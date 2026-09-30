@@ -486,11 +486,11 @@ dem neuen Pfad gestartet und läuft: 9 Ziele erkannt, Capture aktiv, kein Firewa
 
 So läuft die Probe:
 
-- Aus dem Worktree starten:
+- Starten (Skript, `t97mouse.exe` und Quelle liegen als Kopie auch in `C:/hw97/deploy_t97instr/`, der `-Manual`-Weg ist dort mit regulärem Schließen des Fensters geprüft: `T97MOUSE`- und `T97CAP`-Zeilen kommen, 800 Frames, 0 Abweichungen):
 
   ```
-  .\docs\d3d12-imgui-flicker-osmaus.ps1 -Name mensch_vs1 -Manual -Exe C:\hw97\deploy_t97instr\Editor\HorizonEditor.exe
-  .\docs\d3d12-imgui-flicker-osmaus.ps1 -Name mensch_vs0 -Manual -Vsync 0 -Exe C:\hw97\deploy_t97instr\Editor\HorizonEditor.exe
+  C:\hw97\deploy_t97instr\d3d12-imgui-flicker-osmaus.ps1 -Name mensch_vs1 -Manual -Exe C:\hw97\deploy_t97instr\Editor\HorizonEditor.exe
+  C:\hw97\deploy_t97instr\d3d12-imgui-flicker-osmaus.ps1 -Name mensch_vs0 -Manual -Vsync 0 -Exe C:\hw97\deploy_t97instr\Editor\HorizonEditor.exe
   ```
 
 - Jeweils 1–2 min die Maus schnell über den Toolbar-Streifen oben im Scene-Fenster, Quick
