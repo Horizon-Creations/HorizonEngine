@@ -244,9 +244,13 @@ das verhindert.
 1. `kSSRTraceFS`: Alle neun Samples sind jetzt `textureLod(…, 0.0)`, nicht
    nur die in der Schleife. Das ist genau die Variante, die das Experiment in
    Schritt 1 geprüft hat.
-   - Keines der SSR-Eingangsziele hat eine Mip-Kette. Die einzigen
-     Mip-Erzeuger in den Backends sind die UI-Backdrop-Kopien von GL und Metal.
-   - Deshalb ist LOD 0 genau das, was `texture()` vorher gelesen hat.
+   - Keines der SSR-Eingangsziele hat eine Mip-Kette. Die per Grep gefundenen
+     Mip-Erzeuger (`glGenerateMipmap`, `generateMipmapsForTexture`) betreffen
+     nur die UI-Backdrop-Kopie und Asset-Texturen.
+   - Der Grep deckt nicht jede Form ab, etwa Vulkan-Blit-Ketten. Den Beleg
+     liefert deshalb die Messung: GL- und Vulkan-Zahlen sind nach dem Fix
+     unverändert.
+   - LOD 0 ist also genau das, was `texture()` vorher gelesen hat.
 2. D3D11/D3D12 `EnsureSSRPipelines`: Das Compile-Log beginnt jetzt bei der
    ersten `error X`-Zeile. Das ist zur Laufzeit **nicht verifiziert**, weil es
    dafür einen absichtlich kaputten Shader im Deploy bräuchte.
