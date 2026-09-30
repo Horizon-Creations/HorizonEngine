@@ -67,9 +67,35 @@ WT-Fenster in den Vordergrund. Seit Thema 110 laufen die Aufrufe über
 Hidden-Modus. Versteckter Editor mit Fix: fünf Shells, null Fenster. Git lief
 schon immer über `HE::Proc::run` und war nie betroffen. ctest/`he_tests`
 erben die Konsole der Shell, aus der sie gestartet werden. In allen Läufen
-mit Prozesszuordnung kam kein Fenster aus ihrem Prozessbaum. Ein WT-Fenster
-im allerersten Lauf, noch ohne Prozessprotokoll, ist nicht zuordenbar und
-trat danach nicht wieder auf.
+mit Prozesszuordnung kam kein Konsolenfenster aus ihrem Prozessbaum. Ein
+WT-Fenster im allerersten Lauf, noch ohne Prozessprotokoll, ist nicht
+zuordenbar und trat danach nicht wieder auf.
+
+**Windows, Firewall-Dialog (nicht behoben):** Der erste Start einer Exe unter
+einem **neuen Pfad**, die auf allen Schnittstellen lauscht, öffnet den Dialog
+der Windows-Defender-Firewall („Windows-Sicherheit“, `PickerHost.exe`, dunkelt
+den Bildschirm ab). Er nimmt den Vordergrund. Wer „Zulassen“ klickt, bestätigt
+danach noch eine Rechteanhebung (`consent.exe`). Weil jede Biene in ein eigenes
+Buildverzeichnis baut, trifft das jedes neue `he_tests.exe` und jeden neuen
+Editor-Deploy einmal. Auf NN-WS03 am 30.09. gemessen: zehn Dialoge zwischen
+16:34 und 18:04 (sechs `he_tests.exe`, vier `HorizonEditor.exe`), jeder als
+„Query User“-Regel im Firewall-Log (Ereignis 2097, rund 2 s später 2099). Alle
+vier Dialoge, die focuslog dabei als `PickerHost` sah, fallen auf eines dieser
+Ereignisse. Auslöser:
+
+- **Editor:** Die LAN-Suche (`CollabController::updateLanDiscovery`,
+  `CollabLanDiscovery` ist standardmäßig an) bindet beim Start
+  UDP `0.0.0.0:47823` (`LanBeacon::kPort`). Mit `HE_COLLAB_OFFLINE=1` bindet
+  der Editor nichts. Gemessen mit `Get-NetUDPEndpoint` an einem bereits
+  freigegebenen Pfad, also ohne Dialog. Die MCP-Brücke lauscht nur auf
+  Loopback und löst ihn nicht aus.
+- **he_tests:** `tests/main.cpp` setzt `HE_COLLAB_OFFLINE` schon. Den Dialog
+  lösen die Netz-Tests aus, die über `HE_Net/src/Socket.cpp` auf
+  `INADDR_ANY`/`in6addr_any` binden. Daran ändert ein Schalter nichts.
+
+Ein Pfad, der schon einmal zugelassen wurde, fragt nicht wieder. Wer ein
+Buildverzeichnis wiederverwendet, statt ein neues anzulegen, erspart dem
+Menschen also den Dialog.
 
 **Windows, sichtbare Fenster:** Splash und Hauptfenster eines Editors ohne
 Hidden-Modus nehmen beim Erscheinen den Vordergrund, das ist so gewollt. Läufe
@@ -116,10 +142,11 @@ Projekt geladen werden, eine `config.json` mit `LastProjectPath` und `"RHI": 4`
 
 Windows (PowerShell; die Variablen gelten nur im selben Aufruf, ein privates
 `APPDATA` schützt die `config.json` des Menschen, die ein sauberes Ende sonst
-neu schreibt):
+neu schreibt; `HE_COLLAB_OFFLINE` hält die LAN-Suche und damit den
+Firewall-Dialog eines neuen Deploy-Pfads fern):
 
 ```powershell
-$env:APPDATA="C:\tmp\he_appdata"; $env:HE_HIDDEN_WINDOW="1"; $env:HE_EXIT_AFTER_FRAMES="600"
+$env:APPDATA="C:\tmp\he_appdata"; $env:HE_HIDDEN_WINDOW="1"; $env:HE_COLLAB_OFFLINE="1"; $env:HE_EXIT_AFTER_FRAMES="600"
 $p = Start-Process <deploy>\Editor\HorizonEditor.exe -PassThru -WorkingDirectory <deploy>\Editor
 $p.WaitForExit(); "rc=$($p.ExitCode)"
 ```
