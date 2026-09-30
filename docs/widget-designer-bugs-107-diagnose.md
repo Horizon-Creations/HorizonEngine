@@ -441,10 +441,13 @@ dort ist die einzige versionierte Sicherung.
 **Nicht gesehen:** ein Bild aus dem laufenden Spiel. Headless gibt es keinen Metal/GL-UI-Pass (siehe (2)), belegt
 ist der Spielpfad bis zum Quad-Alpha, das der Shader multipliziert.
 
-**Achtung, laufender Editor.** Als repariert wurde, lief ein Editor mit Catania offen. Sein ContentManager lädt die
-Datei nach ≤ 1,5 s nach (Hot-Reload, `EditorApplication.cpp:2812`), PIE sieht den Fix also. Ein **offener**
-Designer-Tab „Startup“ hält aber seinen eigenen Baum. Speichern dort (auch „Save All“) schreibt die alte
-0,05-s-Fassung zurück. Den Tab ohne Speichern schließen und neu öffnen, oder den Editor neu starten.
+**Achtung, laufender Editor.** Als repariert wurde, lief ein Editor mit Catania offen. Ob er die neue Fassung im
+Speicher hat, ist **nicht beobachtet**. Sein Hot-Reload (`EditorApplication.cpp:2812`, alle 1,5 s) entlädt und
+lädt eine geänderte Datei neu. `unloadAsset` verweigert das aber, solange ein `AssetRef` das Asset hält
+(`ContentManager.cpp:2264`), und `pollHotReload` prüft das nicht, der Reload fällt dann still aus. Ein **offener**
+Designer-Tab „Startup“ hält außerdem seinen eigenen Baum. Speichern dort (auch „Save All“) schreibt die alte
+0,05-s-Fassung zurück. Sicher ist nur: den Tab ohne Speichern schließen und **den Editor neu starten** (oder
+das Projekt neu öffnen), dann erst im Spiel oder PIE prüfen.
 
 **Nebenbefund (nicht behoben).** `HorizonCode::Node::pinDefaults` ist eine `std::unordered_map<int, Value>`
 (`HorizonCode.h:553`). `toJson` schreibt die Pin-Defaults deshalb in Hash-Reihenfolge, und die kippt bei jedem
