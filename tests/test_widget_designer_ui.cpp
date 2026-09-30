@@ -9,6 +9,7 @@
 #include "EditorWidgets.h"
 #include "AssetThumbnailCache.h"
 #include "TextureImporter.h"
+#include "fixtures/catania_startup_107.h"
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
@@ -21,6 +22,7 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>   // the window list, to find the hierarchy's rows
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -418,24 +420,25 @@ namespace
 	// `root`: HE_REPRO107_LOGO when it names a texture .hasset (the Catania
 	// project's UI/Source/HE_Logo.hasset), else the generated 1024² logo-like
 	// picture imported as sRGB. The content-relative path, or "" on failure.
-	std::string stageLogo107(const std::filesystem::path& root)
+	// `folder` is the content folder it lands in (Catania keeps it in UI/Source).
+	std::string stageLogo107(const std::filesystem::path& root, const std::string& folder = "UI")
 	{
 		namespace fs = std::filesystem;
-		fs::create_directories(root / "UI");
+		fs::create_directories(root / folder);
 		fs::create_directories(root / "Src");
 		if (const char* logo = std::getenv("HE_REPRO107_LOGO"); logo && *logo && fs::exists(logo))
 		{
-			fs::copy_file(logo, root / "UI" / "HE_Logo.hasset", fs::copy_options::overwrite_existing);
-			return "UI/HE_Logo.hasset";
+			fs::copy_file(logo, root / folder / "HE_Logo.hasset", fs::copy_options::overwrite_existing);
+			return folder + "/HE_Logo.hasset";
 		}
 		constexpr int S = 1024;
-		writeTga(root / "Src" / "Logo.tga", S, S, logoLikePicture(S));
+		writeTga(root / "Src" / "HE_Logo.tga", S, S, logoLikePicture(S));
 		TextureImporter::ImportSettings s;
 		s.srgb = true;   // what the import dialog guesses for a logo
-		if (!TextureImporter::import(root / "Src" / "Logo.tga", root, "UI", s)) return {};
+		if (!TextureImporter::import(root / "Src" / "HE_Logo.tga", root, folder, s)) return {};
 		std::string rel;
-		for (const auto& e : fs::directory_iterator(root / "UI"))
-			if (e.path().extension() == ".hasset") rel = "UI/" + e.path().filename().string();
+		for (const auto& e : fs::directory_iterator(root / folder))
+			if (e.path().extension() == ".hasset") rel = folder + "/" + e.path().filename().string();
 		return rel;
 	}
 }
@@ -807,6 +810,276 @@ TEST_CASE("repro 107: the user's Render Opacity clip is over in three frames")
 	}
 }
 
+// Schritt 10 (reopened: "still pops in the GAME"). A fresh clip, not the
+// user's: 3 s, Render Opacity keyed 0 → 1 (Out Quad) → 0.25 → 1 at 0/1/2/3 s,
+// and Position, Size, Rotation and Tint on the same image over the same 3 s.
+// Played the way the game plays it — WidgetManager::playAnimation is where
+// widget.playAnimation lands (ScriptApi::playClipAsAuthored), tick() is what
+// GameApplication calls every frame with the raw dt — and read twice: from the
+// element, and from the quad extract() hands the renderer (what the Metal/GL UI
+// pass multiplies into the pixel). Forward and Backward, like the Catania graph.
+TEST_CASE("repro 107: a multi-key Render Opacity clip interpolates in the game path")
+{
+	auto key = [](float t, HE::UIPropValue v, HE::UIEase e = HE::UIEase::Linear)
+	{ return HE::UIAnimKey{ t, v, e }; };
+
+	ContentManager cm;
+	// Textured, so the quad goes down the image path of the UI pass (mode 2)
+	// rather than the solid one — the logo in Catania is a textured image. By
+	// path, like an authored widget: WidgetManager resolves it with loadAsset.
+	TextureAsset tex;
+	tex.path = "mem://tex107.hasset";
+	tex.width = tex.height = 2; tex.channels = 4;
+	tex.data.assign(2 * 2 * 4, 255);
+	const HE::UUID texId = cm.registerTexture(std::move(tex));
+	REQUIRE(texId != HE::UUID{});
+
+	HE::UIWidgetTree t;
+	t.canvasWidth = 1920.0f; t.canvasHeight = 1080.0f;
+	const int img = t.add(HE::UIWidgetType::Image);
+	t.find(img)->setPropAny("Size", HE::UIPropValue::ofVec2({ 100.0f, 100.0f }));
+	t.find(img)->texture = "mem://tex107.hasset";
+
+	HE::UIAnimClip c;
+	c.name = "Fade3s";
+	c.duration = 3.0f;
+	auto track = [&](const char* prop, std::vector<HE::UIAnimKey> keys)
+	{
+		HE::UIAnimTrack tr;
+		tr.element = img; tr.prop = prop; tr.keys = std::move(keys);
+		c.tracks.push_back(std::move(tr));
+	};
+	using V = HE::UIPropValue;
+	track("Render Opacity", { key(0.0f, V::ofFloat(0.0f)),
+	                          key(1.0f, V::ofFloat(1.0f), HE::UIEase::OutQuad),
+	                          key(2.0f, V::ofFloat(0.25f)),
+	                          key(3.0f, V::ofFloat(1.0f)) });
+	track("Position", { key(0.0f, V::ofVec2({ 0.0f, 0.0f })),   key(3.0f, V::ofVec2({ 300.0f, 0.0f })) });
+	track("Size",     { key(0.0f, V::ofVec2({ 100.0f, 100.0f })), key(3.0f, V::ofVec2({ 400.0f, 100.0f })) });
+	track("Rotation", { key(0.0f, V::ofFloat(0.0f)),            key(3.0f, V::ofFloat(90.0f)) });
+	track("Tint",     { key(0.0f, V::ofColor({ 1, 1, 1, 1 })),  key(3.0f, V::ofColor({ 1, 0, 0, 1 })) });
+	t.animations.push_back(c);
+	REQUIRE(HE::uiAnimPlayEnd(c) == doctest::Approx(3.0f));
+
+	// What the evaluator alone says for a pass time: the reference both reads
+	// are held against.
+	auto expectedOpacity = [&](float clipT)
+	{
+		std::vector<HE::UIAnimSample> s;
+		HE::uiAnimEvaluate(c, clipT, s);
+		for (const auto& x : s) if (x.prop == "Render Opacity") return x.value.f;
+		return -1.0f;
+	};
+
+	UIWidgetAsset a;
+	a.path     = "mem://fade3s107.hasset";
+	a.treeJson = HE::uiWidgetTreeToJson(t);
+	REQUIRE(cm.registerWidget(std::move(a)) != HE::UUID{});
+
+	for (const HE::UIAnimDirection dir : { HE::UIAnimDirection::Forward, HE::UIAnimDirection::Backward })
+	{
+		CAPTURE(HE::uiAnimDirectionName(dir));
+		WidgetManager wm;
+		const int id = wm.createWidget(cm, "mem://fade3s107.hasset");
+		REQUIRE(id != 0);
+		wm.showWidget(id);
+		REQUIRE(wm.tree(id)->find(img)->textureAssetId == texId);
+		REQUIRE(wm.playAnimation(id, "Fade3s", nullptr, dir));
+
+		std::string curve;
+		int   frames = 0, distinct = 0;
+		float prevA = -1.0f, maxStep = 0.0f, maxPropVsQuad = 0.0f, maxVsEval = 0.0f;
+		float x30 = -1, w30 = -1, r30 = -1, g30 = -1;
+		std::vector<UIRenderObject> out;
+		for (int f = 1; f <= 190; ++f)
+		{
+			wm.tick(1.0f / 60.0f);
+			const HE::UIElement* e = wm.tree(id)->find(img);
+			out.clear();
+			wm.extract(1920.0f, 1080.0f, out);
+			const UIRenderObject* q = nullptr;
+			for (const auto& o : out) if (o.textureAssetId == texId) { q = &o; break; }
+			REQUIRE(q);
+			++frames;
+			const float qa = q->color.a;
+			// The quad's alpha IS the element's opacity (tint alpha is 1).
+			maxPropVsQuad = std::max(maxPropVsQuad, std::fabs(qa - e->renderOpacity));
+			const float passT = std::min(f / 60.0f, 3.0f);
+			const float clipT = dir == HE::UIAnimDirection::Backward ? 3.0f - passT : passT;
+			maxVsEval = std::max(maxVsEval, std::fabs(qa - expectedOpacity(clipT)));
+			if (prevA >= 0.0f)
+			{
+				maxStep = std::max(maxStep, std::fabs(qa - prevA));
+				if (std::fabs(qa - prevA) > 1e-4f) ++distinct;
+			}
+			prevA = qa;
+			if (f == 90) { x30 = q->position.x; w30 = q->size.x; r30 = q->rotation; g30 = q->color.g; }
+			if (f <= 3 || f % 15 == 0)
+			{
+				char buf[40];
+				std::snprintf(buf, sizeof(buf), " f%d=%.3f", f, qa);
+				curve += buf;
+			}
+		}
+		MESSAGE("quad alpha per 60 Hz frame:" << curve);
+		MESSAGE("distinct alpha steps " << distinct << " of " << frames - 1
+		        << ", largest step " << maxStep
+		        << ", |quad - element| max " << maxPropVsQuad
+		        << ", |quad - evaluator| max " << maxVsEval);
+
+		// No pop: ~180 frames of motion, every one of them a small step. The
+		// steepest stretch is Out Quad leaving 0 (2/60 per frame ≈ 0.033).
+		CHECK(distinct >= 170);
+		CHECK(maxStep < 0.04f);
+		CHECK(maxPropVsQuad < 1e-5f);
+		CHECK(maxVsEval < 0.02f);
+		// Half way (1.5 s, frame 90) the other tracks are half way too — the
+		// same evaluator and the same write, whatever the property.
+		// The quad's corner, so Position minus the pivot's share of the size.
+		CHECK(x30 == doctest::Approx(150.0f - 0.5f * 250.0f).epsilon(0.02));
+		CHECK(w30 == doctest::Approx(250.0f).epsilon(0.02));
+		CHECK(r30 == doctest::Approx(45.0f * 3.14159265f / 180.0f).epsilon(0.02));
+		CHECK(g30 == doctest::Approx(0.5f).epsilon(0.02));
+		CHECK_FALSE(wm.isPlayingAnimation(id, "Fade3s"));
+	}
+}
+
+namespace
+{
+	// The designer's timeline driven like a person would, for the Thema 107
+	// canvas cases: find a control on the timeline's bar by walking the pointer
+	// over it, click it, and shoot the canvas at three moments of a clip. Made
+	// once the designer has drawn its first frames (the windows exist).
+	struct Timeline107
+	{
+		Designer&    d;
+		ImGuiIO&     io = ImGui::GetIO();
+		ImGuiWindow* tw = windowNamed("##uiw_timeline");
+		ImGuiWindow* cw = windowNamed("##uiw_canvas");
+		ImVec2 toStart{ -1.0f, -1.0f }, play{ -1.0f, -1.0f }, toEnd{ -1.0f, -1.0f };
+
+		static ImGuiWindow* windowNamed(const char* part)
+		{
+			for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+				if (w->Active && std::strstr(w->Name, part)) return w;
+			return nullptr;
+		}
+		ImVec2 find(ImGuiID wanted, float x0, float x1, float y0, float y1, float sx, float sy)
+		{
+			for (float y = y0; y <= y1; y += sy)
+				for (float x = x0; x <= x1; x += sx)
+				{
+					io.AddMousePosEvent(x, y);
+					d.frame(false);
+					if (d.frame(false) == wanted) return ImVec2(x, y);
+				}
+			return ImVec2(-1.0f, -1.0f);
+		}
+		void click(ImVec2 p)
+		{
+			io.AddMousePosEvent(p.x, p.y);
+			d.frame(true); d.frame(false); d.frame(false);
+		}
+		// The pointer off the canvas before a shot, so no hover lands in it.
+		he_ui::Image shoot(const char* name)
+		{
+			io.AddMousePosEvent(-1000.0f, -1000.0f);
+			return d.shoot(name);
+		}
+		ImVec2 onBar(const char* label)
+		{
+			const float x0 = tw->Pos.x, x1 = tw->Pos.x + tw->Size.x, y0 = tw->Pos.y;
+			return find(ImHashStr(label, 0, tw->ID), x0, x1, y0 + 4.0f, y0 + 30.0f, 4.0f, 4.0f);
+		}
+
+		// Open a clip through the clip combo, then find the transport — while
+		// nothing plays: a walk over a playing clip would move the playhead with
+		// every frame it takes.
+		bool openClip(const char* name)
+		{
+			const ImVec2 combo = onBar("##clip");
+			if (combo.x < 0.0f) return false;
+			click(combo);
+			ImGuiWindow* pop = windowNamed("##Combo_");
+			if (!pop) return false;
+			const std::string label = std::string(name) + "##c";
+			const ImVec2 row = find(ImHashStr(label.c_str(), 0, pop->ID), pop->Pos.x + 10.0f,
+			                        pop->Pos.x + 30.0f, pop->Pos.y, pop->Pos.y + pop->Size.y,
+			                        10.0f, 2.0f);
+			if (row.x < 0.0f) return false;
+			click(row);
+			toStart = onBar("|<");
+			play    = onBar("Play");
+			toEnd   = onBar(">|");
+			return toStart.x >= 0.0f && play.x >= 0.0f && toEnd.x >= 0.0f;
+		}
+
+		// Three moments of the clip: its start, half a second of playing, its end.
+		struct Moments { he_ui::Image start, mid, end; };
+		Moments threeMoments(const char* prefix, const char* tag)
+		{
+			Moments m;
+			char name[128];
+			click(toStart);
+			std::snprintf(name, sizeof(name), "%s-%s-0-start", prefix, tag);
+			m.start = shoot(name);
+			click(play);   // the press and release frames; it plays from the release
+			for (int f = 0; f < 26; ++f) d.frame(false);
+			// The same button says Stop while it plays. A clip that already ran
+			// out (the authored one, after three frames) says Play again, and a
+			// click there would start it over.
+			io.AddMousePosEvent(play.x, play.y);
+			d.frame(false);
+			if (d.frame(false) == ImHashStr("Stop", 0, tw->ID)) click(play);
+			std::snprintf(name, sizeof(name), "%s-%s-1-half-second", prefix, tag);
+			m.mid = shoot(name);
+			click(toEnd);
+			std::snprintf(name, sizeof(name), "%s-%s-2-end", prefix, tag);
+			m.end = shoot(name);
+			return m;
+		}
+
+		// How far the canvas is through the fade half way, over the pixels the
+		// fade changes (start and end differ by more than a rounding): `inside`
+		// of them lie strictly between start and end, `outside` do not lie
+		// between at all, and `mean` is how far along they are on average (0 =
+		// start, 1 = end).
+		struct Fade { int changed = 0, inside = 0, outside = 0; double mean = 0.0; };
+		Fade fadeOf(const Moments& m) const
+		{
+			Fade r;
+			const int x0 = std::max(0, int(cw->InnerRect.Min.x)), x1 = std::min(d.width, int(cw->InnerRect.Max.x));
+			const int y0 = std::max(0, int(cw->InnerRect.Min.y)), y1 = std::min(d.height, int(cw->InnerRect.Max.y));
+			for (int y = y0; y < y1; ++y)
+				for (int x = x0; x < x1; ++x)
+				{
+					const size_t i = (size_t(y) * d.width + x) * 4;
+					int c = 0, span = 0;
+					for (int k = 0; k < 3; ++k)
+					{
+						const int s = std::abs(int(m.end.rgba[i + k]) - int(m.start.rgba[i + k]));
+						if (s > span) { span = s; c = k; }
+					}
+					if (span < 24) continue;
+					++r.changed;
+					bool between = true;
+					for (int k = 0; k < 3; ++k)
+					{
+						const int a = m.start.rgba[i + k], b = m.end.rgba[i + k], v = m.mid.rgba[i + k];
+						if (v < std::min(a, b) - 2 || v > std::max(a, b) + 2) between = false;
+					}
+					if (!between) { ++r.outside; continue; }
+					const int a = m.start.rgba[i + c], b = m.end.rgba[i + c], v = m.mid.rgba[i + c];
+					const double f = double(v - a) / double(b - a);
+					r.mean += f;
+					if (std::abs(v - a) >= 8 && std::abs(v - b) >= 8) ++r.inside;
+				}
+			if (r.changed > r.outside) r.mean /= double(r.changed - r.outside);
+			return r;
+		}
+	};
+}
+
 // All four together (Schritt 6): the fixes touch the same canvas, so they are
 // looked at on one. The Catania page as the user has it — the logo drawn
 // through the full-resolution image path (1+4), and the user's "Blend" clip
@@ -876,135 +1149,17 @@ TEST_CASE("repro 107: all four fixes together on one canvas")
 	for (int i = 0; i < 3; ++i) d.frame(false);
 
 	ImGuiIO& io = ImGui::GetIO();
-	auto windowNamed = [](const char* part) -> ImGuiWindow*
-	{
-		for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
-			if (w->Active && std::strstr(w->Name, part)) return w;
-		return nullptr;
-	};
-	auto find = [&](ImGuiID wanted, float x0, float x1, float y0, float y1,
-	                float sx, float sy) -> ImVec2
-	{
-		for (float y = y0; y <= y1; y += sy)
-			for (float x = x0; x <= x1; x += sx)
-			{
-				io.AddMousePosEvent(x, y);
-				d.frame(false);
-				if (d.frame(false) == wanted) return ImVec2(x, y);
-			}
-		return ImVec2(-1.0f, -1.0f);
-	};
-	auto click = [&](ImVec2 p)
-	{
-		io.AddMousePosEvent(p.x, p.y);
-		d.frame(true); d.frame(false); d.frame(false);
-	};
-	// The pointer off the canvas before a shot, so no hover lands in it.
-	auto shoot = [&](const char* name)
-	{
-		io.AddMousePosEvent(-1000.0f, -1000.0f);
-		return d.shoot(name);
-	};
-
-	ImGuiWindow* tw = windowNamed("##uiw_timeline");
-	REQUIRE(tw);
-	const float wx0 = tw->Pos.x, wx1 = tw->Pos.x + tw->Size.x, wy0 = tw->Pos.y;
-	auto onBar = [&](const char* label)
-	{
-		return find(ImHashStr(label, 0, tw->ID), wx0, wx1, wy0 + 4.0f, wy0 + 30.0f, 4.0f, 4.0f);
-	};
-
+	Timeline107 tl{ d };
+	REQUIRE(tl.tw);
+	REQUIRE(tl.cw);
 	// Open "Blend" through the clip combo.
-	const ImVec2 combo = onBar("##clip");
-	REQUIRE(combo.x >= 0.0f);
-	click(combo);
-	ImGuiWindow* pop = windowNamed("##Combo_");
-	REQUIRE(pop);
-	const ImVec2 blend = find(ImHashStr("Blend##c", 0, pop->ID), pop->Pos.x + 10.0f,
-	                          pop->Pos.x + 30.0f, pop->Pos.y, pop->Pos.y + pop->Size.y,
-	                          10.0f, 2.0f);
-	REQUIRE(blend.x >= 0.0f);
-	click(blend);
-
-	// The transport, found while nothing plays: a walk over a playing clip
-	// would move the playhead with every frame it takes.
-	const ImVec2 toStart = onBar("|<");
-	const ImVec2 play    = onBar("Play");
-	const ImVec2 toEnd   = onBar(">|");
-	REQUIRE(toStart.x >= 0.0f);
-	REQUIRE(play.x    >= 0.0f);
-	REQUIRE(toEnd.x   >= 0.0f);
-
-	// Three moments of the clip: its start, half a second of playing, its end.
-	struct Moments { he_ui::Image start, mid, end; };
-	auto threeMoments = [&](const char* tag)
-	{
-		Moments m;
-		char name[96];
-		click(toStart);
-		std::snprintf(name, sizeof(name), "repro107-all-%s-0-start", tag);
-		m.start = shoot(name);
-		click(play);   // the press and release frames; it plays from the release
-		for (int f = 0; f < 26; ++f) d.frame(false);
-		// The same button says Stop while it plays. A clip that already ran
-		// out (the authored one, after three frames) says Play again, and a
-		// click there would start it over.
-		io.AddMousePosEvent(play.x, play.y);
-		d.frame(false);
-		if (d.frame(false) == ImHashStr("Stop", 0, tw->ID)) click(play);
-		std::snprintf(name, sizeof(name), "repro107-all-%s-1-half-second", tag);
-		m.mid = shoot(name);
-		click(toEnd);
-		std::snprintf(name, sizeof(name), "repro107-all-%s-2-end", tag);
-		m.end = shoot(name);
-		return m;
-	};
-
-	// How far the canvas is through the fade half way, over the pixels the fade
-	// changes (start and end differ by more than a rounding): `inside` of them
-	// lie strictly between start and end, `outside` do not lie between at all,
-	// and `mean` is how far along they are on average (0 = start, 1 = end).
-	ImGuiWindow* cw = windowNamed("##uiw_canvas");
-	REQUIRE(cw);
-	struct Fade { int changed = 0, inside = 0, outside = 0; double mean = 0.0; };
-	auto fadeOf = [&](const Moments& m)
-	{
-		Fade r;
-		const int x0 = std::max(0, int(cw->InnerRect.Min.x)), x1 = std::min(d.width, int(cw->InnerRect.Max.x));
-		const int y0 = std::max(0, int(cw->InnerRect.Min.y)), y1 = std::min(d.height, int(cw->InnerRect.Max.y));
-		for (int y = y0; y < y1; ++y)
-			for (int x = x0; x < x1; ++x)
-			{
-				const size_t i = (size_t(y) * d.width + x) * 4;
-				int c = 0, span = 0;
-				for (int k = 0; k < 3; ++k)
-				{
-					const int s = std::abs(int(m.end.rgba[i + k]) - int(m.start.rgba[i + k]));
-					if (s > span) { span = s; c = k; }
-				}
-				if (span < 24) continue;
-				++r.changed;
-				bool between = true;
-				for (int k = 0; k < 3; ++k)
-				{
-					const int a = m.start.rgba[i + k], b = m.end.rgba[i + k], v = m.mid.rgba[i + k];
-					if (v < std::min(a, b) - 2 || v > std::max(a, b) + 2) between = false;
-				}
-				if (!between) { ++r.outside; continue; }
-				const int a = m.start.rgba[i + c], b = m.end.rgba[i + c], v = m.mid.rgba[i + c];
-				const double f = double(v - a) / double(b - a);
-				r.mean += f;
-				if (std::abs(v - a) >= 8 && std::abs(v - b) >= 8) ++r.inside;
-			}
-		if (r.changed > r.outside) r.mean /= double(r.changed - r.outside);
-		return r;
-	};
+	REQUIRE(tl.openClip("Blend"));
 
 	// ── As authored: the fade is over in three frames, half a second in the
 	// logo is long fully there. The runtime rule is unchanged, so this is the
 	// same pop the user saw — the canvas shows it honestly.
-	const Moments before = threeMoments("as-authored");
-	const Fade fb = fadeOf(before);
+	const Timeline107::Moments before = tl.threeMoments("repro107-all", "as-authored");
+	const Timeline107::Fade fb = tl.fadeOf(before);
 	MESSAGE("as authored: changed " << fb.changed << ", strictly between " << fb.inside
 	        << ", outside " << fb.outside << ", mean " << fb.mean);
 	CHECK(fb.changed > 2000);                   // the logo appears at all
@@ -1014,9 +1169,9 @@ TEST_CASE("repro 107: all four fixes together on one canvas")
 	// ── "Stretch to Length": the last key lands on 1 s, and half a second in
 	// the logo is half there. Found only now: it sits right of the time
 	// readout, which is as wide as the moment it shows.
-	const ImVec2 stretch = onBar("Stretch to Length");
+	const ImVec2 stretch = tl.onBar("Stretch to Length");
 	REQUIRE(stretch.x >= 0.0f);
-	click(stretch);
+	tl.click(stretch);
 	{
 		HE::UIWidgetTree* live = UIEditorPanel::liveTree("UI/Startup.hasset");
 		REQUIRE(live);
@@ -1025,8 +1180,8 @@ TEST_CASE("repro 107: all four fixes together on one canvas")
 		REQUIRE(live->animations[0].tracks[0].keys.size() == 2);
 		CHECK(live->animations[0].tracks[0].keys[1].time == 1.0f);
 	}
-	const Moments after = threeMoments("stretched");
-	const Fade fa = fadeOf(after);
+	const Timeline107::Moments after = tl.threeMoments("repro107-all", "stretched");
+	const Timeline107::Fade fa = tl.fadeOf(after);
 	MESSAGE("stretched: changed " << fa.changed << ", strictly between " << fa.inside
 	        << ", outside " << fa.outside << ", mean " << fa.mean);
 	CHECK(fa.changed > 2000);
@@ -1058,4 +1213,221 @@ TEST_CASE("repro 107: all four fixes together on one canvas")
 	d.frame(false);
 	UIEditorPanel::forget(d.assetPath);
 	fs::remove_all(root, ec);
+}
+
+// Schritt 11: the user's own file, repaired with the Schritt 5 tool rather than
+// a clip rebuilt from its numbers. Catania's Content/UI/Startup.hasset as saved
+// on 28.09. (fixtures/catania_startup_107.h) is opened in the designer, "Blend"
+// is opened, "Stretch to Length" clicked and the widget saved the way the
+// editor saves it (UIEditorPanel::save → saveState → ContentManager::saveAsset).
+// A fresh ContentManager then reads the file back: same UUID, the same widget
+// and graph, only the key moved to 1 s. And the repaired file is played the way
+// the Catania graph plays it — Forward on Construct, Backward after the Delay —
+// through the game's path (playAnimation, tick, extract), where the logo's quad
+// alpha now fades over a second instead of popping in three frames.
+//     HE_UI_DUMP_DIR=/tmp/ui ./he_tests -tc="repro 107: the Catania*"
+// HE_REPAIR107_CONTENT=<project>/Content does all of it to that project's own
+// file, in place. Schritt 11 ran it once on ~/HorizonEngineProjects/Catania;
+// run again on a repaired file it only checks.
+TEST_CASE("repro 107: the Catania Startup widget repaired in the designer")
+{
+	Harness harness;
+	namespace fs = std::filesystem;
+	const char* project = std::getenv("HE_REPAIR107_CONTENT");
+	const bool inPlace = project && *project;
+	const fs::path root = inPlace ? fs::path(project)
+	                              : fs::temp_directory_path() / "he_widget_designer_catania107";
+	const fs::path file = root / "UI" / "Startup.hasset";
+	const std::string rel = "UI/Startup.hasset", logoRel = "UI/Source/HE_Logo.hasset";
+	std::error_code ec;
+	if (!inPlace)
+	{
+		fs::remove_all(root, ec);
+		REQUIRE(stageLogo107(root, "UI/Source") == logoRel);
+		std::ofstream(file, std::ios::binary).write(
+			reinterpret_cast<const char*>(he_test::kCataniaStartup107), he_test::kCataniaStartup107Size);
+	}
+	REQUIRE(fs::exists(file));
+	REQUIRE(fs::exists(root / logoRel));
+
+	// The file as it is before anything is touched.
+	auto blendOf = [](const HE::UIWidgetTree& t) -> const HE::UIAnimClip*
+	{
+		for (const HE::UIAnimClip& c : t.animations) if (c.name == "Blend") return &c;
+		return nullptr;
+	};
+	HE::UUID idBefore;
+	HE::UIWidgetTree treeBefore;
+	std::string graphBefore;
+	{
+		ContentManager cm0;
+		cm0.setContentRoot(root.string());
+		idBefore = cm0.loadAsset(rel);
+		REQUIRE(idBefore != HE::UUID{});
+		const UIWidgetAsset* a = cm0.getWidget(idBefore);
+		REQUIRE(a);
+		HE::uiWidgetTreeFromJson(a->treeJson, treeBefore);
+		graphBefore = a->graphJson;
+	}
+	const HE::UIAnimClip* blend = blendOf(treeBefore);
+	REQUIRE(blend);
+	REQUIRE(blend->tracks.size() == 1);
+	REQUIRE(blend->tracks[0].prop == "Render Opacity");
+	REQUIRE(blend->tracks[0].keys.size() == 2);
+	const int logo = blend->tracks[0].element;
+	const bool authored = HE::uiAnimPlayEnd(*blend) < blend->duration - 0.0005f;
+	MESSAGE("Blend as found: " << blend->duration << " s clip, second key at "
+	        << blend->tracks[0].keys[1].time << " s, "
+	        << std::string(authored ? "repairing" : "already repaired"));
+	if (!inPlace)
+	{
+		REQUIRE(authored);
+		CHECK(blend->tracks[0].keys[1].time == doctest::Approx(0.050314463675022125f));
+	}
+
+	// ── In the designer: open, look, stretch, look again, save.
+	{
+		ContentManager cm;
+		cm.setContentRoot(root.string());
+		HorizonWorld world;
+		EditorUndo   undo;
+		ContextBits  bits;
+		AppContext   ctx = bits.make(world, undo);
+		ctx.contentManager = &cm;
+		Designer d{ ctx, file.string() };
+		d.beforeFrame = [] { static double now = 0.0; AssetThumbnailCache::beginFrame(now += 1.0 / 60.0); };
+		d.width = 1920;   // the whole timeline bar, "Stretch to Length" included
+		d.height = 1200;
+		ThumbUploadRenderer stub;
+		AssetThumbnailCache::setContext(&stub, &cm, "");
+		for (int i = 0; i < 3; ++i) d.frame(false);
+
+		Timeline107 tl{ d };
+		REQUIRE(tl.tw);
+		REQUIRE(tl.cw);
+		REQUIRE(tl.openClip("Blend"));
+
+		if (authored)
+		{
+			const Timeline107::Moments m = tl.threeMoments("repro107-catania", "as-saved");
+			const Timeline107::Fade f = tl.fadeOf(m);
+			MESSAGE("designer, as saved: changed " << f.changed << ", strictly between " << f.inside
+			        << ", mean " << f.mean);
+			CHECK(f.changed > 2000);
+			CHECK(f.mean > 0.97);       // half a second in, long fully there: the pop
+
+			const ImVec2 stretch = tl.onBar("Stretch to Length");
+			REQUIRE(stretch.x >= 0.0f);
+			tl.click(stretch);
+			CHECK(UIEditorPanel::isDirtyByContentPath(rel));
+			REQUIRE(UIEditorPanel::save(ctx, d.assetPath));
+			CHECK_FALSE(UIEditorPanel::isDirtyByContentPath(rel));
+		}
+
+		const Timeline107::Moments m = tl.threeMoments("repro107-catania", "repaired");
+		const Timeline107::Fade f = tl.fadeOf(m);
+		MESSAGE("designer, repaired: changed " << f.changed << ", strictly between " << f.inside
+		        << ", outside " << f.outside << ", mean " << f.mean);
+		CHECK(f.changed > 2000);
+		CHECK(f.outside < f.changed / 100);
+		CHECK(f.inside  > f.changed * 8 / 10);   // a fade across the logo…
+		CHECK(f.mean    > 0.35);                  // …about half way at half a second
+		CHECK(f.mean    < 0.65);
+
+		AssetThumbnailCache::setContext(nullptr, nullptr, "");
+		tl.io.AddMousePosEvent(-1000.0f, -1000.0f);
+		d.frame(false);
+		UIEditorPanel::forget(d.assetPath);
+	}
+
+	// ── Read back from disk, as the game (or the editor's hot reload) will.
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+	const HE::UUID idAfter = cm.loadAsset(rel);
+	CHECK(idAfter == idBefore);   // nothing that points at the widget breaks
+	const UIWidgetAsset* a = cm.getWidget(idAfter);
+	REQUIRE(a);
+	HE::UIWidgetTree treeAfter;
+	HE::uiWidgetTreeFromJson(a->treeJson, treeAfter);
+	const HE::UIAnimClip* fixed = blendOf(treeAfter);
+	REQUIRE(fixed);
+	REQUIRE(fixed->tracks.size() == 1);
+	REQUIRE(fixed->tracks[0].keys.size() == 2);
+	CHECK(fixed->duration == 1.0f);
+	CHECK(fixed->tracks[0].keys[0].time == 0.0f);
+	CHECK(fixed->tracks[0].keys[0].value.f == 0.0f);
+	CHECK(fixed->tracks[0].keys[1].time == 1.0f);
+	CHECK(fixed->tracks[0].keys[1].value.f == 1.0f);
+	// Everything else as it was: the tree the Stretch button makes of the old
+	// one, and the same graph. The graph compared with each node's pin defaults
+	// in pin order: Node::pinDefaults is an unordered_map, so the order they
+	// are written in flips with every load and save, and that is all that
+	// differs.
+	HE::UIWidgetTree expected = treeBefore;
+	for (HE::UIAnimClip& c : expected.animations) HE::uiAnimStretchToLength(c);
+	CHECK(HE::uiWidgetTreeToJson(treeAfter) == HE::uiWidgetTreeToJson(expected));
+	auto pinOrdered = [](const std::string& graphJson)
+	{
+		nlohmann::json j = nlohmann::json::parse(graphJson);
+		for (nlohmann::json& n : j["nodes"])
+			if (n.contains("pinDefaults"))
+				std::sort(n["pinDefaults"].begin(), n["pinDefaults"].end(),
+				          [](const nlohmann::json& x, const nlohmann::json& y) { return x["i"] < y["i"]; });
+		return j.dump(1);
+	};
+	CHECK(pinOrdered(a->graphJson) == pinOrdered(graphBefore));
+
+	// ── Played the way Catania's graph plays it, through the game's path.
+	WidgetManager wm;
+	const int id = wm.createWidget(cm, rel);
+	REQUIRE(id != 0);
+	wm.showWidget(id);
+	const HE::UUID texId = wm.tree(id)->find(logo)->textureAssetId;
+	REQUIRE(texId != HE::UUID{});
+	std::vector<UIRenderObject> out;
+	for (const HE::UIAnimDirection dir : { HE::UIAnimDirection::Forward, HE::UIAnimDirection::Backward })
+	{
+		const std::string direction = HE::uiAnimDirectionName(dir);
+		CAPTURE(direction);
+		REQUIRE(wm.playAnimation(id, "Blend", nullptr, dir));
+		std::string curve;
+		int   distinct = 0;
+		float prevA = -1.0f, maxStep = 0.0f, at30 = -1.0f;
+		for (int f = 1; f <= 70; ++f)
+		{
+			wm.tick(1.0f / 60.0f);
+			out.clear();
+			wm.extract(1920.0f, 1080.0f, out);
+			const UIRenderObject* q = nullptr;
+			for (const auto& o : out) if (o.textureAssetId == texId) { q = &o; break; }
+			REQUIRE(q);
+			const float qa = q->color.a;
+			if (prevA >= 0.0f)
+			{
+				maxStep = std::max(maxStep, std::fabs(qa - prevA));
+				if (std::fabs(qa - prevA) > 1e-4f) ++distinct;
+			}
+			prevA = qa;
+			if (f == 30) at30 = qa;
+			if (f <= 3 || f % 10 == 0)
+			{
+				char buf[40];
+				std::snprintf(buf, sizeof(buf), " f%d=%.3f", f, qa);
+				curve += buf;
+			}
+		}
+		MESSAGE("logo quad alpha per 60 Hz frame:" << curve);
+		MESSAGE("distinct alpha steps " << distinct << ", largest step " << maxStep);
+		// A second of fade: ~60 small steps, half way at half a second, then
+		// held (restoreAfterCompleted is off in the graph) until the Delay's
+		// Backward takes it down the same way.
+		CHECK(distinct >= 55);
+		CHECK(maxStep < 0.02f);
+		CHECK(at30 == doctest::Approx(0.5f).epsilon(0.05));
+		// Over after a second, standing at its end: fully in, or fully out.
+		CHECK(prevA == doctest::Approx(dir == HE::UIAnimDirection::Forward ? 1.0f : 0.0f));
+		CHECK_FALSE(wm.isPlayingAnimation(id, "Blend"));
+	}
+
+	if (!inPlace) fs::remove_all(root, ec);
 }

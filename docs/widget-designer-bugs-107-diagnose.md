@@ -328,3 +328,129 @@ jetzt mit 1920 px schießt. Ganz sichtbar ist der Knopf nach Augenmaß ab etwa 1
 einem kleinen Laptop-Bildschirm ist der Reparatur-Knopf also womöglich gar nicht zu sehen. „Key at End“
 und `>|` bleiben erreichbar, sie stehen weiter links. Umstellen, etwa in die Zeile mit „Key at End“, ist
 eine eigene Entscheidung.
+
+## Wieder geöffnet: „poppt im Spiel weiterhin“ (Schritt 10, nur Diagnose)
+
+**Frage.** Interpoliert die Laufzeit Render Opacity überhaupt, oder setzt sie nur den nächsten Key bzw.
+den Endzustand? Und läuft Opacity durch denselben Pfad wie Position, Rotation, Size und Farbe?
+
+**Antwort: Die Laufzeit interpoliert, für jede Eigenschaft auf demselben Weg. Es poppt, weil die Daten des
+Menschen nie repariert wurden.**
+
+*Der Weg im Spiel, Glied für Glied:*
+- HC-Knoten `widget.playAnimation` → `HE::api::widget::playAnimation` (`EngineApi.cpp:1396`) →
+  `ScriptApi::playClipAsAuthored` (`ScriptApi.cpp:338`) → `WidgetManager::playAnimation`
+  (`WidgetManager.cpp:2183`). Die Richtung wird per Name übergeben, einen Sonderfall gibt es nicht.
+- `GameApplication.cpp:3008` ruft jeden Frame `widgets().tick(deltaTime)` auf, mit rohem dt. dt ist auf 0,25 s
+  gedeckelt (`Application.h:251`, `Application.cpp:304`). Ein langer erster Frame nach dem Laden frisst
+  also höchstens eine Viertelsekunde, einen Pop über mehrere Sekunden erklärt er nicht.
+- `WidgetManager::tick` (`:2354-2428`): `p.t += dt`, dann `uiAnimEvaluate(clip, uiAnimDirectedTime(...))`,
+  jede Probe per `setPropAny` zurück. Eine Weiche nach Eigenschaft oder Typ gibt es nicht.
+- `uiAnimEvaluate`/`between` (`UIWidgetAnim.cpp:146-204`): Der Wert wird zwischen dem letzten Key ≤ t und
+  dem ersten Key > t bestimmt, das Easing gehört zum Ziel-Key.
+
+  | Typ | Eigenschaften (Beispiele) | Laufzeit |
+  |---|---|---|
+  | Float | Render Opacity, Rotation, Shadow Blur | linear + Easing |
+  | Vec2 | Position, Size, Shadow Offset | linear + Easing |
+  | Color | Tint, Shadow Color | linear + Easing, auf [0,1] geklemmt |
+  | Int/Bool/String | Visible, Tab Index, Text | springt auf den nächsten Key (`default: return b.value`) |
+
+  Int/Bool/String bietet „Add Track“ gar nicht an (`UIEditorPanel.cpp:3216`), die gibt es also nur in
+  einer von Hand bearbeiteten Datei. Render Opacity ist ein Float (`UIElement.cpp:967`), der Setter klemmt
+  auf 0..1 (`:1028`).
+- `WidgetManager::extract` (`:6190`) multipliziert `uiElementEffectiveOpacity` in `color.a` **jedes** Quads,
+  das das Element ausgibt. Der Metal-UI-Shader (`uiFragment`, `MetalRenderer.mm:1331`) und GL
+  (`OpenGLRenderer.cpp:2943/2949`) nehmen `color.a` in allen drei Modi mit: Fläche, Glyphe und
+  Bild (`color.a * t.a`). D3D/Vulkan sind nicht gelesen, der Mensch spielt auf macOS.
+  Einzige Ausnahme: ein Image mit **eigenem Material** geht über die Material-Pipeline, dort
+  bekommt der Material-Shader `u.color` und ist selbst fürs Alpha zuständig. Das Catania-Logo hat nur
+  eine Textur und kein Material, es ist hier also nicht die Ursache.
+
+*Repro mit frischem Clip.* `repro 107: a multi-key Render Opacity clip interpolates in the game path`
+(`tests/test_widget_designer_ui.cpp`): 3 s, Render Opacity 0 → 1 (Out Quad) → 0,25 → 1 bei 0/1/2/3 s,
+dazu Position, Size, Rotation und Tint auf demselben texturierten Image. Er läuft über `playAnimation`,
+`tick(1/60)` und `extract`, vorwärts und rückwärts. Gemessen am 30.09.:
+- vorwärts: `f1=0.033 f15=0.438 f30=0.750 f60=1.000 f90=0.625 f120=0.250 f150=0.625 f180=1.000`
+- rückwärts: `f1=0.988 f30=0.625 f60=0.250 f90=0.625 f120=1.000 f150=0.750 f180=0.000`
+- 179 verschiedene Alpha-Werte in 180 Frames, größter Schritt 0,033 pro Frame. Quad-Alpha ist genau die
+  Element-Opacity, die Abweichung zum Evaluator liegt bei höchstens 4·10⁻⁶. Bei 1,5 s stehen Position,
+  Size, Rotation und Tint jeweils genau auf der Hälfte.
+
+*Die Daten des Menschen, Stand 30.09.* `~/HorizonEngineProjects/Catania/Content/UI/Startup.hasset`,
+geändert am **28.09. 13:52**. Clip „Blend“ hat unverändert Keys **(0 s → 0)** und **(0,050314 s → 1)**.
+„Stretch to Length“ ist am 29.09. 21:52 dazugekommen (`4bcf020c`), gemergt um 23:12 (`088424dd`). Die
+Datei ist also älter als die Reparatur und wurde danach nie wieder gespeichert. Damit endet der Clip bei
+0,05 s: vorwärts beim `Construct` 3 Frames Blende, nach dem `Delay` rückwärts wieder 3 Frames. Das ist
+genau das berichtete Rein/Raus, im Spiel wie im Designer. Es ist das einzige Widget mit Clips in
+`~/HorizonEngineProjects`.
+
+Womöglich hat der Mensch den Knopf nie gesehen. „Stretch to Length“ liegt unter etwa 1450 px
+Designer-Breite außerhalb der Transport-Leiste (Nebenbefund Schritt 6, oben), und ein MacBook-Air-Display
+erreicht das im Designer-Layout kaum.
+
+**Nicht gesehen:** Pixel aus einem laufenden Spiel. Headless gibt es keinen Metal/GL-UI-Pass (siehe (2)).
+Belegt ist die GPU-Seite deshalb durch den Shader-Quelltext, nicht durch ein Bild.
+
+**Entscheidungshilfe.** Den Clip reparieren: „Stretch to Length“ (oder den Key auf 1,0 s ziehen bzw. in
+sein Time-Feld 1 tippen), **speichern**, das Spiel neu starten. Poppt es danach im Spiel immer noch, bitte
+die gespeicherte `Startup.hasset` anhängen. Erst dann wäre die Laufzeit wieder verdächtig, mit der
+heutigen Datei erklären die Daten allein alles. Kein Fix in diesem Schritt.
+
+## Catania-Clip repariert (Schritt 11)
+
+**Was geändert wurde.** `~/HorizonEngineProjects/Catania/Content/UI/Startup.hasset`, Clip „Blend“: der zweite
+Render-Opacity-Key liegt jetzt bei **1,0 s** statt 0,0503 s, Länge weiter 1 s. Sonst nichts: gleiche UUID,
+dieselben Elemente, derselbe Graph. Die Datei war am 30.09. um 11:15 gespeichert, md5 vorher
+`596ad7843f51960a3c337c3eb45f496c`, nachher `f7e845fc94aec892d8431a72ae08628e`.
+
+**Warum „Stretch to Length“ und kein neuer Endkey.** Der Graph spielt „Blend“ beim `Construct` vorwärts, wartet
+4 s (`Delay`) und spielt ihn rückwärts, beide Male mit `restoreAfterCompleted = false`. Gemeint ist also: Logo
+über eine Sekunde einblenden, stehen lassen, über eine Sekunde ausblenden. Der Clip ist schon 1 s lang, es fehlt
+nur der Key am Ende. Ein zusätzlicher Endkey (1 s → 1) hätte den 0,05-s-Sprung am Anfang behalten, das Strecken
+verteilt die eine Blende über die ganze Sekunde.
+
+**Wie.** Mit dem Werkzeug aus Schritt 5, nicht von Hand (die `.hasset` hat einen Binärkopf mit Längenfeldern).
+Der Test `repro 107: the Catania Startup widget repaired in the designer` öffnet die Datei im Widget-Designer
+(headless, `UIEditorPanel`), wählt „Blend“ im Clip-Combo, klickt „Stretch to Length“ und speichert
+(`UIEditorPanel::save` → `saveState` → `ContentManager::saveAsset`, derselbe Weg wie der Speichern-Knopf).
+Standardmäßig läuft er auf einer Kopie der Originalbytes (`tests/fixtures/catania_startup_107.h`). Mit
+`HE_REPAIR107_CONTENT=<Projekt>/Content` arbeitet er in der Projektdatei selbst. So ist die Catania-Datei einmal
+repariert worden. Ein zweiter Lauf auf der reparierten Datei prüft nur und schreibt nichts (md5 unverändert).
+
+**Geprüft, nach dem Speichern, mit frischem ContentManager von der Platte:**
+- UUID gleich, Keys (0 s → 0) und (1 s → 1), Länge 1 s. Der Baum ist genau der, den Stretch aus dem alten macht,
+  der Graph ist inhaltlich gleich (siehe Nebenbefund).
+- Spielpfad (`playAnimation`, `tick(1/60)`, `extract`, Alpha des Logo-Quads), vorwärts:
+  `f1=0.017 f2=0.033 f3=0.050 f10=0.167 f20=0.333 f30=0.500 f40=0.667 f50=0.833 f60=1.000 f70=1.000`,
+  rückwärts spiegelbildlich bis `f60=0.000`. 59 Stufen, größter Schritt 1/60. Vorher war dieselbe Kurve nach
+  4 Frames bei 1.
+- Designer-Leinwand mit dem echten Catania-Logo, Momente |<, 0,5 s Play, >|: Von den 14 539 Pixeln, die die
+  Blende ändert, lagen bei 0,5 s vorher **0** zwischen Anfang und Ende (Mittel 1,0, der Pop), nachher **alle
+  14 539** (Mittel 0,51).
+
+![Leinwand vorher/nachher](img/widget-designer-bugs-107/schritt11-catania-leinwand-vorher-nachher.png)
+*Oben die Fassung vom 28.09., unten die reparierte, jeweils Start, 0,5 s und Ende.*
+
+![Timeline vorher/nachher](img/widget-designer-bugs-107/schritt11-catania-timeline-vorher-nachher.png)
+*Oben der Key bei 50 ms, grauer Rest und „Stretch to Length“ angeboten. Unten der Key bei 1000 ms, Knopf weg.*
+
+Vorher- und Nachher-Datei liegen unter `img/widget-designer-bugs-107/catania/`. Catania ist kein Git-Repo, das
+dort ist die einzige versionierte Sicherung.
+
+**Nicht gesehen:** ein Bild aus dem laufenden Spiel. Headless gibt es keinen Metal/GL-UI-Pass (siehe (2)), belegt
+ist der Spielpfad bis zum Quad-Alpha, das der Shader multipliziert.
+
+**Achtung, laufender Editor.** Als repariert wurde, lief ein Editor mit Catania offen. Ob er die neue Fassung im
+Speicher hat, ist **nicht beobachtet**. Sein Hot-Reload (`EditorApplication.cpp:2812`, alle 1,5 s) entlädt und
+lädt eine geänderte Datei neu. `unloadAsset` verweigert das aber, solange ein `AssetRef` das Asset hält
+(`ContentManager.cpp:2264`), und `pollHotReload` prüft das nicht, der Reload fällt dann still aus. Ein **offener**
+Designer-Tab „Startup“ hält außerdem seinen eigenen Baum. Speichern dort (auch „Save All“) schreibt die alte
+0,05-s-Fassung zurück. Sicher ist nur: den Tab ohne Speichern schließen und **den Editor neu starten** (oder
+das Projekt neu öffnen), dann erst im Spiel oder PIE prüfen.
+
+**Nebenbefund (nicht behoben).** `HorizonCode::Node::pinDefaults` ist eine `std::unordered_map<int, Value>`
+(`HorizonCode.h:553`). `toJson` schreibt die Pin-Defaults deshalb in Hash-Reihenfolge, und die kippt bei jedem
+Laden und Speichern (hier 3,2,1 → 1,2,3 → 3,2,1). Inhaltlich ändert sich nichts, aber jede `.hasset` und
+`.hcode` mit Pin-Defaults bekommt bei jedem Speichern einen Diff, auch ohne Änderung. Das stört in
+Git-Projekten. Abhilfe wäre, in `toJson` nach Pin-Index sortiert zu schreiben.
