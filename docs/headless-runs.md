@@ -53,6 +53,19 @@ ignoriert sie stillschweigend und startet normal mit Fenster (Audit, F4).
   „Window in background — throttled to 15.0 FPS" bzw.
   „Background throttle off (…)".
 
+**Windows, Kindprozesse:** Der Editor startet beim Hochfahren `cmd.exe /c …`
+(cmake-Probe, vswhere) und pro GameLogic-Build weitere. Bis Thema 110 lief das
+über `std::system`/`_popen`. Weil der Editor keine eigene Konsole hat, bekam
+jeder dieser Aufrufe eine eigene, und mit Windows Terminal als
+Standard-Terminal ist das ein echtes Fenster, das den Vordergrund nimmt.
+Gemessen auf NN-WS03 waren es **drei Fenster pro Editorstart, auch mit
+`HE_HIDDEN_WINDOW=1`**. Seit Thema 110 laufen sie über
+`HE_Scene/src/HiddenShell` mit `CREATE_NO_WINDOW`, unabhängig vom
+Hidden-Modus. Mit Fix: fünf Shells, null Fenster. Git lief schon immer über
+`HE::Proc::run` und war nie betroffen. ctest/`he_tests` selbst öffnen kein
+Fenster: Sie erben die Konsole der Shell, aus der sie gestartet werden (drei
+volle Läufe, null Fenster).
+
 **Nicht abgedeckt:** Datei-Picker (`dialog.open*`/`save*`) und eine gebündelte
 `.app` (die holt sich die Activation-Policy aus ihrem Info.plist, das
 Dock-Icon bliebe). Alle heutigen Test- und Skriptläufe starten unbundled
@@ -89,6 +102,16 @@ Menschen heraus. Mit `HE_EXIT_AFTER_FRAMES` endet der Lauf sauber nach einer
 Frame-Zahl, „leaving cleanly" ist der Exit-Beleg; kein `kill` nötig. Soll ein
 Projekt geladen werden, eine `config.json` mit `LastProjectPath` und `"RHI": 4`
 (Metal) ins private `HOME` legen, so wie `he_mcp_multiclient.py` es macht.
+
+Windows (PowerShell; die Variablen gelten nur im selben Aufruf, ein privates
+`APPDATA` schützt die `config.json` des Menschen, die ein sauberes Ende sonst
+neu schreibt):
+
+```powershell
+$env:APPDATA="C:\tmp\he_appdata"; $env:HE_HIDDEN_WINDOW="1"; $env:HE_EXIT_AFTER_FRAMES="600"
+$p = Start-Process <deploy>\Editor\HorizonEditor.exe -PassThru -WorkingDirectory <deploy>\Editor
+$p.WaitForExit(); "rc=$($p.ExitCode)"
+```
 
 **Negativkontrolle** (entsperrter Bildschirm): dasselbe mit `HE_HIDDEN_WINDOW=0`.
 Dann erscheinen Splash und Fenster, im Log steht „Hidden mode off" und
