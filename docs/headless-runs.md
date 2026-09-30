@@ -71,7 +71,8 @@ mit Prozesszuordnung kam kein Konsolenfenster aus ihrem Prozessbaum. Ein
 WT-Fenster im allerersten Lauf, noch ohne Prozessprotokoll, ist nicht
 zuordenbar und trat danach nicht wieder auf.
 
-**Windows, Firewall-Dialog (nicht behoben):** Der erste Start einer Exe unter
+**Windows, Firewall-Dialog (für `he_tests` behoben, für neue Editor-Deploys
+nicht):** Der erste Start einer Exe unter
 einem **neuen Pfad**, die auf allen Schnittstellen lauscht, öffnet den Dialog
 der Windows-Defender-Firewall („Windows-Sicherheit“, `PickerHost.exe`, dunkelt
 den Bildschirm ab). Er nimmt den Vordergrund. Wer „Zulassen“ klickt, bestätigt
@@ -90,14 +91,45 @@ Ereignisse. Auslöser:
   freigegebenen Pfad, also ohne Dialog. Die MCP-Brücke (`HE_MCP=1`) lauscht
   nur auf `127.0.0.1` (gemessen mit `Get-NetTCPConnection`) und löst ihn
   nicht aus.
-- **he_tests:** `tests/main.cpp` setzt `HE_COLLAB_OFFLINE` schon. Den Dialog
-  lösen laut Code (nicht einzeln gemessen) die Netz-Tests aus, die über
-  `HE_Net/src/Socket.cpp` auf `INADDR_ANY`/`in6addr_any` binden
-  (UDP-/TCP-Transport, LAN-Beacon). Daran ändert ein Schalter nichts.
+- **he_tests (behoben):** Gemessen mit einem Poller auf die TCP-/UDP-Tabellen
+  des Prozesses (`GetExtendedTcpTable`/`GetExtendedUdpTable`), von einem schon
+  freigegebenen Pfad, also ohne Dialog. Ein voller Lauf hielt 178 Endpunkte
+  außerhalb von Loopback: TCP-Listener auf `0.0.0.0`/`::` und UDP auf
+  `0.0.0.0`/`::`. Sie kamen aus `test_collab_controller` (90),
+  `test_net_udp` (58), `test_net_tcp` (18), `test_net_discovery` (6),
+  `test_net_secure` (4), `test_net_game_session` (3) und `test_engine_api`
+  (2, darunter die LAN-Suche auf `0.0.0.0:47823`). Seitdem setzt
+  `tests/main.cpp` `HE_NET_LOOPBACK_ONLY=1` (`HE::Net::socketLoopbackOnly`),
+  wenn es nicht schon gesetzt ist. Jeder Bind „auf alle Schnittstellen“ in
+  `HE_Net` geht dann auf Loopback, die Dual-Stack-Konstruktoren nehmen den
+  IPv4-Weg, und ein ungebundener UDP-Socket wird vor dem ersten `sendto` an
+  Loopback gebunden. Danach bleibt außerhalb von Loopback nur die
+  Routenprobe von `socketLocalAddress` übrig (UDP-`connect` auf 8.8.8.8, es
+  geht kein Paket raus). Auf NN-WS03 am 30.09. von einem **neuen** Pfad
+  gemessen (`C:\hw110\fwfresh`, alle Netz-Testdateien, 661 Fälle): kein
+  Ereignis 2097, keine neue Regel, focuslog ohne Vordergrundwechsel. Mit dem
+  alten Code fragte heute jeder der sechs neuen `he_tests`-Pfade. Die drei
+  Tests zu Dual-Stack und globaler IPv6-Adresse melden im Loopback-Modus per
+  `MESSAGE`, dass sie übersprungen werden. Wer sie echt laufen lassen will,
+  setzt `HE_NET_LOOPBACK_ONLY=0` (CI tut das, ein Runner fragt niemanden)
+  und nimmt dafür an einem neuen Pfad den Dialog in Kauf.
 
 Ein Pfad, der schon einmal zugelassen wurde, fragt nicht wieder. Wer ein
 Buildverzeichnis wiederverwendet, statt ein neues anzulegen, erspart dem
-Menschen also den Dialog.
+Menschen also den Dialog. Das gilt jetzt vor allem noch für Editor-Deploys:
+Bienen setzen dort `HE_COLLAB_OFFLINE=1`, das die LAN-Suche abschaltet.
+(`HE_NET_LOOPBACK_ONLY` lässt Binds an eine ausdrücklich genannte Adresse
+unberührt, etwa die LAN-Ankündigung beim Hosten. Für den Editor ist deshalb
+`HE_COLLAB_OFFLINE` der Schalter.)
+
+Vorschlag, nicht eingerichtet: Braucht ein Lauf an einem neuen Pfad echte
+Netz-Binds, kann ein Admin einmalig eine Regel für genau diese Exe anlegen,
+bevor sie zum ersten Mal startet, zum Beispiel
+`netsh advfirewall firewall add rule name="HorizonEngine hwNN he_tests" dir=in action=allow program="C:\hwNN\tests\he_tests.exe" profile=private`.
+Das braucht Adminrechte und gilt nur für diesen einen Programmpfad. Eine
+Regel nur über den Port würde jedes Programm freigeben. Deshalb läuft das
+nicht bei jedem Testlauf automatisch, und für die Tests reicht der
+Loopback-Schalter.
 
 **Windows, sichtbare Fenster:** Splash und Hauptfenster eines Editors ohne
 Hidden-Modus nehmen beim Erscheinen den Vordergrund, das ist so gewollt. Läufe
