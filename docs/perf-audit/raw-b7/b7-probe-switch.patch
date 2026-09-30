@@ -1,0 +1,108 @@
+diff --git a/src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm b/src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm
+index 5d0aff3c..1ca4e9e7 100644
+--- a/src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm
++++ b/src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm
+@@ -42,6 +42,7 @@
+ #import <QuartzCore/CAMetalLayer.h>
+ #include <cstdint>
+ #include <cstring>
++#include <chrono> // B7-EXPERIMENT
+ 
+ // ── Per-pass GPU timing helpers (Metal stage-boundary counter sampling) ──────
+ namespace {
+@@ -6937,21 +6938,81 @@ fragment float4 debugLineFrag(DebugVOut in [[stage_in]])
+ 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
+ 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
+ 		// repeat so it tiles seamlessly.
+-		constexpr int kNoiseN = 256;
+-		const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
++		// B7-EXPERIMENT (uncommitted): HE_SKY_NOISE=private|small
++		const char* b7Mode = std::getenv("HE_SKY_NOISE");
++		const bool b7Private = b7Mode && std::strcmp(b7Mode, "private") == 0;
++		const bool b7Small   = b7Mode && std::strcmp(b7Mode, "small") == 0;
++		const bool b7Crop    = b7Mode && std::strcmp(b7Mode, "crop") == 0;
++		const int kNoiseN = (b7Small || b7Crop) ? 32 : 256;
++		const auto b7T0 = std::chrono::steady_clock::now();
++		std::vector<uint16_t> noise = HE::BuildSkyNoise3D(b7Crop ? 256 : kNoiseN);
++		const double b7BuildMs = std::chrono::duration<double, std::milli>(
++			std::chrono::steady_clock::now() - b7T0).count();
++		{
++			uint64_t h = 1469598103934665603ull;
++			const unsigned char* bp = reinterpret_cast<const unsigned char*>(noise.data());
++			for (size_t i = 0; i < noise.size() * sizeof(uint16_t); ++i) { h ^= bp[i]; h *= 1099511628211ull; }
++			HE_LOG_INFO(RHI, "B7 noise digest n=%d fnv=0x%016llx", b7Crop ? 256 : kNoiseN,
++				static_cast<unsigned long long>(h));
++		}
++		if (b7Crop) // 32³ corner of the real 256³ volume: same frequencies/statistics
++		{
++			std::vector<uint16_t> c(static_cast<size_t>(32) * 32 * 32 * 2);
++			for (int z = 0; z < 32; ++z)
++				for (int y = 0; y < 32; ++y)
++					for (int x = 0; x < 32; ++x)
++						for (int ch = 0; ch < 2; ++ch)
++							c[((static_cast<size_t>(z) * 32 + y) * 32 + x) * 2 + ch] =
++								noise[((static_cast<size_t>(z) * 256 + y) * 256 + x) * 2 + ch];
++			noise.swap(c);
++		}
++		const bool b7Rg8  = b7Mode && std::strcmp(b7Mode, "rg8") == 0;
++		const bool b7Mips = b7Mode && std::strcmp(b7Mode, "mips") == 0;
++		std::vector<uint8_t> noise8;
++		if (b7Rg8)
++		{
++			noise8.resize(noise.size());
++			for (size_t i = 0; i < noise.size(); ++i)
++				noise8[i] = static_cast<uint8_t>((noise[i] + 128u) / 257u);
++		}
+ 		MTLTextureDescriptor* noiseDesc = [[MTLTextureDescriptor alloc] init];
+ 		noiseDesc.textureType = MTLTextureType3D;
+-		noiseDesc.pixelFormat = MTLPixelFormatRG16Unorm;
++		noiseDesc.pixelFormat = b7Rg8 ? MTLPixelFormatRG8Unorm : MTLPixelFormatRG16Unorm;
+ 		noiseDesc.width = kNoiseN; noiseDesc.height = kNoiseN; noiseDesc.depth = kNoiseN;
++		noiseDesc.mipmapLevelCount = b7Mips ? 9 : 1;
+ 		noiseDesc.usage = MTLTextureUsageShaderRead;
+ 		noiseDesc.storageMode = MTLStorageModeShared;
+ 		id<MTLTexture> noiseTex = [device newTextureWithDescriptor:noiseDesc];
+ 		[noiseTex replaceRegion:MTLRegionMake3D(0, 0, 0, kNoiseN, kNoiseN, kNoiseN)
+ 		            mipmapLevel:0
+ 		                  slice:0
+-		              withBytes:noise.data()
+-		            bytesPerRow:kNoiseN * 2 * sizeof(uint16_t)
+-		          bytesPerImage:kNoiseN * kNoiseN * 2 * sizeof(uint16_t)];
++		              withBytes:b7Rg8 ? (const void*)noise8.data() : (const void*)noise.data()
++		            bytesPerRow:kNoiseN * 2 * (b7Rg8 ? 1 : sizeof(uint16_t))
++		          bytesPerImage:kNoiseN * kNoiseN * 2 * (b7Rg8 ? 1 : sizeof(uint16_t))];
++		if (b7Mips)
++		{
++			id<MTLCommandBuffer> cb = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
++			id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++			[blit generateMipmapsForTexture:noiseTex];
++			[blit endEncoding];
++			[cb commit];
++			[cb waitUntilCompleted];
++		}
++		if (b7Private)
++		{
++			noiseDesc.storageMode = MTLStorageModePrivate;
++			id<MTLTexture> priv = [device newTextureWithDescriptor:noiseDesc];
++			id<MTLCommandBuffer> cb = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
++			id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++			[blit copyFromTexture:noiseTex toTexture:priv];
++			[blit endEncoding];
++			[cb commit];
++			[cb waitUntilCompleted];
++			noiseTex = priv;
++		}
++		HE_LOG_INFO(RHI, "B7 noise: mode=%s n=%d storage=%s build=%.1f ms",
++			b7Mode ? b7Mode : "shared", kNoiseN,
++			noiseTex.storageMode == MTLStorageModePrivate ? "private" : "shared", b7BuildMs);
+ 		m_noiseTexture = (void*)CFBridgingRetain(noiseTex);
+ 
+ 		MTLSamplerDescriptor* noiseSampDesc = [[MTLSamplerDescriptor alloc] init];
+@@ -6960,6 +7021,7 @@ fragment float4 debugLineFrag(DebugVOut in [[stage_in]])
+ 		noiseSampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
+ 		noiseSampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
+ 		noiseSampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
++		if (b7Mips) noiseSampDesc.mipFilter = MTLSamplerMipFilterLinear;
+ 		m_noiseSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:noiseSampDesc]);
+ 
+ 		// UI font atlas (R8): the shared baked ProggyClean atlas glyph quads sample.
