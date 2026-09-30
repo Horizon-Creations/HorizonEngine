@@ -210,3 +210,34 @@ Risiko gering: kein Formatwechsel, Laufzeitpfad unverändert bis auf `between()`
    ihren Inhalt wirkt, einverstanden?
 4. **Erster Key bei Bool-Tracks:** automatisch zusätzlicher Key bei 0 mit dem
    Ist-Wert (Vorschlag), oder wie bei den anderen Tracks nur am Playhead?
+
+## 10. Umsetzung (Schritt 2)
+
+Umgesetzt wie oben, die offenen Fragen aus Abschnitt 9 waren beim Umsetzen noch
+unbeantwortet und sind **nach dem Vorschlag** entschieden, jede einzeln umkehrbar:
+
+1. „Clickable" = **Enabled**. Hit Testable ist in v1 **nicht** im Popup (ein
+   Eintrag in der Tabelle in `uiAnimTrackOffer`, falls gewünscht).
+2. **Whitelist** Visible + Enabled, alle anderen Bools bleiben draußen.
+3. Enabled auf nicht fähigen Elementen **ausgegraut** mit Tooltip
+   (`ui.timeline-track-no-effect`); Container (Panel, Boxen, alles mit
+   `acceptsChildren()`) bekommen Enabled.
+4. Bool-Track bei Playhead > 0: **zusätzlicher Key bei 0** mit dem Ist-Wert.
+
+Wo es steht:
+
+- `UIWidgetAnim.cpp` `between()`: nicht interpolierbar = halten (auch Typ-Mismatch).
+  Neu `uiAnimTypeInterpolates()` und `uiAnimTrackOffer()` (Capability-Filter, im Kern
+  und damit ohne Designer testbar).
+- `UIEditorPanel.cpp`: Add-Track-Popup in zwei Gruppen („Switches" darunter),
+  Key-Editor mit Checkbox, Ease-Combo und Ease-Einträge im Key-Rechtsklick nur
+  für interpolierende Typen.
+- `WidgetManager.cpp`: das Risiko aus Abschnitt 3 bestand. `focusedTextField` und
+  `hasFocusedTextField` prüften weder Enabled noch Visible, ein per Clip
+  gesperrtes, schon fokussiertes TextInput nahm weiter Zeichen an. Jetzt nimmt es
+  nichts, bis es wieder frei ist; der Fokus bleibt stehen.
+- Tests: `test_ui_widgets.cpp` („Clips: a Bool track steps…" und fünf weitere),
+  `test_widget_designer_ui.cpp` („Thema 108: Add Track offers…").
+
+Nicht gemacht (Schritt 4 im Plan): Bool-Balken in der Lane, Umriss für
+clip-verdeckte Elemente, Handbuch auf der Website.

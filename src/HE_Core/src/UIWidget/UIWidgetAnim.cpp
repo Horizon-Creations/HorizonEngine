@@ -140,12 +140,17 @@ bool uiAnimStretchToLength(UIAnimClip& clip)
 
 namespace
 {
-    // The value between two keys, or one key's value where there is nothing to
-    // interpolate with. Only the three types an animation can move; anything
-    // else is refused when the track is made, not silently snapped here.
+    // The value between two keys. Float, Vec2 and Color are interpolated;
+    // everything else (the Visible/Enabled switches, and an Int or String out
+    // of a hand-edited file) HOLDS the earlier key until the next one is
+    // reached. Returning the later key instead would switch a Visible track off
+    // the instant its "on" key is passed — keys 0 = on, 0.5 = off would be off
+    // from 0, because `a` is found with "<=".
     UIPropValue between(const UIAnimKey& a, const UIAnimKey& b, float k)
     {
-        if (a.value.type != b.value.type) return b.value;   // hand-edited file
+        // Two types on one track (hand-edited file): nothing to blend, so the
+        // same rule as any other value that cannot be blended — hold.
+        if (a.value.type != b.value.type) return a.value;
         switch (a.value.type)
         {
         case UIPropType::Float:
@@ -161,9 +166,35 @@ namespace
             return UIPropValue::ofColor(c);
         }
         default:
-            return b.value;
+            return a.value;
         }
     }
+}
+
+bool uiAnimTypeInterpolates(UIPropType t)
+{
+    return t == UIPropType::Float || t == UIPropType::Vec2 || t == UIPropType::Color;
+}
+
+UIAnimTrackOffer uiAnimTrackOffer(const UIElement& e, const UIPropDesc& pd)
+{
+    if (uiAnimTypeInterpolates(pd.type)) return UIAnimTrackOffer::Offer;
+    if (pd.type != UIPropType::Bool) return UIAnimTrackOffer::No;
+    // The switches a clip may throw. A table so the next one ("Hit Testable")
+    // is a line, not a second branch. Every other Bool stays out: Checked,
+    // Password, Word Wrap… would all work, and would bury these two in a list
+    // nobody animates.
+    if (pd.name == "Visible") return UIAnimTrackOffer::Offer;
+    if (pd.name == "Enabled")
+    {
+        // Enabled reaches the whole subtree (uiElementEffectiveEnabled), so a
+        // container is as much a place for it as a button: "lock the menu while
+        // it slides in". Only an element that neither takes input nor holds
+        // anything that could has nothing for it to switch off.
+        return (e.interactive() || e.acceptsChildren()) ? UIAnimTrackOffer::Offer
+                                                        : UIAnimTrackOffer::NoEffect;
+    }
+    return UIAnimTrackOffer::No;
 }
 
 void uiAnimEvaluate(const UIAnimClip& clip, float time, std::vector<UIAnimSample>& out)

@@ -737,6 +737,171 @@ TEST_CASE("repro 107: the timeline puts an end key exactly at the end")
 	fs::remove_all(root, ec);
 }
 
+// Thema 108: Visible and Enabled in the real Add Track list. Enabled is listed
+// but greyed on an Image (nothing there to switch off) and pickable on a
+// Button; a switch made with the playhead past 0 also gets a key at 0.
+TEST_CASE("Thema 108: Add Track offers Visible everywhere, Enabled where it acts")
+{
+	Harness harness;
+	namespace fs = std::filesystem;
+	const fs::path root = fs::temp_directory_path() / "he_widget_designer_timeline108";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root / "UI");
+
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+	HE::UIWidgetTree t = samplePage();
+	{
+		// One clip with one track, so the timeline has something open.
+		HE::UIAnimClip c;
+		c.name = "Intro";
+		c.duration = 1.0f;
+		HE::UIAnimTrack tr;
+		tr.element = 2;   // Logo
+		tr.prop    = "Render Opacity";
+		tr.keys.push_back({ 0.0f, HE::UIPropValue::ofFloat(0.0f), HE::UIEase::Linear });
+		c.tracks.push_back(tr);
+		t.animations.push_back(c);
+	}
+	UIWidgetAsset asset;
+	asset.name     = "Anim108";
+	asset.path     = "UI/Anim108.hasset";
+	asset.treeJson = HE::uiWidgetTreeToJson(t);
+	REQUIRE(cm.registerWidget(std::move(asset)) != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	Designer d{ ctx, (root / "UI" / "Anim108.hasset").string() };
+	d.width = 1920;   // the whole transport bar, ">|" included
+	for (int i = 0; i < 3; ++i) d.frame(false);
+
+	ImGuiIO& io = ImGui::GetIO();
+	auto windowNamed = [](const char* part) -> ImGuiWindow*
+	{
+		for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+			if (w->Active && std::strstr(w->Name, part)) return w;
+		return nullptr;
+	};
+	auto find = [&](ImGuiID wanted, float x0, float x1, float y0, float y1,
+	                float sx, float sy) -> ImVec2
+	{
+		for (float y = y0; y <= y1; y += sy)
+			for (float x = x0; x <= x1; x += sx)
+			{
+				io.AddMousePosEvent(x, y);
+				d.frame(false);
+				if (d.frame(false) == wanted) return ImVec2(x, y);
+			}
+		return ImVec2(-1.0f, -1.0f);
+	};
+	auto click = [&](ImVec2 p)
+	{
+		io.AddMousePosEvent(p.x, p.y);
+		d.frame(true); d.frame(false); d.frame(false);
+	};
+	auto tracks = [&]() -> std::vector<HE::UIAnimTrack>&
+	{
+		HE::UIWidgetTree* live = UIEditorPanel::liveTree("UI/Anim108.hasset");
+		REQUIRE(live);
+		REQUIRE(live->animations.size() == 1);
+		return live->animations[0].tracks;
+	};
+
+	ImGuiWindow* tw = windowNamed("##uiw_timeline");
+	REQUIRE(tw);
+	const float wx0 = tw->Pos.x, wx1 = tw->Pos.x + tw->Size.x;
+	const float wy0 = tw->Pos.y, wy1 = tw->Pos.y + tw->Size.y;
+
+	// Open "Intro" through the clip combo.
+	const ImVec2 combo = find(ImHashStr("##clip", 0, tw->ID), wx0, wx0 + 200.0f,
+	                          wy0 + 4.0f, wy0 + 30.0f, 8.0f, 4.0f);
+	REQUIRE(combo.x >= 0.0f);
+	click(combo);
+	ImGuiWindow* pop = windowNamed("##Combo_");
+	REQUIRE(pop);
+	const ImVec2 intro = find(ImHashStr("Intro##c", 0, pop->ID), pop->Pos.x + 10.0f,
+	                          pop->Pos.x + 30.0f, pop->Pos.y, pop->Pos.y + pop->Size.y,
+	                          10.0f, 2.0f);
+	REQUIRE(intro.x >= 0.0f);
+	click(intro);
+
+	// Playhead to the end, so the new switch's own key is not at 0.
+	const ImVec2 toEnd = find(ImHashStr(">|", 0, tw->ID), wx0, wx1,
+	                          wy0 + 4.0f, wy0 + 30.0f, 6.0f, 4.0f);
+	REQUIRE(toEnd.x >= 0.0f);
+	click(toEnd);
+
+	// Add Track → the popup → the entry named `prop`. Returns where it was
+	// found, or (-1,-1) when the list does not have it at all.
+	auto openAddTrack = [&]() -> ImGuiWindow*
+	{
+		const ImVec2 add = find(ImHashStr("Add Track", 0, tw->ID), wx0 + 10.0f, wx0 + 40.0f,
+		                        wy0 + 30.0f, wy1, 10.0f, 3.0f);
+		REQUIRE(add.x >= 0.0f);
+		click(add);
+		return windowNamed("##Popup_");
+	};
+	auto entry = [&](ImGuiWindow* p, const char* prop)
+	{
+		return find(ImHashStr(prop, 0, p->ID), p->Pos.x + 12.0f, p->Pos.x + 12.0f,
+		            p->Pos.y, p->Pos.y + p->Size.y, 10.0f, 2.0f);
+	};
+
+	// ── The Image ─────────────────────────────────────────────────────────────
+	d.shoot("anim108-warmup");
+	REQUIRE(d.clickRow(d.hierarchyRowId("Logo##hn2")));
+	ImGuiWindow* p = openAddTrack();
+	REQUIRE(p);
+	// Enabled is there — greyed, not missing — and a click on it adds nothing.
+	const ImVec2 enabledOnImage = entry(p, "Enabled");
+	REQUIRE(enabledOnImage.x >= 0.0f);
+	click(enabledOnImage);
+	CHECK(tracks().size() == 1);
+	// No other Bool is listed: Hit Testable stays out in v1.
+	CHECK(entry(p, "Hit Testable").x < 0.0f);
+	// Visible is pickable.
+	const ImVec2 visible = entry(p, "Visible");
+	REQUIRE(visible.x >= 0.0f);
+	click(visible);
+	REQUIRE(tracks().size() == 2);
+	{
+		const HE::UIAnimTrack& tr = tracks()[1];
+		CHECK(tr.element == 2);
+		CHECK(tr.prop == "Visible");
+		// Made at the end, so it also holds the current value at 0 — a switch
+		// set to off at the end must not hide the Logo from the very start.
+		REQUIRE(tr.keys.size() == 2);
+		CHECK(tr.keys[0].time == 0.0f);
+		CHECK(tr.keys[1].time == 1.0f);
+		CHECK(tr.keys[0].value.type == HE::UIPropType::Bool);
+		CHECK(tr.keys[0].value.b);
+		CHECK(tr.keys[1].value.b);
+	}
+
+	// ── The Button ────────────────────────────────────────────────────────────
+	io.AddMousePosEvent(-1000.0f, -1000.0f);
+	d.frame(false);
+	REQUIRE(d.clickRow(d.hierarchyRowId("Start##hn4")));
+	p = openAddTrack();
+	REQUIRE(p);
+	const ImVec2 enabledOnButton = entry(p, "Enabled");
+	REQUIRE(enabledOnButton.x >= 0.0f);
+	click(enabledOnButton);
+	REQUIRE(tracks().size() == 3);
+	CHECK(tracks()[2].element == 4);
+	CHECK(tracks()[2].prop == "Enabled");
+	CHECK(tracks()[2].keys.size() == 2);
+
+	io.AddMousePosEvent(-1000.0f, -1000.0f);
+	d.frame(false);
+	UIEditorPanel::forget(d.assetPath);
+	fs::remove_all(root, ec);
+}
+
 // (3): the Catania "Blend" clip as the user authored it. The Render Opacity
 // keys are 0 -> 1, but the second key sits at 0.0503 s in a 1 s clip, and a
 // clip ends at its last key — so the fade is over in three frames: a pop. The
