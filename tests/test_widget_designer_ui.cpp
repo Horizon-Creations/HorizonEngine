@@ -807,6 +807,140 @@ TEST_CASE("repro 107: the user's Render Opacity clip is over in three frames")
 	}
 }
 
+// Schritt 10 (reopened: "still pops in the GAME"). A fresh clip, not the
+// user's: 3 s, Render Opacity keyed 0 → 1 (Out Quad) → 0.25 → 1 at 0/1/2/3 s,
+// and Position, Size, Rotation and Tint on the same image over the same 3 s.
+// Played the way the game plays it — WidgetManager::playAnimation is where
+// widget.playAnimation lands (ScriptApi::playClipAsAuthored), tick() is what
+// GameApplication calls every frame with the raw dt — and read twice: from the
+// element, and from the quad extract() hands the renderer (what the Metal/GL UI
+// pass multiplies into the pixel). Forward and Backward, like the Catania graph.
+TEST_CASE("repro 107: a multi-key Render Opacity clip interpolates in the game path")
+{
+	auto key = [](float t, HE::UIPropValue v, HE::UIEase e = HE::UIEase::Linear)
+	{ return HE::UIAnimKey{ t, v, e }; };
+
+	ContentManager cm;
+	// Textured, so the quad goes down the image path of the UI pass (mode 2)
+	// rather than the solid one — the logo in Catania is a textured image. By
+	// path, like an authored widget: WidgetManager resolves it with loadAsset.
+	TextureAsset tex;
+	tex.path = "mem://tex107.hasset";
+	tex.width = tex.height = 2; tex.channels = 4;
+	tex.data.assign(2 * 2 * 4, 255);
+	const HE::UUID texId = cm.registerTexture(std::move(tex));
+	REQUIRE(texId != HE::UUID{});
+
+	HE::UIWidgetTree t;
+	t.canvasWidth = 1920.0f; t.canvasHeight = 1080.0f;
+	const int img = t.add(HE::UIWidgetType::Image);
+	t.find(img)->setPropAny("Size", HE::UIPropValue::ofVec2({ 100.0f, 100.0f }));
+	t.find(img)->texture = "mem://tex107.hasset";
+
+	HE::UIAnimClip c;
+	c.name = "Fade3s";
+	c.duration = 3.0f;
+	auto track = [&](const char* prop, std::vector<HE::UIAnimKey> keys)
+	{
+		HE::UIAnimTrack tr;
+		tr.element = img; tr.prop = prop; tr.keys = std::move(keys);
+		c.tracks.push_back(std::move(tr));
+	};
+	using V = HE::UIPropValue;
+	track("Render Opacity", { key(0.0f, V::ofFloat(0.0f)),
+	                          key(1.0f, V::ofFloat(1.0f), HE::UIEase::OutQuad),
+	                          key(2.0f, V::ofFloat(0.25f)),
+	                          key(3.0f, V::ofFloat(1.0f)) });
+	track("Position", { key(0.0f, V::ofVec2({ 0.0f, 0.0f })),   key(3.0f, V::ofVec2({ 300.0f, 0.0f })) });
+	track("Size",     { key(0.0f, V::ofVec2({ 100.0f, 100.0f })), key(3.0f, V::ofVec2({ 400.0f, 100.0f })) });
+	track("Rotation", { key(0.0f, V::ofFloat(0.0f)),            key(3.0f, V::ofFloat(90.0f)) });
+	track("Tint",     { key(0.0f, V::ofColor({ 1, 1, 1, 1 })),  key(3.0f, V::ofColor({ 1, 0, 0, 1 })) });
+	t.animations.push_back(c);
+	REQUIRE(HE::uiAnimPlayEnd(c) == doctest::Approx(3.0f));
+
+	// What the evaluator alone says for a pass time: the reference both reads
+	// are held against.
+	auto expectedOpacity = [&](float clipT)
+	{
+		std::vector<HE::UIAnimSample> s;
+		HE::uiAnimEvaluate(c, clipT, s);
+		for (const auto& x : s) if (x.prop == "Render Opacity") return x.value.f;
+		return -1.0f;
+	};
+
+	UIWidgetAsset a;
+	a.path     = "mem://fade3s107.hasset";
+	a.treeJson = HE::uiWidgetTreeToJson(t);
+	REQUIRE(cm.registerWidget(std::move(a)) != HE::UUID{});
+
+	for (const HE::UIAnimDirection dir : { HE::UIAnimDirection::Forward, HE::UIAnimDirection::Backward })
+	{
+		CAPTURE(HE::uiAnimDirectionName(dir));
+		WidgetManager wm;
+		const int id = wm.createWidget(cm, "mem://fade3s107.hasset");
+		REQUIRE(id != 0);
+		wm.showWidget(id);
+		REQUIRE(wm.tree(id)->find(img)->textureAssetId == texId);
+		REQUIRE(wm.playAnimation(id, "Fade3s", nullptr, dir));
+
+		std::string curve;
+		int   frames = 0, distinct = 0;
+		float prevA = -1.0f, maxStep = 0.0f, maxPropVsQuad = 0.0f, maxVsEval = 0.0f;
+		float x30 = -1, w30 = -1, r30 = -1, g30 = -1;
+		std::vector<UIRenderObject> out;
+		for (int f = 1; f <= 190; ++f)
+		{
+			wm.tick(1.0f / 60.0f);
+			const HE::UIElement* e = wm.tree(id)->find(img);
+			out.clear();
+			wm.extract(1920.0f, 1080.0f, out);
+			const UIRenderObject* q = nullptr;
+			for (const auto& o : out) if (o.textureAssetId == texId) { q = &o; break; }
+			REQUIRE(q);
+			++frames;
+			const float qa = q->color.a;
+			// The quad's alpha IS the element's opacity (tint alpha is 1).
+			maxPropVsQuad = std::max(maxPropVsQuad, std::fabs(qa - e->renderOpacity));
+			const float passT = std::min(f / 60.0f, 3.0f);
+			const float clipT = dir == HE::UIAnimDirection::Backward ? 3.0f - passT : passT;
+			maxVsEval = std::max(maxVsEval, std::fabs(qa - expectedOpacity(clipT)));
+			if (prevA >= 0.0f)
+			{
+				maxStep = std::max(maxStep, std::fabs(qa - prevA));
+				if (std::fabs(qa - prevA) > 1e-4f) ++distinct;
+			}
+			prevA = qa;
+			if (f == 90) { x30 = q->position.x; w30 = q->size.x; r30 = q->rotation; g30 = q->color.g; }
+			if (f <= 3 || f % 15 == 0)
+			{
+				char buf[40];
+				std::snprintf(buf, sizeof(buf), " f%d=%.3f", f, qa);
+				curve += buf;
+			}
+		}
+		MESSAGE("quad alpha per 60 Hz frame:" << curve);
+		MESSAGE("distinct alpha steps " << distinct << " of " << frames - 1
+		        << ", largest step " << maxStep
+		        << ", |quad - element| max " << maxPropVsQuad
+		        << ", |quad - evaluator| max " << maxVsEval);
+
+		// No pop: ~180 frames of motion, every one of them a small step. The
+		// steepest stretch is Out Quad leaving 0 (2/60 per frame ≈ 0.033).
+		CHECK(distinct >= 170);
+		CHECK(maxStep < 0.04f);
+		CHECK(maxPropVsQuad < 1e-5f);
+		CHECK(maxVsEval < 0.02f);
+		// Half way (1.5 s, frame 90) the other tracks are half way too — the
+		// same evaluator and the same write, whatever the property.
+		// The quad's corner, so Position minus the pivot's share of the size.
+		CHECK(x30 == doctest::Approx(150.0f - 0.5f * 250.0f).epsilon(0.02));
+		CHECK(w30 == doctest::Approx(250.0f).epsilon(0.02));
+		CHECK(r30 == doctest::Approx(45.0f * 3.14159265f / 180.0f).epsilon(0.02));
+		CHECK(g30 == doctest::Approx(0.5f).epsilon(0.02));
+		CHECK_FALSE(wm.isPlayingAnimation(id, "Fade3s"));
+	}
+}
+
 // All four together (Schritt 6): the fixes touch the same canvas, so they are
 // looked at on one. The Catania page as the user has it — the logo drawn
 // through the full-resolution image path (1+4), and the user's "Blend" clip
