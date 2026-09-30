@@ -118,7 +118,8 @@ entsperrten Messungen vergleichen, nur die Paare.
   anderes Rauschen die Wolkenmenge und damit die Licht-Marsch-Fetches ändern könnte; beide Sonden
   landen trotzdem beim selben Wert). Der Wolken-Marsch ist also zu einem guten Teil
   speichergebunden, nicht nur ALU- oder Fetch-Issue-gebunden. Der Verdacht aus S2 2.3 ist damit
-  **bestätigt**.
+  **gestützt**. Ob Cache-Fehlrate oder Speicherbandbreite der Limiter ist, bleibt ohne Zähler offen
+  (siehe unten).
 - **`Private` bringt keine GPU-Zeit** (0 und −0,11 ms, im Rauschen). RSS fällt um 64 MB
   (326 → 262), weil die Textur nicht mehr in den Prozess abgebildet ist. Der Speicher liegt damit
   weiter im Unified Memory, eine echte Einsparung ist nicht belegt (Footprint nicht gemessen).
