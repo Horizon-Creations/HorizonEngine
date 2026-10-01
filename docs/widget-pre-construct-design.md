@@ -4,7 +4,7 @@ Thema 119, Schritt 1 (Analyse und Design). Schritt 2 setzt um, was hier steht.
 
 ## 1. Was heute passiert (Ist-Lifecycle)
 
-`WidgetManager::createWidget` (`src/HE_Core/src/UIWidget/WidgetManager.cpp:398ff`), in dieser Reihenfolge:
+`WidgetManager::createWidget` (`src/HE_Core/src/UIWidget/WidgetManager.cpp:402ff`), in dieser Reihenfolge:
 
 1. Asset laden, Baum aus JSON, Graph aus JSON.
 2. `embedWidgetRefs`: alle WidgetRefs werden eingepflanzt; jedes Embed bekommt schon hier **seine eigene Script-Instanz** (`rt().add`/`addCompiled`, Z. 327/329).
