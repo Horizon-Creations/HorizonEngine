@@ -150,6 +150,12 @@ Structured Buffers bzw. SSBOs. Die Clustered-Variante ist für sie also nicht te
 gesperrt, sondern nur von dieser Zeile. Für die Tile-Variante gilt das nur eingeschränkt
 (siehe §4).
 
+> **Korrektur 01.10.2026 (Thema 116):** „übersetzt für jedes Backend" gilt für HLSL nur auf
+> SPIRV-Cross-Ebene. Ungepinnt landen G-Buffer/Preamble-Sampler auf s16–s33 und `HeResolve`
+> auf b23. SM 5.0 endet bei s15/b13, FXC lehnt den Resolve also ab. Vor P4b braucht er eine
+> HLSL-Pin-Liste wie `kHlslMaterialPins`. Einzelheiten, Aufwand und Reihenfolge:
+> `docs/deferred-d3d-vulkan-analysis-2026-10-01.md`.
+
 ### 1.5 Der UI-Pass zeichnet auf D3D11, D3D12 und Vulkan nur farbige Rechtecke
 
 Nachgemessen am 01.09.2026. Alle drei Backends schieben pro Quad **denselben** Satz von sechs
@@ -630,6 +636,11 @@ Phase kehrt sie um. Das ist eine bewusste Änderung, keine Übersehung.
 ein Feld setzen und prüfen, dass **genau** das im Shader ankommt.
 
 ### P4 — Deferred-Pfad (D3D12, Vulkan; D3D11 nach Maßgabe)
+
+> **Neu bewertet 01.10.2026 (Thema 116):** `docs/deferred-d3d-vulkan-analysis-2026-10-01.md`
+> empfiehlt, zuerst Clustered in `heLitP` (Forward) einzubauen und, falls nötig, HDR/PostFX im
+> Swapchain-Zweig nachzuziehen. Kommt P4 danach, dann mit D3D11 als Pilot (WARP-Pixel-Zeuge),
+> danach D3D12 und Vulkan zuletzt. Die Entscheidung liegt beim Menschen.
 
 Erst hier, weil es das erste ist, das echte neue Infrastruktur braucht: heute wertet **kein**
 Zielbackend `SetRenderPath` aus (`grep -c RenderPath` = 0 in allen dreien).
