@@ -930,6 +930,7 @@ HE_HC_POINTER_EVENT(fireOnDragLeave,    "OnDragLeave",    onDragLeave)
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, {});                                  \
     }
+HE_HC_PLAIN_EVENT(firePreConstruct,    "PreConstruct",    onPreConstruct)
 HE_HC_PLAIN_EVENT(fireConstruct,       "Construct",       onConstruct)
 HE_HC_PLAIN_EVENT(fireDestruct,        "Destruct",        onDestruct)
 HE_HC_PLAIN_EVENT(fireBeginPlay,       "BeginPlay",       onBeginPlay)

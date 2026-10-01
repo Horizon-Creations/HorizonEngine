@@ -5695,8 +5695,8 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				if (!st.gEvtNameEdit.empty() && used(st.gEvtNameEdit)) st.gEvtNameEdit = n->s; // reject dup
 				else { n->s = st.gEvtNameEdit; committed = true; }
 			}
-			static const char* kLifecycle[] = { "Construct", "Tick", "Destruct" };
-			for (int k = 0; k < 3; ++k)
+			static const char* kLifecycle[] = { "PreConstruct", "Construct", "Tick", "Destruct" };
+			for (int k = 0; k < IM_ARRAYSIZE(kLifecycle); ++k)
 			{
 				if (k) ImGui::SameLine();
 				const bool u = used(kLifecycle[k]);
@@ -5952,8 +5952,9 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		{ return q.empty() || HGH::lower(name).find(q) != std::string::npos
 		      || HGH::lower(cat).find(q) != std::string::npos; };
 
-		// Widget lifecycle events (Construct on create, Tick per frame, Destruct on
-		// destroy) + Custom Event — addable straight from the menu, event graph only,
+		// Widget lifecycle events (PreConstruct before any Construct of the widget
+		// and its embeds, Construct on create, Tick per frame, Destruct on destroy)
+		// + Custom Event — addable straight from the menu, event graph only,
 		// unique per name (element events still come from the Designer).
 		if (st.currentGraph == 0)
 		{
@@ -5962,7 +5963,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 					if (gn.type == NT::Event && gn.elem == 0 && gn.s == nm) return true;
 				return false; };
 			bool eh = false;
-			static const char* kLifecycle[] = { "Construct", "Tick", "Destruct" };
+			static const char* kLifecycle[] = { "PreConstruct", "Construct", "Tick", "Destruct" };
 			for (const char* ev : kLifecycle)
 			{
 				if (!matches(ev, "Events")) continue;
