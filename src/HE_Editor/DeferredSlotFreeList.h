@@ -70,16 +70,15 @@ public:
 	// Everything parked at or below `completedValue` is free again.
 	void reclaim(std::uint64_t completedValue)
 	{
-		for (size_t i = 0; i < m_pending.size(); )
+		size_t kept = 0;
+		for (size_t i = 0; i < m_pending.size(); ++i)
 		{
 			if (m_pending[i].fenceValue <= completedValue)
-			{
 				m_free.push_back(m_pending[i].slot);
-				m_pending.erase(m_pending.begin() + static_cast<std::ptrdiff_t>(i));
-			}
 			else
-				++i;
+				m_pending[kept++] = m_pending[i];
 		}
+		m_pending.resize(kept);
 	}
 
 	bool hasPending() const { return !m_pending.empty(); }
