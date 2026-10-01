@@ -4077,6 +4077,235 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 		CHECK(with.b == without.b);
 	}
 }
+
+// Thema 117: D3D11 graph materials read point/spot lights from the cluster
+// lists (fragmentClustered, ByteAddressBuffers t24..t26) — through the raw
+// buffers the renderer creates with HE::d3d11mat::CreateClusterRawBuffer, so
+// the test cannot pass with a buffer/view shape the renderer does not ship.
+// One 1x1 lit draw, a 1x1x1 cluster grid, twelve lights in the one cell: the
+// first eight are black (and also fill the 8-light window, as the renderer
+// keeps it full), lights 9..12 are red. Only the lists can make the pixel red.
+TEST_CASE("D3D11: a clustered graph material is lit by cluster lights beyond the 8-light window (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	MESSAGE(w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+
+	// ── Shaders: standard vertex, the plain-colour graph as the window variant
+	// (fragment) and as the clustered one (fragmentClustered), through FXC as
+	// the renderer compiles them.
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3DBlob> vsBlob = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vsBlob.Get() != nullptr, "standard vertex: ", err);
+	const std::string glsl = HE::generateFragment(plainColourGraph()).glsl;
+	const uint64_t hash = std::hash<std::string>{}(glsl);
+	const auto& plainHl   = lib.fragment(hash, glsl, B::HLSL);
+	const auto& clusterHl = lib.fragmentClustered(hash, glsl, B::HLSL);
+	REQUIRE_MESSAGE(plainHl.ok, plainHl.log);
+	REQUIRE_MESSAGE(clusterHl.ok, clusterHl.log);
+	ComPtr<ID3DBlob> plainBlob   = fxcBlob(plainHl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(plainBlob.Get() != nullptr, "plain pixel shader: ", err);
+	ComPtr<ID3DBlob> clusterBlob = fxcBlob(clusterHl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(clusterBlob.Get() != nullptr, "clustered pixel shader: ", err);
+	{
+		const std::vector<Binding> cb = reflectBindings(clusterBlob.Get());
+		const std::vector<Binding> pb = reflectBindings(plainBlob.Get());
+		for (UINT t : { HE::d3d11mat::kClusterLightsSrvSlot, HE::d3d11mat::kClusterGridSrvSlot,
+		                HE::d3d11mat::kClusterIdxSrvSlot })
+		{
+			CHECK_MESSAGE(binds(cb, D3D_SIT_BYTEADDRESS, t), "the clustered PS does not bind a ByteAddressBuffer on t", t);
+			CHECK_MESSAGE(!binds(pb, D3D_SIT_BYTEADDRESS, t), "the PLAIN PS binds t", t, " — fragment() grew cluster code");
+		}
+	}
+	ComPtr<ID3D11VertexShader> vs;
+	ComPtr<ID3D11PixelShader> plainPS, clusterPS;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(plainBlob->GetBufferPointer(), plainBlob->GetBufferSize(), nullptr, &plainPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(clusterBlob->GetBufferPointer(), clusterBlob->GetBufferSize(), nullptr, &clusterPS)));
+	static const D3D11_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il)));
+	ComPtr<ID3D11RasterizerState> rasterNoCull; // see the landscape case: GL winding is culled otherwise
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID;
+		rd.CullMode = D3D11_CULL_NONE;
+		rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
+
+	// ── Geometry: a fullscreen triangle at z = 0.5, normal +Z. With identity
+	// mvp/model the one pixel's world position is (0, 0, 0.5).
+	const MatVertex11 tri[3] = {
+		{ { -1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.5f, 0.5f } },
+		{ {  3.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.5f, 0.5f } },
+		{ { -1.0f,  3.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.5f, 0.5f } },
+	};
+	ComPtr<ID3D11Buffer> vb;
+	{
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = sizeof(tri); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA init{ tri, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &vb)));
+	}
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[2] = 1.0f;
+	ComPtr<ID3D11Buffer> uCB = makeConstantBuffer11(dev, &u, sizeof(u));
+	REQUIRE(uCB.Get() != nullptr);
+
+	ComPtr<ID3D11Texture2D> target, staging;
+	ComPtr<ID3D11RenderTargetView> rtv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+
+	// ── Lights. Every one sits 1 unit above the pixel on its normal, range
+	// 100, so N·L = 1 and the falloff is the same for all. The red ones split
+	// an intensity of 2 four ways: the four list lights together must equal
+	// ONE window light of intensity 2 (the positive control below).
+	const float kLightPos[3] = { 0.0f, 0.0f, 1.5f };
+	const float kRange = 100.0f;
+	const int   kLists = 12, kBlack = 8;
+	std::vector<float> lights(static_cast<size_t>(kLists) * 16, 0.0f);
+	for (int i = 0; i < kLists; ++i)
+	{
+		float* l = &lights[static_cast<size_t>(i) * 16];
+		l[0] = kLightPos[0]; l[1] = kLightPos[1]; l[2] = kLightPos[2]; l[3] = 1.0f; // point
+		l[6] = -1.0f;                                                                // dir (unused)
+		if (i >= kBlack) { l[8] = 1.0f; l[11] = 0.5f; }                              // red, 0.5
+		l[12] = kRange;                                                              // range, no atlas, no GI channel
+	}
+	const uint32_t grid[2] = { 0u, static_cast<uint32_t>(kLists) };
+	std::vector<uint32_t> indices(kLists);
+	for (int i = 0; i < kLists; ++i) indices[i] = static_cast<uint32_t>(i);
+
+	// The renderer's raw buffer shape, filled the renderer's way (WRITE_DISCARD).
+	ComPtr<ID3D11Buffer> rawBuf[3];
+	ComPtr<ID3D11ShaderResourceView> rawSrv[3];
+	const UINT rawBytes[3] = { static_cast<UINT>(lights.size() * sizeof(float)), sizeof(grid),
+	                           static_cast<UINT>(indices.size() * sizeof(uint32_t)) };
+	const void* rawData[3] = { lights.data(), grid, indices.data() };
+	for (int i = 0; i < 3; ++i)
+	{
+		REQUIRE_MESSAGE(HE::d3d11mat::CreateClusterRawBuffer(dev, rawBytes[i], &rawBuf[i], &rawSrv[i]),
+		                "raw cluster buffer ", i, ": ", drainInfoQueue11(w));
+		D3D11_MAPPED_SUBRESOURCE m{};
+		REQUIRE(SUCCEEDED(ctx->Map(rawBuf[i].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)));
+		std::memcpy(m.pData, rawData[i], rawBytes[i]);
+		ctx->Unmap(rawBuf[i].Get(), 0);
+	}
+
+	// HeLighting: lit view, no ambient, no sky/AO/GI/CSM (all gates 0), camera
+	// straight above the pixel. `window` puts lights 1..n of the list into the
+	// window (the renderer's full-window rule); `red` instead puts ONE red
+	// intensity-2 light there; `gate` turns the cluster path on.
+	auto lighting = [&](int window, bool red, bool gate) {
+		HE::MaterialShaderLibrary::Lighting lit{};
+		lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.0f;
+		lit.camPos[0] = 0.0f; lit.camPos[1] = 0.0f; lit.camPos[2] = 5.0f;
+		lit.giParams[0] = lit.giParams[1] = 1.0f; // viewport 1x1 — the cell pick divides by it
+		const int n = red ? 1 : window;
+		for (int i = 0; i < n; ++i)
+		{
+			for (int k = 0; k < 3; ++k) lit.lightPos[i][k] = kLightPos[k];
+			lit.lightPos[i][3]    = 1.0f;
+			lit.lightDir[i][2]    = -1.0f;
+			lit.lightParams[i][0] = kRange;
+			if (red) { lit.lightColor[i][0] = 1.0f; lit.lightColor[i][3] = 2.0f; }
+		}
+		lit.counts[0] = static_cast<float>(n);
+		if (gate)
+		{
+			// 1x1x1 grid: the one cell holds every list light. Slice scale 0
+			// keeps cz at 0 whatever the depth; camFwd looks down -Z, near 0.1.
+			lit.clusterParams[0] = lit.clusterParams[1] = lit.clusterParams[2] = 1.0f;
+			lit.clusterParams[3] = 0.0f;
+			lit.clusterCamFwd[2] = -1.0f;
+			lit.clusterCamFwd[3] = 0.1f;
+		}
+		return makeConstantBuffer11(dev, &lit, sizeof(lit));
+	};
+
+	ctx->IASetInputLayout(il.Get());
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->RSSetState(rasterNoCull.Get());
+	const UINT stride = sizeof(MatVertex11), offset = 0;
+	ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
+	ctx->VSSetShader(vs.Get(), nullptr, 0);
+	ctx->VSSetConstantBuffers(1, 1, uCB.GetAddressOf());
+	ID3D11ShaderResourceView* lists[3] = { rawSrv[0].Get(), rawSrv[1].Get(), rawSrv[2].Get() };
+	HE::d3d11mat::BindClusterLists(ctx, lists);
+	{
+		ComPtr<ID3D11ShaderResourceView> got;
+		ctx->PSGetShaderResources(HE::d3d11mat::kClusterIdxSrvSlot, 1, &got);
+		CHECK(got.Get() == rawSrv[2].Get());
+	}
+	auto draw = [&](ID3D11PixelShader* ps, ID3D11Buffer* litCB, const char* what) {
+		ctx->PSSetShader(ps, nullptr, 0);
+		ctx->PSSetConstantBuffers(0, 1, &litCB);
+		drainInfoQueue11(w);
+		const Pixel11 px = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+		const std::string why = drainInfoQueue11(w);
+		MESSAGE(what, ": ", int(px.r), ",", int(px.g), ",", int(px.b),
+		        why.empty() ? "" : " — debug layer: ", why);
+		return px;
+	};
+
+	// 1. Positive control: the plain (window) variant, one red intensity-2
+	//    window light. This is the pixel the cluster lists must reproduce; it
+	//    also proves the lit path is readable here (unbound textures are 0).
+	ComPtr<ID3D11Buffer> redWindow = lighting(0, /*red=*/true, /*gate=*/false);
+	const Pixel11 ref = draw(plainPS.Get(), redWindow.Get(), "plain PS, one red window light");
+	REQUIRE_MESSAGE((ref.r > 40 && ref.r < 250 && ref.g < 4 && ref.b < 4),
+	                "positive control is not a readable red: ", int(ref.r), ",", int(ref.g), ",", int(ref.b));
+
+	// 2. The fix: clustered variant, gate on, window = the eight black lights.
+	//    Lights 9..12 reach the pixel only through t24..t26.
+	ComPtr<ID3D11Buffer> gated = lighting(kBlack, false, /*gate=*/true);
+	const Pixel11 lit = draw(clusterPS.Get(), gated.Get(), "clustered PS, gate on, 12 list lights");
+	CHECK_MESSAGE((near8(lit.r, ref.r, 3) && lit.g < 4 && lit.b < 4),
+	              "the four red list lights (9..12) should equal the window control ", int(ref.r),
+	              ", got ", int(lit.r), ",", int(lit.g), ",", int(lit.b));
+
+	// 3. Negative controls. (a) The plain variant on the SAME buffer: it sees
+	//    only the window — eight black lights — and stays black; that is the
+	//    8-light limit this step lifts. (b) The clustered variant with the gate
+	//    off: same lists bound, yet black — the light comes from the gated path.
+	const Pixel11 plain = draw(plainPS.Get(), gated.Get(), "plain PS, same buffer");
+	CHECK_MESSAGE((plain.r < 4 && plain.g < 4 && plain.b < 4),
+	              "the window variant saw a light beyond its 8 black ones: ", int(plain.r), ",", int(plain.g), ",", int(plain.b));
+	ComPtr<ID3D11Buffer> ungated = lighting(kBlack, false, /*gate=*/false);
+	const Pixel11 off = draw(clusterPS.Get(), ungated.Get(), "clustered PS, gate off");
+	CHECK_MESSAGE((off.r < 4 && off.g < 4 && off.b < 4),
+	              "gate 0 still lit from the lists: ", int(off.r), ",", int(off.g), ",", int(off.b));
+
+	// 4. Gate off is the window variant's behaviour: the clustered shader with
+	//    the red window light gives the control pixel (HE_FORWARD_CLUSTER=0 and
+	//    a light-less frame leave the gate at 0 and must still light).
+	const Pixel11 fallback = draw(clusterPS.Get(), redWindow.Get(), "clustered PS, gate off, red window light");
+	CHECK_MESSAGE((near8(fallback.r, ref.r, 1) && fallback.g < 4 && fallback.b < 4),
+	              "gate 0 should shade the window like fragment(): ", int(fallback.r), " vs ", int(ref.r));
+}
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC
 

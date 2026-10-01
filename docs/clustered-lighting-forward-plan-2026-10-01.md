@@ -66,7 +66,7 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
 
 | Backend | Bindung | Was fehlt | Zeuge |
 |---|---|---|---|
-| **D3D11** | t24–t26 | Drei Puffer mit `D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS` + SRV `DXGI_FORMAT_R32_TYPELESS`, `D3D11_BUFFEREX_SRV_FLAG_RAW` (SPIRV-Cross emittiert `ByteAddressBuffer`; die strukturierten t18–t20 sind dafür **nicht** verwendbar — ein Puffer kann nicht STRUCTURED und RAW zugleich). Alternativ den Hand-HLSL auf `ByteAddressBuffer` umstellen und einen Puffersatz teilen. Materialpfad (`:4306`) auf `fragmentClustered`, Fill: `FillMaterialClusterParams` aus dem schon vorhandenen Build (`:5622`). Exporter-/Pak-Variante siehe §4. | FXC-Sweep (CI Windows), WARP-Pixeltest mit > 8 Lichtern |
+| **D3D11** | t24–t26 | **Erledigt in Schritt 4**, siehe §3.3. | WARP-Pixeltest mit 12 Lichtern (CI Windows); HW-Pixeltest offen |
 | **D3D12** | t24–t26 | **Erledigt in Schritt 3**, siehe §3.2. | WARP-PSO-Test + Abdeckungs-Sweep (CI Windows); Pixeltest offen |
 | **Vulkan** | Set 0, 24–26 | `m_matSetLayout` (`:2354`) um drei `STORAGE_BUFFER` (Fragment) erweitern, Pool-Größen, Material-Descriptor-Writes auf die vorhandenen Cluster-SSBOs (`:1863`). | nur Kompilat (kein Laufzeit-Zeuge in CI; MoltenVK lokal nur Syntax) |
 | **Metal** (Forward) | Buffer 4/5/6 | **Erledigt in Schritt 2**, siehe §3.1. | he_shot A/B (md5) lokal, `MANYLIGHTS=16` |
@@ -121,6 +121,39 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   (Root-SRV-Zweig in `coveredBy`), Vor-Cluster-Signatur als Negativkontrolle.
 - **Offen:** Pixel-Zeuge auf echter HW (NN-WS03), CI hat keinen D3D12-Bildlauf. Rezept wie
   Metal §3.1, nur mit `HE_DUMP_RHI=D3D12`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
+  `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
+
+### 3.3 D3D11 (Schritt 4, erledigt bis auf Pixel-Zeugen auf HW)
+
+- **Zweiter, roher Puffersatz.** Der eingebaute Shader liest die Listen als
+  `StructuredBuffer` auf t18–t20, SPIRV-Cross macht aus den SSBOs der Cluster-Variante
+  `ByteAddressBuffer` auf t24–t26. Ein D3D11-Puffer kann nicht `MISC_BUFFER_STRUCTURED`
+  und `MISC_BUFFER_ALLOW_RAW_VIEWS` zugleich tragen, also gibt es drei rohe Zwillinge
+  (`clusterLightRaw`/`GridRaw`/`IdxRaw`, gleiche Bytegrößen), gefüllt aus **demselben**
+  `ClusterLightBuild`. Den Hand-HLSL auf `ByteAddressBuffer` umzustellen hätte einen
+  Satz gespart, aber den eingebauten Pfad angefasst; das ist bewusst nicht passiert.
+- `D3D11MaterialBindings.h`: `kCluster*SrvSlot` (24/25/26), `CreateClusterRawBuffer`
+  (DYNAMIC, `ALLOW_RAW_VIEWS`, SRV `R32_TYPELESS` + `BUFFEREX_SRV_FLAG_RAW`) und
+  `BindClusterLists`. Renderer und WARP-Test benutzen dieselben Helfer.
+- Renderer: Zwillinge nur, wenn der strukturierte Satz steht (alle drei oder keiner,
+  sonst Warnung). `matClustered()` = `HE_FORWARD_CLUSTER` ≠ 0 und Zwillinge da, beides
+  vor `createMaterialResources()` entschieden. `uploadClusters` legt den Build in
+  `frameClusters` ab, lädt ihn zusätzlich in die Zwillinge und bindet t24–t26 (einmal pro
+  Fill, kein anderer Pass fasst die Register an). `fillMatLight` setzt das Gate per
+  `FillMaterialClusterParams` nur in diesem Fall. Fenster bleibt voll (§2.1/1),
+  `giParams.xy` war schon der Viewport (§2.1/3).
+- `GetOrBuildMaterialShaders`: Cross-Compile nimmt `fragmentClustered`, Fehler beim
+  Cross-Compile oder in FXC → Warnung + Rückfall auf `fragment()`. Gebackene Pak-Blobs
+  unverändert (§4).
+- **Zeuge (CI Windows, WARP):** `test_material_graph.cpp`, „D3D11: a clustered graph
+  material is lit by cluster lights beyond the 8-light window". 1×1-Draw, 1×1×1-Gitter,
+  12 Listenlichter über `CreateClusterRawBuffer`. Die ersten 8 sind schwarz (und stehen im
+  Fenster), 9–12 rot mit je 0,5. Positivkontrolle: Fenster-PS mit einem roten Licht der
+  Stärke 2. Erwartet: Cluster-PS mit Gate = Kontrollpixel; Fenster-PS auf demselben CB
+  schwarz; Cluster-PS mit Gate 0 schwarz, mit rotem Fensterlicht = Kontrollpixel.
+  Reflexion: `D3D_SIT_BYTEADDRESS` auf t24–t26 im Cluster-PS, nicht im plain PS.
+- **Offen:** Pixel-Zeuge auf echter HW (NN-WS03), Rezept wie §3.2 mit
+  `HE_DUMP_RHI=D3D11`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
   `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
 
 ## 4. Pak-Varianten (gilt für D3D11/D3D12/Vulkan)

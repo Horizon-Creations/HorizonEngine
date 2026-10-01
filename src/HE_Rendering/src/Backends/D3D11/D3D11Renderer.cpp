@@ -1229,6 +1229,16 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> clusterLightSRV, clusterGridSRV, clusterIdxSRV;
     bool forwardClustered = true;  // HE_FORWARD_CLUSTER=0 → 8-light window A/B guard
     bool clusterCapWarned = false; // one log line when the caps drop lights
+    // The same lists as RAW buffers on t24..t26 for graph materials
+    // (fragmentClustered's ByteAddressBuffers, Thema 117) — a second set because
+    // a D3D11 buffer cannot be structured and raw at once (D3D11MaterialBindings.h).
+    // Same byte sizes as the structured set, refilled from the same build.
+    ComPtr<ID3D11Buffer>             clusterLightRaw, clusterGridRaw, clusterIdxRaw;
+    ComPtr<ID3D11ShaderResourceView> clusterLightRawSRV, clusterGridRawSRV, clusterIdxRawSRV;
+    // Graph materials cross-compile fragmentClustered when the raw lists exist
+    // and HE_FORWARD_CLUSTER is not 0. Both are settled before
+    // createMaterialResources() sets m_matReady, i.e. before any material shader.
+    bool matClustered() const { return forwardClustered && clusterLightRawSRV; }
     ComPtr<ID3D11PixelShader>    ps;
     ComPtr<ID3D11InputLayout>    inputLayout;
     ComPtr<ID3D11Buffer>         perObjectCB;
@@ -1255,6 +1265,8 @@ struct D3D11RendererImpl
     //   t14 heLandscapeWeights + SamplerState s0 (linear-CLAMP), per draw, see
     //   D3D11MaterialBindings.h — s0 is ALSO the built-in pass's albedo sampler
     //   and goes back to it after every material draw.
+    //   t24..t26 ByteAddressBuffers (fragmentClustered's cluster lists): the
+    //   raw twins above, bound once per fill in uploadClusters (Thema 117).
     HE::MaterialShaderLibrary m_matShaderLib; // unguarded member (like Vulkan/D3D12)
     struct MatShaders {
         ComPtr<ID3D11VertexShader> vs;
@@ -3954,6 +3966,27 @@ struct D3D11RendererImpl
                 HE_LOG_WARN(RHI, "%s", "D3D11Renderer: cluster light buffers failed — "
                                        "staying on the 8-light window");
             }
+            // The raw twins for graph materials (t24..t26). All three or none;
+            // without them graph materials keep the window variant (fragment()).
+            if (ok)
+            {
+                const bool rawOk =
+                    HE::d3d11mat::CreateClusterRawBuffer(device.Get(),
+                        static_cast<UINT>(HE::kMaxClusteredLights) * 4u * sizeof(glm::vec4),
+                        &clusterLightRaw, &clusterLightRawSRV)
+                 && HE::d3d11mat::CreateClusterRawBuffer(device.Get(),
+                        static_cast<UINT>(HE::kClusterCount) * sizeof(glm::uvec2),
+                        &clusterGridRaw, &clusterGridRawSRV)
+                 && HE::d3d11mat::CreateClusterRawBuffer(device.Get(),
+                        static_cast<UINT>(HE::kMaxClusterIndices) * sizeof(uint32_t),
+                        &clusterIdxRaw, &clusterIdxRawSRV);
+                if (!rawOk)
+                {
+                    clusterLightRawSRV.Reset(); clusterGridRawSRV.Reset(); clusterIdxRawSRV.Reset();
+                    HE_LOG_WARN(RHI, "%s", "D3D11Renderer: raw cluster light buffers failed — "
+                                           "graph materials stay on the 8-light window");
+                }
+            }
             // HE_FORWARD_CLUSTER=0 keeps the mixed 8-light window (A/B guard,
             // the forward twin of Metal's HE_DEFERRED_CLUSTER).
             if (const char* cl = std::getenv("HE_FORWARD_CLUSTER"); cl && *cl && std::atoi(cl) == 0)
@@ -4303,15 +4336,32 @@ struct D3D11RendererImpl
             const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
                 ? m_matShaderLib.standardVertex(Backend::HLSL)
                 : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
-            const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
-            if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+            // Clustered heLitP first (Thema 117): point/spot lights from the
+            // t24..t26 cluster lists instead of the 8-light window. A variant
+            // that does not cross-compile or that FXC rejects falls back to the
+            // window variant below — the material still renders, with 8 lights.
+            if (matClustered() && vc.ok && !vc.source.empty())
             {
-                HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material shader cross-compile failed: ")
-                    + vc.log + " " + fc.log).c_str());
-                m_materialShaders.emplace(key, MatShaders{});
-                return nullptr;
+                const HE::MaterialShaderLibrary::Compiled& cc =
+                    m_matShaderLib.fragmentClustered(hash, frag, Backend::HLSL);
+                if (cc.ok && !cc.source.empty())
+                    built = compilePair(vc.source, cc.source, "cross-compiled, clustered");
+                if (!built)
+                    HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 clustered material variant failed — "
+                        "using the 8-light window variant: ") + cc.log).c_str());
             }
-            built = compilePair(vc.source, fc.source, "cross-compiled");
+            if (!built)
+            {
+                const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+                if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+                {
+                    HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material shader cross-compile failed: ")
+                        + vc.log + " " + fc.log).c_str());
+                    m_materialShaders.emplace(key, MatShaders{});
+                    return nullptr;
+                }
+                built = compilePair(vc.source, fc.source, "cross-compiled");
+            }
         }
         if (!built)
         {
@@ -5614,12 +5664,17 @@ void D3D11Renderer::DrawScene(int width, int height)
     // only. Built once per frame — the light set and camera do not change
     // between the two fillPerFrame calls below; only the GI-mask channel lane
     // depends on the GI decision, and that is re-derived in the refill.
+    // The build outlives the lambda: fillMatLight copies its gate/grid into the
+    // graph materials' HeLighting (they read the raw twins at t24..t26), and
+    // fillPerFrame always runs right before it with the same GI flag.
     const bool clustered = p.forwardClustered && p.clusterLightSRV
                         && !p.m_renderWorld.lights.empty();
+    const bool matClustered = clustered && p.m_matReady && p.matClustered();
+    HE::ClusterLightBuild frameClusters;
     auto uploadClusters = [&](bool giActive)
     {
-        const HE::ClusterLightBuild cb =
-            HE::BuildClusterLights(p.m_renderWorld, localShadows, giActive && p.giLocalMaskSRV);
+        frameClusters = HE::BuildClusterLights(p.m_renderWorld, localShadows, giActive && p.giLocalMaskSRV);
+        const HE::ClusterLightBuild& cb = frameClusters;
         if (cb.droppedLights > 0 && !p.clusterCapWarned)
         {
             p.clusterCapWarned = true;
@@ -5642,6 +5697,17 @@ void D3D11Renderer::DrawScene(int width, int height)
         ID3D11ShaderResourceView* srvs[3] = {
             p.clusterLightSRV.Get(), p.clusterGridSRV.Get(), p.clusterIdxSRV.Get() };
         ctx->PSSetShaderResources(18, 3, srvs);
+        // Graph materials (Thema 117): the same lists into the raw twins on
+        // t24..t26, which fragmentClustered reads as ByteAddressBuffers.
+        if (matClustered)
+        {
+            upload(p.clusterLightRaw.Get(), cb.lights.data(),  cb.lights.size()  * sizeof(glm::vec4));
+            upload(p.clusterGridRaw.Get(),  cb.grid.data(),    cb.grid.size()    * sizeof(glm::uvec2));
+            upload(p.clusterIdxRaw.Get(),   cb.indices.data(), cb.indices.size() * sizeof(uint32_t));
+            ID3D11ShaderResourceView* raw[3] = {
+                p.clusterLightRawSRV.Get(), p.clusterGridRawSRV.Get(), p.clusterIdxRawSRV.Get() };
+            HE::d3d11mat::BindClusterLists(ctx, raw);
+        }
         return std::pair<glm::vec4, glm::vec4>(cb.params, cb.camFwd);
     };
 
@@ -5748,6 +5814,14 @@ void D3D11Renderer::DrawScene(int width, int height)
         // (point/spot) atlas rendered this frame, lightParams[i].y carries the
         // light's base layer + 1 (0 = "casts no local shadow").
         HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        // Clustered heLitP gate (Thema 117): the window above stays FULL —
+        // baked pak blobs and the window fallback read this same CB — and the
+        // clustered variant skips its point/spot slots itself. `matClustered`
+        // means the raw twins were filled and bound on t24..t26 by the
+        // fillPerFrame that ran right before; giParams.xy (the viewport the
+        // cell pick divides by) is set below.
+        if (matClustered)
+            HE::FillMaterialClusterParams(frameClusters, lit);
         HE::FillMaterialWind(m_environment, lit); // Wind / Wind Sway nodes, next to Time
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
         // preamble binding 13 → t13/s13, bound in the scene pass). Same
