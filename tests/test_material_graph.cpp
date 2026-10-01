@@ -3237,10 +3237,11 @@ bool binds(const std::vector<Binding>& v, D3D_SHADER_INPUT_TYPE t, UINT reg)
 
 // Does the (possibly truncated) description cover this binding? Textures must
 // fall inside one of the table's ranges, samplers must be one of the static
-// samplers, cbuffers one of the root CBVs. The description's own counts are
-// the truth here, not a second hand-written list.
+// samplers, cbuffers one of the root CBVs, raw / structured buffers (the
+// clustered variant's t24..t26) one of the root SRVs. The description's own
+// counts are the truth here, not a second hand-written list.
 bool coveredBy(const HE::d3d12mat::MaterialRootSignature& rs, UINT rangeCount, UINT samplerCount,
-               const Binding& b)
+               const Binding& b, UINT paramCount = HE::d3d12mat::kParamCount)
 {
 	switch (b.type)
 	{
@@ -3255,13 +3256,20 @@ bool coveredBy(const HE::d3d12mat::MaterialRootSignature& rs, UINT rangeCount, U
 				if (rs.samplers[i].ShaderRegister == b.reg) return true;
 			return false;
 		case D3D_SIT_CBUFFER:
-			for (UINT i = 0; i < HE::d3d12mat::kParamCount; ++i)
+			for (UINT i = 0; i < paramCount; ++i)
 				if (rs.params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV &&
 				    rs.params[i].Descriptor.ShaderRegister == b.reg)
 					return true;
 			return false;
+		case D3D_SIT_BYTEADDRESS:
+		case D3D_SIT_STRUCTURED:
+			for (UINT i = 0; i < paramCount; ++i)
+				if (rs.params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV &&
+				    rs.params[i].Descriptor.ShaderRegister == b.reg)
+					return true;
+			return false;
 		default:
-			return false; // a UAV / structured buffer would be news
+			return false; // a UAV would be news
 	}
 }
 } // namespace
@@ -3437,6 +3445,66 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 			CHECK(pso.Get() == nullptr);
 		}
 	}
+
+	// Thema 117: the clustered variant the renderer now cross-compiles for every
+	// graph material (fragmentClustered). Its three ByteAddressBuffers t24..t26
+	// are in the bytecode (heLitP's cluster loop reads them behind a runtime
+	// gate FXC cannot fold) and the full signature covers them with root SRVs
+	// 6..8 — the indices bindClusterRoots sets. Negative control: the same
+	// signature WITHOUT those three params (kPreClusterParamCount) must refuse
+	// the clustered PS yet still accept the plain one, so the verdict is about
+	// t24..t26 and nothing else.
+	{
+		const auto& cf = lib.fragmentClustered(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+		REQUIRE_MESSAGE(cf.ok, cf.log);
+		std::string cerr;
+		ComPtr<ID3DBlob> cps = fxcBlob(cf.source, "ps_5_0", cerr);
+		REQUIRE_MESSAGE(cps.Get() != nullptr, "clustered demo graph pixel shader: ", cerr);
+		{
+			const std::vector<Binding> b = reflectBindings(cps.Get());
+			for (UINT t : { 24u, 25u, 26u })
+				CHECK_MESSAGE(binds(b, D3D_SIT_BYTEADDRESS, t), "the clustered PS does not bind a ByteAddressBuffer on t", t);
+			const std::vector<Binding> plainB = reflectBindings(ps.Get());
+			for (UINT t : { 24u, 25u, 26u })
+				CHECK_MESSAGE(!binds(plainB, D3D_SIT_BYTEADDRESS, t), "the PLAIN PS binds t", t, " — fragment() grew cluster code");
+		}
+		CHECK(full.params[HE::d3d12mat::kRootClusterLights].ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV);
+		CHECK(full.params[HE::d3d12mat::kRootClusterLights].Descriptor.ShaderRegister == 24);
+		CHECK(full.params[HE::d3d12mat::kRootClusterGrid].Descriptor.ShaderRegister   == 25);
+		CHECK(full.params[HE::d3d12mat::kRootClusterIdx].Descriptor.ShaderRegister    == 26);
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), fullRs.Get(), vs.Get(), cps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(SUCCEEDED(hr), "clustered PSO against the full signature failed, hr=", hr, ": ", why);
+		}
+
+		HE::d3d12mat::MaterialRootSignature preCluster;
+		HE::d3d12mat::DescribeMaterialRootSignature(preCluster, HE::d3d12mat::kRangeCount,
+		                                            HE::d3d12mat::kSamplerCount,
+		                                            HE::d3d12mat::kPreClusterParamCount);
+		ComPtr<ID3D12RootSignature> preClusterRs;
+		{
+			const HRESULT hr = makeRootSignature(w.device.Get(), preCluster.desc, preClusterRs, err);
+			const std::string why = drainInfoQueue(w);
+			REQUIRE_MESSAGE(SUCCEEDED(hr), "pre-cluster root signature: ", err, why);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), preClusterRs.Get(), vs.Get(), cps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(hr == E_INVALIDARG, "the pre-cluster signature accepted the clustered PS (hr=", hr,
+			              ") — t24..t26 are not what the PSO depends on: ", why);
+			CHECK(pso.Get() == nullptr);
+			if (!why.empty()) MESSAGE("pre-cluster rejection: ", why);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), preClusterRs.Get(), vs.Get(), ps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(SUCCEEDED(hr), "the PLAIN PS failed against the pre-cluster signature, hr=", hr, ": ", why);
+		}
+	}
 }
 
 TEST_CASE("D3D12: every node's bytecode binds only registers the material root signature covers")
@@ -3451,10 +3519,11 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 	using B = HE::MaterialShaderLibrary::Backend;
 	HE::d3d12mat::MaterialRootSignature rs;
 	HE::d3d12mat::DescribeMaterialRootSignature(rs);
-	auto uncovered = [&](const std::vector<Binding>& b, UINT ranges, UINT samplers) {
+	auto uncovered = [&](const std::vector<Binding>& b, UINT ranges, UINT samplers,
+	                     UINT params = HE::d3d12mat::kParamCount) {
 		std::string out;
 		for (const Binding& x : b)
-			if (!coveredBy(rs, ranges, samplers, x))
+			if (!coveredBy(rs, ranges, samplers, x, params))
 				out += (out.empty() ? "" : ", ") + x.name + "(" + std::to_string(static_cast<int>(x.type)) + ":" + std::to_string(x.reg) + ")";
 		return out;
 	};
@@ -3479,7 +3548,7 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		REQUIRE_MESSAGE(vs.Get() != nullptr, err);
 		CHECK(uncovered(reflectBindings(vs.Get()), HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount).empty());
 	}
-	int shaders = 0, litUncoveredByLegacy = 0;
+	int shaders = 0, litUncoveredByLegacy = 0, clUncoveredByPreCluster = 0;
 	for (const NodeShaderCase& c : allNodeShaderCases())
 	{
 		std::string err;
@@ -3502,6 +3571,23 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		if (!uncovered(b, HE::d3d12mat::kLegacyRangeCount, HE::d3d12mat::kLegacySamplerCount).empty())
 			++litUncoveredByLegacy;
 		++shaders;
+		// The clustered twin (Thema 117) — what the renderer actually builds now.
+		// Same coverage rule; the pre-cluster signature (no root SRVs 6..8) is
+		// its negative control and must leave the lit ones uncovered.
+		{
+			ComPtr<ID3DBlob> cps = fxcBlob(lib.fragmentClustered(caseHash(c), c.glsl, B::HLSL).source, "ps_5_0", err);
+			REQUIRE_MESSAGE(cps.Get() != nullptr, "'", c.name, "' (clustered): ", err);
+			const std::vector<Binding> cb = reflectBindings(cps.Get());
+			const std::string cmiss = uncovered(cb, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
+			if (c.name.find("(UI domain)") != std::string::npos)
+				CHECK_MESSAGE((cmiss.empty() || cmiss == "heBackdrop(2:9)"), "'", c.name,
+				              "' (clustered) binds registers beyond heBackdrop the signature does not cover: ", cmiss);
+			else
+				CHECK_MESSAGE(cmiss.empty(), "'", c.name, "' (clustered) binds registers the material root signature does not cover: ", cmiss);
+			if (!uncovered(cb, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount,
+			               HE::d3d12mat::kPreClusterParamCount).empty())
+				++clUncoveredByPreCluster;
+		}
 		if (!c.vertBody.empty())
 		{
 			const auto& cv = lib.customVertex(std::hash<std::string>{}(c.vertBody), c.vertBody, B::HLSL);
@@ -3518,6 +3604,11 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 	              " node shaders — the negative control is not biting");
 	MESSAGE("material root signature covers ", shaders, " node pixel shaders; the legacy one left ",
 	        litUncoveredByLegacy, " of them uncovered");
+	// Same bar for the clustered twins: every lit one reads t24..t26.
+	CHECK_MESSAGE(clUncoveredByPreCluster > shaders / 2,
+	              "the pre-cluster signature covers ", shaders - clUncoveredByPreCluster, "/", shaders,
+	              " clustered node shaders — t24..t26 are not in the bytecode, the negative control is not biting");
+	MESSAGE("clustered twins: the pre-cluster signature left ", clUncoveredByPreCluster, "/", shaders, " uncovered");
 }
 
 // ═══ Thema 57: heBackdrop and heGIReflFwd share s9 — measured, not inferred ═══

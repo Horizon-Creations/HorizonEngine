@@ -67,7 +67,7 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
 | Backend | Bindung | Was fehlt | Zeuge |
 |---|---|---|---|
 | **D3D11** | t24–t26 | Drei Puffer mit `D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS` + SRV `DXGI_FORMAT_R32_TYPELESS`, `D3D11_BUFFEREX_SRV_FLAG_RAW` (SPIRV-Cross emittiert `ByteAddressBuffer`; die strukturierten t18–t20 sind dafür **nicht** verwendbar — ein Puffer kann nicht STRUCTURED und RAW zugleich). Alternativ den Hand-HLSL auf `ByteAddressBuffer` umstellen und einen Puffersatz teilen. Materialpfad (`:4306`) auf `fragmentClustered`, Fill: `FillMaterialClusterParams` aus dem schon vorhandenen Build (`:5622`). Exporter-/Pak-Variante siehe §4. | FXC-Sweep (CI Windows), WARP-Pixeltest mit > 8 Lichtern |
-| **D3D12** | t24–t26 | `D3D12MaterialRootSignature.h`: drei Root-SRVs (oder eine Range) für t24–t26; Root-SRVs sind raw/structured-agnostisch, der vorhandene Ring (`:4760`) kann direkt dran. PSO-Warmup prüfen. | WARP-PSO-Test (`test_material_graph.cpp`, Thema 56) um t24–t26 erweitern, dann Pixeltest |
+| **D3D12** | t24–t26 | **Erledigt in Schritt 3**, siehe §3.2. | WARP-PSO-Test + Abdeckungs-Sweep (CI Windows); Pixeltest offen |
 | **Vulkan** | Set 0, 24–26 | `m_matSetLayout` (`:2354`) um drei `STORAGE_BUFFER` (Fragment) erweitern, Pool-Größen, Material-Descriptor-Writes auf die vorhandenen Cluster-SSBOs (`:1863`). | nur Kompilat (kein Laufzeit-Zeuge in CI; MoltenVK lokal nur Syntax) |
 | **Metal** (Forward) | Buffer 4/5/6 | **Erledigt in Schritt 2**, siehe §3.1. | he_shot A/B (md5) lokal, `MANYLIGHTS=16` |
 | **OpenGL** (≥ 4.3) | SSBO 24–26 | Neues Target `Glsl430` in `ShaderCompiler.h` (+ `Backend::GLSL430`), Laufzeitwahl nach `GLAD_GL_VERSION_4_3` (wie `m_giSupported`, `:3082`); SPIRV-Cross-GLSL braucht die Binding-Nummern explizit (`layout(binding=…)`, GL 4.3 hat sie). Fill mit `BuildClusterLights(..., bottomLeftOrigin = true)`. macOS-GL (4.1) bleibt beim Fenster. | keiner auf diesem Mac (GL 4.1); nur CI-Kompilat |
@@ -95,6 +95,33 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   Deferred (`RENDERPATH=1`), die Built-in-Kontrolle (`MANYLIGHTS=16builtin`) und
   `MATERIALTEST=switchon` sind bitgleich zu vorher. Unter `MTL_DEBUG_LAYER=1` meldet
   der Lauf keine fehlende Bindung auf 4/5/6 (siehe §5 zu den Samplern).
+
+### 3.2 D3D12 (Schritt 3, erledigt bis auf Pixel-Zeugen)
+
+- `D3D12MaterialRootSignature.h`: drei **Root-SRVs** t24/t25/t26 als Parameter **6/7/8**
+  (`kRootCluster*`, Pixel-Sichtbarkeit), `kParamCount` 6 → 9 (17 DWORDs). Root-Deskriptoren
+  haben keine View, also ist raw (`ByteAddressBuffer` aus SPIRV-Cross) vs. structured egal.
+  `kPreClusterParamCount = 6` + `paramCount`-Argument für die Negativkontrolle.
+- Renderer: dieselben Indizes wie die Szenen-/Skinned-Signatur (`static_assert`), daher hängt
+  `bindClusterRoots()` direkt nach `SetGraphicsRootSignature(m_matRootSig)` die **vorhandenen**
+  Upload-Ringe (t18–t20 des eingebauten Shaders, gleiches Byte-Layout) auch an t24–t26.
+  Kein zweiter Puffersatz, kein zweiter Build.
+- `GetOrBuildMaterialPSO`: Cross-Compile nimmt `fragmentClustered`, solange
+  `matClustered()` (Ringe da, `HE_FORWARD_CLUSTER` ≠ 0); Cross-Compile- oder FXC-Fehler →
+  Warnung + Rückfall auf `fragment()`. Gebackene Pak-Blobs unverändert (§4). Die Wahl ist
+  vor jedem Material-PSO entschieden: `m_matReady` wird erst nach Ring-Aufbau und
+  Env-Lesen gesetzt.
+- `DrawScene`: `uploadClusters` legt den Build in `frameClusters` ab, `fillMatLight` setzt
+  das Gate per `FillMaterialClusterParams` (nur wenn `clustered`, also Ringe gebunden und
+  Lichter da). Fenster bleibt voll (§2.1/1); `giParams.xy` war schon Viewport (§2.1/3).
+- **Zeuge (CI Windows):** `test_material_graph.cpp` — WARP-Case: Cluster-PS bindet
+  `D3D_SIT_BYTEADDRESS` auf t24–t26, der plain PS nicht; PSO gegen die volle Signatur baut,
+  gegen die Vor-Cluster-Signatur `E_INVALIDARG`, plain PS dort weiterhin OK. Sweep: alle
+  Knoten-Shader auch als Cluster-Variante reflektiert und gegen die Signatur gedeckt
+  (Root-SRV-Zweig in `coveredBy`), Vor-Cluster-Signatur als Negativkontrolle.
+- **Offen:** Pixel-Zeuge auf echter HW (NN-WS03), CI hat keinen D3D12-Bildlauf. Rezept wie
+  Metal §3.1, nur mit `HE_DUMP_RHI=D3D12`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
+  `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
 
 ## 4. Pak-Varianten (gilt für D3D11/D3D12/Vulkan)
 
