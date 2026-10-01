@@ -4,6 +4,7 @@
 #include "GitController.h"               // Source Control page
 #include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
+#include "GitCloneDialog.h"              // "Clone from GitHub..." beside "Create & push"
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
@@ -1080,7 +1081,11 @@ void drawRepositorySection(AppContext& ctx)
 	}
 	if (!ctx.projectLoaded)
 	{
-		ImGui::TextWrapped("Open a project to configure its repository.");
+		ImGui::TextWrapped("Open a project to configure its repository, or clone one "
+		                   "from your GitHub account as a new project.");
+		ImGui::Spacing();
+		if (EditorWidgets::button("Clone from GitHub...", ImVec2(240.0f, 0.0f)))
+			GitCloneDialog::requestOpen();
 		return;
 	}
 	if (ctx.gitProbe && !ctx.gitProbe->gitFound)
@@ -1182,6 +1187,14 @@ void drawRepositorySection(AppContext& ctx)
 		                    "It is handed to git's credential helper, stored nowhere else.");
 		if (st.initialCommit)
 			ImGui::TextDisabled("Make the first commit before setting up the remote.");
+
+		// The other direction: a repository that already exists on the account,
+		// cloned into a new folder and opened as a project of its own. It does
+		// not touch this one — which is why it is a button, not a third remote.
+		ImGui::Spacing();
+		ImGui::TextWrapped("Or clone one of your GitHub repositories as a new project:");
+		if (EditorWidgets::button("Clone from GitHub...", ImVec2(240.0f, 0.0f)))
+			GitCloneDialog::requestOpen();
 
 		ImGui::Spacing();
 		ImGui::TextWrapped("Or paste an existing repository URL (GitHub, GitLab, "

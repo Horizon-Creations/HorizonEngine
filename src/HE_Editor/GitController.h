@@ -8,12 +8,16 @@
 // nothing happens. That call is cheap — it drains finished work and decides
 // whether enough time has passed to ask git anything.
 
+#include <SourceControl/GitHubApi.h>
 #include <SourceControl/GitService.h>
 #include <SourceControl/RepoStatus.h>
 
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 class CollabController;
 
@@ -88,6 +92,46 @@ public:
 	const std::string& lastInfo()  const { return m_service.lastInfo(); }
 	const std::string& remoteUrl() const { return m_service.remoteUrl(); }
 
+	// ── Clone an existing repository as a new project ────────────────────────
+	// Runs on a GitService of its own, not the project's: GitService::requestClone
+	// re-targets the service at the new working tree, and doing that to m_service
+	// would swap the OPEN project's status for the clone's while the user is
+	// still looking at it — and leave it swapped if the clone then fails or is
+	// never opened. Opening the clone afterwards goes through openProject() like
+	// any other project, which points m_service at it the normal way.
+	//
+	// Not gated on mayModify(): a clone writes into a new folder and moves
+	// nothing in the open project, so a collaboration guest breaks no session by
+	// making one. Opening it is what ends the session, and that goes through the
+	// editor's guarded open path, which asks.
+
+	// GET /user/repos for the token's owner, off the frame thread (one blocking
+	// HTTPS round trip per page of 100). The token is wiped once the list is in.
+	// A request while one is running is dropped.
+	void requestListRepos(std::string token);
+	bool listingRepos() const { return m_listing; }
+	// True once a list request has answered, successfully or not.
+	bool repoListLoaded() const { return m_repoListLoaded; }
+	const std::vector<HE::Sc::RepoListEntry>& repoList() const { return m_repoList; }
+	const std::string& repoListError() const { return m_repoListError; }
+
+	// Clone `cloneUrl` into `targetDir` (absent or empty). `token` goes to the
+	// credential helper, never into the URL — see GitService::requestClone.
+	void requestClone(const std::string& cloneUrl, const std::filesystem::path& targetDir,
+	                  std::string token);
+	// Retry the LFS download of the last clone (git-lfs was missing, the
+	// connection dropped).
+	void requestCloneLfsPull();
+	// Stop the clone worker once its result has been used (the project opened,
+	// or the dialog closed). Harmless when none is running.
+	void finishClone();
+	// Not GitService::busy() directly: see m_cloneBusy.
+	bool cloneBusy() const { return m_cloneBusy; }
+	const std::string& cloneInfo()  const { return m_cloneService.lastInfo(); }
+	const std::string& cloneError() const { return m_cloneService.lastError(); }
+	// Set once the git part of the clone succeeded — also when LFS then failed.
+	const std::filesystem::path& clonedRoot() const { return m_cloneService.lastClonedRoot(); }
+
 	// ── State for the UI ─────────────────────────────────────────────────────
 	bool                     isRepo() const { return m_service.isRepo(); }
 	const HE::Sc::RepoStatus& status() const { return m_service.status(); }
@@ -129,8 +173,30 @@ private:
 	// Absolute → repository-relative with forward slashes, or empty when outside.
 	std::string toRepoRelative(const std::string& absolutePath) const;
 
+	// Main thread: move a finished repository list over from the worker.
+	void collectRepoList();
+
 	HE::Sc::GitService    m_service;
+	HE::Sc::GitService    m_cloneService;
+	// The worker queues its last event and only THEN reports idle, so a
+	// busy() read after this frame's pump can say "done" while the result is
+	// still waiting for the next one — a finished clone with no root and no
+	// error. update() therefore reads busy() BEFORE pumping and clears this
+	// only then: idle before the pump means the pump got everything.
+	bool                  m_cloneBusy = false;
 	std::filesystem::path m_projectRoot;
+
+	// Repository list. The thread writes only the m_listResult* members, under
+	// m_listMutex; everything else is main-thread-only.
+	std::thread                         m_listThread;
+	std::mutex                          m_listMutex;
+	bool                                m_listDone = false;
+	std::vector<HE::Sc::RepoListEntry>  m_listResult;
+	std::string                         m_listResultError;
+	bool                                m_listing        = false;
+	bool                                m_repoListLoaded = false;
+	std::vector<HE::Sc::RepoListEntry>  m_repoList;
+	std::string                         m_repoListError;
 
 	const CollabController* m_collab = nullptr;
 	// Project-path spelling of the repo root when the two are the same directory

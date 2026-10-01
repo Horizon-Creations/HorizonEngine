@@ -5,6 +5,10 @@
 #include <Platform/Process.h>
 
 #include <algorithm>
+#include <fstream>
+#include <iterator>
+#include <string_view>
+#include <utility>
 
 namespace HE::Sc {
 namespace {
@@ -22,11 +26,37 @@ std::string joinForLog(const std::vector<std::string>& args)
 	return s;
 }
 
+// `-c` arguments that make `helper` the ONLY credential helper for one command.
+// The empty value first clears whatever list system/global config built up;
+// git exports both to its children, so git-lfs sees the same single helper.
+std::vector<std::string> helperOverrideArgs(const std::string& helper)
+{
+	if (helper.empty()) return {};
+	return { "-c", "credential.helper=", "-c", "credential.helper=" + helper };
+}
+
+using EnvList = std::vector<std::pair<std::string, std::string>>;
+
+GitResult runImpl(const std::filesystem::path& cwd,
+                  const std::vector<std::string>& args,
+                  std::uint32_t timeoutMs,
+                  const EnvList& extraEnv);
+
 } // namespace
 
 GitResult GitCli::run(const std::filesystem::path& cwd,
                       const std::vector<std::string>& args,
                       std::uint32_t timeoutMs)
+{
+	return runImpl(cwd, args, timeoutMs, {});
+}
+
+namespace {
+
+GitResult runImpl(const std::filesystem::path& cwd,
+                  const std::vector<std::string>& args,
+                  std::uint32_t timeoutMs,
+                  const EnvList& extraEnv)
 {
 	HE::Proc::Options o;
 	o.exe       = "git";
@@ -45,6 +75,7 @@ GitResult GitCli::run(const std::filesystem::path& cwd,
 	// messages, and a parser matching English words breaks on a German install.
 	o.env.emplace_back("LC_ALL", "C");
 	o.env.emplace_back("LANG", "C");
+	for (const auto& kv : extraEnv) o.env.push_back(kv);
 
 	HE_SC_TRACE("git%s (in %s)", joinForLog(args).c_str(), cwd.string().c_str());
 
@@ -76,6 +107,8 @@ GitResult GitCli::run(const std::filesystem::path& cwd,
 	}
 	return g;
 }
+
+} // namespace
 
 std::filesystem::path GitCli::findRepoRoot(const std::filesystem::path& anyPathInside)
 {
@@ -150,9 +183,9 @@ constexpr std::uint32_t kLocalTimeoutMs   = 60'000;
 constexpr std::uint32_t kNetworkTimeoutMs = 15 * 60'000;
 
 bool runChecked(const std::filesystem::path& cwd, const std::vector<std::string>& args,
-                std::uint32_t timeoutMs, std::string* err)
+                std::uint32_t timeoutMs, std::string* err, const EnvList& extraEnv = {})
 {
-	const GitResult r = GitCli::run(cwd, args, timeoutMs);
+	const GitResult r = runImpl(cwd, args, timeoutMs, extraEnv);
 	if (r.ok) return true;
 	if (err)
 	{
@@ -220,6 +253,160 @@ bool GitCli::setRemote(const std::filesystem::path& root, const std::string& url
 	if (remoteUrl(root).empty())
 		return runChecked(root, { "remote", "add", "origin", url }, kLocalTimeoutMs, err);
 	return runChecked(root, { "remote", "set-url", "origin", url }, kLocalTimeoutMs, err);
+}
+
+namespace {
+
+constexpr std::string_view kHttpsScheme = "https://";
+constexpr std::string_view kFileScheme  = "file://";
+
+// Everything between "https://" and the first '/', '?' or '#'.
+std::string httpsAuthority(const std::string& url)
+{
+	if (url.rfind(kHttpsScheme, 0) != 0) return {};
+	const std::size_t begin = kHttpsScheme.size();
+	const std::size_t end   = url.find_first_of("/?#", begin);
+	return url.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+}
+
+// A path from the UTF-8 bytes git prints. Built through char8_t because a
+// narrow std::string is read in the ANSI code page on Windows.
+std::filesystem::path pathFromUtf8(const std::string& utf8)
+{
+	return std::filesystem::path(
+		std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
+}
+
+} // namespace
+
+bool GitCli::isSafeCloneUrl(const std::string& url, std::string* why)
+{
+	const auto refuse = [why](const char* reason) {
+		if (why) *why = reason;
+		return false;
+	};
+	if (url.empty()) return refuse("no clone URL given");
+	for (const unsigned char ch : url)
+	{
+		if (ch < 0x20 || ch == 0x7f)
+			return refuse("the clone URL contains control characters");
+	}
+
+	// A local bare repository. No credentials are involved at all.
+	if (url.rfind(kFileScheme, 0) == 0) return true;
+
+	if (url.rfind(kHttpsScheme, 0) != 0)
+	{
+		return refuse("only https:// clone URLs are supported — the token reaches git "
+		              "through the credential helper, which http:// would send in the "
+		              "clear and ssh does not use at all");
+	}
+	const std::string authority = httpsAuthority(url);
+	if (authority.empty()) return refuse("the clone URL has no host");
+	if (authority.find('@') != std::string::npos)
+	{
+		// The rule the whole module keeps: a token in the URL lands in
+		// .git/config, in the process table and in every error message git
+		// prints about that remote.
+		return refuse("the clone URL carries a user name or token before the host — "
+		              "credentials go through the credential helper, never into the URL");
+	}
+	if (url.find(' ') != std::string::npos)
+		return refuse("the clone URL contains a space");
+	return true;
+}
+
+std::string GitCli::urlHost(const std::string& url)
+{
+	const std::string authority = httpsAuthority(url);
+	// A userinfo part is not a host; isSafeCloneUrl refuses such URLs anyway.
+	if (authority.find('@') != std::string::npos) return {};
+	return authority;
+}
+
+bool GitCli::clone(const std::string& url, const std::filesystem::path& targetDir,
+                   const std::string& helperOverride, std::string* err)
+{
+	namespace fs = std::filesystem;
+
+	std::string why;
+	if (!isSafeCloneUrl(url, &why))
+	{
+		if (err) *err = why;
+		return false;
+	}
+	if (targetDir.empty())
+	{
+		if (err) *err = "no target folder given for the clone";
+		return false;
+	}
+
+	// ── The target must be empty ─────────────────────────────────────────────
+	// Checked here rather than left to git so the refusal names the folder and
+	// what is in it, and — more importantly — so the cleanup below is safe:
+	// everything inside the target after a failed clone was put there by it.
+	std::error_code ec;
+	bool createdDir = false;
+	if (fs::exists(targetDir, ec))
+	{
+		if (!fs::is_directory(targetDir, ec))
+		{
+			if (err) *err = "\"" + targetDir.string() + "\" exists and is not a folder";
+			return false;
+		}
+		std::size_t entries = 0;
+		for (fs::directory_iterator it(targetDir, ec), end; !ec && it != end; it.increment(ec))
+			++entries;
+		if (ec)
+		{
+			if (err) *err = "cannot read \"" + targetDir.string() + "\": " + ec.message();
+			return false;
+		}
+		if (entries != 0)
+		{
+			if (err) *err = "\"" + targetDir.string() + "\" is not empty (" +
+			                std::to_string(entries) + " entries) — choose an empty folder "
+			                "or a new one to clone into";
+			return false;
+		}
+	}
+	else
+	{
+		fs::create_directories(targetDir, ec);
+		if (ec)
+		{
+			if (err) *err = "cannot create \"" + targetDir.string() + "\": " + ec.message();
+			return false;
+		}
+		createdDir = true;
+	}
+
+	std::vector<std::string> args = helperOverrideArgs(helperOverride);
+	// "--" so a URL can never be read as an option, "." because the working
+	// directory IS the target.
+	args.insert(args.end(), { "clone", "--", url, "." });
+
+	const bool ok = runChecked(targetDir, args, kNetworkTimeoutMs, err,
+	                           { { "GIT_LFS_SKIP_SMUDGE", "1" } });
+	if (ok) return true;
+
+	// git removes a failed clone itself — unless it was killed on the timeout,
+	// which leaves a partial .git behind and makes every retry fail with "not
+	// empty". The folder was empty (or absent) before, so clearing it again
+	// removes only what this clone wrote.
+	if (createdDir)
+	{
+		fs::remove_all(targetDir, ec);
+	}
+	else
+	{
+		for (fs::directory_iterator it(targetDir, ec), end; !ec && it != end; it.increment(ec))
+		{
+			std::error_code rmEc;
+			fs::remove_all(it->path(), rmEc);
+		}
+	}
+	return false;
 }
 
 bool GitCli::isValidBranchName(const std::filesystem::path& root, const std::string& name)
@@ -397,10 +584,55 @@ bool GitCli::lfsTrack(const std::filesystem::path& root,
 	                  kLocalTimeoutMs, err);
 }
 
+bool GitCli::usesLfs(const std::filesystem::path& root)
+{
+	// Every tracked .gitattributes, at any depth (**/ matches zero directories,
+	// so the root one is included). -z: paths are raw bytes, no quoting.
+	const GitResult r = run(root, { "ls-files", "-z", "--", ":(glob)**/.gitattributes" }, 10000);
+	if (!r.ok) return false;
+
+	std::size_t pos = 0;
+	while (pos < r.out.size())
+	{
+		const std::size_t nul = r.out.find('\0', pos);
+		const std::string rel = r.out.substr(pos, nul == std::string::npos
+		                                          ? std::string::npos : nul - pos);
+		pos = nul == std::string::npos ? r.out.size() : nul + 1;
+		if (rel.empty()) continue;
+
+		std::ifstream in(root / pathFromUtf8(rel), std::ios::binary);
+		const std::string text((std::istreambuf_iterator<char>(in)),
+		                       std::istreambuf_iterator<char>());
+		if (text.find("filter=lfs") != std::string::npos) return true;
+	}
+	return false;
+}
+
+bool GitCli::lfsPull(const std::filesystem::path& root, std::string* err)
+{
+	// A network transfer like push/pull, with the same bound: a cut-off
+	// download is resumed by simply running this again.
+	return runChecked(root, { "lfs", "pull" }, kNetworkTimeoutMs, err);
+}
+
 std::string GitCli::credentialHelper(const std::filesystem::path& root)
 {
 	const GitResult r = run(root, { "config", "--get", "credential.helper" }, 5000);
 	return r.ok ? trimTrailing(r.out) : std::string{};
+}
+
+std::string GitCli::defaultCredentialHelper()
+{
+#if defined(__APPLE__)
+	return "osxkeychain";       // the macOS keychain
+#elif defined(_WIN32)
+	return "manager";           // Git Credential Manager, ships with Git for Windows
+#else
+	// No universal secure store on Linux; a bounded in-memory cache is the only
+	// default that never writes a plaintext file. NEVER `store` — that is a
+	// token in a world-readable file, silently.
+	return "cache --timeout=3600";
+#endif
 }
 
 bool GitCli::ensureCredentialHelper(const std::filesystem::path& root,
@@ -409,16 +641,7 @@ bool GitCli::ensureCredentialHelper(const std::filesystem::path& root,
 	if (outConfigured) outConfigured->clear();
 	if (!credentialHelper(root).empty()) return true;   // someone already chose
 
-#if defined(__APPLE__)
-	const char* helper = "osxkeychain";       // the macOS keychain
-#elif defined(_WIN32)
-	const char* helper = "manager";           // Git Credential Manager, ships with Git for Windows
-#else
-	// No universal secure store on Linux; a bounded in-memory cache is the only
-	// default that never writes a plaintext file. NEVER `store` — that is a
-	// token in a world-readable file, silently.
-	const char* helper = "cache --timeout=3600";
-#endif
+	const std::string helper = defaultCredentialHelper();
 
 	// --local: this decision is scoped to the repository that asked for it, not
 	// imposed on the user's global git config.
@@ -428,7 +651,7 @@ bool GitCli::ensureCredentialHelper(const std::filesystem::path& root,
 		return false;
 	}
 	if (outConfigured) *outConfigured = helper;
-	HE_SC_INFO("Configured repo-local credential.helper: %s", helper);
+	HE_SC_INFO("Configured repo-local credential.helper: %s", helper.c_str());
 	return true;
 }
 
@@ -436,11 +659,13 @@ bool GitCli::approveCredential(const std::filesystem::path& root,
                                const std::string& host,
                                const std::string& username,
                                const std::string& secret,
-                               std::string* err)
+                               std::string* err,
+                               const std::string& helperOverride)
 {
 	HE::Proc::Options o;
 	o.exe       = "git";
-	o.args      = { "credential", "approve" };
+	o.args      = helperOverrideArgs(helperOverride);
+	o.args.insert(o.args.end(), { "credential", "approve" });
 	o.cwd       = root;
 	o.timeoutMs = 15000;
 	o.env.emplace_back("GIT_TERMINAL_PROMPT", "0");

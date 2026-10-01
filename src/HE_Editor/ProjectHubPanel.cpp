@@ -8,6 +8,7 @@
                                          // product than the window that preceded it
 #include "TutorialPanel.h"               // Help ▸ Interactive Tutorial → sandbox offer
 #include "DocsPanel.h"                   // Help ▸ Documentation — readable before a project exists
+#include "GitCloneDialog.h"              // Open Project ▸ Clone from GitHub...
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -614,11 +615,34 @@ void render(AppContext& ctx)
             false);
     }
 
-    if (ctx.pendingFileReady)
+    // ── Clone from GitHub ─────────────────────────────────────────────────────
+    // The counterpart of Preferences ▸ Source Control's "Create & push": a
+    // repository that already exists on the user's account, made into a project
+    // here. The dialog is drawn by EditorUI (over both screens); the project it
+    // clones comes back through the same load as a browsed .heproj, below.
+    ImGui::Spacing();
+    ImGui::Spacing();
     {
-        ctx.pendingFileReady = false;
-        std::string chosen = ctx.pendingFileResult;
-        ctx.pendingFileResult.clear();
+        EditorWidgets::WrapText wrap(panelW - padding);
+        ImGui::SetCursorPosX(padding);
+        ImGui::TextWrapped("Or clone a repository from your GitHub account into a new "
+                           "folder and open it.");
+    }
+    ImGui::SetCursorPosX(padding);
+    if (EditorWidgets::button("Clone from GitHub...", ImVec2(panelW - padding * 2.0f, 36.0f)))
+        GitCloneDialog::requestOpen();
+
+    std::string cloned;
+    const bool clonedReady = GitCloneDialog::takeOpenRequest(cloned);
+    if (ctx.pendingFileReady || clonedReady)
+    {
+        std::string chosen = clonedReady ? cloned : ctx.pendingFileResult;
+        if (ctx.pendingFileReady && !clonedReady)
+        {
+            ctx.pendingFileReady = false;
+            ctx.pendingFileResult.clear();
+        }
+        ctx.hubOpenError.clear();
         if (ctx.projectManager->loadProject(chosen))
         {
             ctx.globalState->addKnownProject(chosen);

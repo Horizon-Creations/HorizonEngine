@@ -2568,6 +2568,11 @@ namespace
 	  "Opens a project the list does not know yet. It is added to the list "
 	  "afterwards.",
 	  "", "editor#project-hub" },
+	{ "Project Hub/Clone from GitHub...", "",
+	  "Makes a project out of a repository on your GitHub account: pick it from "
+	  "the list, choose a folder, and it is cloned there, Git LFS assets "
+	  "included, and opened.",
+	  "", "editor#project-hub" },
 	{ "Project Hub/Start the tutorial", "",
 	  "Creates a sandbox project and starts the guided tour in it. Nothing you "
 	  "build there is lost — it is an ordinary project.",
@@ -3470,6 +3475,37 @@ namespace
 	  "at it and pushes what is committed. The token is handed to git's "
 	  "credential helper and wiped from the field, never written to a project "
 	  "file.",
+	  "", "editor#preferences" },
+	// "Clone from GitHub..." and the dialog it opens (GitCloneDialog.cpp), which
+	// pushes this same scope — the reverse of Create & push, one chapter.
+	{ "Source Control/Clone from GitHub...", "",
+	  "Opens a list of the repositories on your GitHub account. The one you pick "
+	  "is cloned into a new folder, Git LFS assets included, and opened as a "
+	  "project. The project open now is not touched.",
+	  "", "editor#preferences" },
+	{ "Source Control/Load my repositories", "",
+	  "Asks GitHub for every repository the token above can see — yours, and "
+	  "those of organisations you belong to — newest first. The token is sent in "
+	  "a request header only, never in an address.",
+	  "", "editor#preferences" },
+	{ "Source Control/Browse##clone", "Browse",
+	  "Choose the folder the clone goes INTO. A new folder with the name below "
+	  "is made there for the repository.",
+	  "", "editor#preferences" },
+	{ "Source Control/Clone", "",
+	  "Clones the chosen repository into the folder shown above it, which must "
+	  "be new or empty, then downloads its Git LFS assets. The token goes to "
+	  "git's credential helper, so later pushes and pulls need no retyping. "
+	  "Once started it cannot be stopped.",
+	  "", "editor#preferences" },
+	{ "Source Control/Download LFS assets again", "",
+	  "The repository was cloned but its large files were not downloaded — "
+	  "git-lfs was missing or the connection dropped. This fetches only what is "
+	  "still missing.",
+	  "", "editor#preferences" },
+	{ "Source Control/Open project", "",
+	  "Opens the project in the cloned folder, even though some of its large "
+	  "files may still be placeholders.",
 	  "", "editor#preferences" },
 	{ "Source Control/Set##remote", "Set",
 	  "Points the project at a repository that already exists — GitHub, GitLab, "

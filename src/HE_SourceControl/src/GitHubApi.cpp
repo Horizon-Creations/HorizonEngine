@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace HE::Sc {
@@ -190,7 +191,111 @@ HE::Net::HttpsResponse apiPost(const std::string& url, const std::string& token,
 	return resp;
 }
 
+// A string field, or "" — json::value() throws when the key exists with
+// another type, and GitHub does send null for some of these.
+std::string jsonString(const json& o, const char* key)
+{
+	const auto it = o.find(key);
+	return (it != o.end() && it->is_string()) ? it->get<std::string>() : std::string();
+}
+
 } // namespace
+
+// ─── The token owner's repositories ──────────────────────────────────────────
+
+bool GitHubApi::parseListReposResponse(int statusCode, const std::string& body,
+                                       std::vector<RepoListEntry>& out, std::string* err,
+                                       int* rawCount)
+{
+	out.clear();
+	if (rawCount) *rawCount = 0;
+	const json j = json::parse(body, nullptr, /*allow_exceptions=*/false);
+
+	if (statusCode == 200)
+	{
+		if (!j.is_array())
+		{
+			if (err) *err = "GitHub answered success but not with a repository list";
+			return false;
+		}
+		if (rawCount) *rawCount = static_cast<int>(j.size());
+		out.reserve(j.size());
+		for (const json& e : j)
+		{
+			if (!e.is_object()) continue;
+			RepoListEntry r;
+			r.name          = jsonString(e, "name");
+			r.fullName      = jsonString(e, "full_name");
+			r.cloneUrl      = jsonString(e, "clone_url");
+			r.defaultBranch = jsonString(e, "default_branch");
+			r.updatedAt     = jsonString(e, "updated_at");
+			const auto priv = e.find("private");
+			r.isPrivate     = priv != e.end() && priv->is_boolean() && priv->get<bool>();
+			// Nothing to show or nothing to clone — one odd entry must not cost
+			// the user the rest of their list.
+			if (r.name.empty() || r.cloneUrl.empty()) continue;
+			out.push_back(std::move(r));
+		}
+		return true;
+	}
+	mapCommonError(statusCode, j, "repo", err);
+	return false;
+}
+
+bool GitHubApi::listRepos(const std::string& token, std::vector<RepoListEntry>& out,
+                          std::string* err)
+{
+	out.clear();
+	if (token.empty())
+	{
+		if (err) *err = "a token is required";
+		return false;
+	}
+
+	std::vector<RepoListEntry>      all;
+	std::unordered_set<std::string> seen;
+	for (int page = 1; page <= kListReposMaxPages; ++page)
+	{
+		// Only fixed parameters and a counter go into the URL — the token stays
+		// in the Authorization header.
+		const std::string url =
+			"https://api.github.com/user/repos?sort=updated&per_page=" +
+			std::to_string(kListReposPerPage) + "&page=" + std::to_string(page);
+
+		const HE::Net::HttpsResponse resp =
+			HE::Net::httpsRequest(url, "GET", apiHeaders(token), {}, 30000);
+		if (!resp.ok)
+		{
+			if (err) *err = resp.error.empty()
+				? "could not reach api.github.com"
+				: "could not reach GitHub: " + resp.error;
+			return false;
+		}
+
+		std::vector<RepoListEntry> entries;
+		int rawCount = 0;
+		if (!parseListReposResponse(resp.statusCode, resp.body, entries, err, &rawCount))
+			return false;
+
+		// Sorted by last update, a push between two page fetches moves a
+		// repository up a page and it would come back twice.
+		for (RepoListEntry& r : entries)
+			if (seen.insert(r.fullName.empty() ? r.cloneUrl : r.fullName).second)
+				all.push_back(std::move(r));
+
+		if (rawCount < kListReposPerPage)
+		{
+			HE_SC_INFO("Listed %zu GitHub repositories", all.size());
+			out = std::move(all);
+			return true;
+		}
+	}
+
+	HE_SC_WARN("GitHub repository list stopped at %d pages (%zu repositories)",
+	           kListReposMaxPages, all.size());
+	out = std::move(all);
+	return true;
+}
 
 // ─── Who the token belongs to ────────────────────────────────────────────────
 

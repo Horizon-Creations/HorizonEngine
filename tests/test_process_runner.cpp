@@ -200,6 +200,31 @@ TEST_CASE("Killing a child takes its grandchildren with it")
 	he_test::removeQuiet(marker);
 }
 
+#ifndef _WIN32
+TEST_CASE("A background process the child leaves behind does not hold the result")
+{
+	// What `git credential approve` does with the cache helper: it starts
+	// git-credential-cache--daemon, which points its stdio at /dev/null and stays.
+	// The pipe ends must not reach it under their original descriptor numbers as
+	// well — the daemon then holds them open, EOF never comes, and the run ends
+	// in the timeout with the group kill taking the daemon along. The grandchild
+	// here redirects its stdio the same way, so only a leaked copy could hold it.
+	Proc::Options o;
+	o.exe       = "/bin/sh";
+	o.args      = { "-c", "sleep 8 </dev/null >/dev/null 2>&1 & echo started" };
+	o.timeoutMs = 6000;
+
+	const auto start = std::chrono::steady_clock::now();
+	const Proc::Result r = Proc::run(o);
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+
+	CHECK_FALSE(r.timedOut);
+	CHECK(r.ok());
+	CHECK(r.out == "started\n");
+	CHECK(elapsed < std::chrono::seconds(4));
+}
+#endif
+
 TEST_CASE("Line callbacks deliver whole lines, including an unterminated last one")
 {
 	std::vector<std::string> outLines, errLines;

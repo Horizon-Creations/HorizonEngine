@@ -9,12 +9,15 @@
 #include <SourceControl/GitService.h>
 #include <SourceControl/RepoStatus.h>
 #include <Platform/Process.h>
+#include "ProjectManager.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 // ─── Against a real repository ───────────────────────────────────────────────
 // Everything except the remote server is testable with no network at all: a
@@ -487,6 +490,92 @@ TEST_CASE("GitHub create-repo responses map to actionable messages")
 
 	// Success status with a broken body must not report success.
 	CHECK_FALSE(GitHubApi::parseCreateRepoResponse(201, "not json", repo, &err));
+}
+
+TEST_CASE("GitHub repository-list pages parse into clone-picker entries")
+{
+	// Same discipline: one page of GET /user/repos, no network. The pager in
+	// listRepos decides "was this the last page?" from rawCount, so that count
+	// has to include the entries the parser drops.
+	std::vector<RepoListEntry> repos;
+	std::string err;
+	int raw = -1;
+
+	SUBCASE("a page with public, private and odd entries")
+	{
+		CHECK(GitHubApi::parseListReposResponse(200, R"([
+			{"name":"proj","full_name":"anna/proj","private":false,
+			 "clone_url":"https://github.com/anna/proj.git",
+			 "default_branch":"main","updated_at":"2026-09-30T12:00:00Z"},
+			{"name":"secret","full_name":"anna/secret","private":true,
+			 "clone_url":"https://github.com/anna/secret.git",
+			 "default_branch":null,"updated_at":"2026-09-01T08:00:00Z",
+			 "description":null},
+			{"name":"no-url","full_name":"anna/no-url"},
+			"not an object"
+		])", repos, &err, &raw));
+		CHECK(raw == 4);
+		REQUIRE(repos.size() == 2);
+
+		CHECK(repos[0].name          == "proj");
+		CHECK(repos[0].fullName      == "anna/proj");
+		CHECK(repos[0].cloneUrl      == "https://github.com/anna/proj.git");
+		CHECK(repos[0].defaultBranch == "main");
+		CHECK(repos[0].updatedAt     == "2026-09-30T12:00:00Z");
+		CHECK_FALSE(repos[0].isPrivate);
+
+		// null where a string is expected must read as empty, not throw.
+		CHECK(repos[1].isPrivate);
+		CHECK(repos[1].defaultBranch.empty());
+	}
+
+	SUBCASE("an empty page is a valid, final answer")
+	{
+		CHECK(GitHubApi::parseListReposResponse(200, "[]", repos, &err, &raw));
+		CHECK(repos.empty());
+		CHECK(raw == 0);
+	}
+
+	SUBCASE("a page replaces, never appends")
+	{
+		repos.push_back({ "stale", "x/stale", "https://github.com/x/stale.git", "", "", false });
+		CHECK(GitHubApi::parseListReposResponse(200, "[]", repos, &err));
+		CHECK(repos.empty());
+	}
+
+	SUBCASE("a success status without a list is not a success")
+	{
+		CHECK_FALSE(GitHubApi::parseListReposResponse(200, "not json", repos, &err, &raw));
+		CHECK(raw == 0);
+		CHECK_FALSE(GitHubApi::parseListReposResponse(200, R"({"name":"proj"})", repos, &err));
+		CHECK(err.find("repository list") != std::string::npos);
+	}
+
+	SUBCASE("failures map to messages a user can act on")
+	{
+		CHECK_FALSE(GitHubApi::parseListReposResponse(401,
+			R"({"message":"Bad credentials"})", repos, &err));
+		CHECK(err.find("token") != std::string::npos);
+		CHECK(repos.empty());
+
+		CHECK_FALSE(GitHubApi::parseListReposResponse(404, "{}", repos, &err));
+		CHECK(err.find("repo") != std::string::npos);
+
+		// Rate limiting arrives as 403 with GitHub's own explanation — quote it.
+		CHECK_FALSE(GitHubApi::parseListReposResponse(403,
+			R"({"message":"API rate limit exceeded"})", repos, &err));
+		CHECK(err.find("rate limit") != std::string::npos);
+	}
+}
+
+TEST_CASE("listRepos refuses to run without a token")
+{
+	// No network is reached: the check runs first.
+	std::vector<RepoListEntry> repos;
+	std::string err;
+	CHECK_FALSE(GitHubApi::listRepos("", repos, &err));
+	CHECK(repos.empty());
+	CHECK(err.find("token") != std::string::npos);
 }
 
 TEST_CASE("A credential reaches git's helper via stdin, never argv")
@@ -1040,4 +1129,540 @@ TEST_CASE("Opening a directory that is not a repository is an answer, not an err
 
 	svc.close();
 	he_test::removeAllQuiet(plain);
+}
+
+// ─── Cloning an existing repository ─────────────────────────────────────────
+// Against a local bare repository through a file:// URL: the same clone, LFS
+// install and LFS download the editor runs against GitHub, minus the network.
+
+namespace {
+
+std::string fileUrl(const fs::path& p)
+{
+	const std::string g = p.generic_string();
+	// POSIX paths already start with '/'; a Windows "C:/..." needs the third one.
+	return "file://" + std::string(g.rfind('/', 0) == 0 ? "" : "/") + g;
+}
+
+bool lfsInstalled()
+{
+	const fs::path probe = uniqueDir("lfsprobe_clone");
+	const bool lfs = GitCli::lfsAvailable(probe);
+	he_test::removeQuiet(probe);
+	return lfs;
+}
+
+bool dirIsEmpty(const fs::path& p)
+{
+	std::error_code ec;
+	return fs::is_directory(p, ec) && fs::directory_iterator(p, ec) == fs::directory_iterator();
+}
+
+// Drive a service until its queue is drained, like waitIdle in the LFS test.
+void pumpUntilIdle(GitService& svc, int seconds = 60)
+{
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+	while (svc.busy() && std::chrono::steady_clock::now() < deadline)
+	{
+		svc.pump();
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	svc.pump();
+}
+
+// A bare remote holding one commit with one LFS-tracked binary and one plain
+// text file. `outBinary` receives the binary's exact bytes.
+fs::path makeLfsRemote(const char* stem, std::string& outBinary)
+{
+	const fs::path bare = uniqueDir((std::string(stem) + "_bare").c_str());
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+
+	const fs::path src = makeRepo((std::string(stem) + "_src").c_str());
+	REQUIRE(GitCli::run(src, { "lfs", "install", "--local" }).ok);
+	REQUIRE(GitCli::run(src, { "lfs", "track", "*.bin" }).ok);
+	outBinary.clear();
+	for (int i = 0; i < 4096; ++i) outBinary.push_back(static_cast<char>((i * 131 + 7) & 0xff));
+	writeFile(src / "Content" / "asset.bin", outBinary);
+	writeFile(src / "readme.txt", "plain");
+	commitAll(src, "assets");
+	REQUIRE(GitCli::run(src, { "remote", "add", "origin", fileUrl(bare) }).ok);
+	REQUIRE(GitCli::run(src, { "push", "-u", "origin", "main" }).ok);
+	he_test::removeAllQuiet(src);
+	return bare;
+}
+
+} // namespace
+
+TEST_CASE("Clone URLs with credentials in them or without a helper path are refused")
+{
+	std::string why;
+	CHECK(GitCli::isSafeCloneUrl("https://github.com/owner/repo.git"));
+	CHECK(GitCli::isSafeCloneUrl("https://github.example.com:8443/owner/repo.git"));
+	CHECK(GitCli::isSafeCloneUrl("file:///tmp/some bare.git"));   // local, spaces fine
+
+	// The rule of the whole module: never a token in the URL.
+	CHECK_FALSE(GitCli::isSafeCloneUrl("https://ghp_SECRET@github.com/owner/repo.git", &why));
+	CHECK(why.find("credential helper") != std::string::npos);
+	CHECK_FALSE(GitCli::isSafeCloneUrl("https://x-access-token:ghp_SECRET@github.com/o/r.git"));
+
+	CHECK_FALSE(GitCli::isSafeCloneUrl("http://github.com/owner/repo.git"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("git@github.com:owner/repo.git"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("ssh://git@github.com/owner/repo.git"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("--upload-pack=touch /tmp/pwned"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("https://github.com/o/r.git\n"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("https:///owner/repo.git"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl(""));
+
+	CHECK(GitCli::urlHost("https://github.com/owner/repo.git") == "github.com");
+	CHECK(GitCli::urlHost("https://tok@github.com/owner/repo.git").empty());
+	CHECK(GitCli::urlHost("file:///tmp/x.git").empty());
+}
+
+TEST_CASE("A clone refuses a folder that already holds files and leaves them alone")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path bare = uniqueDir("clone_refuse_bare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+
+	const fs::path target = uniqueDir("clone_refuse_target");
+	writeFile(target / "keep.txt", "mine");
+
+	std::string err;
+	CHECK_FALSE(GitCli::clone(fileUrl(bare), target, {}, &err));
+	CHECK(err.find("not empty") != std::string::npos);
+	CHECK(readFile(target / "keep.txt") == "mine");
+	CHECK_FALSE(fs::exists(target / ".git"));
+
+	he_test::removeAllQuiet(target);
+	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("A failed clone leaves the target exactly as empty as it was")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path missing = uniqueDir("clone_missing_remote") / "does-not-exist.git";
+
+	// A folder that existed (empty) stays, empty; one the clone created goes.
+	const fs::path existing = uniqueDir("clone_fail_existing");
+	std::string err;
+	CHECK_FALSE(GitCli::clone(fileUrl(missing), existing, {}, &err));
+	CHECK_FALSE(err.empty());
+	CHECK(dirIsEmpty(existing));
+
+	const fs::path fresh = uniqueDir("clone_fail_parent") / "NewProject";
+	CHECK_FALSE(GitCli::clone(fileUrl(missing), fresh, {}, &err));
+	CHECK_FALSE(fs::exists(fresh));
+
+	he_test::removeAllQuiet(existing);
+	he_test::removeAllQuiet(fresh.parent_path());
+	he_test::removeAllQuiet(missing.parent_path());
+}
+
+TEST_CASE("A freshly created, empty remote clones into a repository with no commits")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// What a brand-new GitHub repository looks like: no commits at all.
+	const fs::path bare = uniqueDir("clone_empty_bare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+	const fs::path target = uniqueDir("clone_empty_parent") / "Empty";
+
+	std::string err;
+	REQUIRE(GitCli::clone(fileUrl(bare), target, {}, &err));
+	RepoStatus st;
+	REQUIRE(GitCli::status(target, st, &err));
+	CHECK(st.isRepo);
+	std::vector<GitCli::CommitInfo> commits;
+	CHECK(GitCli::log(target, 5, commits, &err));
+	CHECK(commits.empty());
+	CHECK_FALSE(GitCli::usesLfs(target));
+	CHECK(GitCli::remoteUrl(target) == fileUrl(bare));
+
+	he_test::removeAllQuiet(target.parent_path());
+	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("A credential override replaces the configured helpers for one command")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// Before a clone there is no repository to hold a --local helper, so the
+	// helper is passed per command. Outside any repository here, on purpose.
+	// The host is unroutable and the override REPLACES every configured helper,
+	// so a developer's real keychain never receives this test value.
+	const fs::path dir  = uniqueDir("cred_override");
+	const fs::path sink = dir / "sink.txt";
+	const std::string helper =
+		"!f() { test \"$1\" = store && cat >> '" + sink.generic_string() + "'; }; f";
+
+	std::string err;
+	REQUIRE(GitCli::approveCredential(dir, "horizon-test.invalid", "x-access-token",
+	                                  "tok_CLONE_123", &err, helper));
+	const std::string all = readFile(sink);
+	CHECK(all.find("host=horizon-test.invalid") != std::string::npos);
+	CHECK(all.find("password=tok_CLONE_123") != std::string::npos);
+
+	CHECK_FALSE(GitCli::defaultCredentialHelper().empty());
+
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("The service refuses a clone URL with a token in it before storing anything")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path target = uniqueDir("clone_tokenurl_parent") / "Project";
+
+	// No open() first: a clone is what happens before any project is open.
+	GitService svc;
+	svc.requestClone("https://ghp_SECRET@github.com/owner/repo.git", target, "tok_UNUSED");
+	pumpUntilIdle(svc);
+
+	CHECK(svc.lastError().find("credential helper") != std::string::npos);
+	CHECK(svc.lastClonedRoot().empty());
+	CHECK_FALSE(fs::exists(target));
+
+	svc.close();
+	he_test::removeAllQuiet(target.parent_path());
+}
+
+TEST_CASE("Cloning through the service brings the working tree and its LFS assets")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+	if (!lfsInstalled()) { MESSAGE("git-lfs not installed — skipped"); return; }
+
+	std::string binary;
+	const fs::path bare   = makeLfsRemote("clone_lfs", binary);
+	const fs::path target = uniqueDir("clone_lfs_parent") / "Project";
+	const std::string url = fileUrl(bare);
+
+	GitService svc;
+	svc.requestClone(url, target);
+	pumpUntilIdle(svc);
+
+	CHECK(svc.lastError().empty());
+	CHECK(svc.lastInfo().find("Cloned") != std::string::npos);
+	CHECK(svc.lastClonedRoot() == target);
+	CHECK(svc.isRepo());
+	CHECK(svc.remoteUrl() == url);
+
+	// Real bytes, not the LFS pointer text the skip-smudge clone left behind.
+	const std::string got = readFile(target / "Content" / "asset.bin");
+	CHECK(got.size() == binary.size());
+	CHECK(got == binary);
+	CHECK(got.find("git-lfs.github.com/spec") == std::string::npos);
+	CHECK(readFile(target / "readme.txt") == "plain");
+	CHECK(GitCli::usesLfs(target));
+
+	// The filter lives in the repository itself, so later pulls smudge too.
+	CHECK(GitCli::run(target, { "config", "--local", "--get", "filter.lfs.process" }).ok);
+	// And a helper is reachable for push/pull (system, global or repo-local).
+	CHECK_FALSE(GitCli::credentialHelper(target).empty());
+	// Clean: the download did not leave the tree looking modified.
+	CHECK(svc.status().dirtyCount() == 0);
+
+	svc.close();
+	he_test::removeAllQuiet(target.parent_path());
+	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("A clone whose LFS download fails still reports the repository it made")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+	if (!lfsInstalled()) { MESSAGE("git-lfs not installed — skipped"); return; }
+
+	std::string binary;
+	const fs::path bare = makeLfsRemote("clone_lfsfail", binary);
+	// The objects vanish from the remote: git history is intact, LFS is not.
+	he_test::removeAllQuiet(bare / "lfs" / "objects");
+	REQUIRE_FALSE(fs::exists(bare / "lfs" / "objects"));
+
+	const fs::path target = uniqueDir("clone_lfsfail_parent") / "Project";
+	GitService svc;
+	svc.requestClone(fileUrl(bare), target);
+	pumpUntilIdle(svc);
+
+	// Partial success, said as such: the error names LFS, and the working tree
+	// is handed over anyway so the UI can open it and retry the download.
+	CHECK(svc.lastError().find("LFS") != std::string::npos);
+	CHECK(svc.lastClonedRoot() == target);
+	CHECK(svc.isRepo());
+	CHECK(readFile(target / "readme.txt") == "plain");
+
+	// The retry reports the same missing objects instead of pretending.
+	svc.requestLfsPull();
+	pumpUntilIdle(svc);
+	CHECK_FALSE(svc.lastError().empty());
+
+	svc.close();
+	he_test::removeAllQuiet(target.parent_path());
+	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("The controller clones beside the open project without re-targeting it")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// What the clone dialog drives: a project is open (no remote), and a
+	// repository from elsewhere is cloned as a NEW project. GitService's clone
+	// re-targets the service it runs on, so the controller must run it on one
+	// of its own — the open project keeps its status and its (absent) remote.
+	const fs::path open = makeRepo("clonectl_open");
+	writeFile(open / "Open.heproj", "{}");
+	commitAll(open, "open project");
+
+	const fs::path bare = uniqueDir("clonectl_bare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+	const fs::path src = makeRepo("clonectl_src");
+	writeFile(src / "Cloned.heproj", "{}");
+	writeFile(src / "Content" / "readme.txt", "cloned");
+	commitAll(src, "cloned project");
+	REQUIRE(GitCli::run(src, { "remote", "add", "origin", fileUrl(bare) }).ok);
+	REQUIRE(GitCli::run(src, { "push", "-u", "origin", "main" }).ok);
+	he_test::removeAllQuiet(src);
+
+	GitController git;
+	git.openProject(open);
+	std::uint64_t now = 1;
+	const auto frames = [&](auto until, int seconds) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+		while (!until() && std::chrono::steady_clock::now() < deadline)
+		{
+			git.update(now);
+			now += 100;
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+	};
+	frames([&] { return git.status().generation != 0; }, 10);
+	REQUIRE(git.isRepo());
+	const std::string openRoot = git.status().root;
+
+	const fs::path parent = uniqueDir("clonectl_parent");
+	const fs::path target = parent / "Cloned";
+	git.requestClone(fileUrl(bare), target, {});
+	// Busy from the call itself, not from the first frame after it.
+	CHECK(git.cloneBusy());
+	frames([&] { return !git.cloneBusy(); }, 60);
+	REQUIRE_FALSE(git.cloneBusy());
+
+	// The first frame that says "done" already carries the result — the worker
+	// reports idle only after queuing it, and the controller reads idle before
+	// it pumps. A dialog reading this state never sees "finished, no root".
+	CHECK(git.cloneError().empty());
+	CHECK(git.clonedRoot() == target);
+	CHECK(fs::exists(target / "Cloned.heproj"));
+	CHECK(readFile(target / "Content" / "readme.txt") == "cloned");
+
+	// The open project is untouched: same repository, still no remote.
+	frames([&] { return false; }, 1);   // let a status poll land, if one would
+	CHECK(git.projectRoot() == open);
+	CHECK(git.status().root == openRoot);
+	CHECK(git.remoteUrl().empty());
+
+	// A second clone starts with a clean slate — no "Cloned … into …" from the
+	// first standing in as its progress.
+	const fs::path target2 = parent / "Again";
+	git.requestClone(fileUrl(bare), target2, {});
+	CHECK(git.cloneInfo().empty());
+	CHECK(git.cloneError().empty());
+	CHECK(git.clonedRoot().empty());
+	frames([&] { return !git.cloneBusy(); }, 60);
+	CHECK(git.clonedRoot() == target2);
+
+	git.finishClone();
+	CHECK_FALSE(git.cloneBusy());
+	git.closeProject();
+	he_test::removeAllQuiet(parent);
+	he_test::removeAllQuiet(bare);
+	he_test::removeQuiet(open);
+}
+
+// ─── Live: a real repository on the own GitHub account ──────────────────────
+// Skipped unless asked for. What the clone dialog does, call for call, against
+// github.com: list the account's repositories with a token, pick one, clone it
+// with that token into an empty folder (LFS assets included), open the .heproj
+// the way the Project Hub does. The dialog itself cannot be drawn here —
+// AppContext hangs on HE_IMGUI_ENABLED — so this drives the controller under it.
+//
+//   HE_GITHUB_LIVE_TOKEN_FILE  a file holding a token with 'repo' scope
+//   HE_GITHUB_LIVE_REPO        owner/name of a PRIVATE repository made from the seed
+//
+// Run it with a git config that holds NO github.com credential of its own:
+//   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=<file: [credential] helper = cache --timeout=900>
+// A machine-wide helper (gh auth git-credential, the keychain) would otherwise
+// answer for the token, and the test would prove nothing about the path the
+// token takes. It refuses to run in that case, and its first clone, the one
+// without a token, must fail.
+//
+// Seed, once: HE_GITHUB_LIVE_SEED_DIR=<new folder> writes a fresh project plus
+// the LFS probe file; commit it with the probe tracked by LFS, push it to a
+// private repository.
+
+namespace {
+
+// Deterministic bytes, so the seed and the check agree without sharing a file.
+// Binary on purpose (NULs, high bytes): neither a pointer file nor a text
+// conversion survives the comparison.
+std::string lfsProbeBytes()
+{
+	std::string out(192 * 1024, '\0');
+	std::uint32_t x = 0x48454C46u;
+	for (char& c : out)
+	{
+		x = x * 1664525u + 1013904223u;
+		c = static_cast<char>(x >> 24);
+	}
+	return out;
+}
+
+constexpr const char* kLfsProbePath = "Content/Textures/lfs_probe.bin";
+
+std::string envOr(const char* name)
+{
+	const char* v = std::getenv(name);
+	return v ? std::string(v) : std::string{};
+}
+
+} // namespace
+
+TEST_CASE("Live seed: a fresh project with an LFS probe file for the clone check")
+{
+	const std::string dir = envOr("HE_GITHUB_LIVE_SEED_DIR");
+	if (dir.empty()) { MESSAGE("HE_GITHUB_LIVE_SEED_DIR not set — skipped"); return; }
+
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir, "CloneVerify"));
+	writeFile(fs::path(dir) / kLfsProbePath, lfsProbeBytes());
+	MESSAGE("seeded " << pm.currentProject().path);
+}
+
+TEST_CASE("Live: a repository from the own GitHub account clones and opens as a project")
+{
+	const std::string tokenFile = envOr("HE_GITHUB_LIVE_TOKEN_FILE");
+	const std::string repoName  = envOr("HE_GITHUB_LIVE_REPO");
+	if (tokenFile.empty() || repoName.empty())
+	{
+		MESSAGE("HE_GITHUB_LIVE_TOKEN_FILE / HE_GITHUB_LIVE_REPO not set — skipped");
+		return;
+	}
+	REQUIRE(gitAvailable());
+	REQUIRE(lfsInstalled());
+
+	std::string token = trimmed(readFile(tokenFile));
+	REQUIRE_MESSAGE(!token.empty(), "the token file is empty");
+
+	const fs::path parent = uniqueDir("live_clone");
+
+	// No credential for github.com anywhere in the helper chain, or everything
+	// below would pass on someone else's.
+	{
+		HE::Proc::Options o;
+		o.exe       = "git";
+		o.args      = { "credential", "fill" };
+		o.cwd       = parent;
+		o.timeoutMs = 15000;
+		o.env.emplace_back("GIT_TERMINAL_PROMPT", "0");
+		o.stdinData = "protocol=https\nhost=github.com\n\n";
+		const HE::Proc::Result r = HE::Proc::run(o);
+		REQUIRE_MESSAGE(!r.ok(), "the git config already answers for github.com — run with "
+		                         "GIT_CONFIG_NOSYSTEM=1 and a GIT_CONFIG_GLOBAL holding only "
+		                         "a cache helper");
+	}
+
+	GitController git;
+	std::uint64_t now = 1;
+	const auto frames = [&](auto until, int seconds) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+		while (!until() && std::chrono::steady_clock::now() < deadline)
+		{
+			git.update(now);
+			now += 100;
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+	};
+
+	// ── 1. "Load my repositories" ───────────────────────────────────────────
+	git.requestListRepos(token);
+	frames([&] { return git.repoListLoaded() && !git.listingRepos(); }, 60);
+	REQUIRE(git.repoListLoaded());
+	REQUIRE_MESSAGE(git.repoListError().empty(), git.repoListError());
+	MESSAGE("repositories listed: " << git.repoList().size());
+
+	// ── 2. Pick one ─────────────────────────────────────────────────────────
+	const RepoListEntry* chosen = nullptr;
+	for (const auto& r : git.repoList())
+		if (r.fullName == repoName) { chosen = &r; break; }
+	REQUIRE_MESSAGE(chosen != nullptr, repoName << " is not in the account's list");
+	const RepoListEntry entry = *chosen;
+	CHECK(entry.isPrivate);             // so it is the token that gets the clone in
+	CHECK_FALSE(entry.defaultBranch.empty());
+	CHECK(entry.cloneUrl.rfind("https://github.com/", 0) == 0);
+	CHECK(entry.cloneUrl.find('@') == std::string::npos);
+	MESSAGE("picked " << entry.fullName << " (" << entry.cloneUrl << ", default branch "
+	                  << entry.defaultBranch << ")");
+
+	// ── Negative control: the same clone without a token does not get in ────
+	const fs::path refused = parent / "NoToken";
+	git.requestClone(entry.cloneUrl, refused, {});
+	frames([&] { return !git.cloneBusy(); }, 120);
+	REQUIRE_FALSE(git.cloneBusy());
+	CHECK_FALSE(git.cloneError().empty());
+	CHECK(git.clonedRoot().empty());
+	{
+		std::error_code ec;
+		CHECK((!fs::exists(refused, ec) || fs::is_empty(refused, ec)));
+	}
+	MESSAGE("without a token: " << git.cloneError());
+	git.finishClone();
+
+	// ── 3. Clone into an empty folder, with the token ───────────────────────
+	const fs::path target = parent / entry.name;
+	git.requestClone(entry.cloneUrl, target, token);
+	std::string lastPhase;
+	frames([&] {
+		if (git.cloneInfo() != lastPhase)
+		{
+			lastPhase = git.cloneInfo();
+			if (!lastPhase.empty()) MESSAGE("phase: " << lastPhase);
+		}
+		return !git.cloneBusy();
+	}, 600);
+	REQUIRE_FALSE(git.cloneBusy());
+	REQUIRE_MESSAGE(git.cloneError().empty(), git.cloneError());
+	REQUIRE(git.clonedRoot() == target);
+	MESSAGE("result: " << git.cloneInfo());
+
+	// The LFS asset is the real file, not its pointer.
+	const std::string probe = readFile(target / kLfsProbePath);
+	CHECK(probe.rfind("version https://git-lfs", 0) != 0);
+	CHECK(probe.size() == lfsProbeBytes().size());
+	CHECK(probe == lfsProbeBytes());
+	const GitResult lfsFiles = GitCli::run(target, { "lfs", "ls-files" });
+	REQUIRE(lfsFiles.ok);
+	MESSAGE("git lfs ls-files: " << trimmed(lfsFiles.out));
+	CHECK(lfsFiles.out.find(std::string("* ") + kLfsProbePath) != std::string::npos);
+
+	// The token went to the helper, not into the repository.
+	const GitResult remote = GitCli::run(target, { "remote", "get-url", "origin" });
+	REQUIRE(remote.ok);
+	CHECK(trimmed(remote.out) == entry.cloneUrl);
+	CHECK(readFile(target / ".git" / "config").find(token) == std::string::npos);
+
+	// ── 4. Open it: the .heproj at the top, loaded the way the Hub does ─────
+	fs::path heproj;
+	for (const auto& e : fs::directory_iterator(target))
+		if (e.is_regular_file() && e.path().extension() == ".heproj") { heproj = e.path(); break; }
+	REQUIRE_MESSAGE(!heproj.empty(), "no .heproj at the top of the clone");
+	ProjectManager pm;
+	REQUIRE(pm.loadProject(heproj.string()));
+	CHECK(fs::equivalent(fs::path(pm.projectRoot()), target));
+	MESSAGE("opened " << heproj.filename().string() << " as \"" << pm.currentProject().name
+	                  << "\" from " << pm.projectRoot());
+
+	std::fill(token.begin(), token.end(), '\0');
+	pm.closeProject();
+	git.finishClone();
+	he_test::removeAllQuiet(parent);
 }

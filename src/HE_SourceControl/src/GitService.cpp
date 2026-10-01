@@ -24,16 +24,51 @@ void GitService::push(Command c)
 	m_inCv.notify_one();
 }
 
-void GitService::open(const std::filesystem::path& anyPathInside)
+void GitService::post(Event ev)
 {
-	close();
+	std::lock_guard<std::mutex> lock(m_outMutex);
+	m_out.push_back(std::move(ev));
+}
 
+void GitService::startWorker()
+{
 	m_quit.store(false, std::memory_order_release);
 	m_status    = RepoStatus{};
 	m_lastError.clear();
 
 	m_worker = std::thread([this] { workerMain(); });
+}
+
+void GitService::open(const std::filesystem::path& anyPathInside)
+{
+	close();
+	startWorker();
 	push(Command{ Kind::Open, anyPathInside });
+}
+
+void GitService::requestClone(const std::string& cloneUrl,
+                              const std::filesystem::path& targetDir, std::string token)
+{
+	// No early return without a worker, unlike every other request: nothing is
+	// open yet when a project is about to be cloned.
+	if (!m_worker.joinable()) startWorker();
+	m_lastClonedRoot.clear();
+	// Main-thread state, so cleared here: the previous clone's "Cloned … into …"
+	// would otherwise stand as this clone's progress until its first phase lands,
+	// which comes only after the credential helper has answered.
+	m_lastInfo.clear();
+	m_lastError.clear();
+
+	Command c{ Kind::Clone, targetDir };
+	c.text   = cloneUrl;
+	c.secret = std::move(token);
+	push(std::move(c));
+}
+
+void GitService::requestLfsPull()
+{
+	if (!m_worker.joinable()) return;
+	push(Command{ Kind::LfsPull, {} });
 }
 
 void GitService::close()
@@ -476,6 +511,129 @@ void GitService::workerMain()
 			wantStatus = true;
 			break;
 		}
+		case Kind::Clone:
+		{
+			namespace fs = std::filesystem;
+			std::string err;
+			const std::string&    url    = cmd.text;
+			const fs::path&       target = cmd.path;
+			const auto wipeToken = [&cmd] {
+				std::fill(cmd.secret.begin(), cmd.secret.end(), '\0');
+				cmd.secret.clear();
+			};
+
+			// Before anything is stored: a token must not reach the helper for a
+			// URL that is about to be refused.
+			if (!GitCli::isSafeCloneUrl(url, &err)) { wipeToken(); ev.error = err; break; }
+
+			// Which helper holds the credential. Asked from the nearest folder
+			// that exists (the target usually does not yet), which is outside
+			// any repository — so the answer is system + global config. When
+			// that is empty, the platform default rides along on each command
+			// as `-c`, because there is no repository for a --local setting.
+			fs::path probeDir = target;
+			std::error_code ec;
+			while (!probeDir.empty() && !fs::exists(probeDir, ec))
+			{
+				const fs::path parent = probeDir.parent_path();
+				if (parent == probeDir) break;
+				probeDir = parent;
+			}
+			const std::string helperOverride = GitCli::credentialHelper(probeDir).empty()
+			                                 ? GitCli::defaultCredentialHelper()
+			                                 : std::string{};
+
+			// x-access-token is the username GitHub expects when the password
+			// field carries a PAT. No host (a file:// URL) means nothing to store.
+			bool ok = true;
+			const std::string host = GitCli::urlHost(url);
+			if (!cmd.secret.empty() && !host.empty())
+			{
+				ok = GitCli::approveCredential(probeDir, host, "x-access-token", cmd.secret,
+				                               &err, helperOverride);
+			}
+			wipeToken();
+			if (!ok) { ev.error = "The access token could not be stored: " + err; break; }
+
+			{
+				Event phase;
+				phase.info = "Cloning " + url + " ...";
+				post(std::move(phase));
+			}
+			if (!GitCli::clone(url, target, helperOverride, &err)) { ev.error = err; break; }
+
+			// From here on the repository exists, and every outcome says so:
+			// clonedRoot travels with errors too, and status is refreshed.
+			m_root        = target;
+			ev.clonedRoot = target;
+			wantStatus    = true;
+
+			// Pin the helper the credential went into, so push/pull from this
+			// repository find it without the per-command override.
+			std::string helperChosen;
+			if (!GitCli::ensureCredentialHelper(m_root, &helperChosen, &err))
+			{
+				ev.error = "Cloned, but no credential helper could be configured for the "
+				           "repository, so pushing may ask for a token again: " + err;
+				break;
+			}
+
+			if (GitCli::usesLfs(m_root))
+			{
+				if (!GitCli::lfsAvailable(m_root))
+				{
+					ev.error = "Cloned, but this repository stores assets in Git LFS and "
+					           "git-lfs is not installed — those files are placeholders "
+					           "until it is. Install git-lfs, then download the LFS assets.";
+					break;
+				}
+				{
+					Event phase;
+					phase.info = "Cloned. Downloading LFS assets ...";
+					post(std::move(phase));
+				}
+				// --local like requestInit: the filter config lives in this
+				// repository, so later pulls check out real files even where
+				// LFS was never installed globally.
+				const GitResult install = GitCli::run(m_root, { "lfs", "install", "--local" },
+				                                      30000);
+				if (!install.ok)
+				{
+					ev.error = "Cloned, but git lfs install failed, so the LFS assets were "
+					           "not downloaded: " + install.err;
+					break;
+				}
+				if (!GitCli::lfsPull(m_root, &err))
+				{
+					ev.error = "Cloned, but downloading the LFS assets failed — download "
+					           "them again to finish: " + err;
+					break;
+				}
+			}
+
+			ev.info = "Cloned " + url + " into " + target.string() + ".";
+			if (!helperChosen.empty())
+				ev.info += " (Credential helper \"" + helperChosen + "\" was configured "
+				           "for this repository.)";
+			break;
+		}
+		case Kind::LfsPull:
+		{
+			std::string err;
+			if (m_root.empty()) { ev.error = "No repository is open."; break; }
+			if (!GitCli::lfsAvailable(m_root))
+			{
+				ev.error = "git-lfs is not installed — install it, then download the "
+				           "LFS assets again.";
+				break;
+			}
+			// Idempotent; repairs a clone whose install step failed earlier.
+			GitCli::run(m_root, { "lfs", "install", "--local" }, 30000);
+			if (!GitCli::lfsPull(m_root, &err)) { ev.error = err; wantStatus = true; break; }
+			ev.info    = "LFS assets downloaded.";
+			wantStatus = true;
+			break;
+		}
 		case Kind::Quit:
 			return;
 		}
@@ -536,16 +694,23 @@ void GitService::pump(std::size_t maxEvents)
 			m_out.pop_front();
 		}
 
+		if (!ev.clonedRoot.empty()) m_lastClonedRoot = ev.clonedRoot;
+
 		if (!ev.error.empty())
 		{
 			m_lastError = ev.error;
 			m_lastInfo.clear();
 			HE_SC_WARN("Operation failed: %s", ev.error.c_str());
-			continue;
+			// A clone that failed AFTER the repository came into existence (LFS,
+			// helper) still delivers its status: the working tree is real, and
+			// the panel should show it rather than "no repository".
+			if (ev.clonedRoot.empty()) continue;
 		}
-
-		m_lastError.clear();
-		if (!ev.info.empty())      m_lastInfo  = ev.info;
+		else
+		{
+			m_lastError.clear();
+			if (!ev.info.empty()) m_lastInfo = ev.info;
+		}
 		if (ev.remoteUrlValid)
 		{
 			m_remoteUrl = ev.remoteUrl;
