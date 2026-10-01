@@ -149,6 +149,16 @@ Der Aufruf (Z. 5572) übergibt `p.cirrus.w` als Seed, `p.nebulaColor2.w` als Qua
 
 ## Verbleibende Lücken = Vorschlag für die nächsten Schritte
 
+> **Nachtrag Schritt 2 (01.10.2026):** Punkt 1 und 4 sind erledigt. `tests/test_sky_shader.cpp` hat zwei
+> neue Fälle: „D3D11: … draws the nebula at quality 0/1/2 and colour 1 tints it" (32×32, Blick ins
+> galaktische Band, `timeOfDay` 0, Sonne y ≈ −0.81, Coverage 0.8) und „D3D12: … draws the nebula like D3D11
+> does". Die Prüfungen sind differentiell, also ohne GL-Referenzwerte: die Nebula addiert Licht auf über 5 % der
+> Pixel, die Qualitätsstufen 0/1/2 ergeben verschiedene Bilder, Farbe 1 blau ↔ rot verschiebt den
+> Blau- bzw. Rotanteil der Nebula, mit Farbe 1 blau (2/3 fast schwarz) überwiegt Blau, und das D3D12-Bild
+> ist gleich dem D3D11-Bild (mittlere Abweichung < 1e-3). Windows-CI-Lauf 36835142115 grün
+> (`test_sky_shader` 16,6 s statt 14,1 s). Die gemessenen Werte stehen als MESSAGE im Test und sind nur bei
+> `ctest -V` oder einem roten Lauf sichtbar. CopilotDocs-Checkliste A5 ist korrigiert.
+
 1. **D3D11-WARP-Bildtest mit Nebula an** (wichtigster Schritt). `skyLookingUp()` in
    `tests/test_sky_shader.cpp` setzt `nebulaIntensity = 0` und prüft nur das Zenit.
    Neuer Fall: tiefe Nacht (Sonne y ≈ −0.5), Sterne/Milchstraße/Aurora aus, Nebula
