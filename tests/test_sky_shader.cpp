@@ -186,9 +186,11 @@ TEST_CASE("The GL sky cross-compiles to SPIR-V (Vulkan) and pinned HLSL SM 5.0 (
 #include <wrl/client.h>
 #include <HorizonRendering/SkyNoise3D.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 
 namespace
@@ -257,15 +259,131 @@ HE::SkyFrameParams skyLookingUp(const glm::vec3& sunDir)
 	in.time        = 10.0f;
 	return HE::BuildSkyFrameParams(env, in);
 }
-} // namespace
 
-TEST_CASE("D3D11: the cross-compiled sky draws a blue zenith by day and a dark one by night (WARP)")
+// Deep night looking into the galactic band, every night layer off except the
+// nebula — so "image with nebula minus image without" is the nebula alone:
+// nothing after nebula() in kSkyFS reshapes it (cirrus, contrails, rain and
+// clouds are all at 0, the rest of main() adds terms that do not depend on it).
+//   * timeOfDay 0: celestialDir turns by 0, so cdir == dir and the band sits
+//     where the GL source puts it (galN), not rotated away.
+//   * look = the zenith projected onto the galactic plane (y ~0.85), far
+//     above nebula()'s 0.16 horizon fade; 60 degree FOV around it.
+//   * sun y ~-0.81: below the -0.22 the deep-night gate needs to be fully on.
+HE::SkyFrameParams skyNebulaNight(float intensity, int quality, const glm::vec3& colour1,
+                                  const glm::vec3& colour2 = IRenderer::EnvironmentSettings{}.nebulaColor2,
+                                  const glm::vec3& colour3 = IRenderer::EnvironmentSettings{}.nebulaColor3)
 {
-	const SkyBytecode& bc = skyBytecode();
+	IRenderer::EnvironmentSettings env;
+	env.timeOfDay         = 0.0f;
+	env.cloudCoverage     = 0.0f;
+	env.cirrusAmount      = 0.0f;
+	env.contrailAmount    = 0.0f;
+	env.starBrightness    = 0.0f;
+	env.milkyWayIntensity = 0.0f;
+	env.auroraIntensity   = 0.0f;
+	env.shootingStars     = 0.0f;
+	env.nebulaIntensity   = intensity;
+	env.nebulaCoverage    = 0.8f;
+	env.nebulaQuality     = quality;
+	env.nebulaColor       = colour1;
+	env.nebulaColor2      = colour2;
+	env.nebulaColor3      = colour3;
+	const glm::vec3 galN = glm::normalize(glm::vec3(0.46f, 0.52f, -0.72f)); // as in nebula()
+	const glm::vec3 up(0.0f, 1.0f, 0.0f);
+	const glm::vec3 look = glm::normalize(up - galN * glm::dot(up, galN));
+	const glm::vec3 eye(0.0f, 1.0f, 0.0f);
+	const glm::mat4 view = glm::lookAt(eye, eye + look, up);
+	const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 1000.0f);
+	HE::SkyFrameInputs in;
+	in.invViewProj = glm::inverse(proj * view);
+	in.sunDir      = glm::normalize(glm::vec3(0.3f, -0.5f, 0.2f));
+	in.cameraPos   = eye;
+	in.time        = 10.0f;
+	return HE::BuildSkyFrameParams(env, in);
+}
 
+// The renderers bake 256^3 in Release and 64^3 in Debug; the Debug size keeps
+// the bake and the upload small here (64 * 4 bytes is also D3D12's 256-byte
+// row pitch, so the D3D12 copy needs no padding).
+constexpr int kTestNoiseN = 64;
+
+using Image = std::vector<glm::vec4>;
+
+// The clear value is -1: a channel still below 0 was never shaded.
+std::string unshadedReason(const Image& img)
+{
+	for (size_t i = 0; i < img.size(); ++i)
+		for (int c = 0; c < 3; ++c)
+			if (!std::isfinite(img[i][c]) || img[i][c] < 0.0f)
+				return "pixel " + std::to_string(i) + " channel " + std::to_string(c) + " = " + std::to_string(img[i][c]);
+	return {};
+}
+
+struct ImageDelta
+{
+	glm::dvec3 sum{ 0.0 };  // per-channel sum of (a - b)
+	double meanAbs = 0.0;   // mean |a - b| over pixels and RGB
+	float  maxAbs  = 0.0f;
+	double changed = 0.0;   // fraction of pixels with an RGB delta above 1e-3
+};
+
+ImageDelta imageDelta(const Image& a, const Image& b)
+{
+	REQUIRE(a.size() == b.size());
+	REQUIRE_FALSE(a.empty());
+	ImageDelta d;
+	size_t changed = 0;
+	for (size_t i = 0; i < a.size(); ++i)
+	{
+		bool moved = false;
+		for (int c = 0; c < 3; ++c)
+		{
+			const float v = a[i][c] - b[i][c];
+			d.sum[c]  += v;
+			d.meanAbs += std::fabs(v);
+			d.maxAbs   = std::max(d.maxAbs, std::fabs(v));
+			moved      = moved || std::fabs(v) > 1e-3f;
+		}
+		changed += moved ? 1 : 0;
+	}
+	d.meanAbs /= 3.0 * static_cast<double>(a.size());
+	d.changed  = static_cast<double>(changed) / static_cast<double>(a.size());
+	return d;
+}
+
+std::string drainD3D11(ID3D11InfoQueue* iq)
+{
+	if (!iq) return "(no D3D11 debug layer)";
+	std::string out;
+	for (UINT64 i = 0, n = iq->GetNumStoredMessages(); i < n; ++i)
+	{
+		SIZE_T len = 0;
+		iq->GetMessage(i, nullptr, &len);
+		std::vector<char> buf(len);
+		auto* msg = reinterpret_cast<D3D11_MESSAGE*>(buf.data());
+		if (SUCCEEDED(iq->GetMessage(i, msg, &len)) && msg->pDescription)
+			out += std::string(msg->pDescription, msg->DescriptionByteLength) + "\n";
+	}
+	iq->ClearStoredMessages();
+	return out;
+}
+
+// D3D11Renderer's sky draw on WARP: the cross-compiled VS/PS, constants b0,
+// moon t0 (1x1 white) + clamp s0, noise volume t1 + wrap s1, one fullscreen
+// triangle into an RGBA32F target of n x n pixels, read back.
+struct D3D11SkyRig
+{
 	ComPtr<ID3D11Device> dev;
 	ComPtr<ID3D11DeviceContext> ctx;
 	ComPtr<ID3D11InfoQueue> iq;
+	ComPtr<ID3D11VertexShader> vs;
+	ComPtr<ID3D11PixelShader>  ps;
+	ComPtr<ID3D11ShaderResourceView> moonSrv, noiseSrv;
+	ComPtr<ID3D11SamplerState> clampS, wrapS;
+	ComPtr<ID3D11Buffer> cb;
+	ComPtr<ID3D11RasterizerState> rs;
+
+	void init(const SkyBytecode& bc)
 	{
 		const D3D_FEATURE_LEVEL want = D3D_FEATURE_LEVEL_11_0;
 		HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG,
@@ -275,94 +393,73 @@ TEST_CASE("D3D11: the cross-compiled sky draws a blue zenith by day and a dark o
 			                       &want, 1, D3D11_SDK_VERSION, &dev, nullptr, &ctx);
 		REQUIRE_MESSAGE(SUCCEEDED(hr), "D3D11CreateDevice(WARP) failed: ", hr);
 		dev.As(&iq); // null without the SDK layers
-	}
-	auto drain = [&]() -> std::string {
-		if (!iq) return "(no D3D11 debug layer)";
-		std::string out;
-		for (UINT64 i = 0, n = iq->GetNumStoredMessages(); i < n; ++i)
+
+		REQUIRE(SUCCEEDED(dev->CreateVertexShader(bc.vs->GetBufferPointer(), bc.vs->GetBufferSize(), nullptr, &vs)));
+		REQUIRE(SUCCEEDED(dev->CreatePixelShader(bc.ps->GetBufferPointer(), bc.ps->GetBufferSize(), nullptr, &ps)));
 		{
-			SIZE_T len = 0;
-			iq->GetMessage(i, nullptr, &len);
-			std::vector<char> buf(len);
-			auto* msg = reinterpret_cast<D3D11_MESSAGE*>(buf.data());
-			if (SUCCEEDED(iq->GetMessage(i, msg, &len)) && msg->pDescription)
-				out += std::string(msg->pDescription, msg->DescriptionByteLength) + "\n";
+			const uint32_t white = 0xFFFFFFFFu;
+			D3D11_TEXTURE2D_DESC td{};
+			td.Width = td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
+			td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+			td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			D3D11_SUBRESOURCE_DATA init{ &white, 4, 0 };
+			ComPtr<ID3D11Texture2D> tex;
+			REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, &init, &tex)));
+			REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), nullptr, &moonSrv)));
 		}
-		iq->ClearStoredMessages();
-		return out;
-	};
-
-	ComPtr<ID3D11VertexShader> vs;
-	ComPtr<ID3D11PixelShader>  ps;
-	REQUIRE(SUCCEEDED(dev->CreateVertexShader(bc.vs->GetBufferPointer(), bc.vs->GetBufferSize(), nullptr, &vs)));
-	REQUIRE(SUCCEEDED(dev->CreatePixelShader(bc.ps->GetBufferPointer(), bc.ps->GetBufferSize(), nullptr, &ps)));
-
-	// The renderer's resources: moon t0 (1x1 white) + clamp s0, noise volume t1 + wrap s1.
-	ComPtr<ID3D11ShaderResourceView> moonSrv, noiseSrv;
-	{
-		const uint32_t white = 0xFFFFFFFFu;
-		D3D11_TEXTURE2D_DESC td{};
-		td.Width = td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
-		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
-		td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		D3D11_SUBRESOURCE_DATA init{ &white, 4, 0 };
-		ComPtr<ID3D11Texture2D> tex;
-		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, &init, &tex)));
-		REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), nullptr, &moonSrv)));
-	}
-	{
-		constexpr int kN = 16;
-		const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kN);
-		D3D11_TEXTURE3D_DESC nd{};
-		nd.Width = nd.Height = nd.Depth = kN; nd.MipLevels = 1;
-		nd.Format = DXGI_FORMAT_R16G16_UNORM; nd.Usage = D3D11_USAGE_IMMUTABLE;
-		nd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		D3D11_SUBRESOURCE_DATA init{ noise.data(), kN * 4u, kN * kN * 4u };
-		ComPtr<ID3D11Texture3D> tex;
-		REQUIRE(SUCCEEDED(dev->CreateTexture3D(&nd, &init, &tex)));
-		REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), nullptr, &noiseSrv)));
-	}
-	auto sampler = [&](D3D11_TEXTURE_ADDRESS_MODE mode) {
-		D3D11_SAMPLER_DESC sd{};
-		sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-		sd.AddressU = sd.AddressV = sd.AddressW = mode;
-		sd.MaxLOD = D3D11_FLOAT32_MAX;
-		ComPtr<ID3D11SamplerState> s;
-		dev->CreateSamplerState(&sd, &s);
-		return s;
-	};
-	ComPtr<ID3D11SamplerState> clampS = sampler(D3D11_TEXTURE_ADDRESS_CLAMP);
-	ComPtr<ID3D11SamplerState> wrapS  = sampler(D3D11_TEXTURE_ADDRESS_WRAP);
-
-	ComPtr<ID3D11Buffer> cb;
-	{
-		D3D11_BUFFER_DESC bd{};
-		bd.ByteWidth = sizeof(HE::SkyFrameParams);
-		bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-		bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &cb)));
+		{
+			constexpr int kN = kTestNoiseN;
+			const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kN);
+			D3D11_TEXTURE3D_DESC nd{};
+			nd.Width = nd.Height = nd.Depth = kN; nd.MipLevels = 1;
+			nd.Format = DXGI_FORMAT_R16G16_UNORM; nd.Usage = D3D11_USAGE_IMMUTABLE;
+			nd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			D3D11_SUBRESOURCE_DATA init{ noise.data(), kN * 4u, kN * kN * 4u };
+			ComPtr<ID3D11Texture3D> tex;
+			REQUIRE(SUCCEEDED(dev->CreateTexture3D(&nd, &init, &tex)));
+			REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), nullptr, &noiseSrv)));
+		}
+		auto sampler = [&](D3D11_TEXTURE_ADDRESS_MODE mode) {
+			D3D11_SAMPLER_DESC sd{};
+			sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+			sd.AddressU = sd.AddressV = sd.AddressW = mode;
+			sd.MaxLOD = D3D11_FLOAT32_MAX;
+			ComPtr<ID3D11SamplerState> s;
+			dev->CreateSamplerState(&sd, &s);
+			return s;
+		};
+		clampS = sampler(D3D11_TEXTURE_ADDRESS_CLAMP);
+		wrapS  = sampler(D3D11_TEXTURE_ADDRESS_WRAP);
+		{
+			D3D11_BUFFER_DESC bd{};
+			bd.ByteWidth = sizeof(HE::SkyFrameParams);
+			bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+			bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+			REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &cb)));
+		}
+		{
+			D3D11_RASTERIZER_DESC rd{};
+			rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+			REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rs)));
+		}
 	}
 
-	ComPtr<ID3D11Texture2D> target, staging;
-	ComPtr<ID3D11RenderTargetView> rtv;
-	{
-		D3D11_TEXTURE2D_DESC td{};
-		td.Width = td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
-		td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; td.SampleDesc.Count = 1;
-		td.BindFlags = D3D11_BIND_RENDER_TARGET;
-		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
-		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
-		td.BindFlags = 0; td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
-	}
-	ComPtr<ID3D11RasterizerState> rs;
-	{
-		D3D11_RASTERIZER_DESC rd{};
-		rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
-		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rs)));
-	}
+	std::string drain() { return drainD3D11(iq.Get()); }
 
-	auto drawPixel = [&](const HE::SkyFrameParams& p) -> glm::vec4 {
+	Image draw(const HE::SkyFrameParams& p, UINT n)
+	{
+		ComPtr<ID3D11Texture2D> target, staging;
+		ComPtr<ID3D11RenderTargetView> rtv;
+		{
+			D3D11_TEXTURE2D_DESC td{};
+			td.Width = td.Height = n; td.MipLevels = 1; td.ArraySize = 1;
+			td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; td.SampleDesc.Count = 1;
+			td.BindFlags = D3D11_BIND_RENDER_TARGET;
+			REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
+			REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+			td.BindFlags = 0; td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+		}
 		D3D11_MAPPED_SUBRESOURCE m{};
 		REQUIRE(SUCCEEDED(ctx->Map(cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)));
 		std::memcpy(m.pData, &p, sizeof(p));
@@ -371,7 +468,7 @@ TEST_CASE("D3D11: the cross-compiled sky draws a blue zenith by day and a dark o
 		ctx->ClearRenderTargetView(rtv.Get(), clear);
 		ID3D11RenderTargetView* rtvs[] = { rtv.Get() };
 		ctx->OMSetRenderTargets(1, rtvs, nullptr);
-		D3D11_VIEWPORT vp{}; vp.Width = 1.0f; vp.Height = 1.0f; vp.MaxDepth = 1.0f;
+		D3D11_VIEWPORT vp{}; vp.Width = static_cast<float>(n); vp.Height = static_cast<float>(n); vp.MaxDepth = 1.0f;
 		ctx->RSSetViewports(1, &vp);
 		ctx->RSSetState(rs.Get());
 		ctx->IASetInputLayout(nullptr);
@@ -384,18 +481,37 @@ TEST_CASE("D3D11: the cross-compiled sky draws a blue zenith by day and a dark o
 		ID3D11SamplerState* samps[] = { clampS.Get(), wrapS.Get() };
 		ctx->PSSetSamplers(0, 2, samps);
 		ctx->Draw(3, 0);
+		ID3D11RenderTargetView* none[] = { nullptr };
+		ctx->OMSetRenderTargets(1, none, nullptr);
 		ctx->CopyResource(staging.Get(), target.Get());
-		glm::vec4 px(0.0f);
+		Image img(static_cast<size_t>(n) * n);
 		REQUIRE(SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)));
-		std::memcpy(&px, m.pData, sizeof(px));
+		for (UINT y = 0; y < n; ++y)
+			std::memcpy(&img[static_cast<size_t>(y) * n], static_cast<const uint8_t*>(m.pData) + static_cast<size_t>(y) * m.RowPitch,
+			            n * sizeof(glm::vec4));
 		ctx->Unmap(staging.Get(), 0);
-		return px;
-	};
+		return img;
+	}
+};
 
-	const glm::vec4 day   = drawPixel(skyLookingUp(glm::vec3(0.3f,  0.8f, 0.2f)));
-	const std::string dayLog = drain();
-	const glm::vec4 night = drawPixel(skyLookingUp(glm::vec3(0.3f, -0.8f, 0.2f)));
-	const std::string nightLog = drain();
+// The night-sky images the D3D12 case compares itself against: drawn once.
+constexpr UINT kNebulaImageN = 32;
+const glm::vec3 kNebulaBlue(0.0f, 0.0f, 1.0f);
+
+struct NebulaD3D11Images { Image off, q1; bool ok = false; };
+NebulaD3D11Images& nebulaD3D11Images() { static NebulaD3D11Images imgs; return imgs; }
+} // namespace
+
+TEST_CASE("D3D11: the cross-compiled sky draws a blue zenith by day and a dark one by night (WARP)")
+{
+	const SkyBytecode& bc = skyBytecode();
+	D3D11SkyRig rig;
+	rig.init(bc);
+
+	const glm::vec4 day   = rig.draw(skyLookingUp(glm::vec3(0.3f,  0.8f, 0.2f)), 1)[0];
+	const std::string dayLog = rig.drain();
+	const glm::vec4 night = rig.draw(skyLookingUp(glm::vec3(0.3f, -0.8f, 0.2f)), 1)[0];
+	const std::string nightLog = rig.drain();
 	MESSAGE("zenith by day (", day.r, ", ", day.g, ", ", day.b, "), by night (",
 	        night.r, ", ", night.g, ", ", night.b, ")");
 
@@ -417,67 +533,402 @@ TEST_CASE("D3D11: the cross-compiled sky draws a blue zenith by day and a dark o
 	CHECK(night.r + night.g + night.b < 0.2f);
 }
 
-TEST_CASE("D3D12: the cross-compiled sky builds a PSO against the renderer's sky root signature (WARP)")
+// Schritt 2 of "Nebula-Paritaet": the nebula v3 in kSkyFS reaches D3D11/D3D12
+// only through the cross-compile above, and until now no test ever drew it
+// (skyLookingUp switches it off). The checks are differential, so they need no
+// GL reference numbers: the nebula only adds light, each quality tier takes
+// its own code path, and colour 1 is the interior gas colour.
+TEST_CASE("D3D11: the cross-compiled sky draws the nebula at quality 0/1/2 and colour 1 tints it (WARP)")
 {
 	const SkyBytecode& bc = skyBytecode();
+	D3D11SkyRig rig;
+	rig.init(bc);
+	const UINT n = kNebulaImageN;
 
+	const Image off = rig.draw(skyNebulaNight(0.0f, 1, kNebulaBlue), n);
+	const std::string offLog = rig.drain();
+	REQUIRE_MESSAGE(unshadedReason(off).empty(), "nebula off: ", unshadedReason(off), "; ", offLog);
+
+	Image on[3];
+	for (int q = 0; q < 3; ++q)
 	{
-		ComPtr<ID3D12Debug> dbg;
-		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) dbg->EnableDebugLayer();
+		on[q] = rig.draw(skyNebulaNight(1.0f, q, kNebulaBlue), n);
+		const std::string log = rig.drain();
+		REQUIRE_MESSAGE(unshadedReason(on[q]).empty(), "quality ", q, ": ", unshadedReason(on[q]), "; ", log);
+		const ImageDelta d = imageDelta(on[q], off);
+		MESSAGE("quality ", q, ": nebula adds RGB (", d.sum.r, ", ", d.sum.g, ", ", d.sum.b, ") over ", n * n,
+		        " px, mean |delta| ", d.meanAbs, ", max ", d.maxAbs, ", ", d.changed * 100.0, "% of pixels changed");
+		// Visible, and as light: nebula() returns max(C, 0) and is added to col.
+		CHECK_MESSAGE(d.sum.r + d.sum.g + d.sum.b > 1e-3 * n * n, "quality ", q, ": nebula adds no light; ", log);
+		CHECK_MESSAGE(d.changed > 0.05, "quality ", q, ": nebula touches almost no pixel; ", log);
+		CHECK_MESSAGE(d.sum.r >= -1e-3 * n * n, "quality ", q, ": nebula darkens the sky");
+		CHECK_MESSAGE(d.sum.b >= -1e-3 * n * n, "quality ", q, ": nebula darkens the sky");
 	}
+	// uNebulaHiFi (nebulaColor2.w) reaches the shader: High adds the second
+	// warp, the crinkle and the beads, Max the back web and the neck fray.
+	const ImageDelta q01 = imageDelta(on[1], on[0]);
+	const ImageDelta q12 = imageDelta(on[2], on[1]);
+	MESSAGE("quality 1 vs 0: mean |delta| ", q01.meanAbs, "; quality 2 vs 1: mean |delta| ", q12.meanAbs);
+	CHECK(q01.meanAbs > 1e-5);
+	CHECK(q12.meanAbs > 1e-5);
+
+	// Colour 1 is the interior colour: the same nebula with colour 1 pure blue
+	// vs pure red. Colours 2/3 stay equal (and dark, so colour 1 carries most
+	// of the light). Per pixel the nebula's colour is K + colour1 * a with
+	// K, a >= 0 shared by both images, and the final rolloff keeps the hue, so
+	// blue's share of the nebula's light must be larger in the blue image and
+	// red's in the red image — whatever the noise puts in the frame.
+	const glm::vec3 dim(0.05f);
+	const Image blue = rig.draw(skyNebulaNight(1.0f, 1, glm::vec3(0.0f, 0.0f, 1.0f), dim, dim), n);
+	const Image red  = rig.draw(skyNebulaNight(1.0f, 1, glm::vec3(1.0f, 0.0f, 0.0f), dim, dim), n);
+	const std::string colourLog = rig.drain();
+	REQUIRE(unshadedReason(blue).empty());
+	REQUIRE(unshadedReason(red).empty());
+	const ImageDelta nb = imageDelta(blue, off);
+	const ImageDelta nr = imageDelta(red, off);
+	const double totB = nb.sum.r + nb.sum.g + nb.sum.b;
+	const double totR = nr.sum.r + nr.sum.g + nr.sum.b;
+	MESSAGE("colour 1 blue: nebula RGB (", nb.sum.r, ", ", nb.sum.g, ", ", nb.sum.b, "); colour 1 red: (",
+	        nr.sum.r, ", ", nr.sum.g, ", ", nr.sum.b, ")");
+	REQUIRE_MESSAGE(totB > 1e-3 * n * n, colourLog);
+	REQUIRE_MESSAGE(totR > 1e-3 * n * n, colourLog);
+	CHECK(nb.sum.b / totB > nr.sum.b / totR);
+	CHECK(nr.sum.r / totR > nb.sum.r / totB);
+	// ...and with colour 1 blue and colours 2/3 nearly black, blue leads.
+	CHECK(nb.sum.b > nb.sum.r);
+
+	nebulaD3D11Images() = { off, on[1], true };
+}
+
+namespace
+{
+std::string drainD3D12(ID3D12InfoQueue* iq)
+{
+	if (!iq) return "(no D3D12 debug layer)";
+	std::string out;
+	for (UINT64 i = 0, n = iq->GetNumStoredMessages(); i < n; ++i)
+	{
+		SIZE_T len = 0;
+		iq->GetMessage(i, nullptr, &len);
+		std::vector<char> buf(len);
+		auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+		if (SUCCEEDED(iq->GetMessage(i, msg, &len)) && msg->pDescription)
+			out += std::string(msg->pDescription, msg->DescriptionByteLength) + "\n";
+	}
+	iq->ClearStoredMessages();
+	return out;
+}
+
+struct D3D12Warp
+{
 	ComPtr<IDXGIFactory4> factory;
 	ComPtr<IDXGIAdapter>  adapter;
 	ComPtr<ID3D12Device>  dev;
-	REQUIRE(SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))));
-	REQUIRE(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter))));
-	REQUIRE(SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev))));
 	ComPtr<ID3D12InfoQueue> iq;
-	dev.As(&iq);
-	auto drain = [&]() -> std::string {
-		if (!iq) return "(no D3D12 debug layer)";
-		std::string out;
-		for (UINT64 i = 0, n = iq->GetNumStoredMessages(); i < n; ++i)
-		{
-			SIZE_T len = 0;
-			iq->GetMessage(i, nullptr, &len);
-			std::vector<char> buf(len);
-			auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
-			if (SUCCEEDED(iq->GetMessage(i, msg, &len)) && msg->pDescription)
-				out += std::string(msg->pDescription, msg->DescriptionByteLength) + "\n";
-		}
-		iq->ClearStoredMessages();
-		return out;
-	};
 
-	// D3D12Renderer::createSkyPipeline's root signature, as built there:
-	// [0] root CBV b0, [1] SRV table t0..t1, static samplers s0 (clamp) + s1 (wrap).
-	ComPtr<ID3D12RootSignature> rootSig;
+	void init()
 	{
-		D3D12_DESCRIPTOR_RANGE r{};
-		r.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r.NumDescriptors = 2; r.BaseShaderRegister = 0;
-		D3D12_ROOT_PARAMETER params[2]{};
-		params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-		params[0].Descriptor    = { 0, 0 };
-		params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-		params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-		params[1].DescriptorTable = { 1, &r };
-		params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-		D3D12_STATIC_SAMPLER_DESC samps[2]{};
-		for (UINT i = 0; i < 2; ++i)
 		{
-			samps[i].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-			const auto mode = i == 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-			samps[i].AddressU = samps[i].AddressV = samps[i].AddressW = mode;
-			samps[i].ShaderRegister = i; samps[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+			ComPtr<ID3D12Debug> dbg;
+			if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) dbg->EnableDebugLayer();
 		}
-		D3D12_ROOT_SIGNATURE_DESC rsd{};
-		rsd.NumParameters = 2; rsd.pParameters = params;
-		rsd.NumStaticSamplers = 2; rsd.pStaticSamplers = samps;
-		ComPtr<ID3DBlob> sig, err;
-		REQUIRE(SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)));
-		REQUIRE(SUCCEEDED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
-		                                           IID_PPV_ARGS(&rootSig))));
+		REQUIRE(SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))));
+		REQUIRE(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter))));
+		REQUIRE(SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev))));
+		dev.As(&iq);
 	}
+	std::string drain() { return drainD3D12(iq.Get()); }
+};
+
+// D3D12Renderer::createSkyPipeline's root signature, as built there:
+// [0] root CBV b0, [1] SRV table t0..t1, static samplers s0 (clamp) + s1 (wrap).
+ComPtr<ID3D12RootSignature> skyRootSignature(ID3D12Device* dev)
+{
+	ComPtr<ID3D12RootSignature> rootSig;
+	D3D12_DESCRIPTOR_RANGE r{};
+	r.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r.NumDescriptors = 2; r.BaseShaderRegister = 0;
+	D3D12_ROOT_PARAMETER params[2]{};
+	params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+	params[0].Descriptor    = { 0, 0 };
+	params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+	params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	params[1].DescriptorTable = { 1, &r };
+	params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+	D3D12_STATIC_SAMPLER_DESC samps[2]{};
+	for (UINT i = 0; i < 2; ++i)
+	{
+		samps[i].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+		const auto mode = i == 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+		samps[i].AddressU = samps[i].AddressV = samps[i].AddressW = mode;
+		samps[i].ShaderRegister = i; samps[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+	}
+	D3D12_ROOT_SIGNATURE_DESC rsd{};
+	rsd.NumParameters = 2; rsd.pParameters = params;
+	rsd.NumStaticSamplers = 2; rsd.pStaticSamplers = samps;
+	ComPtr<ID3DBlob> sig, err;
+	REQUIRE(SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)));
+	REQUIRE(SUCCEEDED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+	                                           IID_PPV_ARGS(&rootSig))));
+	return rootSig;
+}
+
+ComPtr<ID3D12Resource> makeBuffer(ID3D12Device* dev, D3D12_HEAP_TYPE heap, UINT64 size, D3D12_RESOURCE_STATES state)
+{
+	D3D12_HEAP_PROPERTIES hp{}; hp.Type = heap;
+	D3D12_RESOURCE_DESC bd{};
+	bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	bd.Width = size; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+	bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	ComPtr<ID3D12Resource> buf;
+	REQUIRE(SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, state, nullptr, IID_PPV_ARGS(&buf))));
+	return buf;
+}
+
+void transition(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+{
+	D3D12_RESOURCE_BARRIER b{};
+	b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	b.Transition.pResource   = res;
+	b.Transition.StateBefore = before;
+	b.Transition.StateAfter  = after;
+	b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+	cl->ResourceBarrier(1, &b);
+}
+
+// D3D12Renderer's sky draw on WARP, the D3D12 twin of D3D11SkyRig::draw: the
+// same bytecode against skyRootSignature, moon t0 (1x1 white) + noise volume
+// t1 in a shader-visible SRV table, constants as a root CBV, one fullscreen
+// triangle into an RGBA32F target of n x n pixels, copied to a readback buffer.
+// Everything is created per call; the case draws twice.
+Image d3d12DrawSky(D3D12Warp& w, ID3D12RootSignature* rootSig, const SkyBytecode& bc,
+                   const HE::SkyFrameParams& p, UINT n, std::string& log)
+{
+	ID3D12Device* dev = w.dev.Get();
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+	pd.pRootSignature = rootSig;
+	pd.VS = { bc.vs->GetBufferPointer(), bc.vs->GetBufferSize() };
+	pd.PS = { bc.ps->GetBufferPointer(), bc.ps->GetBufferSize() };
+	pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	pd.SampleMask = UINT_MAX;
+	pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+	pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	pd.RasterizerState.DepthClipEnable = TRUE;
+	pd.DepthStencilState.DepthEnable = FALSE;
+	pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
+	pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+	pd.SampleDesc.Count = 1;
+	ComPtr<ID3D12PipelineState> pso;
+	{
+		const HRESULT hr = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "CreateGraphicsPipelineState (RGBA32F): ", hr, "; ", w.drain());
+	}
+
+	ComPtr<ID3D12CommandQueue> queue;
+	ComPtr<ID3D12CommandAllocator> alloc;
+	ComPtr<ID3D12GraphicsCommandList> cl;
+	ComPtr<ID3D12Fence> fence;
+	{
+		D3D12_COMMAND_QUEUE_DESC qd{}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+		REQUIRE(SUCCEEDED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue))));
+		REQUIRE(SUCCEEDED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))));
+		REQUIRE(SUCCEEDED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), pso.Get(),
+		                                         IID_PPV_ARGS(&cl))));
+		REQUIRE(SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))));
+	}
+
+	// Textures in COPY_DEST, filled from upload buffers (row pitch 256 for both).
+	D3D12_HEAP_PROPERTIES defaultHeap{}; defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+	ComPtr<ID3D12Resource> moonTex, noiseTex;
+	{
+		D3D12_RESOURCE_DESC td{};
+		td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		td.Width = 1; td.Height = 1; td.DepthOrArraySize = 1; td.MipLevels = 1;
+		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+		REQUIRE(SUCCEEDED(dev->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &td,
+		                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&moonTex))));
+		td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+		td.Width = td.Height = kTestNoiseN; td.DepthOrArraySize = static_cast<UINT16>(kTestNoiseN);
+		td.Format = DXGI_FORMAT_R16G16_UNORM;
+		REQUIRE(SUCCEEDED(dev->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &td,
+		                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&noiseTex))));
+	}
+	static_assert(kTestNoiseN * 4 % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT == 0, "noise rows must need no padding");
+	constexpr UINT kNoiseRow = kTestNoiseN * 4;
+	ComPtr<ID3D12Resource> moonUp  = makeBuffer(dev, D3D12_HEAP_TYPE_UPLOAD, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT,
+	                                            D3D12_RESOURCE_STATE_GENERIC_READ);
+	ComPtr<ID3D12Resource> noiseUp = makeBuffer(dev, D3D12_HEAP_TYPE_UPLOAD,
+	                                            static_cast<UINT64>(kNoiseRow) * kTestNoiseN * kTestNoiseN,
+	                                            D3D12_RESOURCE_STATE_GENERIC_READ);
+	constexpr UINT64 kCbSize = (sizeof(HE::SkyFrameParams) + 255) & ~UINT64(255);
+	ComPtr<ID3D12Resource> cbUp = makeBuffer(dev, D3D12_HEAP_TYPE_UPLOAD, kCbSize, D3D12_RESOURCE_STATE_GENERIC_READ);
+	{
+		void* mapped = nullptr; const D3D12_RANGE noRead{ 0, 0 };
+		REQUIRE(SUCCEEDED(moonUp->Map(0, &noRead, &mapped)));
+		const uint32_t white = 0xFFFFFFFFu;
+		std::memcpy(mapped, &white, sizeof(white));
+		moonUp->Unmap(0, nullptr);
+
+		const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kTestNoiseN); // tightly packed RG16
+		REQUIRE(noise.size() * sizeof(uint16_t) == static_cast<size_t>(kNoiseRow) * kTestNoiseN * kTestNoiseN);
+		REQUIRE(SUCCEEDED(noiseUp->Map(0, &noRead, &mapped)));
+		std::memcpy(mapped, noise.data(), noise.size() * sizeof(uint16_t));
+		noiseUp->Unmap(0, nullptr);
+
+		REQUIRE(SUCCEEDED(cbUp->Map(0, &noRead, &mapped)));
+		std::memcpy(mapped, &p, sizeof(p));
+		cbUp->Unmap(0, nullptr);
+	}
+
+	// SRV table t0..t1 (the root signature's one range) + the render target.
+	ComPtr<ID3D12DescriptorHeap> srvHeap, rtvHeap;
+	{
+		D3D12_DESCRIPTOR_HEAP_DESC hd{};
+		hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 2;
+		hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		REQUIRE(SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&srvHeap))));
+		hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; hd.NumDescriptors = 1; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+		REQUIRE(SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvHeap))));
+	}
+	D3D12_CPU_DESCRIPTOR_HANDLE srv = srvHeap->GetCPUDescriptorHandleForHeapStart();
+	dev->CreateShaderResourceView(moonTex.Get(), nullptr, srv);
+	srv.ptr += dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	dev->CreateShaderResourceView(noiseTex.Get(), nullptr, srv);
+
+	const float clear[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+	ComPtr<ID3D12Resource> target;
+	{
+		D3D12_RESOURCE_DESC td{};
+		td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		td.Width = n; td.Height = n; td.DepthOrArraySize = 1; td.MipLevels = 1;
+		td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; td.SampleDesc.Count = 1;
+		td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+		D3D12_CLEAR_VALUE cv{}; cv.Format = td.Format;
+		std::memcpy(cv.Color, clear, sizeof(clear));
+		REQUIRE(SUCCEEDED(dev->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &td,
+		                  D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&target))));
+	}
+	const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+	dev->CreateRenderTargetView(target.Get(), nullptr, rtv);
+
+	const UINT readRow = (n * 16u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+	ComPtr<ID3D12Resource> readback = makeBuffer(dev, D3D12_HEAP_TYPE_READBACK, static_cast<UINT64>(readRow) * n,
+	                                             D3D12_RESOURCE_STATE_COPY_DEST);
+
+	// Record: uploads, draw, copy out.
+	{
+		D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+		src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		src.pResource = moonUp.Get();
+		src.PlacedFootprint.Footprint = { DXGI_FORMAT_R8G8B8A8_UNORM, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT };
+		dst.pResource = moonTex.Get();
+		cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+		src.pResource = noiseUp.Get();
+		src.PlacedFootprint.Footprint = { DXGI_FORMAT_R16G16_UNORM, static_cast<UINT>(kTestNoiseN),
+		                                  static_cast<UINT>(kTestNoiseN), static_cast<UINT>(kTestNoiseN), kNoiseRow };
+		dst.pResource = noiseTex.Get();
+		cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+		transition(cl.Get(), moonTex.Get(),  D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		transition(cl.Get(), noiseTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	}
+	cl->ClearRenderTargetView(rtv, clear, 0, nullptr);
+	cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+	const D3D12_VIEWPORT vp{ 0.0f, 0.0f, static_cast<float>(n), static_cast<float>(n), 0.0f, 1.0f };
+	const D3D12_RECT scissor{ 0, 0, static_cast<LONG>(n), static_cast<LONG>(n) };
+	cl->RSSetViewports(1, &vp);
+	cl->RSSetScissorRects(1, &scissor);
+	cl->SetGraphicsRootSignature(rootSig);
+	ID3D12DescriptorHeap* heaps[] = { srvHeap.Get() };
+	cl->SetDescriptorHeaps(1, heaps);
+	cl->SetGraphicsRootConstantBufferView(0, cbUp->GetGPUVirtualAddress());
+	cl->SetGraphicsRootDescriptorTable(1, srvHeap->GetGPUDescriptorHandleForHeapStart());
+	cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	cl->DrawInstanced(3, 1, 0, 0);
+	transition(cl.Get(), target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	{
+		D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+		src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		src.pResource = target.Get();
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		dst.pResource = readback.Get();
+		dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32B32A32_FLOAT, n, n, 1, readRow };
+		cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+	}
+	REQUIRE(SUCCEEDED(cl->Close()));
+	ID3D12CommandList* lists[] = { cl.Get() };
+	queue->ExecuteCommandLists(1, lists);
+	REQUIRE(SUCCEEDED(queue->Signal(fence.Get(), 1)));
+	if (fence->GetCompletedValue() < 1)
+	{
+		HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+		REQUIRE(ev != nullptr);
+		REQUIRE(SUCCEEDED(fence->SetEventOnCompletion(1, ev)));
+		WaitForSingleObject(ev, INFINITE);
+		CloseHandle(ev);
+	}
+	log = w.drain();
+	REQUIRE_MESSAGE(SUCCEEDED(dev->GetDeviceRemovedReason()), "device removed: ", dev->GetDeviceRemovedReason(), "; ", log);
+
+	Image img(static_cast<size_t>(n) * n);
+	void* mapped = nullptr;
+	const D3D12_RANGE readAll{ 0, static_cast<SIZE_T>(readRow) * n };
+	REQUIRE(SUCCEEDED(readback->Map(0, &readAll, &mapped)));
+	for (UINT y = 0; y < n; ++y)
+		std::memcpy(&img[static_cast<size_t>(y) * n], static_cast<const uint8_t*>(mapped) + static_cast<size_t>(y) * readRow,
+		            n * sizeof(glm::vec4));
+	const D3D12_RANGE noWrite{ 0, 0 };
+	readback->Unmap(0, &noWrite);
+	return img;
+}
+} // namespace
+
+TEST_CASE("D3D12: the cross-compiled sky draws the nebula like D3D11 does (WARP)")
+{
+	const SkyBytecode& bc = skyBytecode();
+	D3D12Warp w;
+	w.init();
+	const ComPtr<ID3D12RootSignature> rootSig = skyRootSignature(w.dev.Get());
+	const UINT n = kNebulaImageN;
+
+	std::string offLog, onLog;
+	const Image off = d3d12DrawSky(w, rootSig.Get(), bc, skyNebulaNight(0.0f, 1, kNebulaBlue), n, offLog);
+	const Image on  = d3d12DrawSky(w, rootSig.Get(), bc, skyNebulaNight(1.0f, 1, kNebulaBlue), n, onLog);
+	REQUIRE_MESSAGE(unshadedReason(off).empty(), "nebula off: ", unshadedReason(off), "; ", offLog);
+	REQUIRE_MESSAGE(unshadedReason(on).empty(),  "nebula on: ",  unshadedReason(on),  "; ", onLog);
+
+	const ImageDelta neb = imageDelta(on, off);
+	MESSAGE("D3D12 quality 1: nebula adds RGB (", neb.sum.r, ", ", neb.sum.g, ", ", neb.sum.b, "), ",
+	        neb.changed * 100.0, "% of pixels changed");
+	CHECK_MESSAGE(neb.sum.r + neb.sum.g + neb.sum.b > 1e-3 * n * n, "D3D12 draws no nebula; ", onLog);
+	CHECK(neb.changed > 0.05);
+
+	// Same FXC bytecode, same inputs, same WARP rasteriser: D3D12 must agree
+	// with the D3D11 image. Only meaningful when the D3D11 case ran first
+	// (doctest runs a file's cases in order; a filtered run skips this part).
+	const NebulaD3D11Images& d11 = nebulaD3D11Images();
+	if (d11.ok)
+	{
+		const ImageDelta dOff = imageDelta(off, d11.off);
+		const ImageDelta dOn  = imageDelta(on,  d11.q1);
+		MESSAGE("D3D12 vs D3D11: nebula off mean |delta| ", dOff.meanAbs, " (max ", dOff.maxAbs,
+		        "), on mean |delta| ", dOn.meanAbs, " (max ", dOn.maxAbs, ")");
+		CHECK(dOff.meanAbs < 1e-3);
+		CHECK(dOn.meanAbs < 1e-3);
+	}
+	else
+		MESSAGE("D3D11 nebula images missing (case filtered out or failed) - D3D12/D3D11 comparison skipped");
+}
+
+TEST_CASE("D3D12: the cross-compiled sky builds a PSO against the renderer's sky root signature (WARP)")
+{
+	const SkyBytecode& bc = skyBytecode();
+	D3D12Warp w;
+	w.init();
+	ID3D12Device* dev = w.dev.Get();
+	auto drain = [&]() { return w.drain(); };
+	const ComPtr<ID3D12RootSignature> rootSig = skyRootSignature(dev);
 
 	// The HDR PSO exactly as makeSkyPso describes it.
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
