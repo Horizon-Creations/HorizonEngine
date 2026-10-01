@@ -184,6 +184,12 @@ struct D3D12DescriptorHeapAllocator
 	}
 	void Destroy()
 	{
+		// ImGui_ImplDX12_Shutdown just freed its textures, each with a Signal
+		// still queued; the renderer's own flush comes later (Application.cpp,
+		// m_renderer->Shutdown). Let those land before the fence goes away.
+		if (Fence && FenceEvent && Fence->GetCompletedValue() < FenceValue &&
+		    SUCCEEDED(Fence->SetEventOnCompletion(FenceValue, FenceEvent)))
+			WaitForSingleObject(FenceEvent, INFINITE);
 		if (Fence)      { Fence->Release(); Fence = nullptr; }
 		if (FenceEvent) { CloseHandle(FenceEvent); FenceEvent = nullptr; }
 		Queue = nullptr;
