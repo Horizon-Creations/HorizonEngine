@@ -40,6 +40,7 @@
 #include "GitController.h"
 #include "McpBridge.h"
 #include "McpClaudeProbe.h"      // Tool Status: can Claude actually reach this editor
+#include "McpLockBook.h"         // external locks, per MCP client
 #include "EditorCommands.h"
 #include <atomic>
 #include <filesystem>
@@ -824,13 +825,13 @@ private:
 	//     lock goes — an MCP edit would lose its undo seconds after it happened.
 	//     The plan's risk section decides it this way (§4, "Lock-Timeout gegen
 	//     dropUnowned"): external locks live until the client disconnects.
-	struct McpLock
-	{
-		std::uint64_t subject     = 0;
-		std::uint64_t lastAskedMs = 0;
-	};
-	std::vector<McpLock> m_mcpLocks;
+	//
+	// "The client" is the one that took the lock, not any client of this editor:
+	// the book records who asked, and a client going hands back exactly its own
+	// share (McpLockBook.h, plan §20.3).
+	HE::Ed::McpLockBook m_mcpLocks;
 	void rememberMcpLock(std::uint64_t subject);
+	void releaseMcpLocksOf(HE::Ed::McpClientId client);
 	void updateMcpLocks(std::uint64_t nowMs);
 	bool mcpLockedByOther(std::uint64_t subject);
 	CollabUndo       m_collabUndo;

@@ -862,6 +862,10 @@ public:
 	// frame with the selection; releases the previous subject and claims the new
 	// one only when it actually changed, so this stays free to call.
 	void followSelection(std::uint64_t subject);
+	// The subject followSelection holds for the human, 0 for none. An external
+	// client giving up an entity the human has selected must not hand back the
+	// human's lock with it — the session holds it once for both.
+	std::uint64_t heldSubject() const { return m_heldSubject; }
 
 	// ── Asset-level locking (lazy) ───────────────────────────────────────────
 	// Assets lock on FIRST EDIT, not on open: reading a graph together is fine,
@@ -1219,6 +1223,9 @@ private:
 	HE::Net::PortMapper::PinholeHandle m_pinhole;
 	bool m_pinholeOpen = false;
 	bool               m_portMapped = false;
+	// When the router's lease was last (re)taken. Every mapping is finite, so a
+	// session longer than the lease has to ask again or silently lose its forward.
+	std::uint64_t      m_lastMapRenewMs = 0;
 	std::string        m_portMapStatus;
 	std::string        m_advice;   // shown once, below both status lines
 	std::future<LookupResult>   m_lookupFuture;

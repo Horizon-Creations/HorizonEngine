@@ -432,6 +432,72 @@ TEST_CASE("McpBridge: a tool learns which connection is calling, and hears when 
 	CHECK(gone[1] == idB);
 }
 
+TEST_CASE("McpBridge: a plain tool can ask the registry who is calling, and nobody is outside a call")
+{
+	// What the gateway's lock hook relies on (McpLockBook): the entity tools
+	// take no context, yet the lock they cause must be booked to the client
+	// that sent the call — not to "this editor's clients".
+	Fixture f;
+	const HE::Ed::McpToolRegistry& reg = f.bridge.registry();
+
+	McpTool who;   // the context signature: the id the bridge hands out
+	who.name        = "who";
+	who.description = "returns the caller's connection id";
+	who.inputSchema = json{ { "type", "object" } };
+	who.handlerCtx  = [](const HE::Ed::McpCallContext& ctx, const json&) {
+		return ToolResult::ok(json{ { "client", ctx.client } });
+	};
+	REQUIRE(f.bridge.registry().add(std::move(who)));
+
+	McpTool plain;   // the plain signature, like entity_set_transform
+	plain.name        = "plain";
+	plain.description = "returns the registry's calling client";
+	plain.inputSchema = json{ { "type", "object" } };
+	plain.handler     = [&reg](const json&) {
+		return ToolResult::ok(json{ { "client", reg.callingClient() } });
+	};
+	REQUIRE(f.bridge.registry().add(std::move(plain)));
+	HE::Ed::registerBatchTool(f.bridge.registry());
+
+	CHECK(reg.callingClient() == 0);
+
+	TestClient a, b;
+	REQUIRE(f.authenticate(a, 1));
+	REQUIRE(f.authenticate(b, 2));
+	std::vector<TestClient*> both{ &a, &b };
+	auto call = [](int id, const char* tool) {
+		return json{ { "jsonrpc", "2.0" }, { "id", id }, { "method", "tools/call" },
+		             { "params", json{ { "name", tool } } } };
+	};
+	a.send(call(40, "who"));
+	a.send(call(41, "plain"));
+	b.send(call(42, "who"));
+	b.send(call(43, "plain"));
+	REQUIRE(pumpUntil(f.bridge, both, [&] {
+		return replyWithId(a, 40) && replyWithId(a, 41) && replyWithId(b, 42) && replyWithId(b, 43);
+	}));
+	const auto idA = structured(*replyWithId(a, 40))["client"].get<HE::Ed::McpClientId>();
+	const auto idB = structured(*replyWithId(b, 42))["client"].get<HE::Ed::McpClientId>();
+	REQUIRE(idA != 0);
+	REQUIRE(idB != 0);
+	REQUIRE(idA != idB);
+	CHECK(structured(*replyWithId(a, 41))["client"] == idA);
+	CHECK(structured(*replyWithId(b, 43))["client"] == idB);
+
+	// Through `batch`: the inner tool runs inside the outer call's scope.
+	b.send(json{ { "jsonrpc", "2.0" }, { "id", 44 }, { "method", "tools/call" },
+	             { "params", json{ { "name", "batch" },
+	                               { "arguments", json{ { "operations", json::array({
+	                                   json{ { "tool", "plain" } } }) } } } } } });
+	REQUIRE(pumpUntil(f.bridge, both, [&] { return replyWithId(b, 44) != nullptr; }));
+	CHECK(structured(*replyWithId(b, 44))["results"][0]["result"]["client"] == idB);
+
+	// The scope closes with the call: between calls nobody is calling, and a
+	// direct call without a bridge is the anonymous client.
+	CHECK(reg.callingClient() == 0);
+	CHECK(reg.find("plain")->handler(json::object()).content["client"] == 0);
+}
+
 TEST_CASE("McpBridge: scene_info reports the editor's real state, not an echo")
 {
 	// The whole point of the stub: prove the pipe carries live editor state.

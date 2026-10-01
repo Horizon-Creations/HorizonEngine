@@ -2739,6 +2739,7 @@ Merge wartet.
 | `clip_*` | 4 | `McpToolsClip.cpp` | §17.4 | **Zweig**, `dfa9bc95` |
 | `project_build`, `project_build_status`, `project_package` | 3 | `McpToolsBuild.cpp` | §18 | **Zweig**, `8df49958` |
 | `settings_get`, `settings_set` | 2 | `McpToolsSettings.cpp` | §18.5 ff. | **Zweig**, `8df49958` |
+| `collab_status` (+ `collab_host/join/leave` nur mit `HE_MCP_COLLAB_CONTROL=1`) | 1 + 3 | `McpToolsCollab.cpp` | §20 | **Zweig** `claude/collab-nat-pmp-two-instance-verify`, `d408f7ac` |
 
 Auf dem Zweig warten außerdem `bc54c7e5` (drei Editor-Tabs waren nur unter
 ihrem absoluten Pfad zu finden), `5c46831a` und `1c34e830` (Nachträge zu §17
@@ -2864,3 +2865,154 @@ abhaken kann.
 Ebenfalls nicht behauptet: dass die Restliste in 19.5 vollständig *gewünscht*
 ist. Sie ist die Liste dessen, was bewusst nicht gebaut wurde — nicht
 dieselbe Liste wie „was als Nächstes gebaut werden sollte".
+
+## 20. Nachtrag: die Sitzung als Werkzeuge, und zwei echte Editoren gegeneinander (Thema 86, Schritt 3)
+
+### 20.1 Was dazukam
+
+`collab_status` liest, was das Collaboration-Fenster zeigt: `idle`,
+`hosting`, `connecting`, `joined` oder `failed`, das Roster mit Ids und Namen,
+Adresse und Port des Hosts. Es ist immer registriert, weil ein Client, der
+über `entity_*` die Szene ändert, wissen muss, ob diese Änderungen bei
+anderen Menschen ankommen. `scene_info.inSession` sagt, *dass* sie das tun,
+`collab_status` sagt, *bei wem*. Den Join-Code nennt es nie: es ist für
+jeden Client offen, und der Code ist das einzige Geheimnis der Sitzung.
+
+`collab_host`, `collab_join` und `collab_leave` drücken die Knöpfe des
+Fensters, über dieselben Aufrufe (`startHosting`, `joinSession`, `leave`).
+Sie sind **nur registriert, wenn der Editor mit `HE_MCP_COLLAB_CONTROL=1`
+gestartet wurde**, und fehlen sonst in `tools/list`. Hosten ist das Einzige,
+was ein Client tun könnte, das über diesen Rechner hinausreicht: ein offener
+Port, eine Portfreigabe am Router, ein Eintrag im öffentlichen Directory
+(ohne `HE_COLLAB_OFFLINE`), und die ganze Szene für jeden mit dem Code, den
+`collab_host` zurückgibt. Das entscheidet der Mensch beim Start des Editors,
+nicht ein Client und kein Schalter in den Preferences. `collab_join` kehrt
+mit `connecting` zurück, wie beim Menschen. Der Client fragt `collab_status`
+ab, bis `joined` oder `failed` dasteht.
+
+Der grep-Befehl aus 19.1 zählt auf diesem Zweig jetzt **98** statt 94
+(die Differenz 84 → 94 sind Familien, die nach Kapitel 19 kamen, etwa
+`scene_screenshot`). Er zählt `collab_host/join/leave` mit, obwohl sie ohne
+die Variable nicht registriert werden. Das Handbuch (19.4,
+`collaboration.html`) nennt `collab_status` noch nicht.
+
+### 20.2 Der Lauf: `scripts/he_collab_two_editors.py OUTDIR`
+
+Zwei gebaute `HorizonEditor`-Prozesse, je mit eigenem `HOME`, eigener
+Projektkopie (dieselbe Projekt-Id, sonst lehnt der Host ab) und eigenem
+MCP-Port, `HE_COLLAB_OFFLINE=1`, versteckte Fenster. Beide booten parallel,
+ein Debug-Editor braucht auf macOS 27 rund 6 min bis zur Endpunktdatei. A
+hostet, B tritt über Loopback + SecureTransport bei, und **jede Änderung wird
+auf der Seite geprüft, die sie nicht gemacht hat**:
+
+1. vor dem Beitritt verschiedene Welten: ein Marker nur auf A, einer nur auf B;
+2. nach dem Beitritt hat B A's Marker unter A's uuid, B's eigener ist weg
+   (Welt ersetzt, nicht gemischt), die Inhalts-uuids sind auf beiden Seiten
+   gleich;
+3. A legt an, B sieht es mit gleicher uuid und Position; B verschiebt (Lock
+   beim Host angefragt, ein `lock_pending`), A sieht es;
+4. solange B's Client den Lock hält, bekommt A `locked_by_other`, und nichts
+   bewegt sich; ohne Client an B kommt der Lock zurück, A's Zug landet, B
+   sieht ihn;
+5. B legt an und benennt um, A sieht den Namen; Löschen in beide Richtungen;
+6. B verlässt die Sitzung, A's Roster ist wieder nur A.
+
+Stand 24.09.2026, Debug-Build: `RESULT: PASS (0 failures)`, jede Übertragung
+unter einer Sekunde, der Beitritt 0,3 s. Die Built-ins `Sun` und `Moon` haben
+auf beiden Seiten verschiedene uuids, und das ist so gewollt: jeder Editor
+legt sie selbst an, `syncStructuralChanges` repliziert sie nie
+(`isLocalOnly`). Der Lauf vergleicht sie deshalb nur nach Namen und listet
+sie auf.
+
+### 20.3 Was der Lauf gefunden hat
+
+**MCP-Locks gehören allen Clients eines Editors gemeinsam, nicht dem, der sie
+geholt hat.** `EditorApplication::updateMcpLocks` gibt die externen Locks erst
+zurück, wenn `m_mcp.clientCount()` 0 ist. Hängt der Client auf, der den Lock
+geholt hat, und ein anderer Client bleibt am selben Editor, dann bleibt der
+Lock stehen, bis auch der zweite geht. Der erste Lauf ist genau daran rot
+geworden (der Treiber hat neu verbunden, und der neue Client hat den Lock
+still geerbt). Kapitel 2.4 hatte „Freigabe beim Disconnect" pro Verbindung
+vorgeschlagen. Für eine Pro-Client-Freigabe muss das Gateway wissen, welcher
+Client einen Befehl schickt. `EditorCommands::Hooks::requestLock` bekommt
+heute nur das Subjekt. In Schritt 3 nicht behoben, das Skript protokollierte
+den Fall nur (Schritt 7a, `NOTE …`). **Seit Schritt 4 behoben, siehe 20.5.**
+
+### 20.4 Was dieser Lauf nicht behauptet
+
+Keinen GUI-Durchlauf: Read-only-Banner, Lock-Abzeichen, Präsenz-Marker im
+Viewport und der „Checking with the host"-Streifen sind nicht angesehen
+worden, nur die Szene, die beide Editoren halten. Keinen Durchlauf zwischen
+zwei Rechnern, keinen über das Directory oder eine echte Portfreigabe (alles
+Loopback, offline). Keine Asset- oder Dokument-Deltas (`CollabDocSync`),
+nur Entities. Und beide Editoren reagierten nicht innerhalb von 10 s auf
+SIGTERM und wurden getötet (rc −9), der Schluss ihrer Logs fehlt deshalb.
+Die Ursache ist gewollt: SDL macht aus SIGTERM ein `SDL_EVENT_QUIT`, und weil
+die Szene nach den MCP-Änderungen ungespeichert ist, blockiert die
+Ungespeichert-Sperre (`EditorApplication.cpp`, `osCloseRequest`) das Beenden
+und wartet auf eine Speichern-Abfrage, die im versteckten Fenster niemand
+beantwortet. Das Aufräumen beim Beenden (`CollabController::shutdown`) ist
+also in diesem Lauf nicht gelaufen. Ein `scene_save` auf beiden Seiten vor
+dem Stoppen würde es ermöglichen, ist aber nicht ausprobiert.
+
+### 20.5 Behoben: externe Locks gehören dem Client, der sie geholt hat (Thema 86, Schritt 4)
+
+**Das Buch.** `McpLockBook` (`src/HE_Editor/McpLockBook.h`, header-only, ohne
+Session und Netz) ersetzt die flache Liste `m_mcpLocks`. Pro Subjekt steht dort
+die Menge der MCP-Clients, die es geholt haben. `clientGone(id)` streicht den
+Client überall und gibt genau die Subjekte zurück, die danach niemand mehr hält.
+Eine Menge statt eines Halters, weil zwei Clients desselben Editors dieselbe
+Entity bearbeiten können: die Session hält den Lock einmal für beide, und ihn
+beim ersten Abgang zurückzugeben, würde ihn dem zweiten wegziehen.
+
+**Wer ruft.** Das Gateway (`EditorCommands::Hooks::requestLock`) bekommt weiter
+nur das Subjekt. Statt `McpCallContext` durch Entity-, Prefab- und
+Terrain-Werkzeuge bis in jeden Befehl zu fädeln, kennt die Registry den
+aufrufenden Client: `McpToolRegistry::callingClient()`, gesetzt vom Bridge per
+`CallerScope` um jedes `tools/call`. Das trägt, weil ein Aufruf synchron im
+Frame-Thread läuft; die inneren Aufrufe von `batch` liegen im selben Scope.
+Außerhalb eines Aufrufs ist es 0, der anonyme Client.
+
+**Die Freigabe.** `EditorApplication` hängt `releaseMcpLocksOf` an den
+Client-weg-Haken der Registry. Der Bridge meldet jede Verbindung, die er
+vergisst, auch beim `stop()`. `updateMcpLocks` behält den Fall
+`clientCount() == 0` nur noch für das, was dann übrig ist: Locks des anonymen
+Clients, der nie trennt. Ein Subjekt, das gerade die Auswahl des Menschen hält
+(`CollabController::heldSubject()`, dieselbe Session-Sperre), wird nicht
+zurückgegeben, sonst verlöre der Mensch seinen Lock mit dem Client.
+
+**Was es nicht abdeckt.** Freigabesignal ist das Schließen der Verbindung. Ein
+Client, der hängt, dessen Socket aber offen bleibt, wird nicht bemerkt; der
+Bridge hat keinen Leerlauf-Timeout. Das ist gewollt und derselbe Grund wie in
+§4: ein Timer würde den Lock kurz nach einer Änderung fallen lassen, und
+`CollabUndo::dropUnowned` würde deren Undo-Eintrag verwerfen.
+
+**Geprüft.** `tests/test_mcp_lock_book.cpp` (Abgang eines Clients, zwei Halter
+auf einem Subjekt, anonymer Client), `tests/test_mcp_bridge.cpp` (ein Werkzeug
+ohne Kontext liest den richtigen Client über die Registry, auch durch `batch`,
+und außerhalb eines Aufrufs 0). `scripts/he_collab_two_editors.py` Schritt 7a
+prüft den Fall jetzt statt ihn zu protokollieren: B2 verbindet sich, A bleibt
+abgewiesen (Kontrolle); der haltende Client trennt, B2 bleibt, A's Zug landet
+in unter 5 s. Danach holt B2 den Lock selbst, A wird wieder abgewiesen, und
+ohne jeden Client an B landet A's Zug wie bisher.
+
+**Lauf (01.10., Debug, nach dem Merge von main): `RESULT: PASS (0 failures)`.**
+Beide Endpunkte nach 42 s. B2 verbunden, Halter noch da: A `locked_by_other`.
+Halter trennt, B2 bleibt: A's Zug landet nach 0,6 s (1× `lock_pending`), B sieht
+ihn nach 0,2 s. B2 holt den Lock selbst (nachdem A's Client neu verbunden und
+damit A's eigenen Lock abgegeben hat, der Host-Fall derselben Regel), A sieht
+B2's Zug nach 0,2 s und wird dann abgewiesen. Ohne Client an B landet A's Zug
+nach 0,8 s.
+
+**Nebenbefund, nicht behoben: `CollabController::publishTransform` verschluckt
+eine Rückkehr auf den zuletzt gesendeten Wert.** Die Entprellung vergleicht mit
+dem Wert, den *dieser* Editor zuletzt für das Subjekt gesendet hat
+(`m_lastTransform`), und der wird nicht zurückgesetzt, wenn ein Peer die Entity
+inzwischen verschoben hat. Der erste Lauf dieses Schritts ist daran rot
+geworden: B sendet in Schritt 6 [-4, 1, 2], A verschiebt nach [7, 0, 7], B2
+setzt wieder [-4, 1, 2]. Das Werkzeug meldet Erfolg, B zeigt [-4, 1, 2], A
+bleibt bei [7, 0, 7], die Welten laufen still auseinander. Beim Ziehen mit der
+Maus praktisch nie, bei getippten Werten (Inspector, MCP) sehr wohl. Naheliegende
+Reparatur: beim Anwenden einer fremden Transform-Änderung auf
+`m_lastTransformSubject` `m_hasLastTransform` zurücksetzen. Das Skript fährt
+Schritt 7b deshalb auf eine andere Position.
