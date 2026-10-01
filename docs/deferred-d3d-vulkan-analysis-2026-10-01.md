@@ -134,8 +134,8 @@ aber jeder Folgegewinn (SSR lag-frei, SSAO aus dem G-Buffer) setzt die PostFX-Ke
 4. **Parität mit Metal bei Decals/SSR.** Decals würden echt beleuchtet (Schatten, Punktlichter,
    GI) statt mit dem eigenen 1-Dir+Ambient-Shading. Kosmetisch, aber sichtbar.
 
-Was Deferred **nicht** bringt: Transparenz (bleibt forward), Skinned (läuft auch auf GL/Metal
-v1 forward), MSAA (kein Thema, die Engine nutzt FXAA/SMAA/TAA).
+Was Deferred **nicht** bringt: Transparenz (bleibt forward), Skinned (läuft auf GL nach dem
+Resolve forward, `OpenGLRenderer.cpp:11577`, auf Metal laut Plan-Stand P0–P4 ebenso), MSAA (kein Thema, die Engine nutzt FXAA/SMAA/TAA).
 
 ---
 
@@ -165,6 +165,13 @@ v1 forward), MSAA (kein Thema, die Engine nutzt FXAA/SMAA/TAA).
   D3D11 still nichts.
 
 ### 4.2 Pro Backend (nach GL-Muster)
+
+**RT-Formate:** GB0 `DXGI_FORMAT_R8G8B8A8_UNORM_SRGB` / `VK_FORMAT_R8G8B8A8_SRGB`, GB1/GB2
+`DXGI_FORMAT_R16G16B16A16_FLOAT` / `VK_FORMAT_R16G16B16A16_SFLOAT`, Tiefe im jeweils
+vorhandenen Szenen-Depth-Format (typeless + SRV auf D3D, damit der Resolve sie sampeln kann;
+D3D11/D3D12 lesen die Szenentiefe seit dem Decal-Port ohnehin schon als SRV). Alle drei
+legen RGBA16F-MRTs heute schon an (Refl-Prepass, GI-G-Buffer), neue Formatunterstützung
+ist also nicht nötig.
 
 Was über GL hinausgeht, ist bei allen dreien dasselbe:
 
