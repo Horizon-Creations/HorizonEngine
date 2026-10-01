@@ -2865,6 +2865,116 @@ TEST_CASE("Every node's HLSL stays inside SM 5.0's register range (D3D11/D3D12 b
 	CHECK(maxRegister(vs, 's') <= 15);
 }
 
+TEST_CASE("Clustered heLitP variant: three buffers, no sampler, refused without SSBOs (Thema 117)")
+{
+	// fragmentClustered is the forward clustered-lighting twin of fragment():
+	// the bind contract the per-backend steps build against is asserted here,
+	// on the emitted text, because no backend binds it yet.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::string glsl = HE::generateFragment(makeDemoGraph()).glsl;
+	const uint64_t h = std::hash<std::string>{}("clustered-demo");
+
+	SUBCASE("HLSL: ByteAddressBuffers on t24..t26, the sampler table unchanged")
+	{
+		const auto& plain = lib.fragment(h, glsl, B::HLSL);
+		const auto& cl    = lib.fragmentClustered(h, glsl, B::HLSL);
+		REQUIRE(plain.ok);
+		REQUIRE_MESSAGE(cl.ok, cl.log);
+		CHECK(cl.source != plain.source);                       // own cache slot
+		for (const char* reg : { "24", "25", "26" })
+		{
+			// ByteAddressBuffer, NOT StructuredBuffer: D3D11 must bind raw views.
+			const std::regex re(std::string("ByteAddressBuffer\\s+\\w+\\s*:\\s*register\\(t") + reg + "\\)");
+			CHECK_MESSAGE(std::regex_search(cl.source, re), "no ByteAddressBuffer on t", reg);
+			CHECK(plain.source.find(std::string("register(t") + reg + ")") == std::string::npos);
+		}
+		CHECK(cl.source.find("StructuredBuffer") == std::string::npos);
+		CHECK(plain.source.find("ByteAddressBuffer") == std::string::npos);
+		// Buffers cost no sampler: the s registers are the plain shader's (as a
+		// set — SPIRV-Cross declares in first-use order, and the cluster loop
+		// touches heGILocal earlier than the window loop does).
+		auto sortedRegs = [](const std::string& s) {
+			std::vector<int> r = registersOf(s, 's');
+			std::sort(r.begin(), r.end());
+			return r;
+		};
+		CHECK(sortedRegs(cl.source) == sortedRegs(plain.source));
+		CHECK(maxRegister(cl.source, 's') <= 15);
+		CHECK(maxRegister(cl.source, 'b') <= 13);
+		CHECK_FALSE(hasDuplicateRegister(cl.source, 't'));
+		CHECK_FALSE(twoLiveSamplersShareRegister(cl.source));
+		// The cluster loop samples without gradients (FXC, per-pixel trip count).
+		CHECK(cl.source.find("heLocalShadow.SampleLevel(") != std::string::npos);
+		CHECK(cl.source.find("heGILocal.SampleLevel(") != std::string::npos);
+		CHECK(plain.source.find("heLocalShadow.SampleLevel(") == std::string::npos);
+		// The gate lives in the shared block, so BOTH variants declare it.
+		CHECK(plain.source.find("clusterParams") != std::string::npos);
+		CHECK(cl.source.find("clusterParams") != std::string::npos);
+	}
+	SUBCASE("SPIR-V and Metal compile; Metal pins the lists to fragment buffers 4/5/6")
+	{
+		const auto& sv = lib.fragmentClustered(h, glsl, B::SpirV);
+		REQUIRE_MESSAGE(sv.ok, sv.log);
+		REQUIRE(sv.spirv.size() > 5);
+		CHECK(sv.spirv[0] == 0x07230203u);
+		CHECK(sv.spirv != lib.fragment(h, glsl, B::SpirV).spirv);
+
+		const auto& msl   = lib.fragmentClustered(h, glsl, B::Metal);
+		const auto& plain = lib.fragment(h, glsl, B::Metal);
+		REQUIRE_MESSAGE(msl.ok, msl.log);
+		REQUIRE(plain.ok);
+		using L = HE::MaterialShaderLibrary;
+		for (int slot : { L::kMetalClusterLightsBufferIndex, L::kMetalClusterGridBufferIndex,
+		                  L::kMetalClusterIndexBufferIndex })
+		{
+			const std::string attr = "[[buffer(" + std::to_string(slot) + ")]]";
+			CHECK_MESSAGE(msl.source.find(attr) != std::string::npos, "missing ", attr);
+			CHECK(plain.source.find(attr) == std::string::npos);
+		}
+		// Still the lighting block on buffer 1, and no new sampler argument.
+		CHECK(msl.source.find("[[buffer(1)]]") != std::string::npos);
+		const std::regex samp("\\[\\[sampler\\((\\d+)\\)\\]\\]");
+		auto samplers = [&](const std::string& s) {
+			std::vector<std::string> v;
+			for (auto it = std::sregex_iterator(s.begin(), s.end(), samp); it != std::sregex_iterator(); ++it)
+				v.push_back((*it)[1].str());
+			return v;
+		};
+		CHECK(samplers(msl.source) == samplers(plain.source));
+	}
+	SUBCASE("GLSL 4.10 / ES 3.0 refuse instead of handing back the window variant")
+	{
+		for (B b : { B::GLSL410, B::GLSLES300 })
+		{
+			const auto& r = lib.fragmentClustered(h, glsl, b);
+			CHECK_FALSE(r.ok);
+			CHECK(r.source.empty());
+			CHECK(r.log.find("SSBO") != std::string::npos);
+			CHECK(lib.fragment(h, glsl, b).ok);                 // the plain variant is unaffected
+		}
+	}
+	SUBCASE("the WPO vertex stage declares the grown lighting block too")
+	{
+		// wpoLightingBlock cuts HeLighting out of the preamble text; GL links
+		// both stages into one program and rejects a block declared differently
+		// in each — the gate fields must sit in the block unconditionally.
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int t   = g.addNode(MatNodeType::Time);
+		const int cmb = g.addNode(MatNodeType::Combine3);
+		REQUIRE(g.connect(t, 0, cmb, 0));
+		REQUIRE(g.connect(cmb, 0, out, HE::kMatOutputWPOPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.vertexBody.empty());
+		const auto& v = lib.customVertex(std::hash<std::string>{}(gen.vertexBody), gen.vertexBody, B::GLSL410);
+		REQUIRE_MESSAGE(v.ok, v.log);
+		CHECK(v.source.find("clusterParams") != std::string::npos);
+		CHECK(v.source.find("clusterCamFwd") != std::string::npos);
+	}
+}
+
 #if defined(_WIN32)
 TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile it")
 {
@@ -2952,6 +3062,33 @@ TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile i
 		}
 	}
 	MESSAGE("FXC accepted ", okPs, "/", total, " node pixel shaders (ps_5_0)");
+
+	// Thema 117: the clustered heLitP variant (fragmentClustered) — three
+	// ByteAddressBuffers on t24..t26 and a per-pixel-length light loop. Same
+	// sweep, same profile, so a D3D backend can switch to it without a surprise.
+	int okCl = 0;
+	for (const NodeShaderCase& c : allNodeShaderCases())
+	{
+		std::string err;
+		const bool ok = fxc(lib.fragmentClustered(caseHash(c), c.glsl, B::HLSL).source, "matPSCl", "ps_5_0", err);
+		CHECK_MESSAGE(ok, "FXC rejected the CLUSTERED pixel shader for '", c.name, "': ", err);
+		okCl += ok ? 1 : 0;
+	}
+	MESSAGE("FXC accepted ", okCl, "/", total, " clustered node pixel shaders (ps_5_0)");
+	// Why the cluster loop samples with SampleLevel: logged, not asserted — the
+	// next person who wants texture() back sees FXC's verdict without a run.
+	{
+		std::string e;
+		const bool ok = fxc(
+			"ByteAddressBuffer n : register(t1);\n"
+			"Texture2D<float4> a : register(t0); SamplerState sa : register(s0);\n"
+			"float4 main(float4 pos : SV_Position) : SV_Target {\n"
+			"  float4 r = 0; uint c = n.Load(uint(pos.x) * 4);\n"
+			"  for (uint k = 0; k < c; ++k) r += a.Sample(sa, pos.xy * k);\n"
+			"  return r; }",
+			"gradient in per-pixel loop", "ps_5_0", e);
+		MESSAGE("FXC probe [Sample inside a per-pixel-length loop]: ", ok ? std::string("accepted") : ("rejected: " + e));
+	}
 }
 
 // ═══ Thema 56: the D3D12 material root signature against a real device ═══════

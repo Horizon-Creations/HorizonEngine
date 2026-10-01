@@ -68,9 +68,19 @@ void FillMaterialWind(const ::EnvironmentSettings& env, MaterialShaderLibrary::L
 	out.camPos[3]   = std::max(env.windSpeed, 0.0f);
 }
 
+void FillMaterialClusterParams(const ClusterLightBuild& build, MaterialShaderLibrary::Lighting& out)
+{
+	for (int c = 0; c < 4; ++c)
+	{
+		out.clusterParams[c] = build.params[c];
+		out.clusterCamFwd[c] = build.camFwd[c];
+	}
+}
+
 ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
                                      bool               localShadowsActive,
-                                     bool               giMasksValid)
+                                     bool               giMasksValid,
+                                     bool               bottomLeftOrigin)
 {
 	ClusterLightBuild out;
 	out.grid.assign(kClusterCount, glm::uvec2(0u, 0u));
@@ -125,9 +135,11 @@ ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
 			const glm::vec4 clip = viewProj * glm::vec4(corner, 1.0f);
 			if (clip.w <= kClusterNear) { fullRect = true; break; }
 			// Top-left uv origin (Metal/D3D/Vulkan fragment coordinates) — flip
-			// v so the scatter and the shader's cluster pick agree.
+			// v so the scatter and the shader's cluster pick agree. GL's
+			// gl_FragCoord starts bottom-left, so there the NDC v is already it.
 			const float u = clip.x / clip.w * 0.5f + 0.5f;
-			const float v = 1.0f - (clip.y / clip.w * 0.5f + 0.5f);
+			const float vUp = clip.y / clip.w * 0.5f + 0.5f;
+			const float v = bottomLeftOrigin ? vUp : 1.0f - vUp;
 			u0 = std::min(u0, u); u1 = std::max(u1, u);
 			v0 = std::min(v0, v); v1 = std::max(v1, v);
 		}

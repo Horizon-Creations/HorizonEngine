@@ -124,7 +124,9 @@ HE_RENDERING_API void FillMaterialWind(const ::EnvironmentSettings&     env,
 //   camFwd  : xyz = camera forward (the slice's depth axis), w = near
 // Screen cells are picked from a TOP-LEFT-origin uv (Metal, D3D SV_Position
 // and Vulkan gl_FragCoord all agree on that); the scatter projects with the
-// GL-convention camera matrices (no clip fix) and flips v itself.
+// GL-convention camera matrices (no clip fix) and flips v itself. OpenGL's
+// gl_FragCoord is BOTTOM-left: a GL fill site passes bottomLeftOrigin = true
+// and the flip is skipped, so the shared shader's cell pick stays unchanged.
 inline constexpr int   kClusterGridX       = 16;
 inline constexpr int   kClusterGridY       = 9;
 inline constexpr int   kClusterGridZ       = 24;
@@ -156,7 +158,18 @@ struct ClusterLightBuild
 // cluster light keeps the channel the mask kernel rendered for it.
 HE_RENDERING_API ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
                                                       bool               localShadowsActive,
-                                                      bool               giMasksValid);
+                                                      bool               giMasksValid,
+                                                      bool               bottomLeftOrigin = false);
+
+// Hands a cluster build's grid to the graph-material lighting block — the
+// gate + grid of MaterialShaderLibrary::fragmentClustered's heLitP
+// (Lighting::clusterParams / clusterCamFwd). Touches nothing else: the light
+// WINDOW stays as FillMaterialLightWindow wrote it (the clustered shader skips
+// the window's point/spot slots itself, a plain one still needs them). Only a
+// fill site that also binds the three cluster buffers may call this; every
+// other site leaves the gate at 0.
+HE_RENDERING_API void FillMaterialClusterParams(const ClusterLightBuild&         build,
+                                                MaterialShaderLibrary::Lighting& out);
 
 // The light window that goes with a cluster build: directional lights only,
 // first kMaxLightWindow of them in extractor order, in the built-in scene
