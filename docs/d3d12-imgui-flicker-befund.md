@@ -107,6 +107,33 @@ flackernde Buttons. Deshalb nachrangig. Der Renderer hat für seine eigenen Heap
 richtige Muster: verzögerte Slot-Rückgabe über `m_freeSlotPending` (`D3D12Renderer.cpp:9383–9387`).
 Die ImGui-Freiliste im Editor hat keines.
 
+**Umgesetzt in Thema 113.** Die Freiliste des Editors (`D3D12DescriptorHeapAllocator` in
+`EditorApplication.cpp`) gibt einen Slot nicht mehr sofort zurück. `Free` signalisiert eine
+eigene `ID3D12Fence` auf der Command-Queue des Renderers und parkt den Slot mit diesem Wert.
+`Alloc` holt nur Slots zurück, deren Wert die Fence schon erreicht hat. Der Signal-Befehl steht
+hinter allem bisher Abgeschickten, also auch hinter dem Frame, der den alten Slot noch liest.
+Beim Neuregistrieren des Viewports kommt deshalb ein **anderer** Slot zurück. Das alte RT bleibt
+über `retiredViewportRTs` im Renderer am Leben, bis der Frame durch ist. Ist der Heap sonst voll,
+wartet `Alloc` auf den ältesten geparkten Wert, statt fehlzuschlagen.
+
+Fence statt Frame-Zähler: Der Editor ruft `Render()` nicht in jeder Iteration auf
+(`Application.cpp`, nur bei `present`). Eine Zahl von Editor-Frames sagt also nichts darüber,
+wie weit die GPU ist. Die Logik steckt plattformneutral in `src/HE_Editor/DeferredSlotFreeList.h`.
+`tests/test_deferred_slot_free_list.cpp` prüft sie. Als Gegenprobe gibt `retire()` sofort frei
+(das alte LIFO-Verhalten), dann schlagen der Splitter-Zug- und der Fence-Test fehl.
+
+Nicht verifiziert ist der Fix auf D3D12-Hardware. Der Pfad hängt an `_WIN32`, unter macOS läuft er
+weder im Bau noch zur Laufzeit. Der D3D12-Debug-Layer meldet so ein Deskriptor-Rennen nicht, denn
+ein CPU-Schreibzugriff in einen Deskriptor-Heap ist kein API-Fehler. Die Abnahme ist deshalb optisch:
+im D3D12-Editor mehrere Sekunden einen Dock-Splitter am Viewport schnell hin und her ziehen. Der
+Viewport-Inhalt darf dabei keinen Frame lang falsch oder leer aufblitzen.
+
+Gleiches Muster, nicht angefasst: Unter Vulkan gibt `ImGui_ImplVulkan_RemoveTexture` den
+Descriptor-Set des Viewports beim Neuregistrieren sofort frei (`EditorApplication.cpp`, Zweig
+`HE_IMGUI_VULKAN_ENABLED`). Das passt zur einmaligen Meldung `vkFreeDescriptorSets … currently in
+use` aus Schritt 4. `D3D12Renderer::DestroyImGuiTexture` ist leer, Icon-Slots kommen also nie in
+die Freiliste zurück.
+
 ## Geprüft und für das Flackern ausgeschlossen
 
 | Verdacht | Befund | Zeilen |
