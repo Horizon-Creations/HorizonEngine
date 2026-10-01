@@ -106,10 +106,10 @@ HE_RENDERING_API void FillMaterialWind(const ::EnvironmentSettings&     env,
 // DIRECTIONAL lights only (BuildDirectionalLightWindow) — a local light must
 // live in exactly one of the two, or it is counted twice.
 //
-// This is the same algorithm (and the same buffer layout) as Metal's deferred
-// EncodeClusterData: the forward built-in shaders of D3D11/D3D12/Vulkan consume
-// it through structured buffers / SSBOs. Metal still carries its own copy in
-// MetalRenderer.mm; this builder is shaped so it can take over there too.
+// One builder for every backend: the forward built-in shaders of
+// D3D11/D3D12/Vulkan consume it through structured buffers / SSBOs, Metal's
+// deferred resolve and its forward graph materials (fragmentClustered) through
+// fragment buffers 4/5/6 (MetalRenderer::BuildFrameClusterLights).
 //
 // Buffer contract (positional — the shaders index by it):
 //   lights  : 4 vec4 per light

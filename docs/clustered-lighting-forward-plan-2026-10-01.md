@@ -69,8 +69,32 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
 | **D3D11** | t24–t26 | Drei Puffer mit `D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS` + SRV `DXGI_FORMAT_R32_TYPELESS`, `D3D11_BUFFEREX_SRV_FLAG_RAW` (SPIRV-Cross emittiert `ByteAddressBuffer`; die strukturierten t18–t20 sind dafür **nicht** verwendbar — ein Puffer kann nicht STRUCTURED und RAW zugleich). Alternativ den Hand-HLSL auf `ByteAddressBuffer` umstellen und einen Puffersatz teilen. Materialpfad (`:4306`) auf `fragmentClustered`, Fill: `FillMaterialClusterParams` aus dem schon vorhandenen Build (`:5622`). Exporter-/Pak-Variante siehe §4. | FXC-Sweep (CI Windows), WARP-Pixeltest mit > 8 Lichtern |
 | **D3D12** | t24–t26 | `D3D12MaterialRootSignature.h`: drei Root-SRVs (oder eine Range) für t24–t26; Root-SRVs sind raw/structured-agnostisch, der vorhandene Ring (`:4760`) kann direkt dran. PSO-Warmup prüfen. | WARP-PSO-Test (`test_material_graph.cpp`, Thema 56) um t24–t26 erweitern, dann Pixeltest |
 | **Vulkan** | Set 0, 24–26 | `m_matSetLayout` (`:2354`) um drei `STORAGE_BUFFER` (Fragment) erweitern, Pool-Größen, Material-Descriptor-Writes auf die vorhandenen Cluster-SSBOs (`:1863`). | nur Kompilat (kein Laufzeit-Zeuge in CI; MoltenVK lokal nur Syntax) |
-| **Metal** (Forward) | Buffer 4/5/6 | Scatter: `EncodeClusterData` hat eine eigene Kopie — erst auf `HE::BuildClusterLights` umstellen (laut `LightPacking.h` dafür vorgesehen), dann vor Material-Draws binden und `FillMaterialClusterParams` in `FillMaterialLighting`. Der Deferred-Resolve teilt sich `matLight`, wird aber **ohne** `HE_CLUSTERED` kompiliert (sein `heLitP` liest das Gate nie, seine Cluster-Lichter kommen aus `HeResolve`) — kein Doppelzählen. Wer den Resolve später auf die Preamble-Funktion umstellt, muss genau das neu prüfen. | he_shot A/B (md5) lokal, Szene mit > 8 Lokallichtern |
+| **Metal** (Forward) | Buffer 4/5/6 | **Erledigt in Schritt 2**, siehe §3.1. | he_shot A/B (md5) lokal, `MANYLIGHTS=16` |
 | **OpenGL** (≥ 4.3) | SSBO 24–26 | Neues Target `Glsl430` in `ShaderCompiler.h` (+ `Backend::GLSL430`), Laufzeitwahl nach `GLAD_GL_VERSION_4_3` (wie `m_giSupported`, `:3082`); SPIRV-Cross-GLSL braucht die Binding-Nummern explizit (`layout(binding=…)`, GL 4.3 hat sie). Fill mit `BuildClusterLights(..., bottomLeftOrigin = true)`. macOS-GL (4.1) bleibt beim Fenster. | keiner auf diesem Mac (GL 4.1); nur CI-Kompilat |
+
+### 3.1 Metal-Forward (Schritt 2, erledigt)
+
+- `EncodeClusterData` hat keine eigene Scatter-Kopie mehr: `BuildFrameClusterLights()`
+  ruft `HE::BuildClusterLights` (Atlas-Lane an `m_localShadowTex`, GI-Kanal am selben
+  Gate wie vorher), `BindClusterBuffers()` lädt die drei Listen in den Frame-Ring und
+  bindet sie auf `kMetalCluster*BufferIndex` (4/5/6). Die doppelten `kCluster*`-Konstanten
+  im Header sind weg.
+- `EncodeScene` baut **einen** Build pro Frame direkt nach `FillMaterialLighting`, bindet
+  4/5/6 einmal für den ganzen Pass (Sky/Skinned fassen nur 0–3 an) und setzt das Gate per
+  `HE::FillMaterialClusterParams` in `matLight`. Das Fenster bleibt voll (§2.1/1). Der
+  Stored-Resolve nimmt denselben Build, der Tile-Resolve (eigener Encoder) baut seinen.
+- `GetOrBuildMaterialPipeline`: Forward-PSOs (opak + blended) aus `fragmentClustered`,
+  bei Compile-Fehler Rückfall auf `fragment()` mit Warnung; G-Buffer-Variante und
+  vorkompilierte Blobs unverändert. Die Materialvorschau bindet leere Listen (Gate 0).
+- `HE_FORWARD_CLUSTER=0` (einmal in `Initialize` gelesen, wie auf D3D/Vulkan) = alter Pfad.
+- **Zeuge** `HE_DUMP_MANYLIGHTS=N[builtin]` (EditorApplication): Graph-Material-Boden unter
+  zwei Reihen aus N bunten Punktlichtern bei y≈200. Aufnahme:
+  `HE_SKY_TIME=10 scripts/he_shot.py out.png MANYLIGHTS=16 TOD=0 COVERAGE=0 CLOUDMODE=0 AA=0 CAMY=207 CAMZ=2 PITCH=-38 RENDERPATH=0`.
+  Ergebnis (md5, Release, M5): vorher 8 von 16 Lichtpools, nachher 16/16; die 8 vorher
+  schon beleuchteten Pools sind bis auf 2 Pixel ±1 identisch. `HE_FORWARD_CLUSTER=0`,
+  Deferred (`RENDERPATH=1`), die Built-in-Kontrolle (`MANYLIGHTS=16builtin`) und
+  `MATERIALTEST=switchon` sind bitgleich zu vorher. Unter `MTL_DEBUG_LAYER=1` meldet
+  der Lauf keine fehlende Bindung auf 4/5/6 (siehe §5 zu den Samplern).
 
 ## 4. Pak-Varianten (gilt für D3D11/D3D12/Vulkan)
 
@@ -92,3 +116,12 @@ Root-Signatur sie optional abdeckt).
 - Der Resolve sampelt im Cluster-Loop mit `texture()`. Für einen späteren HLSL-Resolve
   (Thema 116, §4.1) muss er auf `textureLod` wie der Forward-Zwilling — der Drift-Guard
   normalisiert genau diesen Unterschied.
+- (Schritt 2) Unter `MTL_DEBUG_LAYER=1` scheitert ein Material-Draw schon **vor** dieser
+  Änderung an fehlenden **Samplern** 5–12/14 (`heGIShadowSmplr` … `heSkyEnvSmplr`),
+  identisch mit `HE_FORWARD_CLUSTER=0` und `=1` (Szene `MANYLIGHTS=16` +
+  `MATERIALTEST=translucent` + `PREVIEW=1`). Im Normalbetrieb harmlos, aber es versperrt
+  Validierungsläufe.
+- (Schritt 2) Im Zeugen ist der Boden im Deferred-Pfad deutlich heller als im Forward-Pfad
+  (Ambient/IBL), bei gleicher Szene. Nicht untersucht.
+- Der Exporter backt für Metal weiterhin `fragment()` (§4) — ausgelieferte Spiele bleiben
+  bis dahin beim 8er-Fenster.

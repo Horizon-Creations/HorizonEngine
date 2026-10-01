@@ -52,6 +52,7 @@ struct GpuTimedPoint { const char* name; uint32_t slot; };
 struct SDL_Window;
 struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend material shader
 struct ParticleShaderVariant; // ContentManager/Assets.h — baked per-backend particle shader
+namespace HE { struct ClusterLightBuild; } // HorizonRendering/LightPacking.h
 // Per-frame hand-off between the deferred G-buffer pass and the lighting pass
 // (defined in MetalRenderer.mm — it carries draw structs built on .mm-local
 // types). Lives on EncodeFrame's stack, never across frames.
@@ -405,18 +406,27 @@ private:
 	// 8-light window — the light limit falls. The heLight window then carries
 	// directional lights only. Default on for deferred; HE_DEFERRED_CLUSTER=0
 	// forces the 8-light resolve (A/B guard). GL keeps the 8-light resolve
-	// (no SSBOs in GL 4.1).
-	static constexpr int   kClusterGridX = 16;
-	static constexpr int   kClusterGridY = 9;
-	static constexpr int   kClusterGridZ = 24;
-	static constexpr float kClusterNear  = 0.1f;
-	static constexpr float kClusterFar   = 1000.0f;
-	static constexpr int   kMaxClusteredLights = 256;
+	// (no SSBOs in GL 4.1). Grid, caps and scatter are the shared
+	// HE::BuildClusterLights (LightPacking.h) — the same lists the D3D/Vulkan
+	// forward shaders read.
 	bool  m_deferredClustered = true;
-	// Build this frame's cluster data from m_renderWorld, bind the three SSBO
-	// buffers on the encoder (fragment buffers 4/5/6), fill ru's cluster fields
-	// and rewrite matLight's window to DIRECTIONAL lights only.
-	void  EncodeClusterData(void* renderEncoder,
+	// Forward twin (Thema 117): graph materials (heLitP) in the scene pass are
+	// built from MaterialShaderLibrary::fragmentClustered and shade point/spot
+	// lights from the same lists, bound once per EncodeScene on fragment
+	// buffers 4/5/6. HE_FORWARD_CLUSTER=0 keeps the plain fragment() and the
+	// 8-light window (A/B guard). Read ONCE at init: the material pipeline
+	// cache is keyed by the fragment hash alone, so the variant must not flip
+	// at runtime.
+	bool  m_forwardClustered = true;
+	// This frame's cluster lists from m_renderWorld (camera + lights must be
+	// extracted already), with the atlas/GI-mask lanes gated on what is bound.
+	HE::ClusterLightBuild BuildFrameClusterLights() const;
+	// Upload a build's three lists into the frame's transient ring and bind them
+	// on fragment buffers 4/5/6 (kMetalCluster*BufferIndex).
+	void  BindClusterBuffers(void* renderEncoder, const HE::ClusterLightBuild& build);
+	// Deferred resolve: bind `build`, fill ru's cluster fields and rewrite
+	// matLight's window to DIRECTIONAL lights only.
+	void  EncodeClusterData(void* renderEncoder, const HE::ClusterLightBuild& build,
 	                        HE::MaterialShaderLibrary::Lighting& matLight,
 	                        HE::MaterialShaderLibrary::ResolveUniforms& ru);
 	bool  m_deferredFrameActive     = false;   // this frame renders deferred (set before SSAO — P5 reads it)
