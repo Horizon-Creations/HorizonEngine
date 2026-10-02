@@ -10,9 +10,11 @@ Gemessen auf NN-WS03 (RTX 4070), Release-Build in einem privaten Baum (`C:/hw131
 Bei aktivem GI kommt die Sonnen-Schattenkante **nicht** aus der Shadow-Map und **nicht** aus den
 DDGI-Probes, sondern aus einer eigenen Kette: ray-getracte Sonnenmaske, 1 Strahl pro Pixel,
 halbe Auflösung, dann Temporal-Akkumulation, dann 3×3-Blur. Diese Maske **ersetzt** die CSM
-komplett. Die Kette hat zwei Defekte:
+komplett. Die Kette hat drei Defekte. Das gemeldete Bild entsteht aus 1 und 3 zusammen mit
+dem Grundrauschen (1 spp, weißes Rauschen, nur ~10 effektive Frames, 3×3-Blur auf halber
+Auflösung). Defekt 2 kommt mit der Laufzeit hinzu.
 
-1. **Hauptursache für das gemeldete Bild (fleckig, ausgefranst, wechselt jeden Frame):**
+1. **Größter Einzelhebel im Stand (fleckig, ausgefranst, wechselt jeden Frame):**
    `gi_temporal` clampt die History auf Min/Max der 3×3-Nachbarschaft des **rohen
    1-spp-Signals**. Das Signal ist binär (0/1). Im Halbschatten ist die Nachbarschaft
    regelmäßig zufällig einheitlich (alle 0 oder alle 1). Dann wird die History auf 0 oder 1
@@ -21,18 +23,27 @@ komplett. Die Kette hat zwei Defekte:
    halber Auflösung. Zusammen ergibt das genau das Muster aus der Meldung.
    Auf der Hardware belegt: Wird nur der Clamp entfernt, sinkt das p99-Frame-zu-Frame-Flackern
    an der Kante von **8.0 auf 2.9** Graustufen, und das Hochfrequenz-Rauschen geht von 1.10 auf
-   0.84 zurück.
-2. **Zweiter, laufzeitabhängiger Defekt:** Der Jitter-Seed ist ein unbeschränkt wachsender
+   0.84 zurück. Das mittlere Flackern sinkt allerdings nur um ~40 % (1.29 → 0.78). Den Clamp zu
+   entfernen allein reicht also nicht.
+2. **Laufzeitabhängiger Defekt:** Der Jitter-Seed ist ein unbeschränkt wachsender
    `float` (+1 pro GI-Frame). Er läuft ungebremst in `fract(sin(dot(gid + seed·13.37, …))·43758)`.
    Ab Seed ≈ 1e5 kollabiert der Hash auf der GPU. Bei 144 fps sind das ≈ 11.6 min Editor-Laufzeit,
    bei 60 fps ≈ 28 min. Der Kegel-Jitter steht dann still: Der Halbschatten verschwindet, der
-   Schatten wird hart, verschoben und um ~10 Graustufen dunkler. Belegt auf **Vulkan und D3D12**
-   (beide HW-RT, Shader-Tausch ohne Rebuild). Schon bei Seed 2e4 (≈ 2.3 min @144 fps) ist der
-   Hash messbar degradiert: weniger zeitliche Variation, mehr HF-Struktur.
+   Schatten wird hart, verschoben und um ~10 Graustufen dunkler. Gemessen auf **Vulkan und
+   D3D12**, jeweils mit dem HW-RT-Kernel auf NVIDIA (Shader-Tausch ohne Rebuild). Die SW-Kernel
+   (D3D11, GL, Vulkan/D3D12 ohne HW-RT) teilen Hash und Seed und sollten sich gleich verhalten,
+   gemessen ist das nicht. Andere GPU-Hersteller sind nicht geprüft. Schon bei Seed 2e4
+   (≈ 2.3 min @144 fps) ist der Hash messbar degradiert: weniger zeitliche Variation, mehr
+   HF-Struktur.
+3. **Unter Kamerabewegung verwirft die Reprojektion die History:** Die Positionstoleranz
+   (`clamp(0.02·clip.w, 0.01, 0.06)` Welteinheiten gegen die Half-Res-Weltposition) ist so eng,
+   dass schon ein Frame mit 0.3° Yaw an der Kante History verwirft. Das p99-Flackern steigt dann
+   auf 15.1 (statisch 8.0). Erst ohne Clamp **und** mit gelockerter Toleranz fällt es auf 5.1
+   (§3 C). Das ist das „Wandern" beim Bewegen der Editor-Kamera.
 
 **Die gesamte Kette ist auf allen fünf Backends textgleich, Metal eingeschlossen.** Eine
 Metal-Abweichung, die erklärt, warum Metal „nicht betroffen" sein soll, steht nicht im Code
-(siehe §5). Auf diesem Rechner läuft kein Metal, der Metal-Vergleich ist deshalb reine
+(siehe §6). Auf diesem Rechner läuft kein Metal, der Metal-Vergleich ist deshalb reine
 Code-Lektüre.
 
 ## 1. Die Kette, pro Backend
@@ -70,6 +81,12 @@ Witness: `HE_DUMP_SHADOWINSTTEST=1` (Boden + 7 Würfel), `HE_DUMP_GI=1`, `SKYTES
   ~1–2 Masken-Pixel breit. Die Kante sieht weich aus, das Rauschen geht im Blur unter
   (Flackern 0.28). Bei **6°** (Config-Vorlage mit `"GILightRadius": 6.0`) tritt das gemeldete
   Bild deutlich hervor: weich, aber fleckig, ausgefranst und dither-artig.
+  **6° ist kein Sonderfall, sondern nur ein Hebel für die Penumbra-Breite in Masken-Pixeln.**
+  Die Breite ist ≈ 2·d·tan(r), d = Abstand Verdecker → Empfänger entlang des Lichtstrahls.
+  tan 6° / tan 0.5° ≈ 12. Beim Default 0.5° entsteht dieselbe Breite also bei ~12× größerem d
+  (die Würfel hier liegen ~1.5–3 m über dem Boden, entsprechend ~20–35 m: Gebäude, Baumkrone,
+  Gelände unter tiefer Sonne) oder bei ~12× näherer Kamera. Mit Default-Config ist der Effekt in
+  echten Szenen also genauso zu erwarten, nur nicht in dieser kleinen Witness-Szene.
 * Metriken (`ana.py`) im Kantenband, d. h. in den Bodenpixeln mit Schattengradient
   (~47 000 px): `flicker` = mittlere |f61−f60| (8-bit-Luminanz) mit p99; `hf` = mittlere
   |Bild − 5×5-Box|, also Hochfrequenz-Rauschen; `L` = mittlere Luminanz.
@@ -108,7 +125,24 @@ Bei 0.5° (Default) zeigen sich dieselben Trends, nur kleiner: Stock 0.276 / p99
 Seed + 1e5 → flicker 0.000, hf 2.168, L 157.8. Das ist derselbe Kollaps wie auf Vulkan.
 Danach wurde das Original zurückgelegt, die MD5 stimmt (AB790A13…).
 
-### 2.3 Simulation (`hashsim.py`)
+### 2.3 Ein Frame Kamerabewegung (Vulkan, 6°)
+
+`HE_DUMP_MBYAWSTEP=0.3`: Die Settle-Frames laufen aus einer um 0.3° zurückgedrehten Pose, nur
+der aufgenommene Frame steht an der echten Pose. Das ist genau ein Frame Reprojektion. Gemessen
+wird f60 gegen f61 bei gleicher Endpose (nur der Seed unterscheidet sich).
+
+| Temporal-Variante | flicker | p99 | hf |
+|---|---|---|---|
+| Stock | 2.227 | 15.1 | 1.144 |
+| ohne Clamp | 1.447 | 11.1 | 0.886 |
+| Toleranz 0.5 statt `clamp(0.02·w, 0.01, 0.06)` | 2.094 | 12.9 | 1.124 |
+| ohne Clamp + Toleranz 0.5 | 1.307 | **5.1** | 0.863 |
+
+Statisch lagen dieselben Läufe bei p99 8.0 (Stock) bzw. 2.9 (ohne Clamp). Bei Bewegung verliert
+die Kante also History durch **beide** Mechanismen. Erst wenn beide entschärft sind, kommt das
+Flackern in die Nähe des statischen Falls. Originale danach zurückgelegt, MD5 geprüft.
+
+### 2.4 Simulation (`hashsim.py`)
 
 float32-Emulation der Kette an einer geraden Kante. Der Clamp verdoppelt den RMS-Fehler gegen
 die analytische Penumbra (0.062 gegen 0.028) und erhöht das Flackern um ~40 %, unabhängig vom
@@ -119,7 +153,7 @@ Hardware-Befund.
 
 ## 3. Ursachen im Detail
 
-### A. Neighbourhood-Clamp auf binärem 1-spp-Signal (Hauptursache, alle Backends)
+### A. Neighbourhood-Clamp auf binärem 1-spp-Signal (größter Einzelhebel, alle Backends)
 
 Der Clamp soll Ghosting verhindern, wenn sich der **Verdecker** bewegt (laut Kommentar „Metal
 lesson"). Bei 1 Strahl/Pixel ist `raw` aber 0 oder 1. Liegt ein Penumbra-Pixel mit
@@ -135,7 +169,7 @@ Verstärkt wird das durch (a) History-Gewicht 0.9 (nur ~10 Frames effektiv, selb
 bleibt Restrauschen), (b) weißes Rauschen aus `sin`-Hash statt Blue Noise oder
 Low-Discrepancy-Folge, (c) Blur nur 3×3 und nicht kantenerhaltend.
 
-### B. Unbeschränkter `float`-Seed im `sin`-Hash (laufzeitabhängig, alle Backends)
+### B. Unbeschränkter `float`-Seed im `sin`-Hash (laufzeitabhängig; gemessen: HW-Kernel Vulkan/D3D12 auf NVIDIA, Code in allen Kopien gleich)
 
 `giHash2` rechnet `p = vec2(gid) + seed·13.37`, dann `fract(sin(dot(p, (12.9898, 78.233)))·43758.5453)`.
 Das Argument von `sin` wächst linear mit der Laufzeit (Seed 1e5 → ~1.2e8). Ab 2²³ ist das
@@ -150,7 +184,19 @@ Derselbe Hash steckt mit demselben Seed-Muster auch in den **GI-Reflexions-Kerne
 (`OpenGLRenderer.cpp:2381`, `MetalRenderer.mm:3464`, Kopien analog). Ein Fix sollte sie
 mitnehmen.
 
-### C. Ausgeschlossen
+### C. Reprojektion verwirft History bei Bewegung (alle Backends, gleiche Toleranz)
+
+Die Temporal-Pässe vergleichen die Weltposition des aktuellen Pixels mit der in der History
+gespeicherten Position am reprojizierten UV (Point-Sampler, Half-Res). Bei flachem Blick auf den
+Boden überdeckt ein Masken-Texel mehr Welt als die Toleranz von höchstens 0.06 zulässt. Nach
+einer Subpixel-Verschiebung trifft der Point-Lookup den Nachbartexel, `posError > tolerance`,
+`w = 0`, und der Pixel startet wieder bei rohem 1-spp. Mit Toleranz 0.5 fällt das p99-Flackern
+unter Bewegung (ohne Clamp) von 11.1 auf 5.1 (§2.3). Die enge Toleranz ist aber Absicht: Sie
+verhindert Ghosting über Würfelkanten („Metal lesson 58ee312"). Ein Fix braucht deshalb einen
+genaueren Test (z. B. Normalen-/Ebenen-Abstand statt Punktabstand, Toleranz relativ zur
+Texel-Ausdehnung, bilinearer History-Lookup mit Gewichten pro Tap), nicht nur eine größere Zahl.
+
+### D. Ausgeschlossen
 
 * **DDGI-Probes:** Die Strahlrichtungen sind deterministisch (Oktaeder-Texel,
   `gi_probe.comp:204-205`), es gibt keine Rotation pro Frame. Die Hysterese ist überall 0.92
@@ -167,6 +213,9 @@ mitnehmen.
   Mittelwert ± k·σ über 5×5 des rohen Signals oder Min/Max des *geblurrten* Rohsignals), oder
   nur clampen, wenn die Verdeckerbewegung erkannt ist. Der reine Wegfall halbiert das Flackern
   schon (§2.2), bringt aber das Occluder-Ghosting zurück, gegen das der Clamp eingeführt wurde.
+* **Reprojektion genauer machen statt lockerer** (§3 C): Ebenen-/Normalen-Test oder Toleranz
+  relativ zur Texel-Ausdehnung, damit Bewegung History nicht mehr verwirft, ohne das
+  Würfelkanten-Ghosting zurückzubringen.
 * **Seed beschränken und Hash tauschen:** ganzzahliger Frame-Index modulo Periode (z. B.
   `frame & 1023` als `uint`) in einen Integer-Hash (PCG/Wang), besser Blue Noise oder R2-Folge
   pro Pixel. Das beseitigt Defekt B und senkt nebenbei das Rauschen.
@@ -177,16 +226,26 @@ mitnehmen.
   wie oben. Den Seed-Kollaps prüft man über einen Seed-Offset (Shader-Tausch) oder einen
   künftigen Dump-Knopf für den Start-Seed.
 
-## 5. Offene Frage: Warum soll Metal nicht betroffen sein?
+## 5. Grenzen dieser Analyse
+
+* Metal nur per Code verglichen, kein Metal-Lauf (kein Mac an NN-WS03).
+* Messungen auf einer GPU (RTX 4070); der Seed-Kollaps nur auf den HW-Kerneln (Vulkan, D3D12).
+* Witness bei `GILightRadius` 6° (Äquivalenz zum Default siehe §2), 1280×720.
+* Bewegung nur als ein Frame Yaw (0.3°) geprüft, keine längere Kamerafahrt, kein bewegter
+  Verdecker.
+* GL ist heller und flackert stärker als die anderen drei; nicht untersucht.
+
+## 6. Offene Frage: Warum soll Metal nicht betroffen sein?
 
 Der Metal-Code ist an jeder Stelle der Kette gleich: Kernel, Hash, Seed, Temporal mit
 demselben Clamp, Blend 0.9, Half-Res, lineares Upsample. Nach dem Code müsste Metal **Defekt A
 genauso** zeigen. Belegen lässt sich keine Erklärung, möglich sind:
 
-1. **Pro-Rechner-Config:** `GILightRadius` liegt in `%APPDATA%`/`~/Library/…` des jeweiligen
-   Rechners. Beim Default 0.5° ist der Effekt klein (§2), bei großem Radius groß. Steht der Mac
-   auf dem Default, sieht er glatt aus. Am schnellsten prüfbar: dieselbe Config auf beiden
-   Rechnern.
+1. **Pro-Rechner-Config und Szene:** `GILightRadius` liegt in `%APPDATA%`/`~/Library/…` des
+   jeweiligen Rechners. Sichtbar wird der Effekt über die Penumbra-Breite in Masken-Pixeln
+   (Radius × Verdecker-Abstand / Kameraabstand, §2). Andere Config oder andere Szene/Kamera auf
+   dem Mac können den Unterschied erklären. Bei gleicher Szene, Config und Kamera erklärt das
+   **nichts**. Am schnellsten prüfbar: dieselbe Config und Szene auf beiden Rechnern.
 2. **Retina-Dichte:** Die 2-Bildpixel-Flecken der Half-Res-Maske sind auf einem 2×-Display
    physisch halb so groß.
 3. **Bildrate und Laufzeit (nur Defekt B):** Der Seed wächst pro Frame. 60 Hz auf dem Mac gegen
