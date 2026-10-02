@@ -1067,10 +1067,12 @@ float4 main(In i) : SV_Target {
 
 // ─── 2D UI canvas HLSL ──────────────────────────────────────────────────────
 // Generates a screen-space quad from SV_VertexID (0-3, TRIANGLESTRIP).
-// cbuffer layout: rect(16) + color(16) + uvRect(16) + viewport(8) + mode(4) +
-// pad(4) = 64 bytes.  uUVRect = {u0, v0, u1, v1} into the font atlas (glyph
-// quads); uMode: 0 = solid color, 1 = font-atlas glyph (alpha from the atlas R
-// channel).  Mirrors kUIVS/kUIFS on the GL backend.
+// cbuffer layout: see UICB below, 176 bytes.  uUVRect = {u0, v0, u1, v1} into
+// the font atlas (glyph quads); uMode: 0 = solid color, 1 = font-atlas glyph
+// (alpha from the atlas R channel).  Mirrors kUIVS/kUIFS on the GL backend,
+// including the "Schicht 0" shape (corner radii, border, gradient, soft edge,
+// inner shadow): the pixel shader below is kUIFS line for line, so a widget
+// looks the same on both.
 static const char* kUIHLSL = R"HLSL(
 cbuffer UICB : register(b0) {
     float4 uRect;      // xy = top-left in pixels, zw = size in pixels
@@ -1080,10 +1082,16 @@ cbuffer UICB : register(b0) {
     float  uMode;      // 0 = solid quad, 1 = font-atlas glyph
     float  _upad;
     float4 uRotation;  // { angle(radians), pivotX, pivotY, unused }
+    float4 uCornerRadius;  // px per corner: TL, TR, BR, BL
+    float4 uBorderColor;
+    float4 uGradientColor;
+    float4 uInnerColor;
+    float4 uStyle0;    // x = border width px, y = gradient on, z = gradient angle deg, w = radial
+    float4 uStyle1;    // x = blur px (drop shadow), y = inner shadow blur px, zw unused
 };
 Texture2D    uFontAtlas : register(t0);
 SamplerState uSamp      : register(s0);
-struct UIOut { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; };
+struct UIOut { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; float2 local : TEXCOORD1; };
 UIOut UIVSMain(uint vid : SV_VertexID)
 {
     static const float2 c[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
@@ -1100,13 +1108,62 @@ UIOut UIVSMain(uint vid : SV_VertexID)
                     1.0f - sp.y / uViewport.y * 2.0f,
                     0.0f, 1.0f);
     o.uv = lerp(uUVRect.xy, uUVRect.zw, uv);
+    o.local = uv;      // 0..1 across the quad (for the rounded-rect SDF)
     return o;
 }
+// One rounded box, four radii (TL, TR, BR, BL); `p` relative to the centre, y
+// down. Same function as heRoundedBoxSDF in kUIFS / the Metal path.
+float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
+{
+    float r = (p.x > 0.0f) ? ((p.y > 0.0f) ? radii.z : radii.y)
+                           : ((p.y > 0.0f) ? radii.w : radii.x);
+    r = min(r, min(halfSz.x, halfSz.y));
+    float2 q = abs(p) - (halfSz - r);
+    return length(max(q, 0.0f)) + min(max(q.x, q.y), 0.0f) - r;
+}
+float heMaxRadius(float4 radii) { return max(max(radii.x, radii.y), max(radii.z, radii.w)); }
 float4 UIPSMain(UIOut i) : SV_TARGET
 {
     if (uMode > 0.5f)
         return float4(uColor.rgb, uColor.a * uFontAtlas.Sample(uSamp, i.uv).r);
-    return uColor;
+    float4 fill = uColor;
+    if (uStyle0.y > 0.5f)
+    {
+        float t;
+        if (uStyle0.w > 0.5f)
+        {
+            // Radial: centre out to the farthest corner, in pixels.
+            float2 dpx = (i.local - 0.5f) * uRect.zw;
+            t = saturate(length(dpx) / max(1e-4f, length(uRect.zw * 0.5f)));
+        }
+        else
+        {
+            float a = uStyle0.z * 0.017453292f;
+            float2 dir = float2(sin(a), cos(a));
+            t = saturate(dot(i.local - 0.5f, dir) + 0.5f);
+        }
+        fill = lerp(uColor, uGradientColor, t);
+    }
+    const float borderW = uStyle0.x, blurPx = uStyle1.x, innerBlur = uStyle1.y;
+    if (heMaxRadius(uCornerRadius) <= 0.0f && borderW <= 0.0f &&
+        blurPx <= 0.0f && innerBlur <= 0.0f) return fill;
+    // A blurred quad IS a drop shadow: the producer grew the rect by the blur.
+    float2 halfsz = uRect.zw * 0.5f - blurPx;
+    float d = heRoundedBoxSDF((i.local - 0.5f) * uRect.zw, halfsz, uCornerRadius);
+    float cov = (blurPx > 0.0f) ? (1.0f - smoothstep(-blurPx, blurPx, d))
+                                : saturate(0.5f - d);
+    if (blurPx > 0.0f) return float4(fill.rgb, fill.a * cov);
+    if (innerBlur > 0.0f)
+    {
+        float t = 1.0f - smoothstep(0.0f, innerBlur, -d);
+        float ia = uInnerColor.a * saturate(t);
+        fill = float4(lerp(fill.rgb, uInnerColor.rgb, ia), fill.a);
+    }
+    if (borderW <= 0.0f) return float4(fill.rgb, fill.a * cov);
+    float inner = saturate(0.5f - (d + borderW));
+    float3 rgb  = lerp(uBorderColor.rgb, fill.rgb, inner);
+    float  al   = lerp(uBorderColor.a, fill.a, inner);
+    return float4(rgb, al * cov);
 }
 )HLSL";
 
@@ -5187,9 +5244,10 @@ struct D3D11RendererImpl
         dev.CreatePixelShader (psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &uiPS);
 
         // cbuffer: rect(16) + color(16) + uvRect(16) + viewport(8) + mode(4) +
-        // pad(4) + rotation(16) = 80 bytes
+        // pad(4) + rotation(16) + cornerRadius, borderColor, gradientColor,
+        // innerColor, style0, style1 (6 x 16) = 176 bytes
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth      = 80u;
+        bd.ByteWidth      = 176u;
         bd.Usage          = D3D11_USAGE_DYNAMIC;
         bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -5208,8 +5266,12 @@ struct D3D11RendererImpl
         bd2.RenderTarget[0].SrcBlend              = D3D11_BLEND_SRC_ALPHA;
         bd2.RenderTarget[0].DestBlend             = D3D11_BLEND_INV_SRC_ALPHA;
         bd2.RenderTarget[0].BlendOp               = D3D11_BLEND_OP_ADD;
+        // Alpha "over" (same as the Vulkan UI pipeline): an opaque target stays
+        // opaque. ZERO here wrote the quad's own alpha into the target, and the
+        // editor shows the viewport through ImGui::Image WITH blending, so a
+        // drop shadow (alpha 0.45) punched a see-through hole into PIE.
         bd2.RenderTarget[0].SrcBlendAlpha         = D3D11_BLEND_ONE;
-        bd2.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_ZERO;
+        bd2.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_INV_SRC_ALPHA;
         bd2.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
         bd2.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
         dev.CreateBlendState(&bd2, &uiBlend);
@@ -5250,7 +5312,10 @@ struct D3D11RendererImpl
         uint32_t boundAtlasKey = 0;
 
         struct UICBData { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport;
-                          float mode; float pad; glm::vec4 rotation; };
+                          float mode; float pad; glm::vec4 rotation;
+                          glm::vec4 cornerRadius, borderColor, gradientColor, innerColor,
+                                    style0, style1; };
+        static_assert(sizeof(UICBData) == 176, "UICBData must match the 176-byte UICB");
 
         // Clipping is a scissor rectangle, set only when it CHANGES — a widget
         // tree emits its quads in tree order, so equally-clipped quads arrive in
@@ -5300,6 +5365,13 @@ struct D3D11RendererImpl
             cb.mode     = obj.type == 2 ? 1.0f : 0.0f;
             cb.pad      = 0.0f;
             cb.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
+            cb.cornerRadius  = obj.cornerRadius;
+            cb.borderColor   = obj.borderColor;
+            cb.gradientColor = obj.gradientColor;
+            cb.innerColor    = obj.innerShadowColor;
+            cb.style0 = glm::vec4(obj.borderWidth, obj.gradient ? 1.0f : 0.0f, obj.gradientAngleDeg,
+                                  obj.gradientShape == 1 ? 1.0f : 0.0f);
+            cb.style1 = glm::vec4(obj.blur, obj.innerShadowBlur, 0.0f, 0.0f);
             D3D11_MAPPED_SUBRESOURCE mr{};
             if (SUCCEEDED(ctx->Map(uiCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
             {
