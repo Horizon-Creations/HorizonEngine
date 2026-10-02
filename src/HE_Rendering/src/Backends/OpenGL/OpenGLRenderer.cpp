@@ -4,6 +4,7 @@
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
+#include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/SkyNoise3D.h>     // shared procedural sky/cloud noise volume
 #include <HorizonRendering/SkyFrameParams.h> // shared cloud wind vector
 #include <HorizonRendering/SkyShaderSource.h> // kSkyFS + kSkyFuncGLSL, shared with Vulkan/D3D
@@ -1914,11 +1915,24 @@ uniform vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height
 uniform vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
 uniform vec4 uLocalExtra;       // x = local light count
 
+// Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
+// (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
+// pixel walks the light disk evenly over the frames the temporal pass averages.
+// The host wraps the frame index to [0, 1024) (GIJitter.h), so seed stays small
+// and exact. The old fract(sin(seed * ...)) hash went constant once the never-
+// reset float seed passed ~1e5 (Thema 131) - keep every copy on this one.
+uvec3 giPcg3d(uvec3 v)
+{
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	v ^= v >> 16u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	return v;
+}
 vec2 giHash2(uvec2 gid, float seed)
 {
-	vec2 p = vec2(gid) + seed * 13.37;
-	return vec2(fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453),
-	            fract(sin(dot(p, vec2(39.3468, 11.1352))) * 24634.6345));
+	uvec3 h = giPcg3d(uvec3(gid, 0u));
+	return fract(vec2(h.xy >> 8u) * (1.0 / 16777216.0) + seed * vec2(0.7548776662, 0.5698402910));
 }
 vec3 giConeSample(vec3 L, float angleRad, vec2 xi)
 {
@@ -2008,23 +2022,38 @@ void main()
 	if (any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0))))
 	{ FragColor = vec4(pv.xyz, rawV); return; }
 
+	vec2  texel     = 1.0 / vec2(textureSize(uRaw, 0)); // uGPos has the same size
 	vec4  hist      = texture(uHistory, prevUV);
 	float posError  = length(pv.xyz - hist.rgb);
-	float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
+	// Tolerance covers one texel's world footprint (smaller one-sided G-buffer
+	// step per axis, capped) — see gi_temporal.frag, Thema 131 §3 C.
+	vec3  gxp = texture(uGPos, vUV + vec2(texel.x, 0.0)).xyz, gxm = texture(uGPos, vUV - vec2(texel.x, 0.0)).xyz;
+	vec3  gyp = texture(uGPos, vUV + vec2(0.0, texel.y)).xyz, gym = texture(uGPos, vUV - vec2(0.0, texel.y)).xyz;
+	float footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+	                      min(length(gyp - pv.xyz), length(gym - pv.xyz)));
+	float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
 	float w = (posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
 	// Neighbourhood clamp: guards OCCLUDER motion (the position check above
 	// only covers receiver/camera motion) — moved shadows update in 1-2 frames
-	// instead of smearing for ~30.
-	vec2 texel = 1.0 / vec2(textureSize(uRaw, 0));
-	float nMin = rawV, nMax = rawV;
-	for (int x = -1; x <= 1; ++x)
-		for (int y = -1; y <= 1; ++y)
+	// instead of smearing for ~30. Range of the 3x3 MEANS of raw over a 5x5
+	// footprint, widened by 0.1 — raw min/max on the binary 1-spp signal reset
+	// the penumbra history every few frames (gi_temporal.frag, Thema 131).
+	float r5[25];
+	for (int y = 0; y < 5; ++y)
+		for (int x = 0; x < 5; ++x)
+			r5[y * 5 + x] = texture(uRaw, vUV + vec2(float(x - 2), float(y - 2)) * texel).r;
+	float nMin = 1.0, nMax = 0.0;
+	for (int cy = 1; cy <= 3; ++cy)
+		for (int cx = 1; cx <= 3; ++cx)
 		{
-			float r = texture(uRaw, vUV + vec2(float(x), float(y)) * texel).r;
-			nMin = min(nMin, r);
-			nMax = max(nMax, r);
+			float s = 0.0;
+			for (int y = -1; y <= 1; ++y)
+				for (int x = -1; x <= 1; ++x)
+					s += r5[(cy + y) * 5 + cx + x];
+			nMin = min(nMin, s / 9.0);
+			nMax = max(nMax, s / 9.0);
 		}
-	FragColor = vec4(pv.xyz, mix(rawV, clamp(hist.a, nMin, nMax), w));
+	FragColor = vec4(pv.xyz, mix(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w));
 }
 )GLSL";
 
@@ -2315,11 +2344,24 @@ vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
 
 // SYNC: the same hash/cone pair as kGiShadowCS (separate compilation unit —
 // GLSL has no #include, and the traversal prefix is shared but these are not).
+// Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
+// (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
+// pixel walks the light disk evenly over the frames the temporal pass averages.
+// The host wraps the frame index to [0, 1024) (GIJitter.h), so seed stays small
+// and exact. The old fract(sin(seed * ...)) hash went constant once the never-
+// reset float seed passed ~1e5 (Thema 131) - keep every copy on this one.
+uvec3 giPcg3d(uvec3 v)
+{
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	v ^= v >> 16u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	return v;
+}
 vec2 giHash2(uvec2 gid, float seed)
 {
-	vec2 p = vec2(gid) + seed * 13.37;
-	return vec2(fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453),
-	            fract(sin(dot(p, vec2(39.3468, 11.1352))) * 24634.6345));
+	uvec3 h = giPcg3d(uvec3(gid, 0u));
+	return fract(vec2(h.xy >> 8u) * (1.0 / 16777216.0) + seed * vec2(0.7548776662, 0.5698402910));
 }
 vec3 giConeSample(vec3 L, float angleRad, vec2 xi)
 {
@@ -2378,7 +2420,10 @@ void main()
 	vec3 Rs = R;
 	if (coneW > 1e-3)
 	{
-		vec2 xi = giHash2(gid, uFrame.x + float(sIdx) * 7.13);
+		// The sample index goes into the hashed pixel id, not the seed: every
+		// sample gets its own per-pixel offset under the same R2 frame step. A
+		// seed offset would shift R2 by a near-constant and bunch the samples.
+		vec2 xi = giHash2(gid + uvec2(0u, uint(sIdx) * 65536u), uFrame.x);
 		Rs = giConeSample(R, coneW, vec2((float(sIdx) + xi.x) / float(rays), xi.y));
 		if (dot(Rs, N) <= 0.0) Rs = R;
 	}
@@ -2511,7 +2556,9 @@ void main()
 	float posError  = length(pv.xyz - hp.xyz);
 	float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
 	float w = (hp.a > 0.5 && posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
-	// Neighbourhood clamp — the SAME guard kGiTemporalFS uses, and the reason it
+	// Neighbourhood clamp — the guard kGiTemporalFS also has (there on 3x3 MEANS
+	// with slack since Thema 131, because the shadow signal is binary; radiance
+	// here is not, so the raw min/max box stays), and the reason it
 	// is needed here is stronger: the position test above only validates the
 	// RECEIVER, and reflected content is never reprojected (the engine has no
 	// motion vectors). Rejecting outright on a radiance break would also throw
@@ -5968,7 +6015,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	glBindImageTexture(1, m_giLocalMaskTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
 	glm::vec3 towardLight, lightColorIntensity;
 	m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
-	m_giFrameSeed += 1.0f;
+	m_giFrameSeed = HE::NextGIJitterSeed(m_giFrameSeed); // wraps: GIJitter.h
 	glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uSunDirRadius"),
 	            towardLight.x, towardLight.y, towardLight.z, glm::radians(m_giLightRadius));
 	glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uFrame"),
@@ -6064,7 +6111,7 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
 	const HE::PackedLightArray lights = HE::BuildPackedLightArray(m_renderWorld);
 	const glm::vec3 camPos = m_renderWorld.camera.position;
-	m_giReflFrameSeed += 1.0f;
+	m_giReflFrameSeed = HE::NextGIJitterSeed(m_giReflFrameSeed); // wraps: GIJitter.h
 	glUniform4f(loc("uCamPos"), camPos.x, camPos.y, camPos.z, 0.0f);
 	glUniform4f(loc("uSunDir"), towardLight.x, towardLight.y, towardLight.z,
 	            static_cast<float>(lights.count));

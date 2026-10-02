@@ -15,7 +15,8 @@ pipeline's success check. See docs/backend-parity-plan.md §1.1.
 This script extracts those strings, reassembles them exactly as the call sites do,
 and runs the real compilers over them.
 
-    python scripts/validate_embedded_shaders.py [--hlsl-only|--glsl-only] [-v]
+    python scripts/validate_embedded_shaders.py [--hlsl-only|--glsl-only|--msl-only]
+                                                [--no-msl] [--require-msl] [-v]
 
 Exit code 0 = every shader compiled. Non-zero = at least one failed, or a shader
 string exists that no job covers (see COVERAGE below).
@@ -25,9 +26,21 @@ When someone adds a new shader string, this script FAILS with "not covered by an
 job" until the table below is extended. That is deliberate — a validator that
 silently ignores new shaders is worse than none, because it reads as a pass.
 
-Tool discovery: fxc.exe from the Windows SDK, glslangValidator from the Vulkan SDK.
-Override with FXC / GLSLANG_VALIDATOR env vars. A missing tool SKIPS that half with
-a clear message rather than failing (so non-Windows / no-Vulkan-SDK checkouts work).
+Tool discovery: fxc.exe from the Windows SDK, glslangValidator from the Vulkan SDK,
+`xcrun -sdk macosx metal` from Xcode. Override with FXC / GLSLANG_VALIDATOR / METAL
+env vars. A missing tool SKIPS that part with a clear message rather than failing
+(so non-Windows / no-Vulkan-SDK / non-Mac checkouts work).
+
+MSL is the same story: MetalRenderer.mm hands its `R"MSL(...)MSL"` strings to
+newLibraryWithSource at runtime and logs + disables the feature on failure, while
+the macOS build compiles the .mm as plain Objective-C++. Covered: every R"MSL(
+literal in MetalRenderer.mm (kSkyFuncMSL spliced in at //#SKYFUNC# the way
+injectSkyMSL() does). NOT covered: the inline @R"(...)" NSString shaders and
+kParticleMSL, which use an untagged raw string. The CMake build target passes
+--no-msl (the toolchain is an optional Xcode 26 component a dev Mac may lack);
+CI's macOS job runs `--msl-only --require-msl -v`, where a missing toolchain or
+zero compiled shaders FAILS, and a deliberately broken snippet must be rejected
+first so a compiler invocation that swallows errors cannot read as a pass.
 """
 
 from __future__ import annotations
@@ -55,11 +68,12 @@ HLSL_SOURCES = {
 # kSkyFS + kSkyFuncGLSL moved to SkyShaderSource.h (Thema 78, Schritt 3): the
 # GL sky is also what Vulkan/D3D11/D3D12 compile, behind kSkyVulkanPrelude.
 GLSL_SOURCES = [RENDER / "OpenGL" / "OpenGLRenderer.cpp", SKY_SOURCE]
+MSL_SOURCE = RENDER / "Metal" / "MetalRenderer.mm"
 
 # Strings that are NOT standalone shaders — they are spliced into others and have
 # no entry point of their own.
 PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLSL",
-            "kSkyVulkanPrelude"}
+            "kSkyVulkanPrelude", "kSkyFuncMSL"}
 
 # What each call site prepends before compiling. Mirrors the C++ verbatim:
 #   D3D11Renderer.cpp:2309  std::string(kSkyFuncHLSL) + kSceneHLSL
@@ -259,25 +273,102 @@ def check_glsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
     return ok_n, len(failures), failures
 
 
+def find_metal() -> tuple[list[str] | None, str]:
+    """The metal compiler as an argv prefix plus its version line, or None and why."""
+    if (p := os.environ.get("METAL")) and Path(p).exists():
+        cmd = [p]
+    elif shutil.which("xcrun"):
+        cmd = ["xcrun", "-sdk", "macosx", "metal"]
+    else:
+        return None, "xcrun not found (no Xcode)"
+    # Xcode 26 ships `metal` as a separate component: xcrun still resolves the shim,
+    # but running it fails ("missing Metal Toolchain"). So probe by running it.
+    ok, out = run(cmd + ["--version"])
+    lines = out.strip().splitlines()
+    if not ok:
+        return None, lines[-1] if lines else "metal --version failed"
+    return cmd, lines[0] if lines else "?"
+
+
+def check_msl(tmp: Path, verbose: bool, require: bool) -> tuple[int, int, list[str]]:
+    metal, info = find_metal()
+    if not metal:
+        if require:
+            return 0, 1, [f"MSL check required but no metal compiler: {info}"]
+        print(f"  metal compiler not available ({info}) — MSL check SKIPPED")
+        return 0, 0, []
+    print(f"  {' '.join(metal)}: {info}")
+    if not MSL_SOURCE.exists():
+        return 0, 1, [f"missing {MSL_SOURCE}"]
+
+    def compile_msl(stem: str, src: str) -> tuple[bool, str]:
+        f = tmp / f"mtl__{stem}.metal"
+        f.write_text(src, encoding="utf-8")
+        return run(metal + ["-c", str(f), "-o", str(tmp / f"mtl__{stem}.air")])
+
+    # Negative control: if this compiles, a pass below proves nothing.
+    ok, _ = compile_msl("negative_control",
+                        "#include <metal_stdlib>\nkernel void k() { this_is_not_msl; }\n")
+    if ok:
+        return 0, 1, ["MSL negative control COMPILED — the metal invocation checks nothing"]
+    print("  negative control rejected, as it must be")
+
+    strings = extract(MSL_SOURCE, "MSL")
+    skyfunc = strings.get("kSkyFuncMSL")
+    marker = "//#SKYFUNC#"
+    ok_n, failures = 0, []
+    for name, body in strings.items():
+        if name in PRELUDES:
+            continue
+        if marker in body:                                  # injectSkyMSL()
+            if skyfunc is None:
+                failures.append(f"{name}: kSkyFuncMSL not found for {marker}")
+                continue
+            body = body.replace(marker, skyfunc, 1)
+        ok, out = compile_msl(name, body)
+        if ok:
+            ok_n += 1
+            if verbose:
+                print(f"  ok   {name:44s} metal")
+        else:
+            errs = [l.strip() for l in out.splitlines() if "error:" in l] or out.splitlines()[:3]
+            failures.append(f"{name} (metal):\n      " + "\n      ".join(errs[:3]))
+            print(f"  FAIL {name:44s} metal")
+    if require and ok_n == 0 and not failures:
+        failures.append("MSL check required but 0 shaders compiled")
+    return ok_n, len(failures), failures
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hlsl-only", action="store_true")
     ap.add_argument("--glsl-only", action="store_true")
+    ap.add_argument("--msl-only", action="store_true")
+    ap.add_argument("--no-msl", action="store_true", help="skip the Metal part")
+    ap.add_argument("--require-msl", action="store_true",
+                    help="no metal compiler, or 0 compiled MSL shaders, is a failure")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+    only = args.hlsl_only or args.glsl_only or args.msl_only
 
     total_ok, all_failures = 0, []
     with tempfile.TemporaryDirectory(prefix="he_shadercheck_") as td:
         tmp = Path(td)
-        if not args.glsl_only:
+        if not only or args.hlsl_only:
             print("HLSL (D3D11/D3D12, runtime-compiled via D3DCompile):")
             ok, _, f = check_hlsl(tmp, args.verbose)
             total_ok += ok
             all_failures += f
             print(f"  {ok} compiled, {len(f)} failed")
-        if not args.hlsl_only:
+        if not only or args.glsl_only:
             print("GLSL (OpenGL, runtime-compiled via glCompileShader):")
             ok, _, f = check_glsl(tmp, args.verbose)
+            total_ok += ok
+            all_failures += f
+            print(f"  {ok} compiled, {len(f)} failed")
+        if (not only or args.msl_only) and not args.no_msl:
+            print("MSL (Metal, runtime-compiled via newLibraryWithSource):")
+            ok, _, f = check_msl(tmp, args.verbose, args.require_msl)
             total_ok += ok
             all_failures += f
             print(f"  {ok} compiled, {len(f)} failed")

@@ -193,6 +193,23 @@ jobs:
           HE_NET_LOOPBACK_ONLY: "0"
         run: ctest --test-dir build --output-on-failure -j4
 
+      # The Metal backend compiles its MSL strings at RUNTIME (newLibraryWithSource)
+      # and answers a failure by disabling the feature, while the build above only
+      # compiles MetalRenderer.mm as Objective-C++ — and the build's shader check
+      # reports "All 0 embedded shaders compile" here, since fxc and glslangValidator
+      # are absent. This step is the Metal counterpart: every R"MSL( string through
+      # the offline compiler, after a broken snippet has to be rejected. Xcode 26
+      # ships the compiler as a separate component, fetched if the image lacks it.
+      # Not gated on the tests: a red test must not hide whether the MSL compiles.
+      - name: Compile-check the runtime MSL strings (macOS)
+        if: runner.os == 'macOS' && !cancelled()
+        run: |
+          if ! xcrun -sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+            xcrun -sdk macosx metal --version
+          fi
+          python3 scripts/validate_embedded_shaders.py --msl-only --require-msl -v
+
       # ── The two app runtimes ────────────────────────────────────────────────────
       # docs/app-runtimes-release-pipeline-plan.md. The build above deployed ONE
       # runtime, Game, next to the editor. An exported HorizonApp wants a leaner one

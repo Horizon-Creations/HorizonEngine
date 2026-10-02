@@ -724,11 +724,24 @@ Texture2D<float4>   uGNorm    : register(t1);
 RWTexture2D<float>  uOut      : register(u0);
 RWTexture2D<float4> uOutLocal : register(u1); // per-pixel local-light visibility (1 channel per light, first 4)
 
+// Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
+// (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
+// pixel walks the light disk evenly over the frames the temporal pass averages.
+// The host wraps the frame index to [0, 1024) (GIJitter.h), so seed stays small
+// and exact. The old fract(sin(seed * ...)) hash went constant once the never-
+// reset float seed passed ~1e5 (Thema 131) - keep every copy on this one.
+uint3 giPcg3d(uint3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
 float2 giHash2(uint2 gid, float seed)
 {
-    float2 p = float2(gid) + seed * 13.37;
-    return float2(frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
-                  frac(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+    uint3 h = giPcg3d(uint3(gid, 0u));
+    return frac(float2(h.xy >> 8u) * (1.0 / 16777216.0) + seed * float2(0.7548776662, 0.5698402910));
 }
 float3 giConeSample(float3 L, float angleRad, float2 xi)
 {
@@ -828,22 +841,37 @@ float4 main(In i) : SV_Target
     float2 prevUV = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if (any(prevUV < 0.0) || any(prevUV > 1.0)) return float4(pv.xyz, rawV);
 
+    float2 texel     = 1.0 / uParams.yz; // uGPos has the same size
     float4 hist      = uHistory.Sample(uPointSamp, prevUV);
     float  posError  = length(pv.xyz - hist.rgb);
-    float  tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
+    // Tolerance covers one texel's world footprint (smaller one-sided G-buffer
+    // step per axis, capped) — see gi_temporal.frag, Thema 131 §3 C.
+    float3 gxp = uGPos.Sample(uPointSamp, i.uv + float2(texel.x, 0.0)).xyz, gxm = uGPos.Sample(uPointSamp, i.uv - float2(texel.x, 0.0)).xyz;
+    float3 gyp = uGPos.Sample(uPointSamp, i.uv + float2(0.0, texel.y)).xyz, gym = uGPos.Sample(uPointSamp, i.uv - float2(0.0, texel.y)).xyz;
+    float  footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+                           min(length(gyp - pv.xyz), length(gym - pv.xyz)));
+    float  tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
     float  w = (posError < tolerance) ? clamp(uParams.x, 0.0, 0.98) : 0.0;
     // Neighbourhood clamp: guards OCCLUDER motion (the position check above
-    // only covers receiver/camera motion).
-    float2 texel = 1.0 / uParams.yz;
-    float nMin = rawV, nMax = rawV;
-    [unroll] for (int x = -1; x <= 1; ++x)
-        [unroll] for (int y = -1; y <= 1; ++y)
+    // only covers receiver/camera motion). Range of the 3x3 MEANS of raw over a
+    // 5x5 footprint, widened by 0.1 — raw min/max on the binary 1-spp signal
+    // reset the penumbra history every few frames (gi_temporal.frag, Thema 131).
+    float r5[25];
+    [unroll] for (int y = 0; y < 5; ++y)
+        [unroll] for (int x = 0; x < 5; ++x)
+            r5[y * 5 + x] = uRaw.Sample(uPointSamp, i.uv + float2(x - 2, y - 2) * texel).r;
+    float nMin = 1.0, nMax = 0.0;
+    [unroll] for (int cy = 1; cy <= 3; ++cy)
+        [unroll] for (int cx = 1; cx <= 3; ++cx)
         {
-            float r = uRaw.Sample(uPointSamp, i.uv + float2(x, y) * texel).r;
-            nMin = min(nMin, r);
-            nMax = max(nMax, r);
+            float s = 0.0;
+            [unroll] for (int y = -1; y <= 1; ++y)
+                [unroll] for (int x = -1; x <= 1; ++x)
+                    s += r5[(cy + y) * 5 + cx + x];
+            nMin = min(nMin, s / 9.0);
+            nMax = max(nMax, s / 9.0);
         }
-    return float4(pv.xyz, lerp(rawV, clamp(hist.a, nMin, nMax), w));
+    return float4(pv.xyz, lerp(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w));
 }
 )HLSL";
 

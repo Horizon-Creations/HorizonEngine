@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <HorizonRendering/GIProbeGrid.h>
+#include <HorizonRendering/GIJitter.h>
 
 #include <glm/glm.hpp>
 #include <algorithm>
@@ -211,4 +212,25 @@ TEST_CASE("GI probe grid: a permanently unresolvable object does not turn motion
 		CHECK_FALSE(t.shouldEvaluate(true, sig, 1));
 	// Geometry changes are still seen through it.
 	CHECK(t.shouldEvaluate(true, sig + 1, 1));
+}
+
+// Thema 131 §3 B: the GI cone-jitter frame index stays a small exact integer.
+// It used to grow by one per frame forever, and past ~1e5 the kernels' sin()
+// hash went constant (hard, shifted GI shadows after minutes of editor time).
+TEST_CASE("GI jitter seed wraps within kGIJitterPeriod and stays an exact integer")
+{
+	float seed = 0.0f;
+	uint32_t steps = 0;
+	bool wrapped = false;
+	for (; steps < 3u * HE::kGIJitterPeriod; ++steps)
+	{
+		const float prev = seed;
+		seed = HE::NextGIJitterSeed(seed);
+		REQUIRE(seed >= 0.0f);
+		REQUIRE(seed < static_cast<float>(HE::kGIJitterPeriod));
+		REQUIRE(seed == std::floor(seed));
+		if (seed < prev) { wrapped = true; CHECK(seed == 0.0f); CHECK(prev == HE::kGIJitterPeriod - 1.0f); }
+		else CHECK(seed == prev + 1.0f);
+	}
+	CHECK(wrapped);
 }

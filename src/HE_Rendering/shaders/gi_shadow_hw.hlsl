@@ -67,11 +67,24 @@ bool giSceneAnyHit(float3 o, float3 d, float tMin, float tMax)
     return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
 
+// Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
+// (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
+// pixel walks the light disk evenly over the frames the temporal pass averages.
+// The host wraps the frame index to [0, 1024) (GIJitter.h), so seed stays small
+// and exact. The old fract(sin(seed * ...)) hash went constant once the never-
+// reset float seed passed ~1e5 (Thema 131) - keep every copy on this one.
+uint3 giPcg3d(uint3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
 float2 giHash2(uint2 gid, float seed)
 {
-    float2 p = float2(gid) + seed * 13.37;
-    return float2(frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
-                  frac(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+    uint3 h = giPcg3d(uint3(gid, 0u));
+    return frac(float2(h.xy >> 8u) * (1.0 / 16777216.0) + seed * float2(0.7548776662, 0.5698402910));
 }
 float3 giConeSample(float3 L, float angleRad, float2 xi)
 {
