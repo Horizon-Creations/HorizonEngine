@@ -177,6 +177,15 @@ public:
     static constexpr int kMetalClusterLightsBufferIndex = 4;
     static constexpr int kMetalClusterGridBufferIndex   = 5;
     static constexpr int kMetalClusterIndexBufferIndex  = 6;
+    // Metal fragment SAMPLER slots the lighting preamble pins outside the
+    // material-texture window 0..kMatMaxGraphTextures (fragment() /
+    // fragmentClustered(), see the pin table there). Every encoder that draws a
+    // material PSO must bind a sampler on ALL of them, used or not: API
+    // validation rejects the draw on any declared-but-unbound sampler. The scene
+    // passes bind them per frame; the material preview / thumbnail encoder has no
+    // frame state and binds them with inert defaults (Thema 124 A7 — it bound
+    // none, and MTL_DEBUG_LAYER flagged 5-12/14 on every preview draw).
+    static constexpr int kMetalPreambleSamplerSlots[] = { 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     // GL 4.3 (GLSL430): the same three lists as shader-storage bindings 4/5/6
     // (glBindBufferBase(GL_SHADER_STORAGE_BUFFER, …)). Not 24..26: GL 4.3 only
     // guarantees 8 SSBO bindings, and the GI compute passes own 0..3.
