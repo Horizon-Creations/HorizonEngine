@@ -386,6 +386,9 @@ Vulkan-Dateien unterscheiden sich. Jede Aufnahme hat eine frische APPDATA, `HE_S
   - Bemaltes Terrain (`HE_DUMP_LANDSCAPELAYERS=1`): pre meldet die Bindings 14,15,16,17,18,32,33,
     post nur noch 14.
   - Graph-Kugel (`HE_DUMP_MATERIALTEST=1`): pre meldet 15–18/32/33 (17 Fehler), post **keinen**.
+  - Probe-Grid-Refit mitten im Lauf (`HE_DUMP_GIREFIT=1`, Grid 15×4×15 → 22×4×11, Atlanten neu):
+    post meldet nur Binding 14, keine anderen Fehler. Der Lebensdauer-Pfad der 17/18-Writes ist damit
+    einmal durchlaufen.
   - Keine neuen Fehlerarten. Die Shutdown-Leak-Liste ist pre wie post dieselbe (10 Objekte,
     ImGui-förmig).
 - **Pixel** (bemaltes Terrain = Graph-Material, Draufsicht; mittlere |Δ| in 8-Bit-Stufen):
@@ -405,7 +408,13 @@ Vulkan-Dateien unterscheiden sich. Jede Aufnahme hat eine frische APPDATA, `HE_S
 
 - **Binding 14 (`heLandscapeWeights`)** fehlt weiter im Vulkan-Material-Layout. Der Node-Codegen
   deklariert es nur bei Landscape-Layer-Knoten. Das ist nicht DDGI, sondern ein eigener Punkt
-  (bemalte Terrains auf Vulkan).
+  (bemalte Terrains auf Vulkan). **Achtung Limit:** Die Fragment-Stage des Material-Layouts hat
+  jetzt genau 16 Combined-Image-Sampler (b2, b4–7, b10–13, b15–18, b31–33). Das ist das
+  Spec-Minimum von `maxPerStageDescriptorSamplers`/`…SampledImages`. Binding 14 dazu ergibt 17;
+  wer das nachzieht, muss gegen das Geräte-Limit prüfen. Das Landscape-SPIR-V nutzt die 17 heute
+  schon statisch.
+- **Kein automatischer Vulkan-Test.** Die Belege in §7.2 sind manuelle Hardware-Läufe. Anders als
+  bei D3D11/D3D12 (WARP) gibt es in der CI kein Vulkan-Gerät (s. Thema 122).
 - Nebenbefund 1 (Forward-SSR für Graph-Materialien tot auf Vulkan) unverändert, gehört zu Thema 126.
 - Parität Graph-Material gegen Built-in Pixel für Pixel ist nicht gemessen. Belegt ist nur:
   Graph-Material bekommt jetzt Probe-Licht, und GI aus bleibt bitgleich.
