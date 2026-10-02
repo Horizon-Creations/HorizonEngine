@@ -2420,8 +2420,10 @@ void main()
 	vec3 Rs = R;
 	if (coneW > 1e-3)
 	{
-		// + sIdx * kGIJitterPeriod (GIJitter.h): one integer stream per sample.
-		vec2 xi = giHash2(gid, uFrame.x + float(sIdx) * 1024.0);
+		// The sample index goes into the hashed pixel id, not the seed: every
+		// sample gets its own per-pixel offset under the same R2 frame step. A
+		// seed offset would shift R2 by a near-constant and bunch the samples.
+		vec2 xi = giHash2(gid + uvec2(0u, uint(sIdx) * 65536u), uFrame.x);
 		Rs = giConeSample(R, coneW, vec2((float(sIdx) + xi.x) / float(rays), xi.y));
 		if (dot(Rs, N) <= 0.0) Rs = R;
 	}

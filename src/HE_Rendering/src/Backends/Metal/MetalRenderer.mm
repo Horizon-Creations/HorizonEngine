@@ -2738,8 +2738,10 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 		float3 rayDir = R;
 		if (coneW > 1e-3)
 		{
-			// + sIdx * kGIJitterPeriod (GIJitter.h): one integer stream per sample.
-			const float2 xi = giHash2R(gid, P.sunColor.w + float(sIdx) * 1024.0);
+			// The sample index goes into the hashed pixel id, not the seed: every
+			// sample gets its own per-pixel offset under the same R2 frame step. A
+			// seed offset would shift R2 by a near-constant and bunch the samples.
+			const float2 xi = giHash2R(gid + uint2(0u, uint(sIdx) * 65536u), P.sunColor.w);
 			const float2 st = float2((float(sIdx) + xi.x) / float(rays), xi.y);
 			const float3 jit = giConeSampleR(R, coneW, st);
 			if (dot(jit, N) > 0.0) rayDir = jit; // keep the sample above the surface
@@ -3522,8 +3524,10 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 		float3 rayDir = R;
 		if (coneW > 1e-3)
 		{
-			// + sIdx * kGIJitterPeriod (GIJitter.h): one integer stream per sample.
-			const float2 xi = giHash2(gid, P.sunColor.w + float(sIdx) * 1024.0);
+			// The sample index goes into the hashed pixel id, not the seed: every
+			// sample gets its own per-pixel offset under the same R2 frame step. A
+			// seed offset would shift R2 by a near-constant and bunch the samples.
+			const float2 xi = giHash2(gid + uint2(0u, uint(sIdx) * 65536u), P.sunColor.w);
 			const float2 st = float2((float(sIdx) + xi.x) / float(rays), xi.y);
 			const float3 jit = giConeSample(R, coneW, st);
 			if (dot(jit, N) > 0.0) rayDir = jit;

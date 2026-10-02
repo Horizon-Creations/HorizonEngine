@@ -14,9 +14,10 @@
 // low-discrepancy step per frame (each pixel covers the sun disk evenly over
 // the frames the temporal pass averages), and the host keeps the index in
 // [0, kGIJitterPeriod), so the float uniform always carries a small exact
-// integer. Reflection kernels add sampleIndex * kGIJitterPeriod to it to give
-// each glossy sample its own stream — the shader literal 1024.0 there is this
-// constant and must follow it.
+// integer. Reflection kernels give each glossy sample its own stream through
+// the hashed pixel id (gid.y + sampleIndex * 65536), not through the seed: a
+// seed offset only shifts the R2 sequence by a near-constant and bunches the
+// samples of one frame together.
 namespace HE
 {
 

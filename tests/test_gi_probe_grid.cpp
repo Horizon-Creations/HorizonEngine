@@ -233,7 +233,4 @@ TEST_CASE("GI jitter seed wraps within kGIJitterPeriod and stays an exact intege
 		else CHECK(seed == prev + 1.0f);
 	}
 	CHECK(wrapped);
-	// Reflection kernels add sampleIndex * period (up to 8 samples): every seed
-	// they build must still be exactly representable, i.e. below 2^24.
-	CHECK(static_cast<double>(HE::kGIJitterPeriod) * 9.0 < 16777216.0);
 }
