@@ -67,7 +67,7 @@ Begründungen:
 
 ### 2.4 Bewusst nicht in diesem Thema
 
-* **Kein Lauf zur Entwurfszeit im Designer.** Die Canvas des UI-Editors zeichnet den statischen Baum und führt keinen Graph aus. In Unreal ist das der Hauptzweck von PreConstruct. Hier hieße es, Nutzercode mit Nebenwirkungen (Widgets erzeugen, HTTP, Dateien) bei jeder Änderung im Designer auszuführen. Das ist ein eigenes Thema mit eigener Sandbox-Frage.
+* ~~**Kein Lauf zur Entwurfszeit im Designer.**~~ Nachgezogen in Schritt 4, siehe Abschnitt 5.
 * **Kein Expose on Spawn.** Wer das Widget erzeugt, kann vor Construct nichts setzen, weil `createWidget` erst danach zurückkehrt. PreConstruct ändert daran nichts. Falls das gewünscht ist: Create Widget mit Eingangspins für öffentliche Variablen, gesetzt **zwischen** PreConstruct und Construct. Eigenes Thema.
 * **Nicht in der `Object`-Taxonomie** (`HorizonCode.cpp:2655`). Nur Widgets feuern PreConstruct. Stünde es bei `Object`, böte der Klassen-Editor es Entities und HC-Klassen an, bei denen es nie feuert. Die Event-Liste des Widget-Editors ist ohnehin hart verdrahtet (`kLifecycle`) und kommt nicht aus der Taxonomie.
 
@@ -109,3 +109,70 @@ Entscheidung für Schritt 2: **eine Warnung im Log beim Laden** (`HE_LOG_WARN`),
 ## 4. Nebenbefund zu Thema 118 (Aufblitzen bei Opacity-Animation in Construct)
 
 Pre Construct löst 118 nicht. Die Ursache liegt woanders: `WidgetManager::playAnimation` (Z. 2183ff) merkt sich nur den Clip mit `t = 0` und schreibt **keinen** Wert. Das erste Sample entsteht erst im nächsten `tick` mit `dt > 0` (Z. 2360ff), und das bei `t = dt`. Wird zwischen `showWidget` und diesem Tick schon ein Bild gezogen, zeigt es die gestalteten Werte (z. B. Opacity 1), danach springt die Animation auf ihren Startwert. Naheliegender Fix für 118: in `playAnimation` den Clip sofort bei `t = 0` auswerten und anwenden. Das gehört in Thema 118, nicht hierher.
+
+## 5. PreConstruct zur Entwurfszeit (Schritt 4, aus Frage #14, Möglichkeit 1)
+
+In Unreal ist das der Hauptzweck von PreConstruct: der Designer zeigt, was der Code vor dem ersten Bild setzt (Beschriftung aus einer Variablen, Farbe nach Zustand). Hier lief bisher kein Graph im Designer, die Canvas zeichnet `st.tree` per ImDrawList. Abschnitt 2.4 hatte das wegen der Sandbox-Frage ausgeklammert. Diese Frage wird hier beantwortet.
+
+### 5.1 Was läuft, und worauf
+
+* **Nur PreConstruct.** Kein Construct, kein Tick, kein Destruct, keine Eingabe-Events. Construct ist der Ort für Code, der zur Laufzeit gehört (Daten holen, andere Widgets ansprechen). Das ist genau die Trennung, die UMG zwischen PreConstruct und Construct zieht.
+* **Auf das Dokument, nicht auf das gespeicherte Asset.** Der Lauf nimmt `st.tree` und `st.graph`, wie sie im Editor stehen, mit ungespeicherten Änderungen. Eingebettete Widgets kommen aus dem ContentManager, also mit dem Stand, den auch `drawEmbeddedTree` zeichnet. Ihr PreConstruct läuft mit, die Familie ist dieselbe wie zur Laufzeit.
+* **Immer interpretiert.** `compiledClasses()` wird übergangen, für den Host und alle Embeds. Eine kompilierte Klasse aus der Spiel-dylib wäre älter als der Graph, den man gerade bearbeitet.
+* **In einem Wegwerf-WidgetManager mit eigener Runtime.** Neu `WidgetManager::runDesignTimePreConstruct(content, assetPath, tree, graph)`. Es baut die Instanz wie `createWidget` (gemeinsamer Helfer, damit beide nicht auseinanderlaufen), feuert nur PreConstruct und baut die Familie lautlos wieder ab. `Runtime::remove` statt `destroy`, also kein Destruct. Der Aufrufer stellt die Runtime, und damit die Sandbox.
+
+### 5.2 Sandbox: was im Designer laufen darf
+
+Die Runtime des Laufs bekommt **keine** `Services` außer einem gefilterten `callApi`:
+
+| Weg | zur Entwurfszeit |
+|---|---|
+| Set/Get Property, (Ref)-Varianten, Variablen, Call Function auf sich selbst und auf Embeds, Emit/Bind Event innerhalb der Familie | erlaubt, wirkt nur auf den Wegwerf-Baum |
+| Create/Destroy/Show/Hide Widget, Create/Destroy Object | aus (Services ungebunden), Ergebnis 0 bzw. nichts |
+| Engine Call: Gruppen `math`, `string`, `json`, `datetime`, nur reine Zeilen (`isExec == false`) | erlaubt, berechnen nur aus ihren Argumenten (bzw. der Uhr) |
+| Engine Call: `widget.isDesignTime` | erlaubt, liefert `true` |
+| Engine Call: `widget.childRef` (Get Child Widget) | erlaubt, aufgelöst im Wegwerf-Manager, damit der Host seine Embeds erreicht |
+| jede andere Engine-Call-Zeile (`fs`, `save`, `prefs`, `http`, `net`, `db`, `process`, `audio`, `entity`, `scene`, `ui`, `widget.*`, `random`, `print`, …) | abgelehnt: leere Ergebnisse (Ausgänge auf Vorgabe), Zeilen-Id im Ergebnis vermerkt |
+| Delay, latente Knoten | parken für immer: der Wegwerf-Runtime tickt niemand |
+| Endlosschleifen, Rekursion | der Interpreter bricht nach `kMaxSteps = 4096` Schritten bzw. Tiefe 64 ab |
+| Multiplayer-Routing (`runOn`) | ungebunden, läuft lokal, d. h. im Wegwerf-Baum |
+
+Warum eine **Positivliste nach Gruppe** und nicht „alles mit `isExec == false`“: auch `fs`, `save`, `prefs` haben reine Getter, die die Platte lesen. Neue Gruppen sind damit zur Entwurfszeit erst einmal aus, bis jemand sie bewusst freigibt. `random` bleibt aus, weil seine Zeilen den prozessweiten Generator weiterdrehen (sie sind Exec-Zeilen). `print` bleibt aus, damit der Designer die Konsole nicht bei jeder Änderung füllt.
+
+Die Politik steht in HE_Scene (`HE::api::designTimeAllows(id)` und `HE::api::designTimeCallApi(widgets, refused)`), damit Editor und Tests dieselbe Funktion benutzen.
+
+### 5.3 Knoten „Is Design Time“
+
+Eine reine Registry-Zeile `widget.isDesignTime` (Bool, ohne Argumente), Anzeigename **Is Design Time**, liest das neue Feld `HE::api::Ctx::designTime` (Vorgabe `false`). Nur der Sandbox-Dispatcher baut einen Ctx mit `true`. Im Spiel, im PIE und unter einem ungebundenen `callApi` ist die Antwort also `false`. Wie in 2.3 vorgesehen ist es kein Pin am Event, die Hook-Signatur `onPreConstruct()` bleibt. Kompilierte Klassen bekommen ihn über den generischen EngineCall-Weg (`hc::callApi`) ohne Codegen-Änderung.
+
+Typischer Gebrauch: `PreConstruct → Branch(Is Design Time)`, auf `true` Platzhalterdaten setzen, auf `false` die echten laden.
+
+### 5.4 Wie das Ergebnis auf die Canvas kommt
+
+* **Schreibprotokoll statt Baumvergleich.** Der WidgetManager protokolliert während des Laufs jedes `(Element, Property)`, das ein Graph über Set Property (auch Ref) oder Show/Hide Self schreibt. Danach wird der Endwert gelesen. Ein Vergleich mit `st.tree` ginge nicht: `createWidget` hat Theme und Sprache schon in den Baum geschrieben, und jede themengebundene Property sähe wie „von PreConstruct gesetzt“ aus.
+* **Elemente des Hosts** tragen im Wegwerf-Baum dieselben Ids wie in `st.tree`. Ein RAII-Guard in `drawCanvas` schreibt die Werte für die Dauer des Frames hinein und nimmt sie danach zurück, wie `ScrubPreview`. Er liegt **vor** `ScrubPreview`, die Animationsvorschau legt sich also darüber (wie zur Laufzeit: erst PreConstruct, dann spielt die Animation). Zurückgeschrieben wird nur, was noch den angewendeten Wert hat. Hat der Nutzer im selben Frame denselben Wert geändert (Drag, Details), gewinnt seine Änderung. Damit erreichen die Entwurfszeit-Werte nie Save, Undo oder den Collab-Spiegel.
+* **Elemente der Embeds** werden in `drawEmbeddedTree` in die ohnehin schon kopierte, gelayoutete Fassung (`laid`) geschrieben. Dazu merkt sich das Ergebnis pro Embed `(Ref-Element, idOffset)`, auch für verschachtelte.
+* **Details-Panel und Hierarchie** zeigen weiter die gestalteten Werte. Gespeichert wird, was gestaltet ist, nicht was der Code daraus macht.
+
+### 5.5 Wann neu gerechnet wird
+
+* Wenn sich das Dokument geändert hat: Schlüssel ist der letzte Undo-Schnappschuss (`commitEdit` legt nach jeder abgeschlossenen Änderung einen an). Während eines Drags läuft also nichts neu, erst beim Loslassen.
+* Wenn sich ein eingebettetes Asset geändert hat (dessen Baum- oder Graph-JSON im ContentManager), höchstens zweimal pro Sekunde geprüft.
+* Wenn der Schalter umgelegt wird. **Schalter** in der Designer-Toolbar, „Pre Construct“, Vorgabe an (wie in UMG), nur Sitzungszustand, nicht im Asset.
+* Abgelehnte Engine-Calls stehen klein unter der Canvas („Pre Construct (design time): skipped http.get, fs.readText“). Damit ist sichtbar, warum ein Wert im Designer fehlt, und wohin der `Is Design Time`-Zweig gehört.
+
+### 5.6 Was nicht Entwurfszeit ist
+
+* Thumbnails (`makeWidgetThumbnail`) und `__uiStyleWitness` laufen weiter über `createWidget`, also mit PreConstruct **und** Construct, mit `Is Design Time = false`. Sie zeigen das Widget, wie es zur Laufzeit ankommt. Das war schon vor diesem Thema so.
+* Die Live-Vorschau / PIE ist Laufzeit.
+* Kein Expose on Spawn, wie in 2.4.
+
+### 5.7 Tests (Schritt 4)
+
+1. `widget.isDesignTime`: `false` mit Standard-Ctx, `true` mit `designTime = true`. Die Zeile ist rein, Bool, in der Gruppe Widget.
+2. Sandbox-Politik: `math.*`, `string.*`, `widget.isDesignTime`, `widget.childRef` erlaubt; `fs.*`, `save.*`, `http.*`, `random.*`, `print.*`, `widget.create` abgelehnt; unbekannte Id abgelehnt.
+3. Lauf: PreConstruct setzt Text per Set Property und Farbe nur im `Is Design Time`-Zweig; Ergebnis enthält genau diese Schreibvorgänge mit den Endwerten; ein `fs.writeText` im selben Strang schreibt keine Datei und steht in `refused`; Create Widget liefert 0; Construct läuft nicht (Variable bleibt 0); das Eingangsdokument ist unverändert.
+4. Theme-Schreibvorgänge erscheinen nicht im Ergebnis (gebundene Farbe, kein Graph-Schreibvorgang).
+5. Embed: das PreConstruct eines eingebetteten Widgets landet unter seinem Ref-Element mit lokaler Id.
+6. Ungespeicherter Graph: der Lauf nimmt das übergebene Dokument, nicht das registrierte Asset.
+7. Canvas-Guard: nach dem Frame ist `st.tree` byteweise unverändert; ein im Frame geänderter Wert überlebt das Zurückschreiben.
