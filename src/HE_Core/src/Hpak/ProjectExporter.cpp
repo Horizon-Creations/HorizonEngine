@@ -1004,6 +1004,30 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
             }
         }
 
+        // Offline-compiled GPU shaders live in a Shaders/ SUBDIRECTORY too, which the
+        // flat file loop above skipped: Vulkan's SPIR-V (*.spv) and D3D12's DXR
+        // kernels (*.cso). Both backends load them from <base path>/Shaders/, so a
+        // Vulkan game without it drew nothing at all ("scene shaders missing") and
+        // D3D12 lost hardware GI. Routed like every non-binary runtime file (dataDir
+        // = where SDL_GetBasePath points); replaced wholesale so a shader dropped
+        // from the build does not linger from an older export. Missing source dir =
+        // a runtime without these backends (Metal/GL-only), nothing to ship.
+        {
+            const auto srcShaders = settings.gameRuntimeDir / "Shaders";
+            if (std::filesystem::is_directory(srcShaders, ec))
+            {
+                const auto dstShaders = ctx.dataDir / "Shaders";
+                std::filesystem::remove_all(dstShaders, ec); ec.clear();
+                std::filesystem::copy(srcShaders, dstShaders,
+                    std::filesystem::copy_options::recursive
+                    | std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec)
+                    return ExportResult{false, "Failed to copy runtime Shaders/: "
+                                               + ec.message(), ctx.assetsPacked};
+            }
+            ec.clear();
+        }
+
         // Python C-extension modules live in a lib-dynload/ SUBDIRECTORY, which the
         // flat file loop above skipped. Ship it next to the executable (the
         // <Exe>._pth lists "lib-dynload") — only for Python-language projects, so a
