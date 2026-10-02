@@ -265,7 +265,14 @@ Root-Signatur sie optional abdeckt).
   Änderung an fehlenden **Samplern** 5–12/14 (`heGIShadowSmplr` … `heSkyEnvSmplr`),
   identisch mit `HE_FORWARD_CLUSTER=0` und `=1` (Szene `MANYLIGHTS=16` +
   `MATERIALTEST=translucent` + `PREVIEW=1`). Im Normalbetrieb harmlos, aber es versperrt
-  Validierungsläufe.
+  Validierungsläufe. **Behoben (Thema 124 A7):** es war kein Szenen-Draw, sondern
+  `EncodeMaterialPreview` (Material-Vorschau und Content-Browser-Thumbnail). Der Draw läuft
+  auf einem frischen Encoder ohne die Bindungen aus `EncodeScene`. Ohne `PREVIEW` war der
+  Lauf schon vorher sauber, Forward wie Deferred. Seitdem bindet
+  `MetalRenderer::BindMaterialPreambleSlots` die Slots 5–16 für Szene, Skinned,
+  Transparenz und Vorschau. Die Sampler laufen über
+  `MaterialShaderLibrary::kMetalPreambleSamplerSlots`, ein Test hält die Liste gegen das
+  emittierte MSL. Rezept in `docs/headless-runs.md`.
 - (Schritt 2) Im Zeugen ist der Boden im Deferred-Pfad deutlich heller als im Forward-Pfad
   (Ambient/IBL), bei gleicher Szene. Nicht untersucht.
 - Der Exporter backt für Metal weiterhin `fragment()` (§4) — ausgelieferte Spiele bleiben

@@ -743,6 +743,12 @@ private:
 	bool EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
 	                           float yaw, float pitch, float dist, int shape,
 	                           const HE::UUID& meshId = HE::UUID{});
+	// Bind every fragment texture/sampler slot the material lighting preamble pins
+	// outside the material-texture window: 5..15 (kMetalPreambleSamplerSlots) plus
+	// the cloud-shadow texture 16. `frameState` = this frame's GI/SSAO/reflection/
+	// cloud-shadow results (scene passes); false = inert, correctly TYPED defaults
+	// for an encoder with no frame behind it (material preview, thumbnail).
+	void BindMaterialPreambleSlots(void* renderEncoder, bool frameState);
 	// Build the billboard pipeline once; false on failure.
 	bool EnsureParticlePreviewPipeline();
 	// Encode the particle cloud into an OPEN encoder — shared by the interactive

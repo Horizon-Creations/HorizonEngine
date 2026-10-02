@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1678,6 +1679,62 @@ TEST_CASE("A wired Landscape Layer Blend cross-compiles for Metal and GL")
 	CHECK_MESSAGE(msl.ok, "MSL compile failed: ", msl.log);
 	const auto& gl = lib.fragment(hash, glsl, B::GLSL410);
 	CHECK_MESSAGE(gl.ok, "GLSL compile failed: ", gl.log);
+}
+
+TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambleSamplerSlots or the material window")
+{
+	// Thema 124 A7: the material preview encoder bound no preamble samplers and
+	// MTL_DEBUG_LAYER rejected every preview draw (missing samplers 5-12/14).
+	// MetalRenderer::BindMaterialPreambleSlots now binds the sampler on every
+	// slot of kMetalPreambleSamplerSlots, for the scene passes AND the preview —
+	// so the contract that must not drift is: the emitted MSL declares no
+	// sampler outside that list and the material-texture window 0..4.
+	HE::MaterialGraph g = makeDemoGraph();
+	// A Landscape Layer Blend adds the one per-draw preamble sampler (weightmap).
+	const int out = [&] { for (const auto& n : g.nodes) if (n.type == HE::MatNodeType::Output) return n.id; return -1; }();
+	REQUIRE(out >= 0);
+	const int lb = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+	g.findNode(lb)->s = "Grass\nRock";
+	const int c = g.addNode(HE::MatNodeType::ConstColor);
+	REQUIRE(g.connect(c, 0, lb, 0));
+	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputEmissivePin));
+
+	const std::string glsl = HE::generateFragment(g).glsl;
+	const uint64_t    hash = std::hash<std::string>{}(glsl);
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	HE::MaterialShaderLibrary lib;
+
+	auto samplersOf = [](const std::string& src) {
+		std::set<int> s;
+		const std::string tag = "[[sampler(";
+		for (size_t p = src.find(tag); p != std::string::npos; p = src.find(tag, p + tag.size()))
+			s.insert(std::atoi(src.c_str() + p + tag.size()));
+		return s;
+	};
+	const std::set<int> listed(std::begin(MSL::kMetalPreambleSamplerSlots),
+	                           std::end(MSL::kMetalPreambleSamplerSlots));
+	for (const bool clustered : { false, true })
+	{
+		CAPTURE(clustered);
+		const auto& msl = clustered ? lib.fragmentClustered(hash, glsl, B::Metal)
+		                            : lib.fragment(hash, glsl, B::Metal);
+		REQUIRE_MESSAGE(msl.ok, msl.log);
+		const std::set<int> used = samplersOf(msl.source);
+		// Positive control: the preamble's lit path really declares the slots
+		// the validation layer named, so an empty parse cannot pass vacuously.
+		for (const int slot : { 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 })
+		{
+			CAPTURE(slot);
+			CHECK(used.count(slot) == 1);
+		}
+		for (const int slot : used)
+		{
+			CAPTURE(slot);
+			CHECK(((slot >= 0 && slot <= HE::kMatMaxGraphTextures) || listed.count(slot) == 1));
+		}
+		CHECK(used.size() <= 16); // Metal's fragment sampler cap
+	}
 }
 #endif
 

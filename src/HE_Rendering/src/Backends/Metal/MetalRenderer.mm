@@ -9144,6 +9144,13 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
 		[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 	}
+	// The scene's material PSO declares the whole lighting preamble (GI masks,
+	// probe atlases, reflections, CSM, local shadows, sky env, AO, cloud shadow),
+	// but this encoder is a fresh one with none of EncodeScene's per-frame binds
+	// behind it — left unbound, API validation rejected every preview and
+	// thumbnail draw (missing samplers 5-12/14). Every gate in `lit` is 0, so the
+	// inert defaults are never sampled and the picture does not change.
+	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/false);
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:0]; // heTex0
 	if (ma)
 	{
@@ -13002,6 +13009,59 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 // render encoder (same attachments as the opaque geometry pass).
 // sceneUniformsPtr is a const SceneUniforms* (opaque to avoid pulling the struct
 // into the header).
+void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameState)
+{
+	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	auto pick = [&](void* live) { return (__bridge id<MTLTexture>)(frameState && live ? live : m_dummyTexture); };
+	// Same gates as the shader-side uniforms: GI needs the probe atlases too, not
+	// just the shadow result — on the first GI-active frame (before
+	// EnsureGIProbeGrid has run) the atlases can still be null.
+	const bool giActive = frameState && m_giEnabled && m_giSupported && m_giShadowResult
+	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
+	const bool ssaoActive = frameState && m_ssaoEnabled && m_ssaoResult;
+
+	// Every preamble sampler is the clamp+linear one; binding it on the whole
+	// list (not slot by slot below) is what keeps a newly pinned sampler from
+	// going unbound on one of the encoders.
+	for (const int slot : HE::MaterialShaderLibrary::kMetalPreambleSamplerSlots)
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:slot];
+
+	// GI shadow masks on 5/8, DDGI probe atlases on 6/7 — the slots the built-in
+	// scene shader reads the same textures at (one encoder serves both; Metal caps
+	// the fragment stage at 16 samplers, so the preamble cannot get its own).
+	[encoder setFragmentTexture:pick(giActive ? m_giShadowResult : nullptr) atIndex:5];
+	[encoder setFragmentTexture:pick(giActive ? m_giIrradianceAtlas : nullptr) atIndex:6];
+	[encoder setFragmentTexture:pick(giActive ? m_giVisibilityAtlas : nullptr) atIndex:7];
+	[encoder setFragmentTexture:pick(giActive ? m_giLocalMaskTex : nullptr) atIndex:8];
+	// FORWARD reflection results at 9/10 (heLitP pins; the GI masks moved onto
+	// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run;
+	// the ssr.x / giRefl.z gates are 0 then, the samples fold dead.
+	[encoder setFragmentTexture:pick(m_fwdReflSsrTex) atIndex:9];
+	[encoder setFragmentTexture:pick(m_fwdReflGiTex) atIndex:10];
+	// CSM array for the material preamble's GI-off fallback, pinned at 11
+	// (sampling gated by heLight.csmSplits.w — same convention as slot 1), and
+	// the local (point/spot) shadow atlas at 12 (gated per light by params.y).
+	// Both are 2D ARRAYS: the 2D dummy would fail Metal's texture-type check,
+	// so the CSM array (created in Initialize) is the inert default.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
+	// Landscape weightmap: the dummy until a terrain draw binds its own per draw.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:13];
+	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
+	// image-based ambient and fog — the SAME textures the built-in shaders read
+	// at 2/3, re-pinned clear of the material-texture window. heLight.fog.z/.w
+	// gate the samples, so an absent cubemap (nil — legal in Metal, reads zero)
+	// or a dummy AO bind here is inert. The cube slot must NOT get the 2D dummy:
+	// Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
+	[encoder setFragmentTexture:pick(ssaoActive ? m_ssaoResult : nullptr) atIndex:15];
+	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
+	// (both fragmentMain and the material preamble sample it through an inline
+	// constexpr sampler; sampler indices stop at 15). White dummy when the
+	// pass didn't run, and the strength gate is 0 then anyway.
+	[encoder setFragmentTexture:pick(m_cloudShadowTex) atIndex:16];
+}
+
 void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
                                          bool shadows, const void* sceneUniformsPtr)
 {
@@ -13028,47 +13088,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-	// FORWARD reflection results at 9/10 (heLitP pins; the GI masks moved onto
-	// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run;
-	// the ssr.x / giRefl.z gates are 0 then, the samples fold dead.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
-	// CSM array for the material preamble's GI-off fallback, pinned at 11
-	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
-	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
-	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
-	// image-based ambient and fog — the SAME textures the built-in shaders read
-	// at 2/3, re-pinned clear of the material-texture window. Gated by
-	// heLight.fog.z/.w gate the samples, so an absent cubemap (nil — legal in
-	// Metal, reads zero) or a dummy AO bind here is inert. The cube slot must NOT
-	// get the 2D dummy: Metal validates the texture TYPE.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
-	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
-	// (both fragmentMain and the material preamble sample it through an inline
-	// constexpr sampler; sampler indices stop at 15). White dummy when the
-	// pass didn't run, and the strength gate is 0 then anyway.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
-	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
-	// scene pass already set above for the built-in shaders (Metal caps the
-	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
-	// bind here.
+	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -13272,47 +13292,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// fragment texture/sampler 1-4 with up to kMatMaxGraphTextures graph textures.
 	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult
 	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-	// FORWARD reflection results at 9/10 (heLitP pins; the GI masks moved onto
-	// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run;
-	// the ssr.x / giRefl.z gates are 0 then, the samples fold dead.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
-	// CSM array for the material preamble's GI-off fallback, pinned at 11
-	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
-	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
-	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
-	// image-based ambient and fog — the SAME textures the built-in shaders read
-	// at 2/3, re-pinned clear of the material-texture window. Gated by
-	// heLight.fog.z/.w gate the samples, so an absent cubemap (nil — legal in
-	// Metal, reads zero) or a dummy AO bind here is inert. The cube slot must NOT
-	// get the 2D dummy: Metal validates the texture TYPE.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
-	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
-	// (both fragmentMain and the material preamble sample it through an inline
-	// constexpr sampler; sampler indices stop at 15). White dummy when the
-	// pass didn't run, and the strength gate is 0 then anyway.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
-	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
-	// scene pass already set above for the built-in shaders (Metal caps the
-	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
-	// bind here.
+	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -13888,26 +13868,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
 		[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-		// FORWARD reflection results at 9/10 (heLitP pins; GI masks moved onto
-		// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run.
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
-		// CSM array for the material preamble's GI-off fallback, pinned at 11.
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
-		// Local (point/spot) shadow atlas, pinned at 12.
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
+		BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
 		wire(true);
 		for (const TPDraw& t : transparent)
