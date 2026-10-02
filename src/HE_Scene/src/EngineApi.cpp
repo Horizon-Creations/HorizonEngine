@@ -1392,6 +1392,7 @@ int stopAnimation(Ctx& c, int id, const std::string& element, const std::string&
 
 uint32_t childRef(Ctx& c, int id, const std::string& element)
 { return c.world ? ScriptApi::childWidget(*c.world, id, element) : 0u; }
+bool isDesignTime(Ctx& c) { return c.designTime; }
 
 bool playAnimation(Ctx& c, int id, const std::string& clip, bool restore,
                    const std::string& direction)
@@ -6218,6 +6219,12 @@ const std::vector<ApiFn>& registry()
             "HE::api::widget::childRef",
             [](Ctx& c, const VV& a){ return VV{ Value::ofRef(
                 widget::childRef(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        // True only while the designer runs PreConstruct to draw it (§5 of
+        // docs/widget-pre-construct-design.md). Pure: a Branch reads it.
+        t.push_back({ "widget.isDesignTime", "Widget", false,
+            {}, {{"designTime", P::Bool}},
+            "HE::api::widget::isDesignTime",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(widget::isDesignTime(c)) }; } });
         t.push_back({ "widget.stopAllAnimations", "Widget", true,
             {{"widget", P::Ref}}, {{"stopped", P::Int}},
             "HE::api::widget::stopAllAnimations",
@@ -7605,6 +7612,7 @@ const std::vector<ApiFn>& registry()
             { "widget.stopAnimationClip", "Stop Animation" },
             { "widget.isPlayingAnimation", "Is Animation Playing" },
             { "widget.childRef", "Get Child Widget" },
+            { "widget.isDesignTime", "Is Design Time" },
             { "widget.stopAllAnimations", "Stop All Animations" },
             { "widget.restoreOriginalState", "Restore Original State" },
             { "widget.showModal", "Show Modal Widget" },
@@ -8150,6 +8158,46 @@ bool groupAllowed(std::string_view apiId, const std::vector<const char*>& allowe
     const std::string_view group = apiId.substr(0, dot == std::string_view::npos ? apiId.size() : dot);
     for (const char* g : allowed) if (g && group == g) return true;
     return false;
+}
+
+bool designTimeAllows(const std::string& apiId)
+{
+    if (apiId == "widget.isDesignTime" || apiId == "widget.childRef") return true;
+    // Groups whose pure rows compute from their arguments alone (datetime: and
+    // the clock). Exec rows stay out even here — random's are exec because
+    // they turn the process-wide generator, which is a side effect too.
+    static const std::vector<const char*> kPureGroups = { "math", "string", "json", "datetime" };
+    if (!groupAllowed(apiId, kPureGroups)) return false;
+    const ApiFn* fn = find(apiId);
+    return fn && !fn->isExec;
+}
+
+std::function<std::vector<Value>(uint32_t, const std::string&, const std::vector<Value>&)>
+designTimeCallApi(WidgetManager* widgets, std::vector<std::string>* refused)
+{
+    return [widgets, refused](uint32_t self, const std::string& apiId,
+                              const std::vector<Value>& args) -> std::vector<Value>
+    {
+        if (!designTimeAllows(apiId))
+        {
+            if (refused && std::find(refused->begin(), refused->end(), apiId) == refused->end())
+                refused->push_back(apiId);
+            return {};
+        }
+        // Get Child Widget: the world has no widgets at design time, the
+        // throwaway manager does — the one the page and its embeds live in.
+        if (apiId == "widget.childRef")
+        {
+            const int    id   = args.empty() ? 0 : (int)args[0].ref;
+            const std::string name = args.size() > 1 ? args[1].s : std::string{};
+            return { Value::ofRef(widgets ? widgets->childInstance(id, name) : 0u) };
+        }
+        Ctx c;
+        c.self       = self;
+        c.designTime = true;
+        const ApiFn* fn = find(apiId);
+        return fn ? fn->invoke(c, args) : std::vector<Value>{};
+    };
 }
 
 const ApiFn* find(const std::string& id)

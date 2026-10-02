@@ -25,7 +25,9 @@
 #include <UIWidget/UIElement.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetBinding.h>
+#include <UIWidget/WidgetManager.h>               // design-time Pre Construct run (sandbox)
 #include <HorizonCode/HorizonCode.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
@@ -43,6 +45,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -187,6 +190,29 @@ struct State
 	// display mode, not a value — an element whose corners already differ is
 	// always shown as four whatever this says.
 	bool   cornerPerSide = false;
+
+	// ── Pre Construct at design time (docs/widget-pre-construct-design.md §5) ─
+	// The toolbar switch (on by default, like UMG), and what the last sandboxed
+	// run of the widget's PreConstruct left behind. View state, never saved:
+	// the canvas shows these values for one frame at a time (DesignTimePreview).
+	bool   designPreConstruct = true;
+	struct DesignView
+	{
+		bool ran = false;
+		// Instance element id → the properties PreConstruct changed, final
+		// values. Ids below hostNextId are the document's own elements.
+		std::unordered_map<int, std::vector<std::pair<std::string, UIPropValue>>> writes;
+		// WidgetRef element (instance ids) → how far its embed's local ids were
+		// moved; nested embeds are keyed by their ref's instance id too.
+		std::unordered_map<int, int> embedOffset;
+		int hostNextId = 0;
+		std::vector<std::string> refused;   // engine calls the sandbox turned down
+	} design;
+	// What the last run saw: the committed document (the undo snapshot) and the
+	// embedded assets, which are re-checked twice a second.
+	std::string designDocSeen, designEmbedSeen, designEmbedNow;
+	double      designEmbedCheckAt = 0.0;
+	bool        designWasOn = false;
 
 	// Graph canvas — the shared GraphEditor component owns pan/zoom/selection/
 	// drag; these are the host-side bits it can't own.
@@ -431,9 +457,26 @@ int propIntOr(const UIElement& e, const char* name, int fb)
 	return v.type == UIPropType::Int ? v.i : fb;
 }
 
+// ── Design-time values never reach the document ───────────────────────────────
+// While drawCanvas shows what PreConstruct sets (DesignTimePreview, further
+// down), those values sit in st.tree — and a drag released or a palette drop
+// commits from inside that same frame. Everything that WRITES the document out
+// (the undo snapshot, the live asset, the save) holds one of these for the
+// length of the write, which takes the shown values out and puts them back.
+void designValuesOut();
+void designValuesBack();
+struct DesignValuesOut
+{
+	DesignValuesOut()  { designValuesOut(); }
+	~DesignValuesOut() { designValuesBack(); }
+	DesignValuesOut(const DesignValuesOut&) = delete;
+	DesignValuesOut& operator=(const DesignValuesOut&) = delete;
+};
+
 // ── Undo (combined tree + graph snapshot; '\x1f' = ASCII Unit Separator) ──────
 std::string makeSnapshot(const State& st)
 {
+	const DesignValuesOut authored;
 	return HE::uiWidgetTreeToJson(st.tree) + '\x1f' + HC::toJson(st.graph);
 }
 
@@ -496,7 +539,10 @@ bool saveState(State& st, AppContext& ctx)
 			"UIEditorPanel: widget asset vanished — cannot save");
 		return false;
 	}
-	a->treeJson  = HE::uiWidgetTreeToJson(st.tree);
+	{
+		const DesignValuesOut authored;
+		a->treeJson  = HE::uiWidgetTreeToJson(st.tree);
+	}
 	a->graphJson = HC::toJson(st.graph);
 	if (!ctx.contentManager->saveAsset(*a)) return false;
 	st.dirty = false;
@@ -510,6 +556,7 @@ void applyToAsset(State& st, AppContext& ctx)
 	if (!ctx.contentManager) return;
 	if (UIWidgetAsset* a = ctx.contentManager->getWidgetMutable(st.assetId))
 	{
+		const DesignValuesOut authored;
 		a->treeJson  = HE::uiWidgetTreeToJson(st.tree);
 		a->graphJson = HC::toJson(st.graph);
 	}
@@ -4270,6 +4317,186 @@ const HE::UIWidgetTree* embeddedTreeFor(AppContext& ctx, const std::string& path
 	return c.ok ? &c.tree : nullptr;
 }
 
+// ── Pre Construct at design time (docs/widget-pre-construct-design.md §5) ────
+// What the last sandboxed run left behind, for everything drawCanvas draws this
+// frame — set and cleared by drawCanvas, like g_previewTheme. Null = off.
+const State::DesignView* g_design = nullptr;
+
+// How far the embed under the WidgetRef with INSTANCE id `instRef` was moved,
+// or -1 when nothing ran or that ref has no embed.
+int designOffsetOf(int instRef)
+{
+	if (!g_design || instRef <= 0) return -1;
+	const auto it = g_design->embedOffset.find(instRef);
+	return it == g_design->embedOffset.end() ? -1 : it->second;
+}
+
+// An embedded widget's PreConstruct, written into a COPY of its tree (local
+// ids; `offset` turns them into the run's instance ids).
+void applyDesignWrites(HE::UIWidgetTree& t, int offset)
+{
+	if (!g_design || offset < 0) return;
+	for (auto& ep : t.elements)
+	{
+		if (!ep) continue;
+		const auto it = g_design->writes.find(ep->id + offset);
+		if (it == g_design->writes.end()) continue;
+		for (const auto& [prop, v] : it->second)
+			if (ep->getPropAny(prop).type == v.type) ep->setPropAny(prop, v);
+	}
+}
+
+// Re-run the widget's PreConstruct when what it would see has changed: the
+// committed document (the undo snapshot every finished edit pushes — so a drag
+// re-runs when it is let go, not on every pixel) or one of the embedded assets.
+// The run happens on a throwaway WidgetManager whose runtime has only the
+// design-time Services: no world, no files, no network (HE::api::designTimeCallApi).
+void refreshDesignTimeRun(State& st, AppContext& ctx)
+{
+	if (!st.designPreConstruct || !ctx.contentManager)
+	{
+		st.design = {};
+		st.designWasOn = false;
+		return;
+	}
+	// The embedded assets, as JSON in the content manager — another tab saving
+	// (or live-applying) one of them shows up here. Twice a second is plenty
+	// for that, and it keeps a page of thirty refs from hashing every frame.
+	const double now = ImGui::GetTime();
+	if (now >= st.designEmbedCheckAt)
+	{
+		st.designEmbedCheckAt = now + 0.5;
+		std::string key;
+		for (const auto& ep : st.tree.elements)
+		{
+			const auto* ref = ep ? dynamic_cast<const HE::UIWidgetRef*>(ep.get()) : nullptr;
+			if (!ref || ref->widgetPath.empty()) continue;
+			const HE::UUID id = ctx.contentManager->loadAsset(ref->widgetPath);
+			if (const UIWidgetAsset* a = id == HE::UUID{} ? nullptr : ctx.contentManager->getWidget(id))
+				key += ref->widgetPath + '#' +
+				       std::to_string(std::hash<std::string>{}(a->treeJson)) + '#' +
+				       std::to_string(std::hash<std::string>{}(a->graphJson)) + ';';
+		}
+		st.designEmbedNow = std::move(key);
+	}
+	const std::string& doc = st.undoPos >= 0 && st.undoPos < (int)st.undo.size()
+	                         ? st.undo[st.undoPos] : std::string();
+	if (st.designWasOn && doc == st.designDocSeen && st.designEmbedNow == st.designEmbedSeen)
+		return;
+	st.designWasOn     = true;
+	st.designDocSeen   = doc;
+	st.designEmbedSeen = st.designEmbedNow;
+
+	// The sandbox. The manager is declared after the runtime it runs on, so it
+	// goes first; neither fires anything on the way out.
+	std::vector<std::string> refused;
+	HorizonCode::Runtime rt;
+	WidgetManager wm;
+	wm.setRuntime(&rt);
+	HorizonCode::Runtime::Services svc;
+	svc.callApi = HE::api::designTimeCallApi(&wm, &refused);
+	rt.setServices(std::move(svc));
+	// The theme the canvas resolves against, so a PreConstruct that reads a
+	// themed colour reads the one on screen.
+	if (g_previewTheme) wm.setTheme(*g_previewTheme);
+	wm.setThemePreference(g_previewMode == HE::UIThemeMode::Light ? HE::UIThemePreference::Light
+	                                                               : HE::UIThemePreference::Dark);
+	const WidgetManager::DesignTimeRun run =
+		wm.runDesignTimePreConstruct(*ctx.contentManager, st.relPath, st.tree, st.graph);
+
+	st.design = {};
+	st.design.ran        = run.created;
+	st.design.hostNextId = st.tree.nextId;
+	for (const WidgetManager::DesignTimeRun::Write& w : run.writes)
+		st.design.writes[w.elem].push_back({ w.prop, w.value });
+	for (const WidgetManager::DesignTimeRun::Embed& e : run.embeds)
+		st.design.embedOffset[e.refElem] = e.idOffset;
+	st.design.refused = std::move(refused);
+}
+
+// The run's values for the document's OWN elements, in the tree for exactly as
+// long as this object lives — ScrubPreview's rule and for its reason: nothing
+// outside one frame's drawing may see them, not the save, not an undo
+// snapshot, not the collaboration mirror. A value somebody changed during the
+// frame (a drag, a nudge) is NOT put back: their edit wins over the preview.
+struct DesignTimePreview;
+DesignTimePreview* g_designPreview = nullptr;   // the one in force, for DesignValuesOut
+
+struct DesignTimePreview
+{
+	HE::UIWidgetTree* tree = nullptr;
+	// `taken` = put back to `authored` by a DesignValuesOut that is still open.
+	struct Saved { int elem; std::string prop; UIPropValue authored, shown; bool taken = false; };
+	std::vector<Saved> saved;
+	int outDepth = 0;   // DesignValuesOut nests (commitEdit → pushUndo → makeSnapshot)
+
+	explicit DesignTimePreview(State& st)
+	{
+		if (!st.designPreConstruct || !st.design.ran || st.design.writes.empty()) return;
+		tree = &st.tree;
+		for (const auto& [elem, props] : st.design.writes)
+		{
+			// An embed's element: drawEmbeddedTree writes those into its copy.
+			if (elem >= st.design.hostNextId) continue;
+			UIElement* e = tree->find(elem);
+			if (!e) continue;
+			for (const auto& [prop, v] : props)
+			{
+				const UIPropValue cur = e->getPropAny(prop);
+				if (cur.type != v.type) continue;
+				e->setPropAny(prop, v);
+				saved.push_back({ elem, prop, cur, e->getPropAny(prop) });
+			}
+		}
+		g_designPreview = this;
+	}
+	// The authored values back in wherever the shown one is still there. Where
+	// it is not, somebody changed it this frame (a drag, a nudge, an open clip
+	// on top) and that value is left alone — an edit is the document now.
+	void takeOut()
+	{
+		for (auto it = saved.rbegin(); it != saved.rend(); ++it)
+		{
+			UIElement* e = tree->find(it->elem);
+			if (!e || !WidgetManager::samePropValue(e->getPropAny(it->prop), it->shown)) continue;
+			e->setPropAny(it->prop, it->authored);
+			it->taken = true;
+		}
+	}
+	// …and the shown values back on the canvas for the rest of the frame.
+	void putBack()
+	{
+		for (Saved& s : saved)
+		{
+			if (!s.taken) continue;
+			s.taken = false;
+			UIElement* e = tree->find(s.elem);
+			if (!e || e->getPropAny(s.prop).type != s.shown.type) continue;
+			s.authored = e->getPropAny(s.prop);
+			e->setPropAny(s.prop, s.shown);
+		}
+	}
+	~DesignTimePreview()
+	{
+		if (!tree) return;
+		if (g_designPreview == this) g_designPreview = nullptr;
+		if (outDepth == 0) takeOut();
+	}
+	DesignTimePreview(const DesignTimePreview&) = delete;
+	DesignTimePreview& operator=(const DesignTimePreview&) = delete;
+};
+
+void designValuesOut()
+{
+	if (DesignTimePreview* p = g_designPreview)
+		if (p->outDepth++ == 0) p->takeOut();
+}
+void designValuesBack()
+{
+	if (DesignTimePreview* p = g_designPreview)
+		if (p->outDepth > 0 && --p->outDepth == 0) p->putBack();
+}
+
 // One element of a tree, with the two things every element needs resolved
 // first: its picture and the inherited opacity / disabled dim. Shared by the
 // page itself and by everything embedded in it.
@@ -4302,11 +4529,14 @@ HE::UIWidgetCanvas embeddedCanvasFor(const HE::UIWidgetTree& tree, float slotW, 
 // A COPY, because auto-size mutates the tree it measures and the cached one
 // must stay as the asset wrote it.
 HE::UIWidgetTree laidEmbeddedCopy(const HE::UIWidgetTree& tree, const HE::UIWidgetRef* ref,
-                                  const HE::UIWidgetCanvas& canvas)
+                                  const HE::UIWidgetCanvas& canvas, int designOffset = -1)
 {
 	HE::UIWidgetTree laid = tree;
 	if (ref && !ref->paramValues.empty())
 		HE::uiApplyWidgetParams(laid, ref->paramValues);
+	// …then what its own PreConstruct set, which at runtime also runs after the
+	// parameters went in and before anything is measured.
+	applyDesignWrites(laid, designOffset);
 	HE::uiApplyAutoSize(laid, &canvas);
 	HE::uiUpdateScrollExtents(laid);
 	return laid;
@@ -4342,7 +4572,7 @@ void refreshDesignSlots(AppContext& ctx, HE::UIWidgetTree& page, const HE::UIWid
 
 		const HE::UIWidgetRect r = HE::uiElementRect(page, *ref, canvas);
 		const HE::UIWidgetCanvas subCanvas = embeddedCanvasFor(*sub, r.w, r.h);
-		const HE::UIWidgetTree laid = laidEmbeddedCopy(*sub, ref, subCanvas);
+		const HE::UIWidgetTree laid = laidEmbeddedCopy(*sub, ref, subCanvas, designOffsetOf(ref->id));
 		for (const auto& sp : laid.elements)
 			if (sp && sp->type() == UIWidgetType::NamedSlot)
 				ref->designSlots.push_back({ sp->name, HE::uiElementRect(laid, *sp, &subCanvas) });
@@ -4353,11 +4583,12 @@ void refreshDesignSlots(AppContext& ctx, HE::UIWidgetTree& page, const HE::UIWid
 // same clipping rule the runtime uses. `depth` bounds the recursion so a circle
 // of widgets embedding each other cannot hang the editor. `host` is the tree
 // the ref sits in, when the caller has it: with it, a slot the page has filled
-// hides its default content here as it will at runtime.
+// hides its default content here as it will at runtime. `designOffset` is where
+// this copy's ids sit in the last design-time run (designOffsetOf), -1 = none.
 void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
                       const HE::UIWidgetRef* ref,
                       const ImVec2& mn, const ImVec2& mx, float s, int depth,
-                      const HE::UIWidgetTree* host = nullptr)
+                      const HE::UIWidgetTree* host = nullptr, int designOffset = -1)
 {
 	constexpr int kMaxDepth = 4;
 	if (depth > kMaxDepth) return;
@@ -4384,11 +4615,11 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	// parameter that changes a label changes how wide that label wants to be.
 	//
 	// This is why parameters are element properties and not script variables.
-	// Graphs do not run in the designer, so a knob that only a graph could turn
-	// would leave a page of five form rows showing five identical labels here
-	// and five different ones at runtime — and the designer would be lying
-	// about the one thing it exists to show.
-	HE::UIWidgetTree laid = laidEmbeddedCopy(tree, ref, canvas);
+	// Of a graph only Pre Construct runs in the designer, and only when its
+	// switch is on — a knob that only a graph could turn would leave a page of
+	// five form rows showing five identical labels here whenever it is off,
+	// and the designer would be lying about the one thing it exists to show.
+	HE::UIWidgetTree laid = laidEmbeddedCopy(tree, ref, canvas, designOffset);
 
 	// A slot the page has filled hides its default content, as the graft makes
 	// it. The rule is the graft's: a child named after a slot fills that one,
@@ -4450,7 +4681,8 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 				embeddedTreeFor(ctx, it.n->getProp("Widget").s))
 				drawEmbeddedTree(dl, ctx, *sub,
 				                 dynamic_cast<const HE::UIWidgetRef*>(it.n),
-				                 emn, emx, subY, depth + 1);
+				                 emn, emx, subY, depth + 1, nullptr,
+				                 designOffset < 0 ? -1 : designOffsetOf(designOffset + it.n->id));
 		if (clipped) dl->PopClipRect();
 	}
 }
@@ -4528,6 +4760,19 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	//
 	// Inside the frame it applies to the picking as well as the picture, which
 	// is right: you click what you can see.
+	//
+	// Under it, by the same rule, what the widget's PreConstruct sets (§5 of
+	// docs/widget-pre-construct-design.md): re-run when the document changed,
+	// applied first and taken back last, so an open clip plays on top of it
+	// the way an animation plays over a constructed widget at runtime.
+	refreshDesignTimeRun(st, ctx);
+	struct DesignScope
+	{
+		explicit DesignScope(const State& s)
+		{ g_design = s.designPreConstruct && s.design.ran ? &s.design : nullptr; }
+		~DesignScope() { g_design = nullptr; }
+	} const designScope(st);
+	const DesignTimePreview designPreview(st);
 	const ScrubPreview scrub(st);
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -4658,7 +4903,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			if (const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, wp))
 				drawEmbeddedTree(dl, ctx, *sub,
 				                 dynamic_cast<const HE::UIWidgetRef*>(it.n), mn, mx, s, 0,
-				                 &st.tree);
+				                 &st.tree, designOffsetOf(it.n->id));
 			else
 			{
 				const std::string label = wp.empty()
@@ -4671,6 +4916,24 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		if (clipped) dl->PopClipRect();
 	}
 	dl->PopClipRect();
+
+	// What the Pre Construct sandbox turned down, where the author is looking:
+	// a value the graph would load at runtime is missing on the canvas, and
+	// this says which call it was — the one to put behind Is Design Time.
+	if (g_design && !g_design->refused.empty())
+	{
+		std::string msg = "Pre Construct skipped in the designer: ";
+		const std::size_t n = g_design->refused.size();
+		for (std::size_t i = 0; i < n && i < 4; ++i)
+		{
+			if (i) msg += ", ";
+			const HE::api::ApiFn* fn = HE::api::find(g_design->refused[i]);
+			msg += fn && fn->displayName ? fn->displayName : g_design->refused[i].c_str();
+		}
+		if (n > 4) msg += ", +" + std::to_string(n - 4);
+		dl->AddText(ImVec2(origin.x + 6.0f, origin.y + avail.y - ImGui::GetTextLineHeight() - 4.0f),
+		            IM_COL32(230, 190, 110, 220), msg.c_str());
+	}
 
 	// ── Selection outline, resize handles, anchor marker ─────────────────────
 	const float hs = 4.0f; // handle half-size in px
@@ -6373,6 +6636,18 @@ void render(AppContext& ctx, const std::string& assetPath,
 				// second ago is exactly the one somebody comes here to look at.
 				resolvePreviewTheme(st, ctx);
 				openThemePopup = true;
+			}
+			bar.endGroup();
+
+			// The widget's Pre Construct, run on the canvas in a sandbox
+			// (docs/widget-pre-construct-design.md §5). Beside the theme because
+			// it is the same kind of switch: a way of looking, never saved.
+			bar.group();
+			if (bar.item("##uipreconstruct", T::iconCode, "Pre Construct", st.designPreConstruct,
+			             true, "Show what the widget's Pre Construct sets (sandboxed)",
+			             "ui.pre-construct"))
+			{
+				st.designPreConstruct = !st.designPreConstruct;
 			}
 			bar.endGroup();
 		}

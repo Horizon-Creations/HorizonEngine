@@ -323,7 +323,8 @@ void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
 			HE_LOG_ERROR(Widget, "WidgetRef '%s' has an unparsable graph — it will render "
 			                     "but have no logic", ref->widgetPath.c_str());
 		const HorizonCode::ClassIdentity cls{ ref->widgetPath, "Object" };
-		if (auto compiled = HorizonCode::compiledClasses().create(ref->widgetPath))
+		if (auto compiled = m_designTime ? nullptr
+		                                 : HorizonCode::compiledClasses().create(ref->widgetPath))
 			em.scriptId = rt().addCompiled(std::move(compiled), makeBindings(), cls);
 		else
 			em.scriptId = rt().add(std::move(graph), makeBindings(), cls);
@@ -433,7 +434,59 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 		// graph, previously with nothing in the log to say so.
 		HE_LOG_ERROR(Widget, "Widget '%s' has an unparsable HorizonCode graph — it will "
 		                     "render but have no logic", assetPath.c_str());
+	const bool interpreted = !graph.nodes.empty();
 
+	registerInstance(content, w, std::move(graph));
+	m_instances.push_back(std::move(w));
+
+	// Fire Construct AFTER the widget is in m_instances, so host callbacks can
+	// resolve it by scriptId during construction.
+	//
+	// Everything still needed is COPIED OUT FIRST, because Construct runs user
+	// graph code and that code may create or destroy widgets — and m_instances is
+	// a plain vector, so a single Create Widget inside a Construct reallocates it
+	// and any reference into it points at freed memory. A page widget that builds
+	// its own sub-widget is the ordinary case here, not an exotic one, which is
+	// why this was reachable without anything unusual happening.
+	const int                     widgetId = m_instances.back().id;
+	const HorizonCode::InstanceId scriptId = m_instances.back().scriptId;
+	std::vector<HorizonCode::InstanceId> embedScripts;
+	embedScripts.reserve(m_instances.back().embeds.size());
+	for (const Instance::Embed& em : m_instances.back().embeds)
+		embedScripts.push_back(em.scriptId);
+
+	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
+	            assetPath.c_str(), widgetId, m_instances.back().tree.elements.size(),
+	            interpreted ? "interpreted" : "compiled/no");
+	// Two phases over the whole family. PreConstruct first, for the host and
+	// every embed: each sets its own values and loads its own data. Only then
+	// Construct, so a Construct that calls into an embed finds it initialized
+	// (docs/widget-pre-construct-design.md). Both after theme/text/materials,
+	// so what PreConstruct sets is not overwritten by them. A widget that
+	// destroys itself in PreConstruct simply misses its Construct: the fire
+	// finds no instance and does nothing.
+	rt().firePreConstruct(scriptId);
+	for (const HorizonCode::InstanceId embed : embedScripts)
+		rt().firePreConstruct(embed);
+	rt().fireConstruct(scriptId);
+	// Embedded widgets construct too, innermost last — an embed may only be
+	// spoken to once the widget holding it has run its own Construct.
+	for (const HorizonCode::InstanceId embed : embedScripts)
+		rt().fireConstruct(embed);
+	// A new widget is a new picture, and in an app nothing else asks for one:
+	// the frame is only drawn when something says it changed (A2).
+	m_visualDirty = true;
+	return widgetId;
+}
+
+// Everything createWidget does between "the tree and graph are read" and "the
+// instance is in m_instances" — shared with the designer's design-time run, so
+// the two can never build a widget differently (embeds, theme, text, assets,
+// script registration). The caller moves `w` into m_instances afterwards.
+void WidgetManager::registerInstance(ContentManager& content, Instance& w,
+                                     HorizonCode::Graph graph)
+{
+	const std::string& assetPath = w.assetPath;
 	// Graft in every embedded widget FIRST: what they bring is part of this
 	// tree from here on, so material/font resolution below covers it too.
 	{
@@ -488,52 +541,88 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// path); a table miss runs the graph interpreted, exactly as before.
 	// A widget's class key is its asset path, like any other class; it derives
 	// from nothing (a widget lives outside the entity world), so it stays Object.
+	// At design time never compiled: the class in the game library is older
+	// than the graph somebody is editing right now.
 	const HorizonCode::ClassIdentity widgetCls{ assetPath, "Object" };
-	if (auto compiled = HorizonCode::compiledClasses().create(assetPath))
+	if (auto compiled = m_designTime ? nullptr : HorizonCode::compiledClasses().create(assetPath))
 		w.scriptId = rt().addCompiled(std::move(compiled), makeBindings(), widgetCls);
 	else
 		w.scriptId = rt().add(std::move(graph), makeBindings(), widgetCls);
 	w.id = (int)w.scriptId;
+}
+
+// Same value, compared the way its type means it. UIPropValue carries every
+// type's field at once, so comparing all of them would call two equal Colors
+// different because of a stale `f` nobody reads.
+bool WidgetManager::samePropValue(const HE::UIPropValue& a, const HE::UIPropValue& b)
+{
+	if (a.type != b.type) return false;
+	switch (a.type)
+	{
+	case HE::UIPropType::Float:  return a.f == b.f;
+	case HE::UIPropType::Int:    return a.i == b.i;
+	case HE::UIPropType::Bool:   return a.b == b.b;
+	case HE::UIPropType::Vec2:   return a.v2 == b.v2;
+	case HE::UIPropType::Color:  return a.col == b.col;
+	default:                     return a.s == b.s && a.list == b.list;
+	}
+}
+
+WidgetManager::DesignTimeRun WidgetManager::runDesignTimePreConstruct(
+	ContentManager& content, const std::string& assetPath,
+	const HE::UIWidgetTree& tree, const HorizonCode::Graph& graph)
+{
+	DesignTimeRun out;
+	m_content = &content;
+	m_columnInfo.clear();
+	// Built exactly like createWidget builds it, from the DOCUMENT handed in
+	// rather than the saved asset: the designer shows what is being edited.
+	m_designTime = true;
+	Instance w;
+	w.assetPath = assetPath;
+	w.tree = tree;
+	registerInstance(content, w, graph);
+	m_designTime = false;
 	m_instances.push_back(std::move(w));
 
-	// Fire Construct AFTER the widget is in m_instances, so host callbacks can
-	// resolve it by scriptId during construction.
-	//
-	// Everything still needed is COPIED OUT FIRST, because Construct runs user
-	// graph code and that code may create or destroy widgets — and m_instances is
-	// a plain vector, so a single Create Widget inside a Construct reallocates it
-	// and any reference into it points at freed memory. A page widget that builds
-	// its own sub-widget is the ordinary case here, not an exotic one, which is
-	// why this was reachable without anything unusual happening.
 	const int                     widgetId = m_instances.back().id;
 	const HorizonCode::InstanceId scriptId = m_instances.back().scriptId;
-	std::vector<HorizonCode::InstanceId> embedScripts;
-	embedScripts.reserve(m_instances.back().embeds.size());
+	std::vector<HorizonCode::InstanceId> scripts{ scriptId };
 	for (const Instance::Embed& em : m_instances.back().embeds)
-		embedScripts.push_back(em.scriptId);
+	{
+		scripts.push_back(em.scriptId);
+		out.embeds.push_back({ em.rootElem, em.idOffset });
+	}
+	// What the tree is BEFORE any graph ran: theme and language are already in
+	// it, so they cannot read as something PreConstruct did. A copy, because
+	// PreConstruct may create widgets on this manager and move m_instances.
+	const HE::UIWidgetTree before = m_instances.back().tree;
 
-	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
-	            assetPath.c_str(), widgetId, m_instances.back().tree.elements.size(),
-	            graph.nodes.empty() ? "compiled/no" : "interpreted");
-	// Two phases over the whole family. PreConstruct first, for the host and
-	// every embed: each sets its own values and loads its own data. Only then
-	// Construct, so a Construct that calls into an embed finds it initialized
-	// (docs/widget-pre-construct-design.md). Both after theme/text/materials,
-	// so what PreConstruct sets is not overwritten by them. A widget that
-	// destroys itself in PreConstruct simply misses its Construct: the fire
-	// finds no instance and does nothing.
-	rt().firePreConstruct(scriptId);
-	for (const HorizonCode::InstanceId embed : embedScripts)
-		rt().firePreConstruct(embed);
-	rt().fireConstruct(scriptId);
-	// Embedded widgets construct too, innermost last — an embed may only be
-	// spoken to once the widget holding it has run its own Construct.
-	for (const HorizonCode::InstanceId embed : embedScripts)
-		rt().fireConstruct(embed);
-	// A new widget is a new picture, and in an app nothing else asks for one:
-	// the frame is only drawn when something says it changed (A2).
-	m_visualDirty = true;
-	return widgetId;
+	// PreConstruct and nothing else — no Construct, no tick, no Destruct.
+	for (const HorizonCode::InstanceId id : scripts) rt().firePreConstruct(id);
+
+	if (const Instance* after = find(widgetId))
+	{
+		out.created = true;
+		for (const auto& ep : after->tree.elements)
+		{
+			if (!ep) continue;
+			const HE::UIElement* old = before.find(ep->id);
+			if (!old || old->type() != ep->type()) continue;   // made by the graph
+			for (const HE::UIPropDesc& d : ep->allProperties())
+			{
+				const HE::UIPropValue now = ep->getPropAny(d.name);
+				if (!samePropValue(now, old->getPropAny(d.name)))
+					out.writes.push_back({ ep->id, d.name, now });
+			}
+		}
+	}
+	// Gone without a word: remove, not destroy, so no Destruct runs either.
+	// The scripts first (they act on the tree), then the instance.
+	for (auto it = scripts.rbegin(); it != scripts.rend(); ++it) rt().remove(*it);
+	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(),
+		[widgetId](const Instance& i){ return i.id == widgetId; }), m_instances.end());
+	return out;
 }
 
 void WidgetManager::setTheme(const HE::UITheme& theme)

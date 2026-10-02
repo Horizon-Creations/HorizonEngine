@@ -43,6 +43,40 @@ public:
     // it should appear.
     int createWidget(ContentManager& content, const std::string& assetPath);
 
+    // ── Design time (docs/widget-pre-construct-design.md §5) ─────────────────
+    // What a widget's PreConstruct does to it, for the DESIGNER to show. The
+    // widget is built from the document handed in (tree + graph as they are in
+    // the editor, unsaved edits included; embeds come from `content`), always
+    // interpreted, exactly as createWidget builds it. Then PreConstruct runs
+    // for the whole family — and nothing else: no Construct, no tick, and the
+    // instance is removed afterwards without a Destruct.
+    //
+    // The SANDBOX is the runtime this manager runs on, so call it on a
+    // throwaway manager whose runtime the caller filled with design-time
+    // Services (HE::api::designTimeCallApi). This class does not know which
+    // engine calls are safe; it only builds, fires and reports.
+    struct DesignTimeRun
+    {
+        // Every property PreConstruct left different, with its final value.
+        // `elem` is the id in the INSTANCE tree: the document's own elements
+        // keep their ids, an embed's are its local id + its idOffset.
+        struct Write { int elem = 0; std::string prop; HE::UIPropValue value; };
+        // Which embed sits under which WidgetRef element (instance ids), and
+        // the offset its local ids were moved by. Nested embeds included.
+        struct Embed { int refElem = 0; int idOffset = 0; };
+        std::vector<Write> writes;
+        std::vector<Embed> embeds;
+        bool created = false;
+    };
+    DesignTimeRun runDesignTimePreConstruct(ContentManager& content,
+                                            const std::string& assetPath,
+                                            const HE::UIWidgetTree& tree,
+                                            const HorizonCode::Graph& graph);
+    // Two property values equal in the field their type uses — the comparison
+    // the run above reports differences with, and the one the designer uses
+    // to tell whether somebody edited a value it had put on the canvas.
+    static bool samePropValue(const HE::UIPropValue& a, const HE::UIPropValue& b);
+
     void destroyWidget(int id);
     void showWidget(int id);
     void hideWidget(int id);
@@ -1047,6 +1081,9 @@ private:
     // one component side by side are simply two copies.
     void embedWidgetRefs(Instance& w, ContentManager& content,
                          const std::vector<std::string>& rootChain);
+    // createWidget between reading the asset and m_instances.push_back: embeds,
+    // theme, text, assets, the script instance. Shared with the design-time run.
+    void registerInstance(ContentManager& content, Instance& w, HorizonCode::Graph graph);
     // Put one widget asset in as a child of `parentElem` and give it its own
     // script instance: the whole of what addChild does once the parent is found,
     // and what a list realizes each of its rows with. `rowIndex` >= 0 marks the
@@ -1260,6 +1297,9 @@ private:
     ContentManager*       m_content = nullptr;
     HorizonCode::Runtime  m_ownRuntime;        // fallback when none is injected
     HorizonCode::Runtime* m_runtime = nullptr; // injected shared runtime (null → own)
+    // True while runDesignTimePreConstruct builds its instance: compiled
+    // classes are skipped for the widget and every embed.
+    bool m_designTime = false;
     bool m_wasDown = false;
     bool m_wasSecondaryDown = false;   // the right button, for its own edge
     bool m_pointerOverUI = false;  // last processPointer verdict (see pointerOverUI)
