@@ -2147,6 +2147,13 @@ bool fromJson(const std::string& json, Graph& out)
         d.hasArg  = e.value("hasArg", false);
         d.argType = (PinType)e.value("argType", (int)P::Float);
         d.typeName = e.value("typeName", std::string());
+        // A custom event saved before the engine took its name over (a project
+        // that had its own "PreConstruct") now fires by itself. Not renamed:
+        // whoever chose that name almost always wanted exactly this, but they
+        // should hear that it changed.
+        if (d.name == "PreConstruct")
+            HE_LOG_WARN(HorizonCode, "%s", "Custom event 'PreConstruct' is now an engine "
+                        "event: on a widget it fires by itself on creation, before Construct");
         if (!g.findEvent(d.name)) g.events.push_back(std::move(d));
     }
     for (const auto& e : j.value("comments", nlohmann::json::array()))
@@ -2469,6 +2476,10 @@ const EventDecl* Graph::findEvent(const std::string& name) const
 const std::vector<EngineEventDesc>& engineEvents()
 {
     static const std::vector<EngineEventDesc> k = {
+        // Widgets only: a phase of its own before ANY Construct of the widget
+        // family (host and every embed), so a Construct may talk to an embed
+        // that has already set its own values (docs/widget-pre-construct-design.md).
+        { "PreConstruct",         "onPreConstruct",       P::Exec,   false },
         { "Construct",            "onConstruct",          P::Exec,   false },
         { "Destruct",             "onDestruct",           P::Exec,   false },
         { "Tick",                 "onTick",               P::Float,  false },

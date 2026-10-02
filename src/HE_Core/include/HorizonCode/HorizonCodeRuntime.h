@@ -349,6 +349,9 @@ public:
     void fireOnClipFinished(InstanceId id, const std::string& clip);
     // A dialog, popup or menu closing — the whole widget, so no element.
     void fireOnDismissed(InstanceId id);
+    // Widgets only — WidgetManager fires it for the host and every embed before
+    // the first fireConstruct of any of them.
+    void firePreConstruct(InstanceId id);
     void fireConstruct(InstanceId id);
     void fireDestruct(InstanceId id);
     void fireBeginPlay(InstanceId id);

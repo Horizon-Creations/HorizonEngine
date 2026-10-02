@@ -515,6 +515,16 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
 	            assetPath.c_str(), widgetId, m_instances.back().tree.elements.size(),
 	            graph.nodes.empty() ? "compiled/no" : "interpreted");
+	// Two phases over the whole family. PreConstruct first, for the host and
+	// every embed: each sets its own values and loads its own data. Only then
+	// Construct, so a Construct that calls into an embed finds it initialized
+	// (docs/widget-pre-construct-design.md). Both after theme/text/materials,
+	// so what PreConstruct sets is not overwritten by them. A widget that
+	// destroys itself in PreConstruct simply misses its Construct: the fire
+	// finds no instance and does nothing.
+	rt().firePreConstruct(scriptId);
+	for (const HorizonCode::InstanceId embed : embedScripts)
+		rt().firePreConstruct(embed);
 	rt().fireConstruct(scriptId);
 	// Embedded widgets construct too, innermost last — an embed may only be
 	// spoken to once the widget holding it has run its own Construct.
@@ -698,10 +708,16 @@ HorizonCode::InstanceId WidgetManager::graftChildRef(Instance& w, ContentManager
 	for (const auto& e : w.tree.elements)
 		if (e && e->id > 0) refreshElementAssets(w, *e);
 
-	// Construct last, like createWidget does: the row is fully in the tree
-	// before its own logic can look at it.
+	// PreConstruct, then Construct, last, like createWidget does: the row is
+	// fully in the tree before its own logic can look at it. The ids are copied
+	// out first — both phases run user code that may create widgets, and that
+	// reallocates m_instances under `w`.
+	std::vector<HorizonCode::InstanceId> fresh;
+	fresh.reserve(w.embeds.size() - embedsBefore);
 	for (std::size_t i = embedsBefore; i < w.embeds.size(); ++i)
-		rt().fireConstruct(w.embeds[i].scriptId);
+		fresh.push_back(w.embeds[i].scriptId);
+	for (const HorizonCode::InstanceId id : fresh) rt().firePreConstruct(id);
+	for (const HorizonCode::InstanceId id : fresh) rt().fireConstruct(id);
 	m_visualDirty = true;
 	return child;
 }

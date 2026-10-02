@@ -1888,6 +1888,7 @@ inline HE::hccg::ClassSource fxEngineEvents()
     f.var("text", PT::String);
     f.var("sum", PT::Float);
     f.var("built", PT::Float);
+    f.var("pre", PT::Float);
     f.var("notify", PT::String);
 
     auto append = [&f](int ev, const char* what) {
@@ -1919,6 +1920,11 @@ inline HE::hccg::ClassSource fxEngineEvents()
     const int sB = f.setVar("built", PT::Float);
     f.g.findNode(sB)->pinDefaults[0] = Value::ofFloat(1.0f);
     f.exec(evC, sB);
+    // …and the widget phase before it: its own hook, onPreConstruct.
+    const int evP = f.event("PreConstruct");
+    const int sP = f.setVar("pre", PT::Float);
+    f.g.findNode(sP)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.exec(evP, sP);
 
     // A String argument on an event that carries NO element. The three notify
     // events are the first of that shape, and the hook signature codegen emits

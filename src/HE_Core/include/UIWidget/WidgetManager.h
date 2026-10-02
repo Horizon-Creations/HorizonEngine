@@ -34,7 +34,8 @@ class HE_API WidgetManager
 {
 public:
     // Instantiate a widget asset (content-relative path). Resolves per-element
-    // material references, fires the "Construct" event, returns the widget id
+    // material references, fires "PreConstruct" for the widget and all its
+    // embeds and only then "Construct" for each of them, returns the widget id
     // (0 = asset missing or invalid tree).
     // The instance is created HIDDEN — creating and showing are two steps, the
     // way they are in every UI framework: a menu is usually built long before it

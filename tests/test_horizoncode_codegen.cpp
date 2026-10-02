@@ -2114,6 +2114,16 @@ TEST_CASE("codegen: the engine-event hooks do exactly what the named path does")
 	p.checkParity();
 	CHECK(p.var("built").f == 1.0f);
 
+	// PreConstruct has its own hook. Construct did not touch it…
+	CHECK(p.var("pre").f == 0.0f);
+	// …and it reaches the compiled class through the hook the generator
+	// overrides (a `void onPreConstruct() override` that matches nothing in
+	// CompiledInstance would not even build).
+	p.interp.rt.firePreConstruct(p.interp.id);
+	p.compInst->onPreConstruct();
+	p.checkParity();
+	CHECK(p.var("pre").f == 1.0f);
+
 	// A String argument on an event with NO element — the shape the three
 	// animation notifies have, and the one where a wrong `elem` in the engine's
 	// event table would emit a hook that overrides nothing at all.

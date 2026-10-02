@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-09-29",
+ "generated": "2026-10-01",
  "groups": [
   {
    "pages": [
@@ -12327,6 +12327,14 @@
           },
           {
            "s": "c",
+           "t": "PreConstruct"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
            "t": "Construct"
           },
           {
@@ -12404,7 +12412,7 @@
      ],
      "eyebrow": "Where graphs live",
      "id": "hosts",
-     "text": "Host Lifetime · events Game Instance One app-wide class that outlives scene changes — OnInit (before anything loads), OnShutdown, OnWindowFocusChanged. Reachable from anywhere via Get Game Instance. Open it under View » Game Instance. Level Script One graph per scene, saved inside the scene — OnLevelLoaded, OnLevelUnloaded. Open it under View » Level Script. Widget graph Each UI Widget's logic — Construct, Destruct, Tick and one event per element interaction. UI -> HorizonCode Class A standalone, reusable class asset — Construct, Destruct plus the custom events it declares. Instantiated with Create Object. The Level Script editor with OnLevelLoaded and OnLevelUnloaded events",
+     "text": "Host Lifetime · events Game Instance One app-wide class that outlives scene changes — OnInit (before anything loads), OnShutdown, OnWindowFocusChanged. Reachable from anywhere via Get Game Instance. Open it under View » Game Instance. Level Script One graph per scene, saved inside the scene — OnLevelLoaded, OnLevelUnloaded. Open it under View » Level Script. Widget graph Each UI Widget's logic — PreConstruct, Construct, Destruct, Tick and one event per element interaction. UI -> HorizonCode Class A standalone, reusable class asset — Construct, Destruct plus the custom events it declares. Instantiated with Create Object. The Level Script editor with OnLevelLoaded and OnLevelUnloaded events",
      "title": "The Four Hosts"
     },
     {
@@ -67918,6 +67926,14 @@
         },
         {
          "s": "c",
+         "t": "PreConstruct"
+        },
+        {
+         "s": "",
+         "t": " and then "
+        },
+        {
+         "s": "c",
          "t": "Construct"
         },
         {
@@ -67962,6 +67978,43 @@
        "k": "p",
        "r": [
         {
+         "s": "b",
+         "t": "Pre Construct vs. Construct."
+        },
+        {
+         "s": "",
+         "t": " Creating a widget runs two phases over the widget and every widget embedded in it: first "
+        },
+        {
+         "s": "c",
+         "t": "PreConstruct"
+        },
+        {
+         "s": "",
+         "t": " for all of them, then "
+        },
+        {
+         "s": "c",
+         "t": "Construct"
+        },
+        {
+         "s": "",
+         "t": " for all of them. Use PreConstruct to set the widget's own values and load its own data (a label from a variable, a colour, a value read from a save game). Use Construct for anything that talks to an embedded widget: by then each of them has finished its own PreConstruct. Both run before the first frame and after the theme and the language were applied, so nothing designed flashes up first and the theme does not overwrite what you set. Only the synchronous part counts: a Delay or an HTTP request inside PreConstruct does not hold Construct back. Add the event from the graph's context menu under "
+        },
+        {
+         "s": "i",
+         "t": "Events"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
          "s": "",
          "t": "Because all graphs share one runtime, a widget can call into the Game Instance, bind events on other classes, and expose "
         },
@@ -67978,7 +68031,7 @@
      ],
      "eyebrow": "Behaviour",
      "id": "graph",
-     "text": "Switching the widget editor to Graph mode shows the widget's HorizonCode graph — an event graph plus user-defined functions and typed variables. The host fires Construct when the widget is created, Destruct when destroyed, Tick (with delta time) while visible, and one event per element interaction (OnClicked, OnValueChanged …). Get/Set Property nodes read and write any element property by name — update a health bar, swap a label, recolour a button. Because all graphs share one runtime, a widget can call into the Game Instance, bind events on other classes, and expose public functions that scripts call from outside.",
+     "text": "Switching the widget editor to Graph mode shows the widget's HorizonCode graph — an event graph plus user-defined functions and typed variables. The host fires PreConstruct and then Construct when the widget is created, Destruct when destroyed, Tick (with delta time) while visible, and one event per element interaction (OnClicked, OnValueChanged …). Get/Set Property nodes read and write any element property by name — update a health bar, swap a label, recolour a button. Pre Construct vs. Construct. Creating a widget runs two phases over the widget and every widget embedded in it: first PreConstruct for all of them, then Construct for all of them. Use PreConstruct to set the widget's own values and load its own data (a label from a variable, a colour, a value read from a save game). Use Construct for anything that talks to an embedded widget: by then each of them has finished its own PreConstruct. Both run before the first frame and after the theme and the language were applied, so nothing designed flashes up first and the theme does not overwrite what you set. Only the synchronous part counts: a Delay or an HTTP request inside PreConstruct does not hold Construct back. Add the event from the graph's context menu under Events. Because all graphs share one runtime, a widget can call into the Game Instance, bind events on other classes, and expose public functions that scripts call from outside.",
      "title": "Widget Logic (Graph)"
     },
     {
@@ -68014,7 +68067,7 @@
          },
          {
           "s": "",
-          "t": " — instantiate a widget asset, tear it down (fires Construct/Destruct)."
+          "t": " — instantiate a widget asset, tear it down (fires PreConstruct and Construct, Destruct)."
          }
         ],
         [
@@ -68104,7 +68157,7 @@
      ],
      "eyebrow": "In game",
      "id": "runtime",
-     "text": "Widgets are created and managed from any scripting frontend — Lua, Python or HorizonCode: hud.lua local M = {}\n\nfunction M.onStart(self)\n    -- spawn the HUD widget and keep its id\n    self.hud = horizon.createWidget(\"UI/HUD\")\n    horizon.setWidgetZOrder(self.hud, 10)\nend\n\nfunction M.onUpdate(self, dt)\n    if horizon.isWidgetVisible(self.hud) then\n        horizon.callWidgetFunction(self.hud, \"Refresh\")\n    end\nend\n\nreturn M createWidget(path) / destroyWidget(id) — instantiate a widget asset, tear it down (fires Construct/Destruct). showWidget / hideWidget / isWidgetVisible — visibility without destroying state. setWidgetZOrder(id, z) — stacking between widgets; widgets always draw above in-world UI. callWidgetFunction(id, name) — invoke a public function of the widget's graph. showCursor() / hideCursor() — release or capture the mouse for menu vs. gameplay; hovering interactive elements shows each element's chosen cursor. Text input is routed automatically to a focused TextInput element, and pointer events (hover, press, click) drive the elements' visual states and fire their graph events.",
+     "text": "Widgets are created and managed from any scripting frontend — Lua, Python or HorizonCode: hud.lua local M = {}\n\nfunction M.onStart(self)\n    -- spawn the HUD widget and keep its id\n    self.hud = horizon.createWidget(\"UI/HUD\")\n    horizon.setWidgetZOrder(self.hud, 10)\nend\n\nfunction M.onUpdate(self, dt)\n    if horizon.isWidgetVisible(self.hud) then\n        horizon.callWidgetFunction(self.hud, \"Refresh\")\n    end\nend\n\nreturn M createWidget(path) / destroyWidget(id) — instantiate a widget asset, tear it down (fires PreConstruct and Construct, Destruct). showWidget / hideWidget / isWidgetVisible — visibility without destroying state. setWidgetZOrder(id, z) — stacking between widgets; widgets always draw above in-world UI. callWidgetFunction(id, name) — invoke a public function of the widget's graph. showCursor() / hideCursor() — release or capture the mouse for menu vs. gameplay; hovering interactive elements shows each element's chosen cursor. Text input is routed automatically to a focused TextInput element, and pointer events (hover, press, click) drive the elements' visual states and fire their graph events.",
      "title": "Widgets at Runtime"
     },
     {

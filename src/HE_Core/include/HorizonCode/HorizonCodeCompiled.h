@@ -139,6 +139,8 @@ public:
     // and the instance is still registered while Destruct runs — a C++ ctor/dtor
     // sits outside both windows, and graph nodes that touch the world would
     // silently do nothing there.
+    // Widgets only: runs before ANY Construct of the widget and its embeds.
+    virtual void onPreConstruct() { fireEvent("PreConstruct", 0, Value{}); }
     virtual void onConstruct() { fireEvent("Construct", 0, Value{}); }
     virtual void onDestruct()  { fireEvent("Destruct", 0, Value{}); }
     virtual void onTick(float dt) { fireEvent("Tick", 0, Value::ofFloat(dt)); }
