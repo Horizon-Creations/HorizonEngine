@@ -6210,6 +6210,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
                         &m_editorCamera);
+    // The UI canvas (Entity-UI + WidgetManager widgets) rides in the same
+    // RenderWorld — extract() just cleared it. Mirrors GL/Metal; without this
+    // call every UI pass below sees an empty list and draws nothing.
+    m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+                          m_renderWorld);
 
 
     // Sky is independent of scene geometry — draw it before any early returns so it

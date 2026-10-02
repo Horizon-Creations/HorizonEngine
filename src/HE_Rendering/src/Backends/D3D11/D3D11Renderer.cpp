@@ -5557,6 +5557,11 @@ void D3D11Renderer::DrawScene(int width, int height)
     p.m_extractor.extract(*m_world, p.m_renderWorld,
                           static_cast<float>(width) / static_cast<float>(height),
                           &m_editorCamera);
+    // The UI canvas (Entity-UI + WidgetManager widgets) rides in the same
+    // RenderWorld — extract() just cleared it. Mirrors GL/Metal; without this
+    // call every UI pass below sees an empty list and draws nothing.
+    p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+                            p.m_renderWorld);
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
