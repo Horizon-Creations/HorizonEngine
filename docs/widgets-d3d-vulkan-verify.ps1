@@ -12,9 +12,10 @@ param([string]$Shots = 'C:\hw133\shots', [string]$EditorTag = 'fix', [string]$Ga
 #     (exported UiWit game, swapchain). Red top-left, green bottom-right, blue centre,
 #     and red NOT at its mirrored spot.
 #
-# Not checked here, on purpose: the style features GL has and D3D11/D3D12/Vulkan do not
-# (rounded corners, border, gradient, blur/drop shadow, inner shadow, textures, UI
-# materials). See docs/widgets-d3d-vulkan-analysis-2026-10-02.md, Befund 3.
+# Not checked here: style parity with GL (rounded corners, border, gradient, blur/drop
+# shadow, inner shadow, render-target alpha). That is docs/widgets-d3d-vulkan-tiles.py,
+# per witness tile (Schritt 3). Textures and UI materials are not ported to
+# D3D11/D3D12/Vulkan at all; see docs/widgets-d3d-vulkan-analysis-2026-10-02.md.
 #
 # Exit code = number of failed checks. Before the fix (tags base/gpre) D3D11/D3D12/Vulkan
 # fail; after it (fix/gfix) everything passes.

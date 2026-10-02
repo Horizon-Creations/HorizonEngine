@@ -214,3 +214,96 @@ Weitere Belege zum Nachher-Stand:
 
 Nicht abgedeckt: ein Doctest für das Rendering selbst. Die UI-Passes laufen nur gegen echte Geräte, deshalb ist der
 Nachweis das Skriptpaar oben. Metal ist weiterhin nicht gemessen und nicht geändert.
+
+---
+
+# Schritt 3: Restunterschied zu GL benannt und behoben
+
+Stand: 2026-10-02, NN-WS03, Release-Build aus dem Zweig in `C:/hw133`. Code-Commit `966c4614`.
+
+## Was genau anders war, nach den Kategorien der Aufgabe
+
+| Kategorie | Befund vor Schritt 3 | Beleg |
+|---|---|---|
+| Farbe | **gleich.** Flache Quads haben auf allen vier Backends dieselben Werte. | Spiel: Rot (229,25,25), Grün (25,204,51), Blau (25,76,229) auf allen vier. Editor: Kachel 0 (66,76,97) |
+| Schriftglättung | **gleich, bitgenau.** | Spiel-Capture, Ausschnitt der „WIDGET“-Box (440×141 px, 2438 Textpixel): max. Abweichung D3D11/D3D12/Vulkan zu GL = **0** |
+| Form/Anti-Aliasing/Verlauf/Schatten | **das war der Unterschied.** `kUIFS` (GL) hat `heRoundedBoxSDF`, Rahmen, linearen/radialen Verlauf, Blur-Drop-Shadow und Inner Shadow. `kUIHLSL`, `kUIHLSL12` und `ui.frag` konnten nur `return uColor`. | pro Kachel, Tabelle unten |
+| Alpha/Blending | **D3D11/D3D12 schrieben Quad-Alpha ins Ziel.** Der Blend-State war `SrcBlendAlpha=ONE, DestBlendAlpha=ZERO`. Ein Drop-Shadow-Quad (Alpha 0,45) setzte das Viewport-RT dort auf Alpha 115. Der Editor zeigt das RT per `ImGui::Image` **mit** Blending (`ViewportPanel.cpp:910`), also war der Schatten in PIE durchsichtig. In den RGB-Dumps war das nicht zu sehen. Vulkan (`ONE/ONE_MINUS_SRC_ALPHA`) blieb bei 255. | Dumps sind 32 bit: D3D11/D3D12 hatten 24480 Pixel mit Alpha < 255, Vulkan 0 |
+| Quad-Limit (Nebenbefund) | D3D12 brach den UI-Pass nach `k_maxUIQuads = 256` ab. Jeder Glyph ist ein Quad, ein Menü mit etwas Text verlor ab dem 257. Quad still den Rest. GL, D3D11 und Vulkan haben kein Limit. | Code (`D3D12Renderer.cpp`, `renderUIPass12`). Mit > 256 Quads **nicht** gemessen, der Witness hat 14 |
+
+## Was geändert ist (`966c4614`)
+
+- **D3D11** (`kUIHLSL`) und **D3D12** (`kUIHLSL12`): Der Pixelshader ist Zeile für Zeile `kUIFS`. `UICB` wächst von 80 auf
+  176 B (+ cornerRadius, borderColor, gradientColor, innerColor, style0, style1). D3D11 bekommt einen eigenen lokalen
+  0..1-Interpolanten (`TEXCOORD1`), D3D12 hatte ihn schon. `static_assert` auf die Größe.
+- **Vulkan** (`shaders/ui.vert`, `shaders/ui.frag`): derselbe Shader in GLSL. Die Push-Constants wachsen von 80 auf genau
+  **128 B**, das garantierte Minimum von `maxPushConstantsSize`, ohne UBO. Dafür sind die drei Zusatzfarben als
+  `unorm8x4` gepackt, Rahmenbreite und Verlaufswinkel liegen in bisher freien Komponenten. Das Ziel ist 8 bit, es fällt also nichts weg.
+  Farben außerhalb 0..1 werden geklemmt.
+- **D3D11/D3D12-Alpha-Blend**: `DestBlendAlpha = INV_SRC_ALPHA` wie bei Vulkan. Ein deckendes Ziel bleibt deckend.
+- **D3D12**: `k_maxUIQuads` von 256 auf 4096 (1 MB Upload-Puffer pro Frame-Slot).
+
+Nicht geändert: GL und Metal.
+
+## Messung
+
+`docs/widgets-d3d-vulkan-tiles.py` vergleicht die 12 Witness-Kacheln (`HE_DUMP_UITEST`) einzeln mit GL. Gemessen werden
+die RGB-Abweichung (> 8 Stufen) und die Zahl der Pixel mit Alpha < 255. Exit-Code = Zahl der fehlgeschlagenen
+(Kachel, Backend)-Paare.
+
+```powershell
+& docs\widgets-d3d-vulkan-editor-capture.ps1 -Tag sdf          # Editor/PIE-Captures
+python docs\widgets-d3d-vulkan-tiles.py C:/hw133/shots sdf    # nach Schritt 3: 0
+python docs\widgets-d3d-vulkan-tiles.py C:/hw133/shots fix    # Stand Schritt 2: 32
+```
+
+| Kachel | vorher (`fix`), D3D11 = D3D12 = Vulkan | nachher (`sdf`), alle drei |
+|---|---|---|
+| 0 plain | 0,00 % | 0,00 % |
+| 1 round 24 / 2 tab / 3 leaf | 1,07 / 0,73 / 0,84 % | 0,00 % |
+| 4 border | 5,66 % | 0,00 % |
+| 5 grad lin / 6 grad rad / 7 grad 90 | 49,13 / 49,76 / 47,91 % | 0,00 % |
+| 8 drop shadow | 0,49 %, D3D: 13896 px Alpha 115 | 0,00 %, Alpha überall 255 |
+| 9 inner shadow | 13,00 % | 0,00 % |
+| 10 shadow+border | 3,47 %, D3D: 10584 px Alpha 115 | 0,00 %, Alpha überall 255 |
+| 11 capsule rad+inner | 50,43 % | 0,00 % |
+| **alle Kacheln** | **18,54 %**, 32 Fehlschläge | **0,00 %**, 0 Fehlschläge |
+
+- Ganzes Bild GL gegen D3D11: vorher 12,31 %, jetzt **0,00 %** (`diffbmp.py`, > 8 Stufen). Innerhalb der Kacheln bleiben
+  Abweichungen von höchstens 4 Stufen. Ursachen: die Kanten mischen über dem Szenenhintergrund, und der ist auf GL (0,0,0),
+  auf D3D/Vulkan (4,4,4). Auf Vulkan weichen zusätzlich 41k Pixel um 1 Stufe ab, vermutlich die 8-Bit-Quantisierung der
+  gepackten Verlaufsfarbe. Das ist nicht einzeln nachgewiesen.
+- Die Folge des Alpha-Fehlers im Editor-Fenster (durchsichtiger Schatten in PIE) ist aus dem Code abgeleitet:
+  `ImGui::Image`, ImGui-Backends blenden mit `SRC_ALPHA`. Am Editor-Bildschirm selbst ist sie **nicht** gemessen. Gemessen ist der
+  Alphakanal des Viewport-RT in den Dumps.
+- GL ist bitgleich mit dem Stand von Schritt 2 (`sdf_OpenGL` gegen `fix_OpenGL`: 0,00 %).
+- Spielpfad (Swapchain): `widgets-d3d-vulkan-verify.ps1 -EditorTag sdf -GameTag gsdf` gibt **0 Fehlschläge**, und der
+  „WIDGET“-Text ist weiter bitgleich mit GL. Der Lauf nutzte `C:/hw133/out_sdf` = `out_fix` (MCP-Export aus Schritt 2), in dem
+  genau die geänderten Runtime-Dateien aus `deploy/Editor/Game` ersetzt sind: `HorizonRendering.dll`, `HorizonGame.exe`
+  (neu gelinkt) und `Shaders/ui.{vert,frag}.spv`. Ein Hash-Vergleich zeigte, dass sich sonst nichts unterschied. Es war **kein** frischer MCP-Export.
+- Shader: `scripts/validate_embedded_shaders.py`, alle 105 eingebetteten Shader kompilieren, `kUIHLSL`/`kUIHLSL12` VS+PS
+  eingeschlossen. Die `.spv` baut glslangValidator im Build.
+- Deploy-Konsistenz: `HorizonRendering.dll` 118F1259… ist identisch in `build`, `deploy/Editor`, `deploy/Game` und
+  `deploy/Editor/Game`. `ui.frag.spv` A2CD80A5… und `ui.vert.spv` D5DD0ADD… sind identisch in `build/Shaders`, `deploy/Editor/Shaders`,
+  `deploy/Game/Shaders` und `deploy/Editor/Game/Shaders`. Achtung: Nach dem ersten Build hatten `deploy/Game` und
+  `deploy/Editor/Game` noch die alte DLL und die alten `.spv`, weil `HorizonGame` nicht neu gelinkt hatte. Erst das Löschen
+  beider Exe im Build-Baum und ein neues Linken hat das behoben.
+
+## Was weiter fehlt (Umfang für ein Folgethema)
+
+1. **UIImage mit Textur (`textureAssetId`)**: Auf D3D11/D3D12/Vulkan erscheint weiter eine einfarbige Tint-Fläche. GL nutzt
+   Modus 2 (Textur × Tint, mit gerundeten Ecken über dieselbe SDF). Der Shader-Teil ist klein. Pro Backend fehlt aber die
+   Auflösung Asset → GPU-Textur im UI-Pass:
+   - D3D11: Das ist klein, `graphTexCache`/`createAlbedoSRV` gibt es schon.
+   - D3D12: Die SRVs gehören in den shader-sichtbaren UI-Heap, der heute nur `k_maxUIFontAtlases` Slots hat. Dazu kommen Upload und Barrieren vor dem Pass.
+   - Vulkan: ein Descriptor-Set pro Textur im UI-Pool. Der hat heute 32 Sets, die für Schriften gedacht sind.
+
+   Der Witness enthält keine Textur-Kachel. Ein Port braucht deshalb zuerst eine, sonst lässt er sich nicht messen.
+2. **UI-Materialien (`materialAssetId`, `uiState`, Backdrop-Blur)**: Das ist groß. GL und Metal haben einen eigenen UI-Materialpfad
+   (`GetOrBuildUIMaterialProgram`, `MaterialShaderLibrary::uiVertex`, `HeUI`-Block, Backdrop-Snapshot mit Mip-Kette für
+   „Frosted Glass“). D3D11/D3D12/Vulkan haben den Material-Graph-Pfad nur für Meshes. Nötig wären eine UI-Vertex-Variante
+   in HLSL und SPIR-V, der `HeUI`-Block und eine Backdrop-Kopie mit Mips je Backend.
+3. **GL-Alpha** (nur Hinweis, nicht geändert): GL mischt mit `glBlendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` auch den
+   Alphakanal. Unter einem Drop-Shadow bleibt das Viewport-RT deshalb bei a² + (1 − a), also mindestens 0,75. Die Tabelle
+   oben zählt 12292 bzw. 10624 solche Pixel. Im Editor ist der Schatten auf GL also leicht durchsichtig. Ein
+   `glBlendFuncSeparate(…, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)` im UI-Pass würde das wie bei D3D/Vulkan beheben.
