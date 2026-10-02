@@ -4,7 +4,17 @@ Alles unter „Block A" wurde **blind auf macOS** entwickelt (GL+Metal sind die 
 laufen nur auf Windows). Die CI verifiziert **nur, dass es kompiliert** — NICHT, dass es korrekt rendert.
 Diese Liste ist der **B3-Schritt**: die tatsächliche GPU-Prüfung auf deiner Windows-Hardware.
 
-Stand: A1 ✅, A2 ✅, A3 ✅, A4 ✅ (alle compile-grün + adversariell reviewt); A5 noch offen (siehe unten).
+Stand: A1 ✅, A2 ✅, A3 ✅, A4 ✅ (alle compile-grün + adversariell reviewt); A5 ✅ implementiert seit
+`c2e2351d`, Nebula seit 01.10.2026 als WARP-Bild auf D3D11/D3D12 geprüft (siehe unten). Bei allen fünf ist
+nur die Sichtprüfung auf echter Hardware offen.
+
+> **Achtung, 01.10.2026 grob gesichtet, nicht einzeln nachgeprüft:** Einige „noch offen"-Aussagen in A4
+> sind vermutlich überholt. Die D3D12-Material-Root-Signature deckt seit Thema 56 alle Lighting-Preamble-
+> Bindings ab, mit WARP-PSO-Test (`d0df511a`, Merge `32779d7f`). `heLandscapeWeights` liegt seit
+> `554a43d4` auf s0, nicht mehr auf s14. Der Zeuge `sharesSamplerRegister` existiert in
+> `test_material_graph.cpp` nicht mehr. Und „die CI verifiziert nur, dass es kompiliert" (Absatz oben)
+> stimmt nicht mehr ganz: mehrere he_tests zeichnen bzw. bauen PSOs auf WARP (`test_sky_shader`,
+> `test_material_graph`, `test_temporal_aa`, `test_d3d_shader_manager`).
 
 ---
 
@@ -139,12 +149,27 @@ Material, identisch zum Nachbar-Mesh mit Built-in-PBR. Dann die Schattenauflösu
 umstellen → das Graph-Material muss weiter beschattet sein (D3D12: Template-Rewrite); danach Punktlicht
 entfernen → keine Verdunkelung durch den weißen Fallback-Layer.
 
-## A5 — Sky/Nebula v2–v3.4 + physikalische Atmosphäre auf D3D/Vulkan — ⏳ NOCH NICHT IMPLEMENTIERT
+## A5 — Sky/Nebula v3 + physikalische Atmosphäre auf D3D/Vulkan — ✅ implementiert, GPU-Abnahme offen
 
-`sky.frag` (HLSL/Vulkan) hat noch **Nebula v1 + altes Gradient-`skyColor`**. GL/Metal haben Nebula v2→v3.4,
-Rayleigh/Mie/Ozon-Streuung, 22°-Halo/Mond-Corona, God-Rays, Regenbogen. **Sobald portiert, hier prüfen:**
-Himmel unter D3D/Vulkan gegen GL vergleichen — Nebula-Struktur, Tag-/Nacht-Atmosphärenfarbe, Halo um Sonne/
-Mond, God-Rays, Regenbogen müssen matchen (Environment-Tab „Night Sky"-Regler durchspielen).
+Implementiert seit Thema 78 Schritt 3 (`c2e2351d`): D3D11, D3D12 und Vulkan zeichnen **denselben GL-Himmel**
+(`kSkyFS` + `kSkyFuncGLSL` in `SkyShaderSource.h`, also volle Nebula v3, Rayleigh/Mie/Ozon, Halo/Mond-Corona,
+God-Rays, Regenbogen). `BuildSkyFragmentGLSL450()` setzt `kSkyVulkanPrelude` davor, `he::shaderc` übersetzt
+zur Laufzeit nach SPIR-V (Vulkan) bzw. über SPIRV-Cross nach HLSL SM 5.0 (D3D11/D3D12). Metal hat eine
+handgepflegte, zeilengleiche MSL-Kopie. `shaders/sky.frag` (Nebula v1), der D3D11-`kSkyPSHLSL` und die
+D3D12-Einfarb-Nebula sind nur noch **Fallbacks**, wenn der Cross-Compile scheitert oder ohne
+`HE_ENABLE_SHADERC` gebaut wird; dann steht eine Zeile „falling back to the reduced kSkyPSHLSL /
+kSkyPSHLSL12 / sky.frag" im Log. Analyse: `docs/nebula-backend-parity-analysis-2026-10-01.md`.
+
+Die Windows-CI belegt (`tests/test_sky_shader.cpp`): Cross-Compile + FXC ps_5_0, D3D11-WARP-Zenit Tag/Nacht,
+D3D11-WARP-Nebula in Qualität 0/1/2 (Nebula addiert Licht, Stufen unterscheiden sich, Farbanteil folgt
+Farbe 1), D3D12-WARP-Draw derselben Nebula gleich dem D3D11-Bild, D3D12-PSO gegen die Renderer-Root-Signature.
+**Vulkan wird nirgends gezeichnet**, nur übersetzt und SPIR-V-validiert.
+
+**Hier prüfen (Hardware):** Himmel unter D3D11/D3D12/Vulkan gegen GL vergleichen: Nebula-Struktur und
+Farben 1/2/3, Qualitätsstufen Performance/High/Max, Coverage, Tag-/Nacht-Atmosphärenfarbe, Halo um Sonne/Mond,
+God-Rays, Regenbogen (Environment-Tab „Night Sky"-Regler durchspielen). Reproduzierbar headless mit
+`HE_DUMP_RHI` + `HE_DUMP_NEBULA`/`HE_DUMP_NEBQUALITY`/`HE_DUMP_NEBCOVER` (siehe `scripts/he_shot.py`). Im Log
+darf **keine** Fallback-Zeile des Himmels stehen.
 
 ---
 
