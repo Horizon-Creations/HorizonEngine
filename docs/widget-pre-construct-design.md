@@ -68,7 +68,7 @@ Begründungen:
 ### 2.4 Bewusst nicht in diesem Thema
 
 * ~~**Kein Lauf zur Entwurfszeit im Designer.**~~ Nachgezogen in Schritt 4, siehe Abschnitt 5.
-* **Kein Expose on Spawn.** Wer das Widget erzeugt, kann vor Construct nichts setzen, weil `createWidget` erst danach zurückkehrt. PreConstruct ändert daran nichts. Falls das gewünscht ist: Create Widget mit Eingangspins für öffentliche Variablen, gesetzt **zwischen** PreConstruct und Construct. Eigenes Thema.
+* ~~**Kein Expose on Spawn.** Wer das Widget erzeugt, kann vor Construct nichts setzen, weil `createWidget` erst danach zurückkehrt. PreConstruct ändert daran nichts. Falls das gewünscht ist: Create Widget mit Eingangspins für öffentliche Variablen, gesetzt **zwischen** PreConstruct und Construct. Eigenes Thema.~~ Nachgezogen in Schritt 5, siehe Abschnitt 6. Die Werte landen dort **vor** PreConstruct, nicht dazwischen (Begründung in 6.2).
 * **Nicht in der `Object`-Taxonomie** (`HorizonCode.cpp:2655`). Nur Widgets feuern PreConstruct. Stünde es bei `Object`, böte der Klassen-Editor es Entities und HC-Klassen an, bei denen es nie feuert. Die Event-Liste des Widget-Editors ist ohnehin hart verdrahtet (`kLifecycle`) und kommt nicht aus der Taxonomie.
 
 ### 2.5 Namenskollision mit bestehenden Projekten
@@ -166,7 +166,7 @@ Typischer Gebrauch: `PreConstruct → Branch(Is Design Time)`, auf `true` Platzh
 
 * Thumbnails (`makeWidgetThumbnail`) und `__uiStyleWitness` laufen weiter über `createWidget`, also mit PreConstruct **und** Construct, mit `Is Design Time = false`. Sie zeigen das Widget, wie es zur Laufzeit ankommt. Das war schon vor diesem Thema so.
 * Die Live-Vorschau / PIE ist Laufzeit.
-* Kein Expose on Spawn, wie in 2.4.
+* Expose on Spawn ist Laufzeit (Abschnitt 6). Im Designer läuft PreConstruct mit den Vorgabewerten der Variablen, so wie ein Create Widget ohne verdrahtete Pins sie sähe.
 
 ### 5.7 Tests (Schritt 4)
 
@@ -181,3 +181,67 @@ Typischer Gebrauch: `PreConstruct → Branch(Is Design Time)`, auf `true` Platzh
 Umgesetzt: 1–5 in `tests/test_widget_design_time.cpp` (6 Fälle; 6 steckt im Lauf-Fall: das registrierte Asset hat einen anderen Graphen). 7 in `tests/test_widget_designer_ui.cpp` („Pre Construct shows on the canvas, never in the document“) mit dem echten `UIEditorPanel::render`: grüne Canvas, gestalteter `liveTree`, Drag-Commit aus dem Frame, Live-Asset und Save bleiben gestaltet. Gegenproben: Construct im Lauf bzw. `fs.writeText` freigegeben macht die Lauf- und Sandbox-Fälle rot; ohne `DesignValuesOut` steht nach dem Drag Grün und „Placeholder“ im Asset.
 
 Bekannte Grenzen: Der Schlüssel für eingebettete Assets betrachtet nur direkt eingebettete Widgets, eine Änderung zwei Ebenen tiefer wird erst mit der nächsten Dokumentänderung sichtbar. Ein Drag läuft während der Bewegung mit den Werten des letzten Laufs, neu gerechnet wird beim Loslassen. `drawCanvas` ruft `uiApplyAutoSize(st.tree)` mit den gezeigten Werten auf, die abgeleitete Größe eines Auto-Size-Elements im gespeicherten Asset entspricht also dem PreConstruct-Text. Das ist harmlos, weil die Laufzeit sie neu berechnet, und war bei der Animationsvorschau schon so. Get Child Widget mit unverdrahtetem Widget-Pin meint wie überall das eigene Widget (`widgetIdForScript` im Sandbox-Dispatcher, getestet mit beiden Verdrahtungen).
+
+## 6. Expose on Spawn (Schritt 5, aus Frage #14)
+
+Wer ein Widget erzeugt, soll ihm Werte mitgeben können, die schon beim ersten Code des Widgets da sind: Create Widget bekommt Eingangspins für die Variablen, die das Widget dafür freigibt. Vorbild ist UMG.
+
+### 6.1 Was der Nutzer sieht
+
+* In den Details einer Variablen ein Häkchen **Expose on Spawn**. Nur für öffentliche Instanzvariablen (`access == 0`, `scope == 0`), sonst ausgegraut. Gespeichert als `"spawn": true` an der Variablen, nur wenn gesetzt; ein Graph ohne das Häkchen ist byte-gleich zu vorher. Beim Laden wird es an privaten und lokalen Variablen verworfen.
+* **Opt-in, nicht jede öffentliche Variable.** Öffentlich heißt hier auch „per Get/Set (Ref) erreichbar“, das sind oft Referenzen und Listen für die Verdrahtung. Jede davon als Pin an jedem Create Widget wäre Lärm. So hält es auch Unreal (Instance Editable + Expose on Spawn).
+* Create Widget hat für jede solche Variable einen Dateneingang, in Deklarationsreihenfolge, benannt und getypt wie die Variable. Gespiegelt in `Node::params` wie bei Call Function. Der Ausgang `Widget` liegt dahinter. Ein Knoten ohne Pins (jeder Graph von vorher) hat dasselbe Layout wie bisher, der Ausgang bleibt Pin 2. Eine Migration wie bei Create Object ist nicht nötig.
+
+### 6.2 Reihenfolge: vor PreConstruct
+
+Der Text in 2.4 und auf dem Brett sagte „zwischen PreConstruct und Construct (analog Unreal)“. Das widerspricht sich, und hier gilt Unreal: dort setzt der Create-Widget-Knoten die Werte direkt nach dem Erzeugen, PreConstruct und Construct laufen erst danach (`UUserWidget::OnWidgetRebuilt`). Entscheidend ist der Kernfall dieses Themas: PreConstruct schreibt „Score: “ + `score` in einen Text. Kämen die Spawn-Werte erst nach PreConstruct, zeigte das erste Bild bei einem Pin `score = 99` trotzdem den Vorgabewert, und Designer (Schritt 4) und Laufzeit liefen mit demselben PreConstruct auseinander.
+
+```
+createWidget(content, path, spawn):
+  registerInstance          ← Variablen mit ihren Vorgaben geseedet
+  m_instances.push_back, Ids herauskopieren
+  Spawn-Werte auf den Host  ← neu
+  firePreConstruct(host, embeds…)
+  fireConstruct(host, embeds…)
+```
+
+Ein PreConstruct, das dieselbe Variable selbst setzt, überschreibt den Spawn-Wert. Das ist wie in Unreal und gehört ins Handbuch.
+
+### 6.3 Welcher Pin wirkt
+
+Dieselbe Regel wie bei Make Struct (`HorizonCode.cpp`, `HcCodegen.cpp`): ein Pin wirkt, wenn er **verdrahtet** ist oder **am Knoten einen Wert trägt** (`pinDefaults`). Sonst behält das Widget seinen eigenen Vorgabewert.
+
+Das Inline-Feld eines unverdrahteten Bool/Int/Float/Double/String-Pins legt beim Zeichnen einen Eintrag an (`drawPinDefaultEditor`). Damit ein solcher Pin nicht still 0 setzt, wird er beim Spiegeln mit dem **Vorgabewert der Widget-Variablen** vorbelegt: der Pin zeigt, was ankommt. Vec2, Color, Referenzen, Structs und Container haben kein Inline-Feld und wirken nur verdrahtet.
+
+### 6.4 Laufzeit
+
+* `HorizonCode::SpawnValue { name, value }`, `SpawnValues` = Vektor davon.
+* `Context::createWidget` und `Runtime::Services::createWidget` nehmen `(path, const SpawnValues&)`. `hc::createWidget(ctx, path)` bleibt, dazu ein Überladung mit Werten für den generierten Code.
+* `WidgetManager::createWidget(content, path, const SpawnValues* spawn = nullptr)`. Gesetzt wird nur auf den Host, nicht in `registerInstance` (sonst liefe es im Entwurfszeit-Lauf mit).
+* Gesetzt über `Runtime::setPublicVariable(id, name, value)`, dieselbe Prüfung wie Set (Ref): nur öffentliche Instanzvariablen, für interpretierte wie kompilierte Klassen. Eine unbekannte oder private Variable (das Widget hat sie seit dem letzten Speichern des Aufrufers umbenannt oder versteckt) wird mit Warnung übersprungen. Auf „Expose on Spawn“ prüft die Laufzeit nicht: das Häkchen steuert, welche Pins der Editor anbietet, und kompilierte Klassen brauchen so kein neues Reflexionsfeld.
+* Lua, Python und die Registry-Zeile `widget.create` bleiben ohne Werte.
+
+### 6.5 Pins aktuell halten
+
+* `spawnPinsOf(widgetGraph)` liefert die freigegebenen Variablen mit Typ und Vorgabewert. `syncSpawnPins(graph, nodeId, now, before)` spiegelt sie in den Knoten: Leitungen folgen ihrem Pin über den Namen (`captureLinkRemapSnapshot`/`remapLinksFromSnapshot`), ein entfernter Pin verliert seine Leitung sichtbar. `pinDefaults` sind nach Index geschlüsselt, der Snapshot verschiebt sie nicht, deshalb werden sie hier nach Namen umgeschlüsselt. Neue oder umgetypte Pins bekommen den Vorgabewert der Variablen. Ein Pin, der noch den **vorherigen** Vorgabewert trägt (`before`), folgt dem neuen.
+* Der Editor spiegelt beim Wählen des Assets in den Details und laufend in `buildModel`: pro Asset höchstens zweimal pro Sekunde, Schlüssel ist der Hash des Graph-JSON im ContentManager. Ändert sich ein Knoten dadurch, meldet der Host `onEdit(false)`: das Dokument ist geändert (es speichert die neuen Pins), aber es entsteht kein Undo-Punkt.
+
+### 6.6 Codegen
+
+Ohne wirkende Pins wird exakt die bisherige Zeile erzeugt (byte-gleicher Paritätstext). Sonst ein Block, der die Werte in `hc::SpawnValues` packt und die Überladung aufruft.
+
+### 6.7 Tests (Schritt 5)
+
+1. Reihenfolge: ein Spawn-Wert ist in PreConstruct sichtbar (und damit im ersten Bild), und in Construct. Negativkontrolle: die Werte hinter PreConstruct gesetzt macht den Fall rot.
+2. Unverdrahteter Pin ohne Wert lässt den Vorgabewert stehen; ein Pin mit Wert am Knoten setzt ihn.
+3. Private oder unbekannte Variable wird übersprungen, kein Absturz, das Widget entsteht trotzdem.
+4. Spiegeln: Pins in Deklarationsreihenfolge, nur Häkchen + öffentlich; Leitungen folgen einer Umsortierung, eine entfernte Variable verliert ihre Leitung, `pinDefaults` wandern mit, neue Pins sind vorbelegt, ein unveränderter Pin folgt einem neuen Vorgabewert.
+5. Alter Graph ohne Pins: Ausgang `Widget` auf Pin 2, Leitungen unverändert.
+6. JSON: `spawn` rundet, an privaten Variablen verworfen.
+7. Codegen: ohne Pins identische Zeile; mit verdrahtetem Pin baut das Fixture und ist paritätisch zum Interpreter.
+
+### 6.8 Grenzen
+
+* Der gespiegelte Stand am Knoten ist der vom letzten Öffnen im Editor. Ändert jemand das Widget und exportiert, ohne den Aufrufer zu öffnen, nehmen Interpreter und Codegen die gespeicherten Pins; was es nicht mehr gibt, überspringt die Laufzeit mit Warnung (6.4).
+* Nur Create Widget. Eingebettete Widgets (WidgetRef) und Listenzeilen (Add Child) bekommen keine Werte pro Instanz; das wäre das Gegenstück zu Unreals „Instance Editable“ im Designer, eigenes Thema.
+* Das Folgen eines geänderten Vorgabewerts (6.5) kennt nur den Stand dieser Editor-Sitzung. Nach einem Neustart bleibt ein vorbelegter Pin bei seinem Wert.
