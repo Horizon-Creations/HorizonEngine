@@ -391,7 +391,9 @@ private:
 	// precompiled variants, and a material that has neither falls back to built-in PBR.
 	// Canonical descriptor set 0 layout (matches the generated SPIR-V exactly):
 	//   b0 UBO(FS) HeLighting | b1 UBO(VS) U | b2 tex(FS) heTex0 | b3 UBO(FS) HeParams
-	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex).
+	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex)
+	//   b10..13/b15..18/b31..33 tex(FS) the preamble's fixed samplers (GI masks, CSM,
+	//   local atlas, sky cube, AO, DDGI atlases, SSR, GI reflections, cloud shadow).
 	HE::MaterialShaderLibrary m_matShaderLib;
 	std::unordered_map<uint64_t, VkPipeline> m_materialPipelines; // key = hash ^ hdr-bit
 	VkDescriptorSetLayout m_matSetLayout      = VK_NULL_HANDLE;
@@ -405,6 +407,7 @@ private:
 	bool        m_matReady          = false; // true once createMaterialResources() succeeded
 	static constexpr uint32_t k_matMaxDraws   = 1024;
 	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
+	static constexpr uint32_t k_matSetBindings = 21; // set 0 layout entries = per-draw writes
 
 	// Per-draw material data (32 bytes: baseColor(rgb)+metallic(a) + roughness + opacity
 	// + hasTexture). Updated per-draw via vkCmdUpdateBuffer; binding 2 in scene descriptor set.
@@ -430,6 +433,13 @@ private:
 	// heCsm sampler is arrayed (sampler2DArray), so its default descriptor must
 	// be an array view (a plain 2D view fails validation against that SPIR-V).
 	VkImageView     m_whiteArrayView   = VK_NULL_HANDLE;
+	// 1x1 six-layer white CUBE for the preamble's heSkyEnv (samplerCube, set 0
+	// binding 15). This backend has no sky-environment cube and never raises
+	// heLight.fog.z, so it is never sampled — but the layout must declare every
+	// binding the SPIR-V uses statically, and the view type must match.
+	VkImage         m_whiteCubeImage   = VK_NULL_HANDLE;
+	VkDeviceMemory  m_whiteCubeMem     = VK_NULL_HANDLE;
+	VkImageView     m_whiteCubeView    = VK_NULL_HANDLE;
 
 	// ── MaterialComponent override + hot-reload (A2) ─────────────────────────
 	// Override-material textures cached by material UUID (parallel to the baked per-mesh
