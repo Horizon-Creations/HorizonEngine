@@ -4185,6 +4185,11 @@ void EditorApplication::OnRender(float dt)
 				m_vkViewportDescSet = reinterpret_cast<void*>(ds);
 				vk->SetViewportImGuiHandle(reinterpret_cast<void*>(ds));
 			}
+			else
+			{
+				// The renderer must not keep handing out the set parked above.
+				vk->SetViewportImGuiHandle(nullptr);
+			}
 			vk->ClearViewportResourceChanged();
 		}
 	}
