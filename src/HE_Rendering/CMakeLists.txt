@@ -396,12 +396,15 @@ he_deploy_dll(HorizonRendering)
 # This target extracts those strings, reassembles them exactly as the call sites do
 # and runs fxc / glslangValidator over them (~3 s for 75 shaders). The script skips
 # whichever half has no compiler installed, so a checkout without the Windows or
-# Vulkan SDK still configures and builds.
+# Vulkan SDK still configures and builds. The Metal strings are checked by the
+# script's MSL part, which CI's macOS job runs as its own required step; --no-msl
+# keeps it out of the build because Xcode 26 makes the metal compiler an optional
+# download a dev Mac may not have.
 option(HE_VALIDATE_SHADERS "Compile-check the runtime-compiled shader strings" ON)
 if(HE_VALIDATE_SHADERS AND Python3_Interpreter_FOUND)
     add_custom_target(HeValidateShaders ALL
         COMMAND ${Python3_EXECUTABLE}
-                "${CMAKE_SOURCE_DIR}/scripts/validate_embedded_shaders.py"
+                "${CMAKE_SOURCE_DIR}/scripts/validate_embedded_shaders.py" --no-msl
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "Validating runtime-compiled shader strings (fxc / glslangValidator)"
         VERBATIM)
