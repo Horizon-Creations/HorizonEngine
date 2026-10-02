@@ -99,6 +99,27 @@ HE_RENDERING_API void FillMaterialLightWindow(const RenderWorld&               r
 HE_RENDERING_API void FillMaterialWind(const ::EnvironmentSettings&     env,
                                        MaterialShaderLibrary::Lighting& out);
 
+// ── Graph-material DDGI probe field (Lighting v2.5) ──────────────────────────
+// Writes giGridOrigin / giGridCounts / giProbe — the SAME grid the built-in
+// shaders' GI uniforms carry, so heLitP's indirect diffuse (heGIIrradianceAt)
+// samples the probe atlases exactly like sampleDDGIIrradiance does:
+//   giGridOrigin = (origin, spacing), giGridCounts = (counts, probesPerRow),
+//   giProbe.x    = indirect intensity, giProbe.y = the gate.
+//
+// atlasesBound = GI shades this frame AND both probe atlases (irradiance +
+// visibility) sit on the material pass's heGIIrradiance / heGIVisibility
+// slots. Only then is the gate 1; otherwise heLitP takes its flat-ambient
+// branch and never samples the atlases, whatever is bound there. The grid
+// values are written either way (harmless behind a 0 gate, and identical to
+// what GL and Metal did inline before this helper existed).
+HE_RENDERING_API void FillMaterialGIProbe(MaterialShaderLibrary::Lighting& out,
+                                          const glm::vec3&                 gridOrigin,
+                                          float                            probeSpacing,
+                                          const glm::ivec3&                gridCounts,
+                                          int                              probesPerRow,
+                                          float                            indirectIntensity,
+                                          bool                             atlasesBound);
+
 // ── Clustered lighting (plan P7, cross-backend) ───────────────────────────────
 // Lifts the 8-light window for point/spot lights: every local light is
 // scattered on the CPU into a screen-tile × log-depth-slice grid, and the

@@ -237,3 +237,74 @@ vorgezogen werden. Er hängt nur am Helfer aus Schritt 2.
 
 Die Pixel bleiben damit unbewiesen, bis jemand auf echter Hardware läuft. Das ist dieselbe offene
 Schuld wie bei den übrigen GI-Blind-Ports.
+
+## 5. Stand nach Schritt 2 (02.10.2026)
+
+### 5.1 Die Lücke, präzise benannt
+
+Betroffen ist **nur der Graph-Material-Pfad** (`heLitP` → `heGIIrradianceAt`,
+`MaterialShaderLibrary.cpp:291-330`, Zweig `:625`). Der eingebaute PBR-Shader hat DDGI auf allen
+fünf Backends. Pro Backend fehlen zwei Dinge: das Gate `Lighting::giProbe.y` samt Grid-Werten im
+Material-Fill und die Probe-Atlanten auf den Material-Slots t17/t18 (Sampler s1/s3).
+
+| Backend | Gate im Fill | Atlanten auf t17/t18 | Stand |
+|---|---|---|---|
+| GL | ja | ja | unverändert (nur auf Helfer umgestellt) |
+| Metal | ja | ja | unverändert (nur auf Helfer umgestellt) |
+| D3D12 | **jetzt ja** (`fillMatLight`) | **jetzt ja** (Vorlage, Slots 12/13) | **in diesem Schritt behoben** |
+| D3D11 | nein (`fillMatLight`, `D3D11Renderer.cpp:5724`) | nein, Registerkollision (s. §2.2) | offen, Schritt 3 |
+| Vulkan | nein (Fill `VulkanRenderer.cpp:6378`) | nein, DSL ohne Binding 17/18 (`:2318-2353`) | offen, Schritt 4 |
+
+### 5.2 Was geändert wurde
+
+- **Gemeinsamer Helfer** `HE::FillMaterialGIProbe(Lighting&, origin, spacing, counts, perRow,
+  intensity, atlasesBound)` in `LightPacking.h/.cpp` (hinter `FillMaterialWind`). Er schreibt
+  `giGridOrigin`, `giGridCounts` und `giProbe`. Das Gate ist 1 nur bei `atlasesBound`.
+- **GL** (`OpenGLRenderer.cpp`, Material-Fill) und **Metal** (`MetalRenderer.mm`, Material-Fill)
+  rufen den Helfer statt der Inline-Zeilen. Es sind dieselben Werte und dasselbe Gate, also eine
+  reine Refaktorierung.
+- **D3D12** (`D3D12Renderer.cpp`):
+  - `fillMatLight` ruft den Helfer mit `giActive && giIrrTex && giVisTex`. `giActive` ist dasselbe
+    `giShadingActive`, das auch der eingebaute Shader bekommt.
+  - Neuer `writeMatGiProbeSlots()`: schreibt die Atlas-SRVs (RGBA16F / RG16F) in die Slots
+    `kSlotGIIrradiance`/`kSlotGIVisibility` der CPU-Vorlage `m_matSrvStaging`, sonst Null-Views.
+    Aufgerufen wird er am Ende von `ensureGiProbeAtlas`, in `retireGiProbeAtlas` (Refit → Null)
+    und in `destroyGiTargets`.
+  - Warum keine Synchronisation nötig ist: Die Vorlage wird bei jedem Material-Draw zur
+    **Aufzeichnungszeit** per `CopyDescriptorsSimple` in den Ring kopiert. Bereits aufgezeichnete
+    Blöcke behalten also ihre Views.
+  - Ressourcenzustand: Die Atlanten stehen in `PIXEL_SHADER_RESOURCE`, sobald `giShadingActive`
+    gilt (Barrier am Ende von `dispatchGiProbeUpdate`). Der einzige Material-Draw (Geometrie-Pass)
+    wird danach aufgezeichnet.
+  - Die Root-Signatur bleibt unverändert: t17/t18 und s1/s3 (Linear-Clamp) waren schon deklariert,
+    der WARP-PSO-Test bleibt gültig.
+  - Veraltete Kommentare zu „Slots 9..16 null / D3D11-parity job" sind korrigiert, ebenso der
+    Kopf von `D3D12MaterialRootSignature.h`.
+- **Shader-Parität geprüft (statisch):** `heGIIrradianceAt` (Preamble) und das D3D12-HLSL
+  `sampleDDGIIrradiance` (`D3D12Renderer.cpp`, ab „float3 sampleDDGIIrradiance") stimmen Zeile für
+  Zeile überein: Tile-Position, Oktaeder-Kodierung, UV-Formel, kein y-Flip, Chebyshev. Die Atlanten
+  haben eine Mip-Stufe, `texture()` und `SampleLevel(…, 0)` sind also gleichwertig.
+- **Test:** `tests/test_material_graph.cpp` mit dem Fall „FillMaterialGIProbe: the built-in
+  shaders' grid, gated on bound atlases". Er prüft Werte, Gate 1/0 und dass Nachbarfelder
+  unberührt bleiben.
+
+### 5.3 Was offen bleibt (Umfang für die Folgeschritte)
+
+- **D3D11 (Schritt 3, ≈ 1 Tag):**
+  - `fillMatLight` (`D3D11Renderer.cpp:5724`) auf den Helfer umstellen.
+  - Im Material-Draw (Bindungen ab `:6300`, `BindLandscapeWeights` `:6329`): t17 = `giIrrSRV`,
+    t18 = `giVisSRV` (`:2937`), s1/s3 = `giLinearClamp` (`:2903`).
+  - Nach dem Draw zurücklegen, was der eingebaute Pass dort erwartet: t17 lokaler Schattenatlas
+    (`:6066`), t18 Cluster-Lichter (`:5644`), s1 `pointSampler` (`:6068`), s3 `shadowSampler`
+    (`:6061`). Das gehört als zweites Paar neben `RestoreAfterMaterialDraw` (`:6386`) in
+    `D3D11MaterialBindings.h`, samt WARP-Test.
+  - Achtung: PR #75 (Thema 117) baut den D3D11-Material-Draw und die Bindings gerade um.
+- **Vulkan (Schritt 4, ≈ 1-1,5 Tage):**
+  - Fill (`:6378`) auf den Helfer umstellen.
+  - DSL `:2318-2353` um die Bindings 15/16/17/18/32/33 erweitern, dazu Pool, Per-Draw-Writes und
+    Weiß-/Null-Cube-Fallbacks (s. §2.2).
+  - Damit wird zugleich die spec-widrige Layout-Lücke geschlossen.
+- **Nicht verifiziert:**
+  - Der D3D12-Code ist lokal nicht kompilierbar und hängt an der Windows-CI.
+  - Die Bildparität Graph-Material gegen Built-in bei GI an ist auf D3D12 ohne Windows-Hardware
+    nicht prüfbar (Zeuge wie in §4).

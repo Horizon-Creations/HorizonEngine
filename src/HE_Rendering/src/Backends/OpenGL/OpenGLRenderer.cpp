@@ -10727,16 +10727,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			}
 			// DDGI probe grid — the same values PushGISceneUniforms hands
 			// the built-in programs, so heLitP's indirect diffuse matches.
-			lit.giGridOrigin[0] = m_giGridOrigin.x;
-			lit.giGridOrigin[1] = m_giGridOrigin.y;
-			lit.giGridOrigin[2] = m_giGridOrigin.z;
-			lit.giGridOrigin[3] = m_giProbeSpacing;
-			lit.giGridCounts[0] = static_cast<float>(m_giGridCounts.x);
-			lit.giGridCounts[1] = static_cast<float>(m_giGridCounts.y);
-			lit.giGridCounts[2] = static_cast<float>(m_giGridCounts.z);
-			lit.giGridCounts[3] = static_cast<float>(m_giProbesPerRow);
-			lit.giProbe[0] = m_giIndirectIntensity;
-			lit.giProbe[1] = (giShadingActive && m_giIrrAtlas && m_giVisAtlas) ? 1.0f : 0.0f;
+			HE::FillMaterialGIProbe(lit, m_giGridOrigin, m_giProbeSpacing, m_giGridCounts,
+			                        m_giProbesPerRow, m_giIndirectIntensity,
+			                        giShadingActive && m_giIrrAtlas && m_giVisAtlas);
 			// Ray-traced reflections for heLitP's forward cascade (heGIReflFwd,
 			// unit 18). x = intensity, y = max roughness, z = the gate.
 			lit.giRefl[0] = m_giReflIntensity;

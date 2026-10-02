@@ -761,6 +761,39 @@ TEST_CASE("FillMaterialWind: the cloud compass, a unit direction and the raw str
 	CHECK(lit.camPos[0]   == c);
 }
 
+TEST_CASE("FillMaterialGIProbe: the built-in shaders' grid, gated on bound atlases")
+{
+	// One helper for every backend's graph-material fill (Thema 120: D3D12 used
+	// to leave the block zeroed, so heLitP fell back to flat ambient under GI).
+	HE::MaterialShaderLibrary::Lighting lit;
+	const glm::vec3  origin(-12.5f, 0.25f, 3.0f);
+	const glm::ivec3 counts(9, 4, 7);
+
+	HE::FillMaterialGIProbe(lit, origin, 2.5f, counts, 32, 1.75f, /*atlasesBound=*/true);
+	CHECK(lit.giGridOrigin[0] == -12.5f);
+	CHECK(lit.giGridOrigin[1] == 0.25f);
+	CHECK(lit.giGridOrigin[2] == 3.0f);
+	CHECK(lit.giGridOrigin[3] == 2.5f);   // w = probe spacing
+	CHECK(lit.giGridCounts[0] == 9.0f);
+	CHECK(lit.giGridCounts[1] == 4.0f);
+	CHECK(lit.giGridCounts[2] == 7.0f);
+	CHECK(lit.giGridCounts[3] == 32.0f);  // w = probes per atlas row
+	CHECK(lit.giProbe[0] == 1.75f);       // x = indirect intensity
+	CHECK(lit.giProbe[1] == 1.0f);        // y = the heLitP gate (> 0.5)
+
+	// No atlases on the material slots → gate down, even with a valid grid:
+	// heLitP must not sample heGIIrradiance/heGIVisibility then.
+	HE::FillMaterialGIProbe(lit, origin, 2.5f, counts, 32, 1.75f, /*atlasesBound=*/false);
+	CHECK(lit.giProbe[1] == 0.0f);
+	CHECK(lit.giGridCounts[0] == 9.0f);   // grid still written, harmless behind the gate
+
+	// Only the three DDGI vec4s: neighbouring Lighting fields stay untouched.
+	CHECK(lit.giProbe[2] == 0.0f);
+	CHECK(lit.giProbe[3] == 0.0f);
+	CHECK(lit.fog[3] == 0.0f);
+	CHECK(lit.weather[0] == 0.0f);
+}
+
 TEST_CASE("Comment boxes round-trip through graph JSON (and old JSON still loads)")
 {
 	MaterialGraph g = MaterialGraph::makeDefault();
