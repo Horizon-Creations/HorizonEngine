@@ -3988,6 +3988,9 @@ TEST_CASE("D3D11: a graph material draw reads the DDGI atlases on t17/t18 (s1/s3
 		HE::MaterialShaderLibrary::Lighting lit{};
 		lit.giParams[0] = lit.giParams[1] = 1.0f;
 		lit.camPos[2] = 5.0f;
+		// Lighting defaults ambient to 0.1 — zero it, or the flat-ambient floor
+		// lifts every verdict below (gate on +0.1, gate off +0.135).
+		lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.0f;
 		HE::FillMaterialGIProbe(lit, glm::vec3(0.0f), 1.0f, glm::ivec3(1, 1, 2), 2, 1.0f, atlasesBound);
 		return makeConstantBuffer11(dev, &lit, sizeof(lit));
 	};
