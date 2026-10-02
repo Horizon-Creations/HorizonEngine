@@ -5883,6 +5883,13 @@ namespace
 	  "horizon.callWidgetFunction and friends. Private is the widget's own "
 	  "business.",
 	  "", "ui#graph" },
+	{ "UI Variable/Expose on Spawn", "",
+	  "Every Create Widget of this widget gets an input for this variable. A "
+	  "wired input, or one with a value typed on it, is set on the new widget "
+	  "before its Pre Construct runs, so the widget's own first code already "
+	  "sees it. Left alone, the input keeps the default shown here. Public "
+	  "variables only.",
+	  "", "ui#graph" },
 	{ "UI Variable/Position##vdef", "Default Position",
 	  "The position this transform variable starts at, when the widget is "
 	  "created. It is a starting value, not a binding to anything.",

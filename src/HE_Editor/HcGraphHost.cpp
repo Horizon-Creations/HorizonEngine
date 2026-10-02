@@ -18,7 +18,9 @@
 #include <imgui_internal.h>      // CurrentItemFlags — detect a BeginDisabled scope
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstring>       // strcmp — category names are const char*, compared by value
+#include <unordered_map>
 #include <filesystem>
 #include <functional>
 
@@ -465,6 +467,60 @@ bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph&
 	return false;
 }
 
+bool syncCreateWidgetPins(ContentManager* content, HC::Graph& g, bool force)
+{
+	if (!content) return false;
+	// Per widget path: what its graph offered when last read, and what it
+	// offered the time before (so an untouched pin can follow a new default).
+	// Static because every editor tab asks about the same assets, and the
+	// answer is a property of the asset, not of the graph asking.
+	struct Entry
+	{
+		std::size_t hash = 0;
+		bool        known = false, hasBefore = false;
+		std::vector<HC::SpawnPin> pins, before;
+		std::chrono::steady_clock::time_point checked{};
+	};
+	static std::unordered_map<std::string, Entry> cache;
+	const auto now = std::chrono::steady_clock::now();
+
+	bool changed = false;
+	std::vector<int> ids;
+	for (const HC::Node& n : g.nodes)
+		if (n.type == HC::NodeType::CreateWidget && !n.s.empty()) ids.push_back(n.id);
+	for (const int id : ids)
+	{
+		const std::string path = g.findNode(id)->s;
+		Entry& e = cache[path];
+		if (force || !e.known || now - e.checked >= std::chrono::milliseconds(500))
+		{
+			e.checked = now;
+			const HE::UUID aid = content->loadAsset(path);
+			const UIWidgetAsset* w = content->getWidget(aid);
+			// Missing asset: leave the node as it is. Its pins are the last
+			// thing known about that widget, and dropping them would also drop
+			// the wires somebody may want back once the asset is restored.
+			if (!w) continue;
+			// A copy: the getter points into the manager's dense vector.
+			const std::string json = w->graphJson;
+			const std::size_t hash = std::hash<std::string>{}(json);
+			if (!e.known || hash != e.hash)
+			{
+				HC::Graph wg;
+				if (!json.empty() && !HC::fromJson(json, wg)) continue;
+				e.hasBefore = e.known;
+				e.before    = std::move(e.pins);
+				e.pins      = HC::spawnPinsOf(wg);
+				e.hash      = hash;
+				e.known     = true;
+			}
+		}
+		if (!e.known) continue;
+		changed |= HC::syncSpawnPins(g, id, e.pins, e.hasBefore ? &e.before : nullptr);
+	}
+	return changed;
+}
+
 const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& selfGraph,
                                    const HC::Graph* giGraph, ContentManager* content,
                                    HC::Graph& scratch)
@@ -565,6 +621,11 @@ int quickSpawnNode(const Host& h, NT type, const GraphEditor::QuickSpawnCtx& c)
 GraphEditor::Model buildModel(const Host& h)
 {
 	HC::Graph& graph = *h.graph;
+
+	// Expose on Spawn: every Create Widget's inputs follow the widget it names
+	// (docs/widget-pre-construct-design.md §6.5). The document changed, so it
+	// is dirty, but nobody did anything to undo — hence not a committed edit.
+	if (syncCreateWidgetPins(h.content, graph) && h.onEdit) h.onEdit(false);
 
 	GraphEditor::Model m;
 	m.multiSelect = true;      // shift-click / box-select; drag + Delete act on all
@@ -2098,10 +2159,18 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		{
 			for (const auto& a : HcEditorUtil::listAssets(h.content, HE::AssetType::Widget))
 				if (ImGui::Selectable((a.label + "##" + a.path).c_str(), n.s == a.path))
-					{ n.s = a.path; edit(true); }
+				{
+					n.s = a.path;
+					// The new widget's Expose on Spawn inputs, now rather than
+					// on the next half-second check. Mirroring moves no node,
+					// so `n` stays valid.
+					syncCreateWidgetPins(h.content, g, /*force=*/true);
+					edit(true);
+				}
 			ImGui::EndCombo();
 		}
-		ImGui::TextDisabled("Which UI Widget asset to instantiate.\nOutputs the new widget's id.");
+		ImGui::TextDisabled("Which UI Widget asset to instantiate.\nOutputs the new widget's id.\n"
+		                    "Its Expose on Spawn variables appear as inputs.");
 		return true;
 	}
 	case NT::CreateObject:

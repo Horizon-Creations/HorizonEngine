@@ -5776,8 +5776,25 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			{
 				int vaccess = v->access;
 				if (ImGui::Combo("Access", &vaccess, "Public\0Private\0"))
-					{ v->access = vaccess; commitEdit(st, ctx); }
+				{
+					v->access = vaccess;
+					if (vaccess != 0) v->exposeOnSpawn = false;   // a creator only reaches public ones
+					commitEdit(st, ctx);
+				}
 				EditorWidgets::helpForLabel("Access");
+
+				// Expose on Spawn (docs/widget-pre-construct-design.md §6): every
+				// Create Widget of this widget grows an input for it, set before
+				// PreConstruct. Public only — the runtime sets it the way Set
+				// (Ref) does, and that cannot reach a private one.
+				ImGui::BeginDisabled(v->access != 0);
+				bool spawn = v->exposeOnSpawn && v->access == 0;
+				if (EditorWidgets::checkbox("Expose on Spawn", &spawn))
+					{ v->exposeOnSpawn = spawn; commitEdit(st, ctx); }
+				ImGui::EndDisabled();
+				if (v->access != 0 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+					ImGui::SetTooltip("%s", "Only a public variable can be handed in by Create Widget.");
+				EditorWidgets::helpForLabel("Expose on Spawn");
 			}
 
 			// Single value, or a container of the type. Changing it re-types the
