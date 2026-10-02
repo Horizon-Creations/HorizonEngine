@@ -3096,11 +3096,22 @@ struct D3D12RendererImpl
     bool                         clusterRootValid = false;
     bool                         forwardClustered = true;  // HE_FORWARD_CLUSTER=0 → 8-light A/B guard
     bool                         clusterCapWarned = false;
-    static constexpr UINT        k_clusterRootLights = 6; // root parameter indices (both root sigs)
+    static constexpr UINT        k_clusterRootLights = 6; // root parameter indices (all three root sigs)
     static constexpr UINT        k_clusterRootGrid   = 7;
     static constexpr UINT        k_clusterRootIdx    = 8;
+    // The graph-material signature hangs the SAME rings on t24..t26
+    // (fragmentClustered's ByteAddressBuffers — identical byte layout to the
+    // built-in t18..t20 StructuredBuffers), so one bind helper serves all three.
+    static_assert(k_clusterRootLights == HE::d3d12mat::kRootClusterLights
+               && k_clusterRootGrid   == HE::d3d12mat::kRootClusterGrid
+               && k_clusterRootIdx    == HE::d3d12mat::kRootClusterIdx,
+                  "bindClusterRoots relies on the material root signature's cluster indices");
+    // Graph materials cross-compile fragmentClustered (Thema 117) when the rings
+    // exist and HE_FORWARD_CLUSTER is not 0. Both are settled before
+    // createMaterialResources() sets m_matReady, i.e. before any material PSO.
+    bool matClustered() const { return forwardClustered && clusterRootValid; }
     // Sets the three cluster root SRVs on the current root signature. Call
-    // right after every SetGraphicsRootSignature(rootSig | skinnedRootSig).
+    // right after every SetGraphicsRootSignature(rootSig | skinnedRootSig | m_matRootSig).
     void bindClusterRoots(ID3D12GraphicsCommandList* cl) const
     {
         if (!clusterRootValid) return;
@@ -8108,7 +8119,8 @@ void D3D12RendererImpl::createMaterialResources()
 {
     // Root signature: root CBVs b0/b1/b3/b8/b9 + ONE SRV table (t2, t4..t7, t10..t18,
     // t31..t33 → k_matSrvPerDraw consecutive heap slots, one block per DrawCall in the
-    // ring) + the 16 static samplers s0..s15. The description is
+    // ring) + the 16 static samplers s0..s15 + root SRVs t24..t26 for the clustered
+    // variant's light lists (params 6..8, bindClusterRoots). The description is
     // HE::d3d12mat::DescribeMaterialRootSignature (D3D12MaterialRootSignature.h): every
     // register MaterialShaderLibrary::fragment(HLSL) pins is in there, because
     // CreateGraphicsPipelineState rejects a PSO whose pixel shader names a register the
@@ -8323,16 +8335,33 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
                 ? m_matShaderLib.standardVertex(Backend::HLSL)
                 : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
-            const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
-            if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+            // Clustered heLitP first (Thema 117): point/spot lights from the
+            // t24..t26 cluster lists instead of the 8-light window. A variant
+            // that does not cross-compile or that FXC rejects falls back to the
+            // window variant below — the material still renders, with 8 lights.
+            if (matClustered() && vc.ok && !vc.source.empty())
             {
-                HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material shader cross-compile failed: ")
-                    + vc.log + " " + fc.log).c_str());
-                m_matBytecode.emplace(hash, MatBytecode{});
-                m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
-                return nullptr;
+                const HE::MaterialShaderLibrary::Compiled& cc =
+                    m_matShaderLib.fragmentClustered(hash, frag, Backend::HLSL);
+                if (cc.ok && !cc.source.empty())
+                    built = compilePair(vc.source, cc.source, "cross-compiled, clustered");
+                if (!built)
+                    HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 clustered material variant failed — "
+                        "using the 8-light window variant: ") + cc.log).c_str());
             }
-            built = compilePair(vc.source, fc.source, "cross-compiled");
+            if (!built)
+            {
+                const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+                if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+                {
+                    HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material shader cross-compile failed: ")
+                        + vc.log + " " + fc.log).c_str());
+                    m_matBytecode.emplace(hash, MatBytecode{});
+                    m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
+                    return nullptr;
+                }
+                built = compilePair(vc.source, fc.source, "cross-compiled");
+            }
         }
         if (!built)
         {
@@ -9180,12 +9209,16 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // lights only. The lists are rewritten on each fillPerFrame call like the
     // CB itself (the GPU reads both at execute time) — only the GI-mask channel
     // lane depends on the GI decision the refill carries.
+    // The build outlives the lambda: fillMatLight copies its gate/grid into the
+    // graph materials' HeLighting (they read the same rings at t24..t26), and
+    // fillPerFrame always runs right before it with the same GI flag.
     const bool clustered = p.forwardClustered && p.clusterRootValid
                         && !p.m_renderWorld.lights.empty();
+    HE::ClusterLightBuild frameClusters;
     auto uploadClusters = [&](bool giActive) -> std::pair<glm::vec4, glm::vec4>
     {
-        const HE::ClusterLightBuild cb =
-            HE::BuildClusterLights(p.m_renderWorld, localShadows, giActive && p.giLocalMaskTex);
+        frameClusters = HE::BuildClusterLights(p.m_renderWorld, localShadows, giActive && p.giLocalMaskTex);
+        const HE::ClusterLightBuild& cb = frameClusters;
         if (cb.droppedLights > 0 && !p.clusterCapWarned)
         {
             p.clusterCapWarned = true;
@@ -9300,6 +9333,14 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // (point/spot) atlas rendered this frame, lightParams[i].y carries the
         // light's base layer + 1 (0 = "casts no local shadow").
         HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        // Clustered heLitP gate (Thema 117): the window above stays FULL —
+        // baked pak blobs and the window fallback read this same buffer — and
+        // the clustered variant skips its point/spot slots itself. `clustered`
+        // implies matClustered() (rings live, bound on t24..t26 at every
+        // material draw); giParams.xy (the viewport the cell pick divides by)
+        // is set below.
+        if (clustered)
+            HE::FillMaterialClusterParams(frameClusters, lit);
         HE::FillMaterialWind(m_environment, lit); // Wind / Wind Sway nodes, next to Time
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
         // preamble binding 13 → t13 = SRV block slot k_matLocalShadowSlot,
@@ -9859,6 +9900,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
                         cl->SetDescriptorHeaps(1, mheaps);
                         cl->SetGraphicsRootSignature(p.m_matRootSig.Get());
+                        p.bindClusterRoots(cl); // t24..t26 — fragmentClustered's light lists
                         cl->SetPipelineState(matPso);
                         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                         cl->SetGraphicsRootDescriptorTable(5, p.matSrvGpu(blk));

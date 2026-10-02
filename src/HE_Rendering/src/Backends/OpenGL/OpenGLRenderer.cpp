@@ -3108,6 +3108,19 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 
 	m_shaderManager = OpenGLShaderManager();
 
+	// Clustered heLitP for graph materials (Thema 117): SSBOs are GL 4.3, so
+	// macOS (4.1) keeps the 8-light window. Settled here, before WarmupMaterials
+	// can build a material program; HE_FORWARD_CLUSTER=0 is the A/B guard every
+	// other backend reads too.
+	m_forwardClustered = GLAD_GL_VERSION_4_3 != 0;
+	if (const char* cl = std::getenv("HE_FORWARD_CLUSTER"); cl && *cl && std::atoi(cl) == 0)
+		m_forwardClustered = false;
+	if (m_forwardClustered)
+		CreateClusterSSBOs();
+	HE_LOG_INFO(RHI, "%s", m_forwardClustered
+		? "OpenGLRenderer: graph materials use clustered lighting (SSBO 4/5/6)"
+		: "OpenGLRenderer: graph materials use the 8-light window (GL < 4.3 or HE_FORWARD_CLUSTER=0)");
+
 	// Deferred-path debug/headless knobs (mirrors the Metal backend):
 	// HE_RENDER_PATH=1/deferred forces the path without touching config,
 	// HE_DUMP_GBUFFER=1..4 makes the resolve output a raw G-buffer view — it
@@ -3398,31 +3411,97 @@ void OpenGLRenderer::EnsureMaterialUBOs()
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 }
 
+// The clustered graph-material lists (Thema 117). Created with one zero entry
+// each and bound right away, so a clustered program drawn before the first
+// DrawScene upload (material preview, thumbnail) never reads an unbound SSBO —
+// its gate is 0 there anyway. Indexed bindings are context state and nothing
+// else on GL touches 4..6 (the GI compute passes own 0..3).
+void OpenGLRenderer::CreateClusterSSBOs()
+{
+	glGenBuffers(3, m_clusterSSBO);
+	const int binds[3] = { HE::MaterialShaderLibrary::kGlClusterLightsSsboBinding,
+	                       HE::MaterialShaderLibrary::kGlClusterGridSsboBinding,
+	                       HE::MaterialShaderLibrary::kGlClusterIndexSsboBinding };
+	const uint32_t zero[4] = {};
+	for (int i = 0; i < 3; ++i)
+	{
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_clusterSSBO[i]);
+		glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(zero), zero, GL_DYNAMIC_DRAW);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binds[i], m_clusterSSBO[i]);
+	}
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+	if (m_clusterSSBO[0] == 0 || m_clusterSSBO[1] == 0 || m_clusterSSBO[2] == 0)
+	{
+		HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: cluster SSBOs not created — graph materials keep the 8-light window");
+		m_forwardClustered = false;
+	}
+}
+
+// One HE::BuildClusterLights per frame → the three SSBOs (orphaned with the
+// new size), re-bound to 4/5/6. Same byte layout as the std430 blocks of
+// fragmentClustered: vec4 lights, uvec2 grid cells, uint indices.
+void OpenGLRenderer::UploadClusterLists(const HE::ClusterLightBuild& build)
+{
+	const struct { const void* data; size_t bytes; int binding; } lists[3] = {
+		{ build.lights.data(),  build.lights.size()  * sizeof(glm::vec4),
+		  HE::MaterialShaderLibrary::kGlClusterLightsSsboBinding },
+		{ build.grid.data(),    build.grid.size()    * sizeof(glm::uvec2),
+		  HE::MaterialShaderLibrary::kGlClusterGridSsboBinding },
+		{ build.indices.data(), build.indices.size() * sizeof(uint32_t),
+		  HE::MaterialShaderLibrary::kGlClusterIndexSsboBinding },
+	};
+	for (int i = 0; i < 3; ++i)
+	{
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_clusterSSBO[i]);
+		glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(lists[i].bytes),
+		             lists[i].data, GL_STREAM_DRAW);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, lists[i].binding, m_clusterSSBO[i]);
+	}
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
 unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const std::string& vertBody,
-                                                       const MaterialShaderVariant* precompiled)
+                                                       const MaterialShaderVariant* precompiled,
+                                                       bool gbuffer)
 {
 	EnsureMaterialUBOs(); // before every return below — memo hit and cache hit included
 	if (auto it = m_materialPrograms.find(key); it != m_materialPrograms.end()) return it->second;
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
+	// Forward graph materials on GL 4.3+ shade from the cluster lists (Thema 117):
+	// both stages at GLSL 4.30, one version per program. Baked pak variants
+	// (GLSL 4.10, plain) and the G-buffer variant (never shades) stay as they are.
+	bool clustered = m_forwardClustered && !precompiled && !gbuffer;
+	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
+	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
+	auto crossCompile = [&](Backend b, bool cl) {
+		const auto& v = vertBody.empty()
+			? m_matShaderLib.standardVertex(b)
+			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, b);
+		const auto& f = cl ? m_matShaderLib.fragmentClustered(key, fragGlsl, b)
+		                   : m_matShaderLib.fragment(key, fragGlsl, b);
+		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
+	};
 	if (precompiled)
 	{
 		vertSrc = precompiled->vertex; fragSrc = precompiled->fragment;
 		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL 410 — no runtime cross-compile
 	}
-	else
+	else if (clustered)
 	{
-		// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
-		// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
-		const auto& v = vertBody.empty()
-			? m_matShaderLib.standardVertex(Backend::GLSL410)
-			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody,
-			                              Backend::GLSL410);
-		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
-		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
+		crossCompile(Backend::GLSL430, true);
+		if (!ok)
+		{
+			HE_LOG_WARN(RHI, "%s", (std::string("OpenGLRenderer: clustered material cross-compile failed, "
+				"falling back to the 8-light window\n") + log).c_str());
+			clustered = false;
+			crossCompile(Backend::GLSL410, false);
+		}
 	}
+	else
+		crossCompile(Backend::GLSL410, false);
 	// Uniform-block bindings + sampler-unit assignments. Program state (not always
 	// captured in a program binary), so re-applied whether the program was linked
 	// fresh or restored from the on-disk cache.
@@ -3479,9 +3558,8 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		glUseProgram(0);
 	};
 
-	unsigned int program = 0;
-	if (ok)
-	{
+	// vertSrc/fragSrc → linked program, 0 on failure (logged).
+	auto linkSources = [&]() -> unsigned int {
 		// Fast path: a linked binary cached from a previous launch — skips the
 		// GLSL compile + link entirely. Only when the driver supports binaries.
 		const bool cacheable = glProgramBinarySupported();
@@ -3491,11 +3569,9 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 			if (GLuint cached = glTryLoadCachedProgram(cachePath))
 			{
 				setupProgram(cached);
-				program = cached;
-				m_materialPrograms[key] = program;
 				HE_LOG_INFO(RHI, "%s",
 					"OpenGLRenderer: loaded a material program from the on-disk binary cache");
-				return program;
+				return cached;
 			}
 
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
@@ -3506,25 +3582,37 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
 		glDeleteShader(vs); glDeleteShader(fs);
-		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-		if (ok)
+		GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+		if (!linked)
 		{
-			setupProgram(prog);
-			program = prog;
-			if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
-			HE_LOG_INFO(RHI, "%s", precompiled
-				? "OpenGLRenderer: built a material program from a PRECOMPILED variant (no runtime cross-compile)"
-				: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
-		}
-		else
-		{
-			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			char linkLog[2048]; glGetProgramInfoLog(prog, sizeof(linkLog), nullptr, linkLog);
 			HE_LOG_ERROR(RHI, "%s",
-				(std::string("OpenGLRenderer: material program link failed: ") + log).c_str());
+				(std::string("OpenGLRenderer: material program link failed: ") + linkLog).c_str());
 			glDeleteProgram(prog);
+			return 0;
 		}
+		setupProgram(prog);
+		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
+		HE_LOG_INFO(RHI, "%s", precompiled
+			? "OpenGLRenderer: built a material program from a PRECOMPILED variant (no runtime cross-compile)"
+			: clustered
+			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
+			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
+		return prog;
+	};
+
+	unsigned int program = ok ? linkSources() : 0;
+	if (!program && clustered)
+	{
+		// The GLSL 4.30 pair cross-compiled but the driver rejected it: the
+		// plain 4.10 pair still draws the material (window lights only).
+		HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: clustered material program failed to link, "
+			"falling back to the 8-light window");
+		clustered = false;
+		crossCompile(Backend::GLSL410, false);
+		program = ok ? linkSources() : 0;
 	}
-	else
+	if (!ok)
 		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
 
@@ -8086,7 +8174,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (resolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
 			    && !m_materialPrograms.count(gbKey)
-			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr))
+			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true))
 				++built;
 		}
 	}
@@ -9377,6 +9465,7 @@ void OpenGLRenderer::Shutdown()
 	}
 	m_meshCache.clear();
 	DestroyGIAccel();
+	if (m_clusterSSBO[0]) { glDeleteBuffers(3, m_clusterSSBO); m_clusterSSBO[0] = m_clusterSSBO[1] = m_clusterSSBO[2] = 0; }
 	for (auto& [id, tex] : m_materialTexCache)
 		if (tex) glDeleteTextures(1, &tex);
 	m_materialTexCache.clear();
@@ -10683,6 +10772,21 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		const glm::vec3 camPos = m_renderWorld.camera.position;
 
 #if defined(HE_HAVE_SHADERC)
+		// Clustered heLitP (Thema 117, GL 4.3+): ONE cluster build per frame,
+		// uploaded to SSBO 4/5/6 before any graph-material draw. gl_FragCoord is
+		// bottom-left and the scene renders unflipped into m_hdrFBO / the
+		// G-buffer at (0,0,pw,ph), so the build skips the v-flip. Atlas layers
+		// and GI mask channels ride the same gates as the textures on units
+		// 12 and 10.
+		HE::ClusterLightBuild frameClusters;
+		const bool matClustered = m_forwardClustered;
+		if (matClustered)
+		{
+			frameClusters = HE::BuildClusterLights(m_renderWorld, localShadows,
+			                                       giShadingActive && m_giLocalMaskTex != 0,
+			                                       /*bottomLeftOrigin=*/true);
+			UploadClusterLists(frameClusters);
+		}
 		// The heLitP lighting ABI fill for custom-material programs — shared by
 		// the forward opaque loop, the deferred G-buffer loop (Time input) and
 		// the deferred replay passes, so the values can never drift between them.
@@ -10755,6 +10859,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// writes the per-light atlas layer into lightParams[i].y when
 			// `localShadows` says the atlas is bound this frame.
 			HE::FillMaterialLightWindow(m_renderWorld, lit, localShadows);
+			// Cluster gate + grid for fragmentClustered programs. The window
+			// above stays full: a baked (plain) pak program reads the same UBO.
+			if (matClustered)
+				HE::FillMaterialClusterParams(frameClusters, lit);
 			HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
 			// Local (point/spot) shadow atlas for heLitP — same matrices the
 			// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
@@ -10860,7 +10968,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						// carry no G-buffer GLSL yet).
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
-							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr);
+							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
 						if (ma)
 						{
 							mParams = !dc.paramOverride.empty() ? dc.paramOverride

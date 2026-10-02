@@ -369,7 +369,8 @@ private:
 	// Three host-visible SSBOs per frame in flight (lights / grid / indices),
 	// written once per frame from HE::BuildClusterLights and bound at set 0
 	// bindings 10/11/12 of the scene set (the skinned pipeline shares that
-	// layout). Sized once from the LightPacking caps. m_forwardClustered is
+	// layout) and at bindings 24/25/26 of every graph-material set (Thema 117,
+	// fragmentClustered). Sized once from the LightPacking caps. m_forwardClustered is
 	// the HE_FORWARD_CLUSTER=0 A/B guard (8-light window carries everything).
 	struct ClusterBuffer
 	{
@@ -392,6 +393,7 @@ private:
 	// Canonical descriptor set 0 layout (matches the generated SPIR-V exactly):
 	//   b0 UBO(FS) HeLighting | b1 UBO(VS) U | b2 tex(FS) heTex0 | b3 UBO(FS) HeParams
 	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex).
+	//   Full table (GI/CSM/SSR/atlas samplers, b24..26 cluster SSBOs): VulkanMaterialLayout.h.
 	HE::MaterialShaderLibrary m_matShaderLib;
 	std::unordered_map<uint64_t, VkPipeline> m_materialPipelines; // key = hash ^ hdr-bit
 	VkDescriptorSetLayout m_matSetLayout      = VK_NULL_HANDLE;

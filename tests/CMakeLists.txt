@@ -987,6 +987,15 @@ if(HE_HAVE_SHADERC)
     if(WIN32)
         target_link_libraries(he_tests PRIVATE d3dcompiler d3d12 d3d11 dxgi)
     endif()
+    # SPIRV-Cross reflection (Thema 117): the Vulkan material cases ask which
+    # descriptors a node shader's SPIR-V STATICALLY uses and hold them against
+    # VulkanMaterialLayout.h — the one Vulkan check without a device in CI.
+    # he_shadercompiler links it PRIVATE, so its headers do not come along.
+    target_link_libraries(he_tests PRIVATE spirv-cross-core)
+    # glslang itself (Thema 117, Schritt 6): the GL 4.3 case parses the emitted
+    # GLSL 4.30 in plain OpenGL mode and links vertex + fragment — the one GL 4.3
+    # check without a GL 4.3 context.
+    target_link_libraries(he_tests PRIVATE glslang glslang-default-resource-limits)
 endif()
 
 # The D3D11/D3D12 shader managers (Thema 62): compiled straight into the test

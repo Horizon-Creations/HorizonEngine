@@ -5991,6 +5991,69 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_LOCALSHADOW witness scene added");
 	}
 
+	// ── Many-lights witness (HE_DUMP_MANYLIGHTS=N[builtin]): a floor slab under
+	// two rows of N small coloured point lights (default 16, max 64). The floor
+	// carries a NODE-GRAPH material (heLitP), so with clustered forward lighting
+	// every light leaves its pool; the 8-light window (HE_FORWARD_CLUSTER=0)
+	// lights only a handful. "...builtin" drops the material — the built-in PBR
+	// floor is the negative control on a backend whose built-in shader still
+	// shades the window (Metal forward). Shot at midnight from above:
+	//   he_shot.py out.png MANYLIGHTS=16 TOD=0 CAMY=207 CAMZ=2 PITCH=-38
+	if (const char* ml = std::getenv("HE_DUMP_MANYLIGHTS"); ml && *ml && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string mlMode(ml);
+		const int n = std::clamp(std::atoi(ml) > 1 ? std::atoi(ml) : 16, 1, 64);
+		auto floorE = m_editorWorld->createEntity("ManyLightsFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, 199.0f, -10.0f); // high above any loaded scene content
+		ftc.scale    = glm::vec3(36.0f, 0.25f, 14.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+		if (mlMode.find("builtin") == std::string::npos)
+		{
+			MaterialAsset fm;
+			fm.type = HE::AssetType::Material;
+			fm.name = "ManyLightsFloorMat";
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(col)->p[0] = 0.8f; g.findNode(col)->p[1] = 0.8f; g.findNode(col)->p[2] = 0.8f;
+			g.connect(col, 0, out, 0); // BaseColor → lit output (heLitP)
+			fm.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			fm.customShaderFragGlsl = gen.glsl;
+			fm.customShaderGBufGlsl = gen.glslGBuffer;
+			fm.customShaderVertGlsl = gen.vertexBody;
+			fm.blendMode            = gen.blendMode;
+			fm.domain               = gen.domain;
+			reg.emplace<MaterialComponent>(floorE,
+				MaterialComponent{ contentManager().registerMaterial(std::move(fm)) });
+		}
+		const int perRow = (n + 1) / 2;
+		for (int i = 0; i < n; ++i)
+		{
+			const int row = i / perRow, col = i % perRow;
+			auto lightE = m_editorWorld->createEntity("ManyLights" + std::to_string(i));
+			TransformComponent ltc;
+			ltc.position = glm::vec3((col - (perRow - 1) * 0.5f) * 3.0f, 200.0f, -7.0f - row * 5.0f);
+			LightComponent lc;
+			lc.type      = HE::LightType::Point;
+			lc.intensity = 6.0f;
+			lc.range     = 2.4f;
+			// Distinct hues around the wheel, so a missing pool is easy to name.
+			const float h = static_cast<float>(i) / static_cast<float>(n) * 6.0f;
+			lc.color = glm::clamp(glm::vec3(std::abs(h - 3.0f) - 1.0f,
+			                                2.0f - std::abs(h - 2.0f),
+			                                2.0f - std::abs(h - 4.0f)), 0.0f, 1.0f);
+			reg.emplace<TransformComponent>(lightE, ltc);
+			reg.emplace<LightComponent>(lightE, lc);
+		}
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_MANYLIGHTS witness scene added ("
+			 + std::to_string(n) + " point lights)").c_str());
+	}
+
 	// ── Light-on-the-same-entity witness (HE_DUMP_LIGHTONMESH=…) ─────────────
 	// Two identical cubes left/right of ONE point light that sits on its own
 	// entity: both must be lit the same. The mode string then attaches a SECOND

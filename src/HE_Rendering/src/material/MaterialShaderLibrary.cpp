@@ -146,6 +146,7 @@ he::shaderc::Target toTarget(MaterialShaderLibrary::Backend b)
         case B::GLSL410:   return T::Glsl410;
         case B::GLSLES300: return T::GlslEs300;
         case B::SpirV:     return T::SpirvBinary;
+        case B::GLSL430:   return T::Glsl430;
     }
     return T::Msl;
 }
@@ -223,6 +224,8 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 specAA;         // x = specular-AA strength (0 = off), y = 1 in geometry passes (own normal + valid derivatives)
     vec4 shadowBias;     // CSM receiver bias: x = slope-scaled factor, y = minimum (project ShadowSettings; filled with csmVP)
     vec4 viewMode;       // x = 1 → Unlit/Wireframe view: heLitP hands the base colour back, heApplyFog is a no-op (scene-pass fill sites only)
+    vec4 clusterParams;  // HE_CLUSTERED variant only: x/y/z = cluster grid dims (x = 0 → off, window lights only), w = gridZ / log(far/near)
+    vec4 clusterCamFwd;  // xyz = camera forward (cluster depth axis), w = cluster near plane
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -511,6 +514,112 @@ float heSpecAARoughness(vec3 N, float perceptualRough) {
     float widened     = clamp(alpha * alpha + kernelRough, 0.0, 1.0);
     return max(perceptualRough, sqrt(sqrt(widened)));
 }
+#ifdef HE_CLUSTERED
+// ── Clustered forward lighting (fragmentClustered, Thema 117) ─────────────────
+// Every point/spot light of the scene (HE::BuildClusterLights) in per-cluster
+// lists; while heLight.clusterParams.x > 0 heLitP shades the fragment's own
+// list INSTEAD of the window's point/spot slots (the window keeps its
+// directional lights). Same bindings and layout as the clustered deferred
+// resolve — 4 vec4 per light: posType, dirSpot, colorIntensity (w =
+// intensity), params (x = range, y = atlas layer + 1, z = GI local-mask
+// channel + 1).
+layout(std430, set = 0, binding = 24) readonly buffer HeClusterLights { vec4 clLights[]; };
+layout(std430, set = 0, binding = 25) readonly buffer HeClusterGrid   { uvec2 clGrid[]; };
+layout(std430, set = 0, binding = 26) readonly buffer HeClusterIdx    { uint clIdx[]; };
+// Local atlas shadow with EXPLICIT light data — heLocalShadowFactor's math.
+// SYNC: the deferred resolve's heClusterShadow is the same function (drift
+// guard in test_material_graph.cpp). Samples with textureLod, not texture():
+// the cluster loop's trip count varies per pixel, and FXC rejects gradient
+// samples inside such a loop (X3570, then a failed unroll). The atlas and the
+// GI mask have one mip, so level 0 is exactly what texture() read.
+float heFwdClusterShadow(vec4 posType, vec4 params, vec3 worldPos, vec3 n) {
+    int base = int(params.y) - 1; // stored as layer+1; 0 = none
+    if (base < 0) return 1.0;
+    int layer = base;
+    if (int(posType.w) == 1) { // point: major-axis cube-face pick
+        vec3 d = worldPos - posType.xyz;
+        vec3 a = abs(d);
+        int face;
+        if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+        else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+        else                               face = (d.z > 0.0) ? 4 : 5;
+        layer = base + face;
+    }
+    vec3  toL = normalize(posType.xyz - worldPos);
+    float ndl = clamp(dot(n, toL), 0.0, 1.0);
+    vec4 lp = heLight.localShadowVP[layer] * vec4(worldPos + n * 0.02, 1.0);
+    if (lp.w <= 0.0) return 1.0;
+    vec3 p  = lp.xyz / lp.w;
+    vec2 suv = p.xy * 0.5 + 0.5;
+    vec2 texel = 1.0 / vec2(textureSize(heLocalShadow, 0).xy);
+    if (p.z > 1.0 || p.z < 0.0
+        || any(lessThan(suv, texel)) || any(greaterThan(suv, vec2(1.0) - texel)))
+        return 1.0;
+    float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x) {
+            float cd = textureLod(heLocalShadow, vec3(suv + vec2(x, y) * texel, float(layer)), 0.0).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    return vis / 9.0;
+}
+// The fragment's cluster list with heLitP's per-light model. Takes heLitP's
+// post-weather material terms, so snow/wet apply exactly once. The cell pick
+// uses a TOP-LEFT uv (gl_FragCoord on Vulkan/Metal/D3D); a GL fill site builds
+// its grid with BuildClusterLights(..., bottomLeftOrigin = true) instead.
+// Needs heLight.giParams.xy (viewport) whenever clusterParams.x > 0.
+vec3 heFwdClusterLights(vec3 P, vec3 n, vec3 V, vec3 diffuseColor, vec3 specColor,
+                        float shininess, float specScale) {
+    vec2 uv = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
+    float nearZ = max(heLight.clusterCamFwd.w, 1e-4);
+    float viewZ = max(dot(P - heLight.camPos.xyz, heLight.clusterCamFwd.xyz), nearZ);
+    int gx = int(heLight.clusterParams.x);
+    int gy = int(heLight.clusterParams.y);
+    int gz = int(heLight.clusterParams.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+    int cz = clamp(int(log(viewZ / nearZ) * heLight.clusterParams.w), 0, gz - 1);
+    int cx = clamp(int(uv.x * float(gx)), 0, gx - 1);
+    int cy = clamp(int(uv.y * float(gy)), 0, gy - 1);
+    uvec2 cell = clGrid[(cz * gy + cy) * gx + cx];
+    vec3 result = vec3(0.0);
+    for (uint k = 0u; k < cell.y; ++k) {
+        uint li = clIdx[cell.x + k] * 4u;
+        vec4 posType = clLights[li + 0u];
+        vec4 dirSpot = clLights[li + 1u];
+        vec4 colInt  = clLights[li + 2u];
+        vec4 params  = clLights[li + 3u];
+        vec3  d    = posType.xyz - P;
+        float dist = max(length(d), 1e-4);
+        vec3  L = d / dist;
+        float range = max(params.x, 1e-4);
+        float atten = clamp(1.0 - dist / range, 0.0, 1.0);
+        atten *= atten;
+        if (posType.w > 1.5) { // spot cone
+            float c       = dot(-L, normalize(dirSpot.xyz));
+            float cosCone = dirSpot.w;
+            atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+        }
+        if (atten <= 0.0) continue;
+        float sh = heFwdClusterShadow(posType, params, P, n);
+        // Ray-traced GI local mask: params.z carries this light's channel + 1
+        // (assigned by the CPU scatter with heLitP's exact first-4-of-window
+        // scan), min()-combined with the atlas shadow like heLitP's loop.
+        if (heLight.giParams.z > 0.5) {
+            int ch = int(params.z) - 1;
+            if (ch >= 0) {
+                vec4 lm = textureLod(heGILocal, uv, 0.0);
+                sh = min(sh, lm[ch]);
+            }
+        }
+        float ndl  = max(dot(n, L), 0.0);
+        vec3  H    = normalize(L + V);
+        float spec = pow(max(dot(n, H), 0.0), shininess) * specScale;
+        result += (diffuseColor * ndl + specColor * spec) * colInt.rgb * colInt.a * atten * sh;
+    }
+    return result;
+}
+#endif
 
 vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos,
             float specular, float ambientOcclusion) {
@@ -629,8 +738,17 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         result = (ambDiff * 0.35 + ambSpec) * ao + heLight.ambient.rgb * diffuseColor;
     int count = int(heLight.counts.x);
     int localIdx = 0; // counter over non-directional lights → local-mask channel
+#ifdef HE_CLUSTERED
+    // Clustered: the cluster lists hold EVERY point/spot light, the window's
+    // copies of the first few would count twice. The window stays filled for
+    // the plain variant (a pak-precompiled shader can share this buffer).
+    bool heClustered = heLight.clusterParams.x > 0.5;
+#endif
     for (int i = 0; i < count; ++i) {
         int   type  = int(heLight.lightPos[i].w);
+#ifdef HE_CLUSTERED
+        if (heClustered && type != 0) continue;
+#endif
         vec3  L;
         float atten = 1.0;
         if (type == 0) {
@@ -692,6 +810,10 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         vec3  lc   = heLight.lightColor[i].rgb * heLight.lightColor[i].a;
         result += (diffuseColor * ndl + specColor * spec) * lc * atten * sh;
     }
+#ifdef HE_CLUSTERED
+    if (heClustered)
+        result += heFwdClusterLights(worldPos, n, V, diffuseColor, specColor, shininess, specScale);
+#endif
     return result;
 }
 // Legacy 5-argument form: material blobs baked before the Specular / Ambient
@@ -704,14 +826,18 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
 
 // Insert the preamble right after the material's #version directive (GLSL requires
 // #version to be the first token). If the source has none, prepend one.
-std::string injectPreamble(const std::string& src)
+// `clustered` defines HE_CLUSTERED ahead of the preamble — the forward
+// clustered-lighting variant (fragmentClustered).
+std::string injectPreamble(const std::string& src, bool clustered = false)
 {
+    const std::string pre = clustered ? std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble
+                                      : std::string(kLightingPreamble);
     const size_t vpos = src.find("#version");
     if (vpos == std::string::npos)
-        return std::string("#version 450\n") + kLightingPreamble + src;
+        return std::string("#version 450\n") + pre + src;
     size_t eol = src.find('\n', vpos);
     if (eol == std::string::npos) eol = src.size() - 1;
-    return src.substr(0, eol + 1) + kLightingPreamble + src.substr(eol + 1);
+    return src.substr(0, eol + 1) + pre + src.substr(eol + 1);
 }
 } // namespace
 
@@ -999,6 +1125,10 @@ vec3 heOctDecode(vec2 f) {
     return normalize(n);
 }
 )";
+    // SYNC: heClusterShadow and heClusterLighting's per-light loop below have a
+    // forward twin in kLightingPreamble (heFwdClusterShadow/heFwdClusterLights,
+    // HE_CLUSTERED). The twin samples with textureLod (FXC, see there); the
+    // drift guard in test_material_graph.cpp compares the two modulo that.
     if (clustered)
         src += R"(// ── Clustered lighting (plan P7) ─────────────────────────────────────────────
 // All point/spot lights live in per-cluster lists; heLight's window carries
@@ -2303,14 +2433,37 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fullscreenVertex(B
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
     uint64_t sourceHash, const std::string& glsl, Backend backend)
 {
+    return fragmentVariant(sourceHash, glsl, backend, /*clustered=*/false);
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentClustered(
+    uint64_t sourceHash, const std::string& glsl, Backend backend)
+{
+    return fragmentVariant(sourceHash, glsl, backend, /*clustered=*/true);
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
+    uint64_t sourceHash, const std::string& glsl, Backend backend, bool clustered)
+{
     // Mix the source hash with the backend so each backend gets its own cache slot
-    // without the two ever colliding.
-    const uint64_t key = sourceHash ^ (0x9E3779B97F4A7C15ULL * (static_cast<uint64_t>(backend) + 1));
+    // without the two ever colliding; the clustered variant gets its own salt on
+    // top (backend + 1 + 8 — never a plain variant's multiplier).
+    const uint64_t salt = static_cast<uint64_t>(backend) + 1 + (clustered ? 8 : 0);
+    const uint64_t key = sourceHash ^ (0x9E3779B97F4A7C15ULL * salt);
     if (auto it = m_fragCache.find(key); it != m_fragCache.end()) return it->second;
 
     using namespace he::shaderc;
-    const std::string injected = injectPreamble(glsl); // adds the lighting UBO + heLit()
     Compiled out;
+    if (clustered && (backend == Backend::GLSL410 || backend == Backend::GLSLES300))
+    {
+        // No SSBOs below GL 4.3 / in ES 3.0. Refuse loudly: handing back the
+        // window variant would let a caller asking for the wrong GL target
+        // "work" without ever noticing it never clusters.
+        out.log = "fragmentClustered: the clustered variant needs SSBOs; "
+                  "GLSL410/GLSLES300 have none (GL 4.3+ uses Backend::GLSL430)";
+        return m_fragCache.emplace(key, std::move(out)).first->second;
+    }
+    const std::string injected = injectPreamble(glsl, clustered); // adds the lighting UBO + heLit()
     if (backend == Backend::Metal)
     {
         // ── Fragment sampler budget ──────────────────────────────────────────
@@ -2332,7 +2485,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
         // SceneUniforms occupies fragment buffer 0 in the scene pass), and the material
         // texture (set 0, binding 2 in canonical GLSL) to texture/sampler 0 — the slot the
         // geometry loop already binds per draw (material/mesh texture + linear sampler).
-        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
+        std::vector<MslPin> pins =
             { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
               { Stage::Fragment, 0, 2, 0 },     // legacy/mesh texture → texture/sampler 0
               { Stage::Fragment, 0, 3, 2 },     // HeParams UBO → fragment buffer 2
@@ -2395,8 +2548,18 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // uses an inline constexpr sampler (kMaterialMslOptions below), so
               // the sampler budget stays untouched. Per-frame bind shared with
               // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
-              { Stage::Fragment, 0, 33, 16 } },
-            kMaterialMslOptions()));
+              { Stage::Fragment, 0, 33, 16 } };
+        // Clustered variant: the three light lists are BUFFERS, so the sampler
+        // budget above is untouched. Fragment buffers 4/5/6 — free in the scene
+        // pass (fragmentMain reads 0 and 3), and the slots the clustered
+        // deferred resolve already uses for the same three lists.
+        if (clustered)
+        {
+            pins.push_back({ Stage::Fragment, 0, 24, static_cast<uint32_t>(kMetalClusterLightsBufferIndex) });
+            pins.push_back({ Stage::Fragment, 0, 25, static_cast<uint32_t>(kMetalClusterGridBufferIndex) });
+            pins.push_back({ Stage::Fragment, 0, 26, static_cast<uint32_t>(kMetalClusterIndexBufferIndex) });
+        }
+        out = toCompiled(compileMslPinned(injected, Stage::Fragment, pins, kMaterialMslOptions()));
     }
     else if (backend == Backend::HLSL)
     {
@@ -2482,7 +2645,32 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
             { Stage::Fragment, 0, 32, 32,  9 }, // heGIReflFwd    → s9
             { Stage::Fragment, 0, 33, 33, 14 }, // heCloudShadow  → s14
         };
-        out = toCompiled(compileHlslPinned(injected, Stage::Fragment, kHlslMaterialPins));
+        // Clustered variant: three SRVs and NO sampler, so the table above is
+        // untouched. Pinned to their binding numbers (what SPIRV-Cross would
+        // pick anyway) to make the contract explicit: t24 lights, t25 grid,
+        // t26 index list. SPIRV-Cross emits a readonly std430 block as
+        // ByteAddressBuffer, not StructuredBuffer — D3D11 must bind RAW views
+        // (D3D11_BUFFEREX_SRV_FLAG_RAW); the built-in shader's structured
+        // t18..t20 cannot be reused as they are. D3D12 root SRVs take either.
+        std::vector<he::shaderc::HlslPin> pins = kHlslMaterialPins;
+        if (clustered)
+        {
+            pins.push_back({ Stage::Fragment, 0, 24, 24 }); // HeClusterLights → t24
+            pins.push_back({ Stage::Fragment, 0, 25, 25 }); // HeClusterGrid   → t25
+            pins.push_back({ Stage::Fragment, 0, 26, 26 }); // HeClusterIdx    → t26
+        }
+        out = toCompiled(compileHlslPinned(injected, Stage::Fragment, pins));
+    }
+    else if (backend == Backend::GLSL430 && clustered)
+    {
+        // GL 4.3: the three lists move down to SSBO bindings 4/5/6 — 24..26
+        // would be a compile error on a driver at GL 4.3's guaranteed 8
+        // bindings. Uniform blocks and samplers lose their binding (the GL
+        // renderer binds them by name, exactly as for GLSL410).
+        out = toCompiled(compileGlslPinned(injected, Stage::Fragment,
+            { { Stage::Fragment, 0, 24, static_cast<uint32_t>(kGlClusterLightsSsboBinding) },
+              { Stage::Fragment, 0, 25, static_cast<uint32_t>(kGlClusterGridSsboBinding) },
+              { Stage::Fragment, 0, 26, static_cast<uint32_t>(kGlClusterIndexSsboBinding) } }));
     }
     else
     {

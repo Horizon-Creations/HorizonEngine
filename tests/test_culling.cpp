@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -1333,6 +1334,53 @@ TEST_CASE("BuildClusterLights: scatter, window split, mask channels and caps are
 		CHECK_FALSE(lower);
 	}
 
+	SUBCASE("bottomLeftOrigin (OpenGL gl_FragCoord) mirrors the rows and nothing else")
+	{
+		rw.lights = { local(glm::vec3(2.0f, 3.0f, -10.0f), 1.0f) };
+		const HE::ClusterLightBuild top = HE::BuildClusterLights(rw, false, false);
+		const HE::ClusterLightBuild gl  = HE::BuildClusterLights(rw, false, false, /*bottomLeftOrigin=*/true);
+		REQUIRE(top.lightCount == 1);
+		REQUIRE(gl.lightCount == 1);
+		CHECK(gl.lights == top.lights);
+		CHECK(gl.params == top.params);
+		CHECK(gl.camFwd == top.camFwd);
+		// Above the centre: upper rows top-left, lower rows bottom-left — and
+		// exactly the mirrored cell set (same columns, same slices).
+		int touched = 0;
+		for (int z = 0; z < HE::kClusterGridZ; ++z)
+			for (int y = 0; y < HE::kClusterGridY; ++y)
+				for (int x = 0; x < HE::kClusterGridX; ++x)
+				{
+					const bool t = inCell(top, x, y, z, 0);
+					CHECK(t == inCell(gl, x, HE::kClusterGridY - 1 - y, z, 0));
+					if (t) { ++touched; CHECK(y < HE::kClusterGridY / 2); }
+				}
+		CHECK(touched > 0);
+	}
+
+	SUBCASE("FillMaterialClusterParams hands over the gate and the grid, nothing else")
+	{
+		rw.lights = { local(glm::vec3(0.0f, 0.0f, -10.0f), 1.0f) };
+		const HE::ClusterLightBuild b = HE::BuildClusterLights(rw, false, false);
+		HE::MaterialShaderLibrary::Lighting ml;
+		HE::FillMaterialLightWindow(rw, ml, false);
+		const HE::MaterialShaderLibrary::Lighting window = ml;
+		CHECK(ml.clusterParams[0] == 0.0f);                       // default: gate off
+		HE::FillMaterialClusterParams(b, ml);
+		for (int c = 0; c < 4; ++c)
+		{
+			CHECK(ml.clusterParams[c] == b.params[c]);
+			CHECK(ml.clusterCamFwd[c] == b.camFwd[c]);
+		}
+		CHECK(ml.clusterParams[0] > 0.5f);                        // the shader's gate test
+		// The window is untouched: a plain material reading the same block
+		// still sees its point light (the clustered variant skips it itself).
+		CHECK(ml.counts[0] == window.counts[0]);
+		CHECK(ml.counts[0] == doctest::Approx(1.0f));
+		CHECK(std::memcmp(ml.lightPos, window.lightPos, sizeof(ml.lightPos)) == 0);
+		CHECK(std::memcmp(ml.lightParams, window.lightParams, sizeof(ml.lightParams)) == 0);
+	}
+
 	SUBCASE("directional lights stay in the window; local lights leave it; lights behind the camera vanish")
 	{
 		LightData dir; dir.type = 0; dir.intensity = 2.0f; dir.direction = glm::vec3(0.0f, -1.0f, 0.0f);
@@ -2185,6 +2233,74 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		for (const auto& [file, text] : files)
 			CHECK_MESSAGE(text.find("max(perceptualRough, sqrt(sqrt(widened)))") != std::string::npos,
 			              file, " lost the never-sharpen clamp");
+	}
+}
+
+TEST_CASE("Clustered lighting: heLitP's forward twin matches the deferred resolve's (Thema 117)")
+{
+	// MaterialShaderLibrary.cpp carries the cluster shading twice: the clustered
+	// deferred resolve (heClusterShadow + heClusterLighting, Metal, verified on
+	// hardware) and the forward HE_CLUSTERED block of kLightingPreamble
+	// (heFwdClusterShadow + heFwdClusterLights, what fragmentClustered compiles
+	// for every graph material). They must shade a cluster light identically.
+	// Documented differences, normalised away before the compare: the forward
+	// twin samples with textureLod(…, 0.0) (FXC rejects gradient samples in the
+	// per-pixel-length loop; the atlas and the mask have one mip), reads the grid
+	// from heLight instead of heResolve, and calls its own shadow function.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("MaterialShaderLibrary.cpp not found - drift comparison skipped");
+		return;
+	}
+	const std::string src = stripLineComments(
+		readFile(root / "src" / "HE_Rendering" / "src" / "material" / "MaterialShaderLibrary.cpp"));
+	REQUIRE_FALSE(src.empty());
+
+	// Text from `from` (searched at/after `after`) through the next "\n}\n".
+	auto cut = [&](const std::string& after, const std::string& from) -> std::string {
+		const size_t a = src.find(after);
+		REQUIRE_MESSAGE(a != std::string::npos, "anchor not found: ", after);
+		const size_t b = src.find(from, a);
+		REQUIRE_MESSAGE(b != std::string::npos, "block not found: ", from);
+		const size_t e = src.find("\n}\n", b);
+		REQUIRE(e != std::string::npos);
+		return src.substr(b, e + 3 - b);
+	};
+	auto replaceAll = [](std::string s, const std::string& what, const std::string& with) {
+		for (size_t p = s.find(what); p != std::string::npos; p = s.find(what, p + with.size()))
+			s.replace(p, what.size(), with);
+		return s;
+	};
+
+	SUBCASE("atlas shadow")
+	{
+		const std::string sig = "(vec4 posType, vec4 params, vec3 worldPos, vec3 n) {";
+		std::string fwd = cut("float heFwdClusterShadow" + sig, "    int base");
+		const std::string res = cut("float heClusterShadow" + sig, "    int base");
+		CHECK(fwd.find("textureLod(heLocalShadow") != std::string::npos);
+		fwd = replaceAll(fwd, "textureLod(heLocalShadow", "texture(heLocalShadow");
+		fwd = replaceAll(fwd, ", float(layer)), 0.0).r", ", float(layer))).r");
+		CHECK(fwd == res);
+	}
+	SUBCASE("cell pick and per-light loop")
+	{
+		std::string fwd = cut("vec3 heFwdClusterLights(", "    float nearZ");
+		std::string res = cut("vec3 heClusterLighting(",  "    float nearZ");
+		CHECK(fwd.find("textureLod(heGILocal, uv, 0.0)") != std::string::npos);
+		fwd = replaceAll(fwd, "textureLod(heGILocal, uv, 0.0)", "texture(heGILocal, uv)");
+		fwd = replaceAll(fwd, "heFwdClusterShadow(", "heClusterShadow(");
+		res = replaceAll(res, "heResolve.cluster", "heLight.cluster");
+		CHECK(fwd == res);
+	}
+	SUBCASE("heLitP skips the window's point/spot lights exactly when it adds the cluster's")
+	{
+		const std::string litp = cut("vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos,",
+		                             "    if (heLight.viewMode.x");
+		CHECK(litp.find("bool heClustered = heLight.clusterParams.x > 0.5;") != std::string::npos);
+		CHECK(litp.find("if (heClustered && type != 0) continue;") != std::string::npos);
+		CHECK(litp.find("if (heClustered)\n        result += heFwdClusterLights(") != std::string::npos);
 	}
 }
 
