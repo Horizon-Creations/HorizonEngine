@@ -55,6 +55,23 @@ in that run, so `PreConstruct → Branch(Is Design Time)` gives the designer
 placeholder data and the game the real thing. What the run sets is shown, never
 saved: Details, undo and the saved asset keep the authored values.
 
+**Expose on Spawn.** Tick **Expose on Spawn** on a public variable of a widget
+and every Create Widget of that widget gets an input for it, named and typed
+like the variable, in declaration order. A wired input, or one with a value
+typed on it, is set on the new widget after its variables are seeded and
+**before** its PreConstruct, so a PreConstruct that writes `"Score: " + score`
+shows the creator's score in the first frame; Construct sees it too. An input
+left alone shows the variable's default; Vector/Color/Object/Struct/container
+inputs have no field on the node and only count when wired, otherwise the
+widget keeps its own default. A PreConstruct that sets the same variable
+overwrites the value handed in. The inputs follow the widget: renaming or
+reordering its variables moves the wires along, removing one drops its wire.
+At run time only "public" is checked (like Set (Ref)); a name the widget has
+made private or renamed since the caller was last opened in the editor is
+skipped with a warning. Lua, Python and `widget.create` hand in no values.
+Embedded widgets and list rows do not get per-instance values. Design:
+`docs/widget-pre-construct-design.md` §6.
+
 An Entity class is attached through the ordinary **Script** component — the same
 slot that carries a `.lua`/`.py` script; the engine branches on the referenced
 asset's type. There is no separate "HorizonCode component". The instance and the
@@ -211,7 +228,7 @@ what a container can and cannot nest with.
 ### Widgets
 | Node | Purpose |
 |------|---------|
-| **Create Widget** (`CreateWidget`) | Instantiate a UI Widget asset (picked from a list in Details) → Widget, a `Ref`. |
+| **Create Widget** (`CreateWidget`) | Instantiate a UI Widget asset (picked from a list in Details) → Widget, a `Ref`. One input per variable the widget ticks **Expose on Spawn**, set before its PreConstruct (§1 *Expose on Spawn*). |
 | **Show Widget** / **Hide Widget** / **Destroy Widget** | Act on that Widget. |
 | **Show Self** / **Hide Self** | A widget graph shows/hides its own widget. |
 
