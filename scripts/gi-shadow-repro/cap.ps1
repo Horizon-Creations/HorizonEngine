@@ -26,8 +26,10 @@ $env:HE_COLLAB_OFFLINE = '1'; $env:HE_NET_LOOPBACK_ONLY = '1'
 $env:HE_DUMP_PATH = "$out\$Name.bmp"; $env:HE_DUMP_QUIT = '1'
 $env:HE_DUMP_RHI = $Rhi; $env:HE_DUMP_FRAMES = "$Frames"; $env:HE_DUMP_GI = "$Gi"
 $env:HE_DUMP_SHADOWINSTTEST = '1'; $env:HE_DUMP_SKYTEST = '1'
-$env:HE_DUMP_TOD = '0.35'; $env:HE_DUMP_PITCH = '-18'; $env:HE_DUMP_CAMY = '5'
-$env:HE_DUMP_CAMX = '0'; $env:HE_DUMP_CAMZ = '0'; $env:HE_DUMP_CLOUDMODE = '0'; $env:HE_DUMP_CLOUDSHADOWS = '0'
+# Camera of every number in the analysis doc (looks down onto the shadow row). The
+# first version of this script carried -18/5/0/0 here, the captures passed these via -Extra.
+$env:HE_DUMP_TOD = '0.35'; $env:HE_DUMP_PITCH = '-40'; $env:HE_DUMP_CAMY = '3'
+$env:HE_DUMP_CAMX = '-3'; $env:HE_DUMP_CAMZ = '-5'; $env:HE_DUMP_CLOUDMODE = '0'; $env:HE_DUMP_CLOUDSHADOWS = '0'
 foreach ($k in $Extra.Keys) { Set-Item "env:$k" $Extra[$k] }
 $log = Join-Path $exeDir 'HorizonEngine.log'
 if (Test-Path $log) { Remove-Item $log -Force }

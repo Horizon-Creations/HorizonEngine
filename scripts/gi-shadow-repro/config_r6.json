@@ -1,0 +1,367 @@
+﻿{
+    "CustomConfig": [
+        {
+            "Key": "AASharpness",
+            "Value": 0.3499999940395355
+        },
+        {
+            "Key": "AntiAliasing",
+            "Value": 1
+        },
+        {
+            "Key": "AutosaveEnabled",
+            "Value": true
+        },
+        {
+            "Key": "AutosaveIntervalSec",
+            "Value": 60
+        },
+        {
+            "Key": "BloomEnabled",
+            "Value": true
+        },
+        {
+            "Key": "BloomIntensity",
+            "Value": 0.6000000238418579
+        },
+        {
+            "Key": "BloomThreshold",
+            "Value": 1.0
+        },
+        {
+            "Key": "CbTreeWidth",
+            "Value": -1.0
+        },
+        {
+            "Key": "CollabLanDiscovery",
+            "Value": true
+        },
+        {
+            "Key": "CollabMaxAssetMB",
+            "Value": 64
+        },
+        {
+            "Key": "CollabSyncLargeAssets",
+            "Value": false
+        },
+        {
+            "Key": "ContentBrowserRefreshRate",
+            "Value": 60
+        },
+        {
+            "Key": "DoFAperture",
+            "Value": 2.799999952316284
+        },
+        {
+            "Key": "DoFEnabled",
+            "Value": false
+        },
+        {
+            "Key": "DoFFocusDistance",
+            "Value": 10.0
+        },
+        {
+            "Key": "DoFFocusRange",
+            "Value": 4.0
+        },
+        {
+            "Key": "EditorCamBookmarks",
+            "Value": ""
+        },
+        {
+            "Key": "EditorCamOrtho",
+            "Value": false
+        },
+        {
+            "Key": "EditorCamPitch",
+            "Value": -0.6981317400932312
+        },
+        {
+            "Key": "EditorCamPivot",
+            "Value": 8.699999809265137
+        },
+        {
+            "Key": "EditorCamPosX",
+            "Value": -3.0
+        },
+        {
+            "Key": "EditorCamPosY",
+            "Value": 3.0
+        },
+        {
+            "Key": "EditorCamPosZ",
+            "Value": -5.0
+        },
+        {
+            "Key": "EditorCamValid",
+            "Value": true
+        },
+        {
+            "Key": "EditorCamYaw",
+            "Value": 0.0
+        },
+        {
+            "Key": "EditorCameraSpeed",
+            "Value": 6.0
+        },
+        {
+            "Key": "EditorSoundsMuted",
+            "Value": false
+        },
+        {
+            "Key": "GIIndirectIntensity",
+            "Value": 1.0
+        },
+        {
+            "Key": "GILightRadius",
+            "Value": 6.0
+        },
+        {
+            "Key": "GIReflBlur",
+            "Value": false
+        },
+        {
+            "Key": "GIReflBounces",
+            "Value": 1
+        },
+        {
+            "Key": "GIReflIntensity",
+            "Value": 1.0
+        },
+        {
+            "Key": "GIReflMaxRoughness",
+            "Value": 0.6000000238418579
+        },
+        {
+            "Key": "GIReflQuality",
+            "Value": 1
+        },
+        {
+            "Key": "GIReflectionsEnabled",
+            "Value": false
+        },
+        {
+            "Key": "GamepadStickDeadzone",
+            "Value": 0.15000000596046448
+        },
+        {
+            "Key": "GamepadTriggerDeadzone",
+            "Value": 0.05000000074505806
+        },
+        {
+            "Key": "GlobalIlluminationEnabled",
+            "Value": false
+        },
+        {
+            "Key": "GpuParticles",
+            "Value": true
+        },
+        {
+            "Key": "KeepCPUAssets",
+            "Value": false
+        },
+        {
+            "Key": "KeepCPUAssetsInfoAcknowledged",
+            "Value": false
+        },
+        {
+            "Key": "Keybindings",
+            "Value": ""
+        },
+        {
+            "Key": "MaxFps",
+            "Value": 0.0
+        },
+        {
+            "Key": "McpPort",
+            "Value": 0
+        },
+        {
+            "Key": "McpServerEnabled",
+            "Value": false
+        },
+        {
+            "Key": "MotionBlurEnabled",
+            "Value": false
+        },
+        {
+            "Key": "MotionBlurIntensity",
+            "Value": 0.5
+        },
+        {
+            "Key": "MotionBlurMax",
+            "Value": 24.0
+        },
+        {
+            "Key": "OcclusionCulling",
+            "Value": false
+        },
+        {
+            "Key": "PointerInput",
+            "Value": 0
+        },
+        {
+            "Key": "QuickSettingsFavorites",
+            "Value": "backend,vsync,grid,bloom,ssao"
+        },
+        {
+            "Key": "RenderPath",
+            "Value": 0
+        },
+        {
+            "Key": "RenderScale",
+            "Value": 1.0
+        },
+        {
+            "Key": "RewardsCheckMark",
+            "Value": true
+        },
+        {
+            "Key": "RewardsCounterTick",
+            "Value": true
+        },
+        {
+            "Key": "RewardsEnabled",
+            "Value": true
+        },
+        {
+            "Key": "RewardsImportHighlight",
+            "Value": true
+        },
+        {
+            "Key": "RewardsLightEdge",
+            "Value": true
+        },
+        {
+            "Key": "RewardsReducedMotion",
+            "Value": 0
+        },
+        {
+            "Key": "RewardsShowProgress",
+            "Value": true
+        },
+        {
+            "Key": "RewardsSound",
+            "Value": false
+        },
+        {
+            "Key": "RewardsSoundBuild",
+            "Value": true
+        },
+        {
+            "Key": "RewardsSoundBuildFailed",
+            "Value": true
+        },
+        {
+            "Key": "RewardsSoundImport",
+            "Value": true
+        },
+        {
+            "Key": "RewardsSoundSave",
+            "Value": true
+        },
+        {
+            "Key": "RewardsStreakTooltip",
+            "Value": true
+        },
+        {
+            "Key": "RewardsTabCheck",
+            "Value": true
+        },
+        {
+            "Key": "RewardsVisual",
+            "Value": true
+        },
+        {
+            "Key": "RewardsVolume",
+            "Value": 0.5
+        },
+        {
+            "Key": "SSAOEnabled",
+            "Value": true
+        },
+        {
+            "Key": "SSAOIntensity",
+            "Value": 1.0
+        },
+        {
+            "Key": "SSAOMethod",
+            "Value": 0
+        },
+        {
+            "Key": "SSAORadius",
+            "Value": 0.5
+        },
+        {
+            "Key": "SSREnabled",
+            "Value": false
+        },
+        {
+            "Key": "SSRIntensity",
+            "Value": 1.0
+        },
+        {
+            "Key": "SSRMaxRoughness",
+            "Value": 0.6000000238418579
+        },
+        {
+            "Key": "SSRQuality",
+            "Value": 1
+        },
+        {
+            "Key": "SpecularAA",
+            "Value": true
+        },
+        {
+            "Key": "SpecularAAStrength",
+            "Value": 1.0
+        },
+        {
+            "Key": "UiFontScale",
+            "Value": 1.0
+        },
+        {
+            "Key": "ViewportGroundGrid",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowCollaborators",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowColliders",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowEditorIcons",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowGuides",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowJoints",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowNavMesh",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowScriptDebug",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowSelection",
+            "Value": true
+        },
+        {
+            "Key": "ViewportShowStats",
+            "Value": false
+        }
+    ],
+    "KnownProjects": [],
+    "LastProjectPath": "",
+    "RHI": 0
+}

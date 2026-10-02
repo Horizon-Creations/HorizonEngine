@@ -7178,6 +7178,36 @@ void EditorApplication::dumpFrameHeadless()
 			 + " deg for the captured frame").c_str());
 		settleFrames = 1;
 	}
+	// HE_DUMP_TODSTEP (day fraction, with HE_DUMP_SKYTEST): the OCCLUDER-motion
+	// witness for the GI shadow mask's temporal clamp (Thema 131). Same shape
+	// as the yaw step: the settle frames run with the sun at TOD - step and only
+	// the end at the real TOD — one sudden step of sun motion, so every shadow
+	// edge moves over a static receiver, the reprojection check passes,
+	// and only the neighbourhood clamp keeps the old edge from ghosting.
+	// Compare the capture against a static one at the same TOD. TWO frames run
+	// at the real TOD, not one: Vulkan's runGi() extracts the scene before
+	// DrawScene() feeds the extractor this frame's day-night state, so the GI
+	// mask sees a sun change one frame late — a one-frame capture would show the
+	// old shadow on every backend variant alike and measure nothing.
+	if (const float todStep = mbEnvF("HE_DUMP_TODSTEP"); todStep != 0.0f && m_editorWorld)
+	{
+		const Entity envEntity = m_editorWorld->environmentEntity();
+		if (auto* env = envEntity == entt::null
+		                    ? nullptr : m_editorWorld->registry().try_get<EnvironmentComponent>(envEntity))
+		{
+			const float tod = env->timeOfDay;
+			env->timeOfDay = tod - todStep;
+			pushEnvironment(0.0f);
+			for (int i = 0; i < settleFrames; ++i)
+				r->Render();
+			env->timeOfDay = tod;
+			pushEnvironment(0.0f);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_TODSTEP moved the sun by " + std::to_string(todStep)
+				 + " of a day for the last two frames").c_str());
+			settleFrames = 2;
+		}
+	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
 	// probe-grid refit witness. Halfway through the settle frames a second
 	// landscape appears beside the first, so the scene box leaves the fitted

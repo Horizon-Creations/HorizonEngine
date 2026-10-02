@@ -1936,11 +1936,11 @@ inline void checkGroup(const std::vector<const char*>& names,
 			                                                         : c.patterns[i]));
 		// Empty means the pattern stopped matching everywhere — the code moved, and
 		// the guard would silently pass. That is a failure too.
-		CHECK_MESSAGE(!vals[0].empty(), "no match for '", c.name, "' in ", names[0],
+		CHECK_MESSAGE(!vals[0].empty(), "no match for '", std::string(c.name), "' in ", std::string(names[0]),
 		              " - the drift guard's pattern is stale");
 		for (size_t i = 1; i < vals.size(); ++i)
-			CHECK_MESSAGE(vals[i] == vals[0], c.name, " drifted: ", names[0], " has '",
-			              vals[0], "', ", names[i], " has '", vals[i], "'");
+			CHECK_MESSAGE(vals[i] == vals[0], std::string(c.name), " drifted: ", std::string(names[0]), " has '",
+			              vals[0], "', ", std::string(names[i]), " has '", vals[i], "'");
 	}
 }
 
@@ -1992,10 +1992,95 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "sun ray tMin/tMax",    { R"(giSceneAnyHit\(origin, dir, ([0-9.]+), ([0-9.]+)\))" } },
 			{ "local-light skip",     { R"(distL <= ([0-9.]+)\))" } },
 			{ "local ray tMin/slack", { R"(dirL, ([0-9.]+), max\(distL - ([0-9.]+), ([0-9.]+)\)\))" } },
-			{ "cone jitter hash",     { R"(sin\(dot\(p, \w*2\(([0-9.]+), ([0-9.]+)\)\)\) \* ([0-9.]+)\))" } },
+			{ "cone jitter hash",     { R"(v = v \* (\d+)u \+ (\d+)u;[\s\S]*?v \^= v >> (\d+)u;[\s\S]*?h\.xy >> (\d+)u\) \* \(1\.0 / ([0-9.]+)\))" } },
 			{ "workgroup size",       { R"(local_size_x = (\d+), local_size_y = (\d+))",
 			                            R"(local_size_x = (\d+), local_size_y = (\d+))",
 			                            R"(numthreads\((\d+), (\d+), 1\))" } },
+		});
+	}
+
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+
+	SUBCASE("cone-jitter hash: every copy, the embedded ones included")
+	{
+		// Thema 131: the old fract(sin(seed * 13.37 ...)) hash went constant once the
+		// never-reset float seed passed ~1e5 — the penumbra vanished after minutes of
+		// editor time, on whichever copy still had it. Every giHash2/giHash2R
+		// definition (shadow AND reflection kernels) must be the integer PCG3D offset
+		// plus the R2 frame step, with the same constants, including the copies living in C++ string literals,
+		// which the subcase above cannot reach.
+		const std::vector<std::pair<const char*, fs::path>> files = {
+			{ "gi_shadow.comp",     sh / "gi_shadow.comp" },
+			{ "gi_shadow_hw.comp",  sh / "gi_shadow_hw.comp" },
+			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl" },
+			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h" },
+			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp" },
+			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm" },
+		};
+		const char* kDef  = R"(\w+2 giHash2R? *\(\w+2 gid, float seed\))";
+		const char* kHash = R"(\w+2 giHash2R? *\(\w+2 gid, float seed\)\s*\{\s*\w+3 h = giPcg3dR?\(\w+3\(gid, 0u\)\);\s*)"
+		                    R"(return frac(?:t)?\(\w+2\(h\.xy >> (\d+)u\) \* \(1\.0 / ([0-9.]+)\) \+ seed \* \w+2\(([0-9.]+), ([0-9.]+)\)\);\s*\})";
+		const char* kPcg  = R"(\w+3 giPcg3dR?\(\w+3 v\)\s*\{\s*v = v \* (\d+)u \+ (\d+)u;\s*)"
+		                    R"(v\.x \+= v\.y \* v\.z; v\.y \+= v\.z \* v\.x; v\.z \+= v\.x \* v\.y;\s*v \^= v >> (\d+)u;\s*)"
+		                    R"(v\.x \+= v\.y \* v\.z; v\.y \+= v\.z \* v\.x; v\.z \+= v\.x \* v\.y;\s*return v;\s*\})";
+		// One canonical capture string per match, so a file holding three copies is
+		// checked three times.
+		auto perMatch = [](const std::string& text, const char* pattern)
+		{
+			const std::regex re(pattern);
+			std::vector<std::string> out;
+			for (auto it = std::sregex_iterator(text.begin(), text.end(), re); it != std::sregex_iterator(); ++it)
+			{
+				std::string joined;
+				for (size_t g = 1; g < it->size(); ++g) joined += (g > 1 ? " | " : "") + (*it)[g].str();
+				out.push_back(canonicalise(joined));
+			}
+			return out;
+		};
+		std::string refHash, refPcg;
+		for (const auto& [fileName, path] : files)
+		{
+			const std::string name = fileName; // doctest prints a bare const char* as a bool
+			const std::string s = stripLineComments(readFile(path));
+			const size_t defs = perMatch(s, kDef).size();
+			const std::vector<std::string> hashes = perMatch(s, kHash), pcgs = perMatch(s, kPcg);
+			CHECK_MESSAGE(defs > 0, "no giHash2 definition in ", name, " - the drift guard's pattern is stale");
+			CHECK_MESSAGE(hashes.size() == defs, name, " has ", defs, " giHash2 definitions but ",
+			              hashes.size(), " of them use the integer PCG hash");
+			CHECK_MESSAGE(pcgs.size() == defs, name, " has ", defs, " giHash2 definitions but ",
+			              pcgs.size(), " giPcg3d bodies");
+			for (const std::string& h : hashes)
+			{
+				if (refHash.empty()) refHash = h;
+				CHECK_MESSAGE(h == refHash, "giHash2 drifted in ", name, ": '", h, "' vs '", refHash, "'");
+			}
+			for (const std::string& p : pcgs)
+			{
+				if (refPcg.empty()) refPcg = p;
+				CHECK_MESSAGE(p == refPcg, "giPcg3d drifted in ", name, ": '", p, "' vs '", refPcg, "'");
+			}
+		}
+	}
+
+	SUBCASE("shadow temporal pass: history tolerance and neighbourhood clamp")
+	{
+		// Thema 131 §3 A/C: the clamp box is the range of 3x3 raw MEANS over a 5x5
+		// footprint plus a slack, and the reprojection tolerance follows one texel's
+		// world footprint. Four hand-kept copies; one drifting brings back the torn,
+		// crawling GI shadow edge on exactly that backend.
+		const std::vector<const char*> names = { "gi_temporal.frag", "HlslSources.h",
+		                                         "OpenGLRenderer.cpp", "MetalRenderer.mm" };
+		const std::vector<std::string> src = {
+			stripLineComments(readFile(sh / "gi_temporal.frag")),
+			stripLineComments(readFile(be / "D3D_Shared" / "HlslSources.h")),
+			stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")),
+			stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")),
+		};
+		checkGroup(names, src, {
+			{ "history tolerance", { R"(tolerance = max\(clamp\(([0-9.]+) \* clip\.w, ([0-9.]+), ([0-9.]+)\), min\(footprint, ([0-9.]+)\)\))" } },
+			{ "clamp footprint",   { R"(float r5\[(\d+)\];)" } },
+			{ "clamp box mean",    { R"(nMin = min\(nMin, s / ([0-9.]+)\);)" } },
+			{ "clamp slack",       { R"(clamp\(hist\.a, nMin - ([0-9.]+), nMax \+ ([0-9.]+)\))" } },
 		});
 	}
 

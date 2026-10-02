@@ -3,6 +3,7 @@
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
+#include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
@@ -2059,26 +2060,46 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	// original version of this check used up to ~0.5 units at typical test
 	// distances, comparable to the whole object) accepted exactly that case as
 	// "close enough". Capped in the few-centimetre range regardless of depth.
+	// The few-cm cap above is the floor; where one texel's world footprint is
+	// larger, the tolerance follows it — the point-sampled history texel can sit
+	// up to ~0.7 texel from the exact reprojected spot, so a tighter test threw
+	// the history away on plain camera motion (Thema 131 §3 C). Footprint per
+	// axis = the SMALLER one-sided G-buffer step (the other side may be another
+	// surface), capped so a 1-texel sliver cannot open it up.
+	const float2 texel = 1.0 / float2(raw.get_width(), raw.get_height()); // gPos has the same size
+	const float3 gxp = gPos.sample(smp, in.uv + float2(texel.x, 0.0)).xyz, gxm = gPos.sample(smp, in.uv - float2(texel.x, 0.0)).xyz;
+	const float3 gyp = gPos.sample(smp, in.uv + float2(0.0, texel.y)).xyz, gym = gPos.sample(smp, in.uv - float2(0.0, texel.y)).xyz;
+	const float footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+	                            min(length(gyp - pv.xyz), length(gym - pv.xyz)));
 	const float posError = length(pv.xyz - hist.rgb);
-	const float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
+	const float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
 	const float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
 	// Neighbourhood clamp: the position check above only guards RECEIVER
 	// motion — when the OCCLUDER moves, the receiving surface is unchanged and
 	// stale history blends in at 0.9, smearing the old shadow across the floor
-	// for ~30 frames. Clamping history to the current frame's 3x3 raw
-	// neighbourhood bounds it by present reality: a moved shadow edge updates
-	// within 1-2 frames, while static-noise smoothing is unaffected (the
-	// neighbourhood spans the jitter noise range anyway).
-	const float2 texel = 1.0 / float2(raw.get_width(), raw.get_height());
-	float nMin = rawV, nMax = rawV;
-	for (int x = -1; x <= 1; ++x)
-		for (int y = -1; y <= 1; ++y)
+	// for ~30 frames. Clamping history to the current frame's neighbourhood
+	// bounds it by present reality: a moved shadow edge updates within 1-2
+	// frames. The box is the range of the 3x3 MEANS of raw over a 5x5
+	// footprint, widened by 0.1 — NOT raw min/max: raw is one binary ray per
+	// pixel, so inside a penumbra a 3x3 of raw taps is all-0 or all-1 by chance
+	// every few frames, and clamping to that reset the history to 0/1 over and
+	// over (the torn, crawling edge of Thema 131).
+	float r5[25];
+	for (int y = 0; y < 5; ++y)
+		for (int x = 0; x < 5; ++x)
+			r5[y * 5 + x] = raw.sample(smp, in.uv + float2(float(x - 2), float(y - 2)) * texel).r;
+	float nMin = 1.0, nMax = 0.0;
+	for (int cy = 1; cy <= 3; ++cy)
+		for (int cx = 1; cx <= 3; ++cx)
 		{
-			const float r = raw.sample(smp, in.uv + float2(float(x), float(y)) * texel).r;
-			nMin = min(nMin, r);
-			nMax = max(nMax, r);
+			float s = 0.0;
+			for (int y = -1; y <= 1; ++y)
+				for (int x = -1; x <= 1; ++x)
+					s += r5[(cy + y) * 5 + cx + x];
+			nMin = min(nMin, s / 9.0);
+			nMax = max(nMax, s / 9.0);
 		}
-	float result = mix(rawV, clamp(hist.a, nMin, nMax), w);
+	float result = mix(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w);
 	return float4(pv.xyz, result);
 }
 
@@ -2111,14 +2132,27 @@ struct GIShadowParams {
 	float4 extra;            // x = local light count
 };
 
-// Interleaved-gradient-noise-style hash → two independent [0,1) values per
-// pixel/frame, so successive frames sample different points in the light cone
-// (the temporal pass turns this into a soft penumbra without more rays/pixel).
+// Two independent [0,1) values per pixel/frame, so successive frames sample
+// different points in the light cone (the temporal pass turns this into a soft
+// penumbra without more rays/pixel).
+// Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
+// (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
+// pixel walks the light disk evenly over the frames the temporal pass averages.
+// The host wraps the frame index to [0, 1024) (GIJitter.h), so seed stays small
+// and exact. The old fract(sin(seed * ...)) hash went constant once the never-
+// reset float seed passed ~1e5 (Thema 131) - keep every copy on this one.
+static uint3 giPcg3d(uint3 v)
+{
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	v ^= v >> 16u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	return v;
+}
 static float2 giHash2(uint2 gid, float seed)
 {
-	float2 p = float2(gid) + seed * 13.37;
-	return float2(fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
-	              fract(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+	uint3 h = giPcg3d(uint3(gid, 0u));
+	return fract(float2(h.xy >> 8u) * (1.0 / 16777216.0) + seed * float2(0.7548776662, 0.5698402910));
 }
 // Uniform disk sample mapped into a cone around L (small-angle approximation —
 // fine for the sun's ~0.25-3° angular radius this drives).
@@ -2559,11 +2593,24 @@ static float2 octEncodeR(float3 n)
 
 // Per-pixel/per-frame hash + cone sample for the quality-2 glossy jitter —
 // same constructions as the GI shadow kernel (giHash2/giConeSample copies).
+// Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
+// (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
+// pixel walks the light disk evenly over the frames the temporal pass averages.
+// The host wraps the frame index to [0, 1024) (GIJitter.h), so seed stays small
+// and exact. The old fract(sin(seed * ...)) hash went constant once the never-
+// reset float seed passed ~1e5 (Thema 131) - keep every copy on this one.
+static uint3 giPcg3dR(uint3 v)
+{
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	v ^= v >> 16u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	return v;
+}
 static float2 giHash2R(uint2 gid, float seed)
 {
-	float2 p = float2(gid) + seed * 13.37;
-	return float2(fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
-	              fract(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+	uint3 h = giPcg3dR(uint3(gid, 0u));
+	return fract(float2(h.xy >> 8u) * (1.0 / 16777216.0) + seed * float2(0.7548776662, 0.5698402910));
 }
 static float3 giConeSampleR(float3 L, float angleRad, float2 xi)
 {
@@ -2691,7 +2738,8 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 		float3 rayDir = R;
 		if (coneW > 1e-3)
 		{
-			const float2 xi = giHash2R(gid, P.sunColor.w + float(sIdx) * 7.13);
+			// + sIdx * kGIJitterPeriod (GIJitter.h): one integer stream per sample.
+			const float2 xi = giHash2R(gid, P.sunColor.w + float(sIdx) * 1024.0);
 			const float2 st = float2((float(sIdx) + xi.x) / float(rays), xi.y);
 			const float3 jit = giConeSampleR(R, coneW, st);
 			if (dot(jit, N) > 0.0) rayDir = jit; // keep the sample above the surface
@@ -3049,11 +3097,24 @@ struct GIShadowParams {
 	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
 	float4 extra;            // x = local light count
 };
+// Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
+// (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
+// pixel walks the light disk evenly over the frames the temporal pass averages.
+// The host wraps the frame index to [0, 1024) (GIJitter.h), so seed stays small
+// and exact. The old fract(sin(seed * ...)) hash went constant once the never-
+// reset float seed passed ~1e5 (Thema 131) - keep every copy on this one.
+static uint3 giPcg3d(uint3 v)
+{
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	v ^= v >> 16u;
+	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+	return v;
+}
 static float2 giHash2(uint2 gid, float seed)
 {
-	float2 p = float2(gid) + seed * 13.37;
-	return float2(fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
-	              fract(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+	uint3 h = giPcg3d(uint3(gid, 0u));
+	return fract(float2(h.xy >> 8u) * (1.0 / 16777216.0) + seed * float2(0.7548776662, 0.5698402910));
 }
 static float3 giConeSample(float3 L, float angleRad, float2 xi)
 {
@@ -3461,7 +3522,8 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 		float3 rayDir = R;
 		if (coneW > 1e-3)
 		{
-			const float2 xi = giHash2(gid, P.sunColor.w + float(sIdx) * 7.13);
+			// + sIdx * kGIJitterPeriod (GIJitter.h): one integer stream per sample.
+			const float2 xi = giHash2(gid, P.sunColor.w + float(sIdx) * 1024.0);
 			const float2 st = float2((float(sIdx) + xi.x) / float(rays), xi.y);
 			const float3 jit = giConeSample(R, coneW, st);
 			if (dot(jit, N) > 0.0) rayDir = jit;
@@ -8255,7 +8317,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		glm::vec3 towardLight, lightColorIntensity;
 		m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
 		sp.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
-		m_giShadowFrameSeed += 1.0f;
+		m_giShadowFrameSeed = HE::NextGIJitterSeed(m_giShadowFrameSeed); // wraps: GIJitter.h
 		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height),
 		                     static_cast<float>(m_giSwInstanceCount));
 		// First 4 local (point/spot) lights of the same 8-light window the scene
@@ -14937,7 +14999,7 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		const int  rays     = m_giReflQuality >= 2 ? 4 : (m_giReflQuality >= 1 ? 2 : 1);
 		const bool jitter   = rays > 1;
 		const bool meshData = m_giHwRt && m_giMeshPtrBuf && m_giInstanceMeshBuf;
-		m_giReflFrameSeed += 1.0f;
+		m_giReflFrameSeed = HE::NextGIJitterSeed(m_giReflFrameSeed); // wraps: GIJitter.h
 
 		GIReflParamsCPU rp{};
 		const glm::mat4 viewProj =

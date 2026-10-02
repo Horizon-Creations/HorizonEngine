@@ -15,6 +15,7 @@
 #include <Types/UUID.h>
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
 #include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
+#include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/D3D12)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
@@ -3423,7 +3424,7 @@ struct D3D11RendererImpl
         {
             glm::vec3 towardLight, lightColorIntensity;
             rw.dominantDirectionalLight(towardLight, lightColorIntensity);
-            giFrameSeed += 1.0f;
+            giFrameSeed = HE::NextGIJitterSeed(giFrameSeed); // wraps: GIJitter.h
             struct { glm::vec4 sunDirRadius, frame, localPosRange[4], localExtra; } scb{};
             scb.sunDirRadius = glm::vec4(towardLight, glm::radians(giLightRadius));
             scb.frame        = glm::vec4(giFrameSeed, float(giShadowW), float(giShadowH), 0.0f);

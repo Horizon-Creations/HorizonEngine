@@ -4,6 +4,7 @@ Stand 02.10.2026, Zweig `claude/gi-schatten-zerrissen-und-instabil-am-rand-auf-d
 (Basis `9ed6f816`). Schritt 1 des Themas 131 „GI-Schatten zerrissen und instabil am Rand auf
 D3D11/D3D12/Vulkan/OpenGL (nicht Metal)". Analyse mit Hardware-Repro, **kein Engine-Code geändert**.
 Gemessen auf NN-WS03 (RTX 4070), Release-Build in einem privaten Baum (`C:/hw131`).
+**Der Fix (Schritt 2) mit Vorher/Nachher-Messung steht in §7.**
 
 ## Kurzfassung
 
@@ -257,3 +258,135 @@ genauso** zeigen. Belegen lässt sich keine Erklärung, möglich sind:
 
 Klären lässt sich das nur auf einem Mac: `scripts/he_shot.py` mit denselben `HE_DUMP_*`-Werten
 und `GILightRadius` 6°, f60/f61, dann dieselben Metriken.
+
+## 7. Fix (Schritt 2)
+
+Stand 02.10.2026, gleicher Zweig, gleicher Messbau (`C:/hw131`, Release, RTX 4070). Alle drei
+Defekte aus §3 sind behoben, in **jeder** Kopie: 7 Shadow-Kernel, 2 Reflexions-Kernel (GL, Metal)
+und 4 Temporal-Pässe. Metal ist textgleich mitgezogen, aber **weder kompiliert noch gemessen**
+(kein Mac an NN-WS03).
+
+### 7.1 Was geändert ist
+
+| Defekt | Änderung | Dateien |
+|---|---|---|
+| A: Clamp auf binärem 1-spp-Signal | Die Clamp-Box ist jetzt die Spanne der **3×3-Mittelwerte** des Rohsignals über einen 5×5-Footprint, erweitert um **0.1**. Bisher war es Min/Max der rohen 3×3-Taps. Eine zufällig einheitliche Nachbarschaft setzt die History so nicht mehr auf 0 oder 1 zurück. Wandert ein Verdecker, greift der Clamp weiterhin (§7.3). | `gi_temporal.frag`, `HlslSources.h` (`kGiTemporalHLSL`), `OpenGLRenderer.cpp` (`kGiTemporalFS`), `MetalRenderer.mm` (`giShadowTemporal`) |
+| B: unbeschränkter float-Seed im `sin`-Hash | (1) Host: Seed läuft in [0, 1024) um, `HE::NextGIJitterSeed` in `HorizonRendering/GIJitter.h`. Das gilt für alle fünf Backends sowie für die Reflexions-Seeds von GL und Metal. (2) Kernel: `giHash2` = Offset pro Pixel aus einem **PCG3D-Integer-Hash** + **R2-Low-Discrepancy-Schritt** pro Frame (`fract(offset + seed·(0.7549, 0.5698))`). Kein `sin` mehr, also kein Kollaps. Jeder Pixel deckt die Sonnenscheibe über die gemittelten Frames gleichmäßig ab. Reflexions-Samples bekommen mit `seed + sIdx·1024` einen eigenen Strom (bisher `+ sIdx·7.13`). | `gi_shadow.comp`, `gi_shadow_hw.comp`, `gi_shadow_hw.hlsl`, `HlslSources.h`, `OpenGLRenderer.cpp` (2×), `MetalRenderer.mm` (3×), die 5 `*Renderer.{cpp,mm}` (Host) |
+| C: Reprojektions-Toleranz zu eng | `tolerance = max(clamp(0.02·w, 0.01, 0.06), min(footprint, 0.5))`. `footprint` ist die Welt-Ausdehnung eines Masken-Texels. Gemessen wird pro Achse der **kleinere** einseitige G-Buffer-Schritt (die andere Seite kann eine andere Fläche sein), genommen wird der größere der beiden Achsen. Der Point-gesampelte History-Texel liegt bis ~0.7 Texel neben der exakten Stelle. Die Toleranz muss also einen Texel abdecken, sonst verwirft schon eine Kameradrehung die History. Die feste Untergrenze von wenigen cm bleibt der Schutz gegen falsche Flächen. | die 4 Temporal-Pässe |
+
+Dazu:
+* **Neuer Dump-Knopf `HE_DUMP_TODSTEP`** (Tagesbruchteil, mit `HE_DUMP_SKYTEST`) als Zeuge für
+  Verdecker-Bewegung. Die Settle-Frames laufen bei `TOD − step`, die letzten **zwei** Frames bei
+  `TOD`. Zwei Frames, weil Vulkans `runGi()` die Szene extrahiert, bevor `DrawScene()` den
+  Day-Night-Zustand des Frames setzt (siehe §7.5).
+* **Drift-Guard** `tests/test_culling.cpp` „GI kernels: …". Der alte „cone jitter hash" hätte nach
+  dem Hash-Tausch ins Leere gegriffen und ist neu formuliert. Zwei neue Subcases kommen dazu:
+  (a) jede `giHash2`/`giHash2R`-Definition in **allen sechs Quelldateien**, also auch in den
+  eingebetteten String-Kopien, muss der PCG+R2-Hash mit identischen Konstanten sein;
+  (b) Toleranz, Footprint, Box-Mittelwert und Slack der vier Temporal-Kopien müssen übereinstimmen.
+  Negativkontrolle: Slack 0.2, Shift 9 und ein zusätzliches `h.x >>= 1u` in **einer** Metal-Kopie
+  liefern drei rote Checks mit Dateinamen.
+  `tests/test_gi_probe_grid.cpp` prüft, dass der Seed umläuft und ganzzahlig bleibt.
+* `cap.ps1`: Die Default-Kamera ist jetzt die der Doku (−3/3/−5, Pitch −40). Die erste Fassung hatte
+  −18/5/0/0, die Captures aus Schritt 1 liefen per `-Extra` mit der Doku-Kamera. Kontrolle: Mit den
+  Original-`.spv` aus Schritt 1 im neuen Build ist das Bild **byte-gleich** zu `vk_r6_ctl_f60`. Dazu
+  kommen die Config-Vorlagen `config_r6.json` / `config_r05.json` und `ana_motion.py` (Ghost-Maß
+  für Verdecker-Bewegung).
+
+Verifikation der Laufzeit-Shader: Der Build-Schritt „Validating runtime-compiled shader strings"
+meldet 105 von 105 grün. Er hat beim ersten Versuch ein `fract` statt `frac` im HLSL gefangen.
+Zusätzlich wurden HLSL-Strings (fxc `cs_5_0`/`ps_5_0`), GL-Strings (glslangValidator) und
+`gi_shadow_hw.hlsl` (dxc `lib_6_5`) einzeln offline kompiliert. In jedem Capture-Log steht
+„GI pipelines built". Die Deploy-Hashes haben sich geändert (`gi_shadow_hw.comp.spv` A42E5FC1,
+`gi_temporal.frag.spv` 766427BA, `gi_shadow.comp.spv` 2E0D9679, `gi_shadow_hw.cso` 5581121F).
+
+### 7.2 Vorher/Nachher, statisch (f60 gegen f61, Kantenband, `GILightRadius` 6°)
+
+„Vorher" = Captures aus Schritt 1 (`C:/hw131/cap/*_r6_f6{0,1}.bmp`), „nachher" = `fin_*`. Gleiche
+Kamera, gleiche Config, frisches APPDATA, gleiches Band (Referenz = Vorher-f60 des Backends).
+
+| Backend | flicker vorher → nachher | p99 vorher → nachher | hf vorher → nachher | L |
+|---|---|---|---|---|
+| Vulkan (HW ray_query) | 1.287 → **1.016** | 8.0 → **4.9** | 1.102 → **0.636** | 167.3 → 169.9 |
+| D3D11 (SW-Compute) | 1.264 → **1.007** | 7.9 → **4.9** | 1.126 → **0.666** | 167.6 → 170.1 |
+| D3D12 (DXR 1.1) | 1.283 → **1.018** | 8.0 → **4.9** | 1.104 → **0.636** | 167.3 → 169.9 |
+| OpenGL 4.3 (SW-Compute) | 1.755 → **1.247** | 12.0 → **6.2** | 1.404 → **0.785** | 179.4 → 184.3 |
+
+Bei **0.5°** (Default) ist das Kantenrauschen schon vorher klein und bleibt es. Vulkan vorher (per
+`.spv`-Tausch) 0.276 / p99 1.9 / hf 3.01, nachher 0.286 / 1.9 / 2.97. D3D11 und D3D12 liegen
+nachher bei 0.288 / 1.9 / 2.97, GL bei 0.334 / 2.0 / 3.94.
+
+![Vorher (links) / nachher (rechts), 6°: je Backend Frame 60 und |f61 − f60| × 10; Reihen Vulkan, D3D11, OpenGL](img/gi-shadow-edge-fix-2026-10-02/vorher-nachher-6grad.png)
+
+Die fleckige, ausgefranste Kante ist weg, die Kante ist glatt. Das Frame-zu-Frame-Rauschen ist
+deutlich kleiner und hat keine hellen Ausreißer mehr, ist aber **nicht null**. 1 spp mit
+History-Gewicht 0.9 (≈ 10 effektive Frames) und 3×3-Blur ergibt eine Untergrenze, die erst mehr
+Strahlen, ein höheres History-Gewicht oder ein besserer Spatial-Filter senken (nicht Teil dieses
+Schritts). L steigt um ~2.5, weil der alte Clamp die Penumbra Richtung „dunkel" verzerrt hat
+(§2.4: doppelter RMS-Fehler gegen die analytische Penumbra).
+
+### 7.3 Varianten-Vergleich (Vulkan, `.spv`-Tausch) und Verdecker-Bewegung
+
+Statisch 6°, plus `HE_DUMP_TODSTEP=0.005` (Sonnensprung um 7.2 min). `ghost` = Anteil des alten
+Schattens, der im überstrichenen Bereich nach einem wirksamen Frame noch steht (`ana_motion.py`;
+0 = sofort am neuen Ort, 1 = unverändert). Reine EMA ohne Clamp liegt bei ≈ 0.9.
+
+| Variante | flicker | p99 | hf | ghost 6° | ghost 0.5° |
+|---|---|---|---|---|---|
+| vorher (alter Hash, alter Clamp) | 1.287 | 8.0 | 1.102 | 0.800 | 0.536 |
+| ohne Clamp (Referenz) | 0.810 | 2.9 | 0.821 | 0.878 | **0.879** |
+| neuer Clamp, Slack 0.05 | 1.376 | 7.3 | 0.807 | – | – |
+| neuer Clamp, Slack 0.1, PCG | 1.083 | 5.3 | 0.802 | 0.780 | 0.557 |
+| neuer Clamp, Slack 0.2, PCG | 0.872 | 3.9 | 0.814 | 0.850 | – |
+| **neuer Clamp, Slack 0.1, PCG + R2 (eingebaut)** | **1.016** | **4.9** | **0.636** | **0.782** | **0.536** |
+
+Der Slack ist der Hebel zwischen Rauschen und Verdecker-Reaktion. Bei **0.1** reagiert der Clamp auf
+eine wandernde Kante so schnell wie der alte (0.78 gegen 0.80 bei 6°, 0.536 gegen 0.536 bei 0.5°).
+Bei 0.5° mit einem größeren Sprung (`TODSTEP` 0.02) sind es 0.130 gegen 0.116, ohne Clamp 0.292.
+Bei 0.2 geht zwei Drittel des Clamp-Nutzens verloren. Also 0.1. R2 senkt das Hochfrequenz-Rauschen
+um weitere 20 %, die Verdecker-Reaktion bleibt gleich. Die naheliegende Option „Clamp ganz weg"
+(p99 2.9) bringt das Verdecker-Ghosting zurück (0.88 statt 0.54 bei 0.5°) und ist deshalb nicht
+gewählt.
+
+Seed am Ende der Periode (Kernel mit `seed + 960`, also Seeds 1020/1021): flicker 0.961 / p99 5.1 /
+hf 0.635 / L 169.9. Das ist dasselbe wie bei Seed 60/61. Vorher kollabierte die Kante bei Seed + 1e5
+(flicker 0.003, hf 2.16, L 157.8, §2.2).
+
+### 7.4 Kamerabewegung (`HE_DUMP_MBYAWSTEP`, Vulkan)
+
+| | p99 (Yaw 0.3°, 6°) | flicker | p99 (Yaw 0.3°, 0.5°) |
+|---|---|---|---|
+| vorher (Schritt 1) | 15.1 | 2.227 | – |
+| neuer Clamp + R2, **alte** Toleranz | 11.0 | 1.810 | 4.1 |
+| neuer Clamp + R2, **neue** Toleranz (eingebaut) | **8.1–8.2** | **1.70–1.80** | **3.9** |
+
+Würfelkanten-Ghosting („Metal lesson 58ee312"): Gemessen wurde |bewegt − statisch| an starken
+Kanten (Gradient > 6, Würfelsilhouetten und Schattenkanten), bei Yaw 0.3° und 2°. Mit der neuen
+Toleranz ist der Wert gleich oder kleiner (6°: 3.92 → 3.91 und 3.51 → 3.50; 0.5°: 5.72 → 5.71,
+4.75 → 4.75). In dieser Szene gibt es also keinen neuen Wrong-Surface-Treffer. Eine Nahaufnahme an
+einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
+
+### 7.5 Offen / Grenzen
+
+* **Metal**: textgleich geändert, nicht kompiliert, nicht gemessen. Vor einem Merge muss das MSL
+  einmal auf einem Mac durch (`giShadowTemporal`, `kGIShadowMSL`, `kGISWMSL`, beide
+  Reflexions-Kernel). Der Drift-Guard sichert nur die Textgleichheit.
+* **Vulkan: GI-Sonne einen Frame hinterher** (gefunden beim Bau des TODSTEP-Zeugen, *nicht*
+  behoben). `VulkanRenderer::runGi()` ruft `m_extractor.extract()` ohne vorheriges
+  `setDayNight()` auf. Die GI-Maske rechnet also mit der Sonne des Vorframes, während der
+  Scene-Pass die aktuelle nutzt. Metal ruft `setDayNight()` vor jeder GI-Extraktion auf, D3D11,
+  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Bei normaler
+  Day-Night-Geschwindigkeit ist das unsichtbar, ein Einzeiler, aber ein eigener Schritt.
+* Ein Rest-Flackern bleibt (§7.2, Ende). Für weitere Ruhe bräuchte es mehr Strahlen pro Pixel, ein
+  höheres History-Gewicht (das braucht die Verdecker-Reaktion des Clamps) oder einen
+  kantenerhaltenden Spatial-Filter statt 3×3-Box.
+* Gemessen auf einer GPU (RTX 4070), eine Szene, 1280×720. Kamerabewegung nur als ein Frame Yaw.
+  Längere Kamerafahrten und bewegte Verdecker gibt es nur als Sonnensprung.
+* GL bleibt heller und etwas unruhiger als die anderen drei (§2.1). Das liegt nicht am Fix,
+  der GL-Abstand bleibt.
+
+**Nachmessen:** Aus dem Repo-Root, mit einem Messbau unter `C:\hw131`:
+`scripts\gi-shadow-repro\cap.ps1 -Name X_f60 -Rhi Vulkan -Frames 60 -Config scripts\gi-shadow-repro\config_r6.json`
+(dasselbe mit `-Frames 61`), dann `python scripts/gi-shadow-repro/ana.py REF.bmp X_f60.bmp X_f61.bmp`.
+Für Verdecker-Bewegung drei Captures (statisch, `-Extra @{HE_DUMP_TOD='0.345'}`,
+`-Extra @{HE_DUMP_TODSTEP='0.005'}`) und dann `ana_motion.py NEW OLD MOVED`.

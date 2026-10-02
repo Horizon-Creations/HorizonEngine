@@ -18,6 +18,7 @@
 #include <functional>
 #include <Diagnostics/Logger.h>
 #include <HorizonRendering/ClipSpace.h>
+#include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D11/D3D12)
 #include <HorizonRendering/WorldPreviewGrid.h>  // RenderWorldPreview: grid, background, dump
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
@@ -9483,7 +9484,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
 
     // ── Params UBOs (host-visible ring slot for this in-flight frame) ────────
-    m_giFrameSeed += 1.0f;
+    m_giFrameSeed = HE::NextGIJitterSeed(m_giFrameSeed); // wraps: GIJitter.h
     GiShadowUBOData shadowUbo{};
     shadowUbo.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
     shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh), float(m_giInstanceCount));
