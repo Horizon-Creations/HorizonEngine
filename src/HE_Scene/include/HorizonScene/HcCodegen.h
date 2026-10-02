@@ -101,7 +101,10 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
 // compile against and the engine libraries to link. Three sources, first hit
 // wins: the HE_HCGEN_SDK env override (CI/unusual layouts), a staged
 // <editorBase>/SDK/ (deployed editor), or the he_sdk_config.json CMake writes
-// beside the editor binary in a development build.
+// beside the editor binary in a development build. An SDK root is
+// <root>/include + <root>/lib, plus <root>/src/HE_Core/include when present —
+// the layout src/HE_Editor/CMakeLists.txt stages (engine headers in the
+// checkout's own place, third-party headers in include/).
 struct SdkInfo
 {
     std::vector<std::filesystem::path> includeDirs;
@@ -263,9 +266,10 @@ std::filesystem::path builtGameLogic(const std::filesystem::path& projectFile);
 // The engine ROOT a scaffold CMakeLists needs as HORIZON_ENGINE_DIR (it looks
 // for ${HORIZON_ENGINE_DIR}/src/HE_Core/include). Recovered from the SDK's own
 // include list: the entry that IS that directory names the root three parents
-// up. Empty when there is no such entry — a staged SDK has a flat include/ with
-// no src/ layout, and a caller that gets an empty path must refuse the build
-// rather than configure a project that cannot find its one header.
+// up — for the staged <editor>/SDK that is the SDK folder itself. Empty when
+// there is no such entry (a flat HE_HCGEN_SDK root), and a caller that gets an
+// empty path must refuse the build rather than configure a project that cannot
+// find its one header.
 std::filesystem::path engineRootFromSdk(const SdkInfo& sdk);
 
 // The build a "Build and Reload" runs, as data. `engineRoot` comes from

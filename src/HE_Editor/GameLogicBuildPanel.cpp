@@ -99,7 +99,8 @@ void start(AppContext& ctx)
 		HE::Ed::notify(HE::Ed::NoteLevel::Problem,
 			"Cannot build the game logic",
 			"The engine headers this editor would compile against could not be "
-			"located (no he_sdk_config.json with a src/HE_Core/include entry). "
+			"located (no <editor>/SDK and no he_sdk_config.json with a "
+			"src/HE_Core/include entry). "
 			"Build Source/ by hand with -DHORIZON_ENGINE_DIR=<engine root>.");
 		return;
 	}

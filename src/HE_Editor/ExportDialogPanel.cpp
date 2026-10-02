@@ -1009,9 +1009,18 @@ void render(AppContext& ctx)
             // force it off) when the startup probe couldn't find them, so the export
             // can't try a codegen build that would just fail. Null probe = not finished
             // yet → leave it enabled. Graphs still ship and run interpreted regardless.
-            const bool hcCompileOk =
+            const bool hcToolchainOk =
                 !ctx.toolchainProbe ||
                 (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
+            // The same for the codegen SDK (engine headers + HorizonCore's link
+            // library) the build compiles against: the editor's build stages it
+            // into <editor>/SDK, so missing means a broken or hand-assembled
+            // install — and a compile that cannot succeed. Looked up once: it
+            // belongs to the installation, not to the project.
+            static const bool s_hcSdkFound = HE::hccg::resolveSdk(
+                SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
+                                  : std::filesystem::path{}).valid();
+            const bool hcCompileOk = hcToolchainOk && s_hcSdkFound;
             if (!hcCompileOk) { s_exportCompileHC = false; ImGui::BeginDisabled(); }
             EditorWidgets::checkbox("Compile HorizonCode",   &s_exportCompileHC);
             // Kept in application projects, but said out loud that it is not the
@@ -1070,7 +1079,11 @@ void render(AppContext& ctx)
                 // says the export still works ("will ship interpreted"). Same
                 // absolute column as the rest.
                 EditorWidgets::WrapText wrap(550.0f);
-                ImGui::TextDisabled("Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
+                if (!hcToolchainOk)
+                    ImGui::TextDisabled("Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
+                else
+                    ImGui::TextDisabled("Disabled — this editor has no HorizonCode SDK (<editor>/SDK). "
+                                        "HorizonCode will ship interpreted.");
             }
 
             if (exportAppBundleApplicable(s_exportPlatform))

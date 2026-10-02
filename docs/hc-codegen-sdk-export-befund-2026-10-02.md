@@ -83,3 +83,32 @@ Die Angabe dazu in Plan §8.3 ist veraltet. Nachgeprüft am Generator:
 
 Diagnoseweg, damit es im Deploy des Menschen sichtbar bleibt: Im echten Deploy wurde nichts angelegt
 oder geändert.
+
+## Fix (Schritt 2, 2026-10-02)
+
+- `src/HE_Editor/CMakeLists.txt`: Ein POST_BUILD von `HorizonEditor` stagt bei jedem Editor-Build
+  `DEPLOY_EDITOR/SDK/` neu, mit `src/HE_Core/include` (Checkout-Layout), `include/glm` und
+  `lib/$<TARGET_LINKER_FILE:HorizonCore>`. Auf Windows ist das `HorizonCore.lib`. Alles stammt aus demselben Build wie die
+  DLLs daneben. Windows- und Linux-CI packen `Editor/` komplett, `scripts/package_macos.sh` kopiert
+  `SDK/` nach `Resources/SDK`. Der macOS-Teil ist hier nicht getestet.
+- `resolveSdk` (`HcCodegen.cpp`): Eine SDK-Wurzel liefert `src/HE_Core/include` (falls vorhanden) und `include`.
+  Damit ergibt `engineRootFromSdk` für die gestagte SDK `<editor>/SDK`. „Build and Reload“ eines
+  C++-Projekts läuft aus einem deployten Editor deshalb ohne von Hand kopierte JSON. Die flache Form `HE_HCGEN_SDK`
+  funktioniert weiterhin.
+- Export-Dialog: Fehlt die SDK, ist „Compile HorizonCode“ gesperrt und zeigt einen eigenen Hinweis, wie beim
+  fehlenden Toolchain.
+- Test: `Codegen SDK: a staged <editor>/SDK resolves and names the engine root` (`tests/test_gamelogic_build.cpp`).
+
+Live auf NN-WS03 geprüft: Release-Build `C:/hw132` mit privatem Deploy, ohne `he_sdk_config.json`, ohne `HE_HCGEN_SDK`.
+Exportiert wurde eine Kopie von `Downloads/HEProject` per MCP `project_package` (Shipping, compress+encrypt, compileHorizonCode).
+Ergebnis: „OK: 34 asset(s) packed … — HorizonCode: 4 compiled“, `HorizonCodeGen.dll` liegt im Export. Das exportierte
+`HorizonGame.exe` loggt `HorizonCode: 4 compiled classes` und `GameInstance running compiled`, danach
+`GameInstance OnInit`. „Build and Reload“ eines C++-Scaffold-Projekts baut aus dem Deploy mit
+`HORIZON_ENGINE_DIR=<deploy>/Editor/SDK`.
+
+Dabei gefunden, **nicht** Teil dieses Fixes:
+- Das Level-Script der Startszene läuft im Export immer interpretiert. `ProjectExporter.cpp:636` packt die
+  Startszene unter `UUID::generate()`, die Laufzeit sucht deshalb `level:<zufall>`. Der Codegen kompiliert aber
+  `level:<sceneUuidForPath(rel)>` (`ExportDialogPanel.cpp`, `levelScriptKeyForUuid(sceneUuidForPath(rel))`).
+- `WidgetManager.cpp:515` loggt „interpreted logic“, sobald der Graph Knoten hat, auch wenn die kompilierte Klasse
+  benutzt wird. Die Zeile ist irreführend.

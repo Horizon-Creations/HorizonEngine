@@ -534,9 +534,42 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 	COMMENT "Bundling the game runtime into ${DEPLOY_EDITOR}/Game (for in-editor export)"
 	VERBATIM)
 
+# Stage the HorizonCode codegen SDK into the editor package (<editor>/SDK), the
+# deployed half of plan §8.3: without it a downloaded or deployed editor has no
+# engine headers to compile the generated C++ against, and every "Compile
+# HorizonCode" export quietly shipped interpreted ("no codegen SDK found").
+# What the generated code needs is exactly this:
+#   SDK/src/HE_Core/include  <HorizonCode/HorizonCodeGenSupport.h> and friends —
+#                            in the checkout's own layout, so <editor>/SDK is also
+#                            the HORIZON_ENGINE_DIR a C++ project's GameLogic
+#                            build asks for (engineRootFromSdk)
+#   SDK/include/glm          HorizonCode.h includes <glm/glm.hpp>
+#   SDK/lib                  what the generated CMakeLists links: HorizonCore's
+#                            LINKER file — HorizonCore.lib (the import lib) on
+#                            Windows, the dylib/so elsewhere
+# All three from THIS build, the same one whose DLLs sit beside the editor; a
+# header or import lib from another tree is an ABI mismatch nobody sees until the
+# exported game crashes. Wiped first so a header deleted from the source tree
+# does not live on in the package. Windows/Linux CI zip <editor> as a whole;
+# scripts/package_macos.sh copies SDK/ into the .app.
+add_custom_command(TARGET HorizonEditor POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E rm -rf "${DEPLOY_EDITOR}/SDK"
+	COMMAND ${CMAKE_COMMAND} -E copy_directory
+		"${CMAKE_SOURCE_DIR}/src/HE_Core/include"
+		"${DEPLOY_EDITOR}/SDK/src/HE_Core/include"
+	COMMAND ${CMAKE_COMMAND} -E copy_directory
+		"${glm_SOURCE_DIR}/glm"
+		"${DEPLOY_EDITOR}/SDK/include/glm"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${DEPLOY_EDITOR}/SDK/lib"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		$<TARGET_LINKER_FILE:HorizonCore>
+		"${DEPLOY_EDITOR}/SDK/lib"
+	COMMENT "Staging the HorizonCode codegen SDK into ${DEPLOY_EDITOR}/SDK"
+	VERBATIM)
+
 # he_sdk_config.json: tells the HorizonCode → C++ export codegen where the
 # engine headers + libraries live when exporting from a DEVELOPMENT build (the
-# dev fallback of plan §8.3 — deployed editors ship a staged SDK/ instead).
+# dev fallback of plan §8.3 — deployed editors use the staged SDK/ above).
 # Written beside the editor binary; resolveSdk() reads it at export time.
 file(GENERATE
 	OUTPUT "$<TARGET_FILE_DIR:HorizonEditor>/he_sdk_config.json"
