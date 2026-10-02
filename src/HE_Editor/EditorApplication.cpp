@@ -136,6 +136,7 @@
 #include <SDL3/SDL.h>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_dx12.h>
+#include "DeferredSlotFreeList.h" // the SRV heap's free-list, deferred behind a fence
 #include <d3d11.h>
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -146,41 +147,86 @@ using Microsoft::WRL::ComPtr;
 // Modern folder/file picker (IFileOpenDialog)
 #include <shobjidl.h>
 
-// ─── Simple free-list SRV descriptor heap allocator for D3D12 ImGui ──────────
-// Matches the pattern from the official ImGui DX12 example.
-// Must be kept alive for the entire ImGui lifetime.
+// ─── Free-list SRV descriptor heap allocator for D3D12 ImGui ─────────────────
+// The pattern from the official ImGui DX12 example, plus a deferred free: a
+// freed slot only comes back once a fence signalled on the queue at free time
+// has passed, i.e. once no submitted frame can still read its descriptor (see
+// DeferredSlotFreeList.h — the viewport re-registration on a Dock-Splitter drag
+// used to get its own slot straight back and rewrite it under a running frame,
+// Thema 113). Must be kept alive for the entire ImGui lifetime.
 struct D3D12DescriptorHeapAllocator
 {
 	ID3D12DescriptorHeap*       Heap            = nullptr;
 	D3D12_CPU_DESCRIPTOR_HANDLE HeapStartCpu    = {};
 	D3D12_GPU_DESCRIPTOR_HANDLE HeapStartGpu    = {};
 	UINT                        Increment       = 0;
-	ImVector<int>               FreeIndices;
+	DeferredSlotFreeList        Slots;
+	ID3D12CommandQueue*         Queue           = nullptr; // not owned (the renderer's)
+	ID3D12Fence*                Fence           = nullptr;
+	HANDLE                      FenceEvent      = nullptr;
+	UINT64                      FenceValue      = 0;
 
-	void Create(ID3D12Device* device, ID3D12DescriptorHeap* heap)
+	void Create(ID3D12Device* device, ID3D12DescriptorHeap* heap, ID3D12CommandQueue* queue)
 	{
 		Heap = heap;
 		D3D12_DESCRIPTOR_HEAP_DESC desc = heap->GetDesc();
 		HeapStartCpu  = heap->GetCPUDescriptorHandleForHeapStart();
 		HeapStartGpu  = heap->GetGPUDescriptorHandleForHeapStart();
 		Increment     = device->GetDescriptorHandleIncrementSize(desc.Type);
-		FreeIndices.reserve((int)desc.NumDescriptors);
-		for (int n = (int)desc.NumDescriptors - 1; n >= 0; --n)
-			FreeIndices.push_back(n);
+		Slots.reset((int)desc.NumDescriptors);
+		// Without a fence (no queue, or CreateFence failed) frees are immediate,
+		// which is the old behaviour — worse, but not worse than before.
+		if (queue && SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence))))
+		{
+			Queue      = queue;
+			FenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+		}
 	}
-	void Destroy() { Heap = nullptr; FreeIndices.clear(); }
+	void Destroy()
+	{
+		// ImGui_ImplDX12_Shutdown just freed its textures, each with a Signal
+		// still queued; the renderer's own flush comes later (Application.cpp,
+		// m_renderer->Shutdown). Let those land before the fence goes away.
+		if (Fence && FenceEvent && Fence->GetCompletedValue() < FenceValue &&
+		    SUCCEEDED(Fence->SetEventOnCompletion(FenceValue, FenceEvent)))
+			WaitForSingleObject(FenceEvent, INFINITE);
+		if (Fence)      { Fence->Release(); Fence = nullptr; }
+		if (FenceEvent) { CloseHandle(FenceEvent); FenceEvent = nullptr; }
+		Queue = nullptr;
+		Heap  = nullptr;
+		Slots.clear();
+	}
 
 	void Alloc(D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu)
 	{
-		IM_ASSERT(FreeIndices.Size > 0);
-		int idx   = FreeIndices.back(); FreeIndices.pop_back();
+		if (Fence) Slots.reclaim(Fence->GetCompletedValue());
+		int idx = -1;
+		if (!Slots.alloc(idx) && Fence && Slots.hasPending())
+		{
+			// Every free slot is still parked behind a frame in flight: wait for
+			// the oldest one rather than fail — a few ms, and only on a heap that
+			// is otherwise full.
+			const UINT64 v = Slots.oldestPending();
+			if (Fence->GetCompletedValue() < v && FenceEvent &&
+			    SUCCEEDED(Fence->SetEventOnCompletion(v, FenceEvent)))
+				WaitForSingleObject(FenceEvent, INFINITE);
+			Slots.reclaim(Fence->GetCompletedValue());
+			Slots.alloc(idx);
+		}
+		IM_ASSERT(idx >= 0 && "ImGui D3D12 SRV heap exhausted");
+		if (idx < 0) { out_cpu->ptr = 0; out_gpu->ptr = 0; return; }
 		out_cpu->ptr = HeapStartCpu.ptr + (SIZE_T)(idx * Increment);
 		out_gpu->ptr = HeapStartGpu.ptr + (UINT64)(idx * Increment);
 	}
 	void Free(D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu)
 	{
 		int idx = (int)((cpu.ptr - HeapStartCpu.ptr) / Increment);
-		FreeIndices.push_back(idx);
+		// The signal lands behind everything already submitted, so the fence
+		// passes it once the last frame that could name this slot is done.
+		if (Queue && Fence && SUCCEEDED(Queue->Signal(Fence, FenceValue + 1)))
+			Slots.retire(idx, ++FenceValue);
+		else
+			Slots.release(idx);
 		(void)gpu;
 	}
 };
@@ -963,7 +1009,7 @@ void EditorApplication::OnInit()
 
 			// Build the free-list allocator so ImGui can allocate/free individual SRV slots.
 			auto* alloc = new D3D12DescriptorHeapAllocator();
-			alloc->Create(device, srvHeap);
+			alloc->Create(device, srvHeap, cmdQueue);
 			m_d3d12SrvAllocator = alloc;
 
 			ImGui_ImplSDL3_InitForOther(window()->GetNativeWindow());
@@ -4116,7 +4162,14 @@ void EditorApplication::OnRender(float dt)
 			auto* alloc  = static_cast<D3D12DescriptorHeapAllocator*>(m_d3d12SrvAllocator);
 			if (device && alloc)
 			{
-				// Release the previous slot if we already had one.
+				// Release the previous slot if we already had one. The frame
+				// submitted just before (the one that created the new RT) still
+				// draws ImGui::Image through it, so the free is deferred behind a
+				// fence and the Alloc below gets a DIFFERENT slot; the old RT
+				// itself stays alive in the renderer's retiredViewportRTs. With
+				// the old LIFO list the same slot came straight back and was
+				// rewritten under that frame — wrong viewport content while
+				// dragging a Dock-Splitter (Thema 113).
 				if (m_d3d12ViewportSrvAllocated)
 				{
 					D3D12_CPU_DESCRIPTOR_HANDLE cpu{}; cpu.ptr = static_cast<SIZE_T>(m_d3d12ViewportSrvCpuPtr);

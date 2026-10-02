@@ -53,6 +53,9 @@ add_executable(he_tests
     test_undo.cpp
     test_editor_selection.cpp
     test_editor_marquee.cpp
+    # The D3D12 ImGui SRV heap's free-list: a freed slot waits for its fence
+    # before it is handed out again (Dock-Splitter drag, Thema 113).
+    test_deferred_slot_free_list.cpp
     test_editor_multi_edit.cpp
     test_outliner_filter.cpp
     # The eye, the padlock and the sibling order behind each Outliner row.
