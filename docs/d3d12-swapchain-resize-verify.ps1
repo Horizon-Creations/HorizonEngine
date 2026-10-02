@@ -20,7 +20,8 @@ Get-ChildItem env: | Where-Object { $_.Name -like 'HE_*' } | ForEach-Object { Re
 $appdata = Join-Path $Root "appdata_$Name"
 if (Test-Path $appdata) { Remove-Item -Recurse -Force $appdata }
 New-Item -ItemType Directory -Force (Join-Path $appdata "HorizonEngine") | Out-Null
-# 3 = D3D12. HE_DUMP_RHI must NOT be used outside dump mode (crashes at frame 1).
+# 3 = D3D12. Before Thema 124 (A6) HE_DUMP_RHI outside dump mode crashed at
+# frame 1; fixed since, but the config pin keeps this script valid on older builds.
 "{ `"RHI`": 3, `"LastProjectPath`": `"$Project`" }" |
     Out-File -Encoding ascii (Join-Path $appdata "HorizonEngine\config.json")
 $env:APPDATA = $appdata

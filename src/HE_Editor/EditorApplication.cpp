@@ -28,6 +28,7 @@
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
 #include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
+#include "EditorBackendChoice.h"   // HE_DUMP_RHI against the config's RHI
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
@@ -354,22 +355,9 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	cfg.windowprops.height = 900;
 	cfg.windowprops.vsync  = true;
 	cfg.windowprops.mode   = HE::WindowMode::Windowed;
-	cfg.backend = m_globalState->getSelectedRHI();
-	// Headless-dump backend override (HE_DUMP_RHI=Metal|OpenGL|Vulkan|D3D11|D3D12):
-	// lets a verification screenshot force the user's ACTUAL backend (e.g. Metal on
-	// macOS) instead of whatever RHI happens to be persisted in the config.
-	if (const char* rhi = std::getenv("HE_DUMP_RHI"); rhi && *rhi)
-	{
-		const std::string s = rhi;
-		if      (s == "Metal")               cfg.backend = HE::RendererBackend::Metal;
-		else if (s == "OpenGL" || s == "GL") cfg.backend = HE::RendererBackend::OpenGL;
-		else if (s == "Vulkan")              cfg.backend = HE::RendererBackend::Vulkan;
-		else if (s == "D3D11")               cfg.backend = HE::RendererBackend::D3D11;
-		else if (s == "D3D12")               cfg.backend = HE::RendererBackend::D3D12;
-		// The CPU rasterizer, so a dump can witness what an application without a
-		// GPU actually draws — the whole point of being able to force a backend.
-		else if (s == "Software" || s == "SW") cfg.backend = HE::RendererBackend::Software;
-	}
+	// The config's RHI, unless HE_DUMP_RHI forces another one (EditorBackendChoice.h).
+	cfg.backend = HE::Ed::resolveEditorBackend(m_globalState->getSelectedRHI(),
+	                                           std::getenv("HE_DUMP_RHI"));
 
 	// ── Startup splash ──────────────────────────────────────────────────────
 	// The EDITOR asks for one; it is off by default in HorizonCore so that a
@@ -1222,7 +1210,11 @@ void EditorApplication::OnInit()
 #endif
 	}
 #endif // HE_IMGUI_ENABLED
-	m_backend      = m_globalState->getSelectedRHI();
+	// m_backend is NOT read from the config again here: CreateRenderer set it to
+	// the backend the renderer was actually created with, which HE_DUMP_RHI may
+	// have moved away from the config's RHI. EditorUI picks its per-frame ImGui
+	// branch from it — the config's value drove ImGui_ImplOpenGL3_NewFrame on a
+	// Metal renderer and crashed the first UI frame (Thema 124, A6).
 	m_backend_name = getRHIName(m_backend);
 
 	GlobalState& globalstate = GlobalState::getInstance();
@@ -4206,12 +4198,27 @@ void EditorApplication::OnRender(float dt)
 	if (m_backend == HE::RendererBackend::Vulkan)
 	{
 		auto* vk = static_cast<VulkanRenderer*>(renderer());
+		// Sets retired on earlier re-registrations whose frames are done — every
+		// frame, not only on a change, so a splitter drag does not pile them up.
+		if (vk)
+			m_vkRetiredViewportSets.reclaim(vk->GetCompletedFrameSerial(), [](void* ds)
+			{
+				ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<VkDescriptorSet>(ds));
+			});
 		if (vk && vk->HasViewportResourceChanged())
 		{
-			// Remove the old descriptor set if present.
+			// Retire the old descriptor set if present. The frame submitted just
+			// before (the one that created the new image) still draws
+			// ImGui::Image through it, and RemoveTexture is an immediate
+			// vkFreeDescriptorSets — freeing it now is a free of a set in use
+			// (Thema 124, the Vulkan side of the D3D12 SRV fix in Thema 113).
+			// The old image stays alive in the renderer's m_retiredViewports.
+			// No "wait when full" path as on D3D12: ImGui's pool has 64 sets,
+			// the editor uses ~17, and at most one set per frame in flight is
+			// ever parked here.
 			if (m_vkViewportDescSet)
 			{
-				ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<VkDescriptorSet>(m_vkViewportDescSet));
+				m_vkRetiredViewportSets.retire(m_vkViewportDescSet, vk->GetSubmittedFrameSerial());
 				m_vkViewportDescSet = nullptr;
 			}
 			auto sampler = reinterpret_cast<VkSampler>(vk->GetViewportVkSampler());
@@ -4222,6 +4229,11 @@ void EditorApplication::OnRender(float dt)
 					sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 				m_vkViewportDescSet = reinterpret_cast<void*>(ds);
 				vk->SetViewportImGuiHandle(reinterpret_cast<void*>(ds));
+			}
+			else
+			{
+				// The renderer must not keep handing out the set parked above.
+				vk->SetViewportImGuiHandle(nullptr);
 			}
 			vk->ClearViewportResourceChanged();
 		}
@@ -11020,6 +11032,9 @@ void EditorApplication::OnShutdown()
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
 	case HE::RendererBackend::Vulkan:
+		// Still-parked viewport sets go down with ImGui's descriptor pool;
+		// RemoveTexture after this point would find no backend data.
+		m_vkRetiredViewportSets.clear();
 		ImGui_ImplVulkan_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;

@@ -108,6 +108,15 @@ public:
 	void* GetViewportVkSampler()   const;
 	bool  HasViewportResourceChanged() const;
 	void  ClearViewportResourceChanged();
+	// The Vulkan stand-in for a D3D12 fence value. Every frame handed to the
+	// queue with a frame fence — main window and secondary windows alike, both
+	// draw the ImGui overlay — gets the next serial; GetCompletedFrameSerial()
+	// is the highest serial whose fence has signalled, so every frame at or
+	// below it has finished on the GPU. The editor parks the viewport's old
+	// ImGui descriptor set behind GetSubmittedFrameSerial() and frees it once
+	// the completed serial reaches that value (Thema 124).
+	uint64_t GetSubmittedFrameSerial() const { return m_submitSerial; }
+	uint64_t GetCompletedFrameSerial();
 
 private:
 	void createInstance();
@@ -311,6 +320,9 @@ private:
 	VkFence     m_frameFence[2]{};              // per frame-in-flight (submit fence)
 	std::vector<VkFence>     m_imagesInFlight;  // per image: the fence currently using it
 	uint32_t    m_currentFrame = 0;
+	uint64_t    m_frameSerial[2]{};             // serial of the submit m_frameFence[i] guards
+	uint64_t    m_submitSerial    = 0;          // last serial handed out (main + extra windows)
+	uint64_t    m_completedSerial = 0;          // cached; only ever grows
 
 	// ── Depth buffer (shared, transient) ────────────────────────────────────
 	VkImage        m_depthImage  = VK_NULL_HANDLE;
@@ -695,6 +707,7 @@ private:
 		VkSemaphore imageReady[2]{};
 		VkSemaphore renderDone[2]{};
 		VkFence     frameFence[2]{};
+		uint64_t    frameSerial[2]{};   // see m_frameSerial
 		uint32_t    currentFrame = 0;
 	};
 

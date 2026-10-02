@@ -313,6 +313,7 @@ void VulkanRenderer::Shutdown()
     {
         if (m_frameFence[i])  vkDestroyFence    (m_device, m_frameFence[i],  nullptr);
         if (m_imageReady[i])  vkDestroySemaphore(m_device, m_imageReady[i],  nullptr);
+        m_frameFence[i] = VK_NULL_HANDLE;   // GetCompletedFrameSerial() skips null fences
     }
     for (VkSemaphore s : m_renderDone) if (s) vkDestroySemaphore(m_device, s, nullptr);
     m_renderDone.clear();
@@ -528,6 +529,7 @@ void VulkanRenderer::Render()
     si.pCommandBuffers      = &cmd;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &m_renderDone[imageIndex];   // per-image present semaphore
+    m_frameSerial[fi] = ++m_submitSerial;
     vkQueueSubmit(m_graphicsQueue, 1, &si, m_frameFence[fi]);
 
     VkPresentInfoKHR pi{};
@@ -1641,6 +1643,7 @@ void VulkanRenderer::renderWindowData(WindowData& wd)
     si.pCommandBuffers      = &cmd;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &wd.renderDone[fi];
+    wd.frameSerial[fi] = ++m_submitSerial;   // same counter as the main window
     vkQueueSubmit(m_graphicsQueue, 1, &si, wd.frameFence[fi]);
 
     VkPresentInfoKHR pi{};
@@ -5316,6 +5319,28 @@ void* VulkanRenderer::GetViewportVkImageView() const { return static_cast<void*>
 void* VulkanRenderer::GetViewportVkSampler()   const { return static_cast<void*>(m_viewportSampler); }
 bool  VulkanRenderer::HasViewportResourceChanged() const { return m_viewportResChanged; }
 void  VulkanRenderer::ClearViewportResourceChanged()     { m_viewportResChanged = false; }
+
+uint64_t VulkanRenderer::GetCompletedFrameSerial()
+{
+    // A fence signalled by vkQueueSubmit covers every command submitted to that
+    // queue earlier in submission order (Vulkan spec, "Fences"), and all frame
+    // submits go to m_graphicsQueue — so the highest serial among the signalled
+    // frame fences says every frame up to it is done. A fence reset for a
+    // submit that has not happened yet just does not count; that only delays.
+    if (!m_device) return m_completedSerial;
+    auto consider = [this](VkFence fence, uint64_t serial)
+    {
+        if (fence && serial > m_completedSerial &&
+            vkGetFenceStatus(m_device, fence) == VK_SUCCESS)
+            m_completedSerial = serial;
+    };
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        consider(m_frameFence[i], m_frameSerial[i]);
+    for (auto& [sdlWin, wd] : m_extraWindows)
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+            consider(wd.frameFence[i], wd.frameSerial[i]);
+    return m_completedSerial;
+}
 
 // The Vulkan twin of D3D11/D3D12's drawDepthInstanced: every caller writes the
 // products its per-object loop pushes as constants, so the instanced frame is
