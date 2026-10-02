@@ -2223,6 +2223,15 @@ bool WidgetManager::playAnimation(int widgetId, const std::string& clip, const b
 		rememberOriginal(*w, tr.element + offset, tr.prop);
 	}
 
+	// The clip's first frame is written NOW, not by the next tick. Left to the
+	// tick, the frame between here and it draws the widget as authored: a fade-in
+	// started from Construct showed the element at full opacity for one frame and
+	// then dropped it to 0 to fade it in, which reads as a flicker or a hitch.
+	// After rememberOriginal above, so a Restore still puts back the authored
+	// value and not this one.
+	std::vector<HE::UIAnimSample> samples;
+	const float start = HE::uiAnimDirectedTime(dir, 0.0f, HE::uiAnimPlayEnd(*c));
+
 	// Already playing = rewind, not a second player on the same clip.
 	for (Instance::Playing& p : w->playing)
 		if (p.clip == clip && p.embed == embed)
@@ -2230,6 +2239,7 @@ bool WidgetManager::playAnimation(int widgetId, const std::string& clip, const b
 			p.t = 0.0f;
 			p.loop = loop ? *loop : c->loop;
 			p.dir = dir; p.restore = restore;
+			applyClipAt(*w, *c, offset, start, samples);
 			m_visualDirty = true;
 			return true;
 		}
@@ -2237,8 +2247,25 @@ bool WidgetManager::playAnimation(int widgetId, const std::string& clip, const b
 	p.embed = embed; p.clip = clip; p.loop = loop ? *loop : c->loop;
 	p.dir = dir; p.restore = restore;
 	w->playing.push_back(std::move(p));
+	applyClipAt(*w, *c, offset, start, samples);
 	m_visualDirty = true;
 	return true;
+}
+
+void WidgetManager::applyClipAt(Instance& w, const HE::UIAnimClip& c, int offset, float time,
+                                std::vector<HE::UIAnimSample>& scratch)
+{
+	scratch.clear();
+	HE::uiAnimEvaluate(c, time, scratch);
+	for (const HE::UIAnimSample& s : scratch)
+		if (HE::UIElement* e = w.tree.find(s.element + offset))
+		{
+			// The track's type has to match what is there, for the same reason
+			// animate() checks: a clip authored against an element that has
+			// since changed type must not write a colour into a number.
+			if (e->getPropAny(s.prop).type == s.value.type)
+				e->setPropAny(s.prop, s.value);
+		}
 }
 
 // Put one property back and forget it. Forgetting matters: the entry is what
@@ -2408,18 +2435,7 @@ void WidgetManager::tick(float dt)
 					if (p.loop && span > 0.0f) p.t = std::fmod(p.t, span);
 					else                       { p.t = span; done = true; }
 				}
-				samples.clear();
-				HE::uiAnimEvaluate(*c, HE::uiAnimDirectedTime(p.dir, p.t, end), samples);
-				for (const HE::UIAnimSample& s : samples)
-					if (HE::UIElement* e = w.tree.find(s.element + offset))
-					{
-						// The track's type has to match what is there, for the
-						// same reason animate() checks: a clip authored against
-						// an element that has since changed type must not write
-						// a colour into a number.
-						if (e->getPropAny(s.prop).type == s.value.type)
-							e->setPropAny(s.prop, s.value);
-					}
+				applyClipAt(w, *c, offset, HE::uiAnimDirectedTime(p.dir, p.t, end), samples);
 				if (done)
 				{
 					// "Play it and put it back": the properties this clip drove

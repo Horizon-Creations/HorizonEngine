@@ -1241,6 +1241,10 @@ private:
     void rememberOriginal(Instance& w, int elem, const std::string& prop);
     // Put one recorded property back and drop the record.
     void restoreOne(Instance& w, int elem, const std::string& prop);
+    // Write what clip `c` says at `time` (clip time, direction already applied)
+    // into the widget. `scratch` is only there so the tick reuses one buffer.
+    void applyClipAt(Instance& w, const HE::UIAnimClip& c, int offset, float time,
+                     std::vector<HE::UIAnimSample>& scratch);
     void drawTooltip(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
 
     int   m_tooltipWidget = 0, m_tooltipElem = 0;
