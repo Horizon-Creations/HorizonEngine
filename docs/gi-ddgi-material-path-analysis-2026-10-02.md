@@ -253,7 +253,7 @@ Material-Fill und die Probe-Atlanten auf den Material-Slots t17/t18 (Sampler s1/
 | Metal | ja | ja | unverändert (nur auf Helfer umgestellt) |
 | D3D12 | **jetzt ja** (`fillMatLight`) | **jetzt ja** (Vorlage, Slots 12/13) | **in diesem Schritt behoben** |
 | D3D11 | **Schritt 3: ja** (`fillMatLight`) | **Schritt 3: ja** (Bind + Restore pro Draw) | in Schritt 3 behoben, s. §6 |
-| Vulkan | nein (Fill `VulkanRenderer.cpp:6378`) | nein, DSL ohne Binding 17/18 (`:2318-2353`) | offen, Schritt 4 |
+| Vulkan | **Schritt 4: ja** (Material-Fill in `DrawScene`) | **Schritt 4: ja** (DSL 21 Bindings, Write pro Draw) | in Schritt 4 behoben, s. §7 |
 
 ### 5.2 Was geändert wurde
 
@@ -355,3 +355,57 @@ Lokal (macOS) läuft der Fall nicht, er hängt an der Windows-CI.
 - **Vulkan (Schritt 4)** wie in §5.3.
 - Bildparität Graph-Material gegen Built-in bei GI an: auf D3D11 ebenso unbewiesen wie auf D3D12,
   braucht Windows-Hardware (Zeuge wie in §4).
+
+## 7. Stand nach Schritt 4: Vulkan (02.10.2026)
+
+### 7.1 Was geändert wurde (`VulkanRenderer.cpp/.h`, Commit `a20eb0dd`)
+
+- **Fill:** Der Material-Fill in `DrawScene` ruft `HE::FillMaterialGIProbe` mit demselben Grid,
+  das der Frame-UBO an `scene.frag` gibt. Gate und Descriptor-Wahl für 17/18 hängen an **einem**
+  Prädikat: `matGiProbes = m_giRanThisFrame && m_giProbeGridBuilt && beide Atlas-Views`. Das Gate
+  kann also nie offen stehen, während dort Weiß liegt.
+- **DSL 15 → 21** (`k_matSetBindings`): neu sind 15/16/17/18/32/33. Der Pool hat 16 Sampler pro
+  Set, jeder Draw schreibt 21 Descriptoren. Das Layout deklariert damit jedes Binding, das das
+  Preamble-SPIR-V statisch nutzt. Die spec-widrige Lücke aus §2.2 ist zu, bis auf 14 (s. u.).
+  - 17/18: die Atlanten in `GENERAL`, mit Linear-Clamp (`m_ssaoSampler`, wie Szenen-Bindings 5/6),
+    sonst Weiß.
+  - 15 `heSkyEnv`: neuer weißer 1×1-Cube (`m_whiteCubeImage/View`, sechs Layer,
+    CUBE_COMPATIBLE). Das 2D-Weiß kann keine Cube-View tragen.
+  - 16/32/33: Weiß. Ihre Gates (`fog.w`, `giRefl.z`, `cloudShadowB.x`) bleiben auf Vulkan 0.
+- **Shader-Parität (statisch):** `heGIIrradianceAt` und `scene.frag` `sampleDDGIIrradiance`
+  stimmen Zeile für Zeile überein: Tile-Mathe, Oktaeder, UV, kein y-Flip, Chebyshev.
+
+### 7.2 Geprüft auf NN-WS03 (RTX 4070, Vulkan-Validation an, Release)
+
+Pre = Elternstand `c8268cd4`, post = `a20eb0dd`. Beide kommen aus demselben Baum, nur die zwei
+Vulkan-Dateien unterscheiden sich. Jede Aufnahme hat eine frische APPDATA, `HE_SKY_TIME=10` und
+40 Frames.
+
+- **Build + `he_tests`:** 4130/4130 Fälle grün.
+- **Validation:**
+  - Bemaltes Terrain (`HE_DUMP_LANDSCAPELAYERS=1`): pre meldet die Bindings 14,15,16,17,18,32,33,
+    post nur noch 14.
+  - Graph-Kugel (`HE_DUMP_MATERIALTEST=1`): pre meldet 15–18/32/33 (17 Fehler), post **keinen**.
+  - Keine neuen Fehlerarten. Die Shutdown-Leak-Liste ist pre wie post dieselbe (10 Objekte,
+    ImGui-förmig).
+- **Pixel** (bemaltes Terrain = Graph-Material, Draufsicht; mittlere |Δ| in 8-Bit-Stufen):
+
+| Vergleich | mittlere \|Δ\| | Pixel > 2 |
+|---|---|---|
+| GI aus, pre vs post | 0,01 | 0,0 % |
+| GI an, post vs post (Rauschen) | 0,25 | 0,8 % |
+| GI an, pre vs post | **7,42** | **50,9 %** (Mittel R 187 → 195) |
+| Kugel, GI aus, pre vs post | 0,03 | 0,0 % |
+| Kugel, GI an, pre vs post | 1,17 | 11,1 % |
+
+  Bei GI an hebt der Fix die dunklen GI-Schattenstreifen des Terrains weich an, mit dem
+  Probe-Kachelmuster (Spacing 8,7 m). Bei GI aus ist er unsichtbar.
+
+### 7.3 Was offen bleibt
+
+- **Binding 14 (`heLandscapeWeights`)** fehlt weiter im Vulkan-Material-Layout. Der Node-Codegen
+  deklariert es nur bei Landscape-Layer-Knoten. Das ist nicht DDGI, sondern ein eigener Punkt
+  (bemalte Terrains auf Vulkan).
+- Nebenbefund 1 (Forward-SSR für Graph-Materialien tot auf Vulkan) unverändert, gehört zu Thema 126.
+- Parität Graph-Material gegen Built-in Pixel für Pixel ist nicht gemessen. Belegt ist nur:
+  Graph-Material bekommt jetzt Probe-Licht, und GI aus bleibt bitgleich.
