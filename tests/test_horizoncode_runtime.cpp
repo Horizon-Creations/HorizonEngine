@@ -643,7 +643,7 @@ TEST_CASE("Widget nodes call the runtime services and cache CreateWidget's id")
 	int createCount = 0, shownId = -1;
 	std::string createdPath;
 	Runtime::Services svc;
-	svc.createWidget = [&](const std::string& p){ ++createCount; createdPath = p; return 42; };
+	svc.createWidget = [&](const std::string& p, const SpawnValues&){ ++createCount; createdPath = p; return 42; };
 	svc.showWidget   = [&](int id){ shownId = id; };
 	rt.setServices(svc);
 

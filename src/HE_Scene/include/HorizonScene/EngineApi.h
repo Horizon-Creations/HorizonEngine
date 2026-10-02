@@ -17,6 +17,7 @@ class ContentManager;
 class AudioEngine;
 class EntityHost;
 class NetGameSession;
+class WidgetManager;
 namespace HE::AntiCheat { class AntiCheatHost; }
 struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
 struct HeSaveServices;    // HorizonGameServices.h (global scope, C ABI)
@@ -208,6 +209,11 @@ struct Ctx
     // Nothing reads it yet: the rows are step 5. It sits here now so the
     // applications' aggregate init stops changing shape once they do.
     NetGameSession* net = nullptr;
+    // The widget designer running a PreConstruct to show what it does
+    // (docs/widget-pre-construct-design.md §5). Only designTimeCallApi below
+    // builds a Ctx with it set; the game, PIE and every script frontend leave
+    // it false. What `widget.isDesignTime` answers.
+    bool designTime = false;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -942,6 +948,13 @@ namespace widget {
     // the handle its functions, its events and its public variables are reached
     // through — the same one listRow hands out for a list row.
     uint32_t childRef(Ctx&, int id, const std::string& element);
+
+    // Is this graph running in the widget DESIGNER rather than in the game?
+    // True only while the designer runs a PreConstruct to draw its result
+    // (Ctx::designTime); false in the game, in PIE and everywhere else. The
+    // usual shape: PreConstruct → Branch(Is Design Time) → placeholder data on
+    // true, the real data on false.
+    bool isDesignTime(Ctx&);
 
     // ── Authored clips ──────────────────────────────────────────────────────
     // The animations the widget carries, made in the designer's timeline. By
@@ -2852,5 +2865,28 @@ bool isScriptGroup(std::string_view group);
 // add-node palette and the drag-off-a-pin menu. Filtering one and not the other
 // gives a restriction you can simply drag around.
 bool groupAllowed(std::string_view apiId, const std::vector<const char*>& allowed);
+
+// ── Design time: what a graph may reach in the widget designer ───────────────
+// (docs/widget-pre-construct-design.md §5.2.) The designer runs a widget's
+// PreConstruct on every edit to draw what it does, so whatever the graph calls
+// runs on the machine of somebody who is working: no files, no network, no
+// saves, no sound, no world. An ALLOW-list by group, because "pure" is not
+// "harmless" (fs, save and prefs have pure getters that read the disk) and a
+// group added later must stay out until somebody lets it in on purpose.
+//
+// Allowed: the pure rows of math, string, json and datetime; widget.isDesignTime;
+// widget.childRef (answered by the designer's own throwaway widgets).
+bool designTimeAllows(const std::string& apiId);
+
+// The Services::callApi a design-time runtime gets. Allowed rows run against a
+// Ctx with designTime = true and nothing else bound — except widget.childRef,
+// which is answered from `widgets` (the throwaway manager the run builds on,
+// may be null). Every other id returns no results, so its outputs read as
+// their defaults, and is appended once to `refused` (may be null) — the
+// designer shows that list, which is how an author learns why a value is
+// missing on the canvas.
+std::function<std::vector<Value>(uint32_t self, const std::string& apiId,
+                                 const std::vector<Value>& args)>
+designTimeCallApi(WidgetManager* widgets, std::vector<std::string>* refused);
 
 } // namespace HE::api

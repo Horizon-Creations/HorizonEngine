@@ -1492,7 +1492,8 @@ void EditorApplication::OnInit()
 	// app runtime (+ ContentManager to load assets).
 	{
 		HorizonCode::Runtime::Services svc;
-		svc.createWidget  = [this](const std::string& p){ return m_editorWorld ? m_editorWorld->widgets().createWidget(contentManager(), p) : 0; };
+		svc.createWidget  = [this](const std::string& p, const HorizonCode::SpawnValues& spawn)
+		{ return m_editorWorld ? m_editorWorld->widgets().createWidget(contentManager(), p, &spawn) : 0; };
 		svc.showWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().showWidget(id); };
 		svc.hideWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().hideWidget(id); };
 		svc.destroyWidget = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().destroyWidget(id); };
