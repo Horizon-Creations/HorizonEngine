@@ -263,8 +263,8 @@ und `GILightRadius` 6°, f60/f61, dann dieselben Metriken.
 
 Stand 02.10.2026, gleicher Zweig, gleicher Messbau (`C:/hw131`, Release, RTX 4070). Alle drei
 Defekte aus §3 sind behoben, in **jeder** Kopie: 7 Shadow-Kernel, 2 Reflexions-Kernel (GL, Metal)
-und 4 Temporal-Pässe. Metal ist textgleich mitgezogen, aber **weder kompiliert noch gemessen**
-(kein Mac an NN-WS03).
+und 4 Temporal-Pässe. Metal ist textgleich mitgezogen. Auf NN-WS03 war es weder kompiliert noch
+gemessen (kein Mac). Inzwischen läuft es auf echter Mac-Hardware sauber, siehe §7.6.
 
 ### 7.1 Was geändert ist
 
@@ -374,14 +374,14 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
 
 ### 7.5 Offen / Grenzen
 
-* **Metal**: textgleich geändert, nicht kompiliert, nicht gemessen. Vor einem Merge muss das MSL
-  einmal auf einem Mac durch (`giShadowTemporal`, `kGIShadowMSL`, `kGISWMSL`, beide
-  Reflexions-Kernel). Der Drift-Guard sichert nur die Textgleichheit.
+* **Metal**: Erledigt in §7.6. Alle GI-Kernel kompilieren und laufen auf einem Apple M5, HW- und
+  SW-Pfad, Schatten und Reflexionen. Das Flackern ist auf Metal nicht nach §7.2 gemessen (kein
+  f60/f61-Paar mit `ana.py`), es gibt nur den Einzelbildvergleich.
 * **Reflexions-Kernel**: nur auf GL gemessen (`HE_DUMP_GIREFLTEST=1`, `HE_DUMP_GIREFLROUGH=0.3`,
   Stufe High = 4 Strahlen), mit Seed-Offset-Strom (Stand 1f6f7900) gegen Pixel-Id-Strom (20277df1).
   Beides liegt im Rauschen: Flackern im Reflexionsbereich 0.055 gegen 0.067, HF 0.513 gegen 0.514,
   |an − aus| 15.9. Einen Vorher-Stand mit altem `sin`-Hash gibt es für die Reflexionen nicht.
-  Metal-Reflexionen sind ungeprüft.
+  Auf Metal laufen die Reflexionen (§7.6), ein Flacker-Maß gibt es dort nicht.
 * **Vulkan: GI-Sonne einen Frame hinterher** (gefunden beim Bau des TODSTEP-Zeugen, *nicht*
   behoben). `VulkanRenderer::runGi()` ruft `m_extractor.extract()` ohne vorheriges
   `setDayNight()` auf. Die GI-Maske rechnet also mit der Sonne des Vorframes, während der
@@ -401,3 +401,35 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
 (dasselbe mit `-Frames 61`), dann `python scripts/gi-shadow-repro/ana.py REF.bmp X_f60.bmp X_f61.bmp`.
 Für Verdecker-Bewegung drei Captures (statisch, `-Extra @{HE_DUMP_TOD='0.345'}`,
 `-Extra @{HE_DUMP_TODSTEP='0.005'}`) und dann `ana_motion.py NEW OLD MOVED`.
+
+### 7.6 Metal auf echter Hardware (Schritt 7)
+
+Stand 02.10.2026, Zweig auf 95dd2e44, Apple M5 (`supportsRaytracing = true`), macOS 27,
+macos-release frisch gebaut. Deploy und Build-Baum md5-gleich, der R2-Schritt `0.7548776662`
+steht in der deployten `libHorizonRendering.dylib`. Szene wie `cap.ps1`
+(`SHADOWINSTTEST`, TOD 0.35, Kamera −3/3/−5, Pitch −40, Forward, AA aus, `HE_SKY_TIME=30`,
+leeres `HE_CONFIG_DIR`, also `GILightRadius` 0.5°). Reflexionen mit `GIREFLTEST=1`, Rauheit 0.3,
+Stufe 2. Skript: `scripts/gi-shadow-repro/cap_metal.sh`.
+
+Der Metal-Renderer loggt keinen Erfolg beim Pipeline-Bau, nur Fehler
+(`GI shadow shader compile failed`, `GI … pipeline creation failed`, `GI reflection pipeline
+creation failed`). Eine Zeile „GI pipelines built“ gibt es nicht. Belegt ist der Lauf deshalb
+über diese Zeichen:
+
+| Lauf | Pfad (Logzeile) | Kernel | Fehlerzeilen | Beleg im Bild |
+|---|---|---|---|---|
+| GI an, 3 + 60 Frames | `ray-traced GI supported (hardware ray tracing)` | `kGIShadowRasterMSL` (`giShadowTemporal`, Blur, G-Buffer), `kGIShadowMSL`, `kGIProbeMSL` | 0, Bilanz `0 error(s)` | GI an gegen aus: 100 % der Pixel anders, max. 135. Die CSM-Hexagone weichen der RT-Maske, die Schatten sind indirekt aufgehellt |
+| GI an, `HE_GI_FORCE_SW=1` | `software GI path forced` + `(software ray tracing)` | `kGISWMSL` (`giShadowRaySw`, Probe-SW) + dieselbe Raster-Lib | 0 | HW gegen SW: max. 3/255 nach 3 Frames, **max. 1/255 auf 1,1 % der Pixel nach 60 Frames** |
+| Reflexionen HW | wie oben | `kGIReflMSL` (`giReflRay`) | 0 | an gegen aus: 14,6 % der Pixel, max. 204. Der Spiegelboden zeigt den grünen Graph-Würfel und den roten Emissive-Würfel |
+| Reflexionen SW | wie oben | `kGISWMSL` (`giReflRaySw`) | 0 | an gegen aus: dieselben 14,6 %. HW gegen SW max. 1/255 (507 px) |
+| HW + SW mit `MTL_DEBUG_LAYER=1` (nslog), GI + Reflexionen | „Metal API Validation Enabled“ | alle oben | keine Validierungsmeldung, Bilanz `0 error(s)` | – |
+
+In allen 11 Läufen meldet die Session-Bilanz `0 error(s)`. Die einzige Warnung ist „No config
+file“ (das leere Config-Verzeichnis). Nach 60 Frames ist die Schattenkante auf Metal glatt.
+Nach 3 Frames ist sie noch leicht gezackt, weil die History dort noch nicht konvergiert ist.
+Ein Flacker-Maß wie in §7.2 (f60 gegen f61 mit `ana.py`) ist auf Metal **nicht** erhoben. Die
+offene Frage aus §6, warum Metal „nicht betroffen“ gewirkt hat, bleibt damit offen.
+
+Nebenbeobachtung, nicht untersucht: Innerhalb der GI-Schatten sind dreieckige Helligkeitsstufen
+zu sehen, und auf dem Boden liegen schwache Keile. Beides sieht nach indirektem Licht aus den
+Probes aus, nicht nach der Schattenmaske. Gegen den Stand vor dem Fix ist das nicht verglichen.
