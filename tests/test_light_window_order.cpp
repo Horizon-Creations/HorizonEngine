@@ -73,16 +73,18 @@ TEST_CASE("the synthesised moon stays inside the light window past eight point l
 	CHECK(pointsInWindow == HE::kMaxLightWindow - 1);
 }
 
-TEST_CASE("an authored sun created after the point lights is moved to the front")
+TEST_CASE("an authored sun created before the point lights is moved to the front")
 {
+	// entt hands the light pool out newest-first, so the sun created FIRST is
+	// the one that lands behind all nine point lights without the reorder.
 	HorizonWorld world;
-	addPoints(world, 9);
 	const Entity sun = world.createEntity("Sun");
 	world.addComponent(sun, TransformComponent{});
 	LightComponent dl;
 	dl.type      = HE::LightType::Directional;
 	dl.intensity = 3.0f;
 	world.addComponent(sun, dl);
+	addPoints(world, 9);
 
 	RenderExtractor ex; // day-night off: the authored sun keeps shining
 	RenderWorld rw;

@@ -104,9 +104,11 @@ Forward und Deferred liegen jetzt bis auf 1/255 beieinander, beide Shader-Arten.
 Tests: `test_light_window_order.cpp` (neu), `test_world_preview_grid`, `test_editor_icons`,
 `test_culling`, `test_viewport_pick`, `test_particles`, `test_rope_trail`,
 `test_skeletalmeshcomponent` grün. Negativkontrolle: ohne den `orderLightWindow`-Aufruf
-scheitert der Mitternacht-Fall an vier Fenster-Checks. Der zweite Fall (eine nach den
-Punktlichtern angelegte Sonne) ist auch ohne Fix grün, weil entt die zuletzt angelegte
-Entität zuerst liefert; er sichert nur die Reihenfolge ab und beweist den Fix nicht.
+scheitert der Mitternacht-Fall an vier Fenster-Checks. Der zweite Fall legt die Sonne
+VOR den neun Punktlichtern an: entt liefert die zuletzt angelegte Entität zuerst, die
+Sonne käme ohne Fix also hinter allen Punktlichtern. Ohne `orderLightWindow` scheitert er
+an fünf Checks (Schritt 2 hat die Anlagereihenfolge gedreht, vorher war er auch ohne
+Fix grün).
 
 Nicht geprüft: OpenGL/D3D/Vulkan zur Laufzeit (der Fix liegt backendneutral im
 Extraktor, die Konsumenten lesen dort dieselbe Reihenfolge).
