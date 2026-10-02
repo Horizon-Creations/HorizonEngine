@@ -8188,7 +8188,11 @@ designTimeCallApi(WidgetManager* widgets, std::vector<std::string>* refused)
         // throwaway manager does — the one the page and its embeds live in.
         if (apiId == "widget.childRef")
         {
-            const int    id   = args.empty() ? 0 : (int)args[0].ref;
+            int id = args.empty() ? 0 : (int)args[0].ref;
+            // An unwired Widget pin means the caller's own widget — the same
+            // courtesy the registry's thunk extends (selfDefault), which needs
+            // a world and therefore cannot run here.
+            if (id == 0 && widgets) id = widgets->widgetIdForScript(self);
             const std::string name = args.size() > 1 ? args[1].s : std::string{};
             return { Value::ofRef(widgets ? widgets->childInstance(id, name) : 0u) };
         }

@@ -371,14 +371,22 @@ TEST_CASE("Design-time run: an embed's PreConstruct lands under its ref, by offs
     // The page's PreConstruct reads the card through Get Child Widget. It runs
     // BEFORE the card's own PreConstruct (host first, as at runtime), so it
     // sees the card's default — proof that the ref resolves in the sandbox.
+    // Twice: Widget wired to Get Self, and Widget left unwired — which the
+    // node reference promises means this widget too.
+    for (const bool wireSelf : { true, false })
+    {
+    CAPTURE(wireSelf);
     HorizonCode::Graph pageG;
     {
         const int ev = addEvent(pageG, "PreConstruct");
         const int child = addEngineCall(pageG, "widget.childRef");
         pageG.findNode(child)->pinDefaults[1] = HorizonCode::Value::ofString("Card");
-        HorizonCode::Node self; self.type = NodeType::GetSelf;
-        const int selfId = pageG.addNode(self);
-        REQUIRE(pageG.connect(selfId, 0, child, 0));
+        if (wireSelf)
+        {
+            HorizonCode::Node self; self.type = NodeType::GetSelf;
+            const int selfId = pageG.addNode(self);
+            REQUIRE(pageG.connect(selfId, 0, child, 0));
+        }
         HorizonCode::Node get; get.type = NodeType::GetExternal; get.s = "label";
         get.propType = PinType::String;
         const int getId = pageG.addNode(get);
@@ -407,4 +415,5 @@ TEST_CASE("Design-time run: an embed's PreConstruct lands under its ref, by offs
     const auto* onPage = findWrite(run, pageLabel, "Text");
     REQUIRE(onPage != nullptr);
     CHECK(onPage->value.s == "default");   // reached the card, before its PreConstruct
+    }
 }
