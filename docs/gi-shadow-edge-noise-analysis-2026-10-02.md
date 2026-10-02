@@ -271,7 +271,7 @@ und 4 Temporal-Pässe. Metal ist textgleich mitgezogen, aber **weder kompiliert 
 | Defekt | Änderung | Dateien |
 |---|---|---|
 | A: Clamp auf binärem 1-spp-Signal | Die Clamp-Box ist jetzt die Spanne der **3×3-Mittelwerte** des Rohsignals über einen 5×5-Footprint, erweitert um **0.1**. Bisher war es Min/Max der rohen 3×3-Taps. Eine zufällig einheitliche Nachbarschaft setzt die History so nicht mehr auf 0 oder 1 zurück. Wandert ein Verdecker, greift der Clamp weiterhin (§7.3). | `gi_temporal.frag`, `HlslSources.h` (`kGiTemporalHLSL`), `OpenGLRenderer.cpp` (`kGiTemporalFS`), `MetalRenderer.mm` (`giShadowTemporal`) |
-| B: unbeschränkter float-Seed im `sin`-Hash | (1) Host: Seed läuft in [0, 1024) um, `HE::NextGIJitterSeed` in `HorizonRendering/GIJitter.h`. Das gilt für alle fünf Backends sowie für die Reflexions-Seeds von GL und Metal. (2) Kernel: `giHash2` = Offset pro Pixel aus einem **PCG3D-Integer-Hash** + **R2-Low-Discrepancy-Schritt** pro Frame (`fract(offset + seed·(0.7549, 0.5698))`). Kein `sin` mehr, also kein Kollaps. Jeder Pixel deckt die Sonnenscheibe über die gemittelten Frames gleichmäßig ab. Reflexions-Samples bekommen mit `seed + sIdx·1024` einen eigenen Strom (bisher `+ sIdx·7.13`). | `gi_shadow.comp`, `gi_shadow_hw.comp`, `gi_shadow_hw.hlsl`, `HlslSources.h`, `OpenGLRenderer.cpp` (2×), `MetalRenderer.mm` (3×), die 5 `*Renderer.{cpp,mm}` (Host) |
+| B: unbeschränkter float-Seed im `sin`-Hash | (1) Host: Seed läuft in [0, 1024) um, `HE::NextGIJitterSeed` in `HorizonRendering/GIJitter.h`. Das gilt für alle fünf Backends sowie für die Reflexions-Seeds von GL und Metal. (2) Kernel: `giHash2` = Offset pro Pixel aus einem **PCG3D-Integer-Hash** + **R2-Low-Discrepancy-Schritt** pro Frame (`fract(offset + seed·(0.7549, 0.5698))`). Kein `sin` mehr, also kein Kollaps. Jeder Pixel deckt die Sonnenscheibe über die gemittelten Frames gleichmäßig ab. Reflexions-Samples bekommen über die gehashte Pixel-Id einen eigenen Strom, `giHash2(gid + (0, sIdx·65536), frame)` (bisher `seed + sIdx·7.13`). Ein Seed-Offset würde die R2-Folge nur um eine Fast-Konstante verschieben, die Samples eines Frames lägen dann im Azimut in zwei Keilen. | `gi_shadow.comp`, `gi_shadow_hw.comp`, `gi_shadow_hw.hlsl`, `HlslSources.h`, `OpenGLRenderer.cpp` (2×), `MetalRenderer.mm` (3×), die 5 `*Renderer.{cpp,mm}` (Host) |
 | C: Reprojektions-Toleranz zu eng | `tolerance = max(clamp(0.02·w, 0.01, 0.06), min(footprint, 0.5))`. `footprint` ist die Welt-Ausdehnung eines Masken-Texels. Gemessen wird pro Achse der **kleinere** einseitige G-Buffer-Schritt (die andere Seite kann eine andere Fläche sein), genommen wird der größere der beiden Achsen. Der Point-gesampelte History-Texel liegt bis ~0.7 Texel neben der exakten Stelle. Die Toleranz muss also einen Texel abdecken, sonst verwirft schon eine Kameradrehung die History. Die feste Untergrenze von wenigen cm bleibt der Schutz gegen falsche Flächen. | die 4 Temporal-Pässe |
 
 Dazu:
@@ -284,8 +284,10 @@ Dazu:
   (a) jede `giHash2`/`giHash2R`-Definition in **allen sechs Quelldateien**, also auch in den
   eingebetteten String-Kopien, muss der PCG+R2-Hash mit identischen Konstanten sein;
   (b) Toleranz, Footprint, Box-Mittelwert und Slack der vier Temporal-Kopien müssen übereinstimmen.
-  Negativkontrolle: Slack 0.2, Shift 9 und ein zusätzliches `h.x >>= 1u` in **einer** Metal-Kopie
-  liefern drei rote Checks mit Dateinamen.
+  Negativkontrolle gegen den committeten Guard (danach `git checkout`): Slack 0.2, ein zusätzliches
+  `h.x >>= 1u` und die R2-Konstante 0.6 statt 0.5698 in **einer** Metal-Kopie liefern je einen roten
+  Check mit Dateiname und Werten. Grenze: Der Guard kanonisiert Zahlen auf 9 signifikante Stellen,
+  eine Änderung in der 10. Stelle sieht er nicht.
   `tests/test_gi_probe_grid.cpp` prüft, dass der Seed umläuft und ganzzahlig bleibt.
 * `cap.ps1`: Die Default-Kamera ist jetzt die der Doku (−3/3/−5, Pitch −40). Die erste Fassung hatte
   −18/5/0/0, die Captures aus Schritt 1 liefen per `-Extra` mit der Doku-Kamera. Kontrolle: Mit den
@@ -311,6 +313,10 @@ Kamera, gleiche Config, frisches APPDATA, gleiches Band (Referenz = Vorher-f60 d
 | D3D11 (SW-Compute) | 1.264 → **1.007** | 7.9 → **4.9** | 1.126 → **0.666** | 167.6 → 170.1 |
 | D3D12 (DXR 1.1) | 1.283 → **1.018** | 8.0 → **4.9** | 1.104 → **0.636** | 167.3 → 169.9 |
 | OpenGL 4.3 (SW-Compute) | 1.755 → **1.247** | 12.0 → **6.2** | 1.404 → **0.785** | 179.4 → 184.3 |
+
+Der GLSL-SW-Kernel (`gi_shadow.comp`, Vulkan ohne ray_query) lief mit `HE_GI_FORCE_SW=1` und liefert
+dieselben Werte wie der HW-Pfad (1.017 / 4.9 / 0.636 / 169.9). Der HLSL-SW-String läuft auf D3D11.
+Damit sind alle sechs Kernel-Pfade gelaufen, die es hier gibt. Die zwei MSL-Kernel sind offen.
 
 Bei **0.5°** (Default) ist das Kantenrauschen schon vorher klein und bleibt es. Vulkan vorher (per
 `.spv`-Tausch) 0.276 / p99 1.9 / hf 3.01, nachher 0.286 / 1.9 / 2.97. D3D11 und D3D12 liegen
@@ -371,6 +377,11 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
 * **Metal**: textgleich geändert, nicht kompiliert, nicht gemessen. Vor einem Merge muss das MSL
   einmal auf einem Mac durch (`giShadowTemporal`, `kGIShadowMSL`, `kGISWMSL`, beide
   Reflexions-Kernel). Der Drift-Guard sichert nur die Textgleichheit.
+* **Reflexions-Kernel**: nur auf GL gemessen (`HE_DUMP_GIREFLTEST=1`, `HE_DUMP_GIREFLROUGH=0.3`,
+  Stufe High = 4 Strahlen), mit Seed-Offset-Strom (Stand 1f6f7900) gegen Pixel-Id-Strom (20277df1).
+  Beides liegt im Rauschen: Flackern im Reflexionsbereich 0.055 gegen 0.067, HF 0.513 gegen 0.514,
+  |an − aus| 15.9. Einen Vorher-Stand mit altem `sin`-Hash gibt es für die Reflexionen nicht.
+  Metal-Reflexionen sind ungeprüft.
 * **Vulkan: GI-Sonne einen Frame hinterher** (gefunden beim Bau des TODSTEP-Zeugen, *nicht*
   behoben). `VulkanRenderer::runGi()` ruft `m_extractor.extract()` ohne vorheriges
   `setDayNight()` auf. Die GI-Maske rechnet also mit der Sonne des Vorframes, während der
