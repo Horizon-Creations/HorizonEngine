@@ -75,8 +75,9 @@ Seite und legt es zurück; dabei wird nichts retired.
 - Nach jedem Schritt nimmt `PrintWindow` den Client-Bereich auf.
 - Gemessen werden die ersten UI-Kanten in der Bildmitte (`edgesY`) und die
   letzte nicht schwarze Zeile bei 90 % der Breite (`lastLitRow`).
-- Minimieren und Wiederherstellen ist nicht gefahren: Das holt den
-  Vordergrund, und der Rechner war in Benutzung.
+- Minimieren und Wiederherstellen ist nicht gefahren (`-WithMinimize`): Das
+  holt den Vordergrund, und am Rechner arbeitete jemand. `GetLastInputInfo`
+  ergab beim Abschluss 47 ms Leerlauf.
 
 | Schritt     | vorher (0513f8d4)          | nur Fix 1             | Fix 1 + 2 (3 Läufe, identisch) |
 |-------------|----------------------------|-----------------------|--------------------------------|
