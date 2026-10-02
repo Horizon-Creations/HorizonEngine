@@ -33,7 +33,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -2386,6 +2388,242 @@ TEST_CASE("Sky-View LUT: Metal's host code and kSkyMSL agree on its size and hor
 	CHECK(grab(R"(atmoPhaseRayleigh\(dot\(d, s\)\) \* 20\.0)").size() == 1);
 	CHECK(grab(R"(\+ s\.sumM \* kAtmoBM \* atmoPhaseMie\(mu\)\) \* 20\.0;)").size() == 1);
 	CHECK(grab(R"(lutMie\.sample\(lutSamp, uv\)\.rgb \* atmoPhaseMie\(dot\(d, sunDir\)\))").size() == 1);
+}
+
+namespace nebuladrift
+{
+using namespace shaderdrift;
+
+// The text between `open` and the next `close` after it; empty if either is missing.
+inline std::string rawBlock(const std::string& src, const std::string& open, const std::string& close)
+{
+	const size_t a = src.find(open);
+	if (a == std::string::npos) return {};
+	const size_t b = src.find(close, a + open.size());
+	if (b == std::string::npos) return {};
+	return src.substr(a + open.size(), b - a - open.size());
+}
+
+struct ShaderFunction
+{
+	int         definitions = 0;   // bodies carrying this name (prototypes not counted)
+	std::string params;            // between the signature's parentheses
+	std::string body;              // from '{' to its matching '}'
+};
+
+// `<type> name(...) { ... }` starting a line, found by name rather than by line
+// number, so the guard survives every edit above or inside the function.
+inline ShaderFunction findFunction(const std::string& src, const std::string& name)
+{
+	ShaderFunction fn;
+	const std::regex sig("(^|\\n)[A-Za-z_][A-Za-z0-9_]*[ \\t]+" + name + "[ \\t]*\\(");
+	for (auto it = std::sregex_iterator(src.begin(), src.end(), sig); it != std::sregex_iterator(); ++it)
+	{
+		size_t p = static_cast<size_t>(it->position() + it->length());
+		const size_t paramsBegin = p;
+		for (int depth = 1; p < src.size() && depth > 0; ++p)
+			depth += src[p] == '(' ? 1 : src[p] == ')' ? -1 : 0;
+		const size_t paramsEnd = p - 1;
+		while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+		if (p >= src.size() || src[p] != '{') continue;   // a prototype
+		const size_t bodyBegin = p;
+		for (int depth = 0; p < src.size(); ++p)
+		{
+			if (src[p] == '{') ++depth;
+			else if (src[p] == '}' && --depth == 0) { ++p; break; }
+		}
+		++fn.definitions;
+		fn.params = src.substr(paramsBegin, paramsEnd - paramsBegin);
+		fn.body   = src.substr(bodyBegin, p - bodyBegin);
+	}
+	return fn;
+}
+
+inline std::string replaceAll(std::string s, const std::string& from, const std::string& to)
+{
+	for (size_t p = s.find(from); p != std::string::npos; p = s.find(from, p + to.size()))
+		s.replace(p, from.size(), to);
+	return s;
+}
+
+// GL reads these as loose uniforms; Metal's nebula() takes them as parameters.
+inline const std::vector<std::pair<std::string, std::string>>& uniformToParam()
+{
+	static const std::vector<std::pair<std::string, std::string>> k = {
+		{ "uNebulaColor2", "nebColor2" }, { "uNebulaColor3", "nebColor3" },
+		{ "uNebulaSeed", "nebulaSeed" },  { "uNebulaHiFi", "nebQuality" },
+		{ "uNebulaCover", "nebCover" },
+	};
+	return k;
+}
+
+// The two dialect differences the copies are allowed: how the noise volume is
+// fetched (global sampler vs. threaded texture + sampler) and where the nebula
+// settings come from (uniforms vs. parameters). canonicalise() goes first so a
+// call wrapped over two lines still reads ", noiseTex, noiseSamp".
+inline std::string normaliseGL(const std::string& body)
+{
+	std::string s = replaceAll(canonicalise(body), "texture(uNoise, ", "heNoise(");
+	for (const auto& [uniform, param] : uniformToParam())
+		s = std::regex_replace(s, std::regex("\\b" + uniform + "\\b"), param);
+	return s;
+}
+inline std::string normaliseMetal(const std::string& body)
+{
+	std::string s = replaceAll(canonicalise(body), "noiseTex.sample(noiseSamp, ", "heNoise(");
+	return replaceAll(s, ", noiseTex, noiseSamp", "");
+}
+
+// Where two normalised bodies part, with a little context from each — the
+// bodies themselves run to kilobytes and would bury the one changed token.
+inline std::string firstDifference(const std::string& gl, const std::string& mtl)
+{
+	size_t i = 0;
+	while (i < gl.size() && i < mtl.size() && gl[i] == mtl[i]) ++i;
+	if (i == gl.size() && i == mtl.size()) return {};
+	const size_t from = i > 40 ? i - 40 : 0;
+	return "at offset " + std::to_string(i) + ": GL '..." + gl.substr(from, 100) +
+	       "...' vs Metal '..." + mtl.substr(from, 100) + "...'";
+}
+
+// Every function of `src` that `roots` reach through calls, roots included.
+inline std::vector<std::string> callClosure(const std::string& src, std::vector<std::string> roots)
+{
+	static const std::regex kCall(R"(\b([A-Za-z_][A-Za-z0-9_]*)\s*\()");
+	std::set<std::string> looked(roots.begin(), roots.end());   // builtins repeat dozens of times
+	for (size_t i = 0; i < roots.size(); ++i)
+	{
+		const std::string body = findFunction(src, roots[i]).body;
+		for (auto it = std::sregex_iterator(body.begin(), body.end(), kCall); it != std::sregex_iterator(); ++it)
+		{
+			const std::string callee = (*it)[1].str();
+			if (looked.insert(callee).second && findFunction(src, callee).definitions > 0)
+				roots.push_back(callee);
+		}
+	}
+	std::sort(roots.begin(), roots.end());
+	return roots;
+}
+
+inline std::vector<std::string> splitArgs(const std::string& list)
+{
+	std::vector<std::string> out;
+	std::stringstream ss(list);
+	for (std::string a; std::getline(ss, a, ',');)
+	{
+		const size_t b = a.find_first_not_of(" \t\n"), e = a.find_last_not_of(" \t\n");
+		out.push_back(b == std::string::npos ? std::string() : a.substr(b, e - b + 1));
+	}
+	return out;
+}
+} // namespace nebuladrift
+
+TEST_CASE("Nebula: Metal's kSkyMSL copy matches the GL sky shader after normalisation")
+{
+	// Nebula parity analysis 01.10.2026, point 3 (PR review A13). D3D11, D3D12 and
+	// Vulkan cross-compile GL's SkyShaderSource.h; Metal's kSkyMSL is the one
+	// hand-kept copy. A one-sided nebula edit builds fine on every backend and
+	// only shows as a different sky on one of them. So: cut nebula() and every
+	// helper it reaches out of both sources, strip what the dialects may spell
+	// differently, and require the rest to be identical — every constant, every
+	// branch, every operator.
+	using namespace nebuladrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - nebula drift comparison skipped");
+		return;
+	}
+	const std::string glFile  = readFile(root / "src" / "HE_Rendering" / "include" /
+	                                     "HorizonRendering" / "SkyShaderSource.h");
+	const std::string mtlFile = readFile(root / "src" / "HE_Rendering" / "src" /
+	                                     "Backends" / "Metal" / "MetalRenderer.mm");
+	// The shader text only: kSkyFS with the //#SKYFUNC# block it splices in, and kSkyMSL.
+	const std::string gl = stripLineComments(
+		rawBlock(glFile, "kSkyFS = R\"GLSL(", ")GLSL\"") +
+		rawBlock(glFile, "kSkyFuncGLSL = R\"GLSL(", ")GLSL\""));
+	const std::string mtl     = stripLineComments(rawBlock(mtlFile, "kSkyMSL = R\"MSL(", ")MSL\""));
+	const std::string prelude = rawBlock(glFile, "kSkyVulkanPrelude = R\"GLSL(", ")GLSL\"");
+	REQUIRE(!gl.empty());
+	REQUIRE(!mtl.empty());
+	REQUIRE(!prelude.empty());
+
+	// What to compare comes from the code, not from a list kept beside it: nebula()
+	// and celestialDir() (which makes its cdir argument), plus everything they call.
+	// A helper only one side calls, or inlines, shows up as different sets.
+	const std::vector<std::string> fns = callClosure(gl, { "nebula", "celestialDir" });
+	CHECK(fns == callClosure(mtl, { "nebula", "celestialDir" }));
+	for (const char* known : { "nebIso", "starFbm3", "starNoise3", "worleyNoise3", "mwRift" })
+		CHECK_MESSAGE(std::find(fns.begin(), fns.end(), known) != fns.end(),
+		              known, " is no longer reached from nebula() - is the call scan broken?");
+
+	for (const std::string& name : fns)
+	{
+		CAPTURE(name);
+		const ShaderFunction g = findFunction(gl, name);
+		const ShaderFunction m = findFunction(mtl, name);
+		REQUIRE(g.definitions == 1);
+		REQUIRE(m.definitions == 1);
+		const std::string diff = firstDifference(normaliseGL(g.body), normaliseMetal(m.body));
+		CHECK_MESSAGE(diff.empty(), name, "() drifted between GL and Metal ", diff);
+
+		// Signatures: Metal threads the noise volume through every helper, and
+		// nebula() additionally takes as parameters what GL reads as uniforms.
+		const std::string gp = canonicalise(g.params);
+		const std::string mp = replaceAll(canonicalise(m.params),
+		                                  ", texture3d<float> noiseTex, sampler noiseSamp", "");
+		if (name == "nebula")
+			CHECK(mp.rfind(gp + ",", 0) == 0);
+		else
+			CHECK(gp == mp);
+	}
+
+	// The body diff equates uNebulaSeed with Metal's nebulaSeed, but cannot see
+	// whether both read the same SkyFrameParams slot. Vulkan/D3D get theirs from
+	// the prelude's #defines, Metal from its call site: the two must agree.
+	const ShaderFunction mNeb = findFunction(mtl, "nebula");
+	std::vector<std::string> mParams;
+	for (const std::string& p : splitArgs(mNeb.params))
+		mParams.push_back(p.substr(p.find_last_of(" &") + 1));
+	auto callArgs = [](const std::string& src) {
+		static const std::regex kCallSite(R"(col \+= nebula\(([^;]*)\);)");
+		std::vector<std::vector<std::string>> calls;
+		for (auto it = std::sregex_iterator(src.begin(), src.end(), kCallSite); it != std::sregex_iterator(); ++it)
+			calls.push_back(splitArgs((*it)[1].str()));
+		return calls;
+	};
+	const auto glCalls  = callArgs(gl);
+	const auto mtlCalls = callArgs(mtl);
+	REQUIRE(glCalls.size() == 1);
+	REQUIRE(mtlCalls.size() == 1);
+	REQUIRE(mtlCalls[0].size() == mParams.size());
+	std::map<std::string, std::string> slotOf;   // uniform -> SkyFrameParams field
+	static const std::regex kDefine(R"(#define\s+(u[A-Za-z0-9_]+)\s+heSky\.([A-Za-z0-9_.]+))");
+	for (auto it = std::sregex_iterator(prelude.begin(), prelude.end(), kDefine); it != std::sregex_iterator(); ++it)
+		slotOf[(*it)[1].str()] = (*it)[2].str();
+	int slotsChecked = 0;
+	for (size_t i = 0; i < mParams.size(); ++i)
+	{
+		std::string uniform = i < glCalls[0].size() ? glCalls[0][i] : std::string();
+		for (const auto& [u, param] : uniformToParam())
+			if (param == mParams[i]) uniform = u;
+		const auto slot = slotOf.find(uniform);
+		if (slot == slotOf.end()) continue;   // dir, cdir, the noise volume
+		CHECK_MESSAGE(mtlCalls[0][i] == "p." + slot->second, "nebula() parameter ", mParams[i],
+		              ": Metal passes ", mtlCalls[0][i], ", GL's ", uniform, " is heSky.", slot->second);
+		++slotsChecked;
+	}
+	// sunDir, intensity, colours 1-3, seed, quality, coverage.
+	CHECK(slotsChecked == 8);
+
+	// Negative controls: the normalisation must not be so forgiving that it
+	// equates real edits — a changed constant, or two swapped settings.
+	const ShaderFunction gNeb = findFunction(gl, "nebula");
+	REQUIRE(normaliseGL(gNeb.body).size() > 5000);
+	CHECK(!firstDifference(normaliseGL(gNeb.body),
+	                       normaliseMetal(replaceAll(mNeb.body, "2.05 * intensity", "2.06 * intensity"))).empty());
+	CHECK(!firstDifference(normaliseGL(std::regex_replace(gNeb.body, std::regex(R"(\buNebulaSeed\b)"), "uNebulaHiFi")),
+	                       normaliseMetal(mNeb.body)).empty());
 }
 
 TEST_CASE("D3D12 main swapchain follows the window size (Thema 112)")
