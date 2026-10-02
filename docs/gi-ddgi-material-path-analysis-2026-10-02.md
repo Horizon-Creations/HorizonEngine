@@ -252,7 +252,7 @@ Material-Fill und die Probe-Atlanten auf den Material-Slots t17/t18 (Sampler s1/
 | GL | ja | ja | unverändert (nur auf Helfer umgestellt) |
 | Metal | ja | ja | unverändert (nur auf Helfer umgestellt) |
 | D3D12 | **jetzt ja** (`fillMatLight`) | **jetzt ja** (Vorlage, Slots 12/13) | **in diesem Schritt behoben** |
-| D3D11 | nein (`fillMatLight`, `D3D11Renderer.cpp:5724`) | nein, Registerkollision (s. §2.2) | offen, Schritt 3 |
+| D3D11 | **Schritt 3: ja** (`fillMatLight`) | **Schritt 3: ja** (Bind + Restore pro Draw) | in Schritt 3 behoben, s. §6 |
 | Vulkan | nein (Fill `VulkanRenderer.cpp:6378`) | nein, DSL ohne Binding 17/18 (`:2318-2353`) | offen, Schritt 4 |
 
 ### 5.2 Was geändert wurde
@@ -289,7 +289,7 @@ Material-Fill und die Probe-Atlanten auf den Material-Slots t17/t18 (Sampler s1/
   unberührt bleiben.
 
 ### 5.3 Was offen bleibt (Umfang für die Folgeschritte)
-
+- **D3D11 (Schritt 3): erledigt, s. §6.** Ursprünglicher Plan:
 - **D3D11 (Schritt 3, ≈ 1 Tag):**
   - `fillMatLight` (`D3D11Renderer.cpp:5724`) auf den Helfer umstellen.
   - Im Material-Draw (Bindungen ab `:6300`, `BindLandscapeWeights` `:6329`): t17 = `giIrrSRV`,
@@ -308,3 +308,50 @@ Material-Fill und die Probe-Atlanten auf den Material-Slots t17/t18 (Sampler s1/
   - Der D3D12-Code ist lokal nicht kompilierbar und hängt an der Windows-CI.
   - Die Bildparität Graph-Material gegen Built-in bei GI an ist auf D3D12 ohne Windows-Hardware
     nicht prüfbar (Zeuge wie in §4).
+
+## 6. Stand nach Schritt 3: D3D11 (02.10.2026)
+
+### 6.1 Was geändert wurde
+
+- **Fill:** `fillMatLight` (`D3D11Renderer.cpp`) ruft `HE::FillMaterialGIProbe` mit
+  `giActive && p.giIrrSRV && p.giVisSRV`, also exakt die D3D12-Form. `giActive` ist das
+  `giShadingActive` des eingebauten Shaders.
+- **Bind + Restore als zweites Paar in `D3D11MaterialBindings.h`**, neben dem t14/s0-Paar:
+  - `kGIIrradianceSrvSlot/SamplerSlot` = t17/s1, `kGIVisibilitySrvSlot/SamplerSlot` = t18/s3
+    (gegen `kHlslMaterialPins`).
+  - `BindDDGIAtlases(ctx, irr, vis, linearClamp)` vor jedem Material-Draw. Bei aktivem GI die
+    echten Atlanten, sonst der weiße Dummy. Gebunden wird **immer**, nicht nur bei offenem Gate:
+    Der Material-PS deklariert t17/t18 als `Texture2D`. Bliebe dort das Texture2DArray bzw. der
+    StructuredBuffer des eingebauten Passes liegen, wäre das auch hinter einem 0-Gate ein
+    Dimensions-Mismatch (Debug-Layer-Meldung pro Draw). Der Sampler ist `m_matWeightSampler`:
+    dieselbe Linear-Clamp-Beschreibung wie `giLinearClamp`, existiert aber auch ohne GI-Pfad.
+  - `RestoreBuiltinGISlots(ctx, BuiltinGISlots)` nach dem Draw: t17 = `localShadowSrv_` (null ohne
+    Lokal-Atlas), t18 = `clusterLightSRV` (null wenn nicht clustered), s1 = `pointSampler`,
+    s3 = `shadowSampler`. t19/t20 (Cluster-Grid/-Indizes) fasst der Material-Draw nicht an.
+- **PR #75 (Thema 117) kollidiert bei den Registern nicht:** Die Material-Cluster-Buffer liegen dort
+  auf t24-26. In `test_material_graph.cpp` und im D3D11-Material-Draw ist beim Zusammenführen aber
+  mit Textkonflikten zu rechnen.
+
+### 6.2 Test (Windows-CI, WARP)
+
+`test_material_graph.cpp`, Fall „D3D11: a graph material draw reads the DDGI atlases on t17/t18
+(s1/s3) …". Ein echter Lit-Graph (weiße Basis) durch FXC, HeLighting über `FillMaterialGIProbe`.
+Zwei Probes übereinander (Grid 1×1×2), Irradiance-Kacheln rot/grün, Visibility Kachel 0 offen,
+Kachel 1 verdeckt. Erwartet:
+
+| Fall | Pixel |
+|---|---|
+| Atlanten gebunden, Gate an | (128,128,0), 50/50-Mischung |
+| Gate aus | schwarz (Ambient 0, keine Lichter) |
+| t18 leer | ≈ (12,243,0), beide Probes lesen „verdeckt" |
+| t17 leer | schwarz |
+| nach Restore | t17/t18/s1/s3 wieder Array, Buffer, Point, Shadow |
+
+Die Werte sind von Hand gerechnet, die Herleitung steht im Kommentar über dem Testfall.
+Lokal (macOS) läuft der Fall nicht, er hängt an der Windows-CI.
+
+### 6.3 Was offen bleibt
+
+- **Vulkan (Schritt 4)** wie in §5.3.
+- Bildparität Graph-Material gegen Built-in bei GI an: auf D3D11 ebenso unbewiesen wie auf D3D12,
+  braucht Windows-Hardware (Zeuge wie in §4).

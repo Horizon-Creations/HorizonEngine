@@ -21,6 +21,16 @@
 // follows samples its albedo clamped. Both halves live here, in one place the
 // renderer calls and the WARP test in test_material_graph.cpp drives against
 // a real (software) device, so a later edit cannot fix one and forget the other.
+//
+// The DDGI probe atlases (Thema 120) are the same shape of problem, only worse:
+// the preamble's heGIIrradiance / heGIVisibility sit on t17/s1 and t18/s3, and
+// in the built-in scene pass those registers hold something of a DIFFERENT
+// TYPE — t17 the local shadow atlas (Texture2DArray), t18 the cluster lights
+// (StructuredBuffer), s1 the AO point sampler, s3 the shadow point sampler.
+// D3D11 does not unbind on a type mismatch, it hands back garbage. So the
+// material draw puts the atlases (or the white dummy when GI is off) and a
+// linear-clamp sampler there, and the built-in pass's four bindings go back
+// afterwards — the second Bind/Restore pair below.
 // ─────────────────────────────────────────────────────────────────────────────
 #if defined(_WIN32)
 #include <d3d11.h>
@@ -65,6 +75,56 @@ inline void RestoreAfterMaterialDraw(ID3D11DeviceContext* ctx, ID3D11SamplerStat
     ID3D11ShaderResourceView* nullSrv = nullptr;
     ctx->PSSetShaderResources(kWeightmapSrvSlot, 1, &nullSrv);
     ctx->PSSetSamplers(kWeightmapSamplerSlot, 1, &builtInS0);
+}
+
+// heGIIrradiance: t17 / s1, heGIVisibility: t18 / s3. Must match
+// kHlslMaterialPins in MaterialShaderLibrary.cpp (bindings 17/18 keep their SRV
+// number, the samplers moved below the SM 5.0 cap).
+constexpr UINT kGIIrradianceSrvSlot     = 17;
+constexpr UINT kGIIrradianceSamplerSlot = 1;
+constexpr UINT kGIVisibilitySrvSlot     = 18;
+constexpr UINT kGIVisibilitySamplerSlot = 3;
+
+// What the built-in scene pass keeps on those four registers, handed back by
+// RestoreBuiltinGISlots. Null is a legal value for each (the built-in shader
+// gates its reads: no local atlas this frame, not clustered).
+struct BuiltinGISlots
+{
+    ID3D11ShaderResourceView* localShadowArray = nullptr; // t17, Texture2DArray
+    ID3D11ShaderResourceView* clusterLights    = nullptr; // t18, StructuredBuffer
+    ID3D11SamplerState*       pointSampler     = nullptr; // s1
+    ID3D11SamplerState*       shadowSampler    = nullptr; // s3
+};
+
+// Before a graph-material draw: the probe atlases on t17/t18 — the live ones
+// while GI shades (FillMaterialGIProbe raises giProbe.y exactly then), the
+// white dummy otherwise, so the material shader never sees a view of the wrong
+// dimension even behind a 0 gate — and linear-clamp on s1/s3, the sampler the
+// built-in shader reads the same atlases with (GL/Metal/D3D12 use the same).
+inline void BindDDGIAtlases(ID3D11DeviceContext* ctx,
+                            ID3D11ShaderResourceView* irradiance,
+                            ID3D11ShaderResourceView* visibility,
+                            ID3D11SamplerState* linearClamp)
+{
+    ctx->PSSetShaderResources(kGIIrradianceSrvSlot, 1, &irradiance);
+    ctx->PSSetShaderResources(kGIVisibilitySrvSlot, 1, &visibility);
+    ctx->PSSetSamplers(kGIIrradianceSamplerSlot, 1, &linearClamp);
+    ctx->PSSetSamplers(kGIVisibilitySamplerSlot, 1, &linearClamp);
+}
+
+// After the draw: the built-in pass's own t17/t18/s1/s3, or the next built-in
+// draw reads its local shadow atlas as a 2D texture and its cluster lights out
+// of the irradiance atlas.
+inline void RestoreBuiltinGISlots(ID3D11DeviceContext* ctx, const BuiltinGISlots& b)
+{
+    ID3D11ShaderResourceView* t17 = b.localShadowArray;
+    ID3D11ShaderResourceView* t18 = b.clusterLights;
+    ID3D11SamplerState*       s1  = b.pointSampler;
+    ID3D11SamplerState*       s3  = b.shadowSampler;
+    ctx->PSSetShaderResources(kGIIrradianceSrvSlot, 1, &t17);
+    ctx->PSSetShaderResources(kGIVisibilitySrvSlot, 1, &t18);
+    ctx->PSSetSamplers(kGIIrradianceSamplerSlot, 1, &s1);
+    ctx->PSSetSamplers(kGIVisibilitySamplerSlot, 1, &s3);
 }
 } // namespace HE::d3d11mat
 

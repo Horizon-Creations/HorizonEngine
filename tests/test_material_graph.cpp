@@ -3882,6 +3882,262 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 		CHECK(with.b == without.b);
 	}
 }
+
+// Thema 120: graph materials on D3D11 got no DDGI — fillMatLight left
+// giProbe.y at 0 and the preamble's heGIIrradiance (t17/s1) / heGIVisibility
+// (t18/s3) were never bound. Worse than unbound: in the built-in scene pass
+// those registers hold the local shadow atlas (Texture2DArray), the cluster
+// lights (StructuredBuffer) and two point samplers. So the material draw binds
+// the atlases + linear clamp there (BindDDGIAtlases) and hands the built-in
+// four back afterwards (RestoreBuiltinGISlots) — both driven here on WARP.
+//
+// The scene is two probes stacked on z (grid 1x1x2, spacing 1, origin 0,
+// 2 probes per row → a 16x8 atlas, tile 0 left, tile 1 right) and the pixel at
+// world (0,0,0.5), normal +z. Probe 0 sits behind the surface (backface weight
+// 0.05), probe 1 in front (1.0); trilinear 0.5 each. Irradiance: tile 0 red,
+// tile 1 green. Visibility: tile 0 open (mean 1 > dist 0.5), tile 1 OCCLUDED
+// (mean 0 → Chebyshev 0 → floor 0.05). Weights 0.5*0.05*1 and 0.5*1*0.05 are
+// equal → irradiance (0.5, 0.5, 0) on a white base → pixel (128,128,0).
+// Probe 1's visibility lookup (direction -z) lands on the atlas's bottom-right
+// corner, which the linear-CLAMP sampler keeps inside tile 1. Each face of the
+// bug moves the pixel somewhere else: no visibility on t18 → both read
+// occluded → probe 1 dominates → nearly pure green; no irradiance on t17 →
+// black; gate off (ambient 0, no lights) → black.
+TEST_CASE("D3D11: a graph material draw reads the DDGI atlases on t17/t18 (s1/s3) and gives the built-in pass its registers back (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	MESSAGE(w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+
+	// ── A lit graph with a white base colour (metallic 0 → diffuse = base).
+	MaterialGraph g;
+	{
+		const int out = g.addNode(MatNodeType::Output);
+		const int c   = g.addNode(MatNodeType::ConstColor);
+		g.findNode(c)->p[0] = g.findNode(c)->p[1] = g.findNode(c)->p[2] = 1.0f;
+		REQUIRE(g.connect(c, 0, out, HE::kMatOutputBaseColorPin));
+	}
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3DBlob> vsBlob = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vsBlob.Get() != nullptr, "standard vertex: ", err);
+	const std::string glsl = HE::generateFragment(g).glsl;
+	const auto& hl = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+	REQUIRE_MESSAGE(hl.ok, hl.log);
+	ComPtr<ID3DBlob> psBlob = fxcBlob(hl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(psBlob.Get() != nullptr, "lit pixel shader: ", err);
+	{
+		// The registers this test is about, or it is not the shape that was broken.
+		const std::vector<Binding> b = reflectBindings(psBlob.Get());
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_TEXTURE, HE::d3d11mat::kGIIrradianceSrvSlot), "the lit PS does not bind t17 (heGIIrradiance)");
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_TEXTURE, HE::d3d11mat::kGIVisibilitySrvSlot), "the lit PS does not bind t18 (heGIVisibility)");
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_SAMPLER, HE::d3d11mat::kGIIrradianceSamplerSlot), "the lit PS does not bind s1");
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_SAMPLER, HE::d3d11mat::kGIVisibilitySamplerSlot), "the lit PS does not bind s3");
+	}
+	ComPtr<ID3D11VertexShader> vs;
+	ComPtr<ID3D11PixelShader>  ps;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps)));
+	static const D3D11_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il)));
+	ComPtr<ID3D11RasterizerState> rasterNoCull; // see the t14 case above
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID;
+		rd.CullMode = D3D11_CULL_NONE;
+		rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
+
+	// ── Fullscreen triangle in the z = 0.5 plane, normal +z; the 1x1 viewport's
+	// pixel centre is NDC (0,0) → world (0,0,0.5) with mvp = model = identity.
+	const MatVertex11 tri[3] = {
+		{ { -1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
+		{ {  3.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
+		{ { -1.0f,  3.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
+	};
+	ComPtr<ID3D11Buffer> vb;
+	{
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = sizeof(tri); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA init{ tri, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &vb)));
+	}
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[1] = 0.5f; u.pbr[2] = 1.0f;
+	ComPtr<ID3D11Buffer> uCB = makeConstantBuffer11(dev, &u, sizeof(u));
+	REQUIRE(uCB.Get() != nullptr);
+
+	// ── HeLighting, LIT view: no lights, zero ambient, no fog/sky — the only
+	// light is the probe field. Filled through the renderer's own helper; the
+	// gate-off twin differs in nothing but atlasesBound.
+	auto lightingCB = [&](bool atlasesBound) {
+		HE::MaterialShaderLibrary::Lighting lit{};
+		lit.giParams[0] = lit.giParams[1] = 1.0f;
+		lit.camPos[2] = 5.0f;
+		HE::FillMaterialGIProbe(lit, glm::vec3(0.0f), 1.0f, glm::ivec3(1, 1, 2), 2, 1.0f, atlasesBound);
+		return makeConstantBuffer11(dev, &lit, sizeof(lit));
+	};
+	ComPtr<ID3D11Buffer> litOn  = lightingCB(true);
+	ComPtr<ID3D11Buffer> litOff = lightingCB(false);
+	REQUIRE(litOn.Get() != nullptr);
+	REQUIRE(litOff.Get() != nullptr);
+
+	ComPtr<ID3D11Texture2D> target, staging;
+	ComPtr<ID3D11RenderTargetView> rtv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+
+	// ── The two atlases, 16x8 RGBA8: left 8x8 tile = probe 0, right = probe 1.
+	auto atlas = [&](const uint8_t (&tile0)[4], const uint8_t (&tile1)[4]) {
+		std::vector<uint8_t> px(16 * 8 * 4);
+		for (int y = 0; y < 8; ++y)
+			for (int x = 0; x < 16; ++x)
+				std::memcpy(&px[(y * 16 + x) * 4], x < 8 ? tile0 : tile1, 4);
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = 16; td.Height = 8; td.MipLevels = 1; td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		D3D11_SUBRESOURCE_DATA init{ px.data(), 16 * 4, 0 };
+		ComPtr<ID3D11Texture2D> tex;
+		ComPtr<ID3D11ShaderResourceView> srv;
+		if (SUCCEEDED(dev->CreateTexture2D(&td, &init, &tex)))
+			dev->CreateShaderResourceView(tex.Get(), nullptr, &srv);
+		return srv;
+	};
+	const uint8_t red[4] = { 255, 0, 0, 255 }, green[4] = { 0, 255, 0, 255 };
+	const uint8_t visOpen[4] = { 255, 255, 0, 255 }, visOccluded[4] = { 0, 0, 0, 255 }; // (mean, mean²)
+	ComPtr<ID3D11ShaderResourceView> irrAtlas = atlas(red, green);
+	ComPtr<ID3D11ShaderResourceView> visAtlas = atlas(visOpen, visOccluded);
+	REQUIRE(irrAtlas.Get() != nullptr);
+	REQUIRE(visAtlas.Get() != nullptr);
+	const D3D11_SAMPLER_DESC lcd = HE::d3d11mat::WeightmapSamplerDesc(); // the renderer's linear clamp
+	ComPtr<ID3D11SamplerState> linearClamp;
+	REQUIRE(SUCCEEDED(dev->CreateSamplerState(&lcd, &linearClamp)));
+
+	// ── What the built-in scene pass keeps on t17/t18/s1/s3: a Texture2DArray
+	// (local shadow atlas), a StructuredBuffer<float4> (cluster lights), a
+	// point-wrap and a point-clamp sampler — the types that must come back.
+	ComPtr<ID3D11ShaderResourceView> builtinArray, builtinBuffer;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = 4; td.MipLevels = 1; td.ArraySize = 2;
+		td.Format = DXGI_FORMAT_R32_FLOAT; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		ComPtr<ID3D11Texture2D> tex;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &tex)));
+		REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), nullptr, &builtinArray)));
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = 4 * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; bd.StructureByteStride = 16;
+		ComPtr<ID3D11Buffer> buf;
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &buf)));
+		REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(buf.Get(), nullptr, &builtinBuffer)));
+	}
+	ComPtr<ID3D11SamplerState> builtinPoint, builtinShadow;
+	{
+		D3D11_SAMPLER_DESC sd{};
+		sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+		sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+		sd.MaxLOD = D3D11_FLOAT32_MAX;
+		REQUIRE(SUCCEEDED(dev->CreateSamplerState(&sd, &builtinPoint)));
+		sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		REQUIRE(SUCCEEDED(dev->CreateSamplerState(&sd, &builtinShadow)));
+	}
+	HE::d3d11mat::BuiltinGISlots builtin;
+	builtin.localShadowArray = builtinArray.Get();
+	builtin.clusterLights    = builtinBuffer.Get();
+	builtin.pointSampler     = builtinPoint.Get();
+	builtin.shadowSampler    = builtinShadow.Get();
+
+	ctx->IASetInputLayout(il.Get());
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->RSSetState(rasterNoCull.Get());
+	const UINT stride = sizeof(MatVertex11), offset = 0;
+	ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
+	ctx->VSSetShader(vs.Get(), nullptr, 0);
+	ctx->VSSetConstantBuffers(1, 1, uCB.GetAddressOf());
+	ctx->PSSetShader(ps.Get(), nullptr, 0);
+	HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin); // the pass state before the material draw
+
+	auto samplerAt = [&](UINT slot) {
+		ComPtr<ID3D11SamplerState> s;
+		ctx->PSGetSamplers(slot, 1, &s);
+		return s;
+	};
+	auto srvAt = [&](UINT slot) {
+		ComPtr<ID3D11ShaderResourceView> s;
+		ctx->PSGetShaderResources(slot, 1, &s);
+		return s;
+	};
+	auto draw = [&](ID3D11Buffer* litCB) {
+		ctx->PSSetConstantBuffers(0, 1, &litCB);
+		return drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+	};
+
+	// 1. The fix: atlases on t17/t18, linear clamp on s1/s3, gate up → the
+	//    two probes blend 50/50 → (128,128,0).
+	HE::d3d11mat::BindDDGIAtlases(ctx, irrAtlas.Get(), visAtlas.Get(), linearClamp.Get());
+	CHECK(srvAt(HE::d3d11mat::kGIIrradianceSrvSlot).Get() == irrAtlas.Get());
+	CHECK(srvAt(HE::d3d11mat::kGIVisibilitySrvSlot).Get() == visAtlas.Get());
+	CHECK(samplerAt(HE::d3d11mat::kGIIrradianceSamplerSlot).Get() == linearClamp.Get());
+	CHECK(samplerAt(HE::d3d11mat::kGIVisibilitySamplerSlot).Get() == linearClamp.Get());
+	drainInfoQueue11(w);
+	const Pixel11 shaded = draw(litOn.Get());
+	const std::string why = drainInfoQueue11(w);
+	CHECK_MESSAGE((near8(shaded.r, 128, 3) && near8(shaded.g, 128, 3) && near8(shaded.b, 0)),
+	              "DDGI bound: expected (128,128,0), got ", int(shaded.r), ",", int(shaded.g), ",", int(shaded.b),
+	              "; debug layer: ", why);
+
+	// 2. The gate decides: same bindings, giProbe.y = 0 → flat ambient = 0 → black.
+	const Pixel11 gateOff = draw(litOff.Get());
+	CHECK_MESSAGE((near8(gateOff.r, 0) && near8(gateOff.g, 0) && near8(gateOff.b, 0)),
+	              "gate off: expected black, got ", int(gateOff.r), ",", int(gateOff.g), ",", int(gateOff.b));
+
+	// 3. Teeth, one register at a time. (a) No visibility on t18: both probes
+	//    read occluded, the front one wins → ~(12,243,0), NOT the 50/50 blend.
+	//    (b) No irradiance on t17 → black.
+	{
+		ID3D11ShaderResourceView* nullSrv = nullptr;
+		ctx->PSSetShaderResources(HE::d3d11mat::kGIVisibilitySrvSlot, 1, &nullSrv);
+		const Pixel11 noVis = draw(litOn.Get());
+		CHECK_MESSAGE((noVis.g > 200 && noVis.r < 40),
+		              "t18 empty: expected ~(12,243,0), got ", int(noVis.r), ",", int(noVis.g), ",", int(noVis.b));
+		HE::d3d11mat::BindDDGIAtlases(ctx, nullptr, visAtlas.Get(), linearClamp.Get());
+		const Pixel11 noIrr = draw(litOn.Get());
+		CHECK_MESSAGE((near8(noIrr.r, 0) && near8(noIrr.g, 0) && near8(noIrr.b, 0)),
+		              "t17 empty: expected black, got ", int(noIrr.r), ",", int(noIrr.g), ",", int(noIrr.b));
+	}
+
+	// 4. Restore: the built-in pass's array, structured buffer and both point
+	//    samplers are back on t17/t18/s1/s3.
+	HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin);
+	CHECK(srvAt(HE::d3d11mat::kGIIrradianceSrvSlot).Get() == builtinArray.Get());
+	CHECK(srvAt(HE::d3d11mat::kGIVisibilitySrvSlot).Get() == builtinBuffer.Get());
+	CHECK(samplerAt(HE::d3d11mat::kGIIrradianceSamplerSlot).Get() == builtinPoint.Get());
+	CHECK(samplerAt(HE::d3d11mat::kGIVisibilitySamplerSlot).Get() == builtinShadow.Get());
+}
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC
 
