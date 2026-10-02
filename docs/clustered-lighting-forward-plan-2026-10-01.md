@@ -66,11 +66,11 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
 
 | Backend | Bindung | Was fehlt | Zeuge |
 |---|---|---|---|
-| **D3D11** | t24–t26 | **Erledigt in Schritt 4**, siehe §3.3. | WARP-Pixeltest mit 12 Lichtern (CI Windows); HW-Pixeltest offen |
-| **D3D12** | t24–t26 | **Erledigt in Schritt 3**, siehe §3.2. | WARP-PSO-Test + Abdeckungs-Sweep (CI Windows); Pixeltest offen |
-| **Vulkan** | Set 0, 24–26 | **Erledigt in Schritt 5**, siehe §3.4. | SPIR-V-Reflexion aller Knoten gegen die Layout-Tabelle (CI alle Plattformen) + MSVC-Kompilat (CI Windows); Pixeltest offen |
+| **D3D11** | t24–t26 | **Erledigt in Schritt 4**, siehe §3.3. | WARP-Pixeltest mit 12 Lichtern (CI Windows); HW-Pixeltest RTX 4070 16/16, §3.6 |
+| **D3D12** | t24–t26 | **Erledigt in Schritt 3**, siehe §3.2. | WARP-PSO-Test + Abdeckungs-Sweep (CI Windows); HW-Pixeltest RTX 4070 16/16, §3.6 |
+| **Vulkan** | Set 0, 24–26 | **Erledigt in Schritt 5**, siehe §3.4. | SPIR-V-Reflexion aller Knoten gegen die Layout-Tabelle (CI alle Plattformen) + MSVC-Kompilat (CI Windows); HW-Pixeltest RTX 4070 16/16, §3.6 |
 | **Metal** (Forward) | Buffer 4/5/6 | **Erledigt in Schritt 2**, siehe §3.1. | he_shot A/B (md5) lokal, `MANYLIGHTS=16` |
-| **OpenGL** (≥ 4.3) | SSBO 4–6 | **Erledigt in Schritt 6**, siehe §3.5. macOS-GL (4.1) bleibt beim Fenster. | glslang-GL-Link aller Knoten-Shader (CI alle Plattformen); Laufzeit auf GL 4.3 offen |
+| **OpenGL** (≥ 4.3) | SSBO 4–6 | **Erledigt in Schritt 6**, siehe §3.5. macOS-GL (4.1) bleibt beim Fenster. | glslang-GL-Link aller Knoten-Shader (CI alle Plattformen); Laufzeit NVIDIA-GL 4.3+ 16/16, §3.6 |
 
 ### 3.1 Metal-Forward (Schritt 2, erledigt)
 
@@ -119,7 +119,7 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   gegen die Vor-Cluster-Signatur `E_INVALIDARG`, plain PS dort weiterhin OK. Sweep: alle
   Knoten-Shader auch als Cluster-Variante reflektiert und gegen die Signatur gedeckt
   (Root-SRV-Zweig in `coveredBy`), Vor-Cluster-Signatur als Negativkontrolle.
-- **Offen:** Pixel-Zeuge auf echter HW (NN-WS03), CI hat keinen D3D12-Bildlauf. Rezept wie
+- **Erledigt 2026-10-02 (§3.6):** ~~Offen:~~ Pixel-Zeuge auf echter HW (NN-WS03), CI hat keinen D3D12-Bildlauf. Rezept wie
   Metal §3.1, nur mit `HE_DUMP_RHI=D3D12`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
   `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
 
@@ -152,7 +152,7 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   Stärke 2. Erwartet: Cluster-PS mit Gate = Kontrollpixel; Fenster-PS auf demselben CB
   schwarz; Cluster-PS mit Gate 0 schwarz, mit rotem Fensterlicht = Kontrollpixel.
   Reflexion: `D3D_SIT_BYTEADDRESS` auf t24–t26 im Cluster-PS, nicht im plain PS.
-- **Offen:** Pixel-Zeuge auf echter HW (NN-WS03), Rezept wie §3.2 mit
+- **Erledigt 2026-10-02 (§3.6):** ~~Offen:~~ Pixel-Zeuge auf echter HW (NN-WS03), Rezept wie §3.2 mit
   `HE_DUMP_RHI=D3D11`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
   `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
 
@@ -191,7 +191,7 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   40 und deklariertem, ungelesenem Sampler auf 41 meldet genau das SSBO. Dazu das
   MSVC-Kompilat von `VulkanRenderer.cpp` im Windows-Job (lokal vorab: clang
   `-fsyntax-only` gegen MoltenVK, mit Negativkontrollen).
-- **Offen:** Pixel-Zeuge auf echter HW (NN-WS03), CI hat kein Vulkan-ICD. Rezept wie §3.2
+- **Erledigt 2026-10-02 (§3.6):** ~~Offen:~~ Pixel-Zeuge auf echter HW (NN-WS03), CI hat kein Vulkan-ICD. Rezept wie §3.2
   mit `HE_DUMP_RHI=Vulkan`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
   `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
   Mit Validierungs-Layer wäre zusätzlich zu prüfen, dass keine Meldung zu Bindings 24–26
@@ -234,12 +234,79 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   Blöcke stufenübergreifend). Negativkontrollen: ein Block-Mismatch zwischen den Stufen
   wird abgelehnt; ein Probe-Shader zeigt, dass `Glsl430` UBO-/Sampler-Bindings entfernt,
   SSBOs behält und Pins nur in der passenden Stufe greifen.
-- **Offen:** Laufzeit auf echtem GL 4.3 (NN-WS03 o. ä.; hier gibt es keins). Rezept wie
+- **Erledigt 2026-10-02 (§3.6):** ~~Offen:~~ Laufzeit auf echtem GL 4.3 (NN-WS03 o. ä.; hier gibt es keins). Rezept wie
   §3.2 mit `HE_DUMP_RHI=OpenGL`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
   `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert (der
   eingebaute GL-Shader `kUnlitFS` bleibt beim Fenster, §5). Im Log muss „built a
   CLUSTERED material program (GLSL 4.30)" stehen, keine Rückfall-Warnung; mit
   `HE_GL_DEBUG=1` keine Meldung zu SSBO 4–6.
+
+### 3.6 Hardware-Abnahme D3D11 / D3D12 / Vulkan / OpenGL ≥ 4.3 (Thema 129, 2026-10-02)
+
+Nachgeholt nach dem Merge von PR #75, auf NN-WS03. Code: `main` `9ed6f816` (enthält
+#75 = `df008301` **und** das danach gemergte #76 = `9c73b8ec`, siehe „7 statt 8"),
+Release, privater Deploy. GPU: **NVIDIA GeForce RTX 4070**, Treiber 610.88. Alle vier
+Backends nehmen den Default-Adapter; dass es die RTX und nicht die AMD-iGPU ist, belegt
+`nvidia-smi`: jeder Editor-Lauf steht dort als `C+G`-Prozess (Gegenprobe: ein Notepad
+taucht nicht auf). D3D11 lief also auf echter GPU, nicht WARP.
+
+Aufnahme pro Lauf mit frischem Scratch-`APPDATA`, alle `HE_*` vorher geleert:
+`HE_COLLAB_OFFLINE=1 HE_SKY_TIME=10 HE_DUMP_PATH=… HE_DUMP_QUIT=1 HE_DUMP_RHI=<Backend>
+HE_DUMP_FRAMES=16 HE_DUMP_SKYTEST=1 HE_DUMP_MANYLIGHTS=16 HE_DUMP_TOD=0 HE_DUMP_COVERAGE=0
+HE_DUMP_CLOUDMODE=0 HE_DUMP_AA=0 HE_DUMP_CAMY=207 HE_DUMP_CAMZ=2 HE_DUMP_PITCH=-38
+HE_DUMP_RENDERPATH=0` (= Metal-Rezept §3.1), B-Seite zusätzlich `HE_FORWARD_CLUSTER=0`.
+Messung je Pool: Mittel von max|Pixel − Boden| in einem festen Fenster unter der Lampe
+(Boden = Pixel 640,520); beleuchtet > 8, dunkel ≈ 0. Werte hinten (Lichter 8–15) / vorne
+(0–7), links → rechts:
+
+| Lauf | Pools | hinten | vorne |
+|---|---|---|---|
+| D3D11 / D3D12, Cluster an | **16/16** | 48 43 33 32 48 55 55 54 | 58 59 60 58 51 50 49 48 |
+| D3D11 / D3D12, `HE_FORWARD_CLUSTER=0` | 7/16 | **0** 43 33 32 48 55 55 54 | **0 0 0 0 0 0 0 0** |
+| Vulkan, Cluster an | **16/16** | 48 43 33 32 48 55 55 54 | 58 59 59 58 51 50 49 48 |
+| Vulkan, `HE_FORWARD_CLUSTER=0` | 7/16 | **0** 43 33 32 48 55 55 54 | **0 0 0 0 0 0 0 0** |
+| OpenGL, Cluster an | **16/16** | 50 45 35 34 51 58 58 57 | 61 62 62 61 54 52 51 50 |
+| OpenGL, `HE_FORWARD_CLUSTER=0` | 7/16 | **0** 45 35 34 51 58 58 57 | **0 0 0 0 0 0 0 0** |
+
+- **Ergebnis:** auf allen vier Backends beleuchtet der Graph-Material-Boden mit Clustern
+  alle 16 Pools, mit `HE_FORWARD_CLUSTER=0` nur die 7 des Fensters. Die 7 Pools, die beide
+  Seiten haben, sind auf beiden Seiten gleich hell (gleiche Messwerte). Wiederholungslauf
+  je Backend: bitgleich (Rauschboden 0). D3D11 und D3D12 sind untereinander md5-gleich,
+  Vulkan weicht von D3D11 im Mittel um 0,16 ab (max 16), GL um 1,4 — GL-Boden ist
+  minimal dunkler (182,192,211 statt 185,194,213), unabhängig vom Clustering (auch bei
+  `HE_FORWARD_CLUSTER=0` so).
+- **7 statt 8:** `orderLightWindow` (`RenderExtractor.cpp`, kam mit #76 nach #75; in
+  `df008301` noch nicht vorhanden) stellt leuchtende Directionals vorn ins 8er-Fenster.
+  Bei TOD=0 ist das der Mond, also bleiben 7 Plätze für Punktlichter. Die Metal-Messung
+  „8 von 16" (§3.1) stammt von vor #76. Das Fenster ist nicht kleiner geworden.
+- **GL:** Treiber meldet GL 4.3+ („GI (compute) supported"), Log „graph materials use
+  clustered lighting (SSBO 4/5/6)" und „built a CLUSTERED material program (GLSL 4.30)",
+  keine Rückfall-Warnung; B-Seite loggt „graph materials use the 8-light window".
+  `HE_GL_DEBUG=1` (KHR_debug synchron): nur LOW/MEDIUM-Performance-Hinweise
+  (Renderbuffer-Storage, Shader-Recompile, Pixel-Transfer, Textureinheit 3 ohne Level),
+  nichts zu SSBO 4–6; Bild bitgleich zum Lauf ohne Debug.
+- **Vulkan-Validierung** (immer an): 15 verschiedene Meldungen, mit Cluster an und aus
+  **exakt dieselbe Menge** (bekanntes Rauschen, `heAO`/`heGI*`/`heSkyEnv`/`heCloudShadow`
+  nicht im Layout bzw. ungültig), **keine** zu Bindings 24–26.
+- **D3D12-Debug-Layer** (`HE_GPU_DEBUG=1`, inkl. DRED): eine einzige Meldung
+  (ClearRenderTargetView-Clear-Wert ≠ Erzeugungswert, Performance), nichts zu
+  t24–t26/Root-Signatur; Bild bitgleich zum Lauf ohne Debug. D3D11 hat keinen
+  Debug-Layer-Schalter (nur Bildbeleg).
+- **`16builtin`:** eingebauter Shader auf D3D11/D3D12/Vulkan mit Clustern 16/16, mit
+  `HE_FORWARD_CLUSTER=0` 7/16 — der Schalter steuerte dort schon **vor** #75 auch den
+  eingebauten Shader (Guard in `ffa872f6` vorhanden), also kein neues Verhalten. Ein
+  Vorher/Nachher-Build gegen den Stand vor #75 wurde **nicht** gemacht (main enthält
+  seitdem #76, der Vergleich wäre nicht sauber zuzuordnen). Auf **GL** ist `16builtin`
+  mit und ohne Schalter bitgleich bei 7/16: `kUnlitFS` bleibt beim Fenster (§5) — die
+  Negativkontrolle, dass der GL-Gewinn wirklich aus dem Graph-Pfad kommt.
+- **Prozessende:** D3D11 endet nach dem Dump mit 0xC0000374, D3D12 mit 0xC0000005 —
+  bei Cluster an und aus gleich, also unabhängig von diesem Feature (bekanntes
+  D3D-Shutdown-Rauschen). Vulkan und GL enden mit 0.
+- **macOS-GL:** nicht geprüft und nicht prüfbar — macOS liefert GL 4.1, dort bleibt
+  `heLitP` per Design beim Fenster (§3.5). Der GL-≥-4.3-Pfad ist hier auf NVIDIA-GL
+  unter Windows abgenommen.
+- Bilder (BMP + Kontaktblatt) liegen nur lokal auf NN-WS03 unter `C:\hw129\shots`, nicht
+  im Repo; die Tabelle oben ist der Beleg.
 
 ## 4. Pak-Varianten (gilt für D3D11/D3D12/Vulkan)
 
