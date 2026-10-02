@@ -63,6 +63,9 @@ add_executable(he_tests
     # The Vulkan viewport's old ImGui descriptor set is freed only once the
     # frames drawing it are done on the GPU (Thema 124).
     test_deferred_handle_retire_list.cpp
+    # HE_DUMP_RHI against the config's RHI: the forced backend is the one the
+    # editor keeps after OnInit, or its first UI frame crashes (Thema 124, A6).
+    test_editor_backend_choice.cpp
     # …and the row itself, driven headless: the two buttons sit ON the tree
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.

@@ -578,7 +578,8 @@ private:
 	bool m_projectLoaded     = false;
 	bool m_contentRefreshPending = false;
 	bool m_contentRefreshDone    = false;
-	HE::RendererBackend m_backend;
+	// Set once, by CreateRenderer: the backend the renderer was created with.
+	HE::RendererBackend m_backend = HE::RendererBackend::OpenGL;
 	std::string m_backend_name;
 	ProjectManager m_projectManager;
 	EditorConfig m_editorConfig;
