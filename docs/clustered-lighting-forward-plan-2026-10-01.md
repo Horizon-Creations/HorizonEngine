@@ -70,7 +70,7 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
 | **D3D12** | t24–t26 | **Erledigt in Schritt 3**, siehe §3.2. | WARP-PSO-Test + Abdeckungs-Sweep (CI Windows); Pixeltest offen |
 | **Vulkan** | Set 0, 24–26 | **Erledigt in Schritt 5**, siehe §3.4. | SPIR-V-Reflexion aller Knoten gegen die Layout-Tabelle (CI alle Plattformen) + MSVC-Kompilat (CI Windows); Pixeltest offen |
 | **Metal** (Forward) | Buffer 4/5/6 | **Erledigt in Schritt 2**, siehe §3.1. | he_shot A/B (md5) lokal, `MANYLIGHTS=16` |
-| **OpenGL** (≥ 4.3) | SSBO 24–26 | Neues Target `Glsl430` in `ShaderCompiler.h` (+ `Backend::GLSL430`), Laufzeitwahl nach `GLAD_GL_VERSION_4_3` (wie `m_giSupported`, `:3082`); SPIRV-Cross-GLSL braucht die Binding-Nummern explizit (`layout(binding=…)`, GL 4.3 hat sie). Fill mit `BuildClusterLights(..., bottomLeftOrigin = true)`. macOS-GL (4.1) bleibt beim Fenster. | keiner auf diesem Mac (GL 4.1); nur CI-Kompilat |
+| **OpenGL** (≥ 4.3) | SSBO 4–6 | **Erledigt in Schritt 6**, siehe §3.5. macOS-GL (4.1) bleibt beim Fenster. | glslang-GL-Link aller Knoten-Shader (CI alle Plattformen); Laufzeit auf GL 4.3 offen |
 
 ### 3.1 Metal-Forward (Schritt 2, erledigt)
 
@@ -196,6 +196,50 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
   Mit Validierungs-Layer wäre zusätzlich zu prüfen, dass keine Meldung zu Bindings 24–26
   kommt.
+
+### 3.5 OpenGL ≥ 4.3 (Schritt 6, erledigt bis auf Pixel-Zeugen)
+
+- **Neues Target `Glsl430`** (`ShaderCompiler.h`) + `compileGlslPinned` (`GlslPin`), im
+  Stub mitdefiniert (sonst linken die App-Flavours nicht). Ab GLSL 4.20 schreibt
+  SPIRV-Cross `layout(binding = N)` auf jede Ressource mit Binding-Dekoration. Der
+  GL-Renderer bindet Uniform-Blöcke und Sampler aber **per Name** (4.10-Modell), also
+  entfernt `Glsl430` deren Bindings; nur Storage-Blöcke behalten eins (per Name erst nach
+  erfolgreichem Compile umhängbar). `Backend::GLSL430` hinten an das Enum angehängt
+  (Cache-Salze bleiben kollisionsfrei).
+- **SSBO-Bindings 4/5/6, nicht 24–26** (`kGlCluster*SsboBinding`): GL 4.3 garantiert nur
+  8 SSBO-Bindings, ein Binding ≥ dem Treiberlimit ist ein **Compile**-Fehler. 0–3 gehören
+  den GI-Compute-Pässen. Symmetrisch zu Metals Buffer 4/5/6.
+- **Programm:** beide Stufen GLSL 4.30 (`standardVertex`/`customVertex(GLSL430)` +
+  `fragmentClustered(GLSL430)`), eine Version pro Programm. Rückfall auf das 4.10-Paar
+  bei Cross-Compile-Fehler **und** bei Link-Fehler (Warnung), erst danach wird 0 gecacht.
+  G-Buffer-Variante (`gbuffer=true` an beiden Aufrufstellen) und gebackene Pak-Varianten
+  (GLSL 4.10, plain) unverändert.
+- **Entscheidung in `Initialize`:** `m_forwardClustered` = `GLAD_GL_VERSION_4_3` und
+  `HE_FORWARD_CLUSTER` ≠ 0, eigenes Flag (nicht `m_giSupported`, das bei GI-Fehlern
+  zurückfällt), vor `WarmupMaterials`. `CreateClusterSSBOs` legt die drei Puffer mit je
+  einem Null-Eintrag an und bindet sie sofort, damit Vorschau/Thumbnail (gleiches
+  Programm, Gate 0) nie ein ungebundenes SSBO lesen. macOS (GL 4.1) bleibt beim Fenster.
+- **DrawScene:** ein `BuildClusterLights(..., localShadows, giShadingActive &&
+  m_giLocalMaskTex, bottomLeftOrigin = true)` pro Frame, vor dem ersten `fillMatLight`;
+  `UploadClusterLists` lädt und bindet 4/5/6 neu. Gate per `FillMaterialClusterParams` in
+  `fillMatLight`. Fenster bleibt voll (§2.1/1), `giParams.xy` war schon der Viewport
+  (§2.1/3). `bottomLeftOrigin` geprüft: die Szene rendert ohne Y-Flip mit
+  `glViewport(0, 0, pw, ph)` in `m_hdrFBO` bzw. den G-Buffer. Der GL-Deferred-Resolve
+  (GLSL 4.10, eigener `HeResolve`-Block) liest das Gate nicht.
+- **Zeuge (CI alle Plattformen + lokal):** `test_material_graph.cpp`, „OpenGL 4.3: the
+  clustered variant is GLSL 4.30 with SSBOs 4..6 only and links with its vertex". Für
+  alle 75 Knoten-Shader: `#version 430`, Storage-Blöcke genau auf 4/5/6 (75/75), kein
+  `binding` auf Uniform-Block/Sampler, Vertex ohne Binding, und **glslang im reinen
+  OpenGL-Modus** parst beide Stufen und linkt sie (`TProgram::link` prüft gleichnamige
+  Blöcke stufenübergreifend). Negativkontrollen: ein Block-Mismatch zwischen den Stufen
+  wird abgelehnt; ein Probe-Shader zeigt, dass `Glsl430` UBO-/Sampler-Bindings entfernt,
+  SSBOs behält und Pins nur in der passenden Stufe greifen.
+- **Offen:** Laufzeit auf echtem GL 4.3 (NN-WS03 o. ä.; hier gibt es keins). Rezept wie
+  §3.2 mit `HE_DUMP_RHI=OpenGL`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
+  `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert (der
+  eingebaute GL-Shader `kUnlitFS` bleibt beim Fenster, §5). Im Log muss „built a
+  CLUSTERED material program (GLSL 4.30)" stehen, keine Rückfall-Warnung; mit
+  `HE_GL_DEBUG=1` keine Meldung zu SSBO 4–6.
 
 ## 4. Pak-Varianten (gilt für D3D11/D3D12/Vulkan)
 

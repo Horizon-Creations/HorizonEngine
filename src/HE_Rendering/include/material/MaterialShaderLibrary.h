@@ -23,7 +23,11 @@ namespace HE
 class MaterialShaderLibrary
 {
 public:
-    enum class Backend { Metal, HLSL, GLSL410, GLSLES300, SpirV };
+    // GLSL430 = desktop GL 4.3+ (SSBOs): only the GL backend's clustered graph-material
+    // programs use it (fragmentClustered + the matching vertex); everything else on GL
+    // stays GLSL410, which macOS (GL 4.1) can still compile. Append-only — the caches
+    // salt their keys with the enum value.
+    enum class Backend { Metal, HLSL, GLSL410, GLSLES300, SpirV, GLSL430 };
 
     // Stable shading input for material pipelines — the "material lighting ABI".
     // The engine fills this each frame; the standard-lit preamble's heLit() reads the
@@ -173,6 +177,12 @@ public:
     static constexpr int kMetalClusterLightsBufferIndex = 4;
     static constexpr int kMetalClusterGridBufferIndex   = 5;
     static constexpr int kMetalClusterIndexBufferIndex  = 6;
+    // GL 4.3 (GLSL430): the same three lists as shader-storage bindings 4/5/6
+    // (glBindBufferBase(GL_SHADER_STORAGE_BUFFER, …)). Not 24..26: GL 4.3 only
+    // guarantees 8 SSBO bindings, and the GI compute passes own 0..3.
+    static constexpr int kGlClusterLightsSsboBinding = 4;
+    static constexpr int kGlClusterGridSsboBinding   = 5;
+    static constexpr int kGlClusterIndexSsboBinding  = 6;
 
     struct Compiled
     {
@@ -414,7 +424,9 @@ public:
     // bind all three buffers (D3D12: root signature, Vulkan: set layout), so a
     // backend switches to this only together with its binding code.
     // GLSL410 / GLSLES300 have no SSBOs → ok = false with a log line, never a
-    // silent fallback to the window variant.
+    // silent fallback to the window variant. GLSL430 pins the lists to SSBO
+    // bindings 4/5/6 (kGlCluster*SsboBinding) and drops every other binding;
+    // pair it with standardVertex/customVertex(GLSL430) in one program.
     const Compiled& fragmentClustered(uint64_t sourceHash, const std::string& glsl, Backend backend);
 
     // Custom vertex for World-Position-Offset materials: wraps the graph-generated BODY

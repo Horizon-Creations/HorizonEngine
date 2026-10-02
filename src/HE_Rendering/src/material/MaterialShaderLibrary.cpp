@@ -146,6 +146,7 @@ he::shaderc::Target toTarget(MaterialShaderLibrary::Backend b)
         case B::GLSL410:   return T::Glsl410;
         case B::GLSLES300: return T::GlslEs300;
         case B::SpirV:     return T::SpirvBinary;
+        case B::GLSL430:   return T::Glsl430;
     }
     return T::Msl;
 }
@@ -2456,10 +2457,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
     if (clustered && (backend == Backend::GLSL410 || backend == Backend::GLSLES300))
     {
         // No SSBOs below GL 4.3 / in ES 3.0. Refuse loudly: handing back the
-        // window variant would let a GL 4.3 port "work" without ever noticing
-        // that the material compiler has no GLSL 430 target yet.
+        // window variant would let a caller asking for the wrong GL target
+        // "work" without ever noticing it never clusters.
         out.log = "fragmentClustered: the clustered variant needs SSBOs; "
-                  "GLSL410/GLSLES300 have none (a GL 4.3 port needs a GLSL 430 target)";
+                  "GLSL410/GLSLES300 have none (GL 4.3+ uses Backend::GLSL430)";
         return m_fragCache.emplace(key, std::move(out)).first->second;
     }
     const std::string injected = injectPreamble(glsl, clustered); // adds the lighting UBO + heLit()
@@ -2659,6 +2660,17 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 26, 26 }); // HeClusterIdx    → t26
         }
         out = toCompiled(compileHlslPinned(injected, Stage::Fragment, pins));
+    }
+    else if (backend == Backend::GLSL430 && clustered)
+    {
+        // GL 4.3: the three lists move down to SSBO bindings 4/5/6 — 24..26
+        // would be a compile error on a driver at GL 4.3's guaranteed 8
+        // bindings. Uniform blocks and samplers lose their binding (the GL
+        // renderer binds them by name, exactly as for GLSL410).
+        out = toCompiled(compileGlslPinned(injected, Stage::Fragment,
+            { { Stage::Fragment, 0, 24, static_cast<uint32_t>(kGlClusterLightsSsboBinding) },
+              { Stage::Fragment, 0, 25, static_cast<uint32_t>(kGlClusterGridSsboBinding) },
+              { Stage::Fragment, 0, 26, static_cast<uint32_t>(kGlClusterIndexSsboBinding) } }));
     }
     else
     {

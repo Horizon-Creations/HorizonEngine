@@ -2497,6 +2497,8 @@ TEST_CASE("Material instance resolves to the master's shader hash + baked varian
 #include <set>
 #include <tuple>
 #include <spirv_cross.hpp>                         // Vulkan reflection (Thema 117)
+#include <glslang/Public/ShaderLang.h>             // GL 4.3 front-end judge (Thema 117)
+#include <glslang/Public/ResourceLimits.h>
 #include <ShaderCompiler.h>                        // he::shaderc (reflection negative control)
 #include <Backends/Vulkan/VulkanMaterialLayout.h>  // the renderer's material set 0
 #if defined(_WIN32)
@@ -3132,6 +3134,150 @@ TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in
 	MESSAGE("clustered SPIR-V with set 0 SSBOs 24..26: ", withLists, "/", cases.size(),
 	        "; plain uses outside the layout (pre-existing):",
 	        uncoveredVk(std::vector<VkUse>(plainGap.begin(), plainGap.end()), 0));
+}
+
+// ═══ Thema 117 Schritt 6: OpenGL 4.3 binds the clustered variant ═════════════
+// OpenGLRenderer links forward graph materials from standardVertex /
+// customVertex(GLSL430) + fragmentClustered(GLSL430) and binds the lists on
+// SSBO 4/5/6; uniform blocks and samplers stay bound by NAME. There is no
+// GL 4.3 context anywhere this runs (macOS GL is 4.1, CI has no display), so
+// the judge is glslang in plain OpenGL mode (no SPIR-V/Vulkan rules): the
+// GLSL 4.30 front end a driver would run, plus TProgram::link, which holds the
+// two stages against each other (same-named blocks must match).
+namespace
+{
+bool glslGlLink(const std::string& vs, const std::string& fs, std::string& err)
+{
+	glslang::InitializeProcess();
+	bool ok = true;
+	{
+		glslang::TShader v(EShLangVertex), f(EShLangFragment);
+		const char* vp = vs.c_str();
+		const char* fp = fs.c_str();
+		v.setStrings(&vp, 1);
+		f.setStrings(&fp, 1);
+		const TBuiltInResource* res = GetDefaultResources();
+		if (!v.parse(res, 100, false, EShMsgDefault)) { ok = false; err += std::string("vertex: ") + v.getInfoLog(); }
+		if (!f.parse(res, 100, false, EShMsgDefault)) { ok = false; err += std::string("fragment: ") + f.getInfoLog(); }
+		if (ok)
+		{
+			glslang::TProgram p;
+			p.addShader(&v);
+			p.addShader(&f);
+			if (!p.link(EShMsgDefault)) { ok = false; err += std::string("link: ") + p.getInfoLog(); }
+		}
+	}
+	glslang::FinalizeProcess();
+	return ok;
+}
+
+// Every `layout(... binding = N ...)` of an emitted GLSL source: on a shader
+// storage block → `buffers`, on anything else → `other` (the declaration text).
+struct GlBindings
+{
+	std::set<int>            buffers;
+	std::vector<std::string> other;
+};
+GlBindings glBindingsOf(const std::string& src)
+{
+	GlBindings out;
+	static const std::regex decl(R"(layout\(([^)]*)\)([^;{]*))");
+	static const std::regex bind(R"(binding\s*=\s*(\d+))");
+	for (auto it = std::sregex_iterator(src.begin(), src.end(), decl); it != std::sregex_iterator(); ++it)
+	{
+		const std::string q = (*it)[1].str(), rest = (*it)[2].str();
+		std::smatch m;
+		if (!std::regex_search(q, m, bind)) continue;
+		if (std::regex_search(rest, std::regex(R"(\bbuffer\b)")))
+			out.buffers.insert(std::stoi(m[1].str()));
+		else
+			out.other.push_back(q + rest);
+	}
+	return out;
+}
+} // namespace
+
+TEST_CASE("OpenGL 4.3: the clustered variant is GLSL 4.30 with SSBOs 4..6 only and links with its vertex (Thema 117)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using L = HE::MaterialShaderLibrary;
+	static_assert(L::kGlClusterLightsSsboBinding > 3, "the GI compute passes own SSBO bindings 0..3");
+	static_assert(L::kGlClusterIndexSsboBinding < 8, "GL 4.3 guarantees only 8 SSBO bindings");
+	const std::set<int> lists = { L::kGlClusterLightsSsboBinding, L::kGlClusterGridSsboBinding,
+	                              L::kGlClusterIndexSsboBinding };
+	HE::MaterialShaderLibrary lib;
+
+	SUBCASE("the judge rejects a cross-stage block mismatch (negative control)")
+	{
+		const std::string vs =
+			"#version 430\nlayout(std140) uniform B { vec4 a; } ub;\nvoid main() { gl_Position = ub.a; }\n";
+		const std::string fsGood =
+			"#version 430\nlayout(std140) uniform B { vec4 a; } ub;\nout vec4 o;\nvoid main() { o = ub.a; }\n";
+		const std::string fsBad =
+			"#version 430\nlayout(std140) uniform B { vec2 a; } ub;\nout vec4 o;\nvoid main() { o = vec4(ub.a, 0.0, 1.0); }\n";
+		std::string err;
+		CHECK_MESSAGE(glslGlLink(vs, fsGood, err), err);
+		std::string errBad;
+		CHECK_FALSE(glslGlLink(vs, fsBad, errBad));
+		MESSAGE("negative control rejected with: ", errBad);
+	}
+	SUBCASE("Glsl430 drops uniform/sampler bindings, keeps SSBOs, pins move them")
+	{
+		const std::string probe =
+			"#version 450\n"
+			"layout(std140, set = 0, binding = 3) uniform U { vec4 u; };\n"
+			"layout(set = 0, binding = 5) uniform sampler2D tex;\n"
+			"layout(std430, set = 0, binding = 40) readonly buffer P { vec4 p[]; };\n"
+			"layout(location = 0) out vec4 o;\n"
+			"void main() { o = u + p[0] + texture(tex, vec2(0.5)); }\n";
+		using namespace he::shaderc;
+		const Result plain = compile(probe, Stage::Fragment, Target::Glsl430);
+		REQUIRE_MESSAGE(plain.ok, plain.log);
+		const GlBindings pb = glBindingsOf(plain.source);
+		CHECK(pb.buffers == std::set<int>{ 40 });
+		CHECK_MESSAGE(pb.other.empty(), (pb.other.empty() ? std::string() : pb.other.front()));
+		const Result pinned = compileGlslPinned(probe, Stage::Fragment, { { Stage::Fragment, 0, 40, 2 } });
+		REQUIRE_MESSAGE(pinned.ok, pinned.log);
+		CHECK(glBindingsOf(pinned.source).buffers == std::set<int>{ 2 });
+		CHECK(glBindingsOf(pinned.source).other.empty());
+		// A pin for the other stage leaves it alone.
+		const Result vsPin = compileGlslPinned(probe, Stage::Fragment, { { Stage::Vertex, 0, 40, 2 } });
+		REQUIRE(vsPin.ok);
+		CHECK(glBindingsOf(vsPin.source).buffers == std::set<int>{ 40 });
+	}
+	SUBCASE("every node shader: 4.30, lists on 4/5/6 or nothing, links with its vertex")
+	{
+		const std::vector<NodeShaderCase> cases = allNodeShaderCases();
+		REQUIRE(cases.size() > 40);
+		int withLists = 0;
+		for (const NodeShaderCase& c : cases)
+		{
+			const uint64_t h = caseHash(c);
+			const auto& f = lib.fragmentClustered(h, c.glsl, B::GLSL430);
+			REQUIRE_MESSAGE(f.ok, c.name, ": ", f.log);
+			const auto& v = c.vertBody.empty()
+				? lib.standardVertex(B::GLSL430)
+				: lib.customVertex(std::hash<std::string>{}(c.vertBody), c.vertBody, B::GLSL430);
+			REQUIRE_MESSAGE(v.ok, c.name, ": ", v.log);
+			CHECK_MESSAGE(f.source.rfind("#version 430", 0) == 0, c.name);
+			CHECK_MESSAGE(v.source.rfind("#version 430", 0) == 0, c.name);
+
+			const GlBindings fb = glBindingsOf(f.source);
+			CHECK_MESSAGE((fb.buffers.empty() || fb.buffers == lists), c.name, ": unexpected SSBO bindings");
+			CHECK_MESSAGE(fb.other.empty(), c.name, ": bound by layout: ", (fb.other.empty() ? std::string() : fb.other.front()));
+			if (fb.buffers == lists) ++withLists;
+			const GlBindings vb = glBindingsOf(v.source);
+			CHECK_MESSAGE((vb.buffers.empty() && vb.other.empty()), c.name, ": vertex carries a binding");
+
+			std::string err;
+			CHECK_MESSAGE(glslGlLink(v.source, f.source, err), c.name, ": ", err);
+			// The plain GLSL 4.10 program the renderer falls back to has no
+			// storage blocks at all (macOS GL 4.1 compiles it).
+			CHECK_MESSAGE(lib.fragment(h, c.glsl, B::GLSL410).source.find(" buffer ") == std::string::npos, c.name);
+		}
+		CHECK(withLists * 2 > static_cast<int>(cases.size()));
+		MESSAGE("GLSL 4.30 clustered fragments with SSBOs 4/5/6: ", withLists, "/", cases.size());
+	}
 }
 
 #if defined(_WIN32)
