@@ -40,6 +40,21 @@ right away anyway. A widget that destroys itself in PreConstruct never gets
 its Construct. PreConstruct exists only for widgets; HC classes and entities
 do not fire it. Design: `docs/widget-pre-construct-design.md`.
 
+**PreConstruct at design time.** The widget designer runs PreConstruct too
+(toolbar switch **Pre Construct**, on by default), so text and colours a graph
+sets show on the canvas while you lay the widget out, embedded widgets
+included. It runs on the document as it is in the editor, always interpreted,
+and only PreConstruct: never Construct, Tick or Destruct. It runs in a sandbox:
+Set Property, variables, functions and events within the widget family, Get
+Child Widget and the pure rows of Math, String, JSON and Date/Time work;
+every other Engine Call (files, saves, prefs, HTTP, network, sound, random,
+the world) and Create Widget/Object are skipped, their outputs read as
+defaults, and the canvas lists what was skipped. A Delay parks forever there.
+**Is Design Time** (Engine Call `widget.isDesignTime`, pure Bool) is true only
+in that run, so `PreConstruct → Branch(Is Design Time)` gives the designer
+placeholder data and the game the real thing. What the run sets is shown, never
+saved: Details, undo and the saved asset keep the authored values.
+
 An Entity class is attached through the ordinary **Script** component — the same
 slot that carries a `.lua`/`.py` script; the engine branches on the referenced
 asset's type. There is no separate "HorizonCode component". The instance and the
