@@ -68,7 +68,7 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
 |---|---|---|---|
 | **D3D11** | t24–t26 | **Erledigt in Schritt 4**, siehe §3.3. | WARP-Pixeltest mit 12 Lichtern (CI Windows); HW-Pixeltest offen |
 | **D3D12** | t24–t26 | **Erledigt in Schritt 3**, siehe §3.2. | WARP-PSO-Test + Abdeckungs-Sweep (CI Windows); Pixeltest offen |
-| **Vulkan** | Set 0, 24–26 | `m_matSetLayout` (`:2354`) um drei `STORAGE_BUFFER` (Fragment) erweitern, Pool-Größen, Material-Descriptor-Writes auf die vorhandenen Cluster-SSBOs (`:1863`). | nur Kompilat (kein Laufzeit-Zeuge in CI; MoltenVK lokal nur Syntax) |
+| **Vulkan** | Set 0, 24–26 | **Erledigt in Schritt 5**, siehe §3.4. | SPIR-V-Reflexion aller Knoten gegen die Layout-Tabelle (CI alle Plattformen) + MSVC-Kompilat (CI Windows); Pixeltest offen |
 | **Metal** (Forward) | Buffer 4/5/6 | **Erledigt in Schritt 2**, siehe §3.1. | he_shot A/B (md5) lokal, `MANYLIGHTS=16` |
 | **OpenGL** (≥ 4.3) | SSBO 24–26 | Neues Target `Glsl430` in `ShaderCompiler.h` (+ `Backend::GLSL430`), Laufzeitwahl nach `GLAD_GL_VERSION_4_3` (wie `m_giSupported`, `:3082`); SPIRV-Cross-GLSL braucht die Binding-Nummern explizit (`layout(binding=…)`, GL 4.3 hat sie). Fill mit `BuildClusterLights(..., bottomLeftOrigin = true)`. macOS-GL (4.1) bleibt beim Fenster. | keiner auf diesem Mac (GL 4.1); nur CI-Kompilat |
 
@@ -155,6 +155,47 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
 - **Offen:** Pixel-Zeuge auf echter HW (NN-WS03), Rezept wie §3.2 mit
   `HE_DUMP_RHI=D3D11`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
   `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
+
+### 3.4 Vulkan (Schritt 5, erledigt bis auf Pixel-Zeugen)
+
+- **Kein zweiter Puffersatz.** Die drei Cluster-SSBOs pro Frame-Slot
+  (`m_clusterLights/Grid/Idx`, Szenen-Set-Bindings 10–12 des eingebauten Shaders) haben
+  dasselbe Byte-Layout wie die std430-Listen der Cluster-Variante. Jedes Material-Set
+  bekommt sie zusätzlich auf Bindings **24/25/26** geschrieben. Ein Build pro Frame
+  (`frameClusters` in `DrawScene`, aus dem Frame-UBO-Block hochgezogen) bedient beide.
+- **`VulkanMaterialLayout.h`** (`HE::vkmat::kBindings`): die eine Tabelle, aus der
+  `createMaterialResources` das Set-Layout baut **und** die Pool-Größen zählt
+  (`countOf(kind)`). Ohne Storage-Eintrag im Pool scheitert `vkAllocateDescriptorSets`,
+  und die Draw-Schleife überspringt jedes Graph-Material stumm; deshalb zählt der Pool
+  aus derselben Tabelle wie das Layout. Kein `vulkan/vulkan.h` im Header (he_tests baut
+  auf macOS/Linux ohne SDK), Stage-Bits per `static_assert` gegen Vulkans Werte. Die drei
+  Cluster-Zeilen stehen zuletzt, `kPreClusterBindingCount` schneidet sie für die
+  Negativkontrolle ab.
+- Per-Draw-Writes auf 24–26, sobald `m_clusterReady` (auch bei Gate 0: eine geclusterte
+  Pipeline nutzt sie statisch, ihr Set muss vollständig sein). Ohne SSBOs ist jede Pipeline
+  die plain-Variante, die keines der drei Bindings nutzt.
+- `GetOrBuildMaterialPipeline`: Cross-Compile nimmt `fragmentClustered`, solange
+  `m_forwardClustered && m_clusterReady` (beides in `createScenePipeline` entschieden,
+  vor `createMaterialResources`); Fehler → Warnung + Rückfall auf `fragment()`. Gebackene
+  Pak-Blobs unverändert (§4). `HE_FORWARD_CLUSTER=0` = plain-Pipelines, Gate 0.
+- Lit-Fill: `FillMaterialClusterParams(frameClusters, lit)` nur wenn `clustered`
+  (SSBOs da, Guard nicht gesetzt, Lichter vorhanden). Fenster bleibt voll (§2.1/1),
+  `giParams.xy` war schon der Viewport (§2.1/3).
+- **Zeuge (CI, alle Plattformen):** `test_material_graph.cpp`, „Vulkan: the clustered
+  variant adds exactly set 0 SSBOs 24..26, all in the material layout". SPIRV-Cross
+  reflektiert die **statisch benutzten** Deskriptoren (`get_active_interface_variables`)
+  beider Varianten jedes Knoten-Shaders: die Cluster-Variante fügt genau die drei
+  Storage-Buffer in Set 0 hinzu (oder nichts, wo heLitP nicht erreicht wird), nimmt
+  nichts weg, die Tabelle deckt sie, die Vor-Cluster-Tabelle nicht; der plain-Shader fasst
+  24–26 nie an. Negativkontrolle der Reflexion: ein Probe-Shader mit gelesenem SSBO auf
+  40 und deklariertem, ungelesenem Sampler auf 41 meldet genau das SSBO. Dazu das
+  MSVC-Kompilat von `VulkanRenderer.cpp` im Windows-Job (lokal vorab: clang
+  `-fsyntax-only` gegen MoltenVK, mit Negativkontrollen).
+- **Offen:** Pixel-Zeuge auf echter HW (NN-WS03), CI hat kein Vulkan-ICD. Rezept wie §3.2
+  mit `HE_DUMP_RHI=Vulkan`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
+  `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert.
+  Mit Validierungs-Layer wäre zusätzlich zu prüfen, dass keine Meldung zu Bindings 24–26
+  kommt.
 
 ## 4. Pak-Varianten (gilt für D3D11/D3D12/Vulkan)
 

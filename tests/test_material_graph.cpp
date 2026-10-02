@@ -2493,6 +2493,12 @@ TEST_CASE("Material instance resolves to the master's shader hash + baked varian
 // (ENABLE_OPT=OFF), so there is no spirv-val here and no device in CI.
 #if defined(HE_TESTS_HAVE_SHADERC)
 #include <regex>
+#include <iterator>
+#include <set>
+#include <tuple>
+#include <spirv_cross.hpp>                         // Vulkan reflection (Thema 117)
+#include <ShaderCompiler.h>                        // he::shaderc (reflection negative control)
+#include <Backends/Vulkan/VulkanMaterialLayout.h>  // the renderer's material set 0
 #if defined(_WIN32)
 // windows.h FIRST, so ID3D12InfoQueue::GetMessage is declared and called under
 // the same macro state (winuser.h renames GetMessage to GetMessageW).
@@ -2973,6 +2979,159 @@ TEST_CASE("Clustered heLitP variant: three buffers, no sampler, refused without 
 		CHECK(v.source.find("clusterParams") != std::string::npos);
 		CHECK(v.source.find("clusterCamFwd") != std::string::npos);
 	}
+}
+
+// ═══ Thema 117 Schritt 5: Vulkan binds the clustered variant ═════════════════
+// VulkanRenderer builds every graph-material pipeline against ONE set layout
+// (HE::vkmat::kBindings) and, with the cluster SSBOs up, from
+// fragmentClustered(SpirV). CI has no Vulkan device, so neither "the layout
+// covers what the shader uses" nor "the pool counts every kind" can be watched
+// at runtime. What can: SPIRV-Cross reflection of the STATICALLY used
+// descriptors (get_active_interface_variables), held against the same table
+// the renderer turns into its layout and pool.
+namespace
+{
+struct VkUse
+{
+	uint32_t set     = 0;
+	uint32_t binding = 0;
+	int      kind    = -1; // HE::vkmat::DescKind, or -1 for a kind the material set never has
+	bool operator<(const VkUse& o) const { return std::tie(set, binding, kind) < std::tie(o.set, o.binding, o.kind); }
+	bool operator==(const VkUse& o) const { return set == o.set && binding == o.binding && kind == o.kind; }
+};
+
+std::vector<VkUse> activeVkDescriptors(const std::vector<uint32_t>& spirv, std::string& err)
+{
+	std::vector<VkUse> out;
+	try
+	{
+		spirv_cross::Compiler comp(spirv);
+		const spirv_cross::ShaderResources r =
+			comp.get_shader_resources(comp.get_active_interface_variables());
+		auto add = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, int kind) {
+			for (const spirv_cross::Resource& res : list)
+				out.push_back({ comp.get_decoration(res.id, spv::DecorationDescriptorSet),
+				                comp.get_decoration(res.id, spv::DecorationBinding), kind });
+		};
+		using K = HE::vkmat::DescKind;
+		add(r.uniform_buffers, static_cast<int>(K::UniformBuffer));
+		add(r.sampled_images,  static_cast<int>(K::CombinedImageSampler));
+		add(r.storage_buffers, static_cast<int>(K::StorageBuffer));
+		add(r.separate_images,   -1);
+		add(r.separate_samplers, -1);
+		add(r.storage_images,    -1);
+	}
+	catch (const std::exception& e)
+	{
+		err = e.what();
+	}
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
+// The uses the first `rows` rows of the material table do not cover (set 0,
+// same binding, same kind), as "binding:kind" text — empty when all bind.
+std::string uncoveredVk(const std::vector<VkUse>& uses, uint32_t rows)
+{
+	std::string miss;
+	for (const VkUse& u : uses)
+	{
+		bool ok = false;
+		for (uint32_t i = 0; i < rows && !ok; ++i)
+			ok = u.set == 0 && HE::vkmat::kBindings[i].binding == u.binding
+			  && static_cast<int>(HE::vkmat::kBindings[i].kind) == u.kind;
+		if (!ok)
+			miss += " " + std::to_string(u.set) + "/" + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
+} // namespace
+
+TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in the material layout (Thema 117)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using HE::vkmat::DescKind;
+	HE::MaterialShaderLibrary lib;
+
+	// The table itself: what the renderer's pool is sized from.
+	static_assert(HE::vkmat::countOf(DescKind::StorageBuffer) == 3);
+	CHECK(HE::vkmat::kBindings[HE::vkmat::kPreClusterBindingCount + 0].binding == HE::vkmat::kClusterLightsBinding);
+	CHECK(HE::vkmat::kBindings[HE::vkmat::kPreClusterBindingCount + 1].binding == HE::vkmat::kClusterGridBinding);
+	CHECK(HE::vkmat::kBindings[HE::vkmat::kPreClusterBindingCount + 2].binding == HE::vkmat::kClusterIdxBinding);
+	for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
+		for (uint32_t j = i + 1; j < HE::vkmat::kBindingCount; ++j)
+			CHECK_MESSAGE(HE::vkmat::kBindings[i].binding != HE::vkmat::kBindings[j].binding,
+			              "duplicate binding ", HE::vkmat::kBindings[i].binding);
+
+	const std::vector<VkUse> clusterLists = {
+		{ 0, HE::vkmat::kClusterLightsBinding, static_cast<int>(DescKind::StorageBuffer) },
+		{ 0, HE::vkmat::kClusterGridBinding,   static_cast<int>(DescKind::StorageBuffer) },
+		{ 0, HE::vkmat::kClusterIdxBinding,    static_cast<int>(DescKind::StorageBuffer) },
+	};
+
+	// Negative control for the reflection: a shader that really reads an SSBO
+	// at binding 40 must report it, and the table must refuse it.
+	{
+		const std::string probe =
+			"#version 450\n"
+			"layout(std430, set = 0, binding = 40) readonly buffer P { vec4 p[]; };\n"
+			"layout(set = 0, binding = 41) uniform sampler2D unusedTex;\n"
+			"layout(location = 0) out vec4 o;\n"
+			"void main() { o = p[0]; }\n";
+		const he::shaderc::Result pr = he::shaderc::compile(probe, he::shaderc::Stage::Fragment,
+		                                                    he::shaderc::Target::SpirvBinary);
+		REQUIRE_MESSAGE(pr.ok, pr.log);
+		std::string err;
+		const std::vector<VkUse> u = activeVkDescriptors(pr.spirv, err);
+		REQUIRE_MESSAGE(err.empty(), err);
+		REQUIRE(u.size() == 1); // the declared-but-unread sampler is NOT active
+		CHECK(u[0] == VkUse{ 0, 40, static_cast<int>(DescKind::StorageBuffer) });
+		CHECK_FALSE(uncoveredVk(u, HE::vkmat::kBindingCount).empty());
+	}
+
+	const std::vector<NodeShaderCase> cases = allNodeShaderCases();
+	REQUIRE(cases.size() > 40);
+	int withLists = 0;
+	std::set<VkUse> plainGap; // pre-existing: plain uses the table never covered
+	for (const NodeShaderCase& c : cases)
+	{
+		const uint64_t h = caseHash(c);
+		const auto& plain = lib.fragment(h, c.glsl, B::SpirV);
+		const auto& cl    = lib.fragmentClustered(h, c.glsl, B::SpirV);
+		REQUIRE_MESSAGE(plain.ok, c.name, ": ", plain.log);
+		REQUIRE_MESSAGE(cl.ok, c.name, ": ", cl.log);
+		std::string err;
+		const std::vector<VkUse> up = activeVkDescriptors(plain.spirv, err);
+		REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
+		const std::vector<VkUse> uc = activeVkDescriptors(cl.spirv, err);
+		REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
+
+		// What the clustered twin uses beyond the plain shader: the three
+		// lists, all or none (an unlit domain never reaches heLitP).
+		std::vector<VkUse> added, dropped;
+		std::set_difference(uc.begin(), uc.end(), up.begin(), up.end(), std::back_inserter(added));
+		std::set_difference(up.begin(), up.end(), uc.begin(), uc.end(), std::back_inserter(dropped));
+		CHECK_MESSAGE((added.empty() || added == clusterLists), c.name, ": clustered adds" , uncoveredVk(added, 0));
+		CHECK_MESSAGE(dropped.empty(), c.name, ": clustered drops", uncoveredVk(dropped, 0));
+		if (added == clusterLists)
+		{
+			++withLists;
+			// The renderer's layout binds them; the layout before Thema 117 did not.
+			CHECK_MESSAGE(uncoveredVk(added, HE::vkmat::kBindingCount).empty(), c.name);
+			CHECK_MESSAGE(uncoveredVk(added, HE::vkmat::kPreClusterBindingCount) == uncoveredVk(added, 0), c.name);
+		}
+		// The plain shader never touches the lists (baked blobs = plain).
+		for (const VkUse& u : up)
+			CHECK_MESSAGE((u.binding < 24 || u.binding > 26), c.name, ": plain uses binding ", u.binding);
+		for (const VkUse& u : up)
+			if (!uncoveredVk({ u }, HE::vkmat::kBindingCount).empty()) plainGap.insert(u);
+	}
+	// Most cases are lit surface graphs: the lists must show up in them, or the
+	// variant silently stopped shading clusters.
+	CHECK(withLists * 2 > static_cast<int>(cases.size()));
+	MESSAGE("clustered SPIR-V with set 0 SSBOs 24..26: ", withLists, "/", cases.size(),
+	        "; plain uses outside the layout (pre-existing):",
+	        uncoveredVk(std::vector<VkUse>(plainGap.begin(), plainGap.end()), 0));
 }
 
 #if defined(_WIN32)
