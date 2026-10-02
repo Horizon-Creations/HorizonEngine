@@ -2650,6 +2650,44 @@ TEST_CASE("D3D12 main swapchain follows the window size (Thema 112)")
 	CHECK(call < slot);
 }
 
+TEST_CASE("Vulkan GI extracts with this frame's sun, not the previous one (Thema 131)")
+{
+	// runGi() runs before DrawScene(), and only DrawScene() pushed the day-night
+	// state into the extractor. The GI mask was traced against the PREVIOUS
+	// frame's sun while the scene pass shaded with the current one — visible as
+	// a one-frame lag of the GI shadow edge whenever the time of day moves.
+	// Metal pushes setDayNight before every GI extraction; D3D11/D3D12/GL
+	// extract once per frame after it. No GPU under ctest, so this pins the
+	// order in runGi()'s source.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("Vulkan renderer source not found - GI day-night pin skipped");
+		return;
+	}
+	const std::string src = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "Vulkan" / "VulkanRenderer.cpp"));
+	REQUIRE(!src.empty());
+	const size_t fn = src.find("void VulkanRenderer::runGi(");
+	REQUIRE(fn != std::string::npos);
+	const size_t fnEnd = src.find("\n}\n", fn);
+	REQUIRE(fnEnd != std::string::npos);
+	const std::string body = src.substr(fn, fnEnd - fn);
+
+	const size_t extract = body.find("m_extractor.extract(");
+	REQUIRE(extract != std::string::npos);
+	// Same environment fields DrawScene() pushes, so both passes agree on the sun.
+	std::smatch m;
+	const std::regex dayNight(
+		R"(m_extractor\.setDayNight\(\s*m_environment\.dayNightCycle\s*,\s*m_environment\.timeOfDay\s*,)"
+		R"(\s*m_environment\.sunColor\s*,\s*m_environment\.sunIntensity\s*,)"
+		R"(\s*m_environment\.moonColor\s*,\s*m_environment\.moonIntensity\s*,)"
+		R"(\s*m_environment\.cloudCoverage\s*\))");
+	REQUIRE(std::regex_search(body, m, dayNight));
+	CHECK(static_cast<size_t>(m.position(0)) < extract);
+}
+
 // ─── OcclusionCuller ──────────────────────────────────────────────────────────
 // The rules the culler must honour, each as a scene: a wall in front of the
 // camera and something behind it. "Kept" is the conservative answer, so every
