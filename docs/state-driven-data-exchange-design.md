@@ -131,7 +131,10 @@ exchangeState():
           now = getVariable(src, w.bindVar)
           if src != w.boundTo || !valuesEqual(now, w.sourceShadow):
               w.boundTo = src; w.sourceShadow = now
+              if w.notify && !w.baselined:            // Erstschub zählt als Änderung (§4)
+                  w.shadow = getVariable(inst, w.name); w.baselined = true
               setVariable(inst, w.name, coerce(now, Typ von w))
+              changedAny = true                       // Ketten ohne Notify laufen weiter
       // Phase 2: Änderungen melden
       for each (inst, w) mit w.notify:
           now = getVariable(inst, w.name)
@@ -144,7 +147,8 @@ exchangeState():
       if !changedAny: break
 ```
 
-* **Ketten** A → B → C (B bindet an A, C an B) schließen sich in einem Frame, weil jede Runde erneut zieht und meldet. **Zyklen** (A bindet an B, B an A, beide ändern sich gegenseitig) laufen höchstens `kMaxRounds` Runden. Danach steht der Rest im nächsten Frame an, mit Warnung. Gleicher Stil wie `dispatchToListeners` (Tiefe 32, Budget 256).
+* **Ende einer Runde:** Der Abgleich hört auf, wenn eine Runde **nichts geschoben und nichts gemeldet** hat. Deshalb setzt auch Phase 1 `changedAny`, sonst bräche eine Kette aus gebundenen Variablen ohne Notify nach der ersten Runde ab.
+* **Ketten** A → B → C (B bindet an A, C an B) schließen sich in einem Frame, weil jede Runde erneut zieht und meldet. Die Reihenfolge innerhalb von Phase 1 spielt dafür keine Rolle: Liest C den alten Wert von B, holt die nächste Runde das nach. **Zyklen** (A bindet an B, B an A, beide ändern sich gegenseitig) laufen höchstens `kMaxRounds` Runden. Danach steht der Rest im nächsten Frame an, mit Warnung. Gleicher Stil wie `dispatchToListeners` (Tiefe 32, Budget 256).
 * Ein Handler darf schreiben, zerstören, erzeugen. Die Liste wird pro Runde als Kopie der Ids durchlaufen, und jede Instanz wird vor dem Zugriff mit `alive()` geprüft (zerstörte liegen bis zum Frame-Ende in `m_doomed`).
 * `valuesEqual` zieht dafür aus `HE_Scene/Net/ValueWire` nach `HE_Core` (`HorizonCode::valuesEqual`), denn es ist eine reine Funktion ohne Netzbezug (ValueWire.cpp:277). `ValueWire::valuesEqual` leitet weiter, damit der Replikator unverändert bleibt.
 
@@ -152,7 +156,8 @@ exchangeState():
 
 * **Einen Frame später, wie `worldMatrix`.** Was in Frame N geschrieben wird, ist am Ende von Frame N gemeldet bzw. gebunden. Der Tick des Konsumenten sieht es in Frame N+1. Wer es sofort braucht, ruft wie bisher Call (Ref).
 * **Zusammengefasst:** eine Meldung pro Frame und Variable, `Old` ist der Stand des letzten Abgleichs. Schreiben und Zurücksetzen im selben Frame wird nicht gemeldet.
-* **Anfangszustand meldet nicht.** Die Schattenkopie entsteht beim ersten Abgleich, in dem die Instanz vorkommt. Defaults und alles, was Construct/BeginPlay im selben Frame setzt, sind der Ausgangszustand, kein „Changed“. **Bindungen schieben dagegen immer einmal beim ersten Auflösen** und bei jedem Quellwechsel. Sonst bekäme ein Konsument, der nach dem Produzenten entsteht, den Wert nie.
+* **Der eigene Anfangszustand meldet nicht.** Die Schattenkopie entsteht beim ersten Abgleich, in dem die Instanz vorkommt. Defaults und alles, was die Instanz in Construct/BeginPlay im selben Frame **selbst** setzt, sind der Ausgangszustand, kein „Changed“.
+* **Ein Schub über eine Bindung zählt dagegen immer als Änderung**, auch der erste. Bindungen schieben einmal beim ersten Auflösen und bei jedem Quellwechsel, sonst bekäme ein Konsument, der nach dem Produzenten entsteht, den Wert nie. Weicht der geschobene Wert vom eigenen ab, folgt `OnChanged_<Var>` noch im selben Abgleich. So zeigt das HUD aus §2.1 den Punktestand sofort und nicht erst bei der ersten Änderung. Construct sieht ihn noch nicht, denn der erste Abgleich läuft am Ende des Frames, in dem die Instanz entsteht.
 * **Quelle weg:** Ref null, Quelle zerstört, Variable nicht (mehr) öffentlich → die Bindung ruht, der Konsument behält den letzten Wert, eine Warnung pro Bindung (nicht pro Frame). Zeigt die Ref wieder auf etwas, wird sofort geschoben.
 * **Kein Auf-/Abmelden:** Die Quelle wird jedes Frame über die Ref-Variable aufgelöst. Ref umhängen, Quelle zerstören, Szenenwechsel-GC (`retainOnlyReachableFrom` RT.cpp:243): alles heißt nur „diesen Frame eine andere bzw. keine Quelle“.
 * **Bindungen halten nichts am Leben.** Erreichbarkeit für den GC kommt weiter nur aus Ref-Variablen. Die Ref, über die gebunden wird, ist ohnehin eine Ref-Variable.
@@ -163,8 +168,9 @@ exchangeState():
 
 | Fall | Verhalten |
 |---|---|
-| **Replicated + Notify on Change, Client** | Replikator schreibt in `m_netSession.update` (Frame-Anfang) und ruft `OnRep_<Var>`. Der Abgleich am Frame-Ende sieht die Änderung und ruft `OnChanged_<Var>`. Reihenfolge also **OnRep vor OnChanged**. Faustregel fürs Handbuch: OnRep = „kam übers Netz, nur Client“, OnChanged = „hat sich geändert, egal wodurch, überall“. |
-| **Hot Reload** (Variable umbenannt/umgetypt) | `m_watched` der Instanz wird aus den neuen Deklarationen neu gebaut. Einträge mit gleichem Namen **und** gleicher Wertform (`valueTypesMatch`) behalten ihre Schattenkopie, alle anderen bekommen eine neue Basis ohne Meldung. Gleiche Idee wie das Neu-Tabellieren im Replikator. |
+| **Replicated + Notify on Change, Client** | Replikator schreibt im Lauf der Net-Session und ruft `OnRep_<Var>`, jedenfalls vor dem Abgleich, der als Letztes in der Spiellogik läuft (genaue Stelle von `dispatchRep` in Schritt 2 nachprüfen, für die Reihenfolge genügt „vorher“). Der Abgleich sieht die Änderung und ruft `OnChanged_<Var>`. Reihenfolge also **OnRep vor OnChanged**. Faustregel fürs Handbuch: OnRep = „kam übers Netz, nur Client“, OnChanged = „hat sich geändert, egal wodurch, überall“. |
+| **Hot Reload** (Variable umbenannt/umgetypt) | Mindestens: neue Basis ohne Meldung. Das gilt automatisch, wenn Reload als remove + add läuft, denn dann ist die Instanz neu. Die `Runtime`-Schnittstelle zeigt keinen eigenen Reload-Pfad. Findet Schritt 2 einen, der Instanzen an Ort und Stelle ersetzt, wird `m_watched` dort neu gebaut, und Einträge mit gleichem Namen **und** gleicher Wertform (`valueTypesMatch`) behalten ihre Schattenkopie. Gleiche Idee wie das Neu-Tabellieren im Replikator. |
+| **Bind To + Replicated auf derselben Variable** | Gesperrt: Der Editor graut das jeweils andere aus, der Loader verwirft `bindSource`/`bindVar`, wenn `replicated` gesetzt ist. Sonst schrieben auf dem Client zwei Quellen (Replikator von der Autorität, Bindung lokal) gegeneinander, und die HE_Core-Runtime weiß nicht, ob sie Client ist. Wer einen gebundenen Wert replizieren will, bindet eine zweite, nicht replizierte Variable und kopiert im `OnChanged_`. Siehe offene Frage 6. |
 | **`reseedVariables`** (Game Instance pro Play-Session) | Neue Basis ohne Meldung. Bindungen auf die Game Instance schieben beim nächsten Abgleich (Quellwert anders bzw. `sourceShadow` zurückgesetzt). |
 | **Gebundene Variable wird auch lokal beschrieben** | Erlaubt. Die Bindung schiebt nur, wenn sich die **Quelle** ändert, sie überschreibt nicht jedes Frame. Bis dahin gilt der lokale Wert. |
 | **Typen passen nicht** | Der Editor bietet nur Quellvariablen mit verträglichem Typ an. Zur Laufzeit wird mit `coerce` auf den Konsumententyp gebracht. Unpassende Form (Container gegen Skalar, anderes Struct) → Bindung ruht mit Warnung. |
@@ -189,7 +195,7 @@ Neue Knoten gibt es keine. Das Häkchen ist die Deklaration, wie bei Replicated 
 
 Datenmodell und Persistenz:
 1. `Variable` (HC.h:409-478): `bool notifyChange = false; std::string bindSource, bindVar;` mit Kommentarblock wie bei Replicated.
-2. JSON speichern/laden (HC.cpp:1867-1868 / 2000-2009): Schlüssel `notifyChange`, `bindSource`, `bindVar`, nur geschrieben wenn gesetzt. Beim Laden verwerfen, wenn `scope != 0`. `bindVar` ohne `bindSource` (und umgekehrt) → beides leer.
+2. JSON speichern/laden (HC.cpp:1867-1868 / 2000-2009): Schlüssel `notifyChange`, `bindSource`, `bindVar`, nur geschrieben wenn gesetzt. Beim Laden verwerfen, wenn `scope != 0`. `bindVar` ohne `bindSource` (und umgekehrt) → beides leer. Bei `replicated` → Bindung leer (§5).
 
 Runtime (HE_Core):
 3. `HorizonCode::valuesEqual` nach HE_Core ziehen, `ValueWire::valuesEqual` leitet weiter (ValueWire.h:67, ValueWire.cpp:277).
@@ -217,6 +223,8 @@ Ein Fixture-Paar Produzent/Konsument, in `HCGEN_CLASSES` aufgenommen, damit die 
 
 * Notify: Wert ändern → genau ein `OnChanged_X(Old)` mit richtigem Old. Zweimal schreiben im Frame → einmal. Schreiben und Zurücksetzen → keinmal. Defaults/Construct → keinmal.
 * Event: zweite Klasse mit Bind Event bekommt `XChanged(Neu)`.
+* Erstschub über eine Bindung löst `OnChanged_X` aus (Bind + Notify an derselben Variable), der eigene Anfangszustand nicht.
+* Kette A → B → C **ohne** Notify an B schließt sich in einem Frame (Phase 1 hält den Abgleich am Laufen).
 * Bind an `@GameInstance` und an eine Ref-Variable: Erstschub beim Auflösen, Nachziehen bei Änderung, kein Überschreiben lokaler Werte ohne Quellenänderung.
 * Ref umhängen → sofortiger Schub vom neuen Ziel. Ref null / Quelle zerstört → Bindung ruht, eine Warnung, Wert bleibt.
 * Kette A → B → C in einem Frame. Zyklus A ↔ B → bricht nach `kMaxRounds` ab, Warnung, kein Hänger.
@@ -241,4 +249,5 @@ Ein Fixture-Paar Produzent/Konsument, in `HCGEN_CLASSES` aufgenommen, damit die 
 3. Event-Name `<Var>Changed`: passt das, oder lieber `OnChanged_<Var>` auch für das Dispatcher-Event? Das hieße dann gleich wie die Funktion und könnte verwirren.
 4. Soll der Abgleich auch im pausierten Editor-Play laufen (§2.3, heute: ja unter `uiLive`)?
 5. Braucht `<Var>Changed` den Absender als zweites Argument? Das würde den Dispatcher von einem auf zwei `Value` erweitern und alle `emitEvent`-Stellen berühren, also eher ein eigenes Thema.
-6. Schnitt der Umsetzung: Vorschlag **2a** Runtime + Datenmodell + JSON + Frame-Verdrahtung + Interpreter-Tests, **2b** Codegen-Parität + HCGEN-Fixture, **2c** Editor-UI + Doku/Tooltips. 2b und 2c können parallel laufen, wenn 2a die Felder festgelegt hat.
+6. Bind To + Replicated sperren (§5) oder „auf dem Client ruht die Bindung, Replikation gewinnt“? Das Zweite braucht eine Autoritäts-Abfrage in der HE_Core-Runtime, die es heute nicht gibt.
+7. Schnitt der Umsetzung: Vorschlag **2a** Runtime + Datenmodell + JSON + Frame-Verdrahtung + Interpreter-Tests, **2b** Codegen-Parität + HCGEN-Fixture, **2c** Editor-UI + Doku/Tooltips. 2b und 2c können parallel laufen, wenn 2a die Felder festgelegt hat.
