@@ -418,3 +418,32 @@ Vulkan-Dateien unterscheiden sich. Jede Aufnahme hat eine frische APPDATA, `HE_S
 - Nebenbefund 1 (Forward-SSR für Graph-Materialien tot auf Vulkan) unverändert, gehört zu Thema 126.
 - Parität Graph-Material gegen Built-in Pixel für Pixel ist nicht gemessen. Belegt ist nur:
   Graph-Material bekommt jetzt Probe-Licht, und GI aus bleibt bitgleich.
+
+## 8. Stand nach Schritt 5: Merge mit main, Vor-PR-Prüfung (02.10.2026)
+
+PR #75 (Clustered Lighting, Thema 117) war beim Start von Schritt 5 schon auf main, zusammen mit
+#71/#72/#73/#76. Der Zweig kollidierte in sechs Dateien, wie Thema 121 Teil D es angekündigt hatte.
+`origin/main` (`9ed6f816`) ist per Merge-Commit hereingeholt worden (`009618aa`), ohne Rebase. So
+bleiben die in den Themen und CI-Läufen zitierten Commits gültig.
+
+- **Vulkan:** #75 hat das Material-DSL in die Tabelle `HE::vkmat::kBindings`
+  (`VulkanMaterialLayout.h`) verlegt. Daraus kommen Layout und Pool, und he_tests prüft das SPIR-V
+  jedes Knotens per Reflexion gegen diese Tabelle. Die Bindings 15–18/32/33 aus §7 stehen jetzt dort,
+  vor den drei Cluster-SSBOs: 21 Zeilen ohne Cluster, 24 insgesamt, 16 Combined-Image-Sampler.
+  `k_matSetBindings` entfällt. Die festen Writes belegen `w[0..20]`. Die Cluster-Writes hängen ab
+  `kPreClusterBindingCount` an, abgesichert per `static_assert`. Ein naives „beide Seiten behalten"
+  hätte sie bei Index 15 beginnen lassen und damit heSkyEnv/heAO/heGIIrradiance überschrieben.
+- **D3D11:** `BindDDGIAtlases`/`RestoreBuiltinGISlots` (t17/t18, s1/s3) stehen neben den
+  Cluster-Helfern von #75 (t24–26, eigene Raw-Buffer). Die Register überschneiden sich nicht.
+- **D3D12:** Die Atlanten liegen in den Template-Slots 12/13 der SRV-Tabelle (Root-Index 5). #75
+  hängt die Cluster-Listen als Root-SRVs 6–8 an. Die Signatur ist unverändert.
+- **Test:** Der #75-Reflexionstest prüft jetzt zusätzlich, dass 15–18/32/33 nie wieder außerhalb
+  des Layouts landen. Vorher führte die Tabelle sie ausdrücklich als „pre-existing gap". Rest-Lücke
+  laut Testausgabe: `0/9:1 0/14:1`. 14 ist `heLandscapeWeights` (§7.3). Der Sampler auf Binding 9
+  (dort steht im Layout ein UBO) wird von diesem Zweig nicht berührt und ist nicht untersucht.
+- **Build/Tests (NN-WS03, Release, `C:/hw120s4`):** Build mit 0 Fehlern. he_tests 4153 Fälle,
+  4150 bestanden. Die 3 Fehlschläge sind die bekannten Gamepad-End-to-End-Fälle (echter
+  Xbox-Controller am Rechner, s. Baseline-Liste). Beide D3D11-WARP-Fälle (DDGI aus Schritt 3 und
+  Cluster aus #75) laufen grün nebeneinander.
+- **Nach dem Merge nicht erneut auf Hardware geprüft.** Die A/B-Werte in §7.2 stammen vom Stand
+  vor dem Merge. Die visuelle Abnahme auf D3D11/D3D12/Vulkan mit echter Hardware steht noch aus.

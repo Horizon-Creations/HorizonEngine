@@ -3164,6 +3164,12 @@ TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in
 	// Most cases are lit surface graphs: the lists must show up in them, or the
 	// variant silently stopped shading clusters.
 	CHECK(withLists * 2 > static_cast<int>(cases.size()));
+	// Thema 120: the preamble's sky/AO/DDGI/GI-refl/cloud samplers (15..18,
+	// 32, 33) are layout rows now — the DDGI atlases are written to 17/18 —
+	// so none of them may fall back into the gap.
+	for (const VkUse& u : plainGap)
+		for (uint32_t b : { 15u, 16u, 17u, 18u, 32u, 33u })
+			CHECK_MESSAGE(u.binding != b, "plain uses binding ", b, " outside the material layout");
 	MESSAGE("clustered SPIR-V with set 0 SSBOs 24..26: ", withLists, "/", cases.size(),
 	        "; plain uses outside the layout (pre-existing):",
 	        uncoveredVk(std::vector<VkUse>(plainGap.begin(), plainGap.end()), 0));
