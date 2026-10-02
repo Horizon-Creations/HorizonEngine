@@ -155,3 +155,62 @@ cmake --build C:/hw133/build -j8 --target HorizonEditor HorizonGame
 # veraltet (relinkt nur mit HorizonGame). Für den Kontroll-Export die DLL aus
 # build/src/HE_Rendering nehmen.
 ```
+
+---
+
+# Schritt 2: Fix und Vorher/Nachher-Vergleich
+
+Stand: 2026-10-02, NN-WS03, Release-Build aus dem Zweig in `C:/hw133` (`DEPLOY_DIR=C:/hw133/deploy`).
+
+## Was geändert ist
+
+| Commit | Befund | Änderung |
+|---|---|---|
+| `1155f63d` | 1 | `extractUI` in `DrawScene` von D3D11, D3D12 und Vulkan, direkt nach dem Haupt-`extract` wie bei GL. Danach extrahiert niemand mehr, also auch nicht `runGi`/`runSSAO`. |
+| `69c43bbd` | 2 | `shaders/ui.vert`: `y = sp.y / H * 2 - 1` (Vulkan-NDC, y nach unten). Die Datei wird nur von Vulkan benutzt. Der Clip-Scissor passt damit auch wieder zur Geometrie. |
+| `04de39bd` | 4 | `ProjectExporter`: `Shaders/` aus dem Game-Runtime-Ordner wird rekursiv mitgeliefert und dabei komplett ersetzt, wie `lib-dynload`. Der Test `ProjectExporter ships the runtime Shaders/ subdirectory and replaces a stale one` deckt das ab. |
+
+**Nicht** geändert ist Befund 3. D3D11/D3D12/Vulkan zeichnen Widgets jetzt, aber weiter ohne runde Ecken, Rahmen,
+Verläufe, Blur/Drop-Shadow, Inner Shadow, Texturen (UIImage) und UI-Materialien. Ein Drop-Shadow-Quad, das vorher
+gar nicht zu sehen war, erscheint jetzt als **hartes dunkles Rechteck** (vergrößert, in Schattenfarbe). Das ist eine
+sichtbare Folge dieses Fixes. Ein Port braucht auf Vulkan mehr als die 128 B garantierten Push-Constants (heute 80 B),
+also einen UBO. Das ist ein eigenes Thema.
+
+## Messung
+
+Skripte, alle in `docs/`:
+
+- `widgets-d3d-vulkan-editor-capture.ps1`: Editor/PIE-Pfad (`HE_DUMP_UITEST`, Viewport-RT)
+- `widgets-d3d-vulkan-witness-scene.ps1` + `widgets-d3d-vulkan-export.py` + `widgets-d3d-vulkan-game-capture.ps1`: exportiertes Spiel (Swapchain)
+- `widgets-d3d-vulkan-verify.ps1`: PASS/FAIL mit festen Messpunkten. Exit-Code = Zahl der Fehlschläge.
+
+```powershell
+& docs\widgets-d3d-vulkan-verify.ps1 -EditorTag fix -GameTag gfix   # nach dem Fix
+& docs\widgets-d3d-vulkan-verify.ps1 -EditorTag base -GameTag gpre  # main
+```
+
+(Mit `&` aufrufen. `powershell -File ... -Rhis A,B` reicht die Liste als *einen* String durch.)
+
+| Stand | Editor/PIE | Spiel | Fehlschläge |
+|---|---|---|---|
+| main (`base`/`gpre`) | D3D11/D3D12/Vulkan: keine Kachel (4,4,4) | D3D11/D3D12: nur Szene. Vulkan: schwarz (Export ohne `Shaders/`) | **12** |
+| nur extractUI (`ctl`/`gctl`, Schritt-1-Kontrolle) | Vulkan: Kachel an den gespiegelten Zeilen, Bild = D3D11 gespiegelt (47,92 % Abweichung, 0,00 % zum Spiegelbild) | Vulkan: Rot unten, Grün oben | **6** |
+| Fix (`fix`/`gfix`) | alle vier: Kachel 0 (66,76,97) an y 90–180. Vulkan = D3D11 auf 0,00 % der Pixel | alle vier: Rot (229,25,25) oben links, Grün (25,204,51) unten rechts, Blau (25,76,229) mittig, Text aufrecht | **0** |
+
+Weitere Belege zum Nachher-Stand:
+
+- Export `C:/hw133/out_fix` aus dem gefixten Editor über MCP, `Shaders/` **nicht** von Hand kopiert: 42 Dateien,
+  dieselben wie in `deploy/Editor/Game/Shaders`. Vulkan-Log ohne `shader not found`.
+- Deploy-Konsistenz geprüft: `HorizonRendering.dll` (60a9635c…) ist in `build`, `deploy/Editor`, `deploy/Game`,
+  `deploy/Editor/Game` und `out_fix` identisch. `HorizonCore.dll` (6d5a899e…) ist identisch in `build`,
+  `deploy/Editor`, `deploy/Editor/Game`, `out_fix` und `build/tests`. `ui.vert.spv` war vorher überall 19fb653e…,
+  jetzt überall 1944830b….
+- GL ist vorher wie nachher bitgleich an den Messpunkten. GL gegen D3D11 weicht auf 12,31 % der Pixel ab, vor und nach
+  dem Fix gleich. Das sind die Stil-Features aus Befund 3.
+- Die Szene (Himmel, Boden) sieht auf GL und D3D/Vulkan unterschiedlich aus. Das ist Thema 130
+  (Spielpfad-Postprocessing) und hat mit der UI nichts zu tun.
+- `he_tests` (Release, Scratch-APPDATA), Teilmenge Exporter/UI/Widget, 412 Fälle: viermal grün, einmal 1 Fehlschlag,
+  der sich nicht reproduzieren ließ (siehe Ergebnis im Thema).
+
+Nicht abgedeckt: ein Doctest für das Rendering selbst. Die UI-Passes laufen nur gegen echte Geräte, deshalb ist der
+Nachweis das Skriptpaar oben. Metal ist weiterhin nicht gemessen und nicht geändert.
