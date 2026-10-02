@@ -224,6 +224,7 @@ Das Inline-Feld eines unverdrahteten Bool/Int/Float/Double/String-Pins legt beim
 ### 6.5 Pins aktuell halten
 
 * `spawnPinsOf(widgetGraph)` liefert die freigegebenen Variablen mit Typ und Vorgabewert. `syncSpawnPins(graph, nodeId, now, before)` spiegelt sie in den Knoten: Leitungen folgen ihrem Pin über den Namen (`captureLinkRemapSnapshot`/`remapLinksFromSnapshot`), ein entfernter Pin verliert seine Leitung sichtbar. `pinDefaults` sind nach Index geschlüsselt, der Snapshot verschiebt sie nicht, deshalb werden sie hier nach Namen umgeschlüsselt. Neue oder umgetypte Pins bekommen den Vorgabewert der Variablen. Ein Pin, der noch den **vorherigen** Vorgabewert trägt (`before`), folgt dem neuen.
+* Umbenennen einer Variablen läuft über das projektweite Umbenennen (`HcRename`): es benennt den Pin an jedem Create Widget dieses Widgets mit um. Dem Spiegel allein überlassen sähe der umbenannte Pin neu aus und verlöre seinen getippten Wert (die Leitung bliebe über den Index-Rückfall des Snapshots).
 * Der Editor spiegelt beim Wählen des Assets in den Details und laufend in `buildModel`: pro Asset höchstens zweimal pro Sekunde, Schlüssel ist der Hash des Graph-JSON im ContentManager. Ändert sich ein Knoten dadurch, meldet der Host `onEdit(false)`: das Dokument ist geändert (es speichert die neuen Pins), aber es entsteht kein Undo-Punkt.
 
 ### 6.6 Codegen

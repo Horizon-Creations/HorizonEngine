@@ -7,6 +7,7 @@
 // value, as in UMG.
 #include "doctest.h"
 #include "HcGraphHost.h"
+#include "HcRename.h"
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetTree.h>
 #include <UIWidget/WidgetManager.h>
@@ -346,6 +347,40 @@ TEST_CASE("Expose on Spawn: a Create Widget node hands wired and typed pins to t
     CHECK(rt.getVariable(child, "seenInPre").i == 99);
     CHECK(rt.getVariable(child, "title").s == "Level 3");
     CHECK(rt.getVariable(child, "tint").col.x == doctest::Approx(0.25f));   // its own default
+}
+
+// Renaming the widget's variable goes through the project-wide rename, which
+// renames the pin on every Create Widget of that widget. Left to the mirror,
+// the renamed pin would look new and lose the value typed into it.
+TEST_CASE("Expose on Spawn: renaming the variable carries the pin and its typed value")
+{
+    HorizonCode::Graph g;
+    HorizonCode::Node cw; cw.type = NodeType::CreateWidget; cw.s = kScore;
+    const int create = g.addNode(cw);
+    HorizonCode::SpawnPin score; score.param.name = "score"; score.param.type = PinType::Int;
+    score.def = Value::ofInt(42);
+    REQUIRE(HorizonCode::syncSpawnPins(g, create, { score }));
+    g.findNode(create)->pinDefaults[0] = Value::ofInt(5);   // typed on the node
+    // Another widget's Create Widget with a pin of the same name: not ours.
+    HorizonCode::Node other; other.type = NodeType::CreateWidget; other.s = "mem://other.hasset";
+    const int otherId = g.addNode(other);
+    REQUIRE(HorizonCode::syncSpawnPins(g, otherId, { score }));
+
+    const HcRename::Target t{ kScore, HcRename::Member::Variable, "score", "points" };
+    const HcRename::Plan p = HcRename::planGraph(g, HcRename::Role::Other, { kScore },
+                                                 "mem://creator.hasset", {}, t);
+    REQUIRE(p.rename.size() == 1);
+    CHECK(p.rename[0].node == create);
+    CHECK(HcRename::apply(g, p, t));
+    CHECK(g.findNode(create)->s == kScore);                    // the path stays
+    CHECK(g.findNode(create)->params[0].name == "points");
+    CHECK(g.findNode(otherId)->params[0].name == "score");
+
+    // The widget now offers "points": the mirror finds the pin by name and
+    // keeps the typed 5 instead of re-filling it with the default.
+    HorizonCode::SpawnPin points = score; points.param.name = "points";
+    CHECK_FALSE(HorizonCode::syncSpawnPins(g, create, { points }));
+    CHECK(g.findNode(create)->pinDefaults.at(0).i == 5);
 }
 
 TEST_CASE("Expose on Spawn: the editor's mirror follows the live widget asset")
