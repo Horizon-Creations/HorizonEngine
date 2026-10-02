@@ -1213,6 +1213,8 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Texture2D>        depthTex;
     bool vsync = true;
     int  width = 0, height = 0;
+    HWND hwnd = nullptr;                     // swapchain's output window, polled for its client size
+    int  resizeFailedW = 0, resizeFailedH = 0; // last size ResizeBuffers refused — not retried every frame
 
     // ── Scene pipeline ──────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>   vs;
@@ -1431,6 +1433,14 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Texture2D>          viewportDepth;
     ComPtr<ID3D11DepthStencilView>   viewportDSV;
     ComPtr<ID3D11ShaderResourceView> viewportDepthSRV; // C1, as depthSRV above
+    // SRVs replaced by a viewport resize. The editor asks SetViewportSize and
+    // then GetViewportTexture in the same ImGui frame, so this frame's draw list
+    // still holds the OLD raw SRV pointer when Render() rebuilds the target;
+    // releasing it there let ImGui_ImplDX11_RenderDrawData bind a freed view
+    // (random crash in the NVIDIA driver thread on resize). Kept until the next
+    // Render(), whose draw list was built against the new one — GL's
+    // m_retiredTextures, minus the frame count: D3D11 keeps bound views alive.
+    std::vector<ComPtr<ID3D11ShaderResourceView>> retiredViewportSRVs;
     uint32_t viewportW    = 0;
     uint32_t viewportH    = 0;
     uint32_t viewportReqW = 0;
@@ -3731,6 +3741,7 @@ struct D3D11RendererImpl
 
     void createViewportRT(uint32_t w, uint32_t h)
     {
+        if (viewportSRV) retiredViewportSRVs.push_back(std::move(viewportSRV));
         viewportRTV.Reset(); viewportSRV.Reset(); viewportTex.Reset();
         viewportDSV.Reset(); viewportDepth.Reset();
 
@@ -3794,6 +3805,54 @@ struct D3D11RendererImpl
         swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D),
                              reinterpret_cast<void**>(bb.GetAddressOf()));
         device->CreateRenderTargetView(bb.Get(), nullptr, &rtv);
+    }
+
+    // Keep the swapchain at the window's client size. Without this the back
+    // buffer, its RTV and the swapchain-path depth stayed at the Initialize
+    // size forever: DXGI stretched them over the resized window while ImGui
+    // laid itself out for the new DisplaySize (shrunk into a corner when the
+    // window got smaller). Same check as D3D12Renderer: D3D has no VK_ERROR_OUT_OF_DATE_KHR,
+    // so Render() asks every frame. Returns true on a resize.
+    bool resizeSwapchainIfNeeded()
+    {
+        if (!swapchain || !hwnd) return false;
+        RECT rc{};
+        if (!GetClientRect(hwnd, &rc)) return false;
+        const int w = static_cast<int>(rc.right - rc.left);
+        const int h = static_cast<int>(rc.bottom - rc.top);
+        // Minimised windows report 0x0, which is no legal buffer size: keep the
+        // old buffers and pick the real size up once the window is restored.
+        if (w <= 0 || h <= 0 || (w == width && h == height)) return false;
+        if (w == resizeFailedW && h == resizeFailedH) return false;
+
+        // ResizeBuffers fails with DXGI_ERROR_INVALID_CALL while anything still
+        // references the back buffer: the RTV is left bound on the immediate
+        // context by last frame's overlay, and D3D11 destroys released views
+        // lazily — unbind, drop our reference, then flush.
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        rtv.Reset();
+        context->Flush();
+        const HRESULT hr = swapchain->ResizeBuffers(0, static_cast<UINT>(w), static_cast<UINT>(h),
+                                                    DXGI_FORMAT_UNKNOWN, 0);
+        // The old buffer survives a failed resize: re-view it either way, so a
+        // refused size never leaves the next frame without a render target.
+        createRTV();
+        if (FAILED(hr))
+        {
+            resizeFailedW = w; resizeFailedH = h;
+            HE_LOG_ERROR(RHI, "D3D11Renderer: ResizeBuffers(%dx%d) failed hr=0x%08X — keeping %dx%d",
+                         w, h, static_cast<unsigned>(hr), width, height);
+            return false;
+        }
+
+        width = w; height = h;
+        resizeFailedW = resizeFailedH = 0;
+        createDepth(w, h);   // the swapchain path draws the scene against it
+        DXGI_SWAP_CHAIN_DESC d{};
+        swapchain->GetDesc(&d);
+        HE_LOG_INFO(RHI, "D3D11Renderer: swapchain resized to %ux%u (client %dx%d)",
+                    d.BufferDesc.Width, d.BufferDesc.Height, w, h);
+        return true;
     }
 
     // Checkpoint C1 of docs/decals-cross-backend-plan.md: the scene depth has to be
@@ -5362,6 +5421,7 @@ void D3D11Renderer::Initialize(HE::Window* window)
         props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
     if (!hwnd)
         throw std::runtime_error("D3D11Renderer: could not get HWND");
+    m_impl->hwnd = hwnd;
 
     m_impl->width  = window->GetWidth();
     m_impl->height = window->GetHeight();
@@ -5468,6 +5528,7 @@ void D3D11Renderer::Shutdown()
     m_impl->viewportDSV.Reset();
     m_impl->viewportDepthSRV.Reset();
     m_impl->viewportDepth.Reset();
+    m_impl->retiredViewportSRVs.clear();
     m_impl->swapchain.Reset();
     m_impl->context.Reset();
     m_impl->device.Reset();
@@ -6729,6 +6790,11 @@ void D3D11Renderer::DrawViewportFrame()
 void D3D11Renderer::Render()
 {
     auto& p = *m_impl;
+    // Last frame's draw list was the last to name these; this frame's names the live SRV.
+    p.retiredViewportSRVs.clear();
+    // Swapchain to the window's client size (re-creates RTV + depth only when it changed).
+    p.resizeSwapchainIfNeeded();
+
     p.m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     p.counters = D3D11RendererImpl::FrameCounters{};
     p.gpuTimerBeginFrame();

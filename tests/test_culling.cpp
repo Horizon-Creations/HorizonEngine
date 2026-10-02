@@ -2449,6 +2449,89 @@ TEST_CASE("D3D12 main swapchain follows the window size (Thema 112)")
 	CHECK(call < slot);
 }
 
+TEST_CASE("D3D11 main swapchain follows the window size (Thema 128)")
+{
+	// Same bug as Thema 112 on D3D11: the back buffer, its RTV and the
+	// swapchain-path depth were created once at Initialize, so after a resize
+	// DXGI stretched the start-size image (ImGui shrunk into a corner). No GPU
+	// under ctest, so this pins the wiring in the source:
+	//  - ResizeBuffers exists and gets the creation flags (scd.Flags is never
+	//    set, so 0),
+	//  - before it, every back-buffer reference goes: unbind from the immediate
+	//    context, drop the RTV, flush (D3D11 destroys views lazily),
+	//  - after it, the RTV is re-made and the scene depth follows,
+	//  - Render() checks the size before anything touches the swapchain RTV.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("D3D11 renderer source not found - swapchain resize pin skipped");
+		return;
+	}
+	const std::string src = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "D3D11" / "D3D11Renderer.cpp"));
+	REQUIRE(!src.empty());
+	auto count = [&](const char* pattern) {
+		const std::regex re(pattern);
+		return std::distance(std::sregex_iterator(src.begin(), src.end(), re), std::sregex_iterator());
+	};
+	CHECK(count(R"(scd\.Flags\s*=)") == 0);
+	CHECK(count(R"(->ResizeBuffers\([^;]*DXGI_FORMAT_UNKNOWN\s*,\s*0\s*\))") == 1);
+	CHECK(count(R"(m_impl->hwnd\s*=\s*hwnd;)") == 1);
+
+	const size_t fn = src.find("bool resizeSwapchainIfNeeded()");
+	REQUIRE(fn != std::string::npos);
+	const size_t fnEnd = src.find("\n    }\n", fn);
+	REQUIRE(fnEnd != std::string::npos);
+	const std::string body = src.substr(fn, fnEnd - fn);
+	const size_t client = body.find("GetClientRect(hwnd");
+	const size_t unbind = body.find("OMSetRenderTargets(0, nullptr, nullptr)");
+	const size_t drop   = body.find("rtv.Reset()");
+	const size_t flush  = body.find("Flush()");
+	const size_t resize = body.find("ResizeBuffers(");
+	const size_t rtv    = body.find("createRTV()");
+	const size_t depth  = body.find("createDepth(");
+	const size_t size   = body.find("width = w");
+	for (size_t at : { client, unbind, drop, flush, resize, rtv, depth, size })
+		REQUIRE(at != std::string::npos);
+	CHECK(client < unbind);
+	CHECK(unbind < resize);
+	CHECK(drop < flush);
+	CHECK(flush < resize);
+	CHECK(resize < rtv);
+	CHECK(resize < depth);
+	CHECK(resize < size);
+
+	// Render() resizes before it binds or clears the swapchain RTV.
+	const size_t render = src.find("void D3D11Renderer::Render()");
+	REQUIRE(render != std::string::npos);
+	const size_t call  = src.find("p.resizeSwapchainIfNeeded()", render);
+	const size_t useRt = src.find("p.rtv", render);
+	REQUIRE(call != std::string::npos);
+	REQUIRE(useRt != std::string::npos);
+	CHECK(call < useRt);
+	CHECK(call < src.find("DrawViewportFrame()", render));
+
+	// The viewport target the editor's ImGui frame already handed out as a raw
+	// SRV pointer must outlive this frame's overlay: createViewportRT retires
+	// it instead of releasing it, and only the NEXT Render() drops it (before
+	// it can rebuild — and retire — again). Released in place it was a
+	// use-after-free that crashed the NVIDIA driver thread on random resizes.
+	const size_t vfn = src.find("void createViewportRT(uint32_t w, uint32_t h)");
+	REQUIRE(vfn != std::string::npos);
+	const size_t retire = src.find("retiredViewportSRVs.push_back(std::move(viewportSRV))", vfn);
+	const size_t reset  = src.find("viewportSRV.Reset()", vfn);
+	REQUIRE(retire != std::string::npos);
+	REQUIRE(reset != std::string::npos);
+	CHECK(retire < reset);
+	const size_t clear   = src.find("p.retiredViewportSRVs.clear()", render);
+	const size_t rebuild = src.find("p.createViewportRT(", render);
+	REQUIRE(clear != std::string::npos);
+	REQUIRE(rebuild != std::string::npos);
+	CHECK(clear < rebuild);
+	CHECK(clear < src.find("m_overlayCallback(nullptr)", render));
+}
+
 // ─── OcclusionCuller ──────────────────────────────────────────────────────────
 // The rules the culler must honour, each as a scene: a wall in front of the
 // camera and something behind it. "Kept" is the conservative answer, so every
