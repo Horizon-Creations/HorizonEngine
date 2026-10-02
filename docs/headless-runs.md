@@ -230,7 +230,11 @@ grep -a -o "missing [^ ]* binding at index [0-9]* for [A-Za-z0-9_]*" /tmp/v.log 
 
 „Metal API Validation Enabled" im Log belegt, dass die Schicht an war. `nslog`
 sammelt alle Fehler; ohne `MTL_DEBUG_LAYER_ERROR_MODE` (also `assert`) bricht der
-Lauf am ersten ab (exit 6, kein Bild), das ist der härtere Beleg. Zwei Fallen:
+Lauf am ersten ab (exit 6, kein Bild), das ist der härtere Beleg. Aber Achtung:
+`assert` zusammen mit `HE_DUMP_THUMB` bricht heute noch am Partikel-Thumbnail ab
+(`particlePreviewVertex`: `camRight`/`camUp` kommen mit 12 statt 16 Byte, älterer
+Fehler, offen). Für einen `assert`-Lauf also `HE_DUMP_THUMB` weglassen oder bei
+`nslog` bleiben. Zwei Fallen:
 der Build braucht **`HE_ENABLE_SHADERC=ON`**, sonst kompiliert kein
 Graph-Material, es gibt keinen Material-Draw und die Validierung prüft nichts
 (Log: „built without the shader cross-compiler"). Und die Material-Vorschau und
