@@ -156,6 +156,16 @@ struct Value
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
 
+// One Expose on Spawn value a Create Widget hands the widget it creates: the
+// variable by name and what it is set to before the widget's PreConstruct
+// (docs/widget-pre-construct-design.md §6).
+struct SpawnValue
+{
+    std::string name;
+    Value       value;
+};
+using SpawnValues = std::vector<SpawnValue>;
+
 enum class NodeType : uint8_t
 {
     // Host-fired entry points.
@@ -169,7 +179,7 @@ enum class NodeType : uint8_t
     // Host actions on the running widget itself ("self").
     ShowSelf, HideSelf,
     // Create + manage widgets by id (from any graph — level, GameInstance, …).
-    CreateWidget,    // s = widget asset path; dataOut Widget (Int id)
+    CreateWidget,    // s = widget asset path; params = Expose on Spawn data-ins; dataOut Widget (Int id)
     ShowWidget, HideWidget, DestroyWidget, // dataIn Widget (Int id)
     // Instantiate a HorizonCode class asset as a live runtime object.
     // s = class asset path; dataIn Location (Vec3) + Rotation (Vec3, euler deg);
@@ -476,6 +486,14 @@ struct Variable
     // before this existed. INSTANCE variables only, and never a Ref (an object
     // handle names nothing in the next run) — see isSaveableType.
     bool        saveGame   = false;
+    // ── Expose on Spawn (docs/widget-pre-construct-design.md §6) ─────────────
+    // A Create Widget naming this graph's widget grows an input pin for the
+    // variable, and the value arrives before the widget's PreConstruct. Opt-in
+    // like `replicated`, and only on a PUBLIC INSTANCE variable — the loader
+    // drops it anywhere else. Editor-facing: it decides which pins are offered.
+    // The runtime checks "public" when it sets the value, never this flag, so a
+    // compiled class needs no new reflection field for it.
+    bool        exposeOnSpawn = false;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
@@ -745,6 +763,27 @@ HE_API bool        fromJson(const std::string& json, Graph& out);
 // Followed: the direct wire, and one variable name (Set Variable → Get Variable),
 // which is how a graph keeps a widget between two events.
 HE_API std::vector<int> widgetCreatorsWithoutShow(const Graph& g);
+
+// ── Expose on Spawn (docs/widget-pre-construct-design.md §6) ─────────────────
+// One pin a widget offers its creator: the variable's interface and the value
+// it starts at, which a fresh pin is pre-filled with (an inline field that
+// showed 0 would SET 0 — see §6.3).
+struct SpawnPin
+{
+    FuncParam param;
+    Value     def;
+};
+// The variables of a widget graph that are ticked Expose on Spawn and public
+// instance variables, in declaration order.
+HE_API std::vector<SpawnPin> spawnPinsOf(const Graph& widgetGraph);
+// Re-mirror one Create Widget node's input pins onto `now`. Wires follow their
+// pin by NAME (a removed variable drops its wire, visibly); the node's inline
+// values (pinDefaults, keyed by index) are re-keyed by name too. A new or
+// retyped pin starts at the variable's default; a pin that still holds the
+// default from `before` (the widget as it was when last mirrored, when known)
+// follows the new one. Returns true when the node changed.
+HE_API bool syncSpawnPins(Graph& g, int createWidgetNodeId, const std::vector<SpawnPin>& now,
+                          const std::vector<SpawnPin>* before = nullptr);
 
 // ── Item-level JSON ─────────────────────────────────────────────────────────
 // One node / one variable, in EXACTLY the form toJson() puts into the document's
@@ -1026,7 +1065,9 @@ struct Context
 
     // Widget management services (world-level; bound by the app). createWidget
     // instantiates a widget asset and returns its id; the rest act on that id.
-    std::function<int(const std::string& assetPath)> createWidget;
+    // `spawn` are the Create Widget node's Expose on Spawn values, set on the
+    // new widget before its PreConstruct (empty = the widget's own defaults).
+    std::function<int(const std::string& assetPath, const SpawnValues& spawn)> createWidget;
     std::function<void(int widgetId)> showWidget;
     std::function<void(int widgetId)> hideWidget;
     std::function<void(int widgetId)> destroyWidget;

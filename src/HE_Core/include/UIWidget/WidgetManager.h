@@ -41,7 +41,12 @@ public:
     // way they are in every UI framework: a menu is usually built long before it
     // is put up, and building it visible makes it flash. Call showWidget() when
     // it should appear.
-    int createWidget(ContentManager& content, const std::string& assetPath);
+    // `spawn` (Expose on Spawn, docs/widget-pre-construct-design.md §6): set on
+    // the widget itself after its variables are seeded and BEFORE PreConstruct,
+    // so its own first code already sees them. Public instance variables only
+    // (Set (Ref)'s rule); any other name is skipped with a warning.
+    int createWidget(ContentManager& content, const std::string& assetPath,
+                     const HorizonCode::SpawnValues* spawn = nullptr);
 
     // ── Design time (docs/widget-pre-construct-design.md §5) ─────────────────
     // What a widget's PreConstruct does to it, for the DESIGNER to show. The

@@ -400,7 +400,8 @@ void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
 	}
 }
 
-int WidgetManager::createWidget(ContentManager& content, const std::string& assetPath)
+int WidgetManager::createWidget(ContentManager& content, const std::string& assetPath,
+                                const HorizonCode::SpawnValues* spawn)
 {
 	m_content = &content; // kept for runtime Material/Font re-resolution
 	// What the row templates say their columns are is parsed once per path and
@@ -458,6 +459,19 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
 	            assetPath.c_str(), widgetId, m_instances.back().tree.elements.size(),
 	            interpreted ? "interpreted" : "compiled/no");
+	// Expose on Spawn: what the creator handed in, on the widget itself, before
+	// any of its own code runs — so a PreConstruct that writes "Score: " + score
+	// shows the creator's score in the first picture, as in UMG (§6.2). The
+	// variables were seeded with their defaults in registerInstance, so these
+	// land on top. Not in registerInstance: the designer's run has no creator.
+	if (spawn)
+		for (const HorizonCode::SpawnValue& sv : *spawn)
+			if (!rt().setPublicVariable(scriptId, sv.name, sv.value))
+				// The caller's pins are a mirror from when it was last opened;
+				// the widget has since renamed or hidden this one.
+				HE_LOG_WARN(Widget, "Create Widget '%s': '%s' is no public variable of the "
+				                    "widget (renamed or made private?) — value skipped",
+				            assetPath.c_str(), sv.name.c_str());
 	// Two phases over the whole family. PreConstruct first, for the host and
 	// every embed: each sets its own values and loads its own data. Only then
 	// Construct, so a Construct that calls into an embed finds it initialized

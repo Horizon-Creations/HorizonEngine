@@ -927,7 +927,8 @@ void GameApplication::OnInit()
 	m_widgets.setRuntime(&m_gameInstance.runtime());
 	{
 		HorizonCode::Runtime::Services svc;
-		svc.createWidget  = [this](const std::string& p){ return m_widgets.createWidget(contentManager(), p); };
+		svc.createWidget  = [this](const std::string& p, const HorizonCode::SpawnValues& spawn)
+		{ return m_widgets.createWidget(contentManager(), p, &spawn); };
 		svc.showWidget    = [this](int id){ m_widgets.showWidget(id); };
 		svc.hideWidget    = [this](int id){ m_widgets.hideWidget(id); };
 		svc.destroyWidget = [this](int id){ m_widgets.destroyWidget(id); };

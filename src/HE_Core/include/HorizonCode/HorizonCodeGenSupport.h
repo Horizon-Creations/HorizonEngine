@@ -25,6 +25,8 @@ using HorizonCode::ContainerKind;
 using HorizonCode::containerKindOf;
 using HorizonCode::Context;
 using HorizonCode::PinType;
+using HorizonCode::SpawnValue;
+using HorizonCode::SpawnValues;
 using HorizonCode::Value;
 
 template <typename T> using Array = std::vector<T>;
@@ -663,7 +665,11 @@ inline void setVariableCtx(const Context& c, const char* name, const Value& v)
 inline void showSelf(const Context& c) { if (c.showSelf) c.showSelf(); }
 inline void hideSelf(const Context& c) { if (c.hideSelf) c.hideSelf(); }
 inline uint32_t createWidget(const Context& c, const char* path)
-{ return c.createWidget ? (uint32_t)c.createWidget(path) : 0u; }
+{ return c.createWidget ? (uint32_t)c.createWidget(path, {}) : 0u; }
+// With Expose on Spawn values — only emitted when a pin is wired or carries a
+// value, so a graph without them generates the line above, unchanged.
+inline uint32_t createWidget(const Context& c, const char* path, const SpawnValues& spawn)
+{ return c.createWidget ? (uint32_t)c.createWidget(path, spawn) : 0u; }
 inline void showWidget(const Context& c, int id)    { if (c.showWidget) c.showWidget(id); }
 inline void hideWidget(const Context& c, int id)    { if (c.hideWidget) c.hideWidget(id); }
 inline void destroyWidget(const Context& c, int id) { if (c.destroyWidget) c.destroyWidget(id); }
