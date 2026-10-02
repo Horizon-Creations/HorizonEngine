@@ -60,6 +60,9 @@ add_executable(he_tests
     # Hide / Isolate / Show All / Group / Ungroup behind the viewport's
     # right-click menu: the sun stays, the group's members do not jump.
     test_viewport_actions.cpp
+    # The Vulkan viewport's old ImGui descriptor set is freed only once the
+    # frames drawing it are done on the GPU (Thema 124).
+    test_deferred_handle_retire_list.cpp
     # …and the row itself, driven headless: the two buttons sit ON the tree
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.

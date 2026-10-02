@@ -4153,12 +4153,27 @@ void EditorApplication::OnRender(float dt)
 	if (m_backend == HE::RendererBackend::Vulkan)
 	{
 		auto* vk = static_cast<VulkanRenderer*>(renderer());
+		// Sets retired on earlier re-registrations whose frames are done — every
+		// frame, not only on a change, so a splitter drag does not pile them up.
+		if (vk)
+			m_vkRetiredViewportSets.reclaim(vk->GetCompletedFrameSerial(), [](void* ds)
+			{
+				ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<VkDescriptorSet>(ds));
+			});
 		if (vk && vk->HasViewportResourceChanged())
 		{
-			// Remove the old descriptor set if present.
+			// Retire the old descriptor set if present. The frame submitted just
+			// before (the one that created the new image) still draws
+			// ImGui::Image through it, and RemoveTexture is an immediate
+			// vkFreeDescriptorSets — freeing it now is a free of a set in use
+			// (Thema 124, the Vulkan side of the D3D12 SRV fix in Thema 113).
+			// The old image stays alive in the renderer's m_retiredViewports.
+			// No "wait when full" path as on D3D12: ImGui's pool has 64 sets,
+			// the editor uses ~17, and at most one set per frame in flight is
+			// ever parked here.
 			if (m_vkViewportDescSet)
 			{
-				ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<VkDescriptorSet>(m_vkViewportDescSet));
+				m_vkRetiredViewportSets.retire(m_vkViewportDescSet, vk->GetSubmittedFrameSerial());
 				m_vkViewportDescSet = nullptr;
 			}
 			auto sampler = reinterpret_cast<VkSampler>(vk->GetViewportVkSampler());
@@ -10904,6 +10919,9 @@ void EditorApplication::OnShutdown()
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
 	case HE::RendererBackend::Vulkan:
+		// Still-parked viewport sets go down with ImGui's descriptor pool;
+		// RemoveTexture after this point would find no backend data.
+		m_vkRetiredViewportSets.clear();
 		ImGui_ImplVulkan_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
