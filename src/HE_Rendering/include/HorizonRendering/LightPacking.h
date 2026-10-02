@@ -19,7 +19,10 @@ namespace HE
 
 // The engine's per-frame light window. Everything downstream (direct shading, GI
 // probe bounce, local shadow-mask channels) works on the FIRST kMaxLightWindow
-// lights of RenderWorld::lights, in extractor order.
+// lights of RenderWorld::lights, in extractor order. The extractor puts shining
+// directional lights first, then point/spot, then zero-intensity directionals
+// (RenderExtractor.cpp, orderLightWindow), so a crowd of local lights can never
+// push the sun or moon out of the window.
 inline constexpr int kMaxLightWindow = 8;
 
 // Local (point/spot) lights that get a ray-traced shadow mask channel. The mask
