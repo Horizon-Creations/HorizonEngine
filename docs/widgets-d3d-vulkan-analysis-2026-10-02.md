@@ -68,15 +68,25 @@ den gespiegelten Positionen.
 | Lauf | GL | D3D11 | D3D12 | Vulkan |
 |---|---|---|---|---|
 | main | Rot/Grün/Blau an der Sollposition | nur Himmel/Boden | nur Himmel/Boden | nur Himmel/Boden (mit nachkopierten Shaders/), ohne: schwarz |
-| + extractUI-Patch | wie oben | identisch zu GL (229,25,25)/(25,204,51)/(25,76,229) | identisch zu GL | Rot **unten** links, Grün **oben** rechts, Text auf dem Kopf |
+| + extractUI-Patch | wie oben | an den Messpunkten gleich GL (229,25,25)/(25,204,51)/(25,76,229) | an den Messpunkten gleich GL | Rot **unten** links, Grün **oben** rechts, Text auf dem Kopf |
 
-Der Patch, der D3D11/D3D12 vollständig repariert und Vulkan sichtbar (aber gespiegelt) macht,
-liegt bei: `docs/widgets-d3d-vulkan-extractui-positive-control.patch`. Es sind drei Zeilen,
-jeweils `extractUI(*m_world, width, height, renderWorld)` direkt nach dem Haupt-`extract` in
-`DrawScene`. Er ist **nicht** committet, der Fix gehört zu Schritt 2. Achtung beim Fix für
-Vulkan: `runGi` (`:9455`) und `runSSAO` (`:10591`) extrahieren ebenfalls und leeren dabei
-`uiObjects`. `extractUI` muss deshalb nach dem letzten `extract` vor dem UI-Pass laufen. In
-`DrawScene` ist das der Fall, die Messung oben belegt es.
+Der Kontroll-Patch liegt bei `docs/widgets-d3d-vulkan-extractui-positive-control.patch`.
+Es sind drei Zeilen, jeweils `extractUI(*m_world, width, height, renderWorld)` direkt nach dem
+Haupt-`extract` in `DrawScene`. Er ist **nicht** committet, der Fix gehört zu Schritt 2.
+
+Was der Patch repariert, ist die **Zuführung**. Flache Quads und Text stimmen auf D3D11/D3D12
+in Farbe und Position mit GL überein. Die Stil-Features fehlen weiterhin (Befund 3). Deshalb
+sind mit dem Patch 79200 statt 77861 Pixel hell: Die runden, gestylten Kacheln werden als volle
+Rechtecke gezeichnet. Vulkan wird sichtbar, aber gespiegelt (Befund 2). Drei Zeilen reichen
+also nicht für „sieht aus wie auf GL“.
+
+Reihenfolge: `runGi` (`VulkanRenderer.cpp:9455`) und `runSSAO` (`:10591`) extrahieren ebenfalls
+und leeren dabei `uiObjects`. `extractUI` muss deshalb nach dem letzten `extract` vor dem UI-Pass
+laufen. Der Aufruf in `DrawScene` erfüllt das, und das ist **gemessen**. Lauf `ctlgi_*`:
+`HE_DUMP_GI=1 HE_DUMP_SSAO=1 HE_DUMP_SHADOWINSTTEST=1 HE_DUMP_SKYTEST=1` mit dem Patch, und alle
+drei Backends loggen `GI probe grid 11x4x11 (484 probes)`. Kachel 0 hat danach die exakte
+Kachelfarbe (66,76,97): auf D3D11/D3D12 an der Sollposition (y 90–180), auf Vulkan an der
+gespiegelten (y 540–630). An der jeweils anderen Stelle liegt Szene.
 
 ## Befund 2: Vulkan zeichnet die UI vertikal gespiegelt
 
@@ -125,6 +135,13 @@ eigener Fehler, unabhängig von der UI, aber Teil von "Vulkan im Spiel zeigt nic
   nutzt Entity-UI. Beide Wege laufen über dasselbe `extractUI` (`RenderExtractor.cpp:1338/1341`),
   und der Editor-Witness belegt den WidgetManager-Weg.
 - Ein interaktiver PIE-Klick. Der PIE-Pfad ist über Code plus den Viewport-Dump belegt (siehe oben).
+
+## Stand der Messbäume auf NN-WS03 (für Schritt 2)
+
+- `C:/hw133/deploy` = **Kontroll-Stand** (Editor-`HorizonRendering.dll` 624BCB6C… mit Patch). Das ist NICHT main.
+- `C:/hw133/pre` = main-Baseline (`9ed6f816`, `HorizonRendering.dll` A69E46C8…).
+- `C:/hw133/out_pre`, `C:/hw133/out_ctl` = exportiertes UiWit-Spiel, Baseline bzw. mit Kontroll-DLL. In beide ist `Shaders/` von Hand nachkopiert (Befund 4).
+- Der Quellbaum ist zurückgesetzt. Im Zweig ist nur Doku committet.
 
 ## Reproduktion
 
