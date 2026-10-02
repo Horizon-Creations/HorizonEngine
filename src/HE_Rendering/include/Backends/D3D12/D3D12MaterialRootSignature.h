@@ -34,10 +34,12 @@
 //   [14]     heSSRFwd        t31   forward SSR result
 //   [15]     heGIReflFwd     t32   forward GI-reflection result
 //   [16]     heCloudShadow   t33   cloud-shadow transmittance
-// Slots 9..16 are null views in the template today: the D3D12 fill
-// (fillMatLight) leaves their gates at 0, so they are declared, never
-// sampled. Wiring the real AO / DDGI atlases through them is the D3D11-parity
-// job, not this fix — this header only makes the PSO legal.
+// Slots 9..16 are null views in the template, declared but never sampled
+// (fillMatLight leaves their gates at 0) — except [12]/[13]: the renderer writes
+// the live DDGI atlases there once they exist and fillMatLight raises
+// giProbe.y (Thema 120). AO, sky cube, SSR, GI-refl and cloud shadow are still
+// null; this header only makes the PSO legal — the signature is unchanged by
+// what the template holds.
 //
 // Clustered variant (Thema 117): MaterialShaderLibrary::fragmentClustered(HLSL)
 // adds three ByteAddressBuffers on t24/t25/t26 (light array, grid, index

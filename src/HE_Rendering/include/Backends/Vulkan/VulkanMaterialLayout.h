@@ -66,13 +66,27 @@ inline constexpr Binding kBindings[] = {
 	{ 12, DescKind::CombinedImageSampler, kStageFragment }, // heCsm (CSM fallback, 2D array)
 	// heSSRFwd (docs/ssr-cross-backend-plan.md B5 / §2.3 head 1): the
 	// preamble's reflection cascade declares this sampler unconditionally and
-	// heLight.ssr.x decides whether it is read. (Bindings 15-18, 32 and 33 of
-	// the preamble are still not in this layout — a pre-existing gap, not an
-	// SSR or a cluster one.)
+	// heLight.ssr.x decides whether it is read.
 	{ 31, DescKind::CombinedImageSampler, kStageFragment }, // heSSRFwd
 	// heLocalShadow (sampler2DArray): the local (point/spot) shadow atlas the
 	// built-in scene shader samples at binding 9. Gated by lightParams[i].y.
 	{ 13, DescKind::CombinedImageSampler, kStageFragment }, // heLocalShadow
+	// The rest of the preamble's fixed samplers (Thema 120). Its SPIR-V uses
+	// all of them statically, so the layout declares them even where the gate
+	// never opens on this backend (a pipeline whose shader uses a binding its
+	// layout lacks is invalid — it only ran by driver leniency before).
+	//   15 heSkyEnv (cube)   — fog.z, never set here: white cube
+	//   16 heAO              — fog.w, never set here: white
+	//   17 heGIIrradiance    — giProbe.y (FillMaterialGIProbe): the DDGI atlases,
+	//   18 heGIVisibility      the SAME two images scene bindings 5/6 sample
+	//   32 heGIReflFwd       — giRefl.z, no RT reflections here: white
+	//   33 heCloudShadow     — cloudShadowB.x, never set here: white
+	{ 15, DescKind::CombinedImageSampler, kStageFragment }, // heSkyEnv
+	{ 16, DescKind::CombinedImageSampler, kStageFragment }, // heAO
+	{ 17, DescKind::CombinedImageSampler, kStageFragment }, // heGIIrradiance
+	{ 18, DescKind::CombinedImageSampler, kStageFragment }, // heGIVisibility
+	{ 32, DescKind::CombinedImageSampler, kStageFragment }, // heGIReflFwd
+	{ 33, DescKind::CombinedImageSampler, kStageFragment }, // heCloudShadow
 	// ── Thema 117: fragmentClustered's light lists (keep these LAST) ──
 	{ kClusterLightsBinding, DescKind::StorageBuffer, kStageFragment },
 	{ kClusterGridBinding,   DescKind::StorageBuffer, kStageFragment },
@@ -92,9 +106,9 @@ constexpr uint32_t countOf(DescKind kind, uint32_t bindingCount = kBindingCount)
 	return n;
 }
 
-static_assert(kBindingCount == 18, "material set 0: 15 canonical bindings + 3 cluster lists");
+static_assert(kBindingCount == 24, "material set 0: 21 canonical bindings + 3 cluster lists");
 static_assert(countOf(DescKind::UniformBuffer) == 5);        // b0, b1, b3, b8, b9
-static_assert(countOf(DescKind::CombinedImageSampler) == 10); // b2, b4-b7, b10-b13, b31
+static_assert(countOf(DescKind::CombinedImageSampler) == 16); // b2, b4-b7, b10-b13, b15-b18, b31-b33
 static_assert(countOf(DescKind::StorageBuffer) == 3);         // b24-b26
 static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
               "the cluster lists must be the last rows (negative control slices them off)");

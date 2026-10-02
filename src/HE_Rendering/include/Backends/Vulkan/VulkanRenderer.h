@@ -444,6 +444,13 @@ private:
 	// heCsm sampler is arrayed (sampler2DArray), so its default descriptor must
 	// be an array view (a plain 2D view fails validation against that SPIR-V).
 	VkImageView     m_whiteArrayView   = VK_NULL_HANDLE;
+	// 1x1 six-layer white CUBE for the preamble's heSkyEnv (samplerCube, set 0
+	// binding 15). This backend has no sky-environment cube and never raises
+	// heLight.fog.z, so it is never sampled — but the layout must declare every
+	// binding the SPIR-V uses statically, and the view type must match.
+	VkImage         m_whiteCubeImage   = VK_NULL_HANDLE;
+	VkDeviceMemory  m_whiteCubeMem     = VK_NULL_HANDLE;
+	VkImageView     m_whiteCubeView    = VK_NULL_HANDLE;
 
 	// ── MaterialComponent override + hot-reload (A2) ─────────────────────────
 	// Override-material textures cached by material UUID (parallel to the baked per-mesh

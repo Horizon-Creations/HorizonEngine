@@ -68,6 +68,26 @@ void FillMaterialWind(const ::EnvironmentSettings& env, MaterialShaderLibrary::L
 	out.camPos[3]   = std::max(env.windSpeed, 0.0f);
 }
 
+void FillMaterialGIProbe(MaterialShaderLibrary::Lighting& out,
+                         const glm::vec3&                 gridOrigin,
+                         float                            probeSpacing,
+                         const glm::ivec3&                gridCounts,
+                         int                              probesPerRow,
+                         float                            indirectIntensity,
+                         bool                             atlasesBound)
+{
+	out.giGridOrigin[0] = gridOrigin.x;
+	out.giGridOrigin[1] = gridOrigin.y;
+	out.giGridOrigin[2] = gridOrigin.z;
+	out.giGridOrigin[3] = probeSpacing;
+	out.giGridCounts[0] = static_cast<float>(gridCounts.x);
+	out.giGridCounts[1] = static_cast<float>(gridCounts.y);
+	out.giGridCounts[2] = static_cast<float>(gridCounts.z);
+	out.giGridCounts[3] = static_cast<float>(probesPerRow);
+	out.giProbe[0]      = indirectIntensity;
+	out.giProbe[1]      = atlasesBound ? 1.0f : 0.0f;
+}
+
 void FillMaterialClusterParams(const ClusterLightBuild& build, MaterialShaderLibrary::Lighting& out)
 {
 	for (int c = 0; c < 4; ++c)

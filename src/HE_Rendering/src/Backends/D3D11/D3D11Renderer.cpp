@@ -5901,6 +5901,12 @@ void D3D11Renderer::DrawScene(int width, int height)
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
+        // DDGI probe field for heLitP (Lighting v2.5): the built-in shader's
+        // grid; the gate rises with the same giShadingActive, and the material
+        // draw puts the atlases on t17/t18 exactly then (BindDDGIAtlases).
+        HE::FillMaterialGIProbe(lit, p.giGridOrigin, p.giProbeSpacing, p.giGridCounts,
+                                p.giProbesPerRow, p.giIndirectIntensity,
+                                giActive && p.giIrrSRV && p.giVisSRV);
         // CSM fallback for graph materials (Lighting v2.2): only meaningful
         // when the GI masks are absent this frame — heLitP's directional
         // lights then sample the SAME cascade array as the built-in shader
@@ -6462,6 +6468,17 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // weightmap is filtered with whatever the last built-in pass left
                         // on s0. Restored below. (D3D11MaterialBindings.h, Thema 57)
                         HE::d3d11mat::BindLandscapeWeights(ctx, heWeights, p.m_matWeightSampler.Get());
+                        // heGIIrradiance / heGIVisibility (t17/t18) + linear-clamp on s1/s3
+                        // (Thema 120): the live probe atlases while GI shades — the gate
+                        // fillMatLight raised — the white dummy otherwise, so the 2D slots
+                        // never hold the built-in pass's array / structured buffer during
+                        // the draw. m_matWeightSampler is the same linear-clamp description
+                        // as giLinearClamp and, unlike it, exists without the GI path.
+                        // Restored below.
+                        HE::d3d11mat::BindDDGIAtlases(ctx,
+                            giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
+                            giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
+                            p.m_matWeightSampler.Get());
 
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             // std140 U block (176 B) at b1 VS.
@@ -6517,8 +6534,18 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // restored here too since HeLighting overwrote it. And PS s0: the
                         // weightmap's clamp sampler sat there for the draw, the built-in
                         // shader's albedo sampler (p.sampler, set once per pass) goes back;
-                        // t14 (heLandscapeWeights) comes off with it.
+                        // t14 (heLandscapeWeights) comes off with it. And t17/t18/s1/s3:
+                        // the DDGI atlases go, the built-in pass's local shadow atlas,
+                        // cluster lights, AO point sampler and shadow sampler come back.
                         HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
+                        {
+                            HE::d3d11mat::BuiltinGISlots builtin;
+                            builtin.localShadowArray = localShadowSrv_;
+                            builtin.clusterLights    = clustered ? p.clusterLightSRV.Get() : nullptr;
+                            builtin.pointSampler     = p.pointSampler.Get();
+                            builtin.shadowSampler    = p.shadowSampler.Get();
+                            HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin);
+                        }
                         ctx->VSSetShader(p.vs.Get(), nullptr, 0);
                         ctx->PSSetShader(p.ps.Get(), nullptr, 0);
                         ctx->IASetInputLayout(p.inputLayout.Get());
