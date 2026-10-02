@@ -10327,8 +10327,12 @@ void MetalRenderer::EncodeParticleBillboards(void* renderEncoder, const HE::UUID
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_particlePreviewPipeline];
 	[enc setVertexBuffer:instBuf offset:0 atIndex:0];
 	[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
-	[enc setVertexBytes:&camRight length:sizeof(camRight) atIndex:2];
-	[enc setVertexBytes:&camUp    length:sizeof(camUp)    atIndex:3];
+	// `constant float3&` reads 16 bytes; a bare glm::vec3 (12) trips API validation.
+	static_assert(sizeof(glm::vec4) == HE::kMetalParticleBasisBytes);
+	const glm::vec4 right4(camRight, 0.0f);
+	const glm::vec4 up4   (camUp,    0.0f);
+	[enc setVertexBytes:&right4 length:sizeof(right4) atIndex:2];
+	[enc setVertexBytes:&up4    length:sizeof(up4)    atIndex:3];
 	bool hasTexFlag = hasTex;
 	[enc setFragmentBytes:&hasTexFlag length:sizeof(hasTexFlag) atIndex:1];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)(hasTex ? matTex : m_dummyTexture) atIndex:0];
@@ -16899,8 +16903,11 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	// Camera-facing basis for billboard expansion — same convention as RenderParticlePreview.
-	const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
-	const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
+	// vec4, not vec3: heParticleGraphVertex reads `constant float3&` = 16 bytes
+	// (export-baked PPSD variants too, so the MSL side stays as it is).
+	static_assert(sizeof(glm::vec4) == HE::kMetalParticleBasisBytes);
+	const glm::vec4 camRight(view[0][0], view[1][0], view[2][0], 0.0f);
+	const glm::vec4 camUp   (view[0][1], view[1][1], view[2][1], 0.0f);
 
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
 
