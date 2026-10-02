@@ -126,6 +126,52 @@ inline void RestoreBuiltinGISlots(ID3D11DeviceContext* ctx, const BuiltinGISlots
     ctx->PSSetSamplers(kGIIrradianceSamplerSlot, 1, &s1);
     ctx->PSSetSamplers(kGIVisibilitySamplerSlot, 1, &s3);
 }
+
+// ── Clustered heLitP (Thema 117) ─────────────────────────────────────────────
+// MaterialShaderLibrary::fragmentClustered declares the three cluster lists as
+// std430 SSBOs on bindings 24/25/26; SPIRV-Cross turns those into
+// ByteAddressBuffers on t24/t25/t26. The built-in scene shader reads the SAME
+// lists (identical byte layout, HE::BuildClusterLights) as StructuredBuffers
+// on t18..t20 — but one D3D11 buffer cannot be both: MISC_BUFFER_STRUCTURED
+// and MISC_BUFFER_ALLOW_RAW_VIEWS are mutually exclusive, and a structured SRV
+// on a ByteAddressBuffer register is a view-type mismatch. So graph materials
+// get a second, raw buffer set, refilled from the same build; the built-in
+// t18..t20 stay exactly as they were.
+constexpr UINT kClusterLightsSrvSlot = 24; // HeClusterLights: 4 float4 per light
+constexpr UINT kClusterGridSrvSlot   = 25; // HeClusterGrid:   {offset, count} per cell
+constexpr UINT kClusterIdxSrvSlot    = 26; // HeClusterIdx:    flattened light indices
+
+// One dynamic raw buffer of `bytes` (a multiple of 4) + its raw SRV
+// (R32_TYPELESS, BUFFEREX_SRV_FLAG_RAW — what a ByteAddressBuffer register
+// needs). CPU-written with MAP_WRITE_DISCARD like the structured lists.
+inline bool CreateClusterRawBuffer(ID3D11Device* device, UINT bytes,
+                                   ID3D11Buffer** buffer, ID3D11ShaderResourceView** srv)
+{
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth      = bytes;
+    bd.Usage          = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags      = D3D11_BIND_SHADER_RESOURCE;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    bd.MiscFlags      = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    if (FAILED(device->CreateBuffer(&bd, nullptr, buffer))) return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format                = DXGI_FORMAT_R32_TYPELESS;
+    sd.ViewDimension         = D3D11_SRV_DIMENSION_BUFFEREX;
+    sd.BufferEx.FirstElement = 0;
+    sd.BufferEx.NumElements  = bytes / 4u;
+    sd.BufferEx.Flags        = D3D11_BUFFEREX_SRV_FLAG_RAW;
+    return SUCCEEDED(device->CreateShaderResourceView(*buffer, &sd, srv));
+}
+
+// The three lists on t24..t26, in that order (lights, grid, indices). Once per
+// fill: no material draw rebinds those registers, and the built-in shaders
+// never read them.
+inline void BindClusterLists(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* const lists[3])
+{
+    static_assert(kClusterGridSrvSlot == kClusterLightsSrvSlot + 1 &&
+                  kClusterIdxSrvSlot  == kClusterLightsSrvSlot + 2, "t24..t26 are one contiguous range");
+    ctx->PSSetShaderResources(kClusterLightsSrvSlot, 3, lists);
+}
 } // namespace HE::d3d11mat
 
 #endif // _WIN32

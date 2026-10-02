@@ -860,6 +860,29 @@ namespace
 		}
 	}
 
+	// ── Light window order ────────────────────────────────────────────────────
+	// Every forward consumer (built-in scene shaders, heLitP, GI bounce, shadow
+	// masks) shades only the FIRST kMaxLightWindow lights of out.lights. The ECS
+	// order put the sun/moon wherever its entity happened to sit, and the
+	// day-night pass appends a synthesised one at the END — so eight point
+	// lights pushed the sun out of the window and a forward frame lost its whole
+	// directional term (Thema 125: the MANYLIGHTS floor at a third of the
+	// deferred brightness, which keeps directionals in its window). Stable
+	// three-way split: shining directionals first, then point/spot, then
+	// directionals at zero intensity (the moon by day, the sun by night), which
+	// shade nothing and must not cost a local light its slot. Runs after
+	// applyDayNight (it sets those intensities) and before the shadow phases
+	// (assignLocalShadowLayers indexes the window).
+	void orderLightWindow(RenderWorld& out)
+	{
+		auto rank = [](const LightData& l) {
+			if (l.type != 0) return 1;
+			return l.intensity > 0.0f ? 0 : 2;
+		};
+		std::stable_sort(out.lights.begin(), out.lights.end(),
+		                 [&](const LightData& a, const LightData& b) { return rank(a) < rank(b); });
+	}
+
 	// ── Directional-light shadow view-projection ─────────────────────────────
 	// The brightest directional light casts shadows (so the single shadow map
 	// follows the sun by day and the moon by night). The ortho frustum is fitted
@@ -1187,6 +1210,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// Lights, then the day-night pass that overrides the sun/moon among them.
 	extractLights(reg, out);
 	applyDayNight(out);
+	orderLightWindow(out);
 	// Shadows last: both phases read the finished object + light sets.
 	fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
 	assignLocalShadowLayers(out);

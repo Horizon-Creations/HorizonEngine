@@ -44,6 +44,7 @@ add_executable(he_tests
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
+    test_light_window_order.cpp
     test_world_preview_backends.cpp
     # TAA on D3D11/D3D12/Vulkan (Thema 78, Schritt 6): host jitter + the HLSL
     # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
@@ -53,6 +54,9 @@ add_executable(he_tests
     test_undo.cpp
     test_editor_selection.cpp
     test_editor_marquee.cpp
+    # The D3D12 ImGui SRV heap's free-list: a freed slot waits for its fence
+    # before it is handed out again (Dock-Splitter drag, Thema 113).
+    test_deferred_slot_free_list.cpp
     test_editor_multi_edit.cpp
     test_outliner_filter.cpp
     # The eye, the padlock and the sibling order behind each Outliner row.
@@ -169,6 +173,7 @@ add_executable(he_tests
     test_particles.cpp
     test_ui.cpp
     test_ui_widgets.cpp
+    test_widget_pre_construct.cpp
     # Its own file so it gets its own PROCESS: the shared font atlas is baked
     # once, and this is the one run that bakes it in the regular weight.
     test_ui_font_weight.cpp
@@ -983,6 +988,15 @@ if(HE_HAVE_SHADERC)
     if(WIN32)
         target_link_libraries(he_tests PRIVATE d3dcompiler d3d12 d3d11 dxgi)
     endif()
+    # SPIRV-Cross reflection (Thema 117): the Vulkan material cases ask which
+    # descriptors a node shader's SPIR-V STATICALLY uses and hold them against
+    # VulkanMaterialLayout.h — the one Vulkan check without a device in CI.
+    # he_shadercompiler links it PRIVATE, so its headers do not come along.
+    target_link_libraries(he_tests PRIVATE spirv-cross-core)
+    # glslang itself (Thema 117, Schritt 6): the GL 4.3 case parses the emitted
+    # GLSL 4.30 in plain OpenGL mode and links vertex + fragment — the one GL 4.3
+    # check without a GL 4.3 context.
+    target_link_libraries(he_tests PRIVATE glslang glslang-default-resource-limits)
 endif()
 
 # The D3D11/D3D12 shader managers (Thema 62): compiled straight into the test

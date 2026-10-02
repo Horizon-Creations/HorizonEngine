@@ -6147,6 +6147,10 @@ void MetalRenderer::Initialize(HE::Window* window)
 	// HE_DEFERRED_CLUSTER=0 forces the 8-light resolve (A/B guard).
 	if (const char* cl = std::getenv("HE_DEFERRED_CLUSTER"); cl && *cl)
 		m_deferredClustered = std::atoi(cl) != 0;
+	// Forward twin for graph materials (Thema 117) — same name and meaning as
+	// on D3D11/D3D12/Vulkan: HE_FORWARD_CLUSTER=0 keeps the 8-light window.
+	if (const char* cl = std::getenv("HE_FORWARD_CLUSTER"); cl && *cl)
+		m_forwardClustered = std::atoi(cl) != 0;
 
 	HE_LOG_INFO(RHI, "%s",
 		(std::string("MetalRenderer: initialized on ") + [[device name] UTF8String]).c_str());
@@ -9043,6 +9047,19 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	lit.lightColor[0][3] = 1.0f;
 	lit.counts[0]        = 1.0f;
 	[enc setFragmentBytes:&lit length:sizeof(lit) atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+	// The scene's PSO is the clustered variant (Thema 117), whose MSL declares the
+	// three light lists. lit's gate (clusterParams.x) is 0, so they are never
+	// read — but every declared buffer must be bound for API validation.
+	if (m_forwardClustered)
+	{
+		const uint32_t noLists[4] = { 0u, 0u, 0u, 0u };
+		[enc setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterLightsBufferIndex];
+		[enc setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterGridBufferIndex];
+		[enc setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterIndexBufferIndex];
+	}
 	// WPO materials read HeLighting/HeParams in the VERTEX stage (buffers 2/3).
 	if (!shVert.empty())
 	{
@@ -11864,9 +11881,21 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		const auto& v = vertBody.empty()
 			? m_matShaderLib.standardVertex(Backend::Metal)
 			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::Metal);
-		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
-		vertMSL = v.source; fragMSL = f.source; log = v.log + f.log;
-		ok = v.ok && f.ok;
+		// Forward PSOs (opaque + blended) take the clustered heLitP variant —
+		// EncodeScene binds its lists on fragment buffers 4/5/6 and sets the gate;
+		// the material preview binds empty lists with the gate at 0. The G-buffer
+		// variant never shades lights. A variant that fails to compile falls back
+		// to the plain fragment (8-light window), not to a missing material.
+		const auto* f = &m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
+		if (m_forwardClustered && !gbuffer)
+		{
+			const auto& fc = m_matShaderLib.fragmentClustered(key, fragGlsl, Backend::Metal);
+			if (fc.ok) f = &fc;
+			else HE_LOG_WARN(RHI, "%s", ("MetalRenderer: clustered material variant failed, "
+			                             "using the 8-light window\n" + fc.log).c_str());
+		}
+		vertMSL = v.source; fragMSL = f->source; log = v.log + f->log;
+		ok = v.ok && f->ok;
 	}
 
 	void* result = nullptr;
@@ -13295,6 +13324,20 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// Zero when nothing shines → heLit() correctly degrades to its ambient term.
 	HE::MaterialShaderLibrary::Lighting matLight; // reused by WPO vertex-stage binds below
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
+	// Clustered point/spot lights (Thema 117): ONE build serves the forward
+	// graph materials (fragmentClustered, gate in matLight.clusterParams) and
+	// the stored-mode deferred resolve below. Buffers 4/5/6 are bound once for
+	// the whole pass — the sky and skinned draws in between never touch them.
+	// The window in matLight stays FULL: precompiled (pak) blobs lack the
+	// cluster code and still need its point/spot slots.
+	HE::ClusterLightBuild clusterBuild;
+	if (m_forwardClustered || (deferred && m_deferredClustered))
+		clusterBuild = BuildFrameClusterLights();
+	if (m_forwardClustered)
+	{
+		BindClusterBuffers(renderEncoder, clusterBuild);
+		HE::FillMaterialClusterParams(clusterBuild, matLight);
+	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 
@@ -13344,7 +13387,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		if (m_deferredClustered)
 		{
 			HE::MaterialShaderLibrary::Lighting clusterLight = matLight;
-			EncodeClusterData(renderEncoder, clusterLight, ru);
+			EncodeClusterData(renderEncoder, clusterBuild, clusterLight, ru);
 			[encoder setFragmentBytes:&clusterLight length:sizeof(clusterLight)
 			                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 		}
@@ -13979,134 +14022,61 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 
 // ─── Clustered lighting build (plan P7) ──────────────────────────────────────
 // CPU scatter: every point/spot light's projected bounds mark the screen-tile ×
-// log-z-slice clusters it can touch; the resolve then shades only its cluster's
-// list. Cheap (few hundred lights × few touched clusters) and re-built fresh
-// per frame like the particle instance buffers — no CPU/GPU sync hazards.
-// Rewrites matLight's window to DIRECTIONAL lights only: point/spot shading now
-// belongs exclusively to the cluster list, or every windowed light would be
-// counted twice.
-void MetalRenderer::EncodeClusterData(void* renderEncoder,
-                                      HE::MaterialShaderLibrary::Lighting& matLight,
-                                      HE::MaterialShaderLibrary::ResolveUniforms& ru)
+// log-z-slice clusters it can touch; the shader then shades only its cluster's
+// list. The scatter is the shared HE::BuildClusterLights (top-left uv origin,
+// Metal's gl_FragCoord) — the deferred resolve and the forward graph materials
+// read the same lists. Cheap (few hundred lights × few touched clusters) and
+// re-built fresh per frame like the particle instance buffers — no CPU/GPU
+// sync hazards.
+HE::ClusterLightBuild MetalRenderer::BuildFrameClusterLights() const
 {
-	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-
-	const glm::mat4 viewProj =
-		m_renderWorld.camera.projection * m_renderWorld.camera.view;
-	const glm::vec3 camPos = m_renderWorld.camera.position;
-	const glm::vec3 camFwd =
-		-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
-	const float sliceScale =
-		static_cast<float>(kClusterGridZ) / std::log(kClusterFar / kClusterNear);
-
-	// Pack the local lights (4 vec4 each) + scatter them into the grid.
-	std::vector<glm::vec4> lightData;
-	const int gridTotal = kClusterGridX * kClusterGridY * kClusterGridZ;
-	std::vector<std::vector<uint32_t>> cells(gridTotal);
-	int lightCount = 0;
-	// GI local-mask channel bookkeeping: the ray-traced mask (heGILocal) covers
-	// the first 4 NON-directional lights of the first-8 window, counted exactly
-	// like heLitP's localIdx — reproduce that scan so cluster lights keep their
-	// mask channel when GI is on.
+	// GI local-mask channel: the ray-traced mask (heGILocal) covers the first 4
+	// NON-directional lights of the first-8 window; the builder reproduces that
+	// scan, but only while the mask is actually produced this frame.
 	const bool giMasksValid = m_giEnabled && m_giSupported && m_giShadowResult
 	                       && m_giIrradianceAtlas && m_giVisibilityAtlas;
-	int extractorIndex = -1;
-	int windowLocalIdx = 0;
-	for (const LightData& l : m_renderWorld.lights)
-	{
-		++extractorIndex;
-		int maskChannel = -1; // -1 = no ray-traced mask for this light
-		if (l.type != 0 && extractorIndex < 8)
-		{
-			if (giMasksValid && windowLocalIdx < 4) maskChannel = windowLocalIdx;
-			++windowLocalIdx;
-		}
-		if (l.type == 0) continue; // directional stays in the heLight window
-		if (lightCount >= kMaxClusteredLights) break;
-		const float range = std::max(l.range, 1e-4f);
-		// Depth slice range along the camera forward.
-		const float viewZ = glm::dot(l.position - camPos, camFwd);
-		const float zMin  = viewZ - range, zMax = viewZ + range;
-		if (zMax < kClusterNear || zMin > kClusterFar) continue; // outside the grid
-		auto slice = [&](float z) {
-			return std::clamp(static_cast<int>(std::log(std::max(z, kClusterNear) / kClusterNear)
-			                                   * sliceScale), 0, kClusterGridZ - 1);
-		};
-		const int z0 = slice(zMin), z1 = slice(zMax);
-		// Screen rect: project the 8 corners of the world-space bounding box.
-		// A corner at/behind the near plane makes the projection unusable →
-		// conservatively cover the full screen for that light.
-		float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
-		bool fullRect = false;
-		for (int c = 0; c < 8 && !fullRect; ++c)
-		{
-			const glm::vec3 corner = l.position + range * glm::vec3(
-				(c & 1) ? 1.0f : -1.0f, (c & 2) ? 1.0f : -1.0f, (c & 4) ? 1.0f : -1.0f);
-			const glm::vec4 clip = viewProj * glm::vec4(corner, 1.0f);
-			if (clip.w <= kClusterNear) { fullRect = true; break; }
-			// Metal's gl_FragCoord/uv origin is TOP-LEFT — flip v so the CPU
-			// scatter and the shader's cluster pick agree.
-			const float u = clip.x / clip.w * 0.5f + 0.5f;
-			const float v = 1.0f - (clip.y / clip.w * 0.5f + 0.5f);
-			u0 = std::min(u0, u); u1 = std::max(u1, u);
-			v0 = std::min(v0, v); v1 = std::max(v1, v);
-		}
-		int x0 = 0, x1 = kClusterGridX - 1, y0 = 0, y1 = kClusterGridY - 1;
-		if (!fullRect)
-		{
-			if (u1 < 0.0f || u0 > 1.0f || v1 < 0.0f || v0 > 1.0f) continue; // off-screen
-			x0 = std::clamp(static_cast<int>(u0 * kClusterGridX), 0, kClusterGridX - 1);
-			x1 = std::clamp(static_cast<int>(u1 * kClusterGridX), 0, kClusterGridX - 1);
-			y0 = std::clamp(static_cast<int>(v0 * kClusterGridY), 0, kClusterGridY - 1);
-			y1 = std::clamp(static_cast<int>(v1 * kClusterGridY), 0, kClusterGridY - 1);
-		}
-		const uint32_t li = static_cast<uint32_t>(lightCount++);
-		lightData.push_back(glm::vec4(l.position, static_cast<float>(l.type)));
-		lightData.push_back(glm::vec4(l.direction, l.spotAngleCos));
-		lightData.push_back(glm::vec4(l.color, l.intensity));
-		lightData.push_back(glm::vec4(range,
-			(m_localShadowTex && l.shadowLayer >= 0) ? static_cast<float>(l.shadowLayer + 1) : 0.0f,
-			static_cast<float>(maskChannel + 1), // GI mask channel + 1 (0 = none)
-			0.0f));
-		for (int z = z0; z <= z1; ++z)
-			for (int y = y0; y <= y1; ++y)
-				for (int x = x0; x <= x1; ++x)
-					cells[(z * kClusterGridY + y) * kClusterGridX + x].push_back(li);
-	}
+	return HE::BuildClusterLights(m_renderWorld,
+	                              /*localShadowsActive=*/m_localShadowTex != nullptr,
+	                              giMasksValid);
+}
 
-	// Flatten: per-cluster {offset, count} + one index list.
-	std::vector<uint32_t> grid(gridTotal * 2, 0u);
-	std::vector<uint32_t> indices;
-	for (int cIdx = 0; cIdx < gridTotal; ++cIdx)
-	{
-		grid[cIdx * 2 + 0] = static_cast<uint32_t>(indices.size());
-		grid[cIdx * 2 + 1] = static_cast<uint32_t>(cells[cIdx].size());
-		indices.insert(indices.end(), cells[cIdx].begin(), cells[cIdx].end());
-	}
-	if (lightData.empty()) lightData.push_back(glm::vec4(0.0f)); // never a 0-byte buffer
-	if (indices.empty())   indices.push_back(0u);
-
+void MetalRenderer::BindClusterBuffers(void* renderEncoder, const HE::ClusterLightBuild& build)
+{
+	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	using Lib = HE::MaterialShaderLibrary;
 	// Per-frame lists as slices of the frame's upload ring (UploadTransient);
-	// outside EncodeFrame each is a fresh buffer, as they all used to be.
+	// outside EncodeFrame each is a fresh buffer. The builder never hands out an
+	// empty list, so no binding is ever 0 bytes.
 	void*  lightBuf = nullptr;
 	void*  gridBuf  = nullptr;
 	void*  idxBuf   = nullptr;
 	size_t lightOff = 0, gridOff = 0, idxOff = 0;
-	UploadTransientBytes(lightData.data(), lightData.size() * sizeof(glm::vec4), lightBuf, lightOff);
-	UploadTransientBytes(grid.data(),      grid.size() * sizeof(uint32_t),       gridBuf,  gridOff);
-	UploadTransientBytes(indices.data(),   indices.size() * sizeof(uint32_t),    idxBuf,   idxOff);
-	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)lightBuf offset:lightOff atIndex:4];
-	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)gridBuf  offset:gridOff  atIndex:5];
-	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)idxBuf   offset:idxOff   atIndex:6];
+	UploadTransientBytes(build.lights.data(),  build.lights.size()  * sizeof(glm::vec4),  lightBuf, lightOff);
+	UploadTransientBytes(build.grid.data(),    build.grid.size()    * sizeof(glm::uvec2), gridBuf,  gridOff);
+	UploadTransientBytes(build.indices.data(), build.indices.size() * sizeof(uint32_t),   idxBuf,   idxOff);
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)lightBuf offset:lightOff
+	                   atIndex:Lib::kMetalClusterLightsBufferIndex];
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)gridBuf  offset:gridOff
+	                   atIndex:Lib::kMetalClusterGridBufferIndex];
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)idxBuf   offset:idxOff
+	                   atIndex:Lib::kMetalClusterIndexBufferIndex];
+}
 
-	ru.clusterParams[0]  = static_cast<float>(kClusterGridX);
-	ru.clusterParams[1]  = static_cast<float>(kClusterGridY);
-	ru.clusterParams[2]  = static_cast<float>(kClusterGridZ);
-	ru.clusterParams[3]  = sliceScale;
-	ru.clusterCamFwd[0]  = camFwd.x;
-	ru.clusterCamFwd[1]  = camFwd.y;
-	ru.clusterCamFwd[2]  = camFwd.z;
-	ru.clusterCamFwd[3]  = kClusterNear;
+// Deferred resolve: binds the lists and rewrites matLight's window to
+// DIRECTIONAL lights only — point/spot shading belongs exclusively to the
+// cluster list there, or every windowed light would be counted twice. (The
+// forward graph-material variant keeps the full window and skips its point/spot
+// slots itself; see HE::FillMaterialClusterParams.)
+void MetalRenderer::EncodeClusterData(void* renderEncoder, const HE::ClusterLightBuild& build,
+                                      HE::MaterialShaderLibrary::Lighting& matLight,
+                                      HE::MaterialShaderLibrary::ResolveUniforms& ru)
+{
+	BindClusterBuffers(renderEncoder, build);
+	for (int c = 0; c < 4; ++c)
+	{
+		ru.clusterParams[c] = build.params[c];
+		ru.clusterCamFwd[c] = build.camFwd[c];
+	}
 
 	// heLight window → directional lights only (same field conventions as
 	// HE::FillMaterialLightWindow, which packed the mixed first-8 window).
@@ -14193,7 +14163,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	// P7: point/spot lights move into the cluster lists; matLight's window is
 	// rewritten to directional-only so no light is counted twice.
 	if (m_deferredClustered)
-		EncodeClusterData(renderEncoder, matLight, ru);
+		EncodeClusterData(renderEncoder, BuildFrameClusterLights(), matLight, ru);
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 #endif

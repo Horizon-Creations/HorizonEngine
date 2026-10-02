@@ -21,9 +21,24 @@ A HorizonCode graph is always owned by exactly one host. All hosts share one
 |------|----------------|----------|-------|
 | **GameInstance** | `GameInstance.hcode` (project root) | whole app | `OnInit`, `OnShutdown`, `OnWindowFocusChanged` |
 | **Level Script** | embedded in the `.hescene` | one scene/zone | `OnLevelLoaded`, `OnLevelUnloaded` |
-| **Widget graph** | a UI Widget asset | while the widget lives | `Construct`, `Destruct` + UI element events |
+| **Widget graph** | a UI Widget asset | while the widget lives | `PreConstruct`, `Construct`, `Tick`, `Destruct` + UI element events |
 | **HC Class** | a HorizonCode Class asset | while the object lives | `Construct`, `Destruct` + custom events |
 | **Entity class** | an HC Class with base `Entity`, named by an entity's **Script** component | while that entity lives | the above + `BeginPlay`, `Tick`, `OnBeginOverlap`, `OnEndOverlap`, `OnHit`, `OnHitEnd` |
+
+**Widget creation order.** Create Widget (and Add Child, and every list row)
+fires two phases over the widget **and every widget embedded in it**:
+first `PreConstruct` for the host, then for each embed; only then `Construct`
+for the host, then for each embed. Both run synchronously inside Create Widget,
+after the theme, the text catalogue and the materials have been applied (so a
+value set in PreConstruct is not overwritten by them) and before the first
+Tick and the first frame (the widget is created hidden). Use PreConstruct to
+set a widget's own values and load its own data; use Construct for what talks
+to embedded widgets, which have all finished their PreConstruct by then. Only
+the synchronous part counts: a latent node (Delay, waiting on an animation,
+an HTTP request) parks the rest of the PreConstruct chain and Construct runs
+right away anyway. A widget that destroys itself in PreConstruct never gets
+its Construct. PreConstruct exists only for widgets; HC classes and entities
+do not fire it. Design: `docs/widget-pre-construct-design.md`.
 
 An Entity class is attached through the ordinary **Script** component — the same
 slot that carries a `.lua`/`.py` script; the engine branches on the referenced

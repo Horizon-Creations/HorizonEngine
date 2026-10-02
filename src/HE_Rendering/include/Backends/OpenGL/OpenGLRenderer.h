@@ -22,6 +22,7 @@
 struct SDL_Window;
 struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend material shader
 struct ParticleShaderVariant; // ContentManager/Assets.h — baked per-backend particle shader
+namespace HE { struct ClusterLightBuild; } // HorizonRendering/LightPacking.h
 
 class OpenGLRenderer : public IRenderer
 {
@@ -406,9 +407,22 @@ private:
 	unsigned int GetOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
 	                                       const ParticleShaderVariant* precompiled);
 
+	// `gbuffer` marks the deferred G-buffer variant: it never shades, so it stays
+	// on the plain GLSL 4.10 compile even when forward clustering is on.
 	unsigned int GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},
-	                                       const MaterialShaderVariant* precompiled = nullptr);
+	                                       const MaterialShaderVariant* precompiled = nullptr,
+	                                       bool gbuffer = false);
+	// Clustered heLitP (Thema 117, GL 4.3+): the three cluster lists of
+	// HE::BuildClusterLights as SSBOs on bindings 4/5/6
+	// (MaterialShaderLibrary::kGlCluster*SsboBinding). m_forwardClustered is
+	// settled in Initialize (GL 4.3, HE_FORWARD_CLUSTER ≠ 0, SSBOs created) —
+	// before WarmupMaterials can build a program — and then forward graph-material
+	// programs are GLSL 4.30 from fragmentClustered. macOS (GL 4.1) never gets here.
+	bool         m_forwardClustered = false;
+	unsigned int m_clusterSSBO[3]   = { 0, 0, 0 }; // lights, grid, index list
+	void         CreateClusterSSBOs();
+	void         UploadClusterLists(const HE::ClusterLightBuild& build);
 	// Create the three UBOs every material program draws through (U / HeLighting /
 	// HeParams) unless they already exist. Called by BOTH material-program getters
 	// before they can return — including via a memo hit or the on-disk program

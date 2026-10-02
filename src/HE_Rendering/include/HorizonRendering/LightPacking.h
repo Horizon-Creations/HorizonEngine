@@ -19,7 +19,10 @@ namespace HE
 
 // The engine's per-frame light window. Everything downstream (direct shading, GI
 // probe bounce, local shadow-mask channels) works on the FIRST kMaxLightWindow
-// lights of RenderWorld::lights, in extractor order.
+// lights of RenderWorld::lights, in extractor order. The extractor puts shining
+// directional lights first, then point/spot, then zero-intensity directionals
+// (RenderExtractor.cpp, orderLightWindow), so a crowd of local lights can never
+// push the sun or moon out of the window.
 inline constexpr int kMaxLightWindow = 8;
 
 // Local (point/spot) lights that get a ray-traced shadow mask channel. The mask
@@ -127,10 +130,10 @@ HE_RENDERING_API void FillMaterialGIProbe(MaterialShaderLibrary::Lighting& out,
 // DIRECTIONAL lights only (BuildDirectionalLightWindow) — a local light must
 // live in exactly one of the two, or it is counted twice.
 //
-// This is the same algorithm (and the same buffer layout) as Metal's deferred
-// EncodeClusterData: the forward built-in shaders of D3D11/D3D12/Vulkan consume
-// it through structured buffers / SSBOs. Metal still carries its own copy in
-// MetalRenderer.mm; this builder is shaped so it can take over there too.
+// One builder for every backend: the forward built-in shaders of
+// D3D11/D3D12/Vulkan consume it through structured buffers / SSBOs, Metal's
+// deferred resolve and its forward graph materials (fragmentClustered) through
+// fragment buffers 4/5/6 (MetalRenderer::BuildFrameClusterLights).
 //
 // Buffer contract (positional — the shaders index by it):
 //   lights  : 4 vec4 per light
@@ -145,7 +148,9 @@ HE_RENDERING_API void FillMaterialGIProbe(MaterialShaderLibrary::Lighting& out,
 //   camFwd  : xyz = camera forward (the slice's depth axis), w = near
 // Screen cells are picked from a TOP-LEFT-origin uv (Metal, D3D SV_Position
 // and Vulkan gl_FragCoord all agree on that); the scatter projects with the
-// GL-convention camera matrices (no clip fix) and flips v itself.
+// GL-convention camera matrices (no clip fix) and flips v itself. OpenGL's
+// gl_FragCoord is BOTTOM-left: a GL fill site passes bottomLeftOrigin = true
+// and the flip is skipped, so the shared shader's cell pick stays unchanged.
 inline constexpr int   kClusterGridX       = 16;
 inline constexpr int   kClusterGridY       = 9;
 inline constexpr int   kClusterGridZ       = 24;
@@ -177,7 +182,18 @@ struct ClusterLightBuild
 // cluster light keeps the channel the mask kernel rendered for it.
 HE_RENDERING_API ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
                                                       bool               localShadowsActive,
-                                                      bool               giMasksValid);
+                                                      bool               giMasksValid,
+                                                      bool               bottomLeftOrigin = false);
+
+// Hands a cluster build's grid to the graph-material lighting block — the
+// gate + grid of MaterialShaderLibrary::fragmentClustered's heLitP
+// (Lighting::clusterParams / clusterCamFwd). Touches nothing else: the light
+// WINDOW stays as FillMaterialLightWindow wrote it (the clustered shader skips
+// the window's point/spot slots itself, a plain one still needs them). Only a
+// fill site that also binds the three cluster buffers may call this; every
+// other site leaves the gate at 0.
+HE_RENDERING_API void FillMaterialClusterParams(const ClusterLightBuild&         build,
+                                                MaterialShaderLibrary::Lighting& out);
 
 // The light window that goes with a cluster build: directional lights only,
 // first kMaxLightWindow of them in extractor order, in the built-in scene

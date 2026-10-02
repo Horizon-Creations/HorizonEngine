@@ -22,6 +22,7 @@
 #include <HorizonRendering/WorldPreviewGrid.h>  // RenderWorldPreview: grid, background, dump
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/LightPacking.h>
+#include <Backends/Vulkan/VulkanMaterialLayout.h> // graph-material set 0 (shared with he_tests)
 #include <HorizonRendering/MaterialScalars.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/SkyFrameParams.h>
@@ -2386,54 +2387,33 @@ void VulkanRenderer::createMaterialResources()
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
     }
 
-    // ── Descriptor set 0 layout: canonical bindings 0-7 (matches the generated SPIR-V)
-    //    + 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the VERTEX
-    //    stage at those slots (MaterialShaderLibrary.cpp wpoDeclarations). Extra bindings are
-    //    harmless for the standard (non-WPO) vertex, which references none of them. ──
-    VkDescriptorSetLayoutBinding b[k_matSetBindings]{};
-    auto setB = [&](int i, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stage) {
-        b[i].binding = binding; b[i].descriptorType = type; b[i].descriptorCount = 1; b[i].stageFlags = stage;
+    // ── Descriptor set 0 layout: HE::vkmat::kBindings (VulkanMaterialLayout.h), the
+    //    table he_tests reflects every node shader's SPIR-V against. Canonical bindings
+    //    0-7, 8/9 for the WPO custom vertex, the GI/CSM/SSR/local-atlas samplers, and
+    //    (Thema 117) fragmentClustered's three light lists at 24/25/26. Extra bindings
+    //    are harmless for a shader that references none of them (the standard vertex,
+    //    the plain fragment(), a baked pak blob). ──
+    static_assert(HE::vkmat::kStageVertex   == VK_SHADER_STAGE_VERTEX_BIT,   "vkmat stage bits are Vulkan's");
+    static_assert(HE::vkmat::kStageFragment == VK_SHADER_STAGE_FRAGMENT_BIT, "vkmat stage bits are Vulkan's");
+    auto vkType = [](HE::vkmat::DescKind k) -> VkDescriptorType {
+        switch (k)
+        {
+        case HE::vkmat::DescKind::UniformBuffer:        return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case HE::vkmat::DescKind::CombinedImageSampler: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        case HE::vkmat::DescKind::StorageBuffer:        return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        }
+        return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     };
-    setB(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT); // HeLighting
-    setB(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // U (per object)
-    setB(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTex0
-    setB(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT); // HeParams
-    setB(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP0
-    setB(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP1
-    setB(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP2
-    setB(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP3
-    setB(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeLighting (WPO VS)
-    setB(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeParams   (WPO VS)
-    setB(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIShadow (GI sun mask)
-    setB(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGILocal (GI local mask)
-    setB(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heCsm (CSM fallback, 2D array)
-    // heSSRFwd (docs/ssr-cross-backend-plan.md B5 / §2.3 head 1): the preamble's
-    // reflection cascade declares this sampler unconditionally and heLight.ssr.x
-    // decides whether it is read. Filling that gate without providing the
-    // descriptor would sample an unbound slot, so the two land together.
-    setB(13, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heSSRFwd
-    // heLocalShadow (binding 13, sampler2DArray): the local (point/spot) shadow
-    // atlas the built-in scene shader samples at binding 9. Gated in the
-    // preamble by lightParams[i].y > 0.
-    setB(14, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heLocalShadow
-    // The rest of the preamble's fixed samplers. Its SPIR-V uses all of them
-    // statically, so the layout must declare them even where the gate never
-    // opens on this backend (a pipeline whose shader uses a binding its layout
-    // lacks is invalid — it only ran by driver leniency before these landed).
-    //   15 heSkyEnv (cube)   — fog.z, never set here (no sky-env cube): white cube
-    //   16 heAO              — fog.w, never set here: white
-    //   17 heGIIrradiance    — giProbe.y (FillMaterialGIProbe): the DDGI atlases,
-    //   18 heGIVisibility      the SAME two images scene bindings 5/6 sample
-    //   32 heGIReflFwd       — giRefl.z, no RT reflections here: white
-    //   33 heCloudShadow     — cloudShadowB.x, never set here: white
-    setB(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heSkyEnv
-    setB(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heAO
-    setB(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIIrradiance
-    setB(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIVisibility
-    setB(19, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIReflFwd
-    setB(20, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heCloudShadow
+    VkDescriptorSetLayoutBinding b[HE::vkmat::kBindingCount]{};
+    for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
+    {
+        b[i].binding         = HE::vkmat::kBindings[i].binding;
+        b[i].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
+        b[i].descriptorCount = 1;
+        b[i].stageFlags      = HE::vkmat::kBindings[i].stages;
+    }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = k_matSetBindings;
+    slci.bindingCount = HE::vkmat::kBindingCount;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -2452,9 +2432,10 @@ void VulkanRenderer::createMaterialResources()
     }
 
     // Per-frame descriptor pool (reset whole each frame — no FREE bit) + UBO buffers.
-    // Each allocated set consumes 5 UBO descriptors (b0/b1/b3/b8/b9) and 16 samplers
-    // (b2/b4..7/b10..13/b15..18/b31..33), so the pool must cover k_matMaxDraws sets
-    // worth of each.
+    // Each allocated set consumes one descriptor per layout row of its kind, so the
+    // pool covers k_matMaxDraws sets worth of each — counted from the same table as
+    // the layout. A kind missing here fails vkAllocateDescriptorSets, and the draw
+    // loop then skips EVERY graph material without a word.
     auto makeBuf = [&](VkDeviceSize size, MatFrameBuf& mb) -> bool {
         VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bci.size  = size;
@@ -2473,13 +2454,16 @@ void VulkanRenderer::createMaterialResources()
     const VkDeviceSize ringSize = static_cast<VkDeviceSize>(k_matMaxDraws) * k_matSlotStride;
     for (uint32_t f = 0; f < k_maxFramesInFlight; ++f)
     {
-        VkDescriptorPoolSize ps[2] = {
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16u * k_matMaxDraws }, // b2,b4-7,b10-13,b15-18,b31-33
+        using HE::vkmat::DescKind;
+        using HE::vkmat::countOf;
+        VkDescriptorPoolSize ps[3] = {
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         countOf(DescKind::UniformBuffer)        * k_matMaxDraws }, // b0,b1,b3,b8,b9
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b13,b15-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
-        dpci.poolSizeCount = 2;
+        dpci.poolSizeCount = 3;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
         {
@@ -2590,7 +2574,24 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
             ? m_matShaderLib.standardVertex(Backend::SpirV)
             : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::SpirV);
-        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::SpirV);
+        // Thema 117: the clustered twin while the cluster SSBOs exist and the A/B
+        // guard is not set — the draw loop then writes them at set 0 bindings
+        // 24..26 and DrawScene opens the gate (FillMaterialClusterParams). A
+        // variant that does not compile falls back to the plain window shader,
+        // which is exactly what rendered before (the window stays full, §2.1/1).
+        // Decided once in createScenePipeline, so the cache key needs no bit.
+        const HE::MaterialShaderLibrary::Compiled* fcp = nullptr;
+        if (m_forwardClustered && m_clusterReady)
+        {
+            const HE::MaterialShaderLibrary::Compiled& cc = m_matShaderLib.fragmentClustered(hash, frag, Backend::SpirV);
+            if (cc.ok && !cc.spirv.empty())
+                fcp = &cc;
+            else
+                HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: clustered material variant failed, "
+                                                    "using the 8-light window: ") + cc.log).c_str());
+        }
+        const HE::MaterialShaderLibrary::Compiled& fc =
+            fcp ? *fcp : m_matShaderLib.fragment(hash, frag, Backend::SpirV);
         if (!vc.ok || !fc.ok || vc.spirv.empty() || fc.spirv.empty())
         {
             HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: A4 material shader cross-compile failed: ")
@@ -6338,21 +6339,27 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // rendered at least one layer into it (and the array view is bound).
     const bool localShadows = m_localShadowLayerCount > 0 && m_localShadowView != VK_NULL_HANDLE;
 
+    // Clustered lighting (plan P7 on the forward path): point/spot lights
+    // leave the 8-light window for this frame slot's cluster SSBOs
+    // (HE::BuildClusterLights). ONE build per frame serves the built-in scene
+    // shader (Frame UBO below) and the graph materials (HeLighting gate,
+    // Thema 117) — both read the same three SSBOs.
+    const bool clustered = m_forwardClustered && m_clusterReady
+                        && !m_renderWorld.lights.empty();
+    HE::ClusterLightBuild frameClusters;
+    if (clustered)
+        frameClusters = HE::BuildClusterLights(m_renderWorld, localShadows, m_giRanThisFrame);
+
     // Per-frame UBO for this in-flight slot.
     {
         FrameUBOData f{};
         f.cameraPos     = glm::vec4(m_renderWorld.camera.position, 1.0f);
-        // Clustered lighting (plan P7 on the forward path): point/spot lights
-        // leave the 8-light window for this frame slot's cluster SSBOs
-        // (HE::BuildClusterLights); the window then carries directional lights
-        // only. The slot's fence was waited on in Render(), so the mapped
-        // buffers are free to rewrite.
-        const bool clustered = m_forwardClustered && m_clusterReady
-                            && !m_renderWorld.lights.empty();
+        // The built-in window then carries directional lights only. The slot's
+        // fence was waited on in Render(), so the mapped buffers are free to
+        // rewrite.
         if (clustered)
         {
-            const HE::ClusterLightBuild cb =
-                HE::BuildClusterLights(m_renderWorld, localShadows, m_giRanThisFrame);
+            const HE::ClusterLightBuild& cb = frameClusters;
             if (cb.droppedLights > 0 && !m_clusterCapWarned)
             {
                 m_clusterCapWarned = true;
@@ -6491,6 +6498,14 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // (point/spot) atlas rendered this frame, lightParams[i].y carries the
         // light's base layer + 1 (0 = "casts no local shadow").
         HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        // Thema 117: the cluster gate + grid for fragmentClustered's heLitP, from
+        // the SAME build as the built-in shader. Only when that build ran: the
+        // draw loop writes the SSBOs at bindings 24..26 for every set (contract
+        // §2.1/2), and the window above stays full (§2.1/1) — a plain or baked
+        // material shader reading this buffer still sees its eight lights.
+        // giParams.xy (the viewport the cell pick divides by) is set below.
+        if (clustered)
+            HE::FillMaterialClusterParams(frameClusters, lit);
         HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow, set 0
         // binding 13, bound per draw below). kVulkanClipFix is already in
@@ -6815,7 +6830,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo texPII[HE::kMatMaxGraphTextures];
                             for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
                                 texPII[k] = { m_albedoSampler, heTexP[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            VkWriteDescriptorSet w[k_matSetBindings]{};
+                            VkWriteDescriptorSet w[HE::vkmat::kBindingCount]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
                                 w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -6905,7 +6920,33 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giVisII);
                             wr(19, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
                             wr(20, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
-                            vkUpdateDescriptorSets(m_device, k_matSetBindings, w, 0, nullptr);
+                            // fragmentClustered's light lists (bindings 24..26, Thema
+                            // 117): this frame slot's cluster SSBOs, the very buffers
+                            // the built-in shader reads at scene bindings 10..12. Written
+                            // whenever they exist — also with the gate at 0 (no lights,
+                            // HE_FORWARD_CLUSTER=0): a clustered pipeline statically uses
+                            // them, so its set must be complete. Without them every
+                            // pipeline is the plain variant, which uses none of the three.
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 21,
+                                          "one fixed write (w[0..20]) per non-cluster layout row");
+                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount;
+                            VkDescriptorBufferInfo clusterBI[3]{};
+                            if (m_clusterReady)
+                            {
+                                const ClusterBuffer* cbs[3] = { &m_clusterLights[m_currentFrame],
+                                                                &m_clusterGrid[m_currentFrame],
+                                                                &m_clusterIdx[m_currentFrame] };
+                                const uint32_t cbind[3] = { HE::vkmat::kClusterLightsBinding,
+                                                            HE::vkmat::kClusterGridBinding,
+                                                            HE::vkmat::kClusterIdxBinding };
+                                for (uint32_t c = 0; c < 3; ++c)
+                                {
+                                    clusterBI[c] = { cbs[c]->buf, 0, VK_WHOLE_SIZE };
+                                    wr(static_cast<int>(nWrites++), cbind[c],
+                                       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &clusterBI[c], nullptr);
+                                }
+                            }
+                            vkUpdateDescriptorSets(m_device, nWrites, w, 0, nullptr);
 
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,

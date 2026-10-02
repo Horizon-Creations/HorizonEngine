@@ -40,6 +40,15 @@
 // giProbe.y (Thema 120). AO, sky cube, SSR, GI-refl and cloud shadow are still
 // null; this header only makes the PSO legal — the signature is unchanged by
 // what the template holds.
+//
+// Clustered variant (Thema 117): MaterialShaderLibrary::fragmentClustered(HLSL)
+// adds three ByteAddressBuffers on t24/t25/t26 (light array, grid, index
+// list). They are ROOT SRVs (params 6..8), not table slots: a root SRV takes a
+// raw buffer address, so the renderer hangs the very upload rings the built-in
+// scene shader reads at t18..t20 onto them (bindClusterRoots, same root
+// indices in all three signatures). The plain fragment() and baked pak blobs
+// do not declare t24..t26; an unused root parameter is legal, so one
+// signature serves both variants.
 // ─────────────────────────────────────────────────────────────────────────────
 #if defined(_WIN32)
 #include <d3d12.h>
@@ -69,8 +78,15 @@ constexpr UINT kRootParamsCB  = 2; // b3 HeParams (FS)
 constexpr UINT kRootLightCBVS = 3; // b8 HeLighting (WPO VS)
 constexpr UINT kRootParamsCBVS= 4; // b9 HeParams   (WPO VS)
 constexpr UINT kRootSrvTable  = 5; // the per-draw SRV block
+constexpr UINT kRootClusterLights = 6; // t24 root SRV (fragmentClustered's light array)
+constexpr UINT kRootClusterGrid   = 7; // t25 root SRV (per-cluster {offset, count})
+constexpr UINT kRootClusterIdx    = 8; // t26 root SRV (flat light-index list)
 
-constexpr UINT kParamCount    = 6;
+constexpr UINT kParamCount    = 9;
+// The signature BEFORE the clustered variant (params 0..5): he_tests builds it
+// as the negative control for t24..t26 — a clustered PSO against it must be
+// rejected, a plain one must still build.
+constexpr UINT kPreClusterParamCount = 6;
 constexpr UINT kRangeCount    = 7;
 constexpr UINT kSamplerCount  = 16;
 // What the signature covered BEFORE Thema 56 (t2, t4..t7, t10..t11, t12, t13 /
@@ -90,11 +106,13 @@ struct MaterialRootSignature
     D3D12_ROOT_SIGNATURE_DESC desc{};
 };
 
-// Fills `out`. rangeCount / samplerCount default to the full signature; the
-// legacy counts reproduce the pre-fix one (test negative control only).
+// Fills `out`. rangeCount / samplerCount / paramCount default to the full
+// signature; the legacy / pre-cluster counts reproduce the older ones (test
+// negative controls only).
 inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
                                           UINT rangeCount   = kRangeCount,
-                                          UINT samplerCount = kSamplerCount)
+                                          UINT samplerCount = kSamplerCount,
+                                          UINT paramCount   = kParamCount)
 {
     out = MaterialRootSignature{};
     auto cbv = [&](UINT i, UINT reg) {
@@ -132,6 +150,18 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
     out.params[kRootSrvTable].DescriptorTable.NumDescriptorRanges = rangeCount;
     out.params[kRootSrvTable].DescriptorTable.pDescriptorRanges   = out.ranges;
     out.params[kRootSrvTable].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // Root SRVs t24..t26 for fragmentClustered's ByteAddressBuffers. Root
+    // descriptors carry no view, so raw vs. structured does not matter here
+    // (unlike D3D11, where the same buffers need RAW views).
+    auto rootSrv = [&](UINT i, UINT reg) {
+        out.params[i].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        out.params[i].Descriptor       = { reg, 0 };
+        out.params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    };
+    rootSrv(kRootClusterLights, 24);
+    rootSrv(kRootClusterGrid,   25);
+    rootSrv(kRootClusterIdx,    26);
 
     // Static samplers, one per pinned sampler register. The first nine are the
     // pre-fix set: s2 + s4..s7 linear-wrap (tiling material textures), s10/s11
@@ -174,7 +204,7 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
         s.MaxLOD           = D3D12_FLOAT32_MAX;
     }
 
-    out.desc.NumParameters     = kParamCount;
+    out.desc.NumParameters     = paramCount;
     out.desc.pParameters       = out.params;
     out.desc.NumStaticSamplers = samplerCount;
     out.desc.pStaticSamplers   = out.samplers;

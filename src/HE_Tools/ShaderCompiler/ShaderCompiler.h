@@ -30,6 +30,9 @@ enum class Target
     HlslSm50,    // HLSL, shader model 5.0 (D3D11/12)
     Glsl410,     // desktop GLSL 4.10 (macOS OpenGL core)
     GlslEs300,   // OpenGL ES / WebGL2 GLSL
+    Glsl430,     // desktop GLSL 4.30 (GL 4.3+: SSBOs). Uniform blocks and samplers
+                 // carry NO binding (bound by name, like Glsl410); storage buffers
+                 // keep theirs — see compileGlslPinned.
 };
 
 struct Result
@@ -104,6 +107,24 @@ struct HlslPin
 // (Target::HlslSm50).
 Result compileHlslPinned(const std::string& glsl, Stage stage,
                          const std::vector<HlslPin>& pins);
+
+// The GLSL 4.30 counterpart (Target::Glsl430). The GL backend binds uniform blocks
+// and samplers by name, so the emitted source drops their `layout(binding = N)`;
+// a shader storage block cannot be rebound by name before it compiles, and a
+// binding at or past GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS (only 8 guaranteed by
+// GL 4.3) is a COMPILE error — so SSBOs keep a binding, the canonical one unless
+// a pin moves it. A pinned resource of any kind gets `binding = glBinding`.
+struct GlslPin
+{
+    Stage    stage;     // which shader stage the resource is used in
+    uint32_t set;       // GLSL: layout(set = ...)
+    uint32_t binding;   // GLSL: layout(binding = ...)
+    uint32_t glBinding; // emitted layout(binding = ...)
+};
+
+// Compile canonical GLSL to desktop GLSL 4.30 with explicit binding assignments.
+Result compileGlslPinned(const std::string& glsl, Stage stage,
+                         const std::vector<GlslPin>& pins);
 
 // Convenience: compile once to SPIR-V, then emit several targets from it (cheaper
 // than re-parsing the GLSL per target). Returns SPIR-V + a source per requested target,

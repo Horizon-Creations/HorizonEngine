@@ -2526,6 +2526,14 @@ TEST_CASE("Material instance resolves to the master's shader hash + baked varian
 // (ENABLE_OPT=OFF), so there is no spirv-val here and no device in CI.
 #if defined(HE_TESTS_HAVE_SHADERC)
 #include <regex>
+#include <iterator>
+#include <set>
+#include <tuple>
+#include <spirv_cross.hpp>                         // Vulkan reflection (Thema 117)
+#include <glslang/Public/ShaderLang.h>             // GL 4.3 front-end judge (Thema 117)
+#include <glslang/Public/ResourceLimits.h>
+#include <ShaderCompiler.h>                        // he::shaderc (reflection negative control)
+#include <Backends/Vulkan/VulkanMaterialLayout.h>  // the renderer's material set 0
 #if defined(_WIN32)
 // windows.h FIRST, so ID3D12InfoQueue::GetMessage is declared and called under
 // the same macro state (winuser.h renames GetMessage to GetMessageW).
@@ -2898,6 +2906,413 @@ TEST_CASE("Every node's HLSL stays inside SM 5.0's register range (D3D11/D3D12 b
 	CHECK(maxRegister(vs, 's') <= 15);
 }
 
+TEST_CASE("Clustered heLitP variant: three buffers, no sampler, refused without SSBOs (Thema 117)")
+{
+	// fragmentClustered is the forward clustered-lighting twin of fragment():
+	// the bind contract the per-backend steps build against is asserted here,
+	// on the emitted text, because no backend binds it yet.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::string glsl = HE::generateFragment(makeDemoGraph()).glsl;
+	const uint64_t h = std::hash<std::string>{}("clustered-demo");
+
+	SUBCASE("HLSL: ByteAddressBuffers on t24..t26, the sampler table unchanged")
+	{
+		const auto& plain = lib.fragment(h, glsl, B::HLSL);
+		const auto& cl    = lib.fragmentClustered(h, glsl, B::HLSL);
+		REQUIRE(plain.ok);
+		REQUIRE_MESSAGE(cl.ok, cl.log);
+		CHECK(cl.source != plain.source);                       // own cache slot
+		for (const char* reg : { "24", "25", "26" })
+		{
+			// ByteAddressBuffer, NOT StructuredBuffer: D3D11 must bind raw views.
+			const std::regex re(std::string("ByteAddressBuffer\\s+\\w+\\s*:\\s*register\\(t") + reg + "\\)");
+			CHECK_MESSAGE(std::regex_search(cl.source, re), "no ByteAddressBuffer on t", reg);
+			CHECK(plain.source.find(std::string("register(t") + reg + ")") == std::string::npos);
+		}
+		CHECK(cl.source.find("StructuredBuffer") == std::string::npos);
+		CHECK(plain.source.find("ByteAddressBuffer") == std::string::npos);
+		// Buffers cost no sampler: the s registers are the plain shader's (as a
+		// set — SPIRV-Cross declares in first-use order, and the cluster loop
+		// touches heGILocal earlier than the window loop does).
+		auto sortedRegs = [](const std::string& s) {
+			std::vector<int> r = registersOf(s, 's');
+			std::sort(r.begin(), r.end());
+			return r;
+		};
+		CHECK(sortedRegs(cl.source) == sortedRegs(plain.source));
+		CHECK(maxRegister(cl.source, 's') <= 15);
+		CHECK(maxRegister(cl.source, 'b') <= 13);
+		CHECK_FALSE(hasDuplicateRegister(cl.source, 't'));
+		CHECK_FALSE(twoLiveSamplersShareRegister(cl.source));
+		// The cluster loop samples without gradients (FXC, per-pixel trip count).
+		CHECK(cl.source.find("heLocalShadow.SampleLevel(") != std::string::npos);
+		CHECK(cl.source.find("heGILocal.SampleLevel(") != std::string::npos);
+		CHECK(plain.source.find("heLocalShadow.SampleLevel(") == std::string::npos);
+		// The gate lives in the shared block, so BOTH variants declare it.
+		CHECK(plain.source.find("clusterParams") != std::string::npos);
+		CHECK(cl.source.find("clusterParams") != std::string::npos);
+	}
+	SUBCASE("SPIR-V and Metal compile; Metal pins the lists to fragment buffers 4/5/6")
+	{
+		const auto& sv = lib.fragmentClustered(h, glsl, B::SpirV);
+		REQUIRE_MESSAGE(sv.ok, sv.log);
+		REQUIRE(sv.spirv.size() > 5);
+		CHECK(sv.spirv[0] == 0x07230203u);
+		CHECK(sv.spirv != lib.fragment(h, glsl, B::SpirV).spirv);
+
+		const auto& msl   = lib.fragmentClustered(h, glsl, B::Metal);
+		const auto& plain = lib.fragment(h, glsl, B::Metal);
+		REQUIRE_MESSAGE(msl.ok, msl.log);
+		REQUIRE(plain.ok);
+		using L = HE::MaterialShaderLibrary;
+		for (int slot : { L::kMetalClusterLightsBufferIndex, L::kMetalClusterGridBufferIndex,
+		                  L::kMetalClusterIndexBufferIndex })
+		{
+			const std::string attr = "[[buffer(" + std::to_string(slot) + ")]]";
+			CHECK_MESSAGE(msl.source.find(attr) != std::string::npos, "missing ", attr);
+			CHECK(plain.source.find(attr) == std::string::npos);
+		}
+		// Still the lighting block on buffer 1, and no new sampler argument.
+		CHECK(msl.source.find("[[buffer(1)]]") != std::string::npos);
+		const std::regex samp("\\[\\[sampler\\((\\d+)\\)\\]\\]");
+		auto samplers = [&](const std::string& s) {
+			std::vector<std::string> v;
+			for (auto it = std::sregex_iterator(s.begin(), s.end(), samp); it != std::sregex_iterator(); ++it)
+				v.push_back((*it)[1].str());
+			return v;
+		};
+		CHECK(samplers(msl.source) == samplers(plain.source));
+	}
+	SUBCASE("GLSL 4.10 / ES 3.0 refuse instead of handing back the window variant")
+	{
+		for (B b : { B::GLSL410, B::GLSLES300 })
+		{
+			const auto& r = lib.fragmentClustered(h, glsl, b);
+			CHECK_FALSE(r.ok);
+			CHECK(r.source.empty());
+			CHECK(r.log.find("SSBO") != std::string::npos);
+			CHECK(lib.fragment(h, glsl, b).ok);                 // the plain variant is unaffected
+		}
+	}
+	SUBCASE("the WPO vertex stage declares the grown lighting block too")
+	{
+		// wpoLightingBlock cuts HeLighting out of the preamble text; GL links
+		// both stages into one program and rejects a block declared differently
+		// in each — the gate fields must sit in the block unconditionally.
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int t   = g.addNode(MatNodeType::Time);
+		const int cmb = g.addNode(MatNodeType::Combine3);
+		REQUIRE(g.connect(t, 0, cmb, 0));
+		REQUIRE(g.connect(cmb, 0, out, HE::kMatOutputWPOPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.vertexBody.empty());
+		const auto& v = lib.customVertex(std::hash<std::string>{}(gen.vertexBody), gen.vertexBody, B::GLSL410);
+		REQUIRE_MESSAGE(v.ok, v.log);
+		CHECK(v.source.find("clusterParams") != std::string::npos);
+		CHECK(v.source.find("clusterCamFwd") != std::string::npos);
+	}
+}
+
+// ═══ Thema 117 Schritt 5: Vulkan binds the clustered variant ═════════════════
+// VulkanRenderer builds every graph-material pipeline against ONE set layout
+// (HE::vkmat::kBindings) and, with the cluster SSBOs up, from
+// fragmentClustered(SpirV). CI has no Vulkan device, so neither "the layout
+// covers what the shader uses" nor "the pool counts every kind" can be watched
+// at runtime. What can: SPIRV-Cross reflection of the STATICALLY used
+// descriptors (get_active_interface_variables), held against the same table
+// the renderer turns into its layout and pool.
+namespace
+{
+struct VkUse
+{
+	uint32_t set     = 0;
+	uint32_t binding = 0;
+	int      kind    = -1; // HE::vkmat::DescKind, or -1 for a kind the material set never has
+	bool operator<(const VkUse& o) const { return std::tie(set, binding, kind) < std::tie(o.set, o.binding, o.kind); }
+	bool operator==(const VkUse& o) const { return set == o.set && binding == o.binding && kind == o.kind; }
+};
+
+std::vector<VkUse> activeVkDescriptors(const std::vector<uint32_t>& spirv, std::string& err)
+{
+	std::vector<VkUse> out;
+	try
+	{
+		spirv_cross::Compiler comp(spirv);
+		const spirv_cross::ShaderResources r =
+			comp.get_shader_resources(comp.get_active_interface_variables());
+		auto add = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, int kind) {
+			for (const spirv_cross::Resource& res : list)
+				out.push_back({ comp.get_decoration(res.id, spv::DecorationDescriptorSet),
+				                comp.get_decoration(res.id, spv::DecorationBinding), kind });
+		};
+		using K = HE::vkmat::DescKind;
+		add(r.uniform_buffers, static_cast<int>(K::UniformBuffer));
+		add(r.sampled_images,  static_cast<int>(K::CombinedImageSampler));
+		add(r.storage_buffers, static_cast<int>(K::StorageBuffer));
+		add(r.separate_images,   -1);
+		add(r.separate_samplers, -1);
+		add(r.storage_images,    -1);
+	}
+	catch (const std::exception& e)
+	{
+		err = e.what();
+	}
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
+// The uses the first `rows` rows of the material table do not cover (set 0,
+// same binding, same kind), as "binding:kind" text — empty when all bind.
+std::string uncoveredVk(const std::vector<VkUse>& uses, uint32_t rows)
+{
+	std::string miss;
+	for (const VkUse& u : uses)
+	{
+		bool ok = false;
+		for (uint32_t i = 0; i < rows && !ok; ++i)
+			ok = u.set == 0 && HE::vkmat::kBindings[i].binding == u.binding
+			  && static_cast<int>(HE::vkmat::kBindings[i].kind) == u.kind;
+		if (!ok)
+			miss += " " + std::to_string(u.set) + "/" + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
+} // namespace
+
+TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in the material layout (Thema 117)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using HE::vkmat::DescKind;
+	HE::MaterialShaderLibrary lib;
+
+	// The table itself: what the renderer's pool is sized from.
+	static_assert(HE::vkmat::countOf(DescKind::StorageBuffer) == 3);
+	CHECK(HE::vkmat::kBindings[HE::vkmat::kPreClusterBindingCount + 0].binding == HE::vkmat::kClusterLightsBinding);
+	CHECK(HE::vkmat::kBindings[HE::vkmat::kPreClusterBindingCount + 1].binding == HE::vkmat::kClusterGridBinding);
+	CHECK(HE::vkmat::kBindings[HE::vkmat::kPreClusterBindingCount + 2].binding == HE::vkmat::kClusterIdxBinding);
+	for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
+		for (uint32_t j = i + 1; j < HE::vkmat::kBindingCount; ++j)
+			CHECK_MESSAGE(HE::vkmat::kBindings[i].binding != HE::vkmat::kBindings[j].binding,
+			              "duplicate binding ", HE::vkmat::kBindings[i].binding);
+
+	const std::vector<VkUse> clusterLists = {
+		{ 0, HE::vkmat::kClusterLightsBinding, static_cast<int>(DescKind::StorageBuffer) },
+		{ 0, HE::vkmat::kClusterGridBinding,   static_cast<int>(DescKind::StorageBuffer) },
+		{ 0, HE::vkmat::kClusterIdxBinding,    static_cast<int>(DescKind::StorageBuffer) },
+	};
+
+	// Negative control for the reflection: a shader that really reads an SSBO
+	// at binding 40 must report it, and the table must refuse it.
+	{
+		const std::string probe =
+			"#version 450\n"
+			"layout(std430, set = 0, binding = 40) readonly buffer P { vec4 p[]; };\n"
+			"layout(set = 0, binding = 41) uniform sampler2D unusedTex;\n"
+			"layout(location = 0) out vec4 o;\n"
+			"void main() { o = p[0]; }\n";
+		const he::shaderc::Result pr = he::shaderc::compile(probe, he::shaderc::Stage::Fragment,
+		                                                    he::shaderc::Target::SpirvBinary);
+		REQUIRE_MESSAGE(pr.ok, pr.log);
+		std::string err;
+		const std::vector<VkUse> u = activeVkDescriptors(pr.spirv, err);
+		REQUIRE_MESSAGE(err.empty(), err);
+		REQUIRE(u.size() == 1); // the declared-but-unread sampler is NOT active
+		CHECK(u[0] == VkUse{ 0, 40, static_cast<int>(DescKind::StorageBuffer) });
+		CHECK_FALSE(uncoveredVk(u, HE::vkmat::kBindingCount).empty());
+	}
+
+	const std::vector<NodeShaderCase> cases = allNodeShaderCases();
+	REQUIRE(cases.size() > 40);
+	int withLists = 0;
+	std::set<VkUse> plainGap; // pre-existing: plain uses the table never covered
+	for (const NodeShaderCase& c : cases)
+	{
+		const uint64_t h = caseHash(c);
+		const auto& plain = lib.fragment(h, c.glsl, B::SpirV);
+		const auto& cl    = lib.fragmentClustered(h, c.glsl, B::SpirV);
+		REQUIRE_MESSAGE(plain.ok, c.name, ": ", plain.log);
+		REQUIRE_MESSAGE(cl.ok, c.name, ": ", cl.log);
+		std::string err;
+		const std::vector<VkUse> up = activeVkDescriptors(plain.spirv, err);
+		REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
+		const std::vector<VkUse> uc = activeVkDescriptors(cl.spirv, err);
+		REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
+
+		// What the clustered twin uses beyond the plain shader: the three
+		// lists, all or none (an unlit domain never reaches heLitP).
+		std::vector<VkUse> added, dropped;
+		std::set_difference(uc.begin(), uc.end(), up.begin(), up.end(), std::back_inserter(added));
+		std::set_difference(up.begin(), up.end(), uc.begin(), uc.end(), std::back_inserter(dropped));
+		CHECK_MESSAGE((added.empty() || added == clusterLists), c.name, ": clustered adds" , uncoveredVk(added, 0));
+		CHECK_MESSAGE(dropped.empty(), c.name, ": clustered drops", uncoveredVk(dropped, 0));
+		if (added == clusterLists)
+		{
+			++withLists;
+			// The renderer's layout binds them; the layout before Thema 117 did not.
+			CHECK_MESSAGE(uncoveredVk(added, HE::vkmat::kBindingCount).empty(), c.name);
+			CHECK_MESSAGE(uncoveredVk(added, HE::vkmat::kPreClusterBindingCount) == uncoveredVk(added, 0), c.name);
+		}
+		// The plain shader never touches the lists (baked blobs = plain).
+		for (const VkUse& u : up)
+			CHECK_MESSAGE((u.binding < 24 || u.binding > 26), c.name, ": plain uses binding ", u.binding);
+		for (const VkUse& u : up)
+			if (!uncoveredVk({ u }, HE::vkmat::kBindingCount).empty()) plainGap.insert(u);
+	}
+	// Most cases are lit surface graphs: the lists must show up in them, or the
+	// variant silently stopped shading clusters.
+	CHECK(withLists * 2 > static_cast<int>(cases.size()));
+	MESSAGE("clustered SPIR-V with set 0 SSBOs 24..26: ", withLists, "/", cases.size(),
+	        "; plain uses outside the layout (pre-existing):",
+	        uncoveredVk(std::vector<VkUse>(plainGap.begin(), plainGap.end()), 0));
+}
+
+// ═══ Thema 117 Schritt 6: OpenGL 4.3 binds the clustered variant ═════════════
+// OpenGLRenderer links forward graph materials from standardVertex /
+// customVertex(GLSL430) + fragmentClustered(GLSL430) and binds the lists on
+// SSBO 4/5/6; uniform blocks and samplers stay bound by NAME. There is no
+// GL 4.3 context anywhere this runs (macOS GL is 4.1, CI has no display), so
+// the judge is glslang in plain OpenGL mode (no SPIR-V/Vulkan rules): the
+// GLSL 4.30 front end a driver would run, plus TProgram::link, which holds the
+// two stages against each other (same-named blocks must match).
+namespace
+{
+bool glslGlLink(const std::string& vs, const std::string& fs, std::string& err)
+{
+	glslang::InitializeProcess();
+	bool ok = true;
+	{
+		glslang::TShader v(EShLangVertex), f(EShLangFragment);
+		const char* vp = vs.c_str();
+		const char* fp = fs.c_str();
+		v.setStrings(&vp, 1);
+		f.setStrings(&fp, 1);
+		const TBuiltInResource* res = GetDefaultResources();
+		if (!v.parse(res, 100, false, EShMsgDefault)) { ok = false; err += std::string("vertex: ") + v.getInfoLog(); }
+		if (!f.parse(res, 100, false, EShMsgDefault)) { ok = false; err += std::string("fragment: ") + f.getInfoLog(); }
+		if (ok)
+		{
+			glslang::TProgram p;
+			p.addShader(&v);
+			p.addShader(&f);
+			if (!p.link(EShMsgDefault)) { ok = false; err += std::string("link: ") + p.getInfoLog(); }
+		}
+	}
+	glslang::FinalizeProcess();
+	return ok;
+}
+
+// Every `layout(... binding = N ...)` of an emitted GLSL source: on a shader
+// storage block → `buffers`, on anything else → `other` (the declaration text).
+struct GlBindings
+{
+	std::set<int>            buffers;
+	std::vector<std::string> other;
+};
+GlBindings glBindingsOf(const std::string& src)
+{
+	GlBindings out;
+	static const std::regex decl(R"(layout\(([^)]*)\)([^;{]*))");
+	static const std::regex bind(R"(binding\s*=\s*(\d+))");
+	for (auto it = std::sregex_iterator(src.begin(), src.end(), decl); it != std::sregex_iterator(); ++it)
+	{
+		const std::string q = (*it)[1].str(), rest = (*it)[2].str();
+		std::smatch m;
+		if (!std::regex_search(q, m, bind)) continue;
+		if (std::regex_search(rest, std::regex(R"(\bbuffer\b)")))
+			out.buffers.insert(std::stoi(m[1].str()));
+		else
+			out.other.push_back(q + rest);
+	}
+	return out;
+}
+} // namespace
+
+TEST_CASE("OpenGL 4.3: the clustered variant is GLSL 4.30 with SSBOs 4..6 only and links with its vertex (Thema 117)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using L = HE::MaterialShaderLibrary;
+	static_assert(L::kGlClusterLightsSsboBinding > 3, "the GI compute passes own SSBO bindings 0..3");
+	static_assert(L::kGlClusterIndexSsboBinding < 8, "GL 4.3 guarantees only 8 SSBO bindings");
+	const std::set<int> lists = { L::kGlClusterLightsSsboBinding, L::kGlClusterGridSsboBinding,
+	                              L::kGlClusterIndexSsboBinding };
+	HE::MaterialShaderLibrary lib;
+
+	SUBCASE("the judge rejects a cross-stage block mismatch (negative control)")
+	{
+		const std::string vs =
+			"#version 430\nlayout(std140) uniform B { vec4 a; } ub;\nvoid main() { gl_Position = ub.a; }\n";
+		const std::string fsGood =
+			"#version 430\nlayout(std140) uniform B { vec4 a; } ub;\nout vec4 o;\nvoid main() { o = ub.a; }\n";
+		const std::string fsBad =
+			"#version 430\nlayout(std140) uniform B { vec2 a; } ub;\nout vec4 o;\nvoid main() { o = vec4(ub.a, 0.0, 1.0); }\n";
+		std::string err;
+		CHECK_MESSAGE(glslGlLink(vs, fsGood, err), err);
+		std::string errBad;
+		CHECK_FALSE(glslGlLink(vs, fsBad, errBad));
+		MESSAGE("negative control rejected with: ", errBad);
+	}
+	SUBCASE("Glsl430 drops uniform/sampler bindings, keeps SSBOs, pins move them")
+	{
+		const std::string probe =
+			"#version 450\n"
+			"layout(std140, set = 0, binding = 3) uniform U { vec4 u; };\n"
+			"layout(set = 0, binding = 5) uniform sampler2D tex;\n"
+			"layout(std430, set = 0, binding = 40) readonly buffer P { vec4 p[]; };\n"
+			"layout(location = 0) out vec4 o;\n"
+			"void main() { o = u + p[0] + texture(tex, vec2(0.5)); }\n";
+		using namespace he::shaderc;
+		const Result plain = compile(probe, Stage::Fragment, Target::Glsl430);
+		REQUIRE_MESSAGE(plain.ok, plain.log);
+		const GlBindings pb = glBindingsOf(plain.source);
+		CHECK(pb.buffers == std::set<int>{ 40 });
+		CHECK_MESSAGE(pb.other.empty(), (pb.other.empty() ? std::string() : pb.other.front()));
+		const Result pinned = compileGlslPinned(probe, Stage::Fragment, { { Stage::Fragment, 0, 40, 2 } });
+		REQUIRE_MESSAGE(pinned.ok, pinned.log);
+		CHECK(glBindingsOf(pinned.source).buffers == std::set<int>{ 2 });
+		CHECK(glBindingsOf(pinned.source).other.empty());
+		// A pin for the other stage leaves it alone.
+		const Result vsPin = compileGlslPinned(probe, Stage::Fragment, { { Stage::Vertex, 0, 40, 2 } });
+		REQUIRE(vsPin.ok);
+		CHECK(glBindingsOf(vsPin.source).buffers == std::set<int>{ 40 });
+	}
+	SUBCASE("every node shader: 4.30, lists on 4/5/6 or nothing, links with its vertex")
+	{
+		const std::vector<NodeShaderCase> cases = allNodeShaderCases();
+		REQUIRE(cases.size() > 40);
+		int withLists = 0;
+		for (const NodeShaderCase& c : cases)
+		{
+			const uint64_t h = caseHash(c);
+			const auto& f = lib.fragmentClustered(h, c.glsl, B::GLSL430);
+			REQUIRE_MESSAGE(f.ok, c.name, ": ", f.log);
+			const auto& v = c.vertBody.empty()
+				? lib.standardVertex(B::GLSL430)
+				: lib.customVertex(std::hash<std::string>{}(c.vertBody), c.vertBody, B::GLSL430);
+			REQUIRE_MESSAGE(v.ok, c.name, ": ", v.log);
+			CHECK_MESSAGE(f.source.rfind("#version 430", 0) == 0, c.name);
+			CHECK_MESSAGE(v.source.rfind("#version 430", 0) == 0, c.name);
+
+			const GlBindings fb = glBindingsOf(f.source);
+			CHECK_MESSAGE((fb.buffers.empty() || fb.buffers == lists), c.name, ": unexpected SSBO bindings");
+			CHECK_MESSAGE(fb.other.empty(), c.name, ": bound by layout: ", (fb.other.empty() ? std::string() : fb.other.front()));
+			if (fb.buffers == lists) ++withLists;
+			const GlBindings vb = glBindingsOf(v.source);
+			CHECK_MESSAGE((vb.buffers.empty() && vb.other.empty()), c.name, ": vertex carries a binding");
+
+			std::string err;
+			CHECK_MESSAGE(glslGlLink(v.source, f.source, err), c.name, ": ", err);
+			// The plain GLSL 4.10 program the renderer falls back to has no
+			// storage blocks at all (macOS GL 4.1 compiles it).
+			CHECK_MESSAGE(lib.fragment(h, c.glsl, B::GLSL410).source.find(" buffer ") == std::string::npos, c.name);
+		}
+		CHECK(withLists * 2 > static_cast<int>(cases.size()));
+		MESSAGE("GLSL 4.30 clustered fragments with SSBOs 4/5/6: ", withLists, "/", cases.size());
+	}
+}
+
 #if defined(_WIN32)
 TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile it")
 {
@@ -2985,6 +3400,33 @@ TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile i
 		}
 	}
 	MESSAGE("FXC accepted ", okPs, "/", total, " node pixel shaders (ps_5_0)");
+
+	// Thema 117: the clustered heLitP variant (fragmentClustered) — three
+	// ByteAddressBuffers on t24..t26 and a per-pixel-length light loop. Same
+	// sweep, same profile, so a D3D backend can switch to it without a surprise.
+	int okCl = 0;
+	for (const NodeShaderCase& c : allNodeShaderCases())
+	{
+		std::string err;
+		const bool ok = fxc(lib.fragmentClustered(caseHash(c), c.glsl, B::HLSL).source, "matPSCl", "ps_5_0", err);
+		CHECK_MESSAGE(ok, "FXC rejected the CLUSTERED pixel shader for '", c.name, "': ", err);
+		okCl += ok ? 1 : 0;
+	}
+	MESSAGE("FXC accepted ", okCl, "/", total, " clustered node pixel shaders (ps_5_0)");
+	// Why the cluster loop samples with SampleLevel: logged, not asserted — the
+	// next person who wants texture() back sees FXC's verdict without a run.
+	{
+		std::string e;
+		const bool ok = fxc(
+			"ByteAddressBuffer n : register(t1);\n"
+			"Texture2D<float4> a : register(t0); SamplerState sa : register(s0);\n"
+			"float4 main(float4 pos : SV_Position) : SV_Target {\n"
+			"  float4 r = 0; uint c = n.Load(uint(pos.x) * 4);\n"
+			"  for (uint k = 0; k < c; ++k) r += a.Sample(sa, pos.xy * k);\n"
+			"  return r; }",
+			"gradient in per-pixel loop", "ps_5_0", e);
+		MESSAGE("FXC probe [Sample inside a per-pixel-length loop]: ", ok ? std::string("accepted") : ("rejected: " + e));
+	}
 }
 
 // ═══ Thema 56: the D3D12 material root signature against a real device ═══════
@@ -3133,10 +3575,11 @@ bool binds(const std::vector<Binding>& v, D3D_SHADER_INPUT_TYPE t, UINT reg)
 
 // Does the (possibly truncated) description cover this binding? Textures must
 // fall inside one of the table's ranges, samplers must be one of the static
-// samplers, cbuffers one of the root CBVs. The description's own counts are
-// the truth here, not a second hand-written list.
+// samplers, cbuffers one of the root CBVs, raw / structured buffers (the
+// clustered variant's t24..t26) one of the root SRVs. The description's own
+// counts are the truth here, not a second hand-written list.
 bool coveredBy(const HE::d3d12mat::MaterialRootSignature& rs, UINT rangeCount, UINT samplerCount,
-               const Binding& b)
+               const Binding& b, UINT paramCount = HE::d3d12mat::kParamCount)
 {
 	switch (b.type)
 	{
@@ -3151,13 +3594,20 @@ bool coveredBy(const HE::d3d12mat::MaterialRootSignature& rs, UINT rangeCount, U
 				if (rs.samplers[i].ShaderRegister == b.reg) return true;
 			return false;
 		case D3D_SIT_CBUFFER:
-			for (UINT i = 0; i < HE::d3d12mat::kParamCount; ++i)
+			for (UINT i = 0; i < paramCount; ++i)
 				if (rs.params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV &&
 				    rs.params[i].Descriptor.ShaderRegister == b.reg)
 					return true;
 			return false;
+		case D3D_SIT_BYTEADDRESS:
+		case D3D_SIT_STRUCTURED:
+			for (UINT i = 0; i < paramCount; ++i)
+				if (rs.params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV &&
+				    rs.params[i].Descriptor.ShaderRegister == b.reg)
+					return true;
+			return false;
 		default:
-			return false; // a UAV / structured buffer would be news
+			return false; // a UAV would be news
 	}
 }
 } // namespace
@@ -3333,6 +3783,66 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 			CHECK(pso.Get() == nullptr);
 		}
 	}
+
+	// Thema 117: the clustered variant the renderer now cross-compiles for every
+	// graph material (fragmentClustered). Its three ByteAddressBuffers t24..t26
+	// are in the bytecode (heLitP's cluster loop reads them behind a runtime
+	// gate FXC cannot fold) and the full signature covers them with root SRVs
+	// 6..8 — the indices bindClusterRoots sets. Negative control: the same
+	// signature WITHOUT those three params (kPreClusterParamCount) must refuse
+	// the clustered PS yet still accept the plain one, so the verdict is about
+	// t24..t26 and nothing else.
+	{
+		const auto& cf = lib.fragmentClustered(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+		REQUIRE_MESSAGE(cf.ok, cf.log);
+		std::string cerr;
+		ComPtr<ID3DBlob> cps = fxcBlob(cf.source, "ps_5_0", cerr);
+		REQUIRE_MESSAGE(cps.Get() != nullptr, "clustered demo graph pixel shader: ", cerr);
+		{
+			const std::vector<Binding> b = reflectBindings(cps.Get());
+			for (UINT t : { 24u, 25u, 26u })
+				CHECK_MESSAGE(binds(b, D3D_SIT_BYTEADDRESS, t), "the clustered PS does not bind a ByteAddressBuffer on t", t);
+			const std::vector<Binding> plainB = reflectBindings(ps.Get());
+			for (UINT t : { 24u, 25u, 26u })
+				CHECK_MESSAGE(!binds(plainB, D3D_SIT_BYTEADDRESS, t), "the PLAIN PS binds t", t, " — fragment() grew cluster code");
+		}
+		CHECK(full.params[HE::d3d12mat::kRootClusterLights].ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV);
+		CHECK(full.params[HE::d3d12mat::kRootClusterLights].Descriptor.ShaderRegister == 24);
+		CHECK(full.params[HE::d3d12mat::kRootClusterGrid].Descriptor.ShaderRegister   == 25);
+		CHECK(full.params[HE::d3d12mat::kRootClusterIdx].Descriptor.ShaderRegister    == 26);
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), fullRs.Get(), vs.Get(), cps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(SUCCEEDED(hr), "clustered PSO against the full signature failed, hr=", hr, ": ", why);
+		}
+
+		HE::d3d12mat::MaterialRootSignature preCluster;
+		HE::d3d12mat::DescribeMaterialRootSignature(preCluster, HE::d3d12mat::kRangeCount,
+		                                            HE::d3d12mat::kSamplerCount,
+		                                            HE::d3d12mat::kPreClusterParamCount);
+		ComPtr<ID3D12RootSignature> preClusterRs;
+		{
+			const HRESULT hr = makeRootSignature(w.device.Get(), preCluster.desc, preClusterRs, err);
+			const std::string why = drainInfoQueue(w);
+			REQUIRE_MESSAGE(SUCCEEDED(hr), "pre-cluster root signature: ", err, why);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), preClusterRs.Get(), vs.Get(), cps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(hr == E_INVALIDARG, "the pre-cluster signature accepted the clustered PS (hr=", hr,
+			              ") — t24..t26 are not what the PSO depends on: ", why);
+			CHECK(pso.Get() == nullptr);
+			if (!why.empty()) MESSAGE("pre-cluster rejection: ", why);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), preClusterRs.Get(), vs.Get(), ps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(SUCCEEDED(hr), "the PLAIN PS failed against the pre-cluster signature, hr=", hr, ": ", why);
+		}
+	}
 }
 
 TEST_CASE("D3D12: every node's bytecode binds only registers the material root signature covers")
@@ -3347,10 +3857,11 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 	using B = HE::MaterialShaderLibrary::Backend;
 	HE::d3d12mat::MaterialRootSignature rs;
 	HE::d3d12mat::DescribeMaterialRootSignature(rs);
-	auto uncovered = [&](const std::vector<Binding>& b, UINT ranges, UINT samplers) {
+	auto uncovered = [&](const std::vector<Binding>& b, UINT ranges, UINT samplers,
+	                     UINT params = HE::d3d12mat::kParamCount) {
 		std::string out;
 		for (const Binding& x : b)
-			if (!coveredBy(rs, ranges, samplers, x))
+			if (!coveredBy(rs, ranges, samplers, x, params))
 				out += (out.empty() ? "" : ", ") + x.name + "(" + std::to_string(static_cast<int>(x.type)) + ":" + std::to_string(x.reg) + ")";
 		return out;
 	};
@@ -3375,7 +3886,7 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		REQUIRE_MESSAGE(vs.Get() != nullptr, err);
 		CHECK(uncovered(reflectBindings(vs.Get()), HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount).empty());
 	}
-	int shaders = 0, litUncoveredByLegacy = 0;
+	int shaders = 0, litUncoveredByLegacy = 0, clUncoveredByPreCluster = 0;
 	for (const NodeShaderCase& c : allNodeShaderCases())
 	{
 		std::string err;
@@ -3398,6 +3909,23 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		if (!uncovered(b, HE::d3d12mat::kLegacyRangeCount, HE::d3d12mat::kLegacySamplerCount).empty())
 			++litUncoveredByLegacy;
 		++shaders;
+		// The clustered twin (Thema 117) — what the renderer actually builds now.
+		// Same coverage rule; the pre-cluster signature (no root SRVs 6..8) is
+		// its negative control and must leave the lit ones uncovered.
+		{
+			ComPtr<ID3DBlob> cps = fxcBlob(lib.fragmentClustered(caseHash(c), c.glsl, B::HLSL).source, "ps_5_0", err);
+			REQUIRE_MESSAGE(cps.Get() != nullptr, "'", c.name, "' (clustered): ", err);
+			const std::vector<Binding> cb = reflectBindings(cps.Get());
+			const std::string cmiss = uncovered(cb, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
+			if (c.name.find("(UI domain)") != std::string::npos)
+				CHECK_MESSAGE((cmiss.empty() || cmiss == "heBackdrop(2:9)"), "'", c.name,
+				              "' (clustered) binds registers beyond heBackdrop the signature does not cover: ", cmiss);
+			else
+				CHECK_MESSAGE(cmiss.empty(), "'", c.name, "' (clustered) binds registers the material root signature does not cover: ", cmiss);
+			if (!uncovered(cb, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount,
+			               HE::d3d12mat::kPreClusterParamCount).empty())
+				++clUncoveredByPreCluster;
+		}
 		if (!c.vertBody.empty())
 		{
 			const auto& cv = lib.customVertex(std::hash<std::string>{}(c.vertBody), c.vertBody, B::HLSL);
@@ -3414,6 +3942,11 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 	              " node shaders — the negative control is not biting");
 	MESSAGE("material root signature covers ", shaders, " node pixel shaders; the legacy one left ",
 	        litUncoveredByLegacy, " of them uncovered");
+	// Same bar for the clustered twins: every lit one reads t24..t26.
+	CHECK_MESSAGE(clUncoveredByPreCluster > shaders / 2,
+	              "the pre-cluster signature covers ", shaders - clUncoveredByPreCluster, "/", shaders,
+	              " clustered node shaders — t24..t26 are not in the bytecode, the negative control is not biting");
+	MESSAGE("clustered twins: the pre-cluster signature left ", clUncoveredByPreCluster, "/", shaders, " uncovered");
 }
 
 // ═══ Thema 57: heBackdrop and heGIReflFwd share s9 — measured, not inferred ═══
@@ -4140,6 +4673,235 @@ TEST_CASE("D3D11: a graph material draw reads the DDGI atlases on t17/t18 (s1/s3
 	CHECK(srvAt(HE::d3d11mat::kGIVisibilitySrvSlot).Get() == builtinBuffer.Get());
 	CHECK(samplerAt(HE::d3d11mat::kGIIrradianceSamplerSlot).Get() == builtinPoint.Get());
 	CHECK(samplerAt(HE::d3d11mat::kGIVisibilitySamplerSlot).Get() == builtinShadow.Get());
+}
+
+// Thema 117: D3D11 graph materials read point/spot lights from the cluster
+// lists (fragmentClustered, ByteAddressBuffers t24..t26) — through the raw
+// buffers the renderer creates with HE::d3d11mat::CreateClusterRawBuffer, so
+// the test cannot pass with a buffer/view shape the renderer does not ship.
+// One 1x1 lit draw, a 1x1x1 cluster grid, twelve lights in the one cell: the
+// first eight are black (and also fill the 8-light window, as the renderer
+// keeps it full), lights 9..12 are red. Only the lists can make the pixel red.
+TEST_CASE("D3D11: a clustered graph material is lit by cluster lights beyond the 8-light window (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	MESSAGE(w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+
+	// ── Shaders: standard vertex, the plain-colour graph as the window variant
+	// (fragment) and as the clustered one (fragmentClustered), through FXC as
+	// the renderer compiles them.
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3DBlob> vsBlob = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vsBlob.Get() != nullptr, "standard vertex: ", err);
+	const std::string glsl = HE::generateFragment(plainColourGraph()).glsl;
+	const uint64_t hash = std::hash<std::string>{}(glsl);
+	const auto& plainHl   = lib.fragment(hash, glsl, B::HLSL);
+	const auto& clusterHl = lib.fragmentClustered(hash, glsl, B::HLSL);
+	REQUIRE_MESSAGE(plainHl.ok, plainHl.log);
+	REQUIRE_MESSAGE(clusterHl.ok, clusterHl.log);
+	ComPtr<ID3DBlob> plainBlob   = fxcBlob(plainHl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(plainBlob.Get() != nullptr, "plain pixel shader: ", err);
+	ComPtr<ID3DBlob> clusterBlob = fxcBlob(clusterHl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(clusterBlob.Get() != nullptr, "clustered pixel shader: ", err);
+	{
+		const std::vector<Binding> cb = reflectBindings(clusterBlob.Get());
+		const std::vector<Binding> pb = reflectBindings(plainBlob.Get());
+		for (UINT t : { HE::d3d11mat::kClusterLightsSrvSlot, HE::d3d11mat::kClusterGridSrvSlot,
+		                HE::d3d11mat::kClusterIdxSrvSlot })
+		{
+			CHECK_MESSAGE(binds(cb, D3D_SIT_BYTEADDRESS, t), "the clustered PS does not bind a ByteAddressBuffer on t", t);
+			CHECK_MESSAGE(!binds(pb, D3D_SIT_BYTEADDRESS, t), "the PLAIN PS binds t", t, " — fragment() grew cluster code");
+		}
+	}
+	ComPtr<ID3D11VertexShader> vs;
+	ComPtr<ID3D11PixelShader> plainPS, clusterPS;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(plainBlob->GetBufferPointer(), plainBlob->GetBufferSize(), nullptr, &plainPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(clusterBlob->GetBufferPointer(), clusterBlob->GetBufferSize(), nullptr, &clusterPS)));
+	static const D3D11_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il)));
+	ComPtr<ID3D11RasterizerState> rasterNoCull; // see the landscape case: GL winding is culled otherwise
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID;
+		rd.CullMode = D3D11_CULL_NONE;
+		rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
+
+	// ── Geometry: a fullscreen triangle at z = 0.5, normal +Z. With identity
+	// mvp/model the one pixel's world position is (0, 0, 0.5).
+	const MatVertex11 tri[3] = {
+		{ { -1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.5f, 0.5f } },
+		{ {  3.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.5f, 0.5f } },
+		{ { -1.0f,  3.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.5f, 0.5f } },
+	};
+	ComPtr<ID3D11Buffer> vb;
+	{
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = sizeof(tri); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA init{ tri, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &vb)));
+	}
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[2] = 1.0f;
+	ComPtr<ID3D11Buffer> uCB = makeConstantBuffer11(dev, &u, sizeof(u));
+	REQUIRE(uCB.Get() != nullptr);
+
+	ComPtr<ID3D11Texture2D> target, staging;
+	ComPtr<ID3D11RenderTargetView> rtv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+
+	// ── Lights. Every one sits 1 unit above the pixel on its normal, range
+	// 100, so N·L = 1 and the falloff is the same for all. The red ones split
+	// an intensity of 2 four ways: the four list lights together must equal
+	// ONE window light of intensity 2 (the positive control below).
+	const float kLightPos[3] = { 0.0f, 0.0f, 1.5f };
+	const float kRange = 100.0f;
+	const int   kLists = 12, kBlack = 8;
+	std::vector<float> lights(static_cast<size_t>(kLists) * 16, 0.0f);
+	for (int i = 0; i < kLists; ++i)
+	{
+		float* l = &lights[static_cast<size_t>(i) * 16];
+		l[0] = kLightPos[0]; l[1] = kLightPos[1]; l[2] = kLightPos[2]; l[3] = 1.0f; // point
+		l[6] = -1.0f;                                                                // dir (unused)
+		if (i >= kBlack) { l[8] = 1.0f; l[11] = 0.5f; }                              // red, 0.5
+		l[12] = kRange;                                                              // range, no atlas, no GI channel
+	}
+	const uint32_t grid[2] = { 0u, static_cast<uint32_t>(kLists) };
+	std::vector<uint32_t> indices(kLists);
+	for (int i = 0; i < kLists; ++i) indices[i] = static_cast<uint32_t>(i);
+
+	// The renderer's raw buffer shape, filled the renderer's way (WRITE_DISCARD).
+	ComPtr<ID3D11Buffer> rawBuf[3];
+	ComPtr<ID3D11ShaderResourceView> rawSrv[3];
+	const UINT rawBytes[3] = { static_cast<UINT>(lights.size() * sizeof(float)), sizeof(grid),
+	                           static_cast<UINT>(indices.size() * sizeof(uint32_t)) };
+	const void* rawData[3] = { lights.data(), grid, indices.data() };
+	for (int i = 0; i < 3; ++i)
+	{
+		REQUIRE_MESSAGE(HE::d3d11mat::CreateClusterRawBuffer(dev, rawBytes[i], &rawBuf[i], &rawSrv[i]),
+		                "raw cluster buffer ", i, ": ", drainInfoQueue11(w));
+		D3D11_MAPPED_SUBRESOURCE m{};
+		REQUIRE(SUCCEEDED(ctx->Map(rawBuf[i].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)));
+		std::memcpy(m.pData, rawData[i], rawBytes[i]);
+		ctx->Unmap(rawBuf[i].Get(), 0);
+	}
+
+	// HeLighting: lit view, no ambient, no sky/AO/GI/CSM (all gates 0), camera
+	// straight above the pixel. `window` puts lights 1..n of the list into the
+	// window (the renderer's full-window rule); `red` instead puts ONE red
+	// intensity-2 light there; `gate` turns the cluster path on.
+	auto lighting = [&](int window, bool red, bool gate) {
+		HE::MaterialShaderLibrary::Lighting lit{};
+		lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.0f;
+		lit.camPos[0] = 0.0f; lit.camPos[1] = 0.0f; lit.camPos[2] = 5.0f;
+		lit.giParams[0] = lit.giParams[1] = 1.0f; // viewport 1x1 — the cell pick divides by it
+		const int n = red ? 1 : window;
+		for (int i = 0; i < n; ++i)
+		{
+			for (int k = 0; k < 3; ++k) lit.lightPos[i][k] = kLightPos[k];
+			lit.lightPos[i][3]    = 1.0f;
+			lit.lightDir[i][2]    = -1.0f;
+			lit.lightParams[i][0] = kRange;
+			if (red) { lit.lightColor[i][0] = 1.0f; lit.lightColor[i][3] = 2.0f; }
+		}
+		lit.counts[0] = static_cast<float>(n);
+		if (gate)
+		{
+			// 1x1x1 grid: the one cell holds every list light. Slice scale 0
+			// keeps cz at 0 whatever the depth; camFwd looks down -Z, near 0.1.
+			lit.clusterParams[0] = lit.clusterParams[1] = lit.clusterParams[2] = 1.0f;
+			lit.clusterParams[3] = 0.0f;
+			lit.clusterCamFwd[2] = -1.0f;
+			lit.clusterCamFwd[3] = 0.1f;
+		}
+		return makeConstantBuffer11(dev, &lit, sizeof(lit));
+	};
+
+	ctx->IASetInputLayout(il.Get());
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->RSSetState(rasterNoCull.Get());
+	const UINT stride = sizeof(MatVertex11), offset = 0;
+	ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
+	ctx->VSSetShader(vs.Get(), nullptr, 0);
+	ctx->VSSetConstantBuffers(1, 1, uCB.GetAddressOf());
+	ID3D11ShaderResourceView* lists[3] = { rawSrv[0].Get(), rawSrv[1].Get(), rawSrv[2].Get() };
+	HE::d3d11mat::BindClusterLists(ctx, lists);
+	{
+		ComPtr<ID3D11ShaderResourceView> got;
+		ctx->PSGetShaderResources(HE::d3d11mat::kClusterIdxSrvSlot, 1, &got);
+		CHECK(got.Get() == rawSrv[2].Get());
+	}
+	auto draw = [&](ID3D11PixelShader* ps, ID3D11Buffer* litCB, const char* what) {
+		ctx->PSSetShader(ps, nullptr, 0);
+		ctx->PSSetConstantBuffers(0, 1, &litCB);
+		drainInfoQueue11(w);
+		const Pixel11 px = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+		const std::string why = drainInfoQueue11(w);
+		MESSAGE(what, ": ", int(px.r), ",", int(px.g), ",", int(px.b),
+		        why.empty() ? "" : " — debug layer: ", why);
+		return px;
+	};
+
+	// 1. Positive control: the plain (window) variant, one red intensity-2
+	//    window light. This is the pixel the cluster lists must reproduce; it
+	//    also proves the lit path is readable here (unbound textures are 0).
+	ComPtr<ID3D11Buffer> redWindow = lighting(0, /*red=*/true, /*gate=*/false);
+	const Pixel11 ref = draw(plainPS.Get(), redWindow.Get(), "plain PS, one red window light");
+	REQUIRE_MESSAGE((ref.r > 40 && ref.r < 250 && ref.g < 4 && ref.b < 4),
+	                "positive control is not a readable red: ", int(ref.r), ",", int(ref.g), ",", int(ref.b));
+
+	// 2. The fix: clustered variant, gate on, window = the eight black lights.
+	//    Lights 9..12 reach the pixel only through t24..t26.
+	ComPtr<ID3D11Buffer> gated = lighting(kBlack, false, /*gate=*/true);
+	const Pixel11 lit = draw(clusterPS.Get(), gated.Get(), "clustered PS, gate on, 12 list lights");
+	CHECK_MESSAGE((near8(lit.r, ref.r, 3) && lit.g < 4 && lit.b < 4),
+	              "the four red list lights (9..12) should equal the window control ", int(ref.r),
+	              ", got ", int(lit.r), ",", int(lit.g), ",", int(lit.b));
+
+	// 3. Negative controls. (a) The plain variant on the SAME buffer: it sees
+	//    only the window — eight black lights — and stays black; that is the
+	//    8-light limit this step lifts. (b) The clustered variant with the gate
+	//    off: same lists bound, yet black — the light comes from the gated path.
+	const Pixel11 plain = draw(plainPS.Get(), gated.Get(), "plain PS, same buffer");
+	CHECK_MESSAGE((plain.r < 4 && plain.g < 4 && plain.b < 4),
+	              "the window variant saw a light beyond its 8 black ones: ", int(plain.r), ",", int(plain.g), ",", int(plain.b));
+	ComPtr<ID3D11Buffer> ungated = lighting(kBlack, false, /*gate=*/false);
+	const Pixel11 off = draw(clusterPS.Get(), ungated.Get(), "clustered PS, gate off");
+	CHECK_MESSAGE((off.r < 4 && off.g < 4 && off.b < 4),
+	              "gate 0 still lit from the lists: ", int(off.r), ",", int(off.g), ",", int(off.b));
+
+	// 4. Gate off is the window variant's behaviour: the clustered shader with
+	//    the red window light gives the control pixel (HE_FORWARD_CLUSTER=0 and
+	//    a light-less frame leave the gate at 0 and must still light).
+	const Pixel11 fallback = draw(clusterPS.Get(), redWindow.Get(), "clustered PS, gate off, red window light");
+	CHECK_MESSAGE((near8(fallback.r, ref.r, 1) && fallback.g < 4 && fallback.b < 4),
+	              "gate 0 should shade the window like fragment(): ", int(fallback.r), " vs ", int(ref.r));
 }
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC

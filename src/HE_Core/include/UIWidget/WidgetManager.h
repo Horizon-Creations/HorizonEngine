@@ -34,7 +34,8 @@ class HE_API WidgetManager
 {
 public:
     // Instantiate a widget asset (content-relative path). Resolves per-element
-    // material references, fires the "Construct" event, returns the widget id
+    // material references, fires "PreConstruct" for the widget and all its
+    // embeds and only then "Construct" for each of them, returns the widget id
     // (0 = asset missing or invalid tree).
     // The instance is created HIDDEN — creating and showing are two steps, the
     // way they are in every UI framework: a menu is usually built long before it
@@ -1240,6 +1241,10 @@ private:
     void rememberOriginal(Instance& w, int elem, const std::string& prop);
     // Put one recorded property back and drop the record.
     void restoreOne(Instance& w, int elem, const std::string& prop);
+    // Write what clip `c` says at `time` (clip time, direction already applied)
+    // into the widget. `scratch` is only there so the tick reuses one buffer.
+    void applyClipAt(Instance& w, const HE::UIAnimClip& c, int offset, float time,
+                     std::vector<HE::UIAnimSample>& scratch);
     void drawTooltip(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
 
     int   m_tooltipWidget = 0, m_tooltipElem = 0;

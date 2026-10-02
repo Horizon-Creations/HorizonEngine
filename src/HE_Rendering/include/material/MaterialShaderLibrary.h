@@ -23,7 +23,11 @@ namespace HE
 class MaterialShaderLibrary
 {
 public:
-    enum class Backend { Metal, HLSL, GLSL410, GLSLES300, SpirV };
+    // GLSL430 = desktop GL 4.3+ (SSBOs): only the GL backend's clustered graph-material
+    // programs use it (fragmentClustered + the matching vertex); everything else on GL
+    // stays GLSL410, which macOS (GL 4.1) can still compile. Append-only — the caches
+    // salt their keys with the enum value.
+    enum class Backend { Metal, HLSL, GLSL410, GLSLES300, SpirV, GLSL430 };
 
     // Stable shading input for material pipelines — the "material lighting ABI".
     // The engine fills this each frame; the standard-lit preamble's heLit() reads the
@@ -150,8 +154,35 @@ public:
         //       it (Metal FillMaterialLighting, GL fillMatLight); the zero every
         //       preview/thumbnail/UI site leaves keeps them shaded.
         float viewMode[4]     = {};
+        // Clustered forward lighting (append-only, v3.3, Thema 117): the gate and
+        // grid of the CLUSTERED fragment variant (fragmentClustered). Exactly
+        // HE::ClusterLightBuild::params / camFwd — HE::FillMaterialClusterParams
+        // copies them over:
+        //   clusterParams: x/y/z = grid dims, w = gridZ / log(far / near).
+        //                  x == 0 → OFF: the variant shades the 8-light window
+        //                  exactly like fragment() does. Every fill site that
+        //                  does not bind the cluster buffers leaves it 0.
+        //   clusterCamFwd: xyz = camera forward (the slice depth axis), w = near.
+        // The light WINDOW stays fully filled when this is on: the clustered
+        // variant skips the window's point/spot lights itself, so a plain
+        // (or pak-precompiled) material shader reading the same buffer in the
+        // same frame still sees its eight lights.
+        float clusterParams[4] = {};
+        float clusterCamFwd[4] = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
+    // Clustered variant's light lists (fragmentClustered): GLSL bindings 24/25/26
+    // (light array, grid, index list — the same three the clustered deferred
+    // resolve reads) → Metal fragment buffers 4/5/6, HLSL t24/t25/t26.
+    static constexpr int kMetalClusterLightsBufferIndex = 4;
+    static constexpr int kMetalClusterGridBufferIndex   = 5;
+    static constexpr int kMetalClusterIndexBufferIndex  = 6;
+    // GL 4.3 (GLSL430): the same three lists as shader-storage bindings 4/5/6
+    // (glBindBufferBase(GL_SHADER_STORAGE_BUFFER, …)). Not 24..26: GL 4.3 only
+    // guarantees 8 SSBO bindings, and the GI compute passes own 0..3.
+    static constexpr int kGlClusterLightsSsboBinding = 4;
+    static constexpr int kGlClusterGridSsboBinding   = 5;
+    static constexpr int kGlClusterIndexSsboBinding  = 6;
 
     struct Compiled
     {
@@ -383,6 +414,21 @@ public:
     const Compiled& standardVertex(Backend backend);
     const Compiled& fragment(uint64_t sourceHash, const std::string& glsl, Backend backend);
 
+    // Clustered-lighting twin of fragment() (Thema 117, forward path): the same
+    // material, but heLitP additionally declares the cluster light lists (SSBO
+    // bindings 24/25/26 — see kMetalCluster*BufferIndex; HLSL t24..t26, which
+    // SPIRV-Cross emits as ByteAddressBuffer, so D3D11 needs RAW views there)
+    // and, while heLight.clusterParams.x > 0, shades point/spot lights from the
+    // fragment's cluster list instead of the 8-light window. With the gate at 0
+    // the output equals fragment()'s. Opt-in per backend: the pipeline must
+    // bind all three buffers (D3D12: root signature, Vulkan: set layout), so a
+    // backend switches to this only together with its binding code.
+    // GLSL410 / GLSLES300 have no SSBOs → ok = false with a log line, never a
+    // silent fallback to the window variant. GLSL430 pins the lists to SSBO
+    // bindings 4/5/6 (kGlCluster*SsboBinding) and drops every other binding;
+    // pair it with standardVertex/customVertex(GLSL430) in one program.
+    const Compiled& fragmentClustered(uint64_t sourceHash, const std::string& glsl, Backend backend);
+
     // Custom vertex for World-Position-Offset materials: wraps the graph-generated BODY
     // (canonical statements ending in `vec3 heWpo`) into the per-backend vertex template
     // (SSBO vertex-pull on Metal, attributes elsewhere — same split as standardVertex).
@@ -407,8 +453,11 @@ public:
                    m_reflPrepassCache.clear(); }
 
 private:
+    const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
+                                    bool clustered);
+
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
-    std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend)
+    std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend, clustered)
     std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)

@@ -71,6 +71,48 @@ bool glslToSpirv(const std::string& glsl, Stage stage,
     return !spirvOut.empty();
 }
 
+// Desktop GLSL 4.30 (Target::Glsl430 / compileGlslPinned). From 4.20 on
+// SPIRV-Cross writes `layout(binding = N)` on every resource that carries a
+// Binding decoration, i.e. the canonical numbers (up to 33). The GL backend
+// binds uniform blocks and samplers BY NAME (glUniformBlockBinding /
+// glUniform1i, the GLSL 4.10 model), so their bindings are dropped here — a
+// program then links the same way whether a stage is 4.10 or 4.30, and no
+// canonical number can trip a driver limit. Storage buffers have no by-name
+// route before a successful compile, so they keep a binding: the pinned one,
+// else the canonical one (GL 4.3 only guarantees 8 SSBO bindings — pin
+// anything above 7). A pin applies to any resource kind it matches.
+std::string emitGlsl430(const std::vector<uint32_t>& spirv, const std::vector<GlslPin>& pins,
+                        Stage stage)
+{
+    spirv_cross::CompilerGLSL c(spirv);
+    spirv_cross::CompilerGLSL::Options o;
+    o.version = 430u;
+    o.es      = false;
+    c.set_common_options(o);
+    const spirv_cross::ShaderResources res = c.get_shader_resources();
+    auto apply = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, bool keepUnpinned) {
+        for (const spirv_cross::Resource& r : list)
+        {
+            const uint32_t set     = c.get_decoration(r.id, spv::DecorationDescriptorSet);
+            const uint32_t binding = c.get_decoration(r.id, spv::DecorationBinding);
+            const GlslPin* pin = nullptr;
+            for (const GlslPin& p : pins)
+                if (p.stage == stage && p.set == set && p.binding == binding) { pin = &p; break; }
+            if (pin)
+                c.set_decoration(r.id, spv::DecorationBinding, pin->glBinding);
+            else if (!keepUnpinned)
+                c.unset_decoration(r.id, spv::DecorationBinding);
+        }
+    };
+    apply(res.uniform_buffers,   /*keepUnpinned=*/false);
+    apply(res.sampled_images,    /*keepUnpinned=*/false);
+    apply(res.separate_images,   /*keepUnpinned=*/false);
+    apply(res.separate_samplers, /*keepUnpinned=*/false);
+    apply(res.storage_buffers,   /*keepUnpinned=*/true);
+    apply(res.storage_images,    /*keepUnpinned=*/true);
+    return c.compile();
+}
+
 // SPIR-V → textual target via SPIRV-Cross.
 bool spirvToSource(const std::vector<uint32_t>& spirv, Target target,
                    std::string& out, std::string& log)
@@ -79,6 +121,11 @@ bool spirvToSource(const std::vector<uint32_t>& spirv, Target target,
     {
         switch (target)
         {
+            case Target::Glsl430:
+                // No pins: only the stage-matched pin lookup needs the stage,
+                // and an empty list never consults it.
+                out = emitGlsl430(spirv, {}, Stage::Fragment);
+                return true;
             case Target::Msl:
             {
                 spirv_cross::CompilerMSL c(spirv);
@@ -253,6 +300,31 @@ Result compileHlslPinned(const std::string& glsl, Stage stage,
     }
     glslang::FinalizeProcess();
     reportShaderResult("Pinned-HLSL shader compile", r.ok, r.log, glsl.size());
+    return r;
+}
+
+Result compileGlslPinned(const std::string& glsl, Stage stage,
+                         const std::vector<GlslPin>& pins)
+{
+    Result r;
+    std::lock_guard<std::mutex> lock(g_glslangMutex);
+    glslang::InitializeProcess();
+    if (glslToSpirv(glsl, stage, r.spirv, r.log))
+    {
+        try
+        {
+            r.source = emitGlsl430(r.spirv, pins, stage);
+            r.ok = true;
+        }
+        catch (const std::exception& e)
+        {
+            r.log += "SPIRV-Cross(GLSL 430 pinned): ";
+            r.log += e.what();
+            r.log += '\n';
+        }
+    }
+    glslang::FinalizeProcess();
+    reportShaderResult("Pinned-GLSL430 shader compile", r.ok, r.log, glsl.size());
     return r;
 }
 

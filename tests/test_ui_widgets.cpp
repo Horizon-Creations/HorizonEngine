@@ -6887,7 +6887,9 @@ TEST_CASE("Clips: playing one moves the widget, and looping never ends")
     REQUIRE(wm.playAnimation(id, "FadeIn"));
     CHECK(wm.isPlayingAnimation(id, "FadeIn"));
     CHECK(wm.isAnimating());              // the frame pump has to keep running
-    CHECK(opacity() == doctest::Approx(0.5f));   // starting is not playing a frame
+    // Starting writes the clip's first frame at once: the frame drawn before the
+    // next tick shows where the clip starts, not the authored 0.5.
+    CHECK(opacity() == doctest::Approx(0.0f));
 
     wm.tick(0.25f);
     CHECK(opacity() == doctest::Approx(0.25f));
@@ -6917,6 +6919,57 @@ TEST_CASE("Clips: playing one moves the widget, and looping never ends")
     wm.tick(10.0f);
     CHECK(wm.isPlayingAnimation(id, "FadeIn"));
     CHECK(wm.stopAnimationClip(id) == 1);
+}
+
+// Thema 118: a fade-in played from Event Construct showed the element fully
+// opaque for one frame and then dropped it to 0 to fade it in. playAnimation
+// only queued the clip; the first value was written by the NEXT tick (and at
+// t=dt, not 0), and the editor ticks widgets before the scripts that create
+// them, so one whole frame was drawn as authored.
+TEST_CASE("Clips: the first frame drawn after Play Animation is the clip's start")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    t.find(panel)->renderOpacity = 1.0f;         // authored visible, as a fade-in's target is
+    t.animations.push_back(fadeClip(panel, "FadeIn", 0.0f, 1.0f, 1.0f));
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    auto opacity = [&](int id){ return wm.tree(id)->find(panel)->renderOpacity; };
+
+    // What Construct does: created, the clip started, shown — and drawn before
+    // any tick has run.
+    const int id = wm.createWidget(cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.playAnimation(id, "FadeIn", nullptr, HE::UIAnimDirection::Forward,
+                             /*restore=*/true));
+    wm.showWidget(id);
+    CHECK(opacity(id) == doctest::Approx(0.0f));
+    wm.tick(0.25f);
+    CHECK(opacity(id) == doctest::Approx(0.25f));   // and on from there, no jump back
+
+    // Rewinding mid-flight lands on the start at once too.
+    REQUIRE(wm.playAnimation(id, "FadeIn", nullptr, HE::UIAnimDirection::Forward, true));
+    CHECK(opacity(id) == doctest::Approx(0.0f));
+
+    // The start of a backwards play is the clip's END.
+    REQUIRE(wm.playAnimation(id, "FadeIn", nullptr, HE::UIAnimDirection::Backward, true));
+    CHECK(opacity(id) == doctest::Approx(1.0f));
+    wm.tick(0.25f);
+    CHECK(opacity(id) == doctest::Approx(0.75f));
+
+    // The immediate write is not what Restore puts back: the original was
+    // recorded before it, so the authored 1.0 comes back, not the clip's 0.
+    REQUIRE(wm.playAnimation(id, "FadeIn", nullptr, HE::UIAnimDirection::Forward, true));
+    CHECK(opacity(id) == doctest::Approx(0.0f));
+    wm.tick(2.0f);
+    CHECK_FALSE(wm.isPlayingAnimation(id, "FadeIn"));
+    CHECK(opacity(id) == doctest::Approx(1.0f));
+    CHECK(wm.restoreOriginalState(id) == 0);
 }
 
 // An animation is over when its last key is, not when its length is. The tail

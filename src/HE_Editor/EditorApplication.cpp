@@ -136,6 +136,7 @@
 #include <SDL3/SDL.h>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_dx12.h>
+#include "DeferredSlotFreeList.h" // the SRV heap's free-list, deferred behind a fence
 #include <d3d11.h>
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -146,41 +147,86 @@ using Microsoft::WRL::ComPtr;
 // Modern folder/file picker (IFileOpenDialog)
 #include <shobjidl.h>
 
-// ─── Simple free-list SRV descriptor heap allocator for D3D12 ImGui ──────────
-// Matches the pattern from the official ImGui DX12 example.
-// Must be kept alive for the entire ImGui lifetime.
+// ─── Free-list SRV descriptor heap allocator for D3D12 ImGui ─────────────────
+// The pattern from the official ImGui DX12 example, plus a deferred free: a
+// freed slot only comes back once a fence signalled on the queue at free time
+// has passed, i.e. once no submitted frame can still read its descriptor (see
+// DeferredSlotFreeList.h — the viewport re-registration on a Dock-Splitter drag
+// used to get its own slot straight back and rewrite it under a running frame,
+// Thema 113). Must be kept alive for the entire ImGui lifetime.
 struct D3D12DescriptorHeapAllocator
 {
 	ID3D12DescriptorHeap*       Heap            = nullptr;
 	D3D12_CPU_DESCRIPTOR_HANDLE HeapStartCpu    = {};
 	D3D12_GPU_DESCRIPTOR_HANDLE HeapStartGpu    = {};
 	UINT                        Increment       = 0;
-	ImVector<int>               FreeIndices;
+	DeferredSlotFreeList        Slots;
+	ID3D12CommandQueue*         Queue           = nullptr; // not owned (the renderer's)
+	ID3D12Fence*                Fence           = nullptr;
+	HANDLE                      FenceEvent      = nullptr;
+	UINT64                      FenceValue      = 0;
 
-	void Create(ID3D12Device* device, ID3D12DescriptorHeap* heap)
+	void Create(ID3D12Device* device, ID3D12DescriptorHeap* heap, ID3D12CommandQueue* queue)
 	{
 		Heap = heap;
 		D3D12_DESCRIPTOR_HEAP_DESC desc = heap->GetDesc();
 		HeapStartCpu  = heap->GetCPUDescriptorHandleForHeapStart();
 		HeapStartGpu  = heap->GetGPUDescriptorHandleForHeapStart();
 		Increment     = device->GetDescriptorHandleIncrementSize(desc.Type);
-		FreeIndices.reserve((int)desc.NumDescriptors);
-		for (int n = (int)desc.NumDescriptors - 1; n >= 0; --n)
-			FreeIndices.push_back(n);
+		Slots.reset((int)desc.NumDescriptors);
+		// Without a fence (no queue, or CreateFence failed) frees are immediate,
+		// which is the old behaviour — worse, but not worse than before.
+		if (queue && SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence))))
+		{
+			Queue      = queue;
+			FenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+		}
 	}
-	void Destroy() { Heap = nullptr; FreeIndices.clear(); }
+	void Destroy()
+	{
+		// ImGui_ImplDX12_Shutdown just freed its textures, each with a Signal
+		// still queued; the renderer's own flush comes later (Application.cpp,
+		// m_renderer->Shutdown). Let those land before the fence goes away.
+		if (Fence && FenceEvent && Fence->GetCompletedValue() < FenceValue &&
+		    SUCCEEDED(Fence->SetEventOnCompletion(FenceValue, FenceEvent)))
+			WaitForSingleObject(FenceEvent, INFINITE);
+		if (Fence)      { Fence->Release(); Fence = nullptr; }
+		if (FenceEvent) { CloseHandle(FenceEvent); FenceEvent = nullptr; }
+		Queue = nullptr;
+		Heap  = nullptr;
+		Slots.clear();
+	}
 
 	void Alloc(D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu)
 	{
-		IM_ASSERT(FreeIndices.Size > 0);
-		int idx   = FreeIndices.back(); FreeIndices.pop_back();
+		if (Fence) Slots.reclaim(Fence->GetCompletedValue());
+		int idx = -1;
+		if (!Slots.alloc(idx) && Fence && Slots.hasPending())
+		{
+			// Every free slot is still parked behind a frame in flight: wait for
+			// the oldest one rather than fail — a few ms, and only on a heap that
+			// is otherwise full.
+			const UINT64 v = Slots.oldestPending();
+			if (Fence->GetCompletedValue() < v && FenceEvent &&
+			    SUCCEEDED(Fence->SetEventOnCompletion(v, FenceEvent)))
+				WaitForSingleObject(FenceEvent, INFINITE);
+			Slots.reclaim(Fence->GetCompletedValue());
+			Slots.alloc(idx);
+		}
+		IM_ASSERT(idx >= 0 && "ImGui D3D12 SRV heap exhausted");
+		if (idx < 0) { out_cpu->ptr = 0; out_gpu->ptr = 0; return; }
 		out_cpu->ptr = HeapStartCpu.ptr + (SIZE_T)(idx * Increment);
 		out_gpu->ptr = HeapStartGpu.ptr + (UINT64)(idx * Increment);
 	}
 	void Free(D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu)
 	{
 		int idx = (int)((cpu.ptr - HeapStartCpu.ptr) / Increment);
-		FreeIndices.push_back(idx);
+		// The signal lands behind everything already submitted, so the fence
+		// passes it once the last frame that could name this slot is done.
+		if (Queue && Fence && SUCCEEDED(Queue->Signal(Fence, FenceValue + 1)))
+			Slots.retire(idx, ++FenceValue);
+		else
+			Slots.release(idx);
 		(void)gpu;
 	}
 };
@@ -963,7 +1009,7 @@ void EditorApplication::OnInit()
 
 			// Build the free-list allocator so ImGui can allocate/free individual SRV slots.
 			auto* alloc = new D3D12DescriptorHeapAllocator();
-			alloc->Create(device, srvHeap);
+			alloc->Create(device, srvHeap, cmdQueue);
 			m_d3d12SrvAllocator = alloc;
 
 			ImGui_ImplSDL3_InitForOther(window()->GetNativeWindow());
@@ -4116,7 +4162,14 @@ void EditorApplication::OnRender(float dt)
 			auto* alloc  = static_cast<D3D12DescriptorHeapAllocator*>(m_d3d12SrvAllocator);
 			if (device && alloc)
 			{
-				// Release the previous slot if we already had one.
+				// Release the previous slot if we already had one. The frame
+				// submitted just before (the one that created the new RT) still
+				// draws ImGui::Image through it, so the free is deferred behind a
+				// fence and the Alloc below gets a DIFFERENT slot; the old RT
+				// itself stays alive in the renderer's retiredViewportRTs. With
+				// the old LIFO list the same slot came straight back and was
+				// rewritten under that frame — wrong viewport content while
+				// dragging a Dock-Splitter (Thema 113).
 				if (m_d3d12ViewportSrvAllocated)
 				{
 					D3D12_CPU_DESCRIPTOR_HANDLE cpu{}; cpu.ptr = static_cast<SIZE_T>(m_d3d12ViewportSrvCpuPtr);
@@ -5936,6 +5989,69 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<LightComponent>(lightE, lc);
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_LOCALSHADOW witness scene added");
+	}
+
+	// ── Many-lights witness (HE_DUMP_MANYLIGHTS=N[builtin]): a floor slab under
+	// two rows of N small coloured point lights (default 16, max 64). The floor
+	// carries a NODE-GRAPH material (heLitP), so with clustered forward lighting
+	// every light leaves its pool; the 8-light window (HE_FORWARD_CLUSTER=0)
+	// lights only a handful. "...builtin" drops the material — the built-in PBR
+	// floor is the negative control on a backend whose built-in shader still
+	// shades the window (Metal forward). Shot at midnight from above:
+	//   he_shot.py out.png MANYLIGHTS=16 TOD=0 CAMY=207 CAMZ=2 PITCH=-38
+	if (const char* ml = std::getenv("HE_DUMP_MANYLIGHTS"); ml && *ml && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string mlMode(ml);
+		const int n = std::clamp(std::atoi(ml) > 1 ? std::atoi(ml) : 16, 1, 64);
+		auto floorE = m_editorWorld->createEntity("ManyLightsFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, 199.0f, -10.0f); // high above any loaded scene content
+		ftc.scale    = glm::vec3(36.0f, 0.25f, 14.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+		if (mlMode.find("builtin") == std::string::npos)
+		{
+			MaterialAsset fm;
+			fm.type = HE::AssetType::Material;
+			fm.name = "ManyLightsFloorMat";
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(col)->p[0] = 0.8f; g.findNode(col)->p[1] = 0.8f; g.findNode(col)->p[2] = 0.8f;
+			g.connect(col, 0, out, 0); // BaseColor → lit output (heLitP)
+			fm.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			fm.customShaderFragGlsl = gen.glsl;
+			fm.customShaderGBufGlsl = gen.glslGBuffer;
+			fm.customShaderVertGlsl = gen.vertexBody;
+			fm.blendMode            = gen.blendMode;
+			fm.domain               = gen.domain;
+			reg.emplace<MaterialComponent>(floorE,
+				MaterialComponent{ contentManager().registerMaterial(std::move(fm)) });
+		}
+		const int perRow = (n + 1) / 2;
+		for (int i = 0; i < n; ++i)
+		{
+			const int row = i / perRow, col = i % perRow;
+			auto lightE = m_editorWorld->createEntity("ManyLights" + std::to_string(i));
+			TransformComponent ltc;
+			ltc.position = glm::vec3((col - (perRow - 1) * 0.5f) * 3.0f, 200.0f, -7.0f - row * 5.0f);
+			LightComponent lc;
+			lc.type      = HE::LightType::Point;
+			lc.intensity = 6.0f;
+			lc.range     = 2.4f;
+			// Distinct hues around the wheel, so a missing pool is easy to name.
+			const float h = static_cast<float>(i) / static_cast<float>(n) * 6.0f;
+			lc.color = glm::clamp(glm::vec3(std::abs(h - 3.0f) - 1.0f,
+			                                2.0f - std::abs(h - 2.0f),
+			                                2.0f - std::abs(h - 4.0f)), 0.0f, 1.0f);
+			reg.emplace<TransformComponent>(lightE, ltc);
+			reg.emplace<LightComponent>(lightE, lc);
+		}
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_MANYLIGHTS witness scene added ("
+			 + std::to_string(n) + " point lights)").c_str());
 	}
 
 	// ── Light-on-the-same-entity witness (HE_DUMP_LIGHTONMESH=…) ─────────────
