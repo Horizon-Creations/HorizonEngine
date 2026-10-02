@@ -239,6 +239,18 @@ done
 # looks for <base>/cmake/bin/cmake, and <base> = SDL_GetBasePath() = Resources.
 [ -d "$DEPLOY_DIR/cmake" ] && { echo "    bundled cmake → Resources/cmake"; cp -R "$DEPLOY_DIR/cmake" "$RES_PATH/cmake"; }
 
+# The HorizonCode codegen SDK (engine headers + glm + the HorizonCore library to link
+# against), staged by the editor's POST_BUILD. resolveSdk() looks for <base>/SDK, so
+# without it every "Compile HorizonCode" export from the .app ships interpreted
+# ("no codegen SDK found"), and Build and Reload of a C++ project finds no engine headers.
+if [ -d "$DEPLOY_DIR/SDK" ]; then
+    echo "    codegen SDK → Resources/SDK"
+    rm -rf "$RES_PATH/SDK"
+    cp -R "$DEPLOY_DIR/SDK" "$RES_PATH/SDK"
+else
+    echo "    WARNING: $DEPLOY_DIR/SDK not found — the .app will export HorizonCode interpreted only."
+fi
+
 # ─── 6b. App icon (.icns from the HC logo) ────────────────────────────────────
 # Must land in Resources/ and be referenced in Info.plist BEFORE codesign so the
 # signature covers it and the Finder/Dock icon sticks.

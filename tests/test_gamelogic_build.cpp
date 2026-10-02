@@ -21,7 +21,9 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <filesystem>
+#include <cstdlib>
 #include <fstream>
+#include <string>
 
 // The engine checkout this test binary was built from — the HORIZON_ENGINE_DIR a
 // deployed editor recovers from its SDK config (engineRootFromSdk).
@@ -147,4 +149,72 @@ TEST_CASE("Game logic build: the editor's build path compiles and loads a real m
     CHECK(again.artifact == out.artifact);
 
     he_test::removeAllQuiet(root);
+}
+
+// The codegen SDK a deployed editor ships (src/HE_Editor/CMakeLists.txt stages
+// it into <editor>/SDK). Before that staging existed, a deployed editor had none
+// of resolveSdk's three sources, and every "Compile HorizonCode" export shipped
+// interpreted. Pinned here: the staged layout resolves, carries BOTH include
+// dirs the generated code needs (engine headers + glm), and doubles as the
+// HORIZON_ENGINE_DIR the GameLogic build recovers through engineRootFromSdk.
+TEST_CASE("Codegen SDK: a staged <editor>/SDK resolves and names the engine root")
+{
+    namespace fs = std::filesystem;
+    // The env override is stage 1 and would shadow everything below.
+    std::string savedEnv;
+    const bool hadEnv = std::getenv("HE_HCGEN_SDK") != nullptr;
+    if (hadEnv) savedEnv = std::getenv("HE_HCGEN_SDK");
+#if defined(_WIN32)
+    _putenv_s("HE_HCGEN_SDK", "");
+#else
+    unsetenv("HE_HCGEN_SDK");
+#endif
+
+    const fs::path base = fs::temp_directory_path() / "he_codegen_sdk_probe";
+    he_test::removeAllQuiet(base);
+    fs::create_directories(base);
+
+    // Nothing beside the editor: no SDK, and the failure has to say so.
+    CHECK_FALSE(HE::hccg::resolveSdk(base).valid());
+
+    const fs::path sdk = base / "SDK";
+    fs::create_directories(sdk / "src" / "HE_Core" / "include");
+    fs::create_directories(sdk / "include" / "glm");
+    fs::create_directories(sdk / "lib");
+
+    const HE::hccg::SdkInfo info = HE::hccg::resolveSdk(base);
+    REQUIRE(info.valid());
+    REQUIRE(info.includeDirs.size() == 2);
+    CHECK(info.includeDirs[0] == sdk / "src" / "HE_Core" / "include");
+    CHECK(info.includeDirs[1] == sdk / "include");
+    CHECK(info.libDir == sdk / "lib");
+    CHECK(HE::hccg::engineRootFromSdk(info) == sdk);
+
+    // A dev config beside it loses: the staged SDK came out of the same build
+    // as the DLLs beside the editor, the JSON may point into another tree.
+    writeFile(base / "he_sdk_config.json",
+              R"({"includeDirs": ["/elsewhere/src/HE_Core/include"], "libDir": "/elsewhere"})");
+    CHECK(HE::hccg::resolveSdk(base).libDir == sdk / "lib");
+
+    // The flat form (HE_HCGEN_SDK, hand-assembled SDKs) still resolves for the
+    // codegen, it just names no engine root — the GameLogic build refuses then.
+    const fs::path flat = base / "flat";
+    fs::create_directories(flat / "include");
+#if defined(_WIN32)
+    _putenv_s("HE_HCGEN_SDK", flat.string().c_str());
+#else
+    setenv("HE_HCGEN_SDK", flat.string().c_str(), 1);
+#endif
+    const HE::hccg::SdkInfo flatInfo = HE::hccg::resolveSdk(base);
+    REQUIRE(flatInfo.valid());
+    REQUIRE(flatInfo.includeDirs.size() == 1);
+    CHECK(flatInfo.includeDirs[0] == flat / "include");
+    CHECK(HE::hccg::engineRootFromSdk(flatInfo).empty());
+
+#if defined(_WIN32)
+    _putenv_s("HE_HCGEN_SDK", hadEnv ? savedEnv.c_str() : "");
+#else
+    if (hadEnv) setenv("HE_HCGEN_SDK", savedEnv.c_str(), 1); else unsetenv("HE_HCGEN_SDK");
+#endif
+    he_test::removeAllQuiet(base);
 }
