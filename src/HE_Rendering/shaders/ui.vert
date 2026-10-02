@@ -18,7 +18,11 @@ void main() {
         sp = pc.uRotation.yz + vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
     }
     vUV = mix(pc.uUVRect.xy, pc.uUVRect.zw, uv);
+    // Vulkan NDC has y pointing DOWN (y = -1 is the top edge) and both UI
+    // pipelines use a positive-height viewport, so canvas y maps straight
+    // through. GL's 1 - y flip here drew the canvas upside down, and the
+    // clip scissor (top-left pixels) then cut the wrong band.
     gl_Position = vec4(sp.x / pc.uViewport.x * 2.0 - 1.0,
-                       1.0 - sp.y / pc.uViewport.y * 2.0,
+                       sp.y / pc.uViewport.y * 2.0 - 1.0,
                        0.0, 1.0);
 }
