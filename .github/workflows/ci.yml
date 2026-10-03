@@ -388,10 +388,6 @@ jobs:
     name: Linux · Vulkan (lavapipe)
     runs-on: ubuntu-24.04
     timeout-minutes: 150
-    env:
-      # Only lavapipe, even if the image ever ships another ICD: the renderer takes
-      # devs[0] without choosing, and the device line in each log proves the pick.
-      VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 
     steps:
       - uses: actions/checkout@v4
@@ -423,10 +419,20 @@ jobs:
       # offscreen driver needs for a surface without a display; ray_query is the
       # GI hardware-RT path. A missing one is reported here and fails the image
       # test that depends on it, not the whole job.
+      #
+      # VK_DRIVER_FILES pins the loader to lavapipe alone (the package also ships
+      # intel/radeon/nouveau/asahi/virtio ICDs): the renderer takes devs[0] without
+      # choosing, and the device line in each test log proves the pick. The json is
+      # looked up, not hard-coded — Mesa 25.2 on noble names it lvp_icd.json, older
+      # Mesa lvp_icd.x86_64.json.
       - name: Software ICD witness
         run: |
           ls -l /usr/share/vulkan/icd.d/ /usr/share/vulkan/explicit_layer.d/ || true
-          test -f "$VK_DRIVER_FILES" || { echo "::error::$VK_DRIVER_FILES missing"; exit 1; }
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
+          test -n "$icd" || { echo "::error::no lavapipe ICD json in /usr/share/vulkan/icd.d"; exit 1; }
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          export VK_DRIVER_FILES="$icd"
+          cat "$icd"
           vulkaninfo --summary
           vulkaninfo > vkinfo.txt 2>&1 || true
           for ext in VK_EXT_headless_surface VK_KHR_ray_query VK_KHR_acceleration_structure; do
@@ -456,6 +462,7 @@ jobs:
           fi
 
       - name: Build editor
+        id: build
         run: cmake --build build --target HorizonEditor -j 4
 
       - name: Deployed editor
@@ -476,8 +483,9 @@ jobs:
               --editor out/deploy/Editor/HorizonEditor --out vk-shots/xvfb --cases nebula
 
       # SDL's offscreen video driver + VK_EXT_headless_surface: no display at all.
+      # Runs even when the Xvfb probe failed, but only on a built editor.
       - name: Vulkan image tests (offscreen)
-        if: success() || failure()
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 75
         env:
           SDL_VIDEO_DRIVER: offscreen
