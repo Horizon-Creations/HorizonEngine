@@ -1117,20 +1117,21 @@ private:
 	// Pipelines + layouts.
 	VkDescriptorSetLayout m_giShadowDSL = VK_NULL_HANDLE; // 3 SSBOs + 2 samplers + storage image + UBO
 	VkDescriptorSetLayout m_giProbeDSL  = VK_NULL_HANDLE; // 3 SSBOs + 2 storage images + UBO
-	VkDescriptorSetLayout m_giFsDSL     = VK_NULL_HANDLE; // 3 samplers + UBO (temporal; blur uses binding 0 + UBO ignored)
+	VkDescriptorSetLayout m_giFsDSL     = VK_NULL_HANDLE; // 3 samplers + UBO (temporal; a-trous: src/gPos/gNorm, UBO ignored)
 	VkPipelineLayout m_giShadowPL   = VK_NULL_HANDLE;
 	VkPipelineLayout m_giProbePL    = VK_NULL_HANDLE;
 	VkPipelineLayout m_giFsPL       = VK_NULL_HANDLE;
+	VkPipelineLayout m_giAtrousPL   = VK_NULL_HANDLE; // m_giFsDSL + 16-byte fragment push constant (HE::GIShadowAtrousStep)
 	VkPipelineLayout m_giGBufPL     = VK_NULL_HANDLE;
 	VkPipeline m_giShadowPipe   = VK_NULL_HANDLE; // compute
 	VkPipeline m_giProbePipe    = VK_NULL_HANDLE; // compute
 	VkPipeline m_giGBufPipe     = VK_NULL_HANDLE;
 	VkPipeline m_giGBufInstancedPipe = VK_NULL_HANDLE; // gi_gbuf_instanced.vert
 	VkPipeline m_giTemporalPipe = VK_NULL_HANDLE;
-	VkPipeline m_giBlurPipe     = VK_NULL_HANDLE;
+	VkPipeline m_giAtrousPipe   = VK_NULL_HANDLE; // gi_atrous.frag, both iterations
 	VkRenderPass m_giGBufRP     = VK_NULL_HANDLE; // 2x RGBA16F + depth → SHADER_READ_ONLY
 	VkRenderPass m_giTemporalRP = VK_NULL_HANDLE; // RGBA16F → SHADER_READ_ONLY
-	VkRenderPass m_giBlurRP     = VK_NULL_HANDLE; // R16F → SHADER_READ_ONLY
+	VkRenderPass m_giAtrousRP   = VK_NULL_HANDLE; // R16F → SHADER_READ_ONLY (scratch + result)
 	// Half-res targets.
 	struct GiImage
 	{
@@ -1142,9 +1143,10 @@ private:
 	GiImage m_giRaw;                 // R16F storage image, lives in GENERAL
 	GiImage m_giLocalMask;           // RGBA16F per-pixel local-light visibility (1 channel per light, first 4), GENERAL
 	GiImage m_giHist[2];             // RGBA16F ping-pong temporal history
-	GiImage m_giResult;              // R16F blurred mask (sampled by scene.frag)
+	GiImage m_giResult;              // R16F filtered mask (sampled by scene.frag)
+	GiImage m_giFilterTmp;           // R16F between the two a-trous iterations
 	VkFramebuffer m_giGBufFB = VK_NULL_HANDLE, m_giHistFB[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE },
-	              m_giResultFB = VK_NULL_HANDLE;
+	              m_giResultFB = VK_NULL_HANDLE, m_giFilterTmpFB = VK_NULL_HANDLE;
 	uint32_t  m_giW = 0, m_giH = 0;
 	int       m_giHistIdx   = 0;
 	bool      m_giHistValid = false;
@@ -1164,7 +1166,7 @@ private:
 	VkDescriptorSet  m_giShadowSet[3]   = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 	VkDescriptorSet  m_giProbeSet[3]    = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 	VkDescriptorSet  m_giTemporalSet[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
-	VkDescriptorSet  m_giBlurSet[3]     = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+	VkDescriptorSet  m_giAtrousSet[3][2] = {}; // per frame, per a-trous iteration (source differs)
 	GiBuffer m_giShadowUBO[3];
 	GiBuffer m_giProbeUBO[3];
 	GiBuffer m_giTemporalUBO[3];

@@ -1,8 +1,9 @@
 #!/bin/zsh
 # Thema 134 measurement matrix on Metal: f60/f61 pairs per (case, variant) via
-# cap_metal.sh, two captures at a time. Needs a macos-release build carrying the
-# HE_GI_PROTO_* switches (docs/gi-shadow-restflackern-1spp-2026-10-03.md, patch
-# scripts/gi-shadow-repro/proto134-metal.patch) and HE_DUMP_PANYAW/PANMOVE.
+# cap_metal.sh, two captures at a time. The HE_GI_PROTO_* variants need a
+# macos-release build carrying the prototype patch (scripts/gi-shadow-repro/
+# proto134-metal.patch); the Schritt-2 variants (gtR, A, AB, ABC, ABCr1/r4,
+# ABnof) run on the plain build (docs/gi-shadow-restflackern-1spp-2026-10-03.md §8).
 # usage: run134.sh CASE VARIANT...      (see the two tables below)
 #   then: python3 ana134.py $OUT/CASE__gt_f60.bmp $OUT/CASE__V_f60.bmp $OUT/CASE__V_f61.bmp
 HERE=${0:A:h}

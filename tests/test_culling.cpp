@@ -2127,6 +2127,34 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		});
 	}
 
+	SUBCASE("shadow spatial filter: the four a-trous copies")
+	{
+		// Thema 134 §4.3/§5.3: the edge-aware a-trous that replaced the 3x3 box.
+		// The value stop is the one that matters — without it (or with a
+		// different scale) the filter softens every shadow (rmse x7 in the
+		// measurement); the plane/normal stops keep it off other surfaces.
+		const std::vector<const char*> names = { "gi_atrous.frag", "HlslSources.h",
+		                                         "OpenGLRenderer.cpp", "MetalRenderer.mm" };
+		const std::vector<std::string> src = {
+			stripLineComments(readFile(sh / "gi_atrous.frag")),
+			stripLineComments(readFile(be / "D3D_Shared" / "HlslSources.h")),
+			stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")),
+			stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")),
+		};
+		checkGroup(names, src, {
+			{ "B3 weights",        { R"(h\[5\] = (?:float\[5\]\(|\{ ?)([0-9./ ,]+?)(?:\)| ?\});)" } },
+			{ "kernel taps",       { R"(h\[x \+ (\d+)\] \* h\[y \+ (\d+)\])" } },
+			{ "plane stop",        { R"(exp\(-abs\(dot\(n, q\.xyz - pv\.xyz\)\) / \(([0-9.]+) \* fp\)\))" } },
+			{ "normal power",      { R"(pow\(max\(dot\(n, normalize\([^;]*?\.xyz\)\), ([0-9.]+)\), ([0-9.]+)\);)" } },
+			{ "value stop",        { R"(exp\(-abs\(v - c\) / \(([0-9.]+) \* sig \+ ([0-9.e+-]+)\)\))" } },
+			{ "Bernoulli sigma",   { R"(sig\s*= sqrt\(max\(c \* \(1\.0 - c\), ([0-9.]+)\) / max\([\w.]+, ([0-9.]+)\)\))" } },
+			{ "footprint",         { R"(fp\s*= max\(max\(min\(length\(gxp - pv\.xyz\), length\(gxm - pv\.xyz\)\),\s*min\(length\(gyp - pv\.xyz\), length\(gym - pv\.xyz\)\)\), ([0-9.e+-]+)\))" } },
+			{ "early-out range",   { R"(if \(c < ([0-9.e+-]+) \|\| c > 1\.0 - ([0-9.e+-]+)\))" } },
+			{ "early-out reach",   { R"(o \* \(([0-9.]+) \* st\) \* texel)" } },
+			{ "early-out equal",   { R"(\) - c\) < ([0-9.e+-]+);)" } },
+		});
+	}
+
 	SUBCASE("DDGI probe-update kernels")
 	{
 		const std::vector<const char*> names = { "gi_probe.comp", "gi_probe_hw.comp",

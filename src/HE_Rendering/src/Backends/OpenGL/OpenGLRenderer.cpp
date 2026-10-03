@@ -2080,19 +2080,60 @@ void main()
 }
 )GLSL";
 
-static const char* kGiBlurFS = R"GLSL(
+// One edge-aware a-trous iteration over the shadow mask, run twice; replaces
+// the 3x3 box (gi_atrous.frag, Thema 134 §4.3 — same constants, SYNC there).
+// The first iteration reads the history's alpha (rgb = world position).
+static const char* kGiAtrousFS = R"GLSL(
 #version 410 core
 in vec2 vUV;
-uniform sampler2D uSrc; // temporal history: rgb = world pos, a = shadow
+uniform sampler2D uSrc;   // history (.a) or the previous iteration (.r)
+uniform sampler2D uGPos;
+uniform sampler2D uGNorm;
+uniform vec4 uAtrous;     // x = step in texels (0 = plain copy), y = 1 read .a else .r, z = N_eff (history samples)
 out vec4 FragColor;
+vec4  tap(sampler2D s, vec2 uv) { return textureLod(s, uv, 0.0); }
+float atrousValue(vec4 s) { return uAtrous.y > 0.5 ? s.a : s.r; }
 void main()
 {
+	float c  = atrousValue(tap(uSrc, vUV));
+	vec4  pv = tap(uGPos, vUV);
+	float st = uAtrous.x;
+	if (st < 0.5 || pv.a < 0.5) { FragColor = vec4(c, 0.0, 0.0, 1.0); return; }
+
 	vec2 texel = 1.0 / vec2(textureSize(uSrc, 0));
-	float sum = 0.0;
-	for (int x = -1; x <= 1; ++x)
-		for (int y = -1; y <= 1; ++y)
-			sum += texture(uSrc, vUV + vec2(float(x), float(y)) * texel).a;
-	FragColor = vec4(sum / 9.0, 0.0, 0.0, 1.0);
+	if (c < 1e-3 || c > 1.0 - 1e-3)
+	{
+		bool allSame = true;
+		for (int k = 0; k < 4 && allSame; ++k)
+		{
+			vec2 o = vec2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
+			allSame = abs(atrousValue(tap(uSrc, vUV + o * (2.0 * st) * texel)) - c) < 1e-3;
+		}
+		if (allSame) { FragColor = vec4(c, 0.0, 0.0, 1.0); return; }
+	}
+
+	vec3 n = normalize(tap(uGNorm, vUV).xyz);
+	vec3  gxp = tap(uGPos, vUV + vec2(texel.x, 0.0)).xyz, gxm = tap(uGPos, vUV - vec2(texel.x, 0.0)).xyz;
+	vec3  gyp = tap(uGPos, vUV + vec2(0.0, texel.y)).xyz, gym = tap(uGPos, vUV - vec2(0.0, texel.y)).xyz;
+	float fp  = max(max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+	                    min(length(gyp - pv.xyz), length(gym - pv.xyz))), 1e-4);
+	float sig = sqrt(max(c * (1.0 - c), 0.0) / max(uAtrous.z, 1.0));
+	const float h[5] = float[5](1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
+	float sum = 0.0, wsum = 0.0;
+	for (int y = -2; y <= 2; ++y)
+		for (int x = -2; x <= 2; ++x)
+		{
+			vec2 uv = vUV + vec2(float(x), float(y)) * st * texel;
+			vec4 q  = tap(uGPos, uv);
+			if (q.a < 0.5) continue;
+			float v = atrousValue(tap(uSrc, uv));
+			float w = h[x + 2] * h[y + 2];
+			w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (1.0 * fp));
+			w *= pow(max(dot(n, normalize(tap(uGNorm, uv).xyz)), 0.0), 32.0);
+			w *= exp(-abs(v - c) / (2.0 * sig + 1e-3));
+			sum += v * w; wsum += w;
+		}
+	FragColor = vec4(wsum > 0.0 ? sum / wsum : c, 0.0, 0.0, 1.0);
 }
 )GLSL";
 
@@ -5644,8 +5685,8 @@ void OpenGLRenderer::CreateGIPipelines()
 		                       CompileStage(GL_FRAGMENT_SHADER, kGiGBufFS));
 		m_giTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                           CompileStage(GL_FRAGMENT_SHADER, kGiTemporalFS));
-		m_giBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
-		                       CompileStage(GL_FRAGMENT_SHADER, kGiBlurFS));
+		m_giAtrousProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                       CompileStage(GL_FRAGMENT_SHADER, kGiAtrousFS));
 		m_giReflTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                               CompileStage(GL_FRAGMENT_SHADER, kGiReflTemporalFS));
 		m_giReflBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
@@ -5664,7 +5705,7 @@ void OpenGLRenderer::CreateGIPipelines()
 		            (std::string("OpenGLRenderer: GI pipeline build failed — GI disabled: ") + e.what()).c_str());
 		if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
 		if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
-		if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+		if (m_giAtrousProgram)     { glDeleteProgram(m_giAtrousProgram);     m_giAtrousProgram = 0; }
 		if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
 		if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
 		if (m_giReflCSProgram)   { glDeleteProgram(m_giReflCSProgram);   m_giReflCSProgram = 0; }
@@ -5757,6 +5798,11 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 	glGenFramebuffers(1, &m_giResultFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giResultTex, 0);
+	// Scratch between the two a-trous iterations (read texel-exact, NEAREST).
+	m_giFilterTmpTex = makeTex(GL_R16F, GL_NEAREST);
+	glGenFramebuffers(1, &m_giFilterTmpFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giFilterTmpFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giFilterTmpTex, 0);
 
 	// Ray-traced reflections: the compute kernel image-stores the raw trace, the
 	// (optional) temporal pass ping-pongs radiance + receiver position through an
@@ -5811,6 +5857,8 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	}
 	if (m_giResultFBO) { glDeleteFramebuffers(1, &m_giResultFBO); m_giResultFBO = 0; }
 	if (m_giResultTex) { glDeleteTextures(1, &m_giResultTex);     m_giResultTex = 0; }
+	if (m_giFilterTmpFBO) { glDeleteFramebuffers(1, &m_giFilterTmpFBO); m_giFilterTmpFBO = 0; }
+	if (m_giFilterTmpTex) { glDeleteTextures(1, &m_giFilterTmpTex);     m_giFilterTmpTex = 0; }
 	if (m_giReflFBO)     { glDeleteFramebuffers(1, &m_giReflFBO);     m_giReflFBO = 0; }
 	if (m_giReflTex)     { glDeleteTextures(1, &m_giReflTex);         m_giReflTex = 0; }
 	if (m_giReflRawTex)  { glDeleteTextures(1, &m_giReflRawTex);      m_giReflRawTex = 0; }
@@ -6020,7 +6068,7 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 // filled this frame. Returns the blurred mask texture (0 if unavailable).
 unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::mat4& viewProj)
 {
-	if (!m_giShadowCSProgram || !m_giTemporalProgram || !m_giBlurProgram) return 0;
+	if (!m_giShadowCSProgram || !m_giTemporalProgram || !m_giAtrousProgram) return 0;
 	if (!m_giGBufFBO) return 0;
 	// Explicit: the temporal/blur fullscreen draws below are half-res, and the
 	// reflection pass may have run between the pre-pass and here.
@@ -6086,13 +6134,29 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	m_giHistIdx     = prevIdx;
 	m_giPrevViewProj = viewProj; // for NEXT frame's reprojection
 
-	// ── 4. Spatial blur → the mask the scene shader samples ─────────────────
-	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
-	glUseProgram(m_giBlurProgram);
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, m_giHistTex[curIdx]);
-	glUniform1i(glGetUniformLocation(m_giBlurProgram, "uSrc"), 0);
-	glDrawArrays(GL_TRIANGLES, 0, 3);
+	// ── 4. Edge-aware a-trous → the mask the scene shader samples ───────────
+	// Iteration 0: history[cur].a → scratch (hole 1); iteration 1: scratch.r →
+	// result (hole 2). With the filter off both are plain copies.
+	static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
+	glUseProgram(m_giAtrousProgram);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uGPos"), 1);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufNormTex);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uGNorm"), 2);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uSrc"), 0);
+	for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, it == 0 ? m_giFilterTmpFBO : m_giResultFBO);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, it == 0 ? m_giHistTex[curIdx] : m_giFilterTmpTex);
+		const HE::GIShadowAtrousStep step = HE::GIShadowAtrousParams(it, m_giShadowFilter,
+		                                                             m_giShadowHistoryWeight, m_giShadowRays);
+		glUniform4f(glGetUniformLocation(m_giAtrousProgram, "uAtrous"),
+		            step.step, step.fromHistory, step.effectiveSamples, step.unused);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
 
 	glActiveTexture(GL_TEXTURE0);
 	glEnable(GL_DEPTH_TEST);
@@ -9589,7 +9653,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
 	if (m_giGBufInstancedProgram) { glDeleteProgram(m_giGBufInstancedProgram); m_giGBufInstancedProgram = 0; }
 	if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
-	if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+	if (m_giAtrousProgram)     { glDeleteProgram(m_giAtrousProgram);     m_giAtrousProgram = 0; }
 	if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
 	if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
 	for (auto& r : m_retiredTextures)

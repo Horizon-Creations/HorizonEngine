@@ -899,20 +899,67 @@ float4 main(In i) : SV_Target
 }
 )HLSL";
 
-// 3x3 spatial blur of the accumulated shadow scalar → the mask the scene
-// shader samples (R16F, linear = free bilinear upsample to full res).
-inline constexpr const char* kGiBlurHLSL = R"HLSL(
-Texture2D    uSrc : register(t0); // temporal history: rgb = world pos, a = shadow
+// One edge-aware a-trous iteration over the accumulated shadow scalar (B3 5x5,
+// holes = uAtrous.x texels), run twice → the mask the scene shader samples
+// (R16F, linear = free bilinear upsample to full res). Replaces the 3x3 box.
+// Plane, normal and Bernoulli value stops — see gi_atrous.frag (Thema 134
+// §4.3), same constants (SYNC). SampleLevel throughout: the early outs and the
+// background skip make the taps divergent.
+// t0 = history (.a: rgb is the world position) or the previous iteration
+// (.r), t1 = gPos, t2 = gNorm.
+inline constexpr const char* kGiAtrousHLSL = R"HLSL(
+Texture2D    uSrc   : register(t0);
+Texture2D    uGPos  : register(t1);
+Texture2D    uGNorm : register(t2);
 SamplerState uPointSamp : register(s0);
-cbuffer GiBlurCB : register(b0) { float4 uTexel; }; // xy = 1/size
+cbuffer GiAtrousCB : register(b0)
+{
+    float4 uAtrous; // x = step in texels (0 = plain copy), y = 1 read .a else .r, z = N_eff (history samples)
+    float4 uTexel;  // xy = 1/size
+};
 struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float atrousValue(float4 s) { return uAtrous.y > 0.5 ? s.a : s.r; }
 float4 main(In i) : SV_Target
 {
-    float sum = 0.0;
-    [unroll] for (int x = -1; x <= 1; ++x)
-        [unroll] for (int y = -1; y <= 1; ++y)
-            sum += uSrc.Sample(uPointSamp, i.uv + float2(x, y) * uTexel.xy).a;
-    return float4(sum / 9.0, 0.0, 0.0, 1.0);
+    float  c  = atrousValue(uSrc.SampleLevel(uPointSamp, i.uv, 0));
+    float4 pv = uGPos.SampleLevel(uPointSamp, i.uv, 0);
+    float  st = uAtrous.x;
+    if (st < 0.5 || pv.a < 0.5) return float4(c, 0.0, 0.0, 1.0);
+
+    float2 texel = uTexel.xy;
+    if (c < 1e-3 || c > 1.0 - 1e-3)
+    {
+        bool allSame = true;
+        [unroll] for (int k = 0; k < 4; ++k)
+        {
+            float2 o = float2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
+            allSame = allSame && abs(atrousValue(uSrc.SampleLevel(uPointSamp, i.uv + o * (2.0 * st) * texel, 0)) - c) < 1e-3;
+        }
+        if (allSame) return float4(c, 0.0, 0.0, 1.0);
+    }
+
+    float3 n   = normalize(uGNorm.SampleLevel(uPointSamp, i.uv, 0).xyz);
+    float3 gxp = uGPos.SampleLevel(uPointSamp, i.uv + float2(texel.x, 0.0), 0).xyz, gxm = uGPos.SampleLevel(uPointSamp, i.uv - float2(texel.x, 0.0), 0).xyz;
+    float3 gyp = uGPos.SampleLevel(uPointSamp, i.uv + float2(0.0, texel.y), 0).xyz, gym = uGPos.SampleLevel(uPointSamp, i.uv - float2(0.0, texel.y), 0).xyz;
+    float  fp  = max(max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+                         min(length(gyp - pv.xyz), length(gym - pv.xyz))), 1e-4);
+    float  sig = sqrt(max(c * (1.0 - c), 0.0) / max(uAtrous.z, 1.0));
+    const float h[5] = { 1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0 };
+    float sum = 0.0, wsum = 0.0;
+    [unroll] for (int y = -2; y <= 2; ++y)
+        [unroll] for (int x = -2; x <= 2; ++x)
+        {
+            float2 uv = i.uv + float2(float(x), float(y)) * st * texel;
+            float4 q  = uGPos.SampleLevel(uPointSamp, uv, 0);
+            if (q.a < 0.5) continue;
+            float v = atrousValue(uSrc.SampleLevel(uPointSamp, uv, 0));
+            float w = h[x + 2] * h[y + 2];
+            w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (1.0 * fp));
+            w *= pow(max(dot(n, normalize(uGNorm.SampleLevel(uPointSamp, uv, 0).xyz)), 0.0), 32.0);
+            w *= exp(-abs(v - c) / (2.0 * sig + 1e-3));
+            sum += v * w; wsum += w;
+        }
+    return float4(wsum > 0.0 ? sum / wsum : c, 0.0, 0.0, 1.0);
 }
 )HLSL";
 

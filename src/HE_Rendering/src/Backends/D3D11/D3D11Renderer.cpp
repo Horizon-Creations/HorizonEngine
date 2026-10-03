@@ -2924,8 +2924,8 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ComputeShader> giShadowCS;
     ComPtr<ID3D11ComputeShader> giProbeCS;
     ComPtr<ID3D11PixelShader>   giTemporalPS;
-    ComPtr<ID3D11PixelShader>   giBlurPS;
-    ComPtr<ID3D11Buffer>        giShadowCB, giCountCB, giTemporalCB, giBlurCB, giProbeCB;
+    ComPtr<ID3D11PixelShader>   giAtrousPS;
+    ComPtr<ID3D11Buffer>        giShadowCB, giCountCB, giTemporalCB, giAtrousCB, giProbeCB;
     ComPtr<ID3D11SamplerState>  giLinearClamp;
 
     std::unordered_map<HE::UUID, GIBlasRange> giBlasCache;
@@ -2939,11 +2939,11 @@ struct D3D11RendererImpl
 
     int giShadowW = 0, giShadowH = 0;
     ComPtr<ID3D11Texture2D> giGBufPosTex, giGBufNormTex, giGBufDepth, giRawTex,
-                            giHistTex[2], giResultTex;
-    ComPtr<ID3D11RenderTargetView>    giGBufPosRTV, giGBufNormRTV, giHistRTV[2], giResultRTV;
+                            giHistTex[2], giResultTex, giFilterTmpTex;
+    ComPtr<ID3D11RenderTargetView>    giGBufPosRTV, giGBufNormRTV, giHistRTV[2], giResultRTV, giFilterTmpRTV;
     ComPtr<ID3D11DepthStencilView>    giGBufDSV;
     ComPtr<ID3D11ShaderResourceView>  giGBufPosSRV, giGBufNormSRV, giRawSRV,
-                                      giHistSRV[2], giResultSRV;
+                                      giHistSRV[2], giResultSRV, giFilterTmpSRV; // tmp: between the a-trous iterations
     ComPtr<ID3D11UnorderedAccessView> giRawUAV;
     ComPtr<ID3D11Texture2D>           giLocalMaskTex; // RGBA16F per-pixel local-light visibility
     ComPtr<ID3D11ShaderResourceView>  giLocalMaskSRV;
@@ -3126,13 +3126,13 @@ struct D3D11RendererImpl
             ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giProbeCS));
         if (ok && (ok = compile(kGiTemporalHLSL, "main", "ps_5_0", b)))
             ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giTemporalPS));
-        if (ok && (ok = compile(kGiBlurHLSL, "main", "ps_5_0", b)))
-            ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giBlurPS));
+        if (ok && (ok = compile(kGiAtrousHLSL, "main", "ps_5_0", b)))
+            ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giAtrousPS));
 
         ok = ok && makeCB(7 * 16, giShadowCB) // sunDirRadius + frame + localPosRange[4] + localExtra
                 && makeCB(16, giCountCB)
                 && makeCB(2 * sizeof(glm::mat4) + 16, giTemporalCB)
-                && makeCB(16, giBlurCB)
+                && makeCB(32, giAtrousCB) // HE::GIShadowAtrousStep + texel size
                 && makeCB(6 * 16 + 3 * 8 * 16, giProbeCB);
         if (ok)
         {
@@ -3148,7 +3148,7 @@ struct D3D11RendererImpl
             HE_LOG_ERROR(RHI, "%s",
                         "D3D11Renderer: GI pipeline build failed — GI disabled");
             giGBufVS.Reset(); giGBufVSInstanced.Reset(); giGBufPS.Reset(); giShadowCS.Reset(); giProbeCS.Reset();
-            giTemporalPS.Reset(); giBlurPS.Reset();
+            giTemporalPS.Reset(); giAtrousPS.Reset();
             giSupported = false;
             return;
         }
@@ -3209,7 +3209,10 @@ struct D3D11RendererImpl
                           giHistTex[1], &giHistRTV[1], &giHistSRV[1], nullptr)
                && makeTex(DXGI_FORMAT_R16_FLOAT,
                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
-                          giResultTex, &giResultRTV, &giResultSRV, nullptr);
+                          giResultTex, &giResultRTV, &giResultSRV, nullptr)
+               && makeTex(DXGI_FORMAT_R16_FLOAT,
+                          D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                          giFilterTmpTex, &giFilterTmpRTV, &giFilterTmpSRV, nullptr);
         // Depth buffer for the G-buffer prepass.
         giGBufDSV.Reset(); giGBufDepth.Reset();
         D3D11_TEXTURE2D_DESC dd{};
@@ -3339,6 +3342,7 @@ struct D3D11RendererImpl
         for (int i = 0; i < 2; ++i)
         { giHistTex[i].Reset(); giHistRTV[i].Reset(); giHistSRV[i].Reset(); }
         giResultTex.Reset(); giResultRTV.Reset(); giResultSRV.Reset();
+        giFilterTmpTex.Reset(); giFilterTmpRTV.Reset(); giFilterTmpSRV.Reset();
         giShadowW = giShadowH = 0;
         giHistValid = false;
         destroyGiProbeAtlas();
@@ -3357,7 +3361,7 @@ struct D3D11RendererImpl
                                           ID3D11RasterizerState* rasterSt)
     {
         createGiPipelines();
-        if (!giGBufVS || !giShadowCS || !giTemporalPS || !giBlurPS) return nullptr;
+        if (!giGBufVS || !giShadowCS || !giTemporalPS || !giAtrousPS) return nullptr;
         ensureGiShadowTargets(w, h);
         if (!giGBufPosTex) return nullptr;
 
@@ -3508,22 +3512,31 @@ struct D3D11RendererImpl
         giHistIdx      = prevIdx;
         giPrevViewProj = viewProj; // for NEXT frame's reprojection
 
-        // ── 4. Spatial blur → the mask the scene shader samples ─────────────
+        // ── 4. Edge-aware a-trous → the mask the scene shader samples ───────
+        // Iteration 0: history[cur].a → scratch (hole 1); iteration 1:
+        // scratch.r → result (hole 2). With the filter off both are copies.
+        static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
+        ctx->PSSetShader(giAtrousPS.Get(), nullptr, 0);
+        for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
         {
-            ctx->OMSetRenderTargets(1, giResultRTV.GetAddressOf(), nullptr);
-            ctx->PSSetShader(giBlurPS.Get(), nullptr, 0);
-            glm::vec4 texel(1.0f / float(giShadowW), 1.0f / float(giShadowH), 0.0f, 0.0f);
+            ctx->OMSetRenderTargets(1, it == 0 ? giFilterTmpRTV.GetAddressOf() : giResultRTV.GetAddressOf(), nullptr);
+            struct { HE::GIShadowAtrousStep step; glm::vec4 texel; } acb{};
+            acb.step  = HE::GIShadowAtrousParams(it, giShadowFilter, giShadowHistoryWeight, giShadowRays);
+            acb.texel = glm::vec4(1.0f / float(giShadowW), 1.0f / float(giShadowH), 0.0f, 0.0f);
             D3D11_MAPPED_SUBRESOURCE mapped{};
-            if (SUCCEEDED(ctx->Map(giBlurCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-            { std::memcpy(mapped.pData, &texel, sizeof(texel)); ctx->Unmap(giBlurCB.Get(), 0); }
-            ctx->PSSetConstantBuffers(0, 1, giBlurCB.GetAddressOf());
-            ID3D11ShaderResourceView* srv = giHistSRV[curIdx].Get();
-            ctx->PSSetShaderResources(0, 1, &srv);
+            if (SUCCEEDED(ctx->Map(giAtrousCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            { std::memcpy(mapped.pData, &acb, sizeof(acb)); ctx->Unmap(giAtrousCB.Get(), 0); }
+            ctx->PSSetConstantBuffers(0, 1, giAtrousCB.GetAddressOf());
+            ID3D11ShaderResourceView* srvs[3] = { it == 0 ? giHistSRV[curIdx].Get() : giFilterTmpSRV.Get(),
+                                                  giGBufPosSRV.Get(), giGBufNormSRV.Get() };
+            ctx->PSSetShaderResources(0, 3, srvs);
             ctx->Draw(3, 0);
+            // Unbind before the scratch target flips from RTV to SRV (and the
+            // result to the scene's t4).
             ID3D11RenderTargetView* n = nullptr;
             ctx->OMSetRenderTargets(1, &n, nullptr);
-            ID3D11ShaderResourceView* nullSrv = nullptr;
-            ctx->PSSetShaderResources(0, 1, &nullSrv);
+            ID3D11ShaderResourceView* nullSrvs[3] = {};
+            ctx->PSSetShaderResources(0, 3, nullSrvs);
         }
         return giResultSRV.Get();
     }
@@ -5572,9 +5585,9 @@ void D3D11Renderer::Shutdown()
     m_impl->destroyGiTargets();
     m_impl->giGBufVS.Reset(); m_impl->giGBufVSInstanced.Reset(); m_impl->giGBufPS.Reset();
     m_impl->giShadowCS.Reset(); m_impl->giProbeCS.Reset();
-    m_impl->giTemporalPS.Reset(); m_impl->giBlurPS.Reset();
+    m_impl->giTemporalPS.Reset(); m_impl->giAtrousPS.Reset();
     m_impl->giShadowCB.Reset(); m_impl->giCountCB.Reset(); m_impl->giTemporalCB.Reset();
-    m_impl->giBlurCB.Reset(); m_impl->giProbeCB.Reset();
+    m_impl->giAtrousCB.Reset(); m_impl->giProbeCB.Reset();
     m_impl->giLinearClamp.Reset();
     m_impl->rtv.Reset();
     m_impl->dsv.Reset();

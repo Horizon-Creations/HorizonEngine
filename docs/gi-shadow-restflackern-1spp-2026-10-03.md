@@ -386,3 +386,84 @@ git checkout src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm
 ```
 
 `python3` aus Homebrew hat hier kein numpy, `/usr/local/bin/python3` hat es.
+
+## 8. Umsetzung (Schritt 2)
+
+Alle drei Bausteine stehen in allen Backends, ohne Prototyp-Patch. Commits: A `fc7ed6e2`,
+B `01442285`, C Metal `90da6aff`, C D3D11/D3D12/GL/Vulkan + Drift-Guard im selben Commit wie dieser Abschnitt.
+
+| Baustein | Shader-Kopien | Host |
+|---|---|---|
+| A Bewegungsvektor-bilineare History | `gi_temporal.frag`, `kGiTemporalHLSL`, `kGiTemporalFS`, `giShadowTemporal` | `curViewProj` im Parameterblock (Reihenfolge prev, cur, blend) |
+| B Strahlen pro Pixel | die 7 Kerne aus §5.2 | `.y` der Local-Extra-Zeile; `GISettings::shadowRays` |
+| C À-trous statt Box | `gi_atrous.frag` (neu, `gi_blur.frag` entfällt), `kGiAtrousHLSL`, `kGiAtrousFS`, `giShadowAtrous` | R16F-Zwischenziel, 2 Pässe; Parameter aus `HE::GIShadowAtrousParams` (`GIJitter.h`) |
+
+**Einstellungen.** `IRenderer::GISettings` hat jetzt `shadowRays` (Default 2), `shadowHistory`
+(0.9, vorher in jedem Host hart verdrahtet) und `shadowFilter`. Der Editor bietet
+*GI Shadow Quality* (Low/Medium/High = 1/2/4 Strahlen, Default Medium) in den Preferences, im
+Settings-Katalog, in `config.json` (`GIShadowQuality`), im Export und im Spiel. Ob der
+SW-Pfad (kein RT-Kern) einen anderen Default braucht, bleibt die offene Produktfrage aus §5.2.
+
+**Dump-Schalter.** `HE_GI_REFERENCE=1` rendert die Referenz in jedem Backend selbst (256 Strahlen,
+History 0.98, Filter aus); `HE_DUMP_GISHADOWRAYS=n` und `HE_DUMP_GISHADOWFILTER=0|1` für A/B.
+`run134.sh` kennt dafür die Varianten `gtR`, `A`, `AB`, `ABC`, `ABCr1`, `ABCr4`, `ABnof`.
+Die `HE_GI_PROTO_*`-Varianten brauchen weiter den Prototyp-Patch.
+
+**Abweichungen vom Prototyp, gewollt:**
+* Footprint im À-trous zweiseitig per `min` pro Achse (§5.3); im Messraster nicht vom
+  Prototyp zu unterscheiden.
+* Alle À-trous-Taps mit explizitem LOD 0 (`textureLod`/`SampleLevel`/`level(0)`): früher
+  Ausstieg und Hintergrund-Skip machen die Taps divergent, FXC lehnt Gradienten dort ab.
+* Ebenen-/Normalen-/Werte-Konstanten (1, 32, 2σ) stehen im Shader, nicht im Parameterblock,
+  damit der Drift-Guard sie festhalten kann. Pro Pass wechseln nur Loch, Quelle und N_eff.
+
+### 8.1 Gegenprobe auf dem M5 (Metal, HW-RT)
+
+Gegen dieselbe 256-spp-Referenz wie §3. In Klammern der Prototyp (`mvp2at2le`, §3.1/§3.2);
+die Abweichungen liegen im Rauschboden des M5.
+
+| Fall | Flackern Stock → Umsetzung | rmse Stock → Umsetzung |
+|---|---|---|
+| s6 | 0.703 → **0.416** (0.416) | 1.56 → **1.21** (1.21) |
+| s05 | 0.209 → **0.159** (0.158) | 7.20 → **1.53** (1.53) |
+| c05 | 0.115 → **0.102** (0.100) | 3.91 → **0.68** (0.68) |
+| cnear | 0.142 → **0.127** (0.132) | 3.83 → **1.11** (1.11) |
+| pan6 | 2.107 → **0.933** (0.932) | 7.03 → **2.43** (2.43) |
+| cpan6 | 0.582 → **0.288** (0.282) | 4.76 → **1.07** (1.07) |
+| move6 | 1.319 → **0.886** (0.886) | 2.35 → **1.73** (1.73) |
+| cmove6 | 0.374 → **0.362** (0.353) | 3.62 → **0.83** (0.83) |
+
+Ghost (§3.3): s6 0.635 → **0.693**, s05 0.433 → **0.503**, gleich dem Prototyp.
+Abnahme §5.4 Punkt 5: Flackern überall ≤ Stock, rmse s05/c05/cpan6 bei 21 % / 17 % / 23 % von
+Stock (Grenze 33 %), Ghost s6 ≤ 0.72. **Erfüllt.**
+
+Einzeln gemessen (je Baustein auf dem Stand davor): A allein pan6 rmse 7.03 → 2.79, statisch
+unverändert (= `mv`); A+B Flackern s6 0.70 → 0.33, pan6 1.44 → 0.83 (= `spp2`).
+
+**Qualitätsstufen** (Flackern / rmse):
+
+| Fall | Low (1) | Medium (2, Default) | High (4) |
+|---|---|---|---|
+| s6 | 0.696 / 1.63 | 0.416 / 1.21 | 0.318 / 1.03 |
+| s05 | 0.314 / 1.87 | 0.159 / 1.53 | 0.105 / 1.09 |
+| c05 | 0.168 / 0.90 | 0.102 / 0.68 | 0.093 / 0.50 |
+| pan6 | 1.400 / 2.88 | 0.933 / 2.43 | 0.662 / 1.82 |
+
+Low flackert an scharfen Kanten stärker als Stock (s05 0.31 gegen 0.21, wie §4.3 für den
+À-trous allein vorhergesagt) und liegt bei s6 knapp über dem Stock-Fehler (rmse 1.63 gegen
+1.56); bei 0.5°, an Kontaktkanten und unter Bewegung ist der Fehler deutlich kleiner.
+
+**Weitere Gegenproben:** SW-Pfad (`HE_GI_FORCE_SW=1`, `kGISWMSL`) gleich HW (s6 0.416 / 1.21).
+`HE_GI_REFERENCE` gegen die Prototyp-Referenz: rmse 0.05 (s6) / 0.08 (c05), also im
+Eigenrauschen der Referenz. Alle Läufe 0 Fehler im Log (MSL kompiliert zur Laufzeit).
+
+### 8.2 Was nicht geprüft ist
+
+* **D3D11, D3D12, Vulkan, OpenGL laufen hier nicht.** Geprüft sind die Shader offline
+  (glslang: Vulkan-GLSL, GL-Strings, HLSL-Strings, `gi_shadow_hw.hlsl` mit gestubbtem DXR-Teil),
+  `VulkanRenderer.cpp` per `clang -fsyntax-only` gegen die MoltenVK-Header (mit
+  Negativkontrolle). D3D11/D3D12-Hosts sind nicht kompiliert; das macht die Windows-CI. Die
+  GL-GI braucht Compute (GL 4.3), der macOS-Treiber hat 4.1.
+* MSL ist nicht offline kompiliert (Metal-Toolchain fehlt in diesem Xcode), nur zur Laufzeit.
+* Kosten nicht neu gemessen; der Prototyp hatte dieselben Pässe (§3.4: ~+0.4 ms HW).
+* Nachmessen auf NN-WS03 (RTX 4070) mit `cap.ps1` und `HE_GI_REFERENCE=1` steht aus.
