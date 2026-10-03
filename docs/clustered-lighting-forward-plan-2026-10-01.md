@@ -290,6 +290,25 @@ kenntlich machen, welche Variante gebacken ist (sonst bindet ein Backend die Puf
 einen Blob, der sie nicht deklariert — auf D3D11/Vulkan unschädlich, auf D3D12 nur, wenn die
 Root-Signatur sie optional abdeckt).
 
+**Umgesetzt (Thema 123, Schritt 2):**
+- `MaterialShaderVariant` trägt `fragmentClustered` + `vertexClustered` (letzteres nur GL:
+  das Cluster-Programm ist dort GLSL 4.30 in beiden Stufen, `vertex` bleibt 4.10). Leer =
+  nicht gebacken. PSHD **v3**: die Paare stehen als Block **hinter** allen Records, ein
+  v2-Leser liest einen v3-Blob also weiter richtig; v1/v2-Paks dekodieren mit leeren Paaren.
+- Ein Rezept für beide Backstellen: `HE::bakeMaterialShaderVariant`
+  (`material/MaterialShaderBake.h`) — Exporter (`CompileMaterialShaderVariants`) und
+  `HE_DUMP_MATPRECOMPILE`-Zeuge rufen es. Scheitert das Cluster-Paar, Warnung, plain wird
+  trotzdem ausgeliefert. `uiVertex` paart weiter nur mit `fragment`.
+- Laufzeit, pro Backend unter **genau** der Bedingung, unter der es die Listen bindet und das
+  Gate öffnet: GL `m_forwardClustered && !gbuffer` (+ beide Strings gebacken), Metal
+  `m_forwardClustered && !gbuffer`, D3D11/D3D12 `matClustered()`, Vulkan
+  `m_forwardClustered && m_clusterReady`. Kette: gebacken-clustered → gebacken-plain → wie
+  bisher. Log: „PRECOMPILED variant, clustered/plain" (GL, Metal) bzw. „baked variant,
+  clustered" (D3D/Vulkan).
+- Zeugen: `test_material_graph` „Export bake …" (alle 75 Knoten-Shader: GL-Paar 4.30, linkt
+  unter glslang, byte-gleich zum Laufzeit-Cross-Compile; Negativkontrolle 4.10-Vertex → rot),
+  PSHD-Roundtrip inkl. v2-Blob und abgerissenem Tail.
+
 ## 5. Nebenbefunde (nicht in diesem Schritt gelöst)
 
 - ~~Der **eingebaute** Forward-Shader von **Metal** (`fragmentMain`) und **GL** (`kUnlitFS`)
@@ -306,5 +325,5 @@ Root-Signatur sie optional abdeckt).
   Validierungsläufe.
 - (Schritt 2) Im Zeugen ist der Boden im Deferred-Pfad deutlich heller als im Forward-Pfad
   (Ambient/IBL), bei gleicher Szene. Nicht untersucht.
-- Der Exporter backt für Metal weiterhin `fragment()` (§4) — ausgelieferte Spiele bleiben
-  bis dahin beim 8er-Fenster.
+- ~~Der Exporter backt für Metal weiterhin `fragment()` (§4) — ausgelieferte Spiele bleiben
+  bis dahin beim 8er-Fenster.~~ Erledigt in Thema 123 Schritt 2 (alle Backends, §4).

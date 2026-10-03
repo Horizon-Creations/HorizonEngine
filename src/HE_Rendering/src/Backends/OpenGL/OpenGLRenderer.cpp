@@ -3670,9 +3670,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
 	// Forward graph materials on GL 4.3+ shade from the cluster lists (Thema 117):
-	// both stages at GLSL 4.30, one version per program. Baked pak variants
-	// (GLSL 4.10, plain) and the G-buffer variant (never shades) stay as they are.
-	bool clustered = m_forwardClustered && !precompiled && !gbuffer;
+	// both stages at GLSL 4.30, one version per program. A baked pak variant
+	// clusters only if the exporter baked that 4.30 pair (vertexClustered +
+	// fragmentClustered); otherwise its plain 4.10 pair draws with the window.
+	// The G-buffer variant never shades lights.
+	const bool bakedClustered = precompiled && !precompiled->vertexClustered.empty()
+	                         && !precompiled->fragmentClustered.empty();
+	bool clustered = m_forwardClustered && !gbuffer && (!precompiled || bakedClustered);
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
 	auto crossCompile = [&](Backend b, bool cl) {
@@ -3683,11 +3687,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		                   : m_matShaderLib.fragment(key, fragGlsl, b);
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	};
+	auto usePrecompiled = [&](bool cl) {
+		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
+		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
+	};
 	if (precompiled)
-	{
-		vertSrc = precompiled->vertex; fragSrc = precompiled->fragment;
-		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL 410 — no runtime cross-compile
-	}
+		usePrecompiled(clustered);
 	else if (clustered)
 	{
 		crossCompile(Backend::GLSL430, true);
@@ -3793,7 +3799,9 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		setupProgram(prog);
 		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 		HE_LOG_INFO(RHI, "%s", precompiled
-			? "OpenGLRenderer: built a material program from a PRECOMPILED variant (no runtime cross-compile)"
+			? (clustered
+				? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)"
+				: "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)")
 			: clustered
 			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
 			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -3803,12 +3811,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	unsigned int program = ok ? linkSources() : 0;
 	if (!program && clustered)
 	{
-		// The GLSL 4.30 pair cross-compiled but the driver rejected it: the
-		// plain 4.10 pair still draws the material (window lights only).
+		// The GLSL 4.30 pair (cross-compiled or baked) but the driver rejected
+		// it: the plain 4.10 pair still draws the material (window lights only).
 		HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: clustered material program failed to link, "
 			"falling back to the 8-light window");
 		clustered = false;
-		crossCompile(Backend::GLSL410, false);
+		if (precompiled) usePrecompiled(false);
+		else             crossCompile(Backend::GLSL410, false);
 		program = ok ? linkSources() : 0;
 	}
 	if (!ok)

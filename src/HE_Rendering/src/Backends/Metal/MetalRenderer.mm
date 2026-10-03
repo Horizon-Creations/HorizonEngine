@@ -12020,11 +12020,25 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertMSL, fragMSL, log;
+	std::string fragFallbackMSL; // baked plain fragment, if the baked clustered one is rejected
+	bool bakedClustered = false;
 	bool ok = false;
 	if (precompiled)
 	{
-		// Baked at export time — no runtime cross-compile.
+		// Baked at export time — no runtime cross-compile. Forward PSOs take the
+		// baked clustered twin under the same rule as the cross-compiled path
+		// below (Thema 117); a pak without it keeps the plain window variant.
 		vertMSL = precompiled->vertex; fragMSL = precompiled->fragment;
+		if (m_forwardClustered && !gbuffer && !precompiled->fragmentClustered.empty())
+		{
+			// The exporter never bakes a separate clustered vertex for Metal; honour
+			// one anyway, but then the plain fragment no longer pairs with it and
+			// there is no fallback to offer.
+			if (!precompiled->vertexClustered.empty()) vertMSL = precompiled->vertexClustered;
+			else                                       fragFallbackMSL = fragMSL;
+			fragMSL = precompiled->fragmentClustered;
+			bakedClustered = true;
+		}
 		ok = !vertMSL.empty() && !fragMSL.empty();
 	}
 	else
@@ -12060,6 +12074,22 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		id<MTLLibrary> fLib = err ? nil
 			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
 			                       options:nil error:&err];
+		if (vLib && !fLib && !fragFallbackMSL.empty())
+		{
+			// The baked clustered fragment did not compile: the baked plain one
+			// still draws the material (8-light window, which stays full).
+			HE_LOG_WARN(RHI, "%s", (std::string("MetalRenderer: baked clustered material variant rejected, "
+				"using the 8-light window: ") + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+			err = nil;
+			fragMSL = std::move(fragFallbackMSL);
+			bakedClustered = false;
+			fLib = [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
+			                            options:nil error:&err];
+		}
+		if (precompiled && vLib && fLib)
+			HE_LOG_INFO(RHI, "%s", bakedClustered
+				? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered"
+				: "MetalRenderer: material pipeline from a PRECOMPILED variant, plain");
 		if (vLib && fLib)
 		{
 			MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -13468,8 +13498,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// for the whole pass (the sky and skinned draws never touch them); without
 	// a build they get zero lists, because fragmentMain declares them
 	// unconditionally and API validation wants every declared buffer bound.
-	// The light windows stay FULL: precompiled (pak) blobs lack the cluster
-	// code and still need their point/spot slots.
+	// The light windows stay FULL: a pak baked without fragmentClustered (or
+	// whose clustered blob was rejected) draws the plain fragment and still
+	// needs its point/spot slots.
 	HE::ClusterLightBuild clusterBuild;
 	if (m_forwardClustered || (deferred && m_deferredClustered))
 		clusterBuild = BuildFrameClusterLights();
