@@ -7,6 +7,7 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/packing.hpp>
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
@@ -6309,6 +6310,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
                         &m_editorCamera);
+    // The UI canvas (Entity-UI + WidgetManager widgets) rides in the same
+    // RenderWorld — extract() just cleared it. Mirrors GL/Metal; without this
+    // call every UI pass below sees an empty list and draws nothing.
+    m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+                          m_renderWorld);
 
 
     // Sky is independent of scene geometry — draw it before any early returns so it
@@ -12174,12 +12180,14 @@ void VulkanRenderer::createUIPipeline()
         vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_uiAtlasDescPool), "ui atlas desc pool");
     }
 
-    // Push constant layout: UIPush (80 bytes) visible to both stages.
+    // Push constant layout: UIPush (128 bytes, the guaranteed minimum of
+    // maxPushConstantsSize) visible to both stages.
     VkPushConstantRange pcr{};
     pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pcr.offset     = 0;
     // vec4 rect + vec4 color + vec4 uvRect + vec2 viewport + vec2 params + vec4 rotation
-    pcr.size       = 80;
+    // + vec4 cornerRadius + vec4 style + uvec4 packed colours (see ui.frag)
+    pcr.size       = 128;
 
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plci.setLayoutCount         = 1;
@@ -12319,7 +12327,9 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
     // viewport/scissor before calling. This function only loops over UI objects
     // and issues draw calls — it does NOT begin/end a render pass.
     struct UIPush { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport;
-                    glm::vec2 params; glm::vec4 rotation; };
+                    glm::vec2 params; glm::vec4 rotation;
+                    glm::vec4 cornerRadius; glm::vec4 style; glm::uvec4 colors; };
+    static_assert(sizeof(UIPush) == 128, "UIPush must match ui.vert/ui.frag and the 128-byte range");
 
     // The atlas set must be bound for EVERY draw (the fragment shader statically
     // uses the sampler even for solid quads). Default to the shared font (key 0);
@@ -12377,8 +12387,15 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
         push.color    = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
         push.uvRect   = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
         push.viewport = glm::vec2(float(width), float(height));
-        push.params   = glm::vec2(obj.type == 2 ? 1.0f : 0.0f, 0.0f);
-        push.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
+        push.params   = glm::vec2(obj.type == 2 ? 1.0f : 0.0f, obj.borderWidth);
+        push.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y,
+                                  obj.gradientAngleDeg);
+        push.cornerRadius = obj.cornerRadius;
+        push.style    = glm::vec4(obj.blur, obj.innerShadowBlur, obj.gradient ? 1.0f : 0.0f,
+                                  obj.gradientShape == 1 ? 1.0f : 0.0f);
+        push.colors   = glm::uvec4(glm::packUnorm4x8(obj.borderColor),
+                                   glm::packUnorm4x8(obj.gradientColor),
+                                   glm::packUnorm4x8(obj.innerShadowColor), 0u);
         vkCmdPushConstants(cmd, m_uiPipeLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(UIPush), &push);
