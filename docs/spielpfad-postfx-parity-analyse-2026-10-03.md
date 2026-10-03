@@ -471,3 +471,63 @@ Grundrauschen, echtes Xbox-Pad am Rechner).
 
 Nicht gemessen: Parität Editor gegen Spiel als Bildvergleich (§8.2, strukturell gegeben, weil beide `DrawViewportFrame` fahren), Vollbild (der Default-`GameWindowMode`; nur Windowed getestet), Frame-Zeit-Kosten (volle Kette plus eine Kopie), ein App-Projekt (Schalter `false` ab Frame 1, also alter Code), der
 Übergang `true` → `false` zur Laufzeit (kein realer Auslöser) und der D3D11-Debug-Layer.
+
+## 11. Ergebnis Schritt 3: D3D12 (2026-10-03)
+
+Commit `738e983b`. Umgesetzt nach §3.4, im selben Muster wie §10:
+
+- `D3D12Renderer::SetSwapchainPostProcessing` speichert nur das Flag. `Render()` baut das
+  Spiel-Set direkt nach `resizeSwapchainIfNeeded()` und **vor** `syncTaaTargets()` und dem
+  Reset der Kommandoliste, denn `createViewportRT`, `createPostFXResources` und
+  `syncTaaTargets` flushen. Größe und Format kommen aus dem Desc des aktuellen Backbuffers
+  (`R8G8B8A8_UNORM`, 1×), nicht aus dem Fenster. Ein gescheitertes `ResizeBuffers` behält
+  die alte Größe, und `CopyResource` braucht exakt gleiche Maße.
+- Spielframe: `DrawViewportFrame()` (UI-Canvas inklusive), dann zwei Barrieren-Paare.
+  `viewportRT` geht PSR→COPY_SOURCE→PSR, das Backbuffer PRESENT→COPY_DEST→RENDER_TARGET.
+  Dazwischen läuft `CopyResource`. Das gemeinsame RT→PRESENT am Ende bleibt gültig. Clear,
+  zweites `DrawScene` und `renderUIPass12` des alten Swapchain-Blocks entfallen; für das
+  Overlay wird das Backbuffer-RTV ohne DSV gebunden.
+- Ein Editor-Request (`HE_CAPTURE_FRAME`) wird währenddessen ignoriert. Fällt der Schalter
+  weg, wird das Set nach einem `waitForAllFrames()` abgebaut, der Decal-Depth-SRV
+  (`k_decalViewportDepthSlot`) bekommt eine Null-View (wie in `RenderSceneImage`), und die
+  TAA-History wird ungültig.
+- Offen für Schritt 4 (§9), überholt für D3D12: der C6-Kommentar am SSR-Gate in `DrawScene`
+  (`D3D12Renderer.cpp:9696`), „the switch exists but does nothing“ in `GetCapabilities`
+  (`:10738f`) und „Editor-viewport only … C6 hole“ an `SetSSRSettings` (`D3D12Renderer.h:76f`).
+
+**Belege** (NN-WS03, RTX 4070, Release `C:/hw130`, Szene Depthy). Das Export-Paar liegt unter
+`C:/hw130/s3`: `export_d3d12` ist der Depthy-Export aus Schritt 2 mit allen Top-Level-Dateien
+aus dem frisch gebauten `deploy/Editor/Game` (also genau dem, was `project_package` kopiert;
+Hash von `HorizonRendering.dll` gegen den Build geprüft). `export_ctl12` ist dieselbe Mappe
+mit der Kontroll-`HorizonGame.exe` aus Schritt 2 (Opt-in `false`), läuft also mit **denselben
+neuen DLLs** über den alten Pfad. Der D3D12-Spieler legt das Fenster DPI-skaliert an:
+Config 1600×900 ergibt physisch 2000×1125, Config 1280×720 ergibt 1600×900. Skripte wie in §10, der
+Runner hat jetzt `S2_GPUDEBUG` (setzt `HE_GPU_DEBUG`), der Vergleich `-File`. Gemessen
+unterhalb des Himmelsstreifens (obere 25 %), 2000×1125, wo nicht anders angegeben:
+
+| Vergleich | Ergebnis |
+|---|---|
+| Neu gegen Neu (Wiederholung) | 0 px Abweichung |
+| Neu gegen Kontrolle (Opt-in `false`, alter Pfad) | alle Pixel anders, mittlere Luma **201,9 statt 133,9** (Tonemap/Gamma) |
+| SSAO an/aus, neu | 1 042 002 px anders |
+| SSAO an/aus, alter Pfad | 1 121 368 px anders: SSAO lief auf D3D12 schon im Spiel (§3.2), anders als auf D3D11 |
+| Bloom an/aus, Schwelle 0,3 | mittlere Diff 10,9, Luma 213,1 gegen 201,9 |
+| SSR an/aus (MaxRoughness 1,0), neu | 568 681 px anders, Log „screen-space reflection pipeline created“ |
+| SSR an/aus, alter Pfad | **0 px**: das C6-Gate hielt SSR im Spiel aus |
+| AA FXAA gegen Off | 10 131 px anders (Kanten) |
+| AA FXAA gegen TAA | 32 173 px anders, Log „TAA resolve active (2000x1125)“ |
+| Resize-Folge (Thema-112-Rezept, Start 1600×900 physisch) gegen Frischstart gleicher Größe | **0 px bei allen 8 Stufen** (1600×900, 1800×1000, 960×540, nach 30 schnellen Zufallsgrößen, langsam, minimiert/wiederhergestellt, 1280×720) |
+| `HE_CAPTURE_FRAME=120` gegen PrintWindow (1600×900) | PPM 1600×900 = Backbuffer, nicht der logische 1280×720-Request; 0 px unter dem Himmel (im Himmel nur die animierten Wolken zwischen Frame 120 und dem späteren PrintWindow) |
+| D3D12-Debug-Layer (`HE_GPU_DEBUG`, Log „GPU debug layer + DRED ENABLED“): neu FXAA / TAA+SSR / Resize-Folge mit TAA+SSR | 2 / 1 / 89 Meldungen, **alle** „ClearRenderTargetView: clear values do not match“ (Performance-Warnung), keine auf ERROR-Ebene |
+| Dasselbe, Kontrolle (alter Pfad) fresh / Resize-Folge | 2 / 90 Meldungen derselben Art. Die Kopie und ihre Barrieren erzeugen **keine neue** Meldung |
+
+Log: „swapchain post chain active (WxH)“ einmal beim Start und einmal pro Größenwechsel (Resize-Folge:
+87 Zeilen bei 86 Swapchain-Resizes), nicht pro Frame; in der Kontrolle nie. he_tests (enthält das
+D3D12-Backend nicht, Lauf nur als Stand): 4165 Fälle, 3 fehlgeschlagen, alle Gamepad-End-to-End
+(bekanntes Grundrauschen).
+
+Nicht gemessen: Parität Editor gegen Spiel als Bildbeleg (strukturell gegeben, beide fahren
+`DrawViewportFrame`; die Luma 201,9 auf D3D12 gegen 202,1 auf D3D11 stammt aus verschiedenen
+Fenstergrößen und ist kein Paritätsbeleg), Vollbild (nur Windowed), Frame-Zeit-Kosten (volle Kette,
+eine Kopie und ≥ 3 Flushes pro Größenwechsel, §3.3), ein App-Projekt, und der Abbau-Pfad
+`true` → `false` zur Laufzeit (kein realer Auslöser, im Code vorhanden, nie gelaufen).

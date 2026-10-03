@@ -18,6 +18,7 @@ param(
 # process it is killed at once and the run aborts.
 Get-ChildItem env: | Where-Object { $_.Name -like 'HE_*' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
 if ($env:S2_BGFPS) { $env:HE_BACKGROUND_FPS = $env:S2_BGFPS }
+if ($env:S2_GPUDEBUG) { $env:HE_GPU_DEBUG = "1" }   # D3D12 debug layer (Thema 130 step 3)
 $env:HE_COLLAB_OFFLINE = "1"
 if ($env:S2_CAPTURE) { $env:HE_CAPTURE_FRAME = $env:S2_CAPTURE; $env:HE_CAPTURE_PATH = Join-Path $Root "capture_$Name.ppm" }
 $env:HE_NET_LOOPBACK_ONLY = "1"

@@ -1,4 +1,4 @@
-param([string[]]$Pairs, [string]$Root = "C:\hw130\s2\shots")
+param([string[]]$Pairs, [string]$Root = "C:\hw130\s2\shots", [string]$File = "fresh_1600x900.png")
 # Thema 130 step 2: A/B of two captures. Below the top 25 % (the sky band
 # animates clouds): mean |diff| per channel, pixels that differ at all, and the
 # mean luma of each image there.
@@ -25,4 +25,4 @@ public static class ImgCmp130 {
     } } }
 "@
 }
-foreach ($p in $Pairs) { $x, $y = $p -split ':'; "{0,-22} {1}" -f $p, [ImgCmp130]::Cmp("$Root\$x\fresh_1600x900.png", "$Root\$y\fresh_1600x900.png") }
+foreach ($p in $Pairs) { $x, $y = $p -split ':'; "{0,-22} {1}" -f $p, [ImgCmp130]::Cmp("$Root\$x\$File", "$Root\$y\$File") }
