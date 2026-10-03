@@ -531,3 +531,79 @@ Nicht gemessen: Parität Editor gegen Spiel als Bildbeleg (strukturell gegeben, 
 Fenstergrößen und ist kein Paritätsbeleg), Vollbild (nur Windowed), Frame-Zeit-Kosten (volle Kette,
 eine Kopie und ≥ 3 Flushes pro Größenwechsel, §3.3), ein App-Projekt, und der Abbau-Pfad
 `true` → `false` zur Laufzeit (kein realer Auslöser, im Code vorhanden, nie gelaufen).
+
+## 12. Ergebnis Schritt 4: Vulkan (2026-10-03)
+
+Commits `8ab0bb76` und `7e23f3d4`. Umgesetzt nach §4.3, Weg a, mit dem Vollbild-Pass statt
+Kopie:
+
+- `VulkanRenderer::SetSwapchainPostProcessing` speichert nur das Flag. `Render()` baut das
+  Spiel-Set **vor dem Acquire** (nach `vkDeviceWaitIdle`) in `m_swapExtent`, also in
+  physischen Pixeln, nicht in Fenstergröße. Ein Recreate bei Acquire oder Present greift im
+  nächsten Frame. Ein Editor-Request (`HE_CAPTURE_FRAME`) wird währenddessen ignoriert.
+- Spielframe: `DrawViewportFrame(cmd)` (GI, SSAO, SSR, Szene HDR, Bloom, Tonemap, TAA, AA,
+  UI-Canvas). Dann eine explizite Barriere auf `m_viewportImage` (SHADER_READ→SHADER_READ,
+  COLOR_ATTACHMENT_WRITE→SHADER_READ), weil `m_postFxFinalRP` und `m_uiViewportRP` keine
+  Dependency nach EXTERNAL haben und `runPostFXBarrier` bei gleichem Layout nichts tut. In
+  `m_renderPass` zeichnet ein Vollbild-Dreieck das Bild ins Swapchain-Bild:
+  `postfx_aa_blit.frag` als neue Pipeline `m_presentPipe` gegen `m_renderPass` mit
+  ausgeschalteter Tiefe, Set `m_presentDS` (PostFX-Pool 5→6 Sets). Das Set wird in
+  `createPostFXResources` beschrieben und gilt damit auch nach dem Restore in
+  `RenderSceneImage`. Kein neuer Shader, keine neue `.spv`. Die Vertauschung RGBA→BGRA
+  erledigt der Schreibvorgang (`vkCmdCopyImage` würde Rot und Blau tauschen; ein Blit
+  bräuchte `TRANSFER_DST` und eine LOAD-Variante von `m_renderPass`).
+- Swapchain-Format: UNORM bevorzugt (`B8G8R8A8`, dann `R8G8B8A8`). Eine reine sRGB-Swapchain
+  bleibt mit einer Warnung auf dem alten Pfad, sonst würde Gamma doppelt kodiert.
+- Minimiertes Fenster (0×0-Surface): Das Set bleibt bestehen, und der Frame fällt wie vorher
+  auf den direkten Pfad (`7e23f3d4`). Abgebaut wird nur, wenn das Spiel den Schalter
+  zurücknimmt: nach einem `vkDeviceWaitIdle` `destroyViewportResources`, dann
+  `pointSceneAoAtWhite()` (aus `RenderSceneImage` herausgezogen, denn Binding 3 zeigte auf das
+  zerstörte SSAO-Ziel). TAA- und SSR-Historie werden ungültig.
+- Offen für die Bereinigung (§9 Punkt 4), für Vulkan jetzt überholt: der Kommentar zu SSR
+  „does not exist in the swapchain path at all“ in `DrawViewportFrame`, die Kommentare zu SSR
+  „only in the editor viewport“ und TAA „The swapchain path renders unjittered“ in
+  `GetCapabilities`, dort außerdem `supportsHDR = false`. `Application.cpp` (Capture-Hook)
+  bleibt, weil GL und Metal ihn brauchen.
+
+**Belege** (NN-WS03, RTX 4070, Release `C:/hw130`, Szene Depthy). Exportpaar unter
+`C:/hw130/s4`: `export_vk` ist der Depthy-Export aus Schritt 3 mit allen Top-Level-Dateien
+aus `deploy/Editor/Game`. **`Shaders/` ist von Hand kopiert** (42 `.spv`), weil `04de39bd`
+nicht auf diesem Zweig ist (§4.4). `HorizonRendering.dll` wurde direkt aus
+`src/HE_Rendering/` kopiert, weil die Kopie in `deploy/Editor/Game` nach dem DLL-only-Rebuild
+veraltet war; der Hash ist gegen den Build geprüft. `export_ctlvk` ist dieselbe Mappe mit der
+Kontroll-`HorizonGame.exe` aus Schritt 2 (Opt-in `false`) und **denselben neuen DLLs**.
+`GameBackend=Vulkan`. Das Fenster ist DPI-skaliert wie auf D3D12: Config 1600×900 ergibt
+2000×1125 physisch. Gemessen unterhalb des Himmelsstreifens, 2000×1125, wo nicht anders
+angegeben:
+
+| Vergleich | Ergebnis |
+|---|---|
+| Neu gegen Neu (Wiederholung) | 0 px Abweichung |
+| Neu gegen Kontrolle (Opt-in `false`, alter Pfad) | alle Pixel anders, mittlere Luma **202,1 statt 135,8**, dieselben Werte wie auf D3D11 (§10) |
+| SSAO an/aus, neu | 966 334 px anders |
+| SSAO an/aus, alter Pfad | **0 px**: SSAO war im Vulkan-Spiel tot (§4.2) |
+| GI an/aus, neu | alle Pixel anders, Luma 215,4 gegen 202,1, Log „GI pipelines built“ |
+| GI an/aus, alter Pfad | **0 px**: GI war im Vulkan-Spiel tot (§4.2), obwohl `GetCapabilities` es meldet |
+| SSR an/aus (MaxRoughness 1,0), neu | 568 683 px anders, Log „SSR pipelines created (forward, half-res trace)“ |
+| SSR an/aus, alter Pfad | **0 px** |
+| Bloom an/aus, Schwelle 0,3 | mittlere Diff 11,0, Luma 213,4 gegen 202,1 |
+| AA FXAA gegen Off | 10 169 px anders (Kanten) |
+| AA FXAA gegen TAA | 32 882 px anders, Log „TAA resolve active (2000x1125)“ |
+| Resize-Folge (Thema-112-Rezept, Start 1600×900 physisch) gegen Frischstart gleicher Größe | **0 px bei allen 8 Stufen** (1600×900, 1800×1000, 960×540, nach 30 schnellen Zufallsgrößen, langsam, minimiert/wiederhergestellt, 1280×720) |
+| `HE_CAPTURE_FRAME=120` gegen PrintWindow desselben Laufs (1600×900) | PPM 1600×900 (Swapchain, nicht der logische 1280×720-Request), **0 px** unter dem Himmel |
+| Validierung (der Layer ist auf Vulkan immer an): neu gegen Kontrolle, frisch | in beiden nur `vkCmdUpdateBuffer` und `vkCmdPipelineBarrier` „inside an active VkRenderPass“, je bis zur Duplikatgrenze. **Keine neue VUID** |
+| Validierung, Resize-Folge neu gegen Kontrolle | in beiden dieselben 0×0-Meldungen beim Minimieren (`vkCreateSwapchainKHR`, `vkCreateImage`, `vkCreateFramebuffer`, `vkCmdBeginRenderPass`): `recreateSwapchain` bei 0×0-Surface, älter als dieser Umbau |
+| Validierung, SSR an | zusätzlich eine WARN „Vertex attribute at location 2 not consumed“ beim ersten Bau der SSR-Pipelines. Die Kontrolle baut sie nie; nicht aus dem neuen Code |
+
+Log: „swapchain post chain active (WxH)“ einmal beim Start und einmal pro Größenwechsel
+(Resize-Folge: 87 Zeilen; vor `7e23f3d4` waren es 88, weil Minimieren das Set ab- und wieder
+aufbaute), in der Kontrolle nie. he_tests (enthält das Vulkan-Backend nicht, Lauf nur als
+Stand, eigenes APPDATA): 4165 Fälle, 3 fehlgeschlagen, alle Gamepad-End-to-End (bekanntes
+Grundrauschen).
+
+Nicht gemessen: eine reine sRGB-Swapchain (auf der RTX 4070 wird `B8G8R8A8_UNORM` angeboten;
+der Zweig mit Warnung ist nie gelaufen), Parität Editor gegen Spiel als Bildbeleg (strukturell
+gegeben, beide fahren `DrawViewportFrame`), Vollbild (nur Windowed), Frame-Zeit-Kosten (volle
+Kette, ein Present-Pass, `vkDeviceWaitIdle` pro Größenwechsel), ein App-Projekt und der
+Abbau-Pfad `true` → `false` zur Laufzeit (kein realer Auslöser, im Code vorhanden, nie
+gelaufen).
