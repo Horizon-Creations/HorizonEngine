@@ -105,7 +105,7 @@ und Depth, dann `createHDRTargets` (`:2043ff`) für HDR, Bloom und LDR, darin
 - **SSAO (neu, in Doku 116 nicht genannt):** `runSSAO` gibt sofort `whiteSRV` zurück, wenn
   `ssaoPosRTV` fehlt (`:2333`). `ssaoPosRTV` entsteht nur über `createHDRTargets →
   createSSAOTargets`. Das Spiel gibt `SSAOEnabled` also weiter, sieht aber nie AO.
-- **GI** läuft dagegen auch im Spielpfad. Es hängt nicht am Viewport-Ziel, sondern an eigenen
+- **GI** läuft dagegen auch im Spielpfad (`runGiShadow` legt seine Ziele lazy an, `ensureGiShadowTargets` `:3358`). Es hängt nicht am Viewport-Ziel, sondern an eigenen
   Half-Res-Zielen.
 - `GetCapabilities()` (`:6945–6965`) meldet `supportsScreenSpaceReflections` und
   `supportsTemporalAA` über `postFxReady`, also **true**, auch im Spielpfad. Der Kommentar
@@ -183,7 +183,7 @@ Analyse durch einen Agenten. Die tragenden Stellen sind von Hand nachgeprüft (m
 - **Backbuffer:** ✔ `R8G8B8A8_UNORM`, `FLIP_DISCARD`, `BufferCount = k_frameCount` (3),
   Usage `RENDER_TARGET_OUTPUT` (`:8893–8901`).
 - **`viewportRT`:** ✔ `R8G8B8A8_UNORM` (`:1595`). Tonemap-, AA- und UI-PSOs sind alle
-  RGBA8_UNORM. Nirgends wird `_SRGB` verwendet, Gamma kodiert der Tonemap-Shader selbst.
+  RGBA8_UNORM. Das Backbuffer-RTV entsteht mit `nullptr`-Desc (✔ `:4084`, `:8922`), ist also UNORM; `_SRGB` gibt es nur bei Material-Texturen. Gamma kodiert der Tonemap-Shader selbst.
   → `CopyResource` kopiert byte-genau, eine sRGB-Frage stellt sich nicht.
 - **Barrieren für die Kopie:**
   - `viewportRT`: PSR→COPY_SOURCE→PSR. Dabei `viewportState` mitführen.
