@@ -64,6 +64,10 @@ VAR[blh95at2l]="HE_GI_PROTO_BILERP=1 HE_GI_PROTO_HIST=0.95 HE_GI_PROTO_ATROUS=2 
 VAR[A]=""      # Baustein A: motion-vector bilinear history
 VAR[AB]=""     # + B: 2 rays per pixel (default)
 VAR[ABC]=""    # + C: edge-aware a-trous (the shipped chain)
+VAR[gtR]="HE_GI_REFERENCE=1"           # the engine's own reference switch (256 rays, 0.98, no filter)
+VAR[ABCr1]="HE_DUMP_GISHADOWRAYS=1"    # shipped chain at GI Shadow Quality Low
+VAR[ABCr4]="HE_DUMP_GISHADOWRAYS=4"    # ... and High
+VAR[ABnof]="HE_DUMP_GISHADOWFILTER=0"  # A+B, filter off (unfiltered mask)
 C=$1; shift
 spec=${CASE[$C]}; [ -z "$spec" ] && { echo "unknown case $C"; exit 1; }
 cfg=$HERE/${spec%%|*}; envs=${spec#*|}

@@ -1179,13 +1179,13 @@ private:
 	// sample per pixel (jittered within a cone around the sun for a soft
 	// penumbra), temporally accumulated against a ping-pong history (reprojected
 	// via the true previous frame's view-proj — NOT the same-frame m_prepassViewProj
-	// pattern), then a small spatial blur. Result sampled by fragmentMain exactly
+	// pattern), then an edge-aware a-trous filter. Result sampled by fragmentMain exactly
 	// like aoTex (screen-space UV, free bilinear upsample from half-res).
 	void* m_giGBufPipeline        = nullptr; // id<MTLRenderPipelineState> (MRT: world pos + normal)
 	void* m_giGBufInstancedPipeline = nullptr; // instanced twin (giGBufVertexInstanced); optional
 	void* m_giShadowRayPipeline   = nullptr; // id<MTLComputePipelineState>
 	void* m_giShadowTemporalPipeline = nullptr; // id<MTLRenderPipelineState>
-	void* m_giShadowBlurPipeline  = nullptr; // id<MTLRenderPipelineState>
+	void* m_giShadowAtrousPipeline = nullptr; // id<MTLRenderPipelineState> edge-aware a-trous (Thema 134)
 	void* m_giGBufPosTex  = nullptr; // id<MTLTexture> RGBA16F world pos, a=1 valid geometry
 	void* m_giGBufNormTex = nullptr; // id<MTLTexture> RGBA16F world normal
 	void* m_giGBufDepth   = nullptr; // id<MTLTexture> depth for the prepass only
@@ -1199,6 +1199,7 @@ private:
 	int   m_giShadowHistoryIdx   = 0;
 	bool  m_giShadowHistoryValid = false; // false right after (re)alloc — first frame skips history blend
 	void* m_giShadowResult = nullptr; // id<MTLTexture> R16F final blurred result, sampled by fragmentMain
+	void* m_giShadowFilterTmp = nullptr; // id<MTLTexture> R16F between the two a-trous iterations
 	int   m_giShadowW = 0, m_giShadowH = 0;
 	// TRUE previous-frame view-proj (unlike m_prepassViewProj, which is written and
 	// read within the SAME frame for the low-res cloud pre-pass) — written at the
