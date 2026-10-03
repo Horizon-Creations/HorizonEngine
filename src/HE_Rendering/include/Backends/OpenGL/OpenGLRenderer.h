@@ -1186,7 +1186,7 @@ private:
 	int          m_uGiGBufInstViewProj    = -1;
 	unsigned int m_giShadowCSProgram  = 0;
 	unsigned int m_giTemporalProgram  = 0;
-	unsigned int m_giBlurProgram      = 0;
+	unsigned int m_giAtrousProgram    = 0; // edge-aware a-trous on the shadow mask (Thema 134)
 	unsigned int m_giProbeCSProgram   = 0;
 	unsigned int m_giReflCSProgram       = 0; // specular trace (GLSL 430 compute)
 	unsigned int m_giReflTemporalProgram = 0; // MRT: radiance+confidence / receiver pos
@@ -1198,6 +1198,7 @@ private:
 	unsigned int m_giLocalMaskTex = 0;                    // rgba16f, per-pixel local-light visibility (1 channel per light, first 4)
 	unsigned int m_giHistFBO[2] = { 0, 0 }, m_giHistTex[2] = { 0, 0 }; // RGBA16F ping-pong
 	unsigned int m_giResultFBO = 0, m_giResultTex = 0;    // r16f, sampled by the scene
+	unsigned int m_giFilterTmpFBO = 0, m_giFilterTmpTex = 0; // r16f, between the two a-trous iterations
 	// Reflection chain: raw compute output → optional temporal ping-pong →
 	// optional separable blur ending in m_giReflTex. All rgba16f half-res
 	// (rgb = radiance arriving along the mirror ray, a = confidence).
@@ -1251,6 +1252,9 @@ private:
 	float        m_giLightRadius       = 0.5f;        // degrees, shadow-ray cone
 	int          m_giRaysPerProbe        = 128;
 	int          m_giProbeBudgetPerFrame = 256;
+	int          m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
+	float        m_giShadowHistoryWeight       = 0.9f;  // shadow-mask temporal history weight
+	bool         m_giShadowFilter        = true;  // edge-aware a-trous on the mask
 	// ── Ray-traced GI reflections (docs/gi-reflections-plan.md §10) ──────────
 	// Independent of m_giEnabled: the pass needs the acceleration structures and
 	// the half-res pre-pass, not the diffuse probe field (which it uses when it

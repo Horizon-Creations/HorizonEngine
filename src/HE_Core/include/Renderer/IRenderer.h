@@ -464,7 +464,7 @@ public:
     // Only the Metal backend implements this (Capabilities::supportsGlobalIllumination
     // gates it); other backends silently ignore it and keep CSM shadows + AO. When
     // enabled on a supported device, GI COMPLETELY REPLACES both CSM shadows and
-    // AO/ambient with one ray-traced pipeline: 1 shadow ray/pixel toward the
+    // AO/ambient with one ray-traced pipeline: shadowRays rays/pixel toward the
     // dominant directional light (soft, temporally accumulated) plus DDGI probes
     // sampled for indirect diffuse. Disabled = zero cost and the image is
     // byte-identical to GI never having existed.
@@ -475,6 +475,15 @@ public:
         float lightRadius        = 0.5f;   // degrees — sun angular radius, drives shadow penumbra softness
         int   raysPerProbe       = 128;    // rays traced per probe on the frame it's updated
         int   probeBudgetPerFrame = 256;   // probes relit per frame (round-robin over the grid)
+        // Shadow mask (docs/gi-shadow-restflackern-1spp-2026-10-03.md): sun rays
+        // per pixel, the temporal history weight and the edge-aware a-trous
+        // filter. Defaults are the shipped chain; HE_GI_REFERENCE renders 256 /
+        // 0.98 / no filter as the converged reference the others are measured by.
+        int   shadowRays         = 2;      // 1-256; every extra ray costs a full trace on the SW path
+        float shadowHistory      = 0.9f;   // 0-0.98
+        bool  shadowFilter       = true;   // false = the accumulated mask unfiltered (reference captures)
+        // Preferences tier (0 Low / 1 Medium / 2 High) → rays: 1 / 2 / 4.
+        static int shadowRaysForQuality(int tier) { return 1 << (tier < 0 ? 0 : tier > 2 ? 2 : tier); }
     };
     virtual void SetGISettings(const GISettings& /*settings*/) {}
 

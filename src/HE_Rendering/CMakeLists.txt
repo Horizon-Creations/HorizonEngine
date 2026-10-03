@@ -139,7 +139,7 @@ if(HE_VULKAN_ENABLED)
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag
                       ssao_pos.vert ssao_pos_instanced.vert ssao_pos.frag ssao.frag ssao_blur.frag
-                      gi_gbuf.vert gi_gbuf_instanced.vert gi_gbuf.frag gi_temporal.frag gi_blur.frag
+                      gi_gbuf.vert gi_gbuf_instanced.vert gi_gbuf.frag gi_temporal.frag gi_atrous.frag
                       gi_shadow.comp gi_probe.comp
                       gi_shadow_hw.comp gi_probe_hw.comp
                       skinned.vert
