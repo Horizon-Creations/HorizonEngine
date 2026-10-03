@@ -9877,6 +9877,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // ── 4. Edge-aware a-trous (fullscreen: hist[cur] → scratch → result) ────
     // The render pass's external dependencies order the scratch write before
     // the second iteration's read (COLOR_ATTACHMENT_OUTPUT → FRAGMENT_SHADER).
+    static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
     for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
     {
         VkRenderPassBeginInfo bRPBI{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };

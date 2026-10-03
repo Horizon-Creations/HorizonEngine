@@ -372,6 +372,10 @@ Dateien: `shaders/gi_blur.frag` → neuer `gi_atrous.frag` (Vulkan, neue Pipelin
 
 ## 7. Nachmessen
 
+Der Prototyp-Patch gilt für den Stand von Schritt 1 (`f62742aa`), nicht für den Zweigkopf:
+dort gibt es `giShadowBlur` nicht mehr. Die `HE_GI_PROTO_*`-Varianten in `run134.sh` laufen
+also nur auf einem Checkout von `f62742aa`; für die Umsetzung siehe §8 (ohne Patch).
+
 ```zsh
 git apply scripts/gi-shadow-repro/proto134-metal.patch    # Prototypen, nur lokal
 cmake --build out/build/macos-release -j8 --target HorizonEditor
