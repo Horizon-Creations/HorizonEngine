@@ -136,7 +136,7 @@ std::string pullMember;   // optional: field of pullVar when that is a Struct
 
 `pullSource` ist absichtlich ein String und kein Bool: Weitere Quellen kommen ohne Formatwechsel dazu, ältere Engines verwerfen sie laut (§2.2).
 
-**Die Game Instance kann selbst kein Ziel sein.** Sie wäre ihre eigene Quelle, und `fireInit` setzt ihre Variablen ohnehin per `reseedVariables` zurück. Der Editor zeigt die Option im GI-Graph nicht an, die Runtime überspringt Pull für `m_gameInstance`.
+**Die Game Instance kann selbst kein Ziel sein.** Sie wäre ihre eigene Quelle, und `fireInit` setzt ihre Variablen ohnehin per `reseedVariables` zurück. Der Editor zeigt die Option im GI-Graph nicht an. Die Runtime registriert die GI **ohne Pull**: `setGameInstance`/`setGameInstanceCompiled` (RT:225-240) geben `addLevels`/`addCompiled` einen Schalter „kein Pull“ mit. Eine Prüfung `id == m_gameInstance` in `pullOnConstruct` griffe nicht. `m_gameInstance` wird erst nach der Rückkehr von `add` gesetzt, und die alte GI ist vorher schon entfernt. Während ihrer eigenen Registrierung gäbe es also „keine Game Instance“, und jede Pull-Angabe in einem handbearbeiteten GI-Graph würde warnen.
 
 ### 2.4 Einhakpunkt und Reihenfolge
 
@@ -163,8 +163,7 @@ Defaults (addLevels-Seeding bzw. Member-Initialisierer)
 ### 2.5 Ablauf von `pullOnConstruct`
 
 ```
-pullOnConstruct(id):
-  if id == m_gameInstance: return
+pullOnConstruct(id):                            // nie für die GI selbst (§2.3)
   for each Variable-Deklaration v der Instanz mit v.pullSource != ""
       (Interpreter: flache Ebenen, die abgeleitetste Deklaration gewinnt,
        wie replicatedVariablesOf; kompiliert: varInfos())
@@ -203,7 +202,7 @@ pullOnConstruct(id):
 | Widget-Thumbnails, Designer, App-Vorschau | Erzeugen über `createWidget`. Im Editor existiert die GI-Instanz mit ihren Defaults (§1.1), gezogen wird also deren Default. Das ist harmlos und sogar anschaulich |
 | Embeds | werden vor dem Host registriert (§1.1). Sie ziehen ebenfalls aus der Game Instance und brauchen dafür keinen Host |
 | `reseedVariables` der Game Instance (Play-Start) | betrifft nur die GI selbst, nicht schon gezogene Werte anderer. Alles, was nach dem Play-Start entsteht, zieht aus den frisch geseedeten Werten |
-| Hot Reload | Läuft er als `remove` + `add`, wird neu gezogen. Einen Pfad, der Instanzen an Ort und Stelle ersetzt, prüft Schritt 3. Dort wird **nicht** neu gezogen, der laufende Wert bleibt |
+| Hot Reload | Widgets: `captureState` → neu erzeugen (dabei Pull) → `restoreState` (`WidgetManager.cpp:4998/5040`) setzt die alten Werte darüber. **Der wiederhergestellte laufende Wert gewinnt**, gezogen wird nur, was es vorher nicht gab oder was den Typ gewechselt hat. Andere Reload-Pfade prüft Schritt 3 nach derselben Regel |
 | Save Game an derselben Variable | erlaubt. `applySavedState` läuft nur auf ausdrücklichen Aufruf und damit nach Construct, der gespeicherte Wert gewinnt |
 | Ref-Variablen als Ziel | erlaubt (lokal ist eine Instanz-Id ein gültiger Wert) |
 | Vererbung | die abgeleitetste Deklaration gewinnt, wie bei Replicated |
@@ -287,6 +286,7 @@ JSON: `"extract": {"struct": "Types/EnemyReport.hasset", "map": [{"member": "Kil
   * ohne Argument → feuern, Nutzlast fällt weg,
   * Struct mit gleichem `typeName` → feuern,
   * anderer Typ → **nicht** feuern, einmal warnen pro (Listener-Klasse, Struct). Ein stilles `coerce` einer fremden Struct ergäbe Unsinnswerte.
+  * Interpretierte Listener liefern die Signatur über `graph.events`. **Kompilierte nicht:** `CompiledEventInfo` (CC:44-48) hat heute nur `{name, elem}`. Es bekommt `int argType = -1; const char* typeName = nullptr;` (hinten angehängt und vorbelegt, damit alte Tabellen weiter kompilieren), und die Codegen füllt beide aus dem `EventDecl`.
 * Tiefe und Budget wie beim Dispatcher (32 / 256). Ein Listener darf in `OnDestroyed` erzeugen, zerstören und binden. Die Listener-Liste wird vorher kopiert, wie heute (RT:1197).
 
 **Bestehende Nutzerprojekte** mit einem eigenen Custom Event `OnDestroyed`, das sie selbst per Emit Event schicken, bekommen ab dann zusätzlich das Engine-Event. Wie bei PreConstruct (`widget-pre-construct-design.md` §2.5): eine Warnung beim Laden, wenn ein Graph `OnDestroyed` per `EmitEvent` aussendet, kein automatisches Umbenennen.
@@ -418,7 +418,7 @@ Datenmodell und Persistenz:
 2. JSON speichern/laden (HC:1857 ff. / HC:1991 ff.): Schlüssel `pull`, Verwerfen nach §2.2.
 
 Runtime (HE_Core):
-3. `Runtime::pullOnConstruct(id)` nach §2.5, aufgerufen als letzte Zeile von `addLevels` (RT:65 ff.) und `addCompiled` (RT:108 ff.). Überspringt `m_gameInstance`.
+3. `Runtime::pullOnConstruct(id)` nach §2.5, aufgerufen als letzte Zeile von `addLevels` (RT:65 ff.) und `addCompiled` (RT:108 ff.). Beide bekommen einen Schalter „kein Pull“, den nur `setGameInstance`/`setGameInstanceCompiled` setzen (§2.3).
 4. Warnung einmal pro (Klasse, Variable, Grund), Helfer für den Grundtext, den auch der Editor benutzt.
 5. `shapeMatches` (ggf. mit dem Replikator teilen), `Runtime::pulledVariablesOf(id)`.
 
@@ -439,7 +439,7 @@ Datenmodell und Persistenz:
 
 Runtime:
 3. `Runtime::destroy` nach §3.4: `buildExtract`, `dispatchDestroyed` mit Typprüfung nach §3.3.
-4. `CompiledInstance::extractOnDestruct(Value&)` (CC:137-149), Standard `false`.
+4. `CompiledInstance::extractOnDestruct(Value&)` (CC:137-149), Standard `false`. `CompiledEventInfo` (CC:44-48) um `argType`/`typeName` erweitern (vorbelegt), Emission in der Codegen, damit `dispatchDestroyed` auch kompilierte Listener prüfen kann (§3.3).
 5. Flache Auflösung der `extract`-Angabe über die Ebenen (die abgeleitetste gewinnt ganz).
 
 Codegen:
@@ -463,7 +463,9 @@ Pull on Construct:
 * Int ↔ Float wird umgewandelt, Array gegen Skalar fällt zurück.
 * Kopie: Array ziehen, danach GI-Array ändern → gezogene Kopie unverändert.
 * Level-Script und Entity, Player, Create Object ziehen alle (jede Host-Art einmal, weil der Einhakpunkt in der Runtime sitzt, reicht je ein kurzer Fall).
-* GI-Graph mit Pull-Angabe → wird ignoriert, kein Absturz.
+* GI-Graph mit Pull-Angabe → wird ignoriert, keine Warnung, kein Absturz (auch beim Ersetzen einer schon laufenden GI).
+* Widget-Hot-Reload: der wiederhergestellte Wert schlägt den gezogenen.
+* Kompilierter Listener mit falschem Struct-Typ an `OnDestroyed` wird übersprungen wie ein interpretierter (prüft die neuen `CompiledEventInfo`-Felder).
 * JSON-Rundreise, Loader verwirft bei Funktions-locals und unbekannter Quelle.
 * Codegen: alte `CompiledVarInfo`-Aggregate kompilieren weiter. Kompilierte Klasse zieht genauso wie interpretierte.
 * Falls Thema 119 Schritt 5 schon gemergt ist: Spawn-Pin schlägt Pull.
