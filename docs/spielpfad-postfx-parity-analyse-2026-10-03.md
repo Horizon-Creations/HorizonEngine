@@ -9,21 +9,43 @@
 
 ## 0. Kurzfassung
 
-- Die Diagnose von Doku 116 §2.1 stimmt, und das Loch ist **größer** als dort genannt: Im
-  Spielpfad fehlen auf allen drei Backends nicht nur HDR, Tonemap, Bloom, AA, TAA und SSR,
-  sondern auch **SSAO** (D3D11 belegt, D3D12/Vulkan siehe §3/§4). Die SSAO-Ziele entstehen nur
-  zusammen mit dem Viewport-Ziel.
+- Die Diagnose von Doku 116 §2.1 stimmt, und das Loch ist **größer** als dort genannt. Im
+  Spielpfad fehlen auf allen drei Backends HDR, Tonemap (ACES und Gamma), Bloom, AA (FXAA,
+  SMAA), TAA und SSR. Zusätzlich gilt:
+
+  | Backend | SSAO im Spielpfad | GI im Spielpfad |
+  |---|---|---|
+  | D3D11 | **tot** | läuft |
+  | D3D12 | läuft | läuft |
+  | Vulkan | **tot** | **tot** |
+
+  Details in §2.3, §3.2 und §4.2.
+- **Das ausgelieferte Bild ist heute falsch kodiert, nicht nur „ohne Effekte“.** Gamma und
+  Tonemap sitzen ausschließlich im Post-Pass (`D3D_Shared/HlslSources.h:415`,
+  `shaders/postfx_tonemap.frag:11`). Der Szenen-Shader schreibt lineares, ungetonemapptes
+  Licht direkt in ein UNORM-Backbuffer. D3D- und Vulkan-Spiele sind darum dunkler als im
+  Editor, und Glanzlichter und Himmel clippen hart. Nach der Umstellung **ändert sich das
+  Bild jedes ausgelieferten D3D- und Vulkan-Spiels sichtbar**, und zwar hin zum Editor-Bild.
+  Das ist der Zweck der Änderung, gehört aber in die Release-Notes (siehe C6 im SSR-Plan:
+  „vorlagepflichtig, weil es den Frame-Aufbau des gepackten Spiels ändert“; die Vorlage ist
+  mit Frage #13 erledigt).
 - Die Post-Kette muss **nicht portiert** werden. Sie existiert auf jedem der drei Backends
   vollständig als „Viewport-Frame“, und der Spielzweig ruft sie nur nicht auf. Empfohlen wird
-  deshalb: **Der Swapchain-Zweig fährt den Viewport-Frame in Fenstergröße und bringt das
-  fertige LDR-Bild per Copy oder Blit in den Backbuffer** (Weg a, §5). Ein zweiter Nachbau der
-  Kette im Swapchain-Zweig (Weg b, die Annahme hinter den „200–400 Z./Backend“) wäre
-  Code-Duplikat mit eigenem Drift-Risiko.
-- Auf der Spielseite ist **nichts** zu tun: `GameApplication` gibt Bloom, SSAO, AA-Methode,
-  SSR, GI, DoF und RenderPath schon heute aus `config.json` an den Renderer weiter
-  (`src/HE_Game/src/GameApplication.cpp:3160–3258`). Die Werte verpuffen nur im Backend.
-- Aufwand nach Weg a: siehe Tabelle §6. Die 200–400 Zeilen aus Doku 116 gelten nur für Weg b.
-- Reihenfolge: **D3D11 → D3D12 → Vulkan**, Begründung in §7.
+  deshalb **Weg a**: Der Swapchain-Zweig fährt den Viewport-Frame in Swapchain-Größe und bringt
+  das fertige LDR-Bild in den Backbuffer, auf D3D per `CopyResource`, auf Vulkan per
+  Fullscreen-Pass (Details in §5). Weg b, ein zweiter Nachbau der Kette im Swapchain-Zweig, ist
+  die Annahme hinter den „200–400 Z./Backend“. Er wäre Code-Duplikat mit eigenem Drift-Risiko.
+- Die Spielseite braucht **nur einen Opt-in-Aufruf**. `GameApplication` gibt Bloom, SSAO,
+  AA-Methode und -Schärfe, SSR, GI, DoF und RenderPath schon heute aus `config.json` an den
+  Renderer weiter (`src/HE_Game/src/GameApplication.cpp:3160–3258`), die Werte verpuffen nur
+  im Backend. `exposure` setzt auf D3D11 niemand, weder Editor noch Spiel; der Wert ist fest
+  1.0, also gleich. Neu wäre ein Schalter, der dem Renderer sagt, dass der Swapchain-Zweig die
+  Post-Kette fahren soll (§5.1). Ohne ihn kann das Backend „Spiel“ nicht von „Editor vor dem
+  ersten `SetViewportSize`“ unterscheiden.
+- Aufwand nach Weg a: **D3D11 ≈ 40–70, D3D12 ≈ 60–100, Vulkan ≈ 90–130 Zeilen**, dazu
+  ≈ 15 Zeilen gemeinsam (Interface und Spiel). Die 200–400 Zeilen aus Doku 116 treffen nur Weg b
+  und sind für Vulkan zu niedrig (Weg b ≈ 400–600). Herleitung in §6.
+- Reihenfolge: **D3D11 → D3D12 → Vulkan**, nach steigender Komplexität (§7).
 
 ## 1. Die Verzweigung, die das Spiel aussperrt
 
@@ -120,42 +142,286 @@ Schätzung D3D11: **≈ 40–70 Zeilen** im Renderer. Dazu kommen Test und Zeuge
 
 ## 3. D3D12
 
-_(wird nach Analyse ergänzt)_
+Analyse durch einen Agenten. Die tragenden Stellen sind von Hand nachgeprüft (mit ✔ markiert).
+
+### 3.1 Ist-Zustand
+
+- `Render()` steht in `D3D12Renderer.cpp:10451–10638`. Ablauf:
+  1. `resizeSwapchainIfNeeded()` (`:10489`).
+  2. Viewport neu anlegen, wenn sich der Request geändert hat (`:10492–10494`).
+  3. `useViewport` (`:10499`).
+  4. Viewport-Zweig: `DrawViewportFrame()` (`:10525f`).
+- Gemeinsamer Teil: Backbuffer PRESENT→RT, Backbuffer-RTV und Swapchain-DSV binden, beide
+  clearen (`:10529–10542`).
+- Swapchain-Block (`:10544–10563`): `usingHDR = false`, `taaFrame = false` (✔ `:10550f`),
+  `DrawScene` direkt ins Backbuffer, `renderUIPass12` auf das Backbuffer.
+- `DrawViewportFrame()` steht in `:10346–10449`:
+  - HDR-Zweig (`:10353–10411`): TAA-Entscheidung und Velocity-Clear, `hdrRT` mit Viewport-DSV,
+    `DrawScene`, `runPostFX`, UI-Canvas auf `viewportRT`. `viewportRT` bleibt danach in
+    PIXEL_SHADER_RESOURCE.
+  - LDR-Fallback (`:10412–10448`).
+- `runPostFX` (`:2191–2337`) in dieser Reihenfolge: Bloom-Bright, 10 Blur-Passes, Tonemap →
+  `ldrRT`, TAA-Resolve, AA (FXAA/SMAA/Blit/TAA-Sharpen). Das Ziel des AA-Passes ist
+  **fest `viewportRT`**.
+- Ressourcen aus `createPostFXResources` (`:1852–1951`), nur von `createViewportRT` aufgerufen
+  (`:1664`): `hdrRT` RGBA16F, `bloomRT[2]` RGBA16F in halber Auflösung, `ldrRT` RGBA8,
+  `postFxSrvHeap` mit 13 Slots, TAA-Ziele (RG16F Velocity, 2× RGBA8 History) und die
+  SSR-Vorframe-Kopie `ssrColorHist` RGBA16F.
+
+### 3.2 Was im Spielpfad stirbt
+
+- **HDR, Bloom, Tonemap, AA, TAA:** Die Passes werden nicht aufgerufen.
+- **SSR:** gesperrt über `usingHDR && hdrRT` (`:9696–9699`, Kommentar `:9688–9695`).
+- **SSAO läuft** (anders als auf D3D11). Die Ziele entstehen lazy in `DrawScene`
+  (✔ `:9710f`, `createSSAOTargets(width, height)`).
+- **GI läuft** (`:9674–9686`), es hängt nicht am Viewport.
+- `GetCapabilities()` (`:10640–10659`) meldet SSR und TAA mit dem Kommentar „the switch exists
+  but does nothing“, wie D3D11.
+
+### 3.3 Formate, Zustände, Lebensdauer
+
+- **Backbuffer:** ✔ `R8G8B8A8_UNORM`, `FLIP_DISCARD`, `BufferCount = k_frameCount` (3),
+  Usage `RENDER_TARGET_OUTPUT` (`:8893–8901`).
+- **`viewportRT`:** ✔ `R8G8B8A8_UNORM` (`:1595`). Tonemap-, AA- und UI-PSOs sind alle
+  RGBA8_UNORM. Nirgends wird `_SRGB` verwendet, Gamma kodiert der Tonemap-Shader selbst.
+  → `CopyResource` kopiert byte-genau, eine sRGB-Frage stellt sich nicht.
+- **Barrieren für die Kopie:**
+  - `viewportRT`: PSR→COPY_SOURCE→PSR. Dabei `viewportState` mitführen.
+  - Backbuffer: PRESENT→COPY_DEST→RENDER_TARGET (für eventuelle Overlays), danach wie bisher
+    →PRESENT.
+  - Das Clear des Backbuffers (`:10540`) und der Swapchain-Depth entfällt auf diesem Weg.
+  - Kopieren in einen FLIP_DISCARD-Puffer ist zulässig. Es braucht trotzdem einmal einen Lauf
+    mit Debug-Layer.
+- **Lebensdauer:** `createViewportRT` (`:1570–1665`) flusht und gibt das alte Farbziel erst nach
+  `k_frameCount + 2` Frames frei. `createPostFXResources` flusht erneut. SSAO, SSR und GI
+  passen ihre Größe lazy an, jeweils mit eigenem Flush. Ein Fenster-Resize kostet im
+  Spielpfad damit ≥ 3 Flushes. Das ist korrekt, aber ruckelig beim Ziehen; der Editor zahlt
+  das heute schon.
+
+### 3.4 Umbau nach Weg a
+
+1. Nach `resizeSwapchainIfNeeded()` den Viewport an `p.width/p.height` binden. Das ist die
+   physische Client-Größe und **nicht** `m_window->GetWidth()`: Bei 125 % DPI wären die Größen
+   verschieden, und `CopyResource` braucht exakt gleiche Maße.
+2. `DrawViewportFrame()` aufrufen, dann die Kopie mit den Barrieren aus §3.3.
+3. Clear und `DrawScene` des Swapchain-Blocks überspringen.
+
+Schätzung D3D12: **≈ 60–100 Zeilen**. Weg b wäre ≈ 250–400 Zeilen, weil `viewportDsvHeap`
+und `viewportDepth` an vielen Stellen angenommen werden: `rebindSceneTarget` `:9494–9518`,
+Decals `:8693–8711`, Debug-Linien `:10313`, TAA-Velocity-DSV `:10226`, SSR-Rebind `:10336`.
 
 ## 4. Vulkan
 
-_(wird nach Analyse ergänzt)_
+Analyse durch einen Agenten. Die tragenden Stellen sind von Hand nachgeprüft (mit ✔ markiert).
+
+### 4.1 Ist-Zustand
+
+- `Render()` steht in `VulkanRenderer.cpp:381–552`. Verzweigung über `useViewport`
+  (✔ `:434f`). Ein Viewport-Resize wartet auf den Device-Idle und läuft vor dem Acquire
+  (`:409–414`).
+- Swapchain-Zweig (✔ `:481–493`): `m_taaFrame = false`, Shadow-Encode mit dem Aspect der
+  Swapchain, Decal-Depth-Prepass. Danach öffnen beide Zweige `m_renderPass` (CLEAR, UNDEFINED →
+  PRESENT_SRC). Nur im Spiel folgen darin `DrawScene(…)` mit LDR-Pipelines und der UI-Canvas
+  (✔ `:504–516`). Dann Overlay, Submit, Present.
+- `DrawViewportFrame(cmd)` steht in `:565–882`. `RenderSceneImage` nutzt die Funktion schon mit
+  (`:4714`).
+- Kette (alles unter `useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB`, ✔ `:572`):
+  1. GI (`runGi`, ✔ `:606`)
+  2. SSAO und Refl-MRT (`runSSAO`, ✔ `:623`)
+  3. SSR-Trace (`RenderForwardSSR`, ✔ `:628`)
+  4. Szene in RGBA16F (`m_postFxSceneRP`)
+  5. TAA-Velocity
+  6. SSR-History-Kopie
+  7. Bloom (halbe Auflösung, Bright und 10 Blur-Passes)
+  8. Tonemap → `m_ldrImage` RGBA8
+  9. TAA-Resolve
+  10. AA → `m_viewportImage` (`m_postFxFinalRP`)
+  11. UI-Canvas (`m_uiViewportRP`)
+
+  Größenabhängige Ziele entstehen in `createViewportResources` (`:4315–4480`), darin
+  `createPostFXResources` (`:3769`) und `createSSAOTargets` (`:4478`).
+- Die Szenen-Pipelines gibt es zweimal, als LDR gegen `m_renderPass` und als HDR gegen
+  `m_postFxSceneRP`. Das gilt ebenso für Material, Himmel, Debug-Linien, Decals, Skinned und UI.
+  `DrawScene` wählt die Variante über `hdr`.
+
+### 4.2 Was im Spielpfad stirbt
+
+- **Alles außer Schatten und Decals.** `runGi`, `runSSAO` und `RenderForwardSSR` werden nur
+  aus `DrawViewportFrame` gerufen (✔ grep: einzige Aufrufer `:606/623/628`). Damit fehlen im
+  Spiel auch **GI und SSAO**, obwohl `GetCapabilities()` `supportsGlobalIllumination = true`
+  meldet und `GameApplication` GI daraufhin einschaltet.
+- `GetCapabilities()` (`:884–910`) meldet `supportsHDR = false` hart. SSR wird über
+  `m_postFxReady` gemeldet (Kommentar: „only in the editor viewport“), TAA über `taaReady()`.
+
+### 4.3 Formate und der Weg ins Swapchain-Bild
+
+- **Swapchain-Format** (✔ `:1201–1204`): `B8G8R8A8_UNORM`, sofern angeboten, **sonst
+  `fmts[0]`**. Das kann ein `_SRGB`-Format sein und würde dann Gamma doppelt kodieren, sowohl
+  beim Blit als auch beim Pass. Die Auswahl muss ein UNORM-Format bevorzugen und bei sRGB
+  warnen oder linearisieren.
+- **Swapchain-Usage** (✔ `:1218`): nur `COLOR_ATTACHMENT`, **kein `TRANSFER_DST`**.
+- **`m_viewportImage`:** `R8G8B8A8_UNORM` mit `TRANSFER_SRC`, schon gammakodiert.
+- `vkCmdCopyImage` RGBA→BGRA würde Rot und Blau tauschen. In Frage kommen deshalb nur zwei
+  Wege:
+  - **Blit** (`vkCmdBlitImage`). Braucht `TRANSFER_DST` auf der Swapchain (mit Prüfung von
+    `supportedUsageFlags`) und eine zweite, kompatible `m_renderPass`-Variante mit LOAD statt
+    CLEAR. Ohne sie löscht das CLEAR das geblittete Bild wieder.
+  - **Fullscreen-Sampling-Pass in `m_renderPass`** (Empfehlung des Agenten und meine). Braucht
+    eine Pipeline-Variante des Blit-Shaders gegen `m_renderPass` mit gesetztem
+    `pDepthStencilState`, denn der Subpass hat Depth und `makePipe` (`:3619`) setzt keinen.
+    Dazu kommt ein weiteres Descriptor-Set: Der PostFX-Pool ist mit ✔ `maxSets = 5` voll
+    (`:3482–3490`). Außerdem nötig ist eine explizite Barriere COLOR_WRITE→SHADER_READ auf
+    `m_viewportImage`, weil `m_postFxFinalRP` und `m_uiViewportRP` keine Subpass→EXTERNAL-
+    Dependency haben und `runPostFXBarrier` bei gleichem Layout früh zurückkehrt (`:3442`).
+    Vorteil: Format-Swizzle und eine spätere sRGB-Swapchain erledigen sich im Shader, und
+    `m_uiPipeline` und ImGui bleiben im selben Pass.
+- **Resize:** `recreateSwapchain` (`:1437`) wartet auf den Device-Idle. Das alte
+  Viewport-Farbbild wird `k_maxFramesInFlight + 2` Frames zurückgehalten (`:4321–4328`). Im
+  Spiel muss sich der Viewport an `m_swapExtent` orientieren, nicht an der Fenstergröße
+  (DPI). Ein Recreate zur Present-Zeit fließt dann in den Viewport-Resize des nächsten Frames.
+
+### 4.4 Shader-Auslieferung
+
+Die Shader für PostFX, TAA, SSAO und GI liegen als vorkompilierte `.spv` vor
+(`src/HE_Rendering/CMakeLists.txt:133–147`). Geladen werden sie aus `<exe>/Shaders` (`:1706–1711`),
+ins Spiel kopiert nur über einen POST_BUILD-Schritt von HorizonGame
+(`src/HE_Game/CMakeLists.txt:108–116`). Die SSR-Shader erzeugt shaderc zur Laufzeit.
+Folgen:
+- Eine reine Shader-Änderung braucht einen Relink (Memory „vulkan-spv-deploy-was-post-build“).
+- Der Exporter lässt `Game/Shaders/` fallen. Der Fix `04de39bd` (Zweig
+  `claude/d3d-und-evtl-vulkan-widgets-…`, Thema 133) ist ✔ **nicht in main**. Ohne ihn bleibt
+  ein exportiertes Vulkan-Spiel aus anderem Grund schwarz.
+
+### 4.5 Nebenbefund (nicht verifiziert)
+
+Laut Agent bindet der LDR-Fallback von `DrawViewportFrame` (`:847–852`, ohne PostFX) Pipelines,
+die gegen das BGRA8-`m_renderPass` gebaut sind, innerhalb des RGBA8-`m_viewportRenderPass`. Die
+Formate sind nicht renderpass-kompatibel, das ergäbe einen Validierungsfehler. Er greift nur,
+wenn die PostFX-Shader fehlen, und ist nicht Teil dieses Themas. Für Schritt Vulkan im Blick
+behalten, weil Weg a im Fallback genau dorthin führt.
+
+Schätzung Vulkan: **≈ 90–130 Zeilen**. Weg b ≈ 400–600 Zeilen: ein zweiter Satz
+swapchain-großer Ziele, an `recreateSwapchain` gekoppelt, und die rund 300 Zeilen
+`DrawViewportFrame` mit ihrer Größenkopplung an `m_viewportW/H` doppelt.
 
 ## 5. Weg a gegen Weg b
 
-| | **a) Spielzweig fährt Viewport-Frame + Copy/Blit** | b) Post-Kette im Swapchain-Zweig nachbauen |
+| | **a) Spielzweig fährt Viewport-Frame, dann Copy/Pass** | b) Post-Kette im Swapchain-Zweig nachbauen |
 |---|---|---|
-| Code | klein, nur Verdrahtung | 200–400 Z./Backend (Doku 116), Duplikat |
-| Drift | keiner, ein Pfad für Editor und Spiel | zwei Ketten, die auseinanderlaufen (wie die C6-Gates zeigen) |
-| SSAO/SSR/TAA | kommen mit, weil sie am Viewport-Ziel hängen | jedes Gate einzeln umbauen |
-| Kosten zur Laufzeit | eine Vollbild-Kopie pro Frame (RGBA8, vernachlässigbar), eine zusätzliche RGBA8-Fläche | keine Kopie, AA schreibt direkt ins Backbuffer |
-| Risiko | Resize-Pfad, Ressourcenzustände bei D3D12/Vulkan | alles aus a plus PSO-/Renderpass-Varianten fürs Backbuffer-Format |
+| Code | klein, nur Verdrahtung (§6) | 250–600 Z./Backend, Duplikat |
+| Drift | keiner, Editor und Spiel nutzen einen Pfad | zwei Ketten, die auseinanderlaufen (die C6-Gates zeigen es schon) |
+| SSAO/SSR/GI/TAA | kommen mit, weil sie am Viewport-Ziel hängen | jedes Gate einzeln umbauen |
+| Laufzeitkosten | eine Vollbild-Kopie oder ein Pass pro Frame (RGBA8, klein), eine RGBA8-Fläche mehr; die Swapchain-Depth wird tot | keine Kopie |
+| Risiko | Resize, Zustände/Barrieren (D3D12), Renderpass/Format (Vulkan) | alles aus a plus PSO- und Renderpass-Varianten |
 
-Weg b spart genau eine Kopie. Lohnt sich das später doch, kann der letzte AA-Pass unter Weg a
-direkt ins Backbuffer schreiben, sobald die Formate passen. Das ist eine Optimierung auf Weg
-a, kein eigener Weg.
+Weg b spart nur die eine Kopie. Lohnt sich das später doch, kann der letzte AA-Pass unter Weg
+a direkt ins Backbuffer schreiben. Auf D3D sind die Formate gleich, nur das Ziel von
+`runPostFX`/AA wird zum Parameter. Das ist eine Optimierung von a, kein eigener Weg.
 
-**App-Modus (`m_appMode`)**: Für Anwendungen ohne Welt schaltet das Spiel Bloom, SSAO, AA,
-GI und SSR aus und den Himmel ab (`GameApplication.cpp:3133–3156`), weil die Post-Kette über
-einer leeren Szene messbar Zeit kostete. Unter Weg a würde ein App-Modus-Spiel trotzdem
-HDR-Ziel, Tonemap und Kopie bezahlen. Vorschlag: Der Spielzweig nimmt den Viewport-Frame nur,
-wenn eine Welt gerendert wird. Konkret: ein Renderer-Schalter („Spiel-PostFX an/aus“), den
-`GameApplication` im App-Modus aus und sonst an setzt. Alternative: Gate im Backend auf „es
-gibt eine Szene“. Das gehört in Schritt 2.
+### 5.1 Opt-in statt Heuristik
+
+Das Backend kann „Spiel“ nicht von „Editor vor dem ersten `SetViewportSize`“ unterscheiden,
+denn `viewportReq` ist in beiden Fällen 0. Vorschlag:
+
+- **Interface:** ein neuer Default-No-Op in `IRenderer`, etwa
+  `virtual void SetSwapchainPostProcessing(bool)`. Er ist inline im HE_Core-Header, braucht
+  also **kein** `HE_API` (siehe Memory zur HE_API-Konvention). GL und Metal ignorieren ihn,
+  weil sie die Kette dort schon haben.
+- **Aufrufer:** `GameApplication` setzt `true`, wenn eine Welt gerendert wird (Zweig
+  `else if (r && m_world)`, `:3157`), und `false` im App-Modus.
+- **App-Modus:** `GameApplication.cpp:3133–3156` schaltet die Kette für Anwendungen ohne Welt
+  bewusst ab, weil sie über einer leeren Szene messbar Zeit kostete. Mit dem Schalter zahlt
+  eine App weiterhin nichts.
+- **Backend-intern:** Der Spiel-Viewport ist vom Editor-Request (`viewportReqW/H`) getrennt.
+  `GetViewportTexture()` liefert dem Editor nichts Neues.
+
+### 5.2 `HE_CAPTURE_FRAME` und der Zeuge
+
+Heute schaltet `Application.cpp:569–570` ein Spiel mit `HE_CAPTURE_FRAME` auf den
+Viewport-Pfad um. Das PPM zeigt dann das nachbearbeitete Bild, das **Fenster aber nur die
+Clear-Farbe**. Captures waren deshalb nie ein Beleg für den Swapchain-Pfad (Memory
+„verify-exported-game-windows“).
+
+Nach Weg a liest `CaptureViewport` genau das Bild, das auch ins Backbuffer geht. Der Aufruf
+von `SetViewportSize` in `Application.cpp` muss im Spielmodus dann entfallen oder vom Backend
+ignoriert werden. Er nutzt `m_window->GetWidth()`, also logische Pixel, und würde bei 125 % DPI
+die Größe gegen das Backbuffer verstellen. Danach ist `HE_CAPTURE_FRAME` ein **gültiger
+Zeuge für das Spielbild**, und das Rezept aus PrintWindow und Zeitfenster bleibt nur als
+Gegenprobe nötig.
 
 ## 6. Umfang je Backend
 
-_(wird nach D3D12-/Vulkan-Analyse ergänzt)_
+| | gemessen: Viewport-Frame | Weg a (Empfehlung) | Weg b (Doku-116-Annahme) |
+|---|---|---|---|
+| Gemeinsam (Interface + `GameApplication` + Capture-Hook) | — | ≈ 15 Z. | ≈ 15 Z. |
+| D3D11 | `DrawViewportFrame` `:6755–6890`, 135 Z. | **≈ 40–70 Z.** | ≈ 200–300 Z. |
+| D3D12 | `DrawViewportFrame` `:10346–10449` + `runPostFX` `:2191–2337`, ≈ 250 Z. | **≈ 60–100 Z.** | ≈ 250–400 Z. |
+| Vulkan | `DrawViewportFrame` `:565–882`, 318 Z. | **≈ 90–130 Z.** | ≈ 400–600 Z. |
+
+Herleitung Weg b: Die Kette wird dupliziert (Spanne in Spalte 2), dazu kommt das Umverdrahten
+der Gates und Zielannahmen (§3.4, §4.3). Damit sind die 200–400 Z./Backend aus Doku 116 als
+Größenordnung für b **bestätigt**, für Vulkan aber zu niedrig. Weg a liegt bei etwa einem
+Viertel. Nicht eingerechnet: Tests und Zeugen-Skripte (§8) sowie der Fix des
+Vulkan-Swapchain-Formats (§4.3, ≈ 10 Z.).
 
 ## 7. Reihenfolge
 
-_(wird ergänzt)_
+**D3D11 → D3D12 → Vulkan**, nach steigender Komplexität desselben Musters:
 
-## 8. Verifikation
+1. **D3D11:** keine Barrieren, keine PSO- oder Renderpass-Frage, `CopyResource` mit
+   identischem Format. Das ist der Pilot, der das gemeinsame Interface (§5.1), den Capture-Hook
+   (§5.2) und das Zeugen-Rezept festlegt.
+2. **D3D12:** dasselbe Muster plus Ressourcenzustände, Flip-Model mit 3 Puffern und
+   Flush-Kosten beim Resize.
+3. **Vulkan:** Pipeline-Variante gegen `m_renderPass`, Descriptor-Set, Barriere, Wahl des
+   Swapchain-Formats, Shader-Auslieferung (Vorbedingung `04de39bd`).
 
-_(wird ergänzt)_
+Eine fehlende Laufzeitprüfung ist **kein** Grund für diese Reihenfolge, anders als Doku 116 §7
+für Deferred argumentierte. NN-WS03 hat eine RTX 4070, und das Rezept für exportierte Spiele
+funktioniert auf allen drei Backends (Memory „headless-render-verification“, „verify-exported-
+game-windows“). Jedes Backend ist ein eigener Schritt mit Bildbeleg und kann einzeln gemergt
+werden.
+
+## 8. Verifikation (je Backend-Schritt)
+
+**Zeugen-Szene:** `docs/d3d12-swapchain-resize-witness-scene.ps1` als Basis, erweitert um ein
+emissives Objekt über 1.0 (Bloom), eine glänzende Bodenfläche (SSR), feine Kanten (AA) und
+eine Kamera-Bewegung (TAA). Export über die eigene MCP-Bridge (`project_package`).
+`config.json` mit `GameBackend`, `GameWindowMode=Windowed`, `BloomEnabled`,
+`AntiAliasing`, `SSREnabled`, `SSAOEnabled`.
+
+1. **Positivbeleg:** Vorher-/Nachher-Bild des exportierten Spiels. Nach der Umstellung ist
+   die Gamma-Anhebung messbar: Der Mittelwert der Mitteltöne steigt, Glanzlichter clippen
+   nicht mehr. Bloom-Saum am Emissiv-Objekt.
+2. **Parität zum Editor:** dieselbe Szene im Editor-Viewport (`HE_DUMP_*`) gegen das Spielbild
+   bei gleicher Größe. Erwartet wird Gleichheit bis auf TAA-Rauschen und Zeitabhängiges
+   (Himmel). Den Himmelsstreifen wie im Resize-Rezept ausmaskieren.
+3. **Negativkontrollen:** `BloomEnabled=false` muss den Saum entfernen, `AntiAliasing=0` die
+   Kantenglättung, `SSREnabled=false` die Spiegelung. Jede Kontrolle muss das Bild ändern,
+   sonst misst der Zeuge nichts.
+4. **Resize:** Bild nach dem Resize gegen einen Frischstart bei gleicher Größe (Rezept
+   `d3d12-swapchain-resize-*`, 0 px Abweichung unterhalb des Himmels).
+5. **Debug-Layer und Validierung:** D3D12-Debug-Layer (Kopie in FLIP_DISCARD) und
+   Vulkan-Validierung ohne **neue** Meldungen gegenüber dem bekannten Grundrauschen
+   (Memory „vulkan-d3d-baseline-noise“).
+6. **App-Modus:** Ein exportiertes App-Projekt (`m_appMode`) zeigt unverändert die gleiche
+   Frame-Zeit, der Schalter steht dort auf aus.
+7. **Capture:** `HE_CAPTURE_FRAME` ergibt dasselbe Bild wie PrintWindow (§5.2).
+
+Vorbedingungen:
+- Für Vulkan muss `04de39bd` gemergt sein, oder `Game/Shaders` wird von Hand ins Export
+  kopiert.
+- Nach DLL-Änderungen HorizonGame und Editor neu linken (Memory „stale-dll-beside-tool-exes“),
+  sonst testet der Export die alte DLL.
+- ctest sieht davon nichts, denn der Pfad läuft nur im exportierten Spiel. Ein doctest kann
+  höchstens den neuen Schalter am Interface prüfen.
+
+## 9. Vorschlag für die Folgeschritte
+
+1. D3D11 plus gemeinsames Interface, `GameApplication`-Opt-in und Capture-Hook, mit Zeuge
+   §8 auf D3D11.
+2. D3D12 mit Zeuge.
+3. Vulkan inklusive Swapchain-Format-Fix, mit Zeuge. Vorbedingung `04de39bd`.
+4. `GetCapabilities`-Kommentare (C6, „the switch exists but does nothing“) auf allen drei
+   Backends bereinigen, `ssr-cross-backend-plan.md` C6 als erledigt markieren und
+   Release-Notes-Hinweis zur Bildänderung (§0).
