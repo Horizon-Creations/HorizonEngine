@@ -274,7 +274,8 @@ ohne `SDL_VIDEO_DRIVER` laufen lassen (X11-WSI von Mesa).
 - Editor-CMake §3.1/§3.2: Gate auf `HE_VULKAN_ENABLED`, SDK-Bibliothekspfad je Plattform.
 - Gerätename im Log (§3.5): `VulkanRenderer: device 0 of N: <Name> (Vulkan x.y.z, driver …)`.
 
-**Gemessen** (Läufe 37112790557 und 37113763253):
+**Gemessen** (Läufe 37112790557 und 37113763253; Lauf 37114795547 mit der fertigen Fassung:
+Job grün, 4/4 Fälle, Werte wie unten):
 
 | | Wert |
 |---|---|
@@ -283,7 +284,7 @@ ohne `SDL_VIDEO_DRIVER` laufen lassen (X11-WSI von Mesa).
 | ICD-Datei | **`lvp_icd.json`**, nicht `lvp_icd.x86_64.json` (§5 lag falsch). Der Job sucht sie jetzt per Glob |
 | Extensions | `VK_EXT_headless_surface`, `VK_KHR_ray_query` und `VK_KHR_acceleration_structure` vorhanden |
 | Runner | 4 Kerne. Build nur `HorizonEditor`: **13 min** |
-| Zeit pro Bild (1280×720) | 3–6 s mit 3 Frames, 11–13 s mit 40 Frames GI. §3.4 (`HE_DUMP_W/H`) ist **nicht nötig** |
+| Zeit pro Bild (1280×720) | 3–6 s mit 3 Frames, 11–19 s mit 40 Frames GI; alle 13 Bilder unter 3 min. §3.4 (`HE_DUMP_W/H`) ist **nicht nötig** |
 | WSI | SDL-Offscreen + Headless-Surface **und** Xvfb/X11 funktionieren beide |
 | Abbau | Exit-Code 0 bei allen Bildern, der Abbau-Absturz aus `he_shot.py` tritt hier nicht auf |
 
