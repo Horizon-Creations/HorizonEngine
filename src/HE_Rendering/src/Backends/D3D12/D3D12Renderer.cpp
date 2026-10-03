@@ -25,6 +25,9 @@
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
+#include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
+#include <JobSystem/JobSystem.h>              // parallel_for for that bake
+#include <glm/gtc/packing.hpp>                // packHalf1x16 (RGBA16F cube upload)
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h"                   // he::shaderc::compileHlslPinned (sky pass)
 #endif
@@ -3155,8 +3158,9 @@ struct D3D12RendererImpl
     // [5..6] (rewritten at GI-target creation), the shadow arrays in [7..8] (the cascade
     // slot is rewritten by createShadowArray() on a resolution swap — it MUST land here,
     // not in the ring, so every later draw block inherits it), null views in [9..16] (the
-    // preamble's gates for those stay 0 on D3D12). One CopyDescriptorsSimple per draw,
-    // then the draw's real textures overwrite [0..4].
+    // preamble's gates for those stay 0 unless the slot is filled). One CopyDescriptorsSimple
+    // per draw, then the draw's real textures overwrite [0..4] — and the sky cube / blurred
+    // SSAO overwrite [10]/[11] on the frames fillMatLight raises fog.z / fog.w (Thema 126).
     ComPtr<ID3D12DescriptorHeap> m_matSrvStaging;
     UINT                         m_matSrvInc = 0;
     UINT                         m_matSrvCursor[k_frameCount] = {}; // per-frame block cursor (one block per DrawCall)
@@ -3231,6 +3235,35 @@ struct D3D12RendererImpl
     bool                         m_matHlslLogged = false;            // one-time dump of generated HLSL for HW verify
     static constexpr UINT        k_matMaxDraws   = 1024;             // U/HeParams ring slots per frame
     static constexpr UINT        k_matSlot       = 256;              // 256-B stride/slot (U=176, HeParams=256)
+
+    // Image-based-ambient sky cube for graph materials (heSkyEnv, t15 = SRV block
+    // slot kSlotSkyEnv, static sampler s15) — Thema 126. The SAME
+    // HE::BuildSkyEnvFaceRow bake GL, Metal, Vulkan and D3D11 sample, re-baked on
+    // the CPU when the sun moves and copied in from this frame slot's upload
+    // buffer on the frame's own command list (updateSkyEnvCube), like Vulkan.
+    // RGBA16F; a row is 128 × 8 B = 1024 B and a face 128 KiB, so the tightly
+    // packed bake already meets D3D12's 256-B pitch / 512-B placement rules.
+    // m_skyEnvValid gates heLight.fog.z AND the per-draw view write.
+    static constexpr int         k_skyEnvFace    = 128;              // GL/Metal/Vulkan face size
+    ComPtr<ID3D12Resource>       m_skyEnvCube;                       // DEFAULT, 6 slices, 1 mip
+    ComPtr<ID3D12Resource>       m_skyEnvUpload[k_frameCount]; uint8_t* m_skyEnvUploadPtr[k_frameCount]{};
+    D3D12_RESOURCE_STATES        m_skyEnvState   = D3D12_RESOURCE_STATE_COPY_DEST;
+    bool                         m_skyEnvValid   = false;            // the cube holds a bake (fog.z may be raised)
+    glm::vec3                    m_skyEnvSunDir  = glm::vec3(0.0f);
+    void createSkyEnvCube();
+    void updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir);
+    // A TextureCube view of m_skyEnvCube into `h` (a material draw block's
+    // kSlotSkyEnv — the template keeps its null cube view).
+    void srvForSkyEnvCube(D3D12_CPU_DESCRIPTOR_HANDLE h)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                      = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sv.ViewDimension               = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        sv.Shader4ComponentMapping     = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.TextureCube.MostDetailedMip = 0;
+        sv.TextureCube.MipLevels       = 1;
+        device->CreateShaderResourceView(m_skyEnvCube.Get(), &sv, h);
+    }
 
     void createMaterialResources();
     ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
@@ -8171,7 +8204,8 @@ void D3D12RendererImpl::createMaterialResources()
     // heSSRFwd / heGIReflFwd / heCloudShadow (t14..t18, t31..t33) — null views, their
     // gates stay 0 in fillMatLight; EXCEPT the DDGI atlases [12..13] (t17/t18), which
     // ensureGiProbeAtlas writes into the template (writeMatGiProbeSlots) behind the
-    // giProbe.y gate.
+    // giProbe.y gate, and heSkyEnv / heAO [10..11] (t15/t16), which the draw writes into
+    // its own block behind fog.z / fog.w (Thema 126).
     HE::d3d12mat::MaterialRootSignature matRs;
     HE::d3d12mat::DescribeMaterialRootSignature(matRs);
     const D3D12_ROOT_SIGNATURE_DESC& rsd = matRs.desc;
@@ -8248,7 +8282,9 @@ void D3D12RendererImpl::createMaterialResources()
         writeShadowArraySrv(localShadowDepth.Get(), h, kLocalShadowLayers); h.ptr += inc;
         // Slots 9..16: the preamble's remaining SRVs (heLandscapeWeights, heSkyEnv,
         // heAO, the DDGI atlases, heSSRFwd, heGIReflFwd, heCloudShadow). Declared so
-        // the PSO is legal, never sampled: fillMatLight leaves their gates at 0.
+        // the PSO is legal, never sampled while fillMatLight leaves their gates at 0.
+        // heSkyEnv/heAO (10/11) stay null HERE; the material draw writes the sky
+        // cube / blurred SSAO into its own block when fog.z / fog.w rise (Thema 126).
         // The DDGI pair (12/13) starts null too and is swapped for the live atlases
         // by ensureGiProbeAtlas → writeMatGiProbeSlots (back to null on retire);
         // the atlases are created per frame, long after this init. Null views
@@ -8286,8 +8322,99 @@ void D3D12RendererImpl::createMaterialResources()
         }
     }
 
+    // The sky cube for heSkyEnv (Thema 126) — optional, see createSkyEnvCube.
+    createSkyEnvCube();
+
     m_matReady = true;
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: A4 material resources created");
+}
+
+// ── Image-based-ambient sky cube for graph materials (heSkyEnv, t15) ─────────
+// GL, Metal and (since Thema 126, Schritt 1) Vulkan bake HE::SkyColorCPU into a
+// 128² cube and raise heLight.fog.z; this backend kept a null cube view in the
+// template and fog.z at 0, so graph materials had no sky ambient, no specular
+// IBL and no fog (heApplyFog takes its colour from the cube). Not fatal when it
+// fails: fog.z stays 0, exactly the state before the cube existed.
+void D3D12RendererImpl::createSkyEnvCube()
+{
+    m_skyEnvValid = false;
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width            = static_cast<UINT64>(k_skyEnvFace);
+    td.Height           = static_cast<UINT>(k_skyEnvFace);
+    td.DepthOrArraySize = 6;
+    td.MipLevels        = 1;
+    td.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Flags            = D3D12_RESOURCE_FLAG_NONE;
+    bool ok = SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_skyEnvCube)));
+    m_skyEnvState = D3D12_RESOURCE_STATE_COPY_DEST;
+    const UINT64 bytes = static_cast<UINT64>(k_skyEnvFace) * k_skyEnvFace * 6 * 4 * sizeof(uint16_t);
+    for (UINT f = 0; ok && f < k_frameCount; ++f)
+    {
+        m_skyEnvUpload[f] = createUploadBuffer(bytes, reinterpret_cast<void**>(&m_skyEnvUploadPtr[f]));
+        ok = m_skyEnvUpload[f] && m_skyEnvUploadPtr[f];
+    }
+    if (!ok)
+    {
+        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: sky environment cube unavailable — graph materials keep flat ambient");
+        m_skyEnvCube.Reset();
+        for (UINT f = 0; f < k_frameCount; ++f) { m_skyEnvUpload[f].Reset(); m_skyEnvUploadPtr[f] = nullptr; }
+    }
+}
+
+// Recorded on the frame's command list before its first material draw. The
+// upload buffer is this frame slot's own, so the frame fence that guards the
+// HeLighting/U/HeParams rings guards it too. GL's dead-band (2e-3 ≈ 0.11°): a
+// static sun bakes once, a moving one roughly every other frame.
+void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir)
+{
+    if (!cl || !m_skyEnvCube || !m_skyEnvUploadPtr[frameIndex]) return;
+    if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
+
+    constexpr int N = k_skyEnvFace;
+    std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
+    parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
+    {
+        const int f = static_cast<int>(idx / N);
+        const int t = static_cast<int>(idx % N);
+        HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
+    }, "SkyEnvBake", 1);
+    uint16_t* dst = reinterpret_cast<uint16_t*>(m_skyEnvUploadPtr[frameIndex]);
+    for (size_t i = 0; i < px.size(); ++i)
+        dst[i] = glm::packHalf1x16(px[i]);
+
+    // D3D cube faces are array slices 0..5 = +X,-X,+Y,-Y,+Z,-Z with GL's (s,t)
+    // table, row 0 = t 0 — the bake goes in unchanged (SkyEnvBake.h). The
+    // previous frame may still be sampling the cube on this queue: the
+    // transition out of PIXEL_SHADER_RESOURCE orders the copy after it.
+    const UINT   rowPitch  = static_cast<UINT>(N * 4 * sizeof(uint16_t));
+    const UINT64 faceBytes = static_cast<UINT64>(rowPitch) * N;
+    static_assert((k_skyEnvFace * 4 * sizeof(uint16_t)) % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT == 0,
+                  "the tightly packed bake row must already be 256-B aligned");
+    static_assert((k_skyEnvFace * k_skyEnvFace * 4 * sizeof(uint16_t)) % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0,
+                  "every face of the tightly packed bake must start 512-B aligned");
+    barrier12(cl, m_skyEnvCube.Get(), m_skyEnvState, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (UINT f = 0; f < 6; ++f)
+    {
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = m_skyEnvUpload[frameIndex].Get();
+        src.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset    = faceBytes * f;
+        src.PlacedFootprint.Footprint = { DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                          static_cast<UINT>(N), static_cast<UINT>(N), 1, rowPitch };
+        D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+        dstLoc.pResource        = m_skyEnvCube.Get();
+        dstLoc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = f; // mip 0 of slice f (one mip level)
+        cl->CopyTextureRegion(&dstLoc, 0, 0, 0, &src, nullptr);
+    }
+    barrier12(cl, m_skyEnvCube.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_skyEnvState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    m_skyEnvSunDir = sunDir;
+    m_skyEnvValid  = true;
 }
 
 // `precompiled` (the pak's baked HLSL for this backend, MaterialShaderLibrary::
@@ -9077,7 +9204,10 @@ void D3D12Renderer::Shutdown()
         m_impl->m_matObjRing[i].Reset();   m_impl->m_matObjPtr[i]   = nullptr;
         m_impl->m_matParamRing[i].Reset(); m_impl->m_matParamPtr[i] = nullptr;
         m_impl->m_matDrawCursor[i] = 0;
+        m_impl->m_skyEnvUpload[i].Reset(); m_impl->m_skyEnvUploadPtr[i] = nullptr;
     }
+    m_impl->m_skyEnvCube.Reset();
+    m_impl->m_skyEnvValid = false;
     m_impl->depthBuffer.Reset();
     m_impl->dsvHeap.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
@@ -9343,8 +9473,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // buffer at execute time, so the last write wins). Now fills the FULL v2
     // light window from the dominant directional light (was sun-only sky values
     // before — graph materials never saw point/spot lights on D3D12 and stayed
-    // sun-lit at night). Mirrors the D3D11 fillMatLight.
-    auto fillMatLight = [&](bool giActive)
+    // sun-lit at night). Mirrors the D3D11 fillMatLight. `aoActive`: the blurred
+    // SSAO ran this frame — fillPerFrame's own AO gate; the material draw writes
+    // that image into its block's kSlotAO exactly then.
+    auto fillMatLight = [&](bool giActive, bool aoActive)
     {
         if (!(p.m_matReady && p.m_matLightPtr[p.frameIndex])) return;
         HE::MaterialShaderLibrary::Lighting lit{};
@@ -9435,9 +9567,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             lit.shadowBias[0] = p.shadowSettings.slopeBias;
             lit.shadowBias[1] = p.shadowSettings.minBias;
         }
+        // Height fog + the two image gates, the GL/Metal/Vulkan fill (Thema
+        // 126; lit.fog stayed all-zero here before, so graph materials had no
+        // sky ambient, no specular IBL, no SSAO and no fog). z: the baked sky
+        // cube exists — every material draw block gets its view in kSlotSkyEnv
+        // exactly then. w: the blurred SSAO goes into kSlotAO under the same
+        // flag the caller passes here.
+        const bool skyEnvBound = p.m_skyEnvValid;
+        lit.fog[0] = m_environment.fogDensity;
+        lit.fog[1] = m_environment.fogHeightFalloff;
+        lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
+        lit.fog[3] = aoActive    ? 1.0f : 0.0f;
         std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
     };
-    fillMatLight(false);
+    // The sky cube first: a copy on this frame's command list, recorded before
+    // any graph-material draw, and fillMatLight reads m_skyEnvValid.
+    if (p.m_matReady)
+        p.updateSkyEnvCube(cl, p.m_renderWorld.sunDirection);
+    fillMatLight(false, false);
 
     // The heap slot the scene shader's t16 SSR table points at this frame. Set
     // once the trace has run; until then (and on every non-SSR frame) it names
@@ -9743,7 +9890,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // non-zero intensity. Off → t16 names the null descriptor and the
         // cascade folds away on uSSRParams.x.
         fillPerFrame(giShadingActive, aoWanted, ssrResult != nullptr);
-        fillMatLight(giShadingActive);
+        const bool matAOActive = aoWanted && p.ssaoBlurRT != nullptr; // heAO = the built-in's t2 image
+        fillMatLight(giShadingActive, matAOActive);
 
         // ── Geometry pass: bind combined sceneSrvHeap (shadow t0 + AO t2 +
         // GI mask/atlases t4..t6 — slots [4..6] were written at GI-target/atlas
@@ -9944,6 +10092,16 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy block slots 1..4 (t4..t7)");
                         for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
                             if (heTexP[k]) p.srvForTexture(heTexP[k], p.matSrvCpu(blk + 1 + static_cast<UINT>(k)));
+                        // heSkyEnv (t15) + heAO (t16) (Thema 126): the baked sky cube and
+                        // this frame's blurred SSAO (the image the built-in shader reads at
+                        // t2, in PIXEL_SHADER_RESOURCE after the blur pass), each under the
+                        // very flag fillMatLight raised its gate with (fog.z / fog.w). The
+                        // template's null views stay where the gate is 0.
+                        if (p.m_skyEnvValid)
+                            p.srvForSkyEnvCube(p.matSrvCpu(blk + HE::d3d12mat::kSlotSkyEnv));
+                        if (matAOActive)
+                            p.srvIntoHeapSlot(p.ssaoBlurRT.Get(), DXGI_FORMAT_R8_UNORM,
+                                              p.matSrvCpu(blk + HE::d3d12mat::kSlotAO));
 
                         // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
