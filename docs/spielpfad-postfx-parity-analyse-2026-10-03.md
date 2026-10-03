@@ -425,3 +425,46 @@ Vorbedingungen:
 4. `GetCapabilities`-Kommentare (C6, „the switch exists but does nothing“) auf allen drei
    Backends bereinigen, `ssr-cross-backend-plan.md` C6 als erledigt markieren und
    Release-Notes-Hinweis zur Bildänderung (§0).
+
+## 10. Ergebnis Schritt 2: D3D11 (2026-10-03)
+
+Commit `567687ba`. Umgesetzt nach §2.5 und §5.1:
+
+- `IRenderer::SetSwapchainPostProcessing(bool)`: Default-No-Op, als **letzte** virtuelle
+  Funktion angehängt, damit die vtable-Slots davor bleiben, wo sie waren.
+- `GameApplication` setzt `true` im Welt-Zweig und `false` im App-Modus, jeden Frame (der
+  Setter speichert nur ein Flag).
+- `D3D11Renderer::Render()`: Ist der Schalter an und `postFxReady`, läuft der Spielzweig über
+  `DrawViewportFrame()` in Backbuffer-Größe und dann `CopyResource` ins Backbuffer. Die Größe
+  kommt aus dem Backbuffer selbst (`rtv->GetResource` → `GetDesc`), nicht aus dem Fenster.
+  Ein Editor-Request (`SetViewportSize`, z. B. vom `HE_CAPTURE_FRAME`-Hook mit logischer
+  Größe) wird währenddessen ignoriert. Fällt der Schalter weg, wird das Spiel-Paar abgebaut,
+  sonst liefe `Render()` in den Editor-Zweig mit schwarzem Clear. `Application.cpp` bleibt
+  unverändert, weil D3D12 und Vulkan den Hook noch brauchen.
+- Offen für Schritt 4 (§9): Die Kommentare zu C6 und „the switch exists but does nothing“
+  in `DrawScene` (SSR-Gate) und `GetCapabilities` sind für D3D11 jetzt überholt.
+
+**Belege** (NN-WS03, RTX 4070, Release `C:/hw130`, Export über die eigene MCP-Bridge,
+Szene Depthy aus Thema 112, Fenster 1600×900 physisch bei 125 % DPI). Skripte:
+`docs/spielpfad-postfx-run-game.ps1` (PrintWindow, DPI-aware) und
+`docs/spielpfad-postfx-cmp.ps1`. Gemessen unterhalb des Himmelsstreifens (obere 25 %):
+
+| Vergleich | Ergebnis |
+|---|---|
+| Neu gegen Neu (Wiederholung) | 0 px Abweichung, Rauschboden 0 |
+| Neu gegen Kontrolle (gleiche Exe, Schalter `false` = alter Pfad) | alle Pixel anders, mittlere Luma **202,1 statt 135,8** (Tonemap/Gamma) |
+| SSAO an/aus, neu | 565 840 px anders |
+| SSAO an/aus, alter Pfad | **0 px**: SSAO war im Spiel tot (§2.3) |
+| Bloom an/aus, Schwelle 0,3 | mittlere Diff 15,9 |
+| Bloom an/aus, Schwelle 1,0 | nur 208 px: Die Szene hat unter dem Himmel kaum HDR > 1 |
+| AA FXAA gegen Off | 8 149 px anders (Kanten) |
+| AA FXAA gegen TAA | 25 198 px anders, Log „TAA resolve active (1600x900)“ |
+| Resize-Folge (Thema-112-Rezept) gegen Frischstart gleicher Größe | 0 px bei allen 7 Stufen, 1 px bei 1280×720 |
+| `HE_CAPTURE_FRAME=120` gegen PrintWindow | 1600×900 (nicht der logische 1280×720-Request), 0 px Abweichung |
+
+Log: „swapchain post chain active (WxH)“ einmal beim Start und einmal pro Größenwechsel,
+nicht pro Frame. he_tests: 4165 Fälle, 3 fehlgeschlagen, alle Gamepad-End-to-End (bekanntes
+Grundrauschen, echtes Xbox-Pad am Rechner).
+
+Nicht gemessen: Ein App-Projekt (Schalter `false` ab Frame 1, also alter Code), der
+Übergang `true` → `false` zur Laufzeit (kein realer Auslöser) und der D3D11-Debug-Layer.
