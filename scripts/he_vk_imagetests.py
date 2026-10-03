@@ -64,13 +64,19 @@ CASES = {
         "pairs": [("window", "clustered", 0.3)],
         "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"]},
     },
-    # DDGI on the painted witness terrain, top-down (the scene of
-    # docs/gi-ddgi-material-path-analysis-2026-10-02.md §7.2 and
-    # docs/terrain-vegetation-gap-audit-2026-09-26.md §8). "sw" forces the
-    # software BVH; on lavapipe "on" takes the VK_KHR_ray_query path.
+    # DDGI diffuse on the GI-reflections witness scene (graph-material cubes, one
+    # emissive, on a mirror floor), with the reflections pinned OFF so the A/B is
+    # the probe irradiance alone. "sw" forces the software BVH; on lavapipe "on"
+    # takes the VK_KHR_ray_query path.
+    #
+    # NOT the painted terrain (HE_DUMP_LANDSCAPELAYERS) of the GI doc §7.2: its
+    # layer-blend material reads binding 14 (heLandscapeWeights), which the Vulkan
+    # material layout lacks. NVIDIA answers that with a validation message,
+    # lavapipe with SIGSEGV in the draw — first lavapipe run, 03.10.2026.
     "gi": {
-        "base": {"LANDSCAPELAYERS": "1", "SKYTEST": "1", "CAMY": "392", "PITCH": "-89",
-                 "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0", "FRAMES": "40"},
+        "base": {"GIREFLTEST": "1", "GIREFL": "0", "SKYTEST": "1", "CAMY": "3", "CAMZ": "0",
+                 "PITCH": "-12", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
+                 "FRAMES": "40"},
         "variants": {
             "off": {"dump": {"GI": "0"}},
             "on":  {"dump": {"GI": "1"}},
@@ -82,7 +88,26 @@ CASES = {
         "require": {"on": ["GI probe grid", "GI hardware ray tracing available"],
                     "sw": ["GI probe grid"]},
     },
+    # GI reflections on the same scene: the green and the glowing red cube must
+    # appear in the mirror floor (docs/gi-reflections-plan.md).
+    "gi_refl": {
+        "base": {"GIREFLTEST": "1", "GI": "1", "SKYTEST": "1", "CAMY": "3", "CAMZ": "0",
+                 "PITCH": "-12", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
+                 "FRAMES": "40"},
+        "variants": {
+            "off": {"dump": {"GIREFL": "0"}},
+            "on":  {"dump": {"GIREFL": "1"}},
+        },
+        "pairs": [("off", "on", 0.3)],
+        "require": {"on": ["HE_DUMP_GIREFLTEST witness scene added"]},
+    },
 }
+
+# Validation messages that may appear while a picture is made, as
+# (regex, reason + Thema). Anything else between "frame dump armed" and
+# "frame dumped" fails the case. Empty on purpose: the first lavapipe run
+# (Mesa 25.2.8, layers 1.3.275) printed none for nebula and clustered.
+ALLOWED_VALIDATION = []
 
 LOG_MARK_ARMED  = "frame dump armed"
 LOG_MARK_DUMPED = "frame dumped ("
@@ -255,6 +280,14 @@ def main():
                 problems.append(f"{vname}: device '{shot['device']}' is not '{args.require_device}'")
             if img["min"] == img["max"]:
                 problems.append(f"{vname}: image is one flat value ({img['min']})")
+            unexpected = [v for v in shot["validation_in_dump"]
+                          if not any(re.search(rx, v) for rx, _ in ALLOWED_VALIDATION)]
+            if unexpected:
+                problems.append(f"{vname}: {len(unexpected)} validation message(s) while drawing")
+            if shot["exit_code"] != 0:
+                # Reported, not judged: the BMP is written before the teardown.
+                print(f"::warning::{case}/{vname}: editor exit code {shot['exit_code']}"
+                      f"{' (timeout)' if shot['timed_out'] else ''} after writing the image")
             for needle in spec.get("require", {}).get(vname, []):
                 if needle not in shot["_log"]:
                     problems.append(f"{vname}: log lacks '{needle}'")
