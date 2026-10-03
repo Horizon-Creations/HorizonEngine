@@ -418,11 +418,15 @@ void VulkanRenderer::Render()
     const bool swapIsSrgb = m_swapFormat == VK_FORMAT_B8G8R8A8_SRGB
                          || m_swapFormat == VK_FORMAT_R8G8B8A8_SRGB
                          || m_swapFormat == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+    // A minimised window reports a 0×0 surface: the set stays as it is (no
+    // rebuild, no teardown) and the frame below falls through to the direct
+    // path, which is what that frame did before.
     const bool gameChain = m_swapchainPostFx && m_postFxReady && m_presentPipe && m_presentDS
-                        && !swapIsSrgb && m_swapExtent.width > 0 && m_swapExtent.height > 0;
+                        && !swapIsSrgb;
     if (gameChain)
     {
-        if (!m_gameViewport || m_viewportW != m_swapExtent.width || m_viewportH != m_swapExtent.height)
+        if (m_swapExtent.width > 0 && m_swapExtent.height > 0
+            && (!m_gameViewport || m_viewportW != m_swapExtent.width || m_viewportH != m_swapExtent.height))
         {
             vkDeviceWaitIdle(m_device);
             createViewportResources(m_swapExtent.width, m_swapExtent.height);
