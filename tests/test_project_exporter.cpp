@@ -971,6 +971,40 @@ TEST_CASE("ProjectExporter does not copy subdirectories from gameRuntimeDir")
     he_test::removeAllQuiet(outputDir);
 }
 
+// The one runtime subdirectory that MUST ship (beside Python's lib-dynload):
+// Vulkan loads its SPIR-V and D3D12 its DXR kernels from <base path>/Shaders/.
+// Without it an exported Vulkan game drew nothing (Thema 133, Befund 4). A shader
+// left over from an older export must not survive the re-export.
+TEST_CASE("ProjectExporter ships the runtime Shaders/ subdirectory and replaces a stale one")
+{
+    auto runtimeDir = std::filesystem::temp_directory_path() / "he_test_export_shaders_runtime";
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_shaders_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_shaders_out";
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(runtimeDir / "Shaders");
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(outputDir / "Shaders");
+    { std::ofstream f(runtimeDir / "HorizonGame"); f << "ELF"; }
+    { std::ofstream f(runtimeDir / "Shaders" / "ui.vert.spv"); f << "SPV"; }
+    { std::ofstream f(runtimeDir / "Shaders" / "gi_trace_hw.cso"); f << "CSO"; }
+    { std::ofstream f(outputDir / "Shaders" / "stale.spv"); f << "OLD"; }
+
+    ExportSettings settings;
+    settings.compress       = false;
+    settings.gameRuntimeDir = runtimeDir;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "Game", "", outputDir, settings);
+
+    REQUIRE(result.success);
+    CHECK(std::filesystem::exists(outputDir / "Shaders" / "ui.vert.spv"));
+    CHECK(std::filesystem::exists(outputDir / "Shaders" / "gi_trace_hw.cso"));
+    CHECK_FALSE(std::filesystem::exists(outputDir / "Shaders" / "stale.spv"));
+
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
 TEST_CASE("ProjectExporter returns error for invalid output dir (file in the way)")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_err_content";

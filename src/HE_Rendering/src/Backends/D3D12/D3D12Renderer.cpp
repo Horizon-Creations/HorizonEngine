@@ -905,7 +905,8 @@ float4 PSMain(VSOut i) : SV_TARGET
 )HLSL";
 
 // 2D UI canvas — NOT shared: same maths as D3D11's, but this copy does the glyph
-// UV lerp in the PS where D3D11 does it in the VS.
+// UV lerp in the PS where D3D11 does it in the VS. The "Schicht 0" shape (corner
+// radii, border, gradient, soft edge, inner shadow) is kUIFS line for line.
 static const char* kUIHLSL12 = R"HLSL(
 cbuffer UICB : register(b0) {
     float4 uRect;      // xy=top-left px, zw=size px
@@ -915,6 +916,12 @@ cbuffer UICB : register(b0) {
     float  uMode;      // 0 = solid color, 1 = font-atlas glyph
     float  _upad;
     float4 uRotation;  // { angle(radians), pivotX, pivotY, unused }
+    float4 uCornerRadius;  // px per corner: TL, TR, BR, BL
+    float4 uBorderColor;
+    float4 uGradientColor;
+    float4 uInnerColor;
+    float4 uStyle0;    // x = border width px, y = gradient on, z = gradient angle deg, w = radial
+    float4 uStyle1;    // x = blur px (drop shadow), y = inner shadow blur px, zw unused
 };
 Texture2D    uFontAtlas : register(t0);
 SamplerState uSamp      : register(s0);
@@ -935,6 +942,17 @@ UIOut UIVSMain(uint vid : SV_VertexID)
     o.uv = uv;
     return o;
 }
+// One rounded box, four radii (TL, TR, BR, BL); `p` relative to the centre, y
+// down. Same function as heRoundedBoxSDF in kUIFS / the Metal path.
+float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
+{
+    float r = (p.x > 0.0f) ? ((p.y > 0.0f) ? radii.z : radii.y)
+                           : ((p.y > 0.0f) ? radii.w : radii.x);
+    r = min(r, min(halfSz.x, halfSz.y));
+    float2 q = abs(p) - (halfSz - r);
+    return length(max(q, 0.0f)) + min(max(q.x, q.y), 0.0f) - r;
+}
+float heMaxRadius(float4 radii) { return max(max(radii.x, radii.y), max(radii.z, radii.w)); }
 float4 UIPSMain(UIOut i) : SV_TARGET
 {
     if (uMode > 0.5f)
@@ -943,7 +961,45 @@ float4 UIPSMain(UIOut i) : SV_TARGET
         float a = uFontAtlas.Sample(uSamp, lerp(uUVRect.xy, uUVRect.zw, i.uv)).r;
         return float4(uColor.rgb, uColor.a * a);
     }
-    return uColor;
+    // i.uv is the quad-local 0..1 here (GL's vLocal).
+    float4 fill = uColor;
+    if (uStyle0.y > 0.5f)
+    {
+        float t;
+        if (uStyle0.w > 0.5f)
+        {
+            // Radial: centre out to the farthest corner, in pixels.
+            float2 dpx = (i.uv - 0.5f) * uRect.zw;
+            t = saturate(length(dpx) / max(1e-4f, length(uRect.zw * 0.5f)));
+        }
+        else
+        {
+            float a = uStyle0.z * 0.017453292f;
+            float2 dir = float2(sin(a), cos(a));
+            t = saturate(dot(i.uv - 0.5f, dir) + 0.5f);
+        }
+        fill = lerp(uColor, uGradientColor, t);
+    }
+    const float borderW = uStyle0.x, blurPx = uStyle1.x, innerBlur = uStyle1.y;
+    if (heMaxRadius(uCornerRadius) <= 0.0f && borderW <= 0.0f &&
+        blurPx <= 0.0f && innerBlur <= 0.0f) return fill;
+    // A blurred quad IS a drop shadow: the producer grew the rect by the blur.
+    float2 halfsz = uRect.zw * 0.5f - blurPx;
+    float d = heRoundedBoxSDF((i.uv - 0.5f) * uRect.zw, halfsz, uCornerRadius);
+    float cov = (blurPx > 0.0f) ? (1.0f - smoothstep(-blurPx, blurPx, d))
+                                : saturate(0.5f - d);
+    if (blurPx > 0.0f) return float4(fill.rgb, fill.a * cov);
+    if (innerBlur > 0.0f)
+    {
+        float t = 1.0f - smoothstep(0.0f, innerBlur, -d);
+        float ia = uInnerColor.a * saturate(t);
+        fill = float4(lerp(fill.rgb, uInnerColor.rgb, ia), fill.a);
+    }
+    if (borderW <= 0.0f) return float4(fill.rgb, fill.a * cov);
+    float inner = saturate(0.5f - (d + borderW));
+    float3 rgb  = lerp(uBorderColor.rgb, fill.rgb, inner);
+    float  al   = lerp(uBorderColor.a, fill.a, inner);
+    return float4(rgb, al * cov);
 }
 )HLSL";
 
@@ -3403,8 +3459,10 @@ struct D3D12RendererImpl
     // ── 2D UI canvas pipeline ─────────────────────────────────────────────────
     ComPtr<ID3D12PipelineState>  m_uiPSO;
     ComPtr<ID3D12RootSignature>  m_uiRootSig;
-    // Per-frame UI CB ring: up to 256 quads per frame × 256 bytes each (48B padded to 256B).
-    static constexpr UINT   k_maxUIQuads = 256;
+    // Per-frame UI CB ring: up to 4096 quads per frame × 256 bytes each (176 B
+    // padded to 256 B) = 1 MB per frame slot. Every glyph is a quad, so the old
+    // 256 cut a menu's text off mid-word where GL/D3D11/Vulkan drew all of it.
+    static constexpr UINT   k_maxUIQuads = 4096;
     static constexpr UINT64 k_uiCBSlot   = 256;
     ComPtr<ID3D12Resource>  m_uiCB[k_frameCount];
     uint8_t*                m_uiCBPtr[k_frameCount]{};
@@ -4259,8 +4317,11 @@ struct D3D12RendererImpl
             rt.SrcBlend       = D3D12_BLEND_SRC_ALPHA;
             rt.DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
             rt.BlendOp        = D3D12_BLEND_OP_ADD;
+            // Alpha "over" (as D3D11/Vulkan): an opaque target stays opaque —
+            // ZERO let a drop shadow punch a see-through hole into the editor
+            // viewport, which ImGui composites with blending.
             rt.SrcBlendAlpha  = D3D12_BLEND_ONE;
-            rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+            rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
             rt.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
             rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -4334,9 +4395,13 @@ struct D3D12RendererImpl
         int boundSlot = std::max(defaultSlot, 0);
         cmd->SetGraphicsRootDescriptorTable(1, uiAtlasGpu(static_cast<UINT>(boundSlot)));
 
-        // 256-byte CB slots (k_uiCBSlot), so the added row costs nothing.
+        // 256-byte CB slots (k_uiCBSlot), so the added rows cost nothing.
         struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect;
-                      glm::vec2 vp; float mode; float pad; glm::vec4 rotation; };
+                      glm::vec2 vp; float mode; float pad; glm::vec4 rotation;
+                      glm::vec4 cornerRadius, borderColor, gradientColor, innerColor,
+                                style0, style1; };
+        static_assert(sizeof(UICB) == 176 && sizeof(UICB) <= k_uiCBSlot,
+                      "UICB must match the HLSL cbuffer and fit one CB slot");
 
         // Clipping is a scissor rectangle, set only when it CHANGES — a widget
         // tree emits its quads in tree order, so equally-clipped quads arrive in
@@ -4388,6 +4453,13 @@ struct D3D12RendererImpl
             cb.mode   = obj.type == 2 ? 1.0f : 0.0f;
             cb.pad    = 0.0f;
             cb.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
+            cb.cornerRadius  = obj.cornerRadius;
+            cb.borderColor   = obj.borderColor;
+            cb.gradientColor = obj.gradientColor;
+            cb.innerColor    = obj.innerShadowColor;
+            cb.style0 = glm::vec4(obj.borderWidth, obj.gradient ? 1.0f : 0.0f, obj.gradientAngleDeg,
+                                  obj.gradientShape == 1 ? 1.0f : 0.0f);
+            cb.style1 = glm::vec4(obj.blur, obj.innerShadowBlur, 0.0f, 0.0f);
             std::memcpy(m_uiCBPtr[fi] + static_cast<size_t>(qi) * k_uiCBSlot, &cb, sizeof(cb));
             D3D12_GPU_VIRTUAL_ADDRESS addr = m_uiCB[fi]->GetGPUVirtualAddress()
                                            + static_cast<UINT64>(qi) * k_uiCBSlot;
@@ -9152,6 +9224,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     p.m_extractor.extract(*m_world, p.m_renderWorld,
                           static_cast<float>(width) / static_cast<float>(height),
                           &m_editorCamera);
+    // The UI canvas (Entity-UI + WidgetManager widgets) rides in the same
+    // RenderWorld — extract() just cleared it. Mirrors GL/Metal; without this
+    // call every UI pass below sees an empty list and draws nothing.
+    p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+                            p.m_renderWorld);
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
