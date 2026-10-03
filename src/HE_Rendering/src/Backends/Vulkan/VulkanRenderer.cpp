@@ -8262,6 +8262,9 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
     m_giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
     m_giRaysPerProbe        = std::clamp(s.raysPerProbe, 8, 1024);
     m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+    m_giShadowRays          = std::clamp(s.shadowRays, 1, 256);
+    m_giShadowHistoryWeight       = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+    m_giShadowFilter        = s.shadowFilter;
 }
 
 // Screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint B1). The
@@ -8804,7 +8807,7 @@ struct GiShadowUBOData
     glm::vec4 sunDirRadius;     // xyz = toward light, w = angular radius (radians)
     glm::vec4 frame;            // x = jitter seed, y/z = tex size, w = instance count
     glm::vec4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-    glm::vec4 localExtra;       // x = local light count
+    glm::vec4 localExtra;       // x = local light count, y = sun rays per pixel
 };
 static_assert(sizeof(GiShadowUBOData) == 7 * 16, "must match gi_shadow.comp's GiShadowUBO");
 struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::mat4 curViewProj; glm::vec4 blend; };
@@ -9636,7 +9639,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         static_assert(sizeof(shadowUbo.localPosRange) == sizeof(ml.posRange),
                       "gi_shadow.comp's local light slots must match HE::kMaxMaskedLocalLights");
         std::memcpy(shadowUbo.localPosRange, ml.posRange, sizeof(shadowUbo.localPosRange));
-        shadowUbo.localExtra = glm::vec4(float(ml.count), 0.0f, 0.0f, 0.0f);
+        shadowUbo.localExtra = glm::vec4(float(ml.count), float(m_giShadowRays), 0.0f, 0.0f);
     }
     if (!uploadGiBuffer(m_giShadowUBO[fi], &shadowUbo, sizeof(shadowUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
@@ -9644,7 +9647,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     GiTemporalUBOData tempUbo{};
     tempUbo.prevViewProj = m_giPrevViewProj;
     tempUbo.curViewProj  = vp; // clip-fixed like prevViewProj; becomes it below
-    tempUbo.blend        = glm::vec4(m_giHistValid ? 0.9f : 0.0f, 0.0f, 0.0f, 0.0f);
+    tempUbo.blend        = glm::vec4(m_giHistValid ? m_giShadowHistoryWeight : 0.0f, 0.0f, 0.0f, 0.0f);
     if (!uploadGiBuffer(m_giTemporalUBO[fi], &tempUbo, sizeof(tempUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
 

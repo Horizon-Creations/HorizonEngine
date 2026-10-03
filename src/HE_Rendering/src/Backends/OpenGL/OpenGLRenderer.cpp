@@ -1913,7 +1913,7 @@ layout(rgba16f, binding = 1) uniform writeonly image2D uOutLocal;
 uniform vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 uniform vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height
 uniform vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
-uniform vec4 uLocalExtra;       // x = local light count
+uniform vec4 uLocalExtra;       // x = local light count, y = sun rays per pixel
 
 // Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
 // (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
@@ -1965,11 +1965,17 @@ void main()
 	// term already zeroes this out, so skip the trace entirely.
 	if (dot(N, L) > 0.0)
 	{
-		vec2 xi  = giHash2(gid, uFrame.x);
-		vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
-		// Same self-intersection guards as Metal: normal-offset origin + min t.
-		vec3 origin = pv.xyz + N * 0.05;
-		sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		// spp rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		uint spp = uint(max(uLocalExtra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			vec2 xi  = giHash2(gid, uFrame.x * float(spp) + float(k));
+			vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+			// Same self-intersection guards as Metal: normal-offset origin + min t.
+			vec3 origin = pv.xyz + N * 0.05;
+			sunVis += giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		}
+		sunVis /= float(spp);
 	}
 	imageStore(uOut, ivec2(gid), vec4(sunVis));
 
@@ -5348,6 +5354,9 @@ void OpenGLRenderer::SetGISettings(const GISettings& s)
 	m_giLightRadius        = std::clamp(s.lightRadius, 0.0f, 10.0f);
 	m_giRaysPerProbe       = std::clamp(s.raysPerProbe, 8, 1024);
 	m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+	m_giShadowRays         = std::clamp(s.shadowRays, 1, 256);
+	m_giShadowHistoryWeight      = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+	m_giShadowFilter       = s.shadowFilter;
 }
 
 void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
@@ -6045,7 +6054,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 		glUniform4fv(glGetUniformLocation(m_giShadowCSProgram, "uLocalPosRange"),
 		             HE::kMaxMaskedLocalLights, glm::value_ptr(masked.posRange[0]));
 		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uLocalExtra"),
-		            static_cast<float>(masked.count), 0.0f, 0.0f, 0.0f);
+		            static_cast<float>(masked.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 	}
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
@@ -6071,7 +6080,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	                   1, GL_FALSE, glm::value_ptr(m_giPrevViewProj));
 	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uCurViewProj"),
 	                   1, GL_FALSE, glm::value_ptr(viewProj)); // becomes m_giPrevViewProj below
-	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? 0.9f : 0.0f);
+	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? m_giShadowHistoryWeight : 0.0f);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 	m_giHistValid   = true;
 	m_giHistIdx     = prevIdx;

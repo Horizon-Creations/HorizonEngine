@@ -3197,13 +3197,16 @@ void GameApplication::OnRender(float deltaTime)
 			}
 
 			// Global Illumination — GlobalIlluminationEnabled/GIIndirectIntensity/
-			// GILightRadius, capability-gated so non-Metal/non-raytracing builds no-op.
+			// GILightRadius/GIShadowQuality, capability-gated so non-Metal/non-raytracing builds no-op.
 			const bool giEnabled = GlobalState::getInstance().getCustomConfigBool("GlobalIlluminationEnabled", false) &&
 			                       r->GetCapabilities().supportsGlobalIllumination;
-			r->SetGISettings(IRenderer::GISettings{
+			IRenderer::GISettings gi{
 				giEnabled,
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIIndirectIntensity", 1.0f)),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GILightRadius", 0.5f))});
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GILightRadius", 0.5f))};
+			gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(
+				GlobalState::getInstance().getCustomConfigInt("GIShadowQuality", 1));
+			r->SetGISettings(gi);
 
 			// SSR — same config.json keys the editor writes, capability-gated
 			// (Metal deferred tile mode only in v1).

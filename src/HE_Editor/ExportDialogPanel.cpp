@@ -174,6 +174,7 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("GlobalIlluminationEnabled", cfg.GlobalIlluminationEnabled);
     put("GIIndirectIntensity",       cfg.GIIndirectIntensity);
     put("GILightRadius",             cfg.GILightRadius);
+    put("GIShadowQuality",           cfg.GIShadowQuality);
     put("OcclusionCulling",          cfg.OcclusionCulling);
     put("SSREnabled",                cfg.SSREnabled);
     put("SSRIntensity",              cfg.SSRIntensity);

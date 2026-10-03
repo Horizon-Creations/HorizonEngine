@@ -2148,7 +2148,7 @@ struct GIShadowParams {
 	float4 sunDirRadius; // xyz = direction TOWARD the light (world space), w = angular radius (radians)
 	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = SW instance count
 	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-	float4 extra;            // x = local light count
+	float4 extra;            // x = local light count, y = sun rays per pixel
 };
 
 // Two independent [0,1) values per pixel/frame, so successive frames sample
@@ -2210,21 +2210,27 @@ kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
 	// term already zeroes this out, so skip the trace entirely.
 	if (dot(N, L) > 0.0)
 	{
-		float2 xi  = giHash2(gid, P.frame.x);
-		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
-		// Normal-offset bias + min_distance floor guard self-intersection
-		// ("shadow acne") independently.
-		ray r;
-		r.origin       = pv.xyz + N * 0.05;
-		r.direction    = dir;
-		r.min_distance = 0.02;
-		r.max_distance = 10000.0;
-		intersection_params params;
-		params.accept_any_intersection(true);
-		intersection_query<triangle_data, instancing> q;
-		q.reset(r, accel, params);
-		q.next();
-		sunVis = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+		// extra.y rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		const uint spp = uint(max(P.extra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			float2 xi  = giHash2(gid, P.frame.x * float(spp) + float(k));
+			float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+			// Normal-offset bias + min_distance floor guard self-intersection
+			// ("shadow acne") independently.
+			ray r;
+			r.origin       = pv.xyz + N * 0.05;
+			r.direction    = dir;
+			r.min_distance = 0.02;
+			r.max_distance = 10000.0;
+			intersection_params params;
+			params.accept_any_intersection(true);
+			intersection_query<triangle_data, instancing> q;
+			q.reset(r, accel, params);
+			q.next();
+			sunVis += (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+		}
+		sunVis /= float(spp);
 	}
 	outShadow.write(float4(sunVis), gid);
 
@@ -3116,7 +3122,7 @@ struct GIShadowParams {
 	float4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = instance count
 	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-	float4 extra;            // x = local light count
+	float4 extra;            // x = local light count, y = sun rays per pixel
 };
 // Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
 // (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
@@ -3168,10 +3174,16 @@ kernel void giShadowRaySw(uint2 gid [[thread_position_in_grid]],
 	float sunVis = 0.0;
 	if (dot(N, L) > 0.0)
 	{
-		float2 xi  = giHash2(gid, P.frame.x);
-		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
-		float3 origin = pv.xyz + N * 0.05;
-		sunVis = giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		// extra.y rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		const uint spp = uint(max(P.extra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			float2 xi  = giHash2(gid, P.frame.x * float(spp) + float(k));
+			float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+			float3 origin = pv.xyz + N * 0.05;
+			sunVis += giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		}
+		sunVis /= float(spp);
 	}
 	outShadow.write(float4(sunVis), gid);
 
@@ -6105,7 +6117,7 @@ struct GIShadowParamsCPU
 	glm::vec4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 	glm::vec4 frame;        // x = jitter seed, y = tex width, z = tex height, w = SW instance count
 	glm::vec4 localPosRange[4]; // xyz = local light position, w = range
-	glm::vec4 extra;            // x = local light count
+	glm::vec4 extra;            // x = local light count, y = sun rays per pixel
 };
 static_assert(sizeof(GIShadowParamsCPU) == 7 * 16, "must match the MSL GIShadowParams layout");
 // Matches the MSL GIReflParams struct (kGIReflMSL + kGISWMSL's copy, used only
@@ -8353,7 +8365,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			static_assert(HE::kMaxMaskedLocalLights == 4, "GIShadowParams has 4 mask channels");
 			for (int i = 0; i < HE::kMaxMaskedLocalLights; ++i)
 				sp.localPosRange[i] = lm.posRange[i];
-			sp.extra = glm::vec4(static_cast<float>(lm.count), 0.0f, 0.0f, 0.0f);
+			sp.extra = glm::vec4(static_cast<float>(lm.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 		}
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
@@ -8400,7 +8412,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			GITemporalParamsCPU tparams;
 			tparams.prevViewProj = m_giPrevViewProj;
 			tparams.curViewProj  = viewProj; // same (unfixed) family as prevViewProj
-			tparams.blend = glm::vec4(m_giShadowHistoryValid ? 0.9f : 0.0f,
+			tparams.blend = glm::vec4(m_giShadowHistoryValid ? m_giShadowHistoryWeight : 0.0f,
 			                          static_cast<float>(width), static_cast<float>(height), 0.0f);
 			[tenc setFragmentBytes:&tparams length:sizeof(tparams) atIndex:0];
 			[tenc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -17123,6 +17135,9 @@ void MetalRenderer::SetGISettings(const GISettings& s)
 	m_giLightRadius         = s.lightRadius;
 	m_giRaysPerProbe        = s.raysPerProbe;
 	m_giProbeBudgetPerFrame = s.probeBudgetPerFrame;
+	m_giShadowRays          = std::clamp(s.shadowRays, 1, 256);
+	m_giShadowHistoryWeight = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+	m_giShadowFilter        = s.shadowFilter;
 }
 
 void MetalRenderer::SetVSync(bool enabled)

@@ -1251,6 +1251,9 @@ private:
 	float        m_giLightRadius       = 0.5f;        // degrees, shadow-ray cone
 	int          m_giRaysPerProbe        = 128;
 	int          m_giProbeBudgetPerFrame = 256;
+	int          m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
+	float        m_giShadowHistoryWeight       = 0.9f;  // shadow-mask temporal history weight
+	bool         m_giShadowFilter        = true;  // edge-aware a-trous on the mask
 	// ── Ray-traced GI reflections (docs/gi-reflections-plan.md §10) ──────────
 	// Independent of m_giEnabled: the pass needs the acceleration structures and
 	// the half-res pre-pass, not the diffuse probe field (which it uses when it

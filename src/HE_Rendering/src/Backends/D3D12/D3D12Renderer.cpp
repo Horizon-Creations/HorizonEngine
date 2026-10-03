@@ -6196,6 +6196,9 @@ struct D3D12RendererImpl
     bool  giPipelinesBuilt     = false;
     float giIndirectIntensity  = 1.0f;
     float giLightRadius        = 0.5f;  // degrees, shadow-ray cone
+    int   giShadowRays         = 2;     // sun rays per pixel (GISettings::shadowRays)
+    float giShadowHistoryWeight      = 0.9f;  // temporal history weight of the shadow mask
+    bool  giShadowFilter       = true;  // edge-aware a-trous on the mask (false = unfiltered copy)
     int   giProbeBudgetPerFrame = 256;
 
     // Pipelines + root signatures (built lazily on the first GI-active frame).
@@ -7295,7 +7298,7 @@ struct D3D12RendererImpl
                 const HE::PackedLocalShadowLights local = HE::BuildMaskedLocalLights(rw);
                 for (int i = 0; i < HE::kMaxMaskedLocalLights; ++i)
                     scb.localPosRange[i] = local.posRange[i];
-                scb.localExtra = glm::vec4(float(local.count), 0.0f, 0.0f, 0.0f);
+                scb.localExtra = glm::vec4(float(local.count), float(giShadowRays), 0.0f, 0.0f);
             }
             if (giShadowCBPtr[fi]) std::memcpy(giShadowCBPtr[fi], &scb, sizeof(scb));
             glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
@@ -7358,7 +7361,7 @@ struct D3D12RendererImpl
             static_assert(sizeof(tcb) <= k_cbSlot, "temporal CB outgrew its upload slot");
             tcb.prevViewProj = giPrevViewProj;
             tcb.curViewProj  = viewProj; // becomes giPrevViewProj below (motion-vector reprojection)
-            tcb.params = glm::vec4(giHistValid ? 0.9f : 0.0f,
+            tcb.params = glm::vec4(giHistValid ? giShadowHistoryWeight : 0.0f,
                                    float(giShadowW), float(giShadowH), 0.0f);
             if (giTemporalCBPtr[fi]) std::memcpy(giTemporalCBPtr[fi], &tcb, sizeof(tcb));
 
@@ -10699,6 +10702,9 @@ void D3D12Renderer::SetGISettings(const GISettings& s)
     p.giIndirectIntensity   = std::max(0.0f, s.indirectIntensity);
     p.giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
     p.giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+    p.giShadowRays          = std::clamp(s.shadowRays, 1, 256);
+    p.giShadowHistoryWeight       = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+    p.giShadowFilter        = s.shadowFilter;
 }
 
 void* D3D12Renderer::GetDevice()       const { return m_impl->device.Get(); }

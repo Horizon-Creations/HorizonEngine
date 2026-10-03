@@ -1319,6 +1319,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
+	m_editorConfig.GIShadowQuality             = globalstate.getCustomConfigInt("GIShadowQuality",            m_editorConfig.GIShadowQuality);
 	m_editorConfig.GIReflectionsEnabled        = globalstate.getCustomConfigBool("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	m_editorConfig.GIReflIntensity             = globalstate.getCustomConfigFloat("GIReflIntensity",          m_editorConfig.GIReflIntensity);
 	m_editorConfig.GIReflMaxRoughness          = globalstate.getCustomConfigFloat("GIReflMaxRoughness",       m_editorConfig.GIReflMaxRoughness);
@@ -2982,10 +2983,14 @@ void EditorApplication::OnRender(float dt)
 			}
 			renderer()->SetAntiAliasingSettings(aa);
 		}
-		renderer()->SetGISettings(IRenderer::GISettings{
-			m_editorConfig.GlobalIlluminationEnabled,
-			m_editorConfig.GIIndirectIntensity,
-			m_editorConfig.GILightRadius});
+		{
+			IRenderer::GISettings gi{
+				m_editorConfig.GlobalIlluminationEnabled,
+				m_editorConfig.GIIndirectIntensity,
+				m_editorConfig.GILightRadius};
+			gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+			renderer()->SetGISettings(gi);
+		}
 		{
 			IRenderer::SSRSettings ssr;
 			ssr.enabled      = m_editorConfig.SSREnabled;
@@ -4726,8 +4731,22 @@ void EditorApplication::dumpFrameHeadless()
 			const char* v = std::getenv("HE_DUMP_GI");
 			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
 		}();
-		r->SetGISettings(IRenderer::GISettings{
-			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
+		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
+		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
+		// mask's rays per pixel and its edge-aware filter on any backend.
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
+		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
+		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
+		// history 0.98, no spatial filter. Every backend renders its own.
+		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
+		{
+			gi.shadowRays    = 256;
+			gi.shadowHistory = 0.98f;
+			gi.shadowFilter  = false;
+		}
+		r->SetGISettings(gi);
 	}
 	{
 		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
@@ -11231,6 +11250,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
+	globalstate.setCustomConfigEntry("GIShadowQuality",           m_editorConfig.GIShadowQuality);
 	globalstate.setCustomConfigEntry("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	globalstate.setCustomConfigEntry("GIReflIntensity",           m_editorConfig.GIReflIntensity);
 	globalstate.setCustomConfigEntry("GIReflMaxRoughness",        m_editorConfig.GIReflMaxRoughness);

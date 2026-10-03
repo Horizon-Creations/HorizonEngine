@@ -1077,6 +1077,9 @@ private:
 	float m_giLightRadius       = 0.5f;  // degrees — sun angular radius (shadow penumbra softness)
 	int   m_giRaysPerProbe        = 128;
 	int   m_giProbeBudgetPerFrame = 256;
+	int   m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
+	float m_giShadowHistoryWeight = 0.9f;  // shadow-mask temporal history weight
+	bool  m_giShadowFilter        = true;  // edge-aware a-trous on the mask
 	// TLAS + its instance-descriptor buffer are reallocated FRESH every GI-active
 	// frame (never mutated/resized in place): the previous frame's build may still
 	// be executing on the GPU when this frame starts encoding a new one, and

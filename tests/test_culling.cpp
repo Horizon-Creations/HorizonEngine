@@ -39,6 +39,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, invalid (kept visible) otherwise")
@@ -2061,6 +2062,36 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 				if (refPcg.empty()) refPcg = p;
 				CHECK_MESSAGE(p == refPcg, "giPcg3d drifted in ", name, ": '", p, "' vs '", refPcg, "'");
 			}
+		}
+	}
+
+	SUBCASE("sun rays per pixel: every shadow kernel, the embedded ones included")
+	{
+		// Thema 134 §5.2: the sun-ray count arrives in the params block's .y lane
+		// of the local-extra row, and sample k continues the pixel's R2 walk at
+		// seed * spp + k. A kernel still tracing one ray ignores the setting on
+		// its backend/path only; one with another seed formula repeats or skips
+		// R2 points and leaves a different, slower-converging noise.
+		const std::vector<std::tuple<const char*, fs::path, size_t>> files = {
+			{ "gi_shadow.comp",     sh / "gi_shadow.comp",                     1 },
+			{ "gi_shadow_hw.comp",  sh / "gi_shadow_hw.comp",                  1 },
+			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl",                  1 },
+			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h",       1 },
+			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp",      1 },
+			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm",         2 }, // kGIShadowMSL + kGISWMSL
+		};
+		const std::regex kCount(R"(uint spp = uint\(max\((?:uLocalExtra|P\.extra)\.y, 1\.0\)\);)");
+		const std::regex kSeed(R"(giHash2\(gid(?:\.xy)?, (?:uFrame|P\.frame)\.x \* float\(spp\) \+ float\(k\)\))");
+		const std::regex kMean(R"(sunVis \+= [^;]*\? (?:0\.0 : 1\.0|1\.0 : 0\.0);\s*\}\s*sunVis /= float\(spp\);)");
+		auto count = [](const std::string& s, const std::regex& re)
+		{ return static_cast<size_t>(std::distance(std::sregex_iterator(s.begin(), s.end(), re), std::sregex_iterator())); };
+		for (const auto& [fileName, path, expected] : files)
+		{
+			const std::string name = fileName;
+			const std::string s = stripLineComments(readFile(path));
+			CHECK_MESSAGE(count(s, kCount) == expected, name, ": ray-count read found ", count(s, kCount), "x, expected ", expected);
+			CHECK_MESSAGE(count(s, kSeed)  == expected, name, ": seed*spp+k sample found ", count(s, kSeed), "x, expected ", expected);
+			CHECK_MESSAGE(count(s, kMean)  == expected, name, ": averaged sun visibility found ", count(s, kMean), "x, expected ", expected);
 		}
 	}
 

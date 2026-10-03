@@ -1254,6 +1254,9 @@ private:
 	float    m_giLightRadius        = 0.5f;
 	int      m_giRaysPerProbe        = 128;
 	int      m_giProbeBudgetPerFrame = 256;
+	int      m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
+	float    m_giShadowHistoryWeight       = 0.9f;  // shadow-mask temporal history weight
+	bool     m_giShadowFilter        = true;  // edge-aware a-trous on the mask
 
 	// ── GPU skeletal-mesh skinning ───────────────────────────────────────────
 	// Each skeletal mesh uploaded to the GPU gets three vertex buffers:

@@ -73,8 +73,8 @@ void main()
     // Neighbourhood clamp: guards OCCLUDER motion (the position check above
     // only covers receiver/camera motion) — moved shadows update in 1-2 frames
     // instead of smearing for ~30. The box is the range of the 3x3 MEANS of raw
-    // over a 5x5 footprint, widened by 0.1 — not raw min/max: raw is ONE binary
-    // ray per pixel, so inside a penumbra a 3x3 of raw taps is all-0 or all-1 by
+    // over a 5x5 footprint, widened by 0.1 — not raw min/max: raw is one or two
+    // binary rays per pixel, so inside a penumbra a 3x3 of raw taps is all-0 or all-1 by
     // chance every few frames, and clamping to that reset the history to 0/1
     // over and over (the torn, crawling edge of Thema 131).
     float r5[25];
