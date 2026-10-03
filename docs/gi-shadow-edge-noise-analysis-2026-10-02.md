@@ -433,3 +433,6 @@ offene Frage aus §6, warum Metal „nicht betroffen“ gewirkt hat, bleibt dami
 Nebenbeobachtung, nicht untersucht: Innerhalb der GI-Schatten sind dreieckige Helligkeitsstufen
 zu sehen, und auf dem Boden liegen schwache Keile. Beides sieht nach indirektem Licht aus den
 Probes aus, nicht nach der Schattenmaske. Gegen den Stand vor dem Fix ist das nicht verglichen.
+
+**Folgearbeit Restflackern (Thema 134):** Messung unter Kamerafahrt, Kontaktschatten, Optionen und
+Entwurf in [gi-shadow-restflackern-1spp-2026-10-03.md](gi-shadow-restflackern-1spp-2026-10-03.md).
