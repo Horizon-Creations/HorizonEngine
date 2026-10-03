@@ -193,10 +193,13 @@ den Lauf nicht (Windows 76 min ist der lange Pol).
           VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: |
           vulkaninfo --summary
-          vulkaninfo | grep -E 'VK_EXT_headless_surface|VK_KHR_ray_query' \
-            || { echo "::error::lavapipe without headless surface / ray query"; exit 1; }
+          vulkaninfo > vkinfo.txt
+          for ext in VK_EXT_headless_surface VK_KHR_ray_query; do
+            grep -q "$ext" vkinfo.txt || { echo "::error::lavapipe without $ext"; exit 1; }
+          done
+      # Derselbe Schluessel wie der Linux-Job: dieselben FetchContent-Checkouts.
       - uses: actions/cache@v4
-        with: { path: build/_deps, key: deps-vk-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }} }
+        with: { path: build/_deps, key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }} }
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
       - name: Assert the Vulkan backend is enabled
@@ -246,7 +249,11 @@ ohne `SDL_VIDEO_DRIVER` laufen lassen (X11-WSI von Mesa).
   diesem Mac): Mesa 25.2.x in noble-updates, Ray Query seit 24.1, Headless-Surface auf lavapipe,
   FIFO auf der Headless-Swapchain. Selbst geprüft ist nur der Offscreen-Vulkan-Code im gepinnten
   SDL 3.2.14 (`HEADLESS_SURFACE_EXTENSION_REQUIRED_TO_LOAD 0`: die Extension wird nur gemeldet,
-  wenn die Instanz sie anbietet).
+  wenn die Instanz sie anbietet). Ebenfalls geprüft: der Offscreen-Treiber ist **mitgebaut**.
+  SDL 3.2.14 setzt `SDL_OFFSCREEN` per Default `ON` (`sdl3-src/CMakeLists.txt:382`) und
+  `SDL_VULKAN` auf Linux `ON` (Z. 376); das Engine-CMake überschreibt nur
+  `SDL_SHARED/STATIC/TEST` (`CMakeLists.txt:67-69`). Die lokale Mac-Build-Config enthält
+  `SDL_VIDEO_DRIVER_OFFSCREEN 1` und `SDL_VIDEO_VULKAN 1`; die Linux-Config ist nicht gesehen.
 - **CPU-Laufzeit pro Bild unbekannt.** Volumetrische Wolken, Probe-Compute und 20–40 Settle-Frames
   bei 1280×720 auf 4 Runner-Kernen können Sekunden bis Minuten je Fall kosten.
 - **Sturz beim Dump-Quit-Abbau** (`he_shot.py`-Docstring) ist auf Vulkan/Linux unbeobachtet;
