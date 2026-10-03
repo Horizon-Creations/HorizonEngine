@@ -6035,6 +6035,21 @@ void EditorApplication::dumpFrameHeadless()
 			fm.customShaderVertGlsl = gen.vertexBody;
 			fm.blendMode            = gen.blendMode;
 			fm.domain               = gen.domain;
+			// HE_DUMP_MATPRECOMPILE bakes the floor exactly as the exporter would
+			// (Thema 123): with the clustered twin baked, the pak floor must show
+			// every pool too, pixel-identical to the cross-compiled run.
+			if (const char* pc = std::getenv("HE_DUMP_MATPRECOMPILE"); pc && *pc)
+			{
+				HE::MaterialShaderLibrary lib;
+				for (HE::RendererBackend rb : { HE::RendererBackend::OpenGL, HE::RendererBackend::Metal })
+				{
+					MaterialShaderVariant var;
+					std::string error;
+					std::vector<std::string> warnings;
+					if (HE::bakeMaterialShaderVariant(lib, rb, gen.glsl, gen.vertexBody, var, error, warnings))
+						fm.precompiledShaders.push_back(std::move(var));
+				}
+			}
 			reg.emplace<MaterialComponent>(floorE,
 				MaterialComponent{ contentManager().registerMaterial(std::move(fm)) });
 		}
