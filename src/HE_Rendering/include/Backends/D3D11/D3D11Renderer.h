@@ -43,6 +43,10 @@ public:
                              const WorldPreviewEnv& env = {},
                              glm::mat4* outViewProj = nullptr,
                              uint32_t slot = 0) override;
+    // The packaged game: Render() runs the viewport frame at the back buffer's
+    // size and copies its result into the back buffer (docs/spielpfad-postfx-
+    // parity-analyse-2026-10-03.md, Weg a).
+    void  SetSwapchainPostProcessing(bool enabled) override;
 
     // [blind] added D3D11 sky+IBL+debuglines parity
     void SetDebugLines(const std::vector<DebugLine>& lines) override;

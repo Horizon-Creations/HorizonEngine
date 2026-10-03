@@ -1458,6 +1458,12 @@ struct D3D11RendererImpl
     uint32_t viewportH    = 0;
     uint32_t viewportReqW = 0;
     uint32_t viewportReqH = 0;
+    // SetSwapchainPostProcessing: the game asks for the post chain on the
+    // swapchain path. gameViewport = the viewport pair above is the game's
+    // (back-buffer sized), not an editor request — dropped when the game stops
+    // asking, or the leftover pair would send Render() down the editor branch.
+    bool     swapchainPostFx = false;
+    bool     gameViewport    = false;
 
     // ── HDR scene color (RGBA16F) — geometry renders here ───────────────────
     ComPtr<ID3D11Texture2D>          hdrTex;
@@ -6902,14 +6908,71 @@ void D3D11Renderer::Render()
     p.gpuTimerBeginFrame();
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
+    // The packaged game (SetSwapchainPostProcessing): the post chain — HDR,
+    // bloom, tonemap, AA, TAA, SSR, and the SSAO targets with it — exists only in
+    // the viewport frame, so the game runs that frame at the back buffer's size
+    // and copies the finished RGBA8 image into the back buffer. Sized from the
+    // back buffer itself, not the window: CopyResource does nothing at all on a
+    // size or format mismatch. An editor request (HE_CAPTURE_FRAME asks for one
+    // at the window's logical size) is ignored meanwhile — honouring it would
+    // rebuild every target each frame — and the capture reads this very image.
+    ComPtr<ID3D11Texture2D> backBuffer;
+    if (p.swapchainPostFx && p.postFxReady && p.rtv)
+    {
+        ComPtr<ID3D11Resource> res;
+        p.rtv->GetResource(res.GetAddressOf());
+        res.As(&backBuffer);
+    }
+    D3D11_TEXTURE2D_DESC bbDesc{};
+    if (backBuffer) backBuffer->GetDesc(&bbDesc);
+    const bool gameChain = backBuffer && bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM
+                        && bbDesc.SampleDesc.Count == 1 && bbDesc.Width > 0 && bbDesc.Height > 0;
+    if (gameChain)
+    {
+        if (!p.gameViewport || p.viewportW != bbDesc.Width || p.viewportH != bbDesc.Height)
+        {
+            p.createViewportRT(bbDesc.Width, bbDesc.Height);
+            p.gameViewport = true;
+            if (p.viewportW == bbDesc.Width && p.viewportH == bbDesc.Height)
+                HE_LOG_INFO(RHI, "D3D11Renderer: swapchain post chain active (%ux%u)",
+                            bbDesc.Width, bbDesc.Height);
+        }
+    }
+    else if (p.gameViewport)
+    {
+        // The game stopped asking (application mode): drop its pair so the
+        // branch below draws straight into the back buffer again, and the TAA
+        // history with it — it would blend a stale world when the chain returns.
+        if (p.viewportSRV) p.retiredViewportSRVs.push_back(std::move(p.viewportSRV));
+        p.viewportTex.Reset(); p.viewportRTV.Reset(); p.viewportSRV.Reset();
+        p.viewportDepth.Reset(); p.viewportDSV.Reset(); p.viewportDepthSRV.Reset();
+        p.viewportW = p.viewportH = 0;
+        p.gameViewport    = false;
+        p.taaHistoryValid = false;
+    }
+    const bool gameFrame = gameChain && p.viewportTex && p.viewportRTV && p.viewportDSV
+                        && p.viewportW == bbDesc.Width && p.viewportH == bbDesc.Height;
+
     // Recreate the viewport RT if the editor requested a different size.
-    if (p.viewportReqW > 0 && p.viewportReqH > 0 &&
+    if (!gameChain && p.viewportReqW > 0 && p.viewportReqH > 0 &&
         (p.viewportReqW != p.viewportW || p.viewportReqH != p.viewportH))
         p.createViewportRT(p.viewportReqW, p.viewportReqH);
 
-    const bool useViewport = p.viewportRTV && p.viewportDSV;
+    const bool useViewport = !gameChain && p.viewportRTV && p.viewportDSV;
 
-    if (useViewport)
+    if (gameFrame)
+    {
+        DrawViewportFrame();
+        p.context->CopyResource(backBuffer.Get(), p.viewportTex.Get());
+        // The overlay (if any) draws on top of the copied image.
+        p.context->OMSetRenderTargets(1, p.rtv.GetAddressOf(), nullptr);
+        D3D11_VIEWPORT vp{};
+        vp.Width    = static_cast<float>(bbDesc.Width);
+        vp.Height   = static_cast<float>(bbDesc.Height);
+        vp.MaxDepth = 1.0f;
+        p.context->RSSetViewports(1, &vp);
+    }
+    else if (useViewport)
     {
         DrawViewportFrame();
 
@@ -7006,6 +7069,11 @@ void D3D11Renderer::SetViewportSize(uint32_t width, uint32_t height)
 {
     m_impl->viewportReqW = width;
     m_impl->viewportReqH = height;
+}
+
+void D3D11Renderer::SetSwapchainPostProcessing(bool enabled)
+{
+    m_impl->swapchainPostFx = enabled;   // Render() builds or drops the pair
 }
 
 void* D3D11Renderer::GetViewportTexture()
