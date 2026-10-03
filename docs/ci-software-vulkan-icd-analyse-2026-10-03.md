@@ -292,7 +292,7 @@ Job grün, 4/4 Fälle, Werte wie unten):
 
 | Fall | A/B | Signal | Rauschen | Schwelle |
 |---|---|---|---|---|
-| `nebula` | `NEBULA=0` / `0.6`, Nacht, Blick nach oben | 13,1–13,4 (35 % px > 2) | 1,2–1,4 zwischen Läufen, im Lauf 0 | 5,0 |
+| `nebula` | `NEBULA=0` / `0.6`, Nacht, Blick nach oben | 13,1–13,4 (35 % px > 2) | bis 1,4 zwischen zwei beliebigen Aufnahmen (1,2–1,4 zwischen Läufen, 1,0 im selben Lauf Offscreen gegen Xvfb): das Sternfeld bewegt sich | 5,0 |
 | `clustered` | `HE_FORWARD_CLUSTER=0` / an, `MANYLIGHTS=16` | 2,97 (18 % px > 2): **16 Lichtpools gegen 7** | bitgleich zwischen Läufen | 1,5 |
 | `gi` | `GI=0` / `1` auf `GIREFLTEST`, `GIREFL=0` | 0,46 (10 % px > 2) | max 1 auf 6 px | 0,3 |
 | `gi` HW gegen SW | `HE_GI_FORCE_SW=1` | max 1 auf 20 px: **Ray-Query-Pfad = Software-BVH** | – | nur Bericht |

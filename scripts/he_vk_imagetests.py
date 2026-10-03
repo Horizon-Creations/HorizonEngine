@@ -40,8 +40,8 @@ import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 # 2.97, GI 0.46. They separate "the feature drew" from "the feature is
 # silently off on Vulkan" (A/B byte-identical), not one shade from another.
 # Noise floor, same shot twice: clustered bit-identical across runs; GI
-# max |Δ| 1 on 6 pixels (so GI's 0.46 is signal); nebula 1.2–1.4 across runs
-# (the star field moves between runs), well under its 5.0.
+# max |Δ| 1 on 6 pixels (so GI's 0.46 is signal); nebula up to 1.4 between
+# any two shots, also within one run (the star field moves), well under 5.0.
 CASES = {
     # Nebula on the night sky (docs/nebula-backend-parity-analysis-2026-10-01.md).
     # Dome clouds at zero coverage: the volumetric march is the costliest thing
