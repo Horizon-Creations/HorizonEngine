@@ -3160,7 +3160,7 @@ void GameApplication::OnRender(float deltaTime)
 		else if (r && m_world)
 		{
 			// The settings below only reach the screen through the post chain,
-			// which D3D11 has only in its viewport frame; this sends the game
+			// which D3D11 and D3D12 have only in their viewport frame; this sends the game
 			// through it (IRenderer::SetSwapchainPostProcessing). Every frame,
 			// like everything here — the call only stores a flag.
 			r->SetSwapchainPostProcessing(true);
