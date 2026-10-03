@@ -2323,6 +2323,157 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 	}
 }
 
+TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky cube's (Thema 126)")
+{
+	// The forward SSR and GI-reflection stages of heLitP used to sit INSIDE the
+	// `heLight.fog.z > 0.5` block (fog.z = heSkyEnv bound). Vulkan raised ssr.x
+	// and never fog.z, so every graph-material reflection on Vulkan was thrown
+	// away without a trace in any log — the gate the backend set was simply
+	// never reached. Two halves keep that from coming back: the preamble keeps
+	// the stages outside the sky block, and every backend that ships the sky
+	// cube and the AO buffer actually raises their gates.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - gate structure check skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::string lib = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "material" / "MaterialShaderLibrary.cpp"));
+
+	SUBCASE("SSR and GI reflections are not nested in the heSkyEnv block")
+	{
+		const size_t fn = lib.find("vec3 heLitP(");
+		REQUIRE(fn != std::string::npos);
+		const size_t gate = lib.find("if (heLight.fog.z > 0.5)", fn);
+		REQUIRE(gate != std::string::npos);
+		const size_t open = lib.find('{', gate);
+		REQUIRE(open != std::string::npos);
+		size_t close = open;
+		for (int depth = 0; close < lib.size(); ++close)
+		{
+			if (lib[close] == '{') ++depth;
+			else if (lib[close] == '}' && --depth == 0) break;
+		}
+		REQUIRE(close < lib.size());
+		const std::string skyBlock = lib.substr(open, close - open);
+		// The block this test is about — the sky sample, nothing else.
+		CHECK(skyBlock.find("texture(heSkyEnv, Rrough)") != std::string::npos);
+		CHECK_MESSAGE(skyBlock.find("heSSRFwd") == std::string::npos,
+		              "the forward SSR stage is back inside the fog.z (heSkyEnv) block - "
+		              "a backend with SSR but no sky cube loses every reflection again");
+		CHECK_MESSAGE(skyBlock.find("heGIReflFwd") == std::string::npos,
+		              "the GI-reflection stage is back inside the fog.z (heSkyEnv) block");
+		const size_t ssr = lib.find("texture(heSSRFwd", fn);
+		const size_t gir = lib.find("texture(heGIReflFwd", fn);
+		CHECK(ssr != std::string::npos);
+		CHECK(gir != std::string::npos);
+		// Still ONE specular term for all three sources: without that gate a
+		// backend with no cube and no trace (any of them before its first sky
+		// bake, or with the cube unavailable) would grow a Fresnel term over
+		// black where it had none.
+		CHECK(lib.find("if (heLight.fog.z > 0.5 || heLight.giRefl.z > 0.5 || heLight.ssr.x > 0.5)", fn)
+		      != std::string::npos);
+	}
+
+	SUBCASE("All five backends raise the sky-cube and AO gates of graph materials")
+	{
+		// D3D11 and D3D12 joined in Schritt 3: their fillMatLight set no lit.fog
+		// field at all, so graph materials there had no sky ambient, no specular
+		// IBL, no SSAO and no height fog.
+		const std::vector<std::pair<const char*, std::string>> fills = {
+			{ "OpenGLRenderer.cpp", stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")) },
+			{ "MetalRenderer.mm",   stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")) },
+			{ "VulkanRenderer.cpp", stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp")) },
+			{ "D3D11Renderer.cpp",  stripLineComments(readFile(be / "D3D11" / "D3D11Renderer.cpp")) },
+			{ "D3D12Renderer.cpp",  stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp")) },
+		};
+		const std::regex fogZ(R"(\.fog\[2\]\s*=\s*\w+\s*\?\s*1\.0f\s*:\s*0\.0f;)");
+		const std::regex fogW(R"(\.fog\[3\]\s*=\s*\w+\s*\?\s*1\.0f\s*:\s*0\.0f;)");
+		for (const auto& [file, text] : fills)
+		{
+			CHECK_MESSAGE(std::regex_search(text, fogZ), std::string(file), " no longer raises heLight.fog.z (heSkyEnv)");
+			CHECK_MESSAGE(std::regex_search(text, fogW), std::string(file), " no longer raises heLight.fog.w (heAO)");
+		}
+	}
+
+	SUBCASE("Vulkan binds exactly what its gates promise")
+	{
+		// The gate and the descriptor must be decided by the SAME flag: fog.z with
+		// a white cube bound would tint everything white, fog.w with the white
+		// stand-in would silently drop occlusion.
+		const std::string vk = stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp"));
+		CHECK(vk.find("lit.fog[2] = m_skyEnvValid      ? 1.0f : 0.0f;") != std::string::npos);
+		CHECK(vk.find("lit.fog[3] = m_ssaoRanThisFrame ? 1.0f : 0.0f;") != std::string::npos);
+		CHECK(vk.find("m_skyEnvValid ? m_skyEnvView : m_whiteCubeView") != std::string::npos);
+		CHECK(vk.find("m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView") != std::string::npos);
+		CHECK(vk.find("wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);") != std::string::npos);
+		CHECK(vk.find("wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);") != std::string::npos);
+		// And the cube is the SHARED bake, not a fourth hand-kept sky.
+		CHECK(vk.find("HE::BuildSkyEnvFaceRow(") != std::string::npos);
+	}
+
+	SUBCASE("D3D11 and D3D12 bind exactly what their gates promise")
+	{
+		// Same rule as Vulkan: gate and view come from ONE flag. Neither backend
+		// had a sky cube before, so both bake the shared one — before the first
+		// fillMatLight of the frame, which reads the flag.
+		const fs::path inc = root / "src" / "HE_Rendering" / "include" / "Backends";
+		const std::string d11  = stripLineComments(readFile(be / "D3D11" / "D3D11Renderer.cpp"));
+		const std::string d12  = stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp"));
+		const std::string bind = stripLineComments(readFile(inc / "D3D11" / "D3D11MaterialBindings.h"));
+		for (const std::string* src : { &d11, &d12 })
+		{
+			CHECK(src->find("HE::BuildSkyEnvFaceRow(") != std::string::npos);
+			CHECK(src->find("const bool skyEnvBound = p.m_skyEnvValid;") != std::string::npos);
+			CHECK(src->find("lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;") != std::string::npos);
+			CHECK(src->find("lit.fog[3] = aoActive    ? 1.0f : 0.0f;") != std::string::npos);
+			const size_t bake = src->find("p.updateSkyEnvCube(");
+			const size_t fill = src->find("fillMatLight(false, false);");
+			REQUIRE(bake != std::string::npos);
+			REQUIRE(fill != std::string::npos);
+			CHECK_MESSAGE(bake < fill, "the sky cube must be baked before fillMatLight reads m_skyEnvValid");
+		}
+
+		// D3D11: the AO gate is the built-in shader's own (the SRV it reads at
+		// t2 is not the white dummy), and heAO's t16 is the built-in pass's
+		// forward SSR result — the material draw must hand it back, or every
+		// built-in draw after a graph material reflects the occlusion buffer.
+		CHECK(d11.find("fillMatLight(giShadingActive, aoWanted && aoSRV != p.whiteSRV.Get());") != std::string::npos);
+		CHECK(d11.find("Texture2D    uSSRFwd    : register(t16);") != std::string::npos);
+		CHECK(d11.find("p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,") != std::string::npos);
+		CHECK(d11.find("aoSRV, p.m_matWeightSampler.Get());") != std::string::npos);
+		CHECK(d11.find("HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);") != std::string::npos);
+		CHECK(bind.find("constexpr UINT kSkyEnvSrvSlot     = 15;") != std::string::npos);
+		CHECK(bind.find("constexpr UINT kSkyEnvSamplerSlot = 15;") != std::string::npos);
+		CHECK(bind.find("constexpr UINT kAOSrvSlot         = 16;") != std::string::npos);
+		CHECK(bind.find("ctx->PSSetShaderResources(kAOSrvSlot, 1, &builtinSSR);") != std::string::npos);
+		// …and those registers are where the HLSL pin table puts the preamble's
+		// (raw source: the pin rows name their binding only in the comment).
+		const std::string libRaw = readFile(root / "src" / "HE_Rendering" / "src" / "material" /
+		                                    "MaterialShaderLibrary.cpp");
+		CHECK(libRaw.find("{ Stage::Fragment, 0, 15, 15 },     // heSkyEnv") != std::string::npos);
+		CHECK(libRaw.find("{ Stage::Fragment, 0, 16, 16,  0 }, // heAO") != std::string::npos);
+
+		// D3D12: both views are written into the draw's OWN block, after the
+		// template copy (the copy would overwrite them otherwise), under the flags
+		// the gates were raised with.
+		CHECK(d12.find("const bool matAOActive = aoWanted && p.ssaoBlurRT != nullptr;") != std::string::npos);
+		CHECK(d12.find("fillMatLight(giShadingActive, matAOActive);") != std::string::npos);
+		const size_t copy = d12.find("CopyDescriptorsSimple(D3D12RendererImpl::k_matSrvPerDraw, p.matSrvCpu(blk)");
+		const std::regex sky(R"(if \(p\.m_skyEnvValid\)\s*p\.srvForSkyEnvCube\(p\.matSrvCpu\(blk \+ HE::d3d12mat::kSlotSkyEnv\)\);)");
+		const std::regex ao(R"(if \(matAOActive\)\s*p\.srvIntoHeapSlot\(p\.ssaoBlurRT\.Get\(\), DXGI_FORMAT_R8_UNORM,\s*p\.matSrvCpu\(blk \+ HE::d3d12mat::kSlotAO\)\);)");
+		std::smatch skyM, aoM;
+		REQUIRE(copy != std::string::npos);
+		REQUIRE(std::regex_search(d12, skyM, sky));
+		REQUIRE(std::regex_search(d12, aoM, ao));
+		CHECK(static_cast<size_t>(skyM.position(0)) > copy);
+		CHECK(static_cast<size_t>(aoM.position(0)) > copy);
+	}
+}
+
 TEST_CASE("Clustered lighting: heLitP's forward twin matches the deferred resolve's (Thema 117)")
 {
 	// MaterialShaderLibrary.cpp carries the cluster shading twice: the clustered

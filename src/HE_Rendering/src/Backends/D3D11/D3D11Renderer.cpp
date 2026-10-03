@@ -27,6 +27,9 @@
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
+#include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
+#include <JobSystem/JobSystem.h>              // parallel_for for that bake
+#include <glm/gtc/packing.hpp>                // packHalf1x16 (RGBA16F cube upload)
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h"                   // he::shaderc::compileHlslPinned (sky pass)
 #endif
@@ -1268,6 +1271,8 @@ struct D3D11RendererImpl
     //   t14 heLandscapeWeights + SamplerState s0 (linear-CLAMP), per draw, see
     //   D3D11MaterialBindings.h — s0 is ALSO the built-in pass's albedo sampler
     //   and goes back to it after every material draw.
+    //   t15/s15 heSkyEnv (the cube below) + t16 heAO, per draw — t16 is the
+    //   built-in pass's forward SSR result and goes back to it (Thema 126).
     //   t24..t26 ByteAddressBuffers (fragmentClustered's cluster lists): the
     //   raw twins above, bound once per fill in uploadClusters (Thema 117).
     HE::MaterialShaderLibrary m_matShaderLib; // unguarded member (like Vulkan/D3D12)
@@ -1282,6 +1287,16 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>       m_matParamCB;  // HeParams (256 B)  — b3 PS / b9 WPO VS, filled per draw
     ComPtr<ID3D11SamplerState> m_matSampler;  // linear-wrap, bound at s2 + s4..s7
     ComPtr<ID3D11SamplerState> m_matWeightSampler; // linear-clamp, bound at s0 for the draw (heLandscapeWeights)
+    // Image-based-ambient sky cube for graph materials (heSkyEnv, t15/s15 per
+    // draw, D3D11MaterialBindings.h): the SAME HE::BuildSkyEnvFaceRow bake GL,
+    // Metal and Vulkan sample, re-baked on the CPU when the sun moves
+    // (updateSkyEnvCube). RGBA16F like Vulkan's. m_skyEnvValid gates
+    // heLight.fog.z — the cube's colour also feeds heApplyFog.
+    static constexpr int k_skyEnvFace = 128; // GL/Metal/Vulkan face size
+    ComPtr<ID3D11Texture2D>          m_skyEnvTex;
+    ComPtr<ID3D11ShaderResourceView> m_skyEnvSRV;
+    bool      m_skyEnvValid  = false; // the cube holds a bake (fog.z may be raised)
+    glm::vec3 m_skyEnvSunDir = glm::vec3(0.0f);
     bool m_matReady      = false; // true once createMaterialResources() succeeded
     bool m_matHlslLogged = false; // one-time dump of generated HLSL for HW verify
     // createMaterialResources() + GetOrBuildMaterialShaders() are defined inline below.
@@ -4323,6 +4338,71 @@ struct D3D11RendererImpl
         Logger::LogTo(HE::Log::Cat::RHI, m_matReady ? Logger::LogLevel::Info : Logger::LogLevel::Error,
             m_matReady ? "D3D11Renderer: A4 material resources created"
                        : "D3D11Renderer: A4 material resource allocation failed");
+
+        // The sky cube for heSkyEnv (Thema 126). Optional: without it graph
+        // materials keep fog.z = 0 — flat ambient, no specular IBL, no fog,
+        // exactly the state before the cube existed — so a failure does not
+        // touch m_matReady. Filled by the first updateSkyEnvCube.
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width            = static_cast<UINT>(k_skyEnvFace);
+        td.Height           = static_cast<UINT>(k_skyEnvFace);
+        td.MipLevels        = 1;
+        td.ArraySize        = 6;
+        td.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Usage            = D3D11_USAGE_DEFAULT;
+        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+        td.MiscFlags        = D3D11_RESOURCE_MISC_TEXTURECUBE;
+        D3D11_SHADER_RESOURCE_VIEW_DESC cv{};
+        cv.Format                    = td.Format;
+        cv.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURECUBE;
+        cv.TextureCube.MostDetailedMip = 0;
+        cv.TextureCube.MipLevels     = 1;
+        if (FAILED(device->CreateTexture2D(&td, nullptr, &m_skyEnvTex)) ||
+            FAILED(device->CreateShaderResourceView(m_skyEnvTex.Get(), &cv, &m_skyEnvSRV)))
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: sky environment cube unavailable — graph materials keep flat ambient");
+            m_skyEnvSRV.Reset();
+            m_skyEnvTex.Reset();
+        }
+        m_skyEnvValid = false;
+    }
+
+    // Re-bake the heSkyEnv cube when the sun moved — GL's UpdateSkyEnvCube with
+    // the same 2e-3 dead-band (≈0.11°, invisible on a low-frequency ambient
+    // cube, but it halves the rebuild rate under day-night auto-advance). The
+    // bake is the shared row function, parallel over (face, row) like
+    // GL/Metal/Vulkan; the upload is one UpdateSubresource per face. Runs on
+    // the immediate context before the frame's first material draw, so no
+    // draw of this frame can see a half-written cube.
+    void updateSkyEnvCube(ID3D11DeviceContext* ctx, const glm::vec3& sunDir)
+    {
+        if (!m_skyEnvTex) return;
+        if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
+
+        constexpr int N = k_skyEnvFace;
+        std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
+        parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
+        {
+            const int f = static_cast<int>(idx / N);
+            const int t = static_cast<int>(idx % N);
+            HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
+        }, "SkyEnvBake", 1);
+        std::vector<uint16_t> half(px.size());
+        for (size_t i = 0; i < px.size(); ++i)
+            half[i] = glm::packHalf1x16(px[i]);
+
+        // D3D cube faces are +X,-X,+Y,-Y,+Z,-Z (array slices 0..5) with the
+        // same per-face (s,t) table as GL, row 0 = t 0 — the bake's face order
+        // and texel layout go in unchanged, the claim SkyEnvBake.h makes for
+        // Metal and Vulkan.
+        const size_t faceHalfs = static_cast<size_t>(N) * N * 4;
+        const UINT   rowPitch  = static_cast<UINT>(N * 4 * sizeof(uint16_t));
+        for (UINT f = 0; f < 6; ++f)
+            ctx->UpdateSubresource(m_skyEnvTex.Get(), D3D11CalcSubresource(0, f, 1), nullptr,
+                                   half.data() + f * faceHalfs, rowPitch, rowPitch * static_cast<UINT>(N));
+        m_skyEnvSunDir = sunDir;
+        m_skyEnvValid  = true;
     }
 
     // Build (or fetch from cache) the per-material VS + PS + input layout from the
@@ -5526,6 +5606,9 @@ void D3D11Renderer::Shutdown()
     m_impl->m_matParamCB.Reset();
     m_impl->m_matSampler.Reset();
     m_impl->m_matWeightSampler.Reset();
+    m_impl->m_skyEnvSRV.Reset();
+    m_impl->m_skyEnvTex.Reset();
+    m_impl->m_skyEnvValid = false;
     // Screen-space decals + graph project textures (ComPtr auto-release).
     m_impl->decalTexCache.clear();
     m_impl->graphTexCache.clear();
@@ -5848,8 +5931,11 @@ void D3D11Renderer::DrawScene(int width, int height)
     // giParams.z is only known after the GI passes ran (refilled in the backbuffer
     // branch). Now fills the FULL v2 light window from the dominant directional light
     // (was sun-only sky values before — graph materials never saw point/spot lights
-    // on D3D11 and stayed sun-lit at night).
-    auto fillMatLight = [&](bool giActive)
+    // on D3D11 and stayed sun-lit at night). `aoActive`: this frame's SSAO result
+    // is the AO SRV the material draw puts on t16 — the built-in shader's own
+    // gate (fillPerFrame's), a parameter because that SRV only exists after
+    // the passes below ran.
+    auto fillMatLight = [&](bool giActive, bool aoActive)
     {
         if (!(p.m_matReady && p.m_matLightCB)) return;
         HE::MaterialShaderLibrary::Lighting lit{};
@@ -5944,6 +6030,17 @@ void D3D11Renderer::DrawScene(int width, int height)
         // make every graph material sample an unbound sampler. Closing it means
         // pinning the whole preamble, which is its own, larger job
         // (docs/ssr-cross-backend-plan.md §2.3 head 1 / C5).
+        //
+        // Height fog + the two image gates, the GL/Metal/Vulkan fill (Thema
+        // 126; lit.fog stayed all-zero here before, so graph materials had no
+        // sky ambient, no specular IBL, no SSAO and no fog). z: the baked sky
+        // cube exists — the material draw binds it on t15 exactly then. w: the
+        // material draw puts this frame's AO on t16 (BindSkyEnvAndAO).
+        const bool skyEnvBound = p.m_skyEnvValid;
+        lit.fog[0] = m_environment.fogDensity;
+        lit.fog[1] = m_environment.fogHeightFalloff;
+        lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
+        lit.fog[3] = aoActive    ? 1.0f : 0.0f;
         D3D11_MAPPED_SUBRESOURCE lm{};
         if (SUCCEEDED(ctx->Map(p.m_matLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &lm)))
         {
@@ -5951,7 +6048,11 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->Unmap(p.m_matLightCB.Get(), 0);
         }
     };
-    fillMatLight(false);
+    // The sky cube first: fillMatLight reads m_skyEnvValid, and every graph
+    // material of the frame samples what this uploads.
+    if (p.m_matReady)
+        p.updateSkyEnvCube(ctx, p.m_renderWorld.sunDirection);
+    fillMatLight(false, false);
 
     const UINT stride = 8 * sizeof(float);
     const UINT offset = 0;
@@ -6230,7 +6331,7 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->PSSetShaderResources(16, 1, &ssrSRV);
             fillPerFrame(giShadingActive,
                          aoWanted && aoSRV != p.whiteSRV.Get(), ssrActive);
-            fillMatLight(giShadingActive);
+            fillMatLight(giShadingActive, aoWanted && aoSRV != p.whiteSRV.Get());
             // heLitP GI masks for graph materials: sun mask on t10, per-light
             // local mask on t11 (the REAL mask when GI ran this frame).
             // Samplers s10/s11 = linear clamp.
@@ -6480,6 +6581,14 @@ void D3D11Renderer::DrawScene(int width, int height)
                             giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
                             giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
                             p.m_matWeightSampler.Get());
+                        // heSkyEnv (t15/s15) + heAO (t16) (Thema 126): the baked sky cube
+                        // under the same flag fillMatLight raised fog.z with, and the AO
+                        // SRV the built-in shader reads at t2 (white when SSAO did not
+                        // run, fog.w is 0 then). t16 is the built-in pass's forward SSR
+                        // result — restored below, with t15.
+                        HE::d3d11mat::BindSkyEnvAndAO(ctx,
+                            p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
+                            aoSRV, p.m_matWeightSampler.Get());
 
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             // std140 U block (176 B) at b1 VS.
@@ -6538,7 +6647,10 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // t14 (heLandscapeWeights) comes off with it. And t17/t18/s1/s3:
                         // the DDGI atlases go, the built-in pass's local shadow atlas,
                         // cluster lights, AO point sampler and shadow sampler come back.
+                        // And t15/t16: the sky cube comes off, the forward SSR result
+                        // (uSSRFwd) goes back on t16.
                         HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
+                        HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
                         {
                             HE::d3d11mat::BuiltinGISlots builtin;
                             builtin.localShadowArray = localShadowSrv_;
