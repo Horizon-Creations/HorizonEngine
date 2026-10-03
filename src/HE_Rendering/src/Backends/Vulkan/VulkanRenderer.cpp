@@ -29,6 +29,9 @@
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/SkyNoise3D.h>
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, compiled to SPIR-V for the sky pass
+#include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake (graph materials' heSkyEnv)
+#include <JobSystem/JobSystem.h>             // parallel_for for that bake
+#include <glm/gtc/packing.hpp>               // packHalf1x16 (RGBA16F cube upload)
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h"                   // he::shaderc::compile (sky pass)
 #endif
@@ -486,6 +489,7 @@ void VulkanRenderer::Render()
         // split, with `useViewport` resolved to false. No post chain on this
         // path, so nothing would resolve a TAA jitter.
         m_taaFrame = false;
+        updateSkyEnvCube(cmd); // before any pass — graph materials' heSkyEnv
         EncodeShadowMap(cmd, float(std::max(m_swapExtent.width,  1u))
                            / float(std::max(m_swapExtent.height, 1u)));
         m_decalDepthActive = &m_decalDepth;
@@ -582,6 +586,9 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     if (m_taaFrame)
         m_taaJitter = HE::taaJitter(m_taaFrameIndex++);
     m_taaSceneSorted = false;
+
+    // Graph materials' sky cube (heSkyEnv): a transfer, so before every pass.
+    updateSkyEnvCube(cmd);
 
     // Cascade shadow maps first, in their own render passes (before the scene
     // pass), fit against the aspect of the target the scene will be drawn into.
@@ -2390,6 +2397,9 @@ void VulkanRenderer::createMaterialResources()
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
     }
+    // The real sky cube that replaces the white one once baked (optional —
+    // a failure keeps fog.z at 0, see createSkyEnvCube).
+    createSkyEnvCube();
 
     // ── Descriptor set 0 layout: HE::vkmat::kBindings (VulkanMaterialLayout.h), the
     //    table he_tests reflects every node shader's SPIR-V against. Canonical bindings
@@ -2513,6 +2523,151 @@ void VulkanRenderer::destroyMaterialResources()
     if (m_whiteCubeView)     { vkDestroyImageView(m_device, m_whiteCubeView, nullptr);          m_whiteCubeView  = VK_NULL_HANDLE; }
     if (m_whiteCubeImage)    { vkDestroyImage(m_device, m_whiteCubeImage, nullptr);             m_whiteCubeImage = VK_NULL_HANDLE; }
     if (m_whiteCubeMem)      { vkFreeMemory(m_device, m_whiteCubeMem, nullptr);                 m_whiteCubeMem   = VK_NULL_HANDLE; }
+    destroySkyEnvCube();
+}
+
+// ── Image-based-ambient sky cube for graph materials (heSkyEnv, binding 15) ──
+// GL and Metal bake HE::SkyColorCPU into a 128² cube and raise heLight.fog.z;
+// this backend bound a white cube and kept fog.z at 0, so graph materials had
+// no sky ambient, no specular IBL and no fog (heApplyFog needs the cube for its
+// colour). The bake below is the same shared row function at the same size;
+// only the upload is Vulkan's: a persistently mapped staging buffer per frame
+// in flight and a copy recorded into the frame's own command buffer, so a
+// moving sun never stalls the queue the way a one-shot submit would.
+void VulkanRenderer::createSkyEnvCube()
+{
+    const VkFormat fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.flags         = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = fmt;
+    ici.extent        = { static_cast<uint32_t>(k_skyEnvFace), static_cast<uint32_t>(k_skyEnvFace), 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 6;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool ok = vkCreateImage(m_device, &ici, nullptr, &m_skyEnvImage) == VK_SUCCESS;
+    if (ok)
+    {
+        VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, m_skyEnvImage, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        ok = vkAllocateMemory(m_device, &mai, nullptr, &m_skyEnvMem) == VK_SUCCESS;
+        if (ok) vkBindImageMemory(m_device, m_skyEnvImage, m_skyEnvMem, 0);
+    }
+    if (ok)
+    {
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image            = m_skyEnvImage;
+        vci.viewType         = VK_IMAGE_VIEW_TYPE_CUBE;
+        vci.format           = fmt;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+        ok = vkCreateImageView(m_device, &vci, nullptr, &m_skyEnvView) == VK_SUCCESS;
+    }
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(k_skyEnvFace) * k_skyEnvFace * 6 * 4 * sizeof(uint16_t);
+    for (uint32_t f = 0; ok && f < k_maxFramesInFlight; ++f)
+    {
+        MatFrameBuf& sb = m_skyEnvStaging[f];
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = bytes;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        ok = vkCreateBuffer(m_device, &bci, nullptr, &sb.buf) == VK_SUCCESS;
+        if (!ok) break;
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, sb.buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        ok = vkAllocateMemory(m_device, &mai, nullptr, &sb.mem) == VK_SUCCESS;
+        if (!ok) break;
+        vkBindBufferMemory(m_device, sb.buf, sb.mem, 0);
+        ok = vkMapMemory(m_device, sb.mem, 0, bytes, 0, &sb.mapped) == VK_SUCCESS;
+    }
+    if (!ok)
+    {
+        // Not fatal: graph materials keep the white stand-in with fog.z = 0,
+        // exactly the state before this cube existed.
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: sky environment cube unavailable — graph materials keep flat ambient");
+        destroySkyEnvCube();
+    }
+    m_skyEnvValid = false;
+}
+
+void VulkanRenderer::destroySkyEnvCube()
+{
+    for (MatFrameBuf& sb : m_skyEnvStaging)
+    {
+        if (sb.mapped) vkUnmapMemory(m_device, sb.mem);
+        if (sb.buf)    vkDestroyBuffer(m_device, sb.buf, nullptr);
+        if (sb.mem)    vkFreeMemory(m_device, sb.mem, nullptr);
+        sb = {};
+    }
+    if (m_skyEnvView)  { vkDestroyImageView(m_device, m_skyEnvView, nullptr); m_skyEnvView  = VK_NULL_HANDLE; }
+    if (m_skyEnvImage) { vkDestroyImage(m_device, m_skyEnvImage, nullptr);    m_skyEnvImage = VK_NULL_HANDLE; }
+    if (m_skyEnvMem)   { vkFreeMemory(m_device, m_skyEnvMem, nullptr);        m_skyEnvMem   = VK_NULL_HANDLE; }
+    m_skyEnvValid = false;
+}
+
+// Recorded OUTSIDE any render pass, before the first pass of the frame. The sun
+// is m_renderWorld.sunDirection — what GL and Metal bake from — but on this
+// backend the extractor runs inside DrawScene, i.e. AFTER this point, so the
+// bake can trail the sun by one frame (EncodeShadowMap re-extracts first when
+// shadows are on). For a low-frequency ambient cube under GL's own 0.11°
+// dead-band that is invisible; a static sun is exact from the second frame.
+void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
+{
+    if (!m_skyEnvView || !m_skyEnvStaging[m_currentFrame].mapped) return;
+    const glm::vec3 sunDir = m_renderWorld.sunDirection;
+    if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
+
+    constexpr int N = k_skyEnvFace;
+    std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
+    // Parallel over (face, row) like GL/Metal: rows are independent and
+    // HE::SkyColorCPU is pure. Grain 1 — a row is tens of µs.
+    parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
+    {
+        const int f = static_cast<int>(idx / N);
+        const int t = static_cast<int>(idx % N);
+        HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
+    }, "SkyEnvBake", 1);
+    uint16_t* dst = static_cast<uint16_t*>(m_skyEnvStaging[m_currentFrame].mapped);
+    for (size_t i = 0; i < px.size(); ++i)
+        dst[i] = glm::packHalf1x16(px[i]);
+
+    // Vulkan cube faces are +X,-X,+Y,-Y,+Z,-Z with GL's (s,t) table, and row 0 of
+    // the upload is t = 0 in both APIs — the bake's face order and texel layout
+    // go in unchanged, no flip (the same claim SkyEnvBake.h makes for Metal).
+    const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+    VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = m_skyEnvImage; b.subresourceRange = range;
+    // The previous frame (still in flight on the same queue) may be sampling the
+    // cube: the barrier's first scope covers every earlier submission, so its
+    // fragment reads finish before the copy overwrites the texels. The first
+    // bake comes from UNDEFINED — nothing has sampled it yet (fog.z was 0).
+    b.oldLayout     = m_skyEnvValid ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    b.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.srcAccessMask = m_skyEnvValid ? VK_ACCESS_SHADER_READ_BIT : 0u;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd,
+        m_skyEnvValid ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    VkBufferImageCopy region{};
+    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6 };
+    region.imageExtent      = { static_cast<uint32_t>(N), static_cast<uint32_t>(N), 1 };
+    vkCmdCopyBufferToImage(cmd, m_skyEnvStaging[m_currentFrame].buf, m_skyEnvImage,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    b.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+    m_skyEnvSunDir = sunDir;
+    m_skyEnvValid  = true;
 }
 
 // `precompiled` (the pak's baked SPIR-V for Vulkan, MaterialShaderLibrary::precompiledFor)
@@ -6581,6 +6736,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.ssr[1] = m_ssrIntensity;
         lit.ssr[2] = m_ssrMaxRoughness;
         lit.ssr[3] = 0.0f;
+        // Height fog + the two image gates, the GL/Metal fill verbatim. z: the
+        // baked sky cube is bound at binding 15 (image-based ambient, specular
+        // IBL, fog colour). w: this frame's blurred SSAO is bound at binding 16 —
+        // the exact gate the built-in shader's viewport.z uses, so a graph
+        // material is occluded on precisely the frames a built-in one is.
+        lit.fog[0] = m_environment.fogDensity;
+        lit.fog[1] = m_environment.fogHeightFalloff;
+        lit.fog[2] = m_skyEnvValid      ? 1.0f : 0.0f;
+        lit.fog[3] = m_ssaoRanThisFrame ? 1.0f : 0.0f;
         lit.ambient[0] = m_renderWorld.ambient.r;
         lit.ambient[1] = m_renderWorld.ambient.g;
         lit.ambient[2] = m_renderWorld.ambient.b;
@@ -6921,15 +7085,30 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 localShadows ? m_localShadowView : m_whiteArrayView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(14, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &localII);
-                            // heSkyEnv (15): white cube — fog.z stays 0 here.
-                            VkDescriptorImageInfo skyII{ m_albedoSampler, m_whiteCubeView,
-                                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            // heSkyEnv (15): the baked sky cube once updateSkyEnvCube
+                            // filled it (fog.z = 1 exactly then), the white cube before.
+                            // Linear-CLAMP like GL/Metal's cube sampler; the repeat
+                            // address mode of m_albedoSampler is moot on a cube, but the
+                            // SSAO sampler is the clamp one this backend already has.
+                            VkDescriptorImageInfo skyII{
+                                m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler,
+                                m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
-                            // heAO (16), heGIReflFwd (32), heCloudShadow (33): white —
-                            // their gates (fog.w, giRefl.z, cloudShadowB.x) stay 0 here.
+                            // heAO (16): this frame's blurred SSAO — the image the
+                            // built-in shader reads at scene binding 3, parked in
+                            // SHADER_READ_ONLY by the blur pass's finalLayout. White
+                            // otherwise; fog.w is 0 then. heLitP texelFetches it, so the
+                            // sampler is only there because the descriptor is combined.
                             VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
+                            VkDescriptorImageInfo aoII{
+                                m_ssaoRanThisFrame ? m_ssaoSampler      : m_albedoSampler,
+                                m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);
+                            // heGIReflFwd (32), heCloudShadow (33): white — their gates
+                            // (giRefl.z, cloudShadowB.x) stay 0 here.
                             // heGIIrradiance / heGIVisibility (17/18): the probe atlases
                             // under matGiProbes (the gate FillMaterialGIProbe raised), in
                             // GENERAL like everywhere else they are sampled; white

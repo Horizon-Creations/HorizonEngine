@@ -2323,6 +2323,93 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 	}
 }
 
+TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky cube's (Thema 126)")
+{
+	// The forward SSR and GI-reflection stages of heLitP used to sit INSIDE the
+	// `heLight.fog.z > 0.5` block (fog.z = heSkyEnv bound). Vulkan raised ssr.x
+	// and never fog.z, so every graph-material reflection on Vulkan was thrown
+	// away without a trace in any log — the gate the backend set was simply
+	// never reached. Two halves keep that from coming back: the preamble keeps
+	// the stages outside the sky block, and every backend that ships the sky
+	// cube and the AO buffer actually raises their gates.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - gate structure check skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::string lib = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "material" / "MaterialShaderLibrary.cpp"));
+
+	SUBCASE("SSR and GI reflections are not nested in the heSkyEnv block")
+	{
+		const size_t fn = lib.find("vec3 heLitP(");
+		REQUIRE(fn != std::string::npos);
+		const size_t gate = lib.find("if (heLight.fog.z > 0.5)", fn);
+		REQUIRE(gate != std::string::npos);
+		const size_t open = lib.find('{', gate);
+		REQUIRE(open != std::string::npos);
+		size_t close = open;
+		for (int depth = 0; close < lib.size(); ++close)
+		{
+			if (lib[close] == '{') ++depth;
+			else if (lib[close] == '}' && --depth == 0) break;
+		}
+		REQUIRE(close < lib.size());
+		const std::string skyBlock = lib.substr(open, close - open);
+		// The block this test is about — the sky sample, nothing else.
+		CHECK(skyBlock.find("texture(heSkyEnv, Rrough)") != std::string::npos);
+		CHECK_MESSAGE(skyBlock.find("heSSRFwd") == std::string::npos,
+		              "the forward SSR stage is back inside the fog.z (heSkyEnv) block - "
+		              "a backend with SSR but no sky cube loses every reflection again");
+		CHECK_MESSAGE(skyBlock.find("heGIReflFwd") == std::string::npos,
+		              "the GI-reflection stage is back inside the fog.z (heSkyEnv) block");
+		const size_t ssr = lib.find("texture(heSSRFwd", fn);
+		const size_t gir = lib.find("texture(heGIReflFwd", fn);
+		CHECK(ssr != std::string::npos);
+		CHECK(gir != std::string::npos);
+		// Still ONE specular term for all three sources: without that gate the
+		// no-cube, no-trace backends (D3D11/D3D12 today) would grow a Fresnel
+		// term over black where they had none.
+		CHECK(lib.find("if (heLight.fog.z > 0.5 || heLight.giRefl.z > 0.5 || heLight.ssr.x > 0.5)", fn)
+		      != std::string::npos);
+	}
+
+	SUBCASE("GL, Metal and Vulkan raise the sky-cube and AO gates of graph materials")
+	{
+		const std::vector<std::pair<const char*, std::string>> fills = {
+			{ "OpenGLRenderer.cpp", stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")) },
+			{ "MetalRenderer.mm",   stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")) },
+			{ "VulkanRenderer.cpp", stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp")) },
+		};
+		const std::regex fogZ(R"(\.fog\[2\]\s*=\s*\w+\s*\?\s*1\.0f\s*:\s*0\.0f;)");
+		const std::regex fogW(R"(\.fog\[3\]\s*=\s*\w+\s*\?\s*1\.0f\s*:\s*0\.0f;)");
+		for (const auto& [file, text] : fills)
+		{
+			CHECK_MESSAGE(std::regex_search(text, fogZ), std::string(file), " no longer raises heLight.fog.z (heSkyEnv)");
+			CHECK_MESSAGE(std::regex_search(text, fogW), std::string(file), " no longer raises heLight.fog.w (heAO)");
+		}
+	}
+
+	SUBCASE("Vulkan binds exactly what its gates promise")
+	{
+		// The gate and the descriptor must be decided by the SAME flag: fog.z with
+		// a white cube bound would tint everything white, fog.w with the white
+		// stand-in would silently drop occlusion.
+		const std::string vk = stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp"));
+		CHECK(vk.find("lit.fog[2] = m_skyEnvValid      ? 1.0f : 0.0f;") != std::string::npos);
+		CHECK(vk.find("lit.fog[3] = m_ssaoRanThisFrame ? 1.0f : 0.0f;") != std::string::npos);
+		CHECK(vk.find("m_skyEnvValid ? m_skyEnvView : m_whiteCubeView") != std::string::npos);
+		CHECK(vk.find("m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView") != std::string::npos);
+		CHECK(vk.find("wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);") != std::string::npos);
+		CHECK(vk.find("wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);") != std::string::npos);
+		// And the cube is the SHARED bake, not a fourth hand-kept sky.
+		CHECK(vk.find("HE::BuildSkyEnvFaceRow(") != std::string::npos);
+	}
+}
+
 TEST_CASE("Clustered lighting: heLitP's forward twin matches the deferred resolve's (Thema 117)")
 {
 	// MaterialShaderLibrary.cpp carries the cluster shading twice: the clustered
