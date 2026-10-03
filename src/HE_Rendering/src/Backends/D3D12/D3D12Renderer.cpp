@@ -1616,6 +1616,12 @@ struct D3D12RendererImpl
     UINT     viewportReqH         = 0;
     bool     viewportResChanged   = false;
     D3D12_RESOURCE_STATES viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // SetSwapchainPostProcessing: the game asks for the post chain on the
+    // swapchain path. gameViewport = the viewport set above is the game's
+    // (back-buffer sized), not an editor request — dropped when the game stops
+    // asking, or the leftover set would send Render() down the editor branch.
+    bool     swapchainPostFx      = false;
+    bool     gameViewport         = false;
     // On resize the OLD viewport RT must not be destroyed immediately: the editor's
     // ImGui descriptor still points at it for the current frame (it only updates next
     // frame on HasViewportResourceChanged), and ImGui samples it later this same frame.
@@ -10565,15 +10571,61 @@ void D3D12Renderer::Render()
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
 
+    // The packaged game (SetSwapchainPostProcessing): the post chain — HDR,
+    // bloom, tonemap, AA, TAA, SSR — exists only in the viewport frame, so the
+    // game runs that frame at the back buffer's size and copies the finished
+    // RGBA8 image into the back buffer. Sized from the back buffer itself, not
+    // the window: CopyResource needs identical dimensions, and a failed
+    // ResizeBuffers keeps the old ones. An editor request (HE_CAPTURE_FRAME asks
+    // for one at the window's logical size) is ignored meanwhile — honouring it
+    // would rebuild every target each frame — and the capture reads this very
+    // image. All of this flushes, so it runs before the list starts recording.
+    ID3D12Resource* backBuffer = p.renderTargets[p.frameIndex].Get();
+    D3D12_RESOURCE_DESC bbDesc{};
+    if (backBuffer) bbDesc = backBuffer->GetDesc();
+    const UINT bbW = static_cast<UINT>(bbDesc.Width);
+    const UINT bbH = bbDesc.Height;
+    const bool gameChain = p.swapchainPostFx && p.postFxReady && backBuffer
+                        && bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM
+                        && bbDesc.SampleDesc.Count == 1 && bbW > 0 && bbH > 0;
+    if (gameChain)
+    {
+        if (!p.gameViewport || p.viewportW != bbW || p.viewportH != bbH)
+        {
+            p.createViewportRT(bbW, bbH);
+            p.gameViewport = true;
+            if (p.viewportRT && p.viewportW == bbW && p.viewportH == bbH)
+                HE_LOG_INFO(RHI, "D3D12Renderer: swapchain post chain active (%ux%u)", bbW, bbH);
+        }
+    }
+    else if (p.gameViewport)
+    {
+        // The game stopped asking (application mode): drop its set so the
+        // branch below draws straight into the back buffer again, and the TAA
+        // history with it — it would blend a stale world when the chain returns.
+        // The decal pass's viewport-depth SRV gets a null view (bound on every
+        // scene draw). One flush, on the switch only.
+        p.waitForAllFrames();
+        p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
+        p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
+        p.createDepthSrv(nullptr, D3D12RendererImpl::k_decalViewportDepthSlot);
+        p.viewportW = p.viewportH = 0;
+        p.viewportState   = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        p.gameViewport    = false;
+        p.taaHistoryValid = false;
+    }
+
     // Resize viewport RT if the editor requested a different size.
-    if (p.viewportReqW > 0 && p.viewportReqH > 0 &&
+    if (!gameChain && p.viewportReqW > 0 && p.viewportReqH > 0 &&
         (p.viewportReqW != p.viewportW || p.viewportReqH != p.viewportH))
         p.createViewportRT(p.viewportReqW, p.viewportReqH);
     // TAA targets to the mode in force (only flushes on a toggle), before the
     // command list below starts recording against them.
     p.syncTaaTargets();
 
-    const bool useViewport = p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
+    const bool gameFrame   = gameChain && p.viewportRT && p.viewportDsvHeap
+                          && p.viewportW == bbW && p.viewportH == bbH;
+    const bool useViewport = !gameChain && p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
 
     p.waitForFrame(p.frameIndex);
 
@@ -10599,44 +10651,79 @@ void D3D12Renderer::Render()
 
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
-    if (useViewport)
-        DrawViewportFrame();
-
-    // ── Swapchain → transition to RTV, clear, run ImGui overlay ────────────
     D3D12_RESOURCE_BARRIER swapBarrier{};
     swapBarrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     swapBarrier.Transition.pResource   = p.renderTargets[p.frameIndex].Get();
     swapBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
     swapBarrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
     swapBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    p.cmdList->ResourceBarrier(1, &swapBarrier);
-
     auto rtv = p.rtvHandle(p.frameIndex);
-    auto dsv = p.dsvHeap ? p.dsvHeap->GetCPUDescriptorHandleForHeapStart() : D3D12_CPU_DESCRIPTOR_HANDLE{};
-    p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, p.dsvHeap ? &dsv : nullptr);
-    p.cmdList->ClearRenderTargetView(rtv, bgColor, 0, nullptr);
-    if (p.dsvHeap)
-        p.cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    if (!useViewport)
+    if (gameFrame)
     {
-        D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
-        D3D12_RECT     sc{ 0, 0, p.width, p.height };
+        // Viewport frame (UI canvas included), then copy it into the back
+        // buffer: viewportRT PSR → COPY_SOURCE → PSR, back buffer PRESENT →
+        // COPY_DEST → RENDER_TARGET, so the shared RT → PRESENT below holds. No
+        // clear — the copy overwrites every texel.
+        DrawViewportFrame();
+        D3D12_RESOURCE_BARRIER copyBarriers[2]{};
+        copyBarriers[0].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyBarriers[0].Transition.pResource   = p.viewportRT.Get();
+        copyBarriers[0].Transition.StateBefore = p.viewportState;
+        copyBarriers[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        copyBarriers[1] = swapBarrier;
+        copyBarriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        p.cmdList->ResourceBarrier(2, copyBarriers);
+        p.cmdList->CopyResource(backBuffer, p.viewportRT.Get());
+        copyBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyBarriers[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        copyBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyBarriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        p.cmdList->ResourceBarrier(2, copyBarriers);
+        p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        // The overlay (if any) draws on top of the copied image.
+        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(bbW), static_cast<float>(bbH), 0.0f, 1.0f };
+        D3D12_RECT     sc{ 0, 0, static_cast<LONG>(bbW), static_cast<LONG>(bbH) };
         p.cmdList->RSSetViewports(1, &vp);
         p.cmdList->RSSetScissorRects(1, &sc);
-        p.usingHDR = false;
-        p.taaFrame = false; // no post chain here, nothing would resolve a jitter
-        DrawScene(p.cmdList.Get(), p.width, p.height);
+    }
+    else
+    {
+        if (useViewport)
+            DrawViewportFrame();
 
-        // ── 2D UI canvas on swapchain RT (already bound, in RENDER_TARGET state) ─
-        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        // ── Swapchain → transition to RTV, clear, run ImGui overlay ────────────
+        p.cmdList->ResourceBarrier(1, &swapBarrier);
+
+        auto dsv = p.dsvHeap ? p.dsvHeap->GetCPUDescriptorHandleForHeapStart() : D3D12_CPU_DESCRIPTOR_HANDLE{};
+        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, p.dsvHeap ? &dsv : nullptr);
+        p.cmdList->ClearRenderTargetView(rtv, bgColor, 0, nullptr);
+        if (p.dsvHeap)
+            p.cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        if (!useViewport)
         {
-            D3D12_VIEWPORT uivp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
-            D3D12_RECT     uisc{ 0, 0, p.width, p.height };
-            p.cmdList->RSSetViewports(1, &uivp);
-            p.cmdList->RSSetScissorRects(1, &uisc);
+            D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
+            D3D12_RECT     sc{ 0, 0, p.width, p.height };
+            p.cmdList->RSSetViewports(1, &vp);
+            p.cmdList->RSSetScissorRects(1, &sc);
+            p.usingHDR = false;
+            p.taaFrame = false; // no post chain here, nothing would resolve a jitter
+            DrawScene(p.cmdList.Get(), p.width, p.height);
+
+            // ── 2D UI canvas on swapchain RT (already bound, in RENDER_TARGET state) ─
+            p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            {
+                D3D12_VIEWPORT uivp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
+                D3D12_RECT     uisc{ 0, 0, p.width, p.height };
+                p.cmdList->RSSetViewports(1, &uivp);
+                p.cmdList->RSSetScissorRects(1, &uisc);
+            }
+            p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
         }
-        p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
     }
 
     // Overlay (ImGui) records into this command list and binds its own SRV heap.
@@ -10789,6 +10876,11 @@ void D3D12Renderer::SetViewportSize(uint32_t width, uint32_t height)
 {
     m_impl->viewportReqW = static_cast<UINT>(width);
     m_impl->viewportReqH = static_cast<UINT>(height);
+}
+
+void D3D12Renderer::SetSwapchainPostProcessing(bool enabled)
+{
+    m_impl->swapchainPostFx = enabled;   // Render() builds or drops the set
 }
 
 bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)
