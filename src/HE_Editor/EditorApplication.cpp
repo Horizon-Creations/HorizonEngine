@@ -7197,10 +7197,11 @@ void EditorApplication::dumpFrameHeadless()
 	// edge moves over a static receiver, the reprojection check passes,
 	// and only the neighbourhood clamp keeps the old edge from ghosting.
 	// Compare the capture against a static one at the same TOD. TWO frames run
-	// at the real TOD, not one: Vulkan's runGi() extracts the scene before
-	// DrawScene() feeds the extractor this frame's day-night state, so the GI
-	// mask sees a sun change one frame late — a one-frame capture would show the
-	// old shadow on every backend variant alike and measure nothing.
+	// at the real TOD, not one: until Thema 131 step 6, Vulkan's runGi()
+	// extracted the scene before DrawScene() fed the extractor this frame's
+	// day-night state, so the GI mask saw a sun change one frame late. runGi()
+	// sets it itself now; the second frame stays so captures remain comparable
+	// with ones taken on older builds.
 	if (const float todStep = mbEnvF("HE_DUMP_TODSTEP"); todStep != 0.0f && m_editorWorld)
 	{
 		const Entity envEntity = m_editorWorld->environmentEntity();
