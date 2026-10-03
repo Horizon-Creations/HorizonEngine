@@ -8807,7 +8807,8 @@ struct GiShadowUBOData
     glm::vec4 localExtra;       // x = local light count
 };
 static_assert(sizeof(GiShadowUBOData) == 7 * 16, "must match gi_shadow.comp's GiShadowUBO");
-struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::vec4 blend; };
+struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::mat4 curViewProj; glm::vec4 blend; };
+static_assert(sizeof(GiTemporalUBOData) == 2 * 64 + 16, "must match gi_temporal.frag's GiTemporalUBO");
 struct GiProbeUBOData
 {
     glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
@@ -9642,6 +9643,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
 
     GiTemporalUBOData tempUbo{};
     tempUbo.prevViewProj = m_giPrevViewProj;
+    tempUbo.curViewProj  = vp; // clip-fixed like prevViewProj; becomes it below
     tempUbo.blend        = glm::vec4(m_giHistValid ? 0.9f : 0.0f, 0.0f, 0.0f, 0.0f);
     if (!uploadGiBuffer(m_giTemporalUBO[fi], &tempUbo, sizeof(tempUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;

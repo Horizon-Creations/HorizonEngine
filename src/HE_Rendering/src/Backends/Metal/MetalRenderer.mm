@@ -2022,7 +2022,9 @@ vertex GIFsOut giFsVertex(uint vid [[vertex_id]])
 	return o;
 }
 
-struct GITemporalParams { float4x4 prevViewProj; float4 blend; }; // blend.x = history weight (0 on first activation frame)
+// curViewProj = this frame's, same family as prevViewProj (motion-vector
+// reprojection); blend.x = history weight (0 on first activation frame).
+struct GITemporalParams { float4x4 prevViewProj; float4x4 curViewProj; float4 blend; };
 
 // Reproject last frame's accumulated shadow value via this pixel's world
 // position and blend it with the new raw sample. The history texture carries
@@ -2050,7 +2052,6 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	if (any(prevUV < 0.0) || any(prevUV > 1.0))
 		return float4(pv.xyz, rawV); // off-screen last frame → no history
 
-	float4 hist = history.sample(smp, prevUV);
 	// Reject history whose recorded world position is far from THIS pixel's —
 	// a disoccluded/wrong-surface reproject, not the same point one frame ago.
 	// MUST be tight: two points can be spatially close in world units while
@@ -2071,9 +2072,27 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	const float3 gyp = gPos.sample(smp, in.uv + float2(0.0, texel.y)).xyz, gym = gPos.sample(smp, in.uv - float2(0.0, texel.y)).xyz;
 	const float footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
 	                            min(length(gyp - pv.xyz), length(gym - pv.xyz)));
-	const float posError = length(pv.xyz - hist.rgb);
 	const float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
-	const float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
+	// Bilinear history, reprojected as a motion vector from this pixel's
+	// centre; 4 taps, each only if written for this surface, renormalised —
+	// see gi_temporal.frag, Thema 134 §4.2. curUV uses prevUV's y-flip.
+	const float4 cclip = P.curViewProj * float4(pv.xyz, 1.0);
+	const float2 cndc  = cclip.xy / cclip.w;
+	const float2 curUV = float2(cndc.x * 0.5 + 0.5, 1.0 - (cndc.y * 0.5 + 0.5));
+	const float2 hsz   = float2(history.get_width(), history.get_height());
+	const float2 hf    = (in.uv + (prevUV - curUV)) * hsz - 0.5;
+	const float2 hb    = floor(hf);
+	const float2 ht    = hf - hb;
+	float hAcc = 0.0, hWsum = 0.0;
+	for (int j = 0; j < 4; ++j)
+	{
+		const float2 o  = float2(float(j & 1), float(j >> 1));
+		const float2 bw = mix(1.0 - ht, ht, o);
+		const float4 h  = history.sample(smp, (hb + o + 0.5) / hsz);
+		if (length(pv.xyz - h.rgb) < tolerance) { hAcc += h.a * bw.x * bw.y; hWsum += bw.x * bw.y; }
+	}
+	const float histA = hWsum > 1e-3 ? hAcc / hWsum : 0.0;
+	const float w = hWsum > 1e-3 ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
 	// Neighbourhood clamp: the position check above only guards RECEIVER
 	// motion — when the OCCLUDER moves, the receiving surface is unchanged and
 	// stale history blends in at 0.9, smearing the old shadow across the floor
@@ -2099,7 +2118,7 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 			nMin = min(nMin, s / 9.0);
 			nMax = max(nMax, s / 9.0);
 		}
-	float result = mix(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w);
+	float result = mix(rawV, clamp(histA, nMin - 0.1, nMax + 0.1), w);
 	return float4(pv.xyz, result);
 }
 
@@ -6109,8 +6128,10 @@ static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GI
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
+	glm::mat4 curViewProj; // this frame's (motion-vector reprojection of the bilinear history)
 	glm::vec4 blend; // x = history weight (0 on first activation frame), y/z = tex width/height, w unused
 };
+static_assert(sizeof(GITemporalParamsCPU) == 2 * 64 + 16, "must match the MSL GITemporalParams layout");
 
 // Matches the MSL GIProbeParams struct (kGIProbeMSL, EncodeGIProbeUpdate only).
 struct GIProbeParamsCPU
@@ -8378,6 +8399,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			[tenc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
 			GITemporalParamsCPU tparams;
 			tparams.prevViewProj = m_giPrevViewProj;
+			tparams.curViewProj  = viewProj; // same (unfixed) family as prevViewProj
 			tparams.blend = glm::vec4(m_giShadowHistoryValid ? 0.9f : 0.0f,
 			                          static_cast<float>(width), static_cast<float>(height), 0.0f);
 			[tenc setFragmentBytes:&tparams length:sizeof(tparams) atIndex:0];

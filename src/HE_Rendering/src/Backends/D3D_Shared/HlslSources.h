@@ -826,6 +826,7 @@ SamplerState uPointSamp : register(s0);
 cbuffer GiTemporalCB : register(b0)
 {
     float4x4 uPrevViewProj;
+    float4x4 uCurViewProj; // this frame's, same family as uPrevViewProj (motion-vector reprojection)
     float4   uParams; // x = blend (0 on first GI frame), y = tex width, z = tex height
 };
 struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
@@ -842,8 +843,6 @@ float4 main(In i) : SV_Target
     if (any(prevUV < 0.0) || any(prevUV > 1.0)) return float4(pv.xyz, rawV);
 
     float2 texel     = 1.0 / uParams.yz; // uGPos has the same size
-    float4 hist      = uHistory.Sample(uPointSamp, prevUV);
-    float  posError  = length(pv.xyz - hist.rgb);
     // Tolerance covers one texel's world footprint (smaller one-sided G-buffer
     // step per axis, capped) — see gi_temporal.frag, Thema 131 §3 C.
     float3 gxp = uGPos.Sample(uPointSamp, i.uv + float2(texel.x, 0.0)).xyz, gxm = uGPos.Sample(uPointSamp, i.uv - float2(texel.x, 0.0)).xyz;
@@ -851,7 +850,26 @@ float4 main(In i) : SV_Target
     float  footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
                            min(length(gyp - pv.xyz), length(gym - pv.xyz)));
     float  tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
-    float  w = (posError < tolerance) ? clamp(uParams.x, 0.0, 0.98) : 0.0;
+    // Bilinear history, reprojected as a motion vector from this pixel's
+    // centre; 4 taps, each only if written for this surface, renormalised —
+    // see gi_temporal.frag, Thema 134 §4.2. curUV uses prevUV's y-flip.
+    float4 cclip = mul(uCurViewProj, float4(pv.xyz, 1.0));
+    float2 cndc  = cclip.xy / cclip.w;
+    float2 curUV = float2(cndc.x * 0.5 + 0.5, 0.5 - cndc.y * 0.5);
+    float2 hsz   = uParams.yz; // history has the mask's size
+    float2 hf    = (i.uv + (prevUV - curUV)) * hsz - 0.5;
+    float2 hb    = floor(hf);
+    float2 ht    = hf - hb;
+    float  hAcc = 0.0, hWsum = 0.0;
+    [unroll] for (int j = 0; j < 4; ++j)
+    {
+        float2 o  = float2(float(j & 1), float(j >> 1));
+        float2 bw = lerp(1.0 - ht, ht, o);
+        float4 h  = uHistory.Sample(uPointSamp, (hb + o + 0.5) / hsz);
+        if (length(pv.xyz - h.rgb) < tolerance) { hAcc += h.a * bw.x * bw.y; hWsum += bw.x * bw.y; }
+    }
+    float  histA = hWsum > 1e-3 ? hAcc / hWsum : 0.0;
+    float  w = hWsum > 1e-3 ? clamp(uParams.x, 0.0, 0.98) : 0.0;
     // Neighbourhood clamp: guards OCCLUDER motion (the position check above
     // only covers receiver/camera motion). Range of the 3x3 MEANS of raw over a
     // 5x5 footprint, widened by 0.1 — raw min/max on the binary 1-spp signal
@@ -871,7 +889,7 @@ float4 main(In i) : SV_Target
             nMin = min(nMin, s / 9.0);
             nMax = max(nMax, s / 9.0);
         }
-    return float4(pv.xyz, lerp(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w));
+    return float4(pv.xyz, lerp(rawV, clamp(histA, nMin - 0.1, nMax + 0.1), w));
 }
 )HLSL";
 

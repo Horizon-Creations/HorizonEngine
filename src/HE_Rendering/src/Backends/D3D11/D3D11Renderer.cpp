@@ -3128,7 +3128,7 @@ struct D3D11RendererImpl
 
         ok = ok && makeCB(7 * 16, giShadowCB) // sunDirRadius + frame + localPosRange[4] + localExtra
                 && makeCB(16, giCountCB)
-                && makeCB(sizeof(glm::mat4) + 16, giTemporalCB)
+                && makeCB(2 * sizeof(glm::mat4) + 16, giTemporalCB)
                 && makeCB(16, giBlurCB)
                 && makeCB(6 * 16 + 3 * 8 * 16, giProbeCB);
         if (ok)
@@ -3483,8 +3483,9 @@ struct D3D11RendererImpl
             ctx->OMSetDepthStencilState(noDepthDSS.Get(), 0);
             ctx->RSSetState(fsRastState.Get());
             ctx->PSSetSamplers(0, 1, pointSampler.GetAddressOf());
-            struct { glm::mat4 prevViewProj; glm::vec4 params; } tcb{};
+            struct { glm::mat4 prevViewProj, curViewProj; glm::vec4 params; } tcb{};
             tcb.prevViewProj = giPrevViewProj;
+            tcb.curViewProj  = viewProj; // becomes giPrevViewProj below (motion-vector reprojection)
             tcb.params = glm::vec4(giHistValid ? 0.9f : 0.0f,
                                    float(giShadowW), float(giShadowH), 0.0f);
             D3D11_MAPPED_SUBRESOURCE mapped{};

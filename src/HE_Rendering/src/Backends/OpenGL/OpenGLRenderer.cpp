@@ -2007,6 +2007,7 @@ uniform sampler2D uGPos;
 uniform sampler2D uRaw;
 uniform sampler2D uHistory;
 uniform mat4  uPrevViewProj;
+uniform mat4  uCurViewProj; // this frame's, same family as uPrevViewProj (motion-vector reprojection)
 uniform float uBlend; // history weight (0 on first GI frame)
 out vec4 FragColor;
 void main()
@@ -2023,8 +2024,6 @@ void main()
 	{ FragColor = vec4(pv.xyz, rawV); return; }
 
 	vec2  texel     = 1.0 / vec2(textureSize(uRaw, 0)); // uGPos has the same size
-	vec4  hist      = texture(uHistory, prevUV);
-	float posError  = length(pv.xyz - hist.rgb);
 	// Tolerance covers one texel's world footprint (smaller one-sided G-buffer
 	// step per axis, capped) — see gi_temporal.frag, Thema 131 §3 C.
 	vec3  gxp = texture(uGPos, vUV + vec2(texel.x, 0.0)).xyz, gxm = texture(uGPos, vUV - vec2(texel.x, 0.0)).xyz;
@@ -2032,7 +2031,25 @@ void main()
 	float footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
 	                      min(length(gyp - pv.xyz), length(gym - pv.xyz)));
 	float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
-	float w = (posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
+	// Bilinear history, reprojected as a motion vector from this pixel's
+	// centre; 4 taps, each only if written for this surface, renormalised —
+	// see gi_temporal.frag, Thema 134 §4.2. curUV: prevUV's formula (no y-flip).
+	vec4 cclip = uCurViewProj * vec4(pv.xyz, 1.0);
+	vec2 curUV = (cclip.xy / cclip.w) * 0.5 + 0.5;
+	vec2 hsz   = vec2(textureSize(uHistory, 0));
+	vec2 hf    = (vUV + (prevUV - curUV)) * hsz - 0.5;
+	vec2 hb    = floor(hf);
+	vec2 ht    = hf - hb;
+	float hAcc = 0.0, hWsum = 0.0;
+	for (int j = 0; j < 4; ++j)
+	{
+		vec2  o  = vec2(float(j & 1), float(j >> 1));
+		vec2  bw = mix(1.0 - ht, ht, o);
+		vec4  h  = texture(uHistory, (hb + o + 0.5) / hsz);
+		if (length(pv.xyz - h.rgb) < tolerance) { hAcc += h.a * bw.x * bw.y; hWsum += bw.x * bw.y; }
+	}
+	float histA = hWsum > 1e-3 ? hAcc / hWsum : 0.0;
+	float w = hWsum > 1e-3 ? clamp(uBlend, 0.0, 0.98) : 0.0;
 	// Neighbourhood clamp: guards OCCLUDER motion (the position check above
 	// only covers receiver/camera motion) — moved shadows update in 1-2 frames
 	// instead of smearing for ~30. Range of the 3x3 MEANS of raw over a 5x5
@@ -2053,7 +2070,7 @@ void main()
 			nMin = min(nMin, s / 9.0);
 			nMax = max(nMax, s / 9.0);
 		}
-	FragColor = vec4(pv.xyz, mix(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w));
+	FragColor = vec4(pv.xyz, mix(rawV, clamp(histA, nMin - 0.1, nMax + 0.1), w));
 }
 )GLSL";
 
@@ -6052,6 +6069,8 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uHistory"), 2);
 	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uPrevViewProj"),
 	                   1, GL_FALSE, glm::value_ptr(m_giPrevViewProj));
+	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uCurViewProj"),
+	                   1, GL_FALSE, glm::value_ptr(viewProj)); // becomes m_giPrevViewProj below
 	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? 0.9f : 0.0f);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 	m_giHistValid   = true;

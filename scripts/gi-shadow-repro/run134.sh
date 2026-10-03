@@ -59,6 +59,11 @@ VAR[mvp4at2l]="HE_GI_PROTO_BILERP=2 HE_GI_PROTO_SPP=4 HE_GI_PROTO_ATROUS=2 HE_GI
 VAR[mvp2at2le]="HE_GI_PROTO_BILERP=2 HE_GI_PROTO_SPP=2 HE_GI_PROTO_ATROUS=2 HE_GI_PROTO_SIGL=2 HE_GI_PROTO_EARLY=1"
 VAR[mvat2l]="HE_GI_PROTO_BILERP=2 HE_GI_PROTO_ATROUS=2 HE_GI_PROTO_SIGL=2"
 VAR[blh95at2l]="HE_GI_PROTO_BILERP=1 HE_GI_PROTO_HIST=0.95 HE_GI_PROTO_ATROUS=2 HE_GI_PROTO_SIGL=2"
+# Schritt 2 (the real implementation, no prototype patch): the build's own
+# defaults, one name per stage so captures of successive builds sit side by side.
+VAR[A]=""      # Baustein A: motion-vector bilinear history
+VAR[AB]=""     # + B: 2 rays per pixel (default)
+VAR[ABC]=""    # + C: edge-aware a-trous (the shipped chain)
 C=$1; shift
 spec=${CASE[$C]}; [ -z "$spec" ] && { echo "unknown case $C"; exit 1; }
 cfg=$HERE/${spec%%|*}; envs=${spec#*|}

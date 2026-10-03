@@ -7354,8 +7354,10 @@ struct D3D12RendererImpl
                 giHistState[prevIdx] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             }
 
-            struct { glm::mat4 prevViewProj; glm::vec4 params; } tcb{};
+            struct { glm::mat4 prevViewProj, curViewProj; glm::vec4 params; } tcb{};
+            static_assert(sizeof(tcb) <= k_cbSlot, "temporal CB outgrew its upload slot");
             tcb.prevViewProj = giPrevViewProj;
+            tcb.curViewProj  = viewProj; // becomes giPrevViewProj below (motion-vector reprojection)
             tcb.params = glm::vec4(giHistValid ? 0.9f : 0.0f,
                                    float(giShadowW), float(giShadowH), 0.0f);
             if (giTemporalCBPtr[fi]) std::memcpy(giTemporalCBPtr[fi], &tcb, sizeof(tcb));

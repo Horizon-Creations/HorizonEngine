@@ -2082,7 +2082,17 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "history tolerance", { R"(tolerance = max\(clamp\(([0-9.]+) \* clip\.w, ([0-9.]+), ([0-9.]+)\), min\(footprint, ([0-9.]+)\)\))" } },
 			{ "clamp footprint",   { R"(float r5\[(\d+)\];)" } },
 			{ "clamp box mean",    { R"(nMin = min\(nMin, s / ([0-9.]+)\);)" } },
-			{ "clamp slack",       { R"(clamp\(hist\.a, nMin - ([0-9.]+), nMax \+ ([0-9.]+)\))" } },
+			{ "clamp slack",       { R"(clamp\(histA, nMin - ([0-9.]+), nMax \+ ([0-9.]+)\))" } },
+			// Thema 134 §4.2: bilinear history, reprojected as a motion vector
+			// from the pixel centre (NOT the absolute prevUV, which dissolves
+			// static contact edges), 4 taps each gated by the surface test and
+			// renormalised. A copy falling back to the point lookup brings back
+			// the shadow trailing a panning camera on that backend only.
+			{ "history motion vector", { R"(hf\s*= \(\w+\.?\w* \+ \(prevUV - curUV\)\) \* hsz - ([0-9.]+);)" } },
+			{ "history taps",          { R"(for \(int j = 0; j < (\d+); \+\+j\)\s*\{\s*(?:const )?\w+2\s+o\s*= \w+2\(float\(j & (\d+)\), float\(j >> (\d+)\)\);)" } },
+			{ "history tap gate",      { R"(if \(length\(pv\.xyz - h\.rgb\) < (tolerance)\) \{ hAcc \+= h\.a \* bw\.x \* bw\.y; hWsum \+= bw\.x \* bw\.y; \})" } },
+			{ "history renormalise",   { R"(histA = hWsum > ([0-9.e+-]+) \? hAcc / hWsum : ([0-9.]+);)" } },
+			{ "history weight gate",   { R"(w = hWsum > ([0-9.e+-]+) \? clamp\([\w.]+, ([0-9.]+), ([0-9.]+)\) : ([0-9.]+);)" } },
 		});
 	}
 
