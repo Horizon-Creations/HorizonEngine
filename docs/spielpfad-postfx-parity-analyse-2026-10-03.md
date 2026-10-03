@@ -574,12 +574,15 @@ veraltet war; der Hash ist gegen den Build geprüft. `export_ctlvk` ist dieselbe
 Kontroll-`HorizonGame.exe` aus Schritt 2 (Opt-in `false`) und **denselben neuen DLLs**.
 `GameBackend=Vulkan`. Das Fenster ist DPI-skaliert wie auf D3D12: Config 1600×900 ergibt
 2000×1125 physisch. Gemessen unterhalb des Himmelsstreifens, 2000×1125, wo nicht anders
-angegeben:
+angegeben. Alle Zeilen außer der Resize-Folge liefen mit der DLL aus `8ab0bb76`; die
+Resize-Folge (neu und Kontrolle) mit der aus `7e23f3d4`, verglichen mit Frischstarts der
+älteren DLL. Ein Frischstart läuft in beiden Ständen gleich, `7e23f3d4` ändert nur das
+Minimieren.
 
 | Vergleich | Ergebnis |
 |---|---|
 | Neu gegen Neu (Wiederholung) | 0 px Abweichung |
-| Neu gegen Kontrolle (Opt-in `false`, alter Pfad) | alle Pixel anders, mittlere Luma **202,1 statt 135,8**, dieselben Werte wie auf D3D11 (§10) |
+| Neu gegen Kontrolle (Opt-in `false`, alter Pfad) | alle Pixel anders, mittlere Luma **202,1 statt 135,8** (Tonemap/Gamma; dass D3D11 in §10 bei anderer Fenstergröße dieselben Zahlen zeigt, ist kein Paritätsbeleg, siehe §11) |
 | SSAO an/aus, neu | 966 334 px anders |
 | SSAO an/aus, alter Pfad | **0 px**: SSAO war im Vulkan-Spiel tot (§4.2) |
 | GI an/aus, neu | alle Pixel anders, Luma 215,4 gegen 202,1, Log „GI pipelines built“ |
@@ -594,6 +597,7 @@ angegeben:
 | Validierung (der Layer ist auf Vulkan immer an): neu gegen Kontrolle, frisch | in beiden nur `vkCmdUpdateBuffer` und `vkCmdPipelineBarrier` „inside an active VkRenderPass“, je bis zur Duplikatgrenze. **Keine neue VUID** |
 | Validierung, Resize-Folge neu gegen Kontrolle | in beiden dieselben 0×0-Meldungen beim Minimieren (`vkCreateSwapchainKHR`, `vkCreateImage`, `vkCreateFramebuffer`, `vkCmdBeginRenderPass`): `recreateSwapchain` bei 0×0-Surface, älter als dieser Umbau |
 | Validierung, SSR an | zusätzlich eine WARN „Vertex attribute at location 2 not consumed“ beim ersten Bau der SSR-Pipelines. Die Kontrolle baut sie nie; nicht aus dem neuen Code |
+| Vulkan-**Editor** (`HE_DUMP_RHI=Vulkan`, `HE_DUMP_SSRTEST`, 16 Frames, Deploy `C:/hw130/deploy/Editor`) mit der neuen DLL gegen die DLL aus Schritt 3: Pool 5→6, `m_presentPipe`, Formatwahl laufen dort beim Start mit | exit 0 in allen drei Läufen; neu/neu 17 380 px (mittlere Diff 0,01), neu/alt 20 516 px (0,02), Luma beide 186,7: im Rauschbereich. Dieselben zwei Validierungsarten wie vorher, keine „swapchain post chain“-Zeile |
 
 Log: „swapchain post chain active (WxH)“ einmal beim Start und einmal pro Größenwechsel
 (Resize-Folge: 87 Zeilen; vor `7e23f3d4` waren es 88, weil Minimieren das Set ab- und wieder
@@ -601,7 +605,8 @@ aufbaute), in der Kontrolle nie. he_tests (enthält das Vulkan-Backend nicht, La
 Stand, eigenes APPDATA): 4165 Fälle, 3 fehlgeschlagen, alle Gamepad-End-to-End (bekanntes
 Grundrauschen).
 
-Nicht gemessen: eine reine sRGB-Swapchain (auf der RTX 4070 wird `B8G8R8A8_UNORM` angeboten;
+Nicht gemessen: `RenderSceneImage` (MCP `scene_screenshot`) nach dem Herausziehen von
+`pointSceneAoAtWhite`, eine reine sRGB-Swapchain (auf der RTX 4070 wird `B8G8R8A8_UNORM` angeboten;
 der Zweig mit Warnung ist nie gelaufen), Parität Editor gegen Spiel als Bildbeleg (strukturell
 gegeben, beide fahren `DrawViewportFrame`), Vollbild (nur Windowed), Frame-Zeit-Kosten (volle
 Kette, ein Present-Pass, `vkDeviceWaitIdle` pro Größenwechsel), ein App-Projekt und der
