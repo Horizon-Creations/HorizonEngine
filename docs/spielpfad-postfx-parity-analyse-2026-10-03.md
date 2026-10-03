@@ -612,3 +612,35 @@ gegeben, beide fahren `DrawViewportFrame`), Vollbild (nur Windowed), Frame-Zeit-
 Kette, ein Present-Pass, `vkDeviceWaitIdle` pro Größenwechsel), ein App-Projekt und der
 Abbau-Pfad `true` → `false` zur Laufzeit (kein realer Auslöser, im Code vorhanden, nie
 gelaufen).
+
+## 13. Schritt 5: Prüfung vor dem PR (2026-10-03)
+
+**main gemergt.** `04de39bd` (Thema 133, `Game/Shaders/` im Export) liegt über PR #82 in
+`origin/main` (`git merge-base --is-ancestor`). `git merge-tree` meldete keinen Konflikt,
+obwohl beide Seiten alle drei Renderer anfassen (main: UI-Stil, dieser Zweig: Spielpfad).
+Gemergt als `ff0bef7d`, damit der Vulkan-Zeuge ohne Handkopie läuft.
+
+**Build** (Release `C:/hw130`, `-j8`): 0 Fehler, einzige Warnung C5285 aus der
+vendorten `doctest.h`. 105 laufzeitkompilierte Shader (51 HLSL, 54 GLSL) kompilieren.
+
+**Falle im Build-Baum, nicht im Code:** Nach einem reinen DLL-Rebuild bleibt `deploy/Game`
+(und damit `deploy/Editor/Game`, die Quelle des In-Editor-Exports) veraltet, weil es nur beim
+Neulinken von `HorizonGame.exe` aufgefrischt wird. Hier lag dort noch `HorizonRendering.dll`
+aus Schritt 4 und `HorizonCore.dll` aus Schritt 2. Erst nach Löschen von `HorizonGame.exe` und
+`HorizonEditor.exe` und erneutem Build glichen die Laufzeit-DLLs dem Build (Hash geprüft).
+Ein Voll-Build (CI, Release-Paket) ist davon nicht betroffen.
+
+**Tests** (eigenes APPDATA): he_tests 4166 Fälle, 4163 bestanden, 3 fehlgeschlagen (11
+Assertions, alle in `test_input_gamepad.cpp`, echtes Xbox-Pad am Rechner; gleiches Bild wie
+in Schritt 2–4). ctest-Extras `editor_help_audit`, `he_mcp_shim`, `test_project_exporter`,
+`test_d3d_shader_manager`, `runtime_size`: bestanden, die zwei App-Größentests übersprungen.
+
+**Export-Zeuge auf dem gemergten Stand** (Depthy, Export über die MCP-Bridge des frischen
+Editors, `C:/hw130/s5`, **nichts von Hand kopiert**): Export enthält `Shaders/` mit 40 `.spv`
+(wie `deploy/Editor/Game/Shaders`). Frischstart 1600×900 Config = 2000×1125 physisch:
+
+| Backend | Log | Bild unter dem Himmel |
+|---|---|---|
+| Vulkan | „swapchain post chain active (2000x1125)“, kein „scene shaders missing“; Validierung nur die zwei bekannten Basisfehler | **0 px** gegen Schritt 4 (`s4/shots/post`), Luma 202,1 |
+| D3D12 | „swapchain post chain active (2000x1125)“, 0 ERROR | **0 px** gegen Schritt 3 (`s3/shots/post`), Luma 201,9 |
+| D3D11 | „swapchain post chain active (2000x1125)“, 0 ERROR | Luma 201,9, D3D11 und D3D12 gegen Vulkan je mittlere Diff 0,31 |
