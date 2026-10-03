@@ -13,6 +13,7 @@
 // he_materialshader is linked into he_tests in every flavour (the stub answers the
 // compiles); only the cross-compile TEST CASES below are gated on HE_TESTS_HAVE_SHADERC.
 #include <material/MaterialShaderLibrary.h>
+#include <material/MaterialShaderBake.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonRendering/LightPacking.h>   // FillMaterialWind
 #include <HorizonRendering/SkyFrameParams.h> // CloudWindVector (the compass it must share)
@@ -1356,6 +1357,7 @@ TEST_CASE("Generated graph GLSL cross-compiles through the real material pipelin
 // encode/decode is the single source of truth shared by the exporter and the
 // runtime; a roundtrip must preserve backend + both (possibly binary) sources.
 #include <ContentManager/Assets.h>
+#include <ContentManager/HAsset.h> // hand-built v2 blob
 
 TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 {
@@ -1376,6 +1378,11 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 		in.push_back(v);
 	}
 
+	// Clustered twin (Thema 123): set on the Vulkan record only, with NULs — the
+	// Metal record's empty pair must come back empty, not shifted from a neighbour.
+	in[1].fragmentClustered = std::string("\x00\xC1\x00\x57", 4);
+	in[1].vertexClustered   = std::string("\x07\x00", 2);
+
 	const std::vector<uint8_t> bytes = HE::encodeMaterialShaderVariants(in);
 	CHECK(!bytes.empty());
 
@@ -1386,6 +1393,36 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 		CHECK(out[i].backend  == in[i].backend);
 		CHECK(out[i].vertex   == in[i].vertex);   // std::string ==, NUL-safe
 		CHECK(out[i].fragment == in[i].fragment);
+		CHECK(out[i].fragmentClustered == in[i].fragmentClustered);
+		CHECK(out[i].vertexClustered   == in[i].vertexClustered);
+	}
+
+	// A torn tail (pak cut short) still yields every record, the clustered pairs
+	// it could not read stay empty — the renderer then draws the plain fragment.
+	{
+		std::vector<uint8_t> torn(bytes.begin(), bytes.end() - 1);
+		const auto t = HE::decodeMaterialShaderVariants(torn);
+		REQUIRE(t.size() == in.size());
+		CHECK(t[1].fragment == in[1].fragment);
+		CHECK(t[1].vertexClustered.empty());
+	}
+
+	// A v2 pak (uiVertex per record, no clustered tail) decodes with empty pairs.
+	{
+		std::vector<uint8_t> v2;
+		HAsset::Writer::appendPOD(v2, uint8_t{0}); // version mark
+		HAsset::Writer::appendPOD(v2, uint8_t{2}); // version
+		HAsset::Writer::appendPOD(v2, uint8_t{1}); // count
+		HAsset::Writer::appendPOD(v2, uint8_t{static_cast<uint8_t>(HE::RendererBackend::Metal)});
+		HAsset::Writer::appendString(v2, "v");
+		HAsset::Writer::appendString(v2, "f");
+		HAsset::Writer::appendString(v2, "ui");
+		const auto o2 = HE::decodeMaterialShaderVariants(v2);
+		REQUIRE(o2.size() == 1);
+		CHECK(o2[0].fragment == "f");
+		CHECK(o2[0].uiVertex == "ui");
+		CHECK(o2[0].fragmentClustered.empty());
+		CHECK(o2[0].vertexClustered.empty());
 	}
 
 	// Empty input → empty blob → empty decode (exporter treats this as "no chunk").
@@ -3316,6 +3353,110 @@ TEST_CASE("OpenGL 4.3: the clustered variant is GLSL 4.30 with SSBOs 4..6 only a
 		}
 		CHECK(withLists * 2 > static_cast<int>(cases.size()));
 		MESSAGE("GLSL 4.30 clustered fragments with SSBOs 4/5/6: ", withLists, "/", cases.size());
+	}
+}
+
+// The exporter (and the HE_DUMP_MATPRECOMPILE witness) bake through
+// HE::bakeMaterialShaderVariant. Thema 123: every backend's variant now carries
+// the clustered twin next to the plain pair, and GL's is a GLSL 4.30 PAIR —
+// GL clusters only with both stages at 4.30, so a 4.30 fragment next to the
+// 4.10 `vertex` would never link. Same glslang judge as above (no GL 4.3
+// context runs anywhere this does); the baked text must also be byte-identical
+// to what the renderer cross-compiles, or the runtime witness proves nothing.
+TEST_CASE("Export bake: every backend carries the clustered twin, GL as a linking GLSL 4.30 pair (Thema 123)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using RB = HE::RendererBackend;
+	HE::MaterialShaderLibrary lib;
+	const std::vector<NodeShaderCase> cases = allNodeShaderCases();
+	REQUIRE(cases.size() > 40);
+
+	SUBCASE("GL: every node shader bakes a 4.30 pair that links and matches the runtime")
+	{
+		int wpo = 0;
+		for (const NodeShaderCase& c : cases)
+		{
+			MaterialShaderVariant var;
+			std::string error;
+			std::vector<std::string> warnings;
+			REQUIRE_MESSAGE(HE::bakeMaterialShaderVariant(lib, RB::OpenGL, c.glsl, c.vertBody, var, error, warnings),
+			                c.name, ": ", error);
+			CHECK_MESSAGE(warnings.empty(), c.name, ": ", (warnings.empty() ? std::string() : warnings.front()));
+			CHECK(var.backend == static_cast<uint8_t>(RB::OpenGL));
+			CHECK_MESSAGE(var.vertex.rfind("#version 410", 0) == 0, c.name);
+			CHECK_MESSAGE(var.fragment.rfind("#version 410", 0) == 0, c.name);
+			REQUIRE_MESSAGE(!var.fragmentClustered.empty(), c.name);
+			REQUIRE_MESSAGE(!var.vertexClustered.empty(), c.name);
+			CHECK_MESSAGE(var.vertexClustered.rfind("#version 430", 0) == 0, c.name);
+			CHECK_MESSAGE(var.fragmentClustered.rfind("#version 430", 0) == 0, c.name);
+			std::string err;
+			CHECK_MESSAGE(glslGlLink(var.vertexClustered, var.fragmentClustered, err), c.name, ": ", err);
+
+			const uint64_t h = std::hash<std::string>{}(c.glsl);
+			CHECK_MESSAGE(var.fragmentClustered == lib.fragmentClustered(h, c.glsl, B::GLSL430).source, c.name);
+			const auto& v430 = c.vertBody.empty()
+				? lib.standardVertex(B::GLSL430)
+				: lib.customVertex(std::hash<std::string>{}(c.vertBody), c.vertBody, B::GLSL430);
+			CHECK_MESSAGE(var.vertexClustered == v430.source, c.name);
+			if (!c.vertBody.empty()) ++wpo;
+		}
+		MESSAGE("GL baked clustered pairs linked: ", cases.size(), " (", wpo, " with a WPO vertex)");
+	}
+	SUBCASE("Metal / HLSL / SPIR-V: the clustered fragment pairs with the plain vertex")
+	{
+		// A lit case — heLitP is what the clustered twin changes.
+		const NodeShaderCase* lit = nullptr;
+		for (const NodeShaderCase& c : cases)
+			if (c.vertBody.empty() && c.glsl.find("heLitP") != std::string::npos) { lit = &c; break; }
+		REQUIRE(lit != nullptr);
+		for (RB rb : { RB::Metal, RB::D3D11, RB::D3D12, RB::Vulkan })
+		{
+			CAPTURE(static_cast<int>(rb));
+			MaterialShaderVariant var;
+			std::string error;
+			std::vector<std::string> warnings;
+			REQUIRE_MESSAGE(HE::bakeMaterialShaderVariant(lib, rb, lit->glsl, lit->vertBody, var, error, warnings), error);
+			CHECK(warnings.empty());
+			CHECK(var.backend == static_cast<uint8_t>(rb));
+			CHECK(!var.uiVertex.empty());
+			REQUIRE(!var.fragmentClustered.empty());
+			CHECK(var.vertexClustered.empty());
+			CHECK(var.fragmentClustered != var.fragment);
+			if (rb == RB::Vulkan)
+			{
+				std::vector<uint32_t> words;
+				CHECK(HE::MaterialShaderLibrary::spirvFromBytes(var.fragmentClustered, words));
+				CHECK(!words.empty());
+			}
+		}
+	}
+	SUBCASE("the baked twin survives the PSHD roundtrip")
+	{
+		std::vector<MaterialShaderVariant> vars(2);
+		std::string error;
+		std::vector<std::string> warnings;
+		REQUIRE(HE::bakeMaterialShaderVariant(lib, RB::OpenGL, cases.front().glsl, cases.front().vertBody,
+		                                      vars[0], error, warnings));
+		REQUIRE(HE::bakeMaterialShaderVariant(lib, RB::Vulkan, cases.front().glsl, cases.front().vertBody,
+		                                      vars[1], error, warnings));
+		const auto out = HE::decodeMaterialShaderVariants(HE::encodeMaterialShaderVariants(vars));
+		REQUIRE(out.size() == 2);
+		for (size_t i = 0; i < 2; ++i)
+		{
+			CHECK(out[i].fragmentClustered == vars[i].fragmentClustered);
+			CHECK(out[i].vertexClustered   == vars[i].vertexClustered);
+			CHECK(out[i].uiVertex          == vars[i].uiVertex);
+		}
+	}
+	SUBCASE("a plain-only failure is an error, not a variant")
+	{
+		MaterialShaderVariant var;
+		var.backend = 0xEE;
+		std::string error;
+		std::vector<std::string> warnings;
+		CHECK_FALSE(HE::bakeMaterialShaderVariant(lib, RB::Metal, "this is not glsl", "", var, error, warnings));
+		CHECK(!error.empty());
+		CHECK(var.backend == 0xEE); // untouched
 	}
 }
 

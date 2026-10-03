@@ -2562,8 +2562,23 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     // through to the runtime cross-compile, which is what rendered that pak before
     // variants were consumed here at all. Only when both roads are closed is the miss
     // cached.
+    // The baked clustered twin (Thema 117) goes first, under the same rule as the
+    // cross-compiled one below (cluster SSBOs exist, A/B guard not set): only then
+    // does the draw loop write bindings 24..26 and DrawScene open the gate.
     bool built = false;
-    if (precompiled)
+    if (precompiled && m_forwardClustered && m_clusterReady && !precompiled->fragmentClustered.empty())
+    {
+        std::vector<uint32_t> preVs, preFs;
+        const std::string& vsBytes = precompiled->vertexClustered.empty()
+            ? precompiled->vertex : precompiled->vertexClustered;
+        if (HE::MaterialShaderLibrary::spirvFromBytes(vsBytes, preVs)
+            && HE::MaterialShaderLibrary::spirvFromBytes(precompiled->fragmentClustered, preFs))
+            built = makePair(preVs, preFs, "baked variant, clustered");
+        if (!built)
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: A4 baked clustered material variant rejected — "
+                "trying the baked 8-light window variant");
+    }
+    if (!built && precompiled)
     {
         std::vector<uint32_t> preVs, preFs;
         if (HE::MaterialShaderLibrary::spirvFromBytes(precompiled->vertex, preVs)

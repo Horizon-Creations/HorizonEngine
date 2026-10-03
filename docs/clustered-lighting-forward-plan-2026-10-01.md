@@ -236,10 +236,48 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   SSBOs behält und Pins nur in der passenden Stufe greifen.
 - **Offen:** Laufzeit auf echtem GL 4.3 (NN-WS03 o. ä.; hier gibt es keins). Rezept wie
   §3.2 mit `HE_DUMP_RHI=OpenGL`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
-  `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert (der
-  eingebaute GL-Shader `kUnlitFS` bleibt beim Fenster, §5). Im Log muss „built a
+  `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, seit §3.6 auch mit
+  `16builtin` (vorher blieb `kUnlitFS` beim Fenster). Im Log muss „built a
   CLUSTERED material program (GLSL 4.30)" stehen, keine Rückfall-Warnung; mit
   `HE_GL_DEBUG=1` keine Meldung zu SSBO 4–6.
+
+### 3.6 Eingebaute Forward-Shader Metal + GL (Thema 123, Nachzug Schritt 1)
+
+Der Nebenbefund aus §5 („eingebauter Shader bleibt beim Fenster") ist für Metal und
+GL ≥ 4.3 geschlossen. Gleicher Vertrag wie §2.1: Fenster bleibt voll, die Shader
+überspringen dessen Punkt-/Spot-Plätze selbst, solange das Gate an ist.
+
+- **Metal `fragmentMain`:** liest die Listen auf Fragment-Buffer **4/5/6** (dieselben
+  wie heLitP). Gate + Raster in `SceneUniforms::clusterParams/clusterCamFwd` (angehängt,
+  `static_assert` +32 B). `EncodeScene` baut den Cluster-Build jetzt **vor** dem Upload
+  von `scene` (der Skinned-Pass lädt dieselbe Struct erneut hoch); ein Build dient
+  fragmentMain, den Graph-Materialien und dem Stored-Resolve. Ohne Build
+  (`HE_FORWARD_CLUSTER=0`) werden 16-Byte-Nulllisten gebunden, weil fragmentMain die
+  Puffer unbedingt deklariert. `localShadowFactor` → `localShadowFactorAt(posType, base)`,
+  der Fenster-Pfad ruft es unverändert auf. Kein Rückfall nötig: der Shader-Text ist
+  für beide Fälle derselbe.
+- **GL `kUnlitFS`:** `#ifdef HE_CLUSTERED`-Zweig (SSBOs 4/5/6 aus
+  `kGlCluster*SsboBinding`, `uClusterParams/uClusterCamFwd`, `clusterLights()`).
+  `SceneStageSource` hebt **beide** Stufen eines Szenen-Programms auf GLSL 4.30 und
+  definiert Schalter + Bindings; `LinkSceneProgram` baut unlit/skinned/instanced damit,
+  solange `m_forwardClustered`, sonst und bei Compile-/Link-Fehler (Warnung) die
+  4.10-Fassung. `m_forwardClustered` bleibt dabei unangetastet. Der Cluster-Build
+  in `DrawScene` steht jetzt vor dem ersten `BindSceneLighting` und außerhalb von
+  `HE_HAVE_SHADERC`; `BindSceneLighting` schreibt das Gate jedes Frame für alle drei
+  Programme (Uniform-Werte bleiben pro Programm stehen). macOS-GL (4.1) unverändert.
+- **Zeugen (lokal, M5, Release):** Rezept §3.1 mit `MANYLIGHTS=16builtin`. Vorher
+  7/16 Lichtpools (der 8. Fensterplatz ist das Richtungslicht), nachher 16/16;
+  außerhalb des neuen Pools pixelgleich (3 Pixel ±1 an der Überlappungskante).
+  Bitgleich zu vorher: `HE_FORWARD_CLUSTER=0`, Deferred (`RENDERPATH=1`),
+  Graph-Material (`MANYLIGHTS=16`), GL `16builtin` und GL `16` (macOS-GL 4.1).
+  Rauschboden 0 (zwei Läufe md5-gleich). `MTL_DEBUG_LAYER=1` (nslog): 0 fehlende
+  Bindungen in Forward, `HE_FORWARD_CLUSTER=0` und Deferred.
+  `validate_embedded_shaders.py` linkt die 4.30-Fassung aller drei Programme
+  (`-l`, VS + kUnlitFS); Gegenprobe: Tippfehler im Cluster-Zweig und dieselbe
+  Fassung unter `#version 410` werden abgelehnt.
+- **Offen:** Laufzeit auf echtem GL 4.3 (NN-WS03 o. ä.). Rezept wie §3.5 mit
+  `16builtin`; im Log muss „scene program uses clustered lighting (GLSL 4.30)"
+  (dazu skinned/instanced) stehen, keine Rückfall-Warnung.
 
 ## 4. Pak-Varianten (gilt für D3D11/D3D12/Vulkan)
 
@@ -252,10 +290,29 @@ kenntlich machen, welche Variante gebacken ist (sonst bindet ein Backend die Puf
 einen Blob, der sie nicht deklariert — auf D3D11/Vulkan unschädlich, auf D3D12 nur, wenn die
 Root-Signatur sie optional abdeckt).
 
+**Umgesetzt (Thema 123, Schritt 2):**
+- `MaterialShaderVariant` trägt `fragmentClustered` + `vertexClustered` (letzteres nur GL:
+  das Cluster-Programm ist dort GLSL 4.30 in beiden Stufen, `vertex` bleibt 4.10). Leer =
+  nicht gebacken. PSHD **v3**: die Paare stehen als Block **hinter** allen Records, ein
+  v2-Leser liest einen v3-Blob also weiter richtig; v1/v2-Paks dekodieren mit leeren Paaren.
+- Ein Rezept für beide Backstellen: `HE::bakeMaterialShaderVariant`
+  (`material/MaterialShaderBake.h`) — Exporter (`CompileMaterialShaderVariants`) und
+  `HE_DUMP_MATPRECOMPILE`-Zeuge rufen es. Scheitert das Cluster-Paar, Warnung, plain wird
+  trotzdem ausgeliefert. `uiVertex` paart weiter nur mit `fragment`.
+- Laufzeit, pro Backend unter **genau** der Bedingung, unter der es die Listen bindet und das
+  Gate öffnet: GL `m_forwardClustered && !gbuffer` (+ beide Strings gebacken), Metal
+  `m_forwardClustered && !gbuffer`, D3D11/D3D12 `matClustered()`, Vulkan
+  `m_forwardClustered && m_clusterReady`. Kette: gebacken-clustered → gebacken-plain → wie
+  bisher. Log: „PRECOMPILED variant, clustered/plain" (GL, Metal) bzw. „baked variant,
+  clustered" (D3D/Vulkan).
+- Zeugen: `test_material_graph` „Export bake …" (alle 75 Knoten-Shader: GL-Paar 4.30, linkt
+  unter glslang, byte-gleich zum Laufzeit-Cross-Compile; Negativkontrolle 4.10-Vertex → rot),
+  PSHD-Roundtrip inkl. v2-Blob und abgerissenem Tail.
+
 ## 5. Nebenbefunde (nicht in diesem Schritt gelöst)
 
-- Der **eingebaute** Forward-Shader von **Metal** (`fragmentMain`) und **GL** (`kUnlitFS`)
-  bleibt beim 8er-Fenster. Das ist eine zweite Licht-Limit-Lücke neben `heLitP`.
+- ~~Der **eingebaute** Forward-Shader von **Metal** (`fragmentMain`) und **GL** (`kUnlitFS`)
+  bleibt beim 8er-Fenster.~~ Erledigt in Thema 123 Schritt 1, siehe §3.6 (GL nur ≥ 4.3).
 - Der Deferred-Resolve-Kommentar im Header nennt die GI-Lokalmaske „v1 limitation", der
   Code wendet sie längst an (Kanal über `params.z`).
 - Der Resolve sampelt im Cluster-Loop mit `texture()`. Für einen späteren HLSL-Resolve
@@ -268,5 +325,5 @@ Root-Signatur sie optional abdeckt).
   Validierungsläufe.
 - (Schritt 2) Im Zeugen ist der Boden im Deferred-Pfad deutlich heller als im Forward-Pfad
   (Ambient/IBL), bei gleicher Szene. Nicht untersucht.
-- Der Exporter backt für Metal weiterhin `fragment()` (§4) — ausgelieferte Spiele bleiben
-  bis dahin beim 8er-Fenster.
+- ~~Der Exporter backt für Metal weiterhin `fragment()` (§4) — ausgelieferte Spiele bleiben
+  bis dahin beim 8er-Fenster.~~ Erledigt in Thema 123 Schritt 2 (alle Backends, §4).

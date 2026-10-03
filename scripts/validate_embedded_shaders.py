@@ -69,6 +69,8 @@ HLSL_SOURCES = {
 # GL sky is also what Vulkan/D3D11/D3D12 compile, behind kSkyVulkanPrelude.
 GLSL_SOURCES = [RENDER / "OpenGL" / "OpenGLRenderer.cpp", SKY_SOURCE]
 MSL_SOURCE = RENDER / "Metal" / "MetalRenderer.mm"
+# kGlCluster*SsboBinding — the SSBO bindings the clustered kUnlitFS build defines.
+MATERIAL_LIB_H = REPO / "src" / "HE_Rendering" / "include" / "material" / "MaterialShaderLibrary.h"
 
 # Strings that are NOT standalone shaders — they are spliced into others and have
 # no entry point of their own.
@@ -247,6 +249,47 @@ def check_glsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
             errs = [l.strip() for l in out.splitlines() if "ERROR:" in l]
             failures.append("kSkyFS (Vulkan build):\n      " + "\n      ".join(errs[:3]))
             print(f"  FAIL {'kSkyFS (Vulkan build)':44s} frag")
+
+    # The clustered GL 4.3 build of the three scene programs (Thema 117
+    # Nachzug), assembled like SceneStageSource() in OpenGLRenderer.cpp: the
+    # "#version 410 core" line of BOTH stages becomes 4.30 + HE_CLUSTERED + the
+    # SSBO bindings from MaterialShaderLibrary.h. Linked as a pair (-l), so a
+    # stage mismatch fails here and not first on a GL 4.3 driver.
+    lib_h = MATERIAL_LIB_H.read_text(encoding="utf-8", errors="replace") if MATERIAL_LIB_H.exists() else ""
+    binds = {k: re.search(r"kGlCluster" + k + r"SsboBinding\s*=\s*(\d+)", lib_h) for k in ("Lights", "Grid", "Index")}
+    unlit_fs = strings.get("kUnlitFS")
+    if unlit_fs is None or not all(binds.values()):
+        failures.append("kUnlitFS (clustered GL 4.30): kUnlitFS or kGlCluster*SsboBinding not found")
+    elif "#ifdef HE_CLUSTERED" not in unlit_fs:
+        failures.append("kUnlitFS (clustered GL 4.30): no HE_CLUSTERED branch — the job checks nothing")
+    else:
+        header = ("#version 430 core\n#define HE_CLUSTERED 1\n"
+                  f"#define HE_CL_LIGHTS_BINDING {binds['Lights'].group(1)}\n"
+                  f"#define HE_CL_GRID_BINDING {binds['Grid'].group(1)}\n"
+                  f"#define HE_CL_INDEX_BINDING {binds['Index'].group(1)}\n")
+
+        def clustered(src: str) -> str:
+            return src.replace("#version 410 core\n", header, 1)
+
+        fs = tmp / "gl__kUnlitFS_clustered.frag"
+        fs.write_text(clustered(unlit_fs.replace("//#SKYFUNC#", skyfunc)), encoding="utf-8")
+        for vs_name in ("kUnlitVS", "kSkinnedVS", "kInstancedVS"):
+            label = f"{vs_name}+kUnlitFS (clustered GL 4.30)"
+            vs_body = strings.get(vs_name)
+            if vs_body is None:
+                failures.append(f"{label}: {vs_name} not found")
+                continue
+            vs = tmp / f"gl__{vs_name}_clustered.vert"
+            vs.write_text(clustered(vs_body), encoding="utf-8")
+            ok, out = run([gv, "-l", str(vs), str(fs)])
+            if ok:
+                ok_n += 1
+                if verbose:
+                    print(f"  ok   {label:44s} link")
+            else:
+                errs = [l.strip() for l in out.splitlines() if "ERROR:" in l]
+                failures.append(f"{label}:\n      " + "\n      ".join(errs[:3]))
+                print(f"  FAIL {label:44s} link")
 
     for name, body in strings.items():
         if name in PRELUDES:
