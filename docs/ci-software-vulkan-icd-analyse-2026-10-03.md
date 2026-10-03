@@ -264,6 +264,67 @@ ohne `SDL_VIDEO_DRIVER` laufen lassen (X11-WSI von Mesa).
   lavapipe meldet höhere Grenzen; ein Fehler, der nur auf Geräten am Minimum auftritt, fällt dort
   **nicht** auf.
 
+## 8. Schritt 2: umgesetzt und auf dem Runner gemessen (03.10.2026)
+
+**Eingebaut:**
+- Job `vulkan-lavapipe` in `.github/workflows/ci.yml` (ubuntu-24.04 gepinnt, eigener Job wie
+  in §5 vorgeschlagen, das Linux-Paket bleibt ohne Vulkan).
+- `scripts/he_vk_imagetests.py`: A/B-Fälle, Urteil nach der BMP, Gerätezeuge `llvmpipe`,
+  Validation-Prüfung.
+- Editor-CMake §3.1/§3.2: Gate auf `HE_VULKAN_ENABLED`, SDK-Bibliothekspfad je Plattform.
+- Gerätename im Log (§3.5): `VulkanRenderer: device 0 of N: <Name> (Vulkan x.y.z, driver …)`.
+
+**Gemessen** (Läufe 37112790557 und 37113763253):
+
+| | Wert |
+|---|---|
+| Treiber | Mesa 25.2.8-0ubuntu0.24.04.4, `llvmpipe (LLVM 20.1.2, 256 bits)`, Vulkan 1.4.318 |
+| Loader / Layer | `libvulkan1` 1.3.275, `vulkan-validationlayers` 1.3.275 |
+| ICD-Datei | **`lvp_icd.json`**, nicht `lvp_icd.x86_64.json` (§5 lag falsch). Der Job sucht sie jetzt per Glob |
+| Extensions | `VK_EXT_headless_surface`, `VK_KHR_ray_query` und `VK_KHR_acceleration_structure` vorhanden |
+| Runner | 4 Kerne. Build nur `HorizonEditor`: **13 min** |
+| Zeit pro Bild (1280×720) | 3–6 s mit 3 Frames, 11–13 s mit 40 Frames GI. §3.4 (`HE_DUMP_W/H`) ist **nicht nötig** |
+| WSI | SDL-Offscreen + Headless-Surface **und** Xvfb/X11 funktionieren beide |
+| Abbau | Exit-Code 0 bei allen Bildern, der Abbau-Absturz aus `he_shot.py` tritt hier nicht auf |
+
+**Fälle und Messwerte** (mittlere |Δ| in 8-Bit-Stufen; Rauschen = gleiches Bild zweimal):
+
+| Fall | A/B | Signal | Rauschen | Schwelle |
+|---|---|---|---|---|
+| `nebula` | `NEBULA=0` / `0.6`, Nacht, Blick nach oben | 13,1–13,4 (35 % px > 2) | 1,2–1,4 zwischen Läufen, im Lauf 0 | 5,0 |
+| `clustered` | `HE_FORWARD_CLUSTER=0` / an, `MANYLIGHTS=16` | 2,97 (18 % px > 2): **16 Lichtpools gegen 7** | bitgleich zwischen Läufen | 1,5 |
+| `gi` | `GI=0` / `1` auf `GIREFLTEST`, `GIREFL=0` | 0,46 (10 % px > 2) | max 1 auf 6 px | 0,3 |
+| `gi` HW gegen SW | `HE_GI_FORCE_SW=1` | max 1 auf 20 px: **Ray-Query-Pfad = Software-BVH** | – | nur Bericht |
+| `gi_refl` | `GIREFL=0` / `1` | max 1 auf 39 px: **keine GI-Reflexionen auf Vulkan** | – | nur Bericht |
+
+Der HW-RT-Pfad der GI (`gi_*_hw.comp`) ist damit zum ersten Mal außerhalb von NN-WS03 gelaufen,
+und er trifft den Software-Pfad praktisch pixelgleich.
+
+**Gefundene Renderer-Fehler** (offen, nicht Teil dieses Schritts):
+1. **Bemaltes Terrain stürzt auf lavapipe ab.** `HE_DUMP_LANDSCAPELAYERS=1` endet mit SIGSEGV
+   im ersten Draw, auch mit `GI=0`. Validation: `VUID-VkGraphicsPipelineCreateInfo-layout-07988`
+   und `vkCmdDrawIndexed … binding #14 is invalid`. Das ist das fehlende `heLandscapeWeights`
+   aus GI-Doku §7.3. NVIDIA meldet es nur, ein Treiber, der den Deskriptor wirklich liest,
+   stürzt. Der GI-Fall nutzt deshalb `GIREFLTEST` statt des Terrains aus §4.
+2. **Material-UBO wird im Render-Pass beschrieben.** Built-in-Material-Draws rufen
+   `vkCmdUpdateBuffer` und eine Barriere innerhalb des Szenen-Render-Pass
+   (`VulkanRenderer.cpp`, „Update material UBO", in `drawDCVk` und im instanzierten Zwilling).
+   Meldungen: `VUID-vkCmdUpdateBuffer-renderpass` und `VUID-vkCmdPipelineBarrier-None-07889`,
+   zwei pro Built-in-Draw und Frame. Spec-widrig: alle Draws teilen einen UBO.
+3. **Bildlayout mit GI an.** Einmal pro Frame
+   `UNASSIGNED-CoreValidation-DrawState-InvalidImageLayout`. Der Engine-Logger kürzt die
+   Meldung vor den Layout-Namen; welches Bild es ist, ist offen.
+
+2 und 3 stehen in der Allowlist des Skripts (`ALLOWED_VALIDATION`, je Fall und Variante,
+mit Grund). Nebula und Clustered erlauben nichts. Jede neue Meldung färbt den Fall rot. Ist
+ein Fehler behoben, wird sein Eintrag gelöscht.
+
+**Offen nach Schritt 2:**
+- Pool-Zähler für Clustered (heute: mittlere |Δ|; die Bilder zeigen 16 gegen 7 Pools eindeutig).
+- `LANDSCAPELAYERS` als Fall aufnehmen, sobald Fund 1 behoben ist.
+- `gi_refl` zur bewerteten Paarung machen, sobald Vulkan GI-Reflexionen zeichnet.
+- GL/llvmpipe-Deferred-Beigabe und In-Process-Fälle (Ebene a) aus §4: nicht angefangen.
+
 ## Quellen
 
 - Phoronix, „Mesa's CPU-Based Vulkan Driver Now Supports Ray-Tracing":
