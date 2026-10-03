@@ -3960,20 +3960,35 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
 
 // ── toolchain integration ─────────────────────────────────────────────────────
 
-SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir)
+namespace {
+// An SDK root: <root>/include + <root>/lib. The deploy stages the engine headers
+// one level deeper, at <root>/src/HE_Core/include, so that <root> doubles as the
+// HORIZON_ENGINE_DIR a C++ project's scaffold asks for (engineRootFromSdk);
+// <root>/include then holds the third-party headers (glm) alone. A flat root
+// with everything in include/ still works — that is the HE_HCGEN_SDK form.
+SdkInfo sdkFromRoot(const std::filesystem::path& root)
 {
     namespace fs = std::filesystem;
     std::error_code ec;
+    if (!fs::is_directory(root / "include", ec)) return {};
+    SdkInfo info;
+    if (const fs::path core = root / "src" / "HE_Core" / "include"; fs::is_directory(core, ec))
+        info.includeDirs.push_back(core);
+    info.includeDirs.push_back(root / "include");
+    info.libDir = root / "lib";
+    return info;
+}
+} // namespace
+
+SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir)
+{
+    namespace fs = std::filesystem;
     // 1. Explicit override for CI / unusual layouts.
     if (const char* env = std::getenv("HE_HCGEN_SDK"); env && *env)
-    {
-        const fs::path root(env);
-        if (fs::is_directory(root / "include", ec))
-            return { { root / "include" }, root / "lib" };
-    }
-    // 2. A staged SDK beside the deployed editor.
-    if (const fs::path staged = editorBaseDir / "SDK"; fs::is_directory(staged / "include", ec))
-        return { { staged / "include" }, staged / "lib" };
+        if (SdkInfo info = sdkFromRoot(fs::path(env)); info.valid()) return info;
+    // 2. A staged SDK beside the deployed editor (src/HE_Editor/CMakeLists.txt
+    //    stages it on every build of the editor).
+    if (SdkInfo info = sdkFromRoot(editorBaseDir / "SDK"); info.valid()) return info;
     // 3. Development build: the config CMake wrote beside the editor binary,
     //    pointing straight into the source tree + build dir.
     std::ifstream cfg(editorBaseDir / "he_sdk_config.json", std::ios::binary);

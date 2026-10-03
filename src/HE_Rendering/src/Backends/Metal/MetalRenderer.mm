@@ -14071,19 +14071,9 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// DDGI probe grid — the SAME values BuildGIUniforms hands the built-in
 	// shaders, so heLitP's indirect diffuse matches theirs instead of
 	// falling back to flat ambient while GI is on.
-	{
-		const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
-		                                      m_giGridCounts, m_giProbesPerRow,
-		                                      m_giIndirectIntensity);
-		for (int k = 0; k < 4; ++k)
-		{
-			matLight.giGridOrigin[k] = gu.gridOrigin[k];
-			matLight.giGridCounts[k] = gu.gridCounts[k];
-		}
-		matLight.giProbe[0] = gu.params.x;
-		matLight.giProbe[1] = (giActive && m_giIrradianceAtlas && m_giVisibilityAtlas)
-			? 1.0f : 0.0f;
-	}
+	HE::FillMaterialGIProbe(matLight, m_giGridOrigin, m_giProbeSpacing, m_giGridCounts,
+	                        m_giProbesPerRow, m_giIndirectIntensity,
+	                        giActive && m_giIrradianceAtlas && m_giVisibilityAtlas);
 	// Specular AA (A6). y = 1 means "this fill feeds a GEOMETRY pass", where the
 	// fragment's own normal and its derivatives exist. The forward pass is one;
 	// the deferred resolve and the SSR composite are NOT and clear it right after

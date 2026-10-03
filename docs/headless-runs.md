@@ -220,10 +220,12 @@ wird nichts automatisch versteckt.
 
 ## Fallen
 
-- **Config-RHI gegen `HE_DUMP_RHI`:** `HE_DUMP_RHI=Metal` tauscht nur den
-  Renderer; das ImGui-Backend kommt aus der Config. Config `RHI 0` plus
-  `HE_DUMP_RHI=Metal` stürzt im ersten UI-Frame in `ImGui_ImplOpenGL3_NewFrame`
-  ab. Im privaten `HOME` `"RHI": 4` setzen.
+- **Config-RHI gegen `HE_DUMP_RHI` (behoben, Thema 124 A6):** Bis dahin tauschte
+  `HE_DUMP_RHI=Metal` nur den Renderer, das ImGui-Backend kam am Ende von `OnInit`
+  wieder aus der Config. Config `RHI 0` plus `HE_DUMP_RHI=Metal` stürzte im ersten
+  UI-Frame in `ImGui_ImplOpenGL3_NewFrame` ab. Seitdem gilt durchgehend das
+  Backend, mit dem der Renderer erzeugt wurde (`EditorBackendChoice.h`). Wer ältere
+  Builds treibt, setzt im privaten `HOME` weiter `"RHI": 4`.
 - **Debug-Deploys** brauchen für die Metal-Pipelines beim ersten Start mehrere
   Minuten (~160 s bis zum ersten Frame). Timeouts danach wählen
   (`HE_SHOT_TIMEOUT=400` für `he_shot.py`).

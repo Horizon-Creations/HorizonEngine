@@ -314,6 +314,7 @@ void VulkanRenderer::Shutdown()
     {
         if (m_frameFence[i])  vkDestroyFence    (m_device, m_frameFence[i],  nullptr);
         if (m_imageReady[i])  vkDestroySemaphore(m_device, m_imageReady[i],  nullptr);
+        m_frameFence[i] = VK_NULL_HANDLE;   // GetCompletedFrameSerial() skips null fences
     }
     for (VkSemaphore s : m_renderDone) if (s) vkDestroySemaphore(m_device, s, nullptr);
     m_renderDone.clear();
@@ -529,6 +530,7 @@ void VulkanRenderer::Render()
     si.pCommandBuffers      = &cmd;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &m_renderDone[imageIndex];   // per-image present semaphore
+    m_frameSerial[fi] = ++m_submitSerial;
     vkQueueSubmit(m_graphicsQueue, 1, &si, m_frameFence[fi]);
 
     VkPresentInfoKHR pi{};
@@ -1642,6 +1644,7 @@ void VulkanRenderer::renderWindowData(WindowData& wd)
     si.pCommandBuffers      = &cmd;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &wd.renderDone[fi];
+    wd.frameSerial[fi] = ++m_submitSerial;   // same counter as the main window
     vkQueueSubmit(m_graphicsQueue, 1, &si, wd.frameFence[fi]);
 
     VkPresentInfoKHR pi{};
@@ -2318,6 +2321,76 @@ void VulkanRenderer::createMaterialResources()
         }
     }
 
+    // 1x1 white CUBE for heSkyEnv (binding 15, samplerCube). The white 2D image
+    // above cannot carry a cube view (one layer, not CUBE_COMPATIBLE), so this is
+    // its own six-layer image, cleared to white and parked in SHADER_READ_ONLY.
+    {
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.flags         = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+        ici.imageType     = VK_IMAGE_TYPE_2D;
+        ici.format        = VK_FORMAT_R8G8B8A8_UNORM;
+        ici.extent        = { 1, 1, 1 };
+        ici.mipLevels     = 1;
+        ici.arrayLayers   = 6;
+        ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        bool ok = vkCreateImage(m_device, &ici, nullptr, &m_whiteCubeImage) == VK_SUCCESS;
+        if (ok)
+        {
+            VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, m_whiteCubeImage, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = req.size;
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            ok = vkAllocateMemory(m_device, &mai, nullptr, &m_whiteCubeMem) == VK_SUCCESS;
+            if (ok) vkBindImageMemory(m_device, m_whiteCubeImage, m_whiteCubeMem, 0);
+        }
+        if (ok)
+        {
+            VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            vci.image            = m_whiteCubeImage;
+            vci.viewType         = VK_IMAGE_VIEW_TYPE_CUBE;
+            vci.format           = VK_FORMAT_R8G8B8A8_UNORM;
+            vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+            ok = vkCreateImageView(m_device, &vci, nullptr, &m_whiteCubeView) == VK_SUCCESS;
+        }
+        if (!ok)
+        {
+            HE_LOG_WARN(RHI, "%s",
+                "VulkanRenderer: A4 material path disabled — white cube default failed");
+            return;
+        }
+
+        // One-shot: UNDEFINED → TRANSFER_DST → clear white → SHADER_READ_ONLY.
+        VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+        VkCommandBuffer tmp = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(m_device, &cbai, &tmp);
+        VkCommandBufferBeginInfo cbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(tmp, &cbi);
+        const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = m_whiteCubeImage; b.subresourceRange = range;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(tmp, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        VkClearColorValue white{}; white.float32[0] = white.float32[1] = white.float32[2] = white.float32[3] = 1.0f;
+        vkCmdClearColorImage(tmp, m_whiteCubeImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &range);
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(tmp, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        vkEndCommandBuffer(tmp);
+        VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
+        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(m_graphicsQueue);
+        vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
+    }
+
     // ── Descriptor set 0 layout: HE::vkmat::kBindings (VulkanMaterialLayout.h), the
     //    table he_tests reflects every node shader's SPIR-V against. Canonical bindings
     //    0-7, 8/9 for the WPO custom vertex, the GI/CSM/SSR/local-atlas samplers, and
@@ -2389,7 +2462,7 @@ void VulkanRenderer::createMaterialResources()
         using HE::vkmat::countOf;
         VkDescriptorPoolSize ps[3] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         countOf(DescKind::UniformBuffer)        * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b13,b31
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b13,b15-b18,b31-b33
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -2437,6 +2510,9 @@ void VulkanRenderer::destroyMaterialResources()
     if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
     if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
     if (m_whiteArrayView)    { vkDestroyImageView(m_device, m_whiteArrayView, nullptr);         m_whiteArrayView = VK_NULL_HANDLE; }
+    if (m_whiteCubeView)     { vkDestroyImageView(m_device, m_whiteCubeView, nullptr);          m_whiteCubeView  = VK_NULL_HANDLE; }
+    if (m_whiteCubeImage)    { vkDestroyImage(m_device, m_whiteCubeImage, nullptr);             m_whiteCubeImage = VK_NULL_HANDLE; }
+    if (m_whiteCubeMem)      { vkFreeMemory(m_device, m_whiteCubeMem, nullptr);                 m_whiteCubeMem   = VK_NULL_HANDLE; }
 }
 
 // `precompiled` (the pak's baked SPIR-V for Vulkan, MaterialShaderLibrary::precompiledFor)
@@ -5318,6 +5394,28 @@ void* VulkanRenderer::GetViewportVkSampler()   const { return static_cast<void*>
 bool  VulkanRenderer::HasViewportResourceChanged() const { return m_viewportResChanged; }
 void  VulkanRenderer::ClearViewportResourceChanged()     { m_viewportResChanged = false; }
 
+uint64_t VulkanRenderer::GetCompletedFrameSerial()
+{
+    // A fence signalled by vkQueueSubmit covers every command submitted to that
+    // queue earlier in submission order (Vulkan spec, "Fences"), and all frame
+    // submits go to m_graphicsQueue — so the highest serial among the signalled
+    // frame fences says every frame up to it is done. A fence reset for a
+    // submit that has not happened yet just does not count; that only delays.
+    if (!m_device) return m_completedSerial;
+    auto consider = [this](VkFence fence, uint64_t serial)
+    {
+        if (fence && serial > m_completedSerial &&
+            vkGetFenceStatus(m_device, fence) == VK_SUCCESS)
+            m_completedSerial = serial;
+    };
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        consider(m_frameFence[i], m_frameSerial[i]);
+    for (auto& [sdlWin, wd] : m_extraWindows)
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+            consider(wd.frameFence[i], wd.frameSerial[i]);
+    return m_completedSerial;
+}
+
 // The Vulkan twin of D3D11/D3D12's drawDepthInstanced: every caller writes the
 // products its per-object loop pushes as constants, so the instanced frame is
 // the loop's frame. The buffer is host-coherent and read at submit, which is
@@ -6393,6 +6491,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // then fill the shared HeLighting UBO once — identical for every graph-material draw.
     // DrawScene runs at most once per frame (viewport OR swapchain, gated by useViewport),
     // so this reset happens exactly once per frame. Matches OpenGLRenderer's HeLighting fill.
+    // DDGI for graph materials: ONE predicate opens heLitP's probe gate and picks
+    // the real atlases for bindings 17/18 per draw below — the gate can never be
+    // up while white sits there, nor an atlas be bound in a layout the gate does
+    // not vouch for. runGi() ran earlier this frame (its step-6 write points the
+    // scene set's 5/6 at the same images under the same condition).
+    const bool matGiProbes = m_giRanThisFrame && m_giProbeGridBuilt
+                          && m_giIrrAtlas.view && m_giVisAtlas.view;
     if (m_matReady)
     {
         vkResetDescriptorPool(m_device, m_matPool[m_currentFrame], 0);
@@ -6437,6 +6542,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = m_giRanThisFrame ? 1.0f : 0.0f;
+        // DDGI probe field (Lighting v2.5) — the same grid the frame UBO hands
+        // scene.frag's sampleDDGIIrradiance, so a graph material's indirect
+        // diffuse matches a built-in neighbour instead of flat ambient while GI
+        // is on (heGIIrradianceAt is its line-for-line twin).
+        HE::FillMaterialGIProbe(lit, m_giGridOrigin, m_giProbeSpacing, m_giGridCounts,
+                                m_giProbesPerRow, m_giIndirectIntensity, matGiProbes);
         // CSM fallback for graph materials (Lighting v2.2): only meaningful
         // when the GI masks are absent this frame — heLitP's directional
         // lights then sample the SAME cascade array as the built-in shader
@@ -6810,6 +6921,31 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 localShadows ? m_localShadowView : m_whiteArrayView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(14, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &localII);
+                            // heSkyEnv (15): white cube — fog.z stays 0 here.
+                            VkDescriptorImageInfo skyII{ m_albedoSampler, m_whiteCubeView,
+                                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
+                            // heAO (16), heGIReflFwd (32), heCloudShadow (33): white —
+                            // their gates (fog.w, giRefl.z, cloudShadowB.x) stay 0 here.
+                            VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
+                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
+                            // heGIIrradiance / heGIVisibility (17/18): the probe atlases
+                            // under matGiProbes (the gate FillMaterialGIProbe raised), in
+                            // GENERAL like everywhere else they are sampled; white
+                            // otherwise. Linear-CLAMP like the scene set's 5/6 — a
+                            // repeating sampler would wrap edge taps across the atlas.
+                            const VkSampler giAtlasSampler = m_ssaoSampler ? m_ssaoSampler : m_albedoSampler;
+                            VkDescriptorImageInfo giIrrII{ giAtlasSampler,
+                                matGiProbes ? m_giIrrAtlas.view : m_whiteAlbedoView,
+                                matGiProbes ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            VkDescriptorImageInfo giVisII{ giAtlasSampler,
+                                matGiProbes ? m_giVisAtlas.view : m_whiteAlbedoView,
+                                matGiProbes ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giIrrII);
+                            wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giVisII);
+                            wr(19, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
+                            wr(20, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
                             // fragmentClustered's light lists (bindings 24..26, Thema
                             // 117): this frame slot's cluster SSBOs, the very buffers
                             // the built-in shader reads at scene bindings 10..12. Written
@@ -6817,7 +6953,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // HE_FORWARD_CLUSTER=0): a clustered pipeline statically uses
                             // them, so its set must be complete. Without them every
                             // pipeline is the plain variant, which uses none of the three.
-                            uint32_t nWrites = 15;
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 21,
+                                          "one fixed write (w[0..20]) per non-cluster layout row");
+                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount;
                             VkDescriptorBufferInfo clusterBI[3]{};
                             if (m_clusterReady)
                             {

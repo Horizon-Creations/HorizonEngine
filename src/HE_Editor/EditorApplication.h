@@ -41,6 +41,7 @@
 #include "McpBridge.h"
 #include "McpClaudeProbe.h"      // Tool Status: can Claude actually reach this editor
 #include "McpLockBook.h"         // external locks, per MCP client
+#include "DeferredHandleRetireList.h" // Vulkan viewport descriptor sets, freed behind the GPU
 #include "EditorCommands.h"
 #include <atomic>
 #include <filesystem>
@@ -577,7 +578,8 @@ private:
 	bool m_projectLoaded     = false;
 	bool m_contentRefreshPending = false;
 	bool m_contentRefreshDone    = false;
-	HE::RendererBackend m_backend;
+	// Set once, by CreateRenderer: the backend the renderer was created with.
+	HE::RendererBackend m_backend = HE::RendererBackend::OpenGL;
 	std::string m_backend_name;
 	ProjectManager m_projectManager;
 	EditorConfig m_editorConfig;
@@ -1250,6 +1252,9 @@ private:
 	bool     m_d3d12ViewportSrvAllocated = false;
 	// Viewport ImGui descriptor set (Vulkan only); void* to avoid Vulkan headers here.
 	void*    m_vkViewportDescSet         = nullptr;
+	// Old viewport descriptor sets, freed only once the frames that drew them
+	// have finished on the GPU (Thema 124, see DeferredHandleRetireList.h).
+	DeferredHandleRetireList<void*> m_vkRetiredViewportSets;
 
 	ImTextureID m_logoTexture = 0;
 	int         m_logoW       = 0;

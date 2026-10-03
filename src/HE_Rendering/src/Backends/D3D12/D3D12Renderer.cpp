@@ -7031,9 +7031,37 @@ struct D3D12RendererImpl
         auto retire = [&](ComPtr<ID3D12Resource>& t)
         { if (t) m_retiredTextures.emplace_back(std::move(t), retireN); };
         retire(giIrrTex); retire(giVisTex); retire(giIrrPrevTex); retire(giVisPrevTex);
+        writeMatGiProbeSlots(); // template → nulls; the atlases above are gone
         giProbeGridBuilt = false;
         giProbeCount = 0;
         giProbeCursor = 0;
+    }
+
+    // The graph-material TEMPLATE's DDGI slots (t17/t18 = kSlotGIIrradiance /
+    // kSlotGIVisibility): the live probe atlases while they exist, otherwise null
+    // views of the same dimension. CPU-only heap — every material draw copies
+    // the template into its ring block at RECORD time, so blocks already
+    // recorded keep their views and the next draw picks up the new ones; no
+    // flush needed for the template itself. fillMatLight's giProbe.y gate
+    // decides whether heLitP samples them at all.
+    void writeMatGiProbeSlots()
+    {
+        if (!m_matSrvStaging) return;
+        const D3D12_CPU_DESCRIPTOR_HANDLE irrH = matSrvStagingCpu(HE::d3d12mat::kSlotGIIrradiance);
+        const D3D12_CPU_DESCRIPTOR_HANDLE visH = matSrvStagingCpu(HE::d3d12mat::kSlotGIVisibility);
+        if (giIrrTex && giVisTex)
+        {
+            srvIntoHeapSlot(giIrrTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, irrH);
+            srvIntoHeapSlot(giVisTex.Get(), DXGI_FORMAT_R16G16_FLOAT,       visH);
+            return;
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC nv{};
+        nv.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+        nv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        nv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        nv.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(nullptr, &nv, irrH);
+        device->CreateShaderResourceView(nullptr, &nv, visH);
     }
 
     // Creates the octahedral probe atlases (irradiance RGBA16F + visibility
@@ -7129,6 +7157,9 @@ struct D3D12RendererImpl
             srvIntoHeapSlot(giIrrTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, sceneSrvCpu(5));
             srvIntoHeapSlot(giVisTex.Get(), DXGI_FORMAT_R16G16_FLOAT,       sceneSrvCpu(6));
         }
+        // ...and into the graph-material template (t17/t18), so heLitP's
+        // heGIIrradianceAt reads the same atlases as the built-in shader.
+        writeMatGiProbeSlots();
     }
 
     void destroyGiTargets()
@@ -7139,6 +7170,7 @@ struct D3D12RendererImpl
         giShadowW = giShadowH = 0;
         giHistValid = false;
         giIrrTex.Reset(); giVisTex.Reset(); giIrrPrevTex.Reset(); giVisPrevTex.Reset();
+        writeMatGiProbeSlots(); // template → nulls
         giProbeGridBuilt = false;
         giProbeCount = 0;
         giProbeCursor = 0;
@@ -8136,8 +8168,10 @@ void D3D12RendererImpl::createMaterialResources()
     // shader reads at t0, sampled behind csmSplits.w > 0), [8] k_matLocalShadowSlot =
     // heLocalShadow (t13, the local atlas the built-in shader reads at t17, sampled behind
     // lightParams[i].y > 0), [9..16] heLandscapeWeights / heSkyEnv / heAO / DDGI atlases /
-    // heSSRFwd / heGIReflFwd / heCloudShadow (t14..t18, t31..t33) — null views for now,
-    // their gates stay 0 in fillMatLight.
+    // heSSRFwd / heGIReflFwd / heCloudShadow (t14..t18, t31..t33) — null views, their
+    // gates stay 0 in fillMatLight; EXCEPT the DDGI atlases [12..13] (t17/t18), which
+    // ensureGiProbeAtlas writes into the template (writeMatGiProbeSlots) behind the
+    // giProbe.y gate.
     HE::d3d12mat::MaterialRootSignature matRs;
     HE::d3d12mat::DescribeMaterialRootSignature(matRs);
     const D3D12_ROOT_SIGNATURE_DESC& rsd = matRs.desc;
@@ -8158,8 +8192,9 @@ void D3D12RendererImpl::createMaterialResources()
     //                     (an empty heTex0/heTexP slot samples (0,0,0,0); the shader's
     //                     hasTex flag and the graph's own defaults decide what that means),
     //                     the GI masks in [5..6], the cascade array for heCsm in [7],
-    //                     the local atlas for heLocalShadow in [8] and null views of the
-    //                     preamble's remaining SRVs in [9..16].
+    //                     the local atlas for heLocalShadow in [8], the DDGI atlases in
+    //                     [12..13] once they exist, and null views of the preamble's
+    //                     remaining SRVs in the rest of [9..16].
     //   m_matSrvHeap     — the shader-visible ring of per-draw blocks the template is
     //                     copied into, k_frameCount × k_matMaxDraws × k_matSrvPerDraw.
     {
@@ -8213,8 +8248,10 @@ void D3D12RendererImpl::createMaterialResources()
         writeShadowArraySrv(localShadowDepth.Get(), h, kLocalShadowLayers); h.ptr += inc;
         // Slots 9..16: the preamble's remaining SRVs (heLandscapeWeights, heSkyEnv,
         // heAO, the DDGI atlases, heSSRFwd, heGIReflFwd, heCloudShadow). Declared so
-        // the PSO is legal, never sampled: fillMatLight leaves their gates at 0
-        // (wiring the real targets through here is the D3D11-parity job). Null views
+        // the PSO is legal, never sampled: fillMatLight leaves their gates at 0.
+        // The DDGI pair (12/13) starts null too and is swapped for the live atlases
+        // by ensureGiProbeAtlas → writeMatGiProbeSlots (back to null on retire);
+        // the atlases are created per frame, long after this init. Null views
         // of the DIMENSION the shader declares — heSkyEnv is a samplerCube, and a null
         // descriptor of the wrong dimension is undefined behaviour, not "zero".
         for (UINT slot = HE::d3d12mat::kSlotLocalShadow + 1; slot < HE::d3d12mat::kSrvPerDraw; ++slot)
@@ -9360,6 +9397,17 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
+        // DDGI probe field (Lighting v2.5) — the same grid fillPerFrame hands the
+        // built-in shader, so heLitP's indirect diffuse matches its
+        // sampleDDGIIrradiance instead of falling back to flat ambient while GI
+        // is on. The atlases reach t17/t18 (SRV block slots kSlotGIIrradiance /
+        // kSlotGIVisibility) through the material template, written by
+        // ensureGiProbeAtlas; they are in PIXEL_SHADER_RESOURCE whenever giActive
+        // is true (dispatchGiProbeUpdate's tail barrier), and every graph-material
+        // draw is recorded after it, in the geometry pass.
+        HE::FillMaterialGIProbe(lit, p.giGridOrigin, p.giProbeSpacing, p.giGridCounts,
+                                p.giProbesPerRow, p.giIndirectIntensity,
+                                giActive && p.giIrrTex && p.giVisTex);
         // CSM fallback for graph materials (Lighting v2.2): only meaningful
         // when the GI masks are absent this frame — heLitP's directional
         // lights then sample the SAME cascade array as the built-in shader

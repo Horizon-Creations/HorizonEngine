@@ -518,8 +518,9 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
   mit `RHI: 0` (OpenGL) plus `HE_DUMP_RHI=Metal` stürzt im ersten UI-Frame in
   `ImGui_ImplOpenGL3_NewFrame` → `glGetIntegerv` (SIGSEGV), weil
   `EditorUI::render` seinen ImGui-Backend-Zweig aus der Config wählt. Der
-  Dump-Pfad beendet vor der UI und merkt nichts. Nicht gefixt (kein Teil des
-  Themas), der Treiber schreibt `RHI: 4` in seine private Config.
+  Dump-Pfad beendet vor der UI und merkt nichts. Hier nicht gefixt (kein Teil
+  des Themas), der Treiber schreibt `RHI: 4` in seine private Config. Behoben in
+  Thema 124 (A6): `m_backend` bleibt der Wert aus `CreateRenderer`.
 
 **Einschränkungen, die bleiben:**
 
