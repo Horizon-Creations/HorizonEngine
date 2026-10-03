@@ -236,10 +236,48 @@ Deferred-Resolve und war per `compileResolveVariant` auf Metal gesperrt.
   SSBOs behält und Pins nur in der passenden Stufe greifen.
 - **Offen:** Laufzeit auf echtem GL 4.3 (NN-WS03 o. ä.; hier gibt es keins). Rezept wie
   §3.2 mit `HE_DUMP_RHI=OpenGL`: `HE_DUMP_MANYLIGHTS=16` einmal mit, einmal mit
-  `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, `16builtin` unverändert (der
-  eingebaute GL-Shader `kUnlitFS` bleibt beim Fenster, §5). Im Log muss „built a
+  `HE_FORWARD_CLUSTER=0`; erwartet 16 statt 8 Lichtpools, seit §3.6 auch mit
+  `16builtin` (vorher blieb `kUnlitFS` beim Fenster). Im Log muss „built a
   CLUSTERED material program (GLSL 4.30)" stehen, keine Rückfall-Warnung; mit
   `HE_GL_DEBUG=1` keine Meldung zu SSBO 4–6.
+
+### 3.6 Eingebaute Forward-Shader Metal + GL (Thema 123, Nachzug Schritt 1)
+
+Der Nebenbefund aus §5 („eingebauter Shader bleibt beim Fenster") ist für Metal und
+GL ≥ 4.3 geschlossen. Gleicher Vertrag wie §2.1: Fenster bleibt voll, die Shader
+überspringen dessen Punkt-/Spot-Plätze selbst, solange das Gate an ist.
+
+- **Metal `fragmentMain`:** liest die Listen auf Fragment-Buffer **4/5/6** (dieselben
+  wie heLitP). Gate + Raster in `SceneUniforms::clusterParams/clusterCamFwd` (angehängt,
+  `static_assert` +32 B). `EncodeScene` baut den Cluster-Build jetzt **vor** dem Upload
+  von `scene` (der Skinned-Pass lädt dieselbe Struct erneut hoch); ein Build dient
+  fragmentMain, den Graph-Materialien und dem Stored-Resolve. Ohne Build
+  (`HE_FORWARD_CLUSTER=0`) werden 16-Byte-Nulllisten gebunden, weil fragmentMain die
+  Puffer unbedingt deklariert. `localShadowFactor` → `localShadowFactorAt(posType, base)`,
+  der Fenster-Pfad ruft es unverändert auf. Kein Rückfall nötig: der Shader-Text ist
+  für beide Fälle derselbe.
+- **GL `kUnlitFS`:** `#ifdef HE_CLUSTERED`-Zweig (SSBOs 4/5/6 aus
+  `kGlCluster*SsboBinding`, `uClusterParams/uClusterCamFwd`, `clusterLights()`).
+  `SceneStageSource` hebt **beide** Stufen eines Szenen-Programms auf GLSL 4.30 und
+  definiert Schalter + Bindings; `LinkSceneProgram` baut unlit/skinned/instanced damit,
+  solange `m_forwardClustered`, sonst und bei Compile-/Link-Fehler (Warnung) die
+  4.10-Fassung. `m_forwardClustered` bleibt dabei unangetastet. Der Cluster-Build
+  in `DrawScene` steht jetzt vor dem ersten `BindSceneLighting` und außerhalb von
+  `HE_HAVE_SHADERC`; `BindSceneLighting` schreibt das Gate jedes Frame für alle drei
+  Programme (Uniform-Werte bleiben pro Programm stehen). macOS-GL (4.1) unverändert.
+- **Zeugen (lokal, M5, Release):** Rezept §3.1 mit `MANYLIGHTS=16builtin`. Vorher
+  7/16 Lichtpools (der 8. Fensterplatz ist das Richtungslicht), nachher 16/16;
+  außerhalb des neuen Pools pixelgleich (3 Pixel ±1 an der Überlappungskante).
+  Bitgleich zu vorher: `HE_FORWARD_CLUSTER=0`, Deferred (`RENDERPATH=1`),
+  Graph-Material (`MANYLIGHTS=16`), GL `16builtin` und GL `16` (macOS-GL 4.1).
+  Rauschboden 0 (zwei Läufe md5-gleich). `MTL_DEBUG_LAYER=1` (nslog): 0 fehlende
+  Bindungen in Forward, `HE_FORWARD_CLUSTER=0` und Deferred.
+  `validate_embedded_shaders.py` linkt die 4.30-Fassung aller drei Programme
+  (`-l`, VS + kUnlitFS); Gegenprobe: Tippfehler im Cluster-Zweig und dieselbe
+  Fassung unter `#version 410` werden abgelehnt.
+- **Offen:** Laufzeit auf echtem GL 4.3 (NN-WS03 o. ä.). Rezept wie §3.5 mit
+  `16builtin`; im Log muss „scene program uses clustered lighting (GLSL 4.30)"
+  (dazu skinned/instanced) stehen, keine Rückfall-Warnung.
 
 ## 4. Pak-Varianten (gilt für D3D11/D3D12/Vulkan)
 
@@ -254,8 +292,8 @@ Root-Signatur sie optional abdeckt).
 
 ## 5. Nebenbefunde (nicht in diesem Schritt gelöst)
 
-- Der **eingebaute** Forward-Shader von **Metal** (`fragmentMain`) und **GL** (`kUnlitFS`)
-  bleibt beim 8er-Fenster. Das ist eine zweite Licht-Limit-Lücke neben `heLitP`.
+- ~~Der **eingebaute** Forward-Shader von **Metal** (`fragmentMain`) und **GL** (`kUnlitFS`)
+  bleibt beim 8er-Fenster.~~ Erledigt in Thema 123 Schritt 1, siehe §3.6 (GL nur ≥ 4.3).
 - Der Deferred-Resolve-Kommentar im Header nennt die GI-Lokalmaske „v1 limitation", der
   Code wendet sie längst an (Kanal über `params.z`).
 - Der Resolve sampelt im Cluster-Loop mit `texture()`. Für einen späteren HLSL-Resolve

@@ -33,8 +33,9 @@
 //   * (AHEAD of GL, Thema 35 / Schritt 8) Clustered lighting — point/spot
 //     lights beyond the 8-light window come from per-cluster SSBOs (bindings
 //     10..12, `clusterParams` / `clusterCamFwd` in the Frame block) built by
-//     HE::BuildClusterLights; GL's kUnlitFS still iterates the 8-light window
-//     only (no SSBOs in GL 4.1). The loop body mirrors heClusterLighting in
+//     HE::BuildClusterLights; GL's kUnlitFS clusters only in its GL 4.3 build
+//     (HE_CLUSTERED, SSBOs 4..6) and keeps the 8-light window on GL 4.1
+//     (macOS). The loop body mirrors heClusterLighting in
 //     MaterialShaderLibrary.cpp's deferred resolve.
 //   * uSkyEnv — the baked skyColor cubemap GL samples for ambient diffuse and
 //     specular. This file evaluates skyColor() analytically per fragment.

@@ -282,6 +282,12 @@ struct SceneUniforms {
 	// CSM receiver depth bias (project ShadowSettings): x = slope-scaled
 	// factor, y = minimum. Defaults (0.0008, 0.0002) are the old literals.
 	float4   shadowBias;
+	// Clustered point/spot lights (Thema 117, fragment buffers 4/5/6):
+	// x/y/z = cluster grid dims (x == 0 → off, window lights only), w = slice
+	// scale; clusterCamFwd xyz = camera forward, w = cluster near plane.
+	// Same values as the graph materials' Lighting::clusterParams/CamFwd.
+	float4   clusterParams;
+	float4   clusterCamFwd;
 };
 
 // Widen the roughness by how much the normal turns inside this pixel, so a
@@ -488,16 +494,17 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 // fragment→light vector's major axis (faces stored as 6 consecutive array layers,
 // +X −X +Y −Y +Z −Z), then project into that face's layer. Same 3×3 PCF and
 // normal-offset bias family as the directional CSM above.
-float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
-                        float3 worldPos, float3 N,
-                        texture2d_array<float> localMap, sampler shadowSmp)
+// `base` = the light's first atlas layer (-1 = casts no shadow). Takes the
+// light by value so the window (LightGPU) and the cluster lists share it.
+float localShadowFactorAt(constant SceneUniforms& scene, float4 posType, int base,
+                          float3 worldPos, float3 N,
+                          texture2d_array<float> localMap, sampler shadowSmp)
 {
-	int base = int(l.params.y);
 	if (base < 0) return 1.0;
 	int layer = base;
-	if (int(l.posType.w) == 1) // point: major-axis cube-face pick
+	if (int(posType.w) == 1) // point: major-axis cube-face pick
 	{
-		float3 d = worldPos - l.posType.xyz;
+		float3 d = worldPos - posType.xyz;
 		float3 a = abs(d);
 		int face;
 		if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
@@ -505,7 +512,7 @@ float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
 		else                               face = (d.z > 0.0) ? 4 : 5;
 		layer = base + face;
 	}
-	float3 toL  = normalize(l.posType.xyz - worldPos);
+	float3 toL  = normalize(posType.xyz - worldPos);
 	float  ndl  = clamp(dot(N, toL), 0.0, 1.0);
 	float4 lp = scene.localShadowVP[layer] * float4(worldPos + N * 0.02, 1.0);
 	if (lp.w <= 0.0) return 1.0;                  // behind the light's near plane
@@ -522,6 +529,13 @@ float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
 			vis += (p.z - bias > cd) ? 0.0 : 1.0;
 		}
 	return vis / 9.0;
+}
+
+float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
+                        float3 worldPos, float3 N,
+                        texture2d_array<float> localMap, sampler shadowSmp)
+{
+	return localShadowFactorAt(scene, l.posType, int(l.params.y), worldPos, N, localMap, shadowSmp);
 }
 
 // Standard signed-octahedral mapping (Meyer et al. 2010) — direction -> texel
@@ -690,7 +704,14 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              // cloudShadowFactor): the fragment stage is at
                              // Metal's 16-sampler cap. Shares the slot with the
                              // material preamble's heCloudShadow pin.
-                             texture2d<float> cloudShadowTex [[texture(16)]])
+                             texture2d<float> cloudShadowTex [[texture(16)]],
+                             // Clustered point/spot lists (Thema 117) — the same
+                             // buffers 4/5/6 the graph materials' heLitP reads
+                             // (kMetalCluster*BufferIndex). Always bound in the
+                             // scene pass; read only while scene.clusterParams.x > 0.
+                             const device float4* clLights [[buffer(4)]],
+                             const device uint2*  clGrid   [[buffer(5)]],
+                             const device uint*   clIdx    [[buffer(6)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -783,10 +804,15 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
+	// Clustered: the lists hold EVERY point/spot light, so the window's copies
+	// of the first few would count twice — the window keeps its directionals.
+	// Twin of heLitP's HE_CLUSTERED branch (MaterialShaderLibrary.cpp).
+	const bool clustered = scene.clusterParams.x > 0.5;
 	for (int i = 0; i < scene.lightCount; ++i)
 	{
 		constant LightGPU& l = scene.lights[i];
 		int    type  = int(l.posType.w);
+		if (clustered && type != 0) continue;
 		float3 L;
 		float  atten = 1.0;
 
@@ -844,6 +870,61 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		float spec = pow(max(dot(N, H), 0.0), shininess) * specScale;
 		result += (diffuseColor * diff + specColor * spec)
 		        * l.colorIntensity.rgb * l.colorIntensity.w * atten * sh;
+	}
+	// The fragment's cluster list (HE::BuildClusterLights, top-left uv like
+	// in.position): 4 float4 per light — posType, dirSpot, colorIntensity,
+	// params (x = range, y = atlas layer + 1, z = GI local-mask channel + 1).
+	// Same per-light model as the window loop above; SYNC with heLitP's
+	// heFwdClusterLights.
+	if (clustered)
+	{
+		float2 cuv   = in.position.xy / max(scene.viewport.xy, float2(1.0));
+		float  nearZ = max(scene.clusterCamFwd.w, 1e-4);
+		float  viewZ = max(dot(in.worldPos - scene.cameraPos.xyz, scene.clusterCamFwd.xyz), nearZ);
+		int gx = int(scene.clusterParams.x);
+		int gy = int(scene.clusterParams.y);
+		int gz = int(scene.clusterParams.z);
+		if (gx > 0 && gy > 0 && gz > 0)
+		{
+			int cz = clamp(int(log(viewZ / nearZ) * scene.clusterParams.w), 0, gz - 1);
+			int cx = clamp(int(cuv.x * float(gx)), 0, gx - 1);
+			int cy = clamp(int(cuv.y * float(gy)), 0, gy - 1);
+			uint2 cell = clGrid[(cz * gy + cy) * gx + cx];
+			for (uint k = 0u; k < cell.y; ++k)
+			{
+				uint   li      = clIdx[cell.x + k] * 4u;
+				float4 posType = clLights[li + 0u];
+				float4 dirSpot = clLights[li + 1u];
+				float4 colInt  = clLights[li + 2u];
+				float4 params  = clLights[li + 3u];
+				float3 d    = posType.xyz - in.worldPos;
+				float  dist = max(length(d), 1e-4);
+				float3 L    = d / dist;
+				float  range = max(params.x, 1e-4);
+				float  atten = clamp(1.0 - dist / range, 0.0, 1.0);
+				atten *= atten;
+				if (posType.w > 1.5) // spot cone
+				{
+					float c       = dot(-L, normalize(dirSpot.xyz));
+					float cosCone = dirSpot.w;
+					atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+				}
+				if (atten <= 0.0) continue;
+				float sh = localShadowFactorAt(scene, posType, int(params.y) - 1,
+				                               in.worldPos, N, localShadowMap, shadowSmp);
+				// Ray-traced local mask: the builder hands out the window's
+				// first-4 channels (giLocalIdx above), only while the mask is live.
+				int ch = int(params.z) - 1;
+				if (gi.enabled != 0 && ch >= 0)
+					sh = min(sh, giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[ch]);
+				if (in.noShadow > 0.5) sh = 1.0;
+				float diff = max(dot(N, L), 0.0);
+				float3 H   = normalize(L + V);
+				float spec = pow(max(dot(N, H), 0.0), shininess) * specScale;
+				result += (diffuseColor * diff + specColor * spec)
+				        * colInt.rgb * colInt.w * atten * sh;
+			}
+		}
 	}
 	result = applyFog(result, scene.cameraPos.xyz, in.worldPos, scene.sunDir.xyz, scene.fog.xy);
 
@@ -6029,9 +6110,14 @@ struct SceneUniforms
 	// project's ShadowSettings. Defaulted to the old shader literals so a fill
 	// site that never sets it (previews) shadows exactly as before.
 	glm::vec4 shadowBias = glm::vec4(0.0008f, 0.0002f, 0.0f, 0.0f);
+	// Clustered point/spot gate + grid (HE::ClusterLightBuild::params/camFwd).
+	// x == 0 → fragmentMain shades the 8-light window only; set solely in
+	// EncodeScene, which binds the three lists on fragment buffers 4/5/6.
+	glm::vec4 clusterParams = glm::vec4(0.0f);
+	glm::vec4 clusterCamFwd = glm::vec4(0.0f);
 };
 static_assert(sizeof(SceneUniforms) ==
-              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 4 * 16,
+              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 6 * 16,
               "SceneUniforms must stay byte-identical to its MSL twin");
 
 // Matches the MSL SSAOPosUniforms / SSAOParams structs.
@@ -13374,6 +13460,35 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// Specular AA (A6): valid in this forward pass — it shades from the
 	// fragment's own interpolated normal. 0 = off, image identical to before.
 	scene.aaParams = glm::vec4(m_specularAA ? m_specularAAStrength : 0.0f, 0.0f, 0.0f, 0.0f);
+	// Clustered point/spot lights (Thema 117): ONE build serves the built-in
+	// fragmentMain (gate in scene.clusterParams), the forward graph materials
+	// (fragmentClustered, gate in matLight.clusterParams below) and the
+	// stored-mode deferred resolve. Built before `scene` is uploaded — the
+	// skinned pass re-uploads this very struct. Buffers 4/5/6 are bound once
+	// for the whole pass (the sky and skinned draws never touch them); without
+	// a build they get zero lists, because fragmentMain declares them
+	// unconditionally and API validation wants every declared buffer bound.
+	// The light windows stay FULL: precompiled (pak) blobs lack the cluster
+	// code and still need their point/spot slots.
+	HE::ClusterLightBuild clusterBuild;
+	if (m_forwardClustered || (deferred && m_deferredClustered))
+		clusterBuild = BuildFrameClusterLights();
+	if (m_forwardClustered)
+	{
+		BindClusterBuffers(renderEncoder, clusterBuild);
+		scene.clusterParams = clusterBuild.params;
+		scene.clusterCamFwd = clusterBuild.camFwd;
+	}
+	else
+	{
+		const uint32_t noLists[4] = { 0u, 0u, 0u, 0u };
+		[encoder setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterLightsBufferIndex];
+		[encoder setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterGridBufferIndex];
+		[encoder setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterIndexBufferIndex];
+	}
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
 	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
@@ -13390,20 +13505,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// Zero when nothing shines → heLit() correctly degrades to its ambient term.
 	HE::MaterialShaderLibrary::Lighting matLight; // reused by WPO vertex-stage binds below
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
-	// Clustered point/spot lights (Thema 117): ONE build serves the forward
-	// graph materials (fragmentClustered, gate in matLight.clusterParams) and
-	// the stored-mode deferred resolve below. Buffers 4/5/6 are bound once for
-	// the whole pass — the sky and skinned draws in between never touch them.
-	// The window in matLight stays FULL: precompiled (pak) blobs lack the
-	// cluster code and still need its point/spot slots.
-	HE::ClusterLightBuild clusterBuild;
-	if (m_forwardClustered || (deferred && m_deferredClustered))
-		clusterBuild = BuildFrameClusterLights();
+	// Same cluster build + bound lists as fragmentMain above.
 	if (m_forwardClustered)
-	{
-		BindClusterBuffers(renderEncoder, clusterBuild);
 		HE::FillMaterialClusterParams(clusterBuild, matLight);
-	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 
