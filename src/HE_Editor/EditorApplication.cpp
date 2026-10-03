@@ -5663,11 +5663,20 @@ void EditorApplication::dumpFrameHeadless()
 			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
 		};
 		makeCube("ShadowInstFloor", glm::vec3(0.0f, -0.1f, -12.0f), glm::vec3(30.0f, 0.2f, 30.0f));
+		// =contact (Thema 134): the cubes STAND on the floor, 1 / 2.5 / 4 m tall,
+		// so every shadow runs from a hard contact edge at the foot to a wide
+		// penumbra at the far end — the case where a spatial filter must not
+		// soften what is sharp. The hovering row has no contact edge at all.
+		const bool contact = std::string_view(st) == "contact";
 		for (int i = 0; i < 7; ++i)
-			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), 2.0f, -12.0f),
-			         glm::vec3(1.0f, 1.0f + 0.4f * float(i % 3), 1.0f));
-		HE_LOG_INFO(Editor, "%s",
-			"EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
+		{
+			const float hgt = contact ? 1.0f + 1.5f * float(i % 3) : 1.0f + 0.4f * float(i % 3);
+			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), contact ? 0.5f * hgt : 2.0f, -12.0f),
+			         glm::vec3(1.0f, hgt, 1.0f));
+		}
+		HE_LOG_INFO(Editor, "%s", contact
+			? "EditorApplication: HE_DUMP_SHADOWINSTTEST=contact floor + seven standing cubes added"
+			: "EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
 	}
 
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
@@ -7189,6 +7198,38 @@ void EditorApplication::dumpFrameHeadless()
 			 + std::to_string(mbYawStep) + "/" + std::to_string(mbPitchStep)
 			 + " deg for the captured frame").c_str());
 		settleFrames = 1;
+	}
+	// HE_DUMP_PANYAW (degrees per frame) / HE_DUMP_PANMOVE (world units per frame
+	// along the camera's right axis): a camera that keeps MOVING through every
+	// settle frame, not the single step above — the GI shadow mask's temporal
+	// pass has to hold its history over a steady pan, which one step cannot show
+	// (Thema 134). Frame i of N stands (N-1-i) steps back, so the captured frame
+	// is at the real pose and two captures with N and N+1 frames share the pose
+	// and the last N frames of motion: their difference is the flicker of a
+	// panning camera, the way f60/f61 is that of a still one.
+	const float panYaw  = mbEnvF("HE_DUMP_PANYAW");
+	const float panMove = mbEnvF("HE_DUMP_PANMOVE");
+	if ((panYaw != 0.0f || panMove != 0.0f) && !mbSweep)
+	{
+		const glm::vec3 eye   = m_editorCamera.position();
+		const float     yaw   = m_editorCamera.yaw();
+		const float     pitch = m_editorCamera.pitch();
+		const glm::vec3 right(std::cos(yaw), 0.0f, std::sin(yaw)); // fwd = (sin yaw, ·, -cos yaw)
+		for (int i = 0; i < settleFrames; ++i)
+		{
+			const float back = static_cast<float>(settleFrames - 1 - i);
+			const float y    = yaw - glm::radians(panYaw * back);
+			m_editorCamera.setOrientation(eye - right * (panMove * back),
+			                              glm::vec3(std::sin(y) * std::cos(pitch), std::sin(pitch),
+			                                        -std::cos(y) * std::cos(pitch)));
+			r->SetEditorCamera(m_editorCamera.makeOverride());
+			r->Render();
+		}
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_PANYAW/PANMOVE panned the camera by " + std::to_string(panYaw)
+			 + " deg / " + std::to_string(panMove) + " units per frame over "
+			 + std::to_string(settleFrames) + " frames").c_str());
+		settleFrames = 0;
 	}
 	// HE_DUMP_TODSTEP (day fraction, with HE_DUMP_SKYTEST): the OCCLUDER-motion
 	// witness for the GI shadow mask's temporal clamp (Thema 131). Same shape
