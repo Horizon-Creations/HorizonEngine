@@ -681,6 +681,13 @@ inline void destroyWidget(const Context& c, int id) { if (c.destroyWidget) c.des
 HE_API uint32_t createObject(const Context& c, const char* classPath,
                              const float* position = nullptr,
                              const float* rotationEuler = nullptr);
+// With Expose on Spawn values, set on the new instance before its Construct —
+// only emitted when a spawn pin is wired or carries a value, so a graph without
+// them generates one of the calls above, unchanged. No defaults: they would make
+// a four-argument call ambiguous.
+HE_API uint32_t createObject(const Context& c, const char* classPath,
+                             const float* position, const float* rotationEuler,
+                             const SpawnValues& spawn);
 inline void destroyObject(const Context& c, uint32_t ref)
 { if (c.destroyObject) c.destroyObject(ref); }
 inline Value getExternal(const Context& c, uint32_t target, const char* var)

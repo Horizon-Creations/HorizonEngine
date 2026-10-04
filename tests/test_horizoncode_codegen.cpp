@@ -244,6 +244,11 @@ namespace
 				         + std::to_string(v[2]) + ")"; };
 				if (pos) place += " at " + vec(pos);
 				if (rot) place += " rot " + vec(rot);
+				// The Expose on Spawn values likewise, as createWidget spells
+				// them: without them in the text, two backends that both
+				// dropped the values would agree. Empty for every fixture but
+				// spawn_caller, so all other traces read as before.
+				for (const SpawnValue& v : spawn) place += " " + v.name + "=" + valueStr(v.value);
 				trace.push_back("createObject " + path + place + " -> " + std::to_string(nid));
 				// Expose on Spawn before Construct, as the apps do it.
 				if (nid) rt.applySpawnValues(nid, spawn, path);
@@ -1480,6 +1485,112 @@ TEST_CASE("codegen parity: refs_objects (create/destroy, external access, warn p
 	CHECK_FALSE(p.interp.rt.alive(obj));
 	CHECK_FALSE(p.comp.rt.alive(obj));
 	p.checkInstance(obj);   // both dead → both empty
+}
+
+TEST_CASE("codegen parity: spawn_caller (Expose on Spawn on Create Object)")
+{
+	// docs/hc-class-expose-on-spawn-design.md §6/§8.10. checkParity() compares the
+	// two backends call for call — the createObject trace line names the handed
+	// values — and the instances' stores; what follows pins down WHICH values,
+	// and that Construct already saw them, in BOTH worlds.
+	ParityPair p("fix/spawn_caller");
+	p.fire("Spawn");
+	const uint32_t a = p.var("objA").ref, b = p.var("objB").ref, c = p.var("objC").ref;
+	REQUIRE(a != 0);
+	REQUIRE(b != 0);
+	REQUIRE(c != 0);
+	p.checkInstance(a);
+	p.checkInstance(b);
+	p.checkInstance(c);
+
+	for (World* w : { &p.interp, &p.comp })
+	{
+		INFO((w == &p.interp ? "interpreted" : "compiled"));
+		auto get = [w](uint32_t id, const char* name) { return w->rt.getVariable(id, name); };
+		// A: typed on the node, wired, enum, struct — all there in Construct.
+		CHECK(get(a, "seenScore").i == 42);
+		CHECK(get(a, "seenSpeed").f == 6.5f);
+		CHECK(get(a, "seenTitle").s == "spawned");
+		CHECK(get(a, "seenArmed").b == true);
+		CHECK(get(a, "seenAim").v3 == glm::vec3(1.0f, 2.0f, 3.0f));
+		CHECK(get(a, "seenMood").i == 5);
+		const Value st = get(a, "seenStats");
+		REQUIRE(st.items.size() >= 2);
+		CHECK(st.items[0].f == 7.0f);   // hp, from the caller's proto
+		CHECK(st.items[1].i == 9);      // lvl
+		// Left alone: the class's own defaults.
+		CHECK(get(a, "keep").f == 9.0f);
+		CHECK(valueEq(get(a, "tint"), get(c, "tint")));
+		// B: one value next to the placement; the rest as the class has it.
+		CHECK(get(b, "seenScore").i == 5);
+		CHECK(get(b, "seenTitle").s == "def");
+		CHECK(get(b, "seenSpeed").f == 2.5f);
+		// C: nothing counted — every default.
+		CHECK(get(c, "seenScore").i == 1);
+		CHECK(get(c, "seenTitle").s == "def");
+		CHECK(get(c, "seenMood").i == 0);
+	}
+
+	std::vector<std::string> creates;
+	for (const std::string& t : p.interp.trace)
+		if (t.rfind("createObject ", 0) == 0) creates.push_back(t);
+	REQUIRE(creates.size() == 3);
+	INFO(creates[0], " | ", creates[1], " | ", creates[2]);
+	// A in pin order, the untouched two absent.
+	const size_t sc = creates[0].find(" score=i:42"), ti = creates[0].find(" title=s:\"spawned\""),
+	             mo = creates[0].find(" mood=e:5"), sx = creates[0].find(" stats=st{");
+	CHECK(sc != std::string::npos);
+	CHECK(ti != std::string::npos);
+	CHECK(mo != std::string::npos);
+	CHECK(sx != std::string::npos);
+	CHECK((sc < ti && ti < mo && mo < sx));
+	CHECK(creates[0].find(" at ") == std::string::npos);
+	CHECK(creates[0].find("keep=") == std::string::npos);
+	CHECK(creates[0].find("tint=") == std::string::npos);
+	CHECK(creates[1].find(" at (10.000000,0.000000,0.000000) score=i:5 -> ") != std::string::npos);
+	CHECK(creates[1].find("title=") == std::string::npos);
+	CHECK(creates[2] == "createObject fix/spawn_target -> " + std::to_string(c));
+}
+
+TEST_CASE("codegen: Create Object emits spawn values only when a pin counts")
+{
+	// The emitted TEXT, which the parity case cannot see: a Create Object whose
+	// spawn pins all sit idle generates the line every graph got before the pins
+	// existed, and a placement-only one its old block. And no fallback — a class
+	// that silently shipped interpreted would make the parity case compare the
+	// interpreter with itself.
+	HE::hccg::Options opt;
+	HE::hccg::Result r = HE::hccg::generate(
+		{ hcfix::fxSpawnTarget(), hcfix::fxSpawnCaller(), hcfix::fxRefsObjects() }, opt);
+	REQUIRE(r.ok);
+	std::string why;
+	for (const auto& fb : r.fallbacks) why += fb.reason + "; ";
+	CHECK_MESSAGE(r.fallbacks.empty(), "a class did not compile: ", why);
+
+	std::string caller, refs;
+	for (const auto& f : r.files)
+	{
+		if (f.name == "hcgen_C_spawn_caller.cpp") caller = f.contents;
+		if (f.name == "hcgen_C_refs_objects.cpp") refs = f.contents;
+	}
+	REQUIRE_FALSE(caller.empty());
+	REQUIRE_FALSE(refs.empty());
+	INFO(caller);
+	// A: values, no placement. B: placement and values in one call.
+	CHECK(caller.find("hc::SpawnValues s") != std::string::npos);
+	CHECK(caller.find("\"fix/spawn_target\", nullptr, nullptr, s") != std::string::npos);
+	CHECK(caller.find("_pos.x, nullptr, s") != std::string::npos);
+	// C: byte for byte the old line.
+	CHECK(caller.find(" = hc::createObject(m_ctx, \"fix/spawn_target\");") != std::string::npos);
+	// Enum and struct box with their definition, like every other Value seam.
+	CHECK(caller.find("hc::toEnumValue(") != std::string::npos);
+	CHECK(caller.find("::toValue(") != std::string::npos);
+	// Untouched pins are not handed over at all.
+	CHECK(caller.find("\"keep\"") == std::string::npos);
+	CHECK(caller.find("\"tint\"") == std::string::npos);
+	// A placement-only Create Object (refs_objects) keeps its old four-argument call.
+	CHECK(refs.find("_rot.x);") != std::string::npos);
+	CHECK(refs.find("SpawnValues") == std::string::npos);
 }
 
 TEST_CASE("codegen parity: casts (the DIRECT lowerings agree with the interpreter)")

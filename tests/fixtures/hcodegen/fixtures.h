@@ -1480,6 +1480,135 @@ inline HE::hccg::ClassSource fxRefsObjects()
     return f.done("refs_objects");
 }
 
+// 11c — spawn_target: the class fixture 11d creates with Expose on Spawn values
+// (docs/hc-class-expose-on-spawn-design.md §6). One ticked public variable per
+// kind the codegen boxes differently (scalar, string, vector, enum, struct), two
+// the caller leaves alone, and a Construct that copies the values into seen*:
+// what Construct saw is the proof they were there BEFORE it ran.
+inline HE::hccg::ClassSource fxSpawnTarget()
+{
+    Fx f;
+    auto tick = [&f] { f.g.variables.back().exposeOnSpawn = true; };
+    f.var("score", PT::Int, 1.0f);            tick();
+    f.var("speed", PT::Float, 2.5f);          tick();
+    f.var("title", PT::String, 0.0f, "def");  tick();
+    f.var("armed", PT::Bool);                 tick();
+    f.var("aim", PT::Vec3);                   tick();
+    f.enumVar("mood", kMoodEnum, "Calm");     tick();
+    f.structVar("stats", kStatsType);         tick();
+    f.var("tint", PT::Color);                 tick();   // no inline field: untouched
+    f.var("keep", PT::Float, 9.0f);           tick();   // value taken off at the caller
+    f.var("seenScore", PT::Int);
+    f.var("seenSpeed", PT::Float);
+    f.var("seenTitle", PT::String);
+    f.var("seenArmed", PT::Bool);
+    f.var("seenAim", PT::Vec3);
+    f.enumVar("seenMood", kMoodEnum, "Calm");
+    f.structVar("seenStats", kStatsType);
+
+    int prev = f.event("Construct");
+    auto copy = [&f, &prev](const char* from, const char* to, PT t, const char* tn = "")
+    {
+        const int s = f.setVarT(to, t, tn);
+        f.data(f.getVarT(from, t, tn), 0, s, 0);
+        f.exec(prev, s);
+        prev = s;
+    };
+    copy("score", "seenScore", PT::Int);
+    copy("speed", "seenSpeed", PT::Float);
+    copy("title", "seenTitle", PT::String);
+    copy("armed", "seenArmed", PT::Bool);
+    copy("aim",   "seenAim",   PT::Vec3);
+    copy("mood",  "seenMood",  PT::Enum,   kMoodEnum);
+    copy("stats", "seenStats", PT::Struct, kStatsType);
+    return f.done("spawn_target");
+}
+
+// 11d — spawn_caller: three Create Objects of spawn_target, pins mirrored the
+// way the editor does it (spawnPinsOfLevels + syncSpawnPins, which pre-fills
+// the inline values with the variables' defaults):
+//   A  values only — wired (Float via Add, Vec3, Enum, Struct) and typed on the
+//      node (Int, String, Bool); Color untouched, Float's value taken off.
+//   B  Location wired plus one typed value: the placement and the spawn values
+//      share one call.
+//   C  pins present but none counting: the call generated before the pins
+//      existed, byte for byte.
+inline HE::hccg::ClassSource fxSpawnCaller()
+{
+    Fx f;
+    f.var("objA", PT::Ref);
+    f.var("objB", PT::Ref);
+    f.var("objC", PT::Ref);
+    f.structVar("proto", kStatsType, { { "hp", Value::ofFloat(7.0f) }, { "lvl", Value::ofInt(9) } });
+
+    const std::vector<HorizonCode::SpawnPin> pins =
+        HorizonCode::spawnPinsOfLevels({ fxSpawnTarget().graph });
+    Fx::must(pins.size() == 9, "spawn_target pins");
+    auto create = [&f, &pins]
+    {
+        Node co; co.type = NT::CreateObject; co.s = "fix/spawn_target";
+        const int id = f.add(co);
+        Fx::must(HorizonCode::syncSpawnPins(f.g, id, pins, nullptr, /*dropWiresOnRetype=*/true),
+                 "syncSpawnPins");
+        return id;
+    };
+    auto in = [&pins](const char* name)   // data-in index of a spawn pin
+    {
+        for (size_t i = 0; i < pins.size(); ++i)
+            if (pins[i].param.name == name) return 2 + (int)i;
+        Fx::must(false, "spawn pin name");
+        return -1;
+    };
+
+    const int ev = f.event("Spawn");
+
+    const int a = create();
+    {
+        Node* n = f.g.findNode(a);
+        n->pinDefaults[in("score")] = Value::ofInt(42);
+        n->pinDefaults[in("title")] = Value::ofString("spawned");
+        n->pinDefaults[in("armed")] = Value::ofBool(true);
+        n->pinDefaults.erase(in("keep"));
+    }
+    { const int add = f.op(NT::Add);
+      f.data(f.constF(4.0f), 0, add, 0);
+      f.data(f.constF(2.5f), 0, add, 1);
+      f.data(add, 0, a, in("speed")); }
+    { const int v = f.op(NT::MakeVector3);
+      f.data(f.constF(1.0f), 0, v, 0);
+      f.data(f.constF(2.0f), 0, v, 1);
+      f.data(f.constF(3.0f), 0, v, 2);
+      f.data(v, 0, a, in("aim")); }
+    f.data(f.constEnum(kMoodEnum, 5), 0, a, in("mood"));   // Angry
+    f.data(f.getVarT("proto", PT::Struct, kStatsType), 0, a, in("stats"));
+    f.exec(ev, a);
+    const int sA = f.setVar("objA", PT::Ref);
+    f.data(a, 0, sA, 0);
+    f.exec(a, sA);
+
+    const int b = create();
+    {
+        Node* n = f.g.findNode(b);
+        n->pinDefaults.clear();
+        n->pinDefaults[in("score")] = Value::ofInt(5);
+    }
+    { const int loc = f.op(NT::MakeVector3);
+      f.data(f.constF(10.0f), 0, loc, 0);
+      f.data(loc, 0, b, 0); }
+    f.exec(sA, b);
+    const int sB = f.setVar("objB", PT::Ref);
+    f.data(b, 0, sB, 0);
+    f.exec(b, sB);
+
+    const int c = create();
+    f.g.findNode(c)->pinDefaults.clear();
+    f.exec(sB, c);
+    const int sC = f.setVar("objC", PT::Ref);
+    f.data(c, 0, sC, 0);
+    f.exec(c, sC);
+    return f.done("spawn_caller");
+}
+
 // 12a — dispatch_owner: fires/emits "Sig" (dispatchers, §3.5).
 inline HE::hccg::ClassSource fxDispatchOwner()
 {
@@ -3034,7 +3163,8 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxFunctionsRecursive(), fxForeachArrays(), fxEventsMulti(),
         fxWidgetProps(), fxLimitsSmoke(), fxFunctionsLocals(),
         fxEnginePureMultiout(), fxEngineExecCached(), fxAnimatorSync(), fxSequenceTransport(),
-        fxRefTarget(), fxRefsObjects(), fxDispatchOwner(), fxDispatchListener(),
+        fxRefTarget(), fxRefsObjects(), fxSpawnTarget(), fxSpawnCaller(),
+        fxDispatchOwner(), fxDispatchListener(),
         fxDispatchSink(), fxLatentFlow(), fxEnums(), fxStructs(),
         fxGameInstance(), fxGiCaller(), fxEngineEvents(),
         fxCastTarget(), fxCasts(),

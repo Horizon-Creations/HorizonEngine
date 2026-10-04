@@ -35,8 +35,15 @@ void warnArrayGet(int idx, size_t size)
 uint32_t createObject(const Context& c, const char* classPath,
                       const float* position, const float* rotationEuler)
 {
+    return createObject(c, classPath, position, rotationEuler, SpawnValues{});
+}
+
+uint32_t createObject(const Context& c, const char* classPath,
+                      const float* position, const float* rotationEuler,
+                      const SpawnValues& spawn)
+{
     const uint32_t ref = c.createObject
-        ? c.createObject(classPath, position, rotationEuler, {}) : 0u;
+        ? c.createObject(classPath, position, rotationEuler, spawn) : 0u;
     if (ref == 0u)
         HE_LOG_ERROR(HorizonCode, "%s",
             ("HorizonCode: Create Object failed — class '" + std::string(classPath) +

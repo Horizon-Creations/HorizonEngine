@@ -2382,10 +2382,22 @@ private:
             // Same wire-not-value rule as the interpreter, decided statically.
             const bool hasPos = dataLinkTo(n.id, r.dataIn0 + 0) != nullptr;
             const bool hasRot = dataLinkTo(n.id, r.dataIn0 + 1) != nullptr;
-            if (!hasPos && !hasRot)
+            // Expose on Spawn behind the placement (spawn pin i = data-in 2 + i),
+            // Create Widget's rule: wired or a value on the node counts
+            // (docs/hc-class-expose-on-spawn-design.md §6). None counting keeps
+            // the two forms below, so a graph without them generates the text
+            // it always did.
+            std::vector<int> spawnPins;
+            for (size_t i = 0; i < n.params.size(); ++i)
             {
-                // Neither pin wired: emit the call exactly as it was emitted
-                // before the pins existed. The shim defaults both pointers to
+                const int in = 2 + (int)i;
+                if (dataLinkTo(n.id, r.dataIn0 + in) || n.pinDefaults.count(in))
+                    spawnPins.push_back(in);
+            }
+            if (!hasPos && !hasRot && spawnPins.empty())
+            {
+                // Neither placement pin wired, no spawn pin counting: emit the
+                // call exactly as it was emitted before the pins existed. The shim defaults both pointers to
                 // nullptr ("as authored"), so every pre-existing graph generates
                 // byte-identical text and the traced parity text is unchanged.
                 b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + ");");
@@ -2394,15 +2406,30 @@ private:
             // Wired: the host takes `const float*`, and you cannot take the
             // address of a prvalue — the vectors need names that outlive the
             // call. Node-scoped names inside a block so two Create Objects in
-            // one scope cannot collide.
+            // one scope cannot collide; the spawn values share the block.
             const std::string nid = std::to_string(n.id);
             b.line("{");
             ++b.indent;
             if (hasPos) b.line("const glm::vec3 n" + nid + "_pos = " + input(n, 0, fnCtx) + ";");
             if (hasRot) b.line("const glm::vec3 n" + nid + "_rot = " + input(n, 1, fnCtx) + ";");
-            b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + ", "
-                   + (hasPos ? "&n" + nid + "_pos.x" : "nullptr") + ", "
-                   + (hasRot ? "&n" + nid + "_rot.x" : "nullptr") + ");");
+            const std::string place = std::string(", ")
+                + (hasPos ? "&n" + nid + "_pos.x" : "nullptr") + ", "
+                + (hasRot ? "&n" + nid + "_rot.x" : "nullptr");
+            if (spawnPins.empty())
+                b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + place + ");");
+            else
+            {
+                // After the placement, in pin order — the interpreter's
+                // evaluation order, which a pure EngineCall on any of these
+                // pins makes visible in the trace.
+                const std::string sv = "s" + nid;
+                b.line("hc::SpawnValues " + sv + ";");
+                b.line(sv + ".reserve(" + std::to_string(spawnPins.size()) + ");");
+                for (const int in : spawnPins)
+                    b.line(sv + ".push_back({ " + strLit(n.params[(size_t)(in - 2)].name) + ", " +
+                           toValueCall(input(n, in, fnCtx), dataInType(n, in), m_opt.namespaceName) + " });");
+                b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + place + ", " + sv + ");");
+            }
             --b.indent;
             b.line("}");
             break;
