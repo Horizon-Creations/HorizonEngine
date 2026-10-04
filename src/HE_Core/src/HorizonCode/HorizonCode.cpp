@@ -897,7 +897,10 @@ const char* nodeTooltip(NodeType t)
             return "Instantiates the chosen HorizonCode class as a live object and outputs\n"
                    "a reference to it (its Construct event fires).\n"
                    "Location and Rotation (euler degrees) place the new object; leave a pin\n"
-                   "UNWIRED to keep the placement the class was authored with.";
+                   "UNWIRED to keep the placement the class was authored with.\n"
+                   "Variables the class (or a base class) ticks Expose on Spawn appear as\n"
+                   "inputs behind them; a wired input or one with a value is set before\n"
+                   "the object's Construct (and an Entity's BeginPlay).";
         case T::DestroyObject:
             return "Destroys the object referenced by the input (its Destruct event fires);\n"
                    "the reference becomes invalid.";

@@ -12493,6 +12493,43 @@
        "k": "ul"
       },
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Expose on Spawn."
+        },
+        {
+         "s": "",
+         "t": " Tick "
+        },
+        {
+         "s": "b",
+         "t": "Expose on Spawn"
+        },
+        {
+         "s": "",
+         "t": " on a public variable of a class (Object, Entity, Player Character or Player Controller), and every "
+        },
+        {
+         "s": "b",
+         "t": "Create Object"
+        },
+        {
+         "s": "",
+         "t": " node for that class, and for every class deriving from it, gets an input for it, behind Location and Rotation. Whatever you wire in, or type into the input, is set on the new object "
+        },
+        {
+         "s": "i",
+         "t": "before"
+        },
+        {
+         "s": "",
+         "t": " its Construct runs, and for an Entity class before BeginPlay as well, so the object's first code already works with the creator's value. An input you leave alone keeps the class's default. Number, text and true/false inputs have a field on the node; vector, colour, enum, object, struct and list inputs only count when wired. If Construct or BeginPlay sets the same variable itself, that wins. The inputs appear once you save the class. Rename the variable and the inputs are renamed with it, wire and value kept; untick, delete or retype it and the wire on its input goes, with a line in the log saying so. A variable called Location or Rotation cannot be ticked. The exported C++ game sets the same values. No values are handed in by the Spawn Class node, Lua or Python, to entities placed in the level, to the Player Controller the engine starts for you, or to the copy of a spawned object a network client gets from the host: those start on their defaults, and a variable that is also Replicated arrives a moment later."
+        }
+       ]
+      },
+      {
        "alt": "A function graph with typed inputs and outputs, Branch, variable access and Return nodes",
        "k": "figure",
        "src": "hc_function_graph.jpg"
@@ -12500,7 +12537,7 @@
      ],
      "eyebrow": "Structure",
      "id": "functions",
-     "text": "Variables — named, typed, persistent state (single values or arrays), listed on the left of the graph editor with Get/Set nodes. Private to their graph unless marked public; each running instance gets its own copy, seeded from the declared defaults. Functions — reusable sub-graphs with typed inputs and outputs and an access modifier: public functions can be called across a class boundary — from another graph, or from Lua/Python via callWidgetFunction; private ones stay internal. Events — the entry points the host raises; a graph can also declare its own and emit them to listeners. A function graph with typed inputs and outputs, Branch, variable access and Return nodes",
+     "text": "Variables — named, typed, persistent state (single values or arrays), listed on the left of the graph editor with Get/Set nodes. Private to their graph unless marked public; each running instance gets its own copy, seeded from the declared defaults. Functions — reusable sub-graphs with typed inputs and outputs and an access modifier: public functions can be called across a class boundary — from another graph, or from Lua/Python via callWidgetFunction; private ones stay internal. Events — the entry points the host raises; a graph can also declare its own and emit them to listeners. Expose on Spawn. Tick Expose on Spawn on a public variable of a class (Object, Entity, Player Character or Player Controller), and every Create Object node for that class, and for every class deriving from it, gets an input for it, behind Location and Rotation. Whatever you wire in, or type into the input, is set on the new object before its Construct runs, and for an Entity class before BeginPlay as well, so the object's first code already works with the creator's value. An input you leave alone keeps the class's default. Number, text and true/false inputs have a field on the node; vector, colour, enum, object, struct and list inputs only count when wired. If Construct or BeginPlay sets the same variable itself, that wins. The inputs appear once you save the class. Rename the variable and the inputs are renamed with it, wire and value kept; untick, delete or retype it and the wire on its input goes, with a line in the log saying so. A variable called Location or Rotation cannot be ticked. The exported C++ game sets the same values. No values are handed in by the Spawn Class node, Lua or Python, to entities placed in the level, to the Player Controller the engine starts for you, or to the copy of a spawned object a network client gets from the host: those start on their defaults, and a variable that is also Replicated arrives a moment later. A function graph with typed inputs and outputs, Branch, variable access and Return nodes",
      "title": "Variables & Functions"
     },
     {

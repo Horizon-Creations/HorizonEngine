@@ -88,6 +88,47 @@ WidgetManager owned by the app (not any world), so they appear from frame one an
 **persist across `scene.load`** — a HUD stays up through level changes. (`OnInit`
 therefore fires before the first world is even built.)
 
+**Expose on Spawn for classes.** The same tick as on a widget works on every
+HorizonCode class: Object, Entity, PlayerCharacter and PlayerController classes.
+Tick **Expose on Spawn** on a public variable in the class editor and every
+**Create Object** of that class, **and of every class deriving from it**, gets an
+input for it, named and typed like the variable, **behind** Location and Rotation
+(the `Object` output moves behind them). Inherited variables come first, root
+class first, then each class's own in declaration order. The tick sits on the
+declaration: a derived class cannot tick or untick a variable it inherits. Level
+Scripts and the Game Instance have no box, no node creates them. A wired input,
+or one with a value typed on it, is set on the new object after its variables
+are seeded and **before** its `Construct`, and for an Entity class (the
+PlayerCharacter included) before its `BeginPlay` too, so the object's own first
+code already sees the creator's value. A `Construct` or `BeginPlay` that sets the
+same variable overwrites it. An input left alone keeps the class's default:
+Bool/Int/Float/Double/String inputs have a field on the node, prefilled with the
+default; Vector, Color, Enum, Object, Struct and container inputs have none and
+only count when wired. Note the two rules on one node: Location and Rotation
+only count when **wired**, spawn inputs when wired **or** given a value. A
+variable called `Location` or `Rotation` cannot be ticked (Create Object has
+inputs of those names). The inputs follow the **saved** class: tick, untick,
+delete or retype a variable and the Create Object nodes change once the class is
+saved and a graph using them is open. Renaming the variable in the class editor
+renames the inputs with it, wire and typed value kept, in its own graph at once
+and in the other graphs through the usual rename dialog. An input that goes
+away, or changes type, loses its wire, and the log (category Editor) names the
+node, the pin and why. At run time only "public" is checked, like Set (Ref),
+for interpreted and compiled classes alike; a name the class has renamed or made
+private since the caller was last opened is skipped with a warning and the
+object is still created. The exported C++ sets the same values in the same order
+(Location, Rotation, then the spawn inputs); a Create Object with no input in
+effect exports exactly the line it always did. **Limits:** the **Spawn Class**
+row (`entity.spawnClass`/`spawnClassRotated`), Lua and Python create classes
+without values; entities placed in a level, the Game Instance and the
+PlayerController from the project settings have no creator and start on their
+defaults. In a network session only the host creates Entity classes (a client's
+Create Object of one does nothing, values included); the copy a client builds
+from the host's spawn carries class and pose only, so its `Construct`/`BeginPlay`
+see the defaults, and a variable that is also **Replicated** reaches it through
+the ordinary property replication afterwards. Design:
+`docs/hc-class-expose-on-spawn-design.md`.
+
 ---
 
 ## 2. Built-in nodes
@@ -240,7 +281,7 @@ take the same `Ref` the Create Widget node outputs.
 ### Objects, references & members
 | Node | Purpose |
 |------|---------|
-| **Create Object** (`CreateObject`) | Instantiate a HorizonCode Class asset → `Ref`. Fires its `Construct`. Two data inputs place it: **Location** (Vec3) and **Rotation** (Vec3, Euler degrees). Leaving a pin **unwired** keeps what the class authored — the difference is the WIRE, not the value, so an unwired pin is not "spawn at 0,0,0". Placement is applied before `Construct`/`BeginPlay` run, so the graph's first frame already sees where it stands. |
+| **Create Object** (`CreateObject`) | Instantiate a HorizonCode Class asset → `Ref`. Fires its `Construct`. Two data inputs place it: **Location** (Vec3) and **Rotation** (Vec3, Euler degrees). Leaving a pin **unwired** keeps what the class authored — the difference is the WIRE, not the value, so an unwired pin is not "spawn at 0,0,0". Placement is applied before `Construct`/`BeginPlay` run, so the graph's first frame already sees where it stands. Behind them, one input per variable the class or a base class ticks **Expose on Spawn**, set before its `Construct` (and an Entity's `BeginPlay`) when wired or given a value (§1 *Expose on Spawn for classes*). |
 | **Destroy Object** (`DestroyObject`) | Destroy a referenced object (fires `Destruct`). |
 | **Call Function** (`FunctionCall`) | Call a function in this graph. |
 | **Call Function (Ref)** (`CallExternal`) | Call a public function on another instance, passing typed args + returns. |

@@ -48,7 +48,9 @@ namespace
 	  "carries, its physics body and its graph are all in place before Construct "
 	  "and Begin Play run, so its first frame already knows where it stands. "
 	  "Rotation stays as the class authored it. Returns 0 and logs why if the "
-	  "class is unknown or is not an Entity class." },
+	  "class is unknown or is not an Entity class. The class is named by a string "
+	  "here, so its Expose on Spawn variables get no inputs and start on their "
+	  "defaults; Create Object is the node that hands them in." },
 	{ "entity.spawnClassRotated",
 	  "Spawn Class with the rotation stated as well, in Euler degrees. The two are "
 	  "separate calls because \"leave the rotation the class authored\" and \"face "
