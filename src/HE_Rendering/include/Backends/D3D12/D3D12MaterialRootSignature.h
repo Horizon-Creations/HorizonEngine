@@ -37,9 +37,11 @@
 // Slots 9..16 are null views in the template, declared but never sampled
 // (fillMatLight leaves their gates at 0) — except [12]/[13]: the renderer writes
 // the live DDGI atlases there once they exist and fillMatLight raises
-// giProbe.y (Thema 120). AO, sky cube, SSR, GI-refl and cloud shadow are still
-// null; this header only makes the PSO legal — the signature is unchanged by
-// what the template holds.
+// giProbe.y (Thema 120) — and [10]/[11]: the template keeps their null views,
+// but each draw block gets the baked sky cube / the blurred SSAO written over
+// them whenever fillMatLight raises fog.z / fog.w (Thema 126). SSR, GI-refl and
+// cloud shadow are still null; this header only makes the PSO legal — the
+// signature is unchanged by what the template holds.
 //
 // Clustered variant (Thema 117): MaterialShaderLibrary::fragmentClustered(HLSL)
 // adds three ByteAddressBuffers on t24/t25/t26 (light array, grid, index

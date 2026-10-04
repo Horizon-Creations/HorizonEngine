@@ -75,8 +75,10 @@ inline constexpr Binding kBindings[] = {
 	// all of them statically, so the layout declares them even where the gate
 	// never opens on this backend (a pipeline whose shader uses a binding its
 	// layout lacks is invalid — it only ran by driver leniency before).
-	//   15 heSkyEnv (cube)   — fog.z, never set here: white cube
-	//   16 heAO              — fog.w, never set here: white
+	//   15 heSkyEnv (cube)   — fog.z: the baked sky cube (SkyEnvBake.h, the
+	//                          GL/Metal bake), white cube until the first bake
+	//   16 heAO              — fog.w: this frame's blurred SSAO (scene binding 3's
+	//                          image), white when SSAO did not run
 	//   17 heGIIrradiance    — giProbe.y (FillMaterialGIProbe): the DDGI atlases,
 	//   18 heGIVisibility      the SAME two images scene bindings 5/6 sample
 	//   32 heGIReflFwd       — giRefl.z, no RT reflections here: white
