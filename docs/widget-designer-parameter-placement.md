@@ -116,3 +116,27 @@ vorzubelegen; beides eigenes Thema.
 Bündels `EditorDeps/Docs/he-docs.json`) erwähnt Widget-Parameter gar nicht; dort gab es nichts
 anzugleichen, und eine neue Seite wäre ein Commit im Website-Repository plus Deploy mit
 Bestätigung, also nicht Teil dieses Schritts.
+
+## Schritt 4: Verifikation (04.10.2026)
+
+Stand `d7472b78`, macOS, Debug, `HE_ENABLE_SHADERC=OFF`.
+
+- **Vollbau** `cmake --build . -j8`: RC 0, keine Warnung, kein Fehler im Log. Alle Objektdateien
+  von `UIEditorPanel.cpp`, `EditorHelp.cpp` und den beiden Testdateien sind neuer als ihre Quellen
+  (in `HorizonEditor` wie in `he_tests`), der Build ist also nicht stale.
+- **ctest**, 9 Tests, alle grün: `test_widget_designer_ui` (181 s), `test_editor_help`,
+  `editor_help_audit`, `test_ui_widgets`, `test_widget_pre_construct`, `test_widget_design_time`,
+  `test_widget_expose_on_spawn`, `test_mcp_tools_widget`, `test_editor_row_widgets`.
+- **doctest direkt:** `test_widget_designer_ui.cpp` 11 Testfälle, 946/946 Zusicherungen; davon
+  der Fall „ui shot: widget designer — the Details panel as it is (Thema 92)" mit den vier neuen
+  Subcases 90/90. `test_editor_help.cpp` 17 Testfälle, 77137/77137.
+- **Tooltips** (`scripts/editor_help_audit.py`, gegen einen main-Checkout verglichen):
+  main 1072/1072 Bedienelemente gedeckt, 1632 Hilfe-Einträge; Zweig 1073/1073, 1636 Einträge.
+  Bereich `ui` 132 → 133, offen bleibt 0. Die Abdeckung fällt also nicht.
+- **Handbuch:** `test_editor_help` verlangt für jeden der 1636 Einträge einen Bereich (`kAreas`)
+  und einen eigenen, auflösbaren Abschnitt in der Editor-Referenz; grün heißt, kein Eintrag steht
+  ohne Handbuch-Abschnitt.
+
+Offen bleibt nur der Undo-Befund aus Schritt 3 (frischer Parameter ohne Property überlebt kein
+Undo), der laut Thema außerhalb liegt. Den vollen ctest-Lauf hat dieser Schritt nicht gemacht;
+mit `HE_ENABLE_SHADERC=OFF` wäre `test_app_todo` dort ohnehin rot, ohne Bezug zu diesem Thema.
