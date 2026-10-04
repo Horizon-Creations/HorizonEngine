@@ -2078,3 +2078,157 @@ TEST_CASE("repro 107: the Catania Startup widget repaired in the designer")
 
 	if (!inPlace) fs::remove_all(root, ec);
 }
+
+// ── Thema 119, Schritt 4: Pre Construct at design time ──────────────────────
+// The canvas shows what the widget's PreConstruct sets (a sandboxed run, see
+// docs/widget-pre-construct-design.md §5) — and the document never does: not
+// after the frame, not in the live asset a drag commits from INSIDE the frame,
+// not in the saved file. The panel is grey as designed and green from the
+// graph; the title says "designed" and the graph writes "Placeholder".
+TEST_CASE("ui shot: widget designer — Pre Construct shows on the canvas, never in the document")
+{
+	Harness harness;
+	namespace fs = std::filesystem;
+	const fs::path root = tempRoot() / "precons";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root / "UI");
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+
+	HE::UIWidgetTree t;
+	t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+	const int panel = t.add(HE::UIWidgetType::Panel);
+	{
+		HE::UIElement& e = *t.find(panel);
+		e.name = "Card";
+		HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+		e.posX = 300.0f; e.posY = 200.0f; e.sizeX = 500.0f; e.sizeY = 300.0f;
+		e.setProp("Color", HE::UIPropValue::ofColor({ 0.4f, 0.4f, 0.4f, 1.0f }));
+	}
+	const int title = t.add(HE::UIWidgetType::Text);
+	{
+		HE::UIElement& e = *t.find(title);
+		e.name = "Title";
+		HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+		e.posX = 20.0f; e.posY = 20.0f; e.sizeX = 300.0f; e.sizeY = 40.0f;
+		e.setProp("Text", HE::UIPropValue::ofString("designed"));
+	}
+	HorizonCode::Graph g;
+	{
+		HorizonCode::Node ev; ev.type = HorizonCode::NodeType::Event; ev.s = "PreConstruct";
+		const int evId = g.addNode(ev);
+		HorizonCode::Node col; col.type = HorizonCode::NodeType::ConstColor;
+		col.f[0] = 0.1f; col.f[1] = 0.85f; col.f[2] = 0.2f; col.f[3] = 1.0f;
+		const int colId = g.addNode(col);
+		HorizonCode::Node setC; setC.type = HorizonCode::NodeType::SetProperty;
+		setC.elem = panel; setC.s = "Color"; setC.propType = HorizonCode::PinType::Color;
+		const int setCId = g.addNode(setC);
+		REQUIRE(g.connect(evId, 0, setCId, 0));
+		REQUIRE(g.connect(colId, 0, setCId, 2));
+		HorizonCode::Node txt; txt.type = HorizonCode::NodeType::ConstString; txt.s = "Placeholder";
+		const int txtId = g.addNode(txt);
+		HorizonCode::Node setT; setT.type = HorizonCode::NodeType::SetProperty;
+		setT.elem = title; setT.s = "Text"; setT.propType = HorizonCode::PinType::String;
+		const int setTId = g.addNode(setT);
+		REQUIRE(g.connect(setCId, 1, setTId, 0));
+		REQUIRE(g.connect(txtId, 0, setTId, 2));
+	}
+	const std::string rel = "UI/PreCons.hasset";
+	UIWidgetAsset asset;
+	asset.name      = "PreCons";
+	asset.path      = rel;
+	asset.treeJson  = HE::uiWidgetTreeToJson(t);
+	asset.graphJson = HorizonCode::toJson(g);
+	const HE::UUID assetId = cm.registerWidget(std::move(asset));
+	REQUIRE(assetId != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	Designer d{ ctx, (root / rel).string() };
+
+	// What the document says about the two elements, read from any tree.
+	const auto colorG = [&](const HE::UIWidgetTree& tr)
+	{ return tr.find(panel)->getProp("Color").col.g; };
+	const auto text = [&](const HE::UIWidgetTree& tr)
+	{ return tr.find(title)->getProp("Text").s; };
+	const auto assetTree = [&]()
+	{
+		HE::UIWidgetTree tr;
+		const UIWidgetAsset* a = cm.getWidget(assetId);
+		REQUIRE(a != nullptr);
+		REQUIRE(HE::uiWidgetTreeFromJson(a->treeJson, tr));
+		return tr;
+	};
+	const auto isGreen = [](std::uint8_t r, std::uint8_t g8, std::uint8_t b)
+	{ return g8 > 170 && r < 70 && b < 90; };
+
+	// ── The canvas shows the green PreConstruct sets… ───────────────────────
+	const he_ui::Image img = d.shoot("widget-designer-pre-construct");
+	REQUIRE(img.valid());
+	long sx = 0, sy = 0, green = 0;
+	for (int y = 0; y < img.height; ++y)
+		for (int x = 0; x < img.width; ++x)
+		{
+			std::uint8_t r, g8, b, a;
+			img.pixel(x, y, r, g8, b, a);
+			if (isGreen(r, g8, b)) { sx += x; sy += y; ++green; }
+		}
+	MESSAGE("green canvas pixels: " << green);
+	CHECK(green > 5000);
+
+	// …while the document, between frames, still holds what was designed.
+	HE::UIWidgetTree* live = UIEditorPanel::liveTree(rel);
+	REQUIRE(live != nullptr);
+	CHECK(colorG(*live) == doctest::Approx(0.4f));
+	CHECK(text(*live) == "designed");
+
+	// ── A drag commits from inside the canvas frame ─────────────────────────
+	// Grab the green card where it is drawn and move it: on release the
+	// designer pushes an undo snapshot and writes the live asset, with the
+	// shown values still in the tree around it.
+	REQUIRE(green > 0);
+	const float px = float(sx) / float(green), py = float(sy) / float(green);
+	const float posBefore = live->find(panel)->posX;
+	ImGuiIO& io = ImGui::GetIO();
+	io.AddMousePosEvent(px, py);
+	d.frame(false);
+	d.frame(true);
+	for (int i = 1; i <= 6; ++i)
+	{
+		io.AddMousePosEvent(px + 12.0f * float(i), py + 3.0f * float(i));
+		d.frame(true);
+	}
+	d.frame(false);
+	d.frame(false);
+	io.AddMousePosEvent(-1000.0f, -1000.0f);
+	d.frame(false);
+
+	live = UIEditorPanel::liveTree(rel);
+	REQUIRE(live != nullptr);
+	MESSAGE("card x " << posBefore << " -> " << live->find(panel)->posX);
+	CHECK(live->find(panel)->posX != doctest::Approx(posBefore));   // the drag did commit
+	CHECK(colorG(*live) == doctest::Approx(0.4f));
+	CHECK(text(*live) == "designed");
+	CHECK(UIEditorPanel::isDirtyByContentPath(rel));
+	{
+		const HE::UIWidgetTree committed = assetTree();   // the live asset PIE reads
+		CHECK(committed.find(panel)->posX == doctest::Approx(live->find(panel)->posX));
+		CHECK(colorG(committed) == doctest::Approx(0.4f));
+		CHECK(text(committed) == "designed");
+	}
+
+	// ── …and the saved file ──────────────────────────────────────────────────
+	REQUIRE(UIEditorPanel::saveByContentPath(ctx, rel));
+	{
+		const HE::UIWidgetTree saved = assetTree();
+		CHECK(colorG(saved) == doctest::Approx(0.4f));
+		CHECK(text(saved) == "designed");
+	}
+
+	UIEditorPanel::forget(d.assetPath);
+	fs::remove_all(root, ec);
+}
