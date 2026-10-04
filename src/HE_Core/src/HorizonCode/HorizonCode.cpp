@@ -14,6 +14,7 @@
 #include <cstddef>   // std::ptrdiff_t — iterator arithmetic in the container nodes
 #include <cstdio>
 #include <cstring>
+#include <iterator>   // std::next — syncSpawnPins' erase loop
 #include <unordered_set>
 #include <vector>
 
