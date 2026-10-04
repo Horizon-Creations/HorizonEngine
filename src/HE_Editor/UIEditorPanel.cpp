@@ -496,7 +496,11 @@ bool restoreSnapshot(State& st, int pos)
 	if (pos < 0 || pos >= (int)st.undo.size()) return false;
 	const std::string& snap = st.undo[pos];
 	const size_t sep = snap.find('\x1f');
-	HE::uiWidgetTreeFromJson(snap.substr(0, sep), st.tree);
+	// KeepUnfinished: a snapshot is the author's document mid-edit. A parameter
+	// "Add Parameter" just made has no property yet; read strictly, every undo
+	// landing on a snapshot that holds it would lose the row.
+	HE::uiWidgetTreeFromJson(snap.substr(0, sep), st.tree,
+	                         HE::UIWidgetParamRead::KeepUnfinished);
 	if (sep != std::string::npos)
 		HC::fromJson(snap.substr(sep + 1), st.graph);
 	st.undoPos = pos;
@@ -518,7 +522,11 @@ void loadState(State& st, AppContext& ctx, const std::string& assetPath)
 	st.assetId = ctx.contentManager->loadAsset(st.relPath);
 	if (const UIWidgetAsset* a = ctx.contentManager->getWidget(st.assetId))
 	{
-		if (!a->treeJson.empty())  HE::uiWidgetTreeFromJson(a->treeJson, st.tree);
+		// Kept like an undo snapshot keeps them: Save writes a half-declared
+		// parameter out, and reopening the tab must not be what drops it.
+		if (!a->treeJson.empty())
+			HE::uiWidgetTreeFromJson(a->treeJson, st.tree,
+			                         HE::UIWidgetParamRead::KeepUnfinished);
 		if (!a->graphJson.empty()) HC::fromJson(a->graphJson, st.graph);
 	}
 
