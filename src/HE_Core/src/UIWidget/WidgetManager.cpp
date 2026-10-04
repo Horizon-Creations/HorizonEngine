@@ -489,10 +489,21 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// A widget's class key is its asset path, like any other class; it derives
 	// from nothing (a widget lives outside the entity world), so it stays Object.
 	const HorizonCode::ClassIdentity widgetCls{ assetPath, "Object" };
+	// What kind of logic this widget got, for the log line below — decided HERE,
+	// because the interpreted path moves the graph into the runtime and a
+	// moved-from graph has no nodes left to ask about (it said "compiled/no" for
+	// every interpreted widget).
+	const char* logicKind = "no";
 	if (auto compiled = HorizonCode::compiledClasses().create(assetPath))
+	{
+		logicKind = "compiled";
 		w.scriptId = rt().addCompiled(std::move(compiled), makeBindings(), widgetCls);
+	}
 	else
+	{
+		if (!graph.nodes.empty()) logicKind = "interpreted";
 		w.scriptId = rt().add(std::move(graph), makeBindings(), widgetCls);
+	}
 	w.id = (int)w.scriptId;
 	m_instances.push_back(std::move(w));
 
@@ -514,7 +525,7 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 
 	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
 	            assetPath.c_str(), widgetId, m_instances.back().tree.elements.size(),
-	            graph.nodes.empty() ? "compiled/no" : "interpreted");
+	            logicKind);
 	// Two phases over the whole family. PreConstruct first, for the host and
 	// every embed: each sets its own values and loads its own data. Only then
 	// Construct, so a Construct that calls into an embed finds it initialized

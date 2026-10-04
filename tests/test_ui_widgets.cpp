@@ -761,6 +761,47 @@ TEST_CASE("WidgetManager lifecycle and z-order")
     CHECK(wm.createWidget(cm, "mem://missing.hasset") == 0);
 }
 
+// The "Created widget" line names the kind of logic the widget got. It used to
+// read the graph AFTER handing it to the runtime by std::move, found it empty
+// every time, and so called every interpreted widget "compiled/no".
+TEST_CASE("WidgetManager: the create log names interpreted logic as interpreted")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+    g.addNode(ev);
+    registerWidget(cm, t, &g, "mem://scripted.hasset");
+    registerWidget(cm, t, nullptr, "mem://plain.hasset");
+
+    // Info may be filtered away by HE_LOG; this test needs the line it asks about.
+    const HE::Log::Level before = HE::Log::verbosity(HE::Log::Cat::Widget);
+    HE::Log::setVerbosity(HE::Log::Cat::Widget, HE::Log::Level::Info);
+    std::vector<std::string> lines;
+    const int sink = HE::Log::addSink([](const HE::Log::Record& r, void* user)
+    {
+        if (r.category == HE::Log::Cat::Widget && r.message &&
+            std::string(r.message).find("Created widget") != std::string::npos)
+            static_cast<std::vector<std::string>*>(user)->push_back(r.message);
+    }, &lines);
+
+    WidgetManager wm;
+    const int scripted = wm.createWidget(cm, "mem://scripted.hasset");
+    const int plain    = wm.createWidget(cm, "mem://plain.hasset");
+    HE::Log::removeSink(sink);
+    HE::Log::setVerbosity(HE::Log::Cat::Widget, before);
+    REQUIRE(scripted != 0);
+    REQUIRE(plain != 0);
+
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0].find("scripted.hasset") != std::string::npos);
+    CHECK(lines[0].find("interpreted logic") != std::string::npos);
+    CHECK(lines[1].find("plain.hasset") != std::string::npos);
+    CHECK(lines[1].find("no logic") != std::string::npos);
+}
+
 TEST_CASE("HorizonWorld: injected app-level WidgetManager persists across clear()")
 {
     // The game's GameInstance UI lives in an APP-LEVEL WidgetManager that each
