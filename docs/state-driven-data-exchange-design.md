@@ -4,6 +4,13 @@ Thema 127, Schritt 2 (Entwurf korrigiert). Nur Doku, keine Umsetzung. Schritt 3 
 
 **Stand nach dem Review (Schritt 3):** Alle fünf offenen Fragen aus §9 sind entschieden (Beiträge 879, 880, 882 im Thema). Die Antworten sind in §2.2, §2.3, §2.9, §3.3 und §9 eingearbeitet. Kurz: Quelle **Erzeuger** gehört in den ersten Wurf, der Knopf heißt **„Add to Target“** und arbeitet mit jeder Quelle und auch für Struct-Member, ohne Zuhörer werden extrahierte Daten verworfen, eine Struct pro Klasse bleibt die Grenze, und die Lebenszyklus-Events gehen nicht mehr an Listener (Schritt 4).
 
+**Stand nach Schritt 4 (Extract on Destruct umgesetzt):** Runtime (`buildExtract`, `dispatchDestroyed` in `Runtime::destroy`), native Codegen (`extractOnDestruct`, `CompiledEventInfo::argType/typeName`) und Editor (`HcExtract` + `HcExtractUi` in beiden Klassen-Editoren, Bind-Event-Helfer) stehen. In Schritt 4 entschieden:
+
+* **OnDestroyed ohne Nutzlast bleibt erlaubt** (Frage 3, offener Teil). Weil der Destruct-Dispatch an Listener wegfällt, wäre es sonst für Klassen ohne Extract die einzige verlorene Todesmeldung. Ein Listener ohne Argument hört jeden Tod. Ein Listener mit Struct-Argument läuft nur bei genau dieser Struct, bei „keine Daten“ wird er mit einer Warnung übersprungen und nicht mit einem Default gefüttert.
+* **Ohne Listener-Dispatch** laufen PreConstruct, Construct, Destruct, BeginPlay, OnInit sowie OnShutdown, OnLevelLoaded und OnLevelUnloaded („verwandte Lebenszyklus-Events“). **OnDismissed behält ihn**, denn es meldet ein Ereignis am Widget und gehört nicht zum Lebenszyklus. Ein Elternwidget darf sein Popup beobachten.
+* `dispatchDestroyed` ruft den Handler des Listeners **direkt** auf, ohne die Weiterleitung an dessen eigene Listener, die `fireEvent` anhängt. Sonst würde „ein Objekt, an das L gebunden ist, ist gestorben“ bei den Listenern von L als „L ist gestorben“ ankommen.
+* Bekannte Grenzen: Collab synchronisiert `Graph::extract` nicht live (wie `Graph::events`, es geht mit dem gespeicherten Asset mit). „New Struct from Variables…“ schreibt in C++-Projekten den Typen-Header (`writeCppTypesHeader`) nicht sofort neu. Das tun der Typ-Editor beim Speichern und das MCP-Werkzeug, dieser Knopf nicht (nicht geprüft, ob der Export es nachholt). Das Umbenennen einer Basisklassen-Variable über den Projekt-Rename-Dialog zieht Einträge in abgeleiteten Klassen nicht nach, nur die der eigenen Klasse.
+
 ## 0. Auslegung und was verworfen ist
 
 **Gemeint ist** (Antwort des Menschen auf Frage #16, Beiträge 864 und 865 im Thema):
