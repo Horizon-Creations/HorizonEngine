@@ -12,6 +12,7 @@
 #include <vector>
 #include <algorithm>
 #include <fstream>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -1052,6 +1053,17 @@ void VulkanRenderer::pickPhysicalDevice()
     std::vector<VkPhysicalDevice> devs(count);
     vkEnumeratePhysicalDevices(m_instance, &count, devs.data());
     m_physDevice = devs[0];
+    // Name the device: a CI image test on a software ICD (lavapipe) must be able
+    // to show in its log that "llvmpipe" — and not some other ICD — drew it.
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(m_physDevice, &props);
+    char line[384];
+    std::snprintf(line, sizeof line,
+        "VulkanRenderer: device 0 of %u: %s (Vulkan %u.%u.%u, driver 0x%x)",
+        count, props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
+        VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion),
+        props.driverVersion);
+    HE_LOG_INFO(RHI, "%s", line);
 }
 
 void VulkanRenderer::createDevice()

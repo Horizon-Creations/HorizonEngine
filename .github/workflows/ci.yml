@@ -88,7 +88,8 @@ jobs:
       # OpenGL/EGL, audio and udev/dbus dev headers; the engine also links Python and
       # uses lz4/zstd. Install the dev packages before configuring. (Vulkan is optional
       # and left out — the Linux build uses the OpenGL backend; the Windows job above
-      # is where RendererVulkan gets compiled.)
+      # is where RendererVulkan gets compiled, the vulkan-lavapipe job below where
+      # it runs.)
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -369,3 +370,135 @@ jobs:
           name: HorizonEditor-linux-x64
           path: HorizonEditor-linux-x64.tar.gz
           if-no-files-found: error
+
+  # Vulkan image tests on a software ICD (Thema 122, docs/ci-software-vulkan-icd-
+  # analyse-2026-10-03.md). Mesa lavapipe draws on the CPU, so the VulkanRenderer
+  # finally RUNS somewhere automatic — until now it was only compiled (Windows job)
+  # and every Vulkan picture came from a manual run on one RTX machine.
+  #
+  # A job of its own, not a step in the Linux job: libvulkan-dev there would flip
+  # HE_VULKAN_ENABLED through find_package(Vulkan) and the shipped Linux editor
+  # package would suddenly carry RendererVulkan + Shaders/ — a product decision,
+  # not a CI one. This job builds only HorizonEditor and runs in parallel; Windows
+  # (~76 min) stays the long pole.
+  #
+  # ubuntu-24.04 pinned rather than -latest: the Mesa version decides the pictures,
+  # and a runner-image bump should be a visible commit, not a silent change.
+  vulkan-lavapipe:
+    name: Linux · Vulkan (lavapipe)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      # The Linux job's packages, plus: the lavapipe ICD (mesa-vulkan-drivers),
+      # loader + headers for the build (libvulkan-dev), vulkaninfo, the Khronos
+      # validation layer (the renderer turns it on by itself when it is installed,
+      # so every image test is also a validation run), glslangValidator for the
+      # scene SPIR-V, and Xvfb for the X11 fallback probe.
+      - name: Install dependencies (+ lavapipe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            liblz4-dev libzstd-dev python3-dev \
+            libcurl4-openssl-dev \
+            mesa-vulkan-drivers libvulkan-dev vulkan-tools vulkan-validationlayers \
+            glslang-tools xvfb
+          dpkg-query -W mesa-vulkan-drivers libvulkan1 vulkan-validationlayers glslang-tools
+
+      # What the pictures were drawn with. A sudden change in the image numbers is
+      # explained by this block or not at all. headless_surface is what the SDL
+      # offscreen driver needs for a surface without a display; ray_query is the
+      # GI hardware-RT path. A missing one is reported here and fails the image
+      # test that depends on it, not the whole job.
+      #
+      # VK_DRIVER_FILES pins the loader to lavapipe alone (the package also ships
+      # intel/radeon/nouveau/asahi/virtio ICDs): the renderer takes devs[0] without
+      # choosing, and the device line in each test log proves the pick. The json is
+      # looked up, not hard-coded — Mesa 25.2 on noble names it lvp_icd.json, older
+      # Mesa lvp_icd.x86_64.json.
+      - name: Software ICD witness
+        run: |
+          ls -l /usr/share/vulkan/icd.d/ /usr/share/vulkan/explicit_layer.d/ || true
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
+          test -n "$icd" || { echo "::error::no lavapipe ICD json in /usr/share/vulkan/icd.d"; exit 1; }
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          export VK_DRIVER_FILES="$icd"
+          cat "$icd"
+          vulkaninfo --summary
+          vulkaninfo > vkinfo.txt 2>&1 || true
+          for ext in VK_EXT_headless_surface VK_KHR_ray_query VK_KHR_acceleration_structure; do
+            if grep -q "$ext" vkinfo.txt; then echo "$ext: present"; else echo "::warning::lavapipe does not offer $ext"; fi
+          done
+          nproc
+
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-vk-${{ hashFiles('CMakeLists.txt') }}
+
+      # Default DEPLOY_DIR (out/deploy): the editor and its Shaders/ land in
+      # out/deploy/Editor, which is all the image tests need.
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
+
+      - name: Assert the Vulkan backend is enabled
+        run: |
+          if grep -qE '^HE_VULKAN_ENABLED:INTERNAL=TRUE$' build/CMakeCache.txt; then
+            echo "HE_VULKAN_ENABLED=TRUE — RendererVulkan is part of this build"
+          else
+            echo "::error::HE_VULKAN_ENABLED is not TRUE — libvulkan-dev was installed but CMake did not pick it up"
+            grep -n 'HE_VULKAN_ENABLED\|Vulkan_' build/CMakeCache.txt || true
+            exit 1
+          fi
+
+      - name: Build editor
+        id: build
+        run: cmake --build build --target HorizonEditor -j 4
+
+      - name: Deployed editor
+        run: |
+          ls -l out/deploy/Editor/HorizonEditor
+          echo "SPIR-V shaders: $(ls out/deploy/Editor/Shaders/*.spv | wc -l)"
+
+      # The X11 fallback (Mesa's X11 WSI under Xvfb), one A/B only. It answers
+      # "does Vulkan presentation work at all here" independently of the SDL
+      # offscreen path below, and is informational: the job's verdict is the
+      # offscreen run.
+      - name: Vulkan image probe (Xvfb)
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          xvfb-run -a -s "-screen 0 1280x720x24" \
+            python3 scripts/he_vk_imagetests.py \
+              --editor out/deploy/Editor/HorizonEditor --out vk-shots/xvfb --cases nebula
+
+      # SDL's offscreen video driver + VK_EXT_headless_surface: no display at all.
+      # Runs even when the Xvfb probe failed, but only on a built editor.
+      - name: Vulkan image tests (offscreen)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 75
+        env:
+          SDL_VIDEO_DRIVER: offscreen
+        run: |
+          python3 scripts/he_vk_imagetests.py \
+            --editor out/deploy/Editor/HorizonEditor --out vk-shots/offscreen
+
+      - name: Upload Vulkan image-test shots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulkan-lavapipe-shots
+          path: |
+            vk-shots/
+            vkinfo.txt
+          if-no-files-found: warn
