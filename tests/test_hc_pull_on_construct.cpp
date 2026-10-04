@@ -9,6 +9,12 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Diagnostics/Log.h>
 #include <Types/TypeRegistry.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <UIWidget/UIElements.h>
+#include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/WidgetManager.h>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -519,4 +525,85 @@ TEST_CASE("Pull on Construct: the compatibility rule the editor shares")
 	CHECK(isKnownPullSource("Creator"));
 	CHECK_FALSE(isKnownPullSource(""));
 	CHECK_FALSE(isKnownPullSource("SaveGame"));
+}
+
+// The real host: WidgetManager registers the embed first and the page after,
+// then fires PreConstruct on both before any Construct (Thema 119). The pull
+// happens inside each registration, so both PreConstructs already see it —
+// and a hot reload's restored running value lands on top of the pulled one.
+TEST_CASE("Pull on Construct: a widget and its embed have it in PreConstruct, and a reload keeps the running value")
+{
+	struct TempDir
+	{
+		std::filesystem::path path;
+		TempDir()
+		{
+			path = std::filesystem::temp_directory_path() / "he_test_pull_on_construct";
+			std::filesystem::remove_all(path);
+			std::filesystem::create_directories(path);
+		}
+		~TempDir() { std::filesystem::remove_all(path); }
+	} dir;
+	ContentManager cm(dir.path.string());
+
+	auto pullingGraph = [] {
+		Graph g;
+		g.variables = { pulling(intVar("Score", 0), kPullFromGameInstance, "Score"),
+		                intVar("SeenInPre", -1) };
+		eventCopies(g, "PreConstruct", "Score", "SeenInPre", PinType::Int);
+		return g;
+	};
+	auto registerWidget = [&cm](const HE::UIWidgetTree& tree, const Graph& g, const char* path)
+	{
+		UIWidgetAsset a;
+		a.treeJson = HE::uiWidgetTreeToJson(tree);
+		a.graphJson = toJson(g);
+		a.path = path;
+		cm.registerWidget(std::move(a));
+	};
+
+	HE::UIWidgetTree card;
+	card.canvasWidth = 200.0f; card.canvasHeight = 100.0f;
+	card.add(HE::UIWidgetType::Panel);
+	registerWidget(card, pullingGraph(), "mem://pull_card.hasset");
+
+	HE::UIWidgetTree page;
+	page.canvasWidth = 400.0f; page.canvasHeight = 300.0f;
+	{
+		const int slot = page.add(HE::UIWidgetType::WidgetRef);
+		auto* r = dynamic_cast<HE::UIWidgetRef*>(page.find(slot));
+		REQUIRE(r != nullptr);
+		r->widgetPath = "mem://pull_card.hasset";
+		r->name = "Card";
+	}
+	registerWidget(page, pullingGraph(), "mem://pull_page.hasset");
+
+	Runtime rt;
+	rt.setGameInstance(giWith({ intVar("Score", 7) }));
+	WidgetManager wm;
+	wm.setRuntime(&rt);
+
+	const int id = wm.createWidget(cm, "mem://pull_page.hasset");
+	REQUIRE(id != 0);
+	const InstanceId pageId = (InstanceId)id;
+	const InstanceId cardId = wm.childInstance(id, "Card");
+	REQUIRE(cardId != 0);
+	CHECK(rt.getVariable(pageId, "Score").i == 7);
+	CHECK(rt.getVariable(pageId, "SeenInPre").i == 7);
+	CHECK(rt.getVariable(cardId, "Score").i == 7);
+	CHECK(rt.getVariable(cardId, "SeenInPre").i == 7);
+	// A widget created from a graph's Create Widget would name its creator; one
+	// the host creates directly has none.
+	CHECK(rt.creatorOf(pageId) == 0);
+
+	// Hot reload: the running value is 42, the source still says 7. After the
+	// rebuild the restored 42 wins over the freshly pulled 7 (design §2.7).
+	rt.setVariable(pageId, "Score", Value::ofInt(42));
+	const WidgetManager::StateSnapshot snap = wm.captureState();
+	wm.clear();
+	const int again = wm.createWidget(cm, "mem://pull_page.hasset");
+	REQUIRE(again != 0);
+	CHECK(rt.getVariable((InstanceId)again, "Score").i == 7);   // pulled anew
+	CHECK(wm.restoreState(snap) > 0);
+	CHECK(rt.getVariable((InstanceId)again, "Score").i == 42);  // the running value wins
 }
