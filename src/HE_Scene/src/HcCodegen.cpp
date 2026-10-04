@@ -582,6 +582,9 @@ void collectUserTypePaths(const Graph& g, PinType kind, std::unordered_set<std::
         for (const auto& r : n.results) take(r.type, r.typeName);
     }
     for (const Variable& v : g.variables) take(v.type, v.typeName);
+    // Extract on Destruct: its struct is emitted even when no node or variable
+    // of the class names it — extractOnDestruct fills an S_<Struct> natively.
+    if (kind == PT::Struct && !g.extract.structPath.empty()) out.insert(g.extract.structPath);
 }
 
 TypeTable buildTypeTable(const std::vector<ClassSource>& sources)
@@ -1218,6 +1221,73 @@ private:
         const auto it = from->varMember.find(name);
         if (it == from->varMember.end()) return {};
         return { from->graph->findVariable(name), it->second };
+    }
+
+    // ── Extract on Destruct (design §3.7) ───────────────────────────────────
+    // The statements of extractOnDestruct, or none when THIS class declares no
+    // spec — a derived class then inherits the base's override, which is the
+    // interpreter's "leaf-most level that names a struct wins" — or the struct
+    // is unknown to this run (the interpreter then sends no data either). The
+    // mapping is fully known here, so it comes out native: an S_<Struct>
+    // seeded with the DEFINITION's defaults (members default to zero, the
+    // interpreter starts from makeDefaultValue) and one assignment per entry.
+    // An entry that cannot be filled is skipped with the interpreter's
+    // sentence instead of producing code that does not compile.
+    std::vector<std::string> extractBody()
+    {
+        std::vector<std::string> out;
+        const HorizonCode::ExtractSpec& ex = m_g.extract;
+        if (ex.empty()) return out;
+        const StructType* st = m_tt.find(ex.structPath);
+        if (!st)
+        {
+            warn("Extract on Destruct: struct '" + ex.structPath +
+                 "' is not registered; OnDestroyed goes out without data");
+            return out;
+        }
+        const TypeRef stTr = trOf(PT::Struct, false, ex.structPath);
+        out.push_back(st->cpp + " s = " +
+                      structLit(HE::TypeRegistry::instance().makeDefaultValue(ex.structPath),
+                                m_tt, stTr) + ";");
+        for (const HorizonCode::ExtractMapEntry& m : ex.map)
+        {
+            using HorizonCode::ExtractFailure;
+            ExtractFailure why = ExtractFailure::None;
+            std::string detail;
+            const HE::StructField* f = st->def.findField(m.member);
+            if (!f)
+                why = ExtractFailure::NoSuchMember;
+            else
+            {
+                const size_t fi = (size_t)(f - st->def.fields.data());
+                const TypeRef ft = trOf(*f);
+                const HorizonCode::ContainerKind fk =
+                    HorizonCode::containerKindOf(f->isArray, f->container);
+                if (m.var == HorizonCode::kExtractSelf)
+                {
+                    if (f->type != PT::Ref || fk != HorizonCode::ContainerKind::None)
+                        why = ExtractFailure::SelfNotRef;
+                    else
+                        out.push_back("s." + st->members[fi] + " = hc::self(m_ctx);");
+                }
+                else if (const VarRef iv = instanceVar(m.var); !iv.decl)
+                    why = ExtractFailure::NoSuchVariable;
+                else if (!HorizonCode::pullShapesCompatible(
+                             iv.decl->type, iv.decl->kind(), iv.decl->keyType, iv.decl->typeName,
+                             f->type, fk, f->keyType, f->typeName, &detail))
+                    why = ExtractFailure::TypeMismatch;
+                else
+                    out.push_back("s." + st->members[fi] + " = " +
+                                  convertExpr(iv.member, trOf(*iv.decl), ft) + ";");
+            }
+            if (why != ExtractFailure::None)
+                warn("Extract on Destruct: " +
+                     HorizonCode::extractFailureText(why, m.member, m.var, detail) +
+                     "; struct default used");
+        }
+        out.push_back("out = " + toValueCall("s", stTr, m_opt.namespaceName) + ";");
+        out.push_back("return true;");
+        return out;
     }
 
     // ── Stage A0: recover missing user-type definitions ─────────────────────
@@ -2985,6 +3055,7 @@ private:
         // every "does this class handle events at all" test asks about both.
         const bool anyEvents = !groups.empty() || !inputs.empty();
         const auto fns     = functionEntries();
+        const auto extractLines = extractBody();   // Extract on Destruct, §3.7
         bool anyElemFilter = false, anyPrivateFn = false, anyFnParams = false, anyRefVar = false;
         for (const Node& n : m_g.nodes) if (n.type == NT::Event && n.elem != 0) anyElemFilter = true;
         for (const Node* fn : fns)
@@ -3160,6 +3231,8 @@ private:
             if (chainRefVar) h += "    void collectRefs(std::vector<uint32_t>& out) const override;\n";
         }
         if (varCount || !states.empty()) h += "    void reseedVariables() override;\n";
+        if (!extractLines.empty())
+            h += "    bool extractOnDestruct(hc::Value& out) const override;\n";
         if (!delays.empty())             h += "    void resumeFrom(int nodeId) override;\n";
 
         // protected, not private: a derived class's generated code reads and
@@ -3323,13 +3396,28 @@ private:
             c += "{ static const std::vector<HorizonCode::CompiledVarInfo> k = hc::varInfosOf(slots()); return k; }\n\n";
         }
 
+        if (!extractLines.empty())
+        {
+            // Extract on Destruct: Runtime::destroy calls this after onDestruct
+            // and before the instance is unregistered.
+            c += "bool " + m_cls + "::extractOnDestruct(hc::Value& out) const\n{\n";
+            for (const std::string& l : extractLines) c += "    " + l + "\n";
+            c += "}\n\n";
+        }
+
         if (anyEvents)
         {
             c += "const std::vector<HorizonCode::CompiledEventInfo>& " + m_cls + "::eventInfos() const\n{\n";
             c += "    static const std::vector<HorizonCode::CompiledEventInfo> kEvents = {\n";
+            // A handler with an argument also names its type: "OnDestroyed"
+            // is type-checked per listener against the struct the dying
+            // instance sends (design §3.3), and a compiled listener has no
+            // graph to ask. Rows without an argument keep the old two fields.
             for (const Node& n : m_g.nodes)
                 if (n.type == NT::Event)
-                    c += "        { " + strLit(n.s) + ", " + std::to_string(n.elem) + " },\n";
+                    c += "        { " + strLit(n.s) + ", " + std::to_string(n.elem) +
+                         (n.hasArg ? ", " + std::to_string((int)n.propType) + ", " + strLit(n.typeName)
+                                   : std::string()) + " },\n";
             // One row per input event this class handles — same reason the
             // inherited ones are listed below: this table is what says the
             // instance cares, and a handler missing from it is never fired.

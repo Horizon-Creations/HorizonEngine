@@ -856,6 +856,7 @@ set(HCGEN_CLASSES
     inherit_novars_base inherit_novars input_actions containers reroutes
     cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
     pull_construct pull_spawner
+    extract_destruct extract_derived extract_listener
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

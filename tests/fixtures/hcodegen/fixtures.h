@@ -3069,6 +3069,61 @@ inline HE::hccg::ClassSource fxPullSpawner()
     return f.done("pull_spawner");
 }
 
+// 47 — Extract on Destruct (docs/state-driven-data-exchange-design.md §3.7):
+// the generated extractOnDestruct is NATIVE (S_FixStats filled member by
+// member), the interpreter builds the same struct from the graph's table.
+// What both must agree on: a private variable the class's own Destruct wrote
+// last (secret ← finalHp), Float → Int converted, @Self, a mismatching entry
+// (Int into the Enum member) and one naming a member the struct lacks both
+// left at the struct's DEFINITION defaults, like every unmapped member
+// (inner, hits — the generated struct members default to zero, the definition
+// does not).
+inline HE::hccg::ClassSource fxExtractDestruct()
+{
+    Fx f;
+    f.var("hp", PT::Float, 5.5f);
+    f.var("lvlF", PT::Float, 7.0f);
+    f.var("kills", PT::Int, 4.0f);
+    f.var("secret", PT::Float, 0.0f, {}, /*access=*/1);
+    f.var("finalHp", PT::Float, 42.0f);
+    const int ev = f.event("Destruct");
+    const int s = f.setVar("secret", PT::Float);
+    f.data(f.getVar("finalHp", PT::Float), 0, s, 0);
+    f.exec(ev, s);
+    f.g.extract.structPath = kStatsType;
+    f.g.extract.map = { { "hp", "secret" }, { "lvl", "lvlF" }, { "mood", "kills" },
+                        { "owner", HorizonCode::kExtractSelf }, { "gone", "hp" } };
+    return f.done("extract_destruct");
+}
+
+// 48 — a class deriving from extract_destruct without a spec of its own: it
+// extracts the base's struct (C++: the inherited override; interpreter: the
+// leaf-most level that names one).
+inline HE::hccg::ClassSource fxExtractDerived()
+{
+    Fx f;
+    f.var("extra", PT::Int, 1.0f);
+    return f.done("extract_derived", "fix/extract_destruct", "");
+}
+
+// 49 — the listener side: OnDestroyed (FixStats) copies the payload into `got`.
+// Its generated event table must carry the argument's type, or a compiled
+// listener could not be type-checked (Runtime::dispatchDestroyed).
+inline HE::hccg::ClassSource fxExtractListener()
+{
+    Fx f;
+    f.structVar("got", kStatsType);
+    Node ev; ev.type = NT::Event; ev.s = HorizonCode::kOnDestroyed;
+    ev.hasArg = true; ev.propType = PT::Struct; ev.typeName = kStatsType;
+    const int e = f.add(ev);
+    Node sv; sv.type = NT::SetVariable; sv.s = "got"; sv.propType = PT::Struct;
+    sv.typeName = kStatsType;
+    const int s = f.add(sv);
+    f.data(e, 0, s, 0);
+    f.exec(e, s);
+    return f.done("extract_listener");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -3086,6 +3141,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
         fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxPlayerSlots(),
         fxPullConstruct(), fxPullSpawner(),
+        fxExtractDestruct(), fxExtractDerived(), fxExtractListener(),
     };
 }
 

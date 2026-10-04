@@ -2133,6 +2133,77 @@ TEST_CASE("codegen parity: pull_spawner (the Creator source on both backends)")
 	CHECK(p.comp.rt.getVariable(cc, "hp").f == 77.0f);
 }
 
+TEST_CASE("codegen parity: extract_destruct (both backends extract the same struct)")
+{
+	ParityPair p("fix/extract_destruct");
+	// One OnDestroyed (FixStats) listener per world, each in its own backend:
+	// the compiled one is checked against its generated event table.
+	auto addListener = [](World& w) -> InstanceId
+	{
+		if (w.useCompiled)
+		{
+			const CompiledClassEntry* e = findCompiled("fix/extract_listener");
+			REQUIRE(e != nullptr);
+			return w.rt.addCompiled(CompiledPtr(e->create(), CompiledDeleter{ e->destroy }));
+		}
+		for (auto& s : hcfix::all())
+			if (s.key == "fix/extract_listener") return w.rt.add(std::move(s.graph));
+		return 0;
+	};
+	const InstanceId li = addListener(p.interp);
+	const InstanceId lc = addListener(p.comp);
+	REQUIRE(li != 0);
+	REQUIRE(li == lc);   // both worlds mint ids identically
+
+	// Before Destruct ran: the private `secret` is still 0.
+	const Value early = p.interp.rt.buildExtract(p.interp.id);
+	CHECK(valueEq(early, p.comp.rt.buildExtract(p.comp.id)));
+	REQUIRE(early.items.size() == 6);
+	CHECK(early.items[0].f == 0.0f);
+
+	p.interp.rt.bindEvent(p.interp.id, HorizonCode::kOnDestroyed, li);
+	p.comp.rt.bindEvent(p.comp.id, HorizonCode::kOnDestroyed, lc);
+	const InstanceId owner = p.interp.id;
+	p.interp.rt.destroy(p.interp.id);
+	p.comp.rt.destroy(p.comp.id);
+	CHECK_FALSE(p.interp.rt.alive(owner));
+	CHECK_FALSE(p.comp.rt.alive(owner));
+
+	const Value gi = p.interp.rt.getVariable(li, "got");
+	const Value gc = p.comp.rt.getVariable(lc, "got");
+	INFO("interp=", valueStr(gi), " compiled=", valueStr(gc));
+	CHECK(valueEq(gi, gc));
+	REQUIRE(gi.items.size() == 6);
+	CHECK(gi.items[0].f == 42.0f);          // hp ← secret, as Destruct left it
+	CHECK(gi.items[1].i == 7);              // lvl ← lvlF, Float → Int
+	const Value defs = HE::TypeRegistry::instance().makeDefaultValue(hcfix::kStatsType);
+	REQUIRE(defs.items.size() == 6);
+	CHECK(valueEq(gi.items[2], defs.items[2]));   // mood: Int refused → definition default
+	CHECK(gi.items[5].ref == owner);        // owner ← @Self
+	REQUIRE(gi.items[4].items.size() == 2); // hits: the definition's authored slots
+	CHECK(gi.items[4].items[1].f == 2.0f);
+
+	// The listener's generated table names its argument's type.
+	const CompiledClassEntry* le = findCompiled("fix/extract_listener");
+	CompiledPtr probe(le->create(), CompiledDeleter{ le->destroy });
+	bool typed = false;
+	for (const auto& e : probe->eventInfos())
+		if (std::string(e.name) == HorizonCode::kOnDestroyed)
+			typed = e.argType == (int)PinType::Struct && std::string(e.typeName) == hcfix::kStatsType;
+	CHECK(typed);
+}
+
+TEST_CASE("codegen parity: extract_derived (a derived class without a spec extracts the base's)")
+{
+	ParityPair p("fix/extract_derived");
+	const Value vi = p.interp.rt.buildExtract(p.interp.id);
+	const Value vc = p.comp.rt.buildExtract(p.comp.id);
+	REQUIRE(vi.type == PinType::Struct);
+	CHECK(vi.typeName == hcfix::kStatsType);
+	INFO("interp=", valueStr(vi), " compiled=", valueStr(vc));
+	CHECK(valueEq(vi, vc));
+}
+
 TEST_CASE("codegen: the engine-event hooks do exactly what the named path does")
 {
 	// Step A of the native event route: a compiled class overrides the
