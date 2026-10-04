@@ -12,6 +12,7 @@
 #include "HcExecTrace.h"         // which node just ran — the fading amber halo
 #include <HorizonScene/EngineApi.h>
 #include <HorizonCode/HcClassResolve.h>   // member menus read the FLATTENED class
+#include <Diagnostics/Log.h>     // a spawn-pin wire the mirror cuts is logged
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -521,6 +522,129 @@ bool syncCreateWidgetPins(ContentManager* content, HC::Graph& g, bool force)
 	return changed;
 }
 
+namespace
+{
+// The spawn pins of node `id` that have a wire coming in, by name and type —
+// taken before a mirror so what the mirror cut can be said out loud after it.
+std::vector<HC::FuncParam> wiredSpawnPins(const HC::Graph& g, int id)
+{
+	std::vector<HC::FuncParam> out;
+	const HC::Node* n = g.findNode(id);
+	if (!n) return out;
+	const int first = pinRanges(*n).dataIn0 + HC::firstSpawnDataIn(n->type);
+	for (const HC::Link& l : g.links)
+	{
+		const int i = l.dstPin - first;
+		if (l.dstNode == id && i >= 0 && i < (int)n->params.size()) out.push_back(n->params[(size_t)i]);
+	}
+	return out;
+}
+
+// What a class's inheritance chain is right now, as one number: the path, the
+// stored graph and the base string of the class and of every class asset above
+// it. Cheap on purpose — no JSON is parsed — so it can be asked twice a second;
+// the chain is only resolved when this changes. The base has to be in it: a
+// tick on an ANCESTOR's variable changes the pins of every derived Create
+// Object (docs/hc-class-expose-on-spawn-design.md §5.2). false = the class
+// itself is not there.
+bool classChainHash(ContentManager& cm, const std::string& path, std::size_t& out)
+{
+	std::size_t h = 0;
+	auto mix = [&h](const std::string& s)
+	{ h ^= std::hash<std::string>{}(s) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+	std::vector<std::string> seen;
+	std::string key = path;
+	while (!key.empty() && std::find(seen.begin(), seen.end(), key) == seen.end())
+	{
+		const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(cm.loadAsset(key));
+		if (!a) break;   // a missing class or ancestor
+		// Copies before the next loadAsset: the getter points into the
+		// manager's dense vector, and loading another asset may move it.
+		const std::string json = a->graphJson, base = a->baseClass;
+		seen.push_back(key);
+		mix(key); mix(json); mix(base);
+		// An engine taxonomy row ends the chain, as in resolveClass — and it
+		// is no asset, so asking the content system for it would only log.
+		if (base.empty() || HC::findEngineClass(base)) break;
+		key = base;
+	}
+	if (seen.empty()) return false;
+	out = h;
+	return true;
+}
+} // namespace
+
+bool syncCreateObjectPins(ContentManager* content, HC::Graph& g, bool force)
+{
+	if (!content) return false;
+	// Per class path, as for widgets above — but keyed by the whole chain.
+	struct Entry
+	{
+		std::size_t hash = 0;
+		bool        known = false, hasBefore = false;
+		std::vector<HC::SpawnPin> pins, before;
+		std::chrono::steady_clock::time_point checked{};
+	};
+	static std::unordered_map<std::string, Entry> cache;
+	const auto now = std::chrono::steady_clock::now();
+
+	bool changed = false;
+	std::vector<int> ids;
+	for (const HC::Node& n : g.nodes)
+		if (n.type == HC::NodeType::CreateObject && !n.s.empty()) ids.push_back(n.id);
+	for (const int id : ids)
+	{
+		const std::string path = g.findNode(id)->s;
+		Entry& e = cache[path];
+		if (force || !e.known || now - e.checked >= std::chrono::milliseconds(500))
+		{
+			e.checked = now;
+			std::size_t hash = 0;
+			// Missing class: the node stays as it is, wires included, for when
+			// the asset comes back (same rule as a missing widget).
+			if (!classChainHash(*content, path, hash)) continue;
+			if (!e.known || hash != e.hash)
+			{
+				const HC::ResolvedClass rc = HC::resolveClassAsset(*content, path);
+				if (!rc.ok) continue;
+				e.hasBefore = e.known;
+				e.before    = std::move(e.pins);
+				e.pins      = HC::spawnPinsOfClass(rc);
+				e.hash      = hash;
+				e.known     = true;
+			}
+		}
+		if (!e.known) continue;
+
+		const std::vector<HC::FuncParam> wired = wiredSpawnPins(g, id);
+		if (!HC::syncSpawnPins(g, id, e.pins, e.hasBefore ? &e.before : nullptr,
+		                       /*dropWiresOnRetype=*/true))
+			continue;
+		changed = true;
+
+		// A wire the mirror had to cut is never dropped in silence: the pin is
+		// gone (variable deleted, unticked, made private, renamed past the
+		// rename dialog) or its type changed under it. The node itself shows the
+		// result; the log says what was there before (§5.3).
+		const std::vector<HC::FuncParam> still = wiredSpawnPins(g, id);
+		for (const HC::FuncParam& w : wired)
+		{
+			const bool kept = std::any_of(still.begin(), still.end(),
+				[&](const HC::FuncParam& s) { return s.name == w.name; });
+			if (kept) continue;
+			const bool retyped = std::any_of(e.pins.begin(), e.pins.end(),
+				[&](const HC::SpawnPin& p) { return p.param.name == w.name; });
+			HE_LOG_WARN(Editor, "%s", ("Create Object '" + path + "' (node " + std::to_string(id) +
+				"): the wire into '" + w.name + "' was removed — " +
+				(retyped ? std::string("the variable changed type")
+				         : std::string("the class no longer offers it (variable deleted, renamed, "
+				                       "made private or no longer Expose on Spawn)")) +
+				". Re-wire it if it is still meant to be set.").c_str());
+		}
+	}
+	return changed;
+}
+
 const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& selfGraph,
                                    const HC::Graph* giGraph, ContentManager* content,
                                    HC::Graph& scratch)
@@ -625,7 +749,12 @@ GraphEditor::Model buildModel(const Host& h)
 	// Expose on Spawn: every Create Widget's inputs follow the widget it names
 	// (docs/widget-pre-construct-design.md §6.5). The document changed, so it
 	// is dirty, but nobody did anything to undo — hence not a committed edit.
-	if (syncCreateWidgetPins(h.content, graph) && h.onEdit) h.onEdit(false);
+	// Every Create Object's the same, from its class and that class's ancestors
+	// (docs/hc-class-expose-on-spawn-design.md §5.2) — in every graph, since a
+	// widget or a level script may create objects too. Both run every frame:
+	// `|` and not `||`.
+	if ((syncCreateWidgetPins(h.content, graph) | syncCreateObjectPins(h.content, graph)) && h.onEdit)
+		h.onEdit(false);
 
 	GraphEditor::Model m;
 	m.multiSelect = true;      // shift-click / box-select; drag + Delete act on all
@@ -2181,12 +2310,20 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		{
 			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(h.content))
 				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n.s == c.path))
-					{ n.s = c.path; edit(true); }
+				{
+					n.s = c.path;
+					// The new class's Expose on Spawn inputs, now. Pins of the
+					// same name and type keep their wire and value; the rest go,
+					// and a cut wire is logged. Mirroring moves no node.
+					syncCreateObjectPins(h.content, g, /*force=*/true);
+					edit(true);
+				}
 			ImGui::EndCombo();
 		}
 		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.\n"
 		                    "Wire Location/Rotation to place it;\nleave them unwired to keep the\n"
-		                    "placement the class was authored with.");
+		                    "placement the class was authored with.\n"
+		                    "Its Expose on Spawn variables appear as inputs.");
 		return true;
 	}
 

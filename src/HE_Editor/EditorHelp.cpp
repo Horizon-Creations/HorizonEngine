@@ -6933,7 +6933,10 @@ namespace
 
 	{ "Script Variable/Name", "",
 	  "What this variable is called. The rename carries: every Get Variable and "
-	  "Set Variable node using it is renamed with it, so the wiring survives. A "
+	  "Set Variable node using it is renamed with it, so the wiring survives. "
+	  "For a public variable of a class the input it gives Create Object is "
+	  "renamed too, wire and typed value kept, and the other graphs that name "
+	  "it are offered the same rename. A "
 	  "name this graph or a base class already uses is refused, private ones "
 	  "included — an instance has one variable store, so the same name would be "
 	  "that variable rather than a new one.",
@@ -6943,6 +6946,18 @@ namespace
 	  "(Ref) node on a reference to this object. Private keeps it to this graph. "
 	  "A function-local has no access at all, which is why a \"Local to\" line "
 	  "stands here instead for those.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Expose on Spawn", "",
+	  "Every Create Object of this class, and of every class deriving from it, "
+	  "gets an input for this variable, behind Location and Rotation. A wired "
+	  "input, or one with a value typed on it, is set on the new object before "
+	  "its Construct runs, and for an Entity class before Begin Play too, so "
+	  "the object's own first code already sees it. Left alone, the input keeps "
+	  "the default shown here. Public variables only, and not one called "
+	  "Location or Rotation: Create Object has inputs of those names already. "
+	  "The inputs appear once the class is saved. Unticking or deleting the "
+	  "variable takes the input away again; a wire on it is removed and the "
+	  "log says so.",
 	  "", "horizoncode#functions" },
 	{ "Script Variable/Replicated", "",
 	  "In a multiplayer session the host owns this variable and every client is "
@@ -6986,7 +7001,9 @@ namespace
 	{ "Script Variable/Delete Variable", "Delete Variable",
 	  "Removes the variable from this graph. Get Variable and Set Variable nodes "
 	  "that used it are left where they are, still naming something no longer "
-	  "declared — nothing is repaired for you.",
+	  "declared — nothing is repaired for you. An Expose on Spawn input it gave "
+	  "Create Object goes away once the class is saved; a wire on it is "
+	  "removed and the log says so.",
 	  "", "horizoncode#functions" },
 
 	{ "Script Node/Run On", "",

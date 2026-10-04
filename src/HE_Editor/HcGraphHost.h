@@ -115,6 +115,16 @@ std::string resolveClassBase(const HC::Node& srcNode, const HC::Graph& selfGraph
 // when last read here follows a changed default. true = some node changed.
 bool syncCreateWidgetPins(ContentManager* content, HC::Graph& g, bool force = false);
 
+// The same for every Create Object in `g` (docs/hc-class-expose-on-spawn-design.md
+// §5): its inputs behind Location/Rotation follow the Expose on Spawn variables
+// of the class it names AND of that class's ancestors, root first. The cache key
+// covers the whole chain, so a tick on a base class reaches every derived
+// Create Object. What the class asset holds is what counts — the class editor
+// writes it on save. A retyped pin loses its wire here (Create Widget keeps
+// it), and every wire the mirror cuts is logged as a warning with the reason.
+// A missing class leaves the node untouched. true = some node changed.
+bool syncCreateObjectPins(ContentManager* content, HC::Graph& g, bool force = false);
+
 // ── Host bindings ────────────────────────────────────────────────────────────
 
 // Which node types each frontend offers. Kept as plain data (not behaviour) so

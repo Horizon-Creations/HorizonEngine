@@ -281,9 +281,14 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 	// asset it names, so there is nothing to prove. Renamed here and not left to
 	// the pin mirror: the mirror goes by name, and would take a renamed pin for
 	// a new one and drop the value somebody typed into it.
+	//
+	// A Create Object does the same for a class (docs/hc-class-expose-on-spawn-
+	// design.md §5.4). Its pins carry the ancestors' variables too, which is why
+	// targetKeys holds the renamed class AND every class deriving from it: a
+	// base variable's pin sits on the Create Object of each of them.
 	if (t.member == Member::Variable)
 		for (const HorizonCode::Node& n : g.nodes)
-			if (n.type == NT::CreateWidget && contains(targetKeys, n.s))
+			if ((n.type == NT::CreateWidget || n.type == NT::CreateObject) && contains(targetKeys, n.s))
 				for (const HorizonCode::FuncParam& prm : n.params)
 					if (prm.name == t.oldName) { p.rename.push_back({ n.id, {}, line(n) }); break; }
 
@@ -382,8 +387,9 @@ bool apply(HorizonCode::Graph& g, const Plan& p, const Target& t)
 		if (h.node)
 		{
 			HorizonCode::Node* n = g.findNode(h.node);
-			// Create Widget's `s` is the widget's PATH; the name is one of its pins.
-			if (n && n->type == NT::CreateWidget)
+			// Create Widget's / Create Object's `s` is the asset's PATH; the name
+			// is one of its pins.
+			if (n && (n->type == NT::CreateWidget || n->type == NT::CreateObject))
 			{
 				for (HorizonCode::FuncParam& prm : n->params)
 					if (prm.name == t.oldName) { prm.name = t.newName; changed = true; }

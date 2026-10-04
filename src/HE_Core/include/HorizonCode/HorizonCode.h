@@ -801,8 +801,11 @@ HE_API std::vector<SpawnPin> spawnPinsOfLevels(const std::vector<Graph>& levelsR
 //
 // dropWiresOnRetype: a pin whose name stayed but whose type changed loses its
 // wire, as Get/Set Variable do on a retype — a wire of the old type would
-// otherwise stay on it. On for Create Object; Create Widget keeps its behaviour
-// (the wire stays), which is why it is an option and not the rule.
+// otherwise stay on it. With it, too, a wire only ever stays on a pin of the
+// name it had: when the pin count stays the same (one variable deleted, another
+// ticked) the generic remap keeps the index, and the wire would slide onto the
+// new pin. On for Create Object; Create Widget keeps its behaviour (the wire
+// stays), which is why it is an option and not the rule.
 HE_API bool syncSpawnPins(Graph& g, int createNodeId, const std::vector<SpawnPin>& now,
                           const std::vector<SpawnPin>* before = nullptr,
                           bool dropWiresOnRetype = false);

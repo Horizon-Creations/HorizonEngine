@@ -8,6 +8,7 @@
 #include "HorizonCodeClassPanel.h"
 #include "HcEditorUtil.h"
 #include "HcRenameDialog.h"     // "that rename reaches other files"
+#include "HcRenameSweep.h"      // classAndDescendants — whose Create Object pins a variable rename carries
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
@@ -618,8 +619,18 @@ void drawEventDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 	}
 }
 
+// A rename that just happened in one of these graphs and still has to be offered
+// to the rest of the project. The details rows have no AppContext — they are
+// reached through drawGraphBody, which is given a ContentManager and nothing
+// else — so the rename is parked here and picked up by the panel entry points,
+// which do. Consumed the same frame; never more than one rename per frame,
+// because a rename takes an InputText losing focus.
+HcRename::Target s_pendingRename;
+
+// `derivable` = this graph belongs to a CLASS asset (see drawNodeDetails). Only
+// a class is made by Create Object, so only there is Expose on Spawn offered.
 void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariable>& inheritedVars,
-                         ContentManager* content, bool& edited)
+                         ContentManager* content, bool derivable, bool& edited)
 {
 	HC::Variable* v = graph.findVariable(g.selectedVar);
 	if (!v) { g.selectedVar.clear(); return; }
@@ -662,6 +673,43 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 			for (auto& n : graph.nodes)
 				if ((n.type == NT::GetVariable || n.type == NT::SetVariable) && n.s == oldName)
 					n.s = nn;
+			// A public variable of a CLASS is reachable from outside: Get/Set
+			// (Ref) name it, and with Expose on Spawn so does a pin on every
+			// Create Object of this class and of each class deriving from it
+			// (docs/hc-class-expose-on-spawn-design.md §5.4). Left to the pin
+			// mirror, a renamed pin would read as a new one and lose its wire
+			// and the value typed on it — so the rename carries them.
+			//
+			// This graph is followed here, in memory (a class may well create
+			// itself or a child); the rest of the project is OFFERED through
+			// the same dialog a function rename uses, which skips this class.
+			//
+			// The pin mirror reads the class ASSET, which this tab only writes
+			// on save. Left at that, the mirror would see the old name and turn
+			// every pin just renamed back — here and in the graphs the dialog
+			// renames — dropping wire and value. So the rename, and only the
+			// rename, goes into the live asset too, as the dialog writes it into
+			// every other asset; the rest of this tab's edits wait for Save.
+			if (derivable && content && v->scope == 0 && v->access == 0 && !g.graphFor.empty())
+			{
+				const HcRename::Target t{ g.graphFor, HcRename::Member::Variable, oldName, nn };
+				const std::vector<std::string> keys =
+					HcRenameSweep::classAndDescendants(*content, g.graphFor);
+				HcRename::apply(graph, HcRename::planGraph(graph, HcRename::Role::Declares,
+				                                           keys, g.graphFor, {}, t), t);
+				// No loadAsset between this getter and the write: it points
+				// into the manager's dense vector.
+				const HE::UUID id = content->loadAsset(g.graphFor);
+				if (HorizonCodeClassAsset* a = content->getHorizonCodeClassMutable(id))
+				{
+					HC::Graph live;
+					if (HC::fromJson(a->graphJson, live) &&
+					    HcRename::apply(live, HcRename::planGraph(live, HcRename::Role::Declares,
+					                                              keys, g.graphFor, {}, t), t))
+						a->graphJson = HC::toJson(live);
+				}
+				s_pendingRename = t;
+			}
 			g.selectedVar = nn;
 			g.varNameEditFor = nn;
 			g.varNameErrorName.clear();
@@ -719,8 +767,36 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 	else
 	{
 		int vaccess = v->access;
-		if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
+		if (ImGui::Combo("Access", &vaccess, "Public\0Private\0"))
+		{
+			v->access = vaccess;
+			if (vaccess != 0) v->exposeOnSpawn = false;   // a creator only reaches public ones
+			edited = true;
+		}
 		EditorWidgets::helpForLabel("Access");
+
+		// ── Expose on Spawn (docs/hc-class-expose-on-spawn-design.md §5.1) ───
+		// Every Create Object of this class, and of every class deriving from
+		// it, grows an input for the variable, set before Construct (and an
+		// Entity's BeginPlay). Same flag as on a widget. Public only — it is
+		// set the way Set (Ref) sets, which cannot reach a private one. And not
+		// under the names of Create Object's own placement inputs: the mirror
+		// moves wires by name, so a pin called Location would take that wire
+		// (§3.3). The flag stays stored either way; only the box is refused.
+		if (derivable)
+		{
+			const bool clashes = v->name == "Location" || v->name == "Rotation";
+			const bool canSpawn = v->access == 0 && !clashes;
+			ImGui::BeginDisabled(!canSpawn);
+			bool spawn = v->exposeOnSpawn && canSpawn;
+			if (EditorWidgets::checkbox("Expose on Spawn", &spawn)) { v->exposeOnSpawn = spawn; edited = true; }
+			ImGui::EndDisabled();
+			if (!canSpawn && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("%s", clashes
+					? "Create Object already has an input of this name; rename the variable."
+					: "Only a public variable can be handed in by Create Object.");
+			EditorWidgets::helpForLabel("Expose on Spawn");
+		}
 
 		// ── Multiplayer (docs/gameplay-replication-plan.md §6.1, §8.2) ───────
 		// THIS CHECKBOX IS THE WHOLE DECLARATION. Nothing else has to be
@@ -899,14 +975,7 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 // bind), the Lua/Python wording on FunctionEntry, the unnamed-function filter on
 // FunctionCall, and the "script" wording on Bind/Emit Event.
 // HcGraphHost::drawCommonNodeDetails lists the same split from the other side.
-// A rename that just happened in one of these graphs and still has to be offered
-// to the rest of the project. The details rows have no AppContext — they are
-// reached through drawGraphBody, which is given a ContentManager and nothing
-// else — so the rename is parked here and picked up by the panel entry points,
-// which do. Consumed the same frame; never more than one rename per frame,
-// because a rename takes an InputText losing focus.
-HcRename::Target s_pendingRename;
-
+// (s_pendingRename is declared above drawVariableDetails, its first writer.)
 bool takePendingRename(HcRename::Target& out)
 {
 	if (s_pendingRename.oldName.empty()) return false;
@@ -1422,7 +1491,8 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		ImGui::Separator();
 		if (g.selectedNode != 0)           drawNodeDetails(graph, events, allowCustomEvents,
 		                                                   content, derivable, edited);
-		else if (!g.selectedVar.empty())   drawVariableDetails(graph, inheritedVars, content, edited);
+		else if (!g.selectedVar.empty())   drawVariableDetails(graph, inheritedVars, content,
+		                                                       derivable, edited);
 		else if (!g.selectedEvent.empty()) drawEventDetails(graph, content, edited);
 		else ImGui::TextDisabled("Select a node, variable or event.");
 	}

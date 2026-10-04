@@ -2438,18 +2438,43 @@ bool syncSpawnPins(Graph& g, int createNodeId, const std::vector<SpawnPin>& now,
     if (!changed) return false;
 
     const LinkRemapSnapshot snap = captureLinkRemapSnapshot(g, { createNodeId });
+    // Which pin NAME each wire into a spawn pin had, for the strict check below.
+    struct WiredSpawn { int srcNode, srcPin; std::string name; };
+    std::vector<WiredSpawn> wiredBefore;
+    const int spawnPin0 = pinRanges(*n).dataIn0 + first;   // fixed inputs do not move
+    for (const Link& l : g.links)
+    {
+        const int i = l.dstPin - spawnPin0;
+        if (l.dstNode == createNodeId && i >= 0 && i < (int)n->params.size())
+            wiredBefore.push_back({ l.srcNode, l.srcPin, n->params[(size_t)i].name });
+    }
     n->params = std::move(params);
     for (auto it = n->pinDefaults.begin(); it != n->pinDefaults.end(); )
         it = it->first >= first ? n->pinDefaults.erase(it) : std::next(it);
     for (auto& [idx, v] : values) n->pinDefaults[idx] = std::move(v);
     remapLinksFromSnapshot(g, snap);   // wires follow their pin by name
-    if (dropWiresOnRetype && !retyped.empty())
+    if (dropWiresOnRetype)
     {
         // The name matched, so the remap kept the wire — on a pin of another
         // type now. Dropped, visibly, as a retyped Get/Set Variable drops its.
-        const int dataIn0 = pinRanges(*n).dataIn0;
         std::unordered_set<int> dead;
-        for (const size_t i : retyped) dead.insert(dataIn0 + first + (int)i);
+        for (const size_t i : retyped) dead.insert(spawnPin0 + (int)i);
+        // And a wire only stays on a pin of the name it had. The remap keeps
+        // the INDEX when a region kept its size (an in-place rename of a struct
+        // field, say), which for spawn pins means: delete one variable, tick
+        // another in the same save, and the old wire slides onto the new pin.
+        // A real rename goes through the rename (HcRename) first, which renames
+        // the pin itself, so the name still matches here.
+        for (const Link& l : g.links)
+        {
+            const int i = l.dstPin - spawnPin0;
+            if (l.dstNode != createNodeId || i < 0 || i >= (int)n->params.size()) continue;
+            const std::string& name = n->params[(size_t)i].name;
+            const bool same = std::any_of(wiredBefore.begin(), wiredBefore.end(),
+                [&](const WiredSpawn& w)
+                { return w.srcNode == l.srcNode && w.srcPin == l.srcPin && w.name == name; });
+            if (!same) dead.insert(l.dstPin);
+        }
         g.links.erase(std::remove_if(g.links.begin(), g.links.end(), [&](const Link& l)
                       { return l.dstNode == createNodeId && dead.count(l.dstPin); }),
                       g.links.end());
