@@ -106,6 +106,10 @@ public:
 	// Returns VkImageView for the viewport color image (for ImGui_ImplVulkan_AddTexture).
 	void* GetViewportVkImageView() const;
 	void* GetViewportVkSampler()   const;
+	// The packaged game: Render() runs the viewport frame at the swapchain's
+	// size and draws its result into the swapchain image (docs/spielpfad-
+	// postfx-parity-analyse-2026-10-03.md, Weg a).
+	void  SetSwapchainPostProcessing(bool enabled) override;
 	bool  HasViewportResourceChanged() const;
 	void  ClearViewportResourceChanged();
 	// The Vulkan stand-in for a D3D12 fence value. Every frame handed to the
@@ -572,6 +576,15 @@ private:
 	// Color image sampled by ImGui; depth image for the viewport render pass.
 	void createViewportResources(uint32_t w, uint32_t h);
 	void destroyViewportResources();
+	// Scene binding 3 (AO) back to the 1×1 white fallback, for when the
+	// viewport set — and with it the SSAO blur target — is gone.
+	void pointSceneAoAtWhite();
+	// SetSwapchainPostProcessing: the game asks for the post chain on the
+	// swapchain path. m_gameViewport = the viewport set is the game's
+	// (swapchain sized), not an editor request — dropped when the game stops
+	// asking, or the leftover set would send Render() down the editor branch.
+	bool           m_swapchainPostFx = false;
+	bool           m_gameViewport    = false;
 	VkImage        m_viewportImage   = VK_NULL_HANDLE;
 	VkDeviceMemory m_viewportMemory  = VK_NULL_HANDLE;
 	VkImageView    m_viewportView    = VK_NULL_HANDLE;
@@ -643,6 +656,10 @@ private:
 	VkPipeline            m_fxaaPipe         = VK_NULL_HANDLE;
 	VkPipeline            m_smaaPipe         = VK_NULL_HANDLE; // AA = SMAA
 	VkPipeline            m_aaBlitPipe       = VK_NULL_HANDLE; // AA = Off passthrough
+	// The game's present: the same passthrough against m_renderPass (swapchain
+	// format, depth test off), sampling m_viewportImage through m_presentDS.
+	VkPipeline            m_presentPipe      = VK_NULL_HANDLE;
+	VkDescriptorSet       m_presentDS        = VK_NULL_HANDLE;
 
 	// Anti-aliasing method in force, already resolved against this backend's
 	// capabilities (docs/anti-aliasing-plan.md). The final post pass writes
