@@ -16,6 +16,7 @@
 #include "HcExecTrace.h"                        // run-time node hits + "go to node" reveals
 #include "HcEditorUtil.h"                       // Create Object class picker
 #include "HcRenameDialog.h"                     // "that rename reaches other files"
+#include "HcPullUi.h"                           // Pull on Construct in the variable details
 #include "UITimelineMath.h"                     // seconds ⇄ pixels for the animation strip
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
@@ -5333,11 +5334,14 @@ void drawGraphVariables(State& st, AppContext& ctx)
 
 	auto varRow = [&](const HC::Variable& v)
 	{
-		if (HGH::variableRow(v, st.selectedVar == v.name, rowStyle))
+		const std::string pullNote = HcPullUi::listNote(v);
+		if (HGH::variableRow(v, st.selectedVar == v.name, rowStyle,
+		                     pullNote.empty() ? nullptr : pullNote.c_str()))
 		{
 			st.selectedVar = v.name;
 			st.selectedGraphNode = 0; // editing the variable, not a node
 		}
+		HcPullUi::listTooltip(v);
 		if (ImGui::BeginDragDropSource())
 		{
 			// Payload = the variable name (fixed-size buffer for stable copy).
@@ -5515,6 +5519,10 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				if (ImGui::Combo("Access", &vaccess, "Public\0Private\0"))
 					{ v->access = vaccess; commitEdit(st, ctx); }
 				EditorWidgets::helpForLabel("Access");
+
+				// Pull on Construct — the SAME drawing as the level-script
+				// details (HcPullUi), not a third copy.
+				if (HcPullUi::drawSection(*v, st.graph)) commitEdit(st, ctx);
 			}
 
 			// Single value, or a container of the type. Changing it re-types the
@@ -5540,7 +5548,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			if (!v->isArray)
 			{
 				// Default value editor (seeds the runtime store at widget creation).
-				ImGui::SeparatorText("Default");
+				ImGui::SeparatorText(HcPullUi::defaultSectionLabel(*v));
 				bool ed = false;
 				switch (v->type)
 				{
@@ -6282,6 +6290,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	State& st = s_states[assetPath];
 	if (!st.loaded) loadState(st, ctx, assetPath);
 	normalizeSelection(st);
+	HcPullUi::bindFrom(ctx);   // the variable details may write a pull source
 	// A reveal aimed at this widget's graph — a console line's "go to node":
 	// the graph side of the split, the node's sub-graph, the node selected and
 	// framed. Same moves as "Show the node that failed" below, minus the button.

@@ -3276,11 +3276,17 @@ private:
                     //                   as generated C++ replicates nothing,
                     //                   the hole §6.5 left open;
                     //   save game       without it entity.saveState would skip
-                    //                   every variable of a compiled class.
+                    //                   every variable of a compiled class;
+                    //   pull            Pull on Construct's four strings. No
+                    //                   pull CODE is generated: the Runtime
+                    //                   pulls for both backends from varInfos()
+                    //                   (design §2.8), so parity is built in.
                     const bool setOrMap = tr.kind() == HorizonCode::ContainerKind::Set ||
                                           tr.kind() == HorizonCode::ContainerKind::Map;
                     const bool saveGame = v.saveGame && HorizonCode::isSaveableType(v.type);
-                    const bool needRep  = v.replicated || saveGame;
+                    const bool pull     = !v.pullSource.empty() && !v.pullVar.empty();
+                    const bool needSave = saveGame || pull;
+                    const bool needRep  = v.replicated || needSave;
                     std::string trailing;
                     if (setOrMap || needRep)
                         trailing += setOrMap
@@ -3291,7 +3297,10 @@ private:
                     if (needRep)
                         trailing += std::string(", ") + (v.replicated ? "true" : "false") + ", " +
                                     (v.replicated && v.repNotify ? "true" : "false");
-                    if (saveGame) trailing += ", true";
+                    if (needSave) trailing += saveGame ? ", true" : ", false";
+                    if (pull)
+                        trailing += ", " + strLit(v.pullSource) + ", " + strLit(v.pullVar) + ", " +
+                                    strLit(v.pullMember) + ", " + strLit(v.pullClass);
                     c += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
                          strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
                          (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +

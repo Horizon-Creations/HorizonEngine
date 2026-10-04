@@ -40,6 +40,15 @@ struct CompiledVarInfo
     // reason as the pair above: a table generated before savegames captured
     // script variables still compiles and still means "not saved".
     bool        saveGame   = false;
+    // Mirrors Variable::pullSource/pullVar/pullMember/pullClass (Pull on
+    // Construct). Appended last and defaulted, so a table generated before the
+    // feature still compiles and means "pulls nothing". "" and never nullptr:
+    // the Runtime compares these as strings, and a null there would be the
+    // one generated table that crashes instead of falling back.
+    const char* pullSource = "";
+    const char* pullVar    = "";
+    const char* pullMember = "";
+    const char* pullClass  = "";
 };
 struct CompiledEventInfo
 {

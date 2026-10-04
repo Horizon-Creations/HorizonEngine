@@ -5871,6 +5871,35 @@ namespace
 	  "horizon.callWidgetFunction and friends. Private is the widget's own "
 	  "business.",
 	  "", "ui#graph" },
+	{ "UI Variable/Pull on Construct", "",
+	  "Fills this variable from somewhere else the moment the widget is created, "
+	  "before PreConstruct runs. Once, not continuously. When the source cannot "
+	  "answer, the default (now called Fallback) stays, and the log says why "
+	  "once per widget class.",
+	  "", "ui#graph" },
+	{ "UI Variable/Source", "",
+	  "Game Instance: one of its public variables. Creator: a public variable of "
+	  "whoever ran the Create Widget that made this one.",
+	  "", "ui#graph" },
+	{ "UI Variable/Creator Class", "",
+	  "The class expected to create this widget. It fills the Variable list and "
+	  "is where Add to Target writes; another creator leaves the fallback.",
+	  "", "ui#graph" },
+	{ "UI Variable/Variable", "",
+	  "The public variable of the source to copy. What cannot land here is "
+	  "greyed with the reason.",
+	  "", "ui#graph" },
+	{ "UI Variable/Member", "",
+	  "One field of a struct variable instead of the whole struct. Renamed "
+	  "fields are still found.",
+	  "", "ui#graph" },
+	{ "UI Variable/Struct Type", "",
+	  "The struct a missing source variable is created as, for a member pull.",
+	  "", "ui#graph" },
+	{ "UI Variable/Add to Target", "",
+	  "Creates what the source is missing, in the Game Instance or the creator "
+	  "class: the variable, a struct variable, or the struct's field.",
+	  "", "ui#graph" },
 	{ "UI Variable/Position##vdef", "Default Position",
 	  "The position this transform variable starts at, when the widget is "
 	  "created. It is a starting value, not a binding to anything.",
@@ -6953,6 +6982,48 @@ namespace
 	  "are never saved. An Object variable cannot be ticked: a reference points "
 	  "at something that exists only in this run — save a name or an id "
 	  "instead.",
+	  "", "horizoncode#functions" },
+	// Pull on Construct (HcPullUi draws it; the same block sits in the widget
+	// editor under "UI Variable/" below).
+	{ "Script Variable/Pull on Construct", "",
+	  "Fills this variable from somewhere else the moment an instance is created, "
+	  "before any of its own events run: PreConstruct, Construct and BeginPlay "
+	  "already see the pulled value. It happens once; a later change at the "
+	  "source does not follow. When the source cannot answer, the default below "
+	  "(now called Fallback) stays, and the log says why once per class.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Source", "",
+	  "Where the value comes from. Game Instance: one of its public variables, "
+	  "which exist before anything else is created. Creator: a public variable of "
+	  "whoever ran the Create Object or Create Widget that made this instance. A "
+	  "placed object has no creator and keeps its fallback.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Creator Class", "",
+	  "The class the creator is expected to be. It fills the Variable list and "
+	  "tells Add to Target where to write. At run time a creator of another class "
+	  "leaves the fallback in place; derived classes count. Any creator accepts "
+	  "whoever has a public variable of that name.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Variable", "",
+	  "The public variable of the source to copy. Every public variable is "
+	  "listed; one that cannot land here is greyed with the reason. A struct that "
+	  "only fits through one of its fields opens the Member choice.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Member", "",
+	  "One field of a struct variable, instead of the whole struct. A field "
+	  "renamed in the struct is still found under its old name, and the new name "
+	  "is written here.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Struct Type", "",
+	  "Which struct the missing source variable is declared as, when Add to "
+	  "Target creates it for a member pull. Only structs with a fitting field of "
+	  "that name are offered.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Add to Target", "",
+	  "Creates what the source is missing: a public variable with this one's "
+	  "type and default, a struct variable for a member pull, or the missing "
+	  "field in the struct. It writes into the Game Instance or the creator "
+	  "class, never into a class open with unsaved changes.",
 	  "", "horizoncode#functions" },
 	{ "Script Variable/Position##vdef", "Default Position",
 	  "The position this Transform variable starts at. It is a starting value, "

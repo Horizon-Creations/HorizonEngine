@@ -2076,6 +2076,63 @@ TEST_CASE("codegen parity: gi_caller (the GameInstance resolves without a lookup
 	CHECK(p.var("total").f == 13.0f);   // Set 3 again, then +10
 }
 
+TEST_CASE("codegen parity: pull_construct (Pull on Construct lands the same values)")
+{
+	// Registration alone pulls: ParityPair's constructor is the whole act.
+	ParityPair p("fix/pull_construct");
+	p.checkParity();
+	CHECK(p.var("bonus").f == 2.5f);      // scalar from the Game Instance
+	CHECK(p.var("bonusInt").i == 2);      // Float → Int
+	CHECK(p.var("hp").f == 77.0f);        // a struct member (per-graph override)
+	CHECK(p.var("lvl").i == 3);           // a struct member (definition default)
+	CHECK(p.var("hidden").f == 9.0f);     // private on the source → default
+	CHECK(p.var("missing").f == 4.0f);    // not there → default
+	CHECK(p.var("gift").f == -1.0f);      // registered by a host → no creator
+	// The generated table carries the spec; without it the compiled side
+	// would have stayed at every default.
+	bool sawPull = false;
+	for (const auto& vi : p.compInst->varInfos())
+		if (std::string(vi.name) == "hp")
+		{
+			sawPull = true;
+			CHECK(std::string(vi.pullSource) == "GameInstance");
+			CHECK(std::string(vi.pullVar) == "run");
+			CHECK(std::string(vi.pullMember) == "hp");
+			CHECK(std::string(vi.pullClass).empty());
+		}
+		else if (std::string(vi.name) == "seen")
+			CHECK(std::string(vi.pullSource).empty());   // a non-pulling slot keeps ""
+	CHECK(sawPull);
+	const auto pi = p.interp.rt.pulledVariablesOf(p.interp.id);
+	const auto pc = p.comp.rt.pulledVariablesOf(p.comp.id);
+	REQUIRE(pi.size() == pc.size());
+	for (size_t i = 0; i < pi.size(); ++i)
+	{
+		INFO("pull ", pi[i].name);
+		CHECK(pi[i].name == pc[i].name);
+		CHECK(pi[i].pulled == pc[i].pulled);
+		CHECK(pi[i].why == pc[i].why);
+	}
+	p.fire("Construct");
+	CHECK(p.var("seen").f == 2.5f);
+}
+
+TEST_CASE("codegen parity: pull_spawner (the Creator source on both backends)")
+{
+	ParityPair p("fix/pull_spawner");
+	p.fire("Spawn");
+	const uint32_t ci = p.interp.rt.getVariable(p.interp.id, "child").ref;
+	const uint32_t cc = p.comp.rt.getVariable(p.comp.id, "child").ref;
+	REQUIRE(ci != 0);
+	REQUIRE(cc != 0);
+	CHECK(p.interp.rt.creatorOf(ci) == p.interp.id);
+	CHECK(p.comp.rt.creatorOf(cc) == p.comp.id);
+	CHECK(p.interp.rt.getVariable(ci, "gift").f == 6.5f);
+	CHECK(p.comp.rt.getVariable(cc, "gift").f == 6.5f);
+	// The child pulled from the Game Instance as well, in both worlds.
+	CHECK(p.comp.rt.getVariable(cc, "hp").f == 77.0f);
+}
+
 TEST_CASE("codegen: the engine-event hooks do exactly what the named path does")
 {
 	// Step A of the native event route: a compiled class overrides the

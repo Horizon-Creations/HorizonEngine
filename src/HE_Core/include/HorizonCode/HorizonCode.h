@@ -476,6 +476,23 @@ struct Variable
     // before this existed. INSTANCE variables only, and never a Ref (an object
     // handle names nothing in the next run) — see isSaveableType.
     bool        saveGame   = false;
+    // ── Pull on Construct (docs/state-driven-data-exchange-design.md §2) ─────
+    // At registration, before any of the instance's own code runs (PreConstruct,
+    // Construct, BeginPlay, OnLevelLoaded), the runtime copies a value from
+    // `pullSource` over the default. The default stays the fallback when the
+    // source cannot be resolved — there is no second "fallback" field, because
+    // nobody can see the default before the pull happens.
+    //
+    // No separate on/off flag: an empty pullSource IS off, so there is no half
+    // state (ticked, but no source). INSTANCE variables only, like `replicated`.
+    std::string pullSource;   // "" = off | kPullFromGameInstance | kPullFromCreator
+    std::string pullVar;      // public instance variable of the source
+    std::string pullMember;   // optional: field of pullVar when that is a Struct
+    // Creator only, optional: the class the creator is expected to be (asset
+    // path). The editor lists that class's variables from it and "Add to
+    // Target" writes into it; at run time a creator that is not one (derived
+    // classes count) falls back to the default. Empty = any creator.
+    std::string pullClass;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
@@ -485,6 +502,58 @@ struct Variable
 // Exec, which is no value at all. One rule for the checkbox, the loader and the
 // runtime's enumeration.
 inline bool isSaveableType(PinType t) { return t != PinType::Ref && t != PinType::Exec; }
+
+// ── Pull on Construct: the shared rules ─────────────────────────────────────
+// One spelling of each source, one compatibility rule and one sentence per
+// failure, used by the runtime (which warns) and the editor (which shows the
+// same sentence in red before anything runs).
+inline constexpr const char* kPullFromGameInstance = "GameInstance";
+inline constexpr const char* kPullFromCreator      = "Creator";
+// A source this build understands. The loader drops anything else with a
+// warning — a project saved by a newer engine names sources this one lacks.
+HE_API bool        isKnownPullSource(const std::string& src);
+// "Game Instance" / "Creator" — what the editor and the log call a source.
+HE_API std::string pullSourceLabel(const std::string& src);
+
+// Can a value of the source's shape land in the target's? Same container kind
+// (and map key), same type — Int, Float and Double convert into each other as
+// SCALARS — and for an Enum/Struct the same definition. An empty typeName on
+// either side is no evidence against a match: an array of enums carries none
+// (variableDefaultValue, slotRead). A Ref fits any Ref; which class it holds
+// is the editor's to check, the runtime cannot see a declaration's className.
+// `why`, when given, receives the editor's tooltip ("Float, needs Int").
+HE_API bool pullShapesCompatible(PinType srcType, ContainerKind srcKind, PinType srcKey,
+                                 const std::string& srcTypeName,
+                                 PinType dstType, ContainerKind dstKind, PinType dstKey,
+                                 const std::string& dstTypeName, std::string* why = nullptr);
+// The same, for two live values (the target's current value stands for its
+// declaration — at registration it IS the declared default).
+HE_API bool  pullValuesCompatible(const Value& src, const Value& dstShape);
+// The value that is written: `src` converted to the target's scalar type when
+// the two are numeric and differ, unchanged otherwise. Only meaningful after
+// pullValuesCompatible said yes.
+HE_API Value pullConvert(const Value& src, const Value& dstShape);
+
+// Why a pull fell back to the default. Order is not persisted anywhere.
+enum class PullFailure : uint8_t
+{
+    None,
+    NoGameInstance,     // the runtime has no Game Instance
+    NoCreator,          // placed in the level / spawned from outside HorizonCode
+    CreatorGone,        // the creator was destroyed before the pull ran
+    CreatorWrongClass,  // pullClass set and the creator is not one
+    NoPublicVariable,   // the source has no PUBLIC instance variable of that name
+    NotAStruct,         // a member was asked for, but the variable is no Struct
+    NoSuchMember,       // the struct has no field of that name (formerNames tried)
+    TypeMismatch,       // pullShapesCompatible said no
+    UnknownSource,      // pullSource names nothing this build knows
+};
+// The reason as one sentence, e.g. "Game Instance has no public variable
+// 'Score'". `src` is the Variable's pullSource; `detail` fills in what only
+// the caller knows (the type pair for a mismatch, the class for a creator).
+HE_API std::string pullFailureText(PullFailure why, const std::string& src,
+                                   const std::string& var, const std::string& member,
+                                   const std::string& detail = {});
 
 // Where a function runs, for Node::runOn below. The numbers travel in kMsgRpc's
 // `target` byte, so they are frozen: a saved graph and a datagram agree on them.

@@ -1,6 +1,7 @@
 #include "HorizonCode/HorizonCodeRuntime.h"
 #include <cstdint>
 #include <Diagnostics/Logger.h>
+#include <Types/TypeRegistry.h>   // Pull on Construct: struct member lookup
 #include <algorithm>
 #include <unordered_set>
 #include <vector>
@@ -64,6 +65,12 @@ InstanceId Runtime::add(Graph graph, HostBindings bindings, ClassIdentity cls)
 
 InstanceId Runtime::addLevels(std::vector<Graph> levels, HostBindings bindings, ClassIdentity cls)
 {
+    return registerLevels(std::move(levels), std::move(bindings), std::move(cls), /*pull=*/true);
+}
+
+InstanceId Runtime::registerLevels(std::vector<Graph> levels, HostBindings bindings,
+                                   ClassIdentity cls, bool pull)
+{
     const InstanceId id = m_next++;
     Inst inst;
     inst.levels = std::move(levels);
@@ -101,11 +108,22 @@ InstanceId Runtime::addLevels(std::vector<Graph> levels, HostBindings bindings, 
                          "Widget output into a Show Widget");
             }
 
+    inst.creator = m_creatorStack.empty() ? 0 : m_creatorStack.back();
     m_insts.emplace(id, std::move(inst));
+    // LAST, after the defaults are seeded and before the caller can fire
+    // anything — the one point every kind of instance passes through
+    // (design §2.4). Hosts fire PreConstruct/Construct/BeginPlay afterwards.
+    if (pull) pullOnConstruct(id);
     return id;
 }
 
 InstanceId Runtime::addCompiled(CompiledPtr inst, HostBindings bindings, ClassIdentity cls)
+{
+    return registerCompiled(std::move(inst), std::move(bindings), std::move(cls), /*pull=*/true);
+}
+
+InstanceId Runtime::registerCompiled(CompiledPtr inst, HostBindings bindings,
+                                     ClassIdentity cls, bool pull)
 {
     if (!inst) return 0;
     // A generated class already carries its own identity, so a caller that has
@@ -124,11 +142,177 @@ InstanceId Runtime::addCompiled(CompiledPtr inst, HostBindings bindings, ClassId
     rec.compiled = std::move(inst);
     rec.host     = std::move(bindings);
     rec.cls      = std::move(cls);
+    rec.creator  = m_creatorStack.empty() ? 0 : m_creatorStack.back();
     auto [it, ok] = m_insts.emplace(id, std::move(rec));
     // No var seeding: the generated constructor initializes its members to the
     // declared defaults. Wire the same Context the interpreter would get.
     it->second.compiled->bindContext(makeContext(id));
+    // Same place in the sequence as for an interpreted instance: after the
+    // defaults (the member initialisers) and the Context, before any event.
+    if (pull) pullOnConstruct(id);
     return id;
+}
+
+// ── Pull on Construct (design §2.5) ─────────────────────────────────────────
+namespace {
+// One pulling variable, as either backend declares it.
+struct PullSpec { std::string name, src, var, member, cls; };
+}
+
+void Runtime::pullOnConstruct(InstanceId id)
+{
+    Inst* inst = find(id);
+    if (!inst) return;
+
+    // Which variables pull. The LEAF-MOST declaration decides, as for
+    // Replicated: a derived class that re-declares a variable without a pull
+    // takes it out, one with another source replaces the base's.
+    std::vector<PullSpec> specs;
+    auto report = [&specs](PullSpec s)
+    {
+        for (PullSpec& o : specs)
+            if (o.name == s.name) { o = std::move(s); return; }
+        specs.push_back(std::move(s));
+    };
+    if (inst->compiled)
+    {
+        auto str = [](const char* p) { return p ? std::string(p) : std::string(); };
+        for (const auto& vi : inst->compiled->varInfos())
+            report({ str(vi.name), str(vi.pullSource), str(vi.pullVar), str(vi.pullMember),
+                     str(vi.pullClass) });
+    }
+    else
+        for (const Graph& g : inst->levels)
+            for (const Variable& v : g.variables)
+                if (v.scope == 0)
+                    report({ v.name, v.pullSource, v.pullVar, v.pullMember, v.pullClass });
+    specs.erase(std::remove_if(specs.begin(), specs.end(),
+                               [](const PullSpec& s) { return s.src.empty() || s.var.empty(); }),
+                specs.end());
+    if (specs.empty()) return;
+
+    const InstanceId creator = inst->creator;
+    const std::string clsKey = inst->cls.key.empty() ? std::string("<graph>") : inst->cls.key;
+    std::vector<PullOutcome> outcomes;
+    for (const PullSpec& s : specs)
+    {
+        PullOutcome out;
+        out.name = s.name;
+        std::string detail;
+        Value val;
+        auto fail = [&](PullFailure why) { out.why = why; };
+
+        // 1. The source instance.
+        InstanceId src = 0;
+        if (s.src == kPullFromGameInstance)
+        {
+            src = m_gameInstance;
+            if (!src || !find(src)) fail(PullFailure::NoGameInstance);
+        }
+        else if (s.src == kPullFromCreator)
+        {
+            src = creator;
+            if (!src) fail(PullFailure::NoCreator);
+            else if (!find(src)) fail(PullFailure::CreatorGone);
+            else if (!s.cls.empty() && !instanceIsA(src, s.cls))
+            {
+                fail(PullFailure::CreatorWrongClass);
+                detail = s.cls;
+            }
+        }
+        else
+            fail(PullFailure::UnknownSource);
+
+        // 2. Its PUBLIC instance variable — the same door Get (Ref) uses, so a
+        //    variable nobody may read through a reference is not pullable
+        //    either.
+        if (out.why == PullFailure::None)
+        {
+            const Inst* si = find(src);
+            bool visible = false;
+            if (si->compiled)
+            {
+                const CompiledVarInfo* vi = findVarInfo(*si->compiled, s.var);
+                visible = vi && vi->access == 0;
+            }
+            else
+            {
+                const Variable* v = findVarInLevels(si->levels, s.var);
+                visible = v && v->access == 0 && v->scope == 0;
+            }
+            if (!visible) fail(PullFailure::NoPublicVariable);
+            else          val = getVariable(src, s.var);
+        }
+
+        // 3. Optionally one field of it. findField follows formerNames, so a
+        //    member renamed in the struct keeps being found.
+        if (out.why == PullFailure::None && !s.member.empty())
+        {
+            HE::StructDef def;
+            if (val.type != PinType::Struct || val.isArray)
+                fail(PullFailure::NotAStruct);
+            else if (!HE::TypeRegistry::instance().getStruct(val.typeName, def))
+                fail(PullFailure::NoSuchMember);
+            else if (const HE::StructField* f = def.findField(s.member);
+                     !f || (size_t)(f - def.fields.data()) >= val.items.size())
+                fail(PullFailure::NoSuchMember);
+            else
+            {
+                Value field = val.items[(size_t)(f - def.fields.data())];
+                val = std::move(field);
+            }
+        }
+
+        // 4. Shape against the target. The target's current value IS its
+        //    declared default here, and serves as the declaration for both
+        //    backends (a CompiledVarInfo carries no typeName to ask).
+        if (out.why == PullFailure::None)
+        {
+            const Value shape = getVariable(id, s.name);
+            if (!pullValuesCompatible(val, shape))
+            {
+                fail(PullFailure::TypeMismatch);
+                pullShapesCompatible(val.type, val.kind(), val.keyType, val.typeName,
+                                     shape.type, shape.kind(), shape.keyType, shape.typeName,
+                                     &detail);
+            }
+            else
+            {
+                // A copy: Value holds containers and structs by value, so a
+                // pulled array does not change with the source's. A Ref still
+                // names the same object, which is the point of pulling one.
+                setVariable(id, s.name, pullConvert(val, shape));
+                out.pulled = true;
+            }
+        }
+
+        if (!out.pulled)
+        {
+            // Nothing is written — the default is already there, and it IS the
+            // fallback. Warned once per (class, variable, reason) and session.
+            out.reason = pullFailureText(out.why, s.src, s.var, s.member, detail);
+            const std::string key = clsKey + "|" + s.name + "|" + std::to_string((int)out.why);
+            if (m_pullWarned.insert(key).second)
+                hcWarn("Pull on Construct: '" + clsKey + "." + s.name + "' - " + out.reason +
+                       "; default used");
+        }
+        outcomes.push_back(std::move(out));
+    }
+    // Re-found: setVariable cannot add instances, but nothing here should rely
+    // on a pointer taken before a call that reaches into another instance.
+    if (Inst* again = find(id)) again->pulls = std::move(outcomes);
+}
+
+std::vector<Runtime::PullOutcome> Runtime::pulledVariablesOf(InstanceId id) const
+{
+    const Inst* i = find(id);
+    return i ? i->pulls : std::vector<PullOutcome>{};
+}
+
+InstanceId Runtime::creatorOf(InstanceId id) const
+{
+    const Inst* i = find(id);
+    return i ? i->creator : 0;
 }
 
 bool Runtime::instanceIsA(InstanceId id, const std::string& classKey) const
@@ -225,7 +409,12 @@ static const ClassIdentity kGameInstanceIdentity{ "__game_instance__", "Object" 
 InstanceId Runtime::setGameInstance(Graph graph, HostBindings bindings)
 {
     if (m_gameInstance) remove(m_gameInstance);
-    m_gameInstance = add(std::move(graph), std::move(bindings), kGameInstanceIdentity);
+    // Without Pull on Construct (design §2.3): the Game Instance would be its
+    // own source, and fireInit reseeds it anyway.
+    std::vector<Graph> one;
+    one.push_back(std::move(graph));
+    m_gameInstance = registerLevels(std::move(one), std::move(bindings), kGameInstanceIdentity,
+                                    /*pull=*/false);
     m_gameInstanceCompiled = nullptr;   // interpreted
     return m_gameInstance;
 }
@@ -234,7 +423,8 @@ InstanceId Runtime::setGameInstanceCompiled(CompiledPtr inst, HostBindings bindi
 {
     if (!inst) return m_gameInstance; // don't drop a working GameInstance for a null one
     if (m_gameInstance) remove(m_gameInstance);
-    m_gameInstance = addCompiled(std::move(inst), std::move(bindings), kGameInstanceIdentity);
+    m_gameInstance = registerCompiled(std::move(inst), std::move(bindings), kGameInstanceIdentity,
+                                      /*pull=*/false);
     const Inst* gi = find(m_gameInstance);
     m_gameInstanceCompiled = gi ? gi->compiled.get() : nullptr;
     return m_gameInstance;
@@ -676,20 +866,38 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     // every fire so they never noticed, but a COMPILED instance binds its
     // Context once at addCompiled — registering it before setServices (the
     // GameInstance boot order) would leave it with dead services forever.
-    ctx.createWidget  = [this](const std::string& path) -> int
-    { return m_services.createWidget ? m_services.createWidget(path) : 0; };
+    //
+    // The three that can REGISTER an instance (createWidget, createObject, and
+    // callApi, whose rows may spawn) say who is asking while they run: the
+    // registration they lead to reads its creator off m_creatorStack (Pull on
+    // Construct's "Creator" source, design §2.3). The calls are synchronous to
+    // the registration, so nothing has to travel through Services for it.
+    ctx.createWidget  = [this, id](const std::string& path) -> int
+    {
+        if (!m_services.createWidget) return 0;
+        CreatorScope creating(m_creatorStack, id);
+        return m_services.createWidget(path);
+    };
     ctx.showWidget    = [this](int id_) { if (m_services.showWidget) m_services.showWidget(id_); };
     ctx.hideWidget    = [this](int id_) { if (m_services.hideWidget) m_services.hideWidget(id_); };
     ctx.destroyWidget = [this](int id_) { if (m_services.destroyWidget) m_services.destroyWidget(id_); };
     // Straight passthrough, including the nullptr-means-"as authored" pointers:
     // the call is synchronous, so the caller's vec3 locals outlive it and there
     // is nothing here to own or copy.
-    ctx.createObject  = [this](const std::string& path, const float* pos,
-                               const float* rot) -> uint32_t
-    { return m_services.createObject ? m_services.createObject(path, pos, rot) : 0u; };
+    ctx.createObject  = [this, id](const std::string& path, const float* pos,
+                                   const float* rot) -> uint32_t
+    {
+        if (!m_services.createObject) return 0u;
+        CreatorScope creating(m_creatorStack, id);
+        return m_services.createObject(path, pos, rot);
+    };
     ctx.destroyObject = [this](uint32_t ref) { if (m_services.destroyObject) m_services.destroyObject(ref); };
     ctx.callApi       = [this, id](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
-    { return m_services.callApi ? m_services.callApi(id, apiId, args) : std::vector<Value>{}; };
+    {
+        if (!m_services.callApi) return {};
+        CreatorScope creating(m_creatorStack, id);
+        return m_services.callApi(id, apiId, args);
+    };
     // Multiplayer: the Call Function node asks this before running anything
     // whose entry has Run On set (plan §7.2). Unbound = false = run it here,
     // which is what every runtime without a session answers.

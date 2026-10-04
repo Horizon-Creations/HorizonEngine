@@ -18,6 +18,7 @@ add_executable(he_tests
     test_horizoncode_shortcuts.cpp
     test_hc_function_rename.cpp
     test_hc_rename_scope.cpp
+    test_hc_pull_editor.cpp
     test_graph_editor_keys.cpp
     test_preview_pick.cpp
     test_gizmo_pick.cpp
@@ -154,6 +155,7 @@ add_executable(he_tests
     test_animator_host.cpp
     test_movement.cpp
     test_hc_inheritance.cpp
+    test_hc_pull_on_construct.cpp
     test_collider.cpp
     test_raycast.cpp
     test_character.cpp
@@ -543,6 +545,9 @@ add_executable(he_tests
     # of the content system, which is what lets the whole decision — whose call is
     # this, may it be rewritten — be asserted here instead of clicked through.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcRename.cpp
+    # Pull on Construct's editor decisions (which source variables fit, what Add
+    # to Target writes). ImGui-free for the same reason as HcRename above.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcPull.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PanelSpotlight.cpp
     # The mesh tabs' material-slot list. Takes a ContentManager and the widget
     # that draws a slot, never AppContext — which is what lets the UI-shot test
@@ -685,6 +690,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphHost.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphClipboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
+    # The Pull on Construct block of its variable details (the drawing only;
+    # HcPullUi::bindFrom is stubbed below).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcPullUi.cpp
     WidgetDesignerLinkStubs.cpp
     # The texture viewer, for test_texture_viewer.cpp (Thema 92, Schritt 4): same
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
@@ -732,6 +740,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphHost.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphClipboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcPullUi.cpp
     WidgetDesignerLinkStubs.cpp
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
@@ -845,6 +854,7 @@ set(HCGEN_CLASSES
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
     cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
+    pull_construct pull_spawner
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

@@ -8,6 +8,7 @@
 #include "HorizonCodeClassPanel.h"
 #include "HcEditorUtil.h"
 #include "HcRenameDialog.h"     // "that rename reaches other files"
+#include "HcPullUi.h"           // Pull on Construct in the variable details
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
@@ -332,11 +333,14 @@ void drawVariables(HC::Graph& graph, const std::vector<HC::InheritedVariable>& i
 	auto varRow = [&](const HC::Variable& v)
 	{
 		ImGui::PushID(v.name.c_str());
-		if (HGH::variableRow(v, g.selectedVar == v.name, rowStyle))
+		const std::string pullNote = HcPullUi::listNote(v);
+		if (HGH::variableRow(v, g.selectedVar == v.name, rowStyle,
+		                     pullNote.empty() ? nullptr : pullNote.c_str()))
 		{
 			g.selectedVar = v.name;
 			g.selectedNode = 0;
 		}
+		HcPullUi::listTooltip(v);
 		if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 		{
 			char buf[64] = {};
@@ -808,6 +812,11 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 			ImGui::SetTooltip("%s", "An object reference names something that exists only in "
 			                        "this run; save a name or an id instead.");
 		EditorWidgets::helpForLabel("Save Game");
+
+		// ── Pull on Construct (docs/state-driven-data-exchange-design.md §2.9)
+		// Shared with the widget editor's copy of this panel (HcPullUi), so
+		// the two cannot drift on it. Hidden in the Game Instance's own graph.
+		if (HcPullUi::drawSection(*v, graph)) edited = true;
 	}
 
 	// Single value, or a container of the type. Changing it re-types the matching
@@ -832,7 +841,9 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 
 	if (!v->isArray)
 	{
-		ImGui::SeparatorText("Default");
+		// "Fallback" while the variable pulls: the default is then exactly what
+		// it falls back to when the source cannot answer.
+		ImGui::SeparatorText(HcPullUi::defaultSectionLabel(*v));
 		switch (v->type)
 		{
 			// A Double's authored default lives in the same float slot (see
@@ -1555,6 +1566,7 @@ void beginTabWindow(const char* id, const ImVec2& pos, const ImVec2& size)
 
 void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 {
+	HcPullUi::bindFrom(ctx);   // the variable details may write a pull source
 	beginTabWindow("##levelscript_tab", pos, size);
 	// The "no scene" line is the one thing this panel ever draws at window scope,
 	// and it is a full sentence — in a narrow tab it would be clipped mid-word.
@@ -1599,6 +1611,7 @@ void LevelScriptPanel::forgetAllGraphContexts()
 
 void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 {
+	HcPullUi::bindFrom(ctx);
 	beginTabWindow("##gameinstance_tab", pos, size);
 	// Same shape as the Level Script tab above, and for the same two reasons: the
 	// "no project" sentence is drawn at window scope, and the guard has to close
@@ -2825,6 +2838,7 @@ bool HorizonCodeClassPanel::save(AppContext& ctx, const std::string& path)
 void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath,
                                    const ImVec2& pos, const ImVec2& size)
 {
+	HcPullUi::bindFrom(ctx);
 	ClassState& st = s_classStates[assetPath];
 	if (!st.loaded && ctx.contentManager)
 	{

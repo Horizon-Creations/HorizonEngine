@@ -1825,6 +1825,11 @@ inline HE::hccg::ClassSource fxGameInstance()
     Fx f;
     f.var("score", PT::Float);
     f.var("hidden", PT::Float, 0.0f, {}, /*access=*/1);
+    // Sources for the Pull on Construct fixture (pull_construct): a non-zero
+    // scalar, so a pulled value cannot be mistaken for a zero default, and a
+    // struct for the member path.
+    f.var("bonus", PT::Float, 2.5f);
+    f.structVar("run", kStatsType, { { "hp", Value::ofFloat(77.0f) } });
 
     const int fn = f.fnEntry("AddScore", 0, { { "amount", PT::Float } },
                                             { { "total", PT::Float } });
@@ -3016,6 +3021,54 @@ inline HE::hccg::ClassSource fxPlayerSlots()
     return f.done("player_slots");
 }
 
+// 45 — Pull on Construct (docs/state-driven-data-exchange-design.md §2.8): no
+// pull CODE is generated, the Runtime pulls for both backends from the
+// declarations (Variable vs CompiledVarInfo). What this proves is that the
+// generated table carries the four strings and that both paths land the same
+// values: a scalar, a scalar converted Float → Int, a struct member, and the
+// three fallbacks (private, missing, and no creator when registered by a host).
+// Construct copies `bonus` into `seen` — the pulled value is there by then.
+inline HE::hccg::ClassSource fxPullConstruct()
+{
+    Fx f;
+    auto pull = [&f](const char* src, const char* var, const char* member = "")
+    {
+        Variable& v = f.g.variables.back();
+        v.pullSource = src; v.pullVar = var; v.pullMember = member;
+    };
+    f.var("bonus", PT::Float, -1.0f);    pull(HorizonCode::kPullFromGameInstance, "bonus");
+    f.var("bonusInt", PT::Int, -1.0f);   pull(HorizonCode::kPullFromGameInstance, "bonus");
+    f.var("hp", PT::Float, -1.0f);       pull(HorizonCode::kPullFromGameInstance, "run", "hp");
+    f.var("lvl", PT::Int, -1.0f);        pull(HorizonCode::kPullFromGameInstance, "run", "lvl");
+    f.var("hidden", PT::Float, 9.0f);    pull(HorizonCode::kPullFromGameInstance, "hidden");
+    f.var("missing", PT::Float, 4.0f);   pull(HorizonCode::kPullFromGameInstance, "nope");
+    f.var("gift", PT::Float, -1.0f);     pull(HorizonCode::kPullFromCreator, "gift");
+    f.var("seen", PT::Float);
+    const int ev = f.event("Construct");
+    const int s = f.setVar("seen", PT::Float);
+    f.data(f.getVar("bonus", PT::Float), 0, s, 0);
+    f.exec(ev, s);
+    return f.done("pull_construct");
+}
+
+// 46 — the Creator source across backends: Spawn creates a pull_construct,
+// whose `gift` is pulled from THIS instance. The child is compiled in the
+// compiled world, so its creator is read off the same runtime stack there.
+inline HE::hccg::ClassSource fxPullSpawner()
+{
+    Fx f;
+    f.var("gift", PT::Float, 6.5f);
+    f.var("child", PT::Ref);
+    const int ev = f.event("Spawn");
+    Node co; co.type = NT::CreateObject; co.s = "fix/pull_construct";
+    const int c = f.add(co);
+    f.exec(ev, c);
+    const int s = f.setVar("child", PT::Ref);
+    f.data(c, 0, s, 0);
+    f.exec(c, s);
+    return f.done("pull_spawner");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -3032,6 +3085,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
         fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxPlayerSlots(),
+        fxPullConstruct(), fxPullSpawner(),
     };
 }
 

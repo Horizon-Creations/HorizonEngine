@@ -88,6 +88,30 @@ therefore fires before the first world is even built.)
 Variables can be a **single value** or an **array** of any type, and object-typed
 variables show the class name. Arrays have a default-value slot editor.
 
+**Pull on Construct** (variable details, instance variables only;
+`docs/state-driven-data-exchange-design.md` §2). A variable can name a source it
+is filled from when an instance is registered, before any of its own events:
+
+| Source | What it reads |
+|--------|---------------|
+| **Game Instance** | a public instance variable of the Game Instance, optionally one **Member** of a struct variable |
+| **Creator** | a public instance variable of the instance whose Create Object / Create Widget (or engine-API call) registered this one; optional **Creator Class** = the expected class (derived classes count) |
+
+Guarantees: PreConstruct, Construct, BeginPlay and OnLevelLoaded see the pulled
+value or the default, never anything in between. It happens **once** (a later
+change at the source does not follow). When the source cannot answer (no Game
+Instance, no creator because the object was placed or spawned from Lua/Python/C++,
+a private or missing variable, a type that does not fit) the declared default stays
+and is shown as **Fallback**; the log warns once per class, variable and reason.
+Int, Float and Double convert as scalars; containers must match exactly; a pulled
+container or struct is a copy. Spawn values (Expose on Spawn) are set after the
+pull and win. The Game Instance itself never pulls. The runtime does the pull for
+both backends (`Runtime::pullOnConstruct`, `pulledVariablesOf`, `creatorOf`); the
+codegen only carries the spec in `CompiledVarInfo`. **Add to Target** writes a
+missing source variable (or struct variable / struct field) into the Game Instance
+or the creator class. Renaming a source variable carries the pull along when its
+class is provable (Game Instance, or a Creator Class).
+
 ### Literals (edited inline on the node body)
 **Float**, **Bool** (checkbox), **Int**, **String** (grows then scrolls),
 **Vec2**, **Color** (swatch), **Transform** (position/rotation/scale).

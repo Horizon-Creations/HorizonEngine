@@ -764,6 +764,14 @@ struct VarSlot
     // Mirrors Variable::saveGame, appended last with a default for the same
     // reason: an older slot() call still compiles and still means "not saved".
     bool          saveGame   = false;
+    // Mirrors Variable::pull* (Pull on Construct), appended last with defaults
+    // for the same reason. The generated code never pulls by itself — the
+    // Runtime does it for both backends from varInfos() — so this is metadata
+    // and nothing else.
+    const char*   pullSource = "";
+    const char*   pullVar    = "";
+    const char*   pullMember = "";
+    const char*   pullClass  = "";
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
@@ -795,11 +803,15 @@ inline VarSlot slot(const char* name, PinType type, bool isArray, int access,
                     ContainerKind container = ContainerKind::None,
                     PinType keyType = PinType::String,
                     bool replicated = false, bool repNotify = false,
-                    bool saveGame = false)
+                    bool saveGame = false,
+                    const char* pullSource = "", const char* pullVar = "",
+                    const char* pullMember = "", const char* pullClass = "")
 {
     return VarSlot{ name, type, isArray, access, typeName, std::move(def),
                     &SlotAccess<M>::get, &SlotAccess<M>::set, container, keyType,
-                    replicated, repNotify, saveGame };
+                    replicated, repNotify, saveGame,
+                    pullSource ? pullSource : "", pullVar ? pullVar : "",
+                    pullMember ? pullMember : "", pullClass ? pullClass : "" };
 }
 
 // Enum members are plain ints in C++, so the Value coming back out has to be
@@ -894,10 +906,11 @@ inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slot
     // would replicate nothing at all: Runtime::replicatedVariablesOf reads this
     // table for a compiled instance, and an unset flag there means the variable
     // never reaches a client (plan §6.1). Save Game rides along for the same
-    // reason: Runtime::savedVariablesOf reads this table too.
+    // reason: Runtime::savedVariablesOf reads this table too. And the pull
+    // spec, which Runtime::pullOnConstruct reads at registration.
     for (const VarSlot& s : slots)
         out.push_back({ s.name, s.type, s.isArray, s.access, s.replicated, s.repNotify,
-                        s.saveGame });
+                        s.saveGame, s.pullSource, s.pullVar, s.pullMember, s.pullClass });
     return out;
 }
 
