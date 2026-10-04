@@ -5,8 +5,9 @@ Stand 03.10.2026, Zweig `claude/gi-schatten-restflackern-bei-1-spp-senken-mehr-s
 Engine-Code geändert** außer zwei Dump-Knöpfen für den Messbau. Gemessen auf Apple M5
 (Metal, Hardware-RT, macOS 27, Stromsparmodus an), Release-Build, 1280×720 → Maske 640×360.
 Vorgeschichte: [gi-shadow-edge-noise-analysis-2026-10-02.md](gi-shadow-edge-noise-analysis-2026-10-02.md)
-(Thema 131, RTX 4070). Dessen §7.6 (Metal-Lauf, Commit 77bb2a8e) war nicht in main
-gelandet und ist hier per Cherry-pick enthalten (d21b8a23).
+(Thema 131, RTX 4070). Dessen §7.6 (Metal-Lauf, Commit 77bb2a8e) war zunächst nicht in main
+gelandet und war hier per Cherry-pick enthalten (d21b8a23). Inzwischen ist er mit dem Nachzug
+PR #85 in main.
 
 ## Kurzfassung
 
@@ -363,9 +364,9 @@ Dateien: `shaders/gi_blur.frag` → neuer `gi_atrous.frag` (Vulkan, neue Pipelin
   ein Objekt). Verdecker-Bewegung nur als Sonnensprung.
 * Metal ist zwischen zwei Läufen nicht bitgleich (Rauschboden §1).
 * Der Fehler-Rest von mv in cnear (§3.1) ist nicht untersucht.
-* Vulkan: Der Fix „GI-Sonne einen Frame hinterher“ (c59f0bc4, Thema 131 Schritt 6) ist **nicht in
-  main**. TODSTEP-Messungen auf Vulkan sind dort deshalb um einen Frame verfälscht, bis der
-  Nachzug gemergt ist.
+* Vulkan: Der Fix „GI-Sonne einen Frame hinterher“ (c59f0bc4, Thema 131 Schritt 6) war beim
+  Messen nicht in main, ist aber mit dem Nachzug PR #85 gemergt. Eigene Vulkan-Messungen hat
+  dieses Dokument keine (Vulkan-Zahlen sind aus Thema 131 zitiert), betroffen wären nur TODSTEP-Läufe auf älteren Ständen.
 * `cap_metal.sh` hatte in dieser Sitzung vereinzelt Fehlstarts (Editor nach 5 s ohne Log
   beendet, mit identischem Aufruf danach sauber). `run134.sh` meldet jede Aufnahme mit `bmp=yes/no`;
   die Matrix war vollständig.

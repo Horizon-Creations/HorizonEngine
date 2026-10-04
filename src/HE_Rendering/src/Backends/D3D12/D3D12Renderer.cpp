@@ -25,6 +25,9 @@
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
+#include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
+#include <JobSystem/JobSystem.h>              // parallel_for for that bake
+#include <glm/gtc/packing.hpp>                // packHalf1x16 (RGBA16F cube upload)
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h"                   // he::shaderc::compileHlslPinned (sky pass)
 #endif
@@ -905,7 +908,8 @@ float4 PSMain(VSOut i) : SV_TARGET
 )HLSL";
 
 // 2D UI canvas — NOT shared: same maths as D3D11's, but this copy does the glyph
-// UV lerp in the PS where D3D11 does it in the VS.
+// UV lerp in the PS where D3D11 does it in the VS. The "Schicht 0" shape (corner
+// radii, border, gradient, soft edge, inner shadow) is kUIFS line for line.
 static const char* kUIHLSL12 = R"HLSL(
 cbuffer UICB : register(b0) {
     float4 uRect;      // xy=top-left px, zw=size px
@@ -915,6 +919,12 @@ cbuffer UICB : register(b0) {
     float  uMode;      // 0 = solid color, 1 = font-atlas glyph
     float  _upad;
     float4 uRotation;  // { angle(radians), pivotX, pivotY, unused }
+    float4 uCornerRadius;  // px per corner: TL, TR, BR, BL
+    float4 uBorderColor;
+    float4 uGradientColor;
+    float4 uInnerColor;
+    float4 uStyle0;    // x = border width px, y = gradient on, z = gradient angle deg, w = radial
+    float4 uStyle1;    // x = blur px (drop shadow), y = inner shadow blur px, zw unused
 };
 Texture2D    uFontAtlas : register(t0);
 SamplerState uSamp      : register(s0);
@@ -935,6 +945,17 @@ UIOut UIVSMain(uint vid : SV_VertexID)
     o.uv = uv;
     return o;
 }
+// One rounded box, four radii (TL, TR, BR, BL); `p` relative to the centre, y
+// down. Same function as heRoundedBoxSDF in kUIFS / the Metal path.
+float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
+{
+    float r = (p.x > 0.0f) ? ((p.y > 0.0f) ? radii.z : radii.y)
+                           : ((p.y > 0.0f) ? radii.w : radii.x);
+    r = min(r, min(halfSz.x, halfSz.y));
+    float2 q = abs(p) - (halfSz - r);
+    return length(max(q, 0.0f)) + min(max(q.x, q.y), 0.0f) - r;
+}
+float heMaxRadius(float4 radii) { return max(max(radii.x, radii.y), max(radii.z, radii.w)); }
 float4 UIPSMain(UIOut i) : SV_TARGET
 {
     if (uMode > 0.5f)
@@ -943,7 +964,45 @@ float4 UIPSMain(UIOut i) : SV_TARGET
         float a = uFontAtlas.Sample(uSamp, lerp(uUVRect.xy, uUVRect.zw, i.uv)).r;
         return float4(uColor.rgb, uColor.a * a);
     }
-    return uColor;
+    // i.uv is the quad-local 0..1 here (GL's vLocal).
+    float4 fill = uColor;
+    if (uStyle0.y > 0.5f)
+    {
+        float t;
+        if (uStyle0.w > 0.5f)
+        {
+            // Radial: centre out to the farthest corner, in pixels.
+            float2 dpx = (i.uv - 0.5f) * uRect.zw;
+            t = saturate(length(dpx) / max(1e-4f, length(uRect.zw * 0.5f)));
+        }
+        else
+        {
+            float a = uStyle0.z * 0.017453292f;
+            float2 dir = float2(sin(a), cos(a));
+            t = saturate(dot(i.uv - 0.5f, dir) + 0.5f);
+        }
+        fill = lerp(uColor, uGradientColor, t);
+    }
+    const float borderW = uStyle0.x, blurPx = uStyle1.x, innerBlur = uStyle1.y;
+    if (heMaxRadius(uCornerRadius) <= 0.0f && borderW <= 0.0f &&
+        blurPx <= 0.0f && innerBlur <= 0.0f) return fill;
+    // A blurred quad IS a drop shadow: the producer grew the rect by the blur.
+    float2 halfsz = uRect.zw * 0.5f - blurPx;
+    float d = heRoundedBoxSDF((i.uv - 0.5f) * uRect.zw, halfsz, uCornerRadius);
+    float cov = (blurPx > 0.0f) ? (1.0f - smoothstep(-blurPx, blurPx, d))
+                                : saturate(0.5f - d);
+    if (blurPx > 0.0f) return float4(fill.rgb, fill.a * cov);
+    if (innerBlur > 0.0f)
+    {
+        float t = 1.0f - smoothstep(0.0f, innerBlur, -d);
+        float ia = uInnerColor.a * saturate(t);
+        fill = float4(lerp(fill.rgb, uInnerColor.rgb, ia), fill.a);
+    }
+    if (borderW <= 0.0f) return float4(fill.rgb, fill.a * cov);
+    float inner = saturate(0.5f - (d + borderW));
+    float3 rgb  = lerp(uBorderColor.rgb, fill.rgb, inner);
+    float  al   = lerp(uBorderColor.a, fill.a, inner);
+    return float4(rgb, al * cov);
 }
 )HLSL";
 
@@ -1560,6 +1619,12 @@ struct D3D12RendererImpl
     UINT     viewportReqH         = 0;
     bool     viewportResChanged   = false;
     D3D12_RESOURCE_STATES viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // SetSwapchainPostProcessing: the game asks for the post chain on the
+    // swapchain path. gameViewport = the viewport set above is the game's
+    // (back-buffer sized), not an editor request — dropped when the game stops
+    // asking, or the leftover set would send Render() down the editor branch.
+    bool     swapchainPostFx      = false;
+    bool     gameViewport         = false;
     // On resize the OLD viewport RT must not be destroyed immediately: the editor's
     // ImGui descriptor still points at it for the current frame (it only updates next
     // frame on HasViewportResourceChanged), and ImGui samples it later this same frame.
@@ -3155,8 +3220,9 @@ struct D3D12RendererImpl
     // [5..6] (rewritten at GI-target creation), the shadow arrays in [7..8] (the cascade
     // slot is rewritten by createShadowArray() on a resolution swap — it MUST land here,
     // not in the ring, so every later draw block inherits it), null views in [9..16] (the
-    // preamble's gates for those stay 0 on D3D12). One CopyDescriptorsSimple per draw,
-    // then the draw's real textures overwrite [0..4].
+    // preamble's gates for those stay 0 unless the slot is filled). One CopyDescriptorsSimple
+    // per draw, then the draw's real textures overwrite [0..4] — and the sky cube / blurred
+    // SSAO overwrite [10]/[11] on the frames fillMatLight raises fog.z / fog.w (Thema 126).
     ComPtr<ID3D12DescriptorHeap> m_matSrvStaging;
     UINT                         m_matSrvInc = 0;
     UINT                         m_matSrvCursor[k_frameCount] = {}; // per-frame block cursor (one block per DrawCall)
@@ -3231,6 +3297,35 @@ struct D3D12RendererImpl
     bool                         m_matHlslLogged = false;            // one-time dump of generated HLSL for HW verify
     static constexpr UINT        k_matMaxDraws   = 1024;             // U/HeParams ring slots per frame
     static constexpr UINT        k_matSlot       = 256;              // 256-B stride/slot (U=176, HeParams=256)
+
+    // Image-based-ambient sky cube for graph materials (heSkyEnv, t15 = SRV block
+    // slot kSlotSkyEnv, static sampler s15) — Thema 126. The SAME
+    // HE::BuildSkyEnvFaceRow bake GL, Metal, Vulkan and D3D11 sample, re-baked on
+    // the CPU when the sun moves and copied in from this frame slot's upload
+    // buffer on the frame's own command list (updateSkyEnvCube), like Vulkan.
+    // RGBA16F; a row is 128 × 8 B = 1024 B and a face 128 KiB, so the tightly
+    // packed bake already meets D3D12's 256-B pitch / 512-B placement rules.
+    // m_skyEnvValid gates heLight.fog.z AND the per-draw view write.
+    static constexpr int         k_skyEnvFace    = 128;              // GL/Metal/Vulkan face size
+    ComPtr<ID3D12Resource>       m_skyEnvCube;                       // DEFAULT, 6 slices, 1 mip
+    ComPtr<ID3D12Resource>       m_skyEnvUpload[k_frameCount]; uint8_t* m_skyEnvUploadPtr[k_frameCount]{};
+    D3D12_RESOURCE_STATES        m_skyEnvState   = D3D12_RESOURCE_STATE_COPY_DEST;
+    bool                         m_skyEnvValid   = false;            // the cube holds a bake (fog.z may be raised)
+    glm::vec3                    m_skyEnvSunDir  = glm::vec3(0.0f);
+    void createSkyEnvCube();
+    void updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir);
+    // A TextureCube view of m_skyEnvCube into `h` (a material draw block's
+    // kSlotSkyEnv — the template keeps its null cube view).
+    void srvForSkyEnvCube(D3D12_CPU_DESCRIPTOR_HANDLE h)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                      = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sv.ViewDimension               = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        sv.Shader4ComponentMapping     = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.TextureCube.MostDetailedMip = 0;
+        sv.TextureCube.MipLevels       = 1;
+        device->CreateShaderResourceView(m_skyEnvCube.Get(), &sv, h);
+    }
 
     void createMaterialResources();
     ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
@@ -3397,8 +3492,10 @@ struct D3D12RendererImpl
     // ── 2D UI canvas pipeline ─────────────────────────────────────────────────
     ComPtr<ID3D12PipelineState>  m_uiPSO;
     ComPtr<ID3D12RootSignature>  m_uiRootSig;
-    // Per-frame UI CB ring: up to 256 quads per frame × 256 bytes each (48B padded to 256B).
-    static constexpr UINT   k_maxUIQuads = 256;
+    // Per-frame UI CB ring: up to 4096 quads per frame × 256 bytes each (176 B
+    // padded to 256 B) = 1 MB per frame slot. Every glyph is a quad, so the old
+    // 256 cut a menu's text off mid-word where GL/D3D11/Vulkan drew all of it.
+    static constexpr UINT   k_maxUIQuads = 4096;
     static constexpr UINT64 k_uiCBSlot   = 256;
     ComPtr<ID3D12Resource>  m_uiCB[k_frameCount];
     uint8_t*                m_uiCBPtr[k_frameCount]{};
@@ -4253,8 +4350,11 @@ struct D3D12RendererImpl
             rt.SrcBlend       = D3D12_BLEND_SRC_ALPHA;
             rt.DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
             rt.BlendOp        = D3D12_BLEND_OP_ADD;
+            // Alpha "over" (as D3D11/Vulkan): an opaque target stays opaque —
+            // ZERO let a drop shadow punch a see-through hole into the editor
+            // viewport, which ImGui composites with blending.
             rt.SrcBlendAlpha  = D3D12_BLEND_ONE;
-            rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+            rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
             rt.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
             rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -4328,9 +4428,13 @@ struct D3D12RendererImpl
         int boundSlot = std::max(defaultSlot, 0);
         cmd->SetGraphicsRootDescriptorTable(1, uiAtlasGpu(static_cast<UINT>(boundSlot)));
 
-        // 256-byte CB slots (k_uiCBSlot), so the added row costs nothing.
+        // 256-byte CB slots (k_uiCBSlot), so the added rows cost nothing.
         struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect;
-                      glm::vec2 vp; float mode; float pad; glm::vec4 rotation; };
+                      glm::vec2 vp; float mode; float pad; glm::vec4 rotation;
+                      glm::vec4 cornerRadius, borderColor, gradientColor, innerColor,
+                                style0, style1; };
+        static_assert(sizeof(UICB) == 176 && sizeof(UICB) <= k_uiCBSlot,
+                      "UICB must match the HLSL cbuffer and fit one CB slot");
 
         // Clipping is a scissor rectangle, set only when it CHANGES — a widget
         // tree emits its quads in tree order, so equally-clipped quads arrive in
@@ -4382,6 +4486,13 @@ struct D3D12RendererImpl
             cb.mode   = obj.type == 2 ? 1.0f : 0.0f;
             cb.pad    = 0.0f;
             cb.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
+            cb.cornerRadius  = obj.cornerRadius;
+            cb.borderColor   = obj.borderColor;
+            cb.gradientColor = obj.gradientColor;
+            cb.innerColor    = obj.innerShadowColor;
+            cb.style0 = glm::vec4(obj.borderWidth, obj.gradient ? 1.0f : 0.0f, obj.gradientAngleDeg,
+                                  obj.gradientShape == 1 ? 1.0f : 0.0f);
+            cb.style1 = glm::vec4(obj.blur, obj.innerShadowBlur, 0.0f, 0.0f);
             std::memcpy(m_uiCBPtr[fi] + static_cast<size_t>(qi) * k_uiCBSlot, &cb, sizeof(cb));
             D3D12_GPU_VIRTUAL_ADDRESS addr = m_uiCB[fi]->GetGPUVirtualAddress()
                                            + static_cast<UINT64>(qi) * k_uiCBSlot;
@@ -8204,7 +8315,8 @@ void D3D12RendererImpl::createMaterialResources()
     // heSSRFwd / heGIReflFwd / heCloudShadow (t14..t18, t31..t33) — null views, their
     // gates stay 0 in fillMatLight; EXCEPT the DDGI atlases [12..13] (t17/t18), which
     // ensureGiProbeAtlas writes into the template (writeMatGiProbeSlots) behind the
-    // giProbe.y gate.
+    // giProbe.y gate, and heSkyEnv / heAO [10..11] (t15/t16), which the draw writes into
+    // its own block behind fog.z / fog.w (Thema 126).
     HE::d3d12mat::MaterialRootSignature matRs;
     HE::d3d12mat::DescribeMaterialRootSignature(matRs);
     const D3D12_ROOT_SIGNATURE_DESC& rsd = matRs.desc;
@@ -8281,7 +8393,9 @@ void D3D12RendererImpl::createMaterialResources()
         writeShadowArraySrv(localShadowDepth.Get(), h, kLocalShadowLayers); h.ptr += inc;
         // Slots 9..16: the preamble's remaining SRVs (heLandscapeWeights, heSkyEnv,
         // heAO, the DDGI atlases, heSSRFwd, heGIReflFwd, heCloudShadow). Declared so
-        // the PSO is legal, never sampled: fillMatLight leaves their gates at 0.
+        // the PSO is legal, never sampled while fillMatLight leaves their gates at 0.
+        // heSkyEnv/heAO (10/11) stay null HERE; the material draw writes the sky
+        // cube / blurred SSAO into its own block when fog.z / fog.w rise (Thema 126).
         // The DDGI pair (12/13) starts null too and is swapped for the live atlases
         // by ensureGiProbeAtlas → writeMatGiProbeSlots (back to null on retire);
         // the atlases are created per frame, long after this init. Null views
@@ -8319,8 +8433,99 @@ void D3D12RendererImpl::createMaterialResources()
         }
     }
 
+    // The sky cube for heSkyEnv (Thema 126) — optional, see createSkyEnvCube.
+    createSkyEnvCube();
+
     m_matReady = true;
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: A4 material resources created");
+}
+
+// ── Image-based-ambient sky cube for graph materials (heSkyEnv, t15) ─────────
+// GL, Metal and (since Thema 126, Schritt 1) Vulkan bake HE::SkyColorCPU into a
+// 128² cube and raise heLight.fog.z; this backend kept a null cube view in the
+// template and fog.z at 0, so graph materials had no sky ambient, no specular
+// IBL and no fog (heApplyFog takes its colour from the cube). Not fatal when it
+// fails: fog.z stays 0, exactly the state before the cube existed.
+void D3D12RendererImpl::createSkyEnvCube()
+{
+    m_skyEnvValid = false;
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width            = static_cast<UINT64>(k_skyEnvFace);
+    td.Height           = static_cast<UINT>(k_skyEnvFace);
+    td.DepthOrArraySize = 6;
+    td.MipLevels        = 1;
+    td.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Flags            = D3D12_RESOURCE_FLAG_NONE;
+    bool ok = SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_skyEnvCube)));
+    m_skyEnvState = D3D12_RESOURCE_STATE_COPY_DEST;
+    const UINT64 bytes = static_cast<UINT64>(k_skyEnvFace) * k_skyEnvFace * 6 * 4 * sizeof(uint16_t);
+    for (UINT f = 0; ok && f < k_frameCount; ++f)
+    {
+        m_skyEnvUpload[f] = createUploadBuffer(bytes, reinterpret_cast<void**>(&m_skyEnvUploadPtr[f]));
+        ok = m_skyEnvUpload[f] && m_skyEnvUploadPtr[f];
+    }
+    if (!ok)
+    {
+        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: sky environment cube unavailable — graph materials keep flat ambient");
+        m_skyEnvCube.Reset();
+        for (UINT f = 0; f < k_frameCount; ++f) { m_skyEnvUpload[f].Reset(); m_skyEnvUploadPtr[f] = nullptr; }
+    }
+}
+
+// Recorded on the frame's command list before its first material draw. The
+// upload buffer is this frame slot's own, so the frame fence that guards the
+// HeLighting/U/HeParams rings guards it too. GL's dead-band (2e-3 ≈ 0.11°): a
+// static sun bakes once, a moving one roughly every other frame.
+void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir)
+{
+    if (!cl || !m_skyEnvCube || !m_skyEnvUploadPtr[frameIndex]) return;
+    if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
+
+    constexpr int N = k_skyEnvFace;
+    std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
+    parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
+    {
+        const int f = static_cast<int>(idx / N);
+        const int t = static_cast<int>(idx % N);
+        HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
+    }, "SkyEnvBake", 1);
+    uint16_t* dst = reinterpret_cast<uint16_t*>(m_skyEnvUploadPtr[frameIndex]);
+    for (size_t i = 0; i < px.size(); ++i)
+        dst[i] = glm::packHalf1x16(px[i]);
+
+    // D3D cube faces are array slices 0..5 = +X,-X,+Y,-Y,+Z,-Z with GL's (s,t)
+    // table, row 0 = t 0 — the bake goes in unchanged (SkyEnvBake.h). The
+    // previous frame may still be sampling the cube on this queue: the
+    // transition out of PIXEL_SHADER_RESOURCE orders the copy after it.
+    const UINT   rowPitch  = static_cast<UINT>(N * 4 * sizeof(uint16_t));
+    const UINT64 faceBytes = static_cast<UINT64>(rowPitch) * N;
+    static_assert((k_skyEnvFace * 4 * sizeof(uint16_t)) % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT == 0,
+                  "the tightly packed bake row must already be 256-B aligned");
+    static_assert((k_skyEnvFace * k_skyEnvFace * 4 * sizeof(uint16_t)) % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0,
+                  "every face of the tightly packed bake must start 512-B aligned");
+    barrier12(cl, m_skyEnvCube.Get(), m_skyEnvState, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (UINT f = 0; f < 6; ++f)
+    {
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = m_skyEnvUpload[frameIndex].Get();
+        src.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset    = faceBytes * f;
+        src.PlacedFootprint.Footprint = { DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                          static_cast<UINT>(N), static_cast<UINT>(N), 1, rowPitch };
+        D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+        dstLoc.pResource        = m_skyEnvCube.Get();
+        dstLoc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = f; // mip 0 of slice f (one mip level)
+        cl->CopyTextureRegion(&dstLoc, 0, 0, 0, &src, nullptr);
+    }
+    barrier12(cl, m_skyEnvCube.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_skyEnvState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    m_skyEnvSunDir = sunDir;
+    m_skyEnvValid  = true;
 }
 
 // `precompiled` (the pak's baked HLSL for this backend, MaterialShaderLibrary::
@@ -8393,8 +8598,21 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         // HLSL sampler pins of 5e52d64e, say) is not the end: fall through to the runtime
         // cross-compile, which is what rendered that pak before variants were consumed
         // here at all. Only when both roads are closed is the miss cached.
+        // The baked clustered twin (Thema 117) goes before the baked plain pair, under
+        // the same matClustered() rule as the cross-compiled one below: only then does
+        // the root signature carry t24..t26 and the gate open.
         bool built = false;
-        if (precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
+        if (precompiled && matClustered() && !precompiled->fragmentClustered.empty())
+        {
+            const std::string& vsSrc = precompiled->vertexClustered.empty()
+                ? precompiled->vertex : precompiled->vertexClustered;
+            if (!vsSrc.empty())
+                built = compilePair(vsSrc, precompiled->fragmentClustered, "baked variant, clustered");
+            if (!built)
+                HE_LOG_WARN(RHI, "%s", "D3D12Renderer: A4 baked clustered material variant rejected — "
+                    "trying the baked 8-light window variant");
+        }
+        if (!built && precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
         {
             built = compilePair(precompiled->vertex, precompiled->fragment, "baked variant");
             if (!built)
@@ -9110,7 +9328,10 @@ void D3D12Renderer::Shutdown()
         m_impl->m_matObjRing[i].Reset();   m_impl->m_matObjPtr[i]   = nullptr;
         m_impl->m_matParamRing[i].Reset(); m_impl->m_matParamPtr[i] = nullptr;
         m_impl->m_matDrawCursor[i] = 0;
+        m_impl->m_skyEnvUpload[i].Reset(); m_impl->m_skyEnvUploadPtr[i] = nullptr;
     }
+    m_impl->m_skyEnvCube.Reset();
+    m_impl->m_skyEnvValid = false;
     m_impl->depthBuffer.Reset();
     m_impl->dsvHeap.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
@@ -9179,6 +9400,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     p.m_extractor.extract(*m_world, p.m_renderWorld,
                           static_cast<float>(width) / static_cast<float>(height),
                           &m_editorCamera);
+    // The UI canvas (Entity-UI + WidgetManager widgets) rides in the same
+    // RenderWorld — extract() just cleared it. Mirrors GL/Metal; without this
+    // call every UI pass below sees an empty list and draws nothing.
+    p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+                            p.m_renderWorld);
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
@@ -9376,8 +9602,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // buffer at execute time, so the last write wins). Now fills the FULL v2
     // light window from the dominant directional light (was sun-only sky values
     // before — graph materials never saw point/spot lights on D3D12 and stayed
-    // sun-lit at night). Mirrors the D3D11 fillMatLight.
-    auto fillMatLight = [&](bool giActive)
+    // sun-lit at night). Mirrors the D3D11 fillMatLight. `aoActive`: the blurred
+    // SSAO ran this frame — fillPerFrame's own AO gate; the material draw writes
+    // that image into its block's kSlotAO exactly then.
+    auto fillMatLight = [&](bool giActive, bool aoActive)
     {
         if (!(p.m_matReady && p.m_matLightPtr[p.frameIndex])) return;
         HE::MaterialShaderLibrary::Lighting lit{};
@@ -9468,9 +9696,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             lit.shadowBias[0] = p.shadowSettings.slopeBias;
             lit.shadowBias[1] = p.shadowSettings.minBias;
         }
+        // Height fog + the two image gates, the GL/Metal/Vulkan fill (Thema
+        // 126; lit.fog stayed all-zero here before, so graph materials had no
+        // sky ambient, no specular IBL, no SSAO and no fog). z: the baked sky
+        // cube exists — every material draw block gets its view in kSlotSkyEnv
+        // exactly then. w: the blurred SSAO goes into kSlotAO under the same
+        // flag the caller passes here.
+        const bool skyEnvBound = p.m_skyEnvValid;
+        lit.fog[0] = m_environment.fogDensity;
+        lit.fog[1] = m_environment.fogHeightFalloff;
+        lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
+        lit.fog[3] = aoActive    ? 1.0f : 0.0f;
         std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
     };
-    fillMatLight(false);
+    // The sky cube first: a copy on this frame's command list, recorded before
+    // any graph-material draw, and fillMatLight reads m_skyEnvValid.
+    if (p.m_matReady)
+        p.updateSkyEnvCube(cl, p.m_renderWorld.sunDirection);
+    fillMatLight(false, false);
 
     // The heap slot the scene shader's t16 SSR table points at this frame. Set
     // once the trace has run; until then (and on every non-SSR frame) it names
@@ -9776,7 +10019,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // non-zero intensity. Off → t16 names the null descriptor and the
         // cascade folds away on uSSRParams.x.
         fillPerFrame(giShadingActive, aoWanted, ssrResult != nullptr);
-        fillMatLight(giShadingActive);
+        const bool matAOActive = aoWanted && p.ssaoBlurRT != nullptr; // heAO = the built-in's t2 image
+        fillMatLight(giShadingActive, matAOActive);
 
         // ── Geometry pass: bind combined sceneSrvHeap (shadow t0 + AO t2 +
         // GI mask/atlases t4..t6 — slots [4..6] were written at GI-target/atlas
@@ -9977,6 +10221,16 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy block slots 1..4 (t4..t7)");
                         for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
                             if (heTexP[k]) p.srvForTexture(heTexP[k], p.matSrvCpu(blk + 1 + static_cast<UINT>(k)));
+                        // heSkyEnv (t15) + heAO (t16) (Thema 126): the baked sky cube and
+                        // this frame's blurred SSAO (the image the built-in shader reads at
+                        // t2, in PIXEL_SHADER_RESOURCE after the blur pass), each under the
+                        // very flag fillMatLight raised its gate with (fog.z / fog.w). The
+                        // template's null views stay where the gate is 0.
+                        if (p.m_skyEnvValid)
+                            p.srvForSkyEnvCube(p.matSrvCpu(blk + HE::d3d12mat::kSlotSkyEnv));
+                        if (matAOActive)
+                            p.srvIntoHeapSlot(p.ssaoBlurRT.Get(), DXGI_FORMAT_R8_UNORM,
+                                              p.matSrvCpu(blk + HE::d3d12mat::kSlotAO));
 
                         // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
@@ -10521,15 +10775,61 @@ void D3D12Renderer::Render()
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
 
+    // The packaged game (SetSwapchainPostProcessing): the post chain — HDR,
+    // bloom, tonemap, AA, TAA, SSR — exists only in the viewport frame, so the
+    // game runs that frame at the back buffer's size and copies the finished
+    // RGBA8 image into the back buffer. Sized from the back buffer itself, not
+    // the window: CopyResource needs identical dimensions, and a failed
+    // ResizeBuffers keeps the old ones. An editor request (HE_CAPTURE_FRAME asks
+    // for one at the window's logical size) is ignored meanwhile — honouring it
+    // would rebuild every target each frame — and the capture reads this very
+    // image. All of this flushes, so it runs before the list starts recording.
+    ID3D12Resource* backBuffer = p.renderTargets[p.frameIndex].Get();
+    D3D12_RESOURCE_DESC bbDesc{};
+    if (backBuffer) bbDesc = backBuffer->GetDesc();
+    const UINT bbW = static_cast<UINT>(bbDesc.Width);
+    const UINT bbH = bbDesc.Height;
+    const bool gameChain = p.swapchainPostFx && p.postFxReady && backBuffer
+                        && bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM
+                        && bbDesc.SampleDesc.Count == 1 && bbW > 0 && bbH > 0;
+    if (gameChain)
+    {
+        if (!p.gameViewport || p.viewportW != bbW || p.viewportH != bbH)
+        {
+            p.createViewportRT(bbW, bbH);
+            p.gameViewport = true;
+            if (p.viewportRT && p.viewportW == bbW && p.viewportH == bbH)
+                HE_LOG_INFO(RHI, "D3D12Renderer: swapchain post chain active (%ux%u)", bbW, bbH);
+        }
+    }
+    else if (p.gameViewport)
+    {
+        // The game stopped asking (application mode): drop its set so the
+        // branch below draws straight into the back buffer again, and the TAA
+        // history with it — it would blend a stale world when the chain returns.
+        // The decal pass's viewport-depth SRV gets a null view (bound on every
+        // scene draw). One flush, on the switch only.
+        p.waitForAllFrames();
+        p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
+        p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
+        p.createDepthSrv(nullptr, D3D12RendererImpl::k_decalViewportDepthSlot);
+        p.viewportW = p.viewportH = 0;
+        p.viewportState   = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        p.gameViewport    = false;
+        p.taaHistoryValid = false;
+    }
+
     // Resize viewport RT if the editor requested a different size.
-    if (p.viewportReqW > 0 && p.viewportReqH > 0 &&
+    if (!gameChain && p.viewportReqW > 0 && p.viewportReqH > 0 &&
         (p.viewportReqW != p.viewportW || p.viewportReqH != p.viewportH))
         p.createViewportRT(p.viewportReqW, p.viewportReqH);
     // TAA targets to the mode in force (only flushes on a toggle), before the
     // command list below starts recording against them.
     p.syncTaaTargets();
 
-    const bool useViewport = p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
+    const bool gameFrame   = gameChain && p.viewportRT && p.viewportDsvHeap
+                          && p.viewportW == bbW && p.viewportH == bbH;
+    const bool useViewport = !gameChain && p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
 
     p.waitForFrame(p.frameIndex);
 
@@ -10555,44 +10855,79 @@ void D3D12Renderer::Render()
 
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
-    if (useViewport)
-        DrawViewportFrame();
-
-    // ── Swapchain → transition to RTV, clear, run ImGui overlay ────────────
     D3D12_RESOURCE_BARRIER swapBarrier{};
     swapBarrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     swapBarrier.Transition.pResource   = p.renderTargets[p.frameIndex].Get();
     swapBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
     swapBarrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
     swapBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    p.cmdList->ResourceBarrier(1, &swapBarrier);
-
     auto rtv = p.rtvHandle(p.frameIndex);
-    auto dsv = p.dsvHeap ? p.dsvHeap->GetCPUDescriptorHandleForHeapStart() : D3D12_CPU_DESCRIPTOR_HANDLE{};
-    p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, p.dsvHeap ? &dsv : nullptr);
-    p.cmdList->ClearRenderTargetView(rtv, bgColor, 0, nullptr);
-    if (p.dsvHeap)
-        p.cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    if (!useViewport)
+    if (gameFrame)
     {
-        D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
-        D3D12_RECT     sc{ 0, 0, p.width, p.height };
+        // Viewport frame (UI canvas included), then copy it into the back
+        // buffer: viewportRT PSR → COPY_SOURCE → PSR, back buffer PRESENT →
+        // COPY_DEST → RENDER_TARGET, so the shared RT → PRESENT below holds. No
+        // clear — the copy overwrites every texel.
+        DrawViewportFrame();
+        D3D12_RESOURCE_BARRIER copyBarriers[2]{};
+        copyBarriers[0].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyBarriers[0].Transition.pResource   = p.viewportRT.Get();
+        copyBarriers[0].Transition.StateBefore = p.viewportState;
+        copyBarriers[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        copyBarriers[1] = swapBarrier;
+        copyBarriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        p.cmdList->ResourceBarrier(2, copyBarriers);
+        p.cmdList->CopyResource(backBuffer, p.viewportRT.Get());
+        copyBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyBarriers[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        copyBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyBarriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        p.cmdList->ResourceBarrier(2, copyBarriers);
+        p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        // The overlay (if any) draws on top of the copied image.
+        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(bbW), static_cast<float>(bbH), 0.0f, 1.0f };
+        D3D12_RECT     sc{ 0, 0, static_cast<LONG>(bbW), static_cast<LONG>(bbH) };
         p.cmdList->RSSetViewports(1, &vp);
         p.cmdList->RSSetScissorRects(1, &sc);
-        p.usingHDR = false;
-        p.taaFrame = false; // no post chain here, nothing would resolve a jitter
-        DrawScene(p.cmdList.Get(), p.width, p.height);
+    }
+    else
+    {
+        if (useViewport)
+            DrawViewportFrame();
 
-        // ── 2D UI canvas on swapchain RT (already bound, in RENDER_TARGET state) ─
-        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        // ── Swapchain → transition to RTV, clear, run ImGui overlay ────────────
+        p.cmdList->ResourceBarrier(1, &swapBarrier);
+
+        auto dsv = p.dsvHeap ? p.dsvHeap->GetCPUDescriptorHandleForHeapStart() : D3D12_CPU_DESCRIPTOR_HANDLE{};
+        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, p.dsvHeap ? &dsv : nullptr);
+        p.cmdList->ClearRenderTargetView(rtv, bgColor, 0, nullptr);
+        if (p.dsvHeap)
+            p.cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        if (!useViewport)
         {
-            D3D12_VIEWPORT uivp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
-            D3D12_RECT     uisc{ 0, 0, p.width, p.height };
-            p.cmdList->RSSetViewports(1, &uivp);
-            p.cmdList->RSSetScissorRects(1, &uisc);
+            D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
+            D3D12_RECT     sc{ 0, 0, p.width, p.height };
+            p.cmdList->RSSetViewports(1, &vp);
+            p.cmdList->RSSetScissorRects(1, &sc);
+            p.usingHDR = false;
+            p.taaFrame = false; // no post chain here, nothing would resolve a jitter
+            DrawScene(p.cmdList.Get(), p.width, p.height);
+
+            // ── 2D UI canvas on swapchain RT (already bound, in RENDER_TARGET state) ─
+            p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            {
+                D3D12_VIEWPORT uivp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
+                D3D12_RECT     uisc{ 0, 0, p.width, p.height };
+                p.cmdList->RSSetViewports(1, &uivp);
+                p.cmdList->RSSetScissorRects(1, &uisc);
+            }
+            p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
         }
-        p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
     }
 
     // Overlay (ImGui) records into this command list and binds its own SRV heap.
@@ -10748,6 +11083,11 @@ void D3D12Renderer::SetViewportSize(uint32_t width, uint32_t height)
 {
     m_impl->viewportReqW = static_cast<UINT>(width);
     m_impl->viewportReqH = static_cast<UINT>(height);
+}
+
+void D3D12Renderer::SetSwapchainPostProcessing(bool enabled)
+{
+    m_impl->swapchainPostFx = enabled;   // Render() builds or drops the set
 }
 
 bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)

@@ -1,0 +1,39 @@
+﻿diff --git a/src/HE_Rendering/src/Backends/D3D11/D3D11Renderer.cpp b/src/HE_Rendering/src/Backends/D3D11/D3D11Renderer.cpp
+index 2ac85fc5..0d3c2950 100644
+--- a/src/HE_Rendering/src/Backends/D3D11/D3D11Renderer.cpp
++++ b/src/HE_Rendering/src/Backends/D3D11/D3D11Renderer.cpp
+@@ -5557,6 +5557,8 @@ void D3D11Renderer::DrawScene(int width, int height)
+     p.m_extractor.extract(*m_world, p.m_renderWorld,
+                           static_cast<float>(width) / static_cast<float>(height),
+                           &m_editorCamera);
++    p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
++                            p.m_renderWorld);
+ 
+     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
+     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
+diff --git a/src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp b/src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp
+index 6c94e8c5..7a79df4f 100644
+--- a/src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp
++++ b/src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp
+@@ -9108,6 +9108,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
+     p.m_extractor.extract(*m_world, p.m_renderWorld,
+                           static_cast<float>(width) / static_cast<float>(height),
+                           &m_editorCamera);
++    p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
++                            p.m_renderWorld);
+ 
+     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
+     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
+diff --git a/src/HE_Rendering/src/Backends/Vulkan/VulkanRenderer.cpp b/src/HE_Rendering/src/Backends/Vulkan/VulkanRenderer.cpp
+index 9a8b6336..3c4128a6 100644
+--- a/src/HE_Rendering/src/Backends/Vulkan/VulkanRenderer.cpp
++++ b/src/HE_Rendering/src/Backends/Vulkan/VulkanRenderer.cpp
+@@ -6210,6 +6210,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
+     m_extractor.extract(*m_world, m_renderWorld,
+                         static_cast<float>(width) / static_cast<float>(height),
+                         &m_editorCamera);
++    m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
++                          m_renderWorld);
+ 
+ 
+     // Sky is independent of scene geometry — draw it before any early returns so it

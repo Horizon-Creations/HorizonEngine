@@ -277,8 +277,9 @@ gemessen (kein Mac). Inzwischen läuft es auf echter Mac-Hardware sauber, siehe 
 Dazu:
 * **Neuer Dump-Knopf `HE_DUMP_TODSTEP`** (Tagesbruchteil, mit `HE_DUMP_SKYTEST`) als Zeuge für
   Verdecker-Bewegung. Die Settle-Frames laufen bei `TOD − step`, die letzten **zwei** Frames bei
-  `TOD`. Zwei Frames, weil Vulkans `runGi()` die Szene extrahiert, bevor `DrawScene()` den
-  Day-Night-Zustand des Frames setzt (siehe §7.5).
+  `TOD`. Zwei Frames, weil Vulkans `runGi()` die Szene extrahierte, bevor `DrawScene()` den
+  Day-Night-Zustand des Frames setzte (siehe §7.5, inzwischen behoben). Der zweite Frame bleibt,
+  damit Captures mit älteren Builds vergleichbar sind.
 * **Drift-Guard** `tests/test_culling.cpp` „GI kernels: …". Der alte „cone jitter hash" hätte nach
   dem Hash-Tausch ins Leere gegriffen und ist neu formuliert. Zwei neue Subcases kommen dazu:
   (a) jede `giHash2`/`giHash2R`-Definition in **allen sechs Quelldateien**, also auch in den
@@ -382,12 +383,22 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
   Beides liegt im Rauschen: Flackern im Reflexionsbereich 0.055 gegen 0.067, HF 0.513 gegen 0.514,
   |an − aus| 15.9. Einen Vorher-Stand mit altem `sin`-Hash gibt es für die Reflexionen nicht.
   Auf Metal laufen die Reflexionen (§7.6), ein Flacker-Maß gibt es dort nicht.
-* **Vulkan: GI-Sonne einen Frame hinterher** (gefunden beim Bau des TODSTEP-Zeugen, *nicht*
-  behoben). `VulkanRenderer::runGi()` ruft `m_extractor.extract()` ohne vorheriges
-  `setDayNight()` auf. Die GI-Maske rechnet also mit der Sonne des Vorframes, während der
-  Scene-Pass die aktuelle nutzt. Metal ruft `setDayNight()` vor jeder GI-Extraktion auf, D3D11,
-  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Bei normaler
-  Day-Night-Geschwindigkeit ist das unsichtbar, ein Einzeiler, aber ein eigener Schritt.
+* **Vulkan: GI-Sonne einen Frame hinterher** (gefunden beim Bau des TODSTEP-Zeugen, **behoben in
+  Schritt 6**). `VulkanRenderer::runGi()` rief `m_extractor.extract()` ohne vorheriges
+  `setDayNight()` auf. Die GI-Maske rechnete also mit der Sonne des Vorframes, während der
+  Scene-Pass die aktuelle nutzte. Metal ruft `setDayNight()` vor jeder GI-Extraktion auf, D3D11,
+  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Jetzt setzt `runGi()` den
+  Zustand selbst, mit demselben Aufruf wie `DrawScene()`. Der Test in `tests/test_culling.cpp`
+  („Vulkan GI extracts with this frame's sun …") prüft die Reihenfolge im Quelltext. Negativkontrolle:
+  ohne den Aufruf schlägt `REQUIRE` fehl, bei `setDayNight()` hinter `extract()` der `CHECK`.
+  Kompiliert ist die Datei lokal nur per `-fsyntax-only` gegen die MoltenVK-Header, echt
+  kompiliert sie die Windows-CI. Gelaufen ist sie auf keinem Vulkan-Gerät.
+  **Nicht behoben, gleiche Art:** `EncodeShadowMap()`, `runSSAO()` und `EncodeDecalDepth()`
+  extrahieren in Vulkan ebenfalls vor `DrawScene()` und ohne eigenes `setDayNight()`. Bei GI
+  aus werden die CSM-Kaskaden also mit der Sonne des Vorframes gefittet und gerendert, während der
+  Scene-Pass mit der aktuellen schattiert. Bei normaler Day-Night-Geschwindigkeit ist das
+  unsichtbar. Sauberer wäre ein `setDayNight()` einmal am Frame-Anfang (`DrawViewportFrame()`
+  und der Swapchain-Zweig in `Render()`), das ist aber ein eigener Schritt.
 * Ein Rest-Flackern bleibt (§7.2, Ende). Für weitere Ruhe bräuchte es mehr Strahlen pro Pixel, ein
   höheres History-Gewicht (das braucht die Verdecker-Reaktion des Clamps) oder einen
   kantenerhaltenden Spatial-Filter statt 3×3-Box.

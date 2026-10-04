@@ -93,7 +93,8 @@ namespace
             cm.setContentRoot((dir / "Content").string());
             world.setScriptRuntime(&gi.runtime());
             HorizonCode::Runtime::Services svc;
-            svc.createWidget  = [this](const std::string& p){ return world.widgets().createWidget(cm, p); };
+            svc.createWidget  = [this](const std::string& p, const HorizonCode::SpawnValues& spawn)
+            { return world.widgets().createWidget(cm, p, &spawn); };
             svc.showWidget    = [this](int id){ world.widgets().showWidget(id); };
             svc.hideWidget    = [this](int id){ world.widgets().hideWidget(id); };
             svc.destroyWidget = [this](int id){ world.widgets().destroyWidget(id); };

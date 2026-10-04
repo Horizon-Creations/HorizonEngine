@@ -31,6 +31,9 @@
 // material draw puts the atlases (or the white dummy when GI is off) and a
 // linear-clamp sampler there, and the built-in pass's four bindings go back
 // afterwards — the second Bind/Restore pair below.
+//
+// The sky cube and the AO buffer (Thema 126) are the third pair: heAO's t16 is
+// the built-in pass's forward SSR result, see BindSkyEnvAndAO.
 // ─────────────────────────────────────────────────────────────────────────────
 #if defined(_WIN32)
 #include <d3d11.h>
@@ -171,6 +174,49 @@ inline void BindClusterLists(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView*
     static_assert(kClusterGridSrvSlot == kClusterLightsSrvSlot + 1 &&
                   kClusterIdxSrvSlot  == kClusterLightsSrvSlot + 2, "t24..t26 are one contiguous range");
     ctx->PSSetShaderResources(kClusterLightsSrvSlot, 3, lists);
+}
+
+// ── heSkyEnv / heAO (Thema 126) ──────────────────────────────────────────────
+// heSkyEnv: t15 / s15 (binding 15 keeps its number, its sampler already fits
+// under the SM 5.0 cap). heAO: t16, read with texelFetch, so its sampler is the
+// dead s0 the weightmap borrows. Must match kHlslMaterialPins in
+// MaterialShaderLibrary.cpp.
+//
+// The register clash is t16: the built-in scene shader keeps its forward SSR
+// result there (uSSRFwd, bound ONCE per pass), and nothing in the material draw
+// used to touch it — so the moment heLight.fog.w rose, heAO would have
+// texelFetched the reflection trace instead of the occlusion. The material draw
+// therefore puts the AO buffer (the very SRV the built-in shader reads at t2)
+// on t16 and the sky cube on t15, and the SSR result goes back afterwards. s15
+// needs no restore: the built-in shaders never read it, and the decal pass —
+// the only other user of t15/s15 — sets its own pair every time it runs.
+constexpr UINT kSkyEnvSrvSlot     = 15;
+constexpr UINT kSkyEnvSamplerSlot = 15;
+constexpr UINT kAOSrvSlot         = 16;
+
+// Before a graph-material draw: the baked sky cube on t15 (null while it does
+// not exist yet — fillMatLight keeps fog.z at 0 then, so it is never sampled),
+// linear-clamp on s15 (GL/Metal's cube sampler; the address mode is moot on a
+// cube), and this frame's AO on t16 (the white dummy when SSAO did not run —
+// fog.w is 0 then).
+inline void BindSkyEnvAndAO(ID3D11DeviceContext* ctx,
+                            ID3D11ShaderResourceView* skyCube,
+                            ID3D11ShaderResourceView* ao,
+                            ID3D11SamplerState* linearClamp)
+{
+    ctx->PSSetShaderResources(kSkyEnvSrvSlot, 1, &skyCube);
+    ctx->PSSetShaderResources(kAOSrvSlot, 1, &ao);
+    ctx->PSSetSamplers(kSkyEnvSamplerSlot, 1, &linearClamp);
+}
+
+// After the draw: t15 off (the decal pass binds the scene depth there and must
+// not find a cube still on it) and t16 back to the built-in pass's forward SSR
+// result — null when the trace did not run, exactly what the pass bound.
+inline void RestoreBuiltinSkyEnvAOSlots(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* builtinSSR)
+{
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    ctx->PSSetShaderResources(kSkyEnvSrvSlot, 1, &nullSrv);
+    ctx->PSSetShaderResources(kAOSrvSlot, 1, &builtinSSR);
 }
 } // namespace HE::d3d11mat
 

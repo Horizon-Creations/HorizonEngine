@@ -927,7 +927,8 @@ void GameApplication::OnInit()
 	m_widgets.setRuntime(&m_gameInstance.runtime());
 	{
 		HorizonCode::Runtime::Services svc;
-		svc.createWidget  = [this](const std::string& p){ return m_widgets.createWidget(contentManager(), p); };
+		svc.createWidget  = [this](const std::string& p, const HorizonCode::SpawnValues& spawn)
+		{ return m_widgets.createWidget(contentManager(), p, &spawn); };
 		svc.showWidget    = [this](int id){ m_widgets.showWidget(id); };
 		svc.hideWidget    = [this](int id){ m_widgets.hideWidget(id); };
 		svc.destroyWidget = [this](int id){ m_widgets.destroyWidget(id); };
@@ -3153,9 +3154,17 @@ void GameApplication::OnRender(float deltaTime)
 			// own default — which draws one. An atmosphere behind a settings
 			// dialog is not a subtle bug, and it cost a sky pass per frame.
 			r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
+			// …and no post chain on the swapchain path either (D3D: the viewport
+			// frame plus a copy per frame, for nothing).
+			r->SetSwapchainPostProcessing(false);
 		}
 		else if (r && m_world)
 		{
+			// The settings below only reach the screen through the post chain,
+			// which D3D11, D3D12 and Vulkan have only in their viewport frame; this sends the game
+			// through it (IRenderer::SetSwapchainPostProcessing). Every frame,
+			// like everything here — the call only stores a flag.
+			r->SetSwapchainPostProcessing(true);
 			// Bloom + AO. The packaged game pushed neither for a long time, which
 			// meant a shipped build ran on the renderer's built-in defaults no
 			// matter what the project was set to.

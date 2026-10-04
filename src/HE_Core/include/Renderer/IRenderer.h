@@ -936,6 +936,17 @@ public:
     // vector is a no-op / clears any previously submitted lines.
     virtual void SetDebugLines(const std::vector<DebugLine>& /*lines*/) {}
 
+    // ── Post chain on the swapchain path (the packaged game) ───────────────
+    // A backend whose post chain (HDR, bloom, tonemap, AA, TAA, SSR) lives only
+    // in the offscreen viewport frame cannot tell a game from an editor that has
+    // not sized its viewport yet: both have no viewport request. The game says
+    // so here — every frame, so this only stores a flag; Render() does the work.
+    // true = run the viewport frame at the back buffer's size and present its
+    // result; false (default) = draw the scene straight into the back buffer.
+    // OpenGL and Metal attach their chain to whatever target is bound and ignore
+    // it. Declared last so every vtable slot before it stays where it was.
+    virtual void SetSwapchainPostProcessing(bool /*enabled*/) {}
+
 protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
