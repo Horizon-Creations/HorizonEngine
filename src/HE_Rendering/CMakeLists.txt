@@ -22,7 +22,9 @@ set(HE_CORE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../HE_Core/include)
 # The material path itself, precompiled variants included, is in every build.
 add_library(he_materialshader STATIC
     src/material/MaterialShaderLibrary.cpp
-    include/material/MaterialShaderLibrary.h)
+    include/material/MaterialShaderLibrary.h
+    src/material/MaterialShaderBake.cpp
+    include/material/MaterialShaderBake.h)
 target_include_directories(he_materialshader PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${HE_CORE_INCLUDE})

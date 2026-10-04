@@ -55,6 +55,10 @@ public:
     // Returns ID3D12Resource* for the viewport color RT (or nullptr if not allocated).
     // The editor allocates an SRV in its ImGui heap and calls SetViewportImGuiHandle.
     void* GetViewportD3DResource() const;
+    // The packaged game: Render() runs the viewport frame at the back buffer's
+    // size and copies its result into the back buffer (docs/spielpfad-postfx-
+    // parity-analyse-2026-10-03.md, Weg a).
+    void  SetSwapchainPostProcessing(bool enabled) override;
     // True when SetViewportSize changed the RT size since the last call to
     // ClearViewportResourceChanged(). The editor checks this to re-register the SRV.
     bool  HasViewportResourceChanged() const;

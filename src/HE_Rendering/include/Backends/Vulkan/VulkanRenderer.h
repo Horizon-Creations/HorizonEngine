@@ -106,6 +106,10 @@ public:
 	// Returns VkImageView for the viewport color image (for ImGui_ImplVulkan_AddTexture).
 	void* GetViewportVkImageView() const;
 	void* GetViewportVkSampler()   const;
+	// The packaged game: Render() runs the viewport frame at the swapchain's
+	// size and draws its result into the swapchain image (docs/spielpfad-
+	// postfx-parity-analyse-2026-10-03.md, Weg a).
+	void  SetSwapchainPostProcessing(bool enabled) override;
 	bool  HasViewportResourceChanged() const;
 	void  ClearViewportResourceChanged();
 	// The Vulkan stand-in for a D3D12 fence value. Every frame handed to the
@@ -445,12 +449,28 @@ private:
 	// be an array view (a plain 2D view fails validation against that SPIR-V).
 	VkImageView     m_whiteArrayView   = VK_NULL_HANDLE;
 	// 1x1 six-layer white CUBE for the preamble's heSkyEnv (samplerCube, set 0
-	// binding 15). This backend has no sky-environment cube and never raises
-	// heLight.fog.z, so it is never sampled — but the layout must declare every
-	// binding the SPIR-V uses statically, and the view type must match.
+	// binding 15) while the real sky cube below does not exist yet (heLight.fog.z
+	// is 0 then, so it is never sampled) — the layout must declare every binding
+	// the SPIR-V uses statically, and the view type must match.
 	VkImage         m_whiteCubeImage   = VK_NULL_HANDLE;
 	VkDeviceMemory  m_whiteCubeMem     = VK_NULL_HANDLE;
 	VkImageView     m_whiteCubeView    = VK_NULL_HANDLE;
+	// Image-based-ambient sky cube for graph materials (heSkyEnv, binding 15):
+	// the SAME HE::BuildSkyEnvFaceRow bake GL and Metal sample, re-baked on the
+	// CPU when the sun moves and copied in from a per-frame staging buffer at
+	// the top of the frame (updateSkyEnvCube). RGBA16F, not GL's RGBA32F:
+	// linear filtering of R32G32B32A32_SFLOAT is optional in Vulkan, of
+	// R16G16B16A16_SFLOAT mandatory. m_skyEnvValid gates heLight.fog.z.
+	static constexpr int k_skyEnvFace = 128; // GL/Metal face size
+	VkImage         m_skyEnvImage      = VK_NULL_HANDLE;
+	VkDeviceMemory  m_skyEnvMem        = VK_NULL_HANDLE;
+	VkImageView     m_skyEnvView       = VK_NULL_HANDLE;
+	MatFrameBuf     m_skyEnvStaging[2];        // k_maxFramesInFlight, host-visible
+	bool            m_skyEnvValid      = false; // the image holds a bake (fog.z may be raised)
+	glm::vec3       m_skyEnvSunDir     = glm::vec3(0.0f);
+	void createSkyEnvCube();
+	void destroySkyEnvCube();
+	void updateSkyEnvCube(VkCommandBuffer cmd);
 
 	// ── MaterialComponent override + hot-reload (A2) ─────────────────────────
 	// Override-material textures cached by material UUID (parallel to the baked per-mesh
@@ -556,6 +576,15 @@ private:
 	// Color image sampled by ImGui; depth image for the viewport render pass.
 	void createViewportResources(uint32_t w, uint32_t h);
 	void destroyViewportResources();
+	// Scene binding 3 (AO) back to the 1×1 white fallback, for when the
+	// viewport set — and with it the SSAO blur target — is gone.
+	void pointSceneAoAtWhite();
+	// SetSwapchainPostProcessing: the game asks for the post chain on the
+	// swapchain path. m_gameViewport = the viewport set is the game's
+	// (swapchain sized), not an editor request — dropped when the game stops
+	// asking, or the leftover set would send Render() down the editor branch.
+	bool           m_swapchainPostFx = false;
+	bool           m_gameViewport    = false;
 	VkImage        m_viewportImage   = VK_NULL_HANDLE;
 	VkDeviceMemory m_viewportMemory  = VK_NULL_HANDLE;
 	VkImageView    m_viewportView    = VK_NULL_HANDLE;
@@ -627,6 +656,10 @@ private:
 	VkPipeline            m_fxaaPipe         = VK_NULL_HANDLE;
 	VkPipeline            m_smaaPipe         = VK_NULL_HANDLE; // AA = SMAA
 	VkPipeline            m_aaBlitPipe       = VK_NULL_HANDLE; // AA = Off passthrough
+	// The game's present: the same passthrough against m_renderPass (swapchain
+	// format, depth test off), sampling m_viewportImage through m_presentDS.
+	VkPipeline            m_presentPipe      = VK_NULL_HANDLE;
+	VkDescriptorSet       m_presentDS        = VK_NULL_HANDLE;
 
 	// Anti-aliasing method in force, already resolved against this backend's
 	// capabilities (docs/anti-aliasing-plan.md). The final post pass writes

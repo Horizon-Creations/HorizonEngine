@@ -800,6 +800,9 @@ TEST_CASE("WidgetManager: the create log names interpreted logic as interpreted"
     CHECK(lines[0].find("interpreted logic") != std::string::npos);
     CHECK(lines[1].find("plain.hasset") != std::string::npos);
     CHECK(lines[1].find("no logic") != std::string::npos);
+    // Neither is "compiled": nothing here was in the compiled-class table.
+    CHECK(lines[0].find("compiled") == std::string::npos);
+    CHECK(lines[1].find("compiled") == std::string::npos);
 }
 
 TEST_CASE("HorizonWorld: injected app-level WidgetManager persists across clear()")

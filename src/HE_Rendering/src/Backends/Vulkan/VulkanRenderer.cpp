@@ -7,10 +7,12 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/packing.hpp>
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
 #include <fstream>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -29,6 +31,9 @@
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/SkyNoise3D.h>
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, compiled to SPIR-V for the sky pass
+#include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake (graph materials' heSkyEnv)
+#include <JobSystem/JobSystem.h>             // parallel_for for that bake
+#include <glm/gtc/packing.hpp>               // packHalf1x16 (RGBA16F cube upload)
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h"                   // he::shaderc::compile (sky pass)
 #endif
@@ -405,8 +410,64 @@ void VulkanRenderer::Render()
         else ++it;
     }
 
+    // The packaged game (SetSwapchainPostProcessing): the post chain — HDR,
+    // bloom, tonemap, AA, TAA, SSR, and on Vulkan GI and SSAO too — exists only
+    // in the viewport frame, so the game runs that frame at the swapchain's
+    // size and draws the finished RGBA8 image into the swapchain pass below.
+    // Sized from m_swapExtent (physical pixels), not the window; a recreate at
+    // acquire/present time is picked up here on the next frame. An editor
+    // request (HE_CAPTURE_FRAME asks for one at the window's logical size) is
+    // ignored meanwhile, and the capture reads this very image. An sRGB
+    // swapchain is left on the old path: the present pass would encode the
+    // already gamma-encoded image a second time.
+    const bool swapIsSrgb = m_swapFormat == VK_FORMAT_B8G8R8A8_SRGB
+                         || m_swapFormat == VK_FORMAT_R8G8B8A8_SRGB
+                         || m_swapFormat == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+    // A minimised window reports a 0×0 surface: the set stays as it is (no
+    // rebuild, no teardown) and the frame below falls through to the direct
+    // path, which is what that frame did before.
+    const bool gameChain = m_swapchainPostFx && m_postFxReady && m_presentPipe && m_presentDS
+                        && !swapIsSrgb;
+    if (gameChain)
+    {
+        if (m_swapExtent.width > 0 && m_swapExtent.height > 0
+            && (!m_gameViewport || m_viewportW != m_swapExtent.width || m_viewportH != m_swapExtent.height))
+        {
+            vkDeviceWaitIdle(m_device);
+            createViewportResources(m_swapExtent.width, m_swapExtent.height);
+            m_gameViewport = true;
+            if (m_viewportImage && m_viewportW == m_swapExtent.width && m_viewportH == m_swapExtent.height)
+                HE_LOG_INFO(RHI, "VulkanRenderer: swapchain post chain active (%ux%u)",
+                            m_swapExtent.width, m_swapExtent.height);
+        }
+    }
+    else if (m_gameViewport)
+    {
+        // The game stopped asking (application mode): drop its set so the
+        // branch below draws straight into the swapchain again. Scene binding 3
+        // pointed at the SSAO blur target that goes with it, and the temporal
+        // histories would blend a stale world when the chain returns. One wait,
+        // on the switch only.
+        vkDeviceWaitIdle(m_device);
+        destroyViewportResources();
+        pointSceneAoAtWhite();
+        m_gameViewport      = false;
+        m_taaHistoryValid   = false;
+        m_ssrColorHistValid = false;
+        m_ssrHistValid      = false;
+    }
+    else if (m_swapchainPostFx && swapIsSrgb)
+    {
+        static bool s_srgbLogged = false;
+        if (!s_srgbLogged)
+        {
+            s_srgbLogged = true;
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: sRGB-only swapchain — the game runs without its post chain");
+        }
+    }
+
     // Resize viewport resources if the editor requested a different size.
-    if (m_viewportReqW > 0 && m_viewportReqH > 0 &&
+    if (!gameChain && m_viewportReqW > 0 && m_viewportReqH > 0 &&
         (m_viewportReqW != m_viewportW || m_viewportReqH != m_viewportH))
     {
         vkDeviceWaitIdle(m_device);
@@ -431,7 +492,11 @@ void VulkanRenderer::Render()
         m_shadowSizeDirty = false;
     }
 
-    const bool useViewport = m_viewportImage != VK_NULL_HANDLE
+    // The game frame needs the full HDR set: without it DrawViewportFrame takes
+    // its LDR fallback, whose pipelines are built against the swapchain pass.
+    const bool gameFrame   = gameChain && m_viewportImage && m_hdrFB && m_ldrFB && m_fxaaFB
+                          && m_viewportW == m_swapExtent.width && m_viewportH == m_swapExtent.height;
+    const bool useViewport = !gameChain && m_viewportImage != VK_NULL_HANDLE
                           && m_viewportW > 0 && m_viewportH > 0;
 
     const uint32_t fi = m_currentFrame;
@@ -470,13 +535,29 @@ void VulkanRenderer::Render()
     clears[0].color        = { { 0.0f, 0.0f, 0.0f, 1.0f } };
     clears[1].depthStencil = { 1.0f, 0 };
 
-    if (useViewport)
+    if (useViewport || gameFrame)
     {
         // The whole offscreen half of the frame — cascades, decal depth pre-pass,
         // GI/SSAO/SSR, scene, PostFX, AA resolve, UI canvas. Lives in its own
         // method because RenderSceneImage() records exactly this and nothing of
         // the swapchain part below.
         DrawViewportFrame(cmd);
+        if (gameFrame)
+        {
+            // The image is SHADER_READ_ONLY already (final AA / UI pass), but
+            // neither pass has a dependency to EXTERNAL that makes its writes
+            // visible to the present pass's fragment shader — and
+            // runPostFXBarrier skips a barrier whose layouts match.
+            VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            b.oldLayout = b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = m_viewportImage;
+            b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        }
     }
     else
     {
@@ -486,6 +567,7 @@ void VulkanRenderer::Render()
         // split, with `useViewport` resolved to false. No post chain on this
         // path, so nothing would resolve a TAA jitter.
         m_taaFrame = false;
+        updateSkyEnvCube(cmd); // before any pass — graph materials' heSkyEnv
         EncodeShadowMap(cmd, float(std::max(m_swapExtent.width,  1u))
                            / float(std::max(m_swapExtent.height, 1u)));
         m_decalDepthActive = &m_decalDepth;
@@ -501,7 +583,24 @@ void VulkanRenderer::Render()
     rpbi.clearValueCount   = 2;
     rpbi.pClearValues      = clears;
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-    if (!useViewport)
+    if (gameFrame)
+    {
+        // The game's frame, finished (UI canvas included): one fullscreen
+        // triangle samples it into the swapchain image — the format swizzle
+        // RGBA8 → swapchain format happens in the write. Same size, so every
+        // fragment lands on a texel centre. The overlay (if any) draws on top.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_presentPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_postFxPipeLayout, 0, 1, &m_presentDS, 0, nullptr);
+        const float p[4] = { 0, 0, 0, 0 };
+        vkCmdPushConstants(cmd, m_postFxPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, p);
+        VkViewport vp{ 0, 0, float(m_swapExtent.width), float(m_swapExtent.height), 0, 1 };
+        VkRect2D   sc{ { 0, 0 }, m_swapExtent };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd,  0, 1, &sc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
+    else if (!useViewport)
     {
         DrawScene(cmd, m_swapExtent.width, m_swapExtent.height);
         // UI canvas — inline in the swapchain pass (game / non-editor path).
@@ -582,6 +681,9 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     if (m_taaFrame)
         m_taaJitter = HE::taaJitter(m_taaFrameIndex++);
     m_taaSceneSorted = false;
+
+    // Graph materials' sky cube (heSkyEnv): a transfer, so before every pass.
+    updateSkyEnvCube(cmd);
 
     // Cascade shadow maps first, in their own render passes (before the scene
     // pass), fit against the aspect of the target the scene will be drawn into.
@@ -1051,6 +1153,17 @@ void VulkanRenderer::pickPhysicalDevice()
     std::vector<VkPhysicalDevice> devs(count);
     vkEnumeratePhysicalDevices(m_instance, &count, devs.data());
     m_physDevice = devs[0];
+    // Name the device: a CI image test on a software ICD (lavapipe) must be able
+    // to show in its log that "llvmpipe" — and not some other ICD — drew it.
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(m_physDevice, &props);
+    char line[384];
+    std::snprintf(line, sizeof line,
+        "VulkanRenderer: device 0 of %u: %s (Vulkan %u.%u.%u, driver 0x%x)",
+        count, props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
+        VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion),
+        props.driverVersion);
+    HE_LOG_INFO(RHI, "%s", line);
 }
 
 void VulkanRenderer::createDevice()
@@ -1198,9 +1311,18 @@ void VulkanRenderer::createSwapchain(uint32_t w, uint32_t h)
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_physDevice, m_surface, &fmtCount, nullptr);
     std::vector<VkSurfaceFormatKHR> fmts(fmtCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_physDevice, m_surface, &fmtCount, fmts.data());
+    // UNORM first: everything that reaches this image is already display-encoded
+    // (the tonemap pass writes gamma), an _SRGB format would encode it again.
     VkSurfaceFormatKHR chosen = fmts[0];
-    for (auto& f : fmts)
-        if (f.format == VK_FORMAT_B8G8R8A8_UNORM) { chosen = f; break; }
+    bool unorm = false;
+    for (VkFormat want : { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM })
+    {
+        for (auto& f : fmts)
+            if (f.format == want) { chosen = f; unorm = true; break; }
+        if (unorm) break;
+    }
+    if (!unorm)
+        HE_LOG_WARN(RHI, "VulkanRenderer: no UNORM swapchain format offered, using %d", int(chosen.format));
     m_swapFormat = chosen.format;
     if (caps.currentExtent.width != UINT32_MAX)
         m_swapExtent = caps.currentExtent;
@@ -2390,6 +2512,9 @@ void VulkanRenderer::createMaterialResources()
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
     }
+    // The real sky cube that replaces the white one once baked (optional —
+    // a failure keeps fog.z at 0, see createSkyEnvCube).
+    createSkyEnvCube();
 
     // ── Descriptor set 0 layout: HE::vkmat::kBindings (VulkanMaterialLayout.h), the
     //    table he_tests reflects every node shader's SPIR-V against. Canonical bindings
@@ -2513,6 +2638,151 @@ void VulkanRenderer::destroyMaterialResources()
     if (m_whiteCubeView)     { vkDestroyImageView(m_device, m_whiteCubeView, nullptr);          m_whiteCubeView  = VK_NULL_HANDLE; }
     if (m_whiteCubeImage)    { vkDestroyImage(m_device, m_whiteCubeImage, nullptr);             m_whiteCubeImage = VK_NULL_HANDLE; }
     if (m_whiteCubeMem)      { vkFreeMemory(m_device, m_whiteCubeMem, nullptr);                 m_whiteCubeMem   = VK_NULL_HANDLE; }
+    destroySkyEnvCube();
+}
+
+// ── Image-based-ambient sky cube for graph materials (heSkyEnv, binding 15) ──
+// GL and Metal bake HE::SkyColorCPU into a 128² cube and raise heLight.fog.z;
+// this backend bound a white cube and kept fog.z at 0, so graph materials had
+// no sky ambient, no specular IBL and no fog (heApplyFog needs the cube for its
+// colour). The bake below is the same shared row function at the same size;
+// only the upload is Vulkan's: a persistently mapped staging buffer per frame
+// in flight and a copy recorded into the frame's own command buffer, so a
+// moving sun never stalls the queue the way a one-shot submit would.
+void VulkanRenderer::createSkyEnvCube()
+{
+    const VkFormat fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.flags         = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = fmt;
+    ici.extent        = { static_cast<uint32_t>(k_skyEnvFace), static_cast<uint32_t>(k_skyEnvFace), 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 6;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool ok = vkCreateImage(m_device, &ici, nullptr, &m_skyEnvImage) == VK_SUCCESS;
+    if (ok)
+    {
+        VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, m_skyEnvImage, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        ok = vkAllocateMemory(m_device, &mai, nullptr, &m_skyEnvMem) == VK_SUCCESS;
+        if (ok) vkBindImageMemory(m_device, m_skyEnvImage, m_skyEnvMem, 0);
+    }
+    if (ok)
+    {
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image            = m_skyEnvImage;
+        vci.viewType         = VK_IMAGE_VIEW_TYPE_CUBE;
+        vci.format           = fmt;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+        ok = vkCreateImageView(m_device, &vci, nullptr, &m_skyEnvView) == VK_SUCCESS;
+    }
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(k_skyEnvFace) * k_skyEnvFace * 6 * 4 * sizeof(uint16_t);
+    for (uint32_t f = 0; ok && f < k_maxFramesInFlight; ++f)
+    {
+        MatFrameBuf& sb = m_skyEnvStaging[f];
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = bytes;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        ok = vkCreateBuffer(m_device, &bci, nullptr, &sb.buf) == VK_SUCCESS;
+        if (!ok) break;
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, sb.buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        ok = vkAllocateMemory(m_device, &mai, nullptr, &sb.mem) == VK_SUCCESS;
+        if (!ok) break;
+        vkBindBufferMemory(m_device, sb.buf, sb.mem, 0);
+        ok = vkMapMemory(m_device, sb.mem, 0, bytes, 0, &sb.mapped) == VK_SUCCESS;
+    }
+    if (!ok)
+    {
+        // Not fatal: graph materials keep the white stand-in with fog.z = 0,
+        // exactly the state before this cube existed.
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: sky environment cube unavailable — graph materials keep flat ambient");
+        destroySkyEnvCube();
+    }
+    m_skyEnvValid = false;
+}
+
+void VulkanRenderer::destroySkyEnvCube()
+{
+    for (MatFrameBuf& sb : m_skyEnvStaging)
+    {
+        if (sb.mapped) vkUnmapMemory(m_device, sb.mem);
+        if (sb.buf)    vkDestroyBuffer(m_device, sb.buf, nullptr);
+        if (sb.mem)    vkFreeMemory(m_device, sb.mem, nullptr);
+        sb = {};
+    }
+    if (m_skyEnvView)  { vkDestroyImageView(m_device, m_skyEnvView, nullptr); m_skyEnvView  = VK_NULL_HANDLE; }
+    if (m_skyEnvImage) { vkDestroyImage(m_device, m_skyEnvImage, nullptr);    m_skyEnvImage = VK_NULL_HANDLE; }
+    if (m_skyEnvMem)   { vkFreeMemory(m_device, m_skyEnvMem, nullptr);        m_skyEnvMem   = VK_NULL_HANDLE; }
+    m_skyEnvValid = false;
+}
+
+// Recorded OUTSIDE any render pass, before the first pass of the frame. The sun
+// is m_renderWorld.sunDirection — what GL and Metal bake from — but on this
+// backend the extractor runs inside DrawScene, i.e. AFTER this point, so the
+// bake can trail the sun by one frame (EncodeShadowMap re-extracts first when
+// shadows are on). For a low-frequency ambient cube under GL's own 0.11°
+// dead-band that is invisible; a static sun is exact from the second frame.
+void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
+{
+    if (!m_skyEnvView || !m_skyEnvStaging[m_currentFrame].mapped) return;
+    const glm::vec3 sunDir = m_renderWorld.sunDirection;
+    if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
+
+    constexpr int N = k_skyEnvFace;
+    std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
+    // Parallel over (face, row) like GL/Metal: rows are independent and
+    // HE::SkyColorCPU is pure. Grain 1 — a row is tens of µs.
+    parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
+    {
+        const int f = static_cast<int>(idx / N);
+        const int t = static_cast<int>(idx % N);
+        HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
+    }, "SkyEnvBake", 1);
+    uint16_t* dst = static_cast<uint16_t*>(m_skyEnvStaging[m_currentFrame].mapped);
+    for (size_t i = 0; i < px.size(); ++i)
+        dst[i] = glm::packHalf1x16(px[i]);
+
+    // Vulkan cube faces are +X,-X,+Y,-Y,+Z,-Z with GL's (s,t) table, and row 0 of
+    // the upload is t = 0 in both APIs — the bake's face order and texel layout
+    // go in unchanged, no flip (the same claim SkyEnvBake.h makes for Metal).
+    const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+    VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = m_skyEnvImage; b.subresourceRange = range;
+    // The previous frame (still in flight on the same queue) may be sampling the
+    // cube: the barrier's first scope covers every earlier submission, so its
+    // fragment reads finish before the copy overwrites the texels. The first
+    // bake comes from UNDEFINED — nothing has sampled it yet (fog.z was 0).
+    b.oldLayout     = m_skyEnvValid ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    b.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.srcAccessMask = m_skyEnvValid ? VK_ACCESS_SHADER_READ_BIT : 0u;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd,
+        m_skyEnvValid ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    VkBufferImageCopy region{};
+    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6 };
+    region.imageExtent      = { static_cast<uint32_t>(N), static_cast<uint32_t>(N), 1 };
+    vkCmdCopyBufferToImage(cmd, m_skyEnvStaging[m_currentFrame].buf, m_skyEnvImage,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    b.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+    m_skyEnvSunDir = sunDir;
+    m_skyEnvValid  = true;
 }
 
 // `precompiled` (the pak's baked SPIR-V for Vulkan, MaterialShaderLibrary::precompiledFor)
@@ -2562,8 +2832,23 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     // through to the runtime cross-compile, which is what rendered that pak before
     // variants were consumed here at all. Only when both roads are closed is the miss
     // cached.
+    // The baked clustered twin (Thema 117) goes first, under the same rule as the
+    // cross-compiled one below (cluster SSBOs exist, A/B guard not set): only then
+    // does the draw loop write bindings 24..26 and DrawScene open the gate.
     bool built = false;
-    if (precompiled)
+    if (precompiled && m_forwardClustered && m_clusterReady && !precompiled->fragmentClustered.empty())
+    {
+        std::vector<uint32_t> preVs, preFs;
+        const std::string& vsBytes = precompiled->vertexClustered.empty()
+            ? precompiled->vertex : precompiled->vertexClustered;
+        if (HE::MaterialShaderLibrary::spirvFromBytes(vsBytes, preVs)
+            && HE::MaterialShaderLibrary::spirvFromBytes(precompiled->fragmentClustered, preFs))
+            built = makePair(preVs, preFs, "baked variant, clustered");
+        if (!built)
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: A4 baked clustered material variant rejected — "
+                "trying the baked 8-light window variant");
+    }
+    if (!built && precompiled)
     {
         std::vector<uint32_t> preVs, preFs;
         if (HE::MaterialShaderLibrary::spirvFromBytes(precompiled->vertex, preVs)
@@ -3479,15 +3764,18 @@ void VulkanRenderer::createPostFXPipelines()
     slci.bindingCount = 2; slci.pBindings = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_postFxDSLayout), "postfx dsl");
 
-    VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10 };
+    // 5 chain sets + m_presentDS (the game's present pass), 2 samplers each.
+    VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12 };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    dpci.maxSets = 5; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    dpci.maxSets = 6; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_postFxDSPool), "postfx pool");
 
     VkDescriptorSetLayout layouts[5]; for (auto& l : layouts) l = m_postFxDSLayout;
     VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     dsai.descriptorPool = m_postFxDSPool; dsai.descriptorSetCount = 5; dsai.pSetLayouts = layouts;
     vkCheck(vkAllocateDescriptorSets(m_device, &dsai, m_postFxDS), "postfx ds alloc");
+    dsai.descriptorSetCount = 1;
+    vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_presentDS), "present ds alloc");
 
     // Dummy 1×1 RGBA8 image for unused binding slots.
     {
@@ -3616,7 +3904,8 @@ void VulkanRenderer::createPostFXPipelines()
         return;
     }
 
-    auto makePipe = [&](VkShaderModule fs, VkRenderPass rp, VkPipeline& out) {
+    auto makePipe = [&](VkShaderModule fs, VkRenderPass rp, VkPipeline& out,
+                        const VkPipelineDepthStencilStateCreateInfo* depth = nullptr) {
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vsM; stages[0].pName = "main";
@@ -3644,6 +3933,7 @@ void VulkanRenderer::createPostFXPipelines()
         pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia;
         pci.pViewportState = &vp; pci.pRasterizationState = &rs;
         pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
+        pci.pDepthStencilState = depth;
         pci.pDynamicState = &dyn; pci.layout = m_postFxPipeLayout;
         pci.renderPass = rp; pci.subpass = 0;
         vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out), "postfx pipeline");
@@ -3655,6 +3945,15 @@ void VulkanRenderer::createPostFXPipelines()
     makePipe(fxFS, m_postFxFinalRP, m_fxaaPipe);
     makePipe(smFS, m_postFxFinalRP, m_smaaPipe);     // AA = SMAA
     makePipe(btFS, m_postFxFinalRP, m_aaBlitPipe);   // AA = Off
+    // The game's present (SetSwapchainPostProcessing): the finished RGBA8
+    // viewport image into the swapchain pass. A pass, not vkCmdCopyImage —
+    // RGBA→BGRA would swap red and blue — and not a blit, which would need
+    // TRANSFER_DST on the swapchain and a LOAD variant of m_renderPass. That
+    // subpass has a depth attachment, so the pipeline states one (off).
+    {
+        VkPipelineDepthStencilStateCreateInfo noDepth{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        makePipe(btFS, m_renderPass, m_presentPipe, &noDepth);
+    }
     createTaaPipelines(vsM);                         // optional — see taaReady()
 
     for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS}) vkDestroyShaderModule(m_device,m,nullptr);
@@ -3751,9 +4050,10 @@ void VulkanRenderer::destroyPostFXPipelines()
 {
     m_postFxReady = false;
     destroyTaaPipelines();
-    for (auto p : {m_bloomBrightPipe,m_bloomBlurPipe,m_tonemapPipe,m_fxaaPipe,m_smaaPipe,m_aaBlitPipe})
+    for (auto p : {m_bloomBrightPipe,m_bloomBlurPipe,m_tonemapPipe,m_fxaaPipe,m_smaaPipe,m_aaBlitPipe,m_presentPipe})
         if (p) vkDestroyPipeline(m_device, p, nullptr);
-    m_bloomBrightPipe=m_bloomBlurPipe=m_tonemapPipe=m_fxaaPipe=m_smaaPipe=m_aaBlitPipe=VK_NULL_HANDLE;
+    m_bloomBrightPipe=m_bloomBlurPipe=m_tonemapPipe=m_fxaaPipe=m_smaaPipe=m_aaBlitPipe=m_presentPipe=VK_NULL_HANDLE;
+    m_presentDS = VK_NULL_HANDLE;   // freed with the pool below
     if (m_postFxPipeLayout) { vkDestroyPipelineLayout(m_device, m_postFxPipeLayout, nullptr); m_postFxPipeLayout=VK_NULL_HANDLE; }
     if (m_postFxDSPool)     { vkDestroyDescriptorPool(m_device, m_postFxDSPool, nullptr); m_postFxDSPool=VK_NULL_HANDLE; }
     if (m_postFxDSLayout)   { vkDestroyDescriptorSetLayout(m_device, m_postFxDSLayout, nullptr); m_postFxDSLayout=VK_NULL_HANDLE; }
@@ -3826,16 +4126,19 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
 
     // Write descriptor sets: [0]=bloomBright, [1]=blurH(bloom[0]), [2]=blurV(bloom[1]),
     //                         [3]=tonemap, [4]=fxaa
+    //                         and the game's present pass (the finished viewport image)
     struct DSEntry { VkDescriptorSet set; VkImageView t0; VkImageView t1; };
-    DSEntry dss[5] = {
+    DSEntry dss[6] = {
         { m_postFxDS[0], m_hdrView,      m_dummyView    },
         { m_postFxDS[1], m_bloomView[0], m_dummyView    },
         { m_postFxDS[2], m_bloomView[1], m_dummyView    },
         { m_postFxDS[3], m_hdrView,      m_bloomView[0] },
         { m_postFxDS[4], m_ldrView,      m_dummyView    },
+        { m_presentDS,   m_viewportView ? m_viewportView : m_dummyView, m_dummyView },
     };
     for (auto& d : dss)
     {
+        if (!d.set) continue;
         VkDescriptorImageInfo ii0{ VK_NULL_HANDLE, d.t0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo ii1{ VK_NULL_HANDLE, d.t1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet w[2]{};
@@ -4312,6 +4615,26 @@ void VulkanRenderer::destroyViewportResources()
     m_viewportLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
+// Back to the 1×1 white AO fallback every scene set starts on, once the SSAO
+// blur target that createSSAOTargets pointed binding 3 at is gone. Bindings
+// 4–7 (GI) are untouched by destroyViewportResources and binding 8 is
+// rewritten by every DrawScene.
+void VulkanRenderer::pointSceneAoAtWhite()
+{
+    if (!m_ssaoWhiteView || !m_ssaoSampler) return;
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (!m_frameUBO[i].set) continue;
+        VkDescriptorImageInfo wdii{ m_ssaoSampler, m_ssaoWhiteView,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet aw{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        aw.dstSet = m_frameUBO[i].set; aw.dstBinding = 3; aw.descriptorCount = 1;
+        aw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        aw.pImageInfo = &wdii;
+        vkUpdateDescriptorSets(m_device, 1, &aw, 0, nullptr);
+    }
+}
+
 void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
 {
     // Retire the OLD color image/view/memory: ImGui's viewport descriptor still points at
@@ -4483,6 +4806,11 @@ void  VulkanRenderer::SetViewportSize(uint32_t w, uint32_t h)
 {
     m_viewportReqW = w;
     m_viewportReqH = h;
+}
+
+void VulkanRenderer::SetSwapchainPostProcessing(bool enabled)
+{
+    m_swapchainPostFx = enabled;   // Render() builds or drops the set
 }
 
 bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)
@@ -4771,24 +5099,12 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
         createSSAOTargets(liveW, liveH);
         createDecalDepth(m_decalDepthVp, liveW, liveH);
     }
-    else if (m_ssaoWhiteView && m_ssaoSampler)
+    else
     {
         // No live viewport (the direct-to-swapchain path): there is no size to
         // rebuild against, and createSSAOTargets pointed scene binding 3 at the
-        // screenshot's blur target, which is gone. Back to the 1×1 white AO
-        // fallback every set starts on. Bindings 4–7 (GI) are untouched by
-        // destroyViewportResources and binding 8 is rewritten by every DrawScene.
-        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
-        {
-            if (!m_frameUBO[i].set) continue;
-            VkDescriptorImageInfo wdii{ m_ssaoSampler, m_ssaoWhiteView,
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-            VkWriteDescriptorSet aw{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            aw.dstSet = m_frameUBO[i].set; aw.dstBinding = 3; aw.descriptorCount = 1;
-            aw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            aw.pImageInfo = &wdii;
-            vkUpdateDescriptorSets(m_device, 1, &aw, 0, nullptr);
-        }
+        // screenshot's blur target, which is gone.
+        pointSceneAoAtWhite();
     }
     // The SSR history is the screenshot camera's now (a same-size request kept
     // the copy, and the frame just captured into it). So is TAA's — rebuilt
@@ -6309,6 +6625,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
                         &m_editorCamera);
+    // The UI canvas (Entity-UI + WidgetManager widgets) rides in the same
+    // RenderWorld — extract() just cleared it. Mirrors GL/Metal; without this
+    // call every UI pass below sees an empty list and draws nothing.
+    m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+                          m_renderWorld);
 
 
     // Sky is independent of scene geometry — draw it before any early returns so it
@@ -6581,6 +6902,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.ssr[1] = m_ssrIntensity;
         lit.ssr[2] = m_ssrMaxRoughness;
         lit.ssr[3] = 0.0f;
+        // Height fog + the two image gates, the GL/Metal fill verbatim. z: the
+        // baked sky cube is bound at binding 15 (image-based ambient, specular
+        // IBL, fog colour). w: this frame's blurred SSAO is bound at binding 16 —
+        // the exact gate the built-in shader's viewport.z uses, so a graph
+        // material is occluded on precisely the frames a built-in one is.
+        lit.fog[0] = m_environment.fogDensity;
+        lit.fog[1] = m_environment.fogHeightFalloff;
+        lit.fog[2] = m_skyEnvValid      ? 1.0f : 0.0f;
+        lit.fog[3] = m_ssaoRanThisFrame ? 1.0f : 0.0f;
         lit.ambient[0] = m_renderWorld.ambient.r;
         lit.ambient[1] = m_renderWorld.ambient.g;
         lit.ambient[2] = m_renderWorld.ambient.b;
@@ -6921,15 +7251,30 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 localShadows ? m_localShadowView : m_whiteArrayView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(14, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &localII);
-                            // heSkyEnv (15): white cube — fog.z stays 0 here.
-                            VkDescriptorImageInfo skyII{ m_albedoSampler, m_whiteCubeView,
-                                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            // heSkyEnv (15): the baked sky cube once updateSkyEnvCube
+                            // filled it (fog.z = 1 exactly then), the white cube before.
+                            // Linear-CLAMP like GL/Metal's cube sampler; the repeat
+                            // address mode of m_albedoSampler is moot on a cube, but the
+                            // SSAO sampler is the clamp one this backend already has.
+                            VkDescriptorImageInfo skyII{
+                                m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler,
+                                m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
-                            // heAO (16), heGIReflFwd (32), heCloudShadow (33): white —
-                            // their gates (fog.w, giRefl.z, cloudShadowB.x) stay 0 here.
+                            // heAO (16): this frame's blurred SSAO — the image the
+                            // built-in shader reads at scene binding 3, parked in
+                            // SHADER_READ_ONLY by the blur pass's finalLayout. White
+                            // otherwise; fog.w is 0 then. heLitP texelFetches it, so the
+                            // sampler is only there because the descriptor is combined.
                             VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
+                            VkDescriptorImageInfo aoII{
+                                m_ssaoRanThisFrame ? m_ssaoSampler      : m_albedoSampler,
+                                m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);
+                            // heGIReflFwd (32), heCloudShadow (33): white — their gates
+                            // (giRefl.z, cloudShadowB.x) stay 0 here.
                             // heGIIrradiance / heGIVisibility (17/18): the probe atlases
                             // under matGiProbes (the gate FillMaterialGIProbe raised), in
                             // GENERAL like everywhere else they are sampled; white
@@ -9590,6 +9935,13 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // Extract with the scene pass's aspect (Metal lesson 5846efc: a mismatched
     // camera misaligns the screen-space mask → swimming shadows).
     const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
+    // And with this frame's sun: runGi() runs before DrawScene(), which used to
+    // be the only place feeding the day-night state, so the GI mask traced
+    // against the previous frame's sun (Thema 131). Same call as DrawScene.
+    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                            m_environment.sunColor, m_environment.sunIntensity,
+                            m_environment.moonColor, m_environment.moonIntensity,
+                            m_environment.cloudCoverage);
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
@@ -12174,12 +12526,14 @@ void VulkanRenderer::createUIPipeline()
         vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_uiAtlasDescPool), "ui atlas desc pool");
     }
 
-    // Push constant layout: UIPush (80 bytes) visible to both stages.
+    // Push constant layout: UIPush (128 bytes, the guaranteed minimum of
+    // maxPushConstantsSize) visible to both stages.
     VkPushConstantRange pcr{};
     pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pcr.offset     = 0;
     // vec4 rect + vec4 color + vec4 uvRect + vec2 viewport + vec2 params + vec4 rotation
-    pcr.size       = 80;
+    // + vec4 cornerRadius + vec4 style + uvec4 packed colours (see ui.frag)
+    pcr.size       = 128;
 
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plci.setLayoutCount         = 1;
@@ -12319,7 +12673,9 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
     // viewport/scissor before calling. This function only loops over UI objects
     // and issues draw calls — it does NOT begin/end a render pass.
     struct UIPush { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport;
-                    glm::vec2 params; glm::vec4 rotation; };
+                    glm::vec2 params; glm::vec4 rotation;
+                    glm::vec4 cornerRadius; glm::vec4 style; glm::uvec4 colors; };
+    static_assert(sizeof(UIPush) == 128, "UIPush must match ui.vert/ui.frag and the 128-byte range");
 
     // The atlas set must be bound for EVERY draw (the fragment shader statically
     // uses the sampler even for solid quads). Default to the shared font (key 0);
@@ -12377,8 +12733,15 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
         push.color    = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
         push.uvRect   = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
         push.viewport = glm::vec2(float(width), float(height));
-        push.params   = glm::vec2(obj.type == 2 ? 1.0f : 0.0f, 0.0f);
-        push.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
+        push.params   = glm::vec2(obj.type == 2 ? 1.0f : 0.0f, obj.borderWidth);
+        push.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y,
+                                  obj.gradientAngleDeg);
+        push.cornerRadius = obj.cornerRadius;
+        push.style    = glm::vec4(obj.blur, obj.innerShadowBlur, obj.gradient ? 1.0f : 0.0f,
+                                  obj.gradientShape == 1 ? 1.0f : 0.0f);
+        push.colors   = glm::uvec4(glm::packUnorm4x8(obj.borderColor),
+                                   glm::packUnorm4x8(obj.gradientColor),
+                                   glm::packUnorm4x8(obj.innerShadowColor), 0u);
         vkCmdPushConstants(cmd, m_uiPipeLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(UIPush), &push);

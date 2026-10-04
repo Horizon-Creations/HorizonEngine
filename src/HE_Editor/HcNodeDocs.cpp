@@ -637,6 +637,13 @@ namespace
 	  "you call its functions, bind its events and read its public variables — "
 	  "and how a page tells one of three identical cards apart. Leave Widget "
 	  "unwired for this widget's own slots." },
+	{ "widget.isDesignTime",
+	  "True while the widget designer runs this graph's Pre Construct to draw "
+	  "what it does, false in the game and in Play. Branch on it in Pre "
+	  "Construct: placeholder text and colours for the designer on true, the "
+	  "real data on false. At design time only Set Property, variables and "
+	  "pure Math, String, JSON and Date/Time calls run; files, saves, the "
+	  "network and Create Widget are skipped." },
 	{ "widget.stopAllAnimations",
 	  "Stops everything moving in the widget: the authored animations and the "
 	  "single-property ones both. What a screen being torn down or swapped "

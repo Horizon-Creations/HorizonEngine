@@ -327,6 +327,23 @@ void Runtime::setVariable(InstanceId id, const std::string& name, const Value& v
     i->vars[name] = v;
 }
 
+bool Runtime::setPublicVariable(InstanceId id, const std::string& name, const Value& v)
+{
+    Inst* i = find(id);
+    if (!i) return false;
+    if (i->compiled)
+    {
+        const CompiledVarInfo* vi = findVarInfo(*i->compiled, name);
+        if (!vi || vi->access != 0) return false;
+        i->compiled->setVariable(name, v);
+        return true;
+    }
+    const Variable* var = findVarInLevels(i->levels, name);
+    if (!var || var->access != 0 || var->scope != 0) return false; // locals are never externally visible
+    i->vars[name] = v;
+    return true;
+}
+
 void Runtime::reseedVariables(InstanceId id)
 {
     Inst* i = find(id);
@@ -643,20 +660,9 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     };
     ctx.setExternal = [this](uint32_t target, const std::string& var, const Value& val)
     {
-        Inst* i = find(target);
-        if (!i) { hcError("null reference — Set '" + var + "' on a null/destroyed object"); return; }
-        if (i->compiled)
-        {
-            const CompiledVarInfo* vi = findVarInfo(*i->compiled, var);
-            if (!vi || vi->access != 0)
-            { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
-            i->compiled->setVariable(var, val);
-            return;
-        }
-        const Variable* v = findVarInLevels(i->levels, var);
-        if (!v || v->access != 0 || v->scope != 0) // locals are never externally visible
-        { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
-        i->vars[var] = val;
+        if (!find(target)) { hcError("null reference — Set '" + var + "' on a null/destroyed object"); return; }
+        if (!setPublicVariable(target, var, val))
+            hcWarn("variable '" + var + "' not found or not public on the target object");
     };
     // Compiled-to-compiled shortcut: hand the object over so generated code can
     // call it directly. Interpreted instances answer null, which is exactly what
@@ -676,8 +682,8 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     // every fire so they never noticed, but a COMPILED instance binds its
     // Context once at addCompiled — registering it before setServices (the
     // GameInstance boot order) would leave it with dead services forever.
-    ctx.createWidget  = [this](const std::string& path) -> int
-    { return m_services.createWidget ? m_services.createWidget(path) : 0; };
+    ctx.createWidget  = [this](const std::string& path, const SpawnValues& spawn) -> int
+    { return m_services.createWidget ? m_services.createWidget(path, spawn) : 0; };
     ctx.showWidget    = [this](int id_) { if (m_services.showWidget) m_services.showWidget(id_); };
     ctx.hideWidget    = [this](int id_) { if (m_services.hideWidget) m_services.hideWidget(id_); };
     ctx.destroyWidget = [this](int id_) { if (m_services.destroyWidget) m_services.destroyWidget(id_); };
