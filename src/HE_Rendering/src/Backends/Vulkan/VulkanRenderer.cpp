@@ -9802,6 +9802,13 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // Extract with the scene pass's aspect (Metal lesson 5846efc: a mismatched
     // camera misaligns the screen-space mask → swimming shadows).
     const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
+    // And with this frame's sun: runGi() runs before DrawScene(), which used to
+    // be the only place feeding the day-night state, so the GI mask traced
+    // against the previous frame's sun (Thema 131). Same call as DrawScene.
+    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                            m_environment.sunColor, m_environment.sunIntensity,
+                            m_environment.moonColor, m_environment.moonIntensity,
+                            m_environment.cloudCoverage);
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
