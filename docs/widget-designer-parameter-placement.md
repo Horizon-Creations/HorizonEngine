@@ -67,3 +67,52 @@ Verworfen:
    muss dafür nicht angefasst werden, nur ihr Aufrufort zieht um.
 7. Nur die Designer-Ansicht (`viewMode == 0`). `drawGraphVariables`, Expose on Spawn (Thema 119) und
    das Datenmodell der Parameter bleiben unberührt.
+
+## Schritt 3: Tests, Tooltips, Handbuch (04.10.2026)
+
+**Tooltips.** Die beiden Reiterköpfe schlagen unter einem eigenen Scope `UI Details` nach
+(`UIEditorPanel.cpp`, `render`, um die Reiterleiste; der Scope endet vor dem Inhalt, damit die
+Abschnitte darunter nicht auf ihn zurückfallen). Einträge `UI Details/Details` und
+`UI Details/Widget Parameters` in `EditorHelp.cpp`, Kapitelzeile
+`{ "UI Details/", "editor-ui", "UI Designer", "The details column" }` in `kAreas`. Die
+Parameter-Zeilen bleiben bei `Canvas` (Entscheidung 5 oben); `Canvas/Add Parameter` sagt jetzt,
+dass die Auswahl beim Reiter bleibt. `helpForLabel` steht direkt nach `BeginTabItem` und vor dem
+`if`, weil der Reiterkopf nur dort sicher das letzte Element ist, offen oder nicht.
+`editor_help_audit.py` liest `BeginTabItem` nicht; den Wächter macht der Laufzeit-Lookup in
+`tests/test_editor_help.cpp` (fünf neue Paare: die zwei Reiter, `Open Widget Parameters`,
+`Add Parameter`, `Parameter Name`). Audit unverändert 1073/1073.
+
+**Tests** (`tests/test_widget_designer_ui.cpp`, Testfall „the Details panel as it is"):
+
+- *the tab heads carry their help*: Zeiger eine Sekunde ruhig auf jedem Reiterkopf, das
+  Tooltip-Fenster `##Tooltip_00` ist aktiv. Gegenprobe ohne die beiden `helpForLabel`: rot.
+- *an element selected: rename, reselect, remove, undo — all on the tab*: Logo auswählen,
+  Reiter öffnen, Parameter anlegen (zeigt aufs Logo), umbenennen über das Namensfeld + Enter,
+  Cmd/Ctrl+Z nimmt nur das Umbenennen zurück; dann „Title" in der Hierarchie anklicken: der
+  Reiter bleibt offen, ein neuer Parameter zeigt auf Title; den ersten per × löschen, Title ist
+  weiter ausgewählt; zwei Undos holen die gelöschte Zeile zurück. Gegenprobe (Reiter springt bei
+  Auswahlwechsel auf Details): rot an der Stelle nach dem Klick auf Title.
+
+Zusammen mit den zwei Subcases aus Schritt 2 ist die Fertig-Bedingung damit belegt: anlegen,
+umbenennen und löschen bei ausgewähltem Element, ohne die Auswahl zu verlieren, jeweils mit Undo.
+Bilder: `HE_UI_DUMP_DIR=… he_tests -tc="ui shot: widget designer — the Details panel*"` schreibt
+`widget-designer-widget-parameters-edited` und `widget-designer-widget-parameters-tooltip`.
+
+**Befund, nicht behoben (Datenmodell, laut Thema ausgeschlossen).** `uiWidgetTreeFromJson`
+(`UIWidgetTree.cpp`, Commit `00f1a56f`) verwirft eine Parameter-Deklaration ohne Property
+(„names nothing"). Der Undo-Snapshot des Designers (`makeSnapshot`/`restoreSnapshot`) läuft durch
+genau dieses JSON. Ein frisch angelegter Parameter hat noch keine Property, also geht er bei jedem
+Undo verloren, das einen Snapshot mit ihm zurückholt: *anlegen, umbenennen, Cmd/Ctrl+Z* lässt
+null Parameter übrig statt einem. Das ist älter als dieses Thema. Der Schritt-2-Test
+(anlegen, Undo, leer) war davon nicht betroffen, weil er ohnehin auf dem Snapshot ohne Parameter
+landet. Der neue Test geht den Weg eines Autors und wählt direkt nach dem Anlegen eine Property
+(über `UIEditorPanel::markEdited`, den Commit-Pfad des MCP). Abhilfe wäre, im Editor-Snapshot
+auch unvollständige Deklarationen mitzunehmen oder „Add Parameter" gleich eine Property
+vorzubelegen; beides eigenes Thema.
+
+**Handbuch.** Die Editor-Referenz im In-Engine-Handbuch wird aus `EditorHelp.cpp` gebaut
+(`EditorReference.cpp`), die neuen Einträge stehen dort im Kapitel „UI Designer" unter
+„The details column". Die Website-Handbuchseite (`Website/HorizonEngineDocs/ui.html`, Quelle des
+Bündels `EditorDeps/Docs/he-docs.json`) erwähnt Widget-Parameter gar nicht; dort gab es nichts
+anzugleichen, und eine neue Seite wäre ein Commit im Website-Repository plus Deploy mit
+Bestätigung, also nicht Teil dieses Schritts.
