@@ -253,6 +253,43 @@ namespace
 			return false;
 		}
 
+		ImGuiWindow* detailsWindow() const
+		{
+			for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+				if (w->Active && std::strstr(w->Name, "##uiw_details")) return w;
+			return nullptr;
+		}
+
+		// Walk the pointer over the Details column until ImGui says it is on
+		// `wanted`. The position it was found at, or (-1,-1).
+		ImVec2 findInDetails(ImGuiID wanted)
+		{
+			ImGuiWindow* dw = detailsWindow();
+			if (!dw || wanted == 0) return ImVec2(-1.0f, -1.0f);
+			ImGuiIO& io = ImGui::GetIO();
+			for (float y = dw->Pos.y + 4.0f; y < dw->Pos.y + dw->Size.y; y += 4.0f)
+				for (float x = dw->Pos.x + 12.0f; x < dw->Pos.x + dw->Size.x; x += 24.0f)
+				{
+					io.AddMousePosEvent(x, y);
+					frame(false);
+					if (frame(false) == wanted) return ImVec2(x, y);
+				}
+			return ImVec2(-1.0f, -1.0f);
+		}
+
+		// …and click it. False when the walk never met it.
+		bool clickInDetails(ImGuiID wanted)
+		{
+			const ImVec2 p = findInDetails(wanted);
+			if (p.x < 0.0f) return false;
+			ImGuiIO& io = ImGui::GetIO();
+			io.AddMousePosEvent(p.x, p.y);
+			frame(true); frame(false); frame(false);
+			io.AddMousePosEvent(-1000.0f, -1000.0f);
+			frame(false); frame(false);
+			return true;
+		}
+
 		he_ui::Image shoot(const char* name)
 		{
 			he_ui::Image img;
@@ -319,6 +356,55 @@ TEST_CASE("ui shot: widget designer — the Details panel as it is (Thema 92)")
 		const he_ui::Image all = d.shoot("widget-designer-image-details-all-open");
 		REQUIRE(all.valid());
 		CHECK(all.inkedPixels(20, 18, 15) > 10000);
+	}
+
+	// Thema 139: the parameters have their own tab beside Details, and reaching
+	// it does not cost the selection — "Add Parameter" there points the new one
+	// at the element still selected, and Cmd/Ctrl+Z takes it back as before.
+	SUBCASE("the Image selected: the Widget Parameters tab keeps the selection")
+	{
+		d.shoot("widget-designer-warmup");
+		REQUIRE(d.clickRow(d.hierarchyRowId("Logo##hn2")));
+
+		ImGuiIO& io = ImGui::GetIO();
+		ImGuiWindow* dw = d.detailsWindow();
+		REQUIRE(dw);
+		const ImGuiID tabBar = ImHashStr("##uiw_detailtabs", 0, dw->ID);
+		REQUIRE(d.clickInDetails(ImHashStr("Widget Parameters", 0, tabBar)));
+
+		// The rows sit under the id the old "Parameters" section pushed.
+		REQUIRE(d.clickInDetails(ImHashStr("Add Parameter", 0, ImHashStr("Parameters", 0, dw->ID))));
+
+		HE::UIWidgetTree* live = UIEditorPanel::liveTree("UI/MainMenu.hasset");
+		REQUIRE(live);
+		REQUIRE(live->params.size() == 1);
+		CHECK(live->params[0].elementId == 2);   // the Logo: still selected
+
+		const he_ui::Image img = d.shoot("widget-designer-widget-parameters");
+		REQUIRE(img.valid());
+		CHECK(img.inkedPixels(20, 18, 15) > 10000);
+
+		io.AddKeyEvent(ImGuiMod_Ctrl, true);
+		io.AddKeyEvent(ImGuiKey_Z, true);
+		d.frame(false);
+		io.AddKeyEvent(ImGuiKey_Z, false);
+		io.AddKeyEvent(ImGuiMod_Ctrl, false);
+		d.frame(false);
+		live = UIEditorPanel::liveTree("UI/MainMenu.hasset");
+		REQUIRE(live);
+		CHECK(live->params.empty());
+	}
+
+	// …and the old place, with nothing selected, still leads there.
+	SUBCASE("nothing selected: the old Parameters place opens the tab")
+	{
+		d.shoot("widget-designer-warmup");
+		ImGuiWindow* dw = d.detailsWindow();
+		REQUIRE(dw);
+		const ImGuiID addId = ImHashStr("Add Parameter", 0, ImHashStr("Parameters", 0, dw->ID));
+		CHECK(d.findInDetails(addId).x < 0.0f);   // Details is the open tab
+		REQUIRE(d.clickInDetails(ImHashStr("Open Widget Parameters", 0, dw->ID)));
+		CHECK(d.findInDetails(addId).x >= 0.0f);
 	}
 
 	UIEditorPanel::forget(d.assetPath);
