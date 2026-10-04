@@ -156,6 +156,7 @@ add_executable(he_tests
     test_movement.cpp
     test_hc_inheritance.cpp
     test_hc_pull_on_construct.cpp
+    test_hc_extract_on_destruct.cpp
     test_collider.cpp
     test_raycast.cpp
     test_character.cpp

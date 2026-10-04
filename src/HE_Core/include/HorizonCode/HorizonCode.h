@@ -555,6 +555,45 @@ HE_API std::string pullFailureText(PullFailure why, const std::string& src,
                                    const std::string& var, const std::string& member,
                                    const std::string& detail = {});
 
+// ── Extract on Destruct (docs/state-driven-data-exchange-design.md §3) ──────
+// A class names ONE struct and, per struct member, which of its instance
+// variables goes in. When the instance is destroyed (Runtime::destroy, after
+// its own Destruct and before it is unregistered) the engine fills a value of
+// that struct and sends it through "OnDestroyed" to every instance bound to it.
+// Members nobody maps keep the struct's default. Lives on the GRAPH, not on a
+// variable: the struct decides what comes out, and one table is the shape the
+// C++ codegen needs.
+//
+// The mapping entries ARE the "marked fields": there is no second flag on the
+// variable that could disagree with the table.
+inline constexpr const char* kExtractSelf    = "@Self";        // pseudo-variable: Ref to the dying instance
+inline constexpr const char* kOnDestroyed    = "OnDestroyed";  // the listener-side event
+struct ExtractMapEntry
+{
+    std::string member;   // struct field (live name; formerNames resolve on load/run)
+    std::string var;      // instance variable of the class, or kExtractSelf
+};
+struct ExtractSpec
+{
+    std::string                  structPath;   // "" = the class extracts nothing
+    std::vector<ExtractMapEntry> map;
+    bool empty() const { return structPath.empty(); }
+    // The entry filling `member`, or null.
+    const ExtractMapEntry* entryFor(const std::string& member) const;
+};
+// Why one mapping entry could not be filled; the member then keeps its default.
+enum class ExtractFailure : uint8_t
+{
+    None,
+    NoSuchMember,     // the struct has no field of that name (formerNames tried)
+    NoSuchVariable,   // the class has no instance variable of that name (deleted/renamed)
+    TypeMismatch,     // pullShapesCompatible said no
+    SelfNotRef,       // @Self mapped onto a member that is not a scalar Ref
+};
+// One sentence, the runtime's warning and the editor's red row alike.
+HE_API std::string extractFailureText(ExtractFailure why, const std::string& member,
+                                      const std::string& var, const std::string& detail = {});
+
 // Where a function runs, for Node::runOn below. The numbers travel in kMsgRpc's
 // `target` byte, so they are frozen: a saved graph and a datagram agree on them.
 enum class RunOn : std::uint8_t
@@ -745,6 +784,9 @@ struct HE_API Graph
     // Editor chrome, see GraphComment. Absent from every graph written before
     // it existed, which fromJson reads as "none".
     std::vector<GraphComment> comments;
+    // Extract on Destruct (ExtractSpec above). Empty = extracts nothing; JSON
+    // key "extract", written only when a struct is set.
+    ExtractSpec extract;
     int nextId = 1;
 
     // ── What this graph INHERITS, for the editor only ────────────────────────

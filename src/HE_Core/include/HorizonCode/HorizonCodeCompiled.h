@@ -54,6 +54,13 @@ struct CompiledEventInfo
 {
     const char* name;     // one entry per Event node in the source graph
     int         elem;     // widget element filter (0 = any), mirrors Node::elem
+    // The handler's argument: -1 = none, otherwise (int)PinType, plus the
+    // Enum/Struct definition. Appended last and defaulted, so a table generated
+    // before Extract on Destruct still compiles and reads "no argument". The
+    // Runtime asks it for one event only — "OnDestroyed", whose payload struct
+    // differs per sender and is type-checked per listener (design §3.3).
+    int         argType  = -1;
+    const char* typeName = "";
 };
 // One FunctionEntry's multiplayer face (docs/gameplay-replication-plan.md §7).
 // Only what the RPC router has to ask about a function it did not author: where
@@ -289,6 +296,17 @@ public:
     { fireEvent("OnAnimationNotifyBegin", 0, Value::ofString(name)); }
     virtual void onAnimationNotifyEnd(const std::string& name)
     { fireEvent("OnAnimationNotifyEnd", 0, Value::ofString(name)); }
+
+    // ── Extract on Destruct (docs/state-driven-data-exchange-design.md §3.7) ─
+    // Fill `out` with this class's extract struct and say true, or say false
+    // when the class extracts nothing. Runtime::destroy calls it after
+    // onDestruct and before the instance is unregistered, so every member is
+    // still the value Destruct left behind. The generator emits it NATIVELY
+    // (S_<Struct> filled member by member), which is why the mapping is not a
+    // table here. A derived class without its own spec inherits the base's
+    // override, which is exactly the interpreter's "leaf-most level that names
+    // a struct wins".
+    virtual bool extractOnDestruct(Value& out) const { (void)out; return false; }
 
     // ── execution (mirrors Runner's entry points) ───────────────────────────
     virtual void fireEvent(const std::string& name, int elem, const Value& arg)

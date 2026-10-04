@@ -128,7 +128,20 @@ public:
     // teardown counterpart to the "Construct" fired on create. Use this (not
     // remove) whenever an object/widget is intentionally destroyed so its
     // destructor graph runs; no-op if the id is already gone.
+    //
+    // Extract on Destruct (docs/state-driven-data-exchange-design.md §3.4):
+    // between its own Destruct and the unregistering, the instance's extract
+    // struct is built (buildExtract) and sent as "OnDestroyed" to every
+    // instance bound to it — never to the instance itself. Instances that only
+    // go through remove() or clear() send nothing.
     void       destroy(InstanceId id);
+    // The value Extract on Destruct would send for `id` right now: its class's
+    // struct filled from its variables, members nobody maps at the struct
+    // default. An empty Value when the class extracts nothing or the struct is
+    // not registered. Interpreted: from the leaf-most level that names a
+    // struct; compiled: the generated extractOnDestruct. Public for the parity
+    // suite and tools; destroy() is the one caller that matters.
+    Value      buildExtract(InstanceId id);
     bool       alive(InstanceId id) const;
     // Drop every instance (whole-runtime teardown).
     void       clear();
@@ -675,6 +688,17 @@ private:
     void dispatchToListeners(InstanceId owner, EventId ev, const std::string& name,
                              const Value& arg);
     void dispatchToListeners(InstanceId owner, const std::string& name, const Value& arg);
+    // "OnDestroyed" to everyone bound to `owner` (design §3.3). Unlike
+    // dispatchToListeners it checks each listener's handler signature first —
+    // no argument: fired without the payload; a struct of the payload's type:
+    // fired with it; anything else: skipped with one warning per (listener
+    // class, payload type) — and it runs the handler DIRECTLY, without the
+    // trailing pass to the listener's own listeners that fireEvent adds: their
+    // OnDestroyed means "the object I am bound to died", which this is not.
+    void dispatchDestroyed(InstanceId owner, const Value& payload);
+    // Warnings already printed by buildExtract / dispatchDestroyed, keyed like
+    // m_pullWarned: one per class and cause, not one per instance.
+    std::unordered_set<std::string> m_extractWarned;
 
     std::unordered_map<InstanceId, Inst> m_insts;
     // owner → event name → subscribed listener instances.

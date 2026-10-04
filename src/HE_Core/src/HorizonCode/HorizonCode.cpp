@@ -2124,6 +2124,17 @@ std::string toJson(const Graph& g)
         }
         j["comments"] = std::move(jc);
     }
+    // Extract on Destruct: only when a struct is set, so a class that extracts
+    // nothing keeps the bytes it had before the feature existed. The struct is
+    // a content-relative path inside HCGR, which AssetRefs::retargetBlob
+    // already rewrites when the struct asset moves.
+    if (!g.extract.empty())
+    {
+        nlohmann::json jm = nlohmann::json::array();
+        for (const ExtractMapEntry& m : g.extract.map)
+            jm.push_back({ { "member", m.member }, { "var", m.var } });
+        j["extract"] = { { "struct", g.extract.structPath }, { "map", std::move(jm) } };
+    }
     return j.dump(2);
 }
 
@@ -2208,6 +2219,43 @@ bool fromJson(const std::string& json, Graph& out)
         HE::graph::bumpNextId(g.nextId, c.id);
         g.comments.push_back(std::move(c));
     }
+    // Extract on Destruct. An entry without a member or a variable names
+    // nothing and is dropped; one member mapped twice keeps the first (the
+    // table has one row per member). A member saved under a name the struct
+    // has since renamed (formerNames) is read back under its live name when
+    // the definition is registered — at run time findField resolves it anyway.
+    if (const auto ex = j.find("extract"); ex != j.end() && ex->is_object())
+    {
+        g.extract.structPath = ex->value("struct", std::string());
+        if (!g.extract.structPath.empty())
+        {
+            HE::StructDef def;
+            const bool haveDef = HE::TypeRegistry::instance().getStruct(g.extract.structPath, def);
+            for (const auto& e : ex->value("map", nlohmann::json::array()))
+            {
+                if (!e.is_object()) continue;
+                ExtractMapEntry m;
+                m.member = e.value("member", std::string());
+                m.var    = e.value("var", std::string());
+                if (m.member.empty() || m.var.empty()) continue;
+                if (haveDef)
+                    if (const HE::StructField* f = def.findField(m.member)) m.member = f->name;
+                if (g.extract.entryFor(m.member)) continue;
+                g.extract.map.push_back(std::move(m));
+            }
+        }
+    }
+    // A graph that EMITS its own "OnDestroyed" now shares the name with the
+    // engine's: every instance bound to it also hears the engine's on death.
+    // Not renamed, like the PreConstruct case above — the author should hear it.
+    for (const Node& n : g.nodes)
+        if (n.type == NodeType::EmitEvent && n.s == kOnDestroyed)
+        {
+            HE_LOG_WARN(HorizonCode, "%s", "Custom event 'OnDestroyed' is emitted by this graph, "
+                        "but 'OnDestroyed' is now an engine event: everything bound to an "
+                        "instance also receives it when that instance is destroyed");
+            break;
+        }
     inferEventDecls(g);        // graphs older than declared events arrive with one
     // Both syncs below rebuild pin layouts from definitions that may have changed
     // shape since this graph was saved (a function edited elsewhere, a struct
@@ -3397,6 +3445,34 @@ std::string pullFailureText(PullFailure why, const std::string& src, const std::
             return from + " '" + var + (member.empty() ? std::string() : "." + member) +
                    "' does not fit" + (detail.empty() ? std::string() : " (" + detail + ")");
         case PullFailure::UnknownSource:     return "unknown source " + from;
+    }
+    return {};
+}
+
+// ── Extract on Destruct (design §3) ─────────────────────────────────────────
+const ExtractMapEntry* ExtractSpec::entryFor(const std::string& member) const
+{
+    for (const ExtractMapEntry& m : map)
+        if (m.member == member) return &m;
+    return nullptr;
+}
+
+std::string extractFailureText(ExtractFailure why, const std::string& member,
+                               const std::string& var, const std::string& detail)
+{
+    const std::string from = var == kExtractSelf ? std::string("Self") : "'" + var + "'";
+    switch (why)
+    {
+        case ExtractFailure::None:           return {};
+        case ExtractFailure::NoSuchMember:
+            return "the struct has no member '" + member + "' (removed from struct?)";
+        case ExtractFailure::NoSuchVariable:
+            return "member '" + member + "': the class has no variable " + from + " (renamed or deleted?)";
+        case ExtractFailure::TypeMismatch:
+            return "member '" + member + "': " + from + " does not fit" +
+                   (detail.empty() ? std::string() : " (" + detail + ")");
+        case ExtractFailure::SelfNotRef:
+            return "member '" + member + "': Self is an object reference, the member is not";
     }
     return {};
 }
