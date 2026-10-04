@@ -383,14 +383,15 @@ float cloudShadowFactor(vec3 worldPos, vec3 L)
 	return mix(1.0, T, s * edge);
 }
 
-float localShadowFactor(int i, vec3 worldPos, vec3 N)
+// `base` = the light's first atlas layer (-1 = casts no shadow). Takes the
+// light by value so the window and the cluster lists share it.
+float localShadowFactorAt(vec4 posType, int base, vec3 worldPos, vec3 N)
 {
-	int base = int(uLightParams[i].y);
 	if (base < 0) return 1.0;
 	int layer = base;
-	if (int(uLightPos[i].w) == 1) // point: major-axis cube-face pick
+	if (int(posType.w) == 1) // point: major-axis cube-face pick
 	{
-		vec3 d = worldPos - uLightPos[i].xyz;
+		vec3 d = worldPos - posType.xyz;
 		vec3 a = abs(d);
 		int face;
 		if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
@@ -398,7 +399,7 @@ float localShadowFactor(int i, vec3 worldPos, vec3 N)
 		else                               face = (d.z > 0.0) ? 4 : 5;
 		layer = base + face;
 	}
-	vec3  toL = normalize(uLightPos[i].xyz - worldPos);
+	vec3  toL = normalize(posType.xyz - worldPos);
 	float ndl = clamp(dot(N, toL), 0.0, 1.0);
 	vec4 lp = uLocalShadowVP[layer] * vec4(worldPos + N * 0.02, 1.0);
 	if (lp.w <= 0.0) return 1.0;             // behind the light's near plane
@@ -418,6 +419,82 @@ float localShadowFactor(int i, vec3 worldPos, vec3 N)
 		}
 	return vis / 9.0;
 }
+
+float localShadowFactor(int i, vec3 worldPos, vec3 N)
+{
+	return localShadowFactorAt(uLightPos[i], int(uLightParams[i].y), worldPos, N);
+}
+
+#ifdef HE_CLUSTERED
+// ── Clustered point/spot lights (Thema 117, GL 4.3 build only) ───────────────
+// Every point/spot light of the scene (HE::BuildClusterLights with
+// bottomLeftOrigin = true, gl_FragCoord's origin) in per-cluster lists, the
+// SAME SSBOs 4/5/6 the graph materials' heLitP reads. While
+// uClusterParams.x > 0 main() shades the fragment's list INSTEAD of the
+// window's point/spot slots (the window keeps its directional lights). 4 vec4
+// per light: posType, dirSpot, colorIntensity (w = intensity), params
+// (x = range, y = atlas layer + 1, z = GI local-mask channel + 1). The
+// HE_CL_*_BINDING values are prepended by SceneStageSource.
+layout(std430, binding = HE_CL_LIGHTS_BINDING) readonly buffer HeClusterLights { vec4 clLights[]; };
+layout(std430, binding = HE_CL_GRID_BINDING)   readonly buffer HeClusterGrid   { uvec2 clGrid[]; };
+layout(std430, binding = HE_CL_INDEX_BINDING)  readonly buffer HeClusterIdx    { uint clIdx[]; };
+uniform vec4 uClusterParams; // x/y/z grid dims (x = 0 → off), w = slice scale
+uniform vec4 uClusterCamFwd; // xyz camera forward, w = cluster near plane
+
+// The fragment's cluster list with the window loop's per-light model. Takes
+// main()'s post-weather material terms, so snow/wet apply exactly once.
+// SYNC: heLitP's heFwdClusterLights (MaterialShaderLibrary.cpp) and Metal
+// fragmentMain's cluster loop.
+vec3 clusterLights(vec3 P, vec3 N, vec3 V, vec3 diffuseColor, vec3 specColor,
+                   float shininess, float specScale)
+{
+	vec2  uv    = gl_FragCoord.xy / max(uViewport, vec2(1.0));
+	float nearZ = max(uClusterCamFwd.w, 1e-4);
+	float viewZ = max(dot(P - uCameraPos, uClusterCamFwd.xyz), nearZ);
+	int gx = int(uClusterParams.x);
+	int gy = int(uClusterParams.y);
+	int gz = int(uClusterParams.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+	int cz = clamp(int(log(viewZ / nearZ) * uClusterParams.w), 0, gz - 1);
+	int cx = clamp(int(uv.x * float(gx)), 0, gx - 1);
+	int cy = clamp(int(uv.y * float(gy)), 0, gy - 1);
+	uvec2 cell = clGrid[(cz * gy + cy) * gx + cx];
+	vec3 result = vec3(0.0);
+	for (uint k = 0u; k < cell.y; ++k)
+	{
+		uint li = clIdx[cell.x + k] * 4u;
+		vec4 posType = clLights[li + 0u];
+		vec4 dirSpot = clLights[li + 1u];
+		vec4 colInt  = clLights[li + 2u];
+		vec4 params  = clLights[li + 3u];
+		vec3  d    = posType.xyz - P;
+		float dist = max(length(d), 1e-4);
+		vec3  L    = d / dist;
+		float range = max(params.x, 1e-4);
+		float atten = clamp(1.0 - dist / range, 0.0, 1.0);
+		atten *= atten;
+		if (posType.w > 1.5) // spot cone
+		{
+			float c       = dot(-L, normalize(dirSpot.xyz));
+			float cosCone = dirSpot.w;
+			atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+		}
+		if (atten <= 0.0) continue;
+		float sh = localShadowFactorAt(posType, int(params.y) - 1, P, N);
+		// Ray-traced local mask: the builder hands out the window's first-4
+		// channels (giLocalIdx in main), only while the mask is bound.
+		int ch = int(params.z) - 1;
+		if (uGIEnabled == 1 && ch >= 0)
+			sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uViewport)[ch]);
+		if (uNoShadow) sh = 1.0;
+		float diff = max(dot(N, L), 0.0);
+		vec3  H    = normalize(L + V);
+		float spec = pow(max(dot(N, H), 0.0), shininess) * specScale;
+		result += (diffuseColor * diff + specColor * spec) * colInt.rgb * colInt.w * atten * sh;
+	}
+	return result;
+}
+#endif
 
 void main()
 {
@@ -518,9 +595,17 @@ void main()
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
+#ifdef HE_CLUSTERED
+	// Clustered: the lists hold EVERY point/spot light, so the window's copies
+	// of the first few would count twice — the window keeps its directionals.
+	bool clustered = uClusterParams.x > 0.5;
+#endif
 	for (int i = 0; i < uLightCount; ++i)
 	{
 		int   type  = int(uLightPos[i].w);
+#ifdef HE_CLUSTERED
+		if (clustered && type != 0) continue;
+#endif
 		vec3  L;
 		float atten = 1.0;
 
@@ -579,6 +664,10 @@ void main()
 		result += (diffuseColor * diff + specColor * spec)
 		        * uLightColor[i].rgb * uLightColor[i].w * atten * sh;
 	}
+#ifdef HE_CLUSTERED
+	if (clustered)
+		result += clusterLights(vWorldPos, N, V, diffuseColor, specColor, shininess, specScale);
+#endif
 	result = applyFog(result, uCameraPos, vWorldPos, uSunDir);
 
 	// Debug: tint each fragment by its shadow cascade (red / green / blue / yellow)
@@ -3082,6 +3171,24 @@ static std::string injectSkyFunc(const char* src)
 	return s;
 }
 
+// A scene-program stage (kUnlitVS/kSkinnedVS/kInstancedVS or kUnlitFS) for the
+// clustered GL 4.3 build: the "#version 410 core" line becomes 4.30 and the
+// cluster switch + SSBO bindings are defined right behind it. Both stages of a
+// program take this, so a program stays on one version. SYNC:
+// scripts/validate_embedded_shaders.py assembles the same text.
+static std::string SceneStageSource(std::string src)
+{
+	using Lib = HE::MaterialShaderLibrary;
+	const std::string from = "#version 410 core\n";
+	const std::string to = "#version 430 core\n#define HE_CLUSTERED 1\n"
+		"#define HE_CL_LIGHTS_BINDING " + std::to_string(Lib::kGlClusterLightsSsboBinding) + "\n"
+		"#define HE_CL_GRID_BINDING "   + std::to_string(Lib::kGlClusterGridSsboBinding)   + "\n"
+		"#define HE_CL_INDEX_BINDING "  + std::to_string(Lib::kGlClusterIndexSsboBinding)  + "\n";
+	if (size_t pos = src.find(from); pos != std::string::npos)
+		src.replace(pos, from.size(), to);
+	return src;
+}
+
 // KHR_debug sink (see the HE_GL_DEBUG block in Initialize). Runs on the calling
 // thread while debug output is synchronous, so the message names the GL call that
 // produced it — the one thing the end-of-frame glGetError below can never say.
@@ -3244,17 +3351,60 @@ struct GLWireScope
 	}
 };
 
+unsigned int OpenGLRenderer::LinkSceneProgram(const char* vsSrc, const char* what)
+{
+	auto link = [](GLuint vs, GLuint fs) {
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		return prog;
+	};
+	// Clustered point/spot lights for the built-in shading (Thema 117): the
+	// same GL 4.3 switch as the graph materials, read in Initialize before the
+	// scene programs are built. A failure falls back to the window build for
+	// THIS program only — m_forwardClustered stays the graph-material flag, and
+	// the fallback has no uCluster* uniforms, so its gate writes are no-ops.
+	if (m_forwardClustered)
+	{
+		GLuint vs = 0;
+		try
+		{
+			vs = CompileStage(GL_VERTEX_SHADER, SceneStageSource(vsSrc).c_str());
+			const GLuint fs = CompileStage(GL_FRAGMENT_SHADER,
+			                               SceneStageSource(injectSkyFunc(kUnlitFS)).c_str());
+			const GLuint prog = link(vs, fs);
+			vs = 0;
+			GLint ok = 0;
+			glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+			if (ok)
+			{
+				HE_LOG_INFO(RHI, "OpenGLRenderer: %s program uses clustered lighting (GLSL 4.30)", what);
+				return prog;
+			}
+			char log[512];
+			glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			glDeleteProgram(prog);
+			HE_LOG_WARN(RHI, "OpenGLRenderer: clustered %s program failed to link, using the 8-light window: %s",
+			            what, log);
+		}
+		catch (const std::exception& e)
+		{
+			if (vs) glDeleteShader(vs);
+			HE_LOG_WARN(RHI, "OpenGLRenderer: clustered %s program failed to compile, using the 8-light window: %s",
+			            what, e.what());
+		}
+	}
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   vsSrc);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
+	return link(vs, fs);
+}
+
 void OpenGLRenderer::CreateUnlitPipeline()
 {
-	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kUnlitVS);
-	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
-
-	m_unlitProgram = glCreateProgram();
-	glAttachShader(m_unlitProgram, vs);
-	glAttachShader(m_unlitProgram, fs);
-	glLinkProgram(m_unlitProgram);
-	glDeleteShader(vs);
-	glDeleteShader(fs);
+	m_unlitProgram = LinkSceneProgram(kUnlitVS, "scene");
 
 	GLint ok = 0;
 	glGetProgramiv(m_unlitProgram, GL_LINK_STATUS, &ok);
@@ -3312,6 +3462,8 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
 	m_uShadowDebug   = glGetUniformLocation(m_unlitProgram, "uShadowDebug");
 	m_uUnlit         = glGetUniformLocation(m_unlitProgram, "uUnlit");
+	m_uClusterParams = glGetUniformLocation(m_unlitProgram, "uClusterParams");
+	m_uClusterCamFwd = glGetUniformLocation(m_unlitProgram, "uClusterCamFwd");
 	m_uLocalShadowVP  = glGetUniformLocation(m_unlitProgram, "uLocalShadowVP[0]");
 	m_uLocalShadowMap = glGetUniformLocation(m_unlitProgram, "uLocalShadowMap");
 	m_uShadowBias     = glGetUniformLocation(m_unlitProgram, "uShadowBias");
@@ -3518,9 +3670,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
 	// Forward graph materials on GL 4.3+ shade from the cluster lists (Thema 117):
-	// both stages at GLSL 4.30, one version per program. Baked pak variants
-	// (GLSL 4.10, plain) and the G-buffer variant (never shades) stay as they are.
-	bool clustered = m_forwardClustered && !precompiled && !gbuffer;
+	// both stages at GLSL 4.30, one version per program. A baked pak variant
+	// clusters only if the exporter baked that 4.30 pair (vertexClustered +
+	// fragmentClustered); otherwise its plain 4.10 pair draws with the window.
+	// The G-buffer variant never shades lights.
+	const bool bakedClustered = precompiled && !precompiled->vertexClustered.empty()
+	                         && !precompiled->fragmentClustered.empty();
+	bool clustered = m_forwardClustered && !gbuffer && (!precompiled || bakedClustered);
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
 	auto crossCompile = [&](Backend b, bool cl) {
@@ -3531,11 +3687,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		                   : m_matShaderLib.fragment(key, fragGlsl, b);
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	};
+	auto usePrecompiled = [&](bool cl) {
+		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
+		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
+	};
 	if (precompiled)
-	{
-		vertSrc = precompiled->vertex; fragSrc = precompiled->fragment;
-		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL 410 — no runtime cross-compile
-	}
+		usePrecompiled(clustered);
 	else if (clustered)
 	{
 		crossCompile(Backend::GLSL430, true);
@@ -3641,7 +3799,9 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		setupProgram(prog);
 		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 		HE_LOG_INFO(RHI, "%s", precompiled
-			? "OpenGLRenderer: built a material program from a PRECOMPILED variant (no runtime cross-compile)"
+			? (clustered
+				? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)"
+				: "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)")
 			: clustered
 			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
 			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -3651,12 +3811,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	unsigned int program = ok ? linkSources() : 0;
 	if (!program && clustered)
 	{
-		// The GLSL 4.30 pair cross-compiled but the driver rejected it: the
-		// plain 4.10 pair still draws the material (window lights only).
+		// The GLSL 4.30 pair (cross-compiled or baked) but the driver rejected
+		// it: the plain 4.10 pair still draws the material (window lights only).
 		HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: clustered material program failed to link, "
 			"falling back to the 8-light window");
 		clustered = false;
-		crossCompile(Backend::GLSL410, false);
+		if (precompiled) usePrecompiled(false);
+		else             crossCompile(Backend::GLSL410, false);
 		program = ok ? linkSources() : 0;
 	}
 	if (!ok)
@@ -3838,14 +3999,7 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 
 void OpenGLRenderer::CreateSkinnedPipeline()
 {
-	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSkinnedVS);
-	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
-
-	m_skinnedProgram = glCreateProgram();
-	glAttachShader(m_skinnedProgram, vs);
-	glAttachShader(m_skinnedProgram, fs);
-	glLinkProgram(m_skinnedProgram);
-	glDeleteShader(vs); glDeleteShader(fs);
+	m_skinnedProgram = LinkSceneProgram(kSkinnedVS, "skinned");
 
 	GLint ok = 0;
 	glGetProgramiv(m_skinnedProgram, GL_LINK_STATUS, &ok);
@@ -3886,6 +4040,8 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedCameraFwd          = loc("uCameraFwd");
 	m_uSkinnedShadowDebug        = loc("uShadowDebug");
 	m_uSkinnedUnlit              = loc("uUnlit");
+	m_uSkinnedClusterParams      = loc("uClusterParams");
+	m_uSkinnedClusterCamFwd      = loc("uClusterCamFwd");
 	m_uSkinnedShadowMap          = loc("uShadowMap");
 	m_uSkinnedLocalShadowVP      = loc("uLocalShadowVP[0]");
 	m_uSkinnedLocalShadowMap     = loc("uLocalShadowMap");
@@ -3901,14 +4057,7 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 
 void OpenGLRenderer::CreateInstancedPipeline()
 {
-	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kInstancedVS);
-	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
-
-	m_instancedProgram = glCreateProgram();
-	glAttachShader(m_instancedProgram, vs);
-	glAttachShader(m_instancedProgram, fs);
-	glLinkProgram(m_instancedProgram);
-	glDeleteShader(vs); glDeleteShader(fs);
+	m_instancedProgram = LinkSceneProgram(kInstancedVS, "instanced");
 
 	GLint ok = 0;
 	glGetProgramiv(m_instancedProgram, GL_LINK_STATUS, &ok);
@@ -3949,6 +4098,8 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstCameraFwd        = loc("uCameraFwd");
 	m_uInstShadowDebug      = loc("uShadowDebug");
 	m_uInstUnlit            = loc("uUnlit");
+	m_uInstClusterParams    = loc("uClusterParams");
+	m_uInstClusterCamFwd    = loc("uClusterCamFwd");
 	m_uInstShadowMap        = loc("uShadowMap");
 	m_uInstShadowEnabled    = loc("uShadowEnabled");
 	m_uInstLocalShadowVP    = loc("uLocalShadowVP[0]");
@@ -9870,8 +10021,14 @@ void OpenGLRenderer::DestroyViewportTarget()
 // The matching sampler TEXTURE BINDS stay at the call sites: they are shared
 // state that only some of the three re-assert, each for its own documented
 // reason. The caller must have the target program bound.
-void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneShadowFrame& F) const
+void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneShadowFrame& F,
+                                       const HE::ClusterLightBuild& clusters) const
 {
+	// Cluster gate + grid (Thema 117) — written every frame, because a
+	// program keeps its uniform values: a stale gate would read last frame's
+	// lists. Locations are -1 in a 4.10 window build (no-op).
+	glUniform4fv(L.clusterParams, 1, glm::value_ptr(clusters.params));
+	glUniform4fv(L.clusterCamFwd, 1, glm::value_ptr(clusters.camFwd));
 	// Lights (clamped to the shader's MAX_LIGHTS, which IS the engine's shared
 	// light window — a local `constexpr int kMaxLights = 8` here could drift away
 	// from it silently).
@@ -10651,6 +10808,23 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		}
 
+		// Clustered point/spot lights (Thema 117, GL 4.3+): ONE cluster build per
+		// frame, uploaded to SSBO 4/5/6 before any draw. It serves the three
+		// built-in scene programs (gate via BindSceneLighting) and the graph
+		// materials (fragmentClustered, gate via fillMatLight). gl_FragCoord is
+		// bottom-left and the scene renders unflipped into m_hdrFBO / the
+		// G-buffer at (0,0,pw,ph), so the build skips the v-flip. Atlas layers
+		// and GI mask channels ride the same gates as the textures on units
+		// 8/10 and 11/12. Off → params stay 0 = window only everywhere.
+		HE::ClusterLightBuild frameClusters;
+		if (m_forwardClustered)
+		{
+			frameClusters = HE::BuildClusterLights(m_renderWorld, localShadows,
+			                                       giShadingActive && m_giLocalMaskTex != 0,
+			                                       /*bottomLeftOrigin=*/true);
+			UploadClusterLists(frameClusters);
+		}
+
 		// (The procedural skybox is drawn AFTER the geometry below, with a
 		// depth-test == far, so the heavy sky shader only runs on the background
 		// pixels the scene didn't cover.)
@@ -10733,7 +10907,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		BindSceneLighting({ m_uLightCount, m_uLightPos, m_uLightDir, m_uLightColor, m_uLightParams,
 		                    m_uCameraPos, m_uShadowEnabled, m_uShadowDebug, m_uCascadeVP,
 		                    m_uCascadeSplits, m_uCameraFwd, m_uShadowMap,
-		                    m_uLocalShadowMap, m_uLocalShadowVP, m_uShadowBias, m_uUnlit }, shadowFrame);
+		                    m_uLocalShadowMap, m_uLocalShadowVP, m_uShadowBias, m_uUnlit,
+		                    m_uClusterParams, m_uClusterCamFwd }, shadowFrame, frameClusters);
 
 		// CSM shadow-map array bound on texture unit 1. Always bound (the sampling
 		// is gated by uShadowEnabled) so the sampler2DArray never reads a mismatched
@@ -10778,7 +10953,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			                    m_uInstShadowEnabled, m_uInstShadowDebug, m_uInstCascadeVP,
 			                    m_uInstCascadeSplits, m_uInstCameraFwd, m_uInstShadowMap,
 			                    m_uInstLocalShadowMap, m_uInstLocalShadowVP, m_uInstShadowBias,
-			                    m_uInstUnlit }, shadowFrame);
+			                    m_uInstUnlit, m_uInstClusterParams, m_uInstClusterCamFwd },
+			                  shadowFrame, frameClusters);
 			glUseProgram(m_unlitProgram); // restore for the per-object loop
 		}
 
@@ -10819,21 +10995,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		const glm::vec3 camPos = m_renderWorld.camera.position;
 
 #if defined(HE_HAVE_SHADERC)
-		// Clustered heLitP (Thema 117, GL 4.3+): ONE cluster build per frame,
-		// uploaded to SSBO 4/5/6 before any graph-material draw. gl_FragCoord is
-		// bottom-left and the scene renders unflipped into m_hdrFBO / the
-		// G-buffer at (0,0,pw,ph), so the build skips the v-flip. Atlas layers
-		// and GI mask channels ride the same gates as the textures on units
-		// 12 and 10.
-		HE::ClusterLightBuild frameClusters;
+		// Clustered heLitP (Thema 117): the frameClusters build above.
 		const bool matClustered = m_forwardClustered;
-		if (matClustered)
-		{
-			frameClusters = HE::BuildClusterLights(m_renderWorld, localShadows,
-			                                       giShadingActive && m_giLocalMaskTex != 0,
-			                                       /*bottomLeftOrigin=*/true);
-			UploadClusterLists(frameClusters);
-		}
 		// The heLitP lighting ABI fill for custom-material programs — shared by
 		// the forward opaque loop, the deferred G-buffer loop (Time input) and
 		// the deferred replay passes, so the values can never drift between them.
@@ -11738,7 +11901,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			                    m_uSkinnedShadowEnabled, m_uSkinnedShadowDebug, m_uSkinnedCascadeVP,
 			                    m_uSkinnedCascadeSplits, m_uSkinnedCameraFwd, m_uSkinnedShadowMap,
 			                    m_uSkinnedLocalShadowMap, m_uSkinnedLocalShadowVP, m_uSkinnedShadowBias,
-			                    m_uSkinnedUnlit }, shadowFrame);
+			                    m_uSkinnedUnlit, m_uSkinnedClusterParams, m_uSkinnedClusterCamFwd },
+			                  shadowFrame, frameClusters);
 			// Re-assert the CSM array on unit 1 — opaque/instanced draws and the AO
 			// bind run between the unlit setup and here; this guarantees the skinned
 			// sampler2DArray reads the shadow array, not a stale 2D texture.

@@ -66,6 +66,7 @@
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
+#include <material/MaterialShaderBake.h>
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/TerrainPaint.h>
@@ -5080,28 +5081,23 @@ void EditorApplication::dumpFrameHeadless()
 			// shader variants into the material NOW, exactly as the exporter would, so
 			// the renderer takes the getOrBuild*(precompiled) branch instead of cross-
 			// compiling at draw time. A capture matching the non-baked run proves the
-			// baked path renders identically.
+			// baked path renders identically — including the clustered twin (Thema
+			// 117), which the renderer picks whenever it clusters itself.
 			if (const char* pc = std::getenv("HE_DUMP_MATPRECOMPILE"); pc && *pc)
 			{
-				using LB = HE::MaterialShaderLibrary::Backend;
 				HE::MaterialShaderLibrary lib;
-				const uint64_t h = std::hash<std::string>{}(gen.glsl);
-				auto bake = [&](HE::RendererBackend rb, LB lb) {
-					const auto& v = gen.vertexBody.empty()
-						? lib.standardVertex(lb)
-						: lib.customVertex(std::hash<std::string>{}(gen.vertexBody),
-						                   gen.vertexBody, lb);
-					const auto& f = lib.fragment(h, gen.glsl, lb);
-					if (v.ok && f.ok) {
-						MaterialShaderVariant var;
-						var.backend  = static_cast<uint8_t>(rb);
-						var.vertex   = v.source;
-						var.fragment = f.source;
+				auto bake = [&](HE::RendererBackend rb) {
+					MaterialShaderVariant var;
+					std::string error;
+					std::vector<std::string> warnings;
+					if (HE::bakeMaterialShaderVariant(lib, rb, gen.glsl, gen.vertexBody,
+					                                  var, error, warnings))
 						mat.precompiledShaders.push_back(std::move(var));
-					}
+					for (const std::string& w : warnings)
+						HE_LOG_WARN(Editor, "%s", ("EditorApplication: HE_DUMP_MATPRECOMPILE: " + w).c_str());
 				};
-				bake(HE::RendererBackend::OpenGL, LB::GLSL410);
-				bake(HE::RendererBackend::Metal,  LB::Metal);
+				bake(HE::RendererBackend::OpenGL);
+				bake(HE::RendererBackend::Metal);
 				HE_LOG_INFO(Editor, "%s",
 					"EditorApplication: HE_DUMP_MATPRECOMPILE baked precompiled shader variants");
 			}
@@ -6040,6 +6036,21 @@ void EditorApplication::dumpFrameHeadless()
 			fm.customShaderVertGlsl = gen.vertexBody;
 			fm.blendMode            = gen.blendMode;
 			fm.domain               = gen.domain;
+			// HE_DUMP_MATPRECOMPILE bakes the floor exactly as the exporter would
+			// (Thema 123): with the clustered twin baked, the pak floor must show
+			// every pool too, pixel-identical to the cross-compiled run.
+			if (const char* pc = std::getenv("HE_DUMP_MATPRECOMPILE"); pc && *pc)
+			{
+				HE::MaterialShaderLibrary lib;
+				for (HE::RendererBackend rb : { HE::RendererBackend::OpenGL, HE::RendererBackend::Metal })
+				{
+					MaterialShaderVariant var;
+					std::string error;
+					std::vector<std::string> warnings;
+					if (HE::bakeMaterialShaderVariant(lib, rb, gen.glsl, gen.vertexBody, var, error, warnings))
+						fm.precompiledShaders.push_back(std::move(var));
+				}
+			}
 			reg.emplace<MaterialComponent>(floorE,
 				MaterialComponent{ contentManager().registerMaterial(std::move(fm)) });
 		}

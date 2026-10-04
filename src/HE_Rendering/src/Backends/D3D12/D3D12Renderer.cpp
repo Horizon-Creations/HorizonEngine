@@ -8432,8 +8432,21 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         // HLSL sampler pins of 5e52d64e, say) is not the end: fall through to the runtime
         // cross-compile, which is what rendered that pak before variants were consumed
         // here at all. Only when both roads are closed is the miss cached.
+        // The baked clustered twin (Thema 117) goes before the baked plain pair, under
+        // the same matClustered() rule as the cross-compiled one below: only then does
+        // the root signature carry t24..t26 and the gate open.
         bool built = false;
-        if (precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
+        if (precompiled && matClustered() && !precompiled->fragmentClustered.empty())
+        {
+            const std::string& vsSrc = precompiled->vertexClustered.empty()
+                ? precompiled->vertex : precompiled->vertexClustered;
+            if (!vsSrc.empty())
+                built = compilePair(vsSrc, precompiled->fragmentClustered, "baked variant, clustered");
+            if (!built)
+                HE_LOG_WARN(RHI, "%s", "D3D12Renderer: A4 baked clustered material variant rejected — "
+                    "trying the baked 8-light window variant");
+        }
+        if (!built && precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
         {
             built = compilePair(precompiled->vertex, precompiled->fragment, "baked variant");
             if (!built)
