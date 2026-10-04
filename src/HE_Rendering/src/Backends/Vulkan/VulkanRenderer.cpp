@@ -11,6 +11,7 @@
 #include <vector>
 #include <algorithm>
 #include <fstream>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
