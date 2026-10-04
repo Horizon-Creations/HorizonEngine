@@ -300,6 +300,11 @@ std::vector<InheritedFunction> inheritedFunctions(const ResolvedClass& rc)
     return out;
 }
 
+std::vector<SpawnPin> spawnPinsOfClass(const ResolvedClass& rc)
+{
+    return spawnPinsOfLevels(rc.levels);
+}
+
 namespace
 {
 // The content system's answer to "what is this class's graph and base".

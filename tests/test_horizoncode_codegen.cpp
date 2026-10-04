@@ -210,7 +210,8 @@ namespace
 			// Create Object instantiates the class in THIS world's backend and
 			// fires "Construct" — the same shape as the app's svc.createObject.
 			s.createObject  = [this](const std::string& path,
-			                         const float* pos, const float* rot) -> uint32_t
+			                         const float* pos, const float* rot,
+			                         const SpawnValues& spawn) -> uint32_t
 			{
 				InstanceId nid = 0;
 				// The class identity travels with the instance in BOTH worlds,
@@ -244,6 +245,8 @@ namespace
 				if (pos) place += " at " + vec(pos);
 				if (rot) place += " rot " + vec(rot);
 				trace.push_back("createObject " + path + place + " -> " + std::to_string(nid));
+				// Expose on Spawn before Construct, as the apps do it.
+				if (nid) rt.applySpawnValues(nid, spawn, path);
 				if (nid) rt.fireEvent(nid, "Construct");
 				return nid;
 			};

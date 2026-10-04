@@ -85,7 +85,8 @@ int EntityHost::bindFor(const std::vector<Entity>& entities)
 // asset in it and the argument would be pointing at freed memory inside the very
 // call that was handed it. One copy per bind is nothing; the alternative is a
 // use-after-free that only fires when the class happens not to be loaded yet.
-HorizonCode::InstanceId EntityHost::bind(Entity entity, std::string classPath)
+HorizonCode::InstanceId EntityHost::bind(Entity entity, std::string classPath,
+                                         const HorizonCode::SpawnValues* spawn)
 {
 	if (!m_runtime || !m_content || !m_world) return 0;
 	if (!m_world->registry().valid(entity)) return 0;
@@ -121,13 +122,20 @@ HorizonCode::InstanceId EntityHost::bind(Entity entity, std::string classPath)
 	m_byEntity[raw]    = inst;
 	m_byInstance[inst] = raw;
 
+	// Expose on Spawn: the creator's values on top of the seeded defaults,
+	// after the instance knows its entity and before any of its own code runs
+	// — Construct and BeginPlay fire back to back below, so there is no later
+	// point a creator could reach (docs/hc-class-expose-on-spawn-design.md §4.4).
+	if (spawn) m_runtime->applySpawnValues(inst, *spawn, assetPath);
+
 	m_runtime->fireConstruct(inst);
 	m_runtime->fireBeginPlay(inst);
 	return inst;
 }
 
 EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity parent,
-                                      const float* position, const float* rotationEuler)
+                                      const float* position, const float* rotationEuler,
+                                      const HorizonCode::SpawnValues* spawnValues)
 {
 	Spawned out;
 	if (!m_runtime || !m_content || !m_world) return out;
@@ -211,7 +219,7 @@ EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity paren
 	if (m_physics)
 		m_physics->addEntityTree(*m_world, static_cast<uint32_t>(out.entity));
 
-	out.instance = bind(out.entity, classPath);
+	out.instance = bind(out.entity, classPath, spawnValues);
 	if (!out.instance)
 	{
 		// Never leave a body without its logic standing in the scene — and that

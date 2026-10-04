@@ -427,7 +427,8 @@ TEST_CASE("Create/Destroy Object instantiate a class, run Construct, cache the r
 
 	int createCount = 0; InstanceId createdRef = 0, destroyedRef = 0; bool builtAfterConstruct = false;
 	Runtime::Services svc;
-	svc.createObject = [&](const std::string& /*path*/, const float*, const float*) -> uint32_t {
+	svc.createObject = [&](const std::string& /*path*/, const float*, const float*,
+	                       const SpawnValues&) -> uint32_t {
 		++createCount;
 		const InstanceId id = rt.add(classGraph);
 		rt.fireEvent(id, "Construct");
@@ -500,7 +501,7 @@ TEST_CASE("Create Object with unwired placement pins spawns where the class auth
 	Runtime rt;
 	SpawnCapture cap;
 	Runtime::Services svc;
-	svc.createObject = [&](const std::string&, const float* p, const float* r) -> uint32_t {
+	svc.createObject = [&](const std::string&, const float* p, const float* r, const SpawnValues&) -> uint32_t {
 		++cap.calls;
 		cap.posNull = (p == nullptr);
 		cap.rotNull = (r == nullptr);
@@ -533,7 +534,7 @@ TEST_CASE("Create Object with wired placement pins hands the host the values")
 		Runtime rt;
 		SpawnCapture cap;
 		Runtime::Services svc;
-		svc.createObject = [&](const std::string&, const float* p, const float* r) -> uint32_t {
+		svc.createObject = [&](const std::string&, const float* p, const float* r, const SpawnValues&) -> uint32_t {
 			++cap.calls;
 			cap.posNull = (p == nullptr);
 			cap.rotNull = (r == nullptr);
@@ -566,7 +567,7 @@ TEST_CASE("Create Object with wired placement pins hands the host the values")
 		Runtime rt;
 		SpawnCapture cap;
 		Runtime::Services svc;
-		svc.createObject = [&](const std::string&, const float* p, const float* r) -> uint32_t {
+		svc.createObject = [&](const std::string&, const float* p, const float* r, const SpawnValues&) -> uint32_t {
 			++cap.calls;
 			cap.posNull = (p == nullptr);
 			cap.rotNull = (r == nullptr);
@@ -624,7 +625,7 @@ TEST_CASE("A graph saved before the placement pins keeps its Object wire")
 	bool posNull = false, rotNull = false;
 	uint32_t destroyed = 0;
 	Runtime::Services svc;
-	svc.createObject = [&](const std::string&, const float* p, const float* r) -> uint32_t {
+	svc.createObject = [&](const std::string&, const float* p, const float* r, const SpawnValues&) -> uint32_t {
 		posNull = (p == nullptr); rotNull = (r == nullptr); return 55u;
 	};
 	svc.destroyObject = [&](uint32_t id){ destroyed = id; };

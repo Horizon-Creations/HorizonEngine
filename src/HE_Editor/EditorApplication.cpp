@@ -1571,8 +1571,12 @@ void EditorApplication::OnInit()
 			         : glm::vec2(0.0f);
 		};
 		g_host.requestRedraw = [this] { requestRedraw(); };
-		g_host.createObject = [this](const std::string& p, const float* pos,
-		                          const float* rot) -> uint32_t {
+		// The ONE implementation, with the Create Object node's Expose on Spawn
+		// values; g_host.createObject below is it without them (Lua, Python and
+		// the Spawn Class row have none to give). One door, not two.
+		svc.createObject = [this](const std::string& p, const float* pos,
+		                          const float* rot,
+		                          const HorizonCode::SpawnValues& spawn) -> uint32_t {
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
@@ -1604,8 +1608,10 @@ void EditorApplication::OnInit()
 				// does, the graph's first frame (which routinely asks whether it
 				// is grounded, or pushes itself) has already happened. What this
 				// file owes that is the setPhysicsWorld() handover at play start.
+				// Expose on Spawn values go in with it: the host sets them
+				// between creating the instance and its Construct/BeginPlay.
 				const HorizonCode::InstanceId inst =
-					m_entityHost.spawn(assetPath, entt::null, pos, rot).instance;
+					m_entityHost.spawn(assetPath, entt::null, pos, rot, &spawn).instance;
 				// The PlayerHost no longer creates characters, so this is the only
 				// place it can learn that one exists — and it has to, or a project
 				// without a controller loses its input in PIE.
@@ -1622,9 +1628,14 @@ void EditorApplication::OnInit()
 			// class are never two different classes to a Cast.
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().addLevels(
 				std::move(rc.levels), {}, { assetPath, rc.engineBase, rc.chain });
+			// Expose on Spawn: on the seeded defaults, before the first code.
+			m_gameInstance.runtime().applySpawnValues(inst, spawn, assetPath);
 			m_gameInstance.runtime().fireConstruct(inst); // let the object init
 			return inst;
 		};
+		g_host.createObject = [create = svc.createObject](const std::string& p, const float* pos,
+		                                                  const float* rot) -> uint32_t
+		{ return create(p, pos, rot, {}); };
 		g_host.destroyObject = [this](uint32_t ref){
 			auto& rt = m_gameInstance.runtime();
 			if (ref == 0 || ref == rt.gameInstance()) return;
@@ -1652,8 +1663,8 @@ void EditorApplication::OnInit()
 		};
 		// HorizonCode reaches the two through its services; the registry rows Lua
 		// and Python call reach the SAME lambdas through the Ctx apiCtx() builds.
-		// Copies of one std::function, not a second implementation.
-		svc.createObject  = g_host.createObject;
+		// Copies of one std::function, not a second implementation (createObject:
+		// svc holds the implementation, g_host the forward to it, see above).
 		svc.destroyObject = g_host.destroyObject;
 		// EngineCall nodes dispatch through the HE::api registry against the editor
 		// world, physics and content — resolved at CALL time, so PIE entering and

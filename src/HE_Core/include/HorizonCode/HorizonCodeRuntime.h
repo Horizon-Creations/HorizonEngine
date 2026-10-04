@@ -161,6 +161,15 @@ public:
     // no such instance, or no public variable of that name — nothing written,
     // and saying so is the caller's business.
     bool  setPublicVariable(InstanceId id, const std::string& name, const Value& v);
+    // A Create Object's Expose on Spawn values on the instance it just made,
+    // between creating it and its Construct — each through setPublicVariable.
+    // A name the class no longer has as a public variable is skipped with a
+    // warning naming `classPath`: the creator's pins are a mirror from when it
+    // was last opened. Does not check the Expose on Spawn tick, like the
+    // widget's: the tick decides which pins the editor offers, and a compiled
+    // class has no reflection field for it
+    // (docs/hc-class-expose-on-spawn-design.md §4.2).
+    void  applySpawnValues(InstanceId id, const SpawnValues& spawn, const std::string& classPath);
     // Reset an instance's variables to its graph's declared defaults (used to
     // give the persistent GameInstance a fresh start each play session).
     void  reseedVariables(InstanceId id);
@@ -413,9 +422,13 @@ public:
         // position/rotationEuler are 3 floats each, or nullptr for "spawn where
         // the class authored it" (see Context::createObject — a zero vector is
         // NOT the same thing, which is why these are pointers).
+        // `spawn`: the Create Object node's Expose on Spawn values, for the new
+        // instance to take before its Construct (see Context::createObject;
+        // applySpawnValues is the setter every implementation uses).
         std::function<uint32_t(const std::string& classPath,
                                const float* position,
-                               const float* rotationEuler)> createObject;
+                               const float* rotationEuler,
+                               const SpawnValues& spawn)> createObject;
         std::function<void(uint32_t)> destroyObject;
         // Generic engine-API dispatch, forwarded to every instance's Context so any
         // EngineCall node reaches the HE::api registry. The app binds it to the

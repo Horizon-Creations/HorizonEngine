@@ -115,4 +115,8 @@ struct InheritedFunction
 HE_API std::vector<InheritedVariable> inheritedVariables(const ResolvedClass& rc);
 HE_API std::vector<InheritedFunction> inheritedFunctions(const ResolvedClass& rc);
 
+// The Expose on Spawn pins a Create Object of this class offers — its own and
+// its ancestors', root first (spawnPinsOfLevels over rc.levels; see there).
+HE_API std::vector<SpawnPin> spawnPinsOfClass(const ResolvedClass& rc);
+
 } // namespace HorizonCode

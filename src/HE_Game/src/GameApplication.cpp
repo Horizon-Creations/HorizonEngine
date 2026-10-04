@@ -1121,8 +1121,12 @@ void GameApplication::OnInit()
 			if (HE::Window* win = getWindow(HE::WindowHandle{ id })) win->SetSize(w, h);
 			else HE_LOG_WARN(Script, "window.setSize: no window with id %u", id);
 		};
-		g_host.createObject = [this](const std::string& p, const float* pos,
-		                          const float* rot) -> uint32_t {
+		// The ONE implementation, with the Create Object node's Expose on Spawn
+		// values; g_host.createObject below is it without them (Lua, Python and
+		// the Spawn Class row have none to give). One door, not two.
+		svc.createObject = [this](const std::string& p, const float* pos,
+		                          const float* rot,
+		                          const HorizonCode::SpawnValues& spawn) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives
 			// it one — before the compiled shortcut below, because it needs that
 			// body whichever backend ends up serving its logic (EntityHost::bind
@@ -1155,9 +1159,10 @@ void GameApplication::OnInit()
 						// the reason in the log.
 						if (m_netSession.refuseClientSpawn(assetPath)) return 0u;
 						// Placement travels with the spawn (null = authored), so
-						// Construct/BeginPlay already run at the destination.
+						// Construct/BeginPlay already run at the destination —
+						// and so do the Expose on Spawn values.
 						const HorizonCode::InstanceId inst =
-							m_entityHost.spawn(assetPath, entt::null, pos, rot).instance;
+							m_entityHost.spawn(assetPath, entt::null, pos, rot, &spawn).instance;
 						// The PlayerHost no longer creates characters, so this is
 						// the only place it can learn that one exists — and it has
 						// to, or a project without a controller loses its input.
@@ -1175,6 +1180,9 @@ void GameApplication::OnInit()
 			{
 				const HorizonCode::InstanceId inst =
 					m_gameInstance.runtime().addCompiled(std::move(compiled));
+				// Expose on Spawn, before the first code; setPublicVariable
+				// reaches a compiled class's members through its reflection.
+				m_gameInstance.runtime().applySpawnValues(inst, spawn, p);
 				m_gameInstance.runtime().fireConstruct(inst);
 				return inst;
 			}
@@ -1192,9 +1200,13 @@ void GameApplication::OnInit()
 				HorizonCode::resolveClassAsset(contentManager(), assetPath);
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().addLevels(
 				std::move(rc.levels), {}, { assetPath, rc.engineBase, rc.chain });
+			m_gameInstance.runtime().applySpawnValues(inst, spawn, assetPath);
 			m_gameInstance.runtime().fireConstruct(inst);
 			return inst;
 		};
+		g_host.createObject = [create = svc.createObject](const std::string& p, const float* pos,
+		                                                  const float* rot) -> uint32_t
+		{ return create(p, pos, rot, {}); };
 		g_host.destroyObject = [this](uint32_t ref){
 			auto& rt = m_gameInstance.runtime();
 			if (ref == 0 || ref == rt.gameInstance()) return;
@@ -1218,8 +1230,8 @@ void GameApplication::OnInit()
 		};
 		// HorizonCode reaches the two through its services; the registry rows that
 		// Lua and Python call reach the SAME lambdas through the Ctx apiCtx()
-		// builds. Copies of one std::function, not a second implementation.
-		svc.createObject  = g_host.createObject;
+		// builds. Copies of one std::function, not a second implementation
+		// (createObject: svc holds the implementation, g_host the forward to it).
 		svc.destroyObject = g_host.destroyObject;
 		// EngineCall nodes dispatch through the HE::api registry against the CURRENT
 		// world, physics and content — all resolved at CALL time, which is what

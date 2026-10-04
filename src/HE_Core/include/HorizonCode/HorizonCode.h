@@ -156,9 +156,11 @@ struct Value
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
 
-// One Expose on Spawn value a Create Widget hands the widget it creates: the
-// variable by name and what it is set to before the widget's PreConstruct
-// (docs/widget-pre-construct-design.md §6).
+// One Expose on Spawn value a Create Widget or Create Object hands what it
+// creates: the variable by name and what it is set to before the new
+// instance's first code runs — PreConstruct for a widget, Construct (and so
+// BeginPlay) for a class (docs/widget-pre-construct-design.md §6,
+// docs/hc-class-expose-on-spawn-design.md §4).
 struct SpawnValue
 {
     std::string name;
@@ -776,14 +778,37 @@ struct SpawnPin
 // The variables of a widget graph that are ticked Expose on Spawn and public
 // instance variables, in declaration order.
 HE_API std::vector<SpawnPin> spawnPinsOf(const Graph& widgetGraph);
-// Re-mirror one Create Widget node's input pins onto `now`. Wires follow their
-// pin by NAME (a removed variable drops its wire, visibly); the node's inline
-// values (pinDefaults, keyed by index) are re-keyed by name too. A new or
-// retyped pin starts at the variable's default; a pin that still holds the
-// default from `before` (the widget as it was when last mirrored, when known)
-// follows the new one. Returns true when the node changed.
-HE_API bool syncSpawnPins(Graph& g, int createWidgetNodeId, const std::vector<SpawnPin>& now,
-                          const std::vector<SpawnPin>* before = nullptr);
+// The same over a class's inheritance chain (ResolvedClass::levels, ROOT
+// FIRST), which is what a Create Object offers: an ancestor's public variable
+// is reachable on the derived instance, so it is settable at spawn too. Root
+// first, each level in declaration order. A name the chain declares twice is
+// taken once, by its NEAREST declaration — the one Runtime::setPublicVariable
+// resolves — and dropped when that one is not exposed. The names Location and
+// Rotation are left out: Create Object already has inputs of those names, and
+// the mirror moves wires by name (docs/hc-class-expose-on-spawn-design.md §3.3).
+// spawnPinsOfClass (HcClassResolve.h) is the ResolvedClass form.
+HE_API std::vector<SpawnPin> spawnPinsOfLevels(const std::vector<Graph>& levelsRootFirst);
+// Re-mirror one Create Widget or Create Object node's spawn inputs onto `now`.
+// Wires follow their pin by NAME (a removed variable drops its wire, visibly);
+// the node's inline values (pinDefaults, keyed by data-in index) are re-keyed
+// by name too. A new or retyped pin starts at the variable's default; a pin
+// that still holds the default from `before` (the class as it was when last
+// mirrored, when known) follows the new one. Returns true when the node changed.
+//
+// The spawn inputs sit behind the node's fixed data inputs: none on Create
+// Widget, Location and Rotation on Create Object — so spawn pin i is data-in
+// (2 + i) there, and those two keep their wires and values untouched.
+//
+// dropWiresOnRetype: a pin whose name stayed but whose type changed loses its
+// wire, as Get/Set Variable do on a retype — a wire of the old type would
+// otherwise stay on it. On for Create Object; Create Widget keeps its behaviour
+// (the wire stays), which is why it is an option and not the rule.
+HE_API bool syncSpawnPins(Graph& g, int createNodeId, const std::vector<SpawnPin>& now,
+                          const std::vector<SpawnPin>* before = nullptr,
+                          bool dropWiresOnRetype = false);
+// The data-in index of a Create node's first spawn pin: 0 for Create Widget,
+// 2 for Create Object (behind Location and Rotation), -1 for any other node.
+HE_API int firstSpawnDataIn(NodeType t);
 
 // ── Item-level JSON ─────────────────────────────────────────────────────────
 // One node / one variable, in EXACTLY the form toJson() puts into the document's
@@ -1079,9 +1104,14 @@ struct Context
     // the backward-compatibility anchor: a graph that never wired the Location
     // pin must keep spawning where it spawns today, and a zero vector would
     // silently teleport every such spawn to (0,0,0). Hence a pointer, not a value.
+    //
+    // `spawn` are the node's Expose on Spawn values, set on the new instance
+    // before its Construct (and an Entity class's BeginPlay) fires; empty = the
+    // class's own defaults (docs/hc-class-expose-on-spawn-design.md §4).
     std::function<uint32_t(const std::string& classPath,
                            const float* position,      // 3 floats, or nullptr
-                           const float* rotationEuler)> createObject; // 3 floats, degrees, or nullptr
+                           const float* rotationEuler, // 3 floats, degrees, or nullptr
+                           const SpawnValues& spawn)> createObject;
     std::function<void(uint32_t objectRef)>               destroyObject;
 
     // Reference-based delegation (bound by the Runtime). All optional.

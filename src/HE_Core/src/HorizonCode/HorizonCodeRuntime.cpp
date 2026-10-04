@@ -344,6 +344,17 @@ bool Runtime::setPublicVariable(InstanceId id, const std::string& name, const Va
     return true;
 }
 
+void Runtime::applySpawnValues(InstanceId id, const SpawnValues& spawn, const std::string& classPath)
+{
+    for (const SpawnValue& sv : spawn)
+        if (!setPublicVariable(id, sv.name, sv.value))
+            // The creator's pins are a mirror from when it was last opened; the
+            // class has since renamed or hidden this one.
+            HE_LOG_WARN(HorizonCode, "Create Object '%s': '%s' is no public variable of the "
+                                     "class (renamed or made private?) — value skipped",
+                        classPath.c_str(), sv.name.c_str());
+}
+
 void Runtime::reseedVariables(InstanceId id)
 {
     Inst* i = find(id);
@@ -691,8 +702,8 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     // the call is synchronous, so the caller's vec3 locals outlive it and there
     // is nothing here to own or copy.
     ctx.createObject  = [this](const std::string& path, const float* pos,
-                               const float* rot) -> uint32_t
-    { return m_services.createObject ? m_services.createObject(path, pos, rot) : 0u; };
+                               const float* rot, const SpawnValues& spawn) -> uint32_t
+    { return m_services.createObject ? m_services.createObject(path, pos, rot, spawn) : 0u; };
     ctx.destroyObject = [this](uint32_t ref) { if (m_services.destroyObject) m_services.destroyObject(ref); };
     ctx.callApi       = [this, id](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
     { return m_services.callApi ? m_services.callApi(id, apiId, args) : std::vector<Value>{}; };

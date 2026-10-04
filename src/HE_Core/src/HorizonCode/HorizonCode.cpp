@@ -235,6 +235,11 @@ void signatureInto(const Node& n, NodeSig& s)
         // same as one wired to (0,0,0). Adding these shifted the Object output's
         // absolute pin index (2 → 4); fromJson migrates graphs saved before that.
         s.dataIns  = { { "Location", P::Vec3 }, { "Rotation", P::Vec3 } };
+        // Expose on Spawn: one input per variable the class offers, BEHIND the
+        // placement and mirrored by syncSpawnPins. None on every node from
+        // before and on every class without a tick, so the Object output stays
+        // at pin 4 there (docs/hc-class-expose-on-spawn-design.md §3.1).
+        for (const auto& p : n.params) s.dataIns.push_back(paramPin(p));
         s.dataOuts = { { "Object", P::Ref } };
         break;
     case T::DestroyObject:
@@ -2307,33 +2312,74 @@ bool sameInlineValue(const Value& a, const Value& b)
     default:        return false;
     }
 }
+// A variable a creator may set at spawn: ticked, public, an instance variable.
+bool offeredAtSpawn(const Variable& v)
+{
+    return v.exposeOnSpawn && v.access == 0 && v.scope == 0;
+}
+SpawnPin spawnPinOf(const Variable& v)
+{
+    SpawnPin p;
+    p.param.name        = v.name;
+    p.param.type        = v.type;
+    p.param.isArray     = v.isArray;
+    p.param.typeName    = v.typeName;
+    p.param.container   = v.container;
+    p.param.keyType     = v.keyType;
+    p.param.keyTypeName = v.keyTypeName;
+    p.def = variableDefaultValue(v);
+    return p;
+}
 } // namespace
 
 std::vector<SpawnPin> spawnPinsOf(const Graph& widgetGraph)
 {
     std::vector<SpawnPin> out;
     for (const Variable& v : widgetGraph.variables)
-    {
-        if (!v.exposeOnSpawn || v.access != 0 || v.scope != 0) continue;
-        SpawnPin p;
-        p.param.name        = v.name;
-        p.param.type        = v.type;
-        p.param.isArray     = v.isArray;
-        p.param.typeName    = v.typeName;
-        p.param.container   = v.container;
-        p.param.keyType     = v.keyType;
-        p.param.keyTypeName = v.keyTypeName;
-        p.def = variableDefaultValue(v);
-        out.push_back(std::move(p));
-    }
+        if (offeredAtSpawn(v)) out.push_back(spawnPinOf(v));
     return out;
 }
 
-bool syncSpawnPins(Graph& g, int createWidgetNodeId, const std::vector<SpawnPin>& now,
-                   const std::vector<SpawnPin>* before)
+std::vector<SpawnPin> spawnPinsOfLevels(const std::vector<Graph>& levels)
 {
-    Node* n = g.findNode(createWidgetNodeId);
-    if (!n || n->type != T::CreateWidget) return false;
+    // The declaration a name resolves to on a live instance: the nearest one,
+    // leaf-first — Runtime::setPublicVariable's lookup, so a pin is offered
+    // exactly when its value would be accepted, with that declaration's type.
+    const auto nearest = [&levels](const std::string& name) -> const Variable*
+    {
+        for (auto lv = levels.rbegin(); lv != levels.rend(); ++lv)
+            if (const Variable* v = lv->findVariable(name)) return v;
+        return nullptr;
+    };
+    std::vector<SpawnPin> out;
+    for (const Graph& lv : levels)
+        for (const Variable& v : lv.variables)
+        {
+            if (!offeredAtSpawn(v) || nearest(v.name) != &v) continue;
+            // Create Object's fixed inputs carry these names (§3.3).
+            if (v.name == "Location" || v.name == "Rotation") continue;
+            out.push_back(spawnPinOf(v));
+        }
+    return out;
+}
+
+int firstSpawnDataIn(NodeType t)
+{
+    switch (t)
+    {
+    case T::CreateWidget: return 0;
+    case T::CreateObject: return 2;   // behind Location, Rotation
+    default:              return -1;
+    }
+}
+
+bool syncSpawnPins(Graph& g, int createNodeId, const std::vector<SpawnPin>& now,
+                   const std::vector<SpawnPin>* before, bool dropWiresOnRetype)
+{
+    Node* n = g.findNode(createNodeId);
+    if (!n) return false;
+    const int first = firstSpawnDataIn(n->type);
+    if (first < 0) return false;
 
     // What the node carries today, by pin NAME: its inline values are keyed by
     // data-in index, which is exactly what is about to move.
@@ -2347,32 +2393,39 @@ bool syncSpawnPins(Graph& g, int createWidgetNodeId, const std::vector<SpawnPin>
     };
 
     std::vector<FuncParam>         params;
-    std::unordered_map<int, Value> values;
+    std::unordered_map<int, Value> values;   // keyed by data-in index, like pinDefaults
+    std::vector<size_t>            retyped;  // new indices whose name stayed, type did not
     params.reserve(now.size());
     for (size_t i = 0; i < now.size(); ++i)
     {
         const SpawnPin& sp = now[i];
         params.push_back(sp.param);
+        const auto oi = oldIndex.find(sp.param.name);
+        const bool same = oi != oldIndex.end() && sameSpawnParam(n->params[oi->second], sp.param);
+        if (oi != oldIndex.end() && !same) retyped.push_back(i);
         if (!spawnPinHasInlineValue(sp.param)) continue;
         Value v = sp.def;   // a new or retyped pin starts where the variable does
-        if (const auto oi = oldIndex.find(sp.param.name); oi != oldIndex.end() &&
-            sameSpawnParam(n->params[oi->second], sp.param))
+        if (same)
         {
-            const auto pd = n->pinDefaults.find((int)oi->second);
+            const auto pd = n->pinDefaults.find(first + (int)oi->second);
             if (pd != n->pinDefaults.end())
             {
                 v = pd->second;
-                // Still the default the widget had when this pin was filled:
-                // nobody chose that value here, so it follows the widget.
+                // Still the default the class had when this pin was filled:
+                // nobody chose that value here, so it follows the class.
                 const SpawnPin* b = findBefore(sp.param.name);
                 if (b && sameSpawnParam(b->param, sp.param) && sameInlineValue(v, b->def))
                     v = sp.def;
             }
         }
-        values.emplace((int)i, std::move(v));
+        values.emplace(first + (int)i, std::move(v));
     }
 
-    bool changed = params.size() != n->params.size() || values.size() != n->pinDefaults.size();
+    // Only the spawn pins' values are this function's; a fixed input in front
+    // (Create Object's placement) keeps whatever it carries.
+    size_t oldSpawnValues = 0;
+    for (const auto& [idx, v] : n->pinDefaults) if (idx >= first) ++oldSpawnValues;
+    bool changed = params.size() != n->params.size() || values.size() != oldSpawnValues;
     for (size_t i = 0; !changed && i < params.size(); ++i)
         changed = !sameSpawnParam(params[i], n->params[i]);
     for (const auto& [idx, v] : values)
@@ -2383,10 +2436,23 @@ bool syncSpawnPins(Graph& g, int createWidgetNodeId, const std::vector<SpawnPin>
     }
     if (!changed) return false;
 
-    const LinkRemapSnapshot snap = captureLinkRemapSnapshot(g, { createWidgetNodeId });
-    n->params      = std::move(params);
-    n->pinDefaults = std::move(values);
+    const LinkRemapSnapshot snap = captureLinkRemapSnapshot(g, { createNodeId });
+    n->params = std::move(params);
+    for (auto it = n->pinDefaults.begin(); it != n->pinDefaults.end(); )
+        it = it->first >= first ? n->pinDefaults.erase(it) : std::next(it);
+    for (auto& [idx, v] : values) n->pinDefaults[idx] = std::move(v);
     remapLinksFromSnapshot(g, snap);   // wires follow their pin by name
+    if (dropWiresOnRetype && !retyped.empty())
+    {
+        // The name matched, so the remap kept the wire — on a pin of another
+        // type now. Dropped, visibly, as a retyped Get/Set Variable drops its.
+        const int dataIn0 = pinRanges(*n).dataIn0;
+        std::unordered_set<int> dead;
+        for (const size_t i : retyped) dead.insert(dataIn0 + first + (int)i);
+        g.links.erase(std::remove_if(g.links.begin(), g.links.end(), [&](const Link& l)
+                      { return l.dstNode == createNodeId && dead.count(l.dstPin); }),
+                      g.links.end());
+    }
     return true;
 }
 
@@ -3818,8 +3884,21 @@ void Runner::execNode(const Node& n, int depth)
         const bool hasPos = inputLinked(n, 0), hasRot = inputLinked(n, 1);
         if (hasPos) pos = evalInput(n, 0, depth + 1).v3;
         if (hasRot) rot = evalInput(n, 1, depth + 1).v3;
+        // Expose on Spawn, behind the placement (spawn pin i = data-in 2 + i):
+        // Create Widget's rule — wired, or a value on the node, counts; an
+        // untouched pin leaves the class's own default. Evaluated here, in the
+        // creator's context, before the instance exists
+        // (docs/hc-class-expose-on-spawn-design.md §4.5).
+        SpawnValues spawn;
+        for (size_t i = 0; i < n.params.size(); ++i)
+        {
+            const int in = 2 + (int)i;
+            if (inputLinked(n, in) || n.pinDefaults.count(in))
+                spawn.push_back({ n.params[i].name,
+                                  coerce(evalInput(n, in, depth + 1), n.params[i].type) });
+        }
         const uint32_t ref = m_ctx.createObject
-            ? m_ctx.createObject(n.s, hasPos ? &pos.x : nullptr, hasRot ? &rot.x : nullptr)
+            ? m_ctx.createObject(n.s, hasPos ? &pos.x : nullptr, hasRot ? &rot.x : nullptr, spawn)
             : 0u;
         if (ref == 0u)
             HE_LOG_ERROR(HorizonCode, "%s",

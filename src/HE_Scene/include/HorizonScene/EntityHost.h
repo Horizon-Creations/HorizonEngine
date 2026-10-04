@@ -61,7 +61,13 @@ public:
     // classPath BY VALUE on purpose — see the note at the definition. Callers
     // pass strings owned by content-manager assets, and binding loads assets,
     // which moves them.
-    HorizonCode::InstanceId bind(Entity entity, std::string classPath);
+    //
+    // `spawn`: a Create Object's Expose on Spawn values, set on the new
+    // instance between creating it and its Construct — so Construct and
+    // BeginPlay both already see them. nullptr (begin(), bindFor(), anything
+    // without a creator) = the class's own defaults.
+    HorizonCode::InstanceId bind(Entity entity, std::string classPath,
+                                 const HorizonCode::SpawnValues* spawn = nullptr);
 
     // Spawn a class that brings its OWN entity: instantiates the class asset's
     // component list (CHUNK_HCCP, a prefab-shaped subtree) into the world and
@@ -84,9 +90,13 @@ public:
     // until this existed every one of those answered against a bodiless world.
     // The whole SUBTREE, not just the root — a PlayerCharacter arrives with
     // child entities that carry colliders of their own.
+    //
+    // `spawnValues` is handed on to bind() (see there): Expose on Spawn values, in
+    // place before Construct and BeginPlay like the placement and the body.
     struct Spawned { HorizonCode::InstanceId instance = 0; Entity entity = entt::null; };
     Spawned spawn(const std::string& classPath, Entity parent = entt::null,
-                  const float* position = nullptr, const float* rotationEuler = nullptr);
+                  const float* position = nullptr, const float* rotationEuler = nullptr,
+                  const HorizonCode::SpawnValues* spawnValues = nullptr);
 
     // Per-frame: fire Tick on every entity instance, and reap the ones whose
     // entity has gone away (see the lifetime rule in the .cpp). No-op when not

@@ -665,7 +665,8 @@ TEST_CASE("a Tick that spawns and destroys entity classes does not walk a mutati
 	Runtime::Services svc;
 	// Placement is not what this test is about: it hands the spawn nothing, which
 	// is the "leave it where the class authored it" case.
-	svc.createObject = [&](const std::string& p, const float*, const float*) -> uint32_t
+	svc.createObject = [&](const std::string& p, const float*, const float*,
+	                       const SpawnValues&) -> uint32_t
 	{ return host.spawn(p).instance; };
 	svc.destroyObject = [&](uint32_t ref) { rt.destroy(ref); };
 	rt.setServices(std::move(svc));
@@ -877,8 +878,9 @@ TEST_CASE("entity.spawnClass hands a script the furnished entity, not a bare one
 		c.self = self; c.entities = &host;
 		return fn->invoke(c, args);
 	};
-	svc.createObject = [&](const std::string& p, const float* pos, const float* rot) -> uint32_t
-	{ return host.spawn(p, entt::null, pos, rot).instance; };
+	svc.createObject = [&](const std::string& p, const float* pos, const float* rot,
+	                       const SpawnValues& spawn) -> uint32_t
+	{ return host.spawn(p, entt::null, pos, rot, &spawn).instance; };
 	svc.destroyObject = [&](uint32_t ref)
 	{
 		const uint32_t owned = rt.ownedEntity(ref);
@@ -890,10 +892,14 @@ TEST_CASE("entity.spawnClass hands a script the furnished entity, not a bare one
 
 	// The Ctx a script call arrives in, assembled member by member — the same
 	// two services the runtime got, so a Create Object node and this row are one
-	// operation rather than two implementations that can drift.
+	// operation rather than two implementations that can drift. The row has no
+	// Expose on Spawn values to give, so it reaches the same one without them —
+	// the apps' g_host.createObject forward.
 	HE::api::Ctx c;
 	c.world = &world; c.physics = &phys; c.content = &cm; c.runtime = &rt; c.entities = &host;
-	c.createObject  = svc.createObject;
+	c.createObject  = [create = svc.createObject](const std::string& p, const float* pos,
+	                                              const float* rot)
+	{ return create(p, pos, rot, {}); };
 	c.destroyObject = svc.destroyObject;
 
 	const HE::api::Entity spawned = HE::api::entity::spawnClass(c, cls, 50.0f, 12.0f, -25.0f);

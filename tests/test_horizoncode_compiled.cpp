@@ -124,7 +124,7 @@ namespace
 		// nullptr placement = the unwired Location/Rotation pins, which is what
 		// generated code emits for a Create Object nobody wired a position into.
 		uint32_t ctxCreateObject(const std::string& path)
-		{ return m_ctx.createObject ? m_ctx.createObject(path, nullptr, nullptr) : 0u; }
+		{ return m_ctx.createObject ? m_ctx.createObject(path, nullptr, nullptr, {}) : 0u; }
 		Value ctxGetExternal(uint32_t target, const std::string& var)
 		{ return m_ctx.getExternal ? m_ctx.getExternal(target, var) : Value{}; }
 		void ctxSetExternal(uint32_t target, const std::string& var, const Value& v)
@@ -251,6 +251,22 @@ TEST_CASE("External access on a compiled target enforces the public-access check
 	CHECK(r[0].f == doctest::Approx(4.0f));
 	CHECK(c->ctxCallExternal(target, "Hidden", {}).empty());
 	CHECK(rt.getVariable(target, "Secret").f == doctest::Approx(1.0f));
+}
+
+TEST_CASE("Expose on Spawn values reach a compiled class's public members only")
+{
+	// Create Object's values go through applySpawnValues, i.e. Set (Ref)'s rule —
+	// for a compiled class through its reflection (CompiledVarInfo::access), so
+	// the generated class needs nothing new (docs/hc-class-expose-on-spawn-design.md §6).
+	Runtime rt;
+	const InstanceId id = rt.addCompiled(makeCompiled<MockCompiled>());
+	rt.applySpawnValues(id, { { "Score",  Value::ofFloat(9.0f) },
+	                          { "Secret", Value::ofFloat(7.0f) },     // private: skipped
+	                          { "gone",   Value::ofInt(3) } },        // unknown: skipped
+	                    "Content/Logic/Mock.hasset");
+	CHECK(rt.getVariable(id, "Score").f  == doctest::Approx(9.0f));
+	CHECK(rt.getVariable(id, "Secret").f == doctest::Approx(1.0f));
+	CHECK(rt.variablesOf(id).count("gone") == 0);   // not even in the overflow store
 }
 
 TEST_CASE("Bind/Emit works in both directions between compiled and interpreted instances")
@@ -396,7 +412,8 @@ TEST_CASE("Services bound AFTER addCompiled still reach the compiled instance")
 	CHECK(m->ctxCreateObject("Content/X.hasset") == 0u);   // …no services yet
 
 	Runtime::Services svc;                       // …services arrive afterwards
-	svc.createObject = [](const std::string&, const float*, const float*) -> uint32_t { return 77u; };
+	svc.createObject = [](const std::string&, const float*, const float*,
+	                      const SpawnValues&) -> uint32_t { return 77u; };
 	rt.setServices(std::move(svc));
 	CHECK(m->ctxCreateObject("Content/X.hasset") == 77u);
 }
