@@ -137,7 +137,7 @@ EntityHost::spawn(path, parent, pos, rot, spawn):
 
 ### 5.1 Häkchen
 
-`LevelScriptPanel.cpp` `drawVariableDetails`, im öffentlichen Zweig neben Replicated und Save Game, nur wenn das Panel ein Klassen-Asset zeigt. Ausgegraut bei `access != 0` und bei den Namen `Location`/`Rotation` (§3.3), jeweils mit Grund im Tooltip. Private schalten löscht das Flag, wie im Widget-Editor. Hilfetext unter `Script Variable/Expose on Spawn` in `EditorHelp.cpp` (die Tooltip-Abdeckung ist vollständig und soll es bleiben).
+`LevelScriptPanel.cpp` `drawVariableDetails`, im öffentlichen Zweig neben Replicated und Save Game, nur wenn das Panel ein Klassen-Asset zeigt. Das weiß die Funktion heute nicht (Parameter: Graph, geerbte Variablen, ContentManager); die Panel-Art muss hineingereicht werden. Ausgegraut bei `access != 0` und bei den Namen `Location`/`Rotation` (§3.3), jeweils mit Grund im Tooltip. Private schalten löscht das Flag, wie im Widget-Editor. Hilfetext unter `Script Variable/Expose on Spawn` in `EditorHelp.cpp` (die Tooltip-Abdeckung ist vollständig und soll es bleiben).
 
 ### 5.2 Pin-Spiegel
 
