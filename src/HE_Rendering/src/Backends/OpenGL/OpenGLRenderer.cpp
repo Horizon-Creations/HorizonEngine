@@ -383,14 +383,15 @@ float cloudShadowFactor(vec3 worldPos, vec3 L)
 	return mix(1.0, T, s * edge);
 }
 
-float localShadowFactor(int i, vec3 worldPos, vec3 N)
+// `base` = the light's first atlas layer (-1 = casts no shadow). Takes the
+// light by value so the window and the cluster lists share it.
+float localShadowFactorAt(vec4 posType, int base, vec3 worldPos, vec3 N)
 {
-	int base = int(uLightParams[i].y);
 	if (base < 0) return 1.0;
 	int layer = base;
-	if (int(uLightPos[i].w) == 1) // point: major-axis cube-face pick
+	if (int(posType.w) == 1) // point: major-axis cube-face pick
 	{
-		vec3 d = worldPos - uLightPos[i].xyz;
+		vec3 d = worldPos - posType.xyz;
 		vec3 a = abs(d);
 		int face;
 		if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
@@ -398,7 +399,7 @@ float localShadowFactor(int i, vec3 worldPos, vec3 N)
 		else                               face = (d.z > 0.0) ? 4 : 5;
 		layer = base + face;
 	}
-	vec3  toL = normalize(uLightPos[i].xyz - worldPos);
+	vec3  toL = normalize(posType.xyz - worldPos);
 	float ndl = clamp(dot(N, toL), 0.0, 1.0);
 	vec4 lp = uLocalShadowVP[layer] * vec4(worldPos + N * 0.02, 1.0);
 	if (lp.w <= 0.0) return 1.0;             // behind the light's near plane
@@ -418,6 +419,82 @@ float localShadowFactor(int i, vec3 worldPos, vec3 N)
 		}
 	return vis / 9.0;
 }
+
+float localShadowFactor(int i, vec3 worldPos, vec3 N)
+{
+	return localShadowFactorAt(uLightPos[i], int(uLightParams[i].y), worldPos, N);
+}
+
+#ifdef HE_CLUSTERED
+// ── Clustered point/spot lights (Thema 117, GL 4.3 build only) ───────────────
+// Every point/spot light of the scene (HE::BuildClusterLights with
+// bottomLeftOrigin = true, gl_FragCoord's origin) in per-cluster lists, the
+// SAME SSBOs 4/5/6 the graph materials' heLitP reads. While
+// uClusterParams.x > 0 main() shades the fragment's list INSTEAD of the
+// window's point/spot slots (the window keeps its directional lights). 4 vec4
+// per light: posType, dirSpot, colorIntensity (w = intensity), params
+// (x = range, y = atlas layer + 1, z = GI local-mask channel + 1). The
+// HE_CL_*_BINDING values are prepended by SceneStageSource.
+layout(std430, binding = HE_CL_LIGHTS_BINDING) readonly buffer HeClusterLights { vec4 clLights[]; };
+layout(std430, binding = HE_CL_GRID_BINDING)   readonly buffer HeClusterGrid   { uvec2 clGrid[]; };
+layout(std430, binding = HE_CL_INDEX_BINDING)  readonly buffer HeClusterIdx    { uint clIdx[]; };
+uniform vec4 uClusterParams; // x/y/z grid dims (x = 0 → off), w = slice scale
+uniform vec4 uClusterCamFwd; // xyz camera forward, w = cluster near plane
+
+// The fragment's cluster list with the window loop's per-light model. Takes
+// main()'s post-weather material terms, so snow/wet apply exactly once.
+// SYNC: heLitP's heFwdClusterLights (MaterialShaderLibrary.cpp) and Metal
+// fragmentMain's cluster loop.
+vec3 clusterLights(vec3 P, vec3 N, vec3 V, vec3 diffuseColor, vec3 specColor,
+                   float shininess, float specScale)
+{
+	vec2  uv    = gl_FragCoord.xy / max(uViewport, vec2(1.0));
+	float nearZ = max(uClusterCamFwd.w, 1e-4);
+	float viewZ = max(dot(P - uCameraPos, uClusterCamFwd.xyz), nearZ);
+	int gx = int(uClusterParams.x);
+	int gy = int(uClusterParams.y);
+	int gz = int(uClusterParams.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+	int cz = clamp(int(log(viewZ / nearZ) * uClusterParams.w), 0, gz - 1);
+	int cx = clamp(int(uv.x * float(gx)), 0, gx - 1);
+	int cy = clamp(int(uv.y * float(gy)), 0, gy - 1);
+	uvec2 cell = clGrid[(cz * gy + cy) * gx + cx];
+	vec3 result = vec3(0.0);
+	for (uint k = 0u; k < cell.y; ++k)
+	{
+		uint li = clIdx[cell.x + k] * 4u;
+		vec4 posType = clLights[li + 0u];
+		vec4 dirSpot = clLights[li + 1u];
+		vec4 colInt  = clLights[li + 2u];
+		vec4 params  = clLights[li + 3u];
+		vec3  d    = posType.xyz - P;
+		float dist = max(length(d), 1e-4);
+		vec3  L    = d / dist;
+		float range = max(params.x, 1e-4);
+		float atten = clamp(1.0 - dist / range, 0.0, 1.0);
+		atten *= atten;
+		if (posType.w > 1.5) // spot cone
+		{
+			float c       = dot(-L, normalize(dirSpot.xyz));
+			float cosCone = dirSpot.w;
+			atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+		}
+		if (atten <= 0.0) continue;
+		float sh = localShadowFactorAt(posType, int(params.y) - 1, P, N);
+		// Ray-traced local mask: the builder hands out the window's first-4
+		// channels (giLocalIdx in main), only while the mask is bound.
+		int ch = int(params.z) - 1;
+		if (uGIEnabled == 1 && ch >= 0)
+			sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uViewport)[ch]);
+		if (uNoShadow) sh = 1.0;
+		float diff = max(dot(N, L), 0.0);
+		vec3  H    = normalize(L + V);
+		float spec = pow(max(dot(N, H), 0.0), shininess) * specScale;
+		result += (diffuseColor * diff + specColor * spec) * colInt.rgb * colInt.w * atten * sh;
+	}
+	return result;
+}
+#endif
 
 void main()
 {
@@ -518,9 +595,17 @@ void main()
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
+#ifdef HE_CLUSTERED
+	// Clustered: the lists hold EVERY point/spot light, so the window's copies
+	// of the first few would count twice — the window keeps its directionals.
+	bool clustered = uClusterParams.x > 0.5;
+#endif
 	for (int i = 0; i < uLightCount; ++i)
 	{
 		int   type  = int(uLightPos[i].w);
+#ifdef HE_CLUSTERED
+		if (clustered && type != 0) continue;
+#endif
 		vec3  L;
 		float atten = 1.0;
 
@@ -579,6 +664,10 @@ void main()
 		result += (diffuseColor * diff + specColor * spec)
 		        * uLightColor[i].rgb * uLightColor[i].w * atten * sh;
 	}
+#ifdef HE_CLUSTERED
+	if (clustered)
+		result += clusterLights(vWorldPos, N, V, diffuseColor, specColor, shininess, specScale);
+#endif
 	result = applyFog(result, uCameraPos, vWorldPos, uSunDir);
 
 	// Debug: tint each fragment by its shadow cascade (red / green / blue / yellow)
@@ -1913,7 +2002,7 @@ layout(rgba16f, binding = 1) uniform writeonly image2D uOutLocal;
 uniform vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 uniform vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height
 uniform vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
-uniform vec4 uLocalExtra;       // x = local light count
+uniform vec4 uLocalExtra;       // x = local light count, y = sun rays per pixel
 
 // Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
 // (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
@@ -1965,11 +2054,17 @@ void main()
 	// term already zeroes this out, so skip the trace entirely.
 	if (dot(N, L) > 0.0)
 	{
-		vec2 xi  = giHash2(gid, uFrame.x);
-		vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
-		// Same self-intersection guards as Metal: normal-offset origin + min t.
-		vec3 origin = pv.xyz + N * 0.05;
-		sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		// spp rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		uint spp = uint(max(uLocalExtra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			vec2 xi  = giHash2(gid, uFrame.x * float(spp) + float(k));
+			vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+			// Same self-intersection guards as Metal: normal-offset origin + min t.
+			vec3 origin = pv.xyz + N * 0.05;
+			sunVis += giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		}
+		sunVis /= float(spp);
 	}
 	imageStore(uOut, ivec2(gid), vec4(sunVis));
 
@@ -2007,6 +2102,7 @@ uniform sampler2D uGPos;
 uniform sampler2D uRaw;
 uniform sampler2D uHistory;
 uniform mat4  uPrevViewProj;
+uniform mat4  uCurViewProj; // this frame's, same family as uPrevViewProj (motion-vector reprojection)
 uniform float uBlend; // history weight (0 on first GI frame)
 out vec4 FragColor;
 void main()
@@ -2023,8 +2119,6 @@ void main()
 	{ FragColor = vec4(pv.xyz, rawV); return; }
 
 	vec2  texel     = 1.0 / vec2(textureSize(uRaw, 0)); // uGPos has the same size
-	vec4  hist      = texture(uHistory, prevUV);
-	float posError  = length(pv.xyz - hist.rgb);
 	// Tolerance covers one texel's world footprint (smaller one-sided G-buffer
 	// step per axis, capped) — see gi_temporal.frag, Thema 131 §3 C.
 	vec3  gxp = texture(uGPos, vUV + vec2(texel.x, 0.0)).xyz, gxm = texture(uGPos, vUV - vec2(texel.x, 0.0)).xyz;
@@ -2032,7 +2126,25 @@ void main()
 	float footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
 	                      min(length(gyp - pv.xyz), length(gym - pv.xyz)));
 	float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
-	float w = (posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
+	// Bilinear history, reprojected as a motion vector from this pixel's
+	// centre; 4 taps, each only if written for this surface, renormalised —
+	// see gi_temporal.frag, Thema 134 §4.2. curUV: prevUV's formula (no y-flip).
+	vec4 cclip = uCurViewProj * vec4(pv.xyz, 1.0);
+	vec2 curUV = (cclip.xy / cclip.w) * 0.5 + 0.5;
+	vec2 hsz   = vec2(textureSize(uHistory, 0));
+	vec2 hf    = (vUV + (prevUV - curUV)) * hsz - 0.5;
+	vec2 hb    = floor(hf);
+	vec2 ht    = hf - hb;
+	float hAcc = 0.0, hWsum = 0.0;
+	for (int j = 0; j < 4; ++j)
+	{
+		vec2  o  = vec2(float(j & 1), float(j >> 1));
+		vec2  bw = mix(1.0 - ht, ht, o);
+		vec4  h  = texture(uHistory, (hb + o + 0.5) / hsz);
+		if (length(pv.xyz - h.rgb) < tolerance) { hAcc += h.a * bw.x * bw.y; hWsum += bw.x * bw.y; }
+	}
+	float histA = hWsum > 1e-3 ? hAcc / hWsum : 0.0;
+	float w = hWsum > 1e-3 ? clamp(uBlend, 0.0, 0.98) : 0.0;
 	// Neighbourhood clamp: guards OCCLUDER motion (the position check above
 	// only covers receiver/camera motion) — moved shadows update in 1-2 frames
 	// instead of smearing for ~30. Range of the 3x3 MEANS of raw over a 5x5
@@ -2053,23 +2165,64 @@ void main()
 			nMin = min(nMin, s / 9.0);
 			nMax = max(nMax, s / 9.0);
 		}
-	FragColor = vec4(pv.xyz, mix(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w));
+	FragColor = vec4(pv.xyz, mix(rawV, clamp(histA, nMin - 0.1, nMax + 0.1), w));
 }
 )GLSL";
 
-static const char* kGiBlurFS = R"GLSL(
+// One edge-aware a-trous iteration over the shadow mask, run twice; replaces
+// the 3x3 box (gi_atrous.frag, Thema 134 §4.3 — same constants, SYNC there).
+// The first iteration reads the history's alpha (rgb = world position).
+static const char* kGiAtrousFS = R"GLSL(
 #version 410 core
 in vec2 vUV;
-uniform sampler2D uSrc; // temporal history: rgb = world pos, a = shadow
+uniform sampler2D uSrc;   // history (.a) or the previous iteration (.r)
+uniform sampler2D uGPos;
+uniform sampler2D uGNorm;
+uniform vec4 uAtrous;     // x = step in texels (0 = plain copy), y = 1 read .a else .r, z = N_eff (history samples)
 out vec4 FragColor;
+vec4  tap(sampler2D s, vec2 uv) { return textureLod(s, uv, 0.0); }
+float atrousValue(vec4 s) { return uAtrous.y > 0.5 ? s.a : s.r; }
 void main()
 {
+	float c  = atrousValue(tap(uSrc, vUV));
+	vec4  pv = tap(uGPos, vUV);
+	float st = uAtrous.x;
+	if (st < 0.5 || pv.a < 0.5) { FragColor = vec4(c, 0.0, 0.0, 1.0); return; }
+
 	vec2 texel = 1.0 / vec2(textureSize(uSrc, 0));
-	float sum = 0.0;
-	for (int x = -1; x <= 1; ++x)
-		for (int y = -1; y <= 1; ++y)
-			sum += texture(uSrc, vUV + vec2(float(x), float(y)) * texel).a;
-	FragColor = vec4(sum / 9.0, 0.0, 0.0, 1.0);
+	if (c < 1e-3 || c > 1.0 - 1e-3)
+	{
+		bool allSame = true;
+		for (int k = 0; k < 4 && allSame; ++k)
+		{
+			vec2 o = vec2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
+			allSame = abs(atrousValue(tap(uSrc, vUV + o * (2.0 * st) * texel)) - c) < 1e-3;
+		}
+		if (allSame) { FragColor = vec4(c, 0.0, 0.0, 1.0); return; }
+	}
+
+	vec3 n = normalize(tap(uGNorm, vUV).xyz);
+	vec3  gxp = tap(uGPos, vUV + vec2(texel.x, 0.0)).xyz, gxm = tap(uGPos, vUV - vec2(texel.x, 0.0)).xyz;
+	vec3  gyp = tap(uGPos, vUV + vec2(0.0, texel.y)).xyz, gym = tap(uGPos, vUV - vec2(0.0, texel.y)).xyz;
+	float fp  = max(max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+	                    min(length(gyp - pv.xyz), length(gym - pv.xyz))), 1e-4);
+	float sig = sqrt(max(c * (1.0 - c), 0.0) / max(uAtrous.z, 1.0));
+	const float h[5] = float[5](1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
+	float sum = 0.0, wsum = 0.0;
+	for (int y = -2; y <= 2; ++y)
+		for (int x = -2; x <= 2; ++x)
+		{
+			vec2 uv = vUV + vec2(float(x), float(y)) * st * texel;
+			vec4 q  = tap(uGPos, uv);
+			if (q.a < 0.5) continue;
+			float v = atrousValue(tap(uSrc, uv));
+			float w = h[x + 2] * h[y + 2];
+			w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (1.0 * fp));
+			w *= pow(max(dot(n, normalize(tap(uGNorm, uv).xyz)), 0.0), 32.0);
+			w *= exp(-abs(v - c) / (2.0 * sig + 1e-3));
+			sum += v * w; wsum += w;
+		}
+	FragColor = vec4(wsum > 0.0 ? sum / wsum : c, 0.0, 0.0, 1.0);
 }
 )GLSL";
 
@@ -3082,6 +3235,24 @@ static std::string injectSkyFunc(const char* src)
 	return s;
 }
 
+// A scene-program stage (kUnlitVS/kSkinnedVS/kInstancedVS or kUnlitFS) for the
+// clustered GL 4.3 build: the "#version 410 core" line becomes 4.30 and the
+// cluster switch + SSBO bindings are defined right behind it. Both stages of a
+// program take this, so a program stays on one version. SYNC:
+// scripts/validate_embedded_shaders.py assembles the same text.
+static std::string SceneStageSource(std::string src)
+{
+	using Lib = HE::MaterialShaderLibrary;
+	const std::string from = "#version 410 core\n";
+	const std::string to = "#version 430 core\n#define HE_CLUSTERED 1\n"
+		"#define HE_CL_LIGHTS_BINDING " + std::to_string(Lib::kGlClusterLightsSsboBinding) + "\n"
+		"#define HE_CL_GRID_BINDING "   + std::to_string(Lib::kGlClusterGridSsboBinding)   + "\n"
+		"#define HE_CL_INDEX_BINDING "  + std::to_string(Lib::kGlClusterIndexSsboBinding)  + "\n";
+	if (size_t pos = src.find(from); pos != std::string::npos)
+		src.replace(pos, from.size(), to);
+	return src;
+}
+
 // KHR_debug sink (see the HE_GL_DEBUG block in Initialize). Runs on the calling
 // thread while debug output is synchronous, so the message names the GL call that
 // produced it — the one thing the end-of-frame glGetError below can never say.
@@ -3244,17 +3415,60 @@ struct GLWireScope
 	}
 };
 
+unsigned int OpenGLRenderer::LinkSceneProgram(const char* vsSrc, const char* what)
+{
+	auto link = [](GLuint vs, GLuint fs) {
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		return prog;
+	};
+	// Clustered point/spot lights for the built-in shading (Thema 117): the
+	// same GL 4.3 switch as the graph materials, read in Initialize before the
+	// scene programs are built. A failure falls back to the window build for
+	// THIS program only — m_forwardClustered stays the graph-material flag, and
+	// the fallback has no uCluster* uniforms, so its gate writes are no-ops.
+	if (m_forwardClustered)
+	{
+		GLuint vs = 0;
+		try
+		{
+			vs = CompileStage(GL_VERTEX_SHADER, SceneStageSource(vsSrc).c_str());
+			const GLuint fs = CompileStage(GL_FRAGMENT_SHADER,
+			                               SceneStageSource(injectSkyFunc(kUnlitFS)).c_str());
+			const GLuint prog = link(vs, fs);
+			vs = 0;
+			GLint ok = 0;
+			glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+			if (ok)
+			{
+				HE_LOG_INFO(RHI, "OpenGLRenderer: %s program uses clustered lighting (GLSL 4.30)", what);
+				return prog;
+			}
+			char log[512];
+			glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			glDeleteProgram(prog);
+			HE_LOG_WARN(RHI, "OpenGLRenderer: clustered %s program failed to link, using the 8-light window: %s",
+			            what, log);
+		}
+		catch (const std::exception& e)
+		{
+			if (vs) glDeleteShader(vs);
+			HE_LOG_WARN(RHI, "OpenGLRenderer: clustered %s program failed to compile, using the 8-light window: %s",
+			            what, e.what());
+		}
+	}
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   vsSrc);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
+	return link(vs, fs);
+}
+
 void OpenGLRenderer::CreateUnlitPipeline()
 {
-	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kUnlitVS);
-	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
-
-	m_unlitProgram = glCreateProgram();
-	glAttachShader(m_unlitProgram, vs);
-	glAttachShader(m_unlitProgram, fs);
-	glLinkProgram(m_unlitProgram);
-	glDeleteShader(vs);
-	glDeleteShader(fs);
+	m_unlitProgram = LinkSceneProgram(kUnlitVS, "scene");
 
 	GLint ok = 0;
 	glGetProgramiv(m_unlitProgram, GL_LINK_STATUS, &ok);
@@ -3312,6 +3526,8 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
 	m_uShadowDebug   = glGetUniformLocation(m_unlitProgram, "uShadowDebug");
 	m_uUnlit         = glGetUniformLocation(m_unlitProgram, "uUnlit");
+	m_uClusterParams = glGetUniformLocation(m_unlitProgram, "uClusterParams");
+	m_uClusterCamFwd = glGetUniformLocation(m_unlitProgram, "uClusterCamFwd");
 	m_uLocalShadowVP  = glGetUniformLocation(m_unlitProgram, "uLocalShadowVP[0]");
 	m_uLocalShadowMap = glGetUniformLocation(m_unlitProgram, "uLocalShadowMap");
 	m_uShadowBias     = glGetUniformLocation(m_unlitProgram, "uShadowBias");
@@ -3518,9 +3734,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
 	// Forward graph materials on GL 4.3+ shade from the cluster lists (Thema 117):
-	// both stages at GLSL 4.30, one version per program. Baked pak variants
-	// (GLSL 4.10, plain) and the G-buffer variant (never shades) stay as they are.
-	bool clustered = m_forwardClustered && !precompiled && !gbuffer;
+	// both stages at GLSL 4.30, one version per program. A baked pak variant
+	// clusters only if the exporter baked that 4.30 pair (vertexClustered +
+	// fragmentClustered); otherwise its plain 4.10 pair draws with the window.
+	// The G-buffer variant never shades lights.
+	const bool bakedClustered = precompiled && !precompiled->vertexClustered.empty()
+	                         && !precompiled->fragmentClustered.empty();
+	bool clustered = m_forwardClustered && !gbuffer && (!precompiled || bakedClustered);
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
 	auto crossCompile = [&](Backend b, bool cl) {
@@ -3531,11 +3751,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		                   : m_matShaderLib.fragment(key, fragGlsl, b);
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	};
+	auto usePrecompiled = [&](bool cl) {
+		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
+		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
+	};
 	if (precompiled)
-	{
-		vertSrc = precompiled->vertex; fragSrc = precompiled->fragment;
-		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL 410 — no runtime cross-compile
-	}
+		usePrecompiled(clustered);
 	else if (clustered)
 	{
 		crossCompile(Backend::GLSL430, true);
@@ -3641,7 +3863,9 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		setupProgram(prog);
 		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 		HE_LOG_INFO(RHI, "%s", precompiled
-			? "OpenGLRenderer: built a material program from a PRECOMPILED variant (no runtime cross-compile)"
+			? (clustered
+				? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)"
+				: "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)")
 			: clustered
 			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
 			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -3651,12 +3875,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	unsigned int program = ok ? linkSources() : 0;
 	if (!program && clustered)
 	{
-		// The GLSL 4.30 pair cross-compiled but the driver rejected it: the
-		// plain 4.10 pair still draws the material (window lights only).
+		// The GLSL 4.30 pair (cross-compiled or baked) but the driver rejected
+		// it: the plain 4.10 pair still draws the material (window lights only).
 		HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: clustered material program failed to link, "
 			"falling back to the 8-light window");
 		clustered = false;
-		crossCompile(Backend::GLSL410, false);
+		if (precompiled) usePrecompiled(false);
+		else             crossCompile(Backend::GLSL410, false);
 		program = ok ? linkSources() : 0;
 	}
 	if (!ok)
@@ -3838,14 +4063,7 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 
 void OpenGLRenderer::CreateSkinnedPipeline()
 {
-	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSkinnedVS);
-	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
-
-	m_skinnedProgram = glCreateProgram();
-	glAttachShader(m_skinnedProgram, vs);
-	glAttachShader(m_skinnedProgram, fs);
-	glLinkProgram(m_skinnedProgram);
-	glDeleteShader(vs); glDeleteShader(fs);
+	m_skinnedProgram = LinkSceneProgram(kSkinnedVS, "skinned");
 
 	GLint ok = 0;
 	glGetProgramiv(m_skinnedProgram, GL_LINK_STATUS, &ok);
@@ -3886,6 +4104,8 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedCameraFwd          = loc("uCameraFwd");
 	m_uSkinnedShadowDebug        = loc("uShadowDebug");
 	m_uSkinnedUnlit              = loc("uUnlit");
+	m_uSkinnedClusterParams      = loc("uClusterParams");
+	m_uSkinnedClusterCamFwd      = loc("uClusterCamFwd");
 	m_uSkinnedShadowMap          = loc("uShadowMap");
 	m_uSkinnedLocalShadowVP      = loc("uLocalShadowVP[0]");
 	m_uSkinnedLocalShadowMap     = loc("uLocalShadowMap");
@@ -3901,14 +4121,7 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 
 void OpenGLRenderer::CreateInstancedPipeline()
 {
-	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kInstancedVS);
-	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
-
-	m_instancedProgram = glCreateProgram();
-	glAttachShader(m_instancedProgram, vs);
-	glAttachShader(m_instancedProgram, fs);
-	glLinkProgram(m_instancedProgram);
-	glDeleteShader(vs); glDeleteShader(fs);
+	m_instancedProgram = LinkSceneProgram(kInstancedVS, "instanced");
 
 	GLint ok = 0;
 	glGetProgramiv(m_instancedProgram, GL_LINK_STATUS, &ok);
@@ -3949,6 +4162,8 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstCameraFwd        = loc("uCameraFwd");
 	m_uInstShadowDebug      = loc("uShadowDebug");
 	m_uInstUnlit            = loc("uUnlit");
+	m_uInstClusterParams    = loc("uClusterParams");
+	m_uInstClusterCamFwd    = loc("uClusterCamFwd");
 	m_uInstShadowMap        = loc("uShadowMap");
 	m_uInstShadowEnabled    = loc("uShadowEnabled");
 	m_uInstLocalShadowVP    = loc("uLocalShadowVP[0]");
@@ -5331,6 +5546,9 @@ void OpenGLRenderer::SetGISettings(const GISettings& s)
 	m_giLightRadius        = std::clamp(s.lightRadius, 0.0f, 10.0f);
 	m_giRaysPerProbe       = std::clamp(s.raysPerProbe, 8, 1024);
 	m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+	m_giShadowRays         = std::clamp(s.shadowRays, 1, 256);
+	m_giShadowHistoryWeight      = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+	m_giShadowFilter       = s.shadowFilter;
 }
 
 void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
@@ -5618,8 +5836,8 @@ void OpenGLRenderer::CreateGIPipelines()
 		                       CompileStage(GL_FRAGMENT_SHADER, kGiGBufFS));
 		m_giTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                           CompileStage(GL_FRAGMENT_SHADER, kGiTemporalFS));
-		m_giBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
-		                       CompileStage(GL_FRAGMENT_SHADER, kGiBlurFS));
+		m_giAtrousProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                       CompileStage(GL_FRAGMENT_SHADER, kGiAtrousFS));
 		m_giReflTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                               CompileStage(GL_FRAGMENT_SHADER, kGiReflTemporalFS));
 		m_giReflBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
@@ -5638,7 +5856,7 @@ void OpenGLRenderer::CreateGIPipelines()
 		            (std::string("OpenGLRenderer: GI pipeline build failed — GI disabled: ") + e.what()).c_str());
 		if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
 		if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
-		if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+		if (m_giAtrousProgram)     { glDeleteProgram(m_giAtrousProgram);     m_giAtrousProgram = 0; }
 		if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
 		if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
 		if (m_giReflCSProgram)   { glDeleteProgram(m_giReflCSProgram);   m_giReflCSProgram = 0; }
@@ -5731,6 +5949,11 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 	glGenFramebuffers(1, &m_giResultFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giResultTex, 0);
+	// Scratch between the two a-trous iterations (read texel-exact, NEAREST).
+	m_giFilterTmpTex = makeTex(GL_R16F, GL_NEAREST);
+	glGenFramebuffers(1, &m_giFilterTmpFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giFilterTmpFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giFilterTmpTex, 0);
 
 	// Ray-traced reflections: the compute kernel image-stores the raw trace, the
 	// (optional) temporal pass ping-pongs radiance + receiver position through an
@@ -5785,6 +6008,8 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	}
 	if (m_giResultFBO) { glDeleteFramebuffers(1, &m_giResultFBO); m_giResultFBO = 0; }
 	if (m_giResultTex) { glDeleteTextures(1, &m_giResultTex);     m_giResultTex = 0; }
+	if (m_giFilterTmpFBO) { glDeleteFramebuffers(1, &m_giFilterTmpFBO); m_giFilterTmpFBO = 0; }
+	if (m_giFilterTmpTex) { glDeleteTextures(1, &m_giFilterTmpTex);     m_giFilterTmpTex = 0; }
 	if (m_giReflFBO)     { glDeleteFramebuffers(1, &m_giReflFBO);     m_giReflFBO = 0; }
 	if (m_giReflTex)     { glDeleteTextures(1, &m_giReflTex);         m_giReflTex = 0; }
 	if (m_giReflRawTex)  { glDeleteTextures(1, &m_giReflRawTex);      m_giReflRawTex = 0; }
@@ -5994,7 +6219,7 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 // filled this frame. Returns the blurred mask texture (0 if unavailable).
 unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::mat4& viewProj)
 {
-	if (!m_giShadowCSProgram || !m_giTemporalProgram || !m_giBlurProgram) return 0;
+	if (!m_giShadowCSProgram || !m_giTemporalProgram || !m_giAtrousProgram) return 0;
 	if (!m_giGBufFBO) return 0;
 	// Explicit: the temporal/blur fullscreen draws below are half-res, and the
 	// reflection pass may have run between the pre-pass and here.
@@ -6028,7 +6253,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 		glUniform4fv(glGetUniformLocation(m_giShadowCSProgram, "uLocalPosRange"),
 		             HE::kMaxMaskedLocalLights, glm::value_ptr(masked.posRange[0]));
 		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uLocalExtra"),
-		            static_cast<float>(masked.count), 0.0f, 0.0f, 0.0f);
+		            static_cast<float>(masked.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 	}
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
@@ -6052,19 +6277,37 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uHistory"), 2);
 	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uPrevViewProj"),
 	                   1, GL_FALSE, glm::value_ptr(m_giPrevViewProj));
-	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? 0.9f : 0.0f);
+	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uCurViewProj"),
+	                   1, GL_FALSE, glm::value_ptr(viewProj)); // becomes m_giPrevViewProj below
+	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? m_giShadowHistoryWeight : 0.0f);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 	m_giHistValid   = true;
 	m_giHistIdx     = prevIdx;
 	m_giPrevViewProj = viewProj; // for NEXT frame's reprojection
 
-	// ── 4. Spatial blur → the mask the scene shader samples ─────────────────
-	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
-	glUseProgram(m_giBlurProgram);
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, m_giHistTex[curIdx]);
-	glUniform1i(glGetUniformLocation(m_giBlurProgram, "uSrc"), 0);
-	glDrawArrays(GL_TRIANGLES, 0, 3);
+	// ── 4. Edge-aware a-trous → the mask the scene shader samples ───────────
+	// Iteration 0: history[cur].a → scratch (hole 1); iteration 1: scratch.r →
+	// result (hole 2). With the filter off both are plain copies.
+	static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
+	glUseProgram(m_giAtrousProgram);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uGPos"), 1);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufNormTex);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uGNorm"), 2);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uSrc"), 0);
+	for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, it == 0 ? m_giFilterTmpFBO : m_giResultFBO);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, it == 0 ? m_giHistTex[curIdx] : m_giFilterTmpTex);
+		const HE::GIShadowAtrousStep step = HE::GIShadowAtrousParams(it, m_giShadowFilter,
+		                                                             m_giShadowHistoryWeight, m_giShadowRays);
+		glUniform4f(glGetUniformLocation(m_giAtrousProgram, "uAtrous"),
+		            step.step, step.fromHistory, step.effectiveSamples, step.unused);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
 
 	glActiveTexture(GL_TEXTURE0);
 	glEnable(GL_DEPTH_TEST);
@@ -9561,7 +9804,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
 	if (m_giGBufInstancedProgram) { glDeleteProgram(m_giGBufInstancedProgram); m_giGBufInstancedProgram = 0; }
 	if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
-	if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+	if (m_giAtrousProgram)     { glDeleteProgram(m_giAtrousProgram);     m_giAtrousProgram = 0; }
 	if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
 	if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
 	for (auto& r : m_retiredTextures)
@@ -9870,8 +10113,14 @@ void OpenGLRenderer::DestroyViewportTarget()
 // The matching sampler TEXTURE BINDS stay at the call sites: they are shared
 // state that only some of the three re-assert, each for its own documented
 // reason. The caller must have the target program bound.
-void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneShadowFrame& F) const
+void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneShadowFrame& F,
+                                       const HE::ClusterLightBuild& clusters) const
 {
+	// Cluster gate + grid (Thema 117) — written every frame, because a
+	// program keeps its uniform values: a stale gate would read last frame's
+	// lists. Locations are -1 in a 4.10 window build (no-op).
+	glUniform4fv(L.clusterParams, 1, glm::value_ptr(clusters.params));
+	glUniform4fv(L.clusterCamFwd, 1, glm::value_ptr(clusters.camFwd));
 	// Lights (clamped to the shader's MAX_LIGHTS, which IS the engine's shared
 	// light window — a local `constexpr int kMaxLights = 8` here could drift away
 	// from it silently).
@@ -10651,6 +10900,23 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		}
 
+		// Clustered point/spot lights (Thema 117, GL 4.3+): ONE cluster build per
+		// frame, uploaded to SSBO 4/5/6 before any draw. It serves the three
+		// built-in scene programs (gate via BindSceneLighting) and the graph
+		// materials (fragmentClustered, gate via fillMatLight). gl_FragCoord is
+		// bottom-left and the scene renders unflipped into m_hdrFBO / the
+		// G-buffer at (0,0,pw,ph), so the build skips the v-flip. Atlas layers
+		// and GI mask channels ride the same gates as the textures on units
+		// 8/10 and 11/12. Off → params stay 0 = window only everywhere.
+		HE::ClusterLightBuild frameClusters;
+		if (m_forwardClustered)
+		{
+			frameClusters = HE::BuildClusterLights(m_renderWorld, localShadows,
+			                                       giShadingActive && m_giLocalMaskTex != 0,
+			                                       /*bottomLeftOrigin=*/true);
+			UploadClusterLists(frameClusters);
+		}
+
 		// (The procedural skybox is drawn AFTER the geometry below, with a
 		// depth-test == far, so the heavy sky shader only runs on the background
 		// pixels the scene didn't cover.)
@@ -10733,7 +10999,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		BindSceneLighting({ m_uLightCount, m_uLightPos, m_uLightDir, m_uLightColor, m_uLightParams,
 		                    m_uCameraPos, m_uShadowEnabled, m_uShadowDebug, m_uCascadeVP,
 		                    m_uCascadeSplits, m_uCameraFwd, m_uShadowMap,
-		                    m_uLocalShadowMap, m_uLocalShadowVP, m_uShadowBias, m_uUnlit }, shadowFrame);
+		                    m_uLocalShadowMap, m_uLocalShadowVP, m_uShadowBias, m_uUnlit,
+		                    m_uClusterParams, m_uClusterCamFwd }, shadowFrame, frameClusters);
 
 		// CSM shadow-map array bound on texture unit 1. Always bound (the sampling
 		// is gated by uShadowEnabled) so the sampler2DArray never reads a mismatched
@@ -10778,7 +11045,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			                    m_uInstShadowEnabled, m_uInstShadowDebug, m_uInstCascadeVP,
 			                    m_uInstCascadeSplits, m_uInstCameraFwd, m_uInstShadowMap,
 			                    m_uInstLocalShadowMap, m_uInstLocalShadowVP, m_uInstShadowBias,
-			                    m_uInstUnlit }, shadowFrame);
+			                    m_uInstUnlit, m_uInstClusterParams, m_uInstClusterCamFwd },
+			                  shadowFrame, frameClusters);
 			glUseProgram(m_unlitProgram); // restore for the per-object loop
 		}
 
@@ -10819,21 +11087,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		const glm::vec3 camPos = m_renderWorld.camera.position;
 
 #if defined(HE_HAVE_SHADERC)
-		// Clustered heLitP (Thema 117, GL 4.3+): ONE cluster build per frame,
-		// uploaded to SSBO 4/5/6 before any graph-material draw. gl_FragCoord is
-		// bottom-left and the scene renders unflipped into m_hdrFBO / the
-		// G-buffer at (0,0,pw,ph), so the build skips the v-flip. Atlas layers
-		// and GI mask channels ride the same gates as the textures on units
-		// 12 and 10.
-		HE::ClusterLightBuild frameClusters;
+		// Clustered heLitP (Thema 117): the frameClusters build above.
 		const bool matClustered = m_forwardClustered;
-		if (matClustered)
-		{
-			frameClusters = HE::BuildClusterLights(m_renderWorld, localShadows,
-			                                       giShadingActive && m_giLocalMaskTex != 0,
-			                                       /*bottomLeftOrigin=*/true);
-			UploadClusterLists(frameClusters);
-		}
 		// The heLitP lighting ABI fill for custom-material programs — shared by
 		// the forward opaque loop, the deferred G-buffer loop (Time input) and
 		// the deferred replay passes, so the values can never drift between them.
@@ -11738,7 +11993,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			                    m_uSkinnedShadowEnabled, m_uSkinnedShadowDebug, m_uSkinnedCascadeVP,
 			                    m_uSkinnedCascadeSplits, m_uSkinnedCameraFwd, m_uSkinnedShadowMap,
 			                    m_uSkinnedLocalShadowMap, m_uSkinnedLocalShadowVP, m_uSkinnedShadowBias,
-			                    m_uSkinnedUnlit }, shadowFrame);
+			                    m_uSkinnedUnlit, m_uSkinnedClusterParams, m_uSkinnedClusterCamFwd },
+			                  shadowFrame, frameClusters);
 			// Re-assert the CSM array on unit 1 — opaque/instanced draws and the AO
 			// bind run between the unlit setup and here; this guarantees the skinned
 			// sampler2DArray reads the shadow array, not a stale 2D texture.

@@ -106,6 +106,10 @@ public:
 	// Returns VkImageView for the viewport color image (for ImGui_ImplVulkan_AddTexture).
 	void* GetViewportVkImageView() const;
 	void* GetViewportVkSampler()   const;
+	// The packaged game: Render() runs the viewport frame at the swapchain's
+	// size and draws its result into the swapchain image (docs/spielpfad-
+	// postfx-parity-analyse-2026-10-03.md, Weg a).
+	void  SetSwapchainPostProcessing(bool enabled) override;
 	bool  HasViewportResourceChanged() const;
 	void  ClearViewportResourceChanged();
 	// The Vulkan stand-in for a D3D12 fence value. Every frame handed to the
@@ -445,12 +449,28 @@ private:
 	// be an array view (a plain 2D view fails validation against that SPIR-V).
 	VkImageView     m_whiteArrayView   = VK_NULL_HANDLE;
 	// 1x1 six-layer white CUBE for the preamble's heSkyEnv (samplerCube, set 0
-	// binding 15). This backend has no sky-environment cube and never raises
-	// heLight.fog.z, so it is never sampled — but the layout must declare every
-	// binding the SPIR-V uses statically, and the view type must match.
+	// binding 15) while the real sky cube below does not exist yet (heLight.fog.z
+	// is 0 then, so it is never sampled) — the layout must declare every binding
+	// the SPIR-V uses statically, and the view type must match.
 	VkImage         m_whiteCubeImage   = VK_NULL_HANDLE;
 	VkDeviceMemory  m_whiteCubeMem     = VK_NULL_HANDLE;
 	VkImageView     m_whiteCubeView    = VK_NULL_HANDLE;
+	// Image-based-ambient sky cube for graph materials (heSkyEnv, binding 15):
+	// the SAME HE::BuildSkyEnvFaceRow bake GL and Metal sample, re-baked on the
+	// CPU when the sun moves and copied in from a per-frame staging buffer at
+	// the top of the frame (updateSkyEnvCube). RGBA16F, not GL's RGBA32F:
+	// linear filtering of R32G32B32A32_SFLOAT is optional in Vulkan, of
+	// R16G16B16A16_SFLOAT mandatory. m_skyEnvValid gates heLight.fog.z.
+	static constexpr int k_skyEnvFace = 128; // GL/Metal face size
+	VkImage         m_skyEnvImage      = VK_NULL_HANDLE;
+	VkDeviceMemory  m_skyEnvMem        = VK_NULL_HANDLE;
+	VkImageView     m_skyEnvView       = VK_NULL_HANDLE;
+	MatFrameBuf     m_skyEnvStaging[2];        // k_maxFramesInFlight, host-visible
+	bool            m_skyEnvValid      = false; // the image holds a bake (fog.z may be raised)
+	glm::vec3       m_skyEnvSunDir     = glm::vec3(0.0f);
+	void createSkyEnvCube();
+	void destroySkyEnvCube();
+	void updateSkyEnvCube(VkCommandBuffer cmd);
 
 	// ── MaterialComponent override + hot-reload (A2) ─────────────────────────
 	// Override-material textures cached by material UUID (parallel to the baked per-mesh
@@ -556,6 +576,15 @@ private:
 	// Color image sampled by ImGui; depth image for the viewport render pass.
 	void createViewportResources(uint32_t w, uint32_t h);
 	void destroyViewportResources();
+	// Scene binding 3 (AO) back to the 1×1 white fallback, for when the
+	// viewport set — and with it the SSAO blur target — is gone.
+	void pointSceneAoAtWhite();
+	// SetSwapchainPostProcessing: the game asks for the post chain on the
+	// swapchain path. m_gameViewport = the viewport set is the game's
+	// (swapchain sized), not an editor request — dropped when the game stops
+	// asking, or the leftover set would send Render() down the editor branch.
+	bool           m_swapchainPostFx = false;
+	bool           m_gameViewport    = false;
 	VkImage        m_viewportImage   = VK_NULL_HANDLE;
 	VkDeviceMemory m_viewportMemory  = VK_NULL_HANDLE;
 	VkImageView    m_viewportView    = VK_NULL_HANDLE;
@@ -627,6 +656,10 @@ private:
 	VkPipeline            m_fxaaPipe         = VK_NULL_HANDLE;
 	VkPipeline            m_smaaPipe         = VK_NULL_HANDLE; // AA = SMAA
 	VkPipeline            m_aaBlitPipe       = VK_NULL_HANDLE; // AA = Off passthrough
+	// The game's present: the same passthrough against m_renderPass (swapchain
+	// format, depth test off), sampling m_viewportImage through m_presentDS.
+	VkPipeline            m_presentPipe      = VK_NULL_HANDLE;
+	VkDescriptorSet       m_presentDS        = VK_NULL_HANDLE;
 
 	// Anti-aliasing method in force, already resolved against this backend's
 	// capabilities (docs/anti-aliasing-plan.md). The final post pass writes
@@ -1117,20 +1150,21 @@ private:
 	// Pipelines + layouts.
 	VkDescriptorSetLayout m_giShadowDSL = VK_NULL_HANDLE; // 3 SSBOs + 2 samplers + storage image + UBO
 	VkDescriptorSetLayout m_giProbeDSL  = VK_NULL_HANDLE; // 3 SSBOs + 2 storage images + UBO
-	VkDescriptorSetLayout m_giFsDSL     = VK_NULL_HANDLE; // 3 samplers + UBO (temporal; blur uses binding 0 + UBO ignored)
+	VkDescriptorSetLayout m_giFsDSL     = VK_NULL_HANDLE; // 3 samplers + UBO (temporal; a-trous: src/gPos/gNorm, UBO ignored)
 	VkPipelineLayout m_giShadowPL   = VK_NULL_HANDLE;
 	VkPipelineLayout m_giProbePL    = VK_NULL_HANDLE;
 	VkPipelineLayout m_giFsPL       = VK_NULL_HANDLE;
+	VkPipelineLayout m_giAtrousPL   = VK_NULL_HANDLE; // m_giFsDSL + 16-byte fragment push constant (HE::GIShadowAtrousStep)
 	VkPipelineLayout m_giGBufPL     = VK_NULL_HANDLE;
 	VkPipeline m_giShadowPipe   = VK_NULL_HANDLE; // compute
 	VkPipeline m_giProbePipe    = VK_NULL_HANDLE; // compute
 	VkPipeline m_giGBufPipe     = VK_NULL_HANDLE;
 	VkPipeline m_giGBufInstancedPipe = VK_NULL_HANDLE; // gi_gbuf_instanced.vert
 	VkPipeline m_giTemporalPipe = VK_NULL_HANDLE;
-	VkPipeline m_giBlurPipe     = VK_NULL_HANDLE;
+	VkPipeline m_giAtrousPipe   = VK_NULL_HANDLE; // gi_atrous.frag, both iterations
 	VkRenderPass m_giGBufRP     = VK_NULL_HANDLE; // 2x RGBA16F + depth → SHADER_READ_ONLY
 	VkRenderPass m_giTemporalRP = VK_NULL_HANDLE; // RGBA16F → SHADER_READ_ONLY
-	VkRenderPass m_giBlurRP     = VK_NULL_HANDLE; // R16F → SHADER_READ_ONLY
+	VkRenderPass m_giAtrousRP   = VK_NULL_HANDLE; // R16F → SHADER_READ_ONLY (scratch + result)
 	// Half-res targets.
 	struct GiImage
 	{
@@ -1142,9 +1176,10 @@ private:
 	GiImage m_giRaw;                 // R16F storage image, lives in GENERAL
 	GiImage m_giLocalMask;           // RGBA16F per-pixel local-light visibility (1 channel per light, first 4), GENERAL
 	GiImage m_giHist[2];             // RGBA16F ping-pong temporal history
-	GiImage m_giResult;              // R16F blurred mask (sampled by scene.frag)
+	GiImage m_giResult;              // R16F filtered mask (sampled by scene.frag)
+	GiImage m_giFilterTmp;           // R16F between the two a-trous iterations
 	VkFramebuffer m_giGBufFB = VK_NULL_HANDLE, m_giHistFB[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE },
-	              m_giResultFB = VK_NULL_HANDLE;
+	              m_giResultFB = VK_NULL_HANDLE, m_giFilterTmpFB = VK_NULL_HANDLE;
 	uint32_t  m_giW = 0, m_giH = 0;
 	int       m_giHistIdx   = 0;
 	bool      m_giHistValid = false;
@@ -1164,7 +1199,7 @@ private:
 	VkDescriptorSet  m_giShadowSet[3]   = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 	VkDescriptorSet  m_giProbeSet[3]    = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 	VkDescriptorSet  m_giTemporalSet[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
-	VkDescriptorSet  m_giBlurSet[3]     = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+	VkDescriptorSet  m_giAtrousSet[3][2] = {}; // per frame, per a-trous iteration (source differs)
 	GiBuffer m_giShadowUBO[3];
 	GiBuffer m_giProbeUBO[3];
 	GiBuffer m_giTemporalUBO[3];
@@ -1254,6 +1289,9 @@ private:
 	float    m_giLightRadius        = 0.5f;
 	int      m_giRaysPerProbe        = 128;
 	int      m_giProbeBudgetPerFrame = 256;
+	int      m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
+	float    m_giShadowHistoryWeight       = 0.9f;  // shadow-mask temporal history weight
+	bool     m_giShadowFilter        = true;  // edge-aware a-trous on the mask
 
 	// ── GPU skeletal-mesh skinning ───────────────────────────────────────────
 	// Each skeletal mesh uploaded to the GPU gets three vertex buffers:

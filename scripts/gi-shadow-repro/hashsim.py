@@ -1,5 +1,6 @@
 # float32 emulation of the GI shadow kernel's hash + temporal + blur chain
-# (gi_shadow.comp giHash2/giConeSample, gi_temporal.frag, gi_blur.frag) on a
+# (gi_shadow.comp giHash2/giConeSample, gi_temporal.frag, and the 3x3 box of
+# gi_blur.frag, which Thema 134 replaced with gi_atrous.frag — not emulated) on a
 # static straight shadow edge, to separate seed-precision effects from the
 # filter design. Static camera/occluder -> reprojection always accepted.
 import numpy as np, sys

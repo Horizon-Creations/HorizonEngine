@@ -213,6 +213,10 @@ void signatureInto(const Node& n, NodeSig& s)
     case T::CreateWidget:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
+        // Expose on Spawn: one input per variable the widget offers, mirrored
+        // by syncSpawnPins. None on every node from before, so the Widget
+        // output stays where those graphs wired it (pin 2).
+        for (const auto& p : n.params) s.dataIns.push_back(paramPin(p));
         s.dataOuts = { { "Widget", P::Ref } };
         break;
     case T::ShowWidget:
@@ -874,7 +878,9 @@ const char* nodeTooltip(NodeType t)
             return "Hides THIS widget (only meaningful inside a widget graph).";
         case T::CreateWidget:
             return "Instantiates the chosen widget asset and outputs its Widget id —\n"
-                   "feed that into Show/Hide/Destroy Widget.";
+                   "feed that into Show/Hide/Destroy Widget.\n"
+                   "Variables the widget ticks Expose on Spawn appear as inputs; a wired\n"
+                   "input or one with a value is set before the widget's PreConstruct.";
         case T::ShowWidget:
             return "Shows the widget identified by the Widget input (from Create Widget).";
         case T::HideWidget:
@@ -1866,6 +1872,7 @@ nlohmann::json variableToJsonObj(const Variable& v)
     if (v.replicated) e["rep"] = true;
     if (v.repNotify)  e["repNotify"] = true;
     if (v.saveGame)   e["saveGame"] = true;
+    if (v.exposeOnSpawn) e["spawn"] = true;
     if (v.isArray)    e["arr"] = true;
     if (v.isArray && !v.defaultItems.empty())
     {
@@ -2016,6 +2023,9 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     // Same reasoning for Save Game: a handle does not survive into the next
     // run, and a function-local is gone before anybody could save it.
     v.saveGame = e.value("saveGame", false) && isSaveableType(v.type) && v.scope == 0;
+    // Only a creator can hand a value in, and it reaches public instance
+    // variables only (the runtime sets them the way Set (Ref) does).
+    v.exposeOnSpawn = e.value("spawn", false) && v.access == 0 && v.scope == 0;
     v.isArray = e.value("arr", false);
     v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
     if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams
@@ -2346,6 +2356,120 @@ std::vector<int> widgetCreatorsWithoutShow(const Graph& g)
         if (!shown) out.push_back(c.id);
     }
     return out;
+}
+
+// ── Expose on Spawn (docs/widget-pre-construct-design.md §6) ─────────────────
+namespace
+{
+bool sameSpawnParam(const FuncParam& a, const FuncParam& b)
+{
+    return a.name == b.name && a.type == b.type && a.isArray == b.isArray &&
+           a.typeName == b.typeName && a.kind() == b.kind() &&
+           a.keyType == b.keyType && a.keyTypeName == b.keyTypeName;
+}
+// The types an unwired pin can carry a value of on the node (the inline field,
+// see HcEditorUtil::pinSupportsInlineDefault). Everything else only acts wired.
+bool spawnPinHasInlineValue(const FuncParam& p)
+{
+    if (p.isArray) return false;
+    return p.type == P::Bool || p.type == P::Int || p.type == P::Float ||
+           p.type == P::Double || p.type == P::String;
+}
+// Equal in the field the type uses — only ever asked of inline-value types.
+bool sameInlineValue(const Value& a, const Value& b)
+{
+    if (a.type != b.type) return false;
+    switch (a.type)
+    {
+    case P::Bool:   return a.b == b.b;
+    case P::Int:    return a.i == b.i;
+    case P::Float:  return a.f == b.f;
+    case P::Double: return a.d == b.d;
+    case P::String: return a.s == b.s;
+    default:        return false;
+    }
+}
+} // namespace
+
+std::vector<SpawnPin> spawnPinsOf(const Graph& widgetGraph)
+{
+    std::vector<SpawnPin> out;
+    for (const Variable& v : widgetGraph.variables)
+    {
+        if (!v.exposeOnSpawn || v.access != 0 || v.scope != 0) continue;
+        SpawnPin p;
+        p.param.name        = v.name;
+        p.param.type        = v.type;
+        p.param.isArray     = v.isArray;
+        p.param.typeName    = v.typeName;
+        p.param.container   = v.container;
+        p.param.keyType     = v.keyType;
+        p.param.keyTypeName = v.keyTypeName;
+        p.def = variableDefaultValue(v);
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
+bool syncSpawnPins(Graph& g, int createWidgetNodeId, const std::vector<SpawnPin>& now,
+                   const std::vector<SpawnPin>* before)
+{
+    Node* n = g.findNode(createWidgetNodeId);
+    if (!n || n->type != T::CreateWidget) return false;
+
+    // What the node carries today, by pin NAME: its inline values are keyed by
+    // data-in index, which is exactly what is about to move.
+    std::unordered_map<std::string, size_t> oldIndex;
+    for (size_t i = 0; i < n->params.size(); ++i) oldIndex.emplace(n->params[i].name, i);
+    const auto findBefore = [before](const std::string& name) -> const SpawnPin*
+    {
+        if (!before) return nullptr;
+        for (const SpawnPin& b : *before) if (b.param.name == name) return &b;
+        return nullptr;
+    };
+
+    std::vector<FuncParam>         params;
+    std::unordered_map<int, Value> values;
+    params.reserve(now.size());
+    for (size_t i = 0; i < now.size(); ++i)
+    {
+        const SpawnPin& sp = now[i];
+        params.push_back(sp.param);
+        if (!spawnPinHasInlineValue(sp.param)) continue;
+        Value v = sp.def;   // a new or retyped pin starts where the variable does
+        if (const auto oi = oldIndex.find(sp.param.name); oi != oldIndex.end() &&
+            sameSpawnParam(n->params[oi->second], sp.param))
+        {
+            const auto pd = n->pinDefaults.find((int)oi->second);
+            if (pd != n->pinDefaults.end())
+            {
+                v = pd->second;
+                // Still the default the widget had when this pin was filled:
+                // nobody chose that value here, so it follows the widget.
+                const SpawnPin* b = findBefore(sp.param.name);
+                if (b && sameSpawnParam(b->param, sp.param) && sameInlineValue(v, b->def))
+                    v = sp.def;
+            }
+        }
+        values.emplace((int)i, std::move(v));
+    }
+
+    bool changed = params.size() != n->params.size() || values.size() != n->pinDefaults.size();
+    for (size_t i = 0; !changed && i < params.size(); ++i)
+        changed = !sameSpawnParam(params[i], n->params[i]);
+    for (const auto& [idx, v] : values)
+    {
+        if (changed) break;
+        const auto pd = n->pinDefaults.find(idx);
+        changed = pd == n->pinDefaults.end() || !sameInlineValue(pd->second, v);
+    }
+    if (!changed) return false;
+
+    const LinkRemapSnapshot snap = captureLinkRemapSnapshot(g, { createWidgetNodeId });
+    n->params      = std::move(params);
+    n->pinDefaults = std::move(values);
+    remapLinksFromSnapshot(g, snap);   // wires follow their pin by name
+    return true;
 }
 
 // ── Item-level JSON, public (collaboration addresses single items) ──────────
@@ -3884,9 +4008,18 @@ void Runner::execNode(const Node& n, int depth)
     case T::HideSelf: if (m_ctx.hideSelf) m_ctx.hideSelf(); break;
     case T::CreateWidget:
     {
+        // Expose on Spawn: a pin counts when it is wired or carries a value on
+        // the node (Make Struct's rule); an untouched one leaves the widget's
+        // own default. Evaluated here, in the creator's context, before the
+        // widget exists (docs/widget-pre-construct-design.md §6.3).
+        SpawnValues spawn;
+        for (size_t i = 0; i < n.params.size(); ++i)
+            if (inputLinked(n, (int)i) || n.pinDefaults.count((int)i))
+                spawn.push_back({ n.params[i].name,
+                                  coerce(evalInput(n, (int)i, depth + 1), n.params[i].type) });
         // The widget id doubles as its runtime reference (widget id == scriptId),
         // so a created widget is a first-class Ref object.
-        const int id = m_ctx.createWidget ? m_ctx.createWidget(n.s) : 0;
+        const int id = m_ctx.createWidget ? m_ctx.createWidget(n.s, spawn) : 0;
         m_execOutputs[n.id] = { Value::ofRef((uint32_t)id) }; // cached for the data output
         break;
     }

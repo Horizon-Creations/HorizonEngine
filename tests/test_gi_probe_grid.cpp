@@ -234,3 +234,32 @@ TEST_CASE("GI jitter seed wraps within kGIJitterPeriod and stays an exact intege
 	}
 	CHECK(wrapped);
 }
+
+// Thema 134 §4.3/§5.3: the a-trous value stop scales with sqrt(c(1-c)/N_eff),
+// N_eff = (1+a)/(1-a) * rays. Every backend feeds its shader from these two
+// helpers. Too small an N_eff widens the sigma until the value stop stops
+// nothing and the filter softens every shadow; too large shrinks it until the
+// filter rejects every neighbour and does nothing.
+TEST_CASE("GI shadow a-trous: effective samples and per-iteration parameters")
+{
+	CHECK(HE::GIShadowEffectiveSamples(0.9f, 1) == doctest::Approx(19.0f));
+	CHECK(HE::GIShadowEffectiveSamples(0.9f, 2) == doctest::Approx(38.0f));
+	CHECK(HE::GIShadowEffectiveSamples(0.0f, 4) == doctest::Approx(4.0f));
+	// Clamped like the hosts clamp the history weight: no division by zero at 1.
+	CHECK(HE::GIShadowEffectiveSamples(1.0f, 1) == doctest::Approx(99.0f));
+	CHECK(HE::GIShadowEffectiveSamples(0.9f, 0) == doctest::Approx(19.0f));
+
+	static_assert(HE::kGIShadowAtrousIterations == 2, "the design measured two iterations");
+	const HE::GIShadowAtrousStep a = HE::GIShadowAtrousParams(0, true, 0.9f, 2);
+	const HE::GIShadowAtrousStep b = HE::GIShadowAtrousParams(1, true, 0.9f, 2);
+	CHECK(a.step == 1.0f);        // holes 1, 2
+	CHECK(b.step == 2.0f);
+	CHECK(a.fromHistory == 1.0f); // first iteration reads history.a
+	CHECK(b.fromHistory == 0.0f); // second the scratch .r
+	CHECK(a.effectiveSamples == doctest::Approx(38.0f));
+	// Filter off (HE_GI_REFERENCE): step 0 = plain copy in both iterations.
+	CHECK(HE::GIShadowAtrousParams(0, false, 0.98f, 256).step == 0.0f);
+	CHECK(HE::GIShadowAtrousParams(1, false, 0.98f, 256).step == 0.0f);
+	// The shaders read one vec4: x step, y source, z N_eff.
+	static_assert(sizeof(HE::GIShadowAtrousStep) == 16, "push-constant / cbuffer row");
+}

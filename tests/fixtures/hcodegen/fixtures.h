@@ -984,6 +984,16 @@ inline HE::hccg::ClassSource fxEventsMulti()
     const int sRef = f.setVar("wRef", PT::Ref);
     f.data(create, 0, sRef, 0);
     f.exec(sB, sRef);
+    // Expose on Spawn (docs/widget-pre-construct-design.md §6.6): a WIRED pin
+    // and one with a value on the node are handed over, in pin order; one left
+    // alone (a Color has no inline field) is not. Handler A's Create Widget
+    // above keeps no pins — the call generated for it is the old one.
+    Node cw2; cw2.type = NT::CreateWidget; cw2.s = "Content/UI/W.hasset";
+    cw2.params = { { "score", PT::Int }, { "title", PT::String }, { "tint", PT::Color } };
+    cw2.pinDefaults[1] = Value::ofString("hi");
+    const int create2 = f.add(cw2);
+    f.data(f.constI(7), 0, create2, 0);
+    f.exec(sRef, create2);
 
     const int evT = f.event("Tick", 0, true, PT::Float);
     const int sT = f.setVar("tickSum", PT::Float);

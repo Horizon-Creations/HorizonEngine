@@ -282,6 +282,12 @@ struct SceneUniforms {
 	// CSM receiver depth bias (project ShadowSettings): x = slope-scaled
 	// factor, y = minimum. Defaults (0.0008, 0.0002) are the old literals.
 	float4   shadowBias;
+	// Clustered point/spot lights (Thema 117, fragment buffers 4/5/6):
+	// x/y/z = cluster grid dims (x == 0 → off, window lights only), w = slice
+	// scale; clusterCamFwd xyz = camera forward, w = cluster near plane.
+	// Same values as the graph materials' Lighting::clusterParams/CamFwd.
+	float4   clusterParams;
+	float4   clusterCamFwd;
 };
 
 // Widen the roughness by how much the normal turns inside this pixel, so a
@@ -488,16 +494,17 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 // fragment→light vector's major axis (faces stored as 6 consecutive array layers,
 // +X −X +Y −Y +Z −Z), then project into that face's layer. Same 3×3 PCF and
 // normal-offset bias family as the directional CSM above.
-float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
-                        float3 worldPos, float3 N,
-                        texture2d_array<float> localMap, sampler shadowSmp)
+// `base` = the light's first atlas layer (-1 = casts no shadow). Takes the
+// light by value so the window (LightGPU) and the cluster lists share it.
+float localShadowFactorAt(constant SceneUniforms& scene, float4 posType, int base,
+                          float3 worldPos, float3 N,
+                          texture2d_array<float> localMap, sampler shadowSmp)
 {
-	int base = int(l.params.y);
 	if (base < 0) return 1.0;
 	int layer = base;
-	if (int(l.posType.w) == 1) // point: major-axis cube-face pick
+	if (int(posType.w) == 1) // point: major-axis cube-face pick
 	{
-		float3 d = worldPos - l.posType.xyz;
+		float3 d = worldPos - posType.xyz;
 		float3 a = abs(d);
 		int face;
 		if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
@@ -505,7 +512,7 @@ float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
 		else                               face = (d.z > 0.0) ? 4 : 5;
 		layer = base + face;
 	}
-	float3 toL  = normalize(l.posType.xyz - worldPos);
+	float3 toL  = normalize(posType.xyz - worldPos);
 	float  ndl  = clamp(dot(N, toL), 0.0, 1.0);
 	float4 lp = scene.localShadowVP[layer] * float4(worldPos + N * 0.02, 1.0);
 	if (lp.w <= 0.0) return 1.0;                  // behind the light's near plane
@@ -522,6 +529,13 @@ float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
 			vis += (p.z - bias > cd) ? 0.0 : 1.0;
 		}
 	return vis / 9.0;
+}
+
+float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
+                        float3 worldPos, float3 N,
+                        texture2d_array<float> localMap, sampler shadowSmp)
+{
+	return localShadowFactorAt(scene, l.posType, int(l.params.y), worldPos, N, localMap, shadowSmp);
 }
 
 // Standard signed-octahedral mapping (Meyer et al. 2010) — direction -> texel
@@ -690,7 +704,14 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              // cloudShadowFactor): the fragment stage is at
                              // Metal's 16-sampler cap. Shares the slot with the
                              // material preamble's heCloudShadow pin.
-                             texture2d<float> cloudShadowTex [[texture(16)]])
+                             texture2d<float> cloudShadowTex [[texture(16)]],
+                             // Clustered point/spot lists (Thema 117) — the same
+                             // buffers 4/5/6 the graph materials' heLitP reads
+                             // (kMetalCluster*BufferIndex). Always bound in the
+                             // scene pass; read only while scene.clusterParams.x > 0.
+                             const device float4* clLights [[buffer(4)]],
+                             const device uint2*  clGrid   [[buffer(5)]],
+                             const device uint*   clIdx    [[buffer(6)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -783,10 +804,15 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
+	// Clustered: the lists hold EVERY point/spot light, so the window's copies
+	// of the first few would count twice — the window keeps its directionals.
+	// Twin of heLitP's HE_CLUSTERED branch (MaterialShaderLibrary.cpp).
+	const bool clustered = scene.clusterParams.x > 0.5;
 	for (int i = 0; i < scene.lightCount; ++i)
 	{
 		constant LightGPU& l = scene.lights[i];
 		int    type  = int(l.posType.w);
+		if (clustered && type != 0) continue;
 		float3 L;
 		float  atten = 1.0;
 
@@ -844,6 +870,61 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		float spec = pow(max(dot(N, H), 0.0), shininess) * specScale;
 		result += (diffuseColor * diff + specColor * spec)
 		        * l.colorIntensity.rgb * l.colorIntensity.w * atten * sh;
+	}
+	// The fragment's cluster list (HE::BuildClusterLights, top-left uv like
+	// in.position): 4 float4 per light — posType, dirSpot, colorIntensity,
+	// params (x = range, y = atlas layer + 1, z = GI local-mask channel + 1).
+	// Same per-light model as the window loop above; SYNC with heLitP's
+	// heFwdClusterLights.
+	if (clustered)
+	{
+		float2 cuv   = in.position.xy / max(scene.viewport.xy, float2(1.0));
+		float  nearZ = max(scene.clusterCamFwd.w, 1e-4);
+		float  viewZ = max(dot(in.worldPos - scene.cameraPos.xyz, scene.clusterCamFwd.xyz), nearZ);
+		int gx = int(scene.clusterParams.x);
+		int gy = int(scene.clusterParams.y);
+		int gz = int(scene.clusterParams.z);
+		if (gx > 0 && gy > 0 && gz > 0)
+		{
+			int cz = clamp(int(log(viewZ / nearZ) * scene.clusterParams.w), 0, gz - 1);
+			int cx = clamp(int(cuv.x * float(gx)), 0, gx - 1);
+			int cy = clamp(int(cuv.y * float(gy)), 0, gy - 1);
+			uint2 cell = clGrid[(cz * gy + cy) * gx + cx];
+			for (uint k = 0u; k < cell.y; ++k)
+			{
+				uint   li      = clIdx[cell.x + k] * 4u;
+				float4 posType = clLights[li + 0u];
+				float4 dirSpot = clLights[li + 1u];
+				float4 colInt  = clLights[li + 2u];
+				float4 params  = clLights[li + 3u];
+				float3 d    = posType.xyz - in.worldPos;
+				float  dist = max(length(d), 1e-4);
+				float3 L    = d / dist;
+				float  range = max(params.x, 1e-4);
+				float  atten = clamp(1.0 - dist / range, 0.0, 1.0);
+				atten *= atten;
+				if (posType.w > 1.5) // spot cone
+				{
+					float c       = dot(-L, normalize(dirSpot.xyz));
+					float cosCone = dirSpot.w;
+					atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+				}
+				if (atten <= 0.0) continue;
+				float sh = localShadowFactorAt(scene, posType, int(params.y) - 1,
+				                               in.worldPos, N, localShadowMap, shadowSmp);
+				// Ray-traced local mask: the builder hands out the window's
+				// first-4 channels (giLocalIdx above), only while the mask is live.
+				int ch = int(params.z) - 1;
+				if (gi.enabled != 0 && ch >= 0)
+					sh = min(sh, giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[ch]);
+				if (in.noShadow > 0.5) sh = 1.0;
+				float diff = max(dot(N, L), 0.0);
+				float3 H   = normalize(L + V);
+				float spec = pow(max(dot(N, H), 0.0), shininess) * specScale;
+				result += (diffuseColor * diff + specColor * spec)
+				        * colInt.rgb * colInt.w * atten * sh;
+			}
+		}
 	}
 	result = applyFog(result, scene.cameraPos.xyz, in.worldPos, scene.sunDir.xyz, scene.fog.xy);
 
@@ -2022,7 +2103,9 @@ vertex GIFsOut giFsVertex(uint vid [[vertex_id]])
 	return o;
 }
 
-struct GITemporalParams { float4x4 prevViewProj; float4 blend; }; // blend.x = history weight (0 on first activation frame)
+// curViewProj = this frame's, same family as prevViewProj (motion-vector
+// reprojection); blend.x = history weight (0 on first activation frame).
+struct GITemporalParams { float4x4 prevViewProj; float4x4 curViewProj; float4 blend; };
 
 // Reproject last frame's accumulated shadow value via this pixel's world
 // position and blend it with the new raw sample. The history texture carries
@@ -2050,7 +2133,6 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	if (any(prevUV < 0.0) || any(prevUV > 1.0))
 		return float4(pv.xyz, rawV); // off-screen last frame → no history
 
-	float4 hist = history.sample(smp, prevUV);
 	// Reject history whose recorded world position is far from THIS pixel's —
 	// a disoccluded/wrong-surface reproject, not the same point one frame ago.
 	// MUST be tight: two points can be spatially close in world units while
@@ -2071,9 +2153,27 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	const float3 gyp = gPos.sample(smp, in.uv + float2(0.0, texel.y)).xyz, gym = gPos.sample(smp, in.uv - float2(0.0, texel.y)).xyz;
 	const float footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
 	                            min(length(gyp - pv.xyz), length(gym - pv.xyz)));
-	const float posError = length(pv.xyz - hist.rgb);
 	const float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
-	const float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
+	// Bilinear history, reprojected as a motion vector from this pixel's
+	// centre; 4 taps, each only if written for this surface, renormalised —
+	// see gi_temporal.frag, Thema 134 §4.2. curUV uses prevUV's y-flip.
+	const float4 cclip = P.curViewProj * float4(pv.xyz, 1.0);
+	const float2 cndc  = cclip.xy / cclip.w;
+	const float2 curUV = float2(cndc.x * 0.5 + 0.5, 1.0 - (cndc.y * 0.5 + 0.5));
+	const float2 hsz   = float2(history.get_width(), history.get_height());
+	const float2 hf    = (in.uv + (prevUV - curUV)) * hsz - 0.5;
+	const float2 hb    = floor(hf);
+	const float2 ht    = hf - hb;
+	float hAcc = 0.0, hWsum = 0.0;
+	for (int j = 0; j < 4; ++j)
+	{
+		const float2 o  = float2(float(j & 1), float(j >> 1));
+		const float2 bw = mix(1.0 - ht, ht, o);
+		const float4 h  = history.sample(smp, (hb + o + 0.5) / hsz);
+		if (length(pv.xyz - h.rgb) < tolerance) { hAcc += h.a * bw.x * bw.y; hWsum += bw.x * bw.y; }
+	}
+	const float histA = hWsum > 1e-3 ? hAcc / hWsum : 0.0;
+	const float w = hWsum > 1e-3 ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
 	// Neighbourhood clamp: the position check above only guards RECEIVER
 	// motion — when the OCCLUDER moves, the receiving surface is unchanged and
 	// stale history blends in at 0.9, smearing the old shadow across the floor
@@ -2099,23 +2199,64 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 			nMin = min(nMin, s / 9.0);
 			nMax = max(nMax, s / 9.0);
 		}
-	float result = mix(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w);
+	float result = mix(rawV, clamp(histA, nMin - 0.1, nMax + 0.1), w);
 	return float4(pv.xyz, result);
 }
 
-// Reads the shadow scalar from the temporal history's alpha channel (rgb there
-// is the world position used for next frame's disocclusion check, not colour).
-fragment float4 giShadowBlur(GIFsOut in [[stage_in]],
-                             texture2d<float> src [[texture(0)]],
-                             sampler          smp [[sampler(0)]])
+// One edge-aware a-trous iteration over the shadow mask (B3 5x5, holes =
+// A.x texels), run twice; replaces the 3x3 box. Plane, normal and Bernoulli
+// value stops — see gi_atrous.frag (Thema 134 §4.3), same constants (SYNC).
+// The first iteration reads the shadow scalar from the history's alpha (rgb
+// there is the world position for the disocclusion check, not colour).
+// level(0) throughout: the early outs and the background skip are divergent.
+// A.x = step in texels (0 = plain copy), A.y = 1 read .a else .r, A.z = N_eff.
+static inline float giAtrousValue(float4 s, float fromA) { return fromA > 0.5 ? s.a : s.r; }
+fragment float4 giShadowAtrous(GIFsOut in [[stage_in]],
+                               texture2d<float> src  [[texture(0)]],
+                               texture2d<float> gPos [[texture(1)]],
+                               texture2d<float> gNrm [[texture(2)]],
+                               sampler          smp  [[sampler(0)]],
+                               constant float4& A    [[buffer(0)]])
 {
-	float2 texel = 1.0 / float2(src.get_width(), src.get_height());
-	float sum = 0.0;
-	for (int x = -1; x <= 1; ++x)
-		for (int y = -1; y <= 1; ++y)
-			sum += src.sample(smp, in.uv + float2(float(x), float(y)) * texel).a;
-	float v = sum / 9.0;
-	return float4(v, 0.0, 0.0, 1.0);
+	const float  c  = giAtrousValue(src.sample(smp, in.uv, level(0)), A.y);
+	const float4 pv = gPos.sample(smp, in.uv, level(0));
+	const float  st = A.x;
+	if (st < 0.5 || pv.a < 0.5) return float4(c, 0.0, 0.0, 1.0);
+
+	const float2 texel = 1.0 / float2(src.get_width(), src.get_height());
+	if (c < 1e-3 || c > 1.0 - 1e-3)
+	{
+		bool allSame = true;
+		for (int k = 0; k < 4 && allSame; ++k)
+		{
+			const float2 o = float2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
+			allSame = abs(giAtrousValue(src.sample(smp, in.uv + o * (2.0 * st) * texel, level(0)), A.y) - c) < 1e-3;
+		}
+		if (allSame) return float4(c, 0.0, 0.0, 1.0);
+	}
+
+	const float3 n = normalize(gNrm.sample(smp, in.uv, level(0)).xyz);
+	const float3 gxp = gPos.sample(smp, in.uv + float2(texel.x, 0.0), level(0)).xyz, gxm = gPos.sample(smp, in.uv - float2(texel.x, 0.0), level(0)).xyz;
+	const float3 gyp = gPos.sample(smp, in.uv + float2(0.0, texel.y), level(0)).xyz, gym = gPos.sample(smp, in.uv - float2(0.0, texel.y), level(0)).xyz;
+	const float  fp  = max(max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+	                           min(length(gyp - pv.xyz), length(gym - pv.xyz))), 1e-4);
+	const float  sig = sqrt(max(c * (1.0 - c), 0.0) / max(A.z, 1.0));
+	const float  h[5] = { 1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0 };
+	float sum = 0.0, wsum = 0.0;
+	for (int y = -2; y <= 2; ++y)
+		for (int x = -2; x <= 2; ++x)
+		{
+			const float2 uv = in.uv + float2(float(x), float(y)) * st * texel;
+			const float4 q  = gPos.sample(smp, uv, level(0));
+			if (q.a < 0.5) continue;
+			const float v = giAtrousValue(src.sample(smp, uv, level(0)), A.y);
+			float w = h[x + 2] * h[y + 2];
+			w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (1.0 * fp));
+			w *= pow(max(dot(n, normalize(gNrm.sample(smp, uv, level(0)).xyz)), 0.0), 32.0);
+			w *= exp(-abs(v - c) / (2.0 * sig + 1e-3));
+			sum += v * w; wsum += w;
+		}
+	return float4(wsum > 0.0 ? sum / wsum : c, 0.0, 0.0, 1.0);
 }
 )MSL";
 
@@ -2129,7 +2270,7 @@ struct GIShadowParams {
 	float4 sunDirRadius; // xyz = direction TOWARD the light (world space), w = angular radius (radians)
 	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = SW instance count
 	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-	float4 extra;            // x = local light count
+	float4 extra;            // x = local light count, y = sun rays per pixel
 };
 
 // Two independent [0,1) values per pixel/frame, so successive frames sample
@@ -2191,21 +2332,27 @@ kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
 	// term already zeroes this out, so skip the trace entirely.
 	if (dot(N, L) > 0.0)
 	{
-		float2 xi  = giHash2(gid, P.frame.x);
-		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
-		// Normal-offset bias + min_distance floor guard self-intersection
-		// ("shadow acne") independently.
-		ray r;
-		r.origin       = pv.xyz + N * 0.05;
-		r.direction    = dir;
-		r.min_distance = 0.02;
-		r.max_distance = 10000.0;
-		intersection_params params;
-		params.accept_any_intersection(true);
-		intersection_query<triangle_data, instancing> q;
-		q.reset(r, accel, params);
-		q.next();
-		sunVis = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+		// extra.y rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		const uint spp = uint(max(P.extra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			float2 xi  = giHash2(gid, P.frame.x * float(spp) + float(k));
+			float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+			// Normal-offset bias + min_distance floor guard self-intersection
+			// ("shadow acne") independently.
+			ray r;
+			r.origin       = pv.xyz + N * 0.05;
+			r.direction    = dir;
+			r.min_distance = 0.02;
+			r.max_distance = 10000.0;
+			intersection_params params;
+			params.accept_any_intersection(true);
+			intersection_query<triangle_data, instancing> q;
+			q.reset(r, accel, params);
+			q.next();
+			sunVis += (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+		}
+		sunVis /= float(spp);
 	}
 	outShadow.write(float4(sunVis), gid);
 
@@ -3097,7 +3244,7 @@ struct GIShadowParams {
 	float4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = instance count
 	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-	float4 extra;            // x = local light count
+	float4 extra;            // x = local light count, y = sun rays per pixel
 };
 // Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
 // (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
@@ -3149,10 +3296,16 @@ kernel void giShadowRaySw(uint2 gid [[thread_position_in_grid]],
 	float sunVis = 0.0;
 	if (dot(N, L) > 0.0)
 	{
-		float2 xi  = giHash2(gid, P.frame.x);
-		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
-		float3 origin = pv.xyz + N * 0.05;
-		sunVis = giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		// extra.y rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		const uint spp = uint(max(P.extra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			float2 xi  = giHash2(gid, P.frame.x * float(spp) + float(k));
+			float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+			float3 origin = pv.xyz + N * 0.05;
+			sunVis += giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		}
+		sunVis /= float(spp);
 	}
 	outShadow.write(float4(sunVis), gid);
 
@@ -6029,9 +6182,14 @@ struct SceneUniforms
 	// project's ShadowSettings. Defaulted to the old shader literals so a fill
 	// site that never sets it (previews) shadows exactly as before.
 	glm::vec4 shadowBias = glm::vec4(0.0008f, 0.0002f, 0.0f, 0.0f);
+	// Clustered point/spot gate + grid (HE::ClusterLightBuild::params/camFwd).
+	// x == 0 → fragmentMain shades the 8-light window only; set solely in
+	// EncodeScene, which binds the three lists on fragment buffers 4/5/6.
+	glm::vec4 clusterParams = glm::vec4(0.0f);
+	glm::vec4 clusterCamFwd = glm::vec4(0.0f);
 };
 static_assert(sizeof(SceneUniforms) ==
-              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 4 * 16,
+              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 6 * 16,
               "SceneUniforms must stay byte-identical to its MSL twin");
 
 // Matches the MSL SSAOPosUniforms / SSAOParams structs.
@@ -6086,7 +6244,7 @@ struct GIShadowParamsCPU
 	glm::vec4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 	glm::vec4 frame;        // x = jitter seed, y = tex width, z = tex height, w = SW instance count
 	glm::vec4 localPosRange[4]; // xyz = local light position, w = range
-	glm::vec4 extra;            // x = local light count
+	glm::vec4 extra;            // x = local light count, y = sun rays per pixel
 };
 static_assert(sizeof(GIShadowParamsCPU) == 7 * 16, "must match the MSL GIShadowParams layout");
 // Matches the MSL GIReflParams struct (kGIReflMSL + kGISWMSL's copy, used only
@@ -6109,8 +6267,10 @@ static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GI
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
+	glm::mat4 curViewProj; // this frame's (motion-vector reprojection of the bilinear history)
 	glm::vec4 blend; // x = history weight (0 on first activation frame), y/z = tex width/height, w unused
 };
+static_assert(sizeof(GITemporalParamsCPU) == 2 * 64 + 16, "must match the MSL GITemporalParams layout");
 
 // Matches the MSL GIProbeParams struct (kGIProbeMSL, EncodeGIProbeUpdate only).
 struct GIProbeParamsCPU
@@ -6322,7 +6482,7 @@ void MetalRenderer::Shutdown()
 	if (m_giGBufInstancedPipeline)  { CFBridgingRelease(m_giGBufInstancedPipeline);  m_giGBufInstancedPipeline = nullptr; }
 	if (m_giShadowRayPipeline)      { CFBridgingRelease(m_giShadowRayPipeline);      m_giShadowRayPipeline = nullptr; }
 	if (m_giShadowTemporalPipeline) { CFBridgingRelease(m_giShadowTemporalPipeline); m_giShadowTemporalPipeline = nullptr; }
-	if (m_giShadowBlurPipeline)     { CFBridgingRelease(m_giShadowBlurPipeline);     m_giShadowBlurPipeline = nullptr; }
+	if (m_giShadowAtrousPipeline)   { CFBridgingRelease(m_giShadowAtrousPipeline);   m_giShadowAtrousPipeline = nullptr; }
 	if (m_giProbeUpdatePipeline)    { CFBridgingRelease(m_giProbeUpdatePipeline);    m_giProbeUpdatePipeline = nullptr; }
 	if (m_giShadowRaySwPipeline)    { CFBridgingRelease(m_giShadowRaySwPipeline);    m_giShadowRaySwPipeline = nullptr; }
 	if (m_giProbeUpdateSwPipeline)  { CFBridgingRelease(m_giProbeUpdateSwPipeline);  m_giProbeUpdateSwPipeline = nullptr; }
@@ -8102,14 +8262,15 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		if (tPso) m_giShadowTemporalPipeline = (void*)CFBridgingRetain(tPso);
 		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow-temporal pipeline creation failed");
 
-		// Spatial blur (fullscreen triangle, single R-channel output).
+		// Edge-aware a-trous (fullscreen triangle, single R-channel output), one
+		// pipeline for both iterations — the step/source arrive as bytes.
 		MTLRenderPipelineDescriptor* bDesc = [[MTLRenderPipelineDescriptor alloc] init];
 		bDesc.vertexFunction   = [lib newFunctionWithName:@"giFsVertex"];
-		bDesc.fragmentFunction = [lib newFunctionWithName:@"giShadowBlur"];
+		bDesc.fragmentFunction = [lib newFunctionWithName:@"giShadowAtrous"];
 		bDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR16Float;
 		id<MTLRenderPipelineState> bPso = [device newRenderPipelineStateWithDescriptor:bDesc error:&error];
-		if (bPso) m_giShadowBlurPipeline = (void*)CFBridgingRetain(bPso);
-		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow-blur pipeline creation failed");
+		if (bPso) m_giShadowAtrousPipeline = (void*)CFBridgingRetain(bPso);
+		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow a-trous pipeline creation failed");
 	}
 }
 
@@ -8157,13 +8318,15 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	m_giShadowHistory[0] = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
 	m_giShadowHistory[1] = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
 	// Final result is a plain scalar (fragmentMain only ever samples .r), written
-	// by a render pass (giShadowBlur) rather than a compute kernel — RenderTarget,
-	// not ShaderWrite, and back to the smaller R16Float format.
+	// by a render pass (giShadowAtrous) rather than a compute kernel — RenderTarget,
+	// not ShaderWrite, and back to the smaller R16Float format. The scratch
+	// target between the two a-trous iterations has the same shape.
 	MTLTextureDescriptor* resultDesc = [MTLTextureDescriptor
 		texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:width height:height mipmapped:NO];
 	resultDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	resultDesc.storageMode = MTLStorageModePrivate;
-	m_giShadowResult = (void*)CFBridgingRetain([device newTextureWithDescriptor:resultDesc]);
+	m_giShadowResult    = (void*)CFBridgingRetain([device newTextureWithDescriptor:resultDesc]);
+	m_giShadowFilterTmp = (void*)CFBridgingRetain([device newTextureWithDescriptor:resultDesc]);
 
 	m_giShadowHistoryIdx   = 0;
 	m_giShadowHistoryValid = false; // fresh (undefined-content) textures — first frame skips the history blend
@@ -8180,6 +8343,7 @@ void MetalRenderer::DestroyGIShadowTargets()
 	if (m_giShadowHistory[0]) { CFBridgingRelease(m_giShadowHistory[0]); m_giShadowHistory[0] = nullptr; }
 	if (m_giShadowHistory[1]) { CFBridgingRelease(m_giShadowHistory[1]); m_giShadowHistory[1] = nullptr; }
 	if (m_giShadowResult)     { CFBridgingRelease(m_giShadowResult);     m_giShadowResult = nullptr; }
+	if (m_giShadowFilterTmp)  { CFBridgingRelease(m_giShadowFilterTmp);  m_giShadowFilterTmp = nullptr; }
 	m_giShadowHistoryValid = false;
 	m_giShadowW = m_giShadowH = 0;
 }
@@ -8193,7 +8357,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 	             : (!m_giSwNodeBuf || !m_giSwTriBuf || !m_giSwInstanceBuf || m_giSwInstanceCount == 0))
 		return;
 	EnsureGIShadowPipelines();
-	if (!m_giGBufPipeline || !m_giShadowTemporalPipeline || !m_giShadowBlurPipeline)
+	if (!m_giGBufPipeline || !m_giShadowTemporalPipeline || !m_giShadowAtrousPipeline)
 		return;
 	if (m_giHwRt ? !m_giShadowRayPipeline : !m_giShadowRaySwPipeline)
 		return;
@@ -8332,7 +8496,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			static_assert(HE::kMaxMaskedLocalLights == 4, "GIShadowParams has 4 mask channels");
 			for (int i = 0; i < HE::kMaxMaskedLocalLights; ++i)
 				sp.localPosRange[i] = lm.posRange[i];
-			sp.extra = glm::vec4(static_cast<float>(lm.count), 0.0f, 0.0f, 0.0f);
+			sp.extra = glm::vec4(static_cast<float>(lm.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 		}
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
@@ -8378,7 +8542,8 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			[tenc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
 			GITemporalParamsCPU tparams;
 			tparams.prevViewProj = m_giPrevViewProj;
-			tparams.blend = glm::vec4(m_giShadowHistoryValid ? 0.9f : 0.0f,
+			tparams.curViewProj  = viewProj; // same (unfixed) family as prevViewProj
+			tparams.blend = glm::vec4(m_giShadowHistoryValid ? m_giShadowHistoryWeight : 0.0f,
 			                          static_cast<float>(width), static_cast<float>(height), 0.0f);
 			[tenc setFragmentBytes:&tparams length:sizeof(tparams) atIndex:0];
 			[tenc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -8388,16 +8553,25 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		m_giShadowHistoryIdx   = prevIdx;
 		m_giPrevViewProj       = viewProj; // for NEXT frame's reprojection
 
-		// ── 4. Spatial blur → final result fragmentMain samples ─────────────
+		// ── 4. Edge-aware a-trous → final result fragmentMain samples ───────
+		// Iteration 0: history[cur].a → scratch (hole 1); iteration 1: scratch.r
+		// → result (hole 2). With the filter off both are plain copies.
+		static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
+		for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
 		{
 			MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
-			bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_giShadowResult;
+			bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)(it == 0 ? m_giShadowFilterTmp : m_giShadowResult);
 			bp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
 			bp.colorAttachments[0].storeAction = MTLStoreActionStore;
 			id<MTLRenderCommandEncoder> benc = [cmdBuf renderCommandEncoderWithDescriptor:bp];
-			[benc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giShadowBlurPipeline];
-			[benc setFragmentTexture:(__bridge id<MTLTexture>)m_giShadowHistory[curIdx] atIndex:0];
-			[benc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			[benc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giShadowAtrousPipeline];
+			[benc setFragmentTexture:(__bridge id<MTLTexture>)(it == 0 ? m_giShadowHistory[curIdx] : m_giShadowFilterTmp) atIndex:0];
+			[benc setFragmentTexture:(__bridge id<MTLTexture>)m_giGBufPosTex  atIndex:1];
+			[benc setFragmentTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:2];
+			[benc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
+			const HE::GIShadowAtrousStep step = HE::GIShadowAtrousParams(it, m_giShadowFilter,
+			                                                             m_giShadowHistoryWeight, m_giShadowRays);
+			[benc setFragmentBytes:&step length:sizeof(step) atIndex:0];
 			[benc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 			[benc endEncoding];
 		}
@@ -9144,6 +9318,13 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
 		[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 	}
+	// The scene's material PSO declares the whole lighting preamble (GI masks,
+	// probe atlases, reflections, CSM, local shadows, sky env, AO, cloud shadow),
+	// but this encoder is a fresh one with none of EncodeScene's per-frame binds
+	// behind it — left unbound, API validation rejected every preview and
+	// thumbnail draw (missing samplers 5-12/14). Every gate in `lit` is 0, so the
+	// inert defaults are never sampled and the picture does not change.
+	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/false);
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:0]; // heTex0
 	if (ma)
 	{
@@ -10320,8 +10501,12 @@ void MetalRenderer::EncodeParticleBillboards(void* renderEncoder, const HE::UUID
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_particlePreviewPipeline];
 	[enc setVertexBuffer:instBuf offset:0 atIndex:0];
 	[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
-	[enc setVertexBytes:&camRight length:sizeof(camRight) atIndex:2];
-	[enc setVertexBytes:&camUp    length:sizeof(camUp)    atIndex:3];
+	// `constant float3&` reads 16 bytes; a bare glm::vec3 (12) trips API validation.
+	static_assert(sizeof(glm::vec4) == HE::kMetalParticleBasisBytes);
+	const glm::vec4 right4(camRight, 0.0f);
+	const glm::vec4 up4   (camUp,    0.0f);
+	[enc setVertexBytes:&right4 length:sizeof(right4) atIndex:2];
+	[enc setVertexBytes:&up4    length:sizeof(up4)    atIndex:3];
 	bool hasTexFlag = hasTex;
 	[enc setFragmentBytes:&hasTexFlag length:sizeof(hasTexFlag) atIndex:1];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)(hasTex ? matTex : m_dummyTexture) atIndex:0];
@@ -11934,11 +12119,25 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertMSL, fragMSL, log;
+	std::string fragFallbackMSL; // baked plain fragment, if the baked clustered one is rejected
+	bool bakedClustered = false;
 	bool ok = false;
 	if (precompiled)
 	{
-		// Baked at export time — no runtime cross-compile.
+		// Baked at export time — no runtime cross-compile. Forward PSOs take the
+		// baked clustered twin under the same rule as the cross-compiled path
+		// below (Thema 117); a pak without it keeps the plain window variant.
 		vertMSL = precompiled->vertex; fragMSL = precompiled->fragment;
+		if (m_forwardClustered && !gbuffer && !precompiled->fragmentClustered.empty())
+		{
+			// The exporter never bakes a separate clustered vertex for Metal; honour
+			// one anyway, but then the plain fragment no longer pairs with it and
+			// there is no fallback to offer.
+			if (!precompiled->vertexClustered.empty()) vertMSL = precompiled->vertexClustered;
+			else                                       fragFallbackMSL = fragMSL;
+			fragMSL = precompiled->fragmentClustered;
+			bakedClustered = true;
+		}
 		ok = !vertMSL.empty() && !fragMSL.empty();
 	}
 	else
@@ -11974,6 +12173,22 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		id<MTLLibrary> fLib = err ? nil
 			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
 			                       options:nil error:&err];
+		if (vLib && !fLib && !fragFallbackMSL.empty())
+		{
+			// The baked clustered fragment did not compile: the baked plain one
+			// still draws the material (8-light window, which stays full).
+			HE_LOG_WARN(RHI, "%s", (std::string("MetalRenderer: baked clustered material variant rejected, "
+				"using the 8-light window: ") + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+			err = nil;
+			fragMSL = std::move(fragFallbackMSL);
+			bakedClustered = false;
+			fLib = [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
+			                            options:nil error:&err];
+		}
+		if (precompiled && vLib && fLib)
+			HE_LOG_INFO(RHI, "%s", bakedClustered
+				? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered"
+				: "MetalRenderer: material pipeline from a PRECOMPILED variant, plain");
 		if (vLib && fLib)
 		{
 			MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -13002,6 +13217,59 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 // render encoder (same attachments as the opaque geometry pass).
 // sceneUniformsPtr is a const SceneUniforms* (opaque to avoid pulling the struct
 // into the header).
+void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameState)
+{
+	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	auto pick = [&](void* live) { return (__bridge id<MTLTexture>)(frameState && live ? live : m_dummyTexture); };
+	// Same gates as the shader-side uniforms: GI needs the probe atlases too, not
+	// just the shadow result — on the first GI-active frame (before
+	// EnsureGIProbeGrid has run) the atlases can still be null.
+	const bool giActive = frameState && m_giEnabled && m_giSupported && m_giShadowResult
+	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
+	const bool ssaoActive = frameState && m_ssaoEnabled && m_ssaoResult;
+
+	// Every preamble sampler is the clamp+linear one; binding it on the whole
+	// list (not slot by slot below) is what keeps a newly pinned sampler from
+	// going unbound on one of the encoders.
+	for (const int slot : HE::MaterialShaderLibrary::kMetalPreambleSamplerSlots)
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:slot];
+
+	// GI shadow masks on 5/8, DDGI probe atlases on 6/7 — the slots the built-in
+	// scene shader reads the same textures at (one encoder serves both; Metal caps
+	// the fragment stage at 16 samplers, so the preamble cannot get its own).
+	[encoder setFragmentTexture:pick(giActive ? m_giShadowResult : nullptr) atIndex:5];
+	[encoder setFragmentTexture:pick(giActive ? m_giIrradianceAtlas : nullptr) atIndex:6];
+	[encoder setFragmentTexture:pick(giActive ? m_giVisibilityAtlas : nullptr) atIndex:7];
+	[encoder setFragmentTexture:pick(giActive ? m_giLocalMaskTex : nullptr) atIndex:8];
+	// FORWARD reflection results at 9/10 (heLitP pins; the GI masks moved onto
+	// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run;
+	// the ssr.x / giRefl.z gates are 0 then, the samples fold dead.
+	[encoder setFragmentTexture:pick(m_fwdReflSsrTex) atIndex:9];
+	[encoder setFragmentTexture:pick(m_fwdReflGiTex) atIndex:10];
+	// CSM array for the material preamble's GI-off fallback, pinned at 11
+	// (sampling gated by heLight.csmSplits.w — same convention as slot 1), and
+	// the local (point/spot) shadow atlas at 12 (gated per light by params.y).
+	// Both are 2D ARRAYS: the 2D dummy would fail Metal's texture-type check,
+	// so the CSM array (created in Initialize) is the inert default.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
+	// Landscape weightmap: the dummy until a terrain draw binds its own per draw.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:13];
+	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
+	// image-based ambient and fog — the SAME textures the built-in shaders read
+	// at 2/3, re-pinned clear of the material-texture window. heLight.fog.z/.w
+	// gate the samples, so an absent cubemap (nil — legal in Metal, reads zero)
+	// or a dummy AO bind here is inert. The cube slot must NOT get the 2D dummy:
+	// Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
+	[encoder setFragmentTexture:pick(ssaoActive ? m_ssaoResult : nullptr) atIndex:15];
+	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
+	// (both fragmentMain and the material preamble sample it through an inline
+	// constexpr sampler; sampler indices stop at 15). White dummy when the
+	// pass didn't run, and the strength gate is 0 then anyway.
+	[encoder setFragmentTexture:pick(m_cloudShadowTex) atIndex:16];
+}
+
 void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
                                          bool shadows, const void* sceneUniformsPtr)
 {
@@ -13028,47 +13296,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-	// FORWARD reflection results at 9/10 (heLitP pins; the GI masks moved onto
-	// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run;
-	// the ssr.x / giRefl.z gates are 0 then, the samples fold dead.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
-	// CSM array for the material preamble's GI-off fallback, pinned at 11
-	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
-	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
-	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
-	// image-based ambient and fog — the SAME textures the built-in shaders read
-	// at 2/3, re-pinned clear of the material-texture window. Gated by
-	// heLight.fog.z/.w gate the samples, so an absent cubemap (nil — legal in
-	// Metal, reads zero) or a dummy AO bind here is inert. The cube slot must NOT
-	// get the 2D dummy: Metal validates the texture TYPE.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
-	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
-	// (both fragmentMain and the material preamble sample it through an inline
-	// constexpr sampler; sampler indices stop at 15). White dummy when the
-	// pass didn't run, and the strength gate is 0 then anyway.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
-	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
-	// scene pass already set above for the built-in shaders (Metal caps the
-	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
-	// bind here.
+	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -13272,47 +13500,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// fragment texture/sampler 1-4 with up to kMatMaxGraphTextures graph textures.
 	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult
 	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-	// FORWARD reflection results at 9/10 (heLitP pins; the GI masks moved onto
-	// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run;
-	// the ssr.x / giRefl.z gates are 0 then, the samples fold dead.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
-	// CSM array for the material preamble's GI-off fallback, pinned at 11
-	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
-	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
-	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
-	// image-based ambient and fog — the SAME textures the built-in shaders read
-	// at 2/3, re-pinned clear of the material-texture window. Gated by
-	// heLight.fog.z/.w gate the samples, so an absent cubemap (nil — legal in
-	// Metal, reads zero) or a dummy AO bind here is inert. The cube slot must NOT
-	// get the 2D dummy: Metal validates the texture TYPE.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
-	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
-	// (both fragmentMain and the material preamble sample it through an inline
-	// constexpr sampler; sampler indices stop at 15). White dummy when the
-	// pass didn't run, and the strength gate is 0 then anyway.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
-	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
-	// scene pass already set above for the built-in shaders (Metal caps the
-	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
-	// bind here.
+	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -13374,6 +13562,36 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// Specular AA (A6): valid in this forward pass — it shades from the
 	// fragment's own interpolated normal. 0 = off, image identical to before.
 	scene.aaParams = glm::vec4(m_specularAA ? m_specularAAStrength : 0.0f, 0.0f, 0.0f, 0.0f);
+	// Clustered point/spot lights (Thema 117): ONE build serves the built-in
+	// fragmentMain (gate in scene.clusterParams), the forward graph materials
+	// (fragmentClustered, gate in matLight.clusterParams below) and the
+	// stored-mode deferred resolve. Built before `scene` is uploaded — the
+	// skinned pass re-uploads this very struct. Buffers 4/5/6 are bound once
+	// for the whole pass (the sky and skinned draws never touch them); without
+	// a build they get zero lists, because fragmentMain declares them
+	// unconditionally and API validation wants every declared buffer bound.
+	// The light windows stay FULL: a pak baked without fragmentClustered (or
+	// whose clustered blob was rejected) draws the plain fragment and still
+	// needs its point/spot slots.
+	HE::ClusterLightBuild clusterBuild;
+	if (m_forwardClustered || (deferred && m_deferredClustered))
+		clusterBuild = BuildFrameClusterLights();
+	if (m_forwardClustered)
+	{
+		BindClusterBuffers(renderEncoder, clusterBuild);
+		scene.clusterParams = clusterBuild.params;
+		scene.clusterCamFwd = clusterBuild.camFwd;
+	}
+	else
+	{
+		const uint32_t noLists[4] = { 0u, 0u, 0u, 0u };
+		[encoder setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterLightsBufferIndex];
+		[encoder setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterGridBufferIndex];
+		[encoder setFragmentBytes:noLists length:sizeof(noLists)
+		              atIndex:HE::MaterialShaderLibrary::kMetalClusterIndexBufferIndex];
+	}
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
 	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
@@ -13390,20 +13608,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// Zero when nothing shines → heLit() correctly degrades to its ambient term.
 	HE::MaterialShaderLibrary::Lighting matLight; // reused by WPO vertex-stage binds below
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
-	// Clustered point/spot lights (Thema 117): ONE build serves the forward
-	// graph materials (fragmentClustered, gate in matLight.clusterParams) and
-	// the stored-mode deferred resolve below. Buffers 4/5/6 are bound once for
-	// the whole pass — the sky and skinned draws in between never touch them.
-	// The window in matLight stays FULL: precompiled (pak) blobs lack the
-	// cluster code and still need its point/spot slots.
-	HE::ClusterLightBuild clusterBuild;
-	if (m_forwardClustered || (deferred && m_deferredClustered))
-		clusterBuild = BuildFrameClusterLights();
+	// Same cluster build + bound lists as fragmentMain above.
 	if (m_forwardClustered)
-	{
-		BindClusterBuffers(renderEncoder, clusterBuild);
 		HE::FillMaterialClusterParams(clusterBuild, matLight);
-	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 
@@ -13888,26 +14095,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
 		[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-		// FORWARD reflection results at 9/10 (heLitP pins; GI masks moved onto
-		// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run.
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
-		// CSM array for the material preamble's GI-off fallback, pinned at 11.
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
-		// Local (point/spot) shadow atlas, pinned at 12.
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
+		BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
 		wire(true);
 		for (const TPDraw& t : transparent)
@@ -16938,8 +17126,11 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	// Camera-facing basis for billboard expansion — same convention as RenderParticlePreview.
-	const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
-	const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
+	// vec4, not vec3: heParticleGraphVertex reads `constant float3&` = 16 bytes
+	// (export-baked PPSD variants too, so the MSL side stays as it is).
+	static_assert(sizeof(glm::vec4) == HE::kMetalParticleBasisBytes);
+	const glm::vec4 camRight(view[0][0], view[1][0], view[2][0], 0.0f);
+	const glm::vec4 camUp   (view[0][1], view[1][1], view[2][1], 0.0f);
 
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
 
@@ -17101,6 +17292,9 @@ void MetalRenderer::SetGISettings(const GISettings& s)
 	m_giLightRadius         = s.lightRadius;
 	m_giRaysPerProbe        = s.raysPerProbe;
 	m_giProbeBudgetPerFrame = s.probeBudgetPerFrame;
+	m_giShadowRays          = std::clamp(s.shadowRays, 1, 256);
+	m_giShadowHistoryWeight = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+	m_giShadowFilter        = s.shadowFilter;
 }
 
 void MetalRenderer::SetVSync(bool enabled)

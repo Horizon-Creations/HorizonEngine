@@ -3194,6 +3194,11 @@ namespace
 	  "How large the light source is treated as being, in degrees. Wider means "
 	  "softer, more diffuse indirect shadows.",
 	  "", "rendering#lighting" },
+	{ "Preferences/Global Illumination/GI Shadow Quality", "",
+	  "Shadow rays per pixel toward the sun. More rays calm the shimmer at soft "
+	  "shadow edges; on GPUs without hardware ray tracing every extra ray costs "
+	  "as much as the first.",
+	  "", "rendering#performance" },
 	{ "Preferences/Global Illumination/GI Reflections (ray-traced)", "",
 	  "Traced reflections instead of screen-space ones: they can show what is "
 	  "behind the camera, at the cost of tracing the scene.",
@@ -5090,6 +5095,18 @@ namespace
 	  "here is stored in the widget — it is a way of dragging, not a property.",
 	  "", "ui#designer" },
 
+	// ── The widget's Pre Construct, run while designing ──────────────────────
+	{ "ui.pre-construct", "Pre Construct",
+	  "Runs the widget's Pre Construct event on the canvas, the way the game "
+	  "runs it before the first frame, so text and colours your graph sets show "
+	  "here too. Embedded widgets run theirs as well. Only Pre Construct runs, "
+	  "never Construct or Tick, and only in a sandbox: Set Property, variables "
+	  "and pure Math, String, JSON and Date/Time calls work, while files, saves, "
+	  "the network, sound and Create Widget are skipped and listed under the "
+	  "canvas. Use Is Design Time to give the designer placeholder data. What it "
+	  "sets is shown, never saved: Details still shows the authored values.",
+	  "", "ui#designer" },
+
 	// ── Lining up what is already placed ─────────────────────────────────────
 	// The toolbar cell and the eight entries of its popup.
 	{ "ui.align", "Align",
@@ -5870,6 +5887,13 @@ namespace
 	  "Public can be read and written from a script through "
 	  "horizon.callWidgetFunction and friends. Private is the widget's own "
 	  "business.",
+	  "", "ui#graph" },
+	{ "UI Variable/Expose on Spawn", "",
+	  "Every Create Widget of this widget gets an input for this variable. A "
+	  "wired input, or one with a value typed on it, is set on the new widget "
+	  "before its Pre Construct runs, so the widget's own first code already "
+	  "sees it. Left alone, the input keeps the default shown here. Public "
+	  "variables only.",
 	  "", "ui#graph" },
 	{ "UI Variable/Pull on Construct", "",
 	  "Fills this variable from somewhere else the moment the widget is created, "

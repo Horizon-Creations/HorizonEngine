@@ -2412,8 +2412,32 @@ private:
         case NT::ShowSelf: b.line("hc::showSelf(m_ctx);"); break;
         case NT::HideSelf: b.line("hc::hideSelf(m_ctx);"); break;
         case NT::CreateWidget:
-            b.line(slotRef(n, 0) + " = hc::createWidget(m_ctx, " + strLit(n.s) + ");");
+        {
+            // Expose on Spawn, by the interpreter's rule: a pin counts when it
+            // is wired or carries a value on the node. None counting emits the
+            // line every graph got before the pins existed, byte for byte.
+            std::vector<int> spawnPins;
+            for (size_t i = 0; i < n.params.size(); ++i)
+                if (dataLinkTo(n.id, r.dataIn0 + (int)i) || n.pinDefaults.count((int)i))
+                    spawnPins.push_back((int)i);
+            if (spawnPins.empty())
+            {
+                b.line(slotRef(n, 0) + " = hc::createWidget(m_ctx, " + strLit(n.s) + ");");
+                break;
+            }
+            const std::string sv = "s" + std::to_string(n.id);
+            b.line("{");
+            ++b.indent;
+            b.line("hc::SpawnValues " + sv + ";");
+            b.line(sv + ".reserve(" + std::to_string(spawnPins.size()) + ");");
+            for (const int i : spawnPins)
+                b.line(sv + ".push_back({ " + strLit(n.params[(size_t)i].name) + ", " +
+                       toValueCall(input(n, i, fnCtx), dataInType(n, i), m_opt.namespaceName) + " });");
+            b.line(slotRef(n, 0) + " = hc::createWidget(m_ctx, " + strLit(n.s) + ", " + sv + ");");
+            --b.indent;
+            b.line("}");
             break;
+        }
         case NT::ShowWidget:
             b.line("hc::showWidget(m_ctx, (int)(" + input(n, 0, fnCtx) + "));");
             break;

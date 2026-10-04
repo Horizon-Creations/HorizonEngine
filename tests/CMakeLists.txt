@@ -184,6 +184,8 @@ add_executable(he_tests
     test_ui.cpp
     test_ui_widgets.cpp
     test_widget_pre_construct.cpp
+    test_widget_design_time.cpp
+    test_widget_expose_on_spawn.cpp
     # Its own file so it gets its own PROCESS: the shared font atlas is baked
     # once, and this is the one run that bakes it in the regular weight.
     test_ui_font_weight.cpp

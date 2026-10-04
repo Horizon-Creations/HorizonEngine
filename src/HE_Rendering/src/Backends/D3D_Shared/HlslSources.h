@@ -717,7 +717,7 @@ cbuffer GiShadowCB : register(b0)
     float4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
     float4 uFrame;        // x = jitter seed, y = tex width, z = tex height
     float4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
-    float4 uLocalExtra;       // x = local light count
+    float4 uLocalExtra;       // x = local light count, y = sun rays per pixel
 };
 Texture2D<float4>   uGPos     : register(t0);
 Texture2D<float4>   uGNorm    : register(t1);
@@ -788,11 +788,17 @@ void GiShadowCS(uint3 gid : SV_DispatchThreadID)
     // term already zeroes this out, so skip the trace entirely.
     if (dot(N, L) > 0.0)
     {
-        float2 xi  = giHash2(gid.xy, uFrame.x);
-        float3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
-        // Same self-intersection guards as Metal: normal-offset origin + min t.
-        float3 origin = pv.xyz + N * 0.05;
-        sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+        // spp rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+        uint spp = uint(max(uLocalExtra.y, 1.0));
+        for (uint k = 0u; k < spp; ++k)
+        {
+            float2 xi  = giHash2(gid.xy, uFrame.x * float(spp) + float(k));
+            float3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+            // Same self-intersection guards as Metal: normal-offset origin + min t.
+            float3 origin = pv.xyz + N * 0.05;
+            sunVis += giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+        }
+        sunVis /= float(spp);
     }
     uOut[gid.xy] = sunVis;
 
@@ -826,6 +832,7 @@ SamplerState uPointSamp : register(s0);
 cbuffer GiTemporalCB : register(b0)
 {
     float4x4 uPrevViewProj;
+    float4x4 uCurViewProj; // this frame's, same family as uPrevViewProj (motion-vector reprojection)
     float4   uParams; // x = blend (0 on first GI frame), y = tex width, z = tex height
 };
 struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
@@ -842,8 +849,6 @@ float4 main(In i) : SV_Target
     if (any(prevUV < 0.0) || any(prevUV > 1.0)) return float4(pv.xyz, rawV);
 
     float2 texel     = 1.0 / uParams.yz; // uGPos has the same size
-    float4 hist      = uHistory.Sample(uPointSamp, prevUV);
-    float  posError  = length(pv.xyz - hist.rgb);
     // Tolerance covers one texel's world footprint (smaller one-sided G-buffer
     // step per axis, capped) — see gi_temporal.frag, Thema 131 §3 C.
     float3 gxp = uGPos.Sample(uPointSamp, i.uv + float2(texel.x, 0.0)).xyz, gxm = uGPos.Sample(uPointSamp, i.uv - float2(texel.x, 0.0)).xyz;
@@ -851,7 +856,26 @@ float4 main(In i) : SV_Target
     float  footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
                            min(length(gyp - pv.xyz), length(gym - pv.xyz)));
     float  tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
-    float  w = (posError < tolerance) ? clamp(uParams.x, 0.0, 0.98) : 0.0;
+    // Bilinear history, reprojected as a motion vector from this pixel's
+    // centre; 4 taps, each only if written for this surface, renormalised —
+    // see gi_temporal.frag, Thema 134 §4.2. curUV uses prevUV's y-flip.
+    float4 cclip = mul(uCurViewProj, float4(pv.xyz, 1.0));
+    float2 cndc  = cclip.xy / cclip.w;
+    float2 curUV = float2(cndc.x * 0.5 + 0.5, 0.5 - cndc.y * 0.5);
+    float2 hsz   = uParams.yz; // history has the mask's size
+    float2 hf    = (i.uv + (prevUV - curUV)) * hsz - 0.5;
+    float2 hb    = floor(hf);
+    float2 ht    = hf - hb;
+    float  hAcc = 0.0, hWsum = 0.0;
+    [unroll] for (int j = 0; j < 4; ++j)
+    {
+        float2 o  = float2(float(j & 1), float(j >> 1));
+        float2 bw = lerp(1.0 - ht, ht, o);
+        float4 h  = uHistory.Sample(uPointSamp, (hb + o + 0.5) / hsz);
+        if (length(pv.xyz - h.rgb) < tolerance) { hAcc += h.a * bw.x * bw.y; hWsum += bw.x * bw.y; }
+    }
+    float  histA = hWsum > 1e-3 ? hAcc / hWsum : 0.0;
+    float  w = hWsum > 1e-3 ? clamp(uParams.x, 0.0, 0.98) : 0.0;
     // Neighbourhood clamp: guards OCCLUDER motion (the position check above
     // only covers receiver/camera motion). Range of the 3x3 MEANS of raw over a
     // 5x5 footprint, widened by 0.1 — raw min/max on the binary 1-spp signal
@@ -871,24 +895,71 @@ float4 main(In i) : SV_Target
             nMin = min(nMin, s / 9.0);
             nMax = max(nMax, s / 9.0);
         }
-    return float4(pv.xyz, lerp(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w));
+    return float4(pv.xyz, lerp(rawV, clamp(histA, nMin - 0.1, nMax + 0.1), w));
 }
 )HLSL";
 
-// 3x3 spatial blur of the accumulated shadow scalar → the mask the scene
-// shader samples (R16F, linear = free bilinear upsample to full res).
-inline constexpr const char* kGiBlurHLSL = R"HLSL(
-Texture2D    uSrc : register(t0); // temporal history: rgb = world pos, a = shadow
+// One edge-aware a-trous iteration over the accumulated shadow scalar (B3 5x5,
+// holes = uAtrous.x texels), run twice → the mask the scene shader samples
+// (R16F, linear = free bilinear upsample to full res). Replaces the 3x3 box.
+// Plane, normal and Bernoulli value stops — see gi_atrous.frag (Thema 134
+// §4.3), same constants (SYNC). SampleLevel throughout: the early outs and the
+// background skip make the taps divergent.
+// t0 = history (.a: rgb is the world position) or the previous iteration
+// (.r), t1 = gPos, t2 = gNorm.
+inline constexpr const char* kGiAtrousHLSL = R"HLSL(
+Texture2D    uSrc   : register(t0);
+Texture2D    uGPos  : register(t1);
+Texture2D    uGNorm : register(t2);
 SamplerState uPointSamp : register(s0);
-cbuffer GiBlurCB : register(b0) { float4 uTexel; }; // xy = 1/size
+cbuffer GiAtrousCB : register(b0)
+{
+    float4 uAtrous; // x = step in texels (0 = plain copy), y = 1 read .a else .r, z = N_eff (history samples)
+    float4 uTexel;  // xy = 1/size
+};
 struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float atrousValue(float4 s) { return uAtrous.y > 0.5 ? s.a : s.r; }
 float4 main(In i) : SV_Target
 {
-    float sum = 0.0;
-    [unroll] for (int x = -1; x <= 1; ++x)
-        [unroll] for (int y = -1; y <= 1; ++y)
-            sum += uSrc.Sample(uPointSamp, i.uv + float2(x, y) * uTexel.xy).a;
-    return float4(sum / 9.0, 0.0, 0.0, 1.0);
+    float  c  = atrousValue(uSrc.SampleLevel(uPointSamp, i.uv, 0));
+    float4 pv = uGPos.SampleLevel(uPointSamp, i.uv, 0);
+    float  st = uAtrous.x;
+    if (st < 0.5 || pv.a < 0.5) return float4(c, 0.0, 0.0, 1.0);
+
+    float2 texel = uTexel.xy;
+    if (c < 1e-3 || c > 1.0 - 1e-3)
+    {
+        bool allSame = true;
+        [unroll] for (int k = 0; k < 4; ++k)
+        {
+            float2 o = float2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
+            allSame = allSame && abs(atrousValue(uSrc.SampleLevel(uPointSamp, i.uv + o * (2.0 * st) * texel, 0)) - c) < 1e-3;
+        }
+        if (allSame) return float4(c, 0.0, 0.0, 1.0);
+    }
+
+    float3 n   = normalize(uGNorm.SampleLevel(uPointSamp, i.uv, 0).xyz);
+    float3 gxp = uGPos.SampleLevel(uPointSamp, i.uv + float2(texel.x, 0.0), 0).xyz, gxm = uGPos.SampleLevel(uPointSamp, i.uv - float2(texel.x, 0.0), 0).xyz;
+    float3 gyp = uGPos.SampleLevel(uPointSamp, i.uv + float2(0.0, texel.y), 0).xyz, gym = uGPos.SampleLevel(uPointSamp, i.uv - float2(0.0, texel.y), 0).xyz;
+    float  fp  = max(max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+                         min(length(gyp - pv.xyz), length(gym - pv.xyz))), 1e-4);
+    float  sig = sqrt(max(c * (1.0 - c), 0.0) / max(uAtrous.z, 1.0));
+    const float h[5] = { 1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0 };
+    float sum = 0.0, wsum = 0.0;
+    [unroll] for (int y = -2; y <= 2; ++y)
+        [unroll] for (int x = -2; x <= 2; ++x)
+        {
+            float2 uv = i.uv + float2(float(x), float(y)) * st * texel;
+            float4 q  = uGPos.SampleLevel(uPointSamp, uv, 0);
+            if (q.a < 0.5) continue;
+            float v = atrousValue(uSrc.SampleLevel(uPointSamp, uv, 0));
+            float w = h[x + 2] * h[y + 2];
+            w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (1.0 * fp));
+            w *= pow(max(dot(n, normalize(uGNorm.SampleLevel(uPointSamp, uv, 0).xyz)), 0.0), 32.0);
+            w *= exp(-abs(v - c) / (2.0 * sig + 1e-3));
+            sum += v * w; wsum += w;
+        }
+    return float4(wsum > 0.0 ? sum / wsum : c, 0.0, 0.0, 1.0);
 }
 )HLSL";
 

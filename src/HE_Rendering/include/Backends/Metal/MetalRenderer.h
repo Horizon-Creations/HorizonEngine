@@ -743,6 +743,12 @@ private:
 	bool EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
 	                           float yaw, float pitch, float dist, int shape,
 	                           const HE::UUID& meshId = HE::UUID{});
+	// Bind every fragment texture/sampler slot the material lighting preamble pins
+	// outside the material-texture window: 5..15 (kMetalPreambleSamplerSlots) plus
+	// the cloud-shadow texture 16. `frameState` = this frame's GI/SSAO/reflection/
+	// cloud-shadow results (scene passes); false = inert, correctly TYPED defaults
+	// for an encoder with no frame behind it (material preview, thumbnail).
+	void BindMaterialPreambleSlots(void* renderEncoder, bool frameState);
 	// Build the billboard pipeline once; false on failure.
 	bool EnsureParticlePreviewPipeline();
 	// Encode the particle cloud into an OPEN encoder — shared by the interactive
@@ -1077,6 +1083,9 @@ private:
 	float m_giLightRadius       = 0.5f;  // degrees — sun angular radius (shadow penumbra softness)
 	int   m_giRaysPerProbe        = 128;
 	int   m_giProbeBudgetPerFrame = 256;
+	int   m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
+	float m_giShadowHistoryWeight = 0.9f;  // shadow-mask temporal history weight
+	bool  m_giShadowFilter        = true;  // edge-aware a-trous on the mask
 	// TLAS + its instance-descriptor buffer are reallocated FRESH every GI-active
 	// frame (never mutated/resized in place): the previous frame's build may still
 	// be executing on the GPU when this frame starts encoding a new one, and
@@ -1176,13 +1185,13 @@ private:
 	// sample per pixel (jittered within a cone around the sun for a soft
 	// penumbra), temporally accumulated against a ping-pong history (reprojected
 	// via the true previous frame's view-proj — NOT the same-frame m_prepassViewProj
-	// pattern), then a small spatial blur. Result sampled by fragmentMain exactly
+	// pattern), then an edge-aware a-trous filter. Result sampled by fragmentMain exactly
 	// like aoTex (screen-space UV, free bilinear upsample from half-res).
 	void* m_giGBufPipeline        = nullptr; // id<MTLRenderPipelineState> (MRT: world pos + normal)
 	void* m_giGBufInstancedPipeline = nullptr; // instanced twin (giGBufVertexInstanced); optional
 	void* m_giShadowRayPipeline   = nullptr; // id<MTLComputePipelineState>
 	void* m_giShadowTemporalPipeline = nullptr; // id<MTLRenderPipelineState>
-	void* m_giShadowBlurPipeline  = nullptr; // id<MTLRenderPipelineState>
+	void* m_giShadowAtrousPipeline = nullptr; // id<MTLRenderPipelineState> edge-aware a-trous (Thema 134)
 	void* m_giGBufPosTex  = nullptr; // id<MTLTexture> RGBA16F world pos, a=1 valid geometry
 	void* m_giGBufNormTex = nullptr; // id<MTLTexture> RGBA16F world normal
 	void* m_giGBufDepth   = nullptr; // id<MTLTexture> depth for the prepass only
@@ -1196,6 +1205,7 @@ private:
 	int   m_giShadowHistoryIdx   = 0;
 	bool  m_giShadowHistoryValid = false; // false right after (re)alloc — first frame skips history blend
 	void* m_giShadowResult = nullptr; // id<MTLTexture> R16F final blurred result, sampled by fragmentMain
+	void* m_giShadowFilterTmp = nullptr; // id<MTLTexture> R16F between the two a-trous iterations
 	int   m_giShadowW = 0, m_giShadowH = 0;
 	// TRUE previous-frame view-proj (unlike m_prepassViewProj, which is written and
 	// read within the SAME frame for the low-res cloud pre-pass) — written at the

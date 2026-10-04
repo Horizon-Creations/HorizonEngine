@@ -169,6 +169,11 @@ public:
     // Private per-instance variable state.
     Value getVariable(InstanceId id, const std::string& name) const;
     void  setVariable(InstanceId id, const std::string& name, const Value& v);
+    // The same write from OUTSIDE the instance, with Set (Ref)'s rule: only a
+    // public instance variable is reachable (interpreted or compiled). false =
+    // no such instance, or no public variable of that name — nothing written,
+    // and saying so is the caller's business.
+    bool  setPublicVariable(InstanceId id, const std::string& name, const Value& v);
     // Reset an instance's variables to its graph's declared defaults (used to
     // give the persistent GameInstance a fresh start each play session).
     void  reseedVariables(InstanceId id);
@@ -438,7 +443,9 @@ public:
     // these to the current world's WidgetManager + ContentManager (+ this runtime).
     struct Services
     {
-        std::function<int(const std::string& assetPath)> createWidget;
+        // `spawn`: the Create Widget node's Expose on Spawn values, for the
+        // widget to take before its PreConstruct (see Context::createWidget).
+        std::function<int(const std::string& assetPath, const SpawnValues& spawn)> createWidget;
         std::function<void(int)> showWidget;
         std::function<void(int)> hideWidget;
         std::function<void(int)> destroyWidget;

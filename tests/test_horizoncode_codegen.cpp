@@ -194,10 +194,14 @@ namespace
 		void bindServices()
 		{
 			Runtime::Services s;
-			s.createWidget = [this](const std::string& path) -> int
+			s.createWidget = [this](const std::string& path, const SpawnValues& spawn) -> int
 			{
 				const int wid = 100 + ++widgetCounter;
-				trace.push_back("createWidget " + path + " -> " + std::to_string(wid));
+				// The Expose on Spawn values are part of what the call means,
+				// so both paths have to hand over the same ones (§6.6).
+				std::string sv;
+				for (const SpawnValue& v : spawn) sv += " " + v.name + "=" + valueStr(v.value);
+				trace.push_back("createWidget " + path + sv + " -> " + std::to_string(wid));
 				return wid;
 			};
 			s.showWidget    = [this](int wid) { trace.push_back("showWidget " + std::to_string(wid)); };
@@ -1131,6 +1135,20 @@ TEST_CASE("codegen parity: events_multi (order, elem filter, shared per-fire cac
 	p.fire("Ping", 2);                      // A then B, sharing one run's cache
 	CHECK(p.var("trace").s == "aab");
 	CHECK(p.var("wRef").ref == 102);        // B read A's fresh CreateWidget ref
+	// Expose on Spawn: B's own Create Widget hands over the wired pin and the
+	// one with a value on the node, in pin order — and nothing for the pin left
+	// alone. Both sides spell it alike (checkParity); this pins down WHAT they
+	// spell, so two paths that both dropped the values would not pass.
+	auto hasSpawnCall = [](const std::vector<std::string>& t)
+	{
+		for (const std::string& e : t)
+			if (e.find("createWidget Content/UI/W.hasset score=") == 0)
+				return e.find(" title=") != std::string::npos &&
+				       e.find("tint") == std::string::npos;
+		return false;
+	};
+	CHECK(hasSpawnCall(p.interp.trace));
+	CHECK(hasSpawnCall(p.comp.trace));
 	p.fire("Tick", 0, Value::ofFloat(1.5f));
 	p.fire("Tick", 0, Value::ofFloat(2.0f));
 	CHECK(p.var("tickSum").f == 3.5f);

@@ -277,6 +277,16 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 		// Else it resolved to some OTHER class: provably not ours, and reporting it
 		// would bury the real warnings under every same-named member in the project.
 	}
+	// A Create Widget of the renamed widget names its Expose on Spawn variables
+	// in its pins (docs/widget-pre-construct-design.md §6.5). Its class is the
+	// asset it names, so there is nothing to prove. Renamed here and not left to
+	// the pin mirror: the mirror goes by name, and would take a renamed pin for
+	// a new one and drop the value somebody typed into it.
+	if (t.member == Member::Variable)
+		for (const HorizonCode::Node& n : g.nodes)
+			if (n.type == NT::CreateWidget && contains(targetKeys, n.s))
+				for (const HorizonCode::FuncParam& prm : n.params)
+					if (prm.name == t.oldName) { p.rename.push_back({ n.id, {}, line(n) }); break; }
 
 	// Pull on Construct names a variable of ANOTHER class too, but on a
 	// variable declaration rather than a node — and it says which class: the
@@ -392,6 +402,13 @@ bool apply(HorizonCode::Graph& g, const Plan& p, const Target& t)
 		if (h.node)
 		{
 			HorizonCode::Node* n = g.findNode(h.node);
+			// Create Widget's `s` is the widget's PATH; the name is one of its pins.
+			if (n && n->type == NT::CreateWidget)
+			{
+				for (HorizonCode::FuncParam& prm : n->params)
+					if (prm.name == t.oldName) { prm.name = t.newName; changed = true; }
+				continue;
+			}
 			if (n && n->s != t.newName) { n->s = t.newName; changed = true; }
 		}
 		else if (t.member == Member::Variable && h.decl.rfind(kPullDeclPrefix, 0) == 0)

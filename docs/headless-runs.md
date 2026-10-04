@@ -212,6 +212,34 @@ cd <export> && HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=30 \
 **Offscreen-Bild aus dem Editor:** `scripts/he_shot.py OUT.png KEY=VAL…`.
 Braucht nichts extra, `HE_DUMP_PATH` schaltet den Hidden-Modus selbst ein.
 
+**Metal-API-Validierung über einen Dump (Thema 124 A7):** Editor direkt starten,
+nicht über `he_shot.py`, und `script -q` gibt jedem Lauf ein eigenes,
+zeilengepuffertes Log:
+
+```sh
+cd out/deploy/Editor && HE_CONFIG_DIR=$(mktemp -d) HE_SKY_TIME=10 \
+  MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog \
+  HE_DUMP_PATH=/tmp/v.bmp HE_DUMP_QUIT=1 HE_DUMP_RHI=Metal HE_DUMP_SKYTEST=1 \
+  HE_DUMP_TOD=0 HE_DUMP_COVERAGE=0 HE_DUMP_CLOUDMODE=0 HE_DUMP_AA=0 \
+  HE_DUMP_CAMY=207 HE_DUMP_CAMZ=2 HE_DUMP_PITCH=-38 HE_DUMP_RENDERPATH=0 \
+  HE_DUMP_MANYLIGHTS=16 HE_DUMP_MATERIALTEST=translucent \
+  HE_DUMP_PREVIEW=1 HE_PREVIEW_DUMP=/tmp/v_preview.ppm HE_DUMP_THUMB=/tmp/v_thumb \
+  script -q /tmp/v.log ./HorizonEditor > /dev/null
+grep -a -o "missing [^ ]* binding at index [0-9]* for [A-Za-z0-9_]*" /tmp/v.log | sort | uniq -c
+```
+
+„Metal API Validation Enabled" im Log belegt, dass die Schicht an war. `nslog`
+sammelt alle Fehler; ohne `MTL_DEBUG_LAYER_ERROR_MODE` (also `assert`) bricht der
+Lauf am ersten ab (exit 6, kein Bild), das ist der härtere Beleg. Der obige Aufruf
+ohne `MTL_DEBUG_LAYER_ERROR_MODE` (inklusive `HE_DUMP_THUMB`) läuft durch, exit 0
+und sieben Thumbnails. Bis Thema 124 Schritt 9 brach er am Partikel-Thumbnail ab
+(`particlePreviewVertex`: `camRight`/`camUp` kamen mit 12 statt 16 Byte, siehe
+`kMetalParticleBasisBytes`). Zwei Fallen:
+der Build braucht **`HE_ENABLE_SHADERC=ON`**, sonst kompiliert kein
+Graph-Material, es gibt keinen Material-Draw und die Validierung prüft nichts
+(Log: „built without the shader cross-compiler"). Und die Material-Vorschau und
+die Thumbnails laufen auf eigenen Encodern, nur `PREVIEW`/`THUMB` treffen sie.
+
 **Live-Editor mit MCP-Clients:** `scripts/he_mcp_multiclient.py` setzt
 `HE_HIDDEN_WINDOW=1` selbst (per `setdefault`, ein `HE_HIDDEN_WINDOW=0` aus der
 Shell gewinnt). Wer den Editor für eigene MCP-Tests von Hand mit `HE_MCP=1`
