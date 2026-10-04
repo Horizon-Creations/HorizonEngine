@@ -447,6 +447,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			SubGroup sub(cfg.GlobalIlluminationEnabled);
 			Row::sliderFloat("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
 			Row::sliderFloat("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
+			// Sun rays per pixel for the shadow mask (Thema 134): 2 halves the
+			// shimmer of 1 for ~0.1 ms on hardware RT; on the software path
+			// (no RT cores) every ray costs as much as the first.
+			const char* kGIShadowQuality[] = { "Low (1 ray)", "Medium (2 rays)", "High (4 rays)" };
+			int gsQ = std::clamp(cfg.GIShadowQuality, 0, 2);
+			if (Row::combo("GI Shadow Quality", &gsQ, kGIShadowQuality, 3))
+				cfg.GIShadowQuality = gsQ;
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)

@@ -1,0 +1,375 @@
+diff --git a/src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm b/src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm
+index 6dcd83f8..2b92f89b 100644
+--- a/src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm
++++ b/src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm
+@@ -2022,7 +2022,7 @@ vertex GIFsOut giFsVertex(uint vid [[vertex_id]])
+ 	return o;
+ }
+ 
+-struct GITemporalParams { float4x4 prevViewProj; float4 blend; }; // blend.x = history weight (0 on first activation frame)
++struct GITemporalParams { float4x4 prevViewProj; float4 blend; float4x4 curViewProj; }; // PROTO(Thema 134): curViewProj // blend.x = history weight (0 on first activation frame)
+ 
+ // Reproject last frame's accumulated shadow value via this pixel's world
+ // position and blend it with the new raw sample. The history texture carries
+@@ -2073,7 +2073,36 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
+ 	                            min(length(gyp - pv.xyz), length(gym - pv.xyz)));
+ 	const float posError = length(pv.xyz - hist.rgb);
+ 	const float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
+-	const float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
++	float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
++	if (P.blend.w > 0.5)
++	{
++		// PROTO(Thema 134): bilinear history — 4 taps, each kept only if it was
++		// written for this surface, weights renormalised over the kept ones.
++		const float2 hsz = float2(history.get_width(), history.get_height());
++		// blend.w = 2: reproject as a motion vector from THIS pixel's centre —
++		// both projections see the same RGBA16F-quantised position, so its
++		// ~1/4-texel error cancels and a still camera lands exactly on the centre.
++		float2 rUV = prevUV;
++		if (P.blend.w > 1.5)
++		{
++			const float4 cc = P.curViewProj * float4(pv.xyz, 1.0);
++			const float2 cn = cc.xy / cc.w;
++			rUV = in.uv + (prevUV - float2(cn.x * 0.5 + 0.5, 1.0 - (cn.y * 0.5 + 0.5)));
++		}
++		const float2 f   = rUV * hsz - 0.5;
++		const float2 b   = floor(f);
++		const float2 t   = f - b;
++		float acc = 0.0, wsum = 0.0;
++		for (int j = 0; j < 4; ++j)
++		{
++			const float2 o  = float2(float(j & 1), float(j >> 1));
++			const float  bw = (o.x > 0.5 ? t.x : 1.0 - t.x) * (o.y > 0.5 ? t.y : 1.0 - t.y);
++			const float4 h  = history.sample(smp, (b + o + 0.5) / hsz);
++			if (length(pv.xyz - h.rgb) < tolerance) { acc += h.a * bw; wsum += bw; }
++		}
++		hist.a = wsum > 1e-3 ? acc / wsum : hist.a;
++		w = wsum > 1e-3 ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
++	}
+ 	// Neighbourhood clamp: the position check above only guards RECEIVER
+ 	// motion — when the OCCLUDER moves, the receiving surface is unchanged and
+ 	// stale history blends in at 0.9, smearing the old shadow across the floor
+@@ -2117,6 +2146,62 @@ fragment float4 giShadowBlur(GIFsOut in [[stage_in]],
+ 	float v = sum / 9.0;
+ 	return float4(v, 0.0, 0.0, 1.0);
+ }
++
++// PROTO(Thema 134): one edge-aware a-trous iteration (B3 5x5, holes = step).
++// x = step in texels (0 = plain copy), y = 1 → read .a (history) else .r,
++// z = sigmaL (0 = no value stop), w = effective history samples (Bernoulli
++// sigma = sqrt(c(1-c)/w)).
++struct GIAtrousParams { float4 p; float4 q; }; // q.x = plane sigma (texels), q.y = normal power
++fragment float4 giShadowAtrous(GIFsOut in [[stage_in]],
++                               texture2d<float> src  [[texture(0)]],
++                               texture2d<float> gPos [[texture(1)]],
++                               texture2d<float> gNrm [[texture(2)]],
++                               sampler          smp  [[sampler(0)]],
++                               constant GIAtrousParams& A [[buffer(0)]])
++{
++	const bool fromA = A.p.y > 0.5;
++	float4 s0 = src.sample(smp, in.uv);
++	float  c  = fromA ? s0.a : s0.r;
++	const float step = A.p.x;
++	float4 pv = gPos.sample(smp, in.uv);
++	if (step < 0.5 || pv.a < 0.5) return float4(c, 0.0, 0.0, 1.0);
++	const float2 texel = 1.0 / float2(src.get_width(), src.get_height());
++	const float3 n = gNrm.sample(smp, in.uv).xyz;
++	const float3 gx = gPos.sample(smp, in.uv + float2(texel.x, 0.0)).xyz;
++	const float3 gy = gPos.sample(smp, in.uv + float2(0.0, texel.y)).xyz;
++	const float  fp = max(max(length(gx - pv.xyz), length(gy - pv.xyz)), 1e-4); // world size of one texel
++	const float  sig = sqrt(max(c * (1.0 - c), 0.0) / max(A.p.w, 1.0));
++	// q.z = 1: early out where this pixel and its 4 step-neighbours are all fully
++	// lit or fully shadowed — most of the screen, nothing to filter there.
++	if (A.q.z > 0.5 && (c < 1e-3 || c > 1.0 - 1e-3))
++	{
++		bool flat = true;
++		for (int k = 0; k < 4 && flat; ++k)
++		{
++			const float2 o = float2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
++			const float4 sn = src.sample(smp, in.uv + o * 2.0 * step * texel);
++			flat = abs((fromA ? sn.a : sn.r) - c) < 1e-3;
++		}
++		if (flat) return float4(c, 0.0, 0.0, 1.0);
++	}
++	const float  h[5] = { 1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0 };
++	float sum = 0.0, wsum = 0.0;
++	for (int y = -2; y <= 2; ++y)
++		for (int x = -2; x <= 2; ++x)
++		{
++			const float2 uv = in.uv + float2(float(x), float(y)) * step * texel;
++			float4 q = gPos.sample(smp, uv);
++			if (q.a < 0.5) continue;
++			float4 sq = src.sample(smp, uv);
++			float  v  = fromA ? sq.a : sq.r;
++			float  w  = h[x + 2] * h[y + 2];
++			w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (A.q.x * fp));
++			w *= pow(max(dot(n, gNrm.sample(smp, uv).xyz), 0.0), A.q.y);
++			if (A.p.z > 0.0) w *= exp(-abs(v - c) / (A.p.z * sig + 1e-3));
++			sum += v * w; wsum += w;
++		}
++	return float4(wsum > 0.0 ? sum / wsum : c, 0.0, 0.0, 1.0);
++}
+ )MSL";
+ 
+ static const char* kGIShadowMSL = R"MSL(
+@@ -2191,7 +2276,20 @@ kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
+ 	// term already zeroes this out, so skip the trace entirely.
+ 	if (dot(N, L) > 0.0)
+ 	{
+-		float2 xi  = giHash2(gid, P.frame.x);
++		// PROTO(Thema 134): extra.y = rays per pixel, extra.z = 3x3-periodic
++		// stratification (every 3x3 window holds 9*spp consecutive R2 points).
++		const uint spp   = uint(max(P.extra.y, 1.0));
++		const bool strat = P.extra.z > 0.5;
++		for (uint k = 0u; k < spp; ++k)
++		{
++		float2 xi;
++		if (strat)
++		{
++			const uint j = (gid.x % 3u) + 3u * (gid.y % 3u) + 9u * (uint(P.frame.x) * spp + k);
++			xi = float2(float((j * 3242174889u) >> 8u), float((j * 2447445414u) >> 8u)) * (1.0 / 16777216.0);
++		}
++		else
++			xi = giHash2(gid, spp == 1u ? P.frame.x : P.frame.x * float(spp) + float(k));
+ 		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+ 		// Normal-offset bias + min_distance floor guard self-intersection
+ 		// ("shadow acne") independently.
+@@ -2205,7 +2303,9 @@ kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
+ 		intersection_query<triangle_data, instancing> q;
+ 		q.reset(r, accel, params);
+ 		q.next();
+-		sunVis = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
++		sunVis += (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
++		}
++		sunVis /= float(spp);
+ 	}
+ 	outShadow.write(float4(sunVis), gid);
+ 
+@@ -3149,10 +3249,15 @@ kernel void giShadowRaySw(uint2 gid [[thread_position_in_grid]],
+ 	float sunVis = 0.0;
+ 	if (dot(N, L) > 0.0)
+ 	{
+-		float2 xi  = giHash2(gid, P.frame.x);
++		const uint spp = uint(max(P.extra.y, 1.0)); // PROTO(Thema 134): rays per pixel
++		for (uint k = 0u; k < spp; ++k)
++		{
++		float2 xi  = giHash2(gid, spp == 1u ? P.frame.x : P.frame.x * float(spp) + float(k));
+ 		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+ 		float3 origin = pv.xyz + N * 0.05;
+-		sunVis = giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
++		sunVis += giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
++		}
++		sunVis /= float(spp);
+ 	}
+ 	outShadow.write(float4(sunVis), gid);
+ 
+@@ -6110,6 +6215,7 @@ static GIUniforms BuildGIUniforms(bool active, const glm::vec3& gridOrigin, floa
+ {
+ 	glm::mat4 prevViewProj;
+ 	glm::vec4 blend; // x = history weight (0 on first activation frame), y/z = tex width/height, w unused
++	glm::mat4 curViewProj; // PROTO(Thema 134): motion-vector reprojection for the bilinear history
+ };
+ 
+ // Matches the MSL GIProbeParams struct (kGIProbeMSL, EncodeGIProbeUpdate only).
+@@ -8026,6 +8132,46 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+ 	}
+ }
+ 
++// PROTO(Thema 134): measurement-only switches for the GI shadow mask, read once.
++//   HE_GI_PROTO_SPP=N      rays per pixel (default 1)
++//   HE_GI_PROTO_STRAT=1    3x3-periodic R2 stratification of the cone samples
++//   HE_GI_PROTO_HIST=w     history weight (default 0.9)
++//   HE_GI_PROTO_ATROUS=K   K edge-aware a-trous iterations instead of the 3x3 box
++//                          (-1 = no spatial filter at all)
++//   HE_GI_PROTO_SIGL=s     a-trous value stop in Bernoulli sigmas (0 = off, default 0)
++//   HE_GI_PROTO_SIGP=t     a-trous plane stop in texel footprints (default 1)
++//   HE_GI_PROTO_NPOW=e     a-trous normal power (default 32)
++//   HE_GI_PROTO_BENCH=1    GI mask passes in an own command buffer, GPU ms logged
++//   HE_GI_PROTO_EARLY=1    a-trous early out on fully lit / fully shadowed pixels
++//   HE_GI_PROTO_BILERP=1   bilinear history reprojection (4 taps, per-tap surface test)
++//                     =2   same, reprojected as a motion vector from the pixel centre
++static void* s_protoAtrousPso = nullptr;
++static void* s_protoTmp[2]    = { nullptr, nullptr };
++static int   s_protoTmpW = 0, s_protoTmpH = 0;
++struct GIProto { int spp = 1; bool strat = false; float hist = 0.9f; int atrous = 0;
++                 float sigL = 0.0f, sigP = 1.0f, nPow = 32.0f; bool bench = false; int bilerp = 0; bool early = false; };
++static const GIProto& giProto()
++{
++	static const GIProto p = [] {
++		GIProto g;
++		auto f = [](const char* k, float d) { const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : d; };
++		g.spp    = std::max(1, static_cast<int>(f("HE_GI_PROTO_SPP", 1.0f)));
++		g.strat  = f("HE_GI_PROTO_STRAT", 0.0f) > 0.5f;
++		g.hist   = f("HE_GI_PROTO_HIST", 0.9f);
++		g.atrous = static_cast<int>(f("HE_GI_PROTO_ATROUS", 0.0f));
++		g.sigL   = f("HE_GI_PROTO_SIGL", 0.0f);
++		g.sigP   = f("HE_GI_PROTO_SIGP", 1.0f);
++		g.nPow   = f("HE_GI_PROTO_NPOW", 32.0f);
++		g.bench  = f("HE_GI_PROTO_BENCH", 0.0f) > 0.5f;
++		g.bilerp = static_cast<int>(f("HE_GI_PROTO_BILERP", 0.0f));
++		g.early  = f("HE_GI_PROTO_EARLY", 0.0f) > 0.5f;
++		HE_LOG_INFO(RHI, "MetalRenderer: PROTO GI mask spp=%d strat=%d hist=%.3f atrous=%d sigL=%.2f sigP=%.2f nPow=%.0f bench=%d bilerp=%d",
++		            g.spp, g.strat ? 1 : 0, g.hist, g.atrous, g.sigL, g.sigP, g.nPow, g.bench ? 1 : 0, g.bilerp);
++		return g;
++	}();
++	return p;
++}
++
+ void MetalRenderer::EnsureGIShadowPipelines()
+ {
+ 	if (m_giGBufPipeline) return; // already built
+@@ -8110,6 +8256,11 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+ 		id<MTLRenderPipelineState> bPso = [device newRenderPipelineStateWithDescriptor:bDesc error:&error];
+ 		if (bPso) m_giShadowBlurPipeline = (void*)CFBridgingRetain(bPso);
+ 		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow-blur pipeline creation failed");
++
++		bDesc.fragmentFunction = [lib newFunctionWithName:@"giShadowAtrous"];
++		id<MTLRenderPipelineState> aPso = [device newRenderPipelineStateWithDescriptor:bDesc error:&error];
++		if (aPso) s_protoAtrousPso = (void*)CFBridgingRetain(aPso);
++		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: PROTO a-trous pipeline creation failed");
+ 	}
+ }
+ 
+@@ -8220,7 +8371,21 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+ 
+ 	@autoreleasepool
+ 	{
+-		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
++		const GIProto& proto = giProto();
++		id<MTLCommandBuffer> cmdBuf = proto.bench
++			? [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer]
++			: (__bridge id<MTLCommandBuffer>)cmdBufPtr;
++		// Bench: every stage in its own command buffer → exclusive per-stage GPU ms
++		// (0 G-buffer, 1 rays, 2 temporal, 3 filter).
++		double benchMs[4] = {};
++		int    benchStage = 0;
++		auto benchCut = [&]() {
++			if (!proto.bench || benchStage > 3) return;
++			[cmdBuf commit];
++			[cmdBuf waitUntilCompleted];
++			benchMs[benchStage++] = ([cmdBuf GPUEndTime] - [cmdBuf GPUStartTime]) * 1000.0;
++			cmdBuf = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
++		};
+ 
+ 		// ── 1. World-space G-buffer pre-pass (position + normal, half-res) ──────
+ 		MTLRenderPassDescriptor* gp = [MTLRenderPassDescriptor renderPassDescriptor];
+@@ -8309,6 +8474,7 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+ 			}
+ 		}
+ 		[genc endEncoding];
++		benchCut();
+ 
+ 		// ── 2. Ray-traced occlusion (compute) — HW intersection_query against
+ 		// the TLAS, or SW BVH traversal against the CPU-built buffers. Same
+@@ -8332,7 +8498,8 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+ 			static_assert(HE::kMaxMaskedLocalLights == 4, "GIShadowParams has 4 mask channels");
+ 			for (int i = 0; i < HE::kMaxMaskedLocalLights; ++i)
+ 				sp.localPosRange[i] = lm.posRange[i];
+-			sp.extra = glm::vec4(static_cast<float>(lm.count), 0.0f, 0.0f, 0.0f);
++			sp.extra = glm::vec4(static_cast<float>(lm.count), static_cast<float>(proto.spp),
++			                     proto.strat ? 1.0f : 0.0f, 0.0f);
+ 		}
+ 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
+ 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
+@@ -8361,6 +8528,7 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+ 		const MTLSize tgCount = MTLSizeMake((NSUInteger)((width + 7) / 8), (NSUInteger)((height + 7) / 8), 1);
+ 		[cenc dispatchThreadgroups:tgCount threadsPerThreadgroup:tgSize];
+ 		[cenc endEncoding];
++		benchCut();
+ 
+ 		// ── 3. Temporal accumulation (reproject + blend into ping-pong history) ─
+ 		const int curIdx  = m_giShadowHistoryIdx;
+@@ -8378,17 +8546,61 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+ 			[tenc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
+ 			GITemporalParamsCPU tparams;
+ 			tparams.prevViewProj = m_giPrevViewProj;
+-			tparams.blend = glm::vec4(m_giShadowHistoryValid ? 0.9f : 0.0f,
+-			                          static_cast<float>(width), static_cast<float>(height), 0.0f);
++			tparams.curViewProj  = viewProj;
++			tparams.blend = glm::vec4(m_giShadowHistoryValid ? proto.hist : 0.0f,
++			                          static_cast<float>(width), static_cast<float>(height),
++			                          static_cast<float>(proto.bilerp));
+ 			[tenc setFragmentBytes:&tparams length:sizeof(tparams) atIndex:0];
+ 			[tenc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+ 			[tenc endEncoding];
+ 		}
++		benchCut();
+ 		m_giShadowHistoryValid = true;
+ 		m_giShadowHistoryIdx   = prevIdx;
+ 		m_giPrevViewProj       = viewProj; // for NEXT frame's reprojection
+ 
+ 		// ── 4. Spatial blur → final result fragmentMain samples ─────────────
++		if (proto.atrous != 0 && s_protoAtrousPso)
++		{
++			id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
++			if (!s_protoTmp[0] || s_protoTmpW != width || s_protoTmpH != height)
++			{
++				for (void*& t : s_protoTmp) if (t) { CFBridgingRelease(t); t = nullptr; }
++				MTLTextureDescriptor* d = [MTLTextureDescriptor
++					texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:width height:height mipmapped:NO];
++				d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
++				d.storageMode = MTLStorageModePrivate;
++				for (void*& t : s_protoTmp) t = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
++				s_protoTmpW = width; s_protoTmpH = height;
++			}
++			const int iters = proto.atrous < 0 ? 1 : proto.atrous;
++			const float nEff = (1.0f + proto.hist) / std::max(1e-3f, 1.0f - proto.hist) * static_cast<float>(proto.spp);
++			for (int it = 0; it < iters; ++it)
++			{
++				id<MTLTexture> src = it == 0 ? (__bridge id<MTLTexture>)m_giShadowHistory[curIdx]
++				                             : (__bridge id<MTLTexture>)s_protoTmp[(it - 1) & 1];
++				id<MTLTexture> dst = it == iters - 1 ? (__bridge id<MTLTexture>)m_giShadowResult
++				                                     : (__bridge id<MTLTexture>)s_protoTmp[it & 1];
++				MTLRenderPassDescriptor* ap = [MTLRenderPassDescriptor renderPassDescriptor];
++				ap.colorAttachments[0].texture     = dst;
++				ap.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
++				ap.colorAttachments[0].storeAction = MTLStoreActionStore;
++				id<MTLRenderCommandEncoder> aenc = [cmdBuf renderCommandEncoderWithDescriptor:ap];
++				[aenc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)s_protoAtrousPso];
++				[aenc setFragmentTexture:src atIndex:0];
++				[aenc setFragmentTexture:(__bridge id<MTLTexture>)m_giGBufPosTex  atIndex:1];
++				[aenc setFragmentTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:2];
++				[aenc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
++				struct { glm::vec4 p, q; } ap4;
++				ap4.p = glm::vec4(proto.atrous < 0 ? 0.0f : static_cast<float>(1 << it), it == 0 ? 1.0f : 0.0f,
++				                  proto.sigL, nEff);
++				ap4.q = glm::vec4(proto.sigP, proto.nPow, proto.early ? 1.0f : 0.0f, 0.0f);
++				[aenc setFragmentBytes:&ap4 length:sizeof(ap4) atIndex:0];
++				[aenc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
++				[aenc endEncoding];
++			}
++		}
++		else
+ 		{
+ 			MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
+ 			bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_giShadowResult;
+@@ -8401,6 +8613,29 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+ 			[benc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+ 			[benc endEncoding];
+ 		}
++		if (proto.bench)
++		{
++			// Exclusive GPU time of the whole mask chain (G-buffer, rays, temporal,
++			// filter). Runs ahead of this frame's main command buffer, so it sees the
++			// previous frame's TLAS — fine for a static timing scene, not for images.
++			benchCut();
++			static std::vector<double> s_ms[5];
++			double total = 0.0;
++			for (int s = 0; s < 4; ++s) { s_ms[s].push_back(benchMs[s]); total += benchMs[s]; }
++			s_ms[4].push_back(total);
++			if (s_ms[4].size() % 60 == 0)
++			{
++				double p50[5];
++				for (int s = 0; s < 5; ++s)
++				{
++					std::vector<double> v(s_ms[s].end() - 60, s_ms[s].end());
++					std::sort(v.begin(), v.end());
++					p50[s] = v[30];
++				}
++				HE_LOG_INFO(RHI, "MetalRenderer: PROTO GI mask GPU ms p50 over 60 frames: gbuf=%.3f rays=%.3f temporal=%.3f filter=%.3f sum=%.3f (%dx%d)",
++				            p50[0], p50[1], p50[2], p50[3], p50[4], width, height);
++			}
++		}
+ 	}
+ }
+ 

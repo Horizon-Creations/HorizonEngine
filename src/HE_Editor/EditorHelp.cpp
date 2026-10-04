@@ -3194,6 +3194,11 @@ namespace
 	  "How large the light source is treated as being, in degrees. Wider means "
 	  "softer, more diffuse indirect shadows.",
 	  "", "rendering#lighting" },
+	{ "Preferences/Global Illumination/GI Shadow Quality", "",
+	  "Shadow rays per pixel toward the sun. More rays calm the shimmer at soft "
+	  "shadow edges; on GPUs without hardware ray tracing every extra ray costs "
+	  "as much as the first.",
+	  "", "rendering#performance" },
 	{ "Preferences/Global Illumination/GI Reflections (ray-traced)", "",
 	  "Traced reflections instead of screen-space ones: they can show what is "
 	  "behind the camera, at the cost of tracing the scene.",

@@ -39,6 +39,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, invalid (kept visible) otherwise")
@@ -2064,6 +2065,36 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		}
 	}
 
+	SUBCASE("sun rays per pixel: every shadow kernel, the embedded ones included")
+	{
+		// Thema 134 §5.2: the sun-ray count arrives in the params block's .y lane
+		// of the local-extra row, and sample k continues the pixel's R2 walk at
+		// seed * spp + k. A kernel still tracing one ray ignores the setting on
+		// its backend/path only; one with another seed formula repeats or skips
+		// R2 points and leaves a different, slower-converging noise.
+		const std::vector<std::tuple<const char*, fs::path, size_t>> files = {
+			{ "gi_shadow.comp",     sh / "gi_shadow.comp",                     1 },
+			{ "gi_shadow_hw.comp",  sh / "gi_shadow_hw.comp",                  1 },
+			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl",                  1 },
+			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h",       1 },
+			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp",      1 },
+			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm",         2 }, // kGIShadowMSL + kGISWMSL
+		};
+		const std::regex kCount(R"(uint spp = uint\(max\((?:uLocalExtra|P\.extra)\.y, 1\.0\)\);)");
+		const std::regex kSeed(R"(giHash2\(gid(?:\.xy)?, (?:uFrame|P\.frame)\.x \* float\(spp\) \+ float\(k\)\))");
+		const std::regex kMean(R"(sunVis \+= [^;]*\? (?:0\.0 : 1\.0|1\.0 : 0\.0);\s*\}\s*sunVis /= float\(spp\);)");
+		auto count = [](const std::string& s, const std::regex& re)
+		{ return static_cast<size_t>(std::distance(std::sregex_iterator(s.begin(), s.end(), re), std::sregex_iterator())); };
+		for (const auto& [fileName, path, expected] : files)
+		{
+			const std::string name = fileName;
+			const std::string s = stripLineComments(readFile(path));
+			CHECK_MESSAGE(count(s, kCount) == expected, name, ": ray-count read found ", count(s, kCount), "x, expected ", expected);
+			CHECK_MESSAGE(count(s, kSeed)  == expected, name, ": seed*spp+k sample found ", count(s, kSeed), "x, expected ", expected);
+			CHECK_MESSAGE(count(s, kMean)  == expected, name, ": averaged sun visibility found ", count(s, kMean), "x, expected ", expected);
+		}
+	}
+
 	SUBCASE("shadow temporal pass: history tolerance and neighbourhood clamp")
 	{
 		// Thema 131 §3 A/C: the clamp box is the range of 3x3 raw MEANS over a 5x5
@@ -2082,7 +2113,45 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "history tolerance", { R"(tolerance = max\(clamp\(([0-9.]+) \* clip\.w, ([0-9.]+), ([0-9.]+)\), min\(footprint, ([0-9.]+)\)\))" } },
 			{ "clamp footprint",   { R"(float r5\[(\d+)\];)" } },
 			{ "clamp box mean",    { R"(nMin = min\(nMin, s / ([0-9.]+)\);)" } },
-			{ "clamp slack",       { R"(clamp\(hist\.a, nMin - ([0-9.]+), nMax \+ ([0-9.]+)\))" } },
+			{ "clamp slack",       { R"(clamp\(histA, nMin - ([0-9.]+), nMax \+ ([0-9.]+)\))" } },
+			// Thema 134 §4.2: bilinear history, reprojected as a motion vector
+			// from the pixel centre (NOT the absolute prevUV, which dissolves
+			// static contact edges), 4 taps each gated by the surface test and
+			// renormalised. A copy falling back to the point lookup brings back
+			// the shadow trailing a panning camera on that backend only.
+			{ "history motion vector", { R"(hf\s*= \(\w+\.?\w* \+ \(prevUV - curUV\)\) \* hsz - ([0-9.]+);)" } },
+			{ "history taps",          { R"(for \(int j = 0; j < (\d+); \+\+j\)\s*\{\s*(?:const )?\w+2\s+o\s*= \w+2\(float\(j & (\d+)\), float\(j >> (\d+)\)\);)" } },
+			{ "history tap gate",      { R"(if \(length\(pv\.xyz - h\.rgb\) < (tolerance)\) \{ hAcc \+= h\.a \* bw\.x \* bw\.y; hWsum \+= bw\.x \* bw\.y; \})" } },
+			{ "history renormalise",   { R"(histA = hWsum > ([0-9.e+-]+) \? hAcc / hWsum : ([0-9.]+);)" } },
+			{ "history weight gate",   { R"(w = hWsum > ([0-9.e+-]+) \? clamp\([\w.]+, ([0-9.]+), ([0-9.]+)\) : ([0-9.]+);)" } },
+		});
+	}
+
+	SUBCASE("shadow spatial filter: the four a-trous copies")
+	{
+		// Thema 134 §4.3/§5.3: the edge-aware a-trous that replaced the 3x3 box.
+		// The value stop is the one that matters — without it (or with a
+		// different scale) the filter softens every shadow (rmse x7 in the
+		// measurement); the plane/normal stops keep it off other surfaces.
+		const std::vector<const char*> names = { "gi_atrous.frag", "HlslSources.h",
+		                                         "OpenGLRenderer.cpp", "MetalRenderer.mm" };
+		const std::vector<std::string> src = {
+			stripLineComments(readFile(sh / "gi_atrous.frag")),
+			stripLineComments(readFile(be / "D3D_Shared" / "HlslSources.h")),
+			stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")),
+			stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")),
+		};
+		checkGroup(names, src, {
+			{ "B3 weights",        { R"(h\[5\] = (?:float\[5\]\(|\{ ?)([0-9./ ,]+?)(?:\)| ?\});)" } },
+			{ "kernel taps",       { R"(h\[x \+ (\d+)\] \* h\[y \+ (\d+)\])" } },
+			{ "plane stop",        { R"(exp\(-abs\(dot\(n, q\.xyz - pv\.xyz\)\) / \(([0-9.]+) \* fp\)\))" } },
+			{ "normal power",      { R"(pow\(max\(dot\(n, normalize\([^;]*?\.xyz\)\), ([0-9.]+)\), ([0-9.]+)\);)" } },
+			{ "value stop",        { R"(exp\(-abs\(v - c\) / \(([0-9.]+) \* sig \+ ([0-9.e+-]+)\)\))" } },
+			{ "Bernoulli sigma",   { R"(sig\s*= sqrt\(max\(c \* \(1\.0 - c\), ([0-9.]+)\) / max\([\w.]+, ([0-9.]+)\)\))" } },
+			{ "footprint",         { R"(fp\s*= max\(max\(min\(length\(gxp - pv\.xyz\), length\(gxm - pv\.xyz\)\),\s*min\(length\(gyp - pv\.xyz\), length\(gym - pv\.xyz\)\)\), ([0-9.e+-]+)\))" } },
+			{ "early-out range",   { R"(if \(c < ([0-9.e+-]+) \|\| c > 1\.0 - ([0-9.e+-]+)\))" } },
+			{ "early-out reach",   { R"(o \* \(([0-9.]+) \* st\) \* texel)" } },
+			{ "early-out equal",   { R"(\) - c\) < ([0-9.e+-]+);)" } },
 		});
 	}
 
