@@ -5373,6 +5373,11 @@ namespace
 	  // Website repository). Pointed at the one that exists rather than at one
 	  // that would 404 — a dead link teaches people the button does nothing.
 	  "", "ui#widgets" },
+	{ "Canvas/Open Widget Parameters", "",
+	  "Switches this column to the Widget Parameters tab, where this widget's "
+	  "parameters are declared. They used to sit here with the canvas settings; "
+	  "the tab shows them whatever is selected, and choosing it keeps the selection.",
+	  "", "ui#widgets" },
 	{ "UI Widget/Default", "",
 	  "Stops setting this parameter on this copy, so it shows whatever the widget "
 	  "itself was authored with. Not the same as clearing the field: an empty text "

@@ -77,6 +77,13 @@ struct State
 	bool         loaded = false;
 	bool         dirty  = false;     // unsaved-to-disk edits (tree OR graph)
 	int          viewMode = 0;       // 0 = Designer, 1 = Graph
+	// The right column's tab: 0 = Details, 1 = Widget Parameters. View state
+	// like viewMode, and deliberately NOT tied to the selection: whoever is on
+	// the parameters and clicks an element stays on the parameters (Thema 139).
+	int          detailsTab = 0;
+	// Set by the "Widget Parameters" jump in Details; SetSelected only lands on
+	// the next frame, so it stays set until that tab really is the open one.
+	bool         detailsTabJump = false;
 	int          selected = 0;       // Designer: selected element id (0 = none)
 	// The REST of a multi-selection (docs/he-apps-plan.md D4). `selected` stays
 	// the primary — the one Details shows and the handles sit on — and this
@@ -1637,14 +1644,15 @@ void drawParamValues(HE::UIWidgetRef& ref, const HE::UIWidgetTree& sub,
 // widget stores "Label" and not "element 7's Text" — and this widget stays free
 // to be rebuilt inside without breaking a single page that uses it.
 //
-// It sits on the CANVAS panel, not on the element's, because it is a property
-// of the widget as a whole: the list of knobs a component has is one list, and
-// an author looking for "what does this component offer" must not have to click
-// through every element to assemble it.
+// It is not on the element's panel, because it is a property of the widget as
+// a whole: the list of knobs a component has is one list, and an author looking
+// for "what does this component offer" must not have to click through every
+// element to assemble it. It has its own tab beside Details (Thema 139) rather
+// than a section of the canvas settings, which only showed with nothing selected.
 void drawParameterDeclarations(State& st, AppContext& ctx)
 {
 	HE::Ed::Help::Scope helpScope("Canvas");
-	// The heading is the caller's: the "Parameters" section of the panel.
+	// The heading is the caller's: the "Widget Parameters" tab of the column.
 	ImGui::TextWrapped("What a page that embeds this widget can set. Each one "
 	                   "points at a property of one element; whatever that "
 	                   "property holds here is the default.");
@@ -2096,8 +2104,14 @@ void drawDetails(State& st, AppContext& ctx)
 		}
 		} // end of the Theme section
 
-		if (DetailSection paramSection("Parameters", true); paramSection.open)
-			drawParameterDeclarations(st, ctx);
+		// The parameters used to be a section here, reachable only with nothing
+		// selected. They have their own tab now (Thema 139); this line is for the
+		// hand that still comes looking for them in the old place.
+		ImGui::Spacing();
+		ImGui::TextDisabled("Parameters:");
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Open Widget Parameters")) st.detailsTabJump = true;
+		EditorWidgets::helpForLabel("Open Widget Parameters");
 
 		if (DetailSection previewSection("Preview", true); previewSection.open)
 		{
@@ -7026,8 +7040,39 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::SameLine();
 
 		ImGui::BeginChild("##uiw_details", ImVec2(rightW, 0), ImGuiChildFlags_Borders);
-		drawDetails(st, ctx);
-		if (st.selected != 0) drawDetailsEvents(st, ctx);
+		// Details | Widget Parameters (Thema 139). The tab items stay EMPTY and
+		// the content is drawn after EndTabBar: BeginTabItem pushes the tab's id,
+		// and drawing inside it would move every section header's id away from
+		// the column's own — which is where their open state has always lived.
+		if (ImGui::BeginTabBar("##uiw_detailtabs"))
+		{
+			if (ImGui::BeginTabItem("Details"))
+			{
+				st.detailsTab = 0;
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Widget Parameters", nullptr,
+			                        st.detailsTabJump ? ImGuiTabItemFlags_SetSelected : 0))
+			{
+				st.detailsTab     = 1;
+				st.detailsTabJump = false;
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
+		}
+		if (st.detailsTab == 1)
+		{
+			// The same id scope the old "Parameters" section pushed, so the rows
+			// keep the ids they had there.
+			ImGui::PushID("Parameters");
+			drawParameterDeclarations(st, ctx);
+			ImGui::PopID();
+		}
+		else
+		{
+			drawDetails(st, ctx);
+			if (st.selected != 0) drawDetailsEvents(st, ctx);
+		}
 		ImGui::EndChild();
 	}
 	else
