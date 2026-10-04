@@ -435,9 +435,10 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 		// graph, previously with nothing in the log to say so.
 		HE_LOG_ERROR(Widget, "Widget '%s' has an unparsable HorizonCode graph — it will "
 		                     "render but have no logic", assetPath.c_str());
-	const bool interpreted = !graph.nodes.empty();
 
-	registerInstance(content, w, std::move(graph));
+	// Asked of registerInstance, not of the graph: the graph is moved into the
+	// runtime there, and only there is it known whether the compiled class won.
+	const char* logicKind = registerInstance(content, w, std::move(graph));
 	m_instances.push_back(std::move(w));
 
 	// Fire Construct AFTER the widget is in m_instances, so host callbacks can
@@ -458,7 +459,7 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 
 	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
 	            assetPath.c_str(), widgetId, m_instances.back().tree.elements.size(),
-	            interpreted ? "interpreted" : "compiled/no");
+	            logicKind);
 	// Expose on Spawn: what the creator handed in, on the widget itself, before
 	// any of its own code runs — so a PreConstruct that writes "Score: " + score
 	// shows the creator's score in the first picture, as in UMG (§6.2). The
@@ -497,8 +498,8 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 // instance is in m_instances" — shared with the designer's design-time run, so
 // the two can never build a widget differently (embeds, theme, text, assets,
 // script registration). The caller moves `w` into m_instances afterwards.
-void WidgetManager::registerInstance(ContentManager& content, Instance& w,
-                                     HorizonCode::Graph graph)
+const char* WidgetManager::registerInstance(ContentManager& content, Instance& w,
+                                            HorizonCode::Graph graph)
 {
 	const std::string& assetPath = w.assetPath;
 	// Graft in every embedded widget FIRST: what they bring is part of this
@@ -558,11 +559,22 @@ void WidgetManager::registerInstance(ContentManager& content, Instance& w,
 	// At design time never compiled: the class in the game library is older
 	// than the graph somebody is editing right now.
 	const HorizonCode::ClassIdentity widgetCls{ assetPath, "Object" };
+	// What kind of logic this widget got — decided HERE, before the graph is
+	// moved into the runtime: a moved-from graph has no nodes left to ask about
+	// (the log said "compiled/no" for every interpreted widget).
+	const char* logicKind = "no";
 	if (auto compiled = m_designTime ? nullptr : HorizonCode::compiledClasses().create(assetPath))
+	{
+		logicKind = "compiled";
 		w.scriptId = rt().addCompiled(std::move(compiled), makeBindings(), widgetCls);
+	}
 	else
+	{
+		if (!graph.nodes.empty()) logicKind = "interpreted";
 		w.scriptId = rt().add(std::move(graph), makeBindings(), widgetCls);
+	}
 	w.id = (int)w.scriptId;
+	return logicKind;
 }
 
 // Same value, compared the way its type means it. UIPropValue carries every

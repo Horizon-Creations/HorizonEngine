@@ -1088,7 +1088,9 @@ private:
                          const std::vector<std::string>& rootChain);
     // createWidget between reading the asset and m_instances.push_back: embeds,
     // theme, text, assets, the script instance. Shared with the design-time run.
-    void registerInstance(ContentManager& content, Instance& w, HorizonCode::Graph graph);
+    // Returns the kind of logic the widget got — "compiled", "interpreted" or
+    // "no" — for createWidget's log line: only here is it known which one ran.
+    const char* registerInstance(ContentManager& content, Instance& w, HorizonCode::Graph graph);
     // Put one widget asset in as a child of `parentElem` and give it its own
     // script instance: the whole of what addChild does once the parent is found,
     // and what a list realizes each of its rows with. `rowIndex` >= 0 marks the
