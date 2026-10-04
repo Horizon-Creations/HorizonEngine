@@ -128,7 +128,20 @@ public:
     // teardown counterpart to the "Construct" fired on create. Use this (not
     // remove) whenever an object/widget is intentionally destroyed so its
     // destructor graph runs; no-op if the id is already gone.
+    //
+    // Extract on Destruct (docs/state-driven-data-exchange-design.md §3.4):
+    // between its own Destruct and the unregistering, the instance's extract
+    // struct is built (buildExtract) and sent as "OnDestroyed" to every
+    // instance bound to it — never to the instance itself. Instances that only
+    // go through remove() or clear() send nothing.
     void       destroy(InstanceId id);
+    // The value Extract on Destruct would send for `id` right now: its class's
+    // struct filled from its variables, members nobody maps at the struct
+    // default. An empty Value when the class extracts nothing or the struct is
+    // not registered. Interpreted: from the leaf-most level that names a
+    // struct; compiled: the generated extractOnDestruct. Public for the parity
+    // suite and tools; destroy() is the one caller that matters.
+    Value      buildExtract(InstanceId id);
     bool       alive(InstanceId id) const;
     // Drop every instance (whole-runtime teardown).
     void       clear();
@@ -200,6 +213,32 @@ public:
     // the save itself is name-keyed, so it carries no meaning beyond being
     // deterministic.
     std::vector<std::string> savedVariablesOf(InstanceId id) const;
+
+    // ── Pull on Construct (docs/state-driven-data-exchange-design.md §2) ─────
+    // Every registration — add, addLevels, addCompiled — ends by copying each
+    // variable that names a pull source over its default, BEFORE any host fires
+    // the instance's first event. That is the whole guarantee: PreConstruct,
+    // Construct, BeginPlay and OnLevelLoaded see the pulled value or the
+    // default, never something in between. Once: a later change at the source
+    // does not follow. The Game Instance is registered without it (it would be
+    // its own source, and fireInit reseeds it anyway).
+    //
+    // What happened, per pulling variable, for tests and tools. `reason` is the
+    // sentence the log warned with (pullFailureText), empty when it pulled.
+    struct PullOutcome
+    {
+        std::string name;
+        bool        pulled = false;
+        PullFailure why    = PullFailure::None;
+        std::string reason;
+    };
+    std::vector<PullOutcome> pulledVariablesOf(InstanceId id) const;
+    // Who created this instance: the instance whose Create Object, Create
+    // Widget or engine-API call was running when it was registered. 0 for one
+    // placed in the level, the Game Instance, the level script, and anything
+    // spawned from outside HorizonCode. The id may since have died — alive()
+    // says so.
+    InstanceId creatorOf(InstanceId id) const;
 
     // ── One function's multiplayer face (plan §7.6) ─────────────────────────
     // Here for exactly the reason replicatedVariablesOf is: it is the question
@@ -563,6 +602,10 @@ private:
         // exactly the same field.
         ClassIdentity                           cls;
         uint32_t                                ownedEntity = 0;
+        // Pull on Construct: who created it (creatorOf), and what its pulls
+        // did (pulledVariablesOf). Filled once, at registration.
+        InstanceId                              creator = 0;
+        std::vector<PullOutcome>                pulls;
         // Interpreted: the private variable store. Compiled: OVERFLOW store for
         // undeclared names only (Set on an undeclared name still creates an entry).
         std::unordered_map<std::string, Value>  vars;
@@ -591,6 +634,33 @@ private:
                            bool realTime = false; };
     Inst*       find(InstanceId id);
     const Inst* find(InstanceId id) const;
+    // The registrations behind add/addLevels/addCompiled. `pull` false is the
+    // Game Instance's way in (setGameInstance*): it must not pull, and a check
+    // inside pullOnConstruct could not tell — m_gameInstance is set only after
+    // registration returns, and the old one is already gone by then.
+    InstanceId registerLevels(std::vector<Graph> levels, HostBindings bindings,
+                              ClassIdentity cls, bool pull);
+    InstanceId registerCompiled(CompiledPtr inst, HostBindings bindings,
+                                ClassIdentity cls, bool pull);
+    // The engine phase between "defaults set" and the first event (§2.5).
+    void pullOnConstruct(InstanceId id);
+    // Who is creating right now: pushed by the Context's createObject /
+    // createWidget / callApi around the synchronous service call, so the
+    // registration it leads to can read the creator off the top. A stack, not
+    // a slot, because creation nests — B's Construct, fired inside A's Create
+    // Object, may create C, whose creator is B and not A.
+    std::vector<InstanceId> m_creatorStack;
+    struct CreatorScope
+    {
+        std::vector<InstanceId>& stack;
+        CreatorScope(std::vector<InstanceId>& s, InstanceId id) : stack(s) { stack.push_back(id); }
+        ~CreatorScope() { stack.pop_back(); }
+        CreatorScope(const CreatorScope&) = delete;
+        CreatorScope& operator=(const CreatorScope&) = delete;
+    };
+    // Pull warnings already printed, keyed "class|variable|reason": a HUD
+    // spawned per enemy has one thing wrong with it, not one per enemy.
+    std::unordered_set<std::string> m_pullWarned;
     // Build a Context that routes variable access to the instance's private
     // store, property/show/hide to its host bindings, and the delegation hooks
     // (emit/bind/callExternal/self/gameInstance) back to the runtime.
@@ -625,6 +695,17 @@ private:
     void dispatchToListeners(InstanceId owner, EventId ev, const std::string& name,
                              const Value& arg);
     void dispatchToListeners(InstanceId owner, const std::string& name, const Value& arg);
+    // "OnDestroyed" to everyone bound to `owner` (design §3.3). Unlike
+    // dispatchToListeners it checks each listener's handler signature first —
+    // no argument: fired without the payload; a struct of the payload's type:
+    // fired with it; anything else: skipped with one warning per (listener
+    // class, payload type) — and it runs the handler DIRECTLY, without the
+    // trailing pass to the listener's own listeners that fireEvent adds: their
+    // OnDestroyed means "the object I am bound to died", which this is not.
+    void dispatchDestroyed(InstanceId owner, const Value& payload);
+    // Warnings already printed by buildExtract / dispatchDestroyed, keyed like
+    // m_pullWarned: one per class and cause, not one per instance.
+    std::unordered_set<std::string> m_extractWarned;
 
     std::unordered_map<InstanceId, Inst> m_insts;
     // owner → event name → subscribed listener instances.

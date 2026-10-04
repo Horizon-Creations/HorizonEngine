@@ -16,6 +16,10 @@
 #include "HcExecTrace.h"                        // run-time node hits + "go to node" reveals
 #include "HcEditorUtil.h"                       // Create Object class picker
 #include "HcRenameDialog.h"                     // "that rename reaches other files"
+#include "HcPullUi.h"                           // Pull on Construct in the variable details
+#include "HcExtract.h"                          // Extract on Destruct: the table's rules
+#include "HcExtractUi.h"                        // …and its sidebar section
+#include "HcRename.h"                           // targetClassOf (Bind Event's OnDestroyed helper)
 #include "UITimelineMath.h"                     // seconds ⇄ pixels for the animation strip
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
@@ -223,7 +227,8 @@ struct State
 	int    gDropElem = 0;            // element dragged onto the graph (Get/Set popup)
 	bool   gOpenDropPopup = false;   // request to open the element Get/Set popup next frame
 	std::string selectedVar;        // graph variable selected in the left panel (editing)
-	std::string varNameEdit;        // in-progress rename text for the selected variable
+	bool        selectedExtract = false;   // the Extract on Destruct entry is in the details
+	std::string varNameEdit;       // in-progress rename text for the selected variable
 	std::string varNameEditFor;     // which variable varNameEdit currently mirrors
 	std::string gDropVar;           // variable dragged onto the graph
 	bool   gOpenVarDrop = false;     // request to open the variable Get/Set popup next frame
@@ -5596,11 +5601,14 @@ void drawGraphVariables(State& st, AppContext& ctx)
 
 	auto varRow = [&](const HC::Variable& v)
 	{
-		if (HGH::variableRow(v, st.selectedVar == v.name, rowStyle))
+		const std::string pullNote = HcExtractUi::listNote(st.graph, v, HcPullUi::listNote(v));
+		if (HGH::variableRow(v, st.selectedVar == v.name, rowStyle,
+		                     pullNote.empty() ? nullptr : pullNote.c_str()))
 		{
 			st.selectedVar = v.name;
 			st.selectedGraphNode = 0; // editing the variable, not a node
 		}
+		HcPullUi::listTooltip(v);
 		if (ImGui::BeginDragDropSource())
 		{
 			// Payload = the variable name (fixed-size buffer for stable copy).
@@ -5682,6 +5690,14 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		ImGui::SameLine();
 		ImGui::TextDisabled(gn.access == 0 ? "public" : "private");
 	}
+
+	// Extract on Destruct (design §3.8) — the same section as the class tabs'.
+	// Any other selection wins, so the places that pick a node or a variable
+	// need not know about it.
+	if (st.selectedGraphNode != 0 || !st.selectedVar.empty()) st.selectedExtract = false;
+	ImGui::Spacing();
+	if (HcExtractUi::drawSidebarEntry(st.graph, st.selectedExtract, nullptr))
+	{ st.selectedExtract = true; st.selectedGraphNode = 0; st.selectedVar.clear(); }
 }
 
 // ── Graph node details (right panel) ─────────────────────────────────────────
@@ -5735,6 +5751,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 					for (auto& gn : st.graph.nodes)
 						if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == oldName)
 							gn.s = nn;
+					HcExtract::renameVariable(st.graph, oldName, nn);   // the Extract on Destruct table
 					st.selectedVar = nn;
 					st.varNameEditFor = nn;
 					commitEdit(st, ctx);
@@ -5795,6 +5812,14 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				if (v->access != 0 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 					ImGui::SetTooltip("%s", "Only a public variable can be handed in by Create Widget.");
 				EditorWidgets::helpForLabel("Expose on Spawn");
+
+				// Pull on Construct — the SAME drawing as the level-script
+				// details (HcPullUi), not a third copy.
+				if (HcPullUi::drawSection(*v, st.graph)) commitEdit(st, ctx);
+
+				// Extract on Destruct: where this variable goes (shown only).
+				if (HcExtractUi::drawVariableLine(st.graph, *v))
+				{ st.selectedVar.clear(); st.selectedGraphNode = 0; st.selectedExtract = true; return; }
 			}
 
 			// Single value, or a container of the type. Changing it re-types the
@@ -5820,7 +5845,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			if (!v->isArray)
 			{
 				// Default value editor (seeds the runtime store at widget creation).
-				ImGui::SeparatorText("Default");
+				ImGui::SeparatorText(HcPullUi::defaultSectionLabel(*v));
 				bool ed = false;
 				switch (v->type)
 				{
@@ -5880,6 +5905,12 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				st.selectedVar.clear();
 				commitEdit(st, ctx);
 			}
+			return;
+		}
+
+		if (st.selectedExtract)
+		{
+			if (HcExtractUi::drawDetails(st.graph, "HE_UIWGRAPH_VAR")) commitEdit(st, ctx);
 			return;
 		}
 
@@ -6090,6 +6121,14 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		ImGui::TextDisabled(n->type == NT::BindEvent
 			? "When Target fires this event, this\nwidget's Event of the same name runs."
 			: "Broadcast to everyone bound to this\nwidget's event of this name.");
+		// The OnDestroyed handler for "tell me when Target dies" (design §3.8).
+		if (n->type == NT::BindEvent)
+		{
+			const std::string target = n->className.empty()
+				? HcRename::targetClassOf(st.graph, *n, std::string(), std::string())
+				: n->className;
+			if (HcExtractUi::drawBindEventHelper(st.graph, *n, target)) committed = true;
+		}
 		break;
 	}
 	default:
@@ -6562,6 +6601,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 	State& st = s_states[assetPath];
 	if (!st.loaded) loadState(st, ctx, assetPath);
 	normalizeSelection(st);
+	HcPullUi::bindFrom(ctx);   // the variable details may write a pull source
+	HcExtractUi::bindFrom(ctx);  // …and the Extract on Destruct table a struct asset
 	// A reveal aimed at this widget's graph — a console line's "go to node":
 	// the graph side of the split, the node's sub-graph, the node selected and
 	// framed. Same moves as "Show the node that failed" below, minus the button.

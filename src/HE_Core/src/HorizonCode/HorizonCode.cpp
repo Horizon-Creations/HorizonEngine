@@ -1913,6 +1913,15 @@ nlohmann::json variableToJsonObj(const Variable& v)
             sd[field] = { { "t", (int)val.type }, { "v", scalarValueToJson(val, val.type) } };
         e["structDefaults"] = std::move(sd);
     }
+    // Pull on Construct: one object, and only when a source is set — a graph
+    // that pulls nothing is byte-identical to one saved before this existed.
+    if (!v.pullSource.empty())
+    {
+        nlohmann::json p = { { "src", v.pullSource }, { "var", v.pullVar } };
+        if (!v.pullMember.empty()) p["member"] = v.pullMember;
+        if (!v.pullClass.empty())  p["class"]  = v.pullClass;
+        e["pull"] = std::move(p);
+    }
 return e;
 }
 
@@ -2037,6 +2046,31 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
             const PinType t = (PinType)it->value("t", (int)P::Float);
             v.structDefaults[it.key()] = scalarValueFromJson(it->value("v", nlohmann::json()), t);
         }
+    // Pull on Construct. Three states are not representable after a load, for
+    // the reason Notify-without-Replicated is not: a function-local is gone
+    // before anybody constructs anything, a source this build does not know
+    // would pull from nowhere, and a pull without a variable names nothing.
+    // The unknown source is the one that warns — it is a project from a newer
+    // engine, and quietly losing the setting would be a surprise on re-save.
+    if (const auto& p = e.value("pull", nlohmann::json::object()); p.is_object() && !p.empty())
+    {
+        const std::string src = p.value("src", std::string());
+        const std::string var = p.value("var", std::string());
+        if (v.scope == 0 && !src.empty() && !var.empty())
+        {
+            if (isKnownPullSource(src))
+            {
+                v.pullSource = src;
+                v.pullVar    = var;
+                v.pullMember = p.value("member", std::string());
+                if (src == kPullFromCreator) v.pullClass = p.value("class", std::string());
+            }
+            else
+                HE_LOG_WARN(HorizonCode, "HorizonCode: variable '%s' pulls from unknown source "
+                            "'%s' (saved by a newer engine?) - Pull on Construct dropped",
+                            v.name.c_str(), src.c_str());
+        }
+    }
     if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
         for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
     if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
@@ -2099,6 +2133,17 @@ std::string toJson(const Graph& g)
             jc.push_back(std::move(o));
         }
         j["comments"] = std::move(jc);
+    }
+    // Extract on Destruct: only when a struct is set, so a class that extracts
+    // nothing keeps the bytes it had before the feature existed. The struct is
+    // a content-relative path inside HCGR, which AssetRefs::retargetBlob
+    // already rewrites when the struct asset moves.
+    if (!g.extract.empty())
+    {
+        nlohmann::json jm = nlohmann::json::array();
+        for (const ExtractMapEntry& m : g.extract.map)
+            jm.push_back({ { "member", m.member }, { "var", m.var } });
+        j["extract"] = { { "struct", g.extract.structPath }, { "map", std::move(jm) } };
     }
     return j.dump(2);
 }
@@ -2184,6 +2229,43 @@ bool fromJson(const std::string& json, Graph& out)
         HE::graph::bumpNextId(g.nextId, c.id);
         g.comments.push_back(std::move(c));
     }
+    // Extract on Destruct. An entry without a member or a variable names
+    // nothing and is dropped; one member mapped twice keeps the first (the
+    // table has one row per member). A member saved under a name the struct
+    // has since renamed (formerNames) is read back under its live name when
+    // the definition is registered — at run time findField resolves it anyway.
+    if (const auto ex = j.find("extract"); ex != j.end() && ex->is_object())
+    {
+        g.extract.structPath = ex->value("struct", std::string());
+        if (!g.extract.structPath.empty())
+        {
+            HE::StructDef def;
+            const bool haveDef = HE::TypeRegistry::instance().getStruct(g.extract.structPath, def);
+            for (const auto& e : ex->value("map", nlohmann::json::array()))
+            {
+                if (!e.is_object()) continue;
+                ExtractMapEntry m;
+                m.member = e.value("member", std::string());
+                m.var    = e.value("var", std::string());
+                if (m.member.empty() || m.var.empty()) continue;
+                if (haveDef)
+                    if (const HE::StructField* f = def.findField(m.member)) m.member = f->name;
+                if (g.extract.entryFor(m.member)) continue;
+                g.extract.map.push_back(std::move(m));
+            }
+        }
+    }
+    // A graph that EMITS its own "OnDestroyed" now shares the name with the
+    // engine's: every instance bound to it also hears the engine's on death.
+    // Not renamed, like the PreConstruct case above — the author should hear it.
+    for (const Node& n : g.nodes)
+        if (n.type == NodeType::EmitEvent && n.s == kOnDestroyed)
+        {
+            HE_LOG_WARN(HorizonCode, "%s", "Custom event 'OnDestroyed' is emitted by this graph, "
+                        "but 'OnDestroyed' is now an engine event: everything bound to an "
+                        "instance also receives it when that instance is destroyed");
+            break;
+        }
     inferEventDecls(g);        // graphs older than declared events arrive with one
     // Both syncs below rebuild pin layouts from definitions that may have changed
     // shape since this graph was saved (a function edited elsewhere, a struct
@@ -3381,7 +3463,143 @@ Value coerce(Value v, PinType want)
     }
     return r;
 }
+
+// The short type word the Pull on Construct sentences use ("Float", "Int[]").
+std::string pullTypeWord(PinType t, ContainerKind k, const std::string& typeName)
+{
+    static const char* kNames[] = { "Exec", "Float", "Bool", "Int", "String", "Vec2", "Color",
+                                    "Object", "Transform", "Enum", "Struct", "Vec3", "Vec4",
+                                    "Double" };
+    const size_t i = (size_t)t;
+    std::string w = i < sizeof(kNames) / sizeof(kNames[0]) ? kNames[i] : "?";
+    if ((t == P::Enum || t == P::Struct) && !typeName.empty())
+    {
+        // The definition's file stem — what the type picker shows too.
+        std::string stem = typeName;
+        if (const size_t s = stem.find_last_of("/\\"); s != std::string::npos) stem.erase(0, s + 1);
+        if (const size_t d = stem.rfind('.'); d != std::string::npos) stem.erase(d);
+        w += " " + stem;
+    }
+    switch (k)
+    {
+        case ContainerKind::Array: return w + "[]";
+        case ContainerKind::Set:   return "Set of " + w;
+        case ContainerKind::Map:   return "Map of " + w;
+        default:                   return w;
+    }
+}
+bool pullNumeric(PinType t) { return t == P::Int || t == P::Float || t == P::Double; }
 } // namespace
+
+// ── Pull on Construct (docs/state-driven-data-exchange-design.md §2.5) ──────
+bool isKnownPullSource(const std::string& src)
+{
+    return src == kPullFromGameInstance || src == kPullFromCreator;
+}
+
+std::string pullSourceLabel(const std::string& src)
+{
+    if (src == kPullFromGameInstance) return "Game Instance";
+    if (src == kPullFromCreator)      return "Creator";
+    return src.empty() ? std::string("(none)") : "'" + src + "'";
+}
+
+bool pullShapesCompatible(PinType srcType, ContainerKind srcKind, PinType srcKey,
+                          const std::string& srcTypeName,
+                          PinType dstType, ContainerKind dstKind, PinType dstKey,
+                          const std::string& dstTypeName, std::string* why)
+{
+    auto refuse = [&]
+    {
+        if (why)
+            *why = pullTypeWord(srcType, srcKind, srcTypeName) + ", needs " +
+                   pullTypeWord(dstType, dstKind, dstTypeName);
+        return false;
+    };
+    if (srcKind != dstKind) return refuse();
+    if (srcKind == ContainerKind::Map && srcKey != dstKey) return refuse();
+    if (srcType != dstType)
+    {
+        // Numbers convert as SCALARS only — coerce never touches a container,
+        // so an Int[] pulled into a Float[] would arrive as ints in a float
+        // array, which nothing downstream expects.
+        if (srcKind != ContainerKind::None || !pullNumeric(srcType) || !pullNumeric(dstType))
+            return refuse();
+        return true;
+    }
+    if ((srcType == P::Enum || srcType == P::Struct) && !srcTypeName.empty() &&
+        !dstTypeName.empty() && srcTypeName != dstTypeName)
+        return refuse();
+    return true;
+}
+
+bool pullValuesCompatible(const Value& src, const Value& dstShape)
+{
+    return pullShapesCompatible(src.type, src.kind(), src.keyType, src.typeName,
+                                dstShape.type, dstShape.kind(), dstShape.keyType,
+                                dstShape.typeName);
+}
+
+Value pullConvert(const Value& src, const Value& dstShape)
+{
+    if (src.isArray || src.type == dstShape.type) return src;
+    return coerce(src, dstShape.type);
+}
+
+std::string pullFailureText(PullFailure why, const std::string& src, const std::string& var,
+                            const std::string& member, const std::string& detail)
+{
+    const std::string from = pullSourceLabel(src);
+    switch (why)
+    {
+        case PullFailure::None:              return {};
+        case PullFailure::NoGameInstance:    return "there is no Game Instance";
+        case PullFailure::NoCreator:
+            return "no creator (placed in the level, or spawned from outside HorizonCode)";
+        case PullFailure::CreatorGone:       return "the creator was already destroyed";
+        case PullFailure::CreatorWrongClass:
+            return "the creator is not a " + (detail.empty() ? std::string("matching class") : detail);
+        case PullFailure::NoPublicVariable:
+            return from + " has no public variable '" + var + "'";
+        case PullFailure::NotAStruct:
+            return from + " variable '" + var + "' is not a struct, it has no member '" + member + "'";
+        case PullFailure::NoSuchMember:
+            return from + " variable '" + var + "' has no member '" + member + "'";
+        case PullFailure::TypeMismatch:
+            return from + " '" + var + (member.empty() ? std::string() : "." + member) +
+                   "' does not fit" + (detail.empty() ? std::string() : " (" + detail + ")");
+        case PullFailure::UnknownSource:     return "unknown source " + from;
+    }
+    return {};
+}
+
+// ── Extract on Destruct (design §3) ─────────────────────────────────────────
+const ExtractMapEntry* ExtractSpec::entryFor(const std::string& member) const
+{
+    for (const ExtractMapEntry& m : map)
+        if (m.member == member) return &m;
+    return nullptr;
+}
+
+std::string extractFailureText(ExtractFailure why, const std::string& member,
+                               const std::string& var, const std::string& detail)
+{
+    const std::string from = var == kExtractSelf ? std::string("Self") : "'" + var + "'";
+    switch (why)
+    {
+        case ExtractFailure::None:           return {};
+        case ExtractFailure::NoSuchMember:
+            return "the struct has no member '" + member + "' (removed from struct?)";
+        case ExtractFailure::NoSuchVariable:
+            return "member '" + member + "': the class has no variable " + from + " (renamed or deleted?)";
+        case ExtractFailure::TypeMismatch:
+            return "member '" + member + "': " + from + " does not fit" +
+                   (detail.empty() ? std::string() : " (" + detail + ")");
+        case ExtractFailure::SelfNotRef:
+            return "member '" + member + "': Self is an object reference, the member is not";
+    }
+    return {};
+}
 
 Runner::Runner(const Graph& graph, Context ctx) : m_graph(graph), m_ctx(std::move(ctx)) {}
 
