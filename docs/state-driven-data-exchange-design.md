@@ -2,6 +2,8 @@
 
 Thema 127, Schritt 2 (Entwurf korrigiert). Nur Doku, keine Umsetzung. Schritt 3 setzt (A) um, Schritt 4 setzt (B) um.
 
+**Stand nach dem Review (Schritt 3):** Alle fünf offenen Fragen aus §9 sind entschieden (Beiträge 879, 880, 882 im Thema). Die Antworten sind in §2.2, §2.3, §2.9, §3.3 und §9 eingearbeitet. Kurz: Quelle **Erzeuger** gehört in den ersten Wurf, der Knopf heißt **„Add to Target“** und arbeitet mit jeder Quelle und auch für Struct-Member, ohne Zuhörer werden extrahierte Daten verworfen, eine Struct pro Klasse bleibt die Grenze, und die Lebenszyklus-Events gehen nicht mehr an Listener (Schritt 4).
+
 ## 0. Auslegung und was verworfen ist
 
 **Gemeint ist** (Antwort des Menschen auf Frage #16, Beiträge 864 und 865 im Thema):
@@ -113,10 +115,13 @@ An `Variable` (HC.h:409-481), hinter `saveGame`, mit Kommentarblock wie bei Repl
 // Pull on Construct (Thema 127): at registration, before any of the instance's
 // own code runs, the runtime copies a value from `pullSource` over the default.
 // The default stays the fallback when the source cannot be resolved.
-std::string pullSource;   // "" = off | "GameInstance"  (more kinds: §2.3)
+std::string pullSource;   // "" = off | "GameInstance" | "Creator"  (more kinds: §2.3)
 std::string pullVar;      // public instance variable of the source
 std::string pullMember;   // optional: field of pullVar when that is a Struct
+std::string pullClass;    // Creator only, optional: the class the creator is expected to be
 ```
+
+`pullClass` kam mit der Entscheidung für die Quelle Erzeuger dazu (Frage 5). Bei der Game Instance kennt der Editor die Quellklasse, beim Erzeuger nicht, denn wer Create Object aufruft, steht erst zur Laufzeit fest. Ohne Klassenangabe könnte die Variablen-Auswahl nichts auflisten, und „Add to Target“ wüsste nicht, in welchen Graph es schreiben soll. Zur Laufzeit gilt: Ist `pullClass` gesetzt und der Erzeuger keine Instanz dieser Klasse (Unterklassen zählen, `instanceIsA`), fällt die Variable auf den Default zurück. Leer heißt: jeder Erzeuger mit einer passenden öffentlichen Variable. (Annahme von Schritt 3, im Thema als Frage 884 gestellt.)
 
 * **Ein Feld für „an/aus“ gibt es nicht.** `pullSource` leer heißt aus. So kann es keinen halben Zustand geben (angehakt, aber ohne Quelle).
 * **JSON** (`variableToJsonObj` HC:1857 / `variableFromJsonObj` HC:1991): Schlüssel `"pull": {"src": "...", "var": "...", "member": "..."}`, nur geschrieben, wenn gesetzt. Der Loader verwirft ihn bei `scope != 0` (Funktions-locals, wie `repNotify` HC:2005-2006), bei unbekanntem `src` (mit Warnung: ein neueres Projekt in einer älteren Engine) und bei leerem `var`.
@@ -129,7 +134,7 @@ std::string pullMember;   // optional: field of pullVar when that is a Struct
 | **Game Instance**, öffentliche Instanzvariable, optional ein Struct-Member davon | **ja** | Existiert vor jeder anderen Instanz und hat OnInit hinter sich (§1.1). Im Editor gibt es sie auch außerhalb von Play |
 | Level-Script | nein | Entsteht **nach** den platzierten Entities (§1.1). Es wäre für die meisten Ziele nicht da und damit eine Quelle, die meistens den Fallback liefert |
 | Ref-Variable der eigenen Klasse | nein | Bei der Registrierung noch null, denn sie hat nur ihren Default. Anders als beim verworfenen „Bind To“ gibt es keinen späteren Abgleich |
-| Erzeuger (wer Create Object / Create Widget / Spawn aufgerufen hat) | Ausbau | Fachlich sinnvoll. Die Erzeuger-Id müsste aber durch `ctx.createObject`, `createWidget`, `EntityHost::spawn` und die `Services` gereicht werden, und platzierte Entities haben gar keinen Erzeuger. Expose on Spawn (§1.3) deckt den Fall „der Erzeuger gibt etwas mit“ schon ab, nur als Push |
+| Erzeuger (wer Create Object / Create Widget / Spawn aufgerufen hat) | **ja** (Frage 5, trotz Überlappung mit Expose on Spawn) | Die Erzeuger-Id muss nicht durch die `Services` gereicht werden: Die Runtime führt in `makeContext` einen Stapel „wer ruft gerade `createObject` / `createWidget` / `callApi` auf“, und `addLevels`/`addCompiled` merken sich die Spitze als Erzeuger. Die Aufrufe sind synchron bis zur Registrierung, verschachtelte Erzeugung (B erzeugt in seinem Construct C) stimmt damit von selbst. Platzierte Entities, Spawns aus Lua/Python/C++ und Embeds, die der WidgetManager selbst anlegt, haben den Erzeuger des Create Widget bzw. keinen, dann gilt der Default |
 | Savegame | Ausbau | Heute nur für Entities und nur auf ausdrücklichen Aufruf (`applySavedState`, `EngineApi.cpp:549-601`, nie automatisch). Ein Pull daraus bräuchte einen Schlüssel pro Instanz, den platzierte Entities, Widgets und Objekte nicht haben |
 | Data Table / Data Asset | entfällt | Gibt es nicht (§1.7). Wenn sie kommen, sind sie die natürlichste weitere Quelle (statisch, im Editor vollständig bekannt) |
 | Datei, HTTP | nein | Asynchron. „Bei Construct vorhanden“ ist damit nicht einzuhalten (gleiche Grenze wie PreConstruct, `widget-pre-construct-design.md` §2.2) |
@@ -236,7 +241,7 @@ Fallback   [ 0 ]                               ← das bisherige Default-Feld, u
 * **Nur bei `scope == 0`** sichtbar, nicht im GI-Graph (§2.3).
 * **Variable-Combo:** listet **alle** öffentlichen Instanzvariablen der Quelle. Unverträgliche stehen ausgegraut mit Grund im Tooltip („Float, needs Int“, „Struct RunStats: pick a member“) statt zu fehlen. Wer eine Variable sucht, sieht dann, warum sie nicht geht. Structs, die ein passendes Member haben, sind wählbar und öffnen das Member-Combo, das nur verträgliche Felder anbietet.
 * **Statuszeile:** grün mit Pfad und Typ, oder rot mit dem Grund aus §2.5, z. B. „Game Instance has no public variable ‚Score‘ (renamed?)“. Das ist derselbe Text wie die Laufzeitwarnung, also derselbe Helfer.
-* **Knopf „Add to Game Instance“**, wenn die Quelle keine passende Variable hat: Er legt im GI-Graph eine öffentliche Variable mit Name, Typ und Default dieser Variable an und wählt sie aus. Damit ist der häufigste Fall („ich will das global haben“) ein Klick. Ob das Bearbeiten des GI-Graphs aus einem fremden Panel sauber in Undo und Dirty-Markierung passt, prüft Schritt 3. Sonst entfällt der Knopf im ersten Wurf.
+* **Knopf „Add to Target“** (Frage 4, entschieden), wenn die Quelle keine passende Variable hat: Er legt im Graph **der gewählten Quelle** eine öffentliche Variable mit Name, Typ und Default dieser Variable an und wählt sie aus. Er ist nicht an die Game Instance gebunden, sondern fragt die Quelle nach ihrem Ziel-Graph (GI-Graph bzw. das `pullClass`-Asset beim Erzeuger, künftige Quellen bringen ihr eigenes Ziel mit). **Struct-Member-Fall:** Ist ein Member gewählt und fehlt es, legt der Knopf in der Quelle eine Struct-Variable vom gewählten Struct-Typ an bzw. ergänzt das fehlende Feld in der Struct-Definition. Klappt Undo/Dirty beim Bearbeiten eines fremden Graphs nicht sauber, wird dort nachgebessert, der Knopf entfällt nicht.
 * **Kennzeichen in der Variablenliste** wie bei Replicated, mit einem Glyph, den die Editor-Schrift hat (keine Pfeile, siehe Memory „Headless-ImGui-Screenshots“). Tooltip: „Pulled from Game Instance › LastRun › Score“.
 * **Hilfe:** Einträge in `src/HE_Editor/EditorHelp.cpp` für „Script Variable/Pull on Construct“, „…/Source“, „…/Variable“, „…/Member“, „…/Fallback“ (Nachbarn :6915-6970) und dieselben unter „UI Variable/“ (:5865-5885). `scripts/editor_help_audit.py --check` läuft in ctest, die BASELINE wird im selben Commit angehoben.
 
@@ -309,7 +314,7 @@ destroy(id):
 
 * **Nach Destruct**, damit die Klasse in ihrem eigenen Destruct noch Endwerte ausrechnen kann (Spielzeit, Endpunktestand), die dann in der Struct landen.
 * **Vor `remove`**, damit die Variablen lesbar sind und Listener in `OnDestroyed` per Get (Ref) über `@Self` noch zusätzlich am sterbenden Objekt lesen können. Das ist das Fenster aus §1.4.
-* **Der vorhandene Destruct-Dispatch an Listener** (RT:931) bleibt in den Schritten 3/4 unverändert, um niemandem Verhalten wegzunehmen. Siehe §8.1 und offene Frage 3.
+* **Der vorhandene Destruct-Dispatch an Listener** (RT:931) fällt nach Frage 3 weg, zusammen mit dem für Construct, PreConstruct, BeginPlay und OnInit: Diese Events laufen nur noch in der eigenen Klasse. Das gehört in **Schritt 4**, im selben Commit wie `OnDestroyed`, damit der Tod-Fall nicht ersatzlos verschwindet. Schritt 3 lässt das Makro unverändert.
 
 `buildExtract`:
 * Interpreter: `TypeRegistry::makeDefaultValue(structPath)`, dann pro Eintrag `findField(member)` → `items[i] = coerce(getVariable(id, var), feldtyp)` bzw. `Value::ofRef(id)` für `@Self`. Ein unpassender Eintrag (Variable weg, Typ geändert) wird übersprungen, das Member behält seinen Default, und es gibt eine Warnung einmal pro (Klasse, Member).
@@ -502,6 +507,16 @@ Extract on Destruct:
 5. **`MemberVar` ohne `typeName`** (§1.7) betrifft heute schon das Get/Set-(Ref)-Umfeld. Das Kontextmenü setzt am GetExternal-Knoten nur `propType`, nicht `typeName` (`HcGraphHost.cpp:1320-1352`).
 
 ## 9. Offene Fragen an das Review
+
+**Alle entschieden** (Beiträge 879, 880, 882 im Thema):
+
+1. **Variante c.** Ohne Zuhörer werden die extrahierten Daten verworfen. Kein Runtime-Speicher, keine deklarative GI-Ablage, §4 reicht.
+2. **Grenze bleibt (c).** Genau eine Struct pro Klasse. Man legt die Struct an, wählt sie im Klassen-Panel und ordnet mit „Auto-Map by Name“ zu.
+3. **Abschaffen.** Construct, PreConstruct, BeginPlay, OnInit und Destruct laufen nur noch intern, kein Listener-Dispatch mehr (Zeile RT:931 im Makro). `OnDestroyed` ist das einzige Event für „ein anderes Objekt ist gestorben“. Umsetzung in Schritt 4 (§3.4). Ob `OnDestroyed` auch ohne Extract (ohne Nutzlast) feuert oder ganz an Extract gekoppelt wird, klärt Schritt 4.
+4. **Ja, als „Add to Target“** für jede Quelle und auch für den Struct-Member-Fall (§2.9).
+5. **Ja.** Quelle Erzeuger kommt in den ersten Wurf (§2.2 `pullClass`, §2.3).
+
+Die ursprünglichen Fragen:
 
 1. **Wohin mit extrahierten Daten, wenn gerade niemand zuhört?** Im Entwurf gehen sie nur an gebundene Listener, der Weg über die Game Instance (§4) braucht Kleberei. Variante a: deklarativ „Extract also into Game Instance variable X“ an der Extract-Angabe. Variante b: ein Runtime-Speicher „letzter Extrakt der Klasse K“, der zugleich eine weitere Pull-Quelle wäre. Variante c: nichts, §4 reicht.
 2. **Mehrere Struct-Typen an einem Listener** (§3.6): (a) Dispatcher-Event zusätzlich unter dem Namen `OnDestroyed_<Struct>` verteilen, sodass ein Listener mehrere typisierte Events haben kann, oder (b) Bind Event bekommt einen Zielnamen für das Event. Beides ändert den Dispatcher. Oder (c) die Grenze stehen lassen.
