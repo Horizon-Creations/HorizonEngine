@@ -7025,6 +7025,72 @@ namespace
 	  "field in the struct. It writes into the Game Instance or the creator "
 	  "class, never into a class open with unsaved changes.",
 	  "", "horizoncode#functions" },
+	// Extract on Destruct (HcExtractUi draws it, in the class tabs and in the
+	// widget editor's graph view alike — one scope for both).
+	{ "Extract on Destruct/Extract on Destruct", "",
+	  "When an instance of this class is destroyed, its own Destruct runs first, "
+	  "then the engine fills the struct chosen here from its variables and sends "
+	  "it as OnDestroyed to everything bound to the instance with Bind Event. "
+	  "Nobody bound: the data is dropped. The instance itself never gets it.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/(not available)", "",
+	  "The Level Script and the Game Instance are never destroyed like an object "
+	  "(they unload or shut down), so they have nothing to extract.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Struct", "",
+	  "The struct listeners receive. One per class. Choosing one fills every "
+	  "member that has a variable of the same name and type; correct the rest "
+	  "below. A derived class without its own struct sends its parent's.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/From", "",
+	  "What fills this member: one of the class's variables (private and "
+	  "inherited ones too), Self for an object member, or nothing, which keeps "
+	  "the struct's default. Variables that do not fit are greyed with the "
+	  "reason. Drag a variable from the list onto the row to map it.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Self", "",
+	  "A reference to the instance being destroyed. Lets a listener bound to "
+	  "several objects tell them apart. It is still readable inside OnDestroyed "
+	  "and dead right after.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/New Struct from Variables...", "",
+	  "Makes a struct asset from the variables you tick, with their names, "
+	  "types and defaults, and maps each to its variable. The quickest start "
+	  "when there is no struct yet.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Name", "",
+	  "The new struct's name: letters, digits and underscores, not starting "
+	  "with a digit. It becomes the asset's file name.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Folder", "",
+	  "Where in the project the struct asset is created, relative to the "
+	  "content folder.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Auto-Map by Name", "",
+	  "Fills every member still at its default with the variable of the same "
+	  "name (ignoring case) when the types fit, and an object member called "
+	  "Self, Owner, Who or Source with Self. Rows already mapped stay.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Clear", "",
+	  "Puts every member back to the struct's default. The struct stays chosen.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Open Extract Table", "",
+	  "Shows the Extract on Destruct table this variable is mapped in.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Data", "",
+	  "What the Target sends when it dies, when this graph cannot tell which "
+	  "class the Target is: a struct, or no data.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/(no data)", "",
+	  "The Target extracts nothing: OnDestroyed arrives without an argument, "
+	  "which still says that it died.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Create OnDestroyed Event", "",
+	  "Declares OnDestroyed in this class, with the struct the Target sends as "
+	  "its argument, and places its event node. Bind Event on OnDestroyed then "
+	  "runs it when the Target is destroyed. A class has one OnDestroyed, so "
+	  "everything it listens to should send the same struct.",
+	  "", "horizoncode#functions" },
 	{ "Script Variable/Position##vdef", "Default Position",
 	  "The position this Transform variable starts at. It is a starting value, "
 	  "not a binding to anything.",
@@ -7822,6 +7888,7 @@ namespace
 		{ "Script Graph/",               "editor-horizoncode", "HorizonCode Editor", "Script graphs" },
 		{ "HorizonCode Graph/",          "editor-horizoncode", "HorizonCode Editor", "Comments and reroutes" },
 		{ "Script Variable/",            "editor-horizoncode", "HorizonCode Editor", "Graph variables" },
+		{ "Extract on Destruct/",        "editor-horizoncode", "HorizonCode Editor", "Extract on Destruct" },
 		{ "Script Node/",                "editor-horizoncode", "HorizonCode Editor", "Nodes in a script graph" },
 		{ "HorizonCode Event/",          "editor-horizoncode", "HorizonCode Editor", "Declared events" },
 		{ "HorizonCode Node/",           "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },

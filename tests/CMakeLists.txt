@@ -19,6 +19,7 @@ add_executable(he_tests
     test_hc_function_rename.cpp
     test_hc_rename_scope.cpp
     test_hc_pull_editor.cpp
+    test_hc_extract_editor.cpp
     test_graph_editor_keys.cpp
     test_preview_pick.cpp
     test_gizmo_pick.cpp
@@ -549,6 +550,9 @@ add_executable(he_tests
     # Pull on Construct's editor decisions (which source variables fit, what Add
     # to Target writes). ImGui-free for the same reason as HcRename above.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcPull.cpp
+    # Extract on Destruct's editor decisions (rows, Auto-Map, New Struct from
+    # Variables, Create OnDestroyed Event). ImGui-free, like HcPull.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExtract.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PanelSpotlight.cpp
     # The mesh tabs' material-slot list. Takes a ContentManager and the widget
     # that draws a slot, never AppContext — which is what lets the UI-shot test
@@ -694,6 +698,7 @@ add_executable(he_tests
     # The Pull on Construct block of its variable details (the drawing only;
     # HcPullUi::bindFrom is stubbed below).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcPullUi.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExtractUi.cpp
     WidgetDesignerLinkStubs.cpp
     # The texture viewer, for test_texture_viewer.cpp (Thema 92, Schritt 4): same
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
@@ -742,6 +747,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphClipboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcPullUi.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExtractUi.cpp
     WidgetDesignerLinkStubs.cpp
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp

@@ -1012,3 +1012,18 @@ TEST_CASE("editor help: the Pull on Construct block explains itself in both vari
 			CHECK_MESSAGE(e != nullptr, "no entry for key ", key);
 		}
 }
+
+TEST_CASE("editor help: the Extract on Destruct section explains itself")
+{
+	// HcExtractUi pushes its OWN scope, so editor_help_audit.py covers the file
+	// directly (it is in the horizoncode area); this pins the keys the two
+	// panels and the Bind Event helper reach, in case a label is renamed.
+	const char* labels[] = { "Extract on Destruct", "Struct", "From", "Self",
+	                         "New Struct from Variables...", "Auto-Map by Name", "Clear",
+	                         "Open Extract Table", "Create OnDestroyed Event", "Data" };
+	for (const char* l : labels)
+	{
+		const std::string key = std::string("Extract on Destruct/") + l;
+		CHECK_MESSAGE(Help::findKey(key) != nullptr, "no entry for key ", key);
+	}
+}

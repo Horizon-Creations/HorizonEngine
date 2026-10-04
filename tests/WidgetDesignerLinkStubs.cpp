@@ -21,6 +21,7 @@
 #include "EditorSettingsPanel.h"
 #include "HcRenameDialog.h"
 #include "HcPullUi.h"
+#include "HcExtractUi.h"
 
 namespace EditorSettingsPanel
 {
@@ -34,6 +35,13 @@ namespace HcRenameDialog
 }
 
 namespace HcPullUi
+{
+	void bindFrom(AppContext&) { setTargets({}); }
+}
+
+// The same for Extract on Destruct's block (HcExtractUiBind.cpp): no content
+// manager, so "New Struct from Variables…" writes nothing.
+namespace HcExtractUi
 {
 	void bindFrom(AppContext&) { setTargets({}); }
 }

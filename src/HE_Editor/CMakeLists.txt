@@ -300,6 +300,9 @@ add_executable(HorizonEditor WIN32
 	HcPull.cpp
 	HcPullUi.cpp
 	HcPullUiBind.cpp
+	HcExtract.cpp
+	HcExtractUi.cpp
+	HcExtractUiBind.cpp
 	HcRenameSweep.cpp
 	HcRenameDialog.cpp
 	HcGraphClipboard.cpp

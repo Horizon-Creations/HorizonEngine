@@ -1,4 +1,5 @@
 #include "HcRename.h"
+#include "HcExtract.h"
 
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>   // which parameter names an animation is the registry's answer
@@ -403,7 +404,13 @@ bool apply(HorizonCode::Graph& g, const Plan& p, const Target& t)
 		}
 		else if (!h.decl.empty() && t.member == Member::Variable)
 		{
-			if (HorizonCode::Variable* v = g.findVariable(h.decl)) { v->name = t.newName; changed = true; }
+			if (HorizonCode::Variable* v = g.findVariable(h.decl))
+			{
+				v->name = t.newName;
+				// The class's own Extract on Destruct table names it too.
+				HcExtract::renameVariable(g, h.decl, t.newName);
+				changed = true;
+			}
 		}
 		else if (!h.decl.empty() && t.member == Member::Event)
 		{
