@@ -18,12 +18,21 @@
 // base texture is bound. No per-particle color/alpha uniform — that's what the
 // spliced-in heParticleColor/heParticleAlpha functions replace.
 #include <ParticleGraph/ParticleGraph.h>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
 
 namespace HE
 {
+
+// Bytes the Metal billboard basis (camRight/camUp, buffer(2)/(3)) must be pushed
+// with. Both Metal particle vertex shaders (heParticleGraphVertex below and the
+// preview/thumbnail particlePreviewVertex) take `constant float3&`, and float3
+// has float4 size there; a 12-byte glm::vec3 fails API validation. The fix is on
+// the CPU side (push a vec4) because export-baked PPSD variants already carry
+// this declaration.
+inline constexpr std::size_t kMetalParticleBasisBytes = 16;
 
 inline std::string buildParticleVertexGLSL(const std::string& colorFn, const std::string& alphaFn)
 {

@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <ParticleGraph/ParticleGraph.h>
 #include <ContentManager/Assets.h>
+#include <HorizonRendering/ParticleShaderTemplates.h>
 #include <random>
 #include <cmath>
 
@@ -297,6 +298,20 @@ TEST_CASE("generateParticleShaderSource emits MSL (float3) syntax when metalSynt
     CHECK(gen.colorFn.find("float3 heParticleColor(float t01)") != std::string::npos);
     CHECK(gen.colorFn.find("float3(") != std::string::npos);
     CHECK(gen.colorFn.find("vec3") == std::string::npos);
+}
+
+TEST_CASE("Metal particle vertex shader: billboard basis is constant float3& and gets 16 bytes")
+{
+    // MetalRenderer pushes camRight/camUp as glm::vec4 (static_assert against
+    // kMetalParticleBasisBytes there). A 12-byte vec3 against `constant float3&`
+    // aborted MTL_DEBUG_LAYER's assert mode at the particle thumbnail. Switching
+    // this declaration to packed_float3 would need the pushers and every
+    // export-baked PPSD variant to change with it.
+    const ParticleShaderGen gen = generateParticleShaderSource(ParticleEmitterConfig{}, /*metalSyntax*/true);
+    const std::string msl = buildParticleVertexMSL(gen.colorFn, gen.alphaFn);
+    CHECK(msl.find("constant float3&   camRight [[buffer(2)]]") != std::string::npos);
+    CHECK(msl.find("constant float3&   camUp    [[buffer(3)]]") != std::string::npos);
+    CHECK(kMetalParticleBasisBytes == 4 * sizeof(float));
 }
 
 TEST_CASE("generateParticleShaderSource is a pure function of the resolved config (no rng, no I/O)")
