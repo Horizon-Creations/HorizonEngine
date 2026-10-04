@@ -347,6 +347,13 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "UI Graph Node", "Delete Node" },
 		{ "UI Variable",   "Access" },
 		{ "UI Variable",   "Scale##vdef" },
+		// The right column's tabs (Thema 139), and the parameter rows that moved
+		// into the second of them but kept their "Canvas" scope.
+		{ "UI Details",    "Details" },
+		{ "UI Details",    "Widget Parameters" },
+		{ "Canvas",        "Open Widget Parameters" },
+		{ "Canvas",        "Add Parameter" },
+		{ "Canvas",        "Parameter Name" },
 		// Input. "Bind" is drawn by a helper defined above every one of its
 		// callers, so its scope is pushed inside that helper.
 		{ "Input Action",  "Bind" },

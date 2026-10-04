@@ -7046,13 +7046,23 @@ void render(AppContext& ctx, const std::string& assetPath,
 		// the column's own — which is where their open state has always lived.
 		if (ImGui::BeginTabBar("##uiw_detailtabs"))
 		{
-			if (ImGui::BeginTabItem("Details"))
+			// Its own scope, closed again before the content: the sections
+			// below push theirs, and a row there must not fall back to these.
+			HE::Ed::Help::Scope helpScope("UI Details");
+			// The lookup goes right after BeginTabItem, before the branch: the
+			// tab is the last item whether or not it is the open one.
+			const bool detailsOpen = ImGui::BeginTabItem("Details");
+			EditorWidgets::helpForLabel("Details");
+			if (detailsOpen)
 			{
 				st.detailsTab = 0;
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Widget Parameters", nullptr,
-			                        st.detailsTabJump ? ImGuiTabItemFlags_SetSelected : 0))
+			const bool paramsOpen = ImGui::BeginTabItem(
+				"Widget Parameters", nullptr,
+				st.detailsTabJump ? ImGuiTabItemFlags_SetSelected : 0);
+			EditorWidgets::helpForLabel("Widget Parameters");
+			if (paramsOpen)
 			{
 				st.detailsTab     = 1;
 				st.detailsTabJump = false;

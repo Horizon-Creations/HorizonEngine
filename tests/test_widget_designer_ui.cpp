@@ -407,6 +407,145 @@ TEST_CASE("ui shot: widget designer — the Details panel as it is (Thema 92)")
 		CHECK(d.findInDetails(addId).x >= 0.0f);
 	}
 
+	// Both tab heads explain themselves (help entries "UI Details/…"): the
+	// pointer held still on one brings up the tooltip window.
+	SUBCASE("the tab heads carry their help")
+	{
+		d.shoot("widget-designer-warmup");
+		ImGuiWindow* dw = d.detailsWindow();
+		REQUIRE(dw);
+		const ImGuiID tabBar = ImHashStr("##uiw_detailtabs", 0, dw->ID);
+		ImGuiIO& io = ImGui::GetIO();
+		for (const char* tab : { "Details", "Widget Parameters" })
+		{
+			const std::string tabName = tab;
+			CAPTURE(tabName);
+			const ImVec2 p = d.findInDetails(ImHashStr(tab, 0, tabBar));
+			REQUIRE(p.x >= 0.0f);
+			io.AddMousePosEvent(p.x, p.y);
+			for (int i = 0; i < 60; ++i) d.frame(false);   // a second, standing still
+			const ImGuiWindow* tip = ImGui::FindWindowByName("##Tooltip_00");
+			CHECK((tip && tip->Active));
+			if (std::strcmp(tab, "Widget Parameters") == 0)
+				d.shoot("widget-designer-widget-parameters-tooltip");
+			io.AddMousePosEvent(-1000.0f, -1000.0f);
+			for (int i = 0; i < 3; ++i) d.frame(false);
+		}
+	}
+
+	// The rest of the Thema 139 contract: with an element selected the whole
+	// list stays editable — rename and remove, not only add — the tab does not
+	// jump back to Details when the selection changes, and every one of those
+	// edits is an undo step. The selection itself has no getter; what
+	// "Add Parameter" points the new row at is the witness for it.
+	SUBCASE("an element selected: rename, reselect, remove, undo — all on the tab")
+	{
+		d.shoot("widget-designer-warmup");
+		REQUIRE(d.clickRow(d.hierarchyRowId("Logo##hn2")));
+
+		ImGuiIO& io = ImGui::GetIO();
+		ImGuiWindow* dw = d.detailsWindow();
+		REQUIRE(dw);
+		const ImGuiID tabBar   = ImHashStr("##uiw_detailtabs", 0, dw->ID);
+		const ImGuiID paramsId = ImHashStr("Parameters", 0, dw->ID);
+		const ImGuiID addId    = ImHashStr("Add Parameter", 0, paramsId);
+		// A row's controls sit under PushID(i) inside the parameters' scope.
+		auto rowId = [&](int i, const char* label)
+		{
+			return ImHashStr(label, 0, ImHashData(&i, sizeof(i), paramsId));
+		};
+		auto press = [&](ImGuiKey key)
+		{
+			io.AddKeyEvent(key, true);  d.frame(false);
+			io.AddKeyEvent(key, false); d.frame(false);
+		};
+		auto undo = [&]
+		{
+			io.AddKeyEvent(ImGuiMod_Ctrl, true);
+			io.AddKeyEvent(ImGuiKey_Z, true);
+			d.frame(false);
+			io.AddKeyEvent(ImGuiKey_Z, false);
+			io.AddKeyEvent(ImGuiMod_Ctrl, false);
+			d.frame(false);
+		};
+		auto live = [&]() -> HE::UIWidgetTree&
+		{
+			HE::UIWidgetTree* t = UIEditorPanel::liveTree("UI/MainMenu.hasset");
+			REQUIRE(t);
+			return *t;
+		};
+
+		// A fresh parameter names no property yet, and the tree's JSON drops
+		// such a declaration (uiWidgetTreeFromJson, "names nothing") — which is
+		// also what an undo snapshot goes through. So an undo that lands on a
+		// snapshot holding a fresh one loses it. That rule is the data model's
+		// and older than this tab; the author's real path picks a property
+		// right after adding, and so does this test, through markEdited — the
+		// editor's own "the tree was changed from outside" commit (the MCP path).
+		auto pickProperty = [&](int i)
+		{
+			live().params[i].property = "Visible";
+			UIEditorPanel::markEdited(ctx, "UI/MainMenu.hasset");
+		};
+
+		REQUIRE(d.clickInDetails(ImHashStr("Widget Parameters", 0, tabBar)));
+		REQUIRE(d.clickInDetails(addId));
+		REQUIRE(live().params.size() == 1);
+		CHECK(live().params[0].name == "Parameter");
+		CHECK(live().params[0].elementId == 2);   // the Logo
+		pickProperty(0);
+
+		// Rename: into the name field, clear it, type, Enter. The field edits
+		// the tree as it is typed; the undo step is taken when it lets go.
+		REQUIRE(d.clickInDetails(rowId(0, "##pname")));
+		REQUIRE(ImGui::GetActiveID() == rowId(0, "##pname"));
+		press(ImGuiKey_End);
+		for (int i = 0; i < 12; ++i) press(ImGuiKey_Backspace);
+		io.AddInputCharactersUTF8("Label");
+		d.frame(false);
+		press(ImGuiKey_Enter);
+		d.frame(false);
+		CHECK(ImGui::GetActiveID() == 0);
+		CHECK(live().params[0].name == "Label");
+		CHECK(live().params[0].elementId == 2);
+
+		// …and Cmd/Ctrl+Z takes the rename back, the parameter itself stays.
+		undo();
+		REQUIRE(live().params.size() == 1);
+		CHECK(live().params[0].name == "Parameter");
+
+		// Another element clicked in the hierarchy: the tab stays open, and a
+		// new parameter points at the element that is selected NOW.
+		REQUIRE(d.clickRow(d.hierarchyRowId("Title##hn3")));
+		REQUIRE(d.clickInDetails(addId));
+		REQUIRE(live().params.size() == 2);
+		CHECK(live().params[1].elementId == 3);   // the Title
+		pickProperty(1);
+
+		// Remove the first one by its ×. The Title stays selected: the next
+		// Add points at it again (left without a property — no undo below goes
+		// back to a snapshot that holds it).
+		REQUIRE(d.clickInDetails(rowId(0, "\xc3\x97")));
+		REQUIRE(live().params.size() == 1);
+		CHECK(live().params[0].elementId == 3);
+		REQUIRE(d.clickInDetails(addId));
+		REQUIRE(live().params.size() == 2);
+		CHECK(live().params[1].elementId == 3);
+
+		const he_ui::Image img = d.shoot("widget-designer-widget-parameters-edited");
+		REQUIRE(img.valid());
+		CHECK(img.inkedPixels(20, 18, 15) > 10000);
+
+		// Two undos: the last Add, then the removal — the Logo's row is back.
+		undo();
+		REQUIRE(live().params.size() == 1);
+		undo();
+		REQUIRE(live().params.size() == 2);
+		CHECK(live().params[0].elementId == 2);
+		CHECK(live().params[0].name == "Parameter");
+		CHECK(live().params[1].elementId == 3);
+	}
+
 	UIEditorPanel::forget(d.assetPath);
 	std::error_code ec;
 	std::filesystem::remove_all(root, ec);

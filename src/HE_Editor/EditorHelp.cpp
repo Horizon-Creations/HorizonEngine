@@ -5365,7 +5365,9 @@ namespace
 	  // that would 404 — a dead link teaches people the button does nothing.
 	  "", "ui#widgets" },
 	{ "Canvas/Add Parameter", "",
-	  "Adds a knob to this widget, pointed at whatever is selected. A widget with "
+	  "Adds a knob to this widget, pointed at whatever is selected. Selecting an "
+	  "element does not leave this tab, so: click the element on the canvas or in "
+	  "the hierarchy, then Add Parameter. A widget with "
 	  "no parameters is a page: it can be embedded, but every copy of it looks "
 	  "exactly the same. One with parameters is a component — the same form row "
 	  "used twenty times with twenty different labels.",
@@ -5377,6 +5379,19 @@ namespace
 	  "Switches this column to the Widget Parameters tab, where this widget's "
 	  "parameters are declared. They used to sit here with the canvas settings; "
 	  "the tab shows them whatever is selected, and choosing it keeps the selection.",
+	  "", "ui#widgets" },
+
+	// ── The right column's two tabs (Thema 139) ──────────────────────────────
+	{ "UI Details/Details", "",
+	  "The selected element's properties and events, or the canvas settings when "
+	  "nothing is selected. Clicking an element while Widget Parameters is open "
+	  "does not switch back here; this tab is only ever chosen by hand.",
+	  "", "ui#widgets" },
+	{ "UI Details/Widget Parameters", "",
+	  "What a page that embeds this widget can set: name, element, property and "
+	  "help line of each parameter. They belong to the widget as a whole, so this "
+	  "tab shows the same list whatever is selected, and switching to it keeps "
+	  "the selection.",
 	  "", "ui#widgets" },
 	{ "UI Widget/Default", "",
 	  "Stops setting this parameter on this copy, so it shows whatever the widget "
@@ -7762,6 +7777,7 @@ namespace
 		{ "ui.",             "editor-ui", "UI Designer", "Widget designer" },
 		{ "UI Hierarchy/",   "editor-ui", "UI Designer", "The hierarchy" },
 		{ "Canvas/",         "editor-ui", "UI Designer", "The canvas" },
+		{ "UI Details/",     "editor-ui", "UI Designer", "The details column" },
 		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
 		{ "UI Theme Preview/", "editor-ui", "UI Designer", "Previewing a theme" },
