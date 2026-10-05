@@ -393,6 +393,7 @@ void VulkanRenderer::Render()
     m_ssrResultView    = VK_NULL_HANDLE;
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
     m_instCursor = 0; // this frame's instance-buffer slots start from the top
+    m_sceneMatCursor = 0; m_sceneMatOffset = 0; // ...and its built-in material-ring slots
 
     // Drop caches for materials/meshes edited since last frame, before any recording — the
     // frame's DrawScene then re-resolves them fresh from the ContentManager.
@@ -666,8 +667,11 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 {
     // The shadow, GI and SSAO depth passes and the geometry pass below all take
     // instance-buffer slots from this frame's m_instCursor. Reset here too, not
-    // only in Render(): RenderSceneImage records this frame on its own.
+    // only in Render(): RenderSceneImage records this frame on its own. Same for
+    // the built-in material ring (m_sceneMatBuf) the geometry pass fills.
     m_instCursor = 0;
+    m_sceneMatCursor = 0;
+    m_sceneMatOffset = 0;
 
     const bool useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB;
 
@@ -1867,8 +1871,8 @@ void VulkanRenderer::createScenePipeline()
     binds[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     binds[1].descriptorCount = 1;
     binds[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-    binds[2].binding         = 2;
-    binds[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binds[2].binding         = 2;  // per-draw material block: dynamic offset into m_sceneMatBuf
+    binds[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     binds[2].descriptorCount = 1;
     binds[2].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
     binds[3].binding         = 3;  // uAO: SSAO occlusion (1x1 white fallback when disabled)
@@ -1906,18 +1910,36 @@ void VulkanRenderer::createScenePipeline()
     slci.pBindings    = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_sceneSetLayout), "descriptor set layout");
 
-    // Create the per-draw material UBO (32 bytes, host-coherent, written per-draw via vkCmdUpdateBuffer).
+    // The per-draw material ring behind binding 2 (see m_sceneMatBuf): one per frame in
+    // flight, host-visible + coherent and persistently mapped like the Frame UBO, so a
+    // draw's block is written while recording and never by a transfer inside the pass.
     {
-        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = 32;
-        bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &m_matUBO), "mat ubo");
-        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, m_matUBO, &req);
-        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = req.size;
-        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_matMem), "mat ubo mem");
-        vkBindBufferMemory(m_device, m_matUBO, m_matMem, 0);
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        const VkDeviceSize align = std::max<VkDeviceSize>(props.limits.minUniformBufferOffsetAlignment, 1);
+        m_sceneMatStride = (32 + align - 1) / align * align;
+        const VkDeviceSize bytes = m_sceneMatStride * k_sceneMatSlots;
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        {
+            MatFrameBuf& rb = m_sceneMatBuf[i];
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size  = bytes;
+            bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &rb.buf), "scene material ring");
+            VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, rb.buf, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = req.size;
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &rb.mem), "scene material ring mem");
+            vkBindBufferMemory(m_device, rb.buf, rb.mem, 0);
+            vkCheck(vkMapMemory(m_device, rb.mem, 0, bytes, 0, &rb.mapped), "scene material ring map");
+            // Slot 0 holds a valid block before the first draw writes one: the
+            // binds ahead of any built-in draw use offset 0.
+            std::memset(rb.mapped, 0, static_cast<size_t>(m_sceneMatStride));
+        }
+        m_sceneMatCursor = 0;
+        m_sceneMatOffset = 0;
     }
 
     // Base-color descriptor set layout (set = 2: one combined image sampler, fragment stage)
@@ -1953,14 +1975,15 @@ void VulkanRenderer::createScenePipeline()
     vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_scenePipelineLayout), "pipeline layout");
 
     // Per-frame UBO buffers + descriptor sets (one per frame in flight).
-    VkDescriptorPoolSize ps[3] = {
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 2 },  // binding0 + binding2
+    VkDescriptorPoolSize ps[4] = {
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 1 },  // binding0
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, k_maxFramesInFlight * 1 },  // binding2 (material ring)
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 },  // binding1(shadow) + binding3(AO) + bindings4-7(GI) + binding8(SSR) + binding9(local atlas)
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 3 },  // bindings10-12 (cluster lists)
     };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = k_maxFramesInFlight;
-    dpci.poolSizeCount = 3;
+    dpci.poolSizeCount = 4;
     dpci.pPoolSizes    = ps;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_descPool), "descriptor pool");
 
@@ -2029,7 +2052,7 @@ void VulkanRenderer::createScenePipeline()
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo  lii{ m_shadowSampler, m_localShadowView,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorBufferInfo matDbi{ m_matUBO, 0, 32 };
+        VkDescriptorBufferInfo matDbi{ m_sceneMatBuf[i].buf, 0, 32 };  // + dynamic offset per draw
         // Binding 3 (AO): filled in by createSSAOPipeline() with the white fallback
         // view after it creates the 1x1 white texture; left unwritten here.
         // Binding 9 (local atlas) goes in with binding 1 — both exist once
@@ -2051,7 +2074,7 @@ void VulkanRenderer::createScenePipeline()
         w[2].dstSet          = m_frameUBO[i].set;
         w[2].dstBinding      = 2;
         w[2].descriptorCount = 1;
-        w[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         w[2].pBufferInfo     = &matDbi;
         w[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[3].dstSet          = m_frameUBO[i].set;
@@ -2373,6 +2396,10 @@ void VulkanRenderer::destroyScenePipeline()
         if (m_instanceBuf[i].buf)    vkDestroyBuffer(m_device, m_instanceBuf[i].buf, nullptr);
         if (m_instanceBuf[i].mem)    vkFreeMemory   (m_device, m_instanceBuf[i].mem, nullptr);
         m_instanceBuf[i] = {};
+        if (m_sceneMatBuf[i].mapped) vkUnmapMemory(m_device, m_sceneMatBuf[i].mem);
+        if (m_sceneMatBuf[i].buf)    vkDestroyBuffer(m_device, m_sceneMatBuf[i].buf, nullptr);
+        if (m_sceneMatBuf[i].mem)    vkFreeMemory   (m_device, m_sceneMatBuf[i].mem, nullptr);
+        m_sceneMatBuf[i] = {};
         for (ClusterBuffer* cb : { &m_clusterLights[i], &m_clusterGrid[i], &m_clusterIdx[i] })
         {
             if (cb->mapped) vkUnmapMemory(m_device, cb->mem);
@@ -2382,8 +2409,6 @@ void VulkanRenderer::destroyScenePipeline()
         }
     }
     m_clusterReady = false;
-    if (m_matUBO)              { vkDestroyBuffer(m_device, m_matUBO, nullptr); m_matUBO = VK_NULL_HANDLE; }
-    if (m_matMem)              { vkFreeMemory   (m_device, m_matMem, nullptr); m_matMem = VK_NULL_HANDLE; }
     if (m_descPool)            { vkDestroyDescriptorPool(m_device, m_descPool, nullptr);            m_descPool = VK_NULL_HANDLE; }
     // Base-color texture resources (per-mesh images are freed with their caches; the pool
     // destroy frees every albedo descriptor set incl. m_whiteAlbedoSet).
@@ -6608,6 +6633,34 @@ const VulkanRenderer::GpuMesh* VulkanRenderer::resolveMesh(const HE::UUID& asset
     return &m_meshCache.emplace(assetId, mesh).first->second;
 }
 
+uint32_t VulkanRenderer::pushSceneMaterial(const void* data, size_t bytes)
+{
+    MatFrameBuf& rb = m_sceneMatBuf[m_currentFrame];
+    if (!rb.mapped || bytes > sizeof(m_sceneMatLast)) return m_sceneMatOffset;
+    auto* base = static_cast<uint8_t*>(rb.mapped);
+    // Same block as the draw before → same slot. Compared against a CPU copy:
+    // the ring is mapped write-combined on discrete GPUs, slow to read back.
+    if (m_sceneMatCursor > 0 && std::memcmp(m_sceneMatLast, data, bytes) == 0)
+        return m_sceneMatOffset;
+    if (m_sceneMatCursor >= k_sceneMatSlots)
+    {
+        if (!m_sceneMatWarned)
+        {
+            m_sceneMatWarned = true;
+            HE_LOG_WARN(RHI, "%s",
+                ("VulkanRenderer: more than " + std::to_string(k_sceneMatSlots)
+                 + " built-in material blocks in one frame — the surplus draws reuse the "
+                   "last one's material; raise k_sceneMatSlots").c_str());
+        }
+        return m_sceneMatOffset;
+    }
+    const VkDeviceSize off = static_cast<VkDeviceSize>(m_sceneMatCursor++) * m_sceneMatStride;
+    std::memcpy(base + off, data, bytes);
+    std::memcpy(m_sceneMatLast, data, bytes);
+    m_sceneMatOffset = static_cast<uint32_t>(off);
+    return m_sceneMatOffset;
+}
+
 void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr)
 {
     if (!m_world || m_scenePipeline == VK_NULL_HANDLE || width == 0 || height == 0) return;
@@ -6929,7 +6982,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                            0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                            0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
 
     // Per-pass sink: today the only pass renders to the backbuffer (the active
     // render pass). Offscreen targets (id != backbuffer) arrive with shadows/HDR.
@@ -6943,7 +6996,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
             hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                                0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
 
         const glm::vec3 camPos = m_renderWorld.camera.position;
         // Shared opaque/blended split + back-to-front order. The split now weighs
@@ -7343,7 +7396,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         // per-frame UBO (view-proj/lighting/shadow/AO), not the material descriptors.
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                 m_scenePipelineLayout, 0, 1,
-                                                &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                                &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
                         return;
                     }
                 }
@@ -7360,23 +7413,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             }
             if (!albedoSet) albedoSet = m_whiteAlbedoSet;       // flat draws bind the white default
 
-            if (m_matUBO)
+            // This draw's material block: its own slot in the frame's material ring,
+            // selected by set 0's dynamic offset (no transfer inside the render pass).
             {
-                struct MatData { float r,g,b,met; float rough,opacity,hasTex,noShadow; } md{
+                const SceneMatData md{
                     dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
                     dc.roughness, dc.opacity, textured ? 1.0f : 0.0f,
                     dc.receivesShadow ? 0.0f : 1.0f
                 };
-                vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
-                VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-                bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                bar.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
-                bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bar.buffer = m_matUBO; bar.offset = 0; bar.size = VK_WHOLE_SIZE;
-                vkCmdPipelineBarrier(cmd,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    0, 0, nullptr, 1, &bar, 0, nullptr);
+                pushSceneMaterial(&md, sizeof(md));
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                        0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
             }
 
             // Bind the effective base-color texture at set 2 (albedoSet resolved above).
@@ -7454,7 +7501,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             EncodeDecals(cmd, *m_decalDepthActive, width, height, hdr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
 
         const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
@@ -7480,7 +7527,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             // set=0 (scene.frag per-frame data) is already bound from DrawScene preamble.
             // Re-bind it here because the sky / transparent passes may have changed state.
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
-                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
 
             constexpr int          kMaxBones     = 128;
             constexpr VkDeviceSize kBoneSlotSize = 128 * sizeof(glm::mat4);
@@ -7524,24 +7571,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 }
                 if (!albedoSet) albedoSet = m_whiteAlbedoSet;
 
-                // Update material UBO (same as drawDCVk).
-                if (m_matUBO)
+                // Material block → its ring slot + set 0 at that offset (same as drawDCVk).
                 {
-                    struct MatData { float r,g,b,met; float rough,opacity,hasTex,noShadow; } md{
+                    const SceneMatData md{
                         dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
                         dc.roughness, dc.opacity, textured ? 1.0f : 0.0f,
                         dc.receivesShadow ? 0.0f : 1.0f
                     };
-                    vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
-                    VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-                    bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-                    bar.dstAccessMask       = VK_ACCESS_UNIFORM_READ_BIT;
-                    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    bar.buffer = m_matUBO; bar.offset = 0; bar.size = VK_WHOLE_SIZE;
-                    vkCmdPipelineBarrier(cmd,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        0, 0, nullptr, 1, &bar, 0, nullptr);
+                    pushSceneMaterial(&md, sizeof(md));
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
+                                            0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
                 }
 
                 // Bind the effective base-color texture at set 2 (albedoSet resolved above).
@@ -7579,7 +7618,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
 
         // Debug lines on top of opaque+transparent geometry, before post-process.

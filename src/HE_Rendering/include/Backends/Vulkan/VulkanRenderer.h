@@ -424,10 +424,29 @@ private:
 	static constexpr uint32_t k_matMaxDraws   = 1024;
 	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
 
-	// Per-draw material data (32 bytes: baseColor(rgb)+metallic(a) + roughness + opacity
-	// + hasTexture). Updated per-draw via vkCmdUpdateBuffer; binding 2 in scene descriptor set.
-	VkBuffer       m_matUBO    = VK_NULL_HANDLE;
-	VkDeviceMemory m_matMem    = VK_NULL_HANDLE;
+	// Per-draw material data of the built-in scene shader (32 bytes: baseColor(rgb)+metallic(a)
+	// + roughness + opacity + hasTexture + noShadow), scene set binding 2. That binding is a
+	// UNIFORM_BUFFER_DYNAMIC into a per-frame host-mapped ring: every built-in draw writes its
+	// block into the next slot while the frame is recorded and binds set 0 with that slot's
+	// dynamic offset. The GPU reads the ring only after submit, so nothing transfers inside a
+	// render pass (Thema 144 — this used to be vkCmdUpdateBuffer + a barrier per draw, both
+	// invalid in a render pass). Consequence: EVERY bind of m_frameUBO[].set passes one
+	// dynamic offset (m_sceneMatOffset). Cursor reset with m_instCursor (Render() and
+	// DrawViewportFrame); a slot is never reused within a frame.
+	struct SceneMatData { float r, g, b, met; float rough, opacity, hasTex, noShadow; }; // scene.frag MatUBO
+	static_assert(sizeof(SceneMatData) == 32, "scene.frag's MatUBO is two vec4");
+	MatFrameBuf  m_sceneMatBuf[2];
+	VkDeviceSize m_sceneMatStride  = 256;   // 32 B rounded up to minUniformBufferOffsetAlignment
+	uint32_t     m_sceneMatCursor  = 0;     // next free slot in m_sceneMatBuf[m_currentFrame]
+	uint32_t     m_sceneMatOffset  = 0;     // dynamic offset of the slot set 0 is bound with
+	bool         m_sceneMatWarned  = false; // one-time notice when the ring runs full
+	uint8_t      m_sceneMatLast[32] = {};   // CPU copy of the block at m_sceneMatOffset
+	static constexpr uint32_t k_sceneMatSlots = 16384; // built-in draws per frame
+	// Writes one draw's block into the ring and returns its dynamic offset. A block equal to
+	// the previous draw's reuses that slot (runs of one material take one slot). A full ring
+	// returns the last slot's offset unchanged (that draw shows its predecessor's material)
+	// and warns once — slots already recorded are never overwritten.
+	uint32_t pushSceneMaterial(const void* data, size_t bytes);
 
 	// ── Per-mesh base-color texture (descriptor set = 2) ─────────────────────
 	// Each textured mesh owns a device-local RGBA8 image + view + a single combined-

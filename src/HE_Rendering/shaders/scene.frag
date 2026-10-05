@@ -132,7 +132,8 @@ layout(set = 0, binding = 1) uniform sampler2DArray uShadowMap;
 // after the forward-SSR result on 8.
 layout(set = 0, binding = 9) uniform sampler2DArray uLocalShadowMap;
 
-// Per-draw PBR material scalars uploaded via vkCmdUpdateBuffer before each draw.
+// Per-draw PBR material scalars: a dynamic UBO, each draw bound at its own slot
+// of the renderer's per-frame material ring (VulkanRenderer m_sceneMatBuf).
 layout(set = 0, binding = 2) uniform MatUBO {
     vec4 baseColorMet;  // rgb = baseColor, a = metallic
     // x = roughness, y = opacity, z = hasTexture (0/1),
