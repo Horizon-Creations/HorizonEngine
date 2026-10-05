@@ -302,6 +302,11 @@ private:
 	VkInstance               m_instance       = VK_NULL_HANDLE;
 	uint32_t                 m_instanceApiVersion = 0; // actual requested VkApplicationInfo::apiVersion
 	VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE; // validation → Logger (debug only)
+	// Debug names for images a validation message may point at: the layer prints
+	// the name in the brackets after the handle ("VkImage 0x…[SSAO blur]"), which
+	// survives the logger's 512-byte line cut. Null without VK_EXT_debug_utils.
+	PFN_vkSetDebugUtilsObjectNameEXT m_setObjectName = nullptr;
+	void nameImage(VkImage img, const char* name) const;
 	VkPhysicalDevice         m_physDevice     = VK_NULL_HANDLE;
 	VkDevice                 m_device         = VK_NULL_HANDLE;
 	VkQueue                  m_graphicsQueue  = VK_NULL_HANDLE;
@@ -1037,7 +1042,7 @@ private:
 	// scene render pass ends, while m_hdrImage is still COLOR_ATTACHMENT_OPTIMAL.
 	void        CaptureSSRColorHistory(VkCommandBuffer cmd, uint32_t w, uint32_t h);
 	// One-time submit that parks a freshly created image in SHADER_READ_ONLY.
-	void        ssrPrimeLayout(VkImage img);
+	void        primeShaderReadLayout(VkImage img);
 
 	// Reflection MRT pre-pass: two extra attachments on SSAO's position pass.
 	SSAORenderTarget m_reflAttrRT;   // RGBA16F: rg = oct world normal *0.5+0.5, b = roughness (0)

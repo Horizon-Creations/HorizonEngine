@@ -93,7 +93,7 @@ CASES = {
         "pairs": [("off", "on", 0.3), ("on", "sw", None)],
         "require": {"on": ["GI probe grid", "GI hardware ray tracing available"],
                     "sw": ["GI probe grid", "software GI path forced"]},
-        "allow": {"off": ["mat_ubo"], "on": ["mat_ubo", "gi_layout"], "sw": ["mat_ubo", "gi_layout"]},
+        "allow": {"off": ["mat_ubo"], "on": ["mat_ubo"], "sw": ["mat_ubo"]},
     },
     # GI reflections on the same scene: the green and the glowing red cube should
     # appear in the mirror floor (docs/gi-reflections-plan.md). REPORT ONLY:
@@ -110,7 +110,7 @@ CASES = {
         },
         "pairs": [("off", "on", None)],
         "require": {"on": ["HE_DUMP_GIREFLTEST witness scene added"]},
-        "allow": {"off": ["mat_ubo", "gi_layout"], "on": ["mat_ubo", "gi_layout"]},
+        "allow": {"off": ["mat_ubo"], "on": ["mat_ubo"]},
     },
 }
 
@@ -129,10 +129,6 @@ ALLOWED_VALIDATION = {
     # UBO"). Two messages per built-in draw per frame.
     "mat_ubo": [r"VUID-vkCmdUpdateBuffer-renderpass",
                 r"VUID-vkCmdPipelineBarrier-None-07889"],
-    # With GI on, once per frame: a submitted command buffer expects an image in
-    # a layout it is not in. The engine log truncates the message before the
-    # layout names; the full text is in the artifact's per-shot log.
-    "gi_layout": [r"UNASSIGNED-CoreValidation-DrawState-InvalidImageLayout"],
 }
 
 LOG_MARK_ARMED  = "frame dump armed"
