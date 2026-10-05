@@ -96,6 +96,11 @@ Fußzeilenzeile, V1/V2b, die Merge-, Rang- und Ton-Regeln geschenkt.
 | **M5 `Committed`** | „Committed“ / „Committed and pushed“ / „Pushed“ | Source-Control-Panel: Commit (SourceControlPanel.cpp:742), Push (:532). Erkannt als Flanke `busy → idle` ohne `lastError` nach einer **im Panel** ausgelösten Anfrage (eigener Anfrage-Zähler in GitController, ImGui-frei testbar). Pull/Fetch sind kein Moment. | gleich Build | zählt als „benutzt“, neuer Tageszähler `commits` nur im 7-Tage-Tooltip | wie Build (Push kann dauern, man schaut weg) |
 | **M6 `TourFinished`** | „Tutorial complete“ | TutorialPanel.cpp:767, der letzte Schritt ist erledigt (`tut::finished(tut::advance(s_cursor))`) und wird bestätigt. **Nicht** pro Schritt: der hat schon eigenes Feedback (`s_doneTimer`, Auto-Advance). Einmal pro Durchlauf. | gleich Build | zählt als „benutzt“ | keine |
 
+Hinweis für M5: Die Flanke `busy → idle` hat dieselbe Falle, die der Kommentar zu
+`m_cloneBusy` in GitController.h beschreibt. Nach `pump()` kann `busy()` schon
+„idle“ sagen, während das Ergebnis noch in der Warteschlange steht. Deshalb
+`busy()` **vor** dem Pumpen lesen, wie es der Clone-Pfad tut.
+
 Neuer Ton ohne Moment (wie `buildFailedPcm16`):
 - **`CompileFailed`**: Compile-Knopf mit Fallback/Fehler (LevelScriptPanel.cpp:239,
   UIEditorPanel analog). Ohne Fokus-Gate (siehe M4). Keine Zeile; der Graph springt
@@ -106,6 +111,10 @@ Neuer Ton ohne Moment (wie `buildFailedPcm16`):
   `HE_LOG_ERROR` dorthin weiterleitet. Klingt nur, wenn der Editor *nicht* im
   Vordergrund ist; im Vordergrund reicht der Puls an der Glocke (V8). Standard:
   Schalter an, steht aber unter `RewardsSound` (aus).
+  `NotificationStore` kennt nur `unseenCount()` (alle Stufen) und `snapshot()`.
+  Für die Problem-Flanke entweder einen kleinen Zähler je Stufe ergänzen oder den
+  Snapshot mitbenutzen, den NotificationBar ohnehin pro Frame holt. Keinen zweiten
+  Snapshot ziehen.
 
 Rang im Feed (Regel 3), von oben nach unten: Build = Commit = Tutorial >
 Import > Compile > Save. Bei gleichem Rang und anderer Art ersetzt der neuere
@@ -286,8 +295,10 @@ Motion gilt überall: Bewegungen entfallen, Farbwechsel und Ausblenden bleiben.
 - Knoten-Verschieben (D9) ohne Ton (Begründung in §3).
 - Material-, Partikel- und Animator-Leinwand: Der Callback bleibt dort ungesetzt.
   Später möglich, aber nicht hier.
-- Keine Änderung an Feed-Regeln 1–6, an den vorhandenen Tönen oder ihren
-  Standardwerten.
+- Feed-Regeln 1–6 bleiben, wie sie sind. Einzige Erweiterung: Regel 3 bekommt den
+  Gleichrang-Fall aus §1 (heute hat jede Art einen eigenen Rang, den Fall gibt es
+  also noch nicht). Die vorhandenen Töne und ihre Standardwerte bleiben
+  unverändert.
 - Keine Engine-Features, keine Renderer-Backends, kein HorizonCode-Laufzeitverhalten
   (`Graph::connect` & Co. werden nur gelesen, nie geändert).
 - Keine Vendor-Dateien (ImGui, ImGuizmo; die `HE-PATCH`-Stellen bleiben).
