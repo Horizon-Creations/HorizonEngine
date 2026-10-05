@@ -398,3 +398,75 @@ Umgesetzt wie in §3, die Spezifikation steht im Kopf von
   gepusht, kein Deploy), ins Bundle nur dieser Abschnitt übernommen.
 - **Offen:** V6/V7 (Pin-Ringe, Snap-Puls) sind optisch und gehören nicht zu
   Schritt 4. Die Bausteine dafür (`canConnect`, `State::cueNode`) liegen jetzt bereit.
+
+## 12. Stand nach Schritt 5 (Verifikation, NN-WS03, Windows)
+
+Gemessen am 2026-10-05 auf NN-WS03 (Windows 11, MSVC 14.51 / VS 18, Ninja),
+**Release**, eigener Build-Baum `C:/hw140/b` mit `-DDEPLOY_DIR=C:/hw140/deploy`
+(das Editor-Deploy des Menschen blieb unberührt), shaderc ON. Alle Läufe im
+Vordergrund abgewartet, Testläufe mit eigenem `APPDATA` (die `config.json` des
+Menschen hat vorher und nachher denselben Hash).
+
+| Prüfung | Ergebnis |
+|---------|----------|
+| Vollbau `cmake --build -j8` | 1757/1757, 0 Fehler; zweiter Lauf ohne Arbeit; 108 Laufzeit-Shader kompilieren. Keine Warnung in einer Datei dieses Zweigs |
+| ctest, voll (vor dem Katalog-Fix) | 233/233 bestanden, 2 übersprungen (`runtime_size_app_*`: kein `AppAdvanced`/`AppBasic`-Deploy in diesem Baum), 173 s |
+| ctest, voll (endgültiges Binary) | 233/233 bestanden, dieselben 2 übersprungen, 160 s |
+| `test_editor_rewards` | 66 Fälle, 1297 Assertions, 0 rot |
+| `test_graph_editor_keys` | 22 Fälle, 81 Assertions, 0 rot |
+| `test_git_roundtrip` | 39 Fälle, 515 Assertions, 0 rot |
+| `test_editor_help` | 17 Fälle, 77 402 Assertions, 0 rot; `editor_help_audit` (ctest) grün |
+| `test_ui_shot` | 30 Fälle, 295 Assertions, 0 rot (inkl. der neuen Szene) |
+| `he_rewards_live.py --only-new` gegen den Release-Deploy | RESULT PASS, 341 Prüfungen ok, 0 Fehlschläge, Editor-Exit rc 0 |
+
+**Neu in diesem Schritt** (Commit 4144f515):
+
+- Szene „ui shot: the editor reference explains every new Feedback switch“ in
+  `tests/test_ui_shot.cpp`: Für jeden der zehn neuen Keys unter
+  `Preferences/Feedback/` gibt es einen EditorHelp-Eintrag, sein F1-Anker löst in
+  der Settings Reference auf, und sein „More about this“ erreicht
+  `editor#preferences` bzw. `horizoncode#graphs`. Gegenprobe: Mit dem Label
+  „Drag and Drop Sounds“ wird der Fall rot, genau an diesem Key.
+- `EditorSettingsCatalog.cpp`: Zwei Anweisungen standen auf einer Zeile (ein
+  verlorener Zeilenumbruch aus Schritt 3). Nur Formatierung.
+
+**Handbuch**: Im Bundle (`he-docs.json`) beschreibt `editor#preferences` die drei
+neuen Momente, alle neun Töne, Problem Pulse, Lautstärke, Mute und Reduced Motion.
+`horizoncode#graphs` beschreibt die fünf DnD-Cues und den Schalter. Die Settings
+Reference (generiert aus EditorHelp) hat für alle zehn Schalter einen eigenen
+Eintrag, und dieselben Texte sind die Tooltips.
+
+Bildbelege (`scripts/he_uishot.py` gegen das Windows-Release-he_tests):
+
+| Was | Bild |
+|-----|------|
+| Settings Reference, Feedback ab Commit Moment | `img/editor-feinschliff/editor-reference-feedback-commit.png` |
+| Settings Reference, Drag and Drop Sound | `img/editor-feinschliff/editor-reference-feedback-dragdrop.png` |
+
+Die fünf V8/V9-Szenen aus §10 wurden auf Windows neu aufgenommen und mit den
+committeten Mac-Bildern verglichen. Der größte Unterschied ist 3 Stufen je
+Kanal; nur im Compile-Readout weichen 4 Pixel (Text-Antialiasing) stärker ab. Die
+Bilder sind also auf beiden Systemen dieselben.
+
+**Offen, ehrlich:**
+
+- Live **hörbar** belegt sind nur der Build-Chime und der Failed-Ton
+  (Audio-Trace, Frame-Länge unterscheidet sie). Für die neuen Töne (Compile,
+  Compile Failed, Commit, Tutorial, Problem) und die fünf DnD-Cues prüft
+  `he_rewards_live.py` nur Schalter, Datei und Audio-Engine: Keine MCP-Aktion
+  kompiliert einen Graphen, committet oder zieht ein Kabel. Ihr Tonpfad bis zum
+  Ausgang der UI-Audio-Engine ist in `test_editor_rewards` über `setDragCueProbe`
+  bzw. `preview()` belegt. Eine Hörprobe am Gerät durch einen Menschen steht aus.
+- Der Fließtext in `editor#preferences` zählt die Ton-Schalter auf, nennt
+  Drag and Drop dort aber nicht, und er sagt nicht, dass die drei neuen Momente je
+  einen eigenen Schalter haben. Beides steht in den Tooltips und in der Settings
+  Reference, DnD zusätzlich in `horizoncode#graphs`. Wer das ändert, muss es in der
+  Website-Quelle **und** abschnittsweise im Bundle ändern (siehe die Lehre zu
+  `build_docs_bundle.py`).
+- Die Website-Quelle mit beiden Abschnitten (Commit df92b9b) liegt nur lokal auf
+  dem MacBook und ist nicht gepusht; auf NN-WS03 fehlt sie. Den Deploy macht nur
+  der Mensch.
+- V6/V7 (Pin-Ringe, Snap-Puls) sind weiter nicht gebaut (siehe §11).
+- Der Zweig steht auf dem Merge-Stand 469fa9f6; `origin/main` ist inzwischen
+  weiter (u. a. PR #94). Ob es Konflikte gibt, zeigt erst der Merge durch den
+  Chefchen.
