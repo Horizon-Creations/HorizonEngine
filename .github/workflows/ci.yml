@@ -211,6 +211,17 @@ jobs:
           fi
           python3 scripts/validate_embedded_shaders.py --msl-only --require-msl -v
 
+      # Graph materials have no MSL string to extract: theirs exists only once
+      # MaterialShaderLibrary cross-compiles the graph, so the step above never
+      # sees it, and no he_tests case can reach a Metal compiler (the toolchain
+      # arrives after ctest). he_tests dumps every variant the renderers build
+      # for the engine water material (Thema 152) and the script hands them to
+      # the same compiler, negative control first; --require-msl turns a missing
+      # toolchain into a failure instead of a skip.
+      - name: Compile-check the engine water material's MSL (macOS)
+        if: runner.os == 'macOS' && !cancelled()
+        run: python3 scripts/water_shader_offline_check.py --require-msl --he-tests build/tests/he_tests -v
+
       # ── The two app runtimes ────────────────────────────────────────────────────
       # docs/app-runtimes-release-pipeline-plan.md. The build above deployed ONE
       # runtime, Game, next to the editor. An exported HorizonApp wants a leaner one

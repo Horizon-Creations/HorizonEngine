@@ -1,6 +1,7 @@
 # Wasser-Shader als Engine-Material — Plan (Thema 152)
 
 Stand 2026-10-05, Schritt 1 (Bestandsaufnahme), vollständig. Nichts am Renderer geändert; Abschnitt 3 nennt Renderer-Fehler, die spätere Schritte beheben müssen.
+Schritt 2 (Material gebaut): §5a. Schritt 3 (Backend-Parität, GL-Fehler 1 behoben): §8.
 
 Ziel: ein Wasser-Material als Engine-Content, gebaut als Material-Node-Graph, auf allen
 fünf Backends über die bestehende Graph-Shader-Pipeline, mit vollem Parametersatz im
@@ -140,6 +141,8 @@ SSR. Für Refraktion taugt sie nicht (das Wasser sähe sich selbst).
    (G:11641–11661). Selbst nachgelesen. Ohne Fix ist das Wasser auf GL forward im
    Zweifel still und spiegelt den Himmel nicht. Das ist eine Renderer-Änderung (nicht in
    diesem Schritt).
+   **Behoben in Schritt 3** (§8): der Zweig lädt `HeLighting` jetzt selbst hoch und bindet
+   13–17 wie der opake.
 2. **GL: keine Sampler-Grenze geprüft.** Material-Programme nutzen Units bis 20 (G:3777–3826).
    macOS-GL 4.1 meldet typischerweise 16 Fragment-Units. Nichts im Code fragt
    `GL_MAX_TEXTURE_IMAGE_UNITS` ab. Ungeprüft, ob das heute stört; neue Sampler würden es
@@ -344,3 +347,109 @@ ausgeschlossenen Unterwasser-Teil.
 - Eine Wasser-Normalmap als `Engine/`-Textur fehlt; ohne sie prozedurale Normale.
 - „Sichtbar animiert auf einer Plane" geht über Normalen/UV; WPO braucht ein unterteiltes
   Mesh (Engine-Plane ist ein Quad).
+
+---
+
+## 8. Backend-Parität (Schritt 3, gebaut und gemessen)
+
+Was die Renderer bauen: D3D11, D3D12, Vulkan und GL 4.3 nehmen zuerst `fragmentClustered`
+und fallen auf `fragment` zurück; Metal und GL 4.1 bauen `fragment`. Ein Export backt pro
+Backend `bakeMaterialShaderVariant`. Das Wasser hat keine Textur, bringt also keinen eigenen
+Sampler mit; geprüft wird, ob die Lighting-Preamble, die es mitzieht, in die Wände jedes
+Backends passt.
+
+### 8.1 In he_tests (`tests/test_engine_materials.cpp`, läuft in CI auf allen drei OS)
+
+Jeder Prüfer hat eine eigene Negativkontrolle (ein Eingang, den er ablehnen muss).
+
+| Backend | Richter | Stand |
+|---|---|---|
+| GL 4.1 / ES 3.0 / GL 4.3 (geclustert) | glslang im GL-Modus parst und **linkt** Vertex + Fragment (forward, G-Buffer, gebacken); Reflexion des gelinkten Programms | grün |
+| Metal | Sampler nur im Material-Fenster 0..4 oder auf `kMetalPreambleSamplerSlots`, ≤ 16; Textur-Slots ≤ 30. **Nur Text**, kein Metal-Compiler (§8.2) | grün |
+| D3D11/D3D12 (Windows) | FXC ps_5_0 plain/geclustert/gebacken + vs_5_0; Bytecode-Reflexion: s ≤ 15, ≤ 16 Sampler, b ≤ 13; Abdeckung durch `D3D12MaterialRootSignature.h`; echtes **Translucent-PSO auf D3D12-WARP**; D3D11-WARP `CreateVertexShader`/`CreatePixelShader`/`CreateInputLayout` | grün |
+| HLSL-Text (alle OS) | SM-5.0-Wände, keine zwei lebenden Sampler auf einem s-Register (X4500) | grün |
+| Vulkan | SPIRV-Cross: aktive Deskriptoren von Vertex, plain und geclustert inkl. **Stage** gegen `VulkanMaterialLayout.h`; geclustert fügt genau 24..26 hinzu; kein Binding 14 (Thema 143); ≤ 16 Sampler | grün |
+| Export | `bakeMaterialShaderVariant` für alle fünf `RendererBackend`, regeneriert und aus der Datei: ok, keine Warnung; GL-4.10- und 4.30-Paar linken; SPIR-V entpackbar; D3D-HLSL durch FXC | grün |
+
+**HeParams-Layout**, eine Abmachung, vier Sichten: jeder Renderer kopiert
+`min(shaderParamData.size(), 64)` Floats in einen 256-Byte-Block. Geprüft: SPIR-V set 0
+binding 3, 256 B, `v[16]` bei Offset 0, Stride 16; gelinktes GL-Programm: Block `HeParams`
+256 B, Bindung per Name (kein `binding =`), ES hält ihn `highp` trotz `precision mediump float`;
+FXC-Reflexion: cbuffer `HeParams` auf b3 = Root-CBV `kRootParamsCB`, 256 B, `float4[16]`;
+MSL: `float4 v[16]`, `HeParams` auf `buffer(2)`, `HeLighting` auf `buffer(1)`. Dazu
+`HeLighting` = `sizeof(MaterialShaderLibrary::Lighting)` in SPIR-V, GL und FXC. CPU: 15 Knöpfe
+= 60 Floats ≤ 64, jeder Default in den Komponenten seines Typs. Jede Lesestelle
+`heParams.v[i]` nutzt den Swizzle ihres Typs (Float `.x`, Vec2 `.xy`, Color `.xyz`, Vec4 ohne),
+alle 15 Slots werden gelesen, keiner ≥ 16. Slot-Indizes werden nie per Position angenommen
+(Reihenfolge ist compilerabhängig, §5a).
+
+### 8.2 Offline mit den SDK-Werkzeugen
+
+`python scripts/water_shader_offline_check.py` lässt he_tests jede Variante dumpen
+(`HE_DUMP_WATER_SHADERS`) und schickt sie durch die Werkzeuge, jedes nach einer
+Negativkontrolle. NN-WS03, 2026-10-05: **13 bestanden, 0 fehlgeschlagen, 1 übersprungen.**
+
+- `glslangValidator -l` (GL-Modus, beide Stufen gelinkt): GL 4.1 forward, GL 4.1 G-Buffer,
+  ES 3.0, GL 4.3 geclustert.
+- `spirv-val --target-env vulkan1.2` (das Ziel von `he::shaderc`): Vertex, Fragment, geclustert.
+- `fxc /T vs_5_0|ps_5_0 /E main`: Vertex, Fragment, geclustert. Warnung X3570 aus
+  `heLocalShadowFactor` (PCF-Schleife der gemeinsamen Preamble, jedes beleuchtete
+  Graph-Material); FXC rollt ab und baut.
+- MoltenVK, erste Hälfte: `spirv-cross --msl --msl-version 20100` über das Vulkan-SPIR-V
+  (Vertex, Fragment, geclustert); 11 Fragment-Sampler, unter Metals 16.
+- **`xcrun metal` nicht gelaufen** (kein Mac). Auf einem Mac:
+  `python3 scripts/water_shader_offline_check.py --require-msl` übersetzt das Engine-MSL
+  (forward, geclustert, G-Buffer, Vertex) und das MoltenVK-MSL mit `metal -c`. Der
+  macOS-Job in `ci.yml` ruft genau das nach dem Abruf der Metal-Toolchain auf; er läuft auf
+  `main`, in PRs und per `gh workflow run CI --ref <zweig>`.
+
+### 8.3 Auf echter GPU (Rauchtest, keine Abnahme)
+
+Zeuge `HE_DUMP_WATERTEST=floor` (Editor, §8.4), RTX 4070, Editor-Deploy des Zweigs,
+`HE_DUMP_SKYTEST` mit CAMY 4, CAMZ 6, PITCH −25, TOD 0.4, 16 Settle-Frames, 1280×720,
+frisches `APPDATA` pro Lauf (kalter GL-Programm-Cache). Gemessen im Wasserband (untere 60 %),
+mittlere absolute Differenz in 0..255:
+
+| Backend | Helligkeit | t = 1.0 zweimal | t = 1.0 gegen 3.5 | gegen GL forward |
+|---|---|---|---|---|
+| GL forward | 143.33 | 0 | 22.4 | — |
+| GL deferred | 143.35 | 0 | 22.4 | 0.05 |
+| D3D11 | 142.92 | 0 | 23.1 | 1.8 |
+| D3D12 | 142.37 | 0 | 23.6 | 4.1 |
+| Vulkan | 142.39 | 0 | 23.6 | 4.1 |
+
+Alle fünf animieren, sind reproduzierbar und zeigen dasselbe Bild. D3D12 und Vulkan zeichnen die
+Kaustiklinien sichtbar etwas weicher als GL/D3D11 (Ursache nicht untersucht). D3D12-Debug-Layer:
+nur die bekannte `ClearRenderTargetView`-Warnung. Vulkan-Validierung: nur
+`vkCmdUpdateBuffer`/Barriere im Render-Pass (Thema 144, vorbestehend). **Nicht** belegt: eine
+zweite GPU (AMD/Intel), das exportierte Spiel, D3D11 mit Debug-Layer (`HE_GPU_DEBUG` wirkt dort
+nicht), Metal überhaupt.
+
+### 8.4 GL-Fehler 1 behoben (`OpenGLRenderer.cpp`, Translucent-Zweig)
+
+Der Zweig lädt `HeLighting` jetzt selbst hoch, wenn es in diesem Frame noch niemand getan hat
+(dieselbe Einmal-Regel wie der opake), und bindet die Units wie der opake: 13 Weightmap (beim
+Einsammeln aufgelöst), 14 Himmels-Cube, 15 AO, 16/17 DDGI. Gleicher Zeuge, gleiche Einstellungen,
+nur das Wasser als Graph-Material im Bild:
+
+| GL | Helligkeit | t = 1.0 gegen 3.5 |
+|---|---|---|
+| forward, **vorher** | 0.41 (schwarz) | 0 (steht still) |
+| forward, nachher | 143.33 | 22.4 |
+| deferred, vorher = nachher | 143.35 (bytegleich) | 22.4 |
+
+Der Zeuge (`HE_DUMP_WATERTEST`, `=floor` mit grauem Boden 1.5 m darunter) lädt das ausgelieferte
+`Engine/Materials/Water.hasset` auf die Engine-Plane (40 m, y = 0) und ist für den Screenshot in
+Schritt 4 gedacht.
+
+### 8.5 Offen und Nebenbefunde
+
+- **Metal:** kein `xcrun metal`, kein Bild. Bis ein Mac oder der macOS-CI-Job läuft, ist das
+  Engine-MSL nur von SPIRV-Cross erzeugt und textlich geprüft.
+- **Vulkan 1.0:** `he::shaderc` erzeugt SPIR-V 1.5 (Vulkan 1.2), `VulkanRenderer` fällt bei einem
+  Loader unter 1.2 auf eine 1.0-Instanz zurück, und `spirv-val --target-env vulkan1.0` lehnt
+  dieselben Module ab. Das betrifft jeden Shader aus `he::shaderc`, nicht das Wasser. Ob ein
+  echtes 1.0-System das trifft, ist ungeprüft.
+- §3 Fehler 3 (GL/Metal: Graph-Texturen bleiben auf Units 1–4) unverändert, das Wasser hat keine
+  Textur.
+- Debug-`test_material_graph` braucht auf NN-WS03 643 s (vorbestehend, WARP-Fälle).
