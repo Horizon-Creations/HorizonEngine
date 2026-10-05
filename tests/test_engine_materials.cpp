@@ -441,6 +441,10 @@ TEST_CASE("Engine water material: dump every backend's shader for the offline co
 	put("metal_frag.metal",           need(lib.fragment(hf, w.frag, B::Metal), "MSL fragment").source);
 	put("metal_frag_clustered.metal", need(lib.fragmentClustered(hf, w.frag, B::Metal), "MSL clustered").source);
 	put("metal_gbuf.metal",           need(lib.fragment(hg, w.gbuf, B::Metal), "MSL G-buffer").source);
+	// The text the FILE carries (baked by mat_gen under MSVC): what a pak ships and
+	// what a Mac cross-compiles when the pak has no Metal variant. Under clang the
+	// regenerated text above differs from it (slot order, variable numbers).
+	put("metal_frag_baked.metal",     need(lib.fragment(srcHash(w.baked), w.baked, B::Metal), "MSL baked").source);
 	MESSAGE("water shaders dumped to ", out.string());
 }
 

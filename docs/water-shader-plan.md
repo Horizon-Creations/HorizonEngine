@@ -399,7 +399,8 @@ Negativkontrolle. NN-WS03, 2026-10-05: **13 bestanden, 0 fehlgeschlagen, 1 über
   (Vertex, Fragment, geclustert); 11 Fragment-Sampler, unter Metals 16.
 - **`xcrun metal` nicht gelaufen** (kein Mac). Auf einem Mac:
   `python3 scripts/water_shader_offline_check.py --require-msl` übersetzt das Engine-MSL
-  (forward, geclustert, G-Buffer, Vertex) und das MoltenVK-MSL mit `metal -c`. Der
+  (forward, geclustert, G-Buffer, Vertex und das in der Datei gebackene Fragment) und das
+  MoltenVK-MSL mit `metal -c`. Der
   macOS-Job in `ci.yml` ruft genau das nach dem Abruf der Metal-Toolchain auf; er läuft auf
   `main`, in PRs und per `gh workflow run CI --ref <zweig>`.
 
@@ -418,7 +419,8 @@ mittlere absolute Differenz in 0..255:
 | D3D12 | 142.37 | 0 | 23.6 | 4.1 |
 | Vulkan | 142.39 | 0 | 23.6 | 4.1 |
 
-Alle fünf animieren, sind reproduzierbar und zeigen dasselbe Bild. D3D12 und Vulkan zeichnen die
+Alle fünf Läufe (vier Backends, GL zweimal) animieren, sind reproduzierbar und zeigen dasselbe
+Bild; Metal fehlt in dieser Tabelle. D3D12 und Vulkan zeichnen die
 Kaustiklinien sichtbar etwas weicher als GL/D3D11 (Ursache nicht untersucht). D3D12-Debug-Layer:
 nur die bekannte `ClearRenderTargetView`-Warnung. Vulkan-Validierung: nur
 `vkCmdUpdateBuffer`/Barriere im Render-Pass (Thema 144, vorbestehend). **Nicht** belegt: eine

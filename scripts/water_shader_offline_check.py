@@ -53,7 +53,8 @@ GL_PAIRS = [
 ]
 SPV = ["vk_vert.spv", "vk_frag.spv", "vk_frag_clustered.spv"]
 HLSL = [("vs_5_0", "hlsl_vert.hlsl"), ("ps_5_0", "hlsl_frag.hlsl"), ("ps_5_0", "hlsl_frag_clustered.hlsl")]
-MSL = ["metal_vert.metal", "metal_frag.metal", "metal_frag_clustered.metal", "metal_gbuf.metal"]
+MSL = ["metal_vert.metal", "metal_frag.metal", "metal_frag_clustered.metal", "metal_gbuf.metal",
+       "metal_frag_baked.metal"]
 
 
 class Report:
