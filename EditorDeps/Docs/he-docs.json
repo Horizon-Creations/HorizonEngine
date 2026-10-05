@@ -12311,11 +12311,36 @@
          "t": "The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins."
         }
        ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "With "
+        },
+        {
+         "s": "b",
+         "t": "Preferences » Feedback » Success Sound"
+        },
+        {
+         "s": "",
+         "t": " on, dragging makes short, quiet sounds: a blip when a wire or a variable is picked up, a light tick over a pin it would connect to and a muted one over a pin it would not, a snap when it lands and a falling blip when the drop is cancelled or refused. Each sound plays once per event, never per frame, and moving a node stays silent. "
+        },
+        {
+         "s": "b",
+         "t": "Drag and Drop Sound"
+        },
+        {
+         "s": "",
+         "t": " switches them off on their own; volume and mute are shared with the other feedback sounds."
+        }
+       ]
       }
      ],
      "eyebrow": "Mechanics",
      "id": "graphs",
-     "text": "A graph is built from nodes connected by two kinds of wire. Execution links (white) define control flow — they run in order from an event. Data links are typed (Float, Bool, Int, String, Vec2, Color, Transform, or an object Reference) and are evaluated on demand when a node needs a value. Nothing runs until an event fires from the host — a button click, the frame tick, a level loading, an input action. The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins.",
+     "text": "A graph is built from nodes connected by two kinds of wire. Execution links (white) define control flow — they run in order from an event. Data links are typed (Float, Bool, Int, String, Vec2, Color, Transform, or an object Reference) and are evaluated on demand when a node needs a value. Nothing runs until an event fires from the host — a button click, the frame tick, a level loading, an input action. The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins. With Preferences » Feedback » Success Sound on, dragging makes short, quiet sounds: a blip when a wire or a variable is picked up, a light tick over a pin it would connect to and a muted one over a pin it would not, a snap when it lands and a falling blip when the drop is cancelled or refused. Each sound plays once per event, never per frame, and moving a node stays silent. Drag and Drop Sound switches them off on their own; volume and mute are shared with the other feedback sounds.",
      "title": "How a Graph Works"
     },
     {

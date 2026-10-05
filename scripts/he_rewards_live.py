@@ -122,6 +122,7 @@ SETTINGS = {
     "rewards.soundCommit":      ("RewardsSoundCommit", True),
     "rewards.soundTutorial":    ("RewardsSoundTutorial", True),
     "rewards.soundProblem":     ("RewardsSoundProblem", True),
+    "rewards.soundDragDrop":    ("RewardsSoundDragDrop", True),
     "rewards.showProgress":     ("RewardsShowProgress", True),
     "rewards.counterTick":      ("RewardsCounterTick", True),
     "rewards.streakTooltip":    ("RewardsStreakTooltip", True),

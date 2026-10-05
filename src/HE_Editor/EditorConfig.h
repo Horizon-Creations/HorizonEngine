@@ -112,6 +112,7 @@ struct EditorConfig
 	bool  RewardsSoundCommit        = true; // unfocused), tour finished, a new
 	bool  RewardsSoundTutorial      = true; // problem (only unfocused) — all
 	bool  RewardsSoundProblem       = true; // under RewardsSound
+	bool  RewardsSoundDragDrop      = true; // HC graph drag and drop cues (EditorDragCues.h)
 	bool  RewardsProblemPulse  = true;   // V8/V9: the bell rings out, a failed node pulses
 	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
 	bool  RewardsCounterTick   = true;   // V3: a number that rose lights up (under Progress)

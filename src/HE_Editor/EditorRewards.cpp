@@ -941,6 +941,62 @@ std::vector<uint8_t> tonePcm16(Tone t, int sampleRate)
 	return {};
 }
 
+// ── Drag and drop cues (EditorDragCues.h) ────────────────────────────────────
+// Shorter and quieter than the tick (peak 0.16): at most 60 ms, peaks at or
+// below 0.09. Heard many times a minute while wiring, so they stay clicks.
+namespace
+{
+// A sine gliding exponentially fromHz → toHz over the whole length, phase
+// integrated (see importPopPcm16), with an attack and an e-folding decay.
+std::vector<double> glide(int sampleRate, double lengthSec, double fromHz, double toHz,
+                          double attackSec, double decaySec)
+{
+	std::vector<double> v(static_cast<size_t>(lengthSec * sampleRate));
+	double phase = 0.0;
+	for (size_t i = 0; i < v.size(); ++i)
+	{
+		const double t  = static_cast<double>(i) / sampleRate;
+		const double hz = fromHz * std::pow(toHz / fromHz, t / lengthSec);
+		v[i]   = std::sin(phase) * std::min(1.0, t / attackSec) * std::exp(-t / decaySec);
+		phase += kTwoPi * hz / sampleRate;
+	}
+	return v;
+}
+} // namespace
+
+std::vector<uint8_t> dragCuePcm16(DragCue c, int sampleRate)
+{
+	if (sampleRate <= 0) return {};
+	switch (c)
+	{
+	case DragCue::Pickup:        // E6 → A6, a short blip up
+		return toPcm16(glide(sampleRate, 0.035, 1318.51, 1760.0, 0.004, 0.02),
+		               sampleRate, 0.08, 0.008);
+	case DragCue::OverValid:     // C#7, a very light tick
+	{
+		constexpr Note kNotes[] = { { 2217.46, 0.0, 1.0 } };
+		return toPcm16(ringNotes(kNotes, 1, sampleRate, 0.02, 0.004, 0.006),
+		               sampleRate, 0.05, 0.006);
+	}
+	case DragCue::OverInvalid:   // B5, muted and damped quicker — no buzz
+	{
+		constexpr Note kNotes[] = { { 987.77, 0.0, 1.0 } };
+		return toPcm16(ringNotes(kNotes, 1, sampleRate, 0.025, 0.005, 0.006),
+		               sampleRate, 0.05, 0.008);
+	}
+	case DragCue::Drop:          // E6 with its octave as the click: a snap
+	{
+		constexpr Note kNotes[] = { { 1318.51, 0.0, 1.0 }, { 2637.02, 0.0, 0.6 } };
+		return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, 0.04, 0.004, 0.012),
+		               sampleRate, 0.09, 0.01);
+	}
+	case DragCue::Cancel:        // A6 → E6, the pickup turned down, softer onset
+		return toPcm16(glide(sampleRate, 0.045, 1760.0, 1318.51, 0.008, 0.025),
+		               sampleRate, 0.07, 0.012);
+	}
+	return {};
+}
+
 std::vector<uint8_t> chimePcm16(int sampleRate)
 {
 	// A5 then E6 70 ms later, each struck and left to ring out. Quiet on
@@ -1025,6 +1081,13 @@ bool s_uiAudioFailed = false;  // its device would not open — see keepUiAudio
 // postSound()'s queue, played by the next pollBuild.
 std::vector<Tone> s_postedSounds;
 
+// postDragCue()'s queue, its pacing, the tests' probe, and the frame the last
+// reward tone played in (a drag cue in that frame is dropped).
+std::vector<DragCue> s_postedDragCues;
+DragCues::Gate       s_dragGate;
+void               (*s_dragProbe)(DragCue) = nullptr;
+int                  s_toneFrame = -2;
+
 // V8's edge and the problem tone's own gap.
 ProblemWatch s_problems;
 double       s_problemAt = -1.0;   // when the bell's ring began (< 0: never)
@@ -1054,8 +1117,12 @@ void keepUiAudio(AppContext& ctx)
 		s_uiAudioFailed = true;
 }
 
+int frameNo();
+
 void playTone(AppContext& ctx, Tone t, float gain)
 {
+	// Decided to sound, device or not: a drag cue in this frame steps aside.
+	s_toneFrame = frameNo();
 	AudioEngine* a = ctx.uiAudioEngine;
 	if (!a || !a->isInitialized() || !(gain > 0.0f)) return;
 	constexpr int kRate = 44100;
@@ -1064,6 +1131,18 @@ void playTone(AppContext& ctx, Tone t, float gain)
 	const int i = static_cast<int>(t);
 	if (i < 0 || i >= kToneCount) return;
 	if (pcm[i].empty()) pcm[i] = tonePcm16(t, kRate);
+	a->play(pcm[i], kRate, 1, gain);
+}
+
+void playDragCue(AppContext& ctx, DragCue c, float gain)
+{
+	AudioEngine* a = ctx.uiAudioEngine;
+	if (!a || !a->isInitialized() || !(gain > 0.0f)) return;
+	constexpr int kRate = 44100;
+	static std::vector<uint8_t> pcm[kDragCueCount];
+	const int i = static_cast<int>(c);
+	if (i < 0 || i >= kDragCueCount) return;
+	if (pcm[i].empty()) pcm[i] = dragCuePcm16(c, kRate);
 	a->play(pcm[i], kRate, 1, gain);
 }
 
@@ -1121,6 +1200,48 @@ void sound(AppContext& ctx, Tone t)
 void postSound(Tone t)
 {
 	if (s_postedSounds.size() < 16) s_postedSounds.push_back(t);
+}
+
+void postDragCue(DragCue c)
+{
+	if (s_postedDragCues.size() < 16) s_postedDragCues.push_back(c);
+}
+
+bool dragCueWanted(const EditorConfig& cfg, bool playing)
+{
+	return uiSoundPossible(cfg) && cfg.RewardsSoundDragDrop
+	    && gainFor(cfg.RewardsVolume) > 0.0f && !playing;
+}
+
+void setDragCueProbe(void (*probe)(DragCue))
+{
+	s_dragProbe = probe;
+}
+
+void previewDragCues(AppContext& ctx)
+{
+	keepUiAudio(ctx);
+	AudioEngine* a = ctx.uiAudioEngine;
+	const float gain = gainFor(ctx.editorConfig.RewardsVolume);
+	if (!a || !a->isInitialized() || !(gain > 0.0f)) return;
+	// One buffer, the five 90 ms apart — one play() call, so nothing has to
+	// be scheduled across frames.
+	constexpr int    kRate = 44100;
+	constexpr size_t kStep = static_cast<size_t>(0.09 * kRate);
+	std::vector<int16_t> mix(kStep * kDragCueCount + kRate / 10, 0);
+	for (int i = 0; i < kDragCueCount; ++i)
+	{
+		const std::vector<uint8_t> pcm = dragCuePcm16(static_cast<DragCue>(i), kRate);
+		for (size_t k = 0; k + 1 < pcm.size() && i * kStep + k / 2 < mix.size(); k += 2)
+			mix[i * kStep + k / 2] = static_cast<int16_t>(pcm[k] | (pcm[k + 1] << 8));
+	}
+	std::vector<uint8_t> out(mix.size() * 2);
+	for (size_t i = 0; i < mix.size(); ++i)
+	{
+		out[i * 2]     = static_cast<uint8_t>(mix[i] & 0xFF);
+		out[i * 2 + 1] = static_cast<uint8_t>((mix[i] >> 8) & 0xFF);
+	}
+	a->play(out, kRate, 1, gain);
 }
 
 double problemSeen(AppContext& ctx, unsigned long long newestProblemMs)
@@ -1272,6 +1393,26 @@ void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool succ
 		break;
 	case Feed::BuildEnd::None:
 		break;
+	}
+	// postDragCue()'s cues from the last frame, after everything above: a
+	// reward tone that played in this frame wins over them.
+	if (!s_postedDragCues.empty())
+	{
+		std::vector<DragCue> posted;
+		posted.swap(s_postedDragCues);
+		const EditorConfig& cfg = ctx.editorConfig;
+		// No frame counter (no ImGui context) = no frame to share.
+		const int frame = frameNo();
+		if (dragCueWanted(cfg, ctx.isPlaying) && (frame < 0 || s_toneFrame != frame))
+		{
+			const double now = nowSec();
+			for (DragCue c : posted)
+				if (s_dragGate.take(c, now))
+				{
+					if (s_dragProbe) s_dragProbe(c);
+					playDragCue(ctx, c, gainFor(cfg.RewardsVolume));
+				}
+		}
 	}
 }
 

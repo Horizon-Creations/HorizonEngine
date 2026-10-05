@@ -2210,3 +2210,142 @@ TEST_CASE("ui shot: a failed compile's node halo brightens once")
 	CHECK(pale(rest) == 0);
 	ImGui::GetIO().DisplaySize = ImVec2(float(kShotW), float(kShotH));
 }
+
+// ── Drag and drop cues (EditorDragCues.h, topic 140 step 4) ──────────────────
+
+TEST_CASE("Rewards: the drag cues are shorter and quieter than the tick")
+{
+	constexpr int kRate = 44100;
+	const int tickPeak = peakOf(samplesOf(saveTickPcm16(kRate)));
+	struct Case { HE::Ed::DragCue cue; double mainHz; };
+	using C = HE::Ed::DragCue;
+	const Case cases[] = { { C::Pickup, 1500.0 }, { C::OverValid, 2217.46 },
+	                       { C::OverInvalid, 987.77 }, { C::Drop, 1318.51 },
+	                       { C::Cancel, 1500.0 } };
+	static_assert(std::size(cases) == static_cast<size_t>(HE::Ed::kDragCueCount));
+	for (const Case& c : cases)
+	{
+		CAPTURE(static_cast<int>(c.cue));
+		const std::vector<int16_t> s = samplesOf(dragCuePcm16(c.cue, kRate));
+		REQUIRE_FALSE(s.empty());
+		CHECK(s.size() <= static_cast<size_t>(0.06 * kRate));        // ≤ 60 ms
+		const int peak = peakOf(s);
+		CHECK(peak > 0);
+		CHECK(peak <= tickPeak * 6 / 10);                             // ≤ 0.6 × the tick
+		CHECK(s.back() == 0);                                         // ends on exactly 0
+		const std::vector<int16_t> firstMs(s.begin(), s.begin() + kRate / 1000);
+		CHECK(peakOf(firstMs) < peak / 2);                            // eased in
+		CHECK(powerAt(s, kRate, c.mainHz) > 10.0 * powerAt(s, kRate, 300.0));   // no bass
+	}
+	CHECK(dragCuePcm16(C::Drop, 0).empty());
+}
+
+TEST_CASE("Rewards: the drag cue gate — hover edges paced, drop and cancel always")
+{
+	using C = HE::Ed::DragCue;
+	HE::Ed::DragCues::Gate g;
+	CHECK(g.take(C::Pickup, 1.0));
+	CHECK(g.take(C::OverValid, 1.0));          // a different cue in the same instant
+	CHECK_FALSE(g.take(C::OverInvalid, 1.02)); // zig-zag over a pin row: within 50 ms
+	CHECK(g.take(C::OverInvalid, 1.06));
+	CHECK(g.take(C::Drop, 1.061));             // the end of a gesture is never paced away
+	CHECK_FALSE(g.take(C::Drop, 1.07));        // …but the same event twice (two canvases) is
+	CHECK(g.take(C::Cancel, 1.07));
+	CHECK(g.take(C::Drop, 1.2));
+	// A clock that went backwards (a new ImGui context) does not block.
+	CHECK(g.take(C::Drop, 0.0));
+}
+
+TEST_CASE("Rewards: drag cues follow the feedback switches")
+{
+	EditorConfig c;
+	CHECK_FALSE(dragCueWanted(c, false));      // Success Sound starts off
+	c.RewardsSound = true;
+	CHECK(dragCueWanted(c, false));
+	CHECK(c.RewardsSoundDragDrop);             // on by default under Success Sound
+	CHECK_FALSE(dragCueWanted(c, true));       // not during Play
+	c.RewardsSoundDragDrop = false;
+	CHECK_FALSE(dragCueWanted(c, false));
+	c.RewardsSoundDragDrop = true;
+	c.RewardsVolume = 0.0f;
+	CHECK_FALSE(dragCueWanted(c, false));
+	c.RewardsVolume = 0.5f;
+	c.EditorSoundsMuted = true;
+	CHECK_FALSE(dragCueWanted(c, false));
+	c.EditorSoundsMuted = false;
+	c.RewardsEnabled = false;
+	CHECK_FALSE(dragCueWanted(c, false));
+}
+
+namespace
+{
+std::vector<HE::Ed::DragCue> s_probed;
+void probeCue(HE::Ed::DragCue c) { s_probed.push_back(c); }
+} // namespace
+
+TEST_CASE("Rewards: posted drag cues play once, on the editor's engine, through the probe")
+{
+	using C = HE::Ed::DragCue;
+	AudioEngine project, ui;
+	REQUIRE(project.init(true));
+	RewardsContextBits bits;
+	bits.config.RewardsSound  = true;
+	bits.config.RewardsVolume = 1.0f;
+	AppContext ctx = bits.make(project, ui);
+
+	// A context of its own, so the frame counter and the clock move.
+	ImGuiContext* prev = ImGui::GetCurrentContext();
+	ImGuiContext* mine = ImGui::CreateContext();
+	ImGui::SetCurrentContext(mine);
+	ImGuiIO& io = ImGui::GetIO();
+	io.DisplaySize = ImVec2(640.0f, 480.0f);
+	io.DeltaTime   = 0.1f;
+	io.IniFilename = nullptr;
+	io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+	auto frame = [&]{ ImGui::NewFrame(); pollBuild(ctx, 0, false, false, true); ImGui::EndFrame(); };
+
+	setDragCueProbe(&probeCue);
+	s_probed.clear();
+	frame();                                    // opens the UI-sound device
+	REQUIRE(ui.isInitialized());
+
+	postDragCue(C::Pickup);
+	postDragCue(C::OverValid);
+	CHECK(s_probed.empty());                    // queued, not played yet
+	frame();
+	CHECK(s_probed == std::vector<C>{ C::Pickup, C::OverValid });
+	CHECK(loudestOut(ui) > 0.01f);              // heard on the editor's engine…
+	CHECK(loudestOut(project) == 0.0f);         // …never on the project's
+	ui.stopAll();
+	frame();
+	CHECK(s_probed.size() == 2);                // once, not again next frame
+
+	// Switched off, during Play: dropped, not kept for later.
+	s_probed.clear();
+	bits.config.RewardsSoundDragDrop = false;
+	postDragCue(C::Drop);
+	frame();
+	bits.config.RewardsSoundDragDrop = true;
+	ctx.isPlaying = true;
+	postDragCue(C::Drop);
+	frame();
+	ctx.isPlaying = false;
+	frame();
+	CHECK(s_probed.empty());
+
+	// A reward tone in the same frame wins over the cue.
+	postDragCue(C::Drop);
+	ImGui::NewFrame();
+	preview(ctx, Tone::CompileFailed);          // a tone that played this frame
+	pollBuild(ctx, 0, false, false, true);
+	ImGui::EndFrame();
+	CHECK(s_probed.empty());
+	postDragCue(C::Drop);
+	frame();
+	CHECK(s_probed == std::vector<C>{ C::Drop });
+
+	setDragCueProbe(nullptr);
+	ui.stopAll();
+	ImGui::DestroyContext(mine);
+	ImGui::SetCurrentContext(prev);
+}

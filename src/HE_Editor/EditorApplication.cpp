@@ -1261,6 +1261,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsSoundCommit           = globalstate.getCustomConfigBool("RewardsSoundCommit", m_editorConfig.RewardsSoundCommit);
 	m_editorConfig.RewardsSoundTutorial         = globalstate.getCustomConfigBool("RewardsSoundTutorial", m_editorConfig.RewardsSoundTutorial);
 	m_editorConfig.RewardsSoundProblem          = globalstate.getCustomConfigBool("RewardsSoundProblem", m_editorConfig.RewardsSoundProblem);
+	m_editorConfig.RewardsSoundDragDrop         = globalstate.getCustomConfigBool("RewardsSoundDragDrop", m_editorConfig.RewardsSoundDragDrop);
 	m_editorConfig.RewardsProblemPulse          = globalstate.getCustomConfigBool("RewardsProblemPulse", m_editorConfig.RewardsProblemPulse);
 	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
 	m_editorConfig.RewardsCounterTick           = globalstate.getCustomConfigBool("RewardsCounterTick", m_editorConfig.RewardsCounterTick);
@@ -11197,6 +11198,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsSoundCommit",         m_editorConfig.RewardsSoundCommit);
 	globalstate.setCustomConfigEntry("RewardsSoundTutorial",       m_editorConfig.RewardsSoundTutorial);
 	globalstate.setCustomConfigEntry("RewardsSoundProblem",        m_editorConfig.RewardsSoundProblem);
+	globalstate.setCustomConfigEntry("RewardsSoundDragDrop",       m_editorConfig.RewardsSoundDragDrop);
 	globalstate.setCustomConfigEntry("RewardsProblemPulse",        m_editorConfig.RewardsProblemPulse);
 	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
 	globalstate.setCustomConfigEntry("RewardsCounterTick",         m_editorConfig.RewardsCounterTick);

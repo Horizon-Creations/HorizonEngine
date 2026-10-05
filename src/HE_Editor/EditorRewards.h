@@ -1,5 +1,7 @@
 #pragma once
 
+#include "EditorDragCues.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -361,6 +363,8 @@ struct EditorConfig;
 //   bool  RewardsSoundCommit      = true;  committed / pushed
 //   bool  RewardsSoundTutorial    = true;  tour finished
 //   bool  RewardsSoundProblem     = true;  a new problem, editor in the background
+//   bool  RewardsSoundDragDrop    = true;  the HorizonCode graph's drag and drop
+//                                          cues — not moments, see EditorDragCues.h
 //                                      Each tone's own switch, under
 //                                      RewardsSound — which is the one that
 //                                      starts off, so a fresh install still
@@ -460,6 +464,21 @@ namespace HE::Ed::Rewards
 	// sound(), deferred to the next pollBuild, for a hook without an AppContext
 	// (LevelScriptPanel's failed compile). Same cap and order as post().
 	void postSound(Tone t);
+
+	// A drag and drop cue from the HorizonCode canvas (EditorDragCues.h), played
+	// by the next pollBuild if dragCueWanted and the cue Gate let it through,
+	// and no reward tone played in that frame. Not a moment: no line, nothing
+	// counted, not through the Feed. A frame's handful at most, queued in order.
+	void postDragCue(DragCue c);
+	// Master, Success Sound, Drag and Drop Sound, volume > 0, not muted, not
+	// during Play. No focus rule: whoever drags is using the editor right now.
+	bool dragCueWanted(const EditorConfig& cfg, bool playing);
+	// The test interface (no audio device needed): called with every cue
+	// pollBuild decided to play, before the device is asked. nullptr = none.
+	void setDragCueProbe(void (*probe)(DragCue));
+	// The settings' "Preview" for Drag and Drop Sound: the five cues once, in
+	// a row, past the switches and the Gate (muted still means silent).
+	void previewDragCues(AppContext& ctx);
 
 	// V8 and the problem tone, once per frame from the footer bell with the
 	// newest Problem entry's whenMs in the snapshot it draws from (0: none).
@@ -878,4 +897,6 @@ namespace HE::Ed::Rewards
 	std::vector<uint8_t> problemPcm16(int sampleRate);
 	// The one for `t`.
 	std::vector<uint8_t> tonePcm16(Tone t, int sampleRate);
+	// The drag and drop cues (EditorDragCues.h): shorter and quieter than the tick.
+	std::vector<uint8_t> dragCuePcm16(DragCue c, int sampleRate);
 }

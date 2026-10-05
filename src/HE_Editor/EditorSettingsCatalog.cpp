@@ -226,6 +226,11 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Two quiet knocks when a new problem notification arrives, "
 	                    "only while the editor is in the background and at most "
 	                    "every 30 s. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundDragDrop", "Drag and Drop Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundDragDrop,
+	                    "Short, quiet clicks while dragging wires and variables in "
+	                    "the HorizonCode graphs: pick up, over a pin that fits or "
+	                    "not, dropped, cancelled. Needs Success Sound on."));
 	t.push_back(boolRow("rewards.showProgress", "Show Progress", "Feedback", "rewards",
 	                    &EditorConfig::RewardsShowProgress,
 	                    "Show successful builds today and days in a row with the "

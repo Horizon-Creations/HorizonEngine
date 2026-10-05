@@ -970,6 +970,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 				ImGui::SameLine();
 				if (EditorWidgets::button("Preview##problem"))
 					HE::Ed::Rewards::preview(ctx, Tone::Problem);
+				EditorWidgets::checkbox("Drag and Drop Sound", &cfg.RewardsSoundDragDrop);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##dragdrop"))
+					HE::Ed::Rewards::previewDragCues(ctx);
 			}
 			EditorWidgets::checkbox("Show Progress", &cfg.RewardsShowProgress);
 			{
@@ -2160,6 +2164,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsSoundCommit        = true;
 			cfg.RewardsSoundTutorial      = true;
 			cfg.RewardsSoundProblem       = true;
+			cfg.RewardsSoundDragDrop      = true;
 			cfg.RewardsProblemPulse       = true;
 			cfg.RewardsShowProgress  = true;
 			cfg.RewardsCounterTick   = true;

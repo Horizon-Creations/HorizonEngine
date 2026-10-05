@@ -3430,6 +3430,15 @@ namespace
 	  "front of it the bell's ring says it, see Problem Pulse) and at most once "
 	  "every thirty seconds, however many errors arrive at once.",
 	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Drag and Drop Sound", "",
+	  "Short, quiet cues for drag and drop in the HorizonCode graphs (Level "
+	  "Script, Game Instance, classes, widget graphs): a blip when a wire or a "
+	  "variable is picked up, a light tick over a pin it would connect to and a "
+	  "muted one over a pin it would not, a snap when it lands and a falling "
+	  "blip when the drop is cancelled or refused. Once per event, never per "
+	  "frame; dragging a node around stays silent. Same volume and mute as the "
+	  "other feedback sounds. Preview plays all five in a row.",
+	  "", "horizoncode#graphs" },
 	{ "Preferences/Feedback/Problem Pulse", "",
 	  "When a new problem arrives in the notifications, one thin ring widens "
 	  "around the footer bell and fades within about half a second; with "
