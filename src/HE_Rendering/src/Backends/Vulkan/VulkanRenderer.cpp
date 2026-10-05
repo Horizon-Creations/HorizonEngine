@@ -710,8 +710,10 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 
         // ── Forward SSR (docs/ssr-cross-backend-plan.md checkpoint B) ──
         // Built lazily, and only here: the trace's radiance source is the
-        // HDR target of THIS branch, so SSR does not exist in the swapchain
-        // path at all (plan §2.2 — reported, not hidden).
+        // HDR target of THIS branch. The packaged game reaches it too when it
+        // asks for the chain (SetSwapchainPostProcessing, plan C6 closed); only
+        // the direct swapchain fallback (application mode, sRGB-only
+        // swapchain) has no SSR.
         if (m_ssrEnabled) EnsureSSRPipelines();
         const bool ssrWanted = ssrWantedThisFrame();
 
@@ -980,7 +982,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         }
     }
     // The jitter belongs to this frame's viewport passes only; whatever draws
-    // after them (a world preview, the swapchain path) rasterises unjittered.
+    // after them (a world preview, the swapchain pass — the game's present
+    // blit or the direct fallback) rasterises unjittered.
     m_taaFrame = false;
 }
 
@@ -989,7 +992,9 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     Capabilities c;
     c.supportsShadows        = true;
     c.supportsPostProcessing = m_postFxReady;
-    c.supportsHDR            = false;
+    // The HDR scene target lives and dies with the post chain, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing) both run.
+    c.supportsHDR            = m_postFxReady;
     c.supportsGpuParticles   = false;
     // Software compute ray tracing (gi_*.comp) — compute is core Vulkan, so no
     // extension gate. If pipeline creation fails at runtime, runGi() leaves
@@ -1000,14 +1005,15 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // B) — the reflection MRT pre-pass plus last frame's HDR copy, Metal's
     // Option-A path. There is no deferred composite here because there is no
     // G-buffer. Reported alongside supportsPostProcessing on purpose: the HDR
-    // target the trace reads is the PostFX scene target, and it exists only in
-    // the editor viewport (§2.2) — in the swapchain path the toggle is honoured
-    // by doing nothing. The shaders come from the cross-compiler, hence the #if.
+    // target the trace reads is the PostFX scene target, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing, plan C6) both
+    // run; only the direct swapchain fallback (application mode, sRGB-only
+    // swapchain) has none. The shaders come from the cross-compiler, hence the #if.
     c.supportsScreenSpaceReflections = m_postFxReady;
 #endif
-    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the editor
-    // viewport's post chain — false only if a TAA shader (.spv) or pipeline is
-    // missing. The swapchain path renders unjittered either way (m_taaFrame).
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same post
+    // chain — false only if a TAA shader (.spv) or pipeline is missing. Only
+    // the direct swapchain fallback renders unjittered (m_taaFrame).
     c.supportsTemporalAA = taaReady();
     return c;
 }
@@ -8616,8 +8622,8 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
 // Screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint B1). The
 // trace is a fragment shader over a rasterized pre-pass — no compute, no BVH,
 // no extension — so unlike the ray-traced GI it has no device gate here. What
-// it does need is the shader cross-compiler and the editor viewport's HDR
-// target; both are checked in ssrWantedThisFrame().
+// it does need is the shader cross-compiler and the post chain's HDR target
+// (editor viewport or packaged game); both are checked in ssrWantedThisFrame().
 void VulkanRenderer::SetShadowSettings(const ShadowSettings& s)
 {
     // The images are not touched here: this is called from the editor's frame
@@ -11928,8 +11934,9 @@ void VulkanRenderer::destroySSRTargets()
 
 // One gate for the whole frame, asked before the pre-pass and again before the
 // trace. `m_postFxReady`/`m_hdrImage` are the honest part: this backend's only
-// HDR radiance source is the editor viewport's PostFX target (plan §2.2), so in
-// the swapchain path SSR is silently inactive rather than half-wired.
+// HDR radiance source is the PostFX target (plan §2.2) — the editor viewport's,
+// or the packaged game's since it runs the chain too (plan C6) — so in the
+// direct swapchain fallback SSR is silently inactive rather than half-wired.
 bool VulkanRenderer::ssrWantedThisFrame() const
 {
     return m_ssrEnabled && m_ssrIntensity > 0.0f && m_ssrReady

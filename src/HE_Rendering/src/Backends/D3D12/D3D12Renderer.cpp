@@ -9963,12 +9963,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         // ── Forward screen-space reflections (plan checkpoint D) ─────────────
         // The radiance source is the previous frame's HDR colour, so SSR runs
-        // only where Render() actually bound hdrRT — `usingHDR`. That is the C6
-        // hole inherited from D3D11, stated as one gate: the swapchain branch
-        // (the packaged game, no editor viewport) draws straight into the
-        // backbuffer, has no HDR target, and therefore no SSR. Deliberately not
-        // fixed here — giving the swapchain path an HDR target changes the
-        // packaged game's frame layout and needs its own decision.
+        // only where Render() actually bound hdrRT — `usingHDR`, stated as one
+        // gate. That is DrawViewportFrame: the editor viewport, and the packaged
+        // game too since it asks for the chain (SetSwapchainPostProcessing, C6
+        // closed). Only the direct swapchain branch (application mode, or the
+        // chain not ready) draws straight into the backbuffer, has no HDR
+        // target, and therefore no SSR.
         bool ssrFrameActive = false;
 #if defined(HE_HAVE_SHADERC)
         ssrFrameActive = p.ssrEnabled && p.usingHDR && p.hdrRT
@@ -11010,18 +11010,20 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     Capabilities c{};
     c.supportsShadows        = true;
     c.supportsPostProcessing = m_impl->postFxReady;
-    c.supportsHDR            = false;
+    // The HDR scene target lives and dies with the post chain, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing) both run.
+    c.supportsHDR            = m_impl->postFxReady;
     // Software ray-traced DDGI via CS 5.0/5.1 (FL 11.0 baseline) — same
     // CPU-BVH path as GL 4.3/D3D11; cleared if the GI pipelines fail to build.
     c.supportsGlobalIllumination = m_impl->giSupported;
-    // Forward SSR needs an HDR scene target to read radiance out of, and D3D12
-    // only has one in the editor viewport path (docs/ssr-cross-backend-plan.md
-    // C6/D). postFxReady is the honest answer: in the swapchain path the switch
-    // exists but does nothing, exactly as on Vulkan and D3D11.
+    // Forward SSR reads radiance out of the post chain's HDR scene target, so
+    // it is there exactly when the chain is (docs/ssr-cross-backend-plan.md
+    // C6/D, closed by the swapchain post chain): editor viewport and packaged
+    // game alike. Only the direct swapchain fallback (application mode) has none.
     c.supportsScreenSpaceReflections = m_impl->postFxReady;
-    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same
-    // editor-viewport post chain SSR needs — false only if a TAA shader or
-    // PSO failed. The swapchain path renders unjittered either way (taaFrame).
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same post
+    // chain SSR needs — false only if a TAA shader or PSO failed. Only the
+    // direct swapchain fallback renders unjittered (taaFrame).
     c.supportsTemporalAA = m_impl->taaReady();
     return c;
 }

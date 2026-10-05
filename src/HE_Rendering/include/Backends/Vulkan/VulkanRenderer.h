@@ -1013,9 +1013,11 @@ private:
 	//    trace SAMPLES the previous history pair even on the first frame (the
 	//    blend weight is zero, the read is not), and sampling an image still in
 	//    UNDEFINED is invalid however the value is used afterwards.
-	//  * SSR exists ONLY in the editor-viewport HDR path, because that is the
-	//    only place m_hdrImage exists (§2.2 of the plan). The swapchain branch
-	//    draws straight into the backbuffer and has no radiance source.
+	//  * SSR exists ONLY in the post chain's HDR path, because that is the only
+	//    place m_hdrImage exists (§2.2 of the plan): the editor viewport, and the
+	//    packaged game when it runs the chain (SetSwapchainPostProcessing, C6).
+	//    The direct swapchain fallback draws straight into the backbuffer and
+	//    has no radiance source.
 	bool        EnsureSSRPipelines();
 	void        destroySSRPipelines();
 	void        createSSRTargets(uint32_t w, uint32_t h);

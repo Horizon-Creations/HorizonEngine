@@ -425,6 +425,8 @@ Vorbedingungen:
 4. `GetCapabilities`-Kommentare (C6, „the switch exists but does nothing“) auf allen drei
    Backends bereinigen, `ssr-cross-backend-plan.md` C6 als erledigt markieren und
    Release-Notes-Hinweis zur Bildänderung (§0).
+   *Kommentare, `supportsHDR` (jetzt `postFxReady` auf allen drei) und C6 nachgezogen in
+   Thema 147 (2026-10-05). Der Release-Notes-Hinweis ist dort nicht enthalten und bleibt offen.*
 
 ## 10. Ergebnis Schritt 2: D3D11 (2026-10-03)
 
