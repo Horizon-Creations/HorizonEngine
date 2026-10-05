@@ -782,6 +782,9 @@ struct VarSlot
     // Metadata again: the Runtime's frame-end compare binds both backends.
     bool          bindTo     = false;
     const char*   pullRef    = "";
+    // Mirrors Variable::notifyChange, appended last with a default. Metadata:
+    // the Runtime's frame-end compare reports for both backends.
+    bool          notifyChange = false;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
@@ -816,14 +819,15 @@ inline VarSlot slot(const char* name, PinType type, bool isArray, int access,
                     bool saveGame = false,
                     const char* pullSource = "", const char* pullVar = "",
                     const char* pullMember = "", const char* pullClass = "",
-                    bool bindTo = false, const char* pullRef = "")
+                    bool bindTo = false, const char* pullRef = "",
+                    bool notifyChange = false)
 {
     return VarSlot{ name, type, isArray, access, typeName, std::move(def),
                     &SlotAccess<M>::get, &SlotAccess<M>::set, container, keyType,
                     replicated, repNotify, saveGame,
                     pullSource ? pullSource : "", pullVar ? pullVar : "",
                     pullMember ? pullMember : "", pullClass ? pullClass : "",
-                    bindTo, pullRef ? pullRef : "" };
+                    bindTo, pullRef ? pullRef : "", notifyChange };
 }
 
 // Enum members are plain ints in C++, so the Value coming back out has to be
@@ -924,7 +928,7 @@ inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slot
     for (const VarSlot& s : slots)
         out.push_back({ s.name, s.type, s.isArray, s.access, s.replicated, s.repNotify,
                         s.saveGame, s.pullSource, s.pullVar, s.pullMember, s.pullClass,
-                        s.bindTo, s.pullRef });
+                        s.bindTo, s.pullRef, s.notifyChange });
     return out;
 }
 

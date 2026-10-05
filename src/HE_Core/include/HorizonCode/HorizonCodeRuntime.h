@@ -268,6 +268,32 @@ public:
     };
     std::vector<BindOutcome> boundVariablesOf(InstanceId id) const;
 
+    // ── Notify on Change (docs/bind-to-variable-binding-plan.md §4) ──────────
+    // A variable marked Variable::notifyChange is watched from registration on.
+    // exchangeState() compares it with what it held at the previous compare and,
+    // when it moved, calls the owner's private OnChanged_<Name>(Old) (silently
+    // nothing when the class has none) and sends "<Name>Changed" with the NEW
+    // value to every instance bound to the owner per Bind Event (directly, typed
+    // per listener, never passed on to the listener's listeners). The first
+    // compare an instance appears in only takes the baseline: defaults, pulls,
+    // spawn values and whatever Construct set are its starting state. A Bind To
+    // push always reports, the first one included.
+    //
+    // Script frontends subscribe through watch(): the same compare, without the
+    // HorizonCode side (no OnChanged_, no <Name>Changed), reported through
+    // onVariableChanged. Only PUBLIC instance variables can be watched — the
+    // door Get (Ref) uses. `token` belongs to the caller (one per script
+    // instance, say); unwatch(token) drops all of its subscriptions. False =
+    // no such instance or no such public variable.
+    bool watch(InstanceId owner, const std::string& var, uint64_t token);
+    void unwatch(uint64_t token);
+    void unwatch(InstanceId owner, const std::string& var, uint64_t token);
+    // Called once per reported change of a variable somebody watch()ed, after
+    // the HorizonCode side of it. One hook, set by the host, like the debug hooks.
+    // `tokens` are the subscribers to hand it to.
+    std::function<void(InstanceId owner, const std::string& var, const Value& old,
+                       const Value& now, const std::vector<uint64_t>& tokens)> onVariableChanged;
+
     // ── One function's multiplayer face (plan §7.6) ─────────────────────────
     // Here for exactly the reason replicatedVariablesOf is: it is the question
     // whose answer differs between the two backends — an interpreted instance
@@ -715,6 +741,28 @@ private:
     // The owner's source instance for `b` right now, or 0 with the reason (None
     // and 0 together = a Ref source that holds null, which is no failure).
     InstanceId resolveBindSource(const Binding& b, PullFailure& why) const;
+
+    // ── Notify on Change (§4.2) ──────────────────────────────────────────────
+    // One watched variable: declared (Notify on Change) and/or subscribed by
+    // scripts. Both share the shadow and the compare, nothing else.
+    struct Watched
+    {
+        InstanceId  owner = 0;
+        std::string name;
+        bool        declared = false;       // Notify on Change: OnChanged_ + <Name>Changed
+        std::vector<uint64_t> tokens;       // script subscriptions: onVariableChanged
+        Value       shadow;
+        bool        baselined = false;
+    };
+    std::vector<Watched> m_watched;
+    static constexpr int kMaxChangeFires = 256;
+    // The declared watches of a freshly registered instance (both backends).
+    void watchDeclared(InstanceId id);
+    Watched* findWatched(InstanceId owner, const std::string& name);
+    // Phase 2 of exchangeState: one pass over m_watched. Returns how many fired.
+    int reportChanges(int& budget);
+    // "<name>Changed" to everyone bound to `owner`, typed per listener, direct.
+    void dispatchChanged(InstanceId owner, const std::string& name, const Value& now);
     // Build a Context that routes variable access to the instance's private
     // store, property/show/hide to its host bindings, and the delegation hooks
     // (emit/bind/callExternal/self/gameInstance) back to the runtime.

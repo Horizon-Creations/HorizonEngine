@@ -1873,6 +1873,7 @@ nlohmann::json variableToJsonObj(const Variable& v)
     if (v.repNotify)  e["repNotify"] = true;
     if (v.saveGame)   e["saveGame"] = true;
     if (v.exposeOnSpawn) e["spawn"] = true;
+    if (v.notifyChange)  e["notifyChange"] = true;
     if (v.isArray)    e["arr"] = true;
     if (v.isArray && !v.defaultItems.empty())
     {
@@ -2029,6 +2030,9 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     // Only a creator can hand a value in, and it reaches public instance
     // variables only (the runtime sets them the way Set (Ref) does).
     v.exposeOnSpawn = e.value("spawn", false) && v.access == 0 && v.scope == 0;
+    // Notify on Change (Bind To plan §4.1): instance variables only, any type —
+    // a Ref is a value locally, so unlike Replicated it may report too.
+    v.notifyChange = e.value("notifyChange", false) && v.scope == 0;
     v.isArray = e.value("arr", false);
     v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
     if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams

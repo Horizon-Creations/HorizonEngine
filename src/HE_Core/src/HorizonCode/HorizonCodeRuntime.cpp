@@ -113,6 +113,7 @@ InstanceId Runtime::registerLevels(std::vector<Graph> levels, HostBindings bindi
     // LAST, after the defaults are seeded and before the caller can fire
     // anything — the one point every kind of instance passes through
     // (design §2.4). Hosts fire PreConstruct/Construct/BeginPlay afterwards.
+    watchDeclared(id);   // Notify on Change: every instance, the Game Instance too
     if (pull) pullOnConstruct(id);
     return id;
 }
@@ -149,6 +150,7 @@ InstanceId Runtime::registerCompiled(CompiledPtr inst, HostBindings bindings,
     it->second.compiled->bindContext(makeContext(id));
     // Same place in the sequence as for an interpreted instance: after the
     // defaults (the member initialisers) and the Context, before any event.
+    watchDeclared(id);   // Notify on Change: every instance, the Game Instance too
     if (pull) pullOnConstruct(id);
     return id;
 }
@@ -409,8 +411,9 @@ InstanceId Runtime::resolveBindSource(const Binding& b, PullFailure& why) const
 
 int Runtime::exchangeState()
 {
-    if (m_bindings.empty()) return 0;
+    if (m_bindings.empty() && m_watched.empty()) return 0;
     int writes = 0;
+    int changeBudget = kMaxChangeFires;
 
     // The binding rests: the variable keeps its last value, and the first
     // compare that can resolve the source again writes, whatever the value.
@@ -464,10 +467,26 @@ int Runtime::exchangeState()
             b.sourceShadow = val;
             b.haveShadow = true;
             b.why = PullFailure::None;
+            // A push over a binding always reports (§4.2), the first one too:
+            // a watched target without a baseline gets the value it is about
+            // to lose as one.
+            if (Watched* w = findWatched(b.owner, b.name); w && !w->baselined)
+            {
+                w->shadow = shape;
+                w->baselined = true;
+            }
             // A copy, as for the pull: containers and structs are values.
             setVariable(b.owner, b.name, pullConvert(val, shape));
             changedAny = true;
             ++writes;
+        }
+        // Phase 2 (§4.2): report what moved — through a binding above, or
+        // through anything else since the last compare. Its handlers may move
+        // bound sources again, so a report keeps the rounds going.
+        if (reportChanges(changeBudget) > 0)
+        {
+            changedAny = true;
+            ++writes;   // a handler ran: an event-driven host redraws
         }
         if (!changedAny) break;
     }
@@ -483,6 +502,212 @@ std::vector<Runtime::BindOutcome> Runtime::boundVariablesOf(InstanceId id) const
     for (const Binding& b : m_bindings)
         if (b.owner == id) out.push_back({ b.name, b.src, b.boundTo, b.why });
     return out;
+}
+
+// ── Notify on Change (docs/bind-to-variable-binding-plan.md §4) ─────────────
+void Runtime::watchDeclared(InstanceId id)
+{
+    const Inst* inst = find(id);
+    if (!inst) return;
+    // Leaf-most declaration decides, as for the pull: names cannot repeat
+    // across levels, so "any level says notify" is the same thing.
+    std::vector<std::string> names;
+    if (inst->compiled)
+    {
+        for (const auto& vi : inst->compiled->varInfos())
+            if (vi.notifyChange && vi.name) names.emplace_back(vi.name);
+    }
+    else
+        for (const Graph& g : inst->levels)
+            for (const Variable& v : g.variables)
+                if (v.scope == 0 && v.notifyChange) names.push_back(v.name);
+    for (std::string& n : names)
+    {
+        Watched w;
+        w.owner = id;
+        w.name = std::move(n);
+        w.declared = true;
+        m_watched.push_back(std::move(w));
+    }
+}
+
+Runtime::Watched* Runtime::findWatched(InstanceId owner, const std::string& name)
+{
+    for (Watched& w : m_watched)
+        if (w.owner == owner && w.name == name) return &w;
+    return nullptr;
+}
+
+bool Runtime::watch(InstanceId owner, const std::string& var, uint64_t token)
+{
+    const Inst* inst = find(owner);
+    if (!inst) return false;
+    // Public instance variables only — the door Get (Ref) uses.
+    bool visible = false;
+    if (inst->compiled)
+    {
+        const CompiledVarInfo* vi = findVarInfo(*inst->compiled, var);
+        visible = vi && vi->access == 0;
+    }
+    else
+    {
+        const Variable* v = findVarInLevels(inst->levels, var);
+        visible = v && v->scope == 0 && v->access == 0;
+    }
+    if (!visible) return false;
+    Watched* w = findWatched(owner, var);
+    if (!w)
+    {
+        Watched n;
+        n.owner = owner;
+        n.name = var;
+        m_watched.push_back(std::move(n));
+        w = &m_watched.back();
+    }
+    if (std::find(w->tokens.begin(), w->tokens.end(), token) == w->tokens.end())
+        w->tokens.push_back(token);
+    return true;
+}
+
+void Runtime::unwatch(InstanceId owner, const std::string& var, uint64_t token)
+{
+    for (Watched& w : m_watched)
+        if (w.owner == owner && w.name == var)
+            w.tokens.erase(std::remove(w.tokens.begin(), w.tokens.end(), token), w.tokens.end());
+    m_watched.erase(std::remove_if(m_watched.begin(), m_watched.end(),
+        [](const Watched& w){ return !w.declared && w.tokens.empty(); }), m_watched.end());
+}
+
+void Runtime::unwatch(uint64_t token)
+{
+    for (Watched& w : m_watched)
+        w.tokens.erase(std::remove(w.tokens.begin(), w.tokens.end(), token), w.tokens.end());
+    m_watched.erase(std::remove_if(m_watched.begin(), m_watched.end(),
+        [](const Watched& w){ return !w.declared && w.tokens.empty(); }), m_watched.end());
+}
+
+int Runtime::reportChanges(int& budget)
+{
+    int fires = 0;
+    // By index and re-read after every handler: a handler may write, create,
+    // destroy (remove() erases entries) or watch — nothing here may hold a
+    // reference into m_watched across a call out.
+    for (size_t i = 0; i < m_watched.size(); ++i)
+    {
+        const InstanceId owner = m_watched[i].owner;
+        if (!find(owner)) continue;
+        Value now = getVariable(owner, m_watched[i].name);
+        Watched& w = m_watched[i];
+        if (!w.baselined) { w.shadow = std::move(now); w.baselined = true; continue; }
+        if (valuesEqual(now, w.shadow)) continue;
+        if (budget <= 0)
+        {
+            if (m_pullWarned.insert("notify|budget").second)
+                hcWarn("Notify on Change: more than " + std::to_string(kMaxChangeFires) +
+                       " change reports in one frame - an OnChanged_ handler feeding another?"
+                       " The rest follows next frame");
+            return fires;
+        }
+        --budget;
+        ++fires;
+        Value old = std::move(w.shadow);
+        w.shadow = now;
+        const std::string name = w.name;
+        const bool declared = w.declared;
+        const std::vector<uint64_t> tokens = w.tokens;   // copy: a handler may unwatch
+        if (declared)
+        {
+            // Private is fine: the runtime calls it on the class's own behalf.
+            // A class without the function gets nothing (callFunction is silent).
+            callFunction(owner, "OnChanged_" + name, /*requirePublic=*/false, { old });
+            if (find(owner)) dispatchChanged(owner, name, now);
+        }
+        if (!tokens.empty() && onVariableChanged)
+            onVariableChanged(owner, name, old, now, tokens);
+    }
+    return fires;
+}
+
+void Runtime::dispatchChanged(InstanceId owner, const std::string& name, const Value& now)
+{
+    if (m_dispatchDepth >= 32) return;   // same bound as dispatchToListeners
+    const std::string evName = name + "Changed";
+    const EventId ev = eventId(evName);
+    auto oit = m_listeners.find(owner);
+    if (oit == m_listeners.end()) return;
+    auto eit = oit->second.find(ev);
+    if (eit == oit->second.end()) return;
+
+    const std::vector<InstanceId> listeners = eit->second;   // copy: a handler may re-bind
+    ++m_dispatchDepth;
+    for (InstanceId l : listeners)
+    {
+        if (l == owner) continue;            // its own change goes to OnChanged_, not here
+        Inst* li = find(l);
+        if (!li) continue;
+        if (++m_dispatchFires > kMaxDispatchFires)
+        {
+            if (m_dispatchFires == kMaxDispatchFires + 1)
+                hcError("event dispatch budget exceeded while dispatching '" + evName + "' - aborting it");
+            break;
+        }
+
+        // The listener's handler signature, as for OnDestroyed.
+        bool handles = false, wantsArg = false;
+        PinType argType = PinType::Float;
+        std::string argTypeName;
+        if (li->compiled)
+        {
+            for (const CompiledEventInfo& e : li->compiled->eventInfos())
+                if (e.name && evName == e.name && e.elem == 0)
+                {
+                    handles  = true;
+                    wantsArg = e.argType >= 0;
+                    argType  = (PinType)e.argType;
+                    argTypeName = e.typeName ? e.typeName : "";
+                }
+        }
+        else if (const int lv = levelHandlingEvent(*li, evName, 0); lv >= 0)
+        {
+            handles = true;
+            for (const Node& n : li->levels[(size_t)lv].nodes)
+                if (n.type == NodeType::Event && n.s == evName && n.elem == 0)
+                {
+                    wantsArg = n.hasArg;
+                    argType  = n.propType;
+                    argTypeName = n.typeName;
+                    break;
+                }
+        }
+        if (!handles) continue;
+
+        Value arg;   // no argument: "it changed" is the message
+        if (wantsArg)
+        {
+            // Checked, not coerced, as for OnDestroyed: a Float handler on an
+            // Int variable takes it (the pull's numeric rule), a String one
+            // on a struct does not.
+            std::string detail;
+            if (!pullShapesCompatible(now.type, now.kind(), now.keyType, now.typeName,
+                                      argType, ContainerKind::None, PinType::String, argTypeName,
+                                      &detail))
+            {
+                const std::string lKey = li->cls.key.empty() ? std::string("<graph>") : li->cls.key;
+                if (m_extractWarned.insert("changed|" + lKey + "|" + evName).second)
+                    hcWarn("Notify on Change: '" + lKey + "' handles '" + evName +
+                           "' with an argument that does not fit (" + detail + "); handler skipped");
+                continue;
+            }
+            Value shape;
+            shape.type = argType;
+            shape.typeName = argTypeName;
+            arg = pullConvert(now, shape);
+        }
+        if (li->compiled) li->compiled->fireEvent(evName, 0, arg);
+        else              runEventOnLevel(*li, l, evName, 0, arg);
+    }
+    --m_dispatchDepth;
+    if (m_dispatchDepth == 0) m_dispatchFires = 0;
 }
 
 bool Runtime::instanceIsA(InstanceId id, const std::string& classKey) const
@@ -548,6 +773,9 @@ void Runtime::remove(InstanceId id)
     // themselves at their next compare and rest.
     m_bindings.erase(std::remove_if(m_bindings.begin(), m_bindings.end(),
         [&](const Binding& b){ return b.owner == id; }), m_bindings.end());
+    // Its watches too, script subscriptions included: nothing reports a ghost.
+    m_watched.erase(std::remove_if(m_watched.begin(), m_watched.end(),
+        [&](const Watched& w){ return w.owner == id; }), m_watched.end());
     if (id == m_gameInstance) { m_gameInstance = 0; m_gameInstanceCompiled = nullptr; }
 }
 void Runtime::destroy(InstanceId id)
@@ -753,6 +981,7 @@ void Runtime::clear()
     m_pending.clear();
     m_suspended.clear();
     m_bindings.clear();
+    m_watched.clear();
     m_breakNext = false;
     m_gameInstance = 0;
     m_gameInstanceCompiled = nullptr;

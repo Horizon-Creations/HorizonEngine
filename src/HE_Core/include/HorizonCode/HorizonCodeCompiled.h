@@ -53,6 +53,9 @@ struct CompiledVarInfo
     // defaulted like the pull strings: an older table means "not bound".
     bool        bindTo     = false;
     const char* pullRef    = "";
+    // Mirrors Variable::notifyChange (Notify on Change). Appended last and
+    // defaulted: an older table means "reports nothing".
+    bool        notifyChange = false;
 };
 struct CompiledEventInfo
 {

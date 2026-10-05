@@ -7007,6 +7007,16 @@ namespace
 	  "calls its own handler after the Set. Untick and tick again and the "
 	  "existing function is kept, not duplicated.",
 	  "", "horizoncode#functions" },
+	{ "Script Variable/Notify on Change", "",
+	  "The variable reports its own change. At the end of every frame the engine "
+	  "compares it with the value it had at the end of the last one, and when it "
+	  "moved, calls OnChanged_<variable> with the old value as its one parameter "
+	  "(ticking the box writes that function for you, private). Instances bound "
+	  "to this one with Bind Event get the event <variable>Changed with the new "
+	  "value. It does not matter what wrote it: a node, Bind To, the network or a "
+	  "save. Several writes in one frame report once, a write undone in the same "
+	  "frame not at all, and the starting value (default, pull, Construct) never.",
+	  "", "horizoncode#functions" },
 	{ "Script Variable/Save Game", "",
 	  "Part of the savegame. When an entity running this class has a Save State "
 	  "component, entity.saveState writes this variable's value into the active "

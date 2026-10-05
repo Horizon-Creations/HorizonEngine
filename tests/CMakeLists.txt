@@ -158,6 +158,7 @@ add_executable(he_tests
     test_hc_inheritance.cpp
     test_hc_pull_on_construct.cpp
     test_hc_bind_to.cpp
+    test_hc_on_changed.cpp
     test_hc_extract_on_destruct.cpp
     test_collider.cpp
     test_raycast.cpp

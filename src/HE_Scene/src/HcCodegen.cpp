@@ -3382,7 +3382,10 @@ private:
                                           tr.kind() == HorizonCode::ContainerKind::Map;
                     const bool saveGame = v.saveGame && HorizonCode::isSaveableType(v.type);
                     const bool pull     = !v.pullSource.empty() && !v.pullVar.empty();
-                    const bool needSave = saveGame || pull;
+                    const bool notify   = v.notifyChange;
+                    const bool needBind = (pull && v.bindTo) || notify;
+                    const bool needPull = pull || needBind;
+                    const bool needSave = saveGame || needPull;
                     const bool needRep  = v.replicated || needSave;
                     std::string trailing;
                     if (setOrMap || needRep)
@@ -3395,14 +3398,19 @@ private:
                         trailing += std::string(", ") + (v.replicated ? "true" : "false") + ", " +
                                     (v.replicated && v.repNotify ? "true" : "false");
                     if (needSave) trailing += saveGame ? ", true" : ", false";
-                    if (pull)
-                        trailing += ", " + strLit(v.pullSource) + ", " + strLit(v.pullVar) + ", " +
-                                    strLit(v.pullMember) + ", " + strLit(v.pullClass);
+                    if (needPull)
+                        trailing += pull
+                            ? ", " + strLit(v.pullSource) + ", " + strLit(v.pullVar) + ", " +
+                              strLit(v.pullMember) + ", " + strLit(v.pullClass)
+                            : std::string(", \"\", \"\", \"\", \"\"");
                     //   bind            Bind To's flag and reference name,
                     //                   behind the pull strings it extends.
                     //                   Metadata only, like the pull itself.
-                    if (pull && v.bindTo)
-                        trailing += ", true, " + strLit(v.pullRef);
+                    if (needBind)
+                        trailing += pull && v.bindTo ? ", true, " + strLit(v.pullRef)
+                                                     : std::string(", false, \"\"");
+                    //   notify          Notify on Change, last (plan §4.1).
+                    if (notify) trailing += ", true";
                     c += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
                          strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
                          (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +

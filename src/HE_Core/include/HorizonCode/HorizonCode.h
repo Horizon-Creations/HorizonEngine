@@ -515,6 +515,13 @@ struct Variable
     // Source kPullFromRef only: the name of a Ref INSTANCE variable of this class;
     // the source is whatever that reference holds at the moment of the compare.
     std::string pullRef;
+    // ── Notify on Change (docs/bind-to-variable-binding-plan.md §4) ──────────
+    // The variable reports its own change: at the frame-end compare the runtime
+    // calls this class's private OnChanged_<Name>(Old) and sends "<Name>Changed"
+    // with the new value to every instance bound to it per Bind Event. Whatever
+    // wrote it (a node, Bind To, the replicator, a save) — one report per frame,
+    // none for a write that was undone in the same frame. INSTANCE variables only.
+    bool        notifyChange = false;
     // ── Expose on Spawn (docs/widget-pre-construct-design.md §6) ─────────────
     // A Create Widget naming this graph's widget grows an input pin for the
     // variable, and the value arrives before the widget's PreConstruct. Opt-in
