@@ -5,6 +5,9 @@
 > Metal zuerst (wie GI/SSR), Architektur so, dass die Shading-Mathematik **nicht** ein siebtes
 > Mal kopiert wird.
 
+> **Port auf D3D11 / D3D12 / Vulkan (Thema 150, ab 2026-10-05):** Bestandsaufnahme, Pass×Backend-
+> Tabelle und Bauplan in **§10**.
+
 > **UMSETZUNGSSTAND 2026-07-31: P0–P7 implementiert (Metal + OpenGL; P6/P7 Metal-only).**
 > - P0–P3: `RenderPath`-Enum, Editor-Combo + `config.json`-Persistenz + Game-Read;
 >   G-Buffer-Codegen (`MatShaderGen::glslGBuffer`, gemeinsamer Body + zweiter Emit-Tail),
@@ -287,3 +290,360 @@ Composite-Wege — im Forward über `heSSR` in `heLitP` (Vorframe-Farbe, 1 Frame
 als eigener Reflexions-Pass nach dem Resolve mit den exakten G-Buffer-Daten (**kein** Lag).
 Reihenfolge-Empfehlung: **P0–P2 dieses Plans zuerst**, dann SSR — dann muss der SSR-Composite nur
 einmal geschrieben werden statt zweimal.
+
+---
+
+## 10. Port auf D3D11, D3D12 und Vulkan — Bestandsaufnahme und Bauplan (Thema 150, Schritt 1)
+
+> Stand: 2026-10-05 · Zweig `claude/deferred-renderer-fuer-d3d11-d3d12-und-vulkan-volle-paritaet`
+> = main `469fa9f6`. Alle Zeilennummern beziehen sich darauf. Nur Bestandsaufnahme, kein
+> Renderer-Code, kein bestehender Pfad geändert.
+>
+> Methode: vier getrennte Inventuren (Metal/GL-Referenz, D3D11, D3D12, Vulkan) mit
+> `Datei:Zeile`, danach jede Aussage, auf der der Bauplan steht, von Hand am Code nachgeprüft.
+> Was nur gelesen und nicht gemessen ist, ist so markiert. Echte Hardware hat keiner der drei
+> Ziel-Backends hier gesehen, und das bleibt bis zum Ende des Themas so.
+
+Abkürzungen: **D11** = `src/HE_Rendering/src/Backends/D3D11/D3D11Renderer.cpp`, **D12** =
+`…/D3D12/D3D12Renderer.cpp`, **VK** = `…/Vulkan/VulkanRenderer.cpp`, **MTL** =
+`…/Metal/MetalRenderer.mm`, **GL** = `…/OpenGL/OpenGLRenderer.cpp`, **MSL** =
+`src/HE_Rendering/src/material/MaterialShaderLibrary.cpp`, **MB** =
+`src/HE_Rendering/include/Backends/D3D11/D3D11MaterialBindings.h`, **MRS** =
+`…/include/Backends/D3D12/D3D12MaterialRootSignature.h`, **VML** =
+`…/include/Backends/Vulkan/VulkanMaterialLayout.h`, **VAL** =
+`scripts/validate_embedded_shaders.py`, **TMG** = `tests/test_material_graph.cpp`.
+
+### 10.1 Was sich seit der Analyse aus Thema 116 geändert hat
+
+Die erste Port-Analyse (`docs/deferred-d3d-vulkan-analysis-2026-10-01.md`) liegt nur auf dem nie
+gemergten Zweig `origin/claude/deferred-rendering-d3d-vulkan`. Sie hat den Port damals
+zurückgestellt und drei Dinge vorgezogen. Alle drei sind inzwischen auf main:
+
+| Vorbedingung aus 116 §7 | Stand heute | Beleg |
+|---|---|---|
+| Clustered für Graph-Materialien (`heLitP`) | erledigt (Thema 117): `fragmentClustered`; D3D11 Raw-Buffer t24–t26, D3D12 Root-SRVs, Vulkan Bindings 24–26 | MSL:2668–2673; D11:1296–1333; D12:10206; VK:2522 |
+| HDR/PostFX im Spielpfad | erledigt (Thema 130, PR #89): der Spielzweig fährt den Viewport-Frame in Backbuffer-Größe und kopiert ihn | D11:7121–7176; D12:10754–10862; VK:423–467 |
+| Laufzeit-Zeuge für Vulkan | erledigt (PR #90): CI-Job `vulkan-lavapipe` + `scripts/he_vk_imagetests.py` | `.github/workflows/ci.yml:387–505` |
+
+Drei Aussagen aus 116 bzw. `backend-parity-plan.md` gelten so nicht mehr:
+
+- **Tiefen-Übergabe per Kopie** (116 §4.2c: „D3D11 `CopyResource`, D3D12 Barrier + Copy“) ist
+  auf D3D nicht nötig. Seit dem Decal-Port liegt die Szenentiefe auf beiden D3D-Backends
+  typeless mit DSV **und** SRV vor (D11:3976–3990, D12:4248–4274), und der Decal-Pass ist das
+  fertige Muster: DSV vom Output-Merger nehmen, Tiefe als Textur lesen, zurückhängen
+  (D11:4791–4874, D12:8937–9002). Der G-Buffer-Pass schreibt direkt in diese Tiefe, der
+  Forward-Schwanz testet danach dagegen. Auf Vulkan gilt das nicht (10.5).
+- **`backend-parity-plan.md` §1.4 „die Sperre ist eine Zeile“:** für SPIR-V annähernd richtig,
+  für HLSL nicht, dort fehlen die Register-Pins (10.4). Die Zeilenangaben dort (`:1024`,
+  `:1030`) sind veraltet, heute MSL:1324–1336.
+- **„Vulkan ohne Laufzeit-Zeugen“** (116 §4.2, §5) ist mit PR #90 überholt.
+
+### 10.2 Referenz: was Metal und GL im Deferred-Pfad tatsächlich tun
+
+Vorbild für D3D11/D3D12/Vulkan ist **nicht** der Metal-Tile-Pfad (P6, Framebuffer-Fetch,
+Apple-only), sondern der **Metal-Two-Pass-Fallback** bzw. GL: G-Buffer als gespeicherte
+Texturen, eigener Resolve-Pass, Forward-Schwanz gegen die G-Buffer-Tiefe.
+
+| | Metal Two-Pass | OpenGL |
+|---|---|---|
+| Entscheidung pro Frame | `m_renderPath == Deferred && EnsureDeferredPipelines()` MTL:16066–16068 | dasselbe GL:10727–10728 |
+| Targets | `EnsureGBufferTargets` MTL:10958–11001: GB0 RGBA8-sRGB, GB1/GB2 RGBA16F, GB3 R32F (NDC-Tiefe), Depth32F | GL:7596–7658: GB0 `SRGB8_ALPHA8`, GB1/GB2 `RGBA16F`, Depth24-Textur; nur 3 Draw-Buffer, `oGB3` fällt weg |
+| G-Buffer-Pass | `EncodeGBuffer` MTL:15363–15734; eingebaut `gbufferMain` MTL:942–976 | inline GL:11104–11329; eingebaut `kGBufFS` GL:685–728 |
+| Routing | Translucent → Forward, Graph ohne GB-Variante → `forwardOpaque`, Skinned immer Forward (MTL:15586–15618) | dasselbe (`deferredForward` GL:11191–11256), Skinned GL:11889 |
+| Resolve | `deferredResolve[Clustered]` MTL:13541–13594, `depthParams = (-1, 1, 0)` | nur `deferredResolve(GLSL410)` GL:7745; eigenes `m_resolveLightUBO` GL:7798–7815; `depthParams = (1, 2, -1)` GL:11772–11780 |
+| Tiefe für den Schwanz | Blit `m_gbDepth`→`m_hdrDepth` MTL:16236–16251 | Blit GL:11725–11731 |
+| Clustered im Resolve | ja (MTL:14236–14278) | nein (GL 4.1 ohne SSBO) |
+| SSAO aus G-Buffer (P5) | ja, halbe Auflösung (MTL:11721) | ja, volle Auflösung (GL:11690–11719) |
+| Decals deferred | **nein**, nur im Tile-Pfad (MTL:14378) | ja, `decalFragmentSampled` in GB0 (GL:11594–11679) |
+| SSR deferred | **nein**, nur im Tile-Pfad (MTL:16101–16102) | **nein** (GL:10733–10734) |
+| GI-Reflexionen deferred | nur im Tile-Pfad (MTL:16107) | ja, im Resolve über `heGIReflFwd` |
+
+Für den Begriff „Parität“ heißt das: den vollen Umfang (Clustered **und** Decals **und** SSR
+**und** GI-Reflexionen im Deferred-Pfad) hat heute nur der Metal-Tile-Pfad. Der Metal-Two-Pass
+hat davon nur Clustered, GL nur Decals und GI-Reflexionen. Zielzustand für D3D/Vulkan ist
+deshalb die Two-Pass-Struktur plus Clustered (wie Metal), Decals in GB0 (wie GL) und SSR aus
+dem G-Buffer (wie Metal-Tile, nur gesampelt statt per Fetch). GI-Reflexionen fallen heraus,
+weil es sie auf diesen drei Backends auch im Forward-Pfad nicht gibt (10.6).
+
+### 10.3 Pass × Backend
+
+**Übersicht.** `JA` = vorhanden · `fwd` = nur im Forward-Pfad · `--` = fehlt.
+
+| Pass | Metal | GL | D3D11 | D3D12 | Vulkan |
+|---|:--:|:--:|:--:|:--:|:--:|
+| G-Buffer | JA | JA | -- | -- | -- |
+| Lighting-Resolve | JA | JA | -- | -- | -- |
+| Clustered im Resolve | JA | -- | -- (fwd JA) | -- (fwd JA) | -- (fwd JA) |
+| CSM + Point/Spot-Atlas | JA | JA | fwd | fwd | fwd |
+| Sky / SkyEnv | JA | JA | fwd | fwd | fwd |
+| AO (SSAO) | JA (aus G-Buffer) | JA (aus G-Buffer) | fwd (Prepass) | fwd (Prepass) | fwd (Prepass) |
+| GI (DDGI, Masken) | JA | JA | fwd | fwd | fwd |
+| Decals | nur Tile | JA | fwd (selbst beleuchtet) | fwd (selbst beleuchtet) | fwd (selbst beleuchtet) |
+| SSR | nur Tile | -- (fwd JA) | fwd | fwd | fwd |
+| AA / TAA | JA | JA | fwd | fwd | fwd |
+| Transparenz (Forward-Schwanz) | JA | JA | fwd | fwd | fwd |
+| `supportsDeferredRendering` | JA | JA | -- | -- | -- |
+
+**Ressourcen und Bedarf je Pass.** „Ist“ ist der heutige Forward-Pfad, „Bedarf“ das, was der
+Deferred-Pfad zusätzlich braucht.
+
+**G-Buffer.** Layout aus §3, auf allen drei Zielen ohne neue Formatunterstützung (RGBA16F-MRTs
+legen alle drei schon an):
+- D3D11: GB0 `R8G8B8A8_UNORM_SRGB`, GB1/GB2 `R16G16B16A16_FLOAT` (je RTV + SRV), Tiefe ist die
+  vorhandene `R24G8_TYPELESS` (DSV `D24_UNORM_S8_UINT`, SRV `R24_UNORM_X8_TYPELESS`,
+  D11:3976–3990). Anlegen in `createHDRTargets` (D11:2121–2167). MRT ist erprobt
+  (Refl-Prepass mit 3 RT D11:2430–2433, GI-G-Buffer D11:3448). Der Material-Cache ist heute
+  nur nach dem Shader-Hash geschlüsselt (D11:1341, :4489) → eigener Schlüsselraum für
+  G-Buffer-Varianten.
+- D3D12: dieselben Formate; Tiefe `R32_TYPELESS` (DSV `D32_FLOAT`, SRV `R32_FLOAT`,
+  D12:4248–4274, Viewport D12:1679–1705). Anlegen in `createPostFXResources`
+  (D12:1917–2016), jedes Ziel mit eigenem 1-Slot-RTV-Heap wie heute (D12:1930–1960). Der
+  PSO-Schlüssel `hash ^ hdr ^ transparent` (D12:8509–8511) bekommt die Dimension `gbuffer`
+  (`NumRenderTargets = 3`), der FXC-Bytecode-Cache (D12:8513–8629) teilt sich. MRT-PSO
+  erprobt (D12:5651–5673). Ressourcenzustände über eigene Member + `barrier12`
+  (D12:2241–2252), es gibt keinen Zustands-Tracker.
+- Vulkan: GB0 `VK_FORMAT_R8G8B8A8_SRGB`, GB1/GB2 `VK_FORMAT_R16G16B16A16_SFLOAT`, Tiefe D32.
+  Neuer `VkRenderPass` + Framebuffer; heute existiert jede Szenen-Pipeline schon zweimal
+  (`m_renderPass` und `m_postFxSceneRP`, VK:3962–4044), der G-Buffer-Pass macht daraus einen
+  dritten Satz. Material-Schlüssel (VK:2799–2805) um `gbuffer` erweitern. Die Szenentiefe ist
+  **nicht sampelbar** (VK:4695, nur `DEPTH_STENCIL_ATTACHMENT_BIT`), siehe 10.5.
+- Alle drei: eingebauter G-Buffer-Fragment-Shader (gibt es nur als Metal `gbufferMain` und GL
+  `kGBufFS`). Graph-Materialien: `resolveGBufferShaders` (MSL:977–994) + `fragment()`; auf
+  HLSL greift damit schon die Material-Pin-Tabelle (MSL:2639–2674). Der G-Buffer-Tail schreibt
+  immer auch `oGB3 = gl_FragCoord.z` an Location 3 (`MaterialGraph.cpp:1379`). Ohne gebundenes
+  viertes Ziel wird das verworfen (D3D11 still, D3D12/Vulkan evtl. mit Debug-Layer-Warnung,
+  in Schritt 3/4 prüfen).
+
+**Lighting-Resolve (inkl. Clustered).**
+- D3D11: `deferredResolve[Clustered](HLSL)` mit neuer Pin-Tabelle (10.4); `HeResolve`-CB;
+  `depthParams = (-1, 1, 0)`, dieselbe Konvention, die der Decal-Pass schon füllt
+  (D11:4838–4840); Lighting-Fill wie für Graph-Materialien (`m_matLightCB` D11:4388,
+  `fillMatLight` D11:6034–6146), Cluster-Listen raw t24–t26 (MB:150–177, D11:5943–5951).
+- D3D12: Resolve-Root-Signatur = Material-Signatur (MRS:114–214) + vier G-Buffer-SRVs +
+  `HeResolve`-CBV. D3D12 verlangt, dass die Signatur **jedes** statisch referenzierte Register
+  deckt, sonst `E_INVALIDARG` beim PSO (MSL:2626–2631). Alle Eingänge eines Draws in einem
+  CBV_SRV_UAV-Heap (D12:3617–3621); Cluster als Root-SRVs nach jedem Signaturwechsel
+  (`bindClusterRoots` D12:3181–3187); `depthParams = (-1, 1, 0)` (D12:8972–8974);
+  Tiefe DEPTH_WRITE→PIXEL_SHADER_RESOURCE wie im Decal-Pass.
+- Vulkan: `deferredResolve(SpirV)` übersetzt schon (kanonische Bindings, kein Pin nötig), die
+  Clustered-Variante ist gesperrt (MSL:1334). Eigenes Set-Layout für 0, 10–13, 15–18,
+  **19–23**, 24–26, 31–33; VML hat 19–23 nicht (VML:50–96). `depthParams = (+1, 1, 0)` wie
+  der Decal-Pass (VK:3668–3670).
+
+**Shadows (CSM 3 Kaskaden, Point/Spot-Atlas 16 Layer).** Auf allen drei vorhanden: D11:1401,
+:1429–1430, :6270–6280; D12:1463, :1508–1550, :9857–9877; VK:5926–5975. Kein neuer Pass; der
+Resolve bindet `heCsm`/`heLocalShadow` wie ein Graph-Material (D3D t12/t13, Vulkan 12/13). CSM
+gilt für Graph-Materialien heute nur bei GI aus (D11:6101–6119, D12:9647–9665, VK:6880–6894),
+das bleibt so. Offen und für beide Pfade gleich: Thema 146 (Vulkan-Kaskaden einen Frame hinter
+der Sonne).
+
+**Sky / SkyEnv.** D3D11 und D3D12 zeichnen den Himmel **zuerst**, ohne Tiefentest
+(D11:5816–5823, D12:9389–9395). Das passt ohne Umbau: der Resolve verwirft `d >= 1`
+(MSL:1268), der Himmel bleibt stehen. Bedingung: zwischen Himmel und Resolve löscht niemand das
+HDR-Ziel, und der G-Buffer-Pass bindet es nicht. Vulkan zeichnet den Himmel zwar auch zuerst,
+aber **innerhalb** von `m_postFxSceneRP` (VK:6640–6646); dort ist das der eigentliche Umbau
+(10.5). SkyEnv-Cube gibt es auf allen drei nur für Graph-Materialien (D11:4409–4469,
+D12:8416–8496, VK:2652–2786), der Resolve bindet ihn an 15.
+
+**AO.** Heute ein eigener SSAO-Prepass, der opake Geometrie neu rastert (D11:2394–2583,
+D12:6099–6204, VK:11122–11234); Graph-Materialien lesen das Ergebnis als `heAO` (16,
+`texelFetch`, Gate `fog.w`). **v1:** der Resolve liest dasselbe Ergebnis. **Danach (P5):** SSAO
+aus der G-Buffer-Tiefe (Vorlage GL `kSSAODepthPosFS` GL:2766–2782); dann muss SSAO vor dem
+Resolve laufen und der zweite Lighting-Fill mit dem AO-Gate danach (wie GL:11690–11719).
+
+**GI.** SW-DDGI mit eigenem Halb-Res-Welt-G-Buffer auf allen drei (D11:3264–3603, D12 plus DXR
+D12:7605–7677, Vulkan plus Ray-Query VK:9929–10279). Die GI-Pässe bleiben unverändert, der
+Resolve bindet Masken (10/11) und DDGI-Atlanten (17/18) und bekommt `giParams`. Den
+Welt-G-Buffer durch den Deferred-G-Buffer zu ersetzen ist **nicht** Teil des Themas, Metal
+tut das auch nicht (MTL:16014–16024). Offen: Thema 145 (Vulkan `InvalidImageLayout` bei GI).
+
+**Decals.** Heute auf allen drei Forward und selbst beleuchtet (ein Richtungslicht + Ambient,
+`decalFragmentForward`; D11:4776–4888, D12:8895–9004, VK:3522–3609 plus Tiefen-Vorpass). Im
+Deferred-Pfad: `decalFragmentSampled` blendet **vor** dem Resolve in GB0, Box-Clip gegen die
+G-Buffer-Tiefe. Auf HLSL ist es schon gepinnt (b13/t14/t15, MSL:2386–2406), `decalBlend` auf
+D3D11 ist schon RGB-only auf RT0 (D11:4708–4723). Nur GB0 binden (wie GL `m_gbDecalFBO`);
+auf Vulkan ist das Pflicht, weil `independentBlend` nicht aktiviert ist (VK:1251–1271, kein
+Treffer). Der Vulkan-Tiefen-Vorpass entfällt im Deferred-Pfad.
+
+**SSR.** Heute auf allen drei Forward: Refl-MRT-Prepass, Trace, Blur, Vorframe-HDR-Kopie
+(D11:2425–2957, D12:5587–6079, VK:11314–11469 + :11917–11960), kein Composite. Deferred wie
+Metal `EncodeSSRPasses` (MTL:14609–14826): Trace aus GB1 + Tiefe statt Prepass, `ssrComposite`
+nach dem Resolve. `ssrComposite` ist für HLSL **ungepinnt** (MSL:1948–1972) und braucht eine
+Tabelle wie der Resolve; der Resolve setzt dann `heLight.ssr.w = 1`, damit `heLitP` ambSpec
+überspringt.
+
+**AA / TAA.** Jitter, RG16F-Velocity, Resolve, Sharpen auf allen drei (D11:5809–5814,
+:1772–1833, :7038–7083; D12:9383–9388, :10474–10532, :2332–2389; VK:679–683, :4546–4596). Bedarf: Velocity
+**nach** dem G-Buffer-Pass gegen die dann gefüllte Tiefe (siehe 10.7 Punkt 2), Post-Kette
+unverändert. Die Resolve-`invViewProj` kommt aus der gejitterten Matrix, mit der auch gerastert
+wurde.
+
+**Transparenz und Forward-Schwanz.** Nach dem Resolve unverändert: Transparenz back-to-front
+mit Read-only-Tiefe (D11:6930–6937, D12:10557–10563, VK:7459–7466), dazu der Replay der opaken
+Draws ohne G-Buffer-Variante, Skinned (bleibt Forward wie auf Metal/GL), Partikel/Ribbons,
+Debug-Linien. Vulkan zeichnet Skinned heute **nach** den Transparenten (VK:7468–7470); im
+Schwanz gehört es davor, wie auf Metal/GL.
+
+**Anbindung.** Keines der drei Backends überschreibt `SetRenderPath`/`SetViewMode` oder setzt
+das Flag (D11:7210–7229, D12:10975–10994, VK:986–1012). `m_renderPath` und `m_viewMode` sind im
+Interface `protected`, ein Override ist nicht nötig. Flag wie bei SSR/TAA:
+`supportsDeferredRendering = postFxReady && Resolve gebaut` — der direkte Swapchain-Zweig ohne
+HDR-Ziel (D11:7185–7203) bleibt Forward. Editor und Spiel brauchen nichts, sie hängen nur am
+Flag (`EditorApplication.cpp:3038`, `:4791`; `GameApplication.cpp:3264`;
+`ViewportToolbar.cpp:591`). G-Buffer-Ansichten: `viewModeGBufferIndex` in `depthParams.w`, wie
+Metal und GL.
+
+### 10.4 Gemeinsame Vorarbeit in `MaterialShaderLibrary`
+
+1. **HLSL-Pins für den Resolve.** `compileResolveVariant` übersetzt alles außer Metal ungepinnt
+   (MSL:1330–1335). SPIRV-Cross legt `binding = N` dann auf `register(tN/sN/bN)`: G-Buffer
+   s19–s22, Preamble s16–s18 und s31–s33, `HeResolve` b23. SM 5.0 endet bei s15 und b13
+   (MSL:2578–2590). Gelesen, nicht durch FXC geschickt; die Material-Fragmente hatten bis zu
+   ihrer Pin-Tabelle genau diesen Fehler (X4509). Vorschlag, aufbauend auf `kHlslMaterialPins`:
+
+   | GLSL-Binding | Ressource | HLSL |
+   |---|---|---|
+   | 0 | `HeLighting` | b0 (wie Material) |
+   | 10, 11, 12, 13, 15 | GI-Masken, CSM, Local-Atlas, SkyEnv | t/s gleich Binding (wie Material) |
+   | 16 | `heAO` (`texelFetch`, Sampler tot) | t16/s0 (wie Material) |
+   | 17, 18 | DDGI-Atlanten | t17/s1, t18/s3 (wie Material) |
+   | 31, 32, 33 | Forward-SSR, GI-Refl, Cloud-Shadow | t31/s8, t32/s9, t33/s14 (wie Material) |
+   | 19, 20, 21, 22 | `heGB0..2`, `heGBDepth` | **t19/s2, t20/s4, t21/s5, t22/s6** (neu: der Resolve deklariert weder `heTex0` noch `heTexP0..3`, deren Sampler sind frei) |
+   | 23 | `HeResolve` | **b-Register ≤ b13**, Vorschlag b4 (im Resolve-Draw nur neben b0 belegt) |
+   | 24, 25, 26 | Cluster-Listen | t24–t26 als `ByteAddressBuffer`, kein Sampler (Vertrag aus Thema 117) |
+
+   `heLandscapeWeights` (14) kommt aus dem Graph-Codegen, nicht aus der Preamble, der Resolve
+   deklariert ihn nicht. Damit hat der Resolve 15 Sampler-Deklarationen, davon 14 lebend: passt
+   in s0–s15, mit s7 als einzigem freien Rest.
+2. **Clustered-Sperre öffnen** (MSL:1334) für HLSL und SPIR-V; GLSL410 bleibt gesperrt.
+   Bindings wie in Thema 117, die Puffer existieren auf allen drei schon.
+3. **Tests.** Heute übersetzt **kein** Test `deferredResolve*` oder `fullscreenVertex` für
+   irgendein Backend. Neu: Registertest für die Resolve-HLSL (Muster SSR TMG:1127, Decal
+   TMG:1184), FXC-Lauf auf Windows (Muster TMG:3521, :4197), SPIR-V-Reflexion gegen das neue
+   Resolve-Set-Layout (Muster TMG:3113–3270). Der Validator (VAL) deckt Library-Shader nicht
+   ab, er sieht nur eingebettete Strings.
+4. **Eingebauter G-Buffer-Shader.** Er muss die VS-Ausgabe und den Konstantenpuffer des
+   jeweiligen eingebauten Szenen-Shaders lesen, und die sind pro Backend eigene Handkopien
+   (`kSceneHLSL` in D11 und D12 je eine, Vulkan `shaders/scene.frag`). Empfehlung: ein
+   zusätzlicher Pixel-Entry neben der jeweiligen `kSceneHLSL`-Kopie mit eigenem Namen
+   (z. B. `GBufPS`, kein `main`, sonst greift die `main`→`ps_5_0`-Heuristik) und
+   `shaders/gbuffer.frag` für Vulkan. Ein cross-kompilierter gemeinsamer Shader (Vorschlag aus
+   116 §4.1) wäre schöner, bräuchte aber einen gemeinsamen Binding-Vertrag für die drei
+   Built-in-Shader, den es nicht gibt.
+5. **`ssrComposite` pinnen** (MSL:1948–1972), erst in Schritt 5.
+
+### 10.5 RHI-Bausteine
+
+| Baustein | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|
+| MRT | ja (D11:2430–2433) | ja (D12:5651–5673) | ja (VK:9674–9698, :11784–11807) |
+| Szenentiefe als Shader-Eingang | ja, SRV (D11:3976–3990) | ja, SRV (D12:4248–4274) | **nein** (VK:4695) |
+| Compute | cs_5_0 (D11:3198–3201) | cs_5_0 + DXR cs_6_5 (D12:6784–6837, :7605–7677) | ja (VK:9462–9471) |
+| Structured / Raw / SSBO | structured t18–t20, raw t24–t26 (MB:150–177) | Root-SRVs t18–t20, t24–t26 (D12:4596–4609, MRS:156–166) | SSBO 10–12 und 24–26 (VK:1896–1902, VML:46–48) |
+| Bindungsdeckung | keine statische Prüfung | Root-Signatur muss alles decken (MSL:2626–2631) | Set-Layout muss alles decken; VML ohne 14 und 19–23 |
+| Render-Pass-Objekte | keine | keine (Formate im PSO) | ja, Pipeline je Render-Pass (heute zwei Sätze) |
+| Blend pro Ziel verschieden | möglich, ungenutzt | möglich, ungenutzt | **nein**, `independentBlend` aus (VK:1251–1271) |
+| Fullscreen-VS | `kFSTriangleVS` (`HlslSources.h:386–397`) oder `fullscreenVertex` (MSL:2431–2443, ohne Bindings) | dasselbe | `postfx.vert` oder `fullscreenVertex` (bei SSR schon genutzt, VK:11331) |
+| Zustände / Layouts | implizit (OM lösen und neu binden) | Member + `barrier12` (D12:2241–2252) | CPU-Layout-Tracking; `runPostFXBarrier` kann nur Farbe (VK:3733–3743) |
+| Laufzeit-Zeuge ohne GPU | WARP nur in he_tests (TMG:4297–4316); der Renderer erzeugt nur HARDWARE-Geräte (D11:5664–5669) | WARP nur in he_tests (TMG:3662–3678) | lavapipe im CI-Job `vulkan-lavapipe` |
+
+**Vulkan-Tiefe, zwei Wege.** (A) Szenentiefe mit `VK_IMAGE_USAGE_SAMPLED_BIT` anlegen und
+zwischen G-Buffer-Pass, Resolve und Schwanz die Layouts wechseln. (B) GB3 als viertes
+Farbziel `VK_FORMAT_R32_SFLOAT`, wie im Metal-Layout: der G-Buffer-Tail schreibt `oGB3`
+ohnehin (`MaterialGraph.cpp:1379`), der Resolve sampelt GB3 als `heGBDepth`, das Tiefenbild
+bleibt reines Attachment. Kosten +4 Byte/px. **Empfehlung B**: kein Layout-Tanz auf der Tiefe,
+die Location-3-Ausgabe wird konsumiert statt verworfen, und Decals/SSR/SSAO lesen dasselbe
+GB3. Der eingebaute G-Buffer-Shader muss GB3 dann auch schreiben.
+
+**Vulkan-Pass-Aufteilung.** Heute ist der Himmel der erste Draw in `m_postFxSceneRP`. Für
+Deferred: G-Buffer-Pass (eigener RP) → Resolve + Himmel + Schwanz in einem HDR-Pass mit
+`loadOp = LOAD` für die Tiefe, oder Himmel hinter den Resolve wie Metal/GL. Wer das
+entscheidet, muss die Pipeline-Kompatibilität mitnehmen: `LOAD`-Varianten sind eigene
+Render-Pass-Objekte, die Pipelines aber kompatibel, solange die Attachment-Formate gleich
+bleiben.
+
+### 10.6 Abweichungen, die schon jetzt feststehen
+
+- **Kein Tile/Single-Pass (P6)** auf D3D11/D3D12/Vulkan. D3D hat kein Äquivalent; Vulkan
+  könnte es über Subpass-Input-Attachments, das lohnt nur auf TBDR und ist nicht Teil.
+- **Eingebaute Materialien sehen im Deferred-Pfad anders aus als im Forward-Pfad.** Der
+  eingebaute Forward-Shader ist auf diesen drei Backends eine eigene Implementierung mit
+  dokumentierter Drift: Umgebungslicht analytisch per `skyColor()` statt SkyEnv-Cube
+  (D11:734, :745), Vulkan zusätzlich ohne SkyEnv, `uAmbient` und Wetter
+  (`shaders/scene.frag:38–46`). Der Resolve shadet mit `heLitP`. Deferred-Bilder eingebauter
+  Materialien entsprechen damit Graph-Materialien bzw. Metal/GL, nicht dem eigenen
+  Forward-Bild. Das P4-Gate (mittlere Abweichung < 1/255) ist deshalb nur mit
+  Graph-Materialien aussagekräftig. Die Differenz bei eingebauten Materialien wird gemessen
+  und hier benannt, nicht als Fehler gewertet.
+- **Cloud-Shadow-Map fehlt** auf allen drei (t33/Binding 33 ist ein Null- bzw. Weiß-View,
+  Gate 0; D12:8280–8283, VK:7276–7277). Deferred zeigt keine Wolkenschatten, Forward heute
+  auch nicht.
+- **GI-Reflexionen fehlen** auf allen drei (auch Forward, `supportsGIReflections` nirgends
+  gesetzt). Kein Teil dieses Themas.
+- **Skinned bleibt Forward**, wie auf Metal und GL.
+- **Gepackte Spiele:** die Spiel-Variante baut mit Cross-Compiler (`CMakeLists.txt:636–670`),
+  Resolve und G-Buffer-Varianten werden zur Laufzeit übersetzt wie auf Metal/GL. Eine
+  gebackene G-Buffer-Variante gibt es in `MaterialShaderVariant` nicht (`Assets.h:14–43`); sie
+  wäre nur ein Mittel gegen den Hänger beim ersten Deferred-Frame, keine Voraussetzung.
+
+### 10.7 Nicht abschreiben: Auffälligkeiten in der Referenz
+
+Gelesen, nicht gemessen. Für die Ports gilt jeweils die rechte Spalte, an Metal/GL selbst wird in
+diesem Thema nichts geändert.
+
+| # | Befund | Beleg | Für D3D/Vulkan |
+|---|---|---|---|
+| 1 | Der Metal-Two-Pass-Resolve nullt `specAA[1]` nicht, `heLitP` wendet Specular-AA dann auch im Fullscreen-Pass an. Der Tile-Resolve und GL nullen. | MTL:13541–13594 vs. :14319; GL:11741–11747; MSL:506, :657 | wie GL nullen |
+| 2 | Metal-Two-Pass: `EncodeVelocity` läuft vor dem Depth-Blit und testet gegen die alte Tiefe. GL macht es richtig. | MTL:16224 vs. :16236–16251; GL:11982–11991 | Velocity nach dem G-Buffer-Pass |
+| 3 | Jitter uneinheitlich: Metal-Tile-Resolve und Metal-Decals rekonstruieren mit der ungejitterten Matrix, Metal-Two-Pass und GL mit der gejitterten. | MTL:14305–14308, :14433 vs. :13563; GL:11773 | gejittert, wie gerastert |
+| 4 | Der GL-Programm-Cache hat kein G-Buffer-Salz, er verlässt sich auf den abweichenden Quell-Hash. | GL:3665–3672; MSL:989 | eigener Schlüsselraum |
+| 5 | `ssrComposite` für HLSL ungepinnt. | MSL:1948–1972 | Pin-Tabelle in Schritt 5 |
+
+Veraltete Kommentare, nur notiert: D11:6120–6128 (`heSSRFwd` sei ungepinnt auf s31, die Library
+pinnt t31/s8, MSL:2656); VAL:81–85, :90, :120–122 (Zeilennummern); `MetalRenderer.h:397` („GL
+ignores decals“); `MaterialShaderLibrary.h:416` und MSL:1188–1189 (GI-Local-Masken würden
+nicht auf Cluster-Lichter angewandt, MSL:1240–1248 tut es); D12:10984–10987 (SSR nur im
+Editor-Viewport, seit PR #89 überholt, Thema 147 räumt das auf); die Deferred- und
+Schatten-Zeilen der Matrix in `backend-parity-plan.md` §2.
+
+### 10.8 Bauplan Schritte 2–6
+
+Reihenfolge D3D11 → D3D12 → Vulkan wie im Thema. D3D11 ist Pilot, weil es keine PSOs und keine
+Render-Pass-Objekte hat und der WARP-Zeuge dort am billigsten ist. Umfang laut 116 §4.2:
+D3D11 ≈ 700–900, D3D12 ≈ 900–1 200, Vulkan ≈ 1 000–1 300 Zeilen.
+
+**Schritt 2 — D3D11 + gemeinsame Vorarbeit.** 10.4 Punkte 1–4 (Pins, Clustered-Sperre, Tests,
+eingebauter `GBufPS`). Dann Targets, G-Buffer-Pass mit Routing (Translucent, ohne GB-Variante,
+Skinned → Schwanz), Resolve 8-Licht und Clustered, DSV-Tanz nach Decal-Muster, Schwanz,
+Velocity danach, `specAA[1] = 0`, Flag, `HE_DUMP_GBUFFER`/`depthParams.w`.
+*Validator-Eintrag:* `GBufPS` in `HLSL_ENTRY_PROFILE` (VAL:101–115).
+*Gate:* Windows-CI grün inkl. FXC-Registertest; WARP-Pixeltest in he_tests mit eigenem kleinen
+Rig (Muster Clustered-Test TMG:4889): Graph-Material Forward vs. Deferred mittlere Abweichung
+< 1/255, dazu > 8 Punktlichter clustered; Log-Zeile „deferred path ready“.
+
+**Schritt 3 — D3D12.** Dieselben HLSL-Quellen und Pins. Resolve-Root-Signatur,
+PSO-Dimension `gbuffer`, Barrieren, Heap-Belegung, `GBufPS` neben D12s `kSceneHLSL`.
+*Validator-Eintrag:* wie Schritt 2.
+*Gate:* WARP-PSO-Test (Signatur deckt Resolve und G-Buffer-PSOs, Muster TMG:3819/4052) +
+WARP-Pixeltest wie Schritt 2.
+
+**Schritt 4 — Vulkan.** G-Buffer-RP + Framebuffer mit GB3 (Weg B), Aufteilung von
+`m_postFxSceneRP` um den Himmel, dritter Pipeline-Satz, Resolve-Set-Layout, Skinned vor
+Transparenz, `shaders/gbuffer.frag` in die glslc-Liste (`src/HE_Rendering/CMakeLists.txt:135–148`).
+Abhängigkeiten: Thema 143 (Binding 14 fehlt in VML) und Thema 144 (`mat_ubo`,
+`vkCmdUpdateBuffer` im Render-Pass, VK:7362–7379 und :7527–7544) — ohne Fix bleibt der neue
+Bildtest auf der Allowlist.
+*Gate:* SPIR-V-Reflexionstest Resolve gegen Layout; lavapipe-Fall `deferred` in
+`he_vk_imagetests.py`. Das Skript kann heute nur „mittlere Abweichung **mindestens** X“
+(`he_vk_imagetests.py:340`); für „Deferred ≈ Forward“ braucht es ein Höchstwert-Kriterium.
+
+**Schritt 5 — Zusatzpässe.** Decals in GB0 (`decalFragmentSampled`), SSAO aus der G-Buffer-Tiefe
+(P5), SSR deferred (Trace aus GB1 + Tiefe, `ssrComposite` gepinnt, `ssr.w = 1`), GI im Resolve
+gegen GI-an/aus prüfen, Spielpfad: der Spielzweig fährt den Viewport-Frame und erbt den Pfad;
+Beleg mit `HE_CAPTURE_FRAME` bzw. exportiertem Spiel.
+
+**Schritt 6 — Bildtests, Parität, Doku.** WARP-Pixeltests D3D11/D3D12, lavapipe-Fälle
+(Forward/Deferred, G-Buffer-Ansichten, > 8 Lichter), Abweichungstabelle hier (10.6 + Messwerte),
+Matrix in `backend-parity-plan.md` nachziehen. Ein End-to-End-Lauf des Editors auf WARP bräuchte
+einen neuen Renderer-Schalter (es gibt heute keinen); ob der sich lohnt, entscheidet Schritt 6.
+**Echte-Hardware-Abnahme bleibt offen** und wird im Befund so ausgewiesen.
