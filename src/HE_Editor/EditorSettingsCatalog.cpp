@@ -235,7 +235,8 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsShowProgress,
 	                    "Show successful builds today and days in a row with the "
 	                    "editor beside \"Ready\" in the footer. Needs Success "
-	                    "Feedback on; off hides the counters, they keep counting."));	t.push_back(boolRow("rewards.counterTick", "Counter Tick", "Feedback", "rewards",
+	                    "Feedback on; off hides the counters, they keep counting."));
+	t.push_back(boolRow("rewards.counterTick", "Counter Tick", "Feedback", "rewards",
 	                    &EditorConfig::RewardsCounterTick,
 	                    "A counter that just went up lights up for a moment. "
 	                    "Needs Show Progress on."));

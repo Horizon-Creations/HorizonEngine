@@ -1035,6 +1035,64 @@ TEST_CASE("ui shot: the generated editor reference")
 	DocsPanel::close();
 }
 
+TEST_CASE("ui shot: the editor reference explains every new Feedback switch")
+{
+	// Thema 140 added ten switches to Preferences ▸ Feedback. Each must land on
+	// its own entry when F1 is pressed on it, and that entry's "More about this"
+	// must reach the chapter it names (editor#preferences, horizoncode#graphs).
+	// A key that is spelled differently here than on the panel resolves to
+	// nothing, and a shot of it would just show some other part of the page.
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+	HE::Ed::EditorReference::install(lib);
+
+	static const char* const kNew[] = {
+		"Compile Moment", "Commit Moment", "Tutorial Moment", "Problem Pulse",
+		"Compile Sound", "Compile Failed Sound", "Commit Sound", "Tutorial Sound",
+		"Problem Sound", "Drag and Drop Sound",
+	};
+	for (const char* label : kNew)
+	{
+		const std::string key = std::string("Preferences/Feedback/") + label;
+		INFO("key: " << key);
+		const Help::Entry* e = Help::findKey(key);
+		REQUIRE(e != nullptr);
+		const std::string topic = Help::referenceTopic(key);
+		CHECK(topic == std::string("editor-settings#Preferences.Feedback.") + label);
+		int pg = -1, sec = -1;
+		CHECK(lib.resolve(topic, pg, sec));
+		CHECK(sec >= 0);
+		REQUIRE(e->topic != nullptr);
+		INFO("concept: " << std::string(e->topic));
+		int cpg = -1, csec = -1;
+		CHECK(lib.resolve(e->topic, cpg, csec));
+		CHECK(csec >= 0);
+	}
+
+	// Two pictures: the page sorts by label, so Commit Moment starts a run of
+	// five new entries, and Drag and Drop Sound is the one the graphs link to.
+	const struct { const char* anchor; const char* name; } shots[] = {
+		{ "editor-settings#Preferences.Feedback.Commit Moment", "editor-reference-feedback-commit" },
+		{ "editor-settings#Preferences.Feedback.Drag and Drop Sound", "editor-reference-feedback-dragdrop" },
+	};
+	for (const auto& s : shots)
+	{
+		DocsPanel::openTopic(s.anchor);
+		const he_ui::Image img = shoot(s.name, W, H, 4,
+		                               [&](int) { DocsPanel::draw(host); });
+		REQUIRE(img.valid());
+		CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
+		DocsPanel::close();
+	}
+}
+
 TEST_CASE("ui shot: a page of tables and a diagram")
 {
 	// The rendering page is the reader's hardest case: a wide reference table
