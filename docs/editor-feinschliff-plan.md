@@ -463,8 +463,9 @@ Bilder sind also auf beiden Systemen dieselben.
   Reference, DnD zusätzlich in `horizoncode#graphs`. Wer das ändert, muss es in der
   Website-Quelle **und** abschnittsweise im Bundle ändern (siehe die Lehre zu
   `build_docs_bundle.py`).
-- Die Website-Quelle mit beiden Abschnitten (Commit df92b9b) liegt nur lokal auf
-  dem MacBook und ist nicht gepusht; auf NN-WS03 fehlt sie. Den Deploy macht nur
+- Die Website-Quelle der beiden Abschnitte liegt nur lokal auf dem MacBook und ist
+  nicht gepusht (lokale Commits aus Schritt 3 für `editor.html` und aus Schritt 4
+  für `horizoncode.html`, darunter df92b9b); auf NN-WS03 fehlt sie. Den Deploy macht nur
   der Mensch.
 - V6/V7 (Pin-Ringe, Snap-Puls) sind weiter nicht gebaut (siehe §11).
 - Der Zweig steht auf dem Merge-Stand 469fa9f6; `origin/main` ist inzwischen
