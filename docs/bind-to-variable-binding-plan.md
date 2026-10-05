@@ -158,8 +158,9 @@ int exchangeState():                         // Rückgabe: Zahl der Schreibvorg�
   writes = 0
   for round in 0 .. kMaxRounds-1 (8):
       changedAny = false
-      for b in copy(m_bindings):             // Kopie: ein Handler kann registrieren/entfernen
-          if !alive(b.owner): continue
+      for key in copy(Schlüssel von m_bindings):   // (owner, name) kopieren, nicht die Einträge
+          b = find(m_bindings, key)          // pro Durchgang neu suchen: ein Handler kann
+          if !b or !alive(b.owner): continue //   registrieren/entfernen, b ist der ECHTE Eintrag
           (src, why) = resolve(b)             // GameInstance | creatorOf(owner) | getVariable(owner, b.ref).ref
           if why != None: rest(b, why); continue
           val = getVariable(src, b.var)       // nur öffentlich, dieselbe Tür wie Pull/Get (Ref)
@@ -267,18 +268,22 @@ Für Ref-Variablen ist das Häkchen erlaubt (lokal ist eine Instanz-Id ein Wert)
 
 ```
 // in exchangeState(), pro Runde nach Phase 1:
-for w in copy(m_watched):                     // notifyChange-Variablen + Script-Abos (§4.5)
-    if !alive(w.owner): continue
+for key in copy(Schlüssel von m_watched):    // notifyChange-Variablen + Script-Abos (§4.5)
+    w = find(m_watched, key)                  // echter Eintrag, pro Durchgang neu gesucht
+    if !w or !alive(w.owner): continue
     now = getVariable(w.owner, w.name)
     if !w.baselined: w.shadow = now; w.baselined = true; continue
     if valuesEqual(now, w.shadow): continue
     old = w.shadow; w.shadow = now; changedAny = true
-    callFunction(w.owner, "OnChanged_" + w.name, requirePublic=false, {old})   // fehlt sie: nichts
-    dispatchChanged(w.owner, w.name, now)      // §4.3
-    notifyHost(w.owner, w.name, old, now)      // §4.5
+    if w.declared:                            // nur bei Häkchen Notify on Change
+        callFunction(w.owner, "OnChanged_" + w.name, requirePublic=false, {old})   // fehlt sie: nichts
+        dispatchChanged(w.owner, w.name, now)  // §4.3
+    if w.scriptWatchers > 0:                  // Deklaration ODER Abo, jeder Eintrag
+        notifyHost(w.owner, w.name, old, now)  // §4.5
     if ++fires > kMaxFires (256): einmal warnen, abbrechen (Rest im nächsten Frame)
 ```
 
+* **Ein Script-Abo ändert nichts an der HC-Seite.** Ein Eintrag, der nur durch `hc.watch` entstanden ist (`declared == false`), ruft weder `OnChanged_<Var>` noch `dispatchChanged`. Ob eine HC-Klasse `<Var>Changed` bekommt, hängt nur am Häkchen und nicht daran, ob gerade ein Lua-Script zuschaut. Umgekehrt geht an den Host nur, was ein Script abonniert hat. Deklaration und Abo teilen sich nur Schattenkopie und Vergleich.
 * **Der eigene Anfangszustand meldet nicht.** Die Basis entsteht im ersten Abgleich, in dem die Instanz vorkommt. Defaults, gezogene Pull-Werte, Spawn-Werte und alles, was Construct/BeginPlay im selben Frame setzt, sind Ausgangszustand.
 * **Ein Schub über eine Bindung meldet dagegen immer**, auch der erste: Phase 1 legt die Basis an, **bevor** sie schreibt, falls noch keine da ist. So meldet die Ref-Quelle ihren ersten Wert (null → Wert), und eine Bindung an die Game Instance meldet jede spätere Änderung. Eine Bindung an die Game Instance mit erfolgreichem Pull meldet ihren Startwert nicht, denn der ist schon in Construct da.
 * Handler dürfen schreiben, zerstören, erzeugen und latente Knoten benutzen. Die Listen werden pro Runde kopiert, jede Instanz wird vor dem Zugriff mit `alive()` geprüft.
