@@ -2538,17 +2538,27 @@ void VulkanRenderer::createMaterialResources()
     // the spec minimum of the per-stage limits. A device AT that minimum gets the
     // layout without its row (and layer-blend materials draw built-in, see drawDCVk)
     // rather than a layout it cannot create. The line is the evidence either way.
+    // HE_VK_MAX_STAGE_SAMPLERS=<n> caps both limits as if the device reported n — the
+    // only way to walk the fallback on hardware that reports a million.
     {
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(m_physDevice, &props);
-        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(
-            props.limits.maxPerStageDescriptorSamplers, props.limits.maxPerStageDescriptorSampledImages);
-        char line[320];
+        uint32_t maxSamplers = props.limits.maxPerStageDescriptorSamplers;
+        uint32_t maxImages   = props.limits.maxPerStageDescriptorSampledImages;
+        const char* cap = std::getenv("HE_VK_MAX_STAGE_SAMPLERS");
+        if (cap && *cap)
+        {
+            const uint32_t n = static_cast<uint32_t>(std::strtoul(cap, nullptr, 10));
+            maxSamplers = std::min(maxSamplers, n);
+            maxImages   = std::min(maxImages, n);
+        }
+        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages);
+        char line[384];
         std::snprintf(line, sizeof line,
             "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
-            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u -> heLandscapeWeights %s",
+            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s",
             HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentSamplerCount(false),
-            props.limits.maxPerStageDescriptorSamplers, props.limits.maxPerStageDescriptorSampledImages,
+            maxSamplers, maxImages, (cap && *cap) ? " (capped by HE_VK_MAX_STAGE_SAMPLERS)" : "",
             m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)");
         if (m_matLandscapeWeights) HE_LOG_INFO(RHI, "%s", line);
         else                       HE_LOG_WARN(RHI, "%s", line);
@@ -2818,6 +2828,20 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
                                                       const MaterialShaderVariant* precompiled,
                                                       bool hdr, bool transparent)
 {
+    // A layer-blend graph samples heLandscapeWeights; on a device whose layout had to
+    // leave binding 14 out (createMaterialResources) its pipeline would be invalid. No
+    // pipeline then — drawDCVk draws it built-in PBR, the warm-up skips it. Checked
+    // HERE so both callers go through it.
+    if (!m_matLandscapeWeights && frag.find("heLandscapeWeights") != std::string::npos)
+    {
+        if (!m_matLandscapeWarned)
+        {
+            m_matLandscapeWarned = true;
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: a Landscape Layer Blend material draws built-in "
+                                   "PBR — this device has no sampler slot left for heLandscapeWeights");
+        }
+        return VK_NULL_HANDLE;
+    }
     // Cache key mixes the shader hash with the render-target + blend variant so LDR (swapchain)
     // / HDR (RGBA16F offscreen) / opaque / transparent pipelines never collide.
     const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
@@ -7083,23 +7107,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             if (m_matReady && m_contentManager)
             {
                 uint64_t matHash = 0; std::string matFrag, matVertBody;
-                // A layer-blend graph samples heLandscapeWeights; on a device whose
-                // layout had to leave binding 14 out (createMaterialResources) its
-                // pipeline would be invalid, so it draws built-in PBR there instead.
-                auto matFitsLayout = [&]() {
-                    if (m_matLandscapeWeights || matFrag.find("heLandscapeWeights") == std::string::npos)
-                        return true;
-                    if (!m_matLandscapeWarned)
-                    {
-                        m_matLandscapeWarned = true;
-                        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: a Landscape Layer Blend material draws built-in "
-                                               "PBR — this device has no sampler slot left for heLandscapeWeights");
-                    }
-                    return false;
-                };
                 if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
-                                                  matHash, matFrag, matVertBody)
-                    && matFitsLayout())
+                                                  matHash, matFrag, matVertBody))
                 {
                     // Transparent graph materials get a blend-on / depth-write-off
                     // pipeline variant. MUST use the same predicate the opaque/blended
