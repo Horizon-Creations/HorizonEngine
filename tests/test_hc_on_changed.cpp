@@ -54,7 +54,9 @@ namespace
 		Node sv; sv.type = NodeType::SetVariable; sv.s = "Got"; sv.propType = PinType::Int;
 		const int set = g.addNode(sv);
 		REQUIRE(g.connect(e, 0, set, 0));
-		if (withArg)
+		// A non-numeric argument cannot feed an Int Set: such a listener
+		// copies Marker instead, which still shows whether it fired.
+		if (withArg && (argType == PinType::Int || argType == PinType::Float))
 			REQUIRE(g.connect(e, 1, set, 2));
 		else
 		{
