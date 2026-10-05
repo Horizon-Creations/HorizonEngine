@@ -330,3 +330,43 @@ deshalb besser nacheinander als parallel.
    *Empfehlung: ja.*
 4. **DnD-Cues auch für Material/Partikel/Animator** später? *Empfehlung: erst nach
    Rückmeldung zum HC-Klang.*
+
+## 10. Stand nach Schritt 3 (Sound-Cues + visuelles Feedback)
+
+Umgesetzt (EditorRewards.h ist die Spezifikation, Abschnitte „The tones“ und
+„The visual cues“):
+
+- **Töne**: `compileCleanPcm16`, `compileFailedPcm16`, `commitPcm16`,
+  `tourDonePcm16`, `problemPcm16`; `hasTone` ist für alle sechs Momente wahr.
+  Compile-Failed ohne Moment über `sound()` bzw. `postSound()` (LevelScriptPanel
+  hat keinen AppContext). Problem über `ProblemWatch` auf dem Snapshot, den die
+  Glocke ohnehin holt (neuestes `whenMs` einer Problem-Meldung), nur ohne Fokus,
+  eigener Abstand `kProblemToneGapSec` = 30 s.
+- **Schalter**: `RewardsSoundCompile`, `…CompileFailed`, `…Commit`,
+  `…Tutorial`, `…Problem` (unter Success Sound, je mit Preview) und
+  `RewardsProblemPulse`. Abweichung vom Plan: statt `RewardsBellPulse` ein
+  Schalter **Problem Pulse** für V8 und den Fehlerknoten-Puls aus V9 (beides
+  „schau hier hin“).
+- **V8**: Ring um die Footer-Glocke bei einer neuen Problem-Meldung
+  (`ringAt`, `drawProblemRing`), Reduced Motion: nur Ausblenden.
+- **V9**: Compile-Readout schreibt das V1-Häkchen (`compileCheck`,
+  `Bar::readout` gibt die Icon-Mitte zurück); der rote Halo des
+  Fehlerknotens hellt einmal auf (`errorPulse`, `HcGraphHost::Host::errorPulse`).
+- **Nicht hier, sondern Schritt 4**: V6 (Pin-Ringe beim Kabelziehen) und V7
+  (Snap-Puls/Geisterkabel) brauchen `canConnect` und die Hover-Flanke aus dem
+  DnD-Schritt, ebenso die `drag*Pcm16`-Töne.
+- **Handbuch**: Absatz „Feedback“ / „Feedback sounds“ in
+  `Website/HorizonEngineDocs/editor.html#preferences` (dort lokal committet,
+  nicht gepusht, kein Deploy). Ins Editor-Bundle `he-docs.json` wurde **nur
+  dieser Abschnitt** übernommen: das Bundle ist neuer als der Website-Stand
+  (Abschnitte aus anderen Zweigen), ein komplettes Neuerzeugen hätte Inhalt
+  zurückgedreht.
+
+Bildbelege (`scripts/he_uishot.py`, Szenen „ui shot: …“ in
+`tests/test_editor_rewards.cpp`):
+
+| Effekt | Bild |
+|--------|------|
+| V8 Ring um die Glocke | `img/editor-feinschliff/rewards_bell_problem_ring.png` |
+| V9 Häkchen wird geschrieben / fertig | `img/editor-feinschliff/rewards_compile_readout_writing.png`, `…_written.png` |
+| V9 Fehlerknoten auf dem Puls / in Ruhe | `img/editor-feinschliff/rewards_error_node_pulse.png`, `…_rest.png` |
