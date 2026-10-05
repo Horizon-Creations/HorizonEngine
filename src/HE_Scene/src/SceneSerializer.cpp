@@ -56,6 +56,7 @@
 #include <Diagnostics/Log.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <cstring>
@@ -2746,16 +2747,28 @@ bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path&
         return false;
     }
 
+    // Parse and build are timed apart because they scale differently with the
+    // entity count, and the world-streaming baseline (Thema 153) needs to know
+    // which of the two a large scene actually waits on.
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point t0 = Clock::now();
     json scene = json::parse(in, nullptr, false);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Scene load: '%s' is not valid JSON", path.string().c_str());
         return false;
     }
+    const Clock::time_point t1 = Clock::now();
 
+    const size_t entityCount = sceneEntityCount(scene);
     HE_LOG_INFO(Serialize, "Scene loaded (JSON): '%s', %zu entity/-ies",
-                path.string().c_str(), sceneEntityCount(scene));
-    return applySceneJson(world, scene);
+                path.string().c_str(), entityCount);
+    const bool ok = applySceneJson(world, scene);
+    const Clock::time_point t2 = Clock::now();
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    HE_LOG_INFO(Serialize, "SceneLoadTiming: entities=%zu parseMs=%.2f buildMs=%.2f",
+                entityCount, ms(t1 - t0), ms(t2 - t1));
+    return ok;
 }
 
 // ── In-memory snapshots (CBOR) ────────────────────────────────────────────────

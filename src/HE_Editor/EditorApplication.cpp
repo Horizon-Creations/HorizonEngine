@@ -1871,14 +1871,29 @@ void EditorApplication::OnInit()
 			splashStatus("Loading scene " +
 			             std::filesystem::path(sceneAbsPath).stem().string(), 0.9f);
 			SceneSerializer serializer;
+			// Phase timings for the world-streaming baseline (Thema 153): the
+			// whole startup load is one blocking call chain, and its parts
+			// scale differently with entity count and asset count.
+			using Clock = std::chrono::steady_clock;
+			const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+			const Clock::time_point tLoad = Clock::now();
 			bool ok = serializer.load(*m_editorWorld, sceneAbsPath, SerializeFormat::JSON);
 			if (ok)
 			{
+				const Clock::time_point tSync = Clock::now();
 				m_currentScenePath = sceneAbsPath;
 				syncPrefabInstances("startup"); // same order as openScene: before the preload
+				const Clock::time_point tPreload = Clock::now();
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+				const Clock::time_point tWarmup = Clock::now();
 				splashStatus("Compiling material pipelines", 0.95f);
 				warmupWorldMaterials(); // build custom-material pipelines before the first draw
+				const Clock::time_point tEnd = Clock::now();
+				// The entity count is on the SceneLoadTiming line just before.
+				HE_LOG_INFO(Editor, "SceneOpenTiming: loadMs=%.2f prefabSyncMs=%.2f "
+				                    "preloadMs=%.2f warmupMs=%.2f totalMs=%.2f",
+				            ms(tSync - tLoad), ms(tPreload - tSync), ms(tWarmup - tPreload),
+				            ms(tEnd - tWarmup), ms(tEnd - tLoad));
 				HE_LOG_INFO(Editor, "%s",
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
 			}

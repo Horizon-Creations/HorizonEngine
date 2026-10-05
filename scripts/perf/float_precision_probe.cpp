@@ -80,10 +80,15 @@ void row(double d)
         depthOk = depthOk && zFace[1] < zFace[0];
     }
 
+    // Same worst-of-64 placement as above for the walking step.
     const double step = 1.4 / 60.0;
-    const float  pf   = static_cast<float>(s);
-    const double moved = double(pf + static_cast<float>(step)) - double(pf);
-    const double stepErr = std::fabs(moved - step) / step * 100.0;
+    double stepErr = 0.0;
+    for (int k = 0; k < 64; ++k)
+    {
+        const float  pf    = static_cast<float>(s + k / 64.0);
+        const double moved = double(pf + static_cast<float>(step)) - double(pf);
+        stepErr = std::fmax(stepErr, std::fabs(moved - step) / step * 100.0);
+    }
 
     std::printf("%10.0f  %10.3f  %9.1f  %10.3f  %s\n", d, ulpAt(s) * 1000.0, stepErr, maxPx,
                 depthOk ? "yes" : "NO");
