@@ -495,7 +495,7 @@ struct Variable
     //
     // No separate on/off flag: an empty pullSource IS off, so there is no half
     // state (ticked, but no source). INSTANCE variables only, like `replicated`.
-    std::string pullSource;   // "" = off | kPullFromGameInstance | kPullFromCreator
+    std::string pullSource;   // "" = off | kPullFromGameInstance | kPullFromCreator | kPullFromRef
     std::string pullVar;      // public instance variable of the source
     std::string pullMember;   // optional: field of pullVar when that is a Struct
     // Creator only, optional: the class the creator is expected to be (asset
@@ -503,6 +503,18 @@ struct Variable
     // Target" writes into it; at run time a creator that is not one (derived
     // classes count) falls back to the default. Empty = any creator.
     std::string pullClass;
+    // ── Bind To (docs/bind-to-variable-binding-plan.md) ──────────────────────
+    // Keeps the pull's source BOUND for the instance's whole life: at the end of
+    // every frame the runtime compares the source value with what it last saw and,
+    // when it moved (or the source is another instance now), writes it here. The
+    // construct-time pull above still runs first, so the value is there before
+    // PreConstruct. A local write stays until the SOURCE changes again.
+    // INSTANCE variables only; never together with `replicated` (the loader drops
+    // bindTo then).
+    bool        bindTo  = false;
+    // Source kPullFromRef only: the name of a Ref INSTANCE variable of this class;
+    // the source is whatever that reference holds at the moment of the compare.
+    std::string pullRef;
     // ── Expose on Spawn (docs/widget-pre-construct-design.md §6) ─────────────
     // A Create Widget naming this graph's widget grows an input pin for the
     // variable, and the value arrives before the widget's PreConstruct. Opt-in
@@ -527,11 +539,15 @@ inline bool isSaveableType(PinType t) { return t != PinType::Ref && t != PinType
 // same sentence in red before anything runs).
 inline constexpr const char* kPullFromGameInstance = "GameInstance";
 inline constexpr const char* kPullFromCreator      = "Creator";
+// Bind To only: whatever a Ref instance variable of the class (Variable::pullRef)
+// holds. Never a construct-time pull — at registration the Ref is still null.
+inline constexpr const char* kPullFromRef          = "Ref";
 // A source this build understands. The loader drops anything else with a
 // warning — a project saved by a newer engine names sources this one lacks.
 HE_API bool        isKnownPullSource(const std::string& src);
-// "Game Instance" / "Creator" — what the editor and the log call a source.
-HE_API std::string pullSourceLabel(const std::string& src);
+// "Game Instance" / "Creator" / "Reference 'Target'" — what the editor and the
+// log call a source. `ref` is Variable::pullRef and only read for kPullFromRef.
+HE_API std::string pullSourceLabel(const std::string& src, const std::string& ref = {});
 
 // Can a value of the source's shape land in the target's? Same container kind
 // (and map key), same type — Int, Float and Double convert into each other as
@@ -565,13 +581,19 @@ enum class PullFailure : uint8_t
     NoSuchMember,       // the struct has no field of that name (formerNames tried)
     TypeMismatch,       // pullShapesCompatible said no
     UnknownSource,      // pullSource names nothing this build knows
+    // Bind To with a Ref source (appended: the order is not persisted, but
+    // nothing has to move for these either).
+    NoRefVariable,      // pullRef names no Ref instance variable of the class
+    RefTargetGone,      // the reference holds an instance that was destroyed
 };
 // The reason as one sentence, e.g. "Game Instance has no public variable
 // 'Score'". `src` is the Variable's pullSource; `detail` fills in what only
 // the caller knows (the type pair for a mismatch, the class for a creator).
+// `ref` is Variable::pullRef, named in the sentence for a Ref source.
 HE_API std::string pullFailureText(PullFailure why, const std::string& src,
                                    const std::string& var, const std::string& member,
-                                   const std::string& detail = {});
+                                   const std::string& detail = {},
+                                   const std::string& ref = {});
 
 // ── Extract on Destruct (docs/state-driven-data-exchange-design.md §3) ──────
 // A class names ONE struct and, per struct member, which of its instance
@@ -1060,6 +1082,17 @@ HE_API bool connectWithConversion(Graph& g, int srcNode, int srcPin,
 // it, and generated C++ mirrors it (hc::sameScalar). Types with no meaningful
 // identity (Struct) compare unequal, which is also why they cannot key a map.
 HE_API bool scalarValueEquals(const Value& a, const Value& b, PinType t);
+
+// Exact equality of two WHOLE values, recursing through containers and struct
+// fields (scalarValueEquals is the leaf). Different types are never equal —
+// including "Array of Int" against "scalar Int". A map compares position by
+// position: insertion order is part of its value. Moved here from the
+// replicator's ValueWire so the Bind To compare (Runtime::exchangeState) and
+// dirty tracking mean one thing by "changed".
+HE_API bool valuesEqual(const Value& a, const Value& b);
+// Do these two describe the same property? Type, container kind, map key and,
+// for Enum/Struct, the definition name; the payload is ignored.
+HE_API bool valueTypesMatch(const Value& a, const Value& b);
 
 HE_API void inferUserTypeNames(Graph& g);
 

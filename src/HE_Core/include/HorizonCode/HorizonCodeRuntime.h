@@ -240,6 +240,34 @@ public:
     // says so.
     InstanceId creatorOf(InstanceId id) const;
 
+    // ── Bind To (docs/bind-to-variable-binding-plan.md §3) ───────────────────
+    // A variable whose pull is marked Variable::bindTo stays bound to its source
+    // for the instance's whole life. The bindings are made at registration, in
+    // the same pass that pulls; the Game Instance binds nothing (it registers
+    // without a pull). The host calls exchangeState() ONCE PER FRAME, at the
+    // frame's end — after every script of the frame has run, before anything is
+    // drawn — and each binding whose source value moved since the last compare
+    // (or whose source is another instance now) writes the new value into its
+    // variable. A source that did not move writes nothing, so a local write to
+    // a bound variable stays until the source changes again.
+    //
+    // Chains (A bound to B bound to C) settle within one call; a cycle stops
+    // after kMaxBindRounds rounds with one warning and continues next frame.
+    // Returns how many variables were written, so an event-driven host knows
+    // whether to redraw (0 = nothing moved).
+    int exchangeState();
+    // Each binding of `id`, for tests and tools: where it looks now (`boundTo`,
+    // 0 while it rests or waits for a null reference) and why it rests (`why`,
+    // None while bound or waiting).
+    struct BindOutcome
+    {
+        std::string name;
+        std::string source;          // Variable::pullSource
+        InstanceId  boundTo = 0;
+        PullFailure why     = PullFailure::None;
+    };
+    std::vector<BindOutcome> boundVariablesOf(InstanceId id) const;
+
     // ── One function's multiplayer face (plan §7.6) ─────────────────────────
     // Here for exactly the reason replicatedVariablesOf is: it is the question
     // whose answer differs between the two backends — an interpreted instance
@@ -659,8 +687,34 @@ private:
         CreatorScope& operator=(const CreatorScope&) = delete;
     };
     // Pull warnings already printed, keyed "class|variable|reason": a HUD
-    // spawned per enemy has one thing wrong with it, not one per enemy.
+    // spawned per enemy has one thing wrong with it, not one per enemy. Bind To
+    // files its own under "bind|class|variable|reason".
     std::unordered_set<std::string> m_pullWarned;
+    // The value a pull or a binding reads off `src`: its PUBLIC instance
+    // variable `var` (the door Get (Ref) uses), and of that optionally one
+    // struct `member` (formerNames followed). `src` must be alive.
+    PullFailure readPullSource(InstanceId src, const std::string& var,
+                               const std::string& member, Value& out) const;
+
+    // ── Bind To (§3.1) ───────────────────────────────────────────────────────
+    struct Binding
+    {
+        InstanceId  owner = 0;
+        std::string name;                           // the bound (target) variable
+        std::string src, var, member, cls, ref;     // the pull spec it extends
+        std::string clsKey;                         // owner's class, for warnings
+        InstanceId  boundTo = 0;                    // source at the last compare (0 = none)
+        Value       sourceShadow;                   // source value then, after the member pick
+        bool        haveShadow = false;
+        PullFailure why = PullFailure::None;        // why it rests (None = bound / waiting)
+    };
+    // Registration order. A flat vector: the compare walks all of them every
+    // frame, and remove() is the only thing that takes one out.
+    std::vector<Binding> m_bindings;
+    static constexpr int kMaxBindRounds = 8;
+    // The owner's source instance for `b` right now, or 0 with the reason (None
+    // and 0 together = a Ref source that holds null, which is no failure).
+    InstanceId resolveBindSource(const Binding& b, PullFailure& why) const;
     // Build a Context that routes variable access to the instance's private
     // store, property/show/hide to its host bindings, and the delegation hooks
     // (emit/bind/callExternal/self/gameInstance) back to the runtime.

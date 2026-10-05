@@ -27,7 +27,9 @@
 // here keeps "equal" meaning one thing across the engine. But it has no Struct
 // case and does not descend into containers (its own callers note this), and a
 // struct property that compared equal to everything would never replicate. The
-// recursion is the part that is missing, and it is the only part added here.
+// recursion is the part that is missing. It now lives in HE_Core as
+// HorizonCode::valuesEqual (Bind To compares with it too); the two functions
+// below forward there.
 //
 // WHAT IS NOT SUPPORTED. `Ref`: an InstanceId is a local handle that names
 // nothing on the other machine (plan §6.1). writeValue refuses it and returns
@@ -64,13 +66,17 @@ bool readValue(BitReader& r, HorizonCode::Value& out);
 // Exact equality, recursing through containers and struct fields. Different
 // types are never equal — including "Array of Int" against "scalar Int", which
 // is the shape a mis-declared variable has.
-bool valuesEqual(const HorizonCode::Value& a, const HorizonCode::Value& b);
-
-// Do these two describe the SAME property? Type, container kind and, for the
+//
+// Do two values describe the SAME property? Type, container kind and, for the
 // user-defined types, the definition name. This is the check a client runs
 // before applying a delta (plan §6.2 "dessen Typ nicht passt"); it deliberately
 // ignores the payload, so an empty array still matches a full one.
-bool valueTypesMatch(const HorizonCode::Value& a, const HorizonCode::Value& b);
+//
+// Both live in HE_Core (HorizonCode.h). Brought in by name rather than wrapped:
+// a second function of the same signature here would make every unqualified
+// call ambiguous, since a HorizonCode::Value argument finds the original by ADL.
+using HorizonCode::valuesEqual;
+using HorizonCode::valueTypesMatch;
 
 // ── A call's arguments as JSON, for the native module boundary (plan §7.2) ───
 // IGameLogic::onRpc takes a string and not a Value list, the same trade

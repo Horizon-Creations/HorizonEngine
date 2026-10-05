@@ -3398,6 +3398,11 @@ private:
                     if (pull)
                         trailing += ", " + strLit(v.pullSource) + ", " + strLit(v.pullVar) + ", " +
                                     strLit(v.pullMember) + ", " + strLit(v.pullClass);
+                    //   bind            Bind To's flag and reference name,
+                    //                   behind the pull strings it extends.
+                    //                   Metadata only, like the pull itself.
+                    if (pull && v.bindTo)
+                        trailing += ", true, " + strLit(v.pullRef);
                     c += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
                          strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
                          (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +

@@ -3301,6 +3301,16 @@ void GameApplication::OnRender(float deltaTime)
 	// window in front of it.
 	dispatchNetEvents();
 
+	// ── Frame end: Bind To (docs/bind-to-variable-binding-plan.md §3.4) ──────
+	// Every bound variable whose source moved this frame takes the new value.
+	// After every script of the frame (ticks, Delays, UI clicks, OnRep above),
+	// so whatever was written in frame N is bound at the end of frame N, and
+	// before anything is drawn, so a bound HUD shows it in this very image.
+	// Also while the game is paused: a pause menu bound to the Game Instance
+	// follows it like the widget tick does. An event-driven app would not draw
+	// a written value until the next input — hence the redraw.
+	if (m_gameInstance.runtime().exchangeState() > 0) requestRedraw();
+
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// LAST in the frame, after every script had its turn: a kick decided at the
 	// frame's start is executed here, so a handler had the whole frame to

@@ -256,6 +256,17 @@ Editor (§5.1) und Doku:
 11. EditorHelp-Einträge in beiden Scopes („Script Variable/…“, „UI Variable/…“), `scripts/editor_help_audit.py --check` BASELINE im selben Commit. `docs/horizoncode-reference.md`, In-Engine-Handbuch.
 12. **SDDE-Doku nachziehen** (`docs/state-driven-data-exchange-design.md`, liegt nach dem Merge auf dem Zweig): §2.6 „Einmal … wer laufend nachziehen will, macht das wie heute selbst“ → Verweis auf Bind To. §7 „Laufendes Nachziehen nach Construct. Das war der verworfene erste Entwurf.“ → „siehe docs/bind-to-variable-binding-plan.md“. §0 „wird hier nicht weitergeführt“ → „wird in Thema 137 weitergeführt“.
 
+### 3.7 Umsetzungsstand Schritt 2
+
+Umgesetzt nach §2.1 (Modus der Pull-Angabe; Frage 1 war beim Start unbeantwortet, die Empfehlung gilt, bis das Review anders entscheidet).
+
+* **Datenmodell/JSON:** `Variable::bindTo`, `pullRef`, `kPullFromRef`, `PullFailure::NoRefVariable/RefTargetGone`, `pullSourceLabel(src, ref)`, `pullFailureText(…, ref)`. Der Loader verwirft `bind` bei Replicated (Pull bleibt), eine Ref-Quelle ohne `bind`, ohne `ref` oder auf einer Replicated-Variable ganz. **Ob `ref` eine Ref-Instanzvariable ist, prüft nur die Runtime** (`NoRefVariable`): eine abgeleitete Klasse darf über eine geerbte Referenz binden, die der Loader eines einzelnen Graphs nicht sieht.
+* **`valuesEqual`/`valueTypesMatch`** liegen jetzt in HE_Core (HorizonCode.h). `ValueWire.h` holt sie per `using`-Deklaration herein. Eigene Weiterleitungsfunktionen gleicher Signatur gingen nicht: jeder unqualifizierte Aufruf mit einem `HorizonCode::Value` findet das Original per ADL und wäre mehrdeutig.
+* **Runtime:** Die Bindungen entstehen in `pullOnConstruct`, im selben Durchgang wie der Pull, mit dessen Ergebnis als Startwert. Lese- und Prüfweg der Quelle teilen sich Pull und Bind (`readPullSource`). Ein fehlgeschlagener Pull einer gebundenen Variable meldet nicht ein zweites Mal als „Bind To“. Die Liste ist ein flacher Vektor in Registrierungsreihenfolge; der Abgleich geht pro Runde über den Index, damit Schritt 3 Handler dazwischen rufen kann.
+* **Hosts:** GA hinter `dispatchNetEvents`, EA ebenso auf `uiLive`. Ob die Editor-Vorschau die Zeichenliste schon vorher baut, ist **nicht gemessen**; Kommentar und Handbuch sagen „vielleicht ein Bild später“.
+* **Editor:** Modus-Combo „Source Mode“, Quelle „Reference“ nur bei Bind To, Liste der Ref-Variablen nur aus der **eigenen** Ebene (eine geerbte Referenz bleibt eingetragen, ist aber nicht wählbar). Bind To bei Replicated nicht wählbar; ein Graph mit beidem fällt im Block auf den Pull zurück. Das Replicated-Häkchen selbst wird **nicht** ausgegraut (es sitzt in LevelScriptPanel/UIEditorPanel, die auf einem anderen Zweig belegt waren). `HcRename` beweist eine Bindung über den `className` der Referenz und zieht `pullRef` beim Umbenennen der eigenen Ref-Variable nach, nicht aber in abgeleiteten Klassen, die über eine geerbte Referenz binden (die warnen dann zur Laufzeit `NoRefVariable`).
+* **Offen:** die Kostenmessung aus §3.2 (1000 Bindungen, 10 × 10 000-Array); der Headless-Lauf des echten Spiels mit gebundenem Widget (§6); die Website-Doku.
+
 ## 4. Schritt 3: OnChanged_\<Var\> und die Meldung nach außen
 
 ### 4.1 Deklaration

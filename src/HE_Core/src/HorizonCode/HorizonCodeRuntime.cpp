@@ -156,7 +156,41 @@ InstanceId Runtime::registerCompiled(CompiledPtr inst, HostBindings bindings,
 // ── Pull on Construct (design §2.5) ─────────────────────────────────────────
 namespace {
 // One pulling variable, as either backend declares it.
-struct PullSpec { std::string name, src, var, member, cls; };
+struct PullSpec { std::string name, src, var, member, cls; bool bind = false; std::string ref; };
+}
+
+PullFailure Runtime::readPullSource(InstanceId src, const std::string& var,
+                                    const std::string& member, Value& out) const
+{
+    // Its PUBLIC instance variable — the same door Get (Ref) uses, so a
+    // variable nobody may read through a reference is not pullable either.
+    const Inst* si = find(src);
+    if (!si) return PullFailure::NoPublicVariable;
+    bool visible = false;
+    if (si->compiled)
+    {
+        const CompiledVarInfo* vi = findVarInfo(*si->compiled, var);
+        visible = vi && vi->access == 0;
+    }
+    else
+    {
+        const Variable* v = findVarInLevels(si->levels, var);
+        visible = v && v->access == 0 && v->scope == 0;
+    }
+    if (!visible) return PullFailure::NoPublicVariable;
+    out = getVariable(src, var);
+    if (member.empty()) return PullFailure::None;
+
+    // Optionally one field of it. findField follows formerNames, so a member
+    // renamed in the struct keeps being found.
+    HE::StructDef def;
+    if (out.type != PinType::Struct || out.isArray) return PullFailure::NotAStruct;
+    if (!HE::TypeRegistry::instance().getStruct(out.typeName, def)) return PullFailure::NoSuchMember;
+    const HE::StructField* f = def.findField(member);
+    if (!f || (size_t)(f - def.fields.data()) >= out.items.size()) return PullFailure::NoSuchMember;
+    Value field = out.items[(size_t)(f - def.fields.data())];
+    out = std::move(field);
+    return PullFailure::None;
 }
 
 void Runtime::pullOnConstruct(InstanceId id)
@@ -179,13 +213,14 @@ void Runtime::pullOnConstruct(InstanceId id)
         auto str = [](const char* p) { return p ? std::string(p) : std::string(); };
         for (const auto& vi : inst->compiled->varInfos())
             report({ str(vi.name), str(vi.pullSource), str(vi.pullVar), str(vi.pullMember),
-                     str(vi.pullClass) });
+                     str(vi.pullClass), vi.bindTo, str(vi.pullRef) });
     }
     else
         for (const Graph& g : inst->levels)
             for (const Variable& v : g.variables)
                 if (v.scope == 0)
-                    report({ v.name, v.pullSource, v.pullVar, v.pullMember, v.pullClass });
+                    report({ v.name, v.pullSource, v.pullVar, v.pullMember, v.pullClass,
+                             v.bindTo, v.pullRef });
     specs.erase(std::remove_if(specs.begin(), specs.end(),
                                [](const PullSpec& s) { return s.src.empty() || s.var.empty(); }),
                 specs.end());
@@ -196,6 +231,29 @@ void Runtime::pullOnConstruct(InstanceId id)
     std::vector<PullOutcome> outcomes;
     for (const PullSpec& s : specs)
     {
+        // Bind To (plan §3.1): every bound spec becomes a binding here, in the
+        // pass that knows its source and what was pulled from it.
+        Binding bind;
+        if (s.bind)
+        {
+            bind.owner = id;
+            bind.name = s.name;
+            bind.src = s.src; bind.var = s.var; bind.member = s.member;
+            bind.cls = s.cls; bind.ref = s.ref;
+            bind.clsKey = clsKey;
+        }
+        // A reference source pulls nothing at registration — the Ref still
+        // holds its default (null) — and that is no failure, so no outcome and
+        // no warning. Its first value comes with the first compare after the
+        // reference points somewhere (§3.2). Without Bind To it is no state the
+        // loader lets through; one that arrives anyway (hand-built graph) is
+        // skipped the same quiet way.
+        if (s.src == kPullFromRef)
+        {
+            if (s.bind && !s.ref.empty()) m_bindings.push_back(std::move(bind));
+            continue;
+        }
+
         PullOutcome out;
         out.name = s.name;
         std::string detail;
@@ -223,45 +281,10 @@ void Runtime::pullOnConstruct(InstanceId id)
         else
             fail(PullFailure::UnknownSource);
 
-        // 2. Its PUBLIC instance variable — the same door Get (Ref) uses, so a
-        //    variable nobody may read through a reference is not pullable
-        //    either.
+        // 2./3. Its public instance variable, optionally one struct field of it
+        //    (readPullSource, shared with Bind To's compare).
         if (out.why == PullFailure::None)
-        {
-            const Inst* si = find(src);
-            bool visible = false;
-            if (si->compiled)
-            {
-                const CompiledVarInfo* vi = findVarInfo(*si->compiled, s.var);
-                visible = vi && vi->access == 0;
-            }
-            else
-            {
-                const Variable* v = findVarInLevels(si->levels, s.var);
-                visible = v && v->access == 0 && v->scope == 0;
-            }
-            if (!visible) fail(PullFailure::NoPublicVariable);
-            else          val = getVariable(src, s.var);
-        }
-
-        // 3. Optionally one field of it. findField follows formerNames, so a
-        //    member renamed in the struct keeps being found.
-        if (out.why == PullFailure::None && !s.member.empty())
-        {
-            HE::StructDef def;
-            if (val.type != PinType::Struct || val.isArray)
-                fail(PullFailure::NotAStruct);
-            else if (!HE::TypeRegistry::instance().getStruct(val.typeName, def))
-                fail(PullFailure::NoSuchMember);
-            else if (const HE::StructField* f = def.findField(s.member);
-                     !f || (size_t)(f - def.fields.data()) >= val.items.size())
-                fail(PullFailure::NoSuchMember);
-            else
-            {
-                Value field = val.items[(size_t)(f - def.fields.data())];
-                val = std::move(field);
-            }
-        }
+            fail(readPullSource(src, s.var, s.member, val));
 
         // 4. Shape against the target. The target's current value IS its
         //    declared default here, and serves as the declaration for both
@@ -295,6 +318,27 @@ void Runtime::pullOnConstruct(InstanceId id)
             if (m_pullWarned.insert(key).second)
                 hcWarn("Pull on Construct: '" + clsKey + "." + s.name + "' - " + out.reason +
                        "; default used");
+            // A bound variable whose pull failed would say the same thing again
+            // at its first compare; this line already said it.
+            if (s.bind)
+                m_pullWarned.insert("bind|" + key);
+        }
+        if (s.bind)
+        {
+            // Start value (§3.1): a successful pull IS the first compare, so the
+            // first exchangeState sees "unchanged" and writes nothing — a spawn
+            // or hot-reload value set after this stays until the source moves.
+            // A failed pull leaves no shadow, and the first compare that can
+            // resolve the source writes.
+            if (out.pulled)
+            {
+                bind.boundTo = src;
+                bind.sourceShadow = val;
+                bind.haveShadow = true;
+            }
+            else
+                bind.why = out.why;
+            m_bindings.push_back(std::move(bind));
         }
         outcomes.push_back(std::move(out));
     }
@@ -313,6 +357,132 @@ InstanceId Runtime::creatorOf(InstanceId id) const
 {
     const Inst* i = find(id);
     return i ? i->creator : 0;
+}
+
+// ── Bind To (docs/bind-to-variable-binding-plan.md §3) ──────────────────────
+InstanceId Runtime::resolveBindSource(const Binding& b, PullFailure& why) const
+{
+    why = PullFailure::None;
+    if (b.src == kPullFromGameInstance)
+    {
+        // Looked up afresh every time: a Game Instance replaced at play start
+        // is another instance, and the binding follows it.
+        if (!m_gameInstance || !find(m_gameInstance)) { why = PullFailure::NoGameInstance; return 0; }
+        return m_gameInstance;
+    }
+    if (b.src == kPullFromCreator)
+    {
+        const Inst* o = find(b.owner);
+        const InstanceId c = o ? o->creator : 0;
+        if (!c)       { why = PullFailure::NoCreator;   return 0; }
+        if (!find(c)) { why = PullFailure::CreatorGone; return 0; }
+        if (!b.cls.empty() && !instanceIsA(c, b.cls)) { why = PullFailure::CreatorWrongClass; return 0; }
+        return c;
+    }
+    if (b.src == kPullFromRef)
+    {
+        // The reference must be a scalar Ref INSTANCE variable of the owner's
+        // class, at any level (a derived class may bind through an inherited
+        // one; the loader could not check that, so this is where it is).
+        const Inst* o = find(b.owner);
+        if (!o) { why = PullFailure::NoRefVariable; return 0; }
+        bool isRef = false;
+        if (o->compiled)
+        {
+            const CompiledVarInfo* vi = findVarInfo(*o->compiled, b.ref);
+            isRef = vi && vi->type == PinType::Ref && !vi->isArray;
+        }
+        else
+        {
+            const Variable* v = findVarInLevels(o->levels, b.ref);
+            isRef = v && v->scope == 0 && v->type == PinType::Ref && !v->isArray;
+        }
+        if (!isRef) { why = PullFailure::NoRefVariable; return 0; }
+        const InstanceId target = getVariable(b.owner, b.ref).ref;
+        if (!target) return 0;                       // not assigned yet: waiting, not failing
+        if (!find(target)) { why = PullFailure::RefTargetGone; return 0; }
+        return target;
+    }
+    why = PullFailure::UnknownSource;
+    return 0;
+}
+
+int Runtime::exchangeState()
+{
+    if (m_bindings.empty()) return 0;
+    int writes = 0;
+
+    // The binding rests: the variable keeps its last value, and the first
+    // compare that can resolve the source again writes, whatever the value.
+    // Warned once per (class, variable, reason) and session; a null reference
+    // is an ordinary state ("not assigned yet") and rests without a word.
+    auto rest = [this](Binding& b, PullFailure why, const std::string& detail)
+    {
+        b.boundTo = 0;
+        b.haveShadow = false;
+        b.why = why;
+        if (why == PullFailure::None) return;
+        const std::string key = "bind|" + b.clsKey + "|" + b.name + "|" + std::to_string((int)why);
+        if (m_pullWarned.insert(key).second)
+            hcWarn("Bind To: '" + b.clsKey + "." + b.name + "' - " +
+                   pullFailureText(why, b.src, b.var, b.member, detail, b.ref) +
+                   "; keeps its last value");
+    };
+
+    int round = 0;
+    for (; round < kMaxBindRounds; ++round)
+    {
+        bool changedAny = false;
+        // By index, re-checked every pass: nothing below runs a script today,
+        // but the change notification that follows (plan §4) will, and a
+        // handler may register or remove instances — and with them bindings.
+        for (size_t i = 0; i < m_bindings.size(); ++i)
+        {
+            if (!find(m_bindings[i].owner)) continue;
+            PullFailure why = PullFailure::None;
+            const InstanceId src = resolveBindSource(m_bindings[i], why);
+            Binding& b = m_bindings[i];
+            if (!src) { rest(b, why, why == PullFailure::CreatorWrongClass ? b.cls : std::string()); continue; }
+
+            Value val;
+            if (const PullFailure r = readPullSource(src, b.var, b.member, val); r != PullFailure::None)
+            { rest(b, r, {}); continue; }
+            // Only a MOVE writes: the value, or which instance it comes from.
+            if (src == b.boundTo && b.haveShadow && valuesEqual(val, b.sourceShadow)) continue;
+
+            const Value shape = getVariable(b.owner, b.name);
+            if (!pullValuesCompatible(val, shape))
+            {
+                std::string detail;
+                pullShapesCompatible(val.type, val.kind(), val.keyType, val.typeName,
+                                     shape.type, shape.kind(), shape.keyType, shape.typeName,
+                                     &detail);
+                rest(b, PullFailure::TypeMismatch, detail);
+                continue;
+            }
+            b.boundTo = src;
+            b.sourceShadow = val;
+            b.haveShadow = true;
+            b.why = PullFailure::None;
+            // A copy, as for the pull: containers and structs are values.
+            setVariable(b.owner, b.name, pullConvert(val, shape));
+            changedAny = true;
+            ++writes;
+        }
+        if (!changedAny) break;
+    }
+    if (round == kMaxBindRounds && m_pullWarned.insert("bind|cycle").second)
+        hcWarn("Bind To: bindings still moving after " + std::to_string(kMaxBindRounds) +
+               " rounds - a cycle (A bound to B bound to A)? The rest follows next frame");
+    return writes;
+}
+
+std::vector<Runtime::BindOutcome> Runtime::boundVariablesOf(InstanceId id) const
+{
+    std::vector<BindOutcome> out;
+    for (const Binding& b : m_bindings)
+        if (b.owner == id) out.push_back({ b.name, b.src, b.boundTo, b.why });
+    return out;
 }
 
 bool Runtime::instanceIsA(InstanceId id, const std::string& classKey) const
@@ -374,6 +544,10 @@ void Runtime::remove(InstanceId id)
     // So does a run of its that is stopped at a breakpoint.
     m_suspended.erase(std::remove_if(m_suspended.begin(), m_suspended.end(),
         [&](const SuspendedRun& r){ return r.instance == id; }), m_suspended.end());
+    // Its bindings go (Bind To §3.1). Bindings whose SOURCE it was notice that
+    // themselves at their next compare and rest.
+    m_bindings.erase(std::remove_if(m_bindings.begin(), m_bindings.end(),
+        [&](const Binding& b){ return b.owner == id; }), m_bindings.end());
     if (id == m_gameInstance) { m_gameInstance = 0; m_gameInstanceCompiled = nullptr; }
 }
 void Runtime::destroy(InstanceId id)
@@ -578,6 +752,7 @@ void Runtime::clear()
     m_listeners.clear();
     m_pending.clear();
     m_suspended.clear();
+    m_bindings.clear();
     m_breakNext = false;
     m_gameInstance = 0;
     m_gameInstanceCompiled = nullptr;

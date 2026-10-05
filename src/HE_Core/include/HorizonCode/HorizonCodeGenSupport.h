@@ -778,6 +778,10 @@ struct VarSlot
     const char*   pullVar    = "";
     const char*   pullMember = "";
     const char*   pullClass  = "";
+    // Mirrors Variable::bindTo / pullRef (Bind To), appended last with defaults.
+    // Metadata again: the Runtime's frame-end compare binds both backends.
+    bool          bindTo     = false;
+    const char*   pullRef    = "";
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
@@ -811,13 +815,15 @@ inline VarSlot slot(const char* name, PinType type, bool isArray, int access,
                     bool replicated = false, bool repNotify = false,
                     bool saveGame = false,
                     const char* pullSource = "", const char* pullVar = "",
-                    const char* pullMember = "", const char* pullClass = "")
+                    const char* pullMember = "", const char* pullClass = "",
+                    bool bindTo = false, const char* pullRef = "")
 {
     return VarSlot{ name, type, isArray, access, typeName, std::move(def),
                     &SlotAccess<M>::get, &SlotAccess<M>::set, container, keyType,
                     replicated, repNotify, saveGame,
                     pullSource ? pullSource : "", pullVar ? pullVar : "",
-                    pullMember ? pullMember : "", pullClass ? pullClass : "" };
+                    pullMember ? pullMember : "", pullClass ? pullClass : "",
+                    bindTo, pullRef ? pullRef : "" };
 }
 
 // Enum members are plain ints in C++, so the Value coming back out has to be
@@ -913,10 +919,12 @@ inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slot
     // table for a compiled instance, and an unset flag there means the variable
     // never reaches a client (plan §6.1). Save Game rides along for the same
     // reason: Runtime::savedVariablesOf reads this table too. And the pull
-    // spec, which Runtime::pullOnConstruct reads at registration.
+    // spec, which Runtime::pullOnConstruct reads at registration (and Bind To's
+    // two fields, which the same place turns into bindings).
     for (const VarSlot& s : slots)
         out.push_back({ s.name, s.type, s.isArray, s.access, s.replicated, s.repNotify,
-                        s.saveGame, s.pullSource, s.pullVar, s.pullMember, s.pullClass });
+                        s.saveGame, s.pullSource, s.pullVar, s.pullMember, s.pullClass,
+                        s.bindTo, s.pullRef });
     return out;
 }
 

@@ -5895,15 +5895,23 @@ namespace
 	  "sees it. Left alone, the input keeps the default shown here. Public "
 	  "variables only.",
 	  "", "ui#graph" },
-	{ "UI Variable/Pull on Construct", "",
-	  "Fills this variable from somewhere else the moment the widget is created, "
-	  "before PreConstruct runs. Once, not continuously. When the source cannot "
+	{ "UI Variable/Source Mode", "",
+	  "Pull on Construct fills this variable from somewhere else the moment the "
+	  "widget is created, before PreConstruct runs, once. Bind To keeps it "
+	  "following the source: at the end of every frame a changed source value "
+	  "is written here, in time for that frame's picture. When the source cannot "
 	  "answer, the default (now called Fallback) stays, and the log says why "
 	  "once per widget class.",
 	  "", "ui#graph" },
 	{ "UI Variable/Source", "",
 	  "Game Instance: one of its public variables. Creator: a public variable of "
-	  "whoever ran the Create Widget that made this one.",
+	  "whoever ran the Create Widget that made this one. Reference (Bind To "
+	  "only): a public variable of whatever an object variable of this widget "
+	  "holds.",
+	  "", "ui#graph" },
+	{ "UI Variable/Reference", "",
+	  "The object variable to bind through. Whatever it holds is the source; "
+	  "empty means the Initial Value stays, without a warning.",
 	  "", "ui#graph" },
 	{ "UI Variable/Creator Class", "",
 	  "The class expected to create this widget. It fills the Variable list and "
@@ -7007,20 +7015,32 @@ namespace
 	  "at something that exists only in this run — save a name or an id "
 	  "instead.",
 	  "", "horizoncode#functions" },
-	// Pull on Construct (HcPullUi draws it; the same block sits in the widget
-	// editor under "UI Variable/" below).
-	{ "Script Variable/Pull on Construct", "",
-	  "Fills this variable from somewhere else the moment an instance is created, "
-	  "before any of its own events run: PreConstruct, Construct and BeginPlay "
-	  "already see the pulled value. It happens once; a later change at the "
-	  "source does not follow. When the source cannot answer, the default below "
-	  "(now called Fallback) stays, and the log says why once per class.",
+	// Pull on Construct and Bind To (HcPullUi draws them; the same block sits
+	// in the widget editor under "UI Variable/" below).
+	{ "Script Variable/Source Mode", "",
+	  "Whether this variable takes its value from somewhere else. Pull on "
+	  "Construct fills it once, the moment an instance is created, before any of "
+	  "its own events run: PreConstruct, Construct and BeginPlay already see the "
+	  "pulled value, and a later change at the source does not follow. Bind To "
+	  "does the same and then keeps following: at the end of every frame, when "
+	  "the source has changed, the new value is written here (a value you set "
+	  "yourself stays until the source changes again). When the source cannot "
+	  "answer, the default below (now called Fallback) stays, and the log says "
+	  "why once per class. Bind To is not offered on a Replicated variable.",
 	  "", "horizoncode#functions" },
 	{ "Script Variable/Source", "",
 	  "Where the value comes from. Game Instance: one of its public variables, "
 	  "which exist before anything else is created. Creator: a public variable of "
 	  "whoever ran the Create Object or Create Widget that made this instance. A "
-	  "placed object has no creator and keeps its fallback.",
+	  "placed object has no creator and keeps its fallback. Reference (Bind To "
+	  "only): a public variable of whatever one of this class's object variables "
+	  "holds right now.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Reference", "",
+	  "The object variable of this class to bind through. Whatever it holds is "
+	  "the source; point it at another object and the value follows that one. "
+	  "While it is empty the variable keeps its Initial Value, without a "
+	  "warning. Its declared class fills the Variable list.",
 	  "", "horizoncode#functions" },
 	{ "Script Variable/Creator Class", "",
 	  "The class the creator is expected to be. It fills the Variable list and "

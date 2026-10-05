@@ -4455,6 +4455,14 @@ void EditorApplication::OnRender(float dt)
 	// from inside a message handler (NetEvents.h).
 	dispatchNetEvents();
 
+	// ── Frame end: Bind To (docs/bind-to-variable-binding-plan.md §3.4) ──────
+	// The packaged game's line, on uiLive like the rest of the script world:
+	// under the editor's pause the bindings stand still with the widget tick,
+	// and a single step compares once. Should the game view's UI be collected
+	// before this line, the preview shows a bound value one frame after the
+	// shipped game does (not measured; the plan §3.4 accepts it).
+	if (uiLive && m_gameInstance.runtime().exchangeState() > 0) requestRedraw();
+
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// The same last line the packaged game has, after every script and the UI
 	// had their turn (plan §5.3). In preview mode what runs here is log and

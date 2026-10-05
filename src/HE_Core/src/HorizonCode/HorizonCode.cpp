@@ -1920,6 +1920,9 @@ nlohmann::json variableToJsonObj(const Variable& v)
         nlohmann::json p = { { "src", v.pullSource }, { "var", v.pullVar } };
         if (!v.pullMember.empty()) p["member"] = v.pullMember;
         if (!v.pullClass.empty())  p["class"]  = v.pullClass;
+        // Bind To: both only when set, so a plain pull saves as before.
+        if (v.bindTo)              p["bind"]   = true;
+        if (!v.pullRef.empty())    p["ref"]    = v.pullRef;
         e["pull"] = std::move(p);
     }
 return e;
@@ -2056,7 +2059,23 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     {
         const std::string src = p.value("src", std::string());
         const std::string var = p.value("var", std::string());
-        if (v.scope == 0 && !src.empty() && !var.empty())
+        // Bind To (docs/bind-to-variable-binding-plan.md §2.1) adds two more:
+        // a binding on a Replicated variable would have two writers on a client
+        // (the replicator and the binding), so `bind` goes, with a warning; and
+        // a Ref source exists for Bind To only and needs a reference to name,
+        // so a Ref pull without both is dropped whole. Whether `ref` names a Ref
+        // instance variable is NOT checked here: it may be inherited from a base
+        // class this one graph cannot see. The runtime checks it
+        // (PullFailure::NoRefVariable) and the editor shows it.
+        const bool        bind = p.value("bind", false);
+        const std::string ref  = p.value("ref", std::string());
+        if (v.scope == 0 && !src.empty() && !var.empty() && src == kPullFromRef &&
+            (!bind || ref.empty() || v.replicated))
+            HE_LOG_WARN(HorizonCode, "HorizonCode: variable '%s' takes a reference source "
+                        "without %s - Bind To dropped", v.name.c_str(),
+                        v.replicated ? "being bindable (it is Replicated)"
+                                     : !bind ? "Bind To" : "naming the reference");
+        else if (v.scope == 0 && !src.empty() && !var.empty())
         {
             if (isKnownPullSource(src))
             {
@@ -2064,6 +2083,15 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
                 v.pullVar    = var;
                 v.pullMember = p.value("member", std::string());
                 if (src == kPullFromCreator) v.pullClass = p.value("class", std::string());
+                if (bind && v.replicated)
+                    HE_LOG_WARN(HorizonCode, "HorizonCode: variable '%s' is Replicated and "
+                                "cannot be bound - Bind To dropped, Pull on Construct kept",
+                                v.name.c_str());
+                else if (bind)
+                {
+                    v.bindTo = true;
+                    if (src == kPullFromRef) v.pullRef = ref;
+                }
             }
             else
                 HE_LOG_WARN(HorizonCode, "HorizonCode: variable '%s' pulls from unknown source "
@@ -3404,6 +3432,62 @@ bool scalarValueEquals(const Value& a, const Value& b, PinType t)
     }
 }
 
+// Whole-value equality and shape identity. Public — see HorizonCode.h. Lived in
+// HE_Scene's ValueWire until Bind To needed the same answer in this layer;
+// ValueWire forwards here, so the replicator's notion of "changed" is this one.
+bool valueTypesMatch(const Value& a, const Value& b)
+{
+    if (a.type != b.type) return false;
+    if (a.kind() != b.kind()) return false;
+    if (a.kind() == ContainerKind::Map && a.keyType != b.keyType) return false;
+    // Enum and Struct are only the same property when they name the same
+    // definition: two Structs of different shapes have nothing in common but
+    // the word.
+    if ((a.type == P::Enum || a.type == P::Struct) &&
+        !a.typeName.empty() && !b.typeName.empty() && a.typeName != b.typeName)
+        return false;
+    return true;
+}
+
+bool valuesEqual(const Value& a, const Value& b)
+{
+    if (a.type != b.type) return false;
+    const ContainerKind kind = a.kind();
+    if (kind != b.kind()) return false;
+
+    if (kind == ContainerKind::None)
+    {
+        if (a.type == P::Struct)
+        {
+            // scalarValueEquals has no Struct case; the recursion is the part
+            // it lacks.
+            if (a.typeName != b.typeName) return false;
+            if (a.items.size() != b.items.size()) return false;
+            for (std::size_t i = 0; i < a.items.size(); ++i)
+                if (!valuesEqual(a.items[i], b.items[i])) return false;
+            return true;
+        }
+        if (a.type == P::Enum && a.typeName != b.typeName) return false;
+        return scalarValueEquals(a, b, a.type);
+    }
+
+    if (a.items.size() != b.items.size()) return false;
+    if (kind == ContainerKind::Map)
+    {
+        if (a.keyType != b.keyType) return false;
+        if (a.keys.size() != b.keys.size()) return false;
+        // Position by position, NOT set-wise: iteration order is insertion order
+        // and it is part of a map's observable value (the containers plan's
+        // §1.2), so two maps holding the same pairs in a different order really
+        // are different.
+        for (std::size_t i = 0; i < a.keys.size(); ++i)
+            if (!valuesEqual(a.keys[i], b.keys[i])) return false;
+    }
+    for (std::size_t i = 0; i < a.items.size(); ++i)
+        if (!valuesEqual(a.items[i], b.items[i])) return false;
+    return true;
+}
+
 namespace
 {
 // ── THE coercion rule. Two other places implement it and MUST match: ─────────
@@ -3494,13 +3578,15 @@ bool pullNumeric(PinType t) { return t == P::Int || t == P::Float || t == P::Dou
 // ── Pull on Construct (docs/state-driven-data-exchange-design.md §2.5) ──────
 bool isKnownPullSource(const std::string& src)
 {
-    return src == kPullFromGameInstance || src == kPullFromCreator;
+    return src == kPullFromGameInstance || src == kPullFromCreator || src == kPullFromRef;
 }
 
-std::string pullSourceLabel(const std::string& src)
+std::string pullSourceLabel(const std::string& src, const std::string& ref)
 {
     if (src == kPullFromGameInstance) return "Game Instance";
     if (src == kPullFromCreator)      return "Creator";
+    if (src == kPullFromRef)
+        return ref.empty() ? std::string("Reference") : "Reference '" + ref + "'";
     return src.empty() ? std::string("(none)") : "'" + src + "'";
 }
 
@@ -3547,9 +3633,10 @@ Value pullConvert(const Value& src, const Value& dstShape)
 }
 
 std::string pullFailureText(PullFailure why, const std::string& src, const std::string& var,
-                            const std::string& member, const std::string& detail)
+                            const std::string& member, const std::string& detail,
+                            const std::string& ref)
 {
-    const std::string from = pullSourceLabel(src);
+    const std::string from = pullSourceLabel(src, ref);
     switch (why)
     {
         case PullFailure::None:              return {};
@@ -3569,6 +3656,10 @@ std::string pullFailureText(PullFailure why, const std::string& src, const std::
             return from + " '" + var + (member.empty() ? std::string() : "." + member) +
                    "' does not fit" + (detail.empty() ? std::string() : " (" + detail + ")");
         case PullFailure::UnknownSource:     return "unknown source " + from;
+        case PullFailure::NoRefVariable:
+            return "the class has no object reference variable '" + ref +
+                   "' (renamed, deleted or not a Ref?)";
+        case PullFailure::RefTargetGone:     return from + " holds an object that was destroyed";
     }
     return {};
 }
