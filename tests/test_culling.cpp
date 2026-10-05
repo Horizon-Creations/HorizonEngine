@@ -2515,6 +2515,10 @@ TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky c
 		CHECK(d11.find("p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,") != std::string::npos);
 		CHECK(d11.find("aoSRV, p.m_matWeightSampler.Get());") != std::string::npos);
 		CHECK(d11.find("HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);") != std::string::npos);
+		// The cube goes up through the helper the WARP orientation case samples
+		// back (test_material_graph.cpp), not through a private copy of it.
+		CHECK(d11.find("HE::d3d11mat::UploadSkyEnvCube(ctx, m_skyEnvTex.Get(),") != std::string::npos);
+		CHECK(d11.find("HE::d3d11mat::SkyEnvCubeSrvDesc()") != std::string::npos);
 		CHECK(bind.find("constexpr UINT kSkyEnvSrvSlot     = 15;") != std::string::npos);
 		CHECK(bind.find("constexpr UINT kSkyEnvSamplerSlot = 15;") != std::string::npos);
 		CHECK(bind.find("constexpr UINT kAOSrvSlot         = 16;") != std::string::npos);

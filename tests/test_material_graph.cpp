@@ -2648,6 +2648,8 @@ TEST_CASE("Material instance resolves to the master's shader hash + baked varian
 #include <wrl/client.h>
 #include <Backends/D3D12/D3D12MaterialRootSignature.h>
 #include <Backends/D3D11/D3D11MaterialBindings.h>
+#include <HorizonRendering/SkyEnvBake.h>    // SkyEnvFaceDirection (cube orientation case)
+#include <glm/gtc/packing.hpp>              // packHalf1x16 (the renderer's half upload)
 #endif
 
 namespace
@@ -5106,6 +5108,449 @@ TEST_CASE("D3D11: a clustered graph material is lit by cluster lights beyond the
 	const Pixel11 fallback = draw(clusterPS.Get(), redWindow.Get(), "clustered PS, gate off, red window light");
 	CHECK_MESSAGE((near8(fallback.r, ref.r, 1) && fallback.g < 4 && fallback.b < 4),
 	              "gate 0 should shade the window like fragment(): ", int(fallback.r), " vs ", int(ref.r));
+}
+
+// Thema 126 gave D3D11 graph materials the sky cube (heSkyEnv, t15/s15) and the
+// screen-space AO (heAO, t16) through BindSkyEnvAndAO / RestoreBuiltinSkyEnvAOSlots
+// — until now only checked as source text (test_culling.cpp). The clash is t16:
+// the built-in scene pass keeps its forward SSR result there, bound once per
+// pass, and a Texture2D-for-Texture2D mix-up is silent. So the pixel has to
+// say which texture the draw read.
+//
+// Shading set up so the pixel is ONE term: base white, metallic 1 (no diffuse
+// lobe, so Nup's horizon clamp never enters), roughness 1 (the IBL direction
+// Rrough is exactly the normal, the Schlick term collapses to 1), no lights,
+// ambient 0, fog density 0. heLitP then returns envSpec * 0.4 * ssao, with
+// envSpec = heSkyEnv(N). The cube's six faces carry six different colours at
+// 2.0, so a face reads as 204 in its channels and 0 elsewhere; the AO buffer
+// is 128/255 and the "built-in SSR" texture 64/255, so the AO-scaled pixel
+// says whose .r the texelFetch on t16 returned.
+TEST_CASE("D3D11: a graph material draw reads the sky cube on t15/s15 and the AO on t16, and gives t16 back to the SSR result (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	MESSAGE(w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+
+	MaterialGraph g;
+	{
+		const int out = g.addNode(MatNodeType::Output);
+		const int c   = g.addNode(MatNodeType::ConstColor);
+		g.findNode(c)->p[0] = g.findNode(c)->p[1] = g.findNode(c)->p[2] = 1.0f;
+		REQUIRE(g.connect(c, 0, out, HE::kMatOutputBaseColorPin));
+		const int one = g.addNode(MatNodeType::ConstFloat);
+		g.findNode(one)->p[0] = 1.0f;
+		REQUIRE(g.connect(one, 0, out, HE::kMatOutputMetallicPin));
+		REQUIRE(g.connect(one, 0, out, HE::kMatOutputRoughnessPin));
+		REQUIRE(g.connect(one, 0, out, HE::kMatOutputAOPin));
+	}
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3DBlob> vsBlob = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vsBlob.Get() != nullptr, "standard vertex: ", err);
+	const std::string glsl = HE::generateFragment(g).glsl;
+	const auto& hl = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+	REQUIRE_MESSAGE(hl.ok, hl.log);
+	ComPtr<ID3DBlob> psBlob = fxcBlob(hl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(psBlob.Get() != nullptr, "lit pixel shader: ", err);
+	{
+		// The registers this test is about, or it is not the shape that was broken.
+		const std::vector<Binding> b = reflectBindings(psBlob.Get());
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_TEXTURE, HE::d3d11mat::kSkyEnvSrvSlot), "the lit PS does not bind t15 (heSkyEnv)");
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_SAMPLER, HE::d3d11mat::kSkyEnvSamplerSlot), "the lit PS does not bind s15");
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_TEXTURE, HE::d3d11mat::kAOSrvSlot), "the lit PS does not bind t16 (heAO)");
+	}
+	ComPtr<ID3D11VertexShader> vs;
+	ComPtr<ID3D11PixelShader>  ps;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps)));
+	static const D3D11_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il)));
+	ComPtr<ID3D11RasterizerState> rasterNoCull; // see the t14 case above
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID;
+		rd.CullMode = D3D11_CULL_NONE;
+		rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
+
+	// ── One fullscreen triangle per normal: the six cube axes, in the cube's
+	// face order (+X,-X,+Y,-Y,+Z,-Z). The normal IS the sample direction.
+	const glm::vec3 axes[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+	ComPtr<ID3D11Buffer> vbs[6];
+	for (int f = 0; f < 6; ++f)
+	{
+		const glm::vec3 n = axes[f];
+		const MatVertex11 tri[3] = {
+			{ { -1.0f, -1.0f, 0.5f }, { n.x, n.y, n.z }, { 0.0f, 0.0f } },
+			{ {  3.0f, -1.0f, 0.5f }, { n.x, n.y, n.z }, { 0.0f, 0.0f } },
+			{ { -1.0f,  3.0f, 0.5f }, { n.x, n.y, n.z }, { 0.0f, 0.0f } },
+		};
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = sizeof(tri); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA init{ tri, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &vbs[f])));
+	}
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[0] = u.pbr[1] = u.pbr[2] = 1.0f;
+	ComPtr<ID3D11Buffer> uCB = makeConstantBuffer11(dev, &u, sizeof(u));
+	REQUIRE(uCB.Get() != nullptr);
+
+	// ── HeLighting, LIT view, the two gates under test: fog.z (heSkyEnv) and
+	// fog.w (heAO). fog.x = 0 keeps heApplyFog out of the pixel.
+	auto lightingCB = [&](bool skyGate, bool aoGate) {
+		HE::MaterialShaderLibrary::Lighting lit{};
+		lit.giParams[0] = lit.giParams[1] = 1.0f; // the 1x1 viewport
+		lit.camPos[2] = 5.0f;
+		lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.0f;
+		lit.fog[2] = skyGate ? 1.0f : 0.0f;
+		lit.fog[3] = aoGate  ? 1.0f : 0.0f;
+		return makeConstantBuffer11(dev, &lit, sizeof(lit));
+	};
+	ComPtr<ID3D11Buffer> litBoth = lightingCB(true, true);
+	ComPtr<ID3D11Buffer> litSky  = lightingCB(true, false);
+	ComPtr<ID3D11Buffer> litNone = lightingCB(false, false);
+	REQUIRE(litBoth.Get() != nullptr);
+	REQUIRE(litSky.Get() != nullptr);
+	REQUIRE(litNone.Get() != nullptr);
+
+	ComPtr<ID3D11Texture2D> target, staging;
+	ComPtr<ID3D11RenderTargetView> rtv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+
+	// ── The cube, created and filled exactly as the renderer does (shared
+	// desc / view / upload): 4x4 faces, one colour per face, values 0 or 2.
+	constexpr UINT kN = 4;
+	const float faceRGB[6][3] = { { 2, 0, 0 }, { 0, 2, 2 }, { 0, 2, 0 }, { 2, 0, 2 }, { 0, 0, 2 }, { 2, 2, 0 } };
+	ComPtr<ID3D11Texture2D> cubeTex;
+	ComPtr<ID3D11ShaderResourceView> cube;
+	{
+		const D3D11_TEXTURE2D_DESC td = HE::d3d11mat::SkyEnvCubeDesc(kN);
+		const D3D11_SHADER_RESOURCE_VIEW_DESC cv = HE::d3d11mat::SkyEnvCubeSrvDesc();
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &cubeTex)));
+		REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(cubeTex.Get(), &cv, &cube)));
+		std::vector<uint16_t> half(static_cast<size_t>(kN) * kN * 6 * 4);
+		for (int f = 0; f < 6; ++f)
+			for (UINT i = 0; i < kN * kN; ++i)
+				for (int k = 0; k < 4; ++k)
+					half[(static_cast<size_t>(f) * kN * kN + i) * 4 + k] = glm::packHalf1x16(k < 3 ? faceRGB[f][k] : 1.0f);
+		HE::d3d11mat::UploadSkyEnvCube(ctx, cubeTex.Get(), kN, half.data());
+	}
+	// The AO buffer at 128/255, a white one, and the built-in pass's forward SSR
+	// result at 64/255 — three different .r values for the texelFetch on t16.
+	ComPtr<ID3D11ShaderResourceView> aoHalf  = makeTexture11(dev, 1, { 128, 128, 128, 255 });
+	ComPtr<ID3D11ShaderResourceView> aoWhite = makeTexture11(dev, 1, { 255, 255, 255, 255 });
+	ComPtr<ID3D11ShaderResourceView> ssr     = makeTexture11(dev, 1, { 64, 64, 64, 255 });
+	REQUIRE(aoHalf.Get() != nullptr);
+	REQUIRE(aoWhite.Get() != nullptr);
+	REQUIRE(ssr.Get() != nullptr);
+	const D3D11_SAMPLER_DESC lcd = HE::d3d11mat::WeightmapSamplerDesc(); // the renderer's linear clamp
+	ComPtr<ID3D11SamplerState> linearClamp;
+	REQUIRE(SUCCEEDED(dev->CreateSamplerState(&lcd, &linearClamp)));
+
+	// ── Pass state as the built-in scene pass leaves it: SSR on t16, t15 empty.
+	ctx->IASetInputLayout(il.Get());
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->RSSetState(rasterNoCull.Get());
+	ctx->VSSetShader(vs.Get(), nullptr, 0);
+	ctx->VSSetConstantBuffers(1, 1, uCB.GetAddressOf());
+	ctx->PSSetShader(ps.Get(), nullptr, 0);
+	HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssr.Get());
+
+	auto srvAt = [&](UINT slot) {
+		ComPtr<ID3D11ShaderResourceView> s;
+		ctx->PSGetShaderResources(slot, 1, &s);
+		return s;
+	};
+	auto draw = [&](int face, ID3D11Buffer* litCB) {
+		const UINT stride = sizeof(MatVertex11), offset = 0;
+		ctx->IASetVertexBuffers(0, 1, vbs[face].GetAddressOf(), &stride, &offset);
+		ctx->PSSetConstantBuffers(0, 1, &litCB);
+		return drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+	};
+	auto rgb = [](const Pixel11& p) {
+		return std::to_string(p.r) + "," + std::to_string(p.g) + "," + std::to_string(p.b);
+	};
+	// 0.4 * faceRGB * ao in 8 bits, per channel.
+	auto expectFace = [&](const Pixel11& p, int face, float ao) {
+		const int want[3] = { int(std::lround(0.4f * faceRGB[face][0] * ao * 255.0f)),
+		                      int(std::lround(0.4f * faceRGB[face][1] * ao * 255.0f)),
+		                      int(std::lround(0.4f * faceRGB[face][2] * ao * 255.0f)) };
+		return near8(p.r, want[0], 3) && near8(p.g, want[1], 3) && near8(p.b, want[2], 3);
+	};
+
+	// 1. The fix, white AO: each normal reads its own face through the SPIRV-
+	//    Cross TextureCube sample the renderer ships — six colours, six faces.
+	HE::d3d11mat::BindSkyEnvAndAO(ctx, cube.Get(), aoWhite.Get(), linearClamp.Get());
+	CHECK(srvAt(HE::d3d11mat::kSkyEnvSrvSlot).Get() == cube.Get());
+	CHECK(srvAt(HE::d3d11mat::kAOSrvSlot).Get() == aoWhite.Get());
+	{
+		ComPtr<ID3D11SamplerState> s;
+		ctx->PSGetSamplers(HE::d3d11mat::kSkyEnvSamplerSlot, 1, &s);
+		CHECK(s.Get() == linearClamp.Get());
+	}
+	drainInfoQueue11(w);
+	for (int f = 0; f < 6; ++f)
+	{
+		const Pixel11 p = draw(f, litBoth.Get());
+		const std::string why = drainInfoQueue11(w);
+		CHECK_MESSAGE(expectFace(p, f, 1.0f), "normal ", std::string("+-")[f & 1], std::string("XYZ")[f / 2],
+		              " should read face ", f, " (0.4 * (", faceRGB[f][0], ",", faceRGB[f][1], ",", faceRGB[f][2],
+		              ")), got ", rgb(p), "; debug layer: ", why);
+	}
+
+	// 2. The fix, the real AO: half the light → (0,0,102) for +Z.
+	HE::d3d11mat::BindSkyEnvAndAO(ctx, cube.Get(), aoHalf.Get(), linearClamp.Get());
+	const float aoR = 128.0f / 255.0f, ssrR = 64.0f / 255.0f;
+	const Pixel11 withAO = draw(4, litBoth.Get());
+	CHECK_MESSAGE(expectFace(withAO, 4, aoR), "AO 128 on t16: expected ~(0,0,102), got ", rgb(withAO));
+
+	// 3. Teeth. (a) t16 left on the SSR result (the draw before Thema 126's
+	//    bind: the cube on t15, nothing put on t16) → the pixel follows the SSR
+	//    texture's .r, (0,0,51) — NOT the AO's 102. (b) No cube on t15 with
+	//    fog.z raised → black. (c) fog.w = 0: the AO texture is bound and
+	//    ignored → the unoccluded 204. (d) fog.z = 0: the cube is ignored and the
+	//    cascade starts from black, no ambient → black.
+	{
+		ID3D11ShaderResourceView* s = ssr.Get();
+		ctx->PSSetShaderResources(HE::d3d11mat::kAOSrvSlot, 1, &s);
+		const Pixel11 readsSSR = draw(4, litBoth.Get());
+		CHECK_MESSAGE(expectFace(readsSSR, 4, ssrR), "t16 = SSR: expected ~(0,0,51), got ", rgb(readsSSR));
+		CHECK_MESSAGE(std::abs(int(readsSSR.b) - int(withAO.b)) > 30,
+		              "t16 = SSR and t16 = AO give the same pixel (", rgb(readsSSR), " vs ", rgb(withAO),
+		              ") — the test cannot tell the two textures apart");
+
+		HE::d3d11mat::BindSkyEnvAndAO(ctx, nullptr, aoHalf.Get(), linearClamp.Get());
+		const Pixel11 noCube = draw(4, litBoth.Get());
+		CHECK_MESSAGE((noCube.r < 3 && noCube.g < 3 && noCube.b < 3), "t15 empty: expected black, got ", rgb(noCube));
+
+		HE::d3d11mat::BindSkyEnvAndAO(ctx, cube.Get(), aoHalf.Get(), linearClamp.Get());
+		const Pixel11 aoGateOff = draw(4, litSky.Get());
+		CHECK_MESSAGE(expectFace(aoGateOff, 4, 1.0f), "fog.w = 0: expected the unoccluded ~(0,0,204), got ", rgb(aoGateOff));
+		const Pixel11 skyGateOff = draw(4, litNone.Get());
+		CHECK_MESSAGE((skyGateOff.r < 3 && skyGateOff.g < 3 && skyGateOff.b < 3),
+		              "fog.z = 0: expected black, got ", rgb(skyGateOff));
+		MESSAGE("+Z: AO on t16 ", rgb(withAO), " | SSR left on t16 ", rgb(readsSSR), " | t15 empty ", rgb(noCube),
+		        " | fog.w 0 ", rgb(aoGateOff), " | fog.z 0 ", rgb(skyGateOff));
+	}
+
+	// 4. Restore: t15 off (the decal pass binds the scene depth there), t16 the
+	//    built-in pass's SSR result again.
+	HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssr.Get());
+	CHECK(srvAt(HE::d3d11mat::kSkyEnvSrvSlot).Get() == nullptr);
+	CHECK(srvAt(HE::d3d11mat::kAOSrvSlot).Get() == ssr.Get());
+}
+
+// The open half of Thema 126: SkyEnvBake.h argues that GL, Metal and Vulkan
+// share one cube face/texel convention, and D3D11Renderer / D3D12Renderer
+// upload the bake unchanged on that same argument — measured nowhere for D3D.
+// Here it is measured: every texel of a 4x4 cube carries its own (face, s, t),
+// the cube goes up through the renderer's UploadSkyEnvCube, and a plain
+// TextureCube point sample along SkyEnvFaceDirection(face, u, v) — the
+// direction the bake evaluated the sky for at that texel — must hand back
+// exactly that texel. Off-centre texels are the point: a centre sample cannot
+// see a flipped or transposed face. A flipped upload is the negative control.
+TEST_CASE("D3D11: every sky-cube texel samples back along the direction the bake gave it (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	MESSAGE(w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+
+	constexpr UINT kN = 4, kProbes = 6 * kN * kN;
+	static const char* kVS =
+		"float4 main(uint id : SV_VertexID) : SV_Position {\n"
+		"    float2 p = float2((id << 1) & 2, id & 2);\n"
+		"    return float4(p * 2.0 - 1.0, 0.5, 1.0);\n"
+		"}\n";
+	static const char* kPS =
+		"TextureCube<float4> cube : register(t0);\n"
+		"Buffer<float4>      dirs : register(t1);\n"
+		"SamplerState        pt   : register(s0);\n"
+		"float4 main(float4 pos : SV_Position) : SV_Target {\n"
+		"    return cube.SampleLevel(pt, dirs.Load(int(pos.x)).xyz, 0.0);\n"
+		"}\n";
+	std::string err;
+	ComPtr<ID3DBlob> vsBlob = fxcBlob(kVS, "vs_5_0", err);
+	REQUIRE_MESSAGE(vsBlob.Get() != nullptr, err);
+	ComPtr<ID3DBlob> psBlob = fxcBlob(kPS, "ps_5_0", err);
+	REQUIRE_MESSAGE(psBlob.Get() != nullptr, err);
+	ComPtr<ID3D11VertexShader> vs;
+	ComPtr<ID3D11PixelShader>  ps;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps)));
+
+	// ── Probe i = (face, t, s) in the bake's order; its direction is the bake's
+	// own texel centre, SkyEnvFaceDirection(face, u, v) (BuildSkyEnvFaceRow).
+	struct Probe { int face, s, t; };
+	std::vector<Probe> probes;
+	std::vector<float> dirs;
+	for (int f = 0; f < 6; ++f)
+		for (UINT t = 0; t < kN; ++t)
+			for (UINT s = 0; s < kN; ++s)
+			{
+				const float uu = (s + 0.5f) / kN * 2.0f - 1.0f;
+				const float vv = (t + 0.5f) / kN * 2.0f - 1.0f;
+				const glm::vec3 d = glm::normalize(HE::SkyEnvFaceDirection(f, uu, vv));
+				probes.push_back({ f, int(s), int(t) });
+				dirs.insert(dirs.end(), { d.x, d.y, d.z, 0.0f });
+			}
+	REQUIRE(probes.size() == kProbes);
+	ComPtr<ID3D11Buffer> dirBuf;
+	ComPtr<ID3D11ShaderResourceView> dirSRV;
+	{
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = UINT(dirs.size() * sizeof(float));
+		bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		D3D11_SUBRESOURCE_DATA init{ dirs.data(), 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &dirBuf)));
+		D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+		sd.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		sd.Buffer.FirstElement = 0;
+		sd.Buffer.NumElements = kProbes;
+		REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(dirBuf.Get(), &sd, &dirSRV)));
+	}
+
+	// ── kProbes x 1 float target: pixel i = the cube's answer for probe i.
+	ComPtr<ID3D11Texture2D> target, staging;
+	ComPtr<ID3D11RenderTargetView> rtv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = kProbes; td.Height = 1; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+	ComPtr<ID3D11SamplerState> point;
+	{
+		D3D11_SAMPLER_DESC sd{};
+		sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+		sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		sd.MaxLOD = D3D11_FLOAT32_MAX;
+		REQUIRE(SUCCEEDED(dev->CreateSamplerState(&sd, &point)));
+	}
+	ComPtr<ID3D11RasterizerState> rasterNoCull;
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID;
+		rd.CullMode = D3D11_CULL_NONE;
+		rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
+
+	// Upload a cube whose texel (f, row, col) carries (f, s, t) — with `layout`
+	// deciding which (s, t) a stored texel claims, so a wrong layout can be
+	// staged on purpose — and return how many probes came back as some OTHER
+	// texel, with the first few named.
+	enum class Layout { Bake, RowsReversed, ColumnsReversed };
+	auto run = [&](Layout layout, std::string& firstMisses) -> int {
+		ComPtr<ID3D11Texture2D> cubeTex;
+		ComPtr<ID3D11ShaderResourceView> cube;
+		const D3D11_TEXTURE2D_DESC td = HE::d3d11mat::SkyEnvCubeDesc(kN);
+		const D3D11_SHADER_RESOURCE_VIEW_DESC cv = HE::d3d11mat::SkyEnvCubeSrvDesc();
+		if (FAILED(dev->CreateTexture2D(&td, nullptr, &cubeTex)) ||
+		    FAILED(dev->CreateShaderResourceView(cubeTex.Get(), &cv, &cube)))
+		{
+			firstMisses = "cube creation failed";
+			return -1;
+		}
+		std::vector<uint16_t> half(static_cast<size_t>(kN) * kN * 6 * 4);
+		for (int f = 0; f < 6; ++f)
+			for (UINT row = 0; row < kN; ++row)
+				for (UINT col = 0; col < kN; ++col)
+				{
+					const UINT s = layout == Layout::ColumnsReversed ? kN - 1 - col : col;
+					const UINT t = layout == Layout::RowsReversed    ? kN - 1 - row : row;
+					uint16_t* px = &half[((static_cast<size_t>(f) * kN + row) * kN + col) * 4];
+					px[0] = glm::packHalf1x16(float(f));
+					px[1] = glm::packHalf1x16(float(s));
+					px[2] = glm::packHalf1x16(float(t));
+					px[3] = glm::packHalf1x16(1.0f);
+				}
+		HE::d3d11mat::UploadSkyEnvCube(ctx, cubeTex.Get(), kN, half.data());
+
+		ctx->IASetInputLayout(nullptr);
+		ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		ctx->RSSetState(rasterNoCull.Get());
+		ctx->VSSetShader(vs.Get(), nullptr, 0);
+		ctx->PSSetShader(ps.Get(), nullptr, 0);
+		ID3D11ShaderResourceView* srvs[2] = { cube.Get(), dirSRV.Get() };
+		ctx->PSSetShaderResources(0, 2, srvs);
+		ctx->PSSetSamplers(0, 1, point.GetAddressOf());
+		const float clear[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+		ctx->ClearRenderTargetView(rtv.Get(), clear);
+		ctx->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+		D3D11_VIEWPORT vp{}; vp.Width = float(kProbes); vp.Height = 1.0f; vp.MaxDepth = 1.0f;
+		ctx->RSSetViewports(1, &vp);
+		ctx->Draw(3, 0);
+		ctx->CopyResource(staging.Get(), target.Get());
+		D3D11_MAPPED_SUBRESOURCE m{};
+		if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
+		{
+			firstMisses = "readback failed";
+			return -1;
+		}
+		const float* got = static_cast<const float*>(m.pData);
+		int misses = 0;
+		for (UINT i = 0; i < kProbes; ++i)
+		{
+			const Probe& p = probes[i];
+			const float* g = got + i * 4;
+			if (int(std::lround(g[0])) == p.face && int(std::lround(g[1])) == p.s && int(std::lround(g[2])) == p.t)
+				continue;
+			if (++misses <= 4)
+				firstMisses += "probe (face " + std::to_string(p.face) + ", s " + std::to_string(p.s) + ", t " +
+				               std::to_string(p.t) + ") read (" + std::to_string(g[0]) + ", " + std::to_string(g[1]) +
+				               ", " + std::to_string(g[2]) + "); ";
+		}
+		ctx->Unmap(staging.Get(), 0);
+		ID3D11ShaderResourceView* none[2] = { nullptr, nullptr };
+		ctx->PSSetShaderResources(0, 2, none);
+		return misses;
+	};
+
+	// 1. The renderer's layout: all 96 texels come back where the bake put them.
+	drainInfoQueue11(w);
+	std::string misses;
+	const int bake = run(Layout::Bake, misses);
+	const std::string why = drainInfoQueue11(w);
+	CHECK_MESSAGE(bake == 0, bake, " of ", kProbes, " texels sampled back from the wrong place: ", misses,
+	              "debug layer: ", why);
+
+	// 2. Negative controls: the same check against an upload with each face's
+	//    rows reversed (a v flip) and one with its columns reversed (a u flip)
+	//    — every texel of a 4x4 face moves, so every probe must miss.
+	std::string flipMisses;
+	CHECK(run(Layout::RowsReversed, flipMisses) == int(kProbes));
+	CHECK(run(Layout::ColumnsReversed, flipMisses) == int(kProbes));
 }
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC
