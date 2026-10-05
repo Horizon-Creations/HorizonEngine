@@ -393,12 +393,15 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
   ohne den Aufruf schlägt `REQUIRE` fehl, bei `setDayNight()` hinter `extract()` der `CHECK`.
   Kompiliert ist die Datei lokal nur per `-fsyntax-only` gegen die MoltenVK-Header, echt
   kompiliert sie die Windows-CI. Gelaufen ist sie auf keinem Vulkan-Gerät.
-  **Nicht behoben, gleiche Art:** `EncodeShadowMap()`, `runSSAO()` und `EncodeDecalDepth()`
-  extrahieren in Vulkan ebenfalls vor `DrawScene()` und ohne eigenes `setDayNight()`. Bei GI
-  aus werden die CSM-Kaskaden also mit der Sonne des Vorframes gefittet und gerendert, während der
-  Scene-Pass mit der aktuellen schattiert. Bei normaler Day-Night-Geschwindigkeit ist das
-  unsichtbar. Sauberer wäre ein `setDayNight()` einmal am Frame-Anfang (`DrawViewportFrame()`
-  und der Swapchain-Zweig in `Render()`), das ist aber ein eigener Schritt.
+  **Gleiche Art, behoben in Thema 146:** `EncodeShadowMap()`, `runSSAO()` und `EncodeDecalDepth()`
+  extrahierten in Vulkan ebenfalls vor `DrawScene()` und ohne eigenes `setDayNight()`. Bei GI
+  aus wurden die CSM-Kaskaden also mit der Sonne des Vorframes gefittet und gerendert, während der
+  Scene-Pass mit der aktuellen schattierte. Bei normaler Day-Night-Geschwindigkeit war das
+  unsichtbar. Jetzt gibt es genau ein `setDayNight()` pro Frame, ganz oben in den beiden Stellen,
+  die einen Frame aufzeichnen (`Render()` und `RenderSceneImage()`), vor jeder Extraktion. Die
+  Aufrufe in `runGi()` und `DrawScene()` sind entfallen. Der Test in `tests/test_culling.cpp`
+  („Vulkan extracts with this frame's sun: one setDayNight at the frame's top …") prüft die
+  Reihenfolge und dass es genau diese zwei Aufrufe gibt.
 * Ein Rest-Flackern bleibt (§7.2, Ende). Für weitere Ruhe bräuchte es mehr Strahlen pro Pixel, ein
   höheres History-Gewicht (das braucht die Verdecker-Reaktion des Clamps) oder einen
   kantenerhaltenden Spatial-Filter statt 3×3-Box.

@@ -394,6 +394,16 @@ void VulkanRenderer::Render()
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
     m_instCursor = 0; // this frame's instance-buffer slots start from the top
 
+    // This frame's sun, once, before the first extraction. The cascades, the
+    // decal depth pre-pass, GI and SSAO all extract on their own ahead of
+    // DrawScene(); with the day-night state fed only there they fit and traced
+    // against the previous frame's sun (Thema 131 for GI, 146 for the rest).
+    // RenderSceneImage() does the same at its top.
+    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                            m_environment.sunColor, m_environment.sunIntensity,
+                            m_environment.moonColor, m_environment.moonIntensity,
+                            m_environment.cloudCoverage);
+
     // Drop caches for materials/meshes edited since last frame, before any recording — the
     // frame's DrawScene then re-resolves them fresh from the ContentManager.
     processPendingInvalidations();
@@ -5027,6 +5037,11 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
         m_ssrRanThisFrame  = false;
         m_ssrResultView    = VK_NULL_HANDLE;
         m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;
+        // This frame's sun before DrawViewportFrame's first extraction, as in Render().
+        m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                                m_environment.sunColor, m_environment.sunIntensity,
+                                m_environment.moonColor, m_environment.moonIntensity,
+                                m_environment.cloudCoverage);
 
         // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
         // decal depth) are torn down and rebuilt, and the one-shot buffer below
@@ -6622,12 +6637,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // before any draw below can stall on them.
     drainMaterialWarmup(hdr);
 
-    // Feed time-of-day so the extractor recomputes the sun/moon direction (otherwise the
-    // sky never responds to the time slider). Mirrors OpenGL/Metal.
-    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
-                            m_environment.sunColor, m_environment.sunIntensity,
-                            m_environment.moonColor, m_environment.moonIntensity,
-                            m_environment.cloudCoverage);
+    // The day-night state (sun/moon direction for the sky and the lights) was
+    // fed once at the top of Render() / RenderSceneImage(), so this extraction
+    // sees the same sun as the cascades, GI and SSAO before it.
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
@@ -9955,13 +9967,10 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // Extract with the scene pass's aspect (Metal lesson 5846efc: a mismatched
     // camera misaligns the screen-space mask → swimming shadows).
     const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
-    // And with this frame's sun: runGi() runs before DrawScene(), which used to
-    // be the only place feeding the day-night state, so the GI mask traced
-    // against the previous frame's sun (Thema 131). Same call as DrawScene.
-    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
-                            m_environment.sunColor, m_environment.sunIntensity,
-                            m_environment.moonColor, m_environment.moonIntensity,
-                            m_environment.cloudCoverage);
+    // This frame's sun comes from the setDayNight() at the top of Render() /
+    // RenderSceneImage(): runGi() runs before DrawScene(), which used to be the
+    // only place feeding it, so the GI mask traced against the previous
+    // frame's sun (Thema 131).
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
