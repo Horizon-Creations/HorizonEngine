@@ -196,7 +196,11 @@ public:
 	// A cell that reports rather than acts: icon and label inside the current
 	// well, with no hit box at all. An InvisibleButton that does nothing still
 	// lights up on hover, which promises a click that never happens.
-	void readout(IconFn icon, const char* label, ImU32 fg = kFg);
+	// Returns the icon's centre, for a caller that draws its own in the slot
+	// (the compile readout's written check, EditorRewards.h V9).
+	ImVec2 readout(IconFn icon, const char* label, ImU32 fg = kFg);
+	// The icon slot's size (square), as readout lays it out.
+	float iconSize() const { return m_m.icon; }
 	// A hairline between two cells inside one well, for a group that holds two
 	// unrelated things and is not worth splitting.
 	void divider();

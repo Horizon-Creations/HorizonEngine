@@ -2,7 +2,11 @@
 
 #include "EditorRewards.h"
 #include "EditorApplication.h"   // AppContext, EditorConfig
+#include "EditorToolbar.h"       // V9: the compile readout's strip
+#include "HcGraphHost.h"         // V9: the failed node's halo
 #include "ImGuiSoftwareRaster.h" // the footer, drawn and looked at
+#include "NotificationBar.h"     // V8: the real bell and its ring
+#include "NotificationStore.h"
 #include "TestFsUtil.h"
 #include <HorizonScene/AudioEngine.h>
 
@@ -19,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ── The reward moments' core (EditorRewards.h) ───────────────────────────────
@@ -289,11 +294,24 @@ TEST_CASE("Rewards: which tone each moment plays")
 	CHECK(hasTone(Moment::Saved));
 	CHECK(hasTone(Moment::BuildSucceeded));
 	CHECK(hasTone(Moment::AssetsImported));
-	// Topic 140's moments have no tone in this step.
-	CHECK_FALSE(hasTone(Moment::CompiledClean));
-	CHECK_FALSE(hasTone(Moment::Committed));
-	CHECK_FALSE(hasTone(Moment::TourFinished));
+	// Topic 140, step 3: the new moments have tones of their own now (step 2
+	// pinned them toneless; this is where that changes, on purpose).
+	CHECK(hasTone(Moment::CompiledClean));
+	CHECK(hasTone(Moment::Committed));
+	CHECK(hasTone(Moment::TourFinished));
+	CHECK(toneFor(Moment::CompiledClean) == Tone::CompileClean);
+	CHECK(toneFor(Moment::Committed) == Tone::Commit);
+	CHECK(toneFor(Moment::TourFinished) == Tone::TourDone);
 }
+
+namespace
+{
+// Every tone, in Tone order — the editor's cache is indexed by it.
+const Tone kAllTones[] = { Tone::SaveTick,     Tone::BuildChime,    Tone::BuildFailed,
+                           Tone::ImportPop,    Tone::CompileClean,  Tone::CompileFailed,
+                           Tone::Commit,       Tone::TourDone,      Tone::Problem };
+static_assert(std::size(kAllTones) == static_cast<size_t>(kToneCount));
+} // namespace
 
 TEST_CASE("Rewards: every switch can silence a tone, and the build tones want the editor unfocused")
 {
@@ -301,15 +319,21 @@ TEST_CASE("Rewards: every switch can silence a tone, and the build tones want th
 	on.RewardsEnabled = true;
 	on.RewardsSound   = true;
 	on.RewardsVolume  = 0.5f;
-	const Tone all[] = { Tone::SaveTick, Tone::BuildChime, Tone::BuildFailed, Tone::ImportPop };
+	const auto& all = kAllTones;
 
 	// Everything on, editor in the background, not playing: every tone.
 	for (Tone t : all) CHECK(toneWanted(on, t, false, false));
-	// With the editor focused only the save and import tones.
+	// With the editor focused: save, import, both compile tones and the tour —
+	// not the build tones, the commit tone or the problem tone.
 	CHECK(toneWanted(on, Tone::SaveTick, false, true));
 	CHECK(toneWanted(on, Tone::ImportPop, false, true));
+	CHECK(toneWanted(on, Tone::CompileClean, false, true));
+	CHECK(toneWanted(on, Tone::CompileFailed, false, true));
+	CHECK(toneWanted(on, Tone::TourDone, false, true));
 	CHECK_FALSE(toneWanted(on, Tone::BuildChime, false, true));
 	CHECK_FALSE(toneWanted(on, Tone::BuildFailed, false, true));
+	CHECK_FALSE(toneWanted(on, Tone::Commit, false, true));
+	CHECK_FALSE(toneWanted(on, Tone::Problem, false, true));
 	// During Play none.
 	for (Tone t : all) CHECK_FALSE(toneWanted(on, t, true, false));
 
@@ -331,6 +355,11 @@ TEST_CASE("Rewards: every switch can silence a tone, and the build tones want th
 		{ &EditorConfig::RewardsSoundBuild,       Tone::BuildChime },
 		{ &EditorConfig::RewardsSoundBuildFailed, Tone::BuildFailed },
 		{ &EditorConfig::RewardsSoundImport,      Tone::ImportPop },
+		{ &EditorConfig::RewardsSoundCompile,       Tone::CompileClean },
+		{ &EditorConfig::RewardsSoundCompileFailed, Tone::CompileFailed },
+		{ &EditorConfig::RewardsSoundCommit,        Tone::Commit },
+		{ &EditorConfig::RewardsSoundTutorial,      Tone::TourDone },
+		{ &EditorConfig::RewardsSoundProblem,       Tone::Problem },
 	};
 	for (const Own& o : own)
 	{
@@ -350,7 +379,20 @@ TEST_CASE("Rewards: the defaults hear nothing, and what keeps the UI device open
 	CHECK(d.RewardsSoundBuild);
 	CHECK(d.RewardsSoundBuildFailed);
 	CHECK(d.RewardsSoundImport);
+	CHECK(d.RewardsSoundCompile);
+	CHECK(d.RewardsSoundCompileFailed);
+	CHECK(d.RewardsSoundCommit);
+	CHECK(d.RewardsSoundTutorial);
+	CHECK(d.RewardsSoundProblem);
+	CHECK(d.RewardsProblemPulse);
 	CHECK_FALSE(uiSoundPossible(d));
+	// …so no tone at all, in front of the editor or behind it: a headless run
+	// or a test with the default config never asks for a device.
+	for (Tone t : kAllTones)
+	{
+		CHECK_FALSE(toneWanted(d, t, false, false));
+		CHECK_FALSE(toneWanted(d, t, false, true));
+	}
 	// The visual cues are on (they were asked for; each can go), the motion
 	// follows the system.
 	CHECK(d.RewardsCheckMark);
@@ -418,8 +460,11 @@ TEST_CASE("Rewards: every tone is short, soft at both ends, quiet and free of ba
 	const Case cases[] = {
 		{ Tone::SaveTick, 1318.51 }, { Tone::BuildChime, 880.0 },
 		{ Tone::BuildFailed, 1318.51 }, { Tone::ImportPop, 1100.0 },
+		{ Tone::CompileClean, 1318.51 }, { Tone::CompileFailed, 1318.51 },
+		{ Tone::Commit, 1318.51 }, { Tone::TourDone, 880.0 },
+		{ Tone::Problem, 987.77 },
 	};
-	int peaks[4] = {};
+	int peaks[kToneCount] = {};
 	for (const Case& c : cases)
 	{
 		CAPTURE(static_cast<int>(c.tone));
@@ -452,18 +497,50 @@ TEST_CASE("Rewards: every tone is short, soft at both ends, quiet and free of ba
 	}
 	// The one heard most is the quietest; the failure is not louder than
 	// the success.
-	for (int p : { peaks[1], peaks[2], peaks[3] }) CHECK(peaks[0] < p);
+	const auto peakOfTone = [&](Tone t) { return peaks[static_cast<int>(t)]; };
+	for (Tone t : kAllTones)
+		if (t != Tone::SaveTick) CHECK(peakOfTone(Tone::SaveTick) < peakOfTone(t));
 	CHECK(peaks[2] <= peaks[1]);
+	// Topic 140's tones: all below the chime, each failure below its success.
+	for (Tone t : { Tone::CompileClean, Tone::CompileFailed, Tone::Commit, Tone::TourDone,
+	                Tone::Problem })
+	{
+		CAPTURE(static_cast<int>(t));
+		CHECK(peakOfTone(t) < peakOfTone(Tone::BuildChime));
+	}
+	CHECK(peakOfTone(Tone::CompileFailed) <= peakOfTone(Tone::CompileClean));
+	// The answer to a click is shorter than the chime that answers a build.
+	CHECK(samplesOf(tonePcm16(Tone::CompileClean, kRate)).size()
+	      < samplesOf(tonePcm16(Tone::BuildChime, kRate)).size());
 	// The newer tones land on exactly zero.
-	for (Tone t : { Tone::SaveTick, Tone::BuildFailed, Tone::ImportPop })
-		CHECK(samplesOf(tonePcm16(t, kRate)).back() == 0);
+	for (Tone t : kAllTones)
+		if (t != Tone::BuildChime) CHECK(samplesOf(tonePcm16(t, kRate)).back() == 0);
 }
 
 TEST_CASE("Rewards: the tones are the same every time")
 {
 	constexpr int kRate = 48000;
-	for (Tone t : { Tone::SaveTick, Tone::BuildChime, Tone::BuildFailed, Tone::ImportPop })
+	for (Tone t : kAllTones)
 		CHECK(tonePcm16(t, kRate) == tonePcm16(t, kRate));
+}
+
+TEST_CASE("Rewards: compile tones step up and down, the problem tone stays on B5")
+{
+	// Which way each goes, measured: the first 60 ms against the rest.
+	constexpr int kRate = 44100;
+	const auto split = [&](Tone t, double hzA, double hzB)
+	{
+		const std::vector<int16_t> s = samplesOf(tonePcm16(t, kRate));
+		const size_t cut = kRate * 6 / 100;
+		const std::vector<int16_t> head(s.begin(), s.begin() + cut), tail(s.begin() + cut, s.end());
+		// Head: more of A than of B; tail: more of B than of A.
+		return powerAt(head, kRate, hzA) > powerAt(head, kRate, hzB)
+		    && powerAt(tail, kRate, hzB) > powerAt(tail, kRate, hzA);
+	};
+	CHECK(split(Tone::CompileClean, 1108.73, 1318.51));    // C#6 → E6, up
+	CHECK(split(Tone::CompileFailed, 1318.51, 1108.73));   // E6 → C#6, down
+	const std::vector<int16_t> p = samplesOf(tonePcm16(Tone::Problem, kRate));
+	CHECK(powerAt(p, kRate, 987.77) > 50.0 * powerAt(p, kRate, 1318.51));
 }
 
 TEST_CASE("Rewards: the chime is short, quiet and ends silent")
@@ -662,7 +739,7 @@ TEST_CASE("Rewards: the tones play on the editor's engine, never on the project'
 	bits.config.RewardsVolume = 1.0f;
 	AppContext ctx = bits.make(project, ui);
 
-	for (Tone t : { Tone::SaveTick, Tone::BuildChime, Tone::BuildFailed, Tone::ImportPop })
+	for (Tone t : kAllTones)
 	{
 		CAPTURE(static_cast<int>(t));
 		preview(ctx, t);
@@ -719,6 +796,9 @@ TEST_CASE("Rewards: HE_DUMP_REWARD_TONES writes the tones for listening")
 	const std::pair<Tone, const char*> tones[] = {
 		{ Tone::SaveTick, "save_tick.wav" },       { Tone::BuildChime, "build_chime.wav" },
 		{ Tone::BuildFailed, "build_failed.wav" }, { Tone::ImportPop, "import_pop.wav" },
+		{ Tone::CompileClean, "compile_clean.wav" }, { Tone::CompileFailed, "compile_failed.wav" },
+		{ Tone::Commit, "commit.wav" },            { Tone::TourDone, "tour_done.wav" },
+		{ Tone::Problem, "problem.wav" },
 	};
 	std::filesystem::create_directories(dir);
 	for (const auto& [tone, name] : tones)
@@ -1427,19 +1507,25 @@ TEST_CASE("Rewards: equal rank, other kind: the newer moment replaces the line")
 	CHECK_FALSE(g.take(Moment::Saved, 1, 0.4, 3, false).shown);
 }
 
-TEST_CASE("Rewards: a moment without a tone never sounds and books no gap")
+TEST_CASE("Rewards: topic 140's moments sound with their own tone and book the gap")
 {
-	// Even if a caller says "may sound", a toneless moment does not take one…
+	// Step 2 pinned these toneless; step 3 gave them tones. A caller that says
+	// "may sound" now gets one…
 	for (Moment m : { Moment::CompiledClean, Moment::Committed, Moment::TourFinished })
 	{
 		Feed g;
 		CAPTURE(static_cast<int>(m));
 		const Feed::Taken r = g.take(m, 1, 0.0, 1, true);
 		CHECK(r.shown);
-		CHECK_FALSE(r.sound);
-		// …so the next tone is not pushed back by it.
-		CHECK(g.takeTone(Tone::SaveTick, 0.1));
+		CHECK(r.sound);
+		// …and it books the tone gap like any other.
+		CHECK_FALSE(g.takeTone(Tone::SaveTick, 0.1));
+		CHECK(g.takeTone(Tone::SaveTick, kToneGapSec));
 	}
+	// A caller that says no (its switch, focus, Play) books nothing.
+	Feed q;
+	CHECK_FALSE(q.take(Moment::Committed, kSyncCommit, 0.0, 1, false).sound);
+	CHECK(q.takeTone(Tone::SaveTick, 0.1));
 }
 
 TEST_CASE("Rewards: each new moment has its own switch, the old ones have none")
@@ -1614,4 +1700,513 @@ TEST_CASE("Rewards: post() fires on the next pollBuild, not before")
 	for (int i = 1; i < 12; ++i) footerFrame(ctx);
 	CHECK(edgeInk(footerShot(ctx)) == 0);
 	settle(ctx);
+}
+
+// ── Topic 140, step 3: the clocks of V8/V9 and the problem tone ──────────────
+namespace HC = HorizonCode;
+// The ring and the pulse with a hand clock, ProblemWatch's edge and its gap,
+// then the editor side: the real footer bell over a real NotificationStore,
+// the tones that have no moment, and the switches V9 reads from pollBuild.
+
+TEST_CASE("Rewards: the bell's ring widens and fades within kPulseSec, only fades when reduced")
+{
+	CHECK(ringAt(-0.01, false).alpha == 0.0f);
+	CHECK(ringAt(kPulseSec, false).alpha == 0.0f);
+	CHECK(ringAt(0.0, false).alpha == 0.0f);   // rises in, no hard start
+	const Ring a = ringAt(0.1, false), b = ringAt(0.4, false);
+	CHECK(a.alpha > 0.5f);
+	CHECK(a.alpha < 1.0f);                      // never full strength
+	CHECK(b.grow > a.grow);                     // it moves out…
+	CHECK(b.alpha < a.alpha);                   // …and fades as it goes
+	CHECK(ringAt(kPulseSec - 0.001, false).alpha < 0.01f);
+	// Reduced: the same fade, no movement.
+	for (double t : { 0.05, 0.1, 0.3, 0.5 })
+	{
+		CAPTURE(t);
+		CHECK(ringAt(t, true).grow == 0.0f);
+		CHECK(ringAt(t, true).alpha == ringAt(t, false).alpha);
+	}
+}
+
+TEST_CASE("Rewards: the failed node's pulse is one bump, back to nothing at kPulseSec")
+{
+	CHECK(pulseAt(-0.1) == 0.0f);
+	CHECK(pulseAt(0.0) == 0.0f);
+	CHECK(pulseAt(kPulseSec * 0.2) == doctest::Approx(1.0f));
+	CHECK(pulseAt(kPulseSec) == 0.0f);
+	CHECK(pulseAt(5.0) == 0.0f);
+	// Down after the top, never up again: one pulse, not a blink.
+	float last = 1.0f;
+	for (double t = kPulseSec * 0.2; t < kPulseSec; t += 0.01)
+	{
+		const float p = pulseAt(t);
+		CHECK(p <= last + 1e-6f);
+		last = p;
+	}
+}
+
+TEST_CASE("Rewards: ProblemWatch fires once per new problem, never for the first it sees")
+{
+	ProblemWatch w;
+	CHECK_FALSE(w.observe(500));   // problems from before: where it starts
+	CHECK_FALSE(w.observe(500));
+	CHECK(w.observe(600));         // a new one (or the last one again, restamped)
+	CHECK_FALSE(w.observe(600));
+	CHECK_FALSE(w.observe(0));     // the store cleared: where it starts now
+	CHECK(w.observe(10));
+
+	ProblemWatch none;
+	CHECK_FALSE(none.observe(0));
+	CHECK(none.observe(1));
+
+	// Its own gap, on top of the tone gap.
+	ProblemWatch g;
+	CHECK(g.toneDue(0.0));
+	g.tonePlayed(5.0);
+	CHECK_FALSE(g.toneDue(6.0));
+	CHECK_FALSE(g.toneDue(5.0 + kProblemToneGapSec - 0.01));
+	CHECK(g.toneDue(5.0 + kProblemToneGapSec));
+	CHECK(g.toneDue(1.0));         // a clock behind the last tone is a new clock
+}
+
+namespace
+{
+constexpr float kBellX = 800.0f;
+
+// A post a real millisecond after the last: the bell's edge is the store's
+// millisecond stamp, and a test posts faster than that (see problemSeen).
+void postProblem(HE::Ed::NotificationStore& store, HE::Ed::NoteLevel level, std::string text)
+{
+	std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	store.post(level, std::move(text));
+}
+
+// One frame of the footer with the real bell at kBellX. `during` runs inside
+// it, before the bell (pollBuild, a post), like the editor's frame.
+he_ui::Image bellFrame(AppContext& ctx, float dt = 1.0f / 60.0f,
+                       const std::function<void()>& during = {}, bool shot = false)
+{
+	ImGui::GetIO().DeltaTime = dt;
+	ImGui::NewFrame();
+	ImGui::SetNextWindowPos(ImVec2(0.0f, kFootY));
+	ImGui::SetNextWindowSize(ImVec2(float(kShotW), kFootH));
+	ImGui::Begin("##footer", nullptr,
+	             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+	             ImGuiWindowFlags_NoSavedSettings);
+	if (during) during();
+	ImGui::SetCursorScreenPos(ImVec2(kBellX, kFootY + 6.0f));
+	NotificationBar::DrawFooter(ctx);
+	ImGui::End();
+	ImGui::Render();
+	return shot ? he_ui::rasterize(ImGui::GetDrawData(), kShotW, kShotH) : he_ui::Image{};
+}
+
+// The problem red, in the strip LEFT of the bell — the bell and its count
+// are red themselves while a problem is unread; only the ring reaches here.
+int ringInk(const he_ui::Image& img)
+{
+	int n = 0;
+	for (int y = int(kFootY); y < int(kFootY + kFootH); ++y)
+		for (int x = int(kBellX) - 16; x < int(kBellX) - 1; ++x)
+		{
+			uint8_t r, g, b, a;
+			img.pixel(x, y, r, g, b, a);
+			if (r > 90 && r > g + 40 && r > b + 40) ++n;
+		}
+	return n;
+}
+} // namespace
+
+TEST_CASE("ui shot: a new problem rings the footer bell once")
+{
+	FooterHarness h;
+	AudioEngine project, ui;
+	RewardsContextBits bits;
+	AppContext ctx = bits.make(project, ui);
+	HE::Ed::NotificationStore store;
+	ctx.notifications = &store;
+
+	// Nothing new: no ring. (A problem from before the footer was first
+	// drawn is ProblemWatch's case above — the watch here is the editor's
+	// one, and an earlier test may already have started it.)
+	bellFrame(ctx, 1.0f);
+	bellFrame(ctx, 1.0f);
+	for (int i = 0; i < 5; ++i) bellFrame(ctx);
+	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
+
+	// A new one: the ring, a few frames in — and gone after kPulseSec.
+	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Problem, "New problem."); });
+	for (int i = 0; i < 5; ++i) bellFrame(ctx);
+	const he_ui::Image ringing = bellFrame(ctx, 1.0f / 60.0f, {}, true);
+	dumpShot(ringing, "rewards_bell_problem_ring");
+	CHECK(ringInk(ringing) > 6);
+	bellFrame(ctx, 1.0f);
+	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
+
+	// A warning is not a problem: no ring.
+	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Warning, "Just a warning."); });
+	for (int i = 0; i < 5; ++i) bellFrame(ctx);
+	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
+
+	// Problem Pulse off: none — and switching it back on does not ring for
+	// the problem that came while it was off.
+	bits.config.RewardsProblemPulse = false;
+	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Problem, "Quiet problem."); });
+	for (int i = 0; i < 5; ++i) bellFrame(ctx);
+	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
+	bits.config.RewardsProblemPulse = true;
+	bellFrame(ctx, 1.0f);
+	for (int i = 0; i < 5; ++i) bellFrame(ctx);
+	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
+
+	// The master off: none either.
+	bits.config.RewardsEnabled = false;
+	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Problem, "Off problem."); });
+	for (int i = 0; i < 5; ++i) bellFrame(ctx);
+	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
+	bits.config.RewardsEnabled = true;
+	bellFrame(ctx, 1.0f);
+}
+
+TEST_CASE("Rewards: the problem tone plays in the background, once per kProblemToneGapSec")
+{
+	FooterHarness h;
+	AudioEngine project, ui;
+	REQUIRE(project.init(true));
+	REQUIRE(ui.init(true));
+	RewardsContextBits bits;
+	bits.config.RewardsSound  = true;
+	bits.config.RewardsVolume = 1.0f;
+	AppContext ctx = bits.make(project, ui);
+	HE::Ed::NotificationStore store;
+	ctx.notifications = &store;
+	const auto background = [&] { pollBuild(ctx, 0, false, false, /*appFocused=*/false); };
+	const auto foreground = [&] { pollBuild(ctx, 0, false, false, /*appFocused=*/true); };
+	const auto problem = [&](const char* text)
+	{
+		return [&, text] { background(); postProblem(store, HE::Ed::NoteLevel::Problem, text); };
+	};
+
+	// Far past any tone an earlier test booked on the shared Feed.
+	bellFrame(ctx, 1000.0f, background);   // empty store: where the watch starts
+	bellFrame(ctx, 1.0f, background);
+	ui.stopAll();
+
+	// A new problem with the editor in the background: heard.
+	bellFrame(ctx, 1.0f / 60.0f, problem("First."));
+	bellFrame(ctx, 1.0f / 60.0f, background);
+	CHECK(loudestOut(ui) > 0.02f);
+	CHECK(loudestOut(project) == 0.0f);
+	ui.stopAll();
+
+	// Another one 5 s later: the ring, but no second tone inside the gap.
+	bellFrame(ctx, 5.0f, background);
+	bellFrame(ctx, 1.0f / 60.0f, problem("Second."));
+	bellFrame(ctx, 1.0f / 60.0f, background);
+	CHECK(loudestOut(ui) == 0.0f);
+
+	// Past the gap: heard again.
+	bellFrame(ctx, float(kProblemToneGapSec), background);
+	bellFrame(ctx, 1.0f / 60.0f, problem("Third."));
+	bellFrame(ctx, 1.0f / 60.0f, background);
+	CHECK(loudestOut(ui) > 0.02f);
+	ui.stopAll();
+
+	// In front of the editor: the bell rings, the speakers stay quiet — and a
+	// tone that did not play books no gap.
+	bellFrame(ctx, float(kProblemToneGapSec), foreground);
+	bellFrame(ctx, 1.0f / 60.0f, [&] { foreground(); postProblem(store, HE::Ed::NoteLevel::Problem, "Fourth."); });
+	bellFrame(ctx, 1.0f / 60.0f, foreground);
+	CHECK(loudestOut(ui) == 0.0f);
+	bellFrame(ctx, 3.0f, background);
+	bellFrame(ctx, 1.0f / 60.0f, problem("Fifth."));
+	bellFrame(ctx, 1.0f / 60.0f, background);
+	CHECK(loudestOut(ui) > 0.02f);
+	ui.stopAll();
+
+	// Its own switch.
+	bits.config.RewardsSoundProblem = false;
+	bellFrame(ctx, float(kProblemToneGapSec), background);
+	bellFrame(ctx, 1.0f / 60.0f, problem("Sixth."));
+	bellFrame(ctx, 1.0f / 60.0f, background);
+	CHECK(loudestOut(ui) == 0.0f);
+}
+
+TEST_CASE("Rewards: a failed compile sounds without a moment, posted ones on the next pollBuild")
+{
+	FooterHarness h;
+	AudioEngine project, ui;
+	REQUIRE(project.init(true));
+	REQUIRE(ui.init(true));
+	RewardsContextBits bits;
+	bits.config.RewardsSound  = true;
+	bits.config.RewardsVolume = 1.0f;
+	AppContext ctx = bits.make(project, ui);
+	const auto focused = [&] { pollBuild(ctx, 0, false, false, true); };
+	// Far past any tone an earlier test booked on the shared Feed.
+	footerFrame(ctx, 1000.0f, focused);
+	footerFrame(ctx, 3.0f, focused);
+	ui.stopAll();
+
+	// Direct (the widget graph): heard with the editor focused, no line.
+	footerFrame(ctx, 1.0f / 60.0f, [&] { focused(); sound(ctx, Tone::CompileFailed); });
+	CHECK(loudestOut(ui) > 0.02f);
+	ui.stopAll();
+	for (int i = 0; i < 12; ++i) footerFrame(ctx);
+	CHECK(edgeInk(footerShot(ctx)) == 0);
+
+	// Posted (the class graph has no AppContext): nothing until the next
+	// pollBuild, then heard.
+	footerFrame(ctx, 3.0f, focused);
+	footerFrame(ctx, 1.0f / 60.0f, [&] { postSound(Tone::CompileFailed); });
+	CHECK(loudestOut(ui) == 0.0f);
+	footerFrame(ctx, 1.0f / 60.0f, focused);
+	CHECK(loudestOut(ui) > 0.02f);
+	ui.stopAll();
+
+	// It keeps the tone gap: right after another tone, silent.
+	footerFrame(ctx, 3.0f, focused);
+	footerFrame(ctx, 1.0f / 60.0f, [&] { focused(); fire(ctx, Moment::CompiledClean); });
+	CHECK(loudestOut(ui) > 0.02f);   // the clean compile's own tone
+	ui.stopAll();
+	footerFrame(ctx, 0.5f, [&] { focused(); sound(ctx, Tone::CompileFailed); });
+	CHECK(loudestOut(ui) == 0.0f);
+
+	// Its own switch.
+	bits.config.RewardsSoundCompileFailed = false;
+	footerFrame(ctx, 3.0f, [&] { focused(); sound(ctx, Tone::CompileFailed); });
+	CHECK(loudestOut(ui) == 0.0f);
+	settle(ctx);
+}
+
+TEST_CASE("Rewards: no device, no sound — nothing opens, nothing hangs, nothing plays")
+{
+	// What a headless run is: the default config (Sound off) and, in the
+	// worst case, no UI engine at all.
+	FooterHarness h;
+	AudioEngine project, ui;
+	RewardsContextBits bits;
+	AppContext ctx = bits.make(project, ui);
+	HE::Ed::NotificationStore store;
+	ctx.notifications = &store;
+
+	// Defaults: a whole session of moments, failures and problems never
+	// opens the editor's device.
+	for (int i = 0; i < 3; ++i)
+		bellFrame(ctx, 3.0f, [&]
+		{
+			pollBuild(ctx, 0, false, false, false);
+			fire(ctx, Moment::CompiledClean);
+			sound(ctx, Tone::CompileFailed);
+			postSound(Tone::Problem);
+			postProblem(store, HE::Ed::NoteLevel::Problem, "Problem " + std::to_string(i));
+		});
+	pollBuild(ctx, 7, true, false, false);   // a failed build
+	CHECK_FALSE(ui.isInitialized());
+
+	// No engine at all, sound on: every entry point is a no-op, not a crash.
+	bits.config.RewardsSound = true;
+	ctx.uiAudioEngine = nullptr;
+	bellFrame(ctx, 3.0f, [&]
+	{
+		pollBuild(ctx, 0, false, false, false);
+		for (Tone t : kAllTones) preview(ctx, t);
+		sound(ctx, Tone::CompileFailed);
+		fire(ctx, Moment::Committed, kSyncCommit);
+		postProblem(store, HE::Ed::NoteLevel::Problem, "No engine.");
+	});
+	pollBuild(ctx, 8, true, false, false);
+	CHECK(true);   // reaching here is the check
+	settle(ctx);
+}
+
+TEST_CASE("Rewards: V9 follows the switches pollBuild saw, and reduced motion")
+{
+	FooterHarness h;
+	AudioEngine project, ui;
+	RewardsContextBits bits;
+	AppContext ctx = bits.make(project, ui);
+	const auto poll = [&] { pollBuild(ctx, 0, false, false, true); };
+
+	poll();
+	// The check is written over kCheckDrawSec, like V1.
+	CHECK(compileCheck(0.0) == 0.0f);
+	CHECK(compileCheck(kCheckDrawSec * 0.5) > 0.0f);
+	CHECK(compileCheck(kCheckDrawSec * 0.5) < 1.0f);
+	CHECK(compileCheck(3.0) == 1.0f);
+	CHECK(errorPulse(kPulseSec * 0.2) == doctest::Approx(1.0f));
+
+	// Check Mark off, or Visual Cues off, or the master off: the static icon.
+	for (bool EditorConfig::*f : { &EditorConfig::RewardsCheckMark, &EditorConfig::RewardsVisual,
+	                               &EditorConfig::RewardsEnabled })
+	{
+		bits.config.*f = false;
+		poll();
+		CHECK(compileCheck(3.0) < 0.0f);
+		bits.config.*f = true;
+		poll();
+		CHECK(compileCheck(3.0) == 1.0f);
+	}
+	// Problem Pulse off, or the master off: no node pulse.
+	bits.config.RewardsProblemPulse = false;
+	poll();
+	CHECK(errorPulse(kPulseSec * 0.2) == 0.0f);
+	bits.config.RewardsProblemPulse = true;
+	bits.config.RewardsEnabled      = false;
+	poll();
+	CHECK(errorPulse(kPulseSec * 0.2) == 0.0f);
+	bits.config.RewardsEnabled = true;
+
+	// Reduced motion: the check is whole at once; the pulse is a colour and stays.
+	s_fakeReduce = true;
+	setSystemMotionQuery(&fakeReduceQuery);
+	poll();
+	CHECK(compileCheck(0.0) == 1.0f);
+	CHECK(errorPulse(kPulseSec * 0.2) == doctest::Approx(1.0f));
+	setSystemMotionQuery(nullptr);
+	s_fakeReduce = false;
+	poll();
+}
+
+TEST_CASE("ui shot: the compile readout writes its check")
+{
+	FooterHarness h;
+	AudioEngine project, ui;
+	RewardsContextBits bits;
+	AppContext ctx = bits.make(project, ui);
+	constexpr int W = 420, H = 60;
+
+	// The panels' strip, as LevelScriptPanel / UIEditorPanel draw it.
+	const auto strip = [&](double age, bool useCheck)
+	{
+		ImGui::GetIO().DisplaySize = ImVec2(float(W), float(H));
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("##graph", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+		pollBuild(ctx, 0, false, false, true);
+		{
+			EditorToolbar::Bar bar;
+			bar.group();
+			const float stroke = useCheck ? compileCheck(age) : -1.0f;
+			if (stroke >= 0.0f)
+			{
+				const ImVec2 c = bar.readout([](ImDrawList*, const ImVec2&, float, ImU32) {},
+				                             "compiles clean — 120 lines of C++",
+				                             EditorToolbar::kGood);
+				const float s = bar.iconSize();
+				drawCheckMark(c.x - s * 0.5f, c.y - s * 0.5f, s, stroke, 1.0f);
+			}
+			else
+				bar.readout(EditorToolbar::iconCheck, "compiles clean — 120 lines of C++",
+				            EditorToolbar::kGood);
+			bar.endGroup();
+		}
+		ImGui::End();
+		ImGui::Render();
+		return he_ui::rasterize(ImGui::GetDrawData(), W, H);
+	};
+	// The icon slot: the left end of the first well.
+	const auto slotInk = [&](const he_ui::Image& img)
+	{
+		int n = 0;
+		for (int y = 0; y < H; ++y)
+			for (int x = 0; x < 40; ++x)
+			{
+				uint8_t r, g, b, a;
+				img.pixel(x, y, r, g, b, a);
+				if (g > 120 && g > r + 40 && g > b + 30) ++n;
+			}
+		return n;
+	};
+
+	const he_ui::Image half = strip(kCheckDrawSec * 0.4, true);
+	const he_ui::Image whole = strip(1.0, true);
+	dumpShot(half, "rewards_compile_readout_writing");
+	dumpShot(whole, "rewards_compile_readout_written");
+	CHECK(slotInk(half) > 0);
+	CHECK(slotInk(whole) > slotInk(half));   // more of it written
+	// Check Mark off: the static icon, still in the slot.
+	bits.config.RewardsCheckMark = false;
+	CHECK(slotInk(strip(1.0, true)) > 0);
+	bits.config.RewardsCheckMark = true;
+	ImGui::GetIO().DisplaySize = ImVec2(float(kShotW), float(kShotH));
+}
+
+TEST_CASE("ui shot: a failed compile's node halo brightens once")
+{
+	FooterHarness h;
+	constexpr int W = 360, H = 200;
+	HC::Graph graph;
+	GraphEditor::State ge;
+	ge.pan  = ImVec2(0.0f, 0.0f);
+	ge.zoom = 1.0f;
+	int selected = 0;
+	const int bad = HcGraphHost::addNode(graph, HC::NodeType::Branch, ImVec2(60.0f, 60.0f), 0);
+	const int ok  = HcGraphHost::addNode(graph, HC::NodeType::Sequence, ImVec2(60.0f, 400.0f), 0);
+	REQUIRE(bad != 0);
+
+	HcGraphHost::Host host;
+	host.graph        = &graph;
+	host.ge           = &ge;
+	host.selectedNode = &selected;
+	host.title        = [](const HC::Node&) { return std::string("Branch"); };
+	host.errorNode    = bad;
+
+	// The colour the halo gets: the plain error red, a paler red at the top of
+	// the pulse — the same hue family, never another state's colour.
+	host.errorPulse = 0.0f;
+	{
+		GraphEditor::Model m = HcGraphHost::buildModel(host);
+		CHECK(m.nodeOutline(bad) == IM_COL32(230, 70, 70, 255));
+		CHECK(m.nodeOutline(ok) == 0u);
+	}
+	host.errorPulse = 1.0f;
+	{
+		GraphEditor::Model m = HcGraphHost::buildModel(host);
+		const ImU32 c = m.nodeOutline(bad);
+		CHECK(c == IM_COL32(255, 190, 180, 255));
+		CHECK(m.nodeOutline(ok) == 0u);
+	}
+
+	// And on the canvas, mid-pulse.
+	const auto shoot = [&](float pulse)
+	{
+		host.errorPulse = pulse;
+		GraphEditor::Model m = HcGraphHost::buildModel(host);
+		he_ui::Image img;
+		ImGui::GetIO().DisplaySize = ImVec2(float(W), float(H));
+		for (int f = 0; f < 3; ++f)
+		{
+			ImGui::NewFrame();
+			ImGui::SetNextWindowPos(ImVec2(0, 0));
+			ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+			ImGui::Begin("##canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+			GraphEditor::draw("##ge", m, ge, ImVec2(float(W), float(H)));
+			ImGui::End();
+			ImGui::Render();
+		}
+		img = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+		return img;
+	};
+	// Pale-red pixels: only the pulse's halo has them.
+	const auto pale = [&](const he_ui::Image& img)
+	{
+		int n = 0;
+		for (int y = 0; y < H; ++y)
+			for (int x = 0; x < W; ++x)
+			{
+				uint8_t r, g, b, a;
+				img.pixel(x, y, r, g, b, a);
+				if (r > 220 && g > 140 && g < 215 && b > 130 && b < 205 && r > g + 30) ++n;
+			}
+		return n;
+	};
+	const he_ui::Image top  = shoot(1.0f);
+	const he_ui::Image rest = shoot(0.0f);
+	dumpShot(top, "rewards_error_node_pulse");
+	dumpShot(rest, "rewards_error_node_rest");
+	CHECK(pale(top) > 10);
+	CHECK(pale(rest) == 0);
+	ImGui::GetIO().DisplaySize = ImVec2(float(kShotW), float(kShotH));
 }

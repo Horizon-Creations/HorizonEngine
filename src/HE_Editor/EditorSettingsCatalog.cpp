@@ -164,6 +164,12 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Assets an import just wrote get a frame in the Content "
 	                    "Browser that fades after about two seconds. Needs "
 	                    "Success Feedback on."));
+	t.push_back(boolRow("rewards.problemPulse", "Problem Pulse", "Feedback", "rewards",
+	                    &EditorConfig::RewardsProblemPulse,
+	                    "A new problem notification draws one ring around the "
+	                    "footer bell, and the node a HorizonCode compile failed "
+	                    "on pulses once. Never a blink. Needs Success Feedback "
+	                    "on."));
 	t.push_back(enumRow("rewards.reducedMotion", "Reduced Motion", "Feedback", "rewards",
 	                    &EditorConfig::RewardsReducedMotion,
 	                    { "Follow System", "Off" },
@@ -173,7 +179,8 @@ std::vector<SettingDesc> buildCatalog()
 	t.push_back(boolRow("rewards.sound", "Success Sound", "Feedback", "rewards",
 	                    &EditorConfig::RewardsSound,
 	                    "Play a short sound when a moment happens (and when a "
-	                    "build fails); each sound has its own switch below. Needs "
+	                    "build or compile fails, or a problem arrives while you "
+	                    "are elsewhere); each sound has its own switch below. Needs "
 	                    "Success Feedback on; independent of Visual Cues. At most "
 	                    "one sound every 2 s, a save's at most every 20 s, none "
 	                    "during Play. Played on the editor's own output, not the "
@@ -197,6 +204,28 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsSoundImport,
 	                    "A short pop when files were imported as assets. Needs "
 	                    "Success Sound on."));
+	t.push_back(boolRow("rewards.soundCompile", "Compile Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundCompile,
+	                    "A small step up when a HorizonCode graph's Compile button "
+	                    "found nothing to fix. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundCompileFailed", "Compile Failed Sound", "Feedback",
+	                    "rewards", &EditorConfig::RewardsSoundCompileFailed,
+	                    "The same step down, softer, when the Compile button found "
+	                    "a problem. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundCommit", "Commit Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundCommit,
+	                    "Three rising notes when a commit or push went through, only "
+	                    "while the editor is in the background. Needs Success Sound "
+	                    "on."));
+	t.push_back(boolRow("rewards.soundTutorial", "Tutorial Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundTutorial,
+	                    "The build chime with one note more when the tutorial is "
+	                    "finished. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundProblem", "Problem Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundProblem,
+	                    "Two quiet knocks when a new problem notification arrives, "
+	                    "only while the editor is in the background and at most "
+	                    "every 30 s. Needs Success Sound on."));
 	t.push_back(boolRow("rewards.showProgress", "Show Progress", "Feedback", "rewards",
 	                    &EditorConfig::RewardsShowProgress,
 	                    "Show successful builds today and days in a row with the "

@@ -83,15 +83,16 @@ int rankOf(Moment m)
 
 bool hasTone(Moment m)
 {
+	// Every moment has one since topic 140, step 3 — a moment added later
+	// answers false here until it gets its own (see "The tones").
 	switch (m)
 	{
 	case Moment::Saved:
 	case Moment::BuildSucceeded:
-	case Moment::AssetsImported: return true;
-	// Their tones are topic 140's next step — see "The tones" in the header.
+	case Moment::AssetsImported:
 	case Moment::CompiledClean:
 	case Moment::Committed:
-	case Moment::TourFinished:   return false;
+	case Moment::TourFinished:   return true;
 	}
 	return false;
 }
@@ -103,7 +104,9 @@ Tone toneFor(Moment m)
 	case Moment::Saved:          return Tone::SaveTick;
 	case Moment::BuildSucceeded: return Tone::BuildChime;
 	case Moment::AssetsImported: return Tone::ImportPop;
-	default:                     break;   // no tone (hasTone false)
+	case Moment::CompiledClean:  return Tone::CompileClean;
+	case Moment::Committed:      return Tone::Commit;
+	case Moment::TourFinished:   return Tone::TourDone;
 	}
 	return Tone::SaveTick;
 }
@@ -122,6 +125,13 @@ bool toneWanted(const EditorConfig& cfg, Tone t, bool playing, bool appFocused)
 	case Tone::ImportPop:   return cfg.RewardsSoundImport;
 	case Tone::BuildChime:  return cfg.RewardsSoundBuild && !appFocused;
 	case Tone::BuildFailed: return cfg.RewardsSoundBuildFailed && !appFocused;
+	// The compile runs on the click: the editor always has focus when it ends.
+	case Tone::CompileClean:  return cfg.RewardsSoundCompile;
+	case Tone::CompileFailed: return cfg.RewardsSoundCompileFailed;
+	case Tone::Commit:        return cfg.RewardsSoundCommit && !appFocused;
+	case Tone::TourDone:      return cfg.RewardsSoundTutorial;
+	// In front of the editor the bell's pulse says it (V8).
+	case Tone::Problem:       return cfg.RewardsSoundProblem && !appFocused;
 	}
 	return false;
 }
@@ -184,10 +194,12 @@ int SyncWatch::poll(bool idleBeforePump, const std::string& lastError, const std
 
 bool Feed::takeTone(Tone t, double now)
 {
-	// Rules 4 and 5: the gaps run from the last tone that played.
+	// Rules 4 and 5: the gaps run from the last tone that played. A clock
+	// behind that tone is a new clock (a new ImGui context), not a gap.
 	const bool save = t == Tone::SaveTick;
-	if (m_toned && now - m_toneAt < kToneGapSec) return false;
-	if (save && m_saveToned && now - m_saveToneAt < kSaveToneGapSec) return false;
+	if (m_toned && now >= m_toneAt && now - m_toneAt < kToneGapSec) return false;
+	if (save && m_saveToned && now >= m_saveToneAt && now - m_saveToneAt < kSaveToneGapSec)
+		return false;
 	m_toned  = true;
 	m_toneAt = now;
 	if (save)
@@ -276,6 +288,44 @@ Edge edgeAt(double age, bool reduced)
 	const double up = std::min(1.0, t * 6.0);
 	e.alpha = static_cast<float>(0.55 * up * (1.0 - smooth01(t)));
 	return e;
+}
+
+Ring ringAt(double age, bool reduced)
+{
+	Ring r;
+	if (age < 0.0 || age >= kPulseSec) return r;
+	const double t = age / kPulseSec;
+	// Out fast, then settling — the way a ripple slows; up over the first
+	// eighth, then gone. Softer than the light edge: the bell is small.
+	if (!reduced) r.grow = static_cast<float>(1.0 - (1.0 - t) * (1.0 - t));
+	const double up = std::min(1.0, t * 8.0);
+	r.alpha = static_cast<float>(0.8 * up * (1.0 - smooth01(t)));
+	return r;
+}
+
+float pulseAt(double age)
+{
+	if (age < 0.0 || age >= kPulseSec) return 0.0f;
+	const double t = age / kPulseSec;
+	// Up over the first fifth, back down eased: one bump, no plateau.
+	if (t < 0.2) return static_cast<float>(smooth01(t / 0.2));
+	return static_cast<float>(1.0 - smooth01((t - 0.2) / 0.8));
+}
+
+bool ProblemWatch::observe(unsigned long long newestMs)
+{
+	if (!m_known)
+	{
+		m_known = true;
+		m_last  = newestMs;
+		return false;
+	}
+	// The store's clock is steady, so a newer problem (or the last one
+	// posted again, which restamps it) is always a larger number. A smaller
+	// one is the store emptied or the old entry dropped: where it starts now.
+	const bool rose = newestMs > m_last;
+	m_last = newestMs;
+	return rose;
 }
 
 void CounterTick::observe(int value)
@@ -810,14 +860,83 @@ std::vector<uint8_t> buildFailedPcm16(int sampleRate)
 	               sampleRate, kPeak, 0.03);
 }
 
+// ── Topic 140's tones ────────────────────────────────────────────────────────
+// Same rules as above, all struck notes (ringNotes) normalised to a stated
+// peak, all quieter than the chime. The notes: A5 880, C#6 1108.73, E6 1318.51,
+// F#6 1479.98, B5 987.77 — A major pentatonic.
+
+std::vector<uint8_t> compileCleanPcm16(int sampleRate)
+{
+	// C#6 then E6 60 ms later: a small step up, short — it answers a click.
+	constexpr Note   kNotes[]   = { { 1108.73, 0.0, 0.9 }, { 1318.51, 0.06, 1.0 } };
+	constexpr double kLengthSec = 0.18;
+	constexpr double kPeak      = 0.20;       // ≈ −14 dBFS
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.004, 0.045),
+	               sampleRate, kPeak, 0.02);
+}
+
+std::vector<uint8_t> compileFailedPcm16(int sampleRate)
+{
+	// The same step DOWN, E6 then C#6, with a softer onset and a slower
+	// second note: "have a look", not "wrong". No buzz, no low note.
+	constexpr Note   kNotes[]   = { { 1318.51, 0.0, 1.0 }, { 1108.73, 0.08, 0.85 } };
+	constexpr double kLengthSec = 0.24;
+	constexpr double kPeak      = 0.18;       // ≈ −15 dBFS, below the clean one
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.008, 0.055),
+	               sampleRate, kPeak, 0.025);
+}
+
+std::vector<uint8_t> commitPcm16(int sampleRate)
+{
+	// A5, C#6, E6, 55 ms apart: the major triad rolled upwards — "sent".
+	constexpr Note   kNotes[]   = { { 880.0, 0.0, 0.9 }, { 1108.73, 0.055, 0.9 },
+	                                { 1318.51, 0.11, 1.0 } };
+	constexpr double kLengthSec = 0.30;
+	constexpr double kPeak      = 0.24;       // ≈ −12 dBFS
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.004, 0.06),
+	               sampleRate, kPeak, 0.03);
+}
+
+std::vector<uint8_t> tourDonePcm16(int sampleRate)
+{
+	// The build chime's A5 and E6, then F#6: the chime, one note further.
+	constexpr Note   kNotes[]   = { { 880.0, 0.0, 1.0 }, { 1318.51, 0.07, 1.0 },
+	                                { 1479.98, 0.14, 0.9 } };
+	constexpr double kLengthSec = 0.42;
+	constexpr double kPeak      = 0.26;       // ≈ −12 dBFS, under the chime's 0.30
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.004, 0.09),
+	               sampleRate, kPeak, 0.03);
+}
+
+std::vector<uint8_t> problemPcm16(int sampleRate)
+{
+	// B5 twice, short and damped, 120 ms apart: a knock, not a siren. B5 sits
+	// between the others and resolves nowhere — it asks you to look.
+	constexpr Note   kNotes[]   = { { 987.77, 0.0, 1.0 }, { 987.77, 0.12, 0.8 } };
+	constexpr double kLengthSec = 0.26;
+	constexpr double kPeak      = 0.18;       // ≈ −15 dBFS
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.006, 0.03),
+	               sampleRate, kPeak, 0.02);
+}
+
 std::vector<uint8_t> tonePcm16(Tone t, int sampleRate)
 {
 	switch (t)
 	{
-	case Tone::SaveTick:    return saveTickPcm16(sampleRate);
-	case Tone::BuildChime:  return chimePcm16(sampleRate);
-	case Tone::BuildFailed: return buildFailedPcm16(sampleRate);
-	case Tone::ImportPop:   return importPopPcm16(sampleRate);
+	case Tone::SaveTick:      return saveTickPcm16(sampleRate);
+	case Tone::BuildChime:    return chimePcm16(sampleRate);
+	case Tone::BuildFailed:   return buildFailedPcm16(sampleRate);
+	case Tone::ImportPop:     return importPopPcm16(sampleRate);
+	case Tone::CompileClean:  return compileCleanPcm16(sampleRate);
+	case Tone::CompileFailed: return compileFailedPcm16(sampleRate);
+	case Tone::Commit:        return commitPcm16(sampleRate);
+	case Tone::TourDone:      return tourDonePcm16(sampleRate);
+	case Tone::Problem:       return problemPcm16(sampleRate);
 	}
 	return {};
 }
@@ -903,6 +1022,20 @@ std::chrono::steady_clock::time_point s_motionAt;
 bool s_appFocused   = true;    // the last pollBuild's word; focused = no build tone
 bool s_uiAudioFailed = false;  // its device would not open — see keepUiAudio
 
+// postSound()'s queue, played by the next pollBuild.
+std::vector<Tone> s_postedSounds;
+
+// V8's edge and the problem tone's own gap.
+ProblemWatch s_problems;
+double       s_problemAt = -1.0;   // when the bell's ring began (< 0: never)
+
+// V9's switches as the last pollBuild saw them — its callers have no
+// AppContext. Values, not a pointer to the config: a test's config does not
+// outlive its test.
+bool s_compileCheckOn = true;
+bool s_problemPulseOn = true;
+bool s_reducedCached  = false;
+
 // The UI-sound engine ("Routing" in the header): open while a tone is
 // possible, closed while none is. Called every frame from pollBuild, so the
 // device opens in a frame of its own and never in the frame of a save.
@@ -926,12 +1059,12 @@ void playTone(AppContext& ctx, Tone t, float gain)
 	AudioEngine* a = ctx.uiAudioEngine;
 	if (!a || !a->isInitialized() || !(gain > 0.0f)) return;
 	constexpr int kRate = 44100;
-	// Indexed by Tone.
-	static const std::vector<uint8_t> pcm[] = {
-		tonePcm16(Tone::SaveTick, kRate),    tonePcm16(Tone::BuildChime, kRate),
-		tonePcm16(Tone::BuildFailed, kRate), tonePcm16(Tone::ImportPop, kRate),
-	};
-	a->play(pcm[static_cast<int>(t)], kRate, 1, gain);
+	// Indexed by Tone, each built on its first play.
+	static std::vector<uint8_t> pcm[kToneCount];
+	const int i = static_cast<int>(t);
+	if (i < 0 || i >= kToneCount) return;
+	if (pcm[i].empty()) pcm[i] = tonePcm16(t, kRate);
+	a->play(pcm[i], kRate, 1, gain);
 }
 
 double nowSec()
@@ -976,6 +1109,52 @@ void post(Moment m, int count)
 	// A handful a frame at most (one per click); a cap so a caller in a loop
 	// cannot grow it without bound before the next pollBuild.
 	if (s_posted.size() < 16) s_posted.emplace_back(m, count);
+}
+
+void sound(AppContext& ctx, Tone t)
+{
+	const EditorConfig& cfg = ctx.editorConfig;
+	if (toneWanted(cfg, t, ctx.isPlaying, s_appFocused) && s_feed.takeTone(t, nowSec()))
+		playTone(ctx, t, gainFor(cfg.RewardsVolume));
+}
+
+void postSound(Tone t)
+{
+	if (s_postedSounds.size() < 16) s_postedSounds.push_back(t);
+}
+
+double problemSeen(AppContext& ctx, unsigned long long newestProblemMs)
+{
+	const EditorConfig& cfg = ctx.editorConfig;
+	const double now = nowSec();
+	// Observed whatever the switches say, so switching them on never pulses
+	// or sounds for a problem from before.
+	if (s_problems.observe(newestProblemMs) && cfg.RewardsEnabled)
+	{
+		s_problemAt = now;
+		// Rule 6, then the problem tone's own gap, then the shared one — and
+		// the own gap is only booked when the tone really played.
+		if (toneWanted(cfg, Tone::Problem, ctx.isPlaying, s_appFocused)
+		    && s_problems.toneDue(now) && s_feed.takeTone(Tone::Problem, now))
+		{
+			s_problems.tonePlayed(now);
+			playTone(ctx, Tone::Problem, gainFor(cfg.RewardsVolume));
+		}
+	}
+	if (!cfg.RewardsEnabled || !cfg.RewardsProblemPulse || s_problemAt < 0.0) return -1.0;
+	const double age = now - s_problemAt;
+	return (age >= 0.0 && age < kPulseSec) ? age : -1.0;
+}
+
+float compileCheck(double age)
+{
+	if (!s_compileCheckOn) return -1.0f;
+	return checkStroke(age, s_reducedCached);
+}
+
+float errorPulse(double age)
+{
+	return s_problemPulseOn ? pulseAt(age) : 0.0f;
 }
 
 void preview(AppContext& ctx, Tone t)
@@ -1059,6 +1238,12 @@ void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool succ
 {
 	s_appFocused = appFocused;
 	keepUiAudio(ctx);
+	{
+		const EditorConfig& cfg = ctx.editorConfig;
+		s_compileCheckOn = cfg.RewardsEnabled && cfg.RewardsVisual && cfg.RewardsCheckMark;
+		s_problemPulseOn = cfg.RewardsEnabled && cfg.RewardsProblemPulse;
+		s_reducedCached  = reducedMotion(ctx);
+	}
 	// post()'s moments from the last frame, in order. Swapped out first: fire()
 	// never posts, but nothing here should depend on that.
 	if (!s_posted.empty())
@@ -1066,6 +1251,12 @@ void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool succ
 		std::vector<std::pair<Moment, int>> posted;
 		posted.swap(s_posted);
 		for (const auto& [m, count] : posted) fire(ctx, m, count);
+	}
+	if (!s_postedSounds.empty())
+	{
+		std::vector<Tone> posted;
+		posted.swap(s_postedSounds);
+		for (Tone t : posted) sound(ctx, t);
 	}
 	// Consumed whether or not the feature is on: switching it on later must not
 	// reward a build that finished while it was off.
@@ -1075,15 +1266,10 @@ void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool succ
 		fire(ctx, Moment::BuildSucceeded);
 		break;
 	case Feed::BuildEnd::Failed:
-	{
 		// Not a moment (no line, nothing counted) — only its tone, under the
 		// same switches and the same gap as every other.
-		const EditorConfig& cfg = ctx.editorConfig;
-		if (toneWanted(cfg, Tone::BuildFailed, ctx.isPlaying, appFocused)
-		    && s_feed.takeTone(Tone::BuildFailed, nowSec()))
-			playTone(ctx, Tone::BuildFailed, gainFor(cfg.RewardsVolume));
+		sound(ctx, Tone::BuildFailed);
 		break;
-	}
 	case Feed::BuildEnd::None:
 		break;
 	}
@@ -1259,6 +1445,27 @@ void drawCheckMark(float x, float y, float size, float stroke, float alpha)
 	                                        ImDrawFlags_None, std::max(1.5f, size * 0.14f));
 }
 
+void drawProblemRing(float x0, float y0, float x1, float y1, double age, bool reduced,
+                     unsigned int col)
+{
+	const Ring r = ringAt(age, reduced);
+	if (!(r.alpha > 0.0f)) return;
+	// A circle around the bell's box, widening by up to a third of its height:
+	// the footer is one text line tall, and a ring that left it would be cut.
+	const float  h      = y1 - y0;
+	const ImVec2 c((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+	const float  radius = std::max(x1 - x0, h) * 0.5f + 1.0f + r.grow * h * 0.35f;
+	ImVec4 v = ImGui::ColorConvertU32ToFloat4(col);
+	v.w *= r.alpha;
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	// Past the window's padding, like the light edge: the ring is around the
+	// bell, not inside the footer's content box.
+	const ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+	dl->PushClipRect(wp, ImVec2(wp.x + ws.x, wp.y + ws.y), false);
+	dl->AddCircle(c, radius, ImGui::GetColorU32(v), 0, 1.5f);
+	dl->PopClipRect();
+}
+
 void drawFooterStatus(AppContext& ctx, const char* idleTextIn)
 {
 	const EditorConfig& cfg = ctx.editorConfig;
@@ -1377,6 +1584,7 @@ void drawFooterStatus(AppContext& ctx, const char* idleTextIn)
 #else
 void drawFooterStatus(AppContext&, const char*) {}
 void drawCheckMark(float, float, float, float, float) {}
+void drawProblemRing(float, float, float, float, double, bool, unsigned int) {}
 #endif
 
 } // namespace HE::Ed::Rewards

@@ -107,6 +107,12 @@ struct EditorConfig
 	bool  RewardsSoundBuild       = true;   // RewardsSound (the one that starts
 	bool  RewardsSoundBuildFailed = true;   // off); the two build tones only
 	bool  RewardsSoundImport      = true;   // play with the editor unfocused
+	bool  RewardsSoundCompile       = true; // topic 140: compiled clean,
+	bool  RewardsSoundCompileFailed = true; // compile failed, committed (only
+	bool  RewardsSoundCommit        = true; // unfocused), tour finished, a new
+	bool  RewardsSoundTutorial      = true; // problem (only unfocused) — all
+	bool  RewardsSoundProblem       = true; // under RewardsSound
+	bool  RewardsProblemPulse  = true;   // V8/V9: the bell rings out, a failed node pulses
 	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
 	bool  RewardsCounterTick   = true;   // V3: a number that rose lights up (under Progress)
 	bool  RewardsStreakTooltip = true;   // hovering the counters: the last 7 days (under Progress)

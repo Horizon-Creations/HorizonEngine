@@ -159,12 +159,13 @@ struct EditorConfig;
 //   inside a gap, merged, outranked) never pushes the next tone further away.
 //   6. The caller decides whether a moment may sound at all (toneWanted: the
 //      switches, volume > 0, not during Play-in-Editor — the speakers belong to
-//      the game then — and the build tones only with the editor in the
-//      background) and hands that in as soundWanted. Autosave, MCP saves and
-//      hc.save are not moments at all (above), so they are silent by
-//      construction.
-//   The failed-build tone has no moment and no line; it goes straight to
-//   takeTone() and so keeps rule 4 with the others.
+//      the game then — and the build, commit and problem tones only with the
+//      editor in the background) and hands that in as soundWanted. Autosave,
+//      MCP saves and hc.save are not moments at all (above), so they are
+//      silent by construction.
+//   The failed-build, failed-compile and problem tones have no moment and no
+//   line; they go straight to takeTone() (sound()) and so keep rule 4 with
+//   the others.
 //
 // ── What the feedback is ─────────────────────────────────────────────────────
 // Visual (RewardsVisual, with the master on): the footer's centred "Ready" label
@@ -212,6 +213,21 @@ struct EditorConfig;
 //       the import. "Just wrote" = new or rewritten in the import's target
 //       folder, from a listing before and after (DirSnapshot) — importSource
 //       does not say what it wrote, and a file clock would be a guess.
+//   V8  PROBLEM PULSE on the bell (RewardsProblemPulse): a new Problem in the
+//       notification store draws one ring around the footer bell that widens
+//       and fades over kPulseSec (ringAt). One ring per new problem, never a
+//       blink, never repeated; the bell's colour and count say the rest, as
+//       before. Reduced motion: the ring does not widen, it only fades. The
+//       edge is ProblemWatch over the snapshot the bell takes anyway — the
+//       first one it sees is where it starts, so problems from before the
+//       editor drew its footer do not pulse.
+//   V9  COMPILE READOUT (topic 140): the HorizonCode graph's Compile readout
+//       ("compiles clean — 120 lines of C++") draws V1's check, written over
+//       kCheckDrawSec, where its static icon was (compileCheck; Visual Cues
+//       and Check Mark, like V1). A failed compile's red node halo pulses
+//       once, brighter and back over kPulseSec (errorPulse; under Problem
+//       Pulse — the same "look here" as the bell). Both panels that ask have
+//       no AppContext, so the switches come from the last pollBuild.
 //   RECENT DAYS (RewardsStreakTooltip, part of the counters): hovering the
 //       counters — and only hovering, never on its own — shows the last
 //       kRecentDays days: which had a moment, each day's builds and, where
@@ -258,11 +274,35 @@ struct EditorConfig;
 //                                    says so to someone looking at it).
 //   Import        importPopPcm16     I1 "pop": a sine gliding 1.4 → 0.9 kHz in
 //                                    70 ms. The count does not change the sound.
-//   Compiled clean, Committed, Tour finished: no tone YET (hasTone false) —
-//   their tones are topic 140's next step. Until then such a moment is shown
-//   and counted but never heard, and it must not borrow another tone's switch:
-//   fire() asks hasTone before toneWanted. Giving one a tone = a Tone value,
-//   its PCM, its switch, and hasTone/toneFor answering for it.
+// Topic 140, step 3 (docs/editor-feinschliff-plan.md §2): one tone per new
+// moment and two that belong to no moment. All quieter than the chime.
+//   Compiled clean compileCleanPcm16  C#6 then E6, 0.18 s: a small step up. No
+//                                    focus rule — the compile runs on the click,
+//                                    so the editor always has focus when it ends.
+//   Compile failed compileFailedPcm16 E6 then C#6, the same step DOWN, softer
+//                                    onset. No moment (no line, nothing counted):
+//                                    the graph already jumps to the node. No
+//                                    focus rule, same reason. Through sound() /
+//                                    postSound(), like the failed build.
+//   Committed     commitPcm16        A5, C#6, E6 in 0.3 s, an arpeggio up. The
+//                                    build's focus rule: a push can take a while
+//                                    and you look elsewhere; one you watched go
+//                                    through needs no tone.
+//   Tour finished tourDonePcm16      the chime's A5 and E6 with F#6 on top,
+//                                    0.42 s: the build chime, one note further.
+//   Problem       problemPcm16       B5 twice, short and damped: "come and look",
+//                                    not an alarm. No moment: a new Problem in
+//                                    the notification store (the bell's
+//                                    snapshot, ProblemWatch), only while NO
+//                                    editor window has focus — in front of the
+//                                    editor the bell's pulse (V8) says it — and
+//                                    at most once every kProblemToneGapSec on top
+//                                    of the tone gap, because attachToEngineLog
+//                                    forwards every HE_LOG_ERROR there and a
+//                                    burst of them must stay one tone.
+// Every moment has a tone now (hasTone is true for all six); hasTone stays the
+// question fire() asks before toneWanted, so a moment added later without a
+// tone cannot borrow another tone's switch.
 //
 // Routing: the tones play on an AudioEngine of their own (AppContext::
 // uiAudioEngine, owned by EditorApplication), NOT on the project's engine:
@@ -301,12 +341,13 @@ struct EditorConfig;
 //                                      the counters, if those are on)
 //   bool  RewardsCheckMark    = true;  V1, under Visual (it sits beside the line)
 //   bool  RewardsLightEdge    = true;  V2b, under Visual (it pulses for the line)
-//   bool  RewardsMomentCompile  = true;  moment 4 — line and (later) tone;
+//   bool  RewardsMomentCompile  = true;  moment 4 — line and tone;
 //   bool  RewardsMomentCommit   = true;  moment 5   counted either way while
 //   bool  RewardsMomentTutorial = true;  moment 6   the master is on
 //   bool  RewardsTabCheck     = true;  V4 — siblings of Visual: other places,
 //   bool  RewardsImportHighlight = true; V5  not the footer line
-//   int   RewardsReducedMotion = 0;    0 = follow the system's reduce-motion
+//   bool  RewardsProblemPulse = true;  V8 and V9's failed-node pulse (topic 140)
+//   int   RewardsReducedMotion = 0;   0 = follow the system's reduce-motion
 //                                      setting, 1 = off (full motion). See
 //                                      "Reduced motion" above.
 //   bool  RewardsSound        = false; the tones at all
@@ -315,6 +356,11 @@ struct EditorConfig;
 //   bool  RewardsSoundBuild       = true;  the chime
 //   bool  RewardsSoundBuildFailed = true;  the failed-build tone
 //   bool  RewardsSoundImport      = true;  the pop
+//   bool  RewardsSoundCompile     = true;  compiled clean     (topic 140)
+//   bool  RewardsSoundCompileFailed = true; compile failed
+//   bool  RewardsSoundCommit      = true;  committed / pushed
+//   bool  RewardsSoundTutorial    = true;  tour finished
+//   bool  RewardsSoundProblem     = true;  a new problem, editor in the background
 //                                      Each tone's own switch, under
 //                                      RewardsSound — which is the one that
 //                                      starts off, so a fresh install still
@@ -387,9 +433,12 @@ namespace HE::Ed::Rewards
 	inline constexpr int kSyncCommit = 1;
 	inline constexpr int kSyncPush   = 2;
 
-	// One tone per topic-75 moment, and one for a failed build, which is not a
-	// moment. Moments 4–6 have none yet (see "The tones").
-	enum class Tone { SaveTick, BuildChime, BuildFailed, ImportPop };
+	// One tone per moment, and three that are not moments: a failed build, a
+	// failed compile, a new problem (see "The tones"). Appended in the order
+	// they came: the editor's tone cache is indexed by this.
+	enum class Tone { SaveTick, BuildChime, BuildFailed, ImportPop,
+	                  CompileClean, CompileFailed, Commit, TourDone, Problem };
+	inline constexpr int kToneCount = 9;
 	bool hasTone(Moment m);
 	Tone toneFor(Moment m);   // only meaningful where hasTone(m)
 
@@ -403,6 +452,37 @@ namespace HE::Ed::Rewards
 	// fire(), deferred to the next pollBuild — for a hook that has no
 	// AppContext (see "post()" above). A handful at most; queued in order.
 	void post(Moment m, int count = 1);
+
+	// A tone that belongs to no moment — a failed compile (and the failed build
+	// and the problem tone, from inside this file): the same switches
+	// (toneWanted) and the same gap (takeTone), no line, nothing counted.
+	void sound(AppContext& ctx, Tone t);
+	// sound(), deferred to the next pollBuild, for a hook without an AppContext
+	// (LevelScriptPanel's failed compile). Same cap and order as post().
+	void postSound(Tone t);
+
+	// V8 and the problem tone, once per frame from the footer bell with the
+	// newest Problem entry's whenMs in the snapshot it draws from (0: none).
+	// A rise is a new problem: its tone (only without focus, at most every
+	// kProblemToneGapSec) and the bell's ring. The stamp has millisecond
+	// resolution: a second problem within the same millisecond as one already
+	// seen is no rise — it would have rung inside the first one's ring and
+	// tone gap anyway. Returns how long the ring has
+	// been running, or < 0 while there is none (or Problem Pulse is off).
+	double problemSeen(AppContext& ctx, unsigned long long newestProblemMs);
+	// The ring around the bell's box (x0, y0)–(x1, y1), `age` s into it, in
+	// `col` (an ImU32). Nothing once it has run out.
+	void drawProblemRing(float x0, float y0, float x1, float y1, double age, bool reduced,
+	                     unsigned int col);
+
+	// V9, for the HorizonCode graphs' Compile readout (no AppContext there; the
+	// switches as the last pollBuild saw them). compileCheck: how much of the
+	// check is written `age` s after a clean compile, or < 0 to keep the
+	// static icon (Visual Cues or Check Mark off). errorPulse: the failed
+	// node's halo, 0..1 brighter over kPulseSec after the compile, 0 with
+	// Problem Pulse off.
+	float compileCheck(double age);
+	float errorPulse(double age);
 
 	// Once per frame, with BuildProgressDialog::outcome(): fires BuildSucceeded
 	// for each run serial that finished successfully and plays the failed-build
@@ -472,6 +552,8 @@ namespace HE::Ed::Rewards
 	inline constexpr double kImportFadeSec  = 0.8;    // V5: …then gone
 	inline constexpr double kImportWindowSec = 30.0;  // V5: to come on screen at all
 	inline constexpr int    kRecentDays     = 7;      // the tooltip's days
+	inline constexpr double kProblemToneGapSec = 30.0; // between two problem tones
+	inline constexpr double kPulseSec       = 0.6;    // V8 ring, V9 node pulse
 
 	// What the footer says for a moment. count only matters for imports and
 	// for Committed (its flags).
@@ -491,8 +573,9 @@ namespace HE::Ed::Rewards
 	int rankOf(Moment m);
 
 	// Rule 6: may this tone sound at all? Master, Sound, not muted, the tone's
-	// own switch, volume > 0, not during Play, and for the two build tones no
-	// editor window focused. The Feed's merging, rank and gaps come after.
+	// own switch, volume > 0, not during Play, and for the two build tones,
+	// the commit tone and the problem tone no editor window focused. The
+	// Feed's merging, rank and gaps come after.
 	bool toneWanted(const EditorConfig& cfg, Tone t, bool playing, bool appFocused);
 
 	// Whether any tone could play under these switches — what keeps the
@@ -600,6 +683,39 @@ namespace HE::Ed::Rewards
 	// from its middle), alpha one soft pulse to 0 at kEdgeSec. Reduced: none.
 	struct Edge { float spread = 0.0f; float alpha = 0.0f; };
 	Edge edgeAt(double age, bool reduced);
+
+	// V8: the bell's ring `age` s in — grow 0 → 1 (how far out of the bell's
+	// box it has moved, in units of the box's half-height) and alpha one
+	// pulse to 0 at kPulseSec. Reduced: it stays where it starts and only
+	// fades — fading is not motion.
+	struct Ring { float grow = 0.0f; float alpha = 0.0f; };
+	Ring ringAt(double age, bool reduced);
+
+	// V9: one soft bump, 0 → 1 quickly and back to 0 at kPulseSec; 0 outside.
+	// A colour change, not motion: the same with reduced motion.
+	float pulseAt(double age);
+
+	// V8's edge and the problem tone's own gap, ImGui-free. observe() every
+	// frame with the newest Problem entry's stamp (0 = none): true once per
+	// rise. The first stamp it ever sees is where it starts, never a rise.
+	class ProblemWatch
+	{
+	public:
+		bool observe(unsigned long long newestMs);
+		// kProblemToneGapSec since the last problem tone that played?
+		// A clock behind the last tone is a new clock, not a gap.
+		bool toneDue(double now) const
+		{
+			return !m_toned || now < m_toneAt || now - m_toneAt >= kProblemToneGapSec;
+		}
+		void tonePlayed(double now) { m_toned = true; m_toneAt = now; }
+
+	private:
+		bool               m_known  = false;
+		unsigned long long m_last   = 0;
+		bool               m_toned  = false;
+		double             m_toneAt = 0.0;
+	};
 
 	// V3: one counter. observe() every frame with the counter's value; a rise
 	// becomes a PENDING tick that start() — the frame the counters are on
@@ -753,6 +869,13 @@ namespace HE::Ed::Rewards
 	std::vector<uint8_t> buildFailedPcm16(int sampleRate);
 	// Import: I1, the pop.
 	std::vector<uint8_t> importPopPcm16(int sampleRate);
+	// Topic 140: compiled clean (C#6 → E6), compile failed (E6 → C#6),
+	// committed (A5 C#6 E6), tour finished (A5 E6 F#6), problem (B5 twice).
+	std::vector<uint8_t> compileCleanPcm16(int sampleRate);
+	std::vector<uint8_t> compileFailedPcm16(int sampleRate);
+	std::vector<uint8_t> commitPcm16(int sampleRate);
+	std::vector<uint8_t> tourDonePcm16(int sampleRate);
+	std::vector<uint8_t> problemPcm16(int sampleRate);
 	// The one for `t`.
 	std::vector<uint8_t> tonePcm16(Tone t, int sampleRate);
 }

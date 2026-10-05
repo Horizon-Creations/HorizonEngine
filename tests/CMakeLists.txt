@@ -672,6 +672,9 @@ add_executable(he_tests
     # The reward moments it fires (EditorRewards.h), and test_editor_rewards.cpp:
     # same AppContext, same per-file HE_IMGUI_ENABLED.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
+    # The footer bell, so test_editor_rewards.cpp can draw the real one and its
+    # problem ring (V8) from a real NotificationStore (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
@@ -726,6 +729,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     test_editor_rewards.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp

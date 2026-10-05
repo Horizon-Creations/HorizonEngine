@@ -635,7 +635,14 @@ GraphEditor::Model buildModel(const Host& h)
 	// The error wins where both apply — a broken node running is still broken.
 	m.nodeOutline = [&h](int id) -> ImU32
 	{
-		if (h.errorNode != 0 && id == h.errorNode) return IM_COL32(230, 70, 70, 255);
+		if (h.errorNode != 0 && id == h.errorNode)
+		{
+			// V9: brighter toward a pale red and back, once — the hue stays,
+			// so it reads as the same halo drawing the eye, not a new state.
+			const float p = std::clamp(h.errorPulse, 0.0f, 1.0f);
+			return IM_COL32(230 + (int)(25.0f * p), 70 + (int)(120.0f * p),
+			                70 + (int)(110.0f * p), 255);
+		}
 		if (h.traceKey.empty()) return 0;
 		// The node a run is STOPPED at: a solid marker that stays until the
 		// run moves on — a program counter does not fade. Yellow, not the
