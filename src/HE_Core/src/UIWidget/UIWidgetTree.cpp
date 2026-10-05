@@ -2131,7 +2131,8 @@ int uiApplyWidgetParams(UIWidgetTree& tree,
     return written;
 }
 
-bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
+bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
+                          UIWidgetParamRead paramRead)
 {
     nlohmann::json j;
     if (!HE::graph::parseGraphObject(json, j)) return false;
@@ -2158,8 +2159,11 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
             p.property  = o.value("prop", std::string());
             p.help      = o.value("help", std::string());
             // A declaration missing either half names nothing and would be a
-            // row in the host's panel that writes into the void.
-            if (p.name.empty() || p.property.empty() || p.elementId <= 0) continue;
+            // row in the host's panel that writes into the void — unless this
+            // is the author's own document, where it is a row still being
+            // filled in (see UIWidgetParamRead).
+            if (paramRead == UIWidgetParamRead::DropUnfinished &&
+                (p.name.empty() || p.property.empty() || p.elementId <= 0)) continue;
             t.params.push_back(std::move(p));
         }
 
