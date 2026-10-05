@@ -253,8 +253,9 @@ public:
     //
     // Chains (A bound to B bound to C) settle within one call; a cycle stops
     // after kMaxBindRounds rounds with one warning and continues next frame.
-    // Returns how many variables were written, so an event-driven host knows
-    // whether to redraw (0 = nothing moved).
+    // Returns how many variables were written plus how many rounds ran change
+    // handlers (Notify on Change, below), so an event-driven host knows whether
+    // to redraw (0 = nothing moved and nothing ran).
     int exchangeState();
     // Each binding of `id`, for tests and tools: where it looks now (`boundTo`,
     // 0 while it rests or waits for a null reference) and why it rests (`why`,
