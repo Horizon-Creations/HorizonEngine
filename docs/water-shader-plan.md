@@ -1,6 +1,6 @@
 # Wasser-Shader als Engine-Material — Plan (Thema 152)
 
-Stand 2026-10-05, Schritt 1 (Bestandsaufnahme), auf Bitte des Leitstands vor Abschnitt 3 beendet. Nichts am Renderer geändert.
+Stand 2026-10-05, Schritt 1 (Bestandsaufnahme), vollständig. Nichts am Renderer geändert; Abschnitt 3 nennt Renderer-Fehler, die spätere Schritte beheben müssen.
 
 Ziel: ein Wasser-Material als Engine-Content, gebaut als Material-Node-Graph, auf allen
 fünf Backends über die bestehende Graph-Shader-Pipeline, mit vollem Parametersatz im
@@ -94,16 +94,95 @@ Der Graph liefert nur die Attribute (Unreal-Modell), die Beleuchtung macht die E
 
 ## 3. Befund: Transparenz/Blend pro Backend
 
-**Offen — Schritt 1 wurde auf Bitte des Leitstands vor diesem Abschnitt beendet.**
-Fest steht nur: `MatBlendMode::Translucent` existiert und leitet ins sortierte
-Alpha-Blend-Pass (`MaterialGraph.h:174`), und `heLitP` hängt die Himmelsreflexion an
-`heLight.fog.z` (laut Kommentar `MaterialShaderLibrary.cpp:675–680` setzte Vulkan `fog.z`
-zumindest früher nicht). Noch zu belegen, pro Backend mit Datei:Zeile: Gibt es den
-Translucent-Pass für **Graph**-Materialien? Blendfaktoren, Depth-Write aus/-Test an? Läuft
-er mit Lit-Preamble (`heSkyEnv`, SSR, CSM)? Im Deferred-Pfad nach dem Resolve forward
-gezeichnet? Wird `fog.z` und `sunDir.w` (Zeit) überall gesetzt? Welche Bindungen/Slots
-sind frei für SceneColor/SceneDepth (Metal-Fragment ist am 16-Sampler-Limit, HLSL-SM5-Pin-
-Tabelle in `MaterialShaderLibrary::fragment`)? Wie macht `Backdrop` das im UI-Pass?
+Alles aus dem Code gelesen, nichts auf Hardware gelaufen. Abkürzungen: M =
+`Backends/Metal/MetalRenderer.mm`, G = `Backends/OpenGL/OpenGLRenderer.cpp`,
+D11/D12 = `Backends/D3D11/D3D11Renderer.cpp` / `Backends/D3D12/D3D12Renderer.cpp`,
+V = `Backends/Vulkan/VulkanRenderer.cpp`, MSL = `material/MaterialShaderLibrary.cpp`
+(alle unter `src/HE_Rendering/src/`).
+
+**Weg ins Blend-Pass (alle fünf gleich):** einsortiert wird nach Deckkraft, nicht nach
+`blendMode`. `blendMode == 2` kappt die Deckkraft auf 0.998 (`MaterialScalars.cpp:21`, Metal
+M:9118, GL G:8415), `RenderSorter::isTransparent` (< 0.999, `RenderSorter.h:18,28`) legt den
+Draw dann in die Transparent-Liste. Ein Translucent-Graph landet also auch bei Opacity 1
+immer dort.
+
+| | Metal | OpenGL | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|---|---|
+| Translucent-**Graph** mit eigenem Shader | ja, `EncodeScene` M:14081–14143, PSO aus `GetOrBuildMaterialPipeline(blend=true)` M:12212 | ja, G:12173–12239 (`t.matProg`) | ja, `drawDC` D11:6573–6792, Schleife :6947 | ja, `drawDC12` D12:10132–10314, Schleife :10590 | ja, `drawDCVk` V:7045, Schleife V:7466 |
+| Sortierung | hinten→vorn nach Objektursprung, pro Instanz, nicht stabil (M:14085) | hinten→vorn pro Instanz (G:12175) | hinten→vorn nach Ursprung (D11:6542) | dto. (D12:10098) | dto. (V:7029) |
+| Blend | SrcAlpha / 1−SrcAlpha, nicht vormultipliziert | dto. (G:12178) | dto. (D11:4206–4216) | dto., im PSO (D12:8688–8703) | dto., Alpha ONE/ZERO (V:2946–2955) |
+| Depth | Test LessEqual, Write aus (M:7220) | Test LESS, Write aus (G:12180) | LESS, Write aus (D11:4196) | LESS, Write aus | LESS, Write aus (V:2938) |
+| Culling | keins (nie gesetzt) | keins | CULL_NONE (D11:4218) | CULL_NONE (D12:8686) | CULL_NONE (V:2932) |
+| `sunDir.w` = Zeit | ja (M:14167) | ja (G:11106) | ja (D11:6063) | ja (D12:9620) | ja (V:6842) |
+| `fog.z` / Himmels-Cube | ja (M:14245) | ja im Fill (G:11121), **aber siehe Fehler unten** | ja, t15 (D11:6155, :6702) | ja (D12:9708, :10229) | ja, Binding 15 (V:6919, :7266) |
+| Forward-SSR (`ssr.x`) | nur Forward-Pfad (M:14178); deferred 0 | nur Forward (G:11148); deferred aus | 0, absichtlich (D11:6137) | 0, nie gesetzt | ja (V:6908) |
+| Deferred-Pfad | ja; Translucent danach forward in `m_hdrColor`, vor Post/TAA (M:13621, :16365) | ja; dto. in `m_hdrFBO` (G:12173 nach Resolve) | keiner | keiner | keiner (V:6903) |
+| Szenenfarbe/-tiefe lesbar im Translucent-Pass | **nein**: rendert in `m_hdrColor`/`m_hdrDepth`; nur Deferred-Zweipass hat `m_gbDepth` lesbar (nur G-Buffer-Opaque) | **nein**: rendert in `m_hdrFBO`; deferred `m_gbDepthTex` lesbar (nur G-Buffer-Opaque) | **nein**; Tiefen-SRV existiert (`viewportDepthSRV`), braucht aber Unbind/Copy wie bei Decals (D11:4809) | **nein**; Tiefen-SRV für Decals, braucht Zustandswechsel/Copy (D12:8970) | **nein**; ein einziger Render-Pass mit Sky…Translucent…Skinned (V:3862, :744–746) |
+
+`doubleSided` wird auf **keinem** Backend gelesen, alles ist zweiseitig. Für eine
+Wasserfläche passt das. Die einzige vorhandene Farbkopie ist überall die SSR-History
+(`CaptureSSRColorHistory`): das **vorige** Bild **mit** Transparenz, und nur bei aktivem
+SSR. Für Refraktion taugt sie nicht (das Wasser sähe sich selbst).
+
+**Fehler und Fallen, die das Wasser direkt treffen:**
+
+1. **OpenGL forward: der Translucent-Graph bekommt kein frisches `HeLighting`.** Der
+   Translucent-Zweig bindet `m_matLightUBO` nur (G:12205), er lädt ihn nie hoch. Hochgeladen
+   wird nur im Deferred-Pfad (G:11204) oder im **opaken** Custom-Material-Draw (G:11582,
+   Dedupe-Flag zurückgesetzt bei G:11189). Ist das Wasser das einzige Graph-Material im
+   Bild, liest es den Stand vom Vorbild, vom UI-Pass (G:7523, `fog.z = 0`) oder von der
+   Material-Vorschau (G:8578, `sunDir.w = 0` → **keine Animation**). Die Units 13–17
+   (Weightmap, Himmels-Cube, AO, DDGI) bindet ebenfalls nur der opake Zweig
+   (G:11641–11661). Selbst nachgelesen. Ohne Fix ist das Wasser auf GL forward im
+   Zweifel still und spiegelt den Himmel nicht. Das ist eine Renderer-Änderung (nicht in
+   diesem Schritt).
+2. **GL: keine Sampler-Grenze geprüft.** Material-Programme nutzen Units bis 20 (G:3777–3826).
+   macOS-GL 4.1 meldet typischerweise 16 Fragment-Units. Nichts im Code fragt
+   `GL_MAX_TEXTURE_IMAGE_UNITS` ab. Ungeprüft, ob das heute stört; neue Sampler würden es
+   verschärfen.
+3. **Metal und GL: Graph-Texturen bleiben auf Slot 1–4 liegen** (M:14119–14124,
+   G:12211–12215). Ein **eingebautes** transparentes Material, das danach kommt, liest dort
+   CSM/Cube/AO und bekommt die falschen Texturen. Ungeprüft zur Laufzeit.
+4. **Vulkan: Skinned-Meshes werden nach den Transparenten gezeichnet** (V:7481). Eine
+   Figur hinter dem Wasser malt sich über die Wasserfläche.
+5. **Deferred (Metal/GL): Wasser bekommt keine SSR**, weil das Deferred-Reflexions-
+   Composite vor dem Forward-Schwanz läuft (M:16318) bzw. SSR deferred aus ist (G:10825).
+   Es spiegelt dann nur den Himmels-Cube.
+6. **SSAO auf Wasser** (Schluss, nicht getestet): bei `fog.w = 1` multipliziert `heLitP` das
+   Ambient mit dem AO des opaken Grunds hinter dem Pixel (MSL:727–738).
+7. Der Kommentar MSL:675–680 („Vulkan setzt `fog.z` nie") ist **veraltet**; Vulkan setzt es
+   heute (V:6919, Fix dokumentiert V:2651).
+
+**Was SceneColor/SceneDepth kosten würden (für das Renderer-Thema):**
+
+- **Schnitt im Pass:** vor der Transparent-Schleife Pass beenden, Farbe und Tiefe kopieren,
+  mit Load weitermachen. Vorbild ist `Backdrop` im UI-Pass: GL `snapshotBackdrop`
+  (`glCopyTexSubImage2D`, G:7445–7484), Metal `cutForBackdrop` (M:12907–12925). Vulkan
+  braucht eine Load-Variante von `m_postFxSceneRP` (Load/Store-Ops brechen die
+  Pipeline-Kompatibilität nicht, V:3870); `CaptureSSRColorHistory` (V:11951) ist die
+  Vorlage für Kopie + Barrieren. Vulkan und D3D haben im UI-Pass gar keinen
+  Backdrop-Pfad, also auch kein Vorbild für die Kopie.
+- **Bindungsnummern:** 34 = Szenenfarbe, 35 = Szenentiefe sind in MSL und MaterialGraph
+  frei. 19–23 und 27–30 sind im Material-Fragment frei, aber in Geschwister-Shadern
+  (Resolve, SSR, Decals) belegt, und `heSceneColor` ist als Name im SSR-Trace vergeben.
+- **Sampler sind der Engpass, nicht Bindungen:** Metal hat 16/16 Sampler belegt
+  (MSL:2500–2563; freie Texture-Slots 17–30 nur mit Inline-Constexpr-Sampler wie Binding 33,
+  MSL:1311). HLSL SM5 hat 16/16 s-Register belegt (`kHlslMaterialPins` MSL:2639–2659). Also
+  per `texelFetch` lesen (HLSL `Load`), den toten Sampler auf ein belegtes Register legen wie
+  heAO→s0. **Folge:** Refraktion nur punktgesampelt, ohne Bilinear.
+- **Stellen pro Backend:** Vulkan `VulkanMaterialLayout.h` `kBindings` (vor den
+  Cluster-Zeilen) + Draw-Writes V:7196–7327 (`static_assert` V:7308) + Reflexions-Test
+  `tests/test_material_graph.cpp:3115+`. Metal-Pin-Tabelle MSL:2500ff. HLSL-Pins +
+  `D3D11MaterialBindings.h` + `D3D12MaterialRootSignature.h` (`kSrvPerDraw` 17→19, neue
+  Range, Null-Views D12:8366). GL Units per Name in `setupProgram` (G:3777ff., ab 21 frei,
+  siehe Falle 2). Codegen: Sampler nur deklarieren, wenn ein Knoten sie nutzt (wie
+  `heLandscapeWeights`, MaterialGraph.cpp:1214).
+- **Screen-UV:** `gl_FragCoord.xy / heLight.giParams.xy` wie `heSSRFwd` (MSL:704). Da die
+  Kopie das eigene Render-Target ist, sollte der Ursprung überall passen (begründet,
+  nicht getestet).
+
+Nebenbefund (nicht Wasser): das Vulkan-Layout hat **kein Binding 14**, der Codegen
+deklariert dort `heLandscapeWeights` (MaterialGraph.cpp:1220). Das ist Thema 143.
 
 ---
 
@@ -202,8 +281,14 @@ ausgeschlossenen Unterwasser-Teil.
 
 ## 7. Folgen für die nächsten Schritte
 
-- **Vor Schritt 2:** Abschnitt 3 nachziehen (Backend-Tabelle). Davon hängt ab, ob ein
-  Translucent-Graph-Wasser auf allen fünf Backends überhaupt gezeichnet und gespiegelt wird.
+- **Translucent-Graph läuft heute auf allen fünf Backends** (Abschnitt 3). Ein Wasser ohne
+  SceneColor/SceneDepth braucht für die Grundfunktion keinen neuen Pass.
+- **Vor dem GL-Screenshot (Schritt 3/4) muss Fehler 1 aus Abschnitt 3 behoben sein:** im
+  GL-Translucent-Zweig `HeLighting` hochladen (Dedupe-Flag beachten) und Units 13–17 binden,
+  wie im opaken Zweig. Kleine Renderer-Änderung, eigener Schritt oder Teil von Schritt 3.
+  Sonst animiert das Wasser auf GL forward nicht und spiegelt keinen Himmel, wenn es das
+  einzige Graph-Material im Bild ist. Bis dahin GL-Bildläufe mit Deferred-Pfad oder mit einem
+  zweiten, opaken Graph-Material in der Szene (verdeckt den Fehler nur!).
 - **Schritt 2 ohne Renderer machbar:** `mat_gen` + `Water.hasset` + Konstante in
   `DefaultAssets.h`; Graph mit Wellen aus `WorldPos.xz`, prozeduraler oder Normalmap-Normale,
   Fresnel-Farbmischung, lit + Translucent, Parametern nach Abschnitt 5. Dazu Inspector-
