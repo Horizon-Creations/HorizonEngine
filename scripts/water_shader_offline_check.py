@@ -69,7 +69,10 @@ class Report:
             self.passed.append(what)
             print(f"  ok   {what}")
             if self.verbose and out.strip():
-                print("       " + "\n       ".join(out.strip().splitlines()[-3:]))
+                # A warning's own line names it; the last lines are only the caret.
+                lines = out.strip().splitlines()
+                shown = [l for l in lines if "warning" in l.lower()][:6] or lines[-3:]
+                print("       " + "\n       ".join(shown))
         else:
             self.failed.append(what)
             lines = [l for l in out.splitlines() if "error" in l.lower()] or out.splitlines()

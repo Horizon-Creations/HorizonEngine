@@ -397,12 +397,18 @@ Negativkontrolle. NN-WS03, 2026-10-05: **13 bestanden, 0 fehlgeschlagen, 1 über
   Graph-Material); FXC rollt ab und baut.
 - MoltenVK, erste Hälfte: `spirv-cross --msl --msl-version 20100` über das Vulkan-SPIR-V
   (Vertex, Fragment, geclustert); 11 Fragment-Sampler, unter Metals 16.
-- **`xcrun metal` nicht gelaufen** (kein Mac). Auf einem Mac:
-  `python3 scripts/water_shader_offline_check.py --require-msl` übersetzt das Engine-MSL
-  (forward, geclustert, G-Buffer, Vertex und das in der Datei gebackene Fragment) und das
-  MoltenVK-MSL mit `metal -c`. Der
-  macOS-Job in `ci.yml` ruft genau das nach dem Abruf der Metal-Toolchain auf; er läuft auf
-  `main`, in PRs und per `gh workflow run CI --ref <zweig>`.
+- FXC-Warnungen X3556 (Integer-Modulo/-Division) und X3570 stammen alle aus der Preamble.
+- **`xcrun metal`: grün in CI** (Lauf 37347421486, macOS-Job, Apple metal 32023.883, Commit
+  62e6a410). Negativkontrolle abgelehnt, dann `metal -c` ok für Vertex, forward, geclustert,
+  G-Buffer und das in der Datei gebackene Fragment (5/5). Der G-Buffer meldet eine Warnung
+  (Art im Log abgeschnitten, das Skript zeigt Warnungszeilen seither ganz). Die regenerierten
+  Varianten kamen dort aus clang, das gebackene Fragment aus der MSVC-Datei; beide bauen.
+  Das MoltenVK-MSL lief dort nicht durch `metal -c`, weil `spirv-cross` auf dem Runner fehlt.
+  Auf einem Mac mit Vulkan SDK übersetzt `python3 scripts/water_shader_offline_check.py
+  --require-msl` beides. Der macOS-Job in `ci.yml` ruft das nach dem Abruf der
+  Metal-Toolchain auf, auf `main`, in PRs und per `gh workflow run CI --ref <zweig>`.
+- Im selben Lauf liefen die neuen he_tests-Fälle zum ersten Mal unter clang und gcc: macOS
+  237/237, Linux (GCC 13.3) grün, Windows 238/238, lavapipe-Bildtests grün.
 
 ### 8.3 Auf echter GPU (Rauchtest, keine Abnahme)
 
@@ -446,8 +452,9 @@ Schritt 4 gedacht.
 
 ### 8.5 Offen und Nebenbefunde
 
-- **Metal:** kein `xcrun metal`, kein Bild. Bis ein Mac oder der macOS-CI-Job läuft, ist das
-  Engine-MSL nur von SPIRV-Cross erzeugt und textlich geprüft.
+- **Metal:** Das Kompilat ist belegt (§8.2, CI). Ein Bild gibt es noch nicht, weder Editor
+  noch Spiel: das ist Schritt 4. Der Metal-Pfad des Editors ist nie mit dem Wasser
+  gelaufen. MoltenVK: nur übersetzt (`spirv-cross --msl`), nicht kompiliert.
 - **Vulkan 1.0:** `he::shaderc` erzeugt SPIR-V 1.5 (Vulkan 1.2), `VulkanRenderer` fällt bei einem
   Loader unter 1.2 auf eine 1.0-Instanz zurück, und `spirv-val --target-env vulkan1.0` lehnt
   dieselben Module ab. Das betrifft jeden Shader aus `he::shaderc`, nicht das Wasser. Ob ein
