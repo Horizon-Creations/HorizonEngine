@@ -52,7 +52,7 @@ Die Szenen erzeugt `scripts/perf/gen_reference_world.py`. Das Ergebnis ist deter
 | 10 000 | 10 168 | 5,9 MB |
 | 50 000 | 50 568 | 27,9 MB |
 | 100 000 | 101 068 | 55,3 MB |
-| 200 000 | 202 068 | ~110 MB |
+| 200 000 | 202 068 | 110,2 MB |
 
 ## 3. Messwerte
 
@@ -63,8 +63,8 @@ Die Szenen erzeugt `scripts/perf/gen_reference_world.py`. Das Ergebnis ist deter
 | 1 078 | 24,7 ms | 9,4 ms | 37,1 ms | 0,02 ms | 0,8 ms | 533 ms | 571 ms |
 | 10 168 | 176,5 ms | 69,2 ms | 280,2 ms | 0,02 ms | 1,1 ms | 577 ms | 859 ms |
 | 50 568 | 831,3 ms | 323,0 ms | 1 313,6 ms | 0,02 ms | 2,7 ms | 576 ms | 1 892 ms |
-| 101 068 | _folgt_ | | | | | | |
-| 202 068 | _folgt_ | | | | | | |
+| 101 068 | 1 577,1 ms | 628,8 ms | 2 495,4 ms | 0,02 ms | 4,6 ms | 581 ms | 3 081 ms |
+| 202 068 | 3 264,0 ms | 1 404,7 ms | 5 255,5 ms | 0,02 ms | 11,1 ms | 581 ms | 5 847 ms |
 
 ¹ `load` ist der Aufruf `SceneSerializer::load` von außen. Der Rest über parse + build hinaus
 (34 ms bei 10k, 159 ms bei 50k, also ~12 %) ist das Freigeben des nlohmann-JSON-Baums am
@@ -88,14 +88,15 @@ nur eingebaute Meshes benutzt. Mit echten Assets wäre das anders (siehe 4.2).
 | 1 078 | 8,6 ms | 73,5 ms⁴ | 347 MB | 2,1 | 0,9 | 0,8 | 0,9 | 0,6 | 0,15 |
 | 10 168 | 64,4 ms | 81,0 ms | 432 MB | 19,7 | 6,5 | 6,5 | 6,8 | 5,1 | 0,6 |
 | 50 568 | 322,5 ms | 346,3 ms | 1 154 MB | 104,9 | 35,3 | 35,3 | 34,3 | 25,2 | 3,2 |
-| 101 068 | _folgt_ | | | | | | | | |
-| 202 068 | _folgt_ | | | | | | | | |
+| 101 068 | 662,2 ms | 1 490 ms⁵ | 2 126 MB | 219,9 | 78,4 | 77,8 | 69,9 | 49,9 | 8,4 |
+| 202 068 | 1 312,7 ms | 2 335 ms⁵ | 4 149 MB | 411,0 | 154,2 | 150,5 | 140,7 | 110,8 | 18,7 |
 
 ³ Summe pro Frame über alle Aufrufe. `RenderExtractor::extract` läuft **4× pro Frame**
 (2 399 Aufrufe in 600 Frames).
 ⁴ Die p99 bei 1k kommt von NextDrawable unter Bildschirmsperre. Das ist kein Engine-Hänger.
+⁵ Bei 100k und 200k nur 120 Frames (`FRAMES=120`). Die p99 sind dort die Frames 0/1 (3.4).
 
-Die Kosten wachsen linear: von 10k auf 50k sind es **6,45 µs pro Entity und Frame**. Die Scopes
+Die Kosten wachsen linear bis 200k: **6,45 µs pro Entity und Frame** von 10k auf 50k, 6,5 µs von 100k auf 200k. Die Scopes
 oben erklären etwa 190 ms der 322 ms. Den Rest trägt `OnRender` als Eigenzeit (166 ms bei 50k), und
 die hat der Time Profiler aufgeschlüsselt (3.3).
 
@@ -124,7 +125,8 @@ keinen Outliner, Extraktion und Hierarchie-Lauf trägt sie aber genauso.
 - Ab Frame 2 laufen die Frames gleichmäßig. Die Referenzwelt löst keinen weiteren Nachlade-Hänger
   aus: die Meshes sind eingebaut, und das Terrain wird beim Laden einmal gebaut.
 - Gemessen bis zum fertigen Laden plus 2 Frames sind das bei 1k Entities **~1,9 s** (warmer Cache),
-  bei 50k **~3,9 s**.
+  bei 50k **~3,9 s**, bei 100k ~6,1 s und bei 200k ~10,6 s. Frame 0/1 wachsen ab 100k mit, weil
+  dann der Frame selbst schon über 0,6 s kostet.
 
 ### 3.5 Weltgrenzen: Float-Präzision (`scripts/perf/float_precision_probe.cpp`)
 
@@ -174,7 +176,7 @@ Die Netzwerk-Quantisierung nimmt `worldExtent = 4096 m` an (`ProjectSettings.h:3
 - Linear zwischen 1k und 10k interpoliert liegt sie bei **≈ 5 000 Entities**.
 - Für 60 FPS (16,7 ms) liegt sie bei ≈ 2 300.
 - Bei 50k läuft der Editor mit 3 FPS.
-- Was bei 100k und 200k passiert, steht in 3.1/3.2.
+- **Eine harte Wand gibt es bis 200k nicht.** 202 068 Entities laden in 5,3 s und laufen ohne Absturz, aber mit 0,76 FPS (1,31 s CPU pro Frame) und 4,1 GB RSS. Die Obergrenze ist allein die lineare Kurve pro Frame. Nach RSS (~20 KB pro Entity im Editor) wäre bei 24 GB etwa bei 1 Mio. Schluss, ungefähr dort, wo auch die EnTT-Grenze liegt.
 
 ## 4. Wo heute gestreamt wird (Bestandsaufnahme)
 
@@ -337,8 +339,8 @@ Präzisionsgrenze.
     Editor **und** Spiel.
   - `SceneOpenTiming: loadMs= prefabSyncMs= preloadMs= warmupMs= totalMs=` im Startpfad des
     Editors.
-- Rohdaten: `docs/perf-audit/raw-streaming/*.summary.json` und `*.log`. Die Profil-Dumps
-  (6–10 MB) sind nicht eingecheckt.
+- Rohdaten: `docs/perf-audit/raw-streaming/*.summary.json`. Die Logs schließt die Repo-`.gitignore`
+  aus, die Profil-Dumps (6–10 MB) die `.gitignore` im Ordner. Die Timing-Zeilen stehen oben in 3.1.
 
 ```sh
 # Release-Build im Worktree (Deps vom Nachbar-Build, siehe Memory headless-dump-log-and-worktree-configure)
