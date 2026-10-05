@@ -18,8 +18,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <set>
 #include <string>
@@ -325,6 +327,104 @@ TEST_CASE("Engine water material: the editor's shader and the shipped one cross-
 		CHECK_MESSAGE(SUCCEEDED(hr), std::string(src.what), ": ", log);
 	}
 #endif
+}
+
+// ═══ Backend parity (Thema 152, Schritt 3) ════════════════════════════════════
+// The case above asks SPIRV-Cross whether the water translates. What follows
+// asks each backend's own judge whether it would BUILD it, the way the renderer
+// does — the clustered twin included, because D3D11/D3D12/Vulkan/GL 4.3 build
+// fragmentClustered first and only fall back to fragment() when it fails.
+//
+// The dump case writes every variant to disk for the SDK tools
+// (scripts/water_shader_offline_check.py runs glslangValidator, spirv-val, fxc
+// and, on a Mac, xcrun metal over it). It does nothing unless
+// HE_DUMP_WATER_SHADERS names a directory.
+namespace
+{
+struct WaterSources
+{
+	std::string frag;  // regenerated forward fragment (what the editor draws)
+	std::string gbuf;  // regenerated G-buffer fragment
+	std::string baked; // forward fragment as committed in the file (what an export ships)
+	std::vector<std::string> paramNames;
+	std::vector<uint8_t>     paramTypes;
+	std::vector<float>       paramData;
+	bool ok = false;
+};
+WaterSources loadWaterSources(const char* tag)
+{
+	WaterSources w;
+	Scratch s(tag);
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const MaterialAsset* m = cm.getMaterial(cm.loadAsset(kWaterPath));
+	const Baked b = readBaked(engineRoot() / "Materials" / "Water.hasset");
+	if (!m || !b.ok) return w;
+	w.frag       = m->customShaderFragGlsl;
+	w.gbuf       = m->customShaderGBufGlsl;
+	w.baked      = b.frag;
+	w.paramNames = m->graphParamNames;
+	w.paramTypes = m->graphParamTypes;
+	w.paramData  = m->shaderParamData;
+	w.ok = !w.frag.empty() && !w.gbuf.empty() && !w.baked.empty();
+	return w;
+}
+uint64_t srcHash(const std::string& s) { return std::hash<std::string>{}(s); }
+} // namespace
+
+TEST_CASE("Engine water material: dump every backend's shader for the offline compilers (HE_DUMP_WATER_SHADERS)")
+{
+	const char* dir = std::getenv("HE_DUMP_WATER_SHADERS");
+	if (!dir || !*dir)
+	{
+		MESSAGE("HE_DUMP_WATER_SHADERS not set — nothing dumped (scripts/water_shader_offline_check.py sets it)");
+		return;
+	}
+	const WaterSources w = loadWaterSources("dump");
+	REQUIRE(w.ok);
+	const fs::path out(dir);
+	fs::create_directories(out);
+	auto put = [&](const char* name, const std::string& text) {
+		std::ofstream f(out / name, std::ios::binary);
+		f.write(text.data(), static_cast<std::streamsize>(text.size()));
+		REQUIRE_MESSAGE(f.good(), "could not write ", (out / name).string());
+	};
+	auto putSpv = [&](const char* name, const std::vector<uint32_t>& words) {
+		std::ofstream f(out / name, std::ios::binary);
+		f.write(reinterpret_cast<const char*>(words.data()), static_cast<std::streamsize>(words.size() * 4));
+		REQUIRE_MESSAGE(f.good(), "could not write ", (out / name).string());
+	};
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	auto need = [](const HE::MaterialShaderLibrary::Compiled& c, const char* what) -> const HE::MaterialShaderLibrary::Compiled& {
+		REQUIRE_MESSAGE(c.ok, what, ": ", c.log);
+		return c;
+	};
+	const uint64_t hf = srcHash(w.frag), hg = srcHash(w.gbuf);
+	put("water_frag.glsl", w.frag);
+	put("water_gbuf.glsl", w.gbuf);
+	// GL 4.1 (macOS) and ES 3.0: the plain pair; GL 4.3: the clustered pair.
+	put("gl410.vert",           need(lib.standardVertex(B::GLSL410), "GL410 vertex").source);
+	put("gl410.frag",           need(lib.fragment(hf, w.frag, B::GLSL410), "GL410 fragment").source);
+	put("gl410_gbuf.frag",      need(lib.fragment(hg, w.gbuf, B::GLSL410), "GL410 G-buffer").source);
+	put("es300.vert",           need(lib.standardVertex(B::GLSLES300), "ES300 vertex").source);
+	put("es300.frag",           need(lib.fragment(hf, w.frag, B::GLSLES300), "ES300 fragment").source);
+	put("gl430.vert",           need(lib.standardVertex(B::GLSL430), "GL430 vertex").source);
+	put("gl430_clustered.frag", need(lib.fragmentClustered(hf, w.frag, B::GLSL430), "GL430 clustered").source);
+	// D3D11/D3D12: one HLSL (SM 5.0) for both.
+	put("hlsl_vert.hlsl",           need(lib.standardVertex(B::HLSL), "HLSL vertex").source);
+	put("hlsl_frag.hlsl",           need(lib.fragment(hf, w.frag, B::HLSL), "HLSL fragment").source);
+	put("hlsl_frag_clustered.hlsl", need(lib.fragmentClustered(hf, w.frag, B::HLSL), "HLSL clustered").source);
+	// Vulkan: SPIR-V words.
+	putSpv("vk_vert.spv",           need(lib.standardVertex(B::SpirV), "SPIR-V vertex").spirv);
+	putSpv("vk_frag.spv",           need(lib.fragment(hf, w.frag, B::SpirV), "SPIR-V fragment").spirv);
+	putSpv("vk_frag_clustered.spv", need(lib.fragmentClustered(hf, w.frag, B::SpirV), "SPIR-V clustered").spirv);
+	// Metal: MSL text the renderer hands to newLibraryWithSource.
+	put("metal_vert.metal",           need(lib.standardVertex(B::Metal), "MSL vertex").source);
+	put("metal_frag.metal",           need(lib.fragment(hf, w.frag, B::Metal), "MSL fragment").source);
+	put("metal_frag_clustered.metal", need(lib.fragmentClustered(hf, w.frag, B::Metal), "MSL clustered").source);
+	put("metal_gbuf.metal",           need(lib.fragment(hg, w.gbuf, B::Metal), "MSL G-buffer").source);
+	MESSAGE("water shaders dumped to ", out.string());
 }
 #endif // HE_TESTS_HAVE_SHADERC
 #endif // HE_EDITOR_DEPS_DIR
