@@ -123,8 +123,9 @@ std::vector<SettingDesc> buildCatalog()
 	// ── General ▸ Feedback ──────────────────────────────────────────────────
 	t.push_back(boolRow("rewards.enabled", "Success Feedback", "Feedback", "rewards",
 	                    &EditorConfig::RewardsEnabled,
-	                    "Briefly show \"Saved\", \"Build succeeded\" or \"Imported N "
-	                    "assets\" in the footer when one of those just worked. "
+	                    "Briefly show \"Saved\", \"Build succeeded\", \"Imported N "
+	                    "assets\", \"Compiles clean\", \"Committed\" or \"Tutorial "
+	                    "complete\" in the footer when one of those just worked. "
 	                    "Off: nothing is shown, played or counted."));
 	t.push_back(boolRow("rewards.visual", "Visual Cues", "Feedback", "rewards",
 	                    &EditorConfig::RewardsVisual,
@@ -138,6 +139,22 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsLightEdge,
 	                    "One soft line of light along the top of the footer when "
 	                    "the line appears. Needs Visual Cues on."));
+	t.push_back(boolRow("rewards.momentCompile", "Compile Moment", "Feedback", "rewards",
+	                    &EditorConfig::RewardsMomentCompile,
+	                    "Say \"Compiles clean\" when a HorizonCode graph's Compile "
+	                    "button found nothing to fix. Off: not shown, still "
+	                    "counted. Needs Success Feedback on."));
+	t.push_back(boolRow("rewards.momentCommit", "Commit Moment", "Feedback", "rewards",
+	                    &EditorConfig::RewardsMomentCommit,
+	                    "Say \"Committed\", \"Pushed\" or \"Committed and pushed\" "
+	                    "when a commit or push from the Source Control panel went "
+	                    "through. Off: not shown, still counted. Needs Success "
+	                    "Feedback on."));
+	t.push_back(boolRow("rewards.momentTutorial", "Tutorial Moment", "Feedback", "rewards",
+	                    &EditorConfig::RewardsMomentTutorial,
+	                    "Say \"Tutorial complete\" when the last step of the "
+	                    "interactive tutorial is done. Off: not shown, still "
+	                    "counted. Needs Success Feedback on."));
 	t.push_back(boolRow("rewards.tabCheck", "Tab Check on Save", "Feedback", "rewards",
 	                    &EditorConfig::RewardsTabCheck,
 	                    "A saved tab's unsaved marker turns into a check for a "
@@ -184,15 +201,15 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsShowProgress,
 	                    "Show successful builds today and days in a row with the "
 	                    "editor beside \"Ready\" in the footer. Needs Success "
-	                    "Feedback on; off hides the counters, they keep counting."));
-	t.push_back(boolRow("rewards.counterTick", "Counter Tick", "Feedback", "rewards",
+	                    "Feedback on; off hides the counters, they keep counting."));	t.push_back(boolRow("rewards.counterTick", "Counter Tick", "Feedback", "rewards",
 	                    &EditorConfig::RewardsCounterTick,
 	                    "A counter that just went up lights up for a moment. "
 	                    "Needs Show Progress on."));
 	t.push_back(boolRow("rewards.streakTooltip", "Recent Days Tooltip", "Feedback",
 	                    "rewards", &EditorConfig::RewardsStreakTooltip,
-	                    "Hovering the counters shows the last seven days. Only on "
-	                    "hover, never on its own. Needs Show Progress on."));
+	                    "Hovering the counters shows the last seven days, with "
+	                    "each day's builds and commits. Only on hover, never on "
+	                    "its own. Needs Show Progress on."));
 	t.push_back(boolRow("rewards.muteEditorSounds", "Mute Editor Sounds", "Feedback",
 	                    "rewards", &EditorConfig::EditorSoundsMuted,
 	                    "Silence the sounds the editor plays on its own output "

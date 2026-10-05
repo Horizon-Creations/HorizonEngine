@@ -18,8 +18,9 @@ struct EditorConfig;
 // delays the action it rewards. The editor is a professional tool first; the
 // whole feature switches off completely, and while it is off it costs nothing.
 //
-// ── The three moments ────────────────────────────────────────────────────────
-// All three fire on the UI thread, once per USER action, and only on success.
+// ── The six moments ──────────────────────────────────────────────────────────
+// All six fire on the UI thread, once per USER action, and only on success.
+// 1–3 are topic 75's; 4–6 came with topic 140 (docs/editor-feinschliff-plan.md).
 //
 // 1. SAVED — the user saved what they were working on.
 //    Fires from EditorUI.cpp, never from EditorApplication::saveSceneToPath:
@@ -85,6 +86,52 @@ struct EditorConfig;
 //    is handed to the preview's widget manager (EditorApplication.cpp,
 //    SDL_EVENT_DROP_COMPLETE).
 //
+// 4. COMPILED CLEAN — the Compile button of a HorizonCode graph found nothing
+//    that would keep the class from shipping compiled. Line "Compiles clean".
+//      • LevelScriptPanel.cpp, runCompileCheck's clean branch (level script,
+//        Game Instance, HC classes). That code has no AppContext, so it uses
+//        post() — fire(), one frame later (see post below).
+//      • UIEditorPanel.cpp, the widget graph's Compile button — fire() direct.
+//    A compile with a fallback is NOT a moment: the graph already jumps to the
+//    offending node. NO focus rule: the check runs synchronously on the click,
+//    so the editor always has focus when it ends — a focus gate would mute it
+//    for good. Counted as "used" (the streak), NOT as a build.
+//
+// 5. COMMITTED — a commit and/or push the user started in the Source Control
+//    panel went through. Line "Committed", "Pushed" or "Committed and pushed";
+//    count carries which as flags (kSyncCommit | kSyncPush), and a merge (rule
+//    2) ORs them, so Commit then Push within the hold reads "Committed and
+//    pushed". Detected by SyncWatch inside GitController (ImGui-free, tested):
+//    armed by requestCommitAll / requestPush — only when the service really
+//    queued the request (busy() right after it) — and judged on the frame the
+//    service was idle BEFORE its pump (the m_cloneBusy trap in GitController.h:
+//    idle after the pump can still have the result waiting), with no
+//    lastError and a lastInfo. Its kind comes from the REQUEST, not from
+//    parsing lastInfo: a commit with Auto Push and a remote is "committed and
+//    pushed". EditorApplication takes it after m_git.update (takeSyncMoment)
+//    and post()s it — there is no AppContext at that point. Pull and fetch are
+//    not moments; a commit whose auto-push failed is an error and no moment.
+//    Same rank as a build; counted as "used" and, for the commit part, in the
+//    day's commits (RewardsCommitsToday, the tooltip only — not the footer).
+//
+// 6. TOUR FINISHED — the interactive tutorial's last step is done. Fires in
+//    TutorialPanel.cpp where the cursor moves from the last step to finished:
+//    the Finish button and the auto-advance after a done step, the two places
+//    that call advance. Once per run through the tour: Back and Start Over do
+//    not fire, and a finished tour has no step left to advance from. Not per
+//    step — a step has its own "Done." and auto-advance. Counted as "used".
+//
+// Each of 4–6 has a switch of its own (RewardsMoment*, below) that turns off
+// only the moment — line and tone; it is still counted while the master is on.
+//
+// post(): fire() deferred to the next pollBuild, i.e. the start of the next
+// frame, for a hook without an AppContext (moments 4 in LevelScriptPanel and
+// 5). Not a second gate — fire() still
+// decides everything. A side effect worth knowing: the deferred moment takes
+// the NEXT frame's once-per-frame slot (rule 1), so a Cmd+S in exactly that
+// frame is counted but not shown. Compile outranks Save, so the line would be
+// Compile's anyway.
+//
 // Once: fire() takes at most one moment per ImGui frame — the first. A user
 // action is one frame of UI code, so this is what keeps the guard's assets +
 // scene, or a menu shortcut that might reach two handlers, from pulsing and
@@ -97,11 +144,13 @@ struct EditorConfig;
 //   2. SAME KIND MERGES: the same moment again while its line still shows
 //      (hold + fade) adds its count ("Imported 1 asset" → "Imported 3 assets";
 //      a second "Saved" keeps "Saved") and restarts the hold. Never a tone.
-//   3. RANK Build > Import > Save: a lower moment does not replace a higher
-//      line that still shows — it is counted (the tally ran before the Feed),
-//      not shown, never heard, and the hold is NOT restarted. A higher one
-//      replaces a lower line and may sound under 4 and 5. Once a line has
-//      faded out, anything replaces it.
+//   3. RANK Build = Commit = Tour > Import > Compile > Save: a lower moment
+//      does not replace a higher line that still shows — it is counted (the
+//      tally ran before the Feed), not shown, never heard, and the hold is NOT
+//      restarted. A higher one replaces a lower line and may sound under 4 and
+//      5. EQUAL rank, other kind (a commit landing on a build's line): the
+//      newer replaces it, like a higher one. Once a line has faded out,
+//      anything replaces it.
 //   4. TONE GAP: kToneGapSec between two tones, whatever the moments. A moment
 //      in the gap is shown, not heard.
 //   5. SAVE GAP: kSaveToneGapSec between two SAVE tones on top of that, so
@@ -165,7 +214,8 @@ struct EditorConfig;
 //       does not say what it wrote, and a file clock would be a guess.
 //   RECENT DAYS (RewardsStreakTooltip, part of the counters): hovering the
 //       counters — and only hovering, never on its own — shows the last
-//       kRecentDays days: which had a moment, and each day's builds. Kept in
+//       kRecentDays days: which had a moment, each day's builds and, where
+//       there were any, its commits. Kept in
 //       GlobalState key RewardsRecent next to the tally. Words stay neutral:
 //       no "keep your streak", nothing that asks for tomorrow.
 //
@@ -208,6 +258,11 @@ struct EditorConfig;
 //                                    says so to someone looking at it).
 //   Import        importPopPcm16     I1 "pop": a sine gliding 1.4 → 0.9 kHz in
 //                                    70 ms. The count does not change the sound.
+//   Compiled clean, Committed, Tour finished: no tone YET (hasTone false) —
+//   their tones are topic 140's next step. Until then such a moment is shown
+//   and counted but never heard, and it must not borrow another tone's switch:
+//   fire() asks hasTone before toneWanted. Giving one a tone = a Tone value,
+//   its PCM, its switch, and hasTone/toneFor answering for it.
 //
 // Routing: the tones play on an AudioEngine of their own (AppContext::
 // uiAudioEngine, owned by EditorApplication), NOT on the project's engine:
@@ -246,6 +301,9 @@ struct EditorConfig;
 //                                      the counters, if those are on)
 //   bool  RewardsCheckMark    = true;  V1, under Visual (it sits beside the line)
 //   bool  RewardsLightEdge    = true;  V2b, under Visual (it pulses for the line)
+//   bool  RewardsMomentCompile  = true;  moment 4 — line and (later) tone;
+//   bool  RewardsMomentCommit   = true;  moment 5   counted either way while
+//   bool  RewardsMomentTutorial = true;  moment 6   the master is on
 //   bool  RewardsTabCheck     = true;  V4 — siblings of Visual: other places,
 //   bool  RewardsImportHighlight = true; V5  not the footer line
 //   int   RewardsReducedMotion = 0;    0 = follow the system's reduce-motion
@@ -287,10 +345,13 @@ struct EditorConfig;
 // projects), NOT into EditorConfig — anything in EditorConfig is in the settings
 // catalog and therefore writable through MCP settings_set. The keys:
 //   RewardsDay (YYYY-MM-DD, local time), RewardsBuildsToday, RewardsStreakDays,
-//   RewardsRecent ("YYYY-MM-DD:builds,…", the last kRecentDays days that had a
-//   moment, oldest first — for the tooltip). A tally from before RewardsRecent
-//   existed is seeded from its streak (seedRecent): the streak's days were
-//   used, their builds unknown except today's.
+//   RewardsCommitsToday, RewardsRecent ("YYYY-MM-DD:builds[:commits],…", the
+//   last kRecentDays days that had a moment, oldest first — for the tooltip).
+//   The commits field is written only for a day that had one, so a file a
+//   day without commits leaves behind is still read by an editor from before
+//   it (which drops an entry it cannot parse rather than guess). A tally from
+//   before RewardsRecent existed is seeded from its streak (seedRecent): the
+//   streak's days were used, their builds unknown except today's.
 // Loaded once, on first use; written through (writeConfig) only when a moment
 // changed them — the first moment of a day and each build, a handful of writes
 // a session. No globalState (tests): counted in memory, never written.
@@ -298,9 +359,13 @@ struct EditorConfig;
 // Rules (recordUse / progressText, tested with string dates):
 //   • A day counts as "used" on its first MOMENT, not on editor start, so
 //     leaving the editor open overnight does not extend a streak. Any of the
-//     three moments counts; they are all counted before fire()'s once-per-frame
-//     fold, so a build that lands in the same frame as a save is not lost.
+//     six moments counts, its own switch on or off; they are all counted
+//     before fire()'s once-per-frame fold, so a build that lands in the same
+//     frame as a save is not lost.
 //   • "Builds" are successful builds — the BuildSucceeded moments, one per run.
+//     A clean compile is not a build.
+//   • "Commits" are Committed moments with the commit flag; a push alone
+//     counts the day as used and nothing else. Shown only in the tooltip.
 //   • First moment of a new day: the day before the stored one → streak + 1;
 //     any other gap → streak 1; builds today back to 0.
 //   • The clock behind the stored day (set back by hand, a flight west): the
@@ -315,17 +380,29 @@ struct EditorConfig;
 //     shown, the label is plain "Ready".
 namespace HE::Ed::Rewards
 {
-	enum class Moment { Saved, BuildSucceeded, AssetsImported };
+	enum class Moment { Saved, BuildSucceeded, AssetsImported,
+	                    CompiledClean, Committed, TourFinished };
 
-	// One tone per moment, and one for a failed build, which is not a moment.
+	// Committed's count: which of the two went through (OR-ed on a merge).
+	inline constexpr int kSyncCommit = 1;
+	inline constexpr int kSyncPush   = 2;
+
+	// One tone per topic-75 moment, and one for a failed build, which is not a
+	// moment. Moments 4–6 have none yet (see "The tones").
 	enum class Tone { SaveTick, BuildChime, BuildFailed, ImportPop };
-	Tone toneFor(Moment m);
+	bool hasTone(Moment m);
+	Tone toneFor(Moment m);   // only meaningful where hasTone(m)
 
 	// ── The editor side (UI thread only) ─────────────────────────────────────
 
 	// A moment happened. The single gate on RewardsEnabled — a call site never
-	// checks the switch itself. count: how many assets an import brought in.
+	// checks the switch itself. count: how many assets an import brought in;
+	// for Committed, kSyncCommit | kSyncPush.
 	void fire(AppContext& ctx, Moment m, int count = 1);
+
+	// fire(), deferred to the next pollBuild — for a hook that has no
+	// AppContext (see "post()" above). A handful at most; queued in order.
+	void post(Moment m, int count = 1);
 
 	// Once per frame, with BuildProgressDialog::outcome(): fires BuildSucceeded
 	// for each run serial that finished successfully and plays the failed-build
@@ -333,7 +410,7 @@ namespace HE::Ed::Rewards
 	// link against it (he_tests builds it without). appFocused: some editor
 	// window has keyboard focus (the build tones only play without). Also the
 	// UI-sound engine's housekeeping: opened when a tone becomes possible,
-	// closed when none is.
+	// closed when none is. And where post()'s queue is fired.
 	void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool success,
 	               bool appFocused);
 
@@ -396,8 +473,13 @@ namespace HE::Ed::Rewards
 	inline constexpr double kImportWindowSec = 30.0;  // V5: to come on screen at all
 	inline constexpr int    kRecentDays     = 7;      // the tooltip's days
 
-	// What the footer says for a moment. count only matters for imports.
+	// What the footer says for a moment. count only matters for imports and
+	// for Committed (its flags).
 	std::string lineFor(Moment m, int count);
+
+	// The moment's own switch (RewardsMoment*; true for moments 1–3, which
+	// have none): may it show and sound? Counting does not ask.
+	bool momentWanted(const EditorConfig& cfg, Moment m);
 
 	// 1 while holding, easing to 0 at kHoldSec + kFadeSec, 0 after; 1 before 0.
 	float strengthAt(double age);
@@ -405,7 +487,7 @@ namespace HE::Ed::Rewards
 	// The volume slider (0..1) as a playback gain: squared, clamped to 0..1.
 	float gainFor(float volume);
 
-	// Build > Import > Save (rule 3 above).
+	// Build = Commit = Tour > Import > Compile > Save (rule 3 above).
 	int rankOf(Moment m);
 
 	// Rule 6: may this tone sound at all? Master, Sound, not muted, the tone's
@@ -479,6 +561,27 @@ namespace HE::Ed::Rewards
 		double             m_toneAt    = 0.0;     // …and when the last one did
 		bool               m_saveToned = false;
 		double             m_saveToneAt = 0.0;
+	};
+
+	// Moment 5's edge, git-free: GitController owns one (see "COMMITTED").
+	class SyncWatch
+	{
+	public:
+		// The user asked for a commit and/or push (kSyncCommit | kSyncPush) and
+		// the service queued it. A second request before the first is judged
+		// adds its flags: both are in the same queue and judged together.
+		void requested(int flags);
+
+		// Once per frame. idleBeforePump: the service was idle BEFORE this
+		// frame's pump, so the pump got every result; lastError/lastInfo as
+		// they are after it. Returns the flags to fire Committed with, once,
+		// or 0 (nothing armed, still busy, or it failed).
+		int poll(bool idleBeforePump, const std::string& lastError, const std::string& lastInfo);
+
+		bool armed() const { return m_flags != 0; }
+
+	private:
+		int m_flags = 0;
 	};
 
 	// ── Visual cues, the parts with a clock (see "The visual cues") ──────────
@@ -576,14 +679,16 @@ namespace HE::Ed::Rewards
 	struct DayUse
 	{
 		std::string day;       // YYYY-MM-DD with at least one moment
-		int         builds = 0;
+		int         builds  = 0;
+		int         commits = 0;
 	};
 
 	struct Tally
 	{
 		std::string day;              // YYYY-MM-DD of the last counted moment, "" = never
-		int         buildsToday = 0;  // successful builds on `day`
-		int         streakDays  = 0;  // consecutive days ending with `day`
+		int         buildsToday  = 0; // successful builds on `day`
+		int         streakDays   = 0; // consecutive days ending with `day`
+		int         commitsToday = 0; // commits on `day` (the tooltip only)
 		std::vector<DayUse> recent;   // the last kRecentDays days WITH a moment,
 		                              // oldest first — the tooltip's history
 	};
@@ -592,7 +697,7 @@ namespace HE::Ed::Rewards
 	std::string formatRecent(const std::vector<DayUse>& recent);
 	std::vector<DayUse> parseRecent(const std::string& text);
 	// A tally from before RewardsRecent: its streak's days (at most
-	// kRecentDays), today's builds on its own day, 0 on the others.
+	// kRecentDays), today's builds and commits on its own day, 0 on the others.
 	void seedRecent(Tally& t);
 
 	// 0 = Monday … 6 = Sunday; -1 if ymd is not a valid YYYY-MM-DD.
@@ -605,6 +710,7 @@ namespace HE::Ed::Rewards
 		int         weekday = -1;
 		bool        used    = false;   // a moment on that day
 		int         builds  = 0;
+		int         commits = 0;
 	};
 	std::vector<DayCell> recentDays(const Tally& t, const std::string& today, int n = kRecentDays);
 
@@ -619,9 +725,15 @@ namespace HE::Ed::Rewards
 	// "2026-03-01" → "2026-02-28"; "" if ymd is not a valid YYYY-MM-DD.
 	std::string dayBefore(const std::string& ymd);
 
-	// A moment on `today` (build = it was a BuildSucceeded). true = the tally
-	// changed and wants writing.
+	// A moment on `today`: m with its count (Committed's flags decide whether
+	// it was a commit). true = the tally changed and wants writing.
+	bool recordMoment(Tally& t, const std::string& today, Moment m, int count = 1);
+	// The same for "a moment" (build = it was a BuildSucceeded) — the form the
+	// topic-75 rules are written and tested in.
 	bool recordUse(Tally& t, const std::string& today, bool build);
+
+	// "1 commit today", "3 commits today" — the tooltip's line; "" for 0.
+	std::string commitsPhrase(int commits);
 
 	// "3 builds today · 5 days in a row", or "" when there is nothing to show.
 	std::string progressText(const Tally& t, const std::string& today);

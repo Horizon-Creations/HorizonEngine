@@ -14,6 +14,7 @@
 #include "GraphEditor.h"                        // shared node-graph canvas
 #include "HcGraphHost.h"                        // shared HorizonCode canvas host (pins, menus, clipboard)
 #include "HcExecTrace.h"                        // run-time node hits + "go to node" reveals
+#include "EditorRewards.h"                      // reward moment: Compiles clean
 #include "HcEditorUtil.h"                       // Create Object class picker
 #include "HcRenameDialog.h"                     // "that rename reaches other files"
 #include "UITimelineMath.h"                     // seconds ⇄ pixels for the animation strip
@@ -7126,6 +7127,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 					lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
 				st.compileOk  = true;
 				st.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+				// Reward moment (EditorRewards.h): COMPILED CLEAN.
+				HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::CompiledClean);
 				for (const auto& w : res.warnings)
 					HE_LOG_WARN(Editor, "%s",
 						("HorizonCode compile check: " + w).c_str());

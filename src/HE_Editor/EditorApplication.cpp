@@ -1244,6 +1244,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsVisual                = globalstate.getCustomConfigBool("RewardsVisual", m_editorConfig.RewardsVisual);
 	m_editorConfig.RewardsCheckMark             = globalstate.getCustomConfigBool("RewardsCheckMark", m_editorConfig.RewardsCheckMark);
 	m_editorConfig.RewardsLightEdge             = globalstate.getCustomConfigBool("RewardsLightEdge", m_editorConfig.RewardsLightEdge);
+	m_editorConfig.RewardsMomentCompile         = globalstate.getCustomConfigBool("RewardsMomentCompile", m_editorConfig.RewardsMomentCompile);
+	m_editorConfig.RewardsMomentCommit          = globalstate.getCustomConfigBool("RewardsMomentCommit", m_editorConfig.RewardsMomentCommit);
+	m_editorConfig.RewardsMomentTutorial        = globalstate.getCustomConfigBool("RewardsMomentTutorial", m_editorConfig.RewardsMomentTutorial);
 	m_editorConfig.RewardsTabCheck              = globalstate.getCustomConfigBool("RewardsTabCheck", m_editorConfig.RewardsTabCheck);
 	m_editorConfig.RewardsImportHighlight       = globalstate.getCustomConfigBool("RewardsImportHighlight", m_editorConfig.RewardsImportHighlight);
 	m_editorConfig.RewardsReducedMotion         = std::clamp(globalstate.getCustomConfigInt("RewardsReducedMotion", m_editorConfig.RewardsReducedMotion), 0, 1);
@@ -4317,6 +4320,10 @@ void EditorApplication::OnRender(float dt)
 
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
+	// Reward moment (EditorRewards.h): COMMITTED — no AppContext here, so
+	// post(): fired by the next frame's pollBuild.
+	if (const int sync = m_git.takeSyncMoment())
+		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::Committed, sync);
 
 		if (m_collab.inSession()) syncStructuralChanges();
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
@@ -11167,6 +11174,9 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsVisual",              m_editorConfig.RewardsVisual);
 	globalstate.setCustomConfigEntry("RewardsCheckMark",           m_editorConfig.RewardsCheckMark);
 	globalstate.setCustomConfigEntry("RewardsLightEdge",           m_editorConfig.RewardsLightEdge);
+	globalstate.setCustomConfigEntry("RewardsMomentCompile",       m_editorConfig.RewardsMomentCompile);
+	globalstate.setCustomConfigEntry("RewardsMomentCommit",        m_editorConfig.RewardsMomentCommit);
+	globalstate.setCustomConfigEntry("RewardsMomentTutorial",      m_editorConfig.RewardsMomentTutorial);
 	globalstate.setCustomConfigEntry("RewardsTabCheck",            m_editorConfig.RewardsTabCheck);
 	globalstate.setCustomConfigEntry("RewardsImportHighlight",     m_editorConfig.RewardsImportHighlight);
 	globalstate.setCustomConfigEntry("RewardsReducedMotion",       m_editorConfig.RewardsReducedMotion);

@@ -3300,13 +3300,35 @@ namespace
 	  "that, writing the scene is itself the pause it was meant to spare you.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Feedback", "",
-	  "When a save you made, a build or an import has just worked, the middle of "
+	  "When a save you made, a build, an import, a HorizonCode compile, a commit "
+	  "or push, or the last step of the tutorial has just worked, the middle of "
 	  "the footer says so for about a second and a half (\"Saved\", \"Build "
-	  "succeeded\", \"Imported 3 assets\") and then goes back to \"Ready\". "
+	  "succeeded\", \"Imported 3 assets\", \"Compiles clean\", \"Committed and "
+	  "pushed\", \"Tutorial complete\") and then goes back to \"Ready\". "
 	  "Nothing opens, nothing takes focus and nothing waits for it. Saves by an "
-	  "MCP client or a script, the autosave and failed builds show nothing (a "
-	  "failed build can have a sound of its own, see Build Failed Sound). Off: "
-	  "no feedback at all, no sound and no progress counted.",
+	  "MCP client or a script, the autosave, failed builds and compiles that "
+	  "found a problem show nothing (a failed build can have a sound of its "
+	  "own, see Build Failed Sound). Off: no feedback at all, no sound and no "
+	  "progress counted.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Compile Moment", "",
+	  "\"Compiles clean\" in the footer when the Compile button of a HorizonCode "
+	  "graph (level script, Game Instance, a class or a widget's script) found "
+	  "nothing that would keep it from shipping compiled. A compile that found "
+	  "a problem shows nothing here: the graph already jumps to the node. Off: "
+	  "not shown, but the day still counts as one you worked on.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Commit Moment", "",
+	  "\"Committed\", \"Pushed\" or \"Committed and pushed\" in the footer when "
+	  "a commit or push you started in the Source Control panel went through. "
+	  "Pull and fetch say nothing, and neither does a commit whose automatic "
+	  "push failed (the panel says why). Commits are counted per day for the "
+	  "Recent Days Tooltip. Off: not shown, still counted.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Tutorial Moment", "",
+	  "\"Tutorial complete\" in the footer once, when the last step of the "
+	  "interactive tutorial is done. Single steps keep their own \"Done.\" in "
+	  "the tutorial card. Off: not shown, still counted.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Visual Cues", "",
 	  "The moment's line in the middle of the footer (\"Saved\", \"Build "
@@ -3389,8 +3411,9 @@ namespace
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Show Progress", "",
 	  "Beside \"Ready\" in the footer: how many builds succeeded today, and from "
-	  "the second day on how many days in a row you have saved, built or "
-	  "imported something. A day counts from its first such action, not from "
+	  "the second day on how many days in a row you have saved, built, "
+	  "imported, compiled or committed something or finished the tutorial. A "
+	  "day counts from its first such action, not from "
 	  "opening the editor. No points, no levels, nothing shared: the numbers "
 	  "stay in this computer's editor settings. Off hides them; they keep "
 	  "counting while Success Feedback is on, and Success Feedback off stops "
@@ -3404,9 +3427,11 @@ namespace
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Recent Days Tooltip", "",
 	  "Rest the mouse on the counters beside \"Ready\" to see the last seven "
-	  "days: a dot for each day you saved, built or imported something, and "
-	  "that day's successful builds. It only appears while you hover, never "
-	  "on its own.",
+	  "days: a dot for each day you saved, built, imported, compiled or "
+	  "committed something or finished the tutorial, that day's successful "
+	  "builds, and in green below them its commits (a row that only appears "
+	  "once there were any). It only appears while you hover, never on its "
+	  "own.",
 	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "

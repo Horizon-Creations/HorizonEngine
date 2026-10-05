@@ -30,8 +30,24 @@ std::string lineFor(Moment m, int count)
 	case Moment::AssetsImported:
 		return count == 1 ? std::string("Imported 1 asset")
 		                  : "Imported " + std::to_string(std::max(count, 0)) + " assets";
+	case Moment::CompiledClean:  return "Compiles clean";
+	case Moment::Committed:
+		if ((count & kSyncCommit) && (count & kSyncPush)) return "Committed and pushed";
+		return (count & kSyncPush) ? "Pushed" : "Committed";
+	case Moment::TourFinished:   return "Tutorial complete";
 	}
 	return {};
+}
+
+bool momentWanted(const EditorConfig& cfg, Moment m)
+{
+	switch (m)
+	{
+	case Moment::CompiledClean: return cfg.RewardsMomentCompile;
+	case Moment::Committed:     return cfg.RewardsMomentCommit;
+	case Moment::TourFinished:  return cfg.RewardsMomentTutorial;
+	default:                    return true;
+	}
 }
 
 float strengthAt(double age)
@@ -56,10 +72,28 @@ int rankOf(Moment m)
 	switch (m)
 	{
 	case Moment::Saved:          return 0;
-	case Moment::AssetsImported: return 1;
-	case Moment::BuildSucceeded: return 2;
+	case Moment::CompiledClean:  return 1;
+	case Moment::AssetsImported: return 2;
+	case Moment::BuildSucceeded:
+	case Moment::Committed:
+	case Moment::TourFinished:   return 3;
 	}
 	return 0;
+}
+
+bool hasTone(Moment m)
+{
+	switch (m)
+	{
+	case Moment::Saved:
+	case Moment::BuildSucceeded:
+	case Moment::AssetsImported: return true;
+	// Their tones are topic 140's next step — see "The tones" in the header.
+	case Moment::CompiledClean:
+	case Moment::Committed:
+	case Moment::TourFinished:   return false;
+	}
+	return false;
 }
 
 Tone toneFor(Moment m)
@@ -69,6 +103,7 @@ Tone toneFor(Moment m)
 	case Moment::Saved:          return Tone::SaveTick;
 	case Moment::BuildSucceeded: return Tone::BuildChime;
 	case Moment::AssetsImported: return Tone::ImportPop;
+	default:                     break;   // no tone (hasTone false)
 	}
 	return Tone::SaveTick;
 }
@@ -104,12 +139,15 @@ Feed::Taken Feed::take(Moment m, int count, double now, int frame, bool soundWan
 	if (showing && m == m_moment)
 	{
 		// Rule 2: the same kind again — one line, counted up, held anew, silent.
-		m_count += std::max(count, 0);
+		// Committed's count is flags: a push after the commit is "and pushed".
+		if (m == Moment::Committed) m_count |= count;
+		else                        m_count += std::max(count, 0);
 		m_at     = now;
 		r.shown  = true;
 		return r;
 	}
 	// Rule 3: a lower moment leaves a higher line alone (the tally has it).
+	// Equal rank, other kind, falls through: the newer one replaces the line.
 	if (showing && rankOf(m) < rankOf(m_moment)) return r;
 
 	m_has    = true;
@@ -119,8 +157,27 @@ Feed::Taken Feed::take(Moment m, int count, double now, int frame, bool soundWan
 	m_since  = now;
 	r.shown  = true;
 
-	r.sound = soundWanted && takeTone(toneFor(m), now);
+	// A moment without a tone books no gap (soundWanted is false for it from
+	// fire(); checked here too, so no caller can make it borrow one).
+	r.sound = soundWanted && hasTone(m) && takeTone(toneFor(m), now);
 	return r;
+}
+
+void SyncWatch::requested(int flags)
+{
+	m_flags |= flags & (kSyncCommit | kSyncPush);
+}
+
+int SyncWatch::poll(bool idleBeforePump, const std::string& lastError, const std::string& lastInfo)
+{
+	if (m_flags == 0 || !idleBeforePump) return 0;
+	const int flags = m_flags;
+	m_flags = 0;
+	// A failed operation sets lastError and clears lastInfo; a status refresh
+	// queued behind it can clear lastError again, but never sets lastInfo —
+	// so both are asked.
+	if (!lastError.empty() || lastInfo.empty()) return 0;
+	return flags;
 }
 
 bool Feed::takeTone(Tone t, double now)
@@ -426,26 +483,46 @@ DayUse& recentEntry(std::vector<DayUse>& recent, const std::string& day)
 }
 } // namespace
 
-bool recordUse(Tally& t, const std::string& today, bool build)
+bool recordMoment(Tally& t, const std::string& today, Moment m, int count)
 {
+	const bool build  = m == Moment::BuildSucceeded;
+	const bool commit = m == Moment::Committed && (count & kSyncCommit);
 	Ymd now;
 	if (!parseDay(today, now)) return false;
 	if (t.day == today)
 	{
-		if (!build) return false;   // the day is already counted
-		++t.buildsToday;
-		recentEntry(t.recent, today).builds = t.buildsToday;
+		if (!build && !commit) return false;   // the day is already counted
+		if (build)  ++t.buildsToday;
+		if (commit) ++t.commitsToday;
+		DayUse& e = recentEntry(t.recent, today);
+		e.builds  = t.buildsToday;
+		e.commits = t.commitsToday;
 		return true;
 	}
 	// The clock is behind the stored day. YYYY-MM-DD orders as text.
 	Ymd stored;
 	if (parseDay(t.day, stored) && today < t.day) return false;
 
-	t.streakDays  = (t.day == dayBefore(today) && t.streakDays > 0) ? t.streakDays + 1 : 1;
-	t.day         = today;
-	t.buildsToday = build ? 1 : 0;
-	recentEntry(t.recent, today).builds = t.buildsToday;
+	t.streakDays   = (t.day == dayBefore(today) && t.streakDays > 0) ? t.streakDays + 1 : 1;
+	t.day          = today;
+	t.buildsToday  = build ? 1 : 0;
+	t.commitsToday = commit ? 1 : 0;
+	DayUse& e = recentEntry(t.recent, today);
+	e.builds  = t.buildsToday;
+	e.commits = t.commitsToday;
 	return true;
+}
+
+bool recordUse(Tally& t, const std::string& today, bool build)
+{
+	return recordMoment(t, today, build ? Moment::BuildSucceeded : Moment::Saved);
+}
+
+std::string commitsPhrase(int commits)
+{
+	if (commits <= 0) return {};
+	return commits == 1 ? std::string("1 commit today")
+	                    : std::to_string(commits) + " commits today";
 }
 
 std::string formatRecent(const std::vector<DayUse>& recent)
@@ -455,6 +532,9 @@ std::string formatRecent(const std::vector<DayUse>& recent)
 	{
 		if (!s.empty()) s += ',';
 		s += d.day + ':' + std::to_string(std::max(d.builds, 0));
+		// Only where there were commits: an editor from before the field
+		// drops an entry it cannot parse, so the field costs it nothing else.
+		if (d.commits > 0) s += ':' + std::to_string(d.commits);
 	}
 	return s;
 }
@@ -468,17 +548,24 @@ std::vector<DayUse> parseRecent(const std::string& text)
 		const size_t comma = std::min(text.find(',', at), text.size());
 		const std::string item = text.substr(at, comma - at);
 		at = comma + 1;
-		// "YYYY-MM-DD:n" — anything else (a hand edit) is skipped, not guessed.
+		// "YYYY-MM-DD:n" or "YYYY-MM-DD:n:c" — anything else (a hand edit) is
+		// skipped, not guessed.
 		Ymd v;
 		if (item.size() < 12 || item[10] != ':' || !parseDay(item.substr(0, 10), v)) continue;
-		const std::string n = item.substr(11);
-		if (n.empty() || n.size() > 6
-		    || !std::all_of(n.begin(), n.end(), [](char c) { return c >= '0' && c <= '9'; }))
-			continue;
+		const std::string rest  = item.substr(11);
+		const size_t      colon = rest.find(':');
+		const std::string n     = rest.substr(0, colon);
+		const std::string c     = colon == std::string::npos ? std::string("0") : rest.substr(colon + 1);
+		const auto number = [](const std::string& s)
+		{
+			return !s.empty() && s.size() <= 6
+			    && std::all_of(s.begin(), s.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
+		};
+		if (!number(n) || !number(c)) continue;
 		// Oldest first and one entry per day, whatever the file says.
 		const std::string day = item.substr(0, 10);
 		if (!out.empty() && day <= out.back().day) continue;
-		out.push_back({ day, std::stoi(n) });
+		out.push_back({ day, std::stoi(n), std::stoi(c) });
 	}
 	if (out.size() > static_cast<size_t>(kRecentDays))
 		out.erase(out.begin(), out.end() - kRecentDays);
@@ -493,7 +580,9 @@ void seedRecent(Tally& t)
 	std::string d = t.day;
 	for (int i = 0; i < days && !d.empty(); ++i)
 	{
-		t.recent.insert(t.recent.begin(), DayUse{ d, i == 0 ? std::max(t.buildsToday, 0) : 0 });
+		t.recent.insert(t.recent.begin(),
+		                DayUse{ d, i == 0 ? std::max(t.buildsToday, 0) : 0,
+		                        i == 0 ? std::max(t.commitsToday, 0) : 0 });
 		d = dayBefore(d);
 	}
 }
@@ -521,10 +610,20 @@ std::vector<DayCell> recentDays(const Tally& t, const std::string& today, int n)
 		c.day     = d;
 		c.weekday = weekdayOf(d);
 		for (const DayUse& u : t.recent)
-			if (u.day == d) { c.used = true; c.builds = std::max(u.builds, 0); }
+			if (u.day == d)
+			{
+				c.used    = true;
+				c.builds  = std::max(u.builds, 0);
+				c.commits = std::max(u.commits, 0);
+			}
 		// The tally's own day is used whatever the history says (a tally
 		// seeded before its first write, a hand-edited list).
-		if (d == t.day) { c.used = true; c.builds = std::max(t.buildsToday, 0); }
+		if (d == t.day)
+		{
+			c.used    = true;
+			c.builds  = std::max(t.buildsToday, 0);
+			c.commits = std::max(t.commitsToday, 0);
+		}
 		out.insert(out.begin(), c);
 		d = dayBefore(d);
 	}
@@ -764,21 +863,26 @@ void loadTally(AppContext& ctx)
 	s_tally.day         = gs.getCustomConfigString("RewardsDay", "");
 	s_tally.buildsToday = std::max(0, gs.getCustomConfigInt("RewardsBuildsToday", 0));
 	s_tally.streakDays  = std::max(0, gs.getCustomConfigInt("RewardsStreakDays", 0));
+	s_tally.commitsToday = std::max(0, gs.getCustomConfigInt("RewardsCommitsToday", 0));
 	s_tally.recent      = parseRecent(gs.getCustomConfigString("RewardsRecent", ""));
 	seedRecent(s_tally);   // a tally from before the history: its streak
 }
 
 // Before fire()'s once-per-frame fold — see "Rules" in the header.
-void tallyMoment(AppContext& ctx, bool build)
+void tallyMoment(AppContext& ctx, Moment m, int count)
 {
 	loadTally(ctx);
-	if (!recordUse(s_tally, localDay(), build) || !ctx.globalState) return;
-	ctx.globalState->setCustomConfigEntry("RewardsDay",         s_tally.day);
-	ctx.globalState->setCustomConfigEntry("RewardsBuildsToday", s_tally.buildsToday);
-	ctx.globalState->setCustomConfigEntry("RewardsStreakDays",  s_tally.streakDays);
-	ctx.globalState->setCustomConfigEntry("RewardsRecent",      formatRecent(s_tally.recent));
+	if (!recordMoment(s_tally, localDay(), m, count) || !ctx.globalState) return;
+	ctx.globalState->setCustomConfigEntry("RewardsDay",          s_tally.day);
+	ctx.globalState->setCustomConfigEntry("RewardsBuildsToday",  s_tally.buildsToday);
+	ctx.globalState->setCustomConfigEntry("RewardsStreakDays",   s_tally.streakDays);
+	ctx.globalState->setCustomConfigEntry("RewardsCommitsToday", s_tally.commitsToday);
+	ctx.globalState->setCustomConfigEntry("RewardsRecent",       formatRecent(s_tally.recent));
 	ctx.globalState->writeConfig();
 }
+
+// post()'s queue, fired by the next pollBuild.
+std::vector<std::pair<Moment, int>> s_posted;
 
 // V3's two counters, V4's tabs and when the last Saved moment fired, V5's
 // fresh files — see "The visual cues" in the header.
@@ -849,17 +953,27 @@ void fire(AppContext& ctx, Moment m, int count)
 {
 	const EditorConfig& cfg = ctx.editorConfig;
 	if (!cfg.RewardsEnabled) return;
-	tallyMoment(ctx, m == Moment::BuildSucceeded);
+	tallyMoment(ctx, m, count);
 	// V4 matches a tab's dirty → clean against this — before the Feed's
 	// once-per-frame fold, so a save that shares its frame still marks its tab.
 	if (m == Moment::Saved) s_lastSaveAt = nowSec();
+	// The moment's own switch (4–6): counted above, neither shown nor heard.
+	if (!momentWanted(cfg, m)) return;
 	// Rule 6: the switches say whether this moment may sound at all; the Feed
 	// says whether it does. Visual off still goes through the Feed, so what
-	// is heard follows the same merging and rank either way.
+	// is heard follows the same merging and rank either way. hasTone first: a
+	// moment without a tone of its own must not ask another tone's switch.
 	const Tone tone        = toneFor(m);
-	const bool soundWanted = toneWanted(cfg, tone, ctx.isPlaying, s_appFocused);
+	const bool soundWanted = hasTone(m) && toneWanted(cfg, tone, ctx.isPlaying, s_appFocused);
 	if (s_feed.take(m, count, nowSec(), frameNo(), soundWanted).sound)
 		playTone(ctx, tone, gainFor(cfg.RewardsVolume));
+}
+
+void post(Moment m, int count)
+{
+	// A handful a frame at most (one per click); a cap so a caller in a loop
+	// cannot grow it without bound before the next pollBuild.
+	if (s_posted.size() < 16) s_posted.emplace_back(m, count);
 }
 
 void preview(AppContext& ctx, Tone t)
@@ -943,6 +1057,14 @@ void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool succ
 {
 	s_appFocused = appFocused;
 	keepUiAudio(ctx);
+	// post()'s moments from the last frame, in order. Swapped out first: fire()
+	// never posts, but nothing here should depend on that.
+	if (!s_posted.empty())
+	{
+		std::vector<std::pair<Moment, int>> posted;
+		posted.swap(s_posted);
+		for (const auto& [m, count] : posted) fire(ctx, m, count);
+	}
 	// Consumed whether or not the feature is on: switching it on later must not
 	// reward a build that finished while it was off.
 	switch (s_feed.buildEnded(run, finished, success))
@@ -1061,7 +1183,8 @@ void drawIdle(ImDrawList* dl, ImVec2 at, const IdleText& t, float alpha,
 }
 
 // The recent-days tooltip: seven small columns (weekday, a dot for a day with
-// a moment, its builds), then the counters in words. Neutral on purpose — a
+// a moment, its builds, and — only if any of the seven had one — its commits
+// in a row of their own), then the counters in words. Neutral on purpose — a
 // record of what was, nothing that asks for tomorrow.
 void drawRecentDays(const std::string& today)
 {
@@ -1070,10 +1193,13 @@ void drawRecentDays(const std::string& today)
 	const float  lineH = ImGui::GetTextLineHeight();
 	const float  cellW = ImGui::CalcTextSize("Wed").x + 10.0f;
 	const ImVec4 grey  = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+	const bool   anyCommits = std::any_of(cells.begin(), cells.end(),
+	                                      [](const DayCell& c) { return c.commits > 0; });
+	const float  rows = anyCommits ? 4.0f : 3.0f;
 
 	ImGui::TextDisabled("Last %d days", kRecentDays);
 	const ImVec2 o = ImGui::GetCursorScreenPos();
-	ImGui::Dummy(ImVec2(cellW * static_cast<float>(cells.size()), lineH * 3.0f + 2.0f));
+	ImGui::Dummy(ImVec2(cellW * static_cast<float>(cells.size()), lineH * rows + 2.0f));
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	for (size_t i = 0; i < cells.size(); ++i)
 	{
@@ -1093,13 +1219,29 @@ void drawRecentDays(const std::string& today)
 			dl->AddText(ImVec2(cx - ImGui::CalcTextSize(n.c_str()).x * 0.5f, o.y + lineH * 2.0f + 2.0f),
 			            ImGui::GetColorU32(grey), n.c_str());
 		}
+		// Commits: a row of their own, in the done green at half strength so
+		// it does not read as a second builds row.
+		if (c.commits > 0)
+		{
+			const std::string n = std::to_string(c.commits);
+			dl->AddText(ImVec2(cx - ImGui::CalcTextSize(n.c_str()).x * 0.5f, o.y + lineH * 3.0f + 2.0f),
+			            ImGui::GetColorU32(withAlpha(kDone, 0.7f)), n.c_str());
+		}
 	}
 	const std::string words = progressText(s_tally, today);
 	if (!words.empty()) ImGui::TextUnformatted(words.c_str());
+	const std::string commits =
+		commitsPhrase(s_tally.day == today ? s_tally.commitsToday : 0);
+	if (!commits.empty()) ImGui::TextUnformatted(commits.c_str());
 	ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(cellW * 7.0f, 220.0f));
-	ImGui::TextDisabled("A dot is a day you saved, built or imported something; the "
-	                    "number under it, that day's successful builds. Kept on this "
-	                    "computer only.");
+	ImGui::TextDisabled(anyCommits
+		? "A dot is a day you saved, built, imported, compiled, committed or "
+		  "finished the tutorial; the number under it, that day's successful "
+		  "builds, and below that in green, its commits. Kept on this computer "
+		  "only."
+		: "A dot is a day you saved, built, imported, compiled, committed or "
+		  "finished the tutorial; the number under it, that day's successful "
+		  "builds. Kept on this computer only.");
 	ImGui::PopTextWrapPos();
 }
 } // namespace

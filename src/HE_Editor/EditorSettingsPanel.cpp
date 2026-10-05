@@ -909,6 +909,12 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 				EditorWidgets::checkbox("Check Mark", &cfg.RewardsCheckMark);
 				EditorWidgets::checkbox("Light Edge", &cfg.RewardsLightEdge);
 			}
+			// Moments 4–6 (topic 140): each switches off only its moment, the
+			// counting goes on — so they are not under Visual Cues, which
+			// does not silence a moment's sound either.
+			EditorWidgets::checkbox("Compile Moment", &cfg.RewardsMomentCompile);
+			EditorWidgets::checkbox("Commit Moment", &cfg.RewardsMomentCommit);
+			EditorWidgets::checkbox("Tutorial Moment", &cfg.RewardsMomentTutorial);
 			EditorWidgets::checkbox("Tab Check on Save", &cfg.RewardsTabCheck);
 			EditorWidgets::checkbox("Highlight Imports", &cfg.RewardsImportHighlight);
 			static const char* motionItems[] = { "Follow System", "Off" };
@@ -949,7 +955,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			}
 		}
 		EditorWidgets::checkbox("Mute Editor Sounds", &cfg.EditorSoundsMuted);
-		hint("A saved scene or asset, a finished build and an import say so for a "
+		hint("A saved scene or asset, a finished build, an import, a clean compile, "
+		     "a commit or push and the end of the tutorial say so for a "
 		     "moment in the middle of the footer. Nothing opens, nothing takes focus, "
 		     "and nothing waits for it. The sound is off unless you turn it on, and "
 		     "works with or without the visual cue; the build sounds only play while "
@@ -2111,6 +2118,9 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsVisual        = true;
 			cfg.RewardsCheckMark     = true;
 			cfg.RewardsLightEdge     = true;
+			cfg.RewardsMomentCompile  = true;
+			cfg.RewardsMomentCommit   = true;
+			cfg.RewardsMomentTutorial = true;
 			cfg.RewardsTabCheck      = true;
 			cfg.RewardsImportHighlight = true;
 			cfg.RewardsReducedMotion = 0;

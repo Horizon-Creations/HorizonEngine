@@ -16,6 +16,7 @@
 #include "GraphEditor.h"         // shared node-graph canvas
 #include "HcGraphHost.h"         // shared HorizonCode canvas host (pins, menus, clipboard)
 #include "HcExecTrace.h"         // run-time node hits + "go to node" reveals
+#include "EditorRewards.h"       // reward moment: Compiles clean (post)
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/Net/ValueWire.h>   // which types may replicate at all
@@ -254,6 +255,9 @@ void runCompileCheck(const HC::Graph& graph, const char* title,
 		for (const auto& f : res.files)
 			lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
 		g.compileOk  = true;
+		// Reward moment (EditorRewards.h): COMPILED CLEAN — post(), this code
+		// has no AppContext. Only the Compile button calls this.
+		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::CompiledClean);
 		// The line count covers the whole ancestry when there is one — which is
 		// honest: that is what an export builds to make THIS class native.
 		g.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";

@@ -143,6 +143,11 @@ TEST_CASE("Rewards: a lower moment leaves a higher line alone")
 {
 	CHECK(rankOf(Moment::BuildSucceeded) > rankOf(Moment::AssetsImported));
 	CHECK(rankOf(Moment::AssetsImported) > rankOf(Moment::Saved));
+	// Topic 140: Build = Commit = Tour > Import > Compile > Save.
+	CHECK(rankOf(Moment::Committed) == rankOf(Moment::BuildSucceeded));
+	CHECK(rankOf(Moment::TourFinished) == rankOf(Moment::BuildSucceeded));
+	CHECK(rankOf(Moment::AssetsImported) > rankOf(Moment::CompiledClean));
+	CHECK(rankOf(Moment::CompiledClean) > rankOf(Moment::Saved));
 
 	Feed f;
 	CHECK(f.take(Moment::BuildSucceeded, 1, 0.0, 1, true).sound);
@@ -253,6 +258,11 @@ TEST_CASE("Rewards: the footer lines")
 	CHECK(lineFor(Moment::BuildSucceeded, 1) == "Build succeeded");
 	CHECK(lineFor(Moment::AssetsImported, 1) == "Imported 1 asset");
 	CHECK(lineFor(Moment::AssetsImported, 12) == "Imported 12 assets");
+	CHECK(lineFor(Moment::CompiledClean, 1) == "Compiles clean");
+	CHECK(lineFor(Moment::Committed, kSyncCommit) == "Committed");
+	CHECK(lineFor(Moment::Committed, kSyncPush) == "Pushed");
+	CHECK(lineFor(Moment::Committed, kSyncCommit | kSyncPush) == "Committed and pushed");
+	CHECK(lineFor(Moment::TourFinished, 1) == "Tutorial complete");
 }
 
 TEST_CASE("Rewards: the failed-build tone keeps the tone gap, and only saves the save gap")
@@ -276,6 +286,13 @@ TEST_CASE("Rewards: which tone each moment plays")
 	CHECK(toneFor(Moment::Saved) == Tone::SaveTick);
 	CHECK(toneFor(Moment::BuildSucceeded) == Tone::BuildChime);
 	CHECK(toneFor(Moment::AssetsImported) == Tone::ImportPop);
+	CHECK(hasTone(Moment::Saved));
+	CHECK(hasTone(Moment::BuildSucceeded));
+	CHECK(hasTone(Moment::AssetsImported));
+	// Topic 140's moments have no tone in this step.
+	CHECK_FALSE(hasTone(Moment::CompiledClean));
+	CHECK_FALSE(hasTone(Moment::Committed));
+	CHECK_FALSE(hasTone(Moment::TourFinished));
 }
 
 TEST_CASE("Rewards: every switch can silence a tone, and the build tones want the editor unfocused")
@@ -343,6 +360,10 @@ TEST_CASE("Rewards: the defaults hear nothing, and what keeps the UI device open
 	CHECK(d.RewardsImportHighlight);
 	CHECK(d.RewardsStreakTooltip);
 	CHECK(d.RewardsReducedMotion == 0);
+	// Topic 140's moments are on, like the three before them.
+	CHECK(d.RewardsMomentCompile);
+	CHECK(d.RewardsMomentCommit);
+	CHECK(d.RewardsMomentTutorial);
 
 	EditorConfig c;
 	c.RewardsSound = true;
@@ -973,6 +994,22 @@ TEST_CASE("Rewards: the recent days are kept, written and read back")
 	CHECK(odd[1].day == "2026-09-23");
 	CHECK(parseRecent("").empty());
 
+	// The commits field (topic 140): read with and without it, and a bad one
+	// drops the entry like any other hand edit.
+	const std::vector<DayUse> mixed =
+		parseRecent("2026-09-20:2,2026-09-21:0:3,2026-09-22:1:,2026-09-23:1:x,2026-09-24:4:1:9,2026-09-25:1:2");
+	REQUIRE(mixed.size() == 3);
+	CHECK(mixed[0].day == "2026-09-20");
+	CHECK(mixed[0].commits == 0);
+	CHECK(mixed[1].day == "2026-09-21");
+	CHECK(mixed[1].builds == 0);
+	CHECK(mixed[1].commits == 3);
+	CHECK(mixed[2].day == "2026-09-25");
+	CHECK(mixed[2].commits == 2);
+	// Written only where there were commits, so a day without one reads in an
+	// editor from before the field.
+	CHECK(formatRecent(mixed) == "2026-09-20:2,2026-09-21:0:3,2026-09-25:1:2");
+
 	// Only the last kRecentDays days with a moment are kept.
 	Tally w;
 	for (int d = 1; d <= 20; ++d)
@@ -998,6 +1035,12 @@ TEST_CASE("Rewards: a tally from before the history is seeded from its streak")
 	CHECK(t.recent[2].day == "2026-03-02");
 	CHECK(t.recent[2].builds == 4);
 	CHECK(t.recent[0].builds == 0);
+	CHECK(t.recent[2].commits == 0);
+	Tally c;
+	c.day = "2026-03-02"; c.commitsToday = 2; c.streakDays = 1;
+	seedRecent(c);
+	REQUIRE(c.recent.size() == 1);
+	CHECK(c.recent[0].commits == 2);
 	// Seeded once: a history that exists is left alone.
 	t.streakDays = 30;
 	seedRecent(t);
@@ -1343,4 +1386,232 @@ TEST_CASE("Rewards: the recent days show on hover of the counters, and only then
 	CHECK_FALSE(hoverFor(kShotW * 0.5f, midY, 60).first);
 	bits.config.RewardsShowProgress = true;
 	hoverFor(-100.0f, -100.0f, 2);
+}
+
+// ── Topic 140: compile, commit and tour moments ──────────────────────────────
+
+TEST_CASE("Rewards: a commit then a push merge into one line with both flags")
+{
+	Feed f;
+	CHECK(f.take(Moment::Committed, kSyncCommit, 0.0, 1, false).shown);
+	CHECK(f.look(0.0).line == "Committed");
+	// The push lands while the line still shows: same kind, flags OR-ed —
+	// never "added" into a third value.
+	const Feed::Taken push = f.take(Moment::Committed, kSyncPush, 0.5, 2, false);
+	CHECK(push.shown);
+	CHECK(f.look(0.5).line == "Committed and pushed");
+	CHECK(f.take(Moment::Committed, kSyncPush, 0.8, 3, false).shown);
+	CHECK(f.look(0.8).line == "Committed and pushed");
+	// A merge holds the line anew, as for any other kind.
+	CHECK(f.look(0.8 + kHoldSec).active);
+}
+
+TEST_CASE("Rewards: equal rank, other kind: the newer moment replaces the line")
+{
+	Feed f;
+	CHECK(f.take(Moment::BuildSucceeded, 1, 0.0, 1, false).shown);
+	const Feed::Taken c = f.take(Moment::Committed, kSyncCommit, 0.3, 2, false);
+	CHECK(c.shown);
+	CHECK(f.look(0.3).line == "Committed");
+	const Feed::Taken t = f.take(Moment::TourFinished, 1, 0.6, 3, false);
+	CHECK(t.shown);
+	CHECK(f.look(0.6).line == "Tutorial complete");
+	// A compile under a tour line: lower, counted, not shown.
+	CHECK_FALSE(f.take(Moment::CompiledClean, 1, 0.9, 4, false).shown);
+	CHECK(f.look(0.9).line == "Tutorial complete");
+	// A compile over a save line: higher, replaces it.
+	Feed g;
+	CHECK(g.take(Moment::Saved, 1, 0.0, 1, false).shown);
+	CHECK(g.take(Moment::CompiledClean, 1, 0.2, 2, false).shown);
+	CHECK(g.look(0.2).line == "Compiles clean");
+	CHECK_FALSE(g.take(Moment::Saved, 1, 0.4, 3, false).shown);
+}
+
+TEST_CASE("Rewards: a moment without a tone never sounds and books no gap")
+{
+	// Even if a caller says "may sound", a toneless moment does not take one…
+	for (Moment m : { Moment::CompiledClean, Moment::Committed, Moment::TourFinished })
+	{
+		Feed g;
+		CAPTURE(static_cast<int>(m));
+		const Feed::Taken r = g.take(m, 1, 0.0, 1, true);
+		CHECK(r.shown);
+		CHECK_FALSE(r.sound);
+		// …so the next tone is not pushed back by it.
+		CHECK(g.takeTone(Tone::SaveTick, 0.1));
+	}
+}
+
+TEST_CASE("Rewards: each new moment has its own switch, the old ones have none")
+{
+	EditorConfig c;
+	for (Moment m : { Moment::Saved, Moment::BuildSucceeded, Moment::AssetsImported,
+	                  Moment::CompiledClean, Moment::Committed, Moment::TourFinished })
+		CHECK(momentWanted(c, m));
+	c.RewardsMomentCompile = false;
+	CHECK_FALSE(momentWanted(c, Moment::CompiledClean));
+	CHECK(momentWanted(c, Moment::Committed));
+	c.RewardsMomentCommit = false;
+	CHECK_FALSE(momentWanted(c, Moment::Committed));
+	CHECK(momentWanted(c, Moment::TourFinished));
+	c.RewardsMomentTutorial = false;
+	CHECK_FALSE(momentWanted(c, Moment::TourFinished));
+	// The topic-75 moments answer to Visual/Sound, not to these.
+	CHECK(momentWanted(c, Moment::Saved));
+	CHECK(momentWanted(c, Moment::BuildSucceeded));
+	CHECK(momentWanted(c, Moment::AssetsImported));
+}
+
+TEST_CASE("Rewards: compile, commit and tour count the day; only commits count commits")
+{
+	Tally t;
+	// A clean compile is the day's first moment: the day is used, no build.
+	CHECK(recordMoment(t, "2026-10-05", Moment::CompiledClean));
+	CHECK(t.day == "2026-10-05");
+	CHECK(t.streakDays == 1);
+	CHECK(t.buildsToday == 0);
+	CHECK(t.commitsToday == 0);
+	// The day is already counted: a compile or a tour changes nothing more.
+	CHECK_FALSE(recordMoment(t, "2026-10-05", Moment::CompiledClean));
+	CHECK_FALSE(recordMoment(t, "2026-10-05", Moment::TourFinished));
+	// A push alone is no commit.
+	CHECK_FALSE(recordMoment(t, "2026-10-05", Moment::Committed, kSyncPush));
+	CHECK(t.commitsToday == 0);
+	// A commit (with or without its push) is one.
+	CHECK(recordMoment(t, "2026-10-05", Moment::Committed, kSyncCommit));
+	CHECK(recordMoment(t, "2026-10-05", Moment::Committed, kSyncCommit | kSyncPush));
+	CHECK(t.commitsToday == 2);
+	CHECK(t.buildsToday == 0);
+	REQUIRE_FALSE(t.recent.empty());
+	CHECK(t.recent.back().commits == 2);
+	CHECK(t.recent.back().builds == 0);
+	// Builds still count as before, beside the commits.
+	CHECK(recordMoment(t, "2026-10-05", Moment::BuildSucceeded));
+	CHECK(t.buildsToday == 1);
+	CHECK(t.recent.back().builds == 1);
+	CHECK(t.recent.back().commits == 2);
+	CHECK(formatRecent(t.recent) == "2026-10-05:1:2");
+
+	// The next day: a tour moment carries the streak; the commits start over.
+	CHECK(recordMoment(t, "2026-10-06", Moment::TourFinished));
+	CHECK(t.streakDays == 2);
+	CHECK(t.commitsToday == 0);
+	CHECK(t.buildsToday == 0);
+	// The footer text does not grow a commits part — the tooltip only.
+	CHECK(progressText(t, "2026-10-06") == "0 builds today · 2 days in a row");
+
+	const std::vector<DayCell> week = recentDays(t, "2026-10-06");
+	REQUIRE(week.size() == static_cast<size_t>(kRecentDays));
+	CHECK(week[5].day == "2026-10-05");
+	CHECK(week[5].commits == 2);
+	CHECK(week[6].used);
+	CHECK(week[6].commits == 0);
+
+	CHECK(commitsPhrase(0).empty());
+	CHECK(commitsPhrase(1) == "1 commit today");
+	CHECK(commitsPhrase(4) == "4 commits today");
+}
+
+TEST_CASE("Rewards: SyncWatch fires once for a request that went through")
+{
+	SyncWatch w;
+	// Nothing asked: nothing, however idle and however it says "Committed.".
+	CHECK(w.poll(true, "", "Committed.") == 0);
+
+	w.requested(kSyncCommit);
+	CHECK(w.armed());
+	// Still busy before the pump: not judged yet, and still armed.
+	CHECK(w.poll(false, "", "") == 0);
+	CHECK(w.armed());
+	// Idle before the pump: judged once.
+	CHECK(w.poll(true, "", "Committed.") == kSyncCommit);
+	CHECK_FALSE(w.armed());
+	CHECK(w.poll(true, "", "Committed.") == 0);
+
+	// A failure: lastError set — no moment, and disarmed.
+	w.requested(kSyncPush);
+	CHECK(w.poll(true, "push rejected", "") == 0);
+	CHECK_FALSE(w.armed());
+	// A failure whose error a later status refresh cleared again: lastInfo is
+	// what the error had wiped, so still no moment.
+	w.requested(kSyncCommit);
+	CHECK(w.poll(true, "", "") == 0);
+
+	// Commit then push before the first was judged: one answer with both.
+	w.requested(kSyncCommit);
+	w.requested(kSyncPush);
+	CHECK(w.poll(true, "", "Pushed.") == (kSyncCommit | kSyncPush));
+	// Nonsense flags are not passed through.
+	w.requested(8);
+	CHECK_FALSE(w.armed());
+}
+
+TEST_CASE("Rewards: a moment's own switch hides it from the footer")
+{
+	FooterHarness h;
+	AudioEngine project, ui;
+	RewardsContextBits bits;
+	AppContext ctx = bits.make(project, ui);
+	settle(ctx);
+
+	// On (the default): "Compiles clean" shows, with its light edge.
+	CHECK(edgeInk(shotAfter(ctx, Moment::CompiledClean, 12)) > 20);
+	settle(ctx);
+	CHECK(edgeInk(shotAfter(ctx, Moment::TourFinished, 12)) > 20);
+	settle(ctx);
+	footerFrame(ctx, 1.0f / 60.0f, [&] { fire(ctx, Moment::Committed, kSyncCommit | kSyncPush); });
+	for (int i = 1; i < 12; ++i) footerFrame(ctx);
+	he_ui::Image committed = footerShot(ctx);
+	dumpShot(committed, "rewards_footer_committed");
+	CHECK(edgeInk(committed) > 20);
+	settle(ctx);
+
+	// Off: nothing shows for that moment…
+	bits.config.RewardsMomentCompile = false;
+	CHECK(edgeInk(shotAfter(ctx, Moment::CompiledClean, 12)) == 0);
+	// …and a lower moment right after is not outranked by a hidden line.
+	CHECK(edgeInk(shotAfter(ctx, Moment::Saved, 12)) > 20);
+	bits.config.RewardsMomentCompile = true;
+	settle(ctx);
+	bits.config.RewardsMomentCommit = false;
+	CHECK(edgeInk(shotAfter(ctx, Moment::Committed, 12)) == 0);
+	bits.config.RewardsMomentCommit = true;
+	settle(ctx);
+	bits.config.RewardsMomentTutorial = false;
+	CHECK(edgeInk(shotAfter(ctx, Moment::TourFinished, 12)) == 0);
+	bits.config.RewardsMomentTutorial = true;
+	settle(ctx);
+}
+
+TEST_CASE("Rewards: post() fires on the next pollBuild, not before")
+{
+	FooterHarness h;
+	AudioEngine project, ui;
+	RewardsContextBits bits;
+	AppContext ctx = bits.make(project, ui);
+	settle(ctx);
+
+	// Posted in one frame (a hook without an AppContext): nothing yet.
+	footerFrame(ctx, 1.0f / 60.0f, [&] { post(Moment::CompiledClean); });
+	for (int i = 0; i < 11; ++i) footerFrame(ctx);
+	CHECK(edgeInk(footerShot(ctx)) == 0);
+	// The next frame's pollBuild fires it — in that frame's clock.
+	footerFrame(ctx, 1.0f / 60.0f, [&] { pollBuild(ctx, 0, false, false, true); });
+	for (int i = 1; i < 12; ++i) footerFrame(ctx);
+	CHECK(edgeInk(footerShot(ctx)) > 20);
+	settle(ctx);
+	// Fired once: a second pollBuild has nothing left.
+	footerFrame(ctx, 1.0f / 60.0f, [&] { pollBuild(ctx, 0, false, false, true); });
+	for (int i = 1; i < 12; ++i) footerFrame(ctx);
+	CHECK(edgeInk(footerShot(ctx)) == 0);
+
+	// With the master off a posted moment is gone, not kept for later.
+	bits.config.RewardsEnabled = false;
+	post(Moment::CompiledClean);
+	footerFrame(ctx, 1.0f / 60.0f, [&] { pollBuild(ctx, 0, false, false, true); });
+	bits.config.RewardsEnabled = true;
+	footerFrame(ctx, 1.0f / 60.0f, [&] { pollBuild(ctx, 0, false, false, true); });
+	for (int i = 1; i < 12; ++i) footerFrame(ctx);
+	CHECK(edgeInk(footerShot(ctx)) == 0);
+	settle(ctx);
 }

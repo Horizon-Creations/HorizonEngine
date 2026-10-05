@@ -95,6 +95,9 @@ struct EditorConfig
 	bool  RewardsVisual        = true;   // the footer's "Saved"/"Build succeeded" line
 	bool  RewardsCheckMark     = true;   // V1: its drawn check (under Visual)
 	bool  RewardsLightEdge     = true;   // V2b: its pulse along the footer's top (under Visual)
+	bool  RewardsMomentCompile  = true;  // moment 4 "Compiles clean" — the moment only;
+	bool  RewardsMomentCommit   = true;  // moment 5 "Committed"        counting goes on
+	bool  RewardsMomentTutorial = true;  // moment 6 "Tutorial complete" (topic 140)
 	bool  RewardsTabCheck      = true;   // V4: a saved tab's " *" becomes a check
 	bool  RewardsImportHighlight = true; // V5: just-imported tiles get a fading frame
 	int   RewardsReducedMotion = 0;      // 0 = follow the system, 1 = off (full motion)
