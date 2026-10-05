@@ -3174,6 +3174,28 @@ std::string uncoveredVk(const std::vector<VkUse>& uses, uint32_t rows)
 	}
 	return miss;
 }
+
+// The same for uses in a FRAGMENT shader, held to the stage bits too (a row
+// that exists but is vertex-only does not serve the fragment stage), with the
+// row for `skipBinding` taken out of the table — the negative control for a
+// row that is not the last one. ~0u skips nothing.
+std::string uncoveredVkFragment(const std::vector<VkUse>& uses, uint32_t skipBinding = ~0u)
+{
+	std::string miss;
+	for (const VkUse& u : uses)
+	{
+		bool ok = false;
+		for (uint32_t i = 0; i < HE::vkmat::kBindingCount && !ok; ++i)
+		{
+			const HE::vkmat::Binding& row = HE::vkmat::kBindings[i];
+			ok = row.binding != skipBinding && u.set == 0 && row.binding == u.binding
+			  && static_cast<int>(row.kind) == u.kind && (row.stages & HE::vkmat::kStageFragment);
+		}
+		if (!ok)
+			miss += " " + std::to_string(u.set) + "/" + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
 } // namespace
 
 TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in the material layout (Thema 117)")
@@ -3260,13 +3282,97 @@ TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in
 	CHECK(withLists * 2 > static_cast<int>(cases.size()));
 	// Thema 120: the preamble's sky/AO/DDGI/GI-refl/cloud samplers (15..18,
 	// 32, 33) are layout rows now — the DDGI atlases are written to 17/18 —
-	// so none of them may fall back into the gap.
+	// so none of them may fall back into the gap. Thema 143: nor may 14
+	// (heLandscapeWeights, the painted terrain lavapipe crashed on).
 	for (const VkUse& u : plainGap)
-		for (uint32_t b : { 15u, 16u, 17u, 18u, 32u, 33u })
+		for (uint32_t b : { 14u, 15u, 16u, 17u, 18u, 32u, 33u })
 			CHECK_MESSAGE(u.binding != b, "plain uses binding ", b, " outside the material layout");
 	MESSAGE("clustered SPIR-V with set 0 SSBOs 24..26: ", withLists, "/", cases.size(),
 	        "; plain uses outside the layout (pre-existing):",
 	        uncoveredVk(std::vector<VkUse>(plainGap.begin(), plainGap.end()), 0));
+}
+
+// ═══ Thema 143: heLandscapeWeights is a Vulkan material layout row ══════════
+// A Landscape Layer Blend graph samples its weightmap at set 0 binding 14. The
+// layout lacked that row: NVIDIA answered with VUID-…-layout-07988 and an
+// "invalid" descriptor per draw (and drew the terrain unpainted), lavapipe with
+// SIGSEGV in the first draw. Held here the same way as the Thema 117/120 rows:
+// reflection of the statically used descriptors against HE::vkmat::kBindings.
+TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, and the rest of the gap is UI-only (Thema 143)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using HE::vkmat::DescKind;
+	HE::MaterialShaderLibrary lib;
+	const VkUse weights{ 0, HE::vkmat::kLandscapeWeightsBinding, static_cast<int>(DescKind::CombinedImageSampler) };
+
+	// The row itself, fragment stage, ahead of the cluster lists.
+	bool row = false;
+	for (uint32_t i = 0; i < HE::vkmat::kPreClusterBindingCount; ++i)
+		row = row || (HE::vkmat::kBindings[i].binding == 14
+		              && HE::vkmat::kBindings[i].kind == DescKind::CombinedImageSampler
+		              && HE::vkmat::kBindings[i].stages == HE::vkmat::kStageFragment);
+	CHECK(row);
+
+	// The device limit: 17 fragment samplers with the row, 16 (the spec
+	// minimum, which every device meets) without it — the renderer's fallback.
+	CHECK(HE::vkmat::fragmentSamplerCount(true) == 17);
+	CHECK(HE::vkmat::fragmentSamplerCount(false) == 16);
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
+	CHECK(HE::vkmat::landscapeWeightsFit(17, 17));
+	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+
+	int landscapeCases = 0;
+	std::set<VkUse> fragGap;           // stage-aware: what no fragment row serves
+	std::set<std::string> fragGapCases;
+	for (const NodeShaderCase& c : allNodeShaderCases())
+	{
+		const uint64_t h = caseHash(c);
+		for (const bool clustered : { false, true })
+		{
+			const auto& sv = clustered ? lib.fragmentClustered(h, c.glsl, B::SpirV) : lib.fragment(h, c.glsl, B::SpirV);
+			REQUIRE_MESSAGE(sv.ok, c.name, ": ", sv.log);
+			std::string err;
+			const std::vector<VkUse> uses = activeVkDescriptors(sv.spirv, err);
+			REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
+			const bool usesWeights = std::find(uses.begin(), uses.end(), weights) != uses.end();
+			const bool declares    = c.glsl.find("heLandscapeWeights") != std::string::npos;
+			// Only a layer-blend graph reaches binding 14 — what lets the renderer
+			// gate its fallback on the GLSL text alone.
+			CHECK_MESSAGE(usesWeights == declares, std::string(c.name));
+			if (usesWeights)
+			{
+				++landscapeCases;
+				// Positive: the full table serves it in the fragment stage.
+				CHECK_MESSAGE(uncoveredVkFragment({ weights }).empty(), std::string(c.name));
+				// Negative control: the same table without row 14 leaves exactly
+				// that use uncovered — the state before this fix.
+				CHECK_MESSAGE(uncoveredVkFragment(uses, 14) == " 0/14:1", std::string(c.name));
+			}
+			for (const VkUse& u : uses)
+				if (!uncoveredVkFragment({ u }).empty())
+				{
+					fragGap.insert(u);
+					fragGapCases.insert(c.name);
+				}
+		}
+	}
+	// The sweep did reach the Landscape Layer Blend node (plain + clustered).
+	CHECK(landscapeCases >= 2);
+
+	// What is left is the UI domain alone, and it is two uses no layout row can
+	// fix: HeUI (binding 8) is a FRAGMENT uniform block where the layout has the
+	// WPO vertex HeLighting, and heBackdrop (binding 9) is a combined sampler
+	// where the layout has the WPO vertex HeParams UBO. Vulkan has no UI-material
+	// pass (only GL/Metal draw UI-domain graphs), so the mesh path is the only
+	// way in. Listed exactly, so the gap cannot grow silently.
+	const std::set<VkUse> uiOnly = { { 0, 8, static_cast<int>(DescKind::UniformBuffer) },
+	                                 { 0, 9, static_cast<int>(DescKind::CombinedImageSampler) } };
+	CHECK_MESSAGE(fragGap == uiOnly, "fragment uses outside the layout:",
+	              uncoveredVk(std::vector<VkUse>(fragGap.begin(), fragGap.end()), 0));
+	for (const std::string& name : fragGapCases)
+		CHECK_MESSAGE(name.find("(UI domain)") != std::string::npos, name, " uses a binding outside the layout");
 }
 
 // ═══ Thema 117 Schritt 6: OpenGL 4.3 binds the clustered variant ═════════════

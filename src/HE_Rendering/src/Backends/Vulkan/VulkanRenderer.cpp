@@ -2534,16 +2534,39 @@ void VulkanRenderer::createMaterialResources()
         }
         return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     };
+    // heLandscapeWeights brings the fragment stage to 17 combined samplers, one over
+    // the spec minimum of the per-stage limits. A device AT that minimum gets the
+    // layout without its row (and layer-blend materials draw built-in, see drawDCVk)
+    // rather than a layout it cannot create. The line is the evidence either way.
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(
+            props.limits.maxPerStageDescriptorSamplers, props.limits.maxPerStageDescriptorSampledImages);
+        char line[320];
+        std::snprintf(line, sizeof line,
+            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
+            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u -> heLandscapeWeights %s",
+            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentSamplerCount(false),
+            props.limits.maxPerStageDescriptorSamplers, props.limits.maxPerStageDescriptorSampledImages,
+            m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)");
+        if (m_matLandscapeWeights) HE_LOG_INFO(RHI, "%s", line);
+        else                       HE_LOG_WARN(RHI, "%s", line);
+    }
     VkDescriptorSetLayoutBinding b[HE::vkmat::kBindingCount]{};
+    uint32_t nb = 0;
     for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
     {
-        b[i].binding         = HE::vkmat::kBindings[i].binding;
-        b[i].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
-        b[i].descriptorCount = 1;
-        b[i].stageFlags      = HE::vkmat::kBindings[i].stages;
+        if (!m_matLandscapeWeights && HE::vkmat::kBindings[i].binding == HE::vkmat::kLandscapeWeightsBinding)
+            continue;
+        b[nb].binding         = HE::vkmat::kBindings[i].binding;
+        b[nb].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
+        b[nb].descriptorCount = 1;
+        b[nb].stageFlags      = HE::vkmat::kBindings[i].stages;
+        ++nb;
     }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = HE::vkmat::kBindingCount;
+    slci.bindingCount = nb;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -2588,7 +2611,7 @@ void VulkanRenderer::createMaterialResources()
         using HE::vkmat::countOf;
         VkDescriptorPoolSize ps[3] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         countOf(DescKind::UniformBuffer)        * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b13,b15-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -7060,8 +7083,23 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             if (m_matReady && m_contentManager)
             {
                 uint64_t matHash = 0; std::string matFrag, matVertBody;
+                // A layer-blend graph samples heLandscapeWeights; on a device whose
+                // layout had to leave binding 14 out (createMaterialResources) its
+                // pipeline would be invalid, so it draws built-in PBR there instead.
+                auto matFitsLayout = [&]() {
+                    if (m_matLandscapeWeights || matFrag.find("heLandscapeWeights") == std::string::npos)
+                        return true;
+                    if (!m_matLandscapeWarned)
+                    {
+                        m_matLandscapeWarned = true;
+                        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: a Landscape Layer Blend material draws built-in "
+                                               "PBR — this device has no sampler slot left for heLandscapeWeights");
+                    }
+                    return false;
+                };
                 if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
-                                                  matHash, matFrag, matVertBody))
+                                                  matHash, matFrag, matVertBody)
+                    && matFitsLayout())
                 {
                     // Transparent graph materials get a blend-on / depth-write-off
                     // pipeline variant. MUST use the same predicate the opaque/blended
@@ -7121,6 +7159,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 if (VkImageView v = resolveGraphTexture(gIds[i], gPaths[i]))
                                     heTexP[i] = v;
                         }
+                        // heLandscapeWeights (binding 14) = the object's landscape weightmap,
+                        // PER DRAW like D3D11 t14 / GL unit 13 / Metal slot 13: it belongs to
+                        // the terrain the chunk is part of, not to the material. Anything that
+                        // is not a landscape chunk gets the 1x1 (1,0,0,0) default, so a layer
+                        // blend resolves to layer 0 instead of black; white is the last
+                        // resort. Resolved before `ma` below for the same reason as heTexP.
+                        VkImageView heWeights = VK_NULL_HANDLE;
+                        if (dc.weightmapTextureId != HE::UUID{})
+                            heWeights = resolveGraphTexture(dc.weightmapTextureId, {});
+                        if (!heWeights)
+                            heWeights = resolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+                        if (!heWeights) heWeights = m_whiteAlbedoView;
 
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
@@ -7299,9 +7349,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // HE_FORWARD_CLUSTER=0): a clustered pipeline statically uses
                             // them, so its set must be complete. Without them every
                             // pipeline is the plain variant, which uses none of the three.
-                            static_assert(HE::vkmat::kPreClusterBindingCount == 21,
-                                          "one fixed write (w[0..20]) per non-cluster layout row");
-                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount;
+                            // heLandscapeWeights (14): the weightmap resolved above,
+                            // linear-CLAMP like D3D11's s0 (a [0,1] weight field; a
+                            // repeating sampler would bleed the far edge's paint in).
+                            // Only when the layout has the row (m_matLandscapeWeights).
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 22,
+                                          "fixed writes w[0..20] + w[21] heLandscapeWeights, one per non-cluster row");
+                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 1;
+                            VkDescriptorImageInfo weightsII{ m_ssaoSampler ? m_ssaoSampler : m_albedoSampler,
+                                                             heWeights, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            if (m_matLandscapeWeights)
+                                wr(static_cast<int>(nWrites++), HE::vkmat::kLandscapeWeightsBinding,
+                                   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &weightsII);
                             VkDescriptorBufferInfo clusterBI[3]{};
                             if (m_clusterReady)
                             {
