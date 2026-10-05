@@ -1,6 +1,6 @@
 # Wasser-Shader als Engine-Material — Plan (Thema 152)
 
-Stand 2026-10-05, Schritt 1 (Bestandsaufnahme). Nichts am Renderer geändert.
+Stand 2026-10-05, Schritt 1 (Bestandsaufnahme), auf Bitte des Leitstands vor Abschnitt 3 beendet. Nichts am Renderer geändert.
 
 Ziel: ein Wasser-Material als Engine-Content, gebaut als Material-Node-Graph, auf allen
 fünf Backends über die bestehende Graph-Shader-Pipeline, mit vollem Parametersatz im
@@ -11,7 +11,45 @@ Ozean-Mesh-Komponente.
 
 ## 1. Befund: wie Default-Materialien registriert werden
 
-<!-- EDITOR-BEFUND -->
+Zwei Mechanismen gibt es heute:
+
+1. **Im Code, `mem://`:** `ContentManager::initDefaultAssets` (`ContentManager.cpp:2964`)
+   registriert Würfel, Quad, Weiß-Textur, `kDefaultMaterialId` (`:3106`, reines PBR ohne
+   Graph), `kDefaultTerrainMaterialId` (`:3157`) und die Editor-Icon-Materialien
+   (`:3243–3269`, als **Graph** gebaut: `MaterialGraph` → `generateFragment` →
+   `nodeGraphJson`/`customShaderFragGlsl`). UUIDs in `DefaultAssets.h`.
+2. **Als Datei, `Engine/…`:** `.hasset` unter `EditorDeps/EngineContent/`, deterministisch
+   erzeugt und committet von Generatoren außerhalb des normalen Builds
+   (`src/HE_Tools/CMakeLists.txt:136–173`): `mesh_gen` (UUID-Block hi=0x100), `widget_gen`
+   (0x200), `matfn_gen` (0x300, `src/HE_Tools/src/MatFnGen/main.cpp`). **hi=0x400 ist frei.**
+   `scanContentDirectory` indexiert sie mit Präfix `Engine/` (`ContentManager.cpp:2907–2928`),
+   der Exporter packt sie mit (`ProjectExporter.cpp:778–783`). Für Nutzer schreibgeschützt,
+   Speichern legt eine projekteigene Kopie an (`ContentManager.cpp:983–990`).
+
+Was davon im Editor auftaucht:
+
+- **Inspector-Materialslot** (`InspectorPanel.cpp:1965–1973`) und Picker
+  (`EditorWidgets.cpp:91–199` über `HcEditorUtil::listAssets`, `HcEditorUtil.cpp:93–100`)
+  listen nur `.hasset` auf der Platte unter Projekt- und Engine-Root. **`mem://`-Materialien
+  erscheinen nie** — nicht absichtlich versteckt, sie haben schlicht keine Datei.
+- **Content Browser** ist rein dateisystembasiert (`GlobalState::refreshEngineFolder`,
+  `GlobalState.cpp:820–879`), also dasselbe.
+- Ein `.hasset`-Material wird beim Laden aus `nodeGraphJson` neu erzeugt
+  (`regenerateMaterialFromGraph`, `ContentManager.cpp:764`; Fragment, G-Buffer, WPO,
+  Texturen, Parameter, Werte bleiben per Name erhalten). Der Generator muss nur den Graphen
+  schreiben.
+- Es gibt **noch kein** Material-`.hasset` in EngineContent (`Materials/` hat nur
+  `.gitkeep`); der Pfad `Engine/Materials/…` ist in Tests schon vorgesehen
+  (`tests/test_mcp_tools_material.cpp:910–935`).
+
+Das „globale Fallback-Material" ist **nicht** `kDefaultMaterialId`: ein Mesh ohne Material
+behält `materialAssetId` null (`RenderExtractor.cpp:131–133`) und zeichnet mit dem fest
+eingebauten Backend-Default (Metal `MetalRenderer.mm:9107–9122`, `:13344`: weiß bei Textur,
+sonst Grau 0.55, Rauheit 0.5; OpenGL gleich, `OpenGLRenderer.cpp:8404`; D3D/Vulkan nicht
+geprüft). `kDefaultMaterialId` nutzen nur die Projektvorlagen (`ProjectManager.cpp:1631`,
+`:1637`, `:1661`), die Vorschau im LevelScriptPanel (`:2498`) und `TerrainSystem`, das ihn als
+„nicht zugewiesen" liest und durch das Terrain-Material ersetzt (`TerrainSystem.cpp:417`,
+`:490`). Ein Test pinnt seine Werte (`tests/test_contentmanager.cpp:889–899`).
 
 ---
 
@@ -56,13 +94,37 @@ Der Graph liefert nur die Attribute (Unreal-Modell), die Beleuchtung macht die E
 
 ## 3. Befund: Transparenz/Blend pro Backend
 
-<!-- BACKEND-BEFUND -->
+**Offen — Schritt 1 wurde auf Bitte des Leitstands vor diesem Abschnitt beendet.**
+Fest steht nur: `MatBlendMode::Translucent` existiert und leitet ins sortierte
+Alpha-Blend-Pass (`MaterialGraph.h:174`), und `heLitP` hängt die Himmelsreflexion an
+`heLight.fog.z` (laut Kommentar `MaterialShaderLibrary.cpp:675–680` setzte Vulkan `fog.z`
+zumindest früher nicht). Noch zu belegen, pro Backend mit Datei:Zeile: Gibt es den
+Translucent-Pass für **Graph**-Materialien? Blendfaktoren, Depth-Write aus/-Test an? Läuft
+er mit Lit-Preamble (`heSkyEnv`, SSR, CSM)? Im Deferred-Pfad nach dem Resolve forward
+gezeichnet? Wird `fog.z` und `sunDir.w` (Zeit) überall gesetzt? Welche Bindungen/Slots
+sind frei für SceneColor/SceneDepth (Metal-Fragment ist am 16-Sampler-Limit, HLSL-SM5-Pin-
+Tabelle in `MaterialShaderLibrary::fragment`)? Wie macht `Backdrop` das im UI-Pass?
 
 ---
 
 ## 4. Entscheidung
 
-<!-- ENTSCHEIDUNG -->
+**Das Wasser wird ein zusätzliches Engine-Material, es ersetzt nichts.**
+
+- `kDefaultMaterialId` zu ersetzen hieße: jede Vorlagen-Box und die Tutorial-Szene wären
+  Wasser, und das echte Fallback (Mesh ohne Material) bliebe trotzdem grau. Gewinn null.
+- Form: `EditorDeps/EngineContent/Materials/Water.hasset`, erzeugt von einem neuen Generator
+  nach dem `matfn_gen`-Muster (`mat_gen`, UUID-Block **hi=0x400**, lo=1, „anhängen, nie
+  umordnen"). Nur so erscheint es ohne Zutun im Content Browser und im Inspector-Picker und
+  wird mit dem Spiel ausgeliefert.
+- `DefaultAssets.h` bekommt dafür eine **Konstante** `kEngineWaterMaterialId = {0x400, 1}`
+  mit Kommentar „lebt als Engine/Materials/Water.hasset", damit Code es per UUID findet.
+  **Nicht** zusätzlich in `initDefaultAssets` als `mem://` registrieren: dieselbe UUID zweimal
+  (Speicher + Datei) kollidiert, und jede neue `initDefaultAssets`-Zeile bricht
+  `tests/test_contentmanager.cpp:925` (`defaultCount == 18`) und `:948` (`materials == 7`).
+- Ein `.hasset` darf **keine** `mem://`-Textur referenzieren (im gepackten Spiel nicht
+  auflösbar, `HpakWriter.cpp:308–311`). Texturen nur als `Engine/…`-Pfad oder prozedural.
+- Varianten (See, Ozean, Sumpf) als Material-Instanzen dieses Elternmaterials.
 
 ---
 
@@ -102,10 +164,13 @@ Texturen (≤ 4): eine kachelbare Wasser-Normalmap, gelesen von allen drei Welle
 (dedupliziert = 1 Slot), optional eine Schaum-Rauschtextur. Beides gibt es in EngineContent
 **noch nicht**; ohne Textur gilt die prozedurale Normale (Abschnitt 6).
 
-UX-Kosten der Packung: der Inspector zeigt `ParamVec4` heute als vier unbeschriftete Zahlen.
-Die Bedeutung der Komponenten steht deshalb im Tooltip des Param-Knotens (`tooltip`-Feld,
-wird im Inspector angezeigt). Beschriftete Komponenten wären eine Editor-Änderung für
-später. "Alle Parameter einstellbar" ist damit erfüllt, schön ist es noch nicht.
+UX-Kosten der Packung: der Inspector (`InspectorPanel.cpp:2096–2160`, Abschnitt "Material
+Parameters (this entity)", schreibt Pro-Entity-Overrides) zeigt `ParamVec4` als vier
+unbeschriftete Zahlen (`Row::dragFloat4`) und **ignoriert Tooltip, Gruppe und Slider-Bereich**
+des Param-Knotens. Diese Metadaten kommen heute nur im Material-Editor an
+(`MaterialEditorPanel.cpp:1965`). Damit "alle Parameter im Inspector einstellbar" mehr ist
+als vier nackte Zahlen, sollte Schritt 2 den Inspector-Abschnitt um Tooltip (Bedeutung der
+Komponenten) und Slider-Bereich ergänzen. Das ist eine kleine Editor-Änderung, kein Renderer.
 
 Ohne SceneDepth/SceneColor wirken `Turbidity`, `Refraction`, `Foam` und die Tiefen-
 ausblendung der Kaustik nicht so, wie sie sollen. Rückfall ohne neue Knoten: Farbe aus
@@ -137,4 +202,17 @@ ausgeschlossenen Unterwasser-Teil.
 
 ## 7. Folgen für die nächsten Schritte
 
-<!-- FOLGEN -->
+- **Vor Schritt 2:** Abschnitt 3 nachziehen (Backend-Tabelle). Davon hängt ab, ob ein
+  Translucent-Graph-Wasser auf allen fünf Backends überhaupt gezeichnet und gespiegelt wird.
+- **Schritt 2 ohne Renderer machbar:** `mat_gen` + `Water.hasset` + Konstante in
+  `DefaultAssets.h`; Graph mit Wellen aus `WorldPos.xz`, prozeduraler oder Normalmap-Normale,
+  Fresnel-Farbmischung, lit + Translucent, Parametern nach Abschnitt 5. Dazu Inspector-
+  Abschnitt um Tooltip/Slider ergänzen (Editor). Neue Codegen-Knoten (Screen UV, Normal
+  from Height) gehen ohne Renderer; jeder neue Knoten braucht die Registry-Stellen
+  (Display-Name, Doku, Tests).
+- **Renderer-Arbeit, eigener Schritt/Thema:** SceneDepth + SceneColor (Kopien vor dem
+  Translucent-Pass, neue Bindungen in fünf Backends). Erst danach wirken Tiefenfärbung,
+  Trübung, Küstenschaum und Refraktion echt; bis dahin der Fresnel-Rückfall aus Abschnitt 5.
+- Eine Wasser-Normalmap als `Engine/`-Textur fehlt; ohne sie prozedurale Normale.
+- „Sichtbar animiert auf einer Plane" geht über Normalen/UV; WPO braucht ein unterteiltes
+  Mesh (Engine-Plane ist ein Quad).
