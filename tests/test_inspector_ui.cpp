@@ -7,6 +7,7 @@
 #include "EditorUndo.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "HcEditorUtil.h"     // listAssets: what the material picker offers
 
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>
@@ -840,6 +841,13 @@ TEST_CASE("inspector ui: the engine water material shows all fifteen parameters,
 		names.insert(m->graphParamNames.begin(), m->graphParamNames.end());
 	}
 	REQUIRE(names.size() == 15);
+
+	// Selectable without any setup: the material slot's picker lists it
+	// (EditorWidgets → HcEditorUtil::listAssets, the same scan the panel runs).
+	bool listed = false;
+	for (const HcEditorUtil::ClassRef& r : HcEditorUtil::listAssets(&cm, HE::AssetType::Material))
+		listed = listed || r.path == "Engine/Materials/Water.hasset";
+	CHECK(listed);
 
 	HorizonWorld world;
 	EditorUndo   undo;
