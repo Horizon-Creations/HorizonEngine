@@ -387,9 +387,10 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
   Schritt 6**). `VulkanRenderer::runGi()` rief `m_extractor.extract()` ohne vorheriges
   `setDayNight()` auf. Die GI-Maske rechnete also mit der Sonne des Vorframes, während der
   Scene-Pass die aktuelle nutzte. Metal ruft `setDayNight()` vor jeder GI-Extraktion auf, D3D11,
-  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Jetzt setzt `runGi()` den
-  Zustand selbst, mit demselben Aufruf wie `DrawScene()`. Der Test in `tests/test_culling.cpp`
-  („Vulkan GI extracts with this frame's sun …") prüft die Reihenfolge im Quelltext. Negativkontrolle:
+  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Damals setzte `runGi()` den
+  Zustand selbst, mit demselben Aufruf wie `DrawScene()`. Seit Thema 146 kommt er vom Frame-Anfang
+  (siehe unten), und der Test in `tests/test_culling.cpp` heißt jetzt „Vulkan extracts with this
+  frame's sun: one setDayNight at the frame's top …". Er prüft die Reihenfolge im Quelltext. Negativkontrolle:
   ohne den Aufruf schlägt `REQUIRE` fehl, bei `setDayNight()` hinter `extract()` der `CHECK`.
   Kompiliert ist die Datei lokal nur per `-fsyntax-only` gegen die MoltenVK-Header, echt
   kompiliert sie die Windows-CI. Gelaufen ist sie auf keinem Vulkan-Gerät.
