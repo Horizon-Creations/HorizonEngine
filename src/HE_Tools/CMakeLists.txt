@@ -172,5 +172,16 @@ add_executable(matfn_gen
 target_link_libraries(matfn_gen PRIVATE HorizonCore)
 target_include_directories(matfn_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── mat_gen.exe (generates the built-in materials) ───────────────────────────
+# The fourth of the kind: mat_gen <out-dir> writes Water/… .hasset files
+# (Material, node graph + the shader baked from it) via ContentManager. Run
+# manually to (re)populate EditorDeps/EngineContent/Materials; the outputs are
+# committed, so this is not part of the normal build graph.
+add_executable(mat_gen
+    src/MatGen/main.cpp
+)
+target_link_libraries(mat_gen PRIVATE HorizonCore)
+target_include_directories(mat_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
 # HorizonTools is NEVER linked into HorizonGame or any runtime target.
 # It is an editor/build-time only dependency.

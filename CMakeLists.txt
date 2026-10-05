@@ -851,6 +851,21 @@ function(he_bundle_crt target dest)
     endif()
 endfunction()
 
+# ─── MSVC main-thread stack: 8 MB, like macOS/Linux ───────────────────────────
+# Windows reserves 1 MB per thread by default; macOS and Linux give the main
+# thread 8 MB. Recursive engine code is sized against the latter. Measured case
+# (Thema 152): the material-graph codegen recurses once per graph level through
+# emitNode (MaterialGraph.cpp), whose frame is 0x9E08 bytes (~40 KB) in Debug
+# and 0x55B8 (~22 KB) at /O2 — so 1 MB held only ~24 levels in Debug and ~45 in
+# Release, and the engine's water material (23 levels deep under MSVC's
+# evaluation order) overflowed a Debug he_tests run outright; a user graph past
+# ~45 levels would do the same to a Release editor. EXE flags only: /STACK is
+# meaningless on a DLL, and threads created with stack size 0 (std::thread)
+# inherit the executable's reserve. Reserve is address space, not memory.
+if(MSVC)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " /STACK:8388608")
+endif()
+
 # ─── Deploy helper ─────────────────────────────────────────────────────────────
 # Usage: he_deploy_dll(<target>)
 # Adds POST_BUILD steps that copy the DLL to DEPLOY_EDITOR and optionally
