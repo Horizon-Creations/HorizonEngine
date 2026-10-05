@@ -5046,6 +5046,26 @@ void EditorApplication::dumpFrameHeadless()
 				g.connect(blu, 0, sw, 1);
 				g.connect(sw,  0, out, 0);
 			}
+			else if (std::string(mt) == "chrome" || std::string(mt) == "matte")
+			{
+				// Sky-cube / AO witness (Thema 149): no animation, no params — only
+				// what heLitP takes from the environment. chrome = metallic 1,
+				// roughness 0.05: a mirror ball, the sky cube (heSkyEnv) read along
+				// the reflection, so a mis-oriented cube face shows as a broken or
+				// rotated horizon. matte = metallic 0, roughness 0.9: the diffuse
+				// sky ambient, which heAO darkens where the ball meets the floor.
+				const bool chrome = std::string(mt) == "chrome";
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = g.findNode(col)->p[1] = g.findNode(col)->p[2] = chrome ? 0.95f : 0.8f;
+				const int met = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(met)->p[0] = chrome ? 1.0f : 0.0f;
+				const int rgh = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(rgh)->p[0] = chrome ? 0.05f : 0.9f;
+				g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+				g.connect(met, 0, out, HE::kMatOutputMetallicPin);
+				g.connect(rgh, 0, out, HE::kMatOutputRoughnessPin);
+			}
 			else if (std::string(mt) == "noise")
 			{
 				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.
@@ -5213,6 +5233,13 @@ void EditorApplication::dumpFrameHeadless()
 		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
 		TransformComponent tc;
 		tc.position = m_editorCamera.position() + camFwd * 8.0f;
+		// HE_DUMP_MATTESTPOS="x,y,z": a fixed world position instead — e.g. resting
+		// on the HE_DUMP_SSRTEST floor (top at y = 0, sphere radius 2.5).
+		if (const char* mp = std::getenv("HE_DUMP_MATTESTPOS"); mp && *mp)
+		{
+			glm::vec3 p(0.0f);
+			if (std::sscanf(mp, "%f,%f,%f", &p.x, &p.y, &p.z) == 3) tc.position = p;
+		}
 		reg.emplace<TransformComponent>(e, tc);
 		reg.emplace<MeshComponent>(e, MeshComponent{ meshId });
 		MaterialComponent mc{ matId };
