@@ -66,7 +66,7 @@ Der Graph liefert nur die Attribute (Unreal-Modell), die Beleuchtung macht die E
 | **Zeit** | ja: Knoten `Time` = `heLight.sunDir.w`, `Panner` = UV + Speed·Zeit. Geht im Fragment **und** in der WPO-Vertexstufe | `MaterialGraph.cpp:605`, `:730`; `MaterialShaderLibrary.cpp:858` |
 | **Himmelsumgebung / Spiegelung** | indirekt ja: kein eigener Knoten, aber `heLitP` sampelt die Himmels-Cubemap `heSkyEnv` (Binding 15) mit nach Rauheit gebogenem Reflexionsvektor und rauheitsbewusstem Schlick-Fresnel, danach die Forward-Kaskade GI-Reflexion → SSR. Ein **lit** Material mit niedriger Rauheit spiegelt den Himmel also ohne eigenen Knoten. Gate: `heLight.fog.z` (Cubemap gebunden) | `MaterialShaderLibrary.cpp:249`, `:675–716` |
 | **Fresnel** | ja: Knoten `Fresnel` (`pow(1-N·V, p)`, echter Blickvektor pro Pixel), dazu `ViewDir`, `CameraPos`, `CameraDistance` | `MaterialGraph.h:47`, `:51`, `:77–78` |
-| **Wellen** | Bausteine da: `Panner`, `Noise`, `FBM Noise`, `Noise Texture`, `Sine`, `WorldPos`, `Normal Map` (Tangentenraum → Welt ohne Vertex-Tangenten), WPO-Pin (Vertex-Wellen) | `MaterialGraph.h:38–60`, `MaterialGraph.cpp:614` |
+| **Wellen** | Bausteine da: `Panner`, `Noise`, `FBM Noise`, `Noise Texture`, `Sine`, `WorldPos`, `Normal Map` (Tangentenraum → Welt ohne Vertex-Tangenten), WPO-Pin (Vertex-Wellen) | `MaterialGraph.h:38–60`, `:110`, `MaterialGraph.cpp:614` |
 | **Szenentiefe** | **nein.** Kein Knoten, die Material-Preamble deklariert keine Tiefentextur. `heGBDepth` gibt es nur in Deferred-Resolve/SSR-Shadern, nicht im Material-Fragment | `MaterialShaderLibrary.cpp:1119–1122`, `:1441` |
 | **Szenenfarbe (Refraktion)** | **nein** für Surface-Materialien. Einziges Vorbild ist der UI-Knoten `Backdrop` (nur Domain UserInterface, sonst Schwarz). `heSceneColor` existiert nur im SSR-Trace | `MaterialGraph.h:138`, `MaterialShaderLibrary.cpp:1439` |
 | **Blend-Modi** | `Opaque` / `Masked` / `Translucent` am Output-Knoten (`p[1]`); Translucent geht in den sortierten Alpha-Blend-Pass | `MaterialGraph.h:174` |
@@ -118,6 +118,10 @@ immer dort.
 | Forward-SSR (`ssr.x`) | nur Forward-Pfad (M:14178); deferred 0 | nur Forward (G:11148); deferred aus | 0, absichtlich (D11:6137) | 0, nie gesetzt | ja (V:6908) |
 | Deferred-Pfad | ja; Translucent danach forward in `m_hdrColor`, vor Post/TAA (M:13621, :16365) | ja; dto. in `m_hdrFBO` (G:12173 nach Resolve) | keiner | keiner | keiner (V:6903) |
 | Szenenfarbe/-tiefe lesbar im Translucent-Pass | **nein**: rendert in `m_hdrColor`/`m_hdrDepth`; nur Deferred-Zweipass hat `m_gbDepth` lesbar (nur G-Buffer-Opaque) | **nein**: rendert in `m_hdrFBO`; deferred `m_gbDepthTex` lesbar (nur G-Buffer-Opaque) | **nein**; Tiefen-SRV existiert (`viewportDepthSRV`), braucht aber Unbind/Copy wie bei Decals (D11:4809) | **nein**; Tiefen-SRV für Decals, braucht Zustandswechsel/Copy (D12:8970) | **nein**; ein einziger Render-Pass mit Sky…Translucent…Skinned (V:3862, :744–746) |
+
+Auf Vulkan und D3D12 läuft die ganze Transparent-Schleife nur, wenn die **eingebaute**
+Transparent-Pipeline existiert (V:7468, D12:10590). Fehlt sie, fallen auch Graph-
+Translucents still weg.
 
 `doubleSided` wird auf **keinem** Backend gelesen, alles ist zweiseitig. Für eine
 Wasserfläche passt das. Die einzige vorhandene Farbkopie ist überall die SSR-History
