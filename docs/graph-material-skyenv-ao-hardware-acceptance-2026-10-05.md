@@ -41,7 +41,9 @@ Der Lit-Graph ist so gewählt, dass im Pixel genau ein Term steht:
 | +Z, fog.z 0 | schwarz | (0,0,0) |
 | nach Restore | t15 leer, t16 = SSR | ja |
 
-Die D3D11-Debug-Schicht war an und meldete im Draw nichts.
+Die D3D11-Debug-Schicht war an. Ihre Meldungen sind nicht ausgewertet: Der Test hängt sie nur an
+fehlschlagende Prüfungen. Der Lit-PS nennt ausserdem Sampler (s1, s3, …), die der Fall nicht bindet;
+dazu meldet WARP „expects a Sampler … but none is bound“.
 
 **„D3D11: every sky-cube texel samples back along the direction the bake gave it (WARP)“**
 
@@ -67,7 +69,7 @@ Gemeinsame Einstellungen:
 - AA, DoF, Motion Blur, Bloom und Wolken aus
 - 16 Frames, frisches APPDATA pro Lauf
 
-**Rauschboden:** Zwei gleiche Läufe sind auf allen vier Backends bytegleich (|d| = 0,00).
+**Rauschboden:** Zwei gleiche Läufe sind auf allen vier Backends bytegleich (gleicher Datei-Hash).
 
 **Sky-Cube auf der oberen Hälfte der Chromkugel, Abweichung von GL (mittleres |d| je Kanal):**
 
@@ -95,8 +97,11 @@ wieder bytegleich mit dem ersten.
 - Das Differenzbild zeigt eine Sichel genau am Bodenkontakt.
 - Ein SSR-förmiges Muster wie beim Fehler vor Thema 126 gibt es nicht.
 - Der Betrag ist klein, weil `heLitP` das Himmels-Ambient mit 0,35 gewichtet.
-- Die Stärke unterscheidet sich je Backend so, wie sich deren eigene SSAO-Puffer unterscheiden.
-  Am hellen Mittag fällt der Effekt auf 0,2–0,4.
+- D3D11 und D3D12 sind gleich, beide schwächer als GL und Vulkan. Die Ursache ist nicht untersucht.
+  Mit der Stärke der eingebauten SSAO lässt es sich nicht erklären: Der eingebaute Würfel ändert sich
+  in derselben Messung unter GL um 0,06, unter D3D um 0,82, also in umgekehrter Reihenfolge. Dass auf
+  t16 wirklich der AO-Puffer liegt, belegt der WARP-Fall.
+- Am hellen Mittag (TOD 0,40) fällt der Effekt auf 0,2–0,4.
 
 **Boden-SSR neben dem Graph-Draw:** Der eingebaute Spiegelboden zeigt die Spiegelung des roten
 Würfels auf allen vier Backends, SSR an gegen aus |d| ≈ 66–68. Der Restore von t16 lässt die
