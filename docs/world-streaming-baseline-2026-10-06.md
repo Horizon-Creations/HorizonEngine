@@ -277,7 +277,9 @@ Die Netzwerk-Quantisierung nimmt `worldExtent = 4096 m` an (`ProjectSettings.h:3
 - **Nur im Editor:**
   - `OutlinerPanel::render`: alle Zeilen, ohne Clipper.
   - `ViewportActions::anyHidden`: Lauf über die ganze Szene.
-  - `Metal::Overlay`: 25 ms bei 50k.
+  - `Metal::Overlay`: 25 ms bei 50k. Das ist der ImGui-Pass (`m_overlayCallback`,
+    `MetalRenderer.mm:16669`), er rendert die Draw-Listen der Outliner-Zeilen. Fällt mit Punkt 2
+    in Abschnitt 5 weg.
 
 ## 5. Die drei größten Engpässe
 
