@@ -755,7 +755,9 @@ TEST_CASE("GraphEditor drag cues: a payload from a side list")
 		ctx.frame(h);
 		ctx.button(true);
 		ctx.frame(h);
-		ctx.mouse(ImVec2(ctx.sourceCenter.x + 20.0f, ctx.sourceCenter.y + 20.0f));
+		// Past the drag threshold but still on the source row (the canvas
+		// starts right below it): the drag starts without touching the canvas.
+		ctx.mouse(ImVec2(ctx.sourceCenter.x + 30.0f, ctx.sourceCenter.y));
 		ctx.frame(h);
 		ctx.frame(h);
 		ctx.mouse(to);

@@ -370,3 +370,31 @@ Bildbelege (`scripts/he_uishot.py`, Szenen „ui shot: …“ in
 | V8 Ring um die Glocke | `img/editor-feinschliff/rewards_bell_problem_ring.png` |
 | V9 Häkchen wird geschrieben / fertig | `img/editor-feinschliff/rewards_compile_readout_writing.png`, `…_written.png` |
 | V9 Fehlerknoten auf dem Puls / in Ruhe | `img/editor-feinschliff/rewards_error_node_pulse.png`, `…_rest.png` |
+
+## 11. Stand nach Schritt 4 (Drag-and-Drop-Töne)
+
+Umgesetzt wie in §3, die Spezifikation steht im Kopf von
+`src/HE_Editor/EditorDragCues.h`:
+
+- **GraphEditor**: `Model::onDragCue` und `Model::canConnect`, beide optional;
+  Flankenzustand in `State::cue*`. Die Gesten D1–D8 melden die Cues aus der
+  Tabelle in §3, D9 (Knoten verschieben) bleibt stumm. Die D8-Pickup/Cancel
+  sieht die Leinwand selbst über `GetDragDropPayload()`; LevelScriptPanel und
+  UIEditorPanel bleiben dafür unberührt.
+- **HcGraphHost**: setzt beide. **Abweichung vom Plan:** `canConnect` ist kein
+  eigenes Prädikat, sondern derselbe `hostConnect` auf einer Graph-Kopie,
+  gefragt nur beim Pin-Wechsel, nicht pro Frame. So kann „passt“ nicht von dem
+  abweichen, was der Drop wirklich tut, und das Orakel aus §6 erübrigt sich.
+- **EditorRewards**: `postDragCue` (Warteschlange, gespielt in `pollBuild`),
+  `dragCueWanted`, `DragCues::Gate` (Hover 50 ms, gleicher Cue 50 ms),
+  `dragCuePcm16` (≤ 60 ms, Spitze ≤ 0,6 × Tick), ein Ton aus dem Feed im selben
+  Frame hat Vorrang. Testschnittstelle `setDragCueProbe`.
+- **Schalter** `RewardsSoundDragDrop` („Drag and Drop Sound“, an, unter Success
+  Sound) mit Preview der fünf Cues in Folge.
+- **Tests**: `test_graph_editor_keys.cpp` (Cue-Folge je Geste und gleiches
+  Verhalten mit und ohne Callback), `test_editor_rewards.cpp` (Klangregeln,
+  Gate, Schalter, Probe bis zum UI-Audio-Engine-Ausgang).
+- **Handbuch**: `horizoncode.html#graphs` (Website, lokal committet, nicht
+  gepusht, kein Deploy), ins Bundle nur dieser Abschnitt übernommen.
+- **Offen:** V6/V7 (Pin-Ringe, Snap-Puls) sind optisch und gehören nicht zu
+  Schritt 4. Die Bausteine dafür (`canConnect`, `State::cueNode`) liegen jetzt bereit.
