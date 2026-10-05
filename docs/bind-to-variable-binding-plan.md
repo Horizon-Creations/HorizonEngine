@@ -336,6 +336,25 @@ Die API-Form (Abo auf jede öffentliche Variable oder nur auf solche mit Notify 
 5. Beobachter-Haken, `watch`/`unwatch`, ScriptContext-Abo-Tabelle, Lua/Python-Aufruf, `IGameLogic::onHcVariableChanged`, API-Zeilen mit allen Pflichtstellen.
 6. EditorHelp, Audit-BASELINE, Handbuch, `docs/horizoncode-reference.md`, Lua/Python-API-Doku.
 
+### 4.7 Umsetzungsstand Schritt 3
+
+Umgesetzt (Commit 29732494 ff.):
+
+* **Datenmodell/JSON/Codegen:** `Variable::notifyChange` (JSON `notifyChange`, der Loader verwirft es bei Funktions-lokalen), `CompiledVarInfo::notifyChange`, `VarSlot::notifyChange`, `slot<>` hinten angehängt. Die Codegen gibt leere Pull-/Bind-Argumente aus, wenn nur `notifyChange` gesetzt ist.
+* **Runtime:** `m_watched` entsteht in `registerLevels`/`registerCompiled` (`watchDeclared`), **nicht** in `pullOnConstruct`, sonst fehlte die Game Instance (sie registriert ohne Pull). Phase 2 (`reportChanges`) läuft in jeder Runde von `exchangeState` nach Phase 1; eine Meldung hält die Runden am Laufen, damit ein Handler, der eine Bind-Quelle schreibt, im selben Aufruf durchschlägt. Budget 256 Meldungen pro Aufruf, eine Warnung. Ein Bind-Schub legt die Basis vor dem Schreiben an und meldet deshalb immer. `exchangeState` zählt eine Meldung als Schreibvorgang (der Host zeichnet neu).
+* **`dispatchChanged`** nach dem Vorbild von `dispatchDestroyed`: direkt, ohne Weiterleitung, pro Listener mit `pullShapesCompatible` gegen das Event-Argument geprüft (numerisch wird wie beim Pull umgewandelt), sonst übersprungen mit einer Warnung pro (Listener-Klasse, Event).
+* **Script-Abo-Naht:** `Runtime::watch(owner, var, token)` nur auf öffentliche Instanzvariablen, `unwatch(token)` / `unwatch(owner, var, token)`, gemeldet über den einen Haken `onVariableChanged(owner, var, old, now, tokens)`. Ein reines Abo ruft weder `OnChanged_` noch `dispatchChanged`.
+* **Editor:** Häkchen „Notify on Change“ in LevelScriptPanel, `ensureVarHandler(prefix)` teilt die Funktionsanlage mit „Notify“ (OnRep_). Hilfe-Eintrag „Script Variable/Notify on Change“.
+* **Tests:** `tests/test_hc_on_changed.cpp`.
+
+**Offen** (für den nächsten Lauf, Nummern nach §4.5/§4.6):
+
+* §4.5 Punkt 3–5: Hosts (GA/EA) setzen `onVariableChanged` noch nicht; keine Abo-Tabelle in `ScriptContext`, kein `onChanged_<Var>(source, old)` in Lua/Python, kein `IGameLogic::onHcVariableChanged`, keine API-Zeilen `hc.watch`/`hc.unwatch` (mit allen Pflichtstellen der Registry).
+* §4.6 Punkt 3: Lade-Warnung für selbst per Emit Event geschickte `<Var>Changed`.
+* §4.6 Punkt 4: Bind Event bietet `<Var>Changed (Typ)` noch nicht an, kein Knopf „Create \<Var\>Changed Event“; das Häkchen fehlt im Widget-Editor (UIEditorPanel).
+* Kompilierte Seite: kein Paritäts-Fixture `notify_change` in der Codegen-Suite.
+* Doku: `docs/horizoncode-reference.md`, In-Engine-Handbuch.
+
 ## 5. Editor
 
 ### 5.1 Variablen-Detailansicht (Schritt 2)
