@@ -175,7 +175,9 @@ int SyncWatch::poll(bool idleBeforePump, const std::string& lastError, const std
 	m_flags = 0;
 	// A failed operation sets lastError and clears lastInfo; a status refresh
 	// queued behind it can clear lastError again, but never sets lastInfo —
-	// so both are asked.
+	// so both are asked. Known edge: a FETCH queued behind a failed commit
+	// (only the auto-fetch timer can; the buttons are disabled while busy)
+	// sets lastInfo again and would read as success.
 	if (!lastError.empty() || lastInfo.empty()) return 0;
 	return flags;
 }
