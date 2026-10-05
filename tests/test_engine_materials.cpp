@@ -29,6 +29,16 @@
 
 #if defined(HE_TESTS_HAVE_SHADERC)
 #include <material/MaterialShaderLibrary.h>
+#include <material/MaterialShaderBake.h>
+#include <algorithm>
+#include <map>
+#include <regex>
+#include <tuple>
+#include <spirv_cross.hpp>                         // Vulkan / std140 reflection
+#include <glslang/Public/ShaderLang.h>             // the GL front end + linker + reflection
+#include <glslang/Public/ResourceLimits.h>
+#include <ShaderCompiler.h>                        // he::shaderc (reflection negative control)
+#include <Backends/Vulkan/VulkanMaterialLayout.h>  // the renderer's material set 0
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -38,7 +48,12 @@
 #endif
 #include <windows.h>
 #include <d3dcompiler.h>
+#include <d3d11.h>
+#include <d3d12.h>
+#include <d3d12shader.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
+#include <Backends/D3D12/D3D12MaterialRootSignature.h>
 #endif
 #endif
 
@@ -346,7 +361,8 @@ struct WaterSources
 	std::string frag;  // regenerated forward fragment (what the editor draws)
 	std::string gbuf;  // regenerated G-buffer fragment
 	std::string baked; // forward fragment as committed in the file (what an export ships)
-	std::vector<std::string> paramNames;
+	std::vector<std::string> paramNames;      // slot order of frag/gbuf
+	std::vector<std::string> bakedParamNames; // slot order of baked (compiler-dependent, may differ)
 	std::vector<uint8_t>     paramTypes;
 	std::vector<float>       paramData;
 	bool ok = false;
@@ -363,6 +379,7 @@ WaterSources loadWaterSources(const char* tag)
 	w.frag       = m->customShaderFragGlsl;
 	w.gbuf       = m->customShaderGBufGlsl;
 	w.baked      = b.frag;
+	w.bakedParamNames = b.paramNames;
 	w.paramNames = m->graphParamNames;
 	w.paramTypes = m->graphParamTypes;
 	w.paramData  = m->shaderParamData;
@@ -425,6 +442,808 @@ TEST_CASE("Engine water material: dump every backend's shader for the offline co
 	put("metal_frag_clustered.metal", need(lib.fragmentClustered(hf, w.frag, B::Metal), "MSL clustered").source);
 	put("metal_gbuf.metal",           need(lib.fragment(hg, w.gbuf, B::Metal), "MSL G-buffer").source);
 	MESSAGE("water shaders dumped to ", out.string());
+}
+
+// Copies of the judges test_material_graph.cpp runs over every node shader (that
+// file's helpers sit in an anonymous namespace). Each gets its own negative
+// control below, so none of them can pass by not looking.
+namespace
+{
+using LB = HE::MaterialShaderLibrary::Backend;
+
+// HLSL register numbers of one kind ('s', 't', 'b'), in order of appearance.
+std::vector<int> hlslRegisters(const std::string& hlsl, char kind)
+{
+	const std::regex re(std::string("register\\(") + kind + "([0-9]+)\\)");
+	std::vector<int> regs;
+	for (auto it = std::sregex_iterator(hlsl.begin(), hlsl.end(), re); it != std::sregex_iterator(); ++it)
+		regs.push_back(std::stoi((*it)[1].str()));
+	return regs;
+}
+bool hasDuplicate(std::vector<int> v)
+{
+	std::sort(v.begin(), v.end());
+	return std::adjacent_find(v.begin(), v.end()) != v.end();
+}
+// FXC's X4500 rule, as measured for test_material_graph.cpp: two SamplerState
+// declarations may share a register while at most one of them is USED. Live =
+// the name appears again after its declaration.
+std::vector<int> liveSamplerRegisters(const std::string& hlsl)
+{
+	const std::regex decl("SamplerState\\s+(\\w+)\\s*:\\s*register\\(s([0-9]+)\\)\\s*;");
+	std::vector<int> live;
+	for (auto it = std::sregex_iterator(hlsl.begin(), hlsl.end(), decl); it != std::sregex_iterator(); ++it)
+	{
+		const std::regex use("\\b" + (*it)[1].str() + "\\b");
+		const auto uses = std::distance(std::sregex_iterator(hlsl.begin(), hlsl.end(), use), std::sregex_iterator());
+		if (uses > 1) live.push_back(std::stoi((*it)[2].str()));
+	}
+	return live;
+}
+
+// [[attr(N)]] slots of an MSL source, attr = "sampler" / "texture" / "buffer".
+std::set<int> mslSlots(const std::string& msl, const char* attr)
+{
+	std::set<int> s;
+	const std::string tag = std::string("[[") + attr + "(";
+	for (size_t p = msl.find(tag); p != std::string::npos; p = msl.find(tag, p + tag.size()))
+		s.insert(std::atoi(msl.c_str() + p + tag.size()));
+	return s;
+}
+
+// glslang in plain OpenGL mode — the GLSL front end a GL driver runs — then the
+// program link (same-named blocks must match across stages) and the GL
+// reflection of the linked program: block sizes and member offsets/strides.
+struct GlProgram
+{
+	bool ok = false;
+	std::string log;
+	std::map<std::string, int> blockSize;
+	struct Member { std::string name; int offset; int arrayStride; };
+	std::vector<Member> uniforms;
+};
+GlProgram glLink(const std::string& vs, const std::string& fs)
+{
+	GlProgram r;
+	glslang::InitializeProcess();
+	{
+		glslang::TShader v(EShLangVertex), f(EShLangFragment);
+		const char* vp = vs.c_str();
+		const char* fp = fs.c_str();
+		v.setStrings(&vp, 1);
+		f.setStrings(&fp, 1);
+		const TBuiltInResource* res = GetDefaultResources();
+		bool ok = true;
+		if (!v.parse(res, 100, false, EShMsgDefault)) { ok = false; r.log += std::string("vertex: ") + v.getInfoLog(); }
+		if (!f.parse(res, 100, false, EShMsgDefault)) { ok = false; r.log += std::string("fragment: ") + f.getInfoLog(); }
+		if (ok)
+		{
+			glslang::TProgram p;
+			p.addShader(&v);
+			p.addShader(&f);
+			if (!p.link(EShMsgDefault)) { ok = false; r.log += std::string("link: ") + p.getInfoLog(); }
+			else if (p.buildReflection())
+			{
+				for (int i = 0; i < p.getNumUniformBlocks(); ++i)
+					r.blockSize[p.getUniformBlock(i).name] = p.getUniformBlock(i).size;
+				for (int i = 0; i < p.getNumUniformVariables(); ++i)
+				{
+					const glslang::TObjectReflection& u = p.getUniform(i);
+					r.uniforms.push_back({ u.name, u.offset, u.arrayStride });
+				}
+			}
+		}
+		r.ok = ok;
+	}
+	glslang::FinalizeProcess();
+	return r;
+}
+// `layout(... binding = N ...)` on shader-storage blocks of a GLSL source.
+std::set<int> glslSsboBindings(const std::string& src)
+{
+	std::set<int> out;
+	static const std::regex decl(R"(layout\(([^)]*)\)([^;{]*))");
+	static const std::regex bind(R"(binding\s*=\s*(\d+))");
+	for (auto it = std::sregex_iterator(src.begin(), src.end(), decl); it != std::sregex_iterator(); ++it)
+	{
+		const std::string q = (*it)[1].str(), rest = (*it)[2].str();
+		std::smatch m;
+		if (std::regex_search(q, m, bind) && std::regex_search(rest, std::regex(R"(\bbuffer\b)")))
+			out.insert(std::stoi(m[1].str()));
+	}
+	return out;
+}
+
+// Vulkan: the descriptors a SPIR-V module STATICALLY uses (SPIRV-Cross active
+// interface), each with the stage it is used from.
+struct VkUse
+{
+	uint32_t set = 0, binding = 0;
+	int kind = -1; // HE::vkmat::DescKind, -1 = a kind the material set never has
+	uint32_t stage = 0;
+	bool operator<(const VkUse& o) const { return std::tie(set, binding, kind, stage) < std::tie(o.set, o.binding, o.kind, o.stage); }
+	bool operator==(const VkUse& o) const { return set == o.set && binding == o.binding && kind == o.kind && stage == o.stage; }
+};
+std::vector<VkUse> activeVk(const std::vector<uint32_t>& spirv, uint32_t stage, std::string& err)
+{
+	std::vector<VkUse> out;
+	try
+	{
+		spirv_cross::Compiler comp(spirv);
+		const spirv_cross::ShaderResources r = comp.get_shader_resources(comp.get_active_interface_variables());
+		auto add = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, int kind) {
+			for (const spirv_cross::Resource& res : list)
+				out.push_back({ comp.get_decoration(res.id, spv::DecorationDescriptorSet),
+				                comp.get_decoration(res.id, spv::DecorationBinding), kind, stage });
+		};
+		using K = HE::vkmat::DescKind;
+		add(r.uniform_buffers, static_cast<int>(K::UniformBuffer));
+		add(r.sampled_images,  static_cast<int>(K::CombinedImageSampler));
+		add(r.storage_buffers, static_cast<int>(K::StorageBuffer));
+		add(r.separate_images,   -1);
+		add(r.separate_samplers, -1);
+		add(r.storage_images,    -1);
+	}
+	catch (const std::exception& e) { err = e.what(); }
+	std::sort(out.begin(), out.end());
+	return out;
+}
+// Uses the material set-0 layout does not cover (binding, kind AND stage bit),
+// as "set/binding:kind" text — empty when the pipeline layout would accept them.
+std::string uncoveredVk(const std::vector<VkUse>& uses)
+{
+	std::string miss;
+	for (const VkUse& u : uses)
+	{
+		bool ok = false;
+		for (const HE::vkmat::Binding& b : HE::vkmat::kBindings)
+			ok = ok || (u.set == 0 && b.binding == u.binding && static_cast<int>(b.kind) == u.kind && (b.stages & u.stage));
+		if (!ok) miss += " " + std::to_string(u.set) + "/" + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
+
+// The swizzle the codegen reads a parameter slot with (MaterialGraph.cpp emit
+// of the Param* nodes) — the components the CPU side fills for that kind.
+std::string kindSwizzle(MatParamKind k)
+{
+	switch (k)
+	{
+		case MatParamKind::Float: case MatParamKind::Bool: return ".x";
+		case MatParamKind::Vec2:  return ".xy";
+		case MatParamKind::Color: return ".xyz";
+		case MatParamKind::Vec4:  return "";
+	}
+	return "?";
+}
+} // namespace
+
+TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, each slot read as its knob's kind")
+{
+	// One contract, four views of it. The CPU side: every renderer copies
+	// min(shaderParamData.size(), 64) floats into a zero-padded 256-byte block
+	// (Metal/GL/D3D11/D3D12/Vulkan alike, "float padded[64]"). The shader side
+	// must therefore declare exactly 16 vec4 at stride 16 from offset 0, on the
+	// slot each backend binds: Vulkan set 0 binding 3, HLSL b3 (D3D12 root CBV
+	// kRootParamsCB), Metal fragment buffer 2, GL by block NAME "HeParams"
+	// (glUniformBlockBinding → point 2). Slot order is compiler-dependent, so
+	// nothing here looks a slot up by position — only by name or by kind.
+	static_assert(HE::kMatMaxParams == 16, "the renderers hard-code a 64-float / 256-byte HeParams upload");
+	constexpr int kBlockBytes = HE::kMatMaxParams * 16;
+	const WaterSources w = loadWaterSources("ubo");
+	REQUIRE(w.ok);
+
+	SUBCASE("CPU: fifteen knobs pack into the 64-float block the renderers upload")
+	{
+		REQUIRE(static_cast<int>(w.paramNames.size()) == kWaterKnobCount);
+		REQUIRE(w.paramTypes.size() == w.paramNames.size());
+		CHECK(w.paramData.size() == w.paramNames.size() * 4);
+		CHECK(w.paramData.size() <= static_cast<size_t>(HE::kMatMaxParams) * 4); // nothing cut by min(size, 64)
+		// Each knob's authored default sits in ITS slot's components, zeros after.
+		for (const Knob& k : kWaterKnobs)
+		{
+			CAPTURE(std::string(k.name));
+			const auto it = std::find(w.paramNames.begin(), w.paramNames.end(), k.name);
+			REQUIRE(it != w.paramNames.end());
+			const size_t i = static_cast<size_t>(it - w.paramNames.begin());
+			CHECK(w.paramTypes[i] == static_cast<uint8_t>(k.kind));
+			for (int c = 0; c < 4; ++c)
+				CHECK(w.paramData[i * 4 + c] == doctest::Approx(c < HE::matParamKindComponents(k.kind) ? k.v[c] : 0.0f));
+		}
+	}
+
+	SUBCASE("canonical GLSL: the declaration, and every read uses the components its kind fills")
+	{
+		const std::string decl = "layout(std140, set = 0, binding = 3) uniform HeParams { vec4 v["
+		                         + std::to_string(HE::kMatMaxParams) + "]; } heParams;";
+		std::map<std::string, MatParamKind> kindOf;
+		for (size_t i = 0; i < w.paramNames.size(); ++i)
+			kindOf[w.paramNames[i]] = static_cast<MatParamKind>(w.paramTypes[i]);
+		struct Src { const char* what; const std::string* glsl; const std::vector<std::string>* names; };
+		const Src srcs[] = { { "forward", &w.frag, &w.paramNames }, { "G-buffer", &w.gbuf, &w.paramNames },
+		                     { "baked", &w.baked, &w.bakedParamNames } };
+		const std::regex read(R"(heParams\.v\[(\d+)\](\.[xyzw]+)?)");
+		for (const Src& s : srcs)
+		{
+			CAPTURE(std::string(s.what));
+			CHECK(s.glsl->find(decl) != std::string::npos);
+			std::set<int> slots;
+			for (auto it = std::sregex_iterator(s.glsl->begin(), s.glsl->end(), read); it != std::sregex_iterator(); ++it)
+			{
+				const int slot = std::stoi((*it)[1].str());
+				REQUIRE(slot < static_cast<int>(s.names->size()));
+				const std::string& name = (*s.names)[slot];
+				REQUIRE_MESSAGE(kindOf.count(name), "slot ", slot, " is '", name, "', no such knob");
+				CHECK_MESSAGE((*it)[2].str() == kindSwizzle(kindOf[name]),
+				              "slot ", slot, " ('", name, "') read as '", (*it)[2].str(), "'");
+				slots.insert(slot);
+			}
+			CHECK(static_cast<int>(slots.size()) == kWaterKnobCount); // every slot read, none past the knobs
+			CHECK(*slots.rbegin() < HE::kMatMaxParams);
+		}
+		// Negative control for the swizzle rule: a Vec4 knob read with .x is caught.
+		CHECK(kindSwizzle(MatParamKind::Vec4) != ".x");
+	}
+
+	HE::MaterialShaderLibrary lib;
+	const uint64_t h = srcHash(w.frag);
+
+	SUBCASE("SPIR-V (Vulkan): set 0 binding 3, 256 bytes, v[16] at offset 0 stride 16 — plain and clustered")
+	{
+		for (const bool clustered : { false, true })
+		{
+			CAPTURE(clustered);
+			const auto& sv = clustered ? lib.fragmentClustered(h, w.frag, LB::SpirV) : lib.fragment(h, w.frag, LB::SpirV);
+			REQUIRE_MESSAGE(sv.ok, sv.log);
+			bool found = false, foundLighting = false;
+			try
+			{
+				spirv_cross::Compiler comp(sv.spirv);
+				const auto r = comp.get_shader_resources(comp.get_active_interface_variables());
+				for (const spirv_cross::Resource& ub : r.uniform_buffers)
+				{
+					const std::string block = comp.get_name(ub.base_type_id);
+					const spirv_cross::SPIRType& t = comp.get_type(ub.base_type_id);
+					if (block == "HeLighting")
+					{
+						foundLighting = true;
+						CHECK(comp.get_decoration(ub.id, spv::DecorationBinding) == 0);
+						// The fill sites memcpy this struct — its size is the block's size.
+						CHECK(comp.get_declared_struct_size(t) == sizeof(HE::MaterialShaderLibrary::Lighting));
+					}
+					if (block != "HeParams") continue;
+					found = true;
+					CHECK(comp.get_decoration(ub.id, spv::DecorationDescriptorSet) == 0);
+					CHECK(comp.get_decoration(ub.id, spv::DecorationBinding) == 3);
+					CHECK(comp.get_declared_struct_size(t) == static_cast<size_t>(kBlockBytes));
+					REQUIRE(t.member_types.size() == 1);
+					CHECK(comp.type_struct_member_offset(t, 0) == 0);
+					CHECK(comp.type_struct_member_array_stride(t, 0) == 16);
+					const spirv_cross::SPIRType& mt = comp.get_type(t.member_types[0]);
+					REQUIRE(mt.array.size() == 1);
+					CHECK(mt.array[0] == static_cast<uint32_t>(HE::kMatMaxParams));
+					CHECK(mt.vecsize == 4);
+				}
+			}
+			catch (const std::exception& e) { CHECK_MESSAGE(false, "SPIRV-Cross reflection threw: ", e.what()); }
+			CHECK_MESSAGE(found, "HeParams is not an ACTIVE uniform buffer of the water's SPIR-V");
+			CHECK(foundLighting);
+		}
+		// The renderer's layout row for it.
+		bool row = false;
+		for (const HE::vkmat::Binding& b : HE::vkmat::kBindings)
+			row = row || (b.binding == 3 && b.kind == HE::vkmat::DescKind::UniformBuffer && (b.stages & HE::vkmat::kStageFragment));
+		CHECK(row);
+	}
+
+	SUBCASE("GL 4.1 / ES 3.0 / GL 4.3: bound by name, 256 bytes in the LINKED program")
+	{
+		struct Prog { const char* what; LB vb; LB fb; bool clustered; };
+		const Prog progs[] = { { "GL 4.1", LB::GLSL410, LB::GLSL410, false },
+		                       { "ES 3.0", LB::GLSLES300, LB::GLSLES300, false },
+		                       { "GL 4.3 clustered", LB::GLSL430, LB::GLSL430, true } };
+		const std::regex block(R"(layout\(std140\)\s+uniform\s+HeParams\s*\{\s*(highp\s+)?vec4\s+v\[16\];\s*\}\s*heParams;)");
+		for (const Prog& pr : progs)
+		{
+			CAPTURE(std::string(pr.what));
+			const auto& f = pr.clustered ? lib.fragmentClustered(h, w.frag, pr.fb) : lib.fragment(h, w.frag, pr.fb);
+			const auto& v = lib.standardVertex(pr.vb);
+			REQUIRE_MESSAGE(f.ok, f.log);
+			REQUIRE_MESSAGE(v.ok, v.log);
+			// No binding qualifier: OpenGLRenderer binds the block by its name.
+			std::smatch bm;
+			REQUIRE(std::regex_search(f.source, bm, block));
+			// ES: the file opens with `precision mediump float;` — the knobs (wave
+			// directions up to 360°, distances of tens of metres) must stay highp.
+			if (pr.fb == LB::GLSLES300)
+				CHECK(bm[1].matched);
+			const GlProgram p = glLink(v.source, f.source);
+			REQUIRE_MESSAGE(p.ok, p.log);
+			REQUIRE_MESSAGE(p.blockSize.count("HeParams"), "HeParams is not an active block of the linked program");
+			CHECK(p.blockSize.at("HeParams") == kBlockBytes);
+			REQUIRE(p.blockSize.count("HeLighting"));
+			CHECK(p.blockSize.at("HeLighting") == static_cast<int>(sizeof(HE::MaterialShaderLibrary::Lighting)));
+			bool member = false;
+			for (const GlProgram::Member& m : p.uniforms)
+				if (m.name.rfind("HeParams.v", 0) == 0)
+				{
+					member = true;
+					CHECK(m.offset == 0);
+					CHECK(m.arrayStride == 16);
+				}
+			CHECK(member);
+		}
+	}
+
+	SUBCASE("Metal: struct of float4 v[16], HeLighting on buffer 1, HeParams on buffer 2")
+	{
+		const std::regex st(R"(struct\s+HeParams\s*\{\s*float4\s+v\[16\];\s*\};)");
+		const std::regex arg(R"(constant\s+HeParams&\s+heParams\s+\[\[buffer\((\d+)\)\]\])");
+		const std::regex lit(R"(constant\s+HeLighting&\s+heLight\s+\[\[buffer\((\d+)\)\]\])");
+		for (const bool clustered : { false, true })
+		{
+			CAPTURE(clustered);
+			const auto& m = clustered ? lib.fragmentClustered(h, w.frag, LB::Metal) : lib.fragment(h, w.frag, LB::Metal);
+			REQUIRE_MESSAGE(m.ok, m.log);
+			CHECK(std::regex_search(m.source, st));
+			std::smatch a, l;
+			REQUIRE(std::regex_search(m.source, a, arg));
+			CHECK(a[1].str() == "2");   // MetalRenderer: setFragmentBytes:padded … atIndex:2
+			REQUIRE(std::regex_search(m.source, l, lit));
+			CHECK(std::stoi(l[1].str()) == HE::MaterialShaderLibrary::kMetalLightingBufferIndex);
+		}
+	}
+
+#if defined(_WIN32)
+	SUBCASE("HLSL (D3D11/D3D12): FXC's own reflection — cbuffer HeParams on b3, 256 bytes, float4[16]")
+	{
+		HE::d3d12mat::MaterialRootSignature rs;
+		HE::d3d12mat::DescribeMaterialRootSignature(rs);
+		const UINT rootReg = rs.params[HE::d3d12mat::kRootParamsCB].Descriptor.ShaderRegister;
+		for (const bool clustered : { false, true })
+		{
+			CAPTURE(clustered);
+			const auto& hl = clustered ? lib.fragmentClustered(h, w.frag, LB::HLSL) : lib.fragment(h, w.frag, LB::HLSL);
+			REQUIRE_MESSAGE(hl.ok, hl.log);
+			Microsoft::WRL::ComPtr<ID3DBlob> ps, err;
+			const HRESULT hr = D3DCompile(hl.source.c_str(), hl.source.size(), "water", nullptr, nullptr,
+			                              "main", "ps_5_0", 0, 0, &ps, &err);
+			REQUIRE_MESSAGE(SUCCEEDED(hr), (err ? static_cast<const char*>(err->GetBufferPointer()) : ""));
+			Microsoft::WRL::ComPtr<ID3D12ShaderReflection> refl;
+			REQUIRE(SUCCEEDED(D3DReflect(ps->GetBufferPointer(), ps->GetBufferSize(), IID_PPV_ARGS(&refl))));
+			D3D12_SHADER_INPUT_BIND_DESC bind{};
+			REQUIRE_MESSAGE(SUCCEEDED(refl->GetResourceBindingDescByName("HeParams", &bind)),
+			                "FXC dead-stripped HeParams — the water reads no parameter?");
+			CHECK(bind.Type == D3D_SIT_CBUFFER);
+			CHECK(bind.BindPoint == 3);
+			CHECK(bind.BindPoint == rootReg);   // the root CBV D3D12Renderer sets per draw
+			ID3D12ShaderReflectionConstantBuffer* cb = refl->GetConstantBufferByName("HeParams");
+			D3D12_SHADER_BUFFER_DESC bd{};
+			REQUIRE(SUCCEEDED(cb->GetDesc(&bd)));
+			CHECK(bd.Size == static_cast<UINT>(kBlockBytes));
+			REQUIRE(bd.Variables == 1);
+			D3D12_SHADER_VARIABLE_DESC vd{};
+			REQUIRE(SUCCEEDED(cb->GetVariableByIndex(0)->GetDesc(&vd)));
+			CHECK(vd.StartOffset == 0);
+			CHECK(vd.Size == static_cast<UINT>(kBlockBytes));
+			D3D12_SHADER_TYPE_DESC td{};
+			REQUIRE(SUCCEEDED(cb->GetVariableByIndex(0)->GetType()->GetDesc(&td)));
+			CHECK(td.Elements == static_cast<UINT>(HE::kMatMaxParams));
+			CHECK(td.Columns == 4);
+			// HeLighting on b0 (root CBV kRootLightCB), the size the fill uploads.
+			D3D12_SHADER_INPUT_BIND_DESC lb{};
+			REQUIRE(SUCCEEDED(refl->GetResourceBindingDescByName("HeLighting", &lb)));
+			CHECK(lb.BindPoint == rs.params[HE::d3d12mat::kRootLightCB].Descriptor.ShaderRegister);
+			D3D12_SHADER_BUFFER_DESC lbd{};
+			REQUIRE(SUCCEEDED(refl->GetConstantBufferByName("HeLighting")->GetDesc(&lbd)));
+			CHECK(lbd.Size == sizeof(HE::MaterialShaderLibrary::Lighting));
+		}
+	}
+#endif
+}
+
+TEST_CASE("Engine water material: each backend's own judge accepts what its renderer builds (plain and clustered)")
+{
+	// D3D11, D3D12, Vulkan and GL 4.3 build fragmentClustered first and fall
+	// back to fragment() when it fails; Metal and GL 4.1 build fragment(). The
+	// water has no texture, so it adds no sampler of its own: what is checked
+	// is that the lighting preamble it drags in still fits each backend's walls
+	// (SM 5.0: s0..s15 / b0..b13; Metal: 16 samplers on pinned slots; Vulkan:
+	// the material set-0 layout; GL: a linking program).
+	const WaterSources w = loadWaterSources("parity");
+	REQUIRE(w.ok);
+	HE::MaterialShaderLibrary lib;
+	const uint64_t h = srcHash(w.frag), hb = srcHash(w.baked), hg = srcHash(w.gbuf);
+
+	SUBCASE("OpenGL / ES: glslang (GL mode) parses and LINKS every program the GL renderer builds")
+	{
+		// Negative control: a cross-stage block mismatch must not link.
+		{
+			const GlProgram bad = glLink(
+				"#version 410\nlayout(std140) uniform B { vec4 a; } ub;\nvoid main() { gl_Position = ub.a; }\n",
+				"#version 410\nlayout(std140) uniform B { vec2 a; } ub;\nout vec4 o;\nvoid main() { o = vec4(ub.a, 0.0, 1.0); }\n");
+			CHECK_FALSE(bad.ok);
+		}
+		struct Prog { const char* what; LB b; const std::string* src; uint64_t hash; bool clustered; };
+		const Prog progs[] = {
+			{ "GL 4.1 forward",           LB::GLSL410,   &w.frag,  h,  false },
+			{ "GL 4.1 forward (baked)",   LB::GLSL410,   &w.baked, hb, false },
+			{ "GL 4.1 G-buffer",          LB::GLSL410,   &w.gbuf,  hg, false },
+			{ "ES 3.0 forward",           LB::GLSLES300, &w.frag,  h,  false },
+			{ "GL 4.3 clustered forward", LB::GLSL430,   &w.frag,  h,  true  },
+		};
+		for (const Prog& pr : progs)
+		{
+			CAPTURE(std::string(pr.what));
+			const auto& f = pr.clustered ? lib.fragmentClustered(pr.hash, *pr.src, pr.b) : lib.fragment(pr.hash, *pr.src, pr.b);
+			REQUIRE_MESSAGE(f.ok, f.log);
+			const GlProgram p = glLink(lib.standardVertex(pr.b).source, f.source);
+			CHECK_MESSAGE(p.ok, p.log);
+			// GL 4.3 binds the cluster lists on SSBO 4/5/6 and NOTHING else by number.
+			const std::set<int> ssbo = glslSsboBindings(f.source);
+			if (pr.clustered)
+				CHECK(ssbo == std::set<int>{ HE::MaterialShaderLibrary::kGlClusterLightsSsboBinding,
+				                             HE::MaterialShaderLibrary::kGlClusterGridSsboBinding,
+				                             HE::MaterialShaderLibrary::kGlClusterIndexSsboBinding });
+			else
+				CHECK(ssbo.empty());   // macOS GL 4.1 has no SSBOs
+		}
+	}
+
+	SUBCASE("Metal: every sampler on the material window or a preamble slot, at most 16")
+	{
+		const std::set<int> preamble(std::begin(HE::MaterialShaderLibrary::kMetalPreambleSamplerSlots),
+		                             std::end(HE::MaterialShaderLibrary::kMetalPreambleSamplerSlots));
+		struct V { const char* what; const HE::MaterialShaderLibrary::Compiled* c; };
+		const V vs[] = { { "forward",   &lib.fragment(h, w.frag, LB::Metal) },
+		                 { "clustered", &lib.fragmentClustered(h, w.frag, LB::Metal) },
+		                 { "G-buffer",  &lib.fragment(hg, w.gbuf, LB::Metal) },
+		                 { "baked",     &lib.fragment(hb, w.baked, LB::Metal) } };
+		for (const V& v : vs)
+		{
+			CAPTURE(std::string(v.what));
+			REQUIRE_MESSAGE(v.c->ok, v.c->log);
+			const std::set<int> used = mslSlots(v.c->source, "sampler");
+			CHECK(used.size() <= 16);
+			for (const int s : used)
+				CHECK_MESSAGE(((s >= 0 && s <= HE::kMatMaxGraphTextures) || preamble.count(s)),
+				              "sampler(", s, ") is neither a material slot nor in kMetalPreambleSamplerSlots");
+			for (const int t : mslSlots(v.c->source, "texture"))
+				CHECK(t <= 30);   // Metal's fragment texture argument table: 31 entries
+		}
+		// The lit preamble really is in there (positive control — an empty parse
+		// would pass the loop above vacuously).
+		CHECK(mslSlots(lib.fragment(h, w.frag, LB::Metal).source, "sampler").size() >= 8);
+	}
+
+	SUBCASE("HLSL text: inside SM 5.0's register walls, no two live samplers on one s register")
+	{
+		// Negative controls for the two text rules.
+		CHECK(hasDuplicate({ 3, 1, 3 }));
+		{
+			const std::string twoLive =
+				"Texture2D a : register(t0); SamplerState sa : register(s0);\n"
+				"Texture2D b : register(t1); SamplerState sb : register(s0);\n"
+				"float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Sample(sa, uv) + b.Sample(sb, uv); }";
+			CHECK(hasDuplicate(liveSamplerRegisters(twoLive)));
+			const std::string deadAndLive =
+				"Texture2D a : register(t0); SamplerState sa : register(s0);\n"
+				"Texture2D b : register(t1); SamplerState sb : register(s0);\n"
+				"float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Load(int3(0,0,0)) + b.Sample(sb, uv); }";
+			CHECK_FALSE(hasDuplicate(liveSamplerRegisters(deadAndLive)));
+		}
+		for (const bool clustered : { false, true })
+		{
+			CAPTURE(clustered);
+			const auto& hl = clustered ? lib.fragmentClustered(h, w.frag, LB::HLSL) : lib.fragment(h, w.frag, LB::HLSL);
+			REQUIRE_MESSAGE(hl.ok, hl.log);
+			const std::vector<int> s = hlslRegisters(hl.source, 's'), b = hlslRegisters(hl.source, 'b'),
+			                       t = hlslRegisters(hl.source, 't');
+			REQUIRE_FALSE(s.empty());
+			CHECK(*std::max_element(s.begin(), s.end()) <= 15);   // X4509
+			CHECK(*std::max_element(b.begin(), b.end()) <= 13);   // X4567
+			CHECK(*std::max_element(t.begin(), t.end()) <= 127);
+			CHECK_FALSE(hasDuplicate(t));
+			CHECK_FALSE(hasDuplicate(b));
+			CHECK_FALSE(hasDuplicate(liveSamplerRegisters(hl.source)));   // X4500
+		}
+	}
+
+	SUBCASE("Vulkan: every descriptor the SPIR-V uses is in the material set-0 layout, stage included")
+	{
+		// Negative control: an SSBO at binding 40 is reported and refused.
+		{
+			const he::shaderc::Result pr = he::shaderc::compile(
+				"#version 450\n"
+				"layout(std430, set = 0, binding = 40) readonly buffer P { vec4 p[]; };\n"
+				"layout(location = 0) out vec4 o;\n"
+				"void main() { o = p[0]; }\n",
+				he::shaderc::Stage::Fragment, he::shaderc::Target::SpirvBinary);
+			REQUIRE_MESSAGE(pr.ok, pr.log);
+			std::string err;
+			const std::vector<VkUse> u = activeVk(pr.spirv, HE::vkmat::kStageFragment, err);
+			REQUIRE_MESSAGE(err.empty(), err);
+			REQUIRE(u.size() == 1);
+			CHECK_FALSE(uncoveredVk(u).empty());
+		}
+		std::string err;
+		const auto& vtx = lib.standardVertex(LB::SpirV);
+		REQUIRE_MESSAGE(vtx.ok, vtx.log);
+		const std::vector<VkUse> uv = activeVk(vtx.spirv, HE::vkmat::kStageVertex, err);
+		REQUIRE_MESSAGE(err.empty(), err);
+		CHECK_MESSAGE(uncoveredVk(uv).empty(), "standard vertex:", uncoveredVk(uv));
+
+		const auto& plain = lib.fragment(h, w.frag, LB::SpirV);
+		const auto& cl    = lib.fragmentClustered(h, w.frag, LB::SpirV);
+		REQUIRE_MESSAGE(plain.ok, plain.log);
+		REQUIRE_MESSAGE(cl.ok, cl.log);
+		CHECK(plain.spirv[0] == 0x07230203u);
+		const std::vector<VkUse> up = activeVk(plain.spirv, HE::vkmat::kStageFragment, err);
+		REQUIRE_MESSAGE(err.empty(), err);
+		const std::vector<VkUse> uc = activeVk(cl.spirv, HE::vkmat::kStageFragment, err);
+		REQUIRE_MESSAGE(err.empty(), err);
+		CHECK_MESSAGE(uncoveredVk(up).empty(), "plain:", uncoveredVk(up));
+		CHECK_MESSAGE(uncoveredVk(uc).empty(), "clustered:", uncoveredVk(uc));
+		// The clustered twin adds exactly the three lists, nothing else.
+		std::vector<VkUse> added;
+		std::set_difference(uc.begin(), uc.end(), up.begin(), up.end(), std::back_inserter(added));
+		std::set<uint32_t> addedBindings;
+		for (const VkUse& u : added) addedBindings.insert(u.binding);
+		CHECK(addedBindings == std::set<uint32_t>{ HE::vkmat::kClusterLightsBinding, HE::vkmat::kClusterGridBinding,
+		                                           HE::vkmat::kClusterIdxBinding });
+		// Binding 14 (heLandscapeWeights) is the one row the layout lacked until
+		// Thema 143 — the water must not depend on that fix either way.
+		for (const VkUse& u : uc)
+			CHECK(u.binding != 14);
+		// Fragment samplers in the module: Vulkan's guaranteed per-stage minimum is 16.
+		int samplers = 0;
+		for (const VkUse& u : uc)
+			samplers += u.kind == static_cast<int>(HE::vkmat::DescKind::CombinedImageSampler) ? 1 : 0;
+		CHECK(samplers <= 16);
+	}
+
+#if defined(_WIN32)
+	SUBCASE("D3D11 / D3D12: FXC, the root signature, a real PSO and real shader objects on WARP")
+	{
+		using Microsoft::WRL::ComPtr;
+		auto fxc = [](const std::string& src, const char* profile, std::string& err) -> ComPtr<ID3DBlob> {
+			ComPtr<ID3DBlob> blob, cerr;
+			const HRESULT hr = D3DCompile(src.c_str(), src.size(), "water", nullptr, nullptr,
+			                              "main", profile, 0, 0, &blob, &cerr);
+			if (cerr) err.assign(static_cast<const char*>(cerr->GetBufferPointer()), cerr->GetBufferSize());
+			return SUCCEEDED(hr) ? blob : nullptr;
+		};
+		struct Bind { D3D_SHADER_INPUT_TYPE type; UINT reg; std::string name; };
+		auto bindings = [](ID3DBlob* code) {
+			std::vector<Bind> out;
+			ComPtr<ID3D12ShaderReflection> refl;
+			if (FAILED(D3DReflect(code->GetBufferPointer(), code->GetBufferSize(), IID_PPV_ARGS(&refl)))) return out;
+			D3D12_SHADER_DESC sd{};
+			refl->GetDesc(&sd);
+			for (UINT i = 0; i < sd.BoundResources; ++i)
+			{
+				D3D12_SHADER_INPUT_BIND_DESC b{};
+				if (SUCCEEDED(refl->GetResourceBindingDesc(i, &b))) out.push_back({ b.Type, b.BindPoint, b.Name ? b.Name : "" });
+			}
+			return out;
+		};
+		// What the (possibly truncated) root-signature description leaves uncovered.
+		auto uncovered = [](const HE::d3d12mat::MaterialRootSignature& rs, UINT ranges, UINT samplers, UINT params,
+		                    const std::vector<Bind>& bs) {
+			std::string miss;
+			for (const Bind& b : bs)
+			{
+				bool ok = false;
+				switch (b.type)
+				{
+					case D3D_SIT_TEXTURE:
+						for (UINT r = 0; r < ranges; ++r)
+							ok = ok || (b.reg >= rs.ranges[r].BaseShaderRegister &&
+							            b.reg <  rs.ranges[r].BaseShaderRegister + rs.ranges[r].NumDescriptors);
+						break;
+					case D3D_SIT_SAMPLER:
+						for (UINT i = 0; i < samplers; ++i) ok = ok || rs.samplers[i].ShaderRegister == b.reg;
+						break;
+					case D3D_SIT_CBUFFER:
+						for (UINT i = 0; i < params; ++i)
+							ok = ok || (rs.params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV &&
+							            rs.params[i].Descriptor.ShaderRegister == b.reg);
+						break;
+					case D3D_SIT_BYTEADDRESS: case D3D_SIT_STRUCTURED:
+						for (UINT i = 0; i < params; ++i)
+							ok = ok || (rs.params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV &&
+							            rs.params[i].Descriptor.ShaderRegister == b.reg);
+						break;
+					default: break;
+				}
+				if (!ok) miss += " " + b.name + "(" + std::to_string(static_cast<int>(b.type)) + ":" + std::to_string(b.reg) + ")";
+			}
+			return miss;
+		};
+
+		std::string err;
+		{
+			ComPtr<ID3DBlob> bad = fxc("float4 main() : SV_Target { return nonsense; }", "ps_5_0", err);
+			REQUIRE(bad.Get() == nullptr);   // negative control: FXC does judge
+		}
+		ComPtr<ID3DBlob> vs = fxc(lib.standardVertex(LB::HLSL).source, "vs_5_0", err);
+		REQUIRE_MESSAGE(vs.Get() != nullptr, "standard vertex: ", err);
+		ComPtr<ID3DBlob> ps = fxc(lib.fragment(h, w.frag, LB::HLSL).source, "ps_5_0", err);
+		REQUIRE_MESSAGE(ps.Get() != nullptr, "water PS: ", err);
+		ComPtr<ID3DBlob> psCl = fxc(lib.fragmentClustered(h, w.frag, LB::HLSL).source, "ps_5_0", err);
+		REQUIRE_MESSAGE(psCl.Get() != nullptr, "water clustered PS: ", err);
+		ComPtr<ID3DBlob> psBaked = fxc(lib.fragment(hb, w.baked, LB::HLSL).source, "ps_5_0", err);
+		REQUIRE_MESSAGE(psBaked.Get() != nullptr, "baked water PS: ", err);
+
+		// The bytecode's own view of the SM 5.0 walls (FXC kept what it binds).
+		for (ID3DBlob* code : { ps.Get(), psCl.Get() })
+		{
+			std::set<UINT> samplers;
+			for (const Bind& b : bindings(code))
+			{
+				if (b.type == D3D_SIT_SAMPLER) { CHECK(b.reg <= 15); samplers.insert(b.reg); }
+				if (b.type == D3D_SIT_CBUFFER) CHECK(b.reg <= 13);
+			}
+			CHECK(samplers.size() <= 16);
+			CHECK(samplers.size() >= 6);   // the lit preamble is in there
+		}
+
+		namespace m12 = HE::d3d12mat;
+		m12::MaterialRootSignature full, legacy, preCluster;
+		m12::DescribeMaterialRootSignature(full);
+		m12::DescribeMaterialRootSignature(legacy, m12::kLegacyRangeCount, m12::kLegacySamplerCount);
+		m12::DescribeMaterialRootSignature(preCluster, m12::kRangeCount, m12::kSamplerCount, m12::kPreClusterParamCount);
+		CHECK_MESSAGE(uncovered(full, m12::kRangeCount, m12::kSamplerCount, m12::kParamCount, bindings(vs.Get())).empty(), "VS");
+		for (ID3DBlob* code : { ps.Get(), psCl.Get(), psBaked.Get() })
+		{
+			const std::string miss = uncovered(full, m12::kRangeCount, m12::kSamplerCount, m12::kParamCount, bindings(code));
+			CHECK_MESSAGE(miss.empty(), "the material root signature does not cover:", miss);
+		}
+		// Negative controls: the pre-Thema-56 signature leaves the lit water
+		// uncovered, the pre-cluster one the clustered twin.
+		CHECK_FALSE(uncovered(legacy, m12::kLegacyRangeCount, m12::kLegacySamplerCount, m12::kParamCount, bindings(ps.Get())).empty());
+		CHECK_FALSE(uncovered(preCluster, m12::kRangeCount, m12::kSamplerCount, m12::kPreClusterParamCount, bindings(psCl.Get())).empty());
+
+		// D3D12 on WARP: the root signature the renderer serialises, and the
+		// TRANSLUCENT material PSO D3D12Renderer::GetOrBuildMaterialPSO builds for
+		// the water (alpha blend, depth test without write, HDR target).
+		ComPtr<IDXGIFactory4> factory;
+		ComPtr<IDXGIAdapter> warp;
+		ComPtr<ID3D12Device> dev;
+		REQUIRE(SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))));
+		REQUIRE(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))));
+		REQUIRE(SUCCEEDED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev))));
+		auto rootSig = [&](const m12::MaterialRootSignature& d) {
+			ComPtr<ID3DBlob> sig, e;
+			ComPtr<ID3D12RootSignature> rs;
+			if (SUCCEEDED(D3D12SerializeRootSignature(&d.desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e)))
+				dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&rs));
+			return rs;
+		};
+		const D3D12_INPUT_ELEMENT_DESC layout[] = {
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		};
+		auto translucentPso = [&](ID3D12RootSignature* rs, ID3DBlob* p) -> HRESULT {
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+			pd.pRootSignature        = rs;
+			pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+			pd.PS                    = { p->GetBufferPointer(), p->GetBufferSize() };
+			pd.InputLayout           = { layout, 3 };
+			pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			pd.NumRenderTargets      = 1;
+			pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+			pd.SampleDesc.Count      = 1;
+			pd.SampleMask            = UINT_MAX;
+			pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+			pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+			pd.RasterizerState.DepthClipEnable = TRUE;
+			pd.DepthStencilState.DepthEnable    = TRUE;
+			pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+			pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+			auto& rt = pd.BlendState.RenderTarget[0];
+			rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+			rt.BlendEnable    = TRUE;
+			rt.SrcBlend       = D3D12_BLEND_SRC_ALPHA;
+			rt.DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
+			rt.BlendOp        = D3D12_BLEND_OP_ADD;
+			rt.SrcBlendAlpha  = D3D12_BLEND_ONE;
+			rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+			rt.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+			ComPtr<ID3D12PipelineState> pso;
+			return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+		};
+		ComPtr<ID3D12RootSignature> fullRs = rootSig(full), legacyRs = rootSig(legacy), preClusterRs = rootSig(preCluster);
+		REQUIRE(fullRs.Get() != nullptr);
+		REQUIRE(legacyRs.Get() != nullptr);
+		REQUIRE(preClusterRs.Get() != nullptr);
+		CHECK_MESSAGE(SUCCEEDED(translucentPso(fullRs.Get(), ps.Get())), "plain water PSO refused on WARP");
+		CHECK_MESSAGE(SUCCEEDED(translucentPso(fullRs.Get(), psCl.Get())), "clustered water PSO refused on WARP");
+		CHECK_MESSAGE(SUCCEEDED(translucentPso(fullRs.Get(), psBaked.Get())), "baked water PSO refused on WARP");
+		CHECK(translucentPso(legacyRs.Get(), ps.Get()) == E_INVALIDARG);          // the device does say no
+		CHECK(translucentPso(preClusterRs.Get(), psCl.Get()) == E_INVALIDARG);
+
+		// D3D11 on WARP: the shader objects and the input layout D3D11Renderer
+		// creates from the same bytecode (CreateInputLayout holds the layout
+		// against the vertex signature).
+		ComPtr<ID3D11Device> d11;
+		REQUIRE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+		                                    D3D11_SDK_VERSION, &d11, nullptr, nullptr)));
+		ComPtr<ID3D11VertexShader> v11;
+		ComPtr<ID3D11PixelShader> p11;
+		ComPtr<ID3D11InputLayout> il;
+		CHECK(SUCCEEDED(d11->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &v11)));
+		for (ID3DBlob* code : { ps.Get(), psCl.Get(), psBaked.Get() })
+			CHECK(SUCCEEDED(d11->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &p11)));
+		const D3D11_INPUT_ELEMENT_DESC il11[] = {
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		};
+		CHECK(SUCCEEDED(d11->CreateInputLayout(il11, 3, vs->GetBufferPointer(), vs->GetBufferSize(), &il)));
+		const uint32_t junk[4] = { 0xDEADBEEFu, 1u, 2u, 3u };
+		CHECK(FAILED(d11->CreatePixelShader(junk, sizeof(junk), nullptr, &p11)));   // negative control
+	}
+#endif
+}
+
+TEST_CASE("Engine water material: an export bakes it for all five backends, clustered twin included")
+{
+	// What CompileMaterialShaderVariants (ExportDialogPanel) does per requested
+	// backend. A failure there is only a warning in the export log and the game
+	// cross-compiles at load — so nobody would notice it but this case.
+	const WaterSources w = loadWaterSources("bake");
+	REQUIRE(w.ok);
+	HE::MaterialShaderLibrary lib;
+	using RB = HE::RendererBackend;
+	struct Src { const char* what; const std::string* glsl; };
+	const Src srcs[] = { { "regenerated", &w.frag }, { "baked in the file", &w.baked } };
+	for (const Src& s : srcs)
+		for (RB rb : { RB::OpenGL, RB::Vulkan, RB::D3D11, RB::D3D12, RB::Metal })
+		{
+			CAPTURE(std::string(s.what));
+			CAPTURE(static_cast<int>(rb));
+			MaterialShaderVariant var;
+			std::string error;
+			std::vector<std::string> warnings;
+			REQUIRE_MESSAGE(HE::bakeMaterialShaderVariant(lib, rb, *s.glsl, "", var, error, warnings), error);
+			CHECK_MESSAGE(warnings.empty(), (warnings.empty() ? std::string() : warnings.front()));
+			CHECK(var.backend == static_cast<uint8_t>(rb));
+			CHECK_FALSE(var.vertex.empty());
+			CHECK_FALSE(var.fragment.empty());
+			CHECK_FALSE(var.uiVertex.empty());
+			REQUIRE_FALSE(var.fragmentClustered.empty());
+			if (rb == RB::OpenGL)
+			{
+				// GL clusters only with BOTH stages at 4.30.
+				REQUIRE_FALSE(var.vertexClustered.empty());
+				const GlProgram p = glLink(var.vertexClustered, var.fragmentClustered);
+				CHECK_MESSAGE(p.ok, p.log);
+				const GlProgram p410 = glLink(var.vertex, var.fragment);
+				CHECK_MESSAGE(p410.ok, p410.log);
+			}
+			if (rb == RB::Vulkan)
+			{
+				std::vector<uint32_t> words;
+				REQUIRE(HE::MaterialShaderLibrary::spirvFromBytes(var.fragment, words));
+				CHECK(words[0] == 0x07230203u);
+				REQUIRE(HE::MaterialShaderLibrary::spirvFromBytes(var.fragmentClustered, words));
+				CHECK(words[0] == 0x07230203u);
+			}
+#if defined(_WIN32)
+			if (rb == RB::D3D11 || rb == RB::D3D12)
+				for (const std::string* src : { &var.vertex, &var.fragment, &var.fragmentClustered })
+				{
+					Microsoft::WRL::ComPtr<ID3DBlob> blob, err;
+					const char* profile = src == &var.vertex ? "vs_5_0" : "ps_5_0";
+					const HRESULT hr = D3DCompile(src->c_str(), src->size(), "baked", nullptr, nullptr,
+					                              "main", profile, 0, 0, &blob, &err);
+					CHECK_MESSAGE(SUCCEEDED(hr), profile, ": ", (err ? static_cast<const char*>(err->GetBufferPointer()) : ""));
+				}
+#endif
+		}
 }
 #endif // HE_TESTS_HAVE_SHADERC
 #endif // HE_EDITOR_DEPS_DIR
