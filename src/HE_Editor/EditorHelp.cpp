@@ -3335,7 +3335,8 @@ namespace
 	  "succeeded\", \"Imported 3 assets\") and the thin line under it, with its "
 	  "check mark and light edge below. Off: the footer stays on \"Ready\" and "
 	  "the progress counters, the sound (if on) still plays and counting goes "
-	  "on. The tab check and the import highlight have switches of their own.",
+	  "on. The tab check, the import highlight and the problem pulse have "
+	  "switches of their own.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Check Mark", "",
 	  "A small check drawn beside the footer line, so \"it worked\" does not "
