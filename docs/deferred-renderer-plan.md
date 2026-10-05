@@ -482,7 +482,11 @@ wurde.
 mit Read-only-Tiefe (D11:6930–6937, D12:10557–10563, VK:7459–7466), dazu der Replay der opaken
 Draws ohne G-Buffer-Variante, Skinned (bleibt Forward wie auf Metal/GL), Partikel/Ribbons,
 Debug-Linien. Vulkan zeichnet Skinned heute **nach** den Transparenten (VK:7468–7470); im
-Schwanz gehört es davor, wie auf Metal/GL.
+Schwanz gehört es davor, wie auf Metal/GL. Auf D3D12 braucht der Schwanz weder einen
+Read-only-DSV noch den Zustand `DEPTH_READ`: der heutige Frame macht dieselbe Abfolge schon,
+`EncodeDecals` sampelt die Tiefe (DEPTH_WRITE→PIXEL_SHADER_RESOURCE, D12:8937–8939), hängt sie
+zurück (D12:9000–9002), danach testen die Transparenten dagegen (D12:10556 ff.). Ob ein Draw
+Tiefe schreibt, legt der PSO fest (`DepthWriteMask`), nicht der Ressourcenzustand.
 
 **Anbindung.** Keines der drei Backends überschreibt `SetRenderPath`/`SetViewMode` oder setzt
 das Flag (D11:7210–7229, D12:10975–10994, VK:986–1012). `m_renderPath` und `m_viewMode` sind im
@@ -578,8 +582,10 @@ bleiben.
 - **Cloud-Shadow-Map fehlt** auf allen drei (t33/Binding 33 ist ein Null- bzw. Weiß-View,
   Gate 0; D12:8280–8283, VK:7276–7277). Deferred zeigt keine Wolkenschatten, Forward heute
   auch nicht.
-- **GI-Reflexionen fehlen** auf allen drei (auch Forward, `supportsGIReflections` nirgends
-  gesetzt). Kein Teil dieses Themas.
+- **GI-Reflexionen** (eigenes Feature neben DDGI, `docs/gi-reflections-plan.md`) fehlen auf
+  allen drei auch im Forward-Pfad (`supportsGIReflections` nirgends gesetzt). Hier nicht
+  nachgezogen: das Thema bringt den Deferred-Pfad auf diese Backends, nicht Features, die
+  dort schon Forward fehlen. Das „GI“ im Thema ist mit DDGI + GI-Masken im Resolve abgedeckt.
 - **Skinned bleibt Forward**, wie auf Metal und GL.
 - **Gepackte Spiele:** die Spiel-Variante baut mit Cross-Compiler (`CMakeLists.txt:636–670`),
   Resolve und G-Buffer-Varianten werden zur Laufzeit übersetzt wie auf Metal/GL. Eine
