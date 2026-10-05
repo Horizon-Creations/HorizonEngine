@@ -11073,8 +11073,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                // node-graph textures (0 → the built-in blend program).
 		                unsigned int matProg = 0; std::vector<float> params;
 		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0;
-		                // Deferred forward-routed opaque draws only: the landscape
-		                // weightmap resolved at collect time (0 → layer-0 default).
+		                // Custom-material draws (deferred forward-routed opaque and
+		                // translucent): the landscape weightmap for unit 13, resolved at
+		                // collect time (0 → leave the unit as it is).
 		                unsigned int wmTex = 0;
 		                // Section draw: byte offset into the EBO (nullptr = from the
 		                // start, which is every whole-mesh draw). Trailing + defaulted
@@ -11283,6 +11284,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				if (opacity < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					// Same collection as the forward loop's transparent branch.
+					const unsigned int wm = matProg ? ResolveGraphTexture(dc.weightmapTextureId != HE::UUID{}
+						? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId, {}) : 0u;
 					auto pushTP = [&](const glm::mat4& t) {
 						TPDraw tp{ viewProj * t, t, baseColor,
 						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
@@ -11293,6 +11296,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						tp.params  = mParams;
 						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
 						tp.gtexCount = mGtexCount;
+						tp.wmTex     = wm;
 						transparent.push_back(std::move(tp));
 					};
 					if (!dc.instanceTransforms.empty())
@@ -11502,6 +11506,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 #endif
 				// Transparent instanced batches: push one TPDraw per instance so
 				// each object is sorted individually by distance.
+				const unsigned int tpWm = tpProg ? ResolveGraphTexture(dc.weightmapTextureId != HE::UUID{}
+					? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId, {}) : 0u;
 				auto pushTP = [&](const glm::mat4& t) {
 					TPDraw tp{ viewProj * t, t, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
@@ -11512,6 +11518,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					tp.params  = tpParams;
 					for (int i = 0; i < tpGtexCount; ++i) tp.gtex[i] = tpGtex[i];
 					tp.gtexCount = tpGtexCount;
+					tp.wmTex     = tpWm;
 					transparent.push_back(std::move(tp));
 				};
 				if (!dc.instanceTransforms.empty())
@@ -12202,6 +12209,23 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
 					m_haveMatParams = false; // opaque-pass dedup cache no longer matches
+#if defined(HE_HAVE_SHADERC)
+					// The shared lighting block. Forward, only the OPAQUE custom-material
+					// draw used to upload it — with no opaque graph material in view the
+					// translucent one read whatever the UI pass or a material preview had
+					// left there (fog.z = 0: no sky; sunDir.w = 0: no clock, so a Time-driven
+					// graph like the engine water stood still). Same once-per-frame rule as
+					// the opaque branch; deferred has uploaded it after the resolve already.
+					if (!m_matLightUploadedThisFrame)
+					{
+						HE::MaterialShaderLibrary::Lighting lit{};
+						fillMatLight(lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						m_matLightUploadedThisFrame = true;
+					}
+#endif
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
@@ -12213,6 +12237,24 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
 						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
 					}
+					// Units 13..17, exactly as the opaque custom-material draw binds them
+					// (only material programs read these units): the weightmap, the sky
+					// cube (14, gated by heLight.fog.z), the AO (15, fog.w) and the DDGI
+					// atlases (16/17, giProbe.y). Forward, nothing else binds them when no
+					// opaque graph material is in view.
+					if (t.wmTex)
+					{
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, t.wmTex);
+					}
+					glActiveTexture(GL_TEXTURE14);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glActiveTexture(GL_TEXTURE15);
+					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+					glActiveTexture(GL_TEXTURE16);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+					glActiveTexture(GL_TEXTURE17);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
 					glActiveTexture(GL_TEXTURE0);
 					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program

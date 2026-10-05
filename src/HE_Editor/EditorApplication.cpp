@@ -5618,6 +5618,51 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
+	// ── Engine water witness (HE_DUMP_WATERTEST, Thema 152): the SHIPPED
+	// Engine/Materials/Water.hasset on the engine plane (one quad — the waves are
+	// normals only), 40 m square at y = 0, and no other graph material — the case
+	// in which GL forward handed the translucent water a stale HeLighting (no
+	// clock, no sky). =floor adds a grey opaque slab 1.5 m below so the
+	// transparency has something to show. Frame it with SKYTEST (e.g. CAMY=4
+	// CAMZ=6 PITCH=-25): two shots at different HE_SKY_TIME differ only if the
+	// clock reaches the material, the same time twice is the noise floor.
+	if (const char* wt = std::getenv("HE_DUMP_WATERTEST"); wt && *wt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const HE::UUID waterId = contentManager().loadAsset("Engine/Materials/Water.hasset");
+		const HE::UUID planeId = contentManager().loadAsset("Engine/Meshes/Plane.hasset");
+		if (waterId == HE::UUID{} || planeId == HE::UUID{})
+			HE_LOG_WARN(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST could not load "
+			                          "Engine/Materials/Water.hasset or Engine/Meshes/Plane.hasset");
+		else
+		{
+			auto e = m_editorWorld->createEntity("WaterTest");
+			TransformComponent tc;
+			tc.position = glm::vec3(0.0f, 0.0f, -8.0f);
+			tc.scale    = glm::vec3(40.0f, 1.0f, 40.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
+			reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
+			if (std::string(wt) == "floor")
+			{
+				MaterialAsset grey;
+				grey.type = HE::AssetType::Material;
+				grey.name = "WaterTestFloor";
+				grey.baseColor[0] = grey.baseColor[1] = grey.baseColor[2] = 0.5f;
+				grey.roughness = 0.8f;
+				auto fe = m_editorWorld->createEntity("WaterTestFloor");
+				TransformComponent ftc;
+				ftc.position = glm::vec3(0.0f, -1.5f, -8.0f);
+				ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+				reg.emplace<TransformComponent>(fe, ftc);
+				reg.emplace<MeshComponent>(fe, MeshComponent{ HE::kDefaultCubeMeshId });
+				reg.emplace<MaterialComponent>(fe,
+					MaterialComponent{ contentManager().registerMaterial(std::move(grey)) });
+			}
+			HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST engine water plane added");
+		}
+	}
+
 	// ── sRGB-texture witness (HE_DUMP_SRGBTEST=1): two cubes side by side, both
 	// textured with the same solid mid-grey (128/255) on a white material. The
 	// LEFT texture is flagged linear, the RIGHT one sRGB. A backend that honours
