@@ -1002,7 +1002,9 @@ TEST_CASE("editor help: the Pull on Construct block explains itself in both vari
 	// scope ("Script Variable" in the level-script/class details, "UI Variable"
 	// in the widget editor). editor_help_audit.py walks one file at a time and
 	// cannot follow a scope across files, so the coverage is asserted here.
-	const char* labels[] = { "Pull on Construct", "Source", "Creator Class", "Variable",
+	// "Source Mode" replaced the "Pull on Construct" checkbox with Bind To
+	// (docs/bind-to-variable-binding-plan.md §5.1); "Reference" is its source.
+	const char* labels[] = { "Source Mode", "Source", "Reference", "Creator Class", "Variable",
 	                         "Member", "Struct Type", "Add to Target" };
 	for (const char* scope : { "Script Variable/", "UI Variable/" })
 		for (const char* l : labels)
