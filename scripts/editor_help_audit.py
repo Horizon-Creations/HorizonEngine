@@ -116,7 +116,7 @@ AREAS: dict[str, list[str]] = {
     "materials": ["MaterialEditorPanel.cpp"],
     "ui": ["UIEditorPanel.cpp", "ThemeAssetPanel.cpp"],
     "horizoncode": ["LevelScriptPanel.cpp", "HcGraphHost.cpp", "HcEditorUtil.cpp",
-                    "TypeAssetPanel.cpp", "HcWatchPanel.cpp"],
+                    "TypeAssetPanel.cpp", "HcWatchPanel.cpp", "HcExtractUi.cpp"],
     "input": ["InputAssetPanel.cpp"],
     "animation": ["AnimatorStateMachineEditorPanel.cpp", "AudioEditorPanel.cpp",
                   "StaticMeshEditorPanel.cpp", "SkeletalMeshEditorPanel.cpp",

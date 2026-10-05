@@ -368,6 +368,10 @@ std::vector<SettingDesc> buildCatalog()
 	t.push_back(floatRow("gi.lightRadius", "Sun Angular Radius",
 	                     "Global Illumination", "gi", &EditorConfig::GILightRadius,
 	                     0.0, 10.0, "Degrees — drives shadow penumbra softness."));
+	t.push_back(enumRow("gi.shadowQuality", "Shadow Quality",
+	                    "Global Illumination", "gi", &EditorConfig::GIShadowQuality,
+	                    { "Low (1 ray)", "Medium (2 rays)", "High (4 rays)" },
+	                    "Sun rays per pixel for the GI shadow mask."));
 	t.push_back(boolRow("gi.reflectionsEnabled", "GI Reflections",
 	                    "Global Illumination", "girefl",
 	                    &EditorConfig::GIReflectionsEnabled,

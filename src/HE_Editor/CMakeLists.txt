@@ -306,6 +306,12 @@ add_executable(HorizonEditor WIN32
 	HcWatch.cpp
 	HcWatchPanel.cpp
 	HcRename.cpp
+	HcPull.cpp
+	HcPullUi.cpp
+	HcPullUiBind.cpp
+	HcExtract.cpp
+	HcExtractUi.cpp
+	HcExtractUiBind.cpp
 	HcRenameSweep.cpp
 	HcRenameDialog.cpp
 	HcGraphClipboard.cpp

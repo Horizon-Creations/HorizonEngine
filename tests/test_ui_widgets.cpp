@@ -13733,6 +13733,42 @@ TEST_CASE("Parameters: a half-written declaration does not survive loading")
     CHECK(back.params[0].name == "Label");
 }
 
+// …for whoever USES the component. The author's own document is read with
+// KeepUnfinished, because "Add Parameter" makes exactly such a row (no property
+// yet, no element when nothing was selected) and the designer's undo snapshot,
+// its load and the MCP tools all go through this reader. Read strictly, an undo
+// onto a snapshot holding the fresh row lost it (Thema 141).
+TEST_CASE("Parameters: the author's own document keeps a half-written declaration")
+{
+    HE::UIWidgetTree t = labelledRow();
+    t.params.push_back({ "",          1, "Text", "" });
+    t.params.push_back({ "Nope",      1, "",     "half" });
+    t.params.push_back({ "Parameter", 0, "",     "" });   // what Add Parameter makes
+    const std::string json = HE::uiWidgetTreeToJson(t);
+
+    HE::UIWidgetTree kept;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, kept, HE::UIWidgetParamRead::KeepUnfinished));
+    REQUIRE(kept.params.size() == 4);
+    CHECK(kept.params[0].name == "Label");
+    CHECK(kept.params[1].name.empty());
+    CHECK(kept.params[1].property == "Text");
+    CHECK(kept.params[2].name == "Nope");
+    CHECK(kept.params[2].elementId == 1);
+    CHECK(kept.params[2].property.empty());
+    CHECK(kept.params[2].help == "half");
+    CHECK(kept.params[3].name == "Parameter");
+    CHECK(kept.params[3].elementId == 0);
+    // Writing it again is byte-identical: nothing about the half rows changes
+    // on the way through, so an undo snapshot compares equal to its source.
+    CHECK(HE::uiWidgetTreeToJson(kept) == json);
+
+    // The default is still the consumer's, and still drops all three.
+    HE::UIWidgetTree used;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, used));
+    REQUIRE(used.params.size() == 1);
+    CHECK(used.params[0].name == "Label");
+}
+
 // ── The timeline's arithmetic ────────────────────────────────────────────────
 // The strip itself needs a window, but the part of it that can be wrong in a way
 // nobody notices — a ruler whose labels crowd, a zoom that slides the view out

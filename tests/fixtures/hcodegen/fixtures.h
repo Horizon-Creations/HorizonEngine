@@ -1835,6 +1835,11 @@ inline HE::hccg::ClassSource fxGameInstance()
     Fx f;
     f.var("score", PT::Float);
     f.var("hidden", PT::Float, 0.0f, {}, /*access=*/1);
+    // Sources for the Pull on Construct fixture (pull_construct): a non-zero
+    // scalar, so a pulled value cannot be mistaken for a zero default, and a
+    // struct for the member path.
+    f.var("bonus", PT::Float, 2.5f);
+    f.structVar("run", kStatsType, { { "hp", Value::ofFloat(77.0f) } });
 
     const int fn = f.fnEntry("AddScore", 0, { { "amount", PT::Float } },
                                             { { "total", PT::Float } });
@@ -3026,6 +3031,109 @@ inline HE::hccg::ClassSource fxPlayerSlots()
     return f.done("player_slots");
 }
 
+// 45 — Pull on Construct (docs/state-driven-data-exchange-design.md §2.8): no
+// pull CODE is generated, the Runtime pulls for both backends from the
+// declarations (Variable vs CompiledVarInfo). What this proves is that the
+// generated table carries the four strings and that both paths land the same
+// values: a scalar, a scalar converted Float → Int, a struct member, and the
+// three fallbacks (private, missing, and no creator when registered by a host).
+// Construct copies `bonus` into `seen` — the pulled value is there by then.
+inline HE::hccg::ClassSource fxPullConstruct()
+{
+    Fx f;
+    auto pull = [&f](const char* src, const char* var, const char* member = "")
+    {
+        Variable& v = f.g.variables.back();
+        v.pullSource = src; v.pullVar = var; v.pullMember = member;
+    };
+    f.var("bonus", PT::Float, -1.0f);    pull(HorizonCode::kPullFromGameInstance, "bonus");
+    f.var("bonusInt", PT::Int, -1.0f);   pull(HorizonCode::kPullFromGameInstance, "bonus");
+    f.var("hp", PT::Float, -1.0f);       pull(HorizonCode::kPullFromGameInstance, "run", "hp");
+    f.var("lvl", PT::Int, -1.0f);        pull(HorizonCode::kPullFromGameInstance, "run", "lvl");
+    f.var("hidden", PT::Float, 9.0f);    pull(HorizonCode::kPullFromGameInstance, "hidden");
+    f.var("missing", PT::Float, 4.0f);   pull(HorizonCode::kPullFromGameInstance, "nope");
+    f.var("gift", PT::Float, -1.0f);     pull(HorizonCode::kPullFromCreator, "gift");
+    f.var("seen", PT::Float);
+    const int ev = f.event("Construct");
+    const int s = f.setVar("seen", PT::Float);
+    f.data(f.getVar("bonus", PT::Float), 0, s, 0);
+    f.exec(ev, s);
+    return f.done("pull_construct");
+}
+
+// 46 — the Creator source across backends: Spawn creates a pull_construct,
+// whose `gift` is pulled from THIS instance. The child is compiled in the
+// compiled world, so its creator is read off the same runtime stack there.
+inline HE::hccg::ClassSource fxPullSpawner()
+{
+    Fx f;
+    f.var("gift", PT::Float, 6.5f);
+    f.var("child", PT::Ref);
+    const int ev = f.event("Spawn");
+    Node co; co.type = NT::CreateObject; co.s = "fix/pull_construct";
+    const int c = f.add(co);
+    f.exec(ev, c);
+    const int s = f.setVar("child", PT::Ref);
+    f.data(c, 0, s, 0);
+    f.exec(c, s);
+    return f.done("pull_spawner");
+}
+
+// 47 — Extract on Destruct (docs/state-driven-data-exchange-design.md §3.7):
+// the generated extractOnDestruct is NATIVE (S_FixStats filled member by
+// member), the interpreter builds the same struct from the graph's table.
+// What both must agree on: a private variable the class's own Destruct wrote
+// last (secret ← finalHp), Float → Int converted, @Self, a mismatching entry
+// (Int into the Enum member) and one naming a member the struct lacks both
+// left at the struct's DEFINITION defaults, like every unmapped member
+// (inner, hits — the generated struct members default to zero, the definition
+// does not).
+inline HE::hccg::ClassSource fxExtractDestruct()
+{
+    Fx f;
+    f.var("hp", PT::Float, 5.5f);
+    f.var("lvlF", PT::Float, 7.0f);
+    f.var("kills", PT::Int, 4.0f);
+    f.var("secret", PT::Float, 0.0f, {}, /*access=*/1);
+    f.var("finalHp", PT::Float, 42.0f);
+    const int ev = f.event("Destruct");
+    const int s = f.setVar("secret", PT::Float);
+    f.data(f.getVar("finalHp", PT::Float), 0, s, 0);
+    f.exec(ev, s);
+    f.g.extract.structPath = kStatsType;
+    f.g.extract.map = { { "hp", "secret" }, { "lvl", "lvlF" }, { "mood", "kills" },
+                        { "owner", HorizonCode::kExtractSelf }, { "gone", "hp" } };
+    return f.done("extract_destruct");
+}
+
+// 48 — a class deriving from extract_destruct without a spec of its own: it
+// extracts the base's struct (C++: the inherited override; interpreter: the
+// leaf-most level that names one).
+inline HE::hccg::ClassSource fxExtractDerived()
+{
+    Fx f;
+    f.var("extra", PT::Int, 1.0f);
+    return f.done("extract_derived", "fix/extract_destruct", "");
+}
+
+// 49 — the listener side: OnDestroyed (FixStats) copies the payload into `got`.
+// Its generated event table must carry the argument's type, or a compiled
+// listener could not be type-checked (Runtime::dispatchDestroyed).
+inline HE::hccg::ClassSource fxExtractListener()
+{
+    Fx f;
+    f.structVar("got", kStatsType);
+    Node ev; ev.type = NT::Event; ev.s = HorizonCode::kOnDestroyed;
+    ev.hasArg = true; ev.propType = PT::Struct; ev.typeName = kStatsType;
+    const int e = f.add(ev);
+    Node sv; sv.type = NT::SetVariable; sv.s = "got"; sv.propType = PT::Struct;
+    sv.typeName = kStatsType;
+    const int s = f.add(sv);
+    f.data(e, 0, s, 0);
+    f.exec(e, s);
+    return f.done("extract_listener");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -3042,6 +3150,8 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
         fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxPlayerSlots(),
+        fxPullConstruct(), fxPullSpawner(),
+        fxExtractDestruct(), fxExtractDerived(), fxExtractListener(),
     };
 }
 

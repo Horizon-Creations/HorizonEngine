@@ -3194,6 +3194,11 @@ namespace
 	  "How large the light source is treated as being, in degrees. Wider means "
 	  "softer, more diffuse indirect shadows.",
 	  "", "rendering#lighting" },
+	{ "Preferences/Global Illumination/GI Shadow Quality", "",
+	  "Shadow rays per pixel toward the sun. More rays calm the shimmer at soft "
+	  "shadow edges; on GPUs without hardware ray tracing every extra ray costs "
+	  "as much as the first.",
+	  "", "rendering#performance" },
 	{ "Preferences/Global Illumination/GI Reflections (ray-traced)", "",
 	  "Traced reflections instead of screen-space ones: they can show what is "
 	  "behind the camera, at the cost of tracing the scene.",
@@ -5890,6 +5895,35 @@ namespace
 	  "sees it. Left alone, the input keeps the default shown here. Public "
 	  "variables only.",
 	  "", "ui#graph" },
+	{ "UI Variable/Pull on Construct", "",
+	  "Fills this variable from somewhere else the moment the widget is created, "
+	  "before PreConstruct runs. Once, not continuously. When the source cannot "
+	  "answer, the default (now called Fallback) stays, and the log says why "
+	  "once per widget class.",
+	  "", "ui#graph" },
+	{ "UI Variable/Source", "",
+	  "Game Instance: one of its public variables. Creator: a public variable of "
+	  "whoever ran the Create Widget that made this one.",
+	  "", "ui#graph" },
+	{ "UI Variable/Creator Class", "",
+	  "The class expected to create this widget. It fills the Variable list and "
+	  "is where Add to Target writes; another creator leaves the fallback.",
+	  "", "ui#graph" },
+	{ "UI Variable/Variable", "",
+	  "The public variable of the source to copy. What cannot land here is "
+	  "greyed with the reason.",
+	  "", "ui#graph" },
+	{ "UI Variable/Member", "",
+	  "One field of a struct variable instead of the whole struct. Renamed "
+	  "fields are still found.",
+	  "", "ui#graph" },
+	{ "UI Variable/Struct Type", "",
+	  "The struct a missing source variable is created as, for a member pull.",
+	  "", "ui#graph" },
+	{ "UI Variable/Add to Target", "",
+	  "Creates what the source is missing, in the Game Instance or the creator "
+	  "class: the variable, a struct variable, or the struct's field.",
+	  "", "ui#graph" },
 	{ "UI Variable/Position##vdef", "Default Position",
 	  "The position this transform variable starts at, when the widget is "
 	  "created. It is a starting value, not a binding to anything.",
@@ -6973,6 +7007,114 @@ namespace
 	  "at something that exists only in this run — save a name or an id "
 	  "instead.",
 	  "", "horizoncode#functions" },
+	// Pull on Construct (HcPullUi draws it; the same block sits in the widget
+	// editor under "UI Variable/" below).
+	{ "Script Variable/Pull on Construct", "",
+	  "Fills this variable from somewhere else the moment an instance is created, "
+	  "before any of its own events run: PreConstruct, Construct and BeginPlay "
+	  "already see the pulled value. It happens once; a later change at the "
+	  "source does not follow. When the source cannot answer, the default below "
+	  "(now called Fallback) stays, and the log says why once per class.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Source", "",
+	  "Where the value comes from. Game Instance: one of its public variables, "
+	  "which exist before anything else is created. Creator: a public variable of "
+	  "whoever ran the Create Object or Create Widget that made this instance. A "
+	  "placed object has no creator and keeps its fallback.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Creator Class", "",
+	  "The class the creator is expected to be. It fills the Variable list and "
+	  "tells Add to Target where to write. At run time a creator of another class "
+	  "leaves the fallback in place; derived classes count. Any creator accepts "
+	  "whoever has a public variable of that name.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Variable", "",
+	  "The public variable of the source to copy. Every public variable is "
+	  "listed; one that cannot land here is greyed with the reason. A struct that "
+	  "only fits through one of its fields opens the Member choice.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Member", "",
+	  "One field of a struct variable, instead of the whole struct. A field "
+	  "renamed in the struct is still found under its old name, and the new name "
+	  "is written here.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Struct Type", "",
+	  "Which struct the missing source variable is declared as, when Add to "
+	  "Target creates it for a member pull. Only structs with a fitting field of "
+	  "that name are offered.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Add to Target", "",
+	  "Creates what the source is missing: a public variable with this one's "
+	  "type and default, a struct variable for a member pull, or the missing "
+	  "field in the struct. It writes into the Game Instance or the creator "
+	  "class, never into a class open with unsaved changes.",
+	  "", "horizoncode#functions" },
+	// Extract on Destruct (HcExtractUi draws it, in the class tabs and in the
+	// widget editor's graph view alike — one scope for both).
+	{ "Extract on Destruct/Extract on Destruct", "",
+	  "When an instance of this class is destroyed, its own Destruct runs first, "
+	  "then the engine fills the struct chosen here from its variables and sends "
+	  "it as OnDestroyed to everything bound to the instance with Bind Event. "
+	  "Nobody bound: the data is dropped. The instance itself never gets it.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/(not available)", "",
+	  "The Level Script and the Game Instance are never destroyed like an object "
+	  "(they unload or shut down), so they have nothing to extract.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Struct", "",
+	  "The struct listeners receive. One per class. Choosing one fills every "
+	  "member that has a variable of the same name and type; correct the rest "
+	  "below. A derived class without its own struct sends its parent's.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/From", "",
+	  "What fills this member: one of the class's variables (private and "
+	  "inherited ones too), Self for an object member, or nothing, which keeps "
+	  "the struct's default. Variables that do not fit are greyed with the "
+	  "reason. Drag a variable from the list onto the row to map it.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Self", "",
+	  "A reference to the instance being destroyed. Lets a listener bound to "
+	  "several objects tell them apart. It is still readable inside OnDestroyed "
+	  "and dead right after.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/New Struct from Variables...", "",
+	  "Makes a struct asset from the variables you tick, with their names, "
+	  "types and defaults, and maps each to its variable. The quickest start "
+	  "when there is no struct yet.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Name", "",
+	  "The new struct's name: letters, digits and underscores, not starting "
+	  "with a digit. It becomes the asset's file name.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Folder", "",
+	  "Where in the project the struct asset is created, relative to the "
+	  "content folder.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Auto-Map by Name", "",
+	  "Fills every member still at its default with the variable of the same "
+	  "name (ignoring case) when the types fit, and an object member called "
+	  "Self, Owner, Who or Source with Self. Rows already mapped stay.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Clear", "",
+	  "Puts every member back to the struct's default. The struct stays chosen.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Open Extract Table", "",
+	  "Shows the Extract on Destruct table this variable is mapped in.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Data", "",
+	  "What the Target sends when it dies, when this graph cannot tell which "
+	  "class the Target is: a struct, or no data.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/(no data)", "",
+	  "The Target extracts nothing: OnDestroyed arrives without an argument, "
+	  "which still says that it died.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Create OnDestroyed Event", "",
+	  "Declares OnDestroyed in this class, with the struct the Target sends as "
+	  "its argument, and places its event node. Bind Event on OnDestroyed then "
+	  "runs it when the Target is destroyed. A class has one OnDestroyed, so "
+	  "everything it listens to should send the same struct.",
+	  "", "horizoncode#functions" },
 	{ "Script Variable/Position##vdef", "Default Position",
 	  "The position this Transform variable starts at. It is a starting value, "
 	  "not a binding to anything.",
@@ -7770,6 +7912,7 @@ namespace
 		{ "Script Graph/",               "editor-horizoncode", "HorizonCode Editor", "Script graphs" },
 		{ "HorizonCode Graph/",          "editor-horizoncode", "HorizonCode Editor", "Comments and reroutes" },
 		{ "Script Variable/",            "editor-horizoncode", "HorizonCode Editor", "Graph variables" },
+		{ "Extract on Destruct/",        "editor-horizoncode", "HorizonCode Editor", "Extract on Destruct" },
 		{ "Script Node/",                "editor-horizoncode", "HorizonCode Editor", "Nodes in a script graph" },
 		{ "HorizonCode Event/",          "editor-horizoncode", "HorizonCode Editor", "Declared events" },
 		{ "HorizonCode Node/",           "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },

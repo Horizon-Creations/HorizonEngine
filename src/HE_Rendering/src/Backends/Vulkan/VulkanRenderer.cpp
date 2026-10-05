@@ -236,15 +236,16 @@ void VulkanRenderer::Shutdown()
     if (m_giGBufPipe)     { vkDestroyPipeline(m_device, m_giGBufPipe, nullptr);     m_giGBufPipe = VK_NULL_HANDLE; }
     if (m_giGBufInstancedPipe) { vkDestroyPipeline(m_device, m_giGBufInstancedPipe, nullptr); m_giGBufInstancedPipe = VK_NULL_HANDLE; }
     if (m_giTemporalPipe){ vkDestroyPipeline(m_device, m_giTemporalPipe, nullptr); m_giTemporalPipe = VK_NULL_HANDLE; }
-    if (m_giBlurPipe)     { vkDestroyPipeline(m_device, m_giBlurPipe, nullptr);     m_giBlurPipe = VK_NULL_HANDLE; }
+    if (m_giAtrousPipe)     { vkDestroyPipeline(m_device, m_giAtrousPipe, nullptr);     m_giAtrousPipe = VK_NULL_HANDLE; }
     if (m_giShadowPipe)   { vkDestroyPipeline(m_device, m_giShadowPipe, nullptr);   m_giShadowPipe = VK_NULL_HANDLE; }
     if (m_giProbePipe)    { vkDestroyPipeline(m_device, m_giProbePipe, nullptr);    m_giProbePipe = VK_NULL_HANDLE; }
     if (m_giGBufRP)       { vkDestroyRenderPass(m_device, m_giGBufRP, nullptr);     m_giGBufRP = VK_NULL_HANDLE; }
     if (m_giTemporalRP)   { vkDestroyRenderPass(m_device, m_giTemporalRP, nullptr); m_giTemporalRP = VK_NULL_HANDLE; }
-    if (m_giBlurRP)       { vkDestroyRenderPass(m_device, m_giBlurRP, nullptr);     m_giBlurRP = VK_NULL_HANDLE; }
+    if (m_giAtrousRP)       { vkDestroyRenderPass(m_device, m_giAtrousRP, nullptr);     m_giAtrousRP = VK_NULL_HANDLE; }
     if (m_giShadowPL)     { vkDestroyPipelineLayout(m_device, m_giShadowPL, nullptr); m_giShadowPL = VK_NULL_HANDLE; }
     if (m_giProbePL)      { vkDestroyPipelineLayout(m_device, m_giProbePL, nullptr);  m_giProbePL = VK_NULL_HANDLE; }
     if (m_giFsPL)         { vkDestroyPipelineLayout(m_device, m_giFsPL, nullptr);     m_giFsPL = VK_NULL_HANDLE; }
+    if (m_giAtrousPL)     { vkDestroyPipelineLayout(m_device, m_giAtrousPL, nullptr); m_giAtrousPL = VK_NULL_HANDLE; }
     if (m_giGBufPL)       { vkDestroyPipelineLayout(m_device, m_giGBufPL, nullptr);   m_giGBufPL = VK_NULL_HANDLE; }
     if (m_giShadowDSL)    { vkDestroyDescriptorSetLayout(m_device, m_giShadowDSL, nullptr); m_giShadowDSL = VK_NULL_HANDLE; }
     if (m_giProbeDSL)     { vkDestroyDescriptorSetLayout(m_device, m_giProbeDSL, nullptr);  m_giProbeDSL = VK_NULL_HANDLE; }
@@ -709,8 +710,10 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 
         // ── Forward SSR (docs/ssr-cross-backend-plan.md checkpoint B) ──
         // Built lazily, and only here: the trace's radiance source is the
-        // HDR target of THIS branch, so SSR does not exist in the swapchain
-        // path at all (plan §2.2 — reported, not hidden).
+        // HDR target of THIS branch. The packaged game reaches it too when it
+        // asks for the chain (SetSwapchainPostProcessing, plan C6 closed); only
+        // the direct swapchain fallback (application mode, sRGB-only
+        // swapchain) has no SSR.
         if (m_ssrEnabled) EnsureSSRPipelines();
         const bool ssrWanted = ssrWantedThisFrame();
 
@@ -979,7 +982,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         }
     }
     // The jitter belongs to this frame's viewport passes only; whatever draws
-    // after them (a world preview, the swapchain path) rasterises unjittered.
+    // after them (a world preview, the swapchain pass — the game's present
+    // blit or the direct fallback) rasterises unjittered.
     m_taaFrame = false;
 }
 
@@ -988,7 +992,9 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     Capabilities c;
     c.supportsShadows        = true;
     c.supportsPostProcessing = m_postFxReady;
-    c.supportsHDR            = false;
+    // The HDR scene target lives and dies with the post chain, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing) both run.
+    c.supportsHDR            = m_postFxReady;
     c.supportsGpuParticles   = false;
     // Software compute ray tracing (gi_*.comp) — compute is core Vulkan, so no
     // extension gate. If pipeline creation fails at runtime, runGi() leaves
@@ -999,14 +1005,15 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // B) — the reflection MRT pre-pass plus last frame's HDR copy, Metal's
     // Option-A path. There is no deferred composite here because there is no
     // G-buffer. Reported alongside supportsPostProcessing on purpose: the HDR
-    // target the trace reads is the PostFX scene target, and it exists only in
-    // the editor viewport (§2.2) — in the swapchain path the toggle is honoured
-    // by doing nothing. The shaders come from the cross-compiler, hence the #if.
+    // target the trace reads is the PostFX scene target, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing, plan C6) both
+    // run; only the direct swapchain fallback (application mode, sRGB-only
+    // swapchain) has none. The shaders come from the cross-compiler, hence the #if.
     c.supportsScreenSpaceReflections = m_postFxReady;
 #endif
-    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the editor
-    // viewport's post chain — false only if a TAA shader (.spv) or pipeline is
-    // missing. The swapchain path renders unjittered either way (m_taaFrame).
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same post
+    // chain — false only if a TAA shader (.spv) or pipeline is missing. Only
+    // the direct swapchain fallback renders unjittered (m_taaFrame).
     c.supportsTemporalAA = taaReady();
     return c;
 }
@@ -8607,13 +8614,16 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
     m_giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
     m_giRaysPerProbe        = std::clamp(s.raysPerProbe, 8, 1024);
     m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+    m_giShadowRays          = std::clamp(s.shadowRays, 1, 256);
+    m_giShadowHistoryWeight       = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+    m_giShadowFilter        = s.shadowFilter;
 }
 
 // Screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint B1). The
 // trace is a fragment shader over a rasterized pre-pass — no compute, no BVH,
 // no extension — so unlike the ray-traced GI it has no device gate here. What
-// it does need is the shader cross-compiler and the editor viewport's HDR
-// target; both are checked in ssrWantedThisFrame().
+// it does need is the shader cross-compiler and the post chain's HDR target
+// (editor viewport or packaged game); both are checked in ssrWantedThisFrame().
 void VulkanRenderer::SetShadowSettings(const ShadowSettings& s)
 {
     // The images are not touched here: this is called from the editor's frame
@@ -9149,10 +9159,11 @@ struct GiShadowUBOData
     glm::vec4 sunDirRadius;     // xyz = toward light, w = angular radius (radians)
     glm::vec4 frame;            // x = jitter seed, y/z = tex size, w = instance count
     glm::vec4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-    glm::vec4 localExtra;       // x = local light count
+    glm::vec4 localExtra;       // x = local light count, y = sun rays per pixel
 };
 static_assert(sizeof(GiShadowUBOData) == 7 * 16, "must match gi_shadow.comp's GiShadowUBO");
-struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::vec4 blend; };
+struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::mat4 curViewProj; glm::vec4 blend; };
+static_assert(sizeof(GiTemporalUBOData) == 2 * 64 + 16, "must match gi_temporal.frag's GiTemporalUBO");
 struct GiProbeUBOData
 {
     glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
@@ -9248,6 +9259,7 @@ void VulkanRenderer::createGiPipelines()
     ok = makePL(m_giShadowDSL, 0, 0, m_giShadowPL)
       && makePL(m_giProbeDSL,  0, 0, m_giProbePL)
       && makePL(m_giFsDSL,     0, 0, m_giFsPL)
+      && makePL(m_giFsDSL,     sizeof(HE::GIShadowAtrousStep), VK_SHADER_STAGE_FRAGMENT_BIT, m_giAtrousPL)
       && makePL(VK_NULL_HANDLE, sizeof(PushConstants), VK_SHADER_STAGE_VERTEX_BIT, m_giGBufPL);
     if (!ok)
     { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI pipeline layouts failed"); return; }
@@ -9346,7 +9358,7 @@ void VulkanRenderer::createGiPipelines()
         return vkCreateRenderPass(m_device, &rpci, nullptr, &rp) == VK_SUCCESS;
     };
     if (!makeFsRP(VK_FORMAT_R16G16B16A16_SFLOAT, m_giTemporalRP) ||
-        !makeFsRP(VK_FORMAT_R16_SFLOAT,          m_giBlurRP))
+        !makeFsRP(VK_FORMAT_R16_SFLOAT,          m_giAtrousRP))
     { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI fs render passes failed"); return; }
 
     // ── Shader modules ────────────────────────────────────────────────────────
@@ -9354,15 +9366,15 @@ void VulkanRenderer::createGiPipelines()
     VkShaderModule gbufFS   = loadShaderModule("gi_gbuf.frag.spv");
     VkShaderModule fsVS     = loadShaderModule("postfx.vert.spv");
     VkShaderModule tempFS   = loadShaderModule("gi_temporal.frag.spv");
-    VkShaderModule blurFS   = loadShaderModule("gi_blur.frag.spv");
+    VkShaderModule atrousFS = loadShaderModule("gi_atrous.frag.spv");
     VkShaderModule shadowCS = loadShaderModule("gi_shadow.comp.spv");
     VkShaderModule probeCS  = loadShaderModule("gi_probe.comp.spv");
     auto destroyModules = [&]()
     {
-        for (auto m : { gbufVS, gbufFS, fsVS, tempFS, blurFS, shadowCS, probeCS })
+        for (auto m : { gbufVS, gbufFS, fsVS, tempFS, atrousFS, shadowCS, probeCS })
             if (m) vkDestroyShaderModule(m_device, m, nullptr);
     };
-    if (!gbufVS || !gbufFS || !fsVS || !tempFS || !blurFS || !shadowCS || !probeCS)
+    if (!gbufVS || !gbufFS || !fsVS || !tempFS || !atrousFS || !shadowCS || !probeCS)
     {
         HE_LOG_WARN(RHI, "%s", "VulkanRenderer: GI shaders missing — GI disabled");
         destroyModules();
@@ -9437,10 +9449,11 @@ void VulkanRenderer::createGiPipelines()
                 vkDestroyShaderModule(m_device, gbufIVS, nullptr);
             }
     }
-    // Temporal + blur (attribute-less fullscreen, no depth).
+    // Temporal + a-trous (attribute-less fullscreen, no depth).
     VkPipelineVertexInputStateCreateInfo fsVI{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     VkPipelineDepthStencilStateCreateInfo nods{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
-    auto makeFsPipe = [&](VkShaderModule fs, VkRenderPass rp, VkPipeline& out) -> bool
+    auto makeFsPipe = [&](VkShaderModule fs, VkRenderPass rp, VkPipeline& out,
+                          VkPipelineLayout layout) -> bool
     {
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -9453,11 +9466,11 @@ void VulkanRenderer::createGiPipelines()
         pci.pViewportState = &vps;     pci.pRasterizationState = &rs;
         pci.pMultisampleState = &ms;   pci.pDepthStencilState = &nods;
         pci.pColorBlendState = &cb1;   pci.pDynamicState = &dyn;
-        pci.layout = m_giFsPL;         pci.renderPass = rp;
+        pci.layout = layout;           pci.renderPass = rp;
         return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
     };
-    pipesOk = pipesOk && makeFsPipe(tempFS, m_giTemporalRP, m_giTemporalPipe);
-    pipesOk = pipesOk && makeFsPipe(blurFS, m_giBlurRP,     m_giBlurPipe);
+    pipesOk = pipesOk && makeFsPipe(tempFS,   m_giTemporalRP, m_giTemporalPipe, m_giFsPL);
+    pipesOk = pipesOk && makeFsPipe(atrousFS, m_giAtrousRP,   m_giAtrousPipe,   m_giAtrousPL);
     // Compute kernels.
     auto makeCompute = [&](VkShaderModule cs, VkPipelineLayout pl, VkPipeline& out) -> bool
     {
@@ -9477,32 +9490,34 @@ void VulkanRenderer::createGiPipelines()
 
     // ── Descriptor pool + per-in-flight-frame sets + params UBOs ─────────────
     {
+        // Per frame: shadow, probe, temporal and one a-trous set per iteration.
         VkDescriptorPoolSize ps[4] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 6 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 11 }, // shadow 2, temporal 3, a-trous 2x3
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          k_maxFramesInFlight * 4 }, // shadow raw+local, probe irr+vis
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 4 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 5 },
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-        dpci.maxSets       = k_maxFramesInFlight * 4;
+        dpci.maxSets       = k_maxFramesInFlight * 5;
         dpci.poolSizeCount = 4;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_giDescPool) != VK_SUCCESS)
         { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI descriptor pool failed"); return; }
         for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
         {
-            VkDescriptorSetLayout layouts[4] = { m_giShadowDSL, m_giProbeDSL, m_giFsDSL, m_giFsDSL };
-            VkDescriptorSet sets[4]{};
+            VkDescriptorSetLayout layouts[5] = { m_giShadowDSL, m_giProbeDSL, m_giFsDSL, m_giFsDSL, m_giFsDSL };
+            VkDescriptorSet sets[5]{};
             VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
             dsai.descriptorPool     = m_giDescPool;
-            dsai.descriptorSetCount = 4;
+            dsai.descriptorSetCount = 5;
             dsai.pSetLayouts        = layouts;
             if (vkAllocateDescriptorSets(m_device, &dsai, sets) != VK_SUCCESS)
             { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI descriptor sets failed"); return; }
-            m_giShadowSet[i]   = sets[0];
-            m_giProbeSet[i]    = sets[1];
-            m_giTemporalSet[i] = sets[2];
-            m_giBlurSet[i]     = sets[3];
+            m_giShadowSet[i]    = sets[0];
+            m_giProbeSet[i]     = sets[1];
+            m_giTemporalSet[i]  = sets[2];
+            m_giAtrousSet[i][0] = sets[3];
+            m_giAtrousSet[i][1] = sets[4];
         }
     }
     m_giReady = true;
@@ -9681,7 +9696,8 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
                       VK_IMAGE_ASPECT_COLOR_BIT, m_giLocalMask)
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giHist[0])
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giHist[1])
-           && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giResult);
+           && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giResult)
+           && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giFilterTmp);
     if (!ok)
     {
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI target creation failed");
@@ -9706,9 +9722,11 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
         if (ok)
         {
             VkFramebufferCreateInfo rci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-            rci.renderPass = m_giBlurRP; rci.attachmentCount = 1; rci.pAttachments = &m_giResult.view;
+            rci.renderPass = m_giAtrousRP; rci.attachmentCount = 1; rci.pAttachments = &m_giResult.view;
             rci.width = w; rci.height = h; rci.layers = 1;
             ok = vkCreateFramebuffer(m_device, &rci, nullptr, &m_giResultFB) == VK_SUCCESS;
+            rci.pAttachments = &m_giFilterTmp.view;
+            ok = ok && vkCreateFramebuffer(m_device, &rci, nullptr, &m_giFilterTmpFB) == VK_SUCCESS;
         }
     }
     if (!ok)
@@ -9767,8 +9785,10 @@ void VulkanRenderer::destroyGiTargets()
     for (int i = 0; i < 2; ++i)
         if (m_giHistFB[i]) { vkDestroyFramebuffer(m_device, m_giHistFB[i], nullptr); m_giHistFB[i] = VK_NULL_HANDLE; }
     if (m_giResultFB) { vkDestroyFramebuffer(m_device, m_giResultFB, nullptr); m_giResultFB = VK_NULL_HANDLE; }
+    if (m_giFilterTmpFB) { vkDestroyFramebuffer(m_device, m_giFilterTmpFB, nullptr); m_giFilterTmpFB = VK_NULL_HANDLE; }
     destroy(m_giGBufPos); destroy(m_giGBufNorm); destroy(m_giGBufDepth);
     destroy(m_giRaw); destroy(m_giLocalMask); destroy(m_giHist[0]); destroy(m_giHist[1]); destroy(m_giResult);
+    destroy(m_giFilterTmp);
     m_giW = m_giH = 0;
     m_giHistValid = false;
 }
@@ -9958,7 +9978,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
 
     const uint32_t gw = std::max(1u, w / 2), gh = std::max(1u, h / 2); // half-res like GL/Metal
     createGiTargets(gw, gh);
-    if (!m_giGBufFB || !m_giResultFB) return;
+    if (!m_giGBufFB || !m_giResultFB || !m_giFilterTmpFB) return;
     ensureGiProbeGrid();
     if (m_giProbeGridBuilt) ensureGiProbeAtlas();
 
@@ -9987,14 +10007,15 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         static_assert(sizeof(shadowUbo.localPosRange) == sizeof(ml.posRange),
                       "gi_shadow.comp's local light slots must match HE::kMaxMaskedLocalLights");
         std::memcpy(shadowUbo.localPosRange, ml.posRange, sizeof(shadowUbo.localPosRange));
-        shadowUbo.localExtra = glm::vec4(float(ml.count), 0.0f, 0.0f, 0.0f);
+        shadowUbo.localExtra = glm::vec4(float(ml.count), float(m_giShadowRays), 0.0f, 0.0f);
     }
     if (!uploadGiBuffer(m_giShadowUBO[fi], &shadowUbo, sizeof(shadowUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
 
     GiTemporalUBOData tempUbo{};
     tempUbo.prevViewProj = m_giPrevViewProj;
-    tempUbo.blend        = glm::vec4(m_giHistValid ? 0.9f : 0.0f, 0.0f, 0.0f, 0.0f);
+    tempUbo.curViewProj  = vp; // clip-fixed like prevViewProj; becomes it below
+    tempUbo.blend        = glm::vec4(m_giHistValid ? m_giShadowHistoryWeight : 0.0f, 0.0f, 0.0f, 0.0f);
     if (!uploadGiBuffer(m_giTemporalUBO[fi], &tempUbo, sizeof(tempUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
 
@@ -10082,12 +10103,17 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         wImg(m_giTemporalSet[fi], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &rawSamp);
         wImg(m_giTemporalSet[fi], 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histBI);
         wBuf(m_giTemporalSet[fi], 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &tUboBI);
-        // Blur set: reads history[cur]; bindings 1/2 get valid fillers, UBO reused.
+        // A-trous sets: source (iteration 0 history[cur], iteration 1 the
+        // scratch), gPos, gNorm; the UBO binding is unused, valid filler.
         VkDescriptorImageInfo histCurBI{ VK_NULL_HANDLE, m_giHist[curIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        wImg(m_giBlurSet[fi], 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
-        wImg(m_giBlurSet[fi], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
-        wImg(m_giBlurSet[fi], 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
-        wBuf(m_giBlurSet[fi], 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &tUboBI);
+        VkDescriptorImageInfo tmpBI    { VK_NULL_HANDLE, m_giFilterTmp.view,    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
+        {
+            wImg(m_giAtrousSet[fi][it], 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, it == 0 ? &histCurBI : &tmpBI);
+            wImg(m_giAtrousSet[fi][it], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &posBI);
+            wImg(m_giAtrousSet[fi][it], 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normBI);
+            wBuf(m_giAtrousSet[fi][it], 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &tUboBI);
+        }
         // Probe kernel set.
         VkDescriptorBufferInfo pUboBI{ m_giProbeUBO[fi].buf, 0, sizeof(GiProbeUBOData) };
         VkDescriptorImageInfo  irrSI { VK_NULL_HANDLE, m_giIrrAtlas.view, VK_IMAGE_LAYOUT_GENERAL };
@@ -10206,16 +10232,23 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     m_giHistIdx      = prevIdx;
     m_giPrevViewProj = vp; // clip-fixed, matching the G-buffer raster + temporal math
 
-    // ── 4. Spatial blur (fullscreen → result) ────────────────────────────────
+    // ── 4. Edge-aware a-trous (fullscreen: hist[cur] → scratch → result) ────
+    // The render pass's external dependencies order the scratch write before
+    // the second iteration's read (COLOR_ATTACHMENT_OUTPUT → FRAGMENT_SHADER).
+    static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
+    for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
     {
         VkRenderPassBeginInfo bRPBI{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-        bRPBI.renderPass        = m_giBlurRP;
-        bRPBI.framebuffer       = m_giResultFB;
+        bRPBI.renderPass        = m_giAtrousRP;
+        bRPBI.framebuffer       = it == 0 ? m_giFilterTmpFB : m_giResultFB;
         bRPBI.renderArea.extent = { gw, gh };
         vkCmdBeginRenderPass(cmd, &bRPBI, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giBlurPipe);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giFsPL,
-                                0, 1, &m_giBlurSet[fi], 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giAtrousPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giAtrousPL,
+                                0, 1, &m_giAtrousSet[fi][it], 0, nullptr);
+        const HE::GIShadowAtrousStep step = HE::GIShadowAtrousParams(it, m_giShadowFilter,
+                                                                     m_giShadowHistoryWeight, m_giShadowRays);
+        vkCmdPushConstants(cmd, m_giAtrousPL, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(step), &step);
         vkCmdSetViewport(cmd, 0, 1, &vvp);
         vkCmdSetScissor(cmd, 0, 1, &vsc);
         vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -11901,8 +11934,9 @@ void VulkanRenderer::destroySSRTargets()
 
 // One gate for the whole frame, asked before the pre-pass and again before the
 // trace. `m_postFxReady`/`m_hdrImage` are the honest part: this backend's only
-// HDR radiance source is the editor viewport's PostFX target (plan §2.2), so in
-// the swapchain path SSR is silently inactive rather than half-wired.
+// HDR radiance source is the PostFX target (plan §2.2) — the editor viewport's,
+// or the packaged game's since it runs the chain too (plan C6) — so in the
+// direct swapchain fallback SSR is silently inactive rather than half-wired.
 bool VulkanRenderer::ssrWantedThisFrame() const
 {
     return m_ssrEnabled && m_ssrIntensity > 0.0f && m_ssrReady
