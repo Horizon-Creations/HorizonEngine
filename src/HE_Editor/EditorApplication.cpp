@@ -123,6 +123,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -5642,7 +5643,41 @@ void EditorApplication::dumpFrameHeadless()
 			tc.scale    = glm::vec3(40.0f, 1.0f, 40.0f);
 			reg.emplace<TransformComponent>(e, tc);
 			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
-			reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
+			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
+			// HE_DUMP_WATERPARAMS="FresnelPower=10;DeepColor=1,0,0": per-entity
+			// overrides, the same MaterialComponent::paramOverrides the Details
+			// panel writes, so a shot pair can show what ONE knob does. Components
+			// left out keep the material's default.
+			if (const char* wp = std::getenv("HE_DUMP_WATERPARAMS"); wp && *wp)
+				if (const MaterialAsset* wm = contentManager().getMaterial(waterId))
+				{
+					std::stringstream all(wp);
+					std::string item;
+					while (std::getline(all, item, ';'))
+					{
+						const size_t eq = item.find('=');
+						if (eq == std::string::npos) continue;
+						MaterialParamOverride ov;
+						ov.name = item.substr(0, eq);
+						size_t slot = 0;
+						while (slot < wm->graphParamNames.size() && wm->graphParamNames[slot] != ov.name) ++slot;
+						if (slot == wm->graphParamNames.size())
+						{
+							HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_WATERPARAMS: no parameter '%s'",
+							            ov.name.c_str());
+							continue;
+						}
+						for (int k = 0; k < 4 && slot * 4 + k < wm->shaderParamData.size(); ++k)
+							ov.value[k] = wm->shaderParamData[slot * 4 + k];
+						std::stringstream vals(item.substr(eq + 1));
+						std::string v;
+						for (int k = 0; k < 4 && std::getline(vals, v, ','); ++k)
+							ov.value[k] = std::strtof(v.c_str(), nullptr);
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERPARAMS %s = (%g, %g, %g, %g)",
+						            ov.name.c_str(), ov.value[0], ov.value[1], ov.value[2], ov.value[3]);
+						wmc.paramOverrides.push_back(std::move(ov));
+					}
+				}
 			if (std::string(wt) == "floor")
 			{
 				MaterialAsset grey;

@@ -2,6 +2,7 @@
 
 Stand 2026-10-05, Schritt 1 (Bestandsaufnahme), vollständig. Nichts am Renderer geändert; Abschnitt 3 nennt Renderer-Fehler, die spätere Schritte beheben müssen.
 Schritt 2 (Material gebaut): §5a. Schritt 3 (Backend-Parität, GL-Fehler 1 behoben): §8.
+Schritt 4 (Bilder auf Metal und GL, Tooltips, Handbuch, Stand 2026-10-06): §9.
 
 Ziel: ein Wasser-Material als Engine-Content, gebaut als Material-Node-Graph, auf allen
 fünf Backends über die bestehende Graph-Shader-Pipeline, mit vollem Parametersatz im
@@ -298,6 +299,8 @@ Geprüft in `tests/test_engine_materials.cpp`. Abweichungen von der Tabelle oben
   siehe Thema-152-Warnung zum Codegen. **Idee, nicht umgesetzt (Chefchen):** der
   Inspector könnte Tooltip und Sliderbereich der Slots zeigen (`graphParamTooltips`,
   `graphParamMinMax` sind im Asset gefüllt) und Vec4-Komponenten beschriften.
+  Seit Schritt 4 haben die Wasser-Zeilen Tooltips aus der Hilfe-Tabelle (§9.3), die
+  Asset-Tooltips liest der Inspector weiterhin nicht.
 - `matGraphApproxSurface` kann die BaseColor des Wassers nicht falten (sie hängt an
   `ViewDir`/`Time`), GI-Treffer auf Wasser bekommen dann Weiß. Laut Code
   (`MaterialGraph.h:318–322`), nicht gemessen. Kleiner Nebenbefund.
@@ -426,7 +429,7 @@ mittlere absolute Differenz in 0..255:
 | Vulkan | 142.39 | 0 | 23.6 | 4.1 |
 
 Alle fünf Läufe (vier Backends, GL zweimal) animieren, sind reproduzierbar und zeigen dasselbe
-Bild; Metal fehlt in dieser Tabelle. D3D12 und Vulkan zeichnen die
+Bild; Metal fehlt in dieser Tabelle (Metal und GL auf dem Mac: §9.1). D3D12 und Vulkan zeichnen die
 Kaustiklinien sichtbar etwas weicher als GL/D3D11 (Ursache nicht untersucht). D3D12-Debug-Layer:
 nur die bekannte `ClearRenderTargetView`-Warnung. Vulkan-Validierung: nur
 `vkCmdUpdateBuffer`/Barriere im Render-Pass (Thema 144, vorbestehend). **Nicht** belegt: eine
@@ -452,9 +455,9 @@ Schritt 4 gedacht.
 
 ### 8.5 Offen und Nebenbefunde
 
-- **Metal:** Das Kompilat ist belegt (§8.2, CI). Ein Bild gibt es noch nicht, weder Editor
-  noch Spiel: das ist Schritt 4. Der Metal-Pfad des Editors ist nie mit dem Wasser
-  gelaufen. MoltenVK: nur übersetzt (`spirv-cross --msl`), nicht kompiliert.
+- **Metal:** Das Kompilat ist belegt (§8.2, CI), das Bild im Editor seit Schritt 4 auch
+  (§9.1). Das exportierte Spiel auf Metal ist weiter ungeprüft. MoltenVK: nur übersetzt
+  (`spirv-cross --msl`), nicht kompiliert.
 - **Vulkan 1.0:** `he::shaderc` erzeugt SPIR-V 1.5 (Vulkan 1.2), `VulkanRenderer` fällt bei einem
   Loader unter 1.2 auf eine 1.0-Instanz zurück, und `spirv-val --target-env vulkan1.0` lehnt
   dieselben Module ab. Das betrifft jeden Shader aus `he::shaderc`, nicht das Wasser. Ob ein
@@ -462,3 +465,93 @@ Schritt 4 gedacht.
 - §3 Fehler 3 (GL/Metal: Graph-Texturen bleiben auf Units 1–4) unverändert, das Wasser hat keine
   Textur.
 - Debug-`test_material_graph` braucht auf NN-WS03 643 s (vorbestehend, WARP-Fälle).
+
+---
+
+## 9. Bilder auf Metal und GL, Tooltips, Handbuch (Schritt 4)
+
+### 9.1 Headless-Aufnahmen auf dem Mac (M5, macOS 27, Release-Editor des Zweigs)
+
+Rezept wie §8.3, damit die Zahlen zur Windows-Tabelle passen:
+
+```
+HE_SKY_TIME=1.0 HE_CONFIG_DIR=<frisch pro Lauf> HE_SHOT_TIMEOUT=400 \
+  python3 scripts/he_shot.py out.png WATERTEST=floor TOD=0.4 CAMY=4 CAMZ=6 PITCH=-25 \
+  RHI=Metal|OpenGL RENDERPATH=0|1 AA=0 [WATERPARAMS="Name=v0,v1,…;Name2=…"]
+```
+
+1280×720, `he_shot` erzwingt `SKYTEST=1` (Himmel aktiv). Jeder Lauf meldet
+`dump counters — draws=2 tris=14 visible=2/2` (forward; deferred `draws=3`) und
+`0 error(s)`. Orakel: mittlere absolute Differenz in 0..255, Wasserband = untere 60 %.
+
+| Vergleich | Metal | OpenGL 4.1 |
+|---|---|---|
+| t = 1.0 zweimal (Rauschboden) | md5-gleich | md5-gleich |
+| t = 1.0 gegen 3.5, forward (Animation) | 25.58 | 25.58 |
+| t = 1.0 gegen 3.5, deferred | 25.58 | — |
+| forward gegen deferred, t = 1.0 | 0.02 | 0.09 |
+| Metal gegen GL, forward t = 1.0 / t = 3.5 | 0.07 / 0.06 | |
+| Metal gegen GL, deferred t = 1.0 | 0.05 | |
+
+Damit ist das erste Metal-Bild des Wassers belegt, und Metal und GL zeichnen auf dem Mac
+dasselbe Bild. Sichtbar: drei Wellenzüge, Himmelsspiegelung, die zum Horizont hin zunimmt
+(Luma der Bildstreifen von 94 vorn auf 130 am Horizont), heller Flach- und dunkler Tiefton,
+Kaustiklinien und Schaumflecken auf den Kämmen.
+
+### 9.2 Was jeder Knopf bewirkt (Metal, t = 1.0, je gegen die Aufnahme ohne Override)
+
+Neuer Schalter am Zeugen: `HE_DUMP_WATERPARAMS` setzt `MaterialComponent::paramOverrides`
+der Wasser-Plane, also genau das, was der Inspector unter „Material Parameters (this
+entity)" schreibt. Nicht genannte Komponenten behalten den Material-Default. Kontrollen:
+ohne Schalter und mit einem unbekannten Namen (`Nope=1`, nur eine Warnung im Log) ist das
+Bild md5-gleich zur Aufnahme vor dem Umbau.
+
+| Override | Wasserband | Befund |
+|---|---|---|
+| `DeepColor=1,0,0` | 68.97 | Tiefentönung: das Wasser wird rot, zum Horizont stärker (R 193 vorn, 217 am Horizont) |
+| `Turbidity=0,3` (keine Absorption) | 41.00 | klares Wasser, deutlich heller (Luma vorn 94 → 137) |
+| alle drei Wellen `w = 0` | 14.57 | Wellen weg (PNG 579 → 380 KB) |
+| `Reflection=0` | 2.69 | schwach |
+| `FresnelPower=1` | 0.44 | kaum sichtbar |
+| `Turbidity=0,3` + `FresnelPower=1` / `=10` | 7.38 / 1.03 | in klarem Wasser wirkt Fresnel, monoton |
+| `Turbidity=0,3` + `Reflection=0` | 2.57 | schwach |
+| GL: `DeepColor` / Wellen aus, gegen Metal | 0.07 / 0.06 | Override-Pfad auf GL gleich |
+
+**Befund zur Abstimmung (nicht behoben):** Mit der Standard-Trübung (0.35/m, 3 m) ist das
+Wasser in dieser Kamera fast deckend, die Tiefentönung überdeckt dann den Fresnel-Lift der
+Deckkraft. Die cremefarbenen Himmelsstreifen bleiben auch bei `Reflection=0`; sie kommen
+vermutlich aus dem Fresnel in `heLitP`, der bei streifendem Blick unabhängig vom F0 gegen 1
+geht. `FresnelPower` und `Reflection` sind damit im Default-Wasser schwache Knöpfe. Wer das
+ändern will, stimmt `mat_gen` ab (z. B. Reflection auch auf die Himmelsfarbe statt nur auf F0)
+und erzeugt `Water.hasset` neu; die Tests in `test_engine_materials.cpp` prüfen Mengen und
+Defaults und müssen dann mitgezogen werden.
+
+### 9.3 Tooltips und Handbuch
+
+- Die Inspector-Zeilen der Wasser-Parameter tragen den **Parameternamen** als Label
+  (`Row::colorEdit3/dragFloat2/dragFloat4/dragFloat`), die Hilfe sucht also unter dem
+  Komponenten-Scope `Material/<Name>`. Neu in `src/HE_Editor/EditorHelp.cpp`: 13 Einträge
+  `Material/ShallowColor` … `Material/Caustics`, Topic `materials#parameters`, Text aus den
+  Asset-Tooltips von `mat_gen`, ausformuliert. `Roughness` und `Opacity` teilen sich die
+  Einträge mit dem Surface-Block derselben Komponente (ein Schlüssel kann nur einmal
+  existieren); beide haben einen Satz zum Wasser dazubekommen.
+- `editor_help_audit` sieht diese Zeilen nicht (Label = Daten). Deshalb prüft
+  `tests/test_engine_materials.cpp` („every knob has a tooltip in the Details panel") jeden
+  Parameternamen des ausgelieferten Assets unter dem Scope `Material` gegen die Tabelle,
+  mit Negativkontrolle `WaveD`. Ein in `mat_gen` umbenannter oder neuer Knopf wird dort rot.
+- **Handbuch:** Die Einträge landen von selbst in der generierten Editor-Referenz des
+  In-Engine-Handbuchs (Komponentenseite, Gruppe Material), F1 auf einer Zeile öffnet dort
+  den eigenen Abschnitt, „Mehr dazu" zeigt auf `materials#parameters`.
+- **Offen:** ein eigener Abschnitt „Engine Water" im Website-Handbuch
+  (`Website/HorizonEngineDocs/materials.html`), danach `scripts/build_docs_bundle.py` und das
+  Bündel `EditorDeps/Docs/he-docs.json` neu einchecken. Nicht gemacht: der Website-Checkout
+  ist ein anderes Repo, hat fremde uncommittete Änderungen und ist gegen `origin/main`
+  auseinandergelaufen (ahead 2, behind 2), und eine Veröffentlichung braucht ohnehin die
+  Bestätigung des Menschen.
+
+### 9.4 Nicht belegt
+
+- „Sichtbar animiert im Editor" ist über die Headless-Aufnahmen belegt (gleicher Renderer,
+  gleiche Welt), nicht durch Bedienen des Editors. Die Tooltips sind über den Lookup-Test
+  belegt, nicht durch ein Bild des schwebenden Tooltips.
+- Das exportierte Spiel auf Metal/GL.

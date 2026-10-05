@@ -9,6 +9,7 @@
 // Water (docs/water-shader-plan.md, Thema 152).
 
 #include "doctest.h"
+#include "EditorHelp.h"   // the Details panel's tooltip table, for the knobs' rows
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
@@ -210,6 +211,37 @@ TEST_CASE("Engine water material: loads as a lit Translucent graph with all fift
 		CHECK_MESSAGE(m->customShaderFragGlsl.find("heParams.v[" + std::to_string(i) + "]") != std::string::npos,
 		              "slot ", i, " is never read");
 	CHECK(m->customShaderFragGlsl.find("heLight.sunDir.w") != std::string::npos);
+}
+
+// The Details panel lists these knobs under "Material Parameters (this entity)"
+// with the parameter NAME as the row label — data, which editor_help_audit
+// cannot read. So the shipped asset is walked against the help table here: a
+// knob renamed in mat_gen, or a new one, fails until its entry is written.
+TEST_CASE("Engine water material: every knob has a tooltip in the Details panel")
+{
+	Scratch s("help");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const MaterialAsset* m = cm.getMaterial(cm.loadAsset(kWaterPath));
+	REQUIRE(m);
+	REQUIRE(static_cast<int>(m->graphParamNames.size()) == kWaterKnobCount);
+
+	HE::Ed::Help::Scope scope("Material");   // what componentHeader("Material") pushes
+	for (const std::string& name : m->graphParamNames)
+	{
+		CAPTURE(name);
+		const HE::Ed::Help::Entry* e = HE::Ed::Help::find(name);
+		REQUIRE(e != nullptr);
+		CHECK(std::string(e->key) == "Material/" + name);
+		// materials#parameters, except Roughness/Opacity: those entries are shared
+		// with the Surface block and point at rendering#lighting.
+		CHECK_FALSE(std::string(e->topic).empty());
+		// F1 on the row opens the knob's own section of the generated reference.
+		CHECK(HE::Ed::Help::referenceTopic(e->key) == "editor-components#Material." + name);
+	}
+	// The negative control: a name no material ships has no entry, so the loop
+	// above is not passing on a lookup that answers everything.
+	CHECK(HE::Ed::Help::find("WaveD") == nullptr);
 }
 
 TEST_CASE("Engine water material: an edited value survives save and reload, the default does not move")
