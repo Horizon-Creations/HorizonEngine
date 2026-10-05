@@ -260,6 +260,45 @@ ausblendung der Kaustik nicht so, wie sie sollen. Rückfall ohne neue Knoten: Fa
 Fresnel (flach = `ShallowColor` von oben, `DeepColor` am Rand), Deckkraft aus `Opacity` +
 Fresnel, Schaum als Rauschmuster über Wellenkämmen statt an der Küste.
 
+### 5a. Stand nach Schritt 2 (gebaut)
+
+`EditorDeps/EngineContent/Materials/Water.hasset`, erzeugt von `mat_gen`
+(`src/HE_Tools/src/MatGen/main.cpp`, UUID `kEngineWaterMaterialId = {0x400, 1}` in
+`DefaultAssets.h`). Lit, Translucent, Surface, 222 Knoten, keine Textur, keine neuen Knoten.
+Geprüft in `tests/test_engine_materials.cpp`. Abweichungen von der Tabelle oben:
+
+| Name | Typ | Komponenten (wie gebaut) | Default |
+|---|---|---|---|
+| `ShallowColor` / `DeepColor` | Color | rgb | (0.10, 0.42, 0.45) / (0.01, 0.07, 0.12) |
+| `Turbidity` | Vec2 | x = Absorption pro m, y = **angenommene** Wassertiefe (m) | (0.35, 3.0) |
+| `WaveA/B/C` | Vec4 | x = Richtung (Grad, 0 = +X, 90 = +Z), y = Tempo (m/s), z = Wellenlänge (m), w = **Steilheit** (Höhe/Wellenlänge, die Normale sieht nur die Steigung) | (30, 1.2, 8, 0.25) / (310, 0.8, 3.5, 0.18) / (100, 0.5, 1.2, 0.12) |
+| `FresnelPower` | Float 1..10 | Exponent eines eigenen Fresnel aus der **Wellen**normale (der Fresnel-Knoten backt seinen Exponenten und liest `vNormal`) | 5 |
+| `Reflection` | Float 0..1 | hebt die Deckkraft mit Fresnel an und skaliert Specular (F0) | 0.8 |
+| `Roughness` / `Specular` | Float 0..1 | Specular-Pin = Specular × Reflection | 0.06 / 0.3 |
+| `Opacity` | Float 0..1 | Deckkraft senkrecht von oben bei klarem Wasser | 0.55 |
+| `Refraction` | Float 0..1 | beugt den Blickstrahl zur Wellennormale: bewegt Tiefentönung und Kaustik mit den Wellen (Szene dahinter noch unverzerrt) | 0.3 |
+| `FoamColor` | Color | rgb | (0.92, 0.95, 0.97) |
+| `Foam` | Vec4 | x = **Abdeckung** der Wellenkämme 0..1 (statt Breite in m, ohne Szenentiefe gibt es keine Küste), y = Stärke, z = Rauschgröße (m), w = Drift (m/s) | (0.18, 0.8, 1.5, 0.3) |
+| `Caustics` | Vec4 | x = Stärke, y = Mustergröße (m), z = Tempo, w = **Kameradistanz** (m), bis zu der das Muster ausgeblendet ist (statt Tiefe; verhindert Moiré in der Ferne) | (0.35, 2.5, 0.25, 25) |
+
+- **Keine Static Switches.** Der Inspector zeigt nur `graphParamNames`. Schalter wären dort
+  unsichtbar und nur per Material-Instanz änderbar. Aus = Stärke 0.
+- Wellen: gerichteter Sinus pro Ebene, Phase mit FBM verzerrt (bricht die Kämme), Normale
+  analytisch `N = normalize(vNormal − Σ steep·cos(phase)·d)`. Setzt eine ungefähr
+  waagrechte Fläche voraus. Kein WPO, die Engine-Plane ist ein Quad.
+- Wasserkörper: `T = exp(−Absorption · Tiefe / (N·V + 0.05))`, Farbe `mix(Shallow, Deep, 1−T)`,
+  Deckkraft `Opacity → 1` mit `1−T`, dann mit `Reflection·Fresnel`, dann mit Schaum.
+- Die Datei trägt den **gebackenen** Shader (der Packer liefert ihn verbatim aus).
+  `mat_gen` speichert, lädt über einen frischen ContentManager (Editor-Ladepfad) und
+  speichert noch einmal.
+- **Inspector-Reihenfolge ist compilerabhängig** (MSVC: Foam, WaveC, WaveB, WaveA, …),
+  siehe Thema-152-Warnung zum Codegen. **Idee, nicht umgesetzt (Chefchen):** der
+  Inspector könnte Tooltip und Sliderbereich der Slots zeigen (`graphParamTooltips`,
+  `graphParamMinMax` sind im Asset gefüllt) und Vec4-Komponenten beschriften.
+- `matGraphApproxSurface` kann die BaseColor des Wassers nicht falten (sie hängt an
+  `ViewDir`/`Time`), GI-Treffer auf Wasser bekommen dann Weiß. Laut Code
+  (`MaterialGraph.h:318–322`), nicht gemessen. Kleiner Nebenbefund.
+
 ---
 
 ## 6. Fehlende Graph-Knoten (benannt, nicht gebaut)
