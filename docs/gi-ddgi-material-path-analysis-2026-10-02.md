@@ -413,6 +413,13 @@ Vulkan-Dateien unterscheiden sich. Jede Aufnahme hat eine frische APPDATA, `HE_S
   Spec-Minimum von `maxPerStageDescriptorSamplers`/`…SampledImages`. Binding 14 dazu ergibt 17;
   wer das nachzieht, muss gegen das Geräte-Limit prüfen. Das Landscape-SPIR-V nutzt die 17 heute
   schon statisch.
+  **Nachtrag 05.10.2026 (Thema 143):** Zeile 14 steht jetzt in `HE::vkmat::kBindings`, die
+  Gewichtskarte wird pro Draw geschrieben. Liegt ein Gerät beim Limit 16, fehlt nur diese Zeile
+  im Layout und Layer-Blend-Materialien zeichnen built-in (Log-Zeile „material set 0 needs 17
+  fragment samplers …"). Der Sampler auf Binding 9 ist `heBackdrop` der UI-Domain. Dazu kommt HeUI
+  auf Binding 8 im Fragment-Stage. Beides erreicht Vulkan nur über ein UI-Material auf einem
+  Mesh. Der Test „heLandscapeWeights (binding 14) is in the material layout…" listet diese Lücke
+  exakt.
 - **Kein automatischer Vulkan-Test.** Die Belege in §7.2 sind manuelle Hardware-Läufe. Anders als
   bei D3D11/D3D12 (WARP) gibt es in der CI kein Vulkan-Gerät (s. Thema 122).
 - Nebenbefund 1 (Forward-SSR für Graph-Materialien tot auf Vulkan) unverändert, gehört zu Thema 126.
