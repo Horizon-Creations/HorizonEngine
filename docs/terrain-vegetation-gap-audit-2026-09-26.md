@@ -73,6 +73,13 @@ Der Fix existiert: `f704282d` „Bemalte Landschaften erscheinen auf D3D und Vul
 auch **nicht** auf dem Zweig von Thema 78 (`claude/d3d-vulkan-parity-remaining-gaps`). Kein eigener
 Umsetzungsschritt hier; Entscheidung für den Chefchen, ob der Zweig nach main oder in Thema 78 geht.
 
+**Nachtrag 06.10.2026: erledigt.** Vulkan bekam Binding 14 mit PR #95 (Thema 143). D3D12 schreibt
+die Weightmap seit Thema 155 pro Draw in Slot 9 (t14) des Material-Blocks, ohne `f704282d`; der Zweig
+`backend-parity-p1` wird dafür nicht mehr gebraucht. Gemessen auf der RTX 4070 mit
+`scripts/landscape-weights-repro/` (Draufsicht, GI aus und an, Nachmalen mitten im Lauf per
+`HE_DUMP_LAYERREPAINT=mid`): D3D12 und D3D11 sind pixelgleich, GL und Vulkan liegen innerhalb von 2 %.
+Die Gegenprobe ohne `InvalidateTexture` zeigt den Nachmal-Strich nicht.
+
 ### 3.3 Falsche Roadmap-Zusage: Wind
 
 (Nachtrag: Windgröße, Wind-Knoten und Foliage-Vorlage sind seit Schritt 3 da, siehe Abschnitt 7;
