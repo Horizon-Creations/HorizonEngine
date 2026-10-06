@@ -357,6 +357,8 @@ Dateien: `shaders/gi_blur.frag` → neuer `gi_atrous.frag` (Vulkan, neue Pipelin
 * **Nur eine GPU.** Gemessen auf dem M5 (Metal, HW- und SW-Strahlen). Die Themenstellung wollte
   mehrere GPUs. Die RTX 4070 steht an NN-WS03 und ist von diesem Rechner aus nicht bedienbar.
   Vergleichbar sind nur die Stock-Werte von s6 (§1). Die Prototypen gibt es nur für Metal.
+  (Nachtrag 06.10.: Die **Umsetzung** ist inzwischen auf der RTX 4070 in allen vier Backends
+  nachgemessen, siehe §8.3. Die Prototyp-Varianten aus §3 bleiben M5-only.)
 * Stromsparmodus an, deshalb sind die Kosten bei niedrigem Takt gemessen; nur die Deltas gelten.
   Szene mit 8 Boxen, deshalb sind die Strahlenkosten untere Schranken.
 * 1280×720, eine Szene in zwei Varianten, Kameras von Hand gewählt. Bewegung nur mit konstanter
@@ -464,11 +466,160 @@ Eigenrauschen der Referenz. Alle Läufe 0 Fehler im Log (MSL kompiliert zur Lauf
 
 ### 8.2 Was nicht geprüft ist
 
-* **D3D11, D3D12, Vulkan, OpenGL laufen hier nicht.** Geprüft sind die Shader offline
-  (glslang: Vulkan-GLSL, GL-Strings, HLSL-Strings, `gi_shadow_hw.hlsl` mit gestubbtem DXR-Teil),
+* ~~D3D11, D3D12, Vulkan, OpenGL laufen hier nicht.~~ Inzwischen auf der RTX 4070 im Bild
+  gemessen, siehe §8.3. Auf dem Mac waren nur die Shader offline geprüft (glslang:
+  Vulkan-GLSL, GL-Strings, HLSL-Strings, `gi_shadow_hw.hlsl` mit gestubbtem DXR-Teil) und
   `VulkanRenderer.cpp` per `clang -fsyntax-only` gegen die MoltenVK-Header (mit
-  Negativkontrolle). D3D11/D3D12-Hosts sind nicht kompiliert; das macht die Windows-CI. Die
-  GL-GI braucht Compute (GL 4.3), der macOS-Treiber hat 4.1.
+  Negativkontrolle). Die GL-GI braucht Compute (GL 4.3), der macOS-Treiber hat nur 4.1.
 * MSL ist nicht offline kompiliert (Metal-Toolchain fehlt in diesem Xcode), nur zur Laufzeit.
-* Kosten nicht neu gemessen; der Prototyp hatte dieselben Pässe (§3.4: ~+0.4 ms HW).
-* Nachmessen auf NN-WS03 (RTX 4070) mit `cap.ps1` und `HE_GI_REFERENCE=1` steht aus.
+* Kosten nicht neu gemessen, auch nicht auf der RTX 4070. Der Prototyp hatte dieselben Pässe
+  (§3.4: ~+0.4 ms HW). Die Windows-Backends haben keinen `HE_GI_PROTO_BENCH`-Gegenpart.
+* ~~Nachmessen auf NN-WS03 (RTX 4070) mit `cap.ps1` und `HE_GI_REFERENCE=1` steht aus.~~ Erledigt, §8.3.
+
+### 8.3 Nachmessung auf der RTX 4070 (D3D11, D3D12, Vulkan, OpenGL)
+
+Thema 142, Schritt 2, 06.10.2026 auf NN-WS03: NVIDIA GeForce RTX 4070, Treiber mit Vulkan
+1.4.341, Windows 11, Release-Builds, 1280×720 → Maske 640×360. Zwei private Builds gegeneinander:
+
+* **Umsetzung** = `2b0ea05f` (main mit PR #86).
+* **Stock** = `469fa9f6` (main direkt vor dem #86-Merge `e8e7ab2a`). Dazu kommt nur der
+  `EditorApplication.cpp`-Teil von `708ce773` (`HE_DUMP_PANYAW`/`PANMOVE`,
+  `SHADOWINSTTEST=contact`), denn ohne ihn rendert der Stock-Build die Bewegungs- und
+  Kontaktfälle still als schwebende Reihe. Jedes Bewegungs-Log beider Builds enthält die Zeile
+  `HE_DUMP_PANYAW/PANMOVE panned the camera by …`.
+
+Die Fälle, Kameras und Config-Vorlagen sind dieselben wie in §1. Werkzeuge:
+`scripts/gi-shadow-repro/run142.ps1` (Windows-Zwilling von `run134.sh`, über `cap.ps1`) und
+`ana142.py` (`ana134.py` und `ana_motion.py` über die ganze Matrix). Jedes Backend misst gegen
+seine **eigene** Referenz (`HE_GI_REFERENCE=1`). Die Bewegungsfälle laufen gegen die Referenz
+ihres statischen Zwillings, wie in §1.
+
+**Greift die Maske überhaupt?** Ja, auf allen vier Backends:
+
+* GI-Pfad laut Log: D3D11 und GL rechnen mit SW-Strahlen (CPU-BVH, GL meldet
+  „GL 4.3+ — GI (compute) supported"). D3D12 nutzt DXR 1.1 Inline-RayQuery, Vulkan
+  `VK_KHR_ray_query`.
+* Dass die RTX rendert, belegt `nvidia-smi`: Der Editor-Prozess erscheint dort als `C+G`.
+* Shader-Fehler: keiner in 272 Logs, beide Builds. Übrig bleiben nur die bekannten
+  Vulkan-Validation-Zeilen: `vkCmdUpdateBuffer` und Barrier im Subpass (PR #96) sowie das
+  `[SSAO blur]`-Layout (PR #97). Beide PRs sind noch nicht auf main.
+* Rauschboden zwischen zwei Läufen: bitgleich auf D3D11, D3D12 und Vulkan, auf GL max. 1
+  Graustufe (mittlere Abweichung ≤ 0.0001).
+* Die Referenz flackert selbst um 0.006 (GL 0.009).
+* Die Qualitätsstufen ordnen sich überall wie erwartet: Low > Medium > High.
+* `HE_GI_FORCE_SW=1` auf D3D12/Vulkan (SW-Strahlen auf RT-Hardware) gleicht dem HW-Pfad bis
+  auf ±0.004 in Flackern, rmse, bias und sharp_rmse (s6, s05, pan6), p99 ±0.1. Das ist
+  derselbe Befund wie auf dem M5 (§8.1).
+
+**Flackern** Stock → Umsetzung (Mittel im Kantenband; M5-Spalte aus §8.1):
+
+| Fall | M5 (Metal) | D3D11 (SW) | D3D12 (DXR) | Vulkan (RayQuery) | OpenGL (SW) |
+|---|---|---|---|---|---|
+| s6 | 0.703 → 0.416 | 0.977 → **0.546** | 0.977 → **0.547** | 0.977 → **0.546** | 1.216 → **0.706** |
+| s05 | 0.209 → 0.159 | 0.344 → **0.249** | 0.344 → **0.249** | 0.343 → **0.249** | 0.418 → **0.327** |
+| c05 | 0.115 → 0.102 | 0.185 → **0.175** | 0.185 → **0.175** | 0.180 → **0.171** | 0.236 → **0.199** |
+| cnear | 0.142 → 0.127 | 0.244 → **0.219** | 0.244 → **0.219** | 0.248 → **0.225** | 0.298 → **0.242** |
+| pan6 | 2.107 → 0.933 | 2.779 → **1.143** | 2.785 → **1.144** | 2.784 → **1.143** | 3.474 → **1.384** |
+| cpan6 | 0.582 → 0.288 | 0.883 → **0.421** | 0.883 → **0.421** | 0.784 → **0.388** | 1.677 → **0.636** |
+| move6 | 1.319 → 0.886 | 1.787 → **1.112** | 1.796 → **1.112** | 1.796 → **1.112** | 2.203 → **1.396** |
+| cmove6 | 0.374 → 0.362 | 0.621 → **0.508** | 0.621 → **0.507** | 0.554 → **0.459** | 1.155 → **0.805** |
+
+**rmse gegen die Referenz** Stock → Umsetzung:
+
+| Fall | M5 (Metal) | D3D11 (SW) | D3D12 (DXR) | Vulkan (RayQuery) | OpenGL (SW) |
+|---|---|---|---|---|---|
+| s6 | 1.56 → 1.21 | 2.04 → **1.49** | 1.95 → **1.48** | 1.94 → **1.48** | 2.73 → **2.09** |
+| s05 | 7.20 → 1.53 | 10.54 → **2.06** | 10.50 → **2.06** | 10.49 → **2.05** | 15.08 → **2.80** |
+| c05 | 3.91 → 0.68 | 5.44 → **0.97** | 5.44 → **0.97** | 5.11 → **0.90** | 8.86 → **1.54** |
+| cnear | 3.83 → 1.11 | 5.95 → **1.20** | 5.94 → **1.20** | 5.66 → **1.15** | 9.22 → **1.84** |
+| pan6 | 7.03 → 2.43 | 8.33 → **2.67** | 8.32 → **2.67** | 8.31 → **2.67** | 11.67 → **3.84** |
+| cpan6 | 4.76 → 1.07 | 6.29 → **1.56** | 6.29 → **1.56** | 5.91 → **1.35** | 9.88 → **2.63** |
+| move6 | 2.35 → 1.73 | 2.90 → **1.99** | 2.86 → **2.00** | 2.86 → **2.00** | 4.00 → **2.64** |
+| cmove6 | 3.62 → 0.83 | 4.33 → **1.24** | 4.33 → **1.24** | 4.02 → **1.02** | 6.54 → **1.72** |
+
+**Ghost** (§3.3, Sonnensprung 0.005) Stock → Umsetzung: s6 0.635 → **0.693** auf D3D11,
+D3D12 und Vulkan, auf GL 0.664 → **0.725**. s05 0.463 → **0.515** auf D3D11, D3D12 und Vulkan,
+auf GL 0.472 → **0.514**. Der M5 lag bei 0.635 → 0.693 und 0.433 → 0.503.
+
+**Abnahme §5.4 Punkt 5, je Backend:**
+
+* Flackern: überall ≤ Stock.
+* rmse in s05, c05 und cpan6 (Grenze 33 % von Stock):
+
+  | Backend | s05 | c05 | cpan6 |
+  |---|---|---|---|
+  | D3D11 | 20 % | 18 % | 25 % |
+  | D3D12 | 20 % | 18 % | 25 % |
+  | Vulkan | 20 % | 18 % | 23 % |
+  | GL | 19 % | 17 % | 27 % |
+
+* Ghost s6 ≤ 0.72: erfüllt auf D3D11, D3D12 und Vulkan. GL liegt mit **0.725** knapp über der
+  absoluten M5-Grenze. Schon der GL-Stock liegt höher (0.664), der Anstieg ist mit +9 % derselbe
+  wie überall. Relativ gelesen („andere GPUs relativ“, Grenze 0.72/0.635 × Stock = 0.753) ist
+  das erfüllt.
+* **Gesamt: erfüllt auf allen vier Backends**, bei GL nur mit der relativen Lesart des Ghost-Werts.
+
+**Lesehilfen:**
+
+* **D3D11 (SW), D3D12 (DXR) und Vulkan (RayQuery) liegen bis auf wenige Tausendstel gleich.**
+  Die drei Strahlenpfade sehen dieselben Boxen mit derselben R2-Folge. Abweichungen gibt es nur
+  in den Kontaktfällen auf Vulkan (anderes Band, Kanten etwas flacher, Gradient 4.5 statt 5.2);
+  dort sind die Werte etwas besser. Nicht untersucht.
+* **GL liegt in absoluten Graustufen meist 30–60 % höher, bei Stock wie bei der Umsetzung.**
+  In den Kontakt-Bewegungsfällen sind es bis zu 90 % (cpan6, Stock-Flackern 1.68 statt 0.88). Der
+  beleuchtete Boden ist auf GL heller (224 statt 205 neben dem Band, der bekannte
+  GL-Bodenunterschied). Die Kanten sind steiler, der mittlere Gradient im Band liegt 25–30 %
+  höher (s6 4.4 statt 3.5, s05 11.6 statt 9.0). Bei gleichem Positionsfehler entsteht so mehr
+  Graustufen-Fehler. Die Verhältnisse zu Stock sind dieselben wie auf den anderen Backends,
+  also kein GL-eigener Filterfehler.
+* **Größer als auf dem M5:** Alle Windows-Werte liegen absolut über dem M5, und das gilt
+  schon für Stock (s6 0.98 statt 0.70, wie in §1 für Thema 131 notiert). Die relativen
+  Gewinne entsprechen dem M5: Flackern s6 −44 % (M5 −41 %), pan6 −59 % (M5 −56 %); rmse s05
+  −80 % (M5 −79 %).
+* **p99 des Flackerns steigt an scharfen Kanten**, auf allen Backends: s05 1.9 → 2.6 (GL
+  2.2 → 3.0), c05 1.2 → 1.8. Das Mittel sinkt. Auf dem M5 war das kleiner (s05 1.7 → 1.9,
+  §3.1). Das ist der in §4.3 beschriebene Effekt: Der À-trous mittelt das Rauschen nicht mehr
+  über die Kante. 2 Strahlen gleichen das im Mittel aus, an den einzelnen härtesten Pixeln
+  nicht ganz.
+* **cmove6 auf GL** ist der Fall mit dem kleinsten Gewinn beim Flackern (1.155 → 0.805, p99
+  7.1 → 6.9). Auf dem M5 war es ebenfalls der schwächste Fall (0.374 → 0.362).
+
+**Qualitätsstufen auf der RTX 4070** (Flackern / rmse). D3D12 entspricht D3D11 auf ±0.01.
+Vulkan ebenso, außer bei c05: dort liegt Vulkan wie oben etwas niedriger (Low 0.238 / 1.21).
+
+| Fall | D3D11 (SW) Low / Medium / High | OpenGL (SW) Low / Medium / High | Stock D3D11 / GL |
+|---|---|---|---|
+| s6 | 0.929/2.03 · 0.546/1.49 · 0.424/1.24 | 1.130/2.64 · 0.706/2.09 · 0.546/1.78 | 0.977/2.04 · 1.216/2.73 |
+| s05 | 0.501/2.60 · 0.249/2.06 · 0.171/1.48 | 0.599/3.33 · 0.327/2.80 · 0.221/1.97 | 0.344/10.54 · 0.418/15.08 |
+| c05 | 0.255/1.28 · 0.175/0.97 · 0.147/0.70 | 0.329/2.15 · 0.199/1.54 · 0.156/1.11 | 0.185/5.44 · 0.236/8.86 |
+| pan6 | 1.735/3.14 · 1.143/2.67 · 0.854/2.08 | 2.139/4.92 · 1.384/3.84 · 1.104/3.30 | 2.779/8.33 · 3.474/11.67 |
+
+Für die offene Frage nach dem SW-Default (§5.2, Thema 142 Schritt 3) liefern diese Läufe
+**nur Daten, keine Entscheidung**:
+
+* **Bild:** HW- und SW-Strahlen ergeben dasselbe Bild. Die Stufe wirkt auf beiden Pfaden gleich.
+* **Low (1 Strahl):** flackert an scharfen Kanten auf jedem Backend stärker als Stock. Das ist
+  derselbe Befund wie auf dem M5 (§8.1).
+  * s05: 0.50 statt 0.34 auf D3D11, 0.60 statt 0.42 auf GL.
+  * c05: 0.26 statt 0.19.
+  * Der Fehler bleibt trotzdem überall deutlich unter Stock.
+* **Kosten:** nicht gemessen. Die SW-Strahlenkosten auf der RTX 4070 sind damit ebenfalls offen.
+
+**Nachmessen:**
+
+```powershell
+# zwei private Release-Builds (DEPLOY_DIR je Baum), Stock = 469fa9f6 + EditorApplication.cpp aus 708ce773
+$s = 'scripts\gi-shadow-repro\run142.ps1'
+foreach ($r in 'D3D11','D3D12','Vulkan','OpenGL') {
+  & $s -Root C:\hw142  -Rhi $r -Cases s6,s05,c6,c05,cnear -Variants gtR -Only60
+  & $s -Root C:\hw142  -Rhi $r -Cases s6,s05,c05,cnear,pan6,cpan6,move6,cmove6 -Variants ABC
+  & $s -Root C:\hw142  -Rhi $r -Cases s6old,s6mov,s05old,s05mov -Variants ABC -Only60
+  & $s -Root C:\hw142s -Rhi $r -Cases s6,s05,c05,cnear,pan6,cpan6,move6,cmove6 -Variants stock
+  & $s -Root C:\hw142s -Rhi $r -Cases s6old,s6mov,s05old,s05mov -Variants stock -Only60 }
+python scripts\gi-shadow-repro\ana142.py C:\hw142\cap C:\hw142s\cap
+```
+
+Eine Aufnahme dauert ~2 s (GL), ~3 s (Vulkan) bzw. ~8 s (D3D, Kill 8 s nach dem Dump). Die
+ganze Matrix mit Stock, Stufen und SW-Gegenprobe braucht ~15 min. Pro Deploy läuft immer nur
+eine Aufnahme, denn `HorizonEngine.log` neben der Exe ist geteilt. Die beiden Deploys laufen
+parallel.

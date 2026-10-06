@@ -1,0 +1,130 @@
+﻿D3D11   s6      stock  band= 48999 flicker= 0.977 (p99   4.9) rmse= 2.043 bias= 1.093 sharp_rmse= 2.356
+D3D11   s6      ABC    band= 48999 flicker= 0.546 (p99   2.9) rmse= 1.492 bias= 0.766 sharp_rmse= 2.026
+D3D11   s6      ABCr1  band= 48999 flicker= 0.929 (p99   4.9) rmse= 2.025 bias= 1.057 sharp_rmse= 2.710
+D3D11   s6      ABCr4  band= 48999 flicker= 0.424 (p99   1.9) rmse= 1.240 bias= 0.675 sharp_rmse= 1.805
+D3D11   s05     stock  band= 26414 flicker= 0.344 (p99   1.9) rmse=10.537 bias= 4.008 sharp_rmse=14.026
+D3D11   s05     ABC    band= 26414 flicker= 0.249 (p99   2.6) rmse= 2.059 bias= 0.700 sharp_rmse= 3.558
+D3D11   s05     ABCr1  band= 26414 flicker= 0.501 (p99   4.8) rmse= 2.603 bias= 0.887 sharp_rmse= 4.065
+D3D11   s05     ABCr4  band= 26414 flicker= 0.171 (p99   1.7) rmse= 1.476 bias= 0.473 sharp_rmse= 2.488
+D3D11   c05     stock  band= 53089 flicker= 0.185 (p99   1.2) rmse= 5.437 bias= 1.232 sharp_rmse=12.070
+D3D11   c05     ABC    band= 53089 flicker= 0.175 (p99   1.8) rmse= 0.966 bias= 0.207 sharp_rmse= 1.957
+D3D11   c05     ABCr1  band= 53089 flicker= 0.255 (p99   2.9) rmse= 1.282 bias= 0.304 sharp_rmse= 2.258
+D3D11   c05     ABCr4  band= 53089 flicker= 0.147 (p99   1.0) rmse= 0.702 bias= 0.143 sharp_rmse= 1.334
+D3D11   cnear   stock  band= 42420 flicker= 0.244 (p99   1.7) rmse= 5.946 bias= 1.593 sharp_rmse=11.460
+D3D11   cnear   ABC    band= 42420 flicker= 0.219 (p99   1.9) rmse= 1.202 bias= 0.268 sharp_rmse= 2.476
+D3D11   pan6    stock  band= 48999 flicker= 2.779 (p99  13.1) rmse= 8.333 bias= 6.071 sharp_rmse=13.240
+D3D11   pan6    ABC    band= 48999 flicker= 1.143 (p99   7.1) rmse= 2.671 bias= 1.528 sharp_rmse= 3.548
+D3D11   pan6    ABCr1  band= 48999 flicker= 1.735 (p99   9.0) rmse= 3.140 bias= 1.639 sharp_rmse= 4.698
+D3D11   pan6    ABCr4  band= 48999 flicker= 0.854 (p99   4.1) rmse= 2.078 bias= 1.237 sharp_rmse= 2.670
+D3D11   cpan6   stock  band= 56640 flicker= 0.883 (p99   6.9) rmse= 6.285 bias= 2.780 sharp_rmse=11.738
+D3D11   cpan6   ABC    band= 56640 flicker= 0.421 (p99   3.7) rmse= 1.555 bias= 0.548 sharp_rmse= 2.808
+D3D11   move6   stock  band= 48999 flicker= 1.787 (p99   8.3) rmse= 2.897 bias= 1.604 sharp_rmse= 3.828
+D3D11   move6   ABC    band= 48999 flicker= 1.112 (p99   5.8) rmse= 1.987 bias= 0.897 sharp_rmse= 3.012
+D3D11   cmove6  stock  band= 56640 flicker= 0.621 (p99   4.6) rmse= 4.331 bias= 1.393 sharp_rmse=10.338
+D3D11   cmove6  ABC    band= 56640 flicker= 0.508 (p99   4.6) rmse= 1.240 bias= 0.356 sharp_rmse= 2.635
+D3D11   s6      gtR    reference self-flicker= 0.006 (p99   0.2)
+D3D11   s6      ABC    vs ctl (2nd run): mean|d|=0.0000 max=0
+D3D11   s6      stock  vs ctl (2nd run): mean|d|=0.0000 max=0
+D3D11   s6      stock  ghost=0.635 swept_px= 19856 |old-new|= 12.57
+D3D11   s6      ABC    ghost=0.693 swept_px= 20067 |old-new|= 12.64
+D3D11   s05     stock  ghost=0.463 swept_px= 17958 |old-new|= 27.35
+D3D11   s05     ABC    ghost=0.515 swept_px= 13559 |old-new|= 39.16
+D3D12   s6      stock  band= 48995 flicker= 0.977 (p99   4.9) rmse= 1.945 bias= 1.070 sharp_rmse= 2.345
+D3D12   s6      ABC    band= 48995 flicker= 0.547 (p99   2.9) rmse= 1.480 bias= 0.758 sharp_rmse= 2.026
+D3D12   s6      ABCr1  band= 48995 flicker= 0.931 (p99   4.9) rmse= 1.989 bias= 1.042 sharp_rmse= 2.693
+D3D12   s6      ABCr4  band= 48995 flicker= 0.424 (p99   1.9) rmse= 1.232 bias= 0.670 sharp_rmse= 1.786
+D3D12   s6      ABCsw  band= 48995 flicker= 0.547 (p99   2.9) rmse= 1.479 bias= 0.758 sharp_rmse= 2.026
+D3D12   s05     stock  band= 26414 flicker= 0.344 (p99   1.9) rmse=10.497 bias= 3.986 sharp_rmse=14.009
+D3D12   s05     ABC    band= 26414 flicker= 0.249 (p99   2.6) rmse= 2.056 bias= 0.699 sharp_rmse= 3.560
+D3D12   s05     ABCr1  band= 26414 flicker= 0.501 (p99   4.6) rmse= 2.602 bias= 0.886 sharp_rmse= 4.076
+D3D12   s05     ABCr4  band= 26414 flicker= 0.171 (p99   1.7) rmse= 1.471 bias= 0.471 sharp_rmse= 2.478
+D3D12   s05     ABCsw  band= 26414 flicker= 0.249 (p99   2.6) rmse= 2.056 bias= 0.699 sharp_rmse= 3.560
+D3D12   c05     stock  band= 53088 flicker= 0.185 (p99   1.2) rmse= 5.436 bias= 1.230 sharp_rmse=12.069
+D3D12   c05     ABC    band= 53088 flicker= 0.175 (p99   1.8) rmse= 0.966 bias= 0.206 sharp_rmse= 1.958
+D3D12   c05     ABCr1  band= 53088 flicker= 0.255 (p99   2.9) rmse= 1.282 bias= 0.304 sharp_rmse= 2.260
+D3D12   c05     ABCr4  band= 53088 flicker= 0.147 (p99   1.0) rmse= 0.702 bias= 0.143 sharp_rmse= 1.334
+D3D12   cnear   stock  band= 42420 flicker= 0.244 (p99   1.7) rmse= 5.939 bias= 1.586 sharp_rmse=11.460
+D3D12   cnear   ABC    band= 42420 flicker= 0.219 (p99   1.9) rmse= 1.202 bias= 0.268 sharp_rmse= 2.477
+D3D12   pan6    stock  band= 48995 flicker= 2.785 (p99  13.1) rmse= 8.315 bias= 6.072 sharp_rmse=13.240
+D3D12   pan6    ABC    band= 48995 flicker= 1.144 (p99   7.1) rmse= 2.672 bias= 1.526 sharp_rmse= 3.567
+D3D12   pan6    ABCr1  band= 48995 flicker= 1.733 (p99   9.0) rmse= 3.139 bias= 1.638 sharp_rmse= 4.701
+D3D12   pan6    ABCr4  band= 48995 flicker= 0.854 (p99   4.1) rmse= 2.071 bias= 1.233 sharp_rmse= 2.661
+D3D12   pan6    ABCsw  band= 48995 flicker= 1.144 (p99   7.1) rmse= 2.672 bias= 1.526 sharp_rmse= 3.567
+D3D12   cpan6   stock  band= 56640 flicker= 0.883 (p99   6.9) rmse= 6.285 bias= 2.779 sharp_rmse=11.727
+D3D12   cpan6   ABC    band= 56640 flicker= 0.421 (p99   3.7) rmse= 1.555 bias= 0.549 sharp_rmse= 2.802
+D3D12   move6   stock  band= 48995 flicker= 1.796 (p99   8.2) rmse= 2.860 bias= 1.598 sharp_rmse= 3.871
+D3D12   move6   ABC    band= 48995 flicker= 1.112 (p99   5.8) rmse= 1.998 bias= 0.894 sharp_rmse= 3.034
+D3D12   cmove6  stock  band= 56640 flicker= 0.621 (p99   4.6) rmse= 4.330 bias= 1.391 sharp_rmse=10.330
+D3D12   cmove6  ABC    band= 56640 flicker= 0.507 (p99   4.6) rmse= 1.240 bias= 0.356 sharp_rmse= 2.635
+D3D12   s6      gtR    reference self-flicker= 0.006 (p99   0.2)
+D3D12   s6      ABC    vs ctl (2nd run): mean|d|=0.0000 max=0
+D3D12   s6      stock  vs ctl (2nd run): mean|d|=0.0000 max=0
+D3D12   s6      stock  ghost=0.636 swept_px= 19869 |old-new|= 12.58
+D3D12   s6      ABC    ghost=0.693 swept_px= 20066 |old-new|= 12.65
+D3D12   s05     stock  ghost=0.463 swept_px= 17966 |old-new|= 27.36
+D3D12   s05     ABC    ghost=0.515 swept_px= 13558 |old-new|= 39.16
+Vulkan  s6      stock  band= 48992 flicker= 0.977 (p99   4.9) rmse= 1.944 bias= 1.069 sharp_rmse= 2.337
+Vulkan  s6      ABC    band= 48992 flicker= 0.546 (p99   2.9) rmse= 1.480 bias= 0.758 sharp_rmse= 2.026
+Vulkan  s6      ABCr1  band= 48992 flicker= 0.930 (p99   4.9) rmse= 1.988 bias= 1.041 sharp_rmse= 2.688
+Vulkan  s6      ABCr4  band= 48992 flicker= 0.424 (p99   1.9) rmse= 1.232 bias= 0.669 sharp_rmse= 1.787
+Vulkan  s6      ABCsw  band= 48992 flicker= 0.546 (p99   2.9) rmse= 1.480 bias= 0.757 sharp_rmse= 2.022
+Vulkan  s05     stock  band= 26413 flicker= 0.343 (p99   1.9) rmse=10.494 bias= 3.982 sharp_rmse=14.007
+Vulkan  s05     ABC    band= 26413 flicker= 0.249 (p99   2.4) rmse= 2.054 bias= 0.698 sharp_rmse= 3.554
+Vulkan  s05     ABCr1  band= 26413 flicker= 0.500 (p99   4.6) rmse= 2.600 bias= 0.885 sharp_rmse= 4.063
+Vulkan  s05     ABCr4  band= 26413 flicker= 0.172 (p99   1.7) rmse= 1.469 bias= 0.470 sharp_rmse= 2.469
+Vulkan  s05     ABCsw  band= 26413 flicker= 0.249 (p99   2.3) rmse= 2.053 bias= 0.696 sharp_rmse= 3.550
+Vulkan  c05     stock  band= 58952 flicker= 0.180 (p99   1.2) rmse= 5.105 bias= 1.095 sharp_rmse=12.429
+Vulkan  c05     ABC    band= 58952 flicker= 0.171 (p99   1.7) rmse= 0.902 bias= 0.188 sharp_rmse= 2.142
+Vulkan  c05     ABCr1  band= 58952 flicker= 0.238 (p99   2.9) rmse= 1.206 bias= 0.272 sharp_rmse= 2.632
+Vulkan  c05     ABCr4  band= 58952 flicker= 0.145 (p99   1.0) rmse= 0.655 bias= 0.130 sharp_rmse= 1.491
+Vulkan  cnear   stock  band= 45860 flicker= 0.248 (p99   1.7) rmse= 5.657 bias= 1.432 sharp_rmse=12.123
+Vulkan  cnear   ABC    band= 45860 flicker= 0.225 (p99   1.9) rmse= 1.147 bias= 0.246 sharp_rmse= 2.617
+Vulkan  pan6    stock  band= 48992 flicker= 2.784 (p99  13.1) rmse= 8.312 bias= 6.068 sharp_rmse=13.252
+Vulkan  pan6    ABC    band= 48992 flicker= 1.143 (p99   7.1) rmse= 2.671 bias= 1.525 sharp_rmse= 3.560
+Vulkan  pan6    ABCr1  band= 48992 flicker= 1.733 (p99   9.0) rmse= 3.137 bias= 1.636 sharp_rmse= 4.701
+Vulkan  pan6    ABCr4  band= 48992 flicker= 0.854 (p99   4.1) rmse= 2.069 bias= 1.231 sharp_rmse= 2.660
+Vulkan  pan6    ABCsw  band= 48992 flicker= 1.144 (p99   7.1) rmse= 2.673 bias= 1.528 sharp_rmse= 3.563
+Vulkan  cpan6   stock  band= 61374 flicker= 0.784 (p99   6.9) rmse= 5.913 bias= 2.452 sharp_rmse=12.720
+Vulkan  cpan6   ABC    band= 61374 flicker= 0.388 (p99   3.2) rmse= 1.351 bias= 0.465 sharp_rmse= 2.576
+Vulkan  move6   stock  band= 48992 flicker= 1.796 (p99   8.2) rmse= 2.859 bias= 1.596 sharp_rmse= 3.867
+Vulkan  move6   ABC    band= 48992 flicker= 1.112 (p99   5.8) rmse= 1.999 bias= 0.893 sharp_rmse= 3.041
+Vulkan  cmove6  stock  band= 61374 flicker= 0.554 (p99   4.1) rmse= 4.022 bias= 1.225 sharp_rmse=10.632
+Vulkan  cmove6  ABC    band= 61374 flicker= 0.459 (p99   4.1) rmse= 1.017 bias= 0.295 sharp_rmse= 2.136
+Vulkan  s6      gtR    reference self-flicker= 0.006 (p99   0.2)
+Vulkan  s6      ABC    vs ctl (2nd run): mean|d|=0.0000 max=0
+Vulkan  s6      stock  vs ctl (2nd run): mean|d|=0.0000 max=0
+Vulkan  s6      stock  ghost=0.635 swept_px= 19856 |old-new|= 12.58
+Vulkan  s6      ABC    ghost=0.693 swept_px= 20058 |old-new|= 12.64
+Vulkan  s05     stock  ghost=0.463 swept_px= 17970 |old-new|= 27.35
+Vulkan  s05     ABC    ghost=0.515 swept_px= 13561 |old-new|= 39.14
+OpenGL  s6      stock  band= 49746 flicker= 1.216 (p99   6.9) rmse= 2.733 bias= 1.444 sharp_rmse= 3.832
+OpenGL  s6      ABC    band= 49746 flicker= 0.706 (p99   3.9) rmse= 2.088 bias= 1.061 sharp_rmse= 3.247
+OpenGL  s6      ABCr1  band= 49746 flicker= 1.130 (p99   6.1) rmse= 2.644 bias= 1.312 sharp_rmse= 3.877
+OpenGL  s6      ABCr4  band= 49746 flicker= 0.546 (p99   2.9) rmse= 1.775 bias= 0.920 sharp_rmse= 3.045
+OpenGL  s05     stock  band= 25193 flicker= 0.418 (p99   2.2) rmse=15.081 bias= 6.636 sharp_rmse=20.703
+OpenGL  s05     ABC    band= 25193 flicker= 0.327 (p99   3.0) rmse= 2.799 bias= 1.022 sharp_rmse= 4.973
+OpenGL  s05     ABCr1  band= 25193 flicker= 0.599 (p99   5.1) rmse= 3.327 bias= 1.228 sharp_rmse= 5.549
+OpenGL  s05     ABCr4  band= 25193 flicker= 0.221 (p99   2.0) rmse= 1.969 bias= 0.691 sharp_rmse= 3.409
+OpenGL  c05     stock  band= 45464 flicker= 0.236 (p99   2.0) rmse= 8.858 bias= 2.659 sharp_rmse=20.336
+OpenGL  c05     ABC    band= 45464 flicker= 0.199 (p99   2.2) rmse= 1.537 bias= 0.395 sharp_rmse= 3.335
+OpenGL  c05     ABCr1  band= 45464 flicker= 0.329 (p99   3.9) rmse= 2.146 bias= 0.585 sharp_rmse= 3.966
+OpenGL  c05     ABCr4  band= 45464 flicker= 0.156 (p99   1.8) rmse= 1.105 bias= 0.260 sharp_rmse= 2.218
+OpenGL  cnear   stock  band= 37207 flicker= 0.298 (p99   2.0) rmse= 9.215 bias= 3.013 sharp_rmse=18.493
+OpenGL  cnear   ABC    band= 37207 flicker= 0.242 (p99   2.7) rmse= 1.843 bias= 0.486 sharp_rmse= 3.822
+OpenGL  pan6    stock  band= 49746 flicker= 3.474 (p99  18.0) rmse=11.673 bias= 8.135 sharp_rmse=19.153
+OpenGL  pan6    ABC    band= 49746 flicker= 1.384 (p99   8.0) rmse= 3.837 bias= 2.208 sharp_rmse= 5.117
+OpenGL  pan6    ABCr1  band= 49746 flicker= 2.139 (p99  12.0) rmse= 4.920 bias= 2.561 sharp_rmse= 6.662
+OpenGL  pan6    ABCr4  band= 49746 flicker= 1.104 (p99   6.9) rmse= 3.300 bias= 1.915 sharp_rmse= 4.399
+OpenGL  cpan6   stock  band= 55673 flicker= 1.677 (p99  12.0) rmse= 9.875 bias= 5.067 sharp_rmse=19.861
+OpenGL  cpan6   ABC    band= 55673 flicker= 0.636 (p99   5.1) rmse= 2.630 bias= 1.113 sharp_rmse= 4.584
+OpenGL  move6   stock  band= 49746 flicker= 2.203 (p99  10.3) rmse= 4.001 bias= 2.139 sharp_rmse= 6.163
+OpenGL  move6   ABC    band= 49746 flicker= 1.396 (p99   7.4) rmse= 2.635 bias= 1.199 sharp_rmse= 4.461
+OpenGL  cmove6  stock  band= 55673 flicker= 1.155 (p99   7.1) rmse= 6.538 bias= 2.356 sharp_rmse=17.307
+OpenGL  cmove6  ABC    band= 55673 flicker= 0.805 (p99   6.9) rmse= 1.722 bias= 0.607 sharp_rmse= 3.317
+OpenGL  s6      gtR    reference self-flicker= 0.009 (p99   0.2)
+OpenGL  s6      ABC    vs ctl (2nd run): mean|d|=0.0000 max=1
+OpenGL  s6      stock  vs ctl (2nd run): mean|d|=0.0001 max=1
+OpenGL  s6      stock  ghost=0.664 swept_px= 23510 |old-new|= 15.25
+OpenGL  s6      ABC    ghost=0.725 swept_px= 23856 |old-new|= 15.55
+OpenGL  s05     stock  ghost=0.472 swept_px= 19208 |old-new|= 32.97
+OpenGL  s05     ABC    ghost=0.514 swept_px= 13927 |old-new|= 47.95
