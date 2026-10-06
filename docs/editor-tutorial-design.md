@@ -24,6 +24,14 @@
    Nutzer verschieben.
 5. **Die Sandbox ist ein ganz normales Projekt.** Kein Sonderformat, keine Read-only-
    Flags: alles, was jemand während des Rundgangs baut, behält er.
+6. **Erst das Warum, dann die eine Aktion.** Der `body` erklärt zuerst, wozu das Ding da
+   ist und wann man es braucht, danach das Wie. Weitere Tasten oder Menüs stehen dort als
+   Beschreibung, nie als Aufforderung: die einzige Aufforderung ist die `action`-Zeile,
+   denn nur sie wird beobachtet. Der Body scrollt in der Karte (430×340), die
+   `action`-Zeile und der Status bleiben darunter stehen. Längerer Text ändert also weder
+   die Kartengröße noch das Ausweichen. Wer einen Text umschreibt, lässt `id`, `check`,
+   `arg`, `action` und `focusWindow` unangetastet, sonst bricht gespeicherter Fortschritt
+   oder die Erkennung.
 
 ## Bestandteile
 
@@ -213,6 +221,14 @@ Die Karte nimmt dann die Stelle, die am wenigsten überdeckt. Bilder:
 [Details vorher/nachher](img/tutorial-card-2026-10-06/details-vorher-nachher.png),
 [Content Browser vorher/nachher](img/tutorial-card-2026-10-06/content-browser-vorher-nachher.png),
 [weitere Schritte](img/tutorial-card-2026-10-06/weitere-schritte.png).
+
+Die ausgebauten Texte der ersten Karten (Thema 151, Schritt 2) im laufenden Editor,
+derselbe Zeuge mit `HE_DUMP_TUTORIALUI_STEPS=welcome,layout,fly,orbit`. Die Überdeckung
+ist dabei unverändert (`layout` 47 680 pt², `fly`/`orbit` 3 990 pt², `welcome` 0):
+[welcome](img/tutorial-card-2026-10-06/text-welcome.png),
+[layout](img/tutorial-card-2026-10-06/text-layout.png),
+[fly](img/tutorial-card-2026-10-06/text-fly.png),
+[orbit](img/tutorial-card-2026-10-06/text-orbit.png).
 
 ## Offen
 
