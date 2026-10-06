@@ -471,12 +471,16 @@ Chunk-Zerlegung gleich synchronem Laden, Duplikate). 227 Testfälle in den betro
 - **CBOR-Szenen (Spielstart aus der `.hpak`, Undo) parsen weiter sequentiell.** CBOR-Elemente
   lassen sich ohne Dekodieren nicht abgrenzen. Sie haben nur das Freigeben auf dem Worker.
 - **GPU-Upload ohne Budget** (Abschnitt 4.2) bleibt: Renderer-Arbeit, nicht Teil dieses Themas.
+- **Der Editor** pollt weiter `pollAsyncResults(4)` ohne Zeitbudget, nur das Spiel hat es.
+- `releaseOnWorker` gibt den JSON-Baum später frei: Eine RSS-Messung direkt nach `load` sieht
+  ihn noch, und bei voller Low-Obergrenze wartet die Freigabe hinter Streaming-Jobs.
 - **Pak-Loads** brechen weiterhin nur vor dem Start ab (`readEntry` hat keinen Checkpoint).
 - **Hänger in Frame 0 und 1** (0,46 und 0,72 s in `Metal::EncodeScene`, schon bei 1k Entities)
   ist weiter unaufgelöst. `--detailed` schlüsselt nur die GPU auf, Unter-Scopes auf der CPU gibt es
   nicht. Ein Time-Profiler-Mitschnitt mit `xctrace record --launch` startete auf diesem Mac die
   installierte `/Applications/HorizonEditor.app` statt des Deploy-Binarys, auch mit absolutem Pfad,
-  und war damit wertlos (zu sehen an den Binary-Pfaden im Export). Für den nächsten Versuch: Editor
+  und war damit wertlos (zu sehen an den Binary-Pfaden im Export). Beide Versuche haben die
+  installierte App dabei sichtbar gestartet (unter der Bildschirmsperre). Für den nächsten Versuch: Editor
   per `he_perf_capture` starten und mit `--attach` sofort anhängen, oder `EncodeScene` mit
   Unter-Scopes versehen.
 - Die Spiel-Runtime ist weiter nur über den Bench gemessen, nicht über ein exportiertes Spiel.
