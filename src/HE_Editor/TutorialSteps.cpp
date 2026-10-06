@@ -186,7 +186,7 @@ constexpr Step kOrientation[] = {
 	  "Layout puts everything back. Hover almost any control for a tooltip; pressing "
 	  "F1 while it shows opens the manual at that entry.\n"
 	  "Each outline dims once you have clicked into its panel, and the line under "
-	  "this text counts how many are left.",
+	  "this text counts how many you have visited so far.",
 	  "Click into each of the four highlighted panels once.",
 	  "Scene|World Outliner|Details|Content Browser",
 	  Check::PanelsVisited, "Scene|World Outliner|Details|Content Browser" },
