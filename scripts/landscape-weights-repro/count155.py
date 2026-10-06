@@ -16,6 +16,8 @@ Reference (same machine, -Extra HE_DUMP_AA=0, HE_DUMP_GI=0|1, red->green):
   GI off  D3D12 29002  D3D11 29002  OpenGL 32947  Vulkan 29042
   GI on   D3D12 31955  D3D11 31955  OpenGL 33061  Vulkan 32031
   D3D12 with InvalidateTexture a no-op (negative control): 0
+D3D12 vs D3D11 is NOT byte-identical: the classified layer pixels differ by
+at most 1 level, the background beside the terrain by up to 19.
 GI on draws dark probe-tile stripes across the terrain on every backend —
 known (docs/gi-ddgi-material-path-analysis-2026-10-02.md §7.2), not the blend.
 """
