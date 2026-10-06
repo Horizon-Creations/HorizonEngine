@@ -12,6 +12,7 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/EntityIdComponent.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <cmath>
@@ -108,6 +109,15 @@ std::set<std::string> namesIn(const json& scene)
 	return names;
 }
 
+// name → stable id, of every named entity but the world root.
+std::map<std::string, HE::UUID> idsByName(HorizonWorld& w)
+{
+	std::map<std::string, HE::UUID> out;
+	for (auto [e, n, id] : w.registry().view<NameComponent, EntityIdComponent>().each())
+		if (e != w.rootEntity()) out[n.name] = id.id;
+	return out;
+}
+
 // name → world position, of every named entity but the world root.
 std::map<std::string, glm::vec3> placed(HorizonWorld& w)
 {
@@ -164,6 +174,7 @@ TEST_CASE("Cells split in the editor: the world becomes the base, merge puts eve
 	HorizonWorld world;
 	buildScene(world);
 	const std::map<std::string, glm::vec3> before = placed(world);
+	const std::map<std::string, HE::UUID>  idsBefore = idsByName(world);
 
 	std::map<std::string, std::string> files;   // project-relative path → text
 	HE::CellSplitOptions o;
@@ -237,6 +248,12 @@ TEST_CASE("Cells split in the editor: the world becomes the base, merge puts eve
 	std::map<std::string, glm::vec3> expect = before;
 	expect.erase("Props");
 	CHECK(after == expect);
+	// …under the identities they had before the split: whatever in the base
+	// refers to one of them (a joint, a script) still finds it.
+	std::map<std::string, HE::UUID> idsAfter = idsByName(world);
+	std::map<std::string, HE::UUID> idsExpect = idsBefore;
+	idsExpect.erase("Props");
+	CHECK(idsAfter == idsExpect);
 	// The moved subtrees hang off the world root again, with their children.
 	for (auto [e, n] : world.registry().view<NameComponent>().each())
 		if (n.name == "Flag")

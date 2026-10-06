@@ -379,34 +379,71 @@ bool mergeCellsIntoWorld(HorizonWorld& world,
 		scenes.push_back(std::move(scene));
 	}
 
+	// Merged in the scene's JSON and loaded whole, not added entity by entity:
+	// an additive load mints new ids (SceneSerializer, applyAdditiveJson), and
+	// a merge has to give every entity back the identity it had before the
+	// split, or whatever in the base refers to it (a joint, a script) would
+	// point at nothing. The full load restores the stored ids.
 	SceneSerializer ser;
-	auto& reg = world.registry();
-	const glm::vec3 shift = -glm::vec3(world.origin());   // absolute in the file, relative in the world
-	size_t merged = 0;
-	for (const json& scene : scenes)
-	{
-		std::vector<Entity> created;
-		if (!ser.loadAdditiveFromJson(world, scene, &created)) continue;
-		// The cell's own root goes; its children move up to the world root.
-		Entity cellRoot = entt::null;
-		for (Entity e : created)
-			if (const auto* h = reg.try_get<HierarchyComponent>(e); h && h->parent == world.rootEntity())
-			{
-				cellRoot = e;
-				break;
-			}
-		if (cellRoot == entt::null) continue;
-		const std::vector<Entity> kids = reg.get<HierarchyComponent>(cellRoot).children;
-		for (Entity k : kids)
+	std::vector<uint8_t> snapshot;
+	if (!ser.saveToMemory(world, snapshot)) return fail("the scene could not be serialized");
+	json scene = parseSceneCbor(snapshot);
+	if (scene.is_discarded() || !scene.contains("entities") || !scene["entities"].is_array())
+		return fail("the scene could not be read back");
+	json& ents = scene["entities"];
+	json* baseRoot = nullptr;
+	for (json& e : ents)
+		if (e.is_object() && (!e.contains("parent") || e["parent"].is_null()))
 		{
-			world.reparentEntity(k, world.rootEntity());
-			if (shift != glm::vec3(0.0f))
-				if (auto* t = reg.try_get<TransformComponent>(k)) t->position += shift;
+			baseRoot = &e;
+			break;
 		}
-		world.destroyEntity(cellRoot);
-		merged += created.size() - 1;
+	if (!baseRoot || !baseRoot->contains("uuid")) return fail("the scene has no root");
+	const json rootId = (*baseRoot)["uuid"];
+	json rootKids = baseRoot->contains("children") && (*baseRoot)["children"].is_array()
+	              ? (*baseRoot)["children"] : json::array();
+
+	// Absolute in the cell files, relative to the origin in the world.
+	const glm::dvec3 origin = world.origin();
+	std::vector<json> added;
+	size_t merged = 0;
+	for (const json& cell : scenes)
+	{
+		const auto cellEnts = cell.find("entities");
+		if (cellEnts == cell.end() || !cellEnts->is_array()) continue;
+		std::string cellRootKey;
+		for (const json& e : *cellEnts)
+			if (e.is_object() && (!e.contains("parent") || e["parent"].is_null()) && e.contains("uuid"))
+				cellRootKey = idKey(e["uuid"]);
+		for (const json& e : *cellEnts)
+		{
+			if (!e.is_object() || !e.contains("uuid") || idKey(e["uuid"]) == cellRootKey) continue;
+			json copy = e;
+			if (copy.contains("parent") && idKey(copy["parent"]) == cellRootKey)
+			{
+				copy["parent"] = rootId;
+				rootKids.push_back(copy["uuid"]);
+				if (origin != glm::dvec3(0.0))
+					if (auto c = copy.find("components"); c != copy.end() && c->contains("transform"))
+						if (json& p = (*c)["transform"]["position"]; p.is_array() && p.size() >= 3)
+							for (int i = 0; i < 3; ++i)
+								p[i] = p[i].get<double>() - origin[i];
+			}
+			added.push_back(std::move(copy));
+			++merged;
+		}
 	}
-	world.setCellManifestJson(std::string());
+	(*baseRoot)["children"] = std::move(rootKids);   // before `ents` grows: baseRoot points into it
+	for (json& e : added) ents.push_back(std::move(e));
+	scene.erase("cells");
+
+	world.clear();
+	if (!ser.loadFromMemory(world, json::to_cbor(scene)))
+	{
+		world.clear();
+		ser.loadFromMemory(world, snapshot);
+		return fail("the merged scene did not load");
+	}
 	world.markHierarchyDirty();
 	if (mergedEntities) *mergedEntities = merged;
 	HE_LOG_INFO(World, "Merged %zu streaming cell(s) back into the scene: %zu entities",
