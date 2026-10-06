@@ -178,12 +178,45 @@ mit `KeepClear` keinen Pixel davon. Mit `HE_UI_DUMP_DIR` entsteht je Seite ein V
 Ein zweiter Fall zieht die Karte per simulierter Maus zurück aufs Panel: sie bleibt dort,
 bis `reset()` den nächsten Schritt anzeigt.
 
+Im **laufenden Editor** belegt es der Zeuge `HE_DUMP_TUTORIALUI=<ordner>` mit
+`HE_DUMP_TUTORIALUI_STEPS=id,id,…` (in `TutorialPanel.cpp`). Er öffnet den Rundgang
+nacheinander auf diesen Schritten, ohne die Position in die Config zu schreiben, und hält
+jeden 120 Frames lang. Dann rastert er die ImGui-Zeichendaten dieses Frames auf der CPU
+(`tests/ImGuiSoftwareRaster`, über einen Klon mit umgehängten Texturen, damit das
+GPU-Backend seinen Font-Atlas behält) und schreibt `tutorial-ui-<id>.bmp`. Ins Log kommen
+das Rechteck der Karte, die Rechtecke der Zielpanels und die überdeckte Fläche. Danach
+beendet sich der Editor. Mit `HE_DUMP_TUTORIALUI_NOAVOID=1` weicht die Karte nicht aus;
+das ist der Kontrolllauf. Das Bild der Szene selbst fehlt dabei (grau), weil es eine
+GPU-Textur ist. Rezept: frisches `HE_CONFIG_DIR` mit `LastProjectPath` auf eine Kopie der
+Sandbox und `Tutorial.Offered: true` (so entsteht das Standard-Layout aus einer leeren
+imgui.ini), dazu `HE_EXIT_AFTER_FRAMES=20000` (verstecktes Fenster, keine Drosselung).
+
+Messwerte vom 06.10.2026, Debug-Editor, Metal, Fenster 1600×900 pt:
+
+| Schritt | Zielpanel | Überdeckt ohne Ausweichen | Überdeckt mit Ausweichen |
+|---|---|---|---|
+| `add-mesh` | Details (rechts unten) | 109 140 pt² | 0 |
+| `create-asset` | Content Browser (unten) | 28 248 pt² | 0 |
+| `sculpt` | Quick Settings (links) | – | 0 |
+| `outliner` | World Outliner (rechts oben) | – | 0 |
+| `sky-tuning` | World Outliner + Details | – | 0 |
+| `fly` | Scene (Mitte) | – | 3 990 pt² |
+| `layout` | Scene + Outliner + Details + Content Browser | – | 47 680 pt² (nur Scene) |
+
+Bei `fly` und `layout` passt die 430×340 große Karte in keine Lücke des Standard-Layouts.
+Die linke Spalte ist 287 pt breit, die rechte 341 pt, der Content Browser 280 pt hoch.
+Die Karte nimmt dann die Stelle, die am wenigsten überdeckt. Bilder:
+[Details vorher/nachher](img/tutorial-card-2026-10-06/details-vorher-nachher.png),
+[Content Browser vorher/nachher](img/tutorial-card-2026-10-06/content-browser-vorher-nachher.png),
+[weitere Schritte](img/tutorial-card-2026-10-06/weitere-schritte.png).
+
 ## Offen
 
-- Willkommensmodal und Karteninhalt sind **nicht** in der laufenden App optisch
-  verifiziert. Der Headless-Dump rendert die Szene ohne ImGui-Overlay, und `test_ui_shot`
-  zeigt nur die Platzierung der Karte über einem nachgebauten Layout, nicht das echte
-  `TutorialPanel::render`.
+- Das Willkommensmodal ist **nicht** in der laufenden App optisch verifiziert (der
+  Zeuge oben setzt erst im geöffneten Projekt ein).
+- Der pulsierende Rahmen liegt auf der Foreground-Drawlist und damit **über** der Karte.
+  Wo die Karte ein Zielpanel nicht ganz meiden kann (`layout`, Scene-Schritte), läuft die
+  Rahmenlinie durch die Karte.
 - Ohne offenes Projekt gibt es außerhalb von macOS kein Menü im Hub, also dort auch keinen
   Weg zurück zur Willkommenskarte, wenn sie einmal weggeklickt wurde. Der Hub hätte gern
   eine eigene kleine Menüzeile.
