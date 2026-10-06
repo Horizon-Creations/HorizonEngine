@@ -233,9 +233,12 @@ TEST_CASE("Engine water material: every knob has a tooltip in the Details panel"
 		const HE::Ed::Help::Entry* e = HE::Ed::Help::find(name);
 		REQUIRE(e != nullptr);
 		CHECK(std::string(e->key) == "Material/" + name);
-		// materials#parameters, except Roughness/Opacity: those entries are shared
-		// with the Surface block and point at rendering#lighting.
+		// "More" opens the manual's Engine Water section, except Roughness/Opacity:
+		// those entries are shared with the Surface block and point at
+		// rendering#lighting.
 		CHECK_FALSE(std::string(e->topic).empty());
+		if (name != "Roughness" && name != "Opacity")
+			CHECK(std::string(e->topic) == "materials#water");
 		// F1 on the row opens the knob's own section of the generated reference.
 		CHECK(HE::Ed::Help::referenceTopic(e->key) == "editor-components#Material." + name);
 	}

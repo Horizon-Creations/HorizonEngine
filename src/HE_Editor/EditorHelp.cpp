@@ -273,67 +273,67 @@ namespace
 	  "Water colour where the view ray through the water is short — looking "
 	  "straight down. Blends toward Deep Color as the path through the water "
 	  "grows.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/DeepColor", "",
 	  "Water colour where the view ray through the water is long — toward the "
 	  "horizon, or in murky water. Usually a darker, bluer version of Shallow "
 	  "Color.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/Turbidity", "",
 	  "x = absorption per metre: higher is murkier, the deep colour arrives "
 	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
 	  "below the surface is not read yet.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/WaveA", "",
 	  "The swell, the largest of three wave trains. x = direction in degrees "
 	  "(0 = +X, 90 = +Z), y = speed in m/s, z = wavelength in metres, "
 	  "w = steepness (0 is flat, about 0.4 is choppy). The waves bend the "
 	  "normal only, the mesh stays flat.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/WaveB", "",
 	  "Second wave train, laid across the swell so the crests do not line up. "
 	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "
 	  "w = steepness. A steepness of 0 switches it off.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/WaveC", "",
 	  "Fine ripples on top of the two larger trains. x = direction in degrees, "
 	  "y = speed in m/s, z = wavelength in metres, w = steepness.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/FresnelPower", "",
 	  "How quickly the surface turns reflective toward grazing angles. 5 is "
 	  "physical water; lower values make the water mirror-like even when you "
 	  "look down into it.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/Reflection", "",
 	  "How strongly sky and scene reflection cover the water. Scales both the "
 	  "Fresnel lift of the opacity and the specular strength, so 0 leaves only "
 	  "the water colour.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/Specular", "",
 	  "Strength of the specular reflection for a non-metal (0.5 = F0 0.04). It "
 	  "is multiplied by Reflection; about 0.3 gives water's real F0 of 0.02.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/Refraction", "",
 	  "How much the waves bend the view into the water: the depth tint and the "
 	  "caustics move with the waves. The scene behind the water is not "
 	  "distorted yet.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/FoamColor", "",
 	  "Colour of the foam on the wave crests. Near-white reads as foam; a "
 	  "tinted value suits murky or polluted water.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/Foam", "",
 	  "x = coverage, the share of the wave crests that foam (0 = none), "
 	  "y = strength 0..1, z = size of the noise that breaks it up, in metres, "
 	  "w = drift speed in m/s. Foam sits on the crests, not at the shore — "
 	  "there is no scene depth to find a shoreline yet.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 	{ "Material/Caustics", "",
 	  "The shimmering light pattern on the surface. x = strength (0 = off), "
 	  "y = pattern size in metres, z = speed, w = camera distance in metres at "
 	  "which the pattern has faded out, so it does not shimmer into moiré far "
 	  "away.",
-	  "", "materials#parameters" },
+	  "", "materials#water" },
 
 	// ── Light ────────────────────────────────────────────────────────────────
 	{ "Light/Type", "",

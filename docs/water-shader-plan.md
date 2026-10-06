@@ -542,12 +542,7 @@ Defaults und müssen dann mitgezogen werden.
 - **Handbuch:** Die Einträge landen von selbst in der generierten Editor-Referenz des
   In-Engine-Handbuchs (Komponentenseite, Gruppe Material), F1 auf einer Zeile öffnet dort
   den eigenen Abschnitt, „Mehr dazu" zeigt auf `materials#parameters`.
-- **Offen:** ein eigener Abschnitt „Engine Water" im Website-Handbuch
-  (`Website/HorizonEngineDocs/materials.html`), danach `scripts/build_docs_bundle.py` und das
-  Bündel `EditorDeps/Docs/he-docs.json` neu einchecken. Nicht gemacht: der Website-Checkout
-  ist ein anderes Repo, hat fremde uncommittete Änderungen und ist gegen `origin/main`
-  auseinandergelaufen (ahead 2, behind 2), und eine Veröffentlichung braucht ohnehin die
-  Bestätigung des Menschen.
+- **Website-Handbuch:** seit Schritt 5 erledigt, siehe §10.2.
 
 ### 9.4 Nicht belegt
 
@@ -555,3 +550,67 @@ Defaults und müssen dann mitgezogen werden.
   gleiche Welt), nicht durch Bedienen des Editors. Die Tooltips sind über den Lookup-Test
   belegt, nicht durch ein Bild des schwebenden Tooltips.
 - Das exportierte Spiel auf Metal/GL.
+
+---
+
+## 10. Verifikation (Schritt 5)
+
+### 10.1 Build und Tests (Mac, M5, macOS 27.0.1, Apple clang 21, 2026-10-06)
+
+`out/build/macos-release` im Worktree: Release, Unix Makefiles, `HE_ENABLE_SHADERC=ON`,
+`HE_VALIDATE_SHADERS=ON`, `HE_BUILD_TESTS=ON`. Alles im Vordergrund, Ergebnis aus dem Log
+und dem Rückgabewert gelesen, nicht aus einer Zusammenfassung.
+
+- `cmake --build . -j8`: rc 0, alle 60 Ziele (Engine, Editor, Werkzeuge inkl. `mat_gen`,
+  `HeValidateShaders`, `he_tests`). **Inkrementell**: die Engine-Ziele stammten aus dem
+  Build von Schritt 4; geprüft, dass `he_tests` und `HorizonEditor` jünger sind als jede
+  Datei, die der Zweig gegen `main` ändert. Nach den Änderungen dieses Schritts noch einmal:
+  rc 0, neu übersetzt nur `EditorHelp.cpp` (Editor + he_tests) und `test_engine_materials.cpp`.
+  Einzige Warnungen: `ld: ignoring duplicate libraries` (vorbestehend).
+- `ctest` in drei Stücken, `-j4`, eigenes `TMPDIR`: **235 bestanden, 0 fehlgeschlagen,
+  2 übersprungen** von 237. Die zwei sind `runtime_size_app_basic|advanced`, sie messen ein
+  exportiertes `out/deploy/AppBasic|AppAdvanced`, das es im Worktree nicht gibt (nicht
+  Wasser-bezogen). `test_material_graph` 200 s, `test_engine_materials` 15 s.
+- `scripts/water_shader_offline_check.py` lokal: 10 bestanden, 0 fehlgeschlagen,
+  2 übersprungen. GL/ES `glslangValidator -l` (4 Paare), `spirv-val vulkan1.2` (3),
+  `spirv-cross --msl` (MoltenVK-Übersetzung, 3), jeweils nach Negativkontrolle. Übersprungen:
+  `fxc` (kein Windows SDK) und `xcrun metal` (Metal-Toolchain auf diesem Mac nicht geladen).
+  Beides ist in CI belegt (§8.2, Lauf 37347421486), dieser Schritt ändert keinen Shader.
+
+### 10.2 Website-Handbuch
+
+- Abschnitt `#water` „Engine Water" in `HorizonEngineDocs/materials.html` mit Bild
+  `water_engine.png` (Metal, Rezept §9.1, t = 1.0): Verwendung, alle 15 Parameter mit
+  Bedeutung und Default, Grenzen. Repo HC-Website, Zweig
+  `claude/eigener-wasser-shader-als-engine-default-material` (von `origin/main`, Commit
+  b9809f8), gepusht, **nicht gemergt und nicht deployt**: das Veröffentlichen braucht die
+  Bestätigung des Menschen. Der lokale `main`-Checkout der Website (fremde Änderungen,
+  ahead 2 / behind 2) ist unberührt.
+- `EditorDeps/Docs/he-docs.json`: **nur die Seite `materials` ersetzt**, plus
+  `img/water_engine.jpg`. Ein voller Neulauf von `build_docs_bundle.py` hätte 18 fremde
+  Abschnitte anderer Themen mitgebracht, das eingecheckte Bündel war schon vorher
+  gegen den Website-Stand veraltet. Die anderen sechs Abschnitte der Seite sind
+  unverändert, die übrigen Bilder byte-gleich (Pillow in einer Wegwerf-venv).
+  `build_docs_bundle.py --check` meldet das Bündel deshalb weiter als veraltet.
+- Die 13 Wasser-Einträge in `EditorHelp.cpp` zeigen jetzt auf `materials#water` statt
+  `materials#parameters`. `test_engine_materials` pinnt das, und `test_editor_help`
+  („every topic it points at exists in the manual") prüft, dass der Abschnitt im
+  ausgelieferten Bündel existiert.
+
+### 10.3 Was nur syntaktisch geprüft ist, was auf echter Hardware offen bleibt
+
+| Backend | Kompilat | Bild |
+|---|---|---|
+| Metal | `xcrun metal` 5/5 (CI) | Editor headless, M5 (§9.1) |
+| OpenGL 4.1 | glslang gelinkt (he_tests, lokal) | Editor headless, M5 (§9.1); GL 4.3 + ES nur Compiler |
+| D3D11 | FXC + WARP-Shader-Objekte (he_tests, Windows-CI) | ein Rauchtest im Editor, RTX 4070 (§8.3) |
+| D3D12 | FXC + WARP-Translucent-PSO (Windows-CI) | ein Rauchtest im Editor, RTX 4070 (§8.3) |
+| Vulkan | spirv-val 1.2, SPIR-V-Reflexion, lavapipe-Job grün | ein Rauchtest im Editor, RTX 4070 (§8.3) |
+| MoltenVK | nur `spirv-cross --msl`, nie `metal -c` | nie |
+
+Offen auf echter Hardware: AMD- und Intel-GPUs (D3D11/D3D12/Vulkan), D3D11 mit Debug-Layer
+(`HE_GPU_DEBUG` wirkt dort nicht), Vulkan auf einem 1.0-Loader (§8.5), das **exportierte
+Spiel** auf allen fünf Backends, und das Bedienen im laufenden Editor (alles Bildliche kommt
+aus dem Headless-Zeugen). Für den GL-Fix aus §8.4 gibt es keinen CI-Test (kein GL-Kontext in
+CI), nur das lokale A/B. Offene Abstimmung: `FresnelPower`/`Reflection` wirken bei der
+Default-Trübung kaum (§9.2).
