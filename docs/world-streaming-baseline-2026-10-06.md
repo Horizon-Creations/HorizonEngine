@@ -16,6 +16,11 @@ wurde nichts umgebaut. Neu sind nur Messhilfen: zwei Log-Zeilen mit Ladezeiten u
 (Bench, ohne Rendern und Physik); Frame 0/1 bei 1k 382/769 → 104/41 ms;
 30-FPS-Grenze ≈ 5 000 → ≈ 13 500 Entities; Floating Origin, Jolt auf mehreren Threads.
 
+**Schritt 6 (Editor-Integration, Debugging) steht in Abschnitt 11:** Pick-Snapshot des
+Scene-Fensters nur noch bei Bedarf, Outliner ohne verdeckte Zeilen; CPU pro Frame 50k
+98,6 → 62,4 ms, 30-FPS-Grenze ≈ 13 500 → ≈ 26 000 Entities. Neu: Profiler-Tab *Streaming*,
+Zellen im Scene-Fenster, Zellen splitten und zurückführen im Editor.
+
 **Kurz:**
 - Die Ladezeit ist nicht das Problem. 50 000 Entities sind in 1,3 s geladen, und die Ladezeit
   wächst linear.
@@ -779,4 +784,128 @@ FRAMES=30 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /
 FRAMES=120 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws5/end s5end 1000 10000 50000
 FRAMES=120 TIMEOUT=1500 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws5/end s5end 100000 200000
 python3 scripts/perf/ladder_table.py /tmp/ws5/end/s5end-*.profile.json
+```
+
+## 11. Schritt 6: Editor-Integration und Debugging
+
+Stand 06.10.2026, Commits `93089d9d` bis `4561c2c8`. Schritt 5 hatte zwei Punkte an diesen Schritt
+übergeben (10.6): den Pick-Snapshot des Scene-Fensters und den Outliner ohne Clipping. Dazu kommen
+Zellen sehen und bearbeiten sowie eine Ansicht, die zeigt, was das Streaming gerade tut.
+
+**Kurz:**
+- **Frame im Editor:** CPU pro Frame bei 50k **116,7 → 62,4 ms** (gleicher Tag, gleiche
+  Bedingungen, Vorher auf `72e8b54a`). Der Pick-Snapshot kostet im Leerlauf nichts mehr (vorher
+  28 ms bei 50k), der Outliner 2,4 statt 23,5 ms.
+- **Entity-Grenze im Editor:** 30 FPS bei **≈ 26 000** statt ≈ 13 500 Entities, 60 FPS bei
+  ≈ 12 000 statt ≈ 6 400 (CPU-Frame p50, linear zwischen 10k und 50k interpoliert, wie 10.3).
+- **Debugging:** Der Performance Profiler hat einen Tab *Streaming*. Er zeigt den Job-Pool je
+  Priorität, die laufenden Asset-Loads mit Fortschritt, die letzte Szenen-Ladung, die Zellen der
+  offenen Szene mit dem, was das Spiel von der Editor-Kamera aus laden würde, und die Weltgröße.
+- **Zellen im Editor:** *Show ▸ Streaming Cells* zeichnet die Zellquadrate im Scene-Fenster.
+  *Split into Streaming Cells* und *Merge Cells into the Scene* im Streaming-Tab teilen eine Szene
+  und führen sie zurück, je mit einem Undo-Schritt. Damit bleibt eine geteilte Szene bearbeitbar.
+
+### 11.1 Messbedingungen
+
+M5, Release (`HE_PROFILING=ON`, `HE_ENABLE_SHADERC=ON`), `--warmup 0`, 120 Frames, Stromsparmodus
+AN, wie 10.2. Unterschiede:
+- **Bildschirm gesperrt** in allen Läufen dieses Schritts (die Leiter meldet `locked=Yes`). Laut
+  den Lehren aus Schritt 1 bis 5 bekommt ein billiger Frame im gesperrten Zustand mehr Hänger. Die
+  Spalte „>2×Median“ bei 1k (55 statt 20) kommt daher, nicht vom Umbau. Verglichen werden die
+  Scope-p50.
+- Load average 1,5 bis 4,5 (fremde Prozesse). Vor jedem frisch gebauten Binary lief ein
+  verworfener 1k-Lauf (Pipeline-Cache).
+- **Vorher** wurde in diesem Schritt neu gemessen, jeweils direkt vor dem Umbau und unter
+  denselben Bedingungen: `s6vorher-*` auf `72e8b54a` (Ende Schritt 5), `s6outl-vorher-*` auf
+  `37109c22` mit dem neuen Scope `OutlinerPanel::render`. Die Abschnitte 3 und 10 sind unter anderen
+  Bedingungen gemessen und dienen nur zur Einordnung.
+
+### 11.2 Was die beiden Umbauten bringen (10k und 50k)
+
+| Stand | 10k: OnRender / Outliner / CPU p50 | 50k: OnRender / Outliner / CPU p50 |
+|---|---|---|
+| `72e8b54a` Ende Schritt 5 (`s6vorher`) | 10,4 / – / 22,2 ms | 57,7 / – / 116,7 ms |
+| Pick-Snapshot bei Bedarf (`93089d9d`, `s6pick`) | 6,2 / – / 18,8 ms | 30,9 / – / 94,0 ms |
+| vor dem Outliner-Umbau, mit Scope (`s6outl-vorher`) | 6,2 / 4,65 / 18,6 ms | 29,1 / 23,5 / 90,7 ms |
+| Outliner ohne verdeckte Zeilen (`s6outl-nachher`) | 2,3 / 0,54 / 15,2 ms | 8,8 / 2,4 / 67,1 ms |
+
+- **Pick-Snapshot:** Das Scene-Fenster extrahierte jeden Frame die ganze Welt für Klick, Rahmen,
+  Drop und Snap, zusätzlich zum Renderer (28,5 ms bei 50k, ein `RenderExtractor::extract` in
+  `OnRender`). Jetzt rechnet es pro Frame nur die Kamera (`extractCameraOnly`). Die Objekte holt
+  `sceneSnapshot()` beim ersten Bedarf im Frame. Im Leerlauf, also ohne Klick, Rahmen, Drop, F
+  oder Snap-Drag, ist der Scope `ViewportPanel::sceneSnapshot` in allen Läufen 0. Das Propagieren
+  der Transforms hat diesen Extract mitgemacht und läuft jetzt im Renderer-Extract:
+  `Render` 59 → 63 ms. Netto spart der Umbau ≈ 23 ms bei 50k.
+- **Outliner:** Jede Zeile lief durch `TreeNodeEx`, das sein Label auch dann misst, wenn ImGui es
+  wegschneidet. Verdeckte Zeilen liefern jetzt nur ihre ID und ihren Aufklapp-Zustand. Ihre Höhe
+  geht als ein Platzhalter vor die nächste sichtbare Zeile.
+
+### 11.3 End-Stand über die ganze Leiter
+
+Rohdaten `docs/perf-audit/raw-streaming/s6end-*`, Tabelle `s6end-table.md`. Zur Einordnung
+`s5end` aus 10.3 (Bildschirm offen, Last 3,9–4,7, also andere Bedingungen):
+
+| Entities | CPU/Frame p50 `s5end` → `s6end` | OnRender `s5end` → `s6end` | `RenderExtractor::extract` `s5end` → `s6end` |
+|---|---|---|---|
+| 1 084 | 12,3 → 10,1 ms¹ | 1,7 → 0,7 ms | 1,0 → 0,7 ms |
+| 10 174 | 31,2 → **14,1** ms | 8,2 → 2,1 ms | 8,9 → 6,4 ms |
+| 50 574 | 98,6 → **62,4** ms | 42,2 → 7,7 ms | 59,7 → 33,4 ms |
+| 101 074 | 195,5 → **145,4** ms | 85,2 → 17,6 ms | 111,6 → 76,6 ms |
+| 202 074 | 501,2 → **286,8** ms | 221,4 → 34,5 ms | 265,5 → 146,1 ms |
+
+¹ Bei 1k wartet der Frame auf vsync (`Metal::NextDrawable`), siehe 10.2.
+
+- Die Ladezeiten (`parse`/`build`) hat dieser Schritt nicht angefasst. Sie streuen hier mit Sperre
+  und Last (200k `parse` 1 544 → 2 162 ms) und werden nicht verglichen.
+- **Wohin die 62 ms bei 50k jetzt gehen:** `Render` 56 ms. Davon entfallen 33 ms auf den einen vollen
+  Extract im Schattenpass samt Wiederverwendung, 35 ms auf `EncodeShadowMap` (den Extract
+  eingerechnet) und je 10 ms auf Szene und SSAO. `OnRender` braucht 7,7 ms, davon der Outliner
+  2,4 ms. Der Rest ist Renderer-Arbeit pro Entity und gehört nicht in dieses Thema
+  (Renderer-Features und Backend-Parität sind ausgeschlossen). Der nächste Hebel wäre der Lauf des
+  Extractors selbst.
+
+### 11.4 Was umgesetzt ist
+
+| Punkt | Umsetzung | Beleg |
+|---|---|---|
+| Pick-Snapshot extrahiert voll (9.4, 10.6) | `RenderExtractor::extractCameraOnly` pro Frame, Objekte über `sceneSnapshot(ctx)` beim ersten Bedarf. Das Kontextmenü extrahiert erst, wenn eine Zeile gewählt ist | 11.2; Tests `test_viewport_pick`, `test_editor_marquee`, `test_gizmo_pick` grün |
+| Gizmo lebte vom Propagieren dieses Extracts | `EditorTransformGizmo` liest Weltmatrizen per `worldMatrixOf`, nicht `TransformComponent::worldMatrix` | `test_viewport_gizmo` „Gizmo without a propagate“; mit dem alten Lesezugriff rot |
+| Outliner ohne Clipper (9.4, 10.6) | Verdeckte Zeilen: ID per `ImHashData` wie `TreeNodeEx`, Aufklapp-Zustand aus dem Fenster-Storage, ein `Dummy` pro Lauf, Vorfahren-Ebenen per `TreePushOverrideID` nachgespielt. Die Wurzelzeile (ohne Schloss, 3 px niedriger) wird eigens vermessen | `test_outliner_ui`: mit und ohne Clipping **pixelgleich** an vier Scrollpositionen mit gefaltetem Zweig, gleiche Scrollhöhe; ohne eigene Wurzelhöhe rot |
+| Debugging: was tut das Streaming | Profiler-Tab *Streaming*. `ThreadPool::stats()` liefert je Priorität wartend, laufend, Grenze, ausgeführt, Arbeitszeit, abgebrochen und fehlgeschlagen, über Atomics ohne zweiten Lock; Jobs/s und Pool-Anteil kommen aus zwei Stichproben im Abstand von einer halben Sekunde. Außerdem `ContentManager::asyncInFlightPaths`/`asyncPollStats`, `SceneSerializer::lastLoadTiming`, die Zellen aus Sicht der Editor-Kamera (`CellManifest::around`) sowie der Float-Schritt an der Kamera | `test_jobsystem` „ThreadPool::stats“ (fünfmal grün; er fand, dass abgebrochene Jobs als ausgeführt zählten, `runClaimed` meldet das jetzt), `test_async_streaming`, `test_world_scale`, `test_streaming_view` mit UI-Shot |
+| Zellen im Editor sehen (10.6) | *Show ▸ Streaming Cells*: Quadrate im Umkreis nach Reichweite gefärbt (grün laden, orange halten, grau fallen lassen), Lade- und Entladeradius um die Kamera | `test_streaming_view` (Linien da, ohne Zellen keine) |
+| Zellen bearbeiten (10.6) | `HE::splitSceneIntoCells` (die Regeln von `split_scene_cells.py` in C++), `splitWorldIntoCells`, `mergeCellsIntoWorld`. Im Streaming-Tab gibt es Split mit Zellgröße und Radien sowie Merge. Die Zell-Dateien landen in `<Szene>.cells` neben der Szene, projektrelativ im Manifest. Alte `cell_*.hescene` dort werden entfernt. Je ein Undo-Schritt, nur bei Erfolg. Der Merge läuft über das Szenen-JSON und einen Voll-Load, damit jede Entity ihre UUID behält | `test_cell_split`: Regeln, Split → das Spiel streamt die Zelle (`CellStreamer`) → Merge stellt Namen, Positionen und UUIDs wieder her, ein unlesbarer Merge ändert nichts; `test_streaming_view`: Pfade, Aufräumen, Undo/Redo |
+
+Vollbau grün, `ctest -j4 --timeout 1500`: **`100% tests passed out of 239`** (`CTEST_RC=0`, die
+zwei `runtime_size_app_*` übersprungen wie zuvor), aus dem Log gelesen. Spiel-Runtime lokal
+33,9 MB ohne Python (Schwelle macOS 36 MB); `CellSplit` bringt ≈ 90 KB Code.
+
+### 11.5 Offen und Grenzen
+
+- **Nie von Hand bedient:** Tab, Overlay, Split und Merge sind headless getestet: Logik, Undo,
+  Dateien, ein gerasterter Shot des Tabs. Niemand hat sie im laufenden Editor angeklickt, und das
+  Overlay im Scene-Fenster ist nur als Linienpuffer geprüft, nicht als Bild.
+- **Vollen Extract gibt es weiterhin**, sobald etwas die Objekte braucht: während eines Snap-Drags
+  jeden Frame, ebenso solange ein zweites Scene-Fenster offen ist und etwas ausgewählt ist
+  (`selectionBox` für dessen Umriss). Das ist so teuer wie vorher, nur nicht mehr im Leerlauf.
+- **Ordner nach dem Merge:** Der Split blickt durch Ordner hindurch und lässt leere fallen. Nach
+  dem Merge hängen die zurückgeholten Teilbäume direkt unter der Welt-Wurzel, nicht im alten
+  Ordner.
+- **Zwei Splitter:** `scripts/split_scene_cells.py` und `HE::splitSceneIntoCells` setzen dieselben
+  Regeln zweimal um. Getestet ist die C++-Fassung. Das Skript bleibt für Stapelläufe; einen
+  Kommandozeilen-Aufruf der C++-Fassung gibt es nicht.
+- **Verweise über Zellgrenzen im Spiel:** Der `CellStreamer` lädt Zellen additiv, mit neuen IDs,
+  wie Zonen. Ein Verweis aus der Basis auf ein Entity in einer Zelle trägt im Spiel nicht (wie in
+  Schritt 5). Im Editor stellt der Merge die IDs wieder her.
+- **Handbuch:** Die Hilfetexte im Editor (F1, Tooltips) sind geschrieben, das Website-Handbuch
+  nicht. Die Hilfe verweist auf die vorhandenen Abschnitte `editor#profiler` und
+  `editor#viewport`.
+
+```sh
+cmake --build out/build/release -j8
+(cd out/build/release && ctest -j4 --timeout 1500)
+HE_UI_DUMP_DIR=/tmp/ui out/build/release/tests/he_tests --source-file='*test_streaming_view.cpp'
+FRAMES=30 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws6/end verwerfen 1000
+FRAMES=120 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws6/end s6end 1000 10000 50000
+FRAMES=120 TIMEOUT=1500 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws6/end s6end 100000 200000
+python3 scripts/perf/ladder_table.py /tmp/ws6/end/s6end-*.profile.json
 ```
