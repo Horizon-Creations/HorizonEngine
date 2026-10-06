@@ -114,6 +114,53 @@ Die Historie bleibt unverändert (kein filter-repo, kein Force-Push). Darum gilt
 - **Was wirklich sinkt:** der Arbeitsbaum jedes neuen Checkouts oder Worktrees, um die oben gemessenen ~26,3 MiB Belegung und 1374 Dateien. Dazu sinkt bei flachen Clones (CI mit `fetch-depth: 1`) die Transfergröße um diese rund 2,1 MiB.
 - **Bestehende Arbeitsbäume** verlieren `doc/api` erst, wenn sie einen Stand ab `9cdb009d` auschecken oder mergen. Danach greift der Ignore-Eintrag: Falls dort Dateien liegen bleiben, weil sie z. B. nie getrackt waren, checkt `git add -A` sie nicht wieder ein.
 
+## Schritt 4: Verifikation (Build, Tests, Doku-Skripte)
+
+Geprüft wurde Stand `1df3b075` auf NN-WS03 (Windows 11, VS 18 / MSVC 14.51, Ninja, CMake 4.4). Dieser Abschnitt ist danach die einzige Änderung, und er ändert keinen Code.
+
+### Build: frisch, Release, grün
+
+- **Konfiguration:** `cmake --preset x64-release -B C:/hw156/build -DDEPLOY_DIR=C:/hw156/deploy`, also ein leeres Build-Verzeichnis mit allen FetchContent-Abhängigkeiten neu. Exit 0 (91 s). Das Log nennt `GLM: Version 1.0.1`, und im Cache steht `glm_SOURCE_DIR = C:/hw156/build/_deps/glm-src`. Die vendorte Kopie unter `src/HE_Rendering/glm` kommt im Build nicht vor. Die CMake-Warnungen sind nur Deprecation-Hinweise aus `glm-src` und `mbedtls-src`. Keine Warnung nennt fehlende Dateien, `doc/` oder `.html`.
+- **Build:** `cmake --build C:/hw156/build -j8`. Exit 0, 1780/1780 Schritte. Der letzte Schritt prüft die zur Laufzeit kompilierten Shader-Strings mit fxc und glslangValidator, Ergebnis „51 compiled, 0 failed“.
+- **Editor-Handbuch:** `Editor/Docs/he-docs.json` liegt im Deploy und ist byte-gleich zu `EditorDeps/Docs/he-docs.json`. Im ganzen Deploy liegt keine `.html`-Datei. Der Editor liefert also auch vorher kein HTML aus.
+- Der gemeinsame Deploy `HorizonEngineBuild` wurde nicht berührt (`DEPLOY_DIR`-Override, `HorizonEditor.exe` dort unverändert vom 05.10.).
+
+### Tests: `ctest` im Vordergrund, Exit 0
+
+`ctest --test-dir C:/hw156/build -j8 --output-on-failure` mit eigenem `APPDATA` (he_tests überschreibt sonst die echte Editor-Config) und `HE_COLLAB_OFFLINE=1`:
+
+- **Exit 0, „100% tests passed out of 237“**, 156 s. 235 Tests liefen und bestanden.
+- **2 übersprungen:** `runtime_size_app_advanced` und `runtime_size_app_basic`. Das ist gewollt (`tests/CMakeLists.txt:1133`): die App-Runtimes entstehen nur über `scripts/build_runtimes.py`. Ohne sie meldet der Test Exit 2 = Skip, auch in CI. `runtime_size` (Game) lief und bestand.
+
+### Doku-Skripte: Zweig und Merge-Base liefern dasselbe
+
+`scripts/script_api_docs/` ist zwischen Merge-Base `9b00bfb1` und diesem Zweig unverändert. Geprüft habe ich trotzdem empirisch, als A/B: einmal auf diesem Arbeitsbaum, einmal auf einem `git archive` von `9b00bfb1`. Beide liefen gegen dieselbe Website, einen eigenen Worktree von `HC-Website` `origin/main` (`2178676`). Der Website-Hauptcheckout steht 82 Commits zurück, ihm fehlt `scripting.html`. Daran scheitert `gen_reference.py` mit `FileNotFoundError`, unabhängig von diesem Thema.
+
+| Skript | Zweig | Merge-Base | Vergleich |
+|---|---|---|---|
+| `gen_reference.py --check` | Exit 1, stale: `scripting-reference.html`, `horizoncode-nodes.html`, `scripting.html` | gleich | Ausgabe byte-gleich |
+| `coverage.py --out` | Exit 0, 617 Ids (582 ref, 4 named, 31 missing) | gleich | Bericht byte-gleich |
+| `build_docs_bundle.py --out` | Exit 0, Bündel + 8 Abbildungen | gleich | `he-docs.json` byte-gleich |
+
+Das „stale“ von `gen_reference.py` heißt: Die Website-Seiten sind älter als `registry.json`. Das ist auf beiden Seiten gleich, also kein Effekt dieses Themas. `gen_reference.py` und `coverage.py` lesen die 43 Overlay-Seiten und finden sie. `build_docs_bundle.py` liest nur die Website. Keins der drei liest `glm/doc`.
+
+### Tatsächlich eingespart (aus Git gemessen, Merge-Base gegen HEAD)
+
+| Messgröße | `9b00bfb1` | `1df3b075` | Differenz |
+|---|---|---|---|
+| versionierte Dateien | 4252 | 2879 | −1373 (−1374 gelöscht, +1 diese Datei) |
+| davon HTML | 1291 | 44 | −1247 |
+| Blobgröße (LF) | 120 023 696 B | 96 348 923 B | **−23 674 773 B (−22,58 MiB, −19,7 %)** |
+| Pack für einen Depth-1-Checkout | 52 389 898 B | 50 155 482 B | **−2 234 416 B (−2,13 MiB, −4,3 %)** |
+
+Das Pack habe ich mit `git rev-list --objects -n1 <commit> | git pack-objects --stdout` gemessen. Das entspricht grob dem, was ein flacher Clone (CI, `fetch-depth: 1`) überträgt. Doxygen-HTML komprimiert sehr gut. Darum sinkt der Arbeitsbaum um ~22,6 MiB Inhalt bzw. ~26,3 MiB Belegung (Schritt 3), der Transfer aber nur um ~2,1 MiB. Volle Clones und bestehende `.git` werden nicht kleiner, weil die Historie bleibt.
+
+### Übersprungen
+
+- **Debug-Build und andere Plattformen** (macOS/Metal, Linux) habe ich nicht gebaut. Die Änderung entfernt nur Dateien, die kein Build-System liest. CI baut die übrigen Plattformen beim PR.
+- **`dump_engine_api.sh`** (erzeugt `registry.json` neu) habe ich nicht ausgeführt. Es liest `_deps/glm-src` und den Engine-Quellcode, kein `glm/doc`, und die Registry ist nicht Gegenstand des Themas.
+- **Doxygen** (`man.doxy`) habe ich nicht laufen lassen. Kein Build-Schritt ruft es auf.
+
 ## Für ein späteres Thema notiert (nicht Teil von Thema 156)
 
 - **Vendorte GLM:** Ganz `src/HE_Rendering/glm` (einschließlich `glm/glm` und `glm/test`) wird vom Build nicht benutzt, weil FetchContent GLM holt. Ob die Kopie insgesamt weg kann, gehört in ein eigenes Thema. Laut diesem Thema bleibt der GLM-Quellcode unangetastet.
