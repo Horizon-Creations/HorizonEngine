@@ -59,7 +59,8 @@ Cursor mit `chapter == chapterCount()` ist die eine kanonische „fertig"-Positi
 **20 Kapitel, 63 Schritte:** Orientierung · Navigation · Entities · Komponenten · Assets ·
 Asset-Typen · Materialien · Sky/Wetter/Licht · Landschaft · Physik · Partikel · Animation ·
 Navigation · UI · HorizonCode · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler ·
-Packaging · Abschluss.
+Packaging · Abschluss. Ohne das HorizonCode-Kapitel (siehe unten) sind es 19 Kapitel und
+57 Schritte.
 
 **Das HorizonCode-Kapitel ist abwählbar (Thema 151, Schritt 4).** `tut::Options`
 (`horizonCode`, Vorgabe `true`) geht als Default-Parameter an jede Cursor-Funktion
@@ -290,7 +291,26 @@ steht die Karte auf `hc-intro`. Die Kapitelzeile auf `language` zeigt ohne das K
 [ohne](img/tutorial-card-2026-10-06/horizoncode-aus-language.png),
 [mit](img/tutorial-card-2026-10-06/horizoncode-an-language.png).
 
+### Abnahme Thema 151 (Schritt 5, 06.10.2026, Stand 3e7f94f2)
+
+Debug-Build, Metal, Fenster 1600×900 pt, deployter Editor byte-gleich mit dem Build.
+
+| Punkt | Ergebnis | Beleg |
+|---|---|---|
+| Vollbau | PASS | `cmake --build . -j8` rc=0, alle Targets |
+| `test_tutorial` | PASS | 27 Fälle, 2522 Assertions |
+| Betroffene Editor-Tests | PASS | `test_ui_shot` (31 Fälle), `test_editor_help`, `editor_help_audit` |
+| Voller ctest | PASS bis auf einen Flake | 232 grün, 3 übersprungen (`runtime_size*`). `test_collab_controller` war im Volllauf rot (`pumpUntil` in Z. 2089, zeitgleich mit `test_material_graph` und einem Live-Editor). Einzeln lief er 3 von 3 Mal grün. Der Zweig berührt keinen Collab-/Net-Code. |
+| Karte weicht aus | PASS | Zeuge wie oben. Die Karte steht an drei verschiedenen Stellen: (817,520) bei `add-mesh` (Details), (817,244) bei `create-asset`/`asset-struct`/`bone-mask` (Content Browser), (1150,244) bei `theme`. Überall 0 pt² überdeckt, auch bei `sculpt`, `outliner` und `asset-prefab`. Die Kontrolle mit `_NOAVOID` bleibt in der Standardecke (1150,520): Details 109 140 pt², Content Browser 28 248 pt². |
+| Neue Asset-Schritte | PASS (Doppelklick nicht ausgeführt) | Live-Lauf mit `HE_MCP=1`, dazu Zeuge, der `asset-prefab` und `asset-audio` je 40-mal hält. Die ersten drei Runden ohne Aktion bleiben offen. Nach `prefab_save` (schreibt dieselbe Datei wie Outliner ▸ Save as Prefab) rückt der Rundgang selbst auf `asset-texture` weiter. Das Prefab erscheint als `Prefabs/Cube.hasset` (Typ Prefab) im Content-Baum. Nach Audio Source per `entity_set_components` rückt er auf `asset-imported` weiter. Struct, Enum, SaveGame Template, Theme, Bone Mask, Blend Space, Property Animation Clip und Sequence, angelegt über `asset_create` (derselbe `AssetStubWriter` wie das Create-Menü), liest `EditorAssetTypeCache` jeweils als genau diesen Typ. Dieselbe Funktion nutzen `sample()` und die Öffnen-Prädikate im Doppelklick-Pfad. Den ImGui-Doppelklick, der den Tab öffnet (`TabOfTypeOpened`), kann von hier niemand auslösen. |
+| HorizonCode abgewählt | PASS | `Tutorial.HorizonCode=false`: Die Karte zählt „Chapter 1/19" (welcome), „14/19 – User interface" (`theme`). `hc-intro` ist nicht erreichbar (`tour is at 'language'`), `language` folgt lückenlos als „15/19 – Gameplay logic". Mit dem Kapitel steht dort „16/20". |
+
 ## Offen
+
+- Die `TabOfTypeOpened`-Schritte der neuen Asset-Typen (`asset-struct`, `asset-enum`,
+  `asset-savegame`, `bone-mask`, `blend-space`, `property-clip`, `sequence`, `theme`) sind
+  nur bis zum Typ-Sniff live belegt (Abnahme oben). Der Doppelklick selbst ist im
+  laufenden Editor nie ausgeführt worden.
 
 - Das Willkommensmodal ist **nicht** in der laufenden App optisch verifiziert (der
   Zeuge oben setzt erst im geöffneten Projekt ein). Das gilt auch für die Checkbox
