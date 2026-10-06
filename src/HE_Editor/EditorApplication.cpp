@@ -5695,6 +5695,37 @@ void EditorApplication::dumpFrameHeadless()
 			: "EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
 	}
 
+	// ── GI caster-count load (HE_DUMP_GICASTERS=N[f], Thema 142): N extra
+	// shadow-casting cubes, for costing the software GI rays. Their TLAS is a
+	// linear loop over every caster (giSceneAnyHit), so every sun ray pays per
+	// instance. Plain N: a grid 20 m BELOW the floor — no sun ray from the floor
+	// can reach it, and each instance costs only its transform + root-box test
+	// (lower bound). The image still shifts a little: the DDGI probe grid refits
+	// to the taller scene box. "f" suffix: 0.3 m cubes standing in a field over
+	// the whole floor, so rays pass near many of them. Pair with HE_GI_SHADOW_BENCH.
+	if (const char* gc = std::getenv("HE_DUMP_GICASTERS"); gc && *gc && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const int  n     = std::clamp(std::atoi(gc), 1, 65536);
+		const bool field = std::string_view(gc).back() == 'f';
+		const int  side  = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(n))));
+		const float pitch = 29.0f / static_cast<float>(side);   // spread over the 30 m floor
+		for (int i = 0; i < n; ++i)
+		{
+			auto e = m_editorWorld->createEntity("GICasterLoad");
+			TransformComponent tc;
+			const float x = -14.5f + pitch * (0.5f + static_cast<float>(i % side));
+			const float z = -26.5f + pitch * (0.5f + static_cast<float>(i / side));
+			tc.position = glm::vec3(x, field ? 0.15f : -20.0f, z);
+			tc.scale    = glm::vec3(field ? 0.3f : 0.5f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		}
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_GICASTERS " + std::to_string(n) + " cubes added ("
+			 + (field ? "field on the floor" : "grid below the floor") + ")").c_str());
+	}
+
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
 	// GRAPH-material cube (ConstColor → BaseColor) and an emissive graph cube
 	// (ConstColor → Emissive) standing on it. The ray-traced reflection must

@@ -42,6 +42,8 @@ PR #85 in main.
 
    Die Mehrkosten liegen bei **~0.4 ms** (Maske 640×360, HW-RT, niedriger Takt). Mit SW-Strahlen
    sind es ~0.7 ms. Das Verdecker-Ghosting wird etwas schlechter (s6 0.635 → 0.693, s05 0.43 → 0.50).
+   Auf dem SW-Pfad wachsen die Strahlkosten linear mit der Zahl der Schattenwerfer. Der Default
+   bleibt trotzdem auf beiden Pfaden 2 Strahlen (§8.4).
 5. **Abgelehnt:** History-Gewicht 0.95 (unter Bewegung schlechter, mehr Ghosting), Stratifizierung
    der Kegel-Samples (weniger Flackern, aber etwas mehr Fehler), À-trous ohne Werte-Stopp
    (rmse 11–23, verschmiert jeden Schatten), bilineare History mit absolutem UV (verschmiert
@@ -317,7 +319,8 @@ Dateien: `gi_shadow.comp`, `gi_shadow_hw.comp`, `gi_shadow_hw.hlsl`, `HlslSource
   läuft in [0, 1024) um, `seed·spp + k` bleibt bei spp ≤ 64 exakt.
 * Einstellung `GIShadowQuality` (1/2/4, Default 2) in `EditorConfig`, Host setzt `extra.y`. Auf
   dem SW-Pfad kostet jeder Strahl so viel wie der erste. Ob der SW-Default 1 bleiben soll, ist
-  eine Produktfrage für den Menschen, nicht hier entschieden.
+  eine Produktfrage für den Menschen, nicht hier entschieden. (Entschieden am 06.10.: Medium bleibt
+  der gemeinsame Default, §8.4.)
 
 ### 5.3 Baustein C: kantenerhaltender À-trous statt 3×3-Box (4 Blur-Kopien)
 
@@ -409,7 +412,8 @@ B `01442285`, C Metal `90da6aff`, C D3D11/D3D12/GL/Vulkan + Drift-Guard im selbe
 (0.9, vorher in jedem Host hart verdrahtet) und `shadowFilter`. Der Editor bietet
 *GI Shadow Quality* (Low/Medium/High = 1/2/4 Strahlen, Default Medium) in den Preferences, im
 Settings-Katalog, in `config.json` (`GIShadowQuality`), im Export und im Spiel. Ob der
-SW-Pfad (kein RT-Kern) einen anderen Default braucht, bleibt die offene Produktfrage aus §5.2.
+SW-Pfad (kein RT-Kern) einen anderen Default braucht, war die offene Produktfrage aus §5.2.
+Entschieden in §8.4: Medium bleibt der gemeinsame Default.
 
 **Dump-Schalter.** `HE_GI_REFERENCE=1` rendert die Referenz in jedem Backend selbst (256 Strahlen,
 History 0.98, Filter aus); `HE_DUMP_GISHADOWRAYS=n` und `HE_DUMP_GISHADOWFILTER=0|1` für A/B.
@@ -474,6 +478,7 @@ Eigenrauschen der Referenz. Alle Läufe 0 Fehler im Log (MSL kompiliert zur Lauf
 * MSL ist nicht offline kompiliert (Metal-Toolchain fehlt in diesem Xcode), nur zur Laufzeit.
 * Kosten nicht neu gemessen, auch nicht auf der RTX 4070. Der Prototyp hatte dieselben Pässe
   (§3.4: ~+0.4 ms HW). Die Windows-Backends haben keinen `HE_GI_PROTO_BENCH`-Gegenpart.
+  (Nachtrag: SW-Strahlkosten auf der RTX 4070 mit `HE_GI_SHADOW_BENCH`, D3D11 und GL, §8.4.)
 * ~~Nachmessen auf NN-WS03 (RTX 4070) mit `cap.ps1` und `HE_GI_REFERENCE=1` steht aus.~~ Erledigt, §8.3.
 
 ### 8.3 Nachmessung auf der RTX 4070 (D3D11, D3D12, Vulkan, OpenGL)
@@ -615,7 +620,7 @@ Für die offene Frage nach dem SW-Default (§5.2, Thema 142 Schritt 3) liefern d
   * s05: 0.50 statt 0.34 auf D3D11, 0.60 statt 0.42 auf GL.
   * c05: 0.26 statt 0.19.
   * Der Fehler bleibt trotzdem überall deutlich unter Stock.
-* **Kosten:** nicht gemessen. Die SW-Strahlenkosten auf der RTX 4070 sind damit ebenfalls offen.
+* **Kosten:** in diesen Läufen nicht gemessen. Nachgeholt in §8.4, mit der Entscheidung.
 
 **Nachmessen:**
 
@@ -635,3 +640,133 @@ Eine Aufnahme dauert ~2 s (GL), ~3 s (Vulkan) bzw. ~8 s (D3D, Kill 8 s nach dem 
 ganze Matrix mit Stock, Stufen und SW-Gegenprobe braucht ~15 min. Pro Deploy läuft immer nur
 eine Aufnahme, denn `HorizonEngine.log` neben der Exe ist geteilt. Die beiden Deploys laufen
 parallel.
+
+### 8.4 SW-Pfad: Kosten pro Strahl und Default (Thema 142, Schritt 3)
+
+Stand 06.10.2026 auf NN-WS03 (RTX 4070), Release. Fall s05 (Default-Radius 0.5°), Maske
+640×360.
+
+**Entscheidung: GI Shadow Quality bleibt Medium (2 Strahlen), auf dem HW- und auf dem SW-Pfad.**
+Es gibt keinen eigenen SW-Default und keinen Auto-Wert. Entschieden vom Chefchen am 06.10. auf
+Anfrage, mit diesen Daten. Zwei Gründe:
+
+1. **Low verfehlt die Abnahme §5.4** („Flackern ≤ Stock“), und zwar auf jedem Backend (§8.3):
+   * s05: 0.50 statt 0.34 (D3D11), 0.60 statt 0.42 (GL).
+   * c05: 0.26 statt 0.19.
+
+   Ein SW-Default Low würde SW-Nutzer an scharfen Kanten schlechter stellen als vor #86.
+2. **Die SW-Kosten wachsen linear mit der Zahl der Schattenwerfer.** Die Strahlenzahl ist dabei
+   nur ein Faktor. Der SW-Pfad hat kein TLAS: Jeder Strahl prüft in einer Schleife jede
+   schattenwerfende Instanz. Das gilt für `giSceneAnyHit` in `HlslSources.h`, `gi_shadow.comp`,
+   den GL-String und `kGISWMSL`. Low halbiert diese Kosten, an ihrer Ordnung ändert es nichts.
+   * Wo der zweite Strahl teuer wird, ist schon der erste zu teuer.
+   * Wo der erste tragbar ist, kostet der zweite wenig.
+
+Auf dem SW-Pfad laufen D3D11 und GL immer, auch auf einer RTX. D3D12, Vulkan und Metal laufen
+dort ohne RT-Kerne oder mit `HE_GI_FORCE_SW`.
+
+**Messbau:**
+
+* `HE_GI_SHADOW_BENCH=1` (`GIShadowBench.h`, D3D11 und GL), das Windows-Gegenstück zu
+  `HE_GI_PROTO_BENCH`:
+  * Ein Timer umschließt genau den Dispatch der Sonnenstrahlen und wird im selben Frame
+    zurückgelesen.
+  * Nach 40 Aufwärmframes kommen p10/p50/p90 über 160 Frames ins Log.
+  * Ohne Schalter fällt kein einziger zusätzlicher API-Aufruf an.
+* `HE_DUMP_GICASTERS=N` fügt N zusätzliche schattenwerfende Würfel ein, und zwar als Gitter 20 m
+  unter dem Boden.
+  * Dorthin kommt kein Sonnenstrahl. Jede Instanz kostet also nur ihre Transformation und den Test
+    gegen die Wurzelbox, das ist die untere Schranke.
+  * Das Bild verschiebt sich trotzdem leicht (GL im Mittel 1.4 Graustufen), weil sich das
+    Probe-Gitter an die höhere Szenenbox anpasst (484 → 900 Probes). Den Masken-Kernel betrifft
+    das nicht, er liest keine Probes.
+* `HE_DUMP_GICASTERS=Nf` stellt stattdessen ein Feld aus 0.3-m-Würfeln auf den Boden. Die Strahlen
+  laufen dann nah an vielen Würfeln vorbei.
+* `scripts/gi-shadow-repro/cost142.ps1` fährt die Matrix und schreibt den GPU-Takt mit.
+* Rohwerte: `docs/img/gi-shadow-restflackern-2026-10-03/rtx4070-cost142.txt`.
+
+**Zwei Fallen beim Messen:**
+
+* **Ganzer-Frame-Timestamps messen hier die CPU.** Im ersten Versuch blieb die Frame-Zeit flach
+  bei ~11 ms (p90 31 ms), unabhängig von Strahlen und Castern. Im Dump wartet die GPU meist auf
+  den Aufbau des Frames.
+* **D3D11 bleibt im Leerlauftakt.** Ein leichter D3D11-Dump hebt die RTX 4070 nicht aus P8: laut
+  `nvidia-smi` durchgehend 210 MHz. GL läuft bei 2.6–2.9 GHz.
+  * Die D3D11-Punkte unter ~1000 Castern sind deshalb ~13× zu langsam (2880/210 = 13.7).
+  * Rechnet man sie auf den Takt um, liegen sie auf den Boost-Punkten.
+  * Vergleichen lassen sich nur Punkte bei Boost-Takt. `cost142.ps1` schreibt den Takt deshalb zu
+    jedem Punkt.
+
+**Ergebnis** (p50, ms pro Dispatch, Maske 640×360, Low / Medium / High = 1 / 2 / 4 Strahlen).
+Bei D3D11 stehen nur Punkte mit Boost-Takt (≥ 2.6 GHz), „–“ = im Leerlauf- oder Zwischentakt
+gelaufen:
+
+| Instanzen | OpenGL (SW) | D3D11 (SW) |
+|---|---|---|
+| 8 (Basisszene) | 0.054 / 0.090 / 0.172 | – / – / – |
+| 72 | 0.341 / 0.677 / 1.348 | – / – / – |
+| 264 | 1.22 / 2.44 / 4.87 | – / – / – |
+| 1032 | 4.78 / 9.57 / 19.11 | – / – / 8.41 |
+| 2056 | 9.52 / 19.07 / 39.85 | – / 8.34 / 16.20 |
+| 4104 | 19.04 / 39.89 / 82.07 | 8.39 / 16.20 / 32.84 |
+| 1032, Feld auf dem Boden | 4.60 / 9.21 / 18.44 | – / – / 9.23 |
+
+* **Linear in Strahlen und Instanzen:**
+  * GL: **4.65 µs pro Instanz und Strahl**. Das hält von 72 bis 4104 Instanzen und auf allen drei
+    Stufen (4.46–5.00).
+  * D3D11: **1.95 µs**. Die Boost-Punkte liegen bei 1.97–2.04. Die 210-MHz-Punkte liegen, auf
+    2880 MHz umgerechnet, bei 1.93–2.07.
+  * Der feste Anteil ist klein: GL braucht mit 8 Instanzen 0.054 ms.
+* **Die Instanzschleife dominiert, nicht die BLAS-Traversierung.** Das Feld auf dem Boden kostet
+  so viel wie das Gitter darunter (GL 4.46 gegen 4.63 µs). Die Würfel haben aber nur
+  12 Dreiecke. Echte Meshes mit tieferem BLAS kosten mehr, sobald ein Strahl ihre Box trifft.
+* **Der D3D11-HLSL-Kern ist pro Instanz 2.4× schneller als der GL-GLSL-Kern**, bei gleicher Logik.
+  Nicht untersucht. Die Kandidaten sind der Compiler (FXC gegen den GLSL-Compiler des Treibers)
+  und der lokale Traversierungs-Stack.
+
+**Hochgerechnet:** Die Kosten eines Strahls entsprechen dem Schritt Low → Medium. Sie skalieren
+mit den Pixeln der Maske (halbe Auflösung): 1080p ×2.25, 1440p ×4. Werte für die RTX 4070 bei
+Boost-Takt:
+
+| Caster | 1080p GL | 1080p D3D11 | 1440p GL | 1440p D3D11 |
+|---|---|---|---|---|
+| 100 | 1.0 ms | 0.44 ms | 1.9 ms | 0.78 ms |
+| 500 | 5.2 ms | 2.2 ms | 9.3 ms | 3.9 ms |
+| 1000 | 10.5 ms | 4.4 ms | 18.6 ms | 7.8 ms |
+| 5000 | 52 ms | 22 ms | 93 ms | 39 ms |
+
+Die RTX 4070 ist keine Ziel-Hardware des SW-Pfads. Eine GPU ohne RT-Kerne hat deutlich weniger
+Rechenleistung, die Tabelle ist also eine untere Schranke. Auch die Probe-Aktualisierung (DDGI) und
+die GI-Reflexionen laufen durch dieselbe lineare Schleife. Sie hängen nicht an der Strahlenzahl der
+Maske und stehen nicht in diesen Zahlen.
+
+**Was das für die Entscheidung heißt:**
+
+* **Bis ~100 Caster** kostet der zweite Strahl bei 1080p auf der RTX 4070 höchstens 1 ms. Dafür
+  senkt er das Flackern um 40–50 % (§8.3, D3D11: s6 0.93 → 0.55, s05 0.50 → 0.25). Medium lohnt
+  sich.
+* **Ab einigen hundert Castern ist schon Low kein Echtzeitbudget mehr.** Low verschiebt die Grenze
+  nur um den Faktor 2. Dort hilft ein TLAS für die SW-Kerne, also eine BVH über die Instanzen mit
+  O(log N) statt O(N). Das ist ein eigener Folgeschritt und nicht Teil dieses Schritts.
+* Der Tooltip (`EditorHelp.cpp`, „GI Shadow Quality“) sagt jetzt drei Dinge:
+  * D3D11 und GL rechnen immer in Software.
+  * Die Kosten wachsen dort mit der Szene, und Low halbiert sie.
+  * Low flackert an scharfen Kanten stärker.
+
+**Nicht gemessen:**
+
+* der HW-Pfad auf der RTX 4070. D3D12 und Vulkan haben keinen Dispatch-Timer. Metal-HW: +0.10 ms
+  pro Strahl bei 8 Boxen, §3.4.
+* D3D12 und Vulkan mit `HE_GI_FORCE_SW`: gleiche HLSL- bzw. GLSL-Logik, aber andere Compiler
+  (DXC, glslc).
+* echte Meshes und andere GPUs.
+
+**Nachmessen:**
+
+```powershell
+# privater Release-Baum (DEPLOY_DIR), Stand dieses Abschnitts
+scripts\gi-shadow-repro\cost142.ps1 -Root C:\hw142 -Casters 0,64,256,1024,2048,4096,256f,1024f
+# Ausgabe pro Punkt: p10/p50/p90 + clockMHz; nur Punkte bei Boost-Takt vergleichen
+```
+
+Ein D3D11-Punkt dauert ~10 s, ein GL-Punkt ~4 s, die ganze Matrix ~6 min.

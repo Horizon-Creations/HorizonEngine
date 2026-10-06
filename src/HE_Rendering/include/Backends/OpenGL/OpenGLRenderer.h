@@ -9,6 +9,7 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/GIShadowBench.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GIProbeGrid.h>
@@ -1272,6 +1273,8 @@ private:
 	int          m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
 	float        m_giShadowHistoryWeight       = 0.9f;  // shadow-mask temporal history weight
 	bool         m_giShadowFilter        = true;  // edge-aware a-trous on the mask
+	unsigned int m_giBenchQuery[2]       = {};    // HE_GI_SHADOW_BENCH: GL_TIMESTAMP pair (GIShadowBench.h)
+	HE::GIShadowBench m_giBench;
 	// ── Ray-traced GI reflections (docs/gi-reflections-plan.md §10) ──────────
 	// Independent of m_giEnabled: the pass needs the acceleration structures and
 	// the half-res pre-pass, not the diffuse probe field (which it uses when it

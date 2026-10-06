@@ -449,7 +449,9 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			Row::sliderFloat("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
 			// Sun rays per pixel for the shadow mask (Thema 134): 2 halves the
 			// shimmer of 1 for ~0.1 ms on hardware RT; on the software path
-			// (no RT cores) every ray costs as much as the first.
+			// (no RT cores; always on D3D11/GL) every ray costs as much as the
+			// first, linear in the caster count. Medium stays the default on both
+			// paths: docs/gi-shadow-restflackern-1spp-2026-10-03.md §8.4.
 			const char* kGIShadowQuality[] = { "Low (1 ray)", "Medium (2 rays)", "High (4 rays)" };
 			int gsQ = std::clamp(cfg.GIShadowQuality, 0, 2);
 			if (Row::combo("GI Shadow Quality", &gsQ, kGIShadowQuality, 3))

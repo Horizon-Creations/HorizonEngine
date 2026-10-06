@@ -14,6 +14,7 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
+#include <HorizonRendering/GIShadowBench.h>  // HE_GI_SHADOW_BENCH (Thema 142)
 #include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
@@ -3030,6 +3031,10 @@ struct D3D11RendererImpl
     bool      giHistValid   = false;
     glm::mat4 giPrevViewProj{ 1.0f };
     float     giFrameSeed   = 0.0f;
+    // HE_GI_SHADOW_BENCH (GIShadowBench.h): disjoint + timestamp pair around the
+    // sun-ray dispatch, created on first use.
+    ComPtr<ID3D11Query> giBenchDisjoint, giBenchT0, giBenchT1;
+    HE::GIShadowBench   giBench;
 
     glm::vec3  giGridOrigin{ 0.0f };
     glm::ivec3 giGridCounts{ 0 };
@@ -3549,7 +3554,33 @@ struct D3D11RendererImpl
             ctx->CSSetConstantBuffers(0, 2, cbs);
             ID3D11UnorderedAccessView* uavs[2] = { giRawUAV.Get(), giLocalMaskUAV.Get() };
             ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+            const bool bench = HE::GIShadowBench::enabled();
+            if (bench && !giBenchDisjoint)
+            {
+                const D3D11_QUERY_DESC dq{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+                const D3D11_QUERY_DESC tq{ D3D11_QUERY_TIMESTAMP, 0 };
+                device->CreateQuery(&dq, &giBenchDisjoint);
+                device->CreateQuery(&tq, &giBenchT0);
+                device->CreateQuery(&tq, &giBenchT1);
+            }
+            if (bench && giBenchT1) { ctx->Begin(giBenchDisjoint.Get()); ctx->End(giBenchT0.Get()); }
             ctx->Dispatch((UINT)((giShadowW + 7) / 8), (UINT)((giShadowH + 7) / 8), 1);
+            if (bench && giBenchT1)
+            {
+                ctx->End(giBenchT1.Get());
+                ctx->End(giBenchDisjoint.Get());
+                D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+                UINT64 t0 = 0, t1 = 0;
+                while (ctx->GetData(giBenchDisjoint.Get(), &dj, sizeof(dj), 0) == S_FALSE) {}
+                while (ctx->GetData(giBenchT0.Get(), &t0, sizeof(t0), 0) == S_FALSE) {}
+                while (ctx->GetData(giBenchT1.Get(), &t1, sizeof(t1), 0) == S_FALSE) {}
+                if (!dj.Disjoint && dj.Frequency != 0 && t1 > t0)
+                {
+                    const std::string line = giBench.add(double(t1 - t0) * 1000.0 / double(dj.Frequency),
+                                                         giShadowRays, giInstanceCount, giShadowW, giShadowH);
+                    if (!line.empty()) HE_LOG_INFO(RHI, "D3D11Renderer: %s", line.c_str());
+                }
+            }
             ID3D11UnorderedAccessView* nullUavs[2] = {};
             ctx->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
             ID3D11ShaderResourceView* nullSrvs[5] = {};

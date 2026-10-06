@@ -3196,8 +3196,10 @@ namespace
 	  "", "rendering#lighting" },
 	{ "Preferences/Global Illumination/GI Shadow Quality", "",
 	  "Shadow rays per pixel toward the sun. More rays calm the shimmer at soft "
-	  "shadow edges; on GPUs without hardware ray tracing every extra ray costs "
-	  "as much as the first.",
+	  "shadow edges; Low shimmers more at sharp ones. Without hardware ray "
+	  "tracing (always on Direct3D 11 and OpenGL) every ray is tested against "
+	  "every shadow-casting object, so each extra ray costs as much as the first "
+	  "and grows with the scene: in large scenes there, Low halves that cost.",
 	  "", "rendering#performance" },
 	{ "Preferences/Global Illumination/GI Reflections (ray-traced)", "",
 	  "Traced reflections instead of screen-space ones: they can show what is "

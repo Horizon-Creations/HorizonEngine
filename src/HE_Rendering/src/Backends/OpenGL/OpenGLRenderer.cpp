@@ -6256,7 +6256,28 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 		            static_cast<float>(masked.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 	}
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
+	// HE_GI_SHADOW_BENCH (GIShadowBench.h): timestamps, not GL_TIME_ELAPSED — the
+	// profiler's "GIShadow" scope may already hold the one elapsed query GL allows.
+	const bool bench = HE::GIShadowBench::enabled();
+	if (bench)
+	{
+		if (!m_giBenchQuery[0]) glGenQueries(2, m_giBenchQuery);
+		glQueryCounter(m_giBenchQuery[0], GL_TIMESTAMP);
+	}
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
+	if (bench)
+	{
+		glQueryCounter(m_giBenchQuery[1], GL_TIMESTAMP);
+		GLuint64 t0 = 0, t1 = 0;
+		glGetQueryObjectui64v(m_giBenchQuery[0], GL_QUERY_RESULT, &t0);   // blocks: measurement only
+		glGetQueryObjectui64v(m_giBenchQuery[1], GL_QUERY_RESULT, &t1);
+		if (t1 > t0)
+		{
+			const std::string line = m_giBench.add(static_cast<double>(t1 - t0) * 1e-6,
+			                                       m_giShadowRays, m_giInstanceCount, width, height);
+			if (!line.empty()) HE_LOG_INFO(RHI, "OpenGLRenderer: %s", line.c_str());
+		}
+	}
 	// The temporal pass SAMPLES the image-stored raw mask next.
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 
@@ -9801,6 +9822,7 @@ void OpenGLRenderer::Shutdown()
 	DestroySSAOTargets();
 	DestroyGIShadowTargets();
 	DestroyGIProbeAtlas();
+	if (m_giBenchQuery[0])   { glDeleteQueries(2, m_giBenchQuery); m_giBenchQuery[0] = m_giBenchQuery[1] = 0; }
 	if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
 	if (m_giGBufInstancedProgram) { glDeleteProgram(m_giGBufInstancedProgram); m_giGBufInstancedProgram = 0; }
 	if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }

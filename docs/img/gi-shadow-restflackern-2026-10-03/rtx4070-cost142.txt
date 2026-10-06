@@ -1,0 +1,60 @@
+# Thema 142 Schritt 3, 06.10.2026, NN-WS03, RTX 4070, Release (Zweigkopf 82c9ec62 + HE_GI_SHADOW_BENCH/HE_DUMP_GICASTERS)
+# scripts/gi-shadow-repro/cost142.ps1 -Root C:\hw142 -Casters 0,64,256,1024,2048,4096,256f,1024f
+# Fall s05 (config_r05.json, Kamera s6/s05, SKYTEST, TOD 0.35), Maske 640x360. Exklusiver Timer um den Sonnenstrahl-Dispatch,
+# p10/p50/p90 ueber 160 Frames (40 Aufwaermframes verworfen). clockMHz = Median des Grafiktakts (nvidia-smi) bei >5 % Last.
+# instances = 8 (Boden + 7 Wuerfel) + N. N = Gitter 20 m unter dem Boden, Nf = 0.3-m-Wuerfelfeld auf dem Boden.
+
+﻿cost_D3D11_c0_r1 p10 0.2683 p50 0.2693 p90 0.2714 (rays 1, instances 8, mask 640x360, 160 frames) clockMHz 210
+cost_D3D11_c0_r2 p10 0.4874 p50 0.4884 p90 0.4905 (rays 2, instances 8, mask 640x360, 160 frames) clockMHz 210
+cost_D3D11_c0_r4 p10 0.9257 p50 0.9288 p90 1.9190 (rays 4, instances 8, mask 640x360, 160 frames) clockMHz 210
+cost_D3D11_c64_r1 p10 1.9436 p50 1.9476 p90 2.9635 (rays 1, instances 72, mask 640x360, 160 frames) clockMHz 210
+cost_D3D11_c64_r2 p10 3.8451 p50 3.8513 p90 4.9213 (rays 2, instances 72, mask 640x360, 160 frames) clockMHz 210
+cost_D3D11_c64_r4 p10 7.6452 p50 7.6554 p90 7.6667 (rays 4, instances 72, mask 640x360, 160 frames) clockMHz 210
+cost_D3D11_c256_r1 p10 7.0001 p50 7.0083 p90 7.0195 (rays 1, instances 264, mask 640x360, 160 frames) clockMHz 210
+cost_D3D11_c256_r2 p10 13.0294 p50 13.9571 p90 13.9776 (rays 2, instances 264, mask 640x360, 160 frames) clockMHz 225
+cost_D3D11_c256_r4 p10 16.2550 p50 16.9769 p90 18.5907 (rays 4, instances 264, mask 640x360, 160 frames) clockMHz 345
+cost_D3D11_c1024_r1 p10 13.1635 p50 14.7159 p90 15.9222 (rays 1, instances 1032, mask 640x360, 160 frames) clockMHz 390
+cost_D3D11_c1024_r2 p10 4.4183 p50 6.2618 p90 9.9236 (rays 2, instances 1032, mask 640x360, 160 frames) clockMHz 1530
+cost_D3D11_c1024_r4 p10 8.1353 p50 8.4058 p90 8.9434 (rays 4, instances 1032, mask 640x360, 160 frames) clockMHz 2730
+cost_D3D11_c2048_r1 p10 4.4776 p50 6.2822 p90 9.3942 (rays 1, instances 2056, mask 640x360, 160 frames) clockMHz 1545
+cost_D3D11_c2048_r2 p10 8.2616 p50 8.3364 p90 9.3788 (rays 2, instances 2056, mask 640x360, 160 frames) clockMHz 2715
+cost_D3D11_c2048_r4 p10 16.1331 p50 16.1997 p90 16.2793 (rays 4, instances 2056, mask 640x360, 160 frames) clockMHz 2880
+cost_D3D11_c4096_r1 p10 8.0978 p50 8.3903 p90 9.3450 (rays 1, instances 4104, mask 640x360, 160 frames) clockMHz 2805
+cost_D3D11_c4096_r2 p10 16.1299 p50 16.1956 p90 16.3195 (rays 2, instances 4104, mask 640x360, 160 frames) clockMHz 2880
+cost_D3D11_c4096_r4 p10 32.6861 p50 32.8387 p90 33.2216 (rays 4, instances 4104, mask 640x360, 160 frames) clockMHz 2850
+cost_D3D11_c256f_r1 p10 6.8864 p50 6.8915 p90 6.8977 (rays 1, instances 264, mask 640x360, 160 frames) clockMHz 210
+cost_D3D11_c256f_r2 p10 9.6338 p50 12.8215 p90 13.7370 (rays 2, instances 264, mask 640x360, 160 frames) clockMHz 225
+cost_D3D11_c256f_r4 p10 2.2272 p50 4.5749 p90 6.6191 (rays 4, instances 264, mask 640x360, 160 frames) clockMHz 1050
+cost_D3D11_c1024f_r1 p10 2.1451 p50 4.1042 p90 6.5270 (rays 1, instances 1032, mask 640x360, 160 frames) clockMHz 1080
+cost_D3D11_c1024f_r2 p10 4.2711 p50 6.6833 p90 15.3733 (rays 2, instances 1032, mask 640x360, 160 frames) clockMHz 1260
+cost_D3D11_c1024f_r4 p10 8.4808 p50 9.2334 p90 13.3444 (rays 4, instances 1032, mask 640x360, 160 frames) clockMHz 2595
+cost_OpenGL_c0_r1 p10 0.0532 p50 0.0543 p90 0.0543 (rays 1, instances 8, mask 640x360, 160 frames) clockMHz 2595
+cost_OpenGL_c0_r2 p10 0.0891 p50 0.0901 p90 0.0901 (rays 2, instances 8, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c0_r4 p10 0.1720 p50 0.1720 p90 0.1731 (rays 4, instances 8, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c64_r1 p10 0.3410 p50 0.3410 p90 0.3430 (rays 1, instances 72, mask 640x360, 160 frames) clockMHz 2910
+cost_OpenGL_c64_r2 p10 0.6748 p50 0.6769 p90 0.6779 (rays 2, instances 72, mask 640x360, 160 frames) clockMHz 2910
+cost_OpenGL_c64_r4 p10 1.3425 p50 1.3476 p90 1.3486 (rays 4, instances 72, mask 640x360, 160 frames) clockMHz 2910
+cost_OpenGL_c256_r1 p10 1.2206 p50 1.2247 p90 1.2257 (rays 1, instances 264, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c256_r2 p10 2.4371 p50 2.4412 p90 2.4422 (rays 2, instances 264, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c256_r4 p10 4.8722 p50 4.8742 p90 5.0237 (rays 4, instances 264, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c1024_r1 p10 4.7749 p50 4.7800 p90 4.9316 (rays 1, instances 1032, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c1024_r2 p10 9.5611 p50 9.5652 p90 10.2072 (rays 2, instances 1032, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c1024_r4 p10 19.0956 p50 19.1099 p90 20.1185 (rays 4, instances 1032, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c2048_r1 p10 9.5212 p50 9.5242 p90 10.1458 (rays 1, instances 2056, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c2048_r2 p10 19.0515 p50 19.0689 p90 20.1114 (rays 2, instances 2056, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c2048_r4 p10 38.1061 p50 39.8541 p90 40.2586 (rays 4, instances 2056, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c4096_r1 p10 19.0259 p50 19.0382 p90 20.0827 (rays 1, instances 4104, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c4096_r2 p10 39.8725 p50 39.8889 p90 40.7491 (rays 2, instances 4104, mask 640x360, 160 frames) clockMHz 2880
+cost_OpenGL_c4096_r4 p10 79.4716 p50 82.0726 p90 83.6137 (rays 4, instances 4104, mask 640x360, 160 frames) clockMHz 2880
+cost_OpenGL_c256f_r1 p10 1.2227 p50 1.2247 p90 1.2257 (rays 1, instances 264, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c256f_r2 p10 2.4392 p50 2.4453 p90 2.4474 (rays 2, instances 264, mask 640x360, 160 frames) clockMHz 2895
+cost_OpenGL_c256f_r4 p10 4.8722 p50 4.8824 p90 5.1343 (rays 4, instances 264, mask 640x360, 160 frames) clockMHz 2880
+cost_OpenGL_c1024f_r1 p10 4.5896 p50 4.6029 p90 4.6367 (rays 1, instances 1032, mask 640x360, 160 frames) clockMHz 2880
+cost_OpenGL_c1024f_r2 p10 9.1802 p50 9.2058 p90 10.0065 (rays 2, instances 1032, mask 640x360, 160 frames) clockMHz 2880
+cost_OpenGL_c1024f_r4 p10 18.3665 p50 18.4381 p90 19.7396 (rays 4, instances 1032, mask 640x360, 160 frames) clockMHz 2880
+
+# Takt-Gegenprobe (eigener Lauf, nvidia-smi alle 150 ms, Takte waehrend Last):
+# OpenGL c64 r1: p50 0.3809 ms bei 2595 MHz | D3D11 c64 r1: p50 1.9476 ms bei durchgehend 210 MHz (Leerlauftakt P8) | D3D11 c4096 r1: p50 8.3599 ms bei 2670-2895 MHz
+
+# Verworfener erster Ansatz: Ganzer-Frame-GPU-Zeit (temporaerer Knopf, nicht eingecheckt; D3D11-Frame-Timestamps) -- misst im Dump vor allem den CPU-Aufbau:
+# c0 r1/r2/r4: p50 11.30 / 11.09 / 10.77 ms (p90 ~31) | c1024 r1/r2/r4: p50 13.44 / 12.86 / 10.18 ms -- keine Abhaengigkeit von Strahlen oder Castern sichtbar.
