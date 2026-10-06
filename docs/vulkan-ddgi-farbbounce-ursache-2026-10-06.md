@@ -59,3 +59,45 @@ Vulkan trifft D3D11 danach bitgenau. Einen zweiten Defekt (Kernel, Atlas, Dispat
 - **Geschwister-Pässe:** Weitere Vulkan-Vorpässe extrahieren `m_renderWorld` selbst (SSAO, Schatten). Zu
   prüfen ist, ob sie `opacity`/`baseColor` unaufgelöst lesen. Der Decal-Vorpass löst bereits auf.
 - **Abnahme:** die Tabelle oben, dazu `ana148.py` gegen GL.
+
+## Schritt 2: Fix und Abnahme
+
+**Fix, Form (a) wie D3D:** `VulkanRenderer::runGi` ruft nach dem eigenen Extract und vor `updateGiAccel()`
+`HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager)` auf. Die Graph-Materialien bekommen damit
+denselben Skalar `MaterialAsset::baseColor` wie auf D3D11/D3D12. Form (b), also `giInstanceSurface` auf allen
+drei Backends, bleibt offen. Sie würde die Abnahmewerte von D3D11/D3D12 aus Thema 148 mitverschieben und ist
+ein eigenes Thema.
+
+**Geschwister-Vorpässe:** Schatten (`m_extractor.extract` im CSM/Local-Pass) und SSAO/Reflexions-MRT lesen
+weder `baseColor` noch `opacity`, `metallic` oder `roughness`. Sie lesen nur Transformation, `castsShadow` und
+`contributesAO`. `RenderCuller`/`RenderSorter` lesen ebenfalls keinen Skalar. Dort ist kein Resolve nötig. Der
+Decal-Vorpass löst schon auf.
+
+**Pin:** `tests/test_culling.cpp`, „GI instances get their material colour before the acceleration update
+(Thema 154)“. Er prüft im Quelltext die Reihenfolge extract → resolve → `updateGiAccel` für Vulkan `runGi`
+und resolve → `p.updateGiAccel` für D3D11/D3D12. Negativkontrolle: Ohne die Zeile in `runGi` fällt der Test
+mit „runGi no longer resolves material scalars“.
+
+**Messung:** Release `C:\hw154`, Deploy `C:\hw154\deploy` mit Fix, RTX 4070, Aufnahmen in `C:\hw154\cap2` mit
+der `ana148.py`-Namensgebung (`post_<rhi>_b<n>_gi<g>`). Aufgenommen per `cap148.ps1 -Deploy C:\hw154\deploy
+-Out C:\hw154\cap2`. Tabelle A von `ana148.py`, (R−G)[rot] − (R−G)[grau], untere Kugelhälfte:
+
+| Backend | Graph-Kugel GI an | Graph-Kugel GI aus | eingebaute Kugel GI an | eingebaute Kugel GI aus |
+|---|---|---|---|---|
+| OpenGL | 20,19 | 0,00 | 46,77 | 0,00 |
+| D3D11 | 19,87 | 0,00 | 69,56 | 0,00 |
+| D3D12 | 19,87 | 0,00 | 69,56 | 0,00 |
+| Vulkan vor Fix (Schritt 1, `C:\hw154\cap\Vulkan_b3/b4`) | 0,00 | – | 0,00 (Thema 148) | – |
+| **Vulkan mit Fix, HW-Ray-Query** | **19,87** | 0,00 | **69,56** | 0,00 |
+| **Vulkan mit Fix, `HE_GI_FORCE_SW=1`** | **19,87** | – | **69,56** | – |
+
+- Vulkan b3 gegen D3D11 b3 (Graph-Maske): mittleres |d| 0,0001, max. 1 Stufe. Gegen GL (Tabelle C): 0,15 wie
+  D3D11/D3D12.
+- Rauschen (b3 GI an, zweite Aufnahme): 0,00 auf allen vier Backends.
+- HW gegen SW auf Vulkan: |d| 0,00. Belegt ist nur, dass die HW-Kernel gebaut sind („GI HW ray-query kernels
+  built“), bzw. dass der SW-Pfad erzwungen ist („HE_GI_FORCE_SW set“). Eine Gegenprobe pro Dispatch (z. B.
+  `gi_probe_hw.spv` tauschen) wurde nicht gemacht. Der Fix sitzt CPU-seitig in `giInsts`, die beide Pfade lesen.
+- Der Abstand GL ↔ D3D bei der eingebauten Kugel (46,77 gegen 69,56) bestand schon vor Thema 154. Vulkan
+  stimmt jetzt mit D3D überein.
+- Vulkan-Validation (HE_GPU_DEBUG an): vor und nach dem Fix dieselbe Art, `VUID-vkCmdUpdateBuffer-renderpass`
+  (bei 10 gesättigt, vorbestehend), keine neue.

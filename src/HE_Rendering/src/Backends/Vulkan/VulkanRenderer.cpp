@@ -9976,6 +9976,12 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     for (RenderObject& obj : m_renderWorld.objects)
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+    // The extractor leaves baseColor at white, and this extraction throws away
+    // DrawScene's resolve (which runs later anyway). Without it every GI
+    // instance bounced white: a red and a grey floor gave the same probe field,
+    // colour bleed exactly 0 (Thema 154). D3D11/D3D12 resolve right before
+    // their updateGiAccel as well.
+    HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
 
     updateGiAccel();
     if (m_giInstanceCount == 0) return;
