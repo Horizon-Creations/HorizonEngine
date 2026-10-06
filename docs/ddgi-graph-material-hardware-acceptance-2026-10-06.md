@@ -78,9 +78,10 @@ Rauschboden: eine zweite `post`-Serie (`_r2`). Alle Aufnahmen sind über die Mas
 | Vulkan, `HE_GI_FORCE_SW=1` | **0,00** | | | **0,00** | | | |
 
 - Das Gate wirkt nur auf Graph-Materialien. Die eingebaute Kugel ist in `post` und `ctl` gleich.
-- Die eingebaute Kugel bounct auf D3D stärker als auf GL (69,6 gegen 46,8). Dazu kommt ein schon
-  bekannter Grundabstand eingebaut-D3D gegen GL von ~10,5 auch bei GI aus (s. Baseline-Liste). Das
-  betrifft den eingebauten Shader, nicht diesen Pfad. Die Graph-Kugel trifft GL dagegen fast genau.
+- Die eingebaute Kugel bounct auf D3D stärker als auf GL (69,6 gegen 46,8). Die Rot-minus-Grau-
+  Metrik hebt den bekannten Grundabstand eingebaut-D3D gegen GL (~10,5 auch bei GI aus) auf. Das ist
+  also ein echter Paritätsunterschied, aber im **eingebauten** Shader (dessen DDGI-Gewichtung),
+  nicht in diesem Pfad. Die Graph-Kugel trifft GL fast genau. Nicht weiter untersucht.
 
 ### 2.2 Gate-Gegenprobe (`post` gegen `ctl`, Graph-Kugel, mittlere |Δ|)
 
@@ -140,7 +141,16 @@ D3D11 und D3D12 liefern über die Maske dieselben Werte, die Dateien sind aber n
   im Render-Pass (Fix in #96) und `[SSAO blur]`-Layout (Fix in #97). Die Graph-Kugel meldet kein
   einziges Binding, das bemalte Terrain nur Binding 14 `heLandscapeWeights` (Fix in #95). Die
   PR-#79-Lücke (15–18/32/33) bleibt also zu.
-- **D3D12:** keine Fehler im Log.
+- **D3D12:** Die Matrix lief ohne Debug-Layer, er ist im Release-Build nur mit `HE_GPU_DEBUG=1`
+  an. Nachgeholt: Bleed `b3`, GI an, mit `HE_GPU_DEBUG=1` (Debug-Layer + DRED). Gemeldet wird nur
+  das bekannte harmlose „Ignoring InitialState UNORDERED_ACCESS" für Buffer, und das Bild ist
+  bitgleich zum Lauf ohne Layer (max |Δ| 0).
+- **Refit mitten im Lauf** (`HE_DUMP_GIREFIT=1`, Terrain, GI an; Gitter 15×4×15 → 22×4×11,
+  Atlanten neu). Das prüft den Lebensdauer-Pfad aus PR #79 (D3D12 `retireGiProbeAtlas` →
+  Null-Views in den Slots 12/13, Vulkan-Writes 17/18):
+  - D3D12 mit Debug-Layer: nur dieselbe InitialState-Meldung.
+  - Vulkan: nur Binding 14.
+  - D3D11: läuft durch, nur Bildbeleg.
 - **D3D11:** hat keinen Debug-Layer, belegt ist dort nur das Bild.
 - Alle vier Backends loggen dasselbe Gitter: `GI probe grid 6x5x6 (180 probes), spacing 4`.
 
@@ -155,15 +165,23 @@ rote Boden die Unterseite deutlich (20 bzw. 47–70 Stufen).
 
 - **Nicht der Material-Pfad.** Das Graph-Material liest das Feld (Gate-Gegenprobe 18,5), und die
   eingebaute Kugel zeigt dasselbe Nullsignal.
-- **Nicht die Instanzfarbe auf der CPU.** `VulkanRenderer::updateGiAccel` füllt
-  `GIInstanceGpu::baseColor` aus `obj.baseColor`, Zeile für Zeile wie D3D11 (`updateGiAccel`,
-  `D3D11Renderer.cpp:3098`), und auf D3D11 bounct es.
-- **Nicht die Hit-Schattierung im Shader-Quelltext.** `gi_probe.comp` und `gi_probe_hw.comp`
-  multiplizieren `giInsts[hitInst].baseColor` in Sonnen-, Licht- und Multi-Bounce-Term.
+- **Die Instanzfarbe auf der CPU ist nur statisch geprüft, nicht zur Laufzeit.**
+  `VulkanRenderer::updateGiAccel` füllt `GIInstanceGpu::baseColor` aus `obj.baseColor`, mit
+  demselben Code wie D3D11 (`D3D11Renderer.cpp:3098`), und auf D3D11 bounct es. Aber
+  `GiInstanceSurface.h` sagt ausdrücklich, dass `RenderObject::baseColor` nur die Meshfarbe ist
+  und eine Materialfarbe nachgeschlagen werden muss (nur GL nutzt den Helfer). Ob der rote Wert
+  auf Vulkan im Instanz-Buffer ankommt, ist nicht gemessen.
+- **Die Probe-Kette an sich läuft auf Vulkan.** Beim Terrain liegen Vulkan und D3D12 mit GI an
+  0,01 auseinander, und die Anhebung `post`/`ctl` ist gleich (13,07 gegen 13,06). Kernel,
+  Dispatch und Atlas-Update liefern dort also dasselbe Feld wie D3D12. Default-Cubes stehen im
+  Vulkan-GI-BVH: Ihre GI-Schatten sind in den Themen 134/142 auf Vulkan gemessen worden.
+- **Shader-Quelltext:** `gi_probe.comp` und `gi_probe_hw.comp` multiplizieren
+  `giInsts[hitInst].baseColor` in Sonnen-, Licht- und Multi-Bounce-Term.
 - **Exakt 0,00 statt „schwächer"** heißt: Kein Probe-Strahl liefert vom Boden einen
-  albedo-abhängigen Beitrag. Entweder treffen die Probe-Strahlen den Boden nicht (Instanz-/BVH-
-  bzw. Descriptor-Zuordnung im Probe-Set), oder ein Bodentreffer ergibt 0 (Schattenstrahl hängt
-  am Boden selbst, und die Feld-Rückkopplung am Treffer ist 0).
+  albedo-abhängigen Beitrag.
+- **Hauptverdacht, nicht belegt:** Die Materialfarbe des Bodens (`MaterialComponent` →
+  `baseColor`) erreicht die Vulkan-GI-Instanz nicht, oder die Instanz wird gebaut, bevor das
+  Material aufgelöst ist, und nie nachgezogen. Weniger wahrscheinlich ist der Kernel.
 
 **Repro:**
 
@@ -175,10 +193,13 @@ scripts/ddgi-material-repro/cap148.ps1 -Name v4 -Rhi Vulkan -Gi 1 -Scene bleed -
 Auf Vulkan sind beide Aufnahmen auf der Kugel gleich, gegen GL ergibt `ana148.py` Tabelle A 20,19.
 
 **Vorschlag:** ein eigenes Thema „Vulkan: DDGI-Probe-Feld ohne Farbbounce" mit diesem Zeugen als
-Abnahme. Ansatz: einen Probe-Texel des Atlas zurücklesen, der zum Boden zeigt (GL gegen Vulkan),
-dann den Probe-Kernel mit `radiance = albedo` am Treffer und ohne Schattenstrahl laufen lassen.
-Bleibt es grau, kommt der Treffer nicht an. Wird es rot, liegt es an Schatten bzw. Rückkopplung.
-Die `.spv` lässt sich ohne Rebuild im Deploy tauschen (`Editor/Shaders/gi_probe*.spv`).
+Abnahme.
+
+1. `baseColor` der Boden-Instanz in `updateGiAccel` auf Vulkan und D3D11 loggen bzw. vergleichen
+   (rot muss (1, 0,05, 0,05) sein).
+2. Erst danach am Kernel ansetzen: `gi_probe*.comp` mit `radiance = albedo` am Treffer und ohne
+   Schattenstrahl. Die `.spv` lässt sich ohne Rebuild im Deploy tauschen
+   (`Editor/Shaders/gi_probe*.spv`).
 
 ## 4. Was diese Abnahme nicht abdeckt
 
