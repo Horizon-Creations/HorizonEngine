@@ -788,7 +788,7 @@ python3 scripts/perf/ladder_table.py /tmp/ws5/end/s5end-*.profile.json
 
 ## 11. Schritt 6: Editor-Integration und Debugging
 
-Stand 06.10.2026, Commits `93089d9d` bis `4561c2c8`. Schritt 5 hatte zwei Punkte an diesen Schritt
+Stand 06.10.2026, Commits `93089d9d` bis `ce053117`. Schritt 5 hatte zwei Punkte an diesen Schritt
 übergeben (10.6): den Pick-Snapshot des Scene-Fensters und den Outliner ohne Clipping. Dazu kommen
 Zellen sehen und bearbeiten sowie eine Ansicht, die zeigt, was das Streaming gerade tut.
 
@@ -873,7 +873,7 @@ Rohdaten `docs/perf-audit/raw-streaming/s6end-*`, Tabelle `s6end-table.md`. Zur 
 | Outliner ohne Clipper (9.4, 10.6) | Verdeckte Zeilen: ID per `ImHashData` wie `TreeNodeEx`, Aufklapp-Zustand aus dem Fenster-Storage, ein `Dummy` pro Lauf, Vorfahren-Ebenen per `TreePushOverrideID` nachgespielt. Die Wurzelzeile (ohne Schloss, 3 px niedriger) wird eigens vermessen | `test_outliner_ui`: mit und ohne Clipping **pixelgleich** an vier Scrollpositionen mit gefaltetem Zweig, gleiche Scrollhöhe; ohne eigene Wurzelhöhe rot |
 | Debugging: was tut das Streaming | Profiler-Tab *Streaming*. `ThreadPool::stats()` liefert je Priorität wartend, laufend, Grenze, ausgeführt, Arbeitszeit, abgebrochen und fehlgeschlagen, über Atomics ohne zweiten Lock; Jobs/s und Pool-Anteil kommen aus zwei Stichproben im Abstand von einer halben Sekunde. Außerdem `ContentManager::asyncInFlightPaths`/`asyncPollStats`, `SceneSerializer::lastLoadTiming`, die Zellen aus Sicht der Editor-Kamera (`CellManifest::around`) sowie der Float-Schritt an der Kamera | `test_jobsystem` „ThreadPool::stats“ (fünfmal grün; er fand, dass abgebrochene Jobs als ausgeführt zählten, `runClaimed` meldet das jetzt), `test_async_streaming`, `test_world_scale`, `test_streaming_view` mit UI-Shot |
 | Zellen im Editor sehen (10.6) | *Show ▸ Streaming Cells*: Quadrate im Umkreis nach Reichweite gefärbt (grün laden, orange halten, grau fallen lassen), Lade- und Entladeradius um die Kamera | `test_streaming_view` (Linien da, ohne Zellen keine) |
-| Zellen bearbeiten (10.6) | `HE::splitSceneIntoCells` (die Regeln von `split_scene_cells.py` in C++), `splitWorldIntoCells`, `mergeCellsIntoWorld`. Im Streaming-Tab gibt es Split mit Zellgröße und Radien sowie Merge. Die Zell-Dateien landen in `<Szene>.cells` neben der Szene, projektrelativ im Manifest. Alte `cell_*.hescene` dort werden entfernt. Je ein Undo-Schritt, nur bei Erfolg. Der Merge läuft über das Szenen-JSON und einen Voll-Load, damit jede Entity ihre UUID behält | `test_cell_split`: Regeln, Split → das Spiel streamt die Zelle (`CellStreamer`) → Merge stellt Namen, Positionen und UUIDs wieder her, ein unlesbarer Merge ändert nichts; `test_streaming_view`: Pfade, Aufräumen, Undo/Redo |
+| Zellen bearbeiten (10.6) | `HE::splitSceneIntoCells` (die Regeln von `split_scene_cells.py` in C++), `splitWorldIntoCells`, `mergeCellsIntoWorld`. Im Streaming-Tab gibt es Split mit Zellgröße und Radien sowie Merge. Die Zell-Dateien landen in `<Szene>.cells` neben der Szene, projektrelativ im Manifest. Alte `cell_*.hescene` dort werden entfernt. Je ein Undo-Schritt, nur bei Erfolg; in einer Collab-Sitzung gesperrt. Der Merge läuft über das Szenen-JSON und einen Voll-Load, damit jede Entity ihre UUID behält. Jede Zelle trägt `cellFolders` (Herkunftsordner und deren Datensätze, das Spiel liest es nicht), damit der Merge auch vom Split fallen gelassene Ordner samt Reihenfolge wieder aufbaut | `test_cell_split`: Regeln, Split → das Spiel streamt die Zelle (`CellStreamer`) → Merge stellt Namen, Positionen, UUIDs, Ordner und Reihenfolge wieder her, ein unlesbarer Merge ändert nichts; `test_streaming_view`: Pfade, Aufräumen, Undo/Redo |
 
 Vollbau grün, `ctest -j4 --timeout 1500`: **`100% tests passed out of 239`** (`CTEST_RC=0`, die
 zwei `runtime_size_app_*` übersprungen wie zuvor), aus dem Log gelesen. Spiel-Runtime lokal
@@ -881,24 +881,18 @@ zwei `runtime_size_app_*` übersprungen wie zuvor), aus dem Log gelesen. Spiel-R
 
 ### 11.5 Offen und Grenzen
 
-- **Nie von Hand bedient:** Tab, Overlay, Split und Merge sind headless getestet: Logik, Undo,
-  Dateien, ein gerasterter Shot des Tabs. Niemand hat sie im laufenden Editor angeklickt, und das
-  Overlay im Scene-Fenster ist nur als Linienpuffer geprüft, nicht als Bild.
-- **Vollen Extract gibt es weiterhin**, sobald etwas die Objekte braucht: während eines Snap-Drags
-  jeden Frame, ebenso solange ein zweites Scene-Fenster offen ist und etwas ausgewählt ist
-  (`selectionBox` für dessen Umriss). Das ist so teuer wie vorher, nur nicht mehr im Leerlauf.
-- **Ordner nach dem Merge:** Der Split blickt durch Ordner hindurch und lässt leere fallen. Nach
-  dem Merge hängen die zurückgeholten Teilbäume direkt unter der Welt-Wurzel, nicht im alten
-  Ordner.
-- **Zwei Splitter:** `scripts/split_scene_cells.py` und `HE::splitSceneIntoCells` setzen dieselben
-  Regeln zweimal um. Getestet ist die C++-Fassung. Das Skript bleibt für Stapelläufe; einen
-  Kommandozeilen-Aufruf der C++-Fassung gibt es nicht.
-- **Verweise über Zellgrenzen im Spiel:** Der `CellStreamer` lädt Zellen additiv, mit neuen IDs,
-  wie Zonen. Ein Verweis aus der Basis auf ein Entity in einer Zelle trägt im Spiel nicht (wie in
-  Schritt 5). Im Editor stellt der Merge die IDs wieder her.
-- **Handbuch:** Die Hilfetexte im Editor (F1, Tooltips) sind geschrieben, das Website-Handbuch
-  nicht. Die Hilfe verweist auf die vorhandenen Abschnitte `editor#profiler` und
-  `editor#viewport`.
+| Punkt | Urteil |
+|---|---|
+| Pick-Snapshot extrahiert voll (9.4, 10.6) | **behoben**, 11.2 |
+| Outliner ohne Clipper (9.4, 10.6) | **behoben**, 11.2 |
+| Zellen im Editor sehen und bearbeiten (10.6) | **behoben**, 11.4. Der Merge stellt UUIDs, Ordner (auch vom Split fallen gelassene) und die Reihenfolge in den Ordnern wieder her. Die Reihenfolge direkt unter der Welt-Wurzel stellt er nicht wieder her: Zurückgeholte Teilbäume kommen dort ans Ende |
+| Split oder Merge in einer Collab-Sitzung | **gesperrt, Design-Entscheidung**: beide ersetzen die ganze Welt, und eine Sitzung repliziert Änderungen, keine neu gebaute Szene. Die Mitspieler behielten die alte. Die Knöpfe sind in einer Sitzung aus, wie das Öffnen einer anderen Szene |
+| Handbuch | **erledigt**: Website `HorizonEngineDocs/editor.html#profiler` (Streaming-Tab, Zellen im Editor) und `systems.html#physics` in `7d45881`, committet, **nicht gepusht und nicht deployt** (wie Schritt 5; Deploy nur nach Bestätigung). Im Editor-Bündel `he-docs.json` sind genau diese zwei Abschnitte übernommen (`ce053117`), die übrigen 18 abweichenden Abschnitte gehören zu anderen Zweigen |
+| Nie von Hand bedient | **nicht ohne Mensch**: Tab, Overlay, Split und Merge sind headless getestet (Logik, Undo, Dateien, gerasterter Shot des Tabs). Das Overlay ist als Linienpuffer geprüft, nicht als Bild im Scene-Fenster; einen sichtbaren Editor bedient hier niemand ungefragt |
+| Voller Extract bei Bedarf | **Grenze, bleibt so**: Braucht etwas die Objekte, wird weiter voll extrahiert. Bei einem Snap-Drag passiert das jeden Frame, ebenso solange ein zweites Scene-Fenster offen und etwas ausgewählt ist (`selectionBox` für dessen Umriss). Das ist so teuer wie vorher, nur nicht mehr im Leerlauf |
+| Zwei Splitter | **Grenze**: `scripts/split_scene_cells.py` und `HE::splitSceneIntoCells` setzen dieselben Regeln zweimal um. Getestet ist die C++-Fassung, und nur sie schreibt `cellFolders` (Merge aus Skript-Zellen: Teilbäume unter die Welt-Wurzel). Das Skript bleibt für Stapelläufe; die C++-Fassung hat keinen Kommandozeilen-Aufruf |
+| Verweise über Zellgrenzen im Spiel | **außerhalb dieses Schritts** (wie Schritt 5): Der `CellStreamer` lädt Zellen additiv mit neuen IDs, wie Zonen. Ein Verweis aus der Basis auf ein Entity in einer Zelle trägt im Spiel nicht. Im Editor stellt der Merge die IDs wieder her |
+| Kosten der Ansicht selbst | **klein, bleibt so**: Der Tab zählt die Entities bei jedem Frame, in dem er offen ist (≈ 1 ms bei 200k). Das Overlay geht alle Manifest-Zellen durch. Zell-Dateien `*.cells/cell_*.hescene` erscheinen im Content Browser als Szenen |
 
 ```sh
 cmake --build out/build/release -j8
