@@ -698,7 +698,7 @@ dort ohne RT-Kerne oder mit `HE_GI_FORCE_SW`.
     jedem Punkt.
 
 **Ergebnis** (p50, ms pro Dispatch, Maske 640×360, Low / Medium / High = 1 / 2 / 4 Strahlen).
-Bei D3D11 stehen nur Punkte mit Boost-Takt (≥ 2.6 GHz), „–“ = im Leerlauf- oder Zwischentakt
+Bei D3D11 stehen nur Punkte mit Boost-Takt (≥ 2.7 GHz), „–“ = im Leerlauf- oder Zwischentakt
 gelaufen:
 
 | Instanzen | OpenGL (SW) | D3D11 (SW) |
@@ -709,13 +709,14 @@ gelaufen:
 | 1032 | 4.78 / 9.57 / 19.11 | – / – / 8.41 |
 | 2056 | 9.52 / 19.07 / 39.85 | – / 8.34 / 16.20 |
 | 4104 | 19.04 / 39.89 / 82.07 | 8.39 / 16.20 / 32.84 |
-| 1032, Feld auf dem Boden | 4.60 / 9.21 / 18.44 | – / – / 9.23 |
+| 1032, Feld auf dem Boden | 4.60 / 9.21 / 18.44 | – / – / – |
 
 * **Linear in Strahlen und Instanzen:**
   * GL: **4.65 µs pro Instanz und Strahl**. Das hält von 72 bis 4104 Instanzen und auf allen drei
     Stufen (4.46–5.00).
-  * D3D11: **1.95 µs**. Die Boost-Punkte liegen bei 1.97–2.04. Die 210-MHz-Punkte liegen, auf
-    2880 MHz umgerechnet, bei 1.93–2.07.
+  * D3D11: **1.95 µs**. Die Boost-Punkte liegen bei 1.97–2.04. Die 210-MHz-Punkte mit 72–264
+    Instanzen liegen, auf 2880 MHz umgerechnet, bei 1.90–2.07. Die Punkte mit 8 Instanzen
+    (2.1–2.5) zählen nicht, dort überwiegt der feste Anteil.
   * Der feste Anteil ist klein: GL braucht mit 8 Instanzen 0.054 ms.
 * **Die Instanzschleife dominiert, nicht die BLAS-Traversierung.** Das Feld auf dem Boden kostet
   so viel wie das Gitter darunter (GL 4.46 gegen 4.63 µs). Die Würfel haben aber nur
