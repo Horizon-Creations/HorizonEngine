@@ -5,6 +5,9 @@ Stand 06.10.2026, Zweig `claude/welt-streaming-job-planung-groessere-welten-mehr
 wurde nichts umgebaut. Neu sind nur Messhilfen: zwei Log-Zeilen mit Ladezeiten und drei Skripte
 (Abschnitt 7). Die Zahlen sind die Vorher-Werte, gegen die Schritt 5 misst.
 
+**Schritt 3 (Streaming-Durchsatz, Lade-Latenz) ist in Abschnitt 8 nachgemessen:** Szene laden
+200k 5,3 s → 2,7 s, Pak-Streaming von 4 000 kleinen Assets 1,0 s → 0,1 s.
+
 **Kurz:**
 - Die Ladezeit ist nicht das Problem. 50 000 Entities sind in 1,3 s geladen, und die Ladezeit
   wächst linear.
@@ -353,4 +356,140 @@ FRAMES=120 TIMEOUT=1500 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test
 clang++ -std=c++17 -O2 -I src/HE_Rendering/glm scripts/perf/float_precision_probe.cpp -o /tmp/fpp && /tmp/fpp
 # Profil: während eines Laufs
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun xctrace record --template 'Time Profiler' --attach <pid> --time-limit 10s --output t.trace
+```
+
+## 8. Schritt 3: Streaming-Durchsatz und Lade-Latenz (Nachher-Messung)
+
+Stand 06.10.2026, Commits `b3ed94d1` und `3813a591` auf dem Zweig, Basis `652c0b66` (Ende Schritt 2).
+
+**Kurz:**
+- Szene laden im Editor: **200k Entities 5,32 s → 2,73 s, 50k 1,36 s → 0,70 s** (je −49 %).
+  Der Parse läuft jetzt parallel auf dem Pool, das Freigeben des JSON-Baums auf einem Worker.
+- Pak-Streaming (Spielpfad, Mikro-Bench): **4 000 kleine Assets 1,0 s → 0,1 s** (Faktor 10).
+  Jeder Job hatte das ganze Inhaltsverzeichnis neu gelesen und gehasht, das war quadratisch.
+- Hauptthread-Anteil beim Streamen großer Assets: **16,5 ms → 2 ms** für 128 × 1 MiB, weil die
+  Chunk-Zerlegung (eine volle Kopie) jetzt auf dem Worker passiert.
+- Die Kosten pro Frame sind unverändert. Sie gehören zu Engpass 1 (Schritt 4).
+
+### 8.1 Messbedingungen
+
+| Punkt | Wert |
+|---|---|
+| Gerät, Build | wie Abschnitt 1 (M5, Release, `HE_PROFILING=ON`, `HE_ENABLE_SHADERC=ON`, `out/build/release`) |
+| Energie | **Stromsparmodus AN** (`pmset -g`: `lowpowermode 1`), also E-Kern-Zahlen wie in Schritt 1 |
+| Bildschirm | gesperrt (`CGSSessionScreenIsLocked=Yes`) |
+| GPU-Fremdlast | 15 % „Device Utilization“ vor den Läufen (Schritt 1: 57 %) |
+| Systemlast | vorher und Teil 1: load average 4–5 (andere Bienen bauten), nachher: ~2 |
+| Programm | Editor über `scripts/perf/world_streaming_ladder.sh` (`he_perf_capture`, `--warmup 0`), 120 Frames bei 1k–50k, 20 Frames bei 200k; vor jeder Serie ein verworfener Lauf (kalter Pipeline-Cache) |
+
+**„Vorher“ ist neu gemessen**, auf HEAD `652c0b66` (nach Schritt 2), nicht aus Abschnitt 3 übernommen:
+Schritt 2 hat das Job-System umgebaut, und die Bedingungen (GPU-Last, Systemlast) waren andere.
+Die neuen Vorher-Werte liegen dicht an Abschnitt 3.1 (200k: 5 316 ms gegen 5 256 ms).
+
+Der Editor, den die Leiter misst, lief nachweislich auf diesem Build: Die Logs enthalten
+`SceneLoadTiming`, das nur auf diesem Zweig existiert (die installierte App in `/Applications`
+kennt es nicht, siehe 8.5).
+
+### 8.2 Ladezeit im Editor (Referenzwelt aus Abschnitt 2)
+
+`load` = `SceneSerializer::load` von außen, `parse` schließt das Lesen der Datei ein.
+
+| Entities | load vorher | load Teil 1¹ | **load nachher** | parse vorher → nachher | build vorher → nachher | total vorher → nachher |
+|---|---|---|---|---|---|---|
+| 1 078 | 35,0 ms | 30,5 ms | **28,7 ms** | 23,8 → 18,4 ms | 9,2 → 9,9 ms | 604 → 595 ms |
+| 10 168 | 224,3 ms | 229,3 ms | **150,3 ms** | 150,9 → 74,9 ms | 42,2 → 75,3 ms² | 792 → 685 ms |
+| 50 568 | 1 356,6 ms | 1 095,8 ms | **697,6 ms** | 857,1 → 332,0 ms | 340,9 → 365,4 ms | 1 929 → 1 207 ms |
+| 202 068 | 5 315,7 ms | 4 387,4 ms | **2 727,0 ms** | 3 301,0 → 1 307,9 ms | 1 439,3 → 1 418,9 ms | 5 903 → 3 364 ms |
+
+¹ Teil 1 (`b3ed94d1`): Datei am Stück lesen, aus dem Puffer parsen, JSON-Baum auf einem Worker
+freigeben. Das Freigeben (Abschnitt 3.1, Fußnote 1: ~11 %) fällt damit aus `load` heraus, der
+Parse aus dem Puffer statt aus dem `std::istream` bringt nur ~10 %. Der DOM-Aufbau von nlohmann
+selbst ist der Engpass, deshalb Teil 2.
+² Kein Effekt des Umbaus: Zwei Wiederholungen im Endstand ergaben 77,9 und 76,1 ms, Abschnitt 3.1
+hatte 69,2 ms. Die 42,2 ms im Vorher-Lauf sind der Ausreißer. Den Aufbau hat Schritt 3 nicht
+angefasst. Der parallele Parse streut mit der Systemlast: 50k in zwei Wiederholungen 225 und 355 ms.
+
+Pro Entity (E-Kern, Last ~2): Parse ~6,5 µs statt ~16,5 µs, Aufbau unverändert ~7 µs.
+`warmup` (530–640 ms) und die Kosten pro Frame (CPU p50 1k 8,6 / 10k 64,2 / 50k 320,7 /
+200k 1 349 ms) sind wie vorher.
+
+### 8.3 Pak-Streaming, der Spielpfad (Ersatzmessung)
+
+`he_perf_capture` kann nur den Editor starten, und einen Export von der Kommandozeile gibt es nicht.
+Den Spielpfad (gemountete `.hpak` → `loadAssetAsync` → `pollAsyncResults`) misst deshalb ein
+Bench in `tests/test_hpak.cpp`, Release-Build, vorher und nachher auf derselben Maschine:
+
+```sh
+out/build/release/tests/he_tests --no-skip --test-case='Streaming bench*'
+```
+
+Er streamt zwei Paks vollständig und pumpt dabei ohne Schlafen (im Stromsparmodus dauert
+`sleep_for(2ms)` ~150 ms). Gemessen werden die Wandzeit bis alles registriert ist und die Zeit am
+Hauptthread in `pollAsyncResults` (Höchstzahl 16 pro Aufruf, wie das Spiel bisher). Drei Läufe je
+Seite, Rohausgabe in `docs/perf-audit/raw-streaming/s3-bench-{vorher,nachher}.txt`.
+
+| Last | Wand vorher | **Wand nachher** | Hauptthread vorher | **Hauptthread nachher** |
+|---|---|---|---|---|
+| 4 000 Materialien (je ~100 B, zstd) | 980–1 018 ms | **95–101 ms** | 17–19 ms | 11–17 ms |
+| 128 Assets à 1 MiB (zstd) | 326–329 ms | 328–360 ms | 16,0–16,7 ms | **1,3–2,3 ms** |
+
+- **Kleine Assets:** Jeder `AssetLoadPak`-Job baute einen neuen `HpakReader`, der das ganze
+  Inhaltsverzeichnis las, hashte und „Mounted package…“ loggte. Bei N Einträgen sind das N × N.
+  Jetzt teilen sich die Jobs das beim Mount geprüfte Inhaltsverzeichnis (`HpakReader::sharedToc`,
+  `openShared`) und lesen nur noch den Header, um `tocHash` abzugleichen.
+- **Große Assets:** Die Wandzeit begrenzt das Entpacken (zstd), sie bleibt. Der Hauptthread spart
+  die Chunk-Zerlegung (`HAsset::Reader::openData`, eine volle Kopie), die jetzt im Worker läuft.
+
+Was das im Spiel heißt: `GameApplication` registriert jetzt nach **Zeit** statt nach Stückzahl,
+4 ms pro Frame für Registrieren und Material-Warmup zusammen, in Paketen zu 16. Vorher waren es
+fest 16 Assets pro Frame. Ein Level mit 4 000 kleinen Assets brauchte damit allein 250 Frames
+zum Registrieren, wie billig jedes einzelne auch war.
+
+### 8.4 Was umgesetzt ist
+
+| Maßnahme | Stelle |
+|---|---|
+| Szene: Datei in einem Stück lesen, aus dem Puffer parsen (JSON und CBOR) | `SceneSerializer.cpp` (`readWholeFile`) |
+| Szene: JSON-Baum auf einem Low-Job freigeben (`load`, `loadAdditive`, `loadBinary`, `loadFromMemory`, `loadAdditiveFromMemory`) | `SceneSerializer.cpp` (`releaseOnWorker`) |
+| Szene: `entities` parallel parsen, Ergebnis gleich `json::parse`, bei jeder unerwarteten Form Rückfall auf den ganzen Parse | `SceneJsonParse.{h,cpp}` (`HE::parseSceneText`) |
+| Pak: Inhaltsverzeichnis pro Mount einmal lesen und prüfen, Jobs teilen es | `HpakReader::sharedToc/openShared`, `ContentManager::launchPakLoad` |
+| Chunk-Zerlegung im Worker statt am Hauptthread | `AsyncResult::asset`, `splitChunks` |
+| Zeitbudget für `pollAsyncResults` (mindestens ein Ergebnis pro Aufruf, nur was beim Aufruf schon da war) | `ContentManager::pollAsyncResults(max, budgetMs)` |
+| Spiel: 4 ms pro Frame für Registrieren und Warmup | `GameApplication.cpp` |
+| Asset-Referenzen der Szene ohne Duplikate (Reihenfolge der ersten Nennung) | `SceneSystems::collectAssetRefs` |
+
+Tests: `test_scene_serializer` (Äquivalenz mit Strings voller Klammern und Escapes, mit
+Positivkontrolle, dass wirklich geteilt wurde; Ausweichformen; große Szene über `load`),
+`test_hpak` (`openShared` und ersetzter Pak, Rückfall im ContentManager, Zeitbudget,
+Chunk-Zerlegung gleich synchronem Laden, Duplikate). 227 Testfälle in den betroffenen Dateien grün.
+
+### 8.5 Offen und nicht gemacht
+
+- **Vorausladen nach Kamerabewegung:** Bewusst nicht gemacht. Es gibt nichts nach Entfernung zu
+  laden: keine Zellen, Zonen werden per Skript geladen (Abschnitt 4.3). Braucht erst eine
+  räumliche Einteilung der Welt, das ist Schritt 4.
+- **CBOR-Szenen (Spielstart aus der `.hpak`, Undo) parsen weiter sequentiell.** CBOR-Elemente
+  lassen sich ohne Dekodieren nicht abgrenzen. Sie haben nur das Freigeben auf dem Worker.
+- **GPU-Upload ohne Budget** (Abschnitt 4.2) bleibt: Renderer-Arbeit, nicht Teil dieses Themas.
+- **Pak-Loads** brechen weiterhin nur vor dem Start ab (`readEntry` hat keinen Checkpoint).
+- **Hänger in Frame 0 und 1** (0,46 und 0,72 s in `Metal::EncodeScene`, schon bei 1k Entities)
+  ist weiter unaufgelöst. `--detailed` schlüsselt nur die GPU auf, Unter-Scopes auf der CPU gibt es
+  nicht. Ein Time-Profiler-Mitschnitt mit `xctrace record --launch` startete auf diesem Mac die
+  installierte `/Applications/HorizonEditor.app` statt des Deploy-Binarys, auch mit absolutem Pfad,
+  und war damit wertlos (zu sehen an den Binary-Pfaden im Export). Für den nächsten Versuch: Editor
+  per `he_perf_capture` starten und mit `--attach` sofort anhängen, oder `EncodeScene` mit
+  Unter-Scopes versehen.
+- Die Spiel-Runtime ist weiter nur über den Bench gemessen, nicht über ein exportiertes Spiel.
+
+Rohdaten: `docs/perf-audit/raw-streaming/s3vorher-*`, `s3teil1-*`, `s3nachher-*`, `s3wdh{a,b}-*`
+(`*.summary.json`), die Timing-Zeilen aller Läufe in `s3-timings.txt`.
+
+Wiederholen:
+
+```sh
+cmake --build out/build/release -j8 --target HorizonEditor he_tests
+FRAMES=30 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws3/raw verwerfen 1000
+FRAMES=120 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws3/raw s3nachher 1000 10000 50000
+FRAMES=20 TIMEOUT=1500 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws3/raw s3nachher 200000
+out/build/release/tests/he_tests --no-skip --test-case='Streaming bench*'
 ```
