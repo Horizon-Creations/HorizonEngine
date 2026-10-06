@@ -421,11 +421,17 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
 
   Der Rauschboden ist null, zwei statische Captures sind auf allen vier Backends bitgleich. Das
   Vulkan-Bild nachher ist auf dem Boden pixelgleich mit D3D11 und D3D12 (1 Pixel Maskenunterschied).
-  Die Validation-Meldungen vorher und nachher sind nach Art und Zahl gleich (je 9×
-  `vkCmdUpdateBuffer` im Render-Pass, 9× `vkCmdPipelineBarrier` in Subpass 0, 9× Bildlayout bei
-  `vkQueueSubmit`). Das sind die vorbestehenden Meldungen aus Thema 144/145, der Fix bringt keine
-  neue. Nicht eigens bezeugt: `RenderSceneImage()`. Dort hat der Dump keinen Sonnensprung zwischen
-  zwei Aufrufen, der Aufruf ist dort nur über den Quelltext-Test belegt.
+  Die Validation-Meldungen vorher und nachher sind nach Art gleich, mit GI und SSAO aus und auch
+  mit beiden an (`-Gi 1`, `HE_DUMP_SSAO=1`, statisch und P1). Es sind immer dieselben drei:
+  `vkCmdUpdateBuffer` im Render-Pass, `vkCmdPipelineBarrier` in Subpass 0 und ein Bildlayout bei
+  `vkQueueSubmit`. Das sind die vorbestehenden Meldungen aus Thema 144/145, der Fix bringt keine
+  neue Art. Die Zahl (je 9 + Abbruchhinweis) taugt nicht zum Vergleich, denn der Layer bricht jede
+  VUID nach 10 Meldungen ab (`duplicate_message_limit`). Mit GI an ist P1 vorher und nachher
+  **bitgleich**, die statische Aufnahme weicht um höchstens 0.1 Luminanz ab. Der GI-Pfad aus
+  Thema 131 (früher eigenes `setDayNight()` in `runGi()`) ist durch das Verlegen also unverändert.
+  Nicht eigens bezeugt: `RenderSceneImage()`. Dort hat der Dump keinen Sonnensprung zwischen zwei
+  Aufrufen, der Aufruf ist dort nur über den Quelltext-Test belegt. Ebenso wenig SSAO und
+  Decal-Tiefe: sie hängen nicht von der Sonne ab, es gibt dort keinen sichtbaren Versatz.
 * Ein Rest-Flackern bleibt (§7.2, Ende). Für weitere Ruhe bräuchte es mehr Strahlen pro Pixel, ein
   höheres History-Gewicht (das braucht die Verdecker-Reaktion des Clamps) oder einen
   kantenerhaltenden Spatial-Filter statt 3×3-Box.
