@@ -557,6 +557,14 @@ setzt (OpenGL, Vulkan, D3D11, D3D12, Software), extrahiert unverändert bei jede
 Vertrag: zwischen zwei Aufrufen im Scope wird die Welt nicht verändert. Im Metal-Renderer läuft der
 Overlay-Callback (dort baut der Editor seine Panels) erst nach dem letzten Extract.
 
+Bild-Zeuge im echten Metal-Passablauf: `he_shot.py` mit `SHADOWINSTTEST=contact
+LOCALSHADOW=point SSAO=1 TOD=0.35 PITCH=-18 CAMY=5 AA=0 RENDERSCALE=0.77 BLOOM=0 MOTIONBLUR=0
+DOF=0 GI=0`, `HE_SKY_TIME=1.0`, frisches `HE_CONFIG_DIR`, forward (`RENDERPATH=0`) und deferred
+(`RENDERPATH=1`). `RENDERSCALE=0.77` sorgt dafür, dass Schatten- und Szenen-Pass mit
+verschiedenem Seitenverhältnis extrahieren. Zwei Läufe mit `FrameScope` waren bytegleich
+(Rauschboden), ein Lauf mit auskommentiertem `FrameScope` ebenfalls bytegleich zu ihnen
+(md5 forward `1c29ed2d…`, deferred `b22e44a6…`). Die Wiederverwendung ändert also kein Pixel.
+
 Tests: `tests/test_world_scale.cpp`. Cache-Korrektheit (Schreiben ohne `dirty`, bewegter
 Elternknoten, Umhängen, bitgleich mit `localMatrix`), 100 000 Entities (Stichproben gegen
 `worldMatrixOf`, nach Bewegung einer Gruppe; Extraktor sieht alle 100 000 Meshes), Wiederverwendung
