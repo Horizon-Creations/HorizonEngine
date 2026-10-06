@@ -117,6 +117,17 @@ public:
     void extract(HorizonWorld& world, RenderWorld& outWorld, float aspectRatio,
                  const EditorCameraOverride* editorCam = nullptr);
 
+    // Only the camera of extract(): outWorld.camera's position, view and
+    // projection, exactly as extract() would set them — the same code, so a
+    // gizmo or a picking ray drawn from it cannot drift from the picture.
+    // Everything else in outWorld is left as it was. Without an active editor
+    // camera the scene camera's matrix is read, so transforms are propagated
+    // first, as extract() does; the editor camera needs nothing from the world.
+    // The editor's Scene window calls this every frame and extract() only when
+    // something asks about the objects (Thema 153, Schritt 6).
+    void extractCameraOnly(HorizonWorld& world, RenderWorld& outWorld, float aspectRatio,
+                           const EditorCameraOverride* editorCam = nullptr);
+
     // ── Reuse within one frame ──────────────────────────────────────────────
     // A backend that extracts once per pass (Metal: shadow, SSAO, G-buffer,
     // scene — every one of them re-extracts so its draw set and cascade fit

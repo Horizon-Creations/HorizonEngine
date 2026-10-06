@@ -1308,6 +1308,15 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	}
 }
 
+void RenderExtractor::extractCameraOnly(HorizonWorld& world, RenderWorld& out, float aspectRatio,
+                                        const EditorCameraOverride* editorCam)
+{
+	HE_PROFILE_SCOPE_N("RenderExtractor::extractCameraOnly");
+	auto& reg = world.registry();
+	if (!(editorCam && editorCam->active)) extractTransforms(world, reg);
+	extractCamera(reg, out, aspectRatio, editorCam);
+}
+
 // ── Environment sun + moon (day-night) ────────────────────────────────────
 // The sun and moon are the two built-in directional lights tagged by the
 // EnvironmentComponent (envRole 1/2). The environment drives their colour,

@@ -35,6 +35,7 @@
 #include <DebugDraw/DebugDraw.h>          // the ground grid rides the editor's debug-line channel
 #include <glm/gtc/type_ptr.hpp>
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/Profiler.h>         // the pick snapshot's own scope
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cmath>
@@ -639,8 +640,47 @@ static void focusSelected(AppContext& ctx, const RenderWorld& snapshotWorld)
 // secondary viewports frame the selection against it too: they have no extract
 // of their own to measure (their picture is drawn inside RenderWorldPreview),
 // and the selection's boxes are the same boxes from any direction.
+//
+// Its CAMERA is refreshed every frame (extractCameraOnly): the gizmo, the
+// brush cursor, the name tags and every picking ray need it. Its OBJECTS are
+// extracted only when something asks about them — a click, a frame, a drop, a
+// snap, F — through sceneSnapshot() below, at most once a frame. The full
+// extract used to run every frame and cost as much as the renderer's own
+// (≈28 ms of a 116 ms frame at 50k entities,
+// docs/world-streaming-baseline-2026-10-06.md §11), for a picture the
+// renderer extracts anyway. Read s_sceneSnapshot directly for the camera only.
 static RenderExtractor s_extractor;
 static RenderWorld     s_sceneSnapshot;
+
+// What this frame's extract is made with: recorded where the camera is
+// extracted, used by sceneSnapshot() whenever it runs.
+struct SnapshotInputs
+{
+	float                aspect    = 1.0f;
+	bool                 hasCamera = false;
+	EditorCameraOverride camera{};
+	int                  objectsFrame = -1;          // ImGui frame the objects are from
+	const HorizonWorld*  objectsWorld = nullptr;     // …and the world
+};
+static SnapshotInputs s_snapshotInputs;
+
+// The Scene window's picture with its objects (meshes, icon quads, skinned
+// meshes) from this frame. Extracts on the first call of a frame, answers from
+// that afterwards; outside the Scene window's own frame (the main menu, a
+// secondary viewport) with the inputs it recorded last.
+static const RenderWorld& sceneSnapshot(AppContext& ctx)
+{
+	const int frame = ImGui::GetFrameCount();
+	if (ctx.world && (s_snapshotInputs.objectsFrame != frame || s_snapshotInputs.objectsWorld != ctx.world))
+	{
+		HE_PROFILE_SCOPE_N("ViewportPanel::sceneSnapshot");
+		s_extractor.extract(*ctx.world, s_sceneSnapshot, s_snapshotInputs.aspect,
+		                    s_snapshotInputs.hasCamera ? &s_snapshotInputs.camera : nullptr);
+		s_snapshotInputs.objectsFrame = frame;
+		s_snapshotInputs.objectsWorld = ctx.world;
+	}
+	return s_sceneSnapshot;
+}
 
 bool focusSelection(AppContext& ctx, EditorCamera& cam)
 {
@@ -649,7 +689,7 @@ bool focusSelection(AppContext& ctx, EditorCamera& cam)
 	if (primary == entt::null || !ctx.world->registry().valid(primary)) return false;
 	glm::vec3 center(0.0f);
 	float     radius = 0.0f;
-	if (!selectionFocusSphere(*ctx.world, ctx.contentManager, primary, s_sceneSnapshot, center, radius))
+	if (!selectionFocusSphere(*ctx.world, ctx.contentManager, primary, sceneSnapshot(ctx), center, radius))
 		return false;
 	cam.focusOn(center, radius);
 	return true;
@@ -661,7 +701,7 @@ bool selectionBox(AppContext& ctx, HE::AABB& out)
 	const Entity primary = ctx.selection.primary();
 	if (primary == entt::null || !ctx.world->registry().valid(primary)) return false;
 	HE::AABB geometry, pivots;
-	selectionBoxes(*ctx.world, ctx.contentManager, primary, s_sceneSnapshot, geometry, pivots);
+	selectionBoxes(*ctx.world, ctx.contentManager, primary, sceneSnapshot(ctx), geometry, pivots);
 	if (geometry.isValid()) { out = geometry; return true; }
 	if (!pivots.isValid()) return false;
 	// Nothing here draws (a light, an empty group): a small box around where
@@ -696,8 +736,8 @@ EntityActionState entityActionState(AppContext& ctx)
 	return st;
 }
 // (Hide / Isolate / Show All / Group / Ungroup are the functions above.)
-void focusSelected(AppContext& ctx)          { focusSelected(ctx, s_sceneSnapshot); }
-void snapSelectionToGround(AppContext& ctx)  { snapSelectionToGround(ctx, s_sceneSnapshot); }
+void focusSelected(AppContext& ctx)          { focusSelected(ctx, sceneSnapshot(ctx)); }
+void snapSelectionToGround(AppContext& ctx)  { snapSelectionToGround(ctx, sceneSnapshot(ctx)); }
 void toggleLockSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
@@ -755,7 +795,9 @@ void bookmarkKeys(EditorCamera& cam)
 	}
 }
 
-static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
+// The snapshot is asked for only when a row is chosen: the menu is drawn every
+// frame it is open, and only Focus and Snap need the objects.
+static void drawContextMenu(AppContext& ctx)
 {
 	// Every row is looked up as "Viewport Menu/<its label>".
 	HE::Ed::Help::Scope helpScope("Viewport Menu");
@@ -766,9 +808,9 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 	                    && reg.valid(ctx.selection.primary());
 
 	if (EditorWidgets::menuItem("Focus Selected", EditorShortcuts::label("viewport.focus").c_str(), false, canFocus))
-		focusSelected(ctx, snapshotWorld);
+		focusSelected(ctx, sceneSnapshot(ctx));
 	if (EditorWidgets::menuItem("Snap to Ground", EditorShortcuts::label("viewport.snapToGround").c_str(), false, editable && hasSel))
-		snapSelectionToGround(ctx, snapshotWorld);
+		snapSelectionToGround(ctx, sceneSnapshot(ctx));
 
 	ImGui::Separator();
 	if (EditorWidgets::menuItem("Hide Selected", EditorShortcuts::label("viewport.hide").c_str(), false, editable && hasSel))
@@ -1115,7 +1157,7 @@ void render(AppContext& ctx, float dt)
 						// End drops the selection onto the ground — Unreal's key
 						// for it, and one nothing else in the viewport uses.
 						if (EditorShortcuts::pressed("viewport.snapToGround"))
-							snapSelectionToGround(ctx, s_sceneSnapshot);
+							snapSelectionToGround(ctx, sceneSnapshot(ctx));
 					}
 					// Focus on selection (F) — frame the selected entity and
 					// everything parented under it (see selectionFocusSphere).
@@ -1127,7 +1169,7 @@ void render(AppContext& ctx, float dt)
 						glm::vec3 center(0.0f);
 						float     radius = 0.0f;
 						if (selectionFocusSphere(*ctx.world, ctx.contentManager,
-						                         ctx.selection.primary(), s_sceneSnapshot,
+						                         ctx.selection.primary(), sceneSnapshot(ctx),
 						                         center, radius))
 							cam.focusOn(center, radius);
 					}
@@ -1185,9 +1227,14 @@ void render(AppContext& ctx, float dt)
 						              : ctx.editorCamera->makeOverride())
 						: EditorCameraOverride{};
 				camOverride.editorIcons = s_showFlags.editorIcons && !look.valid;
+				// The camera now; the objects when something below asks for
+				// them (sceneSnapshot, file scope above).
+				s_snapshotInputs.aspect    = avail.x / avail.y;
+				s_snapshotInputs.hasCamera = camOverride.active;
+				s_snapshotInputs.camera    = camOverride;
 				if (ctx.world)
-					s_extractor.extract(*ctx.world, s_sceneSnapshot, avail.x / avail.y,
-					                    camOverride.active ? &camOverride : nullptr);
+					s_extractor.extractCameraOnly(*ctx.world, s_sceneSnapshot, s_snapshotInputs.aspect,
+					                              camOverride.active ? &camOverride : nullptr);
 
 				// ── Spawn a mesh or prefab dropped onto the viewport ────────
 				// A collision probe decides where: the drop ray is traced against
@@ -1224,7 +1271,7 @@ void render(AppContext& ctx, float dt)
 								const glm::vec3 ro(pNear);
 								const glm::vec3 rd = glm::normalize(glm::vec3(pFar) - glm::vec3(pNear));
 								const HE::ScenePick::SurfaceHit surface = HE::ScenePick::raycast(
-									s_sceneSnapshot, meshLookup(*ctx.contentManager), ro, rd);
+									sceneSnapshot(ctx), meshLookup(*ctx.contentManager), ro, rd);
 								if (surface.hit) { spawnPos = surface.point; placed = true; }
 								else if (std::abs(rd.y) > 1e-5f)
 								{
@@ -1395,7 +1442,7 @@ void render(AppContext& ctx, float dt)
 								// every metre and no corner anyone means to hit.
 								const HE::ScenePick::ObjectFilter base = surfaceFilter(exclude);
 								const HE::ScenePick::VertexHit hit = HE::ScenePick::nearestVertex(
-									s_sceneSnapshot, meshLookup(*ctx.contentManager), viewProj,
+									sceneSnapshot(ctx), meshLookup(*ctx.contentManager), viewProj,
 									rmin, rsize, at, s_tb.snapVertexRadiusPx,
 									[&](const RenderObject& obj)
 									{
@@ -1411,7 +1458,7 @@ void render(AppContext& ctx, float dt)
 							glm::vec3 ro, rd;
 							if (!PreviewPick::screenRay(viewProj, rmin, rsize, at, ro, rd)) return false;
 							glm::vec3 normal;
-							if (!probeSurface(ctx, s_sceneSnapshot, ro, rd, exclude, out, &normal)) return false;
+							if (!probeSurface(ctx, sceneSnapshot(ctx), ro, rd, exclude, out, &normal)) return false;
 							// Rest the object ON the surface: lift the pivot by its
 							// height above the bottom of what it draws, along the
 							// surface's normal. One object only — a group's pivot is
@@ -1420,7 +1467,7 @@ void render(AppContext& ctx, float dt)
 							{
 								HE::AABB geometry, pivots;
 								selectionBoxes(*ctx.world, ctx.contentManager, movable.front(),
-								               s_sceneSnapshot, geometry, pivots);
+								               sceneSnapshot(ctx), geometry, pivots);
 								const float lift = HE::worldPositionOf(*ctx.world, movable.front()).y
 								                 - geometry.min.y;
 								if (geometry.isValid() && lift > 0.0f) out += normal * lift;
@@ -1480,9 +1527,10 @@ void render(AppContext& ctx, float dt)
 					{
 						return cm ? meshBounds(*cm, meshId) : nullptr;
 					};
+					const RenderWorld& snapshot = sceneSnapshot(ctx);
 					return ViewportPick::pickAtScreen(
-						s_sceneSnapshot, ctx.world->registry(), boxes,
-						s_sceneSnapshot.camera.projection * s_sceneSnapshot.camera.view,
+						snapshot, ctx.world->registry(), boxes,
+						snapshot.camera.projection * snapshot.camera.view,
 						{ rectMin.x, rectMin.y }, { rectMax.x - rectMin.x, rectMax.y - rectMin.y },
 						{ mouse.x, mouse.y });
 				};
@@ -1519,9 +1567,10 @@ void render(AppContext& ctx, float dt)
 						if (EditorMarquee::encloses(viewProj, frame, box ? *box : ViewportPick::fallbackBox(), model))
 							found.push_back(e);
 					};
-					for (const RenderObject& obj : s_sceneSnapshot.objects)
+					const RenderWorld& snapshot = sceneSnapshot(ctx);
+					for (const RenderObject& obj : snapshot.objects)
 						consider(obj.entityId, obj.meshAssetId, obj.transform);
-					for (const SkinnedRenderObject& obj : s_sceneSnapshot.skinnedObjects)
+					for (const SkinnedRenderObject& obj : snapshot.skinnedObjects)
 						consider(obj.entityId, obj.meshAssetId, obj.transform);
 					return found;
 				};
@@ -1606,7 +1655,7 @@ void render(AppContext& ctx, float dt)
 				ImGui::SetNextWindowPos(s_contextMenuAt, ImGuiCond_Appearing);
 				if (ImGui::BeginPopup("##vpContextMenu"))
 				{
-					if (ctx.world) drawContextMenu(ctx, s_sceneSnapshot);
+					if (ctx.world) drawContextMenu(ctx);
 					ImGui::EndPopup();
 				}
 
