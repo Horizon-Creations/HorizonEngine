@@ -8,6 +8,9 @@ wurde nichts umgebaut. Neu sind nur Messhilfen: zwei Log-Zeilen mit Ladezeiten u
 **Schritt 3 (Streaming-Durchsatz, Lade-Latenz) ist in Abschnitt 8 nachgemessen:** Szene laden
 200k 5,3 s → 2,7 s, Pak-Streaming von 4 000 kleinen Assets 1,0 s → 0,1 s.
 
+**Schritt 4 (mehr Entities, größere Welten) steht in Abschnitt 9:** CPU pro Frame im Editor
+10k 64 → 22 ms, 50k 321 → 118 ms; Jolt 65 536 statt 1 024 Bodies.
+
 **Kurz:**
 - Die Ladezeit ist nicht das Problem. 50 000 Entities sind in 1,3 s geladen, und die Ladezeit
   wächst linear.
@@ -496,4 +499,105 @@ FRAMES=30 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /
 FRAMES=120 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws3/raw s3nachher 1000 10000 50000
 FRAMES=20 TIMEOUT=1500 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws3/raw s3nachher 200000
 out/build/release/tests/he_tests --no-skip --test-case='Streaming bench*'
+```
+
+## 9. Schritt 4: Größere Welten und mehr Entities (Richtungsmessung)
+
+Stand 06.10.2026, Commit `5aa5f65a` auf dem Zweig, Basis `5d9b8a09` (Ende Schritt 3). Die
+endgültige Vorher/Nachher-Messung ist Schritt 5. Hier steht ein Richtungszeuge mit der Messleiter.
+
+**Kurz:**
+- CPU pro Frame im Editor: **10k 64,2 → 21,8 ms, 50k 320,7 → 118,0 ms** (je etwa −65 %).
+  Pro Entity und Frame **≈ 2,4 µs statt 6,45 µs**.
+- Die 30-FPS-Grenze aus 3.6 (≈ 5 000 Entities) liegt jetzt bei **≈ 15 000**, die 60-FPS-Grenze
+  bei ≈ 8 000 statt ≈ 2 300 (linear zwischen 10k und 50k).
+- RSS bei 50k **1 154 → 500 MB**. Der größte Teil davon waren die ImDrawList-Puffer der
+  Outliner-Icons.
+- Jolt trägt **65 536 Bodies statt 1 024**. Das war die erste harte Wand für größere Welten.
+
+### 9.1 Messbedingungen
+
+Wie 8.1: M5, Release (`HE_PROFILING=ON`, `HE_ENABLE_SHADERC=ON`), **Stromsparmodus AN**,
+**Bildschirm gesperrt**, GPU-Fremdlast 58 % vor den Läufen (Schritt 1: 57 %), Load average 2,4–2,9.
+Editor über `scripts/perf/world_streaming_ladder.sh`, 120 Frames, `--warmup 0`, vorher ein
+verworfener Lauf. „Vorher“ sind die Werte aus 8.2 (Ende Schritt 3, `s3nachher-*`), nicht neu
+gemessen: Schritt 4 hat Laden und Parse nicht angefasst, die Bedingungen sind dieselben.
+
+### 9.2 Kosten pro Frame (p50)
+
+| Entities | CPU vorher | **CPU nachher** | `extract` vorher → nachher¹ | `OnRender` vorher → nachher | `Metal::Overlay` vorher → nachher | RSS max vorher → nachher |
+|---|---|---|---|---|---|---|
+| 1 078 | 8,6 ms | 11,4 / 10,1 ms² | 2,1 → 1,0 ms | 4,5 → 1,5 ms | 0,6 → 0,1 ms | 343 → 336 MB |
+| 10 168 | 64,2 ms | **21,8 / 22,0 ms** | 19,6 → 10,1 ms | 38,7 → 10,4 ms | 5,1 → 0,1 ms | 433 → 313 MB |
+| 50 568 | 320,7 ms | **118,0 ms** | 102,8 → 64,3 ms | 191,7 → 56,7 ms | 25,1 → 0,1 ms | 1 154 → 500 MB |
+
+¹ Summe aller `RenderExtractor::extract`-Aufrufe pro Frame. Es sind weiter vier Aufrufe pro Frame
+(479 in 120 Frames), aber zwei davon (SSAO und Szene) antworten aus der Kopie des ersten:
+`RenderExtractor::reuse` kostet 0,8 ms bei 10k und 4,4 ms bei 50k statt je eines vollen Laufs.
+Voll laufen noch der Schatten-Pass und der Pick-Snapshot des `ViewportPanel` (9.4).
+² Zwei Läufe. Bei 1k ist der Frame so billig geworden, dass er unter Bildschirmsperre auf
+`Metal::NextDrawable` wartet (`WaitForFrame` 4,9 ms, vorher nicht unter den größten Scopes).
+Die Engine-Scopes selbst sind kleiner geworden. Das ist die Falle aus der Memory „Perf-Messung
+auf dem M5“: gesperrt nur die Pass-Scopes vergleichen.
+
+Die Ladezeit ist unverändert (`SceneLoadTiming` 50k: parse 320 ms, build 336 ms, wie 8.2).
+
+### 9.3 Was umgesetzt ist
+
+| Maßnahme | Stelle | Wirkung |
+|---|---|---|
+| Lokale Matrix wird pro Entity gecacht, zusammen mit den Position/Rotation/Skala-Werten, aus denen sie gebaut wurde. `sin`/`cos` nur bei Wertänderung. Vergleich nach Wert, nicht über `dirty`, weil Inspector und Gizmo das Flag nicht setzen | `TransformComponent::localCache*`, `propagateTransforms`, `HE::cachedLocalMatrix` | `propagateTransforms` war 14,9 % des Hauptthreads bei 10k (3.3) |
+| `worldMatrixOf` legt die Elternkette auf den Stack statt in einen `std::vector` pro Aufruf und liest denselben Cache | `TransformHierarchy.cpp` | `LODSystem::update` fragt das für jedes LOD-Entity jeden Tick (4.5) |
+| Extraktion einmal pro Frame: Zwischen `beginFrame` und `endFrame` beantwortet `extract()` weitere Aufrufe mit gleichen Eingaben (Welt, Editor-Kamera nach Wert, Tag/Nacht, Schatten-Einstellungen, ContentManager samt Epoche) aus der Kopie des ersten Laufs. Weicht nur das Seitenverhältnis ab (SSAO in halber, gerundeter Auflösung), werden Projektion, Kaskaden-Fit und lokale Schatten-Layer neu gerechnet, genau wie im vollen Lauf | `RenderExtractor::beginFrame/endFrame/FrameScope`, `MetalRenderer::EncodeFrame` | Engpass 1 aus Abschnitt 5 |
+| Jolt: 65 536 Bodies, 65 536 Body-Paare, 10 240 Kontakte (Jolts eigene Empfehlung) statt je 1 024 | `PhysicsWorld.cpp` (`Impl::kMaxBodies` …) | harte Wand aus 3.6 |
+| Outliner: Auge und Schloss werden für weggescrollte Zeilen nicht gezeichnet, und der Teilbaum-Lauf für das Auge entfällt dort. Gleiches Layout per `Dummy` | `OutlinerPanel.cpp` (`drawRowIcons`) | Engpass 2 aus Abschnitt 5, ohne Clipper |
+
+Die Wiederverwendung ist nur innerhalb eines `FrameScope` scharf. Ein Backend, das ihn nicht
+setzt (OpenGL, Vulkan, D3D11, D3D12, Software), extrahiert unverändert bei jedem Aufruf. Der
+Vertrag: zwischen zwei Aufrufen im Scope wird die Welt nicht verändert. Im Metal-Renderer läuft der
+Overlay-Callback (dort baut der Editor seine Panels) erst nach dem letzten Extract.
+
+Tests: `tests/test_world_scale.cpp`. Cache-Korrektheit (Schreiben ohne `dirty`, bewegter
+Elternknoten, Umhängen, bitgleich mit `localMatrix`), 100 000 Entities (Stichproben gegen
+`worldMatrixOf`, nach Bewegung einer Gruppe; Extraktor sieht alle 100 000 Meshes), Wiederverwendung
+(gleiche Eingaben, anderes Seitenverhältnis gegen einen vollen Lauf, kein Wiederverwenden ohne
+Scope oder mit anderer Kamera/Tageszeit, neues Entity im nächsten Frame), 3 000 Bodies plus ein
+fallender (Negativkontrolle mit dem alten Limit: 1 023 gebaut, Test rot), eine Position 100 km
+draußen, Replikation einer 30-km-Position. Dazu 36 betroffene Testdateien grün (Physik,
+Replikation, Savegame-Pfade, Outliner, LOD, Culling, Sequencer, Kamera-Rig, Szenen-Serializer).
+
+### 9.4 Offen und bewusst nicht gemacht
+
+- **Floating Origin / kamerarelatives Rendern: nicht angefangen.** Die Referenzwelt (8 × 8 km)
+  liegt unter der 16-km-Grenze aus 3.5, und ein Ursprungswechsel berührt Physik, Replikation,
+  Savegames und alle fünf Renderer zugleich. Skizze für später: `HorizonWorld` hält einen
+  `glm::dvec3`-Ursprung; überschreitet die Kamera einen Radius (z. B. 8 km), werden alle Wurzel-
+  Entities und Jolt-Bodies um ganze Zellen verschoben (`PhysicsWorld::setPosition` je Body) und
+  der Ursprung entsprechend versetzt. Savegames und
+  `GameReplication` schreiben dann `lokal + Ursprung` (die Quantisierung ist schon auf bis zu
+  1 000 km einstellbar, `ProjectSettings::kMaxWorldExtent`). Weltraum-Partikel und Trails müssen
+  mitgeschoben werden.
+- **Entities pro Zelle streamen: nicht angefangen.** Es gibt kein Zellformat der Szene, und
+  `FrustumCuller::cull` ist mit 3,2 ms bei 50k nicht der Engpass. Der nächste Hebel pro Entity ist
+  die Extraktion selbst (ein voller Lauf ≈ 30 ms bei 50k, seriell wegen der ContentManager-
+  Lookups).
+- **Der Pick-Snapshot des `ViewportPanel`** extrahiert jeden Frame mit einem eigenen Extractor
+  voll (≈ 30 ms bei 50k). Er dient Gizmo, Box-Auswahl, Kontextmenü und Terrain-Sculpt; ihn aus
+  dem Frame des Renderers zu speisen oder nur bei Bedarf zu ziehen ist Editor-Arbeit (Schritt 6).
+- **Andere Backends:** Vulkan extrahiert ebenfalls mehrfach pro Frame (`VulkanRenderer.cpp`), hat
+  aber keinen `FrameScope`. Backend-Parität gehört nicht zu diesem Thema.
+- **Jolt läuft weiter single-threaded** (`JobSystemSingleThreaded`). Mehr Bodies heißen jetzt
+  mehr Arbeit auf einem Kern.
+- **Der Outliner** zeichnet weiter jede Zeile als `TreeNodeEx` (kein `ImGuiListClipper`, die
+  Baumstruktur mit `TreePush/Pop` macht das aufwendig). Teuer waren nur die Icons.
+- 200k nicht nachgemessen (Richtungsmessung, Schritt 5 misst die ganze Leiter).
+
+Rohdaten: `docs/perf-audit/raw-streaming/s4-*`, `s4wdh-*` (`*.summary.json`),
+Timing-Zeilen in `s4-timings.txt`.
+
+```sh
+cmake --build out/build/release -j8 --target HorizonEditor he_tests
+out/build/release/tests/he_tests --source-file='*test_world_scale.cpp'
+FRAMES=30 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws4/raw verwerfen 1000
+FRAMES=120 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws4/raw s4 1000 10000 50000
 ```
