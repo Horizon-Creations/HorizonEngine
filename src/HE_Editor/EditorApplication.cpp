@@ -417,15 +417,24 @@ static const char* scriptLogTagFor(ProjectScriptLanguage lang)
 // by now (the splash pumps it) — so it is PEEKED here, not taken: it still
 // reaches OnEvent on the first frame, finds its project open and does nothing.
 // That way the first project load is the right one, instead of the last
-// session's project followed by a switch.
-static std::string pickLaunchProject(const std::vector<std::string>& args)
+// session's project followed by a switch. `askedForProject` says a .heproj was
+// named but cannot be opened (moved, deleted): that is still a request, so the
+// caller shows the Hub with the reason rather than the last project.
+static std::string pickLaunchProject(const std::vector<std::string>& args,
+                                     bool& askedForProject)
 {
 	std::error_code ec;
 	const std::filesystem::path cwd = std::filesystem::current_path(ec);
 	ProjectLaunchOpen::LaunchPick pick = ProjectLaunchOpen::pickFromArguments(args, cwd);
+	askedForProject = !pick.project.empty();
 	for (const auto& [arg, why] : pick.rejected)
+	{
 		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' %s — not opened",
 		            arg.c_str(), ProjectLaunchOpen::describe(why));
+		if (why == ProjectLaunchOpen::PathError::NotFound ||
+		    why == ProjectLaunchOpen::PathError::NotAFile)
+			askedForProject = true;
+	}
 	for (const std::string& p : pick.ignored)
 		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' not opened — the editor "
 		                    "opens one project at a time", p.c_str());
@@ -1936,8 +1945,11 @@ void EditorApplication::OnInit()
 	// this point the Hub is what is open. A failure does NOT fall back to the
 	// last project: the user asked for this one, and the Hub says why it did not
 	// open instead of quietly showing something else.
-	const std::string launchProject = pickLaunchProject(launchArguments());
-	if (!launchProject.empty())
+	bool askedForProject = false;
+	const std::string launchProject = pickLaunchProject(launchArguments(), askedForProject);
+	if (askedForProject && launchProject.empty())
+		m_hubOpenError = "The project file passed at launch could not be found.";
+	else if (!launchProject.empty())
 	{
 		HE_LOG_INFO(Editor, "EditorApplication: opening %s (handed over at launch)",
 		            launchProject.c_str());
