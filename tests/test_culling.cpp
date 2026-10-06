@@ -3108,42 +3108,73 @@ TEST_CASE("D3D12 main swapchain follows the window size (Thema 112)")
 	CHECK(call < slot);
 }
 
-TEST_CASE("Vulkan GI extracts with this frame's sun, not the previous one (Thema 131)")
+TEST_CASE("Vulkan extracts with this frame's sun: one setDayNight at the frame's top (Thema 131, 146)")
 {
-	// runGi() runs before DrawScene(), and only DrawScene() pushed the day-night
-	// state into the extractor. The GI mask was traced against the PREVIOUS
-	// frame's sun while the scene pass shaded with the current one — visible as
-	// a one-frame lag of the GI shadow edge whenever the time of day moves.
+	// The cascades (EncodeShadowMap), the decal depth pre-pass, GI and SSAO
+	// each extract the scene on their own, ahead of DrawScene() — and only
+	// DrawScene() pushed the day-night state into the extractor. They fit and
+	// traced against the PREVIOUS frame's sun while the scene pass shaded with
+	// the current one: a one-frame lag of the GI shadow edge (Thema 131) and,
+	// with GI off, of the CSM cascades (Thema 146). The state is now pushed
+	// once at the top of the two places that record a frame — Render() and
+	// RenderSceneImage() — before the first extraction, and nowhere else.
 	// Metal pushes setDayNight before every GI extraction; D3D11/D3D12/GL
 	// extract once per frame after it. No GPU under ctest, so this pins the
-	// order in runGi()'s source.
+	// order in the source.
 	using namespace shaderdrift;
 	const fs::path root = findRepoRoot();
 	if (root.empty())
 	{
-		MESSAGE("Vulkan renderer source not found - GI day-night pin skipped");
+		MESSAGE("Vulkan renderer source not found - day-night pin skipped");
 		return;
 	}
 	const std::string src = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
 	                                                   "Backends" / "Vulkan" / "VulkanRenderer.cpp"));
 	REQUIRE(!src.empty());
-	const size_t fn = src.find("void VulkanRenderer::runGi(");
-	REQUIRE(fn != std::string::npos);
-	const size_t fnEnd = src.find("\n}\n", fn);
-	REQUIRE(fnEnd != std::string::npos);
-	const std::string body = src.substr(fn, fnEnd - fn);
-
-	const size_t extract = body.find("m_extractor.extract(");
-	REQUIRE(extract != std::string::npos);
-	// Same environment fields DrawScene() pushes, so both passes agree on the sun.
-	std::smatch m;
+	auto bodyOf = [&](const char* signature) {
+		const size_t fn = src.find(signature);
+		REQUIRE(fn != std::string::npos);
+		const size_t fnEnd = src.find("\n}\n", fn);
+		REQUIRE(fnEnd != std::string::npos);
+		return src.substr(fn, fnEnd - fn);
+	};
+	// Same environment fields at both, so every pass agrees on the sun.
 	const std::regex dayNight(
 		R"(m_extractor\.setDayNight\(\s*m_environment\.dayNightCycle\s*,\s*m_environment\.timeOfDay\s*,)"
 		R"(\s*m_environment\.sunColor\s*,\s*m_environment\.sunIntensity\s*,)"
 		R"(\s*m_environment\.moonColor\s*,\s*m_environment\.moonIntensity\s*,)"
 		R"(\s*m_environment\.cloudCoverage\s*\))");
-	REQUIRE(std::regex_search(body, m, dayNight));
-	CHECK(static_cast<size_t>(m.position(0)) < extract);
+
+	// Render(): before the viewport frame and before the swapchain branch's
+	// own cascades, decal depth and scene.
+	{
+		const std::string body = bodyOf("void VulkanRenderer::Render()");
+		std::smatch m;
+		REQUIRE(std::regex_search(body, m, dayNight));
+		const size_t at = static_cast<size_t>(m.position(0));
+		for (const char* pass : { "DrawViewportFrame(", "EncodeShadowMap(", "EncodeDecalDepth(", "DrawScene(" })
+		{
+			const size_t p = body.find(pass);
+			REQUIRE_MESSAGE(p != std::string::npos, pass);
+			CHECK_MESSAGE(at < p, pass);
+		}
+	}
+	// RenderSceneImage(): records DrawViewportFrame on its own.
+	{
+		const std::string body = bodyOf("bool VulkanRenderer::RenderSceneImage(");
+		std::smatch m;
+		REQUIRE(std::regex_search(body, m, dayNight));
+		const size_t p = body.find("DrawViewportFrame(");
+		REQUIRE(p != std::string::npos);
+		CHECK(static_cast<size_t>(m.position(0)) < p);
+	}
+	// Nowhere else: no pass in between re-pushes it (with other fields, say),
+	// so the frame's sun has one source. Exactly the two calls above.
+	size_t calls = 0;
+	for (size_t at = src.find("m_extractor.setDayNight("); at != std::string::npos;
+	     at = src.find("m_extractor.setDayNight(", at + 1))
+		++calls;
+	CHECK(calls == 2);
 }
 
 TEST_CASE("D3D11 main swapchain follows the window size (Thema 128)")
