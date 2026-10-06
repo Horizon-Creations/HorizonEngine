@@ -203,6 +203,10 @@ Messwerte vom 06.10.2026, Debug-Editor, Metal, Fenster 1600×900 pt:
 | `fly` | Scene (Mitte) | – | 3 990 pt² |
 | `layout` | Scene + Outliner + Details + Content Browser | – | 47 680 pt² (nur Scene) |
 
+Dazu ein Lauf über **alle 27 Schritte**, deren Zielpanel Details oder der Content Browser
+ist, in der Reihenfolge des Rundgangs (die Karte wandert also von Schritt zu Schritt mit,
+wie beim Nutzer): von `add-mesh` bis `input-mapping` überall 0 pt² überdeckt.
+
 Bei `fly` und `layout` passt die 430×340 große Karte in keine Lücke des Standard-Layouts.
 Die linke Spalte ist 287 pt breit, die rechte 341 pt, der Content Browser 280 pt hoch.
 Die Karte nimmt dann die Stelle, die am wenigsten überdeckt. Bilder:
