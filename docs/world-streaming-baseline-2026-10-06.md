@@ -609,3 +609,104 @@ out/build/release/tests/he_tests --source-file='*test_world_scale.cpp'
 FRAMES=30 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws4/raw verwerfen 1000
 FRAMES=120 scripts/perf/world_streaming_ladder.sh /tmp/ws_proj/Test/Test.heproj /tmp/ws4/raw s4 1000 10000 50000
 ```
+
+## 10. Schritt 5: Verifikation, Vorher/Nachher und offene Punkte
+
+Stand 06.10.2026. Gemessen auf `ebec4fc6` (Ende Schritt 4), danach in Schritt 5 behoben:
+Frame-0/1-Hänger (`574c6910`), CBOR-Parse und Editor-Poll (`d6c807a7`), Pak-Abbruch (`496edb82`).
+
+### 10.1 Vollbau und Tests
+
+- `cmake --build out/build/release -j8` (Release, `HE_PROFILING=ON`, `HE_ENABLE_SHADERC=ON`): rc 0,
+  zweiter Lauf ohne Arbeit, 0 Treffer für `error:` im Log.
+- `ctest -j4 --timeout 1500`: **`100% tests passed out of 237`**, `CTEST_RC=0`, 206 s. Zwei Fälle
+  hat ctest übersprungen (`runtime_size_app_*`, Skip-Fälle). Der Lauf ging per Hintergrund-Task,
+  das Ergebnis ist aus dem Log nachgeprüft, nicht aus der Meldung übernommen.
+- Nach den Fixes: siehe 10.5 (voller Lauf auf dem End-Stand).
+
+### 10.2 Messbedingungen
+
+Wie 8.1/9.1 (M5, Release, `--warmup 0`, 120 Frames, verworfener Lauf vorweg), mit zwei
+Unterschieden:
+- **Bildschirm nicht gesperrt** (die Leiter meldet `locked=none`, Schritt 1: gesperrt). Die CPU-Scopes
+  sind davon unberührt, FPS und `NextDrawable` bei 1k schon (1k: 24 Frames über 2× Median, das ist
+  vsync, kein Engine-Hänger).
+- Load average 3,0–3,8 (Schritt 1: 2,1–2,8), GPU-Fremdlast 26 %. **Stromsparmodus AN** wie immer.
+
+„Vorher“ ist Abschnitt 3 (main + Messhilfen, `3e9dd8e3`), nicht neu gebaut.
+
+### 10.3 Vorher/Nachher (Editor, Referenzwelt aus Abschnitt 2)
+
+| Entities | Laden vorher → **nachher** | CPU/Frame p50 vorher → **nachher** | bis Frame 2 vorher → nachher¹ | RSS max vorher → nachher |
+|---|---|---|---|---|
+| 1 078 | 37 → **25 ms** | 8,6 → **4,5 ms** | ~1,9 → 1,75 s | 347 → 341 MB |
+| 10 168 | 280 → **142 ms** | 64,4 → **25,5 ms** | – → 1,75 s | 432 → 325 MB |
+| 50 568 | 1 314 → **744 ms** | 322,5 → **120,4 ms** | ~3,9 → 2,7 s | 1 154 → 505 MB |
+| 101 068 | 2 495 → **1 349 ms** | 662,2 → **237,1 ms** | ~6,1 → 3,7 s | 2 126 → 736 MB |
+| 202 068 | 5 256 → **2 770 ms** | 1 312,7 → **461,8 ms** | ~10,6 → 5,7 s | 4 149 → 933 MB |
+
+¹ Szene öffnen (`SceneOpenTiming total`) plus Frame 0 und 1, wie in 3.4. Auf `ebec4fc6` gemessen,
+also **vor** dem Frame-0/1-Fix (10.4); der zieht bei 1k weitere ~0,37 s ab.
+
+- **Laden:** −33 % (1k) bis −47 % (200k), `parse` 200k 3 264 → 1 372 ms, `build` unverändert
+  (~7 µs/Entity, Aufbau war nie Thema eines Umbaus).
+- **Entity-Grenze** (CPU-Frame p50, Kriterium aus 3.6, linear interpoliert): 30 FPS bei
+  **≈ 13 500** statt ≈ 5 000 Entities, 60 FPS bei **≈ 6 400** statt ≈ 2 300. Pro Entity und Frame
+  2,35 µs statt 6,45 µs.
+- **Weltgröße:** Referenzwelt 8 × 8 km wie vorher. Jolt trägt 65 536 Bodies statt 1 024
+  (`test_world_scale`). Die Präzisionsgrenze aus 3.5 (Zittern ab ~32 km) gilt ohne Floating Origin
+  weiter, siehe 10.6.
+- Rohdaten: `docs/perf-audit/raw-streaming/s5-*`, Tabelle mit allen Scopes in `s5-table.md`,
+  erzeugt von `scripts/perf/ladder_table.py`.
+
+Wohin die Frame-Zeit bei 50k jetzt geht (xctrace, Hauptthread, 9,6 s): `RenderExtractor::extract`
+59 % (der volle Lauf im Schattenpass und im Pick-Snapshot des `ViewportPanel`), darin
+`propagateFrom` 21 % Eigenzeit (der Lauf über die Hierarchie selbst, die Matrizen kommen aus dem
+Cache), `OutlinerPanel::render` 12 %.
+
+### 10.4 Frame-0/1-Hänger: Ursache und Fix
+
+Die 0,38 + 0,77 s in `Metal::EncodeScene` (unabhängig von der Entity-Zahl) waren **Wartezeit, keine
+CPU-Zeit**: der Time Profiler sah sie nicht. `sample` (zählt auch blockierte Stacks) zeigte
+`GetOrBuildMaterialPipeline` → `MaterialShaderLibrary::fragmentVariant` → glslang → SPIR-V → MSL
+und danach die Metal-Bibliothek. Übersetzt wurde ein einziges Material: das Billboard-Icon der
+Punktlichter im Editor (`kEditorIconPointLightMaterialId`, die Referenzwelt hat 64 Punktlichter),
+opak und als Blend-Variante.
+- `warmupWorldMaterials` kannte die Icon-Materialien nicht (keine Komponente referenziert sie).
+- `WarmupMaterials` (Metal) baute nur die opake Variante, `EncodeScene` baut für jedes Graph-Material
+  zusätzlich die Blend-Variante.
+
+Fix (`574c6910`): Warmup baut die Blend-Variante mit, der Editor wärmt die fünf Icon-Materialien.
+1k: Frame 0/1 **382/769 → 157/77 ms**, `EncodeScene` darin 334/738 → 44/0,2 ms. Die Übersetzung
+läuft jetzt im Warmup (570 → 1 112 ms, beim Laden statt im ersten Bild). Bis zum ersten ruhigen
+Frame: 1,75 → 1,38 s. Rest in Frame 0/1: der erste Editor-UI-Frame (`OnRender` 84 ms) und
+`PollEvents` (66 ms, Fenster-Ereignisse des Systems).
+
+### 10.5 Weitere Fixes in Schritt 5
+
+| Punkt | Fix | Beleg |
+|---|---|---|
+| CBOR-Szenen parsen sequentiell (8.5) | `HE::parseSceneCbor`: Elementgrenzen aus den CBOR-Köpfen, Stücke auf dem Pool, Rückfall auf `from_cbor` bei jeder unerwarteten Form. In `loadBinary`, `loadAdditive` (binär), `loadFromMemory` (Undo, Spielstart aus der `.hpak`), `loadAdditiveFromMemory`, `instantiatePrefab`. `loadBinary` loggt jetzt auch `SceneLoadTiming` | Bench 200k (48 MiB): **2,2 s → 0,8–1,5 s** bei Last ~1,8 (bei Last 4–7: 1,6–1,8 → 1,4–2,1 s, die E-Kerne sind dann belegt). Tests in `test_scene_serializer` |
+| Editor pollt ohne Zeitbudget (8.5) | `pollAsyncResults(16, 2 ms)`, eingetroffene Materialien werden vorgewärmt | `EditorApplication.cpp` |
+| Pak-Loads nur vor dem Start abbrechbar (8.5, Schritt 2) | `HpakReader::readEntry(id, key, stop, &stopped)`: fragt zwischen 4-MiB-Leseblöcken, vor jedem Dekodierschritt und zwischen 4-MiB-Fenstern der zstd-Dekodierung; der Pak-Job meldet `cancelled` | `test_hpak` „readEntry with a stop condition“ |
+
+### 10.6 Alle offenen Punkte aus Abschnitt 1–9
+
+| Punkt (Abschnitt) | Urteil |
+|---|---|
+| Jolt > 1 024 Bodies (6, 3.6) | **erledigt** in Schritt 4 (65 536, Test mit 3 000 Bodies) |
+| 200k nicht nachgemessen (9.4) | **erledigt**, 10.3 |
+| Frame-0/1-Hänger `EncodeScene` (3.4, 6, 8.5) | **behoben**, 10.4 |
+| CBOR-Szenen sequentiell (8.5) | **behoben**, 10.5 |
+| Editor-Poll ohne Zeitbudget (8.5) | **behoben**, 10.5 |
+| Pak-Loads nur vor dem Start abbrechbar (8.5) | **behoben**, 10.5 |
+| Floating Origin (3.5, 5, 9.4) | in Arbeit (Schritt 5) |
+| Entities pro Zelle streamen, Vorausladen nach Kamera (8.5, 9.4) | in Arbeit (Schritt 5) |
+| Messung ohne Stromsparmodus und Sperre (6) | **nicht behebbar ohne Mensch**: `pmset lowpowermode 0` braucht sudo. Alle Zahlen sind E-Kern-Zahlen, vorher wie nachher |
+| `releaseOnWorker` gibt spät frei (8.5) | **kein Fehler**, Beobachtung: eine RSS-Messung direkt nach `load` sieht den Baum noch. Bleibt so |
+| GPU-Upload ohne Budget (4.2, 8.5) | **außerhalb des Rahmens**: Upload passiert im Backend beim ersten Zeichnen (`ResolveMesh`); ein Budget ist Renderer-Arbeit in fünf Backends, das Thema schließt Renderer-Features und Backend-Parität aus. Die Referenzwelt lädt keine Meshes aus Assets, ein Upload-Hänger ist hier nicht messbar |
+| Spiel-Runtime nur über Bench, nicht über ein exportiertes Spiel (6, 8.5) | **offen, Werkzeuglücke**: `he_perf_capture` startet nur den Editor, einen Export von der Kommandozeile gibt es nicht. Der Spielpfad ist über die Benches gemessen (Pak-Streaming 8.3, CBOR 10.5) |
+| Pick-Snapshot des `ViewportPanel` extrahiert voll (9.4) | **gehört zu Schritt 6** (Editor-Integration): ≈ 30 ms bei 50k, nur Editor |
+| Vulkan/andere Backends ohne `FrameScope` (9.4) | **außerhalb des Rahmens** (Backend-Parität ausgeschlossen) |
+| Jolt single-threaded (3.6, 9.4) | offen, siehe 10.7 |
+| Outliner ohne `ImGuiListClipper` (9.4) | **gehört zu Schritt 6**: die teuren Icons sind weg (Schritt 4), Rest 12 % bei 50k |
