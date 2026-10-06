@@ -1,7 +1,7 @@
 # HTML-Altlasten im Repo: Bestandsaufnahme (Thema 156, Schritt 1)
 
 Stand: 2026-10-06, Zweig `claude/html-dateien-aus-dem-repo-aufraeumen` auf 9b00bfb1.
-Bisher ist nichts gelöscht. Hier steht nur, was im Repo liegt, wer darauf verweist und was mit jeder Gruppe passieren soll.
+Die Bestandsaufnahme beschreibt den Stand vor dem Löschen: was im Repo liegt, wer darauf verweist und was mit jeder Gruppe passieren soll. Was Schritt 2 tatsächlich entfernt hat, steht unter [„Schritt 2: entfernt“](#schritt-2-entfernt).
 
 ## Ergebnis
 
@@ -35,6 +35,27 @@ Durchsucht wurden mit `git grep` diese Pfade: `CMakeLists.txt`, `cmake/`, `scrip
 - **Arbeitsbaum und Checkout:** Jeder Checkout und jeder neue Worktree wird um rund 22,6 MiB und 1374 Dateien kleiner. Bei vielen parallelen Worktrees auf NN-WS03 ist das der eigentliche Gewinn.
 - **Voller Clone: praktisch kein Gewinn.** Die Historie wird nicht umgeschrieben (kein filter-repo, kein Force-Push), die Blobs bleiben also im Pack. Komprimiert machen sie ohnehin nur etwa 2,1 MiB aus (`objectsize:disk`), das gesamte Pack ist 296 MiB groß.
 - **Flacher Clone:** Hier sinkt die Transfergröße um diese etwa 2,1 MiB. Das betrifft die CI: `actions/checkout@v4` steht in `ci.yml` und `runtime-flavors.yml` ohne `fetch-depth`, also mit der Vorgabe 1. In `claude.yml` ist `fetch-depth: 1` ausdrücklich gesetzt.
+
+## Schritt 2: entfernt
+
+Der Chefchen hat Variante B entschieden. Mit `git rm -r src/HE_Rendering/glm/doc/api` ist das Verzeichnis aus dem Index und aus dem Arbeitsbaum verschwunden: 1374 Dateien, 22,59 MiB Blobgröße (1247 HTML, 98 JS, 26 PNG, 3 CSS).
+
+- **Geblieben in `glm/doc/`:** `man.doxy`, `manual.pdf`, `manual/` und `theme/`. Sie enthalten kein HTML, und `glm/manual.md` braucht die Bilder aus `manual/`. Danach verweist im Repo nichts mehr auf `doc/api` (`git grep 'doc/api'` findet nur dieses Dokument).
+- **Geblieben sind auch die übrigen 44 HTML-Dateien:** die 43 Overlay-Seiten der Script-API-Referenz und `shell_minimal.html` aus den imgui-Beispielen, beide begründet in der Tabelle oben. `git ls-files '*.html' '*.htm'` zählt jetzt 44 statt 1291 Dateien.
+- **GLM-Quellcode** (`glm/glm`, `glm/test`, `glm/util`) bleibt unberührt.
+
+### Warum die Doku zurückkommen kann: kein Vendoring-Verfahren, sondern ein versehentlicher Wiedereinzug
+
+Ein beschriebenes Verfahren zum Vendoren von GLM gibt es im Repo nicht. Es gibt deshalb auch keine Stelle, an der man „`doc/api` nicht mitnehmen“ eintragen könnte. Die Historie zeigt aber, wie die Dateien hereingekommen sind:
+
+1. `14d1c7d2` (Initial-Commit) hat die komplette GLM-Kopie samt `doc/api` eingecheckt.
+2. `8a9a79f3` (2026-06-17, „Cleanup: remove vendored glm from HE_Rendering (MASTERPLAN 0.6)“) hat alle 2090 Dateien entfernt, laut `CopilotDocs/MASTERPLAN.md` (Forts. 28) mit `git rm -r --cached`. Die Dateien blieben also auf der Platte liegen, und ein Ignore-Eintrag kam nicht dazu.
+3. `fd81c830` (2026-06-19, „Landscape: brush fixes, new sculpt tools, seed bake + 3D grid preview“) hat zusammen mit Editor-Änderungen alle 2090 Dateien unter `src/HE_Rendering/glm/` wieder eingecheckt, darunter alle 1374 aus `doc/api` (gezählt mit `git diff-tree -r --name-only --diff-filter=A`). Wahrscheinlich ist das durch `git add -A` oder `git add .` in einem Arbeitsbaum passiert, in dem die ungetrackten Dateien noch lagen.
+
+Daraus folgt für dieses Thema:
+
+- Schritt 2 löscht mit `git rm -r` **ohne** `--cached`. In diesem Worktree ist `doc/api` auch auf der Platte weg. Andere Checkouts (Hauptarbeitsbaum, weitere Worktrees) verlieren die Dateien, sobald sie diesen Stand auschecken oder mergen, weil Git getrackte Dateien beim Checkout mitlöscht.
+- **Für Schritt 3 (Rückfallschutz):** Der wahrscheinliche Rückweg ist ein `git add -A` mit liegengebliebenen Dateien, kein Re-Vendoring. Ein Ignore-Eintrag muss außerdem zwei Ausgabeorte abdecken: `src/HE_Rendering/glm/doc/api/` (der eingecheckte Upstream-Stand) und `src/HE_Rendering/glm/doc/html/`. Denn `doc/man.doxy` setzt `OUTPUT_DIRECTORY = .` und `HTML_OUTPUT = html`, ein lokaler Doxygen-Lauf schreibt also nach `doc/html/`, nicht nach `doc/api/`.
 
 ## Für ein späteres Thema notiert (nicht Teil von Thema 156)
 
