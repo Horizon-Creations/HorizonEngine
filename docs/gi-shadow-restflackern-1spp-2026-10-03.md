@@ -510,6 +510,18 @@ ihres statischen Zwillings, wie in §1.
 * `HE_GI_FORCE_SW=1` auf D3D12/Vulkan (SW-Strahlen auf RT-Hardware) gleicht dem HW-Pfad bis
   auf ±0.004 in Flackern, rmse, bias und sharp_rmse (s6, s05, pan6), p99 ±0.1. Das ist
   derselbe Befund wie auf dem M5 (§8.1).
+* **Der HW-Schattenkernel war im Bild**, nicht nur „verfügbar“. Belegt mit Negativkontrollen
+  am Deploy, danach die Originaldatei zurück und gegen den Build gehasht:
+  * **D3D12:** ohne `gi_shadow_hw.cso` meldet das Log „DXR kernel not found — software GI
+    kernels stay active“. Das Bild ist dann bitgleich zu `HE_GI_FORCE_SW`. Gegen den normalen
+    Lauf weichen 52 Pixel ab, max. 0.9 Graustufen, alle im Schattenband oder höchstens 4 px
+    daneben und kein einziger sonst im Bild. Weil zwei Läufe bitgleich sind, kann diese
+    Abweichung nur vom DXR-Kernel kommen, und zwar dem der Maske.
+  * **Vulkan:** Ohne die `.spv` schaltet der Renderer HW ganz ab, die Probes eingeschlossen.
+    Die Abweichung verteilt sich dann über das ganze Bild, deshalb dort der schärfere Test:
+    `gi_shadow_hw.comp` mit fester Sichtbarkeit 1.0 kompiliert (`glslc --target-env=vulkan1.2`,
+    sonst unverändert). Die Kontrolle ist bytegleich zum Deploy. Mit der Sabotage-Datei
+    verschwinden die Sonnenschatten: Minimum im Band 104 → 188, mittlere Abweichung 36.
 
 **Flackern** Stock → Umsetzung (Mittel im Kantenband; M5-Spalte aus §8.1):
 
