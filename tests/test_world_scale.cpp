@@ -843,3 +843,37 @@ TEST_CASE("Cell streaming bench: whole reference world against base plus nearby 
 		s.clear(world);
 	}
 }
+
+// A measurement, not a check (does not run in CI): one physics step with a few
+// thousand dynamic bodies in contact, the case Jolt's job system parallelises.
+//   out/build/release/tests/he_tests --no-skip --test-case='Physics step bench*'
+TEST_CASE("Physics step bench: 4000 dynamic boxes settling on a floor" * doctest::skip())
+{
+	HorizonWorld world;
+	const Entity floor = world.createEntity("Floor");
+	tf(world, floor).scale = glm::vec3(400.0f, 1.0f, 400.0f);
+	RigidBodyComponent frb; frb.type = RigidBodyType::Static;
+	world.addComponent(floor, frb);
+	for (int i = 0; i < 4000; ++i)
+	{
+		const Entity e = world.createEntity("Box");
+		tf(world, e).position = glm::vec3(static_cast<float>(i % 40) * 1.2f - 24.0f,
+		                                  2.0f + static_cast<float>(i / 1600) * 1.1f,
+		                                  static_cast<float>((i / 40) % 40) * 1.2f - 24.0f);
+		RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.mass = 1.0f;
+		world.addComponent(e, rb);
+	}
+	PhysicsWorld phys;
+	phys.initialize(world);
+	// From the drop on: falling, landing and piling up, before anything sleeps.
+	std::vector<double> steps;
+	for (int i = 0; i < 180; ++i)
+	{
+		const auto t0 = std::chrono::steady_clock::now();
+		phys.step(world, 1.0f / 60.0f);
+		steps.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+	}
+	std::sort(steps.begin(), steps.end());
+	MESSAGE("4000 bodies: step p50 " << steps[steps.size() / 2] << " ms, p90 " << steps[steps.size() * 9 / 10]
+	        << " ms, max " << steps.back() << " ms");
+}

@@ -1,6 +1,7 @@
 // Must come first — Jolt requires this before any other Jolt include.
 #include <Jolt/Jolt.h>
 #include <algorithm>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <unordered_set>
@@ -10,7 +11,7 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/TempAllocator.h>
-#include <Jolt/Core/JobSystemSingleThreaded.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -270,11 +271,22 @@ public:
         }
     }
 
+    // With Jolt's thread pool the callbacks above arrive from several workers,
+    // in whatever order they finish. Handing the events out sorted by entity
+    // pair keeps what scripts see the same from run to run (Thema 153).
+    static void sortEvents(std::vector<PhysicsWorld::CollisionEvent>& events)
+    {
+        std::sort(events.begin(), events.end(),
+                  [](const PhysicsWorld::CollisionEvent& a, const PhysicsWorld::CollisionEvent& b)
+                  { return a.entityA != b.entityA ? a.entityA < b.entityA : a.entityB < b.entityB; });
+    }
+
     std::vector<PhysicsWorld::CollisionEvent> pollEntered()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_entered);
+        sortEvents(result);
         return result;
     }
 
@@ -283,6 +295,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_enteredOverlap);
+        sortEvents(result);
         return result;
     }
 
@@ -291,6 +304,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_exitedOverlap);
+        sortEvents(result);
         return result;
     }
 
@@ -299,6 +313,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_exited);
+        sortEvents(result);
         return result;
     }
 
@@ -393,7 +408,7 @@ struct PhysicsWorld::Impl
 
     // Both must outlive every Update() call — keep as members.
     JPH::TempAllocatorImpl       tempAllocator{ 10u * 1024u * 1024u };
-    JPH::JobSystemSingleThreaded jobSystem;
+    JPH::JobSystemThreadPool     jobSystem;
     JPH::PhysicsSystem           physicsSystem;
     HEContactListener            contactListener;
 
@@ -571,7 +586,13 @@ struct PhysicsWorld::Impl
 
     Impl()
     {
-        jobSystem.Init(JPH::cMaxPhysicsJobs);
+        // Jolt's own worker threads (the caller joins in too): up to four,
+        // half the cores minus one, so a step with thousands of bodies in
+        // contact is not one core's work while the engine pool sits next to
+        // it. The simulation stays deterministic whatever the count (Jolt,
+        // Docs/Architecture.md "Deterministic Simulation").
+        const int hw = static_cast<int>(std::thread::hardware_concurrency());
+        jobSystem.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::clamp(hw / 2 - 1, 0, 4));
         physicsSystem.Init(
             kMaxBodies,
             0,      // num body mutexes (0 = auto)
