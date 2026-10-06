@@ -45,6 +45,7 @@
 #include "Diagnostics/Profiler.h"
 #include "Diagnostics/EngineProfiler.h"
 #include <cmath>
+#include <unordered_set>
 
 namespace {
 // Build the GPU precipitation parameters from the EnvironmentComponent (the single
@@ -236,45 +237,67 @@ void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float 
     HE::poseEndFrame(world);
 }
 
-std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
+namespace {
+
+// One list of "which component field names an asset", for both the whole world
+// and a subset — two copies would drift the first time a component is added.
+template<typename Keep>
+std::vector<HE::UUID> collectAssetRefsWhere(HorizonWorld& world, Keep keep)
 {
     std::vector<HE::UUID> out;
     auto& reg = world.registry();
     auto add = [&](HE::UUID id) { if (id != HE::UUID{}) out.push_back(id); };
 
-    for (auto [e, c] : reg.view<MeshComponent>().each())            add(c.meshAssetId);
-    for (auto [e, c] : reg.view<MaterialComponent>().each())        add(c.materialAssetId);
-    for (auto [e, c] : reg.view<SkeletalMeshComponent>().each())    add(c.meshAssetId);
-    for (auto [e, c] : reg.view<ScriptComponent>().each())          add(c.scriptAssetId);
-    for (auto [e, c] : reg.view<FoliageComponent>().each())         { add(c.meshAssetId); add(c.materialAssetId); }
-    for (auto [e, c] : reg.view<ParticleSystemComponent>().each())  add(c.particleAssetId);
-    for (auto [e, c] : reg.view<AnimatorComponent>().each())        add(c.clipAssetId);
-    for (auto [e, c] : reg.view<AnimatorBlendComponent>().each())   { add(c.clipAId); add(c.clipBId); }
+    for (auto [e, c] : reg.view<MeshComponent>().each())            if (keep(e)) add(c.meshAssetId);
+    for (auto [e, c] : reg.view<MaterialComponent>().each())        if (keep(e)) add(c.materialAssetId);
+    for (auto [e, c] : reg.view<SkeletalMeshComponent>().each())    if (keep(e)) add(c.meshAssetId);
+    for (auto [e, c] : reg.view<ScriptComponent>().each())          if (keep(e)) add(c.scriptAssetId);
+    for (auto [e, c] : reg.view<FoliageComponent>().each())         if (keep(e)) { add(c.meshAssetId); add(c.materialAssetId); }
+    for (auto [e, c] : reg.view<ParticleSystemComponent>().each())  if (keep(e)) add(c.particleAssetId);
+    for (auto [e, c] : reg.view<AnimatorComponent>().each())        if (keep(e)) add(c.clipAssetId);
+    for (auto [e, c] : reg.view<AnimatorBlendComponent>().each())   if (keep(e)) { add(c.clipAId); add(c.clipBId); }
     // Every layer's clip, its additive reference clip and its mask. What is not
     // listed here is not packed, and a layer whose mask did not travel would go
     // from "upper body only" to "affects nothing" in the packaged build.
     for (auto [e, c] : reg.view<AnimationLayerComponent>().each())
-        for (const auto& l : c.layers)
-            { add(l.clipId); add(l.blendSpaceId); add(l.maskId); add(l.additiveRefClipId); }
-    for (auto [e, c] : reg.view<PropertyAnimatorComponent>().each()) add(c.clipId);
+        if (keep(e))
+            for (const auto& l : c.layers)
+                { add(l.clipId); add(l.blendSpaceId); add(l.maskId); add(l.additiveRefClipId); }
+    for (auto [e, c] : reg.view<PropertyAnimatorComponent>().each()) if (keep(e)) add(c.clipId);
     // The sequence only: what it plays (clips, sounds) is its OWN dependency and
     // follows it — ContentManager::expandFrontier when streaming, the second pass
     // in preloadAssetRefs when not. Looking into it here would need the asset
     // loaded before the list that decides what to load is even made.
-    for (auto [e, c] : reg.view<SequencePlayerComponent>().each())  add(c.sequenceId);
-    for (auto [e, c] : reg.view<AudioSourceComponent>().each())     add(c.assetId);
-    for (auto [e, c] : reg.view<UIImageComponent>().each())         add(c.materialAssetId);
-    for (auto [e, c] : reg.view<TerrainComponent>().each())         add(c.heightmapTexture);
+    for (auto [e, c] : reg.view<SequencePlayerComponent>().each())  if (keep(e)) add(c.sequenceId);
+    for (auto [e, c] : reg.view<AudioSourceComponent>().each())     if (keep(e)) add(c.assetId);
+    for (auto [e, c] : reg.view<UIImageComponent>().each())         if (keep(e)) add(c.materialAssetId);
+    for (auto [e, c] : reg.view<TerrainComponent>().each())         if (keep(e)) add(c.heightmapTexture);
     // Only the MATERIAL of a rope or a trail. RopeComponent::runtimeMeshId is
     // the UUID of a procedural mesh that exists in memory and nowhere else — put
     // it in here and the packer would go looking for a file that was never written.
-    for (auto [e, c] : reg.view<RopeComponent>().each())            add(c.materialAssetId);
-    for (auto [e, c] : reg.view<TrailComponent>().each())           add(c.materialAssetId);
-    for (auto [e, c] : reg.view<WeatherComponent>().each())         add(c.thunderSound);
-    for (auto [e, c] : reg.view<LODComponent>().each())             for (const auto& lvl : c.levels) add(lvl.meshId);
-    for (auto [e, c] : reg.view<AnimatorStateMachineComponent>().each()) add(c.stateMachineAssetId);
+    for (auto [e, c] : reg.view<RopeComponent>().each())            if (keep(e)) add(c.materialAssetId);
+    for (auto [e, c] : reg.view<TrailComponent>().each())           if (keep(e)) add(c.materialAssetId);
+    for (auto [e, c] : reg.view<WeatherComponent>().each())         if (keep(e)) add(c.thunderSound);
+    for (auto [e, c] : reg.view<LODComponent>().each())             if (keep(e)) for (const auto& lvl : c.levels) add(lvl.meshId);
+    for (auto [e, c] : reg.view<AnimatorStateMachineComponent>().each()) if (keep(e)) add(c.stateMachineAssetId);
 
     return out;
+}
+
+} // namespace
+
+std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
+{
+    return collectAssetRefsWhere(world, [](entt::entity) { return true; });
+}
+
+std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world,
+                                                     const std::vector<uint32_t>& onlyEntities)
+{
+    const std::unordered_set<uint32_t> only(onlyEntities.begin(), onlyEntities.end());
+    return collectAssetRefsWhere(world, [&](entt::entity e) {
+        return only.count(static_cast<uint32_t>(e)) > 0;
+    });
 }
 
 size_t SceneSystems::preloadAssetRefs(HorizonWorld& world, ContentManager& cm)

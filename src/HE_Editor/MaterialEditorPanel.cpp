@@ -1606,7 +1606,10 @@ void applyPreviewMesh(State& st, AppContext& ctx, const std::string& path,
 void startPreviewMeshLoad(State& st, AppContext& ctx, const std::string& path, const std::string& label)
 {
 	if (!ctx.contentManager) return;
-	ctx.contentManager->loadAssetAsync(path);
+	// Normal, not the streaming default Low: someone is looking at a progress bar.
+	HE::AsyncLoadOptions options;
+	options.priority = HE::JobPriority::Normal;
+	ctx.contentManager->loadAssetAsync(path, {}, options);
 	st.pendingMeshPath  = path;
 	st.pendingMeshLabel = label;
 	st.pendingMeshStart = ImGui::GetTime();

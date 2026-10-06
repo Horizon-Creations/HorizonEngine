@@ -6,6 +6,8 @@
 #include <memory>
 #include <unordered_map>
 #include <cstdint>
+#include <vector>
+#include <JobSystem/JobSystem.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
@@ -127,7 +129,13 @@ private:
     // async UUID loader resolves from mounted paks first and falls back to the disk
     // registry, so this also works for a WIP build running on loose content.
     // Returns the number of seeded asset roots (for the log lines).
-    size_t streamSceneAssets(HorizonWorld& world);
+    //
+    // `token` is who the loads belong to (a scene, a preloaded level, a zone):
+    // cancelling it drops every load of theirs that has not started yet and that
+    // nobody else asked for. `onlyEntities` limits the seed to those entities —
+    // a zone streams what IT brought in, not the whole merged world again.
+    size_t streamSceneAssets(HorizonWorld& world, const HE::CancelToken& token,
+                             const std::vector<uint32_t>* onlyEntities = nullptr);
 
     ProjectConfig                 m_config;
     // The project's settings file, read from <exeDir>/Config/ProjectSettings.json
@@ -312,7 +320,9 @@ private:
     // project settings are up (plan §5.7). They call the same rows a menu does.
     void applyNetLaunchArguments();
     // Swap the running world for an already-loaded one (shared by switch + activate).
-    void swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label);
+    // `streamToken` becomes the scene's streaming token; the old one is cancelled.
+    void swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label,
+                     HE::CancelToken streamToken);
     // Resolve a project-relative .hescene: packed pak entry (path-derived UUID)
     // → loose JSON in the project → loose JSON next to the executable.
     bool loadSceneInto(HorizonWorld& world, const std::string& scenePath,
@@ -322,5 +332,16 @@ private:
     // scene.activate(). Zone bookkeeping lives centrally in HE::api::scene.
     std::unique_ptr<HorizonWorld> m_pendingWorld;
     std::string                   m_pendingScenePath;
+
+    // Streaming ownership (Thema 153, step 2). Each owner cancels its token when
+    // it goes away, so loads queued for something that no longer exists are
+    // dropped instead of keeping workers busy: the running scene's on a scene
+    // switch, a preloaded level's when another replaces it, a zone's on unload.
+    // A preloaded level's token moves to the scene on activate — it is the same
+    // world, still wanting the same assets.
+    HE::CancelToken                     m_sceneStreamToken;
+    HE::CancelToken                     m_pendingStreamToken;
+    std::unordered_map<int, HE::CancelToken> m_zoneStreamTokens;
+    void cancelZoneStreaming();
 };
 

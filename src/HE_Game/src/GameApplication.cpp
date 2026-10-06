@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "EmbeddedPakKey.h"
 #include <fstream>
+#include <utility>
 #include <Hpak/ProjectConfig.h>
 #include <Application/AppIcon.h>       // the window icon the export generated
 #include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
@@ -1362,9 +1363,12 @@ void GameApplication::OnInit()
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
 	if (!m_appMode)
+	{
+		m_sceneStreamToken = HE::CancelToken::create();
 		HE_LOG_INFO(Core, "%s",
-			("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
+			("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world, m_sceneStreamToken)) +
 			 " scene-referenced asset roots").c_str());
+	}
 
 	// Native C++ game logic: an optional GameLogic library next to the executable
 	// (built from the game's C++ project). Once loaded, the base Application loop
@@ -1446,11 +1450,21 @@ bool GameApplication::ensureDefaultCamera(HorizonWorld& world)
 	return true;
 }
 
-size_t GameApplication::streamSceneAssets(HorizonWorld& world)
+size_t GameApplication::streamSceneAssets(HorizonWorld& world, const HE::CancelToken& token,
+                                          const std::vector<uint32_t>* onlyEntities)
 {
-	const auto refs = SceneSystems::collectAssetRefs(world);
-	for (HE::UUID r : refs) contentManager().loadAssetAsync(r);
+	const auto refs = onlyEntities ? SceneSystems::collectAssetRefs(world, *onlyEntities)
+	                               : SceneSystems::collectAssetRefs(world);
+	HE::AsyncLoadOptions options;   // Low: never ahead of the frame's own work
+	options.cancel = token;
+	for (HE::UUID r : refs) contentManager().loadAssetAsync(r, {}, options);
 	return refs.size();
+}
+
+void GameApplication::cancelZoneStreaming()
+{
+	for (auto& [zone, token] : m_zoneStreamTokens) token.cancel();
+	m_zoneStreamTokens.clear();
 }
 
 // ── Scene transitions ────────────────────────────────────────────────────────
@@ -1673,12 +1687,20 @@ bool GameApplication::performSceneSwitch(const std::string& scenePath)
 			 "(packed entry, project file, exe dir)").c_str());
 		return false;
 	}
-	swapToWorld(std::move(newWorld), scenePath);
+	swapToWorld(std::move(newWorld), scenePath, HE::CancelToken::create());
 	return true;
 }
 
-void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label)
+void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label,
+                                  HE::CancelToken streamToken)
 {
+	// The old scene's (and its zones') loads that have not started are not
+	// wanted any more. Assets the new scene shares with it survive: it asks for
+	// them below under its own token before the next pollAsyncResults looks.
+	m_sceneStreamToken.cancel();
+	cancelZoneStreaming();
+	m_sceneStreamToken = std::move(streamToken);
+
 	// Tear down the old scene: unload event first (handlers still see the world),
 	// then scripts (finalizers may touch entities), sounds, zones. The app-level
 	// UI (m_widgets, the GameInstance's widgets) is deliberately NOT cleared — it
@@ -1726,7 +1748,7 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 
 	// Seamlessness comes from the async streaming pipeline: the swap itself is a
 	// cheap main-thread deserialize; meshes/textures stream in the background.
-	const size_t refCount = streamSceneAssets(*m_world);
+	const size_t refCount = streamSceneAssets(*m_world, m_sceneStreamToken);
 
 	startPhysics();
 	startScripts();
@@ -1763,11 +1785,14 @@ void GameApplication::executeSceneRequests()
 				break;
 			}
 			// Warm the pending scene's assets NOW so the later activate() swap
-			// presents without a streaming pop.
-			const size_t refCount = streamSceneAssets(*pending);
+			// presents without a streaming pop. A level preloaded before it and
+			// never activated is replaced: its loads are dropped first.
 			if (m_pendingWorld)
 				HE_LOG_WARN(Core, "%s",
 					("GameApplication: replacing pending scene '" + m_pendingScenePath + "'").c_str());
+			m_pendingStreamToken.cancel();
+			m_pendingStreamToken = HE::CancelToken::create();
+			const size_t refCount = streamSceneAssets(*pending, m_pendingStreamToken);
 			m_pendingWorld     = std::move(pending);
 			m_pendingScenePath = r.path;
 			HE::api::scene::notePendingLevel(true);
@@ -1784,7 +1809,10 @@ void GameApplication::executeSceneRequests()
 					"GameApplication: scene.activate with no pending scene (load hidden first)");
 				break;
 			}
-			swapToWorld(std::move(m_pendingWorld), m_pendingScenePath);
+			// Not cancelled: the preloaded world becomes the scene and still
+			// wants everything it asked for — its token just changes owner.
+			swapToWorld(std::move(m_pendingWorld), m_pendingScenePath,
+			            std::exchange(m_pendingStreamToken, HE::CancelToken{}));
 			m_pendingScenePath.clear();
 			HE::api::scene::notePendingLevel(false);
 			break;
@@ -1841,7 +1869,19 @@ void GameApplication::executeSceneRequests()
 			// Stream the merged zone's assets + start its ECS scripts. playOnStart
 			// audio is deliberately NOT re-fired (it would restart existing
 			// sources); zone audio starts from its scripts/graphs.
-			streamSceneAssets(*m_world);
+			//
+			// Only what the zone brought in, under the zone's own token: the
+			// rest of the world is already streaming under the scene's, and
+			// unloading the zone must drop exactly the zone's loads.
+			{
+				std::vector<uint32_t> zoneIds;
+				zoneIds.reserve(created.size());
+				for (entt::entity e : created) zoneIds.push_back((uint32_t)e);
+				HE::CancelToken& zoneToken = m_zoneStreamTokens[r.zone];
+				zoneToken.cancel();   // the same id loaded again: the old loads are stale
+				zoneToken = HE::CancelToken::create();
+				streamSceneAssets(*m_world, zoneToken, &zoneIds);
+			}
 			const int started = startScriptsFor(created);
 			HE_LOG_INFO(Core, "%s",
 				("GameApplication: zone " + std::to_string(r.zone) + " loaded ('" + r.path +
@@ -1894,6 +1934,13 @@ void GameApplication::executeSceneRequests()
 				++gone;
 			}
 			HE::api::scene::noteZoneUnloaded(r.zone);
+			// Loads still queued for the zone are dropped, unless the rest of
+			// the world asked for the same asset.
+			if (const auto t = m_zoneStreamTokens.find(r.zone); t != m_zoneStreamTokens.end())
+			{
+				t->second.cancel();
+				m_zoneStreamTokens.erase(t);
+			}
 			HE_LOG_INFO(Core, "%s",
 				("GameApplication: zone " + std::to_string(r.zone) + " unloaded ("
 				 + std::to_string(gone) + " entities)").c_str());
@@ -3423,6 +3470,12 @@ void GameApplication::OnShutdown()
 	HE::AppMacMenu::set({});
 	g_menuDirty = false;
 #endif
+
+	// Nothing streams for a game that is closing. Without this the process waits
+	// at exit for every queued load: the pool drains its queue before it stops.
+	m_sceneStreamToken.cancel();
+	m_pendingStreamToken.cancel();
+	cancelZoneStreaming();
 
 	// Stop audio first: sounds reference asset PCM the ContentManager owns.
 	m_audioEngine.shutdown();

@@ -17,11 +17,15 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/AudioSourceComponent.h>
+#include <JobSystem/JobSystem.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <thread>
 #include <cstring>
 
@@ -1759,6 +1763,160 @@ TEST_CASE("Pack skips PSHD when no backends selected")
     const MaterialAsset* m = loaded.getMaterial(id);
     REQUIRE(m != nullptr);
     CHECK(m->precompiledShaders.empty());
+
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
+}
+
+// ─── Pak streaming cancellation (Thema 153, Schritt 2) ───────────────────────
+
+namespace {
+
+// Every global-pool worker parked in a Normal task until release(): pak loads
+// requested meanwhile stay queued, so "cancelled before start" is deterministic.
+struct HeldGlobalPool
+{
+    std::atomic<bool> go{ false };
+    std::atomic<size_t> parked{ 0 };
+    std::vector<std::future<void>> blockers;
+    HeldGlobalPool()
+    {
+        ThreadPool& pool = globalPool();
+        for (size_t i = 0; i < pool.threadCount(); ++i)
+            blockers.push_back(pool.submit([this] {
+                parked.fetch_add(1);
+                while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }, "TestHeldGlobalPool"));
+        while (parked.load() < pool.threadCount()) std::this_thread::yield();
+    }
+    void release()
+    {
+        go.store(true);
+        for (auto& b : blockers) if (b.valid()) b.get();
+    }
+    ~HeldGlobalPool() { release(); }
+};
+
+HE::AsyncLoadOptions pakWithToken(const HE::CancelToken& t)
+{
+    HE::AsyncLoadOptions o;
+    o.cancel = t;
+    return o;
+}
+
+void pumpUntil(ContentManager& cm, const std::function<bool()>& done, int rounds = 500)
+{
+    for (int i = 0; i < rounds && !done(); ++i)
+    {
+        cm.pollAsyncResults();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
+
+} // namespace
+
+TEST_CASE("Pak streaming: cancelled loads drop, shared or re-requested ones still arrive")
+{
+    const HE::UUID a{0xCA11, 1}, b{0xCA12, 2}, c{0xCA13, 3};
+    HpakWriter p;
+    p.addEntry(a, makeMaterialBlob(a, "cancel_a"), {Hpak::Codec::Zstd});
+    p.addEntry(b, makeMaterialBlob(b, "cancel_b"), {Hpak::Codec::LZ4});
+    p.addEntry(c, makeMaterialBlob(c, "cancel_c"));
+    auto pak = std::filesystem::temp_directory_path() / "he_stream_cancel.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+
+    int aCalls = 0;
+    HE::UUID aGot{ 1, 1 };
+    {
+        HeldGlobalPool held;
+        HE::CancelToken zone  = HE::CancelToken::create();
+        HE::CancelToken scene = HE::CancelToken::create();
+        HE::CancelToken again = HE::CancelToken::create();
+        cm.loadAssetAsync(a, [&](HE::UUID u) { ++aCalls; aGot = u; }, pakWithToken(zone));
+        cm.loadAssetAsync(b, {}, pakWithToken(zone));
+        cm.loadAssetAsync(b, {}, pakWithToken(scene));   // b is shared with the scene
+        cm.loadAssetAsync(c, {}, pakWithToken(zone));
+        zone.cancel();                                  // the zone unloads...
+        cm.loadAssetAsync(c, {}, pakWithToken(again));  // ...and c is wanted again at once
+        CHECK(cm.asyncInFlightCount() == 3);
+    }
+    pumpUntil(cm, [&] { return cm.asyncInFlightCount() == 0; });
+    CHECK(cm.asyncInFlightCount() == 0);
+    CHECK_FALSE(cm.isLoaded(a));     // nobody wanted it any more
+    CHECK(aCalls == 1);
+    CHECK(aGot == HE::UUID{});
+    CHECK(cm.isLoaded(b));
+    CHECK(cm.isLoaded(c));
+
+    // The pak:// key of the dropped load is free again.
+    cm.loadAssetAsync(a);
+    pumpUntil(cm, [&] { return cm.isLoaded(a); });
+    CHECK(cm.isLoaded(a));
+
+    removeQuiet(pak);
+}
+
+TEST_CASE("Reference-graph streaming: dependencies are dropped with the asset that pulled them")
+{
+    // mesh → material → texture. The material and texture are requested by the
+    // frontier on the mesh's behalf, so they inherit the mesh's requesters: when
+    // the zone that asked for the mesh is gone, the rest of its closure is not
+    // loaded for nobody.
+    auto dir = std::filesystem::temp_directory_path() / "he_closure_cancel";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+
+    ContentManager cmSrc(dir.string());
+    TextureAsset tex; tex.type = HE::AssetType::Texture; tex.name = "tex"; tex.path = "tex.hasset";
+    tex.width = 2; tex.height = 2; tex.channels = 4; tex.data = std::vector<uint8_t>(16, 0x44);
+    REQUIRE(cmSrc.saveAsset(tex));
+    MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "mat"; mat.path = "mat.hasset";
+    mat.texturePaths = {"tex.hasset"};
+    REQUIRE(cmSrc.saveAsset(mat));
+    StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "mesh"; mesh.path = "mesh.hasset";
+    mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0}; mesh.indices = {0,1,2};
+    REQUIRE(cmSrc.saveAsset(mesh));
+
+    HpakWriter packer;
+    CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 3);
+    auto pak = std::filesystem::temp_directory_path() / "he_closure_cancel.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    HE::CancelToken zone = HE::CancelToken::create();
+    bool meshArrived = false, meshDropped = false;
+    cm.loadAssetAsync(mesh.id, [&](HE::UUID u) { (u == mesh.id ? meshArrived : meshDropped) = true; },
+                      pakWithToken(zone));
+    // Let the mesh read finish (it is not cancellable once started), then drop
+    // the zone BEFORE the poll that registers the mesh and expands its frontier.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    zone.cancel();
+    pumpUntil(cm, [&] { return (meshArrived || meshDropped) && cm.asyncInFlightCount() == 0; });
+    if (meshDropped)
+    {
+        // A loaded machine did not start the mesh within 200 ms, so the zone's
+        // cancel caught the mesh itself. Correct, but nothing left to check here.
+        MESSAGE("mesh load was dropped before it started; frontier inheritance not exercised");
+    }
+    else
+    {
+        REQUIRE(meshArrived);
+        CHECK(cm.isLoaded(mesh.id));
+        CHECK_FALSE(cm.isLoaded(mat.id));   // inherited the cancelled zone token
+        CHECK_FALSE(cm.isLoaded(tex.id));
+    }
+    CHECK(cm.asyncInFlightCount() == 0);
+
+    // A plain request afterwards streams the closure as usual: no stale keys.
+    cm.loadAssetAsync(mesh.id);
+    cm.loadAssetAsync(mat.id);
+    pumpUntil(cm, [&] { return cm.isLoaded(mat.id) && cm.isLoaded(tex.id); });
+    CHECK(cm.isLoaded(mat.id));
+    CHECK(cm.isLoaded(tex.id));
 
     removeQuiet(pak);
     he_test::removeAllQuiet(dir);

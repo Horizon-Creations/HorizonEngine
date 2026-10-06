@@ -17,11 +17,31 @@
 #include <unordered_set>
 #include <vector>
 #include <unordered_map>
+#include "JobSystem/JobSystem.h"
 
 // Forward-declares
 template<typename T> class AssetRef;
 namespace HAsset { class Reader; }
 class HpakReader;
+
+namespace HE {
+
+// How a background load is planned in the job system (JobSystem.h). What a plain
+// loadAssetAsync(path/uuid, callback) gets is exactly these defaults.
+struct AsyncLoadOptions
+{
+	// Streaming is background work by default: it never queues ahead of a frame's
+	// parallel_for helpers, and occupies at most the pool's Low cap of workers.
+	// Something a user is actively waiting for (a preview) may ask for Normal.
+	JobPriority priority = JobPriority::Low;
+	// Lets the requester drop the load again — a zone unloaded, a level replaced,
+	// a chunk the camera has left. Several requests for the same asset share ONE
+	// job, so the job is dropped only once EVERY requester's token is cancelled;
+	// a request without a token (the none token) keeps it alive for good.
+	CancelToken cancel;
+};
+
+} // namespace HE
 
 class HE_API ContentManager
 {
@@ -379,6 +399,19 @@ public:
 	// gets an empty UUID if the id is in no mount. Duplicate in-flight requests for
 	// the same UUID are coalesced.
 	void     loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> callback = {});
+	// The same two, planned by `options` (priority, cancellation). A load that is
+	// dropped because every requester cancelled reports like a failed one: the
+	// callback gets an empty UUID from pollAsyncResults(). Cancellation is checked
+	// before the job starts and, for a loose file, between its 4 MiB read blocks;
+	// a pak entry is read in one piece once started. A request that joins a
+	// load already in flight cannot raise its priority (it is already queued).
+	// An asset's baked dependencies (expandFrontier) inherit the requesters of the
+	// asset that pulled them in, so they are dropped together with it.
+	void     loadAssetAsync(const std::string& relativePath,
+	                        std::function<void(HE::UUID)> callback,
+	                        const HE::AsyncLoadOptions& options);
+	void     loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> callback,
+	                        const HE::AsyncLoadOptions& options);
 
 	// ── Remote (SFTP-backed) EngineContent assets ──────────────────────────────
 	// Registers `id` as resolvable via `materialize` instead of any local root —
@@ -566,16 +599,57 @@ private:
 	// Reference-graph frontier: enqueue a just-registered asset's baked UUID
 	// dependencies (mesh→material, material→textures) for async streaming. Called
 	// from pollAsyncResults on the main thread. No-op for loose assets.
-	void expandFrontier(HE::UUID id);
+	struct LoadRequester;
+	void expandFrontier(HE::UUID id, const LoadRequester& requester);
 
 	// ── Async streaming state ─────────────────────────────────────────────────
 	struct AsyncResult {
-		std::string                    relativePath;
+		std::string                    relativePath;   // or the pak:// coalesce key
 		std::string                    fullPath;
 		std::vector<uint8_t>           fileBytes;   // populated on background thread
 		std::function<void(HE::UUID)>  callback;
 		bool                           failed = false;
+		// Dropped because nobody wanted it any more — either before the job
+		// started (JobDesc::onCancelled) or between read blocks. Not a failure:
+		// pollAsyncResults checks whether someone asked again meanwhile.
+		bool                           cancelled = false;
+		HE::UUID                       pakId{};       // pak loads: what to relaunch
 	};
+
+	// Who asked for a load: their cancel tokens, or `pinned` when one of them
+	// cannot cancel. The priority is the highest anyone asked for, used when a
+	// dropped load has to be started again.
+	struct LoadRequester {
+		std::vector<HE::CancelToken> tokens;
+		bool                         pinned   = false;
+		HE::JobPriority              priority = HE::JobPriority::Low;
+		static LoadRequester from(const HE::AsyncLoadOptions& options);
+	};
+	// Everyone interested in ONE in-flight load (one coalesce key). Shared with
+	// the job, whose stale() check runs on a worker — hence its own mutex. The
+	// load is stale once no requester is left: not pinned, and every token
+	// cancelled. Not sticky: a new requester joining revives it.
+	struct LoadInterest {
+		mutable std::mutex m;
+		LoadRequester      who;
+		void          join(const LoadRequester& r);
+		bool          stale() const;
+		LoadRequester snapshot() const;
+	};
+	// Coalesce key → interest. Main thread only, like the rest of the registry.
+	std::unordered_map<std::string, std::shared_ptr<LoadInterest>> m_loadInterest;
+
+	void loadPathAsync(const std::string& relativePath, std::function<void(HE::UUID)> callback,
+	                   const LoadRequester& requester);
+	void loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> callback,
+	                   const LoadRequester& requester);
+	void launchPathLoad(const std::string& relativePath, const std::string& fullPath,
+	                    std::function<void(HE::UUID)> callback,
+	                    std::shared_ptr<LoadInterest> interest);
+	// False when `id` is in no mount any more.
+	bool launchPakLoad(HE::UUID id, const std::string& coalesceKey,
+	                   std::function<void(HE::UUID)> callback,
+	                   std::shared_ptr<LoadInterest> interest);
 
 	mutable std::mutex              m_pendingMutex;
 	std::unordered_set<std::string> m_pendingPaths;  // in-flight relative paths
