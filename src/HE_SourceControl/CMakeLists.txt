@@ -15,6 +15,7 @@ add_library(HorizonSourceControl SHARED
 	src/GitCli.cpp
 	src/RepoConfig.cpp
 	src/GitHubApi.cpp
+	src/GitHubOAuth.cpp
 	src/GitService.cpp
 )
 

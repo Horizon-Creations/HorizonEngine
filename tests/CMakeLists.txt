@@ -289,6 +289,7 @@ add_executable(he_tests
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
+    test_github_oauth.cpp
     test_game_replication.cpp
     # The first real gameplay session: two and three NetGameSessions against
     # each other over LossyTransport, headless and on a simulated clock.
