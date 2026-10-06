@@ -237,6 +237,26 @@ namespace HE::tut
 	// panelVisited() on the index-th entry of a '|'-separated list.
 	bool listEntryVisited(std::string_view list, int index, std::string_view visited);
 
+	// ── Which chapters this user's tour includes ─────────────────────────────
+	// Chosen on the welcome card and persisted beside the cursor. The default is
+	// the whole curriculum, so every helper below called without Options walks
+	// every chapter. An excluded chapter is invisible to the cursor: advance and
+	// retreat step over it, a cursor that lands in it rolls forward to the next
+	// included chapter, and the progress numbers count without it.
+	struct Options
+	{
+		// The "horizoncode" chapter. Only that one is optional: it is the one a
+		// user who has already picked Lua, Python or C++ has a reason to leave out.
+		bool horizonCode = true;
+	};
+	bool chapterIncluded(int chapter, const Options& o = {});
+
+	// chapterCount() and totalSteps() over the included chapters only. The
+	// argument-less pair stays the size of the whole table: a finished cursor is
+	// { chapterCount(), 0 } whatever is included.
+	int chapterCount(const Options& o);
+	int totalSteps(const Options& o);
+
 	// ── Position in the curriculum ───────────────────────────────────────────
 	// A cursor one past the last step of the last chapter means "finished"; every
 	// helper clamps into that range, so a corrupted or outdated saved position can
@@ -249,23 +269,30 @@ namespace HE::tut
 		bool operator==(const Cursor& o) const { return chapter == o.chapter && step == o.step; }
 	};
 
-	Cursor clamp(Cursor c);
-	Cursor advance(Cursor c);   // next step, rolling into the next chapter
-	Cursor retreat(Cursor c);   // previous step, rolling back a chapter
-	Cursor nextChapter(Cursor c);
-	bool   finished(Cursor c);
+	Cursor clamp(Cursor c, const Options& o = {});
+	Cursor advance(Cursor c, const Options& o = {});   // next step, rolling into the next chapter
+	Cursor retreat(Cursor c, const Options& o = {});   // previous step, rolling back a chapter
+	Cursor nextChapter(Cursor c, const Options& o = {});
+	bool   finished(Cursor c, const Options& o = {});
 	// The step a cursor points at, or nullptr when finished.
-	const Step*    stepAt(Cursor c);
-	const Chapter* chapterAt(Cursor c);
-	// 0-based index across all chapters (== totalSteps() when finished).
-	int    flatIndex(Cursor c);
-	Cursor fromFlat(int index);
+	const Step*    stepAt(Cursor c, const Options& o = {});
+	const Chapter* chapterAt(Cursor c, const Options& o = {});
+	// 1-based number of `c`'s chapter among the included ones — what the card's
+	// "Chapter n/m" line shows next to chapterCount(o). 0 when finished.
+	int            chapterNumber(Cursor c, const Options& o = {});
+	// 0-based index across the included chapters (== totalSteps(o) when finished).
+	int    flatIndex(Cursor c, const Options& o = {});
+	Cursor fromFlat(int index, const Options& o = {});
 	// Cursor of a step id, or a finished cursor when the id is unknown — an id that
-	// disappeared between releases must not strand the user mid-tour.
+	// disappeared between releases must not strand the user mid-tour. Deliberately
+	// blind to Options: a step of an excluded chapter is still KNOWN, so clamp()
+	// rolls it on to the next included step instead of reading it as "finished".
 	Cursor findStep(std::string_view id);
 
 	// Progress is stored as the step id, not an index: inserting a step in chapter 2
-	// would otherwise silently move everyone's saved position.
-	std::string serialize(Cursor c);
-	Cursor      deserialize(std::string_view s);
+	// would otherwise silently move everyone's saved position. deserialize() clamps
+	// with `o`, so a position saved inside a chapter the user has since excluded
+	// resumes at the next included step.
+	std::string serialize(Cursor c, const Options& o = {});
+	Cursor      deserialize(std::string_view s, const Options& o = {});
 }

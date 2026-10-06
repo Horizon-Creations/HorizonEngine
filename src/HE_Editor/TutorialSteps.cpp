@@ -827,8 +827,8 @@ constexpr Step kScripting[] = {
 	  "graphs), Lua, Python or C++ — chosen when it was created. The editor only "
 	  "offers the matching assets everywhere, so there is no way to end up with half "
 	  "a project in each.\n"
-	  "UI widgets and the two graphs from the HorizonCode chapter — the Level Script "
-	  "and the Game Instance — are shared by every language.",
+	  "UI widgets and the two graphs every project has — the Level Script and the "
+	  "Game Instance, both under the Window menu — are shared by every language.",
 	  "", "", Check::ReadAck, "" },
 
 	{ "entity-logic",
@@ -1001,6 +1001,30 @@ int totalSteps()
 	return n;
 }
 
+bool chapterIncluded(int chapter, const Options& o)
+{
+	if (chapter < 0 || chapter >= chapterCount()) return false;
+	if (!o.horizonCode && std::string_view(kChapters[chapter].id) == "horizoncode")
+		return false;
+	return true;
+}
+
+int chapterCount(const Options& o)
+{
+	int n = 0;
+	for (int i = 0; i < chapterCount(); ++i)
+		if (chapterIncluded(i, o)) ++n;
+	return n;
+}
+
+int totalSteps(const Options& o)
+{
+	int n = 0;
+	for (int i = 0; i < chapterCount(); ++i)
+		if (chapterIncluded(i, o)) n += kChapters[i].stepCount;
+	return n;
+}
+
 // ─── Completion ──────────────────────────────────────────────────────────────
 // Read every case as "what CHANGED since this step opened". A check that merely
 // asks "is X true" would be pre-satisfied by whatever the scene happened to
@@ -1106,84 +1130,95 @@ bool satisfied(const Step& step, const Signals& base, const Signals& now)
 // ─── Cursor arithmetic ───────────────────────────────────────────────────────
 // A cursor of { chapterCount(), 0 } is the one canonical "finished" position;
 // clamp() maps every out-of-range or stale cursor onto a valid one so no caller
-// has to range-check before indexing.
-Cursor clamp(Cursor c)
+// has to range-check before indexing. An excluded chapter (Options) is treated
+// like an empty one: a cursor inside it rolls on to the next included step.
+Cursor clamp(Cursor c, const Options& o)
 {
 	const int nChapters = chapterCount();
-	if (c.chapter < 0 || c.step < 0)       return Cursor{ 0, 0 };
-	if (c.chapter >= nChapters)            return Cursor{ nChapters, 0 };
-	if (c.step >= kChapters[c.chapter].stepCount)
-	{
-		// Past the end of its chapter — roll forward rather than clamping onto the
-		// last step, so a saved position from a shortened chapter resumes at the
-		// next thing the user has not seen.
-		return clamp(Cursor{ c.chapter + 1, 0 });
-	}
+	if (c.chapter < 0 || c.step < 0) c = Cursor{ 0, 0 };
+	// Past the end of its chapter — roll forward rather than clamping onto the
+	// last step, so a saved position from a shortened chapter resumes at the next
+	// thing the user has not seen. The same for a chapter the user left out: a
+	// position saved inside it resumes after it, not at "finished".
+	while (c.chapter < nChapters &&
+	       (!chapterIncluded(c.chapter, o) || c.step >= kChapters[c.chapter].stepCount))
+		c = Cursor{ c.chapter + 1, 0 };
+	if (c.chapter >= nChapters) return Cursor{ nChapters, 0 };
 	return c;
 }
 
-bool finished(Cursor c)
+bool finished(Cursor c, const Options& o)
 {
-	c = clamp(c);
+	c = clamp(c, o);
 	return c.chapter >= chapterCount();
 }
 
-Cursor advance(Cursor c)
+Cursor advance(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return c;
-	return clamp(Cursor{ c.chapter, c.step + 1 });
+	c = clamp(c, o);
+	if (finished(c, o)) return c;
+	return clamp(Cursor{ c.chapter, c.step + 1 }, o);
 }
 
-Cursor retreat(Cursor c)
+Cursor retreat(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (c.chapter == 0 && c.step == 0) return c;
-	if (finished(c))
-	{
-		const int last = chapterCount() - 1;
-		return Cursor{ last, kChapters[last].stepCount - 1 };
-	}
-	if (c.step > 0) return Cursor{ c.chapter, c.step - 1 };
-	const int prev = c.chapter - 1;
-	return Cursor{ prev, kChapters[prev].stepCount - 1 };
+	c = clamp(c, o);
+	if (!finished(c, o) && c.step > 0) return Cursor{ c.chapter, c.step - 1 };
+	// Back to the last step of the nearest earlier chapter that is in the tour.
+	// None left means this already is the first step.
+	for (int prev = c.chapter - 1; prev >= 0; --prev)
+		if (chapterIncluded(prev, o) && kChapters[prev].stepCount > 0)
+			return Cursor{ prev, kChapters[prev].stepCount - 1 };
+	return c;
 }
 
-Cursor nextChapter(Cursor c)
+Cursor nextChapter(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return c;
-	return clamp(Cursor{ c.chapter + 1, 0 });
+	c = clamp(c, o);
+	if (finished(c, o)) return c;
+	return clamp(Cursor{ c.chapter + 1, 0 }, o);
 }
 
-const Step* stepAt(Cursor c)
+const Step* stepAt(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return nullptr;
+	c = clamp(c, o);
+	if (finished(c, o)) return nullptr;
 	return &kChapters[c.chapter].steps[c.step];
 }
 
-const Chapter* chapterAt(Cursor c)
+const Chapter* chapterAt(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return nullptr;
+	c = clamp(c, o);
+	if (finished(c, o)) return nullptr;
 	return &kChapters[c.chapter];
 }
 
-int flatIndex(Cursor c)
+int chapterNumber(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return totalSteps();
+	c = clamp(c, o);
+	if (finished(c, o)) return 0;
 	int n = 0;
-	for (int i = 0; i < c.chapter; ++i) n += kChapters[i].stepCount;
+	for (int i = 0; i <= c.chapter; ++i)
+		if (chapterIncluded(i, o)) ++n;
+	return n;
+}
+
+int flatIndex(Cursor c, const Options& o)
+{
+	c = clamp(c, o);
+	if (finished(c, o)) return totalSteps(o);
+	int n = 0;
+	for (int i = 0; i < c.chapter; ++i)
+		if (chapterIncluded(i, o)) n += kChapters[i].stepCount;
 	return n + c.step;
 }
 
-Cursor fromFlat(int index)
+Cursor fromFlat(int index, const Options& o)
 {
-	if (index < 0) return Cursor{ 0, 0 };
+	if (index < 0) return clamp(Cursor{ 0, 0 }, o);
 	for (int i = 0; i < chapterCount(); ++i)
 	{
+		if (!chapterIncluded(i, o)) continue;
 		if (index < kChapters[i].stepCount) return Cursor{ i, index };
 		index -= kChapters[i].stepCount;
 	}
@@ -1198,18 +1233,18 @@ Cursor findStep(std::string_view id)
 	return Cursor{ chapterCount(), 0 };
 }
 
-std::string serialize(Cursor c)
+std::string serialize(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return "done";
+	c = clamp(c, o);
+	if (finished(c, o)) return "done";
 	return kChapters[c.chapter].steps[c.step].id;
 }
 
-Cursor deserialize(std::string_view s)
+Cursor deserialize(std::string_view s, const Options& o)
 {
-	if (s.empty())  return Cursor{ 0, 0 };
+	if (s.empty())  return clamp(Cursor{ 0, 0 }, o);
 	if (s == "done") return Cursor{ chapterCount(), 0 };
-	return findStep(s);
+	return clamp(findStep(s), o);
 }
 
 } // namespace HE::tut

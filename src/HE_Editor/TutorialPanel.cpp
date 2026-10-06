@@ -61,13 +61,20 @@ namespace
 	// "Tutorial.Offered" is the first-start gate: once the welcome card has been
 	// answered (either way) it never reappears on its own. "Tutorial.Step" is the
 	// serialized cursor — a step id, so inserting steps in a later release does not
-	// move anybody's saved position.
-	constexpr const char* kCfgOffered = "Tutorial.Offered";
-	constexpr const char* kCfgStep    = "Tutorial.Step";
+	// move anybody's saved position. "Tutorial.HorizonCode" is the welcome card's
+	// choice whether the HorizonCode chapter is part of the tour; missing means yes,
+	// so a config from before the option existed walks the tour it always did.
+	constexpr const char* kCfgOffered     = "Tutorial.Offered";
+	constexpr const char* kCfgStep        = "Tutorial.Step";
+	constexpr const char* kCfgHorizonCode = "Tutorial.HorizonCode";
 
 	bool         s_open        = false;
 	bool         s_forceWelcome = false;  // re-offer the sandbox even once answered
 	bool         s_loaded      = false;   // cursor read back from the config yet?
+	// Which chapters the tour includes. Every tut:: cursor call below takes it:
+	// one call without it and the card's progress and its Next/Back disagree
+	// about where the HorizonCode chapter is.
+	tut::Options s_tour        = {};
 	tut::Cursor  s_cursor      = {};
 	tut::Signals s_base;                  // snapshot from when the current step opened
 	bool         s_baseValid   = false;
@@ -94,14 +101,18 @@ namespace
 	void persist(GlobalState* gs)
 	{
 		if (!gs) return;
-		gs->setCustomConfigEntry(kCfgStep, tut::serialize(s_cursor));
+		gs->setCustomConfigEntry(kCfgHorizonCode, s_tour.horizonCode);
+		gs->setCustomConfigEntry(kCfgStep, tut::serialize(s_cursor, s_tour));
 		gs->writeConfig();
 	}
 
 	void loadOnce(GlobalState* gs)
 	{
 		if (s_loaded || !gs) return;
-		s_cursor = tut::deserialize(gs->getCustomConfigString(kCfgStep, ""));
+		// Options first: a position saved inside a chapter that is now left out
+		// resumes at the next included step, and that needs to know which.
+		s_tour.horizonCode = gs->getCustomConfigBool(kCfgHorizonCode, true);
+		s_cursor = tut::deserialize(gs->getCustomConfigString(kCfgStep, ""), s_tour);
 		s_loaded = true;
 	}
 
@@ -110,7 +121,7 @@ namespace
 	// step would arrive pre-completed, which is exactly what this tour must not do.
 	void gotoCursor(tut::Cursor c, GlobalState* gs)
 	{
-		s_cursor    = tut::clamp(c);
+		s_cursor    = tut::clamp(c, s_tour);
 		s_baseValid = false;
 		s_stepDone  = false;
 		s_doneTimer = 0.0f;
@@ -568,7 +579,7 @@ void open()
 	s_open = true;
 	// A finished tour reopens from the top — "Interactive Tutorial" that shows a
 	// single "you are done" card would be a dead menu item.
-	if (tut::finished(s_cursor)) s_cursor = tut::Cursor{ 0, 0 };
+	if (tut::finished(s_cursor, s_tour)) s_cursor = tut::clamp(tut::Cursor{ 0, 0 }, s_tour);
 	s_baseValid = false;
 	s_stepDone  = false;
 	s_doneTimer = 0.0f;
@@ -662,6 +673,18 @@ void renderWelcome(AppContext& ctx)
 		ImGui::TextUnformatted("Created in");
 		ImGui::SetNextItemWidth(-1);
 		ImGui::InputText("##twDir", &s_dir);
+		ImGui::Spacing();
+
+		// The sandbox is a HorizonCode project, but the chapter on it only uses
+		// the Level Script and Game Instance graphs every project has — so the
+		// choice is "do you want the tour of visual scripting", not the project's
+		// language. Set on change: "Not now" writes the config too, and the next
+		// offer should remember what was ticked here.
+		if (EditorWidgets::checkbox("Include the HorizonCode chapter", &s_tour.horizonCode))
+			ctx.globalState->setCustomConfigEntry(kCfgHorizonCode, s_tour.horizonCode);
+		ImGui::TextDisabled(
+			"HorizonCode is the visual scripting language. Writing gameplay in Lua, "
+			"Python or C++ instead? Untick it and the tour skips that chapter.");
 
 		if (!s_error.empty())
 		{
@@ -767,8 +790,8 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 
 	if (!s_open) return;
 
-	const tut::Step*    step = tut::stepAt(s_cursor);
-	const tut::Chapter* chap = tut::chapterAt(s_cursor);
+	const tut::Step*    step = tut::stepAt(s_cursor, s_tour);
+	const tut::Chapter* chap = tut::chapterAt(s_cursor, s_tour);
 
 	// Which panel the user is in, accumulated for the current step. Recorded
 	// before sampling so a click this frame counts this frame, and skipped while
@@ -849,15 +872,15 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	}
 
 	// ── Header: chapter + progress ────────────────────────────────────────────
-	const int done  = tut::flatIndex(s_cursor);
-	const int total = tut::totalSteps();
+	const int done  = tut::flatIndex(s_cursor, s_tour);
+	const int total = tut::totalSteps(s_tour);
 	{
 		// The tour window can be dragged down to 340 points wide, and a chapter
 		// line is "Chapter 7/9  -  " plus a title written for a card, not for a
 		// column. Clipped, it reads as a chapter with no name.
 		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("Chapter %d/%d  -  %s",
-			s_cursor.chapter + 1, tut::chapterCount(), chap->title);
+			tut::chapterNumber(s_cursor, s_tour), tut::chapterCount(s_tour), chap->title);
 		ImGui::ProgressBar(total > 0 ? static_cast<float>(done) / static_cast<float>(total) : 0.0f,
 			ImVec2(-1.0f, 6.0f), "");
 		ImGui::Spacing();
@@ -983,13 +1006,13 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	const float w  = ImGui::GetContentRegionAvail().x;
 	const float bw = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
-	ImGui::BeginDisabled(s_cursor.chapter == 0 && s_cursor.step == 0);
+	ImGui::BeginDisabled(tut::retreat(s_cursor, s_tour) == s_cursor);
 	if (ImGui::Button("Back", ImVec2(bw, 0.0f)))
-		gotoCursor(tut::retreat(s_cursor), ctx.globalState);
+		gotoCursor(tut::retreat(s_cursor, s_tour), ctx.globalState);
 	ImGui::EndDisabled();
 	ImGui::SameLine();
 	{
-		const bool last  = tut::finished(tut::advance(s_cursor));
+		const bool last  = tut::finished(tut::advance(s_cursor, s_tour), s_tour);
 		const bool ready = isReadCard ? s_readToEnd : s_stepDone;
 		ImGui::BeginDisabled(!ready);
 		const char* label = isReadCard ? (last ? "Finish" : "Got it")
@@ -1000,7 +1023,7 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 			// — waiting out the confirmation delay for a card the user just
 			// dismissed would only feel unresponsive.
 			s_ackPressed = true;
-			gotoCursor(tut::advance(s_cursor), ctx.globalState);
+			gotoCursor(tut::advance(s_cursor, s_tour), ctx.globalState);
 		}
 		ImGui::EndDisabled();
 		if (!ready && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1017,7 +1040,7 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	{
 		s_doneTimer += dt;
 		if (s_doneTimer >= kAutoAdvanceDelay)
-			gotoCursor(tut::advance(s_cursor), ctx.globalState);
+			gotoCursor(tut::advance(s_cursor, s_tour), ctx.globalState);
 	}
 
 	if (!s_stepDone)
@@ -1043,7 +1066,7 @@ void witnessAfterRender()
 	if (!w.active || w.done || w.frames < kWitnessHold) return;
 
 	const std::string& id = w.ids[w.index];
-	const tut::Step* step = tut::stepAt(s_cursor);
+	const tut::Step* step = tut::stepAt(s_cursor, s_tour);
 	std::string line = "Tutorial witness: step '" + id + "'";
 	if (!step || id != step->id)
 		line += " NOT on screen (tour is at '" + std::string(step ? step->id : "done") + "')";

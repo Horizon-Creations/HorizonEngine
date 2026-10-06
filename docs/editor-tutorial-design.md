@@ -61,6 +61,18 @@ Asset-Typen · Materialien · Sky/Wetter/Licht · Landschaft · Physik · Partik
 Navigation · UI · HorizonCode · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler ·
 Packaging · Abschluss.
 
+**Das HorizonCode-Kapitel ist abwählbar (Thema 151, Schritt 4).** `tut::Options`
+(`horizonCode`, Vorgabe `true`) geht als Default-Parameter an jede Cursor-Funktion
+(`clamp`, `advance`, `retreat`, `nextChapter`, `finished`, `stepAt`, `chapterAt`,
+`chapterNumber`, `flatIndex`, `fromFlat`, `serialize`, `deserialize`) und an die
+Zählfunktionen `chapterCount(o)`/`totalSteps(o)`. Ein ausgeschlossenes Kapitel behandelt
+`clamp` wie ein leeres: Ein Cursor darin rollt zum nächsten eingeschlossenen Schritt vor.
+`findStep` kennt die Optionen bewusst **nicht**. Eine gespeicherte `hc-*`-ID bleibt also
+bekannt und wird nach dem Abwählen zu `language` (erste Karte nach dem Kapitel), statt
+als unbekannte ID „fertig" zu bedeuten. Die Sprache der Sandbox bleibt HorizonCode: Das
+Kapitel arbeitet nur mit Level Script und Game Instance, die jedes Projekt hat. Die
+Checkbox wählt also die Führung durch das visuelle Scripting ab, nicht die Sprache.
+
 **Jeder Asset-Typ des Content Browsers kommt vor (Thema 151, Schritt 3).** Was der
 Editor anlegen kann, wird auch angelegt und beobachtet (`AssetOfTypeAdded` bzw.
 `TabOfTypeOpened`), und zwar dort, wo es gebraucht wird:
@@ -88,7 +100,8 @@ bleiben, weil `findStep` eine unbekannte gespeicherte ID als „fertig“ liest.
   `Tutorial.Offered` nicht in der Editor-Config steht, legt bei „Start the tutorial" die
   Sandbox selbst an (`ProjectPreset::Tutorial`, Sprache HorizonCode) und öffnet den
   Rundgang. „Not now" setzt dasselbe Flag — danach kommt die Karte nur noch über
-  Help ▸ Interactive Tutorial zurück (`showWelcome()`).
+  Help ▸ Interactive Tutorial zurück (`showWelcome()`). Die Checkbox „Include the
+  HorizonCode chapter" darüber schreibt `Tutorial.HorizonCode`.
 - **`render(ctx, dt, flags)`** — die schwebende Karte im Editor. Sampelt einmal pro Frame
   die `Signals` (Entity-Count über `view<NameComponent>`, Komponenten-Maske über
   `registry.view<T>().empty()`, Asset-Count durch **iteratives** Ablaufen des
@@ -152,12 +165,16 @@ Template-Liste; sie teilen jetzt `ProjectHubPanel::kPresetNames/kPresetDescs`.
 
 ## Persistenz
 
-Zwei Einträge in der globalen Editor-Config (`config.json`, `CustomConfig`):
+Drei Einträge in der globalen Editor-Config (`config.json`, `CustomConfig`):
 
 | Key | Bedeutung |
 |---|---|
 | `Tutorial.Offered` | Die Willkommenskarte wurde einmal beantwortet (egal wie). |
 | `Tutorial.Step` | Serialisierter Cursor: die Schritt-ID, oder `"done"`. |
+| `Tutorial.HorizonCode` | Gehört das HorizonCode-Kapitel zum Rundgang? Fehlt der Eintrag, ja. |
+
+`loadOnce` liest `Tutorial.HorizonCode` **vor** `Tutorial.Step`, damit eine Position im
+abgewählten Kapitel gleich beim Laden auf den nächsten eingeschlossenen Schritt rollt.
 
 Eine unbekannte ID (Schritt in einer neueren Version entfernt) wird als „fertig" gelesen,
 nicht als Fehler — niemand soll auf einem Schritt stranden, der nicht mehr gerendert
@@ -173,7 +190,7 @@ werden kann.
 
 ## Was geprüft ist
 
-`tests/test_tutorial.cpp` (21 Testfälle):
+`tests/test_tutorial.cpp` (27 Testfälle):
 
 - Curriculum-Integrität: keine doppelten Schritt-/Kapitel-IDs, kein leerer Text, jeder
   `ComponentAdded`-Schritt nennt eine existierende Komponente, jeder `TabOpen` ein
@@ -188,6 +205,13 @@ werden kann.
   Müll, `flatIndex`/`fromFlat` sind invers.
 - Fortschritt: Round-Trip über die serialisierte Form für jeden Schritt, plus die beiden
   Sonderfälle (leer, unbekannte ID).
+- HorizonCode-Kapitel mit und ohne: Nur dieses Kapitel ist optional, `Options{true}`
+  rechnet wie die Vorgabe. Ohne betritt `advance` das Kapitel nie, `retreat` und
+  `nextChapter` springen darüber, `chapterNumber` zählt lückenlos bis
+  `chapterCount(o)`, `flatIndex`/`fromFlat` bleiben invers. Jede `hc-*`-ID wird ohne das
+  Kapitel zu `language` (nicht „fertig"), eine Position dahinter wird beim Wiedereinschalten
+  nicht zurückgespult. Gegenprobe: `clamp` ohne die Option gebaut, drei der neuen Fälle rot
+  (42 Assertions).
 - Prädikate: jede `Check`-Variante, inklusive der Übergangs-Semantik von `SceneSaved` und
   `PlayCycled`.
 - Sandbox: Ordner, Manifest-Preset, Szenen-JSON **und** ein Ladetest durch den echten
@@ -257,10 +281,23 @@ ist dabei unverändert (`layout` 47 680 pt², `fly`/`orbit` 3 990 pt², `welcome
 [fly](img/tutorial-card-2026-10-06/text-fly.png),
 [orbit](img/tutorial-card-2026-10-06/text-orbit.png).
 
+Die abwählbare HorizonCode-Option im laufenden Editor (Thema 151, Schritt 4), derselbe
+Zeuge mit `HE_DUMP_TUTORIALUI_STEPS=hc-intro,language` und `Tutorial.HorizonCode` in der
+Config. Mit `false` meldet das Log `step 'hc-intro' NOT on screen (tour is at
+'language')`: Der Editor liest die Option und rollt aus dem Kapitel heraus. Mit `true`
+steht die Karte auf `hc-intro`. Die Kapitelzeile auf `language` zeigt ohne das Kapitel
+„Chapter 15/19", mit „Chapter 16/20":
+[ohne](img/tutorial-card-2026-10-06/horizoncode-aus-language.png),
+[mit](img/tutorial-card-2026-10-06/horizoncode-an-language.png).
+
 ## Offen
 
 - Das Willkommensmodal ist **nicht** in der laufenden App optisch verifiziert (der
-  Zeuge oben setzt erst im geöffneten Projekt ein).
+  Zeuge oben setzt erst im geöffneten Projekt ein). Das gilt auch für die Checkbox
+  „Include the HorizonCode chapter": Sie ist gebaut und hat ihren Help-Eintrag, wurde
+  aber nie angeklickt.
+- Die HorizonCode-Option lässt sich nur auf der Willkommenskarte ändern. Wer im offenen
+  Projekt über Help ▸ Interactive Tutorial einsteigt, behält die gespeicherte Wahl.
 - Der pulsierende Rahmen liegt auf der Foreground-Drawlist und damit **über** der Karte.
   Wo die Karte ein Zielpanel nicht ganz meiden kann (`layout`, Scene-Schritte), läuft die
   Rahmenlinie durch die Karte.
