@@ -1,7 +1,7 @@
 # HTML-Altlasten im Repo: Bestandsaufnahme (Thema 156, Schritt 1)
 
 Stand: 2026-10-06, Zweig `claude/html-dateien-aus-dem-repo-aufraeumen` auf 9b00bfb1.
-Die Bestandsaufnahme beschreibt den Stand vor dem Löschen: was im Repo liegt, wer darauf verweist und was mit jeder Gruppe passieren soll. Was Schritt 2 tatsächlich entfernt hat, steht unter [„Schritt 2: entfernt“](#schritt-2-entfernt).
+Die Bestandsaufnahme beschreibt den Stand vor dem Löschen: was im Repo liegt, wer darauf verweist und was mit jeder Gruppe passieren soll. Was Schritt 2 tatsächlich entfernt hat, steht unter [„Schritt 2: entfernt“](#schritt-2-entfernt). Den Rückfallschutz und die gemessene Ersparnis beschreibt [„Schritt 3“](#schritt-3-rückfallschutz-und-gemessene-ersparnis).
 
 ## Ergebnis
 
@@ -56,6 +56,63 @@ Daraus folgt für dieses Thema:
 
 - Schritt 2 löscht mit `git rm -r` **ohne** `--cached`. In diesem Worktree ist `doc/api` auch auf der Platte weg. Andere Checkouts (Hauptarbeitsbaum, weitere Worktrees) verlieren die Dateien, sobald sie diesen Stand auschecken oder mergen, weil Git getrackte Dateien beim Checkout mitlöscht.
 - **Für Schritt 3 (Rückfallschutz):** Der wahrscheinliche Rückweg ist ein `git add -A` mit liegengebliebenen Dateien, kein Re-Vendoring. Ein Ignore-Eintrag muss außerdem zwei Ausgabeorte abdecken: `src/HE_Rendering/glm/doc/api/` (der eingecheckte Upstream-Stand) und `src/HE_Rendering/glm/doc/html/`. Denn `doc/man.doxy` setzt `OUTPUT_DIRECTORY = .` und `HTML_OUTPUT = html`, ein lokaler Doxygen-Lauf schreibt also nach `doc/html/`, nicht nach `doc/api/`.
+
+## Schritt 3: Rückfallschutz und gemessene Ersparnis
+
+### `.gitignore`
+
+In `.gitignore` stehen jetzt zwei verankerte Verzeichnismuster, jeweils mit Begründung im Kommentar:
+
+```
+/src/HE_Rendering/glm/doc/api/
+/src/HE_Rendering/glm/doc/html/
+```
+
+- **`doc/api/`** ist der früher eingecheckte Upstream-Stand. **`doc/html/`** ist der Ort, an den ein lokaler `doxygen man.doxy` schreibt. `man.doxy` erzeugt nur HTML (`GENERATE_HTML = YES`). LaTeX, RTF, man, XML und DocBook stehen auf `NO`, `GENERATE_TAGFILE` ist leer. Weitere Ausgabeorte gibt es also nicht.
+- **Kein allgemeines `*.html`:** Ein solches Muster würde die 43 Overlay-Seiten und `shell_minimal.html` verstecken, die bewusst bleiben.
+- **Geprüft** auf 9cdb009d + dieser Änderung:
+  - `git check-ignore -v` trifft `doc/api/index.html` und `doc/html/index.html`.
+  - Nicht getroffen werden `doc/manual.pdf`, `doc/man.doxy`, `doc/manual/*.png`, `overlay/sections/conventions.html` und `shell_minimal.html` (exit 1).
+  - Den echten Rückweg aus `fd81c830` habe ich nachgestellt. Dazu lagen Dummy-Dateien in `doc/api/x.html` und `doc/html/x.html`, als Gegenprobe außerdem `doc/kontrolle.html`. `git add -A --dry-run` nahm nur die Gegenprobe auf, die beiden anderen nicht. Danach habe ich alle drei wieder gelöscht.
+  - `git ls-files -ci --exclude-standard` listet keine Datei unter `glm/doc`. Die neuen Muster verstecken also nichts, was getrackt ist.
+- **Grenze:** Ein Ignore-Eintrag hält `git add -A` und `git add .` auf. Gegen `git add -f` hilft er nicht.
+
+### CI: keine Prüfung auf Repo-Größe oder Dateityp
+
+Durchsucht habe ich `.github/workflows/{ci,claude,runtime-flavors}.yml`, `.gitattributes`, `core.hooksPath` und die Hooks des gemeinsamen `.git`. Ergebnis:
+
+- **Keine Prüfung auf Repo-Ebene.** Es gibt keine Prüfung, die eingecheckte Dateien nach Größe oder Typ bewertet. Es gibt auch kein Git LFS, kein `pre-commit` und keinen gesetzten `core.hooksPath`. Im Hook-Ordner liegen nur die `*.sample`-Dateien.
+- **Die einzige Größenprüfung ist `scripts/runtime_size.py`** (`ci.yml:270-280`, `runtime-flavors.yml:137-146`). Sie wiegt die gebauten Game- und App-Runtimes im Deploy-Verzeichnis, nicht das Repo.
+- **Neu gebaut wurde keine CI-Prüfung.** Das war nicht Teil des Schritts. Eine mögliche spätere Absicherung wäre ein Job, der `git ls-files 'src/HE_Rendering/glm/doc/api/*' 'src/HE_Rendering/glm/doc/html/*'` auf leer prüft. Er würde auch `git add -f` fangen.
+
+### Gemessene Ersparnis (`du -sk`)
+
+Gemessen habe ich auf NN-WS03 (NTFS, 4-KB-Cluster) an je einem frisch ausgepackten `git archive` von `9cdb009d^` (vorher) und `9cdb009d` (nachher), also ohne `.git`, ohne `out/` und ohne ungetrackte Dateien. `core.autocrlf` ist auf diesem Rechner `true`, und `git archive` wendet die Zeilenende-Umwandlung an. Darum zeigt die Spalte „Inhalt“ (`du -sk --apparent-size`) für Textdateien CRLF-Größen.
+
+| Messpunkt | vorher | nachher | Differenz |
+|---|---|---|---|
+| ganzer Checkout, belegt (`du -sk`) | 129 309 KiB | 102 332 KiB | **−26 977 KiB (−20,9 %)** |
+| ganzer Checkout, Inhalt (`--apparent-size`) | 118 769 KiB | 95 363 KiB | −23 406 KiB |
+| ganzer Checkout, Dateien | 4253 | 2879 | −1374 |
+| `src/HE_Rendering/glm/doc`, belegt | 29 903 KiB | 2922 KiB | −26 981 KiB |
+| `src/HE_Rendering/glm/doc`, Inhalt | 26 243 KiB | 2834 KiB | −23 410 KiB |
+
+Die Zahlen passen zu den Angaben aus Schritt 1 und 2, sie messen nur jeweils etwas anderes:
+
+- **22,59 MiB (23 130 KiB)** ist die Blobgröße in Git, mit LF-Zeilenenden.
+- **23 410 KiB** ist dieselbe Datenmenge als Windows-Checkout mit CRLF. Die rund 280 KiB Unterschied sind eingefügte `\r`.
+- **26 981 KiB** ist die Belegung auf der Platte. 1374 meist kleine Dateien runden je auf 4 KB auf. Daher kommen auch die „rund 29 MB“ im Thema-Titel (`doc/` vorher 29 903 KiB).
+
+Die Differenz im ganzen Checkout (−26 977 KiB) und die in `glm/doc` (−26 981 KiB) stimmen bis auf 4 KiB überein: ein Cluster Rundung im Verzeichnis-Overhead. Außerhalb von `doc/api` hat sich also nichts geändert.
+
+### Was mit `.git` passiert: nur flache und neue Checkouts profitieren
+
+Die Historie bleibt unverändert (kein filter-repo, kein Force-Push). Darum gilt:
+
+- **Ein bestehendes `.git` wird nicht kleiner.** Die 1374 Blobs bleiben in der Historie erreichbar, über `9cdb009d^` und jeden älteren Commit. Das Pack auf NN-WS03 bleibt bei 296 MiB (`git count-objects -vH`, `size-pack`).
+- **Ein neuer voller Clone wird auch nicht kleiner.** Er holt dieselbe Historie mitsamt den rund 2,1 MiB komprimierten Blobs (siehe [„Was das Löschen wirklich spart“](#was-das-löschen-wirklich-spart)).
+- **Was wirklich sinkt:** der Arbeitsbaum jedes neuen Checkouts oder Worktrees, um die oben gemessenen ~26,3 MiB Belegung und 1374 Dateien. Dazu sinkt bei flachen Clones (CI mit `fetch-depth: 1`) die Transfergröße um diese rund 2,1 MiB.
+- **Bestehende Arbeitsbäume** verlieren `doc/api` erst, wenn sie einen Stand ab `9cdb009d` auschecken oder mergen. Danach greift der Ignore-Eintrag: Falls dort Dateien liegen bleiben, weil sie z. B. nie getrackt waren, checkt `git add -A` sie nicht wieder ein.
 
 ## Für ein späteres Thema notiert (nicht Teil von Thema 156)
 

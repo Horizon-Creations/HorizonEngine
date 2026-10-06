@@ -75,6 +75,15 @@ imgui.ini
 # them from repository secrets instead; see src/HE_ContentSync/CMakeLists.txt.
 cmake/EngineContentCredentials.cmake
 
+# Doxygen output of the vendored GLM copy (nothing builds or reads it — GLM
+# comes from FetchContent). 1374 files / 22.6 MiB of it were removed twice: once
+# with `git rm --cached` (8a9a79f3), which left them on disk, and a later
+# `git add -A` (fd81c830) checked them all back in. doc/api/ is the upstream
+# snapshot that was tracked; doc/html/ is where a local `doxygen man.doxy`
+# writes (HTML_OUTPUT = html). See docs/html-cleanup-2026-10.md.
+/src/HE_Rendering/glm/doc/api/
+/src/HE_Rendering/glm/doc/html/
+
 # Python bytecode of the helper scripts in scripts/. A .pyc of build_runtimes.py
 # was committed once (e68ff8ed) simply because nothing here caught it.
 __pycache__/
