@@ -68244,6 +68244,24 @@
           "s": "",
           "t": " (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates."
          }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Cell streaming"
+         },
+         {
+          "s": "",
+          "t": " — a scene too big to keep loaded whole can be split into a grid of cells with "
+         },
+         {
+          "s": "c",
+          "t": "scripts/split_scene_cells.py"
+         },
+         {
+          "s": "",
+          "t": ": placed things (meshes, point and spot lights, static bodies) go into one scene file per grid square, everything else stays in the base scene, which names the cells. The exported game then loads a cell once the camera, or where it is heading, comes within the load radius, and unloads it beyond the unload radius; reading and parsing run on worker threads, only building the entities on the main thread, a few milliseconds a frame. Cells work with the floating origin. The editor opens the base scene only."
+         }
         ]
        ],
        "k": "ul"
@@ -68251,7 +68269,7 @@
      ],
      "eyebrow": "Jolt-powered",
      "id": "physics",
-     "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike. Large worlds — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). Project Settings » Physics » Simulation » Floating origin radius (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates.",
+     "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike. Large worlds — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). Project Settings » Physics » Simulation » Floating origin radius (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates. Cell streaming — a scene too big to keep loaded whole can be split into a grid of cells with scripts/split_scene_cells.py: placed things (meshes, point and spot lights, static bodies) go into one scene file per grid square, everything else stays in the base scene, which names the cells. The exported game then loads a cell once the camera, or where it is heading, comes within the load radius, and unloads it beyond the unload radius; reading and parsing run on worker threads, only building the entities on the main thread, a few milliseconds a frame. Cells work with the floating origin. The editor opens the base scene only.",
      "title": "Physics"
     },
     {

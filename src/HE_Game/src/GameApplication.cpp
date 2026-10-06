@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "EmbeddedPakKey.h"
 #include <fstream>
+#include <iterator>
 #include <utility>
 #include <Hpak/ProjectConfig.h>
 #include <Application/AppIcon.h>       // the window icon the export generated
