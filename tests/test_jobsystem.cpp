@@ -780,3 +780,58 @@ TEST_CASE("random job graphs with cancels and failures always finish, deps respe
     CHECK(cancelled > 0);
     MESSAGE("random graph: " << done << " done, " << failed << " failed, " << cancelled << " cancelled");
 }
+
+// The editor's streaming view (Thema 153, Schritt 6) reads these; they have to
+// say what the pool is actually doing, per priority.
+TEST_CASE("ThreadPool::stats: queued, running, cap, executed and outcomes per priority")
+{
+    constexpr size_t kHigh = static_cast<size_t>(JobPriority::High);
+    constexpr size_t kNorm = static_cast<size_t>(JobPriority::Normal);
+    constexpr size_t kLow  = static_cast<size_t>(JobPriority::Low);
+    ThreadPool pool(2);
+    std::atomic<bool> release{ false };
+    std::atomic<int>  started{ 0 };
+    auto hold = [&] {
+        started.fetch_add(1);
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    // Both workers held by Normal jobs, one Low job queued behind them.
+    JobHandle a = pool.schedule(hold, desc("TestStatsHoldA"));
+    JobHandle b = pool.schedule(hold, desc("TestStatsHoldB"));
+    REQUIRE(eventually([&] { return started.load() == 2; }));
+    CancelToken token = CancelToken::create();
+    JobDesc lowDesc = desc("TestStatsLow", JobPriority::Low);
+    lowDesc.cancel = token;
+    JobHandle low = pool.schedule([] {}, lowDesc);
+
+    HE::ThreadPoolStats s = pool.stats();
+    CHECK(s.threads == 2);
+    CHECK(s.lanes[kNorm].running == 2);
+    CHECK(s.lanes[kNorm].queued == 0);
+    CHECK(s.lanes[kLow].queued == 1);
+    CHECK(s.lanes[kLow].running == 0);
+    CHECK(s.lanes[kLow].limit == 1);    // a two-worker pool leaves one for the frame
+    CHECK(s.lanes[kHigh].limit == 2);   // uncapped: the cap is the worker count
+
+    // The Low job is cancelled before it ever runs, the holders finish, and a
+    // High job fails.
+    token.cancel();
+    release.store(true);
+    REQUIRE(returnsWithin([&] { a.wait(); b.wait(); low.wait(); }));
+    CHECK(low.status() == JobStatus::Cancelled);
+    JobHandle bad = pool.schedule([] { throw std::runtime_error("broken"); },
+                                  desc("TestStatsThrows", JobPriority::High));
+    REQUIRE(returnsWithin([&] { try { bad.wait(); } catch (const std::runtime_error&) {} }));
+
+    // A worker settles its counters right after the waiter is woken.
+    REQUIRE(eventually([&] {
+        s = pool.stats();
+        return s.lanes[kNorm].running == 0 && s.lanes[kHigh].running == 0 && s.lanes[kNorm].executed >= 2;
+    }));
+    CHECK(s.lanes[kNorm].busyNs > 0);
+    CHECK(s.lanes[kLow].cancelled == 1);
+    CHECK(s.lanes[kLow].executed == 0);   // a cancelled job's dead queue entry is not work
+    CHECK(s.lanes[kHigh].failed == 1);
+    CHECK(s.lanes[kNorm].failed == 0);
+    CHECK(s.lanes[kNorm].cancelled == 0);
+}

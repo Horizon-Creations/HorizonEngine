@@ -2790,6 +2790,25 @@ bool SceneSerializer::saveJSON(const HorizonWorld& world, const std::filesystem:
     return true;
 }
 
+namespace
+{
+std::mutex                  g_lastLoadMutex;
+SceneSerializer::LoadTiming g_lastLoad;
+
+void recordLoadTiming(size_t entities, double parseMs, double buildMs, bool binary,
+                      const std::filesystem::path& path)
+{
+    std::lock_guard<std::mutex> lock(g_lastLoadMutex);
+    g_lastLoad = { entities, parseMs, buildMs, binary, path.string() };
+}
+} // namespace
+
+SceneSerializer::LoadTiming SceneSerializer::lastLoadTiming()
+{
+    std::lock_guard<std::mutex> lock(g_lastLoadMutex);
+    return g_lastLoad;
+}
+
 bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path& path)
 {
     HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::loadJSON");
@@ -2823,6 +2842,7 @@ bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path&
     const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
     HE_LOG_INFO(Serialize, "SceneLoadTiming: entities=%zu parseMs=%.2f buildMs=%.2f",
                 entityCount, ms(t1 - t0), ms(t2 - t1));
+    recordLoadTiming(entityCount, ms(t1 - t0), ms(t2 - t1), false, path);
     return ok;
 }
 
@@ -2907,6 +2927,7 @@ bool SceneSerializer::loadBinary(HorizonWorld& world, const std::filesystem::pat
     const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
     HE_LOG_INFO(Serialize, "SceneLoadTiming: entities=%zu parseMs=%.2f buildMs=%.2f (binary)",
                 entityCount, ms(t1 - t0), ms(t2 - t1));
+    recordLoadTiming(entityCount, ms(t1 - t0), ms(t2 - t1), true, path);
     return ok;
 }
 

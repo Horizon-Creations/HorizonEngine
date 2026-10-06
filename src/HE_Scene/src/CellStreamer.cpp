@@ -75,6 +75,40 @@ double squareDistance(const glm::dvec3& p, int x, int z, double size)
 	const double dz = std::max({ z0 - p.z, 0.0, p.z - (z0 + size) });
 	return std::sqrt(dx * dx + dz * dz);
 }
+} // namespace
+
+double CellManifest::distanceTo(const glm::dvec3& p, int x, int z) const
+{
+	return squareDistance(p, x, z, static_cast<double>(cellSize));
+}
+
+std::vector<CellManifest::View> CellManifest::around(const glm::dvec3& p, double range) const
+{
+	std::vector<View> out;
+	if (empty()) return out;
+	for (const Cell& c : cells)
+	{
+		const double d = distanceTo(p, c.x, c.z);
+		if (d > range) continue;
+		View v;
+		v.x        = c.x;
+		v.z        = c.z;
+		v.entities = c.entities;
+		v.distance = d;
+		v.reach    = d <= loadRadius ? View::Reach::Load
+		           : d <= unloadRadius ? View::Reach::Keep : View::Reach::Out;
+		out.push_back(v);
+	}
+	std::sort(out.begin(), out.end(), [](const View& a, const View& b)
+	{
+		if (a.distance != b.distance) return a.distance < b.distance;
+		return a.x != b.x ? a.x < b.x : a.z < b.z;
+	});
+	return out;
+}
+
+namespace
+{
 
 // Frees a parsed cell on a worker: a cell of thousands of entities is a big
 // tree, and freeing it cost the main thread more than a tenth of a load before.

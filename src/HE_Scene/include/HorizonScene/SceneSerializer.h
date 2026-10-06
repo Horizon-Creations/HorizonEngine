@@ -15,6 +15,19 @@ using Entity = entt::entity;
 
 class SceneSerializer {
 public:
+    // The last whole-scene load (load()/loadJSON/loadBinary), as its
+    // SceneLoadTiming log line says it — kept for the editor's streaming view.
+    // A function, not a static member: WINDOWS_EXPORT_ALL_SYMBOLS exports no data.
+    struct LoadTiming
+    {
+        size_t      entities = 0;
+        double      parseMs  = 0.0;   // read + parse
+        double      buildMs  = 0.0;   // entities and components into the world
+        bool        binary   = false;
+        std::string path;             // empty: nothing loaded yet
+    };
+    static LoadTiming lastLoadTiming();
+
     bool save(const HorizonWorld& world,
               const std::filesystem::path& path,
               SerializeFormat format);

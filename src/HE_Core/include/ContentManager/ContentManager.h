@@ -486,6 +486,22 @@ public:
 	// (one lock + a set size) and called once per frame by the profiler: a frame
 	// that hitches while this is non-zero is a streaming stall, not a render cost.
 	size_t asyncInFlightCount() const;
+	// Up to `max` of the loads in flight, by their coalesce key (a relative path,
+	// or pak://… for a load by UUID), sorted — for the editor's streaming view.
+	std::vector<std::string> asyncInFlightPaths(size_t max) const;
+	// What pollAsyncResults has handled since the manager was made, and what its
+	// last call cost the main thread. Main thread only, like pollAsyncResults.
+	struct AsyncPollStats
+	{
+		uint64_t registered = 0;    // loads that ended in a registered asset
+		uint64_t failed     = 0;    // loads that ended without one
+		uint64_t dropped    = 0;    // cancelled loads nobody asked for again
+		uint64_t restarted  = 0;    // cancelled loads somebody asked for again
+		double   lastPollMs = 0.0;  // main-thread time of the last call
+		size_t   lastPollHandled = 0;   // results it took off the queue
+		size_t   lastPollLeft    = 0;   // results it left for the next call (budget)
+	};
+	const AsyncPollStats& asyncPollStats() const { return m_asyncPollStats; }
 	// Live read progress of an in-flight job: bytes read so far and the file's total
 	// size (0 until the worker has opened the file). False when nothing is in flight
 	// for that path — so a caller can drive a real progress bar for a big asset and
@@ -677,6 +693,7 @@ private:
 		std::atomic<std::uint64_t> bytesTotal{ 0 };
 	};
 	std::unordered_map<std::string, std::shared_ptr<AsyncProgress>> m_pendingProgress;
+	AsyncPollStats m_asyncPollStats;
 
 	// Where finished jobs drop their results. Deliberately NOT a plain member: a job
 	// is submitted fire-and-forget, so it can still be queued (or mid-read) when this

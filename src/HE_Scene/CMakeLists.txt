@@ -11,6 +11,7 @@ add_library(HorizonScene SHARED
     src/HorizonWorld.cpp
     src/FloatingOrigin.cpp
     src/CellStreamer.cpp
+    src/CellSplit.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp

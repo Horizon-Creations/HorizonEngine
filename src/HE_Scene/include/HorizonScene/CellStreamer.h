@@ -54,6 +54,29 @@ struct CellManifest
 	std::string cellPath(int x, int z) const;
 	// The grid square a world position (absolute) falls into.
 	static int  cellIndex(double coord, float cellSize);
+	// Ground-plane distance from `p` (absolute) to the square of cell (x, z),
+	// 0 inside it — the distance CellStreamer loads and unloads by, so the
+	// editor's cell view can say what the game would hold from a viewpoint.
+	double      distanceTo(const glm::dvec3& p, int x, int z) const;
+
+	// One cell as seen from a viewpoint.
+	struct View
+	{
+		enum class Reach : uint8_t
+		{
+			Load,   // within loadRadius: the game builds it from here
+			Keep,   // up to unloadRadius: built cells stay, nothing new loads
+			Out,    // beyond: the game drops it
+		};
+		int      x = 0, z = 0;
+		uint32_t entities = 0;
+		double   distance = 0.0;   // distanceTo(viewpoint)
+		Reach    reach = Reach::Out;
+	};
+	// The cells within `range` of `p` (absolute), nearest first, with what the
+	// game would do with each from there — CellStreamer's rule without the
+	// lookahead (a viewpoint has no velocity). For the editor's cell view.
+	std::vector<View> around(const glm::dvec3& p, double range) const;
 };
 
 class CellStreamer

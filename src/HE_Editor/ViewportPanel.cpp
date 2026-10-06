@@ -80,6 +80,7 @@ const ShowFlagField* showFlagFields(int& outCount)
 		{ "ViewportShowGuides",         &ShowFlags::guides,        "Guides"        },
 		{ "ViewportShowCollaborators",  &ShowFlags::collaborators, "Collaborators" },
 		{ "ViewportShowScriptDebug",    &ShowFlags::scriptDebug,   "Script Debug"  },
+		{ "ViewportShowStreamingCells", &ShowFlags::streamingCells, "Streaming Cells" },
 		{ "ViewportShowStats",          &ShowFlags::stats,         "Stats"         },
 	};
 	outCount = static_cast<int>(sizeof(kFields) / sizeof(kFields[0]));

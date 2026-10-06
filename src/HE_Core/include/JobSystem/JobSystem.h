@@ -58,6 +58,26 @@ enum class JobStatus : uint8_t
 
 namespace detail { struct CancelState; struct JobState; struct PoolCore; }
 
+// What the pool is doing, per priority — for the editor's streaming view
+// (Performance Profiler ▸ Streaming) and for tests. A snapshot: the counters
+// are read one after the other, so `running` and `queued` can be one task
+// apart from each other; the totals only ever grow.
+struct ThreadPoolStats
+{
+    struct Lane
+    {
+        size_t   queued    = 0;   // waiting in the queue, dead entries included
+        size_t   running   = 0;   // on a worker right now
+        size_t   limit     = 0;   // setConcurrencyLimit; == threads means no cap
+        uint64_t executed  = 0;   // tasks a worker ran (post/submit/schedule), since start
+        uint64_t busyNs    = 0;   // …and the time they took, summed over workers
+        uint64_t cancelled = 0;   // scheduled jobs that ended Cancelled (wherever they ended)
+        uint64_t failed    = 0;   // scheduled jobs whose body threw
+    };
+    size_t threads = 0;
+    Lane   lanes[kJobPriorityCount];
+};
+
 // A shared flag that marks work as no longer wanted. Cheap to copy (one
 // shared_ptr); every copy sees the same flag. Cancelling is sticky.
 //
@@ -220,6 +240,9 @@ public:
     // Jobs currently queued at `priority`, including cancelled ones a worker has
     // not yet popped and discarded. For diagnostics and tests.
     size_t queuedCount(HE::JobPriority priority) const;
+    // Every priority's queue, running count, cap and totals at once (one lock for
+    // the queues; the rest are atomics the workers bump without one).
+    HE::ThreadPoolStats stats() const;
 
     size_t threadCount() const { return m_threads.size(); }
 

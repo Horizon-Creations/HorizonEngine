@@ -52,6 +52,14 @@ struct PoolCore
     bool                    stop = false;   // destructor: drain the queues, then exit
     bool                    dead = false;   // workers joined: nothing runs here any more
 
+    // ThreadPool::stats(). Atomics, bumped outside the mutex: a worker already
+    // takes it once per task and a diagnostic must not make that twice.
+    std::atomic<size_t>     active[kJobPriorityCount]    = {};
+    std::atomic<uint64_t>   executed[kJobPriorityCount]  = {};
+    std::atomic<uint64_t>   busyNs[kJobPriorityCount]    = {};
+    std::atomic<uint64_t>   cancelled[kJobPriorityCount] = {};
+    std::atomic<uint64_t>   failed[kJobPriorityCount]    = {};
+
     // Highest priority with a queued task that may start now. Caller holds mutex.
     bool pick(size_t& prio) const
     {
@@ -172,6 +180,13 @@ static void finishJobs(Worklist& work)
         auto [job, st] = std::move(work.back());
         work.pop_back();
 
+        if (job->core && (st == JobStatus::Cancelled || st == JobStatus::Failed))
+        {
+            const size_t p = static_cast<size_t>(job->priority);
+            (st == JobStatus::Cancelled ? job->core->cancelled[p] : job->core->failed[p])
+                .fetch_add(1, std::memory_order_relaxed);
+        }
+
         if (st == JobStatus::Cancelled && job->onCancelled)
         {
             try { job->onCancelled(); }
@@ -206,7 +221,8 @@ static void finishJobs(Worklist& work)
 
 // Run a job this thread has claimed (status Running): unless it turned out to be
 // cancelled or stale, in which case it finishes as Cancelled without running.
-static void runClaimed(const std::shared_ptr<JobState>& job)
+// True when the body ran (ThreadPool::stats counts only those as work).
+static bool runClaimed(const std::shared_ptr<JobState>& job)
 {
     JobStatus st = JobStatus::Done;
     bool skip = cancelWanted(*job);
@@ -251,6 +267,7 @@ static void runClaimed(const std::shared_ptr<JobState>& job)
     Worklist work;
     work.emplace_back(job, st);
     finishJobs(work);
+    return !skip;
 }
 
 // wait() on a Waiting job: find a queued job somewhere upstream and run it here.
@@ -453,11 +470,16 @@ ThreadPool::ThreadPool(size_t threadCount)
                     if (counted) ++core->running[prio];
                 }
 
+                // A dead entry (a wait() ran it inline) is not work, and neither
+                // is a job claimed only to find it cancelled or stale.
+                const bool live = !task.job || HE::detail::claim(*task.job, HE::JobStatus::Queued);
+                using StatClock = std::chrono::steady_clock;
+                const StatClock::time_point began = live ? StatClock::now() : StatClock::time_point{};
+                if (live) core->active[prio].fetch_add(1, std::memory_order_relaxed);
+                bool ran = live;
                 if (task.job)
                 {
-                    if (HE::detail::claim(*task.job, HE::JobStatus::Queued))
-                        HE::detail::runClaimed(task.job);
-                    // else: cancelled, or a wait() ran it inline — a dead entry
+                    if (live) ran = HE::detail::runClaimed(task.job);
                 }
                 else
                 {
@@ -484,6 +506,14 @@ ThreadPool::ThreadPool(size_t threadCount)
                         HE_LOG_ERROR(Job, "%s", "Job threw a non-std exception");
                         throw;
                     }
+                }
+                if (live) core->active[prio].fetch_sub(1, std::memory_order_relaxed);
+                if (ran)
+                {
+                    core->executed[prio].fetch_add(1, std::memory_order_relaxed);
+                    core->busyNs[prio].fetch_add(static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(StatClock::now() - began).count()),
+                        std::memory_order_relaxed);
                 }
 
                 if (counted)
@@ -610,6 +640,31 @@ size_t ThreadPool::queuedCount(HE::JobPriority priority) const
 {
     std::lock_guard<std::mutex> lock(m_core->mutex);
     return m_core->queues[static_cast<size_t>(priority)].size();
+}
+
+HE::ThreadPoolStats ThreadPool::stats() const
+{
+    HE::ThreadPoolStats s;
+    const HE::detail::PoolCore& core = *m_core;
+    {
+        std::lock_guard<std::mutex> lock(core.mutex);
+        s.threads = core.threads;
+        for (size_t p = 0; p < HE::kJobPriorityCount; ++p)
+        {
+            s.lanes[p].queued = core.queues[p].size();
+            s.lanes[p].limit  = core.limit[p];
+        }
+    }
+    for (size_t p = 0; p < HE::kJobPriorityCount; ++p)
+    {
+        HE::ThreadPoolStats::Lane& l = s.lanes[p];
+        l.running   = core.active[p].load(std::memory_order_relaxed);
+        l.executed  = core.executed[p].load(std::memory_order_relaxed);
+        l.busyNs    = core.busyNs[p].load(std::memory_order_relaxed);
+        l.cancelled = core.cancelled[p].load(std::memory_order_relaxed);
+        l.failed    = core.failed[p].load(std::memory_order_relaxed);
+    }
+    return s;
 }
 
 // ─── parallel_for ─────────────────────────────────────────────────────────────

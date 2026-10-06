@@ -24,6 +24,7 @@
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
@@ -4137,6 +4138,10 @@ void EditorApplication::OnRender(float dt)
 			// It draws itself only outside play mode (editor furniture), which is
 			// why m_isPlaying travels along rather than being checked here.
 			ViewportPanel::appendGroundGrid(m_editorCamera, m_isPlaying, dbg);
+			// A split scene's streaming cells, coloured by what the game would do
+			// with each from this camera. Editor furniture too: not while playing.
+			if (show.streamingCells && !m_isPlaying && m_editorWorld)
+				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(), dbg);
 
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,

@@ -2049,6 +2049,14 @@ namespace
 	  "Also the screenshot cameras of connected MCP clients (Remote Control): a "
 	  "frustum in the scene and an MCP #n tag over it, one per client.",
 	  "", "editor#viewport" },
+	{ "Viewport Show/Streaming Cells", "",
+	  "For a scene split into streaming cells: their squares on the ground and "
+	  "two rings around the camera. Green squares lie within the load radius, the "
+	  "game builds them from here; orange ones within the unload radius, it keeps "
+	  "them once built; grey ones it drops. The rings are the two radii. Nothing "
+	  "shows for a scene without cells. The numbers are in the profiler's "
+	  "Streaming tab.",
+	  "", "editor#viewport" },
 	{ "Viewport Show/Stats", "",
 	  "The frame's counters in the corner of the viewport: frame rate and frame "
 	  "time, draw calls, triangles, visible objects out of all of them, and GPU "
@@ -6556,6 +6564,11 @@ namespace
 	  "frame, so a frame that is slow on the GPU can be told apart from one that "
 	  "is slow on the CPU. It appears only when the frames on screen carry GPU "
 	  "times at all.",
+	  "", "editor#profiler" },
+	{ "Profiler/Show the cells in the Scene window", "",
+	  "The same switch as Show > Streaming Cells in the Scene window: the cell "
+	  "squares on the ground, coloured by what the game would load, keep or drop "
+	  "from the editor camera, and the load and unload radius around it.",
 	  "", "editor#profiler" },
 	{ "Profiler/Fit", "",
 	  "Resets the timeline's zoom and pan so the whole capture fits the view "

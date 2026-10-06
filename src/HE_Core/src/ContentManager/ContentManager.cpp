@@ -1340,6 +1340,7 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 		available = m_asyncSink->results.size();
 	}
 	size_t toRegister = 0;
+	size_t handled    = 0;
 
 	std::vector<HE::UUID> registered;
 	for (; available > 0 && toRegister < maxRegistrations; --available)
@@ -1354,6 +1355,7 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 			r = std::move(m_asyncSink->results.front());
 			m_asyncSink->results.pop();
 		}
+		++handled;
 		if (!r.cancelled) ++toRegister;
 
 		std::shared_ptr<LoadInterest> interest;
@@ -1369,14 +1371,20 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 			{
 				if (r.pakId != HE::UUID{})
 				{
-					if (launchPakLoad(r.pakId, r.relativePath, r.callback, interest)) continue;
+					if (launchPakLoad(r.pakId, r.relativePath, r.callback, interest))
+					{
+						++m_asyncPollStats.restarted;
+						continue;
+					}
 				}
 				else
 				{
 					launchPathLoad(r.relativePath, r.fullPath, r.callback, interest);
+					++m_asyncPollStats.restarted;
 					continue;
 				}
 			}
+			++m_asyncPollStats.dropped;
 			{
 				std::unique_lock<std::mutex> lock(m_pendingMutex);
 				m_pendingPaths.erase(r.relativePath);
@@ -1434,8 +1442,12 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 			// The dependencies are wanted by whoever wanted this asset, no longer.
 			expandFrontier(id, interest ? interest->snapshot() : LoadRequester::from({}));
 		}
+		++(id != HE::UUID{} ? m_asyncPollStats.registered : m_asyncPollStats.failed);
 		if (r.callback) r.callback(id);
 	}
+	m_asyncPollStats.lastPollMs      = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+	m_asyncPollStats.lastPollHandled = handled;
+	m_asyncPollStats.lastPollLeft    = available;
 	return registered;
 }
 
@@ -1450,6 +1462,20 @@ size_t ContentManager::asyncInFlightCount() const
 {
 	std::unique_lock<std::mutex> lock(m_pendingMutex);
 	return m_pendingPaths.size();
+}
+
+std::vector<std::string> ContentManager::asyncInFlightPaths(size_t max) const
+{
+	std::vector<std::string> paths;
+	{
+		std::unique_lock<std::mutex> lock(m_pendingMutex);
+		paths.assign(m_pendingPaths.begin(), m_pendingPaths.end());
+	}
+	// Sorted before cut, so the same loads show from frame to frame rather than
+	// whichever the hash set happens to hand out first.
+	std::sort(paths.begin(), paths.end());
+	if (paths.size() > max) paths.resize(max);
+	return paths;
 }
 
 // ─── asyncProgress ────────────────────────────────────────────────────────────

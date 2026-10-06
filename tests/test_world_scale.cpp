@@ -640,6 +640,53 @@ TEST_CASE("CellManifest: reads the splitter's object, refuses a malformed one")
 	CHECK(m.unloadRadius == 50.0f);
 }
 
+TEST_CASE("CellManifest::around: what the game would load, keep or drop from a viewpoint")
+{
+	// Squares of 100 m; load within 60 m of a square, keep up to 120 m.
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "dir": "d",
+		    "list": [[0, 0, 5], [1, 0, 6], [2, 0, 7], [3, 0, 8], [-1, -1, 9]]})", m));
+	// Standing in cell 0,0 at x = 50: cell 1,0 starts 50 m away (load), 2,0 at
+	// 150 m (out), -1,-1 is 50 m off in both axes: sqrt(50²+50²) ≈ 70.7 (keep).
+	const glm::dvec3 eye(50.0, 0.0, 50.0);
+	CHECK(m.distanceTo(eye, 0, 0) == 0.0);
+	CHECK(m.distanceTo(eye, 1, 0) == doctest::Approx(50.0));
+	const std::vector<HE::CellManifest::View> v = m.around(eye, 200.0);
+	REQUIRE(v.size() == 4);   // 3,0 is 250 m away, beyond the range asked for
+	CHECK(v[0].x == 0);   CHECK(v[0].reach == HE::CellManifest::View::Reach::Load);
+	CHECK(v[0].entities == 5u);
+	CHECK(v[1].x == 1);   CHECK(v[1].reach == HE::CellManifest::View::Reach::Load);
+	CHECK(v[2].x == -1);  CHECK(v[2].reach == HE::CellManifest::View::Reach::Keep);
+	CHECK(v[2].distance == doctest::Approx(std::sqrt(2.0) * 50.0));
+	CHECK(v[3].x == 2);   CHECK(v[3].reach == HE::CellManifest::View::Reach::Out);
+	// Nearest first, and nothing for an empty manifest.
+	for (size_t i = 1; i < v.size(); ++i) CHECK(v[i - 1].distance <= v[i].distance);
+	CHECK(HE::CellManifest{}.around(eye, 1e9).empty());
+}
+
+TEST_CASE("SceneSerializer::lastLoadTiming: the last whole-scene load, JSON and binary")
+{
+	HorizonWorld world;
+	world.createEntity("A");
+	world.createEntity("B");
+	SceneSerializer ser;
+	for (const SerializeFormat format : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const auto file = std::filesystem::temp_directory_path() / "he_last_load_timing.hescene";
+		REQUIRE(ser.save(world, file, format));
+		HorizonWorld back;
+		REQUIRE(ser.load(back, file, format));
+		const SceneSerializer::LoadTiming t = SceneSerializer::lastLoadTiming();
+		CHECK(t.path == file.string());
+		CHECK(t.binary == (format == SerializeFormat::Binary));
+		CHECK(t.entities >= 2u);
+		CHECK(t.parseMs >= 0.0);
+		CHECK(t.buildMs >= 0.0);
+		he_test::removeQuiet(file);
+	}
+}
+
 TEST_CASE("CellStreamer: cells come and go with the camera, ahead of it, and under a floating origin")
 {
 	const auto root = std::filesystem::temp_directory_path() / "he_cell_stream";

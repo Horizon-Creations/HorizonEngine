@@ -479,6 +479,46 @@ TEST_CASE("loadAssetAsync: cancelled before it starts → empty callback, key re
     he_test::removeQuiet(full);
 }
 
+// The editor's streaming view (Thema 153, Schritt 6): which loads are in
+// flight, and what pollAsyncResults did with the ones that came back.
+TEST_CASE("ContentManager: in-flight paths and poll counters for the streaming view")
+{
+    const HE::UUID id{0x5EE0000000000001ULL, 0x0000000000000001ULL};
+    const auto good = writeTempAsset("sv_good.hasset", id);
+    const auto dir  = good.parent_path();
+    writeTempAsset("sv_dropped.hasset", HE::UUID{0x5EE0000000000002ULL, 2});
+    {
+        std::ofstream junk(dir / "sv_junk.hasset", std::ios::binary);
+        junk << "not an asset at all";
+    }
+    ContentManager cm(dir.string());
+    const ContentManager::AsyncPollStats before = cm.asyncPollStats();
+    {
+        HeldPool held;
+        HE::CancelToken zone = HE::CancelToken::create();
+        cm.loadAssetAsync("sv_good.hasset");
+        cm.loadAssetAsync("sv_junk.hasset");
+        cm.loadAssetAsync("sv_dropped.hasset", {}, withToken(zone));
+        // Sorted, and cut at the count asked for.
+        CHECK(cm.asyncInFlightPaths(10) ==
+              std::vector<std::string>{ "sv_dropped.hasset", "sv_good.hasset", "sv_junk.hasset" });
+        CHECK(cm.asyncInFlightPaths(1) == std::vector<std::string>{ "sv_dropped.hasset" });
+        zone.cancel();
+    }
+    drainUntil(cm, [&] { return cm.asyncInFlightCount() == 0; });
+    CHECK(cm.asyncInFlightPaths(10).empty());
+    const ContentManager::AsyncPollStats& after = cm.asyncPollStats();
+    CHECK(after.registered - before.registered == 1);
+    CHECK(after.failed - before.failed == 1);
+    CHECK(after.dropped - before.dropped == 1);
+    CHECK(after.restarted == before.restarted);
+    CHECK(after.lastPollLeft == 0);
+
+    he_test::removeQuiet(good);
+    he_test::removeQuiet(dir / "sv_dropped.hasset");
+    he_test::removeQuiet(dir / "sv_junk.hasset");
+}
+
 TEST_CASE("loadAssetAsync: a shared load is dropped only when EVERY requester cancelled")
 {
     const HE::UUID idA{0xCA9CE1ED00000002ULL, 0x2ULL};
