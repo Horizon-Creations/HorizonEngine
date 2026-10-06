@@ -3,6 +3,7 @@
 #include <Types/UUID.h>
 #include <Types/Defines.h>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -17,6 +18,18 @@ public:
     // Open, validate the header + TOC hash, and load the TOC. Returns false on
     // I/O errors, a bad magic/version, or a TOC-hash mismatch (corruption).
     bool open(const std::string& path);
+
+    // The validated table of contents, shared read-only between readers of the
+    // same archive. Opaque outside this class.
+    struct Toc;
+    // This reader's TOC for openShared(); null before a successful open().
+    std::shared_ptr<const Toc> sharedToc() const { return m_toc; }
+    // Open `path` with a TOC another reader already read and validated. Only the
+    // header is read, to check the file still carries that TOC (same tocHash):
+    // a streaming job reads one entry, and re-reading and re-hashing the whole
+    // table for it made pak streaming quadratic in the entry count. Logs nothing
+    // on success. False when the file is gone or now holds a different archive.
+    bool openShared(const std::string& path, std::shared_ptr<const Toc> toc);
 
     bool hasEntry(const HE::UUID& id) const;
 
@@ -70,8 +83,8 @@ private:
     // (verbatim re-pack) and readEntry (decode).
     const EntryMeta* readStoredBytes(const HE::UUID& id, std::vector<uint8_t>& out) const;
 
-    std::string            m_path;
-    mutable std::ifstream  m_file;   // held open for the reader's lifetime
-    uint64_t               m_tocHash = 0;
-    std::vector<EntryMeta> m_entries;
+    std::string                m_path;
+    mutable std::ifstream      m_file;   // held open for the reader's lifetime
+    uint64_t                   m_tocHash = 0;
+    std::shared_ptr<const Toc> m_toc;    // entries sorted by UUID; never null after open()
 };

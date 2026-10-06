@@ -1921,3 +1921,103 @@ TEST_CASE("Reference-graph streaming: dependencies are dropped with the asset th
     removeQuiet(pak);
     he_test::removeAllQuiet(dir);
 }
+
+// ─── Streaming throughput bench (Thema 153, Schritt 3) ───────────────────────
+// Not a correctness test: the game-runtime streaming path (mounted .hpak →
+// loadAssetAsync → pollAsyncResults) cannot be driven by he_perf_capture, which
+// only launches the editor, so this is the before/after measure for it. Skipped
+// by default; run it from a Release build with
+//   he_tests --no-skip --test-case='Streaming bench*'
+// Two workloads: many tiny assets (per-job overhead: opening the pak, its table
+// of contents, the result hand-off) and fewer 1 MiB ones (bytes moved, copies).
+// Reports wall time until everything is resident, and the main-thread time
+// spent inside pollAsyncResults, which is what a frame pays.
+namespace {
+
+struct StreamBenchResult { double wallMs = 0; double mainMs = 0; double worstPollMs = 0; size_t polls = 0; };
+
+StreamBenchResult runStreamBench(const std::filesystem::path& pak, size_t expected,
+                                 size_t maxPerPoll)
+{
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    StreamBenchResult res;
+    size_t registered = 0;
+    const Clock::time_point t0 = Clock::now();
+    REQUIRE(cm.streamMountedAssets() == expected);
+    // Spin, never sleep: in low-power mode a 2 ms sleep takes ~150 ms and would
+    // be all this measures.
+    while (registered < expected && ms(Clock::now() - t0) < 120000.0)
+    {
+        const Clock::time_point p0 = Clock::now();
+        registered += cm.pollAsyncResults(maxPerPoll).size();
+        const double pollMs = ms(Clock::now() - p0);
+        res.mainMs += pollMs;
+        res.worstPollMs = std::max(res.worstPollMs, pollMs);
+        ++res.polls;
+        if (registered < expected) std::this_thread::yield();
+    }
+    res.wallMs = ms(Clock::now() - t0);
+    CHECK(registered == expected);
+    return res;
+}
+
+} // namespace
+
+TEST_CASE("Streaming bench: pak throughput, small and large assets" * doctest::skip())
+{
+    constexpr size_t kSmall = 4000;
+    constexpr size_t kLarge = 128;
+    constexpr size_t kLargeBytes = 1u << 20;
+
+    auto smallPak = std::filesystem::temp_directory_path() / "he_bench_small.hpak";
+    auto largePak = std::filesystem::temp_directory_path() / "he_bench_large.hpak";
+    {
+        HpakWriter p;
+        for (size_t i = 0; i < kSmall; ++i)
+        {
+            const HE::UUID id{0xBE7C000000000000ull + i, i + 1};
+            p.addEntry(id, makeMaterialBlob(id, "bench_s" + std::to_string(i)), {Hpak::Codec::Zstd});
+        }
+        REQUIRE(p.write(smallPak.string()));
+    }
+    {
+        HpakWriter p;
+        std::vector<uint8_t> pad(kLargeBytes);
+        for (size_t i = 0; i < kLarge; ++i)
+        {
+            const HE::UUID id{0xBE7D000000000000ull + i, i + 1};
+            // Half-compressible payload, like vertex data: a ramp with noise.
+            uint32_t x = static_cast<uint32_t>(i) * 2654435761u + 1u;
+            for (size_t b = 0; b < pad.size(); ++b)
+            {
+                x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+                pad[b] = static_cast<uint8_t>((b & 0xF0) | (x & 0x0F));
+            }
+            HAsset::Reader base;
+            REQUIRE(base.openData(makeMaterialBlob(id, "bench_l" + std::to_string(i))));
+            HAsset::Writer w;
+            for (const auto& c : base.chunks()) w.addChunk(c.id, c.data.data(), c.data.size());
+            w.addChunk(HAsset::makeChunkId('P','A','D','B'), pad.data(), pad.size());
+            p.addEntry(id, w.toBytes(static_cast<uint16_t>(HE::AssetType::Material)),
+                       {Hpak::Codec::Zstd});
+        }
+        REQUIRE(p.write(largePak.string()));
+    }
+
+    for (int run = 0; run < 3; ++run)
+    {
+        const StreamBenchResult s  = runStreamBench(smallPak, kSmall, 16);
+        const StreamBenchResult l  = runStreamBench(largePak, kLarge, 16);
+        MESSAGE("run " << run
+                << " | small x" << kSmall << ": wall " << s.wallMs << " ms, main " << s.mainMs
+                << " ms, worst poll " << s.worstPollMs << " ms, polls " << s.polls
+                << " | large x" << kLarge << " (1 MiB): wall " << l.wallMs << " ms, main "
+                << l.mainMs << " ms, worst poll " << l.worstPollMs << " ms, polls " << l.polls);
+    }
+
+    removeQuiet(smallPak);
+    removeQuiet(largePak);
+}

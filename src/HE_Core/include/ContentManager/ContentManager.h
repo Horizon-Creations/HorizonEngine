@@ -469,6 +469,12 @@ public:
 	// The rest stay queued for the next call. Default: unlimited (drain everything).
 	// Returns the UUIDs of assets registered this call.
 	std::vector<HE::UUID> pollAsyncResults(size_t maxRegistrations = SIZE_MAX);
+	// The same with a main-thread time budget on top: a count alone lets sixteen
+	// small materials and sixteen large meshes cost the same frame, so this also
+	// stops once `budgetMs` milliseconds have gone into parsing and registering.
+	// At least one result is handled per call, so one asset slower than the whole
+	// budget still gets through. budgetMs <= 0 means no time limit.
+	std::vector<HE::UUID> pollAsyncResults(size_t maxRegistrations, double budgetMs);
 	// True while a background job for this relative path is in flight.
 	bool isAsyncPending(const std::string& relativePath) const;
 	// How many background loads are in flight right now, across all paths. Cheap
@@ -607,6 +613,10 @@ private:
 		std::string                    relativePath;   // or the pak:// coalesce key
 		std::string                    fullPath;
 		std::vector<uint8_t>           fileBytes;   // populated on background thread
+		// The same bytes already split into chunks on the worker (fileBytes is
+		// then empty): the split is a full copy of the asset, and the main thread
+		// that pollAsyncResults runs on should not pay it.
+		std::shared_ptr<HAsset::Reader> asset;
 		std::function<void(HE::UUID)>  callback;
 		bool                           failed = false;
 		// Dropped because nobody wanted it any more — either before the job

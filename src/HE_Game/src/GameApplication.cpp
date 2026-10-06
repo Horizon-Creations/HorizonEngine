@@ -1,4 +1,5 @@
 #include "GameApplication.h"
+#include <chrono>
 #include <cstdint>
 #include "EmbeddedPakKey.h"
 #include <fstream>
@@ -2994,15 +2995,30 @@ void GameApplication::OnRender(float deltaTime)
 	// safe point for the SlotMaps, never during draw). Budgeted so a burst of
 	// simultaneously-finished loads is spread across frames instead of freezing one;
 	// the rest stay queued for the next frame. Cheap no-op once fully streamed in.
-	constexpr size_t kStreamRegistrationsPerFrame = 16;
-	const std::vector<HE::UUID> justRegistered =
-		contentManager().pollAsyncResults(kStreamRegistrationsPerFrame);
-	// Warm up node-graph material pipelines the moment their material becomes
-	// resident — building the pipeline here (before the material is first drawn)
-	// keeps the first frame that shows it from stalling on a synchronous
-	// cross-compile inside the encoder loop. Non-material ids are skipped.
-	if (!justRegistered.empty() && r)
-		r->WarmupMaterials(justRegistered);
+	// The budget is TIME, a quarter of a 60 Hz frame, and covers registration and
+	// the material warmup together, taken in batches of 16 while time is left. A
+	// fixed 16 per frame made a level of 4 000 small assets take 250 frames
+	// however cheap each one was (Thema 153).
+	{
+		using Clock = std::chrono::steady_clock;
+		constexpr size_t kStreamBatch    = 16;
+		constexpr double kStreamBudgetMs = 4.0;
+		const Clock::time_point streamStart = Clock::now();
+		double spentMs = 0.0;
+		while (spentMs < kStreamBudgetMs)
+		{
+			const std::vector<HE::UUID> justRegistered =
+				contentManager().pollAsyncResults(kStreamBatch, kStreamBudgetMs - spentMs);
+			// Warm up node-graph material pipelines the moment their material becomes
+			// resident — building the pipeline here (before the material is first drawn)
+			// keeps the first frame that shows it from stalling on a synchronous
+			// cross-compile inside the encoder loop. Non-material ids are skipped.
+			if (!justRegistered.empty() && r)
+				r->WarmupMaterials(justRegistered);
+			if (justRegistered.size() < kStreamBatch) break;   // drained, or out of time
+			spentMs = std::chrono::duration<double, std::milli>(Clock::now() - streamStart).count();
+		}
+	}
 
 	// Per-frame ECS script update (Lua/Python onUpdate), before the systems tick so
 	// script-driven transforms/params are reflected the same frame.

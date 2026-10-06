@@ -246,7 +246,11 @@ std::vector<HE::UUID> collectAssetRefsWhere(HorizonWorld& world, Keep keep)
 {
     std::vector<HE::UUID> out;
     auto& reg = world.registry();
-    auto add = [&](HE::UUID id) { if (id != HE::UUID{}) out.push_back(id); };
+    // Each asset once, in first-seen order: 10 000 meshes sharing a material
+    // named it 10 000 times, and every caller (preload, streaming, the packer)
+    // then asked the ContentManager 10 000 times.
+    std::unordered_set<HE::UUID> seen;
+    auto add = [&](HE::UUID id) { if (id != HE::UUID{} && seen.insert(id).second) out.push_back(id); };
 
     for (auto [e, c] : reg.view<MeshComponent>().each())            if (keep(e)) add(c.meshAssetId);
     for (auto [e, c] : reg.view<MaterialComponent>().each())        if (keep(e)) add(c.materialAssetId);

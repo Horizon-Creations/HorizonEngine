@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>             // parse the pak's __asset_index__ / __asset_types__
 #include <Types/TypeRegistry.h>          // struct/enum defs mirror into the registry on load
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -1181,6 +1182,22 @@ void ContentManager::loadPathAsync(const std::string& relativePath,
 	               std::move(interest));
 }
 
+namespace {
+
+// Worker side of a finished read: split the .hasset into its chunks here and
+// drop the flat copy, so pollAsyncResults on the main thread starts at the
+// parse. Null when the bytes are no .hasset; they stay put, and the main thread
+// rejects them as before.
+std::shared_ptr<HAsset::Reader> splitChunks(std::vector<uint8_t>& bytes)
+{
+	auto reader = std::make_shared<HAsset::Reader>();
+	if (!reader->openData(bytes)) return nullptr;
+	std::vector<uint8_t>().swap(bytes);
+	return reader;
+}
+
+} // namespace
+
 void ContentManager::launchPathLoad(const std::string& relativePath, const std::string& fullPath,
                                      std::function<void(HE::UUID)> callback,
                                      std::shared_ptr<LoadInterest> interest)
@@ -1257,6 +1274,7 @@ void ContentManager::launchPathLoad(const std::string& relativePath, const std::
 				progress->bytesRead.store(done, std::memory_order_relaxed);
 			}
 			if (result.fileBytes.empty() && !result.cancelled) result.failed = true;
+			if (!result.failed && !result.cancelled) result.asset = splitChunks(result.fileBytes);
 		}
 		else
 		{
@@ -1270,6 +1288,11 @@ void ContentManager::launchPathLoad(const std::string& relativePath, const std::
 
 // ─── pollAsyncResults ─────────────────────────────────────────────────────────
 std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
+{
+	return pollAsyncResults(maxRegistrations, 0.0);
+}
+
+std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, double budgetMs)
 {
 	// Drain remote-materialization completions FIRST, on this (main) thread —
 	// see registerRemoteAsset()/loadAssetAsync(UUID)'s remote branch and
@@ -1303,24 +1326,36 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 		}
 	}
 
-	std::vector<AsyncResult> ready;
+	// Take completed jobs one at a time, so the clock can stop the drain between
+	// two of them; leave the rest queued so a burst is spread over frames
+	// (registration/parse runs on this thread). Only what was queued when the
+	// call began: results that land meanwhile (a dependency expandFrontier just
+	// asked for) wait for the next call, as they always have. Dropped loads parse
+	// nothing and do not count against the budget.
+	using Clock = std::chrono::steady_clock;
+	const Clock::time_point start = Clock::now();
+	size_t available = 0;
 	{
 		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
-		// Pull at most `maxRegistrations` completed jobs; leave the rest queued so
-		// a burst is spread over frames (registration/parse runs on this thread).
-		// Dropped loads parse nothing and do not count against the budget.
-		size_t toRegister = 0;
-		while (!m_asyncSink->results.empty() && toRegister < maxRegistrations)
-		{
-			if (!m_asyncSink->results.front().cancelled) ++toRegister;
-			ready.push_back(std::move(m_asyncSink->results.front()));
-			m_asyncSink->results.pop();
-		}
+		available = m_asyncSink->results.size();
 	}
+	size_t toRegister = 0;
 
 	std::vector<HE::UUID> registered;
-	for (auto& r : ready)
+	for (; available > 0 && toRegister < maxRegistrations; --available)
 	{
+		if (budgetMs > 0.0 && toRegister > 0 &&
+		    std::chrono::duration<double, std::milli>(Clock::now() - start).count() >= budgetMs)
+			break;
+		AsyncResult r;
+		{
+			std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
+			if (m_asyncSink->results.empty()) break;
+			r = std::move(m_asyncSink->results.front());
+			m_asyncSink->results.pop();
+		}
+		if (!r.cancelled) ++toRegister;
+
 		std::shared_ptr<LoadInterest> interest;
 		if (const auto it = m_loadInterest.find(r.relativePath); it != m_loadInterest.end())
 			interest = it->second;
@@ -1362,11 +1397,16 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 		m_loadInterest.erase(r.relativePath);
 
 		HE::UUID id;
-		if (!r.failed && !r.fileBytes.empty())
+		if (!r.failed && (r.asset || !r.fileBytes.empty()))
 		{
-			HAsset::Reader reader;
-			if (reader.openData(r.fileBytes))
+			// Normally split on the worker already (splitChunks); a blob that did
+			// not split there gets the same check here and fails it the same way.
+			HAsset::Reader local;
+			HAsset::Reader* split = r.asset.get();
+			if (!split && local.openData(r.fileBytes)) split = &local;
+			if (split)
 			{
+				HAsset::Reader& reader = *split;
 				// Register under the asset's REAL embedded META path, not the
 				// synthetic "pak://hi-lo" coalesce key, so a path-based resolver
 				// (loadAsset(materialPath)) hits the m_pathToUUID cache instead of
@@ -1526,10 +1566,13 @@ bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 	const MountedPak& mount = m_mounts[it->second];
 
 	// Capture everything the worker needs by value — it must not touch the shared
-	// mount reader (single ifstream, not thread-safe), so it opens its own.
+	// mount reader (single ifstream, not thread-safe), so it opens its own. With
+	// the mount's table of contents: reading and hashing the whole table again in
+	// every job made streaming a pak quadratic in its entry count (Thema 153).
 	const std::string       path = mount.path;
 	const bool              enc  = mount.encrypted;
 	std::array<uint8_t, 32> key  = mount.key;
+	std::shared_ptr<const HpakReader::Toc> toc = mount.reader->sharedToc();
 
 	HE::JobDesc desc;
 	desc.name     = "AssetLoadPak";
@@ -1550,7 +1593,7 @@ bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 	// Captures the sink, never `this` — the job may outlive this ContentManager.
 	// No mid-read cancel point: readEntry reads, decrypts and decompresses an
 	// entry in one call, so once started it runs to the end.
-	globalPool().schedule([id, path, enc, key, coalesceKey, sink = m_asyncSink,
+	globalPool().schedule([id, path, enc, key, toc, coalesceKey, sink = m_asyncSink,
 	                       cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
@@ -1558,12 +1601,19 @@ bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 		result.callback     = std::move(cb);
 		result.pakId        = id;
 
-		HpakReader reader; // worker-local; safe for concurrent reads across jobs
-		if (reader.open(path))
+		// Worker-local, safe for concurrent reads across jobs. A package replaced
+		// on disk since the mount no longer matches the shared table: then read
+		// the new one in full, as every job did before.
+		HpakReader reader;
+		if (reader.openShared(path, toc) || reader.open(path))
 		{
 			auto data = reader.readEntry(id, enc ? key.data() : nullptr);
-			if (!data.empty()) result.fileBytes = std::move(data); // decoded .hasset
-			else               result.failed = true;
+			if (!data.empty())
+			{
+				result.fileBytes = std::move(data); // decoded .hasset
+				result.asset     = splitChunks(result.fileBytes);
+			}
+			else result.failed = true;
 		}
 		else result.failed = true;
 
