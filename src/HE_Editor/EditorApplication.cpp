@@ -7269,11 +7269,16 @@ void EditorApplication::dumpFrameHeadless()
 	// edge moves over a static receiver, the reprojection check passes,
 	// and only the neighbourhood clamp keeps the old edge from ghosting.
 	// Compare the capture against a static one at the same TOD. TWO frames run
-	// at the real TOD, not one: until Thema 131 step 6, Vulkan's runGi()
-	// extracted the scene before DrawScene() fed the extractor this frame's
-	// day-night state, so the GI mask saw a sun change one frame late. runGi()
-	// sets it itself now; the second frame stays so captures remain comparable
+	// at the real TOD by default, not one: until Thema 131 step 6, Vulkan's
+	// runGi() extracted the scene before DrawScene() fed the extractor this
+	// frame's day-night state, so the GI mask saw a sun change one frame late.
+	// Since Thema 146 every Vulkan pass gets the sun from one setDayNight() at
+	// the top of Render(); the second frame stays so captures remain comparable
 	// with ones taken on older builds.
+	// HE_DUMP_TODSTEPFRAMES=1 is the lag witness itself: only the captured frame
+	// runs at the real TOD, so a pass that still extracts with the previous
+	// frame's sun (CSM cascades with GI off, Thema 146) puts its shadows where
+	// a static capture at TOD - step has them.
 	if (const float todStep = mbEnvF("HE_DUMP_TODSTEP"); todStep != 0.0f && m_editorWorld)
 	{
 		const Entity envEntity = m_editorWorld->environmentEntity();
@@ -7287,10 +7292,13 @@ void EditorApplication::dumpFrameHeadless()
 				r->Render();
 			env->timeOfDay = tod;
 			pushEnvironment(0.0f);
+			int atTod = 2;
+			if (const char* sf = std::getenv("HE_DUMP_TODSTEPFRAMES"); sf && *sf)
+				atTod = std::clamp(std::atoi(sf), 1, 240);
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: HE_DUMP_TODSTEP moved the sun by " + std::to_string(todStep)
-				 + " of a day for the last two frames").c_str());
-			settleFrames = 2;
+				 + " of a day for the last " + std::to_string(atTod) + " frame(s)").c_str());
+			settleFrames = atTod;
 		}
 	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
