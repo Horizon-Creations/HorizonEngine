@@ -2545,8 +2545,7 @@ TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky c
 	SUBCASE("D3D12 writes the draw's landscape weightmap into heLandscapeWeights (t14)")
 	{
 		// Thema 155: block slot 9 stayed the template's null view, so a painted
-		// terrain showed layer 0 only (and a layer blend without any weightmap
-		// read black). The weightmap is the DRAW's, chosen like D3D11 / Vulkan /
+		// terrain showed layer 0 only. The weightmap is the DRAW's, chosen like D3D11 / Vulkan /
 		// GL — the chunk's own, else the layer-0 default — and written AFTER the
 		// template copy, which would overwrite it otherwise.
 		const std::string d12 = stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp"));
@@ -2562,10 +2561,6 @@ TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky c
 		CHECK(own < def);
 		CHECK(def < copy);
 		CHECK(static_cast<size_t>(wrM.position(0)) > copy);
-		// The template's last resort is white, not the typed null (which the
-		// layer blend's max(wsum, 1e-4) divide turns into black).
-		CHECK(d12.find("if (slot == HE::d3d12mat::kSlotLandscapeWeights && ssaoWhiteTex)") != std::string::npos);
-		CHECK(d12.find("D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 0, 0, 0)") != std::string::npos);
 	}
 }
 

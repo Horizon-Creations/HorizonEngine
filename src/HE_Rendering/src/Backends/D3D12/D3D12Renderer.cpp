@@ -3219,9 +3219,9 @@ struct D3D12RendererImpl
     // the defaults every draw block starts from — null RGBA8 in [0..4], the GI masks in
     // [5..6] (rewritten at GI-target creation), the shadow arrays in [7..8] (the cascade
     // slot is rewritten by createShadowArray() on a resolution swap — it MUST land here,
-    // not in the ring, so every later draw block inherits it), a white fallback in [9] and
-    // null views in [10..16] (the preamble's gates for those stay 0 unless the slot is
-    // filled). One CopyDescriptorsSimple per draw, then the draw's real textures overwrite
+    // not in the ring, so every later draw block inherits it), null views in [9..16] (the
+    // preamble's gates for [10..16] stay 0 unless the slot is filled; [9] is overwritten
+    // by every draw). One CopyDescriptorsSimple per draw, then the draw's real textures overwrite
     // [0..4], its landscape weightmap overwrites [9] — and the sky cube / blurred SSAO
     // overwrite [10]/[11] on the frames fillMatLight raises fog.z / fog.w (Thema 126).
     ComPtr<ID3D12DescriptorHeap> m_matSrvStaging;
@@ -8312,7 +8312,7 @@ void D3D12RendererImpl::createMaterialResources()
     // (t10/t11), [7] k_matCsmSlot = heCsm (t12, the SAME cascade array the built-in scene
     // shader reads at t0, sampled behind csmSplits.w > 0), [8] k_matLocalShadowSlot =
     // heLocalShadow (t13, the local atlas the built-in shader reads at t17, sampled behind
-    // lightParams[i].y > 0), [9] heLandscapeWeights (t14, ungated: white in the template,
+    // lightParams[i].y > 0), [9] heLandscapeWeights (t14, ungated: null in the template,
     // the chunk's weightmap written per draw), [10..16] heSkyEnv / heAO / DDGI atlases /
     // heSSRFwd / heGIReflFwd / heCloudShadow (t15..t18, t31..t33) — null views, their
     // gates stay 0 in fillMatLight; EXCEPT the DDGI atlases [12..13] (t17/t18), which
@@ -8340,9 +8340,9 @@ void D3D12RendererImpl::createMaterialResources()
     //                     hasTex flag and the graph's own defaults decide what that means),
     //                     the GI masks in [5..6], the cascade array for heCsm in [7],
     //                     the local atlas for heLocalShadow in [8], the DDGI atlases in
-    //                     [12..13] once they exist, a white heLandscapeWeights fallback
-    //                     in [9], and null views of the preamble's remaining SRVs in
-    //                     the rest of [10..16].
+    //                     [12..13] once they exist, and null views of the preamble's
+    //                     remaining SRVs in the rest of [9..16] ([9] is overwritten
+    //                     with the landscape weightmap by every draw).
     //   m_matSrvHeap     — the shader-visible ring of per-draw blocks the template is
     //                     copied into, k_frameCount × k_matMaxDraws × k_matSrvPerDraw.
     {
@@ -8399,8 +8399,9 @@ void D3D12RendererImpl::createMaterialResources()
         // the PSO is legal, never sampled while fillMatLight leaves their gates at 0.
         // heLandscapeWeights (9) has NO gate — a Landscape Layer Blend samples it
         // unconditionally — so every material draw writes the chunk's weightmap (or
-        // the layer-0 default) into its own block; the template holds WHITE below
-        // only as the last resort, the same as D3D11's dummy / Vulkan's white view.
+        // the layer-0 default) into its own block. The template's null is only the
+        // last resort, and a right one: (0,0,0,0) sums to nothing, which the blend
+        // resolves to layer 0 (MaterialGraph.cpp) — the same as the default asset.
         // heSkyEnv/heAO (10/11) stay null HERE; the material draw writes the sky
         // cube / blurred SSAO into its own block when fog.z / fog.w rise (Thema 126).
         // The DDGI pair (12/13) starts null too and is swapped for the live atlases
@@ -8415,18 +8416,6 @@ void D3D12RendererImpl::createMaterialResources()
             {
                 nv.ViewDimension       = D3D12_SRV_DIMENSION_TEXTURECUBE;
                 nv.TextureCube.MipLevels = 1;
-            }
-            // heLandscapeWeights' fallback: a typed null reads (0,0,0,0), and the layer
-            // blend's max(wsum, 1e-4) divide turns that into BLACK — the worse of the two
-            // wrong colours (DefaultAssets.h). ssaoWhiteTex (1x1 R8, createSSAOPipeline
-            // ran first and never recreates it) with all four channels mapped to its
-            // red one reads (1,1,1,1) without a new resource.
-            if (slot == HE::d3d12mat::kSlotLandscapeWeights && ssaoWhiteTex)
-            {
-                nv.Format                  = DXGI_FORMAT_R8_UNORM;
-                nv.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 0, 0, 0);
-                device->CreateShaderResourceView(ssaoWhiteTex.Get(), &nv, h); h.ptr += inc;
-                continue;
             }
             device->CreateShaderResourceView(nullptr, &nv, h); h.ptr += inc;
         }
@@ -10230,8 +10219,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         // share one material and keep their own paint (RenderPass never
                         // batches across weightmaps, so one block per DrawCall is enough).
                         // Anything that is not a landscape chunk gets the 1x1 (1,0,0,0)
-                        // default, so a Landscape Layer Blend resolves to layer 0 instead of
-                        // black; the template's white view is the last resort. Resolved
+                        // default = layer 0; the template's null view (zero sum → the
+                        // blend's own layer-0 fallback) is the last resort. Resolved
                         // before `ma` below for the same reason as heTexP — a resolve may
                         // load. A paint stroke replaces the pixels under the SAME UUID and
                         // calls InvalidateTexture, which retires this cache entry.

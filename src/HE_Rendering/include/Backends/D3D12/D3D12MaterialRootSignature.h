@@ -34,10 +34,11 @@
 //   [14]     heSSRFwd        t31   forward SSR result
 //   [15]     heGIReflFwd     t32   forward GI-reflection result
 //   [16]     heCloudShadow   t33   cloud-shadow transmittance
-// [9] has no gate (a Landscape Layer Blend samples it unconditionally): the
-// template holds a white view as the last resort, and every draw block gets
-// the chunk's weightmap — or the 1x1 layer-0 default for anything that is not
-// a landscape chunk — written over it, like D3D11 t14 / Vulkan binding 14.
+// [9] has no gate (a Landscape Layer Blend samples it unconditionally): every
+// draw block gets the chunk's weightmap — or the 1x1 layer-0 default for
+// anything that is not a landscape chunk — written over the template's null
+// view, like D3D11 t14 / Vulkan binding 14. The null is a sound last resort:
+// a zero weight sum resolves to layer 0 in the blend itself.
 // Slots 10..16 are null views in the template, declared but never sampled
 // (fillMatLight leaves their gates at 0) — except [12]/[13]: the renderer writes
 // the live DDGI atlases there once they exist and fillMatLight raises
