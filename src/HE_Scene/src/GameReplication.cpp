@@ -17,6 +17,27 @@ using namespace HE::Net;
 
 namespace
 {
+	// Floating origin (HE::shiftWorldOrigin): every peer's world is relative to
+	// its OWN origin, so the wire carries absolute positions. A top-level
+	// entity's position plus the world's origin on the way out, minus it on the
+	// way in; below the top level a position is relative to the parent and
+	// passes as it is. The interpolation buffer keeps what came off the wire, so
+	// a shift between two samples does not bend the path between them.
+	glm::dvec3 wireOrigin(const HorizonWorld* world, entt::entity e)
+	{
+		if (!world) return glm::dvec3(0.0);
+		const auto* h = const_cast<HorizonWorld*>(world)->registry().try_get<HierarchyComponent>(e);
+		return h && h->parent == world->rootEntity() ? world->origin() : glm::dvec3(0.0);
+	}
+	glm::vec3 toWire(const glm::vec3& local, const glm::dvec3& origin)
+	{
+		return glm::vec3(glm::dvec3(local) + origin);
+	}
+	glm::vec3 fromWire(const glm::vec3& absolute, const glm::dvec3& origin)
+	{
+		return glm::vec3(glm::dvec3(absolute) - origin);
+	}
+
 	// Gameplay messages live in their own id range, well clear of the
 	// collaboration protocol's — the two systems share a transport but never a
 	// message. The table itself is in Net/NetMessages.h, shared with the session
@@ -565,7 +586,7 @@ void GameReplication::sendBaseline(ConnectionId conn)
 		const auto* tc = reg.try_get<TransformComponent>(entity);
 		if (!tc) continue;
 		Sample s;
-		s.position = tc->position;
+		s.position = toWire(tc->position, wireOrigin(m_world, entity));
 		s.rotation = tc->rotation;
 		all.emplace_back(netId, s);
 	}
@@ -649,7 +670,7 @@ void GameReplication::applyBaseline(BitReader& r)
 		if (!registry.valid(it->second)) continue;
 		if (auto* tc = registry.try_get<TransformComponent>(it->second))
 		{
-			tc->position = s.position;
+			tc->position = fromWire(s.position, wireOrigin(m_world, it->second));
 			tc->rotation = s.rotation;
 		}
 	}
@@ -703,7 +724,7 @@ void GameReplication::sendSnapshots()
 			}
 
 			Sample s;
-			s.position = tc->position;
+			s.position = toWire(tc->position, wireOrigin(m_world, entity));
 			s.rotation = tc->rotation;
 			relevant.emplace_back(netId, s);
 		}
@@ -782,6 +803,7 @@ void GameReplication::applySnapshot(BitReader& r)
 		{
 			// Our own entity is predicted, not interpolated — hand it to
 			// reconciliation instead of the interpolation buffer.
+			s.position = fromWire(s.position, wireOrigin(m_world, m_controlled));
 			reconcile(s, ack, tick);
 			continue;
 		}
@@ -929,7 +951,8 @@ void GameReplication::advanceInterpolation(float dt)
 		// at 30 Hz on a 60 Hz display.
 		const float t = st.hasPrevious ? std::min(1.0f, st.elapsed / span) : 1.0f;
 
-		tc->position = glm::mix(st.previous.position, st.current.position, t);
+		tc->position = fromWire(glm::mix(st.previous.position, st.current.position, t),
+		                        wireOrigin(m_world, it->second));
 
 		// Rotation is interpolated per component along the SHORTER arc: the delta
 		// is wrapped into [-180, 180] first. Going from 179° to -179° is a 2°

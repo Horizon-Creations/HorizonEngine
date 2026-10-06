@@ -2396,6 +2396,21 @@ void PhysicsWorld::destroyBodyFor(uint32_t entityId, bool requeueJoints)
     m_impl->contactListener.purgeEntity(entityId);
 }
 
+size_t PhysicsWorld::shiftOrigin(const glm::vec3& shift)
+{
+    if (!m_impl) return 0;
+    const JPH::Vec3 d(shift.x, shift.y, shift.z);
+    // All bodies, not only entityToBody: terrain height fields are bodies too.
+    JPH::BodyIDVector ids;
+    m_impl->physicsSystem.GetBodies(ids);
+    JPH::BodyInterface& bodies = m_impl->physicsSystem.GetBodyInterface();
+    for (const JPH::BodyID& id : ids)
+        bodies.SetPosition(id, bodies.GetPosition(id) - d, JPH::EActivation::DontActivate);
+    for (auto& [entityId, character] : m_impl->entityToCharacter)
+        character->SetPosition(character->GetPosition() - d);
+    return ids.size() + m_impl->entityToCharacter.size();
+}
+
 bool PhysicsWorld::setPosition(uint32_t entityId, const glm::vec3& position, bool resetVelocity)
 {
     if (!m_impl)

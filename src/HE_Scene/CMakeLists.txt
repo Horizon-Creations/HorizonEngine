@@ -9,6 +9,7 @@ add_library(HorizonScene SHARED
 	src/AntiCheat/AntiCheatHost.cpp
 	src/AntiCheat/AntiCheatTelemetry.cpp
     src/HorizonWorld.cpp
+    src/FloatingOrigin.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp

@@ -43,6 +43,7 @@
 #include <HorizonScene/FlyCameraController.h>  // free-fly camera (shared with the editor's PIE)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
+#include <HorizonScene/FloatingOrigin.h>
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -3062,6 +3063,20 @@ void GameApplication::OnRender(float deltaTime)
 	// frame has a viewpoint, and a fly-camera controller there would answer WASD
 	// while the user is typing into a text field.
 	if (!m_appMode) updateCameraController(gameDt);
+
+	// Floating origin, when the project switched it on: once the camera is far
+	// out, the world moves back under it (HE::shiftWorldOrigin). Here, after
+	// physics and the camera and before anything else reads a position this
+	// frame — never between two extracts of a frame (RenderExtractor::FrameScope).
+	if (m_world && !m_appMode && m_projectSettings.physics.floatingOriginRadius > 0.0f)
+	{
+		for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
+		{
+			HE::updateFloatingOrigin(*m_world, m_physicsWorld.get(), HE::worldPositionOf(*m_world, e),
+			                         m_projectSettings.physics.floatingOriginRadius);
+			break;   // the camera the systems tick below follows, too
+		}
+	}
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())

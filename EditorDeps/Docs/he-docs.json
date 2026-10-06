@@ -68226,6 +68226,24 @@
           "s": "",
           "t": " (Python) with the other entity's id, for solid contacts and triggers alike."
          }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Large worlds"
+         },
+         {
+          "s": "",
+          "t": " — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). "
+         },
+         {
+          "s": "i",
+          "t": "Project Settings » Physics » Simulation » Floating origin radius"
+         },
+         {
+          "s": "",
+          "t": " (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates."
+         }
         ]
        ],
        "k": "ul"
@@ -68233,7 +68251,7 @@
      ],
      "eyebrow": "Jolt-powered",
      "id": "physics",
-     "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike.",
+     "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike. Large worlds — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). Project Settings » Physics » Simulation » Floating origin radius (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates.",
      "title": "Physics"
     },
     {

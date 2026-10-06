@@ -9,9 +9,14 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/ParticleSystemComponent.h>
+#include <HorizonScene/Components/TrailComponent.h>
+#include <HorizonScene/Components/NavAgentComponent.h>
+#include <HorizonScene/FloatingOrigin.h>
 #include <ContentManager/DefaultAssets.h>
 #include <Net/BitStream.h>
 #include <Renderer/IRenderer.h>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -428,4 +433,128 @@ TEST_CASE("Large coordinates: replication carries a 30 km position once worldExt
 	CHECK(std::fabs(roundTrip(extent) - pos) <= step);
 	CHECK(step < 0.005f);                              // under 5 mm at 32 km
 	CHECK(roundTrip(4096.0f) == doctest::Approx(4096.0f));   // the default clamps
+}
+
+// ─── Floating origin (Thema 153, Schritt 5) ─────────────────────────────────
+
+TEST_CASE("Floating origin: the shift is whole radii, and nothing inside the radius or when off")
+{
+	CHECK(HE::floatingOriginShift({ 7999.0f, -100.0f, 0.0f }, 8000.0f) == glm::vec3(0.0f));
+	CHECK(HE::floatingOriginShift({ 1.0e6f, 0.0f, 0.0f }, 0.0f) == glm::vec3(0.0f));   // off
+	CHECK(HE::floatingOriginShift({ 12000.0f, 5.0f, -25000.0f }, 8000.0f) ==
+	      glm::vec3(16000.0f, 0.0f, -24000.0f));
+	// The camera lands within half a radius of the new origin.
+	const glm::vec3 cam(100001.5f, 40.0f, -99000.0f);
+	const glm::vec3 s = HE::floatingOriginShift(cam, 8000.0f);
+	CHECK(std::fabs(cam.x - s.x) <= 4000.0f);
+	CHECK(std::fabs(cam.z - s.z) <= 4000.0f);
+}
+
+TEST_CASE("Floating origin: a shift keeps every absolute position, bodies included")
+{
+	HorizonWorld world;
+	auto& reg = world.registry();
+	const glm::vec3 far(100000.0f, 0.0f, -60000.0f);
+
+	// A dynamic crate 100 km out over a static floor, a child under the crate,
+	// and the runtime state that holds world positions of its own.
+	const Entity floor = world.createEntity("Floor");
+	tf(world, floor).position = far;
+	tf(world, floor).scale    = glm::vec3(20.0f, 1.0f, 20.0f);
+	RigidBodyComponent frb; frb.type = RigidBodyType::Static;
+	world.addComponent(floor, frb);
+	const Entity crate = world.createEntity("Crate");
+	tf(world, crate).position = far + glm::vec3(1.5f, 5.0f, -2.0f);
+	RigidBodyComponent crb; crb.type = RigidBodyType::Dynamic; crb.mass = 1.0f;
+	world.addComponent(crate, crb);
+	const Entity child = world.createEntity("Lamp");
+	world.reparentEntity(child, crate);
+	tf(world, child).position = glm::vec3(0.0f, 1.0f, 0.0f);
+	ParticleSystemComponent ps;
+	ps.particles.push_back(Particle{ far + glm::vec3(3.0f), glm::vec3(0.0f), 1.0f, 1.0f });
+	world.addComponent(crate, ps);
+	TrailComponent trail;
+	trail.points.push_back({ far + glm::vec3(2.0f), 0.0f });
+	world.addComponent(child, trail);
+	NavAgentComponent agent;
+	agent.targetPos = far + glm::vec3(10.0f, 0.0f, 0.0f);
+	agent.path      = { far, far + glm::vec3(10.0f, 0.0f, 0.0f) };
+	world.addComponent(floor, agent);
+
+	PhysicsWorld phys;
+	phys.initialize(world);
+	REQUIRE(phys.hasPhysics(static_cast<uint32_t>(crate)));
+	for (int i = 0; i < 10; ++i) phys.step(world, 1.0f / 60.0f);
+
+	const auto absolute = [&](Entity e) { return glm::dvec3(HE::worldPositionOf(world, e)) + world.origin(); };
+	const glm::dvec3 crateBefore = absolute(crate);
+	const glm::dvec3 childBefore = absolute(child);
+	const glm::vec3  matrixBefore(tf(world, crate).worldMatrix[3]);
+
+	const glm::vec3 shift = HE::updateFloatingOrigin(world, &phys, HE::worldPositionOf(world, crate), 8000.0f);
+	REQUIRE(shift == glm::vec3(104000.0f, 0.0f, -64000.0f));
+	CHECK(world.origin() == glm::dvec3(104000.0, 0.0, -64000.0));
+	const auto near = [](const glm::dvec3& a, const glm::dvec3& b) { return glm::length(a - b) < 0.01; };
+	CHECK(near(absolute(crate), crateBefore));
+	CHECK(near(absolute(child), childBefore));
+	CHECK(glm::length(tf(world, crate).position) < 8000.0f);   // near the origin now
+	CHECK(glm::vec3(tf(world, crate).worldMatrix[3]) == matrixBefore - shift);   // derived state too
+	CHECK(reg.get<ParticleSystemComponent>(crate).particles[0].position == far + glm::vec3(3.0f) - shift);
+	CHECK(reg.get<TrailComponent>(child).points[0].worldPos == far + glm::vec3(2.0f) - shift);
+	CHECK(reg.get<NavAgentComponent>(floor).targetPos == far + glm::vec3(10.0f, 0.0f, 0.0f) - shift);
+	CHECK(reg.get<NavAgentComponent>(floor).path[0] == far - shift);
+
+	// The bodies moved with the world: the next steps continue the fall where
+	// it was. Had Jolt kept the old coordinates, the step would write them back
+	// into the transform, 120 km off.
+	for (int i = 0; i < 10; ++i) phys.step(world, 1.0f / 60.0f);
+	const glm::dvec3 crateAfter = absolute(crate);
+	CHECK(std::fabs(crateAfter.x - crateBefore.x) < 0.01);
+	CHECK(std::fabs(crateAfter.z - crateBefore.z) < 0.01);
+	CHECK(crateAfter.y < crateBefore.y);   // still falling
+	CHECK(crateAfter.y > double(far.y));   // and still above the floor it moved with
+
+	// clear() puts the origin back.
+	world.clear();
+	CHECK(world.origin() == glm::dvec3(0.0));
+}
+
+// A measurement, not a check (does not run in CI): what one shift costs the
+// frame it happens in, for the reference world's shape.
+//   out/build/release/tests/he_tests --no-skip --test-case='Floating origin bench*'
+TEST_CASE("Floating origin bench: one shift at 50k and 200k entities" * doctest::skip())
+{
+	for (const int groups : { 500, 2000 })
+	{
+		HorizonWorld world;
+		buildGroupedWorld(world, groups, 100);
+		HE::propagateTransforms(world);
+		const auto t0 = std::chrono::steady_clock::now();
+		HE::shiftWorldOrigin(world, nullptr, glm::vec3(8000.0f, 0.0f, 0.0f));
+		const auto t1 = std::chrono::steady_clock::now();
+		HE::propagateTransforms(world);   // the next extract's walk, which rebuilds the moved groups
+		const auto t2 = std::chrono::steady_clock::now();
+		const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+		MESSAGE((groups * 101) << " entities: shift " << ms(t1 - t0) << " ms, next walk " << ms(t2 - t1) << " ms");
+	}
+}
+
+TEST_CASE("Floating origin: a millimetre step 100 km out survives only after the shift")
+{
+	// The witness for the precision table (docs/world-streaming-baseline-
+	// 2026-10-06.md, 3.5): 100 km out a float step is 7.8 mm.
+	HorizonWorld world;
+	const Entity e = world.createEntity("Walker");
+	tf(world, e).position = glm::vec3(100000.0f, 0.0f, 0.0f);
+	const glm::vec3 step(0.001f, 0.0f, 0.0f);
+
+	glm::vec3 p = tf(world, e).position + step;
+	CHECK(p.x == 100000.0f);   // without a floating origin the step is lost
+
+	HE::updateFloatingOrigin(world, nullptr, tf(world, e).position, 8000.0f);
+	const float before = tf(world, e).position.x;
+	p = tf(world, e).position + step;
+	CHECK(p.x > before);       // with it, it arrives
+	// Absolute within a quarter of a millimetre (a float step at 4 km).
+	CHECK(std::fabs(double(p.x) + world.origin().x - 100000.001) < 0.00025);
 }

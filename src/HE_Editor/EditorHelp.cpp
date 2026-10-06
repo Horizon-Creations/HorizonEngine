@@ -3900,6 +3900,19 @@ namespace
 	{ "Physics/Earth", "Earth",
 	  "Puts gravity back to 0, −9.81, 0.",
 	  "", "systems#physics" },
+	{ "Physics/Floating origin radius", "Floating origin radius",
+	  "Positions are 32-bit floats: 30 km from the origin objects start to shake "
+	  "by a pixel, at 250 km a walking step is rounded away. With a radius set, "
+	  "the exported game moves the whole world back by whole multiples of it "
+	  "once the camera is further out than this on any axis — entities, physics "
+	  "bodies, particles, trails, rain, the rig camera, nav agents — and keeps "
+	  "the absolute offset itself. Savegames and multiplayer carry absolute "
+	  "positions, the navmesh is queried with the offset added.\n\n"
+	  "0 is off, the default. What does not move along: positions a script "
+	  "keeps in its own variables, keyframes that set a top-level entity's "
+	  "position, and GPU particles — each jumps by the shift. The editor and its "
+	  "Play keep absolute coordinates. 5 000–10 000 m is a good radius.",
+	  "", "systems#physics" },
 	// ── Audio ▸ Buses ────────────────────────────────────────────────────────
 	{ "Audio Buses/Open Audio Mixer", "Open Audio Mixer",
 	  "Opens the mixer window, where the project's buses are made and their "

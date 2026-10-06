@@ -147,6 +147,7 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && nearlyEqual(physics.gravity.x, o.physics.gravity.x)
         && nearlyEqual(physics.gravity.y, o.physics.gravity.y)
         && nearlyEqual(physics.gravity.z, o.physics.gravity.z)
+        && nearlyEqual(physics.floatingOriginRadius, o.physics.floatingOriginRadius)
         && renderDefaults.useEditorSettings == o.renderDefaults.useEditorSettings
         && renderDefaults.windowWidth == o.renderDefaults.windowWidth
         && renderDefaults.windowHeight == o.renderDefaults.windowHeight
@@ -195,6 +196,9 @@ void ProjectSettings::clamp()
 
     auto& p = physics;
     p.fixedHz = std::clamp(p.fixedHz, ProjectPhysicsSettings::kMinHz, ProjectPhysicsSettings::kMaxHz);
+    p.floatingOriginRadius = std::isfinite(p.floatingOriginRadius)
+        ? std::clamp(p.floatingOriginRadius, 0.0f, ProjectPhysicsSettings::kMaxFloatingOriginRadius)
+        : 0.0f;
     for (int i = 0; i < 3; ++i)
     {
         if (!std::isfinite(p.gravity[i])) p.gravity[i] = 0.0f;
@@ -293,6 +297,7 @@ void ProjectSettings::toJson(json& out) const
     out["physics"] = {
         { "fixedHz", physics.fixedHz },
         { "gravity", { physics.gravity.x, physics.gravity.y, physics.gravity.z } },
+        { "floatingOriginRadius", physics.floatingOriginRadius },
     };
 
     out["renderDefaults"] = {
@@ -370,6 +375,7 @@ void ProjectSettings::fromJson(const json& in)
     {
         const json& p = section(in, "physics");
         readNumber(p, "fixedHz", physics.fixedHz);
+        readNumber(p, "floatingOriginRadius", physics.floatingOriginRadius);
         const auto g = p.find("gravity");
         if (g != p.end() && g->is_array() && g->size() == 3)
         {

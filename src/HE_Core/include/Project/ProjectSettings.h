@@ -122,9 +122,17 @@ struct HE_API ProjectPhysicsSettings
     // Default is what PhysicsWorld::kFixedDt has always been.
     int       fixedHz = 60;
     glm::vec3 gravity = glm::vec3(0.0f, -9.81f, 0.0f);   // m/s², rigid bodies
+    // Floating origin (HE::updateFloatingOrigin, Thema 153): once the game's
+    // camera is further than this from 0,0,0 on any axis, the world moves back
+    // by whole multiples of it. 0 = off, the default: a script that keeps
+    // positions of its own, or a cutscene that keys a top-level entity's
+    // position, would jump by the shift. Read by the packaged game only; the
+    // editor's Play keeps absolute coordinates.
+    float     floatingOriginRadius = 0.0f;   // m
 
-    static constexpr int kMinHz = 10;
-    static constexpr int kMaxHz = 480;
+    static constexpr int   kMinHz = 10;
+    static constexpr int   kMaxHz = 480;
+    static constexpr float kMaxFloatingOriginRadius = 1.0e5f;
 
     // The step length both applications hand to HE::advanceFixedSteps. ONE
     // function so the editor's preview and the packaged game cannot round the
