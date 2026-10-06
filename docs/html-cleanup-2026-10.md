@@ -122,7 +122,7 @@ Geprüft wurde Stand `1df3b075` auf NN-WS03 (Windows 11, VS 18 / MSVC 14.51, Nin
 
 - **Konfiguration:** `cmake --preset x64-release -B C:/hw156/build -DDEPLOY_DIR=C:/hw156/deploy`, also ein leeres Build-Verzeichnis mit allen FetchContent-Abhängigkeiten neu. Exit 0 (91 s). Das Log nennt `GLM: Version 1.0.1`, und im Cache steht `glm_SOURCE_DIR = C:/hw156/build/_deps/glm-src`. Die vendorte Kopie unter `src/HE_Rendering/glm` kommt im Build nicht vor. Die CMake-Warnungen sind nur Deprecation-Hinweise aus `glm-src` und `mbedtls-src`. Keine Warnung nennt fehlende Dateien, `doc/` oder `.html`.
 - **Build:** `cmake --build C:/hw156/build -j8`. Exit 0, 1780/1780 Schritte. Der letzte Schritt prüft die zur Laufzeit kompilierten Shader-Strings mit fxc und glslangValidator, Ergebnis „51 compiled, 0 failed“.
-- **Editor-Handbuch:** `Editor/Docs/he-docs.json` liegt im Deploy und ist byte-gleich zu `EditorDeps/Docs/he-docs.json`. Im ganzen Deploy liegt keine `.html`-Datei. Der Editor liefert also auch vorher kein HTML aus.
+- **Editor-Handbuch:** `Editor/Docs/he-docs.json` liegt im Deploy und ist byte-gleich zu `EditorDeps/Docs/he-docs.json`. Im ganzen Deploy liegt keine `.html`-Datei. Gemessen ist nur der Stand nach der Löschung. Dass auch vorher kein `glm/doc` im Deploy lag, folgt aus dem fehlenden CMake-Verweis (Schritt 1), nicht aus einer Messung.
 - Der gemeinsame Deploy `HorizonEngineBuild` wurde nicht berührt (`DEPLOY_DIR`-Override, `HorizonEditor.exe` dort unverändert vom 05.10.).
 
 ### Tests: `ctest` im Vordergrund, Exit 0
