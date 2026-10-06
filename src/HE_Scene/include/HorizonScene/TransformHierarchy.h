@@ -24,6 +24,12 @@ namespace HE {
     // in a different order is a bug that only shows up on rotated parents.
     glm::mat4 localMatrix(const TransformComponent& t);
 
+    // The same matrix, taken from TransformComponent::localCache when that was
+    // built from exactly the current position/rotation/scale, and computed
+    // otherwise. Never writes the cache (only propagateTransforms does), so it
+    // is as safe to call from anywhere as localMatrix itself.
+    glm::mat4 cachedLocalMatrix(const TransformComponent& t);
+
     // Recompute worldMatrix for every entity, top-down from the world root, and
     // clear their dirty flags.
     //
@@ -32,8 +38,10 @@ namespace HE {
     // would never fire. Entities outside that hierarchy (no HierarchyComponent)
     // are handled separately — for them local IS world.
     //
-    // Recomputing everything is cheap at current scene sizes; dirty-flag pruning
-    // can come back with profiling.
+    // Every entity is still visited, but the sin/cos of localMatrix is only paid
+    // for the ones whose position/rotation/scale changed since the last call
+    // (TransformComponent::localCache). Not pruned by the dirty flag: too many
+    // writers never set it.
     void propagateTransforms(HorizonWorld& world);
 
     // ONE entity's world matrix, composed on the spot by walking its parent

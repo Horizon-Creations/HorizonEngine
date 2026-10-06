@@ -1182,12 +1182,95 @@ void RenderExtractor::setContentManager(ContentManager* cm)
 	m_contentManager       = cm;
 }
 
+void RenderExtractor::beginFrame()
+{
+	m_frameArmed  = true;
+	m_frameCached = false;
+}
+
+void RenderExtractor::endFrame()
+{
+	m_frameArmed  = false;
+	m_frameCached = false;
+	// Keeps its capacity for the next frame; the contents must not outlive it.
+	if (m_frameCopy) m_frameCopy->clear();
+}
+
+RenderExtractor::FrameKey RenderExtractor::makeFrameKey(const HorizonWorld& world,
+                                                        const EditorCameraOverride* editorCam) const
+{
+	FrameKey k;
+	k.world          = &world;
+	k.hasEditorCam   = editorCam != nullptr;
+	if (editorCam) k.editorCam = *editorCam;
+	k.contentManager = m_contentManager;
+	k.materialEpoch  = m_sectionMaterialEpoch;
+	k.shadowDistance = m_shadowDistance;
+	k.cascadeCount   = m_cascadeCount;
+	k.splitLambda    = m_splitLambda;
+	k.shadowMapRes   = m_shadowMapRes;
+	k.dayNight       = m_dayNight;
+	k.timeOfDay      = m_timeOfDay;
+	k.sunColor       = m_sunColor;
+	k.sunIntensity   = m_sunIntensity;
+	k.moonColor      = m_moonColor;
+	k.moonIntensity  = m_moonIntensity;
+	k.cloudCoverage  = m_cloudCoverage;
+	return k;
+}
+
+bool RenderExtractor::sameFrameKey(const FrameKey& a, const FrameKey& b)
+{
+	if (a.hasEditorCam != b.hasEditorCam) return false;
+	if (a.hasEditorCam)
+	{
+		const EditorCameraOverride& x = a.editorCam;
+		const EditorCameraOverride& y = b.editorCam;
+		if (x.active != y.active || x.view != y.view || x.position != y.position
+		    || x.fovDegrees != y.fovDegrees || x.nearPlane != y.nearPlane
+		    || x.farPlane != y.farPlane || x.orthographic != y.orthographic
+		    || x.orthoHalfHeight != y.orthoHalfHeight || x.editorIcons != y.editorIcons)
+			return false;
+	}
+	return a.world == b.world && a.contentManager == b.contentManager
+	    && a.materialEpoch == b.materialEpoch
+	    && a.shadowDistance == b.shadowDistance && a.cascadeCount == b.cascadeCount
+	    && a.splitLambda == b.splitLambda && a.shadowMapRes == b.shadowMapRes
+	    && a.dayNight == b.dayNight && a.timeOfDay == b.timeOfDay
+	    && a.sunColor == b.sunColor && a.sunIntensity == b.sunIntensity
+	    && a.moonColor == b.moonColor && a.moonIntensity == b.moonIntensity
+	    && a.cloudCoverage == b.cloudCoverage;
+}
+
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
                               const EditorCameraOverride* editorCam)
 {
 	HE_PROFILE_SCOPE_N("RenderExtractor::extract");
-	out.clear();
 	auto& reg = world.registry();
+
+	// Second and later call of a frame with the same inputs: the copy of the
+	// first walk, see beginFrame() in the header.
+	if (m_frameArmed && m_frameCached && m_frameCopy
+	    && sameFrameKey(m_frameKey, makeFrameKey(world, editorCam)))
+	{
+		HE_PROFILE_SCOPE_N("RenderExtractor::reuse");
+		out = *m_frameCopy;
+		if (aspectRatio != m_frameAspect)
+		{
+			// The aspect-dependent tail of the walk, in the walk's order: the
+			// projection, then the cascade fit around it and the local layers,
+			// on a shadow block reset the way clear() resets it.
+			extractCamera(reg, out, aspectRatio, editorCam);
+			out.shadow = ShadowData{};
+			fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
+			assignLocalShadowLayers(out);
+		}
+		++m_reusedExtracts;
+		return;
+	}
+
+	++m_fullExtracts;
+	out.clear();
 
 	extractTransforms(world, reg);
 	extractCamera(reg, out, aspectRatio, editorCam);
@@ -1214,6 +1297,15 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// Shadows last: both phases read the finished object + light sets.
 	fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
 	assignLocalShadowLayers(out);
+
+	if (m_frameArmed)
+	{
+		if (!m_frameCopy) m_frameCopy = std::make_unique<RenderWorld>();
+		*m_frameCopy  = out;
+		m_frameKey    = makeFrameKey(world, editorCam);
+		m_frameAspect = aspectRatio;
+		m_frameCached = true;
+	}
 }
 
 // ── Environment sun + moon (day-night) ────────────────────────────────────

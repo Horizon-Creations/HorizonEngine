@@ -319,6 +319,19 @@ namespace
         // drawn about their box's middle.
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + style.FramePadding.y - 1.0f);
 
+        // A row scrolled out of the panel: the same space, nothing drawn and
+        // no subtree walk. The panel lists every row, and the eye and padlock
+        // are ImDrawList paths that ImGui does not clip away by itself — at
+        // 10k entities they were most of the editor's frame
+        // (docs/world-streaming-baseline-2026-10-06.md §3.3). An item nobody
+        // can see cannot be clicked either, so nothing else is lost.
+        const ImVec2 boxMin = ImGui::GetCursorScreenPos();
+        if (!ImGui::IsRectVisible(boxMin, ImVec2(boxMin.x + total, boxMin.y + sz)))
+        {
+            ImGui::Dummy(ImVec2(total, sz));
+            return;
+        }
+
         ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const bool editable = !ctx.isPlaying;

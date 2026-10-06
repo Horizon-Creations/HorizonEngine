@@ -558,16 +558,25 @@ struct PhysicsWorld::Impl
     // Hard limits handed to Jolt below. Exceeding them makes CreateAndAddBody
     // return an invalid id, which used to be swallowed silently — the scene then
     // simply had objects that never fell. They are logged instead.
-    static constexpr uint32_t kMaxBodies = 1024;
+    //
+    // They were 1024 each — the numbers from Jolt's HelloWorld, whose own
+    // comment says a real project wants "something in the order of 65536"
+    // bodies and pairs and ~10240 contact constraints. 1024 bodies was the
+    // first wall a larger world hit, long before float precision
+    // (docs/world-streaming-baseline-2026-10-06.md §3.6). Jolt allocates the
+    // body table and broadphase up front from these, a few MB per world.
+    static constexpr uint32_t kMaxBodies             = 65536;
+    static constexpr uint32_t kMaxBodyPairs          = 65536;
+    static constexpr uint32_t kMaxContactConstraints = 10240;
 
     Impl()
     {
         jobSystem.Init(JPH::cMaxPhysicsJobs);
         physicsSystem.Init(
-            kMaxBodies,   // max bodies
+            kMaxBodies,
             0,      // num body mutexes (0 = auto)
-            1024,   // max body pairs
-            1024,   // max contact constraints
+            kMaxBodyPairs,
+            kMaxContactConstraints,
             bpLayerInterface,
             ovbpFilter,
             ooFilter
@@ -867,7 +876,8 @@ JPH::ShapeSettings::ShapeResult buildConvexHullShape(const StaticMeshAsset& mesh
 // in the surrounding code: the chunk meshes carry downward SKIRTS to hide LOD
 // cracks (as colliders those are invisible walls at every chunk seam), the chunk
 // entities are destroyed and rebuilt whenever the grid changes while a terrain
-// body outlives that, and the body budget is 1024 for the entire world.
+// body outlives that, and the body budget (Impl::kMaxBodies) is shared by the
+// entire world.
 //
 // `worldScale` is the landscape entity's scale from its world matrix, and it has
 // to be applied HERE rather than left to the body: the chunk meshes are child

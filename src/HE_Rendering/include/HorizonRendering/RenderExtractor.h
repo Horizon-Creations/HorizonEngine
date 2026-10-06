@@ -3,6 +3,8 @@
 #include <Renderer/IRenderer.h>   // EditorCameraOverride, EnvironmentSettings
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
 #include <algorithm>
+#include <cstdint>
+#include <memory>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/mat4x4.hpp>
@@ -115,6 +117,45 @@ public:
     void extract(HorizonWorld& world, RenderWorld& outWorld, float aspectRatio,
                  const EditorCameraOverride* editorCam = nullptr);
 
+    // ── Reuse within one frame ──────────────────────────────────────────────
+    // A backend that extracts once per pass (Metal: shadow, SSAO, G-buffer,
+    // scene — every one of them re-extracts so its draw set and cascade fit
+    // match the others) walked the whole registry that many times a frame:
+    // ~26 ms per walk at 50k entities, 4× per frame
+    // (docs/world-streaming-baseline-2026-10-06.md §3.2, §5 point 1).
+    //
+    // Between beginFrame() and endFrame() the world does not change, so the
+    // second and later extract() answer from a copy of the first instead of
+    // walking it again — as long as every input is the same: world, editor
+    // camera (by value), day-night, shadow settings, content manager and its
+    // epoch. The aspect ratio may differ (the SSAO pass extracts at half
+    // resolution, rounded): then only what depends on it — the projection, the
+    // cascade fit and the local shadow layers — is recomputed, exactly as the
+    // full walk would. Outside a frame (no beginFrame, or after endFrame)
+    // nothing is reused, so a caller that never opts in behaves as before.
+    //
+    // The world must not be edited between the two calls; that is the whole
+    // contract. The renderer's frame encode is the place where that holds.
+    void beginFrame();
+    void endFrame();
+
+    // RAII for the two above — an EncodeFrame with early returns stays closed.
+    class FrameScope
+    {
+    public:
+        explicit FrameScope(RenderExtractor& x) : m_x(x) { m_x.beginFrame(); }
+        ~FrameScope() { m_x.endFrame(); }
+        FrameScope(const FrameScope&)            = delete;
+        FrameScope& operator=(const FrameScope&) = delete;
+    private:
+        RenderExtractor& m_x;
+    };
+
+    // How many extract() calls walked the registry and how many were answered
+    // from the frame copy, since construction. For tests and the profiler.
+    uint64_t fullExtractCount() const   { return m_fullExtracts; }
+    uint64_t reusedExtractCount() const { return m_reusedExtracts; }
+
     // Populate outWorld.uiObjects from UISystem::extract.
     // Called after extract() when viewport pixel dimensions are known.
     //
@@ -208,4 +249,37 @@ private:
     glm::vec3 m_moonColor      = glm::vec3(0.55f, 0.65f, 0.95f);
     float     m_moonIntensity  = 0.66f;
     float     m_cloudCoverage  = 0.5f;
+
+    // ── Frame reuse (beginFrame/endFrame) ───────────────────────────────────
+    // Everything extract() reads besides the registry, captured when the frame
+    // copy was taken. A later call reuses the copy only if all of it matches.
+    struct FrameKey
+    {
+        const HorizonWorld*  world = nullptr;
+        bool                 hasEditorCam = false;
+        EditorCameraOverride editorCam{};
+        ContentManager*      contentManager = nullptr;
+        uint64_t             materialEpoch  = 0;
+        float                shadowDistance = 0.0f;
+        int                  cascadeCount   = 0;
+        float                splitLambda    = 0.0f;
+        int                  shadowMapRes   = 0;
+        bool                 dayNight       = false;
+        float                timeOfDay      = 0.0f;
+        glm::vec3            sunColor{ 0.0f };
+        float                sunIntensity   = 0.0f;
+        glm::vec3            moonColor{ 0.0f };
+        float                moonIntensity  = 0.0f;
+        float                cloudCoverage  = 0.0f;
+    };
+    FrameKey makeFrameKey(const HorizonWorld& world, const EditorCameraOverride* editorCam) const;
+    static bool sameFrameKey(const FrameKey& a, const FrameKey& b);
+
+    bool                         m_frameArmed     = false;   // inside beginFrame/endFrame
+    bool                         m_frameCached    = false;   // m_frameCopy holds a full walk
+    float                        m_frameAspect    = 0.0f;    // the aspect it was walked at
+    FrameKey                     m_frameKey{};
+    std::unique_ptr<RenderWorld> m_frameCopy;                // allocated on first use
+    uint64_t                     m_fullExtracts   = 0;
+    uint64_t                     m_reusedExtracts = 0;
 };

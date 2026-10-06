@@ -15825,6 +15825,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 {
 	@autoreleasepool
 	{
+		// Every pass below re-extracts (shadow, GI, SSAO, G-buffer, scene) so
+		// their draw sets and cascade fits agree. Inside this scope the world
+		// does not change, so the extractor walks it once and answers the rest
+		// from that walk (RenderExtractor::beginFrame). Closed on every return.
+		RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
 		if (isPrimary)
 		{
 			// Reset the render counters before any early-return below, so a frame
