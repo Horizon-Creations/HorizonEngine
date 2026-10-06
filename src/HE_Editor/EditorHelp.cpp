@@ -3530,28 +3530,35 @@ namespace
 	  "the editor receives access to your repositories and gists. It is kept in "
 	  "git's credential helper (the system keychain), exactly where a pasted "
 	  "token would go.",
-	  "", "editor#preferences" },
+	  "", "editor#github" },
 	{ "Source Control/Sign out", "Sign out",
 	  "Removes the GitHub token from git's credential helper, so neither the "
 	  "editor nor git on this machine uses it any more. GitHub still lists "
 	  "Horizon Engine under Settings \xe2\x96\xb8 Applications until you revoke it "
 	  "there.",
-	  "", "editor#preferences" },
+	  "", "editor#github" },
 	{ "Source Control/Copy code & open GitHub", "Copy code & open GitHub",
 	  "Puts the code on the clipboard and opens GitHub's device page in your "
 	  "browser. Paste the code there and approve. The editor notices on its own.",
-	  "", "editor#preferences" },
+	  "", "editor#github" },
 	{ "Source Control/Copy code", "Copy code",
 	  "Puts the code on the clipboard, for when the browser is on another "
 	  "machine or already open.",
-	  "", "editor#preferences" },
+	  "", "editor#github" },
 	{ "Source Control/Get a new code", "Get a new code",
 	  "The old code ran out (they last about fifteen minutes). Asks GitHub for a "
 	  "fresh one.",
-	  "", "editor#preferences" },
+	  "", "editor#github" },
 	{ "Source Control/Try again", "Try again",
 	  "Starts the sign-in over with a fresh code.",
-	  "", "editor#preferences" },
+	  "", "editor#github" },
+	// The clone dialog's second "Load my repositories": shown when signed in,
+	// it lists with the sign-in instead of the token field below it.
+	{ "Source Control/Load my repositories##signin", "Load my repositories",
+	  "Asks GitHub for every repository your sign-in can see \xe2\x80\x94 yours, and "
+	  "those of organisations you belong to \xe2\x80\x94 newest first. No token to "
+	  "type: the editor reads the sign-in from git's credential helper.",
+	  "", "editor#github" },
 	{ "Source Control/Push automatically after each commit", "",
 	  "Send every commit to the remote as it is made. Convenient alone, and a "
 	  "way to publish half-finished work when several people share the branch.",
@@ -7697,7 +7704,7 @@ namespace
 	  "right here in this dialog. Afterwards the issue can be filed directly "
 	  "under your account and the whole log uploaded. The sign-in stays for "
 	  "source control too.",
-	  "", "advanced#diagnostics" },
+	  "", "editor#github" },
 	{ "Report Issue/Create a token", "",
 	  "Opens GitHub's personal access token page. A token with issues and gist "
 	  "access is what lets the editor file the report and upload the whole log "

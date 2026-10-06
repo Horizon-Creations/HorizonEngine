@@ -9692,7 +9692,16 @@
          },
          {
           "s": "",
-          "t": " — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Commits and pushes themselves live in "
+          "t": " — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Between the two sits your "
+         },
+         {
+          "h": "#github",
+          "s": "l",
+          "t": "GitHub account"
+         },
+         {
+          "s": "",
+          "t": ": signed in, or a button to sign in. Commits and pushes themselves live in "
          },
          {
           "s": "c",
@@ -9754,8 +9763,719 @@
      ],
      "eyebrow": "Setup",
      "id": "preferences",
-     "text": "Edit » Preferences (Ctrl/Cmd + ,) holds machine-level settings: Renderer — graphics backend picker (OpenGL everywhere; Metal on macOS; Direct3D 11/12 on Windows; Vulkan where enabled), VSync, GPU weather particles. Post-processing — Bloom (threshold, intensity) and ambient occlusion (method SSAO / HBAO / GTAO, radius, intensity). See Post-Processing. Source Control » Repository — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Commits and pushes themselves live in View » Source Control. Tools » Status — everything the editor needs from outside itself in one table: git and Git LFS, CMake and a C++ compiler, the local network and the router. Rows that are not green offer a Fix. A \"C++ Toolchain Not Found\" dialog also appears at startup when CMake or the compiler are missing, offering automatic installation — the toolchain is needed for C++ projects and for compiling HorizonCode at export. Collaboration — whether the editor announces and listens for sessions on the local network; whether it will carry large assets (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself.",
+     "text": "Edit » Preferences (Ctrl/Cmd + ,) holds machine-level settings: Renderer — graphics backend picker (OpenGL everywhere; Metal on macOS; Direct3D 11/12 on Windows; Vulkan where enabled), VSync, GPU weather particles. Post-processing — Bloom (threshold, intensity) and ambient occlusion (method SSAO / HBAO / GTAO, radius, intensity). See Post-Processing. Source Control » Repository — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Between the two sits your GitHub account: signed in, or a button to sign in. Commits and pushes themselves live in View » Source Control. Tools » Status — everything the editor needs from outside itself in one table: git and Git LFS, CMake and a C++ compiler, the local network and the router. Rows that are not green offer a Fix. A \"C++ Toolchain Not Found\" dialog also appears at startup when CMake or the compiler are missing, offering automatic installation — the toolchain is needed for C++ projects and for compiling HorizonCode at export. Collaboration — whether the editor announces and listens for sessions on the local network; whether it will carry large assets (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself.",
      "title": "Preferences"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The editor signs in to GitHub without a token you create by hand. It shows a short code, you approve that code on github.com in your browser, and the editor receives access to your repositories and gists. This is GitHub's "
+        },
+        {
+         "s": "i",
+         "t": "device flow"
+        },
+        {
+         "s": "",
+         "t": ": your password is only ever typed on github.com, and the editor carries no secret of its own, only the public id of the Horizon Engine app."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Where you can sign in"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Preferences » Source Control » GitHub account"
+         },
+         {
+          "s": "",
+          "t": " shows "
+         },
+         {
+          "s": "i",
+          "t": "Signed in to GitHub as <name>"
+         },
+         {
+          "s": "",
+          "t": " with "
+         },
+         {
+          "s": "i",
+          "t": "Sign out"
+         },
+         {
+          "s": "",
+          "t": ", or "
+         },
+         {
+          "s": "i",
+          "t": "Sign in with GitHub..."
+         },
+         {
+          "s": "",
+          "t": ", which opens the sign-in dialog. This works without a project open."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Clone from GitHub..."
+         },
+         {
+          "s": "",
+          "t": " (in the Project Hub and in Preferences) runs the sign-in inside its own dialog. Afterwards "
+         },
+         {
+          "s": "i",
+          "t": "Load my repositories"
+         },
+         {
+          "s": "",
+          "t": " lists your repositories, and the clone needs no token either."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Help » Report Issue..."
+         },
+         {
+          "s": "",
+          "t": " runs it inside the report dialog too. Signed in, the issue is filed under your account and the whole log is uploaded as a gist."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "All three are the same sign-in. Once you are signed in, the others see it too, and "
+        },
+        {
+         "s": "i",
+         "t": "Create & push"
+        },
+        {
+         "s": "",
+         "t": " on the Repository page uses it when the token field is left empty."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Step by step"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Click "
+         },
+         {
+          "s": "i",
+          "t": "Sign in with GitHub..."
+         },
+         {
+          "s": "",
+          "t": ". The editor asks GitHub for a code and shows it in large letters, for example "
+         },
+         {
+          "s": "c",
+          "t": "WDJB-MJHT"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Click "
+         },
+         {
+          "s": "i",
+          "t": "Copy code & open GitHub"
+         },
+         {
+          "s": "",
+          "t": ". The code goes to the clipboard and "
+         },
+         {
+          "s": "c",
+          "t": "github.com/login/device"
+         },
+         {
+          "s": "",
+          "t": " opens in your browser. If the browser is on another machine, use "
+         },
+         {
+          "s": "i",
+          "t": "Copy code"
+         },
+         {
+          "s": "",
+          "t": " and type the address yourself."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "On GitHub, sign in if you have to, paste the code and approve "
+         },
+         {
+          "s": "i",
+          "t": "Horizon Engine"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The editor notices on its own, stores the token and shows "
+         },
+         {
+          "s": "i",
+          "t": "Signed in to GitHub as <name>"
+         },
+         {
+          "s": "",
+          "t": ". Nothing to click in the editor while you wait."
+         }
+        ]
+       ],
+       "k": "ol"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A code lasts about fifteen minutes and the dialog counts down. If it runs out, "
+        },
+        {
+         "s": "i",
+         "t": "Get a new code"
+        },
+        {
+         "s": "",
+         "t": " starts over; if you declined on GitHub or something else went wrong, "
+        },
+        {
+         "s": "i",
+         "t": "Try again"
+        },
+        {
+         "s": "",
+         "t": " does. "
+        },
+        {
+         "s": "i",
+         "t": "Cancel"
+        },
+        {
+         "s": "",
+         "t": " stops waiting at any point."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The editor asks for two scopes and nothing else: "
+        },
+        {
+         "s": "c",
+         "t": "repo"
+        },
+        {
+         "s": "",
+         "t": " (create, list, clone and push your repositories, private ones included) and "
+        },
+        {
+         "s": "c",
+         "t": "gist"
+        },
+        {
+         "s": "",
+         "t": " (the log upload of Report Issue)."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Where the token is kept"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "In git's credential helper, as the entry for "
+        },
+        {
+         "s": "c",
+         "t": "github.com"
+        },
+        {
+         "s": "",
+         "t": ". That is the helper your git is configured with (a project's own helper first); when none is configured, the system keychain on macOS and the Git Credential Manager on Windows. Linux has no such default: there git's in-memory cache keeps the sign-in for an hour, so configure a lasting helper (for example "
+        },
+        {
+         "s": "c",
+         "t": "libsecret"
+        },
+        {
+         "s": "",
+         "t": ") if you want it to stay. It is the same entry a pasted token goes to, so "
+        },
+        {
+         "s": "c",
+         "t": "git push"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "c",
+         "t": "git pull"
+        },
+        {
+         "s": "",
+         "t": " in a terminal use the sign-in as well. The engine keeps no copy: no project file, no "
+        },
+        {
+         "s": "c",
+         "t": "config.json"
+        },
+        {
+         "s": "",
+         "t": " and no log line ever contains the token. Signing in needs git installed, because git is what stores it."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Tokens still work. The token fields stay for GitLab, Azure DevOps and anyone who prefers a personal access token, and a token typed into "
+        },
+        {
+         "s": "i",
+         "t": "Create & push"
+        },
+        {
+         "s": "",
+         "t": " wins over the sign-in."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Signing out"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "i",
+         "t": "Sign out"
+        },
+        {
+         "s": "",
+         "t": " removes the "
+        },
+        {
+         "s": "c",
+         "t": "github.com"
+        },
+        {
+         "s": "",
+         "t": " entry from the credential helper, so neither the editor nor git on this machine uses it any more. Because it is the same entry, a token you once pasted for github.com goes with it. GitHub itself keeps listing Horizon Engine under "
+        },
+        {
+         "s": "i",
+         "t": "Settings » Applications » Authorized OAuth Apps"
+        },
+        {
+         "s": "",
+         "t": " until you revoke it there. If you revoke it on GitHub without signing out, the account row says "
+        },
+        {
+         "s": "i",
+         "t": "A GitHub token is stored, but GitHub did not confirm it"
+        },
+        {
+         "s": "",
+         "t": " the next time the editor checks; "
+        },
+        {
+         "s": "i",
+         "t": "Sign out"
+        },
+        {
+         "s": "",
+         "t": " then clears the stale entry, and you can sign in again."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "When it does not work"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "The editor says"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What to do"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "",
+           "t": "The code expired before it was entered."
+          }
+         ],
+         [
+          {
+           "s": "i",
+           "t": "Get a new code"
+          },
+          {
+           "s": "",
+           "t": ", and enter it within fifteen minutes."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "The sign-in was declined on GitHub."
+          }
+         ],
+         [
+          {
+           "s": "i",
+           "t": "Try again"
+          },
+          {
+           "s": "",
+           "t": ", and choose "
+          },
+          {
+           "s": "i",
+           "t": "Authorize"
+          },
+          {
+           "s": "",
+           "t": " on GitHub's page."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "GitHub has the device flow switched off for this app."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The app's owner has to tick "
+          },
+          {
+           "s": "i",
+           "t": "Enable Device Flow"
+          },
+          {
+           "s": "",
+           "t": " in its settings on GitHub (see below)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "GitHub does not know this app's client id."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The client id is wrong: check "
+          },
+          {
+           "s": "c",
+           "t": "HE_GITHUB_OAUTH_CLIENT_ID"
+          },
+          {
+           "s": "",
+           "t": ", or unset it to use the built-in one."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "A GitHub token is stored, but GitHub did not confirm it."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The stored token was revoked or has expired, or you are offline (the message says which). "
+          },
+          {
+           "s": "i",
+           "t": "Sign out"
+          },
+          {
+           "s": "",
+           "t": ", then sign in again."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Using your own OAuth App"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The editor you download signs in through the Horizon Engine app, and you need nothing of the following. A fork, or a build that should appear on GitHub under another name, can register an app of its own:"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "On github.com open "
+         },
+         {
+          "s": "i",
+          "t": "Settings » Developer settings » OAuth Apps » New OAuth App"
+         },
+         {
+          "s": "",
+          "t": " (for an organisation: the organisation's settings, same path)."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Fill in the "
+         },
+         {
+          "s": "i",
+          "t": "Application name"
+         },
+         {
+          "s": "",
+          "t": " (GitHub shows it on the approval page) and the "
+         },
+         {
+          "s": "i",
+          "t": "Homepage URL"
+         },
+         {
+          "s": "",
+          "t": ". The "
+         },
+         {
+          "s": "i",
+          "t": "Authorization callback URL"
+         },
+         {
+          "s": "",
+          "t": " is required by the form but never used by the device flow; your homepage URL will do."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Click "
+         },
+         {
+          "s": "i",
+          "t": "Register application"
+         },
+         {
+          "s": "",
+          "t": ", then tick "
+         },
+         {
+          "s": "i",
+          "t": "Enable Device Flow"
+         },
+         {
+          "s": "",
+          "t": " on the app's page and click "
+         },
+         {
+          "s": "i",
+          "t": "Update application"
+         },
+         {
+          "s": "",
+          "t": ". Without that tick every sign-in ends with "
+         },
+         {
+          "s": "i",
+          "t": "device flow switched off"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Copy the "
+         },
+         {
+          "s": "i",
+          "t": "Client ID"
+         },
+         {
+          "s": "",
+          "t": " (it starts with "
+         },
+         {
+          "s": "c",
+          "t": "Ov23"
+         },
+         {
+          "s": "",
+          "t": "). Do "
+         },
+         {
+          "s": "b",
+          "t": "not"
+         },
+         {
+          "s": "",
+          "t": " generate a client secret: the device flow does not use one. If the app already has one, it belongs in no source file, configuration or build."
+         }
+        ]
+       ],
+       "k": "ol"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Then hand the client id to the editor, either for one machine by setting it in the environment the editor is started from:"
+        }
+       ]
+      },
+      {
+       "k": "code",
+       "text": "export HE_GITHUB_OAUTH_CLIENT_ID=Ov23xxxxxxxxxxxxxxxx",
+       "title": "terminal"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "or for every build by changing "
+        },
+        {
+         "s": "c",
+         "t": "kDefaultClientId"
+        },
+        {
+         "s": "",
+         "t": " in "
+        },
+        {
+         "s": "c",
+         "t": "src/HE_SourceControl/include/SourceControl/GitHubOAuth.h"
+        },
+        {
+         "s": "",
+         "t": ". The client id is not a secret (it travels in every sign-in request), so it can be committed. On macOS an editor started from the Finder or the Dock does not see variables exported in a shell; start it from that terminal instead."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Source control",
+     "id": "github",
+     "text": "The editor signs in to GitHub without a token you create by hand. It shows a short code, you approve that code on github.com in your browser, and the editor receives access to your repositories and gists. This is GitHub's device flow: your password is only ever typed on github.com, and the editor carries no secret of its own, only the public id of the Horizon Engine app. Where you can sign in Preferences » Source Control » GitHub account shows Signed in to GitHub as <name> with Sign out, or Sign in with GitHub..., which opens the sign-in dialog. This works without a project open. Clone from GitHub... (in the Project Hub and in Preferences) runs the sign-in inside its own dialog. Afterwards Load my repositories lists your repositories, and the clone needs no token either. Help » Report Issue... runs it inside the report dialog too. Signed in, the issue is filed under your account and the whole log is uploaded as a gist. All three are the same sign-in. Once you are signed in, the others see it too, and Create & push on the Repository page uses it when the token field is left empty. Step by step Click Sign in with GitHub.... The editor asks GitHub for a code and shows it in large letters, for example WDJB-MJHT. Click Copy code & open GitHub. The code goes to the clipboard and github.com/login/device opens in your browser. If the browser is on another machine, use Copy code and type the address yourself. On GitHub, sign in if you have to, paste the code and approve Horizon Engine. The editor notices on its own, stores the token and shows Signed in to GitHub as <name>. Nothing to click in the editor while you wait. A code lasts about fifteen minutes and the dialog counts down. If it runs out, Get a new code starts over; if you declined on GitHub or something else went wrong, Try again does. Cancel stops waiting at any point. The editor asks for two scopes and nothing else: repo (create, list, clone and push your repositories, private ones included) and gist (the log upload of Report Issue). Where the token is kept In git's credential helper, as the entry for github.com. That is the helper your git is configured with (a project's own helper first); when none is configured, the system keychain on macOS and the Git Credential Manager on Windows. Linux has no such default: there git's in-memory cache keeps the sign-in for an hour, so configure a lasting helper (for example libsecret) if you want it to stay. It is the same entry a pasted token goes to, so git push and git pull in a terminal use the sign-in as well. The engine keeps no copy: no project file, no config.json and no log line ever contains the token. Signing in needs git installed, because git is what stores it. Tokens still work. The token fields stay for GitLab, Azure DevOps and anyone who prefers a personal access token, and a token typed into Create & push wins over the sign-in. Signing out Sign out removes the github.com entry from the credential helper, so neither the editor nor git on this machine uses it any more. Because it is the same entry, a token you once pasted for github.com goes with it. GitHub itself keeps listing Horizon Engine under Settings » Applications » Authorized OAuth Apps until you revoke it there. If you revoke it on GitHub without signing out, the account row says A GitHub token is stored, but GitHub did not confirm it the next time the editor checks; Sign out then clears the stale entry, and you can sign in again. When it does not work The editor says What to do The code expired before it was entered. Get a new code, and enter it within fifteen minutes. The sign-in was declined on GitHub. Try again, and choose Authorize on GitHub's page. GitHub has the device flow switched off for this app. The app's owner has to tick Enable Device Flow in its settings on GitHub (see below). GitHub does not know this app's client id. The client id is wrong: check HE_GITHUB_OAUTH_CLIENT_ID, or unset it to use the built-in one. A GitHub token is stored, but GitHub did not confirm it. The stored token was revoked or has expired, or you are offline (the message says which). Sign out, then sign in again. Using your own OAuth App The editor you download signs in through the Horizon Engine app, and you need nothing of the following. A fork, or a build that should appear on GitHub under another name, can register an app of its own: On github.com open Settings » Developer settings » OAuth Apps » New OAuth App (for an organisation: the organisation's settings, same path). Fill in the Application name (GitHub shows it on the approval page) and the Homepage URL. The Authorization callback URL is required by the form but never used by the device flow; your homepage URL will do. Click Register application, then tick Enable Device Flow on the app's page and click Update application. Without that tick every sign-in ends with device flow switched off. Copy the Client ID (it starts with Ov23). Do not generate a client secret: the device flow does not use one. If the app already has one, it belongs in no source file, configuration or build. Then hand the client id to the editor, either for one machine by setting it in the environment the editor is started from: terminal export HE_GITHUB_OAUTH_CLIENT_ID=Ov23xxxxxxxxxxxxxxxx or for every build by changing kDefaultClientId in src/HE_SourceControl/include/SourceControl/GitHubOAuth.h. The client id is not a secret (it travels in every sign-in request), so it can be committed. On macOS an editor started from the Finder or the Dock does not see variables exported in a shell; start it from that terminal instead.",
+     "title": "Signing in to GitHub"
     },
     {
      "blocks": [
