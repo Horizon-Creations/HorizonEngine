@@ -447,3 +447,14 @@ bleiben die in den Themen und CI-Läufen zitierten Commits gültig.
   Cluster aus #75) laufen grün nebeneinander.
 - **Nach dem Merge nicht erneut auf Hardware geprüft.** Die A/B-Werte in §7.2 stammen vom Stand
   vor dem Merge. Die visuelle Abnahme auf D3D11/D3D12/Vulkan mit echter Hardware steht noch aus.
+
+## 9. Hardware-Abnahme nach dem Merge (Thema 148, 06.10.2026)
+
+Siehe `docs/ddgi-graph-material-hardware-acceptance-2026-10-06.md`. Auf main-Stand `9b00bfb1`,
+RTX 4070, gegen GL als Referenz, mit Gate-Gegenprobe (`giProbe.y` hart 0) auf allen Backends:
+
+- D3D11/D3D12 sind abgenommen: Die Graph-Kugel weicht im Mittel 0,15 Stufen von GL ab, der
+  Farbbounce beträgt 19,9 (GL 20,2).
+- Vulkan: Der Material-Pfad ist abgenommen (das Material liest die Probes). Das Probe-Feld selbst
+  trägt aber keinen Farbbounce, auch nicht beim eingebauten Shader. Das ist ein eigener Befund,
+  dort §3.
