@@ -1,7 +1,9 @@
 #pragma once
 #include <nlohmann/json.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace HE
 {
@@ -22,6 +24,15 @@ namespace HE
 // piecesUsed (optional): how many pieces the entities were parsed in; 1 when the
 // text was parsed in one go, fallback included. Lets a test see the split happen.
 nlohmann::json parseSceneText(const std::string& text, size_t minPieceBytes = size_t(1) << 20,
+                              size_t* piecesUsed = nullptr);
+
+// The same for the CBOR form of a scene (.hescene saved binary, the scene inside
+// a .hpak, in-memory snapshots): exactly nlohmann::json::from_cbor(data, true,
+// false). The element boundaries come from walking the CBOR item heads, which
+// costs a fraction of building the tree. Indefinite lengths, tags, the key
+// twice, an element that is not a map or anything that does not walk cleanly to
+// the last byte take the one sequential decode.
+nlohmann::json parseSceneCbor(const std::vector<uint8_t>& data, size_t minPieceBytes = size_t(1) << 20,
                               size_t* piecesUsed = nullptr);
 
 } // namespace HE

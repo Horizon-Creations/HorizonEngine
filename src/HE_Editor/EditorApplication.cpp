@@ -2801,7 +2801,16 @@ void EditorApplication::OnRender(float dt)
 	// (registerRemoteAsset, HE_ContentSync) to actually complete once queued —
 	// without this, a passively-triggered download would finish and then sit in
 	// the sink forever, never registered.
-	contentManager().pollAsyncResults(4);
+	// Budgeted by time as well as count, like the game (Thema 153): four large
+	// meshes cost a frame as much as four materials did before. Materials that
+	// arrive are warmed here, so their first draw does not cross-compile.
+	{
+		constexpr size_t kEditorStreamBatch    = 16;
+		constexpr double kEditorStreamBudgetMs = 2.0;
+		const std::vector<HE::UUID> arrived =
+			contentManager().pollAsyncResults(kEditorStreamBatch, kEditorStreamBudgetMs);
+		if (!arrived.empty() && renderer()) renderer()->WarmupMaterials(arrived);
+	}
 
 #ifdef HE_HAVE_LIBSSH2
 	// Apply a freshly fetched EngineContent manifest to ContentManager — see

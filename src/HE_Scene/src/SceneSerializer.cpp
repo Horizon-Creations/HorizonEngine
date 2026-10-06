@@ -2702,7 +2702,7 @@ bool SceneSerializer::loadAdditive(HorizonWorld& world,
             HE_LOG_ERROR(Serialize, "Additive scene load: cannot open '%s'", path.string().c_str());
             return false;
         }
-        json scene = json::from_cbor(bytes, true, false);
+        json scene = HE::parseSceneCbor(bytes);
         if (scene.is_discarded())
         {
             HE_LOG_ERROR(Serialize, "Additive scene load: '%s' is not valid CBOR (%zu bytes)",
@@ -2741,7 +2741,7 @@ bool SceneSerializer::loadAdditiveFromMemory(HorizonWorld& world,
                                              const std::vector<uint8_t>& data,
                                              std::vector<Entity>* outCreated)
 {
-    json scene = json::from_cbor(data, true, false);
+    json scene = HE::parseSceneCbor(data);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Additive scene load from memory: not valid CBOR (%zu bytes)",
@@ -2826,7 +2826,7 @@ bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_
 
 bool SceneSerializer::loadFromMemory(HorizonWorld& world, const std::vector<uint8_t>& data)
 {
-    json scene = json::from_cbor(data, true, false);
+    json scene = HE::parseSceneCbor(data);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Scene restore from memory: not valid CBOR (%zu bytes)", data.size());
@@ -2867,6 +2867,8 @@ bool SceneSerializer::saveBinary(const HorizonWorld& world, const std::filesyste
 bool SceneSerializer::loadBinary(HorizonWorld& world, const std::filesystem::path& path)
 {
     HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::loadBinary");
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point t0 = Clock::now();
     std::vector<uint8_t> bytes;
     if (!readWholeFile(path, bytes))
     {
@@ -2874,7 +2876,7 @@ bool SceneSerializer::loadBinary(HorizonWorld& world, const std::filesystem::pat
         return false;
     }
 
-    json scene = json::from_cbor(bytes, true, false);
+    json scene = HE::parseSceneCbor(bytes);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Scene load: '%s' is not valid CBOR (%zu bytes)",
@@ -2882,11 +2884,17 @@ bool SceneSerializer::loadBinary(HorizonWorld& world, const std::filesystem::pat
         return false;
     }
     std::vector<uint8_t>().swap(bytes);
+    const Clock::time_point t1 = Clock::now();
 
+    const size_t entityCount = sceneEntityCount(scene);
     HE_LOG_INFO(Serialize, "Scene loaded (binary): '%s', %zu entity/-ies",
-                path.string().c_str(), sceneEntityCount(scene));
+                path.string().c_str(), entityCount);
     const bool ok = applySceneJson(world, scene);
+    const Clock::time_point t2 = Clock::now();
     releaseOnWorker(std::move(scene));
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    HE_LOG_INFO(Serialize, "SceneLoadTiming: entities=%zu parseMs=%.2f buildMs=%.2f (binary)",
+                entityCount, ms(t1 - t0), ms(t2 - t1));
     return ok;
 }
 
@@ -2938,7 +2946,7 @@ Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
                                           bool preserveIds,
                                           std::vector<PrefabInstanceComponent::Binding>* outBindings)
 {
-    json scene = json::from_cbor(data, true, false);
+    json scene = HE::parseSceneCbor(data);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Prefab instantiation failed: payload is not valid CBOR "
