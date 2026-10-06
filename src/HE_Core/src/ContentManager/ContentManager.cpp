@@ -1758,6 +1758,22 @@ std::vector<uint8_t> ContentManager::readMountedEntry(HE::UUID id)
 	return mount.reader->readEntry(id, mount.encrypted ? mount.key.data() : nullptr);
 }
 
+std::function<std::vector<uint8_t>()> ContentManager::detachedMountedEntryReader(HE::UUID id) const
+{
+	const auto it = m_pakResidency.find(id);
+	if (it == m_pakResidency.end()) return {};
+	const MountedPak& mount = m_mounts[it->second];
+	if (!mount.reader) return {};
+	// By value, like launchPakLoad: the function must not reach back into this.
+	return [id, path = mount.path, enc = mount.encrypted, key = mount.key,
+	        toc = mount.reader->sharedToc()]
+	{
+		HpakReader reader;
+		if (!reader.openShared(path, toc) && !reader.open(path)) return std::vector<uint8_t>{};
+		return reader.readEntry(id, enc ? key.data() : nullptr);
+	};
+}
+
 // ─── saveAsset ────────────────────────────────────────────────────────────────
 // The chunk encoding of every savable type, shared by saveAsset (the asset's own
 // file) and writeAssetTo (a copy somewhere else). False for a type with no

@@ -971,6 +971,9 @@ namespace
 		const std::string ls = world.levelScriptJson();
 		if (!ls.empty())
 			scene["levelScript"] = json::parse(ls, nullptr, /*allow_exceptions=*/false);
+		// Cell manifest of a split scene (HE::CellStreamer), verbatim.
+		if (const std::string& cells = world.cellManifestJson(); !cells.empty())
+			scene["cells"] = json::parse(cells, nullptr, /*allow_exceptions=*/false);
 
 		return scene;
 	}
@@ -1971,6 +1974,8 @@ namespace
 		// return so an entity-less scene still restores its script.
 		if (scene.contains("levelScript"))
 			world.setLevelScriptJson(scene["levelScript"].dump());
+		if (const auto cells = scene.find("cells"); cells != scene.end() && cells->is_object())
+			world.setCellManifestJson(cells->dump());
 
 		if (!scene.contains("entities")) return true; // empty scene — valid
 
@@ -2751,6 +2756,13 @@ bool SceneSerializer::loadAdditiveFromMemory(HorizonWorld& world,
     const bool ok = applyAdditiveJson(world, scene, outCreated);
     releaseOnWorker(std::move(scene));
     return ok;
+}
+
+bool SceneSerializer::loadAdditiveFromJson(HorizonWorld& world, const json& scene,
+                                           std::vector<Entity>* outCreated)
+{
+    if (!scene.is_object()) return false;
+    return applyAdditiveJson(world, scene, outCreated);
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────

@@ -13,12 +13,22 @@
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/Components/NavAgentComponent.h>
 #include <HorizonScene/FloatingOrigin.h>
+#include <HorizonScene/CellStreamer.h>
+#include <HorizonScene/SceneSerializer.h>
+#include "TestFsUtil.h"
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <thread>
+#include <nlohmann/json.hpp>
 #include <ContentManager/DefaultAssets.h>
 #include <Net/BitStream.h>
 #include <Renderer/IRenderer.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -557,4 +567,279 @@ TEST_CASE("Floating origin: a millimetre step 100 km out survives only after the
 	CHECK(p.x > before);       // with it, it arrives
 	// Absolute within a quarter of a millimetre (a float step at 4 km).
 	CHECK(std::fabs(double(p.x) + world.origin().x - 100000.001) < 0.00025);
+}
+
+// ─── Cell streaming (Thema 153, Schritt 5) ───────────────────────────────────
+
+namespace
+{
+// A cell file as scripts/split_scene_cells.py writes one: a scene whose root
+// holds the placed things of one grid square, at absolute positions.
+void writeCell(const std::filesystem::path& file, const std::vector<glm::vec3>& positions)
+{
+	HorizonWorld cell;
+	for (const glm::vec3& p : positions)
+	{
+		const Entity e = cell.createEntity("Prop");
+		tf(cell, e).position = p;
+		MeshComponent mc;
+		mc.meshAssetId = HE::kDefaultCubeMeshId;
+		cell.addComponent(e, mc);
+	}
+	std::filesystem::create_directories(file.parent_path());
+	SceneSerializer ser;
+	REQUIRE(ser.save(cell, file, SerializeFormat::JSON));
+}
+
+size_t countMeshes(HorizonWorld& world)
+{
+	size_t n = 0;
+	for (auto e : world.registry().view<MeshComponent>()) { (void)e; ++n; }
+	return n;
+}
+
+// Pumps the streamer until `done` or a few seconds have passed. No sleep: in
+// the low-power mode of the measuring Mac a 2 ms sleep takes ~150 ms.
+template <class Done>
+void pumpCells(HE::CellStreamer& s, HorizonWorld& world, const glm::dvec3& cam, const glm::vec3& vel, Done done)
+{
+	const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+	while (std::chrono::steady_clock::now() < until)
+	{
+		s.update(world, cam, vel, 100.0);
+		if (done() && s.stats().inFlight == 0 && s.stats().ready == 0) return;
+		std::this_thread::yield();
+	}
+}
+} // namespace
+
+TEST_CASE("CellManifest: reads the splitter's object, refuses a malformed one")
+{
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 1.5,
+		    "dir": "Content/W.cells", "list": [[0, 0, 3], [-1, 2, 7]]})", m));
+	CHECK(m.cellSize == 100.0f);
+	CHECK(m.unloadRadius == 120.0f);
+	CHECK(m.lookaheadSec == 1.5f);
+	REQUIRE(m.cells.size() == 2);
+	CHECK(m.cells[1].x == -1);
+	CHECK(m.cells[1].z == 2);
+	CHECK(m.cellPath(-1, 2) == "Content/W.cells/cell_-1_2.hescene");
+	CHECK(HE::CellManifest::cellIndex(-0.5, 100.0f) == -1);   // floor, not truncation
+	CHECK(HE::CellManifest::cellIndex(99.9, 100.0f) == 0);
+
+	CHECK_FALSE(HE::CellManifest::parse("not json", m));
+	CHECK(m.empty());
+	CHECK_FALSE(HE::CellManifest::parse(R"({"cellSize": 0, "dir": "d", "list": [[0,0]]})", m));
+	CHECK_FALSE(HE::CellManifest::parse(R"({"cellSize": 10, "list": [[0,0]]})", m));          // no dir
+	CHECK_FALSE(HE::CellManifest::parse(R"({"cellSize": 10, "dir": "d", "list": [["a",0]]})", m));
+	// An unload radius below the load radius would flicker: it is raised to it.
+	REQUIRE(HE::CellManifest::parse(R"({"cellSize": 10, "loadRadius": 50, "unloadRadius": 20,
+	                                    "dir": "d", "list": []})", m));
+	CHECK(m.unloadRadius == 50.0f);
+}
+
+TEST_CASE("CellStreamer: cells come and go with the camera, ahead of it, and under a floating origin")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_stream";
+	he_test::removeAllQuiet(root);
+	// A row of four 100 m cells along +X, three props each, in the middle of the square.
+	for (int x = 0; x < 4; ++x)
+		writeCell(root / "W.cells" / ("cell_" + std::to_string(x) + "_0.hescene"),
+		          { { x * 100.0f + 40.0f, 0.0f, 50.0f }, { x * 100.0f + 50.0f, 0.0f, 50.0f },
+		            { x * 100.0f + 60.0f, 0.0f, 50.0f } });
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 2,
+		    "dir": "W.cells", "list": [[0,0,3],[1,0,3],[2,0,3],[3,0,3],[4,0,3]]})", m));
+	// Cell 4 is in the list but has no file.
+
+	int loadedHook = 0, unloadingHook = 0;
+	HE::CellStreamer::Hooks hooks;
+	hooks.loaded    = [&](entt::entity, const std::vector<entt::entity>& created)
+	{
+		++loadedHook;
+		CHECK(created.size() == 4);   // the cell's root and its three props
+	};
+	hooks.unloading = [&](entt::entity) { ++unloadingHook; };
+	auto reader = [&root](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
+	{
+		const auto file = root / path;
+		if (!std::filesystem::exists(file)) return {};
+		return [file](std::vector<uint8_t>& out)
+		{
+			std::ifstream in(file, std::ios::binary);
+			out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+			return !out.empty();
+		};
+	};
+
+	HorizonWorld world;
+	HE::CellStreamer s;
+	s.begin(m, reader, hooks);
+	REQUIRE(s.active());
+
+	// Standing in cell 0: it and cell 1 (50 m away) come in, cell 2 (150 m) does not.
+	pumpCells(s, world, { 50.0, 1.7, 50.0 }, glm::vec3(0.0f), [&] { return s.stats().loaded == 2; });
+	CHECK(s.isLoaded(0, 0));
+	CHECK(s.isLoaded(1, 0));
+	CHECK_FALSE(s.isLoaded(2, 0));
+	CHECK(countMeshes(world) == 6);
+	CHECK(loadedHook == 2);
+	bool absolute = true;
+	for (auto [e, mc] : world.registry().view<MeshComponent>().each())
+	{
+		const glm::vec3 p = HE::worldPositionOf(world, e);
+		absolute = absolute && p.z == 50.0f && p.x >= 40.0f && p.x <= 160.0f;
+	}
+	CHECK(absolute);
+
+	// 70 m from cell 0: no new load would start there, but it stays (unload at 120 m).
+	pumpCells(s, world, { 170.0, 1.7, 50.0 }, glm::vec3(0.0f), [] { return true; });
+	CHECK(s.isLoaded(0, 0));
+
+	// Over at cell 3: 0 and 1 go, 2 and 3 come.
+	pumpCells(s, world, { 350.0, 1.7, 50.0 }, glm::vec3(0.0f),
+	          [&] { return s.isLoaded(2, 0) && s.isLoaded(3, 0); });
+	CHECK_FALSE(s.isLoaded(0, 0));
+	CHECK_FALSE(s.isLoaded(1, 0));
+	CHECK(s.isLoaded(2, 0));
+	CHECK(s.isLoaded(3, 0));
+	CHECK(countMeshes(world) == 6);
+	CHECK(unloadingHook == 2);
+	// Cell 4, now 50 m away, has no file: it fails once and is not asked for again.
+	CHECK(s.stats().failed == 1);
+	pumpCells(s, world, { 350.0, 1.7, 50.0 }, glm::vec3(0.0f), [] { return true; });
+	CHECK(s.stats().failed == 1);
+
+	s.clear(world);
+	CHECK(countMeshes(world) == 0);
+	CHECK_FALSE(s.active());
+
+	// Lookahead: standing in cell 0 but moving +X at 100 m/s, 2 s ahead is x = 250,
+	// so cell 3 (50 m from there) is wanted already.
+	s.begin(m, reader, hooks);
+	pumpCells(s, world, { 50.0, 1.7, 50.0 }, glm::vec3(100.0f, 0.0f, 0.0f),
+	          [&] { return s.isLoaded(3, 0); });
+	CHECK(s.isLoaded(0, 0));
+	CHECK(s.isLoaded(3, 0));
+	s.clear(world);
+
+	// Floating origin: the world's 0,0,0 sits at absolute x = 200. The camera is
+	// given absolute; the cell lands where it belongs in absolute terms.
+	world.setOrigin({ 200.0, 0.0, 0.0 });
+	s.begin(m, reader, hooks);
+	pumpCells(s, world, { 250.0, 1.7, 50.0 }, glm::vec3(0.0f), [&] { return s.isLoaded(2, 0); });
+	REQUIRE(s.isLoaded(2, 0));
+	bool placed = false;
+	for (auto [e, mc] : world.registry().view<MeshComponent>().each())
+	{
+		const glm::dvec3 abs = glm::dvec3(HE::worldPositionOf(world, e)) + world.origin();
+		if (std::fabs(abs.x - 250.0) < 1e-3) placed = true;   // cell 2's middle prop
+	}
+	CHECK(placed);
+	s.clear(world);
+
+	// A world cleared under it (a level change): the streamer notices and loads again.
+	s.begin(m, reader, hooks);
+	pumpCells(s, world, { 50.0, 1.7, 50.0 }, glm::vec3(0.0f), [&] { return s.stats().loaded == 2; });
+	world.clear();
+	pumpCells(s, world, { 50.0, 1.7, 50.0 }, glm::vec3(0.0f), [&] { return s.stats().loaded == 2; });
+	CHECK(countMeshes(world) == 6);
+	s.clear(world);
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("Cell manifest: survives saving and loading the base scene, JSON and binary; clear() drops it")
+{
+	const std::string cells = R"({"cellSize":100.0,"dir":"W.cells","list":[[0,0,3]],"loadRadius":60.0})";
+	HorizonWorld world;
+	world.setCellManifestJson(cells);
+	world.createEntity("Sky stand-in");
+	SceneSerializer ser;
+	for (const SerializeFormat format : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const auto file = std::filesystem::temp_directory_path() / "he_cell_manifest.hescene";
+		REQUIRE(ser.save(world, file, format));
+		HorizonWorld back;
+		REQUIRE(ser.load(back, file, format));
+		CHECK(nlohmann::json::parse(back.cellManifestJson()) == nlohmann::json::parse(cells));
+		HE::CellManifest m;
+		CHECK(HE::CellManifest::parse(back.cellManifestJson(), m));
+		back.clear();
+		CHECK(back.cellManifestJson().empty());
+		he_test::removeQuiet(file);
+	}
+}
+
+// A measurement, not a check (does not run in CI): the reference world loaded
+// whole against its base plus the cells around the camera. Needs the scene and
+// its split on disk:
+//   python3 scripts/perf/gen_reference_world.py --count 200000 --extent 8000 --groups 2000 \
+//       --lights 64 --template docs/perf-audit/scenes/landscape_noclouds.hescene --out /tmp/ref.hescene
+//   mkdir -p /tmp/cellproj/Content && touch /tmp/cellproj/P.heproj
+//   python3 scripts/split_scene_cells.py /tmp/ref.hescene --out /tmp/cellproj/Content/World.hescene
+//   HE_CELL_BENCH_WHOLE=/tmp/ref.hescene HE_CELL_BENCH_PROJECT=/tmp/cellproj \
+//       out/build/release/tests/he_tests --no-skip --test-case='Cell streaming bench*'
+TEST_CASE("Cell streaming bench: whole reference world against base plus nearby cells" * doctest::skip())
+{
+	const char* wholeEnv   = std::getenv("HE_CELL_BENCH_WHOLE");
+	const char* projectEnv = std::getenv("HE_CELL_BENCH_PROJECT");
+	REQUIRE_MESSAGE((wholeEnv && projectEnv), "set HE_CELL_BENCH_WHOLE and HE_CELL_BENCH_PROJECT");
+	const std::filesystem::path project = projectEnv;
+	using Clock = std::chrono::steady_clock;
+	const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+	const glm::dvec3 camera(0.0, 25.0, 90.0);   // the ladder's --cam
+
+	for (int run = 0; run < 3; ++run)
+	{
+		SceneSerializer ser;
+		size_t wholeEntities = 0;
+		Clock::duration wholeTime{};
+		{
+			HorizonWorld whole;
+			const Clock::time_point t0 = Clock::now();
+			REQUIRE(ser.load(whole, wholeEnv, SerializeFormat::JSON));
+			wholeTime     = Clock::now() - t0;
+			wholeEntities = whole.registry().storage<entt::entity>().in_use();
+		}
+
+		HorizonWorld world;
+		const Clock::time_point t0 = Clock::now();
+		REQUIRE(ser.load(world, project / "Content/World.hescene", SerializeFormat::JSON));
+		const Clock::time_point t1 = Clock::now();
+		HE::CellManifest m;
+		REQUIRE(HE::CellManifest::parse(world.cellManifestJson(), m));
+		HE::CellStreamer s;
+		s.begin(m, [&project](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
+		{
+			const auto file = project / path;
+			return [file](std::vector<uint8_t>& out)
+			{
+				std::ifstream in(file, std::ios::binary);
+				out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+				return !out.empty();
+			};
+		}, {});
+		// Until every cell the camera wants is built; frames of 4 ms budget, like the game.
+		size_t frames = 0;
+		double worstFrameMs = 0.0;
+		for (;;)
+		{
+			const Clock::time_point f0 = Clock::now();
+			s.update(world, camera, glm::vec3(0.0f), 4.0);
+			worstFrameMs = std::max(worstFrameMs, ms(Clock::now() - f0));
+			++frames;
+			if (s.stats().loaded > 0 && s.stats().inFlight == 0 && s.stats().ready == 0) break;
+			std::this_thread::yield();
+		}
+		const Clock::time_point t2 = Clock::now();
+		MESSAGE("run " << run << ": whole " << wholeEntities << " entities in " << ms(wholeTime)
+		        << " ms | base " << ms(t1 - t0) << " ms + " << s.stats().loaded << " of "
+		        << m.cells.size() << " cells in " << ms(t2 - t1) << " ms (" << frames
+		        << " frames, worst main-thread frame " << worstFrameMs << " ms), "
+		        << world.registry().storage<entt::entity>().in_use() << " entities");
+		s.clear(world);
+	}
 }

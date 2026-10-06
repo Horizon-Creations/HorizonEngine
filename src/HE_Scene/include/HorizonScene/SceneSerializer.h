@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <vector>
 #include <entt/entt.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
 
 class HorizonWorld;
@@ -36,6 +37,12 @@ public:
     bool loadAdditiveFromMemory(HorizonWorld& world,
                                 const std::vector<uint8_t>& data,
                                 std::vector<Entity>* outCreated = nullptr);
+
+    // Additive merge of a scene that is already parsed (HE::parseSceneText /
+    // parseSceneCbor) — HE::CellStreamer parses on a worker and only this part
+    // runs on the main thread.
+    bool loadAdditiveFromJson(HorizonWorld& world, const nlohmann::json& scene,
+                              std::vector<Entity>* outCreated = nullptr);
 
     // In-memory snapshot (CBOR, same structure as the binary file format).
     // Used by play-in-editor and the undo system. load does not clear the

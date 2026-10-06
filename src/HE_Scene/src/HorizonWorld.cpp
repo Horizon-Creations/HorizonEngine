@@ -472,6 +472,7 @@ void HorizonWorld::clear()
     // clear() at the start of openScene doesn't spuriously fire OnLevelUnloaded.
     fireLevelUnloaded();
     m_origin = glm::dvec3(0.0);
+    m_cellManifestJson.clear();
 
     // Live UI widgets track the world's lifetime (PIE stop / scene load) — but
     // ONLY a world-owned WM. An injected app-level WM (the game's persistent

@@ -73,6 +73,14 @@ public:
 	const glm::dvec3& origin() const { return m_origin; }
 	void setOrigin(const glm::dvec3& origin) { m_origin = origin; }
 
+	// ── Cell streaming (Thema 153) ───────────────────────────────────────────
+	// The scene file's "cells" object, kept verbatim (HE::CellManifest reads it):
+	// a scene split by scripts/split_scene_cells.py loads its cells by distance
+	// in the game (HE::CellStreamer). Empty for a scene without cells. Written
+	// back when the scene is saved; clear() drops it.
+	const std::string& cellManifestJson() const { return m_cellManifestJson; }
+	void setCellManifestJson(std::string json) { m_cellManifestJson = std::move(json); }
+
 	bool isHierarchyDirty()  const { return m_hierarchyDirty; }
 	void clearHierarchyDirty()     { m_hierarchyDirty = false; }
 	void markHierarchyDirty()      { m_hierarchyDirty = true;  }
@@ -222,6 +230,7 @@ private:
 	Entity         m_rootEntity     = entt::null;
 	bool           m_hierarchyDirty = true;
 	glm::dvec3     m_origin{ 0.0 };
+	std::string    m_cellManifestJson;
 	// Declared before the widget managers so it outlives them (they point at it).
 	HorizonCode::Runtime  m_ownScripts;          // used unless an app runtime is injected
 	HorizonCode::Runtime* m_scriptsPtr = nullptr;

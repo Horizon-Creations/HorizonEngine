@@ -16,6 +16,7 @@
 #include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding (C++ GameLogic services)
@@ -343,5 +344,17 @@ private:
     HE::CancelToken                     m_pendingStreamToken;
     std::unordered_map<int, HE::CancelToken> m_zoneStreamTokens;
     void cancelZoneStreaming();
+
+    // ── Cell streaming (Thema 153) ───────────────────────────────────────────
+    // A scene split into cells (HE::CellStreamer) loads them by camera distance.
+    // Started when the world's cell manifest appears or changes, reset when the
+    // world is swapped out.
+    void updateCellStreaming(float dt);
+    HE::CellStreamer   m_cellStreamer;
+    const HorizonWorld* m_cellWorld = nullptr;   // the world it streams into
+    std::string        m_cellManifestJson;       // and the manifest it started from
+    glm::dvec3         m_cellLastCamera{ 0.0 };
+    bool               m_cellHasLastCamera = false;
+    std::unordered_map<uint32_t, HE::CancelToken> m_cellStreamTokens;   // cell root → its asset loads
 };
 

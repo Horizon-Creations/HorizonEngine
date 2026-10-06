@@ -461,6 +461,11 @@ public:
 	// it as an asset — for non-asset payloads packed into the .hpak, e.g. the
 	// binary startup scene. Empty vector if the UUID is in no mount or read fails.
 	std::vector<uint8_t> readMountedEntry(HE::UUID id);
+	// The same read, packed up for a worker: the returned function opens its own
+	// reader over the mount's table of contents (the mount's reader is not
+	// thread-safe) and may run on any thread, after this ContentManager is gone
+	// too. Empty function if the UUID is in no mount. Used by HE::CellStreamer.
+	std::function<std::vector<uint8_t>()> detachedMountedEntryReader(HE::UUID id) const;
 	// Drain completed async jobs and register each asset + fire callbacks.
 	// Call once per frame from the main/game thread. Registration (parse + insert)
 	// runs here on the main thread, so `maxRegistrations` caps how many assets are
