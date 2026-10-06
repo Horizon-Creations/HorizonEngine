@@ -159,7 +159,9 @@ std::vector<HE::UUID> HpakReader::enumerate() const
 }
 
 const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
-                                                         std::vector<uint8_t>& out) const
+                                                         std::vector<uint8_t>& out,
+                                                         const std::function<bool()>& stop,
+                                                         bool* stopped) const
 {
     const EntryMeta* e = find(id);
     // Use is_open() (independent of stream state), NOT operator bool(): a prior
@@ -198,10 +200,18 @@ const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
     }
 
     out.resize(e->dataSize);
-    if (e->dataSize > 0)
+    // In blocks, so a caller with a stop condition can leave a large entry half-read.
+    constexpr uint64_t kBlock = 4ull << 20; // 4 MiB
+    for (uint64_t done = 0; done < e->dataSize;)
     {
-        m_file.read(reinterpret_cast<char*>(out.data()),
-                    static_cast<std::streamsize>(e->dataSize));
+        if (done > 0 && stop && stop())
+        {
+            if (stopped) *stopped = true;
+            std::vector<uint8_t>().swap(out);
+            return nullptr;
+        }
+        const uint64_t n = std::min<uint64_t>(kBlock, e->dataSize - done);
+        m_file.read(reinterpret_cast<char*>(out.data() + done), static_cast<std::streamsize>(n));
         if (!m_file)
         {
             HE_LOG_ERROR(Pak, "Package read of %u byte(s) failed for entry %016llx%016llx "
@@ -210,6 +220,13 @@ const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
                          static_cast<unsigned long long>(id.lo));
             return nullptr;
         }
+        done += n;
+    }
+    if (stop && stop())
+    {
+        if (stopped) *stopped = true;
+        std::vector<uint8_t>().swap(out);
+        return nullptr;
     }
 
     // Content-hash check on the stored bytes (corruption detection). Verified here,
@@ -243,8 +260,21 @@ bool HpakReader::readStoredEntry(const HE::UUID& id, StoredEntry& out) const
 
 std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key[32]) const
 {
+    return readEntry(id, key, {}, nullptr);
+}
+
+std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key[32],
+                                           const std::function<bool()>& stop, bool* stopped) const
+{
+    if (stopped) *stopped = false;
+    const auto stopNow = [&]
+    {
+        if (!stop || !stop()) return false;
+        if (stopped) *stopped = true;
+        return true;
+    };
     std::vector<uint8_t> raw;
-    const EntryMeta* e = readStoredBytes(id, raw);
+    const EntryMeta* e = readStoredBytes(id, raw, stop, stopped);
     if (!e) return {};
 
     // Reserved entry flags this build cannot honour. kFlagUsesDict says the payload
@@ -288,6 +318,7 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
             return {};                        // wrong key / tampered / no backend
         }
         raw = std::move(pt);
+        if (stopNow()) return {};
     }
 
     // Step 2: decompress by codec
@@ -325,8 +356,31 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
 #ifdef HE_HAVE_ZSTD
         if (e->origSize == 0) return {};
         std::vector<uint8_t> out(e->origSize);
-        const size_t result = ZSTD_decompress(
-            out.data(), out.size(), raw.data(), raw.size());
+        size_t result = 0;
+        if (!stop)
+            result = ZSTD_decompress(out.data(), out.size(), raw.data(), raw.size());
+        else
+        {
+            // Stoppable: the same decode in 4 MiB output windows. Ends like
+            // ZSTD_decompress does, every frame complete and nothing left over.
+            std::unique_ptr<ZSTD_DCtx, size_t (*)(ZSTD_DCtx*)> dctx(ZSTD_createDCtx(), ZSTD_freeDCtx);
+            if (!dctx) return {};
+            ZSTD_inBuffer in{ raw.data(), raw.size(), 0 };
+            size_t pending = 1;   // last return of decompressStream: 0 = frame complete
+            constexpr size_t kWindow = size_t(4) << 20;
+            while (result < out.size() || in.pos < in.size)
+            {
+                if (stopNow()) return {};
+                ZSTD_outBuffer o{ out.data(), std::min(out.size(), result + kWindow), result };
+                const size_t before = o.pos, consumed = in.pos;
+                pending = ZSTD_decompressStream(dctx.get(), &o, &in);
+                if (ZSTD_isError(pending)) { result = pending; break; }
+                result = o.pos;
+                if (o.pos == before && in.pos == consumed) break;   // no progress: truncated or too long
+            }
+            // A frame cut short, or input left over that did not fit.
+            if (!ZSTD_isError(result) && (pending != 0 || in.pos != in.size)) result = 0;
+        }
         if (ZSTD_isError(result) || result != e->origSize)
         {
             HE_LOG_ERROR(Pak, "zstd decode of entry %016llx%016llx failed: %s",

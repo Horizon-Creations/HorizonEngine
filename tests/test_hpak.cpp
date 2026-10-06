@@ -1859,6 +1859,62 @@ TEST_CASE("Pak streaming: cancelled loads drop, shared or re-requested ones stil
     removeQuiet(pak);
 }
 
+// Thema 153, Schritt 5: a started pak load can be dropped too. The reader asks
+// its stop condition between 4 MiB read blocks, before each decode step and
+// between 4 MiB zstd windows.
+TEST_CASE("HpakReader::readEntry with a stop condition: the same bytes, or stopped mid-read and mid-decode")
+{
+    const HE::UUID z{0x570A, 1}, s{0x570B, 2}, l{0x570C, 3};
+    std::vector<uint8_t> big(24u << 20);
+    uint32_t x = 0x9E3779B9u;
+    for (size_t b = 0; b < big.size(); ++b)
+    {
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        big[b] = static_cast<uint8_t>((b & 0xF0) | (x & 0x0F));   // half-compressible
+    }
+    auto pak = std::filesystem::temp_directory_path() / "he_stop_read.hpak";
+    {
+        HpakWriter p;
+        p.addEntry(z, big, {Hpak::Codec::Zstd});
+        p.addEntry(s, big, {Hpak::Codec::Store});
+        p.addEntry(l, big, {Hpak::Codec::LZ4});
+        REQUIRE(p.write(pak.string()));
+    }
+    {   // the reader closes before the file goes (Windows)
+    HpakReader r;
+    REQUIRE(r.open(pak.string()));
+
+    for (const HE::UUID& id : { z, s, l })
+    {
+        CAPTURE(id.hi);
+        // Never stopping: byte for byte the plain read. For zstd this is the
+        // windowed decode, so it also checks that against ZSTD_decompress.
+        int  asks    = 0;
+        bool stopped = true;
+        CHECK(r.readEntry(id, nullptr, [&] { ++asks; return false; }, &stopped) == big);
+        CHECK_FALSE(stopped);
+        CHECK(asks >= 2);   // asked during the read, not only once
+        // Stopping at the second question: during the read (the stored bytes are
+        // over 4 MiB for every codec here).
+        int n = 0;
+        CHECK(r.readEntry(id, nullptr, [&] { return ++n >= 2; }, &stopped).empty());
+        CHECK(stopped);
+        // At the last question: for zstd that is in the decode, in its final window.
+        n = 0;
+        CHECK(r.readEntry(id, nullptr, [&] { return ++n >= asks; }, &stopped).empty());
+        CHECK(stopped);
+        // The reader is fine afterwards, and a plain read is not "stopped".
+        CHECK(r.readEntry(id, nullptr, [] { return false; }, &stopped) == big);
+        CHECK_FALSE(stopped);
+    }
+    // A failure is not a stop.
+    bool stopped = true;
+    CHECK(r.readEntry(HE::UUID{0xDEAD, 1}, nullptr, [] { return false; }, &stopped).empty());
+    CHECK_FALSE(stopped);
+    }
+    removeQuiet(pak);
+}
+
 TEST_CASE("Reference-graph streaming: dependencies are dropped with the asset that pulled them")
 {
     // mesh → material → texture. The material and texture are requested by the

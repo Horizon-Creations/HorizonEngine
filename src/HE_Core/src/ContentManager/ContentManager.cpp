@@ -1591,9 +1591,10 @@ bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 	};
 
 	// Captures the sink, never `this` — the job may outlive this ContentManager.
-	// No mid-read cancel point: readEntry reads, decrypts and decompresses an
-	// entry in one call, so once started it runs to the end.
-	globalPool().schedule([id, path, enc, key, toc, coalesceKey, sink = m_asyncSink,
+	// Once started it can still be dropped: readEntry asks the interest between
+	// 4 MiB blocks of the read and of a zstd decode, and before each decode step.
+	// A dropped read reports `cancelled`, so the coalesce key comes back.
+	globalPool().schedule([id, path, enc, key, toc, coalesceKey, sink = m_asyncSink, interest,
 	                       cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
@@ -1607,13 +1608,16 @@ bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 		HpakReader reader;
 		if (reader.openShared(path, toc) || reader.open(path))
 		{
-			auto data = reader.readEntry(id, enc ? key.data() : nullptr);
+			bool stopped = false;
+			auto data = reader.readEntry(id, enc ? key.data() : nullptr,
+			                             [&interest] { return interest->stale(); }, &stopped);
 			if (!data.empty())
 			{
 				result.fileBytes = std::move(data); // decoded .hasset
 				result.asset     = splitChunks(result.fileBytes);
 			}
-			else result.failed = true;
+			else if (stopped) result.cancelled = true;
+			else              result.failed    = true;
 		}
 		else result.failed = true;
 
