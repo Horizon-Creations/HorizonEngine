@@ -10776,7 +10776,15 @@ void EditorApplication::pushEnvironment(float dt)
 void EditorApplication::warmupWorldMaterials()
 {
 	if (!m_editorWorld || !renderer()) return;
-	renderer()->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
+	std::vector<HE::UUID> ids = SceneSystems::collectAssetRefs(*m_editorWorld);
+	// The billboard icons of lights, cameras and audio sources are graph materials
+	// no component references; the first frame that showed one cross-compiled it
+	// inside Metal::EncodeScene (0.4 + 0.7 s in frames 0/1, Thema 153 Schritt 5).
+	for (const HE::UUID& icon : { HE::kEditorIconPointLightMaterialId, HE::kEditorIconSpotLightMaterialId,
+	                              HE::kEditorIconDirectionalLightMaterialId, HE::kEditorIconCameraMaterialId,
+	                              HE::kEditorIconAudioSourceMaterialId })
+		ids.push_back(icon);
+	renderer()->WarmupMaterials(ids);
 }
 
 bool EditorApplication::openScene(const std::string& path)
