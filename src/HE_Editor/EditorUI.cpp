@@ -1445,9 +1445,25 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// (ProjectLaunchOpen.h): the same door as File ▸ Open Project. It waits in its
 	// slot while any popup is up — above all the unsaved-changes prompt, whose
 	// pending action it would otherwise overwrite under the user's cursor.
+	// Said once per wait, naming the dialog: a project that was double-clicked
+	// and then "did nothing" is otherwise waiting behind a dialog nobody noticed.
+	static bool s_launchWaitLogged = false;
 	if (ProjectLaunchOpen::pending() &&
-	    !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+	    ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
 	{
+		if (!s_launchWaitLogged)
+		{
+			const ImGuiContext& g = *ImGui::GetCurrentContext();
+			const ImGuiWindow* top = g.OpenPopupStack.empty() ? nullptr
+			                                                  : g.OpenPopupStack.back().Window;
+			HE_LOG_INFO(Editor, "Editor: a project handed over by the system waits until the "
+			                    "open dialog is closed (%s)", top ? top->Name : "a popup");
+			s_launchWaitLogged = true;
+		}
+	}
+	else if (ProjectLaunchOpen::pending())
+	{
+		s_launchWaitLogged = false;
 		std::string launched;
 		ProjectLaunchOpen::take(launched);
 		const std::string& current = ctx.projectManager->currentProject().path;
