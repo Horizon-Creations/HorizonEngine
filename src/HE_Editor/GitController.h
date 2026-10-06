@@ -51,6 +51,7 @@ public:
 	// additionally hides the buttons and explains why.
 	void requestInit(bool lfsAvailable);
 	void requestCommitAll(const std::string& message);
+	// An empty token uses the GitHub sign-in (see GitService::requestSetupGitHub).
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate, std::string token);
 	// Put the project folder back to how a commit had it, recorded as a new
 	// commit so the restore is itself undoable. Refused on a dirty tree.
@@ -109,6 +110,10 @@ public:
 	// HTTPS round trip per page of 100). The token is wiped once the list is in.
 	// A request while one is running is dropped.
 	void requestListRepos(std::string token);
+	// The same with the GitHub sign-in instead of a typed token: read from the
+	// credential helper at `credentialRoot` on the list thread
+	// (GitHubTokenStore::load). Not signed in lands in repoListError().
+	void requestListReposWithSignIn(const std::filesystem::path& credentialRoot);
 	bool listingRepos() const { return m_listing; }
 	// True once a list request has answered, successfully or not.
 	bool repoListLoaded() const { return m_repoListLoaded; }
@@ -175,6 +180,7 @@ private:
 
 	// Main thread: move a finished repository list over from the worker.
 	void collectRepoList();
+	void startListRepos(std::string token, std::filesystem::path credentialRoot);
 
 	HE::Sc::GitService    m_service;
 	HE::Sc::GitService    m_cloneService;

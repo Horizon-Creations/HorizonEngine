@@ -3522,6 +3522,36 @@ namespace
 	  "system keychain through git's credential helper; the engine keeps no copy "
 	  "and no project or engine file ever contains it.",
 	  "", "editor#preferences" },
+	// The GitHub sign-in (GitHubSignIn.cpp, GitHubSignInView.cpp): the account
+	// row on this page and in the clone dialog, and the code dialog itself.
+	{ "Source Control/Sign in with GitHub...", "Sign in with GitHub",
+	  "Signs the editor in to your GitHub account without a token to create by "
+	  "hand. You get a short code, approve it on github.com in your browser, and "
+	  "the editor receives access to your repositories and gists. It is kept in "
+	  "git's credential helper (the system keychain), exactly where a pasted "
+	  "token would go.",
+	  "", "editor#preferences" },
+	{ "Source Control/Sign out", "Sign out",
+	  "Removes the GitHub token from git's credential helper, so neither the "
+	  "editor nor git on this machine uses it any more. GitHub still lists "
+	  "Horizon Engine under Settings \xe2\x96\xb8 Applications until you revoke it "
+	  "there.",
+	  "", "editor#preferences" },
+	{ "Source Control/Copy code & open GitHub", "Copy code & open GitHub",
+	  "Puts the code on the clipboard and opens GitHub's device page in your "
+	  "browser. Paste the code there and approve. The editor notices on its own.",
+	  "", "editor#preferences" },
+	{ "Source Control/Copy code", "Copy code",
+	  "Puts the code on the clipboard, for when the browser is on another "
+	  "machine or already open.",
+	  "", "editor#preferences" },
+	{ "Source Control/Get a new code", "Get a new code",
+	  "The old code ran out (they last about fifteen minutes). Asks GitHub for a "
+	  "fresh one.",
+	  "", "editor#preferences" },
+	{ "Source Control/Try again", "Try again",
+	  "Starts the sign-in over with a fresh code.",
+	  "", "editor#preferences" },
 	{ "Source Control/Push automatically after each commit", "",
 	  "Send every commit to the remote as it is made. Convenient alone, and a "
 	  "way to publish half-finished work when several people share the branch.",
@@ -7661,6 +7691,12 @@ namespace
 	{ "Report Issue/Copy Log Path", "",
 	  "Puts the full path of the log file on the clipboard, for opening it in "
 	  "something else or pasting it into a message.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Sign in with GitHub...", "Sign in with GitHub",
+	  "Signs the editor in to GitHub with a code you approve in your browser, "
+	  "right here in this dialog. Afterwards the issue can be filed directly "
+	  "under your account and the whole log uploaded. The sign-in stays for "
+	  "source control too.",
 	  "", "advanced#diagnostics" },
 	{ "Report Issue/Create a token", "",
 	  "Opens GitHub's personal access token page. A token with issues and gist "

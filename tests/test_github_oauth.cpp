@@ -1,12 +1,18 @@
 #include "doctest.h"
 
 #include <SourceControl/GitHubOAuth.h>
+#include <SourceControl/GitHubTokenStore.h>
+#include "TestFsUtil.h"
 
 #include <Diagnostics/Log.h>
+#include <Platform/Process.h>
 
 #include <chrono>
 #include <cstdlib>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -567,4 +573,64 @@ TEST_CASE("The sign-in worker reports refusals and stops promptly on cancel")
 			std::chrono::steady_clock::now() - t0).count();
 		CHECK(ms < 3000);
 	}
+}
+
+// ─── Where the token goes: GitHubTokenStore ─────────────────────────────────
+// Real git, but a throwaway `store --file=` helper that REPLACES every
+// configured one (Options::helper) and an unroutable host — so the developer's
+// keychain neither receives the test token nor hands out their real one.
+TEST_CASE("GitHubTokenStore: stored, read back, and gone again after sign-out")
+{
+	if (!HE::Proc::which("git").has_value()) { MESSAGE("git not installed — skipped"); return; }
+
+	namespace fs = std::filesystem;
+	const auto salt = std::chrono::steady_clock::now().time_since_epoch().count();
+	const fs::path dir = fs::temp_directory_path() /
+	                     ("he_tokenstore_" + std::to_string(static_cast<long long>(salt)));
+	std::error_code ec;
+	fs::create_directories(dir, ec);
+	REQUIRE_FALSE(ec);
+	const fs::path file = dir / "credentials";
+
+	GitHubTokenStore::Options o;
+	o.host   = "horizon-test.invalid";
+	o.helper = "store --file=" + file.generic_string();
+
+	const auto fileText = [&file] {
+		std::ifstream in(file);
+		return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	};
+
+	std::string token, err;
+	SUBCASE("nothing stored: no token, and signing out of nothing is fine")
+	{
+		CHECK_FALSE(GitHubTokenStore::load(dir, token, o));
+		CHECK(token.empty());
+		CHECK(GitHubTokenStore::forget(dir, &err, o));
+	}
+	SUBCASE("a stored token comes back, under the username every reader assumes")
+	{
+		REQUIRE(GitHubTokenStore::store(dir, kFakeToken, &err, o));
+		REQUIRE(GitHubTokenStore::load(dir, token, o));
+		CHECK(token == kFakeToken);
+		CHECK(fileText().find(GitHubTokenStore::kUsername) != std::string::npos);
+
+		SUBCASE("signing out removes it from the helper")
+		{
+			REQUIRE(GitHubTokenStore::forget(dir, &err, o));
+			token.clear();
+			CHECK_FALSE(GitHubTokenStore::load(dir, token, o));
+			CHECK(token.empty());
+			// Positive control above (the token WAS in the file); now it is not.
+			CHECK(fileText().find(kFakeToken) == std::string::npos);
+		}
+	}
+	SUBCASE("an empty token is refused, not stored")
+	{
+		CHECK_FALSE(GitHubTokenStore::store(dir, "", &err, o));
+		CHECK_FALSE(err.empty());
+		CHECK_FALSE(GitHubTokenStore::load(dir, token, o));
+	}
+
+	he_test::removeAllQuiet(dir);
 }
