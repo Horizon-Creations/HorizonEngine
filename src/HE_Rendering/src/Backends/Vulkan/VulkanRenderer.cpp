@@ -8754,6 +8754,14 @@ void VulkanRenderer::updateGiAccel()
             it = m_giHwBlasCache.emplace(id, buildGiHwBlas(id)).first;
         return it->second;
     };
+    // HE_GI_LOG_INSTANCES=N: log every instance's bounce colour once, on the
+    // N-th call — what the probe kernels multiply in (Thema 154 witness).
+    static const int s_giLogAt = [] {
+        const char* v = std::getenv("HE_GI_LOG_INSTANCES");
+        return v && *v ? std::atoi(v) : 0;
+    }();
+    static int s_giLogCall = 0;
+    const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
     for (const RenderObject& obj : m_renderWorld.objects)
     {
         if (!obj.castsShadow) continue;
@@ -8770,6 +8778,12 @@ void VulkanRenderer::updateGiAccel()
         inst.nodeOffset   = range.nodeOffset;
         inst.triOffset    = range.triOffset;
         instances.push_back(inst);
+        if (logInst)
+            HE_LOG_INFO(RHI, "VulkanRenderer: GI instance %zu pos (%.2f, %.2f, %.2f) mat %016llx "
+                        "baseColor (%.3f, %.3f, %.3f)", instances.size() - 1,
+                        obj.transform[3].x, obj.transform[3].y, obj.transform[3].z,
+                        static_cast<unsigned long long>(obj.materialAssetId.lo),
+                        inst.baseColor.r, inst.baseColor.g, inst.baseColor.b);
 
         if (hwAll)
         {
