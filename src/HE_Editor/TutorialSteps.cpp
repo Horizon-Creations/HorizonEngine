@@ -145,22 +145,48 @@ constexpr Step kOrientation[] = {
 	{ "welcome",
 	  "Welcome to Horizon Engine",
 	  "This tour walks once through every part of the editor — scenes, assets, "
-	  "materials, terrain, physics, animation, UI, scripting, playing and shipping.\n"
-	  "It never touches your work: each step tells you what to do and waits until "
-	  "you have actually done it. Nothing is skipped past, so when the tour says a "
-	  "chapter is done you really have used that part of the editor.\n"
+	  "materials, terrain, physics, animation, UI, scripting, playing and shipping. "
+	  "It follows the order a level is actually built in: find your way around, "
+	  "place something, give it a surface, light it, make it move, make it playable, "
+	  "ship it. No earlier engine experience is assumed.\n"
+	  "Each card first explains one idea — what the thing is and why you would want "
+	  "it — and then asks for exactly one action, in the line under the text. You do "
+	  "it in the real editor, not in a special tutorial mode, and the card watches "
+	  "for it: once the editor has seen you do it, the card confirms and moves on by "
+	  "itself. Nothing is skipped past, so when the tour says a chapter is done you "
+	  "really have used that part of the editor.\n"
+	  "A few cards, like this one, have nothing to do. Their button unlocks once you "
+	  "have scrolled to the end of the text.\n"
+	  "A pulsing outline marks the panel a card is talking about. The card moves out "
+	  "of that panel's way on its own; if it still sits where you want to look, drag "
+	  "it somewhere else by its title bar.\n"
+	  "Back returns to the previous card when you want to read something again. "
 	  "Close the window whenever you like and reopen it from Help - Interactive "
-	  "Tutorial; your place is remembered.",
+	  "Tutorial; your place is remembered. The sandbox is an ordinary project, so "
+	  "whatever you build along the way stays yours.",
 	  "", "", Check::ReadAck, "" },
 
 	{ "layout",
 	  "The editor at a glance",
-	  "Scene (centre) renders the world you are editing.\n"
-	  "World Outliner (right) lists every entity in the open scene.\n"
-	  "Details (below it) edits whatever is selected.\n"
-	  "Content Browser (bottom) is your project's asset library.\n"
+	  "Every panel has one job, and nearly every task in the rest of the tour starts "
+	  "in one of the four outlined ones. Knowing which panel to look at is most of "
+	  "learning the editor.\n"
+	  "Scene (centre) renders the world you are editing. It is where you move the "
+	  "camera and drag things into place.\n"
+	  "World Outliner (right) lists every entity in the open scene as a tree. When "
+	  "something is small, hidden or hard to click in the viewport, select it here.\n"
+	  "Details (below it) edits whatever is selected: its position, its components "
+	  "and their settings. Nearly every change that is not a drag happens here.\n"
+	  "Content Browser (bottom) is your project's asset library: meshes, materials, "
+	  "textures, scripts, other scenes. A scene points at these files rather than "
+	  "copying them, so changing an asset changes it everywhere it is used.\n"
 	  "Quick Settings (left) holds the engine switches you pinned, and the tab bar "
-	  "above the viewport is where asset editors open next to the scene.",
+	  "above the viewport is where asset editors open next to the scene.\n"
+	  "Panels are docked, not fixed: drag a tab to rearrange them, and Window - Reset "
+	  "Layout puts everything back. Hover almost any control for a tooltip; pressing "
+	  "F1 while it shows opens the manual at that entry.\n"
+	  "Each outline dims once you have clicked into its panel, and the line under "
+	  "this text counts how many are left.",
 	  "Click into each of the four highlighted panels once.",
 	  "Scene|World Outliner|Details|Content Browser",
 	  Check::PanelsVisited, "Scene|World Outliner|Details|Content Browser" },
@@ -170,8 +196,14 @@ constexpr Step kOrientation[] = {
 constexpr Step kViewport[] = {
 	{ "fly",
 	  "Flying through the scene",
+	  "Before you can work on a scene you have to be able to reach every part of it, "
+	  "so the next two cards are about the camera. The one you steer here belongs "
+	  "to the editor: it is not part of the level and never shows up in the game, "
+	  "so moving it cannot break anything. Look around freely.\n"
 	  "Hold the right mouse button inside the Scene view and steer with the mouse. "
-	  "While it is held, W/A/S/D move, Q/E drop and rise, and Shift moves faster.\n"
+	  "While it is held, W/A/S/D move, Q/E drop and rise, and Shift moves four times "
+	  "faster. Let go and those keys go back to their usual jobs — W, E and R switch "
+	  "the gizmo, which the Entities chapter shows.\n"
 	  "The mouse is captured while you look around, so the cursor will not run off "
 	  "the viewport.",
 	  "Right-drag in the Scene view, then fly with W/A/S/D.",
@@ -179,11 +211,19 @@ constexpr Step kViewport[] = {
 
 	{ "orbit",
 	  "Orbit, pan, zoom, focus",
-	  "Alt + left mouse orbits around the pivot, the middle mouse button pans, and "
-	  "the wheel zooms wherever the cursor hovers.\n"
-	  "Select something and press F to frame it — the fastest way back when you have "
-	  "flown off into the sky.\n"
-	  "Camera speed lives in Edit - Preferences if the default feels wrong.",
+	  "Flying covers distance. Once you have arrived you usually want to look at one "
+	  "thing from all sides, and that is what orbiting is for: the camera circles a "
+	  "pivot point in front of it instead of turning on the spot.\n"
+	  "Alt + left mouse orbits around the pivot, the middle mouse button pans "
+	  "sideways and up and down, and the wheel moves the camera forward and back "
+	  "along its view, towards the pivot or away from it.\n"
+	  "Select something and press F with the mouse over the Scene view to frame it: "
+	  "the camera moves until the selection fills the view, and the selection "
+	  "becomes the new pivot. It is the fastest way back when you have flown off "
+	  "into the sky, and the usual first move before orbiting around an object.\n"
+	  "If flying feels too slow or too fast for the size of your world, Camera Speed "
+	  "is on the Viewport page of Edit - Preferences and next to the camera icon in "
+	  "the Scene toolbar.",
 	  "Roll the mouse wheel in the Scene view to zoom in or out.",
 	  "Scene", Check::CameraZoomed, "" },
 };

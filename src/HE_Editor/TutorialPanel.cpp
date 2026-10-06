@@ -634,6 +634,13 @@ void renderWelcome(AppContext& ctx)
 			"sandbox project it creates for you.");
 		ImGui::Spacing();
 		ImGui::TextWrapped(
+			"No earlier engine experience is assumed. The first chapters are only "
+			"about finding your way around: what each panel is for and how to move "
+			"the camera. Everything after that builds on them. Each card explains one "
+			"idea, then asks you to do one thing in the real editor, and moves on "
+			"once it has seen you do it.");
+		ImGui::Spacing();
+		ImGui::TextWrapped(
 			"It is an ordinary project: everything you build while following along is "
 			"yours to keep. You can leave and resume at any point.");
 		ImGui::Spacing();
