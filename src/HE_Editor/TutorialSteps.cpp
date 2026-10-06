@@ -311,7 +311,7 @@ constexpr Step kContent[] = {
 	{ "import",
 	  "Import your own assets",
 	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB, FBX, OBJ "
-	  "and COLLADA models, PNG/JPG/TGA/HDR textures, WAV audio and fonts. "
+	  "and COLLADA models, PNG/JPG/TGA/HDR textures, WAV/OGG audio and fonts. "
 	  "Importing converts them to .hasset once; the editor never re-reads the "
 	  "original at runtime.\n"
 	  "A glTF with a skin is imported as a skeletal mesh plus its animation clips, "
@@ -420,10 +420,10 @@ constexpr Step kAssetTypes[] = {
 
 	{ "asset-audio",
 	  "Audio",
-	  "Sound arrives the same way: Import turns a WAV file into an Audio asset, "
-	  "and double-clicking it opens a tab where you can audition it. A raw .wav "
-	  "dropped into the project opens there too, so you can listen before you "
-	  "decide to import it.\n"
+	  "Sound arrives the same way: Import turns a WAV or OGG file into an Audio "
+	  "asset, and double-clicking it opens a tab where you can audition it. A raw "
+	  ".wav or .ogg dropped into the project opens there too, so you can listen "
+	  "before you decide to import it.\n"
 	  "Nothing plays on its own. An Audio Source component on an entity plays an "
 	  "Audio asset; switch on Spatial and it is heard from where the entity stands, "
 	  "quieter with distance. The Audio Listener component is the ears, normally "
