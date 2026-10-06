@@ -421,6 +421,10 @@ private:
 	MatFrameBuf m_matParBuf[2];     // HeParams ring (k_matMaxDraws × 256 B, one slot per draw)
 	uint32_t    m_matDrawCursor[2]  = {};    // per-frame ring/descriptor-set cursor
 	bool        m_matReady          = false; // true once createMaterialResources() succeeded
+	// heLandscapeWeights (binding 14) is in m_matSetLayout — false only on a device whose
+	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
+	bool        m_matLandscapeWeights = false;
+	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
 	static constexpr uint32_t k_matMaxDraws   = 1024;
 	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
 

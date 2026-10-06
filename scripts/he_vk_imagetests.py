@@ -33,7 +33,9 @@ import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 # `min_mean` is the least mean |Δ| (8-bit steps, all channels) that counts as
 # "the feature changed the picture"; None = report only. `require`/`forbid`
 # are log witnesses checked on the named variant's log; `allow` lists the
-# validation messages a variant may print (see ALLOWED_VALIDATION).
+# validation messages a variant may print (see ALLOWED_VALIDATION). `probes`
+# name boxes (x, y as a fraction of the frame) whose mean colour must be led by
+# one channel ("r"/"g"/"b") — for pictures where WHAT is drawn is the verdict.
 #
 # Thresholds sit at roughly half of what lavapipe measured (Mesa 25.2.8,
 # runs 37112790557 / 37113763253 on 03.10.2026): nebula 13.1–13.4, clustered
@@ -74,10 +76,8 @@ CASES = {
     # the probe irradiance alone. "sw" forces the software BVH; on lavapipe "on"
     # takes the VK_KHR_ray_query path.
     #
-    # NOT the painted terrain (HE_DUMP_LANDSCAPELAYERS) of the GI doc §7.2: its
-    # layer-blend material reads binding 14 (heLandscapeWeights), which the Vulkan
-    # material layout lacks. NVIDIA answers that with a validation message,
-    # lavapipe with SIGSEGV in the draw — first lavapipe run, 03.10.2026.
+    # Not the painted terrain of the GI doc §7.2 — that one has its own case
+    # ("landscape", below), which judges the paint, not the GI.
     "gi": {
         "base": {"GIREFLTEST": "1", "GIREFL": "0", "SKYTEST": "1", "CAMY": "3", "CAMZ": "0",
                  "PITCH": "-12", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
@@ -112,7 +112,38 @@ CASES = {
         "require": {"on": ["HE_DUMP_GIREFLTEST witness scene added"]},
         "allow": {"off": ["mat_ubo", "gi_layout"], "on": ["mat_ubo", "gi_layout"]},
     },
+    # Painted terrain (Thema 143): a red field with a green disc in the middle and
+    # a blue one bottom left, drawn by a Landscape Layer Blend graph that samples
+    # the weightmap at material binding 14 (heLandscapeWeights). Before that row
+    # was in the Vulkan material layout, lavapipe died with SIGSEGV in the first
+    # draw (GI on or off) and NVIDIA drew the whole terrain red. Seen from straight
+    # above; the probes are the verdict — an A/B cannot tell "painted" from
+    # "unpainted", the colour under the disc can. Measured on an RTX 4070 (Vulkan,
+    # 05.10.2026): the leading channel wins by 59 (green) / 37 (blue) / 85 (red)
+    # steps with GI off, 87 / 41 / 101 with GI on; unpainted, all three read red.
+    "landscape": {
+        "base": {"LANDSCAPELAYERS": "1", "SKYTEST": "1", "CAMX": "0", "CAMY": "392",
+                 "CAMZ": "0", "PITCH": "-89", "TOD": "0.4", "CLOUDMODE": "0",
+                 "COVERAGE": "0"},
+        "variants": {
+            "gi_off": {"dump": {"GI": "0"}},
+            "gi_on":  {"dump": {"GI": "1"}},
+        },
+        "pairs": [("gi_off", "gi_on", None)],
+        "require": {"gi_off": ["HE_DUMP_LANDSCAPELAYERS witness landscape added",
+                               "-> heLandscapeWeights bound"],
+                    "gi_on":  ["HE_DUMP_LANDSCAPELAYERS witness landscape added",
+                               "-> heLandscapeWeights bound"]},
+        "probes": {v: [("green disc", 0.50, 0.50, "g"), ("blue disc", 0.32, 0.70, "b"),
+                       ("red field", 0.50, 0.20, "r")] for v in ("gi_off", "gi_on")},
+        "allow": {"gi_off": ["mat_ubo"], "gi_on": ["mat_ubo", "gi_layout"]},
+    },
 }
+
+# Probe verdict: the named channel of the box mean must lead both others by at
+# least this many 8-bit steps.
+PROBE_MARGIN = 20
+PROBE_RADIUS = 8  # box half-size in pixels
 
 # Validation messages a case may print while its picture is made, by key:
 # (regex, why it is tolerated). A case opts in per variant with "allow"; any
@@ -192,6 +223,27 @@ def diff_stats(a, b):
     px = len(a) // 3
     return {"mean_abs": round(total / len(a), 4), "max_abs": peak, "px_changed": changed,
             "pct_px_over2": round(100.0 * over / px, 3)}
+
+
+def probe_box(pix, w, h, fx, fy, r=PROBE_RADIUS):
+    """Mean (R, G, B) of the (2r+1)² box around (fx·w, fy·h); pix is BGR."""
+    cx = min(max(int(fx * w), r), w - 1 - r)
+    cy = min(max(int(fy * h), r), h - 1 - r)
+    acc = [0, 0, 0]
+    for y in range(cy - r, cy + r + 1):
+        o = (y * w + cx - r) * 3
+        row = pix[o:o + (2 * r + 1) * 3]
+        for c in range(3):
+            acc[c] += sum(row[c::3])
+    n = (2 * r + 1) ** 2
+    b, g, rr = (round(v / n) for v in acc)
+    return rr, g, b
+
+
+def judge_probe(rgb, channel):
+    """Lead of `channel` over the larger of the other two (negative = it loses)."""
+    i = "rgb".index(channel)
+    return rgb[i] - max(v for k, v in enumerate(rgb) if k != i)
 
 
 # ── One shot ─────────────────────────────────────────────────────────────────
@@ -327,6 +379,17 @@ def main():
             for needle in spec.get("forbid", {}).get(vname, []):
                 if needle in shot["_log"]:
                     problems.append(f"{vname}: log has '{needle}'")
+            shot["probes"] = []
+            for label, fx, fy, ch in spec.get("probes", {}).get(vname, []):
+                rgb = probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy)
+                lead = judge_probe(rgb, ch)
+                ok = lead >= PROBE_MARGIN
+                shot["probes"].append({"label": label, "x": fx, "y": fy, "channel": ch,
+                                       "rgb": rgb, "lead": lead, "ok": ok})
+                print(f"      probe {label:12s} ({fx:.2f},{fy:.2f}) rgb={rgb} "
+                      f"{ch} leads by {lead} → {'ok' if ok else 'FAIL'} (min {PROBE_MARGIN})")
+                if not ok:
+                    problems.append(f"{vname}: probe '{label}' rgb={rgb}, {ch} leads by {lead} < {PROBE_MARGIN}")
 
         pairs = []
         for a, b, min_mean in spec["pairs"]:
