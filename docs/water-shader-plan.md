@@ -531,7 +531,8 @@ Defaults und müssen dann mitgezogen werden.
 - Die Inspector-Zeilen der Wasser-Parameter tragen den **Parameternamen** als Label
   (`Row::colorEdit3/dragFloat2/dragFloat4/dragFloat`), die Hilfe sucht also unter dem
   Komponenten-Scope `Material/<Name>`. Neu in `src/HE_Editor/EditorHelp.cpp`: 13 Einträge
-  `Material/ShallowColor` … `Material/Caustics`, Topic `materials#parameters`, Text aus den
+  `Material/ShallowColor` … `Material/Caustics`, Topic `materials#parameters` (seit Schritt 5
+  `materials#water`, §10.2), Text aus den
   Asset-Tooltips von `mat_gen`, ausformuliert. `Roughness` und `Opacity` teilen sich die
   Einträge mit dem Surface-Block derselben Komponente (ein Schlüssel kann nur einmal
   existieren); beide haben einen Satz zum Wasser dazubekommen.
@@ -541,7 +542,7 @@ Defaults und müssen dann mitgezogen werden.
   mit Negativkontrolle `WaveD`. Ein in `mat_gen` umbenannter oder neuer Knopf wird dort rot.
 - **Handbuch:** Die Einträge landen von selbst in der generierten Editor-Referenz des
   In-Engine-Handbuchs (Komponentenseite, Gruppe Material), F1 auf einer Zeile öffnet dort
-  den eigenen Abschnitt, „Mehr dazu" zeigt auf `materials#parameters`.
+  den eigenen Abschnitt, „Mehr dazu" zeigt seit Schritt 5 auf `materials#water`.
 - **Website-Handbuch:** seit Schritt 5 erledigt, siehe §10.2.
 
 ### 9.4 Nicht belegt
@@ -576,6 +577,11 @@ und dem Rückgabewert gelesen, nicht aus einer Zusammenfassung.
   `spirv-cross --msl` (MoltenVK-Übersetzung, 3), jeweils nach Negativkontrolle. Übersprungen:
   `fxc` (kein Windows SDK) und `xcrun metal` (Metal-Toolchain auf diesem Mac nicht geladen).
   Beides ist in CI belegt (§8.2, Lauf 37347421486), dieser Schritt ändert keinen Shader.
+- **Volle CI-Matrix auf 05cb0a25** (Lauf 37393126985, per `gh workflow run CI --ref`):
+  alle vier Jobs grün. macOS 235 bestanden + 2 übersprungen von 237, dazu `xcrun metal`
+  5/5 auf dem Wasser-MSL (Vertex, forward, geclustert, G-Buffer, gebacken); Linux 235 + 2
+  von 237; Windows 236 + 2 von 238 (FXC/WARP-Fälle in he_tests); lavapipe-Bildtests 1/1 und
+  4/4. Die übersprungenen sind überall `runtime_size_app_basic|advanced`.
 
 ### 10.2 Website-Handbuch
 
