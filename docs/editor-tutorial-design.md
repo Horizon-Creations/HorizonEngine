@@ -73,6 +73,21 @@ UI · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler · Packaging 
 Die Karte ist bewusst `NoDocking`: sie zeigt auf die angedockten Panels und muss darüber
 schweben, statt selbst eins zu werden.
 
+**Die Karte weicht dem Panel aus, auf das sie zeigt.** Mit dem Standard-Layout und ihrer
+Standardecke unten rechts lag sie genau auf Details und auf dem Content Browser, also auf
+den Panels, um die es in einem Drittel der Schritte geht. `HE::Ed::Spotlight::KeepClear`
+(`PanelSpotlight.{h,cpp}`) prüft deshalb vor jedem `Begin("Tutorial")` die Rechtecke der
+`focusWindow`-Panels gegen die Karte vom Vorframe. Es sind dieselben Rechtecke, die der
+pulsierende Rahmen zeichnet (`Spotlight::panelRect`, also der Dock-Knoten samt Tab-Leiste).
+Überlappen sie, gleitet die Karte zur nächstgelegenen freien Stelle; Kandidaten sind die
+Ecken des Editorfensters und die vier Seiten jedes Panels. Ist keine Stelle frei (der
+„besuche vier Panels"-Schritt deckt fast den ganzen Editor ab), nimmt sie die mit der
+kleinsten Überdeckung, und bei einem schon besuchten Panel darf sie liegen. Geprüft wird
+jeden Frame, weil ein Ziel auch spät erscheinen kann (der Profiler öffnet sich, wo er
+zuletzt war). Damit die Karte nicht mit dem Nutzer kämpft, gilt: Hat er sie in diesem
+Schritt selbst verschoben, bleibt sie bis zum nächsten Schritt dort (`reset()` aus
+`gotoCursor`). Beim Verkleinern oder Anklicken der Karte wartet sie nur ab.
+
 ### 3. `ProjectPreset::Tutorial` (`src/HE_Tools/.../ProjectManager.cpp`)
 
 Ans Ende des Enums angehängt (der Wert steht als int im `.heproj`). Erzeugt das
@@ -153,10 +168,22 @@ gerichteten Schlagschatten, den derselbe Dump mit den Struct-Defaults *nicht* ha
 den `EditorCam*`-Config-Werten und blickt leicht nach unten, es ist also kaum Himmel im
 Bild.
 
+Das Ausweichen der Karte prüft `tests/test_ui_shot.cpp` („the tutorial card steps off the
+panel its step points at"). Der Test baut das echte Standard-Dock-Layout nach (die Teilungen
+aus `BuildDefaultDockLayout`), nimmt das Zielpanel aus einem echten Schritt des Curriculums
+und lässt dasselbe `KeepClear` laufen wie der Rundgang. Je ein Fall für links (Quick
+Settings), rechts oben (World Outliner), rechts unten (Details), unten (Content Browser) und
+oben (schwebender Performance Profiler). Ohne `KeepClear` überdeckt die Karte das Panel,
+mit `KeepClear` keinen Pixel davon. Mit `HE_UI_DUMP_DIR` entsteht je Seite ein Vorher/Nachher-Bild.
+Ein zweiter Fall zieht die Karte per simulierter Maus zurück aufs Panel: sie bleibt dort,
+bis `reset()` den nächsten Schritt anzeigt.
+
 ## Offen
 
-- Die ImGui-Oberfläche selbst (Karte, Rahmen-Highlight, Willkommensmodal) ist **nicht**
-  optisch verifiziert — der Headless-Dump rendert die Szene ohne ImGui-Overlay.
+- Willkommensmodal und Karteninhalt sind **nicht** in der laufenden App optisch
+  verifiziert. Der Headless-Dump rendert die Szene ohne ImGui-Overlay, und `test_ui_shot`
+  zeigt nur die Platzierung der Karte über einem nachgebauten Layout, nicht das echte
+  `TutorialPanel::render`.
 - Ohne offenes Projekt gibt es außerhalb von macOS kein Menü im Hub, also dort auch keinen
   Weg zurück zur Willkommenskarte, wenn sie einmal weggeklickt wurde. Der Hub hätte gern
   eine eigene kleine Menüzeile.

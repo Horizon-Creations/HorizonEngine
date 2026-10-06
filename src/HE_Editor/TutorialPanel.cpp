@@ -74,6 +74,11 @@ namespace
 	std::string  s_visitedPanels;
 	int          s_playSessions = 0;      // play→stop transitions since the editor started
 	bool         s_wasPlaying  = false;
+#ifdef HE_IMGUI_ENABLED
+	// Keeps the card off the panel the step outlines (see placeCard). Reset per
+	// step: a card the user dragged somewhere is theirs until the next one.
+	HE::Ed::Spotlight::KeepClear s_cardPlacement;
+#endif
 
 	// Seconds a completed step stays on screen before the tour moves on. Long
 	// enough that the user sees WHICH step they just finished, short enough that
@@ -106,6 +111,9 @@ namespace
 		s_ackPressed = false;
 		s_readToEnd  = false;
 		s_visitedPanels.clear();
+#ifdef HE_IMGUI_ENABLED
+		s_cardPlacement.reset();
+#endif
 		persist(gs);
 	}
 
@@ -319,6 +327,34 @@ namespace
 			if (outlineWindow(name.c_str(), time, done)) ++drawn;
 		}
 		return drawn;
+	}
+
+	// ── Keeping the card off the panel it points at ───────────────────────────
+	// The card floats, so wherever it sits it covers something, and the one thing
+	// it must not cover is the panel the step is about: "add a component in the
+	// Details panel" with the card lying on the Details panel is a step the user
+	// has to fight the tour to do — and with the default layout and the card's
+	// default bottom-right spot, that is exactly where it lay. Before the card is
+	// drawn, the panels the step outlines are tested against where the card was
+	// last frame, and when they meet, the card glides aside (Spotlight::KeepClear
+	// has the how and the when: same rects as the pulse, a drag by the user wins).
+	//
+	// The panels still pulsing, that is: on a "visit these panels" step the ones
+	// already visited are drawn dim and are done with, and the card may lie on
+	// them if that is what keeps the rest clear.
+	void placeCard(const tut::Step& step, std::string_view visited, float dt)
+	{
+		std::vector<std::string> panels;
+		const int n = tut::listEntryCount(step.focusWindow);
+		for (int i = 0; i < n; ++i)
+		{
+			std::string name(tut::listEntry(step.focusWindow, i));
+			if (name.empty()) continue;
+			if (step.check == tut::Check::PanelsVisited && tut::panelVisited(name, visited))
+				continue;
+			panels.push_back(std::move(name));
+		}
+		s_cardPlacement.update("Tutorial", panels, dt);
 	}
 
 	// The window the user last clicked into, as the tour's "visited" signal.
@@ -580,6 +616,11 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 		ImVec2(vp->WorkPos.x + vp->WorkSize.x - 450.0f,
 		       vp->WorkPos.y + vp->WorkSize.y - 380.0f),
 		ImGuiCond_FirstUseEver);
+	// …and out of the way of the panel this step points at. After the default
+	// above, so a step-aside overrides it; only while the outline is drawn, since
+	// a finished step points at nothing.
+	if (step && !s_stepDone)
+		placeCard(*step, now.visitedPanels, dt);
 	// Capped to the editor window: a floating window that protrudes gets its own
 	// OS window, which the window manager is free to bury behind the editor on the
 	// next focus change — the tour would then be "open" but invisible.
