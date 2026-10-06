@@ -12,7 +12,8 @@ wurde nichts umgebaut. Neu sind nur Messhilfen: zwei Log-Zeilen mit Ladezeiten u
 10k 64 → 22 ms, 50k 321 → 118 ms; Jolt 65 536 statt 1 024 Bodies.
 
 **Schritt 5 (Verifikation, Vorher/Nachher, alle offenen Punkte) steht in Abschnitt 10:** Laden 200k
-5,3 → 2,8 s, mit Zellen-Streaming nach 0,1–0,2 s spielbar; Frame 0/1 bei 1k 382/769 → 104/41 ms;
+5,3 → 2,8 s, mit Zellen-Streaming Basis plus Zellen um die Kamera in 0,1–0,2 s geladen und gebaut
+(Bench, ohne Rendern und Physik); Frame 0/1 bei 1k 382/769 → 104/41 ms;
 30-FPS-Grenze ≈ 5 000 → ≈ 13 500 Entities; Floating Origin, Jolt auf mehreren Threads.
 
 **Kurz:**
@@ -621,9 +622,10 @@ dem End-Stand `c9db1932` (`s5end-*`). Dazwischen hat Schritt 5 alle offenen Punk
 Abschnitt 1–9 abgearbeitet (10.6), Commits `574c6910` bis `c9db1932`.
 
 **Kurz:**
-- **Laden:** 200k Entities **5,3 s → 2,8 s**, 50k 1,3 s → 0,7–0,8 s. Mit Zellen-Streaming ist
-  die 200k-Welt nach **0,1–0,2 s** spielbar (Basis plus die 14 Zellen um die Kamera,
-  11 527 Entities) statt 2,6–2,8 s für die ganze Welt.
+- **Laden:** 200k Entities **5,3 s → 2,8 s**, 50k 1,3 s → 0,7–0,8 s. Mit Zellen-Streaming sind von
+  der 200k-Welt Basis plus die 14 Zellen um die Kamera (11 527 Entities) nach **0,1–0,2 s** geladen
+  und gebaut, statt 2,6–2,8 s für die ganze Welt. Das ist ein Bench ohne Rendern, Physik und
+  Asset-Streaming, kein gemessenes Spiel (10.7).
 - **Hänger nach dem Laden:** Frame 0/1 bei 1k **382/769 → 104/41 ms**; bis zum ersten ruhigen
   Frame 1,9 s → 1,2 s (1k), 3,9 s → 2,4 s (50k), 10,6 s → 5,7 s (200k).
 - **Entities:** CPU pro Frame 2,35 µs statt 6,45 µs je Entity. Die 30-FPS-Grenze im Editor liegt bei
@@ -642,7 +644,7 @@ Abschnitt 1–9 abgearbeitet (10.6), Commits `574c6910` bis `c9db1932`.
   (`runtime_size_app_*`, Skip-Fälle). Beide Läufe gingen per Hintergrund-Task; das Ergebnis ist aus
   dem Log nachgeprüft, nicht aus der Meldung übernommen.
 - Neue Tests: `test_scene_serializer` (CBOR-Split), `test_hpak` (Stop mitten im Lesen und im
-  zstd-Fenster), `test_world_scale` (Floating Origin samt Negativkontrolle, Zellen-Streaming,
+  zstd-Fenster), `test_world_scale` (Floating Origin samt Negativkontrolle, Zellen-Streaming samt Physik-Bodies unter Ursprung,
   Manifest-Round-Trip), `test_engine_api` (Savegame unter Ursprung). Physik-, Kollisions-, Character-
   und Weltgrößen-Tests liefen nach dem Wechsel auf Jolts Thread-Pool fünfmal hintereinander grün.
 
@@ -752,7 +754,8 @@ Die Benches laufen nicht in der CI (`doctest::skip`). Aufrufe:
 - **Floating Origin, bewusst nicht mitgeschoben:** Positionen, die ein Skript in eigenen Variablen hält,
   Keyframes auf Top-Level-Positionen (Cutscenes), der Simulationszustand der GPU-Partikel, die
   Editor-Kamera. Im Editor-Play bleibt die Welt absolut. Skripte haben noch keine API für die absolute
-  Position.
+  Position. Die Replikation überträgt absolute Positionen als Floats: bei 300 km ist das eine
+  Auflösung von ~3 cm, die 24-Bit-Quantisierung über ±`worldExtent` ist dort aber ohnehin gröber.
 - **Zellen:** Eine Zelle wird immer ganz gebaut. Bei großen Zellen überschreitet ein Frame das
   4-ms-Budget (gemessen bis 99 ms bei ~800 Entities pro Zelle unter Last); kleinere Zellen helfen.
   Dynamische Bodies, Skripte, Prefab-Instanzen und Kameras bleiben in der Basis. Zell-Assets werden

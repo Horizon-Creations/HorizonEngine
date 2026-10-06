@@ -877,3 +877,60 @@ TEST_CASE("Physics step bench: 4000 dynamic boxes settling on a floor" * doctest
 	MESSAGE("4000 bodies: step p50 " << steps[steps.size() / 2] << " ms, p90 " << steps[steps.size() * 9 / 10]
 	        << " ms, max " << steps.back() << " ms");
 }
+
+TEST_CASE("CellStreamer: a cell's static bodies stand where the cell is, under a floating origin")
+{
+	// What GameApplication's loaded hook does: a body for every entity the cell
+	// brought, after the cell's root has been put at -origin. The body pose must
+	// come through the parent chain, not from a world matrix nothing has
+	// propagated yet.
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_bodies";
+	he_test::removeAllQuiet(root);
+	{
+		HorizonWorld cell;
+		const Entity box = cell.createEntity("Crate");
+		tf(cell, box).position = glm::vec3(250.0f, 0.0f, 50.0f);   // absolute
+		tf(cell, box).scale    = glm::vec3(2.0f);
+		RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+		cell.addComponent(box, rb);
+		std::filesystem::create_directories(root / "W.cells");
+		SceneSerializer ser;
+		REQUIRE(ser.save(cell, root / "W.cells" / "cell_2_0.hescene", SerializeFormat::JSON));
+	}
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "dir": "W.cells", "list": [[2,0,1]]})", m));
+
+	HorizonWorld world;
+	world.setOrigin({ 200.0, 0.0, 0.0 });
+	PhysicsWorld phys;
+	phys.initialize(world);
+	HE::CellStreamer::Hooks hooks;
+	hooks.loaded = [&](entt::entity, const std::vector<entt::entity>& created)
+	{
+		for (entt::entity e : created) phys.addEntity(world, static_cast<uint32_t>(e));
+	};
+	HE::CellStreamer s;
+	s.begin(m, [&root](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
+	{
+		const auto file = root / path;
+		return [file](std::vector<uint8_t>& out)
+		{
+			std::ifstream in(file, std::ios::binary);
+			out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+			return !out.empty();
+		};
+	}, hooks);
+	pumpCells(s, world, { 250.0, 1.7, 50.0 }, glm::vec3(0.0f), [&] { return s.isLoaded(2, 0); });
+	REQUIRE(s.isLoaded(2, 0));
+
+	// Local x 50 is absolute 250: the ray straight down meets the crate's top.
+	const PhysicsWorld::RaycastHit hit = phys.raycast({ 50.0f, 10.0f, 50.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f);
+	REQUIRE(hit.hit);
+	CHECK(hit.point.x == doctest::Approx(50.0f));
+	CHECK(hit.point.y == doctest::Approx(1.0f).epsilon(0.05));   // half of the 2 m box
+	// Where the absolute number would put it if the origin were ignored: nothing.
+	CHECK_FALSE(phys.raycast({ 250.0f, 10.0f, 50.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f).hit);
+	s.clear(world);
+	he_test::removeAllQuiet(root);
+}
