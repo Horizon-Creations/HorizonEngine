@@ -55,6 +55,7 @@
 #include <ContentManager/Assets.h>
 #include <Diagnostics/Log.h>
 #include <JobSystem/JobSystem.h>   // releaseOnWorker
+#include "HorizonScene/SceneJsonParse.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <chrono>
@@ -2722,7 +2723,7 @@ bool SceneSerializer::loadAdditive(HorizonWorld& world,
         HE_LOG_ERROR(Serialize, "Additive scene load: cannot open '%s'", path.string().c_str());
         return false;
     }
-    json scene = json::parse(text, nullptr, false);
+    json scene = HE::parseSceneText(text);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Additive scene load: '%s' is not valid JSON", path.string().c_str());
@@ -2792,7 +2793,7 @@ bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path&
         HE_LOG_ERROR(Serialize, "Scene load: cannot open '%s'", path.string().c_str());
         return false;
     }
-    json scene = json::parse(text, nullptr, false);
+    json scene = HE::parseSceneText(text);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Scene load: '%s' is not valid JSON", path.string().c_str());

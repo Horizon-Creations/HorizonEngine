@@ -2021,3 +2021,160 @@ TEST_CASE("Streaming bench: pak throughput, small and large assets" * doctest::s
     removeQuiet(smallPak);
     removeQuiet(largePak);
 }
+
+// ─── Shared TOC, worker-side split, time budget (Thema 153, Schritt 3) ───────
+
+TEST_CASE("HpakReader::openShared reads through the mount's TOC and refuses a replaced package")
+{
+    const HE::UUID a{0x5A, 1}, b{0x5B, 2};
+    auto pak = std::filesystem::temp_directory_path() / "he_shared_toc.hpak";
+    {
+        HpakWriter p;
+        p.addEntry(a, makeMaterialBlob(a, "shared_a"), {Hpak::Codec::Zstd});
+        p.addEntry(b, makeMaterialBlob(b, "shared_b"));
+        REQUIRE(p.write(pak.string()));
+    }
+    std::shared_ptr<const HpakReader::Toc> toc;
+    {
+        HpakReader mount;
+        REQUIRE(mount.open(pak.string()));
+        toc = mount.sharedToc();
+        REQUIRE(toc != nullptr);
+
+        HpakReader job;
+        REQUIRE(job.openShared(pak.string(), toc));
+        CHECK(job.tocHash() == mount.tocHash());
+        CHECK(job.hasEntry(a));
+        CHECK(job.hasEntry(b));
+        CHECK(job.enumerate() == mount.enumerate());
+        CHECK(job.readEntry(a) == makeMaterialBlob(a, "shared_a"));
+        CHECK(job.readEntry(b) == makeMaterialBlob(b, "shared_b"));
+    }
+    HpakReader none;
+    CHECK_FALSE(none.openShared(pak.string(), nullptr));
+
+    // Replaced by a different archive (every reader closed first, so Windows
+    // lets it be rewritten): refused, not read at the old offsets.
+    {
+        HpakWriter p;
+        p.addEntry(a, makeMaterialBlob(a, "replaced_a"));
+        REQUIRE(p.write(pak.string()));
+    }
+    HpakReader stale;
+    CHECK_FALSE(stale.openShared(pak.string(), toc));
+    CHECK_FALSE(stale.hasEntry(a));
+    CHECK(stale.readEntry(a).empty());
+    removeQuiet(pak);
+}
+
+#ifndef _WIN32
+// Windows cannot rewrite a file the mount still holds open, so the situation
+// this guards (a patch written over a mounted package) does not arise there.
+TEST_CASE("Pak streaming: a package replaced after the mount streams from the new file")
+{
+    const HE::UUID a{0x5C, 1};
+    auto pak = std::filesystem::temp_directory_path() / "he_shared_toc_replaced.hpak";
+    {
+        HpakWriter p;
+        p.addEntry(a, makeMaterialBlob(a, "before"), {Hpak::Codec::Zstd});
+        REQUIRE(p.write(pak.string()));
+    }
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    {
+        HpakWriter p;
+        p.addEntry(a, makeMaterialBlob(a, "after"), {Hpak::Codec::LZ4});
+        p.addEntry(HE::UUID{0x5D, 2}, makeMaterialBlob(HE::UUID{0x5D, 2}, "extra"));
+        REQUIRE(p.write(pak.string()));
+    }
+    bool arrived = false;
+    cm.loadAssetAsync(a, [&](HE::UUID u) { arrived = (u == a); });
+    pumpUntil(cm, [&] { return arrived || cm.asyncInFlightCount() == 0; });
+    REQUIRE(arrived);
+    REQUIRE(cm.getMaterial(a) != nullptr);
+    CHECK(cm.getMaterial(a)->name == "after");
+    CHECK(cm.asyncInFlightCount() == 0);   // the coalesce key was released
+    removeQuiet(pak);
+}
+#endif
+
+TEST_CASE("pollAsyncResults with a time budget handles at least one result, then stops")
+{
+    constexpr size_t kCount = 10;
+    HpakWriter p;
+    std::vector<HE::UUID> ids;
+    for (size_t i = 0; i < kCount; ++i)
+    {
+        ids.push_back(HE::UUID{0xB0D6E7, i + 1});
+        p.addEntry(ids.back(), makeMaterialBlob(ids.back(), "budget" + std::to_string(i)));
+    }
+    auto pak = std::filesystem::temp_directory_path() / "he_poll_budget.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    REQUIRE(cm.streamMountedAssets() == kCount);
+    // A budget no parse can stay under: after the first result it is always
+    // spent, so every call registers at most one, and none is ever lost.
+    size_t total = 0, most = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (total < kCount && std::chrono::steady_clock::now() < deadline)
+    {
+        const size_t n = cm.pollAsyncResults(SIZE_MAX, 1e-9).size();
+        most = std::max(most, n);
+        total += n;
+        if (n == 0) std::this_thread::yield();
+    }
+    CHECK(total == kCount);
+    CHECK(most == 1);
+    for (const HE::UUID& id : ids) CHECK(cm.isLoaded(id));
+    CHECK(cm.asyncInFlightCount() == 0);
+    removeQuiet(pak);
+}
+
+TEST_CASE("Async loads arrive split into chunks and register like a synchronous load")
+{
+    // Worker-side split (AsyncResult::asset): the main thread parses chunks it
+    // never copied. Same asset either way, from a pak and from loose content.
+    const HE::UUID id{0x5917, 1};
+    const std::vector<uint8_t> blob = makeMaterialBlob(id, "split_mat", 0.25f, 0.5f, 0.75f);
+    HpakWriter p;
+    p.addEntry(id, blob, {Hpak::Codec::Zstd});
+    auto pak = std::filesystem::temp_directory_path() / "he_split_chunks.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager streamed;
+    REQUIRE(streamed.mountPak(pak.string()));
+    bool arrived = false;
+    streamed.loadAssetAsync(id, [&](HE::UUID u) { arrived = (u == id); });
+    pumpUntil(streamed, [&] { return arrived; });
+    REQUIRE(arrived);
+
+    ContentManager direct;
+    REQUIRE(direct.loadAssetFromMemory(blob) == id);
+
+    const MaterialAsset* s = streamed.getMaterial(id);
+    const MaterialAsset* d = direct.getMaterial(id);
+    REQUIRE(s != nullptr);
+    REQUIRE(d != nullptr);
+    CHECK(s->name == d->name);
+    CHECK(s->shaderPath == d->shaderPath);
+    CHECK(s->texturePaths == d->texturePaths);
+    removeQuiet(pak);
+}
+
+TEST_CASE("SceneSystems::collectAssetRefs names each asset once, in first-seen order")
+{
+    HorizonWorld world;
+    const HE::UUID meshId{0x61, 1}, matId{0x62, 2};
+    for (int i = 0; i < 3; ++i)
+    {
+        auto e = world.createEntity("shared" + std::to_string(i));
+        { MeshComponent mc; mc.meshAssetId = meshId; world.addComponent(e, mc); }
+        { MaterialComponent mc; mc.materialAssetId = matId; world.addComponent(e, mc); }
+    }
+    const auto refs = SceneSystems::collectAssetRefs(world);
+    REQUIRE(refs.size() == 2);
+    CHECK(refs[0] == meshId);   // meshes are gathered before materials
+    CHECK(refs[1] == matId);
+}

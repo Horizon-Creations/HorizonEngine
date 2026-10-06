@@ -2,6 +2,8 @@
 #include "TestFsUtil.h"
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/SceneJsonParse.h>
+#include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
@@ -2879,4 +2881,110 @@ TEST_CASE("A joint saved before the motor existed loads with no motor and no bre
 	CHECK(out->motorMaxForce == doctest::Approx(0.0f));
 	CHECK(out->breakForce    == doctest::Approx(0.0f));
 	CHECK_FALSE(out->collideConnected);
+}
+
+// ─── Parallel scene parse (Thema 153, Schritt 3) ─────────────────────────────
+// parseSceneText cuts the entities array at its element boundaries with its own
+// scanner. Whatever the scanner gets wrong must either still give exactly
+// json::parse's result or fall back to it, so these feed it the strings that
+// trip a naive bracket counter.
+
+TEST_CASE("parseSceneText: split parse equals json::parse, tricky strings included")
+{
+    using nlohmann::json;
+    // Escaped quotes and a trailing escaped backslash right before a closing
+    // quote, brackets inside strings, an entity literally named "entities" and a
+    // nested "entities" key below the top level.
+    std::string text = R"({"version": 3, "levelScript": {"a": [1, 2, {"entities": [7]}]}, "entities": [)";
+    for (int i = 0; i < 40; ++i)
+    {
+        if (i) text += ",\n  ";
+        text += R"({"name": "e)" + std::to_string(i);
+        text += R"( \"q\" ] [x} {y \\", "components": {"t": [1.5, -2e3, null, true, "]"]}, "children": []})";
+    }
+    text += R"(, {"name": "entities", "nested": {"entities": [{"x": "]"}]}}], "zz": "after"})";
+    const json whole = json::parse(text, nullptr, false);
+    REQUIRE_FALSE(whole.is_discarded());
+    REQUIRE(whole["entities"].size() == 41);
+    for (size_t piece : { size_t(1), size_t(16), size_t(200), size_t(1) << 20 })
+    {
+        CAPTURE(piece);
+        size_t pieces = 0;
+        CHECK(HE::parseSceneText(text, piece, &pieces) == whole);
+        // Really split (a scanner that always fell back would pass the line
+        // above too), except where the text is smaller than two pieces.
+        if (piece <= 200) CHECK(pieces > 1);
+        else              CHECK(pieces == 1);
+    }
+}
+
+TEST_CASE("parseSceneText: shapes it does not split, and broken text, read as json::parse does")
+{
+    using nlohmann::json;
+    const char* cases[] = {
+        R"({"entities": [{"a": 1}, 2, {"b": 2}]})",                          // a scalar element
+        R"({"entities": "none", "x": [{"a": 1}, {"b": 2}]})",                 // not an array
+        R"({"entities": [{"a": 1}, {"b": 2}], "entities": [{"c": 3}, {"d": 4}]})", // the key twice
+        R"({"entit\u0069es": [{"a": 1}, {"b": 2}]})",                    // an escaped key
+        R"([{"a": 1}, {"b": 2}])",                                            // not an object
+        R"({"entities": [{"a": 1}, {"b": 2]})",                               // mismatched bracket
+        R"({"entities": [{"a": 1}, {"b": 2}] )",                              // truncated
+        R"({"entities": [{"a": 1}, {"b": "unterminated}]})",                  // open string
+        R"({"entities": [{"a": 1}, {"b": 2}]} trailing)",                     // junk after the object
+    };
+    for (const char* c : cases)
+    {
+        const std::string s = c;
+        CAPTURE(s);
+        const json whole = json::parse(s, nullptr, false);
+        size_t pieces = 0;
+        const json split = HE::parseSceneText(s, 1, &pieces);
+        CHECK(pieces == 1);   // every one of them takes the plain parse
+        CHECK(split.is_discarded() == whole.is_discarded());
+        if (!whole.is_discarded()) CHECK(split == whole);
+    }
+}
+
+TEST_CASE("SceneSerializer::load takes the split parse for a large scene and builds it whole")
+{
+    // Big enough (> 2 MiB of pretty-printed JSON) for the default piece size, so
+    // this is the path a large level really takes.
+    const auto path = std::filesystem::temp_directory_path() / "he_split_parse.hescene";
+    constexpr int kCount = 8000;
+    {
+        HorizonWorld src;
+        for (int i = 0; i < kCount; ++i)
+        {
+            auto e = src.createEntity("split \"" + std::to_string(i) + "\" ]");
+            MeshComponent mc; mc.meshAssetId = HE::UUID{ 0x5E11, static_cast<uint64_t>(i + 1) };
+            src.addComponent(e, mc);
+        }
+        SceneSerializer ser;
+        REQUIRE(ser.save(src, path, SerializeFormat::JSON));
+    }
+    REQUIRE(std::filesystem::file_size(path) > (size_t(2) << 20));
+    {
+        // What the saver writes is a shape the splitter takes, at the default size.
+        std::ifstream in(path, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        size_t pieces = 0;
+        CHECK_FALSE(HE::parseSceneText(text, size_t(1) << 20, &pieces).is_discarded());
+        CHECK(pieces > 1);
+    }
+
+    HorizonWorld dst;
+    SceneSerializer ser;
+    REQUIRE(ser.load(dst, path, SerializeFormat::JSON));
+    size_t meshes = 0;
+    bool   allNamed = true;
+    for (auto [e, mc] : dst.registry().view<MeshComponent>().each())
+    {
+        ++meshes;
+        const uint64_t i = mc.meshAssetId.lo - 1;
+        const auto* nc = dst.registry().try_get<NameComponent>(e);
+        allNamed = allNamed && nc && nc->name == "split \"" + std::to_string(i) + "\" ]";
+    }
+    CHECK(meshes == kCount);
+    CHECK(allNamed);
+    he_test::removeQuiet(path);
 }
