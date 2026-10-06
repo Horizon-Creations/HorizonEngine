@@ -6570,6 +6570,19 @@ namespace
 	  "squares on the ground, coloured by what the game would load, keep or drop "
 	  "from the editor camera, and the load and unload radius around it.",
 	  "", "editor#profiler" },
+	{ "Profiler/Split into Streaming Cells", "",
+	  "Moves the scene's placed things (meshes, point and spot lights, static "
+	  "bodies, decals) into one scene file per grid square, next to the scene in "
+	  "a folder named after it. The rest stays: sky, terrain, cameras, scripts, "
+	  "characters, dynamic bodies, prefab instances. The game then loads the "
+	  "squares around its camera and drops the far ones. One undo step; save the "
+	  "scene to keep it. The scene has to have been saved once.",
+	  "", "editor#profiler" },
+	{ "Profiler/Merge Cells into the Scene", "",
+	  "Loads every cell of a split scene back into it as ordinary entities and "
+	  "drops the cell list, so the scene is one piece again and everything in it "
+	  "can be edited. Split again when done. One undo step; save to keep it.",
+	  "", "editor#profiler" },
 	{ "Profiler/Fit", "",
 	  "Resets the timeline's zoom and pan so the whole capture fits the view "
 	  "again. The way back after wheel-zooming into one span.",

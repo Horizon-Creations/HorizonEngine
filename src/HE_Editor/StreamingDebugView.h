@@ -1,10 +1,11 @@
 #pragma once
 #include <glm/vec3.hpp>
+#include <string>
 
 class HorizonWorld;
 class DebugDrawBuffer;
 struct AppContext;
-namespace HE { struct CellManifest; }
+namespace HE { struct CellManifest; struct CellSplitOptions; }
 
 // ── World streaming, seen from the editor (Thema 153, Schritt 6) ─────────────
 // What the streaming machinery is doing right now, in one place: the job
@@ -25,6 +26,15 @@ namespace StreamingDebugView
 	// The cell squares within reach of `eye` (world space, the editor camera) and
 	// the two radii around it, as debug lines. Nothing for a scene without cells.
 	void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawBuffer& out);
+
+	// The open scene split into streaming cells (HE::splitWorldIntoCells): the
+	// cell files go to "<scene name>.cells" beside the scene file, the world
+	// becomes the base, one undo entry, unsaved. `options.dir` is ignored.
+	// The scene must have been saved once. `message` says what happened.
+	bool splitOpenScene(AppContext& ctx, const HE::CellSplitOptions& options, std::string& message);
+	// The open scene's cells loaded back into it (HE::mergeCellsIntoWorld), one
+	// undo entry, unsaved. The cell files stay where they are.
+	bool mergeOpenScene(AppContext& ctx, std::string& message);
 
 	// The Streaming tab's body.
 	void draw(AppContext& ctx);

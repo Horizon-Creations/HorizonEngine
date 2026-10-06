@@ -1,6 +1,8 @@
 #include "StreamingDebugView.h"
 #include "EditorApplication.h"   // AppContext, ProjectManager, EditorCamera
+#include "EditorUndo.h"
 #include "ViewportPanel.h"       // the Streaming Cells show flag
+#include <HorizonScene/CellSplit.h>
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -12,6 +14,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -95,6 +101,113 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawB
 	};
 	ring(m->loadRadius, kLoad);
 	if (m->unloadRadius > m->loadRadius) ring(m->unloadRadius, kKeep);
+}
+
+// ── Split and merge, on the open scene ───────────────────────────────────────
+// Both change the world in place, behind one undo entry, and leave the scene
+// unsaved: the base reaches the disk with the next Save, and until then the
+// saved file still holds the whole scene and names no cells. Only the cell
+// files are written right away — the base's manifest points at them.
+namespace
+{
+// The folder cell paths are relative to: the project's, the one above Content
+// (how the game's reader resolves them, GameApplication::updateCellStreaming).
+std::filesystem::path projectRootOf(AppContext& ctx)
+{
+	if (!ctx.contentManager || ctx.contentManager->contentRoot().empty()) return {};
+	return std::filesystem::path(ctx.contentManager->contentRoot()).parent_path();
+}
+
+bool readFileBytes(const std::filesystem::path& file, std::vector<uint8_t>& out)
+{
+	std::ifstream in(file, std::ios::binary);
+	if (!in) return false;
+	out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+	return !out.empty();
+}
+} // namespace
+
+bool splitOpenScene(AppContext& ctx, const HE::CellSplitOptions& base, std::string& message)
+{
+	if (!ctx.world || ctx.isPlaying) { message = "Stop playing first."; return false; }
+	if (ctx.currentScenePath.empty()) { message = "Save the scene first: the cells go next to it."; return false; }
+	const std::filesystem::path root = projectRootOf(ctx);
+	if (root.empty()) { message = "No project is open."; return false; }
+
+	const std::filesystem::path scene(ctx.currentScenePath);
+	const std::filesystem::path cellsDir = scene.parent_path() / (scene.stem().string() + ".cells");
+	std::error_code ec;
+	const std::filesystem::path rel = std::filesystem::relative(cellsDir, root, ec);
+	if (ec || rel.empty() || rel.begin()->string() == "..")
+	{
+		message = "The scene is not inside the project folder.";
+		return false;
+	}
+	HE::CellSplitOptions o = base;
+	o.dir = rel.generic_string();
+
+	// Pushed onto the history only once the split happened (see merge below).
+	std::vector<uint8_t> before;
+	SceneSerializer().saveToMemory(*ctx.world, before);
+	std::filesystem::create_directories(cellsDir, ec);
+	std::vector<std::string> written;
+	const HE::CellSplitResult r = HE::splitWorldIntoCells(*ctx.world, o,
+		[&](const std::string& path, const std::string& text)
+		{
+			std::ofstream out(root / path, std::ios::binary | std::ios::trunc);
+			out << text;
+			if (!out) return false;
+			written.push_back(std::filesystem::path(path).filename().string());
+			return true;
+		});
+	if (!r.error.empty())
+	{
+		message = "Not split: " + r.error + ".";
+		return false;
+	}
+	if (ctx.undoSys) ctx.undoSys->pushSnapshot(std::move(before), "Split into Streaming Cells");
+	// Cells of an earlier split with another grid would otherwise stay on disk
+	// beside the new ones. Only files named the way a split names them go.
+	static const std::regex kCellFile(R"(cell_-?\d+_-?\d+\.hescene)");
+	for (const auto& entry : std::filesystem::directory_iterator(cellsDir, ec))
+	{
+		const std::string name = entry.path().filename().string();
+		if (std::regex_match(name, kCellFile)
+		    && std::find(written.begin(), written.end(), name) == written.end())
+			std::filesystem::remove(entry.path(), ec);
+	}
+	ctx.selection.clear();
+	char buf[256];
+	std::snprintf(buf, sizeof(buf), "Split into %zu cells, %zu entities moved to %s. Save the scene to keep it.",
+	              r.cells.size(), r.moved, o.dir.c_str());
+	message = buf;
+	return true;
+}
+
+bool mergeOpenScene(AppContext& ctx, std::string& message)
+{
+	if (!ctx.world || ctx.isPlaying) { message = "Stop playing first."; return false; }
+	const std::filesystem::path root = projectRootOf(ctx);
+	if (root.empty()) { message = "No project is open."; return false; }
+	// The undo entry is taken only once every cell has been read: a merge that
+	// cannot happen must not leave an empty step in the history.
+	std::vector<uint8_t> before;
+	SceneSerializer().saveToMemory(*ctx.world, before);
+	std::string error;
+	size_t merged = 0;
+	const bool ok = HE::mergeCellsIntoWorld(*ctx.world,
+		[&root](const std::string& path, std::vector<uint8_t>& out) { return readFileBytes(root / path, out); },
+		&error, &merged);
+	if (!ok)
+	{
+		message = "Not merged: " + error + ".";
+		return false;
+	}
+	if (ctx.undoSys) ctx.undoSys->pushSnapshot(std::move(before), "Merge Streaming Cells");
+	ctx.selection.clear();
+	message = "Merged " + std::to_string(merged) + " entities back into the scene. The cell files stay "
+	          "on disk until the next split; save the scene to keep it whole.";
+	return true;
 }
 
 #ifdef HE_IMGUI_ENABLED
@@ -218,7 +331,7 @@ void drawScene(AppContext& ctx)
 	{
 		size_t n = 0;
 		ctx.world->registry().view<entt::entity>().each([&](auto) { ++n; });
-		ImGui::Text("%zu entities", n);
+		ImGui::Text("Entities in the open scene: %zu", n);
 	}
 	const SceneSerializer::LoadTiming t = SceneSerializer::lastLoadTiming();
 	if (t.path.empty())
@@ -237,14 +350,31 @@ void drawCells(AppContext& ctx)
 	ImGui::SeparatorText("Streaming cells");
 	EditorWidgets::WrapText wrap;
 	const HE::CellManifest* m = ctx.world ? manifestOf(*ctx.world) : nullptr;
+	static std::string s_message;   // what the last split or merge said
+	const bool editable = ctx.world && !ctx.isPlaying;
 	if (!m)
 	{
 		if (ctx.world && !ctx.world->cellManifestJson().empty())
+		{
 			ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
 			                   "The scene's cell list is malformed; the game loads only the base scene.");
-		else
-			ImGui::TextDisabled("This scene does not stream in cells: the game loads all of it at once. "
-			                    "Scene > Split into Streaming Cells... divides it.");
+			return;
+		}
+		ImGui::TextDisabled("This scene does not stream in cells: the game loads all of it at once. "
+		                    "Splitting moves its placed meshes, point and spot lights, static bodies "
+		                    "and decals into one file per square; the game then loads the squares "
+		                    "around the camera.");
+		static HE::CellSplitOptions s_options;
+		EditorWidgets::Row::dragFloat("Cell size (m)##cellsplit", &s_options.cellSize, 8.0f, 16.0f, 100000.0f, "%.0f");
+		EditorWidgets::Row::dragFloat("Load radius (m), 0 = 1.5 cells##cellsplit", &s_options.loadRadius, 8.0f,
+		                              0.0f, 1.0e6f, "%.0f");
+		EditorWidgets::Row::dragFloat("Unload radius (m), 0 = 1.25 x load##cellsplit", &s_options.unloadRadius,
+		                              8.0f, 0.0f, 1.0e6f, "%.0f");
+		EditorWidgets::Row::dragFloat("Look ahead (s)##cellsplit", &s_options.lookaheadSec, 0.1f, 0.0f, 30.0f, "%.1f");
+		ImGui::BeginDisabled(!editable);
+		if (EditorWidgets::button("Split into Streaming Cells")) splitOpenScene(ctx, s_options, s_message);
+		ImGui::EndDisabled();
+		if (!s_message.empty()) ImGui::TextUnformatted(s_message.c_str());
 		return;
 	}
 	uint64_t inCells = 0;
@@ -256,6 +386,11 @@ void drawCells(AppContext& ctx)
 
 	ViewportPanel::ShowFlags& flags = ViewportPanel::showFlags();
 	EditorWidgets::checkbox("Show the cells in the Scene window", &flags.streamingCells);
+	// The way to edit what is in the cells: back into one scene, edit, split again.
+	ImGui::BeginDisabled(!editable);
+	if (EditorWidgets::button("Merge Cells into the Scene")) mergeOpenScene(ctx, s_message);
+	ImGui::EndDisabled();
+	if (!s_message.empty()) ImGui::TextUnformatted(s_message.c_str());
 
 	if (!ctx.editorCamera) return;
 	const glm::dvec3 eye = glm::dvec3(ctx.editorCamera->position()) + ctx.world->origin();
@@ -314,7 +449,7 @@ void drawWorldSize(AppContext& ctx)
 	const glm::vec3 p = ctx.editorCamera->position();
 	const float farthest = std::max({ std::abs(p.x), std::abs(p.y), std::abs(p.z) });
 	const float step = std::nextafter(farthest, INFINITY) - farthest;
-	ImGui::Text("Editor camera at %.0f m from the origin; positions there move in steps of %.3f mm.",
+	ImGui::Text("Editor camera at %.0f m from the origin; positions there move in steps of %.3g mm.",
 	            static_cast<double>(glm::length(p)), static_cast<double>(step) * 1000.0);
 }
 } // namespace
