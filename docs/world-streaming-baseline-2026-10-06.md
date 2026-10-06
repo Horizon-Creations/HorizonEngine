@@ -749,6 +749,11 @@ Die Benches laufen nicht in der CI (`doctest::skip`). Aufrufe:
 
 - **Echte Hardware:** Alles lief auf diesem M5 im Stromsparmodus, mit Metal. Windows, Linux und Vulkan
   sieht nur die CI (Bauen und Tests, keine Messung).
+- **Größe der Spiel-Runtime:** Windows ging in der CI um 0,1 MB über die Schwelle von `runtime_size`
+  (34,1 MB ohne Python gegen 34,0). Der Zuwachs ist der Code dieses Schritts in HorizonScene:
+  `CellStreamer` (~110 KB), `FloatingOrigin` (~50 KB), der CBOR-Split (~100 KB) und Jolts
+  `JobSystemThreadPool`. Die Schwelle steht jetzt auf gemessen plus 10 % (38 MB), die Begründung
+  steht in `scripts/runtime_size.py`. Lokal auf macOS sind es 33,8 MB gegen 36.
 - **Exportiertes Spiel:** Floating Origin, Zellen-Streaming, der Editor-Poll und der Jolt-Thread-Pool im
   Spiel sind über Tests und Benches belegt, nicht über ein gespieltes, exportiertes Projekt.
 - **Floating Origin, bewusst nicht mitgeschoben:** Positionen, die ein Skript in eigenen Variablen hält,
