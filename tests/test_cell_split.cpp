@@ -52,7 +52,8 @@ Entity mesh(HorizonWorld& w, const std::string& name, glm::vec3 pos, Entity pare
 }
 
 // The test scene, 100 m cells:
-//   Props (folder)            → looked through, then dropped: nothing stays in it
+//   Props (folder)            → looked through, then dropped: nothing stays in it;
+//                               the merge rebuilds it from the cells' cellFolders
 //     RockA   mesh  50, 50    → cell 0,0
 //     Lamp    point 60, 40    → cell 0,0
 //     RockB   mesh 250,-30    → cell 2,-1
@@ -242,25 +243,28 @@ TEST_CASE("Cells split in the editor: the world becomes the base, merge puts eve
 	CHECK(merged == 5);
 	CHECK(world.cellManifestJson().empty());
 	HE::propagateTransforms(world);
-	std::map<std::string, glm::vec3> after = placed(world);
+	const std::map<std::string, glm::vec3> after = placed(world);
 	CHECK(after.count("Cell 0,0") == 0);
-	after.erase("Props");   // the folder the split dropped, nothing of its own
-	std::map<std::string, glm::vec3> expect = before;
-	expect.erase("Props");
-	CHECK(after == expect);
-	// …under the identities they had before the split: whatever in the base
-	// refers to one of them (a joint, a script) still finds it.
-	std::map<std::string, HE::UUID> idsAfter = idsByName(world);
-	std::map<std::string, HE::UUID> idsExpect = idsBefore;
-	idsExpect.erase("Props");
-	CHECK(idsAfter == idsExpect);
-	// The moved subtrees hang off the world root again, with their children.
-	for (auto [e, n] : world.registry().view<NameComponent>().each())
+	CHECK(after == before);
+	// …under the identities they had before the split, the dropped Props folder
+	// included: whatever in the base refers to one of them (a joint, a script)
+	// still finds it.
+	CHECK(idsByName(world) == idsBefore);
+	// …and in the hierarchy they had: Props is back under the root, holding its
+	// four subtrees in their old order, the Flag under the Tower.
+	auto& reg = world.registry();
+	Entity props = entt::null;
+	for (auto [e, n] : reg.view<NameComponent>().each())
+	{
+		if (n.name == "Props") props = e;
 		if (n.name == "Flag")
-		{
-			const Entity parent = world.registry().get<HierarchyComponent>(e).parent;
-			CHECK(world.registry().get<NameComponent>(parent).name == "Tower");
-		}
+			CHECK(reg.get<NameComponent>(reg.get<HierarchyComponent>(e).parent).name == "Tower");
+	}
+	REQUIRE((props != entt::null));
+	CHECK((reg.get<HierarchyComponent>(props).parent == world.rootEntity()));
+	std::vector<std::string> order;
+	for (Entity c : reg.get<HierarchyComponent>(props).children) order.push_back(reg.get<NameComponent>(c).name);
+	CHECK(order == std::vector<std::string>{ "RockA", "Lamp", "RockB", "Tower" });
 
 	// Merged again: nothing left to merge.
 	CHECK_FALSE(HE::mergeCellsIntoWorld(world, {}, &error));

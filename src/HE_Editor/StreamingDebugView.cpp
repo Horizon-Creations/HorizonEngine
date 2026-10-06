@@ -1,6 +1,7 @@
 #include "StreamingDebugView.h"
 #include "EditorApplication.h"   // AppContext, ProjectManager, EditorCamera
 #include "EditorUndo.h"
+#include "CollabController.h"    // no split or merge inside a session
 #include "ViewportPanel.h"       // the Streaming Cells show flag
 #include <HorizonScene/CellSplit.h>
 #include <HorizonScene/CellStreamer.h>
@@ -112,6 +113,14 @@ namespace
 {
 // The folder cell paths are relative to: the project's, the one above Content
 // (how the game's reader resolves them, GameApplication::updateCellStreaming).
+// Both replace the whole world, which a collaboration session does not
+// replicate (it carries edits, not a rebuilt scene): the peers would keep the
+// old one. Not offered in a session, like opening another scene.
+bool inCollabSession(const AppContext& ctx)
+{
+	return ctx.collab && ctx.collab->inSession();
+}
+
 std::filesystem::path projectRootOf(AppContext& ctx)
 {
 	if (!ctx.contentManager || ctx.contentManager->contentRoot().empty()) return {};
@@ -130,6 +139,7 @@ bool readFileBytes(const std::filesystem::path& file, std::vector<uint8_t>& out)
 bool splitOpenScene(AppContext& ctx, const HE::CellSplitOptions& base, std::string& message)
 {
 	if (!ctx.world || ctx.isPlaying) { message = "Stop playing first."; return false; }
+	if (inCollabSession(ctx)) { message = "Not inside a collaboration session: leave it first."; return false; }
 	if (ctx.currentScenePath.empty()) { message = "Save the scene first: the cells go next to it."; return false; }
 	const std::filesystem::path root = projectRootOf(ctx);
 	if (root.empty()) { message = "No project is open."; return false; }
@@ -187,6 +197,7 @@ bool splitOpenScene(AppContext& ctx, const HE::CellSplitOptions& base, std::stri
 bool mergeOpenScene(AppContext& ctx, std::string& message)
 {
 	if (!ctx.world || ctx.isPlaying) { message = "Stop playing first."; return false; }
+	if (inCollabSession(ctx)) { message = "Not inside a collaboration session: leave it first."; return false; }
 	const std::filesystem::path root = projectRootOf(ctx);
 	if (root.empty()) { message = "No project is open."; return false; }
 	// The undo entry is taken only once every cell has been read: a merge that
@@ -351,7 +362,7 @@ void drawCells(AppContext& ctx)
 	EditorWidgets::WrapText wrap;
 	const HE::CellManifest* m = ctx.world ? manifestOf(*ctx.world) : nullptr;
 	static std::string s_message;   // what the last split or merge said
-	const bool editable = ctx.world && !ctx.isPlaying;
+	const bool editable = ctx.world && !ctx.isPlaying && !inCollabSession(ctx);
 	if (!m)
 	{
 		if (ctx.world && !ctx.world->cellManifestJson().empty())

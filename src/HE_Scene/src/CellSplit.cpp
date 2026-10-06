@@ -152,10 +152,15 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 	const double size = options.cellSize;
 	std::map<std::pair<int, int>, std::vector<std::string>> units;   // ordered: files come out sorted
 	std::unordered_set<std::string> moved;
+	// The folder a moved subtree hung in, when not the scene root: the merge
+	// puts it back there (and rebuilds the folder when the split dropped it).
+	std::unordered_map<std::string, std::string> unitFolder;
+	const std::string rootKey = idKey((*roots[0])["uuid"]);
 	std::function<void(const json&)> visit = [&](const json& parent)
 	{
 		const json* kids = childrenOf(parent);
 		if (!kids) return;
+		const std::string parentKey = idKey(parent["uuid"]);
 		for (const json& c : *kids)
 		{
 			const auto it = byId.find(idKey(c));
@@ -166,6 +171,7 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 				visit(child);
 				continue;
 			}
+			if (parentKey != rootKey && subtreeMovable(child)) unitFolder[idKey(child["uuid"])] = parentKey;
 			if (!subtreeMovable(child)) continue;
 			double px = 0.0, pz = 0.0;
 			if (const json* comps = componentsOf(child))
@@ -284,6 +290,27 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		c.entities = static_cast<uint32_t>(cellEntities.size() - 1);
 		c.scene    = { { "entities", std::move(cellEntities) },
 		               { "version", scene.value("version", std::string("1.1")) } };
+		// For the merge only (the game's loader reads no such key): which folder
+		// each subtree came from, and those folders as they were, up to the
+		// scene root — the split may have dropped them from the base.
+		json parents = json::array(), folders = json::array();
+		std::unordered_set<std::string> folderSeen;
+		for (const std::string& k : list)
+		{
+			const auto f = unitFolder.find(k);
+			if (f == unitFolder.end()) continue;
+			parents.push_back(json::array({ (*byId[k])["uuid"], (*byId[f->second])["uuid"] }));
+			for (std::string up = f->second; up != rootKey && byId.count(up) && folderSeen.insert(up).second;)
+			{
+				const json& rec = *byId[up];
+				folders.push_back(rec);
+				const auto p = rec.find("parent");
+				if (p == rec.end() || p->is_null()) break;
+				up = idKey(*p);
+			}
+		}
+		if (!parents.empty())
+			c.scene["cellFolders"] = { { "parents", std::move(parents) }, { "folders", std::move(folders) } };
 		out.moved += c.entities;
 		listing.push_back(json::array({ x, z, c.entities }));
 		out.cells.push_back(std::move(c));
@@ -390,22 +417,60 @@ bool mergeCellsIntoWorld(HorizonWorld& world,
 	json scene = parseSceneCbor(snapshot);
 	if (scene.is_discarded() || !scene.contains("entities") || !scene["entities"].is_array())
 		return fail("the scene could not be read back");
+	// Indices, not pointers, into the entity array: it grows below.
 	json& ents = scene["entities"];
-	json* baseRoot = nullptr;
-	for (json& e : ents)
-		if (e.is_object() && (!e.contains("parent") || e["parent"].is_null()))
+	std::unordered_map<std::string, size_t> at;
+	size_t rootAt = SIZE_MAX;
+	for (size_t i = 0; i < ents.size(); ++i)
+	{
+		json& e = ents[i];
+		if (!e.is_object() || !e.contains("uuid")) continue;
+		at[idKey(e["uuid"])] = i;
+		if (rootAt == SIZE_MAX && (!e.contains("parent") || e["parent"].is_null())) rootAt = i;
+	}
+	if (rootAt == SIZE_MAX) return fail("the scene has no root");
+	const auto adopt = [&ents](size_t parent, const json& childId)
+	{
+		json& p = ents[parent];
+		if (!p.contains("children") || !p["children"].is_array()) p["children"] = json::array();
+		p["children"].push_back(childId);
+	};
+
+	// The folders the subtrees came from (cellFolders, written by the split):
+	// where each went, and the folders as they were.
+	std::unordered_map<std::string, json> unitFolder;     // subtree → its folder's uuid
+	std::unordered_map<std::string, json> folderRecord;   // folder → its record before the split
+	for (const json& cell : scenes)
+		if (const auto cf = cell.find("cellFolders"); cf != cell.end() && cf->is_object())
 		{
-			baseRoot = &e;
-			break;
+			if (const auto p = cf->find("parents"); p != cf->end() && p->is_array())
+				for (const json& pair : *p)
+					if (pair.is_array() && pair.size() == 2) unitFolder[idKey(pair[0])] = pair[1];
+			if (const auto f = cf->find("folders"); f != cf->end() && f->is_array())
+				for (const json& rec : *f)
+					if (rec.is_object() && rec.contains("uuid")) folderRecord[idKey(rec["uuid"])] = rec;
 		}
-	if (!baseRoot || !baseRoot->contains("uuid")) return fail("the scene has no root");
-	const json rootId = (*baseRoot)["uuid"];
-	json rootKids = baseRoot->contains("children") && (*baseRoot)["children"].is_array()
-	              ? (*baseRoot)["children"] : json::array();
+	// A folder that is still in the base is used as it is; one the split
+	// dropped comes back from its record, under its own parent first.
+	std::function<size_t(const std::string&, int)> ensureFolder = [&](const std::string& key, int depth) -> size_t
+	{
+		if (const auto it = at.find(key); it != at.end()) return it->second;
+		const auto rec = folderRecord.find(key);
+		if (rec == folderRecord.end() || depth > 64) return rootAt;
+		const json& up = rec->second.contains("parent") ? rec->second["parent"] : json();
+		const size_t parent = up.is_null() ? rootAt : ensureFolder(idKey(up), depth + 1);
+		json folder = rec->second;
+		folder["parent"]   = ents[parent]["uuid"];
+		folder["children"] = json::array();
+		ents.push_back(std::move(folder));
+		const size_t here = ents.size() - 1;
+		at[key] = here;
+		adopt(parent, ents[here]["uuid"]);
+		return here;
+	};
 
 	// Absolute in the cell files, relative to the origin in the world.
 	const glm::dvec3 origin = world.origin();
-	std::vector<json> added;
 	size_t merged = 0;
 	for (const json& cell : scenes)
 	{
@@ -421,20 +486,41 @@ bool mergeCellsIntoWorld(HorizonWorld& world,
 			json copy = e;
 			if (copy.contains("parent") && idKey(copy["parent"]) == cellRootKey)
 			{
-				copy["parent"] = rootId;
-				rootKids.push_back(copy["uuid"]);
+				const auto f = unitFolder.find(idKey(copy["uuid"]));
+				const size_t parent = f != unitFolder.end() ? ensureFolder(idKey(f->second), 0) : rootAt;
+				copy["parent"] = ents[parent]["uuid"];
+				adopt(parent, copy["uuid"]);
 				if (origin != glm::dvec3(0.0))
 					if (auto c = copy.find("components"); c != copy.end() && c->contains("transform"))
 						if (json& p = (*c)["transform"]["position"]; p.is_array() && p.size() >= 3)
 							for (int i = 0; i < 3; ++i)
 								p[i] = p[i].get<double>() - origin[i];
 			}
-			added.push_back(std::move(copy));
+			ents.push_back(std::move(copy));
+			at[idKey(ents.back()["uuid"])] = ents.size() - 1;
 			++merged;
 		}
 	}
-	(*baseRoot)["children"] = std::move(rootKids);   // before `ents` grows: baseRoot points into it
-	for (json& e : added) ents.push_back(std::move(e));
+
+	// Inside a folder the split knew, the children go back into the order they
+	// had (sibling order is authored data); anything added since stays behind.
+	for (const auto& [key, rec] : folderRecord)
+	{
+		const auto it = at.find(key);
+		const auto orig = rec.find("children");
+		if (it == at.end() || orig == rec.end() || !orig->is_array()) continue;
+		json& kids = ents[it->second]["children"];
+		if (!kids.is_array()) continue;
+		std::unordered_map<std::string, size_t> rank;
+		for (size_t i = 0; i < orig->size(); ++i) rank[idKey((*orig)[i])] = i;
+		std::vector<json> sorted(kids.begin(), kids.end());
+		std::stable_sort(sorted.begin(), sorted.end(), [&rank](const json& a, const json& b)
+		{
+			const auto ra = rank.find(idKey(a)), rb = rank.find(idKey(b));
+			return (ra != rank.end() ? ra->second : SIZE_MAX) < (rb != rank.end() ? rb->second : SIZE_MAX);
+		});
+		kids = json(std::move(sorted));
+	}
 	scene.erase("cells");
 
 	world.clear();
