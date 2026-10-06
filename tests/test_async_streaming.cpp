@@ -430,6 +430,20 @@ HE::AsyncLoadOptions withToken(const HE::CancelToken& t)
     return o;
 }
 
+// drainAsync pumps a fixed 100 rounds; these stop as soon as `done` holds. That
+// matters on a Mac in Low Power Mode, where a 5 ms sleep was measured at ~150 ms
+// (timer coalescing) and a fixed drain alone costs 15 s.
+template<typename P>
+void drainUntil(ContentManager& cm, P done, int maxRounds = 2000)
+{
+    for (int i = 0; i < maxRounds; ++i)
+    {
+        cm.pollAsyncResults();
+        if (done()) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 } // namespace
 
 TEST_CASE("loadAssetAsync: cancelled before it starts → empty callback, key released, reload works")
@@ -448,7 +462,7 @@ TEST_CASE("loadAssetAsync: cancelled before it starts → empty callback, key re
         CHECK(cm.isAsyncPending(rel));
         zone.cancel();                       // the zone is gone before its load ran
     }
-    drainAsync(cm);
+    drainUntil(cm, [&] { return called; });
     CHECK(called);
     CHECK(got == HE::UUID{});                // reported like a failed load
     CHECK_FALSE(cm.isLoaded(rel));
@@ -458,7 +472,7 @@ TEST_CASE("loadAssetAsync: cancelled before it starts → empty callback, key re
     // The leaked-key failure mode: this request would be swallowed forever.
     HE::UUID again;
     cm.loadAssetAsync(rel, [&](HE::UUID u) { again = u; });
-    drainAsync(cm);
+    drainUntil(cm, [&] { return again != HE::UUID{}; });
     CHECK(again == id);
     CHECK(cm.isLoaded(rel));
 
@@ -487,7 +501,7 @@ TEST_CASE("loadAssetAsync: a shared load is dropped only when EVERY requester ca
         zone.cancel();
         other.cancel();
     }
-    drainAsync(cm);
+    drainUntil(cm, [&] { return cm.asyncInFlightCount() == 0; });
     CHECK(cm.isLoaded("async_cancel_shared_a.hasset"));
     CHECK(cm.isLoaded("async_cancel_shared_b.hasset"));
 
@@ -518,7 +532,7 @@ TEST_CASE("loadAssetAsync: asked again after it was dropped → loaded after all
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     HE::CancelToken backIn = HE::CancelToken::create();
     cm.loadAssetAsync(rel, {}, withToken(backIn));   // coalesces onto the same key
-    drainAsync(cm);
+    drainUntil(cm, [&] { return cm.asyncInFlightCount() == 0; });
     CHECK(cm.isLoaded(rel));
     CHECK(first == id);                     // the one callback the key carries
     CHECK_FALSE(cm.isAsyncPending(rel));

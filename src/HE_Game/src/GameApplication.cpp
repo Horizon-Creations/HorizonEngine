@@ -1696,7 +1696,8 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 {
 	// The old scene's (and its zones') loads that have not started are not
 	// wanted any more. Assets the new scene shares with it survive: it asks for
-	// them below under its own token before the next pollAsyncResults looks.
+	// them below under its own token. A worker may drop such a load in between —
+	// then pollAsyncResults sees the new requester and starts it over.
 	m_sceneStreamToken.cancel();
 	cancelZoneStreaming();
 	m_sceneStreamToken = std::move(streamToken);
