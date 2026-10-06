@@ -9,6 +9,7 @@
 #include "TutorialPanel.h"               // Help ▸ Interactive Tutorial → sandbox offer
 #include "DocsPanel.h"                   // Help ▸ Documentation — readable before a project exists
 #include "GitCloneDialog.h"              // Open Project ▸ Clone from GitHub...
+#include "ProjectLaunchOpen.h"           // a .heproj double-clicked in the file manager
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -634,10 +635,17 @@ void render(AppContext& ctx)
 
     std::string cloned;
     const bool clonedReady = GitCloneDialog::takeOpenRequest(cloned);
-    if (ctx.pendingFileReady || clonedReady)
+    // A .heproj double-clicked in the file manager (ProjectLaunchOpen.h) takes
+    // the same load as the dialog's choice. One per frame: a clone that landed
+    // at the same moment goes first and this one waits in its slot.
+    std::string launched;
+    const bool launchedReady = !clonedReady && ProjectLaunchOpen::take(launched);
+    if (ctx.pendingFileReady || clonedReady || launchedReady)
     {
-        std::string chosen = clonedReady ? cloned : ctx.pendingFileResult;
-        if (ctx.pendingFileReady && !clonedReady)
+        std::string chosen = clonedReady ? cloned : launchedReady ? launched : ctx.pendingFileResult;
+        if (launchedReady)
+            HE_LOG_INFO(Editor, "Project Hub: opening %s (handed over by the system)", chosen.c_str());
+        if (ctx.pendingFileReady && !clonedReady && !launchedReady)
         {
             ctx.pendingFileReady = false;
             ctx.pendingFileResult.clear();

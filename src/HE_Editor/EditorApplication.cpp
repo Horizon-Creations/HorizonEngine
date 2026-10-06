@@ -39,6 +39,7 @@
 #include "HcFallbackReport.h"      // which classes an export had to ship interpreted
 #include "EditorRewards.h"         // setSystemMotionQuery — Reduced Motion's "Follow System"
 #include "EditorSystemMotion.h"    // …and the system query it follows
+#include "ProjectLaunchOpen.h"     // a .heproj double-clicked in the file manager
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
@@ -407,6 +408,40 @@ static const char* scriptLogTagFor(ProjectScriptLanguage lang)
 	case ProjectScriptLanguage::HorizonCode:
 	default:                            return "[HC] ";
 	}
+}
+
+// The project this start was asked to open, if any (ProjectLaunchOpen.h).
+// Windows and Linux hand it over as an argument; every argument that is not one
+// is said in the log and otherwise left alone. macOS sends an open event
+// instead, and at launch that event is usually already waiting in SDL's queue
+// by now (the splash pumps it) — so it is PEEKED here, not taken: it still
+// reaches OnEvent on the first frame, finds its project open and does nothing.
+// That way the first project load is the right one, instead of the last
+// session's project followed by a switch.
+static std::string pickLaunchProject(const std::vector<std::string>& args)
+{
+	std::error_code ec;
+	const std::filesystem::path cwd = std::filesystem::current_path(ec);
+	ProjectLaunchOpen::LaunchPick pick = ProjectLaunchOpen::pickFromArguments(args, cwd);
+	for (const auto& [arg, why] : pick.rejected)
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' %s — not opened",
+		            arg.c_str(), ProjectLaunchOpen::describe(why));
+	for (const std::string& p : pick.ignored)
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' not opened — the editor "
+		                    "opens one project at a time", p.c_str());
+	if (!pick.project.empty()) return pick.project;
+
+	SDL_PumpEvents();
+	SDL_Event evs[16];
+	const int n = SDL_PeepEvents(evs, 16, SDL_PEEKEVENT, SDL_EVENT_DROP_FILE, SDL_EVENT_DROP_FILE);
+	for (int i = 0; i < n; ++i)
+	{
+		if (evs[i].drop.windowID != 0 || !evs[i].drop.data) continue;
+		// Unopenable ones are not said here: OnEvent says it when it gets there.
+		const ProjectLaunchOpen::ParsedPath p = ProjectLaunchOpen::parse(evs[i].drop.data, cwd);
+		if (p.ok()) return p.path;
+	}
+	return {};
 }
 
 void EditorApplication::OnInit()
@@ -1896,8 +1931,29 @@ void EditorApplication::OnInit()
 		m_savedRevision = m_undo.revision();
 	});
 
+	// A project double-clicked in the file manager wins over the last one. Loaded
+	// the way the Project Hub loads a chosen file (ProjectHubPanel), because at
+	// this point the Hub is what is open. A failure does NOT fall back to the
+	// last project: the user asked for this one, and the Hub says why it did not
+	// open instead of quietly showing something else.
+	const std::string launchProject = pickLaunchProject(launchArguments());
+	if (!launchProject.empty())
+	{
+		HE_LOG_INFO(Editor, "EditorApplication: opening %s (handed over at launch)",
+		            launchProject.c_str());
+		splashStatus("Opening " + std::filesystem::path(launchProject).stem().string(), 0.75f);
+		if (m_projectManager.loadProject(launchProject))
+		{
+			m_globalState->addKnownProject(launchProject);
+			m_globalState->writeConfig();
+			m_projectLoaded         = true;
+			m_contentRefreshPending = true;
+		}
+		else
+			m_hubOpenError = "Failed to load project file.";
+	}
 	// If a project was previously opened, load it now (triggers the callback above)
-	if (!m_globalState->getLastProjectPath().empty())
+	else if (!m_globalState->getLastProjectPath().empty())
 	{
 		splashStatus("Opening " +
 		             std::filesystem::path(m_globalState->getLastProjectPath())
@@ -11372,6 +11428,32 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			// Only a drop that landed IN the preview is answered here; one that
 			// missed it stays available to whatever the editor grows next.
 			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
+		}
+	}
+
+	// ── A project handed over by the system (ProjectLaunchOpen.h) ────────────
+	// macOS opens a document by event, also in an editor that is already
+	// running, and SDL delivers it as a DROP_FILE with no window (windowID 0).
+	// A .heproj dropped onto the editor window outside the live preview (which
+	// answered above) means the same thing. Only posted here: the Hub or the
+	// editor takes it on the next frame through its own Open, the editor's with
+	// the unsaved-changes prompt. A window drop of any other file stays silent —
+	// it was aimed at the preview or at nothing; an OS open of one is logged.
+	if (event.type == SDL_EVENT_DROP_FILE && event.drop.data)
+	{
+		const bool fromSystem = event.drop.windowID == 0;
+		std::error_code ec;
+		const ProjectLaunchOpen::ParsedPath p =
+			ProjectLaunchOpen::parse(event.drop.data, std::filesystem::current_path(ec));
+		if (fromSystem || p.error != ProjectLaunchOpen::PathError::WrongExtension)
+		{
+			if (!p.ok())
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' %s — not opened",
+				            event.drop.data, ProjectLaunchOpen::describe(p.error));
+			else if (!ProjectLaunchOpen::post(p.path))
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' not opened — another project is "
+				                    "already waiting to open, one at a time", p.path.c_str());
+			return true;
 		}
 	}
 
