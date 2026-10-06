@@ -26,7 +26,7 @@
 //   [6]      heGILocal       t11   ray-traced local-light mask
 //   [7]      heCsm           t12   cascade shadow array (Texture2DArray)
 //   [8]      heLocalShadow   t13   local point/spot atlas (Texture2DArray)
-//   [9]      heLandscapeWeights t14 (landscape domain only; null otherwise)
+//   [9]      heLandscapeWeights t14 landscape weightmap, written per draw
 //   [10]     heSkyEnv        t15   sky cubemap (TextureCube!)
 //   [11]     heAO            t16   screen-space AO
 //   [12]     heGIIrradiance  t17   DDGI irradiance atlas
@@ -34,7 +34,11 @@
 //   [14]     heSSRFwd        t31   forward SSR result
 //   [15]     heGIReflFwd     t32   forward GI-reflection result
 //   [16]     heCloudShadow   t33   cloud-shadow transmittance
-// Slots 9..16 are null views in the template, declared but never sampled
+// [9] has no gate (a Landscape Layer Blend samples it unconditionally): the
+// template holds a white view as the last resort, and every draw block gets
+// the chunk's weightmap — or the 1x1 layer-0 default for anything that is not
+// a landscape chunk — written over it, like D3D11 t14 / Vulkan binding 14.
+// Slots 10..16 are null views in the template, declared but never sampled
 // (fillMatLight leaves their gates at 0) — except [12]/[13]: the renderer writes
 // the live DDGI atlases there once they exist and fillMatLight raises
 // giProbe.y (Thema 120) — and [10]/[11]: the template keeps their null views,
