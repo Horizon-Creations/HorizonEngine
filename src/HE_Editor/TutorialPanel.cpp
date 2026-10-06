@@ -146,6 +146,14 @@ namespace
 		case HE::AssetType::Font:                 return tut::Asset::Font;
 		case HE::AssetType::Prefab:               return tut::Asset::Prefab;
 		case HE::AssetType::AnimationClip:        return tut::Asset::AnimationClip;
+		case HE::AssetType::Theme:                return tut::Asset::Theme;
+		case HE::AssetType::StructType:           return tut::Asset::StructType;
+		case HE::AssetType::EnumType:             return tut::Asset::EnumType;
+		case HE::AssetType::SaveGameTemplate:     return tut::Asset::SaveGameTemplate;
+		case HE::AssetType::BoneMask:             return tut::Asset::BoneMask;
+		case HE::AssetType::BlendSpace:           return tut::Asset::BlendSpace;
+		case HE::AssetType::PropertyAnimClip:     return tut::Asset::PropertyAnimClip;
+		case HE::AssetType::Sequence:             return tut::Asset::Sequence;
 		default:                                  return tut::Asset::Count;
 		}
 	}

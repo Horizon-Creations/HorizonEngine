@@ -146,6 +146,67 @@ TEST_CASE("tutorial: parameterised checks name something that exists")
 	}
 }
 
+// "The assets chapters cover every kind the Content Browser knows" as a test rather
+// than a promise. Each tut::Asset kind is put in exactly one of three buckets:
+//  * authored — the editor can make it (Create Asset, Save as Prefab) or ships one
+//    to open (the Engine root's meshes), so some step must actually WATCH for it;
+//  * imported — only Import brings it in, and the sandbox has none, so a step body
+//    must at least name it;
+//  * language — exists only in a project of one scripting language, which the tour
+//    cannot ask of everyone (see the HorizonCode chapter's comment).
+// A kind added to tut::Asset without being sorted here fails the first CHECK, so
+// "a new asset type nobody walks through" cannot happen quietly.
+TEST_CASE("tutorial: every asset kind is walked through or at least named")
+{
+	const std::set<std::string> authored = {
+		"scene", "prefab", "staticmesh", "material", "materialfunction",
+		"particlesystem", "animatorstatemachine", "bonemask", "blendspace",
+		"propertyanimclip", "sequence", "widget", "theme", "inputaction",
+		"inputmappingcontext", "struct", "enum", "savegametemplate",
+	};
+	// Kind → the words a body must contain to count as naming it.
+	const std::vector<std::pair<std::string, std::string>> imported = {
+		{ "texture", "Texture" }, { "skeletalmesh", "Skeletal Mesh" },
+		{ "audio", "Audio" }, { "font", "Font" }, { "animationclip", "Animation Clip" },
+	};
+	const std::set<std::string> language = { "script", "horizoncodeclass" };
+
+	for (int i = 0; i < static_cast<int>(tut::Asset::Count); ++i)
+	{
+		const std::string name = tut::assetName(static_cast<tut::Asset>(i));
+		CAPTURE(name);
+		int buckets = static_cast<int>(authored.count(name) + language.count(name));
+		for (const auto& [kind, word] : imported) buckets += (kind == name) ? 1 : 0;
+		CHECK(buckets == 1);
+	}
+
+	std::set<std::string> watched;
+	std::string bodies;
+	for (int ci = 0; ci < tut::chapterCount(); ++ci)
+	{
+		const tut::Chapter& c = tut::chapters()[ci];
+		for (int si = 0; si < c.stepCount; ++si)
+		{
+			const tut::Step& s = c.steps[si];
+			if (s.check == tut::Check::AssetOfTypeAdded ||
+			    s.check == tut::Check::TabOfTypeOpened)
+				watched.insert(s.arg);
+			bodies += s.body;
+			bodies += '\n';
+		}
+	}
+	for (const std::string& kind : authored)
+	{
+		CAPTURE(kind);
+		CHECK(watched.count(kind) == 1);
+	}
+	for (const auto& [kind, word] : imported)
+	{
+		CAPTURE(kind);
+		CHECK(bodies.find(word) != std::string::npos);
+	}
+}
+
 // The whole point of the rework: the tour follows the user. A step that advances
 // on a button press alone would be a step the user can click past without ever
 // touching the thing it teaches.
@@ -546,6 +607,15 @@ TEST_CASE("tutorial: component and tab checks match on content, not position")
 	now.addTab(tut::Asset::ParticleSystem);
 	CHECK(tut::satisfied(step(tut::Check::TabOfTypeOpened, "particlesystem"), base, now));
 	CHECK_FALSE(tut::satisfied(step(tut::Check::TabOfTypeOpened, "material"), base, now));
+
+	// The kinds Thema 151 added go through the same two checks; a bone mask tab
+	// is not a blend space tab even though both live in the animation block.
+	now.addTab(tut::Asset::BoneMask);
+	CHECK(tut::satisfied(step(tut::Check::TabOfTypeOpened, "bonemask"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::TabOfTypeOpened, "blendspace"), base, now));
+	now.add(tut::Asset::Prefab);
+	CHECK(tut::satisfied(step(tut::Check::AssetOfTypeAdded, "prefab"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::AssetOfTypeAdded, "savegametemplate"), base, now));
 
 	// TabOpen (the synthetic Level Script tab) wants the tab to APPEAR: one that
 	// was already open when the step began does not count.

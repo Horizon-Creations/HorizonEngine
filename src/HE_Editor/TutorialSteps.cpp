@@ -22,6 +22,8 @@ namespace
 		"animatorstatemachine", "inputaction", "inputmappingcontext",
 		"horizoncodeclass", "scene", "texture", "staticmesh", "skeletalmesh",
 		"script", "audio", "font", "prefab", "animationclip",
+		"theme", "struct", "enum", "savegametemplate", "bonemask", "blendspace",
+		"propertyanimclip", "sequence",
 	};
 }
 
@@ -319,12 +321,15 @@ constexpr Step kContent[] = {
 
 	{ "create-asset",
 	  "Create an asset",
-	  "Right-click in the Content Browser and open Create Asset: scenes, materials, "
-	  "material functions, particle systems, animator state machines, UI widgets, "
-	  "input actions and mapping contexts, textures, meshes, shaders, audio, fonts "
-	  "and your project's scripting assets.\n"
-	  "The list is filtered by the project's scripting language — a Lua project "
-	  "offers Lua scripts, a HorizonCode project offers node classes.",
+	  "Right-click in the Content Browser and open Create Asset. Scenes and UI "
+	  "widgets sit at the top; the rest is grouped by what it belongs to: Gameplay "
+	  "(your logic, plus the animation assets), Input, Rendering (materials and "
+	  "particle systems) and Data (structs, enums, savegame templates, themes).\n"
+	  "Only what the editor can actually author is on that list. Meshes, textures, "
+	  "audio and fonts arrive through Import, which is why the menu ends with a "
+	  "note saying so. The Gameplay group follows the project's scripting "
+	  "language — a Lua project offers Lua scripts, a HorizonCode project offers "
+	  "node classes.",
 	  "Right-click in the Content Browser and create any asset.",
 	  "Content Browser", Check::AssetAdded, "" },
 };
@@ -332,7 +337,17 @@ constexpr Step kContent[] = {
 // ── 6. The asset family ──
 // Every kind of .hasset gets named here, and the ones the Create Asset menu can
 // make are actually made — reading a list of asset types teaches nothing about
-// where they live or what opens them.
+// where they live or what opens them. A kind that belongs to a later chapter is
+// made THERE, next to the thing it feeds: materials and material functions in
+// Materials, particle systems in Particles, state machines, bone masks, blend
+// spaces, property clips and sequences in Animation, widgets and themes in UI,
+// input assets in Gameplay logic. What is left — scenes, prefabs, the data types
+// and the import-only media — is made or explained here.
+//
+// The Create menu has offered no Texture or Static Mesh since the empty stubs it
+// wrote were dropped (they could never hold anything). So those two cards point
+// at the importer and at the Engine root's built-in meshes instead; their ids
+// stay, because a saved position on a vanished id ends the tour.
 constexpr Step kAssetTypes[] = {
 	{ "asset-anatomy",
 	  "What an asset is",
@@ -344,8 +359,10 @@ constexpr Step kAssetTypes[] = {
 	  "things pointing at it; the reference is to the id, and the path is only how "
 	  "you find it.\n"
 	  "Two ways in: Create Asset makes an empty one of a kind the editor can "
-	  "author, Import Asset converts a file from outside. The next steps make one "
-	  "of each authorable kind.",
+	  "author, Import Asset converts a file from outside. This chapter makes the "
+	  "kinds that stand on their own and explains the imported ones; the kinds "
+	  "that feed a material, an animation or a widget are made in those chapters, "
+	  "right where they are used.",
 	  "", "Content Browser", Check::ReadAck, "" },
 
 	{ "asset-scene",
@@ -359,16 +376,30 @@ constexpr Step kAssetTypes[] = {
 	  "Create a Scene asset in the Content Browser.",
 	  "Content Browser", Check::AssetOfTypeAdded, "scene" },
 
+	// Not on the Create menu: a prefab is made FROM something, so it is made where
+	// that something lives.
+	{ "asset-prefab",
+	  "Prefabs",
+	  "A Prefab is an entity with its children and components, saved as an asset "
+	  "so you can place it again — a lamp post, a pickup, an enemy with its "
+	  "weapon. You do not make one from the Create menu but from an entity that "
+	  "already looks right.\n"
+	  "Save as Prefab writes it to Content/Prefabs and links the entity you saved "
+	  "it from to that asset, so it becomes the first instance.",
+	  "Right-click an entity in the World Outliner and choose Save as Prefab.",
+	  "World Outliner", Check::AssetOfTypeAdded, "prefab" },
+
 	{ "asset-texture",
 	  "Textures",
 	  "Texture assets hold the pixels plus how they are meant to be read: colour "
 	  "textures are sRGB, normal and roughness maps are linear, and getting that "
 	  "wrong is the usual cause of a material that looks washed out.\n"
-	  "Import brings in PNG/JPG/TGA/HDR; Create makes an empty one you point a "
-	  "material's Texture node at. HDR images are what an image-based sky lighting "
-	  "setup wants.",
-	  "Create a Texture asset.",
-	  "Content Browser", Check::AssetOfTypeAdded, "texture" },
+	  "The editor does not paint pixels, so there is no empty texture to create: "
+	  "Import brings in PNG/JPG/TGA/HDR, and double-clicking the result opens the "
+	  "texture viewer. A material's Texture node points at it, and HDR images are "
+	  "what an image-based sky lighting setup wants.\n"
+	  "The sandbox ships without textures, so this card is reading only.",
+	  "", "Content Browser", Check::ReadAck, "" },
 
 	{ "asset-mesh",
 	  "Static and skeletal meshes",
@@ -379,22 +410,75 @@ constexpr Step kAssetTypes[] = {
 	  "A Skeletal Mesh is the same thing plus a rig, and carries its Animation "
 	  "Clips. Both usually arrive through Import from a glTF/GLB — whether the file "
 	  "has a skin decides which one you get. FBX, OBJ and COLLADA always give a "
-	  "Static Mesh.",
-	  "Create a Static Mesh asset and double-click it to open its editor.",
+	  "Static Mesh.\n"
+	  "You do not need a file of your own to look at one: the Engine root ships "
+	  "the built-in primitives (cube, sphere, plane, cylinder and friends) as "
+	  "ordinary Static Mesh assets.",
+	  "Switch the Content Browser to the Engine root, open Meshes and double-click "
+	  "Cube.",
 	  "Content Browser", Check::TabOfTypeOpened, "staticmesh" },
 
+	{ "asset-audio",
+	  "Audio",
+	  "Sound arrives the same way: Import turns a WAV file into an Audio asset, "
+	  "and double-clicking it opens a tab where you can audition it. A raw .wav "
+	  "dropped into the project opens there too, so you can listen before you "
+	  "decide to import it.\n"
+	  "Nothing plays on its own. An Audio Source component on an entity plays an "
+	  "Audio asset; switch on Spatial and it is heard from where the entity stands, "
+	  "quieter with distance. The Audio Listener component is the ears, normally "
+	  "on the camera or the player.",
+	  "Add an Audio Source component to an entity.",
+	  "Details", Check::ComponentAdded, "audiosource" },
+
 	{ "asset-imported",
-	  "The import-only kinds",
-	  "Four families exist that the editor does not author, only convert:\n"
-	  "Audio — WAV, played through an Audio Source component.\n"
+	  "The other imported kinds",
+	  "Three more families exist that the editor does not author, only convert or "
+	  "receive:\n"
 	  "Font — TTF, used by UI widget text and the in-game UI.\n"
 	  "Animation Clip — comes along with a rigged glTF; states in an Animator "
-	  "State Machine reference these.\n"
-	  "Prefab — an entity subtree saved for reuse, made by saving a selection out "
-	  "of the World Outliner rather than from the Create menu.\n"
-	  "Shader assets sit next to those for hand-written shader code, for the cases "
-	  "the material graph cannot express.",
+	  "State Machine and the points of a Blend Space reference these.\n"
+	  "Shader — hand-written shader code, for the cases the material graph cannot "
+	  "express.\n"
+	  "Like textures and meshes, they show up in the Content Browser by their icon "
+	  "once imported, and the browser's type filter lists every kind in the "
+	  "project, so you can always ask it for \"all fonts\".",
 	  "", "Content Browser", Check::ReadAck, "" },
+
+	// ── The Data group of the Create menu ──
+	// Language-neutral on purpose: HorizonCode graphs, Lua/Python constants and the
+	// C++ codegen all read the same type definitions, so these steps work in a
+	// project of any scripting language.
+	{ "asset-struct",
+	  "Structs",
+	  "A Struct asset defines a type of your own: named, typed fields with default "
+	  "values — a weapon's damage, range and ammo, an item's name and price. Once "
+	  "saved it shows up in the editor's type dropdowns, so a graph variable or a "
+	  "savegame field can be of that type.\n"
+	  "It is data, not code: the same definition is what the C++ export generates "
+	  "a real struct from.",
+	  "Create Asset - Data - Struct, then double-click it to open its editor.",
+	  "Content Browser", Check::TabOfTypeOpened, "struct" },
+
+	{ "asset-enum",
+	  "Enums",
+	  "An Enum asset is a named list of choices — Idle, Patrol, Chase — stored as "
+	  "numbers but always shown by name. Anywhere a value of that type is edited, "
+	  "the editor offers a dropdown instead of a number field, so a typo cannot "
+	  "produce a fourth state nobody handles.",
+	  "Create Asset - Data - Enum, then double-click it to open it.",
+	  "Content Browser", Check::TabOfTypeOpened, "enum" },
+
+	{ "asset-savegame",
+	  "Savegame templates",
+	  "A SaveGame Template is the shape of a save file: which fields a save "
+	  "holds, their types (structs and enums included) and their defaults. "
+	  "Gameplay writes and reads saves through it, whatever the project's "
+	  "scripting language.\n"
+	  "Keeping the schema an asset rather than ad-hoc code is what lets the editor "
+	  "show you what a save contains.",
+	  "Create Asset - Data - SaveGame Template and double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "savegametemplate" },
 };
 
 // ── 7. Materials ──
@@ -566,6 +650,53 @@ constexpr Step kAnimation[] = {
 	  "runtime state, so one machine can drive a whole crowd.",
 	  "Create an Animator State Machine asset and double-click it to open it.",
 	  "Content Browser", Check::TabOfTypeOpened, "animatorstatemachine" },
+
+	// The rest of Create Asset - Gameplay's animation block, in the order the menu
+	// lists it. Each is a standalone asset with its own tab, and none needs a rig
+	// to be created or opened, so each can be observed in the sandbox.
+	{ "bone-mask",
+	  "Bone masks",
+	  "A Bone Mask says which joints an animation layer may touch, and how "
+	  "strongly — a reload that plays on the upper body while the legs keep "
+	  "running. The Animation Layers component points each layer at one.\n"
+	  "A mask stores joint NAMES, not a skeleton, so one mask fits every rig that "
+	  "names its joints the same way. The tab asks for a reference mesh only to "
+	  "draw the tree you tick joints in.",
+	  "Create Asset - Gameplay - Bone Mask, then double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "bonemask" },
+
+	{ "blend-space",
+	  "Blend spaces",
+	  "A Blend Space places several clips in a one- or two-dimensional parameter "
+	  "space — idle, walk and run along speed, or eight directions of strafing — "
+	  "and mixes them by where the parameters stand. A state in a state machine "
+	  "can play one instead of a single clip.\n"
+	  "Its tab is a diagram, not a graph: drag the points, then drag the cursor to "
+	  "see the mix.",
+	  "Create Asset - Gameplay - Blend Space and double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "blendspace" },
+
+	{ "property-clip",
+	  "Property animation",
+	  "Not everything that moves has a skeleton. A Property Animation Clip "
+	  "animates component properties over time — a moving platform, a door, a "
+	  "light that fades — with one row per property and keys on a shared time "
+	  "axis.\n"
+	  "It opens in the Sequencer tab, and a Property Animator component on the "
+	  "entity plays it.",
+	  "Create Asset - Gameplay - Property Animation Clip and double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "propertyanimclip" },
+
+	{ "sequence",
+	  "Cinematic sequences",
+	  "A Sequence is a cutscene: several actors on one clock, with camera cuts, "
+	  "skeletal clips, events and sound. It opens in the Cinematic tab, which "
+	  "previews the shot through the sequence's own cameras without writing any "
+	  "of it into your level.\n"
+	  "A Sequence Player component plays it while the game runs and receives the "
+	  "events that are addressed to no particular actor.",
+	  "Create Asset - Gameplay - Sequence and double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "sequence" },
 };
 
 // ── 12. Navigation ──
@@ -602,6 +733,17 @@ constexpr Step kUI[] = {
 	  "name, which is how a HUD stays decoupled from the gameplay that feeds it.\n"
 	  "Switch your open widget tab to Graph and have a look before moving on.",
 	  "", "", Check::ReadAck, "" },
+
+	{ "theme",
+	  "Themes",
+	  "A Theme is the look shared by every widget: colour roles, size steps, text "
+	  "sizes and shadows, each with a light and a dark value side by side, so the "
+	  "mode you are not looking at cannot be forgotten.\n"
+	  "Widgets refer to roles (Accent, Surface) rather than to colours, so "
+	  "changing the theme restyles the whole interface at once. It sits under "
+	  "Create Asset - Data because it is a set of values, not a layout.",
+	  "Create Asset - Data - Theme, then double-click it to open the theme editor.",
+	  "Content Browser", Check::TabOfTypeOpened, "theme" },
 };
 
 // ── HorizonCode ──

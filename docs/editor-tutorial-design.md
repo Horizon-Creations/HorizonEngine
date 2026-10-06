@@ -56,9 +56,31 @@ Stoppen, `EntityAdded`/`AssetAdded` nur bei echtem Zuwachs.
 Position auf eine gültige ab, sodass kein Aufrufer vor dem Indizieren prüfen muss. Ein
 Cursor mit `chapter == chapterCount()` ist die eine kanonische „fertig"-Position.
 
-**18 Kapitel, 41 Schritte:** Orientierung · Navigation · Entities · Komponenten · Assets ·
-Materialien · Sky/Wetter/Licht · Landschaft · Physik · Partikel · Animation · Navigation ·
-UI · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler · Packaging · Abschluss.
+**20 Kapitel, 63 Schritte:** Orientierung · Navigation · Entities · Komponenten · Assets ·
+Asset-Typen · Materialien · Sky/Wetter/Licht · Landschaft · Physik · Partikel · Animation ·
+Navigation · UI · HorizonCode · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler ·
+Packaging · Abschluss.
+
+**Jeder Asset-Typ des Content Browsers kommt vor (Thema 151, Schritt 3).** Was der
+Editor anlegen kann, wird auch angelegt und beobachtet (`AssetOfTypeAdded` bzw.
+`TabOfTypeOpened`), und zwar dort, wo es gebraucht wird:
+
+| Kapitel | Asset-Typen mit eigenem Schritt |
+|---|---|
+| Asset-Typen | Scene, Prefab (Outliner ▸ Save as Prefab), Static Mesh (Engine-Wurzel ▸ Cube öffnen), Audio (Audio Source), Struct, Enum, SaveGame Template |
+| Materialien | Material, Material Function |
+| Partikel | Particle System |
+| Animation | Animator State Machine, Bone Mask, Blend Space, Property Animation Clip, Sequence |
+| UI | UI Widget, Theme |
+| Gameplay-Logik | Input Action, Input Mapping Context |
+
+Texture, Skeletal Mesh, Font, Animation Clip und Shader kommen nur per Import herein;
+die Sandbox enthält keine, deshalb werden sie auf Lesekarten erklärt. Script und
+HorizonCode Class gibt es nur in einem Projekt der jeweiligen Sprache und bleiben
+beim Sprach-Kapitel. Das Create-Menü bietet seit 8a7ffa29 (12.08.) weder Texture
+noch Static Mesh an. Die Schritte `asset-texture` (jetzt Lesekarte) und `asset-mesh`
+(jetzt den eingebauten Würfel öffnen) waren seitdem nicht abzuschließen. Ihre IDs
+bleiben, weil `findStep` eine unbekannte gespeicherte ID als „fertig“ liest.
 
 ### 2. `TutorialPanel` (`src/HE_Editor/TutorialPanel.{h,cpp}`)
 
@@ -151,11 +173,16 @@ werden kann.
 
 ## Was geprüft ist
 
-`tests/test_tutorial.cpp` (15 Testfälle):
+`tests/test_tutorial.cpp` (21 Testfälle):
 
 - Curriculum-Integrität: keine doppelten Schritt-/Kapitel-IDs, kein leerer Text, jeder
-  `ComponentPresent`-Schritt nennt eine existierende Komponente, jeder `TabOpen` ein
+  `ComponentAdded`-Schritt nennt eine existierende Komponente, jeder `TabOpen` ein
   nicht-leeres Muster.
+- Asset-Abdeckung („every asset kind is walked through or at least named“): Jeder Wert
+  von `tut::Asset` steckt in genau einem Topf. „Angelegt“ braucht einen beobachtenden
+  Schritt, „importiert“ muss in einem Kartentext vorkommen, „sprachgebunden“ ist
+  ausgenommen. Ein neuer Typ ohne Einordnung lässt den Test scheitern. Gegenprobe: Der
+  Theme-Schritt auf `widget` umgebogen ergibt `kind := theme`, rot.
 - Cursor-Arithmetik: `advance` besucht jeden Schritt genau einmal und terminiert,
   `retreat` ist die Umkehrung, `nextChapter` landet immer auf Schritt 0, `clamp` repariert
   Müll, `flatIndex`/`fromFlat` sind invers.

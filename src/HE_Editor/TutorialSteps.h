@@ -48,11 +48,15 @@ namespace HE::tut
 	// ── Asset kinds a step can ask the user to create ────────────────────────
 	// A subset of HE::AssetType — only what the tour asks for. Kept as its own
 	// enum for the same reason as Comp: this file must not depend on engine types.
+	// TutorialPanel.cpp's tutAsset() maps the engine type onto this one; a kind
+	// added here and not there is never counted, and its step never fires.
 	enum class Asset : uint8_t
 	{
 		Material, MaterialFunction, ParticleSystem, Widget, AnimatorStateMachine,
 		InputAction, InputMappingContext, HorizonCodeClass, Scene, Texture,
 		StaticMesh, SkeletalMesh, Script, Audio, Font, Prefab, AnimationClip,
+		Theme, StructType, EnumType, SaveGameTemplate, BoneMask, BlendSpace,
+		PropertyAnimClip, Sequence,
 		Count
 	};
 	const char* assetName(Asset a);              // "inputaction", "material", …
