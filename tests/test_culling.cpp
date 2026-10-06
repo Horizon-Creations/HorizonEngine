@@ -2541,6 +2541,27 @@ TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky c
 		CHECK(static_cast<size_t>(skyM.position(0)) > copy);
 		CHECK(static_cast<size_t>(aoM.position(0)) > copy);
 	}
+
+	SUBCASE("D3D12 writes the draw's landscape weightmap into heLandscapeWeights (t14)")
+	{
+		// Thema 155: block slot 9 stayed the template's null view, so a painted
+		// terrain showed layer 0 only. The weightmap is the DRAW's, chosen like D3D11 / Vulkan /
+		// GL — the chunk's own, else the layer-0 default — and written AFTER the
+		// template copy, which would overwrite it otherwise.
+		const std::string d12 = stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp"));
+		const size_t own  = d12.find("heWeights = p.resolveGraphTexture(cl, dc.weightmapTextureId, {}, m_contentManager);");
+		const size_t def  = d12.find("heWeights = p.resolveGraphTexture(cl, HE::kDefaultLayer0WeightTextureId, {}, m_contentManager);");
+		const size_t copy = d12.find("CopyDescriptorsSimple(D3D12RendererImpl::k_matSrvPerDraw, p.matSrvCpu(blk)");
+		const std::regex wr(R"(if \(heWeights\)\s*p\.srvForTexture\(heWeights, p\.matSrvCpu\(blk \+ HE::d3d12mat::kSlotLandscapeWeights\)\);)");
+		std::smatch wrM;
+		REQUIRE(own  != std::string::npos);
+		REQUIRE(def  != std::string::npos);
+		REQUIRE(copy != std::string::npos);
+		REQUIRE(std::regex_search(d12, wrM, wr));
+		CHECK(own < def);
+		CHECK(def < copy);
+		CHECK(static_cast<size_t>(wrM.position(0)) > copy);
+	}
 }
 
 TEST_CASE("Clustered lighting: heLitP's forward twin matches the deferred resolve's (Thema 117)")

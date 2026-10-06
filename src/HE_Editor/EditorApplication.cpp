@@ -6413,7 +6413,9 @@ void EditorApplication::dumpFrameHeadless()
 	// other branch: replaceTexture + a DEFERRED InvalidateTexture. This exercises
 	// that second branch, which is the only "runs once" asymmetry in the
 	// weightmap path. Works with or without HE_DUMP_LAYEREDIT.
-	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && m_editorWorld)
+	// HE_DUMP_LAYERREPAINT=mid paints halfway through the settle frames instead
+	// (below), once the backend has already resolved and cached the weightmap.
+	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && std::string(rp) != "mid" && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
 		for (auto [te, tc] : reg.view<TerrainComponent>().each())
@@ -7310,8 +7312,23 @@ void EditorApplication::dumpFrameHeadless()
 	// layer stay quiet.
 	const char* giRefit = std::getenv("HE_DUMP_GIREFIT");
 	const bool  giRefitWitness = giRefit && *giRefit && s_layerMatId != HE::UUID{};
+	// HE_DUMP_LAYERREPAINT=mid: the brush-stroke path on a weightmap the backend
+	// has ALREADY drawn with — replaceTexture + InvalidateTexture must make it
+	// drop its cached view and resolve the new texels. A green disc appears at
+	// (30, -25) in the capture; a stale cache keeps the red field there.
+	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
+	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (repaintMidWitness && i == settleFrames / 2)
+		{
+			for (auto [te, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+				TerrainPaint::paint(tc, 30.0f, -25.0f, /*layer*/1, 14.0f, 5.0f, 1.0f);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_LAYERREPAINT=mid painted before settle frame "
+				 + std::to_string(i)).c_str());
+		}
 		if (giRefitWitness && i == settleFrames / 2)
 		{
 			auto& reg  = m_editorWorld->registry();
