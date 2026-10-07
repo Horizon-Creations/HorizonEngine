@@ -1230,6 +1230,7 @@ Bildvergleich gegen GL (mean|Δ| / Anteil > 8):
   wie D3D11 mit FXC (ps_5_0), der Unterschied entsteht also im Treiber (z. B.
   FMA-Kontraktion). Entscheidung der Queen (Anfrage 21): Das Auto-Material bekommt einen
   robusten Hash, bestehende Noise-Materialien bleiben unverändert. Das ist Schritt 8.
+  **Bewiesen und behoben in §13.**
 
 ### 12.3 Beleuchtet
 
@@ -1289,3 +1290,102 @@ GL **nicht erfüllt**. Die Ursachen sind benannt:
 Erfüllt sind: Fels am Hang, Schnee in der Höhe, Pfützen nur auf flachem Boden, Erdgürtel
 am Fuß (Orakel 15/15) und gebrochene Wiederholung, jeweils auf allen vier
 Windows-Backends.
+
+## 13. Schritt 8: Integer-Hash für das Auto-Material
+
+Stand: Zweig bei `64aeabb5` + `bec72dba`. NN-WS03 (RTX 4070), Release `C:\hw158`, frischer
+Deploy samt `EngineContent`, gleiche Kamera und Skripte wie §12. Aufnahmen in
+`C:\hw158\shots8` (lokal).
+
+### 13.1 Ursache und Behebung
+
+`heHash21` multipliziert den Gitterindex vor dem `fract()` mit 123,34 bzw. 456,21. Das
+Pfützenfeld liest `(xz + (173,1; 419,7)) / Puddle Size`. In der vierten Oktave (× 8)
+liegt der Index damit bei rund 560, das Produkt bei rund 2,5·10⁵. Bei dieser Größe
+bleiben einem float nur noch etwa 6 Nachkommabits. Jede FMA-Kontraktion oder
+Umordnung im Treiber ergibt dann pro Zelle einen anderen Wert. Das waren die blockigen,
+am Rauschgitter ausgerichteten Umrisse auf D3D12/Vulkan aus §12.2. Die Vermutung von
+dort ist damit **bewiesen**: Mit dem Integer-Hash sind sie weg (13.3).
+
+- **Fbm-Knoten, `p[0]` = Hash-Variante.** `0` ist die Vorgabe und schreibt weiter
+  `heFbm`/`heHash21` mit demselben Helfer-Block. `1` schreibt `heFbmI`: pcg2d
+  (Jarzynski & Olano 2020) auf der ganzzahligen Zelle, float → int → uint, exakte
+  24-Bit-Umwandlung. Das ist dasselbe Muster wie `heBombHash`, das seit Schritt 4 auf
+  allen fünf Backends läuft. Interpolation und Oktaven sind unverändert.
+- **Nur das Auto-Material setzt `p[0] = 1`**, auf beiden Fbm-Feldern (Erdflecken,
+  Pfützenbecken). `M_AutoLandscape.hasset` ist mit `landscape_tex_gen --material` neu
+  erzeugt (Drift-Test grün).
+- Das Flag hat **keinen Editor-Regler** (Fbm bleibt `paramCount 0`, damit sich kein
+  bestehender Knoten und keine MCP-Ausgabe ändert). Es steht im JSON (`"p"` wird immer
+  ganz geschrieben) und überlebt Speichern und Laden (Test).
+- Die Kosten-Anzeige im Material-Editor zählt `heFbmI(` mit.
+
+### 13.2 Bestehende Materialien unverändert
+
+- **Probe aus Schritt 7** (Hash von glsl, glslGBuffer, vertexBody, Texturen, Parameter),
+  alte gegen neue `HorizonCore.dll`: alle **76 Knotentypen** (`788e6c1397262ed2`) und die
+  drei Ketten 64/256/1024 sind **bytegleich**. Neu sind nur die sechs Auto-Ansichten.
+- **Content:** Im ganzen Repo (`EditorDeps`, `src`, `tests`, `scripts`, `docs`) hat nur
+  `M_AutoLandscape.hasset` Fbm-Knoten. Vorher stand dort `p[0] = 0`. Ein anderes Asset
+  mit gesetztem `p[0]` gibt es nicht. Über die Oberfläche und MCP lässt sich `p[0]` beim
+  Fbm nicht setzen (`paramCount 0`).
+- **Test** `Fbm p[0] = 1 hashes on integers; the default keeps the float hash`: Vorgabe =
+  `heHash21`/`heFbm(`, ohne `heFbmI`. Flag = `heFbmI(`, ohne `heHash21`. JSON-Rundreise
+  bytegleich. Alle fünf Auto-Ansichten nur mit `heFbmI`.
+  `test_material_graph` + `test_gltf_material_import`: **119/119**. Dazu gehören die
+  FXC-, SPIR-V- und GL-Link-Sweeps mit dem Fall „Auto landscape material“.
+
+### 13.3 Messung: D3D12/Vulkan gegen D3D11
+
+Der neue Hash ergibt eine neue Verteilung von Erde und Pfützen, deshalb ist auch die
+D3D11-Referenz neu aufgenommen (alle vier Backends, 30 Aufnahmen, 0 Abstürze, 0
+Vulkan-Validation-Meldungen). Vergleich jeweils gegen **D3D11** (gleicher Schwarzpegel),
+mean|Δ| / Anteil > 8:
+
+| Ansicht | D3D12 | Vulkan | vorher D3D12 (§12.2, Ebene) |
+|---|---|---|---|
+| `masks` | 0,000 / 0 % | 0,000 / 0 % (Fuß 0,004) | |
+| `ground` | 0,000 / 0 % | 0,000 / 0 % | **22,6 / 41 %** |
+| `normal` | 0,000 / 0 % | 0,000 / 0 % (Hang 0,005) | |
+| `surface` | 0,000 / 0 % | 0,000 / 0 % | |
+| `1` / `nobomb` | 0,000 / 0 % | ≤ 0,002 / 0 % | |
+| `1_s01` / `nobomb_s01` | 0,000 / 0 % | ≤ 0,005 / 0 % | |
+
+**D3D12 und Vulkan sind jetzt bildgleich zu D3D11**, unlit wie beleuchtet. Die Toleranz
+aus §7.5 (≤ 1,0 / ≤ 0,5 %) ist zwischen den drei Backends erfüllt, mit großem Abstand.
+
+- **Masken-Orakel:** 8/8 Aufnahmen (`masks`, `ground` × GL/D3D11/D3D12/Vulkan) erfüllen
+  alle Erwartungen. Ebene: Wasser 12,8 %, Erde 20,8 %, nass 22,9 % (vorher 18,3 / 33,2 /
+  30,6 %, das andere Rauschen). Fuß Erde 93,9 %, Hang Fels 100 %, Plateau Schnee 100 %.
+- **Gegen OpenGL, unlit:** nur noch der Schwarzpegel. `masks` 2,80 / 0 %, `ground`
+  3,20 / 0 %, `surface` 1,33 / 0 %, `normal` 0,001 / 0 %. In allen Regionen ist der Anteil
+  > 8 gleich 0 %. Die Werte liegen also im Rahmen der konstanten 4/255.
+- **Gegen OpenGL, beleuchtet (`1_s01`):** 4,75 / 20,9 %, also wie D3D11 in Schritt 7
+  (4,81 / 22,6 %). Hang 26,0 (Schattenseite, kein Himmels-IBL, §12.3). Ebene 3,95: D3D11
+  ist dort gleichmäßig dunkler, Gras/Erde um 3,4, nasser Boden um 6,0 (GL 66,1 gegen
+  60,1). Das passt zum fehlenden Himmels-IBL (Umgebungslicht, und Spiegelung auf dem
+  glatten Wasser), ist hier aber **nicht bewiesen**. Es liegt nicht am Hash: D3D11, D3D12
+  und Vulkan sind darin bitgleich, und D3D11 zeigte es schon vorher.
+- **Schatten-Orakel:** D3D11/D3D12/Vulkan 0,30, Schatten da. GL deferred 0,37 (= Metal,
+  §11.3), GL forward 1,00, Schatten fehlt (§11.3). Gleich wie in §12.3.
+- **Wiederholung** (`repeat`, `_s01`): Mit Bombing beträgt die Oszillation auf allen vier
+  Backends 0,12 / 0,08, ohne Bombing 1,68–1,70 / 1,51–1,53 mit Minima alle 6 px. Die
+  Wiederholung ist überall gleich gebrochen.
+
+### 13.4 Metal
+
+Auf NN-WS03 gibt es kein Metal. Das Bild „Metal = GL“ aus §11.2 galt für den **alten**
+Hash. Für `heFbmI` ist Metal nur durch den Cross-Compile in der macOS-CI belegt. Das
+Hash-Muster (uint-Arithmetik, `>>`, float(uint)) ist dasselbe wie bei `heBombHash`, das
+in §11.2 auf Metal gerendert wurde (Modus `1` mit Bombing, gegen GL 0,001 / 0 %). Ein neuer Metal-Lauf
+(`cap158auto.sh … masks ground`, dann `ana158auto.py diff` gegen GL) steht noch aus.
+
+### 13.5 Was offen bleibt
+
+- Metal-Aufnahme mit `heFbmI` (13.4), auf einem Mac.
+- Außerhalb dieses Themas, unverändert aus §12.5: Himmels-IBL für Graph-Materialien auf
+  D3D11/D3D12/Vulkan (Thema 150, erklärt den beleuchteten Rest gegen GL), Schwarzpegel
+  4/255, `builtin`-Abweichung, main-Merge.
+- Bestehende Noise-Materialien behalten bewusst `heHash21`. Wer in Weltkoordinaten oder
+  mit großem Scale rauscht, sollte beim Fbm `p[0] = 1` setzen. Ein Editor-Regler dafür
+  wäre ein eigener kleiner Schritt (paramCount 1 ändert jeden Fbm-Knoten in UI und MCP).

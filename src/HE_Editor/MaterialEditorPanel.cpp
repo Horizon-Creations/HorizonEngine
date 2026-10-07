@@ -162,7 +162,7 @@ std::string estimateComplexity(const std::string& glsl)
 	};
 	const size_t ops   = count(body, ";");
 	const size_t tex   = count(body, "texture(");
-	const size_t fbm   = count(body, "heFbm(") + count(body, "heFbm3(");
+	const size_t fbm   = count(body, "heFbm(") + count(body, "heFbm3(") + count(body, "heFbmI(");
 	const size_t noise = count(body, "heValueNoise(") + count(body, "heValueNoise3(");
 	const size_t alu   = ops + tex * 8 + fbm * 24 + noise * 6;
 	char buf[96];
