@@ -178,13 +178,16 @@ enum class MatNodeType : uint8_t
     //   p[1] = Blend sharpness (exponent of the hex weights, ≤ 0 → 7)
     //   p[2] = Seed (rounded to an integer)
     //   p[3] = Strength (normal nodes only, like Normal Map's p[0])
-    // The grid lives in p[0..2] on all four nodes so the Albedo / Normal / Mask
-    // reads of one layer share it: equal params + equal UV = the SAME hexes,
-    // emitted once (codegen memoizes the grid) — the normals stay on the albedo.
-    TextureBombSample,          // (UV) → RGB + A
-    NormalMapBombSample,        // (UV) → world-space N
-    TextureArrayBombSample,     // (UV, Slice) → RGB + A
-    NormalMapArrayBombSample,   // (UV, Slice) → world-space N
+    // The Cell pin (last input) is the hex spacing in texture repeats
+    // (kMatBombDefaultCell unwired), a pin so a parameter can tune it per layer.
+    // The grid lives in p[0..2] + UV + Cell on all four nodes, so the Albedo /
+    // Normal / Mask reads of one layer share it: equal params + equal sources =
+    // the SAME hexes, emitted once (codegen memoizes the grid) — the normals stay
+    // on the albedo.
+    TextureBombSample,          // (UV, Cell) → RGB + A
+    NormalMapBombSample,        // (UV, Cell) → world-space N
+    TextureArrayBombSample,     // (UV, Slice, Cell) → RGB + A
+    NormalMapArrayBombSample,   // (UV, Slice, Cell) → world-space N
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot
@@ -206,6 +209,10 @@ inline bool matNodeSamplesTexture(MatNodeType t)
 // Blend sharpness of a fresh bombing node (and of one saved with p[1] ≤ 0): the
 // exponent the hex-tiling paper uses. Higher = narrower seams between hexes.
 inline constexpr float kMatBombDefaultSharpness = 7.0f;
+// Hex spacing of an unwired Cell pin, in texture repeats: two hexes per repeat
+// keep a texture's larger features whole. The paper's fixed scale is 0.2887;
+// smaller cells mean more variation and more seams.
+inline constexpr float kMatBombDefaultCell = 0.5f;
 
 // The bombing nodes (any of the four v14 types).
 inline bool matNodeIsBombing(MatNodeType t)

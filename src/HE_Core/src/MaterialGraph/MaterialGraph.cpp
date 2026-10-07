@@ -231,18 +231,19 @@ const std::vector<MatNodeDesc>& registry()
           { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength
 
-        // ── v14: texture bombing — p = Rotation, Sharpness, Seed (+ Strength) ──
+        // ── v14: texture bombing — p = Rotation, Sharpness, Seed (+ Strength);
+        // Cell = hex spacing in texture repeats (kMatBombDefaultCell unwired) ──
         { MatNodeType::TextureBombSample, "Texture Bombing", "Texture",
-          { { "UV", F::Vec2, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 3 },
         { MatNodeType::NormalMapBombSample, "Normal Map Bombing", "Texture",
-          { { "UV", F::Vec2, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
           { { "N", F::Vec3, 0 } }, 4 },
         { MatNodeType::TextureArrayBombSample, "Texture Array Bombing", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 3 },
         { MatNodeType::NormalMapArrayBombSample, "Normal Map Array Bombing", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
           { { "N", F::Vec3, 0 } }, 4 },
     };
     return kReg;
@@ -629,7 +630,7 @@ std::string arrayCoord(const std::string& sampler, const std::string& uv, const 
 // <g>; the declaration is appended to `decl` only when this grid is new in the
 // scope, so call it AFTER the node's inputs are emitted (an input may itself be a
 // bombing node that declares the grid first).
-std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv,
+std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv, const std::string& cell,
                      const MatGraphNode& n, std::string& decl)
 {
     const float rot   = std::clamp(n.p[0], 0.0f, 1.0f);
@@ -637,11 +638,11 @@ std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv,
     const long  seedI = std::lround(std::clamp(n.p[2], -2.0e9f, 2.0e9f));
     const std::string seed = std::to_string(static_cast<uint32_t>(seedI)) + "u";
     c.usesBombGrid = true;
-    const std::string key = sc.key + "|" + uv + "|" + fmtF(rot) + "|" + fmtF(sharp) + "|" + seed;
+    const std::string key = sc.key + "|" + uv + "|" + cell + "|" + fmtF(rot) + "|" + fmtF(sharp) + "|" + seed;
     if (auto it = c.bombGrids.find(key); it != c.bombGrids.end()) return it->second;
     const std::string g = "n" + std::to_string(++c.varCounter) + "_g";
     decl += "vec2 " + g + "t0, " + g + "t1, " + g + "t2; mat2 " + g + "r0, " + g + "r1, " + g
-          + "r2; vec3 " + g + "w; heBombGrid(" + uv + ", " + fmtF(rot) + ", " + fmtF(sharp) + ", "
+          + "r2; vec3 " + g + "w; heBombGrid(" + uv + ", " + cell + ", " + fmtF(rot) + ", " + fmtF(sharp) + ", "
           + seed + ", " + g + "t0, " + g + "t1, " + g + "t2, " + g + "r0, " + g + "r1, " + g + "r2, "
           + g + "w); vec2 " + g + "dx = dFdx(" + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ";
     c.bombGrids.emplace(key, g);
@@ -752,7 +753,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             if (isArr) // the layer, rounded + clamped as in arrayCoord, once for all three taps
                 decl = "float " + v + "_l = clamp(floor(" + inputExpr(c, sc, n, 1, F::Float)
                      + " + 0.5), 0.0, float(textureSize(" + sampler + ", 0).z - 1)); ";
-            const std::string g = bombGrid(c, sc, uv, n, decl);
+            const std::string cell = inputExpr(c, sc, n, wantArray ? 2 : 1, F::Float);
+            const std::string g = bombGrid(c, sc, uv, cell, n, decl);
             // One hex's read: its bombed uv, the unbombed gradients turned with it.
             auto tap = [&](int k) {
                 const std::string i = std::to_string(k);
@@ -1536,6 +1538,8 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         // offset is a different texel, which a backend image comparison would see.
         // The cell index goes float → int → uint (a negative float straight to
         // uint is undefined), and the 24-bit → float conversions are exact.
+        // `cell` = distance between neighbouring hex centres in uv units (texture
+        // repeats); the paper's fixed uv * 2√3 is cell = 0.2887.
         src +=
             "uvec3 heBombHash(ivec2 cell, uint seed) {\n"
             "    uvec3 v = uvec3(uvec2(cell), seed) * 1664525u + 1013904223u;\n"
@@ -1543,24 +1547,25 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    v ^= v >> 16u;\n"
             "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
             "    return v; }\n"
-            "void heBombTap(vec2 uv, ivec2 cell, float rot, uint seed, out vec2 t, out mat2 r) {\n"
+            "void heBombTap(vec2 uv, float size, ivec2 cell, float rot, uint seed, out vec2 t, out mat2 r) {\n"
             "    uvec3 h = heBombHash(cell, seed);\n"
             "    vec2 off = vec2(h.xy >> 8u) * (1.0 / 16777216.0);\n"
             "    float a = (float(h.z >> 8u) * (2.0 / 16777216.0) - 1.0) * 3.14159265 * rot;\n"
             "    float cs = cos(a); float sn = sin(a);\n"
             "    r = mat2(cs, sn, -sn, cs);\n"
-            "    vec2 cen = vec2(float(cell.x) + 0.5 * float(cell.y), 0.8660254 * float(cell.y)) * 0.28867513;\n"
+            "    vec2 cen = vec2(float(cell.x) + 0.5 * float(cell.y), 0.8660254 * float(cell.y)) * size;\n"
             "    t = r * (uv - cen) + cen + off; }\n"
-            "void heBombGrid(vec2 uv, float rot, float sharp, uint seed, out vec2 t0, out vec2 t1,\n"
-            "                out vec2 t2, out mat2 r0, out mat2 r1, out mat2 r2, out vec3 w) {\n"
-            "    vec2 st = uv * 3.46410162;\n"
+            "void heBombGrid(vec2 uv, float cell, float rot, float sharp, uint seed, out vec2 t0,\n"
+            "                out vec2 t1, out vec2 t2, out mat2 r0, out mat2 r1, out mat2 r2, out vec3 w) {\n"
+            "    float size = max(cell, 0.001);\n"
+            "    vec2 st = uv / size;\n"
             "    vec2 sk = vec2(st.x - 0.57735027 * st.y, 1.15470054 * st.y);\n"
             "    vec2 bf = floor(sk); vec2 f = sk - bf; float fz = 1.0 - f.x - f.y;\n"
             "    float s = step(0.0, -fz); float s2 = 2.0 * s - 1.0;\n"
             "    ivec2 b = ivec2(bf); int si = int(s);\n"
-            "    heBombTap(uv, b + ivec2(si, si), rot, seed, t0, r0);\n"
-            "    heBombTap(uv, b + ivec2(si, 1 - si), rot, seed, t1, r1);\n"
-            "    heBombTap(uv, b + ivec2(1 - si, si), rot, seed, t2, r2);\n"
+            "    heBombTap(uv, size, b + ivec2(si, si), rot, seed, t0, r0);\n"
+            "    heBombTap(uv, size, b + ivec2(si, 1 - si), rot, seed, t1, r1);\n"
+            "    heBombTap(uv, size, b + ivec2(1 - si, si), rot, seed, t2, r2);\n"
             "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(sharp));\n"
             "    w /= w.x + w.y + w.z; }\n";
     src += "void main() {\n" + c.body;

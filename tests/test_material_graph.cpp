@@ -1060,6 +1060,27 @@ TEST_CASE("Texture bombing: one hex grid per layer, integer hash, gradient reads
 	// The G-buffer variant carries the same body.
 	CHECK(countOf(gen.glslGBuffer, "textureGrad(heTexP") == 12u);
 
+	// A wired Cell is part of the grid: the same layer on another cell size is
+	// another grid, the same cell source keeps one.
+	{
+		MaterialGraph g = makeTextureBombGraph();
+		const int cell = g.addNode(MatNodeType::ConstFloat);
+		g.findNode(cell)->p[0] = 1.5f;
+		int wired = 0;
+		for (const auto& n : g.nodes)
+			if (n.type == MatNodeType::TextureArrayBombSample || n.type == MatNodeType::NormalMapArrayBombSample)
+			{
+				CHECK(g.connect(cell, 0, n.id, 2));
+				++wired;
+			}
+		CHECK(wired == 3);
+		const std::string glsl = HE::generateFragment(g).glsl;
+		CHECK(countOf(glsl, "heBombGrid(n") == 2u);
+		const int msk = [&] { for (const auto& n : g.nodes) if (n.s == "Textures/T_Mask_Array.hasset") return n.id; return 0; }();
+		g.disconnectInput(msk, 2); // the mask back on the default cell → its own grid
+		CHECK(countOf(HE::generateFragment(g).glsl, "heBombGrid(n") == 3u);
+	}
+
 	// Graphs without a bombing node keep their exact text: no helper at all.
 	CHECK(HE::generateFragment(makeDemoGraph()).glsl.find("heBomb") == std::string::npos);
 	CHECK(HE::generateFragment(makeTextureArrayGraph()).glsl.find("heBomb") == std::string::npos);
@@ -1083,7 +1104,9 @@ TEST_CASE("Texture bombing: params are sanitised, and an empty path falls back t
 	g.findNode(n)->p[2] = -1.4f;
 	CHECK(g.connect(n, 0, out, HE::kMatOutputBaseColorPin));
 	const HE::MatShaderGen gen = HE::generateFragment(g);
-	CHECK(gen.glsl.find("(vUV, 1.000000, 7.000000, 4294967295u, ") != std::string::npos);
+	// heBombGrid(uv, cell, rotation, sharpness, seed, …): the unwired Cell pin is
+	// the default spacing.
+	CHECK(gen.glsl.find("(vUV, 0.500000, 1.000000, 7.000000, 4294967295u, ") != std::string::npos);
 	// No texture picked → the mesh texture (2D): plain 2D reads, no layer, no mask.
 	CHECK(gen.textures.empty());
 	CHECK(gen.textureArrayMask == 0u);

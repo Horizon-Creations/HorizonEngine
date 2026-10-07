@@ -1604,9 +1604,11 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 			case HE::MatNodeType::NormalMapArrayBombSample:
 				j["requires"] = "s = content-relative path of a texture, or empty for "
 				                "the mesh's own texture. p = [rotation 0..1, blend sharpness "
-				                "(default 7), seed, strength (normal nodes only)]. Give the "
-				                "Albedo/Normal/Mask reads of one texture the same uv, rotation, "
-				                "sharpness and seed: they then share one hex grid.";
+				                "(default 7), seed, strength (normal nodes only)]. The last input "
+				                "pin, Cell, is the hex spacing in texture repeats (0.5 unwired). "
+				                "Give the Albedo/Normal/Mask reads of one texture the same uv, "
+				                "Cell source, rotation, sharpness and seed: they then share one "
+				                "hex grid.";
 				break;
 			case HE::MatNodeType::StaticSwitch:
 				j["requires"] = "s = switch name; p[0] = default (1 = true).";

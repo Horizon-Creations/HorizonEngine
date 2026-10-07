@@ -6382,6 +6382,134 @@ void EditorApplication::dumpFrameHeadless()
 			gen.textures.size(), gen.textureArrayMask);
 	}
 
+	// ── Texture-bombing witness (HE_DUMP_TEXBOMB=1, Thema 158 Schritt 4) ─────
+	// The same flat, UNLIT 100 m landscape as HE_DUMP_TEXARRAY: five stripes across
+	// U = slices 0..4 of the engine arrays, texture tiling 10. Four bands across V:
+	//   1  the PLAIN Albedo array read — the reference, it repeats every tile;
+	//   2  the Albedo array through Texture Array Bombing;
+	//   3  (N.x, height, N.z) — the Normal Map Array Bombing output's world X/Z
+	//      packed around the bombed Mask's height (B). The placeholder normal IS the
+	//      height's slope, so the image gradient of G must follow R and B in every
+	//      hex: a hex whose normal were turned the wrong way, or read on another
+	//      grid, breaks that correlation;
+	//   4  the Mask array through Texture Array Bombing.
+	// =off is the negative control for the repetition measure (bands 2..4 read
+	// plainly), =seed7 moves every bombed hex (band 1 must stay put), =mismatch
+	// reads the normal on another seed than the height (the correlation must drop).
+	if (const char* tb = std::getenv("HE_DUMP_TEXBOMB"); tb && *tb && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(tb);
+		const bool off      = mode == "off";
+		const float seed    = mode == "seed7" ? 7.0f : 0.0f;
+		const float nrmSeed = mode == "mismatch" ? seed + 1.0f : seed;
+
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		g.findNode(out)->p[0] = 0.0f; // unlit
+		const int raw = g.addNode(HE::MatNodeType::UV);
+		const int uvT = g.addNode(HE::MatNodeType::UV);
+		g.findNode(uvT)->p[0] = g.findNode(uvT)->p[1] = 10.0f;
+		const int split = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(raw, 0, split, 0);
+		auto constF = [&](float v) {
+			const int c = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(c)->p[0] = v;
+			return c;
+		};
+		// slice = u * 5 - 0.5 → floor(u * 5) after the node's rounding.
+		const int mul5 = g.addNode(HE::MatNodeType::Multiply);
+		g.connect(split, 0, mul5, 0);
+		g.connect(constF(5.0f), 0, mul5, 1);
+		const int slice = g.addNode(HE::MatNodeType::Subtract);
+		g.connect(mul5, 0, slice, 0);
+		g.connect(constF(0.5f), 0, slice, 1);
+		auto read = [&](HE::MatNodeType bombed, HE::MatNodeType plain, const char* path, float s) {
+			const int n = g.addNode(off ? plain : bombed);
+			g.findNode(n)->s = path;
+			if (!off) g.findNode(n)->p[2] = s;
+			g.connect(uvT, 0, n, 0);
+			g.connect(slice, 0, n, 1);
+			return n;
+		};
+		const char* kAlb = "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset";
+		const char* kNrm = "Engine/Textures/Landscape/T_Landscape_Normal_Array.hasset";
+		const char* kMsk = "Engine/Textures/Landscape/T_Landscape_Mask_Array.hasset";
+		int band[4];
+		band[0] = g.addNode(HE::MatNodeType::TextureArraySample);
+		g.findNode(band[0])->s = kAlb;
+		g.connect(uvT, 0, band[0], 0);
+		g.connect(slice, 0, band[0], 1);
+		band[1] = read(HE::MatNodeType::TextureArrayBombSample, HE::MatNodeType::TextureArraySample, kAlb, seed);
+		band[3] = read(HE::MatNodeType::TextureArrayBombSample, HE::MatNodeType::TextureArraySample, kMsk, seed);
+		const int nrm = read(HE::MatNodeType::NormalMapArrayBombSample, HE::MatNodeType::NormalMapArraySample,
+		                     kNrm, nrmSeed);
+		// Band 3: (N.x * 0.5 + 0.5, height, N.z * 0.5 + 0.5).
+		const int nSplit = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(nrm, 0, nSplit, 0);
+		const int mSplit = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(band[3], 0, mSplit, 0);
+		auto toUnit = [&](int pin) {
+			const int m = g.addNode(HE::MatNodeType::Multiply);
+			g.connect(nSplit, pin, m, 0);
+			g.connect(constF(0.5f), 0, m, 1);
+			const int a = g.addNode(HE::MatNodeType::Add);
+			g.connect(m, 0, a, 0);
+			g.connect(constF(0.5f), 0, a, 1);
+			return a;
+		};
+		band[2] = g.addNode(HE::MatNodeType::Combine3);
+		g.connect(toUnit(0), 0, band[2], 0);
+		g.connect(mSplit, 2, band[2], 1);
+		g.connect(toUnit(2), 0, band[2], 2);
+		int pick = band[3];
+		for (int i = 2; i >= 0; --i)
+		{
+			const int less = g.addNode(HE::MatNodeType::Less);
+			g.connect(split, 1, less, 0);
+			g.connect(constF(0.25f * static_cast<float>(i + 1)), 0, less, 1);
+			const int sel = g.addNode(HE::MatNodeType::If);
+			g.connect(less, 0, sel, 0);
+			g.connect(band[i], 0, sel, 1);
+			g.connect(pick, 0, sel, 2);
+			pick = sel;
+		}
+		g.connect(pick, 0, out, HE::kMatOutputBaseColorPin);
+
+		MaterialAsset am;
+		am.type = HE::AssetType::Material;
+		am.name = "TextureBombWitness";
+		am.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		am.customShaderFragGlsl = gen.glsl;
+		am.customShaderGBufGlsl = gen.glslGBuffer;
+		am.customShaderVertGlsl = gen.vertexBody;
+		am.blendMode            = gen.blendMode;
+		am.domain               = gen.domain;
+		am.graphTexturePaths    = gen.textures;
+		const HE::UUID amId = contentManager().registerMaterial(std::move(am));
+
+		auto land = m_editorWorld->createEntity("TextureBombLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution = 33;
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		size_t grids = 0;
+		for (size_t at = gen.glsl.find("heBombGrid(n"); at != std::string::npos;
+		     at = gen.glsl.find("heBombGrid(n", at + 1)) ++grids;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXBOMB witness landscape added "
+			"(mode %s, %zu graph textures, array mask %u, %zu hex grid(s))",
+			tb, gen.textures.size(), gen.textureArrayMask, grids);
+	}
+
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
 	// 240 m landscape at y=300; "after" grows one TerrainGenerate::mountain in a
 	// circle around its centre. The before/after pair is the oracle: the frames
