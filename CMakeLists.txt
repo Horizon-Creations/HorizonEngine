@@ -423,7 +423,15 @@ endif()
 # image and dev machine; HE_ContentSync is Editor-only tooling, not the shipped
 # game, so a system OpenSSL runtime dependency here is a much smaller concern
 # than it would be for the packaged build's own hpak crypto).
-find_package(Libssh2 QUIET)
+# libssh2's own build writes a Libssh2 package config into OUR binary dir. Once
+# find_package() has cached that as Libssh2_DIR, every later configure "finds" it,
+# skips the fetch above, and links a libssh2.lib that is no longer produced by any
+# target ("missing and no known rule to make it"). So never accept a package config
+# from inside the build tree, and never consult the user package registry.
+if(Libssh2_DIR AND "${Libssh2_DIR}" MATCHES "^${CMAKE_BINARY_DIR}")
+    unset(Libssh2_DIR CACHE)
+endif()
+find_package(Libssh2 QUIET NO_CMAKE_PACKAGE_REGISTRY NO_CMAKE_SYSTEM_PACKAGE_REGISTRY)
 if(NOT TARGET Libssh2::libssh2 AND NOT LIBSSH2_FOUND)
     if(WIN32)
         set(CRYPTO_BACKEND "WinCNG" CACHE STRING "" FORCE)

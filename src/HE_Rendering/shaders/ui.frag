@@ -7,15 +7,17 @@ layout(push_constant) uniform UIPush {
     vec4  uColor;
     vec4  uUVRect;
     vec2  uViewport;
-    vec2  uParams;        // x: 0 = solid color, 1 = font-atlas glyph; y: border width px
+    vec2  uParams;        // x: 0 = solid color, 1 = font-atlas glyph, 2 = image; y: border width px
     vec4  uRotation;      // w: gradient angle, degrees clockwise from "down"
     vec4  uCornerRadius;  // px per corner: TL, TR, BR, BL
     vec4  uStyle;         // x: blur px (drop shadow), y: inner shadow blur px,
                           // z: gradient on, w: radial gradient
     uvec4 uColors;        // unorm8x4: x border, y gradient, z inner shadow
 } pc;
-// R8 font atlas (glyph coverage in .r) — solid quads ignore it, but the set must
-// stay bound for every draw since the sampler is statically used by this shader.
+// R8 font atlas (glyph coverage in .r) in mode 1, the quad's RGBA image in
+// mode 2 (UNORM: UI colours are sRGB numbers, Thema 107) — solid quads ignore
+// it, but a set must stay bound for every draw since the sampler is statically
+// used by this shader.
 layout(set = 0, binding = 0) uniform sampler2D uFontAtlas;
 layout(location = 0) in  vec2 vUV;
 layout(location = 1) in  vec2 vLocal;
@@ -36,9 +38,18 @@ float heMaxRadius(vec4 radii)
 }
 // The rest is the GL kUIFS line for line, so a widget looks the same on both.
 void main() {
-    if (pc.uParams.x > 0.5) {
+    if (pc.uParams.x > 0.5 && pc.uParams.x < 1.5) {
         float a = texture(uFontAtlas, vUV).r;
         FragColor = vec4(pc.uColor.rgb, pc.uColor.a * a);
+        return;
+    }
+    if (pc.uParams.x > 1.5) {
+        vec4 t = texture(uFontAtlas, vUV);
+        vec4 c = vec4(pc.uColor.rgb * t.rgb, pc.uColor.a * t.a);
+        if (heMaxRadius(pc.uCornerRadius) <= 0.0) { FragColor = c; return; }
+        // A rounded image is the solid path's SDF applied to the sampled alpha.
+        float dd = heRoundedBoxSDF((vLocal - 0.5) * pc.uRect.zw, pc.uRect.zw * 0.5, pc.uCornerRadius);
+        FragColor = vec4(c.rgb, c.a * clamp(0.5 - dd, 0.0, 1.0));
         return;
     }
     vec4 fill = pc.uColor;

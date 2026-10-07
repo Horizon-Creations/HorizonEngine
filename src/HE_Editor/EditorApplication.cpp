@@ -64,6 +64,7 @@
 #include <Scripting/ScriptTypes.h> // setScriptLogTag — the project's script log prefix
 #include <Hpak/ProjectExporter.h>  // sceneUuidForPath + levelScriptKeyForUuid: the level script's key in PIE
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <material/MaterialShaderBake.h>
@@ -6240,6 +6241,11 @@ void EditorApplication::dumpFrameHeadless()
 	// HE_DUMP_LAYEREDIT (below, AFTER WarmupMaterials) then re-authors that
 	// material's layers the way the Material Editor does — the "the blend works
 	// exactly once" case.
+	//
+	// HE_DUMP_LANDSCAPELAYERS=8 is the eight-layer variant (Thema 158): the same
+	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
+	// orange (7) — the last three on the weightmap's SECOND page, which the
+	// renderer uploads as the right half of the one heLandscapeWeights texture.
 	HE::UUID s_layerMatId{};
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
@@ -6251,11 +6257,18 @@ void EditorApplication::dumpFrameHeadless()
 		HE::MaterialGraph g;
 		const int out = g.addNode(HE::MatNodeType::Output);
 		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
-		g.findNode(lb)->s = "Red\nGreen\nBlue";
-		const float rgb[3][3] = { { 0.90f, 0.10f, 0.10f },
+		const bool eight = std::string_view(ll) == "8";
+		g.findNode(lb)->s = eight ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
+		                          : "Red\nGreen\nBlue";
+		const float rgb[8][3] = { { 0.90f, 0.10f, 0.10f },
 		                          { 0.10f, 0.85f, 0.15f },
-		                          { 0.15f, 0.25f, 0.95f } };
-		for (int i = 0; i < 3; ++i)
+		                          { 0.15f, 0.25f, 0.95f },
+		                          { 0.95f, 0.90f, 0.10f },
+		                          { 0.90f, 0.10f, 0.90f },
+		                          { 0.10f, 0.90f, 0.90f },
+		                          { 0.95f, 0.95f, 0.95f },
+		                          { 0.95f, 0.50f, 0.05f } };
+		for (int i = 0; i < (eight ? 8 : 3); ++i)
 		{
 			const int c = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(c)->p[0] = rgb[i][0];
@@ -6277,7 +6290,10 @@ void EditorApplication::dumpFrameHeadless()
 
 		auto land = m_editorWorld->createEntity("LayerLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 100.0f;
@@ -6289,14 +6305,404 @@ void EditorApplication::dumpFrameHeadless()
 		TerrainPaint::ensureWeightmap(ltc);
 		TerrainPaint::paint(ltc,   0.0f,  0.0f, /*Green*/1, 22.0f, 6.0f, 1.0f);
 		TerrainPaint::paint(ltc, -34.0f, 20.0f, /*Blue*/ 2, 12.0f, 4.0f, 1.0f);
+		if (eight)
+		{
+			TerrainPaint::paint(ltc,  34.0f, -30.0f, /*Yellow*/  3, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,  34.0f,  30.0f, /*Magenta*/ 4, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc, -34.0f, -30.0f, /*White*/   6, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,   0.0f,  40.0f, /*Orange*/  7, 7.0f, 2.0f, 1.0f);
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
 		// The headless dump renders from OnInit, BEFORE the main loop's
 		// SceneSystems::tickWorld — without this the terrain has no chunk
 		// entities yet and there is simply nothing to draw.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
-		HE_LOG_INFO(Editor, "%s",
-			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added "
+			"(%d layers, weightmap %ux%u)", eight ? 8 : 3,
+			TerrainPaint::usesSecondPage(ltc) ? 2 * ltc.weightRes : ltc.weightRes,
+			ltc.weightRes);
+	}
+
+	// ── Texture-array witness (HE_DUMP_TEXARRAY=1, Thema 158 Schritt 3) ──────
+	// A flat 100 m landscape at y=300 with an UNLIT graph material that reads the
+	// three engine texture arrays (T_Landscape_{Albedo,Normal,Mask}_Array, five
+	// slices each) plus one plain 2D texture — all four heTexP slots live, three
+	// of them sampler2DArray. Five stripes across U = slices 0..4 (Grass, Dirt,
+	// Rock, Snow, WetGround); four bands across V = Albedo array / Normal array /
+	// Mask array / the 2D Rock albedo. Unlit, so the frame IS the sampled texels
+	// and no lighting difference between backends can fake or hide a slice.
+	// HE_DUMP_TEXARRAY=slice2 is the negative control: every stripe reads slice 2
+	// (Rock), so only the stripes that were NOT Rock may change. =fallback swaps
+	// the bands for the mismatch paths (missing array, 2D asset in an array slot,
+	// array asset in a 2D slot) — see below.
+	if (const char* ta = std::getenv("HE_DUMP_TEXARRAY"); ta && *ta && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const bool fixedSlice = std::string_view(ta) == "slice2";
+
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		g.findNode(out)->p[0] = 0.0f; // unlit
+		const int raw = g.addNode(HE::MatNodeType::UV);           // 0..1 over the terrain
+		const int uvT = g.addNode(HE::MatNodeType::UV);           // the texture's tiling
+		g.findNode(uvT)->p[0] = g.findNode(uvT)->p[1] = 10.0f;
+		const int split = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(raw, 0, split, 0);
+		// slice = u * 5 - 0.5: rounded to the nearest layer by the node, that is
+		// floor(u * 5) — five equal stripes, one per slice.
+		int slice = -1;
+		if (fixedSlice)
+		{
+			slice = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(slice)->p[0] = 2.0f;
+		}
+		else
+		{
+			const int five = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(five)->p[0] = 5.0f;
+			const int half = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(half)->p[0] = 0.5f;
+			const int mul = g.addNode(HE::MatNodeType::Multiply);
+			g.connect(split, 0, mul, 0);
+			g.connect(five, 0, mul, 1);
+			slice = g.addNode(HE::MatNodeType::Subtract);
+			g.connect(mul, 0, slice, 0);
+			g.connect(half, 0, slice, 1);
+		}
+		// HE_DUMP_TEXARRAY=fallback drives every MISMATCH path instead: band 1 reads a
+		// missing array (→ the backend's white array), band 2 a plain 2D asset through
+		// an array slot (→ a one-slice array, every slice clamped to 0 = Rock), band 3
+		// the real albedo array, band 4 that ARRAY asset through a 2D slot (→ slice 0,
+		// Grass, in every stripe).
+		const bool fallback = std::string_view(ta) == "fallback";
+		const char* kArrays[3] = { "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset",
+		                           "Engine/Textures/Landscape/T_Landscape_Normal_Array.hasset",
+		                           "Engine/Textures/Landscape/T_Landscape_Mask_Array.hasset" };
+		if (fallback)
+		{
+			kArrays[0] = "Engine/Textures/Landscape/T_Landscape_Missing_Array.hasset";
+			kArrays[1] = "Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset";
+			kArrays[2] = "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset";
+		}
+		int band[4];
+		for (int i = 0; i < 3; ++i)
+		{
+			band[i] = g.addNode(HE::MatNodeType::TextureArraySample);
+			g.findNode(band[i])->s = kArrays[i];
+			g.connect(uvT, 0, band[i], 0);
+			g.connect(slice, 0, band[i], 1);
+		}
+		band[3] = g.addNode(HE::MatNodeType::TextureSample);
+		g.findNode(band[3])->s = fallback ? "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset"
+		                                  : "Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset";
+		g.connect(uvT, 0, band[3], 0);
+		// Normal Map Array on the Normal pin: compiled and bound on every backend
+		// even though an unlit frame does not show it.
+		const int nrm = g.addNode(HE::MatNodeType::NormalMapArraySample);
+		g.findNode(nrm)->s = kArrays[1];
+		g.connect(uvT, 0, nrm, 0);
+		g.connect(slice, 0, nrm, 1);
+		g.connect(nrm, 0, out, HE::kMatOutputNormalPin);
+		// Bands across V: v < 0.25 → Albedo, < 0.5 → Normal, < 0.75 → Mask, else 2D.
+		int pick = band[3];
+		for (int i = 2; i >= 0; --i)
+		{
+			const int edge = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(edge)->p[0] = 0.25f * static_cast<float>(i + 1);
+			const int less = g.addNode(HE::MatNodeType::Less);
+			g.connect(split, 1, less, 0);
+			g.connect(edge, 0, less, 1);
+			const int sel = g.addNode(HE::MatNodeType::If);
+			g.connect(less, 0, sel, 0);
+			g.connect(band[i], 0, sel, 1);
+			g.connect(pick, 0, sel, 2);
+			pick = sel;
+		}
+		g.connect(pick, 0, out, HE::kMatOutputBaseColorPin);
+
+		MaterialAsset am;
+		am.type = HE::AssetType::Material;
+		am.name = "TextureArrayWitness";
+		am.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		am.customShaderFragGlsl = gen.glsl;
+		am.customShaderGBufGlsl = gen.glslGBuffer;
+		am.customShaderVertGlsl = gen.vertexBody;
+		am.blendMode            = gen.blendMode;
+		am.domain               = gen.domain;
+		am.graphTexturePaths    = gen.textures;
+		const HE::UUID amId = contentManager().registerMaterial(std::move(am));
+
+		auto land = m_editorWorld->createEntity("TextureArrayLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution = 33;
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXARRAY witness landscape added "
+			"(%s, %zu graph textures, array mask %u)",
+			fallback ? "fallback paths" : fixedSlice ? "slice 2 everywhere" : "slices 0..4",
+			gen.textures.size(), gen.textureArrayMask);
+	}
+
+	// ── Texture-bombing witness (HE_DUMP_TEXBOMB=1, Thema 158 Schritt 4) ─────
+	// The same flat, UNLIT 100 m landscape as HE_DUMP_TEXARRAY: five stripes across
+	// U = slices 0..4 of the engine arrays, texture tiling 10. Four bands across V:
+	//   1  the PLAIN Albedo array read — the reference, it repeats every tile;
+	//   2  the Albedo array through Texture Array Bombing;
+	//   3  (N.x, height, N.z) — the Normal Map Array Bombing output's world X/Z
+	//      packed around the bombed Mask's height (B). The placeholder normal IS the
+	//      height's slope, so the image gradient of G must follow R and B in every
+	//      hex: a hex whose normal were turned the wrong way, or read on another
+	//      grid, breaks that correlation;
+	//   4  the Mask array through Texture Array Bombing.
+	// =off is the negative control for the repetition measure (bands 2..4 read
+	// plainly), =seed7 moves every bombed hex (band 1 must stay put), =mismatch
+	// reads the normal on another seed than the height (the correlation must drop).
+	if (const char* tb = std::getenv("HE_DUMP_TEXBOMB"); tb && *tb && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(tb);
+		const bool off      = mode == "off";
+		const float seed    = mode == "seed7" ? 7.0f : 0.0f;
+		const float nrmSeed = mode == "mismatch" ? seed + 1.0f : seed;
+
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		g.findNode(out)->p[0] = 0.0f; // unlit
+		const int raw = g.addNode(HE::MatNodeType::UV);
+		const int uvT = g.addNode(HE::MatNodeType::UV);
+		g.findNode(uvT)->p[0] = g.findNode(uvT)->p[1] = 10.0f;
+		const int split = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(raw, 0, split, 0);
+		auto constF = [&](float v) {
+			const int c = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(c)->p[0] = v;
+			return c;
+		};
+		// slice = u * 5 - 0.5 → floor(u * 5) after the node's rounding.
+		const int mul5 = g.addNode(HE::MatNodeType::Multiply);
+		g.connect(split, 0, mul5, 0);
+		g.connect(constF(5.0f), 0, mul5, 1);
+		const int slice = g.addNode(HE::MatNodeType::Subtract);
+		g.connect(mul5, 0, slice, 0);
+		g.connect(constF(0.5f), 0, slice, 1);
+		auto read = [&](HE::MatNodeType bombed, HE::MatNodeType plain, const char* path, float s) {
+			const int n = g.addNode(off ? plain : bombed);
+			g.findNode(n)->s = path;
+			if (!off) g.findNode(n)->p[2] = s;
+			g.connect(uvT, 0, n, 0);
+			g.connect(slice, 0, n, 1);
+			return n;
+		};
+		const char* kAlb = "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset";
+		const char* kNrm = "Engine/Textures/Landscape/T_Landscape_Normal_Array.hasset";
+		const char* kMsk = "Engine/Textures/Landscape/T_Landscape_Mask_Array.hasset";
+		int band[4];
+		band[0] = g.addNode(HE::MatNodeType::TextureArraySample);
+		g.findNode(band[0])->s = kAlb;
+		g.connect(uvT, 0, band[0], 0);
+		g.connect(slice, 0, band[0], 1);
+		band[1] = read(HE::MatNodeType::TextureArrayBombSample, HE::MatNodeType::TextureArraySample, kAlb, seed);
+		band[3] = read(HE::MatNodeType::TextureArrayBombSample, HE::MatNodeType::TextureArraySample, kMsk, seed);
+		const int nrm = read(HE::MatNodeType::NormalMapArrayBombSample, HE::MatNodeType::NormalMapArraySample,
+		                     kNrm, nrmSeed);
+		// Band 3: (N.x * 0.5 + 0.5, height, N.z * 0.5 + 0.5).
+		const int nSplit = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(nrm, 0, nSplit, 0);
+		const int mSplit = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(band[3], 0, mSplit, 0);
+		auto toUnit = [&](int pin) {
+			const int m = g.addNode(HE::MatNodeType::Multiply);
+			g.connect(nSplit, pin, m, 0);
+			g.connect(constF(0.5f), 0, m, 1);
+			const int a = g.addNode(HE::MatNodeType::Add);
+			g.connect(m, 0, a, 0);
+			g.connect(constF(0.5f), 0, a, 1);
+			return a;
+		};
+		band[2] = g.addNode(HE::MatNodeType::Combine3);
+		g.connect(toUnit(0), 0, band[2], 0);
+		g.connect(mSplit, 2, band[2], 1);
+		g.connect(toUnit(2), 0, band[2], 2);
+		int pick = band[3];
+		for (int i = 2; i >= 0; --i)
+		{
+			const int less = g.addNode(HE::MatNodeType::Less);
+			g.connect(split, 1, less, 0);
+			g.connect(constF(0.25f * static_cast<float>(i + 1)), 0, less, 1);
+			const int sel = g.addNode(HE::MatNodeType::If);
+			g.connect(less, 0, sel, 0);
+			g.connect(band[i], 0, sel, 1);
+			g.connect(pick, 0, sel, 2);
+			pick = sel;
+		}
+		g.connect(pick, 0, out, HE::kMatOutputBaseColorPin);
+
+		MaterialAsset am;
+		am.type = HE::AssetType::Material;
+		am.name = "TextureBombWitness";
+		am.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		am.customShaderFragGlsl = gen.glsl;
+		am.customShaderGBufGlsl = gen.glslGBuffer;
+		am.customShaderVertGlsl = gen.vertexBody;
+		am.blendMode            = gen.blendMode;
+		am.domain               = gen.domain;
+		am.graphTexturePaths    = gen.textures;
+		const HE::UUID amId = contentManager().registerMaterial(std::move(am));
+
+		auto land = m_editorWorld->createEntity("TextureBombLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution = 33;
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		size_t grids = 0;
+		for (size_t at = gen.glsl.find("heBombGrid(n"); at != std::string::npos;
+		     at = gen.glsl.find("heBombGrid(n", at + 1)) ++grids;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXBOMB witness landscape added "
+			"(mode %s, %zu graph textures, array mask %u, %zu hex grid(s))",
+			tb, gen.textures.size(), gen.textureArrayMask, grids);
+	}
+
+	// ── Auto landscape material witness (HE_DUMP_AUTOLAND, Thema 158 Schritt 5) ─
+	// A 128 m landscape at y=300 whose relief is ANALYTIC, so every column's
+	// expected layer is known: a flat plain (x < -24), a smoothstep ramp up to a
+	// 40 m plateau (-24..8, slope 0 → ~62° → 0), the plateau (x > 8). Constant
+	// along Z. Snow Height is moved to y=320 (the shipped default, 60 m, assumes a
+	// terrain at y=0), so snow covers the plateau and the upper ramp, rock the
+	// steep middle, grass/dirt and puddles the plain.
+	//   =1 / lit   the SHIPPED asset, loaded by path (Engine/Materials/
+	//              M_AutoLandscape.hasset — fixed UUID, Engine/ prefix, regenerate
+	//              on load), through a Material Instance overriding Snow Height
+	//   =nobomb    the same instance with the "Texture Bombing" switch off (its own
+	//              permutation): the negative control for the repetition measure
+	//   =masks     unlit, R = rock, G = snow, B = standing water (builder graph)
+	//   =ground    unlit, R = dirt, G = wet ground, B = flat (builder graph)
+	//   =normal    unlit, the final world normal * 0.5 + 0.5 (builder graph)
+	//   =surface   unlit, R = AO, G = roughness (builder graph)
+	//   =builtin   the same relief with the engine's default terrain material:
+	//              the control that separates lighting/shadow differences
+	//              between backends from the material's
+	//   =plaingraph a lit graph material that is only a constant grey: the
+	//              graph lighting path without textures or normal map
+	if (const char* al = std::getenv("HE_DUMP_AUTOLAND"); al && *al && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(al);
+		const bool masks   = mode == "masks";
+		const bool ground  = mode == "ground";
+		const bool noBomb  = mode == "nobomb";
+		const bool builtin = mode == "builtin";
+		const bool normalV = mode == "normal";
+		const bool surface = mode == "surface";
+		constexpr float kBaseY = 300.0f, kPlateau = 40.0f;
+		const float snowHeight = kBaseY + 20.0f;
+
+		HE::UUID amId{};
+		std::string what;
+		if (builtin)
+			what = "default terrain material";
+		else if (mode == "plaingraph")
+		{
+			// A lit graph material with nothing but a constant grey: the graph
+			// lighting path (heLitP) without textures or a perturbed normal.
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+			MaterialAsset am;
+			am.type = HE::AssetType::Material;
+			am.name = "AutoLandscapePlainGraph";
+			am.nodeGraphJson = HE::materialGraphToJson(g);
+			amId = contentManager().registerMaterial(std::move(am));
+			contentManager().regenerateMaterialFromGraph(amId);
+			what = "plain lit graph material";
+		}
+		else if (masks || ground || normalV || surface)
+		{
+			HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(
+				masks   ? HE::AutoLandscapeView::MasksRockSnowWater :
+				ground  ? HE::AutoLandscapeView::MasksDirtWet :
+				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface);
+			for (HE::MatGraphNode& n : built.graph.nodes)
+				if (n.type == HE::MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamSnowHeight)
+					n.p[0] = snowHeight;
+			MaterialAsset am;
+			am.type = HE::AssetType::Material;
+			am.name = "AutoLandscapeMaskWitness";
+			am.nodeGraphJson = HE::materialGraphToJson(built.graph);
+			amId = contentManager().registerMaterial(std::move(am));
+			contentManager().regenerateMaterialFromGraph(amId);
+			what = masks ? "masks rock/snow/water" : ground ? "masks dirt/wet/flat"
+			     : normalV ? "final normal" : "AO/roughness";
+		}
+		else
+		{
+			const HE::UUID parent = contentManager().loadAsset(HE::kAutoLandscapeMaterialPath);
+			MaterialAsset inst;
+			inst.type = HE::AssetType::Material;
+			inst.name = "AutoLandscapeWitness";
+			inst.parentMaterialPath       = HE::kAutoLandscapeMaterialPath;
+			inst.graphParamNames          = { HE::kAutoLandscapeParamSnowHeight };
+			inst.shaderParamData          = { snowHeight, 0.0f, 0.0f, 0.0f };
+			inst.instanceOverriddenParams = { HE::kAutoLandscapeParamSnowHeight };
+			if (noBomb)
+			{
+				inst.instanceSwitchNames  = { HE::kAutoLandscapeSwitchBombing };
+				inst.instanceSwitchValues = { 0 };
+			}
+			amId = contentManager().registerMaterial(std::move(inst));
+			contentManager().syncMaterialInstance(amId);
+			what = std::string(parent == HE::kAutoLandscapeMaterialId ? "shipped asset" : "ASSET NOT FOUND")
+			     + (noBomb ? ", bombing off" : ", bombing on");
+		}
+
+		auto land = m_editorWorld->createEntity("AutoLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, kBaseY, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 128.0f;
+		ltc.resolution = 129;      // 2^n + 1: no resample, one vertex per metre
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
+		for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+			{
+				const float x = -64.0f + static_cast<float>(xi);
+				const float t = std::clamp((x + 24.0f) / 32.0f, 0.0f, 1.0f);
+				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
+					kPlateau * t * t * (3.0f - 2.0f * t);
+			}
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
+			reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const MaterialAsset* ma = contentManager().getMaterial(amId);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLAND witness landscape added "
+			"(mode %s, %s, %zu graph textures, array mask %u, %zu params, snow at y=%.0f)",
+			al, what.c_str(), ma ? ma->graphTexturePaths.size() : size_t(0),
+			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
+			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
@@ -6314,7 +6720,10 @@ void EditorApplication::dumpFrameHeadless()
 		auto& reg = m_editorWorld->registry();
 		auto land = m_editorWorld->createEntity("MountainLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 240.0f;
@@ -6440,7 +6849,9 @@ void EditorApplication::dumpFrameHeadless()
 	// other branch: replaceTexture + a DEFERRED InvalidateTexture. This exercises
 	// that second branch, which is the only "runs once" asymmetry in the
 	// weightmap path. Works with or without HE_DUMP_LAYEREDIT.
-	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && m_editorWorld)
+	// HE_DUMP_LAYERREPAINT=mid paints halfway through the settle frames instead
+	// (below), once the backend has already resolved and cached the weightmap.
+	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && std::string(rp) != "mid" && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
 		for (auto [te, tc] : reg.view<TerrainComponent>().each())
@@ -6855,6 +7266,47 @@ void EditorApplication::dumpFrameHeadless()
 		                           e.gradient = true; e.gradientShape = 1;
 		                           e.gradientColor = glm::vec4(0.55f, 0.20f, 0.65f, 1.0f);
 		                           e.innerShadow = true; e.innerShadowBlur = 20.0f; });
+
+		// HE_DUMP_UITEST=image adds tile 12: an Image element showing a generated
+		// picture, red / green on top, blue / yellow below, white tint (Thema 157).
+		// Kept off the plain "=1" sheet so the Thema-133 baselines stay as measured.
+		// The widget refers to its picture by path and the manager resolves it
+		// again on instantiation, so the texture is registered under that path.
+		if (std::string_view(ui) == "image")
+		{
+			constexpr uint32_t kSz = 64;
+			TextureAsset ta;
+			ta.name = "__uiImageWitness";
+			ta.path = "__uiImageWitness.hasset";
+			ta.width = ta.height = kSz;
+			ta.channels = 4;
+			// Flagged sRGB like every imported colour texture: the UI pass must
+			// sample the bytes as they are anyway (Thema 107), an sRGB upload
+			// would show here as a darker picture.
+			ta.srgb = true;
+			ta.data.resize(size_t(kSz) * kSz * 4);
+			for (uint32_t y = 0; y < kSz; ++y)
+				for (uint32_t x = 0; x < kSz; ++x)
+				{
+					// Rows are stored bottom-up: y >= kSz/2 is the picture's top half.
+					static const uint8_t kQuad[4][4] = {
+						{ 230,  30,  30, 255 }, { 30, 200,  60, 255 },    // top: red, green
+						{  30,  80, 230, 255 }, { 240, 220,  40, 255 } }; // bottom: blue, yellow
+					const uint8_t* c = kQuad[(y >= kSz / 2 ? 0 : 2) + (x >= kSz / 2 ? 1 : 0)];
+					std::memcpy(&ta.data[(size_t(y) * kSz + x) * 4], c, 4);
+				}
+			contentManager().registerTexture(std::move(ta));
+
+			const int id = t.add(HE::UIWidgetType::Image);
+			HE::UIElement& e = *t.find(id);
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = 60.0f + static_cast<float>(col) * 300.0f;
+			e.posY = 80.0f + static_cast<float>(row) * 170.0f;
+			e.sizeX = 240.0f; e.sizeY = 110.0f;
+			e.texture = "__uiImageWitness.hasset";
+			e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+		}
 
 		UIWidgetAsset wa;
 		wa.type = HE::AssetType::Widget;
@@ -7296,11 +7748,16 @@ void EditorApplication::dumpFrameHeadless()
 	// edge moves over a static receiver, the reprojection check passes,
 	// and only the neighbourhood clamp keeps the old edge from ghosting.
 	// Compare the capture against a static one at the same TOD. TWO frames run
-	// at the real TOD, not one: until Thema 131 step 6, Vulkan's runGi()
-	// extracted the scene before DrawScene() fed the extractor this frame's
-	// day-night state, so the GI mask saw a sun change one frame late. runGi()
-	// sets it itself now; the second frame stays so captures remain comparable
+	// at the real TOD by default, not one: until Thema 131 step 6, Vulkan's
+	// runGi() extracted the scene before DrawScene() fed the extractor this
+	// frame's day-night state, so the GI mask saw a sun change one frame late.
+	// Since Thema 146 every Vulkan pass gets the sun from one setDayNight() at
+	// the top of Render(); the second frame stays so captures remain comparable
 	// with ones taken on older builds.
+	// HE_DUMP_TODSTEPFRAMES=1 is the lag witness itself: only the captured frame
+	// runs at the real TOD, so a pass that still extracts with the previous
+	// frame's sun (CSM cascades with GI off, Thema 146) puts its shadows where
+	// a static capture at TOD - step has them.
 	if (const float todStep = mbEnvF("HE_DUMP_TODSTEP"); todStep != 0.0f && m_editorWorld)
 	{
 		const Entity envEntity = m_editorWorld->environmentEntity();
@@ -7314,10 +7771,13 @@ void EditorApplication::dumpFrameHeadless()
 				r->Render();
 			env->timeOfDay = tod;
 			pushEnvironment(0.0f);
+			int atTod = 2;
+			if (const char* sf = std::getenv("HE_DUMP_TODSTEPFRAMES"); sf && *sf)
+				atTod = std::clamp(std::atoi(sf), 1, 240);
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: HE_DUMP_TODSTEP moved the sun by " + std::to_string(todStep)
-				 + " of a day for the last two frames").c_str());
-			settleFrames = 2;
+				 + " of a day for the last " + std::to_string(atTod) + " frame(s)").c_str());
+			settleFrames = atTod;
 		}
 	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
@@ -7329,8 +7789,23 @@ void EditorApplication::dumpFrameHeadless()
 	// layer stay quiet.
 	const char* giRefit = std::getenv("HE_DUMP_GIREFIT");
 	const bool  giRefitWitness = giRefit && *giRefit && s_layerMatId != HE::UUID{};
+	// HE_DUMP_LAYERREPAINT=mid: the brush-stroke path on a weightmap the backend
+	// has ALREADY drawn with — replaceTexture + InvalidateTexture must make it
+	// drop its cached view and resolve the new texels. A green disc appears at
+	// (30, -25) in the capture; a stale cache keeps the red field there.
+	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
+	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (repaintMidWitness && i == settleFrames / 2)
+		{
+			for (auto [te, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+				TerrainPaint::paint(tc, 30.0f, -25.0f, /*layer*/1, 14.0f, 5.0f, 1.0f);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_LAYERREPAINT=mid painted before settle frame "
+				 + std::to_string(i)).c_str());
+		}
 		if (giRefitWitness && i == settleFrames / 2)
 		{
 			auto& reg  = m_editorWorld->registry();

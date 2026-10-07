@@ -33,7 +33,17 @@ import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 # `min_mean` is the least mean |Δ| (8-bit steps, all channels) that counts as
 # "the feature changed the picture"; None = report only. `require`/`forbid`
 # are log witnesses checked on the named variant's log; `allow` lists the
-# validation messages a variant may print (see ALLOWED_VALIDATION).
+# validation messages a variant may print (see ALLOWED_VALIDATION). `probes`
+# name boxes (x, y as a fraction of the frame) whose mean colour must be led by
+# one channel ("r"/"g"/"b") — for pictures where WHAT is drawn is the verdict.
+# `samples` name boxes the same way (→ mean RGB) for verdicts a leading channel
+# cannot express; `checks` are (description, predicate over those RGBs).
+# `colors` are boxes whose mean must sit within COLOR_TOL of an exact (R, G, B)
+# on every channel — for flat, unlit pixels (UI) where the value itself is known.
+# `stripes` name boxes (x0, y0, x1, y1 as fractions of the frame) whose stripe
+# energy (stripe_energy: mean |Δ luminance| between vertically adjacent pixels)
+# must stay at or below a maximum — for pictures where a smooth surface must
+# not break into horizontal bands.
 #
 # Thresholds sit at roughly half of what lavapipe measured (Mesa 25.2.8,
 # runs 37112790557 / 37113763253 on 03.10.2026): nebula 13.1–13.4, clustered
@@ -42,6 +52,11 @@ import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 # Noise floor, same shot twice: clustered bit-identical across runs; GI
 # max |Δ| 1 on 6 pixels (so GI's 0.46 is signal); nebula up to 1.4 between
 # any two shots, also within one run (the star field moves), well under 5.0.
+# Stripe verdict: the most stripe energy (8-bit luminance steps between
+# vertically adjacent pixels, box mean) a `stripes` box may hold. Roughly 3x
+# the clean picture's 0.64 and 2x below the striped one's 4.3 (gi_stripes).
+STRIPE_MAX = 2.0
+
 CASES = {
     # Nebula on the night sky (docs/nebula-backend-parity-analysis-2026-10-01.md).
     # Dome clouds at zero coverage: the volumetric march is the costliest thing
@@ -74,10 +89,8 @@ CASES = {
     # the probe irradiance alone. "sw" forces the software BVH; on lavapipe "on"
     # takes the VK_KHR_ray_query path.
     #
-    # NOT the painted terrain (HE_DUMP_LANDSCAPELAYERS) of the GI doc §7.2: its
-    # layer-blend material reads binding 14 (heLandscapeWeights), which the Vulkan
-    # material layout lacks. NVIDIA answers that with a validation message,
-    # lavapipe with SIGSEGV in the draw — first lavapipe run, 03.10.2026.
+    # Not the painted terrain of the GI doc §7.2 — that one has its own case
+    # ("landscape", below), which judges the paint, not the GI.
     "gi": {
         "base": {"GIREFLTEST": "1", "GIREFL": "0", "SKYTEST": "1", "CAMY": "3", "CAMZ": "0",
                  "PITCH": "-12", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
@@ -93,7 +106,7 @@ CASES = {
         "pairs": [("off", "on", 0.3), ("on", "sw", None)],
         "require": {"on": ["GI probe grid", "GI hardware ray tracing available"],
                     "sw": ["GI probe grid", "software GI path forced"]},
-        "allow": {"off": ["mat_ubo"], "on": ["mat_ubo", "gi_layout"], "sw": ["mat_ubo", "gi_layout"]},
+        "allow": {"on": ["gi_layout"], "sw": ["gi_layout"]},
     },
     # GI reflections on the same scene: the green and the glowing red cube should
     # appear in the mirror floor (docs/gi-reflections-plan.md). REPORT ONLY:
@@ -110,9 +123,123 @@ CASES = {
         },
         "pairs": [("off", "on", None)],
         "require": {"on": ["HE_DUMP_GIREFLTEST witness scene added"]},
-        "allow": {"off": ["mat_ubo", "gi_layout"], "on": ["mat_ubo", "gi_layout"]},
+        "allow": {"off": ["gi_layout"], "on": ["gi_layout"]},
+    },
+    # Built-in (non-graph) materials only, several different ones in ONE frame:
+    # the SSR witness's metallic mirror floor + rough red cube, and the sRGB
+    # witness's two textured cubes (hasTexture=1, linear left / sRGB right).
+    # Each draw's material block lives in its own slot of a per-frame ring
+    # behind a dynamic UBO (Thema 144; it used to be vkCmdUpdateBuffer inside the
+    # render pass). Strict: no validation message allowed. The samples catch the
+    # failure validation cannot see — draws reading each other's slot: the cube
+    # would lose its red, the floor its mirror, the textured pair its texture.
+    "builtin": {
+        "base": {"SKYTEST": "1", "SSRTEST": "1", "SRGBTEST": "1", "SSR": "0", "TOD": "0.5",
+                 "CLOUDMODE": "0", "COVERAGE": "0", "CAMY": "3", "CAMZ": "2", "PITCH": "-12",
+                 "FRAMES": "6"},
+        "variants": {"scene": {}},
+        "pairs": [],
+        "require": {"scene": ["HE_DUMP_SSRTEST witness scene added",
+                              "HE_DUMP_SRGBTEST linear/sRGB cube pair added"]},
+        # (x, y) as fractions of the frame. Measured on an RTX 4070 (1280x720,
+        # 05.10.2026): red (192,71,83), floor (102,171,216), left (148,160,173),
+        # right (95,106,120). The checks are coarse on purpose (lavapipe shades
+        # a little differently); they fail on a swapped block, not on a shade.
+        "samples": {"scene": {"red": (0.50, 0.46), "floor": (0.50, 0.83),
+                              "left": (0.36, 0.42), "right": (0.64, 0.42)}},
+        "checks": {"scene": [
+            ("red cube is red", lambda p: p["red"][0] > p["red"][1] + 60 and p["red"][0] > p["red"][2] + 60),
+            ("mirror floor shows the blue sky", lambda p: p["floor"][2] > p["floor"][0] + 40),
+            ("textured cubes are grey, not red", lambda p: all(abs(p[k][0] - p[k][1]) < 40 for k in ("left", "right"))),
+            ("linear cube brighter than sRGB cube", lambda p: sum(p["left"]) > sum(p["right"]) + 45),
+        ]},
+    },
+    # Painted terrain (Thema 143): a red field with a green disc in the middle and
+    # a blue one bottom left, drawn by a Landscape Layer Blend graph that samples
+    # the weightmap at material binding 14 (heLandscapeWeights). Before that row
+    # was in the Vulkan material layout, lavapipe died with SIGSEGV in the first
+    # draw (GI on or off) and NVIDIA drew the whole terrain red. Seen from straight
+    # above; the probes are the verdict — an A/B cannot tell "painted" from
+    # "unpainted", the colour under the disc can. Measured on an RTX 4070 (Vulkan,
+    # 05.10.2026): the leading channel wins by 59 (green) / 37 (blue) / 85 (red)
+    # steps with GI off, 87 / 41 / 101 with GI on; unpainted, all three read red.
+    "landscape": {
+        "base": {"LANDSCAPELAYERS": "1", "SKYTEST": "1", "CAMX": "0", "CAMY": "392",
+                 "CAMZ": "0", "PITCH": "-89", "TOD": "0.4", "CLOUDMODE": "0",
+                 "COVERAGE": "0"},
+        "variants": {
+            "gi_off": {"dump": {"GI": "0"}},
+            "gi_on":  {"dump": {"GI": "1"}},
+        },
+        "pairs": [("gi_off", "gi_on", None)],
+        "require": {"gi_off": ["HE_DUMP_LANDSCAPELAYERS witness landscape added",
+                               "-> heLandscapeWeights bound"],
+                    "gi_on":  ["HE_DUMP_LANDSCAPELAYERS witness landscape added",
+                               "-> heLandscapeWeights bound"]},
+        "probes": {v: [("green disc", 0.50, 0.50, "g"), ("blue disc", 0.32, 0.70, "b"),
+                       ("red field", 0.50, 0.20, "r")] for v in ("gi_off", "gi_on")},
+        "allow": {"gi_on": ["gi_layout"]},
+    },
+    # Black GI stripes (Thema 159, docs/gi-stripes-vulkan-d3d-ursache-2026-10-07.md):
+    # the GI sun-shadow mask starts its rays at the GI G-buffer position + 5 cm
+    # along the normal. While that position was RGBA16F, its ULP at y = 300
+    # (0.25 m) swallowed the offset and every surface shadowed itself: dense
+    # row stripes on the flat painted terrain, horizontal bands on the sphere.
+    # The witness scenes sit at y = 300 on purpose — at y = 0 the bug is
+    # invisible. Same view as scripts/gi-stripes-repro/cap159.ps1 -Scene layers.
+    # Measured on an RTX 4070 (Vulkan, 07.10.2026), stripe energy terrain /
+    # sphere: 5.22 / 5.58 before the fix (RGBA16F), 0.15 / 0.41 after; GI off
+    # 0.00 / 0.58. The same numbers on OpenGL, D3D11 and D3D12 (4.34-6.11 before).
+    # gi_off is the control that the boxes hold no stripes of their own.
+    "gi_stripes": {
+        "base": {"LANDSCAPELAYERS": "1", "MATERIALTEST": "1", "SKYTEST": "1",
+                 "CAMX": "0", "CAMY": "306", "CAMZ": "20", "PITCH": "-20", "TOD": "0.35",
+                 "CLOUDMODE": "0", "COVERAGE": "0", "CLOUDSHADOWS": "0", "SSAO": "0",
+                 "AA": "0", "MOTIONBLUR": "0", "DOF": "0", "BLOOM": "0", "SSR": "0",
+                 "RENDERPATH": "0", "FRAMES": "40"},
+        "variants": {
+            "gi_off": {"dump": {"GI": "0"}},
+            "gi_on":  {"dump": {"GI": "1"}},
+        },
+        "pairs": [("gi_off", "gi_on", None)],
+        "require": {"gi_off": ["HE_DUMP_LANDSCAPELAYERS witness landscape added",
+                               "HE_DUMP_MATERIALTEST sphere"],
+                    "gi_on":  ["HE_DUMP_LANDSCAPELAYERS witness landscape added",
+                               "HE_DUMP_MATERIALTEST sphere", "GI probe grid"]},
+        "stripes": {v: [("terrain", 0.08, 0.78, 0.92, 0.98, STRIPE_MAX),
+                        ("sphere",  0.37, 0.17, 0.63, 0.47, STRIPE_MAX)] for v in ("gi_off", "gi_on")},
+        "allow": {"gi_on": ["gi_layout"]},
+    },
+    # UI Image widget (Thema 157): tile 12 of HE_DUMP_UITEST=image is an Image
+    # element at x 60..300, y 590..700 of the 1280x720 frame showing a generated
+    # picture (red top-left, green top-right, blue bottom-left, yellow bottom-
+    # right) under a white tint. Before Vulkan's UI pass had a texture path it
+    # drew the tint, a white quad: all three probes read (255,255,255) and lead
+    # by 0 (RTX 4070, 07.10.2026). Yellow is not probed: its red leads green by
+    # exactly PROBE_MARGIN. Exact colours (and the sRGB trap, Thema 107) are
+    # scripts/ui-image-repro/ana157.py's job on hardware.
+    "ui_image": {
+        "base": {"UITEST": "image", "FRAMES": "16"},
+        "variants": {"image": {}},
+        "pairs": [],
+        "probes": {"image": [("red TL", 0.09375, 0.857, "r"), ("green TR", 0.1875, 0.857, "g"),
+                             ("blue BL", 0.09375, 0.933, "b")]},
+        # The witness texture is flagged sRGB; sampled through an _SRGB view it
+        # reads (202,3,3) / (3,147,12) / (3,20,202) / (222,182,5) — the leads
+        # above still pass, these do not (measured on the RTX 4070, 07.10.2026).
+        "colors": {"image": [("red TL", 0.09375, 0.857, (230, 30, 30)),
+                             ("green TR", 0.1875, 0.857, (30, 200, 60)),
+                             ("blue BL", 0.09375, 0.933, (30, 80, 230)),
+                             ("yellow BR", 0.1875, 0.933, (240, 220, 40))]},
     },
 }
+
+# Probe verdict: the named channel of the box mean must lead both others by at
+# least this many 8-bit steps.
+PROBE_MARGIN = 20
+PROBE_RADIUS = 8  # box half-size in pixels
+# Colour verdict: every channel within this many 8-bit steps of the expected value.
+COLOR_TOL = 12
 
 # Validation messages a case may print while its picture is made, by key:
 # (regex, why it is tolerated). A case opts in per variant with "allow"; any
@@ -122,13 +249,11 @@ CASES = {
 #
 # Every entry is an open renderer bug found by this job (03.10.2026), not a
 # layer quirk. Fix the bug, then delete the entry — the case turns strict.
+#
+# Fixed and deleted: "mat_ubo" (vkCmdUpdateBuffer + barrier for the built-in
+# per-draw material block inside the scene render pass; Thema 144 — the block
+# now sits in a per-frame ring behind a dynamic UBO, case "builtin" guards it).
 ALLOWED_VALIDATION = {
-    # Built-in (non-graph) material draws write the shared per-draw material UBO
-    # with vkCmdUpdateBuffer + a buffer barrier INSIDE the scene render pass
-    # (VulkanRenderer.cpp, drawDCVk and its instanced twin: "Update material
-    # UBO"). Two messages per built-in draw per frame.
-    "mat_ubo": [r"VUID-vkCmdUpdateBuffer-renderpass",
-                r"VUID-vkCmdPipelineBarrier-None-07889"],
     # With GI on, once per frame: a submitted command buffer expects an image in
     # a layout it is not in. The engine log truncates the message before the
     # layout names; the full text is in the artifact's per-shot log.
@@ -192,6 +317,45 @@ def diff_stats(a, b):
     px = len(a) // 3
     return {"mean_abs": round(total / len(a), 4), "max_abs": peak, "px_changed": changed,
             "pct_px_over2": round(100.0 * over / px, 3)}
+
+
+def probe_box(pix, w, h, fx, fy, r=PROBE_RADIUS):
+    """Mean (R, G, B) of the (2r+1)² box around (fx·w, fy·h); pix is BGR."""
+    cx = min(max(int(fx * w), r), w - 1 - r)
+    cy = min(max(int(fy * h), r), h - 1 - r)
+    acc = [0, 0, 0]
+    for y in range(cy - r, cy + r + 1):
+        o = (y * w + cx - r) * 3
+        row = pix[o:o + (2 * r + 1) * 3]
+        for c in range(3):
+            acc[c] += sum(row[c::3])
+    n = (2 * r + 1) ** 2
+    b, g, rr = (round(v / n) for v in acc)
+    return rr, g, b
+
+
+def stripe_energy(pix, w, h, fx0, fy0, fx1, fy1):
+    """Mean |Δ luminance| between vertically adjacent pixels in the box
+    (fractions of the frame); luminance = mean of R, G, B. pix is BGR."""
+    x0, x1 = int(fx0 * w), int(fx1 * w)
+    y0, y1 = int(fy0 * h), int(fy1 * h)
+    def lum_row(y):
+        row = pix[(y * w + x0) * 3:(y * w + x1) * 3]
+        return [row[i] + row[i + 1] + row[i + 2] for i in range(0, len(row), 3)]
+    total, n = 0, 0
+    prev = lum_row(y0)
+    for y in range(y0 + 1, y1):
+        cur = lum_row(y)
+        total += sum(abs(a - b) for a, b in zip(cur, prev))
+        n += len(cur)
+        prev = cur
+    return round(total / (3.0 * n), 3) if n else 0.0
+
+
+def judge_probe(rgb, channel):
+    """Lead of `channel` over the larger of the other two (negative = it loses)."""
+    i = "rgb".index(channel)
+    return rgb[i] - max(v for k, v in enumerate(rgb) if k != i)
 
 
 # ── One shot ─────────────────────────────────────────────────────────────────
@@ -327,6 +491,46 @@ def main():
             for needle in spec.get("forbid", {}).get(vname, []):
                 if needle in shot["_log"]:
                     problems.append(f"{vname}: log has '{needle}'")
+            samples = spec.get("samples", {}).get(vname)
+            if samples:
+                p = {k: probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy, r=4)
+                     for k, (fx, fy) in samples.items()}
+                shot["samples"] = p
+                print("      samples: " + ", ".join(f"{k} {v}" for k, v in p.items()))
+                for desc, ok in spec.get("checks", {}).get(vname, []):
+                    if not ok(p):
+                        problems.append(f"{vname}: sample check failed: {desc}")
+            shot["probes"] = []
+            for label, fx, fy, ch in spec.get("probes", {}).get(vname, []):
+                rgb = probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy)
+                lead = judge_probe(rgb, ch)
+                ok = lead >= PROBE_MARGIN
+                shot["probes"].append({"label": label, "x": fx, "y": fy, "channel": ch,
+                                       "rgb": rgb, "lead": lead, "ok": ok})
+                print(f"      probe {label:12s} ({fx:.2f},{fy:.2f}) rgb={rgb} "
+                      f"{ch} leads by {lead} → {'ok' if ok else 'FAIL'} (min {PROBE_MARGIN})")
+                if not ok:
+                    problems.append(f"{vname}: probe '{label}' rgb={rgb}, {ch} leads by {lead} < {PROBE_MARGIN}")
+            for label, fx, fy, want in spec.get("colors", {}).get(vname, []):
+                rgb = probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy)
+                off = max(abs(a - b) for a, b in zip(rgb, want))
+                ok = off <= COLOR_TOL
+                shot["probes"].append({"label": label, "x": fx, "y": fy, "want": list(want),
+                                       "rgb": rgb, "off": off, "ok": ok})
+                print(f"      color {label:12s} ({fx:.2f},{fy:.2f}) rgb={rgb} want {want} "
+                      f"off by {off} → {'ok' if ok else 'FAIL'} (max {COLOR_TOL})")
+                if not ok:
+                    problems.append(f"{vname}: colour '{label}' rgb={rgb}, {off} off {want} > {COLOR_TOL}")
+            shot["stripes"] = []
+            for label, fx0, fy0, fx1, fy1, mx in spec.get("stripes", {}).get(vname, []):
+                e = stripe_energy(shot["_pix"], shot["width"], shot["height"], fx0, fy0, fx1, fy1)
+                ok = e <= mx
+                shot["stripes"].append({"label": label, "box": [fx0, fy0, fx1, fy1],
+                                        "energy": e, "max": mx, "ok": ok})
+                print(f"      stripes {label:10s} ({fx0:.2f},{fy0:.2f})-({fx1:.2f},{fy1:.2f}) "
+                      f"energy {e} → {'ok' if ok else 'FAIL'} (max {mx})")
+                if not ok:
+                    problems.append(f"{vname}: stripes in '{label}', energy {e} > {mx}")
 
         pairs = []
         for a, b, min_mean in spec["pairs"]:

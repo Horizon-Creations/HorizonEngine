@@ -490,7 +490,8 @@ private:
 	// (unretained, autoreleased) id<MTLTexture> owned by the cache.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex);
 	// Node-graph project texture (Texture Sample nodes), cached by UUID/path key.
-	void* ResolveGraphTexture(const HE::UUID& texId, const std::string& path);
+	// `array` = a sampler2DArray slot (Thema 158): texture2d_array, white array when missing.
+	void* ResolveGraphTexture(const HE::UUID& texId, const std::string& path, bool array = false);
 	// A UI quad's image: same asset, uploaded without the sRGB decode, because
 	// the UI pass writes sRGB numbers straight to a Unorm target (Thema 107).
 	void* ResolveUITexture(const HE::UUID& texId, const std::string& path);
@@ -601,7 +602,13 @@ private:
 	void* m_noDepthState    = nullptr; // id<MTLDepthStencilState> (overlay)
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when shadow/AO/moon texture is absent
+	void* m_whiteArrayTexture = nullptr; // id<MTLTexture>, 1×1×1 white texture2d_array (empty array slot)
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
+	// Graph-material project textures (heTexP0..3, MSL texture/sampler 1..4):
+	// linear + mips like m_linearSampler, but REPEAT. Every other backend tiles
+	// these (GL default wrap, D3D WRAP, Vulkan REPEAT); with the clamping sampler
+	// a material uv past 0..1 smeared the edge texel on Metal only (Thema 158 S5).
+	void* m_materialSampler = nullptr; // id<MTLSamplerState>
 	void* m_noiseTexture    = nullptr; // id<MTLTexture>, 3D R16 value noise (sky)
 	void* m_noiseSampler    = nullptr; // id<MTLSamplerState>, linear + repeat
 	void* m_skyEnvCube      = nullptr; // id<MTLTexture>, baked skyColor IBL cubemap

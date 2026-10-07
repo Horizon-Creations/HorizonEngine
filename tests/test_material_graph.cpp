@@ -10,6 +10,7 @@
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 // he_materialshader is linked into he_tests in every flavour (the stub answers the
 // compiles); only the cross-compile TEST CASES below are gated on HE_TESTS_HAVE_SHADERC.
@@ -402,10 +403,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// WindSway is the LAST enum value today; a node added after it must move
-	// this bound, or it silently drops out of the loop (which is how v10/v11
-	// went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::WindSway; ++t)
+	// NormalMapArrayBombSample is the LAST enum value today; a node added after it
+	// must move this bound, or it silently drops out of the loop (which is how
+	// v10/v11 — and the v13 array nodes — went unchecked for a while).
+	for (int t = 0; t <= (int)MatNodeType::NormalMapArrayBombSample; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -869,6 +870,263 @@ TEST_CASE("MaterialShaderLibrary::spirvFromBytes round-trips words and rejects t
 	CHECK(out.empty());
 	CHECK_FALSE(HE::MaterialShaderLibrary::spirvFromBytes(bytes.substr(0, 7), out)); // not whole words
 	CHECK(out.empty());
+}
+
+// ═══ Texture arrays (Thema 158, Schritt 3) ═══════════════════════════════════
+// The auto landscape material's full texture set: Albedo / Normal / Mask arrays
+// (five slices each) in heTexP0..2 and an ordinary 2D texture in heTexP3 — all
+// four project slots live, three of them sampler2DArray. Lit, with every array
+// on a different Output pin so no read can be optimised away.
+static MaterialGraph makeTextureArrayGraph()
+{
+	MaterialGraph g;
+	const int out   = g.addNode(MatNodeType::Output);
+	const int uv    = g.addNode(MatNodeType::UV);
+	g.findNode(uv)->p[0] = g.findNode(uv)->p[1] = 8.0f;
+	const int slice = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(slice)->p[0] = 2.0f;
+	const int alb = g.addNode(MatNodeType::TextureArraySample);
+	g.findNode(alb)->s = "Textures/T_Albedo_Array.hasset";
+	const int nrm = g.addNode(MatNodeType::NormalMapArraySample);
+	g.findNode(nrm)->s = "Textures/T_Normal_Array.hasset";
+	const int msk = g.addNode(MatNodeType::TextureArraySample);
+	g.findNode(msk)->s = "Textures/T_Mask_Array.hasset";
+	const int t2d = g.addNode(MatNodeType::TextureSample);
+	g.findNode(t2d)->s = "Textures/T_Puddle.hasset";
+	const int split = g.addNode(MatNodeType::SplitRGBA);
+	const int mul   = g.addNode(MatNodeType::Multiply);
+	for (int n : { alb, nrm, msk })
+	{
+		CHECK(g.connect(uv,    0, n, 0));
+		CHECK(g.connect(slice, 0, n, 1));
+	}
+	CHECK(g.connect(uv,  0, t2d, 0));
+	CHECK(g.connect(alb, 0, mul, 0));
+	CHECK(g.connect(t2d, 0, mul, 1));
+	CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+	CHECK(g.connect(nrm, 0, out, HE::kMatOutputNormalPin));
+	CHECK(g.connect(msk, 0, split, 0));
+	CHECK(g.connect(split, 0, out, HE::kMatOutputAOPin));
+	CHECK(g.connect(split, 1, out, HE::kMatOutputRoughnessPin));
+	return g;
+}
+
+TEST_CASE("Texture Array Sample declares sampler2DArray slots and writes the array mask")
+{
+	const HE::MatShaderGen gen = HE::generateFragment(makeTextureArrayGraph());
+	// Slot order = order of emission; the three arrays and the 2D texture are four
+	// slots, and exactly the 2D one is not in the mask — wherever it landed.
+	REQUIRE(gen.textures.size() == 4);
+	uint32_t want = 0;
+	for (int i = 0; i < 4; ++i)
+	{
+		const bool is2D = gen.textures[i] == "Textures/T_Puddle.hasset";
+		if (!is2D) want |= 1u << i;
+		CHECK_MESSAGE(gen.glsl.find("binding = " + std::to_string(4 + i) + ") uniform "
+		                            + (is2D ? "sampler2D" : "sampler2DArray") + " heTexP"
+		                            + std::to_string(i) + ";") != std::string::npos, "slot ", i);
+	}
+	CHECK(((want & 1) + ((want >> 1) & 1) + ((want >> 2) & 1) + ((want >> 3) & 1)) == 3u);
+	CHECK(gen.textureArrayMask == want);
+	// The mask sits right under #version, in BOTH variants, and reads back.
+	const std::string line = "#version 450\n// heTexArrays " + std::to_string(want) + "\n";
+	CHECK(gen.glsl.rfind(line, 0) == 0);
+	CHECK(gen.glslGBuffer.rfind(line, 0) == 0);
+	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == want);
+	CHECK(HE::matGlslTextureArrayMask(gen.glslGBuffer) == want);
+	// The slice is rounded and clamped in the shader, not left to the API.
+	CHECK(gen.glsl.find("clamp(floor(") != std::string::npos);
+	CHECK(gen.glsl.find("textureSize(heTexP") != std::string::npos);
+	CHECK(gen.glsl.find(", 0).z - 1") != std::string::npos);
+
+	// A graph with no array node keeps its exact old text: no mask line at all.
+	const HE::MatShaderGen plain = HE::generateFragment(makeDemoGraph());
+	CHECK(plain.textureArrayMask == 0u);
+	CHECK(plain.glsl.rfind("#version 450\n// GENERATED", 0) == 0);
+	CHECK(HE::matGlslTextureArrayMask(plain.glsl) == 0u);
+	CHECK(HE::matGlslTextureArrayMask("") == 0u);
+	CHECK(HE::matGlslTextureArrayMask("#version 450\n// heTexArrays 255\n") == 0b1111u); // capped to 4 slots
+}
+
+TEST_CASE("One file read as 2D and as an array takes two slots, never one with the wrong type")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int a   = g.addNode(MatNodeType::TextureSample);
+	const int b   = g.addNode(MatNodeType::TextureArraySample);
+	const int c   = g.addNode(MatNodeType::TextureArraySample);
+	for (int n : { a, b, c }) g.findNode(n)->s = "Textures/Same.hasset";
+	const int add = g.addNode(MatNodeType::Add);
+	CHECK(g.connect(a, 0, add, 0));
+	CHECK(g.connect(b, 0, add, 1));
+	const int add2 = g.addNode(MatNodeType::Add);
+	CHECK(g.connect(add, 0, add2, 0));
+	CHECK(g.connect(c, 0, add2, 1));
+	CHECK(g.connect(add2, 0, out, HE::kMatOutputBaseColorPin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	// Two array nodes on the same file share ONE slot; the 2D read has its own.
+	REQUIRE(gen.textures.size() == 2);
+	CHECK(gen.textures[0] == gen.textures[1]);
+	REQUIRE((gen.textureArrayMask == 0b01u || gen.textureArrayMask == 0b10u));
+	const int arr = gen.textureArrayMask == 0b01u ? 0 : 1;
+	CHECK(gen.glsl.find("uniform sampler2DArray heTexP" + std::to_string(arr) + ";") != std::string::npos);
+	CHECK(gen.glsl.find("uniform sampler2D heTexP" + std::to_string(1 - arr) + ";") != std::string::npos);
+
+	// No texture picked → the mesh texture (2D) and a plain 2D read: no array
+	// slot, no mask, and no vec3 coordinate on a sampler2D.
+	MaterialGraph e;
+	const int eo = e.addNode(MatNodeType::Output);
+	const int en = e.addNode(MatNodeType::TextureArraySample);
+	CHECK(e.connect(en, 0, eo, HE::kMatOutputBaseColorPin));
+	const HE::MatShaderGen eg = HE::generateFragment(e);
+	CHECK(eg.textures.empty());
+	CHECK(eg.textureArrayMask == 0u);
+	CHECK(eg.glsl.find("sampler2DArray") == std::string::npos);
+	CHECK(eg.glsl.find("texture(heTex0, n") != std::string::npos);
+	// Unconnected UV = the mesh UV, not vec2(0) (one texel for the whole surface).
+	CHECK(eg.glsl.find("_uv = vUV;") != std::string::npos);
+}
+
+// ═══ Texture bombing (Thema 158, Schritt 4) ═══════════════════════════════════
+// One terrain layer read the way the auto material reads it: Albedo / Normal /
+// Mask arrays through the bombing nodes with the SAME uv and grid params, plus a
+// 2D bombed texture with another seed. Lit, every read on its own Output pin.
+static MaterialGraph makeTextureBombGraph()
+{
+	MaterialGraph g;
+	const int out   = g.addNode(MatNodeType::Output);
+	const int uv    = g.addNode(MatNodeType::UV);
+	g.findNode(uv)->p[0] = g.findNode(uv)->p[1] = 8.0f;
+	const int slice = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(slice)->p[0] = 2.0f;
+	const int alb = g.addNode(MatNodeType::TextureArrayBombSample);
+	g.findNode(alb)->s = "Textures/T_Albedo_Array.hasset";
+	const int nrm = g.addNode(MatNodeType::NormalMapArrayBombSample);
+	g.findNode(nrm)->s = "Textures/T_Normal_Array.hasset";
+	const int msk = g.addNode(MatNodeType::TextureArrayBombSample);
+	g.findNode(msk)->s = "Textures/T_Mask_Array.hasset";
+	const int t2d = g.addNode(MatNodeType::TextureBombSample);
+	g.findNode(t2d)->s = "Textures/T_Puddle.hasset";
+	g.findNode(t2d)->p[2] = 5.0f; // its own seed → its own grid
+	const int split = g.addNode(MatNodeType::SplitRGBA);
+	const int mul   = g.addNode(MatNodeType::Multiply);
+	for (int n : { alb, nrm, msk })
+	{
+		CHECK(g.connect(uv,    0, n, 0));
+		CHECK(g.connect(slice, 0, n, 1));
+	}
+	CHECK(g.connect(uv,  0, t2d, 0));
+	CHECK(g.connect(alb, 0, mul, 0));
+	CHECK(g.connect(t2d, 0, mul, 1));
+	CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+	CHECK(g.connect(nrm, 0, out, HE::kMatOutputNormalPin));
+	CHECK(g.connect(msk, 0, split, 0));
+	CHECK(g.connect(split, 0, out, HE::kMatOutputAOPin));
+	CHECK(g.connect(split, 1, out, HE::kMatOutputRoughnessPin));
+	return g;
+}
+
+static size_t countOf(const std::string& s, const std::string& what)
+{
+	size_t n = 0;
+	for (size_t at = s.find(what); at != std::string::npos; at = s.find(what, at + what.size())) ++n;
+	return n;
+}
+
+TEST_CASE("Texture bombing: one hex grid per layer, integer hash, gradient reads")
+{
+	const HE::MatShaderGen gen = HE::generateFragment(makeTextureBombGraph());
+	// Same slots as the plain nodes: three arrays + one 2D texture.
+	REQUIRE(gen.textures.size() == 4);
+	CHECK(countOf(gen.glsl, "uniform sampler2DArray heTexP") == 3u);
+	CHECK(countOf(gen.glsl, "uniform sampler2D heTexP") == 1u);
+	CHECK(gen.textureArrayMask != 0u);
+	// The helpers once; the grid CALLED twice — the three layer reads share one
+	// (same uv + params), the 2D read with seed 5 has its own.
+	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
+	CHECK(countOf(gen.glsl, "heBombGrid(n") == 2u);
+	CHECK(gen.glsl.find(", 0u, n") != std::string::npos); // seed 0 → "0u"
+	CHECK(gen.glsl.find(", 5u, n") != std::string::npos); // seed 5 → "5u"
+	// Three hexes per read, all with explicit gradients (a hex seam must not pick
+	// a different mip): 4 nodes × 3 taps.
+	CHECK(countOf(gen.glsl, "textureGrad(heTexP") == 12u);
+	CHECK(gen.glsl.find("= texture(heTexP") == std::string::npos);
+	CHECK(gen.glsl.find("dFdx(n") != std::string::npos);
+	// The randomness is an integer hash, never fract(sin(…)): a different offset on
+	// one GPU would be a different texel in the backend image comparison.
+	CHECK(gen.glsl.find("uvec3 heBombHash(ivec2 cell, uint seed)") != std::string::npos);
+	CHECK(gen.glsl.find("uvec3(uvec2(cell), seed)") != std::string::npos);
+	CHECK(gen.glsl.find("fract(sin") == std::string::npos);
+	// Normals are turned back by their hex's rotation, then the usual frame.
+	CHECK(countOf(gen.glsl, "= transpose(n") == 3u);
+	CHECK(gen.glsl.find("hePerturbNormal(normalize(vNormal)") != std::string::npos);
+	// The G-buffer variant carries the same body.
+	CHECK(countOf(gen.glslGBuffer, "textureGrad(heTexP") == 12u);
+
+	// A wired Cell is part of the grid: the same layer on another cell size is
+	// another grid, the same cell source keeps one.
+	{
+		MaterialGraph g = makeTextureBombGraph();
+		const int cell = g.addNode(MatNodeType::ConstFloat);
+		g.findNode(cell)->p[0] = 1.5f;
+		int wired = 0;
+		for (const auto& n : g.nodes)
+			if (n.type == MatNodeType::TextureArrayBombSample || n.type == MatNodeType::NormalMapArrayBombSample)
+			{
+				CHECK(g.connect(cell, 0, n.id, 2));
+				++wired;
+			}
+		CHECK(wired == 3);
+		const std::string glsl = HE::generateFragment(g).glsl;
+		CHECK(countOf(glsl, "heBombGrid(n") == 2u);
+		const int msk = [&] { for (const auto& n : g.nodes) if (n.s == "Textures/T_Mask_Array.hasset") return n.id; return 0; }();
+		g.disconnectInput(msk, 2); // the mask back on the default cell → its own grid
+		CHECK(countOf(HE::generateFragment(g).glsl, "heBombGrid(n") == 3u);
+	}
+
+	// Graphs without a bombing node keep their exact text: no helper at all.
+	CHECK(HE::generateFragment(makeDemoGraph()).glsl.find("heBomb") == std::string::npos);
+	CHECK(HE::generateFragment(makeTextureArrayGraph()).glsl.find("heBomb") == std::string::npos);
+}
+
+TEST_CASE("Texture bombing: params are sanitised, and an empty path falls back to the mesh texture")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int n   = g.addNode(MatNodeType::TextureArrayBombSample);
+	// A fresh node: full rotation, sharpness 7, seed 0 (strength 1 on the normal nodes).
+	CHECK(g.findNode(n)->p[0] == doctest::Approx(1.0f));
+	CHECK(g.findNode(n)->p[1] == doctest::Approx(HE::kMatBombDefaultSharpness));
+	CHECK(g.findNode(n)->p[2] == doctest::Approx(0.0f));
+	const int nn = g.addNode(MatNodeType::NormalMapBombSample);
+	CHECK(g.findNode(nn)->p[3] == doctest::Approx(1.0f));
+	// Saved values out of range: rotation clamps to 1, sharpness ≤ 0 means the
+	// default, the seed is rounded (and a negative one wraps like the shader's uint).
+	g.findNode(n)->p[0] = 3.0f;
+	g.findNode(n)->p[1] = 0.0f;
+	g.findNode(n)->p[2] = -1.4f;
+	CHECK(g.connect(n, 0, out, HE::kMatOutputBaseColorPin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	// heBombGrid(uv, cell, rotation, sharpness, seed, …): the unwired Cell pin is
+	// the default spacing.
+	CHECK(gen.glsl.find("(vUV, 0.500000, 1.000000, 7.000000, 4294967295u, ") != std::string::npos);
+	// No texture picked → the mesh texture (2D): plain 2D reads, no layer, no mask.
+	CHECK(gen.textures.empty());
+	CHECK(gen.textureArrayMask == 0u);
+	CHECK(gen.glsl.find("sampler2DArray") == std::string::npos);
+	CHECK(gen.glsl.find("textureGrad(heTex0, n") != std::string::npos);
+	CHECK(gen.glsl.find("textureSize(") == std::string::npos);
+
+	// Through JSON the node keeps its type and every param.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	const auto* bn = back.findNode(n);
+	REQUIRE(bn != nullptr);
+	CHECK(bn->type == MatNodeType::TextureArrayBombSample);
+	CHECK(bn->p[0] == doctest::Approx(3.0f));
+	CHECK(bn->p[2] == doctest::Approx(-1.4f));
+	CHECK(HE::matNodeSamplesTexture(MatNodeType::NormalMapArrayBombSample));
+	CHECK_FALSE(HE::matNodeIsBombing(MatNodeType::TextureArraySample));
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
@@ -1638,9 +1896,11 @@ TEST_CASE("matLandscapeLayerNames splits, trims and caps the layer list")
 	      == std::vector<std::string>{ "Grass", "Rock" });
 	// Never empty — a node with no names still has one pin.
 	CHECK(HE::matLandscapeLayerNames("").size() == 1);
-	// One RGBA weightmap = four channels, so the list is capped.
-	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf").size()
+	// Two RGBA weightmap pages = eight channels, so the list is capped there.
+	CHECK(HE::kMatMaxLandscapeLayers == 8);
+	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf\ng\nh\ni\nj").size()
 	      == static_cast<size_t>(HE::kMatMaxLandscapeLayers));
+	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne").size() == 5);
 }
 
 TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
@@ -1688,6 +1948,80 @@ TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
 	CHECK(pg.glsl.find("heLandscapeWeights") == std::string::npos);
 }
 
+TEST_CASE("Landscape Layer Blend reads layers 4..7 from the right half of the same weightmap")
+{
+	// Eight layers, ONE sampler: the blend takes the page count from the
+	// texture's own size (2:1 = two pages) and never declares a second
+	// weightmap, binding or uniform — on every backend the same single
+	// heLandscapeWeights the four-layer blend used.
+	auto blend = [](int layers) {
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+		std::string names;
+		for (int i = 0; i < layers; ++i) names += (i ? "\n" : "") + std::string("L") + std::to_string(i);
+		g.findNode(lb)->s = names;
+		for (int i = 0; i < layers; ++i)
+		{
+			const int c = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(c)->p[0] = static_cast<float>(i + 1) / 8.0f;
+			REQUIRE(g.connect(c, 0, lb, i));
+		}
+		REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+		return HE::generateFragment(g);
+	};
+	auto count = [](const std::string& hay, const std::string& needle) {
+		size_t n = 0;
+		for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+		return n;
+	};
+
+	const HE::MatShaderGen five = blend(5), eight = blend(8), three = blend(3);
+	REQUIRE(eight.layerNames.size() == 8);
+	REQUIRE(five.layerNames.size() == 5);
+	for (const HE::MatShaderGen* g : { &three, &five, &eight })
+	{
+		// Exactly one weightmap declaration, at the binding it always had.
+		CHECK(count(g->glsl, "uniform sampler2D heLandscapeWeights") == 1);
+		CHECK(g->glsl.find("binding = 14) uniform sampler2D heLandscapeWeights") != std::string::npos);
+		CHECK(g->glsl.find("sampler2DArray heLandscapeWeights") == std::string::npos);
+		// Page-aware: the size test and the clamped, mip-0 page-0 read …
+		CHECK(g->glsl.find("textureSize(heLandscapeWeights, 0)") != std::string::npos);
+		CHECK(g->glsl.find("textureLod(heLandscapeWeights") != std::string::npos);
+		// … beside the untouched square-map read the blend always made.
+		CHECK(g->glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+	}
+	// Only a blend with a fifth layer reads the second page at all.
+	CHECK(count(three.glsl, "textureLod(heLandscapeWeights") == 1);
+	CHECK(count(eight.glsl, "textureLod(heLandscapeWeights") == 2);
+	CHECK(three.glsl.find("_w2.") == std::string::npos);
+	CHECK(eight.glsl.find("_wu + 0.5") != std::string::npos);
+	// Layers 4..7 are the second page's channels, in order.
+	for (const char* ch : { "_w2.x", "_w2.y", "_w2.z", "_w2.w" })
+		CHECK(eight.glsl.find(ch) != std::string::npos);
+	CHECK(five.glsl.find("_w2.x") != std::string::npos);
+	CHECK(five.glsl.find("_w2.y") == std::string::npos);
+	// The approximate surface keeps one colour per layer in memory; the asset
+	// format still persists four (kMatApproxLayerColors).
+	HE::MaterialGraph g8;
+	{
+		const int out = g8.addNode(HE::MatNodeType::Output);
+		const int lb  = g8.addNode(HE::MatNodeType::LandscapeLayerBlend);
+		g8.findNode(lb)->s = "a\nb\nc\nd\ne\nf";
+		for (int i = 0; i < 6; ++i)
+		{
+			const int c = g8.addNode(HE::MatNodeType::ConstColor);
+			g8.findNode(c)->p[0] = 0.1f * static_cast<float>(i + 1);
+			REQUIRE(g8.connect(c, 0, lb, i));
+		}
+		REQUIRE(g8.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+	}
+	const HE::MatApproxSurface ap = HE::matGraphApproxSurface(g8);
+	CHECK(ap.layerCount == 6);
+	CHECK(ap.layerColor[5][0] == doctest::Approx(0.6f));
+	CHECK(HE::kMatApproxLayerColors == 4);
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
 TEST_CASE("A wired Landscape Layer Blend cross-compiles for Metal and GL")
 {
@@ -1716,6 +2050,252 @@ TEST_CASE("A wired Landscape Layer Blend cross-compiles for Metal and GL")
 	CHECK_MESSAGE(msl.ok, "MSL compile failed: ", msl.log);
 	const auto& gl = lib.fragment(hash, glsl, B::GLSL410);
 	CHECK_MESSAGE(gl.ok, "GLSL compile failed: ", gl.log);
+}
+
+TEST_CASE("A five- and an eight-layer Landscape Layer Blend cross-compile for all five backends")
+{
+	// The second page is read through textureSize + textureLod on the SAME
+	// sampler. Every backend's compiler has to take that: MSL (Metal — no
+	// hardware here, this compile is its evidence), GLSL 4.10 / ES 3.00 / 4.30
+	// (OpenGL), HLSL (D3D11/D3D12; FXC is the Windows-only case further down)
+	// and SPIR-V (Vulkan).
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (int layers : { 5, 8 })
+	{
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+		std::string names;
+		for (int i = 0; i < layers; ++i) names += (i ? "\n" : "") + std::string("Layer") + std::to_string(i);
+		g.findNode(lb)->s = names;
+		for (int i = 0; i < layers; ++i)
+		{
+			const int c = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(c)->p[i % 3] = 1.0f;
+			g.findNode(c)->p[(i + 1) % 3] = static_cast<float>(i) / 8.0f;
+			CHECK(g.connect(c, 0, lb, i));
+		}
+		CHECK(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+		const std::string glsl = HE::generateFragment(g).glsl;
+		const uint64_t    hash = std::hash<std::string>{}(glsl);
+		for (B b : { B::Metal, B::GLSL410, B::GLSLES300, B::GLSL430, B::HLSL, B::SpirV })
+		{
+			const auto& r = lib.fragment(hash, glsl, b);
+			CHECK_MESSAGE(r.ok, layers, " layers, backend ", static_cast<int>(b), ": ", r.log);
+		}
+		const auto& clustered = lib.fragmentClustered(hash, glsl, B::HLSL);
+		CHECK_MESSAGE(clustered.ok, layers, " layers, clustered HLSL: ", clustered.log);
+		// The Metal source reads the one weightmap texture at its one slot.
+		const std::string msl = lib.fragment(hash, glsl, B::Metal).source;
+		CHECK(msl.find("heLandscapeWeights.get_width") != std::string::npos);
+
+		// Metal has no hardware here, so its sampler budget is proven on the
+		// source: the eight-layer fragment declares EXACTLY the [[sampler(N)]]
+		// slots the three-layer one does — the second page costs no slot —
+		// and stays inside the 16 a Metal fragment stage allows.
+		auto samplerSlots = [](const std::string& src) {
+			std::vector<int> v;
+			const std::string tag = "[[sampler(";
+			for (size_t at = src.find(tag); at != std::string::npos; at = src.find(tag, at + tag.size()))
+				v.push_back(std::atoi(src.c_str() + at + tag.size()));
+			std::sort(v.begin(), v.end());
+			v.erase(std::unique(v.begin(), v.end()), v.end());
+			return v;
+		};
+		HE::MaterialGraph g3;
+		{
+			const int o3 = g3.addNode(HE::MatNodeType::Output);
+			const int b3 = g3.addNode(HE::MatNodeType::LandscapeLayerBlend);
+			g3.findNode(b3)->s = "Grass\nRock\nSand";
+			for (int i = 0; i < 3; ++i)
+			{
+				const int c = g3.addNode(HE::MatNodeType::ConstColor);
+				g3.findNode(c)->p[i] = 1.0f;
+				CHECK(g3.connect(c, 0, b3, i));
+			}
+			CHECK(g3.connect(b3, 0, o3, HE::kMatOutputBaseColorPin));
+		}
+		const std::string glsl3 = HE::generateFragment(g3).glsl;
+		for (const bool clustered : { false, true })
+		{
+			CAPTURE(clustered);
+			const uint64_t h3 = std::hash<std::string>{}(glsl3);
+			const std::string m3 = clustered ? lib.fragmentClustered(h3, glsl3, B::Metal).source
+			                                 : lib.fragment(h3, glsl3, B::Metal).source;
+			const std::string mN = clustered ? lib.fragmentClustered(hash, glsl, B::Metal).source
+			                                 : msl;
+			const std::vector<int> s3 = samplerSlots(m3), sN = samplerSlots(mN);
+			REQUIRE(!s3.empty());
+			CHECK(sN == s3);
+			CHECK(sN.size() <= 16);
+			CHECK(sN.back() <= 15);
+		}
+	}
+}
+
+TEST_CASE("Three texture arrays + a 2D texture cross-compile for all five backends on the SAME slots")
+{
+	// What each backend is handed for the auto landscape material's texture set.
+	// Metal has no hardware here: its evidence is this compile plus the slot
+	// check — the array graph declares EXACTLY the [[sampler(N)]] / [[texture(N)]]
+	// slots a graph with four plain 2D textures does, so arrays cost no slot.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const HE::MatShaderGen gen = HE::generateFragment(makeTextureArrayGraph());
+	const std::string glsl = gen.glsl;
+	const uint64_t    hash = std::hash<std::string>{}(glsl);
+	for (B b : { B::Metal, B::GLSL410, B::GLSLES300, B::GLSL430, B::HLSL, B::SpirV })
+	{
+		const auto& r = lib.fragment(hash, glsl, b);
+		CHECK_MESSAGE(r.ok, "backend ", static_cast<int>(b), ": ", r.log);
+	}
+	for (B b : { B::Metal, B::HLSL, B::GLSL430 })
+	{
+		const auto& r = lib.fragmentClustered(hash, glsl, b);
+		CHECK_MESSAGE(r.ok, "clustered backend ", static_cast<int>(b), ": ", r.log);
+	}
+	const std::string msl  = lib.fragment(hash, glsl, B::Metal).source;
+	const std::string hlsl = lib.fragment(hash, glsl, B::HLSL).source;
+	REQUIRE(gen.textures.size() == 4);
+	for (int k = 0; k < 4; ++k)
+	{
+		const bool arr = (gen.textureArrayMask >> k) & 1u;
+		const std::string name = " heTexP" + std::to_string(k);
+		CHECK_MESSAGE(msl.find((arr ? "texture2d_array<float>" : "texture2d<float>") + name) != std::string::npos,
+		              "MSL slot ", k, "\n", msl);
+		CHECK_MESSAGE(hlsl.find((arr ? "Texture2DArray<float4>" : "Texture2D<float4>") + name) != std::string::npos,
+		              "HLSL slot ", k, "\n", hlsl);
+	}
+
+	// The same graph with four 2D textures: the reference slot set.
+	MaterialGraph ref;
+	{
+		const int out = ref.addNode(MatNodeType::Output);
+		int prev = -1;
+		for (int i = 0; i < 4; ++i)
+		{
+			const int t = ref.addNode(MatNodeType::TextureSample);
+			ref.findNode(t)->s = "Textures/T" + std::to_string(i) + ".hasset";
+			if (prev < 0) { prev = t; continue; }
+			const int add = ref.addNode(MatNodeType::Add);
+			CHECK(ref.connect(prev, 0, add, 0));
+			CHECK(ref.connect(t, 0, add, 1));
+			prev = add;
+		}
+		CHECK(ref.connect(prev, 0, out, HE::kMatOutputBaseColorPin));
+	}
+	const std::string refGlsl = HE::generateFragment(ref).glsl;
+	auto slots = [](const std::string& src, const std::string& tag) {
+		std::vector<int> v;
+		for (size_t at = src.find(tag); at != std::string::npos; at = src.find(tag, at + tag.size()))
+			v.push_back(std::atoi(src.c_str() + at + tag.size()));
+		std::sort(v.begin(), v.end());
+		v.erase(std::unique(v.begin(), v.end()), v.end());
+		return v;
+	};
+	for (const bool clustered : { false, true })
+	{
+		CAPTURE(clustered);
+		const uint64_t rh = std::hash<std::string>{}(refGlsl);
+		const std::string mRef = clustered ? lib.fragmentClustered(rh, refGlsl, B::Metal).source
+		                                   : lib.fragment(rh, refGlsl, B::Metal).source;
+		const std::string mArr = clustered ? lib.fragmentClustered(hash, glsl, B::Metal).source : msl;
+		for (const char* tag : { "[[sampler(", "[[texture(" })
+		{
+			CAPTURE(tag);
+			const std::vector<int> a = slots(mArr, tag), r = slots(mRef, tag);
+			REQUIRE(!r.empty());
+			CHECK(a == r);
+		}
+		CHECK(slots(mArr, "[[sampler(").size() <= 16);
+	}
+}
+
+TEST_CASE("A bombed texture layer cross-compiles for all five backends, with gradient reads")
+{
+	// The bombing nodes add only shader TEXT (integer hash, out-params, mat2,
+	// gradient reads on 2D and array samplers), no binding. What each backend
+	// gets — and that the gradients survive the translation, i.e. no backend
+	// silently falls back to an implicit-LOD read that would mip-jump at seams.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const HE::MatShaderGen gen = HE::generateFragment(makeTextureBombGraph());
+	const uint64_t hash = std::hash<std::string>{}(gen.glsl);
+	for (B b : { B::Metal, B::GLSL410, B::GLSLES300, B::GLSL430, B::HLSL, B::SpirV })
+	{
+		const auto& r = lib.fragment(hash, gen.glsl, b);
+		CHECK_MESSAGE(r.ok, "backend ", static_cast<int>(b), ": ", r.log);
+	}
+	for (B b : { B::Metal, B::HLSL, B::GLSL430 })
+	{
+		const auto& r = lib.fragmentClustered(hash, gen.glsl, b);
+		CHECK_MESSAGE(r.ok, "clustered backend ", static_cast<int>(b), ": ", r.log);
+	}
+	const uint64_t gh = std::hash<std::string>{}(gen.glslGBuffer);
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& r = lib.fragment(gh, gen.glslGBuffer, b);
+		CHECK_MESSAGE(r.ok, "G-buffer backend ", static_cast<int>(b), ": ", r.log);
+	}
+	const std::string hlsl = lib.fragment(hash, gen.glsl, B::HLSL).source;
+	const std::string msl  = lib.fragment(hash, gen.glsl, B::Metal).source;
+	const std::string gl   = lib.fragment(hash, gen.glsl, B::GLSL410).source;
+	CHECK_MESSAGE(countOf(hlsl, ".SampleGrad(") >= 12u, hlsl);
+	CHECK_MESSAGE(countOf(msl, "gradient2d(") >= 12u, msl);
+	CHECK_MESSAGE(countOf(gl, "textureGrad(") >= 12u, gl);
+}
+
+TEST_CASE("The auto landscape material cross-compiles for all five backends, in every view and permutation")
+{
+	// The biggest graph the engine ships: five layers × three array reads, three
+	// hex grids, two noise fields, fourteen parameters. All of it is shader TEXT
+	// in existing slots — what has to hold is that every backend's translator
+	// takes it, the clustered and G-buffer variants included, and that the
+	// bombing-off permutation and the unlit mask views (the witness) do too.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::map<std::string, bool> noBomb{ { HE::kAutoLandscapeSwitchBombing, false } };
+	struct Variant { const char* name; HE::MatShaderGen gen; };
+	const Variant variants[] = {
+		{ "lit",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph) },
+		{ "nobomb", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, {}, &noBomb) },
+		{ "masks",  HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksRockSnowWater).graph) },
+		{ "ground", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksDirtWet).graph) },
+	};
+	for (const Variant& v : variants)
+	{
+		INFO("variant ", v.name);
+		const uint64_t hash = std::hash<std::string>{}(v.gen.glsl);
+		for (B b : { B::Metal, B::GLSL410, B::GLSLES300, B::GLSL430, B::HLSL, B::SpirV })
+		{
+			const auto& r = lib.fragment(hash, v.gen.glsl, b);
+			CHECK_MESSAGE(r.ok, "backend ", static_cast<int>(b), ": ", r.log);
+		}
+		for (B b : { B::Metal, B::HLSL, B::GLSL430 })
+		{
+			const auto& r = lib.fragmentClustered(hash, v.gen.glsl, b);
+			CHECK_MESSAGE(r.ok, "clustered backend ", static_cast<int>(b), ": ", r.log);
+		}
+		if (v.gen.glslGBuffer.empty()) continue; // the unlit views have none
+		const uint64_t gh = std::hash<std::string>{}(v.gen.glslGBuffer);
+		for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+		{
+			const auto& r = lib.fragment(gh, v.gen.glslGBuffer, b);
+			CHECK_MESSAGE(r.ok, "G-buffer backend ", static_cast<int>(b), ": ", r.log);
+		}
+	}
+	// Three bombed layers × three maps × three taps, as gradient reads on every
+	// backend; the plain permutation has none.
+	const uint64_t h = std::hash<std::string>{}(variants[0].gen.glsl);
+	CHECK(countOf(lib.fragment(h, variants[0].gen.glsl, B::Metal).source, "gradient2d(") >= 27u);
+	CHECK(countOf(lib.fragment(h, variants[0].gen.glsl, B::HLSL).source, ".SampleGrad(") >= 27u);
+	const uint64_t hp = std::hash<std::string>{}(variants[1].gen.glsl);
+	CHECK(countOf(lib.fragment(hp, variants[1].gen.glsl, B::Metal).source, "gradient2d(") == 0u);
+	// Metal's 16 fragment samplers: the three arrays cost no more than any other
+	// four-slot graph material (the budget lesson of docs §2.1).
+	const std::string msl = lib.fragment(h, variants[0].gen.glsl, B::Metal).source;
+	CHECK(countOf(msl, "texture2d_array<float>") >= 3u);
 }
 
 TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambleSamplerSlots or the material window")
@@ -1774,6 +2354,128 @@ TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambl
 	}
 }
 #endif
+
+// ═══ Auto landscape material (Thema 158, Schritt 5) ═══════════════════════════
+
+TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex grid per bombed layer")
+{
+	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
+	const HE::MatShaderGen gen = HE::generateFragment(a.graph);
+	REQUIRE_FALSE(gen.glsl.empty());
+	CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle / missing-output magenta
+
+	// The three engine arrays and nothing else — heTexP3 stays free, no read
+	// falls back to the mesh texture. Slot order is emission order, so compare
+	// as a set.
+	std::vector<std::string> tex = gen.textures;
+	std::sort(tex.begin(), tex.end());
+	std::vector<std::string> want = { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
+	                                  HE::kAutoLandscapeMaskArray };
+	std::sort(want.begin(), want.end());
+	CHECK(tex == want);
+	CHECK(gen.textureArrayMask == 0x7u);
+	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == 0x7u);
+	CHECK(gen.glsl.find("texture(heTex0") == std::string::npos);
+
+	// Every parameter is a real HeParams slot (none baked for being over budget).
+	REQUIRE(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
+	for (const char* name : { HE::kAutoLandscapeParamGroundTile, HE::kAutoLandscapeParamRockTile,
+	                          HE::kAutoLandscapeParamBombCell, HE::kAutoLandscapeParamRockSlope,
+	                          HE::kAutoLandscapeParamRockBlend, HE::kAutoLandscapeParamHeightBlend,
+	                          HE::kAutoLandscapeParamDirtAmount, HE::kAutoLandscapeParamDirtSize,
+	                          HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowBlend,
+	                          HE::kAutoLandscapeParamSnowMaxSlope, HE::kAutoLandscapeParamPuddleAmount,
+	                          HE::kAutoLandscapeParamPuddleSize, HE::kAutoLandscapeParamPuddleMaxSlope })
+	{
+		const bool found = std::any_of(gen.params.begin(), gen.params.end(),
+		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
+		CHECK_MESSAGE(found, name);
+	}
+	// Procedural layers only: no weightmap, no paint layers.
+	CHECK(gen.layerNames.empty());
+	CHECK(gen.glsl.find("heLandscapeWeights, vUV") == std::string::npos);
+
+	// Grass, Dirt, Rock each read albedo + normal + mask on ONE grid (three grids
+	// in total); Snow and Wet Ground are plain reads. The uv here is a coerced
+	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
+	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
+	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 3u);
+	REQUIRE(gen.switches.size() == 1u);
+	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
+	CHECK(gen.switches[0].second);
+
+	// The bombing-off permutation: no grid at all, the same three slots.
+	const std::map<std::string, bool> off{ { HE::kAutoLandscapeSwitchBombing, false } };
+	const HE::MatShaderGen plain = HE::generateFragment(a.graph, {}, &off);
+	CHECK(plain.glsl.find("heBomb") == std::string::npos);
+	CHECK(plain.textureArrayMask == 0x7u);
+	CHECK(plain.textures.size() == 3u);
+	CHECK(plain.glsl != gen.glsl);
+
+	// Lit by default; the mask views are unlit, read the same masks and need no
+	// G-buffer pass.
+	CHECK_FALSE(gen.glslGBuffer.empty());
+	for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet })
+	{
+		const HE::AutoLandscapeGraph m = HE::buildAutoLandscapeGraph(v);
+		REQUIRE(m.graph.findNode(m.output));
+		CHECK(m.graph.findNode(m.output)->p[0] == 0.0f);
+		for (int id : { m.slope, m.dirtMask, m.rockMask, m.snowMask, m.flatMask, m.wetMask, m.waterMask })
+			CHECK(m.graph.findNode(id) != nullptr);
+		const HE::MatShaderGen mg = HE::generateFragment(m.graph);
+		CHECK_FALSE(mg.glsl.empty());
+		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	}
+
+	// The graph survives its JSON (what the .hasset stores) byte for byte.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(a.graph), back));
+	CHECK(HE::generateFragment(back).glsl == gen.glsl);
+}
+
+TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
+{
+	// Thema 158 Schritt 8: heHash21 loses its fraction bits at world-space
+	// lattice indices, and D3D12/Vulkan drew the auto material's dirt and puddle
+	// fields blocky against D3D11/GL. The integer variant is opt-in per node so
+	// every existing noise material keeps its shader text.
+	auto fbmGlsl = [](float flag) {
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int uv  = g.addNode(MatNodeType::UV);
+		const int fbm = g.addNode(MatNodeType::Fbm);
+		g.findNode(fbm)->p[0] = flag;
+		CHECK(g.connect(uv,  0, fbm, 0));
+		CHECK(g.connect(fbm, 0, out, 0));
+		return std::make_pair(g, HE::generateFragmentGlsl(g));
+	};
+	const auto [plainG, plain]   = fbmGlsl(0.0f);
+	const auto [robustG, robust] = fbmGlsl(1.0f);
+	CHECK(plain.find("heFbm(") != std::string::npos);
+	CHECK(plain.find("heHash21") != std::string::npos);
+	CHECK(plain.find("heFbmI") == std::string::npos);
+	CHECK(plain.find("heHashI2") == std::string::npos);
+	CHECK(robust.find("heFbmI(") != std::string::npos);
+	CHECK(robust.find("float heHashI2(ivec2 i)") != std::string::npos);
+	CHECK(robust.find("heHash21") == std::string::npos);
+	CHECK(robust.find("heFbm(") == std::string::npos);
+
+	// The flag lives in p[], which the JSON keeps although Fbm shows no widget.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(robustG), back));
+	CHECK(HE::generateFragmentGlsl(back) == robust);
+
+	// Every auto-material view uses the integer hash only.
+	using V = HE::AutoLandscapeView;
+	for (V view : { V::Lit, V::MasksRockSnowWater, V::MasksDirtWet, V::Normal, V::Surface })
+	{
+		const std::string glsl = HE::generateFragment(HE::buildAutoLandscapeGraph(view).graph).glsl;
+		CHECK(glsl.find("heFbmI(") != std::string::npos);
+		CHECK(glsl.find("heHash21") == std::string::npos);
+		CHECK(glsl.find("heFbm(") == std::string::npos);
+	}
+}
 
 // ═══ Container semantics shared with the other graph systems ═════════════════
 
@@ -2475,6 +3177,27 @@ TEST_CASE("Engine UI effects: every shipped function cross-compiles for Metal an
 	}
 }
 #endif
+
+TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes")
+{
+	// The asset is GENERATED (landscape_tex_gen --material) and committed. A
+	// change to HE::buildAutoLandscapeGraph without re-running the generator would
+	// ship the old graph silently — this is the tripwire. Also pins the fixed
+	// UUID that materials and scenes reference it by.
+	const std::filesystem::path dir =
+		std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent" / "Materials";
+	REQUIRE(std::filesystem::exists(dir / "M_AutoLandscape.hasset"));
+	ContentManager cm(dir.string());
+	const HE::UUID id = cm.loadAsset("M_AutoLandscape.hasset");
+	CHECK(id == HE::kAutoLandscapeMaterialId);
+	const MaterialAsset* m = cm.getMaterial(id);
+	REQUIRE(m);
+	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph().graph),
+	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
+	CHECK(m->graphTexturePaths.size() == 3u);
+	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(m->parentMaterialPath.empty());
+}
 #endif // HE_EDITOR_DEPS_DIR
 
 // ── Thema 51, Schritt 2: instances + overrides never cost a second compile ────
@@ -2779,6 +3502,17 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 		REQUIRE(gen.vertexBody.find("pos.y") != std::string::npos);
 		cases.push_back({ "Wind Sway on WPO (custom vertex)", gen.glsl, gen.vertexBody });
 	}
+	// Texture arrays: the registry sweep above samples heTex0 (no file picked),
+	// so the sampler2DArray declarations only reach the HLSL/FXC/SPIR-V/GL-link
+	// sweeps through this graph.
+	cases.push_back({ "Texture arrays (3 arrays + 1 2D)", HE::generateFragment(makeTextureArrayGraph()).glsl, {} });
+	// Texture bombing with real slots: SampleGrad on Texture2DArray and the uint
+	// hash through FXC, the D3D12 root signature and the GL link.
+	cases.push_back({ "Texture bombing (3 arrays + 1 2D)", HE::generateFragment(makeTextureBombGraph()).glsl, {} });
+	// The auto landscape material (Thema 158 Schritt 5) is a graph, not a node
+	// type, so the registry loop never builds it: 33 array taps, two fBm fields
+	// and 14 HeParams slots through FXC, the D3D12 root signature and the GL link.
+	cases.push_back({ "Auto landscape material", HE::generateFragment(HE::buildAutoLandscapeGraph().graph).glsl, {} });
 	return cases;
 }
 
@@ -2848,16 +3582,20 @@ bool twoLiveSamplersShareRegister(const std::string& hlsl)
 // inputs, so the weightmap sample survives and heLandscapeWeights (t14, the
 // live sampler on s0) is in the shader. The registry sweep's unwired blend
 // folds it away, which is why the sweep alone never saw the X4500.
-MaterialGraph landscapeGraph()
+// `layers` > 4 reads the weightmap's second page through the same sampler.
+MaterialGraph landscapeGraph(int layers = 3)
 {
 	MaterialGraph g;
 	const int out = g.addNode(MatNodeType::Output);
 	const int lb  = g.addNode(MatNodeType::LandscapeLayerBlend);
-	g.findNode(lb)->s = "Grass\nRock\nSand";
-	for (int i = 0; i < 3; ++i)
+	std::string names = "Grass\nRock\nSand";
+	for (int i = 3; i < layers; ++i) names += "\nLayer" + std::to_string(i);
+	g.findNode(lb)->s = names;
+	for (int i = 0; i < layers; ++i)
 	{
 		const int c = g.addNode(MatNodeType::ConstColor);
-		g.findNode(c)->p[i] = 1.0f;
+		g.findNode(c)->p[i % 3] = 1.0f;
+		if (i >= 3) g.findNode(c)->p[(i + 1) % 3] = 0.5f;
 		REQUIRE(g.connect(c, 0, lb, i));
 	}
 	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
@@ -2980,6 +3718,18 @@ TEST_CASE("Every node's HLSL stays inside SM 5.0's register range (D3D11/D3D12 b
 		CHECK(std::count(lscLive.begin(), lscLive.end(), 0) == 1);   // exactly one live user of s0
 		CHECK(lsc.find("heLandscapeWeights.Sample(_heLandscapeWeights_sampler") != std::string::npos);
 		CHECK_FALSE(twoLiveSamplersShareRegister(lsc));
+
+		// Eight layers: the second page is the same SamplerState on the same
+		// s0 — still one live sampler there, no new register anywhere.
+		const std::string l8 = lib.fragment(std::hash<std::string>{}("liveprobe-landscape8"),
+		                                    HE::generateFragment(landscapeGraph(8)).glsl, B::HLSL).source;
+		CHECK(registersOf(l8, 's') == lscRegs);
+		CHECK(registersOf(l8, 't') == registersOf(lsc, 't'));
+		const std::vector<int> l8Live = liveSamplerRegisters(l8);
+		CHECK(std::count(l8Live.begin(), l8Live.end(), 0) == 1);
+		CHECK(l8.find("heLandscapeWeights.SampleLevel(_heLandscapeWeights_sampler") != std::string::npos);
+		CHECK(l8.find("GetDimensions") != std::string::npos);
+		CHECK_FALSE(twoLiveSamplersShareRegister(l8));
 
 		// Thema 57: the UI domain's twin of that share. A wired Backdrop samples
 		// heBackdrop through s9, the register heGIReflFwd's sampler is pinned
@@ -3176,6 +3926,28 @@ std::string uncoveredVk(const std::vector<VkUse>& uses, uint32_t rows)
 	}
 	return miss;
 }
+
+// The same for uses in a FRAGMENT shader, held to the stage bits too (a row
+// that exists but is vertex-only does not serve the fragment stage), with the
+// row for `skipBinding` taken out of the table — the negative control for a
+// row that is not the last one. ~0u skips nothing.
+std::string uncoveredVkFragment(const std::vector<VkUse>& uses, uint32_t skipBinding = ~0u)
+{
+	std::string miss;
+	for (const VkUse& u : uses)
+	{
+		bool ok = false;
+		for (uint32_t i = 0; i < HE::vkmat::kBindingCount && !ok; ++i)
+		{
+			const HE::vkmat::Binding& row = HE::vkmat::kBindings[i];
+			ok = row.binding != skipBinding && u.set == 0 && row.binding == u.binding
+			  && static_cast<int>(row.kind) == u.kind && (row.stages & HE::vkmat::kStageFragment);
+		}
+		if (!ok)
+			miss += " " + std::to_string(u.set) + "/" + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
 } // namespace
 
 TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in the material layout (Thema 117)")
@@ -3262,13 +4034,97 @@ TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in
 	CHECK(withLists * 2 > static_cast<int>(cases.size()));
 	// Thema 120: the preamble's sky/AO/DDGI/GI-refl/cloud samplers (15..18,
 	// 32, 33) are layout rows now — the DDGI atlases are written to 17/18 —
-	// so none of them may fall back into the gap.
+	// so none of them may fall back into the gap. Thema 143: nor may 14
+	// (heLandscapeWeights, the painted terrain lavapipe crashed on).
 	for (const VkUse& u : plainGap)
-		for (uint32_t b : { 15u, 16u, 17u, 18u, 32u, 33u })
+		for (uint32_t b : { 14u, 15u, 16u, 17u, 18u, 32u, 33u })
 			CHECK_MESSAGE(u.binding != b, "plain uses binding ", b, " outside the material layout");
 	MESSAGE("clustered SPIR-V with set 0 SSBOs 24..26: ", withLists, "/", cases.size(),
 	        "; plain uses outside the layout (pre-existing):",
 	        uncoveredVk(std::vector<VkUse>(plainGap.begin(), plainGap.end()), 0));
+}
+
+// ═══ Thema 143: heLandscapeWeights is a Vulkan material layout row ══════════
+// A Landscape Layer Blend graph samples its weightmap at set 0 binding 14. The
+// layout lacked that row: NVIDIA answered with VUID-…-layout-07988 and an
+// "invalid" descriptor per draw (and drew the terrain unpainted), lavapipe with
+// SIGSEGV in the first draw. Held here the same way as the Thema 117/120 rows:
+// reflection of the statically used descriptors against HE::vkmat::kBindings.
+TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, and the rest of the gap is UI-only (Thema 143)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using HE::vkmat::DescKind;
+	HE::MaterialShaderLibrary lib;
+	const VkUse weights{ 0, HE::vkmat::kLandscapeWeightsBinding, static_cast<int>(DescKind::CombinedImageSampler) };
+
+	// The row itself, fragment stage, ahead of the cluster lists.
+	bool row = false;
+	for (uint32_t i = 0; i < HE::vkmat::kPreClusterBindingCount; ++i)
+		row = row || (HE::vkmat::kBindings[i].binding == 14
+		              && HE::vkmat::kBindings[i].kind == DescKind::CombinedImageSampler
+		              && HE::vkmat::kBindings[i].stages == HE::vkmat::kStageFragment);
+	CHECK(row);
+
+	// The device limit: 17 fragment samplers with the row, 16 (the spec
+	// minimum, which every device meets) without it — the renderer's fallback.
+	CHECK(HE::vkmat::fragmentSamplerCount(true) == 17);
+	CHECK(HE::vkmat::fragmentSamplerCount(false) == 16);
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
+	CHECK(HE::vkmat::landscapeWeightsFit(17, 17));
+	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+
+	int landscapeCases = 0;
+	std::set<VkUse> fragGap;           // stage-aware: what no fragment row serves
+	std::set<std::string> fragGapCases;
+	for (const NodeShaderCase& c : allNodeShaderCases())
+	{
+		const uint64_t h = caseHash(c);
+		for (const bool clustered : { false, true })
+		{
+			const auto& sv = clustered ? lib.fragmentClustered(h, c.glsl, B::SpirV) : lib.fragment(h, c.glsl, B::SpirV);
+			REQUIRE_MESSAGE(sv.ok, c.name, ": ", sv.log);
+			std::string err;
+			const std::vector<VkUse> uses = activeVkDescriptors(sv.spirv, err);
+			REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
+			const bool usesWeights = std::find(uses.begin(), uses.end(), weights) != uses.end();
+			const bool declares    = c.glsl.find("heLandscapeWeights") != std::string::npos;
+			// Only a layer-blend graph reaches binding 14 — what lets the renderer
+			// gate its fallback on the GLSL text alone.
+			CHECK_MESSAGE(usesWeights == declares, std::string(c.name));
+			if (usesWeights)
+			{
+				++landscapeCases;
+				// Positive: the full table serves it in the fragment stage.
+				CHECK_MESSAGE(uncoveredVkFragment({ weights }).empty(), std::string(c.name));
+				// Negative control: the same table without row 14 leaves exactly
+				// that use uncovered — the state before this fix.
+				CHECK_MESSAGE(uncoveredVkFragment(uses, 14) == " 0/14:1", std::string(c.name));
+			}
+			for (const VkUse& u : uses)
+				if (!uncoveredVkFragment({ u }).empty())
+				{
+					fragGap.insert(u);
+					fragGapCases.insert(c.name);
+				}
+		}
+	}
+	// The sweep did reach the Landscape Layer Blend node (plain + clustered).
+	CHECK(landscapeCases >= 2);
+
+	// What is left is the UI domain alone, and it is two uses no layout row can
+	// fix: HeUI (binding 8) is a FRAGMENT uniform block where the layout has the
+	// WPO vertex HeLighting, and heBackdrop (binding 9) is a combined sampler
+	// where the layout has the WPO vertex HeParams UBO. Vulkan has no UI-material
+	// pass (only GL/Metal draw UI-domain graphs), so the mesh path is the only
+	// way in. Listed exactly, so the gap cannot grow silently.
+	const std::set<VkUse> uiOnly = { { 0, 8, static_cast<int>(DescKind::UniformBuffer) },
+	                                 { 0, 9, static_cast<int>(DescKind::CombinedImageSampler) } };
+	CHECK_MESSAGE(fragGap == uiOnly, "fragment uses outside the layout:",
+	              uncoveredVk(std::vector<VkUse>(fragGap.begin(), fragGap.end()), 0));
+	for (const std::string& name : fragGapCases)
+		CHECK_MESSAGE(name.find("(UI domain)") != std::string::npos, name, " uses a binding outside the layout");
 }
 
 // ═══ Thema 117 Schritt 6: OpenGL 4.3 binds the clustered variant ═════════════
@@ -3960,8 +4816,10 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 	// bytecode binds t14 AND s0, and the PSO builds against the full signature.
 	// The legacy signature (no t14 range) must still refuse it — the positive
 	// verdict is worthless without a device that can say no.
+	for (int layers : { 3, 8 })
 	{
-		const std::string lglsl = HE::generateFragment(landscapeGraph()).glsl;
+		CAPTURE(layers);
+		const std::string lglsl = HE::generateFragment(landscapeGraph(layers)).glsl;
 		const auto& lf = lib.fragment(std::hash<std::string>{}(lglsl), lglsl, B::HLSL);
 		REQUIRE_MESSAGE(lf.ok, lf.log);
 		std::string lerr;
@@ -4318,11 +5176,12 @@ bool createWarpDevice11(WarpDevice11& w)
 
 // RGBA8 1xN texture with the given texels, as a shader resource.
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> makeTexture11(ID3D11Device* dev, UINT width,
-                                                               const std::vector<uint8_t>& rgba)
+                                                               const std::vector<uint8_t>& rgba,
+                                                               UINT height = 1)
 {
 	using Microsoft::WRL::ComPtr;
 	D3D11_TEXTURE2D_DESC td{};
-	td.Width = width; td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
+	td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
 	td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
 	td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 	D3D11_SUBRESOURCE_DATA init{ rgba.data(), width * 4, 0 };
@@ -4532,12 +5391,15 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
 	}
 
-	// ── The weightmap: 2x1, texel 0 = layer 0 (red), texel 1 = layer 1 (green).
+	// ── The weightmap: 2x2, column 0 = layer 0 (red), column 1 = layer 1 (green).
+	// Square like every engine weightmap: a 2:1 map is read as two weight
+	// pages (layers 0..3 left, 4..7 right — see the eight-layer case below).
 	// And the two samplers: the built-in pass's (WRAP, D3D11Renderer's
 	// p.sampler) and the one the fix puts on s0 for the draw (the renderer's
 	// own description, so the test cannot pass with a different address mode
 	// than the renderer ships).
-	ComPtr<ID3D11ShaderResourceView> weightmap = makeTexture11(dev, 2, { 255, 0, 0, 0,  0, 255, 0, 0 });
+	ComPtr<ID3D11ShaderResourceView> weightmap = makeTexture11(dev, 2, { 255, 0, 0, 0,  0, 255, 0, 0,
+	                                                                     255, 0, 0, 0,  0, 255, 0, 0 }, 2);
 	REQUIRE(weightmap.Get() != nullptr);
 	ComPtr<ID3D11SamplerState> builtInWrap = makeSampler11(dev, D3D11_TEXTURE_ADDRESS_WRAP);
 	const D3D11_SAMPLER_DESC wsd = HE::d3d11mat::WeightmapSamplerDesc();
@@ -4620,6 +5482,224 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 		CHECK(with.g == without.g);
 		CHECK(with.b == without.b);
 	}
+}
+
+// Thema 158, Schritt 2: eight landscape layers through the ONE t14/s0 pair.
+// Layers 4..7 are the right half of a 2:1 weightmap (TerrainPaint::
+// buildWeightTexture); the blend tells the shapes apart by the texture's size.
+// Driven through FXC and a real (WARP) draw, so the verdict is about the shader
+// the renderer ships, not about the GLSL text:
+//   - eight-layer material, 2:1 map  → left half picks layer 1, right half layer 6
+//   - eight-layer material, square map (every landscape painted before)
+//                                     → layers 0..3 exactly as before, 4..7 silent
+//   - three-layer material, 2:1 map  → reads the left page only (a full-width
+//                                       read would see page 1's blue as layer 2)
+//   - t14 unbound (D3D12's null view) → layer 0, as before
+TEST_CASE("D3D11: an eight-layer blend reads layers 4..7 from the right half of the same t14 weightmap (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+
+	// Layer i's colour: r = (i + 1) / 8, g = 0.5, b = 0 — the red channel says
+	// which layer won (32, 64, … 255).
+	MaterialGraph g8;
+	{
+		const int out = g8.addNode(MatNodeType::Output);
+		const int lb  = g8.addNode(MatNodeType::LandscapeLayerBlend);
+		g8.findNode(lb)->s = "L0\nL1\nL2\nL3\nL4\nL5\nL6\nL7";
+		for (int i = 0; i < 8; ++i)
+		{
+			const int c = g8.addNode(MatNodeType::ConstColor);
+			g8.findNode(c)->p[0] = static_cast<float>(i + 1) / 8.0f;
+			g8.findNode(c)->p[1] = 0.5f;
+			g8.findNode(c)->p[2] = 0.0f;
+			REQUIRE(g8.connect(c, 0, lb, i));
+		}
+		REQUIRE(g8.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+	}
+	auto layerR = [](int i) { return static_cast<int>(std::lround((i + 1) / 8.0 * 255.0)); };
+
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3DBlob> vsBlob = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vsBlob.Get() != nullptr, "standard vertex: ", err);
+	auto pixelShader = [&](const char* what, const MaterialGraph& g, ComPtr<ID3DBlob>& blob) -> ComPtr<ID3D11PixelShader>
+	{
+		const std::string glsl = HE::generateFragment(g).glsl;
+		const auto& hl = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+		REQUIRE_MESSAGE(hl.ok, what, ": ", hl.log);
+		std::string e;
+		blob = fxcBlob(hl.source, "ps_5_0", e);
+		REQUIRE_MESSAGE(blob.Get() != nullptr, what, " pixel shader: ", e);
+		ComPtr<ID3D11PixelShader> ps;
+		REQUIRE(SUCCEEDED(dev->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &ps)));
+		return ps;
+	};
+	ComPtr<ID3DBlob> b8, b3;
+	ComPtr<ID3D11PixelShader> ps8 = pixelShader("eight-layer landscape", g8, b8);
+	ComPtr<ID3D11PixelShader> ps3 = pixelShader("rgb landscape", rgbLandscapeGraph(), b3);
+	{
+		// Same two registers as the three-layer blend, nothing more.
+		const std::vector<Binding> b = reflectBindings(b8.Get());
+		CHECK(binds(b, D3D_SIT_TEXTURE, HE::d3d11mat::kWeightmapSrvSlot));
+		CHECK(binds(b, D3D_SIT_SAMPLER, HE::d3d11mat::kWeightmapSamplerSlot));
+		const std::vector<Binding> b3r = reflectBindings(b3.Get());
+		CHECK(b.size() == b3r.size());
+	}
+
+	ComPtr<ID3D11VertexShader> vs;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs)));
+	static const D3D11_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il)));
+	ComPtr<ID3D11RasterizerState> rasterNoCull;
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID;
+		rd.CullMode = D3D11_CULL_NONE;
+		rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
+	// A fullscreen triangle with the same UV at every vertex.
+	auto triangleAt = [&](float u) {
+		const MatVertex11 tri[3] = {
+			{ { -1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { u, 0.5f } },
+			{ {  3.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { u, 0.5f } },
+			{ { -1.0f,  3.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { u, 0.5f } },
+		};
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = sizeof(tri); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA init{ tri, 0, 0 };
+		ComPtr<ID3D11Buffer> vb;
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &vb)));
+		return vb;
+	};
+
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[2] = 1.0f;
+	ComPtr<ID3D11Buffer> uCB = makeConstantBuffer11(dev, &u, sizeof(u));
+	HE::MaterialShaderLibrary::Lighting lit{};
+	lit.viewMode[0] = 1.0f;                       // Unlit view: the pixel IS the blend
+	lit.giParams[0] = lit.giParams[1] = 1.0f;
+	ComPtr<ID3D11Buffer> litCB = makeConstantBuffer11(dev, &lit, sizeof(lit));
+	REQUIRE(uCB.Get() != nullptr);
+	REQUIRE(litCB.Get() != nullptr);
+
+	ComPtr<ID3D11Texture2D> target, staging;
+	ComPtr<ID3D11RenderTargetView> rtv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+
+	// The 2:1 map as buildWeightTexture lays it out for weightRes = 2: per row
+	// [page 0: x0, x1 | page 1: x0, x1]. Page 0 column 0 = layer 1, column 1 =
+	// nothing on page 0; page 1 column 1 = layer 6 (its B channel).
+	const std::vector<uint8_t> row2to1 = { 0, 255, 0, 0,   0, 0, 0, 0,     0, 0, 0, 0,   0, 0, 255, 0 };
+	std::vector<uint8_t> wide = row2to1;
+	wide.insert(wide.end(), row2to1.begin(), row2to1.end());
+	ComPtr<ID3D11ShaderResourceView> map2to1 = makeTexture11(dev, 4, wide, 2);
+	// The square map of a landscape painted before eight layers: column 0 =
+	// layer 1, column 1 = layer 3.
+	const std::vector<uint8_t> rowSq = { 0, 255, 0, 0,   0, 0, 0, 255 };
+	std::vector<uint8_t> square = rowSq;
+	square.insert(square.end(), rowSq.begin(), rowSq.end());
+	ComPtr<ID3D11ShaderResourceView> mapSquare = makeTexture11(dev, 2, square, 2);
+	REQUIRE(map2to1.Get() != nullptr);
+	REQUIRE(mapSquare.Get() != nullptr);
+	const D3D11_SAMPLER_DESC wsd = HE::d3d11mat::WeightmapSamplerDesc();
+	ComPtr<ID3D11SamplerState> weightClamp;
+	REQUIRE(SUCCEEDED(dev->CreateSamplerState(&wsd, &weightClamp)));
+
+	ctx->IASetInputLayout(il.Get());
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->RSSetState(rasterNoCull.Get());
+	ctx->VSSetShader(vs.Get(), nullptr, 0);
+	ctx->VSSetConstantBuffers(1, 1, uCB.GetAddressOf());
+	ctx->PSSetConstantBuffers(0, 1, litCB.GetAddressOf());
+
+	auto drawAt = [&](ID3D11PixelShader* ps, ID3D11ShaderResourceView* map, float uCoord) {
+		ComPtr<ID3D11Buffer> vb = triangleAt(uCoord);
+		const UINT stride = sizeof(MatVertex11), offset = 0;
+		ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
+		ctx->PSSetShader(ps, nullptr, 0);
+		HE::d3d11mat::BindLandscapeWeights(ctx, map, weightClamp.Get());
+		return drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+	};
+	auto isLayer = [&](const Pixel11& px, int layer) {
+		return near8(px.r, layerR(layer)) && near8(px.g, 128) && near8(px.b, 0);
+	};
+
+	// 1. Eight layers on the 2:1 map: the left half of the terrain reads layer
+	//    1 off page 0, the right half layer 6 off page 1. u = 1.2 clamps to the
+	//    right edge — inside page 1, not across into nothing.
+	for (float uc : { 0.1f, 0.25f })
+	{
+		const Pixel11 px = drawAt(ps8.Get(), map2to1.Get(), uc);
+		CHECK_MESSAGE(isLayer(px, 1), "2:1 map, u=", uc, ": expected layer 1, got ", int(px.r), ",", int(px.g), ",", int(px.b));
+	}
+	for (float uc : { 0.9f, 1.2f })
+	{
+		const Pixel11 px = drawAt(ps8.Get(), map2to1.Get(), uc);
+		CHECK_MESSAGE(isLayer(px, 6), "2:1 map, u=", uc, ": expected layer 6, got ", int(px.r), ",", int(px.g), ",", int(px.b));
+	}
+	// Half way across the terrain the page-0 weight fades out while the page-1
+	// weight fades in: layers 1 and 6 mix, normalised — not a black seam and
+	// no bleed of one page into the other at the clamp.
+	{
+		const Pixel11 px = drawAt(ps8.Get(), map2to1.Get(), 0.5f);
+		const int want = (layerR(1) + layerR(6)) / 2;
+		CHECK_MESSAGE(near8(px.r, want, 3), "2:1 map, u=0.5: expected the 1/6 mix r=", want, ", got ", int(px.r));
+	}
+
+	// 2. Eight layers on a square (pre-eight-layer) map: layers 0..3 as always,
+	//    and the second page reads as nothing.
+	{
+		const Pixel11 l = drawAt(ps8.Get(), mapSquare.Get(), 0.1f);
+		const Pixel11 r = drawAt(ps8.Get(), mapSquare.Get(), 0.9f);
+		CHECK_MESSAGE(isLayer(l, 1), "square map, left: expected layer 1, got ", int(l.r));
+		CHECK_MESSAGE(isLayer(r, 3), "square map, right: expected layer 3, got ", int(r.r));
+	}
+
+	// 3. Three layers on the 2:1 map: page 0 only. On the right half page 0 is
+	//    empty → the blend's layer-0 fallback, red. A full-width read would have
+	//    landed on page 1's B channel and shown layer 2, blue.
+	{
+		const Pixel11 l = drawAt(ps3.Get(), map2to1.Get(), 0.1f);
+		const Pixel11 r = drawAt(ps3.Get(), map2to1.Get(), 0.9f);
+		CHECK_MESSAGE((near8(l.r, 0) && near8(l.g, 255) && near8(l.b, 0)),
+		              "3 layers on a 2:1 map, left: expected layer 1 (green), got ", int(l.r), ",", int(l.g), ",", int(l.b));
+		CHECK_MESSAGE((near8(r.r, 255) && near8(r.g, 0) && near8(r.b, 0)),
+		              "3 layers on a 2:1 map, right: expected the layer-0 fallback (red), got ", int(r.r), ",", int(r.g), ",", int(r.b));
+	}
+
+	// 4. Nothing on t14 (what D3D12's null view and an unpainted draw without a
+	//    default map look like): zero size, zero weights → layer 0, as before.
+	{
+		const Pixel11 px = drawAt(ps8.Get(), nullptr, 0.9f);
+		CHECK_MESSAGE(isLayer(px, 0), "t14 unbound: expected layer 0, got ", int(px.r), ",", int(px.g), ",", int(px.b));
+	}
+	const std::string why = drainInfoQueue11(w);
+	MESSAGE(why);
+	HE::d3d11mat::RestoreAfterMaterialDraw(ctx, nullptr);
 }
 
 // Thema 120: graph materials on D3D11 got no DDGI — fillMatLight left
@@ -5626,3 +6706,90 @@ TEST_CASE("GL links a WPO material: HeLighting is the same block in both stages"
 	}
 }
 #endif // HE_TESTS_HAVE_SHADERC
+
+// ═══ Codegen stack depth (Thema 158, Schritt 7) ══════════════════════════════
+// emitNode recurses once per graph level (emitNode -> inputExpr -> emitNode).
+// With the whole node switch in one function MSVC reserved one frame for every
+// case's temporaries: ~26 KB per level in Release, ~43 KB in Debug. The auto
+// landscape graph needed 0.84-0.96 MB of stack and crashed the editor's 1 MB
+// main thread at random on Windows (0xC00000FD, every backend). Split into
+// per-family functions it is ~1.4 KB per level (Release). The codegen runs here
+// on threads with a SMALL stack, so a regression overflows instead of passing
+// by the luck of a shallow caller: the auto views on 512 KB (old: 0.84 MB and
+// up) and a 256-deep chain on 4 MB (old: 6.8 MB; new: 0.4 MB, Debug ~2 MB).
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+#include <functional>
+
+namespace
+{
+struct StackJob { std::function<void()> fn; };
+
+#if defined(_WIN32)
+DWORD WINAPI stackJobMain(LPVOID p) { static_cast<StackJob*>(p)->fn(); return 0; }
+bool runOnSmallStack(size_t bytes, std::function<void()> fn)
+{
+	StackJob job{ std::move(fn) };
+	const HANDLE t = ::CreateThread(nullptr, bytes, stackJobMain, &job, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+	if (!t) return false;
+	::WaitForSingleObject(t, INFINITE);
+	::CloseHandle(t);
+	return true;
+}
+#else
+void* stackJobMain(void* p) { static_cast<StackJob*>(p)->fn(); return nullptr; }
+bool runOnSmallStack(size_t bytes, std::function<void()> fn)
+{
+	StackJob job{ std::move(fn) };
+	pthread_attr_t a;
+	pthread_attr_init(&a);
+	pthread_attr_setstacksize(&a, bytes);
+	pthread_t t;
+	const bool ok = pthread_create(&t, &a, stackJobMain, &job) == 0;
+	pthread_attr_destroy(&a);
+	if (ok) pthread_join(t, nullptr);
+	return ok;
+}
+#endif
+} // namespace
+
+TEST_CASE("Material codegen fits a small thread stack: auto landscape views and a 256-deep chain")
+{
+	(void)HE::matNodeRegistry(); // static init on the main thread
+	using V = HE::AutoLandscapeView;
+	for (V view : { V::Lit, V::MasksRockSnowWater, V::MasksDirtWet, V::Normal, V::Surface })
+	{
+		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(view);
+		std::string glsl;
+		REQUIRE(runOnSmallStack(512 * 1024, [&] { glsl = HE::generateFragment(a.graph).glsl; }));
+		CHECK(!glsl.empty());
+		CHECK(glsl == HE::generateFragment(a.graph).glsl); // the thread changes nothing
+	}
+
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output);
+	int prev = g.addNode(HE::MatNodeType::ConstColor);
+	for (int i = 0; i < 256; ++i)
+	{
+		const int add = g.addNode(HE::MatNodeType::Add);
+		REQUIRE(g.connect(prev, 0, add, 0));
+		prev = add;
+	}
+	REQUIRE(g.connect(prev, 0, out, HE::kMatOutputBaseColorPin));
+	std::string glsl;
+	REQUIRE(runOnSmallStack(4 * 1024 * 1024, [&] { glsl = HE::generateFragment(g).glsl; }));
+	size_t adds = 0;
+	// "vec3 nK = nJ + vec3(0.000000);" per Add (the lit tail adds a zero emissive too)
+	for (size_t p = 0; (p = glsl.find(" + vec3(0.000000);\n", p)) != std::string::npos; ++p) ++adds;
+	CHECK(adds == 256);
+	CHECK(glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle magenta
+}
