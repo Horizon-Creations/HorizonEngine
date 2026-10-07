@@ -19,6 +19,12 @@
 # the MATERIAL comparison against GL pass -Extra @{HE_DUMP_SHADOW='0.1'}
 # (shadow distance 0.1 m) with -Tag _s01, and check the shadow per backend with
 # ana158auto.py shadow AL<mode>-<rhi>.bmp AL<mode>-<rhi>_s01.bmp.
+# -Extra is a hashtable, so call the script IN-PROCESS (powershell -File turns
+# it into a string):
+#   Set-ExecutionPolicy -Scope Process Bypass -Force
+#   & .\cap158auto.ps1 -Deploy ... -Out ... -Mode 1 -Extra @{HE_DUMP_SHADOW='0.1'} -Tag _s01
+# D3D11/D3D12/Vulkan give graph materials no sky IBL (fog.z = 0), so their
+# shadow ratios come out lower than Metal's (0.30 / 0.48 vs 0.37 / 0.56, §12).
 param(
     [Parameter(Mandatory = $true)][string]$Deploy,
     [Parameter(Mandatory = $true)][string]$Out,

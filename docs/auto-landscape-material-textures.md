@@ -1116,9 +1116,12 @@ keinem Paar, Drift 0,000.)
    mit `-Extra @{HE_DUMP_SHADOW='0.1'} -Tag _s01`.
 3. `ana158auto.py masks` (15 Erwartungen je Backend). `diff` gegen OpenGL für die
    Debug-Ansichten und die `_s01`-Läufe (Toleranz §7.5). `shadow` je Backend für die Paare
-   `AL<m>-<rhi>.bmp AL<m>-<rhi>_s01.bmp`; erwartet: D3D11/D3D12/Vulkan wie Metal
-   (0,37 / 0,56 / 0,47 „da“), OpenGL-forward bei Graph-Materialien „fehlt“. `repeat` für
-   `1_s01` gegen `nobomb_s01`.
+   `AL<m>-<rhi>.bmp AL<m>-<rhi>_s01.bmp`; erwartet: D3D11/D3D12/Vulkan „da“, OpenGL-forward
+   bei Graph-Materialien „fehlt“. `repeat` für `1_s01` gegen `nobomb_s01`.
+   **Korrektur aus Schritt 7 (§12):** Die Verhältnisse auf D3D/Vulkan sind NICHT die von
+   Metal (0,37 / 0,56), solange Graph-Materialien dort kein Himmels-IBL bekommen; gemessen
+   0,30 / 0,48. `-Extra` funktioniert nur, wenn das Skript im selben Prozess mit `&`
+   aufgerufen wird (`powershell -File` macht aus der Hashtable einen String).
 4. Vulkan-Validation-Zeilen aus den Logs mitmelden.
 5. **Mips (Lektion aus Schritt 3):** Die drei Arrays backen ihre Mips selbst
    (`buildTextureArray`). D3D/Vulkan dürften in der Ebene also nicht flimmern. Falls doch,
@@ -1143,3 +1146,146 @@ keinem Paar, Drift 0,000.)
   das Handbuch-Bündel `EditorDeps/Docs/he-docs.json` neu bauen.
 - Die übrigen Punkte aus §10.5 gelten weiter (Pfützen in echten Mulden, heTex0 auf
   Metal, steile Felswände, malbare Overrides, GI-Näherung).
+
+## 12. Schritt 7: D3D11, D3D12 und Vulkan auf echter Hardware
+
+Stand: Zweig bei `55a93502` + `fa30d4b9`. Gemessen auf NN-WS03 (NVIDIA RTX 4070, Windows 11),
+Release-Build `C:\hw158` mit eigenem Deploy. Aufnahmen mit `cap158auto.ps1` (gleiche
+Kamera und Einstellungen wie §10.4/§11.2), Auswertung mit `ana158auto.py`. Metal gibt es
+auf diesem Gerät nicht. Die Brücke zu Metal ist OpenGL: §11.2 hat Metal = GL auf dem Mac
+gezeigt, und GL auf NN-WS03 trifft dieselben Zahlen (unten).
+
+### 12.1 Absturz im Codegen: Stack-Überlauf unter MSVC (behoben, `fa30d4b9`)
+
+Der erste Lauf scheiterte, bevor ein Bild entstand. Der Editor stürzte mit dem
+Auto-Material zufällig ab, auf **allen** Backends einschließlich GL: `masks` 4/4 Läufe,
+`ground` 1/4. Ursache war `0xC00000FD` (Stack Overflow) in `HorizonCore.dll`, in
+`__chkstk`.
+
+- **Ursache:** `emitNode` (MaterialGraph.cpp) hielt den ganzen Knoten-Switch in einer
+  Funktion. MSVC reserviert dafür einen Frame für die Temporaries aller Fälle. Das ergab
+  26,7 KB pro Graph-Ebene im Release (main 21,9 KB, Debug 42,8 KB). `emitNode` rekursiert
+  einmal pro Ebene (`emitNode` → `inputExpr` → `emitNode`). Die Ansichten des
+  151-Knoten-Graphen brauchten deshalb 836–964 KB Stack, und der Hauptthread hat 1 MB.
+  Unter clang/macOS war der Frame klein und der Hauptstack 8 MB, darum blieb der Fehler
+  auf dem Mac unsichtbar.
+- **Gegenprobe ohne Neubau:** Eine Kopie des Deploys mit `editbin /STACK:8388608` lief
+  5/5 durch.
+- **Behebung:** Die Fälle stehen jetzt **wörtlich verschoben** in zehn
+  `HE_MG_NOINLINE`-Familien: Blätter, Texturen, Bombing, Layer-Blend, Mathe, Logik,
+  Muster, Fluss, UI, WindSway. Pro Ebene liegt nur der Frame der eigenen Familie auf dem
+  Stack: `emitNode` 632 B, Familie ≤ 1416 B, `inputExpr` 192 B. Gemessen (Thread mit
+  vorgegebenem Stack, SEH):
+
+| Graph | vorher | nachher |
+|---|---|---|
+| Auto-Ansichten lit / nobomb / masks / ground / normal / surface | 836–964 KB | ≤ 68 KB (Messauflösung) |
+| Kette aus 256 Add-Knoten | 6788 KB | 388 KB |
+| Kette aus 1024 Add-Knoten | 27016 KB | 1476 KB |
+| pro Ebene | 26,3 KB | 1,4 KB |
+
+- **Bytegleich:** Der Shader-Text (glsl, glslGBuffer, vertexBody, Texturen, Parameter) hat
+  vorher und nachher denselben Hash. Geprüft wurden alle sechs Auto-Ansichten, alle 76
+  Knotentypen einzeln und die drei Ketten. Die Bilder aus §11 bleiben damit gültig.
+- **Test** `Material codegen fits a small thread stack`: Er erzeugt die Auto-Ansichten
+  auf einem Thread mit 512 KB und die 256er-Kette auf 4 MB. Mit der alten
+  `HorizonCore.dll` schlägt er fehl, mit der neuen ist er grün.
+  `test_material_graph` + `test_gltf_material_import`: 118/118.
+- **Grenze:** Beliebig tiefe Nutzer-Graphen können auch jetzt überlaufen, aber erst bei
+  rund 700 Ebenen statt bei rund 38. Neue Knoten gehören in eine passende Familie, nicht
+  zurück in `emitNode`.
+
+Nach der Behebung: 40 Aufnahmen auf vier Backends, 0 Abstürze.
+
+### 12.2 Material (unlit)
+
+Masken-Orakel (`ana158auto.py masks`): **15/15 Erwartungen auf GL, D3D11, D3D12 und
+Vulkan.** Anteil Pixel > 128:
+
+| Region / Kanal | Mac (Metal = GL) | GL | D3D11 | D3D12 = Vulkan |
+|---|---|---|---|---|
+| Ebene Wasser | 18,3 % | 18,3 % | 18,3 % | 17,9 % |
+| Ebene Erde / nass | 33,2 / 30,6 % | 33,2 / 30,6 % | 33,2 / 30,6 % | 32,8 / 30,1 % |
+| Fuß Fels / Erde | 27 / 93,5 % | 27 / 93,5 % | 27 / 93,5 % | 27 / 93,5 % |
+| Hang Fels | 100 % | 100 % | 100 % | 100 % |
+| Plateau Schnee / Erde | 100 / 2,8 % | 100 / 2,8 % | 100 / 2,8 % | 100 / 4,6 % |
+
+Bildvergleich gegen GL (mean|Δ| / Anteil > 8):
+
+| Ansicht | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|
+| `masks` | 2,79 / 0 % | 5,33 / 4,57 % | 5,33 / 4,57 % |
+| `ground` | 3,10 / 0 % | 9,22 / 12,2 % | 9,21 / 12,2 % |
+| `normal` | 0,001 / 0 % | 0,114 / 0,05 % | 0,113 / 0,05 % |
+| `surface` | 1,33 / 0 % | 3,41 / 7,05 % | 3,41 / 7,05 % |
+
+- **D3D11 = GL**, bis auf einen **Schwarzpegel**: D3D11, D3D12 und Vulkan geben bei
+  unlit-Schwarz 4/255 statt 0 aus. Das ergibt die konstanten 2,67 in jeder Region. Die
+  Ursache ist nicht untersucht, sie liegt nicht im Material.
+- **D3D12 = Vulkan** (bitgleich zueinander), aber in der Ebene sind die Umrisse der
+  Pfützen und Erdflecken **blockig, am Rauschgitter ausgerichtet und versetzt**. Fels und
+  Plateau sind gleich, die Mittelwerte fast gleich. Wahrscheinliche Ursache, **nicht
+  bewiesen**: `heHash21` (`fract(p * vec2(123.34, 456.21))`, dann `fract(p.x * p.y)`) ist
+  bei großen Gitterkoordinaten in den hohen Fbm-Oktaven numerisch instabil. D3D12 übersetzt
+  wie D3D11 mit FXC (ps_5_0), der Unterschied entsteht also im Treiber (z. B.
+  FMA-Kontraktion). Entscheidung der Queen (Anfrage 21): Das Auto-Material bekommt einen
+  robusten Hash, bestehende Noise-Materialien bleiben unverändert. Das ist Schritt 8.
+
+### 12.3 Beleuchtet
+
+Bildvergleich gegen GL mit Schatten-Distanz 0,1 m (`_s01`):
+
+| Modus | D3D11 | D3D12 = Vulkan | davon Hang (Schattenseite) |
+|---|---|---|---|
+| `1` | 4,81 / 22,6 % | 8,09 / 27,1 % | 26,0 / 100 % |
+| `nobomb` | 4,81 / 22,6 % | 8,02 / 27,1 % | 25,8 / 100 % |
+| `plaingraph` | 5,05 / 15,1 % | 5,05 / 15,1 % | 38,2 / 100 % |
+| `builtin` | 45,8 / 99,9 % | 45,8 / 99,9 % | 20,1 / 100 % |
+
+- **Sonnenseite gleich:** `plaingraph` Ebene und Plateau 0,67 (≤ 1 pro Kanal).
+- **Schattenseite dunkler:** Auf D3D11/D3D12/Vulkan bekommen Graph-Materialien **kein
+  Himmels-IBL**. `heLight.fog.z` bleibt dort 0, GL und Metal setzen es auf 1, sobald der
+  Himmels-Cubemap existiert (`MaterialShaderLibrary.cpp` heLitP: `ambDiff` aus
+  `heSkyEnv`). Am Hang gemessen: GL 120/139/165, D3D/Vulkan 90/98/122. Das ist eine
+  Backend-Lücke außerhalb dieses Themas; die Queen sammelt sie für Thema 150.
+- `builtin` weicht auf D3D/Vulkan überall ab (auch auf der Sonnenseite). Außerhalb dieses
+  Themas, nicht untersucht.
+
+**Schatten-Orakel** (`ana158auto.py shadow`, mit ÷ ohne Schatten in der Schlagschattenzone):
+
+| Pfad | `1` | `nobomb` | `plaingraph` | `builtin` |
+|---|---|---|---|---|
+| Metal (Mac, §11.3) | 0,37 | 0,37 | 0,56 | 0,47 |
+| OpenGL deferred, NN-WS03 | 0,37 | | 0,56 | |
+| OpenGL forward, NN-WS03 | 1,00 fehlt | 1,00 fehlt | 1,00 fehlt | 0,47 |
+| D3D11 | 0,30 da | 0,30 da | 0,48 da | 0,50 da |
+| D3D12 | 0,30 da | 0,30 da | 0,48 da | 0,50 da |
+| Vulkan | 0,30 da | 0,30 da | 0,48 da | 0,50 da |
+
+Ebene und Plateau ändern sich in keinem Paar (Drift 0,000). Der Schlagschatten ist auf
+allen drei Backends da. Die kleineren Verhältnisse passen zum fehlenden IBL: Die Zone ist
+nur ambient beleuchtet, mit Schatten 27,5 statt 36,1 (GL deferred).
+
+### 12.4 Bombing und Validation
+
+- `ana158auto.py repeat` (Ebene, `_s01`): mit Bombing Oszillation GL 0,12/0,12, D3D11
+  0,12/0,12, D3D12/Vulkan 0,16/0,14, ohne periodisches Minimum. Ohne Bombing 1,57/1,44
+  (GL), 1,59/1,46 (D3D11), 1,50/1,40 (D3D12/Vulkan) mit Minima bei 6, 12, 19, 25, 31,
+  37 px. Die Wiederholung ist auf allen vier Backends gebrochen.
+- Vulkan-Validation: **0 Meldungen** in jedem Modus mit Graph-Material. `builtin` zeigt 13
+  VUIDs (`vkCmdUpdateBuffer` im Render-Pass, Barrier ohne Self-Dependency). Das ist der
+  Fehler, den PR #96 auf main behoben hat; der Zweig hat main noch nicht.
+
+### 12.5 Urteil
+
+Die Toleranz aus §7.5 (mean|Δ| ≤ 1,0, ≤ 0,5 % Pixel > 8) ist auf D3D11/D3D12/Vulkan gegen
+GL **nicht erfüllt**. Die Ursachen sind benannt:
+
+1. **Im Thema:** Noise-Hash auf D3D12/Vulkan → Schritt 8 (robuster Hash nur für das
+   Auto-Material, dann D3D12/Vulkan gegen D3D11 messen).
+2. **Außerhalb:** kein Himmels-IBL für Graph-Materialien auf D3D11/D3D12/Vulkan (Thema
+   150), Schwarzpegel 4/255, `builtin`-Abweichung, main-Merge (Vulkan-VUIDs bei `builtin`).
+
+Erfüllt sind: Fels am Hang, Schnee in der Höhe, Pfützen nur auf flachem Boden, Erdgürtel
+am Fuß (Orakel 15/15) und gebrochene Wiederholung, jeweils auf allen vier
+Windows-Backends.
