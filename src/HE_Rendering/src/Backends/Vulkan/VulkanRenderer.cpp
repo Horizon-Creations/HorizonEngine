@@ -143,6 +143,9 @@ namespace
         // axis, w = near (HE::ClusterLightBuild). Appended last.
         glm::vec4  clusterParams;
         glm::vec4  clusterCamFwd;
+        // rgb = RenderWorld::ambient, read only by scene.frag's GI branch
+        // (Thema 159) — must match scene.frag's Frame block. Appended last.
+        glm::vec4  ambient;
     };
 
     // Sky pass UBO of the FALLBACK shader (set=0 binding=0 in shaders/sky.frag)
@@ -6905,6 +6908,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         f.giGridCounts  = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
                                     float(m_giGridCounts.z), float(m_giProbesPerRow));
         f.giParams      = glm::vec4(m_giIndirectIntensity, m_giRanThisFrame ? 1.0f : 0.0f, 0.0f, 0.0f);
+        f.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f); // GI-branch floor only
         // Forward SSR: the gate is a REAL trace result this frame, nothing weaker
         // — the same shape as m_ssaoRanThisFrame above.
         f.ssrParams     = glm::vec4(m_ssrRanThisFrame ? 1.0f : 0.0f, m_ssrIntensity,
@@ -9310,6 +9314,12 @@ struct GiProbeUBOData
     glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
 };
 static_assert(sizeof(GiProbeUBOData) == (6 + 24) * 16, "must match gi_probe.comp's GiProbeUBO");
+// The G-buffer position is the shadow-ray ORIGIN (pos + N*0.05). It holds the
+// ABSOLUTE world position, so it must be fp32: as RGBA16F the ULP passes the
+// 5 cm normal offset at |coord| >= ~100 m and every surface self-shadows in
+// height bands (Thema 159). Every consumer point-samples/texelFetches it, so
+// 32F filterability does not matter. Normals stay RGBA16F.
+constexpr VkFormat kGiGBufPosFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
 } // namespace
 
 // Builds the five GI pipelines + layouts + render passes once (first GI-active
@@ -9405,14 +9415,14 @@ void VulkanRenderer::createGiPipelines()
     { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI pipeline layouts failed"); return; }
 
     // ── Render passes ─────────────────────────────────────────────────────────
-    // G-buffer: 2x RGBA16F (CLEAR → SHADER_READ_ONLY) + depth. The end
+    // G-buffer: RGBA32F pos + RGBA16F normal (CLEAR → SHADER_READ_ONLY) + depth. The end
     // dependency covers FRAGMENT **and** COMPUTE consumers — the shadow-ray
     // KERNEL reads gPos/gNorm, unlike SSAO whose consumer is a fragment pass.
     {
         VkAttachmentDescription atts[3]{};
         for (int i = 0; i < 2; ++i)
         {
-            atts[i].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+            atts[i].format         = (i == 0) ? kGiGBufPosFormat : VK_FORMAT_R16G16B16A16_SFLOAT;
             atts[i].samples        = VK_SAMPLE_COUNT_1_BIT;
             atts[i].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
             atts[i].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
@@ -9826,7 +9836,7 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
         return vkCreateImageView(m_device, &vci, nullptr, &out.view) == VK_SUCCESS;
     };
     const VkImageUsageFlags kRT = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    bool ok = makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufPos)
+    bool ok = makeImg(kGiGBufPosFormat, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufPos)
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufNorm)
            && makeImg(m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                       VK_IMAGE_ASPECT_DEPTH_BIT, m_giGBufDepth)
