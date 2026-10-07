@@ -176,6 +176,11 @@ void MetalRenderer::SamplePoint(void* encoderPtr, const char* name)
 // pipeline and the ImGui pass descriptor — they must all match.
 static constexpr MTLPixelFormat kSwapchainFormat = MTLPixelFormatBGRA8Unorm;
 static constexpr MTLPixelFormat kDepthFormat     = MTLPixelFormatDepth32Float;
+// GI G-buffer position = the shadow-ray ORIGIN (pos + N*0.05), stored as the
+// ABSOLUTE world position, so fp32: as RGBA16Float its ULP passes the 5 cm
+// normal offset at |coord| >= ~100 m and surfaces self-shadow in height bands
+// (Thema 159). Every consumer read()s or point-samples it; normals stay 16F.
+static constexpr MTLPixelFormat kGiGBufPosFormat = MTLPixelFormatRGBA32Float;
 static constexpr MTLPixelFormat kSceneColorFormat = MTLPixelFormatRGBA16Float; // HDR scene color
 // Deferred G-buffer layout (docs/deferred-renderer-plan.md §3): BaseColor+Metallic
 // in sRGB8, oct-Normal/Roughness/Specular and HDR-Emissive/AO in RGBA16F.
@@ -8209,7 +8214,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		MTLRenderPipelineDescriptor* gDesc = [[MTLRenderPipelineDescriptor alloc] init];
 		gDesc.vertexFunction   = [lib newFunctionWithName:@"giGBufVertex"];
 		gDesc.fragmentFunction = [lib newFunctionWithName:@"giGBufFragment"];
-		gDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+		gDesc.colorAttachments[0].pixelFormat = kGiGBufPosFormat;
 		gDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
 		gDesc.depthAttachmentPixelFormat      = kDepthFormat;
 		id<MTLRenderPipelineState> gPso = [device newRenderPipelineStateWithDescriptor:gDesc error:&error];
@@ -8283,10 +8288,11 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	MTLTextureDescriptor* posDesc = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+		texture2DDescriptorWithPixelFormat:kGiGBufPosFormat width:width height:height mipmapped:NO];
 	posDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	posDesc.storageMode = MTLStorageModePrivate;
 	m_giGBufPosTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
+	posDesc.pixelFormat = MTLPixelFormatRGBA16Float; // normals keep half precision
 	m_giGBufNormTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
 
 	MTLTextureDescriptor* dDesc = [MTLTextureDescriptor

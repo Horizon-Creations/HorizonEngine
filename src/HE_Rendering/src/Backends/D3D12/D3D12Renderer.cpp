@@ -475,6 +475,12 @@ cbuffer PerFrame : register(b1)
     // w = the grid's near plane. Appended last — the cbuffer is memcpy'd whole.
     float4   uClusterParams;
     float4   uClusterCamFwd;
+    // rgb = RenderWorld::ambient, the flat never-black floor GL/Metal add as
+    // `+ ambient * diffuseColor`. Read ONLY in the GI branch below (Thema 159):
+    // the probes bounce actual lights only, so without it a GI-mask shadow
+    // band went black where GL shows grey. The non-GI branch keeps its
+    // documented drift (GI off stays bit-identical). Appended last.
+    float4   uAmbient;
 };
 // Directional CSM depth array — one slice per cascade, sampled through the
 // point/clamp static sampler on s0 (a PCF tap must read ONE texel's depth; a
@@ -785,7 +791,7 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 result;
     if (uGIParams.x > 0.5f)
         result = sampleDDGIIrradiance(i.worldPos, N) * base * kd * uGIParams.y
-               + ambSpec * (1.0f - 0.6f * rough);
+               + ambSpec * (1.0f - 0.6f * rough) + uAmbient.rgb * base * (1.0f - met);
     else
         result = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
@@ -1201,6 +1207,9 @@ namespace
         // last — the HLSL PerFrame block mirrors this order.
         glm::vec4  clusterParams;
         glm::vec4  clusterCamFwd;
+        // rgb = RenderWorld::ambient, read only by the GI branch of the
+        // built-in shader (Thema 159). Appended last — mirrors uAmbient.
+        glm::vec4  ambient;
     };
 
     struct SkyCB {
@@ -6350,6 +6359,12 @@ struct D3D12RendererImpl
 
     // Screen-space targets (half-res) + probe atlases, with tracked states.
     int giShadowW = 0, giShadowH = 0;
+    // Position = the shadow-ray ORIGIN (pos + N*0.05), stored as the ABSOLUTE
+    // world position, so fp32: as RGBA16F its ULP passes the 5 cm normal offset
+    // at |coord| >= ~100 m and surfaces self-shadow in height bands (Thema 159).
+    // Texture, PSO RTVFormats[0] and EVERY SRV of it use this one constant.
+    // Consumers Load/point-sample it; normals stay RGBA16F.
+    static constexpr DXGI_FORMAT kGiGBufPosFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
     ComPtr<ID3D12Resource> giGBufPosTex, giGBufNormTex, giGBufDepth, giRawTex,
                            giLocalMaskTex, giHistTex[2], giResultTex,
                            giFilterTmpTex; // R16F between the two a-trous iterations
@@ -6794,7 +6809,7 @@ struct D3D12RendererImpl
                 && compile(kGiTemporalHLSL, "main", "ps_5_0", temporalPS)
                 && compile(kGiAtrousHLSL, "main", "ps_5_0", atrousPS);
 
-        if (ok) // G-buffer PSO: MRT RGBA16F pos+norm, D16 depth, scene input layout
+        if (ok) // G-buffer PSO: MRT RGBA32F pos + RGBA16F norm, D16 depth, scene input layout
         {
             const D3D12_INPUT_ELEMENT_DESC layout[] = {
                 { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -6808,7 +6823,7 @@ struct D3D12RendererImpl
             pd.InputLayout           = { layout, 3 };
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             pd.NumRenderTargets      = 2;
-            pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.RTVFormats[0]         = kGiGBufPosFormat;
             pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
             pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;
             pd.SampleDesc.Count      = 1;
@@ -6992,7 +7007,7 @@ struct D3D12RendererImpl
         };
 
         const auto kPSR  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        bool ok = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+        bool ok = makeTex(kGiGBufPosFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                           kPSR, true, giGBufPosTex)
                && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                           kPSR, true, giGBufNormTex)
@@ -7048,7 +7063,7 @@ struct D3D12RendererImpl
             sv.Texture2D.MipLevels     = 1;
             device->CreateShaderResourceView(res, &sv, giSrvCpu(slot));
         };
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+        srvInto(giGBufPosTex.Get(),  kGiGBufPosFormat,               0);
         srvInto(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
         {
             D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
@@ -7061,10 +7076,10 @@ struct D3D12RendererImpl
             device->CreateUnorderedAccessView(giLocalMaskTex.Get(), nullptr, &uv, giSrvCpu(5));
         }
         // Temporal tables: cur=0 reads hist[1]; cur=1 reads hist[0].
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
+        srvInto(giGBufPosTex.Get(),  kGiGBufPosFormat,               8);
         srvInto(giRawTex.Get(),      DXGI_FORMAT_R16_FLOAT,          9);
         srvInto(giHistTex[1].Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 10);
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 11);
+        srvInto(giGBufPosTex.Get(),  kGiGBufPosFormat,               11);
         srvInto(giRawTex.Get(),      DXGI_FORMAT_R16_FLOAT,          12);
         srvInto(giHistTex[0].Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 13);
         // A-trous tables (t0 = source, t1 = gbufPos, t2 = gbufNorm): iteration 0
@@ -7074,7 +7089,7 @@ struct D3D12RendererImpl
         for (int t = 0; t < 3; ++t)
         {
             srvInto(atrousSrc[t], t < 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R16_FLOAT, atrousBase[t]);
-            srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, atrousBase[t] + 1);
+            srvInto(giGBufPosTex.Get(),  kGiGBufPosFormat,               atrousBase[t] + 1);
             srvInto(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, atrousBase[t] + 2);
         }
 
@@ -9586,6 +9601,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
+        f.ambient      = glm::vec4(p.m_renderWorld.ambient, 0.0f); // GI-branch floor only
         f.giGridOrigin = glm::vec4(p.giGridOrigin, p.giProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         // x is the gate the built-in scene shader's reflection cascade tests;

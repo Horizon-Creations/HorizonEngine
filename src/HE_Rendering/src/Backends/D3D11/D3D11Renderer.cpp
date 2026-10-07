@@ -442,6 +442,12 @@ cbuffer PerFrame : register(b1)
     // w = the grid's near plane. Appended last — the cbuffer is memcpy'd whole.
     float4   uClusterParams;
     float4   uClusterCamFwd;
+    // rgb = RenderWorld::ambient, the flat never-black floor GL/Metal add as
+    // `+ ambient * diffuseColor`. Read ONLY in the GI branch below (Thema 159):
+    // the probes bounce actual lights only, so without it a GI-mask shadow
+    // band went black where GL shows grey. The non-GI branch keeps its
+    // documented drift (GI off stays bit-identical). Appended last.
+    float4   uAmbient;
 };
 
 Texture2D    uTexture   : register(t0);
@@ -760,7 +766,7 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 result;
     if (uGIParams.x > 0.5f)
         result = sampleDDGIIrradiance(i.worldPos, N) * base * kd * uGIParams.y
-               + ambSpec * (1.0f - 0.6f * rough);
+               + ambSpec * (1.0f - 0.6f * rough) + uAmbient.rgb * base * (1.0f - met);
     else
         result = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
 
@@ -1251,6 +1257,9 @@ namespace
         // last — the HLSL PerFrame block mirrors this order.
         glm::vec4  clusterParams;
         glm::vec4  clusterCamFwd;
+        // rgb = RenderWorld::ambient, read only by the GI branch of the
+        // built-in shader (Thema 159). Appended last — mirrors uAmbient.
+        glm::vec4  ambient;
     };
 
     struct SkyCB {
@@ -3264,7 +3273,11 @@ struct D3D11RendererImpl
             return true;
         };
 
-        bool ok = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
+        // Position = the shadow-ray ORIGIN (pos + N*0.05), stored as the
+        // ABSOLUTE world position, so fp32: as RGBA16F its ULP passes the 5 cm
+        // normal offset at |coord| >= ~100 m and surfaces self-shadow in height
+        // bands (Thema 159). Consumers Load/point-sample it; normals stay 16F.
+        bool ok = makeTex(DXGI_FORMAT_R32G32B32A32_FLOAT,
                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
                           giGBufPosTex, &giGBufPosRTV, &giGBufPosSRV, nullptr)
                && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -6021,6 +6034,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
+        f.ambient      = glm::vec4(p.m_renderWorld.ambient, 0.0f); // GI-branch floor only
         f.giGridOrigin = glm::vec4(p.giGridOrigin, p.giProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         // x is the gate the built-in scene shader's reflection cascade tests;
