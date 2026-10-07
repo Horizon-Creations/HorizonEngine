@@ -733,8 +733,10 @@ static void applyApproxSurface(MaterialAsset& m, const HE::MaterialGraph& g,
 	}
 	m.approxMetallic  = ap.metallic;
 	m.approxRoughness = ap.roughness;
-	m.approxLayerCount = ap.layerCount;
-	for (int i = 0; i < 4; ++i)
+	// The asset (and the MTRL tail) keeps four layer colours; a blend with more
+	// layers reaches the GI fold through approxBaseColor for 4..7.
+	m.approxLayerCount = std::min(ap.layerCount, HE::kMatApproxLayerColors);
+	for (int i = 0; i < HE::kMatApproxLayerColors; ++i)
 		for (int k = 0; k < 3; ++k) m.approxLayerColor[i][k] = ap.layerColor[i][k];
 	auto slotOf = [&](const std::string& name) -> int32_t
 	{

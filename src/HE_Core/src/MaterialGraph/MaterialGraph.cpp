@@ -641,11 +641,13 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             c.usesLandscapeWeights = true;
             if (c.layerNames.empty()) c.layerNames = names;
 
-            static const char* kChan[kMatMaxLandscapeLayers] = { "x", "y", "z", "w" };
+            // Layers 0..3 are the weightmap's first RGBA page, 4..7 its second.
+            static const char* kChan[kMatMaxLandscapeLayers] =
+                { "_w.x", "_w.y", "_w.z", "_w.w", "_w2.x", "_w2.y", "_w2.z", "_w2.w" };
             std::string sum, wsum;
             for (size_t i = 0; i < names.size(); ++i)
             {
-                const std::string w = v + "_w." + kChan[i];
+                const std::string w = v + kChan[i];
                 sum  += (i ? " + " : "") + inputExpr(c, sc, n, (int)i, F::Vec3) + " * " + w;
                 wsum += (i ? " + " : "") + w;
             }
@@ -657,8 +659,34 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             // its zero sum by the 1e-4 floor and come out as a black hole.
             const std::string layer0 = names.empty()
                 ? std::string("vec3(0.0)") : inputExpr(c, sc, n, 0, F::Vec3);
-            decl = "vec4 " + v + "_w = texture(heLandscapeWeights, vUV);"
-                 + " float " + v + "_s = " + wsum + ";"
+            // Two weightmap shapes share the one binding (TerrainPaint::
+            // buildWeightTexture): a square map = layers 0..3 only, exactly
+            // what every landscape had before there were eight layers, sampled
+            // exactly as before; a 2:1 map = layers 0..3 in the left half and
+            // 4..7 in the right. Told apart by the texture's own size, so the
+            // MATERIAL needs to know nothing about the terrain it lands on and
+            // no backend needs a second sampler, binding or uniform. Every
+            // blend is page-aware, also one with four layers or fewer: on a 2:1
+            // map the plain full-width sample would smear both halves together.
+            //
+            // In the 2:1 case each half is read at mip 0 with U clamped half a
+            // texel inside it: bilinear filtering at a half's edge (and any
+            // runtime mip of the atlas — GL and Metal build one) would bleed
+            // the other page's weights in. Both samples are taken up front and
+            // only SELECTED by the size test, so no implicit-derivative sample
+            // sits in control flow.
+            const bool page2 = names.size() > 4;
+            const std::string ts = v + "_ts", wu = v + "_wu";
+            decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
+                 + " bool " + v + "_p2 = " + ts + ".x > 1.5 * " + ts + ".y;"
+                 + " float " + wu + " = clamp(vUV.x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
+                 + " vec4 " + v + "_wf = texture(heLandscapeWeights, vUV);"
+                 + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", vUV.y), 0.0);"
+                 + " vec4 " + v + "_w = " + v + "_p2 ? " + v + "_wl : " + v + "_wf;";
+            if (page2)
+                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, vUV.y), 0.0);"
+                      + " vec4 " + v + "_w2 = " + v + "_p2 ? " + v + "_wr : vec4(0.0);";
+            decl += " float " + v + "_s = " + wsum + ";"
                  + " vec3 " + v + " = " + v + "_s > 1e-4 ? (" + sum + ") / " + v + "_s : "
                  + layer0 + ";";
             break;

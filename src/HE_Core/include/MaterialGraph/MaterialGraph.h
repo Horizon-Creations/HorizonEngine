@@ -158,8 +158,18 @@ enum class MatNodeType : uint8_t
 };
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
-// channel each. More would mean several weightmap textures + shader permutations.
-inline constexpr int kMatMaxLandscapeLayers = 4;
+// channel each, over two pages of four (TerrainComponent::layerWeights /
+// layerWeights2). Both pages travel in ONE texture, side by side, so the eight
+// layers cost the same single heLandscapeWeights binding and sampler as four
+// did — the SM 5.0 / Metal sampler budget is full (MaterialShaderLibrary).
+inline constexpr int kMatMaxLandscapeLayers = 8;
+
+// How many per-layer colours the CPU fold persists for the GI bounce
+// (MaterialAsset::approxLayerColor, the MTRL tail, GiLandscape::layerColor).
+// Kept at the original four so the asset format and the GPU structs stay as
+// they are: a GI hit on a landscape weights layers 0..3 by their share of the
+// paint, layers 4..7 only reach it through the flat layer average.
+inline constexpr int kMatApproxLayerColors = 4;
 
 // Split a LandscapeLayerBlend node's `s` into its layer names (newline separated,
 // blanks dropped, capped at kMatMaxLandscapeLayers). Empty → one "Layer 1".

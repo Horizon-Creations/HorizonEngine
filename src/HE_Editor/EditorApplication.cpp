@@ -6173,6 +6173,11 @@ void EditorApplication::dumpFrameHeadless()
 	// HE_DUMP_LAYEREDIT (below, AFTER WarmupMaterials) then re-authors that
 	// material's layers the way the Material Editor does — the "the blend works
 	// exactly once" case.
+	//
+	// HE_DUMP_LANDSCAPELAYERS=8 is the eight-layer variant (Thema 158): the same
+	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
+	// orange (7) — the last three on the weightmap's SECOND page, which the
+	// renderer uploads as the right half of the one heLandscapeWeights texture.
 	HE::UUID s_layerMatId{};
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
@@ -6184,11 +6189,18 @@ void EditorApplication::dumpFrameHeadless()
 		HE::MaterialGraph g;
 		const int out = g.addNode(HE::MatNodeType::Output);
 		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
-		g.findNode(lb)->s = "Red\nGreen\nBlue";
-		const float rgb[3][3] = { { 0.90f, 0.10f, 0.10f },
+		const bool eight = std::string_view(ll) == "8";
+		g.findNode(lb)->s = eight ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
+		                          : "Red\nGreen\nBlue";
+		const float rgb[8][3] = { { 0.90f, 0.10f, 0.10f },
 		                          { 0.10f, 0.85f, 0.15f },
-		                          { 0.15f, 0.25f, 0.95f } };
-		for (int i = 0; i < 3; ++i)
+		                          { 0.15f, 0.25f, 0.95f },
+		                          { 0.95f, 0.90f, 0.10f },
+		                          { 0.90f, 0.10f, 0.90f },
+		                          { 0.10f, 0.90f, 0.90f },
+		                          { 0.95f, 0.95f, 0.95f },
+		                          { 0.95f, 0.50f, 0.05f } };
+		for (int i = 0; i < (eight ? 8 : 3); ++i)
 		{
 			const int c = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(c)->p[0] = rgb[i][0];
@@ -6222,14 +6234,23 @@ void EditorApplication::dumpFrameHeadless()
 		TerrainPaint::ensureWeightmap(ltc);
 		TerrainPaint::paint(ltc,   0.0f,  0.0f, /*Green*/1, 22.0f, 6.0f, 1.0f);
 		TerrainPaint::paint(ltc, -34.0f, 20.0f, /*Blue*/ 2, 12.0f, 4.0f, 1.0f);
+		if (eight)
+		{
+			TerrainPaint::paint(ltc,  34.0f, -30.0f, /*Yellow*/  3, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,  34.0f,  30.0f, /*Magenta*/ 4, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc, -34.0f, -30.0f, /*White*/   6, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,   0.0f,  40.0f, /*Orange*/  7, 7.0f, 2.0f, 1.0f);
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
 		// The headless dump renders from OnInit, BEFORE the main loop's
 		// SceneSystems::tickWorld — without this the terrain has no chunk
 		// entities yet and there is simply nothing to draw.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
-		HE_LOG_INFO(Editor, "%s",
-			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added "
+			"(%d layers, weightmap %ux%u)", eight ? 8 : 3,
+			TerrainPaint::usesSecondPage(ltc) ? 2 * ltc.weightRes : ltc.weightRes,
+			ltc.weightRes);
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling

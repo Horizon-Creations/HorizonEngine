@@ -534,7 +534,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 				committed = true;
 			}
 			if (static_cast<int>(names.size()) >= HE::kMatMaxLandscapeLayers)
-				ImGui::TextDisabled("4 layers max (one RGBA weightmap)");
+				ImGui::TextDisabled("8 layers max (two RGBA weightmap pages)");
 			// Rebuild `s`. The link surgery below happens ONLY for an explicit ×:
 			// this runs every frame while the user types, and clearing a name
 			// field to retype it (select-all, delete) makes

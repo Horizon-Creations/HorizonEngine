@@ -310,7 +310,7 @@ struct MaterialAsset : public RuntimeAsset
 	float   approxMetallic  = 0.0f;
 	float   approxRoughness = 0.5f;
 	// BaseColor driven by a Landscape Layer Blend: the layers folded separately,
-	// in weightmap-channel order (HE::kMatMaxLandscapeLayers × rgb). Count 0 =
+	// in weightmap-channel order (HE::kMatApproxLayerColors × rgb). Count 0 =
 	// not layer-blended → approxBaseColor is the whole answer. A landscape's GI
 	// hit blends these by the terrain's AVERAGE painted weights, so a terrain
 	// painted all-grass reflects grass instead of the average of every layer.

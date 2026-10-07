@@ -1036,6 +1036,7 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     ptc.layerWeights.clear();   // back to "everything is layer 0"
+                    ptc.layerWeights2.clear();  // layers 4..7 go with it
                     ptc.weightsDirty = true;
                 }
             }
