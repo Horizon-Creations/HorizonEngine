@@ -6831,6 +6831,47 @@ void EditorApplication::dumpFrameHeadless()
 		                           e.gradientColor = glm::vec4(0.55f, 0.20f, 0.65f, 1.0f);
 		                           e.innerShadow = true; e.innerShadowBlur = 20.0f; });
 
+		// HE_DUMP_UITEST=image adds tile 12: an Image element showing a generated
+		// picture, red / green on top, blue / yellow below, white tint (Thema 157).
+		// Kept off the plain "=1" sheet so the Thema-133 baselines stay as measured.
+		// The widget refers to its picture by path and the manager resolves it
+		// again on instantiation, so the texture is registered under that path.
+		if (std::string_view(ui) == "image")
+		{
+			constexpr uint32_t kSz = 64;
+			TextureAsset ta;
+			ta.name = "__uiImageWitness";
+			ta.path = "__uiImageWitness.hasset";
+			ta.width = ta.height = kSz;
+			ta.channels = 4;
+			// Flagged sRGB like every imported colour texture: the UI pass must
+			// sample the bytes as they are anyway (Thema 107), an sRGB upload
+			// would show here as a darker picture.
+			ta.srgb = true;
+			ta.data.resize(size_t(kSz) * kSz * 4);
+			for (uint32_t y = 0; y < kSz; ++y)
+				for (uint32_t x = 0; x < kSz; ++x)
+				{
+					// Rows are stored bottom-up: y >= kSz/2 is the picture's top half.
+					static const uint8_t kQuad[4][4] = {
+						{ 230,  30,  30, 255 }, { 30, 200,  60, 255 },    // top: red, green
+						{  30,  80, 230, 255 }, { 240, 220,  40, 255 } }; // bottom: blue, yellow
+					const uint8_t* c = kQuad[(y >= kSz / 2 ? 0 : 2) + (x >= kSz / 2 ? 1 : 0)];
+					std::memcpy(&ta.data[(size_t(y) * kSz + x) * 4], c, 4);
+				}
+			contentManager().registerTexture(std::move(ta));
+
+			const int id = t.add(HE::UIWidgetType::Image);
+			HE::UIElement& e = *t.find(id);
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = 60.0f + static_cast<float>(col) * 300.0f;
+			e.posY = 80.0f + static_cast<float>(row) * 170.0f;
+			e.sizeX = 240.0f; e.sizeY = 110.0f;
+			e.texture = "__uiImageWitness.hasset";
+			e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+		}
+
 		UIWidgetAsset wa;
 		wa.type = HE::AssetType::Widget;
 		wa.name = "__uiStyleWitness";
