@@ -580,6 +580,12 @@ namespace
 				tc["weightRes"]     = t->weightRes;
 				tc["layerWeightsB64"] = base64Encode(t->layerWeights.data(),
 				                                     t->layerWeights.size());
+				// Layers 4..7 under their own key, so layerWeightsB64 keeps
+				// its weightRes² × 4 meaning and older builds still read the
+				// first four layers of a scene written by this one.
+				if (t->layerWeights2.size() == t->layerWeights.size())
+					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
+					                                      t->layerWeights2.size());
 			}
 			if (!t->sculptHeights.empty())
 			{
@@ -1419,6 +1425,15 @@ namespace
 				if (t.layerWeights.size() != static_cast<size_t>(t.weightRes) * t.weightRes * 4)
 					t.layerWeights.clear();
 				t.weightsDirty = !t.layerWeights.empty();
+			}
+			// Absent in every scene written before there were eight layers →
+			// empty = layers 4..7 all zero, the look those scenes always had.
+			if (!t.layerWeights.empty() && c.contains("layerWeights2B64")
+			    && c["layerWeights2B64"].is_string())
+			{
+				t.layerWeights2 = base64Decode(c["layerWeights2B64"].get<std::string>());
+				if (t.layerWeights2.size() != t.layerWeights.size())
+					t.layerWeights2.clear();
 			}
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{

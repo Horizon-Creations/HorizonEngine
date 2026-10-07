@@ -5,6 +5,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
+#include <ContentManager/TextureArrayBuild.h>
 #include "ImporterCommon.h"   // import provenance: writeAsset / sourceFileOf / reimport
 #include <Diagnostics/GlobalState.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
@@ -335,6 +336,86 @@ TEST_CASE("ContentManager loads the legacy (size_t) TXMI texture layout")
 	const HAsset::Reader::Chunk* c = r.findChunk(HAsset::CHUNK_TXMI);
 	REQUIRE(c != nullptr);
 	CHECK(c->data.size() == 18);
+}
+
+// Thema 158: a texture ARRAY is one TextureAsset with `layers` slices, each with
+// its own full mip chain, slice 0 leading. The slice count rides in the TXMI tail
+// only when > 1 (22 bytes — still under the legacy discriminator's 24).
+TEST_CASE("A texture array built from same-sized slices round-trips with its slices and baked mips")
+{
+	auto solid = [](uint8_t r, uint8_t g, uint8_t b, bool srgb) {
+		TextureAsset t;
+		t.type = HE::AssetType::Texture;
+		t.width = 4; t.height = 2; t.channels = 4; t.srgb = srgb;
+		for (int i = 0; i < 8; ++i) t.data.insert(t.data.end(), { r, g, b, 255 });
+		return t;
+	};
+	const TextureAsset s0 = solid(200, 10, 10, true), s1 = solid(10, 200, 10, false),
+	                   s2 = solid(10, 10, 200, false);
+
+	TextureAsset arr;
+	std::string err;
+	REQUIRE_MESSAGE(HE::buildTextureArray({ &s0, &s1, &s2 }, arr, /*bakeMips=*/true, &err), err);
+	CHECK(arr.layers == 3);
+	CHECK(arr.mipLevels == 3);                // 4x2 → 2x1 → 1x1
+	CHECK(arr.srgb);                          // follows slice 0
+	CHECK(HE::textureArraySliceBytes(4, 2, 3) == (8 + 2 + 1) * 4u);
+	CHECK(arr.data.size() == 3 * HE::textureArraySliceBytes(4, 2, 3));
+	CHECK(HE::textureArrayPayloadValid(arr));
+	// Slice k, level l starts where textureArrayOffset says, with slice k's colour —
+	// a solid slice halves to itself, so every level of slice 1 is green.
+	for (uint32_t l = 0; l < 3; ++l)
+	{
+		const size_t o = HE::textureArrayOffset(4, 2, 3, 1, l);
+		CHECK(arr.data[o] == 10);
+		CHECK(arr.data[o + 1] == 200);
+	}
+	CHECK(arr.data[HE::textureArrayOffset(4, 2, 3, 2, 0) + 2] == 200);
+	// Slice 0 level 0 is the leading bytes: a consumer that knows nothing of
+	// arrays reads it as the 2D texture.
+	CHECK(std::equal(s0.data.begin(), s0.data.end(), arr.data.begin()));
+
+	// Mismatched slices are refused, not padded.
+	TextureAsset bad = solid(1, 2, 3, false);
+	bad.width = 2; bad.height = 4;
+	CHECK_FALSE(HE::buildTextureArray({ &s0, &bad }, arr, true, &err));
+	CHECK(err.find("size") != std::string::npos);
+
+	TempContentDir dir;
+	{
+		ContentManager cm(dir.path.string());
+		TextureAsset a;
+		REQUIRE(HE::buildTextureArray({ &s0, &s1, &s2 }, a, true));
+		a.type = HE::AssetType::Texture; a.name = "arr"; a.path = "arr.hasset";
+		REQUIRE(cm.saveAsset(a));
+	}
+	HAsset::Reader r;
+	REQUIRE(r.open((dir.path / "arr.hasset").string()));
+	const HAsset::Reader::Chunk* c = r.findChunk(HAsset::CHUNK_TXMI);
+	REQUIRE(c != nullptr);
+	CHECK(c->data.size() == 22);
+	CHECK(c->data.size() < HAsset::kTextureHeaderLegacyMinSize);
+
+	ContentManager cm2(dir.path.string());
+	const TextureAsset* t = cm2.getTexture(cm2.loadAsset("arr.hasset"));
+	REQUIRE(t != nullptr);
+	CHECK(t->width == 4);
+	CHECK(t->height == 2);
+	CHECK(t->layers == 3);
+	CHECK(t->mipLevels == 3);
+	CHECK(t->srgb);
+	CHECK(t->data == arr.data);
+	CHECK(HE::textureArrayPayloadValid(*t));
+
+	// A plain 2D texture still loads as ONE layer.
+	{
+		ContentManager cm(dir.path.string());
+		TextureAsset p = s1; p.name = "plain"; p.path = "plain.hasset";
+		REQUIRE(cm.saveAsset(p));
+	}
+	const TextureAsset* p = cm2.getTexture(cm2.loadAsset("plain.hasset"));
+	REQUIRE(p != nullptr);
+	CHECK(p->layers == 1);
 }
 
 TEST_CASE("ContentManager unload removes asset")

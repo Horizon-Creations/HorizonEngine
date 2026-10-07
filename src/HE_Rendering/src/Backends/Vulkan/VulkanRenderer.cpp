@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <Renderer/UIFont.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -3393,17 +3394,18 @@ const VkImageView* VulkanRenderer::resolveDecalTexture(const HE::UUID& textureId
     return res.first->second.view ? &res.first->second.view : nullptr;
 }
 
-VkImageView VulkanRenderer::resolveGraphTexture(const HE::UUID& id, const std::string& path)
+VkImageView VulkanRenderer::resolveGraphTexture(const HE::UUID& id, const std::string& path, bool array)
 {
-    const std::string key = graphTexKey(id, path);
+    std::string key = graphTexKey(id, path);
     if (key.empty() || !m_contentManager) return VK_NULL_HANDLE;
+    if (array) key += "#arr"; // the same asset can be 2D in one material, an array in another
     if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
         return it->second.view;
     // Unlike the decal cache this caches a null asset too: resolveTextureRef loads
     // synchronously, so "still null" means unloadable, not "not yet" (mirrors GL).
     MaterialTexVk mt;
     if (const TextureAsset* tex = m_contentManager->resolveTextureRef(id, path))
-        uploadTextureImage(tex, mt.image, mt.mem, mt.view); // unsupported format → view stays null
+        uploadTextureImage(tex, mt.image, mt.mem, mt.view, array); // unsupported format → view stays null
     auto res = m_graphTexCache.emplace(key, mt);
     return res.first->second.view;
 }
@@ -6320,7 +6322,7 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
 // Returns false when the device can't sample the shipped format (→ untextured draw).
 bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
                                         VkImage& image, VkDeviceMemory& memory, VkImageView& view,
-                                        bool honourSrgb)
+                                        bool asArray, bool honourSrgb)
 {
     image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
     if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
@@ -6345,6 +6347,13 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     case TextureFormat::BC3:   vkFmt = srgb ? VK_FORMAT_BC3_SRGB_BLOCK  : VK_FORMAT_BC3_UNORM_BLOCK; isBlock = true;  break;
     default: return false;
     }
+    // Texture ARRAY (Thema 158): every slice of a layers > 1 asset, one after the
+    // other in the staging buffer exactly as HE::buildTextureArray stores them
+    // (slice-major, each slice with its full chain). RGBA8 only. A 2D asset in an
+    // array slot is one slice; an array asset in a 2D slot reads slice 0 -- its
+    // leading bytes -- through the plain path below.
+    const uint32_t layers = asArray ? std::max<uint32_t>(1, tex->layers) : 1;
+    if (layers > 1 && (isBlock || !HE::textureArrayPayloadValid(*tex))) return false;
     // Device must actually sample this format (BC support is optional in Vulkan).
     VkFormatProperties fp{};
     vkGetPhysicalDeviceFormatProperties(m_physDevice, vkFmt, &fp);
@@ -6361,6 +6370,8 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
       for (uint32_t l = 0; l < mips; ++l)
       { offsets[l] = total; total += levelBytes(lw, lh);
         lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1; } }
+    const VkDeviceSize sliceBytes = total;     // one slice's chain
+    total *= layers;
     if (tex->data.size() < total) return false; // truncated payload
 
     // Staging buffer holding the whole (already tightly packed) mip chain.
@@ -6390,7 +6401,7 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     ici.format        = vkFmt;
     ici.extent        = { width, height, 1 };
     ici.mipLevels     = mips;
-    ici.arrayLayers   = 1;
+    ici.arrayLayers   = layers;
     ici.samples       = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
     ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -6426,18 +6437,20 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
         bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar.image            = image;
-        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
         bar.srcAccessMask    = 0;
         bar.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
+    for (uint32_t s = 0; s < layers; ++s)
     { uint32_t lw = width, lh = height;
       for (uint32_t l = 0; l < mips; ++l)
       {
         VkBufferImageCopy region{};
-        region.bufferOffset     = offsets[l]; // multiple of 16 → satisfies block/4-byte alignment
-        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1 };
+        // Multiple of 16 for blocks; a multiple of 4 for RGBA8 (the only array format).
+        region.bufferOffset     = s * sliceBytes + offsets[l];
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, s, 1 };
         region.imageExtent      = { lw, lh, 1 };
         vkCmdCopyBufferToImage(oneCB, stageBuf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
@@ -6449,7 +6462,7 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
         bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar.image            = image;
-        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
         bar.srcAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
         bar.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -6467,9 +6480,9 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
 
     VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     ivci.image            = image;
-    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.viewType         = asArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     ivci.format           = vkFmt;
-    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
     if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS)
     {
         view = VK_NULL_HANDLE;
@@ -6560,8 +6573,10 @@ void VulkanRenderer::processPendingInvalidations()
     m_pendingMatInval.clear();
     for (const HE::UUID& id : m_pendingTexInval)
     {
-        if (auto it = m_graphTexCache.find(graphTexKey(id, {})); it != m_graphTexCache.end())
-        { destroyMaterialTex(it->second); m_graphTexCache.erase(it); }
+        // The texture-array upload of the same asset lives under "#arr" (Thema 158).
+        for (const std::string& key : { graphTexKey(id, {}), graphTexKey(id, {}) + "#arr" })
+            if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+            { destroyMaterialTex(it->second); m_graphTexCache.erase(it); }
         if (auto it = m_uiImageCache.find(graphTexKey(id, {})); it != m_uiImageCache.end())
         { destroyUIImage(it->second); m_uiImageCache.erase(it); }
     }
@@ -7243,14 +7258,22 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         // list is snapshotted BEFORE any resolve: a resolve may load, and a
                         // load can move the material asset out from under a held pointer —
                         // which is also why `ma` below is fetched only AFTER this block.
+                        //
+                        // A sampler2DArray slot (Texture Array Sample, Thema 158) needs a
+                        // 2D_ARRAY view -- the white ARRAY view when empty -- or validation
+                        // flags the view type at the draw.
                         VkImageView heTexP[HE::kMatMaxGraphTextures] = {
                             m_whiteAlbedoView, m_whiteAlbedoView, m_whiteAlbedoView, m_whiteAlbedoView };
                         {
                             HE::UUID    gIds[HE::kMatMaxGraphTextures]{};
                             std::string gPaths[HE::kMatMaxGraphTextures];
                             size_t nTex = 0;
+                            uint32_t arrMask = 0;
                             if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
                             {
+                                arrMask = HE::matGlslTextureArrayMask(ma0->customShaderFragGlsl);
+                                for (int i = 0; i < HE::kMatMaxGraphTextures; ++i)
+                                    if ((arrMask >> i) & 1u) heTexP[i] = m_whiteArrayView;
                                 nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
                                     std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
                                 for (size_t i = 0; i < nTex; ++i)
@@ -7260,7 +7283,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 }
                             }
                             for (size_t i = 0; i < nTex; ++i)
-                                if (VkImageView v = resolveGraphTexture(gIds[i], gPaths[i]))
+                                if (VkImageView v = resolveGraphTexture(gIds[i], gPaths[i], (arrMask >> i) & 1u))
                                     heTexP[i] = v;
                         }
                         // heLandscapeWeights (binding 14) = the object's landscape weightmap,
@@ -13210,7 +13233,7 @@ VkDescriptorSet VulkanRenderer::resolveUIImageSet(const HE::UUID& id)
 
     UIFontAtlas img;
     if (const TextureAsset* tex = m_contentManager->resolveTextureRef(id, std::string{}))
-        uploadTextureImage(tex, img.image, img.memory, img.view, /*honourSrgb=*/false);
+        uploadTextureImage(tex, img.image, img.memory, img.view, /*asArray=*/false, /*honourSrgb=*/false);
     if (img.view)
     {
         VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
