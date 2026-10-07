@@ -2340,6 +2340,49 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 	CHECK(HE::generateFragment(back).glsl == gen.glsl);
 }
 
+TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
+{
+	// Thema 158 Schritt 8: heHash21 loses its fraction bits at world-space
+	// lattice indices, and D3D12/Vulkan drew the auto material's dirt and puddle
+	// fields blocky against D3D11/GL. The integer variant is opt-in per node so
+	// every existing noise material keeps its shader text.
+	auto fbmGlsl = [](float flag) {
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int uv  = g.addNode(MatNodeType::UV);
+		const int fbm = g.addNode(MatNodeType::Fbm);
+		g.findNode(fbm)->p[0] = flag;
+		CHECK(g.connect(uv,  0, fbm, 0));
+		CHECK(g.connect(fbm, 0, out, 0));
+		return std::make_pair(g, HE::generateFragmentGlsl(g));
+	};
+	const auto [plainG, plain]   = fbmGlsl(0.0f);
+	const auto [robustG, robust] = fbmGlsl(1.0f);
+	CHECK(plain.find("heFbm(") != std::string::npos);
+	CHECK(plain.find("heHash21") != std::string::npos);
+	CHECK(plain.find("heFbmI") == std::string::npos);
+	CHECK(plain.find("heHashI2") == std::string::npos);
+	CHECK(robust.find("heFbmI(") != std::string::npos);
+	CHECK(robust.find("float heHashI2(ivec2 i)") != std::string::npos);
+	CHECK(robust.find("heHash21") == std::string::npos);
+	CHECK(robust.find("heFbm(") == std::string::npos);
+
+	// The flag lives in p[], which the JSON keeps although Fbm shows no widget.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(robustG), back));
+	CHECK(HE::generateFragmentGlsl(back) == robust);
+
+	// Every auto-material view uses the integer hash only.
+	using V = HE::AutoLandscapeView;
+	for (V view : { V::Lit, V::MasksRockSnowWater, V::MasksDirtWet, V::Normal, V::Surface })
+	{
+		const std::string glsl = HE::generateFragment(HE::buildAutoLandscapeGraph(view).graph).glsl;
+		CHECK(glsl.find("heFbmI(") != std::string::npos);
+		CHECK(glsl.find("heHash21") == std::string::npos);
+		CHECK(glsl.find("heFbm(") == std::string::npos);
+	}
+}
+
 // ═══ Container semantics shared with the other graph systems ═════════════════
 
 TEST_CASE("MaterialGraph::connect REPLACES an existing link on the same input pin")

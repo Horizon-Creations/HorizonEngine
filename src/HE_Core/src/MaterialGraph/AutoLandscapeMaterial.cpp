@@ -156,6 +156,9 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // ── Ground: grass, dirt patches, dirt belt below the rock (column 3) ─────
     const int invDirt  = w.op(T::Divide, 3, { { one }, { pDirtSize } });
     const int dirtFbm  = w.op(T::Fbm, 3, { { xz }, { invDirt } });
+    // Integer hash: the float heHash21 differs per driver at world-space lattice
+    // indices (blocky patches on D3D12/Vulkan, Thema 158 Schritt 7/8).
+    r.graph.findNode(dirtFbm)->p[0] = 1.0f;
     const int tenth    = w.constF(0.1f, 3);
     const int dirtT    = w.op(T::Add, 3, { { dirtFbm }, { heightBias(dirt.height, 2, grass.height, 2, tenth, 3) } });
     // fBm sits around 0.5 (range ~0.1..0.85): edge = 0.75 − 0.5 × amount.
@@ -202,6 +205,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int xzOff  = w.op(T::Add, 6, { { xz }, { offs } });
     const int invPud = w.op(T::Divide, 6, { { one }, { pPudSize } });
     const int basin  = w.op(T::Fbm, 6, { { xzOff }, { invPud } });
+    r.graph.findNode(basin)->p[0] = 1.0f; // integer hash, see dirtFbm
     const int depth  = w.op(T::Subtract, 6, { { pPudAmt }, { basin } });  // > 0 inside a hollow
     // Wet rim: from 0.06 below the water line up to it.
     const int rimW   = w.constF(0.06f, 6);

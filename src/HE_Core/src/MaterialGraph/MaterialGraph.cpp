@@ -507,6 +507,7 @@ struct EmitCtx
     std::vector<std::pair<std::string, bool>> switches;       // switches reached (effective)
     bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
     bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
+    bool usesNoiseI  = false;                            // 2D fbm on the integer hash (Fbm p[0] = 1)
     bool usesNormalPerturb = false;                      // hePerturbNormal (screen-space TBN)
     // Texture bombing: the heBombGrid helper, and the grids already emitted —
     // key = scope + uv expression + grid params, value = the grid's variable
@@ -1137,9 +1138,13 @@ HE_MG_NOINLINE bool emitPatternNode(EmitCtx& c, const Scope& sc, const MatGraphN
             decl = "float " + v + " = heValueNoise(" + uvInput(c, sc, n, 0) + " * "
                  + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
         case MatNodeType::Fbm:
-            c.usesNoise = true;
-            decl = "float " + v + " = heFbm(" + uvInput(c, sc, n, 0) + " * "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            // p[0] = 1 → the integer-hash fbm (see heFbmI); 0 keeps the old text.
+            const bool robust = n.p[0] > 0.5f;
+            (robust ? c.usesNoiseI : c.usesNoise) = true;
+            decl = "float " + v + " = " + (robust ? "heFbmI(" : "heFbm(") + uvInput(c, sc, n, 0)
+                 + " * " + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        }
         case MatNodeType::Checker:
         {
             const std::string uv = uvInput(c, sc, n, 0);
@@ -1658,6 +1663,28 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             " return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z); }\n"
             "float heFbm3(vec3 p) { float v = 0.0; float a = 0.5;"
             " for (int i = 0; i < 4; i++) { v += a * heValueNoise3(p); p *= 2.0; a *= 0.5; }"
+            " return v; }\n";
+    if (c.usesNoiseI)
+        // heHash21 multiplies the lattice index by ~456 before its fract(): at an
+        // index of a few hundred (world-space fbm, high octave) only ~6 fraction
+        // bits are left, so any FMA contraction or reordering in a driver picks a
+        // different value per cell. D3D12/Vulkan drew blocky, grid-aligned puddle
+        // and dirt outlines against D3D11/GL that way (Thema 158 Schritt 7). This
+        // variant hashes the integer cell (pcg2d, Jarzynski & Olano 2020) like
+        // heBombHash: float → int → uint, exact 24-bit → float. Opt-in per node
+        // so existing noise materials keep their look.
+        src +=
+            "float heHashI2(ivec2 i) { uvec2 v = uvec2(i) * 1664525u + 1013904223u;"
+            " v.x += v.y * 1664525u; v.y += v.x * 1664525u; v ^= v >> 16u;"
+            " v.x += v.y * 1664525u; v.y += v.x * 1664525u; v ^= v >> 16u;"
+            " return float(v.x >> 8u) * (1.0 / 16777216.0); }\n"
+            "float heValueNoiseI(vec2 p) { vec2 fl = floor(p); ivec2 i = ivec2(fl); vec2 f = p - fl;"
+            " vec2 u = f * f * (3.0 - 2.0 * f);"
+            " float a = heHashI2(i); float b = heHashI2(i + ivec2(1, 0));"
+            " float cc = heHashI2(i + ivec2(0, 1)); float d = heHashI2(i + ivec2(1, 1));"
+            " return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y); }\n"
+            "float heFbmI(vec2 p) { float v = 0.0; float a = 0.5;"
+            " for (int k = 0; k < 4; k++) { v += a * heValueNoiseI(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
     if (c.usesNormalPerturb)
         // The cotangent frame (Schüler) comes out multiplied by the SIGN of the
