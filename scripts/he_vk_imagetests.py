@@ -36,6 +36,10 @@ import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 # validation messages a variant may print (see ALLOWED_VALIDATION). `probes`
 # name boxes (x, y as a fraction of the frame) whose mean colour must be led by
 # one channel ("r"/"g"/"b") — for pictures where WHAT is drawn is the verdict.
+# `stripes` name boxes (x0, y0, x1, y1 as fractions of the frame) whose stripe
+# energy (stripe_energy: mean |Δ luminance| between vertically adjacent pixels)
+# must stay at or below a maximum — for pictures where a smooth surface must
+# not break into horizontal bands.
 #
 # Thresholds sit at roughly half of what lavapipe measured (Mesa 25.2.8,
 # runs 37112790557 / 37113763253 on 03.10.2026): nebula 13.1–13.4, clustered
@@ -44,6 +48,11 @@ import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 # Noise floor, same shot twice: clustered bit-identical across runs; GI
 # max |Δ| 1 on 6 pixels (so GI's 0.46 is signal); nebula up to 1.4 between
 # any two shots, also within one run (the star field moves), well under 5.0.
+# Stripe verdict: the most stripe energy (8-bit luminance steps between
+# vertically adjacent pixels, box mean) a `stripes` box may hold. Roughly 3x
+# the clean picture's 0.64 and 2x below the striped one's 4.3 (gi_stripes).
+STRIPE_MAX = 2.0
+
 CASES = {
     # Nebula on the night sky (docs/nebula-backend-parity-analysis-2026-10-01.md).
     # Dome clouds at zero coverage: the volumetric march is the costliest thing
@@ -136,6 +145,36 @@ CASES = {
                                "-> heLandscapeWeights bound"]},
         "probes": {v: [("green disc", 0.50, 0.50, "g"), ("blue disc", 0.32, 0.70, "b"),
                        ("red field", 0.50, 0.20, "r")] for v in ("gi_off", "gi_on")},
+        "allow": {"gi_off": ["mat_ubo"], "gi_on": ["mat_ubo", "gi_layout"]},
+    },
+    # Black GI stripes (Thema 159, docs/gi-stripes-vulkan-d3d-ursache-2026-10-07.md):
+    # the GI sun-shadow mask starts its rays at the GI G-buffer position + 5 cm
+    # along the normal. While that position was RGBA16F, its ULP at y = 300
+    # (0.25 m) swallowed the offset and every surface shadowed itself: dense
+    # row stripes on the flat painted terrain, horizontal bands on the sphere.
+    # The witness scenes sit at y = 300 on purpose — at y = 0 the bug is
+    # invisible. Same view as scripts/gi-stripes-repro/cap159.ps1 -Scene layers.
+    # Measured on an RTX 4070 (Vulkan, 07.10.2026), stripe energy terrain /
+    # sphere: 5.22 / 5.58 before the fix (RGBA16F), 0.15 / 0.41 after; GI off
+    # 0.00 / 0.58. The same numbers on OpenGL, D3D11 and D3D12 (4.34-6.11 before).
+    # gi_off is the control that the boxes hold no stripes of their own.
+    "gi_stripes": {
+        "base": {"LANDSCAPELAYERS": "1", "MATERIALTEST": "1", "SKYTEST": "1",
+                 "CAMX": "0", "CAMY": "306", "CAMZ": "20", "PITCH": "-20", "TOD": "0.35",
+                 "CLOUDMODE": "0", "COVERAGE": "0", "CLOUDSHADOWS": "0", "SSAO": "0",
+                 "AA": "0", "MOTIONBLUR": "0", "DOF": "0", "BLOOM": "0", "SSR": "0",
+                 "RENDERPATH": "0", "FRAMES": "40"},
+        "variants": {
+            "gi_off": {"dump": {"GI": "0"}},
+            "gi_on":  {"dump": {"GI": "1"}},
+        },
+        "pairs": [("gi_off", "gi_on", None)],
+        "require": {"gi_off": ["HE_DUMP_LANDSCAPELAYERS witness landscape added",
+                               "HE_DUMP_MATERIALTEST sphere"],
+                    "gi_on":  ["HE_DUMP_LANDSCAPELAYERS witness landscape added",
+                               "HE_DUMP_MATERIALTEST sphere", "GI probe grid"]},
+        "stripes": {v: [("terrain", 0.08, 0.78, 0.92, 0.98, STRIPE_MAX),
+                        ("sphere",  0.37, 0.17, 0.63, 0.47, STRIPE_MAX)] for v in ("gi_off", "gi_on")},
         "allow": {"gi_off": ["mat_ubo"], "gi_on": ["mat_ubo", "gi_layout"]},
     },
 }
@@ -238,6 +277,24 @@ def probe_box(pix, w, h, fx, fy, r=PROBE_RADIUS):
     n = (2 * r + 1) ** 2
     b, g, rr = (round(v / n) for v in acc)
     return rr, g, b
+
+
+def stripe_energy(pix, w, h, fx0, fy0, fx1, fy1):
+    """Mean |Δ luminance| between vertically adjacent pixels in the box
+    (fractions of the frame); luminance = mean of R, G, B. pix is BGR."""
+    x0, x1 = int(fx0 * w), int(fx1 * w)
+    y0, y1 = int(fy0 * h), int(fy1 * h)
+    def lum_row(y):
+        row = pix[(y * w + x0) * 3:(y * w + x1) * 3]
+        return [row[i] + row[i + 1] + row[i + 2] for i in range(0, len(row), 3)]
+    total, n = 0, 0
+    prev = lum_row(y0)
+    for y in range(y0 + 1, y1):
+        cur = lum_row(y)
+        total += sum(abs(a - b) for a, b in zip(cur, prev))
+        n += len(cur)
+        prev = cur
+    return round(total / (3.0 * n), 3) if n else 0.0
 
 
 def judge_probe(rgb, channel):
@@ -390,6 +447,16 @@ def main():
                       f"{ch} leads by {lead} → {'ok' if ok else 'FAIL'} (min {PROBE_MARGIN})")
                 if not ok:
                     problems.append(f"{vname}: probe '{label}' rgb={rgb}, {ch} leads by {lead} < {PROBE_MARGIN}")
+            shot["stripes"] = []
+            for label, fx0, fy0, fx1, fy1, mx in spec.get("stripes", {}).get(vname, []):
+                e = stripe_energy(shot["_pix"], shot["width"], shot["height"], fx0, fy0, fx1, fy1)
+                ok = e <= mx
+                shot["stripes"].append({"label": label, "box": [fx0, fy0, fx1, fy1],
+                                        "energy": e, "max": mx, "ok": ok})
+                print(f"      stripes {label:10s} ({fx0:.2f},{fy0:.2f})-({fx1:.2f},{fy1:.2f}) "
+                      f"energy {e} → {'ok' if ok else 'FAIL'} (max {mx})")
+                if not ok:
+                    problems.append(f"{vname}: stripes in '{label}', energy {e} > {mx}")
 
         pairs = []
         for a, b, min_mean in spec["pairs"]:
