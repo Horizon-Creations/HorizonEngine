@@ -4508,21 +4508,8 @@ struct D3D11RendererImpl
         // materials keep fog.z = 0 — flat ambient, no specular IBL, no fog,
         // exactly the state before the cube existed — so a failure does not
         // touch m_matReady. Filled by the first updateSkyEnvCube.
-        D3D11_TEXTURE2D_DESC td{};
-        td.Width            = static_cast<UINT>(k_skyEnvFace);
-        td.Height           = static_cast<UINT>(k_skyEnvFace);
-        td.MipLevels        = 1;
-        td.ArraySize        = 6;
-        td.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        td.SampleDesc.Count = 1;
-        td.Usage            = D3D11_USAGE_DEFAULT;
-        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-        td.MiscFlags        = D3D11_RESOURCE_MISC_TEXTURECUBE;
-        D3D11_SHADER_RESOURCE_VIEW_DESC cv{};
-        cv.Format                    = td.Format;
-        cv.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURECUBE;
-        cv.TextureCube.MostDetailedMip = 0;
-        cv.TextureCube.MipLevels     = 1;
+        const D3D11_TEXTURE2D_DESC td = HE::d3d11mat::SkyEnvCubeDesc(static_cast<UINT>(k_skyEnvFace));
+        const D3D11_SHADER_RESOURCE_VIEW_DESC cv = HE::d3d11mat::SkyEnvCubeSrvDesc();
         if (FAILED(device->CreateTexture2D(&td, nullptr, &m_skyEnvTex)) ||
             FAILED(device->CreateShaderResourceView(m_skyEnvTex.Get(), &cv, &m_skyEnvSRV)))
         {
@@ -4557,15 +4544,9 @@ struct D3D11RendererImpl
         for (size_t i = 0; i < px.size(); ++i)
             half[i] = glm::packHalf1x16(px[i]);
 
-        // D3D cube faces are +X,-X,+Y,-Y,+Z,-Z (array slices 0..5) with the
-        // same per-face (s,t) table as GL, row 0 = t 0 — the bake's face order
-        // and texel layout go in unchanged, the claim SkyEnvBake.h makes for
-        // Metal and Vulkan.
-        const size_t faceHalfs = static_cast<size_t>(N) * N * 4;
-        const UINT   rowPitch  = static_cast<UINT>(N * 4 * sizeof(uint16_t));
-        for (UINT f = 0; f < 6; ++f)
-            ctx->UpdateSubresource(m_skyEnvTex.Get(), D3D11CalcSubresource(0, f, 1), nullptr,
-                                   half.data() + f * faceHalfs, rowPitch, rowPitch * static_cast<UINT>(N));
+        // Face order and texel layout go in unchanged (UploadSkyEnvCube; the
+        // WARP orientation case in test_material_graph.cpp samples it back).
+        HE::d3d11mat::UploadSkyEnvCube(ctx, m_skyEnvTex.Get(), static_cast<UINT>(N), half.data());
         m_skyEnvSunDir = sunDir;
         m_skyEnvValid  = true;
     }
