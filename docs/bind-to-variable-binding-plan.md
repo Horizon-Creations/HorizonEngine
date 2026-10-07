@@ -349,11 +349,33 @@ Umgesetzt (Commit 29732494 ff.):
 
 **Offen** (für den nächsten Lauf, Nummern nach §4.5/§4.6):
 
-* §4.5 Punkt 3–5: Hosts (GA/EA) setzen `onVariableChanged` noch nicht; keine Abo-Tabelle in `ScriptContext`, kein `onChanged_<Var>(source, old)` in Lua/Python, kein `IGameLogic::onHcVariableChanged`, keine API-Zeilen `hc.watch`/`hc.unwatch` (mit allen Pflichtstellen der Registry).
+* ~~§4.5 Punkt 3–5~~: in Schritt 5 umgesetzt, siehe §4.8.
 * §4.6 Punkt 3: Lade-Warnung für selbst per Emit Event geschickte `<Var>Changed`.
 * §4.6 Punkt 4: Bind Event bietet `<Var>Changed (Typ)` noch nicht an, kein Knopf „Create \<Var\>Changed Event“; das Häkchen fehlt im Widget-Editor (UIEditorPanel).
 * Kompilierte Seite: kein Paritäts-Fixture `notify_change` in der Codegen-Suite.
 * Doku: `docs/horizoncode-reference.md`, In-Engine-Handbuch.
+
+### 4.8 Umsetzungsstand Schritt 5 (Brücke Lua/Python/C++)
+
+Umgesetzt (Commits 38e61812, cc4c227e ff.). Wo die Umsetzung von §4.5 abweicht, steht es dabei.
+
+* **API-Zeilen, Gruppe `hc`** (in `isScriptGroup`, also `horizon.hc.*` in Lua und Python, HcNodeDocs, Anzeigenamen „Watch Variable“, „Stop Watching Variable“, „Get Variable As JSON“):
+  * `hc.watch(entity, target, variable) → ok` und `hc.unwatch(entity, target, variable)`. **Abweichung:** Der Abonnent wird ausdrücklich übergeben (`self.entityId` / `self.entity_id`), statt der Zweier-Form `hc.watch(target, var)`. Lua und Python erreichen die Registry ohne Aufrufer (`Ctx::self` ist für sie 0), die Zeile könnte also nicht wissen, welches Script fragt. Gleiches Muster wie `net.declareVar(entity, …)`, gleiche Adressierung wie `onRep_`: Es hört das Script auf diesem Entity. Weil der erste Parameter `entity` heißt, gilt der Self-Vorgabewert. In einem Graph abonniert der Knoten deshalb für das **Text-Script** auf dem eigenen Entity. Der Graph selbst hat Notify on Change und Bind Event.
+  * `target`: Entity (dessen Klasse über `EntityHost::instanceOf`) oder 0 = Game Instance. Nur **öffentliche** Variablen, dieselbe Tür wie Get (Ref) (`Runtime::isPublicVariable`, neu, `watch` benutzt sie jetzt auch). Offene Frage 4 ist damit für diesen Teil entschieden: jede öffentliche Variable, nicht nur die mit Häkchen. Ziel per Widget-Id bleibt offen.
+  * `hc.getJson(target, variable) → json`: Leser, gleiche Form wie das Speicherdokument (`save::valueToJson`), über `Runtime::getPublicVariable` (neu). Dieselbe Funktion bedient den Leser des C++-Moduls.
+* **Rückruf:** Lua `onChanged_<Var>(self, source, old, new)`, Python `on_changed_<Var>(self, source, old, new)`. Der Name wird wörtlich übernommen wie bei `onRep_`. **Abweichung:** Auch `new` wird mitgegeben, nicht nur `(source, old)`. Die Variable gehört einem anderen, das Script hat also kein eigenes Feld, aus dem es den neuen Wert lesen könnte. Python lehnt jeden Aufruf mit anderer Stelligkeit ab, darum ist diese Signatur verbindlich und in `test_python_scripting` festgenagelt. `source` ist das Entity der besitzenden Klasse, 0 für die Game Instance.
+* **Token** (`HE::api::hc`): `Art << 32 | Entity`. Art 1 heißt Script auf diesem Entity, Art 2 heißt das native Modul (ein Token für das ganze Modul).
+* **Zustellung:** `HcWatchEvents::dispatch` (neu, HE_Scene) ist die eine Stelle, auf die beide Anwendungen `Runtime::onVariableChanged` richten (GA in OnInit, EA beim Aufbau der Dienste). Das Script wird bei jeder Zustellung neu in der Instanztabelle des Hosts nachgeschlagen. Hat das Entity keine Instanz mehr oder ist kein Modul geladen, wird das Abo **beim ersten verpassten Aufruf abgemeldet**.
+* **Abräumen:** `ScriptContext` nimmt alle Script-Abos aus der Runtime mit (`Runtime::unwatchIf`, neu), sobald es seine Runtime abgibt (`setHostServices({})` oder anderer Runtime, Destruktor). Die Runtime der Game Instance lebt länger als jeder Kontext, sonst hörte das Script der nächsten Szene auf einem Entity gleicher Nummer mit. GA meldet beim Entladen einer Zone ab. Modul-Abos fallen mit `HcWatchEvents::dropNative` beim Entladen (GA-Shutdown, EA-Play-Stop/Quit) und vor dem Hot-Reload.
+* **C++:** `IGameLogic::onHcVariableChanged(uint32_t entity, const char* name)`, hinten angehängt und vorbelegt. `entity` ist die **Quelle**, also dieselbe Zahl, die `watch` als Ziel bekam, 0 = Game Instance. Es gibt keinen Wert, aus dem Grund von `onRep`. Neue C-ABI-Tabelle `HeHcServices` (`watch`, `unwatch`, `valueJson`), Umbrella v5, Wrapper `he::hc::available/watch/unwatch/valueJson`. Die Prüfung aus §4.5 Punkt 5 ergab: Die Diensttabelle hatte **keinen** HC-Variablen-Leser, deshalb ist `valueJson` dazugekommen. `GameServicesBinding` löst jetzt auch `runtime` und `entities` auf. Nebenwirkung: `entitySaveState` aus C++ sichert damit erstmals auch die Save-Game-Variablen der Klasse (vorher war `c.runtime` dort immer null).
+* **Tests:** `tests/test_hc_watch_bridge.cpp` (Lua über die echte Tür und `HcWatchEvents`, GI und Entity als Ziel, Abweisungen, kein `<Var>Changed` bei reinem Abo, alle Abräum-Wege), dazu je ein Fall in `test_python_scripting` und `test_gamelogic_services` (geladenes Modul liest im Rückruf zurück). Gegenproben: Kontext-Abräumen ausgeschaltet, Abmelden im Dispatcher ausgeschaltet, `bindingCtx` ohne Runtime. Jede ließ genau ihren Test fallen.
+* **Script-API-Doku:** `gen_reference.py` kennt das Präfix `onChanged_`, `overlay/callbacks.json` beschreibt den Rückruf.
+
+**Offen nach Schritt 5:**
+
+* `scripts/script_api_docs/registry.json` neu erzeugen (`dump_engine_api.sh`, nur macOS), danach Website-Referenz und In-Engine-Handbuch. Die `hc`-Zeilen fehlen dort noch.
+* Ein Headless-Lauf im echten Spiel (§6), der die Verdrahtung in GA/EA mit einem echten Lua-Script belegt, nicht nur im Test-Rig.
+* Was in §4.7 noch offen steht (§4.6 Punkte 3/4, Paritäts-Fixture, Referenz-Doku).
 
 ## 5. Editor
 
