@@ -90,9 +90,8 @@ UI-Pass auf `type == 0 && textureAssetId != 0` prüft wie GL.
 
 ## Nicht geprüft
 
-- Das exportierte Spiel (Swapchain-Pfad) ist nicht aufgenommen. `runUIPass` ist dieselbe Funktion für den
-  Swapchain- und den Viewport-Pipeline-Pfad (`m_uiPipeline` / `m_uiViewportPipeline`), deshalb ist dort
-  dasselbe zu erwarten. Gemessen ist es nicht.
+- Das exportierte Spiel (Swapchain-Pfad) war in Schritt 1 nicht aufgenommen. **Nachgeholt in Schritt 4**
+  (siehe unten): Alle vier Backends zeigen das Bild dort.
 - Metal ist nicht gemessen. Laut Code hat es `ResolveUITexture`.
 
 ## Schritt 2: Vulkan-Fix (2026-10-07)
@@ -197,9 +196,88 @@ python scripts\ui-image-repro\ana157.py C:\hw157\shots fix3          # Exit 0
   `fxc /Ges` gebaut (VS und PS, D3D11 und D3D12), und der Build-Schritt meldet „All 108 embedded shaders compile“.
 
 Nicht gemessen:
-- Runde Ecken an einem Bild (Modus 2 mit `cornerRadius > 0`). Der Zeuge hat Radius 0. Der Code ist derselbe wie
-  bei GL/Vulkan, belegt ist er auf D3D aber nicht.
-- Das exportierte Spiel (Swapchain-Pfad). Beide D3D-Backends rufen dort dieselbe Pass-Funktion auf (D3D11
-  `Render`, D3D12 Swapchain-Zweig von `Render`). Das ist Schritt 4.
+- Runde Ecken an einem Bild (Modus 2 mit `cornerRadius > 0`). Der Zeuge hat Radius 0. **In Schritt 4 im
+  exportierten Spiel nachgemessen**, auf D3D11/D3D12 gleich wie Vulkan.
+- Das exportierte Spiel (Swapchain-Pfad). **In Schritt 4 nachgeholt**, siehe unten.
 - Mehr als 240 verschiedene UI-Bilder in einer D3D12-Sitzung. Danach zeichnen weitere Bilder ihren Tint, ohne
   Meldung. Ein Bild, das per `InvalidateTexture` neu geladen wird, verbraucht jeweils einen neuen Slot.
+
+## Schritt 4: Verifikation (2026-10-07)
+
+Stand HEAD `91bad649`, NN-WS03 (RTX 4070), Release-Baum `C:/hw157` (`DEPLOY_DIR=C:/hw157/deploy`).
+
+**Bau und Tests**
+- `cmake --build C:\hw157 -j8`: rc=0. Der Baum war auf HEAD schon aktuell, es lief nur die Shader-Prüfung:
+  „All 108 embedded shaders compile“. Den sauberen Vollbau hat CI gemacht: Run 37598422154 auf `91bad649`, alle
+  vier Jobs grün (Windows, macOS, Linux, Linux · Vulkan (lavapipe) mit `ui_image`).
+- Deploy-Hashes vor jeder Aufnahme: `HorizonRendering.dll` `19739671…` an allen vier Stellen, `ui.frag.spv`
+  `2A3BA08F…` an allen fünf. Die Kopie im exportierten Spiel trägt dieselben beiden Hashes.
+- `he_tests.exe` (Scratch-APPDATA, `HE_NET_LOOPBACK_ONLY=1`): **rc=1**, `test cases: 4237 | 4235 passed |
+  2 failed`. Beide Fehlschläge stehen in `test_inspector_ui` („a component header's right-click menu copies…“,
+  „the Replication section…“): `OpenClipboard` wird in dieser Sitzung verweigert (`Set-Clipboard` schlägt hier
+  ebenfalls fehl). Das ist die bekannte Umgebungsfalle, im Windows-CI-Job laufen beide grün. Alle Thema-157-Fälle
+  sind grün, auch der D3D-Pin in `test_culling.cpp`.
+
+**Editor-Zeuge auf HEAD** (`cap157.ps1 -Tag v4`, `ana157.py`): Alle vier Backends zeigen „picture“ mit
+(230,30,30) / (30,200,60) / (30,80,230) / (240,220,40), jeweils 0 `[ERROR]` und 0 zusätzliche `[ WARN]`. Vulkan
+lief mit Validation („validation layer ENABLED“). In der Bild-Kachel sind Vulkan, D3D11 und D3D12 pixelgleich
+(0 px), GL weicht nur im 2-px-Rand ab (912 px, `GL_REPEAT`, siehe Schritt 3).
+
+**Exportiertes Spiel (Swapchain-Pfad).** Das war das Abnahmekriterium und bisher ungemessen. Die Engine bringt
+ein Widget-Bild nur über `createWidget` + `showWidget` auf den Schirm. Entity-UI (`uiimage` in der `.hescene`)
+zeichnet über eine Material-UUID statt über `textureAssetId`, sie ist also kein Zeuge für diesen Pfad. Das
+Zeugenprojekt `ImgWit` kommt deshalb ohne Nutzer-Code aus und besteht aus:
+- `GameInstance.hcode`: OnInit → Create Widget(`UI/ImgWitness.hasset`) → Show Widget.
+- `UI/Pic.hasset`: ein 256×256-Vier-Quadranten-PNG, mit `asset_compiler` importiert. Durch den Namen bekommt es
+  das sRGB-Flag wie jede normale Farbtextur.
+- Widget, angelegt über die MCP-Brücke eines privaten Editors, mit zwei Elementen:
+  - Bild A: 400×400, in der Mitte.
+  - Bild B: 200×200, Mitte bei (200,200), `Corner Radius` 60.
+- Kamera, Boden und Himmel.
+
+Exportiert über `project_package` (Host, unkomprimiert). Aufgenommen wird pro Backend im Fenster
+1280×720, wegen 125 % DPI sind das 1600×900. Die Aufnahme läuft per PrintWindow, ohne `HE_CAPTURE_FRAME`, mit
+`HE_GPU_DEBUG=1`.
+
+```powershell
+python scripts\ui-image-repro\game157_setup.py                       # Projekt + Textur + GameInstance
+powershell -File scripts\ui-image-repro\game157_export.ps1           # Widget per MCP, Export nach C:\hw157\game\out
+powershell -File scripts\ui-image-repro\game157_capture.ps1          # GL, Vulkan, D3D11, D3D12
+python scripts\ui-image-repro\game157_ana.py C:\hw157\game\shots g4
+```
+
+| Backend (Spiel) | Bild A: TL / TR / BL / BR | Bild B (rund) | Ecken frei | Log |
+|---|---|---|---|---|
+| OpenGL | (230,31,31) / (31,200,60) / (31,81,230) / (240,220,41) | Bild | ja | 0 `[ERROR]` |
+| Vulkan | (230,31,31) / (31,200,60) / (31,81,230) / (240,220,41) | Bild | ja | 20 `[ERROR]`, Altlast (s. u.) |
+| D3D11 | (230,31,31) / (31,200,60) / (31,81,230) / (240,220,41) | Bild | ja | 0 `[ERROR]` |
+| D3D12 | (230,31,31) / (31,200,60) / (31,81,230) / (240,220,41) | Bild | ja | 0 `[ERROR]`, Debug-Layer an, nur 2× `ClearRenderTargetView`-Hinweis |
+
+![Exportiertes Spiel auf den vier Backends](img/ui-image-quads-2026-10-07/spiel-swapchain-4-backends.png)
+
+- Bild A, 3 px eingerückt: Vulkan, D3D11 und D3D12 sind pixelgleich (0 px), GL weicht höchstens um 1 ab.
+- Bild B: Die Form der runden Ecken ist zwischen Vulkan, D3D11 und D3D12 identisch (0 px Unterschied in der
+  Bildmaske). Auf den Bildpixeln liegt die Abweichung bei höchstens 4, und nur an der geglätteten Kante, wo
+  der animierte Himmel durchscheint. Damit ist die SDF-Rundung im Bild-Modus jetzt auch auf D3D belegt.
+- **Vulkan-Validation im Spiel:** 9× `vkCmdUpdateBuffer() … inside an active VkRenderPass` und 9× „Barriers
+  cannot be set during subpass 0“, dazu 2 Duplikat-Hinweise. Quelle ist der alte Material-UBO-Pfad `m_matUBO` im
+  Swapchain-Szenenpfad (`VulkanRenderer.cpp`, `vkCmdUpdateBuffer(cmd, m_matUBO, …)`), nicht die UI. Belegt ist das
+  so: Die Thema-157-Commits fügen im Vulkan-Renderer weder `vkCmdUpdateBuffer` noch eine Barriere hinzu. Außerdem
+  gibt es eine Gegenprobe: dasselbe Projekt ohne `GameInstance.hcode` (Widget nie gezeigt, `ana`: „KEIN Bild“)
+  hat dieselben 20 `[ERROR]`. Thema 144 hat das für den Viewport-Pfad behoben, der Swapchain-Pfad hat es noch.
+  Das gehört nicht zu diesem Thema.
+- Nebenbefund (nicht behoben, außerhalb des Themas): `widget_add` mit `position` beschreibt die Position als
+  „anchored top-left“. Gezeichnet wird das Element aber mit seiner Mitte an dieser Stelle, auf allen Backends
+  gleich. Bild B sitzt deshalb mit der Mitte bei (200,200).
+
+**Befund**
+- **Vulkan: behoben.** Belegt sind der Editor/PIE-Viewport (Schritt 2, auf HEAD wiederholt), das exportierte
+  Spiel über den Swapchain-Pfad (hier) und lavapipe in CI (`ui_image`).
+- **D3D11 und D3D12: bestätigt und behoben.** Vor dem Fix waren sie weiß wie Vulkan (Schritt 1). Gemessen ist das
+  auf echter Hardware (RTX 4070), im Editor wie im exportierten Spiel, mit runden Ecken. D3D11 hat im Renderer
+  keinen Debug-Layer-Schalter.
+- Offen bleiben:
+  - Metal ist ungemessen. Laut Code hat es `ResolveUITexture`.
+  - Mehr als 240 UI-Bilder pro D3D12-Sitzung zeichnen danach still ihren Tint.
+  - Panel, Border und Button mit Textur nutzen denselben Zweig (`type == 0 && textureAssetId`), aufgenommen sind
+    sie nicht.
