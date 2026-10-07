@@ -241,6 +241,9 @@ Vorher gegen nachher, mean |Δ| / max |Δ| (8-Bit-Stufen):
   186/177 (GL 220). Sie ist gewollt.
 - **Mountain y = 300 gegen y = 0 nach dem Fix:** Die mittlere Terrain-Luminanz ist auf jedem Backend
   gleich (GL 219,6, Vulkan 186,2, D3D 176,5). Die Höhe spielt also keine Rolle mehr.
+- **D3D-Masken-Tausch (offen aus §5) indirekt beantwortet:** Die Layers-Szene läuft ganz über den
+  Graph-Pfad (`heLitP`), den Fix B nicht berührt. Ihre Streifen verschwinden auch auf D3D11/D3D12.
+  Auf D3D genügt also Fix A, und die Ursache ist dieselbe wie auf Vulkan/GL.
 - **Validation:**
   - D3D12 mit `HE_GPU_DEBUG=1`: 0 Fehler, nur die bekannte Warnung „Ignoring InitialState“ der Buffer.
   - Vulkan: vorher und nachher dieselben Meldungen (`gi_layout`, `mat_ubo`), keine neue.
