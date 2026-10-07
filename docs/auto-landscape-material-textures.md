@@ -305,6 +305,11 @@ Abhilfe, offen für einen späteren Schritt:
   (GL nimmt eine vorgebackene Kette schon an, `OpenGLRenderer.cpp:7849`)
 - oder auf D3D und Vulkan beim Hochladen Mips erzeugen
 
+**Nachtrag Schritt 3:** Für die drei **Textur-Arrays**, aus denen das Auto-Material
+liest, ist das gelöst. `HE::buildTextureArray` backt die Kette (8 Mips bei 128²),
+und alle fünf Backends laden genau diese Level hoch (§8.3). Die 15 einzelnen
+2D-Platzhalter haben weiterhin nur Mip 0.
+
 ## 7. Schritt 2: acht Layer statt vier, ohne neuen Sampler
 
 Stand: Zweig `claude/auto-landschaftsmaterial-…`, Commit `36a27cd7` und folgende.
@@ -457,3 +462,148 @@ unabhängig. Die Queen trifft beim Mergen auf denselben Konflikt.
   mit |Δ| > 8. Dieser Witness liegt um Größenordnungen darunter.
 - Gezielte Tests im Scratch-Baum: 172/172 (Landscape, Terrain, Metal-Sampler-Vertrag
   von main, Vulkan-Layout, FXC/PSO).
+
+## 8. Schritt 3: Textur-Arrays (sampler2DArray) auf allen fünf Backends
+
+Stand: Zweig `claude/auto-landschaftsmaterial-…`, Commit nach `ff9c4822`. Basis ist
+weiterhin `9a1cc950` + Zweig. Der Merge von origin/main wurde in dieser Sitzung von der
+Rechte-Prüfung abgelehnt und ist **nicht** passiert (§8.6).
+
+### 8.1 Was es jetzt gibt
+
+- **Knoten:** *Texture Array Sample* (UV, Slice → RGB, A) und *Normal Map Array*
+  (UV, Slice → Welt-Normale wie *Normal Map*, `p[0]` = Stärke). Beide nehmen wie
+  *Texture Sample* einen Texturpfad in `s`. Ist UV offen, gilt die Mesh-UV.
+  Ohne gewählte Textur (oder über dem Budget) lesen sie wie gehabt `heTex0` als 2D.
+- **Codegen** (`MaterialGraph.cpp:574` ff.): Ein Array-Slot ist derselbe Slot
+  `heTexPk` auf **demselben Binding/Register** (GLSL 4+k, D3D t4..t7/s4..s7, Metal
+  1..4) wie ein 2D-Slot, nur als `sampler2DArray` deklariert. Pin-Tabellen,
+  Vulkan-Layout und D3D12-Root-Signature bleiben unverändert. Eine Datei, die ein
+  Knoten als 2D und ein anderer als Array liest, belegt zwei Slots. Der Slice wird im
+  Shader gerundet und geklemmt: `clamp(floor(s + 0.5), 0, Ebenen − 1)`
+  (`MaterialGraph.cpp:597`). Halbe Rundung ist zwischen APIs verschieden, und ein
+  Index außerhalb ist in MSL undefiniert.
+- **Wie der Renderer davon erfährt:** Der Codegen schreibt die Maske als
+  `// heTexArrays <n>` direkt unter `#version 450`, **nur wenn n ≠ 0**
+  (`MaterialGraph.cpp:1446`). Jeder Graph ohne Array-Knoten behält seinen Text Byte
+  für Byte, also auch seine Pipeline-Caches. `HE::matGlslTextureArrayMask`
+  (`MaterialGraph.cpp:1507`) liest die Maske in O(1). Die Backends nehmen sie aus
+  `customShaderFragGlsl`, das unverändert in Paks wandert. Das MTRL-Format bekommt
+  kein neues Feld (siehe Warnung in `HpakWriter.cpp` zur Feldsynchronisation).
+- **Asset:** `TextureAsset::layers` (`Assets.h:601`). Die Slices liegen slice-major,
+  jede mit eigener Mip-Kette. Das ist genau die D3D-Subresource-Reihenfolge, und
+  Slice 0 steht vorn: Wer nichts von Arrays weiß, liest Slice 0 als 2D-Textur.
+  Im TXMI-Tail steht `layers` nur bei > 1. Der Chunk wird dann 22 B groß und bleibt
+  unter dem Legacy-Diskriminator von 24 B (`HAsset.h`, jetzt 10 von 11 freien Bytes
+  belegt). Der Packer kocht Arrays nicht um (`HpakWriter.cpp:726`). Arrays sind
+  **nur RGBA8**: BC7/BC3/ASTC für Arrays fehlt noch.
+- **Bauen:** `HE::buildTextureArray` (`TextureArrayBuild.cpp:59`) setzt gleich große
+  RGBA8-Slices zusammen und **backt die Mips** mit demselben 2×2-Box-Filter wie der
+  Packer.
+- **Engine-Assets:** `landscape_tex_gen` schreibt zusätzlich
+  `T_Landscape_Albedo_Array` (sRGB), `T_Landscape_Normal_Array` und
+  `T_Landscape_Mask_Array` (linear). Jedes hat 5 Slices in der Reihenfolge
+  Grass, Dirt, Rock, Snow, WetGround, 128², 8 Mips, je 437 KB, feste UUIDs
+  `0x40F..0x411`. `landscape_tex_gen <dir> --arrays-only` baut nur die Arrays neu
+  aus den Einzeldateien im Ordner. Das ist der Weg, sobald die echten Texturen über
+  die Platzhalter importiert sind (Packung R=AO/G=Rauheit/B=Höhe weiterhin offen,
+  §3).
+
+| Slot | Inhalt (Plan aus §2.2, jetzt umsetzbar) |
+|---|---|
+| `heTexP0` | `Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset` |
+| `heTexP1` | `…/T_Landscape_Normal_Array.hasset` |
+| `heTexP2` | `…/T_Landscape_Mask_Array.hasset` |
+| `heTexP3` | frei, 2D oder Array |
+
+### 8.2 Backends
+
+| Backend | Array-Ressource | Leerer Array-Slot | Wo |
+|---|---|---|---|
+| OpenGL | `GL_TEXTURE_2D_ARRAY`, alle gespeicherten Level, kein `glGenerateMipmap` bei gebackener Kette. `BindGraphTexture` wählt das Ziel nach Speicherart (6 Bindestellen inkl. G-Buffer, transparent, Preview, UI) | weißes 1×1×1-Array | `OpenGLRenderer.cpp:7898`, `:8223` |
+| Vulkan | `arrayLayers = n`, View `VK_IMAGE_VIEW_TYPE_2D_ARRAY` | `m_whiteArrayView` (gab es schon für heCsm) | `VulkanRenderer.cpp:5895` |
+| D3D11 | `ArraySize = n`, SRV `TEXTURE2DARRAY` | weißes 1-Slice-Array-SRV | `D3D11Renderer.cpp:4231` |
+| D3D12 | `DepthOrArraySize = n`, SRV `TEXTURE2DARRAY`. Die Null-View der Vorlage ist 2D, deshalb wird bei Array-Slots immer überschrieben | weißes 1×1×1-Array, beim ersten Bedarf hochgeladen | `D3D12Renderer.cpp:3677` |
+| Metal | `MTLTextureType2DArray`, `replaceRegion:…slice:` | weißes 1×1×1-Array | `MetalRenderer.mm:8920`, **nur blind geschrieben** |
+
+Jedes Backend legt die Array-Fassung eines Assets im Cache unter `"<Schlüssel>#arr"`
+ab. So kann dasselbe Asset in einem Material 2D und im anderen ein Array sein.
+`InvalidateTexture` verwirft beide Fassungen. Ein 2D-Asset in einem Array-Slot wird
+als 1-Slice-Array hochgeladen, ein Array-Asset in einem 2D-Slot liest Slice 0.
+
+### 8.3 Nachweis (NN-WS03, RTX 4070, Release-Build `C:\hw158`)
+
+Witness `HE_DUMP_TEXARRAY=1` (`EditorApplication.cpp:6256`): Ein flaches 100-m-Terrain
+mit **unlit** Graph-Material (also unabhängig vom Unlit-View-Mode, der auf D3D11 nicht
+wirkt). Fünf Streifen über U zeigen Slice 0..4 (`slice = u·5 − 0,5`), vier Bänder
+über V zeigen Albedo-Array, Normal-Array, Masken-Array und eine **2D**-Textur
+(Rock-Albedo). Alle vier heTexP-Slots sind live, drei davon Arrays. Die *Normal Map
+Array* hängt zusätzlich am Normal-Pin. Skripte:
+`scripts/texture-array-repro/cap158arr.ps1` (eigenes APPDATA, HE_COLLAB_OFFLINE) und
+`ana158arr.py` (Zellmittel 5×4, mean|Δ| über die Terrain-Box).
+
+Zellmittel Albedo-Band, auf allen vier Backends gleich (RGB 0..255):
+
+| Grass | Dirt | Rock | Snow | WetGround |
+|---|---|---|---|---|
+| (63,145,39) | (121,79,41) | (125,132,143) | (211,214,215) | (38,45,54) |
+
+Das 2D-Band zeigt in jeder Spalte (125,132,143) wie die Rock-Slice des Arrays, und
+das Masken-Band trennt WetGround über Rauheit G = 126 von den anderen (≈ 220).
+
+| gegen OpenGL | D3D11 | D3D12 | Vulkan | D3D12 mit Debug-Layer + DRED |
+|---|---|---|---|---|
+| größte Abweichung eines Zellmittels | 0,36 | 0,36 | 0,36 | 0,36 |
+| mean\|Δ\| Terrain | 0,171 | 0,171 | 0,171 | 0,171 |
+| Pixel mit \|Δ\| > 8 | 0,338 % | 0,338 % | 0,338 % | 0,338 % |
+
+- D3D11, D3D12 und Vulkan liefern untereinander dieselben Werte. Die Toleranz aus §7.5
+  (mean|Δ| ≤ 1,0, ≤ 0,5 % Pixel > 8) ist eingehalten.
+- **Negativkontrolle 1** (`HE_DUMP_TEXARRAY=slice2`, jeder Streifen liest Slice 2):
+  Auf allen vier Backends werden alle Albedo-/Masken-Zellen zu Rock, mean|Δ| zum
+  Normalbild 17,5–17,7, größte Zellabweichung 104. Die Slice-Auswahl ist also echt
+  und nicht immer Slice 0.
+- **Negativkontrolle 2** (Vulkan, absichtlich 2D-View im Array-Slot, nur lokal gebaut,
+  danach zurückgesetzt): Die Validation meldet sofort `VkImageViewType is
+  VK_IMAGE_VIEW_TYPE_2D but the OpTypeImage has (Dim = 2D) and (Arrayed = 1)` für
+  heTexP0..2. Die **null** Validation-Meldungen des echten Laufs sind also belastbar.
+  Nach dem Zurücksetzen ist das Bild identisch zum ersten Lauf (mean|Δ| 0,000).
+- D3D12 mit `HE_GPU_DEBUG=1` (Debug-Layer + DRED an): keine Meldung, gleiches Bild.
+- D3D11 hat keinen Debug-Layer im Baum. Dort gilt nur der Bildbefund.
+- **Metal:** keine Hardware auf diesem Gerät. Belegt sind nur: MSL-Cross-Compile
+  (`texture2d_array<float>` an den Array-Slots), dieselben `[[texture(N)]]`- und
+  `[[sampler(N)]]`-Slots wie bei vier 2D-Texturen (normal + clustered), also kein
+  zusätzlicher Sampler. Ob `MetalRenderer.mm` kompiliert, zeigt erst die macOS-CI.
+- Tests: Codegen/Maske/Slot-Trennung, Cross-Compile für MSL, GLSL 4.10/ES 3.00/4.30,
+  HLSL und SPIR-V, Aufnahme in alle Node-Sweeps (FXC wie D3D11/D3D12 kompilieren,
+  D3D12-Root-Signature, GL-Link), Array-Asset-Roundtrip mit 22-B-TXMI.
+
+### 8.4 Speicher in 2K
+
+Ein Array mit 5 Slices à 2048² RGBA8 plus Mips ist ≈ 5 × 21,3 MiB = 107 MiB, die drei
+Arrays zusammen ≈ 320 MiB. Das gehört **nicht** in git (siehe §4.4, kein LFS). Die
+Arrays sind abgeleitete Daten: Mit `--arrays-only` entstehen sie aus den 25 PNGs
+(nach Import und Packung) neu. Die 128²-Platzhalter-Arrays (3 × 437 KB) sind
+eingecheckt, damit Schritt 4/5 ohne den Menschen weiterlaufen.
+
+### 8.5 Was offen bleibt
+
+- **BC7/BC3/ASTC für Arrays:** Der Packer lässt Arrays unverändert. Für 2K ist
+  Kompression aber nötig (§5). Das braucht `cookTexture` pro Slice und die
+  Block-Pfade in den vier Array-Uploads.
+- **Pack-Modus für die echten Einzel-PNGs** → `T_Landscape_*_Mask` (§3): weiter offen.
+- **Metal** kompiliert hier nicht. Nachweis per CI (§8.6).
+- D3D12 bindet einen **leeren 2D**-Slot weiterhin als Null-View, also Schwarz, während
+  die anderen Backends Weiß binden. Das gab es schon vorher und betrifft keinen
+  Array-Slot.
+
+### 8.6 Zweig-Basis
+
+Der Zweig steht weiter auf `9a1cc950`, vor #95/#102. Der Merge von origin/main war von
+der Queen freigegeben, wurde aber in dieser Sitzung von der Rechte-Prüfung abgelehnt.
+Er fehlt also und muss von der Queen oder dem Menschen nachgeholt werden. Für die
+Array-Slots ist das ohne Belang: Sie liegen auf t4..t7 bzw. Binding 4..7, nicht auf
+14. Bemaltes Terrain zeigt auf diesem Zweig auf D3D12/Vulkan aber weiterhin nur
+Layer 0 (§7.5). Beim Merge sind Konflikte in den Renderern rund um die
+Graph-Textur-Bindung möglich: D3D12 `resolveGraphTexture`/`srvForTexture`, Vulkan
+`heTexP`-Block.
