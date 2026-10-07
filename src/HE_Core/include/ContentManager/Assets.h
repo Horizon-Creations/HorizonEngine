@@ -7,6 +7,7 @@
 #include "Types/Enums.h"
 #include "Types/UUID.h"
 #include "Scripting/ScriptTypes.h"
+#include "Audio/AudioEdit.h"
 
 // One precompiled material shader variant for a specific graphics backend (baked at
 // export time so the shipped game never cross-compiles). `vertex`/`fragment` hold the
@@ -547,6 +548,9 @@ struct AudioAsset : public RuntimeAsset
 	int                  sampleRate = 0;
 	int                  channels   = 0;
 	AudioEncoding        encoding   = AudioEncoding::PCM16;
+	// Trim, volume curve, bus and EQ — applied on playback, never baked into
+	// audioData (CHUNK_AUED; default when the chunk is absent). See AudioEdit.h.
+	HE::AudioEdit        edit;
 };
 
 // Frame count of a PCM16 clip (0 for a compressed one — its length is only

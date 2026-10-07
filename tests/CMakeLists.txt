@@ -131,6 +131,8 @@ add_executable(he_tests
     test_profiler_stats.cpp
     test_profiler_layout.cpp
     test_audio.cpp
+    # Audio Editor edit model (Thema 168): trim, volume curve, bus, EQ biquads.
+    test_audio_edit.cpp
     test_rendermanager.cpp
     test_prefab.cpp
     test_inspector_prefab_keys.cpp

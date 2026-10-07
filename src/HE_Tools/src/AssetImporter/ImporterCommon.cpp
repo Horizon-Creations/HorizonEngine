@@ -185,6 +185,12 @@ std::string sourceFileOf(const std::filesystem::path& assetFile)
 	return meta.source;
 }
 
+bool readAssetChunk(const std::filesystem::path& assetFile, uint32_t chunkId,
+                    std::vector<uint8_t>& payload)
+{
+	return readOneChunk(assetFile, chunkId, payload);
+}
+
 // ─── Texture colour space ────────────────────────────────────────────────────
 
 bool suggestTextureSrgb(const std::filesystem::path& path)

@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 #include "ImporterCommon.h"
+#include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"
 
 #define DR_WAV_IMPLEMENTATION
@@ -338,6 +339,16 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 	const auto out = Importer::resolveOutput(outputs.asset, relativeOutputDir, asset->name);
 	asset->name = out.name;
 	asset->path = out.path;
+
+	// A re-import replaces the samples, not what the user did with them: the
+	// trim, volume curve, bus and EQ the asset already carries (CHUNK_AUED) go
+	// onto the fresh asset, the way writeAsset keeps the UUID. Read straight off
+	// the old file, streamed, so the samples about to be replaced are not loaded.
+	{
+		std::vector<uint8_t> edit;
+		if (Importer::readAssetChunk(contentRoot / asset->path, HAsset::CHUNK_AUED, edit))
+			asset->edit.fromChunkText(std::string(edit.begin(), edit.end()));
+	}
 
 	const unsigned int sampleRate = static_cast<unsigned int>(asset->sampleRate);
 	const unsigned int channels   = static_cast<unsigned int>(asset->channels);

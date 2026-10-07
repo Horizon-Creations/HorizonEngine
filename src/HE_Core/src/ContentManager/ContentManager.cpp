@@ -509,6 +509,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		{ a.audioData = c->data; a.encoding = AudioEncoding::Vorbis; }
 		else if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD))
 		{ a.audioData = c->data; a.encoding = AudioEncoding::PCM16; }
+		// No chunk = never edited (or written before edits existed) = default.
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_AUED))
+		{
+			if (!a.edit.fromChunkText(std::string(reinterpret_cast<const char*>(c->data.data()), c->data.size())))
+				HE_LOG_WARN(Asset, "Audio '%s': unreadable edit chunk, playing it unedited",
+				               relativePath.c_str());
+		}
 		handle = m_audioAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Font:
@@ -1760,6 +1767,13 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		}
 		w.addChunk(a.encoding == AudioEncoding::Vorbis ? HAsset::CHUNK_OGGD : HAsset::CHUNK_PCMD,
 		           a.audioData.data(), a.audioData.size());
+		// Only when something was edited: an untouched clip keeps the exact
+		// chunk list it had before edits existed.
+		if (!a.edit.isDefault())
+		{
+			const std::string text = a.edit.toChunkText();
+			w.addChunk(HAsset::CHUNK_AUED, text.data(), text.size());
+		}
 		break;
 	}
 	case HE::AssetType::Font:

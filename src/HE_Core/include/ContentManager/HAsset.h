@@ -111,6 +111,11 @@ inline constexpr uint32_t CHUNK_PIXL = makeChunkId('P','I','X','L'); // pixel da
 inline constexpr uint32_t CHUNK_AUMI = makeChunkId('A','U','M','I'); // audio meta
 inline constexpr uint32_t CHUNK_PCMD = makeChunkId('P','C','M','D'); // PCM data (AudioEncoding::PCM16)
 inline constexpr uint32_t CHUNK_OGGD = makeChunkId('O','G','G','D'); // Ogg Vorbis stream (AudioEncoding::Vorbis)
+// Non-destructive edits (trim, volume curve, bus, EQ) as JSON — HE::AudioEdit.
+// ABSENT (every clip written before it existed, and every clip nobody edited)
+// = the default edit: whole clip, unity, master, no EQ. The data chunk above
+// is never rewritten for an edit; this one sits next to it.
+inline constexpr uint32_t CHUNK_AUED = makeChunkId('A','U','E','D'); // audio edits (JSON)
 
 // Material
 inline constexpr uint32_t CHUNK_MTRL = makeChunkId('M','T','R','L'); // shader path + tex refs
