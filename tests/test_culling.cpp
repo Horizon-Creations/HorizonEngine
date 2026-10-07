@@ -2704,17 +2704,17 @@ TEST_CASE("UI image quads have a texture path on D3D11 and D3D12 (Thema 157)")
 	{
 		// Shader: the glyph branch is bounded, or mode 2 would run into it.
 		CHECK_MESSAGE(text->find("if (uMode > 0.5f && uMode < 1.5f)") != std::string::npos,
-		              file, ": the glyph branch swallows the image mode again");
+		              std::string(file), ": the glyph branch swallows the image mode again");
 		CHECK_MESSAGE(text->find("if (uMode > 1.5f)") != std::string::npos,
-		              file, ": the UI pixel shader has no textured-quad branch");
+		              std::string(file), ": the UI pixel shader has no textured-quad branch");
 		// Pass: a textured quad asks for mode 2.
 		CHECK_MESSAGE(text->find("obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f)") != std::string::npos,
-		              file, ": the UI pass never selects the image mode");
+		              std::string(file), ": the UI pass never selects the image mode");
 		// Upload without the decode, and the helper honours the switch.
 		CHECK_MESSAGE(text->find("/*honourSrgb=*/false") != std::string::npos,
-		              file, ": UI images upload with the sRGB flag again");
+		              std::string(file), ": UI images upload with the sRGB flag again");
 		CHECK_MESSAGE(text->find("tex->srgb && honourSrgb") != std::string::npos,
-		              file, ": the upload helper ignores honourSrgb");
+		              std::string(file), ": the upload helper ignores honourSrgb");
 	}
 	// D3D11: own cache, dropped on a re-import.
 	CHECK(d3d11.find("resolveUITexture(obj.textureAssetId, cm)") != std::string::npos);
