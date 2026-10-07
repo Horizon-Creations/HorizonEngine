@@ -3,6 +3,8 @@
     python3 ana158auto.py masks  A.bmp [B.bmp ...]   region oracle of =masks / =ground
     python3 ana158auto.py diff   REF.bmp B.bmp ...   backend comparison against REF
     python3 ana158auto.py repeat A.bmp [B.bmp ...]   tiling repetition on the plain
+    python3 ana158auto.py shadow ON.bmp OFF.bmp [ON2.bmp OFF2.bmp ...]
+                                                     cast shadow at the ramp foot (Schritt 6)
 
 The HE_DUMP_AUTOLAND terrain is analytic (EditorApplication.cpp): 128 m at
 y=300, constant along Z, height h(x) = 40 * smoothstep(-24, 8, x) -- a flat
@@ -30,10 +32,22 @@ repeat: on the plain, mean|I(p) - I(p + k)| for horizontal and vertical shifts
   checker cell ~6 px, 2 m tile ~12.5 px here); bombing fills the dips. Printed:
   the local minima and the oscillation of the curve (mean distance of D(k) from
   its neighbours' mean) -- near 0 = no visible repetition.
+shadow: pairs of captures of ONE backend, the default shadow distance first,
+  HE_DUMP_SHADOW=0.1 second. At TOD 0.4 the sun stands at +x, 54 degrees up in
+  the x/y plane (RenderExtractor: a = (tod - 0.25) * 2 pi, toward
+  (cos a, sin a, 0.45); the terrain is constant along Z, so only x/y counts).
+  The ramp is steeper than that (up to 62 degrees), so the concave foot below
+  it lies in the ramp's CAST shadow although it faces the sun -- computed here
+  by marching the sun ray over h(x). Printed: the zone, the luminance inside it
+  (1 m in from each edge, clear of the penumbra) with and without shadow, and
+  the plain/plateau change. Shadow present = inside darkens to < 0.7 of the
+  shadowless value while plain and plateau stay within mean|d| 1.0.
+  Override the time of day with HE_TOD (default 0.4).
 
 No third-party modules -- BMP read with struct.
 """
 import math
+import os
 import struct
 import sys
 
@@ -195,8 +209,69 @@ def cmd_repeat(paths):
         print(f"{path}: " + " | ".join(curves))
 
 
+def cast_shadow_zone(tod):
+    """x range [x0, x1] of the terrain that faces the sun but lies in the cast
+    shadow of the terrain further toward +x (None if there is none)."""
+    a = (tod - 0.25) * 2.0 * math.pi
+    k = math.sin(a) / math.cos(a)            # sun ray slope in the x/y plane (sun at +x)
+    def slope(x):
+        return (height(x + 1e-3) - height(x - 1e-3)) / 2e-3
+    def shadowed(x0):
+        y0 = height(x0)
+        x = x0
+        while x < 64.0:
+            x += 0.01
+            if height(x) > y0 + k * (x - x0) + 1e-6:
+                return True
+        return False
+    zone = [i * 0.05 for i in range(-1280, 1280)
+            if slope(i * 0.05) < k and shadowed(i * 0.05)]
+    return (min(zone), max(zone)) if zone else None
+
+
+def mean_lum(img, c0, c1):
+    w, _, px = img
+    s = 0.0
+    n = 0
+    for y in range(ROWS[0], ROWS[1]):
+        for x in range(c0, c1 + 1):
+            s += lum(px[y * w + x])
+            n += 1
+    return s / n
+
+
+def cmd_shadow(paths):
+    if len(paths) % 2:
+        print("shadow needs pairs: ON.bmp OFF.bmp ...")
+        sys.exit(2)
+    tod = float(os.environ.get("HE_TOD", "0.4"))
+    zone = cast_shadow_zone(tod)
+    if not zone:
+        print(f"TOD {tod}: no cast-shadow zone on this profile")
+        return
+    x0, x1 = zone
+    print(f"TOD {tod}: cast shadow x {x0:.1f}..{x1:.1f} "
+          f"(cols {column(x0, W_EXPECT, H_EXPECT)}..{column(x1, W_EXPECT, H_EXPECT)} at {W_EXPECT}x{H_EXPECT})")
+    for on_path, off_path in zip(paths[0::2], paths[1::2]):
+        on, off = read_bmp(on_path), read_bmp(off_path)
+        w, h, _ = on
+        c0, c1 = region_cols(w, h, x0 + 1.0, x1 - 1.0)
+        l_on, l_off = mean_lum(on, c0, c1), mean_lum(off, c0, c1)
+        ratio = l_on / max(l_off, 1e-6)
+        drift = []
+        for name, a, b in REGIONS:
+            if name in ("plain", "plateau"):
+                p0, p1 = region_cols(w, h, a, b)
+                drift.append(abs(mean_lum(on, p0, p1) - mean_lum(off, p0, p1)))
+        present = ratio < 0.7 and max(drift) <= 1.0
+        print(f"  {on_path} vs {off_path}: inside cols {c0}..{c1} lum {l_on:6.1f} / {l_off:6.1f}"
+              f" = {ratio:.2f}, plain/plateau drift {max(drift):.3f}"
+              f"  => cast shadow {'PRESENT' if present else 'MISSING'}")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 3 or sys.argv[1] not in ("masks", "diff", "repeat"):
+    if len(sys.argv) < 3 or sys.argv[1] not in ("masks", "diff", "repeat", "shadow"):
         print(__doc__)
         sys.exit(2)
-    {"masks": cmd_masks, "diff": cmd_diff, "repeat": cmd_repeat}[sys.argv[1]](sys.argv[2:])
+    {"masks": cmd_masks, "diff": cmd_diff, "repeat": cmd_repeat,
+     "shadow": cmd_shadow}[sys.argv[1]](sys.argv[2:])

@@ -945,6 +945,11 @@ nur auf flachem Boden und nie unter Schnee, Erdgürtel am Hangfuß.
   ein eigenes Thema. Bis dahin vergleicht Schritt 6 das Material mit
   `-Extra @{HE_DUMP_SHADOW='0.1'}` und zusätzlich mit Schatten, um zu sehen, ob D3D/Vulkan
   sich wie GL oder wie Metal verhalten.
+  **Richtigstellung aus Schritt 6 (§11.3):** Diese Deutung war falsch herum. Metal hat
+  recht, der Fuß liegt analytisch im Schlagschatten der steileren Rampe. Das eingebaute
+  Material zeichnet ihn auf **beiden** Backends, deshalb unterscheidet sich `builtin` nicht.
+  Den Schatten lässt nur **OpenGL im Forward-Pfad bei Graph-Materialien** weg, und zwar
+  absichtlich (`csmSplits.w = 0`).
 - **Bombing bricht die Wiederholung** (`ana158auto.py repeat`, Ebene, Lumen-Differenz
   bei Verschiebung um k = 4..40 px): ohne Bombing Minima bei 6, 12, 19, 25, 31, 37 px
   (1-m-Schachfeld und 2-m-Kachel bei ≈ 6,2 px/m), Oszillation der Kurve 1,58 (h) /
@@ -968,7 +973,8 @@ nur auf flachem Boden und nie unter Schnee, Erdgürtel am Hangfuß.
   SPIR-V). Das ist Schritt 6 auf NN-WS03 mit `cap158auto.ps1`. Dort fehlt auch der
   Zweig-Merge mit origin/main (§8.6). Für dieses Material ist das unerheblich, weil es
   heLandscapeWeights nicht liest.
-- **Metal-Schatten bei Graph-Materialien** (§10.4): eigener Fehler, eigenes Thema.
+- ~~**Metal-Schatten bei Graph-Materialien**~~ (§10.4): kein Metal-Fehler. Es fehlt der
+  Sonnenschatten bei GL-Forward-Graph-Materialien, siehe §11.3.
 - **Echte Geländemulden für Pfützen** (§10.2): Kavitäts-Kanal, eigenes Thema.
 - **heTex0 auf Metal:** ob Slot 0 (eingebaute Mesh-Textur) bei UV > 1 auch klemmt, ist
   nicht geprüft.
@@ -984,3 +990,154 @@ nur auf flachem Boden und nie unter Schnee, Erdgürtel am Hangfuß.
   (`approxFoldNode` → `false`, „textures … cannot fold“). Die DDGI-Farbrückstrahlung
   bekommt für dieses Material also den Rückfallwert statt einer Mischung der
   Schichtfarben. Wie stark das im Bild auffällt, ist nicht geprüft.
+
+## 11. Schritt 6: Verifikation über die Backends
+
+Stand: Zweig bei `1b8776db` + diesem Schritt. Gemessen auf dem MacBook Air (Apple M5,
+macOS 27, Stromsparmodus), Release-Build `out/build/macos-release` (shaderc ON, Tests ON).
+
+### 11.1 Was auf welchem Backend geprüft ist
+
+| Backend | Gerät / Treiber | gerendert? | Nachweis |
+|---|---|---|---|
+| Metal | Apple M5, echte Hardware | ja | §11.2, alle Modi |
+| OpenGL 4.1 | Apple M5 (Apple-GL über Metal), echte Hardware | ja | §11.2, alle Modi |
+| D3D11 | – | **nein** | nur Cross-Compile + FXC-Sweep in den Tests (Windows-CI) |
+| D3D12 | – | **nein** | nur Cross-Compile + Root-Signature-Sweep in den Tests (Windows-CI) |
+| Vulkan | – | **nein** | nur SPIR-V-Cross-Compile in den Tests |
+
+- **D3D11, D3D12 und Vulkan sind nicht gerendert.** Auf diesem Mac gibt es keinen
+  D3D-Treiber. Der lavapipe-Job (`vulkan-lavapipe`, `scripts/he_vk_imagetests.py`) liegt
+  nur auf main; der Zweig steht 111 Commits dahinter (Basis `9a1cc950`, 02.10.), und den
+  Merge darf ein Arbeiter nicht selbst machen. Auch per CI gibt es von diesem Zweig aus
+  also keine Vulkan-Pixel. Die Queen hat die Messung auf NN-WS03 (RTX 4070, echte
+  Hardware) als Folgeschritt zugesagt, sobald dort ein Platz frei ist; das Rezept steht
+  in §11.4.
+- **Vollbau:** `cmake --build out/build/macos-release -j8`, rc 0, keine `error:`-Zeile.
+  Vorher wurden alle 38 Quelldateien, die der Zweig ändert, per `touch` neu übersetzt
+  (Falle aus Schritt 5: ein Edit mitten im Compile hinterlässt ein altes `.o`). Danach war
+  der Deploy `out/deploy/Editor` md5-gleich mit dem Build (Editor + 9 dylibs).
+- **Tests** (Release, `ctest -j4`, im Vordergrund abgewartet): 17/17 grün:
+  `test_material_graph` (193 s), `test_terrain`, `test_terrain_tessellation`,
+  `test_terrain_heightmap`, `test_terrain_generate`, `test_terrain_tools_ui`,
+  `test_mcp_tools_terrain`, `test_mcp_tools_material`, `test_contentmanager`,
+  `test_hpak`, `test_scene_serializer`, `test_scene_autosave`, `test_asset_autosave`,
+  `test_gltf_material_import`, `test_culling`, `test_texture_colour_space`,
+  `test_texture_orientation`. Ein eigener Savegame-Test existiert nicht. Das
+  Landscape-Format prüft `test_terrain`: „A four-layer landscape writes the old scene
+  format and an old scene loads unchanged“ und „Layers 4..7 round-trip through the
+  scene file, a broken second page is dropped“.
+- **CI** auf `1b8776db` (Lauf 37629204081): macOS und Linux grün. Windows siehe §11.5.
+
+### 11.2 Metal gegen OpenGL
+
+Gleiche Aufnahme wie §10.4 (`cap158auto.sh`, top-down, TOD 0,4, `HE_SKY_TIME=30`, AA,
+GI, SSAO, SSR, Bloom aus). 36 Läufe, kein `[ERROR]`, Link- oder Compile-Fehler, in jedem
+Lauf 4 Draws (forward) bzw. 5 (deferred). Toleranz wie §7.5: mean|Δ| ≤ 1,0 **und**
+≤ 0,5 % Pixel mit |Δ| > 8.
+
+| Modus | Pfad | gesamt | Ebene | Hangfuß | Hang | Plateau | Urteil |
+|---|---|---|---|---|---|---|---|
+| `masks` / `ground` / `normal` / `surface` | forward | 0,000 / 0 % | 0,000 | ≤ 0,002 | ≤ 0,001 | 0,000 | bitgleich bis auf Rundung |
+| `1`, Schatten 0,1 m | forward | 0,001 / 0 % | 0,001 | 0,003 | 0,002 | 0,000 | ok |
+| `nobomb`, Schatten 0,1 m | forward | 0,001 / 0 % | 0,001 | 0,008 | 0,007 | 0,000 | ok |
+| `1`, Schatten 0,1 m | deferred | 0,001 / 0 % | 0,001 | 0,004 | 0,003 | 0,000 | ok |
+| `1` mit Schatten | **deferred** | **0,087 / 0,39 %** | 0,001 | 0,001 | 0,003 | 0,000 | **ok** |
+| `plaingraph` mit Schatten | deferred | 0,153 / 0,40 % | 0,000 | 0,000 | 0,001 | 0,000 | ok |
+| `builtin` mit Schatten | deferred | 0,174 / 0,43 % | 0,000 | 0,000 | 0,000 | 0,000 | ok |
+| `builtin` mit Schatten | forward | 0,169 / 0,44 % | 0,000 | 0,000 | 0,000 | 0,000 | ok |
+| `1` mit Schatten | forward | 2,30 / 4,38 % | 0,001 | **70,6 / 100 %** | 1,14 / 5,6 % | 0,000 | **nicht ok, §11.3** |
+| `plaingraph` mit Schatten | forward | 3,47 / 4,41 % | 0,000 | **108,8 / 100 %** | 0,000 | 0,000 | **nicht ok, §11.3** |
+
+- **Das Auto-Material ist auf Metal und GL gleich.** Masken, Normale, AO und Rauheit sind
+  bitgleich. Das beleuchtete Bild liegt in jedem Pfad, in dem beide Backends denselben
+  Schatten bekommen, weit innerhalb der Toleranz. Die Zahlen sind dieselben wie in §10.4.
+- Die wenigen Pixel > 8 in den Zeilen mit 0,39–0,44 % liegen fast alle in den Spalten
+  480–500. Dort sitzt die Schattenkante am Hangfuß, und der Halbschatten liegt um etwa
+  1 px versetzt. Das eingebaute Material zeigt dasselbe Muster, mit dem Auto-Material hat
+  es nichts zu tun.
+- **Soll/Ist** (`ana158auto.py masks`): alle 15 Erwartungen auf Metal und GL erfüllt
+  (Fels am Hang 100 %, Schnee auf dem Plateau 100 %, Wasser 18,3 % nur in der Ebene,
+  Erdgürtel am Fuß 93,5 %).
+- **Bombing** (`ana158auto.py repeat`): mit Bombing Oszillation 0,12 / 0,12 und kein
+  periodisches Minimum; ohne 1,58 / 1,45 mit Minima bei 6, 12, 19, 25, 31, 37 px. Metal
+  und GL liefern dieselben Zahlen.
+
+### 11.3 Der Schatten am Hangfuß: es fehlt der GL-Forward-Graph-Schatten, Metal ist richtig
+
+Bei TOD 0,4 steht die Sonne bei +x, in der x/y-Ebene 54° hoch (RenderExtractor:
+`a = (tod − 0,25)·2π`, Richtung `(cos a, sin a, 0,45)`). Das Terrain ist entlang Z
+konstant. Die Rampe wird bis 62° steil, also steiler als die Sonne. Der konkave Fuß
+darunter zeigt zur Sonne, liegt aber im **Schlagschatten der steileren Rampe über
+ihm**. Ein Strahl-Marsch über h(x) ergibt x = −24,5 … −16,3 (Spalten 487…532). Danach ist
+die Rampe bis Spalte 643 von der Sonne abgewandt, und darin sind sich alle einig.
+
+Neues Orakel `ana158auto.py shadow ON.bmp OFF.bmp …`: Es vergleicht je Backend die
+Aufnahme mit Schatten gegen dieselbe mit `HE_DUMP_SHADOW=0.1` innerhalb der Zone (1 m
+Abstand zu jeder Kante). Dafür braucht es kein Referenzbild von einem anderen Backend.
+
+| Pfad | `1` | `nobomb` | `plaingraph` | `builtin` |
+|---|---|---|---|---|
+| Metal forward | 0,37 da | 0,37 da | 0,56 da | 0,47 da |
+| Metal deferred | 0,37 da | | 0,56 da | 0,47 da |
+| OpenGL deferred | 0,37 da | | 0,56 da | 0,47 da |
+| OpenGL forward | **1,00 fehlt** | **1,00 fehlt** | **1,00 fehlt** | 0,47 da |
+
+(Helligkeit in der Zone mit Schatten ÷ ohne Schatten; Ebene und Plateau ändern sich in
+keinem Paar, Drift 0,000.)
+
+- **Ursache:** `OpenGLRenderer.cpp:3577` / `:7665` / `:11671`. Im Forward-Pfad hält GL für
+  Graph-Materialien absichtlich `csmSplits.w = 0`. `heCsm` liegt dort auf demselben
+  Texturslot wie der Local-Shadow-Atlas, und `heCsmShadow` gibt sofort 1,0 zurück. Nur der
+  Deferred-Resolve bekommt echte CSM-Matrizen. D3D11 (`D3D11Renderer.cpp:5979`), D3D12
+  (`:9475`), Vulkan (`VulkanRenderer.cpp:6583`) und Metal (`MetalRenderer.mm:14116`)
+  füllen die Kaskaden auch im Forward-Pfad für Graph-Materialien.
+- **Folge:** Jedes Graph-Material auf OpenGL im Forward-Pfad empfängt keinen
+  Sonnenschatten, nicht nur dieses. Das liegt nicht im Auto-Material, also gehört die
+  Behebung nicht in diesen Schritt. Sie braucht ein eigenes Thema (Textur-Units von
+  GL 4.1 gegen CSM + Local-Atlas abwägen). Die Deutung aus §10.4 („Metals heLitP“) war
+  falsch herum.
+- **Für den Bildvergleich heißt das:** Mit Schatten ist OpenGL-forward **keine**
+  Referenz. D3D/Vulkan (forward-only, Thema 150) mit Schatten werden gegen Metal bzw. das
+  Orakel verglichen, gegen GL nur mit `HE_DUMP_SHADOW=0.1`.
+
+### 11.4 Rezept für D3D11 / D3D12 / Vulkan (NN-WS03)
+
+1. Zweig auschecken. Release-`HorizonEditor` mit `-j8` bzw. `/m:8` bauen, den Deploy
+   **inklusive `EditorDeps/EngineContent`** erneuern. Modus `1` lädt
+   `Engine/Materials/M_AutoLandscape.hasset` per Pfad, alter Content gibt also ein
+   falsches Bild. Prüfen, dass das Binary den Zeugen enthält (`findstr "AUTOLAND witness"`).
+2. `cap158auto.ps1 -Backends OpenGL,D3D11,D3D12,Vulkan` für `masks ground normal surface`
+   ausführen. Danach `1 nobomb plaingraph builtin`, jeweils einmal ohne Zusatz und einmal
+   mit `-Extra @{HE_DUMP_SHADOW='0.1'} -Tag _s01`.
+3. `ana158auto.py masks` (15 Erwartungen je Backend). `diff` gegen OpenGL für die
+   Debug-Ansichten und die `_s01`-Läufe (Toleranz §7.5). `shadow` je Backend für die Paare
+   `AL<m>-<rhi>.bmp AL<m>-<rhi>_s01.bmp`; erwartet: D3D11/D3D12/Vulkan wie Metal
+   (0,37 / 0,56 / 0,47 „da“), OpenGL-forward bei Graph-Materialien „fehlt“. `repeat` für
+   `1_s01` gegen `nobomb_s01`.
+4. Vulkan-Validation-Zeilen aus den Logs mitmelden.
+5. **Mips (Lektion aus Schritt 3):** Die drei Arrays backen ihre Mips selbst
+   (`buildTextureArray`). D3D/Vulkan dürften in der Ebene also nicht flimmern. Falls doch,
+   zuerst die Mip-Kette prüfen, nicht den Codegen.
+
+### 11.5 Was offen bleibt
+
+- **D3D11, D3D12, Vulkan gerendert:** Folgeschritt auf NN-WS03 (§11.4). Bis dahin ist
+  das Akzeptanzkriterium „auf allen fünf Backends dasselbe Bild“ nur für Metal und
+  OpenGL belegt, für die anderen drei nur per Cross-Compile.
+- **lavapipe:** erst nach dem Merge von main in den Zweig (dann `he_vk_imagetests.py` um
+  einen AUTOLAND-Fall erweitern; Software-Treiber, keine echte Hardware).
+- **Windows-CI auf `1b8776db`:** bei Abschluss dieses Schritts noch nicht fertig (siehe
+  Ergebnispost im Thema).
+- **GL-Forward-Graph-Materialien ohne Sonnenschatten** (§11.3): eigenes Thema.
+- **Echte Texturen** (§4.3, 25 PNG) und **Wetter-Kopplung** (Schnee/Pfützen aus dem
+  Wetter): gehören laut Thema nicht hierher. Die Vorgaben der 14 Parameter werden mit
+  den echten Texturen am Bild nachgestellt.
+- **Handbuch:** Schritt 5 hat keine neuen Knoten gebracht. Die Knoten aus Schritt 3/4
+  haben Tooltips im Editor (`EditorHelp.cpp`). Die Node-Library-Tabelle der Website
+  (`HorizonEngineDocs/materials.html`, Zeile „Texture“) nennt nur Texture Sample und
+  Panner. Sie bekommt Texture/Normal Map Array und die vier Bombing-Knoten **nach dem
+  Merge**, damit die öffentliche Seite keine unveröffentlichten Knoten zeigt. Danach
+  das Handbuch-Bündel `EditorDeps/Docs/he-docs.json` neu bauen.
+- Die übrigen Punkte aus §10.5 gelten weiter (Pfützen in echten Mulden, heTex0 auf
+  Metal, steile Felswände, malbare Overrides, GI-Näherung).

@@ -13,9 +13,12 @@
 # HE_COLLAB_OFFLINE, sky time pinned. D3D11/D3D12 crash or hang on exit after
 # the dump (known): the process is killed a few seconds after "frame dumped".
 #
-# Shadows: on Metal the graph-material path drew a false shadow at the ramp foot
-# that GL does not (docs §10). For the MATERIAL comparison pass
-# -Extra @{HE_DUMP_SHADOW='0.1'} as well (shadow distance 0.1 m).
+# Shadows: the ramp foot lies in the ramp's cast shadow (TOD 0.4, docs §11.3).
+# OpenGL FORWARD gives graph materials no sun shadow at all (csmSplits.w = 0),
+# every other path draws it -- so with shadows GL forward is no reference. For
+# the MATERIAL comparison against GL pass -Extra @{HE_DUMP_SHADOW='0.1'}
+# (shadow distance 0.1 m) with -Tag _s01, and check the shadow per backend with
+# ana158auto.py shadow AL<mode>-<rhi>.bmp AL<mode>-<rhi>_s01.bmp.
 param(
     [Parameter(Mandatory = $true)][string]$Deploy,
     [Parameter(Mandatory = $true)][string]$Out,
