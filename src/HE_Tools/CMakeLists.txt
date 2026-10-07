@@ -183,5 +183,17 @@ add_executable(mat_gen
 target_link_libraries(mat_gen PRIVATE HorizonCore)
 target_include_directories(mat_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── landscape_tex_gen.exe (placeholder textures of the auto landscape material)
+# Same bargain: landscape_tex_gen <out-dir> writes T_Landscape_<Layer>_<Map>
+# .hasset files (Texture) via ContentManager, byte-identical to imported ones.
+# Run manually to (re)populate EditorDeps/EngineContent/Textures/Landscape; the
+# outputs are committed, and the real textures are imported over them later
+# (docs/auto-landscape-material-textures.md).
+add_executable(landscape_tex_gen
+    src/LandscapeTexGen/main.cpp
+)
+target_link_libraries(landscape_tex_gen PRIVATE HorizonCore)
+target_include_directories(landscape_tex_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
 # HorizonTools is NEVER linked into HorizonGame or any runtime target.
 # It is an editor/build-time only dependency.

@@ -39,8 +39,10 @@
 //     MaterialShaderLibrary.cpp's deferred resolve.
 //   * uSkyEnv — the baked skyColor cubemap GL samples for ambient diffuse and
 //     specular. This file evaluates skyColor() analytically per fragment.
-//   * uAmbient — the flat ambient fill (never-black floor / overcast term).
-//     RenderWorld::ambient never reaches this shader.
+//   * uAmbient — the flat ambient fill (never-black floor / overcast term)
+//     in the NON-GI branch. Since Thema 159 RenderWorld::ambient reaches this
+//     shader as uf.ambient, but only the GI branch adds it (as GL/Metal do);
+//     the non-GI branch was left alone so GI off stays bit-identical.
 //   * uWetness / uSnow — the weather surface response (wet darken + gloss, snow
 //     cover on up-facing surfaces).
 //
@@ -111,6 +113,12 @@ layout(set = 0, binding = 0) uniform Frame {
     // slice is measured along, w = the grid's near plane. Appended last.
     vec4  clusterParams;
     vec4  clusterCamFwd;
+    // rgb = RenderWorld::ambient, the flat never-black floor GL/Metal add as
+    // `+ uAmbient * diffuseColor` — must match FrameUBOData exactly. Read ONLY
+    // in the GI branch (Thema 159): the probes bounce actual lights only, so
+    // without it a GI-mask shadow band went black where GL shows grey. The
+    // non-GI branch keeps the drift documented in the banner. Appended last.
+    vec4  ambient;
 } uf;
 
 // Clustered lighting lists (HE::BuildClusterLights in LightPacking.h): 4 vec4
@@ -132,7 +140,8 @@ layout(set = 0, binding = 1) uniform sampler2DArray uShadowMap;
 // after the forward-SSR result on 8.
 layout(set = 0, binding = 9) uniform sampler2DArray uLocalShadowMap;
 
-// Per-draw PBR material scalars uploaded via vkCmdUpdateBuffer before each draw.
+// Per-draw PBR material scalars: a dynamic UBO, each draw bound at its own slot
+// of the renderer's per-frame material ring (VulkanRenderer m_sceneMatBuf).
 layout(set = 0, binding = 2) uniform MatUBO {
     vec4 baseColorMet;  // rgb = baseColor, a = metallic
     // x = roughness, y = opacity, z = hasTexture (0/1),
@@ -463,10 +472,11 @@ void main()
         ? texture(uAO, gl_FragCoord.xy / uf.viewport.xy).r
         : 1.0;
     // GI replaces the AO-gated diffuse IBL with probe-sampled indirect diffuse
-    // (specular IBL kept — the GI slice is diffuse-only), mirroring GL/Metal.
+    // (specular IBL kept — the GI slice is diffuse-only), mirroring GL/Metal,
+    // including their flat ambient floor `ambient * albedo * (1 - metallic)`.
     vec3 result = (uf.giParams.y > 0.5)
         ? sampleDDGIIrradiance(vWorldPos, N) * base * kd * uf.giParams.x
-              + ambSpec * (1.0 - 0.6 * rough)
+              + ambSpec * (1.0 - 0.6 * rough) + uf.ambient.rgb * base * (1.0 - met)
         : ao * (ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough));
 
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel

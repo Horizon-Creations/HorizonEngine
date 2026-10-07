@@ -279,7 +279,9 @@ Dazu:
   Verdecker-Bewegung. Die Settle-Frames laufen bei `TOD − step`, die letzten **zwei** Frames bei
   `TOD`. Zwei Frames, weil Vulkans `runGi()` die Szene extrahierte, bevor `DrawScene()` den
   Day-Night-Zustand des Frames setzte (siehe §7.5, inzwischen behoben). Der zweite Frame bleibt,
-  damit Captures mit älteren Builds vergleichbar sind.
+  damit Captures mit älteren Builds vergleichbar sind. Seit Thema 146 setzt
+  `HE_DUMP_TODSTEPFRAMES=1` die Zahl auf einen Frame. Das ist der Zeuge für einen Ein-Frame-Versatz
+  selbst, denn bei zwei Frames ist der zweite auch mit Versatz richtig.
 * **Drift-Guard** `tests/test_culling.cpp` „GI kernels: …". Der alte „cone jitter hash" hätte nach
   dem Hash-Tausch ins Leere gegriffen und ist neu formuliert. Zwei neue Subcases kommen dazu:
   (a) jede `giHash2`/`giHash2R`-Definition in **allen sechs Quelldateien**, also auch in den
@@ -387,18 +389,49 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
   Schritt 6**). `VulkanRenderer::runGi()` rief `m_extractor.extract()` ohne vorheriges
   `setDayNight()` auf. Die GI-Maske rechnete also mit der Sonne des Vorframes, während der
   Scene-Pass die aktuelle nutzte. Metal ruft `setDayNight()` vor jeder GI-Extraktion auf, D3D11,
-  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Jetzt setzt `runGi()` den
-  Zustand selbst, mit demselben Aufruf wie `DrawScene()`. Der Test in `tests/test_culling.cpp`
-  („Vulkan GI extracts with this frame's sun …") prüft die Reihenfolge im Quelltext. Negativkontrolle:
+  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Damals setzte `runGi()` den
+  Zustand selbst, mit demselben Aufruf wie `DrawScene()`. Seit Thema 146 kommt er vom Frame-Anfang
+  (siehe unten), und der Test in `tests/test_culling.cpp` heißt jetzt „Vulkan extracts with this
+  frame's sun: one setDayNight at the frame's top …". Er prüft die Reihenfolge im Quelltext. Negativkontrolle:
   ohne den Aufruf schlägt `REQUIRE` fehl, bei `setDayNight()` hinter `extract()` der `CHECK`.
   Kompiliert ist die Datei lokal nur per `-fsyntax-only` gegen die MoltenVK-Header, echt
-  kompiliert sie die Windows-CI. Gelaufen ist sie auf keinem Vulkan-Gerät.
-  **Nicht behoben, gleiche Art:** `EncodeShadowMap()`, `runSSAO()` und `EncodeDecalDepth()`
-  extrahieren in Vulkan ebenfalls vor `DrawScene()` und ohne eigenes `setDayNight()`. Bei GI
-  aus werden die CSM-Kaskaden also mit der Sonne des Vorframes gefittet und gerendert, während der
-  Scene-Pass mit der aktuellen schattiert. Bei normaler Day-Night-Geschwindigkeit ist das
-  unsichtbar. Sauberer wäre ein `setDayNight()` einmal am Frame-Anfang (`DrawViewportFrame()`
-  und der Swapchain-Zweig in `Render()`), das ist aber ein eigener Schritt.
+  kompiliert sie die Windows-CI. Auf einem Vulkan-Gerät gelaufen ist sie erst in Thema 146 (unten).
+  **Gleiche Art, behoben in Thema 146:** `EncodeShadowMap()`, `runSSAO()` und `EncodeDecalDepth()`
+  extrahierten in Vulkan ebenfalls vor `DrawScene()` und ohne eigenes `setDayNight()`. Bei GI
+  aus wurden die CSM-Kaskaden also mit der Sonne des Vorframes gefittet und gerendert, während der
+  Scene-Pass mit der aktuellen schattierte. Bei normaler Day-Night-Geschwindigkeit war das
+  unsichtbar. Jetzt gibt es genau ein `setDayNight()` pro Frame, ganz oben in den beiden Stellen,
+  die einen Frame aufzeichnen (`Render()` und `RenderSceneImage()`), vor jeder Extraktion. Die
+  Aufrufe in `runGi()` und `DrawScene()` sind entfallen. Der Test in `tests/test_culling.cpp`
+  („Vulkan extracts with this frame's sun: one setDayNight at the frame's top …") prüft die
+  Reihenfolge und dass es genau diese zwei Aufrufe gibt.
+  **Auf Hardware gemessen (Thema 146, Schritt 2, 06.10.2026, RTX 4070, Vulkan 1.4.341,
+  Release):** `scripts/gi-shadow-repro/run146.ps1` + `ana146.py`. GI aus, SSAO/AA/Bloom/DOF/
+  Motion-Blur/SSR aus, Forward, Szene `SHADOWINSTTEST`, TOD 0.35, Sprung 0.02 für **einen** Frame
+  (`HE_DUMP_TODSTEPFRAMES=1`). „Vorher" ist derselbe Build mit nur dem `VulkanRenderer.cpp`-Teil
+  von 64efd77b zurückgedreht (es unterscheidet sich nur `HorizonRendering.dll`). `lag` = mittlere
+  |P1 − S| / |S0 − S| auf den rund 32 000 Bodenpixeln, über die die Schattenkanten wandern
+  (0 = Schatten an der Sonne dieses Frames, 1 = an der des Vorframes).
+
+  | Build / Backend | lag | P1 näher an S0 | Schattenmaske verschoben | P1 = S bitgleich |
+  |---|---|---|---|---|
+  | Vulkan vorher | **1.032** | 100 % | 98.3 % | nein (max 102) |
+  | Vulkan nachher | **0.000** | 0 % | 0 % | ja |
+  | D3D11 / D3D12 / OpenGL (Referenz) | 0.000 | 0 % | 0 % | ja |
+
+  Der Rauschboden ist null, zwei statische Captures sind auf allen vier Backends bitgleich. Das
+  Vulkan-Bild nachher ist auf dem Boden pixelgleich mit D3D11 und D3D12 (1 Pixel Maskenunterschied).
+  Die Validation-Meldungen vorher und nachher sind nach Art gleich, mit GI und SSAO aus und auch
+  mit beiden an (`-Gi 1`, `HE_DUMP_SSAO=1`, statisch und P1). Es sind immer dieselben drei:
+  `vkCmdUpdateBuffer` im Render-Pass, `vkCmdPipelineBarrier` in Subpass 0 und ein Bildlayout bei
+  `vkQueueSubmit`. Das sind die vorbestehenden Meldungen aus Thema 144/145, der Fix bringt keine
+  neue Art. Die Zahl (je 9 + Abbruchhinweis) taugt nicht zum Vergleich, denn der Layer bricht jede
+  VUID nach 10 Meldungen ab (`duplicate_message_limit`). Mit GI an ist P1 vorher und nachher
+  **bitgleich**, die statische Aufnahme weicht um höchstens 0.1 Luminanz ab. Der GI-Pfad aus
+  Thema 131 (früher eigenes `setDayNight()` in `runGi()`) ist durch das Verlegen also unverändert.
+  Nicht eigens bezeugt: `RenderSceneImage()`. Dort hat der Dump keinen Sonnensprung zwischen zwei
+  Aufrufen, der Aufruf ist dort nur über den Quelltext-Test belegt. Ebenso wenig SSAO und
+  Decal-Tiefe: sie hängen nicht von der Sonne ab, es gibt dort keinen sichtbaren Versatz.
 * Ein Rest-Flackern bleibt (§7.2, Ende). Für weitere Ruhe bräuchte es mehr Strahlen pro Pixel, ein
   höheres History-Gewicht (das braucht die Verdecker-Reaktion des Clamps) oder einen
   kantenerhaltenden Spatial-Filter statt 3×3-Box.
@@ -412,6 +445,10 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
 (dasselbe mit `-Frames 61`), dann `python scripts/gi-shadow-repro/ana.py REF.bmp X_f60.bmp X_f61.bmp`.
 Für Verdecker-Bewegung drei Captures (statisch, `-Extra @{HE_DUMP_TOD='0.345'}`,
 `-Extra @{HE_DUMP_TODSTEP='0.005'}`) und dann `ana_motion.py NEW OLD MOVED`.
+CSM-Sonnenversatz (Thema 146): Messbauten nach `<root>\deploy\Editor` legen, dann
+`scripts\gi-shadow-repro\run146.ps1 -Roots C:\hw146\pre,C:\hw146\post -Rhis Vulkan` und
+**in einem eigenen Aufruf** (cap.ps1 biegt APPDATA um, numpy fehlt sonst)
+`python scripts/gi-shadow-repro/ana146.py C:\hw146\post\cap vulkan`.
 
 ### 7.6 Metal auf echter Hardware (Schritt 7)
 

@@ -155,11 +155,85 @@ enum class MatNodeType : uint8_t
                     // metres, 0 = off) fades the offset in from the mesh origin
                     // (squared, like a bending stem); the fragment stage has no
                     // object position and ignores it. Mask multiplies the result.
+
+    // ── v13: texture arrays (Thema 158) ──
+    // One heTexP slot holding MANY same-sized layers (TextureAsset::layers): a
+    // sampler2DArray instead of a sampler2D. Five terrain layers × Albedo /
+    // Normal / Mask fit the four-slot budget only this way — an array costs one
+    // sampler however many slices it has. s = texture path, like Texture Sample.
+    // Slice is rounded to the nearest layer and clamped to the array, the same
+    // answer on every backend. An unconnected UV is the mesh UV (vUV).
+    TextureArraySample,   // (UV, Slice) → RGB + A
+    NormalMapArraySample, // (UV, Slice) → world-space N, like Normal Map; p[0] = strength
+
+    // ── v14: texture bombing (Thema 158) ──
+    // Breaks visible tiling WITHOUT another texture: the UV plane is cut into a
+    // hex grid (Mikkelsen, "Practical Real-Time Hex-Tiling", JCGT 2022), every hex
+    // reads the texture at its own random offset and rotation, and three hexes
+    // blend per pixel. The randomness is an integer hash of the hex index, so all
+    // five backends pick the same offset bit for bit; the reads use the gradients
+    // of the UNBOMBED uv, so a hex seam never jumps a mip level. Same sampler
+    // slots as the plain nodes (s = texture path, the array nodes add Slice).
+    //   p[0] = Rotation (0..1 of ±180°; 0 = offsets only)
+    //   p[1] = Blend sharpness (exponent of the hex weights, ≤ 0 → 7)
+    //   p[2] = Seed (rounded to an integer)
+    //   p[3] = Strength (normal nodes only, like Normal Map's p[0])
+    // The Cell pin (last input) is the hex spacing in texture repeats
+    // (kMatBombDefaultCell unwired), a pin so a parameter can tune it per layer.
+    // The grid lives in p[0..2] + UV + Cell on all four nodes, so the Albedo /
+    // Normal / Mask reads of one layer share it: equal params + equal sources =
+    // the SAME hexes, emitted once (codegen memoizes the grid) — the normals stay
+    // on the albedo.
+    TextureBombSample,          // (UV, Cell) → RGB + A
+    NormalMapBombSample,        // (UV, Cell) → world-space N
+    TextureArrayBombSample,     // (UV, Slice, Cell) → RGB + A
+    NormalMapArrayBombSample,   // (UV, Slice, Cell) → world-space N
 };
 
+// True for every node whose `s` is a texture path sampled through a heTexP slot
+// (Texture Sample, Normal Map, their array and bombing variants).
+inline bool matNodeSamplesTexture(MatNodeType t)
+{
+    switch (t)
+    {
+        case MatNodeType::TextureSample:          case MatNodeType::NormalMapSample:
+        case MatNodeType::TextureArraySample:     case MatNodeType::NormalMapArraySample:
+        case MatNodeType::TextureBombSample:      case MatNodeType::NormalMapBombSample:
+        case MatNodeType::TextureArrayBombSample: case MatNodeType::NormalMapArrayBombSample:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Blend sharpness of a fresh bombing node (and of one saved with p[1] ≤ 0): the
+// exponent the hex-tiling paper uses. Higher = narrower seams between hexes.
+inline constexpr float kMatBombDefaultSharpness = 7.0f;
+// Hex spacing of an unwired Cell pin, in texture repeats: two hexes per repeat
+// keep a texture's larger features whole. The paper's fixed scale is 0.2887;
+// smaller cells mean more variation and more seams.
+inline constexpr float kMatBombDefaultCell = 0.5f;
+
+// The bombing nodes (any of the four v14 types).
+inline bool matNodeIsBombing(MatNodeType t)
+{
+    return t == MatNodeType::TextureBombSample || t == MatNodeType::NormalMapBombSample
+        || t == MatNodeType::TextureArrayBombSample || t == MatNodeType::NormalMapArrayBombSample;
+}
+
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
-// channel each. More would mean several weightmap textures + shader permutations.
-inline constexpr int kMatMaxLandscapeLayers = 4;
+// channel each, over two pages of four (TerrainComponent::layerWeights /
+// layerWeights2). Both pages travel in ONE texture, side by side, so the eight
+// layers cost the same single heLandscapeWeights binding and sampler as four
+// did — the SM 5.0 / Metal sampler budget is full (MaterialShaderLibrary).
+inline constexpr int kMatMaxLandscapeLayers = 8;
+
+// How many per-layer colours the CPU fold persists for the GI bounce
+// (MaterialAsset::approxLayerColor, the MTRL tail, GiLandscape::layerColor).
+// Kept at the original four so the asset format and the GPU structs stay as
+// they are: a GI hit on a landscape weights layers 0..3 by their share of the
+// paint, layers 4..7 only reach it through the flat layer average.
+inline constexpr int kMatApproxLayerColors = 4;
 
 // Split a LandscapeLayerBlend node's `s` into its layer names (newline separated,
 // blanks dropped, capped at kMatMaxLandscapeLayers). Empty → one "Layer 1".
@@ -380,6 +454,10 @@ struct MatShaderGen
     // Content-relative paths of the project textures referenced by Texture Sample nodes,
     // in slot order (heTexP0..heTexP3). → MaterialAsset::graphTexturePaths. Max 4.
     std::vector<std::string>  textures;
+    // Bit k set = slot heTexPk is a sampler2DArray (a Texture Array Sample node), so the
+    // renderer must bind an ARRAY view there. Also written into the GLSL itself (see
+    // matGlslTextureArrayMask), which is where the backends read it from.
+    uint32_t textureArrayMask = 0;
     // Static switches reached during codegen: name + the EFFECTIVE value baked into this
     // shader (node default, or the entry from generateFragment's override map).
     std::vector<std::pair<std::string, bool>> switches;
@@ -404,6 +482,15 @@ struct MatShaderGen
 // Max project textures a single material graph may sample (fixed so the per-backend
 // binding pins stay static).
 inline constexpr int kMatMaxGraphTextures = 4;
+
+// Which heTexP slots of a generated fragment are sampler2DArray (bit k = heTexPk).
+// The codegen writes the mask as the line right after `#version` —
+// "// heTexArrays <mask>" — and ONLY when it is non-zero, so every graph without an
+// array node keeps its exact old text (and its cached pipelines). The renderers
+// read it from MaterialAsset::customShaderFragGlsl, which travels verbatim into
+// packed games, so the MTRL layout needs no new field. O(1): it looks at one
+// fixed position. Hand-written GLSL without the line → 0 (all plain 2D).
+HE_API uint32_t matGlslTextureArrayMask(const std::string& glsl);
 
 // Exposed parameters a single material graph may declare — the length of the
 // HeParams UBO array (`uniform HeParams { vec4 v[kMatMaxParams]; }`, emitted by
