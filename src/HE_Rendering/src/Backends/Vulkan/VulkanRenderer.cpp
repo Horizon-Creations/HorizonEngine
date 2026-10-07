@@ -1164,6 +1164,19 @@ void VulkanRenderer::createInstance()
             create(m_instance, &dci, nullptr, &m_debugMessenger);
         }
     }
+    if (haveDebugUtils)
+        m_setObjectName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+            vkGetInstanceProcAddr(m_instance, "vkSetDebugUtilsObjectNameEXT"));
+}
+
+void VulkanRenderer::nameImage(VkImage img, const char* name) const
+{
+    if (!m_setObjectName || !m_device || !img) return;
+    VkDebugUtilsObjectNameInfoEXT ni{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    ni.objectType   = VK_OBJECT_TYPE_IMAGE;
+    ni.objectHandle = reinterpret_cast<uint64_t>(img);
+    ni.pObjectName  = name;
+    m_setObjectName(m_device, &ni);
 }
 
 void VulkanRenderer::createSurface()
@@ -9877,6 +9890,15 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
         destroyGiTargets();
         return;
     }
+    nameImage(m_giGBufPos.img,   "GI gbuffer position");
+    nameImage(m_giGBufNorm.img,  "GI gbuffer normal");
+    nameImage(m_giGBufDepth.img, "GI gbuffer depth");
+    nameImage(m_giRaw.img,       "GI raw mask");
+    nameImage(m_giLocalMask.img, "GI local mask");
+    nameImage(m_giHist[0].img,   "GI history 0");
+    nameImage(m_giHist[1].img,   "GI history 1");
+    nameImage(m_giResult.img,    "GI mask");
+    nameImage(m_giFilterTmp.img, "GI filter scratch");
 
     // Framebuffers.
     {
@@ -10063,6 +10085,8 @@ void VulkanRenderer::ensureGiProbeAtlas()
         destroyGiProbeAtlas();
         return;
     }
+    nameImage(m_giIrrAtlas.img, "GI irradiance atlas");
+    nameImage(m_giVisAtlas.img, "GI visibility atlas");
 
     // Transition both to GENERAL (imageLoad/Store + sampling live there) and
     // zero-fill — the probe kernel EMA-reads its own previous texel.
@@ -11196,6 +11220,17 @@ void VulkanRenderer::createSSAOTargets(uint32_t w, uint32_t h)
     // Blurred AO: R8_UNORM
     ssaoMakeImage(m_device, 0, VK_FORMAT_R8_UNORM, w, h, colorRT,
                   VK_IMAGE_ASPECT_COLOR_BIT, m_ssaoBlurRT.image, m_ssaoBlurRT.memory, m_ssaoBlurRT.view, fmem);
+    nameImage(m_ssaoPosRT.image,    "SSAO position");
+    nameImage(m_ssaoPosDepth.image, "SSAO position depth");
+    nameImage(m_ssaoRT.image,       "SSAO raw");
+    nameImage(m_ssaoBlurRT.image,   "SSAO blur");
+    // Scene binding 3 is pointed at the blur target below, for every frame —
+    // also the ones runSSAO skips (SSAO off, or GI on: the probes replace AO).
+    // Its render pass is then the only thing that would ever leave UNDEFINED, so
+    // every such frame sampled an UNDEFINED image (validation: InvalidImageLayout
+    // once per submit, Thema 145). scene.frag ignores the value while
+    // viewport.z == 0; the layout must be valid regardless.
+    primeShaderReadLayout(m_ssaoBlurRT.image);
 
     // Framebuffers.
     {
@@ -11497,7 +11532,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
 // on frame one (the blend weight is zero, the READ is not), and sampling an
 // image still in UNDEFINED is invalid however the value is used afterwards.
 // Same one-time-submit shape as the dummy image in createPostFXPipelines.
-void VulkanRenderer::ssrPrimeLayout(VkImage img)
+void VulkanRenderer::primeShaderReadLayout(VkImage img)
 {
     if (!img || !m_cmdPool) return;
     VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
@@ -12006,8 +12041,8 @@ bool VulkanRenderer::ensureReflPrepassTargets()
     // Both are written by the pass before they are read, so they need no priming
     // — but the trace's descriptor is written before the first pass on a frame
     // where the pre-pass was skipped, so park them anyway.
-    ssrPrimeLayout(m_reflAttrRT.image);
-    ssrPrimeLayout(m_reflNdcRT.image);
+    primeShaderReadLayout(m_reflAttrRT.image);
+    primeShaderReadLayout(m_reflNdcRT.image);
     VkImageView atts[4] = { m_ssaoPosRT.view, m_reflAttrRT.view, m_reflNdcRT.view,
                             m_ssaoPosDepth.view };
     VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -12050,7 +12085,7 @@ void VulkanRenderer::createSSRTargets(uint32_t w, uint32_t h)
     auto make = [&](SSAORenderTarget& rt) {
         ssaoMakeImage(m_device, 0, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, colorRT,
                       VK_IMAGE_ASPECT_COLOR_BIT, rt.image, rt.memory, rt.view, fmem);
-        ssrPrimeLayout(rt.image);
+        primeShaderReadLayout(rt.image);
     };
     for (int i = 0; i < 2; ++i)
     {
@@ -12139,7 +12174,7 @@ void VulkanRenderer::CaptureSSRColorHistory(VkCommandBuffer cmd, uint32_t w, uin
                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                       VK_IMAGE_ASPECT_COLOR_BIT,
                       m_ssrColorHist.image, m_ssrColorHist.memory, m_ssrColorHist.view, fmem);
-        ssrPrimeLayout(m_ssrColorHist.image);
+        primeShaderReadLayout(m_ssrColorHist.image);
         m_ssrColorHistW = w; m_ssrColorHistH = h;
     }
     if (!m_ssrColorHist.image) return;

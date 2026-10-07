@@ -106,7 +106,6 @@ CASES = {
         "pairs": [("off", "on", 0.3), ("on", "sw", None)],
         "require": {"on": ["GI probe grid", "GI hardware ray tracing available"],
                     "sw": ["GI probe grid", "software GI path forced"]},
-        "allow": {"on": ["gi_layout"], "sw": ["gi_layout"]},
     },
     # GI reflections on the same scene: the green and the glowing red cube should
     # appear in the mirror floor (docs/gi-reflections-plan.md). REPORT ONLY:
@@ -123,7 +122,6 @@ CASES = {
         },
         "pairs": [("off", "on", None)],
         "require": {"on": ["HE_DUMP_GIREFLTEST witness scene added"]},
-        "allow": {"off": ["gi_layout"], "on": ["gi_layout"]},
     },
     # Built-in (non-graph) materials only, several different ones in ONE frame:
     # the SSR witness's metallic mirror floor + rough red cube, and the sRGB
@@ -178,7 +176,6 @@ CASES = {
                                "-> heLandscapeWeights bound"]},
         "probes": {v: [("green disc", 0.50, 0.50, "g"), ("blue disc", 0.32, 0.70, "b"),
                        ("red field", 0.50, 0.20, "r")] for v in ("gi_off", "gi_on")},
-        "allow": {"gi_on": ["gi_layout"]},
     },
     # Black GI stripes (Thema 159, docs/gi-stripes-vulkan-d3d-ursache-2026-10-07.md):
     # the GI sun-shadow mask starts its rays at the GI G-buffer position + 5 cm
@@ -208,7 +205,6 @@ CASES = {
                                "HE_DUMP_MATERIALTEST sphere", "GI probe grid"]},
         "stripes": {v: [("terrain", 0.08, 0.78, 0.92, 0.98, STRIPE_MAX),
                         ("sphere",  0.37, 0.17, 0.63, 0.47, STRIPE_MAX)] for v in ("gi_off", "gi_on")},
-        "allow": {"gi_on": ["gi_layout"]},
     },
     # UI Image widget (Thema 157): tile 12 of HE_DUMP_UITEST=image is an Image
     # element at x 60..300, y 590..700 of the 1280x720 frame showing a generated
@@ -252,12 +248,11 @@ COLOR_TOL = 12
 #
 # Fixed and deleted: "mat_ubo" (vkCmdUpdateBuffer + barrier for the built-in
 # per-draw material block inside the scene render pass; Thema 144 — the block
-# now sits in a per-frame ring behind a dynamic UBO, case "builtin" guards it).
+# now sits in a per-frame ring behind a dynamic UBO, case "builtin" guards it),
+# "gi_layout" (InvalidImageLayout once per frame with GI on: the SSAO blur
+# target behind scene binding 3 stayed UNDEFINED because runSSAO never draws
+# with GI on; Thema 145 — createSSAOTargets primes it to SHADER_READ_ONLY).
 ALLOWED_VALIDATION = {
-    # With GI on, once per frame: a submitted command buffer expects an image in
-    # a layout it is not in. The engine log truncates the message before the
-    # layout names; the full text is in the artifact's per-shot log.
-    "gi_layout": [r"UNASSIGNED-CoreValidation-DrawState-InvalidImageLayout"],
 }
 
 LOG_MARK_ARMED  = "frame dump armed"
