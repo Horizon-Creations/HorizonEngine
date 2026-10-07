@@ -1,5 +1,6 @@
 param([string]$Deploy = 'C:\hw157\deploy', [string]$Tag = 'base', [string[]]$Rhis = @('OpenGL','Vulkan','D3D11','D3D12'),
-      [string]$Shots = 'C:\hw157\shots', [string]$Scratch = 'C:\hw157', [string]$UiTest = 'image')
+      [string]$Shots = 'C:\hw157\shots', [string]$Scratch = 'C:\hw157', [string]$UiTest = 'image',
+      [hashtable]$Extra = @{})
 # Thema 157: UI-Bild-Quad-Zeuge. HE_DUMP_UITEST=image legt zu den 12 Stil-Kacheln aus
 # Thema 133 eine 13. Kachel (Image-Element, erzeugtes Vier-Quadranten-Bild, Tint weiss) an
 # und schickt alles durch WidgetManager -> extractUI -> UI-Pass des Backends. Aufgenommen
@@ -27,6 +28,9 @@ foreach ($rhi in $Rhis) {
     $env:HE_DUMP_RHI = $rhi
     $env:HE_DUMP_FRAMES = '16'
     $env:HE_DUMP_UITEST = $UiTest
+    # Zusaetzliche Variablen NACH dem Aufraeumen oben, z. B. -Extra @{HE_GPU_DEBUG='1'}
+    # fuer den D3D12-Debug-Layer (sonst loescht die Schleife sie wieder).
+    foreach ($k in $Extra.Keys) { Set-Item "env:$k" $Extra[$k] }
     $p = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru -WindowStyle Minimized
     $t0 = Get-Date; $dumped = $null
     # D3D11/D3D12 stuerzen nach dem Dump beim Beenden ab (bekannt): BMP abwarten, dann beenden.

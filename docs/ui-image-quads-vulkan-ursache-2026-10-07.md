@@ -130,3 +130,76 @@ war grün: alle vier Quadranten bytegenau, 0 Validation-Meldungen, 6/6 Fälle.
 - Deploy-Falle bestätigt: Nach der reinen Shader-Änderung hatten `deploy/Game` und `deploy/Editor/Game` noch
   die alte `ui.frag.spv`. Erst nach einem erzwungenen Neu-Linken von HorizonGame **und** HorizonEditor
   stimmten alle fünf Kopien überein. Für Schritt 4 (das laufende Spiel) also zuerst die Hashes prüfen.
+
+## Schritt 3: D3D11 und D3D12 (2026-10-07)
+
+Der Befund aus Schritt 1 stand schon fest: Beide D3D-Backends zeichneten den Bild-Quad weiß, und zwar aus demselben
+Grund wie Vulkan. `renderUIPass` (D3D11) und `renderUIPass12` (D3D12) lasen `textureAssetId` nicht, und
+`kUIHLSL`/`kUIHLSL12` hatten keinen Texturzweig. Es gab also weder einen falschen Slot noch eine kaputte SRV oder
+einen Fallback, der Pfad fehlte ganz. Der Fix baut ihn nach, Zeile für Zeile wie GL `RenderUIPass`/`kUIFS` Modus 2:
+
+- **Shader (beide):** Der Glyphenzweig prüft jetzt `0.5 < uMode < 1.5`. Modus 2 rechnet Bild × Tint und legt bei
+  runden Ecken die SDF auf das Alpha. D3D11 sampelt `i.uv` (die UV-Interpolation passiert im VS) und nimmt `i.local`
+  für die SDF. D3D12 sampelt `lerp(uUVRect, i.uv)`, und `i.uv` ist dort zugleich die quad-lokale Koordinate.
+- **D3D11:** `createAlbedoSRV(tex, honourSrgb)`. Die UI lädt mit `false` hoch, also **UNORM** trotz sRGB-Flag
+  (Thema 107). Dazu kommen ein eigener Cache `uiTexCache` (Schlüssel wie `graphTexCache`, ein Fehlschlag wird als
+  null gecacht und das Element zeichnet dann seinen Tint) und `resolveUITexture`. Der Pass bindet das Bild auf t0
+  und verwirft `boundAtlasKey`, die nächste Glyphe bindet ihren Atlas also neu. `InvalidateTexture` wirft auch den
+  UI-Eintrag weg. Der Sampler war schon trilinear.
+- **D3D12:** `uploadTexture2D(..., honourSrgb)`, `srvForTexture` übernimmt das UNORM-Format der Ressource.
+  Während des UI-Passes ist nur `m_uiAtlasHeap` gebunden. Der Heap hat deshalb hinter den 16 Font-Slots eine eigene
+  Bild-Region mit `k_maxUIImages = 240` Slots, und alle Slots starten als Null-SRV. Bild-Slots werden fortlaufend
+  vergeben und **nicht** wiederverwendet: Eine invalidierte Textur geht in `m_retiredTextures`, der Slot bleibt
+  liegen, denn ein Deskriptor, den eine Liste im Flug noch liest, darf nicht überschrieben werden.
+  `uiImageSlotFor` zeichnet Kopie und Barriere auf, und zwar vor dem Pass-State, in derselben Vorschleife wie die
+  Atlas-Uploads. Der statische Sampler bekommt `MaxLOD = D3D12_FLOAT32_MAX` (vorher 0, das hätte ein Bild mit
+  Mip-Kette auf Ebene 0 festgenagelt; für Atlanten mit einer Ebene ändert das nichts). Beim Shutdown wird der
+  Bild-Cache geleert, und beide Slot-Zähler stehen wieder auf 0.
+
+Messung auf NN-WS03 (RTX 4070), Release-Baum `C:/hw157`, Deploy mit dem neuen `HorizonRendering.dll` (md5
+`19739671…` an allen vier Stellen, also Baum, `deploy/Editor`, `deploy/Game` und `deploy/Editor/Game`, nach
+erzwungenem Neu-Linken von HorizonGame und HorizonEditor):
+
+```powershell
+& scripts\ui-image-repro\cap157.ps1 -Deploy C:\hw157\deploy -Shots C:\hw157\shots -Tag fix3
+python scripts\ui-image-repro\ana157.py C:\hw157\shots fix3          # Exit 0
+& scripts\ui-image-repro\cap157.ps1 -Deploy C:\hw157\deploy -Shots C:\hw157\shots -Tag dbg3 -Rhis D3D12 `
+    -Extra @{HE_GPU_DEBUG='1'; HE_GPU_GBV='1'}                         # neu: -Extra
+```
+
+| Backend | vor Schritt 3 (Tag `fix`) | nach Schritt 3 (Tag `fix3`): TL / TR / BL / BR | Urteil |
+|---|---|---|---|
+| OpenGL | Bild | (230,30,30) / (30,200,60) / (30,80,230) / (240,220,40) | **Bild** |
+| Vulkan | Bild | (230,30,30) / (30,200,60) / (30,80,230) / (240,220,40) | **Bild** |
+| D3D11 | (255,255,255) überall | (230,30,30) / (30,200,60) / (30,80,230) / (240,220,40) | **Bild** |
+| D3D12 | (255,255,255) überall | (230,30,30) / (30,200,60) / (30,80,230) / (240,220,40) | **Bild** |
+| D3D12 + Debug-Layer + GBV (`dbg3`) | – | (230,30,30) / (30,200,60) / (30,80,230) / (240,220,40) | **Bild**, 0 Meldungen „D3D12 debug layer:“ |
+
+![Bild-Kachel nach Schritt 3](img/ui-image-quads-2026-10-07/bild-kachel-4-backends-schritt3.png)
+
+- Die Sollfarben kommen bytegenau an. Bei einem SRGB-Upload wären es (202,3,3) usw. (siehe Gegenprobe in
+  Schritt 2), die Farben belegen also den UNORM-Pfad.
+- Vor/nach (`fix` → `fix3`): Auf D3D11 und D3D12 ändern sich genau die 26 400 Pixel der Kachel 12
+  (x 60–299, y 590–699), sonst kein einziges. Die 12 Stil-Kacheln und alle Glyphen sind also bytegleich geblieben.
+  GL und Vulkan sind zwischen den beiden Läufen bytegleich.
+- In der Kachel sind D3D11, D3D12 und Vulkan pixelgleich (max. Abweichung 0). Gegen GL weichen 912 Pixel ab, und
+  zwar **alle** im äußeren 2-px-Rand der Kachel und keiner an den Quadranten-Nähten. GL lädt das Bild über
+  `uploadTextureAssetGL` hoch, das keinen Wrap-Modus setzt, es gilt also der GL-Standard `GL_REPEAT`. Am Rand
+  filtert GL deshalb die gegenüberliegende Bildkante ein, die anderen drei klemmen (Clamp). Das ist eine GL-Eigenheit am Rand und kein D3D-Fehler. Sie liegt außerhalb dieses Themas.
+- Alle vier Logs haben 0 `[ERROR]` und 0 `[ WARN]` außer dem Config-Hinweis. Der D3D12-Lauf mit
+  `HE_GPU_DEBUG=1` und `HE_GPU_GBV=1` meldet „GPU-based validation ENABLED“ und „GPU debug layer + DRED ENABLED“
+  und hat keine einzige Debug-Layer-Zeile. Eine Gegenprobe, dass die InfoQueue-Leitung in diesem Dump-Lauf
+  wirklich ankommt, habe ich nicht gemacht. D3D11 hat im Renderer keinen Schalter für den Debug-Layer.
+- Test: `tests/test_culling.cpp`, „UI image quads have a texture path on D3D11 and D3D12 (Thema 157)“. Er pinnt
+  Shaderzweig, Modus-Wahl, UNORM-Upload, Cache-Invalidierung und die D3D12-Heap-Region im Quelltext; eine GPU
+  gibt es unter ctest nicht. Auf HEAD vor dem Fix kommt keiner der gepinnten Strings vor. Mit dem Fix ist der
+  Test grün, zusammen mit allen 60 Fällen von `test_culling.cpp`. Die beiden UI-HLSL-Strings sind zusätzlich mit
+  `fxc /Ges` gebaut (VS und PS, D3D11 und D3D12), und der Build-Schritt meldet „All 108 embedded shaders compile“.
+
+Nicht gemessen:
+- Runde Ecken an einem Bild (Modus 2 mit `cornerRadius > 0`). Der Zeuge hat Radius 0. Der Code ist derselbe wie
+  bei GL/Vulkan, belegt ist er auf D3D aber nicht.
+- Das exportierte Spiel (Swapchain-Pfad). Beide D3D-Backends rufen dort dieselbe Pass-Funktion auf (D3D11
+  `Render`, D3D12 Swapchain-Zweig von `Render`). Das ist Schritt 4.
+- Mehr als 240 verschiedene UI-Bilder in einer D3D12-Sitzung. Danach zeichnen weitere Bilder ihren Tint, ohne
+  Meldung. Ein Bild, das per `InvalidateTexture` neu geladen wird, verbraucht jeweils einen neuen Slot.

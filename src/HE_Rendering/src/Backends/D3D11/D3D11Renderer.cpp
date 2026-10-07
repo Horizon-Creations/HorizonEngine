@@ -1072,8 +1072,9 @@ float4 main(In i) : SV_Target {
 // ─── 2D UI canvas HLSL ──────────────────────────────────────────────────────
 // Generates a screen-space quad from SV_VertexID (0-3, TRIANGLESTRIP).
 // cbuffer layout: see UICB below, 176 bytes.  uUVRect = {u0, v0, u1, v1} into
-// the font atlas (glyph quads); uMode: 0 = solid color, 1 = font-atlas glyph
-// (alpha from the atlas R channel).  Mirrors kUIVS/kUIFS on the GL backend,
+// the font atlas (glyph quads) or the image (textured quads); uMode: 0 = solid
+// color, 1 = font-atlas glyph (alpha from the atlas R channel), 2 = textured
+// quad (image x tint).  Mirrors kUIVS/kUIFS on the GL backend,
 // including the "Schicht 0" shape (corner radii, border, gradient, soft edge,
 // inner shadow): the pixel shader below is kUIFS line for line, so a widget
 // looks the same on both.
@@ -1083,7 +1084,7 @@ cbuffer UICB : register(b0) {
     float4 uColor;     // rgba
     float4 uUVRect;    // glyph atlas UVs: xy = min, zw = max
     float2 uViewport;  // w, h in pixels
-    float  uMode;      // 0 = solid quad, 1 = font-atlas glyph
+    float  uMode;      // 0 = solid quad, 1 = font-atlas glyph, 2 = textured quad
     float  _upad;
     float4 uRotation;  // { angle(radians), pivotX, pivotY, unused }
     float4 uCornerRadius;  // px per corner: TL, TR, BR, BL
@@ -1126,10 +1127,22 @@ float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
     return length(max(q, 0.0f)) + min(max(q.x, q.y), 0.0f) - r;
 }
 float heMaxRadius(float4 radii) { return max(max(radii.x, radii.y), max(radii.z, radii.w)); }
+// uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
+// quad (RGBA, tinted by uColor). Modes 1 and 2 share t0: a glyph run binds the
+// atlas there, an image its own texture.
 float4 UIPSMain(UIOut i) : SV_TARGET
 {
-    if (uMode > 0.5f)
+    if (uMode > 0.5f && uMode < 1.5f)
         return float4(uColor.rgb, uColor.a * uFontAtlas.Sample(uSamp, i.uv).r);
+    if (uMode > 1.5f)
+    {
+        float4 t = uFontAtlas.Sample(uSamp, i.uv);
+        float4 c = float4(uColor.rgb * t.rgb, uColor.a * t.a);
+        if (heMaxRadius(uCornerRadius) <= 0.0f) return c;
+        // A rounded image is the solid path's SDF applied to the sampled alpha.
+        float dd = heRoundedBoxSDF((i.local - 0.5f) * uRect.zw, uRect.zw * 0.5f, uCornerRadius);
+        return float4(c.rgb, c.a * saturate(0.5f - dd));
+    }
     float4 fill = uColor;
     if (uStyle0.y > 0.5f)
     {
@@ -1386,6 +1399,9 @@ struct D3D11RendererImpl
     // white default, no per-frame retry). InvalidateTexture drops the UUID key so an
     // edited texture re-uploads; a path-keyed loose asset is not hot-reloaded (same as GL).
     std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> graphTexCache;
+    // UI quad images (Image widget, textured Panel/Border/Button): same keys, but
+    // uploaded UNORM even for an sRGB-flagged asset (see resolveUITexture).
+    std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> uiTexCache;
     std::vector<HE::UUID> pendingTexInval;
     static std::string graphTexKey(const HE::UUID& id, const std::string& path)
     {
@@ -4304,13 +4320,15 @@ struct D3D11RendererImpl
     // textures shade in linear light and only the tonemap's gamma encode re-curves
     // them. The twins share block/byte layout, so pitch math and the support check
     // are unchanged; the null SRV desc below inherits the resource format.
-    ComPtr<ID3D11ShaderResourceView> createAlbedoSRV(const TextureAsset* tex)
+    // honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
+    // as they are): the UI pass wants that, see resolveUITexture.
+    ComPtr<ID3D11ShaderResourceView> createAlbedoSRV(const TextureAsset* tex, bool honourSrgb = true)
     {
         ComPtr<ID3D11ShaderResourceView> srv;
         if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
             return srv;
 
-        const bool srgb = tex->srgb;
+        const bool srgb = tex->srgb && honourSrgb;
         DXGI_FORMAT fmt; bool isBlock; UINT blockBytes = 16;
         switch (tex->format)
         {
@@ -4780,6 +4798,25 @@ struct D3D11RendererImpl
         return raw;
     }
 
+    // The image of a UI quad — D3D11's ResolveUITexture. Its own cache, uploaded
+    // WITHOUT the sRGB decode: UI colours are sRGB numbers end to end (the UI pass
+    // writes an UNORM target), so an _SRGB view would come out linear-decoded and
+    // too dark (Thema 107). Not shared with graphTexCache on purpose: a material
+    // samples the same asset in linear light, which is right there. A miss is
+    // cached as null → the quad draws its tint, no per-frame retry.
+    ID3D11ShaderResourceView* resolveUITexture(const HE::UUID& id, ContentManager* cm)
+    {
+        const std::string key = graphTexKey(id, {});
+        if (key.empty() || !cm) return nullptr;
+        if (auto it = uiTexCache.find(key); it != uiTexCache.end())
+            return it->second.Get();
+        ComPtr<ID3D11ShaderResourceView> srv =
+            createAlbedoSRV(cm->resolveTextureRef(id, {}), /*honourSrgb=*/false);
+        ID3D11ShaderResourceView* raw = srv.Get();
+        uiTexCache.emplace(key, std::move(srv));
+        return raw;
+    }
+
     // Draw every decal of the frame into the currently bound colour target, between
     // the opaque and the transparent geometry — the same slot at which Metal and GL
     // put theirs into the G-buffer.
@@ -4913,7 +4950,10 @@ struct D3D11RendererImpl
             materialTexCache.erase(id);
         pendingMatInval.clear();
         for (const HE::UUID& id : pendingTexInval)
+        {
             graphTexCache.erase(graphTexKey(id, {}));
+            uiTexCache.erase(graphTexKey(id, {}));
+        }
         pendingTexInval.clear();
         for (const HE::UUID& id : pendingMeshInval)
         {
@@ -5466,7 +5506,7 @@ struct D3D11RendererImpl
         dev.CreateRasterizerState(&rd, &uiScissorRast);
     }
 
-    void renderUIPass(ID3D11DeviceContext* ctx, int width, int height)
+    void renderUIPass(ID3D11DeviceContext* ctx, int width, int height, ContentManager* cm)
     {
         if (!uiVS || m_renderWorld.uiObjects.empty()) return;
 
@@ -5533,12 +5573,24 @@ struct D3D11RendererImpl
                 ctx->PSSetShaderResources(0, 1, &atlas);
                 boundAtlasKey = obj.fontAtlasKey;
             }
+            // A textured quad borrows t0; the next glyph rebinds its atlas
+            // because boundAtlasKey is invalidated here (as GL's RenderUIPass).
+            bool textured = false;
+            if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+            {
+                if (ID3D11ShaderResourceView* img = resolveUITexture(obj.textureAssetId, cm))
+                {
+                    ctx->PSSetShaderResources(0, 1, &img);
+                    boundAtlasKey = 0xFFFFFFFFu;   // not a font atlas any more
+                    textured = true;
+                }
+            }
             UICBData cb;
             cb.rect     = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
             cb.color    = obj.color;
             cb.uvRect   = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
             cb.viewport = glm::vec2(float(width), float(height));
-            cb.mode     = obj.type == 2 ? 1.0f : 0.0f;
+            cb.mode     = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
             cb.pad      = 0.0f;
             cb.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
             cb.cornerRadius  = obj.cornerRadius;
@@ -5720,6 +5772,7 @@ void D3D11Renderer::Shutdown()
     // Screen-space decals + graph project textures (ComPtr auto-release).
     m_impl->decalTexCache.clear();
     m_impl->graphTexCache.clear();
+    m_impl->uiTexCache.clear();
     m_impl->pendingTexInval.clear();
     m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalCB.Reset();
     m_impl->decalTexSampler.Reset(); m_impl->decalDepthSampler.Reset();
@@ -7110,7 +7163,8 @@ void D3D11Renderer::DrawViewportFrame()
     // UI canvas pass: draw onto the final composited viewport target (after tonemap/FXAA).
     p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
     p.context->RSSetViewports(1, &vvp);
-    p.renderUIPass(p.context.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+    p.renderUIPass(p.context.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH),
+                   m_contentManager);
     { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
 }
 
@@ -7216,7 +7270,7 @@ void D3D11Renderer::Render()
         p.taaFrame = false;
         DrawScene(p.width, p.height);
         // UI canvas pass: swapchain RT + scene viewport already bound.
-        p.renderUIPass(p.context.Get(), p.width, p.height);
+        p.renderUIPass(p.context.Get(), p.width, p.height, m_contentManager);
     }
 
     if (m_overlayCallback) m_overlayCallback(nullptr);
