@@ -64,6 +64,7 @@
 #include <Scripting/ScriptTypes.h> // setScriptLogTag — the project's script log prefix
 #include <Hpak/ProjectExporter.h>  // sceneUuidForPath + levelScriptKeyForUuid: the level script's key in PIE
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <glm/gtc/quaternion.hpp>
@@ -6508,6 +6509,112 @@ void EditorApplication::dumpFrameHeadless()
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXBOMB witness landscape added "
 			"(mode %s, %zu graph textures, array mask %u, %zu hex grid(s))",
 			tb, gen.textures.size(), gen.textureArrayMask, grids);
+	}
+
+	// ── Auto landscape material witness (HE_DUMP_AUTOLAND, Thema 158 Schritt 5) ─
+	// A 128 m landscape at y=300 whose relief is ANALYTIC, so every column's
+	// expected layer is known: a flat plain (x < -24), a smoothstep ramp up to a
+	// 40 m plateau (-24..8, slope 0 → ~62° → 0), the plateau (x > 8). Constant
+	// along Z. Snow Height is moved to y=320 (the shipped default, 60 m, assumes a
+	// terrain at y=0), so snow covers the plateau and the upper ramp, rock the
+	// steep middle, grass/dirt and puddles the plain.
+	//   =1 / lit   the SHIPPED asset, loaded by path (Engine/Materials/
+	//              M_AutoLandscape.hasset — fixed UUID, Engine/ prefix, regenerate
+	//              on load), through a Material Instance overriding Snow Height
+	//   =nobomb    the same instance with the "Texture Bombing" switch off (its own
+	//              permutation): the negative control for the repetition measure
+	//   =masks     unlit, R = rock, G = snow, B = standing water (builder graph)
+	//   =ground    unlit, R = dirt, G = wet ground, B = flat (builder graph)
+	//   =normal    unlit, the final world normal * 0.5 + 0.5 (builder graph)
+	//   =surface   unlit, R = AO, G = roughness (builder graph)
+	//   =builtin   the same relief with the engine's default terrain material:
+	//              the control that separates lighting/shadow differences
+	//              between backends from the material's
+	if (const char* al = std::getenv("HE_DUMP_AUTOLAND"); al && *al && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(al);
+		const bool masks   = mode == "masks";
+		const bool ground  = mode == "ground";
+		const bool noBomb  = mode == "nobomb";
+		const bool builtin = mode == "builtin";
+		const bool normalV = mode == "normal";
+		const bool surface = mode == "surface";
+		constexpr float kBaseY = 300.0f, kPlateau = 40.0f;
+		const float snowHeight = kBaseY + 20.0f;
+
+		HE::UUID amId{};
+		std::string what;
+		if (builtin)
+			what = "default terrain material";
+		else if (masks || ground || normalV || surface)
+		{
+			HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(
+				masks   ? HE::AutoLandscapeView::MasksRockSnowWater :
+				ground  ? HE::AutoLandscapeView::MasksDirtWet :
+				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface);
+			for (HE::MatGraphNode& n : built.graph.nodes)
+				if (n.type == HE::MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamSnowHeight)
+					n.p[0] = snowHeight;
+			MaterialAsset am;
+			am.type = HE::AssetType::Material;
+			am.name = "AutoLandscapeMaskWitness";
+			am.nodeGraphJson = HE::materialGraphToJson(built.graph);
+			amId = contentManager().registerMaterial(std::move(am));
+			contentManager().regenerateMaterialFromGraph(amId);
+			what = masks ? "masks rock/snow/water" : ground ? "masks dirt/wet/flat"
+			     : normalV ? "final normal" : "AO/roughness";
+		}
+		else
+		{
+			const HE::UUID parent = contentManager().loadAsset(HE::kAutoLandscapeMaterialPath);
+			MaterialAsset inst;
+			inst.type = HE::AssetType::Material;
+			inst.name = "AutoLandscapeWitness";
+			inst.parentMaterialPath       = HE::kAutoLandscapeMaterialPath;
+			inst.graphParamNames          = { HE::kAutoLandscapeParamSnowHeight };
+			inst.shaderParamData          = { snowHeight, 0.0f, 0.0f, 0.0f };
+			inst.instanceOverriddenParams = { HE::kAutoLandscapeParamSnowHeight };
+			if (noBomb)
+			{
+				inst.instanceSwitchNames  = { HE::kAutoLandscapeSwitchBombing };
+				inst.instanceSwitchValues = { 0 };
+			}
+			amId = contentManager().registerMaterial(std::move(inst));
+			contentManager().syncMaterialInstance(amId);
+			what = std::string(parent == HE::kAutoLandscapeMaterialId ? "shipped asset" : "ASSET NOT FOUND")
+			     + (noBomb ? ", bombing off" : ", bombing on");
+		}
+
+		auto land = m_editorWorld->createEntity("AutoLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, kBaseY, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 128.0f;
+		ltc.resolution = 129;      // 2^n + 1: no resample, one vertex per metre
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
+		for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+			{
+				const float x = -64.0f + static_cast<float>(xi);
+				const float t = std::clamp((x + 24.0f) / 32.0f, 0.0f, 1.0f);
+				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
+					kPlateau * t * t * (3.0f - 2.0f * t);
+			}
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
+			reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const MaterialAsset* ma = contentManager().getMaterial(amId);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLAND witness landscape added "
+			"(mode %s, %s, %zu graph textures, array mask %u, %zu params, snow at y=%.0f)",
+			al, what.c_str(), ma ? ma->graphTexturePaths.size() : size_t(0),
+			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
+			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling

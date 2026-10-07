@@ -33,6 +33,7 @@ add_library(HorizonCore SHARED
 	src/Hpak/ProjectExporter.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
+	src/MaterialGraph/AutoLandscapeMaterial.cpp
 	src/ParticleGraph/ParticleGraph.cpp
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/BoneMask/BoneMask.cpp

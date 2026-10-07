@@ -4185,8 +4185,8 @@ namespace
 	  "", "materials#nodes" },
 	{ "Material Node/+ Layer", "Add Layer",
 	  "Adds a paint layer to this blend node, which also adds its pin. The list "
-	  "here IS the set of layers the Landscape tool offers, in this order — one "
-	  "RGBA weightmap holds four of them, which is the limit.",
+	  "here IS the set of layers the Landscape tool offers, in this order — up to "
+	  "eight, four per RGBA weightmap page (both pages travel in one texture).",
 	  "", "materials#nodes" },
 	{ "Material Node/Lit", "",
 	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "

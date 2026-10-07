@@ -7,6 +7,10 @@
 //   EditorDeps/EngineContent/Textures/Landscape). It is used verbatim as the
 //   ContentManager content root, and each texture is saved under "<Name>.hasset".
 //
+//          landscape_tex_gen <output-dir> --material
+//   writes the auto landscape material M_AutoLandscape.hasset instead (Schritt 5,
+//   HE::buildAutoLandscapeGraph) — run it on EditorDeps/EngineContent/Materials.
+//
 // Five layers (Grass, Dirt, Rock, Snow, WetGround) × three maps, in the packed
 // shape docs/auto-landscape-material-textures.md §3 asks the real textures to end
 // up in:
@@ -30,6 +34,8 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/TextureArrayBuild.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/MaterialGraph.h>
 #include <Types/UUID.h>
 
 #include <algorithm>
@@ -219,21 +225,76 @@ int writeArrays(const std::string& outDir)
     }
     return ok;
 }
+
+// The auto landscape MATERIAL (Thema 158, Schritt 5): HE::buildAutoLandscapeGraph
+// saved as M_AutoLandscape.hasset with the fixed kAutoLandscapeMaterialId. Only the
+// graph is the source; the baked GLSL and the parameter layout come from the
+// ContentManager's own regenerate path, so the file is exactly what the material
+// editor would save. Its texture paths point at the engine arrays ("Engine/…"),
+// which do not have to exist in <output-dir>.
+bool writeMaterial(const std::string& outDir)
+{
+    const char* kFile = "M_AutoLandscape.hasset";
+    const HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph();
+    MaterialAsset am;
+    am.type          = HE::AssetType::Material;
+    am.name          = "M_AutoLandscape";
+    am.path          = kFile;
+    am.id            = HE::kAutoLandscapeMaterialId;
+    am.nodeGraphJson = HE::materialGraphToJson(built.graph);
+
+    ContentManager cm(outDir);
+    const HE::UUID id = cm.registerMaterial(std::move(am));
+    cm.regenerateMaterialFromGraph(id);
+    MaterialAsset* m = cm.getMaterialMutable(id);
+    if (!m || m->customShaderFragGlsl.empty())
+    {
+        std::fprintf(stderr, "  M_AutoLandscape: the graph did not compile\n");
+        return false;
+    }
+    if (!cm.saveAsset(*m))
+    {
+        std::fprintf(stderr, "  FAILED to write %s\n", kFile);
+        return false;
+    }
+    ContentManager check(outDir);
+    const MaterialAsset* t = check.getMaterial(check.loadAsset(kFile));
+    if (!t || t->id != HE::kAutoLandscapeMaterialId || t->nodeGraphJson != m->nodeGraphJson ||
+        t->customShaderFragGlsl != m->customShaderFragGlsl || t->graphParamNames != m->graphParamNames)
+    {
+        std::fprintf(stderr, "  %s does NOT read back as written\n", kFile);
+        return false;
+    }
+    std::printf("  %-30s %zu nodes, %zu params, %zu textures, array mask %u\n", kFile,
+                built.graph.nodes.size(), t->graphParamNames.size(), t->graphTexturePaths.size(),
+                HE::matGlslTextureArrayMask(t->customShaderFragGlsl));
+    return true;
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--arrays-only]\n"
+        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--arrays-only | --material]\n"
                              "  --arrays-only  only (re)assemble the three _Array textures from the\n"
-                             "                 per-layer files already in <output-dir>\n");
+                             "                 per-layer files already in <output-dir>\n"
+                             "  --material     write the auto landscape material M_AutoLandscape.hasset\n"
+                             "                 into <output-dir> (EditorDeps/EngineContent/Materials)\n");
         return 2;
     }
     const std::string outDir = argv[1];
     const bool arraysOnly = argc > 2 && std::string(argv[2]) == "--arrays-only";
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
+
+    if (argc > 2 && std::string(argv[2]) == "--material")
+    {
+        const bool ok = writeMaterial(outDir);
+        std::printf("landscape_tex_gen: %s the auto landscape material to %s\n",
+                    ok ? "wrote" : "FAILED to write", outDir.c_str());
+        return ok ? 0 : 1;
+    }
 
     if (arraysOnly)
     {

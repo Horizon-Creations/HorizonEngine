@@ -9,6 +9,7 @@
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 // he_materialshader is linked into he_tests in every flavour (the stub answers the
 // compiles); only the cross-compile TEST CASES below are gated on HE_TESTS_HAVE_SHADERC.
@@ -2206,7 +2207,138 @@ TEST_CASE("A bombed texture layer cross-compiles for all five backends, with gra
 	CHECK_MESSAGE(countOf(msl, "gradient2d(") >= 12u, msl);
 	CHECK_MESSAGE(countOf(gl, "textureGrad(") >= 12u, gl);
 }
+
+TEST_CASE("The auto landscape material cross-compiles for all five backends, in every view and permutation")
+{
+	// The biggest graph the engine ships: five layers × three array reads, three
+	// hex grids, two noise fields, fourteen parameters. All of it is shader TEXT
+	// in existing slots — what has to hold is that every backend's translator
+	// takes it, the clustered and G-buffer variants included, and that the
+	// bombing-off permutation and the unlit mask views (the witness) do too.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::map<std::string, bool> noBomb{ { HE::kAutoLandscapeSwitchBombing, false } };
+	struct Variant { const char* name; HE::MatShaderGen gen; };
+	const Variant variants[] = {
+		{ "lit",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph) },
+		{ "nobomb", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, {}, &noBomb) },
+		{ "masks",  HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksRockSnowWater).graph) },
+		{ "ground", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksDirtWet).graph) },
+	};
+	for (const Variant& v : variants)
+	{
+		INFO("variant ", v.name);
+		const uint64_t hash = std::hash<std::string>{}(v.gen.glsl);
+		for (B b : { B::Metal, B::GLSL410, B::GLSLES300, B::GLSL430, B::HLSL, B::SpirV })
+		{
+			const auto& r = lib.fragment(hash, v.gen.glsl, b);
+			CHECK_MESSAGE(r.ok, "backend ", static_cast<int>(b), ": ", r.log);
+		}
+		for (B b : { B::Metal, B::HLSL, B::GLSL430 })
+		{
+			const auto& r = lib.fragmentClustered(hash, v.gen.glsl, b);
+			CHECK_MESSAGE(r.ok, "clustered backend ", static_cast<int>(b), ": ", r.log);
+		}
+		if (v.gen.glslGBuffer.empty()) continue; // the unlit views have none
+		const uint64_t gh = std::hash<std::string>{}(v.gen.glslGBuffer);
+		for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+		{
+			const auto& r = lib.fragment(gh, v.gen.glslGBuffer, b);
+			CHECK_MESSAGE(r.ok, "G-buffer backend ", static_cast<int>(b), ": ", r.log);
+		}
+	}
+	// Three bombed layers × three maps × three taps, as gradient reads on every
+	// backend; the plain permutation has none.
+	const uint64_t h = std::hash<std::string>{}(variants[0].gen.glsl);
+	CHECK(countOf(lib.fragment(h, variants[0].gen.glsl, B::Metal).source, "gradient2d(") >= 27u);
+	CHECK(countOf(lib.fragment(h, variants[0].gen.glsl, B::HLSL).source, ".SampleGrad(") >= 27u);
+	const uint64_t hp = std::hash<std::string>{}(variants[1].gen.glsl);
+	CHECK(countOf(lib.fragment(hp, variants[1].gen.glsl, B::Metal).source, "gradient2d(") == 0u);
+	// Metal's 16 fragment samplers: the three arrays cost no more than any other
+	// four-slot graph material (the budget lesson of docs §2.1).
+	const std::string msl = lib.fragment(h, variants[0].gen.glsl, B::Metal).source;
+	CHECK(countOf(msl, "texture2d_array<float>") >= 3u);
+}
 #endif
+
+// ═══ Auto landscape material (Thema 158, Schritt 5) ═══════════════════════════
+
+TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex grid per bombed layer")
+{
+	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
+	const HE::MatShaderGen gen = HE::generateFragment(a.graph);
+	REQUIRE_FALSE(gen.glsl.empty());
+	CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle / missing-output magenta
+
+	// The three engine arrays and nothing else — heTexP3 stays free, no read
+	// falls back to the mesh texture. Slot order is emission order, so compare
+	// as a set.
+	std::vector<std::string> tex = gen.textures;
+	std::sort(tex.begin(), tex.end());
+	std::vector<std::string> want = { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
+	                                  HE::kAutoLandscapeMaskArray };
+	std::sort(want.begin(), want.end());
+	CHECK(tex == want);
+	CHECK(gen.textureArrayMask == 0x7u);
+	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == 0x7u);
+	CHECK(gen.glsl.find("texture(heTex0") == std::string::npos);
+
+	// Every parameter is a real HeParams slot (none baked for being over budget).
+	REQUIRE(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
+	for (const char* name : { HE::kAutoLandscapeParamGroundTile, HE::kAutoLandscapeParamRockTile,
+	                          HE::kAutoLandscapeParamBombCell, HE::kAutoLandscapeParamRockSlope,
+	                          HE::kAutoLandscapeParamRockBlend, HE::kAutoLandscapeParamHeightBlend,
+	                          HE::kAutoLandscapeParamDirtAmount, HE::kAutoLandscapeParamDirtSize,
+	                          HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowBlend,
+	                          HE::kAutoLandscapeParamSnowMaxSlope, HE::kAutoLandscapeParamPuddleAmount,
+	                          HE::kAutoLandscapeParamPuddleSize, HE::kAutoLandscapeParamPuddleMaxSlope })
+	{
+		const bool found = std::any_of(gen.params.begin(), gen.params.end(),
+		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
+		CHECK_MESSAGE(found, name);
+	}
+	// Procedural layers only: no weightmap, no paint layers.
+	CHECK(gen.layerNames.empty());
+	CHECK(gen.glsl.find("heLandscapeWeights, vUV") == std::string::npos);
+
+	// Grass, Dirt, Rock each read albedo + normal + mask on ONE grid (three grids
+	// in total); Snow and Wet Ground are plain reads. The uv here is a coerced
+	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
+	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
+	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 3u);
+	REQUIRE(gen.switches.size() == 1u);
+	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
+	CHECK(gen.switches[0].second);
+
+	// The bombing-off permutation: no grid at all, the same three slots.
+	const std::map<std::string, bool> off{ { HE::kAutoLandscapeSwitchBombing, false } };
+	const HE::MatShaderGen plain = HE::generateFragment(a.graph, {}, &off);
+	CHECK(plain.glsl.find("heBomb") == std::string::npos);
+	CHECK(plain.textureArrayMask == 0x7u);
+	CHECK(plain.textures.size() == 3u);
+	CHECK(plain.glsl != gen.glsl);
+
+	// Lit by default; the mask views are unlit, read the same masks and need no
+	// G-buffer pass.
+	CHECK_FALSE(gen.glslGBuffer.empty());
+	for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet })
+	{
+		const HE::AutoLandscapeGraph m = HE::buildAutoLandscapeGraph(v);
+		REQUIRE(m.graph.findNode(m.output));
+		CHECK(m.graph.findNode(m.output)->p[0] == 0.0f);
+		for (int id : { m.slope, m.dirtMask, m.rockMask, m.snowMask, m.flatMask, m.wetMask, m.waterMask })
+			CHECK(m.graph.findNode(id) != nullptr);
+		const HE::MatShaderGen mg = HE::generateFragment(m.graph);
+		CHECK_FALSE(mg.glsl.empty());
+		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	}
+
+	// The graph survives its JSON (what the .hasset stores) byte for byte.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(a.graph), back));
+	CHECK(HE::generateFragment(back).glsl == gen.glsl);
+}
 
 // ═══ Container semantics shared with the other graph systems ═════════════════
 
@@ -2908,6 +3040,27 @@ TEST_CASE("Engine UI effects: every shipped function cross-compiles for Metal an
 	}
 }
 #endif
+
+TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes")
+{
+	// The asset is GENERATED (landscape_tex_gen --material) and committed. A
+	// change to HE::buildAutoLandscapeGraph without re-running the generator would
+	// ship the old graph silently — this is the tripwire. Also pins the fixed
+	// UUID that materials and scenes reference it by.
+	const std::filesystem::path dir =
+		std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent" / "Materials";
+	REQUIRE(std::filesystem::exists(dir / "M_AutoLandscape.hasset"));
+	ContentManager cm(dir.string());
+	const HE::UUID id = cm.loadAsset("M_AutoLandscape.hasset");
+	CHECK(id == HE::kAutoLandscapeMaterialId);
+	const MaterialAsset* m = cm.getMaterial(id);
+	REQUIRE(m);
+	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph().graph),
+	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
+	CHECK(m->graphTexturePaths.size() == 3u);
+	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(m->parentMaterialPath.empty());
+}
 #endif // HE_EDITOR_DEPS_DIR
 
 // ── Thema 51, Schritt 2: instances + overrides never cost a second compile ────
@@ -3217,6 +3370,10 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 	// Texture bombing with real slots: SampleGrad on Texture2DArray and the uint
 	// hash through FXC, the D3D12 root signature and the GL link.
 	cases.push_back({ "Texture bombing (3 arrays + 1 2D)", HE::generateFragment(makeTextureBombGraph()).glsl, {} });
+	// The auto landscape material (Thema 158 Schritt 5) is a graph, not a node
+	// type, so the registry loop never builds it: 33 array taps, two fBm fields
+	// and 14 HeParams slots through FXC, the D3D12 root signature and the GL link.
+	cases.push_back({ "Auto landscape material", HE::generateFragment(HE::buildAutoLandscapeGraph().graph).glsl, {} });
 	return cases;
 }
 
