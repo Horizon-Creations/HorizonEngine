@@ -574,8 +574,11 @@ private:
 	// pre-baked mip chain to a device-local sampled image + view. Returns false when the
 	// format isn't RGBA8/BC and this device can't sample it (caller then draws untextured).
 	// Block formats need no runtime mip generation; the cook baked every level.
+	// honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
+	// as they are) — the UI pass wants that, see resolveUIImageSet.
 	bool uploadTextureImage(const TextureAsset* tex,
-	                        VkImage& image, VkDeviceMemory& mem, VkImageView& view);
+	                        VkImage& image, VkDeviceMemory& mem, VkImageView& view,
+	                        bool honourSrgb = true);
 	// Resolve a mesh/skeletal asset's baked base-color texture (material → textureIds[0]) and
 	// upload it to a device-local image + a set=2 descriptor set (shared by static + skinned).
 	// Fills the out-params and returns true on success; leaves them null and returns false on
@@ -1401,6 +1404,22 @@ private:
 	VkDescriptorPool      m_uiAtlasDescPool = VK_NULL_HANDLE;
 	VkSampler             m_uiFontSampler   = VK_NULL_HANDLE;
 	std::unordered_map<uint32_t, UIFontAtlas> m_uiFontAtlases;
+
+	// ── UI quad images (obj.type == 0 with a textureAssetId: Image widget,
+	// textured Panel/Border/Button) ────────────────────────────────────────────
+	// The counterpart of GL's ResolveUITexture: own cache, keyed like
+	// m_graphTexCache ("hi:lo"), uploaded UNORM even when the asset is flagged
+	// sRGB (UI colours are sRGB numbers end to end, Thema 107). Each image gets a
+	// set in m_uiAtlasDSLayout's shape (same immutable sampler), so ui.frag samples
+	// it through uFontAtlas in mode 2 and the pipeline layout stays one set. A miss
+	// is cached (set null → the quad draws its tint, as on GL). Own pool with the
+	// FREE bit: InvalidateTexture drops entries in processPendingInvalidations.
+	VkDescriptorSet resolveUIImageSet(const HE::UUID& id);
+	void            destroyUIImage(UIFontAtlas& img);
+	void            destroyUIImages();
+	VkDescriptorPool m_uiImageDescPool = VK_NULL_HANDLE;
+	std::unordered_map<std::string, UIFontAtlas> m_uiImageCache;
+	bool m_uiImagePoolWarned = false;
 
 	// ── GPU frame timing (VkQueryPool timestamps) ───────────────────────────
 	// Two timestamps (frame begin/end) per ring slot. The ring is deeper than

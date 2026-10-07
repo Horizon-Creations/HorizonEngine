@@ -298,8 +298,10 @@ void VulkanRenderer::Shutdown()
     if (m_skinnedPipeLayout)   { vkDestroyPipelineLayout(m_device, m_skinnedPipeLayout,  nullptr);  m_skinnedPipeLayout   = VK_NULL_HANDLE; }
     if (m_skinnedDescPool)     { vkDestroyDescriptorPool(m_device, m_skinnedDescPool,    nullptr);  m_skinnedDescPool     = VK_NULL_HANDLE; }
     if (m_skinnedBonesDSL)     { vkDestroyDescriptorSetLayout(m_device, m_skinnedBonesDSL, nullptr); m_skinnedBonesDSL    = VK_NULL_HANDLE; }
-    // UI canvas pipeline + font atlases
+    // UI canvas pipeline + font atlases + quad images
     destroyUIFontAtlases();
+    destroyUIImages();
+    if (m_uiImageDescPool)    { vkDestroyDescriptorPool (m_device, m_uiImageDescPool,   nullptr); m_uiImageDescPool   = VK_NULL_HANDLE; }
     if (m_uiViewportFB)       { vkDestroyFramebuffer    (m_device, m_uiViewportFB,      nullptr); m_uiViewportFB      = VK_NULL_HANDLE; }
     if (m_uiViewportPipeline) { vkDestroyPipeline       (m_device, m_uiViewportPipeline,nullptr); m_uiViewportPipeline = VK_NULL_HANDLE; }
     if (m_uiPipeline)         { vkDestroyPipeline       (m_device, m_uiPipeline,        nullptr); m_uiPipeline        = VK_NULL_HANDLE; }
@@ -6304,7 +6306,8 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
 // into one buffer and copied per-mip; block formats use no runtime mip generation.
 // Returns false when the device can't sample the shipped format (→ untextured draw).
 bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
-                                        VkImage& image, VkDeviceMemory& memory, VkImageView& view)
+                                        VkImage& image, VkDeviceMemory& memory, VkImageView& view,
+                                        bool honourSrgb)
 {
     image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
     if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
@@ -6320,7 +6323,7 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     // colour textures shade in linear light and only the tonemap's gamma encode
     // re-curves them. Twins share block/byte layout, so the level math is unchanged
     // and the format-properties check below validates whichever twin we picked.
-    const bool srgb = tex->srgb;
+    const bool srgb = tex->srgb && honourSrgb;
     VkFormat vkFmt; bool isBlock;
     switch (tex->format)
     {
@@ -6543,8 +6546,12 @@ void VulkanRenderer::processPendingInvalidations()
         { destroyMaterialTex(it->second); m_materialTexCache.erase(it); }
     m_pendingMatInval.clear();
     for (const HE::UUID& id : m_pendingTexInval)
+    {
         if (auto it = m_graphTexCache.find(graphTexKey(id, {})); it != m_graphTexCache.end())
         { destroyMaterialTex(it->second); m_graphTexCache.erase(it); }
+        if (auto it = m_uiImageCache.find(graphTexKey(id, {})); it != m_uiImageCache.end())
+        { destroyUIImage(it->second); m_uiImageCache.erase(it); }
+    }
     m_pendingTexInval.clear();
 
     for (const HE::UUID& id : m_pendingMeshInval)
@@ -12673,11 +12680,15 @@ void VulkanRenderer::createUIPipeline()
         return;
     }
 
-    // Linear clamp sampler for the R8 font atlases (immutable in the set layout).
+    // Linear clamp sampler for the R8 font atlases and the UI quad images
+    // (immutable in the set layout). Trilinear like GL's UI textures: an image
+    // brings its cooked mip chain, an atlas has one level and reads it as before.
     {
         VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
         sci.magFilter    = VK_FILTER_LINEAR;
         sci.minFilter    = VK_FILTER_LINEAR;
+        sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sci.maxLod       = VK_LOD_CLAMP_NONE;
         sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -12704,6 +12715,16 @@ void VulkanRenderer::createUIPipeline()
         dpci.poolSizeCount = 1;
         dpci.pPoolSizes    = &ps;
         vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_uiAtlasDescPool), "ui atlas desc pool");
+
+        // UI quad images (resolveUIImageSet): same layout, own pool, FREE bit so
+        // an invalidated texture gives its set back.
+        VkDescriptorPoolSize ips{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256 };
+        VkDescriptorPoolCreateInfo ipci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        ipci.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        ipci.maxSets       = 256;
+        ipci.poolSizeCount = 1;
+        ipci.pPoolSizes    = &ips;
+        vkCheck(vkCreateDescriptorPool(m_device, &ipci, nullptr, &m_uiImageDescPool), "ui image desc pool");
     }
 
     // Push constant layout: UIPush (128 bytes, the guaranteed minimum of
@@ -12857,14 +12878,22 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
                     glm::vec4 cornerRadius; glm::vec4 style; glm::uvec4 colors; };
     static_assert(sizeof(UIPush) == 128, "UIPush must match ui.vert/ui.frag and the 128-byte range");
 
-    // The atlas set must be bound for EVERY draw (the fragment shader statically
-    // uses the sampler even for solid quads). Default to the shared font (key 0);
-    // glyph quads re-bind when they reference an imported font's atlas.
+    // A set must be bound for EVERY draw (the fragment shader statically uses
+    // the sampler even for solid quads). Default to the shared font (key 0);
+    // glyph quads re-bind their font's atlas, textured quads their image, and
+    // solid quads keep whatever is bound (mode 0 ignores it).
     VkDescriptorSet atlasSet = uiFontAtlasSet(0);
     if (!atlasSet) return;  // device-level upload failure — nothing valid to bind
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeLayout,
                             0, 1, &atlasSet, 0, nullptr);
-    uint32_t boundAtlasKey = 0;
+    VkDescriptorSet boundSet = atlasSet;
+    auto bindSet = [&](VkDescriptorSet s)
+    {
+        if (s == boundSet) return;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeLayout,
+                                0, 1, &s, 0, nullptr);
+        boundSet = s;
+    };
 
     // Clipping is a scissor rectangle, set only when it CHANGES — a widget tree
     // emits its quads in tree order, so equally-clipped quads arrive in runs.
@@ -12899,13 +12928,19 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
     {
         applyClip(obj.clipRect);
         // A glyph quad may use an imported font's atlas — bind its set.
-        if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
+        if (obj.type == 2)
         {
-            if (VkDescriptorSet s = uiFontAtlasSet(obj.fontAtlasKey))
+            if (VkDescriptorSet s = uiFontAtlasSet(obj.fontAtlasKey)) bindSet(s);
+        }
+        // A textured quad (Image widget, textured Panel/Border/Button) samples its
+        // own image in mode 2; unresolvable → its tint, as on GL (mode 0).
+        bool textured = false;
+        if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+        {
+            if (VkDescriptorSet s = resolveUIImageSet(obj.textureAssetId))
             {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeLayout,
-                                        0, 1, &s, 0, nullptr);
-                boundAtlasKey = obj.fontAtlasKey;
+                bindSet(s);
+                textured = true;
             }
         }
         UIPush push{};
@@ -12913,7 +12948,7 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
         push.color    = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
         push.uvRect   = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
         push.viewport = glm::vec2(float(width), float(height));
-        push.params   = glm::vec2(obj.type == 2 ? 1.0f : 0.0f, obj.borderWidth);
+        push.params   = glm::vec2(obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f), obj.borderWidth);
         push.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y,
                                   obj.gradientAngleDeg);
         push.cornerRadius = obj.cornerRadius;
@@ -13122,6 +13157,69 @@ void VulkanRenderer::destroyUIFontAtlases()
         // Descriptor sets are freed with m_uiAtlasDescPool in Shutdown().
     }
     m_uiFontAtlases.clear();
+}
+
+// The image of a UI quad (Image widget, textured Border/Button) as a set in the
+// font-atlas layout — Vulkan's ResolveUITexture. Uploaded UNORM even for an
+// sRGB-flagged asset: UI colours are sRGB numbers end to end, an _SRGB view would
+// decode them and the picture comes out too dark ("the orange logo turns red",
+// Thema 107). Not shared with m_graphTexCache on purpose: a material samples the
+// same asset in linear light, which is right there. A miss is cached like GL's
+// (resolveTextureRef loads synchronously: still null = unloadable).
+VkDescriptorSet VulkanRenderer::resolveUIImageSet(const HE::UUID& id)
+{
+    const std::string key = graphTexKey(id, {});
+    if (auto it = m_uiImageCache.find(key); it != m_uiImageCache.end())
+        return it->second.set;
+    if (!m_contentManager || !m_uiAtlasDSLayout || !m_uiImageDescPool) return VK_NULL_HANDLE;
+
+    UIFontAtlas img;
+    if (const TextureAsset* tex = m_contentManager->resolveTextureRef(id, std::string{}))
+        uploadTextureImage(tex, img.image, img.memory, img.view, /*honourSrgb=*/false);
+    if (img.view)
+    {
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsai.descriptorPool     = m_uiImageDescPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts        = &m_uiAtlasDSLayout;
+        if (vkAllocateDescriptorSets(m_device, &dsai, &img.set) != VK_SUCCESS)
+        {
+            img.set = VK_NULL_HANDLE;
+            if (!m_uiImagePoolWarned)
+            {
+                m_uiImagePoolWarned = true;
+                HE_LOG_WARN(RHI, "%s", "VulkanRenderer: UI image descriptor pool exhausted "
+                                       "(256 images) — further UI images draw their tint");
+            }
+        }
+        else
+        {
+            VkDescriptorImageInfo dii{ VK_NULL_HANDLE, img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            wr.dstSet          = img.set;
+            wr.dstBinding      = 0;
+            wr.descriptorCount = 1;
+            wr.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            wr.pImageInfo      = &dii;
+            vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+        }
+    }
+    return m_uiImageCache.emplace(key, img).first->second.set;
+}
+
+void VulkanRenderer::destroyUIImage(UIFontAtlas& img)
+{
+    if (img.set)    vkFreeDescriptorSets(m_device, m_uiImageDescPool, 1, &img.set); // pool has the FREE bit
+    if (img.view)   vkDestroyImageView(m_device, img.view,   nullptr);
+    if (img.image)  vkDestroyImage    (m_device, img.image,  nullptr);
+    if (img.memory) vkFreeMemory      (m_device, img.memory, nullptr);
+    img = UIFontAtlas{};
+}
+
+void VulkanRenderer::destroyUIImages()
+{
+    for (auto& [key, img] : m_uiImageCache) destroyUIImage(img);
+    m_uiImageCache.clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

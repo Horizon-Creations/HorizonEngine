@@ -922,7 +922,7 @@ cbuffer UICB : register(b0) {
     float4 uColor;
     float4 uUVRect;    // glyph atlas UVs: xy=uvMin, zw=uvMax
     float2 uViewport;
-    float  uMode;      // 0 = solid color, 1 = font-atlas glyph
+    float  uMode;      // 0 = solid color, 1 = font-atlas glyph, 2 = textured quad
     float  _upad;
     float4 uRotation;  // { angle(radians), pivotX, pivotY, unused }
     float4 uCornerRadius;  // px per corner: TL, TR, BR, BL
@@ -962,13 +962,25 @@ float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
     return length(max(q, 0.0f)) + min(max(q.x, q.y), 0.0f) - r;
 }
 float heMaxRadius(float4 radii) { return max(max(radii.x, radii.y), max(radii.z, radii.w)); }
+// uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
+// quad (RGBA, tinted by uColor). Modes 1 and 2 share t0: a glyph run binds the
+// atlas there, an image its own texture.
 float4 UIPSMain(UIOut i) : SV_TARGET
 {
-    if (uMode > 0.5f)
+    if (uMode > 0.5f && uMode < 1.5f)
     {
         // Glyph coverage lives in the atlas R channel; tint by uColor (mirrors GL).
         float a = uFontAtlas.Sample(uSamp, lerp(uUVRect.xy, uUVRect.zw, i.uv)).r;
         return float4(uColor.rgb, uColor.a * a);
+    }
+    if (uMode > 1.5f)
+    {
+        float4 t = uFontAtlas.Sample(uSamp, lerp(uUVRect.xy, uUVRect.zw, i.uv));
+        float4 c = float4(uColor.rgb * t.rgb, uColor.a * t.a);
+        if (heMaxRadius(uCornerRadius) <= 0.0f) return c;
+        // A rounded image is the solid path's SDF applied to the sampled alpha.
+        float dd = heRoundedBoxSDF((i.uv - 0.5f) * uRect.zw, uRect.zw * 0.5f, uCornerRadius);
+        return float4(c.rgb, c.a * saturate(0.5f - dd));
     }
     // i.uv is the quad-local 0..1 here (GL's vLocal).
     float4 fill = uColor;
@@ -3525,6 +3537,20 @@ struct D3D12RendererImpl
     std::unordered_map<uint32_t, UIFontAtlas12> m_uiFontAtlases;
     std::vector<std::pair<ComPtr<ID3D12Resource>, int>> m_uiAtlasUploads; // retire countdown
 
+    // ── UI quad images (obj.type == 0 with a textureAssetId: Image widget,
+    // textured Panel/Border/Button) ── D3D12's ResolveUITexture. The UI pass binds
+    // only m_uiAtlasHeap, so the image SRVs live in that heap too, in their own
+    // region behind the font slots: [k_maxUIFontAtlases, + k_maxUIImages). Slots
+    // are handed out monotonically and NOT reused — an invalidated image retires
+    // its resource and abandons the slot, because rewriting a descriptor that a
+    // list in flight still reads would corrupt that frame (bounded edit-time leak,
+    // the same policy as the scene heap's notes). Keyed like m_graphTexCache; a
+    // miss is cached as slot -1 → the quad draws its tint, no per-frame retry.
+    static constexpr UINT k_maxUIImages = 240;
+    struct UIImage12 { ComPtr<ID3D12Resource> tex; int slot = -1; };
+    std::unordered_map<std::string, UIImage12> m_uiImageCache;
+    UINT m_uiImageNextSlot = 0;
+
     D3D12_CPU_DESCRIPTOR_HANDLE uiAtlasCpu(UINT slot) const
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_uiAtlasHeap->GetCPUDescriptorHandleForHeapStart();
@@ -3602,6 +3628,30 @@ struct D3D12RendererImpl
         m_uiAtlasUploads.emplace_back(std::move(uploadBuf), static_cast<int>(k_frameCount) + 2);
         m_uiFontAtlases[key] = { std::move(tex), slot };
         return static_cast<int>(slot);
+    }
+
+    // Heap slot holding the UI image `id`'s SRV, uploading it on `cmd` the first
+    // time (copy + COPY_DEST→PSR barrier, so call it before the draws that sample
+    // it). Uploaded WITHOUT the sRGB decode: UI colours are sRGB numbers end to
+    // end (the UI pass writes an UNORM target), so an _SRGB view would come out
+    // linear-decoded and too dark (Thema 107). Not shared with m_graphTexCache on
+    // purpose: a material samples the same asset in linear light. -1 = no image.
+    int uiImageSlotFor(ID3D12GraphicsCommandList* cmd, const HE::UUID& id, ContentManager* cm)
+    {
+        const std::string key = graphTexKey(id, {});
+        if (key.empty() || !cm || !m_uiAtlasHeap) return -1;
+        if (auto it = m_uiImageCache.find(key); it != m_uiImageCache.end())
+            return it->second.slot;
+        UIImage12 entry;
+        if (m_uiImageNextSlot < k_maxUIImages &&
+            uploadTexture2D(cmd, cm->resolveTextureRef(id, {}), entry.tex, /*honourSrgb=*/false))
+        {
+            entry.slot = static_cast<int>(k_maxUIFontAtlases + m_uiImageNextSlot++);
+            srvForTexture(entry.tex.Get(), uiAtlasCpu(static_cast<UINT>(entry.slot)));
+        }
+        const int slot = entry.slot;
+        m_uiImageCache.emplace(key, std::move(entry));
+        return slot;
     }
 
     // ── Combined scene SRV heap ──────────────────────────────────────────────
@@ -3743,13 +3793,15 @@ struct D3D12RendererImpl
     // texture (format + full mip chain from the asset), records the copies on `cl` and
     // parks the upload buffer in meshTexUploads until the GPU is past them. Also serves
     // the graph project textures, whose views live in the material ring instead.
+    // honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
+    // as they are): the UI pass wants that, see uiImageSlotFor.
     bool uploadTexture2D(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
-                         ComPtr<ID3D12Resource>& outTex)
+                         ComPtr<ID3D12Resource>& outTex, bool honourSrgb = true)
     {
         if (!cl || !tex) return false;
         if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return false;
 
-        const bool srgb = tex->srgb;
+        const bool srgb = tex->srgb && honourSrgb;
         DXGI_FORMAT fmt; bool isBlock;
         switch (tex->format)
         {
@@ -3907,6 +3959,14 @@ struct D3D12RendererImpl
             {
                 retire(std::move(it->second));
                 m_graphTexCache.erase(it);
+            }
+        // UI images: the resource retires the same way; the UI-heap slot is
+        // abandoned, not reused (see m_uiImageCache).
+        for (const HE::UUID& id : m_pendingTexInval)
+            if (auto it = m_uiImageCache.find(graphTexKey(id, {})); it != m_uiImageCache.end())
+            {
+                retire(std::move(it->second.tex));
+                m_uiImageCache.erase(it);
             }
         m_pendingTexInval.clear();
 
@@ -4308,8 +4368,9 @@ struct D3D12RendererImpl
             return false;
         }
 
-        // Root signature: root CBV at b0 (VS+PS) + SRV table t0 (font atlas, PS)
-        // + static sampler s0 (linear-clamp; glyphs scale the atlas both ways).
+        // Root signature: root CBV at b0 (VS+PS) + SRV table t0 (font atlas or
+        // image, PS) + static sampler s0 (trilinear-clamp; glyphs scale the atlas
+        // both ways, a mipped image minifies through its chain like on GL).
         {
             D3D12_DESCRIPTOR_RANGE srvRange{};
             srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -4327,6 +4388,7 @@ struct D3D12RendererImpl
             D3D12_STATIC_SAMPLER_DESC samp{};
             samp.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
             samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.MaxLOD           = D3D12_FLOAT32_MAX; // zero-init would pin mip 0
             samp.ShaderRegister   = 0; // s0
             samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
@@ -4391,13 +4453,14 @@ struct D3D12RendererImpl
             }
         }
 
-        // Shader-visible font-atlas SRV heap. Every slot starts as a null SRV so
-        // the root table is always valid to bind, even before any atlas uploads.
+        // Shader-visible UI SRV heap: font atlases, then the image region. Every
+        // slot starts as a null SRV so the root table is always valid to bind,
+        // even before any atlas uploads.
         {
             m_uiAtlasDescSize =
                 device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             D3D12_DESCRIPTOR_HEAP_DESC hd{};
-            hd.NumDescriptors = k_maxUIFontAtlases;
+            hd.NumDescriptors = k_maxUIFontAtlases + k_maxUIImages;
             hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
             hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_uiAtlasHeap))))
@@ -4410,23 +4473,27 @@ struct D3D12RendererImpl
             nullSrv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
             nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             nullSrv.Texture2D.MipLevels     = 1;
-            for (UINT s = 0; s < k_maxUIFontAtlases; ++s)
+            for (UINT s = 0; s < k_maxUIFontAtlases + k_maxUIImages; ++s)
                 device->CreateShaderResourceView(nullptr, &nullSrv, uiAtlasCpu(s));
         }
 
         return true;
     }
 
-    void renderUIPass12(ID3D12GraphicsCommandList* cmd, int fi, int w, int h)
+    void renderUIPass12(ID3D12GraphicsCommandList* cmd, int fi, int w, int h, ContentManager* cm)
     {
         if (!m_uiPSO || !m_uiAtlasHeap || m_renderWorld.uiObjects.empty()) return;
 
-        // Record any missing atlas uploads BEFORE the pass state is bound so the
-        // copies + COPY_DEST→PSR barriers sit ahead of the draws that sample them.
+        // Record any missing atlas/image uploads BEFORE the pass state is bound so
+        // the copies + COPY_DEST→PSR barriers sit ahead of the draws that sample them.
         const int defaultSlot = uiAtlasSlotFor(cmd, 0);
         for (const UIRenderObject& obj : m_renderWorld.uiObjects)
+        {
             if (obj.type == 2 && obj.fontAtlasKey != 0)
                 uiAtlasSlotFor(cmd, obj.fontAtlasKey);
+            else if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+                uiImageSlotFor(cmd, obj.textureAssetId, cm);
+        }
 
         cmd->SetPipelineState(m_uiPSO.Get());
         cmd->SetGraphicsRootSignature(m_uiRootSig.Get());
@@ -4488,12 +4555,29 @@ struct D3D12RendererImpl
                     boundSlot = slot;
                 }
             }
+            // A textured quad points t0 at its image (uploaded above); the next
+            // glyph sees boundSlot != its atlas slot and rebinds by itself.
+            bool textured = false;
+            if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+            {
+                const auto it = m_uiImageCache.find(graphTexKey(obj.textureAssetId, {}));
+                const int slot = it != m_uiImageCache.end() ? it->second.slot : -1;
+                if (slot >= 0)
+                {
+                    if (slot != boundSlot)
+                    {
+                        cmd->SetGraphicsRootDescriptorTable(1, uiAtlasGpu(static_cast<UINT>(slot)));
+                        boundSlot = slot;
+                    }
+                    textured = true;
+                }
+            }
             UICB cb;
             cb.rect   = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
             cb.color  = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
             cb.uvRect = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
             cb.vp     = glm::vec2(float(w), float(h));
-            cb.mode   = obj.type == 2 ? 1.0f : 0.0f;
+            cb.mode   = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
             cb.pad    = 0.0f;
             cb.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
             cb.cornerRadius  = obj.cornerRadius;
@@ -9236,8 +9320,11 @@ void D3D12Renderer::Shutdown()
     m_impl->viewportRtvHeap.Reset();
     m_impl->viewportDsvHeap.Reset();
     m_impl->m_uiFontAtlases.clear();
+    m_impl->m_uiImageCache.clear();
     m_impl->m_uiAtlasUploads.clear();
     m_impl->m_uiAtlasHeap.Reset();
+    m_impl->m_uiAtlasNextSlot  = 0; // the heap is rebuilt on a re-Initialize
+    m_impl->m_uiImageNextSlot  = 0;
     m_impl->meshTexUploads.clear(); // per-mesh base-color staging buffers (GpuMesh SRVs die with meshCache)
     m_impl->meshTexNextSlot = D3D12RendererImpl::k_sceneStaticSrvs; // reset the albedo-slot allocator for a possible re-Initialize
     m_impl->m_materialTexCache.clear(); // override-material textures
@@ -10734,7 +10821,8 @@ void D3D12Renderer::DrawViewportFrame()
             p.cmdList->RSSetScissorRects(1, &uisc);
         }
         p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
-                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH),
+                         m_contentManager);
         // Transition back to PSR so ImGui can sample viewportRT.
         p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                     p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -10771,7 +10859,8 @@ void D3D12Renderer::DrawViewportFrame()
             p.cmdList->RSSetScissorRects(1, &uisc);
         }
         p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
-                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH),
+                         m_contentManager);
 
         p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                     p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -10970,7 +11059,7 @@ void D3D12Renderer::Render()
                 p.cmdList->RSSetViewports(1, &uivp);
                 p.cmdList->RSSetScissorRects(1, &uisc);
             }
-            p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
+            p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height, m_contentManager);
         }
     }
 

@@ -2674,6 +2674,59 @@ TEST_CASE("UI image quads sample their texture undecoded on Metal and GL (Thema 
 	}
 }
 
+TEST_CASE("UI image quads have a texture path on D3D11 and D3D12 (Thema 157)")
+{
+	// Before Thema 157 neither D3D UI pass read UIRenderObject::textureAssetId:
+	// an Image widget (and any textured Panel/Border/Button) drew as a solid quad
+	// in its tint, white by default — measured on the RTX 4070 with the
+	// HE_DUMP_UITEST=image witness. The fix mirrors GL's mode 2: a UI-only cache
+	// uploaded WITHOUT the sRGB decode (Thema 107), bound on t0, mode 2 in the
+	// pixel shader. Nothing fails to build when a piece goes missing, the quad
+	// just turns white (or too dark) again — so pin the wiring in the source.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - D3D UI image pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::string d3d11 = stripLineComments(readFile(be / "D3D11" / "D3D11Renderer.cpp"));
+	const std::string d3d12 = stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp"));
+	REQUIRE_MESSAGE(!d3d11.empty(), "D3D11Renderer.cpp not readable");
+	REQUIRE_MESSAGE(!d3d12.empty(), "D3D12Renderer.cpp not readable");
+
+	const std::vector<std::pair<const char*, const std::string*>> files = {
+		{ "D3D11Renderer.cpp", &d3d11 },
+		{ "D3D12Renderer.cpp", &d3d12 },
+	};
+	for (const auto& [file, text] : files)
+	{
+		// Shader: the glyph branch is bounded, or mode 2 would run into it.
+		CHECK_MESSAGE(text->find("if (uMode > 0.5f && uMode < 1.5f)") != std::string::npos,
+		              std::string(file), ": the glyph branch swallows the image mode again");
+		CHECK_MESSAGE(text->find("if (uMode > 1.5f)") != std::string::npos,
+		              std::string(file), ": the UI pixel shader has no textured-quad branch");
+		// Pass: a textured quad asks for mode 2.
+		CHECK_MESSAGE(text->find("obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f)") != std::string::npos,
+		              std::string(file), ": the UI pass never selects the image mode");
+		// Upload without the decode, and the helper honours the switch.
+		CHECK_MESSAGE(text->find("/*honourSrgb=*/false") != std::string::npos,
+		              std::string(file), ": UI images upload with the sRGB flag again");
+		CHECK_MESSAGE(text->find("tex->srgb && honourSrgb") != std::string::npos,
+		              std::string(file), ": the upload helper ignores honourSrgb");
+	}
+	// D3D11: own cache, dropped on a re-import.
+	CHECK(d3d11.find("resolveUITexture(obj.textureAssetId, cm)") != std::string::npos);
+	CHECK(d3d11.find("resolveGraphTexture(obj.textureAssetId") == std::string::npos);
+	CHECK(d3d11.find("uiTexCache.erase(graphTexKey(id, {}))") != std::string::npos);
+	// D3D12: the UI pass binds only m_uiAtlasHeap, so the images need their own
+	// region there (not the 16 font slots); uploads are recorded before the draws.
+	CHECK(d3d12.find("hd.NumDescriptors = k_maxUIFontAtlases + k_maxUIImages;") != std::string::npos);
+	CHECK(d3d12.find("uiImageSlotFor(cmd, obj.textureAssetId, cm)") != std::string::npos);
+	CHECK(d3d12.find("m_uiImageCache.find(graphTexKey(id, {}))") != std::string::npos);
+}
+
 TEST_CASE("specular AA widening: the numbers the shader copies implement")
 {
 	// The formula itself (Kaplanyan/Filament normal filtering), so its BEHAVIOUR
