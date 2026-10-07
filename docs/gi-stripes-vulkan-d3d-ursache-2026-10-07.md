@@ -279,7 +279,8 @@ Einstellungen wie §1 aufruft.
 ### Aufbau
 
 - **Build:** Release, `C:\hw159`, `HE_BUILD_TESTS=ON`, alle Targets
-  (`cmake --build C:\hw159 -j8` ohne `--target`), EXIT 0. Die 108 eingebetteten HLSL/GLSL-Shader
+  (`cmake --build C:\hw159 -j8` ohne `--target`), EXIT 0. Release ist auch der Build-Typ des
+  Windows-CI-Jobs (`ci.yml`: `-DCMAKE_BUILD_TYPE=Release`). Die 108 eingebetteten HLSL/GLSL-Shader
   kompilieren. Danach wurden HorizonGame und HorizonEditor neu gelinkt, sonst bleiben die
   Spiel-Kopien alt. Der Folge-Build hatte nichts mehr zu tun.
   - md5 von `HorizonRendering.dll`, `scene.frag.spv`, `gi_gbuf.frag.spv` und `gi_shadow.comp.spv`
@@ -372,13 +373,27 @@ Per Auge geprüft, Kontaktbogen `C:\hw159\s3_sheet.png` (Spalten GL, Vulkan, D3D
     anderer Kamerahöhe zu erwarten sind.
 - **Rauschen im Rahmen von 0,25 mittlere |Δ|:**
   - Lauf-zu-Lauf mit GI an liegt bei ≤ 0,002 und max 1 Stufe, auf allen vier Backends.
-  - Fix A allein ändert das Bild am Referenzpunkt y = 0 um 0,013–0,019. Das sind nur
-    Penumbrakanten-Pixel (0,34–0,53 %). Der Strahlursprung rückt dort um Bruchteile eines
-    Zentimeters, und das ist die erwartete Wirkung von fp32.
+  - Fix A allein ändert das Bild am Referenzpunkt y = 0 um 0,013–0,019 (0,34–0,53 % der Pixel),
+    Diff-Maske Vulkan in `C:\hw159\s3_fixA_vk.png`:
+    - Abweichungen über 8 Stufen gibt es nur auf der Penumbrakante des Kugelschattens (GL 601,
+      Vulkan 361, D3D11 517 Pixel).
+    - Dazu kommen 2–8 Stufen am Kantensaum und blasse Bögen mit ±1 Stufe auf dem Terrain.
+      Vermutlich sitzen sie an den früheren fp16-Rundungsstufen von x/z, die bei y = 0 bis ~120 m
+      Abstand noch Zentimeter ausmachen.
+    - Der Strahlursprung rückt dort um Bruchteile eines Zentimeters. Das ist die erwartete
+      Wirkung von fp32.
   - Beides liegt deutlich unter 0,25.
   - Die 5,77 (Vulkan) bzw. 7,76 (D3D) bei y = 0 sind **ganz Fix B**: fixA → post, gleich groß auf
-    y = 300. Das ist eine flächige Aufhellung um +9,4 bzw. +11,9 Stufen auf dem Terrain, max 30/37,
-    ohne Struktur. Die Streifenenergie sinkt dabei sogar leicht (Vulkan-Kugel 0,735 → 0,638).
+    y = 300. Das ist eine flächige Aufhellung um +9,4 bzw. +11,9 Stufen auf dem Terrain, max 30/37.
+    - Diff-Bild Vulkan in `C:\hw159\s3_fixB_vk.png`.
+    - In der Terrain-Box: Mittel +9,34, Streuung 0,51, Streifenenergie des Diffs 0,049, also
+      glatt.
+    - Die Korrelation mit der Helligkeit vorher ist −0,89, dunkle Pixel gewinnen also mehr Stufen.
+      Das passt zu einem konstanten linearen Zusatzterm hinter einem komprimierenden
+      Tonemapper, und daher ist der Zuwachs im Kugelschatten am größten.
+    - Die Graph-Kugel bleibt bei 0, weil Fix B nur den eingebauten Pfad betrifft.
+    - Die Streifenenergie der Kugel-Box ändert sich dabei kaum (Vulkan 0,735 → 0,638). Die Box
+      enthält in den Ecken Terrain.
   - Fix B ist gewollt und kein Rauschen: Ambient-Boden wie GL/Metal, Entscheidung der Königin §5.
   - Auf GL und auf dem reinen Graph-Pfad (Layers) ist Fix B nachweislich wirkungslos (≤ 0,001).
 - **GI aus bitgleich:** pre gegen post ist auf allen vier Backends in allen drei Szenen 0 / 0 / 0 %.
