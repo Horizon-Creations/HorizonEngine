@@ -174,6 +174,11 @@ public:
     // no such instance, or no public variable of that name — nothing written,
     // and saying so is the caller's business.
     bool  setPublicVariable(InstanceId id, const std::string& name, const Value& v);
+    // …and the read with Get (Ref)'s rule, for the frontends that are not a
+    // graph (hc.getJson, the native module's reader). false = no such instance
+    // or no public variable of that name; `out` is then left alone.
+    bool  getPublicVariable(InstanceId id, const std::string& name, Value& out) const;
+    bool  isPublicVariable(InstanceId id, const std::string& name) const;
     // Reset an instance's variables to its graph's declared defaults (used to
     // give the persistent GameInstance a fresh start each play session).
     void  reseedVariables(InstanceId id);
@@ -289,6 +294,9 @@ public:
     bool watch(InstanceId owner, const std::string& var, uint64_t token);
     void unwatch(uint64_t token);
     void unwatch(InstanceId owner, const std::string& var, uint64_t token);
+    // Every subscription whose token `drop` says yes to — a host that hands
+    // out tokens by kind sweeps a whole kind when its frontend goes away.
+    void unwatchIf(const std::function<bool(uint64_t token)>& drop);
     // Called once per reported change of a variable somebody watch()ed, after
     // the HorizonCode side of it. One hook, set by the host, like the debug hooks.
     // `tokens` are the subscribers to hand it to.

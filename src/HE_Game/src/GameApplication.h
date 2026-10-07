@@ -180,6 +180,7 @@ private:
     HeContentServices            m_contentServices{};
     HeAntiCheatServices          m_antiCheatServices{};
     HeNetServices                m_netServices{};
+    HeHcServices                 m_hcServices{};
     HeEngineServices             m_engineServices{};
 
     // The anti-cheat's event/response side (docs/anti-cheat-plan.md §5): the

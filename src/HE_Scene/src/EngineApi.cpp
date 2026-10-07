@@ -3583,6 +3583,62 @@ bool hasVar(Ctx& c, int entity, const std::string& name)
 }
 } // namespace net
 
+// ── HorizonCode variables from outside a graph (plan §4.5) ───────────────────
+namespace hc {
+uint32_t targetInstance(Ctx& c, int target)
+{
+    if (!c.runtime) return 0;
+    if (target == 0) return c.runtime->gameInstance();
+    // The CLASS on the entity, asked of EntityHost for the reason
+    // entity::instance gives: several instances may own one entity.
+    return c.entities ? static_cast<uint32_t>(c.entities->instanceOf((entt::entity)target)) : 0u;
+}
+
+uint32_t sourceEntity(const HorizonCode::Runtime& rt, uint32_t owner)
+{
+    if (owner == 0 || owner == rt.gameInstance()) return 0;
+    return rt.ownedEntity(owner);
+}
+
+namespace {
+bool watchWith(Ctx& c, int target, const std::string& variable, uint64_t token)
+{
+    const uint32_t inst = targetInstance(c, target);
+    return inst != 0 && !variable.empty() && c.runtime->watch(inst, variable, token);
+}
+void unwatchWith(Ctx& c, int target, const std::string& variable, uint64_t token)
+{
+    if (const uint32_t inst = targetInstance(c, target))
+        c.runtime->unwatch(inst, variable, token);
+}
+} // namespace
+
+bool watch(Ctx& c, int entity, int target, const std::string& variable)
+{
+    // No subscriber, no subscription: the root is never a script's entity, and
+    // a token for it would be one nobody can ever hear.
+    if (entity <= 0) return false;
+    return watchWith(c, target, variable, scriptToken(static_cast<uint32_t>(entity)));
+}
+void unwatch(Ctx& c, int entity, int target, const std::string& variable)
+{
+    if (entity <= 0) return;
+    unwatchWith(c, target, variable, scriptToken(static_cast<uint32_t>(entity)));
+}
+bool watchNative(Ctx& c, int target, const std::string& variable)
+{ return watchWith(c, target, variable, nativeToken()); }
+void unwatchNative(Ctx& c, int target, const std::string& variable)
+{ unwatchWith(c, target, variable, nativeToken()); }
+
+std::string getJson(Ctx& c, int target, const std::string& variable)
+{
+    const uint32_t inst = targetInstance(c, target);
+    Value v;
+    if (!inst || !c.runtime->getPublicVariable(inst, variable, v)) return {};
+    return save::valueToJson(v).dump();
+}
+} // namespace hc
+
 // ── Printing ─────────────────────────────────────────────────────────────────
 namespace print {
 namespace {
@@ -7365,6 +7421,25 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
                 net::hasVar(c, aI(a, 0), aS(a, 1))) }; } });
 
+        // HorizonCode variables from outside a graph (plan §4.5). `entity` is
+        // the SUBSCRIBER — the entity whose Lua/Python script hears
+        // onChanged_<Var> — so it takes the Self default like every leading
+        // entity; `target` is whose variable (0 = the Game Instance).
+        t.push_back({ "hc.watch", "Variable Watch", true,
+            {{"entity", P::Int}, {"target", P::Int}, {"variable", P::String}}, {{"ok", P::Bool}},
+            "HE::api::hc::watch",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                hc::watch(c, aI(a, 0), aI(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "hc.unwatch", "Variable Watch", true,
+            {{"entity", P::Int}, {"target", P::Int}, {"variable", P::String}}, {},
+            "HE::api::hc::unwatch",
+            [](Ctx& c, const VV& a){ hc::unwatch(c, aI(a, 0), aI(a, 1), aS(a, 2)); return VV{}; } });
+        t.push_back({ "hc.getJson", "Variable Watch", false,
+            {{"target", P::Int}, {"variable", P::String}}, {{"json", P::String}},
+            "HE::api::hc::getJson",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(
+                hc::getJson(c, aI(a, 0), aS(a, 1))) }; } });
+
         // Savegames: ONE active template-shaped document (see the header block).
         // create/load resolve the SaveGameTemplate through the Ctx's content
         // manager; field access validates against it and fails LOUD.
@@ -7869,6 +7944,9 @@ const std::vector<ApiFn>& registry()
             { "net.getVarString", "Get Replicated String" },
             { "net.getVarVec3", "Get Replicated Vector" },
             { "net.hasVar", "Has Replicated Variable" },
+            { "hc.watch", "Watch Variable" },
+            { "hc.unwatch", "Stop Watching Variable" },
+            { "hc.getJson", "Get Variable As JSON" },
             { "save.create", "Create Save" },        { "save.load", "Load Save" },
             { "save.write", "Write Save" },          { "save.close", "Close Save" },
             { "save.activeId", "Active Save Id" },   { "save.list", "List Saves" },
@@ -8144,7 +8222,11 @@ bool isScriptGroup(std::string_view group)
                                                     // or cast "the player" into it. Its end
                                                     // arrives through onAnimationNotify,
                                                     // which both already have.
-                                                    "sequence" };
+                                                    "sequence",
+                                                    // "hc" exists FOR the text languages: it
+                                                    // is how a Lua or Python script hears a
+                                                    // HorizonCode variable change (plan §4.5).
+                                                    "hc" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }
@@ -8253,6 +8335,8 @@ Ctx bindingCtx(void* host)
     c.physics   = b && b->physics ? b->physics() : nullptr;
     c.content   = b ? b->content : nullptr;
     c.antiCheat = b && b->antiCheat ? b->antiCheat() : nullptr;
+    c.runtime   = b && b->runtime ? b->runtime() : nullptr;
+    c.entities  = b && b->entities ? b->entities() : nullptr;
     return c;
 }
 // float[3]/float[2] ↔ glm, the only vector shapes that cross the C boundary.
@@ -8616,6 +8700,27 @@ void fillNetServices(::HeNetServices& out, GameServicesBinding* binding)
     out.localPlayer = [](void* h) {
         Ctx c = bindingCtx(h);
         return (uint32_t)net::localPlayer(c); };
+}
+
+// ── HorizonCode variables for a native module (plan §4.5) ────────────────────
+void fillHcServices(::HeHcServices& out, GameServicesBinding* binding)
+{
+    out = {};
+    out.abiVersion = HE_HC_ABI_VERSION;
+    out.host       = binding;
+
+    // The same hc::* the registry rows use, with the module's one token. The
+    // change itself arrives as IGameLogic::onHcVariableChanged, routed by the
+    // host (HcWatchEvents); the value is read back through valueJson.
+    out.watch = [](void* h, uint32_t target, const char* var) {
+        Ctx c = bindingCtx(h);
+        return hc::watchNative(c, (int)target, var ? var : ""); };
+    out.unwatch = [](void* h, uint32_t target, const char* var) {
+        Ctx c = bindingCtx(h);
+        hc::unwatchNative(c, (int)target, var ? var : ""); };
+    out.valueJson = [](void* h, uint32_t target, const char* var, char* buf, int cap) {
+        Ctx c = bindingCtx(h);
+        return copyOut(hc::getJson(c, (int)target, var ? var : ""), buf, cap); };
 }
 
 } // namespace HE::api

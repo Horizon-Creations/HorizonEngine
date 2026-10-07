@@ -540,21 +540,8 @@ Runtime::Watched* Runtime::findWatched(InstanceId owner, const std::string& name
 
 bool Runtime::watch(InstanceId owner, const std::string& var, uint64_t token)
 {
-    const Inst* inst = find(owner);
-    if (!inst) return false;
     // Public instance variables only — the door Get (Ref) uses.
-    bool visible = false;
-    if (inst->compiled)
-    {
-        const CompiledVarInfo* vi = findVarInfo(*inst->compiled, var);
-        visible = vi && vi->access == 0;
-    }
-    else
-    {
-        const Variable* v = findVarInLevels(inst->levels, var);
-        visible = v && v->scope == 0 && v->access == 0;
-    }
-    if (!visible) return false;
+    if (!isPublicVariable(owner, var)) return false;
     Watched* w = findWatched(owner, var);
     if (!w)
     {
@@ -580,8 +567,13 @@ void Runtime::unwatch(InstanceId owner, const std::string& var, uint64_t token)
 
 void Runtime::unwatch(uint64_t token)
 {
+    unwatchIf([token](uint64_t t){ return t == token; });
+}
+
+void Runtime::unwatchIf(const std::function<bool(uint64_t token)>& drop)
+{
     for (Watched& w : m_watched)
-        w.tokens.erase(std::remove(w.tokens.begin(), w.tokens.end(), token), w.tokens.end());
+        w.tokens.erase(std::remove_if(w.tokens.begin(), w.tokens.end(), drop), w.tokens.end());
     m_watched.erase(std::remove_if(m_watched.begin(), m_watched.end(),
         [](const Watched& w){ return !w.declared && w.tokens.empty(); }), m_watched.end());
 }
@@ -1117,6 +1109,26 @@ bool Runtime::setPublicVariable(InstanceId id, const std::string& name, const Va
     const Variable* var = findVarInLevels(i->levels, name);
     if (!var || var->access != 0 || var->scope != 0) return false; // locals are never externally visible
     i->vars[name] = v;
+    return true;
+}
+
+bool Runtime::isPublicVariable(InstanceId id, const std::string& name) const
+{
+    const Inst* i = find(id);
+    if (!i) return false;
+    if (i->compiled)
+    {
+        const CompiledVarInfo* vi = findVarInfo(*i->compiled, name);
+        return vi && vi->access == 0;
+    }
+    const Variable* var = findVarInLevels(i->levels, name);
+    return var && var->access == 0 && var->scope == 0;
+}
+
+bool Runtime::getPublicVariable(InstanceId id, const std::string& name, Value& out) const
+{
+    if (!isPublicVariable(id, name)) return false;
+    out = getVariable(id, name);
     return true;
 }
 
