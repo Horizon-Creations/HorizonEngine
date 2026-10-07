@@ -3101,6 +3101,13 @@ struct D3D11RendererImpl
                 it = giBlasCache.emplace(id, BuildGIBlas(cm, id)).first;
             return it->second;
         };
+        // HE_GI_LOG_INSTANCES=N: same one-shot instance-colour log as Vulkan's.
+        static const int s_giLogAt = [] {
+            const char* v = std::getenv("HE_GI_LOG_INSTANCES");
+            return v && *v ? std::atoi(v) : 0;
+        }();
+        static int s_giLogCall = 0;
+        const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
         for (const RenderObject& obj : rw.objects)
         {
             if (!obj.castsShadow) continue;
@@ -3115,6 +3122,12 @@ struct D3D11RendererImpl
             inst.nodeOffset   = range.nodeOffset;
             inst.triOffset    = range.triOffset;
             giInstancesCpu.push_back(inst);
+            if (logInst)
+                HE_LOG_INFO(RHI, "D3D11Renderer: GI instance %zu pos (%.2f, %.2f, %.2f) mat %016llx "
+                            "baseColor (%.3f, %.3f, %.3f)", giInstancesCpu.size() - 1,
+                            obj.transform[3].x, obj.transform[3].y, obj.transform[3].z,
+                            static_cast<unsigned long long>(obj.materialAssetId.lo),
+                            inst.baseColor.r, inst.baseColor.g, inst.baseColor.b);
         }
         giInstanceCount = static_cast<int>(giInstancesCpu.size());
         if (giInstanceCount == 0) return;

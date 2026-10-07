@@ -1,10 +1,14 @@
 name: CI
 
 on:
+  # A release's topics are merged into its own branch (release/<version>, see
+  # the Hive's publishing), and exactly that branch is built and published.
+  # So it gets the same as main: a run on every push — only a push stages the
+  # two app runtimes the editor package ships — and on every PR into it.
   push:
-    branches: [ main ]
+    branches: [ main, 'release/**' ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, 'release/**' ]
   # A feature branch can ask for the full matrix before it is merged
   # (`gh workflow run CI --ref <branch>`), the way a Windows-only link error
   # is otherwise only ever seen on main.

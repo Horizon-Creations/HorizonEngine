@@ -3251,6 +3251,52 @@ TEST_CASE("Vulkan extracts with this frame's sun: one setDayNight at the frame's
 	CHECK(calls == 2);
 }
 
+TEST_CASE("GI instances get their material colour before the acceleration update (Thema 154)")
+{
+	// The extractor leaves RenderObject::baseColor white; resolveWorldMaterialScalars
+	// fills it. Vulkan's runGi() extracts on its own and called updateGiAccel()
+	// without the resolve, so every GI instance bounced white and a red floor
+	// gave the same probe field as a grey one (colour bleed exactly 0).
+	// D3D11/D3D12 resolve right before their updateGiAccel. No GPU under ctest,
+	// so this pins the order in the source: extract -> resolve -> updateGiAccel.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - GI material-resolve pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+
+	const std::string vk = stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp"));
+	REQUIRE(!vk.empty());
+	const size_t fn = vk.find("void VulkanRenderer::runGi(");
+	REQUIRE(fn != std::string::npos);
+	const size_t fnEnd = vk.find("\n}\n", fn);
+	REQUIRE(fnEnd != std::string::npos);
+	const std::string body = vk.substr(fn, fnEnd - fn);
+	const size_t extract = body.find("m_extractor.extract(");
+	const size_t resolve = body.find("HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);");
+	const size_t accel   = body.find("updateGiAccel();");
+	REQUIRE(extract != std::string::npos);
+	REQUIRE(accel != std::string::npos);
+	REQUIRE_MESSAGE(resolve != std::string::npos,
+	                "VulkanRenderer::runGi no longer resolves material scalars - GI instances bounce white");
+	CHECK(extract < resolve);
+	CHECK(resolve < accel);
+
+	for (const char* file : { "D3D11/D3D11Renderer.cpp", "D3D12/D3D12Renderer.cpp" })
+	{
+		const std::string src = stripLineComments(readFile(be / file));
+		REQUIRE(!src.empty());
+		const size_t r = src.find("HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);");
+		const size_t a = src.find("p.updateGiAccel(m_contentManager, p.m_renderWorld");
+		REQUIRE_MESSAGE(r != std::string::npos, std::string(file));
+		REQUIRE_MESSAGE(a != std::string::npos, std::string(file));
+		CHECK_MESSAGE(r < a, std::string(file), " updates the GI instances before resolving their material colour");
+	}
+}
+
 TEST_CASE("D3D11 main swapchain follows the window size (Thema 128)")
 {
 	// Same bug as Thema 112 on D3D11: the back buffer, its RTV and the

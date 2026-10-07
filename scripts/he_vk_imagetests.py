@@ -36,6 +36,8 @@ import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 # validation messages a variant may print (see ALLOWED_VALIDATION). `probes`
 # name boxes (x, y as a fraction of the frame) whose mean colour must be led by
 # one channel ("r"/"g"/"b") — for pictures where WHAT is drawn is the verdict.
+# `samples` name boxes the same way (→ mean RGB) for verdicts a leading channel
+# cannot express; `checks` are (description, predicate over those RGBs).
 # `colors` are boxes whose mean must sit within COLOR_TOL of an exact (R, G, B)
 # on every channel — for flat, unlit pixels (UI) where the value itself is known.
 #
@@ -95,7 +97,7 @@ CASES = {
         "pairs": [("off", "on", 0.3), ("on", "sw", None)],
         "require": {"on": ["GI probe grid", "GI hardware ray tracing available"],
                     "sw": ["GI probe grid", "software GI path forced"]},
-        "allow": {"off": ["mat_ubo"], "on": ["mat_ubo", "gi_layout"], "sw": ["mat_ubo", "gi_layout"]},
+        "allow": {"on": ["gi_layout"], "sw": ["gi_layout"]},
     },
     # GI reflections on the same scene: the green and the glowing red cube should
     # appear in the mirror floor (docs/gi-reflections-plan.md). REPORT ONLY:
@@ -112,7 +114,36 @@ CASES = {
         },
         "pairs": [("off", "on", None)],
         "require": {"on": ["HE_DUMP_GIREFLTEST witness scene added"]},
-        "allow": {"off": ["mat_ubo", "gi_layout"], "on": ["mat_ubo", "gi_layout"]},
+        "allow": {"off": ["gi_layout"], "on": ["gi_layout"]},
+    },
+    # Built-in (non-graph) materials only, several different ones in ONE frame:
+    # the SSR witness's metallic mirror floor + rough red cube, and the sRGB
+    # witness's two textured cubes (hasTexture=1, linear left / sRGB right).
+    # Each draw's material block lives in its own slot of a per-frame ring
+    # behind a dynamic UBO (Thema 144; it used to be vkCmdUpdateBuffer inside the
+    # render pass). Strict: no validation message allowed. The samples catch the
+    # failure validation cannot see — draws reading each other's slot: the cube
+    # would lose its red, the floor its mirror, the textured pair its texture.
+    "builtin": {
+        "base": {"SKYTEST": "1", "SSRTEST": "1", "SRGBTEST": "1", "SSR": "0", "TOD": "0.5",
+                 "CLOUDMODE": "0", "COVERAGE": "0", "CAMY": "3", "CAMZ": "2", "PITCH": "-12",
+                 "FRAMES": "6"},
+        "variants": {"scene": {}},
+        "pairs": [],
+        "require": {"scene": ["HE_DUMP_SSRTEST witness scene added",
+                              "HE_DUMP_SRGBTEST linear/sRGB cube pair added"]},
+        # (x, y) as fractions of the frame. Measured on an RTX 4070 (1280x720,
+        # 05.10.2026): red (192,71,83), floor (102,171,216), left (148,160,173),
+        # right (95,106,120). The checks are coarse on purpose (lavapipe shades
+        # a little differently); they fail on a swapped block, not on a shade.
+        "samples": {"scene": {"red": (0.50, 0.46), "floor": (0.50, 0.83),
+                              "left": (0.36, 0.42), "right": (0.64, 0.42)}},
+        "checks": {"scene": [
+            ("red cube is red", lambda p: p["red"][0] > p["red"][1] + 60 and p["red"][0] > p["red"][2] + 60),
+            ("mirror floor shows the blue sky", lambda p: p["floor"][2] > p["floor"][0] + 40),
+            ("textured cubes are grey, not red", lambda p: all(abs(p[k][0] - p[k][1]) < 40 for k in ("left", "right"))),
+            ("linear cube brighter than sRGB cube", lambda p: sum(p["left"]) > sum(p["right"]) + 45),
+        ]},
     },
     # Painted terrain (Thema 143): a red field with a green disc in the middle and
     # a blue one bottom left, drawn by a Landscape Layer Blend graph that samples
@@ -138,7 +169,7 @@ CASES = {
                                "-> heLandscapeWeights bound"]},
         "probes": {v: [("green disc", 0.50, 0.50, "g"), ("blue disc", 0.32, 0.70, "b"),
                        ("red field", 0.50, 0.20, "r")] for v in ("gi_off", "gi_on")},
-        "allow": {"gi_off": ["mat_ubo"], "gi_on": ["mat_ubo", "gi_layout"]},
+        "allow": {"gi_on": ["gi_layout"]},
     },
     # UI Image widget (Thema 157): tile 12 of HE_DUMP_UITEST=image is an Image
     # element at x 60..300, y 590..700 of the 1280x720 frame showing a generated
@@ -179,13 +210,11 @@ COLOR_TOL = 12
 #
 # Every entry is an open renderer bug found by this job (03.10.2026), not a
 # layer quirk. Fix the bug, then delete the entry — the case turns strict.
+#
+# Fixed and deleted: "mat_ubo" (vkCmdUpdateBuffer + barrier for the built-in
+# per-draw material block inside the scene render pass; Thema 144 — the block
+# now sits in a per-frame ring behind a dynamic UBO, case "builtin" guards it).
 ALLOWED_VALIDATION = {
-    # Built-in (non-graph) material draws write the shared per-draw material UBO
-    # with vkCmdUpdateBuffer + a buffer barrier INSIDE the scene render pass
-    # (VulkanRenderer.cpp, drawDCVk and its instanced twin: "Update material
-    # UBO"). Two messages per built-in draw per frame.
-    "mat_ubo": [r"VUID-vkCmdUpdateBuffer-renderpass",
-                r"VUID-vkCmdPipelineBarrier-None-07889"],
     # With GI on, once per frame: a submitted command buffer expects an image in
     # a layout it is not in. The engine log truncates the message before the
     # layout names; the full text is in the artifact's per-shot log.
@@ -405,6 +434,15 @@ def main():
             for needle in spec.get("forbid", {}).get(vname, []):
                 if needle in shot["_log"]:
                     problems.append(f"{vname}: log has '{needle}'")
+            samples = spec.get("samples", {}).get(vname)
+            if samples:
+                p = {k: probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy, r=4)
+                     for k, (fx, fy) in samples.items()}
+                shot["samples"] = p
+                print("      samples: " + ", ".join(f"{k} {v}" for k, v in p.items()))
+                for desc, ok in spec.get("checks", {}).get(vname, []):
+                    if not ok(p):
+                        problems.append(f"{vname}: sample check failed: {desc}")
             shot["probes"] = []
             for label, fx, fy, ch in spec.get("probes", {}).get(vname, []):
                 rgb = probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy)
