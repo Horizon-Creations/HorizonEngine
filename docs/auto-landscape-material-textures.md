@@ -569,6 +569,23 @@ das Masken-Band trennt WetGround über Rauheit G = 126 von den anderen (≈ 220)
   heTexP0..2. Die **null** Validation-Meldungen des echten Laufs sind also belastbar.
   Nach dem Zurücksetzen ist das Bild identisch zum ersten Lauf (mean|Δ| 0,000).
 - D3D12 mit `HE_GPU_DEBUG=1` (Debug-Layer + DRED an): keine Meldung, gleiches Bild.
+- **Pro Band** (D3D11/D3D12/Vulkan gegen GL, alle drei gleich): Albedo-Array
+  mean|Δ| 0,006, Normal-Array 0,000, Masken-Array 0,040 (0,015 % > 8). Die gesamte
+  Restabweichung sitzt im **2D**-Band: 0,637, 1,33 % > 8. Das ist der bekannte
+  Mip-Unterschied der 2D-Assets ohne gebackene Kette (§6). Die gebackenen Array-Mips
+  sind also wirklich auf allen Backends dieselben.
+- **Fallback-Pfade** (`HE_DUMP_TEXARRAY=fallback`, alle vier Backends, D3D12 mit
+  Debug-Layer, Vulkan mit Validation). Jedes Band ergibt das erwartete Bild:
+  fehlendes Array → weißes Array (231,231,231); 2D-Asset im Array-Slot → 1-Slice-Array,
+  jeder Slice auf 0 geklemmt → Rock in allen Streifen; echtes Albedo-Array → die fünf
+  Schichten; Array-Asset im **2D**-Slot → Slice 0 (Grass) in allen Streifen. Die einzige
+  Fehlermeldung ist das absichtlich fehlende Asset, keine Validation- oder
+  Debug-Layer-Meldung. D3D/Vulkan gegen GL: mean|Δ| 0,170, die Abweichung liegt wieder
+  nur im Band mit dem mip-losen 2D-Asset.
+- **GL deferred** (`HE_DUMP_RENDERPATH=1`): pixelgleich zu forward (mean|Δ| 0,000).
+  `HE_DUMP_GBUFFER=2` zeigt das Terrain im G-Buffer, die G-Buffer-Variante mit Maske und
+  ihre Bindestelle sind also gelaufen. D3D/Vulkan haben noch keinen Deferred-Pfad
+  (Thema 150).
 - D3D11 hat keinen Debug-Layer im Baum. Dort gilt nur der Bildbefund.
 - **Metal:** keine Hardware auf diesem Gerät. Belegt sind nur: MSL-Cross-Compile
   (`texture2d_array<float>` an den Array-Slots), dieselben `[[texture(N)]]`- und

@@ -6262,7 +6262,9 @@ void EditorApplication::dumpFrameHeadless()
 	// Mask array / the 2D Rock albedo. Unlit, so the frame IS the sampled texels
 	// and no lighting difference between backends can fake or hide a slice.
 	// HE_DUMP_TEXARRAY=slice2 is the negative control: every stripe reads slice 2
-	// (Rock), so only the stripes that were NOT Rock may change.
+	// (Rock), so only the stripes that were NOT Rock may change. =fallback swaps
+	// the bands for the mismatch paths (missing array, 2D asset in an array slot,
+	// array asset in a 2D slot) — see below.
 	if (const char* ta = std::getenv("HE_DUMP_TEXARRAY"); ta && *ta && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -6297,9 +6299,21 @@ void EditorApplication::dumpFrameHeadless()
 			g.connect(mul, 0, slice, 0);
 			g.connect(half, 0, slice, 1);
 		}
+		// HE_DUMP_TEXARRAY=fallback drives every MISMATCH path instead: band 1 reads a
+		// missing array (→ the backend's white array), band 2 a plain 2D asset through
+		// an array slot (→ a one-slice array, every slice clamped to 0 = Rock), band 3
+		// the real albedo array, band 4 that ARRAY asset through a 2D slot (→ slice 0,
+		// Grass, in every stripe).
+		const bool fallback = std::string_view(ta) == "fallback";
 		const char* kArrays[3] = { "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset",
 		                           "Engine/Textures/Landscape/T_Landscape_Normal_Array.hasset",
 		                           "Engine/Textures/Landscape/T_Landscape_Mask_Array.hasset" };
+		if (fallback)
+		{
+			kArrays[0] = "Engine/Textures/Landscape/T_Landscape_Missing_Array.hasset";
+			kArrays[1] = "Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset";
+			kArrays[2] = "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset";
+		}
 		int band[4];
 		for (int i = 0; i < 3; ++i)
 		{
@@ -6309,7 +6323,8 @@ void EditorApplication::dumpFrameHeadless()
 			g.connect(slice, 0, band[i], 1);
 		}
 		band[3] = g.addNode(HE::MatNodeType::TextureSample);
-		g.findNode(band[3])->s = "Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset";
+		g.findNode(band[3])->s = fallback ? "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset"
+		                                  : "Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset";
 		g.connect(uvT, 0, band[3], 0);
 		// Normal Map Array on the Normal pin: compiled and bound on every backend
 		// even though an unlit frame does not show it.
@@ -6362,7 +6377,8 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXARRAY witness landscape added "
-			"(%s, %zu graph textures, array mask %u)", fixedSlice ? "slice 2 everywhere" : "slices 0..4",
+			"(%s, %zu graph textures, array mask %u)",
+			fallback ? "fallback paths" : fixedSlice ? "slice 2 everywhere" : "slices 0..4",
 			gen.textures.size(), gen.textureArrayMask);
 	}
 

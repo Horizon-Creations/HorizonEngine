@@ -101,6 +101,22 @@ def main(paths):
                 n += 1
         print(f"\n{p} vs {ref}: worst cell-mean channel diff {worst:.2f}, "
               f"terrain mean|d| {diff / n:.3f}, >8: {100.0 * big / n:.3f}%")
+        # Per band: tells the baked-mip ARRAY bands apart from the 2D band, whose
+        # single-level asset GL mips at runtime and D3D/Vulkan do not.
+        bh = (y1 - y0 + 1) / 4.0
+        for b in range(4):
+            ya, yb = int(y0 + bh * b), int(y0 + bh * (b + 1))
+            d2 = 0.0
+            b2 = 0
+            m = 0
+            for y in range(ya, yb):
+                for x in range(x0, x1 + 1):
+                    pa, pq = px[y * w + x], pb[y * wb + x]
+                    dd = sum(abs(a - c) for a, c in zip(pa, pq)) / 3.0
+                    d2 += dd
+                    b2 += dd > 8
+                    m += 1
+            print(f"    band {BANDS[b]:<10} mean|d| {d2 / m:.3f}, >8: {100.0 * b2 / m:.3f}%")
 
 
 if __name__ == "__main__":

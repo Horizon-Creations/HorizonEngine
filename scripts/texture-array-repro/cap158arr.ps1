@@ -16,7 +16,10 @@ param(
     [Parameter(Mandatory = $true)][string]$Out,
     [string]$Mode = "1",
     [string[]]$Backends = @("OpenGL", "D3D11", "D3D12", "Vulkan"),
-    [string]$Tag = ""
+    [string]$Tag = "",
+    # Extra environment for every capture, e.g. @{HE_DUMP_RENDERPATH='1'} -- set AFTER
+    # the HE_DUMP_* sweep below, which would otherwise delete it.
+    [hashtable]$Extra = @{}
 )
 $ErrorActionPreference = "Stop"
 # "-Backends OpenGL,D3D11" through powershell -File arrives as ONE string.
@@ -51,6 +54,7 @@ foreach ($rhi in $Backends) {
     $env:HE_DUMP_GI = "0"; $env:HE_DUMP_SSAO = "0"; $env:HE_DUMP_SSR = "0"
     $env:HE_DUMP_AA = "0"; $env:HE_DUMP_BLOOM = "0"; $env:HE_DUMP_DOF = "0"; $env:HE_DUMP_MOTIONBLUR = "0"
     $env:HE_DUMP_TEXARRAY = $Mode
+    foreach ($k in $Extra.Keys) { Set-Item "env:$k" $Extra[$k] }
 
     if (Test-Path $log) { Remove-Item $log -ErrorAction SilentlyContinue }
     $p = Start-Process -FilePath $exe -WorkingDirectory $Deploy -PassThru
