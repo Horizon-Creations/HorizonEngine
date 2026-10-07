@@ -67,6 +67,7 @@
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
+#include <material/MaterialShaderBake.h>
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/TerrainPaint.h>
@@ -1320,6 +1321,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
+	m_editorConfig.GIShadowQuality             = globalstate.getCustomConfigInt("GIShadowQuality",            m_editorConfig.GIShadowQuality);
 	m_editorConfig.GIReflectionsEnabled        = globalstate.getCustomConfigBool("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	m_editorConfig.GIReflIntensity             = globalstate.getCustomConfigFloat("GIReflIntensity",          m_editorConfig.GIReflIntensity);
 	m_editorConfig.GIReflMaxRoughness          = globalstate.getCustomConfigFloat("GIReflMaxRoughness",       m_editorConfig.GIReflMaxRoughness);
@@ -1493,7 +1495,8 @@ void EditorApplication::OnInit()
 	// app runtime (+ ContentManager to load assets).
 	{
 		HorizonCode::Runtime::Services svc;
-		svc.createWidget  = [this](const std::string& p){ return m_editorWorld ? m_editorWorld->widgets().createWidget(contentManager(), p) : 0; };
+		svc.createWidget  = [this](const std::string& p, const HorizonCode::SpawnValues& spawn)
+		{ return m_editorWorld ? m_editorWorld->widgets().createWidget(contentManager(), p, &spawn) : 0; };
 		svc.showWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().showWidget(id); };
 		svc.hideWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().hideWidget(id); };
 		svc.destroyWidget = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().destroyWidget(id); };
@@ -2983,10 +2986,14 @@ void EditorApplication::OnRender(float dt)
 			}
 			renderer()->SetAntiAliasingSettings(aa);
 		}
-		renderer()->SetGISettings(IRenderer::GISettings{
-			m_editorConfig.GlobalIlluminationEnabled,
-			m_editorConfig.GIIndirectIntensity,
-			m_editorConfig.GILightRadius});
+		{
+			IRenderer::GISettings gi{
+				m_editorConfig.GlobalIlluminationEnabled,
+				m_editorConfig.GIIndirectIntensity,
+				m_editorConfig.GILightRadius};
+			gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+			renderer()->SetGISettings(gi);
+		}
 		{
 			IRenderer::SSRSettings ssr;
 			ssr.enabled      = m_editorConfig.SSREnabled;
@@ -4727,8 +4734,22 @@ void EditorApplication::dumpFrameHeadless()
 			const char* v = std::getenv("HE_DUMP_GI");
 			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
 		}();
-		r->SetGISettings(IRenderer::GISettings{
-			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
+		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
+		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
+		// mask's rays per pixel and its edge-aware filter on any backend.
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
+		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
+		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
+		// history 0.98, no spatial filter. Every backend renders its own.
+		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
+		{
+			gi.shadowRays    = 256;
+			gi.shadowHistory = 0.98f;
+			gi.shadowFilter  = false;
+		}
+		r->SetGISettings(gi);
 	}
 	{
 		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
@@ -5080,28 +5101,23 @@ void EditorApplication::dumpFrameHeadless()
 			// shader variants into the material NOW, exactly as the exporter would, so
 			// the renderer takes the getOrBuild*(precompiled) branch instead of cross-
 			// compiling at draw time. A capture matching the non-baked run proves the
-			// baked path renders identically.
+			// baked path renders identically — including the clustered twin (Thema
+			// 117), which the renderer picks whenever it clusters itself.
 			if (const char* pc = std::getenv("HE_DUMP_MATPRECOMPILE"); pc && *pc)
 			{
-				using LB = HE::MaterialShaderLibrary::Backend;
 				HE::MaterialShaderLibrary lib;
-				const uint64_t h = std::hash<std::string>{}(gen.glsl);
-				auto bake = [&](HE::RendererBackend rb, LB lb) {
-					const auto& v = gen.vertexBody.empty()
-						? lib.standardVertex(lb)
-						: lib.customVertex(std::hash<std::string>{}(gen.vertexBody),
-						                   gen.vertexBody, lb);
-					const auto& f = lib.fragment(h, gen.glsl, lb);
-					if (v.ok && f.ok) {
-						MaterialShaderVariant var;
-						var.backend  = static_cast<uint8_t>(rb);
-						var.vertex   = v.source;
-						var.fragment = f.source;
+				auto bake = [&](HE::RendererBackend rb) {
+					MaterialShaderVariant var;
+					std::string error;
+					std::vector<std::string> warnings;
+					if (HE::bakeMaterialShaderVariant(lib, rb, gen.glsl, gen.vertexBody,
+					                                  var, error, warnings))
 						mat.precompiledShaders.push_back(std::move(var));
-					}
+					for (const std::string& w : warnings)
+						HE_LOG_WARN(Editor, "%s", ("EditorApplication: HE_DUMP_MATPRECOMPILE: " + w).c_str());
 				};
-				bake(HE::RendererBackend::OpenGL, LB::GLSL410);
-				bake(HE::RendererBackend::Metal,  LB::Metal);
+				bake(HE::RendererBackend::OpenGL);
+				bake(HE::RendererBackend::Metal);
 				HE_LOG_INFO(Editor, "%s",
 					"EditorApplication: HE_DUMP_MATPRECOMPILE baked precompiled shader variants");
 			}
@@ -5664,11 +5680,20 @@ void EditorApplication::dumpFrameHeadless()
 			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
 		};
 		makeCube("ShadowInstFloor", glm::vec3(0.0f, -0.1f, -12.0f), glm::vec3(30.0f, 0.2f, 30.0f));
+		// =contact (Thema 134): the cubes STAND on the floor, 1 / 2.5 / 4 m tall,
+		// so every shadow runs from a hard contact edge at the foot to a wide
+		// penumbra at the far end — the case where a spatial filter must not
+		// soften what is sharp. The hovering row has no contact edge at all.
+		const bool contact = std::string_view(st) == "contact";
 		for (int i = 0; i < 7; ++i)
-			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), 2.0f, -12.0f),
-			         glm::vec3(1.0f, 1.0f + 0.4f * float(i % 3), 1.0f));
-		HE_LOG_INFO(Editor, "%s",
-			"EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
+		{
+			const float hgt = contact ? 1.0f + 1.5f * float(i % 3) : 1.0f + 0.4f * float(i % 3);
+			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), contact ? 0.5f * hgt : 2.0f, -12.0f),
+			         glm::vec3(1.0f, hgt, 1.0f));
+		}
+		HE_LOG_INFO(Editor, "%s", contact
+			? "EditorApplication: HE_DUMP_SHADOWINSTTEST=contact floor + seven standing cubes added"
+			: "EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
 	}
 
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
@@ -6040,6 +6065,21 @@ void EditorApplication::dumpFrameHeadless()
 			fm.customShaderVertGlsl = gen.vertexBody;
 			fm.blendMode            = gen.blendMode;
 			fm.domain               = gen.domain;
+			// HE_DUMP_MATPRECOMPILE bakes the floor exactly as the exporter would
+			// (Thema 123): with the clustered twin baked, the pak floor must show
+			// every pool too, pixel-identical to the cross-compiled run.
+			if (const char* pc = std::getenv("HE_DUMP_MATPRECOMPILE"); pc && *pc)
+			{
+				HE::MaterialShaderLibrary lib;
+				for (HE::RendererBackend rb : { HE::RendererBackend::OpenGL, HE::RendererBackend::Metal })
+				{
+					MaterialShaderVariant var;
+					std::string error;
+					std::vector<std::string> warnings;
+					if (HE::bakeMaterialShaderVariant(lib, rb, gen.glsl, gen.vertexBody, var, error, warnings))
+						fm.precompiledShaders.push_back(std::move(var));
+				}
+			}
 			reg.emplace<MaterialComponent>(floorE,
 				MaterialComponent{ contentManager().registerMaterial(std::move(fm)) });
 		}
@@ -6223,7 +6263,10 @@ void EditorApplication::dumpFrameHeadless()
 
 		auto land = m_editorWorld->createEntity("LayerLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 100.0f;
@@ -6650,7 +6693,10 @@ void EditorApplication::dumpFrameHeadless()
 		auto& reg = m_editorWorld->registry();
 		auto land = m_editorWorld->createEntity("MountainLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 240.0f;
@@ -6776,7 +6822,9 @@ void EditorApplication::dumpFrameHeadless()
 	// other branch: replaceTexture + a DEFERRED InvalidateTexture. This exercises
 	// that second branch, which is the only "runs once" asymmetry in the
 	// weightmap path. Works with or without HE_DUMP_LAYEREDIT.
-	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && m_editorWorld)
+	// HE_DUMP_LAYERREPAINT=mid paints halfway through the settle frames instead
+	// (below), once the backend has already resolved and cached the weightmap.
+	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && std::string(rp) != "mid" && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
 		for (auto [te, tc] : reg.view<TerrainComponent>().each())
@@ -7192,6 +7240,47 @@ void EditorApplication::dumpFrameHeadless()
 		                           e.gradientColor = glm::vec4(0.55f, 0.20f, 0.65f, 1.0f);
 		                           e.innerShadow = true; e.innerShadowBlur = 20.0f; });
 
+		// HE_DUMP_UITEST=image adds tile 12: an Image element showing a generated
+		// picture, red / green on top, blue / yellow below, white tint (Thema 157).
+		// Kept off the plain "=1" sheet so the Thema-133 baselines stay as measured.
+		// The widget refers to its picture by path and the manager resolves it
+		// again on instantiation, so the texture is registered under that path.
+		if (std::string_view(ui) == "image")
+		{
+			constexpr uint32_t kSz = 64;
+			TextureAsset ta;
+			ta.name = "__uiImageWitness";
+			ta.path = "__uiImageWitness.hasset";
+			ta.width = ta.height = kSz;
+			ta.channels = 4;
+			// Flagged sRGB like every imported colour texture: the UI pass must
+			// sample the bytes as they are anyway (Thema 107), an sRGB upload
+			// would show here as a darker picture.
+			ta.srgb = true;
+			ta.data.resize(size_t(kSz) * kSz * 4);
+			for (uint32_t y = 0; y < kSz; ++y)
+				for (uint32_t x = 0; x < kSz; ++x)
+				{
+					// Rows are stored bottom-up: y >= kSz/2 is the picture's top half.
+					static const uint8_t kQuad[4][4] = {
+						{ 230,  30,  30, 255 }, { 30, 200,  60, 255 },    // top: red, green
+						{  30,  80, 230, 255 }, { 240, 220,  40, 255 } }; // bottom: blue, yellow
+					const uint8_t* c = kQuad[(y >= kSz / 2 ? 0 : 2) + (x >= kSz / 2 ? 1 : 0)];
+					std::memcpy(&ta.data[(size_t(y) * kSz + x) * 4], c, 4);
+				}
+			contentManager().registerTexture(std::move(ta));
+
+			const int id = t.add(HE::UIWidgetType::Image);
+			HE::UIElement& e = *t.find(id);
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = 60.0f + static_cast<float>(col) * 300.0f;
+			e.posY = 80.0f + static_cast<float>(row) * 170.0f;
+			e.sizeX = 240.0f; e.sizeY = 110.0f;
+			e.texture = "__uiImageWitness.hasset";
+			e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+		}
+
 		UIWidgetAsset wa;
 		wa.type = HE::AssetType::Widget;
 		wa.name = "__uiStyleWitness";
@@ -7593,6 +7682,38 @@ void EditorApplication::dumpFrameHeadless()
 			 + " deg for the captured frame").c_str());
 		settleFrames = 1;
 	}
+	// HE_DUMP_PANYAW (degrees per frame) / HE_DUMP_PANMOVE (world units per frame
+	// along the camera's right axis): a camera that keeps MOVING through every
+	// settle frame, not the single step above — the GI shadow mask's temporal
+	// pass has to hold its history over a steady pan, which one step cannot show
+	// (Thema 134). Frame i of N stands (N-1-i) steps back, so the captured frame
+	// is at the real pose and two captures with N and N+1 frames share the pose
+	// and the last N frames of motion: their difference is the flicker of a
+	// panning camera, the way f60/f61 is that of a still one.
+	const float panYaw  = mbEnvF("HE_DUMP_PANYAW");
+	const float panMove = mbEnvF("HE_DUMP_PANMOVE");
+	if ((panYaw != 0.0f || panMove != 0.0f) && !mbSweep)
+	{
+		const glm::vec3 eye   = m_editorCamera.position();
+		const float     yaw   = m_editorCamera.yaw();
+		const float     pitch = m_editorCamera.pitch();
+		const glm::vec3 right(std::cos(yaw), 0.0f, std::sin(yaw)); // fwd = (sin yaw, ·, -cos yaw)
+		for (int i = 0; i < settleFrames; ++i)
+		{
+			const float back = static_cast<float>(settleFrames - 1 - i);
+			const float y    = yaw - glm::radians(panYaw * back);
+			m_editorCamera.setOrientation(eye - right * (panMove * back),
+			                              glm::vec3(std::sin(y) * std::cos(pitch), std::sin(pitch),
+			                                        -std::cos(y) * std::cos(pitch)));
+			r->SetEditorCamera(m_editorCamera.makeOverride());
+			r->Render();
+		}
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_PANYAW/PANMOVE panned the camera by " + std::to_string(panYaw)
+			 + " deg / " + std::to_string(panMove) + " units per frame over "
+			 + std::to_string(settleFrames) + " frames").c_str());
+		settleFrames = 0;
+	}
 	// HE_DUMP_TODSTEP (day fraction, with HE_DUMP_SKYTEST): the OCCLUDER-motion
 	// witness for the GI shadow mask's temporal clamp (Thema 131). Same shape
 	// as the yaw step: the settle frames run with the sun at TOD - step and only
@@ -7600,10 +7721,16 @@ void EditorApplication::dumpFrameHeadless()
 	// edge moves over a static receiver, the reprojection check passes,
 	// and only the neighbourhood clamp keeps the old edge from ghosting.
 	// Compare the capture against a static one at the same TOD. TWO frames run
-	// at the real TOD, not one: Vulkan's runGi() extracts the scene before
-	// DrawScene() feeds the extractor this frame's day-night state, so the GI
-	// mask sees a sun change one frame late — a one-frame capture would show the
-	// old shadow on every backend variant alike and measure nothing.
+	// at the real TOD by default, not one: until Thema 131 step 6, Vulkan's
+	// runGi() extracted the scene before DrawScene() fed the extractor this
+	// frame's day-night state, so the GI mask saw a sun change one frame late.
+	// Since Thema 146 every Vulkan pass gets the sun from one setDayNight() at
+	// the top of Render(); the second frame stays so captures remain comparable
+	// with ones taken on older builds.
+	// HE_DUMP_TODSTEPFRAMES=1 is the lag witness itself: only the captured frame
+	// runs at the real TOD, so a pass that still extracts with the previous
+	// frame's sun (CSM cascades with GI off, Thema 146) puts its shadows where
+	// a static capture at TOD - step has them.
 	if (const float todStep = mbEnvF("HE_DUMP_TODSTEP"); todStep != 0.0f && m_editorWorld)
 	{
 		const Entity envEntity = m_editorWorld->environmentEntity();
@@ -7617,10 +7744,13 @@ void EditorApplication::dumpFrameHeadless()
 				r->Render();
 			env->timeOfDay = tod;
 			pushEnvironment(0.0f);
+			int atTod = 2;
+			if (const char* sf = std::getenv("HE_DUMP_TODSTEPFRAMES"); sf && *sf)
+				atTod = std::clamp(std::atoi(sf), 1, 240);
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: HE_DUMP_TODSTEP moved the sun by " + std::to_string(todStep)
-				 + " of a day for the last two frames").c_str());
-			settleFrames = 2;
+				 + " of a day for the last " + std::to_string(atTod) + " frame(s)").c_str());
+			settleFrames = atTod;
 		}
 	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
@@ -7632,8 +7762,23 @@ void EditorApplication::dumpFrameHeadless()
 	// layer stay quiet.
 	const char* giRefit = std::getenv("HE_DUMP_GIREFIT");
 	const bool  giRefitWitness = giRefit && *giRefit && s_layerMatId != HE::UUID{};
+	// HE_DUMP_LAYERREPAINT=mid: the brush-stroke path on a weightmap the backend
+	// has ALREADY drawn with — replaceTexture + InvalidateTexture must make it
+	// drop its cached view and resolve the new texels. A green disc appears at
+	// (30, -25) in the capture; a stale cache keeps the red field there.
+	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
+	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (repaintMidWitness && i == settleFrames / 2)
+		{
+			for (auto [te, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+				TerrainPaint::paint(tc, 30.0f, -25.0f, /*layer*/1, 14.0f, 5.0f, 1.0f);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_LAYERREPAINT=mid painted before settle frame "
+				 + std::to_string(i)).c_str());
+		}
 		if (giRefitWitness && i == settleFrames / 2)
 		{
 			auto& reg  = m_editorWorld->registry();
@@ -11593,6 +11738,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
+	globalstate.setCustomConfigEntry("GIShadowQuality",           m_editorConfig.GIShadowQuality);
 	globalstate.setCustomConfigEntry("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	globalstate.setCustomConfigEntry("GIReflIntensity",           m_editorConfig.GIReflIntensity);
 	globalstate.setCustomConfigEntry("GIReflMaxRoughness",        m_editorConfig.GIReflMaxRoughness);

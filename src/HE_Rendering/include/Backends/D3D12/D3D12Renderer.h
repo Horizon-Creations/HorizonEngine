@@ -55,6 +55,10 @@ public:
     // Returns ID3D12Resource* for the viewport color RT (or nullptr if not allocated).
     // The editor allocates an SRV in its ImGui heap and calls SetViewportImGuiHandle.
     void* GetViewportD3DResource() const;
+    // The packaged game: Render() runs the viewport frame at the back buffer's
+    // size and copies its result into the back buffer (docs/spielpfad-postfx-
+    // parity-analyse-2026-10-03.md, Weg a).
+    void  SetSwapchainPostProcessing(bool enabled) override;
     // True when SetViewportSize changed the RT size since the last call to
     // ClearViewportResourceChanged(). The editor checks this to re-register the SRV.
     bool  HasViewportResourceChanged() const;
@@ -69,8 +73,9 @@ public:
     // the editor prefs / packaged game, mirroring the Metal/GL/D3D11 backends.
     void SetGISettings(const GISettings& settings) override;
     // Forward screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint D).
-    // Editor-viewport only: the trace reads the previous frame's HDR colour, and
-    // the swapchain path has no HDR target (the C6 hole, inherited from D3D11).
+    // Post-chain only: the trace reads the previous frame's HDR colour, which the
+    // editor viewport and the packaged game (SetSwapchainPostProcessing) have and
+    // the direct swapchain fallback does not.
     void SetSSRSettings(const SSRSettings& settings) override;
     // Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
     // tint — the same contract GL, Metal and D3D11 honour.

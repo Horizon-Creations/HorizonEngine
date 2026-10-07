@@ -761,6 +761,50 @@ TEST_CASE("WidgetManager lifecycle and z-order")
     CHECK(wm.createWidget(cm, "mem://missing.hasset") == 0);
 }
 
+// The "Created widget" line names the kind of logic the widget got. It used to
+// read the graph AFTER handing it to the runtime by std::move, found it empty
+// every time, and so called every interpreted widget "compiled/no".
+TEST_CASE("WidgetManager: the create log names interpreted logic as interpreted")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+    g.addNode(ev);
+    registerWidget(cm, t, &g, "mem://scripted.hasset");
+    registerWidget(cm, t, nullptr, "mem://plain.hasset");
+
+    // Info may be filtered away by HE_LOG; this test needs the line it asks about.
+    const HE::Log::Level before = HE::Log::verbosity(HE::Log::Cat::Widget);
+    HE::Log::setVerbosity(HE::Log::Cat::Widget, HE::Log::Level::Info);
+    std::vector<std::string> lines;
+    const int sink = HE::Log::addSink([](const HE::Log::Record& r, void* user)
+    {
+        if (r.category == HE::Log::Cat::Widget && r.message &&
+            std::string(r.message).find("Created widget") != std::string::npos)
+            static_cast<std::vector<std::string>*>(user)->push_back(r.message);
+    }, &lines);
+
+    WidgetManager wm;
+    const int scripted = wm.createWidget(cm, "mem://scripted.hasset");
+    const int plain    = wm.createWidget(cm, "mem://plain.hasset");
+    HE::Log::removeSink(sink);
+    HE::Log::setVerbosity(HE::Log::Cat::Widget, before);
+    REQUIRE(scripted != 0);
+    REQUIRE(plain != 0);
+
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0].find("scripted.hasset") != std::string::npos);
+    CHECK(lines[0].find("interpreted logic") != std::string::npos);
+    CHECK(lines[1].find("plain.hasset") != std::string::npos);
+    CHECK(lines[1].find("no logic") != std::string::npos);
+    // Neither is "compiled": nothing here was in the compiled-class table.
+    CHECK(lines[0].find("compiled") == std::string::npos);
+    CHECK(lines[1].find("compiled") == std::string::npos);
+}
+
 TEST_CASE("HorizonWorld: injected app-level WidgetManager persists across clear()")
 {
     // The game's GameInstance UI lives in an APP-LEVEL WidgetManager that each
@@ -13687,6 +13731,42 @@ TEST_CASE("Parameters: a half-written declaration does not survive loading")
     REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
     REQUIRE(back.params.size() == 1);
     CHECK(back.params[0].name == "Label");
+}
+
+// …for whoever USES the component. The author's own document is read with
+// KeepUnfinished, because "Add Parameter" makes exactly such a row (no property
+// yet, no element when nothing was selected) and the designer's undo snapshot,
+// its load and the MCP tools all go through this reader. Read strictly, an undo
+// onto a snapshot holding the fresh row lost it (Thema 141).
+TEST_CASE("Parameters: the author's own document keeps a half-written declaration")
+{
+    HE::UIWidgetTree t = labelledRow();
+    t.params.push_back({ "",          1, "Text", "" });
+    t.params.push_back({ "Nope",      1, "",     "half" });
+    t.params.push_back({ "Parameter", 0, "",     "" });   // what Add Parameter makes
+    const std::string json = HE::uiWidgetTreeToJson(t);
+
+    HE::UIWidgetTree kept;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, kept, HE::UIWidgetParamRead::KeepUnfinished));
+    REQUIRE(kept.params.size() == 4);
+    CHECK(kept.params[0].name == "Label");
+    CHECK(kept.params[1].name.empty());
+    CHECK(kept.params[1].property == "Text");
+    CHECK(kept.params[2].name == "Nope");
+    CHECK(kept.params[2].elementId == 1);
+    CHECK(kept.params[2].property.empty());
+    CHECK(kept.params[2].help == "half");
+    CHECK(kept.params[3].name == "Parameter");
+    CHECK(kept.params[3].elementId == 0);
+    // Writing it again is byte-identical: nothing about the half rows changes
+    // on the way through, so an undo snapshot compares equal to its source.
+    CHECK(HE::uiWidgetTreeToJson(kept) == json);
+
+    // The default is still the consumer's, and still drops all three.
+    HE::UIWidgetTree used;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, used));
+    REQUIRE(used.params.size() == 1);
+    CHECK(used.params[0].name == "Label");
 }
 
 // ── The timeline's arithmetic ────────────────────────────────────────────────

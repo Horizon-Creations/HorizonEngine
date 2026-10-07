@@ -28,6 +28,18 @@ struct MaterialShaderVariant
 	// UI vertex (a pak baked before this field existed, or a backend whose UI
 	// vertex failed to compile at export time).
 	std::string uiVertex;
+	// The clustered-lighting twin of `fragment` (MaterialShaderLibrary::fragmentClustered,
+	// Thema 117): point/spot lights from the cluster lists instead of the 8-light
+	// window. A backend takes it only while it binds those lists and opens the
+	// cluster gate itself; otherwise — and when this is empty (a pak baked before
+	// the field existed, or a backend whose clustered pair failed at export) — the
+	// plain `fragment` draws, exactly as before. Separate fields rather than a
+	// second variant record so "which one is baked" can never be guessed wrong.
+	std::string fragmentClustered;
+	// The vertex stage `fragmentClustered` pairs with when `vertex` cannot: only GL,
+	// whose clustered program is GLSL 4.30 on both stages while `vertex` is 4.10.
+	// Empty = pair `fragmentClustered` with `vertex` (Metal / HLSL / SPIR-V).
+	std::string vertexClustered;
 };
 
 namespace HE

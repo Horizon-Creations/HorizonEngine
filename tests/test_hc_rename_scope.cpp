@@ -270,6 +270,48 @@ TEST_CASE("HorizonCode rename: variables and events reach in through their own n
 	}
 }
 
+TEST_CASE("HorizonCode rename: a Pull on Construct spec follows the variable it names")
+{
+	// A pull names a variable of ANOTHER class on a declaration, and it says
+	// which class — so it is followed exactly when that class is provably the
+	// renamed one, and reported when it could be anything.
+	auto pullVar = [](const char* name, const char* src, const char* var, const char* cls = "")
+	{
+		Variable v; v.name = name; v.type = PinType::Int;
+		v.pullSource = src; v.pullVar = var; v.pullClass = cls;
+		return v;
+	};
+	Graph g;
+	g.variables = { pullVar("Score", kPullFromGameInstance, "Score"),
+	                pullVar("Gift", kPullFromCreator, "Score", kEnemy),
+	                pullVar("Any", kPullFromCreator, "Score"),             // no class: unprovable
+	                pullVar("Other", kPullFromCreator, "Score", kChest) }; // someone else's
+
+	SUBCASE("renaming the Game Instance's variable")
+	{
+		const HcRename::Target t{ kGI, Member::Variable, "Score", "Points" };
+		const HcRename::Plan p = HcRename::planGraph(g, Role::Other, keys({ kGI }), "Hud.hasset", kGI, t);
+		REQUIRE(p.rename.size() == 1);
+		CHECK(p.unsure.size() == 1);          // the class-less creator pull
+		CHECK(HcRename::apply(g, p, t));
+		CHECK(g.findVariable("Score")->pullVar == "Points");
+		CHECK(g.findVariable("Score")->name == "Score");   // the declaration here is not the renamed one
+		CHECK(g.findVariable("Gift")->pullVar == "Score");
+		CHECK(g.findVariable("Any")->pullVar == "Score");
+	}
+	SUBCASE("renaming the creator class's variable, a derived creator included")
+	{
+		const HcRename::Target t{ kEnemy, Member::Variable, "Score", "Points" };
+		const HcRename::Plan p = HcRename::planGraph(g, Role::Other, keys({ kEnemy, kGoblin }),
+		                                             "Hud.hasset", kGI, t);
+		REQUIRE(p.rename.size() == 1);
+		CHECK(HcRename::apply(g, p, t));
+		CHECK(g.findVariable("Gift")->pullVar == "Points");
+		CHECK(g.findVariable("Score")->pullVar == "Score");
+		CHECK(g.findVariable("Other")->pullVar == "Score");
+	}
+}
+
 TEST_CASE("HorizonCode rename: the declaring class and an overriding one carry their own")
 {
 	SUBCASE("the class itself renames its declaration and everything using it")

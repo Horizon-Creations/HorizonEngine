@@ -1926,6 +1926,9 @@ namespace
 // template.
 template<typename Variant>
 inline constexpr bool kHasUIVertex = requires(Variant v) { v.uiVertex; };
+// …and the clustered-lighting pair (Thema 117)? Material only, detected the same way.
+template<typename Variant>
+inline constexpr bool kHasClustered = requires(Variant v) { v.fragmentClustered; v.vertexClustered; };
 
 // A record grew a field, and the record is repeated — so a reader that stops early
 // mis-parses everything AFTER it, not just the tail. Hence a version, and hence it is
@@ -1933,7 +1936,11 @@ inline constexpr bool kHasUIVertex = requires(Variant v) { v.uiVertex; };
 // COUNT, and encode returns {} for an empty list, so a leading 0 is impossible in v1
 // and marks "versioned header follows".
 constexpr uint8_t kShaderVariantVersionMark = 0;
-constexpr uint8_t kShaderVariantVersion     = 2; // v2 = + uiVertex per record
+// v2 = + uiVertex per record. v3 = + a TAIL after the last record holding each
+// record's clustered pair (fragmentClustered, vertexClustered) in record order — a
+// tail rather than two more per-record strings so a v2 reader, which walks the
+// records and stops, still parses a v3 blob correctly (it just never sees the tail).
+constexpr uint8_t kShaderVariantVersion     = 3;
 
 template<typename Variant>
 std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
@@ -1947,14 +1954,22 @@ std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 		HAsset::Writer::appendPOD(b, kShaderVariantVersionMark);
 		HAsset::Writer::appendPOD(b, kShaderVariantVersion);
 	}
-	HAsset::Writer::appendPOD(b, static_cast<uint8_t>(std::min<size_t>(vars.size(), 255)));
-	for (const auto& v : vars)
+	const size_t count = std::min<size_t>(vars.size(), 255);
+	HAsset::Writer::appendPOD(b, static_cast<uint8_t>(count));
+	for (size_t i = 0; i < count; ++i)
 	{
+		const auto& v = vars[i];
 		HAsset::Writer::appendPOD(b, v.backend);
 		HAsset::Writer::appendString(b, v.vertex);
 		HAsset::Writer::appendString(b, v.fragment);
 		if constexpr (kHasUIVertex<Variant>) HAsset::Writer::appendString(b, v.uiVertex);
 	}
+	if constexpr (kHasClustered<Variant>)
+		for (size_t i = 0; i < count; ++i)
+		{
+			HAsset::Writer::appendString(b, vars[i].fragmentClustered);
+			HAsset::Writer::appendString(b, vars[i].vertexClustered);
+		}
 	return b;
 }
 
@@ -1985,6 +2000,21 @@ std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 			if (version >= 2 && !HAsset::Reader::readString(bytes, o, v.uiVertex)) break;
 		}
 		out.push_back(std::move(v));
+	}
+	if constexpr (kHasClustered<Variant>)
+	{
+		// v1/v2 paks have no tail: every clustered pair stays empty and the renderer
+		// draws the plain fragment, as before. A torn tail leaves the rest empty too.
+		// Indexed by out.size(), not count — the record loop may have stopped early.
+		if (version >= 3 && out.size() == count)
+			for (auto& v : out)
+			{
+				std::string frag, vert;
+				if (!HAsset::Reader::readString(bytes, o, frag)) break;
+				if (!HAsset::Reader::readString(bytes, o, vert)) break;
+				v.fragmentClustered = std::move(frag);
+				v.vertexClustered   = std::move(vert);
+			}
 	}
 	return out;
 }

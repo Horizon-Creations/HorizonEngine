@@ -43,6 +43,10 @@ public:
                              const WorldPreviewEnv& env = {},
                              glm::mat4* outViewProj = nullptr,
                              uint32_t slot = 0) override;
+    // The packaged game: Render() runs the viewport frame at the back buffer's
+    // size and copies its result into the back buffer (docs/spielpfad-postfx-
+    // parity-analyse-2026-10-03.md, Weg a).
+    void  SetSwapchainPostProcessing(bool enabled) override;
 
     // [blind] added D3D11 sky+IBL+debuglines parity
     void SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -53,8 +57,9 @@ public:
     // Software ray-traced DDGI (CPU BVH + CS 5.0) — mirrors the GL 4.3/Vulkan port.
     void SetGISettings(const GISettings& settings) override;
     // Forward screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint C).
-    // Editor-viewport only: the trace reads the previous frame's HDR colour, and
-    // the swapchain path has no HDR target (C6).
+    // Post-chain only: the trace reads the previous frame's HDR colour, which the
+    // editor viewport and the packaged game (SetSwapchainPostProcessing) have and
+    // the direct swapchain fallback does not.
     void SetSSRSettings(const SSRSettings& settings) override;
     // Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
     // tint — the same contract GL and Metal honour.

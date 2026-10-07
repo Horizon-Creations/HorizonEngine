@@ -106,6 +106,15 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 std::string resolveClassBase(const HC::Node& srcNode, const HC::Graph& selfGraph,
                              const std::string& selfBaseClass, ContentManager* content);
 
+// Expose on Spawn (docs/widget-pre-construct-design.md §6.5): re-mirror the
+// input pins of every Create Widget in `g` from the widget it names, as that
+// widget is in `content` right now (unsaved designer edits that were applied
+// to the live asset included). A widget's answer is cached by the hash of its
+// graph JSON and re-read at most twice a second — `force` skips that wait
+// (picking an asset, tests). A pin still holding the default the widget had
+// when last read here follows a changed default. true = some node changed.
+bool syncCreateWidgetPins(ContentManager* content, HC::Graph& g, bool force = false);
+
 // ── Host bindings ────────────────────────────────────────────────────────────
 
 // Which node types each frontend offers. Kept as plain data (not behaviour) so

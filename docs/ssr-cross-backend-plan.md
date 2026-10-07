@@ -470,6 +470,10 @@ er ist derselbe Geometriedurchlauf. Melden, nicht verstecken.
 > Dazu die geerbte Grenze von oben: der Vorpass zeichnet, was `contributesAO`
 > sagt — keine Partikel, kein Niederschlag.
 >
+> *Überholt durch PR #89 (C6 erledigt, siehe §6):* Das Spiel fährt die Kette
+> jetzt selbst, SSR gibt es auf Vulkan im Editor und im Spiel; ausgenommen bleibt
+> nur der direkte Ersatzpfad (App-Modus, reine sRGB-Swapchain).
+>
 > **Was hier wirklich lief:** `clang++ -fsyntax-only` über die ganze
 > Übersetzungseinheit gegen SDLs Khronos-Header (warnungsfrei bis auf die zwei
 > Bestandswarnungen der Datei), **`glslc` über das geänderte `scene.frag`** — der
@@ -510,6 +514,18 @@ HDR **nur im Viewport-Pfad** (§2.2).
 - **C6** — Swapchain-Pfad: entweder ausdrücklich als „SSR nur im Editor-Viewport"
   melden oder ein HDR-Ziel dort nachziehen. **Vorlagepflichtig**, weil es den
   Frame-Aufbau des gepackten Spiels ändert.
+
+> **C6 erledigt (PR #89, Thema 130, gemergt 2026-10-04).** Gewählt wurde die
+> zweite Option, das HDR-Ziel im Spiel, und zwar auf D3D11, D3D12 **und** Vulkan
+> zugleich: Das gepackte Spiel bittet per `SetSwapchainPostProcessing(true)` um
+> die Kette, der Swapchain-Zweig fährt dann `DrawViewportFrame()` in
+> Backbuffer-Größe (D3D: `CopyResource` in den Backbuffer, Vulkan: Fullscreen-Pass)
+> und hat damit HDR, SSR und TAA wie der Editor. Ohne HDR-Ziel und damit ohne SSR
+> bleibt nur der direkte Swapchain-Ersatzpfad: App-Modus, Kette nicht bereit, auf
+> Vulkan eine reine sRGB-Swapchain. Die Gates in `DrawScene` sind unverändert
+> richtig, nur ihre Begründung hat sich verschoben; Kommentare und
+> `GetCapabilities` (dort auch `supportsHDR = postFxReady`) sind nachgezogen.
+> Belege: `docs/spielpfad-postfx-parity-analyse-2026-10-03.md` §10–§13.
 
 > **Erledigt in Schritt 6 (C1–C5).** C6 ist wie beauftragt **nur gemeldet**, nicht
 > gebaut. Vier Stellen, an denen der Weg vom Text oben abweicht — jede bewusst:
@@ -563,7 +579,10 @@ HDR **nur im Viewport-Pfad** (§2.2).
 >   Backbuffer und hat keine Radianzquelle. Das Gate ist genau ein Vergleich in
 >   `DrawScene` (`OMGetRenderTargets` gegen `p.hdrRTV`), und
 >   `supportsScreenSpaceReflections` meldet `postFxReady` — dasselbe Loch, das
->   Vulkan in Schritt 5 gemeldet hat.
+>   Vulkan in Schritt 5 gemeldet hat. *Überholt durch PR #89 (C6 erledigt):*
+>   Der Swapchain-Zweig fährt im Spiel jetzt `DrawViewportFrame()`, `hdrRTV` ist
+>   dort gebunden und das Gate greift; ohne SSR bleibt nur der direkte
+>   Ersatzpfad (App-Modus, Kette nicht bereit).
 > - **Graph-Materialien bekommen auf D3D11 KEINE SSR.** `lit.ssr` bleibt null,
 >   und das ist Absicht: ihr Konsument ist `heSSRFwd` auf Bindung 31, die
 >   Preamble wird ungepinnt emittiert, `register(s31)` ist jenseits der 16
@@ -660,7 +679,8 @@ Render-Pass-Objekte, der DSV zu lösen ist ein Aufruf. Zusätzlich zu C1–C5:
 >    tragen die Tabelle auf Parameter 5, damit die Nummer nicht auseinanderläuft.
 >
 > **Die geerbten Grenzen, unverändert:** SSR gibt es auf D3D12 nur im
-> Editor-Viewport (`usingHDR`; C6), Graph-Materialien bekommen kein SSR, weil
+> Editor-Viewport (`usingHDR`; C6 — *überholt durch PR #89*: das Spiel fährt
+> die Kette jetzt mit, `usingHDR` gilt dort auch), Graph-Materialien bekommen kein SSR, weil
 > ihr Konsument auf Bindung 31 sitzt und die Preamble ungepinnt emittiert wird
 > (§2.3 Kopf 1), und der Vorpass zeichnet `opaqueDCs` gegen die vorhandene
 > **D16**-Tiefe des SSAO-Vorpasses — keine Skinned Meshes, keine Partikel.
@@ -785,10 +805,10 @@ also nichts zu brechen.
 | 3 | §3.2 (a): Prepass-Shader nach kanonischem GLSL in die geteilte Library, Metal darauf umstellen — **erledigt** | ja, visuell (A/B gegen den Referenzshot) |
 | 4 | Checkpoint A — OpenGL (Forward-SSR, Kaskade im Szenenshader) — **A1–A5 erledigt, A6 offen** | nur offline + ctest |
 | 5 | Checkpoint B — Vulkan (B1–B5, inkl. §3.3) — **erledigt** | Syntaxprüfung + `glslc` auf `scene.frag` + Drift-ctest |
-| 6 | Checkpoint C — D3D11 (inkl. HLSL-Register-Pins + Registertest) — **C1–C5 erledigt, C6 gemeldet** | nur ctest auf dem HLSL-Text |
+| 6 | Checkpoint C — D3D11 (inkl. HLSL-Register-Pins + Registertest) — **C1–C5 erledigt, C6 gemeldet; C6 erledigt in PR #89** | nur ctest auf dem HLSL-Text |
 | 7 | Checkpoint D — D3D12 (Register aus 6 geerbt) — **D1–D4 erledigt, D3 entfällt begründet** | nur ctest (Drift über sechs Kopien) |
 | — | §2.3 Kopf 1: gepinnte Preamble für D3D11-Graph-Materialien | eigener Vorgang, **jetzt der Grund, warum SSR dort nur Built-ins erreicht** |
-| — | §2.2: HDR im D3D11-Swapchain-Pfad (C6) | vorlagepflichtig, **gemeldet in Schritt 6** |
+| — | §2.2: HDR im D3D11-Swapchain-Pfad (C6) | vorlagepflichtig, gemeldet in Schritt 6 — **erledigt in PR #89 (Thema 130), D3D11/D3D12/Vulkan**, Hardware-Zeugen in `docs/spielpfad-postfx-parity-analyse-2026-10-03.md` §10–§13 |
 | — | GL-Deferred-Composite (A6) | optional |
 | — | Hardware-Verify D3D11/D3D12/Vulkan (Thema 109) — **Vulkan sauber; D3D11/D3D12: `ssrTracePS` X3511, behoben in Schritt 2 (textureLod), auf Hardware nachgemessen** | `docs/ssr-hardware-verification-2026-09-30.md` |
 

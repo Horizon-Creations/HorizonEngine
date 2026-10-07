@@ -29,7 +29,11 @@ if(EXISTS "${IMGUI_DIR}/imgui.cpp")
 	endif()
 
 	# ── Vulkan backend ────────────────────────────────────────────────────────
-	if(DEFINED ENV{VULKAN_SDK} OR Vulkan_FOUND)
+	# Gated on HE_VULKAN_ENABLED (CACHE INTERNAL, set by src/HE_Rendering), not on
+	# Vulkan_FOUND: find_package's result is directory-local to HE_Rendering and
+	# empty here, so with distro packages (libvulkan-dev, no VULKAN_SDK — the
+	# lavapipe CI job) RendererVulkan was linked but the ImGui bridge left out.
+	if(HE_VULKAN_ENABLED)
 		list(APPEND IMGUI_SOURCES
 			${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 		)
@@ -81,9 +85,14 @@ if(EXISTS "${IMGUI_DIR}/imgui.cpp")
 	endif()
 
 	if(HE_IMGUI_VULKAN)
+		# Same SDK layout split as src/HE_Rendering/CMakeLists.txt.
 		if(DEFINED ENV{VULKAN_SDK})
 			set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include")
-			set(Vulkan_LIBRARY     "$ENV{VULKAN_SDK}/Lib/vulkan-1.lib")
+			if(WIN32)
+				set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/Lib/vulkan-1.lib")
+			else()
+				set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/lib/libvulkan.so")
+			endif()
 		endif()
 		find_package(Vulkan REQUIRED)
 		target_include_directories(imgui_editor PUBLIC ${Vulkan_INCLUDE_DIRS})
@@ -297,6 +306,12 @@ add_executable(HorizonEditor WIN32
 	HcWatch.cpp
 	HcWatchPanel.cpp
 	HcRename.cpp
+	HcPull.cpp
+	HcPullUi.cpp
+	HcPullUiBind.cpp
+	HcExtract.cpp
+	HcExtractUi.cpp
+	HcExtractUiBind.cpp
 	HcRenameSweep.cpp
 	HcRenameDialog.cpp
 	HcGraphClipboard.cpp

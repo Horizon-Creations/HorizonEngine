@@ -263,8 +263,8 @@ und `GILightRadius` 6°, f60/f61, dann dieselben Metriken.
 
 Stand 02.10.2026, gleicher Zweig, gleicher Messbau (`C:/hw131`, Release, RTX 4070). Alle drei
 Defekte aus §3 sind behoben, in **jeder** Kopie: 7 Shadow-Kernel, 2 Reflexions-Kernel (GL, Metal)
-und 4 Temporal-Pässe. Metal ist textgleich mitgezogen, aber **weder kompiliert noch gemessen**
-(kein Mac an NN-WS03).
+und 4 Temporal-Pässe. Metal ist textgleich mitgezogen. Auf NN-WS03 war es weder kompiliert noch
+gemessen (kein Mac). Inzwischen läuft es auf echter Mac-Hardware sauber, siehe §7.6.
 
 ### 7.1 Was geändert ist
 
@@ -277,8 +277,11 @@ und 4 Temporal-Pässe. Metal ist textgleich mitgezogen, aber **weder kompiliert 
 Dazu:
 * **Neuer Dump-Knopf `HE_DUMP_TODSTEP`** (Tagesbruchteil, mit `HE_DUMP_SKYTEST`) als Zeuge für
   Verdecker-Bewegung. Die Settle-Frames laufen bei `TOD − step`, die letzten **zwei** Frames bei
-  `TOD`. Zwei Frames, weil Vulkans `runGi()` die Szene extrahiert, bevor `DrawScene()` den
-  Day-Night-Zustand des Frames setzt (siehe §7.5).
+  `TOD`. Zwei Frames, weil Vulkans `runGi()` die Szene extrahierte, bevor `DrawScene()` den
+  Day-Night-Zustand des Frames setzte (siehe §7.5, inzwischen behoben). Der zweite Frame bleibt,
+  damit Captures mit älteren Builds vergleichbar sind. Seit Thema 146 setzt
+  `HE_DUMP_TODSTEPFRAMES=1` die Zahl auf einen Frame. Das ist der Zeuge für einen Ein-Frame-Versatz
+  selbst, denn bei zwei Frames ist der zweite auch mit Versatz richtig.
 * **Drift-Guard** `tests/test_culling.cpp` „GI kernels: …". Der alte „cone jitter hash" hätte nach
   dem Hash-Tausch ins Leere gegriffen und ist neu formuliert. Zwei neue Subcases kommen dazu:
   (a) jede `giHash2`/`giHash2R`-Definition in **allen sechs Quelldateien**, also auch in den
@@ -374,20 +377,61 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
 
 ### 7.5 Offen / Grenzen
 
-* **Metal**: textgleich geändert, nicht kompiliert, nicht gemessen. Vor einem Merge muss das MSL
-  einmal auf einem Mac durch (`giShadowTemporal`, `kGIShadowMSL`, `kGISWMSL`, beide
-  Reflexions-Kernel). Der Drift-Guard sichert nur die Textgleichheit.
+* **Metal**: Erledigt in §7.6. Alle GI-Kernel kompilieren und laufen auf einem Apple M5, HW- und
+  SW-Pfad, Schatten und Reflexionen. Das Flackern ist auf Metal nicht nach §7.2 gemessen (kein
+  f60/f61-Paar mit `ana.py`), es gibt nur den Einzelbildvergleich.
 * **Reflexions-Kernel**: nur auf GL gemessen (`HE_DUMP_GIREFLTEST=1`, `HE_DUMP_GIREFLROUGH=0.3`,
   Stufe High = 4 Strahlen), mit Seed-Offset-Strom (Stand 1f6f7900) gegen Pixel-Id-Strom (20277df1).
   Beides liegt im Rauschen: Flackern im Reflexionsbereich 0.055 gegen 0.067, HF 0.513 gegen 0.514,
   |an − aus| 15.9. Einen Vorher-Stand mit altem `sin`-Hash gibt es für die Reflexionen nicht.
-  Metal-Reflexionen sind ungeprüft.
-* **Vulkan: GI-Sonne einen Frame hinterher** (gefunden beim Bau des TODSTEP-Zeugen, *nicht*
-  behoben). `VulkanRenderer::runGi()` ruft `m_extractor.extract()` ohne vorheriges
-  `setDayNight()` auf. Die GI-Maske rechnet also mit der Sonne des Vorframes, während der
-  Scene-Pass die aktuelle nutzt. Metal ruft `setDayNight()` vor jeder GI-Extraktion auf, D3D11,
-  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Bei normaler
-  Day-Night-Geschwindigkeit ist das unsichtbar, ein Einzeiler, aber ein eigener Schritt.
+  Auf Metal laufen die Reflexionen (§7.6), ein Flacker-Maß gibt es dort nicht.
+* **Vulkan: GI-Sonne einen Frame hinterher** (gefunden beim Bau des TODSTEP-Zeugen, **behoben in
+  Schritt 6**). `VulkanRenderer::runGi()` rief `m_extractor.extract()` ohne vorheriges
+  `setDayNight()` auf. Die GI-Maske rechnete also mit der Sonne des Vorframes, während der
+  Scene-Pass die aktuelle nutzte. Metal ruft `setDayNight()` vor jeder GI-Extraktion auf, D3D11,
+  D3D12 und GL extrahieren einmal pro Frame nach `setDayNight()`. Damals setzte `runGi()` den
+  Zustand selbst, mit demselben Aufruf wie `DrawScene()`. Seit Thema 146 kommt er vom Frame-Anfang
+  (siehe unten), und der Test in `tests/test_culling.cpp` heißt jetzt „Vulkan extracts with this
+  frame's sun: one setDayNight at the frame's top …". Er prüft die Reihenfolge im Quelltext. Negativkontrolle:
+  ohne den Aufruf schlägt `REQUIRE` fehl, bei `setDayNight()` hinter `extract()` der `CHECK`.
+  Kompiliert ist die Datei lokal nur per `-fsyntax-only` gegen die MoltenVK-Header, echt
+  kompiliert sie die Windows-CI. Auf einem Vulkan-Gerät gelaufen ist sie erst in Thema 146 (unten).
+  **Gleiche Art, behoben in Thema 146:** `EncodeShadowMap()`, `runSSAO()` und `EncodeDecalDepth()`
+  extrahierten in Vulkan ebenfalls vor `DrawScene()` und ohne eigenes `setDayNight()`. Bei GI
+  aus wurden die CSM-Kaskaden also mit der Sonne des Vorframes gefittet und gerendert, während der
+  Scene-Pass mit der aktuellen schattierte. Bei normaler Day-Night-Geschwindigkeit war das
+  unsichtbar. Jetzt gibt es genau ein `setDayNight()` pro Frame, ganz oben in den beiden Stellen,
+  die einen Frame aufzeichnen (`Render()` und `RenderSceneImage()`), vor jeder Extraktion. Die
+  Aufrufe in `runGi()` und `DrawScene()` sind entfallen. Der Test in `tests/test_culling.cpp`
+  („Vulkan extracts with this frame's sun: one setDayNight at the frame's top …") prüft die
+  Reihenfolge und dass es genau diese zwei Aufrufe gibt.
+  **Auf Hardware gemessen (Thema 146, Schritt 2, 06.10.2026, RTX 4070, Vulkan 1.4.341,
+  Release):** `scripts/gi-shadow-repro/run146.ps1` + `ana146.py`. GI aus, SSAO/AA/Bloom/DOF/
+  Motion-Blur/SSR aus, Forward, Szene `SHADOWINSTTEST`, TOD 0.35, Sprung 0.02 für **einen** Frame
+  (`HE_DUMP_TODSTEPFRAMES=1`). „Vorher" ist derselbe Build mit nur dem `VulkanRenderer.cpp`-Teil
+  von 64efd77b zurückgedreht (es unterscheidet sich nur `HorizonRendering.dll`). `lag` = mittlere
+  |P1 − S| / |S0 − S| auf den rund 32 000 Bodenpixeln, über die die Schattenkanten wandern
+  (0 = Schatten an der Sonne dieses Frames, 1 = an der des Vorframes).
+
+  | Build / Backend | lag | P1 näher an S0 | Schattenmaske verschoben | P1 = S bitgleich |
+  |---|---|---|---|---|
+  | Vulkan vorher | **1.032** | 100 % | 98.3 % | nein (max 102) |
+  | Vulkan nachher | **0.000** | 0 % | 0 % | ja |
+  | D3D11 / D3D12 / OpenGL (Referenz) | 0.000 | 0 % | 0 % | ja |
+
+  Der Rauschboden ist null, zwei statische Captures sind auf allen vier Backends bitgleich. Das
+  Vulkan-Bild nachher ist auf dem Boden pixelgleich mit D3D11 und D3D12 (1 Pixel Maskenunterschied).
+  Die Validation-Meldungen vorher und nachher sind nach Art gleich, mit GI und SSAO aus und auch
+  mit beiden an (`-Gi 1`, `HE_DUMP_SSAO=1`, statisch und P1). Es sind immer dieselben drei:
+  `vkCmdUpdateBuffer` im Render-Pass, `vkCmdPipelineBarrier` in Subpass 0 und ein Bildlayout bei
+  `vkQueueSubmit`. Das sind die vorbestehenden Meldungen aus Thema 144/145, der Fix bringt keine
+  neue Art. Die Zahl (je 9 + Abbruchhinweis) taugt nicht zum Vergleich, denn der Layer bricht jede
+  VUID nach 10 Meldungen ab (`duplicate_message_limit`). Mit GI an ist P1 vorher und nachher
+  **bitgleich**, die statische Aufnahme weicht um höchstens 0.1 Luminanz ab. Der GI-Pfad aus
+  Thema 131 (früher eigenes `setDayNight()` in `runGi()`) ist durch das Verlegen also unverändert.
+  Nicht eigens bezeugt: `RenderSceneImage()`. Dort hat der Dump keinen Sonnensprung zwischen zwei
+  Aufrufen, der Aufruf ist dort nur über den Quelltext-Test belegt. Ebenso wenig SSAO und
+  Decal-Tiefe: sie hängen nicht von der Sonne ab, es gibt dort keinen sichtbaren Versatz.
 * Ein Rest-Flackern bleibt (§7.2, Ende). Für weitere Ruhe bräuchte es mehr Strahlen pro Pixel, ein
   höheres History-Gewicht (das braucht die Verdecker-Reaktion des Clamps) oder einen
   kantenerhaltenden Spatial-Filter statt 3×3-Box.
@@ -401,3 +445,42 @@ einem Würfelfuß aus spitzem Winkel ist **nicht** gemessen.
 (dasselbe mit `-Frames 61`), dann `python scripts/gi-shadow-repro/ana.py REF.bmp X_f60.bmp X_f61.bmp`.
 Für Verdecker-Bewegung drei Captures (statisch, `-Extra @{HE_DUMP_TOD='0.345'}`,
 `-Extra @{HE_DUMP_TODSTEP='0.005'}`) und dann `ana_motion.py NEW OLD MOVED`.
+CSM-Sonnenversatz (Thema 146): Messbauten nach `<root>\deploy\Editor` legen, dann
+`scripts\gi-shadow-repro\run146.ps1 -Roots C:\hw146\pre,C:\hw146\post -Rhis Vulkan` und
+**in einem eigenen Aufruf** (cap.ps1 biegt APPDATA um, numpy fehlt sonst)
+`python scripts/gi-shadow-repro/ana146.py C:\hw146\post\cap vulkan`.
+
+### 7.6 Metal auf echter Hardware (Schritt 7)
+
+Stand 02.10.2026, Zweig auf 95dd2e44, Apple M5 (`supportsRaytracing = true`), macOS 27,
+macos-release frisch gebaut. Deploy und Build-Baum md5-gleich, der R2-Schritt `0.7548776662`
+steht in der deployten `libHorizonRendering.dylib`. Szene wie `cap.ps1`
+(`SHADOWINSTTEST`, TOD 0.35, Kamera −3/3/−5, Pitch −40, Forward, AA aus, `HE_SKY_TIME=30`,
+leeres `HE_CONFIG_DIR`, also `GILightRadius` 0.5°). Reflexionen mit `GIREFLTEST=1`, Rauheit 0.3,
+Stufe 2. Skript: `scripts/gi-shadow-repro/cap_metal.sh`.
+
+Der Metal-Renderer loggt keinen Erfolg beim Pipeline-Bau, nur Fehler
+(`GI shadow shader compile failed`, `GI … pipeline creation failed`, `GI reflection pipeline
+creation failed`). Eine Zeile „GI pipelines built“ gibt es nicht. Belegt ist der Lauf deshalb
+über diese Zeichen:
+
+| Lauf | Pfad (Logzeile) | Kernel | Fehlerzeilen | Beleg im Bild |
+|---|---|---|---|---|
+| GI an, 3 + 60 Frames | `ray-traced GI supported (hardware ray tracing)` | `kGIShadowRasterMSL` (`giShadowTemporal`, Blur, G-Buffer), `kGIShadowMSL`, `kGIProbeMSL` | 0, Bilanz `0 error(s)` | GI an gegen aus: 100 % der Pixel anders, max. 135. Die CSM-Hexagone weichen der RT-Maske, die Schatten sind indirekt aufgehellt |
+| GI an, `HE_GI_FORCE_SW=1` | `software GI path forced` + `(software ray tracing)` | `kGISWMSL` (`giShadowRaySw`, Probe-SW) + dieselbe Raster-Lib | 0 | HW gegen SW: max. 3/255 nach 3 Frames, **max. 1/255 auf 1,1 % der Pixel nach 60 Frames** |
+| Reflexionen HW | wie oben | `kGIReflMSL` (`giReflRay`) | 0 | an gegen aus: 14,6 % der Pixel, max. 204. Der Spiegelboden zeigt den grünen Graph-Würfel und den roten Emissive-Würfel |
+| Reflexionen SW | wie oben | `kGISWMSL` (`giReflRaySw`) | 0 | an gegen aus: dieselben 14,6 %. HW gegen SW max. 1/255 (507 px) |
+| HW + SW mit `MTL_DEBUG_LAYER=1` (nslog), GI + Reflexionen | „Metal API Validation Enabled“ | alle oben | keine Validierungsmeldung, Bilanz `0 error(s)` | – |
+
+In allen 11 Läufen meldet die Session-Bilanz `0 error(s)`. Die einzige Warnung ist „No config
+file“ (das leere Config-Verzeichnis). Nach 60 Frames ist die Schattenkante auf Metal glatt.
+Nach 3 Frames ist sie noch leicht gezackt, weil die History dort noch nicht konvergiert ist.
+Ein Flacker-Maß wie in §7.2 (f60 gegen f61 mit `ana.py`) ist auf Metal **nicht** erhoben. Die
+offene Frage aus §6, warum Metal „nicht betroffen“ gewirkt hat, bleibt damit offen.
+
+Nebenbeobachtung, nicht untersucht: Innerhalb der GI-Schatten sind dreieckige Helligkeitsstufen
+zu sehen, und auf dem Boden liegen schwache Keile. Beides sieht nach indirektem Licht aus den
+Probes aus, nicht nach der Schattenmaske. Gegen den Stand vor dem Fix ist das nicht verglichen.
+
+**Folgearbeit Restflackern (Thema 134):** Messung unter Kamerafahrt, Kontaktschatten, Optionen und
+Entwurf in [gi-shadow-restflackern-1spp-2026-10-03.md](gi-shadow-restflackern-1spp-2026-10-03.md).

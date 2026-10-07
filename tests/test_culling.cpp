@@ -39,6 +39,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, invalid (kept visible) otherwise")
@@ -2064,6 +2065,36 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		}
 	}
 
+	SUBCASE("sun rays per pixel: every shadow kernel, the embedded ones included")
+	{
+		// Thema 134 §5.2: the sun-ray count arrives in the params block's .y lane
+		// of the local-extra row, and sample k continues the pixel's R2 walk at
+		// seed * spp + k. A kernel still tracing one ray ignores the setting on
+		// its backend/path only; one with another seed formula repeats or skips
+		// R2 points and leaves a different, slower-converging noise.
+		const std::vector<std::tuple<const char*, fs::path, size_t>> files = {
+			{ "gi_shadow.comp",     sh / "gi_shadow.comp",                     1 },
+			{ "gi_shadow_hw.comp",  sh / "gi_shadow_hw.comp",                  1 },
+			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl",                  1 },
+			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h",       1 },
+			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp",      1 },
+			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm",         2 }, // kGIShadowMSL + kGISWMSL
+		};
+		const std::regex kCount(R"(uint spp = uint\(max\((?:uLocalExtra|P\.extra)\.y, 1\.0\)\);)");
+		const std::regex kSeed(R"(giHash2\(gid(?:\.xy)?, (?:uFrame|P\.frame)\.x \* float\(spp\) \+ float\(k\)\))");
+		const std::regex kMean(R"(sunVis \+= [^;]*\? (?:0\.0 : 1\.0|1\.0 : 0\.0);\s*\}\s*sunVis /= float\(spp\);)");
+		auto count = [](const std::string& s, const std::regex& re)
+		{ return static_cast<size_t>(std::distance(std::sregex_iterator(s.begin(), s.end(), re), std::sregex_iterator())); };
+		for (const auto& [fileName, path, expected] : files)
+		{
+			const std::string name = fileName;
+			const std::string s = stripLineComments(readFile(path));
+			CHECK_MESSAGE(count(s, kCount) == expected, name, ": ray-count read found ", count(s, kCount), "x, expected ", expected);
+			CHECK_MESSAGE(count(s, kSeed)  == expected, name, ": seed*spp+k sample found ", count(s, kSeed), "x, expected ", expected);
+			CHECK_MESSAGE(count(s, kMean)  == expected, name, ": averaged sun visibility found ", count(s, kMean), "x, expected ", expected);
+		}
+	}
+
 	SUBCASE("shadow temporal pass: history tolerance and neighbourhood clamp")
 	{
 		// Thema 131 §3 A/C: the clamp box is the range of 3x3 raw MEANS over a 5x5
@@ -2082,7 +2113,45 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "history tolerance", { R"(tolerance = max\(clamp\(([0-9.]+) \* clip\.w, ([0-9.]+), ([0-9.]+)\), min\(footprint, ([0-9.]+)\)\))" } },
 			{ "clamp footprint",   { R"(float r5\[(\d+)\];)" } },
 			{ "clamp box mean",    { R"(nMin = min\(nMin, s / ([0-9.]+)\);)" } },
-			{ "clamp slack",       { R"(clamp\(hist\.a, nMin - ([0-9.]+), nMax \+ ([0-9.]+)\))" } },
+			{ "clamp slack",       { R"(clamp\(histA, nMin - ([0-9.]+), nMax \+ ([0-9.]+)\))" } },
+			// Thema 134 §4.2: bilinear history, reprojected as a motion vector
+			// from the pixel centre (NOT the absolute prevUV, which dissolves
+			// static contact edges), 4 taps each gated by the surface test and
+			// renormalised. A copy falling back to the point lookup brings back
+			// the shadow trailing a panning camera on that backend only.
+			{ "history motion vector", { R"(hf\s*= \(\w+\.?\w* \+ \(prevUV - curUV\)\) \* hsz - ([0-9.]+);)" } },
+			{ "history taps",          { R"(for \(int j = 0; j < (\d+); \+\+j\)\s*\{\s*(?:const )?\w+2\s+o\s*= \w+2\(float\(j & (\d+)\), float\(j >> (\d+)\)\);)" } },
+			{ "history tap gate",      { R"(if \(length\(pv\.xyz - h\.rgb\) < (tolerance)\) \{ hAcc \+= h\.a \* bw\.x \* bw\.y; hWsum \+= bw\.x \* bw\.y; \})" } },
+			{ "history renormalise",   { R"(histA = hWsum > ([0-9.e+-]+) \? hAcc / hWsum : ([0-9.]+);)" } },
+			{ "history weight gate",   { R"(w = hWsum > ([0-9.e+-]+) \? clamp\([\w.]+, ([0-9.]+), ([0-9.]+)\) : ([0-9.]+);)" } },
+		});
+	}
+
+	SUBCASE("shadow spatial filter: the four a-trous copies")
+	{
+		// Thema 134 §4.3/§5.3: the edge-aware a-trous that replaced the 3x3 box.
+		// The value stop is the one that matters — without it (or with a
+		// different scale) the filter softens every shadow (rmse x7 in the
+		// measurement); the plane/normal stops keep it off other surfaces.
+		const std::vector<const char*> names = { "gi_atrous.frag", "HlslSources.h",
+		                                         "OpenGLRenderer.cpp", "MetalRenderer.mm" };
+		const std::vector<std::string> src = {
+			stripLineComments(readFile(sh / "gi_atrous.frag")),
+			stripLineComments(readFile(be / "D3D_Shared" / "HlslSources.h")),
+			stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")),
+			stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")),
+		};
+		checkGroup(names, src, {
+			{ "B3 weights",        { R"(h\[5\] = (?:float\[5\]\(|\{ ?)([0-9./ ,]+?)(?:\)| ?\});)" } },
+			{ "kernel taps",       { R"(h\[x \+ (\d+)\] \* h\[y \+ (\d+)\])" } },
+			{ "plane stop",        { R"(exp\(-abs\(dot\(n, q\.xyz - pv\.xyz\)\) / \(([0-9.]+) \* fp\)\))" } },
+			{ "normal power",      { R"(pow\(max\(dot\(n, normalize\([^;]*?\.xyz\)\), ([0-9.]+)\), ([0-9.]+)\);)" } },
+			{ "value stop",        { R"(exp\(-abs\(v - c\) / \(([0-9.]+) \* sig \+ ([0-9.e+-]+)\)\))" } },
+			{ "Bernoulli sigma",   { R"(sig\s*= sqrt\(max\(c \* \(1\.0 - c\), ([0-9.]+)\) / max\([\w.]+, ([0-9.]+)\)\))" } },
+			{ "footprint",         { R"(fp\s*= max\(max\(min\(length\(gxp - pv\.xyz\), length\(gxm - pv\.xyz\)\),\s*min\(length\(gyp - pv\.xyz\), length\(gym - pv\.xyz\)\)\), ([0-9.e+-]+)\))" } },
+			{ "early-out range",   { R"(if \(c < ([0-9.e+-]+) \|\| c > 1\.0 - ([0-9.e+-]+)\))" } },
+			{ "early-out reach",   { R"(o \* \(([0-9.]+) \* st\) \* texel)" } },
+			{ "early-out equal",   { R"(\) - c\) < ([0-9.e+-]+);)" } },
 		});
 	}
 
@@ -2323,6 +2392,178 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 	}
 }
 
+TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky cube's (Thema 126)")
+{
+	// The forward SSR and GI-reflection stages of heLitP used to sit INSIDE the
+	// `heLight.fog.z > 0.5` block (fog.z = heSkyEnv bound). Vulkan raised ssr.x
+	// and never fog.z, so every graph-material reflection on Vulkan was thrown
+	// away without a trace in any log — the gate the backend set was simply
+	// never reached. Two halves keep that from coming back: the preamble keeps
+	// the stages outside the sky block, and every backend that ships the sky
+	// cube and the AO buffer actually raises their gates.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - gate structure check skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::string lib = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "material" / "MaterialShaderLibrary.cpp"));
+
+	SUBCASE("SSR and GI reflections are not nested in the heSkyEnv block")
+	{
+		const size_t fn = lib.find("vec3 heLitP(");
+		REQUIRE(fn != std::string::npos);
+		const size_t gate = lib.find("if (heLight.fog.z > 0.5)", fn);
+		REQUIRE(gate != std::string::npos);
+		const size_t open = lib.find('{', gate);
+		REQUIRE(open != std::string::npos);
+		size_t close = open;
+		for (int depth = 0; close < lib.size(); ++close)
+		{
+			if (lib[close] == '{') ++depth;
+			else if (lib[close] == '}' && --depth == 0) break;
+		}
+		REQUIRE(close < lib.size());
+		const std::string skyBlock = lib.substr(open, close - open);
+		// The block this test is about — the sky sample, nothing else.
+		CHECK(skyBlock.find("texture(heSkyEnv, Rrough)") != std::string::npos);
+		CHECK_MESSAGE(skyBlock.find("heSSRFwd") == std::string::npos,
+		              "the forward SSR stage is back inside the fog.z (heSkyEnv) block - "
+		              "a backend with SSR but no sky cube loses every reflection again");
+		CHECK_MESSAGE(skyBlock.find("heGIReflFwd") == std::string::npos,
+		              "the GI-reflection stage is back inside the fog.z (heSkyEnv) block");
+		const size_t ssr = lib.find("texture(heSSRFwd", fn);
+		const size_t gir = lib.find("texture(heGIReflFwd", fn);
+		CHECK(ssr != std::string::npos);
+		CHECK(gir != std::string::npos);
+		// Still ONE specular term for all three sources: without that gate a
+		// backend with no cube and no trace (any of them before its first sky
+		// bake, or with the cube unavailable) would grow a Fresnel term over
+		// black where it had none.
+		CHECK(lib.find("if (heLight.fog.z > 0.5 || heLight.giRefl.z > 0.5 || heLight.ssr.x > 0.5)", fn)
+		      != std::string::npos);
+	}
+
+	SUBCASE("All five backends raise the sky-cube and AO gates of graph materials")
+	{
+		// D3D11 and D3D12 joined in Schritt 3: their fillMatLight set no lit.fog
+		// field at all, so graph materials there had no sky ambient, no specular
+		// IBL, no SSAO and no height fog.
+		const std::vector<std::pair<const char*, std::string>> fills = {
+			{ "OpenGLRenderer.cpp", stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")) },
+			{ "MetalRenderer.mm",   stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")) },
+			{ "VulkanRenderer.cpp", stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp")) },
+			{ "D3D11Renderer.cpp",  stripLineComments(readFile(be / "D3D11" / "D3D11Renderer.cpp")) },
+			{ "D3D12Renderer.cpp",  stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp")) },
+		};
+		const std::regex fogZ(R"(\.fog\[2\]\s*=\s*\w+\s*\?\s*1\.0f\s*:\s*0\.0f;)");
+		const std::regex fogW(R"(\.fog\[3\]\s*=\s*\w+\s*\?\s*1\.0f\s*:\s*0\.0f;)");
+		for (const auto& [file, text] : fills)
+		{
+			CHECK_MESSAGE(std::regex_search(text, fogZ), std::string(file), " no longer raises heLight.fog.z (heSkyEnv)");
+			CHECK_MESSAGE(std::regex_search(text, fogW), std::string(file), " no longer raises heLight.fog.w (heAO)");
+		}
+	}
+
+	SUBCASE("Vulkan binds exactly what its gates promise")
+	{
+		// The gate and the descriptor must be decided by the SAME flag: fog.z with
+		// a white cube bound would tint everything white, fog.w with the white
+		// stand-in would silently drop occlusion.
+		const std::string vk = stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp"));
+		CHECK(vk.find("lit.fog[2] = m_skyEnvValid      ? 1.0f : 0.0f;") != std::string::npos);
+		CHECK(vk.find("lit.fog[3] = m_ssaoRanThisFrame ? 1.0f : 0.0f;") != std::string::npos);
+		CHECK(vk.find("m_skyEnvValid ? m_skyEnvView : m_whiteCubeView") != std::string::npos);
+		CHECK(vk.find("m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView") != std::string::npos);
+		CHECK(vk.find("wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);") != std::string::npos);
+		CHECK(vk.find("wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);") != std::string::npos);
+		// And the cube is the SHARED bake, not a fourth hand-kept sky.
+		CHECK(vk.find("HE::BuildSkyEnvFaceRow(") != std::string::npos);
+	}
+
+	SUBCASE("D3D11 and D3D12 bind exactly what their gates promise")
+	{
+		// Same rule as Vulkan: gate and view come from ONE flag. Neither backend
+		// had a sky cube before, so both bake the shared one — before the first
+		// fillMatLight of the frame, which reads the flag.
+		const fs::path inc = root / "src" / "HE_Rendering" / "include" / "Backends";
+		const std::string d11  = stripLineComments(readFile(be / "D3D11" / "D3D11Renderer.cpp"));
+		const std::string d12  = stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp"));
+		const std::string bind = stripLineComments(readFile(inc / "D3D11" / "D3D11MaterialBindings.h"));
+		for (const std::string* src : { &d11, &d12 })
+		{
+			CHECK(src->find("HE::BuildSkyEnvFaceRow(") != std::string::npos);
+			CHECK(src->find("const bool skyEnvBound = p.m_skyEnvValid;") != std::string::npos);
+			CHECK(src->find("lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;") != std::string::npos);
+			CHECK(src->find("lit.fog[3] = aoActive    ? 1.0f : 0.0f;") != std::string::npos);
+			const size_t bake = src->find("p.updateSkyEnvCube(");
+			const size_t fill = src->find("fillMatLight(false, false);");
+			REQUIRE(bake != std::string::npos);
+			REQUIRE(fill != std::string::npos);
+			CHECK_MESSAGE(bake < fill, "the sky cube must be baked before fillMatLight reads m_skyEnvValid");
+		}
+
+		// D3D11: the AO gate is the built-in shader's own (the SRV it reads at
+		// t2 is not the white dummy), and heAO's t16 is the built-in pass's
+		// forward SSR result — the material draw must hand it back, or every
+		// built-in draw after a graph material reflects the occlusion buffer.
+		CHECK(d11.find("fillMatLight(giShadingActive, aoWanted && aoSRV != p.whiteSRV.Get());") != std::string::npos);
+		CHECK(d11.find("Texture2D    uSSRFwd    : register(t16);") != std::string::npos);
+		CHECK(d11.find("p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,") != std::string::npos);
+		CHECK(d11.find("aoSRV, p.m_matWeightSampler.Get());") != std::string::npos);
+		CHECK(d11.find("HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);") != std::string::npos);
+		CHECK(bind.find("constexpr UINT kSkyEnvSrvSlot     = 15;") != std::string::npos);
+		CHECK(bind.find("constexpr UINT kSkyEnvSamplerSlot = 15;") != std::string::npos);
+		CHECK(bind.find("constexpr UINT kAOSrvSlot         = 16;") != std::string::npos);
+		CHECK(bind.find("ctx->PSSetShaderResources(kAOSrvSlot, 1, &builtinSSR);") != std::string::npos);
+		// …and those registers are where the HLSL pin table puts the preamble's
+		// (raw source: the pin rows name their binding only in the comment).
+		const std::string libRaw = readFile(root / "src" / "HE_Rendering" / "src" / "material" /
+		                                    "MaterialShaderLibrary.cpp");
+		CHECK(libRaw.find("{ Stage::Fragment, 0, 15, 15 },     // heSkyEnv") != std::string::npos);
+		CHECK(libRaw.find("{ Stage::Fragment, 0, 16, 16,  0 }, // heAO") != std::string::npos);
+
+		// D3D12: both views are written into the draw's OWN block, after the
+		// template copy (the copy would overwrite them otherwise), under the flags
+		// the gates were raised with.
+		CHECK(d12.find("const bool matAOActive = aoWanted && p.ssaoBlurRT != nullptr;") != std::string::npos);
+		CHECK(d12.find("fillMatLight(giShadingActive, matAOActive);") != std::string::npos);
+		const size_t copy = d12.find("CopyDescriptorsSimple(D3D12RendererImpl::k_matSrvPerDraw, p.matSrvCpu(blk)");
+		const std::regex sky(R"(if \(p\.m_skyEnvValid\)\s*p\.srvForSkyEnvCube\(p\.matSrvCpu\(blk \+ HE::d3d12mat::kSlotSkyEnv\)\);)");
+		const std::regex ao(R"(if \(matAOActive\)\s*p\.srvIntoHeapSlot\(p\.ssaoBlurRT\.Get\(\), DXGI_FORMAT_R8_UNORM,\s*p\.matSrvCpu\(blk \+ HE::d3d12mat::kSlotAO\)\);)");
+		std::smatch skyM, aoM;
+		REQUIRE(copy != std::string::npos);
+		REQUIRE(std::regex_search(d12, skyM, sky));
+		REQUIRE(std::regex_search(d12, aoM, ao));
+		CHECK(static_cast<size_t>(skyM.position(0)) > copy);
+		CHECK(static_cast<size_t>(aoM.position(0)) > copy);
+	}
+
+	SUBCASE("D3D12 writes the draw's landscape weightmap into heLandscapeWeights (t14)")
+	{
+		// Thema 155: block slot 9 stayed the template's null view, so a painted
+		// terrain showed layer 0 only. The weightmap is the DRAW's, chosen like D3D11 / Vulkan /
+		// GL — the chunk's own, else the layer-0 default — and written AFTER the
+		// template copy, which would overwrite it otherwise.
+		const std::string d12 = stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp"));
+		const size_t own  = d12.find("heWeights = p.resolveGraphTexture(cl, dc.weightmapTextureId, {}, m_contentManager);");
+		const size_t def  = d12.find("heWeights = p.resolveGraphTexture(cl, HE::kDefaultLayer0WeightTextureId, {}, m_contentManager);");
+		const size_t copy = d12.find("CopyDescriptorsSimple(D3D12RendererImpl::k_matSrvPerDraw, p.matSrvCpu(blk)");
+		const std::regex wr(R"(if \(heWeights\)\s*p\.srvForTexture\(heWeights, p\.matSrvCpu\(blk \+ HE::d3d12mat::kSlotLandscapeWeights\)\);)");
+		std::smatch wrM;
+		REQUIRE(own  != std::string::npos);
+		REQUIRE(def  != std::string::npos);
+		REQUIRE(copy != std::string::npos);
+		REQUIRE(std::regex_search(d12, wrM, wr));
+		CHECK(own < def);
+		CHECK(def < copy);
+		CHECK(static_cast<size_t>(wrM.position(0)) > copy);
+	}
+}
+
 TEST_CASE("Clustered lighting: heLitP's forward twin matches the deferred resolve's (Thema 117)")
 {
 	// MaterialShaderLibrary.cpp carries the cluster shading twice: the clustered
@@ -2431,6 +2672,59 @@ TEST_CASE("UI image quads sample their texture undecoded on Metal and GL (Thema 
 		CHECK_MESSAGE(text.find("{ &m_graphTexCache, &m_uiTexCache }") != std::string::npos,
 		              file, ": texture invalidation no longer drops the UI cache");
 	}
+}
+
+TEST_CASE("UI image quads have a texture path on D3D11 and D3D12 (Thema 157)")
+{
+	// Before Thema 157 neither D3D UI pass read UIRenderObject::textureAssetId:
+	// an Image widget (and any textured Panel/Border/Button) drew as a solid quad
+	// in its tint, white by default — measured on the RTX 4070 with the
+	// HE_DUMP_UITEST=image witness. The fix mirrors GL's mode 2: a UI-only cache
+	// uploaded WITHOUT the sRGB decode (Thema 107), bound on t0, mode 2 in the
+	// pixel shader. Nothing fails to build when a piece goes missing, the quad
+	// just turns white (or too dark) again — so pin the wiring in the source.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - D3D UI image pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::string d3d11 = stripLineComments(readFile(be / "D3D11" / "D3D11Renderer.cpp"));
+	const std::string d3d12 = stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp"));
+	REQUIRE_MESSAGE(!d3d11.empty(), "D3D11Renderer.cpp not readable");
+	REQUIRE_MESSAGE(!d3d12.empty(), "D3D12Renderer.cpp not readable");
+
+	const std::vector<std::pair<const char*, const std::string*>> files = {
+		{ "D3D11Renderer.cpp", &d3d11 },
+		{ "D3D12Renderer.cpp", &d3d12 },
+	};
+	for (const auto& [file, text] : files)
+	{
+		// Shader: the glyph branch is bounded, or mode 2 would run into it.
+		CHECK_MESSAGE(text->find("if (uMode > 0.5f && uMode < 1.5f)") != std::string::npos,
+		              std::string(file), ": the glyph branch swallows the image mode again");
+		CHECK_MESSAGE(text->find("if (uMode > 1.5f)") != std::string::npos,
+		              std::string(file), ": the UI pixel shader has no textured-quad branch");
+		// Pass: a textured quad asks for mode 2.
+		CHECK_MESSAGE(text->find("obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f)") != std::string::npos,
+		              std::string(file), ": the UI pass never selects the image mode");
+		// Upload without the decode, and the helper honours the switch.
+		CHECK_MESSAGE(text->find("/*honourSrgb=*/false") != std::string::npos,
+		              std::string(file), ": UI images upload with the sRGB flag again");
+		CHECK_MESSAGE(text->find("tex->srgb && honourSrgb") != std::string::npos,
+		              std::string(file), ": the upload helper ignores honourSrgb");
+	}
+	// D3D11: own cache, dropped on a re-import.
+	CHECK(d3d11.find("resolveUITexture(obj.textureAssetId, cm)") != std::string::npos);
+	CHECK(d3d11.find("resolveGraphTexture(obj.textureAssetId") == std::string::npos);
+	CHECK(d3d11.find("uiTexCache.erase(graphTexKey(id, {}))") != std::string::npos);
+	// D3D12: the UI pass binds only m_uiAtlasHeap, so the images need their own
+	// region there (not the 16 font slots); uploads are recorded before the draws.
+	CHECK(d3d12.find("hd.NumDescriptors = k_maxUIFontAtlases + k_maxUIImages;") != std::string::npos);
+	CHECK(d3d12.find("uiImageSlotFor(cmd, obj.textureAssetId, cm)") != std::string::npos);
+	CHECK(d3d12.find("m_uiImageCache.find(graphTexKey(id, {}))") != std::string::npos);
 }
 
 TEST_CASE("specular AA widening: the numbers the shader copies implement")
@@ -2886,6 +3180,121 @@ TEST_CASE("D3D12 main swapchain follows the window size (Thema 112)")
 	REQUIRE(call != std::string::npos);
 	REQUIRE(slot != std::string::npos);
 	CHECK(call < slot);
+}
+
+TEST_CASE("Vulkan extracts with this frame's sun: one setDayNight at the frame's top (Thema 131, 146)")
+{
+	// The cascades (EncodeShadowMap), the decal depth pre-pass, GI and SSAO
+	// each extract the scene on their own, ahead of DrawScene() — and only
+	// DrawScene() pushed the day-night state into the extractor. They fit and
+	// traced against the PREVIOUS frame's sun while the scene pass shaded with
+	// the current one: a one-frame lag of the GI shadow edge (Thema 131) and,
+	// with GI off, of the CSM cascades (Thema 146). The state is now pushed
+	// once at the top of the two places that record a frame — Render() and
+	// RenderSceneImage() — before the first extraction, and nowhere else.
+	// Metal pushes setDayNight before every GI extraction; D3D11/D3D12/GL
+	// extract once per frame after it. No GPU under ctest, so this pins the
+	// order in the source.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("Vulkan renderer source not found - day-night pin skipped");
+		return;
+	}
+	const std::string src = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "Vulkan" / "VulkanRenderer.cpp"));
+	REQUIRE(!src.empty());
+	auto bodyOf = [&](const char* signature) {
+		const size_t fn = src.find(signature);
+		REQUIRE(fn != std::string::npos);
+		const size_t fnEnd = src.find("\n}\n", fn);
+		REQUIRE(fnEnd != std::string::npos);
+		return src.substr(fn, fnEnd - fn);
+	};
+	// Same environment fields at both, so every pass agrees on the sun.
+	const std::regex dayNight(
+		R"(m_extractor\.setDayNight\(\s*m_environment\.dayNightCycle\s*,\s*m_environment\.timeOfDay\s*,)"
+		R"(\s*m_environment\.sunColor\s*,\s*m_environment\.sunIntensity\s*,)"
+		R"(\s*m_environment\.moonColor\s*,\s*m_environment\.moonIntensity\s*,)"
+		R"(\s*m_environment\.cloudCoverage\s*\))");
+
+	// Render(): before the viewport frame and before the swapchain branch's
+	// own cascades, decal depth and scene.
+	{
+		const std::string body = bodyOf("void VulkanRenderer::Render()");
+		std::smatch m;
+		REQUIRE(std::regex_search(body, m, dayNight));
+		const size_t at = static_cast<size_t>(m.position(0));
+		for (const char* pass : { "DrawViewportFrame(", "EncodeShadowMap(", "EncodeDecalDepth(", "DrawScene(" })
+		{
+			const size_t p = body.find(pass);
+			REQUIRE_MESSAGE(p != std::string::npos, pass);
+			CHECK_MESSAGE(at < p, pass);
+		}
+	}
+	// RenderSceneImage(): records DrawViewportFrame on its own.
+	{
+		const std::string body = bodyOf("bool VulkanRenderer::RenderSceneImage(");
+		std::smatch m;
+		REQUIRE(std::regex_search(body, m, dayNight));
+		const size_t p = body.find("DrawViewportFrame(");
+		REQUIRE(p != std::string::npos);
+		CHECK(static_cast<size_t>(m.position(0)) < p);
+	}
+	// Nowhere else: no pass in between re-pushes it (with other fields, say),
+	// so the frame's sun has one source. Exactly the two calls above.
+	size_t calls = 0;
+	for (size_t at = src.find("m_extractor.setDayNight("); at != std::string::npos;
+	     at = src.find("m_extractor.setDayNight(", at + 1))
+		++calls;
+	CHECK(calls == 2);
+}
+
+TEST_CASE("GI instances get their material colour before the acceleration update (Thema 154)")
+{
+	// The extractor leaves RenderObject::baseColor white; resolveWorldMaterialScalars
+	// fills it. Vulkan's runGi() extracts on its own and called updateGiAccel()
+	// without the resolve, so every GI instance bounced white and a red floor
+	// gave the same probe field as a grey one (colour bleed exactly 0).
+	// D3D11/D3D12 resolve right before their updateGiAccel. No GPU under ctest,
+	// so this pins the order in the source: extract -> resolve -> updateGiAccel.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - GI material-resolve pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+
+	const std::string vk = stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp"));
+	REQUIRE(!vk.empty());
+	const size_t fn = vk.find("void VulkanRenderer::runGi(");
+	REQUIRE(fn != std::string::npos);
+	const size_t fnEnd = vk.find("\n}\n", fn);
+	REQUIRE(fnEnd != std::string::npos);
+	const std::string body = vk.substr(fn, fnEnd - fn);
+	const size_t extract = body.find("m_extractor.extract(");
+	const size_t resolve = body.find("HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);");
+	const size_t accel   = body.find("updateGiAccel();");
+	REQUIRE(extract != std::string::npos);
+	REQUIRE(accel != std::string::npos);
+	REQUIRE_MESSAGE(resolve != std::string::npos,
+	                "VulkanRenderer::runGi no longer resolves material scalars - GI instances bounce white");
+	CHECK(extract < resolve);
+	CHECK(resolve < accel);
+
+	for (const char* file : { "D3D11/D3D11Renderer.cpp", "D3D12/D3D12Renderer.cpp" })
+	{
+		const std::string src = stripLineComments(readFile(be / file));
+		REQUIRE(!src.empty());
+		const size_t r = src.find("HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);");
+		const size_t a = src.find("p.updateGiAccel(m_contentManager, p.m_renderWorld");
+		REQUIRE_MESSAGE(r != std::string::npos, std::string(file));
+		REQUIRE_MESSAGE(a != std::string::npos, std::string(file));
+		CHECK_MESSAGE(r < a, std::string(file), " updates the GI instances before resolving their material colour");
+	}
 }
 
 TEST_CASE("D3D11 main swapchain follows the window size (Thema 128)")

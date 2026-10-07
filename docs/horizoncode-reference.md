@@ -40,6 +40,38 @@ right away anyway. A widget that destroys itself in PreConstruct never gets
 its Construct. PreConstruct exists only for widgets; HC classes and entities
 do not fire it. Design: `docs/widget-pre-construct-design.md`.
 
+**PreConstruct at design time.** The widget designer runs PreConstruct too
+(toolbar switch **Pre Construct**, on by default), so text and colours a graph
+sets show on the canvas while you lay the widget out, embedded widgets
+included. It runs on the document as it is in the editor, always interpreted,
+and only PreConstruct: never Construct, Tick or Destruct. It runs in a sandbox:
+Set Property, variables, functions and events within the widget family, Get
+Child Widget and the pure rows of Math, String, JSON and Date/Time work;
+every other Engine Call (files, saves, prefs, HTTP, network, sound, random,
+the world) and Create Widget/Object are skipped, their outputs read as
+defaults, and the canvas lists what was skipped. A Delay parks forever there.
+**Is Design Time** (Engine Call `widget.isDesignTime`, pure Bool) is true only
+in that run, so `PreConstruct → Branch(Is Design Time)` gives the designer
+placeholder data and the game the real thing. What the run sets is shown, never
+saved: Details, undo and the saved asset keep the authored values.
+
+**Expose on Spawn.** Tick **Expose on Spawn** on a public variable of a widget
+and every Create Widget of that widget gets an input for it, named and typed
+like the variable, in declaration order. A wired input, or one with a value
+typed on it, is set on the new widget after its variables are seeded and
+**before** its PreConstruct, so a PreConstruct that writes `"Score: " + score`
+shows the creator's score in the first frame; Construct sees it too. An input
+left alone shows the variable's default; Vector/Color/Object/Struct/container
+inputs have no field on the node and only count when wired, otherwise the
+widget keeps its own default. A PreConstruct that sets the same variable
+overwrites the value handed in. The inputs follow the widget: renaming or
+reordering its variables moves the wires along, removing one drops its wire.
+At run time only "public" is checked (like Set (Ref)); a name the widget has
+made private or renamed since the caller was last opened in the editor is
+skipped with a warning. Lua, Python and `widget.create` hand in no values.
+Embedded widgets and list rows do not get per-instance values. Design:
+`docs/widget-pre-construct-design.md` §6.
+
 An Entity class is attached through the ordinary **Script** component — the same
 slot that carries a `.lua`/`.py` script; the engine branches on the referenced
 asset's type. There is no separate "HorizonCode component". The instance and the
@@ -87,6 +119,62 @@ therefore fires before the first world is even built.)
 
 Variables can be a **single value** or an **array** of any type, and object-typed
 variables show the class name. Arrays have a default-value slot editor.
+
+**Pull on Construct** (variable details, instance variables only;
+`docs/state-driven-data-exchange-design.md` §2). A variable can name a source it
+is filled from when an instance is registered, before any of its own events:
+
+| Source | What it reads |
+|--------|---------------|
+| **Game Instance** | a public instance variable of the Game Instance, optionally one **Member** of a struct variable |
+| **Creator** | a public instance variable of the instance whose Create Object / Create Widget (or engine-API call) registered this one; optional **Creator Class** = the expected class (derived classes count) |
+
+Guarantees: PreConstruct, Construct, BeginPlay and OnLevelLoaded see the pulled
+value or the default, never anything in between. It happens **once** (a later
+change at the source does not follow). When the source cannot answer (no Game
+Instance, no creator because the object was placed or spawned from Lua/Python/C++,
+a private or missing variable, a type that does not fit) the declared default stays
+and is shown as **Fallback**; the log warns once per class, variable and reason.
+Int, Float and Double convert as scalars; containers must match exactly; a pulled
+container or struct is a copy. Spawn values (Expose on Spawn) are set after the
+pull and win. The Game Instance itself never pulls. The runtime does the pull for
+both backends (`Runtime::pullOnConstruct`, `pulledVariablesOf`, `creatorOf`); the
+codegen only carries the spec in `CompiledVarInfo`. **Add to Target** writes a
+missing source variable (or struct variable / struct field) into the Game Instance
+or the creator class. Renaming a source variable carries the pull along when its
+class is provable (Game Instance, or a Creator Class).
+
+**Extract on Destruct** (class sidebar, section of the same name;
+`docs/state-driven-data-exchange-design.md` §3). A class names **one struct** and,
+per struct member, which of its instance variables fills it (**From**: any
+instance variable of the class, private and inherited ones too, or **Self** for an
+object member; nothing = the struct's default). When an instance is destroyed
+through `Runtime::destroy` (Destroy Object, Destroy Widget, an entity deleted,
+play stopping, …) its own `Destruct` runs first, then the struct is built from the
+variables as Destruct left them and sent as **`OnDestroyed`** to every instance
+bound to it with Bind Event, while the dying instance is still readable (Get (Ref)
+through Self works inside the handler; right after, Is Valid says false).
+
+* `OnDestroyed` goes to listeners only, never to the instance itself. It goes out
+  for every destroyed instance, also without Extract — then with no data.
+* A listener declares **one** `OnDestroyed`: with no argument (it hears every
+  death, the data is dropped) or with a struct argument (it runs only when the
+  sender sends that struct; anything else is skipped with one warning). Watching
+  several classes typed means giving them the same struct. **Create OnDestroyed
+  Event** under Bind Event adds it, typed with the target class's struct.
+* Nobody bound: the data is dropped. To keep it beyond the death, bind the Game
+  Instance and store it there (design §4).
+* A derived class without its own struct sends its parent's; with one, only its own.
+* Not extracted: `Runtime::remove`/`clear()` (program end), the Level Script and
+  the Game Instance (they unload/shut down, the section is greyed out there).
+* The interpreter fills the struct from the graph's table, the C++ codegen emits a
+  native `extractOnDestruct` (`S_<Struct>` filled member by member); an entry that
+  cannot be filled keeps the default and warns once per class and member.
+
+Choosing a struct pre-fills the members by name; **Auto-Map by Name** does it
+again for rows still at their default; **New Struct from Variables…** makes a
+struct asset from ticked variables and maps it 1:1. Variables in the table are
+marked "(extracted)" in the list, and a rename carries the mapping along.
 
 ### Literals (edited inline on the node body)
 **Float**, **Bool** (checkbox), **Int**, **String** (grows then scrolls),
@@ -196,7 +284,7 @@ what a container can and cannot nest with.
 ### Widgets
 | Node | Purpose |
 |------|---------|
-| **Create Widget** (`CreateWidget`) | Instantiate a UI Widget asset (picked from a list in Details) → Widget, a `Ref`. |
+| **Create Widget** (`CreateWidget`) | Instantiate a UI Widget asset (picked from a list in Details) → Widget, a `Ref`. One input per variable the widget ticks **Expose on Spawn**, set before its PreConstruct (§1 *Expose on Spawn*). |
 | **Show Widget** / **Hide Widget** / **Destroy Widget** | Act on that Widget. |
 | **Show Self** / **Hide Self** | A widget graph shows/hides its own widget. |
 
@@ -214,7 +302,7 @@ take the same `Ref` the Create Widget node outputs.
 | **Call Function (Ref)** (`CallExternal`) | Call a public function on another instance, passing typed args + returns. |
 | **Get (Ref)** / **Set (Ref)** (`GetExternal`/`SetExternal`) | Read/write a public variable on a referenced instance. |
 | **Get Property** / **Set Property** | Read/write a property on the graph's target element. |
-| **Bind Event** (`BindEvent`) | Subscribe: when the target fires an event, this instance's matching Event fires. |
+| **Bind Event** (`BindEvent`) | Subscribe: when the target fires an event, this instance's matching Event fires. Lifecycle events (PreConstruct, Construct, BeginPlay, Destruct, OnInit, OnShutdown, OnLevelLoaded, OnLevelUnloaded) are NOT passed on to listeners; bind **`OnDestroyed`** to hear that the target died (Extract on Destruct). |
 | **Emit Event** (`EmitEvent`) | Broadcast an event to everyone bound to this instance. |
 | **Is Valid** (`IsValid`) | Bool: is the `Ref` a LIVE instance? The guard before touching an object that may have been destroyed (a dead Ref otherwise null-refs with an error log). |
 | **Cast** (`Cast`) | Checked downcast, Unreal's Cast node. Exec-outs **Success** / **Failure**; the `As <Class>` output carries the same reference on success and 0 otherwise, so it is only meaningful on the Success branch. The target is picked from a dropdown: an **engine class** (§2.1) or one of the project's HC classes. A reference that is 0, destroyed, or of another class all take Failure — Cast therefore doubles as an Is Valid. Its input is an object `Ref`, not an any-type pin: only a reference names a runtime class (the same rule Unreal's object pin follows). |

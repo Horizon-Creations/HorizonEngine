@@ -26,6 +26,9 @@
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
+#include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
+#include <JobSystem/JobSystem.h>              // parallel_for for that bake
+#include <glm/gtc/packing.hpp>                // packHalf1x16 (RGBA16F cube upload)
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h"                   // he::shaderc::compileHlslPinned (sky pass)
 #endif
@@ -473,6 +476,12 @@ cbuffer PerFrame : register(b1)
     // w = the grid's near plane. Appended last — the cbuffer is memcpy'd whole.
     float4   uClusterParams;
     float4   uClusterCamFwd;
+    // rgb = RenderWorld::ambient, the flat never-black floor GL/Metal add as
+    // `+ ambient * diffuseColor`. Read ONLY in the GI branch below (Thema 159):
+    // the probes bounce actual lights only, so without it a GI-mask shadow
+    // band went black where GL shows grey. The non-GI branch keeps its
+    // documented drift (GI off stays bit-identical). Appended last.
+    float4   uAmbient;
 };
 // Directional CSM depth array — one slice per cascade, sampled through the
 // point/clamp static sampler on s0 (a PCF tap must read ONE texel's depth; a
@@ -783,7 +792,7 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 result;
     if (uGIParams.x > 0.5f)
         result = sampleDDGIIrradiance(i.worldPos, N) * base * kd * uGIParams.y
-               + ambSpec * (1.0f - 0.6f * rough);
+               + ambSpec * (1.0f - 0.6f * rough) + uAmbient.rgb * base * (1.0f - met);
     else
         result = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
@@ -906,16 +915,23 @@ float4 PSMain(VSOut i) : SV_TARGET
 )HLSL";
 
 // 2D UI canvas — NOT shared: same maths as D3D11's, but this copy does the glyph
-// UV lerp in the PS where D3D11 does it in the VS.
+// UV lerp in the PS where D3D11 does it in the VS. The "Schicht 0" shape (corner
+// radii, border, gradient, soft edge, inner shadow) is kUIFS line for line.
 static const char* kUIHLSL12 = R"HLSL(
 cbuffer UICB : register(b0) {
     float4 uRect;      // xy=top-left px, zw=size px
     float4 uColor;
     float4 uUVRect;    // glyph atlas UVs: xy=uvMin, zw=uvMax
     float2 uViewport;
-    float  uMode;      // 0 = solid color, 1 = font-atlas glyph
+    float  uMode;      // 0 = solid color, 1 = font-atlas glyph, 2 = textured quad
     float  _upad;
     float4 uRotation;  // { angle(radians), pivotX, pivotY, unused }
+    float4 uCornerRadius;  // px per corner: TL, TR, BR, BL
+    float4 uBorderColor;
+    float4 uGradientColor;
+    float4 uInnerColor;
+    float4 uStyle0;    // x = border width px, y = gradient on, z = gradient angle deg, w = radial
+    float4 uStyle1;    // x = blur px (drop shadow), y = inner shadow blur px, zw unused
 };
 Texture2D    uFontAtlas : register(t0);
 SamplerState uSamp      : register(s0);
@@ -936,15 +952,76 @@ UIOut UIVSMain(uint vid : SV_VertexID)
     o.uv = uv;
     return o;
 }
+// One rounded box, four radii (TL, TR, BR, BL); `p` relative to the centre, y
+// down. Same function as heRoundedBoxSDF in kUIFS / the Metal path.
+float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
+{
+    float r = (p.x > 0.0f) ? ((p.y > 0.0f) ? radii.z : radii.y)
+                           : ((p.y > 0.0f) ? radii.w : radii.x);
+    r = min(r, min(halfSz.x, halfSz.y));
+    float2 q = abs(p) - (halfSz - r);
+    return length(max(q, 0.0f)) + min(max(q.x, q.y), 0.0f) - r;
+}
+float heMaxRadius(float4 radii) { return max(max(radii.x, radii.y), max(radii.z, radii.w)); }
+// uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
+// quad (RGBA, tinted by uColor). Modes 1 and 2 share t0: a glyph run binds the
+// atlas there, an image its own texture.
 float4 UIPSMain(UIOut i) : SV_TARGET
 {
-    if (uMode > 0.5f)
+    if (uMode > 0.5f && uMode < 1.5f)
     {
         // Glyph coverage lives in the atlas R channel; tint by uColor (mirrors GL).
         float a = uFontAtlas.Sample(uSamp, lerp(uUVRect.xy, uUVRect.zw, i.uv)).r;
         return float4(uColor.rgb, uColor.a * a);
     }
-    return uColor;
+    if (uMode > 1.5f)
+    {
+        float4 t = uFontAtlas.Sample(uSamp, lerp(uUVRect.xy, uUVRect.zw, i.uv));
+        float4 c = float4(uColor.rgb * t.rgb, uColor.a * t.a);
+        if (heMaxRadius(uCornerRadius) <= 0.0f) return c;
+        // A rounded image is the solid path's SDF applied to the sampled alpha.
+        float dd = heRoundedBoxSDF((i.uv - 0.5f) * uRect.zw, uRect.zw * 0.5f, uCornerRadius);
+        return float4(c.rgb, c.a * saturate(0.5f - dd));
+    }
+    // i.uv is the quad-local 0..1 here (GL's vLocal).
+    float4 fill = uColor;
+    if (uStyle0.y > 0.5f)
+    {
+        float t;
+        if (uStyle0.w > 0.5f)
+        {
+            // Radial: centre out to the farthest corner, in pixels.
+            float2 dpx = (i.uv - 0.5f) * uRect.zw;
+            t = saturate(length(dpx) / max(1e-4f, length(uRect.zw * 0.5f)));
+        }
+        else
+        {
+            float a = uStyle0.z * 0.017453292f;
+            float2 dir = float2(sin(a), cos(a));
+            t = saturate(dot(i.uv - 0.5f, dir) + 0.5f);
+        }
+        fill = lerp(uColor, uGradientColor, t);
+    }
+    const float borderW = uStyle0.x, blurPx = uStyle1.x, innerBlur = uStyle1.y;
+    if (heMaxRadius(uCornerRadius) <= 0.0f && borderW <= 0.0f &&
+        blurPx <= 0.0f && innerBlur <= 0.0f) return fill;
+    // A blurred quad IS a drop shadow: the producer grew the rect by the blur.
+    float2 halfsz = uRect.zw * 0.5f - blurPx;
+    float d = heRoundedBoxSDF((i.uv - 0.5f) * uRect.zw, halfsz, uCornerRadius);
+    float cov = (blurPx > 0.0f) ? (1.0f - smoothstep(-blurPx, blurPx, d))
+                                : saturate(0.5f - d);
+    if (blurPx > 0.0f) return float4(fill.rgb, fill.a * cov);
+    if (innerBlur > 0.0f)
+    {
+        float t = 1.0f - smoothstep(0.0f, innerBlur, -d);
+        float ia = uInnerColor.a * saturate(t);
+        fill = float4(lerp(fill.rgb, uInnerColor.rgb, ia), fill.a);
+    }
+    if (borderW <= 0.0f) return float4(fill.rgb, fill.a * cov);
+    float inner = saturate(0.5f - (d + borderW));
+    float3 rgb  = lerp(uBorderColor.rgb, fill.rgb, inner);
+    float  al   = lerp(uBorderColor.a, fill.a, inner);
+    return float4(rgb, al * cov);
 }
 )HLSL";
 
@@ -1143,6 +1220,9 @@ namespace
         // last — the HLSL PerFrame block mirrors this order.
         glm::vec4  clusterParams;
         glm::vec4  clusterCamFwd;
+        // rgb = RenderWorld::ambient, read only by the GI branch of the
+        // built-in shader (Thema 159). Appended last — mirrors uAmbient.
+        glm::vec4  ambient;
     };
 
     struct SkyCB {
@@ -1561,6 +1641,12 @@ struct D3D12RendererImpl
     UINT     viewportReqH         = 0;
     bool     viewportResChanged   = false;
     D3D12_RESOURCE_STATES viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // SetSwapchainPostProcessing: the game asks for the post chain on the
+    // swapchain path. gameViewport = the viewport set above is the game's
+    // (back-buffer sized), not an editor request — dropped when the game stops
+    // asking, or the leftover set would send Render() down the editor branch.
+    bool     swapchainPostFx      = false;
+    bool     gameViewport         = false;
     // On resize the OLD viewport RT must not be destroyed immediately: the editor's
     // ImGui descriptor still points at it for the current frame (it only updates next
     // frame on HasViewportResourceChanged), and ImGui samples it later this same frame.
@@ -3156,8 +3242,10 @@ struct D3D12RendererImpl
     // [5..6] (rewritten at GI-target creation), the shadow arrays in [7..8] (the cascade
     // slot is rewritten by createShadowArray() on a resolution swap — it MUST land here,
     // not in the ring, so every later draw block inherits it), null views in [9..16] (the
-    // preamble's gates for those stay 0 on D3D12). One CopyDescriptorsSimple per draw,
-    // then the draw's real textures overwrite [0..4].
+    // preamble's gates for [10..16] stay 0 unless the slot is filled; [9] is overwritten
+    // by every draw). One CopyDescriptorsSimple per draw, then the draw's real textures overwrite
+    // [0..4], its landscape weightmap overwrites [9] — and the sky cube / blurred SSAO
+    // overwrite [10]/[11] on the frames fillMatLight raises fog.z / fog.w (Thema 126).
     ComPtr<ID3D12DescriptorHeap> m_matSrvStaging;
     UINT                         m_matSrvInc = 0;
     UINT                         m_matSrvCursor[k_frameCount] = {}; // per-frame block cursor (one block per DrawCall)
@@ -3263,6 +3351,35 @@ struct D3D12RendererImpl
     bool                         m_matHlslLogged = false;            // one-time dump of generated HLSL for HW verify
     static constexpr UINT        k_matMaxDraws   = 1024;             // U/HeParams ring slots per frame
     static constexpr UINT        k_matSlot       = 256;              // 256-B stride/slot (U=176, HeParams=256)
+
+    // Image-based-ambient sky cube for graph materials (heSkyEnv, t15 = SRV block
+    // slot kSlotSkyEnv, static sampler s15) — Thema 126. The SAME
+    // HE::BuildSkyEnvFaceRow bake GL, Metal, Vulkan and D3D11 sample, re-baked on
+    // the CPU when the sun moves and copied in from this frame slot's upload
+    // buffer on the frame's own command list (updateSkyEnvCube), like Vulkan.
+    // RGBA16F; a row is 128 × 8 B = 1024 B and a face 128 KiB, so the tightly
+    // packed bake already meets D3D12's 256-B pitch / 512-B placement rules.
+    // m_skyEnvValid gates heLight.fog.z AND the per-draw view write.
+    static constexpr int         k_skyEnvFace    = 128;              // GL/Metal/Vulkan face size
+    ComPtr<ID3D12Resource>       m_skyEnvCube;                       // DEFAULT, 6 slices, 1 mip
+    ComPtr<ID3D12Resource>       m_skyEnvUpload[k_frameCount]; uint8_t* m_skyEnvUploadPtr[k_frameCount]{};
+    D3D12_RESOURCE_STATES        m_skyEnvState   = D3D12_RESOURCE_STATE_COPY_DEST;
+    bool                         m_skyEnvValid   = false;            // the cube holds a bake (fog.z may be raised)
+    glm::vec3                    m_skyEnvSunDir  = glm::vec3(0.0f);
+    void createSkyEnvCube();
+    void updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir);
+    // A TextureCube view of m_skyEnvCube into `h` (a material draw block's
+    // kSlotSkyEnv — the template keeps its null cube view).
+    void srvForSkyEnvCube(D3D12_CPU_DESCRIPTOR_HANDLE h)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                      = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sv.ViewDimension               = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        sv.Shader4ComponentMapping     = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.TextureCube.MostDetailedMip = 0;
+        sv.TextureCube.MipLevels       = 1;
+        device->CreateShaderResourceView(m_skyEnvCube.Get(), &sv, h);
+    }
 
     void createMaterialResources();
     ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
@@ -3429,8 +3546,10 @@ struct D3D12RendererImpl
     // ── 2D UI canvas pipeline ─────────────────────────────────────────────────
     ComPtr<ID3D12PipelineState>  m_uiPSO;
     ComPtr<ID3D12RootSignature>  m_uiRootSig;
-    // Per-frame UI CB ring: up to 256 quads per frame × 256 bytes each (48B padded to 256B).
-    static constexpr UINT   k_maxUIQuads = 256;
+    // Per-frame UI CB ring: up to 4096 quads per frame × 256 bytes each (176 B
+    // padded to 256 B) = 1 MB per frame slot. Every glyph is a quad, so the old
+    // 256 cut a menu's text off mid-word where GL/D3D11/Vulkan drew all of it.
+    static constexpr UINT   k_maxUIQuads = 4096;
     static constexpr UINT64 k_uiCBSlot   = 256;
     ComPtr<ID3D12Resource>  m_uiCB[k_frameCount];
     uint8_t*                m_uiCBPtr[k_frameCount]{};
@@ -3449,6 +3568,20 @@ struct D3D12RendererImpl
     UINT m_uiAtlasNextSlot = 0;
     std::unordered_map<uint32_t, UIFontAtlas12> m_uiFontAtlases;
     std::vector<std::pair<ComPtr<ID3D12Resource>, int>> m_uiAtlasUploads; // retire countdown
+
+    // ── UI quad images (obj.type == 0 with a textureAssetId: Image widget,
+    // textured Panel/Border/Button) ── D3D12's ResolveUITexture. The UI pass binds
+    // only m_uiAtlasHeap, so the image SRVs live in that heap too, in their own
+    // region behind the font slots: [k_maxUIFontAtlases, + k_maxUIImages). Slots
+    // are handed out monotonically and NOT reused — an invalidated image retires
+    // its resource and abandons the slot, because rewriting a descriptor that a
+    // list in flight still reads would corrupt that frame (bounded edit-time leak,
+    // the same policy as the scene heap's notes). Keyed like m_graphTexCache; a
+    // miss is cached as slot -1 → the quad draws its tint, no per-frame retry.
+    static constexpr UINT k_maxUIImages = 240;
+    struct UIImage12 { ComPtr<ID3D12Resource> tex; int slot = -1; };
+    std::unordered_map<std::string, UIImage12> m_uiImageCache;
+    UINT m_uiImageNextSlot = 0;
 
     D3D12_CPU_DESCRIPTOR_HANDLE uiAtlasCpu(UINT slot) const
     {
@@ -3527,6 +3660,30 @@ struct D3D12RendererImpl
         m_uiAtlasUploads.emplace_back(std::move(uploadBuf), static_cast<int>(k_frameCount) + 2);
         m_uiFontAtlases[key] = { std::move(tex), slot };
         return static_cast<int>(slot);
+    }
+
+    // Heap slot holding the UI image `id`'s SRV, uploading it on `cmd` the first
+    // time (copy + COPY_DEST→PSR barrier, so call it before the draws that sample
+    // it). Uploaded WITHOUT the sRGB decode: UI colours are sRGB numbers end to
+    // end (the UI pass writes an UNORM target), so an _SRGB view would come out
+    // linear-decoded and too dark (Thema 107). Not shared with m_graphTexCache on
+    // purpose: a material samples the same asset in linear light. -1 = no image.
+    int uiImageSlotFor(ID3D12GraphicsCommandList* cmd, const HE::UUID& id, ContentManager* cm)
+    {
+        const std::string key = graphTexKey(id, {});
+        if (key.empty() || !cm || !m_uiAtlasHeap) return -1;
+        if (auto it = m_uiImageCache.find(key); it != m_uiImageCache.end())
+            return it->second.slot;
+        UIImage12 entry;
+        if (m_uiImageNextSlot < k_maxUIImages &&
+            uploadTexture2D(cmd, cm->resolveTextureRef(id, {}), entry.tex, /*asArray=*/false, /*honourSrgb=*/false))
+        {
+            entry.slot = static_cast<int>(k_maxUIFontAtlases + m_uiImageNextSlot++);
+            srvForTexture(entry.tex.Get(), uiAtlasCpu(static_cast<UINT>(entry.slot)));
+        }
+        const int slot = entry.slot;
+        m_uiImageCache.emplace(key, std::move(entry));
+        return slot;
     }
 
     // ── Combined scene SRV heap ──────────────────────────────────────────────
@@ -3673,15 +3830,18 @@ struct D3D12RendererImpl
     // slice of a layers > 1 asset (RGBA8, HE::buildTextureArray layout: slice-major,
     // each slice with its chain, which IS D3D's subresource order, so the copy below
     // walks it unchanged), or a plain 2D asset as one slice.
+    // honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
+    // as they are): the UI pass wants that, see uiImageSlotFor.
     bool uploadTexture2D(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
-                         ComPtr<ID3D12Resource>& outTex, bool asArray = false)
+                         ComPtr<ID3D12Resource>& outTex, bool asArray = false,
+                         bool honourSrgb = true)
     {
         if (!cl || !tex) return false;
         if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return false;
         const UINT layers = asArray ? std::max<UINT>(1, tex->layers) : 1;
         if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return false; // RGBA8 only
 
-        const bool srgb = tex->srgb;
+        const bool srgb = tex->srgb && honourSrgb;
         DXGI_FORMAT fmt; bool isBlock;
         switch (tex->format)
         {
@@ -3844,6 +4004,14 @@ struct D3D12RendererImpl
                     retire(std::move(it->second));
                     m_graphTexCache.erase(it);
                 }
+        // UI images: the resource retires the same way; the UI-heap slot is
+        // abandoned, not reused (see m_uiImageCache).
+        for (const HE::UUID& id : m_pendingTexInval)
+            if (auto it = m_uiImageCache.find(graphTexKey(id, {})); it != m_uiImageCache.end())
+            {
+                retire(std::move(it->second.tex));
+                m_uiImageCache.erase(it);
+            }
         m_pendingTexInval.clear();
 
         for (const HE::UUID& id : m_pendingMeshInval)
@@ -4244,8 +4412,9 @@ struct D3D12RendererImpl
             return false;
         }
 
-        // Root signature: root CBV at b0 (VS+PS) + SRV table t0 (font atlas, PS)
-        // + static sampler s0 (linear-clamp; glyphs scale the atlas both ways).
+        // Root signature: root CBV at b0 (VS+PS) + SRV table t0 (font atlas or
+        // image, PS) + static sampler s0 (trilinear-clamp; glyphs scale the atlas
+        // both ways, a mipped image minifies through its chain like on GL).
         {
             D3D12_DESCRIPTOR_RANGE srvRange{};
             srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -4263,6 +4432,7 @@ struct D3D12RendererImpl
             D3D12_STATIC_SAMPLER_DESC samp{};
             samp.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
             samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.MaxLOD           = D3D12_FLOAT32_MAX; // zero-init would pin mip 0
             samp.ShaderRegister   = 0; // s0
             samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
@@ -4296,8 +4466,11 @@ struct D3D12RendererImpl
             rt.SrcBlend       = D3D12_BLEND_SRC_ALPHA;
             rt.DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
             rt.BlendOp        = D3D12_BLEND_OP_ADD;
+            // Alpha "over" (as D3D11/Vulkan): an opaque target stays opaque —
+            // ZERO let a drop shadow punch a see-through hole into the editor
+            // viewport, which ImGui composites with blending.
             rt.SrcBlendAlpha  = D3D12_BLEND_ONE;
-            rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+            rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
             rt.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
             rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -4324,13 +4497,14 @@ struct D3D12RendererImpl
             }
         }
 
-        // Shader-visible font-atlas SRV heap. Every slot starts as a null SRV so
-        // the root table is always valid to bind, even before any atlas uploads.
+        // Shader-visible UI SRV heap: font atlases, then the image region. Every
+        // slot starts as a null SRV so the root table is always valid to bind,
+        // even before any atlas uploads.
         {
             m_uiAtlasDescSize =
                 device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             D3D12_DESCRIPTOR_HEAP_DESC hd{};
-            hd.NumDescriptors = k_maxUIFontAtlases;
+            hd.NumDescriptors = k_maxUIFontAtlases + k_maxUIImages;
             hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
             hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_uiAtlasHeap))))
@@ -4343,23 +4517,27 @@ struct D3D12RendererImpl
             nullSrv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
             nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             nullSrv.Texture2D.MipLevels     = 1;
-            for (UINT s = 0; s < k_maxUIFontAtlases; ++s)
+            for (UINT s = 0; s < k_maxUIFontAtlases + k_maxUIImages; ++s)
                 device->CreateShaderResourceView(nullptr, &nullSrv, uiAtlasCpu(s));
         }
 
         return true;
     }
 
-    void renderUIPass12(ID3D12GraphicsCommandList* cmd, int fi, int w, int h)
+    void renderUIPass12(ID3D12GraphicsCommandList* cmd, int fi, int w, int h, ContentManager* cm)
     {
         if (!m_uiPSO || !m_uiAtlasHeap || m_renderWorld.uiObjects.empty()) return;
 
-        // Record any missing atlas uploads BEFORE the pass state is bound so the
-        // copies + COPY_DEST→PSR barriers sit ahead of the draws that sample them.
+        // Record any missing atlas/image uploads BEFORE the pass state is bound so
+        // the copies + COPY_DEST→PSR barriers sit ahead of the draws that sample them.
         const int defaultSlot = uiAtlasSlotFor(cmd, 0);
         for (const UIRenderObject& obj : m_renderWorld.uiObjects)
+        {
             if (obj.type == 2 && obj.fontAtlasKey != 0)
                 uiAtlasSlotFor(cmd, obj.fontAtlasKey);
+            else if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+                uiImageSlotFor(cmd, obj.textureAssetId, cm);
+        }
 
         cmd->SetPipelineState(m_uiPSO.Get());
         cmd->SetGraphicsRootSignature(m_uiRootSig.Get());
@@ -4371,9 +4549,13 @@ struct D3D12RendererImpl
         int boundSlot = std::max(defaultSlot, 0);
         cmd->SetGraphicsRootDescriptorTable(1, uiAtlasGpu(static_cast<UINT>(boundSlot)));
 
-        // 256-byte CB slots (k_uiCBSlot), so the added row costs nothing.
+        // 256-byte CB slots (k_uiCBSlot), so the added rows cost nothing.
         struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect;
-                      glm::vec2 vp; float mode; float pad; glm::vec4 rotation; };
+                      glm::vec2 vp; float mode; float pad; glm::vec4 rotation;
+                      glm::vec4 cornerRadius, borderColor, gradientColor, innerColor,
+                                style0, style1; };
+        static_assert(sizeof(UICB) == 176 && sizeof(UICB) <= k_uiCBSlot,
+                      "UICB must match the HLSL cbuffer and fit one CB slot");
 
         // Clipping is a scissor rectangle, set only when it CHANGES — a widget
         // tree emits its quads in tree order, so equally-clipped quads arrive in
@@ -4417,14 +4599,38 @@ struct D3D12RendererImpl
                     boundSlot = slot;
                 }
             }
+            // A textured quad points t0 at its image (uploaded above); the next
+            // glyph sees boundSlot != its atlas slot and rebinds by itself.
+            bool textured = false;
+            if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+            {
+                const auto it = m_uiImageCache.find(graphTexKey(obj.textureAssetId, {}));
+                const int slot = it != m_uiImageCache.end() ? it->second.slot : -1;
+                if (slot >= 0)
+                {
+                    if (slot != boundSlot)
+                    {
+                        cmd->SetGraphicsRootDescriptorTable(1, uiAtlasGpu(static_cast<UINT>(slot)));
+                        boundSlot = slot;
+                    }
+                    textured = true;
+                }
+            }
             UICB cb;
             cb.rect   = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
             cb.color  = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
             cb.uvRect = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
             cb.vp     = glm::vec2(float(w), float(h));
-            cb.mode   = obj.type == 2 ? 1.0f : 0.0f;
+            cb.mode   = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
             cb.pad    = 0.0f;
             cb.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
+            cb.cornerRadius  = obj.cornerRadius;
+            cb.borderColor   = obj.borderColor;
+            cb.gradientColor = obj.gradientColor;
+            cb.innerColor    = obj.innerShadowColor;
+            cb.style0 = glm::vec4(obj.borderWidth, obj.gradient ? 1.0f : 0.0f, obj.gradientAngleDeg,
+                                  obj.gradientShape == 1 ? 1.0f : 0.0f);
+            cb.style1 = glm::vec4(obj.blur, obj.innerShadowBlur, 0.0f, 0.0f);
             std::memcpy(m_uiCBPtr[fi] + static_cast<size_t>(qi) * k_uiCBSlot, &cb, sizeof(cb));
             D3D12_GPU_VIRTUAL_ADDRESS addr = m_uiCB[fi]->GetGPUVirtualAddress()
                                            + static_cast<UINT64>(qi) * k_uiCBSlot;
@@ -6239,6 +6445,9 @@ struct D3D12RendererImpl
     bool  giPipelinesBuilt     = false;
     float giIndirectIntensity  = 1.0f;
     float giLightRadius        = 0.5f;  // degrees, shadow-ray cone
+    int   giShadowRays         = 2;     // sun rays per pixel (GISettings::shadowRays)
+    float giShadowHistoryWeight      = 0.9f;  // temporal history weight of the shadow mask
+    bool  giShadowFilter       = true;  // edge-aware a-trous on the mask (false = unfiltered copy)
     int   giProbeBudgetPerFrame = 256;
 
     // Pipelines + root signatures (built lazily on the first GI-active frame).
@@ -6250,13 +6459,13 @@ struct D3D12RendererImpl
     ComPtr<ID3D12PipelineState> giShadowPSO;   // compute
     ComPtr<ID3D12PipelineState> giProbePSO;    // compute
     ComPtr<ID3D12PipelineState> giTemporalPSO; // fullscreen RGBA16F
-    ComPtr<ID3D12PipelineState> giBlurPSO;     // fullscreen R16F
+    ComPtr<ID3D12PipelineState> giAtrousPSO;   // fullscreen R16F, edge-aware a-trous (both iterations)
 
     // Per-frame CBs (persistently mapped upload buffers, one slot per frame in flight).
     ComPtr<ID3D12Resource> giShadowCB[k_frameCount];   uint8_t* giShadowCBPtr[k_frameCount]{};
     ComPtr<ID3D12Resource> giCountCB[k_frameCount];    uint8_t* giCountCBPtr[k_frameCount]{};
     ComPtr<ID3D12Resource> giTemporalCB[k_frameCount]; uint8_t* giTemporalCBPtr[k_frameCount]{};
-    ComPtr<ID3D12Resource> giBlurCB[k_frameCount];     uint8_t* giBlurCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource> giAtrousCB[k_frameCount];   uint8_t* giAtrousCBPtr[k_frameCount]{}; // one k_cbSlot per a-trous iteration
     ComPtr<ID3D12Resource> giProbeCB[k_frameCount];    uint8_t* giProbeCBPtr[k_frameCount]{};
     // Per-object ring for the G-buffer prepass (dedicated — the SSAO pos ring
     // may be reused by SSAO in the same frame when GI fails mid-frame).
@@ -6278,8 +6487,15 @@ struct D3D12RendererImpl
 
     // Screen-space targets (half-res) + probe atlases, with tracked states.
     int giShadowW = 0, giShadowH = 0;
+    // Position = the shadow-ray ORIGIN (pos + N*0.05), stored as the ABSOLUTE
+    // world position, so fp32: as RGBA16F its ULP passes the 5 cm normal offset
+    // at |coord| >= ~100 m and surfaces self-shadow in height bands (Thema 159).
+    // Texture, PSO RTVFormats[0] and EVERY SRV of it use this one constant.
+    // Consumers Load/point-sample it; normals stay RGBA16F.
+    static constexpr DXGI_FORMAT kGiGBufPosFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
     ComPtr<ID3D12Resource> giGBufPosTex, giGBufNormTex, giGBufDepth, giRawTex,
-                           giLocalMaskTex, giHistTex[2], giResultTex;
+                           giLocalMaskTex, giHistTex[2], giResultTex,
+                           giFilterTmpTex; // R16F between the two a-trous iterations
     D3D12_RESOURCE_STATES  giGBufPosState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     D3D12_RESOURCE_STATES  giGBufNormState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     D3D12_RESOURCE_STATES  giRawState      = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -6287,6 +6503,7 @@ struct D3D12RendererImpl
     D3D12_RESOURCE_STATES  giHistState[2]  = { D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
     D3D12_RESOURCE_STATES  giResultState   = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES  giFilterTmpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     int       giHistIdx     = 0;
     bool      giHistValid   = false;
     glm::mat4 giPrevViewProj{ 1.0f };
@@ -6342,11 +6559,12 @@ struct D3D12RendererImpl
     //  [6] irr UAV (probe u0)           [7] vis UAV (probe u1)
     //  [8..10]  temporal cur=0: gbufPos, raw, hist1
     //  [11..13] temporal cur=1: gbufPos, raw, hist0
-    //  [14..16] blur cur=0: hist0 x3 (padding — the FS table range is 3 wide)
-    //  [17..19] blur cur=1: hist1 x3
-    static constexpr UINT k_giSrvSlots = 20;
+    //  [14..16] a-trous iteration 0, cur=0: hist0, gbufPos, gbufNorm
+    //  [17..19] a-trous iteration 0, cur=1: hist1, gbufPos, gbufNorm
+    //  [20..22] a-trous iteration 1: filterTmp, gbufPos, gbufNorm
+    static constexpr UINT k_giSrvSlots = 23;
     ComPtr<ID3D12DescriptorHeap> giSrvHeap;   // shader-visible
-    ComPtr<ID3D12DescriptorHeap> giRtvHeap;   // 5: [0]=pos [1]=norm [2]=hist0 [3]=hist1 [4]=result
+    ComPtr<ID3D12DescriptorHeap> giRtvHeap;   // 6: [0]=pos [1]=norm [2]=hist0 [3]=hist1 [4]=result [5]=filterTmp
     ComPtr<ID3D12DescriptorHeap> giDsvHeap;   // 1: G-buffer depth
     UINT giSrvDescSize = 0, giRtvDescSize = 0;
 
@@ -6684,7 +6902,7 @@ struct D3D12RendererImpl
         {
             D3D12_DESCRIPTOR_RANGE srvR{};
             srvR.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-            srvR.NumDescriptors                    = 3; // t0..t2 (blur uses t0 only)
+            srvR.NumDescriptors                    = 3; // t0..t2 (temporal: gPos/raw/hist, a-trous: src/gPos/gNorm)
             srvR.BaseShaderRegister                = 0;
             srvR.OffsetInDescriptorsFromTableStart = 0;
             D3D12_ROOT_PARAMETER params[2]{};
@@ -6710,16 +6928,16 @@ struct D3D12RendererImpl
         }
 
         // ── Shaders + PSOs ──────────────────────────────────────────────────
-        ComPtr<ID3DBlob> gbufVS, gbufPS, shadowCS, probeCS, fsVS, temporalPS, blurPS;
+        ComPtr<ID3DBlob> gbufVS, gbufPS, shadowCS, probeCS, fsVS, temporalPS, atrousPS;
         ok = ok && compile(kGiGBufHLSL, "GiGBufVS", "vs_5_0", gbufVS)
                 && compile(kGiGBufHLSL, "GiGBufPS", "ps_5_0", gbufPS)
                 && compile(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", shadowCS)
                 && compile(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL, "GiProbeCS", "cs_5_0", probeCS)
                 && compile(kFSTriangleVS, "main", "vs_5_0", fsVS)
                 && compile(kGiTemporalHLSL, "main", "ps_5_0", temporalPS)
-                && compile(kGiBlurHLSL, "main", "ps_5_0", blurPS);
+                && compile(kGiAtrousHLSL, "main", "ps_5_0", atrousPS);
 
-        if (ok) // G-buffer PSO: MRT RGBA16F pos+norm, D16 depth, scene input layout
+        if (ok) // G-buffer PSO: MRT RGBA32F pos + RGBA16F norm, D16 depth, scene input layout
         {
             const D3D12_INPUT_ELEMENT_DESC layout[] = {
                 { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -6733,7 +6951,7 @@ struct D3D12RendererImpl
             pd.InputLayout           = { layout, 3 };
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             pd.NumRenderTargets      = 2;
-            pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.RTVFormats[0]         = kGiGBufPosFormat;
             pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
             pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;
             pd.SampleDesc.Count      = 1;
@@ -6787,9 +7005,9 @@ struct D3D12RendererImpl
             ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giTemporalPSO)));
             if (ok)
             {
-                pd.PS            = { blurPS->GetBufferPointer(), blurPS->GetBufferSize() };
+                pd.PS            = { atrousPS->GetBufferPointer(), atrousPS->GetBufferSize() };
                 pd.RTVFormats[0] = DXGI_FORMAT_R16_FLOAT;
-                ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giBlurPSO)));
+                ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giAtrousPSO)));
             }
         }
 
@@ -6799,12 +7017,13 @@ struct D3D12RendererImpl
             giShadowCB[f]   = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giShadowCBPtr[f]));
             giCountCB[f]    = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giCountCBPtr[f]));
             giTemporalCB[f] = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giTemporalCBPtr[f]));
-            giBlurCB[f]     = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giBlurCBPtr[f]));
+            giAtrousCB[f]   = createUploadBuffer(HE::kGIShadowAtrousIterations * k_cbSlot,
+                                                 reinterpret_cast<void**>(&giAtrousCBPtr[f]));
             giProbeCB[f]    = createUploadBuffer(alignUp(6 * 16 + 3 * 8 * 16, k_cbSlot),
                                                  reinterpret_cast<void**>(&giProbeCBPtr[f]));
             giGBufObjRing[f] = createUploadBuffer(static_cast<UINT64>(k_maxDraws) * k_cbSlot,
                                                   reinterpret_cast<void**>(&giGBufObjPtr[f]));
-            ok = giShadowCB[f] && giCountCB[f] && giTemporalCB[f] && giBlurCB[f]
+            ok = giShadowCB[f] && giCountCB[f] && giTemporalCB[f] && giAtrousCB[f]
               && giProbeCB[f] && giGBufObjRing[f];
         }
 
@@ -6818,7 +7037,7 @@ struct D3D12RendererImpl
             sd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
             sd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             D3D12_DESCRIPTOR_HEAP_DESC rd{};
-            rd.NumDescriptors = 5;
+            rd.NumDescriptors = 6;
             rd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
             D3D12_DESCRIPTOR_HEAP_DESC dd{};
             dd.NumDescriptors = 1;
@@ -6863,7 +7082,7 @@ struct D3D12RendererImpl
                         "D3D12Renderer: GI pipeline build failed — GI disabled");
             giGBufRS.Reset(); giComputeRS.Reset(); giFsRS.Reset();
             giGBufPSO.Reset(); giGBufPSOInstanced.Reset(); giShadowPSO.Reset(); giProbePSO.Reset();
-            giTemporalPSO.Reset(); giBlurPSO.Reset();
+            giTemporalPSO.Reset(); giAtrousPSO.Reset();
             giSrvHeap.Reset(); giRtvHeap.Reset(); giDsvHeap.Reset();
             giSupported = false;
             return;
@@ -6890,7 +7109,7 @@ struct D3D12RendererImpl
 
         giGBufPosTex.Reset(); giGBufNormTex.Reset(); giGBufDepth.Reset();
         giRawTex.Reset(); giLocalMaskTex.Reset();
-        giHistTex[0].Reset(); giHistTex[1].Reset(); giResultTex.Reset();
+        giHistTex[0].Reset(); giHistTex[1].Reset(); giResultTex.Reset(); giFilterTmpTex.Reset();
 
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         auto makeTex = [&](DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS rflags,
@@ -6916,7 +7135,7 @@ struct D3D12RendererImpl
         };
 
         const auto kPSR  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        bool ok = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+        bool ok = makeTex(kGiGBufPosFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                           kPSR, true, giGBufPosTex)
                && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                           kPSR, true, giGBufNormTex)
@@ -6933,6 +7152,8 @@ struct D3D12RendererImpl
                           kPSR, true, giHistTex[1])
                && makeTex(DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                           kPSR, true, giResultTex)
+               && makeTex(DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                          kPSR, true, giFilterTmpTex)
                && makeTex(DXGI_FORMAT_D16_UNORM, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
                           D3D12_RESOURCE_STATE_DEPTH_WRITE, false, giGBufDepth);
         if (!ok)
@@ -6948,6 +7169,7 @@ struct D3D12RendererImpl
         giHistState[0]  = kPSR;
         giHistState[1]  = kPSR;
         giResultState   = kPSR;
+        giFilterTmpState = kPSR;
 
         // RTVs + DSV.
         device->CreateRenderTargetView(giGBufPosTex.Get(),  nullptr, giRtvCpu(0));
@@ -6955,6 +7177,7 @@ struct D3D12RendererImpl
         device->CreateRenderTargetView(giHistTex[0].Get(),  nullptr, giRtvCpu(2));
         device->CreateRenderTargetView(giHistTex[1].Get(),  nullptr, giRtvCpu(3));
         device->CreateRenderTargetView(giResultTex.Get(),   nullptr, giRtvCpu(4));
+        device->CreateRenderTargetView(giFilterTmpTex.Get(), nullptr, giRtvCpu(5));
         device->CreateDepthStencilView(giGBufDepth.Get(), nullptr,
             giDsvHeap->GetCPUDescriptorHandleForHeapStart());
 
@@ -6968,7 +7191,7 @@ struct D3D12RendererImpl
             sv.Texture2D.MipLevels     = 1;
             device->CreateShaderResourceView(res, &sv, giSrvCpu(slot));
         };
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+        srvInto(giGBufPosTex.Get(),  kGiGBufPosFormat,               0);
         srvInto(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
         {
             D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
@@ -6981,15 +7204,22 @@ struct D3D12RendererImpl
             device->CreateUnorderedAccessView(giLocalMaskTex.Get(), nullptr, &uv, giSrvCpu(5));
         }
         // Temporal tables: cur=0 reads hist[1]; cur=1 reads hist[0].
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
+        srvInto(giGBufPosTex.Get(),  kGiGBufPosFormat,               8);
         srvInto(giRawTex.Get(),      DXGI_FORMAT_R16_FLOAT,          9);
         srvInto(giHistTex[1].Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 10);
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 11);
+        srvInto(giGBufPosTex.Get(),  kGiGBufPosFormat,               11);
         srvInto(giRawTex.Get(),      DXGI_FORMAT_R16_FLOAT,          12);
         srvInto(giHistTex[0].Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 13);
-        // Blur tables (range is 3 wide → pad with the same SRV).
-        for (UINT s = 14; s <= 16; ++s) srvInto(giHistTex[0].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, s);
-        for (UINT s = 17; s <= 19; ++s) srvInto(giHistTex[1].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, s);
+        // A-trous tables (t0 = source, t1 = gbufPos, t2 = gbufNorm): iteration 0
+        // reads hist[cur] (cur=0 → hist0, cur=1 → hist1), iteration 1 the scratch.
+        const UINT atrousBase[3] = { 14, 17, 20 };
+        ID3D12Resource* atrousSrc[3] = { giHistTex[0].Get(), giHistTex[1].Get(), giFilterTmpTex.Get() };
+        for (int t = 0; t < 3; ++t)
+        {
+            srvInto(atrousSrc[t], t < 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R16_FLOAT, atrousBase[t]);
+            srvInto(giGBufPosTex.Get(),  kGiGBufPosFormat,               atrousBase[t] + 1);
+            srvInto(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, atrousBase[t] + 2);
+        }
 
         // Publish the blurred mask to the shader-visible slots the scene pass
         // (sceneSrvHeap[4], t4) and graph materials (m_matSrvStaging[5], t10)
@@ -7209,7 +7439,7 @@ struct D3D12RendererImpl
     {
         giGBufPosTex.Reset(); giGBufNormTex.Reset(); giGBufDepth.Reset(); giRawTex.Reset();
         giLocalMaskTex.Reset();
-        giHistTex[0].Reset(); giHistTex[1].Reset(); giResultTex.Reset();
+        giHistTex[0].Reset(); giHistTex[1].Reset(); giResultTex.Reset(); giFilterTmpTex.Reset();
         giShadowW = giShadowH = 0;
         giHistValid = false;
         giIrrTex.Reset(); giVisTex.Reset(); giIrrPrevTex.Reset(); giVisPrevTex.Reset();
@@ -7229,7 +7459,7 @@ struct D3D12RendererImpl
                      const RenderWorld& rw, ContentManager* cm)
     {
         createGiPipelines();
-        if (!giSupported || !giGBufPSO || !giShadowPSO || !giTemporalPSO || !giBlurPSO)
+        if (!giSupported || !giGBufPSO || !giShadowPSO || !giTemporalPSO || !giAtrousPSO)
             return false;
         ensureGiShadowTargets(w, h);
         if (!giGBufPosTex) return false;
@@ -7338,7 +7568,7 @@ struct D3D12RendererImpl
                 const HE::PackedLocalShadowLights local = HE::BuildMaskedLocalLights(rw);
                 for (int i = 0; i < HE::kMaxMaskedLocalLights; ++i)
                     scb.localPosRange[i] = local.posRange[i];
-                scb.localExtra = glm::vec4(float(local.count), 0.0f, 0.0f, 0.0f);
+                scb.localExtra = glm::vec4(float(local.count), float(giShadowRays), 0.0f, 0.0f);
             }
             if (giShadowCBPtr[fi]) std::memcpy(giShadowCBPtr[fi], &scb, sizeof(scb));
             glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
@@ -7397,9 +7627,11 @@ struct D3D12RendererImpl
                 giHistState[prevIdx] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             }
 
-            struct { glm::mat4 prevViewProj; glm::vec4 params; } tcb{};
+            struct { glm::mat4 prevViewProj, curViewProj; glm::vec4 params; } tcb{};
+            static_assert(sizeof(tcb) <= k_cbSlot, "temporal CB outgrew its upload slot");
             tcb.prevViewProj = giPrevViewProj;
-            tcb.params = glm::vec4(giHistValid ? 0.9f : 0.0f,
+            tcb.curViewProj  = viewProj; // becomes giPrevViewProj below (motion-vector reprojection)
+            tcb.params = glm::vec4(giHistValid ? giShadowHistoryWeight : 0.0f,
                                    float(giShadowW), float(giShadowH), 0.0f);
             if (giTemporalCBPtr[fi]) std::memcpy(giTemporalCBPtr[fi], &tcb, sizeof(tcb));
 
@@ -7418,26 +7650,39 @@ struct D3D12RendererImpl
         giHistIdx      = prevIdx;
         giPrevViewProj = viewProj; // for NEXT frame's reprojection
 
-        // ── 4. Spatial blur → the mask the scene shader samples ─────────────
+        // ── 4. Edge-aware a-trous → the mask the scene shader samples ───────
+        // Iteration 0: hist[cur].a → scratch (hole 1, RTV 5, table 14/17);
+        // iteration 1: scratch.r → result (hole 2, RTV 4, table 20). Each
+        // iteration has its own k_cbSlot in the frame's upload buffer — one slot
+        // rewritten between the two draws would race the GPU reading the first.
+        static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
         {
             barrier12(cl, giHistTex[curIdx].Get(), giHistState[curIdx],
                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             giHistState[curIdx] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            barrier12(cl, giResultTex.Get(), giResultState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            giResultState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            cl->SetPipelineState(giAtrousPSO.Get());
+            for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
+            {
+                ID3D12Resource*        dst      = it == 0 ? giFilterTmpTex.Get() : giResultTex.Get();
+                D3D12_RESOURCE_STATES& dstState = it == 0 ? giFilterTmpState : giResultState;
+                barrier12(cl, dst, dstState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                dstState = D3D12_RESOURCE_STATE_RENDER_TARGET;
 
-            glm::vec4 texel(1.0f / float(giShadowW), 1.0f / float(giShadowH), 0.0f, 0.0f);
-            if (giBlurCBPtr[fi]) std::memcpy(giBlurCBPtr[fi], &texel, sizeof(texel));
+                struct { HE::GIShadowAtrousStep step; glm::vec4 texel; } acb{};
+                static_assert(sizeof(acb) <= k_cbSlot, "a-trous CB outgrew its upload slot");
+                acb.step  = HE::GIShadowAtrousParams(it, giShadowFilter, giShadowHistoryWeight, giShadowRays);
+                acb.texel = glm::vec4(1.0f / float(giShadowW), 1.0f / float(giShadowH), 0.0f, 0.0f);
+                if (giAtrousCBPtr[fi]) std::memcpy(giAtrousCBPtr[fi] + it * k_cbSlot, &acb, sizeof(acb));
 
-            D3D12_CPU_DESCRIPTOR_HANDLE rtv = giRtvCpu(4);
-            cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            cl->SetPipelineState(giBlurPSO.Get());
-            cl->SetGraphicsRootConstantBufferView(0, giBlurCB[fi]->GetGPUVirtualAddress());
-            cl->SetGraphicsRootDescriptorTable(1, giSrvGpu(curIdx == 0 ? 14u : 17u));
-            cl->DrawInstanced(3, 1, 0, 0);
+                D3D12_CPU_DESCRIPTOR_HANDLE rtv = giRtvCpu(it == 0 ? 5u : 4u);
+                cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+                cl->SetGraphicsRootConstantBufferView(0, giAtrousCB[fi]->GetGPUVirtualAddress() + it * k_cbSlot);
+                cl->SetGraphicsRootDescriptorTable(1, giSrvGpu(it == 1 ? 20u : curIdx == 0 ? 14u : 17u));
+                cl->DrawInstanced(3, 1, 0, 0);
 
-            barrier12(cl, giResultTex.Get(), giResultState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            giResultState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                barrier12(cl, dst, dstState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                dstState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            }
         }
         return true;
     }
@@ -8210,11 +8455,13 @@ void D3D12RendererImpl::createMaterialResources()
     // (t10/t11), [7] k_matCsmSlot = heCsm (t12, the SAME cascade array the built-in scene
     // shader reads at t0, sampled behind csmSplits.w > 0), [8] k_matLocalShadowSlot =
     // heLocalShadow (t13, the local atlas the built-in shader reads at t17, sampled behind
-    // lightParams[i].y > 0), [9..16] heLandscapeWeights / heSkyEnv / heAO / DDGI atlases /
-    // heSSRFwd / heGIReflFwd / heCloudShadow (t14..t18, t31..t33) — null views, their
+    // lightParams[i].y > 0), [9] heLandscapeWeights (t14, ungated: null in the template,
+    // the chunk's weightmap written per draw), [10..16] heSkyEnv / heAO / DDGI atlases /
+    // heSSRFwd / heGIReflFwd / heCloudShadow (t15..t18, t31..t33) — null views, their
     // gates stay 0 in fillMatLight; EXCEPT the DDGI atlases [12..13] (t17/t18), which
     // ensureGiProbeAtlas writes into the template (writeMatGiProbeSlots) behind the
-    // giProbe.y gate.
+    // giProbe.y gate, and heSkyEnv / heAO [10..11] (t15/t16), which the draw writes into
+    // its own block behind fog.z / fog.w (Thema 126).
     HE::d3d12mat::MaterialRootSignature matRs;
     HE::d3d12mat::DescribeMaterialRootSignature(matRs);
     const D3D12_ROOT_SIGNATURE_DESC& rsd = matRs.desc;
@@ -8237,7 +8484,8 @@ void D3D12RendererImpl::createMaterialResources()
     //                     the GI masks in [5..6], the cascade array for heCsm in [7],
     //                     the local atlas for heLocalShadow in [8], the DDGI atlases in
     //                     [12..13] once they exist, and null views of the preamble's
-    //                     remaining SRVs in the rest of [9..16].
+    //                     remaining SRVs in the rest of [9..16] ([9] is overwritten
+    //                     with the landscape weightmap by every draw).
     //   m_matSrvHeap     — the shader-visible ring of per-draw blocks the template is
     //                     copied into, k_frameCount × k_matMaxDraws × k_matSrvPerDraw.
     {
@@ -8291,7 +8539,14 @@ void D3D12RendererImpl::createMaterialResources()
         writeShadowArraySrv(localShadowDepth.Get(), h, kLocalShadowLayers); h.ptr += inc;
         // Slots 9..16: the preamble's remaining SRVs (heLandscapeWeights, heSkyEnv,
         // heAO, the DDGI atlases, heSSRFwd, heGIReflFwd, heCloudShadow). Declared so
-        // the PSO is legal, never sampled: fillMatLight leaves their gates at 0.
+        // the PSO is legal, never sampled while fillMatLight leaves their gates at 0.
+        // heLandscapeWeights (9) has NO gate — a Landscape Layer Blend samples it
+        // unconditionally — so every material draw writes the chunk's weightmap (or
+        // the layer-0 default) into its own block. The template's null is only the
+        // last resort, and a right one: (0,0,0,0) sums to nothing, which the blend
+        // resolves to layer 0 (MaterialGraph.cpp) — the same as the default asset.
+        // heSkyEnv/heAO (10/11) stay null HERE; the material draw writes the sky
+        // cube / blurred SSAO into its own block when fog.z / fog.w rise (Thema 126).
         // The DDGI pair (12/13) starts null too and is swapped for the live atlases
         // by ensureGiProbeAtlas → writeMatGiProbeSlots (back to null on retire);
         // the atlases are created per frame, long after this init. Null views
@@ -8329,8 +8584,99 @@ void D3D12RendererImpl::createMaterialResources()
         }
     }
 
+    // The sky cube for heSkyEnv (Thema 126) — optional, see createSkyEnvCube.
+    createSkyEnvCube();
+
     m_matReady = true;
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: A4 material resources created");
+}
+
+// ── Image-based-ambient sky cube for graph materials (heSkyEnv, t15) ─────────
+// GL, Metal and (since Thema 126, Schritt 1) Vulkan bake HE::SkyColorCPU into a
+// 128² cube and raise heLight.fog.z; this backend kept a null cube view in the
+// template and fog.z at 0, so graph materials had no sky ambient, no specular
+// IBL and no fog (heApplyFog takes its colour from the cube). Not fatal when it
+// fails: fog.z stays 0, exactly the state before the cube existed.
+void D3D12RendererImpl::createSkyEnvCube()
+{
+    m_skyEnvValid = false;
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width            = static_cast<UINT64>(k_skyEnvFace);
+    td.Height           = static_cast<UINT>(k_skyEnvFace);
+    td.DepthOrArraySize = 6;
+    td.MipLevels        = 1;
+    td.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Flags            = D3D12_RESOURCE_FLAG_NONE;
+    bool ok = SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_skyEnvCube)));
+    m_skyEnvState = D3D12_RESOURCE_STATE_COPY_DEST;
+    const UINT64 bytes = static_cast<UINT64>(k_skyEnvFace) * k_skyEnvFace * 6 * 4 * sizeof(uint16_t);
+    for (UINT f = 0; ok && f < k_frameCount; ++f)
+    {
+        m_skyEnvUpload[f] = createUploadBuffer(bytes, reinterpret_cast<void**>(&m_skyEnvUploadPtr[f]));
+        ok = m_skyEnvUpload[f] && m_skyEnvUploadPtr[f];
+    }
+    if (!ok)
+    {
+        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: sky environment cube unavailable — graph materials keep flat ambient");
+        m_skyEnvCube.Reset();
+        for (UINT f = 0; f < k_frameCount; ++f) { m_skyEnvUpload[f].Reset(); m_skyEnvUploadPtr[f] = nullptr; }
+    }
+}
+
+// Recorded on the frame's command list before its first material draw. The
+// upload buffer is this frame slot's own, so the frame fence that guards the
+// HeLighting/U/HeParams rings guards it too. GL's dead-band (2e-3 ≈ 0.11°): a
+// static sun bakes once, a moving one roughly every other frame.
+void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir)
+{
+    if (!cl || !m_skyEnvCube || !m_skyEnvUploadPtr[frameIndex]) return;
+    if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
+
+    constexpr int N = k_skyEnvFace;
+    std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
+    parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
+    {
+        const int f = static_cast<int>(idx / N);
+        const int t = static_cast<int>(idx % N);
+        HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
+    }, "SkyEnvBake", 1);
+    uint16_t* dst = reinterpret_cast<uint16_t*>(m_skyEnvUploadPtr[frameIndex]);
+    for (size_t i = 0; i < px.size(); ++i)
+        dst[i] = glm::packHalf1x16(px[i]);
+
+    // D3D cube faces are array slices 0..5 = +X,-X,+Y,-Y,+Z,-Z with GL's (s,t)
+    // table, row 0 = t 0 — the bake goes in unchanged (SkyEnvBake.h). The
+    // previous frame may still be sampling the cube on this queue: the
+    // transition out of PIXEL_SHADER_RESOURCE orders the copy after it.
+    const UINT   rowPitch  = static_cast<UINT>(N * 4 * sizeof(uint16_t));
+    const UINT64 faceBytes = static_cast<UINT64>(rowPitch) * N;
+    static_assert((k_skyEnvFace * 4 * sizeof(uint16_t)) % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT == 0,
+                  "the tightly packed bake row must already be 256-B aligned");
+    static_assert((k_skyEnvFace * k_skyEnvFace * 4 * sizeof(uint16_t)) % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0,
+                  "every face of the tightly packed bake must start 512-B aligned");
+    barrier12(cl, m_skyEnvCube.Get(), m_skyEnvState, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (UINT f = 0; f < 6; ++f)
+    {
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = m_skyEnvUpload[frameIndex].Get();
+        src.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset    = faceBytes * f;
+        src.PlacedFootprint.Footprint = { DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                          static_cast<UINT>(N), static_cast<UINT>(N), 1, rowPitch };
+        D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+        dstLoc.pResource        = m_skyEnvCube.Get();
+        dstLoc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = f; // mip 0 of slice f (one mip level)
+        cl->CopyTextureRegion(&dstLoc, 0, 0, 0, &src, nullptr);
+    }
+    barrier12(cl, m_skyEnvCube.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_skyEnvState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    m_skyEnvSunDir = sunDir;
+    m_skyEnvValid  = true;
 }
 
 // `precompiled` (the pak's baked HLSL for this backend, MaterialShaderLibrary::
@@ -8403,8 +8749,21 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         // HLSL sampler pins of 5e52d64e, say) is not the end: fall through to the runtime
         // cross-compile, which is what rendered that pak before variants were consumed
         // here at all. Only when both roads are closed is the miss cached.
+        // The baked clustered twin (Thema 117) goes before the baked plain pair, under
+        // the same matClustered() rule as the cross-compiled one below: only then does
+        // the root signature carry t24..t26 and the gate open.
         bool built = false;
-        if (precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
+        if (precompiled && matClustered() && !precompiled->fragmentClustered.empty())
+        {
+            const std::string& vsSrc = precompiled->vertexClustered.empty()
+                ? precompiled->vertex : precompiled->vertexClustered;
+            if (!vsSrc.empty())
+                built = compilePair(vsSrc, precompiled->fragmentClustered, "baked variant, clustered");
+            if (!built)
+                HE_LOG_WARN(RHI, "%s", "D3D12Renderer: A4 baked clustered material variant rejected — "
+                    "trying the baked 8-light window variant");
+        }
+        if (!built && precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
         {
             built = compilePair(precompiled->vertex, precompiled->fragment, "baked variant");
             if (!built)
@@ -9005,8 +9364,11 @@ void D3D12Renderer::Shutdown()
     m_impl->viewportRtvHeap.Reset();
     m_impl->viewportDsvHeap.Reset();
     m_impl->m_uiFontAtlases.clear();
+    m_impl->m_uiImageCache.clear();
     m_impl->m_uiAtlasUploads.clear();
     m_impl->m_uiAtlasHeap.Reset();
+    m_impl->m_uiAtlasNextSlot  = 0; // the heap is rebuilt on a re-Initialize
+    m_impl->m_uiImageNextSlot  = 0;
     m_impl->meshTexUploads.clear(); // per-mesh base-color staging buffers (GpuMesh SRVs die with meshCache)
     m_impl->meshTexNextSlot = D3D12RendererImpl::k_sceneStaticSrvs; // reset the albedo-slot allocator for a possible re-Initialize
     m_impl->m_materialTexCache.clear(); // override-material textures
@@ -9063,14 +9425,14 @@ void D3D12Renderer::Shutdown()
     m_impl->m_retiredTextures.clear(); // includes GI buffers just retired above
     m_impl->giGBufRS.Reset(); m_impl->giComputeRS.Reset(); m_impl->giFsRS.Reset();
     m_impl->giGBufPSO.Reset(); m_impl->giGBufPSOInstanced.Reset(); m_impl->giShadowPSO.Reset(); m_impl->giProbePSO.Reset();
-    m_impl->giTemporalPSO.Reset(); m_impl->giBlurPSO.Reset();
+    m_impl->giTemporalPSO.Reset(); m_impl->giAtrousPSO.Reset();
     m_impl->giSrvHeap.Reset(); m_impl->giRtvHeap.Reset(); m_impl->giDsvHeap.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
     {
         m_impl->giShadowCB[i].Reset();   m_impl->giShadowCBPtr[i]   = nullptr;
         m_impl->giCountCB[i].Reset();    m_impl->giCountCBPtr[i]    = nullptr;
         m_impl->giTemporalCB[i].Reset(); m_impl->giTemporalCBPtr[i] = nullptr;
-        m_impl->giBlurCB[i].Reset();     m_impl->giBlurCBPtr[i]     = nullptr;
+        m_impl->giAtrousCB[i].Reset();     m_impl->giAtrousCBPtr[i]     = nullptr;
         m_impl->giProbeCB[i].Reset();    m_impl->giProbeCBPtr[i]    = nullptr;
         m_impl->giGBufObjRing[i].Reset(); m_impl->giGBufObjPtr[i]   = nullptr;
     }
@@ -9121,7 +9483,10 @@ void D3D12Renderer::Shutdown()
         m_impl->m_matObjRing[i].Reset();   m_impl->m_matObjPtr[i]   = nullptr;
         m_impl->m_matParamRing[i].Reset(); m_impl->m_matParamPtr[i] = nullptr;
         m_impl->m_matDrawCursor[i] = 0;
+        m_impl->m_skyEnvUpload[i].Reset(); m_impl->m_skyEnvUploadPtr[i] = nullptr;
     }
+    m_impl->m_skyEnvCube.Reset();
+    m_impl->m_skyEnvValid = false;
     m_impl->depthBuffer.Reset();
     m_impl->dsvHeap.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
@@ -9190,6 +9555,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     p.m_extractor.extract(*m_world, p.m_renderWorld,
                           static_cast<float>(width) / static_cast<float>(height),
                           &m_editorCamera);
+    // The UI canvas (Entity-UI + WidgetManager widgets) rides in the same
+    // RenderWorld — extract() just cleared it. Mirrors GL/Metal; without this
+    // call every UI pass below sees an empty list and draws nothing.
+    p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+                            p.m_renderWorld);
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
@@ -9363,6 +9733,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
+        f.ambient      = glm::vec4(p.m_renderWorld.ambient, 0.0f); // GI-branch floor only
         f.giGridOrigin = glm::vec4(p.giGridOrigin, p.giProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         // x is the gate the built-in scene shader's reflection cascade tests;
@@ -9387,8 +9758,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // buffer at execute time, so the last write wins). Now fills the FULL v2
     // light window from the dominant directional light (was sun-only sky values
     // before — graph materials never saw point/spot lights on D3D12 and stayed
-    // sun-lit at night). Mirrors the D3D11 fillMatLight.
-    auto fillMatLight = [&](bool giActive)
+    // sun-lit at night). Mirrors the D3D11 fillMatLight. `aoActive`: the blurred
+    // SSAO ran this frame — fillPerFrame's own AO gate; the material draw writes
+    // that image into its block's kSlotAO exactly then.
+    auto fillMatLight = [&](bool giActive, bool aoActive)
     {
         if (!(p.m_matReady && p.m_matLightPtr[p.frameIndex])) return;
         HE::MaterialShaderLibrary::Lighting lit{};
@@ -9479,9 +9852,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             lit.shadowBias[0] = p.shadowSettings.slopeBias;
             lit.shadowBias[1] = p.shadowSettings.minBias;
         }
+        // Height fog + the two image gates, the GL/Metal/Vulkan fill (Thema
+        // 126; lit.fog stayed all-zero here before, so graph materials had no
+        // sky ambient, no specular IBL, no SSAO and no fog). z: the baked sky
+        // cube exists — every material draw block gets its view in kSlotSkyEnv
+        // exactly then. w: the blurred SSAO goes into kSlotAO under the same
+        // flag the caller passes here.
+        const bool skyEnvBound = p.m_skyEnvValid;
+        lit.fog[0] = m_environment.fogDensity;
+        lit.fog[1] = m_environment.fogHeightFalloff;
+        lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
+        lit.fog[3] = aoActive    ? 1.0f : 0.0f;
         std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
     };
-    fillMatLight(false);
+    // The sky cube first: a copy on this frame's command list, recorded before
+    // any graph-material draw, and fillMatLight reads m_skyEnvValid.
+    if (p.m_matReady)
+        p.updateSkyEnvCube(cl, p.m_renderWorld.sunDirection);
+    fillMatLight(false, false);
 
     // The heap slot the scene shader's t16 SSR table points at this frame. Set
     // once the trace has run; until then (and on every non-SSR frame) it names
@@ -9731,12 +10119,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         // ── Forward screen-space reflections (plan checkpoint D) ─────────────
         // The radiance source is the previous frame's HDR colour, so SSR runs
-        // only where Render() actually bound hdrRT — `usingHDR`. That is the C6
-        // hole inherited from D3D11, stated as one gate: the swapchain branch
-        // (the packaged game, no editor viewport) draws straight into the
-        // backbuffer, has no HDR target, and therefore no SSR. Deliberately not
-        // fixed here — giving the swapchain path an HDR target changes the
-        // packaged game's frame layout and needs its own decision.
+        // only where Render() actually bound hdrRT — `usingHDR`, stated as one
+        // gate. That is DrawViewportFrame: the editor viewport, and the packaged
+        // game too since it asks for the chain (SetSwapchainPostProcessing, C6
+        // closed). Only the direct swapchain branch (application mode, or the
+        // chain not ready) draws straight into the backbuffer, has no HDR
+        // target, and therefore no SSR.
         bool ssrFrameActive = false;
 #if defined(HE_HAVE_SHADERC)
         ssrFrameActive = p.ssrEnabled && p.usingHDR && p.hdrRT
@@ -9787,7 +10175,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // non-zero intensity. Off → t16 names the null descriptor and the
         // cascade folds away on uSSRParams.x.
         fillPerFrame(giShadingActive, aoWanted, ssrResult != nullptr);
-        fillMatLight(giShadingActive);
+        const bool matAOActive = aoWanted && p.ssaoBlurRT != nullptr; // heAO = the built-in's t2 image
+        fillMatLight(giShadingActive, matAOActive);
 
         // ── Geometry pass: bind combined sceneSrvHeap (shadow t0 + AO t2 +
         // GI mask/atlases t4..t6 — slots [4..6] were written at GI-target/atlas
@@ -9981,6 +10370,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                     heTexP[i] = p.whiteArrayTexture(cl);
                         }
 
+                        // heLandscapeWeights (t14, block slot kSlotLandscapeWeights) = the
+                        // object's landscape weightmap, PER DRAW like D3D11 t14 / Vulkan
+                        // binding 14 / GL unit 13 / Metal slot 13: it belongs to the terrain
+                        // the chunk is part of, not to the material, so two landscapes can
+                        // share one material and keep their own paint (RenderPass never
+                        // batches across weightmaps, so one block per DrawCall is enough).
+                        // Anything that is not a landscape chunk gets the 1x1 (1,0,0,0)
+                        // default = layer 0; the template's null view (zero sum → the
+                        // blend's own layer-0 fallback) is the last resort. Resolved
+                        // before `ma` below for the same reason as heTexP — a resolve may
+                        // load. A paint stroke replaces the pixels under the SAME UUID and
+                        // calls InvalidateTexture, which retires this cache entry.
+                        ID3D12Resource* heWeights = nullptr;
+                        if (dc.weightmapTextureId != HE::UUID{})
+                            heWeights = p.resolveGraphTexture(cl, dc.weightmapTextureId, {}, m_contentManager);
+                        if (!heWeights)
+                            heWeights = p.resolveGraphTexture(cl, HE::kDefaultLayer0WeightTextureId, {}, m_contentManager);
+
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
                         const std::vector<float>* params =
@@ -9999,6 +10406,18 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
                             if (heTexP[k]) p.srvForTexture(heTexP[k], p.matSrvCpu(blk + 1 + static_cast<UINT>(k)),
                                                            (heTexPArrays >> k) & 1u);
+                        if (heWeights)
+                            p.srvForTexture(heWeights, p.matSrvCpu(blk + HE::d3d12mat::kSlotLandscapeWeights));
+                        // heSkyEnv (t15) + heAO (t16) (Thema 126): the baked sky cube and
+                        // this frame's blurred SSAO (the image the built-in shader reads at
+                        // t2, in PIXEL_SHADER_RESOURCE after the blur pass), each under the
+                        // very flag fillMatLight raised its gate with (fog.z / fog.w). The
+                        // template's null views stay where the gate is 0.
+                        if (p.m_skyEnvValid)
+                            p.srvForSkyEnvCube(p.matSrvCpu(blk + HE::d3d12mat::kSlotSkyEnv));
+                        if (matAOActive)
+                            p.srvIntoHeapSlot(p.ssaoBlurRT.Get(), DXGI_FORMAT_R8_UNORM,
+                                              p.matSrvCpu(blk + HE::d3d12mat::kSlotAO));
 
                         // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
@@ -10458,7 +10877,8 @@ void D3D12Renderer::DrawViewportFrame()
             p.cmdList->RSSetScissorRects(1, &uisc);
         }
         p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
-                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH),
+                         m_contentManager);
         // Transition back to PSR so ImGui can sample viewportRT.
         p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                     p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -10495,7 +10915,8 @@ void D3D12Renderer::DrawViewportFrame()
             p.cmdList->RSSetScissorRects(1, &uisc);
         }
         p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
-                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH),
+                         m_contentManager);
 
         p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                     p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -10543,15 +10964,61 @@ void D3D12Renderer::Render()
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
 
+    // The packaged game (SetSwapchainPostProcessing): the post chain — HDR,
+    // bloom, tonemap, AA, TAA, SSR — exists only in the viewport frame, so the
+    // game runs that frame at the back buffer's size and copies the finished
+    // RGBA8 image into the back buffer. Sized from the back buffer itself, not
+    // the window: CopyResource needs identical dimensions, and a failed
+    // ResizeBuffers keeps the old ones. An editor request (HE_CAPTURE_FRAME asks
+    // for one at the window's logical size) is ignored meanwhile — honouring it
+    // would rebuild every target each frame — and the capture reads this very
+    // image. All of this flushes, so it runs before the list starts recording.
+    ID3D12Resource* backBuffer = p.renderTargets[p.frameIndex].Get();
+    D3D12_RESOURCE_DESC bbDesc{};
+    if (backBuffer) bbDesc = backBuffer->GetDesc();
+    const UINT bbW = static_cast<UINT>(bbDesc.Width);
+    const UINT bbH = bbDesc.Height;
+    const bool gameChain = p.swapchainPostFx && p.postFxReady && backBuffer
+                        && bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM
+                        && bbDesc.SampleDesc.Count == 1 && bbW > 0 && bbH > 0;
+    if (gameChain)
+    {
+        if (!p.gameViewport || p.viewportW != bbW || p.viewportH != bbH)
+        {
+            p.createViewportRT(bbW, bbH);
+            p.gameViewport = true;
+            if (p.viewportRT && p.viewportW == bbW && p.viewportH == bbH)
+                HE_LOG_INFO(RHI, "D3D12Renderer: swapchain post chain active (%ux%u)", bbW, bbH);
+        }
+    }
+    else if (p.gameViewport)
+    {
+        // The game stopped asking (application mode): drop its set so the
+        // branch below draws straight into the back buffer again, and the TAA
+        // history with it — it would blend a stale world when the chain returns.
+        // The decal pass's viewport-depth SRV gets a null view (bound on every
+        // scene draw). One flush, on the switch only.
+        p.waitForAllFrames();
+        p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
+        p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
+        p.createDepthSrv(nullptr, D3D12RendererImpl::k_decalViewportDepthSlot);
+        p.viewportW = p.viewportH = 0;
+        p.viewportState   = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        p.gameViewport    = false;
+        p.taaHistoryValid = false;
+    }
+
     // Resize viewport RT if the editor requested a different size.
-    if (p.viewportReqW > 0 && p.viewportReqH > 0 &&
+    if (!gameChain && p.viewportReqW > 0 && p.viewportReqH > 0 &&
         (p.viewportReqW != p.viewportW || p.viewportReqH != p.viewportH))
         p.createViewportRT(p.viewportReqW, p.viewportReqH);
     // TAA targets to the mode in force (only flushes on a toggle), before the
     // command list below starts recording against them.
     p.syncTaaTargets();
 
-    const bool useViewport = p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
+    const bool gameFrame   = gameChain && p.viewportRT && p.viewportDsvHeap
+                          && p.viewportW == bbW && p.viewportH == bbH;
+    const bool useViewport = !gameChain && p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
 
     p.waitForFrame(p.frameIndex);
 
@@ -10577,44 +11044,79 @@ void D3D12Renderer::Render()
 
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
-    if (useViewport)
-        DrawViewportFrame();
-
-    // ── Swapchain → transition to RTV, clear, run ImGui overlay ────────────
     D3D12_RESOURCE_BARRIER swapBarrier{};
     swapBarrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     swapBarrier.Transition.pResource   = p.renderTargets[p.frameIndex].Get();
     swapBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
     swapBarrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
     swapBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    p.cmdList->ResourceBarrier(1, &swapBarrier);
-
     auto rtv = p.rtvHandle(p.frameIndex);
-    auto dsv = p.dsvHeap ? p.dsvHeap->GetCPUDescriptorHandleForHeapStart() : D3D12_CPU_DESCRIPTOR_HANDLE{};
-    p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, p.dsvHeap ? &dsv : nullptr);
-    p.cmdList->ClearRenderTargetView(rtv, bgColor, 0, nullptr);
-    if (p.dsvHeap)
-        p.cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    if (!useViewport)
+    if (gameFrame)
     {
-        D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
-        D3D12_RECT     sc{ 0, 0, p.width, p.height };
+        // Viewport frame (UI canvas included), then copy it into the back
+        // buffer: viewportRT PSR → COPY_SOURCE → PSR, back buffer PRESENT →
+        // COPY_DEST → RENDER_TARGET, so the shared RT → PRESENT below holds. No
+        // clear — the copy overwrites every texel.
+        DrawViewportFrame();
+        D3D12_RESOURCE_BARRIER copyBarriers[2]{};
+        copyBarriers[0].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyBarriers[0].Transition.pResource   = p.viewportRT.Get();
+        copyBarriers[0].Transition.StateBefore = p.viewportState;
+        copyBarriers[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        copyBarriers[1] = swapBarrier;
+        copyBarriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        p.cmdList->ResourceBarrier(2, copyBarriers);
+        p.cmdList->CopyResource(backBuffer, p.viewportRT.Get());
+        copyBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyBarriers[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        copyBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyBarriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        p.cmdList->ResourceBarrier(2, copyBarriers);
+        p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        // The overlay (if any) draws on top of the copied image.
+        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(bbW), static_cast<float>(bbH), 0.0f, 1.0f };
+        D3D12_RECT     sc{ 0, 0, static_cast<LONG>(bbW), static_cast<LONG>(bbH) };
         p.cmdList->RSSetViewports(1, &vp);
         p.cmdList->RSSetScissorRects(1, &sc);
-        p.usingHDR = false;
-        p.taaFrame = false; // no post chain here, nothing would resolve a jitter
-        DrawScene(p.cmdList.Get(), p.width, p.height);
+    }
+    else
+    {
+        if (useViewport)
+            DrawViewportFrame();
 
-        // ── 2D UI canvas on swapchain RT (already bound, in RENDER_TARGET state) ─
-        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        // ── Swapchain → transition to RTV, clear, run ImGui overlay ────────────
+        p.cmdList->ResourceBarrier(1, &swapBarrier);
+
+        auto dsv = p.dsvHeap ? p.dsvHeap->GetCPUDescriptorHandleForHeapStart() : D3D12_CPU_DESCRIPTOR_HANDLE{};
+        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, p.dsvHeap ? &dsv : nullptr);
+        p.cmdList->ClearRenderTargetView(rtv, bgColor, 0, nullptr);
+        if (p.dsvHeap)
+            p.cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        if (!useViewport)
         {
-            D3D12_VIEWPORT uivp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
-            D3D12_RECT     uisc{ 0, 0, p.width, p.height };
-            p.cmdList->RSSetViewports(1, &uivp);
-            p.cmdList->RSSetScissorRects(1, &uisc);
+            D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
+            D3D12_RECT     sc{ 0, 0, p.width, p.height };
+            p.cmdList->RSSetViewports(1, &vp);
+            p.cmdList->RSSetScissorRects(1, &sc);
+            p.usingHDR = false;
+            p.taaFrame = false; // no post chain here, nothing would resolve a jitter
+            DrawScene(p.cmdList.Get(), p.width, p.height);
+
+            // ── 2D UI canvas on swapchain RT (already bound, in RENDER_TARGET state) ─
+            p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            {
+                D3D12_VIEWPORT uivp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
+                D3D12_RECT     uisc{ 0, 0, p.width, p.height };
+                p.cmdList->RSSetViewports(1, &uivp);
+                p.cmdList->RSSetScissorRects(1, &uisc);
+            }
+            p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height, m_contentManager);
         }
-        p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
     }
 
     // Overlay (ImGui) records into this command list and binds its own SRV heap.
@@ -10697,18 +11199,20 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     Capabilities c{};
     c.supportsShadows        = true;
     c.supportsPostProcessing = m_impl->postFxReady;
-    c.supportsHDR            = false;
+    // The HDR scene target lives and dies with the post chain, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing) both run.
+    c.supportsHDR            = m_impl->postFxReady;
     // Software ray-traced DDGI via CS 5.0/5.1 (FL 11.0 baseline) — same
     // CPU-BVH path as GL 4.3/D3D11; cleared if the GI pipelines fail to build.
     c.supportsGlobalIllumination = m_impl->giSupported;
-    // Forward SSR needs an HDR scene target to read radiance out of, and D3D12
-    // only has one in the editor viewport path (docs/ssr-cross-backend-plan.md
-    // C6/D). postFxReady is the honest answer: in the swapchain path the switch
-    // exists but does nothing, exactly as on Vulkan and D3D11.
+    // Forward SSR reads radiance out of the post chain's HDR scene target, so
+    // it is there exactly when the chain is (docs/ssr-cross-backend-plan.md
+    // C6/D, closed by the swapchain post chain): editor viewport and packaged
+    // game alike. Only the direct swapchain fallback (application mode) has none.
     c.supportsScreenSpaceReflections = m_impl->postFxReady;
-    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same
-    // editor-viewport post chain SSR needs — false only if a TAA shader or
-    // PSO failed. The swapchain path renders unjittered either way (taaFrame).
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same post
+    // chain SSR needs — false only if a TAA shader or PSO failed. Only the
+    // direct swapchain fallback renders unjittered (taaFrame).
     c.supportsTemporalAA = m_impl->taaReady();
     return c;
 }
@@ -10752,6 +11256,9 @@ void D3D12Renderer::SetGISettings(const GISettings& s)
     p.giIndirectIntensity   = std::max(0.0f, s.indirectIntensity);
     p.giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
     p.giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+    p.giShadowRays          = std::clamp(s.shadowRays, 1, 256);
+    p.giShadowHistoryWeight       = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+    p.giShadowFilter        = s.shadowFilter;
 }
 
 void* D3D12Renderer::GetDevice()       const { return m_impl->device.Get(); }
@@ -10767,6 +11274,11 @@ void D3D12Renderer::SetViewportSize(uint32_t width, uint32_t height)
 {
     m_impl->viewportReqW = static_cast<UINT>(width);
     m_impl->viewportReqH = static_cast<UINT>(height);
+}
+
+void D3D12Renderer::SetSwapchainPostProcessing(bool enabled)
+{
+    m_impl->swapchainPostFx = enabled;   // Render() builds or drops the set
 }
 
 bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)

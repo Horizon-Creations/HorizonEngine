@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@
 // he_materialshader is linked into he_tests in every flavour (the stub answers the
 // compiles); only the cross-compile TEST CASES below are gated on HE_TESTS_HAVE_SHADERC.
 #include <material/MaterialShaderLibrary.h>
+#include <material/MaterialShaderBake.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonRendering/LightPacking.h>   // FillMaterialWind
 #include <HorizonRendering/SkyFrameParams.h> // CloudWindVector (the compass it must share)
@@ -1614,6 +1616,7 @@ TEST_CASE("Generated graph GLSL cross-compiles through the real material pipelin
 // encode/decode is the single source of truth shared by the exporter and the
 // runtime; a roundtrip must preserve backend + both (possibly binary) sources.
 #include <ContentManager/Assets.h>
+#include <ContentManager/HAsset.h> // hand-built v2 blob
 
 TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 {
@@ -1634,6 +1637,11 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 		in.push_back(v);
 	}
 
+	// Clustered twin (Thema 123): set on the Vulkan record only, with NULs — the
+	// Metal record's empty pair must come back empty, not shifted from a neighbour.
+	in[1].fragmentClustered = std::string("\x00\xC1\x00\x57", 4);
+	in[1].vertexClustered   = std::string("\x07\x00", 2);
+
 	const std::vector<uint8_t> bytes = HE::encodeMaterialShaderVariants(in);
 	CHECK(!bytes.empty());
 
@@ -1644,6 +1652,36 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 		CHECK(out[i].backend  == in[i].backend);
 		CHECK(out[i].vertex   == in[i].vertex);   // std::string ==, NUL-safe
 		CHECK(out[i].fragment == in[i].fragment);
+		CHECK(out[i].fragmentClustered == in[i].fragmentClustered);
+		CHECK(out[i].vertexClustered   == in[i].vertexClustered);
+	}
+
+	// A torn tail (pak cut short) still yields every record, the clustered pairs
+	// it could not read stay empty — the renderer then draws the plain fragment.
+	{
+		std::vector<uint8_t> torn(bytes.begin(), bytes.end() - 1);
+		const auto t = HE::decodeMaterialShaderVariants(torn);
+		REQUIRE(t.size() == in.size());
+		CHECK(t[1].fragment == in[1].fragment);
+		CHECK(t[1].vertexClustered.empty());
+	}
+
+	// A v2 pak (uiVertex per record, no clustered tail) decodes with empty pairs.
+	{
+		std::vector<uint8_t> v2;
+		HAsset::Writer::appendPOD(v2, uint8_t{0}); // version mark
+		HAsset::Writer::appendPOD(v2, uint8_t{2}); // version
+		HAsset::Writer::appendPOD(v2, uint8_t{1}); // count
+		HAsset::Writer::appendPOD(v2, uint8_t{static_cast<uint8_t>(HE::RendererBackend::Metal)});
+		HAsset::Writer::appendString(v2, "v");
+		HAsset::Writer::appendString(v2, "f");
+		HAsset::Writer::appendString(v2, "ui");
+		const auto o2 = HE::decodeMaterialShaderVariants(v2);
+		REQUIRE(o2.size() == 1);
+		CHECK(o2[0].fragment == "f");
+		CHECK(o2[0].uiVertex == "ui");
+		CHECK(o2[0].fragmentClustered.empty());
+		CHECK(o2[0].vertexClustered.empty());
 	}
 
 	// Empty input → empty blob → empty decode (exporter treats this as "no chunk").
@@ -2258,6 +2296,62 @@ TEST_CASE("The auto landscape material cross-compiles for all five backends, in 
 	// four-slot graph material (the budget lesson of docs §2.1).
 	const std::string msl = lib.fragment(h, variants[0].gen.glsl, B::Metal).source;
 	CHECK(countOf(msl, "texture2d_array<float>") >= 3u);
+}
+
+TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambleSamplerSlots or the material window")
+{
+	// Thema 124 A7: the material preview encoder bound no preamble samplers and
+	// MTL_DEBUG_LAYER rejected every preview draw (missing samplers 5-12/14).
+	// MetalRenderer::BindMaterialPreambleSlots now binds the sampler on every
+	// slot of kMetalPreambleSamplerSlots, for the scene passes AND the preview —
+	// so the contract that must not drift is: the emitted MSL declares no
+	// sampler outside that list and the material-texture window 0..4.
+	HE::MaterialGraph g = makeDemoGraph();
+	// A Landscape Layer Blend adds the one per-draw preamble sampler (weightmap).
+	const int out = [&] { for (const auto& n : g.nodes) if (n.type == HE::MatNodeType::Output) return n.id; return -1; }();
+	REQUIRE(out >= 0);
+	const int lb = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+	g.findNode(lb)->s = "Grass\nRock";
+	const int c = g.addNode(HE::MatNodeType::ConstColor);
+	REQUIRE(g.connect(c, 0, lb, 0));
+	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputEmissivePin));
+
+	const std::string glsl = HE::generateFragment(g).glsl;
+	const uint64_t    hash = std::hash<std::string>{}(glsl);
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	HE::MaterialShaderLibrary lib;
+
+	auto samplersOf = [](const std::string& src) {
+		std::set<int> s;
+		const std::string tag = "[[sampler(";
+		for (size_t p = src.find(tag); p != std::string::npos; p = src.find(tag, p + tag.size()))
+			s.insert(std::atoi(src.c_str() + p + tag.size()));
+		return s;
+	};
+	const std::set<int> listed(std::begin(MSL::kMetalPreambleSamplerSlots),
+	                           std::end(MSL::kMetalPreambleSamplerSlots));
+	for (const bool clustered : { false, true })
+	{
+		CAPTURE(clustered);
+		const auto& msl = clustered ? lib.fragmentClustered(hash, glsl, B::Metal)
+		                            : lib.fragment(hash, glsl, B::Metal);
+		REQUIRE_MESSAGE(msl.ok, msl.log);
+		const std::set<int> used = samplersOf(msl.source);
+		// Positive control: the preamble's lit path really declares the slots
+		// the validation layer named, so an empty parse cannot pass vacuously.
+		for (const int slot : { 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 })
+		{
+			CAPTURE(slot);
+			CHECK(used.count(slot) == 1);
+		}
+		for (const int slot : used)
+		{
+			CAPTURE(slot);
+			CHECK(((slot >= 0 && slot <= HE::kMatMaxGraphTextures) || listed.count(slot) == 1));
+		}
+		CHECK(used.size() <= 16); // Metal's fragment sampler cap
+	}
 }
 #endif
 
@@ -3830,6 +3924,28 @@ std::string uncoveredVk(const std::vector<VkUse>& uses, uint32_t rows)
 	}
 	return miss;
 }
+
+// The same for uses in a FRAGMENT shader, held to the stage bits too (a row
+// that exists but is vertex-only does not serve the fragment stage), with the
+// row for `skipBinding` taken out of the table — the negative control for a
+// row that is not the last one. ~0u skips nothing.
+std::string uncoveredVkFragment(const std::vector<VkUse>& uses, uint32_t skipBinding = ~0u)
+{
+	std::string miss;
+	for (const VkUse& u : uses)
+	{
+		bool ok = false;
+		for (uint32_t i = 0; i < HE::vkmat::kBindingCount && !ok; ++i)
+		{
+			const HE::vkmat::Binding& row = HE::vkmat::kBindings[i];
+			ok = row.binding != skipBinding && u.set == 0 && row.binding == u.binding
+			  && static_cast<int>(row.kind) == u.kind && (row.stages & HE::vkmat::kStageFragment);
+		}
+		if (!ok)
+			miss += " " + std::to_string(u.set) + "/" + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
 } // namespace
 
 TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in the material layout (Thema 117)")
@@ -3916,13 +4032,97 @@ TEST_CASE("Vulkan: the clustered variant adds exactly set 0 SSBOs 24..26, all in
 	CHECK(withLists * 2 > static_cast<int>(cases.size()));
 	// Thema 120: the preamble's sky/AO/DDGI/GI-refl/cloud samplers (15..18,
 	// 32, 33) are layout rows now — the DDGI atlases are written to 17/18 —
-	// so none of them may fall back into the gap.
+	// so none of them may fall back into the gap. Thema 143: nor may 14
+	// (heLandscapeWeights, the painted terrain lavapipe crashed on).
 	for (const VkUse& u : plainGap)
-		for (uint32_t b : { 15u, 16u, 17u, 18u, 32u, 33u })
+		for (uint32_t b : { 14u, 15u, 16u, 17u, 18u, 32u, 33u })
 			CHECK_MESSAGE(u.binding != b, "plain uses binding ", b, " outside the material layout");
 	MESSAGE("clustered SPIR-V with set 0 SSBOs 24..26: ", withLists, "/", cases.size(),
 	        "; plain uses outside the layout (pre-existing):",
 	        uncoveredVk(std::vector<VkUse>(plainGap.begin(), plainGap.end()), 0));
+}
+
+// ═══ Thema 143: heLandscapeWeights is a Vulkan material layout row ══════════
+// A Landscape Layer Blend graph samples its weightmap at set 0 binding 14. The
+// layout lacked that row: NVIDIA answered with VUID-…-layout-07988 and an
+// "invalid" descriptor per draw (and drew the terrain unpainted), lavapipe with
+// SIGSEGV in the first draw. Held here the same way as the Thema 117/120 rows:
+// reflection of the statically used descriptors against HE::vkmat::kBindings.
+TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, and the rest of the gap is UI-only (Thema 143)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using HE::vkmat::DescKind;
+	HE::MaterialShaderLibrary lib;
+	const VkUse weights{ 0, HE::vkmat::kLandscapeWeightsBinding, static_cast<int>(DescKind::CombinedImageSampler) };
+
+	// The row itself, fragment stage, ahead of the cluster lists.
+	bool row = false;
+	for (uint32_t i = 0; i < HE::vkmat::kPreClusterBindingCount; ++i)
+		row = row || (HE::vkmat::kBindings[i].binding == 14
+		              && HE::vkmat::kBindings[i].kind == DescKind::CombinedImageSampler
+		              && HE::vkmat::kBindings[i].stages == HE::vkmat::kStageFragment);
+	CHECK(row);
+
+	// The device limit: 17 fragment samplers with the row, 16 (the spec
+	// minimum, which every device meets) without it — the renderer's fallback.
+	CHECK(HE::vkmat::fragmentSamplerCount(true) == 17);
+	CHECK(HE::vkmat::fragmentSamplerCount(false) == 16);
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
+	CHECK(HE::vkmat::landscapeWeightsFit(17, 17));
+	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+
+	int landscapeCases = 0;
+	std::set<VkUse> fragGap;           // stage-aware: what no fragment row serves
+	std::set<std::string> fragGapCases;
+	for (const NodeShaderCase& c : allNodeShaderCases())
+	{
+		const uint64_t h = caseHash(c);
+		for (const bool clustered : { false, true })
+		{
+			const auto& sv = clustered ? lib.fragmentClustered(h, c.glsl, B::SpirV) : lib.fragment(h, c.glsl, B::SpirV);
+			REQUIRE_MESSAGE(sv.ok, c.name, ": ", sv.log);
+			std::string err;
+			const std::vector<VkUse> uses = activeVkDescriptors(sv.spirv, err);
+			REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
+			const bool usesWeights = std::find(uses.begin(), uses.end(), weights) != uses.end();
+			const bool declares    = c.glsl.find("heLandscapeWeights") != std::string::npos;
+			// Only a layer-blend graph reaches binding 14 — what lets the renderer
+			// gate its fallback on the GLSL text alone.
+			CHECK_MESSAGE(usesWeights == declares, std::string(c.name));
+			if (usesWeights)
+			{
+				++landscapeCases;
+				// Positive: the full table serves it in the fragment stage.
+				CHECK_MESSAGE(uncoveredVkFragment({ weights }).empty(), std::string(c.name));
+				// Negative control: the same table without row 14 leaves exactly
+				// that use uncovered — the state before this fix.
+				CHECK_MESSAGE(uncoveredVkFragment(uses, 14) == " 0/14:1", std::string(c.name));
+			}
+			for (const VkUse& u : uses)
+				if (!uncoveredVkFragment({ u }).empty())
+				{
+					fragGap.insert(u);
+					fragGapCases.insert(c.name);
+				}
+		}
+	}
+	// The sweep did reach the Landscape Layer Blend node (plain + clustered).
+	CHECK(landscapeCases >= 2);
+
+	// What is left is the UI domain alone, and it is two uses no layout row can
+	// fix: HeUI (binding 8) is a FRAGMENT uniform block where the layout has the
+	// WPO vertex HeLighting, and heBackdrop (binding 9) is a combined sampler
+	// where the layout has the WPO vertex HeParams UBO. Vulkan has no UI-material
+	// pass (only GL/Metal draw UI-domain graphs), so the mesh path is the only
+	// way in. Listed exactly, so the gap cannot grow silently.
+	const std::set<VkUse> uiOnly = { { 0, 8, static_cast<int>(DescKind::UniformBuffer) },
+	                                 { 0, 9, static_cast<int>(DescKind::CombinedImageSampler) } };
+	CHECK_MESSAGE(fragGap == uiOnly, "fragment uses outside the layout:",
+	              uncoveredVk(std::vector<VkUse>(fragGap.begin(), fragGap.end()), 0));
+	for (const std::string& name : fragGapCases)
+		CHECK_MESSAGE(name.find("(UI domain)") != std::string::npos, name, " uses a binding outside the layout");
 }
 
 // ═══ Thema 117 Schritt 6: OpenGL 4.3 binds the clustered variant ═════════════
@@ -4066,6 +4266,110 @@ TEST_CASE("OpenGL 4.3: the clustered variant is GLSL 4.30 with SSBOs 4..6 only a
 		}
 		CHECK(withLists * 2 > static_cast<int>(cases.size()));
 		MESSAGE("GLSL 4.30 clustered fragments with SSBOs 4/5/6: ", withLists, "/", cases.size());
+	}
+}
+
+// The exporter (and the HE_DUMP_MATPRECOMPILE witness) bake through
+// HE::bakeMaterialShaderVariant. Thema 123: every backend's variant now carries
+// the clustered twin next to the plain pair, and GL's is a GLSL 4.30 PAIR —
+// GL clusters only with both stages at 4.30, so a 4.30 fragment next to the
+// 4.10 `vertex` would never link. Same glslang judge as above (no GL 4.3
+// context runs anywhere this does); the baked text must also be byte-identical
+// to what the renderer cross-compiles, or the runtime witness proves nothing.
+TEST_CASE("Export bake: every backend carries the clustered twin, GL as a linking GLSL 4.30 pair (Thema 123)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using RB = HE::RendererBackend;
+	HE::MaterialShaderLibrary lib;
+	const std::vector<NodeShaderCase> cases = allNodeShaderCases();
+	REQUIRE(cases.size() > 40);
+
+	SUBCASE("GL: every node shader bakes a 4.30 pair that links and matches the runtime")
+	{
+		int wpo = 0;
+		for (const NodeShaderCase& c : cases)
+		{
+			MaterialShaderVariant var;
+			std::string error;
+			std::vector<std::string> warnings;
+			REQUIRE_MESSAGE(HE::bakeMaterialShaderVariant(lib, RB::OpenGL, c.glsl, c.vertBody, var, error, warnings),
+			                c.name, ": ", error);
+			CHECK_MESSAGE(warnings.empty(), c.name, ": ", (warnings.empty() ? std::string() : warnings.front()));
+			CHECK(var.backend == static_cast<uint8_t>(RB::OpenGL));
+			CHECK_MESSAGE(var.vertex.rfind("#version 410", 0) == 0, c.name);
+			CHECK_MESSAGE(var.fragment.rfind("#version 410", 0) == 0, c.name);
+			REQUIRE_MESSAGE(!var.fragmentClustered.empty(), c.name);
+			REQUIRE_MESSAGE(!var.vertexClustered.empty(), c.name);
+			CHECK_MESSAGE(var.vertexClustered.rfind("#version 430", 0) == 0, c.name);
+			CHECK_MESSAGE(var.fragmentClustered.rfind("#version 430", 0) == 0, c.name);
+			std::string err;
+			CHECK_MESSAGE(glslGlLink(var.vertexClustered, var.fragmentClustered, err), c.name, ": ", err);
+
+			const uint64_t h = std::hash<std::string>{}(c.glsl);
+			CHECK_MESSAGE(var.fragmentClustered == lib.fragmentClustered(h, c.glsl, B::GLSL430).source, c.name);
+			const auto& v430 = c.vertBody.empty()
+				? lib.standardVertex(B::GLSL430)
+				: lib.customVertex(std::hash<std::string>{}(c.vertBody), c.vertBody, B::GLSL430);
+			CHECK_MESSAGE(var.vertexClustered == v430.source, c.name);
+			if (!c.vertBody.empty()) ++wpo;
+		}
+		MESSAGE("GL baked clustered pairs linked: ", cases.size(), " (", wpo, " with a WPO vertex)");
+	}
+	SUBCASE("Metal / HLSL / SPIR-V: the clustered fragment pairs with the plain vertex")
+	{
+		// A lit case — heLitP is what the clustered twin changes.
+		const NodeShaderCase* lit = nullptr;
+		for (const NodeShaderCase& c : cases)
+			if (c.vertBody.empty() && c.glsl.find("heLitP") != std::string::npos) { lit = &c; break; }
+		REQUIRE(lit != nullptr);
+		for (RB rb : { RB::Metal, RB::D3D11, RB::D3D12, RB::Vulkan })
+		{
+			CAPTURE(static_cast<int>(rb));
+			MaterialShaderVariant var;
+			std::string error;
+			std::vector<std::string> warnings;
+			REQUIRE_MESSAGE(HE::bakeMaterialShaderVariant(lib, rb, lit->glsl, lit->vertBody, var, error, warnings), error);
+			CHECK(warnings.empty());
+			CHECK(var.backend == static_cast<uint8_t>(rb));
+			CHECK(!var.uiVertex.empty());
+			REQUIRE(!var.fragmentClustered.empty());
+			CHECK(var.vertexClustered.empty());
+			CHECK(var.fragmentClustered != var.fragment);
+			if (rb == RB::Vulkan)
+			{
+				std::vector<uint32_t> words;
+				CHECK(HE::MaterialShaderLibrary::spirvFromBytes(var.fragmentClustered, words));
+				CHECK(!words.empty());
+			}
+		}
+	}
+	SUBCASE("the baked twin survives the PSHD roundtrip")
+	{
+		std::vector<MaterialShaderVariant> vars(2);
+		std::string error;
+		std::vector<std::string> warnings;
+		REQUIRE(HE::bakeMaterialShaderVariant(lib, RB::OpenGL, cases.front().glsl, cases.front().vertBody,
+		                                      vars[0], error, warnings));
+		REQUIRE(HE::bakeMaterialShaderVariant(lib, RB::Vulkan, cases.front().glsl, cases.front().vertBody,
+		                                      vars[1], error, warnings));
+		const auto out = HE::decodeMaterialShaderVariants(HE::encodeMaterialShaderVariants(vars));
+		REQUIRE(out.size() == 2);
+		for (size_t i = 0; i < 2; ++i)
+		{
+			CHECK(out[i].fragmentClustered == vars[i].fragmentClustered);
+			CHECK(out[i].vertexClustered   == vars[i].vertexClustered);
+			CHECK(out[i].uiVertex          == vars[i].uiVertex);
+		}
+	}
+	SUBCASE("a plain-only failure is an error, not a variant")
+	{
+		MaterialShaderVariant var;
+		var.backend = 0xEE;
+		std::string error;
+		std::vector<std::string> warnings;
+		CHECK_FALSE(HE::bakeMaterialShaderVariant(lib, RB::Metal, "this is not glsl", "", var, error, warnings));
+		CHECK(!error.empty());
+		CHECK(var.backend == 0xEE); // untouched
 	}
 }
 

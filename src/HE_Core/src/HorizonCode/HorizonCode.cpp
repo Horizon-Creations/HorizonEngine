@@ -213,6 +213,10 @@ void signatureInto(const Node& n, NodeSig& s)
     case T::CreateWidget:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
+        // Expose on Spawn: one input per variable the widget offers, mirrored
+        // by syncSpawnPins. None on every node from before, so the Widget
+        // output stays where those graphs wired it (pin 2).
+        for (const auto& p : n.params) s.dataIns.push_back(paramPin(p));
         s.dataOuts = { { "Widget", P::Ref } };
         break;
     case T::ShowWidget:
@@ -874,7 +878,9 @@ const char* nodeTooltip(NodeType t)
             return "Hides THIS widget (only meaningful inside a widget graph).";
         case T::CreateWidget:
             return "Instantiates the chosen widget asset and outputs its Widget id —\n"
-                   "feed that into Show/Hide/Destroy Widget.";
+                   "feed that into Show/Hide/Destroy Widget.\n"
+                   "Variables the widget ticks Expose on Spawn appear as inputs; a wired\n"
+                   "input or one with a value is set before the widget's PreConstruct.";
         case T::ShowWidget:
             return "Shows the widget identified by the Widget input (from Create Widget).";
         case T::HideWidget:
@@ -1866,6 +1872,7 @@ nlohmann::json variableToJsonObj(const Variable& v)
     if (v.replicated) e["rep"] = true;
     if (v.repNotify)  e["repNotify"] = true;
     if (v.saveGame)   e["saveGame"] = true;
+    if (v.exposeOnSpawn) e["spawn"] = true;
     if (v.isArray)    e["arr"] = true;
     if (v.isArray && !v.defaultItems.empty())
     {
@@ -1905,6 +1912,15 @@ nlohmann::json variableToJsonObj(const Variable& v)
         for (const auto& [field, val] : v.structDefaults)
             sd[field] = { { "t", (int)val.type }, { "v", scalarValueToJson(val, val.type) } };
         e["structDefaults"] = std::move(sd);
+    }
+    // Pull on Construct: one object, and only when a source is set — a graph
+    // that pulls nothing is byte-identical to one saved before this existed.
+    if (!v.pullSource.empty())
+    {
+        nlohmann::json p = { { "src", v.pullSource }, { "var", v.pullVar } };
+        if (!v.pullMember.empty()) p["member"] = v.pullMember;
+        if (!v.pullClass.empty())  p["class"]  = v.pullClass;
+        e["pull"] = std::move(p);
     }
 return e;
 }
@@ -2007,6 +2023,9 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     // Same reasoning for Save Game: a handle does not survive into the next
     // run, and a function-local is gone before anybody could save it.
     v.saveGame = e.value("saveGame", false) && isSaveableType(v.type) && v.scope == 0;
+    // Only a creator can hand a value in, and it reaches public instance
+    // variables only (the runtime sets them the way Set (Ref) does).
+    v.exposeOnSpawn = e.value("spawn", false) && v.access == 0 && v.scope == 0;
     v.isArray = e.value("arr", false);
     v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
     if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams
@@ -2027,6 +2046,31 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
             const PinType t = (PinType)it->value("t", (int)P::Float);
             v.structDefaults[it.key()] = scalarValueFromJson(it->value("v", nlohmann::json()), t);
         }
+    // Pull on Construct. Three states are not representable after a load, for
+    // the reason Notify-without-Replicated is not: a function-local is gone
+    // before anybody constructs anything, a source this build does not know
+    // would pull from nowhere, and a pull without a variable names nothing.
+    // The unknown source is the one that warns — it is a project from a newer
+    // engine, and quietly losing the setting would be a surprise on re-save.
+    if (const auto& p = e.value("pull", nlohmann::json::object()); p.is_object() && !p.empty())
+    {
+        const std::string src = p.value("src", std::string());
+        const std::string var = p.value("var", std::string());
+        if (v.scope == 0 && !src.empty() && !var.empty())
+        {
+            if (isKnownPullSource(src))
+            {
+                v.pullSource = src;
+                v.pullVar    = var;
+                v.pullMember = p.value("member", std::string());
+                if (src == kPullFromCreator) v.pullClass = p.value("class", std::string());
+            }
+            else
+                HE_LOG_WARN(HorizonCode, "HorizonCode: variable '%s' pulls from unknown source "
+                            "'%s' (saved by a newer engine?) - Pull on Construct dropped",
+                            v.name.c_str(), src.c_str());
+        }
+    }
     if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
         for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
     if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
@@ -2089,6 +2133,17 @@ std::string toJson(const Graph& g)
             jc.push_back(std::move(o));
         }
         j["comments"] = std::move(jc);
+    }
+    // Extract on Destruct: only when a struct is set, so a class that extracts
+    // nothing keeps the bytes it had before the feature existed. The struct is
+    // a content-relative path inside HCGR, which AssetRefs::retargetBlob
+    // already rewrites when the struct asset moves.
+    if (!g.extract.empty())
+    {
+        nlohmann::json jm = nlohmann::json::array();
+        for (const ExtractMapEntry& m : g.extract.map)
+            jm.push_back({ { "member", m.member }, { "var", m.var } });
+        j["extract"] = { { "struct", g.extract.structPath }, { "map", std::move(jm) } };
     }
     return j.dump(2);
 }
@@ -2174,6 +2229,43 @@ bool fromJson(const std::string& json, Graph& out)
         HE::graph::bumpNextId(g.nextId, c.id);
         g.comments.push_back(std::move(c));
     }
+    // Extract on Destruct. An entry without a member or a variable names
+    // nothing and is dropped; one member mapped twice keeps the first (the
+    // table has one row per member). A member saved under a name the struct
+    // has since renamed (formerNames) is read back under its live name when
+    // the definition is registered — at run time findField resolves it anyway.
+    if (const auto ex = j.find("extract"); ex != j.end() && ex->is_object())
+    {
+        g.extract.structPath = ex->value("struct", std::string());
+        if (!g.extract.structPath.empty())
+        {
+            HE::StructDef def;
+            const bool haveDef = HE::TypeRegistry::instance().getStruct(g.extract.structPath, def);
+            for (const auto& e : ex->value("map", nlohmann::json::array()))
+            {
+                if (!e.is_object()) continue;
+                ExtractMapEntry m;
+                m.member = e.value("member", std::string());
+                m.var    = e.value("var", std::string());
+                if (m.member.empty() || m.var.empty()) continue;
+                if (haveDef)
+                    if (const HE::StructField* f = def.findField(m.member)) m.member = f->name;
+                if (g.extract.entryFor(m.member)) continue;
+                g.extract.map.push_back(std::move(m));
+            }
+        }
+    }
+    // A graph that EMITS its own "OnDestroyed" now shares the name with the
+    // engine's: every instance bound to it also hears the engine's on death.
+    // Not renamed, like the PreConstruct case above — the author should hear it.
+    for (const Node& n : g.nodes)
+        if (n.type == NodeType::EmitEvent && n.s == kOnDestroyed)
+        {
+            HE_LOG_WARN(HorizonCode, "%s", "Custom event 'OnDestroyed' is emitted by this graph, "
+                        "but 'OnDestroyed' is now an engine event: everything bound to an "
+                        "instance also receives it when that instance is destroyed");
+            break;
+        }
     inferEventDecls(g);        // graphs older than declared events arrive with one
     // Both syncs below rebuild pin layouts from definitions that may have changed
     // shape since this graph was saved (a function edited elsewhere, a struct
@@ -2264,6 +2356,120 @@ std::vector<int> widgetCreatorsWithoutShow(const Graph& g)
         if (!shown) out.push_back(c.id);
     }
     return out;
+}
+
+// ── Expose on Spawn (docs/widget-pre-construct-design.md §6) ─────────────────
+namespace
+{
+bool sameSpawnParam(const FuncParam& a, const FuncParam& b)
+{
+    return a.name == b.name && a.type == b.type && a.isArray == b.isArray &&
+           a.typeName == b.typeName && a.kind() == b.kind() &&
+           a.keyType == b.keyType && a.keyTypeName == b.keyTypeName;
+}
+// The types an unwired pin can carry a value of on the node (the inline field,
+// see HcEditorUtil::pinSupportsInlineDefault). Everything else only acts wired.
+bool spawnPinHasInlineValue(const FuncParam& p)
+{
+    if (p.isArray) return false;
+    return p.type == P::Bool || p.type == P::Int || p.type == P::Float ||
+           p.type == P::Double || p.type == P::String;
+}
+// Equal in the field the type uses — only ever asked of inline-value types.
+bool sameInlineValue(const Value& a, const Value& b)
+{
+    if (a.type != b.type) return false;
+    switch (a.type)
+    {
+    case P::Bool:   return a.b == b.b;
+    case P::Int:    return a.i == b.i;
+    case P::Float:  return a.f == b.f;
+    case P::Double: return a.d == b.d;
+    case P::String: return a.s == b.s;
+    default:        return false;
+    }
+}
+} // namespace
+
+std::vector<SpawnPin> spawnPinsOf(const Graph& widgetGraph)
+{
+    std::vector<SpawnPin> out;
+    for (const Variable& v : widgetGraph.variables)
+    {
+        if (!v.exposeOnSpawn || v.access != 0 || v.scope != 0) continue;
+        SpawnPin p;
+        p.param.name        = v.name;
+        p.param.type        = v.type;
+        p.param.isArray     = v.isArray;
+        p.param.typeName    = v.typeName;
+        p.param.container   = v.container;
+        p.param.keyType     = v.keyType;
+        p.param.keyTypeName = v.keyTypeName;
+        p.def = variableDefaultValue(v);
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
+bool syncSpawnPins(Graph& g, int createWidgetNodeId, const std::vector<SpawnPin>& now,
+                   const std::vector<SpawnPin>* before)
+{
+    Node* n = g.findNode(createWidgetNodeId);
+    if (!n || n->type != T::CreateWidget) return false;
+
+    // What the node carries today, by pin NAME: its inline values are keyed by
+    // data-in index, which is exactly what is about to move.
+    std::unordered_map<std::string, size_t> oldIndex;
+    for (size_t i = 0; i < n->params.size(); ++i) oldIndex.emplace(n->params[i].name, i);
+    const auto findBefore = [before](const std::string& name) -> const SpawnPin*
+    {
+        if (!before) return nullptr;
+        for (const SpawnPin& b : *before) if (b.param.name == name) return &b;
+        return nullptr;
+    };
+
+    std::vector<FuncParam>         params;
+    std::unordered_map<int, Value> values;
+    params.reserve(now.size());
+    for (size_t i = 0; i < now.size(); ++i)
+    {
+        const SpawnPin& sp = now[i];
+        params.push_back(sp.param);
+        if (!spawnPinHasInlineValue(sp.param)) continue;
+        Value v = sp.def;   // a new or retyped pin starts where the variable does
+        if (const auto oi = oldIndex.find(sp.param.name); oi != oldIndex.end() &&
+            sameSpawnParam(n->params[oi->second], sp.param))
+        {
+            const auto pd = n->pinDefaults.find((int)oi->second);
+            if (pd != n->pinDefaults.end())
+            {
+                v = pd->second;
+                // Still the default the widget had when this pin was filled:
+                // nobody chose that value here, so it follows the widget.
+                const SpawnPin* b = findBefore(sp.param.name);
+                if (b && sameSpawnParam(b->param, sp.param) && sameInlineValue(v, b->def))
+                    v = sp.def;
+            }
+        }
+        values.emplace((int)i, std::move(v));
+    }
+
+    bool changed = params.size() != n->params.size() || values.size() != n->pinDefaults.size();
+    for (size_t i = 0; !changed && i < params.size(); ++i)
+        changed = !sameSpawnParam(params[i], n->params[i]);
+    for (const auto& [idx, v] : values)
+    {
+        if (changed) break;
+        const auto pd = n->pinDefaults.find(idx);
+        changed = pd == n->pinDefaults.end() || !sameInlineValue(pd->second, v);
+    }
+    if (!changed) return false;
+
+    const LinkRemapSnapshot snap = captureLinkRemapSnapshot(g, { createWidgetNodeId });
+    n->params      = std::move(params);
+    n->pinDefaults = std::move(values);
+    remapLinksFromSnapshot(g, snap);   // wires follow their pin by name
+    return true;
 }
 
 // ── Item-level JSON, public (collaboration addresses single items) ──────────
@@ -3257,7 +3463,143 @@ Value coerce(Value v, PinType want)
     }
     return r;
 }
+
+// The short type word the Pull on Construct sentences use ("Float", "Int[]").
+std::string pullTypeWord(PinType t, ContainerKind k, const std::string& typeName)
+{
+    static const char* kNames[] = { "Exec", "Float", "Bool", "Int", "String", "Vec2", "Color",
+                                    "Object", "Transform", "Enum", "Struct", "Vec3", "Vec4",
+                                    "Double" };
+    const size_t i = (size_t)t;
+    std::string w = i < sizeof(kNames) / sizeof(kNames[0]) ? kNames[i] : "?";
+    if ((t == P::Enum || t == P::Struct) && !typeName.empty())
+    {
+        // The definition's file stem — what the type picker shows too.
+        std::string stem = typeName;
+        if (const size_t s = stem.find_last_of("/\\"); s != std::string::npos) stem.erase(0, s + 1);
+        if (const size_t d = stem.rfind('.'); d != std::string::npos) stem.erase(d);
+        w += " " + stem;
+    }
+    switch (k)
+    {
+        case ContainerKind::Array: return w + "[]";
+        case ContainerKind::Set:   return "Set of " + w;
+        case ContainerKind::Map:   return "Map of " + w;
+        default:                   return w;
+    }
+}
+bool pullNumeric(PinType t) { return t == P::Int || t == P::Float || t == P::Double; }
 } // namespace
+
+// ── Pull on Construct (docs/state-driven-data-exchange-design.md §2.5) ──────
+bool isKnownPullSource(const std::string& src)
+{
+    return src == kPullFromGameInstance || src == kPullFromCreator;
+}
+
+std::string pullSourceLabel(const std::string& src)
+{
+    if (src == kPullFromGameInstance) return "Game Instance";
+    if (src == kPullFromCreator)      return "Creator";
+    return src.empty() ? std::string("(none)") : "'" + src + "'";
+}
+
+bool pullShapesCompatible(PinType srcType, ContainerKind srcKind, PinType srcKey,
+                          const std::string& srcTypeName,
+                          PinType dstType, ContainerKind dstKind, PinType dstKey,
+                          const std::string& dstTypeName, std::string* why)
+{
+    auto refuse = [&]
+    {
+        if (why)
+            *why = pullTypeWord(srcType, srcKind, srcTypeName) + ", needs " +
+                   pullTypeWord(dstType, dstKind, dstTypeName);
+        return false;
+    };
+    if (srcKind != dstKind) return refuse();
+    if (srcKind == ContainerKind::Map && srcKey != dstKey) return refuse();
+    if (srcType != dstType)
+    {
+        // Numbers convert as SCALARS only — coerce never touches a container,
+        // so an Int[] pulled into a Float[] would arrive as ints in a float
+        // array, which nothing downstream expects.
+        if (srcKind != ContainerKind::None || !pullNumeric(srcType) || !pullNumeric(dstType))
+            return refuse();
+        return true;
+    }
+    if ((srcType == P::Enum || srcType == P::Struct) && !srcTypeName.empty() &&
+        !dstTypeName.empty() && srcTypeName != dstTypeName)
+        return refuse();
+    return true;
+}
+
+bool pullValuesCompatible(const Value& src, const Value& dstShape)
+{
+    return pullShapesCompatible(src.type, src.kind(), src.keyType, src.typeName,
+                                dstShape.type, dstShape.kind(), dstShape.keyType,
+                                dstShape.typeName);
+}
+
+Value pullConvert(const Value& src, const Value& dstShape)
+{
+    if (src.isArray || src.type == dstShape.type) return src;
+    return coerce(src, dstShape.type);
+}
+
+std::string pullFailureText(PullFailure why, const std::string& src, const std::string& var,
+                            const std::string& member, const std::string& detail)
+{
+    const std::string from = pullSourceLabel(src);
+    switch (why)
+    {
+        case PullFailure::None:              return {};
+        case PullFailure::NoGameInstance:    return "there is no Game Instance";
+        case PullFailure::NoCreator:
+            return "no creator (placed in the level, or spawned from outside HorizonCode)";
+        case PullFailure::CreatorGone:       return "the creator was already destroyed";
+        case PullFailure::CreatorWrongClass:
+            return "the creator is not a " + (detail.empty() ? std::string("matching class") : detail);
+        case PullFailure::NoPublicVariable:
+            return from + " has no public variable '" + var + "'";
+        case PullFailure::NotAStruct:
+            return from + " variable '" + var + "' is not a struct, it has no member '" + member + "'";
+        case PullFailure::NoSuchMember:
+            return from + " variable '" + var + "' has no member '" + member + "'";
+        case PullFailure::TypeMismatch:
+            return from + " '" + var + (member.empty() ? std::string() : "." + member) +
+                   "' does not fit" + (detail.empty() ? std::string() : " (" + detail + ")");
+        case PullFailure::UnknownSource:     return "unknown source " + from;
+    }
+    return {};
+}
+
+// ── Extract on Destruct (design §3) ─────────────────────────────────────────
+const ExtractMapEntry* ExtractSpec::entryFor(const std::string& member) const
+{
+    for (const ExtractMapEntry& m : map)
+        if (m.member == member) return &m;
+    return nullptr;
+}
+
+std::string extractFailureText(ExtractFailure why, const std::string& member,
+                               const std::string& var, const std::string& detail)
+{
+    const std::string from = var == kExtractSelf ? std::string("Self") : "'" + var + "'";
+    switch (why)
+    {
+        case ExtractFailure::None:           return {};
+        case ExtractFailure::NoSuchMember:
+            return "the struct has no member '" + member + "' (removed from struct?)";
+        case ExtractFailure::NoSuchVariable:
+            return "member '" + member + "': the class has no variable " + from + " (renamed or deleted?)";
+        case ExtractFailure::TypeMismatch:
+            return "member '" + member + "': " + from + " does not fit" +
+                   (detail.empty() ? std::string() : " (" + detail + ")");
+        case ExtractFailure::SelfNotRef:
+            return "member '" + member + "': Self is an object reference, the member is not";
+    }
+    return {};
+}
 
 Runner::Runner(const Graph& graph, Context ctx) : m_graph(graph), m_ctx(std::move(ctx)) {}
 
@@ -3666,9 +4008,18 @@ void Runner::execNode(const Node& n, int depth)
     case T::HideSelf: if (m_ctx.hideSelf) m_ctx.hideSelf(); break;
     case T::CreateWidget:
     {
+        // Expose on Spawn: a pin counts when it is wired or carries a value on
+        // the node (Make Struct's rule); an untouched one leaves the widget's
+        // own default. Evaluated here, in the creator's context, before the
+        // widget exists (docs/widget-pre-construct-design.md §6.3).
+        SpawnValues spawn;
+        for (size_t i = 0; i < n.params.size(); ++i)
+            if (inputLinked(n, (int)i) || n.pinDefaults.count((int)i))
+                spawn.push_back({ n.params[i].name,
+                                  coerce(evalInput(n, (int)i, depth + 1), n.params[i].type) });
         // The widget id doubles as its runtime reference (widget id == scriptId),
         // so a created widget is a first-class Ref object.
-        const int id = m_ctx.createWidget ? m_ctx.createWidget(n.s) : 0;
+        const int id = m_ctx.createWidget ? m_ctx.createWidget(n.s, spawn) : 0;
         m_execOutputs[n.id] = { Value::ofRef((uint32_t)id) }; // cached for the data output
         break;
     }

@@ -18,6 +18,7 @@
 #include <ContentManager/Assets.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <material/MaterialShaderLibrary.h>
+#include <material/MaterialShaderBake.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <HorizonCode/HorizonCode.h>
 #include <Types/Enums.h>
@@ -174,6 +175,7 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("GlobalIlluminationEnabled", cfg.GlobalIlluminationEnabled);
     put("GIIndirectIntensity",       cfg.GIIndirectIntensity);
     put("GILightRadius",             cfg.GILightRadius);
+    put("GIShadowQuality",           cfg.GIShadowQuality);
     put("OcclusionCulling",          cfg.OcclusionCulling);
     put("SSREnabled",                cfg.SSREnabled);
     put("SSRIntensity",              cfg.SSRIntensity);
@@ -304,82 +306,39 @@ static std::vector<std::string> parseExcludeLines(const char* buf)
 // ─── Precompiled material shaders (cook-time) ───────────────────────────────
 // The exporter (in HE_Core) cannot link the shader cross-compiler, so it calls
 // back into the editor with a material's canonical fragment GLSL + a bitmask of
-// target backends (1u << HE::RendererBackend). We cross-compile the standard
-// vertex + this fragment for each requested backend and return the PSHD blob the
-// runtime decodes into MaterialAsset::precompiledShaders. Empty result → the
-// exporter simply omits the chunk and the shipped game cross-compiles at load.
+// target backends (1u << HE::RendererBackend). Each requested backend gets one
+// variant from HE::bakeMaterialShaderVariant — the plain pair, the UI vertex and
+// the clustered-lighting twin (Thema 117) — and the PSHD blob the runtime decodes
+// into MaterialAsset::precompiledShaders comes back. Empty result → the exporter
+// simply omits the chunk and the shipped game cross-compiles at load.
 static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fragGlsl,
                                                           const std::string& vertBody,
                                                           uint32_t backends)
 {
-	using LB = HE::MaterialShaderLibrary::Backend;
 	if (fragGlsl.empty() || backends == 0) return {};
 
-	// RendererBackend value → cross-compiler backend. D3D11/D3D12 share HLSL.
-	auto mapBackend = [](HE::RendererBackend rb, LB& out) -> bool {
-		switch (rb) {
-			case HE::RendererBackend::OpenGL: out = LB::GLSL410; return true;
-			case HE::RendererBackend::Vulkan: out = LB::SpirV;   return true;
-			case HE::RendererBackend::D3D11:
-			case HE::RendererBackend::D3D12:  out = LB::HLSL;     return true;
-			case HE::RendererBackend::Metal:  out = LB::Metal;    return true;
-		}
-		return false;
-	};
-
-	// SPIR-V words → a byte string (the variant stores backend-native text OR, for
-	// Vulkan, the raw SPIR-V bytes in the same string field; runtime reinterprets).
-	auto spirvToBytes = [](const std::vector<uint32_t>& words) {
-		std::string s;
-		s.resize(words.size() * sizeof(uint32_t));
-		if (!words.empty()) std::memcpy(s.data(), words.data(), s.size());
-		return s;
-	};
-
 	HE::MaterialShaderLibrary lib;
-	const uint64_t hash = std::hash<std::string>{}(fragGlsl);
-
 	std::vector<MaterialShaderVariant> variants;
 	for (uint8_t v = 0; v <= static_cast<uint8_t>(HE::RendererBackend::Metal); ++v)
 	{
 		if ((backends & (1u << v)) == 0) continue;
-		LB lb;
-		if (!mapBackend(static_cast<HE::RendererBackend>(v), lb)) continue;
-
-		// WPO materials bake their graph-generated vertex; everything else the shared one.
-		const auto& vert = vertBody.empty()
-			? lib.standardVertex(lb)
-			: lib.customVertex(std::hash<std::string>{}(vertBody), vertBody, lb);
-		const auto& frag = lib.fragment(hash, fragGlsl, lb);
-		if (!vert.ok || !frag.ok)
+		MaterialShaderVariant var;
+		std::string error;
+		std::vector<std::string> warnings;
+		const bool ok = HE::bakeMaterialShaderVariant(lib, static_cast<HE::RendererBackend>(v),
+		                                              fragGlsl, vertBody, var, error, warnings);
+		// A half that failed but is optional (UI vertex, clustered twin) still
+		// ships the rest — the runtime cross-compiles / draws the plain fragment.
+		for (const std::string& w : warnings)
+			HE_LOG_WARN(Editor, "%s", ("Export: backend " + std::to_string(static_cast<int>(v))
+			                           + " — " + w).c_str());
+		if (!ok)
 		{
 			HE_LOG_WARN(Editor, "%s",
 			            ("Export: material shader precompile failed for backend "
-			             + std::to_string(static_cast<int>(v)) + " — "
-			             + vert.log + " " + frag.log).c_str());
+			             + std::to_string(static_cast<int>(v)) + " — " + error).c_str());
 			continue; // skip this backend; runtime falls back to cross-compile
 		}
-		// The same fragment on the screen-space UI quad vertex (A3b): a widget with
-		// this material must not need glslang at load either. Failure here is NOT
-		// fatal for the variant — the mesh half is still worth shipping, and an
-		// empty uiVertex means the renderer cross-compiles that half as before.
-		// Baked per material even though the UI vertex is material-INDEPENDENT: it
-		// is one to two kilobytes, and the alternative (one blob per pak, or a
-		// checked-in generated copy) buys that back at the price of a second place
-		// where the UI vertex lives and can drift from kUIVertex.
-		const auto& uiVert = lib.uiVertex(lb);
-		if (!uiVert.ok)
-			HE_LOG_WARN(Editor, "%s",
-			            ("Export: UI vertex precompile failed for backend "
-			             + std::to_string(static_cast<int>(v)) + " — " + uiVert.log
-			             + " (materials on widgets will cross-compile at load)").c_str());
-
-		MaterialShaderVariant var;
-		var.backend  = v;
-		var.vertex   = (lb == LB::SpirV) ? spirvToBytes(vert.spirv) : vert.source;
-		var.fragment = (lb == LB::SpirV) ? spirvToBytes(frag.spirv) : frag.source;
-		if (uiVert.ok)
-			var.uiVertex = (lb == LB::SpirV) ? spirvToBytes(uiVert.spirv) : uiVert.source;
 		variants.push_back(std::move(var));
 	}
 

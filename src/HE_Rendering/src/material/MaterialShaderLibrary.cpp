@@ -671,30 +671,42 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     // the reflection bent toward N by roughness as a crude prefilter.
     vec3 ambDiff = diffuseColor * heLight.ambient.rgb;   // fallback (no cubemap)
     vec3 ambSpec = vec3(0.0);
+    // The sky sample and the reflection stages each hang off their OWN gate:
+    // fog.z = heSkyEnv bound, giRefl.z = heGIReflFwd bound, ssr.x = heSSRFwd
+    // bound. The two trace stages used to sit INSIDE the fog.z block, so a
+    // backend that ran the SSR trace but had no sky cube (Vulkan, which raised
+    // ssr.x and never fog.z) silently threw every graph-material reflection
+    // away. Without the cube the cascade starts from black, not from the flat
+    // ambient: the old no-cube path had no specular IBL at all, and a trace
+    // only ADDS what it hit — with all three gates at 0 ambSpec stays exactly 0.
+    vec3 envSpec = vec3(0.0);
     if (heLight.fog.z > 0.5)
     {
         vec3 Rrough = normalize(mix(reflect(-V, n), n, rough));
         vec3 Nup    = normalize(vec3(n.x, max(n.y, 0.1), n.z));
         ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
-        vec3 envSpec = texture(heSkyEnv, Rrough).rgb;
-        // FORWARD reflection cascade (sky → ray-traced GI refl → SSR), the
-        // heLitP twin of the deferred composite's cascade. The trace textures
-        // carry no per-pixel roughness in the forward path (the prepass has no
-        // material data), so the roughness fade lives HERE with the exact
-        // shading values. Gates are 0 in the deferred path and on backends
-        // without the passes — dead code after constant folding.
-        if (heLight.giRefl.z > 0.5)
-        {
-            vec4 rr = texture(heGIReflFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
-            float fade = 1.0 - smoothstep(heLight.giRefl.y * 0.7, heLight.giRefl.y, rough);
-            envSpec = mix(envSpec, rr.rgb, rr.a * heLight.giRefl.x * fade);
-        }
-        if (heLight.ssr.x > 0.5)
-        {
-            vec4 r = texture(heSSRFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
-            float fade = 1.0 - smoothstep(heLight.ssr.z * 0.7, heLight.ssr.z, rough);
-            envSpec = mix(envSpec, r.rgb, r.a * heLight.ssr.y * fade);
-        }
+        envSpec = texture(heSkyEnv, Rrough).rgb;
+    }
+    // FORWARD reflection cascade (sky → ray-traced GI refl → SSR), the
+    // heLitP twin of the deferred composite's cascade. The trace textures
+    // carry no per-pixel roughness in the forward path (the prepass has no
+    // material data), so the roughness fade lives HERE with the exact
+    // shading values. Gates are 0 in the deferred path and on backends
+    // without the passes — dead code after constant folding.
+    if (heLight.giRefl.z > 0.5)
+    {
+        vec4 rr = texture(heGIReflFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
+        float fade = 1.0 - smoothstep(heLight.giRefl.y * 0.7, heLight.giRefl.y, rough);
+        envSpec = mix(envSpec, rr.rgb, rr.a * heLight.giRefl.x * fade);
+    }
+    if (heLight.ssr.x > 0.5)
+    {
+        vec4 r = texture(heSSRFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
+        float fade = 1.0 - smoothstep(heLight.ssr.z * 0.7, heLight.ssr.z, rough);
+        envSpec = mix(envSpec, r.rgb, r.a * heLight.ssr.y * fade);
+    }
+    if (heLight.fog.z > 0.5 || heLight.giRefl.z > 0.5 || heLight.ssr.x > 0.5)
+    {
         // Fresnel (Schlick, roughness-aware, ssr-plan P4): grazing views boost
         // the specular IBL toward max(1-rough, F0) instead of the flat specColor.
         float NdV = clamp(dot(n, V), 0.0, 1.0);

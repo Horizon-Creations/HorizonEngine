@@ -995,3 +995,35 @@ TEST_CASE("editor help: the shared application-metadata rows are covered in ever
 		CHECK(Help::find("Subtitle##splashsubtitle") != nullptr);
 	}
 }
+
+TEST_CASE("editor help: the Pull on Construct block explains itself in both variable panels")
+{
+	// HcPullUi draws the block from its own file, inside the CALLER's help
+	// scope ("Script Variable" in the level-script/class details, "UI Variable"
+	// in the widget editor). editor_help_audit.py walks one file at a time and
+	// cannot follow a scope across files, so the coverage is asserted here.
+	const char* labels[] = { "Pull on Construct", "Source", "Creator Class", "Variable",
+	                         "Member", "Struct Type", "Add to Target" };
+	for (const char* scope : { "Script Variable/", "UI Variable/" })
+		for (const char* l : labels)
+		{
+			const std::string key = std::string(scope) + l;
+			const Help::Entry* e = Help::findKey(key);
+			CHECK_MESSAGE(e != nullptr, "no entry for key ", key);
+		}
+}
+
+TEST_CASE("editor help: the Extract on Destruct section explains itself")
+{
+	// HcExtractUi pushes its OWN scope, so editor_help_audit.py covers the file
+	// directly (it is in the horizoncode area); this pins the keys the two
+	// panels and the Bind Event helper reach, in case a label is renamed.
+	const char* labels[] = { "Extract on Destruct", "Struct", "From", "Self",
+	                         "New Struct from Variables...", "Auto-Map by Name", "Clear",
+	                         "Open Extract Table", "Create OnDestroyed Event", "Data" };
+	for (const char* l : labels)
+	{
+		const std::string key = std::string("Extract on Destruct/") + l;
+		CHECK_MESSAGE(Help::findKey(key) != nullptr, "no entry for key ", key);
+	}
+}
