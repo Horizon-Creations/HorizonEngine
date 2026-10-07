@@ -6250,7 +6250,10 @@ void EditorApplication::dumpFrameHeadless()
 
 		auto land = m_editorWorld->createEntity("LayerLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 100.0f;
@@ -6287,7 +6290,10 @@ void EditorApplication::dumpFrameHeadless()
 		auto& reg = m_editorWorld->registry();
 		auto land = m_editorWorld->createEntity("MountainLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 240.0f;
@@ -6413,7 +6419,9 @@ void EditorApplication::dumpFrameHeadless()
 	// other branch: replaceTexture + a DEFERRED InvalidateTexture. This exercises
 	// that second branch, which is the only "runs once" asymmetry in the
 	// weightmap path. Works with or without HE_DUMP_LAYEREDIT.
-	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && m_editorWorld)
+	// HE_DUMP_LAYERREPAINT=mid paints halfway through the settle frames instead
+	// (below), once the backend has already resolved and cached the weightmap.
+	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && std::string(rp) != "mid" && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
 		for (auto [te, tc] : reg.view<TerrainComponent>().each())
@@ -6828,6 +6836,47 @@ void EditorApplication::dumpFrameHeadless()
 		                           e.gradient = true; e.gradientShape = 1;
 		                           e.gradientColor = glm::vec4(0.55f, 0.20f, 0.65f, 1.0f);
 		                           e.innerShadow = true; e.innerShadowBlur = 20.0f; });
+
+		// HE_DUMP_UITEST=image adds tile 12: an Image element showing a generated
+		// picture, red / green on top, blue / yellow below, white tint (Thema 157).
+		// Kept off the plain "=1" sheet so the Thema-133 baselines stay as measured.
+		// The widget refers to its picture by path and the manager resolves it
+		// again on instantiation, so the texture is registered under that path.
+		if (std::string_view(ui) == "image")
+		{
+			constexpr uint32_t kSz = 64;
+			TextureAsset ta;
+			ta.name = "__uiImageWitness";
+			ta.path = "__uiImageWitness.hasset";
+			ta.width = ta.height = kSz;
+			ta.channels = 4;
+			// Flagged sRGB like every imported colour texture: the UI pass must
+			// sample the bytes as they are anyway (Thema 107), an sRGB upload
+			// would show here as a darker picture.
+			ta.srgb = true;
+			ta.data.resize(size_t(kSz) * kSz * 4);
+			for (uint32_t y = 0; y < kSz; ++y)
+				for (uint32_t x = 0; x < kSz; ++x)
+				{
+					// Rows are stored bottom-up: y >= kSz/2 is the picture's top half.
+					static const uint8_t kQuad[4][4] = {
+						{ 230,  30,  30, 255 }, { 30, 200,  60, 255 },    // top: red, green
+						{  30,  80, 230, 255 }, { 240, 220,  40, 255 } }; // bottom: blue, yellow
+					const uint8_t* c = kQuad[(y >= kSz / 2 ? 0 : 2) + (x >= kSz / 2 ? 1 : 0)];
+					std::memcpy(&ta.data[(size_t(y) * kSz + x) * 4], c, 4);
+				}
+			contentManager().registerTexture(std::move(ta));
+
+			const int id = t.add(HE::UIWidgetType::Image);
+			HE::UIElement& e = *t.find(id);
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = 60.0f + static_cast<float>(col) * 300.0f;
+			e.posY = 80.0f + static_cast<float>(row) * 170.0f;
+			e.sizeX = 240.0f; e.sizeY = 110.0f;
+			e.texture = "__uiImageWitness.hasset";
+			e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+		}
 
 		UIWidgetAsset wa;
 		wa.type = HE::AssetType::Widget;
@@ -7269,11 +7318,16 @@ void EditorApplication::dumpFrameHeadless()
 	// edge moves over a static receiver, the reprojection check passes,
 	// and only the neighbourhood clamp keeps the old edge from ghosting.
 	// Compare the capture against a static one at the same TOD. TWO frames run
-	// at the real TOD, not one: until Thema 131 step 6, Vulkan's runGi()
-	// extracted the scene before DrawScene() fed the extractor this frame's
-	// day-night state, so the GI mask saw a sun change one frame late. runGi()
-	// sets it itself now; the second frame stays so captures remain comparable
+	// at the real TOD by default, not one: until Thema 131 step 6, Vulkan's
+	// runGi() extracted the scene before DrawScene() fed the extractor this
+	// frame's day-night state, so the GI mask saw a sun change one frame late.
+	// Since Thema 146 every Vulkan pass gets the sun from one setDayNight() at
+	// the top of Render(); the second frame stays so captures remain comparable
 	// with ones taken on older builds.
+	// HE_DUMP_TODSTEPFRAMES=1 is the lag witness itself: only the captured frame
+	// runs at the real TOD, so a pass that still extracts with the previous
+	// frame's sun (CSM cascades with GI off, Thema 146) puts its shadows where
+	// a static capture at TOD - step has them.
 	if (const float todStep = mbEnvF("HE_DUMP_TODSTEP"); todStep != 0.0f && m_editorWorld)
 	{
 		const Entity envEntity = m_editorWorld->environmentEntity();
@@ -7287,10 +7341,13 @@ void EditorApplication::dumpFrameHeadless()
 				r->Render();
 			env->timeOfDay = tod;
 			pushEnvironment(0.0f);
+			int atTod = 2;
+			if (const char* sf = std::getenv("HE_DUMP_TODSTEPFRAMES"); sf && *sf)
+				atTod = std::clamp(std::atoi(sf), 1, 240);
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: HE_DUMP_TODSTEP moved the sun by " + std::to_string(todStep)
-				 + " of a day for the last two frames").c_str());
-			settleFrames = 2;
+				 + " of a day for the last " + std::to_string(atTod) + " frame(s)").c_str());
+			settleFrames = atTod;
 		}
 	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
@@ -7302,8 +7359,23 @@ void EditorApplication::dumpFrameHeadless()
 	// layer stay quiet.
 	const char* giRefit = std::getenv("HE_DUMP_GIREFIT");
 	const bool  giRefitWitness = giRefit && *giRefit && s_layerMatId != HE::UUID{};
+	// HE_DUMP_LAYERREPAINT=mid: the brush-stroke path on a weightmap the backend
+	// has ALREADY drawn with — replaceTexture + InvalidateTexture must make it
+	// drop its cached view and resolve the new texels. A green disc appears at
+	// (30, -25) in the capture; a stale cache keeps the red field there.
+	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
+	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (repaintMidWitness && i == settleFrames / 2)
+		{
+			for (auto [te, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+				TerrainPaint::paint(tc, 30.0f, -25.0f, /*layer*/1, 14.0f, 5.0f, 1.0f);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_LAYERREPAINT=mid painted before settle frame "
+				 + std::to_string(i)).c_str());
+		}
 		if (giRefitWitness && i == settleFrames / 2)
 		{
 			auto& reg  = m_editorWorld->registry();

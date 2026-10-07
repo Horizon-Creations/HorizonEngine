@@ -5915,7 +5915,10 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 	};
 
 	// World-space G-buffer: pos + normal + surface response MRT + depth.
-	m_giGBufPosTex  = makeTex(GL_RGBA16F, GL_NEAREST);
+	// Position = the shadow-ray ORIGIN (pos + N*0.05), stored as the ABSOLUTE
+	// world position, so fp32: as RGBA16F its ULP passes the 5 cm normal offset
+	// at |coord| >= ~100 m and surfaces self-shadow in height bands (Thema 159).
+	m_giGBufPosTex  = makeTex(GL_RGBA32F, GL_NEAREST);
 	m_giGBufNormTex = makeTex(GL_RGBA16F, GL_NEAREST);
 	m_giGBufMatTex  = makeTex(GL_RGBA16F, GL_NEAREST); // r = roughness, g = metallic
 	glGenTextures(1, &m_giGBufDepth);

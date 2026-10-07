@@ -2232,3 +2232,139 @@ TEST_CASE("ui shot: widget designer — Pre Construct shows on the canvas, never
 	UIEditorPanel::forget(d.assetPath);
 	fs::remove_all(root, ec);
 }
+
+// ── Thema 141: undo kept a fresh parameter only until it was undone to ──────
+// "Add Parameter" makes a row that names no property yet. The designer's undo
+// snapshot is the tree's JSON, and reading that JSON dropped every declaration
+// missing a half ("names nothing", uiWidgetTreeFromJson) — so add, rename,
+// Cmd/Ctrl+Z left NO parameter instead of the one that was added. The same
+// reader is the tab's load, so Save and reopen dropped it too.
+//
+// Driven through liveTree + markEdited rather than through the buttons: that
+// pair IS what "Add Parameter" and the name field do (change the tree, then
+// commitEdit), and it does not depend on where in the Details column the
+// parameter list happens to sit (Thema 139 moves it). The undo itself is the
+// real shortcut through UIEditorPanel::render.
+TEST_CASE("widget designer: undo keeps a parameter that names no property yet (Thema 141)")
+{
+	Harness harness;
+	namespace fs = std::filesystem;
+	const fs::path root = tempRoot() / "Undo141";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root / "UI");
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+
+	const std::string rel = "UI/Params141.hasset";
+	UIWidgetAsset asset;
+	asset.name     = "Params141";
+	asset.path     = rel;
+	asset.treeJson = HE::uiWidgetTreeToJson(samplePage());
+	const HE::UUID assetId = cm.registerWidget(std::move(asset));
+	REQUIRE(assetId != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+
+	Designer d{ ctx, (root / "UI" / "Params141.hasset").string() };
+	d.shoot("widget-designer-warmup");
+	// Selecting the Logo is what an author does before exposing one of its
+	// properties, and the click is also what gives the panel keyboard focus —
+	// the undo shortcut only listens while it has it.
+	REQUIRE(d.clickRow(d.hierarchyRowId("Logo##hn2")));
+
+	auto live = [&]() -> HE::UIWidgetTree&
+	{
+		HE::UIWidgetTree* t = UIEditorPanel::liveTree(rel);
+		REQUIRE(t);
+		return *t;
+	};
+	ImGuiIO& io = ImGui::GetIO();
+	auto chord = [&](bool shift)
+	{
+		io.AddKeyEvent(ImGuiMod_Ctrl, true);
+		if (shift) io.AddKeyEvent(ImGuiMod_Shift, true);
+		io.AddKeyEvent(ImGuiKey_Z, true);
+		d.frame(false);
+		io.AddKeyEvent(ImGuiKey_Z, false);
+		if (shift) io.AddKeyEvent(ImGuiMod_Shift, false);
+		io.AddKeyEvent(ImGuiMod_Ctrl, false);
+		d.frame(false);
+	};
+	auto paramNames = [&]
+	{
+		std::string s;
+		for (const HE::UIWidgetParam& p : live().params) s += "[" + p.name + "]";
+		return s;
+	};
+	REQUIRE(live().params.empty());
+
+	// Add Parameter, as the button does it: pointed at the selection, no
+	// property yet, one undo step.
+	{
+		HE::UIWidgetParam p;
+		p.name      = "Parameter";
+		p.elementId = 2;   // the Logo
+		live().params.push_back(p);
+		UIEditorPanel::markEdited(ctx, rel);
+	}
+	// …a second one with nothing to point at — both halves missing, the
+	// other way "Add Parameter" leaves a row (nothing selected).
+	{
+		HE::UIWidgetParam p;
+		p.name = "Parameter";
+		live().params.push_back(p);
+		UIEditorPanel::markEdited(ctx, rel);
+	}
+	// Rename the first: the name field edits in place and commits on release.
+	live().params[0].name = "Label";
+	UIEditorPanel::markEdited(ctx, rel);
+	d.frame(false);
+	REQUIRE(paramNames() == "[Label][Parameter]");
+
+	// Undo takes back exactly the rename — both rows are still there. Before
+	// the fix this was "": the snapshot was read strictly and both were gone.
+	chord(false);
+	CAPTURE(paramNames());
+	REQUIRE(live().params.size() == 2);
+	CHECK(live().params[0].name == "Parameter");
+	CHECK(live().params[0].elementId == 2);
+	CHECK(live().params[0].property.empty());
+	CHECK(live().params[1].elementId == 0);
+
+	// One more takes back the second add, one more the first.
+	chord(false);
+	CHECK(paramNames() == "[Parameter]");
+	chord(false);
+	CHECK(paramNames() == "");
+	// Redo brings both adds and the rename back, unfinished rows and all.
+	chord(true);
+	chord(true);
+	chord(true);
+	CHECK(paramNames() == "[Label][Parameter]");
+
+	// Save and reopen: the tab's load reads the author's document the same way
+	// an undo does, so the half-done rows survive closing the tab.
+	REQUIRE(UIEditorPanel::saveByContentPath(ctx, rel));
+	UIEditorPanel::forget(d.assetPath);
+	d.frame(false);
+	d.frame(false);
+	CHECK(paramNames() == "[Label][Parameter]");
+
+	// Whoever EMBEDS the component still reads it strictly: neither row names
+	// a property, so neither is something a host could set.
+	{
+		const UIWidgetAsset* a = cm.getWidget(assetId);
+		REQUIRE(a);
+		HE::UIWidgetTree host;
+		REQUIRE(HE::uiWidgetTreeFromJson(a->treeJson, host));
+		CHECK(host.params.empty());
+	}
+
+	UIEditorPanel::forget(d.assetPath);
+	fs::remove_all(root, ec);
+}
