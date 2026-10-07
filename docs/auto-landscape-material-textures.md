@@ -1027,7 +1027,11 @@ macOS 27, Stromsparmodus), Release-Build `out/build/macos-release` (shaderc ON, 
   Landscape-Format prüft `test_terrain`: „A four-layer landscape writes the old scene
   format and an old scene loads unchanged“ und „Layers 4..7 round-trip through the
   scene file, a broken second page is dropped“.
-- **CI** auf `1b8776db` (Lauf 37629204081): macOS und Linux grün. Windows siehe §11.5.
+- **CI** auf `1b8776db` (Lauf 37629204081): Windows, Linux und macOS grün. Windows:
+  231/231 Tests, darunter `test_material_graph` (351 s) mit den FXC-, D3D12-Root-Signatur-
+  und GL-Link-Sweeps. Der Fall „Auto landscape material“ läuft im `_WIN32`-Block mit.
+  Das ist der einzige D3D-Beleg dieses Schritts. Er beweist, dass der Shader kompiliert,
+  nicht, dass das Bild stimmt.
 
 ### 11.2 Metal gegen OpenGL
 
@@ -1127,8 +1131,6 @@ keinem Paar, Drift 0,000.)
   OpenGL belegt, für die anderen drei nur per Cross-Compile.
 - **lavapipe:** erst nach dem Merge von main in den Zweig (dann `he_vk_imagetests.py` um
   einen AUTOLAND-Fall erweitern; Software-Treiber, keine echte Hardware).
-- **Windows-CI auf `1b8776db`:** bei Abschluss dieses Schritts noch nicht fertig (siehe
-  Ergebnispost im Thema).
 - **GL-Forward-Graph-Materialien ohne Sonnenschatten** (§11.3): eigenes Thema.
 - **Echte Texturen** (§4.3, 25 PNG) und **Wetter-Kopplung** (Schnee/Pfützen aus dem
   Wetter): gehören laut Thema nicht hierher. Die Vorgaben der 14 Parameter werden mit
