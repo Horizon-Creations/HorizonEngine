@@ -418,8 +418,15 @@ Maske brauchen Textur-Arrays (§2.2 Variante D). Die Queen hat dafür einen eige
   `git merge-tree origin/main HEAD` (C:/hw158m), siehe 7.5.
 - `HE_DUMP_VIEWMODE=unlit` wirkt auf D3D11 nicht (Frames md5-gleich mit lit).
   Backend-Vergleiche deshalb im lit-View.
-- **Metal:** keine Hardware auf diesem Gerät. Nachweis nur über den MSL-Cross-Compile im
-  Test. Es kommt kein Sampler dazu, also bleibt das 16er-Budget unverändert.
+- **Metal:** keine Hardware auf diesem Gerät. Nachweis nur am Quelltext: Der MSL-Cross-
+  Compile mit 5 und 8 Layern gelingt. Das 8-Layer-Fragment deklariert genau dieselben
+  `[[sampler(N)]]`-Slots wie das 3-Layer-Fragment (normal und clustered), alle ≤ 15.
+  Das 16er-Budget ist damit nachweislich unverändert.
+- **Verhaltensänderung auf GL und Metal:** Sobald ein Terrain Layer 4+ bemalt hat (2:1-Map),
+  liest es die Gewichte bei Mip 0 statt mit impliziter LOD aus der Laufzeit-Mipkette.
+  Ferne Blend-Grenzen werden dort etwas schärfer. D3D und Vulkan hatten ohnehin nur Mip 0,
+  dort ändert sich nichts. Für den Bildvergleich in Schritt 5 ist das eher eine
+  Angleichung. Quadratische Maps lesen wie bisher.
 
 ### 7.5 Vier Backends auf origin/main + diesem Zweig
 
@@ -437,6 +444,13 @@ unabhängig. Die Queen trifft beim Mergen auf denselben Konflikt.
 
 - D3D11, D3D12 und Vulkan liefern **md5-gleiche** Frames. OpenGL weicht in Einzelpixeln
   ab (Anteil > 8: 0,000 %).
+- „Altes Terrain sieht gleich aus“, Beweiskette für D3D12 und Vulkan: OpenGL im
+  Scratch-Baum = OpenGL auf der Zweig-Basis `9a1cc950` (mean|Δ| 0,000) = OpenGL auf
+  diesem Zweig (md5). D3D12 und Vulkan im Scratch-Baum = D3D11 im Scratch-Baum (md5),
+  ≈ OpenGL (0,001). Ein direktes A/B von D3D12/Vulkan gegen eine origin/main-Baseline
+  **fehlt**. D3D11 hat sich durch main selbst gegenüber der Zweig-Basis um 1,7
+  verschoben und liegt jetzt auf OpenGL. Der Codegen-Pfad für quadratische Maps ist auf
+  allen Backends derselbe Sample wie vorher.
 - Vulkan-Validation: keine Binding-14-Meldung mehr. Die eine gezählte Zeile ist die
   Info „validation layer ENABLED“.
 - Toleranz für den Bildvergleich in Schritt 5: lit, mean|Δ| ≤ 1,0 und ≤ 0,5 % Pixel

@@ -1793,6 +1793,48 @@ TEST_CASE("A five- and an eight-layer Landscape Layer Blend cross-compile for al
 		// The Metal source reads the one weightmap texture at its one slot.
 		const std::string msl = lib.fragment(hash, glsl, B::Metal).source;
 		CHECK(msl.find("heLandscapeWeights.get_width") != std::string::npos);
+
+		// Metal has no hardware here, so its sampler budget is proven on the
+		// source: the eight-layer fragment declares EXACTLY the [[sampler(N)]]
+		// slots the three-layer one does — the second page costs no slot —
+		// and stays inside the 16 a Metal fragment stage allows.
+		auto samplerSlots = [](const std::string& src) {
+			std::vector<int> v;
+			const std::string tag = "[[sampler(";
+			for (size_t at = src.find(tag); at != std::string::npos; at = src.find(tag, at + tag.size()))
+				v.push_back(std::atoi(src.c_str() + at + tag.size()));
+			std::sort(v.begin(), v.end());
+			v.erase(std::unique(v.begin(), v.end()), v.end());
+			return v;
+		};
+		HE::MaterialGraph g3;
+		{
+			const int o3 = g3.addNode(HE::MatNodeType::Output);
+			const int b3 = g3.addNode(HE::MatNodeType::LandscapeLayerBlend);
+			g3.findNode(b3)->s = "Grass\nRock\nSand";
+			for (int i = 0; i < 3; ++i)
+			{
+				const int c = g3.addNode(HE::MatNodeType::ConstColor);
+				g3.findNode(c)->p[i] = 1.0f;
+				CHECK(g3.connect(c, 0, b3, i));
+			}
+			CHECK(g3.connect(b3, 0, o3, HE::kMatOutputBaseColorPin));
+		}
+		const std::string glsl3 = HE::generateFragment(g3).glsl;
+		for (const bool clustered : { false, true })
+		{
+			CAPTURE(clustered);
+			const uint64_t h3 = std::hash<std::string>{}(glsl3);
+			const std::string m3 = clustered ? lib.fragmentClustered(h3, glsl3, B::Metal).source
+			                                 : lib.fragment(h3, glsl3, B::Metal).source;
+			const std::string mN = clustered ? lib.fragmentClustered(hash, glsl, B::Metal).source
+			                                 : msl;
+			const std::vector<int> s3 = samplerSlots(m3), sN = samplerSlots(mN);
+			REQUIRE(!s3.empty());
+			CHECK(sN == s3);
+			CHECK(sN.size() <= 16);
+			CHECK(sN.back() <= 15);
+		}
 	}
 }
 #endif
