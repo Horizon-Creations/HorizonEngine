@@ -114,6 +114,8 @@ Gebaut wie oben geplant, nur im Vulkan-Backend:
 
 Bildtest: `scripts/he_vk_imagetests.py --cases ui_image` (läuft in CI auf lavapipe mit). Er hat Leitkanal-
 Sonden auf Rot, Grün und Blau und zusätzlich neu `colors`, also Sollfarben ±12 auf allen vier Quadranten.
+Er ist in CI gelaufen (Run 37590519247, Job „Linux · Vulkan (lavapipe)“, llvmpipe LLVM 20.1.2) und
+war grün: alle vier Quadranten bytegenau, 0 Validation-Meldungen, 6/6 Fälle.
 
 | Lauf (RTX 4070, Vulkan 1.4.341, Validation an) | TL | TR | BL | BR | `ui_image` |
 |---|---|---|---|---|---|
