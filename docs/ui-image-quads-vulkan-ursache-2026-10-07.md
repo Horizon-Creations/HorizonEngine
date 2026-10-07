@@ -260,12 +260,20 @@ python scripts\ui-image-repro\game157_ana.py C:\hw157\game\shots g4
   Bildmaske). Auf den Bildpixeln liegt die Abweichung bei höchstens 4, und nur an der geglätteten Kante, wo
   der animierte Himmel durchscheint. Damit ist die SDF-Rundung im Bild-Modus jetzt auch auf D3D belegt.
 - **Vulkan-Validation im Spiel:** 9× `vkCmdUpdateBuffer() … inside an active VkRenderPass` und 9× „Barriers
-  cannot be set during subpass 0“, dazu 2 Duplikat-Hinweise. Quelle ist der alte Material-UBO-Pfad `m_matUBO` im
-  Swapchain-Szenenpfad (`VulkanRenderer.cpp`, `vkCmdUpdateBuffer(cmd, m_matUBO, …)`), nicht die UI. Belegt ist das
-  so: Die Thema-157-Commits fügen im Vulkan-Renderer weder `vkCmdUpdateBuffer` noch eine Barriere hinzu. Außerdem
-  gibt es eine Gegenprobe: dasselbe Projekt ohne `GameInstance.hcode` (Widget nie gezeigt, `ana`: „KEIN Bild“)
-  hat dieselben 20 `[ERROR]`. Thema 144 hat das für den Viewport-Pfad behoben, der Swapchain-Pfad hat es noch.
-  Das gehört nicht zu diesem Thema.
+  cannot be set during subpass 0“, dazu 2 Duplikat-Hinweise. Das sind 9 + 9, weil der Layer jede Meldung nach
+  10 Wiederholungen kappt, die Zahl ist also keine feste Größe der Engine. Quelle ist der bekannte
+  Material-UBO-Pfad `m_matUBO` in `VulkanRenderer::DrawScene` (`vkCmdUpdateBuffer(cmd, m_matUBO, …)` je
+  Mesh-Draw), nicht die UI. Belegt ist das so:
+  - Die Thema-157-Commits fügen im Vulkan-Renderer weder `vkCmdUpdateBuffer` noch eine Barriere hinzu.
+  - Gegenprobe: Dasselbe Projekt ohne `GameInstance.hcode` (Widget nie gezeigt, `ana`: „KEIN Bild“) hat
+    dieselben 20 `[ERROR]`.
+
+  Den Fix dafür enthält PR #96 (Thema 144, dynamischer UBO-Ring `m_sceneMatBuf`), der ist aber weder auf
+  `origin/main` (= Basis `6866923d`) noch auf diesem Zweig. Das gehört nicht zu diesem Thema.
+- **D3D12-Debug-Layer im Spiel:** Der Lauf schreibt „D3D12 debug layer: ID3D12CommandList::ClearRenderTargetView:
+  The clear values do not match …“ ins Log. Die InfoQueue-Leitung kommt also an, und 0 `[ERROR]` heißt hier
+  wirklich 0 Debug-Layer-Fehler. Die offene Gegenprobe aus Schritt 3 ist damit für den Spiel-Lauf erledigt, für den
+  Dump-Lauf des Editors nicht.
 - Nebenbefund (nicht behoben, außerhalb des Themas): `widget_add` mit `position` beschreibt die Position als
   „anchored top-left“. Gezeichnet wird das Element aber mit seiner Mitte an dieser Stelle, auf allen Backends
   gleich. Bild B sitzt deshalb mit der Mitte bei (200,200).
