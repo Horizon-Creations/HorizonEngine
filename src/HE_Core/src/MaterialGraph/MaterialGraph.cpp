@@ -1520,6 +1520,14 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             " for (int i = 0; i < 4; i++) { v += a * heValueNoise3(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
     if (c.usesNormalPerturb)
+        // The cotangent frame (Schüler) comes out multiplied by the SIGN of the
+        // screen basis: dFdy runs up the screen on OpenGL and down it on D3D,
+        // Vulkan and Metal, which mirrored every normal map there (measured,
+        // Thema 158 Schritt 4: corr(height slope, N) −0.93 on GL, +0.93 on
+        // D3D11/D3D12/Vulkan). dot(cross(dp1, dp2), N) carries exactly that sign
+        // and nothing of the UVs, so multiplying by it makes T = ∂p/∂u on every
+        // backend (and on back faces) while mirrored UVs still mirror the frame.
+        // GL front faces have sign +1 and keep their exact result.
         src +=
             "vec3 hePerturbNormal(vec3 N, vec3 mapN, vec3 pos, vec2 uv) {\n"
             "    vec3 dp1 = dFdx(pos); vec3 dp2 = dFdy(pos);\n"
@@ -1528,6 +1536,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;\n"
             "    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;\n"
             "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
+            "    invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;\n"
             "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
     if (c.usesBombGrid)
         // Texture bombing as hex tiling (Mikkelsen, JCGT 2022): skew the uv into a

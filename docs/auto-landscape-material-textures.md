@@ -627,3 +627,181 @@ Array-Slots ist das ohne Belang: Sie liegen auf t4..t7 bzw. Binding 4..7, nicht 
 Layer 0 (§7.5). Beim Merge sind Konflikte in den Renderern rund um die
 Graph-Textur-Bindung möglich: D3D12 `resolveGraphTexture`/`srvForTexture`, Vulkan
 `heTexP`-Block.
+
+## 9. Schritt 4: Textur-Bombing als Material-Knoten
+
+Stand: Zweig `claude/auto-landschaftsmaterial-…`, Commits `fef4bd08` (Knoten),
+`a99157ba` (Cell-Pin + Zeuge) und der Normal-Rahmen-Fix danach (§9.3). Die
+Zweig-Basis ist unverändert (§8.6).
+
+### 9.1 Was es jetzt gibt
+
+- **Vier Knoten** in der Kategorie *Texture*:
+
+  | Knoten | Eingänge | Ausgänge |
+  |---|---|---|
+  | *Texture Bombing* | UV, Cell | RGB, A |
+  | *Normal Map Bombing* | UV, Cell | N (Welt) |
+  | *Texture Array Bombing* | UV, Slice, Cell | RGB, A |
+  | *Normal Map Array Bombing* | UV, Slice, Cell | N (Welt) |
+
+  Sie belegen **dieselben heTexP-Slots** wie *Texture Sample* / *Texture Array
+  Sample* (Pfad in `s`). Es gibt also keinen neuen Sampler, kein neues Binding und
+  keine Änderung an Pin-Tabelle, Vulkan-Layout oder D3D12-Root-Signature. Graphen
+  ohne Bombing-Knoten behalten ihren Shader-Text Byte für Byte.
+- **Parameter:** `p[0]` Drehung (0..1 von ±180°, 0 = nur Versatz), `p[1]`
+  Blend-Schärfe (Exponent, ≤ 0 → 7), `p[2]` Seed (gerundet, negative Werte laufen
+  wie im Shader als `uint` um), `p[3]` Stärke (nur Normal-Knoten). **Cell** ist der
+  Abstand der Hex-Mitten in Textur-Wiederholungen, ungebunden 0,5
+  (`kMatBombDefaultCell`). Als Pin kann ein Parameter ihn pro Schicht steuern.
+  Das Paper skaliert fest mit 2√3 = 0,29 Wiederholungen. Damit zerfallen grosse
+  Strukturen wie Felsblöcke in kleine Stücke, deshalb ist der Wert hier einstellbar.
+- **Verfahren:** Hex-Tiling nach Mikkelsen (JCGT 2022). Die UV-Ebene wird in ein
+  Dreiecksgitter geschert, die drei Ecken unter dem Pixel sind die Mitten der drei
+  Hexe, die hier mischen. Jedes Hex liest mit eigenem Versatz (0..1 Wiederholung)
+  und eigener Drehung um seine Mitte. Gewicht = baryzentrisch hoch Schärfe,
+  normiert. Ein Lesezugriff kostet **drei** Texturzugriffe.
+- **Gleich auf allen Backends:** Der Zufall kommt aus einem **Integer-Hash**
+  (pcg3d) des Hex-Index, nicht aus `fract(sin())`. Ein anderer Versatz wäre ein
+  anderes Texel. Der Index geht float → int → uint, und die 24-Bit-Werte werden
+  exakt nach float umgerechnet.
+- **Keine Mip-Sprünge an den Nähten:** Alle Zugriffe laufen über `textureGrad` mit den
+  Gradienten des **ungebombten** UV, gedreht mit dem Hex. Im HLSL wird das
+  `SampleGrad`, im MSL `gradient2d`; das prüft ein Test.
+- **Normalen:** Die Tangentenraum-Normale jedes Hex wird mit `transpose(R)`
+  zurückgedreht und erst dann gemischt. Danach folgt der Rahmen des *Normal
+  Map*-Knotens mit dem ungedrehten UV.
+- **Ein Gitter pro Schicht:** Der Codegen merkt sich das Gitter pro Scope +
+  UV-Ausdruck + Cell-Ausdruck + Drehung/Schärfe/Seed. Albedo, Normal und Maske
+  einer Schicht mit gleichen Werten teilen **ein** `heBombGrid` und liegen damit
+  deckungsgleich. Die Zeugen-Logzeile meldet „1 hex grid(s)“ für drei Knoten.
+- **Bewusst weggelassen:** Mikkelsens Luminanz-Gewichtung der Farbe. Sie würde dem
+  Albedo andere Gewichte geben als der Normal-Map und der Maske derselben Schicht,
+  dann lägen die drei nicht mehr deckungsgleich.
+- Editor (Rot/Blend/Seed/Strength mit Hilfetexten, Textur-Drop und -Picker) und MCP
+  (Typnamen `*BombSample`, `requires` mit der p-Belegung, Pfadprüfung).
+  `HE::matNodeSamplesTexture` ersetzt die verstreuten Vier-Knoten-Listen.
+
+### 9.2 Nachweis (NN-WS03, RTX 4070, Release-Build `C:\hw158`)
+
+Zeuge `HE_DUMP_TEXBOMB` (`EditorApplication.cpp`, nach dem TEXARRAY-Zeugen): dasselbe
+flache, **unlit** 100-m-Terrain, 5 Streifen = Slices, Textur-Tiling 10. Vier Bänder:
+
+1. plain Albedo-Array (Referenz, wiederholt sich je Kachel)
+2. gebombtes Albedo-Array
+3. (N.x, Höhe, N.z): gebombte Normal-Map-Array-Lesung um die Höhe (B) der
+   gebombten Masken-Lesung
+4. gebombtes Masken-Array
+
+Skripte: `scripts/texture-bombing-repro/cap158bomb.ps1` (Aufruf wie §8.3) und
+`ana158bomb.py`. Das Skript misst:
+
+- **Wiederholung:** mean|I(p) − I(p + 1 Kachel)|; die Periode wird an Band 1 angepasst
+  (67 × 67 px).
+- **Hang-Korrelation:** corr(Bild-Gradient der Höhe, N.x bzw. N.z) pro Streifen.
+  Die Platzhalter-Normale *ist* die Steigung der Höhe. Die Korrelation bleibt also
+  nur stark, wenn Normale und Höhe auf denselben Hexen liegen **und** jede Normale
+  richtig zurückgedreht ist.
+
+| Modus `=1`, OpenGL | Wiederholung (h / v) |
+|---|---|
+| plain Albedo | 0,60 / 0,80 |
+| gebombtes Albedo | 12,97 / 13,59 |
+| N.x / Höhe / N.z | 8,02 / 7,89 |
+| gebombte Maske | 5,28 / 5,56 |
+
+Die Zellmittel des gebombten Albedo sind gleich denen des plain Albedo (größte
+Abweichung 2): Bombing verschiebt den Farbton nicht.
+
+| Hang-Korrelation `=1` | Grass | Dirt | Rock | Snow | WetGround |
+|---|---|---|---|---|---|
+| corr(dH/dx, N.x) | −0,892 | −0,920 | −0,896 | −0,910 | −0,866 |
+| corr(dH/dy, N.z) | −0,888 | −0,922 | −0,898 | −0,902 | −0,871 |
+
+Auf D3D11, D3D12 und Vulkan sind alle Werte dieselben.
+
+| gegen OpenGL (nach §9.3) | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|
+| `=1` mean\|Δ\| Terrain / Pixel > 8 | 0,002 / 0,000 % | 0,002 / 0,000 % | 0,002 / 0,000 % |
+| `=off` | 0,003 / 0,000 % | 0,003 / 0,000 % | 0,003 / 0,000 % |
+| `=seed7` | 0,002 / 0,000 % | 0,002 / 0,000 % | 0,002 / 0,000 % |
+| `=mismatch` | 0,002 / 0,000 % | 0,002 / 0,000 % | 0,002 / 0,000 % |
+
+Die Toleranz aus §7.5 (mean|Δ| ≤ 1,0, ≤ 0,5 % Pixel > 8) ist damit weit
+unterschritten.
+
+- **Negativkontrolle `=off`** (Bänder 2–4 plain gelesen): Die Wiederholung fällt auf
+  0,9–2,3, die Hang-Korrelation der plain Normal-Map liegt bei −0,91…−0,97. Bombing
+  kostet also etwas Korrelation (Blend-Zonen), aber kein Vorzeichen.
+- **Negativkontrolle `=mismatch`** (Normal auf Seed 1, Höhe auf Seed 0, die Logzeile
+  meldet 2 Gitter): Die Korrelation fällt auf −0,04…+0,08, auf allen vier Backends
+  gleich. Das Mass erkennt also, ob Normale und Albedo/Maske auf demselben Gitter
+  liegen.
+- **`=seed7`:** Die gebombten Bänder ändern sich vollständig gegenüber `=1` (mean|Δ|
+  Albedo 12,4, 54 % > 8). Band 1 bleibt gleich bis auf die Grenzzeilen der Bänder
+  (0,23, dieselbe Grösse wie `=off` gegen `=1`). Die Wiederholung bleibt bei
+  12,4–12,9.
+- Vulkan mit Validation-Layer (`validation layer ENABLED` im Log): keine einzige
+  WARN- oder ERROR-Zeile ausser „No config file“.
+- Vor dem Fix in §9.3 zeigte das gebombte Albedo-Band auf D3D/Vulkan 0,075 / 0,8 %
+  > 8 gegen GL, nach dem Fix 0,003 / 0,000 %. Der Fix berührt den Albedo-Pfad
+  nicht. Vermutlich optimiert der Shader-Compiler das geteilte Gitter anders. Beide
+  Werte liegen innerhalb der Toleranz, die Ursache ist aber nicht geklärt.
+- **Metal:** keine Hardware. Belegt sind der MSL-Cross-Compile (normal, clustered,
+  G-Buffer) mit `gradient2d` an jedem Zugriff und dieselben Slots wie bei den
+  Array-Knoten. Gerendert hat Metal die Knoten nicht.
+- Tests: `test_material_graph.cpp` mit drei neuen Fällen (Gitter-Teilung,
+  Integer-Hash, Gradienten-Zugriffe, Cell im Gitter-Schlüssel, Fallback auf `heTex0`,
+  Parameter-Säuberung, JSON; Cross-Compile MSL/GLSL 4.10/ES 3.00/4.30/HLSL/SPIR-V)
+  und der Aufnahme in die FXC-/D3D12-Root-Signature-/GL-Sweeps. Die
+  Registry-Schleife lief bisher nur bis `WindSway`, die Array-Knoten aus Schritt 3
+  waren dort gar nicht dabei; jetzt reicht sie bis zum letzten Knoten.
+
+### 9.3 Nebenbefund: Normal Maps waren auf D3D/Vulkan gespiegelt (behoben)
+
+Der Zeuge hat einen Fehler gefunden, den es schon vor dem Bombing gab. Der Rahmen
+`hePerturbNormal` aller Normal-Map-Knoten spiegelte auf D3D11/D3D12/Vulkan N.x und
+N.z gegenüber OpenGL: Hang-Korrelation +0,93 statt −0,93, auch mit `=off`, also ganz
+ohne Bombing. GL ist physikalisch richtig. Die Kamera bei Yaw 0 / Pitch −89 legt
+Bild-rechts auf +X und Bild-unten auf +Z, und die Normale muss vom Hang wegkippen
+(N.x ∝ −∂H/∂X). Das sieht der Schritt-3-Zeuge nicht, weil sein Normal-Band rohe
+Texel zeigt und keine gestörte Normale.
+
+- **Ursache:** Schülers Cotangent-Frame enthält das Vorzeichen der
+  Jacobi-Determinante Bildschirm ↔ uv. `dFdy` läuft auf GL nach oben, auf D3D, Vulkan
+  und Metal nach unten. Auf jedem Front-Face dort kippte damit der ganze Rahmen.
+- **Fix** (`MaterialGraph.cpp`, `hePerturbNormal`):
+  `invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;`. Das Produkt enthält
+  genau das Vorzeichen der Bildschirm-Basis und nichts von den UVs. Damit ist T =
+  ∂p/∂u auf jedem Backend und auch auf Back-Faces. Gespiegelte UVs spiegeln den
+  Rahmen weiterhin, wie es der glTF-Test verlangt. Der Fix braucht keine
+  Backend-Konvention und deckt deshalb auch Metal ab, das hier nicht laufen kann.
+- **Gates:**
+  - GL vorher/nachher bitgleich (mean|Δ| 0,000 für `=1` und `=off`), denn
+    GL-Front-Faces haben das Vorzeichen +1.
+  - D3D11/D3D12/Vulkan danach mit GL-Vorzeichen; das Normal-Band gegen GL fällt
+    von 4,33 auf 0,000, das ganze Terrain von 1,10 / 13,3 % > 8 auf
+    0,002 / 0,000 %.
+  - `test_gltf_material_import.cpp` hat jetzt einen Fall mit nach unten laufender
+    Bildschirm-Y-Achse, der das Ergebnis von GL liefern muss.
+- **Reichweite:** Jedes Graph-Material mit Normal Map (auch die importierten
+  PBR-Graphen aus `PbrMaterialImport`) wird auf D3D/Vulkan/Metal jetzt richtig
+  herum beleuchtet, auf GL ändert sich nichts. Im Editor erzeugt der ContentManager
+  Basis-Graph-Materialien beim Laden neu (`ContentManager.cpp`, „regenerate the baked
+  GLSL from the graph“), alte Assets bekommen den Fix also von selbst. Gepackte Spiele
+  mit vorkompilierten Shader-Blobs behalten den alten Stand bis zum nächsten Export.
+  Eingebaute und Decal-Shader bauen keinen solchen Ableitungs-Rahmen (grep
+  `dp2perp`), sie sind nicht betroffen.
+
+### 9.4 Für Schritt 5
+
+- Pro Schicht kosten Albedo + Normal + Maske gebombt 9 Texturzugriffe. Fünf Schichten
+  voll gebombt wären also 45, gegenüber 15 ohne Bombing. Sinnvoll ist: nur die
+  Schichten bomben, die auch Gewicht haben (Steigung, Schnee, Pfütze entscheiden
+  das vorher), oder für Schnee und nassen Boden plain lesen.
+- Pro Schicht eigenen Seed nehmen, damit die Muster der Schichten nicht gemeinsam
+  wiederkehren. Albedo/Normal/Maske **einer** Schicht brauchen denselben Seed und
+  dieselbe Cell-Quelle.
+- Cell 0,5 ist ein Startwert. Für die echten 2K-Texturen am Bild prüfen.
+- Die Hilfe zu „+ Layer“ spricht noch von vier Layern als Grenze. Das stimmt seit
+  Schritt 2 nicht mehr (acht).
