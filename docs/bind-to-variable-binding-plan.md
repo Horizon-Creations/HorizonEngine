@@ -374,6 +374,7 @@ Umgesetzt (Commits 38e61812, cc4c227e ff.). Wo die Umsetzung von §4.5 abweicht,
 **Offen nach Schritt 5:**
 
 * `scripts/script_api_docs/registry.json` neu erzeugen (`dump_engine_api.sh`, nur macOS), danach Website-Referenz und In-Engine-Handbuch. Die `hc`-Zeilen fehlen dort noch.
+* Paritäts-Fixture in `HCGEN_CLASSES` für die `hc`-Zeilen (Pflichtstelle nach §4.5 Punkt 4): Ein Graph, der `Watch Variable`/`Get Variable As JSON` aufruft, interpretiert und kompiliert. Nicht angelegt; die Zeilen laufen beide Wege über `hc::callApi` und dieselbe `invoke`.
 * Ein Headless-Lauf im echten Spiel (§6), der die Verdrahtung in GA/EA mit einem echten Lua-Script belegt, nicht nur im Test-Rig.
 * Was in §4.7 noch offen steht (§4.6 Punkte 3/4, Paritäts-Fixture, Referenz-Doku).
 
