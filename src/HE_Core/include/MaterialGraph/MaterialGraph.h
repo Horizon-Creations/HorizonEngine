@@ -155,6 +155,16 @@ enum class MatNodeType : uint8_t
                     // metres, 0 = off) fades the offset in from the mesh origin
                     // (squared, like a bending stem); the fragment stage has no
                     // object position and ignores it. Mask multiplies the result.
+
+    // ── v13: texture arrays (Thema 158) ──
+    // One heTexP slot holding MANY same-sized layers (TextureAsset::layers): a
+    // sampler2DArray instead of a sampler2D. Five terrain layers × Albedo /
+    // Normal / Mask fit the four-slot budget only this way — an array costs one
+    // sampler however many slices it has. s = texture path, like Texture Sample.
+    // Slice is rounded to the nearest layer and clamped to the array, the same
+    // answer on every backend. An unconnected UV is the mesh UV (vUV).
+    TextureArraySample,   // (UV, Slice) → RGB + A
+    NormalMapArraySample, // (UV, Slice) → world-space N, like Normal Map; p[0] = strength
 };
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
@@ -390,6 +400,10 @@ struct MatShaderGen
     // Content-relative paths of the project textures referenced by Texture Sample nodes,
     // in slot order (heTexP0..heTexP3). → MaterialAsset::graphTexturePaths. Max 4.
     std::vector<std::string>  textures;
+    // Bit k set = slot heTexPk is a sampler2DArray (a Texture Array Sample node), so the
+    // renderer must bind an ARRAY view there. Also written into the GLSL itself (see
+    // matGlslTextureArrayMask), which is where the backends read it from.
+    uint32_t textureArrayMask = 0;
     // Static switches reached during codegen: name + the EFFECTIVE value baked into this
     // shader (node default, or the entry from generateFragment's override map).
     std::vector<std::pair<std::string, bool>> switches;
@@ -414,6 +428,15 @@ struct MatShaderGen
 // Max project textures a single material graph may sample (fixed so the per-backend
 // binding pins stay static).
 inline constexpr int kMatMaxGraphTextures = 4;
+
+// Which heTexP slots of a generated fragment are sampler2DArray (bit k = heTexPk).
+// The codegen writes the mask as the line right after `#version` —
+// "// heTexArrays <mask>" — and ONLY when it is non-zero, so every graph without an
+// array node keeps its exact old text (and its cached pipelines). The renderers
+// read it from MaterialAsset::customShaderFragGlsl, which travels verbatim into
+// packed games, so the MTRL layout needs no new field. O(1): it looks at one
+// fixed position. Hand-written GLSL without the line → 0 (all plain 2D).
+HE_API uint32_t matGlslTextureArrayMask(const std::string& glsl);
 
 // Exposed parameters a single material graph may declare — the length of the
 // HeParams UBO array (`uniform HeParams { vec4 v[kMatMaxParams]; }`, emitted by

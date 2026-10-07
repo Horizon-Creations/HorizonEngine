@@ -682,6 +682,8 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::Reroute:             return "Reroute";
 	case T::StaticSwitch:        return "StaticSwitch";
 	case T::NormalMapSample:     return "NormalMapSample";
+	case T::TextureArraySample:  return "TextureArraySample";
+	case T::NormalMapArraySample:return "NormalMapArraySample";
 	case T::LandscapeLayerBlend: return "LandscapeLayerBlend";
 	case T::ElementSize:         return "ElementSize";
 	case T::ElementUV:           return "ElementUV";
@@ -803,6 +805,8 @@ std::string nodeDetail(const HE::MatGraphNode& n)
 	{
 	case HE::MatNodeType::TextureSample:
 	case HE::MatNodeType::NormalMapSample:
+	case HE::MatNodeType::TextureArraySample:
+	case HE::MatNodeType::NormalMapArraySample:
 	case HE::MatNodeType::FunctionCall:
 		return n.s.empty() ? std::string("no path") : n.s;
 	case HE::MatNodeType::ParamFloat:
@@ -941,6 +945,8 @@ json nodeJson(const HE::MaterialGraph& g, const HE::MatGraphNode& n, int blendMo
 	{
 	case HE::MatNodeType::TextureSample:
 	case HE::MatNodeType::NormalMapSample:
+	case HE::MatNodeType::TextureArraySample:
+	case HE::MatNodeType::NormalMapArraySample:
 		j["texture"] = n.s;
 		break;
 	case HE::MatNodeType::FunctionCall:
@@ -1176,6 +1182,8 @@ void addGraphInfo(McpToolRegistry& registry, ContentManager& content,
 			{
 			case HE::MatNodeType::TextureSample:
 			case HE::MatNodeType::NormalMapSample:
+			case HE::MatNodeType::TextureArraySample:
+			case HE::MatNodeType::NormalMapArraySample:
 				if (!n.s.empty() &&
 				    std::find(textures.begin(), textures.end(), n.s) == textures.end())
 					textures.push_back(n.s);
@@ -1569,6 +1577,8 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 				break;
 			case HE::MatNodeType::TextureSample:
 			case HE::MatNodeType::NormalMapSample:
+			case HE::MatNodeType::TextureArraySample:
+			case HE::MatNodeType::NormalMapArraySample:
 				j["requires"] = "s = content-relative path of a texture, or empty for "
 				                "the mesh's own texture.";
 				break;
@@ -1645,7 +1655,8 @@ void addAddNode(McpToolRegistry& registry, ContentManager& content,
 		"Add one node to a master material's graph. 'type' is a name from "
 		"material_node_types (or material_graph_info's nodes[].type). 's' is the "
 		"node's string payload where the type has one: the parameter name for a "
-		"Param node, the texture path for TextureSample / NormalMapSample (empty = "
+		"Param node, the texture path for TextureSample / NormalMapSample / TextureArraySample / "
+		"NormalMapArraySample (empty = "
 		"the mesh's own texture), the material function path for FunctionCall "
 		"(required), the switch name for StaticSwitch, the layer names (one per "
 		"line) for LandscapeLayerBlend. 'p' sets the node's values (a Float's "
@@ -1726,7 +1737,8 @@ void addAddNode(McpToolRegistry& registry, ContentManager& content,
 					"reports what a path holds; material_node_types lists the functions "
 					"a FunctionCall can be bound to.");
 		}
-		if ((nt == HE::MatNodeType::TextureSample || nt == HE::MatNodeType::NormalMapSample) &&
+		if ((nt == HE::MatNodeType::TextureSample || nt == HE::MatNodeType::NormalMapSample ||
+		     nt == HE::MatNodeType::TextureArraySample || nt == HE::MatNodeType::NormalMapArraySample) &&
 		    !s.empty())
 		{
 			const PathCheck tp = checkPath(*cm, s, /*mustExist=*/true, "s");
@@ -2604,7 +2616,8 @@ void addSetNode(McpToolRegistry& registry, ContentManager& content,
 		"the same fields material_add_node takes, applied to a node by 'id'; "
 		"anything not given stays as it is. 's' is the node's string payload "
 		"(parameter name of a Param node, texture path of a TextureSample / "
-		"NormalMapSample, function path of a FunctionCall, switch name of a "
+		"NormalMapSample / TextureArraySample / NormalMapArraySample, function "
+		"path of a FunctionCall, switch name of a "
 		"StaticSwitch, layer names one per line of a LandscapeLayerBlend), 'p' its "
 		"values in the order material_graph_info reports them (a Float's value, a "
 		"Color's rgb, a ParamFloat's default), 'min'/'max' a ParamFloat's slider "
@@ -2729,7 +2742,8 @@ void addSetNode(McpToolRegistry& registry, ContentManager& content,
 					"reports what a path holds; material_node_types lists the functions "
 					"a FunctionCall can be bound to.");
 		}
-		if (haveS && (nt == HE::MatNodeType::TextureSample || nt == HE::MatNodeType::NormalMapSample) &&
+		if (haveS && (nt == HE::MatNodeType::TextureSample || nt == HE::MatNodeType::NormalMapSample ||
+		     nt == HE::MatNodeType::TextureArraySample || nt == HE::MatNodeType::NormalMapArraySample) &&
 		    !s.empty())
 		{
 			const PathCheck tp = checkPath(*cm, s, /*mustExist=*/true, "s");

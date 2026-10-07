@@ -1,6 +1,7 @@
 #include "Backends/Metal/MetalRenderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
@@ -6403,6 +6404,7 @@ void MetalRenderer::Shutdown()
 	DestroySkyViewLut();
 	if (m_moonTexture)         { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
+	if (m_whiteArrayTexture) { CFBridgingRelease(m_whiteArrayTexture); m_whiteArrayTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
@@ -6675,6 +6677,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 			if (ResolveMaterialShader(rb.materialAssetId, shKey, shFrag, shVert))
 			{
 				std::vector<HE::UUID>    gtexIds;
+				uint32_t                 gtexArr = 0; // sampler2DArray slots (Thema 158)
 				std::vector<std::string> gtexPaths;
 				const MaterialShaderVariant* pre = nullptr;
 				if (const MaterialAsset* ma = m_contentManager
@@ -6685,6 +6688,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 					if (!ma->shaderParamData.empty()) t.params = ma->shaderParamData;
 					// Snapshot the graph texture slots BEFORE resolving any of them —
 					// ResolveGraphTexture loads, and `ma` would not survive it.
+					gtexArr = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 					const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 						std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 					for (size_t i = 0; i < nTex; ++i)
@@ -6696,7 +6700,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
 				t.wpo      = !shVert.empty();
 				for (size_t i = 0; i < gtexIds.size(); ++i)
-					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i]);
+					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i], (gtexArr >> i) & 1u);
 			}
 #endif
 
@@ -7074,6 +7078,18 @@ void MetalRenderer::CreateScenePipeline()
 		const uint32_t white = 0xFFFFFFFF;
 		[dummy replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
 		m_dummyTexture = (void*)CFBridgingRetain(dummy);
+		// Its texture2d_array twin: what an empty sampler2DArray heTexP slot (Texture
+		// Array Sample, Thema 158) gets — a 2D texture there is a type mismatch.
+		MTLTextureDescriptor* dummyArrDesc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
+		dummyArrDesc.textureType = MTLTextureType2DArray;
+		dummyArrDesc.arrayLength = 1;
+		dummyArrDesc.usage       = MTLTextureUsageShaderRead;
+		dummyArrDesc.storageMode = MTLStorageModeShared;
+		id<MTLTexture> dummyArr = [device newTextureWithDescriptor:dummyArrDesc];
+		[dummyArr replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0
+		              withBytes:&white bytesPerRow:4 bytesPerImage:4];
+		m_whiteArrayTexture = (void*)CFBridgingRetain(dummyArr);
 
 		MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
 		sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
@@ -8897,18 +8913,66 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 	return true;
 }
 
+// The MTLTextureType2DArray twin of uploadMetalTexture for a sampler2DArray heTexP
+// slot (Thema 158): every slice of a texture-array asset (layers > 1, RGBA8, the
+// HE::buildTextureArray layout — slice-major, each slice with its full chain), or a
+// plain 2D asset as one slice. nullptr = unusable → the caller binds the white array.
+static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* tex)
+{
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
+	    || tex->format != TextureFormat::RGBA8)
+		return nullptr;
+	const bool     isArray = tex->layers > 1;
+	if (isArray && !HE::textureArrayPayloadValid(*tex)) return nullptr;
+	const uint32_t layers = isArray ? tex->layers : 1;
+	const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
+	const uint32_t w = tex->width, h = tex->height;
+	if (tex->data.size() < (size_t)layers * HE::textureArraySliceBytes(w, h, mips)) return nullptr;
+
+	MTLTextureDescriptor* desc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:(tex->srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm)
+		width:w height:h mipmapped:(mips > 1)];
+	desc.textureType      = MTLTextureType2DArray;
+	desc.arrayLength      = layers;
+	desc.mipmapLevelCount = mips;
+	desc.usage            = MTLTextureUsageShaderRead;
+	desc.storageMode      = MTLStorageModeShared;
+	id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+	if (!texture) return nullptr;
+	for (uint32_t s = 0; s < layers; ++s)
+	{
+		uint32_t lw = w, lh = h;
+		for (uint32_t l = 0; l < mips; ++l)
+		{
+			[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l slice:s
+			             withBytes:tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l)
+			           bytesPerRow:(size_t)lw * 4 bytesPerImage:(size_t)lw * lh * 4];
+			lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
+		}
+	}
+	return (void*)CFBridgingRetain(texture);
+}
+
 // Resolve a node-graph project texture (UUID for packed assets, path for loose editor
 // assets) to a retained id<MTLTexture>, cached by a stable key. nullptr if not loadable.
-void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::string& path)
+//
+// `array` = a sampler2DArray slot (HE::matGlslTextureArrayMask): a texture2d_array
+// under its own "#arr" key — the same asset can be 2D in one material and an array
+// in another — and NEVER nullptr: a missing one is the white array, so every caller
+// binds the right texture type without knowing about arrays.
+void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::string& path, bool array)
 {
-	const std::string key = texId != HE::UUID{}
+	std::string key = texId != HE::UUID{}
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
-	if (key.empty() || !m_contentManager) return nullptr;
-	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end()) return it->second;
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
-		m_contentManager->resolveTextureRef(texId, path));
+	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
+	if (array) key += "#arr";
+	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
+	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
+	void* retained = array ? uploadMetalTextureArray((__bridge id<MTLDevice>)m_device, asset)
+	                       : uploadMetalTexture((__bridge id<MTLDevice>)m_device, asset);
 	m_graphTexCache.emplace(key, retained);
-	return retained;
+	return retained ? retained : (array ? m_whiteArrayTexture : nullptr);
 }
 
 // The image of a UI quad (Image widget, textured Border/Button). Its own cache,
@@ -9147,13 +9211,14 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:0]; // heTex0
 	if (ma)
 	{
+		const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 		const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 			std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 		for (size_t i = 0; i < nTex; ++i)
 		{
 			const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 			const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-			if (void* t = ResolveGraphTexture(gid, gp))
+			if (void* t = ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u))
 			{
 				[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:(i + 1)];
 				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
@@ -12768,11 +12833,12 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 				const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
 				std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 				for (size_t i = 0; i < HE::kMatMaxGraphTextures; ++i)
 				{
 					const HE::UUID tid = i < ma->graphTextureIds.size() ? ma->graphTextureIds[i] : HE::UUID{};
 					const std::string tp = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string();
-					void* gt = ResolveGraphTexture(tid, tp);
+					void* gt = ResolveGraphTexture(tid, tp, (arrMask >> i) & 1u);
 					id<MTLTexture> tex = gt ? (__bridge id<MTLTexture>)gt
 					                        : (__bridge id<MTLTexture>)m_dummyTexture;
 					[enc setFragmentTexture:tex atIndex:(NSUInteger)(i + 1)];
@@ -13615,13 +13681,14 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						{
 							if (!ma->shaderParamData.empty()) cMaterialParams = &ma->shaderParamData;
 							// Node-graph project textures → fragment texture units 1..4.
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    id = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string p  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p);
+								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -15419,13 +15486,14 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
 							if (!ma->shaderParamData.empty()) cMaterialParams = &ma->shaderParamData;
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    id = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string p  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p);
+								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -15714,8 +15782,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			for (const HE::UUID& id : m_pendingTexInvalidations)
 			{
 				const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+				// The texture-array upload of the same asset lives under "#arr" (Thema 158).
+				for (const std::string& k : { key, key + "#arr" })
 				for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
-					if (auto it = cache->find(key); it != cache->end())
+					if (auto it = cache->find(k); it != cache->end())
 					{
 						if (it->second) RetireTexture(it->second);
 						cache->erase(it);

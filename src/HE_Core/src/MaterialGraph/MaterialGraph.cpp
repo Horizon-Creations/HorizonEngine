@@ -222,6 +222,14 @@ const std::vector<MatNodeDesc>& registry()
         // the registry entry only carries the single output + param count.
         { MatNodeType::LandscapeLayerBlend, "Landscape Layer Blend", "Landscape",
           {}, { { "Blended", F::Vec3, 0 } }, 0 },
+
+        // ── v13: texture arrays — s = the array texture, Slice picks the layer ──
+        { MatNodeType::TextureArraySample, "Texture Array Sample", "Texture",
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 0 },
+        { MatNodeType::NormalMapArraySample, "Normal Map Array", "Texture",
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength
     };
     return kReg;
 }
@@ -396,6 +404,7 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (type == MatNodeType::StaticSwitch) { n.p[0] = 1.0f; n.s = "MySwitch"; }
     // v9: normal map strength; Output mask cutoff (p[1] blend mode stays 0 = Opaque)
     if (type == MatNodeType::NormalMapSample) n.p[0] = 1.0f;
+    if (type == MatNodeType::NormalMapArraySample) n.p[0] = 1.0f;
     // v10: a fresh layer-blend node starts with two named layers.
     if (type == MatNodeType::LandscapeLayerBlend) n.s = "Layer 1\nLayer 2";
     if (type == MatNodeType::Output) n.p[2] = 0.5f;
@@ -496,6 +505,7 @@ struct EmitCtx
     int  varCounter  = 0;
     std::vector<MatParamSlot> params;                    // exposed parameters, slot order
     std::vector<std::string>  textures;                  // project textures, slot order (max 4)
+    std::vector<bool>         textureIsArray;            // parallel: slot is a sampler2DArray
     const MatFunctionLoader*  loader = nullptr;
     std::vector<std::string>  fnStack;                   // inline stack (recursion guard)
 };
@@ -554,16 +564,40 @@ int paramSlot(EmitCtx& c, const MatGraphNode& n, MatParamKind kind)
 // capped at kMatMaxGraphTextures); extras fall back to heTex0.
 // Shared by Texture Sample and Normal Map Sample — they must allocate out of the
 // SAME slot table, or two nodes sampling the same file would claim two bindings.
-std::string textureSampler(EmitCtx& c, const MatGraphNode& n)
+//
+// `array` = the node samples a texture ARRAY (Texture Array Sample / Normal Map
+// Array): its slot is declared sampler2DArray. A slot is keyed by path AND kind —
+// one file read as 2D by one node and as an array by another is two slots, never
+// one slot declared with the wrong type. An array node that lands on heTex0 (no
+// texture picked, or over budget) gets the plain 2D mesh texture, so the caller
+// must check *gotArray before building a 3-component coordinate.
+std::string textureSampler(EmitCtx& c, const MatGraphNode& n, bool array = false,
+                           bool* gotArray = nullptr)
 {
+    if (gotArray) *gotArray = false;
     if (n.s.empty()) { c.usesTexture = true; return "heTex0"; }
     int slot = -1;
     for (size_t i = 0; i < c.textures.size(); ++i)
-        if (c.textures[i] == n.s) { slot = (int)i; break; }
+        if (c.textures[i] == n.s && c.textureIsArray[i] == array) { slot = (int)i; break; }
     if (slot < 0 && (int)c.textures.size() < kMatMaxGraphTextures)
-    { slot = (int)c.textures.size(); c.textures.push_back(n.s); }
+    {
+        slot = (int)c.textures.size();
+        c.textures.push_back(n.s);
+        c.textureIsArray.push_back(array);
+    }
     if (slot < 0) { c.usesTexture = true; return "heTex0"; } // over budget → default
+    if (gotArray) *gotArray = array;
     return "heTexP" + std::to_string(slot);
+}
+
+// The texel-space coordinate for a sampler2DArray read: the slice rounded to the
+// nearest layer and clamped into the array. Done HERE rather than left to the
+// hardware: half-way rounding differs between APIs, and an out-of-range layer is
+// undefined in MSL — this way all five backends read the same layer.
+std::string arrayCoord(const std::string& sampler, const std::string& uv, const std::string& slice)
+{
+    return "vec3(" + uv + ", clamp(floor(" + slice + " + 0.5), 0.0, float(textureSize("
+         + sampler + ", 0).z - 1)))";
 }
 
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
@@ -624,6 +658,33 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                  + " " + v + "_t.xy *= " + fmtF(strength) + ";"
                  + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
                  + "_t), vWorldPos, " + v + "_uv);";
+            break;
+        }
+        case MatNodeType::TextureArraySample:
+        case MatNodeType::NormalMapArraySample:
+        {
+            bool isArr = false;
+            const std::string sampler = textureSampler(c, n, /*array=*/true, &isArr);
+            const std::string uv      = uvInput(c, sc, n, 0);
+            decl = "vec2 " + v + "_uv = " + uv + ";";
+            const std::string coord = isArr
+                ? arrayCoord(sampler, v + "_uv", inputExpr(c, sc, n, 1, F::Float))
+                : v + "_uv"; // heTex0 fallback: a plain 2D read, the slice has no meaning
+            if (n.type == MatNodeType::TextureArraySample)
+            {
+                decl += " vec4 " + v + " = texture(" + sampler + ", " + coord + ");";
+                pinExpr = { v + ".xyz", v + ".w" };
+            }
+            else
+            {
+                // The Normal Map node's frame, fed from one layer of the array.
+                c.usesNormalPerturb = true;
+                const float strength = n.p[0] > 0.0f ? n.p[0] : 1.0f;
+                decl += " vec3 " + v + "_t = texture(" + sampler + ", " + coord + ").xyz * 2.0 - 1.0;"
+                      + " " + v + "_t.xy *= " + fmtF(strength) + ";"
+                      + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
+                      + "_t), vWorldPos, " + v + "_uv);";
+            }
             break;
         }
         case MatNodeType::LandscapeLayerBlend:
@@ -1246,9 +1307,17 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         // sampler is pinned to s0, the register heAO leaves dead (texelFetch);
         // the SM 5.0 budget has no other room (MaterialShaderLibrary, HLSL pins).
         src += "layout(set = 0, binding = 14) uniform sampler2D heLandscapeWeights;\n";
-    for (size_t i = 0; i < c.textures.size(); ++i) // project textures (binding 4 + slot)
-        src += "layout(set = 0, binding = " + std::to_string(4 + i)
-             + ") uniform sampler2D heTexP" + std::to_string(i) + ";\n";
+    // Project textures (binding 4 + slot). An array slot keeps the SAME binding and
+    // register as a 2D one — only the declared type differs — so no backend's pin
+    // table, descriptor layout or root signature changes for it.
+    uint32_t arrayMask = 0;
+    for (size_t i = 0; i < c.textures.size(); ++i)
+    {
+        if (c.textureIsArray[i]) arrayMask |= 1u << i;
+        src += "layout(set = 0, binding = " + std::to_string(4 + i) + ") uniform "
+             + (c.textureIsArray[i] ? "sampler2DArray" : "sampler2D")
+             + " heTexP" + std::to_string(i) + ";\n";
+    }
     if (!c.params.empty())
         src += "layout(std140, set = 0, binding = 3) uniform HeParams { vec4 v["
              + std::to_string(kMatMaxParams) + "]; } heParams;\n";
@@ -1370,7 +1439,17 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // G-buffer variant can never drift from the forward one.
     const std::string common = std::move(src);
 
-    src = header + common;
+    // The array mask goes right under #version (matGlslTextureArrayMask reads it
+    // there), and only when there IS an array slot: every other graph keeps its
+    // exact old text.
+    const std::string kVersionLine = "#version 450\n";
+    auto withArrayMask = [&](const std::string& h) {
+        if (!arrayMask) return h;
+        return kVersionLine + "// heTexArrays " + std::to_string(arrayMask) + "\n"
+             + h.substr(kVersionLine.size());
+    };
+
+    src = withArrayMask(header) + common;
     if (lit)
         // Aerial perspective wraps the WHOLE lit colour (emissive included), the
         // same place the built-in scene shaders apply it — without it a distant
@@ -1392,7 +1471,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // A UI material is never deferred — it is drawn in screen space after the
     // G-buffer has long been resolved — so it gets no G-buffer variant at all
     // rather than one that writes nonsense into the scene's normals.
-    std::string gb = uiDomain ? std::string() : headerGB + common;
+    std::string gb = uiDomain ? std::string() : withArrayMask(headerGB) + common;
     if (uiDomain) { /* no G-buffer tail */ }
     else if (lit)
         gb += "    oGB0 = vec4(" + base + ", " + met + ");\n"
@@ -1417,11 +1496,23 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     gen.glslGBuffer = std::move(gb);
     gen.params   = std::move(c.params);
     gen.textures = std::move(c.textures);
+    gen.textureArrayMask = arrayMask;
     gen.switches  = std::move(c.switches);
     gen.blendMode = static_cast<uint8_t>(blendMode);
     gen.domain    = static_cast<uint8_t>(domain);
     gen.layerNames = std::move(c.layerNames);
     return gen;
+}
+
+uint32_t matGlslTextureArrayMask(const std::string& glsl)
+{
+    // Exactly where generateFragment puts it: the second line.
+    static const std::string kTag = "#version 450\n// heTexArrays ";
+    if (glsl.compare(0, kTag.size(), kTag) != 0) return 0;
+    uint32_t mask = 0;
+    for (size_t i = kTag.size(); i < glsl.size() && glsl[i] >= '0' && glsl[i] <= '9'; ++i)
+        mask = mask * 10 + static_cast<uint32_t>(glsl[i] - '0');
+    return mask & ((1u << kMatMaxGraphTextures) - 1);
 }
 
 const char* matDomainName(MatDomain d)

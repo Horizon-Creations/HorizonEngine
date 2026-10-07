@@ -869,6 +869,121 @@ TEST_CASE("MaterialShaderLibrary::spirvFromBytes round-trips words and rejects t
 	CHECK(out.empty());
 }
 
+// ═══ Texture arrays (Thema 158, Schritt 3) ═══════════════════════════════════
+// The auto landscape material's full texture set: Albedo / Normal / Mask arrays
+// (five slices each) in heTexP0..2 and an ordinary 2D texture in heTexP3 — all
+// four project slots live, three of them sampler2DArray. Lit, with every array
+// on a different Output pin so no read can be optimised away.
+static MaterialGraph makeTextureArrayGraph()
+{
+	MaterialGraph g;
+	const int out   = g.addNode(MatNodeType::Output);
+	const int uv    = g.addNode(MatNodeType::UV);
+	g.findNode(uv)->p[0] = g.findNode(uv)->p[1] = 8.0f;
+	const int slice = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(slice)->p[0] = 2.0f;
+	const int alb = g.addNode(MatNodeType::TextureArraySample);
+	g.findNode(alb)->s = "Textures/T_Albedo_Array.hasset";
+	const int nrm = g.addNode(MatNodeType::NormalMapArraySample);
+	g.findNode(nrm)->s = "Textures/T_Normal_Array.hasset";
+	const int msk = g.addNode(MatNodeType::TextureArraySample);
+	g.findNode(msk)->s = "Textures/T_Mask_Array.hasset";
+	const int t2d = g.addNode(MatNodeType::TextureSample);
+	g.findNode(t2d)->s = "Textures/T_Puddle.hasset";
+	const int split = g.addNode(MatNodeType::SplitRGBA);
+	const int mul   = g.addNode(MatNodeType::Multiply);
+	for (int n : { alb, nrm, msk })
+	{
+		CHECK(g.connect(uv,    0, n, 0));
+		CHECK(g.connect(slice, 0, n, 1));
+	}
+	CHECK(g.connect(uv,  0, t2d, 0));
+	CHECK(g.connect(alb, 0, mul, 0));
+	CHECK(g.connect(t2d, 0, mul, 1));
+	CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+	CHECK(g.connect(nrm, 0, out, HE::kMatOutputNormalPin));
+	CHECK(g.connect(msk, 0, split, 0));
+	CHECK(g.connect(split, 0, out, HE::kMatOutputAOPin));
+	CHECK(g.connect(split, 1, out, HE::kMatOutputRoughnessPin));
+	return g;
+}
+
+TEST_CASE("Texture Array Sample declares sampler2DArray slots and writes the array mask")
+{
+	const HE::MatShaderGen gen = HE::generateFragment(makeTextureArrayGraph());
+	// Slot order = order of emission; the three arrays and the 2D texture are four
+	// slots, and exactly the 2D one is not in the mask — wherever it landed.
+	REQUIRE(gen.textures.size() == 4);
+	uint32_t want = 0;
+	for (int i = 0; i < 4; ++i)
+	{
+		const bool is2D = gen.textures[i] == "Textures/T_Puddle.hasset";
+		if (!is2D) want |= 1u << i;
+		CHECK_MESSAGE(gen.glsl.find("binding = " + std::to_string(4 + i) + ") uniform "
+		                            + (is2D ? "sampler2D" : "sampler2DArray") + " heTexP"
+		                            + std::to_string(i) + ";") != std::string::npos, "slot ", i);
+	}
+	CHECK(((want & 1) + ((want >> 1) & 1) + ((want >> 2) & 1) + ((want >> 3) & 1)) == 3u);
+	CHECK(gen.textureArrayMask == want);
+	// The mask sits right under #version, in BOTH variants, and reads back.
+	const std::string line = "#version 450\n// heTexArrays " + std::to_string(want) + "\n";
+	CHECK(gen.glsl.rfind(line, 0) == 0);
+	CHECK(gen.glslGBuffer.rfind(line, 0) == 0);
+	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == want);
+	CHECK(HE::matGlslTextureArrayMask(gen.glslGBuffer) == want);
+	// The slice is rounded and clamped in the shader, not left to the API.
+	CHECK(gen.glsl.find("clamp(floor(") != std::string::npos);
+	CHECK(gen.glsl.find("textureSize(heTexP") != std::string::npos);
+	CHECK(gen.glsl.find(", 0).z - 1") != std::string::npos);
+
+	// A graph with no array node keeps its exact old text: no mask line at all.
+	const HE::MatShaderGen plain = HE::generateFragment(makeDemoGraph());
+	CHECK(plain.textureArrayMask == 0u);
+	CHECK(plain.glsl.rfind("#version 450\n// GENERATED", 0) == 0);
+	CHECK(HE::matGlslTextureArrayMask(plain.glsl) == 0u);
+	CHECK(HE::matGlslTextureArrayMask("") == 0u);
+	CHECK(HE::matGlslTextureArrayMask("#version 450\n// heTexArrays 255\n") == 0b1111u); // capped to 4 slots
+}
+
+TEST_CASE("One file read as 2D and as an array takes two slots, never one with the wrong type")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int a   = g.addNode(MatNodeType::TextureSample);
+	const int b   = g.addNode(MatNodeType::TextureArraySample);
+	const int c   = g.addNode(MatNodeType::TextureArraySample);
+	for (int n : { a, b, c }) g.findNode(n)->s = "Textures/Same.hasset";
+	const int add = g.addNode(MatNodeType::Add);
+	CHECK(g.connect(a, 0, add, 0));
+	CHECK(g.connect(b, 0, add, 1));
+	const int add2 = g.addNode(MatNodeType::Add);
+	CHECK(g.connect(add, 0, add2, 0));
+	CHECK(g.connect(c, 0, add2, 1));
+	CHECK(g.connect(add2, 0, out, HE::kMatOutputBaseColorPin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	// Two array nodes on the same file share ONE slot; the 2D read has its own.
+	REQUIRE(gen.textures.size() == 2);
+	CHECK(gen.textures[0] == gen.textures[1]);
+	REQUIRE((gen.textureArrayMask == 0b01u || gen.textureArrayMask == 0b10u));
+	const int arr = gen.textureArrayMask == 0b01u ? 0 : 1;
+	CHECK(gen.glsl.find("uniform sampler2DArray heTexP" + std::to_string(arr) + ";") != std::string::npos);
+	CHECK(gen.glsl.find("uniform sampler2D heTexP" + std::to_string(1 - arr) + ";") != std::string::npos);
+
+	// No texture picked → the mesh texture (2D) and a plain 2D read: no array
+	// slot, no mask, and no vec3 coordinate on a sampler2D.
+	MaterialGraph e;
+	const int eo = e.addNode(MatNodeType::Output);
+	const int en = e.addNode(MatNodeType::TextureArraySample);
+	CHECK(e.connect(en, 0, eo, HE::kMatOutputBaseColorPin));
+	const HE::MatShaderGen eg = HE::generateFragment(e);
+	CHECK(eg.textures.empty());
+	CHECK(eg.textureArrayMask == 0u);
+	CHECK(eg.glsl.find("sampler2DArray") == std::string::npos);
+	CHECK(eg.glsl.find("texture(heTex0, n") != std::string::npos);
+	// Unconnected UV = the mesh UV, not vec2(0) (one texel for the whole surface).
+	CHECK(eg.glsl.find("_uv = vUV;") != std::string::npos);
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
 TEST_CASE("Every standard node cross-compiles with all inputs wired")
 {
@@ -1835,6 +1950,84 @@ TEST_CASE("A five- and an eight-layer Landscape Layer Blend cross-compile for al
 			CHECK(sN.size() <= 16);
 			CHECK(sN.back() <= 15);
 		}
+	}
+}
+
+TEST_CASE("Three texture arrays + a 2D texture cross-compile for all five backends on the SAME slots")
+{
+	// What each backend is handed for the auto landscape material's texture set.
+	// Metal has no hardware here: its evidence is this compile plus the slot
+	// check — the array graph declares EXACTLY the [[sampler(N)]] / [[texture(N)]]
+	// slots a graph with four plain 2D textures does, so arrays cost no slot.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const HE::MatShaderGen gen = HE::generateFragment(makeTextureArrayGraph());
+	const std::string glsl = gen.glsl;
+	const uint64_t    hash = std::hash<std::string>{}(glsl);
+	for (B b : { B::Metal, B::GLSL410, B::GLSLES300, B::GLSL430, B::HLSL, B::SpirV })
+	{
+		const auto& r = lib.fragment(hash, glsl, b);
+		CHECK_MESSAGE(r.ok, "backend ", static_cast<int>(b), ": ", r.log);
+	}
+	for (B b : { B::Metal, B::HLSL, B::GLSL430 })
+	{
+		const auto& r = lib.fragmentClustered(hash, glsl, b);
+		CHECK_MESSAGE(r.ok, "clustered backend ", static_cast<int>(b), ": ", r.log);
+	}
+	const std::string msl  = lib.fragment(hash, glsl, B::Metal).source;
+	const std::string hlsl = lib.fragment(hash, glsl, B::HLSL).source;
+	REQUIRE(gen.textures.size() == 4);
+	for (int k = 0; k < 4; ++k)
+	{
+		const bool arr = (gen.textureArrayMask >> k) & 1u;
+		const std::string name = " heTexP" + std::to_string(k);
+		CHECK_MESSAGE(msl.find((arr ? "texture2d_array<float>" : "texture2d<float>") + name) != std::string::npos,
+		              "MSL slot ", k, "\n", msl);
+		CHECK_MESSAGE(hlsl.find((arr ? "Texture2DArray<float4>" : "Texture2D<float4>") + name) != std::string::npos,
+		              "HLSL slot ", k, "\n", hlsl);
+	}
+
+	// The same graph with four 2D textures: the reference slot set.
+	MaterialGraph ref;
+	{
+		const int out = ref.addNode(MatNodeType::Output);
+		int prev = -1;
+		for (int i = 0; i < 4; ++i)
+		{
+			const int t = ref.addNode(MatNodeType::TextureSample);
+			ref.findNode(t)->s = "Textures/T" + std::to_string(i) + ".hasset";
+			if (prev < 0) { prev = t; continue; }
+			const int add = ref.addNode(MatNodeType::Add);
+			CHECK(ref.connect(prev, 0, add, 0));
+			CHECK(ref.connect(t, 0, add, 1));
+			prev = add;
+		}
+		CHECK(ref.connect(prev, 0, out, HE::kMatOutputBaseColorPin));
+	}
+	const std::string refGlsl = HE::generateFragment(ref).glsl;
+	auto slots = [](const std::string& src, const std::string& tag) {
+		std::vector<int> v;
+		for (size_t at = src.find(tag); at != std::string::npos; at = src.find(tag, at + tag.size()))
+			v.push_back(std::atoi(src.c_str() + at + tag.size()));
+		std::sort(v.begin(), v.end());
+		v.erase(std::unique(v.begin(), v.end()), v.end());
+		return v;
+	};
+	for (const bool clustered : { false, true })
+	{
+		CAPTURE(clustered);
+		const uint64_t rh = std::hash<std::string>{}(refGlsl);
+		const std::string mRef = clustered ? lib.fragmentClustered(rh, refGlsl, B::Metal).source
+		                                   : lib.fragment(rh, refGlsl, B::Metal).source;
+		const std::string mArr = clustered ? lib.fragmentClustered(hash, glsl, B::Metal).source : msl;
+		for (const char* tag : { "[[sampler(", "[[texture(" })
+		{
+			CAPTURE(tag);
+			const std::vector<int> a = slots(mArr, tag), r = slots(mRef, tag);
+			REQUIRE(!r.empty());
+			CHECK(a == r);
+		}
+		CHECK(slots(mArr, "[[sampler(").size() <= 16);
 	}
 }
 #endif
@@ -2841,6 +3034,10 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 		REQUIRE(gen.vertexBody.find("pos.y") != std::string::npos);
 		cases.push_back({ "Wind Sway on WPO (custom vertex)", gen.glsl, gen.vertexBody });
 	}
+	// Texture arrays: the registry sweep above samples heTex0 (no file picked),
+	// so the sampler2DArray declarations only reach the HLSL/FXC/SPIR-V/GL-link
+	// sweeps through this graph.
+	cases.push_back({ "Texture arrays (3 arrays + 1 2D)", HE::generateFragment(makeTextureArrayGraph()).glsl, {} });
 	return cases;
 }
 

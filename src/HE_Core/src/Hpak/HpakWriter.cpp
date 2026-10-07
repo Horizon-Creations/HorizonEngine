@@ -718,6 +718,12 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     uint8_t srgb = 0;
     if (o + 1 <= tm->data.size()) { uint8_t f = 0; HAsset::Reader::readPOD(tm->data, o, f); }
     if (o + 1 <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, srgb);
+    // A texture ARRAY (Thema 158) is never cooked: buildTextureArray already baked
+    // its mips, and the rewrite below would drop the slice count. {} = the blob
+    // ships unchanged.
+    uint32_t layers = 1;
+    if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, layers);
+    if (layers > 1) return {};
 
     // Only cook plain single-level RGBA8 base textures (skip already-cooked,
     // sub-2px, or non-RGBA8/odd-sized payloads — nothing to gain / can't halve).

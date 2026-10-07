@@ -1,6 +1,7 @@
 #include "Backends/D3D12/D3D12Renderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -3185,14 +3186,25 @@ struct D3D12RendererImpl
     }
     // A Texture2D view over a texture uploaded by uploadTexture2D: its own format
     // (the _SRGB twin included) and its whole mip chain.
-    void srvForTexture(ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE h)
+    // asArray (Thema 158) = a Texture2DArray view over every slice, for a
+    // sampler2DArray heTexP slot.
+    void srvForTexture(ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE h, bool asArray = false)
     {
         const D3D12_RESOURCE_DESC rd = res->GetDesc();
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
         sv.Format                  = rd.Format;
-        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Texture2D.MipLevels     = rd.MipLevels;
+        if (asArray)
+        {
+            sv.ViewDimension                  = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            sv.Texture2DArray.MipLevels       = rd.MipLevels;
+            sv.Texture2DArray.ArraySize       = rd.DepthOrArraySize;
+        }
+        else
+        {
+            sv.ViewDimension       = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Texture2D.MipLevels = rd.MipLevels;
+        }
         device->CreateShaderResourceView(res, &sv, h);
     }
     // Node-graph project textures (MaterialAsset::graphTextureIds/Paths → heTexP0..3, the
@@ -3210,18 +3222,38 @@ struct D3D12RendererImpl
     // resolveTextureRef LOADS a loose asset synchronously, which can move every
     // ContentManager pointer the caller holds — callers snapshot the slot list first and
     // re-fetch the material afterwards.
+    //
+    // `array` = a sampler2DArray slot (HE::matGlslTextureArrayMask, Thema 158): every
+    // slice uploaded, cached under its own "#arr" key (the same asset can be 2D in one
+    // material and an array in another); view it with srvForTexture(.., true).
     ID3D12Resource* resolveGraphTexture(ID3D12GraphicsCommandList* cl, const HE::UUID& id,
-                                        const std::string& path, ContentManager* cm)
+                                        const std::string& path, ContentManager* cm,
+                                        bool array = false)
     {
-        const std::string key = graphTexKey(id, path);
+        std::string key = graphTexKey(id, path);
         if (key.empty() || !cm || !cl) return nullptr;
+        if (array) key += "#arr";
         if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
             return it->second.Get();
         ComPtr<ID3D12Resource> res;
-        uploadTexture2D(cl, cm->resolveTextureRef(id, path), res); // null stays null
+        uploadTexture2D(cl, cm->resolveTextureRef(id, path), res, array); // null stays null
         ID3D12Resource* raw = res.Get();
         m_graphTexCache.emplace(key, std::move(res));
         return raw;
+    }
+    // 1x1x1 white texture array: what an EMPTY sampler2DArray heTexP slot views (the
+    // white default GL/Vulkan/D3D11/Metal bind there too). Uploaded on first use.
+    ComPtr<ID3D12Resource> m_whiteArrayTex;
+    ID3D12Resource* whiteArrayTexture(ID3D12GraphicsCommandList* cl)
+    {
+        if (!m_whiteArrayTex && cl)
+        {
+            TextureAsset w;
+            w.width = w.height = 1; w.channels = 4;
+            w.data = { 255, 255, 255, 255 };
+            uploadTexture2D(cl, &w, m_whiteArrayTex, /*asArray=*/true);
+        }
+        return m_whiteArrayTex.Get();
     }
     ComPtr<ID3D12Resource>       m_matLightCB[k_frameCount];   uint8_t* m_matLightPtr[k_frameCount]{}; // HeLighting (sizeof(Lighting), 256-aligned)
     ComPtr<ID3D12Resource>       m_matObjRing[k_frameCount];   uint8_t* m_matObjPtr[k_frameCount]{};   // U ring (176 B/slot)
@@ -3636,11 +3668,18 @@ struct D3D12RendererImpl
     // texture (format + full mip chain from the asset), records the copies on `cl` and
     // parks the upload buffer in meshTexUploads until the GPU is past them. Also serves
     // the graph project textures, whose views live in the material ring instead.
+    //
+    // asArray (Thema 158): a texture ARRAY resource for a sampler2DArray slot — every
+    // slice of a layers > 1 asset (RGBA8, HE::buildTextureArray layout: slice-major,
+    // each slice with its chain, which IS D3D's subresource order, so the copy below
+    // walks it unchanged), or a plain 2D asset as one slice.
     bool uploadTexture2D(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
-                         ComPtr<ID3D12Resource>& outTex)
+                         ComPtr<ID3D12Resource>& outTex, bool asArray = false)
     {
         if (!cl || !tex) return false;
         if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return false;
+        const UINT layers = asArray ? std::max<UINT>(1, tex->layers) : 1;
+        if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return false; // RGBA8 only
 
         const bool srgb = tex->srgb;
         DXGI_FORMAT fmt; bool isBlock;
@@ -3665,7 +3704,7 @@ struct D3D12RendererImpl
         td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         td.Width            = static_cast<UINT64>(tex->width);
         td.Height           = static_cast<UINT>(tex->height);
-        td.DepthOrArraySize = 1;
+        td.DepthOrArraySize = static_cast<UINT16>(layers);
         td.MipLevels        = static_cast<UINT16>(mips);
         td.Format           = fmt;
         td.SampleDesc.Count = 1;
@@ -3675,16 +3714,18 @@ struct D3D12RendererImpl
             return false;
 
         // Per-subresource footprints (D3D-aligned dest row pitch) + total upload size.
-        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mips);
-        std::vector<UINT>   numRows(mips);
-        std::vector<UINT64> rowSizes(mips);
+        // Subresource = mip + slice * mips — every mip of slice 0, then slice 1 …
+        const UINT subs = mips * layers;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subs);
+        std::vector<UINT>   numRows(subs);
+        std::vector<UINT64> rowSizes(subs);
         UINT64 uploadSize = 0;
-        device->GetCopyableFootprints(&td, 0, mips, 0,
+        device->GetCopyableFootprints(&td, 0, subs, 0,
             footprints.data(), numRows.data(), rowSizes.data(), &uploadSize);
 
         // Guard the source payload holds every mip tightly (numRows × rowSize each).
         size_t need = 0;
-        for (UINT s = 0; s < mips; ++s) need += static_cast<size_t>(numRows[s]) * rowSizes[s];
+        for (UINT s = 0; s < subs; ++s) need += static_cast<size_t>(numRows[s]) * rowSizes[s];
         if (tex->data.size() < need) return false; // truncated
 
         void* mapped = nullptr;
@@ -3692,7 +3733,7 @@ struct D3D12RendererImpl
         if (!uploadBuf || !mapped) return false;
         // Copy each mip's tightly-packed source rows into the aligned upload layout.
         size_t srcOff = 0;
-        for (UINT s = 0; s < mips; ++s)
+        for (UINT s = 0; s < subs; ++s)
         {
             const UINT64 srcPitch = rowSizes[s];                       // tight source row bytes
             const UINT64 dstPitch = footprints[s].Footprint.RowPitch;  // aligned dest row bytes
@@ -3704,7 +3745,7 @@ struct D3D12RendererImpl
         }
         uploadBuf->Unmap(0, nullptr);
 
-        for (UINT s = 0; s < mips; ++s)
+        for (UINT s = 0; s < subs; ++s)
         {
             D3D12_TEXTURE_COPY_LOCATION src{};
             src.pResource       = uploadBuf.Get();
@@ -3796,11 +3837,13 @@ struct D3D12RendererImpl
         // Graph project textures own no scene-heap slot (their views live in the
         // per-frame material ring), so only the resource is retired.
         for (const HE::UUID& id : m_pendingTexInval)
-            if (auto it = m_graphTexCache.find(graphTexKey(id, {})); it != m_graphTexCache.end())
-            {
-                retire(std::move(it->second));
-                m_graphTexCache.erase(it);
-            }
+            // The texture-array upload of the same asset lives under "#arr" (Thema 158).
+            for (const std::string& key : { graphTexKey(id, {}), graphTexKey(id, {}) + "#arr" })
+                if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+                {
+                    retire(std::move(it->second));
+                    m_graphTexCache.erase(it);
+                }
         m_pendingTexInval.clear();
 
         for (const HE::UUID& id : m_pendingMeshInval)
@@ -9068,6 +9111,7 @@ void D3D12Renderer::Shutdown()
     m_impl->m_matSrvHeap.Reset();
     m_impl->m_matSrvStaging.Reset();
     m_impl->m_graphTexCache.clear(); // device is idle here (ComPtr release)
+    m_impl->m_whiteArrayTex.Reset();
     m_impl->m_pendingTexInval.clear();
     m_impl->m_matRootSig.Reset();
     m_impl->m_matShaderLib.clear();
@@ -9908,13 +9952,19 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         // load, and a load can move the material asset out from under a
                         // held pointer — which is also why `ma` below is fetched only
                         // AFTER this block.
+                        //
+                        // A sampler2DArray slot (Texture Array Sample, Thema 158) gets a
+                        // Texture2DArray view — over the white array when it is empty: the
+                        // template's null view is a Texture2D, the wrong dimension there.
                         ID3D12Resource* heTexP[HE::kMatMaxGraphTextures] = {};
+                        uint32_t heTexPArrays = 0;
                         {
                             HE::UUID    gIds[HE::kMatMaxGraphTextures]{};
                             std::string gPaths[HE::kMatMaxGraphTextures];
                             size_t nTex = 0;
                             if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
                             {
+                                heTexPArrays = HE::matGlslTextureArrayMask(ma0->customShaderFragGlsl);
                                 nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
                                     std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
                                 for (size_t i = 0; i < nTex; ++i)
@@ -9924,7 +9974,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                 }
                             }
                             for (size_t i = 0; i < nTex; ++i)
-                                heTexP[i] = p.resolveGraphTexture(cl, gIds[i], gPaths[i], m_contentManager);
+                                heTexP[i] = p.resolveGraphTexture(cl, gIds[i], gPaths[i], m_contentManager,
+                                                                  (heTexPArrays >> i) & 1u);
+                            for (int i = 0; i < HE::kMatMaxGraphTextures; ++i)
+                                if (((heTexPArrays >> i) & 1u) && !heTexP[i])
+                                    heTexP[i] = p.whiteArrayTexture(cl);
                         }
 
                         // Per-entity HeParams override wins over the material's shared params.
@@ -9943,7 +9997,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         if (heTex0) p.srvForTexture(heTex0, p.matSrvCpu(blk));
                         static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy block slots 1..4 (t4..t7)");
                         for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
-                            if (heTexP[k]) p.srvForTexture(heTexP[k], p.matSrvCpu(blk + 1 + static_cast<UINT>(k)));
+                            if (heTexP[k]) p.srvForTexture(heTexP[k], p.matSrvCpu(blk + 1 + static_cast<UINT>(k)),
+                                                           (heTexPArrays >> k) & 1u);
 
                         // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };

@@ -240,7 +240,10 @@ private:
 	// the material was found (outTex may still be 0 = material has no texture);
 	// false when the UUID is null or the material is not loaded yet.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex);
-	unsigned int ResolveGraphTexture(const HE::UUID& id, const std::string& path);
+	// `array` = a sampler2DArray slot (Thema 158) → GL_TEXTURE_2D_ARRAY, white
+	// array when missing. Bind the result with BindGraphTexture.
+	unsigned int ResolveGraphTexture(const HE::UUID& id, const std::string& path, bool array = false);
+	void         BindGraphTexture(unsigned int tex);
 	// A UI quad's image: same asset, uploaded without the sRGB decode, because
 	// the UI pass writes sRGB numbers straight to the target (Thema 107).
 	unsigned int ResolveUITexture(const HE::UUID& id, const std::string& path);
@@ -615,6 +618,8 @@ private:
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
+	std::unordered_set<unsigned int> m_glArrayTex;   // graph textures stored as GL_TEXTURE_2D_ARRAY
+	unsigned int m_whiteArrayTex = 0;                // 1×1×1 white array (missing array slot)
 	std::unordered_map<std::string, unsigned int> m_uiTexCache; // UI quad images, same keys, never sRGB
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 	std::vector<HE::UUID>                       m_pendingMeshInvalidations;

@@ -29,6 +29,7 @@
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/TextureArrayBuild.h>
 #include <Types/UUID.h>
 
 #include <algorithm>
@@ -161,18 +162,85 @@ std::string assetName(const Layer& L, int map)
 {
     return std::string("T_Landscape_") + L.name + "_" + kMapNames[map];
 }
+
+// The three texture ARRAYS (Thema 158, Schritt 3): one per map kind, slice k =
+// kLayers[k], so a Texture Array Sample node reads all five layers through one
+// heTexP slot. Assembled from the per-layer .hasset files ON DISK — the
+// placeholders this tool just wrote, or real textures imported over the same
+// paths later — with a baked mip chain, so every backend samples the same
+// levels. UUID index 15 + map (after the 15 per-layer textures).
+int writeArrays(const std::string& outDir)
+{
+    const int layerCount = static_cast<int>(std::size(kLayers));
+    int ok = 0;
+    for (int map = 0; map < MapCount; ++map)
+    {
+        const std::string name = std::string("T_Landscape_") + kMapNames[map] + "_Array";
+        ContentManager src(outDir);
+        // Load every slice first, THEN take pointers: a load may move the ones
+        // already handed out.
+        std::vector<decltype(src.loadAsset(std::string()))> ids;
+        for (const Layer& L : kLayers)
+            ids.push_back(src.loadAsset(assetName(L, map) + ".hasset"));
+        std::vector<const TextureAsset*> slices;
+        for (const auto& id : ids)
+            slices.push_back(src.getTexture(id));
+
+        TextureAsset a;
+        std::string err;
+        if (!HE::buildTextureArray(slices, a, /*bakeMips=*/true, &err))
+        {
+            std::fprintf(stderr, "  %s: %s\n", name.c_str(), err.c_str());
+            continue;
+        }
+        a.type = HE::AssetType::Texture;
+        a.name = name;
+        a.path = name + ".hasset";
+        a.id   = HE::UUID{ kTexBaseHi + static_cast<uint64_t>(layerCount * MapCount + map),
+                           0x0000000000000001ULL };
+        ContentManager cm(outDir);
+        if (!cm.saveAsset(a))
+        {
+            std::fprintf(stderr, "  FAILED to write %s.hasset\n", name.c_str());
+            continue;
+        }
+        ContentManager check(outDir);
+        const TextureAsset* t = check.getTexture(check.loadAsset(a.path));
+        if (!t || t->id != a.id || t->layers != static_cast<uint32_t>(layerCount) ||
+            t->mipLevels != a.mipLevels || t->srgb != a.srgb || t->data != a.data ||
+            !HE::textureArrayPayloadValid(*t))
+        {
+            std::fprintf(stderr, "  %s.hasset does NOT read back as written\n", name.c_str());
+            continue;
+        }
+        std::printf("  %-30s %ux%u x%u slices, %u mips %s\n", name.c_str(), a.width, a.height,
+                    a.layers, a.mipLevels, a.srgb ? "sRGB" : "linear");
+        ++ok;
+    }
+    return ok;
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir>\n");
+        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--arrays-only]\n"
+                             "  --arrays-only  only (re)assemble the three _Array textures from the\n"
+                             "                 per-layer files already in <output-dir>\n");
         return 2;
     }
     const std::string outDir = argv[1];
+    const bool arraysOnly = argc > 2 && std::string(argv[2]) == "--arrays-only";
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
+
+    if (arraysOnly)
+    {
+        const int arrays = writeArrays(outDir);
+        std::printf("landscape_tex_gen: wrote %d/%d texture arrays to %s\n", arrays, MapCount, outDir.c_str());
+        return arrays == MapCount ? 0 : 1;
+    }
 
     ContentManager cm(outDir);
 
@@ -218,5 +286,7 @@ int main(int argc, char** argv)
         }
 
     std::printf("landscape_tex_gen: wrote %d/%d textures to %s\n", ok, total, outDir.c_str());
-    return ok == total ? 0 : 1;
+    const int arrays = writeArrays(outDir);
+    std::printf("landscape_tex_gen: wrote %d/%d texture arrays to %s\n", arrays, MapCount, outDir.c_str());
+    return ok == total && arrays == MapCount ? 0 : 1;
 }

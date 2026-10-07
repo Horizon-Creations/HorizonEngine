@@ -582,6 +582,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::NormalMapSample:
+		case MatNodeType::NormalMapArraySample:
 		{
 			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
 			ImGui::DragFloat("Strength", &n.p[0], 0.05f, 0.0f, 4.0f);
@@ -597,6 +598,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			break;
 		}
 		case MatNodeType::TextureSample:
+		case MatNodeType::TextureArraySample:
 		{
 			// A picked texture shows its filename + a clear button; the drop target
 			// itself is the whole node body (handled in the node loop). Empty = the
@@ -737,6 +739,14 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 	return committed;
 }
 
+// Nodes whose `s` is a picked texture path: the filename row, the Content-Browser
+// drop target and the "Set Texture" menu belong to all four.
+bool isTextureNode(MatNodeType t)
+{
+	return t == MatNodeType::TextureSample || t == MatNodeType::NormalMapSample
+	    || t == MatNodeType::TextureArraySample || t == MatNodeType::NormalMapArraySample;
+}
+
 // Vertical space (graph units) the node reserves for its inline VALUE widgets. The
 // editable NAME row (for named nodes) is drawn in the body too now (the header carries
 // the node TYPE name via Model.title), so it is added on top of the value height.
@@ -744,10 +754,8 @@ float nodeValueHeight(const MatGraphNode& n)
 {
 	const MatNodeType type = n.type;
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
-	if (d.paramCount == 0 && type != MatNodeType::TextureSample &&
-	    type != MatNodeType::NormalMapSample) return 0.0f;
-	if (type == MatNodeType::TextureSample ||
-	    type == MatNodeType::NormalMapSample) return 44.0f;       // filename + hint rows
+	if (d.paramCount == 0 && !isTextureNode(type)) return 0.0f;
+	if (isTextureNode(type)) return 44.0f;                         // filename + hint rows       // filename + hint rows
 	if (type == MatNodeType::ConstVec4 || type == MatNodeType::ParamVec4) return 30.0f; // vec4 drag row
 	if (type == MatNodeType::UV) return 52.0f;                    // tiling + offset rows
 	if (type == MatNodeType::LandscapeLayerBlend)                 // one row per layer + "+ Layer"
@@ -1026,7 +1034,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		// Texture Sample / Normal Map: the whole body is a Content-Browser drop target.
 		// Submit it FIRST (behind, AllowOverlap) so the label + Clear button drawn on top
 		// still take their clicks.
-		if (n->type == MatNodeType::TextureSample || n->type == MatNodeType::NormalMapSample)
+		if (isTextureNode(n->type))
 		{
 			ImGui::SetCursorScreenPos(bodyMin);
 			ImGui::SetNextItemAllowOverlap();
@@ -1060,7 +1068,8 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			if (ImGui::IsItemDeactivatedAfterEdit()) paramEdit = true; // rename → regenerate
 		}
 		// Inline VALUE widgets (name drawn above, so drawName=false).
-		if (HE::matNodeDesc(n->type).paramCount > 0 || n->type == MatNodeType::TextureSample)
+		if (HE::matNodeDesc(n->type).paramCount > 0 || n->type == MatNodeType::TextureSample ||
+		    n->type == MatNodeType::TextureArraySample)
 			if (nodeParamWidgets(*n, zoom, /*drawName=*/false, &st.graph)) paramEdit = true;
 		popWidgetScale();
 	};
@@ -1210,7 +1219,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		if (!n) return;
 		const bool deletable = n->type != MatNodeType::Output;
 		// Pick a texture from a dropdown (no path typing; drag-drop still works).
-		if (n->type == MatNodeType::TextureSample || n->type == MatNodeType::NormalMapSample)
+		if (isTextureNode(n->type))
 		{
 			// A submenu header cannot be asked about after its body has begun —
 			// by then the last item is inside the popup, not the header. So the

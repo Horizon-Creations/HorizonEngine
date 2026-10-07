@@ -6253,6 +6253,119 @@ void EditorApplication::dumpFrameHeadless()
 			ltc.weightRes);
 	}
 
+	// ── Texture-array witness (HE_DUMP_TEXARRAY=1, Thema 158 Schritt 3) ──────
+	// A flat 100 m landscape at y=300 with an UNLIT graph material that reads the
+	// three engine texture arrays (T_Landscape_{Albedo,Normal,Mask}_Array, five
+	// slices each) plus one plain 2D texture — all four heTexP slots live, three
+	// of them sampler2DArray. Five stripes across U = slices 0..4 (Grass, Dirt,
+	// Rock, Snow, WetGround); four bands across V = Albedo array / Normal array /
+	// Mask array / the 2D Rock albedo. Unlit, so the frame IS the sampled texels
+	// and no lighting difference between backends can fake or hide a slice.
+	// HE_DUMP_TEXARRAY=slice2 is the negative control: every stripe reads slice 2
+	// (Rock), so only the stripes that were NOT Rock may change.
+	if (const char* ta = std::getenv("HE_DUMP_TEXARRAY"); ta && *ta && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const bool fixedSlice = std::string_view(ta) == "slice2";
+
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		g.findNode(out)->p[0] = 0.0f; // unlit
+		const int raw = g.addNode(HE::MatNodeType::UV);           // 0..1 over the terrain
+		const int uvT = g.addNode(HE::MatNodeType::UV);           // the texture's tiling
+		g.findNode(uvT)->p[0] = g.findNode(uvT)->p[1] = 10.0f;
+		const int split = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(raw, 0, split, 0);
+		// slice = u * 5 - 0.5: rounded to the nearest layer by the node, that is
+		// floor(u * 5) — five equal stripes, one per slice.
+		int slice = -1;
+		if (fixedSlice)
+		{
+			slice = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(slice)->p[0] = 2.0f;
+		}
+		else
+		{
+			const int five = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(five)->p[0] = 5.0f;
+			const int half = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(half)->p[0] = 0.5f;
+			const int mul = g.addNode(HE::MatNodeType::Multiply);
+			g.connect(split, 0, mul, 0);
+			g.connect(five, 0, mul, 1);
+			slice = g.addNode(HE::MatNodeType::Subtract);
+			g.connect(mul, 0, slice, 0);
+			g.connect(half, 0, slice, 1);
+		}
+		const char* kArrays[3] = { "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset",
+		                           "Engine/Textures/Landscape/T_Landscape_Normal_Array.hasset",
+		                           "Engine/Textures/Landscape/T_Landscape_Mask_Array.hasset" };
+		int band[4];
+		for (int i = 0; i < 3; ++i)
+		{
+			band[i] = g.addNode(HE::MatNodeType::TextureArraySample);
+			g.findNode(band[i])->s = kArrays[i];
+			g.connect(uvT, 0, band[i], 0);
+			g.connect(slice, 0, band[i], 1);
+		}
+		band[3] = g.addNode(HE::MatNodeType::TextureSample);
+		g.findNode(band[3])->s = "Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset";
+		g.connect(uvT, 0, band[3], 0);
+		// Normal Map Array on the Normal pin: compiled and bound on every backend
+		// even though an unlit frame does not show it.
+		const int nrm = g.addNode(HE::MatNodeType::NormalMapArraySample);
+		g.findNode(nrm)->s = kArrays[1];
+		g.connect(uvT, 0, nrm, 0);
+		g.connect(slice, 0, nrm, 1);
+		g.connect(nrm, 0, out, HE::kMatOutputNormalPin);
+		// Bands across V: v < 0.25 → Albedo, < 0.5 → Normal, < 0.75 → Mask, else 2D.
+		int pick = band[3];
+		for (int i = 2; i >= 0; --i)
+		{
+			const int edge = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(edge)->p[0] = 0.25f * static_cast<float>(i + 1);
+			const int less = g.addNode(HE::MatNodeType::Less);
+			g.connect(split, 1, less, 0);
+			g.connect(edge, 0, less, 1);
+			const int sel = g.addNode(HE::MatNodeType::If);
+			g.connect(less, 0, sel, 0);
+			g.connect(band[i], 0, sel, 1);
+			g.connect(pick, 0, sel, 2);
+			pick = sel;
+		}
+		g.connect(pick, 0, out, HE::kMatOutputBaseColorPin);
+
+		MaterialAsset am;
+		am.type = HE::AssetType::Material;
+		am.name = "TextureArrayWitness";
+		am.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		am.customShaderFragGlsl = gen.glsl;
+		am.customShaderGBufGlsl = gen.glslGBuffer;
+		am.customShaderVertGlsl = gen.vertexBody;
+		am.blendMode            = gen.blendMode;
+		am.domain               = gen.domain;
+		am.graphTexturePaths    = gen.textures;
+		const HE::UUID amId = contentManager().registerMaterial(std::move(am));
+
+		auto land = m_editorWorld->createEntity("TextureArrayLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution = 33;
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXARRAY witness landscape added "
+			"(%s, %zu graph textures, array mask %u)", fixedSlice ? "slice 2 everywhere" : "slices 0..4",
+			gen.textures.size(), gen.textureArrayMask);
+	}
+
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
 	// 240 m landscape at y=300; "after" grows one TerrainGenerate::mountain in a
 	// circle around its centre. The before/after pair is the oracle: the frames

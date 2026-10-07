@@ -590,6 +590,15 @@ struct TextureAsset : public RuntimeAsset
 	uint32_t             mipLevels = 1;                       // levels stored in `data`
 	TextureFormat        format    = TextureFormat::RGBA8;
 	bool                 srgb      = false;                   // sample as sRGB (color) vs linear (data)
+
+	// Texture ARRAY slices (Thema 158; a Texture Array Sample node reads them as one
+	// sampler2DArray). 1 = an ordinary 2D texture. The slices are stored one after
+	// the other, EACH with its own full mip chain (slice 0 levels 0..n-1, then
+	// slice 1 …) — D3D's subresource order, and slice 0 stays the leading bytes,
+	// so a consumer that knows nothing of arrays reads slice 0 as a 2D texture.
+	// RGBA8 only for now (HE::buildTextureArray). Written to the TXMI tail only
+	// when > 1, so every 2D asset keeps its exact bytes.
+	uint32_t             layers    = 1;
 };
 
 struct ShaderAsset : public RuntimeAsset

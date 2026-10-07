@@ -279,7 +279,10 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			if (o + sizeof(uint32_t) <= c->data.size()) HAsset::Reader::readPOD(c->data,o,a.mipLevels);
 			if (o + 1 <= c->data.size()) { uint8_t f=0; HAsset::Reader::readPOD(c->data,o,f); a.format = static_cast<TextureFormat>(f); }
 			if (o + 1 <= c->data.size()) { uint8_t s=0; HAsset::Reader::readPOD(c->data,o,s); a.srgb = s != 0; }
+			// Array slices (Thema 158) — only written when > 1.
+			if (o + sizeof(uint32_t) <= c->data.size()) HAsset::Reader::readPOD(c->data,o,a.layers);
 			if (a.mipLevels == 0) a.mipLevels = 1;
+			if (a.layers == 0) a.layers = 1;
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PIXL)) a.data = c->data;
 		handle = m_textureAssets.insert(std::move(a)); break;
@@ -1584,6 +1587,8 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		  HAsset::Writer::appendPOD(b, a.mipLevels);
 		  HAsset::Writer::appendPOD(b, static_cast<uint8_t>(a.format));
 		  HAsset::Writer::appendPOD(b, static_cast<uint8_t>(a.srgb ? 1 : 0));
+		  // Array slice count only for arrays: a 2D texture keeps its exact old bytes.
+		  if (a.layers > 1) HAsset::Writer::appendPOD(b, a.layers);
 		  w.addChunk(HAsset::CHUNK_TXMI,b.data(),b.size()); }
 		w.addChunk(HAsset::CHUNK_PIXL, a.data.data(), a.data.size());
 		break;
