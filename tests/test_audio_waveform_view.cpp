@@ -349,6 +349,15 @@ TEST_CASE("audio waveform: a drag across the lanes selects the frames under it")
 	CHECK(v.selBegin == 65'000);
 	CHECK(v.selEnd == 70'000);
 
+	// Pressing an edge and letting go in place changes nothing — and says so,
+	// or a playing selection would restart on every such press.
+	mouseAt(650.0f, lanesY()); frame(t.clip, p, v);
+	mouseButton(true);  frame(t.clip, p, v);
+	mouseButton(false); r = frame(t.clip, p, v);
+	CHECK_FALSE(r.selectionChanged);
+	CHECK(v.selBegin == 65'000);
+	CHECK(v.selEnd == 70'000);
+
 	// Grab the end edge and drag it out: the start stays put.
 	mouseAt(700.0f, lanesY()); frame(t.clip, p, v);
 	mouseButton(true);  frame(t.clip, p, v);

@@ -445,6 +445,8 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 		view.pressX    = mouse.x;
 		view.dragMoved = false;
 		view.drag      = View::Drag::Select;
+		view.pressSelBegin = view.selBegin;
+		view.pressSelEnd   = view.selEnd;
 		const float xb = pxAtFrame(view, double(view.selBegin));
 		const float xe = pxAtFrame(view, double(view.selEnd));
 		if (view.hasSelection() && std::fabs(mpx - xe) <= kEdgeGrabPx)
@@ -515,7 +517,13 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 			else
 			{
 				if (view.dragMoved)
-					out.selectionChanged = true;   // empty after the drag = cleared, same thing
+				{
+					// Only a selection that is really different counts: an edge
+					// pressed and let go in place must not restart a playing
+					// selection. Empty after the drag = cleared, also a change.
+					out.selectionChanged = view.selBegin != view.pressSelBegin ||
+					                       view.selEnd   != view.pressSelEnd;
+				}
 				else
 				{
 					// A click: the playhead goes there and the selection goes away.

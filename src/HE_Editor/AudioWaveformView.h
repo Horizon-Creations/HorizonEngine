@@ -116,6 +116,7 @@ namespace HE::Ed::AudioWave
 		float  pressX       = 0.0f;   // pointer x at the press, to tell click from drag
 		bool   dragMoved    = false;  // the press has become a drag (or started as one)
 		double overviewGrab = 0.0;    // frames between the view's start and the grab point
+		size_t pressSelBegin = 0, pressSelEnd = 0;   // the selection at the press, to tell a real change
 
 		bool   hasSelection() const { return selEnd > selBegin; }
 		size_t selectionLength() const { return hasSelection() ? selEnd - selBegin : 0; }
