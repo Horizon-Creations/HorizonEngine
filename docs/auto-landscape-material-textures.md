@@ -31,6 +31,8 @@ der Nutzer an den Eingang des Layers hängt (typisch ein *Texture Sample*):
   (`src/HE_Core/include/MaterialGraph/MaterialGraph.h:162`). Die Annahme
   „vermutlich nur zwei Layer“ aus dem Thema stimmt also nicht: **heute sind es 4**.
   Mehr bräuchte eine zweite Weightmap und damit einen weiteren Sampler (Schritt 2).
+  **Nachtrag Schritt 2:** Ein weiterer Sampler wurde nicht nötig. Seit Schritt 2 gibt es
+  8 Layer in derselben Textur, siehe §7.
 - **Unbemaltes Terrain:** Es bekommt die 1×1-Weightmap (255,0,0,0) und zeigt
   Layer 0 (`src/HE_Core/include/ContentManager/DefaultAssets.h:46-50`).
   Das Default-Terrain-Material ist untexturiert grau (`DefaultAssets.h:33-36`).
@@ -302,3 +304,142 @@ Abhilfe, offen für einen späteren Schritt:
 - die Mip-Kette vorab backen, im Generator bzw. Pack-Schritt oder im Importer
   (GL nimmt eine vorgebackene Kette schon an, `OpenGLRenderer.cpp:7849`)
 - oder auf D3D und Vulkan beim Hochladen Mips erzeugen
+
+## 7. Schritt 2: acht Layer statt vier, ohne neuen Sampler
+
+Stand: Zweig `claude/auto-landschaftsmaterial-…`, Commit `36a27cd7` und folgende.
+
+### 7.1 Wo die Grenze lag
+
+| Stelle | vorher | jetzt |
+|---|---|---|
+| `kMatMaxLandscapeLayers` (`MaterialGraph.h`) | 4 | **8** |
+| Weightmap-Daten (`TerrainComponent`) | `layerWeights`, RGBA8, Layer 0..3 | dazu `layerWeights2`, RGBA8, Layer 4..7 (leer = alles 0) |
+| Paint (`TerrainPaint::paint`) | `layer > 3` → false, normiert über 4 Kanäle | 0..7, normiert über beide Seiten |
+| Szenenformat | `weightRes`, `layerWeightsB64` | unverändert, dazu `layerWeights2B64` (nur wenn benutzt) |
+| GPU-Textur (`TerrainSystem`) | `weightRes × weightRes` | gleich, **2·weightRes × weightRes**, sobald Layer 4..7 bemalt sind |
+| Shader-Binding | `heLandscapeWeights`, Binding 14 / t14+s0 / Metal 13 / GL-Unit 13 | **unverändert**, kein neues Binding |
+| MCP `terrain_paint` / `terrain_info` | Layer 0..3, Mix mit 4 Werten | 0..7, `mixAtCenter`/`layerAverage` mit 8 Werten |
+| Material-Editor | „4 layers max“ | 8 |
+| Neuer Blend-Knoten | 2 Layer („Layer 1/2“) | unverändert. Daher kam die Annahme „zwei Layer“. |
+
+### 7.2 Warum ein Atlas in derselben Textur
+
+Das Sampler-Budget ist auf D3D (SM 5.0) und Metal voll (§2.1). Eine zweite Weightmap
+als eigene Textur hätte einen 17. Sampler oder ein Umschichten der Preamble-Pins in allen
+fünf Backends gebraucht. Dazu ein neues Binding im Vulkan-Material-Layout und in der
+D3D12-Root-Signature, also genau die beiden bekannten Fallen (Binding 14 fehlt → Vulkan
+stürzt ab, Null-View bei t14 auf D3D12). Ein `sampler2DArray` hätte den Typ des
+bestehenden Bindings auf allen Backends geändert, auch für jedes Vier-Layer-Material.
+
+Darum liegen Layer 4..7 als **rechte Hälfte derselben Textur**
+(`TerrainPaint::buildWeightTexture`): Zeile z = [Seite 0, Zeile z | Seite 1, Zeile z].
+Der Codegen jedes Landscape Layer Blend liest die Seitenzahl am Seitenverhältnis ab:
+
+- **quadratisch** (jedes Terrain ohne Layer 4..7 und die 1×1-Default-Map): exakt das
+  alte `texture(heLandscapeWeights, vUV)`. Die Layer 4..7 sind 0.
+- **2:1:** jede Hälfte bei Mip 0, U auf einen halben Texel innerhalb der Hälfte
+  geklemmt. Sonst blutet beim bilinearen Filtern am Rand und in jeder Laufzeit-Mip
+  (GL und Metal erzeugen eine) die andere Seite hinein.
+
+Beide Samples werden vorab genommen und nur selektiert. So steht kein Sample mit
+impliziter LOD im Kontrollfluss. Auch ein Blend mit ≤ 4 Layern liest seitenbewusst, sonst
+würde er auf einer 2:1-Map beide Hälften verschmieren.
+
+**Vertrag:** Eine Landscape-Weightmap ist immer quadratisch oder genau 2:1. Andere Formen
+kommen in der Engine nicht vor (`weightRes × weightRes`). Eine von Hand gebundene 2×1-Map
+würde als zwei Seiten gelesen. Der alte D3D11-WARP-Test hat deshalb jetzt eine 2×2-Map.
+
+**Zahl 8 statt 5:** Zwei RGBA-Seiten ergeben 8 Kanäle. Mehr Sampler kostet das nicht. Die
+5 Schichten des Auto-Materials (Gras, Erde, Stein, Schnee, Pfütze) passen, und es bleiben
+3 Kanäle für von Hand gemalte Extras. Hang, Schnee und Pfützen sind ohnehin prozedural
+(§2.2) und brauchen keinen Kanal.
+
+**Nicht mitgewachsen, mit Absicht:** Die GI-Näherung behält 4 Layer-Farben
+(`kMatApproxLayerColors`): das MTRL-Tail, `MaterialAsset::approxLayerColor[4]` und
+`GiLandscape::layerColor[4]` in den GL/Metal-Kernels. Ein GI-Treffer gewichtet die Layer
+0..3 nach ihrem Anteil am Paint, die Layer 4..7 gehen nur über die flache Mittelung
+`approxBaseColor` ein. Wer das ändern will, muss das Asset-Format versionieren und die
+GPU-Structs anfassen.
+
+**Texturen (heTexP0..3) sind nicht Teil dieses Schritts.** Fünf Schichten × Albedo/Normal/
+Maske brauchen Textur-Arrays (§2.2 Variante D). Die Queen hat dafür einen eigenen Schritt
+3 eingeplant.
+
+### 7.3 Rückwärtskompatibilität
+
+- Eine Szene ohne `layerWeights2B64` lädt ohne zweite Seite. Upload, Shader-Pfad und
+  Bild sind dann identisch zu vorher.
+- Ein Terrain, das nur Layer 0..3 benutzt, schreibt keinen neuen Schlüssel. Ältere
+  Builds lesen die Szene also weiter.
+- Eine zweite Seite mit falscher Größe oder ohne erste Seite wird beim Laden verworfen.
+- Gespeicherte Materialien regeneriert der Editor beim Laden aus dem Graph
+  (`ContentManager::regenerateMaterialFromGraph`). Gepackte Builds behalten ihre
+  vorkompilierten Blobs und passen weiter zu ihren eigenen (quadratischen) Maps.
+
+### 7.4 Nachweis
+
+**Tests (he_tests, Release, C:/hw158):**
+
+- Paint über die Seitengrenze (Layer 3/4/5 = Index 2..4 und Index 5..7, Summe 255 über
+  beide Seiten).
+- Leere zweite Seite = Vier-Layer-Arithmetik, byte-gleich.
+- Upload-Layout 1:1 / 2:1.
+- Altes Szenenformat bleibt und lädt unverändert. Round-Trip, kaputte zweite Seite.
+- `TerrainSystem` lädt 2:1 erst ab Layer 4+ hoch, unter derselben Textur-UUID.
+- MCP Layer 5 + Undo.
+- Codegen-Form.
+- Cross-Compile mit 5 und 8 Layern für MSL, GLSL 4.10/ES 3.00/4.30, HLSL, SPIR-V.
+- Register-Regel: weiterhin genau ein lebender Sampler auf s0, keine neuen t/s-Register.
+- FXC + PSO gegen die volle D3D12-Material-Root-Signature mit 8 Layern (WARP).
+- **D3D11-WARP-Pixeltest:**
+  - 2:1-Map: links Layer 1, rechts Layer 6, in der Mitte die normierte Mischung.
+  - Quadratische Map: Layer 0..3 wie vorher.
+  - 3-Layer-Material auf einer 2:1-Map liest nur die linke Seite.
+  - t14 leer → Layer 0.
+
+  **Negativkontrolle:** Mit abgeschalteter Seitenerkennung schlagen genau die vier
+  erwarteten Prüfungen fehl.
+- Volle Suite: 4173/4175. Die 2 Fehler sind die bekannten Zwischenablage-Fälle in
+  `test_inspector_ui` (OpenClipboard ist in Agent-Sitzungen verweigert).
+
+**Hardware (NN-WS03, RTX 4070), `scripts/landscape-layers-repro/cap158.ps1` + `ana158.py`:**
+
+- Altes Terrain (`HE_DUMP_LANDSCAPELAYERS=1`, 3 Layer, quadratische Map), merge-base
+  `9a1cc950` gegen diesen Zweig: **md5-gleiche Frames** auf OpenGL und D3D11, lit und
+  unlit. Der Rauschboden zweier Baseline-Läufe ist ebenfalls 0.
+- Acht Layer (`HE_DUMP_LANDSCAPELAYERS=8`, Map 256×128) auf diesem Zweig: OpenGL und
+  D3D11 zeigen alle sieben Scheiben. Magenta (4), Weiß (6) und Orange (7) kommen von der
+  zweiten Seite.
+- D3D12 und Vulkan zeigen auf diesem Zweig auch beim alten Drei-Layer-Terrain nur Layer
+  0. Das liegt an der Basis: PR #95 (Vulkan-Binding 14 im Material-Layout) und PR #102
+  (D3D12-Null-View bei t14) sind auf `origin/main` gemergt, aber noch nicht in diesem
+  Zweig. Nachweis auf allen vier Backends deshalb in einem Scratch-Baum
+  `git merge-tree origin/main HEAD` (C:/hw158m), siehe 7.5.
+- `HE_DUMP_VIEWMODE=unlit` wirkt auf D3D11 nicht (Frames md5-gleich mit lit).
+  Backend-Vergleiche deshalb im lit-View.
+- **Metal:** keine Hardware auf diesem Gerät. Nachweis nur über den MSL-Cross-Compile im
+  Test. Es kommt kein Sampler dazu, also bleibt das 16er-Budget unverändert.
+
+### 7.5 Vier Backends auf origin/main + diesem Zweig
+
+Scratch-Baum C:/hw158m aus `git merge-tree --write-tree origin/main HEAD`. origin/main
+stand dabei auf `6866923d` (mit #95 und #102). Der Merge hat genau einen Konflikt, in
+`tests/test_material_graph.cpp`: der Metal-Sampler-Test von main und der neue
+Cross-Compile-Test stehen an derselben Stelle. Lösung: **beide behalten**, sie sind
+unabhängig. Die Queen trifft beim Mergen auf denselben Konflikt.
+
+| Witness (lit, top-down) | OpenGL | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|---|
+| 8 Layer, Map 256×128: alle 7 Scheiben sichtbar | ja | ja | ja | ja |
+| mean\|Δ\| zu OpenGL, 8 Layer | – | 0,000 | 0,000 | 0,000 |
+| mean\|Δ\| zu OpenGL, 3 Layer (altes Terrain) | – | 0,001 | 0,001 | 0,001 |
+
+- D3D11, D3D12 und Vulkan liefern **md5-gleiche** Frames. OpenGL weicht in Einzelpixeln
+  ab (Anteil > 8: 0,000 %).
+- Vulkan-Validation: keine Binding-14-Meldung mehr. Die eine gezählte Zeile ist die
+  Info „validation layer ENABLED“.
+- Toleranz für den Bildvergleich in Schritt 5: lit, mean|Δ| ≤ 1,0 und ≤ 0,5 % Pixel
+  mit |Δ| > 8. Dieser Witness liegt um Größenordnungen darunter.
+- Gezielte Tests im Scratch-Baum: 172/172 (Landscape, Terrain, Metal-Sampler-Vertrag
+  von main, Vulkan-Layout, FXC/PSO).
