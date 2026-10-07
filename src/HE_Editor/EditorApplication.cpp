@@ -6250,7 +6250,10 @@ void EditorApplication::dumpFrameHeadless()
 
 		auto land = m_editorWorld->createEntity("LayerLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 100.0f;
@@ -6287,7 +6290,10 @@ void EditorApplication::dumpFrameHeadless()
 		auto& reg = m_editorWorld->registry();
 		auto land = m_editorWorld->createEntity("MountainLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 240.0f;
