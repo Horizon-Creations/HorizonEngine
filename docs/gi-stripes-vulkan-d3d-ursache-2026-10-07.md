@@ -163,6 +163,14 @@ Mögliche Fixes für A, jeweils pro Backend gleich:
 Fix für B: den Ambient-Boden im GI-Zweig von `scene.frag`/D3D11/D3D12 nachziehen, wie bei GL/Metal.
 Das ändert nur GI an.
 
+**Entscheidung der Königin (07.10.2026, Anfrage 17):**
+
+- A kommt auf **allen fünf** Backends: kamerarelative Position im G-Buffer oder RGBA32F.
+- B kommt nur auf Vulkan/D3D.
+- Das Kriterium „Metal/OpenGL unverändert" gilt am Referenzpunkt nahe dem Ursprung (y = 0).
+- **Für das Review:** Nach Fix A sehen GL und Metal bei GI an weit weg vom Ursprung (ab ~100 m)
+  absichtlich anders aus, nämlich ohne die falschen Bänder. Das ist die Korrektur, keine Regression.
+
 Ungeprüft:
 
 - Metal (kein Mac)
