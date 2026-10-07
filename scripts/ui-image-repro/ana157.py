@@ -12,7 +12,8 @@ the plain tile 0 as a control that the widget is drawn at all, and a verdict:
   white    - all four quadrants within 12 of (255,255,255): the tint, no texture
   missing  - tile 12 is the background (tile not drawn at all)
   other    - anything else (look at the image)
-Also counts '[ERROR]' and 'Validation' lines in <tag>_<backend>.log.
+Also counts '[ERROR]' and '[ WARN]' lines in <tag>_<backend>.log (where the Vulkan
+validation layer's messages land) and prints the log's session summary.
 
 usage: python ana157.py <dir> <tag> [backends...]
 Exit code = number of backends whose verdict is not 'picture'.
@@ -65,14 +66,20 @@ def main(argv):
         elif all(close(q[k], (255, 255, 255)) for k in q):    verdict = 'white'
         elif all(max(q[k]) <= 12 for k in q):                 verdict = 'missing'
         else:                                                 verdict = 'other'
-        errs = val = 0
+        # The Vulkan debug callback logs layer messages as [ WARN] / [ERROR], so
+        # those two levels are what to count (the 1.4.x layers drop the VUID).
+        # A fresh APPDATA always adds one WARN: "No config file ... using defaults".
+        errs = warns = 0
+        summary = ''
         lp = os.path.join(d, f'{tag}_{rhi}.log')
         if os.path.exists(lp):
             for line in open(lp, encoding='utf-8', errors='replace'):
                 if '[ERROR]' in line: errs += 1
-                if 'Validation' in line or 'VUID' in line: val += 1
+                if '[ WARN]' in line and 'No config file' not in line: warns += 1
+                if 'Session summary:' in line: summary = line.split('Session summary:')[1].strip()
         print(f'{rhi:7s} {w}x{h}  tile0={t0}  TL={q["TL"]} TR={q["TR"]} BL={q["BL"]} BR={q["BR"]}'
-              f'  -> {verdict}   log: {errs} [ERROR], {val} validation')
+              f'  -> {verdict}   log: {errs} [ERROR], {warns} [ WARN] besides the config one'
+              + (f'  ({summary})' if summary else ''))
         if verdict != 'picture': bad += 1
     return bad
 

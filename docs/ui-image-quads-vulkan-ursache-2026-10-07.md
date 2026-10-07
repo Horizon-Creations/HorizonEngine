@@ -65,8 +65,11 @@ python scripts\ui-image-repro\ana157.py C:\hw157\shots img       # Exit = Zahl d
   GL (0,0,0), Vulkan (4,4,4). Das Skript meldet dort „missing“. Weiß heißt also wirklich „gezeichnet, aber
   ohne Textur“ und nicht „fehlt“.
 - Vulkan lief auf der RTX 4070 mit aktivem Validation-Layer (`VulkanRenderer: validation layer ENABLED`, Khronos
-  1.4.341). Das Log hat **0** Validation- und 0 `[ERROR]`-Zeilen. Das passt zu „nie gebaut“: Der Shader
-  liest nichts außer dem gebundenen Atlas. Gegen eine falsche Bindung spricht das ebenfalls.
+  1.4.341). Der Debug-Callback schreibt Layer-Meldungen als `[ WARN]`/`[ERROR]` ins Log. Die
+  Session-Zusammenfassung sagt „1 warning(s), 0 error(s)“, und die eine Warnung ist „No config file …“ (frisches
+  APPDATA). Es gibt also **keine** Validation-Meldung. Das passt zu „nie gebaut“: Der Shader liest nichts außer
+  dem gebundenen Atlas. Gegen eine falsche Bindung spricht das ebenfalls. Bei D3D11/D3D12 ist es genauso
+  (D3D12 ohne `HE_GPU_DEBUG`, also ohne Debug-Layer).
 - Die 12 Stil-Kacheln bleiben mit dem neuen Zeugen auf Vulkan, D3D11 und D3D12 bei 0 Fehlschlägen
   (`docs/widgets-d3d-vulkan-tiles.py`, Tags `plain` und `img`).
 
