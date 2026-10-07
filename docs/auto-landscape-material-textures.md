@@ -524,7 +524,7 @@ Rechte-Prüfung abgelehnt und ist **nicht** passiert (§8.6).
 | Vulkan | `arrayLayers = n`, View `VK_IMAGE_VIEW_TYPE_2D_ARRAY` | `m_whiteArrayView` (gab es schon für heCsm) | `VulkanRenderer.cpp:5895` |
 | D3D11 | `ArraySize = n`, SRV `TEXTURE2DARRAY` | weißes 1-Slice-Array-SRV | `D3D11Renderer.cpp:4231` |
 | D3D12 | `DepthOrArraySize = n`, SRV `TEXTURE2DARRAY`. Die Null-View der Vorlage ist 2D, deshalb wird bei Array-Slots immer überschrieben | weißes 1×1×1-Array, beim ersten Bedarf hochgeladen | `D3D12Renderer.cpp:3677` |
-| Metal | `MTLTextureType2DArray`, `replaceRegion:…slice:` | weißes 1×1×1-Array | `MetalRenderer.mm:8920`, **nur blind geschrieben** |
+| Metal | `MTLTextureType2DArray`, `replaceRegion:…slice:` | weißes 1×1×1-Array | `MetalRenderer.mm:8920`, hier nicht baubar, per macOS-CI kompiliert, nicht gerendert |
 
 Jedes Backend legt die Array-Fassung eines Assets im Cache unter `"<Schlüssel>#arr"`
 ab. So kann dasselbe Asset in einem Material 2D und im anderen ein Array sein.
@@ -573,7 +573,10 @@ das Masken-Band trennt WetGround über Rauheit G = 126 von den anderen (≈ 220)
 - **Metal:** keine Hardware auf diesem Gerät. Belegt sind nur: MSL-Cross-Compile
   (`texture2d_array<float>` an den Array-Slots), dieselben `[[texture(N)]]`- und
   `[[sampler(N)]]`-Slots wie bei vier 2D-Texturen (normal + clustered), also kein
-  zusätzlicher Sampler. Ob `MetalRenderer.mm` kompiliert, zeigt erst die macOS-CI.
+  zusätzlicher Sampler. **macOS-CI** (Run 37591669224 auf `6cae02b3`, Job macOS: success):
+  `MetalRenderer.mm` kompiliert, ctest 230/230 inkl. `test_material_graph` mit den neuen
+  Array-Tests, und der Schritt „Compile-check the runtime MSL strings“ ist grün. Gerendert
+  hat Metal damit noch **nicht**: CI erzeugt kein Bild, ein Metal-Bildvergleich steht aus.
 - Tests: Codegen/Maske/Slot-Trennung, Cross-Compile für MSL, GLSL 4.10/ES 3.00/4.30,
   HLSL und SPIR-V, Aufnahme in alle Node-Sweeps (FXC wie D3D11/D3D12 kompilieren,
   D3D12-Root-Signature, GL-Link), Array-Asset-Roundtrip mit 22-B-TXMI.
@@ -592,7 +595,7 @@ eingecheckt, damit Schritt 4/5 ohne den Menschen weiterlaufen.
   Kompression aber nötig (§5). Das braucht `cookTexture` pro Slice und die
   Block-Pfade in den vier Array-Uploads.
 - **Pack-Modus für die echten Einzel-PNGs** → `T_Landscape_*_Mask` (§3): weiter offen.
-- **Metal** kompiliert hier nicht. Nachweis per CI (§8.6).
+- **Metal** ist per CI gebaut und getestet (§8.3), aber auf keiner Hardware gerendert.
 - D3D12 bindet einen **leeren 2D**-Slot weiterhin als Null-View, also Schwarz, während
   die anderen Backends Weiß binden. Das gab es schon vorher und betrifft keinen
   Array-Slot.
