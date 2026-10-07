@@ -6844,7 +6844,10 @@ void EditorApplication::dumpFrameHeadless()
 			ta.path = "__uiImageWitness.hasset";
 			ta.width = ta.height = kSz;
 			ta.channels = 4;
-			ta.srgb = false;
+			// Flagged sRGB like every imported colour texture: the UI pass must
+			// sample the bytes as they are anyway (Thema 107), an sRGB upload
+			// would show here as a darker picture.
+			ta.srgb = true;
 			ta.data.resize(size_t(kSz) * kSz * 4);
 			for (uint32_t y = 0; y < kSz; ++y)
 				for (uint32_t x = 0; x < kSz; ++x)

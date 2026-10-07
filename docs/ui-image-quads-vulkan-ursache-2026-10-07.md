@@ -94,3 +94,37 @@ UI-Pass auf `type == 0 && textureAssetId != 0` prüft wie GL.
   Swapchain- und den Viewport-Pipeline-Pfad (`m_uiPipeline` / `m_uiViewportPipeline`), deshalb ist dort
   dasselbe zu erwarten. Gemessen ist es nicht.
 - Metal ist nicht gemessen. Laut Code hat es `ResolveUITexture`.
+
+## Schritt 2: Vulkan-Fix (2026-10-07)
+
+Gebaut wie oben geplant, nur im Vulkan-Backend:
+- `shaders/ui.frag`: Modus 2 = Bild × Tint, runde Ecken per SDF auf dem Alpha, Zeile für Zeile wie `kUIFS`.
+  Der Glyphenzweig prüft jetzt `0.5 < x < 1.5` und nicht mehr `x > 0.5`, sonst liefe Modus 2 hinein.
+- `VulkanRenderer::resolveUIImageSet`: eigener Cache `m_uiImageCache` (Schlüssel wie `m_graphTexCache`).
+  Ein eigener Pool `m_uiImageDescPool` hat 256 Sets und das FREE-Bit. Die Sets haben das Layout des Font-Atlas,
+  also dieselbe Pipeline und derselbe Immutable-Sampler. Hochgeladen wird über `uploadTextureImage(...,
+  honourSrgb=false)`, also **UNORM**, auch wenn die Textur als sRGB markiert ist (Thema 107). Ein Fehlschlag
+  wird gecacht wie bei GL, das Element zeichnet dann seinen Tint. `InvalidateTexture` wirft den Eintrag weg.
+- `runUIPass`: Der Zweig `type == 0 && textureAssetId != 0` bindet das Set des Bilds und schiebt
+  `params.x = 2`. Gebunden wird nach dem aktuell gebundenen Set, nicht mehr nach dem Atlas-Schlüssel.
+- Der UI-Sampler filtert jetzt trilinear wie GL (`mipmapMode LINEAR`, `maxLod` offen). Ein Atlas hat nur eine
+  Ebene, für ihn ändert sich nichts.
+- Der Zeuge registriert sein Bild jetzt mit `srgb = true`, wie der Importer es bei jeder Farbtextur tut.
+  GL bleibt bytegenau, weil sein UI-Pfad das Flag ignoriert.
+
+Bildtest: `scripts/he_vk_imagetests.py --cases ui_image` (läuft in CI auf lavapipe mit). Er hat Leitkanal-
+Sonden auf Rot, Grün und Blau und zusätzlich neu `colors`, also Sollfarben ±12 auf allen vier Quadranten.
+
+| Lauf (RTX 4070, Vulkan 1.4.341, Validation an) | TL | TR | BL | BR | `ui_image` |
+|---|---|---|---|---|---|
+| vor dem Fix (Deploy 8501146e) | (255,255,255) | (255,255,255) | (255,255,255) | – | **rot**: Leitkanal 0 |
+| Fix, aber Upload SRGB (`honourSrgb=true`, Gegenprobe) | (202,3,3) | (3,147,12) | (3,20,202) | (222,182,5) | **rot**: Leitkanal ok, Farbe 28–60 daneben |
+| Fix | (230,30,30) | (30,200,60) | (30,80,230) | (240,220,40) | **grün**: 0 daneben |
+
+- `ana157.py` (Tag `fix`): GL und Vulkan zeigen beide das Bild bytegenau. D3D11/D3D12 sind weiterhin
+  weiß, das ist Schritt 3. Alle vier haben 0 `[ERROR]` und 0 `[ WARN]` außer dem Config-Hinweis.
+- Vor/nach auf Vulkan: Im `image`-Bild ändern sich genau die 26 400 Pixel der Kachel 12 (240×110), sonst
+  nichts. `HE_DUMP_UITEST=1` (Text plus Vollton, ohne Bild) ist md5-gleich mit Schritt 1.
+- Deploy-Falle bestätigt: Nach der reinen Shader-Änderung hatten `deploy/Game` und `deploy/Editor/Game` noch
+  die alte `ui.frag.spv`. Erst nach einem erzwungenen Neu-Linken von HorizonGame **und** HorizonEditor
+  stimmten alle fünf Kopien überein. Für Schritt 4 (das laufende Spiel) also zuerst die Hashes prüfen.

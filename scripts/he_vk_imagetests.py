@@ -36,6 +36,8 @@ import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 # validation messages a variant may print (see ALLOWED_VALIDATION). `probes`
 # name boxes (x, y as a fraction of the frame) whose mean colour must be led by
 # one channel ("r"/"g"/"b") — for pictures where WHAT is drawn is the verdict.
+# `colors` are boxes whose mean must sit within COLOR_TOL of an exact (R, G, B)
+# on every channel — for flat, unlit pixels (UI) where the value itself is known.
 #
 # Thresholds sit at roughly half of what lavapipe measured (Mesa 25.2.8,
 # runs 37112790557 / 37113763253 on 03.10.2026): nebula 13.1–13.4, clustered
@@ -138,12 +140,36 @@ CASES = {
                        ("red field", 0.50, 0.20, "r")] for v in ("gi_off", "gi_on")},
         "allow": {"gi_off": ["mat_ubo"], "gi_on": ["mat_ubo", "gi_layout"]},
     },
+    # UI Image widget (Thema 157): tile 12 of HE_DUMP_UITEST=image is an Image
+    # element at x 60..300, y 590..700 of the 1280x720 frame showing a generated
+    # picture (red top-left, green top-right, blue bottom-left, yellow bottom-
+    # right) under a white tint. Before Vulkan's UI pass had a texture path it
+    # drew the tint, a white quad: all three probes read (255,255,255) and lead
+    # by 0 (RTX 4070, 07.10.2026). Yellow is not probed: its red leads green by
+    # exactly PROBE_MARGIN. Exact colours (and the sRGB trap, Thema 107) are
+    # scripts/ui-image-repro/ana157.py's job on hardware.
+    "ui_image": {
+        "base": {"UITEST": "image", "FRAMES": "16"},
+        "variants": {"image": {}},
+        "pairs": [],
+        "probes": {"image": [("red TL", 0.09375, 0.857, "r"), ("green TR", 0.1875, 0.857, "g"),
+                             ("blue BL", 0.09375, 0.933, "b")]},
+        # The witness texture is flagged sRGB; sampled through an _SRGB view it
+        # reads (202,3,3) / (3,147,12) / (3,20,202) / (222,182,5) — the leads
+        # above still pass, these do not (measured on the RTX 4070, 07.10.2026).
+        "colors": {"image": [("red TL", 0.09375, 0.857, (230, 30, 30)),
+                             ("green TR", 0.1875, 0.857, (30, 200, 60)),
+                             ("blue BL", 0.09375, 0.933, (30, 80, 230)),
+                             ("yellow BR", 0.1875, 0.933, (240, 220, 40))]},
+    },
 }
 
 # Probe verdict: the named channel of the box mean must lead both others by at
 # least this many 8-bit steps.
 PROBE_MARGIN = 20
 PROBE_RADIUS = 8  # box half-size in pixels
+# Colour verdict: every channel within this many 8-bit steps of the expected value.
+COLOR_TOL = 12
 
 # Validation messages a case may print while its picture is made, by key:
 # (regex, why it is tolerated). A case opts in per variant with "allow"; any
@@ -390,6 +416,16 @@ def main():
                       f"{ch} leads by {lead} → {'ok' if ok else 'FAIL'} (min {PROBE_MARGIN})")
                 if not ok:
                     problems.append(f"{vname}: probe '{label}' rgb={rgb}, {ch} leads by {lead} < {PROBE_MARGIN}")
+            for label, fx, fy, want in spec.get("colors", {}).get(vname, []):
+                rgb = probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy)
+                off = max(abs(a - b) for a, b in zip(rgb, want))
+                ok = off <= COLOR_TOL
+                shot["probes"].append({"label": label, "x": fx, "y": fy, "want": list(want),
+                                       "rgb": rgb, "off": off, "ok": ok})
+                print(f"      color {label:12s} ({fx:.2f},{fy:.2f}) rgb={rgb} want {want} "
+                      f"off by {off} → {'ok' if ok else 'FAIL'} (max {COLOR_TOL})")
+                if not ok:
+                    problems.append(f"{vname}: colour '{label}' rgb={rgb}, {off} off {want} > {COLOR_TOL}")
 
         pairs = []
         for a, b, min_mean in spec["pairs"]:
