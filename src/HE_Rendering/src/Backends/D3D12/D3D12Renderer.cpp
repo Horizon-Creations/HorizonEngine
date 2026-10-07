@@ -3220,9 +3220,10 @@ struct D3D12RendererImpl
     // [5..6] (rewritten at GI-target creation), the shadow arrays in [7..8] (the cascade
     // slot is rewritten by createShadowArray() on a resolution swap — it MUST land here,
     // not in the ring, so every later draw block inherits it), null views in [9..16] (the
-    // preamble's gates for those stay 0 unless the slot is filled). One CopyDescriptorsSimple
-    // per draw, then the draw's real textures overwrite [0..4] — and the sky cube / blurred
-    // SSAO overwrite [10]/[11] on the frames fillMatLight raises fog.z / fog.w (Thema 126).
+    // preamble's gates for [10..16] stay 0 unless the slot is filled; [9] is overwritten
+    // by every draw). One CopyDescriptorsSimple per draw, then the draw's real textures overwrite
+    // [0..4], its landscape weightmap overwrites [9] — and the sky cube / blurred SSAO
+    // overwrite [10]/[11] on the frames fillMatLight raises fog.z / fog.w (Thema 126).
     ComPtr<ID3D12DescriptorHeap> m_matSrvStaging;
     UINT                         m_matSrvInc = 0;
     UINT                         m_matSrvCursor[k_frameCount] = {}; // per-frame block cursor (one block per DrawCall)
@@ -8311,8 +8312,9 @@ void D3D12RendererImpl::createMaterialResources()
     // (t10/t11), [7] k_matCsmSlot = heCsm (t12, the SAME cascade array the built-in scene
     // shader reads at t0, sampled behind csmSplits.w > 0), [8] k_matLocalShadowSlot =
     // heLocalShadow (t13, the local atlas the built-in shader reads at t17, sampled behind
-    // lightParams[i].y > 0), [9..16] heLandscapeWeights / heSkyEnv / heAO / DDGI atlases /
-    // heSSRFwd / heGIReflFwd / heCloudShadow (t14..t18, t31..t33) — null views, their
+    // lightParams[i].y > 0), [9] heLandscapeWeights (t14, ungated: null in the template,
+    // the chunk's weightmap written per draw), [10..16] heSkyEnv / heAO / DDGI atlases /
+    // heSSRFwd / heGIReflFwd / heCloudShadow (t15..t18, t31..t33) — null views, their
     // gates stay 0 in fillMatLight; EXCEPT the DDGI atlases [12..13] (t17/t18), which
     // ensureGiProbeAtlas writes into the template (writeMatGiProbeSlots) behind the
     // giProbe.y gate, and heSkyEnv / heAO [10..11] (t15/t16), which the draw writes into
@@ -8339,7 +8341,8 @@ void D3D12RendererImpl::createMaterialResources()
     //                     the GI masks in [5..6], the cascade array for heCsm in [7],
     //                     the local atlas for heLocalShadow in [8], the DDGI atlases in
     //                     [12..13] once they exist, and null views of the preamble's
-    //                     remaining SRVs in the rest of [9..16].
+    //                     remaining SRVs in the rest of [9..16] ([9] is overwritten
+    //                     with the landscape weightmap by every draw).
     //   m_matSrvHeap     — the shader-visible ring of per-draw blocks the template is
     //                     copied into, k_frameCount × k_matMaxDraws × k_matSrvPerDraw.
     {
@@ -8394,6 +8397,11 @@ void D3D12RendererImpl::createMaterialResources()
         // Slots 9..16: the preamble's remaining SRVs (heLandscapeWeights, heSkyEnv,
         // heAO, the DDGI atlases, heSSRFwd, heGIReflFwd, heCloudShadow). Declared so
         // the PSO is legal, never sampled while fillMatLight leaves their gates at 0.
+        // heLandscapeWeights (9) has NO gate — a Landscape Layer Blend samples it
+        // unconditionally — so every material draw writes the chunk's weightmap (or
+        // the layer-0 default) into its own block. The template's null is only the
+        // last resort, and a right one: (0,0,0,0) sums to nothing, which the blend
+        // resolves to layer 0 (MaterialGraph.cpp) — the same as the default asset.
         // heSkyEnv/heAO (10/11) stay null HERE; the material draw writes the sky
         // cube / blurred SSAO into its own block when fog.z / fog.w rise (Thema 126).
         // The DDGI pair (12/13) starts null too and is swapped for the live atlases
@@ -9963,12 +9971,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         // ── Forward screen-space reflections (plan checkpoint D) ─────────────
         // The radiance source is the previous frame's HDR colour, so SSR runs
-        // only where Render() actually bound hdrRT — `usingHDR`. That is the C6
-        // hole inherited from D3D11, stated as one gate: the swapchain branch
-        // (the packaged game, no editor viewport) draws straight into the
-        // backbuffer, has no HDR target, and therefore no SSR. Deliberately not
-        // fixed here — giving the swapchain path an HDR target changes the
-        // packaged game's frame layout and needs its own decision.
+        // only where Render() actually bound hdrRT — `usingHDR`, stated as one
+        // gate. That is DrawViewportFrame: the editor viewport, and the packaged
+        // game too since it asks for the chain (SetSwapchainPostProcessing, C6
+        // closed). Only the direct swapchain branch (application mode, or the
+        // chain not ready) draws straight into the backbuffer, has no HDR
+        // target, and therefore no SSR.
         bool ssrFrameActive = false;
 #if defined(HE_HAVE_SHADERC)
         ssrFrameActive = p.ssrEnabled && p.usingHDR && p.hdrRT
@@ -10204,6 +10212,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                 heTexP[i] = p.resolveGraphTexture(cl, gIds[i], gPaths[i], m_contentManager);
                         }
 
+                        // heLandscapeWeights (t14, block slot kSlotLandscapeWeights) = the
+                        // object's landscape weightmap, PER DRAW like D3D11 t14 / Vulkan
+                        // binding 14 / GL unit 13 / Metal slot 13: it belongs to the terrain
+                        // the chunk is part of, not to the material, so two landscapes can
+                        // share one material and keep their own paint (RenderPass never
+                        // batches across weightmaps, so one block per DrawCall is enough).
+                        // Anything that is not a landscape chunk gets the 1x1 (1,0,0,0)
+                        // default = layer 0; the template's null view (zero sum → the
+                        // blend's own layer-0 fallback) is the last resort. Resolved
+                        // before `ma` below for the same reason as heTexP — a resolve may
+                        // load. A paint stroke replaces the pixels under the SAME UUID and
+                        // calls InvalidateTexture, which retires this cache entry.
+                        ID3D12Resource* heWeights = nullptr;
+                        if (dc.weightmapTextureId != HE::UUID{})
+                            heWeights = p.resolveGraphTexture(cl, dc.weightmapTextureId, {}, m_contentManager);
+                        if (!heWeights)
+                            heWeights = p.resolveGraphTexture(cl, HE::kDefaultLayer0WeightTextureId, {}, m_contentManager);
+
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
                         const std::vector<float>* params =
@@ -10221,6 +10247,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy block slots 1..4 (t4..t7)");
                         for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
                             if (heTexP[k]) p.srvForTexture(heTexP[k], p.matSrvCpu(blk + 1 + static_cast<UINT>(k)));
+                        if (heWeights)
+                            p.srvForTexture(heWeights, p.matSrvCpu(blk + HE::d3d12mat::kSlotLandscapeWeights));
                         // heSkyEnv (t15) + heAO (t16) (Thema 126): the baked sky cube and
                         // this frame's blurred SSAO (the image the built-in shader reads at
                         // t2, in PIXEL_SHADER_RESOURCE after the blur pass), each under the
@@ -11010,18 +11038,20 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     Capabilities c{};
     c.supportsShadows        = true;
     c.supportsPostProcessing = m_impl->postFxReady;
-    c.supportsHDR            = false;
+    // The HDR scene target lives and dies with the post chain, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing) both run.
+    c.supportsHDR            = m_impl->postFxReady;
     // Software ray-traced DDGI via CS 5.0/5.1 (FL 11.0 baseline) — same
     // CPU-BVH path as GL 4.3/D3D11; cleared if the GI pipelines fail to build.
     c.supportsGlobalIllumination = m_impl->giSupported;
-    // Forward SSR needs an HDR scene target to read radiance out of, and D3D12
-    // only has one in the editor viewport path (docs/ssr-cross-backend-plan.md
-    // C6/D). postFxReady is the honest answer: in the swapchain path the switch
-    // exists but does nothing, exactly as on Vulkan and D3D11.
+    // Forward SSR reads radiance out of the post chain's HDR scene target, so
+    // it is there exactly when the chain is (docs/ssr-cross-backend-plan.md
+    // C6/D, closed by the swapchain post chain): editor viewport and packaged
+    // game alike. Only the direct swapchain fallback (application mode) has none.
     c.supportsScreenSpaceReflections = m_impl->postFxReady;
-    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same
-    // editor-viewport post chain SSR needs — false only if a TAA shader or
-    // PSO failed. The swapchain path renders unjittered either way (taaFrame).
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same post
+    // chain SSR needs — false only if a TAA shader or PSO failed. Only the
+    // direct swapchain fallback renders unjittered (taaFrame).
     c.supportsTemporalAA = m_impl->taaReady();
     return c;
 }

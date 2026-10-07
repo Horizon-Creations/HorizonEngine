@@ -73,8 +73,9 @@ public:
     // the editor prefs / packaged game, mirroring the Metal/GL/D3D11 backends.
     void SetGISettings(const GISettings& settings) override;
     // Forward screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint D).
-    // Editor-viewport only: the trace reads the previous frame's HDR colour, and
-    // the swapchain path has no HDR target (the C6 hole, inherited from D3D11).
+    // Post-chain only: the trace reads the previous frame's HDR colour, which the
+    // editor viewport and the packaged game (SetSwapchainPostProcessing) have and
+    // the direct swapchain fallback does not.
     void SetSSRSettings(const SSRSettings& settings) override;
     // Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
     // tint — the same contract GL, Metal and D3D11 honour.

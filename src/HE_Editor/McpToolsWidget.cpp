@@ -249,7 +249,12 @@ Doc openDoc(ContentManager& content, const McpWidgetHooks& h, const json& args, 
 	// A stub is born with a serialised empty tree, but a file written by
 	// something older may carry nothing at all — and parsing "" fails, which
 	// would make a newborn widget uneditable rather than empty.
-	if (!treeJson.empty() && !uiWidgetTreeFromJson(treeJson, d.local))
+	//
+	// KeepUnfinished, as the designer reads it: this copy is written back to
+	// the file, and a parameter the author has not finished declaring must not
+	// vanish because a tool moved a button.
+	if (!treeJson.empty() &&
+	    !uiWidgetTreeFromJson(treeJson, d.local, UIWidgetParamRead::KeepUnfinished))
 	{
 		d.failure = ToolResult::fail("failed",
 			"The widget tree in '" + p.rel + "' could not be parsed. Open the asset in "
@@ -385,7 +390,8 @@ std::vector<std::string> notPersisted(const UIWidgetTree& tree, int id,
 	if (!before) return lost;
 
 	UIWidgetTree round;
-	if (!uiWidgetTreeFromJson(uiWidgetTreeToJson(tree), round)) return lost;
+	if (!uiWidgetTreeFromJson(uiWidgetTreeToJson(tree), round,
+	                          UIWidgetParamRead::KeepUnfinished)) return lost;
 	const UIElement* after = round.find(id);
 	if (!after) return lost;
 

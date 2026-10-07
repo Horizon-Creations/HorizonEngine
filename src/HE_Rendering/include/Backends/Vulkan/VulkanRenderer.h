@@ -421,6 +421,10 @@ private:
 	MatFrameBuf m_matParBuf[2];     // HeParams ring (k_matMaxDraws × 256 B, one slot per draw)
 	uint32_t    m_matDrawCursor[2]  = {};    // per-frame ring/descriptor-set cursor
 	bool        m_matReady          = false; // true once createMaterialResources() succeeded
+	// heLandscapeWeights (binding 14) is in m_matSetLayout — false only on a device whose
+	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
+	bool        m_matLandscapeWeights = false;
+	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
 	static constexpr uint32_t k_matMaxDraws   = 1024;
 	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
 
@@ -1032,9 +1036,11 @@ private:
 	//    trace SAMPLES the previous history pair even on the first frame (the
 	//    blend weight is zero, the read is not), and sampling an image still in
 	//    UNDEFINED is invalid however the value is used afterwards.
-	//  * SSR exists ONLY in the editor-viewport HDR path, because that is the
-	//    only place m_hdrImage exists (§2.2 of the plan). The swapchain branch
-	//    draws straight into the backbuffer and has no radiance source.
+	//  * SSR exists ONLY in the post chain's HDR path, because that is the only
+	//    place m_hdrImage exists (§2.2 of the plan): the editor viewport, and the
+	//    packaged game when it runs the chain (SetSwapchainPostProcessing, C6).
+	//    The direct swapchain fallback draws straight into the backbuffer and
+	//    has no radiance source.
 	bool        EnsureSSRPipelines();
 	void        destroySSRPipelines();
 	void        createSSRTargets(uint32_t w, uint32_t h);

@@ -2541,6 +2541,27 @@ TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky c
 		CHECK(static_cast<size_t>(skyM.position(0)) > copy);
 		CHECK(static_cast<size_t>(aoM.position(0)) > copy);
 	}
+
+	SUBCASE("D3D12 writes the draw's landscape weightmap into heLandscapeWeights (t14)")
+	{
+		// Thema 155: block slot 9 stayed the template's null view, so a painted
+		// terrain showed layer 0 only. The weightmap is the DRAW's, chosen like D3D11 / Vulkan /
+		// GL — the chunk's own, else the layer-0 default — and written AFTER the
+		// template copy, which would overwrite it otherwise.
+		const std::string d12 = stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp"));
+		const size_t own  = d12.find("heWeights = p.resolveGraphTexture(cl, dc.weightmapTextureId, {}, m_contentManager);");
+		const size_t def  = d12.find("heWeights = p.resolveGraphTexture(cl, HE::kDefaultLayer0WeightTextureId, {}, m_contentManager);");
+		const size_t copy = d12.find("CopyDescriptorsSimple(D3D12RendererImpl::k_matSrvPerDraw, p.matSrvCpu(blk)");
+		const std::regex wr(R"(if \(heWeights\)\s*p\.srvForTexture\(heWeights, p\.matSrvCpu\(blk \+ HE::d3d12mat::kSlotLandscapeWeights\)\);)");
+		std::smatch wrM;
+		REQUIRE(own  != std::string::npos);
+		REQUIRE(def  != std::string::npos);
+		REQUIRE(copy != std::string::npos);
+		REQUIRE(std::regex_search(d12, wrM, wr));
+		CHECK(own < def);
+		CHECK(def < copy);
+		CHECK(static_cast<size_t>(wrM.position(0)) > copy);
+	}
 }
 
 TEST_CASE("Clustered lighting: heLitP's forward twin matches the deferred resolve's (Thema 117)")
@@ -3108,42 +3129,119 @@ TEST_CASE("D3D12 main swapchain follows the window size (Thema 112)")
 	CHECK(call < slot);
 }
 
-TEST_CASE("Vulkan GI extracts with this frame's sun, not the previous one (Thema 131)")
+TEST_CASE("Vulkan extracts with this frame's sun: one setDayNight at the frame's top (Thema 131, 146)")
 {
-	// runGi() runs before DrawScene(), and only DrawScene() pushed the day-night
-	// state into the extractor. The GI mask was traced against the PREVIOUS
-	// frame's sun while the scene pass shaded with the current one — visible as
-	// a one-frame lag of the GI shadow edge whenever the time of day moves.
+	// The cascades (EncodeShadowMap), the decal depth pre-pass, GI and SSAO
+	// each extract the scene on their own, ahead of DrawScene() — and only
+	// DrawScene() pushed the day-night state into the extractor. They fit and
+	// traced against the PREVIOUS frame's sun while the scene pass shaded with
+	// the current one: a one-frame lag of the GI shadow edge (Thema 131) and,
+	// with GI off, of the CSM cascades (Thema 146). The state is now pushed
+	// once at the top of the two places that record a frame — Render() and
+	// RenderSceneImage() — before the first extraction, and nowhere else.
 	// Metal pushes setDayNight before every GI extraction; D3D11/D3D12/GL
 	// extract once per frame after it. No GPU under ctest, so this pins the
-	// order in runGi()'s source.
+	// order in the source.
 	using namespace shaderdrift;
 	const fs::path root = findRepoRoot();
 	if (root.empty())
 	{
-		MESSAGE("Vulkan renderer source not found - GI day-night pin skipped");
+		MESSAGE("Vulkan renderer source not found - day-night pin skipped");
 		return;
 	}
 	const std::string src = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
 	                                                   "Backends" / "Vulkan" / "VulkanRenderer.cpp"));
 	REQUIRE(!src.empty());
-	const size_t fn = src.find("void VulkanRenderer::runGi(");
-	REQUIRE(fn != std::string::npos);
-	const size_t fnEnd = src.find("\n}\n", fn);
-	REQUIRE(fnEnd != std::string::npos);
-	const std::string body = src.substr(fn, fnEnd - fn);
-
-	const size_t extract = body.find("m_extractor.extract(");
-	REQUIRE(extract != std::string::npos);
-	// Same environment fields DrawScene() pushes, so both passes agree on the sun.
-	std::smatch m;
+	auto bodyOf = [&](const char* signature) {
+		const size_t fn = src.find(signature);
+		REQUIRE(fn != std::string::npos);
+		const size_t fnEnd = src.find("\n}\n", fn);
+		REQUIRE(fnEnd != std::string::npos);
+		return src.substr(fn, fnEnd - fn);
+	};
+	// Same environment fields at both, so every pass agrees on the sun.
 	const std::regex dayNight(
 		R"(m_extractor\.setDayNight\(\s*m_environment\.dayNightCycle\s*,\s*m_environment\.timeOfDay\s*,)"
 		R"(\s*m_environment\.sunColor\s*,\s*m_environment\.sunIntensity\s*,)"
 		R"(\s*m_environment\.moonColor\s*,\s*m_environment\.moonIntensity\s*,)"
 		R"(\s*m_environment\.cloudCoverage\s*\))");
-	REQUIRE(std::regex_search(body, m, dayNight));
-	CHECK(static_cast<size_t>(m.position(0)) < extract);
+
+	// Render(): before the viewport frame and before the swapchain branch's
+	// own cascades, decal depth and scene.
+	{
+		const std::string body = bodyOf("void VulkanRenderer::Render()");
+		std::smatch m;
+		REQUIRE(std::regex_search(body, m, dayNight));
+		const size_t at = static_cast<size_t>(m.position(0));
+		for (const char* pass : { "DrawViewportFrame(", "EncodeShadowMap(", "EncodeDecalDepth(", "DrawScene(" })
+		{
+			const size_t p = body.find(pass);
+			REQUIRE_MESSAGE(p != std::string::npos, pass);
+			CHECK_MESSAGE(at < p, pass);
+		}
+	}
+	// RenderSceneImage(): records DrawViewportFrame on its own.
+	{
+		const std::string body = bodyOf("bool VulkanRenderer::RenderSceneImage(");
+		std::smatch m;
+		REQUIRE(std::regex_search(body, m, dayNight));
+		const size_t p = body.find("DrawViewportFrame(");
+		REQUIRE(p != std::string::npos);
+		CHECK(static_cast<size_t>(m.position(0)) < p);
+	}
+	// Nowhere else: no pass in between re-pushes it (with other fields, say),
+	// so the frame's sun has one source. Exactly the two calls above.
+	size_t calls = 0;
+	for (size_t at = src.find("m_extractor.setDayNight("); at != std::string::npos;
+	     at = src.find("m_extractor.setDayNight(", at + 1))
+		++calls;
+	CHECK(calls == 2);
+}
+
+TEST_CASE("GI instances get their material colour before the acceleration update (Thema 154)")
+{
+	// The extractor leaves RenderObject::baseColor white; resolveWorldMaterialScalars
+	// fills it. Vulkan's runGi() extracts on its own and called updateGiAccel()
+	// without the resolve, so every GI instance bounced white and a red floor
+	// gave the same probe field as a grey one (colour bleed exactly 0).
+	// D3D11/D3D12 resolve right before their updateGiAccel. No GPU under ctest,
+	// so this pins the order in the source: extract -> resolve -> updateGiAccel.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - GI material-resolve pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+
+	const std::string vk = stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp"));
+	REQUIRE(!vk.empty());
+	const size_t fn = vk.find("void VulkanRenderer::runGi(");
+	REQUIRE(fn != std::string::npos);
+	const size_t fnEnd = vk.find("\n}\n", fn);
+	REQUIRE(fnEnd != std::string::npos);
+	const std::string body = vk.substr(fn, fnEnd - fn);
+	const size_t extract = body.find("m_extractor.extract(");
+	const size_t resolve = body.find("HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);");
+	const size_t accel   = body.find("updateGiAccel();");
+	REQUIRE(extract != std::string::npos);
+	REQUIRE(accel != std::string::npos);
+	REQUIRE_MESSAGE(resolve != std::string::npos,
+	                "VulkanRenderer::runGi no longer resolves material scalars - GI instances bounce white");
+	CHECK(extract < resolve);
+	CHECK(resolve < accel);
+
+	for (const char* file : { "D3D11/D3D11Renderer.cpp", "D3D12/D3D12Renderer.cpp" })
+	{
+		const std::string src = stripLineComments(readFile(be / file));
+		REQUIRE(!src.empty());
+		const size_t r = src.find("HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);");
+		const size_t a = src.find("p.updateGiAccel(m_contentManager, p.m_renderWorld");
+		REQUIRE_MESSAGE(r != std::string::npos, std::string(file));
+		REQUIRE_MESSAGE(a != std::string::npos, std::string(file));
+		CHECK_MESSAGE(r < a, std::string(file), " updates the GI instances before resolving their material colour");
+	}
 }
 
 TEST_CASE("D3D11 main swapchain follows the window size (Thema 128)")

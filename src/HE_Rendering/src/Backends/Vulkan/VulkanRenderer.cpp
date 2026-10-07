@@ -395,6 +395,16 @@ void VulkanRenderer::Render()
     m_instCursor = 0; // this frame's instance-buffer slots start from the top
     m_sceneMatCursor = 0; m_sceneMatOffset = 0; // ...and its built-in material-ring slots
 
+    // This frame's sun, once, before the first extraction. The cascades, the
+    // decal depth pre-pass, GI and SSAO all extract on their own ahead of
+    // DrawScene(); with the day-night state fed only there they fit and traced
+    // against the previous frame's sun (Thema 131 for GI, 146 for the rest).
+    // RenderSceneImage() does the same at its top.
+    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                            m_environment.sunColor, m_environment.sunIntensity,
+                            m_environment.moonColor, m_environment.moonIntensity,
+                            m_environment.cloudCoverage);
+
     // Drop caches for materials/meshes edited since last frame, before any recording — the
     // frame's DrawScene then re-resolves them fresh from the ContentManager.
     processPendingInvalidations();
@@ -714,8 +724,10 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 
         // ── Forward SSR (docs/ssr-cross-backend-plan.md checkpoint B) ──
         // Built lazily, and only here: the trace's radiance source is the
-        // HDR target of THIS branch, so SSR does not exist in the swapchain
-        // path at all (plan §2.2 — reported, not hidden).
+        // HDR target of THIS branch. The packaged game reaches it too when it
+        // asks for the chain (SetSwapchainPostProcessing, plan C6 closed); only
+        // the direct swapchain fallback (application mode, sRGB-only
+        // swapchain) has no SSR.
         if (m_ssrEnabled) EnsureSSRPipelines();
         const bool ssrWanted = ssrWantedThisFrame();
 
@@ -984,7 +996,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         }
     }
     // The jitter belongs to this frame's viewport passes only; whatever draws
-    // after them (a world preview, the swapchain path) rasterises unjittered.
+    // after them (a world preview, the swapchain pass — the game's present
+    // blit or the direct fallback) rasterises unjittered.
     m_taaFrame = false;
 }
 
@@ -993,7 +1006,9 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     Capabilities c;
     c.supportsShadows        = true;
     c.supportsPostProcessing = m_postFxReady;
-    c.supportsHDR            = false;
+    // The HDR scene target lives and dies with the post chain, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing) both run.
+    c.supportsHDR            = m_postFxReady;
     c.supportsGpuParticles   = false;
     // Software compute ray tracing (gi_*.comp) — compute is core Vulkan, so no
     // extension gate. If pipeline creation fails at runtime, runGi() leaves
@@ -1004,14 +1019,15 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // B) — the reflection MRT pre-pass plus last frame's HDR copy, Metal's
     // Option-A path. There is no deferred composite here because there is no
     // G-buffer. Reported alongside supportsPostProcessing on purpose: the HDR
-    // target the trace reads is the PostFX scene target, and it exists only in
-    // the editor viewport (§2.2) — in the swapchain path the toggle is honoured
-    // by doing nothing. The shaders come from the cross-compiler, hence the #if.
+    // target the trace reads is the PostFX scene target, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing, plan C6) both
+    // run; only the direct swapchain fallback (application mode, sRGB-only
+    // swapchain) has none. The shaders come from the cross-compiler, hence the #if.
     c.supportsScreenSpaceReflections = m_postFxReady;
 #endif
-    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the editor
-    // viewport's post chain — false only if a TAA shader (.spv) or pipeline is
-    // missing. The swapchain path renders unjittered either way (m_taaFrame).
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same post
+    // chain — false only if a TAA shader (.spv) or pipeline is missing. Only
+    // the direct swapchain fallback renders unjittered (m_taaFrame).
     c.supportsTemporalAA = taaReady();
     return c;
 }
@@ -2559,16 +2575,49 @@ void VulkanRenderer::createMaterialResources()
         }
         return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     };
+    // heLandscapeWeights brings the fragment stage to 17 combined samplers, one over
+    // the spec minimum of the per-stage limits. A device AT that minimum gets the
+    // layout without its row (and layer-blend materials draw built-in, see drawDCVk)
+    // rather than a layout it cannot create. The line is the evidence either way.
+    // HE_VK_MAX_STAGE_SAMPLERS=<n> caps both limits as if the device reported n — the
+    // only way to walk the fallback on hardware that reports a million.
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        uint32_t maxSamplers = props.limits.maxPerStageDescriptorSamplers;
+        uint32_t maxImages   = props.limits.maxPerStageDescriptorSampledImages;
+        const char* cap = std::getenv("HE_VK_MAX_STAGE_SAMPLERS");
+        if (cap && *cap)
+        {
+            const uint32_t n = static_cast<uint32_t>(std::strtoul(cap, nullptr, 10));
+            maxSamplers = std::min(maxSamplers, n);
+            maxImages   = std::min(maxImages, n);
+        }
+        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages);
+        char line[384];
+        std::snprintf(line, sizeof line,
+            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
+            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s",
+            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentSamplerCount(false),
+            maxSamplers, maxImages, (cap && *cap) ? " (capped by HE_VK_MAX_STAGE_SAMPLERS)" : "",
+            m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)");
+        if (m_matLandscapeWeights) HE_LOG_INFO(RHI, "%s", line);
+        else                       HE_LOG_WARN(RHI, "%s", line);
+    }
     VkDescriptorSetLayoutBinding b[HE::vkmat::kBindingCount]{};
+    uint32_t nb = 0;
     for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
     {
-        b[i].binding         = HE::vkmat::kBindings[i].binding;
-        b[i].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
-        b[i].descriptorCount = 1;
-        b[i].stageFlags      = HE::vkmat::kBindings[i].stages;
+        if (!m_matLandscapeWeights && HE::vkmat::kBindings[i].binding == HE::vkmat::kLandscapeWeightsBinding)
+            continue;
+        b[nb].binding         = HE::vkmat::kBindings[i].binding;
+        b[nb].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
+        b[nb].descriptorCount = 1;
+        b[nb].stageFlags      = HE::vkmat::kBindings[i].stages;
+        ++nb;
     }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = HE::vkmat::kBindingCount;
+    slci.bindingCount = nb;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -2613,7 +2662,7 @@ void VulkanRenderer::createMaterialResources()
         using HE::vkmat::countOf;
         VkDescriptorPoolSize ps[3] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         countOf(DescKind::UniformBuffer)        * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b13,b15-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -2820,6 +2869,20 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
                                                       const MaterialShaderVariant* precompiled,
                                                       bool hdr, bool transparent)
 {
+    // A layer-blend graph samples heLandscapeWeights; on a device whose layout had to
+    // leave binding 14 out (createMaterialResources) its pipeline would be invalid. No
+    // pipeline then — drawDCVk draws it built-in PBR, the warm-up skips it. Checked
+    // HERE so both callers go through it.
+    if (!m_matLandscapeWeights && frag.find("heLandscapeWeights") != std::string::npos)
+    {
+        if (!m_matLandscapeWarned)
+        {
+            m_matLandscapeWarned = true;
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: a Landscape Layer Blend material draws built-in "
+                                   "PBR — this device has no sampler slot left for heLandscapeWeights");
+        }
+        return VK_NULL_HANDLE;
+    }
     // Cache key mixes the shader hash with the render-target + blend variant so LDR (swapchain)
     // / HDR (RGBA16F offscreen) / opaque / transparent pipelines never collide.
     const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
@@ -5046,6 +5109,11 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
         m_ssrRanThisFrame  = false;
         m_ssrResultView    = VK_NULL_HANDLE;
         m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;
+        // This frame's sun before DrawViewportFrame's first extraction, as in Render().
+        m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                                m_environment.sunColor, m_environment.sunIntensity,
+                                m_environment.moonColor, m_environment.moonIntensity,
+                                m_environment.cloudCoverage);
 
         // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
         // decal depth) are torn down and rebuilt, and the one-shot buffer below
@@ -6669,12 +6737,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // before any draw below can stall on them.
     drainMaterialWarmup(hdr);
 
-    // Feed time-of-day so the extractor recomputes the sun/moon direction (otherwise the
-    // sky never responds to the time slider). Mirrors OpenGL/Metal.
-    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
-                            m_environment.sunColor, m_environment.sunIntensity,
-                            m_environment.moonColor, m_environment.moonIntensity,
-                            m_environment.cloudCoverage);
+    // The day-night state (sun/moon direction for the sky and the lights) was
+    // fed once at the top of Render() / RenderSceneImage(), so this extraction
+    // sees the same sun as the cascades, GI and SSAO before it.
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
@@ -7174,6 +7239,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 if (VkImageView v = resolveGraphTexture(gIds[i], gPaths[i]))
                                     heTexP[i] = v;
                         }
+                        // heLandscapeWeights (binding 14) = the object's landscape weightmap,
+                        // PER DRAW like D3D11 t14 / GL unit 13 / Metal slot 13: it belongs to
+                        // the terrain the chunk is part of, not to the material. Anything that
+                        // is not a landscape chunk gets the 1x1 (1,0,0,0) default, so a layer
+                        // blend resolves to layer 0 instead of black; white is the last
+                        // resort. Resolved before `ma` below for the same reason as heTexP.
+                        VkImageView heWeights = VK_NULL_HANDLE;
+                        if (dc.weightmapTextureId != HE::UUID{})
+                            heWeights = resolveGraphTexture(dc.weightmapTextureId, {});
+                        if (!heWeights)
+                            heWeights = resolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+                        if (!heWeights) heWeights = m_whiteAlbedoView;
 
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
@@ -7352,9 +7429,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // HE_FORWARD_CLUSTER=0): a clustered pipeline statically uses
                             // them, so its set must be complete. Without them every
                             // pipeline is the plain variant, which uses none of the three.
-                            static_assert(HE::vkmat::kPreClusterBindingCount == 21,
-                                          "one fixed write (w[0..20]) per non-cluster layout row");
-                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount;
+                            // heLandscapeWeights (14): the weightmap resolved above,
+                            // linear-CLAMP like D3D11's s0 (a [0,1] weight field; a
+                            // repeating sampler would bleed the far edge's paint in).
+                            // Only when the layout has the row (m_matLandscapeWeights).
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 22,
+                                          "fixed writes w[0..20] + w[21] heLandscapeWeights, one per non-cluster row");
+                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 1;
+                            VkDescriptorImageInfo weightsII{ m_ssaoSampler ? m_ssaoSampler : m_albedoSampler,
+                                                             heWeights, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            if (m_matLandscapeWeights)
+                                wr(static_cast<int>(nWrites++), HE::vkmat::kLandscapeWeightsBinding,
+                                   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &weightsII);
                             VkDescriptorBufferInfo clusterBI[3]{};
                             if (m_clusterReady)
                             {
@@ -8655,8 +8741,8 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
 // Screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint B1). The
 // trace is a fragment shader over a rasterized pre-pass — no compute, no BVH,
 // no extension — so unlike the ray-traced GI it has no device gate here. What
-// it does need is the shader cross-compiler and the editor viewport's HDR
-// target; both are checked in ssrWantedThisFrame().
+// it does need is the shader cross-compiler and the post chain's HDR target
+// (editor viewport or packaged game); both are checked in ssrWantedThisFrame().
 void VulkanRenderer::SetShadowSettings(const ShadowSettings& s)
 {
     // The images are not touched here: this is called from the editor's frame
@@ -8793,6 +8879,14 @@ void VulkanRenderer::updateGiAccel()
             it = m_giHwBlasCache.emplace(id, buildGiHwBlas(id)).first;
         return it->second;
     };
+    // HE_GI_LOG_INSTANCES=N: log every instance's bounce colour once, on the
+    // N-th call — what the probe kernels multiply in (Thema 154 witness).
+    static const int s_giLogAt = [] {
+        const char* v = std::getenv("HE_GI_LOG_INSTANCES");
+        return v && *v ? std::atoi(v) : 0;
+    }();
+    static int s_giLogCall = 0;
+    const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
     for (const RenderObject& obj : m_renderWorld.objects)
     {
         if (!obj.castsShadow) continue;
@@ -8809,6 +8903,12 @@ void VulkanRenderer::updateGiAccel()
         inst.nodeOffset   = range.nodeOffset;
         inst.triOffset    = range.triOffset;
         instances.push_back(inst);
+        if (logInst)
+            HE_LOG_INFO(RHI, "VulkanRenderer: GI instance %zu pos (%.2f, %.2f, %.2f) mat %016llx "
+                        "baseColor (%.3f, %.3f, %.3f)", instances.size() - 1,
+                        obj.transform[3].x, obj.transform[3].y, obj.transform[3].z,
+                        static_cast<unsigned long long>(obj.materialAssetId.lo),
+                        inst.baseColor.r, inst.baseColor.g, inst.baseColor.b);
 
         if (hwAll)
         {
@@ -9988,19 +10088,22 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // Extract with the scene pass's aspect (Metal lesson 5846efc: a mismatched
     // camera misaligns the screen-space mask → swimming shadows).
     const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
-    // And with this frame's sun: runGi() runs before DrawScene(), which used to
-    // be the only place feeding the day-night state, so the GI mask traced
-    // against the previous frame's sun (Thema 131). Same call as DrawScene.
-    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
-                            m_environment.sunColor, m_environment.sunIntensity,
-                            m_environment.moonColor, m_environment.moonIntensity,
-                            m_environment.cloudCoverage);
+    // This frame's sun comes from the setDayNight() at the top of Render() /
+    // RenderSceneImage(): runGi() runs before DrawScene(), which used to be the
+    // only place feeding it, so the GI mask traced against the previous
+    // frame's sun (Thema 131).
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
     for (RenderObject& obj : m_renderWorld.objects)
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+    // The extractor leaves baseColor at white, and this extraction throws away
+    // DrawScene's resolve (which runs later anyway). Without it every GI
+    // instance bounced white: a red and a grey floor gave the same probe field,
+    // colour bleed exactly 0 (Thema 154). D3D11/D3D12 resolve right before
+    // their updateGiAccel as well.
+    HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
 
     updateGiAccel();
     if (m_giInstanceCount == 0) return;
@@ -11967,8 +12070,9 @@ void VulkanRenderer::destroySSRTargets()
 
 // One gate for the whole frame, asked before the pre-pass and again before the
 // trace. `m_postFxReady`/`m_hdrImage` are the honest part: this backend's only
-// HDR radiance source is the editor viewport's PostFX target (plan §2.2), so in
-// the swapchain path SSR is silently inactive rather than half-wired.
+// HDR radiance source is the PostFX target (plan §2.2) — the editor viewport's,
+// or the packaged game's since it runs the chain too (plan C6) — so in the
+// direct swapchain fallback SSR is silently inactive rather than half-wired.
 bool VulkanRenderer::ssrWantedThisFrame() const
 {
     return m_ssrEnabled && m_ssrIntensity > 0.0f && m_ssrReady

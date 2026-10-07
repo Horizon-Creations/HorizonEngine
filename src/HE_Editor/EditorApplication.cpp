@@ -6413,7 +6413,9 @@ void EditorApplication::dumpFrameHeadless()
 	// other branch: replaceTexture + a DEFERRED InvalidateTexture. This exercises
 	// that second branch, which is the only "runs once" asymmetry in the
 	// weightmap path. Works with or without HE_DUMP_LAYEREDIT.
-	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && m_editorWorld)
+	// HE_DUMP_LAYERREPAINT=mid paints halfway through the settle frames instead
+	// (below), once the backend has already resolved and cached the weightmap.
+	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && std::string(rp) != "mid" && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
 		for (auto [te, tc] : reg.view<TerrainComponent>().each())
@@ -7269,11 +7271,16 @@ void EditorApplication::dumpFrameHeadless()
 	// edge moves over a static receiver, the reprojection check passes,
 	// and only the neighbourhood clamp keeps the old edge from ghosting.
 	// Compare the capture against a static one at the same TOD. TWO frames run
-	// at the real TOD, not one: until Thema 131 step 6, Vulkan's runGi()
-	// extracted the scene before DrawScene() fed the extractor this frame's
-	// day-night state, so the GI mask saw a sun change one frame late. runGi()
-	// sets it itself now; the second frame stays so captures remain comparable
+	// at the real TOD by default, not one: until Thema 131 step 6, Vulkan's
+	// runGi() extracted the scene before DrawScene() fed the extractor this
+	// frame's day-night state, so the GI mask saw a sun change one frame late.
+	// Since Thema 146 every Vulkan pass gets the sun from one setDayNight() at
+	// the top of Render(); the second frame stays so captures remain comparable
 	// with ones taken on older builds.
+	// HE_DUMP_TODSTEPFRAMES=1 is the lag witness itself: only the captured frame
+	// runs at the real TOD, so a pass that still extracts with the previous
+	// frame's sun (CSM cascades with GI off, Thema 146) puts its shadows where
+	// a static capture at TOD - step has them.
 	if (const float todStep = mbEnvF("HE_DUMP_TODSTEP"); todStep != 0.0f && m_editorWorld)
 	{
 		const Entity envEntity = m_editorWorld->environmentEntity();
@@ -7287,10 +7294,13 @@ void EditorApplication::dumpFrameHeadless()
 				r->Render();
 			env->timeOfDay = tod;
 			pushEnvironment(0.0f);
+			int atTod = 2;
+			if (const char* sf = std::getenv("HE_DUMP_TODSTEPFRAMES"); sf && *sf)
+				atTod = std::clamp(std::atoi(sf), 1, 240);
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: HE_DUMP_TODSTEP moved the sun by " + std::to_string(todStep)
-				 + " of a day for the last two frames").c_str());
-			settleFrames = 2;
+				 + " of a day for the last " + std::to_string(atTod) + " frame(s)").c_str());
+			settleFrames = atTod;
 		}
 	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
@@ -7302,8 +7312,23 @@ void EditorApplication::dumpFrameHeadless()
 	// layer stay quiet.
 	const char* giRefit = std::getenv("HE_DUMP_GIREFIT");
 	const bool  giRefitWitness = giRefit && *giRefit && s_layerMatId != HE::UUID{};
+	// HE_DUMP_LAYERREPAINT=mid: the brush-stroke path on a weightmap the backend
+	// has ALREADY drawn with — replaceTexture + InvalidateTexture must make it
+	// drop its cached view and resolve the new texels. A green disc appears at
+	// (30, -25) in the capture; a stale cache keeps the red field there.
+	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
+	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (repaintMidWitness && i == settleFrames / 2)
+		{
+			for (auto [te, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+				TerrainPaint::paint(tc, 30.0f, -25.0f, /*layer*/1, 14.0f, 5.0f, 1.0f);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_LAYERREPAINT=mid painted before settle frame "
+				 + std::to_string(i)).c_str());
+		}
 		if (giRefitWitness && i == settleFrames / 2)
 		{
 			auto& reg  = m_editorWorld->registry();
