@@ -178,3 +178,90 @@ Ungeprüft:
 - die Rundungsart float→half
 - die Szene des Melders: Höhe und Koordinaten unbekannt; die Vermutung ist, dass sie bei |y| oder
   |x|, |z| ≳ 100 m liegt
+
+## 6. Schritt 2: Fix (`6d2753f2`) und Regressionstest (`15341488`)
+
+**Fix A, alle fünf Backends:** Das Positions-Target des GI-G-Buffers ist jetzt **RGBA32F**. Die
+Normalen bleiben RGBA16F. Es bleibt bei Formatänderungen, Shader und Konsumenten sind unverändert.
+Alle Leser holen die Position per `texelFetch`/`Load`/`read` oder über einen Point-Sampler, die
+Filterbarkeit von 32F spielt also keine Rolle (geprüft für Schattenkernel SW und HW, Temporal und
+À-trous auf allen fünf Backends).
+
+Kamerarelativ in fp16 wurde verworfen: Der Fehler wüchse dann mit dem Abstand zur Kamera statt zum
+Ursprung, und Terrain ab ~128 m vor der Kamera bekäme die Bänder zurück.
+
+Formatstellen:
+
+- Vulkan: `kGiGBufPosFormat`, Attachment 0 des G-Buffer-Render-Pass und das Image
+- D3D11: die Textur; RTV und SRV folgen ihr per `nullptr`-Desc
+- D3D12: eine Konstante `kGiGBufPosFormat` für Textur, `RTVFormats[0]` und alle sechs SRVs (Slots
+  0, 8, 11 und `atrousBase+1`)
+- GL: `GL_RGBA32F`
+- Metal: `kGiGBufPosFormat` für Textur und Pipeline; der Normalen-Descriptor ist abgetrennt.
+  **Metal ist nicht gebaut** (kein Mac).
+
+**Fix B, nur Vulkan/D3D11/D3D12:** Der GI-Zweig des eingebauten Shaders addiert jetzt wie GL und
+Metal `ambient * albedo * (1 - metallic)`. `RenderWorld::ambient` kommt dafür als neues, zuletzt
+angehängtes vec4 in Frame-UBO bzw. PerFrame-cbuffer. Der Nicht-GI-Zweig ist unberührt.
+
+Offen gelassen, weil es nicht zur Streifen-Ursache gehört: Der GI-Term selbst nutzt auf Vulkan/D3D
+`base * kd` mit `kd = (1 - F0)(1 - met)`, auf GL/Metal `albedo * (1 - metallic)`. Das ist ein
+Unterschied von rund 4 % (`F0` = 0,04).
+
+### Messung
+
+RTX 4070, Release `C:\hw159`, `cap159.ps1` wie in §1. Verglichen werden der Vorher-Deploy (Stand
+`d1b8c36a`, mit LANDY-Zeugen, `C:\hw159\pre2`) und der Fix-Deploy.
+
+Streifenenergie = mittlere |Δ Luminanz| zwischen vertikal benachbarten Pixeln, Box Terrain
+(x 8–92 %, y 78–98 %) bzw. Kugel (x 37–63 %, y 17–47 %).
+
+| Fall | GL vorher → nachher | Vulkan | D3D11 | D3D12 |
+|---|---|---|---|---|
+| Mountain y = 300, GI an, Kugel | 6,09 → 0,45 | 5,12 → 0,64 | 6,11 → 0,55 | 6,11 → 0,55 |
+| Layers y = 300, GI an, Terrain | 4,34 → 0,15 | 5,22 → 0,15 | 5,22 → 0,15 | 5,22 → 0,15 |
+| Layers y = 300, GI an, Kugel | 5,58 → 0,41 | 5,58 → 0,41 | 5,63 → 0,41 | 5,63 → 0,41 |
+| Mountain y = 0, GI an, Kugel | 0,45 → 0,45 | 0,73 → 0,64 | 0,64 → 0,55 | 0,64 → 0,55 |
+
+Vorher gegen nachher, mean |Δ| / max |Δ| (8-Bit-Stufen):
+
+| Fall | GL | Vulkan | D3D11 | D3D12 |
+|---|---|---|---|---|
+| GI aus, y = 300 | **0 / 0** | **0 / 0** | **0 / 0** | **0 / 0** |
+| GI aus, y = 0 | **0 / 0** | **0 / 0** | **0 / 0** | **0 / 0** |
+| GI an, y = 0 | 0,019 / 103 (0,17 % px) | 5,78 / 65 | 7,78 / 82 | 7,78 / 82 |
+| GI an, y = 300 | 52,0 / 143 | 35,5 / 130 | 48,8 / 143 | 48,8 / 143 |
+
+- **GI aus ist auf allen vier Backends bytegleich.**
+- **GL bei y = 0, GI an:** Abweichung nur auf der 1-Pixel-Penumbrakante des Kugelschattens. Der
+  Strahlursprung verschiebt sich um Bruchteile eines Zentimeters. Rauschboden derselben Aufnahme
+  zweimal: max |Δ| 1, vorher wie nachher. Die Abweichung ist deterministisch und optisch nicht zu
+  sehen. Das ist die erwartete Wirkung von fp32, kein Fehler.
+- **Vulkan/D3D bei y = 0, GI an:** Die Aufhellung kommt aus Fix B, das Terrain geht von 177/165 auf
+  186/177 (GL 220). Sie ist gewollt.
+- **Mountain y = 300 gegen y = 0 nach dem Fix:** Die mittlere Terrain-Luminanz ist auf jedem Backend
+  gleich (GL 219,6, Vulkan 186,2, D3D 176,5). Die Höhe spielt also keine Rolle mehr.
+- **Validation:**
+  - D3D12 mit `HE_GPU_DEBUG=1`: 0 Fehler, nur die bekannte Warnung „Ignoring InitialState“ der Buffer.
+  - Vulkan: vorher und nachher dieselben Meldungen (`gi_layout`, `mat_ubo`), keine neue.
+
+### Regressionstest
+
+`scripts/he_vk_imagetests.py`, Fall `gi_stripes`:
+
+- Szene: Layers-Terrain + Graph-Kugel auf y = 300, GI aus/an
+- neues Urteil `stripes`: Streifenenergie je Box ≤ `STRIPE_MAX` = 2,0
+
+Positivkontrolle auf der RTX (`--require-device RTX`):
+
+| Deploy | gi_on Terrain / Kugel | gi_off | Urteil |
+|---|---|---|---|
+| vor dem Fix | 5,273 / 5,632 | 0,24 / 0,419 | **FAIL** |
+| mit Fix | 0,149 / 0,412 | 0,24 / 0,419 | ok |
+
+Auf lavapipe in CI ist der Fall noch nicht gelaufen. Die Rundung float→half dort kann vom Treiber
+abhängen. Bei Rundung zur nächsten Zahl ist die halbe ULP bei y = 300 aber 0,125 m und damit immer
+noch größer als 5 cm.
+
+`he_tests` (Release, scratch APPDATA): 4234/4236. Die zwei Fehlschläge sind die bekannten
+`inspector_ui`-Clipboard-Fälle auf NN-WS03.
