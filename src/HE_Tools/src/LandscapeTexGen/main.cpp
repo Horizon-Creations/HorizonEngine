@@ -191,7 +191,7 @@ int main(int argc, char** argv)
             a.width     = kSize;
             a.height    = kSize;
             a.channels  = 4;
-            a.mipLevels = 1;             // the renderers build the chain at upload
+            a.mipLevels = 1;             // level 0 only, like TextureImporter (GL/Metal mip at upload, D3D/Vulkan do not)
             a.format    = TextureFormat::RGBA8;
             a.srgb      = (map == Albedo);
             a.data      = makeMap(L, static_cast<Map>(map));

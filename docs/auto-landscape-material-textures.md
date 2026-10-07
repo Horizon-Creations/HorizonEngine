@@ -200,10 +200,24 @@ zum Thema). Der freie Slot `heTexP3` hält sie sich nur offen.
 ### 4.4 Zielordner, offene Entscheidung
 
 Die Platzhalter liegen als Engine-Assets in
-`EditorDeps/EngineContent/Textures/Landscape/` (§6). Die echten Texturen gehören
-an dieselben Asset-Pfade. Ein Re-Import auf eine vorhandene Datei behält deren
-UUID (`ImporterCommon.cpp:322-324`) und deren sRGB-Flag (`ImporterCommon.cpp:845`).
-Verweise aus Materialien bleiben so heil.
+`EditorDeps/EngineContent/Textures/Landscape/` (§6). Materialien sprechen sie über
+das reservierte Präfix `Engine/` an
+(`Engine/Textures/Landscape/T_Landscape_<Schicht>_<Map>.hasset`,
+`src/HE_Core/src/ContentManager/ContentManager.cpp:936`). Die echten Texturen
+ersetzen genau diese Dateien. **Einfach importieren reicht dafür nicht:** Ein
+normaler Import von `Grass_Albedo.png` schreibt `Grass_Albedo.hasset` (Name aus
+dem Quell-Stamm) und legt eine neue UUID an. Ersetzt wird auf einem dieser Wege:
+
+- mit einem Import, dessen Ausgabe-Ziel ausdrücklich auf
+  `T_Landscape_Grass_Albedo.hasset` zeigt. Ein Import auf eine vorhandene Datei
+  behält deren UUID (`ImporterCommon.cpp:322-324`) und deren sRGB-Flag
+  (`ImporterCommon.cpp:845`).
+- oder mit dem noch fehlenden Pack-Schritt (§3). Er liest die Einzel-PNGs und
+  schreibt die `T_Landscape_*`-Dateien mit denselben festen UUIDs
+  (`hi` = 0x400 + Index, §6).
+
+Weil die UUIDs fest sind, bleiben die Verweise aus Materialien heil, egal welches
+Werkzeug die Dateien neu schreibt.
 
 **Offen, das entscheidet der Mensch: wohin mit den großen Dateien?** Das Repo hat
 **kein Git LFS**, und Binär-Ballast wurde schon einmal aus der Historie gepurgt.
@@ -235,8 +249,8 @@ für ein kachelndes Terrain nicht.
 
 `EditorDeps/EngineContent/Textures/Landscape/` enthält 15 kleine Texturen, je Schicht
 eine Albedo, eine Normal und eine Maske. Sie sind 128 × 128 groß, bereits im
-Engine-Format (`.hasset`, RGBA8, Mips erzeugt der Renderer zur Laufzeit) und
-bereits gepackt wie in §3:
+Engine-Format (`.hasset`, RGBA8, nur Mip 0, siehe Warnung unten) und bereits
+gepackt wie in §3:
 
 | Schicht | Albedo-Grundton | Rauheit (G der Maske) | Höhenmuster |
 |---|---|---|---|
@@ -270,3 +284,21 @@ Erzeugt werden sie deterministisch mit `landscape_tex_gen`
 ```
 landscape_tex_gen EditorDeps/EngineContent/Textures/Landscape
 ```
+
+Ins Editor-Deploy kommen sie nur, wenn `HorizonEditor` neu linkt. Erst dann
+kopiert sein POST_BUILD ganz `EditorDeps/` (`src/HE_Editor/CMakeLists.txt:442-447`).
+macOS packt ganz `EngineContent/` (`scripts/package_macos.sh:190`).
+
+**Warnung für den Backend-Vergleich (Schritt 5): Mips sind nicht gleich.** Eine
+Textur mit `mipLevels = 1` bekommt auf OpenGL und Metal zur Laufzeit eine
+Mip-Kette (`OpenGLRenderer.cpp:7867`, `MetalRenderer.mm:12621`). D3D11, D3D12
+und Vulkan laden dagegen genau die gespeicherten Level hoch
+(`D3D11Renderer.cpp:4236`, `D3D12Renderer.cpp:3662`, `VulkanRenderer.cpp:5901`),
+also nur Mip 0. Das betrifft die Platzhalter und genauso jede normal importierte
+Textur, denn `TextureImporter` schreibt ebenfalls nur Level 0. Fernes Terrain
+flimmert dann auf D3D und Vulkan und ist auf GL und Metal gefiltert. Ein
+Bildvergleich scheitert so aus einem Grund, der mit dem Material nichts zu tun hat.
+Abhilfe, offen für einen späteren Schritt:
+- die Mip-Kette vorab backen, im Generator bzw. Pack-Schritt oder im Importer
+  (GL nimmt eine vorgebackene Kette schon an, `OpenGLRenderer.cpp:7849`)
+- oder auf D3D und Vulkan beim Hochladen Mips erzeugen
