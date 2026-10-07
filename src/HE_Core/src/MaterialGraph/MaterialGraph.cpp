@@ -649,22 +649,28 @@ std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv, const s
     return g;
 }
 
-// Emit one node (memoized per scope); returns the expression for output pin `pin`.
-std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
+// emitNode's node switch, split by family into functions that are never
+// inlined. MSVC gives a function ONE stack frame for the temporaries of all
+// its cases: the single switch held ~27 KB per recursion level in a Release
+// build, and emitNode recurses once per graph level (emitNode -> inputExpr ->
+// emitNode), so the 151-node auto landscape graph needed 0.9 MB of stack and
+// overflowed the editor's 1 MB main thread on Windows (Thema 158, Schritt 7).
+// Split, only the frame of the family being emitted sits on the stack per
+// level. Cases are moved verbatim: the emitted text is byte-identical.
+// Each returns false for a node type it does not own.
+#if defined(_MSC_VER)
+#define HE_MG_NOINLINE __declspec(noinline)
+#else
+#define HE_MG_NOINLINE __attribute__((noinline))
+#endif
+
+std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin);
+
+// Inputs, constants, parameters: no recursion.
+HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                 std::string& decl, std::vector<std::string>& pinExpr)
 {
-    const std::string memoKey = sc.key + ":" + std::to_string(n.id) + ":" + std::to_string(pin);
-    if (auto it = c.outVar.find(memoKey); it != c.outVar.end()) return it->second;
-    const std::string cycleKey = sc.key + ":" + std::to_string(n.id);
-    if (c.emitting.count(cycleKey))
-        return "vec3(1.0, 0.0, 1.0)"; // cycle → magenta
-    c.emitting.insert(cycleKey);
-
-    const MatNodeDesc& d = matNodeDesc(n.type);
-    const std::string v = "n" + std::to_string(++c.varCounter);
-    std::string decl;
-    // Per-pin result expressions; default = the single variable for every pin.
-    std::vector<std::string> pinExpr;
-
+    (void)sc;
     switch (n.type)
     {
         case MatNodeType::ConstFloat:
@@ -687,6 +693,141 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             break;
         case MatNodeType::Time:
             decl = "float " + v + " = heLight.sunDir.w;"; break;
+        case MatNodeType::Fresnel:
+            decl = "float " + v + " = pow(1.0 - max(dot(normalize(vNormal), "
+                   "normalize(heLight.camPos.xyz - vWorldPos)), 0.0), "
+                 + fmtF(std::max(n.p[0], 0.01f)) + ");"; break;
+
+        case MatNodeType::WorldPos:
+            decl = "vec3 " + v + " = vWorldPos;"; break;
+        case MatNodeType::ViewDir:
+            decl = "vec3 " + v + " = normalize(heLight.camPos.xyz - vWorldPos);"; break;
+        case MatNodeType::ParamFloat:
+        {
+            // Over budget (slot < 0) → bake the authored default; see paramSlot.
+            const int slot = paramSlot(c, n, MatParamKind::Float);
+            decl = "float " + v + " = "
+                 + (slot < 0 ? fmtF(n.p[0]) : "heParams.v[" + std::to_string(slot) + "].x")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
+            break;
+        }
+        case MatNodeType::ParamColor:
+        {
+            const int slot = paramSlot(c, n, MatParamKind::Color);
+            decl = "vec3 " + v + " = "
+                 + (slot < 0 ? "vec3(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", " + fmtF(n.p[2]) + ")"
+                             : "heParams.v[" + std::to_string(slot) + "].xyz")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
+            break;
+        }
+        case MatNodeType::NoiseTexture:
+        {
+            // Self-contained procedural texture: 3D fbm over WORLD-SPACE position, no input
+            // pins. World position (not UV) so it works on ANY mesh — a cube with no UVs
+            // has vUV = 0 everywhere, which would collapse UV noise to a single value.
+            // Output as grayscale RGB (multiply against a colour → mottling) and raw Value.
+            c.usesNoise3 = true;
+            const float scale = n.p[0] > 0.01f ? n.p[0] : 0.01f;
+            decl = "float " + v + " = heFbm3(vWorldPos * " + fmtF(scale) + ");";
+            pinExpr = { "vec3(" + v + ")", v };
+            break;
+        }
+
+        // ── v4 inputs ──
+        case MatNodeType::ConstVec2:
+            decl = "vec2 " + v + " = vec2(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ");"; break;
+        case MatNodeType::ConstVec4:
+            decl = "vec4 " + v + " = vec4(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", "
+                 + fmtF(n.p[2]) + ", " + fmtF(n.p[3]) + ");"; break;
+        case MatNodeType::CameraPos:
+            decl = "vec3 " + v + " = heLight.camPos.xyz;"; break;
+        case MatNodeType::CameraDistance:
+            decl = "float " + v + " = length(heLight.camPos.xyz - vWorldPos);"; break;
+        case MatNodeType::ScreenPos:
+            decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
+
+        // ── v11: the widget under the pixel (D5 Schicht 1) ──
+        // All of these read heUI, which is a uniform block in a UI material and a
+        // compile-time constant everywhere else — so there is one node text, not
+        // one per domain, and nothing to fold.
+        case MatNodeType::ElementSize:
+            c.usesUI = true;
+            decl = "vec2 " + v + " = heUI.rect.xy;";
+            pinExpr = { v, v + ".x", v + ".y" };
+            break;
+        case MatNodeType::ElementUV:
+            // The element's own 0..1, deliberately NOT the UV node: that one bakes
+            // tiling/offset, and a tiled element UV is no longer the element's.
+            decl = "vec2 " + v + " = vUV;"; break;
+        case MatNodeType::BorderDistance:
+            c.usesUI = true; c.usesUISdf = true;
+            // Negated: the SDF is negative inside, and "how far am I from the edge"
+            // is a number that grows as you walk inwards.
+            decl = "float " + v + " = -heUIBoxSDF((vUV - 0.5) * heUI.rect.xy, "
+                   "heUI.rect.xy * 0.5, heUI.radius);";
+            break;
+        case MatNodeType::ElementState:
+            c.usesUI = true;
+            decl = "vec4 " + v + " = heUI.state;";
+            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
+            break;
+
+        // ── v5: baked constants, parameter types, logic ──
+        case MatNodeType::ConstBool:
+            decl = "float " + v + " = " + (n.p[0] > 0.5f ? "1.0" : "0.0") + ";"; break;
+        case MatNodeType::ParamVec2:
+        {
+            const int slot = paramSlot(c, n, MatParamKind::Vec2);
+            decl = "vec2 " + v + " = "
+                 + (slot < 0 ? "vec2(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ")"
+                             : "heParams.v[" + std::to_string(slot) + "].xy")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
+            break;
+        }
+        case MatNodeType::ParamVec4:
+        {
+            const int slot = paramSlot(c, n, MatParamKind::Vec4);
+            decl = "vec4 " + v + " = "
+                 + (slot < 0 ? "vec4(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", "
+                                       + fmtF(n.p[2]) + ", " + fmtF(n.p[3]) + ")"
+                             : "heParams.v[" + std::to_string(slot) + "]")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
+            break;
+        }
+        case MatNodeType::ParamBool:
+        {
+            const int slot = paramSlot(c, n, MatParamKind::Bool);
+            // Threshold so a bool param reads cleanly as 0.0/1.0 even if set to e.g. 0.7.
+            // Over budget the threshold is applied at bake time (same as ConstBool).
+            decl = "float " + v + " = "
+                 + (slot < 0 ? std::string(n.p[0] > 0.5f ? "1.0" : "0.0")
+                             : "step(0.5, heParams.v[" + std::to_string(slot) + "].x)")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
+            break;
+        }
+
+        case MatNodeType::Wind:
+            // Both stages declare the lighting prefix these channels live in
+            // (the fragment preamble and the WPO vertex declarations), so the
+            // text is the same.
+            decl = "vec3 " + v + " = vec3(heLight.sunColor.w, 0.0, heLight.ambient.w);"
+                 + " float " + v + "_s = heLight.camPos.w;";
+            pinExpr = { v, v + "_s", "(" + v + " * " + v + "_s)" };
+            break;
+
+        case MatNodeType::Output:
+            decl = ""; break; // handled by generateFragment
+        default: return false;
+    }
+    return true;
+}
+
+// Texture reads.
+HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                    std::string& decl, std::vector<std::string>& pinExpr)
+{
+    switch (n.type)
+    {
         case MatNodeType::TextureSample:
         {
             const std::string sampler = textureSampler(c, n);
@@ -736,6 +877,17 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             }
             break;
         }
+        default: return false;
+    }
+    return true;
+}
+
+// Texture bombing.
+HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                 std::string& decl, std::vector<std::string>& pinExpr)
+{
+    switch (n.type)
+    {
         case MatNodeType::TextureBombSample:
         case MatNodeType::NormalMapBombSample:
         case MatNodeType::TextureArrayBombSample:
@@ -788,6 +940,18 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             }
             break;
         }
+        default: return false;
+    }
+    return true;
+}
+
+// Landscape layer blend.
+HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                       std::string& decl, std::vector<std::string>& pinExpr)
+{
+    (void)pinExpr;
+    switch (n.type)
+    {
         case MatNodeType::LandscapeLayerBlend:
         {
             // One input per named layer, weighted by the landscape's painted
@@ -853,6 +1017,18 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                  + layer0 + ";";
             break;
         }
+        default: return false;
+    }
+    return true;
+}
+
+// Arithmetic.
+HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                 std::string& decl, std::vector<std::string>& pinExpr)
+{
+    (void)pinExpr;
+    switch (n.type)
+    {
         case MatNodeType::Add:
             decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " + " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
         case MatNodeType::Multiply:
@@ -870,36 +1046,9 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "float " + v + " = dot(" + inputExpr(c, sc, n, 0, F::Vec3) + ", " + inputExpr(c, sc, n, 1, F::Vec3) + ");"; break;
         case MatNodeType::Sine:
             decl = "float " + v + " = sin(" + inputExpr(c, sc, n, 0, F::Float) + ");"; break;
-        case MatNodeType::Fresnel:
-            decl = "float " + v + " = pow(1.0 - max(dot(normalize(vNormal), "
-                   "normalize(heLight.camPos.xyz - vWorldPos)), 0.0), "
-                 + fmtF(std::max(n.p[0], 0.01f)) + ");"; break;
         case MatNodeType::Combine3:
             decl = "vec3 " + v + " = vec3(" + inputExpr(c, sc, n, 0, F::Float) + ", "
                  + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
-
-        case MatNodeType::WorldPos:
-            decl = "vec3 " + v + " = vWorldPos;"; break;
-        case MatNodeType::ViewDir:
-            decl = "vec3 " + v + " = normalize(heLight.camPos.xyz - vWorldPos);"; break;
-        case MatNodeType::ParamFloat:
-        {
-            // Over budget (slot < 0) → bake the authored default; see paramSlot.
-            const int slot = paramSlot(c, n, MatParamKind::Float);
-            decl = "float " + v + " = "
-                 + (slot < 0 ? fmtF(n.p[0]) : "heParams.v[" + std::to_string(slot) + "].x")
-                 + "; // param: " + (n.s.empty() ? "?" : n.s);
-            break;
-        }
-        case MatNodeType::ParamColor:
-        {
-            const int slot = paramSlot(c, n, MatParamKind::Color);
-            decl = "vec3 " + v + " = "
-                 + (slot < 0 ? "vec3(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", " + fmtF(n.p[2]) + ")"
-                             : "heParams.v[" + std::to_string(slot) + "].xyz")
-                 + "; // param: " + (n.s.empty() ? "?" : n.s);
-            break;
-        }
         case MatNodeType::Subtract:
             decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " - " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
         case MatNodeType::Divide:
@@ -917,6 +1066,68 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                  + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
         case MatNodeType::Normalize3:
             decl = "vec3 " + v + " = normalize(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
+        default: return false;
+    }
+    return true;
+}
+
+// Logic and vector packing.
+HE_MG_NOINLINE bool emitLogicNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                  std::string& decl, std::vector<std::string>& pinExpr)
+{
+    switch (n.type)
+    {
+        // ── v3 ──
+        case MatNodeType::SplitRGBA:
+            decl = "vec4 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec4) + ";";
+            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
+            break;
+        case MatNodeType::CombineRGBA:
+            decl = "vec4 " + v + " = vec4(" + inputExpr(c, sc, n, 0, F::Float) + ", "
+                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ", "
+                 + inputExpr(c, sc, n, 3, F::Float) + ");"; break;
+        case MatNodeType::If:
+            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 2, F::Vec3) + ", "
+                 + inputExpr(c, sc, n, 1, F::Vec3) + ", step(0.5, "
+                 + inputExpr(c, sc, n, 0, F::Float) + "));"; break;
+        case MatNodeType::Greater:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > "
+                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        case MatNodeType::Less:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " < "
+                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        case MatNodeType::GreaterEqual:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " >= "
+                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        case MatNodeType::LessEqual:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= "
+                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        case MatNodeType::Equal:
+            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
+                 + inputExpr(c, sc, n, 1, F::Float) + ") < 1e-4);"; break;
+        case MatNodeType::NotEqual:
+            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
+                 + inputExpr(c, sc, n, 1, F::Float) + ") >= 1e-4);"; break;
+        case MatNodeType::And:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 && "
+                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        case MatNodeType::Or:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 || "
+                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        case MatNodeType::Not:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= 0.5);"; break;
+        default: return false;
+    }
+    return true;
+}
+
+// Uv animation and procedural patterns.
+HE_MG_NOINLINE bool emitPatternNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                    std::string& decl, std::vector<std::string>& pinExpr)
+{
+    (void)pinExpr;
+    switch (n.type)
+    {
         case MatNodeType::Panner:
             decl = "vec2 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec2) + " + vec2("
                  + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float)
@@ -936,6 +1147,17 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "float " + v + " = mod(floor(" + uv + ".x * " + sc2 + ") + floor("
                  + uv + ".y * " + sc2 + "), 2.0);"; break;
         }
+        default: return false;
+    }
+    return true;
+}
+
+// Switches, reroutes and function inlining.
+HE_MG_NOINLINE bool emitFlowNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                 std::string& decl, std::vector<std::string>& pinExpr)
+{
+    switch (n.type)
+    {
         case MatNodeType::StaticSwitch:
         {
             // COMPILE-TIME branch: resolve the value now (override map beats the node
@@ -957,28 +1179,6 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             // Editor-only routing pin: emit a plain pass-through so downstream coercion
             // sees exactly what was fed in (memoized like any node, so no duplication).
             decl = "vec4 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec4) + ";"; break;
-        case MatNodeType::NoiseTexture:
-        {
-            // Self-contained procedural texture: 3D fbm over WORLD-SPACE position, no input
-            // pins. World position (not UV) so it works on ANY mesh — a cube with no UVs
-            // has vUV = 0 everywhere, which would collapse UV noise to a single value.
-            // Output as grayscale RGB (multiply against a colour → mottling) and raw Value.
-            c.usesNoise3 = true;
-            const float scale = n.p[0] > 0.01f ? n.p[0] : 0.01f;
-            decl = "float " + v + " = heFbm3(vWorldPos * " + fmtF(scale) + ");";
-            pinExpr = { "vec3(" + v + ")", v };
-            break;
-        }
-
-        // ── v3 ──
-        case MatNodeType::SplitRGBA:
-            decl = "vec4 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec4) + ";";
-            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
-            break;
-        case MatNodeType::CombineRGBA:
-            decl = "vec4 " + v + " = vec4(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ", "
-                 + inputExpr(c, sc, n, 3, F::Float) + ");"; break;
         case MatNodeType::FnInput:
         {
             // Inside a function scope: resolve to the matching call-node input in the
@@ -1034,33 +1234,17 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = ""; // outputs are the inlined FnOutput vars — no own declaration
             break;
         }
+        default: return false;
+    }
+    return true;
+}
 
-        // ── v4 inputs ──
-        case MatNodeType::ConstVec2:
-            decl = "vec2 " + v + " = vec2(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ");"; break;
-        case MatNodeType::ConstVec4:
-            decl = "vec4 " + v + " = vec4(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", "
-                 + fmtF(n.p[2]) + ", " + fmtF(n.p[3]) + ");"; break;
-        case MatNodeType::CameraPos:
-            decl = "vec3 " + v + " = heLight.camPos.xyz;"; break;
-        case MatNodeType::CameraDistance:
-            decl = "float " + v + " = length(heLight.camPos.xyz - vWorldPos);"; break;
-        case MatNodeType::ScreenPos:
-            decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
-
-        // ── v11: the widget under the pixel (D5 Schicht 1) ──
-        // All of these read heUI, which is a uniform block in a UI material and a
-        // compile-time constant everywhere else — so there is one node text, not
-        // one per domain, and nothing to fold.
-        case MatNodeType::ElementSize:
-            c.usesUI = true;
-            decl = "vec2 " + v + " = heUI.rect.xy;";
-            pinExpr = { v, v + ".x", v + ".y" };
-            break;
-        case MatNodeType::ElementUV:
-            // The element's own 0..1, deliberately NOT the UV node: that one bakes
-            // tiling/offset, and a tiled element UV is no longer the element's.
-            decl = "vec2 " + v + " = vUV;"; break;
+// Widget shapes.
+HE_MG_NOINLINE bool emitUiNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                               std::string& decl, std::vector<std::string>& pinExpr)
+{
+    switch (n.type)
+    {
         case MatNodeType::RoundedRectSDF:
         {
             c.usesUI = true; c.usesUISdf = true;
@@ -1073,18 +1257,6 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             pinExpr = { v, "clamp(0.5 - " + v + ", 0.0, 1.0)" };
             break;
         }
-        case MatNodeType::BorderDistance:
-            c.usesUI = true; c.usesUISdf = true;
-            // Negated: the SDF is negative inside, and "how far am I from the edge"
-            // is a number that grows as you walk inwards.
-            decl = "float " + v + " = -heUIBoxSDF((vUV - 0.5) * heUI.rect.xy, "
-                   "heUI.rect.xy * 0.5, heUI.radius);";
-            break;
-        case MatNodeType::ElementState:
-            c.usesUI = true;
-            decl = "vec4 " + v + " = heUI.state;";
-            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
-            break;
         case MatNodeType::Backdrop:
         {
             const std::string rad = inputExpr(c, sc, n, 0, F::Float);
@@ -1101,79 +1273,18 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                 decl = "vec3 " + v + " = vec3(0.0) * " + rad + "; // Backdrop: UI domain only";
             break;
         }
+        default: return false;
+    }
+    return true;
+}
 
-        // ── v5: baked constants, parameter types, logic ──
-        case MatNodeType::ConstBool:
-            decl = "float " + v + " = " + (n.p[0] > 0.5f ? "1.0" : "0.0") + ";"; break;
-        case MatNodeType::ParamVec2:
-        {
-            const int slot = paramSlot(c, n, MatParamKind::Vec2);
-            decl = "vec2 " + v + " = "
-                 + (slot < 0 ? "vec2(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ")"
-                             : "heParams.v[" + std::to_string(slot) + "].xy")
-                 + "; // param: " + (n.s.empty() ? "?" : n.s);
-            break;
-        }
-        case MatNodeType::ParamVec4:
-        {
-            const int slot = paramSlot(c, n, MatParamKind::Vec4);
-            decl = "vec4 " + v + " = "
-                 + (slot < 0 ? "vec4(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", "
-                                       + fmtF(n.p[2]) + ", " + fmtF(n.p[3]) + ")"
-                             : "heParams.v[" + std::to_string(slot) + "]")
-                 + "; // param: " + (n.s.empty() ? "?" : n.s);
-            break;
-        }
-        case MatNodeType::ParamBool:
-        {
-            const int slot = paramSlot(c, n, MatParamKind::Bool);
-            // Threshold so a bool param reads cleanly as 0.0/1.0 even if set to e.g. 0.7.
-            // Over budget the threshold is applied at bake time (same as ConstBool).
-            decl = "float " + v + " = "
-                 + (slot < 0 ? std::string(n.p[0] > 0.5f ? "1.0" : "0.0")
-                             : "step(0.5, heParams.v[" + std::to_string(slot) + "].x)")
-                 + "; // param: " + (n.s.empty() ? "?" : n.s);
-            break;
-        }
-        case MatNodeType::If:
-            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 2, F::Vec3) + ", "
-                 + inputExpr(c, sc, n, 1, F::Vec3) + ", step(0.5, "
-                 + inputExpr(c, sc, n, 0, F::Float) + "));"; break;
-        case MatNodeType::Greater:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
-        case MatNodeType::Less:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " < "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
-        case MatNodeType::GreaterEqual:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " >= "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
-        case MatNodeType::LessEqual:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
-        case MatNodeType::Equal:
-            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") < 1e-4);"; break;
-        case MatNodeType::NotEqual:
-            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") >= 1e-4);"; break;
-        case MatNodeType::And:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 && "
-                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
-        case MatNodeType::Or:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 || "
-                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
-        case MatNodeType::Not:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= 0.5);"; break;
-
-        case MatNodeType::Wind:
-            // Both stages declare the lighting prefix these channels live in
-            // (the fragment preamble and the WPO vertex declarations), so the
-            // text is the same.
-            decl = "vec3 " + v + " = vec3(heLight.sunColor.w, 0.0, heLight.ambient.w);"
-                 + " float " + v + "_s = heLight.camPos.w;";
-            pinExpr = { v, v + "_s", "(" + v + " * " + v + "_s)" };
-            break;
+// Wind sway.
+HE_MG_NOINLINE bool emitWindSwayNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                     std::string& decl, std::vector<std::string>& pinExpr)
+{
+    (void)pinExpr;
+    switch (n.type)
+    {
         case MatNodeType::WindSway:
         {
             // The WPO body is emitted in scope "vs"; a function called from it
@@ -1209,10 +1320,39 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                   + " * " + v + "_b * " + v + "_h);";
             break;
         }
-
-        case MatNodeType::Output:
-            decl = ""; break; // handled by generateFragment
+        default: return false;
     }
+    return true;
+}
+
+// Emit one node (memoized per scope); returns the expression for output pin `pin`.
+std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
+{
+    const std::string memoKey = sc.key + ":" + std::to_string(n.id) + ":" + std::to_string(pin);
+    if (auto it = c.outVar.find(memoKey); it != c.outVar.end()) return it->second;
+    const std::string cycleKey = sc.key + ":" + std::to_string(n.id);
+    if (c.emitting.count(cycleKey))
+        return "vec3(1.0, 0.0, 1.0)"; // cycle → magenta
+    c.emitting.insert(cycleKey);
+
+    const MatNodeDesc& d = matNodeDesc(n.type);
+    const std::string v = "n" + std::to_string(++c.varCounter);
+    std::string decl;
+    // Per-pin result expressions; default = the single variable for every pin.
+    std::vector<std::string> pinExpr;
+
+    // The first family that owns n.type fills decl / pinExpr. A type none owns
+    // declares nothing and every pin reads the variable, as before the split.
+    (void)(emitLeafNode(c, sc, n, v, decl, pinExpr)
+        || emitTextureNode(c, sc, n, v, decl, pinExpr)
+        || emitBombNode(c, sc, n, v, decl, pinExpr)
+        || emitLayerBlendNode(c, sc, n, v, decl, pinExpr)
+        || emitMathNode(c, sc, n, v, decl, pinExpr)
+        || emitLogicNode(c, sc, n, v, decl, pinExpr)
+        || emitPatternNode(c, sc, n, v, decl, pinExpr)
+        || emitFlowNode(c, sc, n, v, decl, pinExpr)
+        || emitUiNode(c, sc, n, v, decl, pinExpr)
+        || emitWindSwayNode(c, sc, n, v, decl, pinExpr));
 
     if (!decl.empty())
         c.body += "    " + decl + "\n";

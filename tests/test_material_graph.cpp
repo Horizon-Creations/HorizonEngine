@@ -5914,3 +5914,90 @@ TEST_CASE("GL links a WPO material: HeLighting is the same block in both stages"
 	}
 }
 #endif // HE_TESTS_HAVE_SHADERC
+
+// ═══ Codegen stack depth (Thema 158, Schritt 7) ══════════════════════════════
+// emitNode recurses once per graph level (emitNode -> inputExpr -> emitNode).
+// With the whole node switch in one function MSVC reserved one frame for every
+// case's temporaries: ~26 KB per level in Release, ~43 KB in Debug. The auto
+// landscape graph needed 0.84-0.96 MB of stack and crashed the editor's 1 MB
+// main thread at random on Windows (0xC00000FD, every backend). Split into
+// per-family functions it is ~1.4 KB per level (Release). The codegen runs here
+// on threads with a SMALL stack, so a regression overflows instead of passing
+// by the luck of a shallow caller: the auto views on 512 KB (old: 0.84 MB and
+// up) and a 256-deep chain on 4 MB (old: 6.8 MB; new: 0.4 MB, Debug ~2 MB).
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+#include <functional>
+
+namespace
+{
+struct StackJob { std::function<void()> fn; };
+
+#if defined(_WIN32)
+DWORD WINAPI stackJobMain(LPVOID p) { static_cast<StackJob*>(p)->fn(); return 0; }
+bool runOnSmallStack(size_t bytes, std::function<void()> fn)
+{
+	StackJob job{ std::move(fn) };
+	const HANDLE t = ::CreateThread(nullptr, bytes, stackJobMain, &job, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+	if (!t) return false;
+	::WaitForSingleObject(t, INFINITE);
+	::CloseHandle(t);
+	return true;
+}
+#else
+void* stackJobMain(void* p) { static_cast<StackJob*>(p)->fn(); return nullptr; }
+bool runOnSmallStack(size_t bytes, std::function<void()> fn)
+{
+	StackJob job{ std::move(fn) };
+	pthread_attr_t a;
+	pthread_attr_init(&a);
+	pthread_attr_setstacksize(&a, bytes);
+	pthread_t t;
+	const bool ok = pthread_create(&t, &a, stackJobMain, &job) == 0;
+	pthread_attr_destroy(&a);
+	if (ok) pthread_join(t, nullptr);
+	return ok;
+}
+#endif
+} // namespace
+
+TEST_CASE("Material codegen fits a small thread stack: auto landscape views and a 256-deep chain")
+{
+	(void)HE::matNodeRegistry(); // static init on the main thread
+	using V = HE::AutoLandscapeView;
+	for (V view : { V::Lit, V::MasksRockSnowWater, V::MasksDirtWet, V::Normal, V::Surface })
+	{
+		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(view);
+		std::string glsl;
+		REQUIRE(runOnSmallStack(512 * 1024, [&] { glsl = HE::generateFragment(a.graph).glsl; }));
+		CHECK(!glsl.empty());
+		CHECK(glsl == HE::generateFragment(a.graph).glsl); // the thread changes nothing
+	}
+
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output);
+	int prev = g.addNode(HE::MatNodeType::ConstColor);
+	for (int i = 0; i < 256; ++i)
+	{
+		const int add = g.addNode(HE::MatNodeType::Add);
+		REQUIRE(g.connect(prev, 0, add, 0));
+		prev = add;
+	}
+	REQUIRE(g.connect(prev, 0, out, HE::kMatOutputBaseColorPin));
+	std::string glsl;
+	REQUIRE(runOnSmallStack(4 * 1024 * 1024, [&] { glsl = HE::generateFragment(g).glsl; }));
+	size_t adds = 0;
+	// "vec3 nK = nJ + vec3(0.000000);" per Add (the lit tail adds a zero emissive too)
+	for (size_t p = 0; (p = glsl.find(" + vec3(0.000000);\n", p)) != std::string::npos; ++p) ++adds;
+	CHECK(adds == 256);
+	CHECK(glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle magenta
+}
