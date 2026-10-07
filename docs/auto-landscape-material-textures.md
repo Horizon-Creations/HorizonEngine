@@ -1317,7 +1317,10 @@ dort ist damit **bewiesen**: Mit dem Integer-Hash sind sie weg (13.3).
   erzeugt (Drift-Test grün).
 - Das Flag hat **keinen Editor-Regler** (Fbm bleibt `paramCount 0`, damit sich kein
   bestehender Knoten und keine MCP-Ausgabe ändert). Es steht im JSON (`"p"` wird immer
-  ganz geschrieben) und überlebt Speichern und Laden (Test).
+  ganz geschrieben) und überlebt Speichern und Laden (Test). Kopieren/Einfügen und Undo
+  im Editor laufen über dasselbe Graph-JSON, MCP ändert Knoten an Ort und Stelle. Nur die
+  Lese-Ausgabe von MCP (`material_graph_info`) kürzt `p` auf `paramCount` und zeigt
+  das Flag deshalb nicht.
 - Die Kosten-Anzeige im Material-Editor zählt `heFbmI(` mit.
 
 ### 13.2 Bestehende Materialien unverändert
@@ -1342,7 +1345,7 @@ D3D11-Referenz neu aufgenommen (alle vier Backends, 30 Aufnahmen, 0 Abstürze, 0
 Vulkan-Validation-Meldungen). Vergleich jeweils gegen **D3D11** (gleicher Schwarzpegel),
 mean|Δ| / Anteil > 8:
 
-| Ansicht | D3D12 | Vulkan | vorher D3D12 (§12.2, Ebene) |
+| Ansicht | D3D12 | Vulkan | vorher D3D12 gegen D3D11, Ebene (`shots7`) |
 |---|---|---|---|
 | `masks` | 0,000 / 0 % | 0,000 / 0 % (Fuß 0,004) | |
 | `ground` | 0,000 / 0 % | 0,000 / 0 % | **22,6 / 41 %** |
