@@ -502,6 +502,11 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		"Anti-Cheat/Policy Kick",  "Anti-Cheat/Policy Ban",
 		"Anti-Cheat/Rule Name",    "Anti-Cheat/Rule Min",   "Anti-Cheat/Rule Max",
 		"Anti-Cheat/Rule Per second", "Anti-Cheat/Rule Level", "Anti-Cheat/Remove rule",
+		// The Audio Editor's toolbar cells (icons, no label) and the three strips
+		// of its waveform canvas (invisible buttons).
+		"Audio Editor/Play", "Audio Editor/Stop", "Audio Editor/Loop",
+		"Audio Editor/Zoom to Selection", "Audio Editor/Fit", "Audio Editor/Samples",
+		"Audio Editor/Waveform", "Audio Editor/Ruler", "Audio Editor/Overview",
 	};
 	for (const char* k : byKey)
 	{

@@ -15,6 +15,7 @@
 #include "SequencerTimeline.h"   // the sequencer's strip, over an in-memory clip
 #include "CinematicTimeline.h"   // the Cinematic tab's strip, over an in-memory sequence
 #include "UITimelineMath.h"
+#include "AudioWaveformView.h"    // the Audio Editor's canvas, over synthetic PCM
 
 #include <ContentManager/ContentManager.h>
 #include <HorizonCode/HorizonCode.h>
@@ -2410,4 +2411,88 @@ TEST_CASE("ui shot: cinematic strip with every kind of row")
 			if (int(r) > 180 && int(g) < 130 && int(b) < 130) ++reddest;
 		}
 	CHECK(reddest > 10);
+}
+
+// ── The Audio Editor's waveform ──────────────────────────────────────────────
+// The hit tests and the arithmetic are asserted in test_audio_waveform_view.cpp;
+// what only a picture shows is that the pieces land where the View says: the
+// selection tints exactly its frames and nothing beside it, the playhead's
+// warm line stands at its frame, both lanes of a stereo clip draw, and the
+// overview strip and the readout under the canvas are there at all.
+TEST_CASE("ui shot: audio waveform with a selection and a playhead")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	// Three seconds of stereo at 48 kHz: a tone that swells and fades on the
+	// left, a faster, quieter one on the right — two lanes that look different.
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t   = double(f) / rate;
+		const double env = std::sin(3.14159265 * t / 3.0);
+		pcm[f * 2 + 0] = int16_t(std::lround(28000.0 * env * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(12000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	AW::View view;
+	AW::select(view, size_t(rate * 0.75), size_t(rate * 1.5), frames);
+	view.playhead = size_t(rate * 2.25);
+
+	const he_ui::Image img = shoot("audio_waveform", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false);
+		const std::string where = AW::readout(view, clip, 0.5 * rate);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::TextDisabled("%s long  |  drag the waveform to select, click to place the playhead",
+		                    AW::formatTime(clip.seconds()).c_str());
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 40000);
+
+	// Fitted: 3 s over 960 px is 150 frames a pixel, so the selection runs from
+	// x = 240 to x = 480 and the playhead stands at x = 720.
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+	const AW::Metrics& M = AW::metrics();
+	const int nearTop = int(M.rulerH) + 3;   // above the loudest sample of lane one
+	std::uint8_t r, g, b, a;
+	img.pixel(360, nearTop, r, g, b, a);     // inside the selection
+	CHECK(int(b) > int(r) + 25);
+	img.pixel(120, nearTop, r, g, b, a);     // beside it: canvas background
+	CHECK(int(b) < 40);
+	img.pixel(600, nearTop, r, g, b, a);     // and past its end
+	CHECK(int(b) < 40);
+
+	// The playhead: bright warm at its x, dark a dozen pixels on.
+	const int laneMid = int(M.rulerH + (canvasH - M.rulerH - M.overviewH - 4.0f) * 0.25f) + 30;
+	img.pixel(720, laneMid, r, g, b, a);
+	CHECK(int(r) > 180);
+	CHECK(int(r) > int(b) + 60);
+	img.pixel(732, nearTop, r, g, b, a);
+	CHECK(int(r) < 90);
+
+	// Lane two draws too: there is waveform ink across its centre line.
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const int   lane2Mid    = int(M.rulerH + (lanesBottom - M.rulerH) * 0.75f);
+	int waveInk = 0;
+	for (int x = 0; x < W; x += 3)
+	{
+		img.pixel(x, lane2Mid - 6, r, g, b, a);
+		if (int(b) > 150) ++waveInk;
+	}
+	CHECK(waveInk > 100);
 }

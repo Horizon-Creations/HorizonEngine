@@ -217,6 +217,7 @@ add_executable(he_tests
     test_hc_node_docs.cpp
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp
+    test_audio_waveform_view.cpp
     test_widget_designer_ui.cpp
     test_texture_viewer.cpp
     ImGuiSoftwareRaster.cpp
@@ -567,6 +568,10 @@ add_executable(he_tests
     # "does a drag on the ruler land the playhead where the ruler says" is a
     # question about arithmetic and hit tests, not about a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SequencerTimeline.cpp
+    # The Audio Editor's waveform — peak pyramid, zoom/scroll, playhead and the
+    # selection drag — over int16 samples and a View, never AppContext or the
+    # AudioEngine, so the shot test can drag a selection across a synthetic clip.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioWaveformView.cpp
     # The Cinematic tab's strip (a Sequence's bindings, cuts, sections, events)
     # and its preview bracket (save, write, restore), both without AppContext —
     # the same reason as the Sequencer's strip above.

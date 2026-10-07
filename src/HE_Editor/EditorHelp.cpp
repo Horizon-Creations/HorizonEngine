@@ -6725,6 +6725,61 @@ namespace
 	  "pitch move together, so raising it both shortens the clip and lifts it. "
 	  "Preview only, like the volume above it.",
 	  "", "systems#audio" },
+	// The waveform canvas (AudioWaveformView.cpp) and the toolbar above it.
+	// Toolbar cells and canvas strips have no visible label, so these are
+	// looked up by key.
+	{ "Audio Editor/Waveform", "Waveform",
+	  "One lane per channel, drawn from the loudest and quietest sample under "
+	  "each pixel. Drag across it to select a range; the readout under the "
+	  "canvas gives its start, end and length in time and in frames. A click "
+	  "without a drag puts the playhead there and drops the selection. "
+	  "Shift-click stretches the selection to the pointer, or makes one from "
+	  "the playhead. Press on an edge of the selection to move just that edge. "
+	  "The wheel zooms around the pointer, Shift+wheel or a middle-drag pans; "
+	  "on a trackpad the swipe pans and Cmd/Ctrl+scroll zooms. Zoomed in far "
+	  "enough, the single samples appear as points.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Ruler", "Time ruler",
+	  "Drag along it to scrub: the playhead follows the pointer, and a clip "
+	  "that is playing jumps with it. Unlike the waveform below it, the ruler "
+	  "never touches the selection. The labels are time, or frame numbers with "
+	  "Samples switched on in the toolbar.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Overview", "Overview",
+	  "The whole clip in one strip, with the part the canvas shows framed, the "
+	  "selection shaded and the playhead as a line. Drag the frame to scroll, "
+	  "or click beside it to bring that part of the clip into view.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Play", "Play / Pause",
+	  "Plays the selection if there is one, otherwise the whole clip, starting "
+	  "at the playhead when it sits inside that range and at its start when it "
+	  "does not. With Loop on, the selection repeats on its own. Marking a new "
+	  "selection while it plays restarts playback on the new range. Pause "
+	  "keeps the position. Greyed out when the editor has no audio device.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Stop", "",
+	  "Stops playback and puts the playhead back to the start of the selection, "
+	  "or of the clip when nothing is selected.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Loop", "",
+	  "Whether playback wraps round at the end or stops there. With a selection "
+	  "it loops exactly the selected range, which is the quickest way to hear "
+	  "whether a cut point will click. Preview only: how a sound loops in the "
+	  "game is the Loop switch on its Audio Source.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Zoom to Selection", "",
+	  "Fills the canvas with the selection, with a sliver of room either side "
+	  "so both edges stay visible. Greyed out when nothing is selected.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Fit", "",
+	  "The whole clip across the canvas again, from the start. The way back "
+	  "after zooming into a long clip.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Samples", "",
+	  "Labels the ruler with frame numbers instead of time. A frame is one "
+	  "sample on every channel; frame 48,000 of a 48 kHz clip is one second in. "
+	  "The readout under the canvas always shows both.",
+	  "", "systems#audio" },
 	{ "Audio Editor/Import as Audio Asset", "",
 	  "Turns the source .wav or .ogg open in this tab into an asset the project "
 	  "can reference, at the path printed under the button. It only appears for a "

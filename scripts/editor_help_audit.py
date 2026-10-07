@@ -119,6 +119,7 @@ AREAS: dict[str, list[str]] = {
                     "TypeAssetPanel.cpp", "HcWatchPanel.cpp", "HcExtractUi.cpp"],
     "input": ["InputAssetPanel.cpp"],
     "animation": ["AnimatorStateMachineEditorPanel.cpp", "AudioEditorPanel.cpp",
+                  "AudioWaveformView.cpp",
                   "StaticMeshEditorPanel.cpp", "SkeletalMeshEditorPanel.cpp",
                   "BoneMaskPanel.cpp", "BlendSpacePanel.cpp",
                   "SequencerPanel.cpp", "SequencerTimeline.cpp",

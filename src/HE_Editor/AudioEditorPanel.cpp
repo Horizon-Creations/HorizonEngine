@@ -7,6 +7,7 @@
 #include "EditorHelp.h"           // "Audio Editor/<label>" scope for the tooltips
 #include "EditorWidgets.h"        // WrapText
 #include "AudioImporter.h"        // raw .wav/.ogg decode + the Import button
+#include "AudioWaveformView.h"    // the canvas: peaks, zoom/scroll, playhead, selection
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Diagnostics/Logger.h>
@@ -29,23 +30,6 @@ namespace AudioEditorPanel
 
 namespace
 {
-
-// ── Peak table ───────────────────────────────────────────────────────────────
-// Drawing a waveform straight from the samples means touching every sample in
-// view every frame, and these clips run to tens of millions. So: one min/max
-// pair per bucket of frames, built once. 256 frames/bucket costs ~0.4% of the
-// PCM size (a 20-minute stereo ambience → well under a megabyte) and still holds
-// more detail than a 4K-wide canvas can show until you zoom past ~5 s of clip.
-// Past that the drawing code reads raw samples instead — see columnExtent().
-constexpr size_t kFramesPerBucket = 256;
-
-struct Peaks
-{
-	// Indexed [bucket * channels + channel]. int16 because the samples are.
-	std::vector<int16_t> lo, hi;
-	size_t buckets  = 0;
-	int    channels = 0;
-};
 
 // What the analysis pane reports. Everything is derived in one pass over the PCM
 // (analyze() below) and cached for the tab's lifetime.
@@ -95,8 +79,10 @@ struct State
 	bool        pcmTried        = false;
 	size_t      compressedBytes = 0;
 
-	Peaks    peaks;     bool peaksDone    = false;
-	Analysis analysis;  bool analysisDone = false;
+	// The view's peak pyramid and the analysis: built once from the PCM above
+	// and kept for the tab's lifetime, like the decoded copy they come from.
+	HE::Ed::AudioWave::Peaks peaks;     bool peaksDone    = false;
+	Analysis                 analysis;  bool analysisDone = false;
 
 	// ── Transport ────────────────────────────────────────────────────────────
 	// The engine outlives every tab (EditorApplication owns it), so holding the
@@ -105,15 +91,24 @@ struct State
 	AudioEngine* audio  = nullptr;
 	uint64_t     handle = 0;
 	bool         paused = false;      // handle alive but stopped; NOT finished
-	size_t       playhead = 0;        // frames; survives stop, drives Play's start
 	bool         loop   = true;       // ambience is the reason this tab exists
 	float        volume = 1.0f;
 	float        pitch  = 1.0f;
+	// What the running voice was handed, in frames of the clip: the whole clip,
+	// or a copy of just the selection when one was marked at Play. The engine
+	// counts its cursor from the start of THAT buffer, so the playhead is
+	// voiceBegin + cursor, and a voice that ran off its end parks the playhead
+	// at voiceEnd — the end of the selection, not of the clip.
+	size_t       voiceBegin = 0;
+	size_t       voiceEnd   = 0;
 
 	// ── Waveform view ────────────────────────────────────────────────────────
-	double viewStart   = 0.0;   // leftmost frame
-	double framesPerPx = 0.0;   // 0 = not fitted yet (first render fits the clip)
-	bool   scrubbing   = false;
+	// Playhead, selection, zoom and scroll (AudioWaveformView.h). The playhead
+	// lives in there because the canvas moves it; it survives Stop and decides
+	// where Play starts.
+	HE::Ed::AudioWave::View view;
+	float  canvasW    = 0.0f;   // last laid-out canvas width, for the toolbar's zoom buttons
+	double hoverFrame = -1.0;   // pointer over the canvas last frame, for the readout
 };
 
 AssetPanelState<State> s_states;
@@ -263,279 +258,13 @@ Analysis analyze(const AudioAsset& a)
 	return an;
 }
 
-// ── Peaks ────────────────────────────────────────────────────────────────────
-
-Peaks buildPeaks(const AudioAsset& a)
-{
-	Peaks p;
-	const int ch = a.channels;
-	const size_t frames = frameCountOf(a);
-	if (ch <= 0 || frames == 0) return p;
-
-	p.channels = ch;
-	p.buckets  = (frames + kFramesPerBucket - 1) / kFramesPerBucket;
-	p.lo.assign(p.buckets * static_cast<size_t>(ch), 0);
-	p.hi.assign(p.buckets * static_cast<size_t>(ch), 0);
-
-	const int16_t* s = samplesOf(a);
-	for (size_t b = 0; b < p.buckets; ++b)
-	{
-		const size_t f0 = b * kFramesPerBucket;
-		const size_t f1 = std::min(frames, f0 + kFramesPerBucket);
-		for (int c = 0; c < ch; ++c)
-		{
-			int16_t lo = std::numeric_limits<int16_t>::max();
-			int16_t hi = std::numeric_limits<int16_t>::min();
-			for (size_t f = f0; f < f1; ++f)
-			{
-				const int16_t v = s[f * ch + c];
-				if (v < lo) lo = v;
-				if (v > hi) hi = v;
-			}
-			p.lo[b * ch + c] = lo;
-			p.hi[b * ch + c] = hi;
-		}
-	}
-	return p;
-}
-
-// Min/max of one channel over [f0, f1) — the vertical extent of one screen
-// column. Reads the peak table when the column spans at least a bucket, raw
-// samples when zoomed in past that. The bucket path rounds the range OUT to
-// bucket boundaries: at that zoom a bucket is under a pixel wide, so the
-// over-inclusion is invisible and it saves the ragged-edge bookkeeping.
-void columnExtent(const AudioAsset& a, const Peaks& p, size_t f0, size_t f1, int c,
-                  int& lo, int& hi)
-{
-	lo = std::numeric_limits<int16_t>::max();
-	hi = std::numeric_limits<int16_t>::min();
-	const int ch = a.channels;
-	if (f1 <= f0 || ch <= 0) { lo = hi = 0; return; }
-
-	if (f1 - f0 >= kFramesPerBucket && p.buckets > 0)
-	{
-		const size_t b0 = f0 / kFramesPerBucket;
-		const size_t b1 = std::min(p.buckets, (f1 + kFramesPerBucket - 1) / kFramesPerBucket);
-		for (size_t b = b0; b < b1; ++b)
-		{
-			lo = std::min<int>(lo, p.lo[b * ch + c]);
-			hi = std::max<int>(hi, p.hi[b * ch + c]);
-		}
-	}
-	else
-	{
-		const int16_t* s = samplesOf(a);
-		for (size_t f = f0; f < f1; ++f)
-		{
-			const int16_t v = s[f * ch + c];
-			lo = std::min<int>(lo, v);
-			hi = std::max<int>(hi, v);
-		}
-	}
-	if (lo > hi) { lo = hi = 0; }
-}
-
 // ── Formatting ───────────────────────────────────────────────────────────────
-
-void formatTime(double sec, char* buf, size_t n)
-{
-	if (sec < 0.0) sec = 0.0;
-	const int total = static_cast<int>(sec);
-	const int ms    = static_cast<int>((sec - total) * 1000.0);
-	const int h     = total / 3600;
-	const int m     = (total / 60) % 60;
-	const int s     = total % 60;
-	if (h > 0) std::snprintf(buf, n, "%d:%02d:%02d.%03d", h, m, s, ms);
-	else       std::snprintf(buf, n, "%d:%02d.%03d", m, s, ms);
-}
-
-// Tick labels drop the milliseconds — a ruler wants to be read, not parsed.
-void formatTimeShort(double sec, char* buf, size_t n)
-{
-	if (sec < 0.0) sec = 0.0;
-	const int total = static_cast<int>(sec);
-	const int h = total / 3600, m = (total / 60) % 60, s = total % 60;
-	if (h > 0)            std::snprintf(buf, n, "%d:%02d:%02d", h, m, s);
-	else if (sec < 10.0)  std::snprintf(buf, n, "%.2fs", sec);
-	else                  std::snprintf(buf, n, "%d:%02d", m, s);
-}
 
 void formatBytes(size_t bytes, char* buf, size_t n)
 {
 	const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
 	if (mb >= 1.0) std::snprintf(buf, n, "%.1f MB", mb);
 	else           std::snprintf(buf, n, "%.0f KB", static_cast<double>(bytes) / 1024.0);
-}
-
-// ── Waveform canvas ──────────────────────────────────────────────────────────
-
-// Ruler tick spacings, coarsest usable first. A tick is placed at the smallest
-// step whose on-screen spacing clears kMinTickPx, so the labels never collide
-// whatever the zoom.
-constexpr double kTickSteps[] = { 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
-                                  1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
-                                  600.0, 900.0, 1800.0, 3600.0 };
-constexpr float  kMinTickPx = 84.0f;
-constexpr float  kRulerH    = 20.0f;
-
-void clampView(State& st, size_t frames, float width)
-{
-	if (width <= 0.0f || frames == 0) return;
-	// Never zoom past ~4 frames per canvas (pointless) nor out past the whole clip.
-	const double maxFpp = static_cast<double>(frames) / width;
-	const double minFpp = 4.0 / width;
-	st.framesPerPx = std::clamp(st.framesPerPx, std::min(minFpp, maxFpp), maxFpp);
-	const double span = st.framesPerPx * width;
-	st.viewStart = std::clamp(st.viewStart, 0.0, std::max(0.0, static_cast<double>(frames) - span));
-}
-
-void drawWaveform(AppContext& ctx, const AudioAsset& clip, State& st, const ImVec2& size)
-{
-	ImDrawList*  dl     = ImGui::GetWindowDrawList();
-	const ImVec2 origin = ImGui::GetCursorScreenPos();
-	const ImVec2 canvas(std::max(64.0f, size.x), std::max(80.0f, size.y));
-	const float  width  = canvas.x;
-	const size_t frames = frameCountOf(clip);
-	const double rate   = clip.sampleRate > 0 ? static_cast<double>(clip.sampleRate) : 48000.0;
-
-	if (st.framesPerPx <= 0.0)   // first render: fit the whole clip
-	{
-		st.framesPerPx = static_cast<double>(frames) / width;
-		st.viewStart   = 0.0;
-	}
-	clampView(st, frames, width);
-
-	ImGui::InvisibleButton("##wavecanvas", canvas,
-		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
-	const bool hovered = ImGui::IsItemHovered();
-	const ImVec2 mouse = ImGui::GetMousePos();
-
-	auto frameAtX = [&](float x) -> double
-	{
-		return st.viewStart + static_cast<double>(x - origin.x) * st.framesPerPx;
-	};
-	auto xAtFrame = [&](double f) -> float
-	{
-		return origin.x + static_cast<float>((f - st.viewStart) / st.framesPerPx);
-	};
-
-	// Mouse grammar: wheel zooms around the cursor, shift+wheel pans. Trackpad
-	// grammar: the two-finger swipe pans the timeline (both axes fold into the
-	// one axis a waveform has), zoom moves behind Cmd/Ctrl+scroll — same rule as
-	// every preview pane: bare scroll moves, modifier-scroll zooms. Middle-drag
-	// pans in both, so the pointer stays free for scrubbing.
-	ImGuiIO& io = ImGui::GetIO();
-	if (hovered && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
-	{
-		const bool trackpad = EditorInput::trackpadPointer(ctx);
-		const bool zoomMod  = io.KeyCtrl || io.KeySuper;
-		const bool panning  = trackpad ? !zoomMod : io.KeyShift;
-		if (panning)
-		{
-			const float pan = trackpad ? (io.MouseWheelH + io.MouseWheel) : io.MouseWheel;
-			st.viewStart -= static_cast<double>(pan) * st.framesPerPx * 80.0;
-		}
-		else if (io.MouseWheel != 0.0f)
-		{
-			const double anchor = frameAtX(mouse.x);
-			st.framesPerPx *= static_cast<double>(std::pow(0.86f, io.MouseWheel));
-			clampView(st, frames, width);
-			// Keep the frame under the cursor under the cursor.
-			st.viewStart = anchor - static_cast<double>(mouse.x - origin.x) * st.framesPerPx;
-		}
-		clampView(st, frames, width);
-	}
-	if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
-	{
-		st.viewStart -= static_cast<double>(ImGui::GetIO().MouseDelta.x) * st.framesPerPx;
-		clampView(st, frames, width);
-	}
-
-	// Left press/drag scrubs: the playhead follows the pointer, and a clip that is
-	// already playing seeks with it.
-	if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
-	{
-		const double f = std::clamp(frameAtX(mouse.x), 0.0, static_cast<double>(frames));
-		st.playhead  = static_cast<size_t>(f);
-		st.scrubbing = true;
-		if (st.handle && st.audio) st.audio->seekSound(st.handle, st.playhead);
-	}
-	else st.scrubbing = false;
-
-	const ImVec2 br(origin.x + canvas.x, origin.y + canvas.y);
-	dl->PushClipRect(origin, br, true);
-	dl->AddRectFilled(origin, br, IM_COL32(20, 21, 25, 255));
-
-	// ── Time ruler ───────────────────────────────────────────────────────────
-	const double secPerPx = st.framesPerPx / rate;
-	double step = kTickSteps[std::size(kTickSteps) - 1];
-	for (double candidate : kTickSteps)
-		if (candidate / secPerPx >= kMinTickPx) { step = candidate; break; }
-
-	const float rulerBottom = origin.y + kRulerH;
-	dl->AddRectFilled(origin, ImVec2(br.x, rulerBottom), IM_COL32(28, 29, 34, 255));
-	dl->AddLine(ImVec2(origin.x, rulerBottom), ImVec2(br.x, rulerBottom), IM_COL32(255, 255, 255, 24));
-
-	const double firstTick = std::ceil((st.viewStart / rate) / step) * step;
-	const double viewEndSec = (st.viewStart + st.framesPerPx * width) / rate;
-	for (double t = firstTick; t <= viewEndSec; t += step)
-	{
-		const float x = xAtFrame(t * rate);
-		dl->AddLine(ImVec2(x, origin.y), ImVec2(x, br.y), IM_COL32(255, 255, 255, 14));
-		dl->AddLine(ImVec2(x, rulerBottom - 5.0f), ImVec2(x, rulerBottom), IM_COL32(255, 255, 255, 60));
-		char lbl[32];
-		formatTimeShort(t, lbl, sizeof(lbl));
-		dl->AddText(ImVec2(x + 4.0f, origin.y + 3.0f), IM_COL32(190, 195, 205, 255), lbl);
-	}
-
-	// ── Channel lanes ────────────────────────────────────────────────────────
-	const int   ch     = std::max(1, clip.channels);
-	const float laneH  = (canvas.y - kRulerH) / static_cast<float>(ch);
-	const ImU32 fill   = IM_COL32(110, 200, 255, 205);
-	const ImU32 mid    = IM_COL32(255, 255, 255, 34);
-
-	for (int c = 0; c < ch; ++c)
-	{
-		const float top    = rulerBottom + laneH * static_cast<float>(c);
-		const float centre = top + laneH * 0.5f;
-		const float halfH  = laneH * 0.45f;
-
-		if (c > 0)
-			dl->AddLine(ImVec2(origin.x, top), ImVec2(br.x, top), IM_COL32(255, 255, 255, 18));
-		dl->AddLine(ImVec2(origin.x, centre), ImVec2(br.x, centre), mid);
-
-		for (int px = 0; px < static_cast<int>(width); ++px)
-		{
-			const double fa = st.viewStart + static_cast<double>(px)       * st.framesPerPx;
-			const double fb = st.viewStart + static_cast<double>(px + 1.0) * st.framesPerPx;
-			if (fb <= 0.0 || fa >= static_cast<double>(frames)) continue;
-			const size_t f0 = static_cast<size_t>(std::max(0.0, fa));
-			const size_t f1 = std::min(frames, static_cast<size_t>(std::max(fa + 1.0, fb)));
-			if (f1 <= f0) continue;
-
-			int lo = 0, hi = 0;
-			columnExtent(clip, st.peaks, f0, f1, c, lo, hi);
-			const float x  = origin.x + static_cast<float>(px) + 0.5f;
-			const float y0 = centre - static_cast<float>(hi) / 32768.0f * halfH;
-			const float y1 = centre - static_cast<float>(lo) / 32768.0f * halfH;
-			// A near-flat column would round to nothing; give it a hairline so
-			// silence still reads as a line rather than as a gap in the clip.
-			dl->AddLine(ImVec2(x, y0), ImVec2(x, std::max(y1, y0 + 1.0f)), fill);
-		}
-	}
-
-	// ── Playhead ─────────────────────────────────────────────────────────────
-	{
-		const float x = xAtFrame(static_cast<double>(st.playhead));
-		if (x >= origin.x - 1.0f && x <= br.x + 1.0f)
-		{
-			dl->AddLine(ImVec2(x, origin.y), ImVec2(x, br.y), IM_COL32(255, 190, 90, 230), 1.5f);
-			dl->AddTriangleFilled(ImVec2(x - 5.0f, origin.y), ImVec2(x + 5.0f, origin.y),
-			                      ImVec2(x, origin.y + 7.0f), IM_COL32(255, 190, 90, 255));
-		}
-	}
-	dl->PopClipRect();
-	dl->AddRect(origin, br, IM_COL32(255, 255, 255, 26));
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -547,23 +276,57 @@ void stopPreview(State& st)
 	st.paused = false;
 }
 
-void startPreview(AppContext& ctx, const AudioAsset& clip, State& st)
+// The clip as the canvas reads it. clipOf() only ever hands back int16 PCM.
+HE::Ed::AudioWave::Clip waveClipOf(const AudioAsset& a)
+{
+	HE::Ed::AudioWave::Clip c;
+	c.samples    = samplesOf(a);
+	c.frames     = frameCountOf(a);
+	c.channels   = a.channels;
+	c.sampleRate = a.sampleRate;
+	return c;
+}
+
+// Start a voice on what Play means right now: the selection if one is marked,
+// else the whole clip, from the playhead when it sits inside that range.
+//
+// The engine has no loop region, so a selection is played as a copy of just
+// its frames, and the voice's own loop flag loops exactly the selection. The
+// engine copies whatever play() is handed anyway (AudioEngine.h), so the slice
+// can die at the end of this function; for the whole clip there is no slice
+// at all — the asset's buffer goes straight in, as before.
+void startPreview(const AudioAsset& clip, State& st)
 {
 	if (!st.audio || !st.audio->isInitialized()) return;
 	stopPreview(st);
 
+	namespace AW = HE::Ed::AudioWave;
 	const size_t frames = frameCountOf(clip);
-	if (st.playhead >= frames) st.playhead = 0;   // Play after the end restarts
+	const AW::PlayRange r = AW::playRange(st.view, frames);
+	if (r.end <= r.begin) return;
 
-	st.handle = st.audio->play(clip.audioData, clip.sampleRate, clip.channels,
-	                           st.volume, st.pitch, st.loop, {});
+	if (r.begin == 0 && r.end == frames)
+	{
+		st.handle = st.audio->play(clip.audioData, clip.sampleRate, clip.channels,
+		                           st.volume, st.pitch, st.loop, {});
+	}
+	else
+	{
+		const size_t bytesPerFrame = sizeof(int16_t) * static_cast<size_t>(clip.channels);
+		const std::vector<uint8_t> slice(clip.audioData.begin() + std::ptrdiff_t(r.begin * bytesPerFrame),
+		                                 clip.audioData.begin() + std::ptrdiff_t(r.end   * bytesPerFrame));
+		st.handle = st.audio->play(slice, clip.sampleRate, clip.channels,
+		                           st.volume, st.pitch, st.loop, {});
+	}
 	if (!st.handle)
 	{
 		HE_LOG_ERROR(Editor, "%s", ("Audio preview failed to start for " + st.name).c_str());
 		return;
 	}
-	if (st.playhead > 0) st.audio->seekSound(st.handle, st.playhead);
-	(void)ctx;
+	st.voiceBegin    = r.begin;
+	st.voiceEnd      = r.end;
+	st.view.playhead = r.start;
+	if (r.start > r.begin) st.audio->seekSound(st.handle, r.start - r.begin);
 }
 
 } // namespace
@@ -648,8 +411,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		return;
 	}
 
-	if (!st.peaksDone)    { st.peaks    = buildPeaks(*clip); st.peaksDone    = true; }
-	if (!st.analysisDone) { st.analysis = analyze(*clip);    st.analysisDone = true; }
+	namespace AW = HE::Ed::AudioWave;
+	const AW::Clip wclip = waveClipOf(*clip);
+	if (!st.peaksDone)    { st.peaks    = AW::buildPeaks(wclip); st.peaksDone    = true; }
+	if (!st.analysisDone) { st.analysis = analyze(*clip);        st.analysisDone = true; }
 
 	const Analysis& an     = st.analysis;
 	const size_t    frames = an.frames;
@@ -664,13 +429,29 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	{
 		if (st.audio->isPlaying(st.handle))
 		{
-			if (!st.scrubbing) st.playhead = st.audio->getSoundCursorFrames(st.handle);
+			// A scrub in progress owns the playhead; the voice follows it.
+			if (st.view.drag != AW::View::Drag::Scrub)
+			{
+				// The view follows a playhead that walks off its right edge, page
+				// by page — but only one that was on screen: somebody who scrolled
+				// away during playback to look at another part of the clip is not
+				// yanked back, and nor is anybody in the middle of a drag.
+				const double span = st.view.framesPerPx * static_cast<double>(st.canvasW);
+				const double was  = static_cast<double>(st.view.playhead);
+				const bool   following = st.canvasW > 0.0f &&
+					was >= st.view.viewStart && was <= st.view.viewStart + span;
+				st.view.playhead = std::min(st.voiceEnd,
+					st.voiceBegin + static_cast<size_t>(st.audio->getSoundCursorFrames(st.handle)));
+				if (following && st.view.drag == AW::View::Drag::None)
+					AW::reveal(st.view, frames, st.canvasW, st.view.playhead);
+			}
 		}
 		else
 		{
-			// Ran off the end (a non-looping clip). Park the playhead there and
-			// give the PCM copy back — these clips are tens of megabytes.
-			st.playhead = frames;
+			// Ran off the end (a non-looping voice). Park the playhead at the end
+			// of what it played — the selection's end when it played one — and
+			// give the PCM copy back: these clips are tens of megabytes.
+			st.view.playhead = st.voiceEnd;
 			stopPreview(st);
 		}
 	}
@@ -692,33 +473,46 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		}
 		bar.endGroup();
 
-		bar.rightGroup(bar.iconGroupWidth(4));
+		// Right-hand groups stack leftwards: the ruler-unit switch sits flush
+		// right, the transport and the zoom buttons to its left.
+		bar.rightGroup(bar.labelGroupWidth({ "Samples" }));
+		if (bar.item("##audiosamples", nullptr, "Samples", st.view.rulerInSamples, true,
+		             "Label the ruler in frames instead of time", "Audio Editor/Samples"))
+			st.view.rulerInSamples = !st.view.rulerInSamples;
+		bar.endGroup();
+
+		bar.rightGroup(bar.iconGroupWidth(5));
 		const bool playing = st.handle != 0 && !st.paused;
 		if (bar.item("##audioplay", playing ? T::iconPause : T::iconPlay, nullptr,
 		             playing, audioReady,
-		             audioReady ? "Play / Pause (from the playhead)"
-		                        : "No audio device — the editor's audio engine failed to start"))
+		             audioReady ? "Play / Pause — the selection if there is one, else the clip"
+		                        : "No audio device — the editor's audio engine failed to start",
+		             "Audio Editor/Play"))
 		{
-			if (!st.handle)          startPreview(ctx, *clip, st);
+			if (!st.handle)          startPreview(*clip, st);
 			else if (st.paused)      { st.audio->resumeSound(st.handle); st.paused = false; }
 			else                     { st.audio->pauseSound(st.handle);  st.paused = true;  }
 		}
-		if (bar.item("##audiostop", T::iconStop, nullptr, false, st.handle != 0, "Stop and rewind"))
+		if (bar.item("##audiostop", T::iconStop, nullptr, false, st.handle != 0, "Stop and rewind",
+		             "Audio Editor/Stop"))
 		{
 			stopPreview(st);
-			st.playhead = 0;
+			st.view.playhead = st.view.hasSelection() ? st.view.selBegin : 0;
 		}
 		if (bar.item("##audioloop", T::iconRefresh, nullptr, st.loop, true,
-		             "Loop the clip — the seam check below says whether it will click"))
+		             "Loop the selection, or the clip — the seam check says whether the clip's loop clicks",
+		             "Audio Editor/Loop"))
 		{
 			st.loop = !st.loop;
 			if (st.handle) st.audio->setSoundLooping(st.handle, st.loop);
 		}
-		if (bar.item("##audiofit", T::iconFit, nullptr, false, true, "Fit the whole clip"))
-		{
-			st.framesPerPx = 0.0;   // refitted on the next draw, which knows the width
-			st.viewStart   = 0.0;
-		}
+		if (bar.item("##audiozoomsel", T::iconSearch, nullptr, false,
+		             st.view.hasSelection() && st.canvasW > 0.0f,
+		             "Zoom to the selection", "Audio Editor/Zoom to Selection"))
+			AW::zoomToRange(st.view, frames, st.canvasW, st.view.selBegin, st.view.selEnd);
+		if (bar.item("##audiofit", T::iconFit, nullptr, false, true, "Fit the whole clip",
+		             "Audio Editor/Fit"))
+			st.view.framesPerPx = 0.0;   // refitted on the next draw, which knows the width
 		bar.endGroup();
 	}
 
@@ -740,8 +534,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		char buf[64];
 
 		ImGui::SeparatorText("Format");
-		formatTime(an.durationSec, buf, sizeof(buf));
-		ImGui::Text("Duration    %s", buf);
+		ImGui::Text("Duration    %s", AW::formatTime(an.durationSec).c_str());
 		ImGui::Text("Sample rate %d Hz", clip->sampleRate);
 		ImGui::Text("Channels    %d%s", clip->channels,
 		            clip->channels == 1 ? " (mono)" : clip->channels == 2 ? " (stereo)" : "");
@@ -881,61 +674,73 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ImGui::BeginChild("##audioWave", ImVec2(0.0f, 0.0f), true);
 	{
 		const ImVec2 avail   = ImGui::GetContentRegionAvail();
-		// Captured before the footer is drawn: the "visible" readout describes the
-		// CANVAS, and asking for the region again after a SameLine would measure
-		// what is left of the footer row instead.
 		const float  canvasW = avail.x;
 
-		// The footer row is composed up here, above the canvas it sits under,
-		// because the canvas can only be sized once the row's height is known — and
-		// the only height that is ever right is the one measured from the very
-		// strings that will be drawn. The state they read (playhead, framesPerPx)
-		// is the state before drawWaveform consumes this frame's scrub and zoom
-		// input, so during a drag the numbers are one frame behind; that is
-		// invisible, whereas a row whose height was guessed is not.
-		char nowBuf[32], totalBuf[32];
-		formatTime(static_cast<double>(st.playhead) / rate, nowBuf, sizeof(nowBuf));
-		formatTime(an.durationSec, totalBuf, sizeof(totalBuf));
-		const std::string timeText = std::string(nowBuf) + " / " + totalBuf;
+		// The footer is composed up here, above the canvas it sits under, because
+		// the canvas can only be sized once the footer's height is known — and the
+		// only height that is ever right is the one measured from the very strings
+		// that will be drawn. The state they read (playhead, selection, zoom,
+		// pointer) is the state before AW::draw consumes this frame's input, so
+		// during a drag the numbers are one frame behind; that is invisible,
+		// whereas a footer whose height was guessed is not.
+		//
+		// Two rows. The first says where things are, each as time AND frame
+		// number — the frame is what a cut in the next step will be made at. The
+		// second is the pointer grammar, which is the first thing to go over the
+		// right edge of a narrow tab, so both rows wrap instead of clipping.
+		const std::string where = AW::readout(st.view, wclip, st.hoverFrame);
 
-		// framesPerPx is still zero the first time a clip is opened — drawWaveform
+		// framesPerPx is still zero the first time a clip is opened — AW::draw
 		// fits the whole clip to the canvas below. Anticipate that fit rather than
 		// flashing "0 s visible" for a frame.
-		const double fpp = st.framesPerPx > 0.0
-			? st.framesPerPx
+		const double fpp = st.view.framesPerPx > 0.0
+			? st.view.framesPerPx
 			: static_cast<double>(frames) / static_cast<double>(std::max(64.0f, canvasW));
-		char hint[192];
+		char hint[320];
 		std::snprintf(hint, sizeof(hint), EditorInput::trackpadPointer(ctx)
-			? "   |   %.3g s visible   |   drag to scrub, swipe to pan, Cmd/Ctrl+scroll to zoom"
-			: "   |   %.3g s visible   |   drag to scrub, wheel to zoom, middle-drag to pan",
-			fpp * canvasW / rate);
+			? "%s long  |  %.3g s visible  |  drag the waveform to select, click to place the "
+			  "playhead, shift-click to extend, drag the ruler to scrub, swipe to pan, "
+			  "Cmd/Ctrl+scroll to zoom"
+			: "%s long  |  %.3g s visible  |  drag the waveform to select, click to place the "
+			  "playhead, shift-click to extend, drag the ruler to scrub, wheel to zoom, "
+			  "middle-drag or the strip below to pan",
+			AW::formatTime(an.durationSec).c_str(), fpp * canvasW / rate);
 
-		// The hint is the item that wraps, so it decides the row's height: measured
-		// from where SameLine will put it to the right edge of this child. Only the
-		// lines BEYOND the first are added to the reservation — the first one lives
-		// in GetFrameHeightWithSpacing() already. An unconditional second line looks
-		// harmless and is not: at any comfortable tab width it is never used, and
-		// the waveform is permanently a text line shorter with a blank strip under
-		// it, which is a worse trade than the narrow-tab scrollbar it avoids.
-		const float hintX   = ImGui::CalcTextSize(timeText.c_str()).x + ImGui::GetStyle().ItemSpacing.x;
-		const float hintH   = ImGui::CalcTextSize(hint, nullptr, false,
-		                                          std::max(1.0f, canvasW - hintX)).y;
-		const float footerH = ImGui::GetFrameHeightWithSpacing()
-		                    + std::max(0.0f, hintH - ImGui::GetTextLineHeight());
-		drawWaveform(ctx, *clip, st, ImVec2(canvasW, std::max(80.0f, avail.y - footerH)));
+		const float wrapW   = std::max(1.0f, canvasW);
+		const float whereH  = ImGui::CalcTextSize(where.c_str(), nullptr, false, wrapW).y;
+		const float hintH   = ImGui::CalcTextSize(hint, nullptr, false, wrapW).y;
+		const float footerH = whereH + hintH + ImGui::GetStyle().ItemSpacing.y * 2.0f;
+
+		const AW::Result res = AW::draw(wclip, st.peaks, st.view,
+			ImVec2(canvasW, std::max(80.0f + AW::metrics().overviewH, avail.y - footerH)),
+			EditorInput::trackpadPointer(ctx));
+		st.canvasW    = res.canvasW;
+		st.hoverFrame = res.hoverFrame;
+
+		// What the canvas did, applied to the voice. A new selection (or one
+		// cleared by a click) changes what Play means, so a running voice is
+		// restarted on it; a paused one is dropped, and the next Play starts on
+		// the new range. A seek inside the range the voice holds just moves it.
+		if (st.handle && audioReady)
+		{
+			if (res.selectionChanged)
+			{
+				if (st.paused) stopPreview(st);
+				else           startPreview(*clip, st);
+			}
+			else if (res.seek)
+			{
+				const size_t f = std::clamp(st.view.playhead, st.voiceBegin,
+				                            st.voiceEnd > st.voiceBegin ? st.voiceEnd - 1 : st.voiceBegin);
+				st.audio->seekSound(st.handle, f - st.voiceBegin);
+			}
+		}
 
 		{
-			// The tail of this row is where the pointer grammar is written down —
-			// middle-drag to pan, Cmd/Ctrl+scroll to zoom — and it is the last
-			// thing on the line, so it is the first thing to go over the right
-			// edge. Clipped, the row still looks finished: it just stops after
-			// "wheel to zoom," and the gesture nobody discovered is the one that
-			// was cut. Wrapping it is what footerH above measured.
 			// The scope is closed before EndChild(): the wrap must come off this
 			// child's stack, not off whatever window follows it.
 			EditorWidgets::WrapText wrap;
-			ImGui::TextUnformatted(timeText.c_str());
-			ImGui::SameLine();
+			ImGui::TextUnformatted(where.c_str());
 			ImGui::TextDisabled("%s", hint);
 		}
 	}
