@@ -268,3 +268,160 @@ noch größer als 5 cm.
 
 `he_tests` (Release, scratch APPDATA): 4234/4236. Die zwei Fehlschläge sind die bekannten
 `inspector_ui`-Clipboard-Fälle auf NN-WS03.
+
+## 7. Schritt 3: Bildvergleich vorher/nachher und Abnahme
+
+Stand `4e2e4d90`, NN-WS03 (RTX 4070), 07.10.2026. Alle Zahlen sind mit
+`scripts/gi-stripes-repro/ana159.py` aus den Aufnahmen gerechnet und damit nachrechenbar.
+Aufgenommen wurde mit `scripts/gi-stripes-repro/run159.ps1`, das `cap159.ps1` mit denselben
+Einstellungen wie §1 aufruft.
+
+### Aufbau
+
+- **Build:** Release, `C:\hw159`, `HE_BUILD_TESTS=ON`, alle Targets
+  (`cmake --build C:\hw159 -j8` ohne `--target`), EXIT 0. Die 108 eingebetteten HLSL/GLSL-Shader
+  kompilieren. Danach wurden HorizonGame und HorizonEditor neu gelinkt, sonst bleiben die
+  Spiel-Kopien alt. Der Folge-Build hatte nichts mehr zu tun.
+  - md5 von `HorizonRendering.dll`, `scene.frag.spv`, `gi_gbuf.frag.spv` und `gi_shadow.comp.spv`
+    ist an allen vier Stellen gleich: Build-Baum, `deploy/Editor`, `deploy/Game` und
+    `deploy/Editor/Game`. **Der exportierte Spiel-Deploy enthält den Fix also**, gemessen ist
+    das aber nur über die Hashes, nicht im Bild.
+- **Drei eingefrorene Deploys:**
+
+  | Name | Inhalt | Ort |
+  |---|---|---|
+  | pre | `d1b8c36a`, vor dem Fix | `C:\hw159\pre2`; Aufnahmen aus S2, ergänzt um `*_s3` |
+  | fixA | HEAD, aber Fix B per temporärem Patch entfernt (die drei `+ ambient …`-Zeilen in `scene.frag`/D3D11/D3D12, UBO-Feld bleibt); nicht committet | `C:\hw159\s3fixA` |
+  | post | HEAD `4e2e4d90` | `C:\hw159\s3post` |
+
+  Mit fixA lassen sich die Wirkungen von Fix A und Fix B getrennt messen.
+- **Szenen:** Mountain (eingebautes Terrain-Material) + Graph-Kugel auf y = 300 und y = 0, und
+  Layers (Graph-Terrain) + Graph-Kugel auf y = 300, jeweils mit GI an und aus. Die Backends sind
+  OpenGL, Vulkan, D3D11 und D3D12.
+- **Rauschboden:** Die bekannte Schwelle 0,25 mittlere |Δ| ist das Rauschen zwischen zwei GI-Läufen
+  auf Hardware (`ci-software-vulkan-icd-analyse-2026-10-03.md`, Zeile GI). Gemessen wird deshalb
+  dieselbe Aufnahme zweimal (`post` gegen `post_r2`).
+
+### Ergebnis
+
+Diffs als mittlere |Δ| / max |Δ| (8-Bit-Stufen) / Anteil geänderter Pixel:
+
+| Vergleich | OpenGL | Vulkan | D3D11 | D3D12 |
+|---|---|---|---|---|
+| **GI aus** y = 300, pre → post | **0 / 0 / 0 %** | **0 / 0 / 0 %** | **0 / 0 / 0 %** | **0 / 0 / 0 %** |
+| **GI aus** y = 0, pre → post | **0 / 0 / 0 %** | **0 / 0 / 0 %** | **0 / 0 / 0 %** | **0 / 0 / 0 %** |
+| **GI aus** Layers y = 300, pre → post | **0 / 0 / 0 %** | **0 / 0 / 0 %** | **0 / 0 / 0 %** | **0 / 0 / 0 %** |
+| Rauschen GI an y = 0, post → post_r2 | 0,000 / 1 / 0,08 % | 0,002 / 1 / 0,51 % | 0,000 / 1 / 0 % | 0,000 / 1 / 0 % |
+| Rauschen GI an y = 300, post → post_r2 | 0,000 / 1 / 0,05 % | 0,001 / 1 / 0,23 % | 0,000 / 1 / 0 % | 0,000 / 1 / 0 % |
+| Rauschen GI an Layers, post → post_r2 | 0,001 / 1 / 0,30 % | 0,000 / 1 / 0,01 % | 0 / 0 / 0 % | 0 / 0 / 0 % |
+| pre (S2) → pre (S3), GI an y = 0 | 0,000 / 1 / 0,10 % | 0,001 / 1 / 0,39 % | 0 / 0 / 0 % | 0,000 / 3 / 0,00 % |
+| **Fix A allein**, GI an y = 0 (pre → fixA) | 0,019 / 103 / 0,45 % | 0,013 / 52 / 0,53 % | 0,017 / 66 / 0,34 % | 0,017 / 66 / 0,34 % |
+| **Fix B allein**, GI an y = 0 (fixA → post) | 0,000 / 1 / 0,03 % | 5,771 / 30 / 64,8 % | 7,762 / 37 / 64,8 % | 7,762 / 37 / 64,8 % |
+| Fix B allein, GI an Layers (Graph-Pfad) | 0,001 / 1 / 0,21 % | 0,000 / 1 / 0,01 % | 0 / 0 / 0 % | 0 / 0 / 0 % |
+| A+B, GI an y = 300, pre → post | 51,96 / 143 / 52,4 % | 35,54 / 130 / 69,5 % | 48,78 / 143 / 69,5 % | 48,78 / 143 / 69,5 % |
+| A+B, GI an Layers y = 300, pre → post | 18,56 / 147 / 46,9 % | 15,68 / 147 / 44,1 % | 15,75 / 147 / 44,1 % | 15,75 / 147 / 44,1 % |
+| Höhe egal? GI an, **pre** y = 300 → y = 0 | 51,96 / 143 / 52,8 % | 29,78 / 130 / 54,6 % | 41,02 / 143 / 52,8 % | 41,02 / 143 / 52,8 % |
+| Höhe egal? GI an, **post** y = 300 → y = 0 | 0,028 / 149 / 0,79 % | 0,024 / 117 / 3,0 % | 0,021 / 103 / 0,83 % | 0,021 / 103 / 0,83 % |
+
+Streifenenergie, Terrain-Box / Kugel-Box. Definition und Boxen sind dieselben wie bei
+`he_vk_imagetests.py`, Grenze 2,0:
+
+| Fall | Backend | pre | fixA | post | post_r2 |
+|---|---|---|---|---|---|
+| Mountain y = 300, GI an | GL | 0,053 / **6,094** | 0,002 / 0,452 | 0,002 / 0,452 | 0,002 / 0,452 |
+| | Vulkan | 0,105 / **5,123** | 0,035 / 0,735 | 0,027 / 0,638 | 0,027 / 0,638 |
+| | D3D11 = D3D12 | 0,056 / **6,114** | 0,013 / 0,640 | 0,010 / 0,553 | 0,010 / 0,553 |
+| Layers y = 300, GI an | GL | **4,340 / 5,576** | 0,149 / 0,413 | 0,149 / 0,413 | 0,149 / 0,413 |
+| | Vulkan | **5,216 / 5,579** | 0,148 / 0,410 | 0,148 / 0,410 | 0,148 / 0,410 |
+| | D3D11 = D3D12 | **5,219 / 5,626** | 0,148 / 0,411 | 0,148 / 0,411 | 0,148 / 0,411 |
+| GI aus, alle Fälle | alle | pre = post (Terrain 0,000–0,240, Kugel 0,419–0,575) | | | |
+
+Mittlerer Wert der Terrain-Box (0–255), Mountain, GI an:
+
+| | y = 0 pre / fixA / post | y = 300 pre / fixA / post |
+|---|---|---|
+| GL | 219,6 / 219,6 / 219,6 | **112,5** / 219,6 / 219,6 |
+| Vulkan | 176,8 / 176,8 / 186,2 | **113,9** / 176,8 / 186,2 |
+| D3D11 = D3D12 | 164,6 / 164,6 / 176,5 | **80,7** / 164,6 / 176,5 |
+
+**Achtung beim Lesen der Streifenenergie:** Auf dem Mountain-Terrain sind die falschen Schatten
+breite Höhenbänder, keine Zeilen. Die Streifenenergie misst nur Nachbarzeilen und sieht diese
+Bänder kaum (pre 0,05–0,10). Für das Mountain-Terrain sind deshalb der mittlere Wert
+(GL 112,5 → 219,6) und „y = 300 gegen y = 0" die Zeugen. Die Kugel und das flache Layers-Terrain
+zeigen Zeilenstreifen, dort greift die Streifenenergie.
+
+Per Auge geprüft, Kontaktbogen `C:\hw159\s3_sheet.png` (Spalten GL, Vulkan, D3D11, D3D12):
+
+- pre, Mountain y = 300: auf allen vier Backends Höhenbänder auf dem Terrain und waagrechte
+  Streifen auf der Kugel
+- post: sauber
+- Layers: pre mit Zeilenstreifen auf Terrain und Kugel, post sauber
+
+### Abnahme gegen das Kriterium
+
+- **Streifen mit GI an weg, auf Vulkan, D3D11 und D3D12 (und GL):**
+  - Die Kugel-Streifenenergie fällt von 5,1–6,1 auf 0,41–0,64, das Layers-Terrain von 4,3–5,2 auf
+    0,15. Das liegt auf dem Niveau der jeweiligen GI-aus-Aufnahme (Kugel 0,42–0,58, Terrain
+    0,02–0,24).
+  - Nach dem Fix spielt die Höhe keine Rolle mehr: y = 300 gegen y = 0 ergibt mittlere |Δ| 0,021–0,028
+    statt 30–52.
+  - Die Rest-Pixel, Diff-Maske GL in `C:\hw159\s3_heightdiff_gl.png`: Abweichungen über 8 Stufen
+    betreffen 0,05–0,10 % der Pixel (GL 899, Vulkan 499, D3D11 676) und liegen fast nur auf der
+    1-Pixel-Penumbrakante des Kugelschattens.
+  - Alles andere sind verstreute Pixel mit ±1 Stufe im Himmel und auf der Kugel, wie sie bei
+    anderer Kamerahöhe zu erwarten sind.
+- **Rauschen im Rahmen von 0,25 mittlere |Δ|:**
+  - Lauf-zu-Lauf mit GI an liegt bei ≤ 0,002 und max 1 Stufe, auf allen vier Backends.
+  - Fix A allein ändert das Bild am Referenzpunkt y = 0 um 0,013–0,019. Das sind nur
+    Penumbrakanten-Pixel (0,34–0,53 %). Der Strahlursprung rückt dort um Bruchteile eines
+    Zentimeters, und das ist die erwartete Wirkung von fp32.
+  - Beides liegt deutlich unter 0,25.
+  - Die 5,77 (Vulkan) bzw. 7,76 (D3D) bei y = 0 sind **ganz Fix B**: fixA → post, gleich groß auf
+    y = 300. Das ist eine flächige Aufhellung um +9,4 bzw. +11,9 Stufen auf dem Terrain, max 30/37,
+    ohne Struktur. Die Streifenenergie sinkt dabei sogar leicht (Vulkan-Kugel 0,735 → 0,638).
+  - Fix B ist gewollt und kein Rauschen: Ambient-Boden wie GL/Metal, Entscheidung der Königin §5.
+  - Auf GL und auf dem reinen Graph-Pfad (Layers) ist Fix B nachweislich wirkungslos (≤ 0,001).
+- **GI aus bitgleich:** pre gegen post ist auf allen vier Backends in allen drei Szenen 0 / 0 / 0 %.
+  fixA gegen post bei GI aus ist ebenfalls 0.
+- **OpenGL unverändert am Referenzpunkt:** pre → post bei y = 0, GI an: 0,019 mittlere |Δ| auf
+  0,44 % der Pixel (Penumbra, Fix A), bei GI aus 0. Weit vom Ursprung (y = 300) ändert sich GL
+  absichtlich: Die Bänder verschwinden (§5).
+- **D3D11 und D3D12** liefern in jeder Zeile identische Zahlen.
+- **Validation:**
+  - Vulkan (Layer aktiv laut Log): pre und post haben dieselben 30 `[ERROR]` je Mountain-Aufnahme.
+    GI aus hat ebenfalls 30, die Fehler kommen also nicht vom GI-Pfad. Layers hat 0.
+  - D3D12 mit `HE_GPU_DEBUG=1` (Debug-Layer + DRED laut Log) bei y = 300, GI an: 0 Fehler, nur die
+    bekannte Warnung „Ignoring InitialState". Für D3D11 meldet das Log keinen Debug-Layer, dafür
+    gibt es also keine Aussage.
+- **he_tests** (Release, Vordergrund, scratch APPDATA, `HE_NET_LOOPBACK_ONLY=1`, 258 s):
+  - 4234/4236 Fälle, 586 096/586 103 Assertions.
+  - Die zwei Fehlschläge sind `inspector ui: a component header's right-click menu copies, resets
+    and pastes the component` (`test_inspector_ui.cpp:325`) und `inspector ui: the Replication
+    section …` (`:413`). Das sind die bekannten Clipboard-Fälle auf NN-WS03, nicht GI.
+- **CI** `37619120681`, Stand `4e2e4d90`: grün auf Windows, Linux, lavapipe und macOS. Auf
+  lavapipe ist `gi_stripes` gelaufen: gi_on Terrain 0,146, Kugel 0,411; gi_off 0,241 / 0,418. Alle
+  6/6 Fälle bestanden.
+
+### Was noch aussteht (ehrlich)
+
+- **Metal:** nicht gemessen, auf NN-WS03 gibt es keinen Mac. Belegt ist nur, dass
+  `MetalRenderer.mm` im macOS-CI-Job kompiliert. Fix A ändert dort nur das Format
+  (`kGiGBufPosFormat`). Ob Metal vorher Bänder bei y = 300 hatte und nachher keine, und ob es bei
+  y = 0 unverändert bleibt, prüft erst ein Lauf auf Apple-Hardware (`cap_metal.sh`-Muster aus
+  `scripts/gi-shadow-repro`).
+- **lavapipe-Negativkontrolle:** Der CI-Fall `gi_stripes` ist nach dem Fix grün. Ob er auf lavapipe
+  **vor** dem Fix rot gewesen wäre (Rundungsart float→half im Treiber), ist ungeprüft. Dafür
+  bräuchte es einen Wegwerf-Zweig mit zurückgenommenem Fix in CI.
+- **Exportiertes Spiel (Swapchain-Pfad):** Nur die Hashes sind gleich (DLL und `.spv` in
+  `deploy/Game` und `deploy/Editor/Game`), ein Bild aus dem exportierten Spiel ist nicht
+  aufgenommen.
+- **Hardware-Breite:** Gemessen ist nur auf einer NVIDIA RTX 4070 (Treiber von NN-WS03). AMD und
+  Intel, besonders deren float→half-Rundung beim RT-Write, sind nicht gemessen. Mit fp32 entfällt
+  die Rundung als Ursache. Eine falsche Formatbehandlung auf einem anderen Treiber wäre aber
+  nur im Bild zu sehen.
+- **Szene des Melders:** unbekannt. Die Abnahme stützt sich auf die Dump-Szenen auf y = 300.
+- **Vulkan-Basis:** `fa73986b` (Thema 154) ist weiterhin nicht auf main (Stand `origin/main
+  6866923d`). Nach dessen Merge ändern sich die absoluten Vulkan-GI-Werte, nicht aber der
+  Höhen-Befund.
+- **Nicht behoben, nur notiert:** die ~4-%-Drift im GI-Term (`base*kd` gegen `albedo*(1-met)`) und
+  der fehlende Ambient-Boden im Nicht-GI-Zweig von Vulkan/D3D (§4).
