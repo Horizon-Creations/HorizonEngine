@@ -3,6 +3,11 @@
 #include <cstdint>
 #include <vector>
 
+// Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
+// Must equal HE::kMatMaxLandscapeLayers (MaterialGraph.h) — test_terrain pins it.
+inline constexpr int kTerrainWeightPages = 2;
+inline constexpr int kTerrainMaxLayers   = 4 * kTerrainWeightPages;
+
 struct TerrainComponent {
     float    sizeX       = 100.0f;
     float    sizeZ       = 100.0f;
@@ -49,7 +54,7 @@ struct TerrainComponent {
     std::vector<float> sculptHeights;
 
     // ── Material layers (paint) ──────────────────────────────────────────────
-    // Per-texel layer weights, RGBA8 = four layers (R=0 … A=3), row-major over
+    // Per-texel layer weights, RGBA8 = layers 0..3 (R=0 … A=3), row-major over
     // the terrain's 0..1 UV range. The MATERIAL defines what the layers mean:
     // a Landscape Layer Blend node names them and the shader blends its inputs
     // by these weights (MaterialAsset::graphLayerNames). Empty = unpainted, the
@@ -60,6 +65,14 @@ struct TerrainComponent {
     // way a landscape is one self-contained thing to copy or undo.
     uint32_t              weightRes = 256;   // weightmap side length in texels
     std::vector<uint8_t>  layerWeights;      // weightRes² × 4 bytes, or empty
+    // Layers 4..7 (R=4 … A=7), same layout as layerWeights. Empty = all four
+    // zero, which is every landscape painted before there were eight layers —
+    // they load without it and render exactly as before. Allocated by the first
+    // stroke on layer 4+, never without layerWeights; the weights of one texel
+    // sum to 255 across BOTH pages. Uploaded as the right half of a 2:1
+    // weightmap in the same texture (TerrainPaint::buildWeightTexture), so the
+    // shader needs no second sampler or binding on any backend.
+    std::vector<uint8_t>  layerWeights2;
 
     // ── Runtime weightmap state (never serialised) ──────────────────────────
     // The GPU texture TerrainSystem (re)registers from layerWeights, handed to
@@ -70,8 +83,9 @@ struct TerrainComponent {
     // with the texture upload — consumers that shade the landscape FLAT, with no
     // texel to sample (the GI ray kernels colour a hit per instance), blend the
     // material's per-layer colours by this instead of reflecting one fixed layer.
-    // Unpainted → { 1, 0, 0, 0 }, matching the shader's 1×1 default weightmap.
-    float    avgLayerWeights[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+    // Unpainted → { 1, 0, … }, matching the shader's 1×1 default weightmap.
+    // The GI consumers read layers 0..3 only (MaterialAsset::approxLayerColor).
+    float    avgLayerWeights[kTerrainMaxLayers] = { 1.0f };
 
     // ── Runtime chunk/LOD state (never serialised) ──────────────────────────
     // Sculpt dirty-region in terrain-local XZ: the brush sets it so TerrainSystem

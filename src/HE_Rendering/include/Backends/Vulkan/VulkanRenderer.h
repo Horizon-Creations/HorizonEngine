@@ -540,7 +540,9 @@ private:
 	// default). resolveTextureRef LOADS a loose asset synchronously, which can move every
 	// ContentManager pointer the caller holds — callers snapshot the slot list first and
 	// re-fetch the material afterwards.
-	VkImageView resolveGraphTexture(const HE::UUID& id, const std::string& path);
+	// `array` = a sampler2DArray slot (HE::matGlslTextureArrayMask): a 2D_ARRAY view,
+	// cached under its own "#arr" key; null → bind m_whiteArrayView.
+	VkImageView resolveGraphTexture(const HE::UUID& id, const std::string& path, bool array = false);
 	// Resolve an override material's texture (dc.materialAssetId), cached by UUID. Returns true
 	// iff the material asset is loaded (out->set may be null = no texture → flat); false while
 	// still loading (retry next frame, baked texture stays). Mirrors GL's ResolveMaterialTexture.
@@ -574,11 +576,14 @@ private:
 	// pre-baked mip chain to a device-local sampled image + view. Returns false when the
 	// format isn't RGBA8/BC and this device can't sample it (caller then draws untextured).
 	// Block formats need no runtime mip generation; the cook baked every level.
+	// asArray (Thema 158): a VK_IMAGE_VIEW_TYPE_2D_ARRAY view for a sampler2DArray
+	// slot — every slice of a texture-array asset (RGBA8 only), or a plain 2D asset
+	// as one slice.
 	// honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
 	// as they are) — the UI pass wants that, see resolveUIImageSet.
 	bool uploadTextureImage(const TextureAsset* tex,
 	                        VkImage& image, VkDeviceMemory& mem, VkImageView& view,
-	                        bool honourSrgb = true);
+	                        bool asArray = false, bool honourSrgb = true);
 	// Resolve a mesh/skeletal asset's baked base-color texture (material → textureIds[0]) and
 	// upload it to a device-local image + a set=2 descriptor set (shared by static + skinned).
 	// Fills the out-params and returns true on success; leaves them null and returns false on

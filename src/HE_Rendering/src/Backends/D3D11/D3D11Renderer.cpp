@@ -1,6 +1,7 @@
 #include "Backends/D3D11/D3D11Renderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/RenderWorld.h>
 #include <Renderer/UIRenderObject.h>
 #include <Renderer/UIFont.h>
@@ -1334,6 +1335,10 @@ struct D3D11RendererImpl
     ComPtr<ID3D11BlendState>        alphaBlendState;    // SRC_ALPHA / INV_SRC_ALPHA
     ComPtr<ID3D11RasterizerState>   rasterState;
     ComPtr<ID3D11ShaderResourceView> dummyTexture; // 1x1 white, for untextured meshes
+    // 1x1x1 white Texture2DArray SRV: what a sampler2DArray heTexP slot (Texture Array
+    // Sample, Thema 158) gets when its texture is missing -- a Texture2D SRV there
+    // would be a dimension mismatch the runtime reads as zero.
+    ComPtr<ID3D11ShaderResourceView> dummyArrayTexture;
 
     // ── A4: node-graph material shaders ──────────────────────────────────────
     // Graph materials (Material-Node editor) render through per-material VS/PS the engine
@@ -4273,7 +4278,16 @@ struct D3D11RendererImpl
             D3D11_SUBRESOURCE_DATA srd{}; srd.pSysMem = &white; srd.SysMemPitch = 4;
             ComPtr<ID3D11Texture2D> tex;
             if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &tex)))
+            {
                 device->CreateShaderResourceView(tex.Get(), nullptr, &dummyTexture);
+                // The same white texel, viewed as a one-slice array.
+                D3D11_SHADER_RESOURCE_VIEW_DESC ad{};
+                ad.Format = td.Format;
+                ad.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+                ad.Texture2DArray.MipLevels = 1;
+                ad.Texture2DArray.ArraySize = 1;
+                device->CreateShaderResourceView(tex.Get(), &ad, &dummyArrayTexture);
+            }
         }
         createPostFX();
         createSSAOPipeline();
@@ -4346,13 +4360,21 @@ struct D3D11RendererImpl
     // textures shade in linear light and only the tonemap's gamma encode re-curves
     // them. The twins share block/byte layout, so pitch math and the support check
     // are unchanged; the null SRV desc below inherits the resource format.
+    //
+    // asArray (Thema 158) = a Texture2DArray SRV for a sampler2DArray heTexP slot: every
+    // slice of a texture-array asset (RGBA8, HE::buildTextureArray layout -- slice-major,
+    // which IS D3D's subresource order), or a plain 2D asset as one slice. An array
+    // asset WITHOUT asArray reads its leading bytes, i.e. slice 0, as a 2D texture.
     // honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
     // as they are): the UI pass wants that, see resolveUITexture.
-    ComPtr<ID3D11ShaderResourceView> createAlbedoSRV(const TextureAsset* tex, bool honourSrgb = true)
+    ComPtr<ID3D11ShaderResourceView> createAlbedoSRV(const TextureAsset* tex, bool asArray = false,
+                                                     bool honourSrgb = true)
     {
         ComPtr<ID3D11ShaderResourceView> srv;
         if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
             return srv;
+        const UINT layers = asArray ? std::max<UINT>(1, tex->layers) : 1;
+        if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return srv;
 
         const bool srgb = tex->srgb && honourSrgb;
         DXGI_FORMAT fmt; bool isBlock; UINT blockBytes = 16;
@@ -4373,30 +4395,49 @@ struct D3D11RendererImpl
         }
 
         const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
-        // One immutable subresource per mip (level 0 first). Row pitch: block formats
-        // are blocks-per-row × 16 B; RGBA8 is width × 4 B.
-        std::vector<D3D11_SUBRESOURCE_DATA> srd(mips);
-        size_t off = 0; UINT lw = static_cast<UINT>(tex->width), lh = static_cast<UINT>(tex->height);
-        for (UINT l = 0; l < mips; ++l)
+        // One immutable subresource per mip (level 0 first), per slice (D3D order:
+        // subresource = mip + slice * mips). Row pitch: block formats are
+        // blocks-per-row × 16 B; RGBA8 is width × 4 B.
+        if (layers > 1 && isBlock) return srv; // arrays are RGBA8 only
+        std::vector<D3D11_SUBRESOURCE_DATA> srd(static_cast<size_t>(mips) * layers);
+        size_t off = 0;
+        for (UINT s = 0; s < layers; ++s)
         {
-            const UINT rowPitch = isBlock ? ((lw + 3) / 4) * blockBytes : lw * 4;
-            const size_t bytes  = isBlock ? static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * blockBytes
-                                          : static_cast<size_t>(lw) * lh * 4;
-            if (off + bytes > tex->data.size()) return {}; // truncated payload
-            srd[l].pSysMem          = tex->data.data() + off;
-            srd[l].SysMemPitch      = rowPitch;
-            srd[l].SysMemSlicePitch = 0;
-            off += bytes; lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
+            UINT lw = static_cast<UINT>(tex->width), lh = static_cast<UINT>(tex->height);
+            for (UINT l = 0; l < mips; ++l)
+            {
+                const UINT rowPitch = isBlock ? ((lw + 3) / 4) * blockBytes : lw * 4;
+                const size_t bytes  = isBlock ? static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * blockBytes
+                                              : static_cast<size_t>(lw) * lh * 4;
+                if (off + bytes > tex->data.size()) return {}; // truncated payload
+                D3D11_SUBRESOURCE_DATA& d = srd[static_cast<size_t>(s) * mips + l];
+                d.pSysMem          = tex->data.data() + off;
+                d.SysMemPitch      = rowPitch;
+                d.SysMemSlicePitch = 0;
+                off += bytes; lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
+            }
         }
 
         D3D11_TEXTURE2D_DESC td{};
         td.Width = static_cast<UINT>(tex->width); td.Height = static_cast<UINT>(tex->height);
-        td.MipLevels = mips; td.ArraySize = 1;
+        td.MipLevels = mips; td.ArraySize = layers;
         td.Format = fmt; td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         ComPtr<ID3D11Texture2D> t;
         if (SUCCEEDED(device->CreateTexture2D(&td, srd.data(), &t)))
-            device->CreateShaderResourceView(t.Get(), nullptr, &srv);
+        {
+            if (asArray)
+            {
+                D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                vd.Format = fmt;
+                vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+                vd.Texture2DArray.MipLevels = mips;
+                vd.Texture2DArray.ArraySize = layers;
+                device->CreateShaderResourceView(t.Get(), &vd, &srv);
+            }
+            else
+                device->CreateShaderResourceView(t.Get(), nullptr, &srv);
+        }
         return srv;
     }
 
@@ -4809,16 +4850,21 @@ struct D3D11RendererImpl
     // A graph material's project texture for one heTexP slot. resolveTextureRef LOADS a
     // loose asset synchronously, which can move every ContentManager pointer the caller
     // holds — callers snapshot the slot list first and re-fetch the material afterwards.
+    //
+    // `array` = a sampler2DArray slot (HE::matGlslTextureArrayMask): a Texture2DArray
+    // SRV under its own "#arr" key -- the same asset can be 2D in one material and an
+    // array in another. Null → the caller binds dummyArrayTexture.
     ID3D11ShaderResourceView* resolveGraphTexture(const HE::UUID& id, const std::string& path,
-                                                  ContentManager* cm)
+                                                  ContentManager* cm, bool array = false)
     {
-        const std::string key = graphTexKey(id, path);
+        std::string key = graphTexKey(id, path);
         if (key.empty() || !cm) return nullptr;
+        if (array) key += "#arr";
         if (auto it = graphTexCache.find(key); it != graphTexCache.end())
             return it->second.Get();
         // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain (skips a block format
         // this device can't sample → null → white default).
-        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(cm->resolveTextureRef(id, path));
+        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(cm->resolveTextureRef(id, path), array);
         ID3D11ShaderResourceView* raw = srv.Get();
         graphTexCache.emplace(key, std::move(srv));
         return raw;
@@ -4837,7 +4883,7 @@ struct D3D11RendererImpl
         if (auto it = uiTexCache.find(key); it != uiTexCache.end())
             return it->second.Get();
         ComPtr<ID3D11ShaderResourceView> srv =
-            createAlbedoSRV(cm->resolveTextureRef(id, {}), /*honourSrgb=*/false);
+            createAlbedoSRV(cm->resolveTextureRef(id, {}), /*asArray=*/false, /*honourSrgb=*/false);
         ID3D11ShaderResourceView* raw = srv.Get();
         uiTexCache.emplace(key, std::move(srv));
         return raw;
@@ -4978,6 +5024,7 @@ struct D3D11RendererImpl
         for (const HE::UUID& id : pendingTexInval)
         {
             graphTexCache.erase(graphTexKey(id, {}));
+            graphTexCache.erase(graphTexKey(id, {}) + "#arr"); // its texture-array upload
             uiTexCache.erase(graphTexKey(id, {}));
         }
         pendingTexInval.clear();
@@ -6694,6 +6741,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // snapshotted BEFORE any resolve: a resolve may load, and a load
                         // can move the material asset out from under a held pointer —
                         // which is also why `ma` below is fetched only AFTER this block.
+                        // A sampler2DArray slot (Texture Array Sample, Thema 158) takes a
+                        // Texture2DArray SRV, the white ARRAY dummy when empty.
                         ID3D11ShaderResourceView* heTexP[HE::kMatMaxGraphTextures] = {
                             p.dummyTexture.Get(), p.dummyTexture.Get(),
                             p.dummyTexture.Get(), p.dummyTexture.Get() };
@@ -6701,8 +6750,12 @@ void D3D11Renderer::DrawScene(int width, int height)
                             HE::UUID    gIds[HE::kMatMaxGraphTextures]{};
                             std::string gPaths[HE::kMatMaxGraphTextures];
                             size_t nTex = 0;
+                            uint32_t arrMask = 0;
                             if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
                             {
+                                arrMask = HE::matGlslTextureArrayMask(ma0->customShaderFragGlsl);
+                                for (int i = 0; i < HE::kMatMaxGraphTextures; ++i)
+                                    if ((arrMask >> i) & 1u) heTexP[i] = p.dummyArrayTexture.Get();
                                 nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
                                     std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
                                 for (size_t i = 0; i < nTex; ++i)
@@ -6712,7 +6765,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                                 }
                             }
                             for (size_t i = 0; i < nTex; ++i)
-                                if (ID3D11ShaderResourceView* srv = p.resolveGraphTexture(gIds[i], gPaths[i], m_contentManager))
+                                if (ID3D11ShaderResourceView* srv = p.resolveGraphTexture(gIds[i], gPaths[i], m_contentManager,
+                                                                                          (arrMask >> i) & 1u))
                                     heTexP[i] = srv;
                         }
 
