@@ -403,6 +403,9 @@ Vulkan-Dateien unterscheiden sich. Jede Aufnahme hat eine frische APPDATA, `HE_S
 
   Bei GI an hebt der Fix die dunklen GI-Schattenstreifen des Terrains weich an, mit dem
   Probe-Kachelmuster (Spacing 8,7 m). Bei GI aus ist er unsichtbar.
+  **Nachtrag 07.10.2026 (Thema 159):** Die dunklen Streifen sind kein Probe-Muster. Sie entstehen in
+  der GI-Sonnenschattenmaske: Der Strahlursprung kommt aus der Half-Float-Weltposition, und das
+  Terrain dieser Szene liegt auf y = 300. Siehe `gi-stripes-vulkan-d3d-ursache-2026-10-07.md`.
 
 ### 7.3 Was offen bleibt
 
