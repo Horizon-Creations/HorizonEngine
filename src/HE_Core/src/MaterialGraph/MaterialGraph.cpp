@@ -230,6 +230,20 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::NormalMapArraySample, "Normal Map Array", "Texture",
           { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength
+
+        // ── v14: texture bombing — p = Rotation, Sharpness, Seed (+ Strength) ──
+        { MatNodeType::TextureBombSample, "Texture Bombing", "Texture",
+          { { "UV", F::Vec2, 0 } },
+          { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 3 },
+        { MatNodeType::NormalMapBombSample, "Normal Map Bombing", "Texture",
+          { { "UV", F::Vec2, 0 } },
+          { { "N", F::Vec3, 0 } }, 4 },
+        { MatNodeType::TextureArrayBombSample, "Texture Array Bombing", "Texture",
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 3 },
+        { MatNodeType::NormalMapArrayBombSample, "Normal Map Array Bombing", "Texture",
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "N", F::Vec3, 0 } }, 4 },
     };
     return kReg;
 }
@@ -405,6 +419,10 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     // v9: normal map strength; Output mask cutoff (p[1] blend mode stays 0 = Opaque)
     if (type == MatNodeType::NormalMapSample) n.p[0] = 1.0f;
     if (type == MatNodeType::NormalMapArraySample) n.p[0] = 1.0f;
+    // v14: full random rotation, the hex-tiling paper's blend exponent, seed 0.
+    if (matNodeIsBombing(type)) { n.p[0] = 1.0f; n.p[1] = kMatBombDefaultSharpness; n.p[2] = 0.0f; }
+    if (type == MatNodeType::NormalMapBombSample || type == MatNodeType::NormalMapArrayBombSample)
+        n.p[3] = 1.0f;
     // v10: a fresh layer-blend node starts with two named layers.
     if (type == MatNodeType::LandscapeLayerBlend) n.s = "Layer 1\nLayer 2";
     if (type == MatNodeType::Output) n.p[2] = 0.5f;
@@ -489,6 +507,11 @@ struct EmitCtx
     bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
     bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
     bool usesNormalPerturb = false;                      // hePerturbNormal (screen-space TBN)
+    // Texture bombing: the heBombGrid helper, and the grids already emitted —
+    // key = scope + uv expression + grid params, value = the grid's variable
+    // prefix. One layer's Albedo/Normal/Mask reads reuse ONE grid this way.
+    bool usesBombGrid = false;
+    std::unordered_map<std::string, std::string> bombGrids;
     // Landscape layer blending: the fragment declares heLandscapeWeights and the
     // material advertises its layer names (order = weightmap channel order).
     bool usesLandscapeWeights = false;
@@ -600,6 +623,31 @@ std::string arrayCoord(const std::string& sampler, const std::string& uv, const 
          + sampler + ", 0).z - 1)))";
 }
 
+// The hex grid of a bombing node (MatNodeType::TextureBombSample): the three
+// bombed uvs <g>t0..2, their rotations <g>r0..2, the blend weights <g>w and the
+// screen gradients <g>dx/<g>dy of the UNBOMBED uv. Returns the variable prefix
+// <g>; the declaration is appended to `decl` only when this grid is new in the
+// scope, so call it AFTER the node's inputs are emitted (an input may itself be a
+// bombing node that declares the grid first).
+std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv,
+                     const MatGraphNode& n, std::string& decl)
+{
+    const float rot   = std::clamp(n.p[0], 0.0f, 1.0f);
+    const float sharp = n.p[1] > 0.0f ? std::min(n.p[1], 32.0f) : kMatBombDefaultSharpness;
+    const long  seedI = std::lround(std::clamp(n.p[2], -2.0e9f, 2.0e9f));
+    const std::string seed = std::to_string(static_cast<uint32_t>(seedI)) + "u";
+    c.usesBombGrid = true;
+    const std::string key = sc.key + "|" + uv + "|" + fmtF(rot) + "|" + fmtF(sharp) + "|" + seed;
+    if (auto it = c.bombGrids.find(key); it != c.bombGrids.end()) return it->second;
+    const std::string g = "n" + std::to_string(++c.varCounter) + "_g";
+    decl += "vec2 " + g + "t0, " + g + "t1, " + g + "t2; mat2 " + g + "r0, " + g + "r1, " + g
+          + "r2; vec3 " + g + "w; heBombGrid(" + uv + ", " + fmtF(rot) + ", " + fmtF(sharp) + ", "
+          + seed + ", " + g + "t0, " + g + "t1, " + g + "t2, " + g + "r0, " + g + "r1, " + g + "r2, "
+          + g + "w); vec2 " + g + "dx = dFdx(" + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ";
+    c.bombGrids.emplace(key, g);
+    return g;
+}
+
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
 std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
 {
@@ -684,6 +732,57 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                       + " " + v + "_t.xy *= " + fmtF(strength) + ";"
                       + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
                       + "_t), vWorldPos, " + v + "_uv);";
+            }
+            break;
+        }
+        case MatNodeType::TextureBombSample:
+        case MatNodeType::NormalMapBombSample:
+        case MatNodeType::TextureArrayBombSample:
+        case MatNodeType::NormalMapArrayBombSample:
+        {
+            const bool wantArray = n.type == MatNodeType::TextureArrayBombSample
+                                || n.type == MatNodeType::NormalMapArrayBombSample;
+            const bool normal = n.type == MatNodeType::NormalMapBombSample
+                             || n.type == MatNodeType::NormalMapArrayBombSample;
+            bool isArr = false;
+            const std::string sampler = textureSampler(c, n, wantArray, &isArr);
+            // The uv EXPRESSION (not a per-node copy) keys the grid, so two nodes
+            // fed from the same UV pin find each other's grid.
+            const std::string uv = uvInput(c, sc, n, 0);
+            if (isArr) // the layer, rounded + clamped as in arrayCoord, once for all three taps
+                decl = "float " + v + "_l = clamp(floor(" + inputExpr(c, sc, n, 1, F::Float)
+                     + " + 0.5), 0.0, float(textureSize(" + sampler + ", 0).z - 1)); ";
+            const std::string g = bombGrid(c, sc, uv, n, decl);
+            // One hex's read: its bombed uv, the unbombed gradients turned with it.
+            auto tap = [&](int k) {
+                const std::string i = std::to_string(k);
+                const std::string coord = isArr ? "vec3(" + g + "t" + i + ", " + v + "_l)" : g + "t" + i;
+                return "textureGrad(" + sampler + ", " + coord + ", " + g + "r" + i + " * " + g
+                     + "dx, " + g + "r" + i + " * " + g + "dy)";
+            };
+            if (!normal)
+            {
+                decl += "vec4 " + v + " = " + g + "w.x * " + tap(0) + " + " + g + "w.y * " + tap(1)
+                      + " + " + g + "w.z * " + tap(2) + ";";
+                pinExpr = { v + ".xyz", v + ".w" };
+            }
+            else
+            {
+                // Each hex's tangent-space normal is turned BACK by its rotation
+                // (transpose = inverse), so a slope lit from the left stays lit from
+                // the left in every hex; then the Normal Map node's frame.
+                c.usesNormalPerturb = true;
+                const float strength = n.p[3] > 0.0f ? n.p[3] : 1.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const std::string t = v + "_" + std::to_string(k);
+                    decl += "vec3 " + t + " = " + tap(k) + ".xyz * 2.0 - 1.0; " + t + ".xy = transpose("
+                          + g + "r" + std::to_string(k) + ") * " + t + ".xy; ";
+                }
+                decl += "vec3 " + v + "_t = " + g + "w.x * " + v + "_0 + " + g + "w.y * " + v + "_1 + "
+                      + g + "w.z * " + v + "_2; " + v + "_t.xy *= " + fmtF(strength) + ";"
+                      + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
+                      + "_t), vWorldPos, " + uv + ");";
             }
             break;
         }
@@ -1428,6 +1527,42 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;\n"
             "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
             "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
+    if (c.usesBombGrid)
+        // Texture bombing as hex tiling (Mikkelsen, JCGT 2022): skew the uv into a
+        // triangle grid, the three corners of the triangle under the pixel are the
+        // centres of the three hexes that blend here. Every hex gets an offset and
+        // a rotation about its centre from an INTEGER hash (pcg3d) of its index —
+        // a fract(sin()) hash is not the same number on every GPU, and a different
+        // offset is a different texel, which a backend image comparison would see.
+        // The cell index goes float → int → uint (a negative float straight to
+        // uint is undefined), and the 24-bit → float conversions are exact.
+        src +=
+            "uvec3 heBombHash(ivec2 cell, uint seed) {\n"
+            "    uvec3 v = uvec3(uvec2(cell), seed) * 1664525u + 1013904223u;\n"
+            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
+            "    v ^= v >> 16u;\n"
+            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
+            "    return v; }\n"
+            "void heBombTap(vec2 uv, ivec2 cell, float rot, uint seed, out vec2 t, out mat2 r) {\n"
+            "    uvec3 h = heBombHash(cell, seed);\n"
+            "    vec2 off = vec2(h.xy >> 8u) * (1.0 / 16777216.0);\n"
+            "    float a = (float(h.z >> 8u) * (2.0 / 16777216.0) - 1.0) * 3.14159265 * rot;\n"
+            "    float cs = cos(a); float sn = sin(a);\n"
+            "    r = mat2(cs, sn, -sn, cs);\n"
+            "    vec2 cen = vec2(float(cell.x) + 0.5 * float(cell.y), 0.8660254 * float(cell.y)) * 0.28867513;\n"
+            "    t = r * (uv - cen) + cen + off; }\n"
+            "void heBombGrid(vec2 uv, float rot, float sharp, uint seed, out vec2 t0, out vec2 t1,\n"
+            "                out vec2 t2, out mat2 r0, out mat2 r1, out mat2 r2, out vec3 w) {\n"
+            "    vec2 st = uv * 3.46410162;\n"
+            "    vec2 sk = vec2(st.x - 0.57735027 * st.y, 1.15470054 * st.y);\n"
+            "    vec2 bf = floor(sk); vec2 f = sk - bf; float fz = 1.0 - f.x - f.y;\n"
+            "    float s = step(0.0, -fz); float s2 = 2.0 * s - 1.0;\n"
+            "    ivec2 b = ivec2(bf); int si = int(s);\n"
+            "    heBombTap(uv, b + ivec2(si, si), rot, seed, t0, r0);\n"
+            "    heBombTap(uv, b + ivec2(si, 1 - si), rot, seed, t1, r1);\n"
+            "    heBombTap(uv, b + ivec2(1 - si, si), rot, seed, t2, r2);\n"
+            "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(sharp));\n"
+            "    w /= w.x + w.y + w.z; }\n";
     src += "void main() {\n" + c.body;
     // Masked: kill sub-cutoff fragments BEFORE shading — hard-edged holes, opaque pass.
     if (blendMode == (int)MatBlendMode::Masked)

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -597,6 +598,43 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
 			break;
 		}
+		case MatNodeType::TextureBombSample:
+		case MatNodeType::NormalMapBombSample:
+		case MatNodeType::TextureArrayBombSample:
+		case MatNodeType::NormalMapArrayBombSample:
+		{
+			// The grid (Rot/Blend/Seed) sits in p[0..2] on all four, so the Albedo,
+			// Normal and Mask reads of one layer agree when these three agree.
+			const float w = (kNodeW - 76.0f) * scale;
+			ImGui::SetNextItemWidth(w);
+			ImGui::DragFloat("Rot", &n.p[0], 0.01f, 0.0f, 1.0f);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Rot");
+			ImGui::SetNextItemWidth(w);
+			ImGui::DragFloat("Blend", &n.p[1], 0.1f, 1.0f, 32.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Blend");
+			int seed = static_cast<int>(std::lround(n.p[2]));
+			ImGui::SetNextItemWidth(w);
+			if (ImGui::DragInt("Seed", &seed, 0.2f)) n.p[2] = static_cast<float>(seed);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Seed");
+			if (n.type == MatNodeType::NormalMapBombSample || n.type == MatNodeType::NormalMapArrayBombSample)
+			{
+				ImGui::SetNextItemWidth(w);
+				ImGui::DragFloat("Strength", &n.p[3], 0.05f, 0.0f, 4.0f);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+				EditorWidgets::helpForLabel("Strength");
+			}
+			const std::string label = n.s.empty()
+				? std::string("(mesh texture)")
+				: std::filesystem::path(n.s).filename().string();
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			ImGui::TextWrapped("%s", label.c_str());
+			ImGui::PopStyleColor();
+			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
+			break;
+		}
 		case MatNodeType::TextureSample:
 		case MatNodeType::TextureArraySample:
 		{
@@ -740,11 +778,10 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 }
 
 // Nodes whose `s` is a picked texture path: the filename row, the Content-Browser
-// drop target and the "Set Texture" menu belong to all four.
+// drop target and the "Set Texture" menu belong to all eight.
 bool isTextureNode(MatNodeType t)
 {
-	return t == MatNodeType::TextureSample || t == MatNodeType::NormalMapSample
-	    || t == MatNodeType::TextureArraySample || t == MatNodeType::NormalMapArraySample;
+	return HE::matNodeSamplesTexture(t);
 }
 
 // Vertical space (graph units) the node reserves for its inline VALUE widgets. The
@@ -755,7 +792,9 @@ float nodeValueHeight(const MatGraphNode& n)
 	const MatNodeType type = n.type;
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
 	if (d.paramCount == 0 && !isTextureNode(type)) return 0.0f;
-	if (isTextureNode(type)) return 44.0f;                         // filename + hint rows       // filename + hint rows
+	if (HE::matNodeIsBombing(type))                                // Rot/Blend/Seed (+Strength) + filename
+		return 44.0f + 26.0f * static_cast<float>(d.paramCount);
+	if (isTextureNode(type)) return 44.0f;                         // filename + hint rows
 	if (type == MatNodeType::ConstVec4 || type == MatNodeType::ParamVec4) return 30.0f; // vec4 drag row
 	if (type == MatNodeType::UV) return 52.0f;                    // tiling + offset rows
 	if (type == MatNodeType::LandscapeLayerBlend)                 // one row per layer + "+ Layer"

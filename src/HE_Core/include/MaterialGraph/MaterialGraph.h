@@ -165,7 +165,54 @@ enum class MatNodeType : uint8_t
     // answer on every backend. An unconnected UV is the mesh UV (vUV).
     TextureArraySample,   // (UV, Slice) → RGB + A
     NormalMapArraySample, // (UV, Slice) → world-space N, like Normal Map; p[0] = strength
+
+    // ── v14: texture bombing (Thema 158) ──
+    // Breaks visible tiling WITHOUT another texture: the UV plane is cut into a
+    // hex grid (Mikkelsen, "Practical Real-Time Hex-Tiling", JCGT 2022), every hex
+    // reads the texture at its own random offset and rotation, and three hexes
+    // blend per pixel. The randomness is an integer hash of the hex index, so all
+    // five backends pick the same offset bit for bit; the reads use the gradients
+    // of the UNBOMBED uv, so a hex seam never jumps a mip level. Same sampler
+    // slots as the plain nodes (s = texture path, the array nodes add Slice).
+    //   p[0] = Rotation (0..1 of ±180°; 0 = offsets only)
+    //   p[1] = Blend sharpness (exponent of the hex weights, ≤ 0 → 7)
+    //   p[2] = Seed (rounded to an integer)
+    //   p[3] = Strength (normal nodes only, like Normal Map's p[0])
+    // The grid lives in p[0..2] on all four nodes so the Albedo / Normal / Mask
+    // reads of one layer share it: equal params + equal UV = the SAME hexes,
+    // emitted once (codegen memoizes the grid) — the normals stay on the albedo.
+    TextureBombSample,          // (UV) → RGB + A
+    NormalMapBombSample,        // (UV) → world-space N
+    TextureArrayBombSample,     // (UV, Slice) → RGB + A
+    NormalMapArrayBombSample,   // (UV, Slice) → world-space N
 };
+
+// True for every node whose `s` is a texture path sampled through a heTexP slot
+// (Texture Sample, Normal Map, their array and bombing variants).
+inline bool matNodeSamplesTexture(MatNodeType t)
+{
+    switch (t)
+    {
+        case MatNodeType::TextureSample:          case MatNodeType::NormalMapSample:
+        case MatNodeType::TextureArraySample:     case MatNodeType::NormalMapArraySample:
+        case MatNodeType::TextureBombSample:      case MatNodeType::NormalMapBombSample:
+        case MatNodeType::TextureArrayBombSample: case MatNodeType::NormalMapArrayBombSample:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Blend sharpness of a fresh bombing node (and of one saved with p[1] ≤ 0): the
+// exponent the hex-tiling paper uses. Higher = narrower seams between hexes.
+inline constexpr float kMatBombDefaultSharpness = 7.0f;
+
+// The bombing nodes (any of the four v14 types).
+inline bool matNodeIsBombing(MatNodeType t)
+{
+    return t == MatNodeType::TextureBombSample || t == MatNodeType::NormalMapBombSample
+        || t == MatNodeType::TextureArrayBombSample || t == MatNodeType::NormalMapArrayBombSample;
+}
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
 // channel each, over two pages of four (TerrainComponent::layerWeights /

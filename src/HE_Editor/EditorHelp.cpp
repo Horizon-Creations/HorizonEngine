@@ -4159,6 +4159,22 @@ namespace
 	  "was authored, 0 flattens it back to the geometry, and past 1 the bumps "
 	  "start lighting themselves in ways no real surface does.",
 	  "", "materials#nodes" },
+	{ "Material Node/Rot", "Bombing Rotation",
+	  "How far each hex of a bombed texture may be turned. 1 is any angle, 0 keeps "
+	  "every copy upright and only shifts it. Turn it down for textures with a "
+	  "direction in them: lit from one side, grass leaning one way.",
+	  "", "materials#nodes" },
+	{ "Material Node/Blend", "Bombing Blend Sharpness",
+	  "How hard the seams between the hexes are. Low numbers blend wide and soft, "
+	  "which also washes the texture out a little; high numbers keep each copy crisp "
+	  "and the seam narrow. 7 is a good start.",
+	  "", "materials#nodes" },
+	{ "Material Node/Seed", "Bombing Seed",
+	  "Picks a different random layout of the hexes. Give the Albedo, Normal and "
+	  "Mask reads of ONE texture the same seed (and rotation and blend) so their "
+	  "copies line up; give different textures different seeds so their patterns "
+	  "do not repeat together.",
+	  "", "materials#nodes" },
 	{ "Material Node/Scale", "Noise Scale",
 	  "How fine the procedural noise is. Bigger numbers mean smaller speckle: the "
 	  "value is how many noise cells fit across one UV unit.",

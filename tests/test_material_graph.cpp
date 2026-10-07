@@ -400,10 +400,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// WindSway is the LAST enum value today; a node added after it must move
-	// this bound, or it silently drops out of the loop (which is how v10/v11
-	// went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::WindSway; ++t)
+	// NormalMapArrayBombSample is the LAST enum value today; a node added after it
+	// must move this bound, or it silently drops out of the loop (which is how
+	// v10/v11 — and the v13 array nodes — went unchecked for a while).
+	for (int t = 0; t <= (int)MatNodeType::NormalMapArrayBombSample; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -982,6 +982,125 @@ TEST_CASE("One file read as 2D and as an array takes two slots, never one with t
 	CHECK(eg.glsl.find("texture(heTex0, n") != std::string::npos);
 	// Unconnected UV = the mesh UV, not vec2(0) (one texel for the whole surface).
 	CHECK(eg.glsl.find("_uv = vUV;") != std::string::npos);
+}
+
+// ═══ Texture bombing (Thema 158, Schritt 4) ═══════════════════════════════════
+// One terrain layer read the way the auto material reads it: Albedo / Normal /
+// Mask arrays through the bombing nodes with the SAME uv and grid params, plus a
+// 2D bombed texture with another seed. Lit, every read on its own Output pin.
+static MaterialGraph makeTextureBombGraph()
+{
+	MaterialGraph g;
+	const int out   = g.addNode(MatNodeType::Output);
+	const int uv    = g.addNode(MatNodeType::UV);
+	g.findNode(uv)->p[0] = g.findNode(uv)->p[1] = 8.0f;
+	const int slice = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(slice)->p[0] = 2.0f;
+	const int alb = g.addNode(MatNodeType::TextureArrayBombSample);
+	g.findNode(alb)->s = "Textures/T_Albedo_Array.hasset";
+	const int nrm = g.addNode(MatNodeType::NormalMapArrayBombSample);
+	g.findNode(nrm)->s = "Textures/T_Normal_Array.hasset";
+	const int msk = g.addNode(MatNodeType::TextureArrayBombSample);
+	g.findNode(msk)->s = "Textures/T_Mask_Array.hasset";
+	const int t2d = g.addNode(MatNodeType::TextureBombSample);
+	g.findNode(t2d)->s = "Textures/T_Puddle.hasset";
+	g.findNode(t2d)->p[2] = 5.0f; // its own seed → its own grid
+	const int split = g.addNode(MatNodeType::SplitRGBA);
+	const int mul   = g.addNode(MatNodeType::Multiply);
+	for (int n : { alb, nrm, msk })
+	{
+		CHECK(g.connect(uv,    0, n, 0));
+		CHECK(g.connect(slice, 0, n, 1));
+	}
+	CHECK(g.connect(uv,  0, t2d, 0));
+	CHECK(g.connect(alb, 0, mul, 0));
+	CHECK(g.connect(t2d, 0, mul, 1));
+	CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+	CHECK(g.connect(nrm, 0, out, HE::kMatOutputNormalPin));
+	CHECK(g.connect(msk, 0, split, 0));
+	CHECK(g.connect(split, 0, out, HE::kMatOutputAOPin));
+	CHECK(g.connect(split, 1, out, HE::kMatOutputRoughnessPin));
+	return g;
+}
+
+static size_t countOf(const std::string& s, const std::string& what)
+{
+	size_t n = 0;
+	for (size_t at = s.find(what); at != std::string::npos; at = s.find(what, at + what.size())) ++n;
+	return n;
+}
+
+TEST_CASE("Texture bombing: one hex grid per layer, integer hash, gradient reads")
+{
+	const HE::MatShaderGen gen = HE::generateFragment(makeTextureBombGraph());
+	// Same slots as the plain nodes: three arrays + one 2D texture.
+	REQUIRE(gen.textures.size() == 4);
+	CHECK(countOf(gen.glsl, "uniform sampler2DArray heTexP") == 3u);
+	CHECK(countOf(gen.glsl, "uniform sampler2D heTexP") == 1u);
+	CHECK(gen.textureArrayMask != 0u);
+	// The helpers once; the grid CALLED twice — the three layer reads share one
+	// (same uv + params), the 2D read with seed 5 has its own.
+	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
+	CHECK(countOf(gen.glsl, "heBombGrid(n") == 2u);
+	CHECK(gen.glsl.find(", 0u, n") != std::string::npos); // seed 0 → "0u"
+	CHECK(gen.glsl.find(", 5u, n") != std::string::npos); // seed 5 → "5u"
+	// Three hexes per read, all with explicit gradients (a hex seam must not pick
+	// a different mip): 4 nodes × 3 taps.
+	CHECK(countOf(gen.glsl, "textureGrad(heTexP") == 12u);
+	CHECK(gen.glsl.find("= texture(heTexP") == std::string::npos);
+	CHECK(gen.glsl.find("dFdx(n") != std::string::npos);
+	// The randomness is an integer hash, never fract(sin(…)): a different offset on
+	// one GPU would be a different texel in the backend image comparison.
+	CHECK(gen.glsl.find("uvec3 heBombHash(ivec2 cell, uint seed)") != std::string::npos);
+	CHECK(gen.glsl.find("uvec3(uvec2(cell), seed)") != std::string::npos);
+	CHECK(gen.glsl.find("fract(sin") == std::string::npos);
+	// Normals are turned back by their hex's rotation, then the usual frame.
+	CHECK(countOf(gen.glsl, "= transpose(n") == 3u);
+	CHECK(gen.glsl.find("hePerturbNormal(normalize(vNormal)") != std::string::npos);
+	// The G-buffer variant carries the same body.
+	CHECK(countOf(gen.glslGBuffer, "textureGrad(heTexP") == 12u);
+
+	// Graphs without a bombing node keep their exact text: no helper at all.
+	CHECK(HE::generateFragment(makeDemoGraph()).glsl.find("heBomb") == std::string::npos);
+	CHECK(HE::generateFragment(makeTextureArrayGraph()).glsl.find("heBomb") == std::string::npos);
+}
+
+TEST_CASE("Texture bombing: params are sanitised, and an empty path falls back to the mesh texture")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int n   = g.addNode(MatNodeType::TextureArrayBombSample);
+	// A fresh node: full rotation, sharpness 7, seed 0 (strength 1 on the normal nodes).
+	CHECK(g.findNode(n)->p[0] == doctest::Approx(1.0f));
+	CHECK(g.findNode(n)->p[1] == doctest::Approx(HE::kMatBombDefaultSharpness));
+	CHECK(g.findNode(n)->p[2] == doctest::Approx(0.0f));
+	const int nn = g.addNode(MatNodeType::NormalMapBombSample);
+	CHECK(g.findNode(nn)->p[3] == doctest::Approx(1.0f));
+	// Saved values out of range: rotation clamps to 1, sharpness ≤ 0 means the
+	// default, the seed is rounded (and a negative one wraps like the shader's uint).
+	g.findNode(n)->p[0] = 3.0f;
+	g.findNode(n)->p[1] = 0.0f;
+	g.findNode(n)->p[2] = -1.4f;
+	CHECK(g.connect(n, 0, out, HE::kMatOutputBaseColorPin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	CHECK(gen.glsl.find("(vUV, 1.000000, 7.000000, 4294967295u, ") != std::string::npos);
+	// No texture picked → the mesh texture (2D): plain 2D reads, no layer, no mask.
+	CHECK(gen.textures.empty());
+	CHECK(gen.textureArrayMask == 0u);
+	CHECK(gen.glsl.find("sampler2DArray") == std::string::npos);
+	CHECK(gen.glsl.find("textureGrad(heTex0, n") != std::string::npos);
+	CHECK(gen.glsl.find("textureSize(") == std::string::npos);
+
+	// Through JSON the node keeps its type and every param.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	const auto* bn = back.findNode(n);
+	REQUIRE(bn != nullptr);
+	CHECK(bn->type == MatNodeType::TextureArrayBombSample);
+	CHECK(bn->p[0] == doctest::Approx(3.0f));
+	CHECK(bn->p[2] == doctest::Approx(-1.4f));
+	CHECK(HE::matNodeSamplesTexture(MatNodeType::NormalMapArrayBombSample));
+	CHECK_FALSE(HE::matNodeIsBombing(MatNodeType::TextureArraySample));
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
@@ -2030,6 +2149,40 @@ TEST_CASE("Three texture arrays + a 2D texture cross-compile for all five backen
 		CHECK(slots(mArr, "[[sampler(").size() <= 16);
 	}
 }
+
+TEST_CASE("A bombed texture layer cross-compiles for all five backends, with gradient reads")
+{
+	// The bombing nodes add only shader TEXT (integer hash, out-params, mat2,
+	// gradient reads on 2D and array samplers), no binding. What each backend
+	// gets — and that the gradients survive the translation, i.e. no backend
+	// silently falls back to an implicit-LOD read that would mip-jump at seams.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const HE::MatShaderGen gen = HE::generateFragment(makeTextureBombGraph());
+	const uint64_t hash = std::hash<std::string>{}(gen.glsl);
+	for (B b : { B::Metal, B::GLSL410, B::GLSLES300, B::GLSL430, B::HLSL, B::SpirV })
+	{
+		const auto& r = lib.fragment(hash, gen.glsl, b);
+		CHECK_MESSAGE(r.ok, "backend ", static_cast<int>(b), ": ", r.log);
+	}
+	for (B b : { B::Metal, B::HLSL, B::GLSL430 })
+	{
+		const auto& r = lib.fragmentClustered(hash, gen.glsl, b);
+		CHECK_MESSAGE(r.ok, "clustered backend ", static_cast<int>(b), ": ", r.log);
+	}
+	const uint64_t gh = std::hash<std::string>{}(gen.glslGBuffer);
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& r = lib.fragment(gh, gen.glslGBuffer, b);
+		CHECK_MESSAGE(r.ok, "G-buffer backend ", static_cast<int>(b), ": ", r.log);
+	}
+	const std::string hlsl = lib.fragment(hash, gen.glsl, B::HLSL).source;
+	const std::string msl  = lib.fragment(hash, gen.glsl, B::Metal).source;
+	const std::string gl   = lib.fragment(hash, gen.glsl, B::GLSL410).source;
+	CHECK_MESSAGE(countOf(hlsl, ".SampleGrad(") >= 12u, hlsl);
+	CHECK_MESSAGE(countOf(msl, "gradient2d(") >= 12u, msl);
+	CHECK_MESSAGE(countOf(gl, "textureGrad(") >= 12u, gl);
+}
 #endif
 
 // ═══ Container semantics shared with the other graph systems ═════════════════
@@ -3038,6 +3191,9 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 	// so the sampler2DArray declarations only reach the HLSL/FXC/SPIR-V/GL-link
 	// sweeps through this graph.
 	cases.push_back({ "Texture arrays (3 arrays + 1 2D)", HE::generateFragment(makeTextureArrayGraph()).glsl, {} });
+	// Texture bombing with real slots: SampleGrad on Texture2DArray and the uint
+	// hash through FXC, the D3D12 root signature and the GL link.
+	cases.push_back({ "Texture bombing (3 arrays + 1 2D)", HE::generateFragment(makeTextureBombGraph()).glsl, {} });
 	return cases;
 }
 
