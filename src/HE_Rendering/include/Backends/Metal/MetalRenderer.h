@@ -604,6 +604,11 @@ private:
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when shadow/AO/moon texture is absent
 	void* m_whiteArrayTexture = nullptr; // id<MTLTexture>, 1×1×1 white texture2d_array (empty array slot)
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
+	// Graph-material project textures (heTexP0..3, MSL texture/sampler 1..4):
+	// linear + mips like m_linearSampler, but REPEAT. Every other backend tiles
+	// these (GL default wrap, D3D WRAP, Vulkan REPEAT); with the clamping sampler
+	// a material uv past 0..1 smeared the edge texel on Metal only (Thema 158 S5).
+	void* m_materialSampler = nullptr; // id<MTLSamplerState>
 	void* m_noiseTexture    = nullptr; // id<MTLTexture>, 3D R16 value noise (sky)
 	void* m_noiseSampler    = nullptr; // id<MTLSamplerState>, linear + repeat
 	void* m_skyEnvCube      = nullptr; // id<MTLTexture>, baked skyColor IBL cubemap

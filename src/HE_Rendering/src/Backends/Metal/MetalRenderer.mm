@@ -6406,6 +6406,7 @@ void MetalRenderer::Shutdown()
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_whiteArrayTexture) { CFBridgingRelease(m_whiteArrayTexture); m_whiteArrayTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
+	if (m_materialSampler) { CFBridgingRelease(m_materialSampler); m_materialSampler = nullptr; }
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
@@ -7096,6 +7097,11 @@ void MetalRenderer::CreateScenePipeline()
 		sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
 		sampDesc.mipFilter = MTLSamplerMipFilterLinear; // use baked mip chains (else level 0 only)
 		m_linearSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
+		// The graph-material slots tile, as on every other backend (see the header).
+		sampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
+		sampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
+		sampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
+		m_materialSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
 
 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
@@ -9221,7 +9227,7 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 			if (void* t = ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u))
 			{
 				[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:(i + 1)];
-				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 			}
 		}
 	}
@@ -12842,7 +12848,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 					id<MTLTexture> tex = gt ? (__bridge id<MTLTexture>)gt
 					                        : (__bridge id<MTLTexture>)m_dummyTexture;
 					[enc setFragmentTexture:tex atIndex:(NSUInteger)(i + 1)];
-					[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler
+					[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler
 					                     atIndex:(NSUInteger)(i + 1)];
 				}
 				// Legacy/mesh texture slot 0 must be bound too (pinned unconditionally).
@@ -13567,7 +13573,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						if (t.gtex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.gtex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 					if (t.wpo)
 					{
@@ -13810,7 +13816,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						if (cGraphTex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)cGraphTex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 				// Landscape layer weightmap → MSL texture 13 (preamble binding 14).
 				// PER DRAW, not per material: it belongs to the terrain the chunk is
@@ -13999,7 +14005,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					if (t.gtex[i])
 					{
 						[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.gtex[i] atIndex:(i + 1)];
-						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 					}
 				if (t.wpo)
 				{
@@ -15605,7 +15611,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						if (cGraphTex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)cGraphTex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 				// Landscape layer weightmap → MSL texture 13, per draw (same as forward).
 				if (cMaterialPipelineGB)
