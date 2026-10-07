@@ -594,6 +594,11 @@ das Masken-Band trennt WetGround über Rauheit G = 126 von den anderen (≈ 220)
   `MetalRenderer.mm` kompiliert, ctest 230/230 inkl. `test_material_graph` mit den neuen
   Array-Tests, und der Schritt „Compile-check the runtime MSL strings“ ist grün. Gerendert
   hat Metal damit noch **nicht**: CI erzeugt kein Bild, ein Metal-Bildvergleich steht aus.
+  **Nachtrag Schritt 5 (M5, Metal gerendert):** Zuerst zeigte Metal nur die erste
+  Kachel, weil heTexP mit einem klemmenden Sampler gebunden war (§10.3). Nach dem Fix
+  `86601d4d` gegen OpenGL auf demselben Gerät: Zellmittel max. 0,39, mean|Δ| 0,168,
+  0,322 % > 8. Pro Band: Albedo-Array 0,000, Normal-Array 0,000, Masken-Array 0,038,
+  2D-Band 0,632 / 1,27 %. Das ist dasselbe Bild wie D3D11/D3D12/Vulkan oben.
 - Tests: Codegen/Maske/Slot-Trennung, Cross-Compile für MSL, GLSL 4.10/ES 3.00/4.30,
   HLSL und SPIR-V, Aufnahme in alle Node-Sweeps (FXC wie D3D11/D3D12 kompilieren,
   D3D12-Root-Signature, GL-Link), Array-Asset-Roundtrip mit 22-B-TXMI.
@@ -931,8 +936,11 @@ nur auf flachem Boden und nie unter Schnee, Erdgürtel am Hangfuß.
   Graph-Materialien einen Schatten an den Hangfuß (und körnig auf den unteren Hang), den
   GL nicht zeichnet. Das passiert auch mit einem Graph-Material, das nur eine konstante
   Farbe ist (`plaingraph`), aber **nicht** mit dem eingebauten Terrain-Material auf
-  Metal selbst (`builtin`). Der Fehler sitzt also im Schatten-Lookup von Metals
-  Graph-Beleuchtung (heLitP), nicht im Codegen dieses Themas. Ein längerer
+  Metal selbst (`builtin`). Drei von vier Pfaden (GL eingebaut, GL Graph, Metal
+  eingebaut) stimmen überein; welche Seite physikalisch richtig ist, wurde nicht aus dem
+  Sonnenstand hergeleitet. Die körnige Form am unteren Hang sieht nach Schatten-Akne aus.
+  Der Fehler sitzt damit sehr wahrscheinlich im Schatten-Lookup von Metals
+  Graph-Beleuchtung (heLitP), jedenfalls nicht im Codegen dieses Themas. Ein längerer
   Schattenabstand (`SHADOW=400`) ändert nichts. Das ist ein eigener Fehler und braucht
   ein eigenes Thema. Bis dahin vergleicht Schritt 6 das Material mit
   `-Extra @{HE_DUMP_SHADOW='0.1'}` und zusätzlich mit Schatten, um zu sehen, ob D3D/Vulkan

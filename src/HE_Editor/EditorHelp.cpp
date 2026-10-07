@@ -6063,8 +6063,8 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
-	  "material's Landscape Layer Blend node, in weightmap-channel order, and "
-	  "one weightmap holds four of them.",
+	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
+	  "eight, four per weightmap page.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Radius", "Brush Radius",
 	  "The inner, full-strength part of the brush, in metres — the tight circle "
