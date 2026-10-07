@@ -6530,6 +6530,8 @@ void EditorApplication::dumpFrameHeadless()
 	//   =builtin   the same relief with the engine's default terrain material:
 	//              the control that separates lighting/shadow differences
 	//              between backends from the material's
+	//   =plaingraph a lit graph material that is only a constant grey: the
+	//              graph lighting path without textures or normal map
 	if (const char* al = std::getenv("HE_DUMP_AUTOLAND"); al && *al && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -6547,6 +6549,22 @@ void EditorApplication::dumpFrameHeadless()
 		std::string what;
 		if (builtin)
 			what = "default terrain material";
+		else if (mode == "plaingraph")
+		{
+			// A lit graph material with nothing but a constant grey: the graph
+			// lighting path (heLitP) without textures or a perturbed normal.
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+			MaterialAsset am;
+			am.type = HE::AssetType::Material;
+			am.name = "AutoLandscapePlainGraph";
+			am.nodeGraphJson = HE::materialGraphToJson(g);
+			amId = contentManager().registerMaterial(std::move(am));
+			contentManager().regenerateMaterialFromGraph(amId);
+			what = "plain lit graph material";
+		}
 		else if (masks || ground || normalV || surface)
 		{
 			HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(

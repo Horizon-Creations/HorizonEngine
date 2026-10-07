@@ -804,4 +804,175 @@ Texel zeigt und keine gestörte Normale.
   dieselbe Cell-Quelle.
 - Cell 0,5 ist ein Startwert. Für die echten 2K-Texturen am Bild prüfen.
 - Die Hilfe zu „+ Layer“ spricht noch von vier Layern als Grenze. Das stimmt seit
-  Schritt 2 nicht mehr (acht).
+  Schritt 2 nicht mehr (acht). **Nachtrag Schritt 5:** korrigiert.
+
+## 10. Schritt 5: das Auto-Landschaftsmaterial
+
+Stand: Zweig `claude/auto-landschaftsmaterial-…`, Commits `86601d4d` (Metal-Sampler),
+`df36842c` (Material, Generator, Zeuge, Tests) und die Doku danach. Gemessen auf dem
+MacBook Air (Apple M5), Release-Build, **Metal und OpenGL**. D3D11/D3D12/Vulkan sind
+auf diesem Gerät nicht lauffähig; das ist Schritt 6 auf NN-WS03.
+
+### 10.1 Was es jetzt gibt
+
+- **Engine-Material** `Engine/Materials/M_AutoLandscape.hasset`, feste UUID
+  `0x412/1` (`HE::kAutoLandscapeMaterialId`). Es ist ein **gewöhnlicher Material-Graph**
+  aus Standardknoten (151 Knoten): kein eigener Knotentyp und kein Backend-Code. Auf allen
+  fünf Backends läuft also derselbe Codegen. Der Graph öffnet sich im Material-Editor wie
+  jeder andere, und eine Material-Instanz stellt ihn über 14 Parameter ein.
+- **Quelle** ist `HE::buildAutoLandscapeGraph` (`src/HE_Core/src/MaterialGraph/AutoLandscapeMaterial.cpp`).
+  Das Asset ist generiert, nicht von Hand gespeichert:
+  `landscape_tex_gen EditorDeps/EngineContent/Materials --material`. Ein zweiter Lauf
+  schreibt dieselben Bytes. Der Test „The shipped M_AutoLandscape.hasset is exactly what
+  the builder makes“ schlägt an, wenn jemand den Builder ändert und den Generator
+  vergisst.
+- **Texturen:** die drei Arrays aus §8 in heTexP0..2, `heTexP3` bleibt frei. Kein
+  Weightmap-Kanal, keine Paint-Layer: Die Verteilung ist vollständig prozedural.
+- **Benutzen:** das Material aus dem Content Browser (Ordner *Engine/Materials*) auf
+  ein Landscape ziehen, oder eine Material-Instanz davon anlegen und z. B. *Snow Height*
+  an die Höhe der eigenen Welt anpassen.
+
+### 10.2 Wie verteilt wird
+
+Pro Pixel, in dieser Reihenfolge (jede Stufe ist ein Lerp über Albedo, Normale und
+Maske):
+
+| Stufe | Maske | Parameter (Vorgabe) |
+|---|---|---|
+| Boden | Gras, darauf Erde in fBm-Flecken (Welt-Rauschen) **plus** ein Erdgürtel knapp unter der Felsgrenze (Geröll) | *Dirt Amount* 0,35, *Dirt Patch Size* 24 m |
+| Fels | `smoothstep(Rock Slope, + Rock Blend, slope)`, slope = 1 − N.y der **geometrischen** Normale | *Rock Slope* 0,12 (≈ 28°), *Rock Blend* 0,12 (voll bei ≈ 40°) |
+| Schnee | Welthöhe über *Snow Height*, über *Snow Blend* geschlossen, nicht auf Flächen steiler als *Snow Max Slope* (dort bleibt Fels) | 60 m, 6 m, 0,45 (≈ 57°) |
+| Pfützen | flacher Boden (slope < *Puddle Max Slope*), ohne Schnee, in den **Senken eines zweiten Welt-Rauschfelds**: nasser Rand (Wet-Ground-Schicht) und in der Mitte stehendes Wasser | *Puddle Amount* 0,32, *Puddle Size* 10 m, *Puddle Max Slope* 0,03 (≈ 14°) |
+| Wasser | Albedo × 0,35, Rauheit 0,05, Normale = geometrische Normale | fest |
+
+- **Stein ist der Hauptteil** der automatischen Verteilung: Er beginnt schon bei ≈ 28°,
+  also auf jedem nennenswerten Hang.
+- **Höhen-Überblendung** (*Height Blend*, Vorgabe 1): Jeder Übergang wird um die
+  Höhendifferenz der beteiligten Schichten (Masken-B) verschoben. Hohe Fels-Texel
+  stechen vor der Steigungsgrenze durch das Gras. Hoher Schnee deckt zuerst. Wasser füllt
+  zuerst die tiefen Texel des nassen Bodens.
+- **Kachelung im Welt-Raum** (*Ground Tile Size* 2 m für Gras/Erde/nassen Boden,
+  *Rock Tile Size* 4 m für Fels/Schnee, wie §4.1), nicht über das 0..1-UV des Terrains.
+  Ein Texel ist damit auf einem 100-m- und einem 4-km-Landscape gleich groß.
+  `TerrainComponent::uvTiling` wirkt auf dieses Material deshalb nicht.
+- **Bombing** (§9) für Fels, Gras und Erde: je ein Hex-Gitter pro Schicht, geteilt von
+  Albedo/Normal/Maske, eigener Seed (11/23/37), *Bombing Cell* 0,5. Schnee und nasser
+  Boden werden plain gelesen (§9.4). Damit sind es 33 statt 45 Texturzugriffe. Der
+  Static Switch **„Texture Bombing“** schaltet die gebombten Zugriffe zur Compile-Zeit
+  auf plain. Eine Instanz mit dem Schalter aus ist eine eigene Permutation; der
+  *Bombing Cell*-Parameter fällt dort heraus (13 statt 14 Slots).
+- **„Mulde“ heißt hier: Senke des Rauschfelds, nicht Senke des Terrain-Meshes.** Der
+  Shader kennt keine Krümmung des Geländes, und das Terrain hat keine Vertex-Farbe.
+  Pfützen liegen also auf flachem Boden zufällig verteilt, nicht gezielt in echten
+  Geländemulden. Echte Mulden bräuchten einen Kavitäts-Kanal, den TerrainSystem aus der
+  Höhe backt (Vorschlag: eigenes Thema; ein Weightmap-Kanal oder ein Vertex-Attribut).
+
+### 10.3 Nebenbefund: Metal hat Graph-Material-Texturen nie gekachelt (behoben)
+
+Metal hat hier **zum ersten Mal** Array- und Bombing-Knoten gerendert (Schritte 3/4 nur
+Cross-Compile). Das erste Bild zeigte das Terrain in vier Kacheln mit falschen Farben,
+entlang x = 0 und z = 0 getrennt. Auch der TEXARRAY-Zeuge aus §8.3 zeigte auf Metal
+nur die erste Kachel, danach den Randtexel verschmiert, und das auch im 2D-Band.
+
+- **Ursache:** `MetalRenderer` band heTexP0..3 mit `m_linearSampler`, dessen
+  Adressmodus der Default **ClampToEdge** ist. GL (Default-Wrap), D3D (WRAP) und Vulkan
+  (REPEAT) kacheln diese Slots. Jedes Graph-Material mit UV außerhalb 0..1 (jede
+  UV-Kachelung > 1) war auf Metal falsch, nicht erst das Auto-Material.
+- **Fix** `86601d4d`: `m_materialSampler` (linear + Mips wie bisher, Repeat) an allen
+  sechs heTexP-Bindestellen (Vorschau, UI, forward, transparent, G-Buffer). heTex0
+  (Slot 0) bleibt beim klemmenden Sampler; ob eingebaute Mesh-Texturen mit UV > 1 auf
+  Metal ebenfalls klemmen, ist **nicht geprüft** (offen).
+- **Nachweis:** TEXARRAY-Zeuge auf Metal nach dem Fix = das GL-Bild (Kacheln, L-Marken,
+  alle Bänder). Auto-Material Metal gegen GL siehe §10.4.
+
+### 10.4 Nachweis (Metal + OpenGL, M5, Release)
+
+Zeuge `HE_DUMP_AUTOLAND` (`EditorApplication.cpp`): ein **analytisches** 128-m-Relief
+auf y = 300, konstant entlang Z: Ebene (x < −24), Smoothstep-Rampe bis ≈ 62° und
+zurück, 40-m-Plateau (x > 8). *Snow Height* steht auf y = 320. Jede Spalte hat damit
+einen bekannten Sollzustand. Modi: `1` (das **ausgelieferte Asset**, per Pfad geladen,
+über eine Material-Instanz mit überschriebener *Snow Height*; das prüft feste UUID,
+`Engine/`-Präfix, Regenerieren beim Laden und den Instanz-Pfad), `nobomb` (dieselbe
+Instanz mit dem Schalter aus), `masks` / `ground` / `normal` / `surface` (unlit:
+Masken, finale Normale, AO/Rauheit), `builtin` und `plaingraph` (Kontrollen ohne
+Auto-Material). Skripte: `scripts/auto-landscape-repro/cap158auto.sh` (macOS),
+`cap158auto.ps1` (Windows, gleiche Kamera), `ana158auto.py` (masks / diff / repeat).
+Aufnahme top-down von y = 400, TOD 0,4, Wolken/GI/SSAO/SSR/AA/Bloom aus, forward,
+`HE_SKY_TIME=30`. Zwei Läufe desselben Builds sind bitgleich.
+
+**Soll/Ist pro Region** (`ana158auto.py masks`, Anteil Pixel > 128, Metal = GL):
+
+| Region | Fels | Schnee | Wasser | Erde | nass |
+|---|---|---|---|---|---|
+| Ebene x −60..−30 | 0 % | 0 % | 18,3 % | 33,2 % | 30,6 % |
+| Hangfuß x −23..−21 | 27 % | 0 % | 1,2 % | 93,5 % | 2,3 % |
+| Hang x −16..−9 (55–62°) | 100 % | 0 % | 0 % | – | 0 % |
+| Plateau x 16..60 (y 340) | 0 % | 100 % | 0 % | 2,8 % | 0 % |
+
+Alle 15 Erwartungen des Skripts sind erfüllt: Fels am Hang, Schnee in der Höhe, Wasser
+nur auf flachem Boden und nie unter Schnee, Erdgürtel am Hangfuß.
+
+**Metal gegen OpenGL** (mean|Δ| / Anteil Pixel mit |Δ| > 8, Terrain-Spalten):
+
+| Modus | gesamt | Ebene | Hangfuß | Hang | Plateau |
+|---|---|---|---|---|---|
+| `masks`, `ground`, `normal`, `surface` | 0,000 / 0 % | 0,000 | ≤ 0,002 | ≤ 0,001 | 0,000 |
+| `1` mit Schatten-Distanz 0,1 m | **0,001 / 0,000 %** | 0,001 | 0,003 | 0,002 | 0,000 |
+| `nobomb` mit Schatten-Distanz 0,1 m | 0,001 / 0,000 % | 0,001 | 0,008 | 0,007 | 0,000 |
+| `1` schräg (Kamera −24°), Schatten 0,1 m | 0,006 / 0,000 % | | | | |
+| `1` mit Schatten | 2,30 / 4,38 % | 0,001 | **70,6 / 100 %** | 1,14 / 5,6 % | 0,000 |
+| `plaingraph` (nur graues Graph-Material) mit Schatten | 3,47 / 4,41 % | 0,000 | **108,8 / 100 %** | 0,000 | 0,000 |
+| `builtin` (Default-Terrain-Material) mit Schatten | 0,17 / 0,44 % | 0,000 | 0,000 | 0,000 | 0,000 |
+
+- **Das Material ist auf Metal und GL gleich:** Masken, finale Normale, AO und Rauheit
+  sind bitgleich, das beleuchtete Bild ohne Schatten auch (0,001 / 0 %, Toleranz §7.5:
+  ≤ 1,0 / ≤ 0,5 %).
+- **Mit Schatten nicht**, und das liegt **nicht** am Material: Metal zeichnet bei
+  Graph-Materialien einen Schatten an den Hangfuß (und körnig auf den unteren Hang), den
+  GL nicht zeichnet. Das passiert auch mit einem Graph-Material, das nur eine konstante
+  Farbe ist (`plaingraph`), aber **nicht** mit dem eingebauten Terrain-Material auf
+  Metal selbst (`builtin`). Der Fehler sitzt also im Schatten-Lookup von Metals
+  Graph-Beleuchtung (heLitP), nicht im Codegen dieses Themas. Ein längerer
+  Schattenabstand (`SHADOW=400`) ändert nichts. Das ist ein eigener Fehler und braucht
+  ein eigenes Thema. Bis dahin vergleicht Schritt 6 das Material mit
+  `-Extra @{HE_DUMP_SHADOW='0.1'}` und zusätzlich mit Schatten, um zu sehen, ob D3D/Vulkan
+  sich wie GL oder wie Metal verhalten.
+- **Bombing bricht die Wiederholung** (`ana158auto.py repeat`, Ebene, Lumen-Differenz
+  bei Verschiebung um k = 4..40 px): ohne Bombing Minima bei 6, 12, 19, 25, 31, 37 px
+  (1-m-Schachfeld und 2-m-Kachel bei ≈ 6,2 px/m), Oszillation der Kurve 1,58 (h) /
+  1,45 (v). Mit Bombing kein periodisches Minimum mehr (nur k = 4) und Oszillation
+  0,12 / 0,12, also gut 12-mal weniger. Auf Metal und GL dieselben Zahlen. Gebombt
+  gegen plain unterscheiden sich die gebombten Regionen deutlich (Ebene 9,9 / 54 % > 8,
+  Hang 9,7 / 62 %), das Plateau (Schnee, immer plain) gar nicht.
+- Keine `[ERROR]`-, Link- oder Compile-Zeile in einem der 20 Läufe. Die
+  Draw-Counter melden 4 Draws (2 × 2 Chunks) in jedem Modus.
+- Tests (`test_material_graph.cpp`, alle grün im Release): Budgets (3 Array-Slots,
+  Maske 7, 14 Parameter, kein heTex0-Fallback, keine Paint-Layer), 3 Hex-Gitter,
+  Bombing-aus-Permutation, Debug-Ansichten unlit, JSON-Roundtrip; Cross-Compile von
+  `lit`, `nobomb`, `masks`, `ground` für MSL, GLSL 4.10/ES 3.00/4.30, HLSL, SPIR-V,
+  clustered und G-Buffer, mit ≥ 27 Gradienten-Zugriffen auf Metal und HLSL; Aufnahme in
+  die FXC/D3D12-Root-Signature/GL-Link-Sweeps (laufen nur unter Windows); Wächter für
+  das ausgelieferte Asset.
+
+### 10.5 Was offen bleibt
+
+- **D3D11, D3D12, Vulkan:** nicht gerendert, nur der Cross-Compile in den Tests (HLSL,
+  SPIR-V). Das ist Schritt 6 auf NN-WS03 mit `cap158auto.ps1`. Dort fehlt auch der
+  Zweig-Merge mit origin/main (§8.6). Für dieses Material ist das unerheblich, weil es
+  heLandscapeWeights nicht liest.
+- **Metal-Schatten bei Graph-Materialien** (§10.4): eigener Fehler, eigenes Thema.
+- **Echte Geländemulden für Pfützen** (§10.2): Kavitäts-Kanal, eigenes Thema.
+- **heTex0 auf Metal:** ob Slot 0 (eingebaute Mesh-Textur) bei UV > 1 auch klemmt, ist
+  nicht geprüft.
+- **Steile Felswände** werden über Welt-XZ projiziert und strecken sich ab ≈ 60°. Das
+  Bombing verdeckt es teilweise. Triplanar/Biplanar für Fels würde 2–3-mal so viele
+  Zugriffe kosten. Erst mit den echten Texturen am Bild entscheiden.
+- **Malbare Overrides** (Layer-Blend „Auto/Grass/Rock/Snow/Puddle“, um Pfützen oder Fels
+  von Hand zu setzen): bewusst weggelassen, weil Paint auf D3D12/Vulkan auf diesem Zweig
+  bis zum Merge nur Layer 0 zeigt (§7.5).
+- Die Vorgaben (Steigungen, Pfützenmenge, Kachelgrößen) sind an den Platzhaltern
+  gewählt und müssen mit den echten Texturen am Bild nachgestellt werden.
+- GI-Näherung: `matGraphApproxSurface` kann Texturknoten nicht falten
+  (`approxFoldNode` → `false`, „textures … cannot fold“). Die DDGI-Farbrückstrahlung
+  bekommt für dieses Material also den Rückfallwert statt einer Mischung der
+  Schichtfarben. Wie stark das im Bild auffällt, ist nicht geprüft.
