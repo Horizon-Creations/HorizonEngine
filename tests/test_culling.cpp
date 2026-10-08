@@ -970,6 +970,42 @@ TEST_CASE("SkyEnvBake: the IBL ambient cube face is pinned and backend-independe
 	CHECK(HE::BuildSkyEnvFace(4, 0, sun) == HE::BuildSkyEnvFace(4, 0, sun));
 }
 
+// The GI-reflection sky cube (topic 173) is the sky PASS rasterised into six
+// faces, with SkyCubeFaceInvViewProj standing in for the camera. The sky shader
+// takes its view direction as normalize(M*(ndc,+1,1)/w - M*(ndc,-1,1)/w), so for
+// every texel that must be the direction a cube SAMPLE of that texel means —
+// SkyEnvFaceDirection, the convention m_skyEnvCube is uploaded in and both
+// backends sample. A wrong sign here mirrors the clouds in every reflection
+// without any other symptom. Row order differs per rasteriser: Metal puts NDC
+// y = +1 in row 0, OpenGL puts NDC y = -1 there.
+TEST_CASE("SkyCubeFaceInvViewProj: the sky pass sees each texel's cube direction on both row orders")
+{
+	const glm::vec3 cam(12.0f, 305.0f, -40.0f); // off-origin: the camera must cancel out
+	const int N = 8;
+	for (int rowZeroAtTop = 0; rowZeroAtTop < 2; ++rowZeroAtTop)
+		for (int f = 0; f < 6; ++f)
+		{
+			const glm::mat4 m = HE::SkyCubeFaceInvViewProj(f, cam, rowZeroAtTop != 0);
+			for (int t = 0; t < N; ++t)
+				for (int s = 0; s < N; ++s)
+				{
+					const float u = (s + 0.5f) / N * 2.0f - 1.0f;   // texel column → cube u
+					const float v = (t + 0.5f) / N * 2.0f - 1.0f;   // texel row → cube v
+					const float x = u;
+					const float y = rowZeroAtTop ? -v : v;          // row → NDC y
+					const glm::vec4 p1 = m * glm::vec4(x, y,  1.0f, 1.0f);
+					const glm::vec4 p0 = m * glm::vec4(x, y, -1.0f, 1.0f);
+					const glm::vec3 dir = glm::normalize(glm::vec3(p1) / p1.w - glm::vec3(p0) / p0.w);
+					const glm::vec3 want = glm::normalize(HE::SkyEnvFaceDirection(f, u, v));
+					CHECK(glm::dot(dir, want) > 0.99999f);
+				}
+			// The near point sits at the camera side of the direction (clouds
+			// march from the camera, not from the origin).
+			const glm::vec4 p0 = m * glm::vec4(0.0f, 0.0f, -1.0f, 1.0f);
+			CHECK(glm::distance(glm::vec3(p0) / p0.w, cam) < 1.0f);
+		}
+}
+
 // The sky used to fall off a cliff at sunset: atmoRaySphere returned a POSITIVE
 // near distance for "the sun ray misses the planet", which the sun-visibility test
 // read as "shadowed" — so every sample whose sun ray cleared the planet entirely

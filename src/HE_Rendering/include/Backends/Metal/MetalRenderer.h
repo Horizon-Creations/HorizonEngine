@@ -455,9 +455,23 @@ private:
 	// tried and looked like one. `lowResClouds` false forces the inline raymarch
 	// (the preview runs no quarter-res pre-pass, so there is no buffer to composite).
 	// `useSkyLut` lets the pass read the Sky-View LUT when it holds this sun.
+	// `cubeBake` draws through m_skyReflPipeline instead (no depth attachment, no
+	// depth state) — the GI-reflection sky cube below.
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
 	                float time, const IRenderer::EnvironmentSettings& env,
-	                const glm::vec3& camPos, bool lowResClouds, bool useSkyLut);
+	                const glm::vec3& camPos, bool lowResClouds, bool useSkyLut,
+	                bool cubeBake = false);
+	// GI-reflection sky (topic 173): the REAL sky pass — clouds, weather, stars,
+	// time of day — drawn into a small cube around the camera each frame the
+	// reflections trace, so a ray that misses the scene returns the sky the
+	// viewer actually sees. m_skyEnvCube cannot: it is the CPU atmosphere bake
+	// (no clouds) the lit shaders' IBL ambient reads. Bound in the reflection
+	// kernels in place of m_skyEnvCube while m_skyReflValid; HE_GIREFL_SKY=0
+	// keeps the old cubemap fallback (A/B).
+	void* m_skyReflPipeline = nullptr; // id<MTLRenderPipelineState> skyFragment, RGBA16F, no depth
+	void* m_skyReflCube     = nullptr; // id<MTLTexture> cube RGBA16F, kSkyReflCubeSize²
+	bool  m_skyReflValid    = false;   // the cube holds THIS frame's sky
+	void  EncodeSkyReflCube(void* cmdBuf);
 	// Sky-View LUT (perf audit A4): atmoScatter for the current sun baked into
 	// two 256×128 RGBA16F targets (skyViewLutFragment in kSkyMSL: Rayleigh +
 	// multiple-scatter fill, and the phase-free Mie term), so the sky pass reads

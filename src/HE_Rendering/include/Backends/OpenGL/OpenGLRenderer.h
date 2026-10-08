@@ -1197,6 +1197,15 @@ private:
 	// pass could not run. probesValid = the DDGI atlases hold real data.
 	unsigned int RenderGIReflections(int width, int height, const glm::mat4& viewProj,
 	                                 bool probesValid);
+	// GI-reflection sky (topic 173): the sky pass (DrawSkyFullscreen — clouds,
+	// weather, stars) drawn into a small cube around the camera each frame the
+	// reflections trace, so a ray that misses the scene returns the sky the
+	// viewer sees instead of nothing (the composite's cloudless m_skyEnvCube).
+	// Mirrors MetalRenderer::EncodeSkyReflCube; HE_GIREFL_SKY=0 turns it off.
+	void         RenderSkyReflCube();
+	unsigned int m_skyReflCube  = 0;     // GL_TEXTURE_CUBE_MAP RGBA16F, kSkyReflCubeSize²
+	unsigned int m_skyReflFBO   = 0;
+	bool         m_skyReflValid = false; // the cube holds THIS frame's sky
 	void         DispatchGIProbeUpdate();
 
 	static constexpr int   kGIProbeOctSize     = 8;    // octahedral tile size

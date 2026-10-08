@@ -2669,7 +2669,7 @@ struct GIReflParams {
 	float4 gridOrigin;      // xyz = probe-grid origin, w = spacing
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
 	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w = max bounces (1-4)
-	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier)
+	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube (primary misses read it)
 };
 
 // P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
@@ -2879,9 +2879,10 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	// Bounce loop (P.extra.w = max bounces, 1-4): a mirror-like hit (metallic,
 	// low roughness — packed in the instance-shading pair) reflects ONWARD
 	// instead of flattening to its base colour; `throughput` carries the metal
-	// tint. A primary miss keeps confidence 0 (the composite's cubemap is the
-	// exact fallback); a SECONDARY miss samples the sky cube directly — that
-	// ray genuinely reflects the sky.
+	// tint. A SECONDARY miss samples the sky cube directly — that ray genuinely
+	// reflects the sky. A primary miss does the same when the baked sky cube
+	// is bound (P.land.z); otherwise it keeps confidence 0 and the composite's
+	// cubemap is the fallback.
 	float4 sampleOut = float4(0.0);
 	for (int sIdx = 0; sIdx < rays; ++sIdx)
 	{
@@ -2918,7 +2919,13 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			q.next();
 			if (q.get_committed_intersection_type() == intersection_type::none)
 			{
-				if (b > 0) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				// With the baked sky cube bound (P.land.z, EncodeSkyReflCube) a
+				// PRIMARY miss returns the real sky too — clouds, weather — at the
+				// receiver's own confidence, so the composite shows it instead of
+				// its cloudless cubemap. Counting the miss as a full sample also
+				// keeps a part-miss glossy lobe from weighting its hits by f².
+				if (b > 0 || P.land.z > 0.5) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				if (b == 0 && P.land.z > 0.5) conf = roughFade;
 				break;
 			}
 			const uint   instId   = q.get_committed_instance_id();
@@ -3519,7 +3526,7 @@ struct GIReflParams {
 	float4 gridOrigin;
 	float4 gridCounts;
 	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count, w = max bounces
-	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier)
+	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube
 };
 
 // Closest hit that also reports WHICH triangle was hit (global index into the
@@ -3706,7 +3713,9 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			                                         dist, triIdx);
 			if (hitInst < 0)
 			{
-				if (b > 0) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				// Miss → sky; see the HW kernel for the primary-miss rule.
+				if (b > 0 || P.land.z > 0.5) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				if (b == 0 && P.land.z > 0.5) conf = roughFade;
 				break;
 			}
 			const float4 alb4     = insts[hitInst].baseColor; // rgb albedo, a metallic
@@ -6267,7 +6276,7 @@ struct GIReflParamsCPU
 	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
 	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
-	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel
+	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube)
 };
 static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
@@ -6562,6 +6571,9 @@ void MetalRenderer::Shutdown()
 	if (m_mbBlurPipeline)       { CFBridgingRelease(m_mbBlurPipeline);       m_mbBlurPipeline = nullptr; }
 	m_mbHasPrev = false;
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
+	if (m_skyReflPipeline)      { CFBridgingRelease(m_skyReflPipeline);      m_skyReflPipeline = nullptr; }
+	if (m_skyReflCube)          { CFBridgingRelease(m_skyReflCube);          m_skyReflCube = nullptr; }
+	m_skyReflValid = false;
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
 	DestroyCloudShadowTarget();
@@ -7182,6 +7194,14 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: sky pipeline creation failed: ")
 				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
 		m_skyPipeline = (void*)CFBridgingRetain(skyPso);
+		// Same sky into the GI-reflection sky cube (EncodeSkyReflCube): a face
+		// pass has no depth attachment, so the PSO must not declare one.
+		skyDesc.depthAttachmentPixelFormat = MTLPixelFormatInvalid;
+		id<MTLRenderPipelineState> skyReflPso = [device newRenderPipelineStateWithDescriptor:skyDesc error:&skyError];
+		if (!skyReflPso)
+			throw std::runtime_error(std::string("MetalRenderer: sky-cube pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_skyReflPipeline = (void*)CFBridgingRetain(skyReflPso);
 
 		// ── Cloud pre-pass pipeline (quarter-res clouds-only → RGBA16F (L,T), no depth) ──
 		MTLRenderPipelineDescriptor* cloudDesc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -13174,14 +13194,18 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              const glm::vec3& sunDir, float time,
                              const IRenderer::EnvironmentSettings& env,
-                             const glm::vec3& camPos, bool lowResClouds, bool useSkyLut)
+                             const glm::vec3& camPos, bool lowResClouds, bool useSkyLut,
+                             bool cubeBake)
 {
-	if (!m_skyPipeline) return;
+	void* const pso = cubeBake ? m_skyReflPipeline : m_skyPipeline;
+	if (!pso) return;
 	if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyPipeline];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pso];
 	// Depth-test == far, no write — only fills background pixels (drawn after scene).
-	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState];
+	// A cube face has no depth attachment: every texel is sky.
+	if (!cubeBake)
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState];
 	id<MTLTexture> moon = m_moonTexture
 		? (__bridge id<MTLTexture>)m_moonTexture
 		: (__bridge id<MTLTexture>)m_dummyTexture;
@@ -13262,6 +13286,53 @@ void MetalRenderer::DestroySkyViewLut()
 	if (m_skyLutRayleigh) { CFBridgingRelease(m_skyLutRayleigh); m_skyLutRayleigh = nullptr; }
 	if (m_skyLutMie)      { CFBridgingRelease(m_skyLutMie);      m_skyLutMie = nullptr; }
 	m_skyLutValid = false;
+}
+
+// GI-reflection sky cube (topic 173): the sky pass drawn into six faces around
+// the camera, so a reflection ray that misses the scene returns the sky the
+// viewer sees — clouds and weather included — instead of m_skyEnvCube's
+// cloudless CPU atmosphere. Every frame the reflections trace (clouds drift
+// with the clock); 6 × 128² texels is about a tenth of a 720p sky pass. No
+// low-res cloud composite: that buffer is screen-space, a face is not.
+static constexpr int kSkyReflCubeSize = 128;
+void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
+{
+	m_skyReflValid = false;
+	static const bool s_off = [] {
+		const char* e = std::getenv("HE_GIREFL_SKY");
+		return e && e[0] == '0';
+	}();
+	if (s_off || !m_skyReflPipeline || !GetEnvironment().skyEnabled) return;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+	if (!m_skyReflCube)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			textureCubeDescriptorWithPixelFormat:kSceneColorFormat
+			size:kSkyReflCubeSize mipmapped:NO];
+		d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		d.storageMode = MTLStorageModePrivate;
+		m_skyReflCube = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+		if (!m_skyReflCube) return;
+	}
+	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f; // == the scene's drawSky
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	const glm::vec3 camPos = m_renderWorld.camera.position;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	for (int f = 0; f < 6; ++f)
+	{
+		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_skyReflCube;
+		pass.colorAttachments[0].slice       = static_cast<NSUInteger>(f);
+		pass.colorAttachments[0].loadAction  = MTLLoadActionDontCare; // every texel is written
+		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+		EncodeSky((__bridge void*)enc, HE::SkyCubeFaceInvViewProj(f, camPos, /*rowZeroAtTop=*/true),
+		          m_renderWorld.sunDirection, skyClock, GetEnvironment(), camPos,
+		          /*lowResClouds=*/false, /*useSkyLut=*/true, /*cubeBake=*/true);
+		[enc endEncoding];
+	}
+	m_skyReflValid = true;
 }
 
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -15313,8 +15384,12 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// for the whole landscape (see GiLandscape.h).
 		std::vector<void*> landTex;
 		const int landCount = BuildGILandscapeTable(landTex);
+		// The real sky (clouds, weather) for rays that miss — see EncodeSkyReflCube.
+		// Baked on this command buffer ahead of the trace encoder below.
+		EncodeSkyReflCube((__bridge void*)cmdBuf);
 		rp.land         = glm::vec4(static_cast<float>(landCount),
-		                            static_cast<float>(rays), 0.0f, 0.0f);
+		                            static_cast<float>(rays),
+		                            m_skyReflValid ? 1.0f : 0.0f, 0.0f);
 
 		const int curIdx  = m_giReflHistIdx;
 		const int prevIdx = 1 - curIdx;
@@ -15330,9 +15405,14 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[prevIdx] atIndex:5];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistRad[curIdx]  atIndex:6];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[curIdx]  atIndex:7];
-		// Sky cubemap for SECONDARY-bounce misses (a mirror seen in a mirror
-		// reflecting the sky) — the primary miss keeps the composite's fallback.
-		[enc setTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:8];
+		// Sky cubemap for misses. With the baked sky cube (rp.land.z = 1) EVERY
+		// miss reads it — primary misses with full confidence, so the mirror
+		// shows the clouds instead of the composite's cloudless m_skyEnvCube.
+		// Without it only SECONDARY misses (a mirror seen in a mirror reflecting
+		// the sky) read m_skyEnvCube, and the primary miss keeps the composite's
+		// fallback, as before.
+		[enc setTexture:(__bridge id<MTLTexture>)(m_skyReflValid ? m_skyReflCube : m_skyEnvCube)
+		        atIndex:8];
 		if (m_giHwRt)
 		{
 			[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas

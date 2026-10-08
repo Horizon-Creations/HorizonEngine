@@ -166,3 +166,56 @@ und zur Laufzeit erst in der Linux-/Windows-CI.
   Ausgabe (inkl. Wolken) in eine niedrig aufgelöste Cubemap, genutzt vom Composite und vom
   Sekundär-Miss. Der f²-Nebenbefund (§4.3) gehört sinnvoll in denselben Schritt.
 - Zeuge für vorher/nachher: §2, die Werte in §3 sind die Vorher-Zahlen.
+
+## 6. Schritt 2: Himmel im Spiegel (umgesetzt)
+
+Lesart der offenen Frage aus §4.2: Der Schritt verlangt die Himmelsfarbe „passend zu Tageszeit
+und Wetter“, also den Himmel, den der Betrachter sieht, mit Wolken. Die Atmosphärenfarbe allein
+kam schon an.
+
+**Umsetzung.** Der echte Himmelspass (`skyFragment` auf Metal, `DrawSkyFullscreen`/`kSkyFS`
+auf GL, mit Wolken, Wetter, Sternen und Mond) wird in jedem Frame, in dem die GI-Reflexionen
+tracen, in eine kleine Cubemap um die Kamera gezeichnet (6 × 128², RGBA16F, ohne Low-Res-
+Wolken, deren Puffer liegt im Bildraum). Strahlen ohne Treffer lesen diese Cubemap:
+
+- **Primär-Miss:** Himmelsfarbe mit voller Konfidenz (Metal: `roughFade` des Empfängers, GL: 1).
+  Das Composite zeigt damit den Himmel aus dem Trace statt seiner wolkenlosen SkyEnv-Cubemap.
+- **Sekundär-Miss** (Bounce-Schleife, nur Metal): liest dieselbe gebackene Cubemap an Slot 8,
+  sonst wie bisher SkyEnv. Die Schleife selbst ist unverändert.
+- Nebenbei erledigt sich der f²-Fehler aus §4.3 für den Himmelsanteil: Ein Miss ist jetzt ein
+  vollwertiges Sample, ein halb danebengehender glossy Lobe mittelt Treffer und Himmel.
+- Ohne Sky-Entity (`skyEnabled` aus) oder mit `HE_GIREFL_SKY=0` wird nichts gebacken, und das
+  alte Verhalten gilt bitgenau (Messung unten).
+- Kein neuer Sampler in den Material-Shadern: Die Cubemap hängt nur an den Compute-Kerneln
+  (Metal: Textur 8 statt `m_skyEnvCube`, GL: Unit 9 `uSkyRefl` in `kGiReflCS`).
+- Kein FrameKey-Eintrag nötig: Alle Eingaben (Sonne, Environment, Uhr, Kamera) liest der
+  Renderer selbst, nichts davon kommt neu aus dem Extraktor.
+- Die Seiten-Matrix ist `HE::SkyCubeFaceInvViewProj` (`SkyEnvBake.h`), geprüft in
+  `tests/test_culling.cpp` gegen `SkyEnvFaceDirection` für beide Zeilenordnungen (Metal: NDC
+  y = +1 in Zeile 0, GL: y = −1).
+
+Kosten: 6 × 128² = 98 304 Himmelspixel pro Frame, etwa ein Zehntel eines 720p-Himmelspasses.
+
+**Messung (Metal, gleicher Zeuge wie §2/§3, `scripts/auto-landscape-repro/ana173sky.py`):**
+
+| Lauf | md5 (BMP) | Spiegel-Himmel Mittel | Luma-Streuung Spiegel-Himmel |
+|---|---|---|---|
+| vorher `r0` (GIRefl aus) | ce9749e7… | | |
+| nachher `r0` (GIRefl aus) | ce9749e7… (gleich) | | |
+| vorher `r1` | 01243515… | 199,217,214 | 7,1 |
+| nachher `r1`, `HE_GIREFL_SKY=0` | 01243515… (gleich) | 199,217,214 | 7,1 |
+| nachher `r1` HW | 383f10d4… | 195,210,208 | **12,5** |
+| nachher `r1sw` SW-BVH | 7a942aa9… | 195,210,208 | 12,5 |
+| nachher `r1def` deferred | 463ce390… | 193,208,206 | 12,2 |
+| echter Himmel (Referenz) | | | 20,7 |
+
+Spiegel-Himmel = Kasten x 500–780, y 190–320 im kamerazugewandten Spiegel; echter Himmel =
+gleicher Kasten bei y 20–150. Die Punktwerte aus §3 ändern sich kaum (640,220 liegt zufällig
+in einer wolkenlosen Stelle: 185,213,223 → 184,212,222); Terrain-Treffer bleiben weiß, das ist
+Schritt 3.
+
+![Nachher: Wolken im Spiegel](gi-reflexionen-ursache-2026-10-08/AL1-Metal-r1-himmel.png)
+
+**OpenGL:** gleich gebaut, aber auf dem Mac nicht lauffähig (§4.4). Geprüft: `kGiReflCS` mit
+`glslangValidator -S comp` (`#version 430 core` + `kGiTraversalGLSL` + `kGiReflCS`), C++ baut.
+Laufzeit erst in der Linux-/Windows-CI.

@@ -2425,6 +2425,11 @@ uniform vec4 uFrame;       // x = jitter seed, y = width, z = height, w = 1 → 
 uniform vec4 uLightPosRange[8];  // xyz pos, w range
 uniform vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
 uniform vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+// The real sky (clouds, weather) for rays that miss, baked around the camera
+// this frame (RenderSkyReflCube). uSkyReflValid = 0: no bake, a miss returns
+// nothing and the composite's cloudless cubemap shows instead.
+uniform samplerCube uSkyRefl;
+uniform float uSkyReflValid;
 
 const int kOctSize = 8; // must match OpenGLRenderer::kGIProbeOctSize
 
@@ -2585,7 +2590,19 @@ void main()
 
 	float dist; int tri;
 	int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
-	if (hitInst < 0) continue; // miss → this sample contributes nothing (sky)
+	if (hitInst < 0)
+	{
+		// Miss → the sky. With the bake it is a full sample (the receiver's
+		// confidence, like a hit at close range) carrying the real sky, so the
+		// mirror shows clouds and a part-miss glossy lobe averages hit and sky
+		// instead of weighting its hits by f². Without it: nothing, as before.
+		if (uSkyReflValid > 0.5)
+		{
+			outRadiance += texture(uSkyRefl, Rs).rgb;
+			outConf     += 1.0;
+		}
+		continue;
+	}
 
 	vec3 hitPos = origin + Rs * dist;
 	vec3 hitN   = giHitNormal(hitInst, tri, Rs);
@@ -6031,6 +6048,9 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	if (m_giReflFBO)     { glDeleteFramebuffers(1, &m_giReflFBO);     m_giReflFBO = 0; }
 	if (m_giReflTex)     { glDeleteTextures(1, &m_giReflTex);         m_giReflTex = 0; }
 	if (m_giReflRawTex)  { glDeleteTextures(1, &m_giReflRawTex);      m_giReflRawTex = 0; }
+	if (m_skyReflFBO)    { glDeleteFramebuffers(1, &m_skyReflFBO);    m_skyReflFBO = 0; }
+	if (m_skyReflCube)   { glDeleteTextures(1, &m_skyReflCube);       m_skyReflCube = 0; }
+	m_skyReflValid = false;
 	if (m_giReflBlurFBO) { glDeleteFramebuffers(1, &m_giReflBlurFBO); m_giReflBlurFBO = 0; }
 	if (m_giReflBlurTex) { glDeleteTextures(1, &m_giReflBlurTex);     m_giReflBlurTex = 0; }
 	for (int i = 0; i < 2; ++i)
@@ -6341,10 +6361,70 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 // `probesValid` = the DDGI atlases hold real data this frame. Reflections run
 // WITHOUT them (sun + local lights + the flat ambient floor at each hit), which
 // is why the whole pass is independent of the diffuse GI toggle.
+// GI-reflection sky cube (topic 173) — see the header and Metal's
+// EncodeSkyReflCube, which this mirrors: six faces of the real sky pass around
+// the camera, low-res clouds off (that buffer is screen-space, a face is not).
+// Leaves the caller's framebuffer, viewport and depth-test state as it found them.
+static constexpr int kSkyReflCubeSize = 128;
+void OpenGLRenderer::RenderSkyReflCube()
+{
+	m_skyReflValid = false;
+	static const bool s_off = [] {
+		const char* e = std::getenv("HE_GIREFL_SKY");
+		return e && e[0] == '0';
+	}();
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	if (s_off || !m_skyProgram || !env.skyEnabled) return;
+	if (!m_skyReflCube)
+	{
+		glGenTextures(1, &m_skyReflCube);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflCube);
+		for (int f = 0; f < 6; ++f)
+			glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA16F,
+			             kSkyReflCubeSize, kSkyReflCubeSize, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+	}
+	if (!m_skyReflFBO) glGenFramebuffers(1, &m_skyReflFBO);
+
+	GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+	const GLboolean depthWasOn = glIsEnabled(GL_DEPTH_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_skyReflFBO);
+	glViewport(0, 0, kSkyReflCubeSize, kSkyReflCubeSize);
+	glDisable(GL_DEPTH_TEST); // no depth attachment: every texel is sky
+	const glm::vec3 camPos = m_renderWorld.camera.position;
+	bool complete = true;
+	for (int f = 0; f < 6 && complete; ++f)
+	{
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		                       GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, m_skyReflCube, 0);
+		complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+		if (complete)
+			DrawSkyFullscreen(HE::SkyCubeFaceInvViewProj(f, camPos, /*rowZeroAtTop=*/false),
+			                  m_renderWorld.sunDirection, camPos, env,
+			                  /*allowLowResClouds=*/false, kSkyReflCubeSize, kSkyReflCubeSize);
+	}
+	// DrawSkyFullscreen leaves GL_LESS + depth writes (the frame default); the
+	// test itself goes back to what the caller had.
+	if (depthWasOn) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
+	glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+	m_skyReflValid = complete;
+}
+
 unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
                                                  const glm::mat4& viewProj, bool probesValid)
 {
 	if (!m_giReflCSProgram || !m_giGBufFBO || !m_giReflRawTex) return 0;
+
+	// The real sky for rays that miss (clouds, weather) — before the trace binds
+	// its own program and units.
+	RenderSkyReflCube();
 
 	// ── 1. Trace: one specular ray per pixel against the BVH SSBOs ───────────
 	glUseProgram(m_giReflCSProgram);
@@ -6414,6 +6494,14 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		        i < static_cast<int>(m_giLandWeightTex.size()) ? m_giLandWeightTex[i] : m_blackTex,
 		        5 + i);
 	}
+	// Baked sky cube on unit 9 (after the weightmaps). The IBL cube stands in
+	// while the bake is off so the samplerCube always has a complete texture;
+	// uSkyReflValid = 0 keeps the kernel from reading it then.
+	glActiveTexture(GL_TEXTURE9);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflValid ? m_skyReflCube : m_skyEnvCube);
+	glUniform1i(loc("uSkyRefl"), 9);
+	glUniform1f(loc("uSkyReflValid"), m_skyReflValid ? 1.0f : 0.0f);
+	glActiveTexture(GL_TEXTURE0);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 
