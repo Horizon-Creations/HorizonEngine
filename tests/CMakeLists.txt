@@ -1118,6 +1118,21 @@ if(Python3_Interpreter_FOUND)
                      "${CMAKE_SOURCE_DIR}/tests/test_he_mcp.py")
 endif()
 
+# ── "Does a double-click on a .heproj open the editor?" ──────────────────────
+# macOS registers the type in Info.plist; Windows and Linux ship a ZIP / tarball with
+# no installer, so the registration is files inside the package (FileTypes/, from
+# scripts/windows_assets and scripts/linux_assets). This holds those files to ONE
+# name for the type on all three platforms, validates them, and on a POSIX machine
+# runs the Linux installer for real against a throwaway XDG_DATA_HOME. Python, because
+# what it checks is files and a shell script, and because the Windows half of the
+# same question is answered on the Windows runner by check_heproj_registration.ps1.
+# CI additionally passes --package to prove the deployed package carries the files.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME heproj_file_types
+             COMMAND ${Python3_EXECUTABLE}
+                     "${CMAKE_SOURCE_DIR}/tests/test_heproj_file_types.py")
+endif()
+
 # ── "How heavy is what we actually ship?" ────────────────────────────────────
 # docs/he-apps-plan.md A3 wrote a size table into the plan and got it wrong,
 # because the numbers came from a tree that was not a Release build. That is why

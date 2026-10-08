@@ -101,6 +101,10 @@ jobs:
             libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
             liblz4-dev libzstd-dev python3-dev \
             libcurl4-openssl-dev
+          # desktop-file-utils / shared-mime-info / xdg-utils: not for the build but for
+          # heproj_file_types, which runs the .heproj installer for real and validates
+          # what it writes (desktop-file-validate, update-mime-database, xdg-mime).
+          sudo apt-get install -y desktop-file-utils shared-mime-info xdg-utils
 
       # FetchContent checkouts (SDL3, glm, nlohmann_json) are cached on the
       # configure hash so CI does not re-clone them on every run.
@@ -313,6 +317,26 @@ jobs:
               exit 1
             fi
           done
+
+      # .heproj file type (Thema 161): Windows and Linux have no installer, so the
+      # registration is files inside the package, FileTypes/. The ctest case
+      # heproj_file_types judged the SOURCE of those files; this judges what was
+      # DEPLOYED, byte for byte, before it is zipped. On Windows the registry is
+      # also exercised for real: register, read the keys and ask the shell what it
+      # resolves .heproj to, unregister, repeat from a path with spaces and
+      # parentheses. What stays open is a double-click on real hardware.
+      - name: Check the .heproj registration in the package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python tests/test_heproj_file_types.py --package package/Editor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & scripts/windows_assets/check_heproj_registration.ps1 -EditorDir package/Editor
+          exit $LASTEXITCODE
+
+      - name: Check the .heproj registration in the package (Linux)
+        if: runner.os == 'Linux'
+        run: python3 tests/test_heproj_file_types.py --package package/Editor
 
       # The editor POST_BUILD deployed a self-contained bundle into package/Editor:
       # HorizonEditor.exe + engine DLLs + SDL3 + EngineContent/Fonts/Images + Vulkan

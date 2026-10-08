@@ -2,8 +2,10 @@
 """Generate the HorizonEditor macOS DMG assets from the HC logo.
 
 Subcommands:
-  icon        Build a macOS AppIcon.icns (full HC lockup on a premium light squircle).
-  docicon     Build ProjectIcon.icns, the Finder icon of .heproj project files.
+  icon        Build a macOS AppIcon.icns (full HC lockup on a premium light squircle;
+              --format png: the same plate as a 256 px PNG for the Linux desktop entry).
+  docicon     Build ProjectIcon.icns, the Finder icon of .heproj project files
+              (--format ico / png: the same page for Windows and Linux).
   background  Build the DMG window background (1x PNG + @2x PNG) for a given theme.
 
 Everything is derived deterministically from EditorDeps/Images/HC_Logo.png so the
@@ -480,12 +482,38 @@ def write_icns(master, out, workdir=None, name="AppIcon"):
 
 
 def cmd_icon(args):
-    write_icns(render_icon_master(args.logo, 1024), args.out, args.workdir)
+    master = render_icon_master(args.logo, 1024)
+    if args.format == "png":
+        write_png(master, args.out)
+    else:
+        write_icns(master, args.out, args.workdir)
+
+
+def write_ico(master, out):
+    """Windows icon: one file, the sizes Explorer asks for (16 in a list view, 256 in
+    the large-icon view). Pillow stores each as PNG, which Vista and later read."""
+    sizes = [(s, s) for s in (16, 24, 32, 48, 64, 128, 256)]
+    master.save(out, format="ICO", sizes=sizes)
+    print(f"  icon (ico): {out}")
+
+
+def write_png(master, out, px=256):
+    """Linux: the 256 px entry of the hicolor mimetypes theme."""
+    master.resize((px, px), Image.LANCZOS).save(out, format="PNG", optimize=True)
+    print(f"  icon (png {px}): {out}")
 
 
 def cmd_docicon(args):
-    write_icns(render_document_master(args.logo, 1024), args.out, args.workdir,
-               name="ProjectIcon")
+    master = render_document_master(args.logo, 1024)
+    # icns is what package_macos.sh asks for and stays the default; ico and png are
+    # the same page for the Windows ProgID and the Linux MIME type, so the three
+    # platforms show one picture for a .heproj.
+    if args.format == "ico":
+        write_ico(master, args.out)
+    elif args.format == "png":
+        write_png(master, args.out)
+    else:
+        write_icns(master, args.out, args.workdir, name="ProjectIcon")
 
 
 def main():
@@ -496,12 +524,16 @@ def main():
     pi.add_argument("--logo", required=True)
     pi.add_argument("--out", required=True)
     pi.add_argument("--workdir", default=None)
+    pi.add_argument("--format", default="icns", choices=["icns", "png"],
+                    help="icns for the macOS bundle (default), png for the Linux desktop entry")
     pi.set_defaults(func=cmd_icon)
 
     pd = sub.add_parser("docicon")
     pd.add_argument("--logo", required=True)
     pd.add_argument("--out", required=True)
     pd.add_argument("--workdir", default=None)
+    pd.add_argument("--format", default="icns", choices=["icns", "ico", "png"],
+                    help="icns for the macOS bundle (default), ico for Windows, png for Linux")
     pd.set_defaults(func=cmd_docicon)
 
     pb = sub.add_parser("background")
