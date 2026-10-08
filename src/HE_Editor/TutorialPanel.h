@@ -45,4 +45,9 @@ namespace TutorialPanel
 	// starts over.
 	void open();
 	bool isOpen();
+
+	// Witness for the card's placement in the RUNNING editor (HE_DUMP_TUTORIALUI,
+	// see TutorialPanel.cpp). Call right after ImGui::Render(); does nothing
+	// unless the variable is set.
+	void witnessAfterRender();
 }

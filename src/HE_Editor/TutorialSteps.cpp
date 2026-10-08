@@ -22,6 +22,8 @@ namespace
 		"animatorstatemachine", "inputaction", "inputmappingcontext",
 		"horizoncodeclass", "scene", "texture", "staticmesh", "skeletalmesh",
 		"script", "audio", "font", "prefab", "animationclip",
+		"theme", "struct", "enum", "savegametemplate", "bonemask", "blendspace",
+		"propertyanimclip", "sequence",
 	};
 }
 
@@ -145,22 +147,48 @@ constexpr Step kOrientation[] = {
 	{ "welcome",
 	  "Welcome to Horizon Engine",
 	  "This tour walks once through every part of the editor — scenes, assets, "
-	  "materials, terrain, physics, animation, UI, scripting, playing and shipping.\n"
-	  "It never touches your work: each step tells you what to do and waits until "
-	  "you have actually done it. Nothing is skipped past, so when the tour says a "
-	  "chapter is done you really have used that part of the editor.\n"
+	  "materials, terrain, physics, animation, UI, scripting, playing and shipping. "
+	  "It follows the order a level is actually built in: find your way around, "
+	  "place something, give it a surface, light it, make it move, make it playable, "
+	  "ship it. No earlier engine experience is assumed.\n"
+	  "Each card first explains one idea — what the thing is and why you would want "
+	  "it — and then asks for exactly one action, in the line under the text. You do "
+	  "it in the real editor, not in a special tutorial mode, and the card watches "
+	  "for it: once the editor has seen you do it, the card confirms and moves on by "
+	  "itself. Nothing is skipped past, so when the tour says a chapter is done you "
+	  "really have used that part of the editor.\n"
+	  "A few cards, like this one, have nothing to do. Their button unlocks once you "
+	  "have scrolled to the end of the text.\n"
+	  "A pulsing outline marks the panel a card is talking about. The card moves out "
+	  "of that panel's way on its own; if it still sits where you want to look, drag "
+	  "it somewhere else by its title bar.\n"
+	  "Back returns to the previous card when you want to read something again. "
 	  "Close the window whenever you like and reopen it from Help - Interactive "
-	  "Tutorial; your place is remembered.",
+	  "Tutorial; your place is remembered. The sandbox is an ordinary project, so "
+	  "whatever you build along the way stays yours.",
 	  "", "", Check::ReadAck, "" },
 
 	{ "layout",
 	  "The editor at a glance",
-	  "Scene (centre) renders the world you are editing.\n"
-	  "World Outliner (right) lists every entity in the open scene.\n"
-	  "Details (below it) edits whatever is selected.\n"
-	  "Content Browser (bottom) is your project's asset library.\n"
+	  "Every panel has one job, and nearly every task in the rest of the tour starts "
+	  "in one of the four outlined ones. Knowing which panel to look at is most of "
+	  "learning the editor.\n"
+	  "Scene (centre) renders the world you are editing. It is where you move the "
+	  "camera and drag things into place.\n"
+	  "World Outliner (right) lists every entity in the open scene as a tree. When "
+	  "something is small, hidden or hard to click in the viewport, select it here.\n"
+	  "Details (below it) edits whatever is selected: its position, its components "
+	  "and their settings. Nearly every change that is not a drag happens here.\n"
+	  "Content Browser (bottom) is your project's asset library: meshes, materials, "
+	  "textures, scripts, other scenes. A scene points at these files rather than "
+	  "copying them, so changing an asset changes it everywhere it is used.\n"
 	  "Quick Settings (left) holds the engine switches you pinned, and the tab bar "
-	  "above the viewport is where asset editors open next to the scene.",
+	  "above the viewport is where asset editors open next to the scene.\n"
+	  "Panels are docked, not fixed: drag a tab to rearrange them, and Window - Reset "
+	  "Layout puts everything back. Hover almost any control for a tooltip; pressing "
+	  "F1 while it shows opens the manual at that entry.\n"
+	  "Each outline dims once you have clicked into its panel, and the line under "
+	  "this text counts how many you have visited so far.",
 	  "Click into each of the four highlighted panels once.",
 	  "Scene|World Outliner|Details|Content Browser",
 	  Check::PanelsVisited, "Scene|World Outliner|Details|Content Browser" },
@@ -170,8 +198,14 @@ constexpr Step kOrientation[] = {
 constexpr Step kViewport[] = {
 	{ "fly",
 	  "Flying through the scene",
+	  "Before you can work on a scene you have to be able to reach every part of it, "
+	  "so the next two cards are about the camera. The one you steer here belongs "
+	  "to the editor: it is not part of the level and never shows up in the game, "
+	  "so moving it cannot break anything. Look around freely.\n"
 	  "Hold the right mouse button inside the Scene view and steer with the mouse. "
-	  "While it is held, W/A/S/D move, Q/E drop and rise, and Shift moves faster.\n"
+	  "While it is held, W/A/S/D move, Q/E drop and rise, and Shift moves four times "
+	  "faster. Let go and those keys go back to their usual jobs — W, E and R switch "
+	  "the gizmo, which the Entities chapter shows.\n"
 	  "The mouse is captured while you look around, so the cursor will not run off "
 	  "the viewport.",
 	  "Right-drag in the Scene view, then fly with W/A/S/D.",
@@ -179,11 +213,19 @@ constexpr Step kViewport[] = {
 
 	{ "orbit",
 	  "Orbit, pan, zoom, focus",
-	  "Alt + left mouse orbits around the pivot, the middle mouse button pans, and "
-	  "the wheel zooms wherever the cursor hovers.\n"
-	  "Select something and press F to frame it — the fastest way back when you have "
-	  "flown off into the sky.\n"
-	  "Camera speed lives in Edit - Preferences if the default feels wrong.",
+	  "Flying covers distance. Once you have arrived you usually want to look at one "
+	  "thing from all sides, and that is what orbiting is for: the camera circles a "
+	  "pivot point in front of it instead of turning on the spot.\n"
+	  "Alt + left mouse orbits around the pivot, the middle mouse button pans "
+	  "sideways and up and down, and the wheel moves the camera forward and back "
+	  "along its view, towards the pivot or away from it.\n"
+	  "Select something and press F with the mouse over the Scene view to frame it: "
+	  "the camera moves until the selection fills the view, and the selection "
+	  "becomes the new pivot. It is the fastest way back when you have flown off "
+	  "into the sky, and the usual first move before orbiting around an object.\n"
+	  "If flying feels too slow or too fast for the size of your world, Camera Speed "
+	  "is on the Viewport page of Edit - Preferences and next to the camera icon in "
+	  "the Scene toolbar.",
 	  "Roll the mouse wheel in the Scene view to zoom in or out.",
 	  "Scene", Check::CameraZoomed, "" },
 };
@@ -269,7 +311,7 @@ constexpr Step kContent[] = {
 	{ "import",
 	  "Import your own assets",
 	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB, FBX, OBJ "
-	  "and COLLADA models, PNG/JPG/TGA/HDR textures, WAV audio and fonts. "
+	  "and COLLADA models, PNG/JPG/TGA/HDR textures, WAV/OGG audio and fonts. "
 	  "Importing converts them to .hasset once; the editor never re-reads the "
 	  "original at runtime.\n"
 	  "A glTF with a skin is imported as a skeletal mesh plus its animation clips, "
@@ -279,12 +321,15 @@ constexpr Step kContent[] = {
 
 	{ "create-asset",
 	  "Create an asset",
-	  "Right-click in the Content Browser and open Create Asset: scenes, materials, "
-	  "material functions, particle systems, animator state machines, UI widgets, "
-	  "input actions and mapping contexts, textures, meshes, shaders, audio, fonts "
-	  "and your project's scripting assets.\n"
-	  "The list is filtered by the project's scripting language — a Lua project "
-	  "offers Lua scripts, a HorizonCode project offers node classes.",
+	  "Right-click in the Content Browser and open Create Asset. Scenes and UI "
+	  "widgets sit at the top; the rest is grouped by what it belongs to: Gameplay "
+	  "(your logic, plus the animation assets), Input, Rendering (materials and "
+	  "particle systems) and Data (structs, enums, savegame templates, themes).\n"
+	  "Only what the editor can actually author is on that list. Meshes, textures, "
+	  "audio and fonts arrive through Import, which is why the menu ends with a "
+	  "note saying so. The Gameplay group follows the project's scripting "
+	  "language — a Lua project offers Lua scripts, a HorizonCode project offers "
+	  "node classes.",
 	  "Right-click in the Content Browser and create any asset.",
 	  "Content Browser", Check::AssetAdded, "" },
 };
@@ -292,7 +337,17 @@ constexpr Step kContent[] = {
 // ── 6. The asset family ──
 // Every kind of .hasset gets named here, and the ones the Create Asset menu can
 // make are actually made — reading a list of asset types teaches nothing about
-// where they live or what opens them.
+// where they live or what opens them. A kind that belongs to a later chapter is
+// made THERE, next to the thing it feeds: materials and material functions in
+// Materials, particle systems in Particles, state machines, bone masks, blend
+// spaces, property clips and sequences in Animation, widgets and themes in UI,
+// input assets in Gameplay logic. What is left — scenes, prefabs, the data types
+// and the import-only media — is made or explained here.
+//
+// The Create menu has offered no Texture or Static Mesh since the empty stubs it
+// wrote were dropped (they could never hold anything). So those two cards point
+// at the importer and at the Engine root's built-in meshes instead; their ids
+// stay, because a saved position on a vanished id ends the tour.
 constexpr Step kAssetTypes[] = {
 	{ "asset-anatomy",
 	  "What an asset is",
@@ -304,8 +359,10 @@ constexpr Step kAssetTypes[] = {
 	  "things pointing at it; the reference is to the id, and the path is only how "
 	  "you find it.\n"
 	  "Two ways in: Create Asset makes an empty one of a kind the editor can "
-	  "author, Import Asset converts a file from outside. The next steps make one "
-	  "of each authorable kind.",
+	  "author, Import Asset converts a file from outside. This chapter makes the "
+	  "kinds that stand on their own and explains the imported ones; the kinds "
+	  "that feed a material, an animation or a widget are made in those chapters, "
+	  "right where they are used.",
 	  "", "Content Browser", Check::ReadAck, "" },
 
 	{ "asset-scene",
@@ -319,16 +376,30 @@ constexpr Step kAssetTypes[] = {
 	  "Create a Scene asset in the Content Browser.",
 	  "Content Browser", Check::AssetOfTypeAdded, "scene" },
 
+	// Not on the Create menu: a prefab is made FROM something, so it is made where
+	// that something lives.
+	{ "asset-prefab",
+	  "Prefabs",
+	  "A Prefab is an entity with its children and components, saved as an asset "
+	  "so you can place it again — a lamp post, a pickup, an enemy with its "
+	  "weapon. You do not make one from the Create menu but from an entity that "
+	  "already looks right.\n"
+	  "Save as Prefab writes it to Content/Prefabs and links the entity you saved "
+	  "it from to that asset, so it becomes the first instance.",
+	  "Right-click an entity in the World Outliner and choose Save as Prefab.",
+	  "World Outliner", Check::AssetOfTypeAdded, "prefab" },
+
 	{ "asset-texture",
 	  "Textures",
 	  "Texture assets hold the pixels plus how they are meant to be read: colour "
 	  "textures are sRGB, normal and roughness maps are linear, and getting that "
 	  "wrong is the usual cause of a material that looks washed out.\n"
-	  "Import brings in PNG/JPG/TGA/HDR; Create makes an empty one you point a "
-	  "material's Texture node at. HDR images are what an image-based sky lighting "
-	  "setup wants.",
-	  "Create a Texture asset.",
-	  "Content Browser", Check::AssetOfTypeAdded, "texture" },
+	  "The editor does not paint pixels, so there is no empty texture to create: "
+	  "Import brings in PNG/JPG/TGA/HDR, and double-clicking the result opens the "
+	  "texture viewer. A material's Texture node points at it, and HDR images are "
+	  "what an image-based sky lighting setup wants.\n"
+	  "The sandbox ships without textures, so this card is reading only.",
+	  "", "Content Browser", Check::ReadAck, "" },
 
 	{ "asset-mesh",
 	  "Static and skeletal meshes",
@@ -339,22 +410,75 @@ constexpr Step kAssetTypes[] = {
 	  "A Skeletal Mesh is the same thing plus a rig, and carries its Animation "
 	  "Clips. Both usually arrive through Import from a glTF/GLB — whether the file "
 	  "has a skin decides which one you get. FBX, OBJ and COLLADA always give a "
-	  "Static Mesh.",
-	  "Create a Static Mesh asset and double-click it to open its editor.",
+	  "Static Mesh.\n"
+	  "You do not need a file of your own to look at one: the Engine root ships "
+	  "the built-in primitives (cube, sphere, plane, cylinder and friends) as "
+	  "ordinary Static Mesh assets.",
+	  "Switch the Content Browser to the Engine root, open Meshes and double-click "
+	  "Cube.",
 	  "Content Browser", Check::TabOfTypeOpened, "staticmesh" },
 
+	{ "asset-audio",
+	  "Audio",
+	  "Sound arrives the same way: Import turns a WAV or OGG file into an Audio "
+	  "asset, and double-clicking it opens a tab where you can audition it. A raw "
+	  ".wav or .ogg dropped into the project opens there too, so you can listen "
+	  "before you decide to import it.\n"
+	  "Nothing plays on its own. An Audio Source component on an entity plays an "
+	  "Audio asset; switch on Spatial and it is heard from where the entity stands, "
+	  "quieter with distance. The Audio Listener component is the ears, normally "
+	  "on the camera or the player.",
+	  "Add an Audio Source component to an entity.",
+	  "Details", Check::ComponentAdded, "audiosource" },
+
 	{ "asset-imported",
-	  "The import-only kinds",
-	  "Four families exist that the editor does not author, only convert:\n"
-	  "Audio — WAV, played through an Audio Source component.\n"
+	  "The other imported kinds",
+	  "Three more families exist that the editor does not author, only convert or "
+	  "receive:\n"
 	  "Font — TTF, used by UI widget text and the in-game UI.\n"
 	  "Animation Clip — comes along with a rigged glTF; states in an Animator "
-	  "State Machine reference these.\n"
-	  "Prefab — an entity subtree saved for reuse, made by saving a selection out "
-	  "of the World Outliner rather than from the Create menu.\n"
-	  "Shader assets sit next to those for hand-written shader code, for the cases "
-	  "the material graph cannot express.",
+	  "State Machine and the points of a Blend Space reference these.\n"
+	  "Shader — hand-written shader code, for the cases the material graph cannot "
+	  "express.\n"
+	  "Like textures and meshes, they show up in the Content Browser by their icon "
+	  "once imported, and the browser's type filter lists every kind in the "
+	  "project, so you can always ask it for \"all fonts\".",
 	  "", "Content Browser", Check::ReadAck, "" },
+
+	// ── The Data group of the Create menu ──
+	// Language-neutral on purpose: HorizonCode graphs, Lua/Python constants and the
+	// C++ codegen all read the same type definitions, so these steps work in a
+	// project of any scripting language.
+	{ "asset-struct",
+	  "Structs",
+	  "A Struct asset defines a type of your own: named, typed fields with default "
+	  "values — a weapon's damage, range and ammo, an item's name and price. Once "
+	  "saved it shows up in the editor's type dropdowns, so a graph variable or a "
+	  "savegame field can be of that type.\n"
+	  "It is data, not code: the same definition is what the C++ export generates "
+	  "a real struct from.",
+	  "Create Asset - Data - Struct, then double-click it to open its editor.",
+	  "Content Browser", Check::TabOfTypeOpened, "struct" },
+
+	{ "asset-enum",
+	  "Enums",
+	  "An Enum asset is a named list of choices — Idle, Patrol, Chase — stored as "
+	  "numbers but always shown by name. Anywhere a value of that type is edited, "
+	  "the editor offers a dropdown instead of a number field, so a typo cannot "
+	  "produce a fourth state nobody handles.",
+	  "Create Asset - Data - Enum, then double-click it to open it.",
+	  "Content Browser", Check::TabOfTypeOpened, "enum" },
+
+	{ "asset-savegame",
+	  "Savegame templates",
+	  "A SaveGame Template is the shape of a save file: which fields a save "
+	  "holds, their types (structs and enums included) and their defaults. "
+	  "Gameplay writes and reads saves through it, whatever the project's "
+	  "scripting language.\n"
+	  "Keeping the schema an asset rather than ad-hoc code is what lets the editor "
+	  "show you what a save contains.",
+	  "Create Asset - Data - SaveGame Template and double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "savegametemplate" },
 };
 
 // ── 7. Materials ──
@@ -526,6 +650,53 @@ constexpr Step kAnimation[] = {
 	  "runtime state, so one machine can drive a whole crowd.",
 	  "Create an Animator State Machine asset and double-click it to open it.",
 	  "Content Browser", Check::TabOfTypeOpened, "animatorstatemachine" },
+
+	// The rest of Create Asset - Gameplay's animation block, in the order the menu
+	// lists it. Each is a standalone asset with its own tab, and none needs a rig
+	// to be created or opened, so each can be observed in the sandbox.
+	{ "bone-mask",
+	  "Bone masks",
+	  "A Bone Mask says which joints an animation layer may touch, and how "
+	  "strongly — a reload that plays on the upper body while the legs keep "
+	  "running. The Animation Layers component points each layer at one.\n"
+	  "A mask stores joint NAMES, not a skeleton, so one mask fits every rig that "
+	  "names its joints the same way. The tab asks for a reference mesh only to "
+	  "draw the tree you tick joints in.",
+	  "Create Asset - Gameplay - Bone Mask, then double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "bonemask" },
+
+	{ "blend-space",
+	  "Blend spaces",
+	  "A Blend Space places several clips in a one- or two-dimensional parameter "
+	  "space — idle, walk and run along speed, or eight directions of strafing — "
+	  "and mixes them by where the parameters stand. A state in a state machine "
+	  "can play one instead of a single clip.\n"
+	  "Its tab is a diagram, not a graph: drag the points, then drag the cursor to "
+	  "see the mix.",
+	  "Create Asset - Gameplay - Blend Space and double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "blendspace" },
+
+	{ "property-clip",
+	  "Property animation",
+	  "Not everything that moves has a skeleton. A Property Animation Clip "
+	  "animates component properties over time — a moving platform, a door, a "
+	  "light that fades — with one row per property and keys on a shared time "
+	  "axis.\n"
+	  "It opens in the Sequencer tab, and a Property Animator component on the "
+	  "entity plays it.",
+	  "Create Asset - Gameplay - Property Animation Clip and double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "propertyanimclip" },
+
+	{ "sequence",
+	  "Cinematic sequences",
+	  "A Sequence is a cutscene: several actors on one clock, with camera cuts, "
+	  "skeletal clips, events and sound. It opens in the Cinematic tab, which "
+	  "previews the shot through the sequence's own cameras without writing any "
+	  "of it into your level.\n"
+	  "A Sequence Player component plays it while the game runs and receives the "
+	  "events that are addressed to no particular actor.",
+	  "Create Asset - Gameplay - Sequence and double-click it.",
+	  "Content Browser", Check::TabOfTypeOpened, "sequence" },
 };
 
 // ── 12. Navigation ──
@@ -562,6 +733,17 @@ constexpr Step kUI[] = {
 	  "name, which is how a HUD stays decoupled from the gameplay that feeds it.\n"
 	  "Switch your open widget tab to Graph and have a look before moving on.",
 	  "", "", Check::ReadAck, "" },
+
+	{ "theme",
+	  "Themes",
+	  "A Theme is the look shared by every widget: colour roles, size steps, text "
+	  "sizes and shadows, each with a light and a dark value side by side, so the "
+	  "mode you are not looking at cannot be forgotten.\n"
+	  "Widgets refer to roles (Accent, Surface) rather than to colours, so "
+	  "changing the theme restyles the whole interface at once. It sits under "
+	  "Create Asset - Data because it is a set of values, not a layout.",
+	  "Create Asset - Data - Theme, then double-click it to open the theme editor.",
+	  "Content Browser", Check::TabOfTypeOpened, "theme" },
 };
 
 // ── HorizonCode ──
@@ -645,8 +827,8 @@ constexpr Step kScripting[] = {
 	  "graphs), Lua, Python or C++ — chosen when it was created. The editor only "
 	  "offers the matching assets everywhere, so there is no way to end up with half "
 	  "a project in each.\n"
-	  "UI widgets and the two graphs from the HorizonCode chapter — the Level Script "
-	  "and the Game Instance — are shared by every language.",
+	  "UI widgets and the two graphs every project has — the Level Script and the "
+	  "Game Instance, both under the Window menu — are shared by every language.",
 	  "", "", Check::ReadAck, "" },
 
 	{ "entity-logic",
@@ -819,6 +1001,30 @@ int totalSteps()
 	return n;
 }
 
+bool chapterIncluded(int chapter, const Options& o)
+{
+	if (chapter < 0 || chapter >= chapterCount()) return false;
+	if (!o.horizonCode && std::string_view(kChapters[chapter].id) == "horizoncode")
+		return false;
+	return true;
+}
+
+int chapterCount(const Options& o)
+{
+	int n = 0;
+	for (int i = 0; i < chapterCount(); ++i)
+		if (chapterIncluded(i, o)) ++n;
+	return n;
+}
+
+int totalSteps(const Options& o)
+{
+	int n = 0;
+	for (int i = 0; i < chapterCount(); ++i)
+		if (chapterIncluded(i, o)) n += kChapters[i].stepCount;
+	return n;
+}
+
 // ─── Completion ──────────────────────────────────────────────────────────────
 // Read every case as "what CHANGED since this step opened". A check that merely
 // asks "is X true" would be pre-satisfied by whatever the scene happened to
@@ -924,84 +1130,95 @@ bool satisfied(const Step& step, const Signals& base, const Signals& now)
 // ─── Cursor arithmetic ───────────────────────────────────────────────────────
 // A cursor of { chapterCount(), 0 } is the one canonical "finished" position;
 // clamp() maps every out-of-range or stale cursor onto a valid one so no caller
-// has to range-check before indexing.
-Cursor clamp(Cursor c)
+// has to range-check before indexing. An excluded chapter (Options) is treated
+// like an empty one: a cursor inside it rolls on to the next included step.
+Cursor clamp(Cursor c, const Options& o)
 {
 	const int nChapters = chapterCount();
-	if (c.chapter < 0 || c.step < 0)       return Cursor{ 0, 0 };
-	if (c.chapter >= nChapters)            return Cursor{ nChapters, 0 };
-	if (c.step >= kChapters[c.chapter].stepCount)
-	{
-		// Past the end of its chapter — roll forward rather than clamping onto the
-		// last step, so a saved position from a shortened chapter resumes at the
-		// next thing the user has not seen.
-		return clamp(Cursor{ c.chapter + 1, 0 });
-	}
+	if (c.chapter < 0 || c.step < 0) c = Cursor{ 0, 0 };
+	// Past the end of its chapter — roll forward rather than clamping onto the
+	// last step, so a saved position from a shortened chapter resumes at the next
+	// thing the user has not seen. The same for a chapter the user left out: a
+	// position saved inside it resumes after it, not at "finished".
+	while (c.chapter < nChapters &&
+	       (!chapterIncluded(c.chapter, o) || c.step >= kChapters[c.chapter].stepCount))
+		c = Cursor{ c.chapter + 1, 0 };
+	if (c.chapter >= nChapters) return Cursor{ nChapters, 0 };
 	return c;
 }
 
-bool finished(Cursor c)
+bool finished(Cursor c, const Options& o)
 {
-	c = clamp(c);
+	c = clamp(c, o);
 	return c.chapter >= chapterCount();
 }
 
-Cursor advance(Cursor c)
+Cursor advance(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return c;
-	return clamp(Cursor{ c.chapter, c.step + 1 });
+	c = clamp(c, o);
+	if (finished(c, o)) return c;
+	return clamp(Cursor{ c.chapter, c.step + 1 }, o);
 }
 
-Cursor retreat(Cursor c)
+Cursor retreat(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (c.chapter == 0 && c.step == 0) return c;
-	if (finished(c))
-	{
-		const int last = chapterCount() - 1;
-		return Cursor{ last, kChapters[last].stepCount - 1 };
-	}
-	if (c.step > 0) return Cursor{ c.chapter, c.step - 1 };
-	const int prev = c.chapter - 1;
-	return Cursor{ prev, kChapters[prev].stepCount - 1 };
+	c = clamp(c, o);
+	if (!finished(c, o) && c.step > 0) return Cursor{ c.chapter, c.step - 1 };
+	// Back to the last step of the nearest earlier chapter that is in the tour.
+	// None left means this already is the first step.
+	for (int prev = c.chapter - 1; prev >= 0; --prev)
+		if (chapterIncluded(prev, o) && kChapters[prev].stepCount > 0)
+			return Cursor{ prev, kChapters[prev].stepCount - 1 };
+	return c;
 }
 
-Cursor nextChapter(Cursor c)
+Cursor nextChapter(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return c;
-	return clamp(Cursor{ c.chapter + 1, 0 });
+	c = clamp(c, o);
+	if (finished(c, o)) return c;
+	return clamp(Cursor{ c.chapter + 1, 0 }, o);
 }
 
-const Step* stepAt(Cursor c)
+const Step* stepAt(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return nullptr;
+	c = clamp(c, o);
+	if (finished(c, o)) return nullptr;
 	return &kChapters[c.chapter].steps[c.step];
 }
 
-const Chapter* chapterAt(Cursor c)
+const Chapter* chapterAt(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return nullptr;
+	c = clamp(c, o);
+	if (finished(c, o)) return nullptr;
 	return &kChapters[c.chapter];
 }
 
-int flatIndex(Cursor c)
+int chapterNumber(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return totalSteps();
+	c = clamp(c, o);
+	if (finished(c, o)) return 0;
 	int n = 0;
-	for (int i = 0; i < c.chapter; ++i) n += kChapters[i].stepCount;
+	for (int i = 0; i <= c.chapter; ++i)
+		if (chapterIncluded(i, o)) ++n;
+	return n;
+}
+
+int flatIndex(Cursor c, const Options& o)
+{
+	c = clamp(c, o);
+	if (finished(c, o)) return totalSteps(o);
+	int n = 0;
+	for (int i = 0; i < c.chapter; ++i)
+		if (chapterIncluded(i, o)) n += kChapters[i].stepCount;
 	return n + c.step;
 }
 
-Cursor fromFlat(int index)
+Cursor fromFlat(int index, const Options& o)
 {
-	if (index < 0) return Cursor{ 0, 0 };
+	if (index < 0) return clamp(Cursor{ 0, 0 }, o);
 	for (int i = 0; i < chapterCount(); ++i)
 	{
+		if (!chapterIncluded(i, o)) continue;
 		if (index < kChapters[i].stepCount) return Cursor{ i, index };
 		index -= kChapters[i].stepCount;
 	}
@@ -1016,18 +1233,18 @@ Cursor findStep(std::string_view id)
 	return Cursor{ chapterCount(), 0 };
 }
 
-std::string serialize(Cursor c)
+std::string serialize(Cursor c, const Options& o)
 {
-	c = clamp(c);
-	if (finished(c)) return "done";
+	c = clamp(c, o);
+	if (finished(c, o)) return "done";
 	return kChapters[c.chapter].steps[c.step].id;
 }
 
-Cursor deserialize(std::string_view s)
+Cursor deserialize(std::string_view s, const Options& o)
 {
-	if (s.empty())  return Cursor{ 0, 0 };
+	if (s.empty())  return clamp(Cursor{ 0, 0 }, o);
 	if (s == "done") return Cursor{ chapterCount(), 0 };
-	return findStep(s);
+	return clamp(findStep(s), o);
 }
 
 } // namespace HE::tut

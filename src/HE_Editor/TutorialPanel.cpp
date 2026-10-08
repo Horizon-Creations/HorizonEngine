@@ -33,15 +33,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
 #include <imgui_internal.h>   // FindWindowByName — used to outline the step's panel
 #include <misc/cpp/imgui_stdlib.h>
+// The test harness's CPU rasteriser, for the HE_DUMP_TUTORIALUI witness only.
+#include "../../tests/ImGuiSoftwareRaster.h"
 #endif
 
 namespace fs = std::filesystem;
@@ -56,13 +62,20 @@ namespace
 	// "Tutorial.Offered" is the first-start gate: once the welcome card has been
 	// answered (either way) it never reappears on its own. "Tutorial.Step" is the
 	// serialized cursor — a step id, so inserting steps in a later release does not
-	// move anybody's saved position.
-	constexpr const char* kCfgOffered = "Tutorial.Offered";
-	constexpr const char* kCfgStep    = "Tutorial.Step";
+	// move anybody's saved position. "Tutorial.HorizonCode" is the welcome card's
+	// choice whether the HorizonCode chapter is part of the tour; missing means yes,
+	// so a config from before the option existed walks the tour it always did.
+	constexpr const char* kCfgOffered     = "Tutorial.Offered";
+	constexpr const char* kCfgStep        = "Tutorial.Step";
+	constexpr const char* kCfgHorizonCode = "Tutorial.HorizonCode";
 
 	bool         s_open        = false;
 	bool         s_forceWelcome = false;  // re-offer the sandbox even once answered
 	bool         s_loaded      = false;   // cursor read back from the config yet?
+	// Which chapters the tour includes. Every tut:: cursor call below takes it:
+	// one call without it and the card's progress and its Next/Back disagree
+	// about where the HorizonCode chapter is.
+	tut::Options s_tour        = {};
 	tut::Cursor  s_cursor      = {};
 	tut::Signals s_base;                  // snapshot from when the current step opened
 	bool         s_baseValid   = false;
@@ -75,6 +88,11 @@ namespace
 	std::string  s_visitedPanels;
 	int          s_playSessions = 0;      // play→stop transitions since the editor started
 	bool         s_wasPlaying  = false;
+#ifdef HE_IMGUI_ENABLED
+	// Keeps the card off the panel the step outlines (see placeCard). Reset per
+	// step: a card the user dragged somewhere is theirs until the next one.
+	HE::Ed::Spotlight::KeepClear s_cardPlacement;
+#endif
 
 	// Seconds a completed step stays on screen before the tour moves on. Long
 	// enough that the user sees WHICH step they just finished, short enough that
@@ -84,14 +102,18 @@ namespace
 	void persist(GlobalState* gs)
 	{
 		if (!gs) return;
-		gs->setCustomConfigEntry(kCfgStep, tut::serialize(s_cursor));
+		gs->setCustomConfigEntry(kCfgHorizonCode, s_tour.horizonCode);
+		gs->setCustomConfigEntry(kCfgStep, tut::serialize(s_cursor, s_tour));
 		gs->writeConfig();
 	}
 
 	void loadOnce(GlobalState* gs)
 	{
 		if (s_loaded || !gs) return;
-		s_cursor = tut::deserialize(gs->getCustomConfigString(kCfgStep, ""));
+		// Options first: a position saved inside a chapter that is now left out
+		// resumes at the next included step, and that needs to know which.
+		s_tour.horizonCode = gs->getCustomConfigBool(kCfgHorizonCode, true);
+		s_cursor = tut::deserialize(gs->getCustomConfigString(kCfgStep, ""), s_tour);
 		s_loaded = true;
 	}
 
@@ -100,13 +122,16 @@ namespace
 	// step would arrive pre-completed, which is exactly what this tour must not do.
 	void gotoCursor(tut::Cursor c, GlobalState* gs)
 	{
-		s_cursor    = tut::clamp(c);
+		s_cursor    = tut::clamp(c, s_tour);
 		s_baseValid = false;
 		s_stepDone  = false;
 		s_doneTimer = 0.0f;
 		s_ackPressed = false;
 		s_readToEnd  = false;
 		s_visitedPanels.clear();
+#ifdef HE_IMGUI_ENABLED
+		s_cardPlacement.reset();
+#endif
 		persist(gs);
 	}
 
@@ -114,8 +139,9 @@ namespace
 	// two ways the tour moves on (Back and Start Over use gotoCursor).
 	void advanceStep(AppContext& ctx)
 	{
-		const bool lastStep = !tut::finished(s_cursor) && tut::finished(tut::advance(s_cursor));
-		gotoCursor(tut::advance(s_cursor), ctx.globalState);
+		const bool lastStep = !tut::finished(s_cursor, s_tour)
+		                   && tut::finished(tut::advance(s_cursor, s_tour), s_tour);
+		gotoCursor(tut::advance(s_cursor, s_tour), ctx.globalState);
 		// Reward moment (EditorRewards.h): TOUR FINISHED — once per run, the
 		// step from the last step to finished.
 		if (lastStep) HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::TourFinished);
@@ -144,6 +170,14 @@ namespace
 		case HE::AssetType::Font:                 return tut::Asset::Font;
 		case HE::AssetType::Prefab:               return tut::Asset::Prefab;
 		case HE::AssetType::AnimationClip:        return tut::Asset::AnimationClip;
+		case HE::AssetType::Theme:                return tut::Asset::Theme;
+		case HE::AssetType::StructType:           return tut::Asset::StructType;
+		case HE::AssetType::EnumType:             return tut::Asset::EnumType;
+		case HE::AssetType::SaveGameTemplate:     return tut::Asset::SaveGameTemplate;
+		case HE::AssetType::BoneMask:             return tut::Asset::BoneMask;
+		case HE::AssetType::BlendSpace:           return tut::Asset::BlendSpace;
+		case HE::AssetType::PropertyAnimClip:     return tut::Asset::PropertyAnimClip;
+		case HE::AssetType::Sequence:             return tut::Asset::Sequence;
 		default:                                  return tut::Asset::Count;
 		}
 	}
@@ -333,6 +367,40 @@ namespace
 		return drawn;
 	}
 
+	// ── Keeping the card off the panel it points at ───────────────────────────
+	// The card floats, so wherever it sits it covers something, and the one thing
+	// it must not cover is the panel the step is about: "add a component in the
+	// Details panel" with the card lying on the Details panel is a step the user
+	// has to fight the tour to do — and with the default layout and the card's
+	// default bottom-right spot, that is exactly where it lay. Before the card is
+	// drawn, the panels the step outlines are tested against where the card was
+	// last frame, and when they meet, the card glides aside (Spotlight::KeepClear
+	// has the how and the when: same rects as the pulse, a drag by the user wins).
+	//
+	// The panels still pulsing, that is: on a "visit these panels" step the ones
+	// already visited are drawn dim and are done with, and the card may lie on
+	// them if that is what keeps the rest clear.
+	void placeCard(const tut::Step& step, std::string_view visited, float dt)
+	{
+		// The witness's control run (HE_DUMP_TUTORIALUI + _NOAVOID): the card stays
+		// where it is, which is what the tour did before it learned to step aside.
+		static const bool s_controlRun = std::getenv("HE_DUMP_TUTORIALUI") &&
+		                                 std::getenv("HE_DUMP_TUTORIALUI_NOAVOID");
+		if (s_controlRun) return;
+
+		std::vector<std::string> panels;
+		const int n = tut::listEntryCount(step.focusWindow);
+		for (int i = 0; i < n; ++i)
+		{
+			std::string name(tut::listEntry(step.focusWindow, i));
+			if (name.empty()) continue;
+			if (step.check == tut::Check::PanelsVisited && tut::panelVisited(name, visited))
+				continue;
+			panels.push_back(std::move(name));
+		}
+		s_cardPlacement.update("Tutorial", panels, dt);
+	}
+
 	// The window the user last clicked into, as the tour's "visited" signal.
 	// Same identity question the spotlight answers, so it lives next to it.
 	std::string focusedPanelName()
@@ -374,6 +442,147 @@ namespace
 		}
 		return {};
 	}
+
+	// ── Witness: the card in the running editor ──────────────────────────────
+	// test_ui_shot proves KeepClear over a rebuilt layout. This proves it in the
+	// editor itself: the real dock layout, the real render() below, the real
+	// step table. With
+	//
+	//   HE_DUMP_TUTORIALUI=<dir>  HE_DUMP_TUTORIALUI_STEPS=add-mesh,create-asset,…
+	//
+	// the tour opens on each listed step in turn (the jump is not written to the
+	// config), holds it for kWitnessHold frames so the card can glide, then writes
+	// <dir>/tutorial-ui-<id>.bmp — the editor's own ImGui output of that frame,
+	// rasterised on the CPU — and logs the card's rect, each outlined panel's
+	// rect and how much of them the card covers. The editor quits after the last.
+	//
+	// The rasteriser is the test harness's (tests/ImGuiSoftwareRaster), and it
+	// is fed a CLONE of the draw data. The live draw data carries the GPU
+	// backend's texture ids and texture requests; handed those, the rasteriser
+	// would claim the font atlas from the real backend. The clone's commands
+	// point at CPU copies of ImGui's own textures instead, and anything that is
+	// not one of them (the Scene viewport's GPU image) is drawn flat grey —
+	// there is no picture of it on this side.
+	struct UiWitness
+	{
+		bool                     active = false;
+		bool                     done   = false;
+		std::string              dir;
+		std::vector<std::string> ids;
+		size_t                   index  = 0;
+		int                      frames = 0;   // frames the current step has been up
+	};
+	constexpr int kWitnessHold = 120;
+
+	UiWitness& uiWitness()
+	{
+		static UiWitness w = [] {
+			UiWitness out;
+			const char* dir = std::getenv("HE_DUMP_TUTORIALUI");
+			if (!dir || !*dir) return out;
+			out.dir = dir;
+			const char* list = std::getenv("HE_DUMP_TUTORIALUI_STEPS");
+			const std::string all = list && *list
+				? list : "add-mesh,create-asset,sculpt,outliner,fly,layout";
+			size_t start = 0;
+			for (;;)
+			{
+				const size_t comma = all.find(',', start);
+				std::string id = all.substr(start, comma == std::string::npos
+				                                   ? std::string::npos : comma - start);
+				if (!id.empty()) out.ids.push_back(std::move(id));
+				if (comma == std::string::npos) break;
+				start = comma + 1;
+			}
+			std::error_code ec;
+			fs::create_directories(out.dir, ec);
+			out.active = !out.ids.empty();
+			return out;
+		}();
+		return w;
+	}
+
+	// A CPU copy of the ImGui texture behind `id`, RGBA8 (the atlas may be
+	// Alpha8), registered with the rasteriser. `grey` when `id` is not one of
+	// ImGui's own textures.
+	ImTextureID witnessTexture(ImTextureID id, ImTextureID grey,
+	                           std::vector<std::pair<ImTextureID, ImTextureID>>& made)
+	{
+		for (const auto& [from, to] : made)
+			if (from == id) return to;
+		ImTextureID to = grey;
+		for (ImTextureData* t : ImGui::GetPlatformIO().Textures)
+		{
+			if (!t || t->GetTexID() != id || !t->Pixels || t->Width <= 0 || t->Height <= 0)
+				continue;
+			const size_t n = static_cast<size_t>(t->Width) * static_cast<size_t>(t->Height);
+			std::vector<std::uint8_t> rgba(n * 4);
+			for (size_t i = 0; i < n; ++i)
+			{
+				if (t->BytesPerPixel == 1)
+				{
+					rgba[i * 4 + 0] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 255;
+					rgba[i * 4 + 3] = t->Pixels[i];
+				}
+				else
+					std::memcpy(&rgba[i * 4], &t->Pixels[i * 4], 4);
+			}
+			to = he_ui::registerTexture(rgba.data(), t->Width, t->Height);
+			break;
+		}
+		made.emplace_back(id, to);
+		return to;
+	}
+
+	bool witnessCapture(const std::string& path)
+	{
+		const ImDrawData* dd = ImGui::GetDrawData();
+		if (!dd || !dd->Valid || dd->DisplaySize.x < 1.0f || dd->DisplaySize.y < 1.0f)
+			return false;
+
+		const std::uint8_t greyPx[4] = { 58, 54, 50, 255 };
+		const ImTextureID grey = he_ui::registerTexture(greyPx, 1, 1);
+		std::vector<std::pair<ImTextureID, ImTextureID>> made;
+		std::vector<ImDrawList*> clones;
+
+		ImDrawData copy;
+		copy.Valid            = true;
+		copy.DisplayPos       = dd->DisplayPos;
+		copy.DisplaySize      = dd->DisplaySize;
+		copy.FramebufferScale = ImVec2(1.0f, 1.0f);   // one pixel per point is plenty
+		copy.Textures         = nullptr;              // no texture requests: not ours to answer
+		for (const ImDrawList* list : dd->CmdLists)
+		{
+			ImDrawList* c = list->CloneOutput();
+			for (ImDrawCmd& cmd : c->CmdBuffer)
+				if (!cmd.UserCallback)
+					cmd.TexRef = ImTextureRef(witnessTexture(cmd.GetTexID(), grey, made));
+			clones.push_back(c);
+			// Straight into the list, not AddDrawList(): that asserts on the
+			// write cursor, which CloneOutput() leaves unset.
+			copy.CmdLists.push_back(c);
+			copy.CmdListsCount += 1;
+			copy.TotalVtxCount += c->VtxBuffer.Size;
+			copy.TotalIdxCount += c->IdxBuffer.Size;
+		}
+
+		const he_ui::Image img = he_ui::rasterize(&copy, static_cast<int>(dd->DisplaySize.x),
+		                                          static_cast<int>(dd->DisplaySize.y));
+		const bool ok = img.valid() && he_ui::writeBmp(img, path);
+
+		for (ImDrawList* c : clones) IM_DELETE(c);
+		for (const auto& [from, to] : made)
+			if (to != grey) he_ui::unregisterTexture(to);
+		he_ui::unregisterTexture(grey);
+		return ok;
+	}
+
+	std::string rectText(ImVec2 a, ImVec2 b)
+	{
+		char buf[96];
+		std::snprintf(buf, sizeof(buf), "(%.0f,%.0f)-(%.0f,%.0f)", a.x, a.y, b.x, b.y);
+		return buf;
+	}
 #endif // HE_IMGUI_ENABLED
 
 } // namespace
@@ -383,7 +592,7 @@ void open()
 	s_open = true;
 	// A finished tour reopens from the top — "Interactive Tutorial" that shows a
 	// single "you are done" card would be a dead menu item.
-	if (tut::finished(s_cursor)) s_cursor = tut::Cursor{ 0, 0 };
+	if (tut::finished(s_cursor, s_tour)) s_cursor = tut::clamp(tut::Cursor{ 0, 0 }, s_tour);
 	s_baseValid = false;
 	s_stepDone  = false;
 	s_doneTimer = 0.0f;
@@ -457,6 +666,13 @@ void renderWelcome(AppContext& ctx)
 			"sandbox project it creates for you.");
 		ImGui::Spacing();
 		ImGui::TextWrapped(
+			"No earlier engine experience is assumed. The first chapters are only "
+			"about finding your way around: what each panel is for and how to move "
+			"the camera. Everything after that builds on them. Each card explains one "
+			"idea, then asks you to do one thing in the real editor, and moves on "
+			"once it has seen you do it.");
+		ImGui::Spacing();
+		ImGui::TextWrapped(
 			"It is an ordinary project: everything you build while following along is "
 			"yours to keep. You can leave and resume at any point.");
 		ImGui::Spacing();
@@ -470,6 +686,18 @@ void renderWelcome(AppContext& ctx)
 		ImGui::TextUnformatted("Created in");
 		ImGui::SetNextItemWidth(-1);
 		ImGui::InputText("##twDir", &s_dir);
+		ImGui::Spacing();
+
+		// The sandbox is a HorizonCode project, but the chapter on it only uses
+		// the Level Script and Game Instance graphs every project has — so the
+		// choice is "do you want the tour of visual scripting", not the project's
+		// language. Set on change: "Not now" writes the config too, and the next
+		// offer should remember what was ticked here.
+		if (EditorWidgets::checkbox("Include the HorizonCode chapter", &s_tour.horizonCode))
+			ctx.globalState->setCustomConfigEntry(kCfgHorizonCode, s_tour.horizonCode);
+		ImGui::TextDisabled(
+			"HorizonCode is the visual scripting language. Writing gameplay in Lua, "
+			"Python or C++ instead? Untick it and the tour skips that chapter.");
 
 		if (!s_error.empty())
 		{
@@ -557,10 +785,26 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	if (s_wasPlaying && !ctx.isPlaying) ++s_playSessions;
 	s_wasPlaying = ctx.isPlaying;
 
+	// HE_DUMP_TUTORIALUI: put the tour on the step under test (see uiWitness).
+	// Not persisted — a witness run must not move anybody's saved position.
+	if (UiWitness& w = uiWitness(); w.active && !w.done)
+	{
+		if (w.frames == 0)
+		{
+			const tut::Cursor c = tut::findStep(w.ids[w.index]);
+			if (tut::finished(c))
+				HE_LOG_WARN(Editor, "%s", ("Tutorial witness: no step with id '" +
+					w.ids[w.index] + "'").c_str());
+			gotoCursor(c, nullptr);
+			s_open = true;
+		}
+		++w.frames;
+	}
+
 	if (!s_open) return;
 
-	const tut::Step*    step = tut::stepAt(s_cursor);
-	const tut::Chapter* chap = tut::chapterAt(s_cursor);
+	const tut::Step*    step = tut::stepAt(s_cursor, s_tour);
+	const tut::Chapter* chap = tut::chapterAt(s_cursor, s_tour);
 
 	// Which panel the user is in, accumulated for the current step. Recorded
 	// before sampling so a click this frame counts this frame, and skipped while
@@ -592,6 +836,11 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 		ImVec2(vp->WorkPos.x + vp->WorkSize.x - 450.0f,
 		       vp->WorkPos.y + vp->WorkSize.y - 380.0f),
 		ImGuiCond_FirstUseEver);
+	// …and out of the way of the panel this step points at. After the default
+	// above, so a step-aside overrides it; only while the outline is drawn, since
+	// a finished step points at nothing.
+	if (step && !s_stepDone)
+		placeCard(*step, now.visitedPanels, dt);
 	// Capped to the editor window: a floating window that protrudes gets its own
 	// OS window, which the window manager is free to bury behind the editor on the
 	// next focus change — the tour would then be "open" but invisible.
@@ -636,15 +885,15 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	}
 
 	// ── Header: chapter + progress ────────────────────────────────────────────
-	const int done  = tut::flatIndex(s_cursor);
-	const int total = tut::totalSteps();
+	const int done  = tut::flatIndex(s_cursor, s_tour);
+	const int total = tut::totalSteps(s_tour);
 	{
 		// The tour window can be dragged down to 340 points wide, and a chapter
 		// line is "Chapter 7/9  -  " plus a title written for a card, not for a
 		// column. Clipped, it reads as a chapter with no name.
 		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("Chapter %d/%d  -  %s",
-			s_cursor.chapter + 1, tut::chapterCount(), chap->title);
+			tut::chapterNumber(s_cursor, s_tour), tut::chapterCount(s_tour), chap->title);
 		ImGui::ProgressBar(total > 0 ? static_cast<float>(done) / static_cast<float>(total) : 0.0f,
 			ImVec2(-1.0f, 6.0f), "");
 		ImGui::Spacing();
@@ -770,13 +1019,13 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	const float w  = ImGui::GetContentRegionAvail().x;
 	const float bw = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
-	ImGui::BeginDisabled(s_cursor.chapter == 0 && s_cursor.step == 0);
+	ImGui::BeginDisabled(tut::retreat(s_cursor, s_tour) == s_cursor);
 	if (ImGui::Button("Back", ImVec2(bw, 0.0f)))
-		gotoCursor(tut::retreat(s_cursor), ctx.globalState);
+		gotoCursor(tut::retreat(s_cursor, s_tour), ctx.globalState);
 	ImGui::EndDisabled();
 	ImGui::SameLine();
 	{
-		const bool last  = tut::finished(tut::advance(s_cursor));
+		const bool last  = tut::finished(tut::advance(s_cursor, s_tour), s_tour);
 		const bool ready = isReadCard ? s_readToEnd : s_stepDone;
 		ImGui::BeginDisabled(!ready);
 		const char* label = isReadCard ? (last ? "Finish" : "Got it")
@@ -819,6 +1068,61 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	}
 #else
 	(void)ctx; (void)dt; (void)flags;
+#endif // HE_IMGUI_ENABLED
+}
+
+void witnessAfterRender()
+{
+#ifdef HE_IMGUI_ENABLED
+	UiWitness& w = uiWitness();
+	// frames == 0: render() has not put the tour up yet (no project loaded).
+	if (!w.active || w.done || w.frames < kWitnessHold) return;
+
+	const std::string& id = w.ids[w.index];
+	const tut::Step* step = tut::stepAt(s_cursor, s_tour);
+	std::string line = "Tutorial witness: step '" + id + "'";
+	if (!step || id != step->id)
+		line += " NOT on screen (tour is at '" + std::string(step ? step->id : "done") + "')";
+
+	if (ImGuiWindow* card = ImGui::FindWindowByName("Tutorial"); card && step)
+	{
+		const ImVec2 cMin = card->Pos;
+		const ImVec2 cMax(card->Pos.x + card->Size.x, card->Pos.y + card->Size.y);
+		line += ", card " + rectText(cMin, cMax) + (s_stepDone ? " [step done]" : "");
+		float total = 0.0f;
+		const int n = tut::listEntryCount(step->focusWindow);
+		for (int i = 0; i < n; ++i)
+		{
+			const std::string name(tut::listEntry(step->focusWindow, i));
+			ImVec2 pos, size;
+			if (!HE::Ed::Spotlight::panelRect(name.c_str(), pos, size))
+			{
+				line += ", '" + name + "' not on screen";
+				continue;
+			}
+			const float covered = HE::Ed::Spotlight::coveredArea(card->Pos, card->Size,
+				{ { pos, ImVec2(pos.x + size.x, pos.y + size.y) } });
+			total += covered;
+			line += ", '" + name + "' " + rectText(pos, ImVec2(pos.x + size.x, pos.y + size.y)) +
+			        " covered " + std::to_string(static_cast<int>(covered)) + " pt²";
+		}
+		line += ", total covered " + std::to_string(static_cast<int>(total)) + " pt²";
+	}
+
+	const std::string path = w.dir + "/tutorial-ui-" + id + ".bmp";
+	line += witnessCapture(path) ? " → " + path : " (capture FAILED)";
+	HE_LOG_INFO(Editor, "%s", line.c_str());
+
+	++w.index;
+	w.frames = 0;
+	if (w.index >= w.ids.size())
+	{
+		w.done = true;
+		HE_LOG_INFO(Editor, "%s", "Tutorial witness: done, quitting");
+		SDL_Event quit{};
+		quit.type = SDL_EVENT_QUIT;
+		SDL_PushEvent(&quit);
+	}
 #endif // HE_IMGUI_ENABLED
 }
 
