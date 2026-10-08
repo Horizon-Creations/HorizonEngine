@@ -153,13 +153,21 @@ jobs:
           max-size: 1G
           save: ${{ github.event_name != 'pull_request' }}
 
-      # FetchContent checkouts (SDL3, glm, nlohmann_json) are cached on the
-      # configure hash so CI does not re-clone them on every run.
-      - name: Cache FetchContent dependencies
-        uses: actions/cache@v4
+      # FetchContent checkouts (SDL3, assimp, glslang, nlohmann_json, …) so CI
+      # does not re-clone them on every run. They were ~850 MB per entry and a
+      # new entry for every change to CMakeLists.txt on every branch, PRs
+      # included: 12 GB, over the repository's 10 GB, before any compiler
+      # cache. Now: restored with a fallback to the previous entry (FetchContent
+      # updates what changed), and written only by pushes and dispatches, right
+      # after configure — sources only, the compiled dependencies come from the
+      # compiler cache.
+      - name: Restore FetchContent dependencies
+        id: deps
+        uses: actions/cache/restore@v4
         with:
           path: build/_deps
-          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          key: deps2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: deps2-${{ runner.os }}-
 
       # HE_PORTABLE_BUILD=ON on every job: these builds are uploaded as artifacts and
       # published as website releases, so nothing may be compiled for the runner's CPU
@@ -217,6 +225,14 @@ jobs:
       # resolved answer sits in CMakeCache.txt — fail the job right here if it is
       # not TRUE, because a Windows build without RendererVulkan is exactly the
       # unchecked state this job exists to end.
+      # Configure has fetched everything; nothing is compiled yet.
+      - name: Save FetchContent dependencies
+        if: github.event_name != 'pull_request' && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/_deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
       - name: Assert the Vulkan backend is enabled (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -504,16 +520,26 @@ jobs:
           max-size: 1G
           save: ${{ github.event_name != 'pull_request' }}
 
-      - name: Cache FetchContent dependencies
-        uses: actions/cache@v4
+      # As in the matrix above: restore with fallback, save after configure.
+      - name: Restore FetchContent dependencies
+        id: deps
+        uses: actions/cache/restore@v4
         with:
           path: build/_deps
-          key: deps-${{ runner.os }}-vk-${{ hashFiles('CMakeLists.txt') }}
+          key: deps2-${{ runner.os }}-vk-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: deps2-${{ runner.os }}-vk-
 
       # Default DEPLOY_DIR (out/deploy): the editor and its Shaders/ land in
       # out/deploy/Editor, which is all the image tests need.
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
+
+      - name: Save FetchContent dependencies
+        if: github.event_name != 'pull_request' && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/_deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       - name: Assert the Vulkan backend is enabled
         run: |
