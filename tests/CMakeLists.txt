@@ -157,6 +157,9 @@ add_executable(he_tests
     test_movement.cpp
     test_hc_inheritance.cpp
     test_hc_pull_on_construct.cpp
+    test_hc_bind_to.cpp
+    test_hc_on_changed.cpp
+    test_hc_watch_bridge.cpp
     test_hc_extract_on_destruct.cpp
     test_collider.cpp
     test_raycast.cpp
@@ -867,7 +870,7 @@ set(HCGEN_CLASSES
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
     cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
-    pull_construct pull_spawner
+    pull_construct pull_spawner bind_to
     extract_destruct extract_derived extract_listener
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)

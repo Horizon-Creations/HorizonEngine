@@ -1516,6 +1516,30 @@ bool PyScriptBackend::callOnRep(InstanceId id, const std::string& varName,
 	Py_DECREF(r); return true;
 }
 
+bool PyScriptBackend::callOnChanged(InstanceId id, const std::string& varName, uint32_t source,
+                                    const HorizonCode::Value& oldValue,
+                                    const HorizonCode::Value& newValue)
+{
+	// on_changed_<name>(self, source, old, new), the snake_case twin of Lua's
+	// onChanged_<name>, the name VERBATIM after the prefix for on_rep_'s reason:
+	// it is the HorizonCode variable's own name, Score gives on_changed_Score.
+	// Four parameters, always — Python, unlike Lua, refuses a call with more
+	// arguments than the handler takes, so the arity is the contract.
+	const std::string fn = "on_changed_" + varName;
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, fn.c_str())) return true;
+
+	PyObject* oldObj = pyFieldValueToObj(oldValue, 0);
+	if (!oldObj) { m_lastError = takePyError(); return false; }
+	PyObject* newObj = pyFieldValueToObj(newValue, 0);
+	if (!newObj) { Py_DECREF(oldObj); m_lastError = takePyError(); return false; }
+	PyObject* r = PyObject_CallMethod(obj, fn.c_str(), "IOO", (unsigned int)source, oldObj, newObj);
+	Py_DECREF(oldObj);
+	Py_DECREF(newObj);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
 bool PyScriptBackend::callRpc(InstanceId id, const std::string& fn,
                               const std::vector<HorizonCode::Value>& args)
 {

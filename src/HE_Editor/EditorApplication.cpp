@@ -96,6 +96,7 @@
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/HcWatchEvents.h>            // horizon.hc.watch / he::hc::watch delivery
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/TimerSystem.h>
@@ -1510,6 +1511,19 @@ void EditorApplication::OnInit()
 		g_host.entities = &m_entityHost;
 		g_host.antiCheat = &m_antiCheat;
 		g_host.net       = &m_netSession;
+		// Script and native subscriptions to HorizonCode variables, routed by the
+		// same HcWatchEvents the packaged game uses (GameApplication::OnInit).
+		// Looked up at call time: outside play there is no script context and no
+		// module, and the dispatcher drops what it cannot deliver.
+		m_gameInstance.runtime().onVariableChanged =
+			[this](HorizonCode::InstanceId owner, const std::string& var,
+			       const HorizonCode::Value& old, const HorizonCode::Value& now,
+			       const std::vector<uint64_t>& tokens)
+			{
+				HcWatchEvents::dispatch(m_gameInstance.runtime(), owner, var, old, now, tokens,
+				                        m_scriptContext.get(), &m_scriptInstances,
+				                        logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+			};
 		// The session's hooks into this host, the same two the packaged game
 		// binds (GameApplication) — a preview that spawned differently from the
 		// shipped build would be a preview of something else.
@@ -4455,6 +4469,14 @@ void EditorApplication::OnRender(float dt)
 	// Joins, leaves, connects — queued during the pump and delivered here, never
 	// from inside a message handler (NetEvents.h).
 	dispatchNetEvents();
+
+	// ── Frame end: Bind To (docs/bind-to-variable-binding-plan.md §3.4) ──────
+	// The packaged game's line, on uiLive like the rest of the script world:
+	// under the editor's pause the bindings stand still with the widget tick,
+	// and a single step compares once. Should the game view's UI be collected
+	// before this line, the preview shows a bound value one frame after the
+	// shipped game does (not measured; the plan §3.4 accepts it).
+	if (uiLive && m_gameInstance.runtime().exchangeState() > 0) requestRedraw();
 
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// The same last line the packaged game has, after every script and the UI
@@ -10522,6 +10544,9 @@ void EditorApplication::setPlayMode(bool play)
 		// logicLoader().logic() is null and the base loop has nothing to tick.
 		if (logicLoader().isLoaded())
 			logicLoader().unload(*m_editorWorld);
+		// The Game Instance's runtime outlives the session; the module's
+		// subscriptions (he::hc::watch) must not.
+		HcWatchEvents::dropNative(m_gameInstance.runtime());
 
 		// Runs stopped at a breakpoint die with the session: the GameInstance's
 		// runtime outlives it, and a stopped run of the GameInstance would
@@ -11397,12 +11422,15 @@ void EditorApplication::bindGameServices()
 	m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
 	m_gameServicesBinding.content = &contentManager();
 	m_gameServicesBinding.antiCheat = [this]() { return &m_antiCheat; };
+	m_gameServicesBinding.runtime   = [this]() { return &m_gameInstance.runtime(); };
+	m_gameServicesBinding.entities  = [this]() { return &m_entityHost; };
 	HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
 	HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
 	HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
 	HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
 	HE::api::fillAntiCheatServices(m_antiCheatServices, &m_gameServicesBinding);
 	HE::api::fillNetServices(m_netServices, &m_gameServicesBinding);
+	HE::api::fillHcServices(m_hcServices, &m_gameServicesBinding);
 	m_engineServices            = {};
 	m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 	m_engineServices.save       = &m_saveServices;
@@ -11411,6 +11439,7 @@ void EditorApplication::bindGameServices()
 	m_engineServices.content    = &m_contentServices;
 	m_engineServices.anticheat  = &m_antiCheatServices;
 	m_engineServices.net        = &m_netServices;
+	m_engineServices.hc         = &m_hcServices;
 }
 
 std::filesystem::path EditorApplication::builtGameLogicPath()
@@ -11452,6 +11481,9 @@ bool EditorApplication::reloadGameLogic()
 	if (lib.empty()) return false;
 
 	bindGameServices();
+	// The fresh image subscribes again in its onStart; what the old one asked
+	// for goes with it.
+	HcWatchEvents::dropNative(m_gameInstance.runtime());
 	// One call, because the sequence is the trap: reload() alone hands the fresh
 	// image no service tables and every he::* call in it becomes a silent no-op
 	// (GameLogicLoader.h).
@@ -11586,6 +11618,8 @@ void EditorApplication::OnShutdown()
 	// below, which returns early in a headless build.
 	if (m_scriptContext) m_scriptContext->setHostServices({});
 	g_host = {};
+	HcWatchEvents::dropNative(m_gameInstance.runtime());
+	m_gameInstance.runtime().onVariableChanged = nullptr;
 	// The sink captured `this` and names the script context; drop it here, for
 	// the reason the block above gives.
 	m_antiCheat.setEventSink({});

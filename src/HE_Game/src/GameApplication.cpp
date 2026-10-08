@@ -35,6 +35,7 @@
 #include <HorizonCode/HcClassResolve.h>
 #include "HorizonVersion.h"          // HE_VERSION_STRING (compiled-classes handshake)
 #include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/HcWatchEvents.h>            // horizon.hc.watch / he::hc::watch delivery
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the editor)
@@ -925,6 +926,19 @@ void GameApplication::OnInit()
 	// runtime directly (not m_world), which is what lets OnInit fire FIRST — before
 	// any world exists.
 	m_widgets.setRuntime(&m_gameInstance.runtime());
+	// Script and native subscriptions to HorizonCode variables (horizon.hc.watch,
+	// he::hc::watch) are reported through this one hook at the frame-end
+	// compare; HcWatchEvents routes them, the same code the editor's play mode
+	// runs. Everything is looked up at call time: the script context is
+	// replaced on every scene switch and the module may be reloaded.
+	m_gameInstance.runtime().onVariableChanged =
+		[this](HorizonCode::InstanceId owner, const std::string& var, const HorizonCode::Value& old,
+		       const HorizonCode::Value& now, const std::vector<uint64_t>& tokens)
+		{
+			HcWatchEvents::dispatch(m_gameInstance.runtime(), owner, var, old, now, tokens,
+			                        m_scriptContext.get(), &m_scriptInstances,
+			                        logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+		};
 	{
 		HorizonCode::Runtime::Services svc;
 		svc.createWidget  = [this](const std::string& p, const HorizonCode::SpawnValues& spawn)
@@ -1389,12 +1403,15 @@ void GameApplication::OnInit()
 		m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
 		m_gameServicesBinding.content = &contentManager();
 		m_gameServicesBinding.antiCheat = [this]() { return &m_antiCheat; };
+		m_gameServicesBinding.runtime   = [this]() { return &m_gameInstance.runtime(); };
+		m_gameServicesBinding.entities  = [this]() { return &m_entityHost; };
 		HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
 		HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
 		HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
 		HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
 		HE::api::fillAntiCheatServices(m_antiCheatServices, &m_gameServicesBinding);
 		HE::api::fillNetServices(m_netServices, &m_gameServicesBinding);
+		HE::api::fillHcServices(m_hcServices, &m_gameServicesBinding);
 		m_engineServices = {};
 		m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 		m_engineServices.save       = &m_saveServices;
@@ -1403,6 +1420,7 @@ void GameApplication::OnInit()
 		m_engineServices.content    = &m_contentServices;
 		m_engineServices.anticheat  = &m_antiCheatServices;
 		m_engineServices.net        = &m_netServices;
+		m_engineServices.hc         = &m_hcServices;
 		logicLoader().injectServices(&m_engineServices);
 		logicLoader().logic()->onStart(*m_world);
 		HE_LOG_INFO(Core, "%s", "GameApplication: native game logic started");
@@ -1888,8 +1906,10 @@ void GameApplication::executeSceneRequests()
 			{
 				const auto e = (entt::entity)id;
 				if (!reg.valid(e)) continue;
-				// Drop the per-entity script instance before the entity dies.
+				// Drop the per-entity script instance before the entity dies,
+				// and what it subscribed to (horizon.hc.watch) with it.
 				m_scriptInstances.erase(id);
+				m_gameInstance.runtime().unwatch(HE::api::hc::scriptToken(id));
 				ScriptApi::destroy(*m_world, id);
 				++gone;
 			}
@@ -3301,6 +3321,16 @@ void GameApplication::OnRender(float deltaTime)
 	// window in front of it.
 	dispatchNetEvents();
 
+	// ── Frame end: Bind To (docs/bind-to-variable-binding-plan.md §3.4) ──────
+	// Every bound variable whose source moved this frame takes the new value.
+	// After every script of the frame (ticks, Delays, UI clicks, OnRep above),
+	// so whatever was written in frame N is bound at the end of frame N, and
+	// before anything is drawn, so a bound HUD shows it in this very image.
+	// Also while the game is paused: a pause menu bound to the Game Instance
+	// follows it like the widget tick does. An event-driven app would not draw
+	// a written value until the next input — hence the redraw.
+	if (m_gameInstance.runtime().exchangeState() > 0) requestRedraw();
+
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// LAST in the frame, after every script had its turn: a kick decided at the
 	// frame's start is executed here, so a handler had the whole frame to
@@ -3469,5 +3499,7 @@ void GameApplication::OnShutdown()
 	// Stop + unload native game logic before the world is torn down.
 	if (m_world && logicLoader().isLoaded())
 		logicLoader().unload(*m_world);
+	HcWatchEvents::dropNative(m_gameInstance.runtime());
+	m_gameInstance.runtime().onVariableChanged = nullptr;
 	HE_LOG_INFO(Core, "%s", "GameApplication::OnShutdown");
 }

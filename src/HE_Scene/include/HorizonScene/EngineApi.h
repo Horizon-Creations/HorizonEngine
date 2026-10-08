@@ -26,6 +26,7 @@ struct HeInputServices;   //   "
 struct HeContentServices; //   "
 struct HeAntiCheatServices; // "
 struct HeNetServices;     //   "
+struct HeHcServices;      //   "
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -1904,6 +1905,64 @@ namespace net {
     int         rpcSender(Ctx&);
 }
 
+// ── HorizonCode variables from outside a graph (docs/bind-to-variable-binding-plan.md §4.5) ──
+// A Lua or Python script, or the native module, subscribes to a PUBLIC
+// variable of a HorizonCode instance — the class on an entity, or the Game
+// Instance — and hears every change the frame-end compare reports
+// (Runtime::exchangeState): onChanged_<Var>(self, source, old, new) in Lua,
+// on_changed_<Var>(self, source, old, new) in Python,
+// IGameLogic::onHcVariableChanged(source, var) in C++. `source` is the entity
+// whose class owns the variable, 0 for the Game Instance. The HorizonCode side
+// of the variable is untouched: a subscription calls no OnChanged_<Var> and
+// sends no <Var>Changed — those belong to the Notify on Change tick alone.
+//
+// `target` names the instance: an entity (its class, EntityHost::instanceOf)
+// or 0 for the Game Instance. 0 is free for that because no gameplay entity is
+// ever numbered 0 (the world root is).
+//
+// The SUBSCRIBER is an entity too, and it is passed explicitly, for the reason
+// net.declareVar takes one: a Lua or Python call reaches this table without a
+// caller (Ctx::self is 0 for them), so the row cannot know which script asked.
+// The script on that entity is the one that hears it — one script instance per
+// entity, the addressing NetEvents::dispatchRep already uses. From a graph the
+// pin defaults to Self like every leading `entity`, and it is still the TEXT
+// script on that entity that hears it: a graph has Notify on Change and Bind
+// Event for itself.
+namespace hc {
+    // Runtime::watch tokens as the hosts hand them out: the high half says
+    // which frontend, the low half which entity's script (0 for the native
+    // module, which has one subscriber per process). The hosts route on it
+    // (HcWatchEvents) and sweep a whole kind when that frontend goes away.
+    inline constexpr uint64_t kScriptTokenKind = 1ull;
+    inline constexpr uint64_t kNativeTokenKind = 2ull;
+    inline uint64_t scriptToken(uint32_t entity) { return (kScriptTokenKind << 32) | entity; }
+    inline uint64_t nativeToken()                { return kNativeTokenKind << 32; }
+    inline bool     isScriptToken(uint64_t t)    { return (t >> 32) == kScriptTokenKind; }
+    inline bool     isNativeToken(uint64_t t)    { return (t >> 32) == kNativeTokenKind; }
+    inline uint32_t tokenEntity(uint64_t t)      { return static_cast<uint32_t>(t); }
+
+    // Subscribe the script on `entity` to `target`'s `variable`. False = no
+    // runtime, no subscriber, no such instance or no PUBLIC variable of that
+    // name (the door Get (Ref) uses). Subscribing twice is one subscription.
+    bool        watch(Ctx&, int entity, int target, const std::string& variable);
+    void        unwatch(Ctx&, int entity, int target, const std::string& variable);
+    // The variable's current value as JSON text (the save document's shape:
+    // numbers, strings, arrays, structs as objects), "" when it cannot be read
+    // for any of watch's reasons. What a handler that wants more than `new`
+    // reads, and the only reader the native module has.
+    std::string getJson(Ctx&, int target, const std::string& variable);
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    // The native module's subscription: one token for the whole module.
+    bool        watchNative(Ctx&, int target, const std::string& variable);
+    void        unwatchNative(Ctx&, int target, const std::string& variable);
+    // The instance `target` stands for (0 = the Game Instance), 0 if none.
+    uint32_t    targetInstance(Ctx&, int target);
+    // The other way round, for a callback: the entity an owner stands for, 0
+    // for the Game Instance (or anything not on an entity).
+    uint32_t    sourceEntity(const HorizonCode::Runtime& rt, uint32_t owner);
+}
+
 // ── JSON ─────────────────────────────────────────────────────────────────────
 // Reading and writing JSON text, addressed by a dotted PATH: "user.name",
 // "items[2].id", "" for the document itself. Text in, text out, because that is
@@ -2296,6 +2355,11 @@ struct GameServicesBinding
     // Null (unbound, or resolving to null) = anti-cheat OFF for the module —
     // readers neutral, check passes, the rest no-ops.
     std::function<HE::AntiCheat::AntiCheatHost*()> antiCheat;
+    // The HorizonCode side, resolvers like `world`: the runtime and the entity
+    // host the hc table reads and subscribes through. Unbound = the hc rows
+    // answer their neutral default (nothing watched, "" read).
+    std::function<HorizonCode::Runtime*()> runtime;
+    std::function<EntityHost*()>           entities;
 };
 void fillSaveServices(::HeSaveServices& out, GameServicesBinding* binding);
 void fillPhysicsServices(::HePhysicsServices& out, GameServicesBinding* binding);
@@ -2313,6 +2377,9 @@ void fillAntiCheatServices(::HeAntiCheatServices& out, GameServicesBinding* bind
 // same lifetime rule as the one above: the binding resolves the session per
 // call, so a session that ends leaves nothing dangling in a module's hands.
 void fillNetServices(::HeNetServices& out, GameServicesBinding* binding);
+// HorizonCode variables (watch/unwatch/read), through the same hc::* the
+// registry rows use. Resolves runtime and entity host per call.
+void fillHcServices(::HeHcServices& out, GameServicesBinding* binding);
 
 // ── Scene transitions (process-global request queue; the app executes) ────────
 // load() requests a full deferred world switch at a safe frame boundary;
