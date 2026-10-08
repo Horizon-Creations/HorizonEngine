@@ -2,6 +2,7 @@
 #include "CollabController.h"
 
 #include <Diagnostics/Log.h>
+#include <SourceControl/GitHubTokenStore.h>
 
 #include <algorithm>
 
@@ -31,21 +32,37 @@ GitController::~GitController()
 
 void GitController::requestListRepos(std::string token)
 {
+	if (token.empty()) return;
+	startListRepos(std::move(token), {});
+}
+
+void GitController::requestListReposWithSignIn(const std::filesystem::path& credentialRoot)
+{
+	startListRepos({}, credentialRoot);
+}
+
+void GitController::startListRepos(std::string token, std::filesystem::path credentialRoot)
+{
 	const auto wipe = [](std::string& s) {
 		std::fill(s.begin(), s.end(), '\0');
 		s.clear();
 	};
-	if (m_listing || token.empty()) { wipe(token); return; }
+	if (m_listing) { wipe(token); return; }
 	// The previous thread has delivered (m_listing is only cleared after
 	// collectRepoList saw its result), so this join does not wait.
 	if (m_listThread.joinable()) m_listThread.join();
 
 	m_listing = true;
 	m_repoListError.clear();
-	m_listThread = std::thread([this, token = std::move(token), wipe]() mutable {
+	m_listThread = std::thread([this, token = std::move(token),
+	                            root = std::move(credentialRoot), wipe]() mutable {
 		std::vector<HE::Sc::RepoListEntry> repos;
 		std::string err;
-		const bool ok = HE::Sc::GitHubApi::listRepos(token, repos, &err);
+		// The sign-in is read here rather than on the frame thread: it is a git
+		// subprocess, and the keychain may take its time.
+		if (token.empty() && !HE::Sc::GitHubTokenStore::load(root, token))
+			err = "You are not signed in to GitHub. Sign in, or paste a token.";
+		const bool ok = !token.empty() && HE::Sc::GitHubApi::listRepos(token, repos, &err);
 		wipe(token);
 
 		std::lock_guard<std::mutex> lock(m_listMutex);
@@ -155,7 +172,8 @@ void GitController::requestCreateBranch(const std::string& name,
 void GitController::requestSetupGitHub(const std::string& repoName, bool isPrivate,
                                        std::string token)
 {
-	if (!mayModify() || repoName.empty() || token.empty()) return;
+	// An empty token is allowed: the service then uses the GitHub sign-in.
+	if (!mayModify() || repoName.empty()) return;
 	m_service.requestSetupGitHub(repoName, isPrivate, std::move(token));
 }
 

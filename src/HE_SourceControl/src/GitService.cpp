@@ -2,6 +2,7 @@
 
 #include "SourceControl/GitCli.h"
 #include "SourceControl/GitHubApi.h"
+#include "SourceControl/GitHubTokenStore.h"
 #include "SourceControl/RepoConfig.h"
 #include "ScLog.h"
 
@@ -376,6 +377,9 @@ void GitService::workerMain()
 		case Kind::SetupGitHub:
 		{
 			std::string err;
+			// No token typed: the GitHub sign-in, if there is one. Read here, on
+			// the worker — it is a git subprocess — and wiped below like a typed one.
+			if (cmd.secret.empty()) GitHubTokenStore::load(m_root, cmd.secret);
 			CreatedRepo repo;
 			const bool created = GitHubApi::createRepo(cmd.secret, cmd.text, cmd.flag,
 			                                           repo, &err);

@@ -293,6 +293,8 @@ add_executable(HorizonEditor WIN32
 	ToolchainDialog.cpp
 	GitMissingDialog.cpp
 	GitCloneDialog.cpp
+	GitHubSignIn.cpp
+	GitHubSignInView.cpp
 	ReportIssueDialog.cpp
 	EditorDockState.cpp
 	GitController.cpp

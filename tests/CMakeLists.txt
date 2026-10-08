@@ -289,6 +289,7 @@ add_executable(he_tests
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
+    test_github_oauth.cpp
     test_game_replication.cpp
     # The first real gameplay session: two and three NetGameSessions against
     # each other over LossyTransport, headless and on a simulated clock.
@@ -533,6 +534,9 @@ add_executable(he_tests
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsPanel.cpp
+    # The GitHub sign-in's drawing half (code, countdown, buttons), for the
+    # ui shots. ImGui plus EditorWidgets; the state half needs the editor.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitHubSignInView.cpp
     # The toolbar look — wells and segmented cells. The reader's language
     # switcher is one, and borrowing the primitives is what keeps it from being
     # a second copy of the palette. ImGui-only by construction, so it compiles
