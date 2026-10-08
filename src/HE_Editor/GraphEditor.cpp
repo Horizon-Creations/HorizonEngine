@@ -455,6 +455,15 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     {
         ImGuiIO& gio = ImGui::GetIO();
         const bool zoomMod = gio.KeyCtrl || gio.KeySuper;
+        // The pinch (macOS: the native magnify event, see EditorInput.h) zooms
+        // about the cursor like the Ctrl/Cmd+scroll below.
+        if (const float pinch = EditorInput::pinchDelta(); pinch != 0.0f)
+        {
+            const ImVec2 before = toGraph(mouse);
+            st.zoom = std::clamp(st.zoom * std::max(0.1f, 1.0f + pinch * 2.0f), 0.3f, 2.5f);
+            st.pan.x = mouse.x - origin.x - before.x * st.zoom;
+            st.pan.y = mouse.y - origin.y - before.y * st.zoom;
+        }
         if (EditorInput::trackpadActive() && !zoomMod)
         {
             constexpr float kSwipeToPx = 16.0f; // wheel units → canvas pixels

@@ -5015,6 +5015,20 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	{
 		const ImGuiIO& gio = ImGui::GetIO();
 		const bool zoomMod = gio.KeyCtrl || gio.KeySuper;
+		// Zoom about the cursor: the canvas point under it stays where it is.
+		const auto zoomBy = [&](float factor)
+		{
+			const ImVec2 before = toCanvas(mouse);
+			st.zoom = std::clamp(st.zoom * factor, 0.15f, 8.0f);
+			const float s2 = std::max(0.02f, fit * st.zoom);
+			st.pan.x += mouse.x - (origin.x + (avail.x - canvasW * s2) * 0.5f
+			                       + st.pan.x + before.x * s2);
+			st.pan.y += mouse.y - (origin.y + (avail.y - canvasH * s2) * 0.5f
+			                       + st.pan.y + before.y * s2);
+		};
+		// The pinch (macOS: the native magnify event, see EditorInput.h).
+		if (const float pinch = EditorInput::pinchDelta(); pinch != 0.0f)
+			zoomBy(std::max(0.1f, 1.0f + pinch * 2.0f));
 		if (EditorInput::trackpadActive() && !zoomMod)
 		{
 			constexpr float kSwipeToPx = 16.0f;   // wheel units → canvas pixels
@@ -5022,16 +5036,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			st.pan.y += gio.MouseWheel  * kSwipeToPx;
 		}
 		else if (gio.MouseWheel != 0.0f)
-		{
-			const ImVec2 before = toCanvas(mouse);
-			st.zoom = std::clamp(st.zoom * (1.0f + gio.MouseWheel * 0.1f), 0.15f, 8.0f);
-			const float s2 = std::max(0.02f, fit * st.zoom);
-			// keep the canvas point under the cursor fixed
-			st.pan.x += mouse.x - (origin.x + (avail.x - canvasW * s2) * 0.5f
-			                       + st.pan.x + before.x * s2);
-			st.pan.y += mouse.y - (origin.y + (avail.y - canvasH * s2) * 0.5f
-			                       + st.pan.y + before.y * s2);
-		}
+			zoomBy(1.0f + gio.MouseWheel * 0.1f);
 	}
 	if (hovered && (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
 	                ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
@@ -7113,14 +7118,38 @@ void render(AppContext& ctx, const std::string& assetPath,
 				const float gs = 22.0f;
 				paletteGlyph(dl, ImVec2((p0.x + p1.x) * 0.5f, p0.y + 6.0f + gs * 0.5f), gs, t,
 				             hot ? IM_COL32(240, 240, 245, 255) : IM_COL32(190, 192, 202, 255));
-				// The label, shortened to fit rather than cut mid-letter.
-				std::string label = spacedTypeName(typeName(t));
+				// The label: on one line when it fits, else broken at its space
+				// ("Horizontal" / "Box"), and only then shortened — never cut
+				// mid-letter.
 				const float maxW = size.x - 8.0f;
-				while (label.size() > 3 && ImGui::CalcTextSize(label.c_str()).x > maxW)
-				{ label.pop_back(); if (ImGui::CalcTextSize((label + "...").c_str()).x <= maxW) { label += "..."; break; } }
-				const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-				dl->AddText(ImVec2((p0.x + p1.x - ts.x) * 0.5f, p1.y - ts.y - 4.0f),
-				            IM_COL32(215, 215, 222, 255), label.c_str());
+				const auto fitLine = [&](std::string line)
+				{
+					while (line.size() > 3 && ImGui::CalcTextSize(line.c_str()).x > maxW)
+					{
+						line.pop_back();
+						if (ImGui::CalcTextSize((line + "...").c_str()).x <= maxW) { line += "..."; break; }
+					}
+					return line;
+				};
+				std::string full = spacedTypeName(typeName(t));
+				std::vector<std::string> lines;
+				const size_t sp = full.find(' ');
+				if (ImGui::CalcTextSize(full.c_str()).x <= maxW || sp == std::string::npos)
+					lines.push_back(fitLine(full));
+				else
+				{
+					lines.push_back(fitLine(full.substr(0, sp)));
+					lines.push_back(fitLine(full.substr(sp + 1)));
+				}
+				const float lineH = ImGui::GetTextLineHeight();
+				float ty = p1.y - lineH * lines.size() - 4.0f;
+				for (const std::string& ln : lines)
+				{
+					const ImVec2 ts = ImGui::CalcTextSize(ln.c_str());
+					dl->AddText(ImVec2((p0.x + p1.x - ts.x) * 0.5f, ty),
+					            IM_COL32(215, 215, 222, 255), ln.c_str());
+					ty += lineH;
+				}
 				// What this element IS. The scan that audits tooltip coverage
 				// only reads literal labels, so it never saw one of these
 				// buttons at all — third gap of that kind. A runtime test asks
@@ -7168,10 +7197,19 @@ void render(AppContext& ctx, const std::string& assetPath,
 				if (!placed) other.push_back(t);
 			}
 
+			// Tiles scale with the pane between a floor and a ceiling, then the
+			// row wraps: as many columns as it takes to keep a tile from growing
+			// past kMaxW, but never so many that one shrinks below kMinW. A wide
+			// pane gets more, same-sized tiles instead of a few stretched ones; a
+			// narrow one gets fewer, slightly smaller ones instead of clipped
+			// text.
+			constexpr float kMinW = 64.0f, kMaxW = 92.0f, kTileH = 58.0f;
 			const float spacing = ImGui::GetStyle().ItemSpacing.x;
 			const float availW  = ImGui::GetContentRegionAvail().x;
-			const int   cols    = std::max(1, static_cast<int>((availW + spacing) / (92.0f + spacing)));
-			const ImVec2 tileSz((availW - spacing * (cols - 1)) / cols, 52.0f);
+			const int   wanted  = static_cast<int>(std::ceil((availW + spacing) / (kMaxW + spacing)));
+			const int   fits    = static_cast<int>((availW + spacing) / (kMinW + spacing));
+			const int   cols    = std::max(1, std::min(wanted, std::max(1, fits)));
+			const ImVec2 tileSz(std::min(kMaxW, (availW - spacing * (cols - 1)) / cols), kTileH);
 
 			const auto drawGroup = [&](const char* title, const std::vector<UIWidgetType>& types)
 			{

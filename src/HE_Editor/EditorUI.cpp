@@ -476,6 +476,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     // Refresh the frame-cached pointer-grammar answer for ctx-less call sites
     // (the shared GraphEditor canvas asks via EditorInput::trackpadActive()).
     EditorInput::trackpadPointer(ctx);
+    // …and publish this frame's pinch (macOS), before any canvas asks for it.
+    EditorInput::beginFrame();
 
     ImGuiIO& io = ImGui::GetIO();
 
