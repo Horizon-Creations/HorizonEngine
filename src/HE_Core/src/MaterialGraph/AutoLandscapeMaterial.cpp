@@ -62,7 +62,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
 
     // ── Parameters (column 0) ────────────────────────────────────────────────
     const int pGroundTile = w.param(kAutoLandscapeParamGroundTile, 2.0f, 0.25f, 16.0f, "Tiling",
-        "Metres one Grass / Dirt / Wet Ground texture covers (world space).");
+        "Metres one Grass / Dirt texture covers (world space).");
     const int pRockTile   = w.param(kAutoLandscapeParamRockTile, 4.0f, 0.25f, 32.0f, "Tiling",
         "Metres one Rock / Snow texture covers (world space).");
     const int pCell       = w.param(kAutoLandscapeParamBombCell, 0.5f, 0.1f, 2.0f, "Tiling",
@@ -137,7 +137,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const LayerReads dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);
     const LayerReads rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
     const LayerReads snow  = layer(AutoLandscapeLayer::Snow,      uvRock,   -1);
-    const LayerReads wet   = layer(AutoLandscapeLayer::WetGround, uvGround, -1);
+    // Slice 4 of the arrays (WetGround) is not read: puddles are an overlay on
+    // the ground below, not a layer of their own.
 
     // (hA − hB) × Height Blend × scale — the height bias of a transition.
     auto heightBias = [&](int hA, int pinA, int hB, int pinB, int scale, int col) {
@@ -212,26 +213,36 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int negRim = w.constF(-0.06f, 6);
     const int rim    = w.ramp(negRim, rimW, { depth }, 6);
     r.wetMask = w.op(T::Multiply, 6, { { rim }, { r.flatMask } });
-    // Water fills the low texels of the wet ground first.
+    // Water fills the low texels of the ground below first (its height map, the
+    // blended B channel of everything under the puddle).
+    const int s2Split = w.op(T::SplitRGBA, 6, { { s2.mask } });
     const int midH   = w.constF(0.5f, 6);
     const int k004   = w.constF(0.04f, 6);
-    const int hOff   = w.op(T::Subtract, 6, { { wet.height, 2 }, { midH } });
+    const int hOff   = w.op(T::Subtract, 6, { { s2Split, 2 }, { midH } });
     const int hBias  = w.op(T::Multiply, 6, { { hOff }, { pHeight } });
     const int hBias2 = w.op(T::Multiply, 6, { { hBias }, { k004 } });
     const int waterT = w.op(T::Subtract, 6, { { depth }, { hBias2 } });
     const int water  = w.ramp(zero, k004, { waterT }, 6);
     r.waterMask = w.op(T::Multiply, 6, { { water }, { r.flatMask } });
-    const Surface s3 = blend(s2, wet, r.wetMask, 6);
 
-    // ── Standing water: darker, mirror-smooth, flat (column 7) ───────────────
-    const int dark   = w.constF(0.35f, 7);
-    const int darkA  = w.op(T::Multiply, 7, { { s3.albedo }, { dark } });
-    const int albedo = w.op(T::Lerp, 7, { { s3.albedo }, { darkA }, { r.waterMask } });
-    const int nWater = w.op(T::Lerp, 7, { { s3.normal }, { nrm }, { r.waterMask } });
-    const int normal = w.op(T::Normalize3, 7, { { nWater } });
-    const int mSplit = w.op(T::SplitRGBA, 7, { { s3.mask } });
-    const int glossy = w.constF(0.05f, 7);
-    const int rough  = w.op(T::Lerp, 7, { { mSplit, 1 }, { glossy }, { r.waterMask } });
+    // ── Puddles as an overlay on the ground below (column 7) ─────────────────
+    // No layer of its own: wet soil is the same soil, darker and smoother.
+    //   wet rim  albedo x 0.6, roughness x 0.5; normal, AO and the texture untouched
+    //   water    albedo x 0.35 of the DRY ground, roughness 0.05, flat geometric normal
+    const int wetDark = w.constF(0.6f, 7);
+    const int wetA    = w.op(T::Multiply, 7, { { s2.albedo }, { wetDark } });
+    const int albedoW = w.op(T::Lerp, 7, { { s2.albedo }, { wetA }, { r.wetMask } });
+    const int dark    = w.constF(0.35f, 7);
+    const int darkA   = w.op(T::Multiply, 7, { { s2.albedo }, { dark } });
+    const int albedo  = w.op(T::Lerp, 7, { { albedoW }, { darkA }, { r.waterMask } });
+    const int nWater  = w.op(T::Lerp, 7, { { s2.normal }, { nrm }, { r.waterMask } });
+    const int normal  = w.op(T::Normalize3, 7, { { nWater } });
+    const int mSplit  = w.op(T::SplitRGBA, 7, { { s2.mask } });
+    const int wetRgh  = w.constF(0.5f, 7);
+    const int roughW  = w.op(T::Multiply, 7, { { mSplit, 1 }, { wetRgh } });
+    const int roughD  = w.op(T::Lerp, 7, { { mSplit, 1 }, { roughW }, { r.wetMask } });
+    const int glossy  = w.constF(0.05f, 7);
+    const int rough   = w.op(T::Lerp, 7, { { roughD }, { glossy }, { r.waterMask } });
 
     // ── Output (column 8) ────────────────────────────────────────────────────
     r.output = w.node(T::Output, 8);

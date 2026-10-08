@@ -2248,7 +2248,7 @@ TEST_CASE("A bombed texture layer cross-compiles for all five backends, with gra
 
 TEST_CASE("The auto landscape material cross-compiles for all five backends, in every view and permutation")
 {
-	// The biggest graph the engine ships: five layers × three array reads, three
+	// The biggest graph the engine ships: four layers × three array reads, three
 	// hex grids, two noise fields, fourteen parameters. All of it is shader TEXT
 	// in existing slots — what has to hold is that every backend's translator
 	// takes it, the clustered and G-buffer variants included, and that the
@@ -2396,8 +2396,36 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 	CHECK(gen.layerNames.empty());
 	CHECK(gen.glsl.find("heLandscapeWeights, vUV") == std::string::npos);
 
+	// Puddles are an OVERLAY on the ground below, not a layer: slice 4 of the arrays
+	// (WetGround) stays in them but no read asks for it — every array read takes its
+	// slice from a constant below it. Positive control: slice 3 (Snow) IS read.
+	{
+		using NT = HE::MatNodeType;
+		const int wetSlice = static_cast<int>(HE::AutoLandscapeLayer::WetGround);
+		int reads = 0;
+		bool sawSnow = false;
+		for (const HE::MatGraphNode& n : a.graph.nodes)
+		{
+			if (n.type != NT::TextureArraySample && n.type != NT::NormalMapArraySample &&
+			    n.type != NT::TextureArrayBombSample && n.type != NT::NormalMapArrayBombSample)
+				continue;
+			for (const HE::MatGraphLink& l : a.graph.links)
+			{
+				if (l.dstNode != n.id || l.dstPin != 1) continue; // pin 1 = Slice
+				const HE::MatGraphNode* s = a.graph.findNode(l.srcNode);
+				REQUIRE(s);
+				REQUIRE(s->type == NT::ConstFloat);
+				++reads;
+				CHECK(static_cast<int>(s->p[0]) != wetSlice);
+				sawSnow = sawSnow || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Snow);
+			}
+		}
+		CHECK(reads == 21); // 3 bombed layers x 3 maps x (plain + bombed) + Snow x 3 maps
+		CHECK(sawSnow);
+	}
+
 	// Grass, Dirt, Rock each read albedo + normal + mask on ONE grid (three grids
-	// in total); Snow and Wet Ground are plain reads. The uv here is a coerced
+	// in total); Snow is a plain read. The uv here is a coerced
 	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
 	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
 	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 3u);
