@@ -53,7 +53,8 @@ public:
 	// additionally hides the buttons and explains why.
 	void requestInit(bool lfsAvailable);
 	void requestCommitAll(const std::string& message);
-	// An empty token uses the GitHub sign-in (see GitService::requestSetupGitHub).
+	// An empty token uses the GitHub sign-in (see GitService::requestSetupGitHub);
+	// the editor always passes an empty one, it has no token field any more.
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate, std::string token);
 	// Put the project folder back to how a commit had it, recorded as a new
 	// commit so the restore is itself undoable. Refused on a dirty tree.
