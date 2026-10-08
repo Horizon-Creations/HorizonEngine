@@ -1067,10 +1067,14 @@ verlangt.
   - Ein persistentes Set je Frame-Slot, nach dem Fence des Slots neu beschrieben (wie Binding 8 des
     Szenen-Sets). Dieselben Views, Sampler, Layouts und Gates wie ein Graph-Material-Draw (GI-Maske
     11 und DDGI-Atlanten in `GENERAL`), G-Buffer mit einem eigenen Point-Clamp-Sampler.
-  - Eigener `HeLighting`- und `HeResolve`-Puffer je Slot, host-sichtbar, **außerhalb** jedes
-    Render-Passes gefüllt (die Falle aus Thema 144 kommt so gar nicht erst vor): die Material-
-    Füllung des Frames mit `specAA[1] = 0`, im clustered Fall das Fenster aus
+  - Eigener `HeLighting`- und `HeResolve`-Puffer je Slot, host-sichtbar und kohärent gemappt.
+    Inhalt: die Material-Füllung des Frames mit `specAA[1] = 0`, im clustered Fall das Fenster aus
     `FillMaterialDirectionalWindow`. `m_matLightBuf` bleibt für Replay und Schwanz unberührt.
+  - Das `memcpy` in diese Puffer und `vkUpdateDescriptorSets` stehen in der Aufzeichnung
+    **innerhalb** von `m_hdrLoadRP`. Die Falle aus Thema 144 tritt trotzdem nicht auf: Das sind
+    Host-Schreibzugriffe auf Speicher, den die GPU erst nach dem Submit liest. Es gibt keinen
+    Transfer-Befehl (`vkCmdUpdateBuffer`, `vkCmdCopy*`) im Render-Pass. Wer hier einen Transfer
+    einführt, baut die Falle wieder ein.
   - `depthParams = (+1, 1, 0)` wie der Decal-Pass, die Inverse der gejitterten `viewProj`
     (`kVulkanClipFix` steckt darin, 10.7 #3).
 - **G-Buffer-Pipelines:**
@@ -1083,7 +1087,13 @@ verlangt.
   - Der instanzierte Zweig stellt die Pipeline des laufenden Passes wieder her
     (`activeMatScenePipe`), wie auf D3D12.
 - **Skinned vor Transparenz** (10.3), in beiden Pfaden: bisher zeichnete Vulkan Skinned nach den
-  Transparenten.
+  Transparenten. **Ungeprüft:**
+  - Keine Witness-Szene hat ein Skinned-Mesh. Der Wechsel ist also gelesen, nicht gelaufen,
+    weder forward noch deferred.
+  - Das gilt auch für das Neubinden von Set 0/2 zwischen `m_skinnedPipeLayout` und dem
+    transparenten `drawDCVk`-Pass. Der Skinned-Block stellt am Ende Szenen-Pipeline und Set 0
+    wieder her, und der Transparenz-Pass bindet seine Pipeline selbst.
+  - Ein Skinned-Witness auf Vulkan gehört in Schritt 6.
 - **Größe:** Der G-Buffer wird lazy in Viewport-Größe angelegt und mit den PostFX-Zielen
   freigegeben (`destroyPostFXResources`, GPU dort idle). Sein Framebuffer hält die
   Viewport-Tiefe, also muss er vor ihr gehen.
@@ -1190,6 +1200,18 @@ G-buffer tails fit the material layout (Thema 150)“, 524 Zusicherungen:
   - Ohne die GB3-Zeile bleibt genau „0/22:1“ ungedeckt.
   - Gegen das Material-Layout fehlen genau 19–23.
 - Die G-Buffer-Tails aller Surface-Knoten-Graphen passen in das Material-Layout (14 inklusive).
+- Gesamtlauf `he_tests` (Release, nach Merge und Schritt 4): 4482 von 4484 Fällen grün. Die zwei
+  roten sind die bekannten Zwischenablage-Fälle in `test_inspector_ui` (7 Zusicherungen),
+  vorbestehend, dieselben wie vor Schritt 4 direkt nach dem Merge.
+
+**D3D11/D3D12 nach dem Merge.** Der Merge hat D3D11- und D3D12-Renderer berührt (zwei Konflikte,
+rund 330 bzw. 430 Zeilen aus release). Beide Deferred-Pfade sind danach zur Laufzeit gelaufen:
+- D3D11 `MATERIALTEST=matte`: forward ↔ deferred 0,045/255 auf der Kugel, `deferred frame` im
+  Log. GL deferred ↔ D3D11 deferred liegt jetzt bei 0,047 / 0,271 (Band / Kugel). In 10.9 waren
+  es 2,49; die release-Änderungen bringen D3D11 näher an GL.
+- `MANYLIGHTS=16`: D3D11 deferred ↔ D3D12 deferred zum Byte gleich.
+- Die D3D12-Läufe der Tabelle oben: Debug-Layer an, 0 `[ERROR]`-Zeilen, `deferred frame` in
+  jedem.
 
 **Abweichungen zu Metal/GL (Vulkan).**
 - *Eingebaute Materialien* sehen in Vulkan deferred anders aus als in Vulkan forward:
