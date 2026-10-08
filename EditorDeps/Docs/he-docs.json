@@ -9528,7 +9528,7 @@
         },
         {
          "s": "",
-         "t": " opens the engine's built-in profiler. Three tabs:"
+         "t": " opens the engine's built-in profiler. Among its tabs:"
         }
        ]
       },
@@ -9614,13 +9614,83 @@
            "t": "Per-pass GPU timing (Shadow, SSAO, Scene, Bloom, Tonemap …), a nested CPU scope tree, and counters — draw calls, triangles, visible/total objects, VRAM used vs budget."
           }
          ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Streaming"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Live view of what loads in the background: the job pool per priority (queued, running, cap, jobs per second, share of the workers, cancelled, failed), the asset loads in flight with their progress, the last scene load (parse and build time), the open scene's streaming cells and how far the editor camera is from the origin."
+          }
+         ]
         ]
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Streaming cells in the editor"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A large scene can stream in squares: the game loads the cells around its camera and drops the far ones (see "
+        },
+        {
+         "h": "systems.html#physics",
+         "s": "l",
+         "t": "large worlds"
+        },
+        {
+         "s": "",
+         "t": "). The Streaming tab splits the open scene: pick a cell size and, if you like, the load and unload radius, then "
+        },
+        {
+         "s": "b",
+         "t": "Split into Streaming Cells"
+        },
+        {
+         "s": "",
+         "t": ". Placed meshes, point and spot lights, static bodies and decals move into one scene file per square, in a folder named after the scene; everything that has to be there all the time stays. The scene must have been saved once, and the split is one undo step that you keep by saving."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "c",
+         "t": "Show » Streaming Cells"
+        },
+        {
+         "s": "",
+         "t": " in the Scene window draws the squares on the ground: green ones the game would load from where the editor camera stands, orange ones it keeps once loaded, grey ones it drops, with the two radii as rings. To change what is in the cells, "
+        },
+        {
+         "s": "b",
+         "t": "Merge Cells into the Scene"
+        },
+        {
+         "s": "",
+         "t": " brings them back as ordinary entities, in their folders and with their identities, and the cell list goes; split again when done. Neither is offered while playing or inside a collaboration session."
+        }
        ]
       }
      ],
      "eyebrow": "Measure",
      "id": "profiler",
-     "text": "View » Performance Profiler opens the engine's built-in profiler. Three tabs: Tab Shows Overview Always-live HUD: FPS, CPU ms, GPU ms and a frame-time graph. Capture Benchmark capture — start/stop with F9 anywhere (editor or exported game); dumps a profile_<timestamp>.json into the dumps/ folder. Plus single-frame captures. Frame Detail Per-pass GPU timing (Shadow, SSAO, Scene, Bloom, Tonemap …), a nested CPU scope tree, and counters — draw calls, triangles, visible/total objects, VRAM used vs budget.",
+     "text": "View » Performance Profiler opens the engine's built-in profiler. Among its tabs: Tab Shows Overview Always-live HUD: FPS, CPU ms, GPU ms and a frame-time graph. Capture Benchmark capture — start/stop with F9 anywhere (editor or exported game); dumps a profile_<timestamp>.json into the dumps/ folder. Plus single-frame captures. Frame Detail Per-pass GPU timing (Shadow, SSAO, Scene, Bloom, Tonemap …), a nested CPU scope tree, and counters — draw calls, triangles, visible/total objects, VRAM used vs budget. Streaming Live view of what loads in the background: the job pool per priority (queued, running, cap, jobs per second, share of the workers, cancelled, failed), the asset loads in flight with their progress, the last scene load (parse and build time), the open scene's streaming cells and how far the editor camera is from the origin. Streaming cells in the editor A large scene can stream in squares: the game loads the cells around its camera and drops the far ones (see large worlds). The Streaming tab splits the open scene: pick a cell size and, if you like, the load and unload radius, then Split into Streaming Cells. Placed meshes, point and spot lights, static bodies and decals move into one scene file per square, in a folder named after the scene; everything that has to be there all the time stays. The scene must have been saved once, and the split is one undo step that you keep by saving. Show » Streaming Cells in the Scene window draws the squares on the ground: green ones the game would load from where the editor camera stands, orange ones it keeps once loaded, grey ones it drops, with the two radii as rings. To change what is in the cells, Merge Cells into the Scene brings them back as ordinary entities, in their folders and with their identities, and the cell list goes; split again when done. Neither is offered while playing or inside a collaboration session.",
      "title": "Performance Profiler"
     },
     {
@@ -68946,6 +69016,51 @@
           "s": "",
           "t": " (Python) with the other entity's id, for solid contacts and triggers alike."
          }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Large worlds"
+         },
+         {
+          "s": "",
+          "t": " — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). "
+         },
+         {
+          "s": "i",
+          "t": "Project Settings » Physics » Simulation » Floating origin radius"
+         },
+         {
+          "s": "",
+          "t": " (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Cell streaming"
+         },
+         {
+          "s": "",
+          "t": " — a scene too big to keep loaded whole can be split into a grid of cells in the editor ("
+         },
+         {
+          "h": "editor.html#profiler",
+          "s": "l",
+          "t": "Performance Profiler » Streaming"
+         },
+         {
+          "s": "",
+          "t": ") or with "
+         },
+         {
+          "s": "c",
+          "t": "scripts/split_scene_cells.py"
+         },
+         {
+          "s": "",
+          "t": ": placed things (meshes, point and spot lights, static bodies, decals) go into one scene file per grid square, everything else stays in the base scene, which names the cells. The exported game then loads a cell once the camera, or where it is heading, comes within the load radius, and unloads it beyond the unload radius; reading and parsing run on worker threads, only building the entities on the main thread, a few milliseconds a frame. Cells work with the floating origin. The editor holds the base scene and draws the cells as squares on the ground; merging them back makes the scene one piece to edit."
+         }
         ]
        ],
        "k": "ul"
@@ -68953,7 +69068,7 @@
      ],
      "eyebrow": "Jolt-powered",
      "id": "physics",
-     "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike.",
+     "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike. Large worlds — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). Project Settings » Physics » Simulation » Floating origin radius (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates. Cell streaming — a scene too big to keep loaded whole can be split into a grid of cells in the editor (Performance Profiler » Streaming) or with scripts/split_scene_cells.py: placed things (meshes, point and spot lights, static bodies, decals) go into one scene file per grid square, everything else stays in the base scene, which names the cells. The exported game then loads a cell once the camera, or where it is heading, comes within the load radius, and unloads it beyond the unload radius; reading and parsing run on worker threads, only building the entities on the main thread, a few milliseconds a frame. Cells work with the floating origin. The editor holds the base scene and draws the cells as squares on the ground; merging them back makes the scene one piece to edit.",
      "title": "Physics"
     },
     {

@@ -2049,6 +2049,14 @@ namespace
 	  "Also the screenshot cameras of connected MCP clients (Remote Control): a "
 	  "frustum in the scene and an MCP #n tag over it, one per client.",
 	  "", "editor#viewport" },
+	{ "Viewport Show/Streaming Cells", "",
+	  "For a scene split into streaming cells: their squares on the ground and "
+	  "two rings around the camera. Green squares lie within the load radius, the "
+	  "game builds them from here; orange ones within the unload radius, it keeps "
+	  "them once built; grey ones it drops. The rings are the two radii. Nothing "
+	  "shows for a scene without cells. The numbers are in the profiler's "
+	  "Streaming tab.",
+	  "", "editor#viewport" },
 	{ "Viewport Show/Stats", "",
 	  "The frame's counters in the corner of the viewport: frame rate and frame "
 	  "time, draw calls, triangles, visible objects out of all of them, and GPU "
@@ -3936,6 +3944,19 @@ namespace
 	  "", "systems#physics" },
 	{ "Physics/Earth", "Earth",
 	  "Puts gravity back to 0, −9.81, 0.",
+	  "", "systems#physics" },
+	{ "Physics/Floating origin radius", "Floating origin radius",
+	  "Positions are 32-bit floats: 30 km from the origin objects start to shake "
+	  "by a pixel, at 250 km a walking step is rounded away. With a radius set, "
+	  "the exported game moves the whole world back by whole multiples of it "
+	  "once the camera is further out than this on any axis — entities, physics "
+	  "bodies, particles, trails, rain, the rig camera, nav agents — and keeps "
+	  "the absolute offset itself. Savegames and multiplayer carry absolute "
+	  "positions, the navmesh is queried with the offset added.\n\n"
+	  "0 is off, the default. What does not move along: positions a script "
+	  "keeps in its own variables, keyframes that set a top-level entity's "
+	  "position, and GPU particles — each jumps by the shift. The editor and its "
+	  "Play keep absolute coordinates. 5 000–10 000 m is a good radius.",
 	  "", "systems#physics" },
 	// ── Audio ▸ Buses ────────────────────────────────────────────────────────
 	{ "Audio Buses/Open Audio Mixer", "Open Audio Mixer",
@@ -6604,6 +6625,24 @@ namespace
 	  "frame, so a frame that is slow on the GPU can be told apart from one that "
 	  "is slow on the CPU. It appears only when the frames on screen carry GPU "
 	  "times at all.",
+	  "", "editor#profiler" },
+	{ "Profiler/Show the cells in the Scene window", "",
+	  "The same switch as Show > Streaming Cells in the Scene window: the cell "
+	  "squares on the ground, coloured by what the game would load, keep or drop "
+	  "from the editor camera, and the load and unload radius around it.",
+	  "", "editor#profiler" },
+	{ "Profiler/Split into Streaming Cells", "",
+	  "Moves the scene's placed things (meshes, point and spot lights, static "
+	  "bodies, decals) into one scene file per grid square, next to the scene in "
+	  "a folder named after it. The rest stays: sky, terrain, cameras, scripts, "
+	  "characters, dynamic bodies, prefab instances. The game then loads the "
+	  "squares around its camera and drops the far ones. One undo step; save the "
+	  "scene to keep it. The scene has to have been saved once.",
+	  "", "editor#profiler" },
+	{ "Profiler/Merge Cells into the Scene", "",
+	  "Loads every cell of a split scene back into it as ordinary entities and "
+	  "drops the cell list, so the scene is one piece again and everything in it "
+	  "can be edited. Split again when done. One undo step; save to keep it.",
 	  "", "editor#profiler" },
 	{ "Profiler/Fit", "",
 	  "Resets the timeline's zoom and pan so the whole capture fits the view "

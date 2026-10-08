@@ -9241,6 +9241,12 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
+		// EncodeScene builds the alpha-blended twin of every graph material on its
+		// first draw, whatever the material's opacity (see there): its own MSL
+		// libraries and PSO, ~0.4-0.7 s on an E-core. Without it here the first
+		// two frames after a scene open stalled in Metal::EncodeScene even with
+		// every material warmed (Thema 153 Schritt 5: the editor light icons).
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true)) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
 		if (m_renderPath == HE::RenderPath::Deferred)
@@ -15905,6 +15911,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 {
 	@autoreleasepool
 	{
+		// Every pass below re-extracts (shadow, GI, SSAO, G-buffer, scene) so
+		// their draw sets and cascade fits agree. Inside this scope the world
+		// does not change, so the extractor walks it once and answers the rest
+		// from that walk (RenderExtractor::beginFrame). Closed on every return.
+		RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
 		if (isPrimary)
 		{
 			// Reset the render counters before any early-return below, so a frame

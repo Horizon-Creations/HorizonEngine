@@ -1,8 +1,12 @@
 #include "doctest.h"
 #include <JobSystem/JobSystem.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <future>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
@@ -177,9 +181,10 @@ TEST_CASE("parallel_for: helpers that dequeue after the call returned touch noth
         SaturatedPool busy;
         parallel_for(N, [&](size_t i) { hits[i].fetch_add(1); }, "TestLateHelper", 16);
     }   // blockers released: the stale helpers now run against a finished job
-    // Drain: the queue is FIFO, and once EVERY worker sits in a blocker queued
-    // after the stale helpers, each of those helpers has not just started but
-    // finished — so the check below sees their full effect, if any.
+    // Drain: the helpers are High and the drain blockers Normal, so the helpers
+    // leave the queue first; once EVERY worker sits in a blocker, each of those
+    // helpers has not just started but finished — so the check below sees their
+    // full effect, if any.
     { SaturatedPool drain; }
     for (size_t i = 0; i < N; ++i)
         CHECK(hits[i].load() == 1);
@@ -256,4 +261,577 @@ TEST_CASE("ThreadPool::post runs every copy it enqueued")
     }, "TestPost", 7);
     std::unique_lock<std::mutex> lock(m);
     CHECK(cv.wait_for(lock, std::chrono::seconds(10), [&] { return ran.load() == 7; }));
+}
+
+// ─── Job planning: priorities, dependencies, cancellation (Thema 153, Schritt 2) ─
+
+namespace {
+
+using HE::CancelToken;
+using HE::JobDesc;
+using HE::JobHandle;
+using HE::JobPriority;
+using HE::JobStatus;
+
+// A door the test opens: jobs that wait on it hold their worker until then.
+struct Gate
+{
+    std::mutex              m;
+    std::condition_variable cv;
+    bool                    open = false;
+    void wait()
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [this] { return open; });
+    }
+    void release()
+    {
+        { std::lock_guard<std::mutex> lock(m); open = true; }
+        cv.notify_all();
+    }
+};
+
+// Poll until pred() holds or the deadline passes. Every wait in these tests goes
+// through a deadline: a scheduling bug must turn the suite red, not freeze CI.
+template<typename P>
+bool eventually(P pred, std::chrono::milliseconds limit = std::chrono::seconds(10))
+{
+    const auto end = std::chrono::steady_clock::now() + limit;
+    while (!pred())
+    {
+        if (std::chrono::steady_clock::now() > end) return false;
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    return true;
+}
+
+// Run fn on a thread of its own and report whether it returned in time. A stuck
+// fn is leaked rather than joined — joining it would hang the suite, which is
+// precisely what a deadlock test must not do.
+template<typename F>
+bool returnsWithin(F fn, std::chrono::milliseconds limit = std::chrono::seconds(10))
+{
+    auto done = std::make_shared<std::promise<void>>();
+    std::future<void> f = done->get_future();
+    std::thread([fn = std::move(fn), done]() mutable {
+        try { fn(); done->set_value(); }
+        catch (...) { done->set_exception(std::current_exception()); }
+    }).detach();
+    if (f.wait_for(limit) != std::future_status::ready) return false;
+    f.get();
+    return true;
+}
+
+// Parks the single worker of a one-thread pool, so everything scheduled after it
+// stays queued until open() — the deterministic way to look at queue order.
+struct ParkedWorker
+{
+    Gate              gate;
+    std::atomic<bool> parked{ false };
+    std::future<void> blocker;
+    explicit ParkedWorker(ThreadPool& pool)
+    {
+        blocker = pool.submit([this] { parked.store(true); gate.wait(); }, "TestParked");
+        while (!parked.load()) std::this_thread::yield();
+    }
+    void open()
+    {
+        gate.release();
+        blocker.get();
+    }
+    ~ParkedWorker() { if (blocker.valid()) open(); }
+};
+
+JobDesc desc(const char* name, JobPriority p = JobPriority::Normal)
+{
+    JobDesc d;
+    d.name     = name;
+    d.priority = p;
+    return d;
+}
+
+JobDesc after(const char* name, std::vector<JobHandle> deps, JobPriority p = JobPriority::Normal)
+{
+    JobDesc d = desc(name, p);
+    d.after   = std::move(deps);
+    return d;
+}
+
+} // namespace
+
+TEST_CASE("schedule: a higher priority overtakes, one priority stays FIFO")
+{
+    std::mutex       om;
+    std::vector<int> order;
+    auto record = [&](int v) { return [&om, &order, v] { std::lock_guard<std::mutex> l(om); order.push_back(v); }; };
+    ThreadPool pool(1);   // declared after what its jobs touch: joins first
+    ParkedWorker park(pool);
+
+    std::vector<JobHandle> hs;
+    hs.push_back(pool.schedule(record(30), desc("TestL1", JobPriority::Low)));
+    hs.push_back(pool.schedule(record(20), desc("TestN1", JobPriority::Normal)));
+    hs.push_back(pool.schedule(record(10), desc("TestH1", JobPriority::High)));
+    hs.push_back(pool.schedule(record(31), desc("TestL2", JobPriority::Low)));
+    hs.push_back(pool.schedule(record(11), desc("TestH2", JobPriority::High)));
+    pool.post(record(21), "TestN2");                                  // post() shares Normal
+    auto lowSubmit = pool.submit(record(32), "TestL3", JobPriority::Low);   // and so can submit()
+
+    CHECK(pool.queuedCount(JobPriority::High) == 2);
+    CHECK(pool.queuedCount(JobPriority::Normal) == 2);
+    CHECK(pool.queuedCount(JobPriority::Low) == 3);
+    CHECK(hs[0].status() == JobStatus::Queued);
+
+    park.open();
+    // Not JobHandle::wait(): that would run a still-queued job right here and
+    // spoil the very order under test.
+    REQUIRE(eventually([&] { std::lock_guard<std::mutex> l(om); return order.size() == 7; }));
+    CHECK(order == std::vector<int>{ 10, 11, 20, 21, 30, 31, 32 });
+    for (auto& h : hs) CHECK(h.status() == JobStatus::Done);
+    lowSubmit.get();
+}
+
+TEST_CASE("Low jobs never hold more workers than the cap, and High still gets through")
+{
+    Gate gate;
+    std::atomic<int> lowRunning{ 0 }, lowPeak{ 0 }, lowDone{ 0 };
+    std::atomic<bool> highRan{ false };
+    ThreadPool pool(4);
+    // Default cap for Low: two workers stay free for frame work.
+    REQUIRE(pool.concurrencyLimit(JobPriority::Low) == 2);
+    CHECK(pool.concurrencyLimit(JobPriority::High) == 4);
+
+    std::vector<JobHandle> lows;
+    for (int i = 0; i < 6; ++i)
+        lows.push_back(pool.schedule([&] {
+            const int n = lowRunning.fetch_add(1) + 1;
+            int peak = lowPeak.load();
+            while (n > peak && !lowPeak.compare_exchange_weak(peak, n)) {}
+            gate.wait();
+            lowRunning.fetch_sub(1);
+            lowDone.fetch_add(1);
+        }, desc("TestLowCapped", JobPriority::Low)));
+
+    REQUIRE(eventually([&] { return lowRunning.load() == 2; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(lowRunning.load() == 2);                       // nobody else took a third
+    CHECK(pool.queuedCount(JobPriority::Low) == 4);
+
+    // The point of the cap: with every Low worker blocked in a "pak read", a
+    // High job is still picked up by a free worker instead of waiting it out.
+    pool.schedule([&] { highRan.store(true); }, desc("TestHighThrough", JobPriority::High));
+    CHECK(eventually([&] { return highRan.load(); }));
+
+    gate.release();
+    REQUIRE(eventually([&] { return lowDone.load() == 6; }));
+    CHECK(lowPeak.load() == 2);
+
+    // A raised cap is honoured for what comes next.
+    pool.setConcurrencyLimit(JobPriority::Low, 4);
+    CHECK(pool.concurrencyLimit(JobPriority::Low) == 4);
+    pool.setConcurrencyLimit(JobPriority::Low, 0);       // 0 means 1, never "nothing runs"
+    CHECK(pool.concurrencyLimit(JobPriority::Low) == 1);
+}
+
+TEST_CASE("schedule: a job starts only after everything it depends on is done")
+{
+    Gate gateA;
+    std::mutex om;
+    std::vector<char> order;
+    std::atomic<bool> bStarted{ false };
+    auto rec = [&](char c) { std::lock_guard<std::mutex> l(om); order.push_back(c); };
+    ThreadPool pool(4);
+
+    //      A
+    //     / \
+    //    B   C        D after B and C; B is High and still waits for A.
+    //     \ /
+    //      D
+    JobHandle a = pool.schedule([&] { gateA.wait(); rec('A'); }, desc("TestDepA"));
+    JobHandle b = pool.schedule([&] { bStarted.store(true); rec('B'); },
+                                after("TestDepB", { a }, JobPriority::High));
+    JobHandle c = pool.schedule([&] { rec('C'); }, after("TestDepC", { a }));
+    JobHandle d = pool.schedule([&] { rec('D'); }, after("TestDepD", { b, c }, JobPriority::Low));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_FALSE(bStarted.load());
+    CHECK(b.status() == JobStatus::Waiting);
+    CHECK(d.status() == JobStatus::Waiting);
+    // Parked, not queued: a waiting job must not sit in a queue and get re-tried.
+    CHECK(pool.queuedCount(JobPriority::High) == 0);
+
+    gateA.release();
+    REQUIRE(returnsWithin([d] { d.wait(); }));
+    CHECK(d.status() == JobStatus::Done);
+    std::lock_guard<std::mutex> l(om);
+    REQUIRE(order.size() == 4);
+    CHECK(order.front() == 'A');
+    CHECK(order.back() == 'D');
+
+    // A dependency that has long finished is no obstacle.
+    std::atomic<bool> late{ false };
+    JobHandle e = pool.schedule([&] { late.store(true); }, after("TestDepLate", { a, JobHandle{} }));
+    REQUIRE(returnsWithin([e] { e.wait(); }));
+    CHECK(late.load());
+}
+
+TEST_CASE("cancel(): a queued job never runs, and its dependents are cancelled with it")
+{
+    std::atomic<int> ran{ 0 }, cancelledCalls{ 0 }, depRan{ 0 };
+    ThreadPool pool(1);
+    ParkedWorker park(pool);
+
+    JobDesc dx = desc("TestCancelX", JobPriority::Low);
+    dx.onCancelled = [&] { cancelledCalls.fetch_add(1); };
+    JobHandle x = pool.schedule([&] { ran.fetch_add(1); }, dx);
+    JobDesc dy = after("TestCancelY", { x });
+    dy.onCancelled = [&] { cancelledCalls.fetch_add(1); };
+    JobHandle y = pool.schedule([&] { depRan.fetch_add(1); }, dy);
+    CHECK(x.status() == JobStatus::Queued);
+    CHECK(y.status() == JobStatus::Waiting);
+
+    x.cancel();
+    // Finished at once — not when the worker gets round to the queue entry.
+    CHECK(x.status() == JobStatus::Cancelled);
+    CHECK(y.status() == JobStatus::Cancelled);
+    CHECK(cancelledCalls.load() == 2);
+    CHECK(returnsWithin([x, y] { x.wait(); y.wait(); }, std::chrono::milliseconds(500)));
+
+    // A job scheduled after a cancelled one is cancelled on the spot.
+    JobHandle z = pool.schedule([&] { depRan.fetch_add(1); }, after("TestCancelZ", { x }));
+    CHECK(z.status() == JobStatus::Cancelled);
+
+    park.open();
+    // The dead queue entry is dropped, the worker carries on with what follows.
+    std::atomic<bool> next{ false };
+    pool.schedule([&] { next.store(true); }, desc("TestAfterCancel", JobPriority::Low));
+    REQUIRE(eventually([&] { return next.load(); }));
+    CHECK(ran.load() == 0);
+    CHECK(depRan.load() == 0);
+    CHECK(cancelledCalls.load() == 2);   // exactly once each, not again on pop
+    // Cancelling something already finished changes nothing.
+    x.cancel();
+    CHECK(x.status() == JobStatus::Cancelled);
+}
+
+TEST_CASE("CancelToken: one cancel drops every job that carries it; child tokens")
+{
+    std::atomic<int> ran{ 0 }, onCancelled{ 0 };
+    ThreadPool pool(1);
+    ParkedWorker park(pool);
+
+    // One token per "region", one child per "chunk" in it.
+    CancelToken region = CancelToken::create();
+    CancelToken chunkA = region.child();
+    CancelToken chunkB = region.child();
+    CancelToken other  = CancelToken::create();
+
+    auto job = [&](const char* name, CancelToken t) {
+        JobDesc d = desc(name, JobPriority::Low);
+        d.cancel      = std::move(t);
+        d.onCancelled = [&] { onCancelled.fetch_add(1); };
+        return pool.schedule([&] { ran.fetch_add(1); }, d);
+    };
+    JobHandle a = job("TestChunkA", chunkA);
+    JobHandle b = job("TestChunkB", chunkB);
+    JobHandle r = job("TestRegion", region);
+    JobHandle o = job("TestOther",  other);
+
+    chunkB.cancel();
+    CHECK(chunkB.cancelled());
+    CHECK_FALSE(region.cancelled());        // a child does not cancel its parent
+    region.cancel();
+    CHECK(chunkA.cancelled());              // the parent cancels every child
+    CHECK_FALSE(other.cancelled());
+
+    park.open();
+    REQUIRE(returnsWithin([=] { a.wait(); b.wait(); r.wait(); o.wait(); }));
+    CHECK(a.status() == JobStatus::Cancelled);
+    CHECK(b.status() == JobStatus::Cancelled);
+    CHECK(r.status() == JobStatus::Cancelled);
+    CHECK(o.status() == JobStatus::Done);
+    CHECK(ran.load() == 1);
+    CHECK(onCancelled.load() == 3);
+
+    // The none token never cancels.
+    CancelToken none;
+    none.cancel();
+    CHECK_FALSE(none.cancelled());
+    CHECK_FALSE(none.cancellable());
+    CHECK(none.child().cancellable());
+
+    // A token cancelled before scheduling: the job never even gets queued.
+    JobHandle pre = job("TestPreCancelled", region);
+    CHECK(pre.status() == JobStatus::Cancelled);
+}
+
+TEST_CASE("stale(): asked right before the start, so relevance can change while queued")
+{
+    std::atomic<bool> farAway{ false };
+    std::atomic<int>  ran{ 0 }, asked{ 0 };
+    ThreadPool pool(1);
+    ParkedWorker park(pool);
+
+    // A chunk load that is no longer wanted once the camera has moved away.
+    JobDesc d = desc("TestChunkLoad", JobPriority::Low);
+    d.stale = [&] { asked.fetch_add(1); return farAway.load(); };
+    JobHandle gone = pool.schedule([&] { ran.fetch_add(1); }, d);
+    JobHandle kept = pool.schedule([&] { ran.fetch_add(1); }, d);
+    CHECK(asked.load() == 0);               // not asked at scheduling time
+
+    farAway.store(true);                    // camera moved: both are stale now...
+    park.open();
+    REQUIRE(returnsWithin([gone] { gone.wait(); }));
+    CHECK(gone.status() == JobStatus::Cancelled);
+    REQUIRE(returnsWithin([kept] { kept.wait(); }));
+    CHECK(kept.status() == JobStatus::Cancelled);
+    CHECK(ran.load() == 0);
+
+    farAway.store(false);                   // ...and back in range: this one runs
+    JobHandle back = pool.schedule([&] { ran.fetch_add(1); }, d);
+    REQUIRE(returnsWithin([back] { back.wait(); }));
+    CHECK(back.status() == JobStatus::Done);
+    CHECK(ran.load() == 1);
+
+    // A throwing predicate counts as stale instead of escaping into the worker.
+    JobDesc bad = desc("TestBadStale");
+    bad.stale = []() -> bool { throw std::runtime_error("stale broke"); };
+    JobHandle b = pool.schedule([&] { ran.fetch_add(1); }, bad);
+    REQUIRE(returnsWithin([b] { b.wait(); }));
+    CHECK(b.status() == JobStatus::Cancelled);
+    CHECK(ran.load() == 1);
+}
+
+TEST_CASE("schedule: a throwing body fails its job, cancels dependents, spares the pool")
+{
+    std::atomic<bool> depRan{ false }, laterRan{ false };
+    ThreadPool pool(2);
+    JobHandle bad = pool.schedule([] { throw std::runtime_error("decode failed"); }, desc("TestThrows"));
+    JobHandle dep = pool.schedule([&] { depRan.store(true); }, after("TestAfterThrow", { bad }));
+
+    bool caught = false;
+    REQUIRE(returnsWithin([&] {
+        try { bad.wait(); }
+        catch (const std::runtime_error& e) { caught = std::string(e.what()) == "decode failed"; }
+    }));
+    CHECK(caught);
+    CHECK(bad.status() == JobStatus::Failed);
+    REQUIRE(returnsWithin([dep] { dep.wait(); }));   // a cancelled job's wait() does not throw
+    CHECK(dep.status() == JobStatus::Cancelled);
+    CHECK_FALSE(depRan.load());
+
+    pool.schedule([&] { laterRan.store(true); }, desc("TestStillAlive"));
+    CHECK(eventually([&] { return laterRan.load(); }));
+}
+
+TEST_CASE("wait() on a saturated pool runs the queued chain itself instead of deadlocking")
+{
+    std::mutex om;
+    std::vector<int> order;
+    ThreadPool pool(1);
+    ParkedWorker park(pool);   // the only worker is gone for the whole test
+
+    JobHandle a = pool.schedule([&] { std::lock_guard<std::mutex> l(om); order.push_back(1); }, desc("TestChainA", JobPriority::Low));
+    JobHandle b = pool.schedule([&] { std::lock_guard<std::mutex> l(om); order.push_back(2); }, after("TestChainB", { a }));
+    JobHandle c = pool.schedule([&] { std::lock_guard<std::mutex> l(om); order.push_back(3); }, after("TestChainC", { b }, JobPriority::High));
+
+    // Without help, c.wait() would sleep until a worker appears — never.
+    REQUIRE(returnsWithin([c] { c.wait(); }));
+    CHECK(c.status() == JobStatus::Done);
+    CHECK(order == std::vector<int>{ 1, 2, 3 });
+}
+
+TEST_CASE("wait() inside a job on the only worker does not deadlock")
+{
+    std::atomic<bool> innerRan{ false };
+    ThreadPool pool(1);
+    // The outer job occupies the single worker and waits for a job that can only
+    // ever be run by... the single worker. wait() takes it out of the queue.
+    JobHandle outer = pool.schedule([&pool, &innerRan] {
+        JobHandle inner = pool.schedule([&innerRan] { innerRan.store(true); }, desc("TestInner"));
+        inner.wait();
+    }, desc("TestOuter"));
+    REQUIRE(returnsWithin([outer] { outer.wait(); }));
+    CHECK(innerRan.load());
+    CHECK(outer.status() == JobStatus::Done);
+}
+
+TEST_CASE("a pool destroyed while its job waits on another pool's job: cancelled, no hang")
+{
+    std::atomic<bool> ran{ false };
+    ThreadPool longLived(1);
+    ParkedWorker park(longLived);
+    JobHandle dep = longLived.schedule([] {}, desc("TestOtherPoolDep"));
+    JobHandle orphan;
+    {
+        ThreadPool shortLived(1);
+        orphan = shortLived.schedule([&] { ran.store(true); }, after("TestOrphan", { dep }));
+        CHECK(orphan.status() == JobStatus::Waiting);
+    }   // gone, with `orphan` still parked on `dep`
+    park.open();
+    REQUIRE(returnsWithin([orphan] { orphan.wait(); }));
+    CHECK(orphan.status() == JobStatus::Cancelled);
+    CHECK_FALSE(ran.load());
+    CHECK(dep.status() == JobStatus::Done);
+}
+
+TEST_CASE("parallel_for helpers overtake queued streaming jobs in the global pool")
+{
+    // The baseline's complaint (Thema 153 §4.1): asset loads queued ahead of a
+    // frame left the frame computing alone. Fill the global pool's Low share with
+    // blocked "loads" and queue more behind them; the frame's helpers are High
+    // and the cap keeps workers free, so a worker still takes part.
+    ThreadPool& pool = globalPool();
+    if (pool.threadCount() < 3) return;   // no free worker by design on a tiny pool
+    Gate loads;
+    std::atomic<int> loadsRunning{ 0 };
+    const size_t cap = pool.concurrencyLimit(JobPriority::Low);
+    std::vector<JobHandle> handles;
+    for (size_t i = 0; i < cap + 16; ++i)
+        handles.push_back(pool.schedule([&] { loadsRunning.fetch_add(1); loads.wait(); loadsRunning.fetch_sub(1); },
+                                        desc("TestStreamingLoad", JobPriority::Low)));
+    REQUIRE(eventually([&] { return loadsRunning.load() == static_cast<int>(cap); }));
+
+    const std::thread::id caller = std::this_thread::get_id();
+    std::atomic<bool> workerRan{ false };
+    bool callerGaveUp = false;
+    parallel_for(4096, [&](size_t) {
+        if (std::this_thread::get_id() != caller) { workerRan.store(true); return; }
+        // The caller holds back until a worker has joined in, with a deadline so
+        // a regression shows up as a failed CHECK rather than a hang.
+        if (!callerGaveUp && !eventually([&] { return workerRan.load(); }, std::chrono::seconds(5)))
+            callerGaveUp = true;
+    }, "TestFrameHelper", 16);
+    CHECK(workerRan.load());
+    CHECK_FALSE(callerGaveUp);
+
+    loads.release();
+    for (auto& h : handles) REQUIRE(returnsWithin([h] { h.wait(); }));
+}
+
+TEST_CASE("random job graphs with cancels and failures always finish, deps respected")
+{
+    // A cheap stand-in for TSan on this machine: many small DAGs, every feature
+    // at once, on several workers. Invariants: everything finishes; a body runs
+    // at most once; a body runs only after all its dependencies' bodies did.
+    constexpr int kJobs = 1500;
+    std::vector<std::atomic<int>> runs(kJobs);
+    std::vector<std::atomic<bool>> bodyDone(kJobs);
+    for (auto& r : runs) r.store(0);
+    for (auto& b : bodyDone) b.store(false);
+    std::atomic<int> orderViolations{ 0 };
+    std::vector<std::vector<int>> deps(kJobs);
+    CancelToken tokens[4] = { CancelToken::create(), CancelToken::create(),
+                              CancelToken::create(), CancelToken::create() };
+    std::vector<JobHandle> hs(kJobs);
+
+    uint32_t rng = 0x9E3779B9u;
+    auto next = [&rng] { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng; };
+
+    ThreadPool pool(4);
+    for (int i = 0; i < kJobs; ++i)
+    {
+        JobDesc d;
+        d.name     = "TestRandomGraph";
+        const uint32_t pr = next() % 3;
+        d.priority = static_cast<JobPriority>(pr);
+        const uint32_t nd = (i == 0) ? 0 : next() % 4;
+        for (uint32_t k = 0; k < nd; ++k)
+        {
+            const uint32_t span = static_cast<uint32_t>(std::min(i, 40));
+            const int dep = i - 1 - static_cast<int>(next() % span);
+            deps[i].push_back(dep);
+            d.after.push_back(hs[dep]);
+        }
+        if (next() % 8 == 0) d.cancel = tokens[next() % 4];
+        const bool throws = next() % 50 == 0;
+        hs[i] = pool.schedule([&, i, throws] {
+            runs[i].fetch_add(1);
+            for (int dp : deps[i])
+                if (!bodyDone[dp].load()) orderViolations.fetch_add(1);
+            if (throws) throw std::runtime_error("random failure");
+            bodyDone[i].store(true);
+        }, d);
+        if (next() % 40 == 0) hs[next() % (i + 1)].cancel();
+        if (i == kJobs / 2) tokens[1].cancel();
+    }
+    tokens[3].cancel();
+
+    REQUIRE(returnsWithin([&] {
+        for (auto& h : hs) { try { h.wait(); } catch (const std::runtime_error&) {} }
+    }, std::chrono::seconds(30)));
+    int done = 0, failed = 0, cancelled = 0;
+    for (int i = 0; i < kJobs; ++i)
+    {
+        CHECK(runs[i].load() <= 1);
+        switch (hs[i].status())
+        {
+        case JobStatus::Done:      ++done; CHECK(runs[i].load() == 1); break;
+        case JobStatus::Failed:    ++failed; break;
+        case JobStatus::Cancelled: ++cancelled; CHECK(runs[i].load() == 0); break;
+        default:                   FAIL("job not finished after wait()");
+        }
+        // Done means every dependency was Done too.
+        if (hs[i].status() == JobStatus::Done)
+            for (int dp : deps[i]) CHECK(hs[dp].status() == JobStatus::Done);
+    }
+    CHECK(orderViolations.load() == 0);
+    CHECK(done > 0);
+    CHECK(failed > 0);
+    CHECK(cancelled > 0);
+    MESSAGE("random graph: " << done << " done, " << failed << " failed, " << cancelled << " cancelled");
+}
+
+// The editor's streaming view (Thema 153, Schritt 6) reads these; they have to
+// say what the pool is actually doing, per priority.
+TEST_CASE("ThreadPool::stats: queued, running, cap, executed and outcomes per priority")
+{
+    constexpr size_t kHigh = static_cast<size_t>(JobPriority::High);
+    constexpr size_t kNorm = static_cast<size_t>(JobPriority::Normal);
+    constexpr size_t kLow  = static_cast<size_t>(JobPriority::Low);
+    ThreadPool pool(2);
+    std::atomic<bool> release{ false };
+    std::atomic<int>  started{ 0 };
+    auto hold = [&] {
+        started.fetch_add(1);
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    // Both workers held by Normal jobs, one Low job queued behind them.
+    JobHandle a = pool.schedule(hold, desc("TestStatsHoldA"));
+    JobHandle b = pool.schedule(hold, desc("TestStatsHoldB"));
+    REQUIRE(eventually([&] { return started.load() == 2; }));
+    CancelToken token = CancelToken::create();
+    JobDesc lowDesc = desc("TestStatsLow", JobPriority::Low);
+    lowDesc.cancel = token;
+    JobHandle low = pool.schedule([] {}, lowDesc);
+
+    HE::ThreadPoolStats s = pool.stats();
+    CHECK(s.threads == 2);
+    CHECK(s.lanes[kNorm].running == 2);
+    CHECK(s.lanes[kNorm].queued == 0);
+    CHECK(s.lanes[kLow].queued == 1);
+    CHECK(s.lanes[kLow].running == 0);
+    CHECK(s.lanes[kLow].limit == 1);    // a two-worker pool leaves one for the frame
+    CHECK(s.lanes[kHigh].limit == 2);   // uncapped: the cap is the worker count
+
+    // The Low job is cancelled before it ever runs, the holders finish, and a
+    // High job fails.
+    token.cancel();
+    release.store(true);
+    REQUIRE(returnsWithin([&] { a.wait(); b.wait(); low.wait(); }));
+    CHECK(low.status() == JobStatus::Cancelled);
+    JobHandle bad = pool.schedule([] { throw std::runtime_error("broken"); },
+                                  desc("TestStatsThrows", JobPriority::High));
+    REQUIRE(returnsWithin([&] { try { bad.wait(); } catch (const std::runtime_error&) {} }));
+
+    // A worker settles its counters right after the waiter is woken.
+    REQUIRE(eventually([&] {
+        s = pool.stats();
+        return s.lanes[kNorm].running == 0 && s.lanes[kHigh].running == 0 && s.lanes[kNorm].executed >= 2;
+    }));
+    CHECK(s.lanes[kNorm].busyNs > 0);
+    CHECK(s.lanes[kLow].cancelled == 1);
+    CHECK(s.lanes[kLow].executed == 0);   // a cancelled job's dead queue entry is not work
+    CHECK(s.lanes[kHigh].failed == 1);
+    CHECK(s.lanes[kNorm].failed == 0);
+    CHECK(s.lanes[kNorm].cancelled == 0);
 }

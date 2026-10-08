@@ -150,6 +150,8 @@ add_executable(he_tests
     test_horizoncode_reroute.cpp
     test_python_scripting.cpp
     test_physics.cpp
+    test_world_scale.cpp
+    test_cell_split.cpp
     test_collision_system.cpp
     test_entity_host.cpp
     test_player_host.cpp
@@ -220,6 +222,7 @@ add_executable(he_tests
     test_ui_shot.cpp
     test_widget_designer_ui.cpp
     test_texture_viewer.cpp
+    test_streaming_view.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
@@ -713,6 +716,11 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
     # linked already.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    # The profiler's Streaming tab and the editor's split/merge of streaming
+    # cells, for test_streaming_view.cpp (Thema 153, Schritt 6). Its one
+    # outside symbol, the Scene window's show flags, is stubbed in
+    # WidgetDesignerLinkStubs.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -761,6 +769,8 @@ set_source_files_properties(
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     test_texture_viewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
+    test_streaming_view.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE

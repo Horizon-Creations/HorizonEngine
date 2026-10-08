@@ -516,6 +516,19 @@ void applyScriptVars(Ctx& c, Entity e, const nlohmann::json& vars)
 }
 } // namespace
 
+namespace
+{
+// A top-level entity's position is relative to the world's floating origin
+// (HE::shiftWorldOrigin). The save holds it absolute, in double, so it comes
+// back to the same place whatever the origin is when it is loaded. Below the
+// top level a position is relative to the parent and the origin does not apply.
+glm::dvec3 saveOriginFor(Ctx& c, Entity e)
+{
+    const auto* h = c.world->registry().try_get<HierarchyComponent>((entt::entity)e);
+    return h && h->parent == c.world->rootEntity() ? c.world->origin() : glm::dvec3(0.0);
+}
+} // namespace
+
 bool saveState(Ctx& c, Entity e)
 {
     std::string uuid;
@@ -524,9 +537,11 @@ bool saveState(Ctx& c, Entity e)
     nlohmann::json j = nlohmann::json::object();
     if (ss->saveTransform)
     {
+        const glm::dvec3 origin = saveOriginFor(c, e);
         if (auto* t = c.world->registry().try_get<TransformComponent>((entt::entity)e))
             j["transform"] = {
-                { "pos", { t->position.x, t->position.y, t->position.z } },
+                { "pos", { double(t->position.x) + origin.x, double(t->position.y) + origin.y,
+                           double(t->position.z) + origin.z } },
                 { "rot", { t->rotation.x, t->rotation.y, t->rotation.z } },
                 { "scl", { t->scale.x,    t->scale.y,    t->scale.z } } };
     }
@@ -570,7 +585,13 @@ bool applySavedState(Ctx& c, Entity e)
                 if (it != t->end() && it->is_array() && it->size() >= 3)
                     out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
             };
-            vec3("pos", tc->position);
+            if (auto it = t->find("pos"); it != t->end() && it->is_array() && it->size() >= 3)
+            {
+                const glm::dvec3 origin = saveOriginFor(c, e);
+                tc->position = glm::vec3((*it)[0].get<double>() - origin.x,
+                                         (*it)[1].get<double>() - origin.y,
+                                         (*it)[2].get<double>() - origin.z);
+            }
             vec3("rot", tc->rotation);
             vec3("scl", tc->scale);
 

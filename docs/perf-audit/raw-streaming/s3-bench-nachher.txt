@@ -1,0 +1,5 @@
+run 0 | small x4000: wall 100.761 ms, main 16.941 ms, worst poll 2.52679 ms, polls 250 | large x128 (1 MiB): wall 360.482 ms, main 2.28797 ms, worst poll 0.06225 ms, polls 5698
+run 1 | small x4000: wall 96.7757 ms, main 13.4798 ms, worst poll 1.95729 ms, polls 250 | large x128 (1 MiB): wall 328.044 ms, main 1.3382 ms, worst poll 0.08375 ms, polls 2423
+run 2 | small x4000: wall 94.5288 ms, main 10.9406 ms, worst poll 0.459208 ms, polls 250 | large x128 (1 MiB): wall 356.955 ms, main 2.2905 ms, worst poll 0.063334 ms, polls 5501
+[doctest] assertions: 148 | 148 passed | 0 failed |
+[doctest] Status: SUCCESS!

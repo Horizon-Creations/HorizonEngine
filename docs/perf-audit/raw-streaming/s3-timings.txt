@@ -1,0 +1,16 @@
+s3vorher-1000: SceneLoadTiming: entities=1078 parseMs=23.82 buildMs=9.24 | SceneOpenTiming: loadMs=34.98 prefabSyncMs=0.01 preloadMs=0.64 warmupMs=568.79 totalMs=604.42
+s3vorher-10000: SceneLoadTiming: entities=10168 parseMs=150.86 buildMs=42.17 | SceneOpenTiming: loadMs=224.27 prefabSyncMs=0.01 preloadMs=0.90 warmupMs=566.71 totalMs=791.89
+s3vorher-50000: SceneLoadTiming: entities=50568 parseMs=857.11 buildMs=340.85 | SceneOpenTiming: loadMs=1356.58 prefabSyncMs=0.02 preloadMs=2.63 warmupMs=570.23 totalMs=1929.45
+s3vorher-200000: SceneLoadTiming: entities=202068 parseMs=3301.03 buildMs=1439.31 | SceneOpenTiming: loadMs=5315.68 prefabSyncMs=0.02 preloadMs=7.23 warmupMs=580.36 totalMs=5903.29
+s3teil1-1000: SceneLoadTiming: entities=1078 parseMs=21.71 buildMs=8.48 | SceneOpenTiming: loadMs=30.52 prefabSyncMs=0.00 preloadMs=0.58 warmupMs=573.62 totalMs=604.73
+s3teil1-10000: SceneLoadTiming: entities=10168 parseMs=163.53 buildMs=65.25 | SceneOpenTiming: loadMs=229.30 prefabSyncMs=0.00 preloadMs=0.96 warmupMs=537.06 totalMs=767.33
+s3teil1-50000: SceneLoadTiming: entities=50568 parseMs=756.20 buildMs=339.02 | SceneOpenTiming: loadMs=1095.78 prefabSyncMs=0.01 preloadMs=2.02 warmupMs=592.90 totalMs=1690.71
+s3teil1-200000: SceneLoadTiming: entities=202068 parseMs=2990.96 buildMs=1396.01 | SceneOpenTiming: loadMs=4387.40 prefabSyncMs=0.00 preloadMs=4.41 warmupMs=637.93 totalMs=5029.75
+s3nachher-1000: SceneLoadTiming: entities=1078 parseMs=18.42 buildMs=9.89 | SceneOpenTiming: loadMs=28.70 prefabSyncMs=0.00 preloadMs=0.75 warmupMs=565.85 totalMs=595.30
+s3nachher-10000: SceneLoadTiming: entities=10168 parseMs=74.85 buildMs=75.30 | SceneOpenTiming: loadMs=150.30 prefabSyncMs=0.00 preloadMs=0.95 warmupMs=533.79 totalMs=685.04
+s3nachher-50000: SceneLoadTiming: entities=50568 parseMs=331.97 buildMs=365.39 | SceneOpenTiming: loadMs=697.58 prefabSyncMs=0.01 preloadMs=1.99 warmupMs=507.40 totalMs=1206.98
+s3nachher-200000: SceneLoadTiming: entities=202068 parseMs=1307.88 buildMs=1418.85 | SceneOpenTiming: loadMs=2726.96 prefabSyncMs=0.01 preloadMs=5.54 warmupMs=631.01 totalMs=3363.52
+s3wdha-10000: SceneLoadTiming: entities=10168 parseMs=79.29 buildMs=77.90 | SceneOpenTiming: loadMs=157.39 prefabSyncMs=0.01 preloadMs=3.72 warmupMs=610.93 totalMs=772.04
+s3wdha-50000: SceneLoadTiming: entities=50568 parseMs=224.95 buildMs=345.38 | SceneOpenTiming: loadMs=570.47 prefabSyncMs=0.01 preloadMs=1.47 warmupMs=326.06 totalMs=898.02
+s3wdhb-10000: SceneLoadTiming: entities=10168 parseMs=79.84 buildMs=76.13 | SceneOpenTiming: loadMs=156.15 prefabSyncMs=0.01 preloadMs=1.05 warmupMs=592.27 totalMs=749.47
+s3wdhb-50000: SceneLoadTiming: entities=50568 parseMs=355.38 buildMs=419.49 | SceneOpenTiming: loadMs=774.96 prefabSyncMs=0.00 preloadMs=1.09 warmupMs=531.29 totalMs=1307.34

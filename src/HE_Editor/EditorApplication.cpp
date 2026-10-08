@@ -24,6 +24,7 @@
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
@@ -1886,14 +1887,29 @@ void EditorApplication::OnInit()
 			splashStatus("Loading scene " +
 			             std::filesystem::path(sceneAbsPath).stem().string(), 0.9f);
 			SceneSerializer serializer;
+			// Phase timings for the world-streaming baseline (Thema 153): the
+			// whole startup load is one blocking call chain, and its parts
+			// scale differently with entity count and asset count.
+			using Clock = std::chrono::steady_clock;
+			const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+			const Clock::time_point tLoad = Clock::now();
 			bool ok = serializer.load(*m_editorWorld, sceneAbsPath, SerializeFormat::JSON);
 			if (ok)
 			{
+				const Clock::time_point tSync = Clock::now();
 				m_currentScenePath = sceneAbsPath;
 				syncPrefabInstances("startup"); // same order as openScene: before the preload
+				const Clock::time_point tPreload = Clock::now();
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+				const Clock::time_point tWarmup = Clock::now();
 				splashStatus("Compiling material pipelines", 0.95f);
 				warmupWorldMaterials(); // build custom-material pipelines before the first draw
+				const Clock::time_point tEnd = Clock::now();
+				// The entity count is on the SceneLoadTiming line just before.
+				HE_LOG_INFO(Editor, "SceneOpenTiming: loadMs=%.2f prefabSyncMs=%.2f "
+				                    "preloadMs=%.2f warmupMs=%.2f totalMs=%.2f",
+				            ms(tSync - tLoad), ms(tPreload - tSync), ms(tWarmup - tPreload),
+				            ms(tEnd - tWarmup), ms(tEnd - tLoad));
 				HE_LOG_INFO(Editor, "%s",
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
 			}
@@ -2801,7 +2817,16 @@ void EditorApplication::OnRender(float dt)
 	// (registerRemoteAsset, HE_ContentSync) to actually complete once queued —
 	// without this, a passively-triggered download would finish and then sit in
 	// the sink forever, never registered.
-	contentManager().pollAsyncResults(4);
+	// Budgeted by time as well as count, like the game (Thema 153): four large
+	// meshes cost a frame as much as four materials did before. Materials that
+	// arrive are warmed here, so their first draw does not cross-compile.
+	{
+		constexpr size_t kEditorStreamBatch    = 16;
+		constexpr double kEditorStreamBudgetMs = 2.0;
+		const std::vector<HE::UUID> arrived =
+			contentManager().pollAsyncResults(kEditorStreamBatch, kEditorStreamBudgetMs);
+		if (!arrived.empty() && renderer()) renderer()->WarmupMaterials(arrived);
+	}
 
 #ifdef HE_HAVE_LIBSSH2
 	// Apply a freshly fetched EngineContent manifest to ContentManager — see
@@ -4128,6 +4153,10 @@ void EditorApplication::OnRender(float dt)
 			// It draws itself only outside play mode (editor furniture), which is
 			// why m_isPlaying travels along rather than being checked here.
 			ViewportPanel::appendGroundGrid(m_editorCamera, m_isPlaying, dbg);
+			// A split scene's streaming cells, coloured by what the game would do
+			// with each from this camera. Editor furniture too: not while playing.
+			if (show.streamingCells && !m_isPlaying && m_editorWorld)
+				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(), dbg);
 
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,
@@ -11288,7 +11317,15 @@ void EditorApplication::pushEnvironment(float dt)
 void EditorApplication::warmupWorldMaterials()
 {
 	if (!m_editorWorld || !renderer()) return;
-	renderer()->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
+	std::vector<HE::UUID> ids = SceneSystems::collectAssetRefs(*m_editorWorld);
+	// The billboard icons of lights, cameras and audio sources are graph materials
+	// no component references; the first frame that showed one cross-compiled it
+	// inside Metal::EncodeScene (0.4 + 0.7 s in frames 0/1, Thema 153 Schritt 5).
+	for (const HE::UUID& icon : { HE::kEditorIconPointLightMaterialId, HE::kEditorIconSpotLightMaterialId,
+	                              HE::kEditorIconDirectionalLightMaterialId, HE::kEditorIconCameraMaterialId,
+	                              HE::kEditorIconAudioSourceMaterialId })
+		ids.push_back(icon);
+	renderer()->WarmupMaterials(ids);
 }
 
 bool EditorApplication::openScene(const std::string& path)
