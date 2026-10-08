@@ -6848,6 +6848,45 @@ void EditorApplication::dumpFrameHeadless()
 			al, what.c_str(), ma ? ma->graphTexturePaths.size() : size_t(0),
 			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
 			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
+
+		// HE_DUMP_AUTOLANDMIRROR=1 (Thema 173): two mirrors on the plain, for the
+		// GI-reflection question "does a mirror show the sky and the auto
+		// material?". The camera-facing one (x -40, z -14) reflects the plain
+		// behind the camera in its lower half and the sky in its upper half; the
+		// one yawed 45° (x -54, z -10) throws its rays toward +x, onto the rock
+		// slope and the snow plateau. Camera: CAMX=-40 CAMY=304 CAMZ=14 PITCH=-4.
+		if (const char* mm = std::getenv("HE_DUMP_AUTOLANDMIRROR"); mm && *mm)
+		{
+			MaterialAsset mirror;
+			mirror.type = HE::AssetType::Material;
+			mirror.name = "AutoLandscapeMirror";
+			mirror.baseColor[0] = mirror.baseColor[1] = mirror.baseColor[2] = 0.9f;
+			mirror.metallic  = 1.0f;
+			mirror.roughness = 0.05f;
+			const HE::UUID mirrorId = contentManager().registerMaterial(std::move(mirror));
+			auto addMirror = [&](const char* name, glm::vec3 pos, float yawDeg, glm::vec3 scale)
+			{
+				auto e = m_editorWorld->createEntity(name);
+				TransformComponent tf;
+				tf.position = pos;
+				tf.rotation = glm::vec3(0.0f, yawDeg, 0.0f);
+				tf.scale    = scale;
+				reg.emplace<TransformComponent>(e, tf);
+				reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+				reg.emplace<MaterialComponent>(e, MaterialComponent{ mirrorId });
+			};
+			addMirror("AutoLandscapeMirror", glm::vec3(-40.0f, kBaseY + 5.0f, -14.0f), 0.0f,
+			          glm::vec3(14.0f, 10.0f, 0.4f));
+			addMirror("AutoLandscapeMirrorAngled", glm::vec3(-54.0f, kBaseY + 4.0f, -10.0f), 45.0f,
+			          glm::vec3(10.0f, 8.0f, 0.4f));
+			// What a GI hit on this landscape is shaded with: the CPU fold of the
+			// material (re-fetched — registerMaterial may move the asset table).
+			const MaterialAsset* lma = contentManager().getMaterial(amId);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDMIRROR mirrors added "
+				"(landscape GI fold: approxBaseColor %.3f %.3f %.3f, approxLayerCount %d)",
+				lma ? lma->approxBaseColor[0] : -1.0f, lma ? lma->approxBaseColor[1] : -1.0f,
+				lma ? lma->approxBaseColor[2] : -1.0f, lma ? lma->approxLayerCount : -1);
+		}
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
