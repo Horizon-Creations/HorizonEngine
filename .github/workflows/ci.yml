@@ -7,12 +7,26 @@ on:
   # two app runtimes the editor package ships — and on every PR into it.
   push:
     branches: [ main, 'release/**' ]
+  # A pull request that only touches docs needs no build. Not for pushes: a
+  # release branch's head commit must always get its run, publishing looks for
+  # a green run of exactly that commit.
   pull_request:
     branches: [ main, 'release/**' ]
+    paths-ignore: [ 'docs/**', '**/*.md' ]
   # A feature branch can ask for the full matrix before it is merged
   # (`gh workflow run CI --ref <branch>`), the way a Windows-only link error
   # is otherwise only ever seen on main.
   workflow_dispatch:
+
+# One run per branch: a newer push (or a bee's dispatch on a branch whose pull
+# request already runs) cancels the one still going. Four pushes to
+# release/0.7.0 within a minute were four full matrices queueing for the same
+# runners. Grouped by branch name, not ref, so a pull request's run and a
+# dispatch on its branch are the same group. Publishing only needs the newest
+# head's run; the Hive's topic watch treats a newer run as replacing the old.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
@@ -22,13 +36,27 @@ jobs:
         include:
           - os: macos-latest
             name: macOS
+            cache: ccache
           - os: windows-latest
             name: Windows
+            cache: sccache
           - os: ubuntu-latest
             name: Linux
+            cache: ccache
 
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+
+    # Every compiler call goes through the cache (step below). As environment,
+    # not on the configure lines: build_runtimes.py configures two more trees
+    # for the app runtimes, and they inherit it — CMake reads these variables
+    # as the default for CMAKE_<LANG>_COMPILER_LAUNCHER (checked: OBJCXX too,
+    # so MetalRenderer.mm and the other .mm files are cached as well).
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ${{ matrix.cache }}
+      CMAKE_CXX_COMPILER_LAUNCHER: ${{ matrix.cache }}
+      CMAKE_OBJC_COMPILER_LAUNCHER: ${{ matrix.cache }}
+      CMAKE_OBJCXX_COMPILER_LAUNCHER: ${{ matrix.cache }}
 
     steps:
       - uses: actions/checkout@v4
@@ -105,6 +133,25 @@ jobs:
             libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
             liblz4-dev libzstd-dev python3-dev \
             libcurl4-openssl-dev
+
+      # The build was the whole run: Windows 46 of ~54 minutes, Linux 28,
+      # macOS 21 — every run compiled everything from scratch on four cores.
+      # ccache (sccache for MSVC, which ccache doesn't cover as well) keeps the
+      # objects: one blob per platform in the Actions cache, restored here,
+      # saved at the end. Only runs of pushes and dispatches write it; a pull
+      # request restores from its base branch and main but writes nothing —
+      # that keeps the repository's 10 GB from churning on one blob per PR, and
+      # on a public repository only trusted refs write what others restore.
+      # After the Linux packages: the action installs ccache with apt and
+      # relies on the package index that step refreshed. Log.cpp uses
+      # __DATE__/__TIME__ and is (rightly) never cached.
+      - name: Compiler cache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ matrix.name }}
+          variant: ${{ matrix.cache }}
+          max-size: 1G
+          save: ${{ github.event_name != 'pull_request' }}
 
       # FetchContent checkouts (SDL3, glm, nlohmann_json) are cached on the
       # configure hash so CI does not re-clone them on every run.
@@ -384,7 +431,7 @@ jobs:
   # HE_VULKAN_ENABLED through find_package(Vulkan) and the shipped Linux editor
   # package would suddenly carry RendererVulkan + Shaders/ — a product decision,
   # not a CI one. This job builds only HorizonEditor and runs in parallel; Windows
-  # (~76 min) stays the long pole.
+  # stays the long pole.
   #
   # ubuntu-24.04 pinned rather than -latest: the Mesa version decides the pictures,
   # and a runner-image bump should be a visible commit, not a silent change.
@@ -392,6 +439,12 @@ jobs:
     name: Linux · Vulkan (lavapipe)
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+
+    # The compiler cache as in the matrix above — a key of its own: this tree
+    # has RendererVulkan on and other flags, its objects aren't the Linux job's.
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
 
     steps:
       - uses: actions/checkout@v4
@@ -443,6 +496,13 @@ jobs:
             if grep -q "$ext" vkinfo.txt; then echo "$ext: present"; else echo "::warning::lavapipe does not offer $ext"; fi
           done
           nproc
+
+      - name: Compiler cache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: Linux-vulkan
+          max-size: 1G
+          save: ${{ github.event_name != 'pull_request' }}
 
       - name: Cache FetchContent dependencies
         uses: actions/cache@v4
