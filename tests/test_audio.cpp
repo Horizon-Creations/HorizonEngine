@@ -1660,3 +1660,37 @@ TEST_CASE("AudioEngine: a Vorbis voice is curved after decoding, before the resa
     CHECK(worst < 1e-5);
     engine.shutdown();
 }
+
+TEST_CASE("AudioSystem: a source playing an asset with a curve hears it, one without takes the old path")
+{
+    // The whole runtime chain — component, ContentManager, AudioSystem — not
+    // just the engine: what an Audio Source plays in the game is the asset as
+    // loaded, edit and all.
+    HorizonWorld   world;
+    ContentManager content;
+    AudioAsset curved = patternClip(4800);
+    curved.edit.envelope = testCurve();
+    const HE::UUID curvedId = content.registerAudio(curved);
+    const HE::UUID plainId  = content.registerAudio(patternClip(4800));
+
+    auto a = world.createEntity("Curved");
+    auto b = world.createEntity("Plain");
+    AudioSourceComponent src;
+    src.playOnStart = true;
+    src.assetId = curvedId;
+    world.registry().emplace<AudioSourceComponent>(a, src);
+    src.assetId = plainId;
+    world.registry().emplace<AudioSourceComponent>(b, src);
+
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    AudioSystem::playOnStart(world, engine, &content);
+
+    const uint64_t ha = world.registry().get<AudioSourceComponent>(a).handle;
+    const uint64_t hb = world.registry().get<AudioSourceComponent>(b).handle;
+    REQUIRE(ha != 0);
+    REQUIRE(hb != 0);
+    CHECK(engine.hasSoundEnvelope(ha));
+    CHECK_FALSE(engine.hasSoundEnvelope(hb));
+    engine.shutdown();
+}
