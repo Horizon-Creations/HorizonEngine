@@ -136,6 +136,8 @@ Packung sind es 3 (Varianten B/D).
 - Wer packt: Die Platzhalter (§6) liegen schon gepackt vor. Für die echten
   Texturen fehlt noch ein Pack-Schritt, z. B. ein Modus von `landscape_tex_gen`,
   der die Einzel-PNGs liest. Das ist offen und gehört zu einem späteren Schritt.
+  **Nachtrag Thema 177:** Der Modus heißt `landscape_tex_gen --pack` (§4.4), davor sitzt
+  `scripts/landscape-textures/stage_polyhaven.py` für EXR und 4K (§14).
 
 ## 4. Die Liste
 
@@ -192,10 +194,11 @@ Schichtnamen in ASCII-Englisch, Schema `<Schicht>_<Map>.png`:
 | Erde | `Dirt_Albedo.png` | `Dirt_Normal.png` | `Dirt_Roughness.png` | `Dirt_AO.png` | `Dirt_Height.png` | trockener Waldboden / Erde mit kleinen Steinen |
 | Stein | `Rock_Albedo.png` | `Rock_Normal.png` | `Rock_Roughness.png` | `Rock_AO.png` | `Rock_Height.png` | **Felswand / gebrochener Fels**, ohne Moos. Hauptteil der automatischen Verteilung, also die wichtigste Schicht. |
 | Schnee | `Snow_Albedo.png` | `Snow_Normal.png` | `Snow_Roughness.png` | `Snow_AO.png` | `Snow_Height.png` | verharschter Schnee, leicht verweht, nicht reinweiß (Albedo ca. 0,8) |
-| Nasser Boden | `WetGround_Albedo.png` | `WetGround_Normal.png` | `WetGround_Roughness.png` | `WetGround_AO.png` | `WetGround_Height.png` | nasser Schlamm / matschige Erde (Rand und Grund von Pfützen) |
+| Nasser Boden | `WetGround_Albedo.png` | `WetGround_Normal.png` | `WetGround_Roughness.png` | `WetGround_AO.png` | `WetGround_Height.png` | nasser Schlamm / matschige Erde (Rand und Grund von Pfützen). **Entfällt seit Thema 177, Schritt 3** (§16): Der nasse Rand ist ein Overlay auf der Schicht darunter, das Auto-Material liest diese Schicht nicht mehr. Wer das Set trotzdem liefert, wird gepackt, aber nicht gelesen. |
 
 Das **Wasser der Pfütze** ist keine Textur. Es entsteht prozedural: flache Normale,
-Rauheit ≈ 0,05 und abgedunkelte Albedo über dem, was darunter liegt. Eine
+Rauheit ≈ 0,05 und abgedunkelte Albedo über dem, was darunter liegt. **Seit Schritt 3
+von Thema 177 gilt das auch für den nassen Rand** (§16). Eine
 Wellen-Normal-Map ist **nicht** nötig (Wetter-Kopplung und Animation gehören nicht
 zum Thema). Der freie Slot `heTexP3` hält sie sich nur offen.
 
@@ -637,7 +640,8 @@ eingecheckt, damit Schritt 4/5 ohne den Menschen weiterlaufen.
 - **BC7/BC3/ASTC für Arrays:** Der Packer lässt Arrays unverändert. Für 2K ist
   Kompression aber nötig (§5). Das braucht `cookTexture` pro Slice und die
   Block-Pfade in den vier Array-Uploads.
-- **Pack-Modus für die echten Einzel-PNGs** → `T_Landscape_*_Mask` (§3): weiter offen.
+- ~~**Pack-Modus für die echten Einzel-PNGs** → `T_Landscape_*_Mask` (§3)~~: erledigt,
+  `landscape_tex_gen --pack` (§4.4), mit den echten Texturen benutzt in §14.
 - **Metal** ist per CI gebaut und getestet (§8.3), aber auf keiner Hardware gerendert.
 - D3D12 bindet einen **leeren 2D**-Slot weiterhin als Null-View, also Schwarz, während
   die anderen Backends Weiß binden. Das gab es schon vorher und betrifft keinen
@@ -868,22 +872,24 @@ Maske):
 | Boden | Gras, darauf Erde in fBm-Flecken (Welt-Rauschen) **plus** ein Erdgürtel knapp unter der Felsgrenze (Geröll) | *Dirt Amount* 0,35, *Dirt Patch Size* 24 m |
 | Fels | `smoothstep(Rock Slope, + Rock Blend, slope)`, slope = 1 − N.y der **geometrischen** Normale | *Rock Slope* 0,12 (≈ 28°), *Rock Blend* 0,12 (voll bei ≈ 40°) |
 | Schnee | Welthöhe über *Snow Height*, über *Snow Blend* geschlossen, nicht auf Flächen steiler als *Snow Max Slope* (dort bleibt Fels) | 60 m, 6 m, 0,45 (≈ 57°) |
-| Pfützen | flacher Boden (slope < *Puddle Max Slope*), ohne Schnee, in den **Senken eines zweiten Welt-Rauschfelds**: nasser Rand (Wet-Ground-Schicht) und in der Mitte stehendes Wasser | *Puddle Amount* 0,32, *Puddle Size* 10 m, *Puddle Max Slope* 0,03 (≈ 14°) |
-| Wasser | Albedo × 0,35, Rauheit 0,05, Normale = geometrische Normale | fest |
+| Pfützen | flacher Boden (slope < *Puddle Max Slope*), ohne Schnee, in den **Senken eines zweiten Welt-Rauschfelds**: nasser Rand und in der Mitte stehendes Wasser. **Overlay auf der Schicht darunter, keine eigene Schicht** (§16) | *Puddle Amount* 0,32, *Puddle Size* 10 m, *Puddle Max Slope* 0,03 (≈ 14°) |
+| Nasser Rand | Albedo × 0,6, Rauheit × 0,5; Normale und AO bleiben die des Bodens | fest |
+| Wasser | Albedo × 0,35 des **trockenen** Bodens, Rauheit 0,05, Normale = geometrische Normale | fest |
 
 - **Stein ist der Hauptteil** der automatischen Verteilung: Er beginnt schon bei ≈ 28°,
   also auf jedem nennenswerten Hang.
 - **Höhen-Überblendung** (*Height Blend*, Vorgabe 1): Jeder Übergang wird um die
   Höhendifferenz der beteiligten Schichten (Masken-B) verschoben. Hohe Fels-Texel
   stechen vor der Steigungsgrenze durch das Gras. Hoher Schnee deckt zuerst. Wasser füllt
-  zuerst die tiefen Texel des nassen Bodens.
-- **Kachelung im Welt-Raum** (*Ground Tile Size* 2 m für Gras/Erde/nassen Boden,
+  zuerst die tiefen Texel des Bodens darunter (Masken-B von Gras/Erde an dieser Stelle).
+- **Kachelung im Welt-Raum** (*Ground Tile Size* 2 m für Gras/Erde,
   *Rock Tile Size* 4 m für Fels/Schnee, wie §4.1), nicht über das 0..1-UV des Terrains.
   Ein Texel ist damit auf einem 100-m- und einem 4-km-Landscape gleich groß.
   `TerrainComponent::uvTiling` wirkt auf dieses Material deshalb nicht.
 - **Bombing** (§9) für Fels, Gras und Erde: je ein Hex-Gitter pro Schicht, geteilt von
-  Albedo/Normal/Maske, eigener Seed (11/23/37), *Bombing Cell* 0,5. Schnee und nasser
-  Boden werden plain gelesen (§9.4). Damit sind es 33 statt 45 Texturzugriffe. Der
+  Albedo/Normal/Maske, eigener Seed (11/23/37), *Bombing Cell* 0,5. Schnee wird
+  plain gelesen (§9.4). Damit sind es **30 statt 36** Texturzugriffe (27 gebombt + 3 Schnee;
+  bis Thema 177, Schritt 3, waren es 33 mit dem plain gelesenen nassen Boden). Der
   Static Switch **„Texture Bombing“** schaltet die gebombten Zugriffe zur Compile-Zeit
   auf plain. Eine Instanz mit dem Schalter aus ist eine eigene Permutation; der
   *Bombing Cell*-Parameter fällt dort heraus (13 statt 14 Slots).
@@ -1413,3 +1419,505 @@ in §11.2 auf Metal gerendert wurde (Modus `1` mit Bombing, gegen GL 0,001 / 0 %
 - Bestehende Noise-Materialien behalten bewusst `heHash21`. Wer in Weltkoordinaten oder
   mit großem Scale rauscht, sollte beim Fbm `p[0] = 1` setzen. Ein Editor-Regler dafür
   wäre ein eigener kleiner Schritt (paramCount 1 ändert jeden Fbm-Knoten in UI und MCP).
+
+## 14. Die echten Texturen: importiert und zu Arrays gebaut (Thema 177, Schritt 1)
+
+Stand: Zweig `claude/auto-landscape-material-texturen-importieren-arrays-bauen-ve`,
+MacBook Air (Apple M5), Release-Build von `landscape_tex_gen`. Es ist **kein Engine-Code**
+geändert. Neu sind der Pack-Modus (`1f99f8fe` von `release/0.7.0`, hier per cherry-pick),
+zwei Skripte unter `scripts/landscape-textures/` und eine Zeile in `.gitignore`.
+
+### 14.1 Was der Mensch geliefert hat
+
+Ordner `EditorDeps/Images/Landscape/` im Haupt-Checkout, **nicht** in git (jetzt
+ignoriert). Alle 16 Dateien sind **byteidentisch zu den Poly-Haven-Originalen** (Größe und
+MD5 gegen `api.polyhaven.com/files/<id>` geprüft). Poly Haven ist CC0.
+
+| Schicht | Poly-Haven-Asset | Autor | Dateien (4K) |
+|---|---|---|---|
+| Grass | `grass_ground` | Charlotte Baglioni | `Grass_Color.jpg` (= `grass_ground_diff_4k.jpg`, nur umbenannt), `_nor_gl` EXR, `_rough` EXR, `_disp` PNG 16 Bit |
+| Dirt | `dirt` | Charlotte Baglioni | `dirt_diff` JPG, `_nor_gl` EXR, `_rough` EXR, `_disp` PNG 16 Bit |
+| Rock | `rocks_ground_08` | Rob Tuytel | `_diff` JPG, `_nor_gl` EXR, `_rough` JPG, `_disp` PNG 8 Bit |
+| Snow | `snow_02` | Rob Tuytel | `_diff` JPG, `_nor_gl` EXR, `_rough` JPG, `_disp` PNG 8 Bit, `_translucent` (ungenutzt) |
+| WetGround | **fehlt** | | |
+
+- **WetGround fehlt.** Entscheidung der Queen: Platzhalter, bis der Mensch das Set nachliefert.
+  Die Schicht zeigt dann das hochskalierte Schachbrett mit L-Marke. Im Auto-Material
+  taucht es am nassen Rand der Pfützen auf. Das ist ein Platzhalter, kein Fehler.
+  **Überholt durch Thema 177, Schritt 3 (§16):** Das Auto-Material liest die Schicht nicht
+  mehr, die Pfützen sind ein Overlay. Das Set wird nicht mehr gebraucht.
+- **AO fehlt bei allen vier.** Poly Haven bietet AO als eigene Datei an (`_ao_`, oder `_arm_`
+  mit AO in R und Rauheit in G). Das Skript nimmt sie automatisch mit, sobald sie im
+  Schichtordner liegen. Ohne AO ist Masken-R weiß, also kein AO-Anteil.
+- Die Dateien sind 4K, die Doku verlangt 2K (§4.1). Die Normal-Maps sind **EXR mit
+  DWAA-Kompression**. stb_image (der Importer, `--pack`) liest kein EXR, `sips` auch nicht.
+
+### 14.2 Zwischenschritt `stage_polyhaven.py`
+
+`scripts/landscape-textures/stage_polyhaven.py <Quellordner> <Staging> --size 2048` macht
+aus den Poly-Haven-Ordnern den flachen Satz `<Schicht>_<Map>.png`, den `--pack` liest:
+
+- erkennt die Maps am Namen (`diff`/`color`, `nor_gl`, `rough`, `ao`/`arm`, `disp`), lässt
+  `nor_dx` und alles Unbekannte liegen und meldet es,
+- liest EXR über das Python-Modul OpenEXR (`pip install numpy Pillow OpenEXR` in einer
+  Wegwerf-venv, Aufruf mit `python3 -I`),
+- 4K → 2K durch exaktes 2×2-Mitteln in float,
+- **Normal-Maps nach dem Verkleinern neu normiert** (Mittel der Längen vorher 0,87 bis
+  1,02, danach 1), kein Gamma: 0..1-Kodierung bleibt linear,
+- **Höhe über die Kachel auf 0..1 gestreckt** (0,5 %/99,5 %-Perzentil, §4.2). Rohbereiche
+  waren zum Beispiel 0,17..0,58 (Grass) und 0,32..0,92 (Rock). Ohne das hätte die
+  Höhen-Überblendung (§10.2) kaum Spielraum,
+- spiegelt **nichts**: der Importer dreht beim Laden, die Dateien bleiben wie geladen,
+- schreibt `stage_manifest.txt` (welche Quelldatei zu welcher Map wurde).
+
+### 14.3 Packen und Ergebnis
+
+```
+python3 -I scripts/landscape-textures/stage_polyhaven.py EditorDeps/Images/Landscape out/landscape-real/staging --size 2048
+landscape_tex_gen out/landscape-real/Engine/Textures/Landscape --pack out/landscape-real/staging --size 2048
+```
+
+Ausgabe `out/landscape-real/Engine/Textures/Landscape/` (560 MiB, **nicht in git**): 15
+Einzeltexturen je 16 MiB (RGBA8, nur Mip 0) und die drei Arrays je 107 MiB (5 Slices in der
+Reihenfolge Grass, Dirt, Rock, Snow, WetGround, **12 Mips**, die Kette gebacken). Feste
+UUIDs `0x400..0x411`, also bleiben alle Verweise heil. `--pack` meldete 15/15 und 3/3
+geschrieben, jede Datei liest es im selben Lauf zurück.
+
+Unabhängige Gegenprobe mit `scripts/landscape-textures/hasset_tex.py` (liest .hasset in
+Python, kennt nur das Dateiformat):
+
+| Prüfung | Ergebnis |
+|---|---|
+| Arrays | 2048², 5 Slices, 12 Mips, Albedo sRGB, Normal und Maske linear, UUIDs 0x40F/0x410/0x411 |
+| Albedo-Array Slice 0 (Grass), 3 (Snow), Normal-Array Slice 2 (Rock) gegen die gestagten PNGs | max. Abweichung **0** in allen Kanälen |
+| Masken-Array Slice 1 (Dirt): G gegen `Dirt_Roughness`, B gegen `Dirt_Height` | max. Abweichung **0** |
+| Negativkontrolle: Masken-R gegen `Dirt_Roughness` | max. 29, Mittel 14,2 (R ist weiß, Rauheit liegt bei 0,94: der Vergleich unterscheidet also) |
+| Sichtprüfung aller 15 Slices (Mip 3) | Normal-Maps sind blau-violett (+Z), Slice 4 ist das Platzhalter-Schachbrett, die übrigen vier zeigen die echten Oberflächen |
+| `landscape_tex_gen <Ordner>` ohne Flags (Platzhalter), nach dem cherry-pick | alle 18 Dateien **byteidentisch** zu `EditorDeps/EngineContent/Textures/Landscape/`: der Pack-Modus berührt den alten Pfad nicht |
+| Rauheit als JPG (Rock, Snow) und als EXR (Grass, Dirt) gleich behandelt: Sind die 8-Bit-JPGs linear? | Ja. `dirt_rough_4k.jpg` (neu von Poly Haven, MD5 passt) hat Mittel 240,8, die EXR derselbe Wert 240,8, mittlere Abweichung 0,0016. Mit sRGB-Kodierung läge es bei 248,6 |
+
+Mit `--arrays-only` lassen sich die Arrays aus den 15 Einzeldateien ohne neues Packen
+neu bauen (wenn zum Beispiel eine Schicht ersetzt wurde).
+
+### 14.4 Befunde an den Quellen (nichts davon ist korrigiert)
+
+- **Grass wirkt trocken, nicht grün.** `grass_ground` ist laut Tags trockenes Gras mit
+  Wurzeln. Grass und Dirt liegen farblich nah beieinander (Mittel sRGB 110/96/62 gegen
+  99/82/62). Ob die Auto-Verteilung dadurch weniger Kontrast zwischen Wiese und Erdflecken
+  zeigt, ist erst am Bild zu sagen (Schritt Verifikation). Wer es grüner will, braucht ein
+  anderes Set.
+- **Schnee ist nicht 0,8.** `snow_02` hat im Mittel sRGB 165 (§4.3 wollte etwa 0,8, also
+  sRGB 204). Er ist grau gegen reinen Schnee.
+- **Rauheit von Dirt** liegt nur zwischen 0,88 und 0,99, fast konstant.
+- Die Höhe von Rock und Snow liegt als **8-Bit-PNG** vor (Grass und Dirt als 16 Bit). Das
+  zeigt sich als Stufen in der Höhen-Überblendung. Wer es schöner will, nimmt die
+  16-Bit-Variante oder die EXR-Displacement-Datei.
+- Die Normal-Map von Snow hat einen mittleren Hang (Mittel R/G 0,56 statt 0,5): eine leichte
+  Vorzugsneigung, die auf der Fläche als einheitlicher Lichtton sichtbar werden kann.
+- Der 2K-Satz ist **unkomprimiert**: Die drei Arrays belegen zusammen etwa 320 MiB im
+  Speicher und auf der Grafikkarte (§5, BC7 für Arrays fehlt weiter, §8.5).
+
+### 14.5 Benutzen
+
+Beide Wege folgen §4.4 und §6. Ein Editor- oder Render-Lauf mit den echten Texturen war in
+diesem Schritt **nicht** dabei, sie sind hier also nicht ausprobiert.
+
+- Die Ausgabe ist ein fertiger **Projekt-Override-Ordner**: den Inhalt von
+  `out/landscape-real/Engine/` nach `<Projekt>/Content/Engine/` kopieren, dann schlägt er
+  die eingecheckten Platzhalter (§4.4).
+- Für einen Editor-Lauf aus dem Build-Baum: die 18 Dateien über
+  `out/deploy/Editor/EngineContent/Textures/Landscape/` kopieren. **Nach jedem Neulinken
+  von `HorizonEditor` neu kopieren**, denn dessen POST_BUILD kopiert ganz `EditorDeps/`
+  zurück und stellt damit die Platzhalter wieder her.
+- Wohin die echten Texturen **dauerhaft** gehören (SFTP-Veröffentlichung, Projekt-Override
+  oder LFS, §4.4) ist weiter offen und Sache des Menschen. Bis dahin nichts davon
+  committen. `EditorDeps/Images/Landscape/` ist deshalb in `.gitignore`.
+- **Fallstrick beim Quellordner:** `.gitignore` hält die Rohdateien (rund 400 MB) nur aus
+  git, nicht aus dem Build. Der POST_BUILD von `HorizonEditor` kopiert `EditorDeps/`
+  **ganz** (`copy_directory`, `src/HE_Editor/CMakeLists.txt:457-462`) neben die exe und in
+  den Deploy, und `scripts/package_macos.sh:179-181` kopiert `EditorDeps/Images` in die
+  `.app`. Die Quellen landen so in jedem Editor-Deploy und im DMG. Sie gehören langfristig
+  außerhalb von `EditorDeps/` (das Staging-Skript nimmt jeden Ordner). Das gilt genauso für
+  die Variante 2 in §4.4 (`…/Landscape/Source/`). Auf dem Haupt-Checkout (Zweig
+  `release/0.7.0`) zeigt `git status` den Ordner bis zum Merge weiter als nicht verfolgt.
+
+### 14.6 Was offen bleibt
+
+- ~~**WetGround** nachliefern, dann `stage_polyhaven.py` und `--pack` neu laufen lassen.~~
+  Entfällt: Pfützen sind seit Thema 177, Schritt 3 ein Overlay (§16).
+- **AO** der vier Schichten nachladen (optional).
+- **Bildprüfung** mit den echten Texturen auf den Backends, die Vorgaben aus §10.2
+  (Steigungen, Pfützenmenge, Kachelgrößen) nachstellen, Triplanar-Frage für den Fels
+  (§10.5). Gerendert ist in diesem Schritt nichts, geprüft ist nur der Inhalt der Dateien.
+  **Nachtrag Thema 177, Schritt 2:** Metal und OpenGL sind gerendert, AO ist geklärt, siehe §15.
+- Dauerhafter Speicherort und Kompression (BC7 für Arrays).
+
+## 15. Verifikation mit den echten Texturen und die AO-Frage (Thema 177, Schritt 2)
+
+Stand: Zweig `claude/auto-landscape-material-texturen-importieren-arrays-bauen-ve`,
+MacBook Air (Apple M5), Release-Build von `HorizonEditor` (`out/build/macos-release`),
+**Metal und OpenGL**. D3D11, D3D12 und Vulkan sind auf diesem Gerät nicht lauffähig und
+**nicht gerendert** (§15.6). Es ist kein Engine-Code geändert. Bilder liegen unter
+`docs/img/auto-landscape-echte-texturen-2026-10-08/`.
+
+### 15.1 Aufbau
+
+- **Texturen:** drei Varianten, jeweils die 18 `.hasset` aus §14 nach
+  `out/deploy/Editor/EngineContent/Textures/Landscape/` kopiert (der Editor liest sie dort,
+  §14.5): `ph` = die eingecheckten 128er-Platzhalter, `real` = Ausgabe von Schritt 1
+  (Masken-R weiß), `realao` = dieselben Quellen **plus Poly-Haven-AO** (§15.3, 4K-JPG,
+  MD5 gegen `api.polyhaven.com/files/<id>` geprüft, mit `stage_polyhaven.py` und
+  `--pack` wie in §14.3 gepackt, **nur lokal, nicht in git**).
+- **Zeuge** `HE_DUMP_AUTOLAND=1` (§10.4: das ausgelieferte Asset, 128-m-Relief auf y = 300),
+  `scripts/auto-landscape-repro/cap158auto.sh`. Draufsicht wie in §10.4 (TOD 0,4, forward,
+  GI/SSAO/AA aus). Dazu vier Schrägansichten von der Ebene (−x) nach +x, **deferred**, TOD
+  0,6 (Sonne hinter der Kamera): `wide` (−62, 314, Nick −12°), `plain` (−50, 301,8, −30°),
+  `rock` (−19, 313,5, −8°), `snow` (14, 341,8, −30°); alle Yaw 90°.
+- Keine `[ERROR]`-, Link- oder Compile-Zeile in einem der 43 Läufe (alle Logs durchsucht).
+  Draw-Counter: 4 Draws (forward), 5 (deferred), wie in §10.4.
+- Kleinigkeit am Skript: `cap158auto.sh` verlangte einen **absoluten** Ausgabeordner (jede
+  Aufnahme läuft nach einem `cd` in den Deploy-Ordner, ein relativer Pfad legte nur eine leere
+  Logdatei an und meldete `bmp=NO`). Jetzt wird der Pfad aufgelöst.
+
+### 15.2 Das Bild
+
+Metal gegen OpenGL mit den echten Texturen (`real`), Differenz pro Pixel (Mittel / Anteil
+> 8 von 255):
+
+| Ansicht (deferred) | Metal gegen GL |
+|---|---|
+| `wide` / `plain` / `rock` / `snow` | 0,004 / 0,011 / 0,010 / 0,002 (Anteil > 8: 0,000 / 0,004 / 0,000 / 0,000 %) |
+| Draufsicht TOD 0,4, Spalten Ebene / Hangfuß / Fels / Plateau | 0,001 / 0,001 / 0,004 / 0,000 |
+
+Die echten Texturen laufen im Auto-Material **auf beiden Backends gleich**; die Normal-Maps
+stehen richtig herum (die Beulen lesen sich konvex, und die Normal-Maps der vier Sets
+korrelieren mit dem Gradienten ihrer Höhenkarte so, wie es die GL-Konvention verlangt:
+n.x gegen dh/dSpalte −0,57 bis −0,86, n.y gegen dh/dZeile +0,56 bis +0,84, jeweils Grass,
+Dirt, Rock, Snow). Forward mit Schatten unterscheidet sich weiter am Hangfuß
+(GL-Forward zeichnet bei Graph-Materialien keinen Sonnenschatten, §11.3); das ist nicht neu.
+
+Was die Bilder zeigen (`echte-texturen-vier-ansichten.png`, `draufsicht-platzhalter-echt-ao.png`):
+
+- **Grass und Erde sind gut zu unterscheiden** (olivgelb gegen Braun, auch in der Weitsicht).
+  Die Sorge aus §14.4 trifft nicht zu. Das Gras ist trocken, nicht grün; das ist das Set.
+- **Bombing wirkt mit den echten Texturen** (`ana158auto.py repeat`, Ebene: Oszillation
+  0,11 horizontal / 0,06 vertikal, kein periodisches Minimum außer dem einen bei 37 px, das auch
+  die Platzhalter haben).
+- **Schnee kachelt sichtbar.** Das Set `snow_02` hat markante dunkle Spuren, und Schnee wird
+  nicht gebombt (§9.4, `snow`-Seed −1 in `AutoLandscapeMaterial.cpp`). Draufsicht, Plateau,
+  Verschiebungs-Differenz D(k): Minima genau bei **42 px und 83 px**, das sind 4 m und 8 m
+  (4 m ≙ 41,6 px bei 10,39 px/m), also die `Rock Tile Size`. Im Bild eine Gitterstruktur aus
+  gleichen Spuren (auch in `draufsicht-…png` rechts). Behebung wäre ein Seed für Schnee (6 Zugriffe
+  mehr, 33 → 39); das ist eine Änderung am Builder, am generierten Asset und am Wächtertest,
+  nicht Teil dieses Schritts.
+- **Fels am Steilhang streckt sich.** `rocks_ground_08` ist ein warmes, sandfarbenes Geröll,
+  kein graues Kliff. Bei 55–62° wird es über Welt-XZ ≈ 2-fach in Hangrichtung gezogen
+  (1/cos 62° = 2,1) und liest sich in der Weitsicht als senkrecht gestreifte Wand (`wide`),
+  ähnlich wie Stroh. Aus der Nähe (`rock`) wirkt es als Gestein. Das ist die Frage aus
+  §10.5 (Triplanar/Biplanar, 2 bis 3-mal so viele Zugriffe); jetzt mit Bild belegt, noch nicht
+  entschieden.
+- **Pfützen** zeigen am Rand das **WetGround-Platzhalter-Schachbrett** (L-Marken), wie
+  erwartet (§14.1). *Behoben in Schritt 3: Overlay statt Schicht, §16.* Die Wasserfarbe hängt stark vom Himmel (tief marineblau von oben, hellblau
+  schräg).
+- Schnee ist hell und grau (Mittel sRGB 165), nicht reinweiß (§14.4); im Bild kein Problem.
+
+Die Vorgaben aus §10.2 (Steigungen 0,12 / 0,12, Pfützenmenge 0,32, Kachelgrößen 2 m / 4 m,
+Dirt 0,35) wurden **nicht verändert**. Mit den echten Texturen sehen Verteilung und
+Größenverhältnisse in den Bildern plausibel aus; eine Feinabstimmung am Geschmack ist offen.
+
+### 15.3 AO: Quelle, Verwendung, Wirkung
+
+**Quelle.** Für alle vier Sets bietet Poly Haven eine AO-Karte (`AO`, `arm`, 1K bis 8K, EXR/JPG/PNG).
+Sie fehlte nur, weil sie nicht mitgeliefert wurde. `stage_polyhaven.py` nimmt `*_ao_*`
+automatisch. AO der JPG ist linear wie die Rauheit (§14.3), kein Decode nötig.
+
+| Schicht | AO-Mittel | 0,5 %-Perzentil | 99,5 %-Perzentil | Maximum |
+|---|---|---|---|---|
+| Grass | 0,80 | 0,46 | 0,97 | 1,00 |
+| Dirt | 0,90 | 0,60 | 0,97 | 1,00 |
+| Rock | 0,71 | 0,36 | 0,88 | 1,00 |
+| Snow | **0,55** | 0,42 | **0,61** | **0,64** |
+
+`snow_02` ist die Ausnahme: Seine AO liegt flächig bei 0,55 und erreicht nie weiß. Ungeprüft
+übernommen würde sie jede Schneefläche im Indirekten um fast die Hälfte abdunkeln.
+
+**Wie die Engine AO benutzt** (Code, nicht Bild): Masken-R geht an den AO-Pin des
+Ausgabeknotens (`AutoLandscapeMaterial.cpp:243`). In `heLitP`
+(`MaterialShaderLibrary.cpp:738-750`) wirkt sie als
+`(ambDiff * 0,35 + ambSpec) * ao + Umgebungsboden * Diffus`, mit `ao = Material-AO * SSAO`.
+Deferred rechnet denselben Faktor: Diffus im Resolve (`heLitP(…, g2.a)`, `:1283`), der
+Spiegelanteil `ambSpec` im Reflexionspass (`:1775-1781`, gleiche Gate `giProbe.y`):
+
+- sie dunkelt **nur das indirekte Licht** ab, **nie das direkte Sonnenlicht**,
+- sie dunkelt den **Umgebungsboden** (`ambient`) nicht ab,
+- **mit GI an** (`giProbe.y > 0,5`) wird sie **ganz übergangen**, die Sonden tragen die
+  Verdeckung selbst. Im Editor ist GI standardmäßig **aus** (`EditorConfig.h:193`).
+
+**Gemessen** (`real` gegen `realao`, Metal, Mittel |Δ| von 255 / Anteil > 8):
+
+| Ansicht | GI aus | GI aus + SSAO an | GI an |
+|---|---|---|---|
+| Draufsicht TOD 0,4, **Fels** (liegt im Schatten, nur Indirektes) | **6,94 / 67,3 %** | 6,92 / 66,8 % | 0,004 / 0 % |
+| Draufsicht, Ebene / Hangfuß / Plateau | 0,70 / 1,43 / 0,91 | 0,70 / 1,42 / 0,90 | 0,01 / 0,05 / 0,00 |
+| Schräg `rock` (TOD 0,6, Fels sonnenbeschienen) | 2,21 / 0,68 % | 2,20 / 0,65 % | 0,004 / 0 % |
+| Schräg `wide` | 1,42 / 0,02 % | 1,40 / 0,02 % | 0,016 / 0 % |
+| Deferred, Draufsicht, ganzes Bild | 1,80 / 9,3 % (Forward 1,79 / 9,2 %) | | 0,006 / 0 % |
+
+- AO ist **sichtbar nur dort, wo das Indirekte dominiert** (Schattenseite von Fels, bei
+  niedriger Sonne), sonst um 1 bis 2 von 255 (`ao-wirkung-gi-aus-an.png`).
+- **GI an: AO hat keine Wirkung** (Metal forward und deferred). Das entspricht dem Code.
+- **SSAO** ändert auf diesem glatten Relief fast nichts (0,03 bis 0,08), die beiden Verdeckungen
+  addieren sich hier also nicht merklich.
+- **OpenGL:** `HE_DUMP_GI=1` liefert in diesem Zeugen ein **bitgleiches** Bild zu `GI=0` (forward und
+  deferred). Dort war GI also nicht wirksam; die GI-Spalte gilt nur für Metal. Nicht weiter
+  untersucht, hat mit AO nichts zu tun.
+
+**Urteil.** AO lohnt sich, kostet nichts (kein neuer Sampler, Masken-R wird schon gelesen) und
+macht die Schattenseiten von Fels und Gras ein wenig plastischer, **aber der Effekt ist klein und
+verschwindet mit GI**. Für Grass, Dirt und Rock ist die Karte unverändert brauchbar. **Snow braucht eine
+Normierung** (99,5 %-Perzentil auf 1 strecken, wie es `stage_polyhaven.py` mit der Höhe macht),
+sonst wird der Schnee im Schatten zu dunkel. Das Skript tut das für AO **nicht**. Für die Albedo ändert
+sich nichts: die Poly-Haven-Albedo ist delit (§4.1), AO wird nicht doppelt gezählt.
+Wer AO nutzen will, lädt die vier `*_ao_4k.jpg` zu den Quellen (`https://api.polyhaven.com/files/<id>`,
+Schlüssel `AO`), staged und packt neu (§14.3, `--arrays-only` genügt nicht, die Einzeltexturen
+ändern sich).
+
+### 15.4 Was bestätigt, was nicht
+
+Bestätigt (Bild, Metal + OpenGL): die echten Texturen laden und kacheln im Auto-Material,
+Verteilung (Fels am Hang, Schnee oben, Erdflecken, Pfützen) stimmt mit §10.4 überein, Metal und
+OpenGL stimmen im Deferred-Pfad auf < 0,02 überein, Bombing wirkt, Normal-Maps stehen richtig herum.
+
+**Nicht** geprüft: D3D11, D3D12, Vulkan (§15.6); Leistung und GPU-Speicher mit 2K-Arrays
+(§14.4: ≈ 320 MiB, nicht gemessen); die Last der 33 Zugriffe; WetGround (Platzhalter);
+Schnee unter Schatten oder Bewölkung; der Editor im Normalbetrieb (nur der Dump-Pfad).
+
+### 15.5 Was offen bleibt
+
+- **Schnee bomben** (Seed), sonst sichtbare 4-m-Kachelung (§15.2).
+- **Fels am Steilhang**: Triplanar/Biplanar entscheiden (§10.5), das Bild liegt jetzt vor. Ein
+  grauerer Fels wäre eine Frage der Wahl des Sets (`rocks_ground_08` ist sandfarben).
+- **AO**: übernehmen (dann Snow normieren) oder weglassen (§15.3).
+- ~~**WetGround** vom Menschen, danach `stage_polyhaven.py` und `--pack` neu.~~ Entfällt (§16).
+- Dauerhafter Speicherort der 2K-Texturen und der Rohquellen (§14.5), BC7 für Arrays (§8.5).
+
+### 15.6 D3D11, D3D12, Vulkan
+
+Auf diesem Gerät nicht lauffähig, also **nicht gerendert**. Rezept auf NN-WS03: §11.4 mit
+`cap158auto.ps1`, **vorher** die 18 Dateien von `out/landscape-real/Engine/Textures/Landscape/`
+(560 MiB, nicht in git) nach `out/deploy/Editor/EngineContent/Textures/Landscape/` kopieren (nach jedem
+Neulinken des Editors neu, §14.5). Die Metal-/GL-Zahlen aus §15.2 sind die Vergleichswerte.
+Mips sind hier kein Hindernis: D3D und Vulkan erzeugen für `mipLevels = 1` keine Kette selbst, aber
+die drei Arrays, die das Auto-Material liest, tragen 12 gebackene Mips (§14.3).
+**Erledigt in Schritt 4 (§17):** auf NN-WS03 nicht übertragen, sondern aus denselben
+Poly-Haven-Quellen neu erzeugt (md5-gleich) und gerendert — stimmt mit OpenGL/Metal überein.
+
+## 16. Pfützen als Overlay statt WetGround-Schicht (Thema 177, Schritt 3)
+
+Stand: derselbe Zweig, MacBook Air (Apple M5), Release-Build, **Metal und OpenGL** (kein
+D3D11/D3D12/Vulkan, §15.6). Geändert ist der Builder `AutoLandscapeMaterial.cpp`, das
+ausgelieferte Asset `M_AutoLandscape.hasset` (neu erzeugt) und ein Test; Arrays, Texturen,
+Shader und Backends sind unverändert. Bilder: `docs/img/auto-landscape-pfuetzen-overlay-2026-10-08/`.
+
+### 16.1 Warum
+
+Das WetGround-Set hat der Mensch nicht geliefert (§14.1), und der Platzhalter zeigte am
+Pfützenrand ein Schachbrett mit L-Marken (§15.2). Eine eigene Schicht für nassen Boden braucht
+außerdem ein weiteres Set mit fünf Maps und drei Texturzugriffe pro Pixel. Nasser Boden ist aber
+derselbe Boden, nur dunkler und glatter.
+
+### 16.2 Was jetzt passiert
+
+Die Masken sind unverändert (Rand = `wetMask`, Wasser = `waterMask`, §10.2). Statt `blend(s2, wet,
+wetMask)` liegt das Overlay auf **s2**, dem Ergebnis aus Gras/Erde/Fels/Schnee:
+
+| Stufe | Albedo | Rauheit | Normale |
+|---|---|---|---|
+| Nasser Rand (`wetMask`) | × 0,6 | × 0,5 | die des Bodens |
+| Wasser (`waterMask`) | × 0,35 des **trockenen** Bodens | 0,05 | geometrische Normale |
+
+- AO bleibt die des Bodens. Es gibt **keinen neuen Parameter** (weiter 14, `kAutoLandscapeParamCount`):
+  0,6 / 0,5 / 0,35 / 0,05 sind feste Werte im Builder.
+- Wasser füllt zuerst die tiefen Texel **des Bodens darunter**: Die Höhen-Verschiebung liest
+  Masken-B von s2 statt der WetGround-Höhe. Der Wasseranteil ändert sich dadurch leicht (§16.3).
+- Der Slice 4 (WetGround) bleibt in den drei Arrays, wird aber **nicht gelesen**.
+  `AutoLandscapeLayer::WetGround` bleibt als Slice-Nummer stehen. **Slice 4 aus den Arrays zu
+  nehmen ist keine Aufräumarbeit, sondern eine UUID-Kollision:** `landscape_tex_gen` vergibt die
+  Array-Ids als `0x400 + Schichten × 3 + Map`. Mit vier Schichten rutschten die Arrays von
+  `0x40F..0x411` auf `0x40C..0x40E`, das sind genau die ids der WetGround-Einzeltexturen. Außerdem
+  änderte es das Layout der lokalen 2K-Arrays aus Schritt 1 (`out/landscape-real`). Der Preis für
+  den toten Slice: 20 % der Array-Größe (≈ 64 MiB von 320 MiB bei 2K).
+- **Texturzugriffe: 33 → 30** (gezählt im erzeugten GLSL: 27 `textureGrad` + 3 `texture`;
+  ohne Bombing 15 → 12).
+
+### 16.3 Messung
+
+Metal, Draufsicht `HE_DUMP_AUTOLAND` (§10.4, `ana158auto.py masks`), vorher gegen nachher:
+
+| Region Ebene | vorher | nachher |
+|---|---|---|
+| Erde (R, `=ground`) | 20,5 % | 20,5 % |
+| Nasser Rand (G, `=ground`) | 22,9 % | 22,9 % |
+| Wasser (B, `=masks`), Anteil > 128 | 12,8 % | 13,1 % |
+| Wasser, Mittel B | 29,2 | 30,2 |
+
+Rand, Erde und flacher Boden bleiben **bitgleich**, nur das Wasser ändert sich um 0,3 Punkte (die
+Höhen-Verschiebung kommt jetzt vom Gras/Erde-Boden). Alle Erwartungen von `ana158auto.py` sind
+erfüllt (Fels, Schnee, Pfützen nur auf Flachem, kein Wasser unter Schnee).
+
+Das Bild (`pfuetzen-vorher-nachher.png`, oben vorher, unten nachher; Metal, deferred, TOD 0,6,
+Kamera (−63, 302,6, −28), Nick −20°, Yaw 90°): vorher ein blaues Schachbrett mit gelben L-Marken in
+den Pfützen und am Rand, nachher das Gras und die Erde, dunkler und glatter am Rand, dazu eine
+Wasserfläche, die den Himmel spiegelt. In der Draufsicht (`pfuetzen-draufsicht-schraeg.png`) werden aus
+den dunkelblau gepunkteten Flecken dunkle Bodenflecken in der Farbe des Untergrunds. Grundfarbe und
+Rand-Breite wurden nicht nachgestellt, die Faktoren sind eine Geschmacksfrage und ein erster Wert.
+
+| Metal gegen OpenGL (deferred) | Mittel \|d\| |
+|---|---|
+| Nahaufnahme der Pfützen | 0,007 |
+| Schrägansicht Ebene | 0,010 |
+| Masken `=masks`, `=ground` | 0,000 |
+
+(Forward-Draufsicht: Ebene 0,000, der Hangfuß unterscheidet sich weiter wie in §15.2 wegen des
+GL-Forward-Schattens bei Graph-Materialien.)
+
+### 16.4 Tests
+
+- `Auto landscape material: three arrays, …` prüft jetzt, dass **keine** Array-Lesung den Slice 4
+  verlangt (jede Lesung nimmt ihre Slice-Nummer aus einer Konstante darunter; Positivkontrolle:
+  Slice 3 wird gelesen; 21 Lesknoten: 3 gebombte Schichten × 3 Maps × (plain + gebombt) + 3 für
+  Schnee). **Negativkontrolle:** die `layer(WetGround, …)`-Zeile wieder eingesetzt, der Test wird
+  rot (4 Fehler), Zeile wieder raus, grün.
+- `The shipped M_AutoLandscape.hasset is exactly what the builder makes` stimmt mit dem neu erzeugten
+  Asset überein (Negativkontrolle: mit dem alten Asset schlägt er an).
+- Ganze Datei `test_material_graph.cpp` (92 Fälle, 10064 Prüfungen) grün. Das ist **nicht** das ganze
+  `he_tests`: Gebaut und gelinkt wurden nur diese Datei und drei Rendering-Hilfsdateien.
+  Volle Läufe macht die CI.
+
+### 16.5 Was offen bleibt
+
+- ~~**D3D11/D3D12/Vulkan** nicht gerendert (Schritt 4).~~ Erledigt: §17, bildgleich zu OpenGL
+  innerhalb der Toleranz aus §7.5.
+- Slice 4 aus den Arrays nehmen: Id-Verschiebung (§16.2), neue Arrays und neue Platzhalter-
+  Assets, `HE_DUMP_TEXARRAY`/`HE_DUMP_TEXBOMB` (fünf Streifen) und die `ana158*`-Skripte anpassen.
+  Lohnt sich erst zusammen mit der Wahl der Kompression (BC7, §8.5).
+- Die Wasserfarbe hängt weiter vom Himmel (§15.2), die Faktoren (0,6 / 0,5 / 0,35) sind ungetunt.
+
+### 16.6 Nebenbefund: das „flackernde” `bmp=NO` von `cap158auto.sh`
+
+Die leere Aufnahme mit 0-Byte-Log (§15.1, Hive-Lesson 132) hat eine feste Ursache: `script(1)` endet
+mit Code 1, wenn stdin der von einem Agent-Harness vererbte Deskriptor ist. Mit `</dev/null` am
+`script`-Aufruf läuft jede Aufnahme; das Skript tut das jetzt. (Ohne die Umleitung schlugen hier alle
+fünf Wiederholungen in Folge fehl, mit ihr gelangen alle 15 Aufnahmen dieses Schritts beim ersten Versuch.)
+
+## 17. Schritt 4: D3D11, D3D12 und Vulkan (Thema 177)
+
+Stand: derselbe Zweig, NN-WS03 (NVIDIA RTX 4070, Windows 11), Release-Build von `HorizonEditor` und
+`landscape_tex_gen` in einem eigenen Baum `C:/hw177` (`-DDEPLOY_DIR=C:/hw177/deploy`, damit der
+Worktree-Build nicht das Deploy berührt, das der Mensch gerade im Editor laufen hat). Es ist kein
+Engine-Code geändert. Rezept: §11.4 mit `cap158auto.ps1`.
+
+### 17.1 Die echten Texturen unabhängig neu erzeugt, nicht übertragen
+
+Die 560 MiB aus `out/landscape-real` (§14.3) liegen nur auf dem Mac, nicht in git und nicht auf
+diesem Gerät. Statt sie zu übertragen: dieselben 16 Poly-Haven-Dateien aus §14.1 direkt über die
+`api.polyhaven.com/files/<id>`-URLs neu heruntergeladen (4K, dieselben Formate: Diffuse jpg, `nor_gl`
+exr, Rough exr bei Grass/Dirt und jpg bei Rock/Snow, Displacement png). **16/16 md5-gleich** zu den
+Werten, die `api.polyhaven.com` für diese Dateien meldet — also byteidentisch zu den Quellen, die
+Schritt 1 auf dem Mac benutzt hat. `stage_polyhaven.py` (eigene venv, `OpenEXR` hat für Python 3.14
+auf Windows ein fertiges Wheel, keine Sonderbehandlung nötig) lieferte dieselben Kennzahlen wie
+§14.4: Normal-Renormierung vor der Mittelung 0,874/0,980/0,981/1,018 (Grass/Dirt/Rock/Snow, Doku
+„0,87 bis 1,02”), Höhen-Streckung 0,166..0,581 (Grass, Doku „0,17..0,58”) und 0,322..0,918 (Rock,
+Doku „0,32..0,92”). `landscape_tex_gen --pack` (Variante **ohne AO**, wie die `real`-Basiswerte aus
+§15.2, nicht `realao`: die AO-Frage ist weiter offen, §15.5) schrieb 15/15 Einzeltexturen und 3/3
+Arrays, UUIDs `0x40F..0x411`, 2048², 5 Slices, 12 Mips — bitgenau wie §14.3. Gegenprobe mit
+`hasset_tex.py`: Mittel der Albedo-Slices Grass (109,9/96,3/61,9), Dirt (99,0/82,2/62,2), Snow
+(165,3/165,2/167,2) — alle drei stimmen mit §14.4 überein (Grass „110/96/62”, Dirt „99/82/62”,
+Snow „165”). Die 18 `.hasset`-Dateien ersetzten die Platzhalter in `C:/hw177/deploy/Editor/
+EngineContent/Textures/Landscape/` (die Arrays dort danach 107 MiB statt 437 KB, geprüft). Der
+Build enthält den Zeugen (`findstr “AUTOLAND witness” HorizonEditor.exe` trifft).
+
+### 17.2 Aufnahmen
+
+`cap158auto.ps1 -Backends OpenGL,D3D11,D3D12,Vulkan`, Modi `masks ground normal surface` (je einmal)
+und `1 nobomb plaingraph builtin` (je einmal ohne Zusatz und einmal mit
+`-Extra @{HE_DUMP_SHADOW='0.1'} -Tag _s01`, siehe §11.3/§11.4) — 48 Läufe, dazu ein D3D12-Lauf mit
+`HE_GPU_DEBUG=1` (Debug-Layer + DRED). **Alle 49 Läufe: `bmp=True`, kein `[ERROR]`**, der Zeuge
+meldet durchgehend `3 graph textures, array mask 7` bei Modus `1`/`nobomb` (alle drei Arrays live,
+heTexP0..2) und `14`/`13` Parameter wie in Schritt 3. Vulkan-Validation: in allen 13 Vulkan-Logs
+genau die eine bekannte Info-Zeile `validation layer ENABLED`, sonst nichts (§8.3/§12-Präzedenz).
+
+### 17.3 Masken-Orakel
+
+`ana158auto.py masks` auf `masks`/`ground`, alle vier Backends: **alle 15 Erwartungen erfüllt**,
+auch der Pfützenrand (`wet` auf der Ebene: 22,9 % auf allen vier Backends — exakt der Wert aus
+Schritt 3, §16.3, Metal/GL). D3D11 und D3D12 sind untereinander **md5-gleich**, Vulkan weicht nur in
+Rundungsfehlern ab (siehe §17.5).
+
+### 17.4 Bildvergleich gegen OpenGL — zwei verschiedene Geschichten
+
+**Unlit-Debugansichten** (`masks`, `ground`, `normal`, `surface`, keine Beleuchtung im Spiel):
+mean|Δ| 2,8 / 3,2 / 0,001 / 1,33, **0,000 % Pixel > 8** auf allen drei Backends. Das ist derselbe
+feste Schwarzpegel-Versatz (0 → 4 von 255), den §12 für die alten Platzhalter-Texturen schon
+dokumentiert hat, kein neuer Befund und ohne jede Wirkung auf den Pixel-Anteil-Test.
+
+**Modus `1`/`nobomb` mit Standard-Schattendistanz:** mean|Δ| 2,5 / 3,4 insgesamt, aber **konzentriert
+in der Zone `foot`** (74,9 / 78,2 mean|Δ|, 100 % > 8) — das ist §11.3: OpenGL zeichnet im
+Forward-Pfad für Graph-Materialien **keinen** Sonnenschatten, D3D11/D3D12/Vulkan tun es. Kein
+Materialfehler, sondern der bekannte, hier erneut bestätigte Pfadunterschied. Die anderen drei
+Zonen liegen bei 0,00–0,04.
+
+**Modus `1`/`nobomb`, schattenneutralisiert (`_s01`, die eigentliche Materialprobe):**
+
+| Vergleich (D3D11/D3D12/Vulkan gegen OpenGL) | mean\|Δ\| | Pixel > 8 |
+|---|---|---|
+| `1_s01` | 0,005–0,006 | 0,000 % |
+| `nobomb_s01` | 0,004 | 0,000 % |
+| `plaingraph_s01` (Kontrolle) | 0,001 | 0,000 % |
+| `builtin_s01` (Kontrolle, Standardmaterial) | 45,8 | 99,9 % |
+
+`builtin` weicht erwartungsgemäß stark ab (kein Teil dieses Themas, dieselbe Kontrolle wie in §12/§13:
+das eingebaute Terrain-Material behandelt Umgebungslicht auf D3D/Vulkan anders). Für das
+Auto-Material selbst liegt die Abweichung bei 0,004–0,006 — eine Größenordnung unter der
+Toleranz aus §7.5 (mean|Δ| ≤ 1,0, ≤ 0,5 % > 8) und im selben Rauschband wie die
+D3D12-Debug-Layer-Gegenprobe (§17.5). **Die echten Texturen, die drei Arrays und das
+Pfützen-Overlay aus Schritt 3 rendern auf D3D11, D3D12 und Vulkan praktisch bitgleich zu OpenGL.**
+
+### 17.5 Schatten- und Bombing-Orakel, Gegenproben
+
+- **Schatten vorhanden:** `ana158auto.py shadow` bestätigt für Modus `1`/`nobomb`: OpenGL-forward
+  Verhältnis 1,00 (`MISSING`, wie erwartet), D3D11/D3D12/Vulkan 0,37 (Modus `1`) bzw. 0,32
+  (`nobomb`), alle `PRESENT`.
+  **Nachtrag gegenüber §12:** Das Verhältnis 0,37 trifft jetzt genau Metals alten Wert aus §11.2
+  (0,37 forward/deferred), nicht mehr die alten 0,30 aus §12, die vor dem Merge von PR #98
+  (Graph-Material SkyEnv/AO auf Vulkan/D3D11/D3D12) gemessen wurden. PR #98 ist auf diesem Zweig
+  bereits gemergt (siehe Commit-Liste oben); die alte Abweichung „kein Himmels-IBL für
+  Graph-Materialien” aus §12/§13 gilt für diesen Zweig **nicht mehr**.
+- **Bombing-Orakel** (`ana158auto.py repeat`, `1_s01` gegen `nobomb_s01`): mit Bombing keine
+  periodischen Minima (Oszillation 0,03/0,01), ohne Bombing Minima bei 12/25/37 px (Oszillation
+  0,19/0,10) — auf **allen vier Backends identisch**, bis auf die dritte Nachkommastelle.
+- **D3D12 mit `HE_GPU_DEBUG=1`** (Debug-Layer + DRED), Modus `1`: 0 zusätzliche Meldungen, Bild
+  **md5-gleich** zum Lauf ohne Debug-Layer.
+- **D3D11 = D3D12** (md5-gleich) bei `1`, `nobomb` und deren `_s01`-Varianten. Vulkan weicht in
+  Rundungsfehlern ab (eigene md5, mean|Δ| gegen D3D11/D3D12 < 0,01 in allen vier Debug-Modi),
+  derselbe Compiler-Unterschied wie in §7.5/§13.
+
+### 17.6 Was das belegt, was nicht
+
+Belegt: Die echten Poly-Haven-Texturen, die drei Textur-Arrays (`heTexP0..2`, Array-Maske 7, 107 MiB
+je Array mit 12 gebackenen Mips) und das Pfützen-Overlay aus Schritt 3 laden und rendern auf D3D11,
+D3D12 und Vulkan **ohne stillen Rückfall auf eingebautes PBR** (Array-Maske und Parameterzahl im
+Zeugen stimmen durchgehend), ohne Vulkan-Validation-Meldung und ohne D3D12-Debug-Layer-Meldung, und
+stimmen mit OpenGL im Rahmen der Toleranz aus §7.5 überein, sobald der bekannte GL-Forward-Schatten-
+Unterschied (§11.3) herausgerechnet ist. Bombing und Pfützenränder messen auf allen vier Backends
+dieselben Zahlen wie auf Metal/GL in Schritt 2/3 (22,9 % wet, Masken-Erwartungen). CI auf diesem
+Zweig (Lauf 37822782616): **alle vier Jobs grün** (Linux, Linux · Vulkan lavapipe, macOS, Windows).
+
+**Nicht** geprüft: die drei offenen Geschmacksentscheidungen aus §15.5 (Schnee bomben, Fels
+Triplanar/Biplanar, AO übernehmen) — die bleiben für Schritt 4 unverändert offen. Kein Metal auf
+diesem Gerät (siehe §11.2/§13.4 für den Metal-Nachweis mit der alten Platzhalter-Textur; ein
+Metal-Lauf mit den echten Texturen ist bereits in Schritt 2/3 erfolgt). Kein Mip-Flimmern geprüft
+(der Draufsicht-Zeuge löst Minifikation in der Ferne nicht auf; die Arrays backen ihre eigene
+Mip-Kette, unabhängig vom Backend, §8.1/§15.6). Leistung/GPU-Speicher mit den 2K-Arrays weiter nicht
+gemessen (§15.4).
+

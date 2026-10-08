@@ -14,7 +14,7 @@
 # (a clean exit rewrites config.json) and its own log via script(1) (a pty, so
 # the log is line-buffered even when the teardown segfaults after the dump).
 set -u
-OUT=$1; MODE=$2; shift 2
+OUT=${1:A}; MODE=$2; shift 2   # absolute: each capture runs after a cd into the deploy folder
 RHIS=()
 while (( $# )) && [[ $1 != "--" ]]; do RHIS+=$1; shift; done
 (( $# )) && shift
@@ -39,7 +39,9 @@ for RHI in $RHIS; do
         HE_DUMP_DOF=0 HE_DUMP_MOTIONBLUR=0 HE_DUMP_RENDERPATH=0
         HE_DUMP_AUTOLAND=$MODE)
   for kv in $EXTRA; do ENVS+=HE_DUMP_$kv; done
-  ( cd $ED && env $ENVS script -q $LOG ./HorizonEditor >/dev/null 2>&1 )
+  # </dev/null: script(1) exits 1 with an empty log when stdin is the closed/odd fd an
+  # agent harness hands down (looked like a flaky "bmp=NO"); a real stdin is not needed.
+  ( cd $ED && env $ENVS script -q $LOG ./HorizonEditor >/dev/null 2>&1 </dev/null )
   W=$(/usr/bin/grep -a "AUTOLAND witness" $LOG | head -1 | sed 's/.*witness landscape added //')
   C=$(/usr/bin/grep -a "dump counters" $LOG | tail -1 | sed 's/.*dump counters/counters/')
   E=$(/usr/bin/grep -a -c -E "\[ERROR\]|link failed|compile failed" $LOG)
