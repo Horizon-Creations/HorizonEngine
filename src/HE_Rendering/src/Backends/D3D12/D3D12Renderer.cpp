@@ -905,6 +905,30 @@ float4 PSMain(VSOut i) : SV_TARGET
     }
     return float4(result, uPBR.z);
 }
+
+// ─── Deferred G-buffer (built-in materials, Thema 150) ──────────────────────
+// D3D11's GBufPS on this file's names (uAlbedo/uAlbedoSamp): surface
+// ATTRIBUTES instead of shading; the fullscreen resolve (MaterialShaderLibrary
+// ::deferredResolve → heLitP) lights them. Base colour by GL's and Metal's rule
+// (texture × uColor; the draw passes 1.0 / 0.55 for a mesh without a material),
+// specular 0.5 = PSMain's dielectric F0 0.04, emissive 0, material AO 1. A named
+// entry, not `main` — the validator maps `main` to ps_5_0 by default.
+struct GBufOut
+{
+    float4 gb0 : SV_Target0; // rgb BaseColor, a Metallic   (R8G8B8A8_UNORM_SRGB)
+    float4 gb1 : SV_Target1; // rg oct Normal, b Roughness, a Specular (RGBA16F)
+    float4 gb2 : SV_Target2; // rgb Emissive, a Material-AO  (RGBA16F)
+};
+GBufOut GBufPS(VSOut i)
+{
+    GBufOut o;
+    float3 base = (uColor.a > 0.5) ? uAlbedo.Sample(uAlbedoSamp, i.uv).rgb * uColor.rgb : uColor.rgb;
+    float3 N    = normalize(i.normal);
+    o.gb0 = float4(base, saturate(uPBR.x));
+    o.gb1 = float4(giOctEncode(N) * 0.5 + 0.5, saturate(uPBR.y), 0.5);
+    o.gb2 = float4(0.0, 0.0, 0.0, 1.0);
+    return o;
+}
 )HLSL";
 
 // 2D UI canvas — NOT shared: same maths as D3D11's, but this copy does the glyph
@@ -3331,7 +3355,7 @@ struct D3D12RendererImpl
     ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool hdr, bool transparent);
+                                               bool hdr, bool transparent, bool gbuffer = false);
 
     // ── Screen-space decals (forward) ───────────────────────────────────────
     // docs/decals-cross-backend-plan.md §6c. D3D12 has no G-buffer, so a decal is
@@ -3358,6 +3382,54 @@ struct D3D12RendererImpl
     static constexpr UINT        k_decalCBSlot = 512; // 256-B aligned stride (DecalUniforms = 368 B)
 
     bool EnsureDecalPipeline();
+
+    // ── Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10) ──
+    // D3D11's structure (Schritt 2) on D3D12: the opaque geometry goes into a
+    // three-target G-buffer (§3: GB0 R8G8B8A8_UNORM_SRGB base + metallic, GB1
+    // RGBA16F oct normal + roughness + specular, GB2 RGBA16F emissive + AO) and
+    // into the viewport depth, which already has an R32_FLOAT SRV path (the
+    // decal pass). The fullscreen resolve is MaterialShaderLibrary::
+    // deferredResolve[Clustered](HLSL) — the SAME heLitP graph materials shade
+    // with, the same HLSL D3D11 runs — on its own root signature
+    // (HE::d3d12mat::DescribeResolveRootSignature: the material one + b4 +
+    // t27..t30 with point-clamp samplers). Its SRV table is two consecutive
+    // blocks of the material ring (17 material slots + 4 G-buffer inputs), so it
+    // lives in the one shader-visible heap the material draws use and is
+    // fenced by the same frame slot. No tile variant: D3D has no framebuffer
+    // fetch (§10.6).
+    static constexpr DXGI_FORMAT k_gbFormats[3] = { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                                    DXGI_FORMAT_R16G16B16A16_FLOAT };
+    ComPtr<ID3D12Resource>       gbTex[3];
+    ComPtr<ID3D12DescriptorHeap> gbRtvHeap;                 // 3 RTVs, created once
+    UINT                         gbRtvInc = 0;
+    D3D12_RESOURCE_STATES        gbState  = D3D12_RESOURCE_STATE_RENDER_TARGET; // all three move together
+    UINT                         gbW = 0, gbH = 0;
+    bool                         gbFailed = false;          // one log line for a failed allocation
+    ComPtr<ID3D12PipelineState>  gbufPso;                   // VSMain + GBufPS on rootSig, 3 MRTs
+    ComPtr<ID3D12PipelineState>  gbufPsoInstanced;          // VSMainInstanced + GBufPS (optional)
+    ComPtr<ID3D12RootSignature>  resolveRootSig;
+    ComPtr<ID3D12PipelineState>  resolvePso;                // deferredResolve(HLSL), 8-light window
+    ComPtr<ID3D12PipelineState>  resolveClusteredPso;       // deferredResolveClustered(HLSL), optional
+    // The resolve's OWN HeLighting (specAA off, directional-only window when
+    // clustered) and HeResolve, per frame slot. NOT m_matLightCB: upload memory
+    // is read at execute time, so rewriting the material block for the resolve
+    // would hand the forward replay and the transparent tail the trimmed window.
+    ComPtr<ID3D12Resource>       resolveLightCB[k_frameCount]; uint8_t* resolveLightPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       resolveUboCB[k_frameCount];   uint8_t* resolveUboPtr[k_frameCount]{};
+    // Built once at Initialize, after the PostFX pipelines: the editor reads
+    // supportsDeferredRendering at startup (EditorApplication applies a saved
+    // RenderPath only when it is true), so a lazy first-frame build would leave
+    // a saved "Deferred" forward without a word.
+    bool                         deferredReady = false;
+    bool createDeferredPipelines();
+    bool ensureGBufferTargets(UINT w, UINT h);
+    D3D12_CPU_DESCRIPTOR_HANDLE gbRtv(UINT i) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = gbRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(i) * gbRtvInc;
+        return h;
+    }
     int  resolveDecalTexture(ID3D12GraphicsCommandList* cl, const HE::UUID& textureId, ContentManager* cm);
     void EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::mat4& viewProj,
                       int width, int height, ContentManager* cm);
@@ -3952,7 +4024,10 @@ struct D3D12RendererImpl
     // show up later only pay CreateGraphicsPipelineState). The blend class is the
     // material's own; a per-entity tint alpha can still ask for the other variant later.
     // Built-in-PBR materials resolve no shader and are skipped.
-    void drainMaterialWarmup(ContentManager* cm)
+    // `deferred` (Thema 150): the frame renders the deferred path — warm each
+    // material's G-buffer variant too, so the first deferred frame does not
+    // hitch on its cross-compile (GL's WarmupMaterials rule).
+    void drainMaterialWarmup(ContentManager* cm, bool deferred = false)
     {
         if (m_pendingMatWarmup.empty()) return;
         if (!m_matReady || !cm) { m_pendingMatWarmup.clear(); return; }
@@ -3963,6 +4038,13 @@ struct D3D12RendererImpl
         {
             uint64_t hash = 0; std::string frag, vertBody;
             if (!m_matShaderLib.resolveShaders(*cm, id, hash, frag, vertBody)) continue;
+            if (deferred && deferredReady && usingHDR)
+            {
+                uint64_t gbHash = 0; std::string gbFrag, gbVert;
+                if (m_matShaderLib.resolveGBufferShaders(*cm, id, gbHash, gbFrag, gbVert)
+                    && GetOrBuildMaterialPSO(gbHash, gbFrag, gbVert, nullptr, true, false, /*gbuffer=*/true))
+                    ++built;
+            }
             const MaterialAsset* ma = cm->getMaterial(id);
             const bool transparent = ma && (ma->blendMode == 2
                                             || ma->opacity < RenderSorter::kOpaqueOpacityThreshold);
@@ -8502,10 +8584,17 @@ void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const gl
 ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                               const std::string& vertBody,
                                                               const MaterialShaderVariant* precompiled,
-                                                              bool hdr, bool transparent)
+                                                              bool hdr, bool transparent, bool gbuffer)
 {
     // Cache key mixes the shader hash with the render-target + blend variant so LDR (RGBA8) /
     // HDR (RGBA16F) / opaque / transparent PSOs never collide (same constants as Vulkan A4).
+    // `gbuffer` (Thema 150): `frag` is the material's G-BUFFER tail (resolveGBufferShaders),
+    // drawn into the three MRTs — its own key space in BOTH caches (D3D11's salt): the
+    // bytecode cache is keyed by hash alone, and a G-buffer shader handed out as a forward
+    // one would write attributes into the lit colour (plan §10.7 #4). Cross-compiled only
+    // and never the clustered variant: the pak bakes no G-buffer HLSL, and its forward
+    // variant would write LIT colour into GB0 — plausible-looking and wrong.
+    if (gbuffer) { precompiled = nullptr; transparent = false; hash ^= 0x6742756666657231ULL; }
     const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
                               ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
     if (auto it = m_materialPSOs.find(key); it != m_materialPSOs.end()) return it->second.Get();
@@ -8595,7 +8684,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             // t24..t26 cluster lists instead of the 8-light window. A variant
             // that does not cross-compile or that FXC rejects falls back to the
             // window variant below — the material still renders, with 8 lights.
-            if (matClustered() && vc.ok && !vc.source.empty())
+            if (!gbuffer && matClustered() && vc.ok && !vc.source.empty())
             {
                 const HE::MaterialShaderLibrary::Compiled& cc =
                     m_matShaderLib.fragmentClustered(hash, frag, Backend::HLSL);
@@ -8646,6 +8735,18 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets      = 1;
     pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (gbuffer)
+    {
+        // The G-buffer MRTs (k_gbFormats). The tail's fourth output (oGB3 =
+        // SV_Target3, Metal's depth copy) has no target here and is discarded;
+        // the resolve reads the scene depth itself (he_tests builds this PSO on WARP).
+        pd.NumRenderTargets = 3;
+        for (UINT i = 0; i < 3; ++i)
+        {
+            pd.RTVFormats[i] = k_gbFormats[i];
+            pd.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        }
+    }
     pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
     pd.SampleDesc.Count      = 1;
     pd.SampleMask            = UINT_MAX;
@@ -9003,6 +9104,238 @@ void D3D12RendererImpl::EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::m
 #endif
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Deferred render path (Thema 150): pipelines + G-buffer targets
+// ─────────────────────────────────────────────────────────────────────────────
+bool D3D12RendererImpl::createDeferredPipelines()
+{
+    deferredReady = false;
+#if !defined(HE_HAVE_SHADERC)
+    // The resolve is cross-compiled at runtime (like the decal pass); a
+    // flavour without the compiler keeps the capability off.
+    return false;
+#else
+    if (!device || !rootSig || !m_matReady || !m_matSrvHeap) return false;
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    auto compile = [&](const std::string& src, const char* name, const char* entry,
+                       const char* profile, ComPtr<ID3DBlob>& out,
+                       const char* consequence = "the deferred path stays off") -> bool
+    {
+        ComPtr<ID3DBlob> err;
+        if (SUCCEEDED(D3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
+                                 entry, profile, flags, 0, &out, &err)))
+            return true;
+        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: deferred ") + name + " compile failed — "
+            + consequence + ": " + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+        return false;
+    };
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    using MSL     = HE::MaterialShaderLibrary;
+    static_assert(HE::d3d12mat::kResolveGBufferReg == static_cast<UINT>(MSL::kHlslResolveGB0Reg)
+               && HE::d3d12mat::kResolveUboReg     == static_cast<UINT>(MSL::kHlslResolveUboReg)
+               && MSL::kHlslResolveDepthReg == MSL::kHlslResolveGB0Reg + 3,
+                  "D3D12MaterialRootSignature.h's resolve range must be the kHlslResolve* contract");
+
+    // ── Built-in G-buffer PSOs: the scene VS (plain + instanced) with GBufPS,
+    // on the scene root signature, three MRTs against the D32 viewport depth.
+    const std::string sceneSource = std::string(kSkyFuncHLSL) + kSceneHLSL;
+    ComPtr<ID3DBlob> svs, svsi, gbps;
+    if (!compile(sceneSource, "GBufVS", "VSMain", "vs_5_0", svs)
+        || !compile(sceneSource, "GBufPS", "GBufPS", "ps_5_0", gbps))
+        return false;
+    const D3D12_INPUT_ELEMENT_DESC layout[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC gp{};
+    gp.pRootSignature        = rootSig.Get();
+    gp.VS                    = { svs->GetBufferPointer(), svs->GetBufferSize() };
+    gp.PS                    = { gbps->GetBufferPointer(), gbps->GetBufferSize() };
+    gp.InputLayout           = { layout, 3 };
+    gp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    gp.NumRenderTargets      = 3;
+    for (UINT i = 0; i < 3; ++i)
+    {
+        gp.RTVFormats[i] = k_gbFormats[i];
+        gp.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    gp.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+    gp.SampleDesc.Count      = 1;
+    gp.SampleMask            = UINT_MAX;
+    gp.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+    gp.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE; // the scene PSO's rule
+    gp.RasterizerState.DepthClipEnable = TRUE;
+    gp.DepthStencilState.DepthEnable    = TRUE;
+    gp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    gp.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+    if (FAILED(device->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&gbufPso))))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: deferred G-buffer PSO creation failed — the deferred path stays off");
+        return false;
+    }
+    // Instanced twin (A3): optional — without it a batch loops per instance.
+    if (compile(sceneSource, "GBufVSInstanced", "VSMainInstanced", "vs_5_0", svsi,
+                "instanced batches loop per instance in the G-buffer"))
+    {
+        gp.VS = { svsi->GetBufferPointer(), svsi->GetBufferSize() };
+        device->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&gbufPsoInstanced));
+    }
+
+    // ── Resolve: fullscreen triangle (no IA, no varyings) into the HDR target.
+    const MSL::Compiled& vc = m_matShaderLib.fullscreenVertex(Backend::HLSL);
+    const MSL::Compiled& rc = m_matShaderLib.deferredResolve(Backend::HLSL);
+    if (!vc.ok || !rc.ok || vc.source.empty() || rc.source.empty())
+    {
+        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: deferred resolve cross-compile failed — "
+            "the deferred path stays off: ") + vc.log + " " + rc.log).c_str());
+        return false;
+    }
+    ComPtr<ID3DBlob> rvs, rps;
+    if (!compile(vc.source, "resolveVS", "main", "vs_5_0", rvs)
+        || !compile(rc.source, "resolvePS", "main", "ps_5_0", rps))
+        return false;
+    {
+        HE::d3d12mat::ResolveRootSignature rs;
+        HE::d3d12mat::DescribeResolveRootSignature(rs);
+        ComPtr<ID3DBlob> sig, err;
+        if (FAILED(D3D12SerializeRootSignature(&rs.desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err))
+            || FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                  IID_PPV_ARGS(&resolveRootSig))))
+        {
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: deferred resolve root signature failed: ")
+                + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+            resolveRootSig.Reset();
+            return false;
+        }
+    }
+    auto makeResolvePso = [&](ID3DBlob* ps, ComPtr<ID3D12PipelineState>& out) -> bool
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature        = resolveRootSig.Get();
+        pd.VS                    = { rvs->GetBufferPointer(), rvs->GetBufferSize() };
+        pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+        pd.InputLayout           = { nullptr, 0 };
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets      = 1;
+        pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        pd.DSVFormat             = DXGI_FORMAT_UNKNOWN; // the depth is t30 here, not an attachment
+        pd.SampleDesc.Count      = 1;
+        pd.SampleMask            = UINT_MAX;
+        pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+        pd.RasterizerState.DepthClipEnable = TRUE;
+        pd.DepthStencilState.DepthEnable   = FALSE;
+        // Opaque write; the sky drawn before stays where the resolve discards d >= 1.
+        pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        return SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+    };
+    if (!makeResolvePso(rps.Get(), resolvePso))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: deferred resolve PSO creation failed — the deferred path stays off");
+        return false;
+    }
+    // The clustered resolve only where the raw cluster lists exist (the same
+    // rule as the clustered graph materials). A failure costs the clustering,
+    // not the path: the window resolve still lights 8 lights.
+    if (matClustered())
+    {
+        const MSL::Compiled& cc = m_matShaderLib.deferredResolveClustered(Backend::HLSL);
+        ComPtr<ID3DBlob> cps;
+        if (!cc.ok || cc.source.empty())
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: clustered resolve cross-compile failed — "
+                "deferred keeps the 8-light window: ") + cc.log).c_str());
+        else if (compile(cc.source, "resolveClusteredPS", "main", "ps_5_0", cps,
+                         "deferred keeps the 8-light window")
+                 && !makeResolvePso(cps.Get(), resolveClusteredPso))
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: clustered resolve PSO creation failed — "
+                                   "deferred keeps the 8-light window");
+    }
+
+    for (UINT f = 0; f < k_frameCount; ++f)
+    {
+        resolveLightCB[f] = createUploadBuffer(alignUp(static_cast<UINT>(sizeof(MSL::Lighting)), k_cbSlot),
+                                               reinterpret_cast<void**>(&resolveLightPtr[f]));
+        resolveUboCB[f]   = createUploadBuffer(alignUp(static_cast<UINT>(sizeof(MSL::ResolveUniforms)), k_cbSlot),
+                                               reinterpret_cast<void**>(&resolveUboPtr[f]));
+        if (!resolveLightCB[f] || !resolveUboCB[f] || !resolveLightPtr[f] || !resolveUboPtr[f])
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: deferred constant buffers failed — the deferred path stays off");
+            return false;
+        }
+    }
+    if (!gbRtvHeap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.NumDescriptors = 3;
+        hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&gbRtvHeap))))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: G-buffer RTV heap failed — the deferred path stays off");
+            return false;
+        }
+        gbRtvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    }
+    deferredReady = true;
+    HE_LOG_INFO(RHI, "D3D12Renderer: deferred path ready (G-buffer + %s resolve)",
+                resolveClusteredPso ? "clustered" : "8-light window");
+    return true;
+#endif
+}
+
+// The G-buffer at the scene's size, rebuilt when it changes. Lazy (first
+// deferred frame) — a forward-only session never allocates it. A size change
+// flushes the GPU first (createSSAOTargets' rule, docs/d3d12-swapchain-resize-
+// befund.md): the frames in flight still write and sample the old targets.
+bool D3D12RendererImpl::ensureGBufferTargets(UINT w, UINT h)
+{
+    if (gbTex[0] && gbW == w && gbH == h) return true;
+    if (!gbRtvHeap) return false;
+    if (gbTex[0]) waitForAllFrames();
+    for (auto& t : gbTex) t.Reset();
+    gbW = gbH = 0;
+    if (w == 0 || h == 0) return false;
+    // Optimised clear values = the clears the G-buffer pass issues (GL's: GB1
+    // an encoded +Z normal, mid rough/spec), so the debug layer stays quiet.
+    static constexpr float kClear[3][4] = { { 0.0f, 0.0f, 0.0f, 0.0f },
+                                            { 0.5f, 0.5f, 1.0f, 0.5f },
+                                            { 0.0f, 0.0f, 0.0f, 0.0f } };
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    for (UINT i = 0; i < 3; ++i)
+    {
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width            = w;
+        rd.Height           = h;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = k_gbFormats[i];
+        rd.SampleDesc.Count = 1;
+        rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE cv{};
+        cv.Format = k_gbFormats[i];
+        std::memcpy(cv.Color, kClear[i], sizeof(cv.Color));
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&gbTex[i]))))
+        {
+            for (auto& t : gbTex) t.Reset();
+            if (!gbFailed)
+            {
+                gbFailed = true;
+                HE_LOG_ERROR(RHI, "D3D12Renderer: G-buffer allocation failed (%ux%u) — frame stays forward", w, h);
+            }
+            return false;
+        }
+        device->CreateRenderTargetView(gbTex[i].Get(), nullptr, gbRtv(i));
+    }
+    gbState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    gbW = w; gbH = h;
+    return true;
+}
+
 D3D12Renderer::D3D12Renderer()  : m_impl(new D3D12RendererImpl{}) {}
 D3D12Renderer::~D3D12Renderer() { delete m_impl; }
 
@@ -9161,7 +9494,22 @@ void D3D12Renderer::Initialize(HE::Window* window)
         HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: scene pipeline creation failed — only clear will work");
     if (!m_impl->createPostFXPipelines())
         HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: PostFX pipeline creation failed — no HDR/bloom/FXAA");
+    // The deferred path (Thema 150) after both: it needs the scene root
+    // signature and the material resources from createPipeline, and the flag
+    // it feeds is read together with postFxReady (GetCapabilities).
+    m_impl->createDeferredPipelines();
     m_impl->createCube();
+    // Deferred-path debug/headless knobs, GL's, Metal's and D3D11's:
+    // HE_RENDER_PATH=1/deferred forces the path without touching config,
+    // HE_DUMP_GBUFFER=1..4 seeds a raw G-buffer view (the editor pushes its own
+    // view mode every frame, the packaged game never does).
+    if (const char* rp = std::getenv("HE_RENDER_PATH"); rp && *rp)
+        m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
+            ? HE::RenderPath::Deferred : HE::RenderPath::Forward;
+    if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
+        if (const int n = std::clamp(std::atoi(dv), 0, 4); n > 0)
+            m_viewMode = static_cast<HE::ViewMode>(
+                static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: initialized successfully");
 }
 
@@ -9285,6 +9633,21 @@ void D3D12Renderer::Shutdown()
     m_impl->m_matBytecode.clear();
     m_impl->m_matSrvHeap.Reset();
     m_impl->m_matSrvStaging.Reset();
+    // Deferred path (Thema 150): the device is idle here.
+    m_impl->deferredReady = false;
+    for (auto& t : m_impl->gbTex) t.Reset();
+    m_impl->gbW = m_impl->gbH = 0;
+    m_impl->gbRtvHeap.Reset();
+    m_impl->gbufPso.Reset();
+    m_impl->gbufPsoInstanced.Reset();
+    m_impl->resolvePso.Reset();
+    m_impl->resolveClusteredPso.Reset();
+    m_impl->resolveRootSig.Reset();
+    for (UINT i = 0; i < k_frameCount; ++i)
+    {
+        m_impl->resolveLightCB[i].Reset(); m_impl->resolveLightPtr[i] = nullptr;
+        m_impl->resolveUboCB[i].Reset();   m_impl->resolveUboPtr[i]   = nullptr;
+    }
     m_impl->m_graphTexCache.clear(); // device is idle here (ComPtr release)
     m_impl->m_pendingTexInval.clear();
     m_impl->m_matRootSig.Reset();
@@ -9339,7 +9702,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     p.processPendingInvalidations();
     // Graph-material PSOs queued by WarmupMaterials, built for this frame's target before
     // any draw below can stall on them.
-    p.drainMaterialWarmup(m_contentManager);
+    p.drainMaterialWarmup(m_contentManager, m_renderPath == HE::RenderPath::Deferred);
 
     // Feed time-of-day to the extractor so it recomputes the sun/moon direction from the
     // day-night clock (otherwise m_timeOfDay stays at its 0.5 default and the sky never
@@ -9571,7 +9934,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // before — graph materials never saw point/spot lights on D3D12 and stayed
     // sun-lit at night). Mirrors the D3D11 fillMatLight. `aoActive`: the blurred
     // SSAO ran this frame — fillPerFrame's own AO gate; the material draw writes
-    // that image into its block's kSlotAO exactly then.
+    // that image into its block's kSlotAO exactly then. `frameMatLight` keeps
+    // the last fill: the deferred resolve starts from exactly it (Thema 150).
+    HE::MaterialShaderLibrary::Lighting frameMatLight{};
     auto fillMatLight = [&](bool giActive, bool aoActive)
     {
         if (!(p.m_matReady && p.m_matLightPtr[p.frameIndex])) return;
@@ -9674,6 +10039,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.fog[1] = m_environment.fogHeightFalloff;
         lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
         lit.fog[3] = aoActive    ? 1.0f : 0.0f;
+        frameMatLight = lit;
         std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
     };
     // The sky cube first: a copy on this frame's command list, recorded before
@@ -9936,9 +10302,32 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // backbuffer, has no HDR target, and therefore no SSR. Deliberately not
         // fixed here — giving the swapchain path an HDR target changes the
         // packaged game's frame layout and needs its own decision.
+        //
+        // ── Deferred render path (Thema 150): decided here, before SSR, which a
+        // deferred frame does not run — GL's and D3D11's rule; the deferred SSR
+        // (trace from GB1 + depth, composite after the resolve) is step 5 of the
+        // port. Only on the HDR viewport frame (usingHDR: hdrRT + the viewport
+        // depth, whose R32_FLOAT view the resolve samples), like SSR and TAA.
+        // The resolve's SRV table (17 material slots + 4 G-buffer inputs = two
+        // consecutive material-ring blocks) is reserved NOW: a frame that has
+        // already filled the G-buffer must be able to resolve it.
+        UINT deferredBlk = 0;
+        bool deferredActive = false;
+        if (m_renderPath == HE::RenderPath::Deferred && p.deferredReady && p.m_matReady
+            && p.usingHDR && p.hdrRT && p.hdrRtvHeap && p.viewportDsvHeap && p.viewportDepth
+            && p.m_matSrvCursor[p.frameIndex] + 2 <= D3D12RendererImpl::k_matMaxDraws
+            && p.ensureGBufferTargets(static_cast<UINT>(width), static_cast<UINT>(height)))
+        {
+            static_assert(HE::d3d12mat::kResolveSrvCount <= 2 * HE::d3d12mat::kSrvPerDraw,
+                          "the resolve table must fit in two material-ring blocks");
+            deferredBlk = (p.frameIndex * D3D12RendererImpl::k_matMaxDraws + p.m_matSrvCursor[p.frameIndex])
+                        * D3D12RendererImpl::k_matSrvPerDraw;
+            p.m_matSrvCursor[p.frameIndex] += 2;
+            deferredActive = true;
+        }
         bool ssrFrameActive = false;
 #if defined(HE_HAVE_SHADERC)
-        ssrFrameActive = p.ssrEnabled && p.usingHDR && p.hdrRT
+        ssrFrameActive = p.ssrEnabled && p.usingHDR && p.hdrRT && !deferredActive
                       && p.EnsureReflPrepassPipeline() && p.EnsureSSRPipelines();
 #endif
         // ── SSAO: run 3-pass (pos prepass → ssao → blur) before sky/geometry ─
@@ -10074,6 +10463,14 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // built-in draw would inherit the material state. Set to the opaque scene PSO below,
         // and to the transparent PSO before the transparent pass.
         ID3D12PipelineState* activeScenePso = nullptr;
+        // Deferred (Thema 150): `gbufferPass` routes drawDC12 into the G-buffer —
+        // graph materials through their G-buffer tail, built-in ones through
+        // GBufPS (activeScenePso = gbufPso, which every restore puts back). A
+        // graph material WITHOUT a usable G-buffer variant is collected into
+        // deferredForwardDCs and replayed, lit, right after the resolve — GL's
+        // `deferredForward`, Metal's `forwardOpaque`, D3D11's replay.
+        bool gbufferPass = false;
+        std::vector<const DrawCall*> deferredForwardDCs;
         auto drawDC12 = [&](const DrawCall& dc) {
             if (drawIdx >= k_maxDraws) return;
             // A trail carries no mesh asset — its geometry sits in this frame's
@@ -10113,8 +10510,26 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     // so the pointer is fresh; it is consumed before anything can load.
                     const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D12);
-                    ID3D12PipelineState* matPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
-                                                                          matPre, p.usingHDR, matTransp);
+                    ID3D12PipelineState* matPso = nullptr;
+                    if (gbufferPass)
+                    {
+                        // The G-buffer tail of the same graph (same expressions,
+                        // attributes instead of heLitP). No variant, or one that
+                        // does not build → the lit forward replay after the resolve.
+                        uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
+                        if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
+                                                                   gbHash, gbFrag, gbVertBody))
+                            matPso = p.GetOrBuildMaterialPSO(gbHash, gbFrag, gbVertBody, nullptr,
+                                                             p.usingHDR, false, /*gbuffer=*/true);
+                        if (!matPso)
+                        {
+                            deferredForwardDCs.push_back(&dc);
+                            return;
+                        }
+                    }
+                    else
+                        matPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
+                                                         matPre, p.usingHDR, matTransp);
                     // A full ring is a silent optics change (built-in look, or a skipped
                     // instance tail) — say so once per session instead of never.
                     auto noteRingFull = [&]() {
@@ -10293,12 +10708,26 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 textured ? static_cast<UINT>(albedoSlot) : p.k_albedoNullSlot));
             cl->IASetVertexBuffers(0, 1, &m.vbv);
             cl->IASetIndexBuffer(&m.ibv);
+            // The colour the built-in shader gets. Forward keeps D3D12's own rule
+            // (the draw's baseColor, RenderObject's white default for a mesh
+            // without a loaded material). The G-buffer takes GL's and Metal's
+            // (kGBufFS / gbufferMain, Thema 150; D3D11 measured 22.7/255 too
+            // bright on the floor without it): no material → 0.55 grey, or 1.0
+            // under a texture GBufPS multiplies in; the instance tint folded in.
+            glm::vec3 drawBase = dc.baseColor;
+            if (gbufferPass)
+            {
+                const bool hasMat = m_contentManager && dc.materialAssetId != HE::UUID{}
+                                 && m_contentManager->getMaterial(dc.materialAssetId);
+                if (!hasMat) drawBase = textured ? glm::vec3(1.0f) : glm::vec3(0.55f);
+                drawBase *= glm::vec3(dc.instanceTint);
+            }
             auto drawOne = [&](const glm::mat4& model) {
                 if (drawIdx >= k_maxDraws) return;
                 PerObjectCB o{};
                 o.mvp   = viewProj * model;
                 o.model = model;
-                o.color = glm::vec4(dc.baseColor, textured ? 1.0f : 0.0f);
+                o.color = glm::vec4(drawBase, textured ? 1.0f : 0.0f);
                 o.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity,
                                     dc.receivesShadow ? 0.0f : 1.0f);
                 if (ringPtr)
@@ -10320,7 +10749,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 // format scenePso resolves to. If that variant is null → fits=false → the
                 // per-instance fallback (never bind an LDR PSO to the HDR target).
                 const bool useHdrInst = p.usingHDR && p.hdrPso;
-                auto* instPso = useHdrInst ? p.hdrPsoInstanced.Get() : p.psoInstanced.Get();
+                auto* instPso = gbufferPass ? p.gbufPsoInstanced.Get()   // 3 MRTs (Thema 150)
+                              : useHdrInst  ? p.hdrPsoInstanced.Get() : p.psoInstanced.Get();
                 const bool fits = allowInstancing && instPso && ringPtr && instRingPtr
                                   && (static_cast<UINT64>(instCursor) + count) <= k_maxInstances
                                   && drawIdx < k_maxDraws;
@@ -10336,7 +10766,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     // One PerObject CB carries the batch-constant colour/pbr (the instanced
                     // VS reads mvp/model from t3, so the CB's mvp/model are unused here).
                     PerObjectCB o{};
-                    o.color = glm::vec4(dc.baseColor, textured ? 1.0f : 0.0f);
+                    o.color = glm::vec4(drawBase, textured ? 1.0f : 0.0f);
                     o.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity,
                                         dc.receivesShadow ? 0.0f : 1.0f);
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
@@ -10345,8 +10775,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         instRingBase + static_cast<UINT64>(instCursor) * k_instStride);
                     cl->SetPipelineState(instPso);
                     cl->DrawIndexedInstanced(range.count, count, range.start, 0, 0);
-                    // Restore the opaque scene PSO (instancing runs in the opaque pass only).
-                    cl->SetPipelineState((p.usingHDR && p.hdrPso) ? p.hdrPso.Get() : p.pso.Get());
+                    // Restore the pass's scene PSO (instancing runs in the opaque and
+                    // G-buffer passes only — activeScenePso is the one of the two).
+                    cl->SetPipelineState(activeScenePso ? activeScenePso
+                                         : (p.usingHDR && p.hdrPso) ? p.hdrPso.Get() : p.pso.Get());
                     ++p.statDraws; p.statTris += (range.count / 3) * count;
                     ++drawIdx;
                     instCursor += count;
@@ -10364,7 +10796,164 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         auto* transePso = p.usingHDR && p.hdrTransparentPso ? p.hdrTransparentPso.Get() : p.transparentPSO.Get();
         activeScenePso = scenePso; // A4: graph-material draws in the opaque pass restore THIS
         cl->SetPipelineState(scenePso);
-        for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
+        // Scene root signature + its frame-constant arguments, as every pass
+        // below that switched signatures rebuilds them.
+        auto restoreSceneRoot = [&]()
+        {
+            cl->SetGraphicsRootSignature(p.rootSig.Get());
+            p.bindClusterRoots(cl);
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+            if (p.sceneSrvHeap)
+            {
+                ID3D12DescriptorHeap* sheaps[] = { p.sceneSrvHeap.Get() };
+                cl->SetDescriptorHeaps(1, sheaps);
+                cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+            }
+        };
+        if (!deferredActive)
+            for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
+        else
+        {
+            // ── Deferred (Thema 150): G-buffer pass → lighting resolve → forward
+            // replay. The sky is already in hdrRT (drawn first, no depth write)
+            // and stays: the resolve discards d >= 1, and nothing between here
+            // and there clears or binds hdrRT. The viewport depth was cleared by
+            // Render() and nothing wrote it yet (shadow/GI/SSAO have their own).
+            const D3D12_CPU_DESCRIPTOR_HANDLE hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            const D3D12_CPU_DESCRIPTOR_HANDLE vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+            ID3D12Resource* depthRes = p.viewportDepth.Get();
+            auto gbBarrier = [&](D3D12_RESOURCE_STATES to)
+            {
+                D3D12_RESOURCE_BARRIER b[3]{};
+                UINT n = 0;
+                for (int i = 0; i < 3; ++i)
+                {
+                    if (p.gbState == to) break;
+                    b[n].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    b[n].Transition.pResource   = p.gbTex[i].Get();
+                    b[n].Transition.StateBefore = p.gbState;
+                    b[n].Transition.StateAfter  = to;
+                    b[n].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    ++n;
+                }
+                if (n) cl->ResourceBarrier(n, b);
+                p.gbState = to;
+            };
+
+            // G-buffer pass: three MRTs + the viewport depth. Clear values are
+            // GL's and the targets' optimised clears (ensureGBufferTargets).
+            gbBarrier(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            const D3D12_CPU_DESCRIPTOR_HANDLE gbRtvs[3] = { p.gbRtv(0), p.gbRtv(1), p.gbRtv(2) };
+            cl->OMSetRenderTargets(3, gbRtvs, FALSE, &vdsv);
+            const float gbClear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            const float gbClear1[4] = { 0.5f, 0.5f, 1.0f, 0.5f };
+            cl->ClearRenderTargetView(gbRtvs[0], gbClear0, 0, nullptr);
+            cl->ClearRenderTargetView(gbRtvs[1], gbClear1, 0, nullptr);
+            cl->ClearRenderTargetView(gbRtvs[2], gbClear0, 0, nullptr);
+            activeScenePso = p.gbufPso.Get();
+            gbufferPass    = true;
+            cl->SetPipelineState(activeScenePso);
+            for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
+            gbufferPass    = false;
+            activeScenePso = scenePso;
+
+            // ── Lighting resolve: fullscreen, into hdrRT. EncodeDecals' order:
+            // the depth comes OFF the output merger first, THEN it becomes a
+            // shader resource; the G-buffer goes RT → SRV in the same batch.
+            cl->OMSetRenderTargets(1, &hrtv, FALSE, nullptr);
+            p.barrier12(cl, depthRes, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            gbBarrier(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            {
+                using MSL = HE::MaterialShaderLibrary;
+                namespace dm = HE::d3d12mat;
+                // The table: a material block exactly as a graph-material draw
+                // builds it (template → GI masks, CSM, local atlas, DDGI atlases;
+                // sky cube + blurred SSAO under the gates fillMatLight raised),
+                // then the four G-buffer inputs in the slots after it.
+                const UINT blk = deferredBlk;
+                p.device->CopyDescriptorsSimple(D3D12RendererImpl::k_matSrvPerDraw, p.matSrvCpu(blk),
+                                                p.matSrvStagingCpu(0), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                if (p.m_skyEnvValid)
+                    p.srvForSkyEnvCube(p.matSrvCpu(blk + dm::kSlotSkyEnv));
+                if (matAOActive)
+                    p.srvIntoHeapSlot(p.ssaoBlurRT.Get(), DXGI_FORMAT_R8_UNORM, p.matSrvCpu(blk + dm::kSlotAO));
+                for (UINT i = 0; i < 3; ++i)
+                    p.srvIntoHeapSlot(p.gbTex[i].Get(), D3D12RendererImpl::k_gbFormats[i],
+                                      p.matSrvCpu(blk + dm::kResolveSlotGB0 + i));
+                p.srvIntoHeapSlot(depthRes, DXGI_FORMAT_R32_FLOAT, p.matSrvCpu(blk + dm::kResolveSlotDepth));
+
+                // The resolve's OWN lighting block: the frame's graph-material
+                // fill, specular AA off (its "normal" is a G-buffer texel whose
+                // derivative jumps at every silhouette — plan §10.7 #1), and in
+                // the clustered variant a directional-only window (heLitP walks
+                // the whole window; the point/spot lights come from the lists).
+                MSL::Lighting rl = frameMatLight;
+                rl.specAA[1] = 0.0f;
+                MSL::ResolveUniforms ru;
+                // World-pos reconstruction from the depth this frame rasterised
+                // with: the JITTERED viewProj (§10.7 #3), and the decal pass's
+                // D3D convention — depth already 0..1 (scale 1, bias 0), and
+                // SV_Position.y counts from the top while NDC y points up (-1).
+                const glm::mat4 invViewProj = glm::inverse(viewProj);
+                std::memcpy(ru.invViewProj, &invViewProj[0][0], 16 * sizeof(float));
+                ru.depthParams[0] = -1.0f;
+                ru.depthParams[1] =  1.0f;
+                ru.depthParams[2] =  0.0f;
+                ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode));
+                ID3D12PipelineState* rpso = p.resolvePso.Get();
+                if (clustered && p.resolveClusteredPso)
+                {
+                    // The raw lists on t24..t26 are the rings uploadClusters
+                    // filled with this frame's GI decision (fillPerFrame above).
+                    rpso = p.resolveClusteredPso.Get();
+                    HE::FillMaterialDirectionalWindow(p.m_renderWorld, rl);
+                    for (int c = 0; c < 4; ++c)
+                    {
+                        ru.clusterParams[c] = frameClusters.params[c];
+                        ru.clusterCamFwd[c] = frameClusters.camFwd[c];
+                    }
+                }
+                std::memcpy(p.resolveLightPtr[p.frameIndex], &rl, sizeof(rl));
+                std::memcpy(p.resolveUboPtr[p.frameIndex],   &ru, sizeof(ru));
+
+                ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
+                cl->SetDescriptorHeaps(1, mheaps);
+                cl->SetGraphicsRootSignature(p.resolveRootSig.Get());
+                p.bindClusterRoots(cl); // t24..t26 — same root indices as the material signature
+                cl->SetPipelineState(rpso);
+                cl->SetGraphicsRootConstantBufferView(dm::kRootLightCB,
+                    p.resolveLightCB[p.frameIndex]->GetGPUVirtualAddress());   // b0 HeLighting
+                cl->SetGraphicsRootConstantBufferView(dm::kRootResolveCB,
+                    p.resolveUboCB[p.frameIndex]->GetGPUVirtualAddress());     // b4 HeResolve
+                cl->SetGraphicsRootDescriptorTable(dm::kRootSrvTable, p.matSrvGpu(blk));
+                cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                cl->DrawInstanced(3, 1, 0, 0);
+                ++p.statDraws; ++p.statTris;
+                static bool s_resolveLogged = false; // the runtime witness on Windows
+                if (!s_resolveLogged)
+                {
+                    s_resolveLogged = true;
+                    HE_LOG_INFO(RHI, "D3D12Renderer: deferred frame (%dx%d, %s resolve, G-buffer view %d)",
+                                width, height, rpso == p.resolveClusteredPso.Get() ? "clustered" : "8-light",
+                                HE::viewModeGBufferIndex(m_viewMode));
+                }
+            }
+            // Depth writable again, the G-buffer a target again — only THEN the
+            // depth goes back on the output merger (rebindSceneTarget).
+            p.barrier12(cl, depthRes, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            gbBarrier(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            rebindSceneTarget();
+            restoreSceneRoot();
+            cl->SetPipelineState(scenePso);
+
+            // Forward replay: graph materials without a G-buffer variant, lit by
+            // their own forward shader against the G-buffer depth (test + write).
+            for (const DrawCall* dc : deferredForwardDCs) drawDC12(*dc);
+        }
 
         // ── Skinned draw calls ────────────────────────────────────────────────
         if (p.m_skinnedPSO && p.skinnedRootSig && !cmds.skinnedDrawCalls().empty())
@@ -10990,6 +11579,11 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // editor-viewport post chain SSR needs — false only if a TAA shader or
     // PSO failed. The swapchain path renders unjittered either way (taaFrame).
     c.supportsTemporalAA = m_impl->taaReady();
+    // Deferred (Thema 150): G-buffer PSOs + resolve built at Initialize. Like
+    // SSR/TAA it lives on the viewport frame's HDR target (Render()'s
+    // usingHDR branch); the LDR viewport branch, the direct-swapchain branch
+    // and the world previews stay forward.
+    c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
     return c;
 }
 

@@ -4104,6 +4104,156 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 	}
 }
 
+TEST_CASE("D3D12: the deferred resolve and G-buffer PSOs build against their signatures (WARP, Thema 150)")
+{
+	// docs/deferred-renderer-plan.md §10.8 Schritt 3. The resolve is heLitP in a
+	// fullscreen pass: the material preamble's registers PLUS b4 / t27..t30. Its
+	// signature (DescribeResolveRootSignature, what D3D12Renderer serialises)
+	// must accept the 8-light and the clustered resolve; the plain material
+	// signature must refuse them — otherwise the extra param and range are not
+	// what the PSO depends on. The G-buffer PSOs (graph tail + three MRTs) ride
+	// on the unchanged material signature.
+	using Microsoft::WRL::ComPtr;
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	namespace dm = HE::d3d12mat;
+	static_assert(dm::kResolveGBufferReg == MSL::kHlslResolveGB0Reg, "t27 = heGB0");
+	static_assert(dm::kResolveUboReg     == MSL::kHlslResolveUboReg, "b4 = HeResolve");
+	static_assert(dm::kResolvePointSamplers[0] == MSL::kHlslResolveGB0Sampler
+	           && dm::kResolvePointSamplers[1] == MSL::kHlslResolveGB1Sampler
+	           && dm::kResolvePointSamplers[2] == MSL::kHlslResolveGB2Sampler
+	           && dm::kResolvePointSamplers[3] == MSL::kHlslResolveDepthSampler,
+	              "the resolve's point samplers are the kHlslResolve* ones");
+	WarpDevice w;
+	const bool haveWarp = createWarpDevice(w);
+	REQUIRE_MESSAGE(haveWarp, w.log);
+
+	MSL lib;
+	std::string err;
+	ComPtr<ID3DBlob> fsVs = fxcBlob(lib.fullscreenVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(fsVs.Get() != nullptr, "fullscreen vertex: ", err);
+	ComPtr<ID3DBlob> resolvePs = fxcBlob(lib.deferredResolve(B::HLSL).source, "ps_5_0", err);
+	REQUIRE_MESSAGE(resolvePs.Get() != nullptr, "resolve: ", err);
+	ComPtr<ID3DBlob> clusterPs = fxcBlob(lib.deferredResolveClustered(B::HLSL).source, "ps_5_0", err);
+	REQUIRE_MESSAGE(clusterPs.Get() != nullptr, "clustered resolve: ", err);
+	{
+		const std::vector<Binding> b = reflectBindings(clusterPs.Get());
+		for (UINT t : { 27u, 28u, 29u, 30u })
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, t), "the resolve no longer binds t", t);
+		for (UINT t : { 24u, 25u, 26u })
+			CHECK_MESSAGE(binds(b, D3D_SIT_BYTEADDRESS, t), "the clustered resolve does not bind t", t);
+		CHECK(binds(b, D3D_SIT_CBUFFER, 4));
+	}
+
+	// The renderer's resolve PSO: no input layout, one RGBA16F target (the HDR
+	// scene colour), no depth (the depth is t30, a shader resource).
+	auto makeResolvePso = [&](ID3D12RootSignature* rs, ID3DBlob* ps, ComPtr<ID3D12PipelineState>& out) {
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = rs;
+		pd.VS                    = { fsVs->GetBufferPointer(), fsVs->GetBufferSize() };
+		pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = 1;
+		pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.DSVFormat             = DXGI_FORMAT_UNKNOWN;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		return w.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
+	};
+
+	dm::ResolveRootSignature rdesc;
+	dm::DescribeResolveRootSignature(rdesc);
+	CHECK(rdesc.params[dm::kRootClusterLights].Descriptor.ShaderRegister == 24); // bindClusterRoots' indices hold
+	CHECK(rdesc.params[dm::kRootResolveCB].Descriptor.ShaderRegister == 4);
+	for (const D3D12_STATIC_SAMPLER_DESC& s : rdesc.samplers)
+		for (UINT reg : dm::kResolvePointSamplers)
+			if (s.ShaderRegister == reg)
+				CHECK_MESSAGE(s.Filter == D3D12_FILTER_MIN_MAG_MIP_POINT, "resolve sampler s", reg, " filters");
+	ComPtr<ID3D12RootSignature> resolveRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), rdesc.desc, resolveRs, err);
+		const std::string why = drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "resolve root signature: ", err, why);
+	}
+	for (ID3DBlob* ps : { resolvePs.Get(), clusterPs.Get() })
+	{
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeResolvePso(resolveRs.Get(), ps, pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(SUCCEEDED(hr), "resolve PSO against the resolve signature failed, hr=", hr, ": ", why);
+	}
+
+	// Negative control: the material signature, the same shaders and PSO.
+	dm::MaterialRootSignature mdesc;
+	dm::DescribeMaterialRootSignature(mdesc);
+	ComPtr<ID3D12RootSignature> matRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), mdesc.desc, matRs, err);
+		drainInfoQueue(w);
+		REQUIRE(SUCCEEDED(hr));
+	}
+	for (ID3DBlob* ps : { resolvePs.Get(), clusterPs.Get() })
+	{
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeResolvePso(matRs.Get(), ps, pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(hr == E_INVALIDARG, "the material signature accepted the resolve (hr=", hr,
+		              ") — b4/t27..t30 are not what the PSO depends on: ", why);
+		CHECK(pso.Get() == nullptr);
+	}
+
+	// G-buffer PSOs: the graph material's G-buffer tail (heLitP replaced by the
+	// attribute writes) on the material signature, three MRTs as the renderer
+	// builds them (SRGB8 + 2x RGBA16F) against the D32 scene depth. The tail
+	// also writes oGB3 (SV_Target3, Metal's depth copy) — with NumRenderTargets
+	// 3 that output is discarded; the PSO must still be legal.
+	const auto gen = HE::generateFragment(makeDemoGraph());
+	REQUIRE_FALSE(gen.glslGBuffer.empty());
+	const auto& gbf = lib.fragment(std::hash<std::string>{}(gen.glslGBuffer), gen.glslGBuffer, B::HLSL);
+	REQUIRE_MESSAGE(gbf.ok, gbf.log);
+	ComPtr<ID3DBlob> gbPs = fxcBlob(gbf.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(gbPs.Get() != nullptr, "G-buffer fragment: ", err);
+	ComPtr<ID3DBlob> stdVs = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE(stdVs.Get() != nullptr);
+	{
+		static const D3D12_INPUT_ELEMENT_DESC layout[] = {
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		};
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = matRs.Get();
+		pd.VS                    = { stdVs->GetBufferPointer(), stdVs->GetBufferSize() };
+		pd.PS                    = { gbPs->GetBufferPointer(), gbPs->GetBufferSize() };
+		pd.InputLayout           = { layout, 3 };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = 3;
+		pd.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.RTVFormats[2]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable    = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+		for (int i = 0; i < 3; ++i)
+			pd.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = w.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(SUCCEEDED(hr), "G-buffer material PSO failed, hr=", hr, ": ", why);
+		if (!why.empty()) MESSAGE("G-buffer PSO debug-layer notes: ", why);
+	}
+}
+
 TEST_CASE("D3D12: every node's bytecode binds only registers the material root signature covers")
 {
 	// The WARP case above builds PSOs for four shapes; this is the net for the
@@ -5576,6 +5726,494 @@ TEST_CASE("D3D11: G-buffer + deferred resolve shade a graph material like its fo
 	const Diff dFull = compare(fwdCl, drawResolve(resClPS.Get(), fullLitCB.Get(), ruClCB.Get()));
 	MESSAGE("negative control (untrimmed window, lit lights): mean ", dFull.mean);
 	CHECK_MESSAGE(dFull.mean > 0.05f, "lit window lights were not counted twice — the control is blind");
+}
+
+TEST_CASE("D3D12: G-buffer + deferred resolve shade a graph material like its forward draw (WARP, Thema 150)")
+{
+	// The D3D11 case above on D3D12, with what only D3D12 has: the renderer's
+	// two signatures (DescribeMaterialRootSignature for the forward and G-buffer
+	// draws, DescribeResolveRootSignature with its point-clamp s2/s4/s5/s6 for
+	// the resolve), ONE table of 17 material slots + 4 G-buffer inputs (the two
+	// ring blocks D3D12Renderer hands the resolve), the R32_TYPELESS depth with
+	// a D32 DSV and an R32_FLOAT SRV, explicit barriers between the passes, and
+	// the cluster lists as root SRVs 6..8. Same rig: 8x8, tilted triangle,
+	// off-centre point light; then 12 list lights past a black 8-light window.
+	using Microsoft::WRL::ComPtr;
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	namespace dm = HE::d3d12mat;
+	WarpDevice w;
+	REQUIRE_MESSAGE(createWarpDevice(w), w.log);
+	ID3D12Device* dev = w.device.Get();
+	constexpr UINT kW = 8, kH = 8;
+
+	MSL lib;
+	const auto gen = HE::generateFragment(plainColourGraph());
+	REQUIRE_FALSE(gen.glslGBuffer.empty());
+	const uint64_t fwdHash = std::hash<std::string>{}(gen.glsl);
+	const uint64_t gbHash  = std::hash<std::string>{}(gen.glslGBuffer);
+	auto blobOf = [&](const MSL::Compiled& c, const char* profile, const char* what) {
+		std::string err;
+		REQUIRE_MESSAGE(c.ok, what, ": ", c.log);
+		ComPtr<ID3DBlob> b = fxcBlob(c.source, profile, err);
+		REQUIRE_MESSAGE(b.Get() != nullptr, what, ": ", err);
+		return b;
+	};
+	ComPtr<ID3DBlob> vsB    = blobOf(lib.standardVertex(B::HLSL), "vs_5_0", "standard vertex");
+	ComPtr<ID3DBlob> fwdB   = blobOf(lib.fragment(fwdHash, gen.glsl, B::HLSL), "ps_5_0", "forward fragment");
+	ComPtr<ID3DBlob> fwdClB = blobOf(lib.fragmentClustered(fwdHash, gen.glsl, B::HLSL), "ps_5_0", "forward clustered fragment");
+	ComPtr<ID3DBlob> gbB    = blobOf(lib.fragment(gbHash, gen.glslGBuffer, B::HLSL), "ps_5_0", "G-buffer fragment");
+	ComPtr<ID3DBlob> fsB    = blobOf(lib.fullscreenVertex(B::HLSL), "vs_5_0", "fullscreen vertex");
+	ComPtr<ID3DBlob> resB   = blobOf(lib.deferredResolve(B::HLSL), "ps_5_0", "deferred resolve");
+	ComPtr<ID3DBlob> resClB = blobOf(lib.deferredResolveClustered(B::HLSL), "ps_5_0", "clustered deferred resolve");
+
+	// ── Signatures, exactly the renderer's descriptions.
+	std::string err;
+	dm::MaterialRootSignature mdesc;  dm::DescribeMaterialRootSignature(mdesc);
+	dm::ResolveRootSignature  rdesc;  dm::DescribeResolveRootSignature(rdesc);
+	ComPtr<ID3D12RootSignature> matRs, resRs;
+	REQUIRE_MESSAGE(SUCCEEDED(makeRootSignature(dev, mdesc.desc, matRs, err)), err, drainInfoQueue(w));
+	REQUIRE_MESSAGE(SUCCEEDED(makeRootSignature(dev, rdesc.desc, resRs, err)), err, drainInfoQueue(w));
+
+	// ── PSOs: forward (one RGBA32F target), G-buffer (the renderer's three
+	// MRT formats), resolve (no IA, no depth). All against D32.
+	static const D3D12_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+	const DXGI_FORMAT gbFmt[3] = { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R16G16B16A16_FLOAT,
+	                               DXGI_FORMAT_R16G16B16A16_FLOAT };
+	auto makePso = [&](ID3D12RootSignature* rs, ID3DBlob* vs, ID3DBlob* ps, bool mesh, UINT nRT,
+	                   const DXGI_FORMAT* fmts, const char* what) {
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = rs;
+		pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+		pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		if (mesh) pd.InputLayout = { layout, 3 };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = nRT;
+		for (UINT i = 0; i < nRT; ++i)
+		{
+			pd.RTVFormats[i] = fmts[i];
+			pd.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		}
+		pd.DSVFormat             = mesh ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable    = mesh ? TRUE : FALSE;
+		pd.DepthStencilState.DepthWriteMask = mesh ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+		pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+		REQUIRE_MESSAGE(SUCCEEDED(hr), what, ": hr=", hr, " ", drainInfoQueue(w));
+		return pso;
+	};
+	const DXGI_FORMAT outFmt = DXGI_FORMAT_R32G32B32A32_FLOAT;
+	ComPtr<ID3D12PipelineState> fwdPso   = makePso(matRs.Get(), vsB.Get(), fwdB.Get(),   true, 1, &outFmt, "forward PSO");
+	ComPtr<ID3D12PipelineState> fwdClPso = makePso(matRs.Get(), vsB.Get(), fwdClB.Get(), true, 1, &outFmt, "clustered forward PSO");
+	ComPtr<ID3D12PipelineState> gbPso    = makePso(matRs.Get(), vsB.Get(), gbB.Get(),    true, 3, gbFmt,   "G-buffer PSO");
+	ComPtr<ID3D12PipelineState> resPso   = makePso(resRs.Get(), fsB.Get(), resB.Get(),   false, 1, &outFmt, "resolve PSO");
+	ComPtr<ID3D12PipelineState> resClPso = makePso(resRs.Get(), fsB.Get(), resClB.Get(), false, 1, &outFmt, "clustered resolve PSO");
+	drainInfoQueue(w); // the G-buffer PSO's "slot 3 discarded" note is expected (oGB3)
+
+	// ── Resources.
+	D3D12_HEAP_PROPERTIES defHeap{}; defHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+	D3D12_HEAP_PROPERTIES upHeap{};  upHeap.Type  = D3D12_HEAP_TYPE_UPLOAD;
+	D3D12_HEAP_PROPERTIES rbHeap{};  rbHeap.Type  = D3D12_HEAP_TYPE_READBACK;
+	auto makeTex = [&](DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
+	                   const D3D12_CLEAR_VALUE* cv) {
+		D3D12_RESOURCE_DESC td{};
+		td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		td.Width = kW; td.Height = kH; td.DepthOrArraySize = 1; td.MipLevels = 1;
+		td.Format = fmt; td.SampleDesc.Count = 1; td.Flags = flags;
+		ComPtr<ID3D12Resource> r;
+		REQUIRE(SUCCEEDED(dev->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &td, state, cv, IID_PPV_ARGS(&r))));
+		return r;
+	};
+	auto makeBuf = [&](const D3D12_HEAP_PROPERTIES& hp, UINT64 size, D3D12_RESOURCE_STATES state) {
+		D3D12_RESOURCE_DESC bd{};
+		bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		bd.Width = size; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+		bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		ComPtr<ID3D12Resource> r;
+		REQUIRE(SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, state, nullptr, IID_PPV_ARGS(&r))));
+		return r;
+	};
+	// Optimised clear values = the clears below (the renderer's rule), so the
+	// debug layer's verdict is about the passes, not about clear speed.
+	auto clearOf = [](DXGI_FORMAT f, float r, float g, float b, float a) {
+		D3D12_CLEAR_VALUE cv{}; cv.Format = f;
+		cv.Color[0] = r; cv.Color[1] = g; cv.Color[2] = b; cv.Color[3] = a;
+		return cv;
+	};
+	const D3D12_CLEAR_VALUE outCv = clearOf(outFmt, 0, 0, 0, 0);
+	ComPtr<ID3D12Resource> outTex = makeTex(outFmt, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+	                                        D3D12_RESOURCE_STATE_RENDER_TARGET, &outCv);
+	ComPtr<ID3D12Resource> gbTex[3];
+	for (int i = 0; i < 3; ++i)
+	{
+		const D3D12_CLEAR_VALUE cv = i == 1 ? clearOf(gbFmt[i], 0.5f, 0.5f, 1.0f, 0.5f) : clearOf(gbFmt[i], 0, 0, 0, 0);
+		gbTex[i] = makeTex(gbFmt[i], D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv);
+	}
+	ComPtr<ID3D12Resource> depthTex;
+	{
+		D3D12_CLEAR_VALUE dcv{}; dcv.Format = DXGI_FORMAT_D32_FLOAT; dcv.DepthStencil.Depth = 1.0f;
+		depthTex = makeTex(DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+		                   D3D12_RESOURCE_STATE_DEPTH_WRITE, &dcv);
+	}
+	const UINT readRow = (kW * 16u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+	ComPtr<ID3D12Resource> readback = makeBuf(rbHeap, UINT64(readRow) * kH, D3D12_RESOURCE_STATE_COPY_DEST);
+
+	// Descriptors: 4 RTVs (out + G-buffer), 1 DSV, and the resolve's table —
+	// 17 material slots (null views of the declared dimension, the template's
+	// rule) + GB0..2 + depth. The forward/G-buffer draws use its first 17.
+	ComPtr<ID3D12DescriptorHeap> rtvHeap, dsvHeap, srvHeap;
+	{
+		D3D12_DESCRIPTOR_HEAP_DESC hd{};
+		hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; hd.NumDescriptors = 4;
+		REQUIRE(SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvHeap))));
+		hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; hd.NumDescriptors = 1;
+		REQUIRE(SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&dsvHeap))));
+		hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = dm::kResolveSrvCount;
+		hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		REQUIRE(SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&srvHeap))));
+	}
+	const UINT rtvInc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	const UINT srvInc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	auto rtvAt = [&](UINT i) { D3D12_CPU_DESCRIPTOR_HANDLE h = rtvHeap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(i) * rtvInc; return h; };
+	auto srvAt = [&](UINT i) { D3D12_CPU_DESCRIPTOR_HANDLE h = srvHeap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(i) * srvInc; return h; };
+	dev->CreateRenderTargetView(outTex.Get(), nullptr, rtvAt(0));
+	for (UINT i = 0; i < 3; ++i) dev->CreateRenderTargetView(gbTex[i].Get(), nullptr, rtvAt(1 + i));
+	const D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap->GetCPUDescriptorHandleForHeapStart();
+	{
+		D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
+		dvd.Format = DXGI_FORMAT_D32_FLOAT; dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+		dev->CreateDepthStencilView(depthTex.Get(), &dvd, dsv);
+	}
+	for (UINT slot = 0; slot < dm::kSrvPerDraw; ++slot)
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC nv{};
+		nv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		nv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		if (slot == dm::kSlotCsm || slot == dm::kSlotLocalShadow)
+		{
+			nv.Format = DXGI_FORMAT_R32_FLOAT;
+			nv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+			nv.Texture2DArray.MipLevels = 1; nv.Texture2DArray.ArraySize = 1;
+		}
+		else if (slot == dm::kSlotSkyEnv)
+		{
+			nv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+			nv.TextureCube.MipLevels = 1;
+		}
+		else
+		{
+			nv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			nv.Texture2D.MipLevels = 1;
+		}
+		dev->CreateShaderResourceView(nullptr, &nv, srvAt(slot));
+	}
+	auto srv2D = [&](ID3D12Resource* r, DXGI_FORMAT fmt, UINT slot) {
+		D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+		sv.Format = fmt; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		sv.Texture2D.MipLevels = 1;
+		dev->CreateShaderResourceView(r, &sv, srvAt(slot));
+	};
+	for (UINT i = 0; i < 3; ++i) srv2D(gbTex[i].Get(), gbFmt[i], dm::kResolveSlotGB0 + i);
+	srv2D(depthTex.Get(), DXGI_FORMAT_R32_FLOAT, dm::kResolveSlotDepth);
+
+	// ── Geometry + constants (the D3D11 case's numbers) in one upload buffer,
+	// every block at a 256-B offset.
+	const glm::vec3 nrm = glm::normalize(glm::vec3(0.3f, -0.2f, 1.0f));
+	const MatVertex11 tri[3] = {
+		{ { -1.0f, -1.0f, 0.3f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+		{ {  3.0f, -1.0f, 0.5f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+		{ { -1.0f,  3.0f, 0.7f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+	};
+	constexpr UINT64 kUpBytes = 64 * 1024;
+	ComPtr<ID3D12Resource> up = makeBuf(upHeap, kUpBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
+	uint8_t* upPtr = nullptr;
+	{
+		const D3D12_RANGE noRead{ 0, 0 };
+		REQUIRE(SUCCEEDED(up->Map(0, &noRead, reinterpret_cast<void**>(&upPtr))));
+	}
+	UINT64 upCursor = 0;
+	auto push = [&](const void* data, size_t bytes) {
+		const UINT64 off = upCursor;
+		REQUIRE(off + bytes <= kUpBytes);
+		std::memcpy(upPtr + off, data, bytes);
+		upCursor = (off + bytes + 255) & ~UINT64(255);
+		return up->GetGPUVirtualAddress() + off;
+	};
+	const D3D12_GPU_VIRTUAL_ADDRESS vbVA = push(tri, sizeof(tri));
+	const D3D12_VERTEX_BUFFER_VIEW vbv{ vbVA, sizeof(tri), sizeof(MatVertex11) };
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[1] = 0.5f; u.pbr[2] = 1.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS uVA = push(&u, sizeof(u));
+	const float params[64] = {};
+	const D3D12_GPU_VIRTUAL_ADDRESS parVA = push(params, sizeof(params));
+
+	MSL::Lighting lit{};
+	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.05f;
+	lit.camPos[0] = 0.2f; lit.camPos[1] = 0.1f; lit.camPos[2] = 3.0f;
+	lit.giParams[0] = float(kW); lit.giParams[1] = float(kH);
+	lit.lightPos[0][0] = 0.4f; lit.lightPos[0][1] = -0.3f; lit.lightPos[0][2] = 1.4f; lit.lightPos[0][3] = 1.0f;
+	lit.lightDir[0][2] = -1.0f;
+	lit.lightColor[0][0] = 1.0f; lit.lightColor[0][1] = 0.9f; lit.lightColor[0][2] = 0.8f; lit.lightColor[0][3] = 3.0f;
+	lit.lightParams[0][0] = 4.0f;
+	lit.counts[0] = 1.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS litVA = push(&lit, sizeof(lit));
+	MSL::ResolveUniforms ru;
+	for (int i = 0; i < 4; ++i) ru.invViewProj[i * 5] = 1.0f;
+	ru.depthParams[0] = -1.0f; ru.depthParams[1] = 1.0f; ru.depthParams[2] = 0.0f; ru.depthParams[3] = 0.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS ruVA = push(&ru, sizeof(ru));
+	MSL::ResolveUniforms ruFlip = ru;  ruFlip.depthParams[0] = 1.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS ruFlipVA = push(&ruFlip, sizeof(ruFlip));
+	MSL::ResolveUniforms ruView = ru;  ruView.depthParams[3] = 1.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS ruViewVA = push(&ruView, sizeof(ruView));
+
+	// Cluster lists (root SRVs t24..t26), the D3D11 case's twelve lights.
+	const int kLists = 12, kBlack = 8;
+	std::vector<float> lights(size_t(kLists) * 16, 0.0f);
+	const float pos[4][3] = { { -0.6f, 0.5f, 1.2f }, { 0.7f, 0.6f, 1.0f }, { -0.4f, -0.7f, 1.5f }, { 0.5f, -0.5f, 0.9f } };
+	const float col[4][3] = { { 1.0f, 0.2f, 0.2f }, { 0.2f, 1.0f, 0.2f }, { 0.2f, 0.3f, 1.0f }, { 1.0f, 1.0f, 0.3f } };
+	for (int i = 0; i < kLists; ++i)
+	{
+		float* l = &lights[size_t(i) * 16];
+		const float* p = i >= kBlack ? pos[i - kBlack] : pos[0];
+		l[0] = p[0]; l[1] = p[1]; l[2] = p[2]; l[3] = 1.0f;
+		l[6] = -1.0f;
+		if (i >= kBlack) { l[8] = col[i - kBlack][0]; l[9] = col[i - kBlack][1]; l[10] = col[i - kBlack][2]; l[11] = 1.5f; }
+		l[12] = 3.0f;
+	}
+	const uint32_t grid[2] = { 0u, uint32_t(kLists) };
+	std::vector<uint32_t> indices(kLists);
+	for (int i = 0; i < kLists; ++i) indices[i] = uint32_t(i);
+	const D3D12_GPU_VIRTUAL_ADDRESS listVA[3] = { push(lights.data(), lights.size() * sizeof(float)),
+	                                              push(grid, sizeof(grid)),
+	                                              push(indices.data(), indices.size() * sizeof(uint32_t)) };
+	MSL::Lighting fwdLit = lit;
+	for (int i = 0; i < 8; ++i)
+	{
+		for (int k = 0; k < 4; ++k) { fwdLit.lightPos[i][k] = 0; fwdLit.lightColor[i][k] = 0; fwdLit.lightParams[i][k] = 0; }
+		fwdLit.lightPos[i][0] = pos[0][0]; fwdLit.lightPos[i][1] = pos[0][1]; fwdLit.lightPos[i][2] = pos[0][2];
+		fwdLit.lightPos[i][3] = 1.0f;
+		fwdLit.lightParams[i][0] = 3.0f;
+	}
+	fwdLit.counts[0] = 8.0f;
+	fwdLit.clusterParams[0] = fwdLit.clusterParams[1] = fwdLit.clusterParams[2] = 1.0f;
+	fwdLit.clusterCamFwd[2] = -1.0f; fwdLit.clusterCamFwd[3] = 0.1f;
+	RenderWorld rw;
+	for (int i = 0; i < kLists; ++i)
+	{
+		LightData ld;
+		ld.type = 1;
+		ld.position = glm::vec3(lights[size_t(i) * 16], lights[size_t(i) * 16 + 1], lights[size_t(i) * 16 + 2]);
+		rw.lights.push_back(ld);
+	}
+	MSL::Lighting resLit = fwdLit;
+	HE::FillMaterialDirectionalWindow(rw, resLit);
+	MSL::ResolveUniforms ruCl = ru;
+	ruCl.clusterParams[0] = ruCl.clusterParams[1] = ruCl.clusterParams[2] = 1.0f;
+	ruCl.clusterCamFwd[2] = -1.0f; ruCl.clusterCamFwd[3] = 0.1f;
+	const D3D12_GPU_VIRTUAL_ADDRESS fwdLitVA = push(&fwdLit, sizeof(fwdLit));
+	const D3D12_GPU_VIRTUAL_ADDRESS resLitVA = push(&resLit, sizeof(resLit));
+	const D3D12_GPU_VIRTUAL_ADDRESS ruClVA   = push(&ruCl, sizeof(ruCl));
+
+	// ── One command list per image, run to completion.
+	ComPtr<ID3D12CommandQueue> queue;
+	ComPtr<ID3D12CommandAllocator> alloc;
+	ComPtr<ID3D12GraphicsCommandList> cl;
+	ComPtr<ID3D12Fence> fence;
+	UINT64 fenceVal = 0;
+	{
+		D3D12_COMMAND_QUEUE_DESC qd{}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+		REQUIRE(SUCCEEDED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue))));
+		REQUIRE(SUCCEEDED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))));
+		REQUIRE(SUCCEEDED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
+		                                         IID_PPV_ARGS(&cl))));
+		REQUIRE(SUCCEEDED(cl->Close()));
+		REQUIRE(SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))));
+	}
+	auto barrier = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b) {
+		D3D12_RESOURCE_BARRIER rb{};
+		rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		rb.Transition.pResource = r; rb.Transition.StateBefore = a; rb.Transition.StateAfter = b;
+		rb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+		cl->ResourceBarrier(1, &rb);
+	};
+	const D3D12_VIEWPORT vp{ 0.0f, 0.0f, float(kW), float(kH), 0.0f, 1.0f };
+	const D3D12_RECT scissor{ 0, 0, LONG(kW), LONG(kH) };
+	const float black[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	std::string debugLog;
+	auto run = [&](auto&& record) {
+		REQUIRE(SUCCEEDED(alloc->Reset()));
+		REQUIRE(SUCCEEDED(cl->Reset(alloc.Get(), nullptr)));
+		cl->RSSetViewports(1, &vp);
+		cl->RSSetScissorRects(1, &scissor);
+		ID3D12DescriptorHeap* heaps[] = { srvHeap.Get() };
+		cl->SetDescriptorHeaps(1, heaps);
+		record();
+		// out → readback
+		barrier(outTex.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+		src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.pResource = outTex.Get();
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;  dst.pResource = readback.Get();
+		dst.PlacedFootprint.Footprint = { outFmt, kW, kH, 1, readRow };
+		cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+		barrier(outTex.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		REQUIRE(SUCCEEDED(cl->Close()));
+		ID3D12CommandList* lists[] = { cl.Get() };
+		queue->ExecuteCommandLists(1, lists);
+		REQUIRE(SUCCEEDED(queue->Signal(fence.Get(), ++fenceVal)));
+		if (fence->GetCompletedValue() < fenceVal)
+		{
+			HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+			REQUIRE(ev != nullptr);
+			REQUIRE(SUCCEEDED(fence->SetEventOnCompletion(fenceVal, ev)));
+			WaitForSingleObject(ev, INFINITE);
+			CloseHandle(ev);
+		}
+		debugLog += drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(dev->GetDeviceRemovedReason()), "device removed: ", debugLog);
+		std::vector<float> px(size_t(kW) * kH * 4, 0.0f);
+		uint8_t* mapped = nullptr;
+		const D3D12_RANGE readAll{ 0, SIZE_T(readRow) * kH };
+		REQUIRE(SUCCEEDED(readback->Map(0, &readAll, reinterpret_cast<void**>(&mapped))));
+		for (UINT y = 0; y < kH; ++y)
+			std::memcpy(&px[size_t(y) * kW * 4], mapped + size_t(y) * readRow, kW * 16);
+		const D3D12_RANGE noWrite{ 0, 0 };
+		readback->Unmap(0, &noWrite);
+		return px;
+	};
+	// The material draw's root arguments (D3D12Renderer's drawMatInstance).
+	auto bindMaterial = [&](ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS light) {
+		cl->SetGraphicsRootSignature(matRs.Get());
+		cl->SetPipelineState(pso);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootLightCB,   light);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootObjectCB,  uVA);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootParamsCB,  parVA);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootLightCBVS, light);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootParamsCBVS, parVA);
+		cl->SetGraphicsRootDescriptorTable(dm::kRootSrvTable, srvHeap->GetGPUDescriptorHandleForHeapStart());
+		cl->SetGraphicsRootShaderResourceView(dm::kRootClusterLights, listVA[0]);
+		cl->SetGraphicsRootShaderResourceView(dm::kRootClusterGrid,   listVA[1]);
+		cl->SetGraphicsRootShaderResourceView(dm::kRootClusterIdx,    listVA[2]);
+		cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		cl->IASetVertexBuffers(0, 1, &vbv);
+	};
+	auto forward = [&](ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS light) {
+		return run([&] {
+			const D3D12_CPU_DESCRIPTOR_HANDLE rt = rtvAt(0);
+			cl->ClearRenderTargetView(rt, black, 0, nullptr);
+			cl->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			cl->OMSetRenderTargets(1, &rt, FALSE, &dsv);
+			bindMaterial(pso, light);
+			cl->DrawInstanced(3, 1, 0, 0);
+		});
+	};
+	// G-buffer pass + resolve in ONE list, with the renderer's barrier order:
+	// DSV off the OM, depth DEPTH_WRITE → PSR and G-buffer RT → PSR, draw,
+	// and back. The G-buffer clears are GL's.
+	auto deferred = [&](ID3D12PipelineState* rpso, D3D12_GPU_VIRTUAL_ADDRESS rLight, D3D12_GPU_VIRTUAL_ADDRESS rUbo) {
+		return run([&] {
+			const D3D12_CPU_DESCRIPTOR_HANDLE gbRtv[3] = { rtvAt(1), rtvAt(2), rtvAt(3) };
+			const float c1[4] = { 0.5f, 0.5f, 1.0f, 0.5f };
+			cl->ClearRenderTargetView(gbRtv[0], black, 0, nullptr);
+			cl->ClearRenderTargetView(gbRtv[1], c1, 0, nullptr);
+			cl->ClearRenderTargetView(gbRtv[2], black, 0, nullptr);
+			cl->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			cl->OMSetRenderTargets(3, gbRtv, FALSE, &dsv);
+			bindMaterial(gbPso.Get(), litVA);
+			cl->DrawInstanced(3, 1, 0, 0);
+
+			const D3D12_CPU_DESCRIPTOR_HANDLE rt = rtvAt(0);
+			cl->ClearRenderTargetView(rt, black, 0, nullptr);
+			cl->OMSetRenderTargets(1, &rt, FALSE, nullptr);
+			barrier(depthTex.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			for (auto& g : gbTex)
+				barrier(g.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			cl->SetGraphicsRootSignature(resRs.Get());
+			cl->SetPipelineState(rpso);
+			cl->SetGraphicsRootConstantBufferView(dm::kRootLightCB,  rLight);
+			cl->SetGraphicsRootConstantBufferView(dm::kRootResolveCB, rUbo);
+			cl->SetGraphicsRootDescriptorTable(dm::kRootSrvTable, srvHeap->GetGPUDescriptorHandleForHeapStart());
+			cl->SetGraphicsRootShaderResourceView(dm::kRootClusterLights, listVA[0]);
+			cl->SetGraphicsRootShaderResourceView(dm::kRootClusterGrid,   listVA[1]);
+			cl->SetGraphicsRootShaderResourceView(dm::kRootClusterIdx,    listVA[2]);
+			cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			cl->DrawInstanced(3, 1, 0, 0);
+			barrier(depthTex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+			for (auto& g : gbTex)
+				barrier(g.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		});
+	};
+	struct Diff { float mean = 0, max = 0, lumMin = 1e9f, lumMax = 0; };
+	auto compare = [&](const std::vector<float>& a, const std::vector<float>& b) {
+		Diff d;
+		for (UINT i = 0; i < kW * kH; ++i)
+		{
+			for (int k = 0; k < 3; ++k)
+			{
+				const float e = std::fabs(a[i * 4 + k] - b[i * 4 + k]);
+				d.mean += e; d.max = std::max(d.max, e);
+			}
+			const float l = a[i * 4] + a[i * 4 + 1] + a[i * 4 + 2];
+			d.lumMin = std::min(d.lumMin, l); d.lumMax = std::max(d.lumMax, l);
+		}
+		d.mean /= float(kW * kH * 3);
+		return d;
+	};
+
+	// 1. Forward vs deferred, 8-light window.
+	drainInfoQueue(w);
+	const std::vector<float> fwd = forward(fwdPso.Get(), litVA);
+	const std::vector<float> def = deferred(resPso.Get(), litVA, ruVA);
+	const Diff d = compare(fwd, def);
+	MESSAGE("D3D12 forward vs deferred: mean ", d.mean, " max ", d.max, " (forward luminance ",
+	        d.lumMin, "..", d.lumMax, ")", std::string(debugLog.empty() ? "" : " — debug layer: "), debugLog);
+	REQUIRE_MESSAGE(d.lumMax - d.lumMin > 0.05f, "the point light does not vary over the 8x8 surface");
+	CHECK_MESSAGE(d.mean < 1.0f / 255.0f, "deferred drifts from forward: mean ", d.mean);
+	CHECK_MESSAGE(d.max  < 4.0f / 255.0f, "deferred drifts from forward: max ", d.max);
+
+	// Negative control 1: GL/Vulkan's uv sign instead of D3D's — P moves.
+	const Diff dFlip = compare(fwd, deferred(resPso.Get(), litVA, ruFlipVA));
+	MESSAGE("negative control (wrong uv sign): mean ", dFlip.mean, " max ", dFlip.max);
+	CHECK_MESSAGE(dFlip.max > 8.0f / 255.0f, "a wrong uv sign went unnoticed — the rig is blind to P");
+
+	// Negative control 2: the base-colour view shows the graph's 0.25/0.5/0.75
+	// unlit — the resolve read GB0 through the table's slot 17, not a null view.
+	const std::vector<float> view = deferred(resPso.Get(), litVA, ruViewVA);
+	CHECK_MESSAGE((std::fabs(view[0] - 0.25f) < 0.01f && std::fabs(view[1] - 0.5f) < 0.01f
+	               && std::fabs(view[2] - 0.75f) < 0.01f),
+	              "G-buffer base-colour view: ", view[0], ",", view[1], ",", view[2]);
+
+	// 2. Clustered: forward with the full (black) window + gate, resolve with
+	// the trimmed window and the grid in HeResolve; lists as root SRVs.
+	debugLog.clear();
+	const std::vector<float> fwdCl = forward(fwdClPso.Get(), fwdLitVA);
+	const std::vector<float> defCl = deferred(resClPso.Get(), resLitVA, ruClVA);
+	const Diff dc = compare(fwdCl, defCl);
+	MESSAGE("D3D12 clustered forward vs clustered deferred: mean ", dc.mean, " max ", dc.max, " (luminance ",
+	        dc.lumMin, "..", dc.lumMax, ")", std::string(debugLog.empty() ? "" : " — debug layer: "), debugLog);
+	REQUIRE_MESSAGE(dc.lumMax > 0.2f, "the four list lights do not reach the surface");
+	CHECK_MESSAGE(dc.mean < 1.0f / 255.0f, "clustered deferred drifts from clustered forward: mean ", dc.mean);
+	CHECK_MESSAGE(dc.max  < 4.0f / 255.0f, "clustered deferred drifts from clustered forward: max ", dc.max);
+
+	// Negative control 3: the 8-light resolve over the same G-buffer sees only
+	// the black window — the lit lights arrive through the root SRVs alone.
+	const Diff dWin = compare(fwdCl, deferred(resPso.Get(), fwdLitVA, ruClVA));
+	MESSAGE("negative control (8-light resolve, black window): mean ", dWin.mean);
+	CHECK_MESSAGE(dWin.mean > 0.05f, "the window resolve matched the clustered image — the lists were not needed");
+	up->Unmap(0, nullptr);
 }
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC

@@ -212,5 +212,79 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
     out.desc.pStaticSamplers   = out.samplers;
     out.desc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deferred lighting resolve (Thema 150, docs/deferred-renderer-plan.md §10.3):
+// MaterialShaderLibrary::deferredResolve[Clustered](HLSL) carries the SAME
+// lighting preamble as a graph material (heLitP), so its signature is the
+// material one plus what only the resolve reads — the kHlslResolve* contract:
+//   b4        HeResolve (invViewProj, depthParams, cluster params)  → param 9
+//   t27..t30  heGB0, heGB1, heGB2, heGBDepth                        → 4 more
+//             slots in the SAME table, right after the 17-slot block
+//   s2/s4/s5/s6  their samplers — POINT-clamp here. The material signature
+//             puts linear-WRAP on those registers (heTex0 / heTexP0..2 tile),
+//             and a static sampler is fixed per register, so the resolve
+//             cannot ride on m_matRootSig: a G-buffer texel is not a texture
+//             to filter, and a wrapping depth lookup at the viewport edge
+//             reads the opposite edge. D3D11 binds the same point/clamp.
+// Params 0..8 keep their indices — bindClusterRoots sets 6..8 on every
+// signature it is handed. The resolve leaves b1/b3/b8/b9 and t2/t4..t7/t14
+// unread; an unused root parameter or table range is legal.
+constexpr UINT kResolveSlotGB0     = kSrvPerDraw;      // t27 heGB0  (BaseColor + Metallic)
+constexpr UINT kResolveSlotGB1     = kSrvPerDraw + 1;  // t28 heGB1  (oct normal, roughness, specular)
+constexpr UINT kResolveSlotGB2     = kSrvPerDraw + 2;  // t29 heGB2  (emissive, material AO)
+constexpr UINT kResolveSlotDepth   = kSrvPerDraw + 3;  // t30 heGBDepth (R32_FLOAT view of the scene depth)
+constexpr UINT kResolveSrvCount    = kSrvPerDraw + 4;  // one table: 17 material slots + 4 G-buffer inputs
+constexpr UINT kResolveGBufferReg  = 27;               // == MaterialShaderLibrary::kHlslResolveGB0Reg
+constexpr UINT kResolveUboReg      = 4;                // == MaterialShaderLibrary::kHlslResolveUboReg
+constexpr UINT kRootResolveCB      = kParamCount;      // 9: b4 HeResolve
+constexpr UINT kResolveParamCount  = kParamCount + 1;
+constexpr UINT kResolveRangeCount  = kRangeCount + 1;
+constexpr UINT kResolvePointSamplers[4] = { 2, 4, 5, 6 }; // == kHlslResolveGB0..DepthSampler
+
+struct ResolveRootSignature
+{
+    D3D12_ROOT_PARAMETER      params[kResolveParamCount]{};
+    D3D12_DESCRIPTOR_RANGE    ranges[kResolveRangeCount]{};
+    D3D12_STATIC_SAMPLER_DESC samplers[kSamplerCount]{};
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+};
+
+inline void DescribeResolveRootSignature(ResolveRootSignature& out)
+{
+    MaterialRootSignature mat;
+    DescribeMaterialRootSignature(mat);
+    out = ResolveRootSignature{};
+    for (UINT i = 0; i < kParamCount; ++i)  out.params[i]   = mat.params[i];
+    for (UINT i = 0; i < kRangeCount; ++i)  out.ranges[i]   = mat.ranges[i];
+    for (UINT i = 0; i < kSamplerCount; ++i) out.samplers[i] = mat.samplers[i];
+
+    D3D12_DESCRIPTOR_RANGE& gb = out.ranges[kRangeCount];
+    gb.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    gb.NumDescriptors                    = 4;
+    gb.BaseShaderRegister                = kResolveGBufferReg;
+    gb.RegisterSpace                     = 0;
+    gb.OffsetInDescriptorsFromTableStart = kResolveSlotGB0;
+    out.params[kRootSrvTable].DescriptorTable.NumDescriptorRanges = kResolveRangeCount;
+    out.params[kRootSrvTable].DescriptorTable.pDescriptorRanges   = out.ranges;
+
+    out.params[kRootResolveCB].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    out.params[kRootResolveCB].Descriptor       = { kResolveUboReg, 0 };
+    out.params[kRootResolveCB].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    for (D3D12_STATIC_SAMPLER_DESC& s : out.samplers)
+        for (UINT reg : kResolvePointSamplers)
+            if (s.ShaderRegister == reg)
+            {
+                s.Filter   = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                s.AddressU = s.AddressV = s.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            }
+
+    out.desc.NumParameters     = kResolveParamCount;
+    out.desc.pParameters       = out.params;
+    out.desc.NumStaticSamplers = kSamplerCount;
+    out.desc.pStaticSamplers   = out.samplers;
+    out.desc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_NONE; // buffer-less fullscreen triangle
+}
 } // namespace HE::d3d12mat
 #endif // _WIN32
