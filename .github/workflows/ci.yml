@@ -329,8 +329,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          python tests/test_heproj_file_types.py --package package/Editor
+          $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { 'python3' }
+          & $py tests/test_heproj_file_types.py --package package/Editor
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Writes (and removes again) the .heproj keys under HKCU of the account the
+          # runner runs as, after exporting whatever was there; see the script header.
           & scripts/windows_assets/check_heproj_registration.ps1 -EditorDir package/Editor
           exit $LASTEXITCODE
 

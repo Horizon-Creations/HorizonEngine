@@ -330,14 +330,16 @@ class LinuxInstaller(unittest.TestCase):
         project = os.path.join(self.tmp, "my project (1).heproj")
         with open(project, "w") as f:
             f.write("{}")
+        # A hung glib call must not eat a ctest slot: every one of them has a timeout.
         info = subprocess.run(["gio", "info", "-a", "standard::content-type", project],
-                              env=self.env, capture_output=True, text=True)
+                              env=self.env, capture_output=True, text=True, timeout=30)
         self.assertIn("standard::content-type: " + MIME, info.stdout, info.stdout + info.stderr)
-        handlers = subprocess.run(["gio", "mime", MIME], env=self.env, capture_output=True, text=True)
+        handlers = subprocess.run(["gio", "mime", MIME], env=self.env, capture_output=True, text=True,
+                                  timeout=30)
         self.assertIn("horizon-editor.desktop", handlers.stdout, handlers.stdout + handlers.stderr)
         # What a file manager does on a double-click: launch the entry with the file.
         launch = subprocess.run(["gio", "launch", self.desktop_file(), project],
-                                env=self.env, capture_output=True, text=True)
+                                env=self.env, capture_output=True, text=True, timeout=30)
         for _ in range(100):
             if os.path.exists(self.args_file) and read_text(self.args_file).strip():
                 break
