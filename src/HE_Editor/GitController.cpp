@@ -61,7 +61,7 @@ void GitController::startListRepos(std::string token, std::filesystem::path cred
 		// The sign-in is read here rather than on the frame thread: it is a git
 		// subprocess, and the keychain may take its time.
 		if (token.empty() && !HE::Sc::GitHubTokenStore::load(root, token))
-			err = "You are not signed in to GitHub. Sign in, or paste a token.";
+			err = "You are not signed in to GitHub. Sign in first.";
 		const bool ok = !token.empty() && HE::Sc::GitHubApi::listRepos(token, repos, &err);
 		wipe(token);
 

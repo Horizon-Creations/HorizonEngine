@@ -15,6 +15,7 @@
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include "EditorRewards.h"             // Feedback > each tone's "Preview"
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
+#include <SourceControl/GitHubTokenStore.h>  // kHost: which remote the sign-in covers
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
 #include <Net/RouterProbe.h>
@@ -1028,16 +1029,16 @@ bool sourceControlPageActive() { return s_scPageFrame == ImGui::GetFrameCount();
 
 namespace {
 
-// GitHub setup inputs. The token buffer is wiped the moment it is handed off —
-// it must not sit in static memory for the rest of the session.
+// GitHub setup inputs. No token among them: "Create & push" uses the GitHub
+// sign-in.
 char s_remoteUrl[512]  = "";
 char s_ghRepoName[128] = "";
-char s_ghToken[256]    = "";
 bool s_ghPrivate       = true;
 
-// Standalone "store a token for this remote" form (separate buffers from the
-// GitHub-create form above — the two are different flows and clearing one must
-// not disturb the other).
+// Standalone "store a token for this remote" form, for the hosts the GitHub
+// sign-in does not cover (GitLab, Azure DevOps, GitHub Enterprise, self-hosted).
+// The token buffer is wiped the moment it is handed off — it must not sit in
+// static memory for the rest of the session.
 char s_credHost[128]  = "";
 char s_credUser[128]  = "";
 char s_credToken[256] = "";
@@ -1103,7 +1104,7 @@ void drawGitMessages(GitController* git)
 	if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
 
-// Repository half of the page: init, remote / GitHub setup (token), auto-push.
+// Repository half of the page: init, remote / GitHub setup, auto-push.
 // Commit, push, pull and the change list stay in the Source Control window
 // (View menu) — this page is the one-time setup, that window is the daily
 // driver.
@@ -1213,30 +1214,17 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::SameLine();
 		EditorWidgets::checkbox("Private", &s_ghPrivate);
 
-		// Signed in (GitHub account, above), the token field may stay empty: the
-		// service then reads the sign-in from the credential helper itself.
+		// The GitHub account (above) is the only way in: an empty token makes the
+		// service read the sign-in from the credential helper itself.
 		const bool signedIn = GitHubSignIn::account() == GitHubSignIn::Account::SignedIn;
-		ImGui::SetNextItemWidth(-140.0f);
-		ImGui::InputTextWithHint("##ghtoken",
-		                         signedIn ? "Token (optional: your GitHub sign-in is used)"
-		                                  : "Personal access token",
-		                         s_ghToken, sizeof(s_ghToken),
-		                         ImGuiInputTextFlags_Password);
-		ImGui::SameLine();
-		ImGui::BeginDisabled(git->busy() || (s_ghToken[0] == '\0' && !signedIn) ||
+		ImGui::BeginDisabled(git->busy() || !signedIn ||
 		                     s_ghRepoName[0] == '\0' || st.initialCommit);
 		if (EditorWidgets::primaryButton("Create & push", ImVec2(130.0f, 0.0f)))
-		{
-			git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, std::string(s_ghToken));
-			// Wipe, not clear: the bytes must go, not just the length.
-			std::fill(std::begin(s_ghToken), std::end(s_ghToken), '\0');
-		}
+			git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, {});
 		ImGui::EndDisabled();
-		ImGui::TextDisabled(signedIn
-			? "Uses your GitHub sign-in. A token typed here wins over it."
-			: "Sign in with GitHub above, or a token: github.com/settings/tokens — "
-			  "classic, 'repo' scope. It is handed to git's credential helper, stored "
-			  "nowhere else.");
+		ImGui::SameLine();
+		ImGui::TextDisabled(signedIn ? "Uses your GitHub sign-in."
+		                             : "Sign in with GitHub above first.");
 		if (st.initialCommit)
 			ImGui::TextDisabled("Make the first commit before setting up the remote.");
 
@@ -1335,9 +1323,10 @@ void drawRepositorySection(AppContext& ctx)
 	}
 
 	// ── Access token ─────────────────────────────────────────────────────────
-	// Available whatever route the remote took: the GitHub-create flow above
-	// stores its token on the way through, but a pasted URL, a cloned project
-	// or an expired token all end up here, with no repository being created.
+	// For a pasted URL on a host the GitHub sign-in does not reach: GitLab,
+	// Azure DevOps, GitHub Enterprise, anything self-hosted. A github.com remote
+	// pushes and pulls with the sign-in (the account row above writes the very
+	// entry this form would), so it gets no token field of its own.
 	ImGui::Spacing();
 	ImGui::SeparatorText("Access token");
 
@@ -1350,6 +1339,12 @@ void drawRepositorySection(AppContext& ctx)
 	{
 		ImGui::TextWrapped("origin uses SSH, which authenticates with your SSH key. "
 		                   "Access tokens apply to https:// remotes only.");
+	}
+	else if (hostFromRemote(remote) == HE::Sc::GitHubTokenStore::kHost)
+	{
+		ImGui::TextWrapped("origin is on github.com, which uses your GitHub sign-in "
+		                   "(GitHub account, above) for pushing and pulling. No token "
+		                   "to create by hand.");
 	}
 	else
 	{
@@ -1391,7 +1386,8 @@ void drawRepositorySection(AppContext& ctx)
 			std::fill(std::begin(s_credToken), std::end(s_credToken), '\0');
 		}
 		ImGui::EndDisabled();
-		ImGui::TextDisabled("GitHub: github.com/settings/tokens — classic, 'repo' scope.");
+		ImGui::TextDisabled("GitLab: a personal access token with write_repository. "
+		                    "Azure DevOps: a PAT with Code (Read & write).");
 	}
 
 	drawGitMessages(git);
@@ -1531,8 +1527,8 @@ void drawSourceControlPage(AppContext& ctx)
 	drawGitSetupSection(ctx);
 
 	// Between the two halves: it needs git (the first) and works without a
-	// project (unlike the second). The token fields further down stay as the
-	// way in for GitLab, Azure DevOps and anyone who prefers a token.
+	// project (unlike the second). The only way in for github.com; the token
+	// form further down is for GitLab, Azure DevOps and other hosts.
 	ImGui::Spacing();
 	ImGui::SeparatorText("GitHub account");
 	GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/false);

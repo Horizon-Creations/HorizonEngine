@@ -3648,10 +3648,9 @@ namespace
 	  "hosting side; the other direction is the awkward one.",
 	  "", "editor#preferences" },
 	{ "Source Control/Create & push", "Create & push",
-	  "Creates the repository on GitHub with the token above, points this project "
-	  "at it and pushes what is committed. The token is handed to git's "
-	  "credential helper and wiped from the field, never written to a project "
-	  "file.",
+	  "Creates the repository on the GitHub account you signed in with above, "
+	  "points this project at it and pushes what is committed. Needs the GitHub "
+	  "sign-in; there is no token to type.",
 	  "", "editor#preferences" },
 	// "Clone from GitHub..." and the dialog it opens (GitCloneDialog.cpp), which
 	// pushes this same scope — the reverse of Create & push, one chapter.
@@ -3660,20 +3659,15 @@ namespace
 	  "is cloned into a new folder, Git LFS assets included, and opened as a "
 	  "project. The project open now is not touched.",
 	  "", "editor#preferences" },
-	{ "Source Control/Load my repositories", "",
-	  "Asks GitHub for every repository the token above can see — yours, and "
-	  "those of organisations you belong to — newest first. The token is sent in "
-	  "a request header only, never in an address.",
-	  "", "editor#preferences" },
 	{ "Source Control/Browse##clone", "Browse",
 	  "Choose the folder the clone goes INTO. A new folder with the name below "
 	  "is made there for the repository.",
 	  "", "editor#preferences" },
 	{ "Source Control/Clone", "",
 	  "Clones the chosen repository into the folder shown above it, which must "
-	  "be new or empty, then downloads its Git LFS assets. The token goes to "
-	  "git's credential helper, so later pushes and pulls need no retyping. "
-	  "Once started it cannot be stopped.",
+	  "be new or empty, then downloads its Git LFS assets. It uses your GitHub "
+	  "sign-in, and so do later pushes and pulls. Once started it cannot be "
+	  "stopped.",
 	  "", "editor#preferences" },
 	{ "Source Control/Download LFS assets again", "",
 	  "The repository was cloned but its large files were not downloaded — "
@@ -3690,9 +3684,10 @@ namespace
 	  "when somebody else made the repository.",
 	  "", "editor#preferences" },
 	{ "Source Control/Save token", "Save token",
-	  "Stores an access token for pushing and pulling. It goes straight into the "
-	  "system keychain through git's credential helper; the engine keeps no copy "
-	  "and no project or engine file ever contains it.",
+	  "Stores an access token for pushing and pulling on GitLab, Azure DevOps "
+	  "and other hosts (github.com uses the GitHub sign-in instead). It goes "
+	  "straight into the system keychain through git's credential helper; the "
+	  "engine keeps no copy and no project or engine file ever contains it.",
 	  "", "editor#preferences" },
 	// The GitHub sign-in (GitHubSignIn.cpp, GitHubSignInView.cpp): the account
 	// row on this page and in the clone dialog, and the code dialog itself.
@@ -3700,8 +3695,8 @@ namespace
 	  "Signs the editor in to your GitHub account without a token to create by "
 	  "hand. You get a short code, approve it on github.com in your browser, and "
 	  "the editor receives access to your repositories and gists. It is kept in "
-	  "git's credential helper (the system keychain), exactly where a pasted "
-	  "token would go.",
+	  "git's credential helper (the system keychain), where git finds it for "
+	  "every push and pull.",
 	  "", "editor#github" },
 	{ "Source Control/Sign out", "Sign out",
 	  "Removes the GitHub token from git's credential helper, so neither the "
@@ -3724,8 +3719,8 @@ namespace
 	{ "Source Control/Try again", "Try again",
 	  "Starts the sign-in over with a fresh code.",
 	  "", "editor#github" },
-	// The clone dialog's second "Load my repositories": shown when signed in,
-	// it lists with the sign-in instead of the token field below it.
+	// The clone dialog's "Load my repositories", shown once signed in. The
+	// suffix stayed from when a token field had a button of the same name.
 	{ "Source Control/Load my repositories##signin", "Load my repositories",
 	  "Asks GitHub for every repository your sign-in can see \xe2\x80\x94 yours, and "
 	  "those of organisations you belong to \xe2\x80\x94 newest first. No token to "
