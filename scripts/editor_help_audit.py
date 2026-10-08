@@ -79,6 +79,10 @@ IGNORE = {
     # test in tests/test_editor_help.cpp instead.
     (None, "Show me"), (None, "Start"), (None, "Online"),
     ("Documentation", "Open the manual online"),
+    # The Audio Mixer's per-strip EQ button: the same story — drawStrip() sits
+    # above DrawAudioMixerWindow, which pushes the "Audio Mixer" scope. Covered
+    # by its explicit helpForKey("Audio Mixer/EQ").
+    (None, "EQ"),
     # The one literal entry in the Target Class dropdown (the others are asset
     # names, built at run time and invisible here). It is not a control with an
     # explanation of its own: "HorizonCode Node/Target Class" is the entry, and it
