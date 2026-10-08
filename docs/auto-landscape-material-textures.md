@@ -194,10 +194,11 @@ Schichtnamen in ASCII-Englisch, Schema `<Schicht>_<Map>.png`:
 | Erde | `Dirt_Albedo.png` | `Dirt_Normal.png` | `Dirt_Roughness.png` | `Dirt_AO.png` | `Dirt_Height.png` | trockener Waldboden / Erde mit kleinen Steinen |
 | Stein | `Rock_Albedo.png` | `Rock_Normal.png` | `Rock_Roughness.png` | `Rock_AO.png` | `Rock_Height.png` | **Felswand / gebrochener Fels**, ohne Moos. Hauptteil der automatischen Verteilung, also die wichtigste Schicht. |
 | Schnee | `Snow_Albedo.png` | `Snow_Normal.png` | `Snow_Roughness.png` | `Snow_AO.png` | `Snow_Height.png` | verharschter Schnee, leicht verweht, nicht reinweiß (Albedo ca. 0,8) |
-| Nasser Boden | `WetGround_Albedo.png` | `WetGround_Normal.png` | `WetGround_Roughness.png` | `WetGround_AO.png` | `WetGround_Height.png` | nasser Schlamm / matschige Erde (Rand und Grund von Pfützen) |
+| Nasser Boden | `WetGround_Albedo.png` | `WetGround_Normal.png` | `WetGround_Roughness.png` | `WetGround_AO.png` | `WetGround_Height.png` | nasser Schlamm / matschige Erde (Rand und Grund von Pfützen). **Entfällt seit Thema 177, Schritt 3** (§16): Der nasse Rand ist ein Overlay auf der Schicht darunter, das Auto-Material liest diese Schicht nicht mehr. Wer das Set trotzdem liefert, wird gepackt, aber nicht gelesen. |
 
 Das **Wasser der Pfütze** ist keine Textur. Es entsteht prozedural: flache Normale,
-Rauheit ≈ 0,05 und abgedunkelte Albedo über dem, was darunter liegt. Eine
+Rauheit ≈ 0,05 und abgedunkelte Albedo über dem, was darunter liegt. **Seit Schritt 3
+von Thema 177 gilt das auch für den nassen Rand** (§16). Eine
 Wellen-Normal-Map ist **nicht** nötig (Wetter-Kopplung und Animation gehören nicht
 zum Thema). Der freie Slot `heTexP3` hält sie sich nur offen.
 
@@ -871,22 +872,24 @@ Maske):
 | Boden | Gras, darauf Erde in fBm-Flecken (Welt-Rauschen) **plus** ein Erdgürtel knapp unter der Felsgrenze (Geröll) | *Dirt Amount* 0,35, *Dirt Patch Size* 24 m |
 | Fels | `smoothstep(Rock Slope, + Rock Blend, slope)`, slope = 1 − N.y der **geometrischen** Normale | *Rock Slope* 0,12 (≈ 28°), *Rock Blend* 0,12 (voll bei ≈ 40°) |
 | Schnee | Welthöhe über *Snow Height*, über *Snow Blend* geschlossen, nicht auf Flächen steiler als *Snow Max Slope* (dort bleibt Fels) | 60 m, 6 m, 0,45 (≈ 57°) |
-| Pfützen | flacher Boden (slope < *Puddle Max Slope*), ohne Schnee, in den **Senken eines zweiten Welt-Rauschfelds**: nasser Rand (Wet-Ground-Schicht) und in der Mitte stehendes Wasser | *Puddle Amount* 0,32, *Puddle Size* 10 m, *Puddle Max Slope* 0,03 (≈ 14°) |
-| Wasser | Albedo × 0,35, Rauheit 0,05, Normale = geometrische Normale | fest |
+| Pfützen | flacher Boden (slope < *Puddle Max Slope*), ohne Schnee, in den **Senken eines zweiten Welt-Rauschfelds**: nasser Rand und in der Mitte stehendes Wasser. **Overlay auf der Schicht darunter, keine eigene Schicht** (§16) | *Puddle Amount* 0,32, *Puddle Size* 10 m, *Puddle Max Slope* 0,03 (≈ 14°) |
+| Nasser Rand | Albedo × 0,6, Rauheit × 0,5; Normale und AO bleiben die des Bodens | fest |
+| Wasser | Albedo × 0,35 des **trockenen** Bodens, Rauheit 0,05, Normale = geometrische Normale | fest |
 
 - **Stein ist der Hauptteil** der automatischen Verteilung: Er beginnt schon bei ≈ 28°,
   also auf jedem nennenswerten Hang.
 - **Höhen-Überblendung** (*Height Blend*, Vorgabe 1): Jeder Übergang wird um die
   Höhendifferenz der beteiligten Schichten (Masken-B) verschoben. Hohe Fels-Texel
   stechen vor der Steigungsgrenze durch das Gras. Hoher Schnee deckt zuerst. Wasser füllt
-  zuerst die tiefen Texel des nassen Bodens.
-- **Kachelung im Welt-Raum** (*Ground Tile Size* 2 m für Gras/Erde/nassen Boden,
+  zuerst die tiefen Texel des Bodens darunter (Masken-B von Gras/Erde an dieser Stelle).
+- **Kachelung im Welt-Raum** (*Ground Tile Size* 2 m für Gras/Erde,
   *Rock Tile Size* 4 m für Fels/Schnee, wie §4.1), nicht über das 0..1-UV des Terrains.
   Ein Texel ist damit auf einem 100-m- und einem 4-km-Landscape gleich groß.
   `TerrainComponent::uvTiling` wirkt auf dieses Material deshalb nicht.
 - **Bombing** (§9) für Fels, Gras und Erde: je ein Hex-Gitter pro Schicht, geteilt von
-  Albedo/Normal/Maske, eigener Seed (11/23/37), *Bombing Cell* 0,5. Schnee und nasser
-  Boden werden plain gelesen (§9.4). Damit sind es 33 statt 45 Texturzugriffe. Der
+  Albedo/Normal/Maske, eigener Seed (11/23/37), *Bombing Cell* 0,5. Schnee wird
+  plain gelesen (§9.4). Damit sind es **30 statt 36** Texturzugriffe (27 gebombt + 3 Schnee;
+  bis Thema 177, Schritt 3, waren es 33 mit dem plain gelesenen nassen Boden). Der
   Static Switch **„Texture Bombing“** schaltet die gebombten Zugriffe zur Compile-Zeit
   auf plain. Eine Instanz mit dem Schalter aus ist eine eigene Permutation; der
   *Bombing Cell*-Parameter fällt dort heraus (13 statt 14 Slots).
@@ -1441,6 +1444,8 @@ MD5 gegen `api.polyhaven.com/files/<id>` geprüft). Poly Haven ist CC0.
 - **WetGround fehlt.** Entscheidung der Queen: Platzhalter, bis der Mensch das Set nachliefert.
   Die Schicht zeigt dann das hochskalierte Schachbrett mit L-Marke. Im Auto-Material
   taucht es am nassen Rand der Pfützen auf. Das ist ein Platzhalter, kein Fehler.
+  **Überholt durch Thema 177, Schritt 3 (§16):** Das Auto-Material liest die Schicht nicht
+  mehr, die Pfützen sind ein Overlay. Das Set wird nicht mehr gebraucht.
 - **AO fehlt bei allen vier.** Poly Haven bietet AO als eigene Datei an (`_ao_`, oder `_arm_`
   mit AO in R und Rauheit in G). Das Skript nimmt sie automatisch mit, sobald sie im
   Schichtordner liegen. Ohne AO ist Masken-R weiß, also kein AO-Anteil.
@@ -1538,7 +1543,8 @@ diesem Schritt **nicht** dabei, sie sind hier also nicht ausprobiert.
 
 ### 14.6 Was offen bleibt
 
-- **WetGround** nachliefern, dann `stage_polyhaven.py` und `--pack` neu laufen lassen.
+- ~~**WetGround** nachliefern, dann `stage_polyhaven.py` und `--pack` neu laufen lassen.~~
+  Entfällt: Pfützen sind seit Thema 177, Schritt 3 ein Overlay (§16).
 - **AO** der vier Schichten nachladen (optional).
 - **Bildprüfung** mit den echten Texturen auf den Backends, die Vorgaben aus §10.2
   (Steigungen, Pfützenmenge, Kachelgrößen) nachstellen, Triplanar-Frage für den Fels
@@ -1611,7 +1617,7 @@ Was die Bilder zeigen (`echte-texturen-vier-ansichten.png`, `draufsicht-platzhal
   §10.5 (Triplanar/Biplanar, 2 bis 3-mal so viele Zugriffe); jetzt mit Bild belegt, noch nicht
   entschieden.
 - **Pfützen** zeigen am Rand das **WetGround-Platzhalter-Schachbrett** (L-Marken), wie
-  erwartet (§14.1). Die Wasserfarbe hängt stark vom Himmel (tief marineblau von oben, hellblau
+  erwartet (§14.1). *Behoben in Schritt 3: Overlay statt Schicht, §16.* Die Wasserfarbe hängt stark vom Himmel (tief marineblau von oben, hellblau
   schräg).
 - Schnee ist hell und grau (Mittel sRGB 165), nicht reinweiß (§14.4); im Bild kein Problem.
 
@@ -1692,7 +1698,7 @@ Schnee unter Schatten oder Bewölkung; der Editor im Normalbetrieb (nur der Dump
 - **Fels am Steilhang**: Triplanar/Biplanar entscheiden (§10.5), das Bild liegt jetzt vor. Ein
   grauerer Fels wäre eine Frage der Wahl des Sets (`rocks_ground_08` ist sandfarben).
 - **AO**: übernehmen (dann Snow normieren) oder weglassen (§15.3).
-- **WetGround** vom Menschen, danach `stage_polyhaven.py` und `--pack` neu.
+- ~~**WetGround** vom Menschen, danach `stage_polyhaven.py` und `--pack` neu.~~ Entfällt (§16).
 - Dauerhafter Speicherort der 2K-Texturen und der Rohquellen (§14.5), BC7 für Arrays (§8.5).
 
 ### 15.6 D3D11, D3D12, Vulkan
@@ -1703,3 +1709,104 @@ Auf diesem Gerät nicht lauffähig, also **nicht gerendert**. Rezept auf NN-WS03
 Neulinken des Editors neu, §14.5). Die Metal-/GL-Zahlen aus §15.2 sind die Vergleichswerte.
 Mips sind hier kein Hindernis: D3D und Vulkan erzeugen für `mipLevels = 1` keine Kette selbst, aber
 die drei Arrays, die das Auto-Material liest, tragen 12 gebackene Mips (§14.3).
+
+## 16. Pfützen als Overlay statt WetGround-Schicht (Thema 177, Schritt 3)
+
+Stand: derselbe Zweig, MacBook Air (Apple M5), Release-Build, **Metal und OpenGL** (kein
+D3D11/D3D12/Vulkan, §15.6). Geändert ist der Builder `AutoLandscapeMaterial.cpp`, das
+ausgelieferte Asset `M_AutoLandscape.hasset` (neu erzeugt) und ein Test; Arrays, Texturen,
+Shader und Backends sind unverändert. Bilder: `docs/img/auto-landscape-pfuetzen-overlay-2026-10-08/`.
+
+### 16.1 Warum
+
+Das WetGround-Set hat der Mensch nicht geliefert (§14.1), und der Platzhalter zeigte am
+Pfützenrand ein Schachbrett mit L-Marken (§15.2). Eine eigene Schicht für nassen Boden braucht
+außerdem ein weiteres Set mit fünf Maps und drei Texturzugriffe pro Pixel. Nasser Boden ist aber
+derselbe Boden, nur dunkler und glatter.
+
+### 16.2 Was jetzt passiert
+
+Die Masken sind unverändert (Rand = `wetMask`, Wasser = `waterMask`, §10.2). Statt `blend(s2, wet,
+wetMask)` liegt das Overlay auf **s2**, dem Ergebnis aus Gras/Erde/Fels/Schnee:
+
+| Stufe | Albedo | Rauheit | Normale |
+|---|---|---|---|
+| Nasser Rand (`wetMask`) | × 0,6 | × 0,5 | die des Bodens |
+| Wasser (`waterMask`) | × 0,35 des **trockenen** Bodens | 0,05 | geometrische Normale |
+
+- AO bleibt die des Bodens. Es gibt **keinen neuen Parameter** (weiter 14, `kAutoLandscapeParamCount`):
+  0,6 / 0,5 / 0,35 / 0,05 sind feste Werte im Builder.
+- Wasser füllt zuerst die tiefen Texel **des Bodens darunter**: Die Höhen-Verschiebung liest
+  Masken-B von s2 statt der WetGround-Höhe. Der Wasseranteil ändert sich dadurch leicht (§16.3).
+- Der Slice 4 (WetGround) bleibt in den drei Arrays, wird aber **nicht gelesen**.
+  `AutoLandscapeLayer::WetGround` bleibt als Slice-Nummer stehen. **Slice 4 aus den Arrays zu
+  nehmen ist keine Aufräumarbeit, sondern eine UUID-Kollision:** `landscape_tex_gen` vergibt die
+  Array-Ids als `0x400 + Schichten × 3 + Map`. Mit vier Schichten rutschten die Arrays von
+  `0x40F..0x411` auf `0x40C..0x40E`, das sind genau die ids der WetGround-Einzeltexturen. Außerdem
+  änderte es das Layout der lokalen 2K-Arrays aus Schritt 1 (`out/landscape-real`). Der Preis für
+  den toten Slice: 20 % der Array-Größe (≈ 64 MiB von 320 MiB bei 2K).
+- **Texturzugriffe: 33 → 30** (gezählt im erzeugten GLSL: 27 `textureGrad` + 3 `texture`;
+  ohne Bombing 15 → 12).
+
+### 16.3 Messung
+
+Metal, Draufsicht `HE_DUMP_AUTOLAND` (§10.4, `ana158auto.py masks`), vorher gegen nachher:
+
+| Region Ebene | vorher | nachher |
+|---|---|---|
+| Erde (R, `=ground`) | 20,5 % | 20,5 % |
+| Nasser Rand (G, `=ground`) | 22,9 % | 22,9 % |
+| Wasser (B, `=masks`), Anteil > 128 | 12,8 % | 13,1 % |
+| Wasser, Mittel B | 29,2 | 30,2 |
+
+Rand, Erde und flacher Boden bleiben **bitgleich**, nur das Wasser ändert sich um 0,3 Punkte (die
+Höhen-Verschiebung kommt jetzt vom Gras/Erde-Boden). Alle Erwartungen von `ana158auto.py` sind
+erfüllt (Fels, Schnee, Pfützen nur auf Flachem, kein Wasser unter Schnee).
+
+Das Bild (`pfuetzen-vorher-nachher.png`, oben vorher, unten nachher; Metal, deferred, TOD 0,6,
+Kamera (−63, 302,6, −28), Nick −20°, Yaw 90°): vorher ein blaues Schachbrett mit gelben L-Marken in
+den Pfützen und am Rand, nachher das Gras und die Erde, dunkler und glatter am Rand, dazu eine
+Wasserfläche, die den Himmel spiegelt. In der Draufsicht (`pfuetzen-draufsicht-schraeg.png`) werden aus
+den dunkelblau gepunkteten Flecken dunkle Bodenflecken in der Farbe des Untergrunds. Grundfarbe und
+Rand-Breite wurden nicht nachgestellt, die Faktoren sind eine Geschmacksfrage und ein erster Wert.
+
+| Metal gegen OpenGL (deferred) | Mittel \|d\| |
+|---|---|
+| Nahaufnahme der Pfützen | 0,007 |
+| Schrägansicht Ebene | 0,010 |
+| Masken `=masks`, `=ground` | 0,000 |
+
+(Forward-Draufsicht: Ebene 0,000, der Hangfuß unterscheidet sich weiter wie in §15.2 wegen des
+GL-Forward-Schattens bei Graph-Materialien.)
+
+### 16.4 Tests
+
+- `Auto landscape material: three arrays, …` prüft jetzt, dass **keine** Array-Lesung den Slice 4
+  verlangt (jede Lesung nimmt ihre Slice-Nummer aus einer Konstante darunter; Positivkontrolle:
+  Slice 3 wird gelesen; 21 Lesknoten: 3 gebombte Schichten × 3 Maps × (plain + gebombt) + 3 für
+  Schnee). **Negativkontrolle:** die `layer(WetGround, …)`-Zeile wieder eingesetzt, der Test wird
+  rot (4 Fehler), Zeile wieder raus, grün.
+- `The shipped M_AutoLandscape.hasset is exactly what the builder makes` stimmt mit dem neu erzeugten
+  Asset überein (Negativkontrolle: mit dem alten Asset schlägt er an).
+- Ganze Datei `test_material_graph.cpp` (92 Fälle, 10064 Prüfungen) grün. Das ist **nicht** das ganze
+  `he_tests`: Gebaut und gelinkt wurden nur diese Datei und drei Rendering-Hilfsdateien.
+  Volle Läufe macht die CI.
+
+### 16.5 Was offen bleibt
+
+- **D3D11/D3D12/Vulkan** nicht gerendert (Schritt 4). Die neuen Knoten sind Standardknoten
+  (Multiply/Lerp/Split auf vorhandenen Werten), der Shadertext wird wie bisher nur durch die
+  Cross-Compile-Tests geprüft; ein Compile-Fehler wäre dort schon aufgefallen, bildgleich ist es
+  damit nicht belegt.
+- Slice 4 aus den Arrays nehmen: Id-Verschiebung (§16.2), neue Arrays und neue Platzhalter-
+  Assets, `HE_DUMP_TEXARRAY`/`HE_DUMP_TEXBOMB` (fünf Streifen) und die `ana158*`-Skripte anpassen.
+  Lohnt sich erst zusammen mit der Wahl der Kompression (BC7, §8.5).
+- Die Wasserfarbe hängt weiter vom Himmel (§15.2), die Faktoren (0,6 / 0,5 / 0,35) sind ungetunt.
+
+### 16.6 Nebenbefund: das „flackernde“ `bmp=NO` von `cap158auto.sh`
+
+Die leere Aufnahme mit 0-Byte-Log (§15.1, Hive-Lesson 132) hat eine feste Ursache: `script(1)` endet
+mit Code 1, wenn stdin der von einem Agent-Harness vererbte Deskriptor ist. Mit `</dev/null` am
+`script`-Aufruf läuft jede Aufnahme; das Skript tut das jetzt. (Ohne die Umleitung schlugen hier alle
+fünf Wiederholungen in Folge fehl, mit ihr gelangen alle 15 Aufnahmen dieses Schritts beim ersten Versuch.)
+
