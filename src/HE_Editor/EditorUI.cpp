@@ -27,6 +27,7 @@
 #include "ExportDialogPanel.h"           // Build > Export Project modal + packing worker
 #include "GameLogicBuildPanel.h"         // Build > Build and Reload Game Logic (C++ projects)
 #include "ContentBrowserPanel.h"         // bottom dock: folder tree + asset grid
+#include "GraphViewStore.h"               // remembered graph pan/zoom, per project
 #include "EditorToolbar.h"                // setRevealAssetHook — the asset tabs' header button
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
@@ -468,6 +469,54 @@ static void HideSceneTabBarOnce()
 
 // ─── render ───────────────────────────────────────────────────────────────────
 
+// ─── Remembered graph views ───────────────────────────────────────────────────
+// The persistent half of GraphViewStore: one JSON table per project in the
+// editor's config ("graphViews:<project path>"), {"mat:Materials/X.hasset":
+// [panX, panY, zoom], …}. Nothing about an asset is touched.
+namespace
+{
+std::string s_graphViewProject;   // the project the in-memory table belongs to
+
+std::string graphViewsKey(const std::string& project) { return "graphViews:" + project; }
+
+void graphViewsLoad(GlobalState& gs, const std::string& project)
+{
+	GraphViewStore::Table& t = GraphViewStore::table();
+	t.views.clear();
+	t.dirty = false;
+	if (project.empty()) return;
+	const std::string raw = gs.getCustomConfigString(graphViewsKey(project), "");
+	if (raw.empty()) return;
+	const nlohmann::json j = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false);
+	if (j.is_discarded() || !j.is_object()) return;
+	for (auto it = j.begin(); it != j.end(); ++it)
+		if (it.value().is_array() && it.value().size() == 3 &&
+		    it.value()[0].is_number() && it.value()[1].is_number() && it.value()[2].is_number())
+			t.views[it.key()] = { it.value()[0].get<float>(), it.value()[1].get<float>(),
+			                      it.value()[2].get<float>() };
+}
+
+bool graphViewsStore(GlobalState& gs, const std::string& project)
+{
+	GraphViewStore::Table& t = GraphViewStore::table();
+	if (project.empty() || !t.dirty) return false;
+	nlohmann::json j = nlohmann::json::object();
+	for (const auto& [key, v] : t.views) j[key] = nlohmann::json::array({ v.panX, v.panY, v.zoom });
+	// "replace": a path with invalid UTF-8 must not abort the editor in dump().
+	gs.setCustomConfigEntry(graphViewsKey(project),
+		j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+	t.dirty = false;
+	return true;
+}
+} // namespace
+
+void EditorUI::flushGraphViews(AppContext& ctx, bool write)
+{
+	if (!ctx.globalState) return;
+	if (graphViewsStore(*ctx.globalState, s_graphViewProject) && write)
+		ctx.globalState->writeConfig();
+}
+
 void EditorUI::render(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -478,6 +527,24 @@ void EditorUI::render(AppContext& ctx, float dt)
     EditorInput::trackpadPointer(ctx);
     // …and publish this frame's pinch (macOS), before any canvas asks for it.
     EditorInput::beginFrame();
+
+    // The remembered graph views: follow the project, and write them a moment
+    // after they stop moving (a pan is dozens of changes a second; the config
+    // file is rewritten once it has been quiet).
+    if (ctx.globalState)
+    {
+        const std::string project = (ctx.projectLoaded && ctx.projectManager)
+            ? ctx.projectManager->currentProject().path : std::string();
+        if (project != s_graphViewProject)
+        {
+            flushGraphViews(ctx);                       // the project we are leaving
+            s_graphViewProject = project;
+            graphViewsLoad(*ctx.globalState, project);  // the one we are entering
+        }
+        else if (GraphViewStore::table().dirty &&
+                 ImGui::GetTime() - GraphViewStore::table().changedAt > 1.5)
+            flushGraphViews(ctx);
+    }
 
     ImGuiIO& io = ImGui::GetIO();
 

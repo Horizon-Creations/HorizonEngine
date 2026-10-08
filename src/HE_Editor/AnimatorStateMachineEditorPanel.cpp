@@ -593,6 +593,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			popWidgetScale();
 		};
 
+		if (st.geState.viewKey.empty() && !st.relPath.empty()) st.geState.viewKey = "asm:" + st.relPath;
 		const bool changed = GraphEditor::draw("##asm_graphcanvas", m, st.geState, avail);
 		// liveEdit is the same answer mid-gesture: a node being dragged has
 		// already moved. Folded in here because structuralEdit only marks the

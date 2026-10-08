@@ -102,6 +102,13 @@ struct State
     ImVec2 pan  = ImVec2(40.0f, 40.0f);
     float  zoom = 1.0f;
 
+    // Where this graph was last looked at is remembered under this key (GraphViewStore.h):
+    // set by the host before draw() — an asset-unique string — and left empty for a
+    // canvas that should not remember (a throwaway preview). The first draw adopts
+    // the stored view; every later one records the current one.
+    std::string viewKey;
+    bool        viewRestored = false;
+
     int              selected = 0;   // primary selection (0 = none)
     std::vector<int> selection;      // all selected ids (multi-select)
 

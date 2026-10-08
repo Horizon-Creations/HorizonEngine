@@ -1411,6 +1411,10 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 			else
 				g = LSState{};
 			g.graphFor = key;
+			// The canvas remembers where it was looked at, per graph (the class's
+			// path, or "Level Script" / "Game Instance").
+			g.ge.viewKey      = "hc:" + key;
+			g.ge.viewRestored = false;
 			// The two editor-owned graphs are keyed by their titles here but by
 			// their reserved tab paths everywhere the trace is concerned; a class
 			// is its content path in both worlds.

@@ -12019,6 +12019,11 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);
 	globalstate.setCustomConfigEntry("SSRMaxRoughness",           m_editorConfig.SSRMaxRoughness);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
+	// The graph views that have not been written yet (a pan just before quitting).
+	{
+		AppContext ctx = makeContext();
+		EditorUI::flushGraphViews(ctx, /*write=*/false);
+	}
 	globalstate.writeConfig();
 }
 

@@ -1,4 +1,5 @@
 #include "GraphEditor.h"
+#include "GraphViewStore.h" // the remembered pan/zoom
 #include "EditorInput.h" // pointer-device grammar (trackpad swipe pans, modifier-scroll zooms)
 #include "EditorWidgets.h" // WrapText — header-only, so the test binary needs no extra link
 #include <imgui_internal.h> // ImBezierCubicCalc: the wire double-click samples the drawn curve
@@ -117,6 +118,24 @@ const ImVec2* findPin(const Drawn& n, int pinId, bool input)
 
 bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
 {
+    // Remembered view: adopt it on the first frame, then record each frame's view
+    // (the one the user left it in at the end of the last frame).
+    if (!st.viewKey.empty())
+    {
+        if (!st.viewRestored)
+        {
+            st.viewRestored = true;
+            GraphViewStore::View v;
+            if (GraphViewStore::get(st.viewKey, v))
+            {
+                st.pan  = ImVec2(v.panX, v.panY);
+                st.zoom = std::clamp(v.zoom, 0.3f, 2.5f);
+            }
+        }
+        else
+            GraphViewStore::put(st.viewKey, st.pan.x, st.pan.y, st.zoom, ImGui::GetTime());
+    }
+
     bool changed = false;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetCursorScreenPos();

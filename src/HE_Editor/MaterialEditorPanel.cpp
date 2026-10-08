@@ -1420,6 +1420,8 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	// The component takes its origin from the cursor screen-pos at entry — capture the
 	// same point so paste/duplicate can map the mouse into graph space afterwards.
 	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
+	// Opens where it was left (GraphViewStore.h) — view state, never the asset's.
+	if (st.geState.viewKey.empty() && !st.relPath.empty()) st.geState.viewKey = "mat:" + st.relPath;
 	const bool changed = GraphEditor::draw("##mat_graphcanvas", m, st.geState, avail);
 	if (changed) structuralEdit = true; // add / connect / delete / move → snapshot
 	// Mid-drag the node has already moved. Kept OUT of structuralEdit on

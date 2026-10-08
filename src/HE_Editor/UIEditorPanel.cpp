@@ -6540,6 +6540,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Submitted before the canvas so it gets the click (see FitCorner).
 	const FitCorner gFit = fitCornerSubmit("##uigfit", canvasOrigin, avail);
 	if (gFit.pressed) { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
+	if (st.geState.viewKey.empty() && !st.relPath.empty()) st.geState.viewKey = "widget:" + st.relPath;
 	const bool changed = GraphEditor::draw("##hc_graphcanvas", m, st.geState, avail);
 	fitCornerDraw(gFit);
 	st.selectedGraphNode = st.geState.selected;
