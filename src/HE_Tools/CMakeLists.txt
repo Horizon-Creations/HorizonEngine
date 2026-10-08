@@ -195,5 +195,17 @@ add_executable(landscape_tex_gen
 target_link_libraries(landscape_tex_gen PRIVATE HorizonCore)
 target_include_directories(landscape_tex_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── weather_sound_gen.exe (the engine's weather sounds) ──────────────────────
+# Same bargain: weather_sound_gen <out-dir> writes Rain/Wind/Snow/Storm/Thunder
+# .hasset files (Audio, PCM16) via ContentManager, synthesised from seeded noise
+# so there is nothing third-party to license. Run manually to (re)populate
+# EditorDeps/EngineContent/Audio/Weather; the outputs are committed, so this is
+# not part of the normal build graph.
+add_executable(weather_sound_gen
+    src/WeatherSoundGen/main.cpp
+)
+target_link_libraries(weather_sound_gen PRIVATE HorizonCore)
+target_include_directories(weather_sound_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
 # HorizonTools is NEVER linked into HorizonGame or any runtime target.
 # It is an editor/build-time only dependency.
