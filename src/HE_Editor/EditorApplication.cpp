@@ -24,6 +24,7 @@
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
@@ -64,6 +65,7 @@
 #include <Scripting/ScriptTypes.h> // setScriptLogTag — the project's script log prefix
 #include <Hpak/ProjectExporter.h>  // sceneUuidForPath + levelScriptKeyForUuid: the level script's key in PIE
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <material/MaterialShaderBake.h>
@@ -95,6 +97,7 @@
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/HcWatchEvents.h>            // horizon.hc.watch / he::hc::watch delivery
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/TimerSystem.h>
@@ -123,6 +126,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -1330,6 +1334,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
+	m_editorConfig.GIShadowQuality             = globalstate.getCustomConfigInt("GIShadowQuality",            m_editorConfig.GIShadowQuality);
 	m_editorConfig.GIReflectionsEnabled        = globalstate.getCustomConfigBool("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	m_editorConfig.GIReflIntensity             = globalstate.getCustomConfigFloat("GIReflIntensity",          m_editorConfig.GIReflIntensity);
 	m_editorConfig.GIReflMaxRoughness          = globalstate.getCustomConfigFloat("GIReflMaxRoughness",       m_editorConfig.GIReflMaxRoughness);
@@ -1518,6 +1523,19 @@ void EditorApplication::OnInit()
 		g_host.entities = &m_entityHost;
 		g_host.antiCheat = &m_antiCheat;
 		g_host.net       = &m_netSession;
+		// Script and native subscriptions to HorizonCode variables, routed by the
+		// same HcWatchEvents the packaged game uses (GameApplication::OnInit).
+		// Looked up at call time: outside play there is no script context and no
+		// module, and the dispatcher drops what it cannot deliver.
+		m_gameInstance.runtime().onVariableChanged =
+			[this](HorizonCode::InstanceId owner, const std::string& var,
+			       const HorizonCode::Value& old, const HorizonCode::Value& now,
+			       const std::vector<uint64_t>& tokens)
+			{
+				HcWatchEvents::dispatch(m_gameInstance.runtime(), owner, var, old, now, tokens,
+				                        m_scriptContext.get(), &m_scriptInstances,
+				                        logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+			};
 		// The session's hooks into this host, the same two the packaged game
 		// binds (GameApplication) — a preview that spawned differently from the
 		// shipped build would be a preview of something else.
@@ -1880,14 +1898,29 @@ void EditorApplication::OnInit()
 			splashStatus("Loading scene " +
 			             std::filesystem::path(sceneAbsPath).stem().string(), 0.9f);
 			SceneSerializer serializer;
+			// Phase timings for the world-streaming baseline (Thema 153): the
+			// whole startup load is one blocking call chain, and its parts
+			// scale differently with entity count and asset count.
+			using Clock = std::chrono::steady_clock;
+			const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+			const Clock::time_point tLoad = Clock::now();
 			bool ok = serializer.load(*m_editorWorld, sceneAbsPath, SerializeFormat::JSON);
 			if (ok)
 			{
+				const Clock::time_point tSync = Clock::now();
 				m_currentScenePath = sceneAbsPath;
 				syncPrefabInstances("startup"); // same order as openScene: before the preload
+				const Clock::time_point tPreload = Clock::now();
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+				const Clock::time_point tWarmup = Clock::now();
 				splashStatus("Compiling material pipelines", 0.95f);
 				warmupWorldMaterials(); // build custom-material pipelines before the first draw
+				const Clock::time_point tEnd = Clock::now();
+				// The entity count is on the SceneLoadTiming line just before.
+				HE_LOG_INFO(Editor, "SceneOpenTiming: loadMs=%.2f prefabSyncMs=%.2f "
+				                    "preloadMs=%.2f warmupMs=%.2f totalMs=%.2f",
+				            ms(tSync - tLoad), ms(tPreload - tSync), ms(tWarmup - tPreload),
+				            ms(tEnd - tWarmup), ms(tEnd - tLoad));
 				HE_LOG_INFO(Editor, "%s",
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
 			}
@@ -2795,7 +2828,16 @@ void EditorApplication::OnRender(float dt)
 	// (registerRemoteAsset, HE_ContentSync) to actually complete once queued —
 	// without this, a passively-triggered download would finish and then sit in
 	// the sink forever, never registered.
-	contentManager().pollAsyncResults(4);
+	// Budgeted by time as well as count, like the game (Thema 153): four large
+	// meshes cost a frame as much as four materials did before. Materials that
+	// arrive are warmed here, so their first draw does not cross-compile.
+	{
+		constexpr size_t kEditorStreamBatch    = 16;
+		constexpr double kEditorStreamBudgetMs = 2.0;
+		const std::vector<HE::UUID> arrived =
+			contentManager().pollAsyncResults(kEditorStreamBatch, kEditorStreamBudgetMs);
+		if (!arrived.empty() && renderer()) renderer()->WarmupMaterials(arrived);
+	}
 
 #ifdef HE_HAVE_LIBSSH2
 	// Apply a freshly fetched EngineContent manifest to ContentManager — see
@@ -2994,10 +3036,14 @@ void EditorApplication::OnRender(float dt)
 			}
 			renderer()->SetAntiAliasingSettings(aa);
 		}
-		renderer()->SetGISettings(IRenderer::GISettings{
-			m_editorConfig.GlobalIlluminationEnabled,
-			m_editorConfig.GIIndirectIntensity,
-			m_editorConfig.GILightRadius});
+		{
+			IRenderer::GISettings gi{
+				m_editorConfig.GlobalIlluminationEnabled,
+				m_editorConfig.GIIndirectIntensity,
+				m_editorConfig.GILightRadius};
+			gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+			renderer()->SetGISettings(gi);
+		}
 		{
 			IRenderer::SSRSettings ssr;
 			ssr.enabled      = m_editorConfig.SSREnabled;
@@ -4118,6 +4164,10 @@ void EditorApplication::OnRender(float dt)
 			// It draws itself only outside play mode (editor furniture), which is
 			// why m_isPlaying travels along rather than being checked here.
 			ViewportPanel::appendGroundGrid(m_editorCamera, m_isPlaying, dbg);
+			// A split scene's streaming cells, coloured by what the game would do
+			// with each from this camera. Editor furniture too: not while playing.
+			if (show.streamingCells && !m_isPlaying && m_editorWorld)
+				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(), dbg);
 
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,
@@ -4464,6 +4514,14 @@ void EditorApplication::OnRender(float dt)
 	// from inside a message handler (NetEvents.h).
 	dispatchNetEvents();
 
+	// ── Frame end: Bind To (docs/bind-to-variable-binding-plan.md §3.4) ──────
+	// The packaged game's line, on uiLive like the rest of the script world:
+	// under the editor's pause the bindings stand still with the widget tick,
+	// and a single step compares once. Should the game view's UI be collected
+	// before this line, the preview shows a bound value one frame after the
+	// shipped game does (not measured; the plan §3.4 accepts it).
+	if (uiLive && m_gameInstance.runtime().exchangeState() > 0) requestRedraw();
+
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// The same last line the packaged game has, after every script and the UI
 	// had their turn (plan §5.3). In preview mode what runs here is log and
@@ -4742,8 +4800,22 @@ void EditorApplication::dumpFrameHeadless()
 			const char* v = std::getenv("HE_DUMP_GI");
 			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
 		}();
-		r->SetGISettings(IRenderer::GISettings{
-			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
+		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
+		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
+		// mask's rays per pixel and its edge-aware filter on any backend.
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
+		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
+		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
+		// history 0.98, no spatial filter. Every backend renders its own.
+		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
+		{
+			gi.shadowRays    = 256;
+			gi.shadowHistory = 0.98f;
+			gi.shadowFilter  = false;
+		}
+		r->SetGISettings(gi);
 	}
 	{
 		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
@@ -5041,6 +5113,26 @@ void EditorApplication::dumpFrameHeadless()
 				g.connect(blu, 0, sw, 1);
 				g.connect(sw,  0, out, 0);
 			}
+			else if (std::string(mt) == "chrome" || std::string(mt) == "matte")
+			{
+				// Sky-cube / AO witness (Thema 149): no animation, no params — only
+				// what heLitP takes from the environment. chrome = metallic 1,
+				// roughness 0.05: a mirror ball, the sky cube (heSkyEnv) read along
+				// the reflection, so a mis-oriented cube face shows as a broken or
+				// rotated horizon. matte = metallic 0, roughness 0.9: the diffuse
+				// sky ambient, which heAO darkens where the ball meets the floor.
+				const bool chrome = std::string(mt) == "chrome";
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = g.findNode(col)->p[1] = g.findNode(col)->p[2] = chrome ? 0.95f : 0.8f;
+				const int met = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(met)->p[0] = chrome ? 1.0f : 0.0f;
+				const int rgh = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(rgh)->p[0] = chrome ? 0.05f : 0.9f;
+				g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+				g.connect(met, 0, out, HE::kMatOutputMetallicPin);
+				g.connect(rgh, 0, out, HE::kMatOutputRoughnessPin);
+			}
 			else if (std::string(mt) == "noise")
 			{
 				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.
@@ -5208,6 +5300,13 @@ void EditorApplication::dumpFrameHeadless()
 		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
 		TransformComponent tc;
 		tc.position = m_editorCamera.position() + camFwd * 8.0f;
+		// HE_DUMP_MATTESTPOS="x,y,z": a fixed world position instead — e.g. resting
+		// on the HE_DUMP_SSRTEST floor (top at y = 0, sphere radius 2.5).
+		if (const char* mp = std::getenv("HE_DUMP_MATTESTPOS"); mp && *mp)
+		{
+			glm::vec3 p(0.0f);
+			if (std::sscanf(mp, "%f,%f,%f", &p.x, &p.y, &p.z) == 3) tc.position = p;
+		}
 		reg.emplace<TransformComponent>(e, tc);
 		reg.emplace<MeshComponent>(e, MeshComponent{ meshId });
 		MaterialComponent mc{ matId };
@@ -5613,6 +5712,85 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
+	// ── Engine water witness (HE_DUMP_WATERTEST, Thema 152): the SHIPPED
+	// Engine/Materials/Water.hasset on the engine plane (one quad — the waves are
+	// normals only), 40 m square at y = 0, and no other graph material — the case
+	// in which GL forward handed the translucent water a stale HeLighting (no
+	// clock, no sky). =floor adds a grey opaque slab 1.5 m below so the
+	// transparency has something to show. Frame it with SKYTEST (e.g. CAMY=4
+	// CAMZ=6 PITCH=-25): two shots at different HE_SKY_TIME differ only if the
+	// clock reaches the material, the same time twice is the noise floor.
+	if (const char* wt = std::getenv("HE_DUMP_WATERTEST"); wt && *wt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const HE::UUID waterId = contentManager().loadAsset("Engine/Materials/Water.hasset");
+		const HE::UUID planeId = contentManager().loadAsset("Engine/Meshes/Plane.hasset");
+		if (waterId == HE::UUID{} || planeId == HE::UUID{})
+			HE_LOG_WARN(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST could not load "
+			                          "Engine/Materials/Water.hasset or Engine/Meshes/Plane.hasset");
+		else
+		{
+			auto e = m_editorWorld->createEntity("WaterTest");
+			TransformComponent tc;
+			tc.position = glm::vec3(0.0f, 0.0f, -8.0f);
+			tc.scale    = glm::vec3(40.0f, 1.0f, 40.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
+			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
+			// HE_DUMP_WATERPARAMS="FresnelPower=10;DeepColor=1,0,0": per-entity
+			// overrides, the same MaterialComponent::paramOverrides the Details
+			// panel writes, so a shot pair can show what ONE knob does. Components
+			// left out keep the material's default.
+			if (const char* wp = std::getenv("HE_DUMP_WATERPARAMS"); wp && *wp)
+				if (const MaterialAsset* wm = contentManager().getMaterial(waterId))
+				{
+					std::stringstream all(wp);
+					std::string item;
+					while (std::getline(all, item, ';'))
+					{
+						const size_t eq = item.find('=');
+						if (eq == std::string::npos) continue;
+						MaterialParamOverride ov;
+						ov.name = item.substr(0, eq);
+						size_t slot = 0;
+						while (slot < wm->graphParamNames.size() && wm->graphParamNames[slot] != ov.name) ++slot;
+						if (slot == wm->graphParamNames.size())
+						{
+							HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_WATERPARAMS: no parameter '%s'",
+							            ov.name.c_str());
+							continue;
+						}
+						for (int k = 0; k < 4 && slot * 4 + k < wm->shaderParamData.size(); ++k)
+							ov.value[k] = wm->shaderParamData[slot * 4 + k];
+						std::stringstream vals(item.substr(eq + 1));
+						std::string v;
+						for (int k = 0; k < 4 && std::getline(vals, v, ','); ++k)
+							ov.value[k] = std::strtof(v.c_str(), nullptr);
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERPARAMS %s = (%g, %g, %g, %g)",
+						            ov.name.c_str(), ov.value[0], ov.value[1], ov.value[2], ov.value[3]);
+						wmc.paramOverrides.push_back(std::move(ov));
+					}
+				}
+			if (std::string(wt) == "floor")
+			{
+				MaterialAsset grey;
+				grey.type = HE::AssetType::Material;
+				grey.name = "WaterTestFloor";
+				grey.baseColor[0] = grey.baseColor[1] = grey.baseColor[2] = 0.5f;
+				grey.roughness = 0.8f;
+				auto fe = m_editorWorld->createEntity("WaterTestFloor");
+				TransformComponent ftc;
+				ftc.position = glm::vec3(0.0f, -1.5f, -8.0f);
+				ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+				reg.emplace<TransformComponent>(fe, ftc);
+				reg.emplace<MeshComponent>(fe, MeshComponent{ HE::kDefaultCubeMeshId });
+				reg.emplace<MaterialComponent>(fe,
+					MaterialComponent{ contentManager().registerMaterial(std::move(grey)) });
+			}
+			HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST engine water plane added");
+		}
+	}
+
 	// ── sRGB-texture witness (HE_DUMP_SRGBTEST=1): two cubes side by side, both
 	// textured with the same solid mid-grey (128/255) on a white material. The
 	// LEFT texture is flagged linear, the RIGHT one sRGB. A backend that honours
@@ -5674,11 +5852,20 @@ void EditorApplication::dumpFrameHeadless()
 			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
 		};
 		makeCube("ShadowInstFloor", glm::vec3(0.0f, -0.1f, -12.0f), glm::vec3(30.0f, 0.2f, 30.0f));
+		// =contact (Thema 134): the cubes STAND on the floor, 1 / 2.5 / 4 m tall,
+		// so every shadow runs from a hard contact edge at the foot to a wide
+		// penumbra at the far end — the case where a spatial filter must not
+		// soften what is sharp. The hovering row has no contact edge at all.
+		const bool contact = std::string_view(st) == "contact";
 		for (int i = 0; i < 7; ++i)
-			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), 2.0f, -12.0f),
-			         glm::vec3(1.0f, 1.0f + 0.4f * float(i % 3), 1.0f));
-		HE_LOG_INFO(Editor, "%s",
-			"EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
+		{
+			const float hgt = contact ? 1.0f + 1.5f * float(i % 3) : 1.0f + 0.4f * float(i % 3);
+			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), contact ? 0.5f * hgt : 2.0f, -12.0f),
+			         glm::vec3(1.0f, hgt, 1.0f));
+		}
+		HE_LOG_INFO(Editor, "%s", contact
+			? "EditorApplication: HE_DUMP_SHADOWINSTTEST=contact floor + seven standing cubes added"
+			: "EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
 	}
 
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
@@ -6199,6 +6386,11 @@ void EditorApplication::dumpFrameHeadless()
 	// HE_DUMP_LAYEREDIT (below, AFTER WarmupMaterials) then re-authors that
 	// material's layers the way the Material Editor does — the "the blend works
 	// exactly once" case.
+	//
+	// HE_DUMP_LANDSCAPELAYERS=8 is the eight-layer variant (Thema 158): the same
+	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
+	// orange (7) — the last three on the weightmap's SECOND page, which the
+	// renderer uploads as the right half of the one heLandscapeWeights texture.
 	HE::UUID s_layerMatId{};
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
@@ -6210,11 +6402,18 @@ void EditorApplication::dumpFrameHeadless()
 		HE::MaterialGraph g;
 		const int out = g.addNode(HE::MatNodeType::Output);
 		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
-		g.findNode(lb)->s = "Red\nGreen\nBlue";
-		const float rgb[3][3] = { { 0.90f, 0.10f, 0.10f },
+		const bool eight = std::string_view(ll) == "8";
+		g.findNode(lb)->s = eight ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
+		                          : "Red\nGreen\nBlue";
+		const float rgb[8][3] = { { 0.90f, 0.10f, 0.10f },
 		                          { 0.10f, 0.85f, 0.15f },
-		                          { 0.15f, 0.25f, 0.95f } };
-		for (int i = 0; i < 3; ++i)
+		                          { 0.15f, 0.25f, 0.95f },
+		                          { 0.95f, 0.90f, 0.10f },
+		                          { 0.90f, 0.10f, 0.90f },
+		                          { 0.10f, 0.90f, 0.90f },
+		                          { 0.95f, 0.95f, 0.95f },
+		                          { 0.95f, 0.50f, 0.05f } };
+		for (int i = 0; i < (eight ? 8 : 3); ++i)
 		{
 			const int c = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(c)->p[0] = rgb[i][0];
@@ -6236,7 +6435,10 @@ void EditorApplication::dumpFrameHeadless()
 
 		auto land = m_editorWorld->createEntity("LayerLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 100.0f;
@@ -6248,14 +6450,404 @@ void EditorApplication::dumpFrameHeadless()
 		TerrainPaint::ensureWeightmap(ltc);
 		TerrainPaint::paint(ltc,   0.0f,  0.0f, /*Green*/1, 22.0f, 6.0f, 1.0f);
 		TerrainPaint::paint(ltc, -34.0f, 20.0f, /*Blue*/ 2, 12.0f, 4.0f, 1.0f);
+		if (eight)
+		{
+			TerrainPaint::paint(ltc,  34.0f, -30.0f, /*Yellow*/  3, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,  34.0f,  30.0f, /*Magenta*/ 4, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc, -34.0f, -30.0f, /*White*/   6, 9.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,   0.0f,  40.0f, /*Orange*/  7, 7.0f, 2.0f, 1.0f);
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
 		// The headless dump renders from OnInit, BEFORE the main loop's
 		// SceneSystems::tickWorld — without this the terrain has no chunk
 		// entities yet and there is simply nothing to draw.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
-		HE_LOG_INFO(Editor, "%s",
-			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added "
+			"(%d layers, weightmap %ux%u)", eight ? 8 : 3,
+			TerrainPaint::usesSecondPage(ltc) ? 2 * ltc.weightRes : ltc.weightRes,
+			ltc.weightRes);
+	}
+
+	// ── Texture-array witness (HE_DUMP_TEXARRAY=1, Thema 158 Schritt 3) ──────
+	// A flat 100 m landscape at y=300 with an UNLIT graph material that reads the
+	// three engine texture arrays (T_Landscape_{Albedo,Normal,Mask}_Array, five
+	// slices each) plus one plain 2D texture — all four heTexP slots live, three
+	// of them sampler2DArray. Five stripes across U = slices 0..4 (Grass, Dirt,
+	// Rock, Snow, WetGround); four bands across V = Albedo array / Normal array /
+	// Mask array / the 2D Rock albedo. Unlit, so the frame IS the sampled texels
+	// and no lighting difference between backends can fake or hide a slice.
+	// HE_DUMP_TEXARRAY=slice2 is the negative control: every stripe reads slice 2
+	// (Rock), so only the stripes that were NOT Rock may change. =fallback swaps
+	// the bands for the mismatch paths (missing array, 2D asset in an array slot,
+	// array asset in a 2D slot) — see below.
+	if (const char* ta = std::getenv("HE_DUMP_TEXARRAY"); ta && *ta && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const bool fixedSlice = std::string_view(ta) == "slice2";
+
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		g.findNode(out)->p[0] = 0.0f; // unlit
+		const int raw = g.addNode(HE::MatNodeType::UV);           // 0..1 over the terrain
+		const int uvT = g.addNode(HE::MatNodeType::UV);           // the texture's tiling
+		g.findNode(uvT)->p[0] = g.findNode(uvT)->p[1] = 10.0f;
+		const int split = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(raw, 0, split, 0);
+		// slice = u * 5 - 0.5: rounded to the nearest layer by the node, that is
+		// floor(u * 5) — five equal stripes, one per slice.
+		int slice = -1;
+		if (fixedSlice)
+		{
+			slice = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(slice)->p[0] = 2.0f;
+		}
+		else
+		{
+			const int five = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(five)->p[0] = 5.0f;
+			const int half = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(half)->p[0] = 0.5f;
+			const int mul = g.addNode(HE::MatNodeType::Multiply);
+			g.connect(split, 0, mul, 0);
+			g.connect(five, 0, mul, 1);
+			slice = g.addNode(HE::MatNodeType::Subtract);
+			g.connect(mul, 0, slice, 0);
+			g.connect(half, 0, slice, 1);
+		}
+		// HE_DUMP_TEXARRAY=fallback drives every MISMATCH path instead: band 1 reads a
+		// missing array (→ the backend's white array), band 2 a plain 2D asset through
+		// an array slot (→ a one-slice array, every slice clamped to 0 = Rock), band 3
+		// the real albedo array, band 4 that ARRAY asset through a 2D slot (→ slice 0,
+		// Grass, in every stripe).
+		const bool fallback = std::string_view(ta) == "fallback";
+		const char* kArrays[3] = { "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset",
+		                           "Engine/Textures/Landscape/T_Landscape_Normal_Array.hasset",
+		                           "Engine/Textures/Landscape/T_Landscape_Mask_Array.hasset" };
+		if (fallback)
+		{
+			kArrays[0] = "Engine/Textures/Landscape/T_Landscape_Missing_Array.hasset";
+			kArrays[1] = "Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset";
+			kArrays[2] = "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset";
+		}
+		int band[4];
+		for (int i = 0; i < 3; ++i)
+		{
+			band[i] = g.addNode(HE::MatNodeType::TextureArraySample);
+			g.findNode(band[i])->s = kArrays[i];
+			g.connect(uvT, 0, band[i], 0);
+			g.connect(slice, 0, band[i], 1);
+		}
+		band[3] = g.addNode(HE::MatNodeType::TextureSample);
+		g.findNode(band[3])->s = fallback ? "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset"
+		                                  : "Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset";
+		g.connect(uvT, 0, band[3], 0);
+		// Normal Map Array on the Normal pin: compiled and bound on every backend
+		// even though an unlit frame does not show it.
+		const int nrm = g.addNode(HE::MatNodeType::NormalMapArraySample);
+		g.findNode(nrm)->s = kArrays[1];
+		g.connect(uvT, 0, nrm, 0);
+		g.connect(slice, 0, nrm, 1);
+		g.connect(nrm, 0, out, HE::kMatOutputNormalPin);
+		// Bands across V: v < 0.25 → Albedo, < 0.5 → Normal, < 0.75 → Mask, else 2D.
+		int pick = band[3];
+		for (int i = 2; i >= 0; --i)
+		{
+			const int edge = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(edge)->p[0] = 0.25f * static_cast<float>(i + 1);
+			const int less = g.addNode(HE::MatNodeType::Less);
+			g.connect(split, 1, less, 0);
+			g.connect(edge, 0, less, 1);
+			const int sel = g.addNode(HE::MatNodeType::If);
+			g.connect(less, 0, sel, 0);
+			g.connect(band[i], 0, sel, 1);
+			g.connect(pick, 0, sel, 2);
+			pick = sel;
+		}
+		g.connect(pick, 0, out, HE::kMatOutputBaseColorPin);
+
+		MaterialAsset am;
+		am.type = HE::AssetType::Material;
+		am.name = "TextureArrayWitness";
+		am.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		am.customShaderFragGlsl = gen.glsl;
+		am.customShaderGBufGlsl = gen.glslGBuffer;
+		am.customShaderVertGlsl = gen.vertexBody;
+		am.blendMode            = gen.blendMode;
+		am.domain               = gen.domain;
+		am.graphTexturePaths    = gen.textures;
+		const HE::UUID amId = contentManager().registerMaterial(std::move(am));
+
+		auto land = m_editorWorld->createEntity("TextureArrayLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution = 33;
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXARRAY witness landscape added "
+			"(%s, %zu graph textures, array mask %u)",
+			fallback ? "fallback paths" : fixedSlice ? "slice 2 everywhere" : "slices 0..4",
+			gen.textures.size(), gen.textureArrayMask);
+	}
+
+	// ── Texture-bombing witness (HE_DUMP_TEXBOMB=1, Thema 158 Schritt 4) ─────
+	// The same flat, UNLIT 100 m landscape as HE_DUMP_TEXARRAY: five stripes across
+	// U = slices 0..4 of the engine arrays, texture tiling 10. Four bands across V:
+	//   1  the PLAIN Albedo array read — the reference, it repeats every tile;
+	//   2  the Albedo array through Texture Array Bombing;
+	//   3  (N.x, height, N.z) — the Normal Map Array Bombing output's world X/Z
+	//      packed around the bombed Mask's height (B). The placeholder normal IS the
+	//      height's slope, so the image gradient of G must follow R and B in every
+	//      hex: a hex whose normal were turned the wrong way, or read on another
+	//      grid, breaks that correlation;
+	//   4  the Mask array through Texture Array Bombing.
+	// =off is the negative control for the repetition measure (bands 2..4 read
+	// plainly), =seed7 moves every bombed hex (band 1 must stay put), =mismatch
+	// reads the normal on another seed than the height (the correlation must drop).
+	if (const char* tb = std::getenv("HE_DUMP_TEXBOMB"); tb && *tb && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(tb);
+		const bool off      = mode == "off";
+		const float seed    = mode == "seed7" ? 7.0f : 0.0f;
+		const float nrmSeed = mode == "mismatch" ? seed + 1.0f : seed;
+
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		g.findNode(out)->p[0] = 0.0f; // unlit
+		const int raw = g.addNode(HE::MatNodeType::UV);
+		const int uvT = g.addNode(HE::MatNodeType::UV);
+		g.findNode(uvT)->p[0] = g.findNode(uvT)->p[1] = 10.0f;
+		const int split = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(raw, 0, split, 0);
+		auto constF = [&](float v) {
+			const int c = g.addNode(HE::MatNodeType::ConstFloat);
+			g.findNode(c)->p[0] = v;
+			return c;
+		};
+		// slice = u * 5 - 0.5 → floor(u * 5) after the node's rounding.
+		const int mul5 = g.addNode(HE::MatNodeType::Multiply);
+		g.connect(split, 0, mul5, 0);
+		g.connect(constF(5.0f), 0, mul5, 1);
+		const int slice = g.addNode(HE::MatNodeType::Subtract);
+		g.connect(mul5, 0, slice, 0);
+		g.connect(constF(0.5f), 0, slice, 1);
+		auto read = [&](HE::MatNodeType bombed, HE::MatNodeType plain, const char* path, float s) {
+			const int n = g.addNode(off ? plain : bombed);
+			g.findNode(n)->s = path;
+			if (!off) g.findNode(n)->p[2] = s;
+			g.connect(uvT, 0, n, 0);
+			g.connect(slice, 0, n, 1);
+			return n;
+		};
+		const char* kAlb = "Engine/Textures/Landscape/T_Landscape_Albedo_Array.hasset";
+		const char* kNrm = "Engine/Textures/Landscape/T_Landscape_Normal_Array.hasset";
+		const char* kMsk = "Engine/Textures/Landscape/T_Landscape_Mask_Array.hasset";
+		int band[4];
+		band[0] = g.addNode(HE::MatNodeType::TextureArraySample);
+		g.findNode(band[0])->s = kAlb;
+		g.connect(uvT, 0, band[0], 0);
+		g.connect(slice, 0, band[0], 1);
+		band[1] = read(HE::MatNodeType::TextureArrayBombSample, HE::MatNodeType::TextureArraySample, kAlb, seed);
+		band[3] = read(HE::MatNodeType::TextureArrayBombSample, HE::MatNodeType::TextureArraySample, kMsk, seed);
+		const int nrm = read(HE::MatNodeType::NormalMapArrayBombSample, HE::MatNodeType::NormalMapArraySample,
+		                     kNrm, nrmSeed);
+		// Band 3: (N.x * 0.5 + 0.5, height, N.z * 0.5 + 0.5).
+		const int nSplit = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(nrm, 0, nSplit, 0);
+		const int mSplit = g.addNode(HE::MatNodeType::SplitRGBA);
+		g.connect(band[3], 0, mSplit, 0);
+		auto toUnit = [&](int pin) {
+			const int m = g.addNode(HE::MatNodeType::Multiply);
+			g.connect(nSplit, pin, m, 0);
+			g.connect(constF(0.5f), 0, m, 1);
+			const int a = g.addNode(HE::MatNodeType::Add);
+			g.connect(m, 0, a, 0);
+			g.connect(constF(0.5f), 0, a, 1);
+			return a;
+		};
+		band[2] = g.addNode(HE::MatNodeType::Combine3);
+		g.connect(toUnit(0), 0, band[2], 0);
+		g.connect(mSplit, 2, band[2], 1);
+		g.connect(toUnit(2), 0, band[2], 2);
+		int pick = band[3];
+		for (int i = 2; i >= 0; --i)
+		{
+			const int less = g.addNode(HE::MatNodeType::Less);
+			g.connect(split, 1, less, 0);
+			g.connect(constF(0.25f * static_cast<float>(i + 1)), 0, less, 1);
+			const int sel = g.addNode(HE::MatNodeType::If);
+			g.connect(less, 0, sel, 0);
+			g.connect(band[i], 0, sel, 1);
+			g.connect(pick, 0, sel, 2);
+			pick = sel;
+		}
+		g.connect(pick, 0, out, HE::kMatOutputBaseColorPin);
+
+		MaterialAsset am;
+		am.type = HE::AssetType::Material;
+		am.name = "TextureBombWitness";
+		am.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		am.customShaderFragGlsl = gen.glsl;
+		am.customShaderGBufGlsl = gen.glslGBuffer;
+		am.customShaderVertGlsl = gen.vertexBody;
+		am.blendMode            = gen.blendMode;
+		am.domain               = gen.domain;
+		am.graphTexturePaths    = gen.textures;
+		const HE::UUID amId = contentManager().registerMaterial(std::move(am));
+
+		auto land = m_editorWorld->createEntity("TextureBombLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution = 33;
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		size_t grids = 0;
+		for (size_t at = gen.glsl.find("heBombGrid(n"); at != std::string::npos;
+		     at = gen.glsl.find("heBombGrid(n", at + 1)) ++grids;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXBOMB witness landscape added "
+			"(mode %s, %zu graph textures, array mask %u, %zu hex grid(s))",
+			tb, gen.textures.size(), gen.textureArrayMask, grids);
+	}
+
+	// ── Auto landscape material witness (HE_DUMP_AUTOLAND, Thema 158 Schritt 5) ─
+	// A 128 m landscape at y=300 whose relief is ANALYTIC, so every column's
+	// expected layer is known: a flat plain (x < -24), a smoothstep ramp up to a
+	// 40 m plateau (-24..8, slope 0 → ~62° → 0), the plateau (x > 8). Constant
+	// along Z. Snow Height is moved to y=320 (the shipped default, 60 m, assumes a
+	// terrain at y=0), so snow covers the plateau and the upper ramp, rock the
+	// steep middle, grass/dirt and puddles the plain.
+	//   =1 / lit   the SHIPPED asset, loaded by path (Engine/Materials/
+	//              M_AutoLandscape.hasset — fixed UUID, Engine/ prefix, regenerate
+	//              on load), through a Material Instance overriding Snow Height
+	//   =nobomb    the same instance with the "Texture Bombing" switch off (its own
+	//              permutation): the negative control for the repetition measure
+	//   =masks     unlit, R = rock, G = snow, B = standing water (builder graph)
+	//   =ground    unlit, R = dirt, G = wet ground, B = flat (builder graph)
+	//   =normal    unlit, the final world normal * 0.5 + 0.5 (builder graph)
+	//   =surface   unlit, R = AO, G = roughness (builder graph)
+	//   =builtin   the same relief with the engine's default terrain material:
+	//              the control that separates lighting/shadow differences
+	//              between backends from the material's
+	//   =plaingraph a lit graph material that is only a constant grey: the
+	//              graph lighting path without textures or normal map
+	if (const char* al = std::getenv("HE_DUMP_AUTOLAND"); al && *al && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(al);
+		const bool masks   = mode == "masks";
+		const bool ground  = mode == "ground";
+		const bool noBomb  = mode == "nobomb";
+		const bool builtin = mode == "builtin";
+		const bool normalV = mode == "normal";
+		const bool surface = mode == "surface";
+		constexpr float kBaseY = 300.0f, kPlateau = 40.0f;
+		const float snowHeight = kBaseY + 20.0f;
+
+		HE::UUID amId{};
+		std::string what;
+		if (builtin)
+			what = "default terrain material";
+		else if (mode == "plaingraph")
+		{
+			// A lit graph material with nothing but a constant grey: the graph
+			// lighting path (heLitP) without textures or a perturbed normal.
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+			MaterialAsset am;
+			am.type = HE::AssetType::Material;
+			am.name = "AutoLandscapePlainGraph";
+			am.nodeGraphJson = HE::materialGraphToJson(g);
+			amId = contentManager().registerMaterial(std::move(am));
+			contentManager().regenerateMaterialFromGraph(amId);
+			what = "plain lit graph material";
+		}
+		else if (masks || ground || normalV || surface)
+		{
+			HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(
+				masks   ? HE::AutoLandscapeView::MasksRockSnowWater :
+				ground  ? HE::AutoLandscapeView::MasksDirtWet :
+				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface);
+			for (HE::MatGraphNode& n : built.graph.nodes)
+				if (n.type == HE::MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamSnowHeight)
+					n.p[0] = snowHeight;
+			MaterialAsset am;
+			am.type = HE::AssetType::Material;
+			am.name = "AutoLandscapeMaskWitness";
+			am.nodeGraphJson = HE::materialGraphToJson(built.graph);
+			amId = contentManager().registerMaterial(std::move(am));
+			contentManager().regenerateMaterialFromGraph(amId);
+			what = masks ? "masks rock/snow/water" : ground ? "masks dirt/wet/flat"
+			     : normalV ? "final normal" : "AO/roughness";
+		}
+		else
+		{
+			const HE::UUID parent = contentManager().loadAsset(HE::kAutoLandscapeMaterialPath);
+			MaterialAsset inst;
+			inst.type = HE::AssetType::Material;
+			inst.name = "AutoLandscapeWitness";
+			inst.parentMaterialPath       = HE::kAutoLandscapeMaterialPath;
+			inst.graphParamNames          = { HE::kAutoLandscapeParamSnowHeight };
+			inst.shaderParamData          = { snowHeight, 0.0f, 0.0f, 0.0f };
+			inst.instanceOverriddenParams = { HE::kAutoLandscapeParamSnowHeight };
+			if (noBomb)
+			{
+				inst.instanceSwitchNames  = { HE::kAutoLandscapeSwitchBombing };
+				inst.instanceSwitchValues = { 0 };
+			}
+			amId = contentManager().registerMaterial(std::move(inst));
+			contentManager().syncMaterialInstance(amId);
+			what = std::string(parent == HE::kAutoLandscapeMaterialId ? "shipped asset" : "ASSET NOT FOUND")
+			     + (noBomb ? ", bombing off" : ", bombing on");
+		}
+
+		auto land = m_editorWorld->createEntity("AutoLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, kBaseY, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 128.0f;
+		ltc.resolution = 129;      // 2^n + 1: no resample, one vertex per metre
+		ltc.heightScale = 0.0f;
+		ltc.seed = 0;
+		ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
+		for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+			{
+				const float x = -64.0f + static_cast<float>(xi);
+				const float t = std::clamp((x + 24.0f) / 32.0f, 0.0f, 1.0f);
+				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
+					kPlateau * t * t * (3.0f - 2.0f * t);
+			}
+		ltc.dirty = true;
+		reg.emplace<TerrainComponent>(land, ltc);
+		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
+			reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const MaterialAsset* ma = contentManager().getMaterial(amId);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLAND witness landscape added "
+			"(mode %s, %s, %zu graph textures, array mask %u, %zu params, snow at y=%.0f)",
+			al, what.c_str(), ma ? ma->graphTexturePaths.size() : size_t(0),
+			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
+			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
@@ -6273,7 +6865,10 @@ void EditorApplication::dumpFrameHeadless()
 		auto& reg = m_editorWorld->registry();
 		auto land = m_editorWorld->createEntity("MountainLandscape");
 		TransformComponent ltf;
-		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		// HE_DUMP_LANDY moves the witness landscape off y=300 (Thema 159: the GI
+		// G-buffer stores world positions as half floats, quantised by height).
+		const char* landY = std::getenv("HE_DUMP_LANDY");
+		ltf.position = glm::vec3(0.0f, landY && *landY ? static_cast<float>(std::atof(landY)) : 300.0f, 0.0f); // clear of any loaded scene
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 240.0f;
@@ -6399,7 +6994,9 @@ void EditorApplication::dumpFrameHeadless()
 	// other branch: replaceTexture + a DEFERRED InvalidateTexture. This exercises
 	// that second branch, which is the only "runs once" asymmetry in the
 	// weightmap path. Works with or without HE_DUMP_LAYEREDIT.
-	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && m_editorWorld)
+	// HE_DUMP_LAYERREPAINT=mid paints halfway through the settle frames instead
+	// (below), once the backend has already resolved and cached the weightmap.
+	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && std::string(rp) != "mid" && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
 		for (auto [te, tc] : reg.view<TerrainComponent>().each())
@@ -6815,6 +7412,47 @@ void EditorApplication::dumpFrameHeadless()
 		                           e.gradientColor = glm::vec4(0.55f, 0.20f, 0.65f, 1.0f);
 		                           e.innerShadow = true; e.innerShadowBlur = 20.0f; });
 
+		// HE_DUMP_UITEST=image adds tile 12: an Image element showing a generated
+		// picture, red / green on top, blue / yellow below, white tint (Thema 157).
+		// Kept off the plain "=1" sheet so the Thema-133 baselines stay as measured.
+		// The widget refers to its picture by path and the manager resolves it
+		// again on instantiation, so the texture is registered under that path.
+		if (std::string_view(ui) == "image")
+		{
+			constexpr uint32_t kSz = 64;
+			TextureAsset ta;
+			ta.name = "__uiImageWitness";
+			ta.path = "__uiImageWitness.hasset";
+			ta.width = ta.height = kSz;
+			ta.channels = 4;
+			// Flagged sRGB like every imported colour texture: the UI pass must
+			// sample the bytes as they are anyway (Thema 107), an sRGB upload
+			// would show here as a darker picture.
+			ta.srgb = true;
+			ta.data.resize(size_t(kSz) * kSz * 4);
+			for (uint32_t y = 0; y < kSz; ++y)
+				for (uint32_t x = 0; x < kSz; ++x)
+				{
+					// Rows are stored bottom-up: y >= kSz/2 is the picture's top half.
+					static const uint8_t kQuad[4][4] = {
+						{ 230,  30,  30, 255 }, { 30, 200,  60, 255 },    // top: red, green
+						{  30,  80, 230, 255 }, { 240, 220,  40, 255 } }; // bottom: blue, yellow
+					const uint8_t* c = kQuad[(y >= kSz / 2 ? 0 : 2) + (x >= kSz / 2 ? 1 : 0)];
+					std::memcpy(&ta.data[(size_t(y) * kSz + x) * 4], c, 4);
+				}
+			contentManager().registerTexture(std::move(ta));
+
+			const int id = t.add(HE::UIWidgetType::Image);
+			HE::UIElement& e = *t.find(id);
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = 60.0f + static_cast<float>(col) * 300.0f;
+			e.posY = 80.0f + static_cast<float>(row) * 170.0f;
+			e.sizeX = 240.0f; e.sizeY = 110.0f;
+			e.texture = "__uiImageWitness.hasset";
+			e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+		}
+
 		UIWidgetAsset wa;
 		wa.type = HE::AssetType::Widget;
 		wa.name = "__uiStyleWitness";
@@ -7216,6 +7854,38 @@ void EditorApplication::dumpFrameHeadless()
 			 + " deg for the captured frame").c_str());
 		settleFrames = 1;
 	}
+	// HE_DUMP_PANYAW (degrees per frame) / HE_DUMP_PANMOVE (world units per frame
+	// along the camera's right axis): a camera that keeps MOVING through every
+	// settle frame, not the single step above — the GI shadow mask's temporal
+	// pass has to hold its history over a steady pan, which one step cannot show
+	// (Thema 134). Frame i of N stands (N-1-i) steps back, so the captured frame
+	// is at the real pose and two captures with N and N+1 frames share the pose
+	// and the last N frames of motion: their difference is the flicker of a
+	// panning camera, the way f60/f61 is that of a still one.
+	const float panYaw  = mbEnvF("HE_DUMP_PANYAW");
+	const float panMove = mbEnvF("HE_DUMP_PANMOVE");
+	if ((panYaw != 0.0f || panMove != 0.0f) && !mbSweep)
+	{
+		const glm::vec3 eye   = m_editorCamera.position();
+		const float     yaw   = m_editorCamera.yaw();
+		const float     pitch = m_editorCamera.pitch();
+		const glm::vec3 right(std::cos(yaw), 0.0f, std::sin(yaw)); // fwd = (sin yaw, ·, -cos yaw)
+		for (int i = 0; i < settleFrames; ++i)
+		{
+			const float back = static_cast<float>(settleFrames - 1 - i);
+			const float y    = yaw - glm::radians(panYaw * back);
+			m_editorCamera.setOrientation(eye - right * (panMove * back),
+			                              glm::vec3(std::sin(y) * std::cos(pitch), std::sin(pitch),
+			                                        -std::cos(y) * std::cos(pitch)));
+			r->SetEditorCamera(m_editorCamera.makeOverride());
+			r->Render();
+		}
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_PANYAW/PANMOVE panned the camera by " + std::to_string(panYaw)
+			 + " deg / " + std::to_string(panMove) + " units per frame over "
+			 + std::to_string(settleFrames) + " frames").c_str());
+		settleFrames = 0;
+	}
 	// HE_DUMP_TODSTEP (day fraction, with HE_DUMP_SKYTEST): the OCCLUDER-motion
 	// witness for the GI shadow mask's temporal clamp (Thema 131). Same shape
 	// as the yaw step: the settle frames run with the sun at TOD - step and only
@@ -7223,11 +7893,16 @@ void EditorApplication::dumpFrameHeadless()
 	// edge moves over a static receiver, the reprojection check passes,
 	// and only the neighbourhood clamp keeps the old edge from ghosting.
 	// Compare the capture against a static one at the same TOD. TWO frames run
-	// at the real TOD, not one: until Thema 131 step 6, Vulkan's runGi()
-	// extracted the scene before DrawScene() fed the extractor this frame's
-	// day-night state, so the GI mask saw a sun change one frame late. runGi()
-	// sets it itself now; the second frame stays so captures remain comparable
+	// at the real TOD by default, not one: until Thema 131 step 6, Vulkan's
+	// runGi() extracted the scene before DrawScene() fed the extractor this
+	// frame's day-night state, so the GI mask saw a sun change one frame late.
+	// Since Thema 146 every Vulkan pass gets the sun from one setDayNight() at
+	// the top of Render(); the second frame stays so captures remain comparable
 	// with ones taken on older builds.
+	// HE_DUMP_TODSTEPFRAMES=1 is the lag witness itself: only the captured frame
+	// runs at the real TOD, so a pass that still extracts with the previous
+	// frame's sun (CSM cascades with GI off, Thema 146) puts its shadows where
+	// a static capture at TOD - step has them.
 	if (const float todStep = mbEnvF("HE_DUMP_TODSTEP"); todStep != 0.0f && m_editorWorld)
 	{
 		const Entity envEntity = m_editorWorld->environmentEntity();
@@ -7241,10 +7916,13 @@ void EditorApplication::dumpFrameHeadless()
 				r->Render();
 			env->timeOfDay = tod;
 			pushEnvironment(0.0f);
+			int atTod = 2;
+			if (const char* sf = std::getenv("HE_DUMP_TODSTEPFRAMES"); sf && *sf)
+				atTod = std::clamp(std::atoi(sf), 1, 240);
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: HE_DUMP_TODSTEP moved the sun by " + std::to_string(todStep)
-				 + " of a day for the last two frames").c_str());
-			settleFrames = 2;
+				 + " of a day for the last " + std::to_string(atTod) + " frame(s)").c_str());
+			settleFrames = atTod;
 		}
 	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
@@ -7256,8 +7934,23 @@ void EditorApplication::dumpFrameHeadless()
 	// layer stay quiet.
 	const char* giRefit = std::getenv("HE_DUMP_GIREFIT");
 	const bool  giRefitWitness = giRefit && *giRefit && s_layerMatId != HE::UUID{};
+	// HE_DUMP_LAYERREPAINT=mid: the brush-stroke path on a weightmap the backend
+	// has ALREADY drawn with — replaceTexture + InvalidateTexture must make it
+	// drop its cached view and resolve the new texels. A green disc appears at
+	// (30, -25) in the capture; a stale cache keeps the red field there.
+	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
+	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (repaintMidWitness && i == settleFrames / 2)
+		{
+			for (auto [te, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+				TerrainPaint::paint(tc, 30.0f, -25.0f, /*layer*/1, 14.0f, 5.0f, 1.0f);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_LAYERREPAINT=mid painted before settle frame "
+				 + std::to_string(i)).c_str());
+		}
 		if (giRefitWitness && i == settleFrames / 2)
 		{
 			auto& reg  = m_editorWorld->registry();
@@ -9974,6 +10667,9 @@ void EditorApplication::setPlayMode(bool play)
 		// logicLoader().logic() is null and the base loop has nothing to tick.
 		if (logicLoader().isLoaded())
 			logicLoader().unload(*m_editorWorld);
+		// The Game Instance's runtime outlives the session; the module's
+		// subscriptions (he::hc::watch) must not.
+		HcWatchEvents::dropNative(m_gameInstance.runtime());
 
 		// Runs stopped at a breakpoint die with the session: the GameInstance's
 		// runtime outlives it, and a stopped run of the GameInstance would
@@ -10715,7 +11411,15 @@ void EditorApplication::pushEnvironment(float dt)
 void EditorApplication::warmupWorldMaterials()
 {
 	if (!m_editorWorld || !renderer()) return;
-	renderer()->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
+	std::vector<HE::UUID> ids = SceneSystems::collectAssetRefs(*m_editorWorld);
+	// The billboard icons of lights, cameras and audio sources are graph materials
+	// no component references; the first frame that showed one cross-compiled it
+	// inside Metal::EncodeScene (0.4 + 0.7 s in frames 0/1, Thema 153 Schritt 5).
+	for (const HE::UUID& icon : { HE::kEditorIconPointLightMaterialId, HE::kEditorIconSpotLightMaterialId,
+	                              HE::kEditorIconDirectionalLightMaterialId, HE::kEditorIconCameraMaterialId,
+	                              HE::kEditorIconAudioSourceMaterialId })
+		ids.push_back(icon);
+	renderer()->WarmupMaterials(ids);
 }
 
 bool EditorApplication::openScene(const std::string& path)
@@ -10849,12 +11553,15 @@ void EditorApplication::bindGameServices()
 	m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
 	m_gameServicesBinding.content = &contentManager();
 	m_gameServicesBinding.antiCheat = [this]() { return &m_antiCheat; };
+	m_gameServicesBinding.runtime   = [this]() { return &m_gameInstance.runtime(); };
+	m_gameServicesBinding.entities  = [this]() { return &m_entityHost; };
 	HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
 	HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
 	HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
 	HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
 	HE::api::fillAntiCheatServices(m_antiCheatServices, &m_gameServicesBinding);
 	HE::api::fillNetServices(m_netServices, &m_gameServicesBinding);
+	HE::api::fillHcServices(m_hcServices, &m_gameServicesBinding);
 	m_engineServices            = {};
 	m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 	m_engineServices.save       = &m_saveServices;
@@ -10863,6 +11570,7 @@ void EditorApplication::bindGameServices()
 	m_engineServices.content    = &m_contentServices;
 	m_engineServices.anticheat  = &m_antiCheatServices;
 	m_engineServices.net        = &m_netServices;
+	m_engineServices.hc         = &m_hcServices;
 }
 
 std::filesystem::path EditorApplication::builtGameLogicPath()
@@ -10904,6 +11612,9 @@ bool EditorApplication::reloadGameLogic()
 	if (lib.empty()) return false;
 
 	bindGameServices();
+	// The fresh image subscribes again in its onStart; what the old one asked
+	// for goes with it.
+	HcWatchEvents::dropNative(m_gameInstance.runtime());
 	// One call, because the sequence is the trap: reload() alone hands the fresh
 	// image no service tables and every he::* call in it becomes a silent no-op
 	// (GameLogicLoader.h).
@@ -11038,6 +11749,8 @@ void EditorApplication::OnShutdown()
 	// below, which returns early in a headless build.
 	if (m_scriptContext) m_scriptContext->setHostServices({});
 	g_host = {};
+	HcWatchEvents::dropNative(m_gameInstance.runtime());
+	m_gameInstance.runtime().onVariableChanged = nullptr;
 	// The sink captured `this` and names the script context; drop it here, for
 	// the reason the block above gives.
 	m_antiCheat.setEventSink({});
@@ -11227,6 +11940,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
+	globalstate.setCustomConfigEntry("GIShadowQuality",           m_editorConfig.GIShadowQuality);
 	globalstate.setCustomConfigEntry("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	globalstate.setCustomConfigEntry("GIReflIntensity",           m_editorConfig.GIReflIntensity);
 	globalstate.setCustomConfigEntry("GIReflMaxRoughness",        m_editorConfig.GIReflMaxRoughness);

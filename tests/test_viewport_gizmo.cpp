@@ -57,8 +57,8 @@ Entity findByName(HorizonWorld& w, const std::string& name)
 }
 
 // One viewport frame in the editor's own order: propagate the hierarchy (the
-// extractor does this before the picture is drawn; the gizmo reads worldMatrix
-// and an entity created this frame would otherwise sit at the identity),
+// renderer's extract does this every frame; the gizmo composes its matrices
+// itself since Thema 153, so `propagate` can be switched off to prove it),
 // NewFrame, ImGuizmo::BeginFrame, the Scene window, manipulate.
 struct Ctx
 {
@@ -69,6 +69,7 @@ struct Ctx
 	glm::mat4 proj = testProj();
 	bool active = false;            // manipulate()'s return: hovered or dragging
 	bool changed = false;           // …and whether it wrote the transform
+	bool propagate = true;          // off: nothing propagates before the gizmo (see the last case)
 
 	Ctx()
 	{
@@ -85,7 +86,7 @@ struct Ctx
 
 	void frame(Entity e)
 	{
-		HE::propagateTransforms(world);
+		if (propagate) HE::propagateTransforms(world);
 		ImGui::NewFrame();
 		ImGuizmo::BeginFrame();
 		ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -196,4 +197,49 @@ TEST_CASE("Gizmo on a light: a drag moves the light and lands on the undo stack 
 	CHECK(back.x == doctest::Approx(2.0f));
 	CHECK(back.y == doctest::Approx(1.0f));
 	CHECK(ctx.world.registry().all_of<LightComponent>(restored));
+}
+
+// Since Thema 153, Schritt 6 the Scene window no longer extracts (and so no
+// longer propagates) the whole world every frame before the gizmo runs: only
+// the camera, and the objects when a click or a drop asks. The gizmo therefore
+// composes the matrices it reads itself. An entity under a moved parent, never
+// propagated at all, gets its gizmo where it really stands; read off
+// TransformComponent::worldMatrix (the identity here) it sat at the origin.
+TEST_CASE("Gizmo without a propagate: the handle sits where the entity stands")
+{
+	Ctx ctx;
+	ctx.propagate = false;
+	const Entity parent = ctx.world.createEntity("Folder");
+	TransformComponent pt;
+	pt.position = { 2.0f, 0.0f, 0.0f };
+	ctx.world.addComponent(parent, pt);
+	const Entity light = ctx.world.createEntity("Lamp");
+	TransformComponent t;
+	t.position = { 0.0f, 1.0f, 0.0f };
+	ctx.world.addComponent(light, t);
+	ctx.world.registry().emplace<LightComponent>(light, LightComponent{});
+	ctx.world.reparentEntity(light, parent);
+	REQUIRE(ctx.world.registry().get<TransformComponent>(light).worldMatrix == glm::mat4(1.0f));
+
+	const ImVec2 at     = project(ctx.view, ctx.proj, { 2.0f, 1.0f, 0.0f });
+	const ImVec2 origin = project(ctx.view, ctx.proj, { 0.0f, 0.0f, 0.0f });
+	ctx.settle(light, at);
+	CHECK(ctx.active);
+	ctx.settle(light, origin);
+	CHECK_FALSE(ctx.active);
+
+	// A drag writes the LOCAL position: the parent's offset is divided out, so
+	// the lamp stays under the folder at x = 0 plus the drag, not at x = 2 plus it.
+	ctx.settle(light, at);
+	REQUIRE(ctx.active);
+	ctx.button(true);
+	ctx.frame(light);
+	ctx.mouse(ImVec2(at.x + 60.0f, at.y));
+	ctx.frame(light);
+	CHECK(ctx.changed);
+	const glm::vec3 local = ctx.world.registry().get<TransformComponent>(light).position;
+	CHECK(local.x > 0.25f);
+	CHECK(local.x < 2.0f);
+	CHECK(local.y == doctest::Approx(1.0f).epsilon(1e-2));
+	ctx.release(light);
 }

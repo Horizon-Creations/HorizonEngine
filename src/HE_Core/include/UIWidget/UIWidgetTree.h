@@ -221,9 +221,24 @@ HE_API int uiApplyWidgetParams(
     UIWidgetTree& tree,
     const std::vector<std::pair<std::string, UIPropValue>>& values);
 
+// What reading does with a parameter declaration that is not finished yet —
+// no name, no element or no property. Whoever USES a component drops it: it
+// names nothing, and would be a row in the host's panel that writes into the
+// void. Whoever is still WRITING the component keeps it: "Add Parameter" makes
+// exactly such a row, and the designer's undo snapshots, its load and the MCP
+// widget tools all read the author's own document back through this function
+// — dropping there loses the author's half-done row the moment they undo,
+// reopen or let a tool touch the file.
+enum class UIWidgetParamRead
+{
+    DropUnfinished,   // runtime, embedding hosts: only declarations that work
+    KeepUnfinished,   // the author's own document: everything that was written
+};
+
 // JSON round-trip (schema-evolution friendly). Returns false on parse failure.
 HE_API std::string uiWidgetTreeToJson(const UIWidgetTree& tree);
-HE_API bool        uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out);
+HE_API bool        uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
+                                        UIWidgetParamRead params = UIWidgetParamRead::DropUnfinished);
 
 // ── Item-level JSON ─────────────────────────────────────────────────────────
 // One element, in EXACTLY the form uiWidgetTreeToJson() puts into the tree's

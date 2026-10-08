@@ -244,11 +244,15 @@ namespace
 	  "", "rendering#lighting" },
 	{ "Material/Roughness", "",
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
-	  "that decides whether something reads as wet, polished or worn.",
+	  "that decides whether something reads as wet, polished or worn. On the "
+	  "engine water it is a parameter of its own: keep it low for sharp "
+	  "reflections and a tight sun glint.",
 	  "", "rendering#lighting" },
 	{ "Material/Opacity", "",
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
-	  "the transparent pass — so it no longer writes depth.",
+	  "the transparent pass — so it no longer writes depth. On the engine water "
+	  "(already transparent) the parameter of that name is the opacity looking "
+	  "straight down into clear water; depth tint, Fresnel and foam raise it.",
 	  "", "rendering#lighting" },
 	{ "Material/Slot Overrides", "Slot Overrides",
 	  "One picker per material slot of the entity's mesh (its LOD 0 mesh, when "
@@ -259,6 +263,77 @@ namespace
 	  "slot override wins over it. LOD levels follow along: their sections are "
 	  "matched to LOD 0's slots by material, else by position.",
 	  "", "materials#concept" },
+
+	// The engine water's knobs (Engine/Materials/Water.hasset, docs/water-shader-
+	// plan.md). They are rows of "Material Parameters (this entity)", whose label
+	// is the parameter's NAME — data, so editor_help_audit cannot see them;
+	// test_engine_materials walks the shipped asset's names against this table.
+	// Roughness and Opacity share the entries above with the Surface block.
+	{ "Material/ShallowColor", "",
+	  "Water colour where the view ray through the water is short — looking "
+	  "straight down. Blends toward Deep Color as the path through the water "
+	  "grows.",
+	  "", "materials#water" },
+	{ "Material/DeepColor", "",
+	  "Water colour where the view ray through the water is long — toward the "
+	  "horizon, or in murky water. Usually a darker, bluer version of Shallow "
+	  "Color.",
+	  "", "materials#water" },
+	{ "Material/Turbidity", "",
+	  "x = absorption per metre: higher is murkier, the deep colour arrives "
+	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
+	  "below the surface is not read yet.",
+	  "", "materials#water" },
+	{ "Material/WaveA", "",
+	  "The swell, the largest of three wave trains. x = direction in degrees "
+	  "(0 = +X, 90 = +Z), y = speed in m/s, z = wavelength in metres, "
+	  "w = steepness (0 is flat, about 0.4 is choppy). The waves bend the "
+	  "normal only, the mesh stays flat.",
+	  "", "materials#water" },
+	{ "Material/WaveB", "",
+	  "Second wave train, laid across the swell so the crests do not line up. "
+	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "
+	  "w = steepness. A steepness of 0 switches it off.",
+	  "", "materials#water" },
+	{ "Material/WaveC", "",
+	  "Fine ripples on top of the two larger trains. x = direction in degrees, "
+	  "y = speed in m/s, z = wavelength in metres, w = steepness.",
+	  "", "materials#water" },
+	{ "Material/FresnelPower", "",
+	  "How quickly the surface turns reflective toward grazing angles. 5 is "
+	  "physical water; lower values make the water mirror-like even when you "
+	  "look down into it.",
+	  "", "materials#water" },
+	{ "Material/Reflection", "",
+	  "How strongly sky and scene reflection cover the water. Scales both the "
+	  "Fresnel lift of the opacity and the specular strength, so 0 leaves only "
+	  "the water colour.",
+	  "", "materials#water" },
+	{ "Material/Specular", "",
+	  "Strength of the specular reflection for a non-metal (0.5 = F0 0.04). It "
+	  "is multiplied by Reflection; about 0.3 gives water's real F0 of 0.02.",
+	  "", "materials#water" },
+	{ "Material/Refraction", "",
+	  "How much the waves bend the view into the water: the depth tint and the "
+	  "caustics move with the waves. The scene behind the water is not "
+	  "distorted yet.",
+	  "", "materials#water" },
+	{ "Material/FoamColor", "",
+	  "Colour of the foam on the wave crests. Near-white reads as foam; a "
+	  "tinted value suits murky or polluted water.",
+	  "", "materials#water" },
+	{ "Material/Foam", "",
+	  "x = coverage, the share of the wave crests that foam (0 = none), "
+	  "y = strength 0..1, z = size of the noise that breaks it up, in metres, "
+	  "w = drift speed in m/s. Foam sits on the crests, not at the shore — "
+	  "there is no scene depth to find a shoreline yet.",
+	  "", "materials#water" },
+	{ "Material/Caustics", "",
+	  "The shimmering light pattern on the surface. x = strength (0 = off), "
+	  "y = pattern size in metres, z = speed, w = camera distance in metres at "
+	  "which the pattern has faded out, so it does not shimmer into moiré far "
+	  "away.",
+	  "", "materials#water" },
 
 	// ── Light ────────────────────────────────────────────────────────────────
 	{ "Light/Type", "",
@@ -2049,6 +2124,14 @@ namespace
 	  "Also the screenshot cameras of connected MCP clients (Remote Control): a "
 	  "frustum in the scene and an MCP #n tag over it, one per client.",
 	  "", "editor#viewport" },
+	{ "Viewport Show/Streaming Cells", "",
+	  "For a scene split into streaming cells: their squares on the ground and "
+	  "two rings around the camera. Green squares lie within the load radius, the "
+	  "game builds them from here; orange ones within the unload radius, it keeps "
+	  "them once built; grey ones it drops. The rings are the two radii. Nothing "
+	  "shows for a scene without cells. The numbers are in the profiler's "
+	  "Streaming tab.",
+	  "", "editor#viewport" },
 	{ "Viewport Show/Stats", "",
 	  "The frame's counters in the corner of the viewport: frame rate and frame "
 	  "time, draw calls, triangles, visible objects out of all of them, and GPU "
@@ -3194,6 +3277,11 @@ namespace
 	  "How large the light source is treated as being, in degrees. Wider means "
 	  "softer, more diffuse indirect shadows.",
 	  "", "rendering#lighting" },
+	{ "Preferences/Global Illumination/GI Shadow Quality", "",
+	  "Shadow rays per pixel toward the sun. More rays calm the shimmer at soft "
+	  "shadow edges; on GPUs without hardware ray tracing every extra ray costs "
+	  "as much as the first.",
+	  "", "rendering#performance" },
 	{ "Preferences/Global Illumination/GI Reflections (ray-traced)", "",
 	  "Traced reflections instead of screen-space ones: they can show what is "
 	  "behind the camera, at the cost of tracing the scene.",
@@ -3591,6 +3679,43 @@ namespace
 	  "system keychain through git's credential helper; the engine keeps no copy "
 	  "and no project or engine file ever contains it.",
 	  "", "editor#preferences" },
+	// The GitHub sign-in (GitHubSignIn.cpp, GitHubSignInView.cpp): the account
+	// row on this page and in the clone dialog, and the code dialog itself.
+	{ "Source Control/Sign in with GitHub...", "Sign in with GitHub",
+	  "Signs the editor in to your GitHub account without a token to create by "
+	  "hand. You get a short code, approve it on github.com in your browser, and "
+	  "the editor receives access to your repositories and gists. It is kept in "
+	  "git's credential helper (the system keychain), exactly where a pasted "
+	  "token would go.",
+	  "", "editor#github" },
+	{ "Source Control/Sign out", "Sign out",
+	  "Removes the GitHub token from git's credential helper, so neither the "
+	  "editor nor git on this machine uses it any more. GitHub still lists "
+	  "Horizon Engine under Settings \xe2\x96\xb8 Applications until you revoke it "
+	  "there.",
+	  "", "editor#github" },
+	{ "Source Control/Copy code & open GitHub", "Copy code & open GitHub",
+	  "Puts the code on the clipboard and opens GitHub's device page in your "
+	  "browser. Paste the code there and approve. The editor notices on its own.",
+	  "", "editor#github" },
+	{ "Source Control/Copy code", "Copy code",
+	  "Puts the code on the clipboard, for when the browser is on another "
+	  "machine or already open.",
+	  "", "editor#github" },
+	{ "Source Control/Get a new code", "Get a new code",
+	  "The old code ran out (they last about fifteen minutes). Asks GitHub for a "
+	  "fresh one.",
+	  "", "editor#github" },
+	{ "Source Control/Try again", "Try again",
+	  "Starts the sign-in over with a fresh code.",
+	  "", "editor#github" },
+	// The clone dialog's second "Load my repositories": shown when signed in,
+	// it lists with the sign-in instead of the token field below it.
+	{ "Source Control/Load my repositories##signin", "Load my repositories",
+	  "Asks GitHub for every repository your sign-in can see \xe2\x80\x94 yours, and "
+	  "those of organisations you belong to \xe2\x80\x94 newest first. No token to "
+	  "type: the editor reads the sign-in from git's credential helper.",
+	  "", "editor#github" },
 	{ "Source Control/Push automatically after each commit", "",
 	  "Send every commit to the remote as it is made. Convenient alone, and a "
 	  "way to publish half-finished work when several people share the branch.",
@@ -3969,6 +4094,19 @@ namespace
 	{ "Physics/Earth", "Earth",
 	  "Puts gravity back to 0, −9.81, 0.",
 	  "", "systems#physics" },
+	{ "Physics/Floating origin radius", "Floating origin radius",
+	  "Positions are 32-bit floats: 30 km from the origin objects start to shake "
+	  "by a pixel, at 250 km a walking step is rounded away. With a radius set, "
+	  "the exported game moves the whole world back by whole multiples of it "
+	  "once the camera is further out than this on any axis — entities, physics "
+	  "bodies, particles, trails, rain, the rig camera, nav agents — and keeps "
+	  "the absolute offset itself. Savegames and multiplayer carry absolute "
+	  "positions, the navmesh is queried with the offset added.\n\n"
+	  "0 is off, the default. What does not move along: positions a script "
+	  "keeps in its own variables, keyframes that set a top-level entity's "
+	  "position, and GPU particles — each jumps by the shift. The editor and its "
+	  "Play keep absolute coordinates. 5 000–10 000 m is a good radius.",
+	  "", "systems#physics" },
 	// ── Audio ▸ Buses ────────────────────────────────────────────────────────
 	{ "Audio Buses/Open Audio Mixer", "Open Audio Mixer",
 	  "Opens the mixer window, where the project's buses are made and their "
@@ -4233,6 +4371,22 @@ namespace
 	  "was authored, 0 flattens it back to the geometry, and past 1 the bumps "
 	  "start lighting themselves in ways no real surface does.",
 	  "", "materials#nodes" },
+	{ "Material Node/Rot", "Bombing Rotation",
+	  "How far each hex of a bombed texture may be turned. 1 is any angle, 0 keeps "
+	  "every copy upright and only shifts it. Turn it down for textures with a "
+	  "direction in them: lit from one side, grass leaning one way.",
+	  "", "materials#nodes" },
+	{ "Material Node/Blend", "Bombing Blend Sharpness",
+	  "How hard the seams between the hexes are. Low numbers blend wide and soft, "
+	  "which also washes the texture out a little; high numbers keep each copy crisp "
+	  "and the seam narrow. 7 is a good start.",
+	  "", "materials#nodes" },
+	{ "Material Node/Seed", "Bombing Seed",
+	  "Picks a different random layout of the hexes. Give the Albedo, Normal and "
+	  "Mask reads of ONE texture the same seed (and rotation and blend) so their "
+	  "copies line up; give different textures different seeds so their patterns "
+	  "do not repeat together.",
+	  "", "materials#nodes" },
 	{ "Material Node/Scale", "Noise Scale",
 	  "How fine the procedural noise is. Bigger numbers mean smaller speckle: the "
 	  "value is how many noise cells fit across one UV unit.",
@@ -4243,8 +4397,8 @@ namespace
 	  "", "materials#nodes" },
 	{ "Material Node/+ Layer", "Add Layer",
 	  "Adds a paint layer to this blend node, which also adds its pin. The list "
-	  "here IS the set of layers the Landscape tool offers, in this order — one "
-	  "RGBA weightmap holds four of them, which is the limit.",
+	  "here IS the set of layers the Landscape tool offers, in this order — up to "
+	  "eight, four per RGBA weightmap page (both pages travel in one texture).",
 	  "", "materials#nodes" },
 	{ "Material Node/Lit", "",
 	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "
@@ -5964,6 +6118,43 @@ namespace
 	  "sees it. Left alone, the input keeps the default shown here. Public "
 	  "variables only.",
 	  "", "ui#graph" },
+	{ "UI Variable/Source Mode", "",
+	  "Pull on Construct fills this variable from somewhere else the moment the "
+	  "widget is created, before PreConstruct runs, once. Bind To keeps it "
+	  "following the source: at the end of every frame a changed source value "
+	  "is written here, in time for that frame's picture. When the source cannot "
+	  "answer, the default (now called Fallback) stays, and the log says why "
+	  "once per widget class.",
+	  "", "ui#graph" },
+	{ "UI Variable/Source", "",
+	  "Game Instance: one of its public variables. Creator: a public variable of "
+	  "whoever ran the Create Widget that made this one. Reference (Bind To "
+	  "only): a public variable of whatever an object variable of this widget "
+	  "holds.",
+	  "", "ui#graph" },
+	{ "UI Variable/Reference", "",
+	  "The object variable to bind through. Whatever it holds is the source; "
+	  "empty means the Initial Value stays, without a warning.",
+	  "", "ui#graph" },
+	{ "UI Variable/Creator Class", "",
+	  "The class expected to create this widget. It fills the Variable list and "
+	  "is where Add to Target writes; another creator leaves the fallback.",
+	  "", "ui#graph" },
+	{ "UI Variable/Variable", "",
+	  "The public variable of the source to copy. What cannot land here is "
+	  "greyed with the reason.",
+	  "", "ui#graph" },
+	{ "UI Variable/Member", "",
+	  "One field of a struct variable instead of the whole struct. Renamed "
+	  "fields are still found.",
+	  "", "ui#graph" },
+	{ "UI Variable/Struct Type", "",
+	  "The struct a missing source variable is created as, for a member pull.",
+	  "", "ui#graph" },
+	{ "UI Variable/Add to Target", "",
+	  "Creates what the source is missing, in the Game Instance or the creator "
+	  "class: the variable, a struct variable, or the struct's field.",
+	  "", "ui#graph" },
 	{ "UI Variable/Position##vdef", "Default Position",
 	  "The position this transform variable starts at, when the widget is "
 	  "created. It is a starting value, not a binding to anything.",
@@ -6140,8 +6331,8 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
-	  "material's Landscape Layer Blend node, in weightmap-channel order, and "
-	  "one weightmap holds four of them.",
+	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
+	  "eight, four per weightmap page.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Radius", "Brush Radius",
 	  "The inner, full-strength part of the brush, in metres — the tight circle "
@@ -6583,6 +6774,24 @@ namespace
 	  "frame, so a frame that is slow on the GPU can be told apart from one that "
 	  "is slow on the CPU. It appears only when the frames on screen carry GPU "
 	  "times at all.",
+	  "", "editor#profiler" },
+	{ "Profiler/Show the cells in the Scene window", "",
+	  "The same switch as Show > Streaming Cells in the Scene window: the cell "
+	  "squares on the ground, coloured by what the game would load, keep or drop "
+	  "from the editor camera, and the load and unload radius around it.",
+	  "", "editor#profiler" },
+	{ "Profiler/Split into Streaming Cells", "",
+	  "Moves the scene's placed things (meshes, point and spot lights, static "
+	  "bodies, decals) into one scene file per grid square, next to the scene in "
+	  "a folder named after it. The rest stays: sky, terrain, cameras, scripts, "
+	  "characters, dynamic bodies, prefab instances. The game then loads the "
+	  "squares around its camera and drops the far ones. One undo step; save the "
+	  "scene to keep it. The scene has to have been saved once.",
+	  "", "editor#profiler" },
+	{ "Profiler/Merge Cells into the Scene", "",
+	  "Loads every cell of a split scene back into it as ordinary entities and "
+	  "drops the cell list, so the scene is one piece again and everything in it "
+	  "can be edited. Split again when done. One undo step; save to keep it.",
 	  "", "editor#profiler" },
 	{ "Profiler/Fit", "",
 	  "Resets the timeline's zoom and pan so the whole capture fits the view "
@@ -7039,6 +7248,16 @@ namespace
 	  "calls its own handler after the Set. Untick and tick again and the "
 	  "existing function is kept, not duplicated.",
 	  "", "horizoncode#functions" },
+	{ "Script Variable/Notify on Change", "",
+	  "The variable reports its own change. At the end of every frame the engine "
+	  "compares it with the value it had at the end of the last one, and when it "
+	  "moved, calls OnChanged_<variable> with the old value as its one parameter "
+	  "(ticking the box writes that function for you, private). Instances bound "
+	  "to this one with Bind Event get the event <variable>Changed with the new "
+	  "value. It does not matter what wrote it: a node, Bind To, the network or a "
+	  "save. Several writes in one frame report once, a write undone in the same "
+	  "frame not at all, and the starting value (default, pull, Construct) never.",
+	  "", "horizoncode#functions" },
 	{ "Script Variable/Save Game", "",
 	  "Part of the savegame. When an entity running this class has a Save State "
 	  "component, entity.saveState writes this variable's value into the active "
@@ -7046,6 +7265,126 @@ namespace
 	  "are never saved. An Object variable cannot be ticked: a reference points "
 	  "at something that exists only in this run — save a name or an id "
 	  "instead.",
+	  "", "horizoncode#functions" },
+	// Pull on Construct and Bind To (HcPullUi draws them; the same block sits
+	// in the widget editor under "UI Variable/" below).
+	{ "Script Variable/Source Mode", "",
+	  "Whether this variable takes its value from somewhere else. Pull on "
+	  "Construct fills it once, the moment an instance is created, before any of "
+	  "its own events run: PreConstruct, Construct and BeginPlay already see the "
+	  "pulled value, and a later change at the source does not follow. Bind To "
+	  "does the same and then keeps following: at the end of every frame, when "
+	  "the source has changed, the new value is written here (a value you set "
+	  "yourself stays until the source changes again). When the source cannot "
+	  "answer, the default below (now called Fallback) stays, and the log says "
+	  "why once per class. Bind To is not offered on a Replicated variable.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Source", "",
+	  "Where the value comes from. Game Instance: one of its public variables, "
+	  "which exist before anything else is created. Creator: a public variable of "
+	  "whoever ran the Create Object or Create Widget that made this instance. A "
+	  "placed object has no creator and keeps its fallback. Reference (Bind To "
+	  "only): a public variable of whatever one of this class's object variables "
+	  "holds right now.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Reference", "",
+	  "The object variable of this class to bind through. Whatever it holds is "
+	  "the source; point it at another object and the value follows that one. "
+	  "While it is empty the variable keeps its Initial Value, without a "
+	  "warning. Its declared class fills the Variable list.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Creator Class", "",
+	  "The class the creator is expected to be. It fills the Variable list and "
+	  "tells Add to Target where to write. At run time a creator of another class "
+	  "leaves the fallback in place; derived classes count. Any creator accepts "
+	  "whoever has a public variable of that name.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Variable", "",
+	  "The public variable of the source to copy. Every public variable is "
+	  "listed; one that cannot land here is greyed with the reason. A struct that "
+	  "only fits through one of its fields opens the Member choice.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Member", "",
+	  "One field of a struct variable, instead of the whole struct. A field "
+	  "renamed in the struct is still found under its old name, and the new name "
+	  "is written here.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Struct Type", "",
+	  "Which struct the missing source variable is declared as, when Add to "
+	  "Target creates it for a member pull. Only structs with a fitting field of "
+	  "that name are offered.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Add to Target", "",
+	  "Creates what the source is missing: a public variable with this one's "
+	  "type and default, a struct variable for a member pull, or the missing "
+	  "field in the struct. It writes into the Game Instance or the creator "
+	  "class, never into a class open with unsaved changes.",
+	  "", "horizoncode#functions" },
+	// Extract on Destruct (HcExtractUi draws it, in the class tabs and in the
+	// widget editor's graph view alike — one scope for both).
+	{ "Extract on Destruct/Extract on Destruct", "",
+	  "When an instance of this class is destroyed, its own Destruct runs first, "
+	  "then the engine fills the struct chosen here from its variables and sends "
+	  "it as OnDestroyed to everything bound to the instance with Bind Event. "
+	  "Nobody bound: the data is dropped. The instance itself never gets it.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/(not available)", "",
+	  "The Level Script and the Game Instance are never destroyed like an object "
+	  "(they unload or shut down), so they have nothing to extract.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Struct", "",
+	  "The struct listeners receive. One per class. Choosing one fills every "
+	  "member that has a variable of the same name and type; correct the rest "
+	  "below. A derived class without its own struct sends its parent's.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/From", "",
+	  "What fills this member: one of the class's variables (private and "
+	  "inherited ones too), Self for an object member, or nothing, which keeps "
+	  "the struct's default. Variables that do not fit are greyed with the "
+	  "reason. Drag a variable from the list onto the row to map it.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Self", "",
+	  "A reference to the instance being destroyed. Lets a listener bound to "
+	  "several objects tell them apart. It is still readable inside OnDestroyed "
+	  "and dead right after.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/New Struct from Variables...", "",
+	  "Makes a struct asset from the variables you tick, with their names, "
+	  "types and defaults, and maps each to its variable. The quickest start "
+	  "when there is no struct yet.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Name", "",
+	  "The new struct's name: letters, digits and underscores, not starting "
+	  "with a digit. It becomes the asset's file name.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Folder", "",
+	  "Where in the project the struct asset is created, relative to the "
+	  "content folder.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Auto-Map by Name", "",
+	  "Fills every member still at its default with the variable of the same "
+	  "name (ignoring case) when the types fit, and an object member called "
+	  "Self, Owner, Who or Source with Self. Rows already mapped stay.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Clear", "",
+	  "Puts every member back to the struct's default. The struct stays chosen.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Open Extract Table", "",
+	  "Shows the Extract on Destruct table this variable is mapped in.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Data", "",
+	  "What the Target sends when it dies, when this graph cannot tell which "
+	  "class the Target is: a struct, or no data.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/(no data)", "",
+	  "The Target extracts nothing: OnDestroyed arrives without an argument, "
+	  "which still says that it died.",
+	  "", "horizoncode#functions" },
+	{ "Extract on Destruct/Create OnDestroyed Event", "",
+	  "Declares OnDestroyed in this class, with the struct the Target sends as "
+	  "its argument, and places its event node. Bind Event on OnDestroyed then "
+	  "runs it when the Target is destroyed. A class has one OnDestroyed, so "
+	  "everything it listens to should send the same struct.",
 	  "", "horizoncode#functions" },
 	{ "Script Variable/Position##vdef", "Default Position",
 	  "The position this Transform variable starts at. It is a starting value, "
@@ -7594,6 +7933,12 @@ namespace
 	  "Puts the full path of the log file on the clipboard, for opening it in "
 	  "something else or pasting it into a message.",
 	  "", "advanced#diagnostics" },
+	{ "Report Issue/Sign in with GitHub...", "Sign in with GitHub",
+	  "Signs the editor in to GitHub with a code you approve in your browser, "
+	  "right here in this dialog. Afterwards the issue can be filed directly "
+	  "under your account and the whole log uploaded. The sign-in stays for "
+	  "source control too.",
+	  "", "editor#github" },
 	{ "Report Issue/Create a token", "",
 	  "Opens GitHub's personal access token page. A token with issues and gist "
 	  "access is what lets the editor file the report and upload the whole log "
@@ -7844,6 +8189,7 @@ namespace
 		{ "Script Graph/",               "editor-horizoncode", "HorizonCode Editor", "Script graphs" },
 		{ "HorizonCode Graph/",          "editor-horizoncode", "HorizonCode Editor", "Comments and reroutes" },
 		{ "Script Variable/",            "editor-horizoncode", "HorizonCode Editor", "Graph variables" },
+		{ "Extract on Destruct/",        "editor-horizoncode", "HorizonCode Editor", "Extract on Destruct" },
 		{ "Script Node/",                "editor-horizoncode", "HorizonCode Editor", "Nodes in a script graph" },
 		{ "HorizonCode Event/",          "editor-horizoncode", "HorizonCode Editor", "Declared events" },
 		{ "HorizonCode Node/",           "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },

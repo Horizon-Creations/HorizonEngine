@@ -203,6 +203,7 @@ struct EditorConfig
 	bool  GlobalIlluminationEnabled = false;
 	float GIIndirectIntensity       = 1.0f;
 	float GILightRadius             = 0.5f;   // degrees — sun angular radius (shadow penumbra softness)
+	int   GIShadowQuality           = 1;      // 0 Low (1 sun ray/pixel) / 1 Medium (2) / 2 High (4) — Thema 134
 
 	// Ray-traced GI reflections (pushed each frame via SetGIReflectionSettings).
 	// Real scene rays against the GI acceleration structure instead of the sky

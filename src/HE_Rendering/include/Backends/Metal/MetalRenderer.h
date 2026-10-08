@@ -490,7 +490,8 @@ private:
 	// (unretained, autoreleased) id<MTLTexture> owned by the cache.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex);
 	// Node-graph project texture (Texture Sample nodes), cached by UUID/path key.
-	void* ResolveGraphTexture(const HE::UUID& texId, const std::string& path);
+	// `array` = a sampler2DArray slot (Thema 158): texture2d_array, white array when missing.
+	void* ResolveGraphTexture(const HE::UUID& texId, const std::string& path, bool array = false);
 	// A UI quad's image: same asset, uploaded without the sRGB decode, because
 	// the UI pass writes sRGB numbers straight to a Unorm target (Thema 107).
 	void* ResolveUITexture(const HE::UUID& texId, const std::string& path);
@@ -601,7 +602,13 @@ private:
 	void* m_noDepthState    = nullptr; // id<MTLDepthStencilState> (overlay)
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when shadow/AO/moon texture is absent
+	void* m_whiteArrayTexture = nullptr; // id<MTLTexture>, 1×1×1 white texture2d_array (empty array slot)
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
+	// Graph-material project textures (heTexP0..3, MSL texture/sampler 1..4):
+	// linear + mips like m_linearSampler, but REPEAT. Every other backend tiles
+	// these (GL default wrap, D3D WRAP, Vulkan REPEAT); with the clamping sampler
+	// a material uv past 0..1 smeared the edge texel on Metal only (Thema 158 S5).
+	void* m_materialSampler = nullptr; // id<MTLSamplerState>
 	void* m_noiseTexture    = nullptr; // id<MTLTexture>, 3D R16 value noise (sky)
 	void* m_noiseSampler    = nullptr; // id<MTLSamplerState>, linear + repeat
 	void* m_skyEnvCube      = nullptr; // id<MTLTexture>, baked skyColor IBL cubemap
@@ -1083,6 +1090,9 @@ private:
 	float m_giLightRadius       = 0.5f;  // degrees — sun angular radius (shadow penumbra softness)
 	int   m_giRaysPerProbe        = 128;
 	int   m_giProbeBudgetPerFrame = 256;
+	int   m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
+	float m_giShadowHistoryWeight = 0.9f;  // shadow-mask temporal history weight
+	bool  m_giShadowFilter        = true;  // edge-aware a-trous on the mask
 	// TLAS + its instance-descriptor buffer are reallocated FRESH every GI-active
 	// frame (never mutated/resized in place): the previous frame's build may still
 	// be executing on the GPU when this frame starts encoding a new one, and
@@ -1182,13 +1192,13 @@ private:
 	// sample per pixel (jittered within a cone around the sun for a soft
 	// penumbra), temporally accumulated against a ping-pong history (reprojected
 	// via the true previous frame's view-proj — NOT the same-frame m_prepassViewProj
-	// pattern), then a small spatial blur. Result sampled by fragmentMain exactly
+	// pattern), then an edge-aware a-trous filter. Result sampled by fragmentMain exactly
 	// like aoTex (screen-space UV, free bilinear upsample from half-res).
 	void* m_giGBufPipeline        = nullptr; // id<MTLRenderPipelineState> (MRT: world pos + normal)
 	void* m_giGBufInstancedPipeline = nullptr; // instanced twin (giGBufVertexInstanced); optional
 	void* m_giShadowRayPipeline   = nullptr; // id<MTLComputePipelineState>
 	void* m_giShadowTemporalPipeline = nullptr; // id<MTLRenderPipelineState>
-	void* m_giShadowBlurPipeline  = nullptr; // id<MTLRenderPipelineState>
+	void* m_giShadowAtrousPipeline = nullptr; // id<MTLRenderPipelineState> edge-aware a-trous (Thema 134)
 	void* m_giGBufPosTex  = nullptr; // id<MTLTexture> RGBA16F world pos, a=1 valid geometry
 	void* m_giGBufNormTex = nullptr; // id<MTLTexture> RGBA16F world normal
 	void* m_giGBufDepth   = nullptr; // id<MTLTexture> depth for the prepass only
@@ -1202,6 +1212,7 @@ private:
 	int   m_giShadowHistoryIdx   = 0;
 	bool  m_giShadowHistoryValid = false; // false right after (re)alloc — first frame skips history blend
 	void* m_giShadowResult = nullptr; // id<MTLTexture> R16F final blurred result, sampled by fragmentMain
+	void* m_giShadowFilterTmp = nullptr; // id<MTLTexture> R16F between the two a-trous iterations
 	int   m_giShadowW = 0, m_giShadowH = 0;
 	// TRUE previous-frame view-proj (unlike m_prepassViewProj, which is written and
 	// read within the SAME frame for the low-res cloud pre-pass) — written at the

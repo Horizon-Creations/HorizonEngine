@@ -2094,6 +2094,190 @@ TEST_CASE("codegen parity: gi_caller (the GameInstance resolves without a lookup
 	CHECK(p.var("total").f == 13.0f);   // Set 3 again, then +10
 }
 
+TEST_CASE("codegen parity: pull_construct (Pull on Construct lands the same values)")
+{
+	// Registration alone pulls: ParityPair's constructor is the whole act.
+	ParityPair p("fix/pull_construct");
+	p.checkParity();
+	CHECK(p.var("bonus").f == 2.5f);      // scalar from the Game Instance
+	CHECK(p.var("bonusInt").i == 2);      // Float → Int
+	CHECK(p.var("hp").f == 77.0f);        // a struct member (per-graph override)
+	CHECK(p.var("lvl").i == 3);           // a struct member (definition default)
+	CHECK(p.var("hidden").f == 9.0f);     // private on the source → default
+	CHECK(p.var("missing").f == 4.0f);    // not there → default
+	CHECK(p.var("gift").f == -1.0f);      // registered by a host → no creator
+	// The generated table carries the spec; without it the compiled side
+	// would have stayed at every default.
+	bool sawPull = false;
+	for (const auto& vi : p.compInst->varInfos())
+		if (std::string(vi.name) == "hp")
+		{
+			sawPull = true;
+			CHECK(std::string(vi.pullSource) == "GameInstance");
+			CHECK(std::string(vi.pullVar) == "run");
+			CHECK(std::string(vi.pullMember) == "hp");
+			CHECK(std::string(vi.pullClass).empty());
+		}
+		else if (std::string(vi.name) == "seen")
+			CHECK(std::string(vi.pullSource).empty());   // a non-pulling slot keeps ""
+	CHECK(sawPull);
+	const auto pi = p.interp.rt.pulledVariablesOf(p.interp.id);
+	const auto pc = p.comp.rt.pulledVariablesOf(p.comp.id);
+	REQUIRE(pi.size() == pc.size());
+	for (size_t i = 0; i < pi.size(); ++i)
+	{
+		INFO("pull ", pi[i].name);
+		CHECK(pi[i].name == pc[i].name);
+		CHECK(pi[i].pulled == pc[i].pulled);
+		CHECK(pi[i].why == pc[i].why);
+	}
+	p.fire("Construct");
+	CHECK(p.var("seen").f == 2.5f);
+}
+
+TEST_CASE("codegen parity: pull_spawner (the Creator source on both backends)")
+{
+	ParityPair p("fix/pull_spawner");
+	p.fire("Spawn");
+	const uint32_t ci = p.interp.rt.getVariable(p.interp.id, "child").ref;
+	const uint32_t cc = p.comp.rt.getVariable(p.comp.id, "child").ref;
+	REQUIRE(ci != 0);
+	REQUIRE(cc != 0);
+	CHECK(p.interp.rt.creatorOf(ci) == p.interp.id);
+	CHECK(p.comp.rt.creatorOf(cc) == p.comp.id);
+	CHECK(p.interp.rt.getVariable(ci, "gift").f == 6.5f);
+	CHECK(p.comp.rt.getVariable(cc, "gift").f == 6.5f);
+	// The child pulled from the Game Instance as well, in both worlds.
+	CHECK(p.comp.rt.getVariable(cc, "hp").f == 77.0f);
+}
+
+TEST_CASE("codegen parity: bind_to (Bind To follows the source the same way)")
+{
+	ParityPair p("fix/bind_to");
+	// Registration pulled the Game Instance sources; the Ref source pulled
+	// nothing (its reference is still null).
+	p.checkParity();
+	CHECK(p.var("bonus").f == 2.5f);
+	CHECK(p.var("hp").f == 77.0f);
+	CHECK(p.var("viaRef").f == -1.0f);
+	bool sawBind = false;
+	for (const auto& vi : p.compInst->varInfos())
+	{
+		const std::string n = vi.name;
+		if (n == "viaRef")
+		{
+			sawBind = true;
+			CHECK(vi.bindTo);
+			CHECK(std::string(vi.pullSource) == "Ref");
+			CHECK(std::string(vi.pullRef) == "target");
+		}
+		else if (n == "bonus") { CHECK(vi.bindTo); CHECK(std::string(vi.pullRef).empty()); }
+		else if (n == "plain") { CHECK_FALSE(vi.bindTo); }
+	}
+	CHECK(sawBind);
+
+	// Nothing moved: the first compare writes nothing, in either world.
+	CHECK(p.interp.rt.exchangeState() == 0);
+	CHECK(p.comp.rt.exchangeState() == 0);
+
+	// The source moves → both follow at the next compare. The reference is
+	// assigned at the same time and pushes its first value.
+	for (World* w : { &p.interp, &p.comp })
+	{
+		const InstanceId gi = w->rt.gameInstance();
+		REQUIRE(gi != 0);
+		w->rt.setVariable(gi, "bonus", Value::ofFloat(4.0f));
+		w->rt.setVariable(w->id, "target", Value::ofRef(gi));
+		CHECK(w->rt.exchangeState() == 2);   // bonus and viaRef
+	}
+	p.checkParity();
+	CHECK(p.var("bonus").f == 4.0f);
+	CHECK(p.var("viaRef").f == 4.0f);
+	CHECK(p.var("hp").f == 77.0f);
+	const auto bi = p.interp.rt.boundVariablesOf(p.interp.id);
+	const auto bc = p.comp.rt.boundVariablesOf(p.comp.id);
+	REQUIRE(bi.size() == 3);
+	REQUIRE(bi.size() == bc.size());
+	for (size_t i = 0; i < bi.size(); ++i)
+	{
+		INFO("binding ", bi[i].name);
+		CHECK(bi[i].name == bc[i].name);
+		CHECK(bi[i].boundTo == bc[i].boundTo);
+		CHECK(bi[i].why == bc[i].why);
+	}
+}
+
+TEST_CASE("codegen parity: extract_destruct (both backends extract the same struct)")
+{
+	ParityPair p("fix/extract_destruct");
+	// One OnDestroyed (FixStats) listener per world, each in its own backend:
+	// the compiled one is checked against its generated event table.
+	auto addListener = [](World& w) -> InstanceId
+	{
+		if (w.useCompiled)
+		{
+			const CompiledClassEntry* e = findCompiled("fix/extract_listener");
+			REQUIRE(e != nullptr);
+			return w.rt.addCompiled(CompiledPtr(e->create(), CompiledDeleter{ e->destroy }));
+		}
+		for (auto& s : hcfix::all())
+			if (s.key == "fix/extract_listener") return w.rt.add(std::move(s.graph));
+		return 0;
+	};
+	const InstanceId li = addListener(p.interp);
+	const InstanceId lc = addListener(p.comp);
+	REQUIRE(li != 0);
+	REQUIRE(li == lc);   // both worlds mint ids identically
+
+	// Before Destruct ran: the private `secret` is still 0.
+	const Value early = p.interp.rt.buildExtract(p.interp.id);
+	CHECK(valueEq(early, p.comp.rt.buildExtract(p.comp.id)));
+	REQUIRE(early.items.size() == 6);
+	CHECK(early.items[0].f == 0.0f);
+
+	p.interp.rt.bindEvent(p.interp.id, HorizonCode::kOnDestroyed, li);
+	p.comp.rt.bindEvent(p.comp.id, HorizonCode::kOnDestroyed, lc);
+	const InstanceId owner = p.interp.id;
+	p.interp.rt.destroy(p.interp.id);
+	p.comp.rt.destroy(p.comp.id);
+	CHECK_FALSE(p.interp.rt.alive(owner));
+	CHECK_FALSE(p.comp.rt.alive(owner));
+
+	const Value gi = p.interp.rt.getVariable(li, "got");
+	const Value gc = p.comp.rt.getVariable(lc, "got");
+	INFO("interp=", valueStr(gi), " compiled=", valueStr(gc));
+	CHECK(valueEq(gi, gc));
+	REQUIRE(gi.items.size() == 6);
+	CHECK(gi.items[0].f == 42.0f);          // hp ← secret, as Destruct left it
+	CHECK(gi.items[1].i == 7);              // lvl ← lvlF, Float → Int
+	const Value defs = HE::TypeRegistry::instance().makeDefaultValue(hcfix::kStatsType);
+	REQUIRE(defs.items.size() == 6);
+	CHECK(valueEq(gi.items[2], defs.items[2]));   // mood: Int refused → definition default
+	CHECK(gi.items[5].ref == owner);        // owner ← @Self
+	REQUIRE(gi.items[4].items.size() == 2); // hits: the definition's authored slots
+	CHECK(gi.items[4].items[1].f == 2.0f);
+
+	// The listener's generated table names its argument's type.
+	const CompiledClassEntry* le = findCompiled("fix/extract_listener");
+	CompiledPtr probe(le->create(), CompiledDeleter{ le->destroy });
+	bool typed = false;
+	for (const auto& e : probe->eventInfos())
+		if (std::string(e.name) == HorizonCode::kOnDestroyed)
+			typed = e.argType == (int)PinType::Struct && std::string(e.typeName) == hcfix::kStatsType;
+	CHECK(typed);
+}
+
+TEST_CASE("codegen parity: extract_derived (a derived class without a spec extracts the base's)")
+{
+	ParityPair p("fix/extract_derived");
+	const Value vi = p.interp.rt.buildExtract(p.interp.id);
+	const Value vc = p.comp.rt.buildExtract(p.comp.id);
+	REQUIRE(vi.type == PinType::Struct);
+	CHECK(vi.typeName == hcfix::kStatsType);
+	INFO("interp=", valueStr(vi), " compiled=", valueStr(vc));
+	CHECK(valueEq(vi, vc));
+}
+
 TEST_CASE("codegen: the engine-event hooks do exactly what the named path does")
 {
 	// Step A of the native event route: a compiled class overrides the

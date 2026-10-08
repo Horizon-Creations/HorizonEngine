@@ -116,7 +116,7 @@ AREAS: dict[str, list[str]] = {
     "materials": ["MaterialEditorPanel.cpp"],
     "ui": ["UIEditorPanel.cpp", "ThemeAssetPanel.cpp"],
     "horizoncode": ["LevelScriptPanel.cpp", "HcGraphHost.cpp", "HcEditorUtil.cpp",
-                    "TypeAssetPanel.cpp", "HcWatchPanel.cpp"],
+                    "TypeAssetPanel.cpp", "HcWatchPanel.cpp", "HcExtractUi.cpp"],
     "input": ["InputAssetPanel.cpp"],
     "animation": ["AnimatorStateMachineEditorPanel.cpp", "AudioEditorPanel.cpp",
                   "StaticMeshEditorPanel.cpp", "SkeletalMeshEditorPanel.cpp",
@@ -127,7 +127,8 @@ AREAS: dict[str, list[str]] = {
     "export": ["ExportDialogPanel.cpp", "BuildProgressDialog.cpp", "ProfilerPanel.cpp"],
     "collab": ["CollabPanel.cpp", "CollabPresenceBar.cpp", "SourceControlPanel.cpp",
                "GitMissingDialog.cpp", "EngineContentPublishDialog.cpp",
-               "ReportIssueDialog.cpp"],
+               "ReportIssueDialog.cpp", "GitCloneDialog.cpp",
+               "GitHubSignIn.cpp", "GitHubSignInView.cpp"],
 }
 
 # The gap as it stands, per area. A number that goes UP is a control somebody

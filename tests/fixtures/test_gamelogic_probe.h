@@ -118,4 +118,18 @@ struct ITestServicesProbe : IGameLogic
     // Straight at the table, to reach the too-small-buffer path the wrapper
     // hides by growing and retrying.
     virtual int  doAssetTypeNameRaw(const he::AssetId& id, char* buf, int cap) const = 0;
+
+    // ── HorizonCode variables (the hc table, umbrella v5) ───────────────────
+    virtual bool doHcAvailable() const = 0;
+    virtual bool doHcWatch(uint32_t target, const char* var) const = 0;
+    virtual void doHcUnwatch(uint32_t target, const char* var) const = 0;
+    // Through the he::hc::valueJson wrapper; copied out like doAssetTypeName.
+    virtual int  doHcValueJson(uint32_t target, const char* var, char* buf, int cap) const = 0;
+    // What onHcVariableChanged saw: how often, the last source and name, and
+    // the value read back through he::hc::valueJson INSIDE that callback —
+    // the module's only way to the new value, so it has to work right there.
+    virtual int      hcChangedCount() const = 0;
+    virtual uint32_t hcChangedEntity() const = 0;
+    virtual int      hcChangedName(char* buf, int cap) const = 0;
+    virtual int      hcChangedJson(char* buf, int cap) const = 0;
 };

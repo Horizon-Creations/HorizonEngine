@@ -7,8 +7,8 @@ struct AppContext;
 // ── Clone a repository from the user's own GitHub account as a project ───────
 // The counterpart of Preferences ▸ Source Control's "Create & push": that one
 // takes a project and makes a repository of it, this one takes a repository
-// and makes a project of it. Token → the account's repository list (searchable)
-// → a folder → clone (LFS assets included) → the project opens.
+// and makes a project of it. GitHub sign-in or token → the account's repository
+// list (searchable) → a folder → clone (LFS assets included) → the project opens.
 //
 // Raised from the Project Hub and from the Preferences page, and drawn once for
 // both screens (EditorUI, next to GitMissingDialog), because a clone is what

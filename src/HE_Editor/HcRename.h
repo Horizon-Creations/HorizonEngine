@@ -90,6 +90,11 @@ namespace HcRename
 		std::string decl;
 		std::string what;
 	};
+	// A Hit whose `decl` starts with this is not a declaration of the renamed
+	// member but a Pull on Construct spec naming it (Variable::pullVar), on the
+	// variable called whatever follows. Its own prefix because a pull spec lives
+	// on a declaration like a variable does, and the two must not be confused.
+	inline constexpr const char* kPullDeclPrefix = "pull:";
 
 	struct Plan
 	{

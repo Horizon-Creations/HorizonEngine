@@ -41,7 +41,7 @@ cbuffer GiShadowCB : register(b0)
     float4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
     float4 uFrame;        // x = jitter seed, y = tex width, z = tex height
     float4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
-    float4 uLocalExtra;       // x = local light count
+    float4 uLocalExtra;       // x = local light count, y = sun rays per pixel
 };
 Texture2D<float4>   uGPos     : register(t0);
 Texture2D<float4>   uGNorm    : register(t1);
@@ -116,11 +116,17 @@ void main(uint3 gid : SV_DispatchThreadID)
     // term already zeroes this out, so skip the trace entirely.
     if (dot(N, L) > 0.0)
     {
-        float2 xi  = giHash2(gid.xy, uFrame.x);
-        float3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
-        // Same self-intersection guards as the SW kernel: normal-offset origin + min t.
-        float3 origin = pv.xyz + N * 0.05;
-        sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+        // spp rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+        uint spp = uint(max(uLocalExtra.y, 1.0));
+        for (uint k = 0u; k < spp; ++k)
+        {
+            float2 xi  = giHash2(gid.xy, uFrame.x * float(spp) + float(k));
+            float3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+            // Same self-intersection guards as the SW kernel: normal-offset origin + min t.
+            float3 origin = pv.xyz + N * 0.05;
+            sunVis += giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+        }
+        sunVis /= float(spp);
     }
     uOut[gid.xy] = sunVis;
 

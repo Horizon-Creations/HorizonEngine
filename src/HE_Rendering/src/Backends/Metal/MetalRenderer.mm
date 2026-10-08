@@ -1,6 +1,7 @@
 #include "Backends/Metal/MetalRenderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
@@ -176,6 +177,11 @@ void MetalRenderer::SamplePoint(void* encoderPtr, const char* name)
 // pipeline and the ImGui pass descriptor — they must all match.
 static constexpr MTLPixelFormat kSwapchainFormat = MTLPixelFormatBGRA8Unorm;
 static constexpr MTLPixelFormat kDepthFormat     = MTLPixelFormatDepth32Float;
+// GI G-buffer position = the shadow-ray ORIGIN (pos + N*0.05), stored as the
+// ABSOLUTE world position, so fp32: as RGBA16Float its ULP passes the 5 cm
+// normal offset at |coord| >= ~100 m and surfaces self-shadow in height bands
+// (Thema 159). Every consumer read()s or point-samples it; normals stay 16F.
+static constexpr MTLPixelFormat kGiGBufPosFormat = MTLPixelFormatRGBA32Float;
 static constexpr MTLPixelFormat kSceneColorFormat = MTLPixelFormatRGBA16Float; // HDR scene color
 // Deferred G-buffer layout (docs/deferred-renderer-plan.md §3): BaseColor+Metallic
 // in sRGB8, oct-Normal/Roughness/Specular and HDR-Emissive/AO in RGBA16F.
@@ -2103,7 +2109,9 @@ vertex GIFsOut giFsVertex(uint vid [[vertex_id]])
 	return o;
 }
 
-struct GITemporalParams { float4x4 prevViewProj; float4 blend; }; // blend.x = history weight (0 on first activation frame)
+// curViewProj = this frame's, same family as prevViewProj (motion-vector
+// reprojection); blend.x = history weight (0 on first activation frame).
+struct GITemporalParams { float4x4 prevViewProj; float4x4 curViewProj; float4 blend; };
 
 // Reproject last frame's accumulated shadow value via this pixel's world
 // position and blend it with the new raw sample. The history texture carries
@@ -2131,7 +2139,6 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	if (any(prevUV < 0.0) || any(prevUV > 1.0))
 		return float4(pv.xyz, rawV); // off-screen last frame → no history
 
-	float4 hist = history.sample(smp, prevUV);
 	// Reject history whose recorded world position is far from THIS pixel's —
 	// a disoccluded/wrong-surface reproject, not the same point one frame ago.
 	// MUST be tight: two points can be spatially close in world units while
@@ -2152,9 +2159,27 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	const float3 gyp = gPos.sample(smp, in.uv + float2(0.0, texel.y)).xyz, gym = gPos.sample(smp, in.uv - float2(0.0, texel.y)).xyz;
 	const float footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
 	                            min(length(gyp - pv.xyz), length(gym - pv.xyz)));
-	const float posError = length(pv.xyz - hist.rgb);
 	const float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
-	const float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
+	// Bilinear history, reprojected as a motion vector from this pixel's
+	// centre; 4 taps, each only if written for this surface, renormalised —
+	// see gi_temporal.frag, Thema 134 §4.2. curUV uses prevUV's y-flip.
+	const float4 cclip = P.curViewProj * float4(pv.xyz, 1.0);
+	const float2 cndc  = cclip.xy / cclip.w;
+	const float2 curUV = float2(cndc.x * 0.5 + 0.5, 1.0 - (cndc.y * 0.5 + 0.5));
+	const float2 hsz   = float2(history.get_width(), history.get_height());
+	const float2 hf    = (in.uv + (prevUV - curUV)) * hsz - 0.5;
+	const float2 hb    = floor(hf);
+	const float2 ht    = hf - hb;
+	float hAcc = 0.0, hWsum = 0.0;
+	for (int j = 0; j < 4; ++j)
+	{
+		const float2 o  = float2(float(j & 1), float(j >> 1));
+		const float2 bw = mix(1.0 - ht, ht, o);
+		const float4 h  = history.sample(smp, (hb + o + 0.5) / hsz);
+		if (length(pv.xyz - h.rgb) < tolerance) { hAcc += h.a * bw.x * bw.y; hWsum += bw.x * bw.y; }
+	}
+	const float histA = hWsum > 1e-3 ? hAcc / hWsum : 0.0;
+	const float w = hWsum > 1e-3 ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
 	// Neighbourhood clamp: the position check above only guards RECEIVER
 	// motion — when the OCCLUDER moves, the receiving surface is unchanged and
 	// stale history blends in at 0.9, smearing the old shadow across the floor
@@ -2180,23 +2205,64 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 			nMin = min(nMin, s / 9.0);
 			nMax = max(nMax, s / 9.0);
 		}
-	float result = mix(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w);
+	float result = mix(rawV, clamp(histA, nMin - 0.1, nMax + 0.1), w);
 	return float4(pv.xyz, result);
 }
 
-// Reads the shadow scalar from the temporal history's alpha channel (rgb there
-// is the world position used for next frame's disocclusion check, not colour).
-fragment float4 giShadowBlur(GIFsOut in [[stage_in]],
-                             texture2d<float> src [[texture(0)]],
-                             sampler          smp [[sampler(0)]])
+// One edge-aware a-trous iteration over the shadow mask (B3 5x5, holes =
+// A.x texels), run twice; replaces the 3x3 box. Plane, normal and Bernoulli
+// value stops — see gi_atrous.frag (Thema 134 §4.3), same constants (SYNC).
+// The first iteration reads the shadow scalar from the history's alpha (rgb
+// there is the world position for the disocclusion check, not colour).
+// level(0) throughout: the early outs and the background skip are divergent.
+// A.x = step in texels (0 = plain copy), A.y = 1 read .a else .r, A.z = N_eff.
+static inline float giAtrousValue(float4 s, float fromA) { return fromA > 0.5 ? s.a : s.r; }
+fragment float4 giShadowAtrous(GIFsOut in [[stage_in]],
+                               texture2d<float> src  [[texture(0)]],
+                               texture2d<float> gPos [[texture(1)]],
+                               texture2d<float> gNrm [[texture(2)]],
+                               sampler          smp  [[sampler(0)]],
+                               constant float4& A    [[buffer(0)]])
 {
-	float2 texel = 1.0 / float2(src.get_width(), src.get_height());
-	float sum = 0.0;
-	for (int x = -1; x <= 1; ++x)
-		for (int y = -1; y <= 1; ++y)
-			sum += src.sample(smp, in.uv + float2(float(x), float(y)) * texel).a;
-	float v = sum / 9.0;
-	return float4(v, 0.0, 0.0, 1.0);
+	const float  c  = giAtrousValue(src.sample(smp, in.uv, level(0)), A.y);
+	const float4 pv = gPos.sample(smp, in.uv, level(0));
+	const float  st = A.x;
+	if (st < 0.5 || pv.a < 0.5) return float4(c, 0.0, 0.0, 1.0);
+
+	const float2 texel = 1.0 / float2(src.get_width(), src.get_height());
+	if (c < 1e-3 || c > 1.0 - 1e-3)
+	{
+		bool allSame = true;
+		for (int k = 0; k < 4 && allSame; ++k)
+		{
+			const float2 o = float2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
+			allSame = abs(giAtrousValue(src.sample(smp, in.uv + o * (2.0 * st) * texel, level(0)), A.y) - c) < 1e-3;
+		}
+		if (allSame) return float4(c, 0.0, 0.0, 1.0);
+	}
+
+	const float3 n = normalize(gNrm.sample(smp, in.uv, level(0)).xyz);
+	const float3 gxp = gPos.sample(smp, in.uv + float2(texel.x, 0.0), level(0)).xyz, gxm = gPos.sample(smp, in.uv - float2(texel.x, 0.0), level(0)).xyz;
+	const float3 gyp = gPos.sample(smp, in.uv + float2(0.0, texel.y), level(0)).xyz, gym = gPos.sample(smp, in.uv - float2(0.0, texel.y), level(0)).xyz;
+	const float  fp  = max(max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+	                           min(length(gyp - pv.xyz), length(gym - pv.xyz))), 1e-4);
+	const float  sig = sqrt(max(c * (1.0 - c), 0.0) / max(A.z, 1.0));
+	const float  h[5] = { 1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0 };
+	float sum = 0.0, wsum = 0.0;
+	for (int y = -2; y <= 2; ++y)
+		for (int x = -2; x <= 2; ++x)
+		{
+			const float2 uv = in.uv + float2(float(x), float(y)) * st * texel;
+			const float4 q  = gPos.sample(smp, uv, level(0));
+			if (q.a < 0.5) continue;
+			const float v = giAtrousValue(src.sample(smp, uv, level(0)), A.y);
+			float w = h[x + 2] * h[y + 2];
+			w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (1.0 * fp));
+			w *= pow(max(dot(n, normalize(gNrm.sample(smp, uv, level(0)).xyz)), 0.0), 32.0);
+			w *= exp(-abs(v - c) / (2.0 * sig + 1e-3));
+			sum += v * w; wsum += w;
+		}
+	return float4(wsum > 0.0 ? sum / wsum : c, 0.0, 0.0, 1.0);
 }
 )MSL";
 
@@ -2210,7 +2276,7 @@ struct GIShadowParams {
 	float4 sunDirRadius; // xyz = direction TOWARD the light (world space), w = angular radius (radians)
 	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = SW instance count
 	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-	float4 extra;            // x = local light count
+	float4 extra;            // x = local light count, y = sun rays per pixel
 };
 
 // Two independent [0,1) values per pixel/frame, so successive frames sample
@@ -2272,21 +2338,27 @@ kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
 	// term already zeroes this out, so skip the trace entirely.
 	if (dot(N, L) > 0.0)
 	{
-		float2 xi  = giHash2(gid, P.frame.x);
-		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
-		// Normal-offset bias + min_distance floor guard self-intersection
-		// ("shadow acne") independently.
-		ray r;
-		r.origin       = pv.xyz + N * 0.05;
-		r.direction    = dir;
-		r.min_distance = 0.02;
-		r.max_distance = 10000.0;
-		intersection_params params;
-		params.accept_any_intersection(true);
-		intersection_query<triangle_data, instancing> q;
-		q.reset(r, accel, params);
-		q.next();
-		sunVis = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+		// extra.y rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		const uint spp = uint(max(P.extra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			float2 xi  = giHash2(gid, P.frame.x * float(spp) + float(k));
+			float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+			// Normal-offset bias + min_distance floor guard self-intersection
+			// ("shadow acne") independently.
+			ray r;
+			r.origin       = pv.xyz + N * 0.05;
+			r.direction    = dir;
+			r.min_distance = 0.02;
+			r.max_distance = 10000.0;
+			intersection_params params;
+			params.accept_any_intersection(true);
+			intersection_query<triangle_data, instancing> q;
+			q.reset(r, accel, params);
+			q.next();
+			sunVis += (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+		}
+		sunVis /= float(spp);
 	}
 	outShadow.write(float4(sunVis), gid);
 
@@ -3178,7 +3250,7 @@ struct GIShadowParams {
 	float4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = instance count
 	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-	float4 extra;            // x = local light count
+	float4 extra;            // x = local light count, y = sun rays per pixel
 };
 // Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
 // (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
@@ -3230,10 +3302,16 @@ kernel void giShadowRaySw(uint2 gid [[thread_position_in_grid]],
 	float sunVis = 0.0;
 	if (dot(N, L) > 0.0)
 	{
-		float2 xi  = giHash2(gid, P.frame.x);
-		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
-		float3 origin = pv.xyz + N * 0.05;
-		sunVis = giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		// extra.y rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		const uint spp = uint(max(P.extra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			float2 xi  = giHash2(gid, P.frame.x * float(spp) + float(k));
+			float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+			float3 origin = pv.xyz + N * 0.05;
+			sunVis += giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		}
+		sunVis /= float(spp);
 	}
 	outShadow.write(float4(sunVis), gid);
 
@@ -6172,7 +6250,7 @@ struct GIShadowParamsCPU
 	glm::vec4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 	glm::vec4 frame;        // x = jitter seed, y = tex width, z = tex height, w = SW instance count
 	glm::vec4 localPosRange[4]; // xyz = local light position, w = range
-	glm::vec4 extra;            // x = local light count
+	glm::vec4 extra;            // x = local light count, y = sun rays per pixel
 };
 static_assert(sizeof(GIShadowParamsCPU) == 7 * 16, "must match the MSL GIShadowParams layout");
 // Matches the MSL GIReflParams struct (kGIReflMSL + kGISWMSL's copy, used only
@@ -6195,8 +6273,10 @@ static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GI
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
+	glm::mat4 curViewProj; // this frame's (motion-vector reprojection of the bilinear history)
 	glm::vec4 blend; // x = history weight (0 on first activation frame), y/z = tex width/height, w unused
 };
+static_assert(sizeof(GITemporalParamsCPU) == 2 * 64 + 16, "must match the MSL GITemporalParams layout");
 
 // Matches the MSL GIProbeParams struct (kGIProbeMSL, EncodeGIProbeUpdate only).
 struct GIProbeParamsCPU
@@ -6408,7 +6488,7 @@ void MetalRenderer::Shutdown()
 	if (m_giGBufInstancedPipeline)  { CFBridgingRelease(m_giGBufInstancedPipeline);  m_giGBufInstancedPipeline = nullptr; }
 	if (m_giShadowRayPipeline)      { CFBridgingRelease(m_giShadowRayPipeline);      m_giShadowRayPipeline = nullptr; }
 	if (m_giShadowTemporalPipeline) { CFBridgingRelease(m_giShadowTemporalPipeline); m_giShadowTemporalPipeline = nullptr; }
-	if (m_giShadowBlurPipeline)     { CFBridgingRelease(m_giShadowBlurPipeline);     m_giShadowBlurPipeline = nullptr; }
+	if (m_giShadowAtrousPipeline)   { CFBridgingRelease(m_giShadowAtrousPipeline);   m_giShadowAtrousPipeline = nullptr; }
 	if (m_giProbeUpdatePipeline)    { CFBridgingRelease(m_giProbeUpdatePipeline);    m_giProbeUpdatePipeline = nullptr; }
 	if (m_giShadowRaySwPipeline)    { CFBridgingRelease(m_giShadowRaySwPipeline);    m_giShadowRaySwPipeline = nullptr; }
 	if (m_giProbeUpdateSwPipeline)  { CFBridgingRelease(m_giProbeUpdateSwPipeline);  m_giProbeUpdateSwPipeline = nullptr; }
@@ -6489,7 +6569,9 @@ void MetalRenderer::Shutdown()
 	DestroySkyViewLut();
 	if (m_moonTexture)         { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
+	if (m_whiteArrayTexture) { CFBridgingRelease(m_whiteArrayTexture); m_whiteArrayTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
+	if (m_materialSampler) { CFBridgingRelease(m_materialSampler); m_materialSampler = nullptr; }
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
@@ -6761,6 +6843,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 			if (ResolveMaterialShader(rb.materialAssetId, shKey, shFrag, shVert))
 			{
 				std::vector<HE::UUID>    gtexIds;
+				uint32_t                 gtexArr = 0; // sampler2DArray slots (Thema 158)
 				std::vector<std::string> gtexPaths;
 				const MaterialShaderVariant* pre = nullptr;
 				if (const MaterialAsset* ma = m_contentManager
@@ -6771,6 +6854,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 					if (!ma->shaderParamData.empty()) t.params = ma->shaderParamData;
 					// Snapshot the graph texture slots BEFORE resolving any of them —
 					// ResolveGraphTexture loads, and `ma` would not survive it.
+					gtexArr = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 					const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 						std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 					for (size_t i = 0; i < nTex; ++i)
@@ -6782,7 +6866,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
 				t.wpo      = !shVert.empty();
 				for (size_t i = 0; i < gtexIds.size(); ++i)
-					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i]);
+					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i], (gtexArr >> i) & 1u);
 			}
 #endif
 
@@ -7160,12 +7244,29 @@ void MetalRenderer::CreateScenePipeline()
 		const uint32_t white = 0xFFFFFFFF;
 		[dummy replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
 		m_dummyTexture = (void*)CFBridgingRetain(dummy);
+		// Its texture2d_array twin: what an empty sampler2DArray heTexP slot (Texture
+		// Array Sample, Thema 158) gets — a 2D texture there is a type mismatch.
+		MTLTextureDescriptor* dummyArrDesc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
+		dummyArrDesc.textureType = MTLTextureType2DArray;
+		dummyArrDesc.arrayLength = 1;
+		dummyArrDesc.usage       = MTLTextureUsageShaderRead;
+		dummyArrDesc.storageMode = MTLStorageModeShared;
+		id<MTLTexture> dummyArr = [device newTextureWithDescriptor:dummyArrDesc];
+		[dummyArr replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0
+		              withBytes:&white bytesPerRow:4 bytesPerImage:4];
+		m_whiteArrayTexture = (void*)CFBridgingRetain(dummyArr);
 
 		MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
 		sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
 		sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
 		sampDesc.mipFilter = MTLSamplerMipFilterLinear; // use baked mip chains (else level 0 only)
 		m_linearSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
+		// The graph-material slots tile, as on every other backend (see the header).
+		sampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
+		sampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
+		sampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
+		m_materialSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
 
 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
@@ -8135,7 +8236,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		MTLRenderPipelineDescriptor* gDesc = [[MTLRenderPipelineDescriptor alloc] init];
 		gDesc.vertexFunction   = [lib newFunctionWithName:@"giGBufVertex"];
 		gDesc.fragmentFunction = [lib newFunctionWithName:@"giGBufFragment"];
-		gDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+		gDesc.colorAttachments[0].pixelFormat = kGiGBufPosFormat;
 		gDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
 		gDesc.depthAttachmentPixelFormat      = kDepthFormat;
 		id<MTLRenderPipelineState> gPso = [device newRenderPipelineStateWithDescriptor:gDesc error:&error];
@@ -8188,14 +8289,15 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		if (tPso) m_giShadowTemporalPipeline = (void*)CFBridgingRetain(tPso);
 		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow-temporal pipeline creation failed");
 
-		// Spatial blur (fullscreen triangle, single R-channel output).
+		// Edge-aware a-trous (fullscreen triangle, single R-channel output), one
+		// pipeline for both iterations — the step/source arrive as bytes.
 		MTLRenderPipelineDescriptor* bDesc = [[MTLRenderPipelineDescriptor alloc] init];
 		bDesc.vertexFunction   = [lib newFunctionWithName:@"giFsVertex"];
-		bDesc.fragmentFunction = [lib newFunctionWithName:@"giShadowBlur"];
+		bDesc.fragmentFunction = [lib newFunctionWithName:@"giShadowAtrous"];
 		bDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR16Float;
 		id<MTLRenderPipelineState> bPso = [device newRenderPipelineStateWithDescriptor:bDesc error:&error];
-		if (bPso) m_giShadowBlurPipeline = (void*)CFBridgingRetain(bPso);
-		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow-blur pipeline creation failed");
+		if (bPso) m_giShadowAtrousPipeline = (void*)CFBridgingRetain(bPso);
+		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow a-trous pipeline creation failed");
 	}
 }
 
@@ -8208,10 +8310,11 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	MTLTextureDescriptor* posDesc = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+		texture2DDescriptorWithPixelFormat:kGiGBufPosFormat width:width height:height mipmapped:NO];
 	posDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	posDesc.storageMode = MTLStorageModePrivate;
 	m_giGBufPosTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
+	posDesc.pixelFormat = MTLPixelFormatRGBA16Float; // normals keep half precision
 	m_giGBufNormTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
 
 	MTLTextureDescriptor* dDesc = [MTLTextureDescriptor
@@ -8243,13 +8346,15 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	m_giShadowHistory[0] = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
 	m_giShadowHistory[1] = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
 	// Final result is a plain scalar (fragmentMain only ever samples .r), written
-	// by a render pass (giShadowBlur) rather than a compute kernel — RenderTarget,
-	// not ShaderWrite, and back to the smaller R16Float format.
+	// by a render pass (giShadowAtrous) rather than a compute kernel — RenderTarget,
+	// not ShaderWrite, and back to the smaller R16Float format. The scratch
+	// target between the two a-trous iterations has the same shape.
 	MTLTextureDescriptor* resultDesc = [MTLTextureDescriptor
 		texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:width height:height mipmapped:NO];
 	resultDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	resultDesc.storageMode = MTLStorageModePrivate;
-	m_giShadowResult = (void*)CFBridgingRetain([device newTextureWithDescriptor:resultDesc]);
+	m_giShadowResult    = (void*)CFBridgingRetain([device newTextureWithDescriptor:resultDesc]);
+	m_giShadowFilterTmp = (void*)CFBridgingRetain([device newTextureWithDescriptor:resultDesc]);
 
 	m_giShadowHistoryIdx   = 0;
 	m_giShadowHistoryValid = false; // fresh (undefined-content) textures — first frame skips the history blend
@@ -8266,6 +8371,7 @@ void MetalRenderer::DestroyGIShadowTargets()
 	if (m_giShadowHistory[0]) { CFBridgingRelease(m_giShadowHistory[0]); m_giShadowHistory[0] = nullptr; }
 	if (m_giShadowHistory[1]) { CFBridgingRelease(m_giShadowHistory[1]); m_giShadowHistory[1] = nullptr; }
 	if (m_giShadowResult)     { CFBridgingRelease(m_giShadowResult);     m_giShadowResult = nullptr; }
+	if (m_giShadowFilterTmp)  { CFBridgingRelease(m_giShadowFilterTmp);  m_giShadowFilterTmp = nullptr; }
 	m_giShadowHistoryValid = false;
 	m_giShadowW = m_giShadowH = 0;
 }
@@ -8279,7 +8385,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 	             : (!m_giSwNodeBuf || !m_giSwTriBuf || !m_giSwInstanceBuf || m_giSwInstanceCount == 0))
 		return;
 	EnsureGIShadowPipelines();
-	if (!m_giGBufPipeline || !m_giShadowTemporalPipeline || !m_giShadowBlurPipeline)
+	if (!m_giGBufPipeline || !m_giShadowTemporalPipeline || !m_giShadowAtrousPipeline)
 		return;
 	if (m_giHwRt ? !m_giShadowRayPipeline : !m_giShadowRaySwPipeline)
 		return;
@@ -8418,7 +8524,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			static_assert(HE::kMaxMaskedLocalLights == 4, "GIShadowParams has 4 mask channels");
 			for (int i = 0; i < HE::kMaxMaskedLocalLights; ++i)
 				sp.localPosRange[i] = lm.posRange[i];
-			sp.extra = glm::vec4(static_cast<float>(lm.count), 0.0f, 0.0f, 0.0f);
+			sp.extra = glm::vec4(static_cast<float>(lm.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 		}
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
@@ -8464,7 +8570,8 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			[tenc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
 			GITemporalParamsCPU tparams;
 			tparams.prevViewProj = m_giPrevViewProj;
-			tparams.blend = glm::vec4(m_giShadowHistoryValid ? 0.9f : 0.0f,
+			tparams.curViewProj  = viewProj; // same (unfixed) family as prevViewProj
+			tparams.blend = glm::vec4(m_giShadowHistoryValid ? m_giShadowHistoryWeight : 0.0f,
 			                          static_cast<float>(width), static_cast<float>(height), 0.0f);
 			[tenc setFragmentBytes:&tparams length:sizeof(tparams) atIndex:0];
 			[tenc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -8474,16 +8581,25 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		m_giShadowHistoryIdx   = prevIdx;
 		m_giPrevViewProj       = viewProj; // for NEXT frame's reprojection
 
-		// ── 4. Spatial blur → final result fragmentMain samples ─────────────
+		// ── 4. Edge-aware a-trous → final result fragmentMain samples ───────
+		// Iteration 0: history[cur].a → scratch (hole 1); iteration 1: scratch.r
+		// → result (hole 2). With the filter off both are plain copies.
+		static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
+		for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
 		{
 			MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
-			bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_giShadowResult;
+			bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)(it == 0 ? m_giShadowFilterTmp : m_giShadowResult);
 			bp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
 			bp.colorAttachments[0].storeAction = MTLStoreActionStore;
 			id<MTLRenderCommandEncoder> benc = [cmdBuf renderCommandEncoderWithDescriptor:bp];
-			[benc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giShadowBlurPipeline];
-			[benc setFragmentTexture:(__bridge id<MTLTexture>)m_giShadowHistory[curIdx] atIndex:0];
-			[benc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			[benc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giShadowAtrousPipeline];
+			[benc setFragmentTexture:(__bridge id<MTLTexture>)(it == 0 ? m_giShadowHistory[curIdx] : m_giShadowFilterTmp) atIndex:0];
+			[benc setFragmentTexture:(__bridge id<MTLTexture>)m_giGBufPosTex  atIndex:1];
+			[benc setFragmentTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:2];
+			[benc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
+			const HE::GIShadowAtrousStep step = HE::GIShadowAtrousParams(it, m_giShadowFilter,
+			                                                             m_giShadowHistoryWeight, m_giShadowRays);
+			[benc setFragmentBytes:&step length:sizeof(step) atIndex:0];
 			[benc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 			[benc endEncoding];
 		}
@@ -8983,18 +9099,66 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 	return true;
 }
 
+// The MTLTextureType2DArray twin of uploadMetalTexture for a sampler2DArray heTexP
+// slot (Thema 158): every slice of a texture-array asset (layers > 1, RGBA8, the
+// HE::buildTextureArray layout — slice-major, each slice with its full chain), or a
+// plain 2D asset as one slice. nullptr = unusable → the caller binds the white array.
+static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* tex)
+{
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
+	    || tex->format != TextureFormat::RGBA8)
+		return nullptr;
+	const bool     isArray = tex->layers > 1;
+	if (isArray && !HE::textureArrayPayloadValid(*tex)) return nullptr;
+	const uint32_t layers = isArray ? tex->layers : 1;
+	const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
+	const uint32_t w = tex->width, h = tex->height;
+	if (tex->data.size() < (size_t)layers * HE::textureArraySliceBytes(w, h, mips)) return nullptr;
+
+	MTLTextureDescriptor* desc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:(tex->srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm)
+		width:w height:h mipmapped:(mips > 1)];
+	desc.textureType      = MTLTextureType2DArray;
+	desc.arrayLength      = layers;
+	desc.mipmapLevelCount = mips;
+	desc.usage            = MTLTextureUsageShaderRead;
+	desc.storageMode      = MTLStorageModeShared;
+	id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+	if (!texture) return nullptr;
+	for (uint32_t s = 0; s < layers; ++s)
+	{
+		uint32_t lw = w, lh = h;
+		for (uint32_t l = 0; l < mips; ++l)
+		{
+			[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l slice:s
+			             withBytes:tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l)
+			           bytesPerRow:(size_t)lw * 4 bytesPerImage:(size_t)lw * lh * 4];
+			lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
+		}
+	}
+	return (void*)CFBridgingRetain(texture);
+}
+
 // Resolve a node-graph project texture (UUID for packed assets, path for loose editor
 // assets) to a retained id<MTLTexture>, cached by a stable key. nullptr if not loadable.
-void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::string& path)
+//
+// `array` = a sampler2DArray slot (HE::matGlslTextureArrayMask): a texture2d_array
+// under its own "#arr" key — the same asset can be 2D in one material and an array
+// in another — and NEVER nullptr: a missing one is the white array, so every caller
+// binds the right texture type without knowing about arrays.
+void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::string& path, bool array)
 {
-	const std::string key = texId != HE::UUID{}
+	std::string key = texId != HE::UUID{}
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
-	if (key.empty() || !m_contentManager) return nullptr;
-	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end()) return it->second;
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
-		m_contentManager->resolveTextureRef(texId, path));
+	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
+	if (array) key += "#arr";
+	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
+	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
+	void* retained = array ? uploadMetalTextureArray((__bridge id<MTLDevice>)m_device, asset)
+	                       : uploadMetalTexture((__bridge id<MTLDevice>)m_device, asset);
 	m_graphTexCache.emplace(key, retained);
-	return retained;
+	return retained ? retained : (array ? m_whiteArrayTexture : nullptr);
 }
 
 // The image of a UI quad (Image widget, textured Border/Button). Its own cache,
@@ -9077,6 +9241,12 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
+		// EncodeScene builds the alpha-blended twin of every graph material on its
+		// first draw, whatever the material's opacity (see there): its own MSL
+		// libraries and PSO, ~0.4-0.7 s on an E-core. Without it here the first
+		// two frames after a scene open stalled in Metal::EncodeScene even with
+		// every material warmed (Thema 153 Schritt 5: the editor light icons).
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true)) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
 		if (m_renderPath == HE::RenderPath::Deferred)
@@ -9240,16 +9410,17 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:0]; // heTex0
 	if (ma)
 	{
+		const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 		const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 			std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 		for (size_t i = 0; i < nTex; ++i)
 		{
 			const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 			const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-			if (void* t = ResolveGraphTexture(gid, gp))
+			if (void* t = ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u))
 			{
 				[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:(i + 1)];
-				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 			}
 		}
 	}
@@ -12895,15 +13066,16 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 				const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
 				std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 				for (size_t i = 0; i < HE::kMatMaxGraphTextures; ++i)
 				{
 					const HE::UUID tid = i < ma->graphTextureIds.size() ? ma->graphTextureIds[i] : HE::UUID{};
 					const std::string tp = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string();
-					void* gt = ResolveGraphTexture(tid, tp);
+					void* gt = ResolveGraphTexture(tid, tp, (arrMask >> i) & 1u);
 					id<MTLTexture> tex = gt ? (__bridge id<MTLTexture>)gt
 					                        : (__bridge id<MTLTexture>)m_dummyTexture;
 					[enc setFragmentTexture:tex atIndex:(NSUInteger)(i + 1)];
-					[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler
+					[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler
 					                     atIndex:(NSUInteger)(i + 1)];
 				}
 				// Legacy/mesh texture slot 0 must be bound too (pinned unconditionally).
@@ -13620,7 +13792,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						if (t.gtex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.gtex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 					if (t.wpo)
 					{
@@ -13734,13 +13906,14 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						{
 							if (!ma->shaderParamData.empty()) cMaterialParams = &ma->shaderParamData;
 							// Node-graph project textures → fragment texture units 1..4.
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    id = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string p  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p);
+								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -13862,7 +14035,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						if (cGraphTex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)cGraphTex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 				// Landscape layer weightmap → MSL texture 13 (preamble binding 14).
 				// PER DRAW, not per material: it belongs to the terrain the chunk is
@@ -14032,7 +14205,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					if (t.gtex[i])
 					{
 						[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.gtex[i] atIndex:(i + 1)];
-						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 					}
 				if (t.wpo)
 				{
@@ -15519,13 +15692,14 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
 							if (!ma->shaderParamData.empty()) cMaterialParams = &ma->shaderParamData;
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    id = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string p  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p);
+								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -15637,7 +15811,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						if (cGraphTex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)cGraphTex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 				// Landscape layer weightmap → MSL texture 13, per draw (same as forward).
 				if (cMaterialPipelineGB)
@@ -15737,6 +15911,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 {
 	@autoreleasepool
 	{
+		// Every pass below re-extracts (shadow, GI, SSAO, G-buffer, scene) so
+		// their draw sets and cascade fits agree. Inside this scope the world
+		// does not change, so the extractor walks it once and answers the rest
+		// from that walk (RenderExtractor::beginFrame). Closed on every return.
+		RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
 		if (isPrimary)
 		{
 			// Reset the render counters before any early-return below, so a frame
@@ -15814,8 +15994,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			for (const HE::UUID& id : m_pendingTexInvalidations)
 			{
 				const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+				// The texture-array upload of the same asset lives under "#arr" (Thema 158).
+				for (const std::string& k : { key, key + "#arr" })
 				for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
-					if (auto it = cache->find(key); it != cache->end())
+					if (auto it = cache->find(k); it != cache->end())
 					{
 						if (it->second) RetireTexture(it->second);
 						cache->erase(it);
@@ -17204,6 +17386,9 @@ void MetalRenderer::SetGISettings(const GISettings& s)
 	m_giLightRadius         = s.lightRadius;
 	m_giRaysPerProbe        = s.raysPerProbe;
 	m_giProbeBudgetPerFrame = s.probeBudgetPerFrame;
+	m_giShadowRays          = std::clamp(s.shadowRays, 1, 256);
+	m_giShadowHistoryWeight = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+	m_giShadowFilter        = s.shadowFilter;
 }
 
 void MetalRenderer::SetVSync(bool enabled)

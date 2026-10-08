@@ -2,6 +2,8 @@
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <MaterialGraph/MaterialGraph.h>         // matGlslTextureArrayMask
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
@@ -2002,7 +2004,7 @@ layout(rgba16f, binding = 1) uniform writeonly image2D uOutLocal;
 uniform vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 uniform vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height
 uniform vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
-uniform vec4 uLocalExtra;       // x = local light count
+uniform vec4 uLocalExtra;       // x = local light count, y = sun rays per pixel
 
 // Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
 // (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
@@ -2054,11 +2056,17 @@ void main()
 	// term already zeroes this out, so skip the trace entirely.
 	if (dot(N, L) > 0.0)
 	{
-		vec2 xi  = giHash2(gid, uFrame.x);
-		vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
-		// Same self-intersection guards as Metal: normal-offset origin + min t.
-		vec3 origin = pv.xyz + N * 0.05;
-		sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		// spp rays, averaged; sample k at seed*spp + k (see gi_shadow.comp).
+		uint spp = uint(max(uLocalExtra.y, 1.0));
+		for (uint k = 0u; k < spp; ++k)
+		{
+			vec2 xi  = giHash2(gid, uFrame.x * float(spp) + float(k));
+			vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+			// Same self-intersection guards as Metal: normal-offset origin + min t.
+			vec3 origin = pv.xyz + N * 0.05;
+			sunVis += giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+		}
+		sunVis /= float(spp);
 	}
 	imageStore(uOut, ivec2(gid), vec4(sunVis));
 
@@ -2096,6 +2104,7 @@ uniform sampler2D uGPos;
 uniform sampler2D uRaw;
 uniform sampler2D uHistory;
 uniform mat4  uPrevViewProj;
+uniform mat4  uCurViewProj; // this frame's, same family as uPrevViewProj (motion-vector reprojection)
 uniform float uBlend; // history weight (0 on first GI frame)
 out vec4 FragColor;
 void main()
@@ -2112,8 +2121,6 @@ void main()
 	{ FragColor = vec4(pv.xyz, rawV); return; }
 
 	vec2  texel     = 1.0 / vec2(textureSize(uRaw, 0)); // uGPos has the same size
-	vec4  hist      = texture(uHistory, prevUV);
-	float posError  = length(pv.xyz - hist.rgb);
 	// Tolerance covers one texel's world footprint (smaller one-sided G-buffer
 	// step per axis, capped) — see gi_temporal.frag, Thema 131 §3 C.
 	vec3  gxp = texture(uGPos, vUV + vec2(texel.x, 0.0)).xyz, gxm = texture(uGPos, vUV - vec2(texel.x, 0.0)).xyz;
@@ -2121,7 +2128,25 @@ void main()
 	float footprint = max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
 	                      min(length(gyp - pv.xyz), length(gym - pv.xyz)));
 	float tolerance = max(clamp(0.02 * clip.w, 0.01, 0.06), min(footprint, 0.5));
-	float w = (posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
+	// Bilinear history, reprojected as a motion vector from this pixel's
+	// centre; 4 taps, each only if written for this surface, renormalised —
+	// see gi_temporal.frag, Thema 134 §4.2. curUV: prevUV's formula (no y-flip).
+	vec4 cclip = uCurViewProj * vec4(pv.xyz, 1.0);
+	vec2 curUV = (cclip.xy / cclip.w) * 0.5 + 0.5;
+	vec2 hsz   = vec2(textureSize(uHistory, 0));
+	vec2 hf    = (vUV + (prevUV - curUV)) * hsz - 0.5;
+	vec2 hb    = floor(hf);
+	vec2 ht    = hf - hb;
+	float hAcc = 0.0, hWsum = 0.0;
+	for (int j = 0; j < 4; ++j)
+	{
+		vec2  o  = vec2(float(j & 1), float(j >> 1));
+		vec2  bw = mix(1.0 - ht, ht, o);
+		vec4  h  = texture(uHistory, (hb + o + 0.5) / hsz);
+		if (length(pv.xyz - h.rgb) < tolerance) { hAcc += h.a * bw.x * bw.y; hWsum += bw.x * bw.y; }
+	}
+	float histA = hWsum > 1e-3 ? hAcc / hWsum : 0.0;
+	float w = hWsum > 1e-3 ? clamp(uBlend, 0.0, 0.98) : 0.0;
 	// Neighbourhood clamp: guards OCCLUDER motion (the position check above
 	// only covers receiver/camera motion) — moved shadows update in 1-2 frames
 	// instead of smearing for ~30. Range of the 3x3 MEANS of raw over a 5x5
@@ -2142,23 +2167,64 @@ void main()
 			nMin = min(nMin, s / 9.0);
 			nMax = max(nMax, s / 9.0);
 		}
-	FragColor = vec4(pv.xyz, mix(rawV, clamp(hist.a, nMin - 0.1, nMax + 0.1), w));
+	FragColor = vec4(pv.xyz, mix(rawV, clamp(histA, nMin - 0.1, nMax + 0.1), w));
 }
 )GLSL";
 
-static const char* kGiBlurFS = R"GLSL(
+// One edge-aware a-trous iteration over the shadow mask, run twice; replaces
+// the 3x3 box (gi_atrous.frag, Thema 134 §4.3 — same constants, SYNC there).
+// The first iteration reads the history's alpha (rgb = world position).
+static const char* kGiAtrousFS = R"GLSL(
 #version 410 core
 in vec2 vUV;
-uniform sampler2D uSrc; // temporal history: rgb = world pos, a = shadow
+uniform sampler2D uSrc;   // history (.a) or the previous iteration (.r)
+uniform sampler2D uGPos;
+uniform sampler2D uGNorm;
+uniform vec4 uAtrous;     // x = step in texels (0 = plain copy), y = 1 read .a else .r, z = N_eff (history samples)
 out vec4 FragColor;
+vec4  tap(sampler2D s, vec2 uv) { return textureLod(s, uv, 0.0); }
+float atrousValue(vec4 s) { return uAtrous.y > 0.5 ? s.a : s.r; }
 void main()
 {
+	float c  = atrousValue(tap(uSrc, vUV));
+	vec4  pv = tap(uGPos, vUV);
+	float st = uAtrous.x;
+	if (st < 0.5 || pv.a < 0.5) { FragColor = vec4(c, 0.0, 0.0, 1.0); return; }
+
 	vec2 texel = 1.0 / vec2(textureSize(uSrc, 0));
-	float sum = 0.0;
-	for (int x = -1; x <= 1; ++x)
-		for (int y = -1; y <= 1; ++y)
-			sum += texture(uSrc, vUV + vec2(float(x), float(y)) * texel).a;
-	FragColor = vec4(sum / 9.0, 0.0, 0.0, 1.0);
+	if (c < 1e-3 || c > 1.0 - 1e-3)
+	{
+		bool allSame = true;
+		for (int k = 0; k < 4 && allSame; ++k)
+		{
+			vec2 o = vec2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
+			allSame = abs(atrousValue(tap(uSrc, vUV + o * (2.0 * st) * texel)) - c) < 1e-3;
+		}
+		if (allSame) { FragColor = vec4(c, 0.0, 0.0, 1.0); return; }
+	}
+
+	vec3 n = normalize(tap(uGNorm, vUV).xyz);
+	vec3  gxp = tap(uGPos, vUV + vec2(texel.x, 0.0)).xyz, gxm = tap(uGPos, vUV - vec2(texel.x, 0.0)).xyz;
+	vec3  gyp = tap(uGPos, vUV + vec2(0.0, texel.y)).xyz, gym = tap(uGPos, vUV - vec2(0.0, texel.y)).xyz;
+	float fp  = max(max(min(length(gxp - pv.xyz), length(gxm - pv.xyz)),
+	                    min(length(gyp - pv.xyz), length(gym - pv.xyz))), 1e-4);
+	float sig = sqrt(max(c * (1.0 - c), 0.0) / max(uAtrous.z, 1.0));
+	const float h[5] = float[5](1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
+	float sum = 0.0, wsum = 0.0;
+	for (int y = -2; y <= 2; ++y)
+		for (int x = -2; x <= 2; ++x)
+		{
+			vec2 uv = vUV + vec2(float(x), float(y)) * st * texel;
+			vec4 q  = tap(uGPos, uv);
+			if (q.a < 0.5) continue;
+			float v = atrousValue(tap(uSrc, uv));
+			float w = h[x + 2] * h[y + 2];
+			w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (1.0 * fp));
+			w *= pow(max(dot(n, normalize(tap(uGNorm, uv).xyz)), 0.0), 32.0);
+			w *= exp(-abs(v - c) / (2.0 * sig + 1e-3));
+			sum += v * w; wsum += w;
+		}
+	FragColor = vec4(wsum > 0.0 ? sum / wsum : c, 0.0, 0.0, 1.0);
 }
 )GLSL";
 
@@ -5443,6 +5509,19 @@ void OpenGLRenderer::CreateSSAOPipeline()
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
+	// 1×1×1 white ARRAY — what a sampler2DArray heTexP slot gets when its texture
+	// is missing or unusable (Thema 158): the array twin of the white default the
+	// other backends bind, so a missing array reads white, never a stale layer.
+	{
+		const uint8_t white[4] = { 255, 255, 255, 255 };
+		glGenTextures(1, &m_whiteArrayTex);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_whiteArrayTex);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+		m_glArrayTex.insert(m_whiteArrayTex);
+	}
 	// 1×1 transparent black — the neutral element for anything sampled as
 	// "radiance + confidence" (the reflection result) or as an additive light
 	// source: alpha 0 means "no data", so a bound dummy contributes nothing.
@@ -5482,6 +5561,9 @@ void OpenGLRenderer::SetGISettings(const GISettings& s)
 	m_giLightRadius        = std::clamp(s.lightRadius, 0.0f, 10.0f);
 	m_giRaysPerProbe       = std::clamp(s.raysPerProbe, 8, 1024);
 	m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+	m_giShadowRays         = std::clamp(s.shadowRays, 1, 256);
+	m_giShadowHistoryWeight      = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+	m_giShadowFilter       = s.shadowFilter;
 }
 
 void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
@@ -5769,8 +5851,8 @@ void OpenGLRenderer::CreateGIPipelines()
 		                       CompileStage(GL_FRAGMENT_SHADER, kGiGBufFS));
 		m_giTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                           CompileStage(GL_FRAGMENT_SHADER, kGiTemporalFS));
-		m_giBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
-		                       CompileStage(GL_FRAGMENT_SHADER, kGiBlurFS));
+		m_giAtrousProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                       CompileStage(GL_FRAGMENT_SHADER, kGiAtrousFS));
 		m_giReflTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                               CompileStage(GL_FRAGMENT_SHADER, kGiReflTemporalFS));
 		m_giReflBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
@@ -5789,7 +5871,7 @@ void OpenGLRenderer::CreateGIPipelines()
 		            (std::string("OpenGLRenderer: GI pipeline build failed — GI disabled: ") + e.what()).c_str());
 		if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
 		if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
-		if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+		if (m_giAtrousProgram)     { glDeleteProgram(m_giAtrousProgram);     m_giAtrousProgram = 0; }
 		if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
 		if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
 		if (m_giReflCSProgram)   { glDeleteProgram(m_giReflCSProgram);   m_giReflCSProgram = 0; }
@@ -5848,7 +5930,10 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 	};
 
 	// World-space G-buffer: pos + normal + surface response MRT + depth.
-	m_giGBufPosTex  = makeTex(GL_RGBA16F, GL_NEAREST);
+	// Position = the shadow-ray ORIGIN (pos + N*0.05), stored as the ABSOLUTE
+	// world position, so fp32: as RGBA16F its ULP passes the 5 cm normal offset
+	// at |coord| >= ~100 m and surfaces self-shadow in height bands (Thema 159).
+	m_giGBufPosTex  = makeTex(GL_RGBA32F, GL_NEAREST);
 	m_giGBufNormTex = makeTex(GL_RGBA16F, GL_NEAREST);
 	m_giGBufMatTex  = makeTex(GL_RGBA16F, GL_NEAREST); // r = roughness, g = metallic
 	glGenTextures(1, &m_giGBufDepth);
@@ -5882,6 +5967,11 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 	glGenFramebuffers(1, &m_giResultFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giResultTex, 0);
+	// Scratch between the two a-trous iterations (read texel-exact, NEAREST).
+	m_giFilterTmpTex = makeTex(GL_R16F, GL_NEAREST);
+	glGenFramebuffers(1, &m_giFilterTmpFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giFilterTmpFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giFilterTmpTex, 0);
 
 	// Ray-traced reflections: the compute kernel image-stores the raw trace, the
 	// (optional) temporal pass ping-pongs radiance + receiver position through an
@@ -5936,6 +6026,8 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	}
 	if (m_giResultFBO) { glDeleteFramebuffers(1, &m_giResultFBO); m_giResultFBO = 0; }
 	if (m_giResultTex) { glDeleteTextures(1, &m_giResultTex);     m_giResultTex = 0; }
+	if (m_giFilterTmpFBO) { glDeleteFramebuffers(1, &m_giFilterTmpFBO); m_giFilterTmpFBO = 0; }
+	if (m_giFilterTmpTex) { glDeleteTextures(1, &m_giFilterTmpTex);     m_giFilterTmpTex = 0; }
 	if (m_giReflFBO)     { glDeleteFramebuffers(1, &m_giReflFBO);     m_giReflFBO = 0; }
 	if (m_giReflTex)     { glDeleteTextures(1, &m_giReflTex);         m_giReflTex = 0; }
 	if (m_giReflRawTex)  { glDeleteTextures(1, &m_giReflRawTex);      m_giReflRawTex = 0; }
@@ -6145,7 +6237,7 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 // filled this frame. Returns the blurred mask texture (0 if unavailable).
 unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::mat4& viewProj)
 {
-	if (!m_giShadowCSProgram || !m_giTemporalProgram || !m_giBlurProgram) return 0;
+	if (!m_giShadowCSProgram || !m_giTemporalProgram || !m_giAtrousProgram) return 0;
 	if (!m_giGBufFBO) return 0;
 	// Explicit: the temporal/blur fullscreen draws below are half-res, and the
 	// reflection pass may have run between the pre-pass and here.
@@ -6179,7 +6271,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 		glUniform4fv(glGetUniformLocation(m_giShadowCSProgram, "uLocalPosRange"),
 		             HE::kMaxMaskedLocalLights, glm::value_ptr(masked.posRange[0]));
 		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uLocalExtra"),
-		            static_cast<float>(masked.count), 0.0f, 0.0f, 0.0f);
+		            static_cast<float>(masked.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 	}
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
@@ -6203,19 +6295,37 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uHistory"), 2);
 	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uPrevViewProj"),
 	                   1, GL_FALSE, glm::value_ptr(m_giPrevViewProj));
-	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? 0.9f : 0.0f);
+	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uCurViewProj"),
+	                   1, GL_FALSE, glm::value_ptr(viewProj)); // becomes m_giPrevViewProj below
+	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? m_giShadowHistoryWeight : 0.0f);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 	m_giHistValid   = true;
 	m_giHistIdx     = prevIdx;
 	m_giPrevViewProj = viewProj; // for NEXT frame's reprojection
 
-	// ── 4. Spatial blur → the mask the scene shader samples ─────────────────
-	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
-	glUseProgram(m_giBlurProgram);
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, m_giHistTex[curIdx]);
-	glUniform1i(glGetUniformLocation(m_giBlurProgram, "uSrc"), 0);
-	glDrawArrays(GL_TRIANGLES, 0, 3);
+	// ── 4. Edge-aware a-trous → the mask the scene shader samples ───────────
+	// Iteration 0: history[cur].a → scratch (hole 1); iteration 1: scratch.r →
+	// result (hole 2). With the filter off both are plain copies.
+	static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
+	glUseProgram(m_giAtrousProgram);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uGPos"), 1);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufNormTex);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uGNorm"), 2);
+	glUniform1i(glGetUniformLocation(m_giAtrousProgram, "uSrc"), 0);
+	for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, it == 0 ? m_giFilterTmpFBO : m_giResultFBO);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, it == 0 ? m_giHistTex[curIdx] : m_giFilterTmpTex);
+		const HE::GIShadowAtrousStep step = HE::GIShadowAtrousParams(it, m_giShadowFilter,
+		                                                             m_giShadowHistoryWeight, m_giShadowRays);
+		glUniform4f(glGetUniformLocation(m_giAtrousProgram, "uAtrous"),
+		            step.step, step.fromHistory, step.effectiveSamples, step.unused);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
 
 	glActiveTexture(GL_TEXTURE0);
 	glEnable(GL_DEPTH_TEST);
@@ -7460,6 +7570,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 				m_haveMatParams = false; // invalidate the mesh loop's content-skip
 				// Node-graph project textures on units 1..4 (heTexP0..3).
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 				const size_t nTex = std::min<size_t>(4,
 					std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 				for (size_t i = 0; i < nTex; ++i)
@@ -7467,7 +7578,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 					const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 					const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
 					glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-					glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+					BindGraphTexture(ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u));
 				}
 			}
 			glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
@@ -8023,6 +8134,53 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = tru
 	return id;
 }
 
+// The GL_TEXTURE_2D_ARRAY twin of uploadTextureAssetGL for a sampler2DArray heTexP
+// slot (Thema 158). A texture ARRAY asset (layers > 1, RGBA8, HE::buildTextureArray
+// layout: slice-major, each slice with its own chain) uploads every stored level of
+// every slice — no glGenerateMipmap, so GL samples the very levels D3D/Vulkan/Metal
+// do. A plain 2D asset in an array slot becomes a ONE-slice array, mipped the way
+// uploadTextureAssetGL mips it. 0 = unusable (block formats are not array-capable
+// yet) → the caller binds the white array.
+unsigned int uploadTextureArrayGL(const TextureAsset* tex)
+{
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
+	    || tex->format != TextureFormat::RGBA8)
+		return 0;
+	const bool     isArray = tex->layers > 1;
+	if (isArray && !HE::textureArrayPayloadValid(*tex)) return 0;
+	const uint32_t layers  = isArray ? tex->layers : 1;
+	const uint32_t mips    = tex->mipLevels > 0 ? tex->mipLevels : 1;
+	const GLenum   fmt     = tex->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+	const uint32_t w = tex->width, h = tex->height;
+	if (!isArray && tex->data.size() < HE::textureArraySliceBytes(w, h, mips)) return 0;
+
+	unsigned int id = 0;
+	glGenTextures(1, &id);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, id);
+	uint32_t lw = w, lh = h;
+	for (uint32_t l = 0; l < mips; ++l)
+	{
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), static_cast<GLint>(fmt),
+		             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(layers),
+		             0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		for (uint32_t s = 0; s < layers; ++s)
+			glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), 0, 0, static_cast<GLint>(s),
+			                static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1, GL_RGBA, GL_UNSIGNED_BYTE,
+			                tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l));
+		lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1);
+	}
+	if (mips > 1)
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(mips - 1));
+	else
+		glGenerateMipmap(GL_TEXTURE_2D_ARRAY); // a loose single-level 2D asset, as for 2D
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	return id;
+}
+
 } // namespace
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -8278,16 +8436,39 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 
 // Resolve a node-graph project texture (UUID for packed assets, path for loose editor
 // assets) to a GL texture, cached by a stable key. 0 if not loadable.
-unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::string& path)
+//
+// `array` = the slot is a sampler2DArray (HE::matGlslTextureArrayMask): the texture
+// is uploaded as GL_TEXTURE_2D_ARRAY under its own "#arr" key — the same asset
+// can sit in a 2D slot of one material and an array slot of another — and a
+// missing one resolves to the white array instead of 0. Bind the result with
+// BindGraphTexture, which picks the target.
+unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::string& path,
+                                                 bool array)
 {
-	const std::string key = id != HE::UUID{}
+	std::string key = id != HE::UUID{}
 		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
-	if (key.empty() || !m_contentManager) return 0;
-	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end()) return it->second;
-	// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
-	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
+	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTex : 0;
+	if (array) key += "#arr";
+	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+		return it->second ? it->second : (array ? m_whiteArrayTex : 0);
+	unsigned int tex = 0;
+	if (array)
+	{
+		tex = uploadTextureArrayGL(m_contentManager->resolveTextureRef(id, path));
+		if (tex) m_glArrayTex.insert(tex);
+	}
+	else
+		// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
+		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
 	m_graphTexCache.emplace(key, tex);
-	return tex;
+	return tex ? tex : (array ? m_whiteArrayTex : 0);
+}
+
+// Bind a ResolveGraphTexture result to the ACTIVE unit on the target its storage
+// has: GL_TEXTURE_2D_ARRAY for a texture array, GL_TEXTURE_2D otherwise.
+void OpenGLRenderer::BindGraphTexture(unsigned int tex)
+{
+	glBindTexture(m_glArrayTex.count(tex) ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D, tex);
 }
 
 // The image of a UI quad (Image widget, textured Border/Button). Its own cache,
@@ -8503,13 +8684,14 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 	// Node-graph project textures at units 1..4 (heTexP0..3).
 	if (ma)
 	{
+		const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 		const size_t nTex = std::min<size_t>(4, std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 		for (size_t i = 0; i < nTex; ++i)
 		{
 			const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 			const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
 			glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-			glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+			BindGraphTexture(ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u));
 		}
 	}
 
@@ -9712,7 +9894,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
 	if (m_giGBufInstancedProgram) { glDeleteProgram(m_giGBufInstancedProgram); m_giGBufInstancedProgram = 0; }
 	if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
-	if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+	if (m_giAtrousProgram)     { glDeleteProgram(m_giAtrousProgram);     m_giAtrousProgram = 0; }
 	if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
 	if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
 	for (auto& r : m_retiredTextures)
@@ -9741,6 +9923,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_previewVAO)   { glDeleteVertexArrays(1, &m_previewVAO);    m_previewVAO = 0; }
 	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
 	m_graphTexCache.clear();
+	m_glArrayTex.clear();
+	if (m_whiteArrayTex) m_glArrayTex.insert(m_whiteArrayTex);
 	for (auto& [k, t] : m_uiTexCache) if (t) glDeleteTextures(1, &t);
 	m_uiTexCache.clear();
 	// Content-Browser thumbnail target + its mesh program.
@@ -9796,6 +9980,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_skyEnvCube)     { glDeleteTextures(1, &m_skyEnvCube);      m_skyEnvCube = 0; }
 	if (m_ssaoNoiseTex)   { glDeleteTextures(1, &m_ssaoNoiseTex);    m_ssaoNoiseTex = 0; }
 	if (m_whiteTex)       { glDeleteTextures(1, &m_whiteTex);        m_whiteTex = 0; }
+	if (m_whiteArrayTex)  { glDeleteTextures(1, &m_whiteArrayTex);   m_whiteArrayTex = 0; }
 	if (m_blackTex)       { glDeleteTextures(1, &m_blackTex);        m_blackTex = 0; }
 	if (m_ssaoPosProgram)  { glDeleteProgram(m_ssaoPosProgram);  m_ssaoPosProgram = 0; }
 	if (m_ssaoPosInstancedProgram) { glDeleteProgram(m_ssaoPosInstancedProgram); m_ssaoPosInstancedProgram = 0; }
@@ -10253,12 +10438,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	for (const HE::UUID& id : m_pendingTexInvalidations)
 	{
 		const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
-		for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
-			if (auto it = cache->find(key); it != cache->end())
-			{
-				if (it->second) glDeleteTextures(1, &it->second);
-				cache->erase(it);
-			}
+		// The texture-array upload of the same asset lives under "#arr".
+		for (const std::string& k : { key, key + "#arr" })
+			for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
+				if (auto it = cache->find(k); it != cache->end())
+				{
+					if (it->second) { m_glArrayTex.erase(it->second); glDeleteTextures(1, &it->second); }
+					cache->erase(it);
+				}
 	}
 	m_pendingTexInvalidations.clear();
 
@@ -10981,8 +11168,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                // node-graph textures (0 → the built-in blend program).
 		                unsigned int matProg = 0; std::vector<float> params;
 		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0;
-		                // Deferred forward-routed opaque draws only: the landscape
-		                // weightmap resolved at collect time (0 → layer-0 default).
+		                // Custom-material draws (deferred forward-routed opaque and
+		                // translucent): the landscape weightmap for unit 13, resolved at
+		                // collect time (0 → leave the unit as it is).
 		                unsigned int wmTex = 0;
 		                // Section draw: byte offset into the EBO (nullptr = from the
 		                // start, which is every whole-mesh draw). Trailing + defaulted
@@ -11176,13 +11364,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						{
 							mParams = !dc.paramOverride.empty() ? dc.paramOverride
 							                                    : ma->shaderParamData;
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(4,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								mGtex[mGtexCount++] = ResolveGraphTexture(gid, gp);
+								mGtex[mGtexCount++] = ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -11191,6 +11380,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				if (opacity < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					// Same collection as the forward loop's transparent branch.
+					const unsigned int wm = matProg ? ResolveGraphTexture(dc.weightmapTextureId != HE::UUID{}
+						? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId, {}) : 0u;
 					auto pushTP = [&](const glm::mat4& t) {
 						TPDraw tp{ viewProj * t, t, baseColor,
 						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
@@ -11201,6 +11392,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						tp.params  = mParams;
 						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
 						tp.gtexCount = mGtexCount;
+						tp.wmTex     = wm;
 						transparent.push_back(std::move(tp));
 					};
 					if (!dc.instanceTransforms.empty())
@@ -11293,7 +11485,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					for (int i = 0; i < mGtexCount; ++i)
 					{
 						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-						glBindTexture(GL_TEXTURE_2D, mGtex[i]);
+						BindGraphTexture(mGtex[i]);
 					}
 					// Landscape layer weightmap on unit 13, per draw (as forward).
 					{
@@ -11396,13 +11588,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						{
 							tpParams = !dc.paramOverride.empty() ? dc.paramOverride
 							                                     : ma->shaderParamData;
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(4,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								tpGtex[tpGtexCount++] = ResolveGraphTexture(gid, gp);
+								tpGtex[tpGtexCount++] = ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -11410,6 +11603,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 #endif
 				// Transparent instanced batches: push one TPDraw per instance so
 				// each object is sorted individually by distance.
+				const unsigned int tpWm = tpProg ? ResolveGraphTexture(dc.weightmapTextureId != HE::UUID{}
+					? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId, {}) : 0u;
 				auto pushTP = [&](const glm::mat4& t) {
 					TPDraw tp{ viewProj * t, t, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
@@ -11420,6 +11615,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					tp.params  = tpParams;
 					for (int i = 0; i < tpGtexCount; ++i) tp.gtex[i] = tpGtex[i];
 					tp.gtexCount = tpGtexCount;
+					tp.wmTex     = tpWm;
 					transparent.push_back(std::move(tp));
 				};
 				if (!dc.instanceTransforms.empty())
@@ -11531,6 +11727,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					if (const MaterialAsset* ma = m_contentManager
 						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 					{
+						const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 						const size_t nTex = std::min<size_t>(4,
 							std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 						for (size_t i = 0; i < nTex; ++i)
@@ -11538,7 +11735,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 							const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
 							glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-							glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+							BindGraphTexture(ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u));
 						}
 						glActiveTexture(GL_TEXTURE0);
 					}
@@ -11852,7 +12049,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					for (int i = 0; i < t.gtexCount; ++i)
 					{
 						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
+						BindGraphTexture(t.gtex[i]);
 					}
 					if (t.wmTex)
 					{
@@ -12023,6 +12220,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			unsigned int rbProg = 0; std::vector<float> rbParams;
 			unsigned int rbGtex[4] = { 0, 0, 0, 0 }; int rbGtexCount = 0;
+			uint32_t rbArrMask = 0; // sampler2DArray slots (HE::matGlslTextureArrayMask)
 #if defined(HE_HAVE_SHADERC)
 			{
 				uint64_t shKey = 0; std::string shFrag, shVert;
@@ -12040,6 +12238,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						rbParams = ma->shaderParamData;
 						// Snapshot the graph texture slots BEFORE resolving any of
 						// them — ResolveGraphTexture loads, and `ma` would not survive.
+						rbArrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 						const size_t nTex = std::min<size_t>(4,
 							std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 						for (size_t i = 0; i < nTex; ++i)
@@ -12051,7 +12250,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					rbProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 					if (rbProg)
 						for (size_t i = 0; i < gIds.size(); ++i)
-							rbGtex[rbGtexCount++] = ResolveGraphTexture(gIds[i], gPaths[i]);
+							rbGtex[rbGtexCount++] = ResolveGraphTexture(gIds[i], gPaths[i], (rbArrMask >> i) & 1u);
 					else
 						rbParams.clear();
 				}
@@ -12110,6 +12309,23 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
 					m_haveMatParams = false; // opaque-pass dedup cache no longer matches
+#if defined(HE_HAVE_SHADERC)
+					// The shared lighting block. Forward, only the OPAQUE custom-material
+					// draw used to upload it — with no opaque graph material in view the
+					// translucent one read whatever the UI pass or a material preview had
+					// left there (fog.z = 0: no sky; sunDir.w = 0: no clock, so a Time-driven
+					// graph like the engine water stood still). Same once-per-frame rule as
+					// the opaque branch; deferred has uploaded it after the resolve already.
+					if (!m_matLightUploadedThisFrame)
+					{
+						HE::MaterialShaderLibrary::Lighting lit{};
+						fillMatLight(lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						m_matLightUploadedThisFrame = true;
+					}
+#endif
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
@@ -12119,8 +12335,26 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					for (int i = 0; i < t.gtexCount; ++i)
 					{
 						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
+						BindGraphTexture(t.gtex[i]);
 					}
+					// Units 13..17, exactly as the opaque custom-material draw binds them
+					// (only material programs read these units): the weightmap, the sky
+					// cube (14, gated by heLight.fog.z), the AO (15, fog.w) and the DDGI
+					// atlases (16/17, giProbe.y). Forward, nothing else binds them when no
+					// opaque graph material is in view.
+					if (t.wmTex)
+					{
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, t.wmTex);
+					}
+					glActiveTexture(GL_TEXTURE14);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glActiveTexture(GL_TEXTURE15);
+					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+					glActiveTexture(GL_TEXTURE16);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+					glActiveTexture(GL_TEXTURE17);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
 					glActiveTexture(GL_TEXTURE0);
 					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program

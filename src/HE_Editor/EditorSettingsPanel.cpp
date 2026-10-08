@@ -5,6 +5,7 @@
 #include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
 #include "GitCloneDialog.h"              // "Clone from GitHub..." beside "Create & push"
+#include "GitHubSignIn.h"                // the GitHub account row
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
@@ -447,6 +448,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			SubGroup sub(cfg.GlobalIlluminationEnabled);
 			Row::sliderFloat("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
 			Row::sliderFloat("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
+			// Sun rays per pixel for the shadow mask (Thema 134): 2 halves the
+			// shimmer of 1 for ~0.1 ms on hardware RT; on the software path
+			// (no RT cores) every ray costs as much as the first.
+			const char* kGIShadowQuality[] = { "Low (1 ray)", "Medium (2 rays)", "High (4 rays)" };
+			int gsQ = std::clamp(cfg.GIShadowQuality, 0, 2);
+			if (Row::combo("GI Shadow Quality", &gsQ, kGIShadowQuality, 3))
+				cfg.GIShadowQuality = gsQ;
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
@@ -1205,12 +1213,17 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::SameLine();
 		EditorWidgets::checkbox("Private", &s_ghPrivate);
 
+		// Signed in (GitHub account, above), the token field may stay empty: the
+		// service then reads the sign-in from the credential helper itself.
+		const bool signedIn = GitHubSignIn::account() == GitHubSignIn::Account::SignedIn;
 		ImGui::SetNextItemWidth(-140.0f);
-		ImGui::InputTextWithHint("##ghtoken", "Personal access token",
+		ImGui::InputTextWithHint("##ghtoken",
+		                         signedIn ? "Token (optional: your GitHub sign-in is used)"
+		                                  : "Personal access token",
 		                         s_ghToken, sizeof(s_ghToken),
 		                         ImGuiInputTextFlags_Password);
 		ImGui::SameLine();
-		ImGui::BeginDisabled(git->busy() || s_ghToken[0] == '\0' ||
+		ImGui::BeginDisabled(git->busy() || (s_ghToken[0] == '\0' && !signedIn) ||
 		                     s_ghRepoName[0] == '\0' || st.initialCommit);
 		if (EditorWidgets::primaryButton("Create & push", ImVec2(130.0f, 0.0f)))
 		{
@@ -1219,8 +1232,11 @@ void drawRepositorySection(AppContext& ctx)
 			std::fill(std::begin(s_ghToken), std::end(s_ghToken), '\0');
 		}
 		ImGui::EndDisabled();
-		ImGui::TextDisabled("Token: github.com/settings/tokens — classic, 'repo' scope. "
-		                    "It is handed to git's credential helper, stored nowhere else.");
+		ImGui::TextDisabled(signedIn
+			? "Uses your GitHub sign-in. A token typed here wins over it."
+			: "Sign in with GitHub above, or a token: github.com/settings/tokens — "
+			  "classic, 'repo' scope. It is handed to git's credential helper, stored "
+			  "nowhere else.");
 		if (st.initialCommit)
 			ImGui::TextDisabled("Make the first commit before setting up the remote.");
 
@@ -1513,6 +1529,13 @@ void drawSourceControlPage(AppContext& ctx)
 
 	ImGui::SeparatorText("Git on this machine");
 	drawGitSetupSection(ctx);
+
+	// Between the two halves: it needs git (the first) and works without a
+	// project (unlike the second). The token fields further down stay as the
+	// way in for GitLab, Azure DevOps and anyone who prefers a token.
+	ImGui::Spacing();
+	ImGui::SeparatorText("GitHub account");
+	GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/false);
 
 	ImGui::Spacing();
 	ImGui::SeparatorText("Repository");

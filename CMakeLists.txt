@@ -423,7 +423,15 @@ endif()
 # image and dev machine; HE_ContentSync is Editor-only tooling, not the shipped
 # game, so a system OpenSSL runtime dependency here is a much smaller concern
 # than it would be for the packaged build's own hpak crypto).
-find_package(Libssh2 QUIET)
+# libssh2's own build writes a Libssh2 package config into OUR binary dir. Once
+# find_package() has cached that as Libssh2_DIR, every later configure "finds" it,
+# skips the fetch above, and links a libssh2.lib that is no longer produced by any
+# target ("missing and no known rule to make it"). So never accept a package config
+# from inside the build tree, and never consult the user package registry.
+if(Libssh2_DIR AND "${Libssh2_DIR}" MATCHES "^${CMAKE_BINARY_DIR}")
+    unset(Libssh2_DIR CACHE)
+endif()
+find_package(Libssh2 QUIET NO_CMAKE_PACKAGE_REGISTRY NO_CMAKE_SYSTEM_PACKAGE_REGISTRY)
 if(NOT TARGET Libssh2::libssh2 AND NOT LIBSSH2_FOUND)
     if(WIN32)
         set(CRYPTO_BACKEND "WinCNG" CACHE STRING "" FORCE)
@@ -850,6 +858,21 @@ function(he_bundle_crt target dest)
             VERBATIM)
     endif()
 endfunction()
+
+# ─── MSVC main-thread stack: 8 MB, like macOS/Linux ───────────────────────────
+# Windows reserves 1 MB per thread by default; macOS and Linux give the main
+# thread 8 MB. Recursive engine code is sized against the latter. Measured case
+# (Thema 152): the material-graph codegen recurses once per graph level through
+# emitNode (MaterialGraph.cpp), whose frame is 0x9E08 bytes (~40 KB) in Debug
+# and 0x55B8 (~22 KB) at /O2 — so 1 MB held only ~24 levels in Debug and ~45 in
+# Release, and the engine's water material (23 levels deep under MSVC's
+# evaluation order) overflowed a Debug he_tests run outright; a user graph past
+# ~45 levels would do the same to a Release editor. EXE flags only: /STACK is
+# meaningless on a DLL, and threads created with stack size 0 (std::thread)
+# inherit the executable's reserve. Reserve is address space, not memory.
+if(MSVC)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " /STACK:8388608")
+endif()
 
 # ─── Deploy helper ─────────────────────────────────────────────────────────────
 # Usage: he_deploy_dll(<target>)

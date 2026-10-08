@@ -285,6 +285,7 @@ add_executable(HorizonEditor WIN32
 	TutorialSteps.cpp
 	ProfilerPanel.cpp
 	ProfilerWidgets.cpp
+	StreamingDebugView.cpp
 	ConsolePanel.cpp
 	EnvironmentPanel.cpp
 	EditorSettingsPanel.cpp
@@ -293,6 +294,8 @@ add_executable(HorizonEditor WIN32
 	ToolchainDialog.cpp
 	GitMissingDialog.cpp
 	GitCloneDialog.cpp
+	GitHubSignIn.cpp
+	GitHubSignInView.cpp
 	ReportIssueDialog.cpp
 	EditorDockState.cpp
 	GitController.cpp
@@ -306,6 +309,12 @@ add_executable(HorizonEditor WIN32
 	HcWatch.cpp
 	HcWatchPanel.cpp
 	HcRename.cpp
+	HcPull.cpp
+	HcPullUi.cpp
+	HcPullUiBind.cpp
+	HcExtract.cpp
+	HcExtractUi.cpp
+	HcExtractUiBind.cpp
 	HcRenameSweep.cpp
 	HcRenameDialog.cpp
 	HcGraphClipboard.cpp
