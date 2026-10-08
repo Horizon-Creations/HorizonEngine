@@ -384,7 +384,8 @@ namespace
 	}
 }
 
-EqResult drawEq(HE::AudioEq& eq, EqView& v, double sampleRate, const ImVec2& size, bool enabled)
+EqResult drawEq(HE::AudioEq& eq, EqView& v, double sampleRate, const ImVec2& size, bool enabled,
+                bool forBus)
 {
 	EqResult r;
 	auto merge = [&r](const EqResult& o) {
@@ -410,13 +411,15 @@ EqResult drawEq(HE::AudioEq& eq, EqView& v, double sampleRate, const ImVec2& siz
 	ImGui::EndDisabled();
 	ImGui::SameLine();
 	if (eq.bands.empty())
-		ImGui::TextDisabled("No bands: the clip plays unfiltered. Add Band, or double-click the graph.");
+		ImGui::TextDisabled(forBus ? "No bands: the bus plays unfiltered. Add Band, or double-click the graph."
+		                           : "No bands: the clip plays unfiltered. Add Band, or double-click the graph.");
 	else if (!eq.enabled)
 		ImGui::TextDisabled("Bypassed: the bands are kept, nothing is filtered.");
 	else if (eq.isNeutral())
 		ImGui::TextDisabled("Every band is flat: nothing is filtered yet.");
 	else
-		ImGui::TextDisabled("Heard in this preview and wherever the game plays the clip.");
+		ImGui::TextDisabled(forBus ? "On everything this bus plays, in the editor and in the game."
+		                           : "Heard in this preview and wherever the game plays the clip.");
 	ImGui::EndDisabled();
 
 	// Graph beside the band list when there is room for both, above it when not.

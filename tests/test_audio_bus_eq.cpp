@@ -5,7 +5,9 @@
 #include <ContentManager/ContentManager.h>
 #include <Audio/AudioBusConfig.h>
 #include <Audio/AudioEdit.h>
+#include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -313,4 +315,152 @@ TEST_CASE("AudioEngine: the preview's EQ can be switched in while it plays, and 
 	CHECK_FALSE(engine.setSoundEq(plain, eq));
 	CHECK_FALSE(engine.setSoundEq(987654, eq));
 	engine.shutdown();
+}
+
+// ─── A mixer bus's EQ ────────────────────────────────────────────────────────
+// The same AudioEq on AudioBusDef, run by a node between the bus's group and
+// the output, at the mixer's rate, on everything the bus plays.
+
+namespace
+{
+	// Level of a looping 48 kHz sine played on bus "Music", whose EQ is `eq`.
+	double busLevel(const AudioAsset& clip, const HE::AudioEq* eq)
+	{
+		AudioEngine engine;
+		REQUIRE(engine.init(true));
+		HE::AudioBusConfig cfg;
+		cfg.add("Music");
+		if (eq) cfg.buses[0].eq = *eq;
+		engine.applyBusConfig(cfg);
+		CHECK(engine.hasBusEq("Music") == (eq && !eq->isNeutral()));
+		const uint64_t h = engine.play(clip, 1.0f, 1.0f, true, "Music");
+		REQUIRE(h != 0);
+		const std::vector<float> mix = pull(engine, 24000);
+		engine.shutdown();
+		return rmsOf(mix, 4800, 24000);
+	}
+}
+
+TEST_CASE("AudioEngine: a bus's EQ shapes what the bus plays, at the response it promises")
+{
+	HE::AudioEq eq;
+	eq.bands = { band(HE::AudioEqBandType::Peak, 1000.0f, -12.0f, 1.0f),
+	             band(HE::AudioEqBandType::LowShelf, 150.0f, 6.0f, 0.7071f) };
+	for (const int f : { 80, 1000, 8000 })
+	{
+		CAPTURE(f);
+		const AudioAsset clip = sineClip(48000, 48000, f);
+		const double got  = 20.0 * std::log10(busLevel(clip, &eq) / busLevel(clip, nullptr));
+		const double want = eq.responseDb(f, 48000.0);   // the mixer's rate
+		CHECK(std::fabs(got - want) < 0.2);
+	}
+	CHECK(eq.responseDb(1000.0, 48000.0) < -11.0);
+	CHECK(eq.responseDb(80.0, 48000.0) > 4.0);
+}
+
+TEST_CASE("AudioEngine: a bus EQ is live, and neutral is bit-identical whether or not it ever filtered")
+{
+	const AudioAsset clip = sineClip(48000, 48000, 440);
+	std::vector<float> ref;
+	{
+		AudioEngine engine;
+		REQUIRE(engine.init(true));
+		REQUIRE(engine.createBus("Music"));
+		REQUIRE(engine.play(clip, 1.0f, 1.0f, true, "Music") != 0);
+		ref = pull(engine, 9600);
+		engine.shutdown();
+	}
+
+	AudioEngine engine;
+	REQUIRE(engine.init(true));
+	REQUIRE(engine.createBus("Music"));
+	HE::AudioEq flat;
+	flat.bands = { band(HE::AudioEqBandType::Peak, 440.0f, 0.0f, 1.0f) };
+	REQUIRE(engine.setBusEq("Music", flat));       // neutral: nothing inserted
+	CHECK_FALSE(engine.hasBusEq("Music"));
+	const uint64_t h = engine.play(clip, 1.0f, 1.0f, true, "Music");
+	REQUIRE(h != 0);
+	CHECK(pull(engine, 9600) == ref);
+
+	// Switched in while the bus plays: the tone at its centre drops by the band.
+	HE::AudioEq cut = flat;
+	cut.bands[0].gainDb = -12.0f;
+	REQUIRE(engine.setBusEq("Music", cut));
+	CHECK(engine.hasBusEq("Music"));
+	const double cutLevel = rmsOf(pull(engine, 9600), 2400, 9600);
+	const double refLevel = rmsOf(ref, 2400, 9600);
+	CHECK(20.0 * std::log10(cutLevel / refLevel) == doctest::Approx(-12.0).epsilon(0.02));
+
+	// …and back to neutral: the node stays in, copying — the output is the
+	// reference again, sample for sample, once the filter has rung out.
+	REQUIRE(engine.setBusEq("Music", flat));
+	CHECK_FALSE(engine.hasBusEq("Music"));
+	pull(engine, 4800);
+	engine.stop(h);
+	const uint64_t h2 = engine.play(clip, 1.0f, 1.0f, true, "Music");
+	REQUIRE(h2 != 0);
+	// From frame 1 on: frame 0 still carries the stopped voice's last sample out
+	// of the bus group's own one-frame resampler delay — the group's, not the
+	// EQ's (it is there without an EQ node too).
+	const std::vector<float> again = pull(engine, 9600);
+	CHECK(std::equal(again.begin() + 2, again.end(), ref.begin() + 2));
+	{
+		// The control for that frame: the same pulls, stop and restart on a bus
+		// that never had an EQ leave the very same sample in frame 0.
+		AudioEngine plain;
+		REQUIRE(plain.init(true));
+		REQUIRE(plain.createBus("Music"));
+		const uint64_t p1 = plain.play(clip, 1.0f, 1.0f, true, "Music");
+		pull(plain, 9600); pull(plain, 9600); pull(plain, 4800);
+		plain.stop(p1);
+		REQUIRE(plain.play(clip, 1.0f, 1.0f, true, "Music") != 0);
+		const std::vector<float> ctl = pull(plain, 9600);
+		CHECK(ctl[0] == again[0]);
+		CHECK(ctl[0] != 0.0f);
+		plain.shutdown();
+	}
+
+	// Removing a bus that has an EQ node stops its voices and tears both down.
+	CHECK(engine.removeBus("Music"));
+	CHECK_FALSE(engine.isPlaying(h2));
+	CHECK_FALSE(engine.setBusEq("Music", cut));     // gone
+	engine.shutdown();
+}
+
+TEST_CASE("AudioBusConfig: a bus's EQ round-trips, and a bus without one writes no key")
+{
+	HE::AudioBusConfig cfg;
+	cfg.add("Music", 0.5f);
+	cfg.add("SFX");
+	cfg.buses[0].eq.bands = { band(HE::AudioEqBandType::HighShelf, 8000.0f, -3.5f, 0.8f) };
+
+	nlohmann::json j;
+	cfg.toJson(j);
+	REQUIRE(j["buses"].size() == 2);
+	CHECK(j["buses"][0].contains("eq"));
+	CHECK_FALSE(j["buses"][1].contains("eq"));   // a project without bus EQs reads as before
+
+	HE::AudioBusConfig back;
+	back.fromJson(j);
+	REQUIRE(back.buses.size() == 2);
+	REQUIRE(back.buses[0].eq.bands.size() == 1);
+	CHECK(back.buses[0].eq.bands[0].type == HE::AudioEqBandType::HighShelf);
+	CHECK(back.buses[0].eq.bands[0].freqHz == doctest::Approx(8000.0f));
+	CHECK(back.buses[0].eq.bands[0].gainDb == doctest::Approx(-3.5f));
+	CHECK(back.buses[0].eq.bands[0].q == doctest::Approx(0.8f));
+	CHECK(back.buses[0].volume == doctest::Approx(0.5f));
+	CHECK(back.buses[1].eq.bands.empty());
+
+	// A bypassed EQ with no bands is still something somebody set.
+	cfg.buses[1].eq.enabled = false;
+	cfg.toJson(j);
+	CHECK(j["buses"][1].contains("eq"));
+	back.fromJson(j);
+	CHECK_FALSE(back.buses[1].eq.enabled);
+
+	// The file a project wrote before bus EQs existed.
+	back.fromJson(nlohmann::json::parse(R"({"master":1.0,"buses":[{"name":"Music","volume":0.8}]})"));
+	REQUIRE(back.buses.size() == 1);
+	CHECK(back.buses[0].eq.bands.empty());
+	CHECK(back.buses[0].eq.enabled);
 }

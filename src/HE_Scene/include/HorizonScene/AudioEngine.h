@@ -70,7 +70,22 @@ public:
     // but not in the config are LEFT ALONE — a script may have made them, and
     // this is called on project load and before play, not as a reset. Muting
     // is untouched too; it belongs to the editor session, not the project.
+    // (It also sets every listed bus's EQ — setBusEq, a compare when unchanged.)
     void  applyBusConfig(const HE::AudioBusConfig& config);
+
+    // The EQ of a bus (AudioBusDef::eq): filters everything the bus plays, at
+    // the mixer's rate, after the voices are summed. A bus that never had a
+    // non-neutral EQ stays wired as it always was; the first one inserts a
+    // filter node between the bus and the output, which then stays (copying
+    // unchanged while neutral) until the bus is removed. Live: a change is
+    // picked up on the mixer's next read, the filter memory kept. False for an
+    // unknown bus. hasBusEq: whether it is filtering right now.
+    bool  setBusEq(const std::string& name, const HE::AudioEq& eq);
+    bool  hasBusEq(const std::string& name) const;
+
+    // The mixer's rate in Hz — what a bus EQ runs at, and so what its graph is
+    // drawn for. 0 when not initialised.
+    int   outputSampleRate() const;
 
     // Which bus a voice asked to play on `requestedBus` (a source's own
     // choice, "" = none) of a clip whose asset names `assetBus` actually plays

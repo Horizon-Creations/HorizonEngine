@@ -152,9 +152,10 @@ struct HE_API AudioEnvelope
 
 // ─── EQ ───────────────────────────────────────────────────────────────────────
 // A small parametric EQ: a list of second-order (biquad) bands in series. One
-// struct for both places an EQ can sit — an asset (here) and a mixer bus (to be
-// added to AudioBusDef with the same JSON shape) — so the editor draws one EQ
-// widget and the engine runs one filter.
+// struct for both places an EQ can sit — an asset (here) and a mixer bus
+// (AudioBusDef::eq, same JSON shape) — so the editor draws one EQ widget
+// (AudioMixView) and the engine runs one filter (an asset's in its voice, a
+// bus's after its voices are summed).
 enum class AudioEqBandType : uint8_t
 {
 	Peak      = 0,   // bell around freqHz: ±gainDb, width by q
@@ -252,8 +253,9 @@ struct HE_API AudioEdit
 	// identity (AudioBusDef is a name and a volume; AudioSourceComponent::busName
 	// is a string too). "" = master. A name the project no longer has falls back
 	// to master (resolveBus), the same thing the engine has always done for a
-	// source naming an unknown bus. Known gap: renaming a bus in the mixer
-	// orphans this, exactly like it orphans a source's busName.
+	// source naming an unknown bus. Renaming a bus in the mixer orphans this
+	// like it orphans a source's busName: the Audio Editor then shows the name
+	// as missing (it is kept — a bus re-added under it is picked up again).
 	std::string   bus;
 
 	AudioEq       eq;

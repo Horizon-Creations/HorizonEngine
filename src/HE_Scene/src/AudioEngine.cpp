@@ -90,6 +90,89 @@ static std::shared_ptr<const EqChain> makeEqChain(const HE::AudioEq& eq, double 
     return chain;
 }
 
+// Run `eq` over `frames` interleaved frames in place. `state` holds kMaxBands
+// filters per channel, band-major; it is flushed of denormals afterwards — a
+// filter ringing out into silence decays towards them, and they cost x86 a
+// hundred times a normal multiply.
+static void runEq(const EqChain& eq, std::vector<HE::BiquadState>& state, float* f,
+                  uint64_t frames, uint32_t ch)
+{
+    for (size_t b = 0; b < eq.bands.size(); ++b)
+    {
+        const HE::BiquadCoeffs& c  = eq.bands[b];
+        HE::BiquadState*        st = state.data() + b * ch;
+        for (uint64_t i = 0; i < frames; ++i)
+            for (uint32_t k = 0; k < ch; ++k)
+                f[i * ch + k] = st[k].process(c, f[i * ch + k]);
+    }
+    for (HE::BiquadState& s : state)
+    {
+        if (std::fabs(s.z1) < 1.0e-20) s.z1 = 0.0;
+        if (std::fabs(s.z2) < 1.0e-20) s.z2 = 0.0;
+    }
+}
+
+static bool sameEq(const HE::AudioEq& a, const HE::AudioEq& b)
+{
+    if (a.enabled != b.enabled || a.bands.size() != b.bands.size()) return false;
+    for (size_t i = 0; i < a.bands.size(); ++i)
+    {
+        const HE::AudioEqBand& x = a.bands[i];
+        const HE::AudioEqBand& y = b.bands[i];
+        if (x.type != y.type || x.freqHz != y.freqHz || x.gainDb != y.gainDb ||
+            x.q != y.q || x.enabled != y.enabled)
+            return false;
+    }
+    return true;
+}
+
+// ─── Bus EQ ──────────────────────────────────────────────────────────────────
+// A mixer bus's EQ (AudioBusDef::eq) as a node of miniaudio's graph between the
+// bus's group and the endpoint: group → this → endpoint. It filters the summed
+// bus at the mixer's rate, after every voice on it has been resampled, panned
+// and mixed. Inserted only when a bus first gets a non-neutral EQ; a bus that
+// never had one keeps its group wired straight to the endpoint. Once in, it
+// stays until the bus goes; with a neutral EQ it copies its input unchanged.
+struct BusEqNode
+{
+    ma_node_base                   base;     // first: miniaudio hands &base back
+    bool                           nodeOk   = false;
+    ma_uint32                      channels = 0;
+    // Same handover as a voice's EQ (EnvelopeSource): the mixer thread swaps
+    // `pending` in with try_lock and never frees a chain itself.
+    std::shared_ptr<const EqChain> eq;
+    std::shared_ptr<const EqChain> pending;
+    std::mutex                     pendingMutex;
+    std::atomic<bool>              hasPending{ false };
+    std::vector<HE::BiquadState>   state;
+};
+
+static void busEqProcess(ma_node* node, const float** in, ma_uint32* /*inCount*/,
+                         float** out, ma_uint32* outCount)
+{
+    BusEqNode& n = *reinterpret_cast<BusEqNode*>(node);
+    if (n.hasPending.load(std::memory_order_acquire))
+    {
+        std::unique_lock<std::mutex> lock(n.pendingMutex, std::try_to_lock);
+        if (lock.owns_lock())
+        {
+            std::swap(n.eq, n.pending);
+            n.hasPending.store(false, std::memory_order_release);
+        }
+    }
+    // Input and output run at one rate, so the output count is the frame count.
+    const ma_uint32 frames = *outCount;
+    std::memcpy(out[0], in[0], sizeof(float) * frames * n.channels);
+    if (n.eq) runEq(*n.eq, n.state, out[0], frames, n.channels);
+}
+
+static ma_node_vtable g_busEqVtable = {
+    busEqProcess,
+    nullptr,   // same rate in and out: no input-count callback
+    1, 1,      // one bus in (the group), one out (to the endpoint)
+    0
+};
+
 struct EnvelopeSource;
 struct EnvelopeNode
 {
@@ -204,24 +287,7 @@ static ma_result envRead(ma_data_source* ds, void* out, ma_uint64 frameCount, ma
                 curve->apply(f, got, static_cast<int>(e.channels), first + total,
                              static_cast<double>(e.sampleRate));
             if (eq)
-            {
-                const ma_uint32 ch = e.channels;
-                for (size_t b = 0; b < eq->bands.size(); ++b)
-                {
-                    const HE::BiquadCoeffs& c  = eq->bands[b];
-                    HE::BiquadState*        st = e.eqState.data() + b * ch;
-                    for (ma_uint64 i = 0; i < got; ++i)
-                        for (ma_uint32 k = 0; k < ch; ++k)
-                            f[i * ch + k] = st[k].process(c, f[i * ch + k]);
-                }
-                // A filter ringing out into silence decays towards denormals,
-                // which cost x86 a hundred times a normal multiply — flush them.
-                for (HE::BiquadState& s : e.eqState)
-                {
-                    if (std::fabs(s.z1) < 1.0e-20) s.z1 = 0.0;
-                    if (std::fabs(s.z2) < 1.0e-20) s.z2 = 0.0;
-                }
-            }
+                runEq(*eq, e.eqState, f, got, e.channels);
         }
         total += got;
         if (rc != MA_SUCCESS || got < want) break;
@@ -322,6 +388,20 @@ struct BusData
     // so the fader's value has to live here or a mute would forget it.
     float          volume  = 1.0f;
     bool           muted   = false;
+    // The bus's EQ as last set (setBusEq compares against it, so the mixer
+    // re-applying the project every frame costs a compare), whether it is
+    // filtering, and the node that runs it once there has been one.
+    HE::AudioEq                eq;
+    bool                       eqActive = false;
+    std::unique_ptr<BusEqNode> eqNode;
+
+    // Group first — it is what feeds the node — then the node.
+    void release()
+    {
+        if (groupOk) { ma_sound_group_uninit(&group); groupOk = false; }
+        if (eqNode && eqNode->nodeOk) { ma_node_uninit(&eqNode->base, nullptr); eqNode->nodeOk = false; }
+        eqNode.reset();
+    }
 };
 
 struct AudioEngine::Impl
@@ -383,7 +463,7 @@ void AudioEngine::shutdown()
     stopAll();
     // Uninit buses before engine teardown
     for (auto& [name, bus] : m_impl->buses)
-        if (bus->groupOk) { ma_sound_group_uninit(&bus->group); bus->groupOk = false; }
+        bus->release();
     m_impl->buses.clear();
     ma_engine_uninit(&m_impl->engine);
     m_impl->engineOk  = false;
@@ -454,7 +534,7 @@ bool AudioEngine::removeBus(const std::string& name)
         }
         else ++s;
     }
-    if (it->second->groupOk) { ma_sound_group_uninit(&it->second->group); it->second->groupOk = false; }
+    it->second->release();
     m_impl->buses.erase(it);
     HE_LOG_DEBUG(Audio, "Removed audio bus '%s' (%zu voice(s) stopped)", name.c_str(), stopped);
     return true;
@@ -527,7 +607,64 @@ void AudioEngine::applyBusConfig(const HE::AudioBusConfig& config)
     {
         if (!createBus(def.name, def.volume)) continue;   // createBus logged it
         setBusVolume(def.name, def.volume);               // an existing bus: only the volume
+        setBusEq(def.name, def.eq);                       // a compare when unchanged
     }
+}
+
+bool AudioEngine::setBusEq(const std::string& name, const HE::AudioEq& eq)
+{
+    if (!m_initialized) return false;
+    auto it = m_impl->buses.find(name);
+    if (it == m_impl->buses.end() || !it->second->groupOk) return false;
+    BusData& bus = *it->second;
+    if (sameEq(bus.eq, eq)) return true;
+    bus.eq = eq;
+
+    std::shared_ptr<const EqChain> chain =
+        makeEqChain(eq, static_cast<double>(ma_engine_get_sample_rate(&m_impl->engine)));
+    bus.eqActive = chain != nullptr;
+    if (!bus.eqNode)
+    {
+        if (!chain) return true;   // neutral, and never filtered: the group stays wired as it is
+        auto node = std::make_unique<BusEqNode>();
+        node->channels = ma_engine_get_channels(&m_impl->engine);
+        node->state.assign(HE::AudioEq::kMaxBands * node->channels, HE::BiquadState{});
+        node->eq = chain;   // no thread sees the node yet
+        ma_node_config ncfg = ma_node_config_init();
+        ncfg.vtable          = &g_busEqVtable;
+        ncfg.pInputChannels  = &node->channels;
+        ncfg.pOutputChannels = &node->channels;
+        if (ma_node_init(ma_engine_get_node_graph(&m_impl->engine), &ncfg, nullptr, &node->base) != MA_SUCCESS)
+        {
+            bus.eqActive = false;
+            HE_LOG_ERROR(Audio, "Could not set up the EQ of bus '%s' — it plays unfiltered", name.c_str());
+            return false;
+        }
+        node->nodeOk = true;
+        // Downstream first, so the group is never attached to a node that leads
+        // nowhere; re-attaching the group's output detaches it from the endpoint.
+        ma_node_attach_output_bus(&node->base, 0, ma_engine_get_endpoint(&m_impl->engine), 0);
+        ma_node_attach_output_bus(&bus.group, 0, &node->base, 0);
+        bus.eqNode = std::move(node);
+        HE_LOG_DEBUG(Audio, "Bus '%s' now runs through an EQ", name.c_str());
+        return true;
+    }
+    BusEqNode& n = *bus.eqNode;
+    std::lock_guard<std::mutex> lock(n.pendingMutex);
+    n.pending = std::move(chain);
+    n.hasPending.store(true, std::memory_order_release);
+    return true;
+}
+
+bool AudioEngine::hasBusEq(const std::string& name) const
+{
+    auto it = m_impl->buses.find(name);
+    return it != m_impl->buses.end() && it->second->eqActive;
+}
+
+int AudioEngine::outputSampleRate() const
+{
+    return m_initialized ? static_cast<int>(ma_engine_get_sample_rate(&m_impl->engine)) : 0;
 }
 
 // The falloff of a spatial voice, from startSound() and setSoundAttenuation()

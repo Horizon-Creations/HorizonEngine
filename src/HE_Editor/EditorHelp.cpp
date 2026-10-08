@@ -2528,6 +2528,13 @@ namespace
 	  "script's Set Bus Volume refer to, so keep it short and spell it the same "
 	  "way everywhere.",
 	  "", "systems#audio" },
+	{ "Audio Mixer/EQ", "Bus EQ",
+	  "Opens this bus's EQ under the strips; press again to close it. Lit while "
+	  "the EQ filters. It shapes everything the bus plays, after the sounds on it "
+	  "are mixed, with the same bands and graph as a clip's EQ in the Audio "
+	  "Editor, and a clip's own EQ comes first. Heard at once, saved with the "
+	  "project and used by the exported game.",
+	  "", "systems#audio" },
 	{ "Audio Mixer/Add Bus", "",
 	  "Creates the bus named on the left, at 0 dB, and saves it with the "
 	  "project.",
@@ -6837,7 +6844,7 @@ namespace
 	  "", "systems#audio" },
 	{ "Audio Editor/EQ On", "",
 	  "Switches the whole EQ in or out. Off keeps every band as it is but filters "
-	  "nothing, which is the quickest way to compare the clip with and without it.",
+	  "nothing, which is the quickest way to compare the sound with and without it.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Add Band", "",
 	  "Adds a bell band at 0 dB at a frequency no other band uses yet, so it "
@@ -6848,9 +6855,10 @@ namespace
 	  "Each numbered handle is a band: drag it to move its frequency and gain, "
 	  "use the wheel over it to change its width (Q), right-click it to remove "
 	  "it. Double-click an empty spot to add a bell there. The faint line is the "
-	  "selected band on its own. The shaded part on the right lies above the "
-	  "clip's Nyquist frequency, half its sample rate: nothing can be shaped "
-	  "there, because the clip holds nothing that high.",
+	  "selected band on its own. For a clip, a shaded part on the right lies above "
+	  "its Nyquist frequency, half its sample rate: nothing can be shaped there, "
+	  "because the clip holds nothing that high. In the Audio Mixer the same graph "
+	  "shapes a whole bus.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Band On", "",
 	  "Switches this band in or out without losing its settings.",

@@ -237,6 +237,9 @@ TEST_CASE("ProjectManager: the mixer's buses round-trip, and only once touched")
     REQUIRE(cfg.add("Music", 0.6f));
     REQUIRE(cfg.add("SFX"));
     cfg.masterVolume = 0.9f;
+    HE::AudioEqBand bell;   // the mixer's bus EQ (Thema 168) is saved with the bus
+    bell.type = HE::AudioEqBandType::Peak; bell.freqHz = 2500.0f; bell.gainDb = 3.0f; bell.q = 2.0f;
+    cfg.find("SFX")->eq.bands = { bell };
     REQUIRE(pm.saveProject(heproj));
 
     ProjectManager pm2;
@@ -247,6 +250,11 @@ TEST_CASE("ProjectManager: the mixer's buses round-trip, and only once touched")
     CHECK(back.buses[0].volume == doctest::Approx(0.6f));
     CHECK(back.buses[1].name == "SFX");
     CHECK(back.masterVolume == doctest::Approx(0.9f));
+    CHECK(back.buses[0].eq.bands.empty());
+    REQUIRE(back.buses[1].eq.bands.size() == 1);
+    CHECK(back.buses[1].eq.bands[0].freqHz == doctest::Approx(2500.0f));
+    CHECK(back.buses[1].eq.bands[0].gainDb == doctest::Approx(3.0f));
+    CHECK(back.buses[1].eq.bands[0].q == doctest::Approx(2.0f));
 
     he_test::removeAllQuiet(dir);
 }

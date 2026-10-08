@@ -85,6 +85,8 @@ namespace HE::Ed::AudioMix
 	// remove. `sampleRate` is the rate the filter runs at (the clip's — see
 	// AudioEdit.h): the curve is computed for it, and the part of the axis
 	// above its Nyquist is shaded, because nothing can be shaped there.
-	// `enabled` false draws it read-only.
-	EqResult drawEq(HE::AudioEq& eq, EqView& view, double sampleRate, const ImVec2& size, bool enabled);
+	// `enabled` false draws it read-only. `forBus`: the EQ of a mixer bus (the
+	// Audio Mixer draws it with this too) — only the status line differs.
+	EqResult drawEq(HE::AudioEq& eq, EqView& view, double sampleRate, const ImVec2& size, bool enabled,
+	                bool forBus = false);
 }
