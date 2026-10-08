@@ -4,6 +4,7 @@
 #include "EditorPanelState.h"     // shared per-tab state map
 #include "EditorHelp.h"           // "Texture Viewer/<label>" scope for the tooltips
 #include "EditorToolbar.h"        // the asset strip: Show in Content Browser
+#include "EditorInput.h"          // trackpad grammar: swipe pans, pinch zooms
 #include "EditorRewards.h"        // the Import button's footer moment
 #include "EditorWidgets.h"        // button, checkbox, WrapText
 #include "ImporterCommon.h"       // Importer::importSource / resolveOutput / sourceFamilyPattern
@@ -346,10 +347,20 @@ void drawCanvas(State& st)
 	ImVec2 p0{ centre.x - w * st.zoom * 0.5f, centre.y - h * st.zoom * 0.5f };
 
 	ImGuiIO& io = ImGui::GetIO();
-	if (hovered && io.MouseWheel != 0.0f)
+	// Wheel / swipe / pinch, the grammar of the other editor tabs: mouse wheel
+	// zooms; on a trackpad the two-finger swipe PANS and the pinch (macOS native
+	// gesture, or Ctrl/Cmd+scroll) zooms. Gated on the canvas region rather than
+	// the surface's hover, so nothing drawn over the picture swallows it, and
+	// left to an open popup when there is one.
+	const bool popupOpen =
+		ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+	const bool wheelHot = !popupOpen &&
+		io.MousePos.x >= c0.x && io.MousePos.y >= c0.y && io.MousePos.x < c1.x && io.MousePos.y < c1.y &&
+		ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+	// Zoom about the pointer: the texel under it stays under it.
+	const auto zoomTo = [&](float factor)
 	{
-		// Zoom about the pointer: the texel under it stays under it.
-		const float next = std::clamp(st.zoom * std::pow(1.2f, io.MouseWheel), 1.0f / 64.0f, 64.0f);
+		const float next = std::clamp(st.zoom * factor, 1.0f / 64.0f, 64.0f);
 		const ImVec2 texel{ (io.MousePos.x - p0.x) / st.zoom, (io.MousePos.y - p0.y) / st.zoom };
 		const ImVec2 np0{ io.MousePos.x - texel.x * next, io.MousePos.y - texel.y * next };
 		st.pan.x += (np0.x + w * next * 0.5f) - (p0.x + w * st.zoom * 0.5f);
@@ -357,6 +368,25 @@ void drawCanvas(State& st)
 		st.zoom = next;
 		st.fit  = false;
 		p0 = np0;
+	};
+	if (wheelHot)
+	{
+		const bool zoomMod = io.KeyCtrl || io.KeySuper;
+		if (const float pinch = EditorInput::pinchDelta(); pinch != 0.0f)
+			zoomTo(std::max(0.1f, 1.0f + pinch * 2.0f));
+		if (EditorInput::trackpadActive() && !zoomMod)
+		{
+			constexpr float kSwipeToPx = 16.0f;   // wheel units → screen pixels
+			const float dx = io.MouseWheelH * kSwipeToPx, dy = io.MouseWheel * kSwipeToPx;
+			if (dx != 0.0f || dy != 0.0f)
+			{
+				st.pan.x += dx; st.pan.y += dy;
+				p0.x     += dx; p0.y     += dy;
+				st.fit = false;
+			}
+		}
+		else if (io.MouseWheel != 0.0f)
+			zoomTo(std::pow(1.2f, io.MouseWheel));
 	}
 	if (active && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f))
 	{
