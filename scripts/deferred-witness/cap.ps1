@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory)] [string]$Name,
     [Parameter(Mandatory)] [string]$Rhi,
-    [hashtable]$Env = @{}
+    [hashtable]$Env = @{},
+    [hashtable]$Config = @{}
 )
 # One headless capture from the PRIVATE deploy (C:\hw150\deploy), fresh APPDATA,
 # every HE_* variable cleared first so nothing leaks from an earlier run.
@@ -14,6 +15,12 @@ $app = "$out\appdata_$Name"
 if (Test-Path $app) { cmd /c rd /s /q "$app" }
 New-Item -ItemType Directory -Force $app | Out-Null
 $env:APPDATA = $app
+# Optional editor-config seed (keys with no HE_DUMP_* knob, e.g. SSAOMethod).
+if ($Config.Count -gt 0) {
+    New-Item -ItemType Directory -Force "$app\HorizonEngine" | Out-Null
+    $cc = @($Config.Keys | ForEach-Object { [pscustomobject]@{ Key = $_; Value = $Config[$_] } })
+    @{ CustomConfig = $cc } | ConvertTo-Json -Depth 4 | Out-File -Encoding ascii "$app\HorizonEngine\config.json"
+}
 $env:HE_COLLAB_OFFLINE = "1"
 $env:HE_DUMP_PATH = "$out\$Name.bmp"
 $env:HE_DUMP_QUIT = "1"

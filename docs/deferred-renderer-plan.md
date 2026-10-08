@@ -369,7 +369,8 @@ weil es sie auf diesen drei Backends auch im Forward-Pfad nicht gibt (10.6).
 
 **Übersicht.** `JA` = vorhanden · `fwd` = nur im Forward-Pfad · `--` = fehlt. Die D3D11-Spalte
 ist der Stand nach Schritt 2 (10.9), die D3D12-Spalte der nach Schritt 3 (10.10), die
-Vulkan-Spalte der nach Schritt 4 (10.11).
+Vulkan-Spalte der nach Schritt 4 (10.11); die Zeilen AO, Decals und SSR sind für alle drei auf dem
+Stand nach Schritt 5 (10.12).
 
 | Pass | Metal | GL | D3D11 (S2) | D3D12 (S3) | Vulkan (S4) |
 |---|:--:|:--:|:--:|:--:|:--:|
@@ -378,10 +379,10 @@ Vulkan-Spalte der nach Schritt 4 (10.11).
 | Clustered im Resolve | JA | -- | JA | JA | JA |
 | CSM + Point/Spot-Atlas | JA | JA | JA (über heLitP im Resolve) | JA (wie D3D11) | JA (wie D3D11) |
 | Sky / SkyEnv | JA | JA | JA | JA | JA |
-| AO (SSAO) | JA (aus G-Buffer) | JA (aus G-Buffer) | JA (Prepass-Ergebnis, v1; aus G-Buffer = S5) | JA (wie D3D11, v1) | JA (wie D3D11, v1) |
+| AO (SSAO/HBAO/GTAO) | JA (aus G-Buffer) | JA (aus G-Buffer) | JA (Prepass-Ergebnis; aus G-Buffer offen, 10.12) | wie D3D11 | wie D3D11 |
 | GI (DDGI, Masken) | JA | JA | JA | JA | JA |
-| Decals | nur Tile | JA | fwd-Decal über dem Resolve (S5: GB0) | wie D3D11 (S5: GB0) | wie D3D11 (S5: GB0) |
-| SSR | nur Tile | -- (fwd JA) | -- im Deferred-Frame (S5) | -- im Deferred-Frame (S5) | -- im Deferred-Frame (S5) |
+| Decals | nur Tile | JA (GB0) | JA (GB0, S5) | JA (GB0, S5) | JA (GB0, eigener Pass, S5) |
+| SSR | nur Tile | -- (fwd JA) | JA (Forward-Trace, Composite im Resolve, S5) | wie D3D11 | wie D3D11 |
 | AA / TAA | JA | JA | JA | JA | JA |
 | Transparenz (Forward-Schwanz) | JA | JA | JA | JA | JA |
 | `supportsDeferredRendering` | JA | JA | JA | JA | JA |
@@ -1232,3 +1233,149 @@ rund 330 bzw. 430 Zeilen aus release). Beide Deferred-Pfade sind danach zur Lauf
   ist hier mit MSVC voll übersetzt, Linux/Mac übersetzt die CI), AMD/Intel, lavapipe (CI).
 - *Kein Tile/Single-Pass* (10.6). Subpass-Input-Attachments wären auf Vulkan möglich, sie lohnen
   sich nur auf TBDR.
+
+### 10.12 Schritt 5 umgesetzt: Zusatzpässe im Deferred-Frame (Stand 2026-10-08)
+
+> Zweig wie oben, Code-Commits `dfd1e7c2` (SSR) und `4c8c37ea` (Decals). Gemessen auf NN-WS03
+> (RTX 4070, Release, privater Deploy `C:\hw150`, eigenes APPDATA je Lauf, **D3D12-Debug-Layer
+> und Vulkan-Validation an** über `HE_GPU_DEBUG=1`; D3D11 hat keinen Debug-Layer, 10.9). Skripte:
+> `scripts/deferred-witness/run_s5.ps1` (Editor-Aufnahmen), `ana_s5.py` (Auswertung),
+> `game_s5.ps1` (exportiertes Spiel). „Echte Hardware“ heißt auch hier nur diese eine NVIDIA-Karte;
+> lavapipe und WARP haben die neuen Wege noch nicht gesehen (Schritt 6).
+
+**Was jetzt im Deferred-Frame läuft, je Pass.**
+
+| Pass | D3D11 / D3D12 / Vulkan im Deferred-Frame | Bezug zu Metal/GL |
+|---|---|---|
+| SSR | Forward-Trace (Refl-Prepass, Trace, Blur gegen das Vorframe-HDR), Composite in `heLitP` im Resolve | GL deferred hat keins, Metal nur im Tile-Pfad (dort ohne Lag aus dem G-Buffer) |
+| Decals | `decalFragmentSampled` in GB0 vor dem Resolve, der Resolve lichtet den Decal | wie GL deferred (gemessen gleich) |
+| AO (SSAO/HBAO/GTAO) | Prepass-Ergebnis im Resolve, alle drei Methoden | GL/Metal rechnen es aus der G-Buffer-Tiefe; das Bild ist dasselbe, nur der Weg nicht |
+| GI (DDGI, Masken) | im Resolve (seit Schritt 2–4) | wie GL/Metal |
+| TAA / SMAA / FXAA, HDR, Tonemap, Bloom | Post-Kette unverändert hinter dem Resolve | wie GL/Metal |
+| Spielpfad | das exportierte Spiel fährt über `SetSwapchainPostProcessing` den Viewport-Frame und damit dieselbe Kette | wie GL/Metal |
+
+Kein Pass fehlt im Deferred-Frame. Ein eigenes Capability-Flag pro Pass war deshalb nicht nötig:
+`supportsDeferredRendering` und `supportsScreenSpaceReflections` sagen auf allen drei Backends die
+Wahrheit (die Kommentare in `IRenderer.h` sind nachgezogen). Bis zu diesem Schritt schaltete der
+Deferred-Frame SSR still ab, obwohl der Schalter im Editor an war; das ist behoben.
+
+**SSR (`dfd1e7c2`).**
+- Der Deferred-Frame fährt jetzt denselben Forward-Trace wie ein Forward-Frame. Der Resolve
+  komponiert ihn über die `heSSRFwd`-Stufe von `heLitP`, die auf Vulkan auch die Graph-Materialien
+  forward benutzen.
+- Der Gate (`ssr.x/y/z`) steht **nur** im Resolve-eigenen `HeLighting`. `frameMatLight` bleibt auf
+  D3D bei `ssr.x = 0`, weil Forward-Replay und transparente Graph-Materialien t31 nicht gebunden
+  haben (Plan C5, `docs/ssr-cross-backend-plan.md`).
+- D3D11 bindet für den Resolve t31 + s8 (linear clamp) und löst t31 danach wieder. D3D12 legt das
+  Trace-Ergebnis in Slot 14 (t31) der Resolve-Tabelle, s8 ist der statische Sampler der Signatur.
+  Vulkan zeigt Binding 31 des Resolve-Sets auf das Trace-Ergebnis.
+- **Abweichung vom Bauplan (10.8, §9):** kein Trace aus GB1 + Tiefe und kein `ssrComposite` nach dem
+  Resolve. Folgen:
+  - Ein Frame Lag in der Strahlungsquelle, wie forward.
+  - Der Refl-Prepass rastert die opake Geometrie im Deferred-Frame ein zweites Mal.
+  - `ssrComposite` bleibt für HLSL ungepinnt (10.7 #5), weil ihn niemand braucht.
+  - Den lag-freien Weg aus dem G-Buffer hat weiterhin nur der Metal-Tile-Pfad.
+- Auf D3D bekommen damit Graph-Materialien im Deferred-Frame SSR, forward aber nicht (C5). Ein
+  Graph-Spiegel sieht auf D3D also deferred anders aus als forward. Das ist gewollt, nicht als Fehler
+  zu werten.
+
+| Szene (`SSRTEST` + Chrom-Graph-Kugel, TOD 0,45) | Vergleich | mittlere Abw. | max | > 8 |
+|---|---|--:|--:|--:|
+| Band | D3D11 deferred SSR an ↔ aus | 2,810 | 156 | 8,2 % |
+| Band | D3D12 deferred SSR an ↔ aus | 2,810 | 156 | 8,2 % |
+| Band | Vulkan deferred SSR an ↔ aus | 2,840 | 156 | 8,3 % |
+| Band | D3D11 deferred ↔ D3D12 deferred | 0,000 | 0 | 0 |
+| Band | D3D12 deferred ↔ Vulkan deferred | 0,051 | 76 | 0,27 % |
+| Band | D3D12 forward ↔ Vulkan forward (Referenz) | 0,655 | 67 | 2,8 % |
+| Band, Qualität 2 (History, Kamera dreht) | D3D12 deferred ↔ Vulkan deferred / forward (Referenz) | 0,810 / 0,868 | 64 / 68 | |
+| Kugel (Graph), SSR aus | forward ↔ deferred, D3D12 und Vulkan | 0,433 | 3 | |
+| Kugel (Graph), SSR an | Vulkan forward ↔ deferred | 3,33 | 46 | |
+
+- Die Kugel spiegelt den eingebauten Boden, und der sieht in beiden Pfaden absichtlich verschieden
+  aus (10.6). Daher die 3,33 bei SSR an gegenüber 0,43 ohne.
+- Im Bild spiegeln Boden und Wand Kugel und Würfel; die untere Kugelhälfte spiegelt den Boden.
+- 0 Fehler in allen SSR-Läufen. Die eine Vulkan-Warnung „Vertex attribute at location 2 not
+  consumed“ kommt aus der Refl-Prepass-Pipeline und erscheint im Forward-Lauf genauso.
+
+**Decals in GB0 (`4c8c37ea`).**
+- D3D11 und D3D12 bekommen eine zweite Decal-Variante mit `decalFragmentSampled` (D3D11 ein zweiter
+  Pixel-Shader, D3D12 eine PSO gegen `R8G8B8A8_UNORM_SRGB`). Sie läuft direkt nach dem
+  G-Buffer-Pass auf GB0 allein. Die Tiefe kommt dabei wie im Forward-Decal vom Output-Merger.
+- Vulkan bekommt einen eigenen Render-Pass `m_gbDecalRP`: nur GB0, `LOAD`, `SHADER_READ_ONLY` rein
+  und raus, eigene Abhängigkeiten. Dazu kommen Framebuffer und Pipeline. Der Decal sampelt **GB3**
+  statt eines Tiefen-Vorpasses.
+- Die Deferred-Entscheidung fällt auf Vulkan jetzt am Anfang von `DrawViewportFrame`, damit ein
+  Deferred-Frame den Decal-Tiefen-Vorpass überspringt. Auch der Forward-Rückfall (unten) liest dann
+  GB3.
+- Blend wie GL: `SrcAlpha/InvSrcAlpha`, nur RGB (GB0.a = Metallic bleibt), auf dem sRGB-Ziel linear.
+- Jede GB-Variante ist optional. Baut sie nicht, zeichnet der Deferred-Frame den selbst beleuchteten
+  Forward-Decal über dem Resolve, und das Log schreibt eine WARN-Zeile.
+- **Witness:** `DECALTEST`, darüber die Graph-Kugel bei (2,5; 4; −6,5), sodass ihr CSM-Schatten über
+  dem Decal liegt. Kamera CAMY 13 / CAMZ −1 / PITCH −65. Der alte `DECALTEST` allein war für den
+  Unterschied blind: selbst beleuchtet und im Resolve beleuchtet lagen dort 0,001/255 auseinander
+  (10.11).
+
+| Aufnahme | Decal im Schatten | Decal in der Sonne | Schatten/Sonne |
+|---|---|---|--:|
+| GL deferred | (117, 67, 89) | (244, 184, 189) | 0,44 |
+| D3D11 / D3D12 / Vulkan **deferred** | (117, 67, 89) | (244, 184, 189) | 0,44 |
+| D3D11 / D3D12 / Vulkan forward (selbst beleuchtet) | (219, 140, 151) | (243, 168, 174) | 0,87 |
+
+- Band: GL deferred ↔ D3D11/D3D12 deferred 0,001/255 (max 1), ↔ Vulkan deferred 0,001 (ein Pixel
+  max 93, 0,001 %). D3D11 ↔ D3D12 deferred 0,000.
+- Der Forward-Decal ignoriert den Schatten (Verhältnis 0,87). Im Deferred-Frame dunkelt er darin ab
+  wie auf GL. 0 Fehler in allen Läufen.
+
+**AO-Methoden im Deferred-Frame** (`SSRTEST`-Boden + matte Graph-Kugel, TOD 0,26, SSR aus,
+`SSAOMethod` über die Editor-Config). Wirkung = AO an ↔ aus im Band:
+
+| Methode | GL fwd / def | D3D11 fwd / def | Vulkan fwd / def | GL def ↔ D3D11 def / ↔ Vulkan def |
+|---|--:|--:|--:|--:|
+| SSAO (0) | 0,09 / 0,07 | 0,15 / 0,13 | 0,12 / 0,12 | 0,12 / 0,09 |
+| HBAO (1) | 8,0 / 8,0 | 18,1 / 17,2 | 9,1 / 9,1 | 9,2 / 1,3 |
+| GTAO (2) | 16,4 / 16,4 | 58,3 / 46,1 | 16,9 / 16,1 | 30,0 / 0,44 |
+
+- Alle drei Methoden wirken im Deferred-Frame so stark wie forward. Vulkan deferred trifft GL
+  deferred.
+- D3D12 deferred ↔ D3D11 deferred: 0,000/255, max 1, für alle drei Methoden.
+- **Vorbestehend, nicht aus diesem Schritt:** HBAO und GTAO sind auf D3D11/D3D12 schon **forward**
+  etwa doppelt (HBAO) bzw. dreieinhalbmal (GTAO) so stark wie auf GL und Vulkan. Der Deferred-Pfad
+  reicht das nur durch. Ursache nicht untersucht; sie liegt im D3D-AO-Kern, nicht im Deferred-Pfad.
+  Die Szene oben reproduziert es in Sekunden.
+
+**Post-Kette** (Graph-Kugel, Bloom an, SMAA):
+- Forward ↔ deferred: 0,009/255 auf allen drei (max 19/19/28).
+- Bloom+SMAA ↔ ohne, deferred (Kontrolle, dass die Kette läuft): 0,126 / 0,126 / 0,137 (max 79–81).
+- GL deferred ↔ D3D11/D3D12 deferred 0,695, ↔ Vulkan deferred 0,671 (max 35).
+- TAA lief deferred schon in Schritt 2–4 (Tabellen dort).
+
+**Spielpfad** (Depthy aus Thema 130):
+- Aufbau: Kopie von `C:\hw150\game12` als `game15`, darüber `deploy\Game\*`, dann `HorizonRendering.dll`
+  aus dem Build-Baum und die `.spv` aus `deploy\Editor\Shaders`. Gestartet über
+  `docs/spielpfad-postfx-run-game.ps1`.
+- Config `RenderPath=1`, `SSREnabled`, `BloomEnabled`, `AntiAliasing=2`. Aufnahme per `PrintWindow`,
+  1600×900 physisch.
+- Ergebnisse:
+  - Jeder Deferred-Lauf loggt `swapchain post chain active` und `deferred frame (1600x900, clustered
+    resolve, …)`. Mit SSR kommt im selben Frame die SSR-Pipeline-Zeile dazu, die es im
+    Deferred-Frame vorher nicht geben konnte.
+  - 0 Fehler, D3D12-Debug-Layer und Vulkan-Validation an.
+  - Unterhalb des Himmels SSR an ↔ aus, deferred: D3D11 0,767 / D3D12 0,767 / Vulkan 0,764 (max 76,
+    2,5 % > 8). Reflexionen auf Würfelflächen und Boden.
+  - D3D11 deferred ↔ D3D12 deferred 0,000, ↔ Vulkan 0,143.
+  - Forward ↔ deferred 16,9 (eingebaute Würfel, 10.6, wie 10.11).
+- Zwei Fallen beim Aufbau:
+  - Mit der alten `HorizonCore.dll` aus `game12` neben der neuen `HorizonRendering.dll` startet das
+    Spiel ohne Fenster und ohne Log (der Loader-Fehler bleibt unsichtbar). `deploy\Game\*` muss mit
+    über die Kopie.
+  - `deploy\Game\Shaders` hat kein `gbuffer.frag.spv`. Dann bleibt Vulkan mit einer WARN-Zeile
+    („the deferred path stays off“) still forward.
+
+**Was offen bleibt.**
+- **SSAO aus der G-Buffer-Tiefe (P5)** ist nicht portiert. Das AO-Bild ist dasselbe (Tabelle oben).
+  Der Unterschied liegt nur in den Kosten: Der Prepass rastert die opake Geometrie, solange SSAO
+  oder SSR an ist, ein zweites Mal. Mit dem SSR-Weg dieses Schritts spart der Umbau erst etwas, wenn
+  auch SSR aus dem G-Buffer trace. Beides gehört zusammen, als eigenes Perf-Thema nach Schritt 6.
+- **lavapipe/WARP:** Die neuen Wege (SSR im Resolve, GB0-Decals, `m_gbDecalRP`) haben nur die RTX
+  gesehen. Fälle dafür gehören in Schritt 6.
+- Nicht geprüft: AMD/Intel, MoltenVK.
