@@ -2,6 +2,7 @@
 #include <imgui_internal.h>   // ShadeVertsLinearColorGradientKeepAlpha — see drawSurfacePreview
 #include <Types/TypeRegistry.h>
 #include "EditorToolbar.h"   // shared toolbar strip
+#include "EditorInput.h"           // trackpadActive — swipe pans, pinch (Ctrl/Cmd+scroll) zooms
 #include "EditorSettingsPanel.h"   // widgetRunPreConstruct — Preferences ▸ Panels ▸ Widgets
 
 #include <cstdio>
@@ -196,6 +197,9 @@ struct State
 	// display mode, not a value — an element whose corners already differ is
 	// always shown as four whatever this says.
 	bool   cornerPerSide = false;
+
+	// The palette's search box (left column). View state, never saved.
+	std::string paletteFilter;
 
 	// ── Pre Construct at design time (docs/widget-pre-construct-design.md §5) ─
 	// Whether it runs is Preferences ▸ Editor ▸ Panels ▸ Widgets (on by default,
@@ -4740,29 +4744,166 @@ struct ScrubPreview
 	ScrubPreview& operator=(const ScrubPreview&) = delete;
 };
 
-// The reset-view button in the corner of a canvas (bottom right): it zooms the
-// view back until the whole thing fits again. Drawn over the canvas as a small
-// plate; called inside the canvas's own child window, after the canvas has been
-// submitted, so it sits on top of it and takes the mouse before the surface does.
-bool fitCornerButton(const char* id)
+// The reset-view button in the bottom-right corner of a canvas: it zooms the
+// view back until the whole thing fits again.
+//
+// Two halves, because ImGui hands a click to whichever overlapping item was
+// submitted FIRST: the canvas is one big InvisibleButton, so a button submitted
+// after it never saw a click (the canvas started a drag instead). Submit() runs
+// before the canvas, owns the corner, and the plate is painted by Draw() after
+// everything else so it stays on top of what the canvas drew.
+struct FitCorner
 {
-	const float  size = ImGui::GetFrameHeight() + 4.0f;
-	const float  gap  = 10.0f;
-	const ImVec2 wp   = ImGui::GetWindowPos();
-	const ImVec2 ws   = ImGui::GetWindowSize();
-	const ImVec2 p0(wp.x + ws.x - size - gap, wp.y + ws.y - size - gap);
-	const ImVec2 p1(p0.x + size, p0.y + size);
+	ImVec2 p0{ 0, 0 }, p1{ 0, 0 };
+	bool   pressed = false;
+	bool   hot     = false;
+};
 
-	ImGui::SetCursorScreenPos(p0);
-	const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
-	const bool hot     = ImGui::IsItemHovered();
+FitCorner fitCornerSubmit(const char* id, const ImVec2& origin, const ImVec2& avail)
+{
+	FitCorner c;
+	const float size = ImGui::GetFrameHeight() + 4.0f;
+	const float gap  = 10.0f;
+	c.p0 = ImVec2(origin.x + avail.x - size - gap, origin.y + avail.y - size - gap);
+	c.p1 = ImVec2(c.p0.x + size, c.p0.y + size);
+	ImGui::SetCursorScreenPos(c.p0);
+	c.pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
+	c.hot     = ImGui::IsItemHovered();
+	if (c.hot) ImGui::SetTooltip("Fit the view \xe2\x80\x94 zoom and pan back until everything is in");
+	// Back to where the canvas surface starts, so it is laid out as before.
+	ImGui::SetCursorScreenPos(origin);
+	return c;
+}
+
+void fitCornerDraw(const FitCorner& c)
+{
 	ImDrawList* dl = ImGui::GetWindowDrawList();
-	dl->AddRectFilled(p0, p1, hot ? IM_COL32(58, 58, 64, 235) : IM_COL32(32, 32, 36, 215), 5.0f);
-	dl->AddRect(p0, p1, IM_COL32(255, 255, 255, hot ? 60 : 30), 5.0f);
-	EditorToolbar::iconFit(dl, ImVec2((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f),
-	                       size * 0.55f, hot ? IM_COL32(235, 235, 240, 255) : IM_COL32(190, 190, 198, 255));
-	if (hot) ImGui::SetTooltip("Fit the view \xe2\x80\x94 zoom and pan back until everything is in");
-	return pressed;
+	const float size = c.p1.x - c.p0.x;
+	dl->AddRectFilled(c.p0, c.p1, c.hot ? IM_COL32(58, 58, 64, 235) : IM_COL32(32, 32, 36, 215), 5.0f);
+	dl->AddRect(c.p0, c.p1, IM_COL32(255, 255, 255, c.hot ? 60 : 30), 5.0f);
+	EditorToolbar::iconFit(dl, ImVec2((c.p0.x + c.p1.x) * 0.5f, (c.p0.y + c.p1.y) * 0.5f),
+	                       size * 0.55f,
+	                       c.hot ? IM_COL32(235, 235, 240, 255) : IM_COL32(190, 190, 198, 255));
+}
+
+// ── Component palette ────────────────────────────────────────────────────────
+// The palette used to be one button per type in registry order — twenty-four
+// identical bars with no hint of which is a layout box and which is an input.
+// It is a grid of tiles now, each with a small drawing of what the component
+// looks like, under headings that say what KIND of thing it is.
+
+// "HorizontalBox" → "Horizontal Box": the on-disk type name, readable.
+std::string spacedTypeName(const char* n)
+{
+	std::string out;
+	for (const char* p = n; *p; ++p)
+	{
+		if (p != n && std::isupper(static_cast<unsigned char>(*p)) &&
+		    !std::isupper(static_cast<unsigned char>(p[-1])))
+			out += ' ';
+		out += *p;
+	}
+	return out;
+}
+
+// A 24 px-ish pictogram of the component, centred on `c`. Plain strokes, so it
+// takes the tile's colour and needs no texture.
+void paletteGlyph(ImDrawList* dl, const ImVec2& c, float size, UIWidgetType t, ImU32 col)
+{
+	const float h  = size * 0.5f;
+	const float th = std::max(1.2f, size * 0.07f);
+	const ImU32 dim = (col & 0x00FFFFFFu) | (0x70u << 24);
+	const auto P = [&](float x, float y) { return ImVec2(c.x + x * h, c.y + y * h); };
+	const auto box = [&](float x0, float y0, float x1, float y1, ImU32 cc, float r = 0.12f)
+	{ dl->AddRect(P(x0, y0), P(x1, y1), cc, r * size, 0, th); };
+	const auto fill = [&](float x0, float y0, float x1, float y1, ImU32 cc, float r = 0.1f)
+	{ dl->AddRectFilled(P(x0, y0), P(x1, y1), cc, r * size); };
+	const auto line = [&](float x0, float y0, float x1, float y1, ImU32 cc = 0)
+	{ dl->AddLine(P(x0, y0), P(x1, y1), cc ? cc : col, th); };
+
+	switch (t)
+	{
+	case UIWidgetType::Panel:       box(-0.9f, -0.7f, 0.9f, 0.7f, col); fill(-0.9f, -0.7f, 0.9f, 0.7f, dim); break;
+	case UIWidgetType::Image:
+		box(-0.9f, -0.7f, 0.9f, 0.7f, col);
+		dl->AddTriangleFilled(P(-0.7f, 0.5f), P(-0.15f, -0.15f), P(0.4f, 0.5f), col);
+		dl->AddCircleFilled(P(0.45f, -0.3f), 0.15f * h * 2.0f, col); break;
+	case UIWidgetType::Text:
+		line(-0.7f, -0.6f, 0.7f, -0.6f); line(0.0f, -0.6f, 0.0f, 0.7f); break;
+	case UIWidgetType::Button:
+		box(-0.9f, -0.45f, 0.9f, 0.45f, col, 0.2f); line(-0.4f, 0.0f, 0.4f, 0.0f); break;
+	case UIWidgetType::CheckBox:
+		box(-0.7f, -0.7f, 0.7f, 0.7f, col);
+	{
+		const ImVec2 tick[3] = { P(-0.4f, 0.0f), P(-0.1f, 0.35f), P(0.45f, -0.35f) };
+		dl->AddPolyline(tick, 3, col, 0, th);
+		break;
+	}
+	case UIWidgetType::RadioButton:
+		dl->AddCircle(c, 0.7f * h, col, 0, th); dl->AddCircleFilled(c, 0.32f * h, col); break;
+	case UIWidgetType::Slider:
+		line(-0.9f, 0.0f, 0.9f, 0.0f, dim); line(-0.9f, 0.0f, 0.2f, 0.0f);
+		dl->AddCircleFilled(P(0.2f, 0.0f), 0.3f * h, col); break;
+	case UIWidgetType::ProgressBar:
+		box(-0.9f, -0.3f, 0.9f, 0.3f, col, 0.15f); fill(-0.9f, -0.3f, 0.2f, 0.3f, col, 0.15f); break;
+	case UIWidgetType::TextInput:
+		box(-0.9f, -0.45f, 0.9f, 0.45f, col); line(-0.5f, -0.2f, -0.5f, 0.2f); break;
+	case UIWidgetType::ComboBox:
+		box(-0.9f, -0.45f, 0.9f, 0.45f, col);
+		dl->AddTriangleFilled(P(0.35f, -0.12f), P(0.75f, -0.12f), P(0.55f, 0.18f), col); break;
+	case UIWidgetType::VerticalBox:
+		for (int i = 0; i < 3; ++i) fill(-0.8f, -0.8f + i * 0.58f, 0.8f, -0.4f + i * 0.58f, i == 1 ? col : dim);
+		break;
+	case UIWidgetType::HorizontalBox:
+		for (int i = 0; i < 3; ++i) fill(-0.8f + i * 0.58f, -0.8f, -0.4f + i * 0.58f, 0.8f, i == 1 ? col : dim);
+		break;
+	case UIWidgetType::WrapBox:
+		fill(-0.9f, -0.7f, -0.2f, -0.2f, col); fill(-0.05f, -0.7f, 0.9f, -0.2f, dim);
+		fill(-0.9f, 0.1f, 0.3f, 0.6f, dim); fill(0.45f, 0.1f, 0.9f, 0.6f, col); break;
+	case UIWidgetType::Grid:
+		for (int r = 0; r < 2; ++r) for (int q = 0; q < 2; ++q)
+			fill(-0.85f + q * 0.95f, -0.85f + r * 0.95f, -0.1f + q * 0.95f, -0.1f + r * 0.95f,
+			     (r + q) % 2 ? dim : col);
+		break;
+	case UIWidgetType::ScrollBox:
+		box(-0.8f, -0.8f, 0.8f, 0.8f, col); fill(0.45f, -0.6f, 0.65f, 0.1f, col, 0.05f); break;
+	case UIWidgetType::Spacer:
+		line(-0.9f, 0.0f, 0.9f, 0.0f); line(-0.9f, -0.35f, -0.9f, 0.35f); line(0.9f, -0.35f, 0.9f, 0.35f); break;
+	case UIWidgetType::Splitter:
+		box(-0.9f, -0.7f, 0.9f, 0.7f, col); line(0.0f, -0.7f, 0.0f, 0.7f); break;
+	case UIWidgetType::NamedSlot:
+		for (int i = 0; i < 4; ++i)
+		{
+			const float a = -0.8f + i * 0.45f;
+			line(a, -0.7f, a + 0.25f, -0.7f); line(a, 0.7f, a + 0.25f, 0.7f);
+			line(-0.9f, a - 0.1f, -0.9f, a + 0.15f); line(0.9f, a - 0.1f, 0.9f, a + 0.15f);
+		}
+		break;
+	case UIWidgetType::TabBox:
+		fill(-0.9f, -0.75f, -0.1f, -0.3f, col, 0.1f); fill(0.0f, -0.75f, 0.6f, -0.3f, dim, 0.1f);
+		box(-0.9f, -0.3f, 0.9f, 0.75f, col); break;
+	case UIWidgetType::Accordion:
+		fill(-0.9f, -0.85f, 0.9f, -0.45f, col); box(-0.9f, -0.4f, 0.9f, 0.1f, dim);
+		fill(-0.9f, 0.2f, 0.9f, 0.6f, col); break;
+	case UIWidgetType::ListView:
+		for (int i = 0; i < 3; ++i) { dl->AddCircleFilled(P(-0.7f, -0.55f + i * 0.55f), 0.1f * h * 2.0f, col);
+			line(-0.4f, -0.55f + i * 0.55f, 0.9f, -0.55f + i * 0.55f); }
+		break;
+	case UIWidgetType::TreeView:
+		line(-0.8f, -0.6f, 0.4f, -0.6f); line(-0.45f, -0.05f, 0.8f, -0.05f);
+		line(-0.45f, 0.55f, 0.8f, 0.55f); line(-0.8f, -0.6f, -0.8f, 0.55f, dim);
+		line(-0.8f, 0.55f, -0.45f, 0.55f, dim); line(-0.8f, -0.05f, -0.45f, -0.05f, dim); break;
+	case UIWidgetType::DatePicker:
+		box(-0.85f, -0.75f, 0.85f, 0.75f, col); fill(-0.85f, -0.75f, 0.85f, -0.3f, col, 0.05f);
+		for (int r = 0; r < 2; ++r) for (int q = 0; q < 3; ++q)
+			dl->AddCircleFilled(P(-0.5f + q * 0.5f, 0.05f + r * 0.35f), 0.08f * h * 2.0f, dim);
+		break;
+	case UIWidgetType::ColorPicker:
+		box(-0.85f, -0.75f, 0.85f, 0.75f, col); fill(-0.65f, -0.55f, 0.2f, 0.55f, dim);
+		fill(0.4f, -0.55f, 0.65f, 0.55f, col, 0.05f); break;
+	default:
+		box(-0.8f, -0.8f, 0.8f, 0.8f, col); break;
+	}
 }
 
 void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
@@ -4817,6 +4958,9 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 
+	const FitCorner fitBtn = fitCornerSubmit("##uifit", origin, avail);
+	if (fitBtn.pressed) { st.zoom = 1.0f; st.pan = ImVec2(0, 0); }
+
 	// Invisible button = canvas interaction surface (captures mouse, no move of window).
 	ImGui::InvisibleButton("##uicanvas", avail,
 		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
@@ -4847,14 +4991,40 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	auto toScreen = [&](const ImVec2& c) { return ImVec2(cTL.x + c.x * s, cTL.y + c.y * s); };
 	auto toCanvas = [&](const ImVec2& p) { return ImVec2((p.x - cTL.x) / s, (p.y - cTL.y) / s); };
 
-	// Zoom around the mouse; pan with middle/right drag.
-	if (hovered)
+	// ── Wheel / swipe over the canvas ────────────────────────────────────────
+	// The same grammar as the HorizonCode graph. Mouse: the wheel zooms about the
+	// cursor. Trackpad: the two-finger swipe PANS the view and the pinch — which
+	// arrives as Ctrl/Cmd+scroll — zooms; the modifier is checked first so a zoom
+	// can never fall through into a pan.
+	//
+	// Gated on the canvas REGION, not on the surface button's hover: an element
+	// under the cursor, the reset button in the corner, or a drag in flight all
+	// turn that hover off, and wheel input must not die when the pointer crosses
+	// them. An open popup owns the wheel (its own list scrolls), as in the graph.
+	// The pointer is never warped: a pan moves the picture under a still cursor,
+	// and a zoom keeps the canvas point under the cursor where it was.
+	const bool popupOpen =
+		ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+	const bool wheelHot =
+		!popupOpen &&
+		mouse.x >= origin.x && mouse.y >= origin.y &&
+		mouse.x <  origin.x + avail.x && mouse.y < origin.y + avail.y &&
+		ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+		                       ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+	if (wheelHot)
 	{
-		const float wheel = ImGui::GetIO().MouseWheel;
-		if (wheel != 0.0f)
+		const ImGuiIO& gio = ImGui::GetIO();
+		const bool zoomMod = gio.KeyCtrl || gio.KeySuper;
+		if (EditorInput::trackpadActive() && !zoomMod)
+		{
+			constexpr float kSwipeToPx = 16.0f;   // wheel units → canvas pixels
+			st.pan.x += gio.MouseWheelH * kSwipeToPx;
+			st.pan.y += gio.MouseWheel  * kSwipeToPx;
+		}
+		else if (gio.MouseWheel != 0.0f)
 		{
 			const ImVec2 before = toCanvas(mouse);
-			st.zoom = std::clamp(st.zoom * (1.0f + wheel * 0.1f), 0.15f, 8.0f);
+			st.zoom = std::clamp(st.zoom * (1.0f + gio.MouseWheel * 0.1f), 0.15f, 8.0f);
 			const float s2 = std::max(0.02f, fit * st.zoom);
 			// keep the canvas point under the cursor fixed
 			st.pan.x += mouse.x - (origin.x + (avail.x - canvasW * s2) * 0.5f
@@ -4862,12 +5032,12 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			st.pan.y += mouse.y - (origin.y + (avail.y - canvasH * s2) * 0.5f
 			                       + st.pan.y + before.y * s2);
 		}
-		if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
-		    ImGui::IsMouseDragging(ImGuiMouseButton_Right))
-		{
-			const ImVec2 d = ImGui::GetIO().MouseDelta;
-			st.pan.x += d.x; st.pan.y += d.y;
-		}
+	}
+	if (hovered && (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
+	                ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
+	{
+		const ImVec2 d = ImGui::GetIO().MouseDelta;
+		st.pan.x += d.x; st.pan.y += d.y;
 	}
 
 	// Background + canvas rect + grid.
@@ -5455,6 +5625,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		}
 		ImGui::EndDragDropTarget();
 	}
+	fitCornerDraw(fitBtn);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -6361,7 +6532,11 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	};
 
 	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
+	// Submitted before the canvas so it gets the click (see FitCorner).
+	const FitCorner gFit = fitCornerSubmit("##uigfit", canvasOrigin, avail);
+	if (gFit.pressed) { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
 	const bool changed = GraphEditor::draw("##hc_graphcanvas", m, st.geState, avail);
+	fitCornerDraw(gFit);
 	st.selectedGraphNode = st.geState.selected;
 	if (changed) commitEdit(st, ctx);
 	// Mid-drag: the node has moved, so the document is dirty and a peer should
@@ -6909,17 +7084,43 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// open across the hierarchy below, as it did when this was one pane:
 			// the hierarchy pushes its own and that is what decides there.
 			HE::Ed::Help::Scope paletteScope("UI Palette");
-			for (UIWidgetType t : HE::uiWidgetTypeRegistry())
+
+			// Find a component by name. Typing opens every heading that has a
+			// hit; the grid underneath shows only those.
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::InputTextWithHint("##uipalettesearch", "Search components", &st.paletteFilter);
+			const std::string needle = [&] {
+				std::string n = st.paletteFilter;
+				for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+				return n; }();
+			const auto matches = [&](UIWidgetType t) {
+				if (needle.empty()) return true;
+				std::string n = spacedTypeName(typeName(t));
+				for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+				return n.find(needle) != std::string::npos; };
+
+			// A plain click adds (centered on the canvas or under the selected
+			// panel); dragging the tile onto the canvas/hierarchy places it there.
+			const auto tile = [&](UIWidgetType t, const ImVec2& size) -> bool
 			{
-				// WidgetRef is not offered as a bare type: every widget of the
-				// project is listed by name under "User Defined" below, and an
-				// empty reference you then have to point somewhere is the same
-				// thing with an extra step. It stays in the REGISTRY, though —
-				// that is what loads the type back out of a saved widget.
-				if (t == UIWidgetType::WidgetRef) continue;
-				// A plain click adds (centered on the canvas or under the selected
-				// panel); dragging the button onto the canvas/hierarchy places it there.
-				const bool clicked = ImGui::Button(typeName(t), ImVec2(-1.0f, 0));
+				ImGui::PushID(static_cast<int>(t));
+				const bool clicked = ImGui::InvisibleButton("##tile", size);
+				const bool hot     = ImGui::IsItemHovered();
+				const ImVec2 p0 = ImGui::GetItemRectMin(), p1 = ImGui::GetItemRectMax();
+				ImDrawList* dl  = ImGui::GetWindowDrawList();
+				dl->AddRectFilled(p0, p1, hot ? IM_COL32(60, 60, 68, 255) : IM_COL32(38, 38, 43, 255), 5.0f);
+				dl->AddRect(p0, p1, IM_COL32(255, 255, 255, hot ? 55 : 22), 5.0f);
+				const float gs = 22.0f;
+				paletteGlyph(dl, ImVec2((p0.x + p1.x) * 0.5f, p0.y + 6.0f + gs * 0.5f), gs, t,
+				             hot ? IM_COL32(240, 240, 245, 255) : IM_COL32(190, 192, 202, 255));
+				// The label, shortened to fit rather than cut mid-letter.
+				std::string label = spacedTypeName(typeName(t));
+				const float maxW = size.x - 8.0f;
+				while (label.size() > 3 && ImGui::CalcTextSize(label.c_str()).x > maxW)
+				{ label.pop_back(); if (ImGui::CalcTextSize((label + "...").c_str()).x <= maxW) { label += "..."; break; } }
+				const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+				dl->AddText(ImVec2((p0.x + p1.x - ts.x) * 0.5f, p1.y - ts.y - 4.0f),
+				            IM_COL32(215, 215, 222, 255), label.c_str());
 				// What this element IS. The scan that audits tooltip coverage
 				// only reads literal labels, so it never saw one of these
 				// buttons at all — third gap of that kind. A runtime test asks
@@ -6929,18 +7130,75 @@ void render(AppContext& ctx, const std::string& assetPath,
 				{
 					const int ti = static_cast<int>(t);
 					ImGui::SetDragDropPayload("HE_UIWIDGET_NEW", &ti, sizeof(int));
-					ImGui::TextUnformatted(typeName(t));
+					ImGui::TextUnformatted(spacedTypeName(typeName(t)).c_str());
 					ImGui::EndDragDropSource();
 				}
-				if (clicked)
-				{
-					int parent = 0;
-					if (const UIElement* selN = st.tree.find(st.selected))
-						parent = selN->acceptsChildren() ? selN->id : selN->parentId;
-					st.selected = addElementAt(st, t, parent, nullptr);
-					commitEdit(st, ctx);
-				}
+				ImGui::PopID();
+				return clicked;
+			};
+
+			// What kind of thing each component is. A type missing from the
+			// table lands under "Other" instead of vanishing, so a new type is
+			// visible the day it is registered.
+			struct Group { const char* title; std::vector<UIWidgetType> types; };
+			static const Group kGroups[] = {
+				{ "Common",  { UIWidgetType::Panel, UIWidgetType::Text, UIWidgetType::Image,
+				               UIWidgetType::Button, UIWidgetType::ProgressBar } },
+				{ "Input",   { UIWidgetType::CheckBox, UIWidgetType::RadioButton, UIWidgetType::Slider,
+				               UIWidgetType::TextInput, UIWidgetType::ComboBox,
+				               UIWidgetType::DatePicker, UIWidgetType::ColorPicker } },
+				{ "Layout",  { UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
+				               UIWidgetType::WrapBox, UIWidgetType::Grid, UIWidgetType::ScrollBox,
+				               UIWidgetType::Spacer, UIWidgetType::Splitter, UIWidgetType::NamedSlot } },
+				{ "Containers & Lists", { UIWidgetType::TabBox, UIWidgetType::Accordion,
+				               UIWidgetType::ListView, UIWidgetType::TreeView } },
+			};
+			std::vector<UIWidgetType> other;
+			for (UIWidgetType t : HE::uiWidgetTypeRegistry())
+			{
+				// WidgetRef is not offered as a bare type: every widget of the
+				// project is listed by name under "User Defined" below, and an
+				// empty reference you then have to point somewhere is the same
+				// thing with an extra step. It stays in the REGISTRY, though —
+				// that is what loads the type back out of a saved widget.
+				if (t == UIWidgetType::WidgetRef) continue;
+				bool placed = false;
+				for (const Group& g : kGroups)
+					if (std::find(g.types.begin(), g.types.end(), t) != g.types.end()) placed = true;
+				if (!placed) other.push_back(t);
 			}
+
+			const float spacing = ImGui::GetStyle().ItemSpacing.x;
+			const float availW  = ImGui::GetContentRegionAvail().x;
+			const int   cols    = std::max(1, static_cast<int>((availW + spacing) / (92.0f + spacing)));
+			const ImVec2 tileSz((availW - spacing * (cols - 1)) / cols, 52.0f);
+
+			const auto drawGroup = [&](const char* title, const std::vector<UIWidgetType>& types)
+			{
+				std::vector<UIWidgetType> shown;
+				for (UIWidgetType t : types) if (matches(t)) shown.push_back(t);
+				if (shown.empty()) return;
+				if (!needle.empty()) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+				if (!ImGui::TreeNodeEx(title, ImGuiTreeNodeFlags_DefaultOpen |
+				                              ImGuiTreeNodeFlags_SpanAvailWidth)) return;
+				int col = 0;
+				for (UIWidgetType t : shown)
+				{
+					if (col > 0) ImGui::SameLine();
+					if (tile(t, tileSz))
+					{
+						int parent = 0;
+						if (const UIElement* selN = st.tree.find(st.selected))
+							parent = selN->acceptsChildren() ? selN->id : selN->parentId;
+						st.selected = addElementAt(st, t, parent, nullptr);
+						commitEdit(st, ctx);
+					}
+					col = (col + 1) % cols;
+				}
+				ImGui::TreePop();
+			};
+			for (const Group& g : kGroups) drawGroup(g.title, g.types);
+			if (!other.empty()) drawGroup("Other", other);
 
 			// ── User Defined ─────────────────────────────────────────────────
 			// Every other widget in the project, ready to be dropped in as a
@@ -7081,7 +7339,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 		drawCanvas(st, ctx, ImGui::GetContentRegionAvail());
-		if (fitCornerButton("##uifit")) { st.zoom = 1.0f; st.pan = ImVec2(0, 0); }
 		ImGui::EndChild();
 		drawTimeline(st, ctx, timelineH);
 		ImGui::EndChild();
@@ -7230,7 +7487,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 		}
 		drawGraphCanvas(st, ctx, ImGui::GetContentRegionAvail());
-		if (fitCornerButton("##uigfit")) { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
 		ImGui::EndChild();
 
 		ImGui::SameLine();
