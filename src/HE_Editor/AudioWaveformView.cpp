@@ -507,7 +507,10 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 	ImGui::SetCursorScreenPos(ImVec2(origin.x, rulerBottom));
 	ImGui::InvisibleButton("##aw_lanes", ImVec2(width, std::max(1.0f, lanesBottom - rulerBottom)),
 	                       ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
-	EditorWidgets::helpForKey("Audio Editor/Waveform");
+	// No tooltip on the waveform itself: the pointer lives here while selecting,
+	// scrubbing and editing the curve, and a box hanging off the cursor the whole
+	// time is in the way. What it said is the footer line under the waveform
+	// (AudioEditorPanel), and the manual still has the entry.
 	const bool lanesHovered = ImGui::IsItemHovered();
 	const bool lanesActive  = ImGui::IsItemActive();
 	const bool lanesPressed = ImGui::IsItemActivated() && ImGui::IsMouseClicked(ImGuiMouseButton_Left);

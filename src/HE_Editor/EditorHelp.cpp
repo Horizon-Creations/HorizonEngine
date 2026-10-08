@@ -2356,6 +2356,13 @@ namespace
 	  "moved; a .hasset beside it records where it came from. Greyed out for an "
 	  "FBX/OBJ/COLLADA file when this build of the editor has no Assimp to read it.",
 	  "", "editor#content-browser" },
+	{ "Content Browser/Import to Project", "",
+	  "For a source file inside the engine's own content (a sound, a picture, a "
+	  "model): copies it into this project's Content folder, in the same "
+	  "sub-folder, and imports the copy as a new asset there. The engine's file "
+	  "is left as it is, and a name already taken in the project gets a number "
+	  "instead of being overwritten.",
+	  "", "editor#engine-content" },
 	{ "Content Browser/Reimport", "",
 	  "Reads the source file again and rebuilds the asset from it — after the "
 	  "model was changed in the program it came from. A texture keeps its "

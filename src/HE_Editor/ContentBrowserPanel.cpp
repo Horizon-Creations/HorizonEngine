@@ -3031,6 +3031,74 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						ImGui::SetTooltip("%s", blocked);
 				}
 
+				// ── Engine default → this project ────────────────────────
+				// The engine's own content is read-only ground, but a source file
+				// in it (a sound, a picture, a model) is raw material: this copies
+				// it into the project's Content, mirroring its folder, and imports
+				// the copy as a new asset there — the source stays beside the asset
+				// it made, exactly as if the file had been imported from disk. One
+				// click instead of "find it in the OS, copy it, import it". Only
+				// files that exist locally: a remote-only placeholder has no bytes
+				// to copy until it is downloaded.
+				if (engineLocked && ctx.contentManager && Importer::isImportableSource(srcPath))
+				{
+					std::error_code existsEc;
+					const bool local = std::filesystem::is_regular_file(srcPath, existsEc);
+					if (local && EditorWidgets::menuItem("Import to Project"))
+					{
+						namespace fs = std::filesystem;
+						const fs::path contentRoot(ctx.contentManager->contentRoot());
+						std::string rel = ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
+						if (rel.rfind("Engine/", 0) == 0) rel.erase(0, 7);
+						const fs::path relDir = fs::path(rel).parent_path();
+
+						std::error_code ec;
+						fs::create_directories(contentRoot / relDir, ec);
+						// Never over an asset the project already has: a second copy
+						// gets a numbered name instead.
+						fs::path dest = contentRoot / relDir / srcPath.filename();
+						for (int n = 1; fs::exists(dest, ec); ++n)
+							dest = contentRoot / relDir /
+							       (srcPath.stem().string() + "_" + std::to_string(n) +
+							        srcPath.extension().string());
+						fs::copy_file(srcPath, dest, ec);
+						if (ec)
+						{
+							HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Could not copy into the project",
+								"\"" + srcPath.filename().string() + "\": " + ec.message());
+						}
+						else if (Importer::isTextureSource(dest))
+						{
+							// sRGB or linear is a choice the file cannot make — same
+							// dialog the Import item opens.
+							TextureColourSpaceDialog::openImport(
+								{ dest.string() }, { relDir.generic_string() }, contentRoot.string());
+						}
+						else
+						{
+							const HE::Ed::Rewards::DirSnapshot before =
+								HE::Ed::Rewards::importSnapshot(ctx, (contentRoot / relDir).string());
+							if (Importer::importSource(dest, contentRoot, relDir))
+							{
+								HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported, 1);
+								HE::Ed::Rewards::markImported(ctx, before);
+								HE::Ed::notify(HE::Ed::NoteLevel::Info, "Imported into the project",
+									"\"" + srcPath.filename().string() + "\" is now an asset under " +
+									(relDir.empty() ? std::string("Content") : "Content/" + relDir.generic_string()) + ".");
+							}
+							else
+								HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Import failed",
+									"\"" + srcPath.filename().string() + "\" was copied into the project "
+									"but could not be imported.");
+						}
+						ctx.contentRefreshPending = true;
+						ImGui::CloseCurrentPopup();
+					}
+					if (local && ImGui::IsItemHovered())
+						ImGui::SetTooltip("Copies this file into the project's Content folder and "
+						                  "imports the copy as an asset.");
+				}
+
 				// ── Reimport ─────────────────────────────────────────────
 				// An asset now records the file it was imported FROM, which is what
 				// makes this possible at all. Before it, updating a mesh meant
