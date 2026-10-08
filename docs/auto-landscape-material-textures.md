@@ -221,6 +221,27 @@ dem Quell-Stamm) und legt eine neue UUID an. Ersetzt wird auf einem dieser Wege:
 Weil die UUIDs fest sind, bleiben die Verweise aus Materialien heil, egal welches
 Werkzeug die Dateien neu schreibt.
 
+**Packen der echten Texturen (`landscape_tex_gen --pack`).** Der Pack-Schritt aus §3
+existiert jetzt als Modus des Werkzeugs:
+
+```
+landscape_tex_gen <Ziel> --pack <PNG-Ordner> [--size 2048]
+```
+
+Er liest `<Schicht>_<Map>.png` aus einem flachen Ordner (Schichten Grass, Dirt, Rock,
+Snow, WetGround; Maps Albedo, Normal, Roughness, AO, Height; auch jpg/tga/bmp). Die
+Quellnamen von ambientCG/Poly Haven werden mit angenommen: `Color`/`BaseColor`/`Diffuse`
+für Albedo, `NormalGL` für Normal, `AmbientOcclusion` für AO, `Displacement` für Height.
+Er schreibt `T_Landscape_<Schicht>_{Albedo,Normal,Mask}.hasset` mit den festen UUIDs
+(Maske: R = AO, G = Rauheit, B = Höhe) und setzt danach die drei `_Array`-Texturen
+zusammen. Fehlendes AO wird Weiß, fehlende Höhe Mittelgrau, eine Schicht ganz ohne
+Dateien behält ihr Platzhalter-Aussehen (auf die Pack-Größe hochskaliert), und Maps
+anderer Größe werden auf `--size` skaliert (die Meldung steht im Log).
+
+Für **ein Projekt allein** ohne das Repo anzufassen: als `<Ziel>` den Override-Ordner
+`<Projekt>/Content/Engine/Textures/Landscape` angeben. Ein Projekt-Override hat dieselbe
+UUID und schlägt den mitgelieferten Platzhalter (§1 im Abschnitt `resolveAbsolutePath`).
+
 **Offen, das entscheidet der Mensch: wohin mit den großen Dateien?** Das Repo hat
 **kein Git LFS**, und Binär-Ballast wurde schon einmal aus der Historie gepurgt.
 In 2K belegen die 15 Engine-Assets (RGBA8, ohne Mips) etwa 15 × 16 MiB = 240 MiB,
