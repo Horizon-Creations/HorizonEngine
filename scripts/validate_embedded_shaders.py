@@ -111,6 +111,7 @@ HLSL_ENTRY_PROFILE = {
     "UIPSMain": "ps_5_0", "UIVSMain": "vs_5_0",
     "PSPreviewMesh": "ps_5_0", "PSPreviewSkinned": "ps_5_0",  # kWorldPreviewPSHLSL
     "VSVelocity": "vs_5_0", "PSVelocity": "ps_5_0",            # kTaaVelocityHLSL
+    "GBufPS": "ps_5_0",  # D3D11 kSceneHLSL: deferred G-buffer, built-in materials (Thema 150)
     "main": "ps_5_0",  # the common case; exceptions below
 }
 
