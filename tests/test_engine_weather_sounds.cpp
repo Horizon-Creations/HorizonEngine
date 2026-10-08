@@ -14,11 +14,13 @@
 
 #include "doctest.h"
 #include "TestFsUtil.h"
+#include "HcEditorUtil.h"   // listAssets: what an Audio slot's picker offers
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
+#include <Diagnostics/GlobalState.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/AudioEngine.h>
@@ -182,6 +184,45 @@ TEST_CASE("Weather sounds: five small mono PCM16 assets under Engine/Audio/Weath
 	// them ten times smaller (see weather_sound_gen); until there is one, this keeps
 	// the PCM from growing unnoticed.
 	CHECK(total < 1500u * 1024u);
+}
+
+TEST_CASE("Weather sounds: selectable in the editor, in the Audio slot's picker and the Content Browser's Engine tree")
+{
+	Scratch s("browse");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+
+	// The Weather component's slots are Audio slots: their picker lists every audio
+	// asset of both roots, so the defaults are offered without being asked for.
+	const std::vector<HcEditorUtil::ClassRef> offered = HcEditorUtil::listAssets(&cm, HE::AssetType::Audio);
+	for (const Clip& c : kClips)
+	{
+		CAPTURE(std::string(c.name));
+		const std::string want = clipPath(c);
+		const bool listed = std::any_of(offered.begin(), offered.end(),
+		                                [&](const HcEditorUtil::ClassRef& r) { return r.path == want; });
+		CHECK(listed);
+	}
+
+	// The Content Browser shows the Engine folder as a plain walk of the directory.
+	REQUIRE(GlobalState::getInstance().refreshEngineFolder(engineRoot().string(), s.content()));
+	auto [engineFolder, lock] = GlobalState::getInstance().lockEngineFolder();
+	const HE::Folder* audio = nullptr;
+	for (const HE::Folder* f : engineFolder.subfolders)
+		if (f->name == "Audio") audio = f;
+	REQUIRE(audio != nullptr);
+	const HE::Folder* weather = nullptr;
+	for (const HE::Folder* f : audio->subfolders)
+		if (f->name == "Weather") weather = f;
+	REQUIRE(weather != nullptr);
+	for (const Clip& c : kClips)
+	{
+		CAPTURE(std::string(c.name));
+		const std::string file = std::string(c.name) + ".hasset";
+		const bool shown = std::any_of(weather->files.begin(), weather->files.end(),
+		                               [&](const HE::File* f) { return f->name == file; });
+		CHECK(shown);
+	}
 }
 
 TEST_CASE("Weather sounds: the SFTP publish scan reads their UUIDs, and nothing else claims the block")

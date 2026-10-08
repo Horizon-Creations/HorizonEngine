@@ -1143,6 +1143,40 @@ namespace
 	  "The mixer bus the weather plays through (SFX by default). A name the mixer "
 	  "does not have falls back to the clip's own bus, then to master.",
 	  "", "rendering#weather" },
+	{ "Weather/Rain Sound", "Rain Sound",
+	  "The rain bed, a loop that fades in as rain falls and out as it stops. Empty "
+	  "plays the engine's rain (Engine » Audio » Weather » Rain). Click to pick an "
+	  "audio asset or drop one from the Content Browser to use your own; it is played "
+	  "on repeat, so it should loop cleanly. Clear brings the engine's back.",
+	  "", "rendering#weather" },
+	{ "Weather/Wind Sound", "Wind Sound",
+	  "The wind bed. It follows the wind speed and swells with the gusts, and is "
+	  "silent when the air is calm. Empty plays the engine's wind (Engine » Audio » "
+	  "Weather » Wind). Click to pick an audio asset or drop one from the Content "
+	  "Browser to use your own; it is played on repeat, so it should loop cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow Sound", "Snow Sound",
+	  "The snow atmosphere, a quiet hush that fades in as snow falls and cross-fades "
+	  "with the rain when one turns into the other. Empty plays the engine's (Engine » "
+	  "Audio » Weather » Snow). Click to pick an audio asset or drop one from the "
+	  "Content Browser to use your own; it is played on repeat, so it should loop "
+	  "cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Storm Sound", "Storm Sound",
+	  "The storm bed, a heavy roar that comes in when strong wind and heavy rain "
+	  "arrive together. It plays on top of the rain and wind beds, not instead of "
+	  "them. Empty plays the engine's (Engine » Audio » Weather » Storm). Click to "
+	  "pick an audio asset or drop one from the Content Browser to use your own; it "
+	  "is played on repeat, so it should loop cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Thunder Sound", "Thunder Sound",
+	  "The thunder after each lightning strike of a storm. It arrives later and "
+	  "quieter the farther away the strike was, picked at random for every strike. "
+	  "Empty plays the engine's (Engine » Audio » Weather » Thunder). Click to pick "
+	  "an audio asset or drop one from the Content Browser to use your own; it is "
+	  "played once per strike, so it should be a single roll that starts and ends "
+	  "in silence, not a loop.",
+	  "", "rendering#weather" },
 
 	// ── UI ───────────────────────────────────────────────────────────────────
 	{ "UI Canvas/Width", "", "The canvas's width in UI units.", "", "ui#designer" },

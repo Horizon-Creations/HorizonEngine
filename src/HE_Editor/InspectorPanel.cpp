@@ -1337,23 +1337,24 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				std::strncpy(wxBus, w->soundBus.c_str(), sizeof(wxBus) - 1);
 				wxBus[sizeof(wxBus) - 1] = '\0';
 				if (Row::inputText("Bus##wxs", wxBus, sizeof(wxBus))) { w->soundBus = wxBus; trackEdit(); }
-				const char* kDefaultSlot = "(default)";
+				// An empty slot plays the engine's sound (Engine/Audio/Weather), so it says
+				// which; the entry behind each slot says how it behaves.
 				EditorWidgets::assetDropSlot(ctx, "Rain", w->rainSound,
-					HE::AssetType::Audio, "wxrain", kDefaultSlot,
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "wxrain", "(default: Rain)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Rain Sound");
 				EditorWidgets::assetDropSlot(ctx, "Wind", w->windSound,
-					HE::AssetType::Audio, "wxwind", kDefaultSlot,
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "wxwind", "(default: Wind)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Wind Sound");
 				EditorWidgets::assetDropSlot(ctx, "Snow", w->snowSound,
-					HE::AssetType::Audio, "wxsnow", kDefaultSlot,
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "wxsnow", "(default: Snow)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Snow Sound");
 				EditorWidgets::assetDropSlot(ctx, "Storm", w->stormSound,
-					HE::AssetType::Audio, "wxstorm", kDefaultSlot,
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "wxstorm", "(default: Storm)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Storm Sound");
 				// Thunder: one roll per lightning strike, a random distance away.
 				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
-					HE::AssetType::Audio, "thunder", kDefaultSlot,
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "thunder", "(default: Thunder)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Thunder Sound");
 				ImGui::EndDisabled();
 				hint("The beds fade with the weather by themselves: rain and snow with how much "
 				     "falls, wind with the wind speed, storm with wind and rain together. An "
