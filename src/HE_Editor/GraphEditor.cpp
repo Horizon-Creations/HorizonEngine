@@ -451,7 +451,11 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         mouse.x <  origin.x + size.x && mouse.y < origin.y + size.y &&
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-    if (wheelHovered && !st.suppressInteraction && !behindConsumed)
+    // Not gated on behindConsumed: that flag means "the pointer is over a comment's
+    // title bar or resize grip", which owns the MOUSE BUTTONS there but has no use
+    // for the wheel — and gating on it made a two-finger swipe die the moment the
+    // cursor crossed a comment title.
+    if (wheelHovered && !st.suppressInteraction)
     {
         ImGuiIO& gio = ImGui::GetIO();
         const bool zoomMod = gio.KeyCtrl || gio.KeySuper;
