@@ -85,6 +85,15 @@ cmake/EngineContentCredentials.cmake
 # repo's EditorDeps/ in the long run (the staging script takes any folder).
 EditorDeps/Images/Landscape/
 
+# The landscape texture assets (three 106.7 MiB arrays, 27 single textures) are NOT
+# shipped from git: GitHub rejects a push with a file over 100 MiB, and the set would
+# double the clone for every re-pack. They live on the EngineContent server and the
+# Editor fetches them on demand (docs/auto-landscape-material-textures.md §20).
+# A local copy placed here (the one that was uploaded) stays untracked; the
+# generator's output (landscape_tex_gen) goes there too, so `git add -A` can't pick
+# 750 MiB up by accident.
+EditorDeps/EngineContent/Textures/Landscape/*.hasset
+
 # Python bytecode of the helper scripts in scripts/. A .pyc of build_runtimes.py
 # was committed once (e68ff8ed) simply because nothing here caught it.
 __pycache__/

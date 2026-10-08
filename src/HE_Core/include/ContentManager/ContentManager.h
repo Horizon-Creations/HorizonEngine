@@ -406,6 +406,18 @@ public:
 	void registerRemoteAsset(HE::UUID id, std::string relativePath,
 	                          std::function<void(std::function<void(bool)>)> materialize);
 
+	// True while `relativePath` ("Engine/…") names a remote asset that was
+	// registered with registerRemoteAsset() and has not landed on this machine yet.
+	// The PATH route to the same download: a loose editor material references its
+	// textures by path only (graphTexturePaths, no baked UUID), so nothing but the
+	// path ever asks for them. loadAsset(path) and loadAssetAsync(path) therefore
+	// start the download themselves when the file is not on disk and this is true;
+	// loadAsset() still returns a zero UUID for now (the file is not there yet), the
+	// caller sees the asset once the download has landed and it asks again. A reader
+	// that remembers a miss (a renderer's texture cache) should not remember THIS one:
+	// it is not a miss yet, and contentEpoch() moves when the download lands.
+	bool isRemoteAssetPending(const std::string& relativePath) const;
+
 	// Forget that a UUID is backed by a file on disk. The counterpart to the
 	// download side of registerRemoteAsset(): when the local copy of an
 	// EngineContent asset is REMOVED, the disk registry still maps its UUID to
@@ -613,6 +625,9 @@ private:
 		std::function<void(std::function<void(bool)>)> materialize;
 	};
 	std::unordered_map<HE::UUID, RemoteAssetEntry> m_remoteAssets;
+	// The UUID registered for `relativePath`, zero when none (isRemoteAssetPending()).
+	// A linear scan: it only runs when a path load already failed to find its file.
+	HE::UUID remoteAssetIdForPath(const std::string& relativePath) const;
 
 	struct PendingRemoteReady {
 		HE::UUID                      id;

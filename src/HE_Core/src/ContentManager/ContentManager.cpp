@@ -1073,6 +1073,18 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	HAsset::Reader reader;
 	if (!reader.open(fullPath))
 	{
+		// Not on this machine, but the EngineContent server has it (the manifest
+		// registered it, see registerRemoteAsset): this path is the only handle a
+		// loose material has on its textures, so the download starts here. Not an
+		// error — the file is on its way. loadAssetAsync(UUID) coalesces, so asking
+		// again while it is in flight costs nothing.
+		if (const HE::UUID remoteId = remoteAssetIdForPath(relativePath); remoteId != HE::UUID{})
+		{
+			HE_LOG_DEBUG(Asset, "Asset '%s' is not on disk, fetching it from the EngineContent server",
+			             relativePath.c_str());
+			loadAssetAsync(remoteId);
+			return HE::UUID();
+		}
 		// The most-reported "why is my asset not there" path: the reference is
 		// fine, the file simply is not where the content root says it should be.
 		HE_LOG_ERROR(Asset, "Cannot load asset '%s': no readable .hasset at '%s'",
@@ -1105,6 +1117,19 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 	{
 		loadAssetAsync(it->second, std::move(callback));
 		return;
+	}
+
+	// Remote-only EngineContent asset addressed by path (see loadAsset(path) and
+	// isRemoteAssetPending): the worker's disk read below would find no file, so go
+	// through the UUID route, which downloads first and calls back once it is loaded.
+	if (const HE::UUID remoteId = remoteAssetIdForPath(relativePath); remoteId != HE::UUID{})
+	{
+		std::error_code ec;
+		if (!std::filesystem::exists(resolveAbsolutePath(relativePath), ec))
+		{
+			loadAssetAsync(remoteId, std::move(callback));
+			return;
+		}
 	}
 
 	auto progress = std::make_shared<AsyncProgress>();
@@ -1192,6 +1217,9 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 			{
 				m_diskRegistry[r.id] = r.relativePath;
 				m_remoteAssets.erase(r.id);
+				// A file just appeared under the content roots: whoever remembers
+				// this path as "not there" (contentEpoch) looks again.
+				noteContentChanged();
 				loadAssetAsync(r.id, r.callback);
 			}
 			else if (r.callback)
@@ -1395,6 +1423,18 @@ void ContentManager::registerRemoteAsset(HE::UUID id, std::string relativePath,
 	entry.relativePath = std::move(relativePath);
 	entry.materialize   = std::move(materialize);
 	m_remoteAssets[id]  = std::move(entry);
+}
+
+HE::UUID ContentManager::remoteAssetIdForPath(const std::string& relativePath) const
+{
+	for (const auto& [id, entry] : m_remoteAssets)
+		if (entry.relativePath == relativePath) return id;
+	return HE::UUID{};
+}
+
+bool ContentManager::isRemoteAssetPending(const std::string& relativePath) const
+{
+	return remoteAssetIdForPath(relativePath) != HE::UUID{};
 }
 
 // ─── forgetDiskAsset ─────────────────────────────────────────────────────────

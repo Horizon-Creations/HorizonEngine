@@ -386,3 +386,145 @@ TEST_CASE("loadAssetAsync: multi-block read is byte-exact and reports progress")
 
     he_test::removeQuiet(full);
 }
+
+// ─── A remote-only EngineContent asset addressed by PATH ─────────────────────
+// A loose material names its textures by path only (graphTexturePaths, no baked
+// UUID), so nothing but the path ever asks for an EngineContent texture that is not
+// on this machine yet. The path loaders have to start the server download themselves:
+// registerRemoteAsset() is otherwise only reached through a UUID.
+
+namespace
+{
+    // Stands in for the SFTP download: the file lands where resolveAbsolutePath looks
+    // for the shipped default, then the test completes the materialize callback.
+    void landRemoteAsset(const std::filesystem::path& file, const HE::UUID& id)
+    {
+        const auto bytes = makeMaterialAssetBytes(id, "T_Remote");
+        std::filesystem::create_directories(file.parent_path());
+        std::ofstream f(file, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+}
+
+TEST_CASE("remote EngineContent asset: loadAsset(path) starts the download once and loads it once it landed")
+{
+    const auto base       = std::filesystem::temp_directory_path() / "he_test_remote_path_a";
+    he_test::removeAllQuiet(base);
+    const auto contentDir = base / "Content";
+    const auto engineDir  = base / "EngineContent";
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(engineDir);
+
+    const HE::UUID    id{0xC0DE0001C0DE0001ULL, 0x1ULL};
+    const std::string rel = "Engine/Textures/Landscape/T_Remote.hasset";
+
+    ContentManager cm(contentDir.string());
+    cm.setEngineContentRoot(engineDir.string());
+
+    int                       started = 0;
+    std::function<void(bool)> finish;
+    cm.registerRemoteAsset(id, rel, [&](std::function<void(bool)> done) {
+        ++started;
+        finish = std::move(done);
+    });
+    CHECK(cm.isRemoteAssetPending(rel));
+    CHECK_FALSE(cm.isRemoteAssetPending("Engine/Textures/Landscape/Other.hasset"));
+    CHECK(started == 0);                         // registering starts nothing
+
+    // The file is not there: no asset yet, but the download is under way.
+    CHECK(cm.loadAsset(rel) == HE::UUID{});
+    CHECK(started == 1);
+    CHECK(cm.loadAsset(rel) == HE::UUID{});      // asking again while it is in flight ...
+    CHECK(started == 1);                         // ... does not start a second download
+
+    // A path the server does not offer is still just a miss, nothing is started.
+    CHECK(cm.loadAsset("Engine/Textures/Landscape/Nope.hasset") == HE::UUID{});
+    CHECK(started == 1);
+
+    // The download lands.
+    landRemoteAsset(engineDir / "Textures" / "Landscape" / "T_Remote.hasset", id);
+    const uint64_t epoch = cm.contentEpoch();
+    REQUIRE(finish);
+    finish(true);
+    for (int i = 0; i < 200 && !cm.isLoaded(rel); ++i)
+    {
+        cm.pollAsyncResults();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(cm.contentEpoch() > epoch);            // whoever remembered "not there" looks again
+    CHECK_FALSE(cm.isRemoteAssetPending(rel));
+    CHECK(cm.isLoaded(rel));
+    CHECK(cm.loadAsset(rel) == id);
+    CHECK(started == 1);
+
+    he_test::removeAllQuiet(base);
+}
+
+TEST_CASE("remote EngineContent asset: loadAssetAsync(path) downloads first and calls back with the loaded asset")
+{
+    const auto base       = std::filesystem::temp_directory_path() / "he_test_remote_path_b";
+    he_test::removeAllQuiet(base);
+    const auto contentDir = base / "Content";
+    const auto engineDir  = base / "EngineContent";
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(engineDir);
+
+    const HE::UUID    id{0xC0DE0002C0DE0002ULL, 0x1ULL};
+    const std::string rel = "Engine/Textures/Landscape/T_Remote.hasset";
+
+    ContentManager cm(contentDir.string());
+    cm.setEngineContentRoot(engineDir.string());
+
+    int                       started = 0;
+    std::function<void(bool)> finish;
+    cm.registerRemoteAsset(id, rel, [&](std::function<void(bool)> done) {
+        ++started;
+        finish = std::move(done);
+    });
+
+    HE::UUID got;
+    bool     fired = false;
+    cm.loadAssetAsync(rel, [&](HE::UUID u) { got = u; fired = true; });
+    CHECK(started == 1);
+    CHECK_FALSE(fired);                          // nothing to read yet
+
+    landRemoteAsset(engineDir / "Textures" / "Landscape" / "T_Remote.hasset", id);
+    REQUIRE(finish);
+    finish(true);
+    for (int i = 0; i < 200 && !fired; ++i)
+    {
+        cm.pollAsyncResults();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(fired);
+    CHECK(got == id);
+    CHECK(cm.isLoaded(rel));
+
+    he_test::removeAllQuiet(base);
+}
+
+TEST_CASE("remote EngineContent asset: a file that is on disk wins, the download is not started")
+{
+    const auto base       = std::filesystem::temp_directory_path() / "he_test_remote_path_c";
+    he_test::removeAllQuiet(base);
+    const auto contentDir = base / "Content";
+    const auto engineDir  = base / "EngineContent";
+    std::filesystem::create_directories(contentDir);
+
+    const HE::UUID    diskId{0xC0DE0003C0DE0003ULL, 0x1ULL};
+    const HE::UUID    remoteId{0xC0DE0004C0DE0004ULL, 0x1ULL};
+    const std::string rel = "Engine/Textures/Landscape/T_Remote.hasset";
+    landRemoteAsset(engineDir / "Textures" / "Landscape" / "T_Remote.hasset", diskId);
+
+    ContentManager cm(contentDir.string());
+    cm.setEngineContentRoot(engineDir.string());
+
+    int started = 0;
+    cm.registerRemoteAsset(remoteId, rel, [&](std::function<void(bool)>) { ++started; });
+
+    CHECK(cm.loadAsset(rel) == diskId);          // the shipped default, as before
+    CHECK(started == 0);
+
+    he_test::removeAllQuiet(base);
+}
