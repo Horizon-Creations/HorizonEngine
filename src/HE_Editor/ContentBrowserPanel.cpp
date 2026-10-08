@@ -4319,6 +4319,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				if (ImGui::Selectable("Content", s_engImportTarget.empty()))
 					s_engImportTarget.clear();
+				EditorWidgets::helpForLabel("Content");
 				std::function<void(const HE::Folder*, const std::string&)> pick =
 					[&](const HE::Folder* folder, const std::string& rel)
 				{
@@ -4567,6 +4568,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		if (ImGui::BeginPopupModal("##cb_remote_download_popup", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
+			// Outside the context menu's scope, so without its own the Download
+			// button asked the help table for a bare "Download" and got nothing.
+			HE::Ed::Help::Scope helpScope("Content Browser");
 			// TextWrapped already covers the paragraph; the title is the line that
 			// does not. At the 420 px this dialog is pinned to, "Download
 			// \"SM_Rock_Cliff_Weathered_Large\"?" loses its closing quote and its
@@ -4661,6 +4665,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		if (ImGui::BeginPopupModal("##cb_remove_cache_popup", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
+			HE::Ed::Help::Scope helpScope("Content Browser");
 			// Two lines here are longer than the 460 px this dialog is pinned to. The
 			// title carries a full filename, and the dimmed line below is
 			// seventy-eight characters: unwrapped it ends at "the copy in memory", so

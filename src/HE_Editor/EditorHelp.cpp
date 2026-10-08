@@ -2368,6 +2368,14 @@ namespace
 	  "project, optionally name a new one, and say whether the engine's own "
 	  "sub-folders are kept underneath.",
 	  "", "editor#engine-content" },
+	{ "Import to Project/Content", "",
+	  "The project's Content root as the target folder. Pick a sub-folder below "
+	  "it to import there instead.",
+	  "", "editor#engine-content" },
+	{ "Import to Project/Import", "",
+	  "Copies the listed engine files into the target folder and imports the "
+	  "copies as new assets. The engine's own files are left as they are.",
+	  "", "editor#engine-content" },
 	{ "Import to Project/Keep the engine's folder structure", "",
 	  "On: Engine/Audio/click.wav lands in <target>/Audio/. Off: every file goes "
 	  "straight into the target folder.",
@@ -8282,6 +8290,9 @@ namespace
 		// Raised from the Content Browser (and File ▸ Import Asset), so it is
 		// read under the same heading.
 		{ "Texture Color Space/", "editor-interface", "Editor Interface", "Content Browser" },
+		// The target-folder dialog of "Import to Project...", raised from the same
+		// context menu.
+		{ "Import to Project/", "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
