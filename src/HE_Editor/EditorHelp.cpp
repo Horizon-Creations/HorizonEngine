@@ -2357,11 +2357,20 @@ namespace
 	  "FBX/OBJ/COLLADA file when this build of the editor has no Assimp to read it.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Import to Project", "",
-	  "For a source file inside the engine's own content (a sound, a picture, a "
-	  "model): copies it into this project's Content folder, in the same "
-	  "sub-folder, and imports the copy as a new asset there. The engine's file "
-	  "is left as it is, and a name already taken in the project gets a number "
-	  "instead of being overwritten.",
+	  "For source files inside the engine's own content (a sound, a picture, a "
+	  "model) — one, a whole selection, or a folder: copies them into this "
+	  "project's Content folder, in the same sub-folders, and imports the copies "
+	  "as new assets there. The engine's files are left as they are, and a name "
+	  "already taken in the project gets a number instead of being overwritten.",
+	  "", "editor#engine-content" },
+	{ "Content Browser/Import to Project...", "",
+	  "The same as Import to Project, but asks where first: pick a folder of the "
+	  "project, optionally name a new one, and say whether the engine's own "
+	  "sub-folders are kept underneath.",
+	  "", "editor#engine-content" },
+	{ "Import to Project/Keep the engine's folder structure", "",
+	  "On: Engine/Audio/click.wav lands in <target>/Audio/. Off: every file goes "
+	  "straight into the target folder.",
 	  "", "editor#engine-content" },
 	{ "Content Browser/Reimport", "",
 	  "Reads the source file again and rebuilds the asset from it — after the "

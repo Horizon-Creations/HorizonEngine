@@ -3,6 +3,7 @@
 #include "EditorTheme.h"     // brand palette (selected tiles, labels)
 #include <algorithm>
 #include <atomic>
+#include <set>
 #include <cstdint>
 #include <mutex>
 #include "EditorApplication.h"           // AppContext, GlobalState folders, ProjectManager
@@ -526,6 +527,121 @@ static std::vector<std::string> collectFolderContents(const std::string& folderA
 	}
 	std::sort(out.begin(), out.end());
 	return out;
+}
+
+// ─── Import engine content into the project ──────────────────────────────────
+// The engine's own content is read-only ground, but a SOURCE file in it (a sound,
+// a picture, a model) is raw material. These copy such files into the project's
+// Content and import the copies as new assets there — the source stays beside the
+// asset it made, exactly as if the file had been imported from disk.
+
+// Every importable, locally present source file under `paths` (files, and folders
+// walked recursively), without duplicates and in a stable order. A remote-only
+// placeholder has no bytes on disk, so it is not here.
+static void collectEngineSources(const std::vector<std::string>& paths,
+                                 std::vector<std::string>& out)
+{
+	namespace fs = std::filesystem;
+	std::set<std::string> seen(out.begin(), out.end());
+	const auto add = [&](const fs::path& p)
+	{
+		if (Importer::isImportableSource(p) && seen.insert(p.string()).second)
+			out.push_back(p.string());
+	};
+	for (const std::string& path : paths)
+	{
+		std::error_code ec;
+		if (fs::is_directory(path, ec))
+		{
+			fs::recursive_directory_iterator it(path, fs::directory_options::skip_permission_denied, ec);
+			const fs::recursive_directory_iterator end;
+			for (; !ec && it != end; it.increment(ec))
+			{
+				if (it->path().filename().string().rfind('.', 0) == 0)
+				{
+					std::error_code dirEc;
+					if (it->is_directory(dirEc)) it.disable_recursion_pending();
+					continue;
+				}
+				std::error_code fileEc;
+				if (it->is_regular_file(fileEc)) add(it->path());
+			}
+		}
+		else if (fs::is_regular_file(path, ec))
+			add(path);
+	}
+	std::sort(out.begin(), out.end());
+}
+
+// Copy `sources` into Content/<targetRel> and import the copies. With
+// `keepStructure` each file also keeps its sub-folder from the engine tree
+// (Engine/Audio/x.wav → <target>/Audio/x.wav). A name the project already uses
+// gets a number instead of being overwritten. Textures wait for the colour-space
+// dialog like any other texture import; one notification sums the batch up.
+static void runEngineImport(AppContext& ctx, const std::vector<std::string>& sources,
+                            const std::string& targetRel, bool keepStructure)
+{
+	namespace fs = std::filesystem;
+	if (!ctx.contentManager || sources.empty()) return;
+	const fs::path contentRoot(ctx.contentManager->contentRoot());
+	const HE::Ed::Rewards::DirSnapshot before =
+		HE::Ed::Rewards::importSnapshot(ctx, (contentRoot / targetRel).string());
+
+	std::size_t imported = 0, failed = 0;
+	std::vector<std::string> textures, textureDirs;
+	for (const std::string& src : sources)
+	{
+		const fs::path srcPath(src);
+		fs::path relDir = targetRel;
+		if (keepStructure)
+		{
+			std::string rel = ctx.contentManager->toContentRelativePath(src);   // "Engine/…"
+			if (rel.rfind("Engine/", 0) == 0) rel.erase(0, 7);
+			relDir /= fs::path(rel).parent_path();
+		}
+		std::error_code ec;
+		fs::create_directories(contentRoot / relDir, ec);
+		fs::path dest = contentRoot / relDir / srcPath.filename();
+		for (int n = 1; fs::exists(dest, ec); ++n)
+			dest = contentRoot / relDir /
+			       (srcPath.stem().string() + "_" + std::to_string(n) + srcPath.extension().string());
+		fs::copy_file(srcPath, dest, ec);
+		if (ec)
+		{
+			++failed;
+			HE_LOG_ERROR(Editor, "%s", ("Editor: could not copy " + src + " into the project: " +
+			                            ec.message()).c_str());
+			continue;
+		}
+		if (Importer::isTextureSource(dest))
+		{
+			textures.push_back(dest.string());
+			textureDirs.push_back(relDir.generic_string());
+		}
+		else if (Importer::importSource(dest, contentRoot, relDir))
+			++imported;
+		else
+		{
+			++failed;
+			HE_LOG_ERROR(Editor, "%s", ("Editor: import failed for " + dest.string()).c_str());
+		}
+	}
+	if (!textures.empty())
+		TextureColourSpaceDialog::openImport(textures, textureDirs, contentRoot.string());
+	if (imported > 0)
+	{
+		HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported, static_cast<int>(imported));
+		HE::Ed::Rewards::markImported(ctx, before);
+	}
+	ctx.contentRefreshPending = true;
+
+	std::string where = targetRel.empty() ? "Content" : "Content/" + targetRel;
+	std::string text  = "Imported " + std::to_string(imported) + " of " +
+	                    std::to_string(sources.size() - textures.size()) + " file(s) into " + where;
+	if (!textures.empty())
+		text += "; " + std::to_string(textures.size()) + " texture(s) wait for their color space";
+	HE::Ed::notify(failed ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Info,
+	               "Imported into the project", text + (failed ? " (" + std::to_string(failed) + " failed — see the console)" : "") + ".");
 }
 
 void render(AppContext& ctx, int& tabSelectRequest,
@@ -1355,6 +1471,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static bool                     s_patternNumber = false;
 		static int                      s_patternStart  = 1;
 		static bool                     s_openPatternRenamePopup = false;
+		// Import to Project…: what is being imported, and where it goes.
+		static std::vector<std::string> s_engImportSources;
+		static std::string              s_engImportTarget;       // content-relative folder, "" = Content
+		static bool                     s_engImportKeep        = true;
+		static char                     s_engImportNewFolder[128] = {};
+		static bool                     s_openEngImportPopup   = false;
 		static std::string              s_referencesTarget;
 		static bool                     s_referencesIsFolder  = false;
 		static std::uint64_t            s_referencesScanGen   = 0;
@@ -2956,6 +3078,65 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				                  "and downloads again when something needs it.");
 #endif
 
+			// ── Engine content → this project ────────────────────────────
+			// Files and folders alike, one or many: whatever in the selection is an
+			// importable source on engine ground. "Import to Project" is the one
+			// click (Content, keeping the engine's sub-folders); the "…" version
+			// asks where the files go first. The walk is cached per selection — a
+			// menu redraws every frame it is open and a folder can be big.
+			if (engineLocked && ctx.contentManager)
+			{
+				static std::string              s_engCacheKey;
+				static std::vector<std::string> s_engCacheSources;
+				std::vector<std::string> picked;
+				if (isSelected(s_ctxMenuItem) && s_selection.size() > 1) picked = s_selection;
+				else picked.push_back(s_ctxMenuItem);
+				std::string key;
+				for (const std::string& p : picked) key += p + "|";
+				if (key != s_engCacheKey)
+				{
+					s_engCacheKey = key;
+					s_engCacheSources.clear();
+					std::vector<std::string> onEngineGround;
+					for (const std::string& p : picked)
+						if (isReadOnlyGround(p)) onEngineGround.push_back(p);
+					collectEngineSources(onEngineGround, s_engCacheSources);
+				}
+				if (!s_engCacheSources.empty())
+				{
+					const std::string count = std::to_string(s_engCacheSources.size()) +
+						(s_engCacheSources.size() == 1 ? " file" : " files");
+					if (EditorWidgets::menuItem("Import to Project"))
+					{
+						runEngineImport(ctx, s_engCacheSources, std::string(), /*keepStructure=*/true);
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("%s: copy into Content, keeping the engine's sub-folders, "
+						                  "and import the copies as assets.", count.c_str());
+					if (EditorWidgets::menuItem("Import to Project..."))
+					{
+						s_engImportSources = s_engCacheSources;
+						s_engImportKeep    = true;
+						s_engImportNewFolder[0] = '\0';
+						// Start where the user is standing, when that is in Content.
+						s_engImportTarget.clear();
+						if (s_selectedRootKind == 0 && !s_browsedFolderPath.empty())
+						{
+							std::error_code relEc;
+							const std::filesystem::path rel = std::filesystem::relative(
+								s_browsedFolderPath, contentFolder.fullPath, relEc);
+							if (!relEc && rel != "." && !rel.empty() && rel.native()[0] != '.')
+								s_engImportTarget = rel.generic_string();
+						}
+						s_openEngImportPopup = true;
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("%s: choose the target folder first.", count.c_str());
+				}
+			}
+
 			// ── Import source file → .hasset ─────────────────────────────
 			if (!s_ctxMenuIsFolder)
 			{
@@ -3029,74 +3210,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					EditorWidgets::menuItem("Import", nullptr, false, /*enabled=*/false);
 					if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 						ImGui::SetTooltip("%s", blocked);
-				}
-
-				// ── Engine default → this project ────────────────────────
-				// The engine's own content is read-only ground, but a source file
-				// in it (a sound, a picture, a model) is raw material: this copies
-				// it into the project's Content, mirroring its folder, and imports
-				// the copy as a new asset there — the source stays beside the asset
-				// it made, exactly as if the file had been imported from disk. One
-				// click instead of "find it in the OS, copy it, import it". Only
-				// files that exist locally: a remote-only placeholder has no bytes
-				// to copy until it is downloaded.
-				if (engineLocked && ctx.contentManager && Importer::isImportableSource(srcPath))
-				{
-					std::error_code existsEc;
-					const bool local = std::filesystem::is_regular_file(srcPath, existsEc);
-					if (local && EditorWidgets::menuItem("Import to Project"))
-					{
-						namespace fs = std::filesystem;
-						const fs::path contentRoot(ctx.contentManager->contentRoot());
-						std::string rel = ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
-						if (rel.rfind("Engine/", 0) == 0) rel.erase(0, 7);
-						const fs::path relDir = fs::path(rel).parent_path();
-
-						std::error_code ec;
-						fs::create_directories(contentRoot / relDir, ec);
-						// Never over an asset the project already has: a second copy
-						// gets a numbered name instead.
-						fs::path dest = contentRoot / relDir / srcPath.filename();
-						for (int n = 1; fs::exists(dest, ec); ++n)
-							dest = contentRoot / relDir /
-							       (srcPath.stem().string() + "_" + std::to_string(n) +
-							        srcPath.extension().string());
-						fs::copy_file(srcPath, dest, ec);
-						if (ec)
-						{
-							HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Could not copy into the project",
-								"\"" + srcPath.filename().string() + "\": " + ec.message());
-						}
-						else if (Importer::isTextureSource(dest))
-						{
-							// sRGB or linear is a choice the file cannot make — same
-							// dialog the Import item opens.
-							TextureColourSpaceDialog::openImport(
-								{ dest.string() }, { relDir.generic_string() }, contentRoot.string());
-						}
-						else
-						{
-							const HE::Ed::Rewards::DirSnapshot before =
-								HE::Ed::Rewards::importSnapshot(ctx, (contentRoot / relDir).string());
-							if (Importer::importSource(dest, contentRoot, relDir))
-							{
-								HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported, 1);
-								HE::Ed::Rewards::markImported(ctx, before);
-								HE::Ed::notify(HE::Ed::NoteLevel::Info, "Imported into the project",
-									"\"" + srcPath.filename().string() + "\" is now an asset under " +
-									(relDir.empty() ? std::string("Content") : "Content/" + relDir.generic_string()) + ".");
-							}
-							else
-								HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Import failed",
-									"\"" + srcPath.filename().string() + "\" was copied into the project "
-									"but could not be imported.");
-						}
-						ctx.contentRefreshPending = true;
-						ImGui::CloseCurrentPopup();
-					}
-					if (local && ImGui::IsItemHovered())
-						ImGui::SetTooltip("Copies this file into the project's Content folder and "
-						                  "imports the copy as an asset.");
 				}
 
 				// ── Reimport ─────────────────────────────────────────────
@@ -4171,6 +4284,109 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		}
 		else if (!s_patternTargets.empty() && !s_openPatternRenamePopup)
 			s_patternTargets.clear();
+
+		// ── Import to Project… (engine content → a folder you pick) ─────────
+		// The one-click menu entry decides for you (Content, engine sub-folders
+		// kept). This asks: which folder of the project, whether to keep the
+		// engine's own sub-folders under it, and optionally a new folder to make.
+		if (s_openEngImportPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_engine_import_popup");
+			s_openEngImportPopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
+		if (ImGui::BeginPopupModal("##cb_engine_import_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			HE::Ed::Help::Scope helpScope("Import to Project");
+			const std::size_t total = s_engImportSources.size();
+			ImGui::Text("Import %d file%s into the project", static_cast<int>(total), total == 1 ? "" : "s");
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			// What goes in: names as the engine tree spells them, a handful of lines.
+			{
+				const float lineH = ImGui::GetTextLineHeightWithSpacing();
+				const float listH = std::clamp(lineH * static_cast<float>(std::min<std::size_t>(total, 6)) + 8.0f,
+				                               lineH * 2.0f, lineH * 6.0f + 8.0f);
+				ImGui::BeginChild("##eng_files", ImVec2(-1.0f, listH), true);
+				for (std::size_t i = 0; i < total; ++i)
+				{
+					std::string rel = ctx.contentManager
+						? ctx.contentManager->toContentRelativePath(s_engImportSources[i]) : std::string();
+					if (rel.empty()) rel = std::filesystem::path(s_engImportSources[i]).filename().string();
+					ImGui::TextUnformatted(rel.c_str());
+				}
+				ImGui::EndChild();
+			}
+
+			ImGui::Spacing();
+			ImGui::TextDisabled("Target folder");
+			ImGui::BeginChild("##eng_target", ImVec2(-1.0f, 170.0f), true);
+			{
+				if (ImGui::Selectable("Content", s_engImportTarget.empty()))
+					s_engImportTarget.clear();
+				std::function<void(const HE::Folder*, const std::string&)> pick =
+					[&](const HE::Folder* folder, const std::string& rel)
+				{
+					for (const HE::Folder* sub : folder->subfolders)
+					{
+						// Content/Engine holds the project's overrides of engine
+						// defaults — not a place to put new work.
+						if (rel.empty() && sub->name == "Engine") continue;
+						const std::string subRel = rel.empty() ? sub->name : rel + "/" + sub->name;
+						ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+						                           ImGuiTreeNodeFlags_SpanAvailWidth;
+						if (sub->subfolders.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+						if (subRel == s_engImportTarget) flags |= ImGuiTreeNodeFlags_Selected;
+						const bool open = ImGui::TreeNodeEx((sub->name + "##engt_" + subRel).c_str(), flags);
+						if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
+							s_engImportTarget = subRel;
+						if (open) { pick(sub, subRel); ImGui::TreePop(); }
+					}
+				};
+				pick(&contentFolder, std::string());
+			}
+			ImGui::EndChild();
+
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::InputTextWithHint("##eng_newfolder", "new sub-folder in the target (optional)",
+			                         s_engImportNewFolder, sizeof(s_engImportNewFolder));
+			ImGui::Checkbox("Keep the engine's folder structure", &s_engImportKeep);
+			EditorWidgets::helpForLabel("Keep the engine's folder structure");
+
+			// The effective target, spelled out — and refused when the new folder
+			// name could not be one.
+			const std::string newName(s_engImportNewFolder);
+			const bool badName = newName.find_first_of("/\\:*?\"<>|") != std::string::npos ||
+			                     newName == "." || newName == "..";
+			std::string effective = s_engImportTarget;
+			if (!newName.empty() && !badName)
+				effective += (effective.empty() ? "" : "/") + newName;
+			ImGui::Spacing();
+			if (badName)
+				ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.45f, 1.0f), "A folder name cannot contain a path or special characters.");
+			else
+				ImGui::TextDisabled("Goes to  Content%s%s", effective.empty() ? "" : "/", effective.c_str());
+			ImGui::Spacing();
+
+			ImGui::BeginDisabled(badName || total == 0);
+			if (EditorWidgets::primaryButton("Import", ImVec2(120, 0)))
+			{
+				runEngineImport(ctx, s_engImportSources, effective, s_engImportKeep);
+				s_engImportSources.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndDisabled();
+			ImGui::SameLine();
+			if (EditorWidgets::button("Cancel", ImVec2(120, 0)))
+			{
+				s_engImportSources.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
 
 		// ── "Find References" result ──────────────────────────────────────
 		// Not a confirmation: nothing is about to happen, so there is one way out
