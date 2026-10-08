@@ -10,6 +10,7 @@
 #include "DocsPanel.h"           // F1 over a node opens its entry in the manual
 #include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
 #include "HcExecTrace.h"         // which node just ran — the fading amber halo
+#include "EditorRewards.h"       // drag cues (EditorDragCues.h) go out through postDragCue
 #include <HorizonScene/EngineApi.h>
 #include <HorizonCode/HcClassResolve.h>   // member menus read the FLATTENED class
 #include <ContentManager/ContentManager.h>
@@ -616,6 +617,31 @@ int quickSpawnNode(const Host& h, NT type, const GraphEditor::QuickSpawnCtx& c)
 	HC::inferUserTypeNames(graph);   // the new node learns its definition from the wire
 	return id;
 }
+
+// The canvas's connect for a HorizonCode graph — the model's connect on the
+// real graph, its canConnect on a scratch copy.
+bool hostConnect(const Host& h, HC::Graph& graph, int oN, int oP, int iN, int iP)
+{
+	// ForEach is generic until wired: adopt the source array's element type
+	// (Array/Element pins retype + recolor) before the typed connect. A
+	// reroute likewise takes the shape of whatever it is wired to.
+	HC::adoptForEachElementType(graph, oN, oP, iN, iP);
+	HC::adoptRerouteType(graph, oN, oP, iN, iP);
+	// A wire the types refused is not always a dead end: when ONE node would
+	// carry it (Float into a String pin → To String) that node is built and
+	// wired here, half-way down the wire. It also re-infers user types, so
+	// this path needs no inferUserTypeNames of its own.
+	// The frontend's hidden types are handed over: a conversion must not be a
+	// way around a node the palette deliberately does not offer.
+	if (!graph.connect(oN, oP, iN, iP))
+		return HC::connectWithConversion(graph, oN, oP, iN, iP,
+			h.menus ? h.menus->addExcluded : std::vector<HC::NodeType>{});
+	// A user-defined type node that had no definition can learn it from what
+	// it was just wired to — an "Enum to String" hanging off a Mood output
+	// IS a Mood one, and asking the panel to pick would be asking twice.
+	HC::inferUserTypeNames(graph);
+	return true;
+}
 } // namespace
 
 GraphEditor::Model buildModel(const Host& h)
@@ -635,7 +661,14 @@ GraphEditor::Model buildModel(const Host& h)
 	// The error wins where both apply — a broken node running is still broken.
 	m.nodeOutline = [&h](int id) -> ImU32
 	{
-		if (h.errorNode != 0 && id == h.errorNode) return IM_COL32(230, 70, 70, 255);
+		if (h.errorNode != 0 && id == h.errorNode)
+		{
+			// V9: brighter toward a pale red and back, once — the hue stays,
+			// so it reads as the same halo drawing the eye, not a new state.
+			const float p = std::clamp(h.errorPulse, 0.0f, 1.0f);
+			return IM_COL32(230 + (int)(25.0f * p), 70 + (int)(120.0f * p),
+			                70 + (int)(110.0f * p), 255);
+		}
 		if (h.traceKey.empty()) return 0;
 		// The node a run is STOPPED at: a solid marker that stays until the
 		// run moves on — a program counter does not fade. Yellow, not the
@@ -662,25 +695,16 @@ GraphEditor::Model buildModel(const Host& h)
 			if (s && s->subgraph == h.currentGraph) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); }
 		return ls; };
 	m.connect = [&h, &graph](int oN, int oP, int iN, int iP){
-		// ForEach is generic until wired: adopt the source array's element type
-		// (Array/Element pins retype + recolor) before the typed connect. A
-		// reroute likewise takes the shape of whatever it is wired to.
-		HC::adoptForEachElementType(graph, oN, oP, iN, iP);
-		HC::adoptRerouteType(graph, oN, oP, iN, iP);
-		// A wire the types refused is not always a dead end: when ONE node would
-		// carry it (Float into a String pin → To String) that node is built and
-		// wired here, half-way down the wire. It also re-infers user types, so
-		// this path needs no inferUserTypeNames of its own.
-		// The frontend's hidden types are handed over: a conversion must not be a
-		// way around a node the palette deliberately does not offer.
-		if (!graph.connect(oN, oP, iN, iP))
-			return HC::connectWithConversion(graph, oN, oP, iN, iP,
-				h.menus ? h.menus->addExcluded : std::vector<HC::NodeType>{});
-		// A user-defined type node that had no definition can learn it from what
-		// it was just wired to — an "Enum to String" hanging off a Mood output
-		// IS a Mood one, and asking the panel to pick would be asking twice.
-		HC::inferUserTypeNames(graph);
-		return true; };
+		return hostConnect(h, graph, oN, oP, iN, iP); };
+	// Drag cues (EditorDragCues.h): queued for the next pollBuild, which owns
+	// the switches and the UI-sound engine. canConnect is the SAME connect on
+	// a scratch copy, so "would it fit" cannot drift from what the drop does —
+	// asked once per pin the wire enters, never per frame, and the real graph
+	// is never touched.
+	m.onDragCue = [](GraphEditor::DragCue c){ HE::Ed::Rewards::postDragCue(c); };
+	m.canConnect = [&h, &graph](int oN, int oP, int iN, int iP){
+		HC::Graph scratch = graph;
+		return hostConnect(h, scratch, oN, oP, iN, iP); };
 	m.clearPinLinks = [&graph](int node, int pin, bool){ removePinLinks(graph, node, pin); };
 	m.removeNode = [&graph](int id){ graph.removeNode(id); };
 	// Reroutes draw as a dot in the wire; a double-click on a wire splices one

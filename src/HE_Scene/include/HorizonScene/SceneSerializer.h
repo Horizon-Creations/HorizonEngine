@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <vector>
 #include <entt/entt.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
 
 class HorizonWorld;
@@ -14,6 +15,19 @@ using Entity = entt::entity;
 
 class SceneSerializer {
 public:
+    // The last whole-scene load (load()/loadJSON/loadBinary), as its
+    // SceneLoadTiming log line says it — kept for the editor's streaming view.
+    // A function, not a static member: WINDOWS_EXPORT_ALL_SYMBOLS exports no data.
+    struct LoadTiming
+    {
+        size_t      entities = 0;
+        double      parseMs  = 0.0;   // read + parse
+        double      buildMs  = 0.0;   // entities and components into the world
+        bool        binary   = false;
+        std::string path;             // empty: nothing loaded yet
+    };
+    static LoadTiming lastLoadTiming();
+
     bool save(const HorizonWorld& world,
               const std::filesystem::path& path,
               SerializeFormat format);
@@ -36,6 +50,12 @@ public:
     bool loadAdditiveFromMemory(HorizonWorld& world,
                                 const std::vector<uint8_t>& data,
                                 std::vector<Entity>* outCreated = nullptr);
+
+    // Additive merge of a scene that is already parsed (HE::parseSceneText /
+    // parseSceneCbor) — HE::CellStreamer parses on a worker and only this part
+    // runs on the main thread.
+    bool loadAdditiveFromJson(HorizonWorld& world, const nlohmann::json& scene,
+                              std::vector<Entity>* outCreated = nullptr);
 
     // In-memory snapshot (CBOR, same structure as the binary file format).
     // Used by play-in-editor and the undo system. load does not clear the

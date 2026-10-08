@@ -33,9 +33,11 @@ namespace
 	}
 
 	// The source's public variables, or false when the source class is not
-	// known here (a creator without an expected class, or no Game Instance).
-	// A creator's class is read flattened, so what it inherits is pullable too.
-	bool sourceVariables(const HC::Variable& v, std::vector<HcPull::SourceVar>& out)
+	// known here (a creator without an expected class, a reference of no
+	// declared class, or no Game Instance). A class is read flattened, so what
+	// it inherits is pullable too. `classPath` = HcPull::sourceClassOf.
+	bool sourceVariables(const HC::Variable& v, const std::string& classPath,
+	                     std::vector<HcPull::SourceVar>& out)
 	{
 		out.clear();
 		if (v.pullSource == HC::kPullFromGameInstance)
@@ -44,7 +46,7 @@ namespace
 			out = HcPull::publicVariables(*s_targets.gameInstance);
 			return true;
 		}
-		if (v.pullSource == HC::kPullFromCreator && !v.pullClass.empty())
+		if (!classPath.empty())
 		{
 			// One parse per class and frame is what the type picker already
 			// pays for its whole list; this is one asset.
@@ -52,12 +54,12 @@ namespace
 			static int s_frame = -1;
 			static std::vector<HcPull::SourceVar> s_vars;
 			static bool s_ok = false;
-			if (s_path != v.pullClass || s_frame != ImGui::GetFrameCount())
+			if (s_path != classPath || s_frame != ImGui::GetFrameCount())
 			{
 				HC::Graph g;
-				s_ok = HcGraphHost::loadClassGraph(s_targets.content, v.pullClass, g);
+				s_ok = HcGraphHost::loadClassGraph(s_targets.content, classPath, g);
 				s_vars = s_ok ? HcPull::publicVariables(g) : std::vector<HcPull::SourceVar>{};
-				s_path = v.pullClass;
+				s_path = classPath;
 				s_frame = ImGui::GetFrameCount();
 			}
 			out = s_vars;
@@ -67,9 +69,11 @@ namespace
 	}
 
 	// Write "Add to Target" into the source. Game Instance: the live graph,
-	// then its commit (re-registers it and saves). A class asset: through the
+	// then its commit (re-registers it and saves). A class asset (`classPath`:
+	// the creator class or the reference's class): through the
 	// ContentManager, refused while its tab holds unsaved changes.
-	void addToTarget(const HC::Variable& v, const std::string& structType)
+	void addToTarget(const HC::Variable& v, const std::string& classPath,
+	                 const std::string& structType)
 	{
 		std::string what;
 		if (v.pullSource == HC::kPullFromGameInstance)
@@ -87,17 +91,17 @@ namespace
 			return;
 		}
 		ContentManager* cm = s_targets.content;
-		if (!cm || v.pullClass.empty()) return;
+		if (!cm || classPath.empty()) return;
 		if (s_targets.blockedBecause)
-			if (const std::string why = s_targets.blockedBecause(v.pullClass); !why.empty())
+			if (const std::string why = s_targets.blockedBecause(classPath); !why.empty())
 			{
 				HE_LOG_WARN(Editor, "Add to Target: %s is %s - save or close it first.",
-				            stem(v.pullClass).c_str(), why.c_str());
+				            stem(classPath).c_str(), why.c_str());
 				return;
 			}
 		// Load first, THEN take the pointer, and use it before anything else
 		// can load: the getters point into a dense vector.
-		const HE::UUID id = cm->loadAsset(v.pullClass);
+		const HE::UUID id = cm->loadAsset(classPath);
 		std::string* json = nullptr;
 		RuntimeAsset* asset = nullptr;
 		if (HorizonCodeClassAsset* a = cm->getHorizonCodeClassMutable(id)) { json = &a->graphJson; asset = a; }
@@ -114,7 +118,7 @@ namespace
 		}
 		*json = HC::toJson(g);
 		if (cm->saveAsset(*asset))
-			HE_LOG_INFO(Editor, "Add to Target: %s in %s.", what.c_str(), stem(v.pullClass).c_str());
+			HE_LOG_INFO(Editor, "Add to Target: %s in %s.", what.c_str(), stem(classPath).c_str());
 	}
 
 	// The member case where the struct variable exists but its definition
@@ -147,13 +151,16 @@ void setTargets(Targets t) { s_targets = std::move(t); }
 
 const char* defaultSectionLabel(const HC::Variable& v)
 {
-	return v.pullSource.empty() ? "Default" : "Fallback";
+	if (v.pullSource.empty()) return "Default";
+	// Bound through a reference: the default is what it holds until the
+	// reference first points somewhere — a start, not a fallback.
+	return v.bindTo && v.pullSource == HC::kPullFromRef ? "Initial Value" : "Fallback";
 }
 
 std::string listNote(const HC::Variable& v)
 {
 	if (v.pullSource.empty()) return {};
-	return HcGraphHost::variableTypeLabel(v) + "  (pulled)";
+	return HcGraphHost::variableTypeLabel(v) + (v.bindTo ? "  (bound)" : "  (pulled)");
 }
 
 void listTooltip(const HC::Variable& v)
@@ -169,30 +176,102 @@ bool drawSection(HC::Variable& v, const HC::Graph& owner)
 	if (s_targets.gameInstance && &owner == s_targets.gameInstance) return false;
 
 	bool edited = false;
-	bool on = !v.pullSource.empty();
-	if (EditorWidgets::checkbox("Pull on Construct", &on))
+	// Bind To and Replicated exclude each other (plan §0.1): on a client the
+	// replicator and the binding would both write. The loader drops the
+	// binding anyway; here it simply falls back to the pull it extends.
+	if (v.replicated && v.bindTo) { v.bindTo = false; v.pullRef.clear(); edited = true; }
+	if (v.replicated && v.pullSource == HC::kPullFromRef)
+	{ v.pullSource = HC::kPullFromGameInstance; v.pullVar.clear(); v.pullMember.clear(); edited = true; }
+
+	// ── Source Mode: Off | Pull on Construct | Bind To (plan §5.1) ───────────
+	// One declaration with two lifetimes: switching between the two keeps
+	// every source field, only Bind To's reference source has no Pull form.
 	{
-		if (on) v.pullSource = HC::kPullFromGameInstance;
-		else    { v.pullSource.clear(); v.pullVar.clear(); v.pullMember.clear(); v.pullClass.clear(); }
-		edited = true;
+		const char* items[] = { "Off", "Pull on Construct", "Bind To" };
+		int cur = v.pullSource.empty() ? 0 : v.bindTo ? 2 : 1;
+		const int was = cur;
+		if (ImGui::BeginCombo("Source Mode", items[cur]))
+		{
+			for (int i = 0; i < 3; ++i)
+			{
+				const bool blocked = i == 2 && v.replicated;
+				ImGui::BeginDisabled(blocked);
+				if (ImGui::Selectable(items[i], i == cur)) cur = i;
+				ImGui::EndDisabled();
+				if (blocked && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+					ImGui::SetTooltip("Not on a Replicated variable: the replicator and the "
+					                  "binding would both write it.");
+			}
+			ImGui::EndCombo();
+		}
+		EditorWidgets::helpForLabel("Source Mode");
+		if (cur != was)
+		{
+			if (cur == 0)
+			{
+				v.pullSource.clear(); v.pullVar.clear(); v.pullMember.clear(); v.pullClass.clear();
+				v.bindTo = false; v.pullRef.clear();
+			}
+			else
+			{
+				if (v.pullSource.empty()) v.pullSource = HC::kPullFromGameInstance;
+				v.bindTo = cur == 2;
+				if (!v.bindTo && v.pullSource == HC::kPullFromRef)
+				{
+					v.pullSource = HC::kPullFromGameInstance;
+					v.pullVar.clear(); v.pullMember.clear();
+				}
+				if (!v.bindTo) v.pullRef.clear();
+			}
+			edited = true;
+		}
 	}
-	EditorWidgets::helpForLabel("Pull on Construct");
-	if (!on) return edited;
+	if (v.pullSource.empty()) return edited;
 
 	ImGui::PushID("pull");
 	ImGui::Indent();
 
 	// ── Source ───────────────────────────────────────────────────────────────
 	{
-		const char* items[] = { "Game Instance", "Creator" };
-		int cur = v.pullSource == HC::kPullFromCreator ? 1 : 0;
-		if (ImGui::Combo("Source", &cur, items, 2))
+		// Reference only for Bind To: at construction the reference is still
+		// null, so a pull through it would only ever see the default.
+		const char* items[] = { "Game Instance", "Creator", "Reference" };
+		int cur = v.pullSource == HC::kPullFromCreator ? 1 : v.pullSource == HC::kPullFromRef ? 2 : 0;
+		if (ImGui::Combo("Source", &cur, items, v.bindTo ? 3 : 2))
 		{
-			v.pullSource = cur == 1 ? HC::kPullFromCreator : HC::kPullFromGameInstance;
+			v.pullSource = cur == 1 ? HC::kPullFromCreator
+			             : cur == 2 ? HC::kPullFromRef : HC::kPullFromGameInstance;
 			if (cur != 1) v.pullClass.clear();
+			if (cur != 2) v.pullRef.clear();
 			edited = true;
 		}
 		EditorWidgets::helpForLabel("Source");
+	}
+
+	// ── The reference to bind through ────────────────────────────────────────
+	if (v.pullSource == HC::kPullFromRef)
+	{
+		const std::vector<std::string> refs = HcPull::refVariables(owner);
+		const std::string shown = v.pullRef.empty() ? std::string("(pick one)") : v.pullRef;
+		if (ImGui::BeginCombo("Reference", shown.c_str()))
+		{
+			for (const std::string& r : refs)
+			{
+				const std::string cls = HcPull::refClassOf(owner, r);
+				const std::string label = r + (cls.empty() ? std::string("  (any object)")
+				                                           : "  " + stem(cls));
+				if (ImGui::Selectable((label + "##" + r).c_str(), r == v.pullRef))
+				{
+					if (r != v.pullRef) { v.pullVar.clear(); v.pullMember.clear(); }
+					v.pullRef = r;
+					edited = true;
+				}
+			}
+			if (refs.empty())
+				ImGui::TextDisabled("This class has no object reference variable.");
+			ImGui::EndCombo();
+		}
+		EditorWidgets::helpForLabel("Reference");
 	}
 
 	// ── Expected creator class ───────────────────────────────────────────────
@@ -214,7 +293,8 @@ bool drawSection(HC::Variable& v, const HC::Graph& owner)
 
 	// ── Variable / Member ────────────────────────────────────────────────────
 	std::vector<HcPull::SourceVar> vars;
-	const bool known = sourceVariables(v, vars);
+	const std::string classPath = HcPull::sourceClassOf(v, owner);
+	const bool known = sourceVariables(v, classPath, vars);
 	const HcPull::SourceVar* chosen = nullptr;
 	for (const HcPull::SourceVar& sv : vars)
 		if (sv.name == v.pullVar) chosen = &sv;
@@ -306,14 +386,16 @@ bool drawSection(HC::Variable& v, const HC::Graph& owner)
 	if (!st.text.empty())
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, st.ok ? kOk : kBad);
-		ImGui::TextWrapped("%s %s", st.ok ? "OK:" : "Default used:", st.text.c_str());
+		ImGui::TextWrapped("%s %s", st.ok ? "OK:" : v.bindTo ? "Not bound:" : "Default used:",
+		                   st.text.c_str());
 		ImGui::PopStyleColor();
 	}
 
 	// ── Add to Target ────────────────────────────────────────────────────────
-	// Only where there IS a target to write into: the Game Instance, or the
-	// creator's expected class. And only for what is missing — a type clash
-	// is the author's to settle, not something to paper over.
+	// Only where there IS a target to write into: the Game Instance, the
+	// creator's expected class or the reference's class. And only for what is
+	// missing — a type clash is the author's to settle, not something to paper
+	// over.
 	const bool canWrite = known && !v.pullVar.empty() &&
 	                      (st.why == HC::PullFailure::NoPublicVariable ||
 	                       st.why == HC::PullFailure::NoSuchMember);
@@ -346,7 +428,7 @@ bool drawSection(HC::Variable& v, const HC::Graph& owner)
 		if (EditorWidgets::button("Add to Target"))
 		{
 			if (memberMissingField) addMemberToStruct(v, chosen->typeName);
-			else                    addToTarget(v, memberMissingVar ? s_structType : std::string());
+			else addToTarget(v, classPath, memberMissingVar ? s_structType : std::string());
 		}
 		ImGui::EndDisabled();
 		EditorWidgets::helpForLabel("Add to Target");

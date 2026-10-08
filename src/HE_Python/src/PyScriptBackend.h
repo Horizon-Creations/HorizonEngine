@@ -71,6 +71,9 @@ public:
 	             const std::vector<HorizonCode::Value>& args) override;
 	bool callOnRep(InstanceId id, const std::string& varName,
 	               const HorizonCode::Value& oldValue) override;
+	bool callOnChanged(InstanceId id, const std::string& varName, uint32_t source,
+	                   const HorizonCode::Value& oldValue,
+	                   const HorizonCode::Value& newValue) override;
 
 	std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const override;
 	void injectProperties(InstanceId id,

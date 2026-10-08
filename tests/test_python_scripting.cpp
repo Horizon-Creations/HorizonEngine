@@ -12,6 +12,7 @@
 #include <Types/TypeRegistry.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/HcWatchEvents.h>             // on_changed_<Var> delivery, as the hosts run it
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // on_cheat_detected + horizon.anticheat.*
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
@@ -1339,6 +1340,66 @@ TEST_CASE("ScriptContext: OnRep reaches a Python instance under on_rep_<name>, w
     REQUIRE(ctx.loadScript("repdeaf", kSpeedEcho, HE::ScriptLanguage::Python));
     auto d = ctx.createInstance("repdeaf", makeEntity(world, "Deaf"));
     CHECK(ctx.callOnRep(d, "health", HorizonCode::Value::ofInt(1)));
+}
+
+// ─── A watched HorizonCode variable reaches Python (Thema 137 step 5) ────────
+// docs/bind-to-variable-binding-plan.md §4.5: horizon.hc.watch from Python, the
+// change reported at the frame-end compare, routed by HcWatchEvents (the hosts'
+// dispatcher) to on_changed_<Var>(self, source, old, new). The handler takes
+// exactly four parameters — Python refuses a call with more arguments than
+// that, so the arity is the contract and this case pins it.
+static const char* kPyWatcher = R"py(
+import horizon
+
+class Ear(horizon.Behavior):
+    def on_start(self):
+        self.calls = 0
+        ok = horizon.hc.watch(self.entity_id, 0, "Score")
+        horizon.setPosition(self.entity_id, 1.0 if ok else 0.0, 0.0, 0.0)
+    def on_changed_Score(self, source, old, new):
+        if source == 0:
+            self.calls += 1
+        horizon.setPosition(self.entity_id, float(old), float(new), float(self.calls))
+)py";
+
+TEST_CASE("ScriptContext: a watched HorizonCode variable reaches Python as on_changed_<Var>(source, old, new)")
+{
+    HorizonWorld world;
+    HorizonCode::Runtime rt;
+    ScriptContext::InstanceMap instances;
+    {
+        ScriptContext ctx(world);
+        ScriptContext::HostServices hs;
+        hs.runtime = &rt;
+        ctx.setHostServices(hs);
+        rt.onVariableChanged = [&](HorizonCode::InstanceId owner, const std::string& var,
+                                   const HorizonCode::Value& old, const HorizonCode::Value& now,
+                                   const std::vector<uint64_t>& tokens)
+        { HcWatchEvents::dispatch(rt, owner, var, old, now, tokens, &ctx, &instances, nullptr); };
+
+        HorizonCode::Graph g;
+        { HorizonCode::Variable s; s.name = "Score"; s.type = HorizonCode::PinType::Int;
+          s.f[0] = 5.0f; g.variables = { s }; }
+        const auto gi = rt.setGameInstance(g);
+
+        REQUIRE(ctx.loadScript("ear", kPyWatcher, HE::ScriptLanguage::Python));
+        auto e  = makeEntity(world, "Ear");
+        auto id = ctx.createInstance("ear", e);
+        REQUIRE(id != ScriptEngine::kInvalidInstance);
+        instances[(uint32_t)e] = id;
+        REQUIRE(ctx.callOnStart(id));
+        const auto& t = world.registry().get<TransformComponent>(e);
+        CHECK(t.position.x == doctest::Approx(1.0f));    // horizon.hc.watch said yes
+
+        rt.exchangeState();                               // baseline: nothing
+        rt.setVariable(gi, "Score", HorizonCode::Value::ofInt(7));
+        rt.exchangeState();
+        CHECK(ctx.lastError().empty());
+        CHECK(t.position.x == doctest::Approx(5.0f));    // old
+        CHECK(t.position.y == doctest::Approx(7.0f));    // new
+        CHECK(t.position.z == doctest::Approx(1.0f));    // once, from source 0
+    }
+    rt.onVariableChanged = nullptr;
 }
 
 #endif // HE_HAVE_PYTHON

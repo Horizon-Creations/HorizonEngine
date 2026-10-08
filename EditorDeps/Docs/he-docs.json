@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-10-02",
+ "generated": "2026-10-06",
  "groups": [
   {
    "pages": [
@@ -9547,7 +9547,7 @@
         },
         {
          "s": "",
-         "t": " opens the engine's built-in profiler. Three tabs:"
+         "t": " opens the engine's built-in profiler. Among its tabs:"
         }
        ]
       },
@@ -9633,13 +9633,83 @@
            "t": "Per-pass GPU timing (Shadow, SSAO, Scene, Bloom, Tonemap …), a nested CPU scope tree, and counters — draw calls, triangles, visible/total objects, VRAM used vs budget."
           }
          ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Streaming"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Live view of what loads in the background: the job pool per priority (queued, running, cap, jobs per second, share of the workers, cancelled, failed), the asset loads in flight with their progress, the last scene load (parse and build time), the open scene's streaming cells and how far the editor camera is from the origin."
+          }
+         ]
         ]
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Streaming cells in the editor"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A large scene can stream in squares: the game loads the cells around its camera and drops the far ones (see "
+        },
+        {
+         "h": "systems.html#physics",
+         "s": "l",
+         "t": "large worlds"
+        },
+        {
+         "s": "",
+         "t": "). The Streaming tab splits the open scene: pick a cell size and, if you like, the load and unload radius, then "
+        },
+        {
+         "s": "b",
+         "t": "Split into Streaming Cells"
+        },
+        {
+         "s": "",
+         "t": ". Placed meshes, point and spot lights, static bodies and decals move into one scene file per square, in a folder named after the scene; everything that has to be there all the time stays. The scene must have been saved once, and the split is one undo step that you keep by saving."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "c",
+         "t": "Show » Streaming Cells"
+        },
+        {
+         "s": "",
+         "t": " in the Scene window draws the squares on the ground: green ones the game would load from where the editor camera stands, orange ones it keeps once loaded, grey ones it drops, with the two radii as rings. To change what is in the cells, "
+        },
+        {
+         "s": "b",
+         "t": "Merge Cells into the Scene"
+        },
+        {
+         "s": "",
+         "t": " brings them back as ordinary entities, in their folders and with their identities, and the cell list goes; split again when done. Neither is offered while playing or inside a collaboration session."
+        }
        ]
       }
      ],
      "eyebrow": "Measure",
      "id": "profiler",
-     "text": "View » Performance Profiler opens the engine's built-in profiler. Three tabs: Tab Shows Overview Always-live HUD: FPS, CPU ms, GPU ms and a frame-time graph. Capture Benchmark capture — start/stop with F9 anywhere (editor or exported game); dumps a profile_<timestamp>.json into the dumps/ folder. Plus single-frame captures. Frame Detail Per-pass GPU timing (Shadow, SSAO, Scene, Bloom, Tonemap …), a nested CPU scope tree, and counters — draw calls, triangles, visible/total objects, VRAM used vs budget.",
+     "text": "View » Performance Profiler opens the engine's built-in profiler. Among its tabs: Tab Shows Overview Always-live HUD: FPS, CPU ms, GPU ms and a frame-time graph. Capture Benchmark capture — start/stop with F9 anywhere (editor or exported game); dumps a profile_<timestamp>.json into the dumps/ folder. Plus single-frame captures. Frame Detail Per-pass GPU timing (Shadow, SSAO, Scene, Bloom, Tonemap …), a nested CPU scope tree, and counters — draw calls, triangles, visible/total objects, VRAM used vs budget. Streaming Live view of what loads in the background: the job pool per priority (queued, running, cap, jobs per second, share of the workers, cancelled, failed), the asset loads in flight with their progress, the last scene load (parse and build time), the open scene's streaming cells and how far the editor camera is from the origin. Streaming cells in the editor A large scene can stream in squares: the game loads the cells around its camera and drops the far ones (see large worlds). The Streaming tab splits the open scene: pick a cell size and, if you like, the load and unload radius, then Split into Streaming Cells. Placed meshes, point and spot lights, static bodies and decals move into one scene file per square, in a folder named after the scene; everything that has to be there all the time stays. The scene must have been saved once, and the split is one undo step that you keep by saving. Show » Streaming Cells in the Scene window draws the squares on the ground: green ones the game would load from where the editor camera stands, orange ones it keeps once loaded, grey ones it drops, with the two radii as rings. To change what is in the cells, Merge Cells into the Scene brings them back as ordinary entities, in their folders and with their identities, and the cell list goes; split again when done. Neither is offered while playing or inside a collaboration session.",
      "title": "Performance Profiler"
     },
     {
@@ -9711,7 +9781,16 @@
          },
          {
           "s": "",
-          "t": " — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Commits and pushes themselves live in "
+          "t": " — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Between the two sits your "
+         },
+         {
+          "h": "#github",
+          "s": "l",
+          "t": "GitHub account"
+         },
+         {
+          "s": "",
+          "t": ": signed in, or a button to sign in. Commits and pushes themselves live in "
          },
          {
           "s": "c",
@@ -9766,6 +9845,122 @@
           "s": "",
           "t": " (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself."
          }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Feedback"
+         },
+         {
+          "s": "",
+          "t": " — small, optional signs that something just worked. A save, a finished build, an import, a clean HorizonCode compile, a commit or push and the end of the tutorial each show a word in the middle of the footer ("
+         },
+         {
+          "s": "i",
+          "t": "Saved"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "i",
+          "t": "Build succeeded"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "i",
+          "t": "Compiles clean"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "i",
+          "t": "Committed and pushed"
+         },
+         {
+          "s": "",
+          "t": "…) with a drawn check mark, then the footer returns to "
+         },
+         {
+          "s": "i",
+          "t": "Ready"
+         },
+         {
+          "s": "",
+          "t": ". Nothing opens, nothing takes focus, nothing waits for it. The compile readout in a graph's strip writes the same check; a compile that found a problem makes the offending node's red halo pulse once, and a new problem notification rings the footer bell once ("
+         },
+         {
+          "s": "i",
+          "t": "Problem Pulse"
+         },
+         {
+          "s": "",
+          "t": "). Beside "
+         },
+         {
+          "s": "i",
+          "t": "Ready"
+         },
+         {
+          "s": "",
+          "t": " the footer can show today's builds and your days in a row; hovering them shows the last seven days. No points, levels or goals."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Feedback sounds"
+         },
+         {
+          "s": "",
+          "t": " — off until you switch on "
+         },
+         {
+          "s": "i",
+          "t": "Success Sound"
+         },
+         {
+          "s": "",
+          "t": ". Then each event has its own quiet tone and its own switch with a "
+         },
+         {
+          "s": "i",
+          "t": "Preview"
+         },
+         {
+          "s": "",
+          "t": " button: save, build, build failed, import, compile, compile failed, commit, tutorial and problem. "
+         },
+         {
+          "s": "i",
+          "t": "Sound Volume"
+         },
+         {
+          "s": "",
+          "t": " sets them all; "
+         },
+         {
+          "s": "i",
+          "t": "Mute Editor Sounds"
+         },
+         {
+          "s": "",
+          "t": " silences them at once and keeps the switches as they are. The build, commit and problem tones only play while the editor is in the background; at most one tone plays every two seconds, the problem tone at most every thirty, and none during Play. They play on an output of the editor's own, which is only opened while sound is on, so the project's mixer and mute do not touch them. "
+         },
+         {
+          "s": "i",
+          "t": "Reduced Motion"
+         },
+         {
+          "s": "",
+          "t": " follows the system: check marks appear whole, rings and lines stop moving, fades stay."
+         }
         ]
        ],
        "k": "ul"
@@ -9773,8 +9968,719 @@
      ],
      "eyebrow": "Setup",
      "id": "preferences",
-     "text": "Edit » Preferences (Ctrl/Cmd + ,) holds machine-level settings: Renderer — graphics backend picker (OpenGL everywhere; Metal on macOS; Direct3D 11/12 on Windows; Vulkan where enabled), VSync, GPU weather particles. Post-processing — Bloom (threshold, intensity) and ambient occlusion (method SSAO / HBAO / GTAO, radius, intensity). See Post-Processing. Source Control » Repository — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Commits and pushes themselves live in View » Source Control. Tools » Status — everything the editor needs from outside itself in one table: git and Git LFS, CMake and a C++ compiler, the local network and the router. Rows that are not green offer a Fix. A \"C++ Toolchain Not Found\" dialog also appears at startup when CMake or the compiler are missing, offering automatic installation — the toolchain is needed for C++ projects and for compiling HorizonCode at export. Collaboration — whether the editor announces and listens for sessions on the local network; whether it will carry large assets (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself.",
+     "text": "Edit » Preferences (Ctrl/Cmd + ,) holds machine-level settings: Renderer — graphics backend picker (OpenGL everywhere; Metal on macOS; Direct3D 11/12 on Windows; Vulkan where enabled), VSync, GPU weather particles. Post-processing — Bloom (threshold, intensity) and ambient occlusion (method SSAO / HBAO / GTAO, radius, intensity). See Post-Processing. Source Control » Repository — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Between the two sits your GitHub account: signed in, or a button to sign in. Commits and pushes themselves live in View » Source Control. Tools » Status — everything the editor needs from outside itself in one table: git and Git LFS, CMake and a C++ compiler, the local network and the router. Rows that are not green offer a Fix. A \"C++ Toolchain Not Found\" dialog also appears at startup when CMake or the compiler are missing, offering automatic installation — the toolchain is needed for C++ projects and for compiling HorizonCode at export. Collaboration — whether the editor announces and listens for sessions on the local network; whether it will carry large assets (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself. Feedback — small, optional signs that something just worked. A save, a finished build, an import, a clean HorizonCode compile, a commit or push and the end of the tutorial each show a word in the middle of the footer (Saved, Build succeeded, Compiles clean, Committed and pushed…) with a drawn check mark, then the footer returns to Ready. Nothing opens, nothing takes focus, nothing waits for it. The compile readout in a graph's strip writes the same check; a compile that found a problem makes the offending node's red halo pulse once, and a new problem notification rings the footer bell once (Problem Pulse). Beside Ready the footer can show today's builds and your days in a row; hovering them shows the last seven days. No points, levels or goals. Feedback sounds — off until you switch on Success Sound. Then each event has its own quiet tone and its own switch with a Preview button: save, build, build failed, import, compile, compile failed, commit, tutorial and problem. Sound Volume sets them all; Mute Editor Sounds silences them at once and keeps the switches as they are. The build, commit and problem tones only play while the editor is in the background; at most one tone plays every two seconds, the problem tone at most every thirty, and none during Play. They play on an output of the editor's own, which is only opened while sound is on, so the project's mixer and mute do not touch them. Reduced Motion follows the system: check marks appear whole, rings and lines stop moving, fades stay.",
      "title": "Preferences"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The editor signs in to GitHub without a token you create by hand. It shows a short code, you approve that code on github.com in your browser, and the editor receives access to your repositories and gists. This is GitHub's "
+        },
+        {
+         "s": "i",
+         "t": "device flow"
+        },
+        {
+         "s": "",
+         "t": ": your password is only ever typed on github.com, and the editor carries no secret of its own, only the public id of the Horizon Engine app."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Where you can sign in"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Preferences » Source Control » GitHub account"
+         },
+         {
+          "s": "",
+          "t": " shows "
+         },
+         {
+          "s": "i",
+          "t": "Signed in to GitHub as <name>"
+         },
+         {
+          "s": "",
+          "t": " with "
+         },
+         {
+          "s": "i",
+          "t": "Sign out"
+         },
+         {
+          "s": "",
+          "t": ", or "
+         },
+         {
+          "s": "i",
+          "t": "Sign in with GitHub..."
+         },
+         {
+          "s": "",
+          "t": ", which opens the sign-in dialog. This works without a project open."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Clone from GitHub..."
+         },
+         {
+          "s": "",
+          "t": " (in the Project Hub and in Preferences) runs the sign-in inside its own dialog. Afterwards "
+         },
+         {
+          "s": "i",
+          "t": "Load my repositories"
+         },
+         {
+          "s": "",
+          "t": " lists your repositories, and the clone needs no token either."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Help » Report Issue..."
+         },
+         {
+          "s": "",
+          "t": " runs it inside the report dialog too. Signed in, the issue is filed under your account and the whole log is uploaded as a gist."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "All three are the same sign-in. Once you are signed in, the others see it too, and "
+        },
+        {
+         "s": "i",
+         "t": "Create & push"
+        },
+        {
+         "s": "",
+         "t": " on the Repository page uses it when the token field is left empty."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Step by step"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Click "
+         },
+         {
+          "s": "i",
+          "t": "Sign in with GitHub..."
+         },
+         {
+          "s": "",
+          "t": ". The editor asks GitHub for a code and shows it in large letters, for example "
+         },
+         {
+          "s": "c",
+          "t": "WDJB-MJHT"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Click "
+         },
+         {
+          "s": "i",
+          "t": "Copy code & open GitHub"
+         },
+         {
+          "s": "",
+          "t": ". The code goes to the clipboard and "
+         },
+         {
+          "s": "c",
+          "t": "github.com/login/device"
+         },
+         {
+          "s": "",
+          "t": " opens in your browser. If the browser is on another machine, use "
+         },
+         {
+          "s": "i",
+          "t": "Copy code"
+         },
+         {
+          "s": "",
+          "t": " and type the address yourself."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "On GitHub, sign in if you have to, paste the code and approve "
+         },
+         {
+          "s": "i",
+          "t": "Horizon Engine"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The editor notices on its own, stores the token and shows "
+         },
+         {
+          "s": "i",
+          "t": "Signed in to GitHub as <name>"
+         },
+         {
+          "s": "",
+          "t": ". Nothing to click in the editor while you wait."
+         }
+        ]
+       ],
+       "k": "ol"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A code lasts about fifteen minutes and the dialog counts down. If it runs out, "
+        },
+        {
+         "s": "i",
+         "t": "Get a new code"
+        },
+        {
+         "s": "",
+         "t": " starts over; if you declined on GitHub or something else went wrong, "
+        },
+        {
+         "s": "i",
+         "t": "Try again"
+        },
+        {
+         "s": "",
+         "t": " does. "
+        },
+        {
+         "s": "i",
+         "t": "Cancel"
+        },
+        {
+         "s": "",
+         "t": " stops waiting at any point."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The editor asks for two scopes and nothing else: "
+        },
+        {
+         "s": "c",
+         "t": "repo"
+        },
+        {
+         "s": "",
+         "t": " (create, list, clone and push your repositories, private ones included) and "
+        },
+        {
+         "s": "c",
+         "t": "gist"
+        },
+        {
+         "s": "",
+         "t": " (the log upload of Report Issue)."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Where the token is kept"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "In git's credential helper, as the entry for "
+        },
+        {
+         "s": "c",
+         "t": "github.com"
+        },
+        {
+         "s": "",
+         "t": ". That is the helper your git is configured with (a project's own helper first); when none is configured, the system keychain on macOS and the Git Credential Manager on Windows. Linux has no such default: there git's in-memory cache keeps the sign-in for an hour, so configure a lasting helper (for example "
+        },
+        {
+         "s": "c",
+         "t": "libsecret"
+        },
+        {
+         "s": "",
+         "t": ") if you want it to stay. It is the same entry a pasted token goes to, so "
+        },
+        {
+         "s": "c",
+         "t": "git push"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "c",
+         "t": "git pull"
+        },
+        {
+         "s": "",
+         "t": " in a terminal use the sign-in as well. The engine keeps no copy: no project file, no "
+        },
+        {
+         "s": "c",
+         "t": "config.json"
+        },
+        {
+         "s": "",
+         "t": " and no log line ever contains the token. Signing in needs git installed, because git is what stores it."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Tokens still work. The token fields stay for GitLab, Azure DevOps and anyone who prefers a personal access token, and a token typed into "
+        },
+        {
+         "s": "i",
+         "t": "Create & push"
+        },
+        {
+         "s": "",
+         "t": " wins over the sign-in."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Signing out"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "i",
+         "t": "Sign out"
+        },
+        {
+         "s": "",
+         "t": " removes the "
+        },
+        {
+         "s": "c",
+         "t": "github.com"
+        },
+        {
+         "s": "",
+         "t": " entry from the credential helper, so neither the editor nor git on this machine uses it any more. Because it is the same entry, a token you once pasted for github.com goes with it. GitHub itself keeps listing Horizon Engine under "
+        },
+        {
+         "s": "i",
+         "t": "Settings » Applications » Authorized OAuth Apps"
+        },
+        {
+         "s": "",
+         "t": " until you revoke it there. If you revoke it on GitHub without signing out, the account row says "
+        },
+        {
+         "s": "i",
+         "t": "A GitHub token is stored, but GitHub did not confirm it"
+        },
+        {
+         "s": "",
+         "t": " the next time the editor checks; "
+        },
+        {
+         "s": "i",
+         "t": "Sign out"
+        },
+        {
+         "s": "",
+         "t": " then clears the stale entry, and you can sign in again."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "When it does not work"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "The editor says"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What to do"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "",
+           "t": "The code expired before it was entered."
+          }
+         ],
+         [
+          {
+           "s": "i",
+           "t": "Get a new code"
+          },
+          {
+           "s": "",
+           "t": ", and enter it within fifteen minutes."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "The sign-in was declined on GitHub."
+          }
+         ],
+         [
+          {
+           "s": "i",
+           "t": "Try again"
+          },
+          {
+           "s": "",
+           "t": ", and choose "
+          },
+          {
+           "s": "i",
+           "t": "Authorize"
+          },
+          {
+           "s": "",
+           "t": " on GitHub's page."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "GitHub has the device flow switched off for this app."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The app's owner has to tick "
+          },
+          {
+           "s": "i",
+           "t": "Enable Device Flow"
+          },
+          {
+           "s": "",
+           "t": " in its settings on GitHub (see below)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "GitHub does not know this app's client id."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The client id is wrong: check "
+          },
+          {
+           "s": "c",
+           "t": "HE_GITHUB_OAUTH_CLIENT_ID"
+          },
+          {
+           "s": "",
+           "t": ", or unset it to use the built-in one."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "A GitHub token is stored, but GitHub did not confirm it."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The stored token was revoked or has expired, or you are offline (the message says which). "
+          },
+          {
+           "s": "i",
+           "t": "Sign out"
+          },
+          {
+           "s": "",
+           "t": ", then sign in again."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Using your own OAuth App"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The editor you download signs in through the Horizon Engine app, and you need nothing of the following. A fork, or a build that should appear on GitHub under another name, can register an app of its own:"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "On github.com open "
+         },
+         {
+          "s": "i",
+          "t": "Settings » Developer settings » OAuth Apps » New OAuth App"
+         },
+         {
+          "s": "",
+          "t": " (for an organisation: the organisation's settings, same path)."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Fill in the "
+         },
+         {
+          "s": "i",
+          "t": "Application name"
+         },
+         {
+          "s": "",
+          "t": " (GitHub shows it on the approval page) and the "
+         },
+         {
+          "s": "i",
+          "t": "Homepage URL"
+         },
+         {
+          "s": "",
+          "t": ". The "
+         },
+         {
+          "s": "i",
+          "t": "Authorization callback URL"
+         },
+         {
+          "s": "",
+          "t": " is required by the form but never used by the device flow; your homepage URL will do."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Click "
+         },
+         {
+          "s": "i",
+          "t": "Register application"
+         },
+         {
+          "s": "",
+          "t": ", then tick "
+         },
+         {
+          "s": "i",
+          "t": "Enable Device Flow"
+         },
+         {
+          "s": "",
+          "t": " on the app's page and click "
+         },
+         {
+          "s": "i",
+          "t": "Update application"
+         },
+         {
+          "s": "",
+          "t": ". Without that tick every sign-in ends with "
+         },
+         {
+          "s": "i",
+          "t": "device flow switched off"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Copy the "
+         },
+         {
+          "s": "i",
+          "t": "Client ID"
+         },
+         {
+          "s": "",
+          "t": " (it starts with "
+         },
+         {
+          "s": "c",
+          "t": "Ov23"
+         },
+         {
+          "s": "",
+          "t": "). Do "
+         },
+         {
+          "s": "b",
+          "t": "not"
+         },
+         {
+          "s": "",
+          "t": " generate a client secret: the device flow does not use one. If the app already has one, it belongs in no source file, configuration or build."
+         }
+        ]
+       ],
+       "k": "ol"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Then hand the client id to the editor, either for one machine by setting it in the environment the editor is started from:"
+        }
+       ]
+      },
+      {
+       "k": "code",
+       "text": "export HE_GITHUB_OAUTH_CLIENT_ID=Ov23xxxxxxxxxxxxxxxx",
+       "title": "terminal"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "or for every build by changing "
+        },
+        {
+         "s": "c",
+         "t": "kDefaultClientId"
+        },
+        {
+         "s": "",
+         "t": " in "
+        },
+        {
+         "s": "c",
+         "t": "src/HE_SourceControl/include/SourceControl/GitHubOAuth.h"
+        },
+        {
+         "s": "",
+         "t": ". The client id is not a secret (it travels in every sign-in request), so it can be committed. On macOS an editor started from the Finder or the Dock does not see variables exported in a shell; start it from that terminal instead."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Source control",
+     "id": "github",
+     "text": "The editor signs in to GitHub without a token you create by hand. It shows a short code, you approve that code on github.com in your browser, and the editor receives access to your repositories and gists. This is GitHub's device flow: your password is only ever typed on github.com, and the editor carries no secret of its own, only the public id of the Horizon Engine app. Where you can sign in Preferences » Source Control » GitHub account shows Signed in to GitHub as <name> with Sign out, or Sign in with GitHub..., which opens the sign-in dialog. This works without a project open. Clone from GitHub... (in the Project Hub and in Preferences) runs the sign-in inside its own dialog. Afterwards Load my repositories lists your repositories, and the clone needs no token either. Help » Report Issue... runs it inside the report dialog too. Signed in, the issue is filed under your account and the whole log is uploaded as a gist. All three are the same sign-in. Once you are signed in, the others see it too, and Create & push on the Repository page uses it when the token field is left empty. Step by step Click Sign in with GitHub.... The editor asks GitHub for a code and shows it in large letters, for example WDJB-MJHT. Click Copy code & open GitHub. The code goes to the clipboard and github.com/login/device opens in your browser. If the browser is on another machine, use Copy code and type the address yourself. On GitHub, sign in if you have to, paste the code and approve Horizon Engine. The editor notices on its own, stores the token and shows Signed in to GitHub as <name>. Nothing to click in the editor while you wait. A code lasts about fifteen minutes and the dialog counts down. If it runs out, Get a new code starts over; if you declined on GitHub or something else went wrong, Try again does. Cancel stops waiting at any point. The editor asks for two scopes and nothing else: repo (create, list, clone and push your repositories, private ones included) and gist (the log upload of Report Issue). Where the token is kept In git's credential helper, as the entry for github.com. That is the helper your git is configured with (a project's own helper first); when none is configured, the system keychain on macOS and the Git Credential Manager on Windows. Linux has no such default: there git's in-memory cache keeps the sign-in for an hour, so configure a lasting helper (for example libsecret) if you want it to stay. It is the same entry a pasted token goes to, so git push and git pull in a terminal use the sign-in as well. The engine keeps no copy: no project file, no config.json and no log line ever contains the token. Signing in needs git installed, because git is what stores it. Tokens still work. The token fields stay for GitLab, Azure DevOps and anyone who prefers a personal access token, and a token typed into Create & push wins over the sign-in. Signing out Sign out removes the github.com entry from the credential helper, so neither the editor nor git on this machine uses it any more. Because it is the same entry, a token you once pasted for github.com goes with it. GitHub itself keeps listing Horizon Engine under Settings » Applications » Authorized OAuth Apps until you revoke it there. If you revoke it on GitHub without signing out, the account row says A GitHub token is stored, but GitHub did not confirm it the next time the editor checks; Sign out then clears the stale entry, and you can sign in again. When it does not work The editor says What to do The code expired before it was entered. Get a new code, and enter it within fifteen minutes. The sign-in was declined on GitHub. Try again, and choose Authorize on GitHub's page. GitHub has the device flow switched off for this app. The app's owner has to tick Enable Device Flow in its settings on GitHub (see below). GitHub does not know this app's client id. The client id is wrong: check HE_GITHUB_OAUTH_CLIENT_ID, or unset it to use the built-in one. A GitHub token is stored, but GitHub did not confirm it. The stored token was revoked or has expired, or you are offline (the message says which). Sign out, then sign in again. Using your own OAuth App The editor you download signs in through the Horizon Engine app, and you need nothing of the following. A fork, or a build that should appear on GitHub under another name, can register an app of its own: On github.com open Settings » Developer settings » OAuth Apps » New OAuth App (for an organisation: the organisation's settings, same path). Fill in the Application name (GitHub shows it on the approval page) and the Homepage URL. The Authorization callback URL is required by the form but never used by the device flow; your homepage URL will do. Click Register application, then tick Enable Device Flow on the app's page and click Update application. Without that tick every sign-in ends with device flow switched off. Copy the Client ID (it starts with Ov23). Do not generate a client secret: the device flow does not use one. If the app already has one, it belongs in no source file, configuration or build. Then hand the client id to the editor, either for one machine by setting it in the environment the editor is started from: terminal export HE_GITHUB_OAUTH_CLIENT_ID=Ov23xxxxxxxxxxxxxxxx or for every build by changing kDefaultClientId in src/HE_SourceControl/include/SourceControl/GitHubOAuth.h. The client id is not a secret (it travels in every sign-in request), so it can be committed. On macOS an editor started from the Finder or the Dock does not see variables exported in a shell; start it from that terminal instead.",
+     "title": "Signing in to GitHub"
     },
     {
      "blocks": [
@@ -12236,11 +13142,36 @@
          "t": "The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins."
         }
        ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "With "
+        },
+        {
+         "s": "b",
+         "t": "Preferences » Feedback » Success Sound"
+        },
+        {
+         "s": "",
+         "t": " on, dragging makes short, quiet sounds: a blip when a wire or a variable is picked up, a light tick over a pin it would connect to and a muted one over a pin it would not, a snap when it lands and a falling blip when the drop is cancelled or refused. Each sound plays once per event, never per frame, and moving a node stays silent. "
+        },
+        {
+         "s": "b",
+         "t": "Drag and Drop Sound"
+        },
+        {
+         "s": "",
+         "t": " switches them off on their own; volume and mute are shared with the other feedback sounds."
+        }
+       ]
       }
      ],
      "eyebrow": "Mechanics",
      "id": "graphs",
-     "text": "A graph is built from nodes connected by two kinds of wire. Execution links (white) define control flow — they run in order from an event. Data links are typed (Float, Bool, Int, String, Vec2, Color, Transform, or an object Reference) and are evaluated on demand when a node needs a value. Nothing runs until an event fires from the host — a button click, the frame tick, a level loading, an input action. The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins.",
+     "text": "A graph is built from nodes connected by two kinds of wire. Execution links (white) define control flow — they run in order from an event. Data links are typed (Float, Bool, Int, String, Vec2, Color, Transform, or an object Reference) and are evaluated on demand when a node needs a value. Nothing runs until an event fires from the host — a button click, the frame tick, a level loading, an input action. The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins. With Preferences » Feedback » Success Sound on, dragging makes short, quiet sounds: a blip when a wire or a variable is picked up, a light tick over a pin it would connect to and a muted one over a pin it would not, a snap when it lands and a falling blip when the drop is cancelled or refused. Each sound plays once per event, never per frame, and moving a node stays silent. Drag and Drop Sound switches them off on their own; volume and mute are shared with the other feedback sounds.",
      "title": "How a Graph Works"
     },
     {
@@ -13886,6 +14817,597 @@
      "id": "functions",
      "text": "Reusable sub-graphs stored as their own assets (Create » Material Function in the Content Browser). A function's interface is defined by its Function Input / Function Output nodes (each named and typed). Any material — project-wide — can insert it from the palette; the call node shows the function's pins and the compiler inlines the body into the generated shader, so functions have zero runtime cost. Recursion is detected and rejected safely.",
      "title": "Material Functions"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "The engine ships a ready made water material, "
+        },
+        {
+         "s": "c",
+         "t": "Engine/Materials/Water.hasset"
+        },
+        {
+         "s": "",
+         "t": ". It is an ordinary node graph material (lit, Translucent blend), built entirely from procedural nodes, so it needs no textures and runs on Metal, OpenGL, D3D11, D3D12 and Vulkan. It is offered in addition to the default material and replaces nothing: meshes without a material stay grey."
+        }
+       ]
+      },
+      {
+       "alt": "The engine water material on a plane: three wave trains, sky reflection, caustic lines and foam on the crests",
+       "k": "figure",
+       "src": "water_engine.jpg"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Using it"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Add a "
+         },
+         {
+          "s": "b",
+          "t": "Plane"
+         },
+         {
+          "s": "",
+          "t": " and pick "
+         },
+         {
+          "s": "c",
+          "t": "Engine/Materials/Water"
+         },
+         {
+          "s": "",
+          "t": " in the material slot of its Material component. No setup is needed: the material is listed there and in the Content Browser under "
+         },
+         {
+          "s": "c",
+          "t": "Engine/Materials"
+         },
+         {
+          "s": "",
+          "t": " in every project."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Every parameter is editable per entity in the Details panel under "
+         },
+         {
+          "s": "b",
+          "t": "Material Parameters (this entity)"
+         },
+         {
+          "s": "",
+          "t": ". Hover a row for its tooltip, F1 opens its reference entry. Leaving a value untouched keeps the material default."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "For reusable variants (lake, ocean, swamp) right click "
+         },
+         {
+          "s": "c",
+          "t": "Water.hasset"
+         },
+         {
+          "s": "",
+          "t": " and choose "
+         },
+         {
+          "s": "b",
+          "t": "Create Material Instance"
+         },
+         {
+          "s": "",
+          "t": ". That creates a new project asset with Water as parent; the engine material itself is never modified."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "At runtime, "
+         },
+         {
+          "s": "c",
+          "t": "horizon.setMaterialParam(entity, \"Turbidity\", 0.1, 3.0)"
+         },
+         {
+          "s": "",
+          "t": " takes one to four numbers. It writes the material asset, so every entity using the same material changes with it; give an entity its own instance if it should change alone."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The water animates on its own from the engine clock. The order of the rows in the Details panel can differ between platforms, so look rows up by name."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Parameters"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Parameter"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Type"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Default"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "ShallowColor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Color"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Colour where the water is clear or shallow."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.10, 0.42, 0.45"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "DeepColor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Color"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Colour the water fades to with depth and absorption."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.01, 0.07, 0.12"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Turbidity"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec2"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "x: absorption per metre. y: assumed water depth in metres. 0 absorption gives clear water."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.35, 3.0"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "WaveA"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "WaveB"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "WaveC"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Three wave trains. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "A: 30, 1.2, 8, 0.25\nB: 310, 0.8, 3.5, 0.18\nC: 100, 0.5, 1.2, 0.12"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "FresnelPower"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 1 to 10"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Exponent of the Fresnel term computed from the wave normal. Higher values keep the reflection to grazing angles."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "5"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Reflection"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Strength of the sky and scene reflection; also raises opacity at grazing angles."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.8"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Roughness"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Surface roughness of the highlight and reflection."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.06"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Specular"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Specular reflectance; the shader uses Specular × Reflection."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.3"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Opacity"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Transparency looking straight down into clear water. Depth, Fresnel and foam raise it from there."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.55"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Refraction"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Bends the view ray towards the wave normal, so the depth tint and the caustics move with the waves."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.3"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "FoamColor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Color"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Colour of the foam."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.92, 0.95, 0.97"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Foam"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "x: share of the wave crests covered (0 to 1). y: strength, 0 turns foam off. z: noise size in metres. w: drift in m/s."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.18, 0.8, 1.5, 0.3"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Caustics"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance)."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.35, 2.5, 0.25, 25"
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Limits"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from "
+         },
+         {
+          "s": "c",
+          "t": "Turbidity"
+         },
+         {
+          "s": "",
+          "t": ", foam sits on the wave crests rather than along a shoreline, caustics are drawn on the water surface, and the scene seen through the water is not distorted."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Waves move the normals, not the vertices, and assume a roughly horizontal surface. The engine plane is a single quad, so there is no visible displacement at the silhouette."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "With the default turbidity the water is nearly opaque, which makes "
+         },
+         {
+          "s": "c",
+          "t": "FresnelPower"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "Reflection"
+         },
+         {
+          "s": "",
+          "t": " subtle. Lower the absorption (for example "
+         },
+         {
+          "s": "c",
+          "t": "Turbidity"
+         },
+         {
+          "s": "",
+          "t": " 0.05, 3) for clear water where both show clearly."
+         }
+        ]
+       ],
+       "k": "ul"
+      }
+     ],
+     "eyebrow": "Engine content",
+     "id": "water",
+     "text": "The engine ships a ready made water material, Engine/Materials/Water.hasset. It is an ordinary node graph material (lit, Translucent blend), built entirely from procedural nodes, so it needs no textures and runs on Metal, OpenGL, D3D11, D3D12 and Vulkan. It is offered in addition to the default material and replaces nothing: meshes without a material stay grey. The engine water material on a plane: three wave trains, sky reflection, caustic lines and foam on the crests Using it Add a Plane and pick Engine/Materials/Water in the material slot of its Material component. No setup is needed: the material is listed there and in the Content Browser under Engine/Materials in every project. Every parameter is editable per entity in the Details panel under Material Parameters (this entity). Hover a row for its tooltip, F1 opens its reference entry. Leaving a value untouched keeps the material default. For reusable variants (lake, ocean, swamp) right click Water.hasset and choose Create Material Instance. That creates a new project asset with Water as parent; the engine material itself is never modified. At runtime, horizon.setMaterialParam(entity, \"Turbidity\", 0.1, 3.0) takes one to four numbers. It writes the material asset, so every entity using the same material changes with it; give an entity its own instance if it should change alone. The water animates on its own from the engine clock. The order of the rows in the Details panel can differ between platforms, so look rows up by name. Parameters Parameter Type Meaning Default ShallowColor Color Colour where the water is clear or shallow. 0.10, 0.42, 0.45 DeepColor Color Colour the water fades to with depth and absorption. 0.01, 0.07, 0.12 Turbidity Vec2 x: absorption per metre. y: assumed water depth in metres. 0 absorption gives clear water. 0.35, 3.0 WaveA, WaveB, WaveC Vec4 Three wave trains. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off. A: 30, 1.2, 8, 0.25\nB: 310, 0.8, 3.5, 0.18\nC: 100, 0.5, 1.2, 0.12 FresnelPower Float 1 to 10 Exponent of the Fresnel term computed from the wave normal. Higher values keep the reflection to grazing angles. 5 Reflection Float 0 to 1 Strength of the sky and scene reflection; also raises opacity at grazing angles. 0.8 Roughness Float 0 to 1 Surface roughness of the highlight and reflection. 0.06 Specular Float 0 to 1 Specular reflectance; the shader uses Specular × Reflection. 0.3 Opacity Float 0 to 1 Transparency looking straight down into clear water. Depth, Fresnel and foam raise it from there. 0.55 Refraction Float 0 to 1 Bends the view ray towards the wave normal, so the depth tint and the caustics move with the waves. 0.3 FoamColor Color Colour of the foam. 0.92, 0.95, 0.97 Foam Vec4 x: share of the wave crests covered (0 to 1). y: strength, 0 turns foam off. z: noise size in metres. w: drift in m/s. 0.18, 0.8, 1.5, 0.3 Caustics Vec4 x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance). 0.35, 2.5, 0.25, 25 Limits The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from Turbidity, foam sits on the wave crests rather than along a shoreline, caustics are drawn on the water surface, and the scene seen through the water is not distorted. Waves move the normals, not the vertices, and assume a roughly horizontal surface. The engine plane is a single quad, so there is no visible displacement at the silhouette. With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.05, 3) for clear water where both show clearly.",
+     "title": "Engine Water"
     }
    ],
    "summary": "",
@@ -68267,6 +69789,51 @@
           "s": "",
           "t": " (Python) with the other entity's id, for solid contacts and triggers alike."
          }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Large worlds"
+         },
+         {
+          "s": "",
+          "t": " — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). "
+         },
+         {
+          "s": "i",
+          "t": "Project Settings » Physics » Simulation » Floating origin radius"
+         },
+         {
+          "s": "",
+          "t": " (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Cell streaming"
+         },
+         {
+          "s": "",
+          "t": " — a scene too big to keep loaded whole can be split into a grid of cells in the editor ("
+         },
+         {
+          "h": "editor.html#profiler",
+          "s": "l",
+          "t": "Performance Profiler » Streaming"
+         },
+         {
+          "s": "",
+          "t": ") or with "
+         },
+         {
+          "s": "c",
+          "t": "scripts/split_scene_cells.py"
+         },
+         {
+          "s": "",
+          "t": ": placed things (meshes, point and spot lights, static bodies, decals) go into one scene file per grid square, everything else stays in the base scene, which names the cells. The exported game then loads a cell once the camera, or where it is heading, comes within the load radius, and unloads it beyond the unload radius; reading and parsing run on worker threads, only building the entities on the main thread, a few milliseconds a frame. Cells work with the floating origin. The editor holds the base scene and draws the cells as squares on the ground; merging them back makes the scene one piece to edit."
+         }
         ]
        ],
        "k": "ul"
@@ -68274,7 +69841,7 @@
      ],
      "eyebrow": "Jolt-powered",
      "id": "physics",
-     "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike.",
+     "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike. Large worlds — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). Project Settings » Physics » Simulation » Floating origin radius (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates. Cell streaming — a scene too big to keep loaded whole can be split into a grid of cells in the editor (Performance Profiler » Streaming) or with scripts/split_scene_cells.py: placed things (meshes, point and spot lights, static bodies, decals) go into one scene file per grid square, everything else stays in the base scene, which names the cells. The exported game then loads a cell once the camera, or where it is heading, comes within the load radius, and unloads it beyond the unload radius; reading and parsing run on worker threads, only building the entities on the main thread, a few milliseconds a frame. Cells work with the floating origin. The editor holds the base scene and draws the cells as squares on the ground; merging them back makes the scene one piece to edit.",
      "title": "Physics"
     },
     {

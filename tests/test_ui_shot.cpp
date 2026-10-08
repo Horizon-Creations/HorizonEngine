@@ -17,6 +17,7 @@
 #include "UITimelineMath.h"
 #include "AudioWaveformView.h"    // the Audio Editor's canvas, over synthetic PCM
 #include "AudioMixView.h"         // …and its bus dropdown and EQ graph
+#include "GitHubSignInView.h"    // the device-flow dialog's body
 
 #include <ContentManager/ContentManager.h>
 #include <HorizonCode/HorizonCode.h>
@@ -1035,6 +1036,64 @@ TEST_CASE("ui shot: the generated editor reference")
 	REQUIRE(img.valid());
 	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
 	DocsPanel::close();
+}
+
+TEST_CASE("ui shot: the editor reference explains every new Feedback switch")
+{
+	// Thema 140 added ten switches to Preferences ▸ Feedback. Each must land on
+	// its own entry when F1 is pressed on it, and that entry's "More about this"
+	// must reach the chapter it names (editor#preferences, horizoncode#graphs).
+	// A key that is spelled differently here than on the panel resolves to
+	// nothing, and a shot of it would just show some other part of the page.
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+	HE::Ed::EditorReference::install(lib);
+
+	static const char* const kNew[] = {
+		"Compile Moment", "Commit Moment", "Tutorial Moment", "Problem Pulse",
+		"Compile Sound", "Compile Failed Sound", "Commit Sound", "Tutorial Sound",
+		"Problem Sound", "Drag and Drop Sound",
+	};
+	for (const char* label : kNew)
+	{
+		const std::string key = std::string("Preferences/Feedback/") + label;
+		INFO("key: " << key);
+		const Help::Entry* e = Help::findKey(key);
+		REQUIRE(e != nullptr);
+		const std::string topic = Help::referenceTopic(key);
+		CHECK(topic == std::string("editor-settings#Preferences.Feedback.") + label);
+		int pg = -1, sec = -1;
+		CHECK(lib.resolve(topic, pg, sec));
+		CHECK(sec >= 0);
+		REQUIRE(e->topic != nullptr);
+		INFO("concept: " << std::string(e->topic));
+		int cpg = -1, csec = -1;
+		CHECK(lib.resolve(e->topic, cpg, csec));
+		CHECK(csec >= 0);
+	}
+
+	// Two pictures: the page sorts by label, so Commit Moment starts a run of
+	// five new entries, and Drag and Drop Sound is the one the graphs link to.
+	const struct { const char* anchor; const char* name; } shots[] = {
+		{ "editor-settings#Preferences.Feedback.Commit Moment", "editor-reference-feedback-commit" },
+		{ "editor-settings#Preferences.Feedback.Drag and Drop Sound", "editor-reference-feedback-dragdrop" },
+	};
+	for (const auto& s : shots)
+	{
+		DocsPanel::openTopic(s.anchor);
+		const he_ui::Image img = shoot(s.name, W, H, 4,
+		                               [&](int) { DocsPanel::draw(host); });
+		REQUIRE(img.valid());
+		CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
+		DocsPanel::close();
+	}
 }
 
 TEST_CASE("ui shot: a page of tables and a diagram")
@@ -2787,4 +2846,123 @@ TEST_CASE("ui shot: audio editor bus dropdown with a missing bus, and an EQ")
 	auto lum = [&](int x, int y) { img.pixel(x, y, r, g, b, a); return int(r) + int(g) + int(b); };
 	const int yMid = int(gy + gh * 0.85f);
 	CHECK(lum(int(gx + AM::xOfFreq(18000.0, gw)), yMid) < lum(int(gx + AM::xOfFreq(12000.0, gw)), yMid));
+}
+
+// ── Sign in with GitHub ──────────────────────────────────────────────────────
+// The device-flow dialog's body (GitHubSignInView), the same function the
+// editor draws in its own popup and inline in the Clone and Report Issue
+// dialogs. Three states a user actually sees: the code to type, the result,
+// and a code that ran out.
+namespace
+{
+	he_ui::Image shootSignIn(const char* name, const Harness& h,
+	                         const GitHubSignInView::View& view)
+	{
+		constexpr int W = 560, H = 420;
+		GitHubSignInView::Fonts fonts;
+		fonts.heading = h.heading;
+		return shoot(name, W, H, 3, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+			ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+			ImGui::Begin("Sign in with GitHub", nullptr,
+			             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+			             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+			{
+				// Braces: the guard must pop before End(), on this window.
+				EditorWidgets::WrapText wrap;
+				GitHubSignInView::drawBody(view, fonts);
+			}
+			ImGui::End();
+		});
+	}
+
+	// Pixels of the "success" green the body uses for "Signed in" / "Copied".
+	int greenPixels(const he_ui::Image& img)
+	{
+		int n = 0;
+		std::uint8_t r, g, b, a;
+		for (int y = 0; y < img.height; ++y)
+			for (int x = 0; x < img.width; ++x)
+			{
+				img.pixel(x, y, r, g, b, a);
+				if (int(g) > 170 && int(r) < 175 && int(b) < 175 && int(g) - int(r) > 40) ++n;
+			}
+		return n;
+	}
+
+	// Light text: the body text and the heading-coloured code, not the dim hints.
+	int brightPixels(const he_ui::Image& img)
+	{
+		int n = 0;
+		std::uint8_t r, g, b, a;
+		for (int y = 0; y < img.height; ++y)
+			for (int x = 0; x < img.width; ++x)
+			{
+				img.pixel(x, y, r, g, b, a);
+				if (int(r) > 200 && int(g) > 180 && int(b) > 120) ++n;
+			}
+		return n;
+	}
+} // namespace
+
+TEST_CASE("GitHub sign-in: the countdown reads as minutes and seconds")
+{
+	CHECK(GitHubSignInView::formatCountdown(845) == "14:05");
+	CHECK(GitHubSignInView::formatCountdown(9) == "0:09");
+	CHECK(GitHubSignInView::formatCountdown(0) == "0:00");
+	CHECK(GitHubSignInView::formatCountdown(-3) == "0:00");
+}
+
+TEST_CASE("ui shot: GitHub sign-in shows the code large, with its countdown")
+{
+	Harness harness(560, 420);
+
+	GitHubSignInView::View v;
+	v.phase           = GitHubSignInView::Phase::WaitingForUser;
+	v.userCode        = "WDJB-MJHT";
+	v.verificationUri = "https://github.com/login/device";
+	v.secondsLeft     = 845;
+	v.copied          = true;
+	const he_ui::Image withCode = shootSignIn("github-signin-code", harness, v);
+	REQUIRE(withCode.valid());
+
+	// Negative control: the same screen with no code in the box. The difference
+	// in bright text pixels is the code's own — large glyphs, so a lot of them.
+	// A code drawn in the body font (or not at all) would leave a few hundred at
+	// most. (Plain ink would not do: the window's own background counts as ink.)
+	GitHubSignInView::View noCode = v;
+	noCode.userCode.clear();
+	const he_ui::Image without = shootSignIn("github-signin-nocode", harness, noCode);
+	const int brightWith    = brightPixels(withCode);
+	const int brightWithout = brightPixels(without);
+	INFO("bright pixels with code " << brightWith << ", without " << brightWithout);
+	CHECK(brightWithout > 500);   // the instructions are there either way
+	CHECK(brightWith - brightWithout > 1000);   // ~1800 at 40 px in Roboto Condensed
+
+	// "Copied." confirms the button press in green.
+	CHECK(greenPixels(withCode) > 30);
+	GitHubSignInView::View notCopied = v;
+	notCopied.copied = false;
+	CHECK(greenPixels(shootSignIn("github-signin-notcopied", harness, notCopied)) == 0);
+}
+
+TEST_CASE("ui shot: GitHub sign-in names the account once it is done")
+{
+	Harness harness(560, 420);
+
+	GitHubSignInView::View v;
+	v.phase = GitHubSignInView::Phase::SignedIn;
+	v.login = "octocat";
+	const he_ui::Image img = shootSignIn("github-signin-done", harness, v);
+	REQUIRE(img.valid());
+	CHECK(brightPixels(img) > 500);
+	CHECK(greenPixels(img) > 100);
+
+	// And a code that ran out offers a new one instead of a dead end.
+	GitHubSignInView::View expired;
+	expired.phase = GitHubSignInView::Phase::Expired;
+	expired.error = "The sign-in code expired. Start again for a new one.";
+	const he_ui::Image exp = shootSignIn("github-signin-expired", harness, expired);
+	CHECK(brightPixels(exp) > 300);
+	CHECK(greenPixels(exp) == 0);
 }

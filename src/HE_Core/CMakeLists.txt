@@ -33,6 +33,7 @@ add_library(HorizonCore SHARED
 	src/Hpak/ProjectExporter.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
+	src/MaterialGraph/AutoLandscapeMaterial.cpp
 	src/ParticleGraph/ParticleGraph.cpp
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/BoneMask/BoneMask.cpp
@@ -60,6 +61,7 @@ add_library(HorizonCore SHARED
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp
 	src/ContentManager/AssetRefScan.cpp
+	src/ContentManager/TextureArrayBuild.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore

@@ -371,7 +371,7 @@ bool Bar::itemTinted(const char* id, IconFn icon, const char* label, ImU32 fg,
 	return EditorToolbar::cellTinted(m_m, x, w, id, icon, label, fg, enabled, tooltip);
 }
 
-void Bar::readout(IconFn icon, const char* label, ImU32 fg)
+ImVec2 Bar::readout(IconFn icon, const char* label, ImU32 fg)
 {
 	const float w = EditorToolbar::cellWidth(m_m, label);
 	if (!m_first) m_cursor += kSegGap;
@@ -383,11 +383,12 @@ void Bar::readout(IconFn icon, const char* label, ImU32 fg)
 	const float iconW    = icon ? m_m.icon : 0.0f;
 	const float gapX     = (icon && label) ? kLabelGap : 0.0f;
 	const float left     = x + (w - (iconW + gapX + labelW)) * 0.5f;
-	if (icon) icon(m_dl, ImVec2(std::floor(left + m_m.icon * 0.5f), std::floor(m_m.cy)),
-	               m_m.icon, fg);
+	const ImVec2 centre(std::floor(left + m_m.icon * 0.5f), std::floor(m_m.cy));
+	if (icon) icon(m_dl, centre, m_m.icon, fg);
 	if (label)
 		m_dl->AddText(ImVec2(std::floor(left + iconW + gapX),
 		                     std::floor(m_m.cy - ImGui::GetFontSize() * 0.5f)), fg, label);
+	return centre;
 }
 
 void Bar::divider()

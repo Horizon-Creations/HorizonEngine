@@ -240,6 +240,14 @@ Graph-Material, es gibt keinen Material-Draw und die Validierung prüft nichts
 (Log: „built without the shader cross-compiler"). Und die Material-Vorschau und
 die Thumbnails laufen auf eigenen Encodern, nur `PREVIEW`/`THUMB` treffen sie.
 
+**Sky-Cube und AO der Graph-Materialien (Thema 149):**
+- `HE_DUMP_MATERIALTEST=chrome` ist eine Graph-Spiegelkugel (metallic 1, roughness 0,05).
+  Sie zeigt `heSkyEnv`; eine falsch orientierte Cube-Face bricht oder dreht den Horizont darauf.
+- `=matte` (metallic 0, roughness 0,9) zeigt das Himmels-Ambient, das `heAO` abdunkelt.
+- `HE_DUMP_MATTESTPOS=-3.5,2.5,-8` legt die Kugel auf den Boden von `HE_DUMP_SSRTEST`.
+- Gegen GL vergleichen; Dämmerung (`HE_DUMP_TOD=0.26`) für AO an gegen aus.
+- Messwerte und das volle Rezept stehen in `docs/graph-material-skyenv-ao-hardware-acceptance-2026-10-05.md`.
+
 **Live-Editor mit MCP-Clients:** `scripts/he_mcp_multiclient.py` setzt
 `HE_HIDDEN_WINDOW=1` selbst (per `setdefault`, ein `HE_HIDDEN_WINDOW=0` aus der
 Shell gewinnt). Wer den Editor für eigene MCP-Tests von Hand mit `HE_MCP=1`

@@ -7,6 +7,7 @@ add_executable(he_tests
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
     test_material_graph.cpp
+    test_engine_materials.cpp
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
     test_scene_serializer.cpp
@@ -154,6 +155,8 @@ add_executable(he_tests
     test_horizoncode_reroute.cpp
     test_python_scripting.cpp
     test_physics.cpp
+    test_world_scale.cpp
+    test_cell_split.cpp
     test_collision_system.cpp
     test_entity_host.cpp
     test_player_host.cpp
@@ -161,6 +164,9 @@ add_executable(he_tests
     test_movement.cpp
     test_hc_inheritance.cpp
     test_hc_pull_on_construct.cpp
+    test_hc_bind_to.cpp
+    test_hc_on_changed.cpp
+    test_hc_watch_bridge.cpp
     test_hc_extract_on_destruct.cpp
     test_collider.cpp
     test_raycast.cpp
@@ -223,6 +229,7 @@ add_executable(he_tests
     test_audio_mix_view.cpp
     test_widget_designer_ui.cpp
     test_texture_viewer.cpp
+    test_streaming_view.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
@@ -295,6 +302,7 @@ add_executable(he_tests
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
+    test_github_oauth.cpp
     test_game_replication.cpp
     # The first real gameplay session: two and three NetGameSessions against
     # each other over LossyTransport, headless and on a simulated clock.
@@ -539,6 +547,9 @@ add_executable(he_tests
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsPanel.cpp
+    # The GitHub sign-in's drawing half (code, countdown, buttons), for the
+    # ui shots. ImGui plus EditorWidgets; the state half needs the editor.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitHubSignInView.cpp
     # The toolbar look — wells and segmented cells. The reader's language
     # switcher is one, and borrowing the primitives is what keeps it from being
     # a second copy of the palette. ImGui-only by construction, so it compiles
@@ -695,6 +706,9 @@ add_executable(he_tests
     # The reward moments it fires (EditorRewards.h), and test_editor_rewards.cpp:
     # same AppContext, same per-file HE_IMGUI_ENABLED.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
+    # The footer bell, so test_editor_rewards.cpp can draw the real one and its
+    # problem ring (V8) from a real NotificationStore (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
@@ -719,6 +733,11 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
     # linked already.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    # The profiler's Streaming tab and the editor's split/merge of streaming
+    # cells, for test_streaming_view.cpp (Thema 153, Schritt 6). Its one
+    # outside symbol, the Scene window's show flags, is stubbed in
+    # WidgetDesignerLinkStubs.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -753,6 +772,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     test_editor_rewards.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
@@ -767,6 +787,8 @@ set_source_files_properties(
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     test_texture_viewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
+    test_streaming_view.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE
@@ -876,7 +898,7 @@ set(HCGEN_CLASSES
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
     cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
-    pull_construct pull_spawner
+    pull_construct pull_spawner bind_to
     extract_destruct extract_derived extract_listener
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)

@@ -1,14 +1,32 @@
 name: CI
 
 on:
+  # A release's topics are merged into its own branch (release/<version>, see
+  # the Hive's publishing), and exactly that branch is built and published.
+  # So it gets the same as main: a run on every push — only a push stages the
+  # two app runtimes the editor package ships — and on every PR into it.
   push:
-    branches: [ main ]
+    branches: [ main, 'release/**' ]
+  # A pull request that only touches docs needs no build. Not for pushes: a
+  # release branch's head commit must always get its run, publishing looks for
+  # a green run of exactly that commit.
   pull_request:
-    branches: [ main ]
+    branches: [ main, 'release/**' ]
+    paths-ignore: [ 'docs/**', '**/*.md' ]
   # A feature branch can ask for the full matrix before it is merged
   # (`gh workflow run CI --ref <branch>`), the way a Windows-only link error
   # is otherwise only ever seen on main.
   workflow_dispatch:
+
+# One run per branch: a newer push (or a bee's dispatch on a branch whose pull
+# request already runs) cancels the one still going. Four pushes to
+# release/0.7.0 within a minute were four full matrices queueing for the same
+# runners. Grouped by branch name, not ref, so a pull request's run and a
+# dispatch on its branch are the same group. Publishing only needs the newest
+# head's run; the Hive's topic watch treats a newer run as replacing the old.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
@@ -16,18 +34,48 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            name: macOS
-          - os: windows-latest
-            name: Windows
-          - os: ubuntu-latest
-            name: Linux
+          - name: macOS
+            runner: '"macos-latest"'
+            cache: ccache
+          # Windows builds on NN-WS03 when the Hive reports it free: the Hive
+          # (ci.py, route_windows) sets the repository variable WINDOWS_RUNNER
+          # to nn-ws03 while that device's self-hosted runner is online and the
+          # PC isn't at its limit (bees working there are fine — a Ryzen 9
+          # 9950X), and back otherwise. There it builds
+          # incrementally in a build tree that stays — minutes instead of the
+          # hosted runner's ~50. Only for topic branches (pull requests and
+          # dispatches): main and the release branches make the download
+          # packages and stay on GitHub's clean machines. Never for a pull
+          # request from a fork: this repository is public, and a fork's code
+          # must not run on a PC at home.
+          - name: Windows
+            runner: >-
+              ${{ (vars.WINDOWS_RUNNER == 'nn-ws03'
+              && github.event_name != 'push'
+              && github.ref_name != 'main'
+              && !startsWith(github.ref_name, 'release/')
+              && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository))
+              && '["self-hosted","nn-ws03"]' || '"windows-latest"' }}
+            cache: sccache
+          - name: Linux
+            runner: '"ubuntu-latest"'
+            cache: ccache
 
     name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
 
     steps:
+      # On NN-WS03 the build tree stays between runs — that is the point.
+      # checkout's clean would wipe it (git clean -ffdx); the tidy step below
+      # cleans everything else.
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment != 'self-hosted' }}
+
+      - name: Tidy the workspace, keep the build tree (NN-WS03)
+        if: runner.environment == 'self-hosted'
+        run: git clean -ffdx -e build/ -e package/
 
       - name: Install Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
@@ -58,7 +106,7 @@ jobs:
       # after the headers, the import library and glslc are confirmed to be there.
       # No cache: 254 MB from LunarG's CDN restores about as fast as actions/cache.
       - name: Install Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment != 'self-hosted'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -84,6 +132,17 @@ jobs:
           "$root\Bin" >> $env:GITHUB_PATH
           Write-Host "Vulkan SDK $version installed at $root"
 
+      # NN-WS03 has the SDK installed (the installer needs admin rights, the
+      # runner doesn't have them); its installer set VULKAN_SDK system-wide.
+      - name: Vulkan SDK present (NN-WS03)
+        if: runner.os == 'Windows' && runner.environment == 'self-hosted'
+        shell: pwsh
+        run: |
+          if (-not $env:VULKAN_SDK -or -not (Test-Path "$env:VULKAN_SDK\Include\vulkan\vulkan.h")) {
+            throw "VULKAN_SDK is not set or incomplete on this runner — install the Vulkan SDK and restart the runner service"
+          }
+          Write-Host "Vulkan SDK at $env:VULKAN_SDK"
+
       # Linux: SDL3 is compiled from source (FetchContent) and needs the X11/Wayland,
       # OpenGL/EGL, audio and udev/dbus dev headers; the engine also links Python and
       # uses lz4/zstd. Install the dev packages before configuring. (Vulkan is optional
@@ -102,13 +161,58 @@ jobs:
             liblz4-dev libzstd-dev python3-dev \
             libcurl4-openssl-dev
 
-      # FetchContent checkouts (SDL3, glm, nlohmann_json) are cached on the
-      # configure hash so CI does not re-clone them on every run.
-      - name: Cache FetchContent dependencies
-        uses: actions/cache@v4
+      # The build was the whole run: Windows 46 of ~54 minutes, Linux 28,
+      # macOS 21 — every run compiled everything from scratch on four cores.
+      # ccache (sccache for MSVC, which ccache doesn't cover as well) keeps the
+      # objects: one blob per platform in the Actions cache, restored here,
+      # saved at the end. Only runs of pushes and dispatches write it; a pull
+      # request restores from its base branch and main but writes nothing —
+      # that keeps the repository's 10 GB from churning on one blob per PR, and
+      # on a public repository only trusted refs write what others restore.
+      # After the Linux packages: the action installs ccache with apt and
+      # relies on the package index that step refreshed. Log.cpp uses
+      # __DATE__/__TIME__ and is (rightly) never cached.
+      #
+      # Not on NN-WS03: its build tree stays, Ninja recompiles only what
+      # changed — and the action needs `sh`, which a Windows PC needn't have.
+      - name: Compiler cache
+        if: runner.environment != 'self-hosted'
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ matrix.name }}
+          variant: ${{ matrix.cache }}
+          max-size: 1G
+          save: ${{ github.event_name != 'pull_request' }}
+
+      # Every compiler call through it. As environment, not on the configure
+      # lines: build_runtimes.py configures two more trees for the app
+      # runtimes and inherits it — CMake takes these variables as the default
+      # for CMAKE_<LANG>_COMPILER_LAUNCHER (checked: OBJCXX too, so
+      # MetalRenderer.mm and the other .mm files are cached as well).
+      - name: Compile through the cache
+        if: runner.environment != 'self-hosted'
+        shell: bash
+        run: |
+          for lang in C CXX OBJC OBJCXX; do
+            echo "CMAKE_${lang}_COMPILER_LAUNCHER=${{ matrix.cache }}" >> "$GITHUB_ENV"
+          done
+
+      # FetchContent checkouts (SDL3, assimp, glslang, nlohmann_json, …) so CI
+      # does not re-clone them on every run. They were ~850 MB per entry and a
+      # new entry for every change to CMakeLists.txt on every branch, PRs
+      # included: 12 GB, over the repository's 10 GB, before any compiler
+      # cache. Now: restored with a fallback to the previous entry (FetchContent
+      # updates what changed), and written only by pushes and dispatches, right
+      # after configure — sources only, the compiled dependencies come from the
+      # compiler cache. (NN-WS03 keeps build/_deps itself.)
+      - name: Restore FetchContent dependencies
+        id: deps
+        if: runner.environment != 'self-hosted'
+        uses: actions/cache/restore@v4
         with:
           path: build/_deps
-          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          key: deps2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: deps2-${{ runner.os }}-
 
       # HE_PORTABLE_BUILD=ON on every job: these builds are uploaded as artifacts and
       # published as website releases, so nothing may be compiled for the runner's CPU
@@ -159,28 +263,41 @@ jobs:
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
+      # Configure has fetched everything; nothing is compiled yet.
+      - name: Save FetchContent dependencies
+        if: >-
+          runner.environment != 'self-hosted' && github.event_name != 'pull_request'
+          && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/_deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
       # The SDK step above can succeed and the backend still silently fall out of
       # the build: find_package(Vulkan) not seeing the variable, a renamed SDK
       # layout, a future refactor of the detection. CMake only reports that as a
       # STATUS line nobody reads. HE_VULKAN_ENABLED is CACHE INTERNAL, so the
       # resolved answer sits in CMakeCache.txt — fail the job right here if it is
       # not TRUE, because a Windows build without RendererVulkan is exactly the
-      # unchecked state this job exists to end.
+      # unchecked state this job exists to end. PowerShell, not bash: NN-WS03
+      # needn't have a bash on its PATH. (Select-String reads lines without
+      # their CRLF, so TRUE$ holds.)
       - name: Assert the Vulkan backend is enabled (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          # \r? because CMake on Windows writes the cache with CRLF line ends.
-          if grep -qE $'^HE_VULKAN_ENABLED:INTERNAL=TRUE\r?$' build/CMakeCache.txt; then
-            echo "HE_VULKAN_ENABLED=TRUE — RendererVulkan is part of this build"
-          else
-            echo "::error::HE_VULKAN_ENABLED is not TRUE in build/CMakeCache.txt — the Vulkan SDK was installed but CMake did not pick it up"
-            grep -n 'HE_VULKAN_ENABLED\|Vulkan_' build/CMakeCache.txt || true
+          if (Select-String -Path build/CMakeCache.txt -Pattern '^HE_VULKAN_ENABLED:INTERNAL=TRUE$' -Quiet) {
+            Write-Host "HE_VULKAN_ENABLED=TRUE — RendererVulkan is part of this build"
+          } else {
+            Write-Host "::error::HE_VULKAN_ENABLED is not TRUE in build/CMakeCache.txt — the Vulkan SDK was installed but CMake did not pick it up"
+            Select-String -Path build/CMakeCache.txt -Pattern 'HE_VULKAN_ENABLED|Vulkan_'
             exit 1
-          fi
+          }
 
+      # Four jobs on GitHub's four cores; on NN-WS03 Ninja's default (all of
+      # its 32 threads — it has room for that next to the bees).
       - name: Build
-        run: cmake --build build -j 4
+        run: cmake --build build ${{ runner.environment == 'self-hosted' && '--parallel' || '-j 4' }}
 
       # -j because the suite waits far more than it computes: real git
       # subprocesses, child-process kills, socket handshakes, polling sleeps.
@@ -188,10 +305,11 @@ jobs:
       #
       # HE_NET_LOOPBACK_ONLY=0: tests/main.cpp otherwise binds every listener to
       # loopback, which spares a developer's desktop the Windows Firewall dialog
-      # but skips the dual-stack and LAN-reachability tests. A runner asks nobody.
+      # but skips the dual-stack and LAN-reachability tests. A hosted runner
+      # asks nobody — NN-WS03 is a desktop, there it stays loopback.
       - name: Run tests
         env:
-          HE_NET_LOOPBACK_ONLY: "0"
+          HE_NET_LOOPBACK_ONLY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
         run: ctest --test-dir build --output-on-failure -j4
 
       # The Metal backend compiles its MSL strings at RUNTIME (newLibraryWithSource)
@@ -210,6 +328,17 @@ jobs:
             xcrun -sdk macosx metal --version
           fi
           python3 scripts/validate_embedded_shaders.py --msl-only --require-msl -v
+
+      # Graph materials have no MSL string to extract: theirs exists only once
+      # MaterialShaderLibrary cross-compiles the graph, so the step above never
+      # sees it, and no he_tests case can reach a Metal compiler (the toolchain
+      # arrives after ctest). he_tests dumps every variant the renderers build
+      # for the engine water material (Thema 152) and the script hands them to
+      # the same compiler, negative control first; --require-msl turns a missing
+      # toolchain into a failure instead of a skip.
+      - name: Compile-check the engine water material's MSL (macOS)
+        if: runner.os == 'macOS' && !cancelled()
+        run: python3 scripts/water_shader_offline_check.py --require-msl --he-tests build/tests/he_tests -v
 
       # ── The two app runtimes ────────────────────────────────────────────────────
       # docs/app-runtimes-release-pipeline-plan.md. The build above deployed ONE
@@ -323,13 +452,17 @@ jobs:
       # Moved below the tests so all three platforms package in the same place in the
       # run. It used to sit before them, which meant Windows uploaded an editor even
       # when ctest was red; it now behaves like macOS and Linux always have.
+      #
+      # Not on NN-WS03: a topic branch's check needs no download package, its
+      # package/ is an incremental deploy that keeps old files, and the zip
+      # would go up through a home connection.
       - name: Package Windows editor
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment != 'self-hosted'
         shell: pwsh
         run: Compress-Archive -Path "package/Editor/*" -DestinationPath "HorizonEditor-windows-x64.zip" -Force
 
       - name: Upload Windows editor package
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment != 'self-hosted'
         uses: actions/upload-artifact@v4
         with:
           name: HorizonEditor-windows-x64
@@ -380,7 +513,7 @@ jobs:
   # HE_VULKAN_ENABLED through find_package(Vulkan) and the shipped Linux editor
   # package would suddenly carry RendererVulkan + Shaders/ — a product decision,
   # not a CI one. This job builds only HorizonEditor and runs in parallel; Windows
-  # (~76 min) stays the long pole.
+  # stays the long pole.
   #
   # ubuntu-24.04 pinned rather than -latest: the Mesa version decides the pictures,
   # and a runner-image bump should be a visible commit, not a silent change.
@@ -388,6 +521,12 @@ jobs:
     name: Linux · Vulkan (lavapipe)
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+
+    # The compiler cache as in the matrix above — a key of its own: this tree
+    # has RendererVulkan on and other flags, its objects aren't the Linux job's.
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
 
     steps:
       - uses: actions/checkout@v4
@@ -440,16 +579,33 @@ jobs:
           done
           nproc
 
-      - name: Cache FetchContent dependencies
-        uses: actions/cache@v4
+      - name: Compiler cache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: Linux-vulkan
+          max-size: 1G
+          save: ${{ github.event_name != 'pull_request' }}
+
+      # As in the matrix above: restore with fallback, save after configure.
+      - name: Restore FetchContent dependencies
+        id: deps
+        uses: actions/cache/restore@v4
         with:
           path: build/_deps
-          key: deps-${{ runner.os }}-vk-${{ hashFiles('CMakeLists.txt') }}
+          key: deps2-${{ runner.os }}-vk-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: deps2-${{ runner.os }}-vk-
 
       # Default DEPLOY_DIR (out/deploy): the editor and its Shaders/ land in
       # out/deploy/Editor, which is all the image tests need.
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
+
+      - name: Save FetchContent dependencies
+        if: github.event_name != 'pull_request' && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/_deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       - name: Assert the Vulkan backend is enabled
         run: |

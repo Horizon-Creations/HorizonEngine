@@ -2151,6 +2151,62 @@ TEST_CASE("codegen parity: pull_spawner (the Creator source on both backends)")
 	CHECK(p.comp.rt.getVariable(cc, "hp").f == 77.0f);
 }
 
+TEST_CASE("codegen parity: bind_to (Bind To follows the source the same way)")
+{
+	ParityPair p("fix/bind_to");
+	// Registration pulled the Game Instance sources; the Ref source pulled
+	// nothing (its reference is still null).
+	p.checkParity();
+	CHECK(p.var("bonus").f == 2.5f);
+	CHECK(p.var("hp").f == 77.0f);
+	CHECK(p.var("viaRef").f == -1.0f);
+	bool sawBind = false;
+	for (const auto& vi : p.compInst->varInfos())
+	{
+		const std::string n = vi.name;
+		if (n == "viaRef")
+		{
+			sawBind = true;
+			CHECK(vi.bindTo);
+			CHECK(std::string(vi.pullSource) == "Ref");
+			CHECK(std::string(vi.pullRef) == "target");
+		}
+		else if (n == "bonus") { CHECK(vi.bindTo); CHECK(std::string(vi.pullRef).empty()); }
+		else if (n == "plain") { CHECK_FALSE(vi.bindTo); }
+	}
+	CHECK(sawBind);
+
+	// Nothing moved: the first compare writes nothing, in either world.
+	CHECK(p.interp.rt.exchangeState() == 0);
+	CHECK(p.comp.rt.exchangeState() == 0);
+
+	// The source moves → both follow at the next compare. The reference is
+	// assigned at the same time and pushes its first value.
+	for (World* w : { &p.interp, &p.comp })
+	{
+		const InstanceId gi = w->rt.gameInstance();
+		REQUIRE(gi != 0);
+		w->rt.setVariable(gi, "bonus", Value::ofFloat(4.0f));
+		w->rt.setVariable(w->id, "target", Value::ofRef(gi));
+		CHECK(w->rt.exchangeState() == 2);   // bonus and viaRef
+	}
+	p.checkParity();
+	CHECK(p.var("bonus").f == 4.0f);
+	CHECK(p.var("viaRef").f == 4.0f);
+	CHECK(p.var("hp").f == 77.0f);
+	const auto bi = p.interp.rt.boundVariablesOf(p.interp.id);
+	const auto bc = p.comp.rt.boundVariablesOf(p.comp.id);
+	REQUIRE(bi.size() == 3);
+	REQUIRE(bi.size() == bc.size());
+	for (size_t i = 0; i < bi.size(); ++i)
+	{
+		INFO("binding ", bi[i].name);
+		CHECK(bi[i].name == bc[i].name);
+		CHECK(bi[i].boundTo == bc[i].boundTo);
+		CHECK(bi[i].why == bc[i].why);
+	}
+}
+
 TEST_CASE("codegen parity: extract_destruct (both backends extract the same struct)")
 {
 	ParityPair p("fix/extract_destruct");

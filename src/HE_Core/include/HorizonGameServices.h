@@ -47,8 +47,11 @@
 //   1 — save, physics, input
 //   2 — + content
 //   3 — + anticheat
+//   4 — + net
+//   5 — + hc
 #define HE_NET_ABI_VERSION 1u
-#define HE_SERVICES_ABI_VERSION 4u
+#define HE_HC_ABI_VERSION  1u
+#define HE_SERVICES_ABI_VERSION 5u
 
 // Export decoration for the receiving symbol — same rule as <IGameLogic.h>,
 // defined here too so this header stands alone (e.g. in tests).
@@ -326,6 +329,28 @@ typedef struct HeNetServices
     uint32_t (*localPlayer)(void* host);
 } HeNetServices;
 
+// HorizonCode variables from native code (docs/bind-to-variable-binding-plan.md
+// §4.5): subscribe to a PUBLIC variable of a HorizonCode instance and hear its
+// changes as IGameLogic::onHcVariableChanged(source, var). `target` is the
+// entity whose class owns the variable, 0 for the Game Instance — the same
+// number onHcVariableChanged hands back as `source`.
+//
+// The value crosses as JSON text (numbers, strings, arrays, structs as
+// objects), the trade every wide value in this header makes. One subscription
+// per (target, var) for the whole module; watching twice is watching once.
+typedef struct HeHcServices
+{
+    uint32_t abiVersion;   // HE_HC_ABI_VERSION
+    void*    host;         // opaque engine context — pass to every call
+
+    // False = no session, no such instance or no PUBLIC variable of that name.
+    bool  (*watch)(void* host, uint32_t target, const char* var);
+    void  (*unwatch)(void* host, uint32_t target, const char* var);
+    // Required length (without the terminator) of the value's JSON — 0 when it
+    // cannot be read for any of watch's reasons. Two-call string fetch.
+    int   (*valueJson)(void* host, uint32_t target, const char* var, char* buf, int cap);
+} HeHcServices;
+
 // ── The umbrella ─────────────────────────────────────────────────────────────
 // Sibling tables rather than one growing table, and one export that hands them
 // over together. A new service appends a POINTER here and bumps
@@ -340,6 +365,7 @@ typedef struct HeEngineServices
     const HeContentServices* content;      // umbrella v2
     const HeAntiCheatServices* anticheat;  // umbrella v3
     const HeNetServices*       net;        // umbrella v4
+    const HeHcServices*        hc;         // umbrella v5
 } HeEngineServices;
 
 typedef void (*FnSetEngineServicesV2)(const HeEngineServices*);
@@ -351,6 +377,7 @@ extern const HeInputServices*   g_heInputServices;
 extern const HeContentServices* g_heContentServices;
 extern const HeAntiCheatServices* g_heAntiCheatServices;
 extern const HeNetServices*       g_heNetServices;
+extern const HeHcServices*        g_heHcServices;
 
 } // extern "C"
 
@@ -378,6 +405,7 @@ extern const HeNetServices*       g_heNetServices;
     const HeContentServices* g_heContentServices = nullptr; \
     const HeAntiCheatServices* g_heAntiCheatServices = nullptr; \
     const HeNetServices*       g_heNetServices       = nullptr; \
+    const HeHcServices*        g_heHcServices        = nullptr; \
     HE_GAME_API void HE_SetEngineServices(const HeSaveServices* s) \
     { g_heSaveServices = (s && s->abiVersion >= HE_SAVE_ABI_VERSION) ? s : nullptr; } \
     HE_GAME_API void HE_SetEngineServicesV2(const HeEngineServices* s) \
@@ -386,6 +414,7 @@ extern const HeNetServices*       g_heNetServices;
         const bool v2 = s && s->abiVersion >= 2u; \
         const bool v3 = s && s->abiVersion >= 3u; \
         const bool v4 = s && s->abiVersion >= 4u; \
+        const bool v5 = s && s->abiVersion >= 5u; \
         g_heSaveServices = (v1 && s->save && \
             s->save->abiVersion >= HE_SAVE_ABI_VERSION) ? s->save : nullptr; \
         g_hePhysicsServices = (v1 && s->physics && \
@@ -398,6 +427,8 @@ extern const HeNetServices*       g_heNetServices;
             s->anticheat->abiVersion >= HE_ANTICHEAT_ABI_VERSION) ? s->anticheat : nullptr; \
         g_heNetServices = (v4 && s->net && \
             s->net->abiVersion >= HE_NET_ABI_VERSION) ? s->net : nullptr; \
+        g_heHcServices = (v5 && s->hc && \
+            s->hc->abiVersion >= HE_HC_ABI_VERSION) ? s->hc : nullptr; \
     } \
     }
 
@@ -468,6 +499,7 @@ inline const HeInputServices*   inputSvc()   { return g_heInputServices; }
 inline const HeContentServices* contentSvc() { return g_heContentServices; }
 inline const HeAntiCheatServices* antiCheatSvc() { return g_heAntiCheatServices; }
 inline const HeNetServices*       netSvc()      { return g_heNetServices; }
+inline const HeHcServices*        hcSvc()       { return g_heHcServices; }
 inline ::HeAssetId toC(const AssetId& id)   { return ::HeAssetId{ id.hi, id.lo }; }
 inline AssetId     fromC(const ::HeAssetId& id) { return AssetId{ id.hi, id.lo }; }
 inline RaycastHit fromC(const HeRaycastHit& h)
@@ -930,6 +962,24 @@ inline bool isAuthority()
 inline uint32_t localPlayer()
 { auto* s = detail::netSvc(); return s ? s->localPlayer(s->host) : 1u; }
 } // namespace net
+
+// HorizonCode variables (see HeHcServices). A change arrives as
+// IGameLogic::onHcVariableChanged(source, var); the new value is read here.
+namespace hc {
+inline bool available() { return detail::hcSvc() != nullptr; }
+inline bool watch(uint32_t target, const std::string& var)
+{ auto* s = detail::hcSvc(); return s && s->watch(s->host, target, var.c_str()); }
+inline void unwatch(uint32_t target, const std::string& var)
+{ auto* s = detail::hcSvc(); if (s) s->unwatch(s->host, target, var.c_str()); }
+// The value as JSON text, "" when it cannot be read (or before injection).
+inline std::string valueJson(uint32_t target, const std::string& var)
+{
+    auto* s = detail::hcSvc();
+    if (!s) return {};
+    return detail::fetchString(s->host, [s, target, &var](void* h, char* b, int c)
+                               { return s->valueJson(h, target, var.c_str(), b, c); });
+}
+} // namespace hc
 
 #if defined(__GNUC__) || defined(__clang__)
 #  pragma GCC visibility pop

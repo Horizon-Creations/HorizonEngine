@@ -3,20 +3,191 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
-#include <queue>
+#include <queue>   // no longer used here; kept for includers that got it from us
 #include <thread>
 #include <vector>
 
-// Fixed-size thread pool. Workers pull tasks from a shared queue.
+class ThreadPool;
+
+// ─── Job planning: priorities, dependencies, cancellation ────────────────────
+//
+// The pool used to be one FIFO behind a mutex. Asset loads, thumbnails, content
+// sync and the frame's parallel_for helpers all stood in the same line, so a
+// burst of streaming queued in front of a frame left the frame computing alone
+// (world-streaming baseline, Thema 153 §4.1). Three things were missing, and are
+// what this section adds:
+//   - a PRIORITY per job, so frame work overtakes background work in the queue,
+//     plus a cap on how many workers background work may occupy at once;
+//   - DEPENDENCIES, so "read, then decode, then upload" is one submission and
+//     not a chain of callbacks that each re-enter the pool by hand;
+//   - CANCELLATION, so a load nobody wants any more (a zone unloaded before its
+//     meshes arrived, a chunk the camera has left) never starts.
+// submit()/post()/parallel_for keep their signatures and behaviour; the new
+// entry point is ThreadPool::schedule().
+namespace HE {
+
+// Queue order. A worker always takes the oldest job of the highest priority it
+// is allowed to run; within one priority the queue stays FIFO. A priority only
+// reorders what is WAITING — a job that is already running is never preempted,
+// which is why Low additionally has a concurrency cap (ThreadPool::
+// setConcurrencyLimit): without it ten 50 ms pak reads still occupy all ten
+// workers and the frame's helpers find nobody to pick them up.
+enum class JobPriority : uint8_t
+{
+    High   = 0,   // someone is blocked on it right now: parallel_for helpers
+    Normal = 1,   // default of submit()/post()/schedule()
+    Low    = 2,   // background streaming: asset reads, thumbnails
+};
+inline constexpr size_t kJobPriorityCount = 3;
+
+enum class JobStatus : uint8_t
+{
+    Waiting,     // dependencies not finished yet — parked, not in any queue
+    Queued,      // in its priority's queue
+    Running,
+    Done,
+    Failed,      // the body threw; JobHandle::wait() rethrows
+    Cancelled,   // never ran: cancelled, stale, or a dependency did not succeed
+};
+
+namespace detail { struct CancelState; struct JobState; struct PoolCore; }
+
+// What the pool is doing, per priority — for the editor's streaming view
+// (Performance Profiler ▸ Streaming) and for tests. A snapshot: the counters
+// are read one after the other, so `running` and `queued` can be one task
+// apart from each other; the totals only ever grow.
+struct ThreadPoolStats
+{
+    struct Lane
+    {
+        size_t   queued    = 0;   // waiting in the queue, dead entries included
+        size_t   running   = 0;   // on a worker right now
+        size_t   limit     = 0;   // setConcurrencyLimit; == threads means no cap
+        uint64_t executed  = 0;   // tasks a worker ran (post/submit/schedule), since start
+        uint64_t busyNs    = 0;   // …and the time they took, summed over workers
+        uint64_t cancelled = 0;   // scheduled jobs that ended Cancelled (wherever they ended)
+        uint64_t failed    = 0;   // scheduled jobs whose body threw
+    };
+    size_t threads = 0;
+    Lane   lanes[kJobPriorityCount];
+};
+
+// A shared flag that marks work as no longer wanted. Cheap to copy (one
+// shared_ptr); every copy sees the same flag. Cancelling is sticky.
+//
+// A default-constructed token is the "none" token: it can never be cancelled and
+// allocates nothing — the default of JobDesc::cancel. Use create() for a real one.
+//
+// Cancellation is checked, not pushed: the pool looks at the token when a job is
+// about to become ready and again right before it starts, and a long body can
+// poll cancelled() itself between steps. A job that is already running is never
+// interrupted.
+class HE_API CancelToken
+{
+public:
+    CancelToken();
+    ~CancelToken();
+    CancelToken(const CancelToken&);
+    CancelToken(CancelToken&&) noexcept;
+    CancelToken& operator=(const CancelToken&);
+    CancelToken& operator=(CancelToken&&) noexcept;
+
+    static CancelToken create();
+    // A token that is cancelled when it OR this one is — e.g. one per chunk under
+    // one per region, so the region can drop all its chunks at once while a single
+    // chunk can still be dropped on its own. On the none token this is create().
+    CancelToken child() const;
+
+    void cancel() const;        // no-op on the none token
+    bool cancelled() const;
+    bool cancellable() const;   // false for the none token
+
+    // Same flag (copies of one token), not merely the same state.
+    bool operator==(const CancelToken& other) const;
+    bool operator!=(const CancelToken& other) const { return !(*this == other); }
+
+private:
+    std::shared_ptr<detail::CancelState> m_state;
+};
+
+// Refers to one job made by ThreadPool::schedule(). Copyable; an empty handle
+// (default-constructed) is valid() == false and finished.
+class HE_API JobHandle
+{
+public:
+    JobHandle();
+    ~JobHandle();
+    JobHandle(const JobHandle&);
+    JobHandle(JobHandle&&) noexcept;
+    JobHandle& operator=(const JobHandle&);
+    JobHandle& operator=(JobHandle&&) noexcept;
+
+    bool      valid() const;
+    JobStatus status() const;
+    bool      finished() const;   // Done, Failed or Cancelled (or empty)
+
+    // Cancel this one job if it has not started: a Waiting or Queued job is
+    // finished as Cancelled at once — its dependents with it, and wait() returns.
+    // A running job is not interrupted; give it a CancelToken to poll for that.
+    void cancel() const;
+
+    // Block until the job has finished. Rethrows the body's exception when it
+    // Failed; returns normally when it was Cancelled (check status()).
+    //
+    // Does not deadlock on a saturated pool: a job that is still QUEUED is taken
+    // out of the queue and run on the calling thread, and so is a queued job it
+    // (transitively) depends on. Only a job another thread is already running is
+    // waited for. So wait() is safe inside a pool job — except on a job that
+    // depends on the very job calling wait(), which can never finish.
+    void wait() const;
+
+private:
+    friend class ::ThreadPool;
+    explicit JobHandle(std::shared_ptr<detail::JobState> state);
+    std::shared_ptr<detail::JobState> m_state;
+};
+
+// Everything schedule() needs besides the body.
+struct JobDesc
+{
+    // Profiler lane label. Static storage (string literal) — see ThreadPool::submit.
+    const char*  name     = "Job::Execute";
+    JobPriority  priority = JobPriority::Normal;
+    // Checked before the job is queued and right before it starts.
+    CancelToken  cancel;
+    // Optional "is this still wanted?" question, asked on the worker right before
+    // the body would start; true finishes the job as Cancelled instead. For work
+    // whose relevance changes while it waits — a chunk the camera has meanwhile
+    // left. Runs on a pool thread, so it must be thread-safe, cheap, and not throw
+    // (a throwing predicate counts as stale).
+    std::function<bool()> stale;
+    // Jobs that must finish first. If any of them Failed or was Cancelled, this
+    // job is Cancelled without running: its input is missing. Handles from another
+    // pool work too, as long as that pool outlives the dependency.
+    std::vector<JobHandle> after;
+    // Called exactly once if the job ends Cancelled without its body having run —
+    // so an owner can release whatever it reserved for the job (a coalescing key,
+    // a progress slot). Runs on whichever thread finished the job off: a worker,
+    // or the thread that called cancel()/wait(). Must not throw.
+    std::function<void()> onCancelled;
+};
+
+} // namespace HE
+
+// Fixed-size thread pool. Workers pull tasks from three priority queues (see
+// HE::JobPriority); within one priority they are FIFO.
 class HE_API ThreadPool {
 public:
     explicit ThreadPool(size_t threadCount);
     ~ThreadPool();
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
 
     // `name` labels the task on the profiler's per-thread timeline. It MUST be a
     // string literal / static storage: the profiler stores the pointer in a span
@@ -27,15 +198,12 @@ public:
     // says FrustumCull / ExtractMeshes / SkyEnvBake answers "what is the pool
     // doing"; one that says Job::Execute only answers "something".
     template<typename F>
-    std::future<void> submit(F&& f, const char* name = "Job::Execute")
+    std::future<void> submit(F&& f, const char* name = "Job::Execute",
+                             HE::JobPriority priority = HE::JobPriority::Normal)
     {
         auto task = std::make_shared<std::packaged_task<void()>>(std::forward<F>(f));
         std::future<void> fut = task->get_future();
-        {
-            std::unique_lock<std::mutex> lock(m_mutex);
-            m_queue.push(Task{ [task]{ (*task)(); }, name });
-        }
-        m_cv.notify_one();
+        enqueue([task]{ (*task)(); }, name, priority, 1);
         return fut;
     }
 
@@ -45,34 +213,45 @@ public:
     // frame's allocations (perf audit step 3, B2). f MUST NOT throw: nothing waits
     // on a future here, so an exception reaching the worker loop terminates.
     template<typename F>
-    void post(F&& f, const char* name = "Job::Execute", size_t copies = 1)
+    void post(F&& f, const char* name = "Job::Execute", size_t copies = 1,
+              HE::JobPriority priority = HE::JobPriority::Normal)
     {
         if (copies == 0) return;
-        {
-            std::unique_lock<std::mutex> lock(m_mutex);
-            std::function<void()> fn(std::forward<F>(f));
-            for (size_t i = 1; i < copies; ++i)
-                m_queue.push(Task{ fn, name });
-            m_queue.push(Task{ std::move(fn), name });
-        }
-        if (copies >= m_threads.size()) m_cv.notify_all();
-        else for (size_t i = 0; i < copies; ++i) m_cv.notify_one();
+        enqueue(std::function<void()>(std::forward<F>(f)), name, priority, copies);
     }
+
+    // A job with priority, dependencies and cancellation — see HE::JobDesc. The
+    // body's exception does not reach the worker loop: it is logged, kept, and
+    // rethrown by JobHandle::wait(); dependents are then Cancelled. f must be
+    // copyable (it is stored in a std::function).
+    template<typename F>
+    HE::JobHandle schedule(F&& f, HE::JobDesc desc = {})
+    {
+        return scheduleFn(std::function<void()>(std::forward<F>(f)), std::move(desc));
+    }
+    HE::JobHandle scheduleFn(std::function<void()> fn, HE::JobDesc desc);
+
+    // At most `maxRunning` workers run jobs of `priority` at the same time (0 is
+    // treated as 1). Default: no cap for High/Normal, max(1, threads - 2) for Low —
+    // background streaming keeps two workers free for the frame. Jobs over the cap
+    // simply wait in their queue; a wait() on one of them still runs it inline.
+    void   setConcurrencyLimit(HE::JobPriority priority, size_t maxRunning);
+    size_t concurrencyLimit(HE::JobPriority priority) const;
+    // Jobs currently queued at `priority`, including cancelled ones a worker has
+    // not yet popped and discarded. For diagnostics and tests.
+    size_t queuedCount(HE::JobPriority priority) const;
+    // Every priority's queue, running count, cap and totals at once (one lock for
+    // the queues; the rest are atomics the workers bump without one).
+    HE::ThreadPoolStats stats() const;
 
     size_t threadCount() const { return m_threads.size(); }
 
 private:
-    struct Task
-    {
-        std::function<void()> fn;
-        const char*           name;   // static storage — see submit()
-    };
+    void enqueue(std::function<void()> fn, const char* name, HE::JobPriority priority,
+                 size_t copies);
 
-    std::vector<std::thread> m_threads;
-    std::queue<Task>         m_queue;
-    std::mutex                        m_mutex;
-    std::condition_variable           m_cv;
-    bool                              m_stop = false;
+    std::vector<std::thread>              m_threads;
+    std::shared_ptr<HE::detail::PoolCore> m_core;   // shared with jobs: see JobSystem.cpp
 };
 
 // Process-wide thread pool (hardware_concurrency threads, created on first use).
@@ -152,6 +331,9 @@ HE_API void parallel_for_wait(ParallelForJob& job);
 // that queue also carries asset loads, thumbnails and content sync, and a frame
 // must not pick up a 50 ms import because it had a microsecond to spare.
 //
+// Helpers are queued at JobPriority::High: they overtake every waiting asset load
+// and thumbnail, and the Low cap keeps workers free to take them.
+//
 // `name` labels every helper on the profiler's worker lanes (string literal —
 // see ThreadPool::submit). Give each call site its own: on the timeline the name
 // IS the identity of the work, and the default tells you nothing.
@@ -182,7 +364,7 @@ void parallel_for(size_t count, F&& f, const char* name = "ParallelFor",
     job->remaining.store(chunks, std::memory_order_relaxed);
 
     pool.post([job]{ parallel_for_run_chunks(*job); }, name,
-              std::min(workers, chunks - 1));
+              std::min(workers, chunks - 1), HE::JobPriority::High);
     parallel_for_run_chunks(*job);
     parallel_for_wait(*job);
 }

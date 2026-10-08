@@ -145,7 +145,31 @@ public:
 		return g_heContentServices->assetTypeName(g_heContentServices->host, cid, buf, cap);
 	}
 
+	bool doHcAvailable() const override { return he::hc::available(); }
+	bool doHcWatch(uint32_t target, const char* var) const override
+	{ return he::hc::watch(target, var ? var : ""); }
+	void doHcUnwatch(uint32_t target, const char* var) const override
+	{ he::hc::unwatch(target, var ? var : ""); }
+	int  doHcValueJson(uint32_t target, const char* var, char* buf, int cap) const override
+	{ return copyOut(he::hc::valueJson(target, var ? var : ""), buf, cap); }
+
+	void onHcVariableChanged(uint32_t entity, const char* name) override
+	{
+		++m_hcChanged;
+		m_hcEntity = entity;
+		m_hcName   = name ? name : "";
+		m_hcJson   = he::hc::valueJson(entity, m_hcName);
+	}
+	int      hcChangedCount()  const override { return m_hcChanged; }
+	uint32_t hcChangedEntity() const override { return m_hcEntity; }
+	int      hcChangedName(char* buf, int cap) const override { return copyOut(m_hcName, buf, cap); }
+	int      hcChangedJson(char* buf, int cap) const override { return copyOut(m_hcJson, buf, cap); }
+
 private:
+	int         m_hcChanged = 0;
+	uint32_t    m_hcEntity  = 0xFFFFFFFFu;
+	std::string m_hcName;
+	std::string m_hcJson;
 	bool m_saveAtStart      = false;
 	bool m_physicsAtStart   = false;
 	bool m_inputAtStart     = false;

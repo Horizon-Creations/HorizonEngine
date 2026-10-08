@@ -12,6 +12,8 @@
 #include <SourceControl/GitService.h>
 #include <SourceControl/RepoStatus.h>
 
+#include "EditorRewards.h"   // SyncWatch (ImGui-free)
+
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -51,6 +53,7 @@ public:
 	// additionally hides the buttons and explains why.
 	void requestInit(bool lfsAvailable);
 	void requestCommitAll(const std::string& message);
+	// An empty token uses the GitHub sign-in (see GitService::requestSetupGitHub).
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate, std::string token);
 	// Put the project folder back to how a commit had it, recorded as a new
 	// commit so the restore is itself undoable. Refused on a dirty tree.
@@ -92,6 +95,16 @@ public:
 	const std::string& lastInfo()  const { return m_service.lastInfo(); }
 	const std::string& remoteUrl() const { return m_service.remoteUrl(); }
 
+	// Reward moment (EditorRewards.h): COMMITTED. A commit or push the user
+	// asked for went through: kSyncCommit | kSyncPush, handed out once (the
+	// next call returns 0), or 0. EditorApplication fires it after update().
+	int takeSyncMoment()
+	{
+		const int f = m_syncMoment;
+		m_syncMoment = 0;
+		return f;
+	}
+
 	// ── Clone an existing repository as a new project ────────────────────────
 	// Runs on a GitService of its own, not the project's: GitService::requestClone
 	// re-targets the service at the new working tree, and doing that to m_service
@@ -109,6 +122,10 @@ public:
 	// HTTPS round trip per page of 100). The token is wiped once the list is in.
 	// A request while one is running is dropped.
 	void requestListRepos(std::string token);
+	// The same with the GitHub sign-in instead of a typed token: read from the
+	// credential helper at `credentialRoot` on the list thread
+	// (GitHubTokenStore::load). Not signed in lands in repoListError().
+	void requestListReposWithSignIn(const std::filesystem::path& credentialRoot);
 	bool listingRepos() const { return m_listing; }
 	// True once a list request has answered, successfully or not.
 	bool repoListLoaded() const { return m_repoListLoaded; }
@@ -175,6 +192,7 @@ private:
 
 	// Main thread: move a finished repository list over from the worker.
 	void collectRepoList();
+	void startListRepos(std::string token, std::filesystem::path credentialRoot);
 
 	HE::Sc::GitService    m_service;
 	HE::Sc::GitService    m_cloneService;
@@ -185,6 +203,9 @@ private:
 	// only then: idle before the pump means the pump got everything.
 	bool                  m_cloneBusy = false;
 	std::filesystem::path m_projectRoot;
+	// The user's commit/push, judged by the same "idle before the pump" rule.
+	HE::Ed::Rewards::SyncWatch m_syncWatch;
+	int                        m_syncMoment = 0;
 
 	// Repository list. The thread writes only the m_listResult* members, under
 	// m_listMutex; everything else is main-thread-only.

@@ -55,8 +55,22 @@ namespace HcPull
 	// the runtime decides, and the line says so.
 	Status check(const HorizonCode::Variable& target, const std::vector<SourceVar>* source);
 
-	// "Pulled from Game Instance › LastRun › Score" — the variable list's tooltip.
+	// "Pulled from Game Instance › LastRun › Score" — the variable list's tooltip
+	// ("Bound to …" for Bind To).
 	std::string describe(const HorizonCode::Variable& v);
+
+	// ── Bind To (docs/bind-to-variable-binding-plan.md §5.1) ─────────────────
+	// The object references a Bind To may read through: the owner's scalar Ref
+	// instance variables, declaration order. Only the owner's own level — an
+	// inherited one is typed in by name and checked at run time.
+	std::vector<std::string> refVariables(const HorizonCode::Graph& owner);
+	// The class (asset path) the reference `ref` of `owner` is declared to hold
+	// — its className — or "" when it names no Ref of the graph or holds any.
+	std::string refClassOf(const HorizonCode::Graph& owner, const std::string& ref);
+	// The class a pull or binding of `v` reads from and "Add to Target" writes
+	// into, when it is one asset: the expected creator class, or the
+	// reference's class. "" for the Game Instance and for unknown classes.
+	std::string sourceClassOf(const HorizonCode::Variable& v, const HorizonCode::Graph& owner);
 
 	// ── Add to Target ────────────────────────────────────────────────────────
 	// The source lacks what the pull names; write it into the source's graph.

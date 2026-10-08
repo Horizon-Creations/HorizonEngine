@@ -14,6 +14,8 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/HcWatchEvents.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/TransformHierarchy.h>
@@ -841,5 +843,75 @@ TEST_CASE("GameLogic services: a loaded module runs its own copy of the wrappers
     CHECK(mod.saveTable == reinterpret_cast<uintptr_t>(&rig.save));
     CHECK(g_heSaveServices == hostTableBefore);
 
+    loader.unload(rig.world);
+}
+
+// ── HorizonCode variables (Thema 137 step 5, plan §4.5) ──────────────────────
+// The module subscribes with he::hc::watch, the runtime reports at the frame-end
+// compare, HcWatchEvents (the hosts' dispatcher) calls the module's
+// onHcVariableChanged, and the module reads the new value back through
+// he::hc::valueJson — every step across the C ABI. Without runtime resolution
+// in bindingCtx every call here answered its neutral default; the readback
+// inside the callback is what would show it.
+TEST_CASE("GameLogic services: a loaded module watches a HorizonCode variable and reads it back")
+{
+    const std::filesystem::path libPath = HE_TEST_GAMELOGIC_SERVICES_LIB;
+    REQUIRE(std::filesystem::exists(libPath));
+
+    ServicesRig rig;
+    HorizonCode::Runtime rt;
+    HorizonCode::Graph g;
+    {
+        HorizonCode::Variable s; s.name = "Score"; s.type = HorizonCode::PinType::Int; s.f[0] = 5.0f;
+        HorizonCode::Variable h; h.name = "Hidden"; h.type = HorizonCode::PinType::Int; h.access = 1;
+        g.variables = { s, h };
+    }
+    const auto gi = rt.setGameInstance(g);
+    rig.binding.runtime = [&rt]() { return &rt; };
+    HeHcServices hcTable{};
+    HE::api::fillHcServices(hcTable, &rig.binding);
+    rig.umbrella.hc = &hcTable;
+
+    HE::GameLogicLoader loader;
+    REQUIRE(loader.load(libPath));
+    auto* probe = probeOf(loader);
+    REQUIRE(probe != nullptr);
+    // Before injection: nothing, and no crash.
+    CHECK_FALSE(probe->doHcAvailable());
+    CHECK_FALSE(probe->doHcWatch(0, "Score"));
+
+    REQUIRE(loader.injectServices(&rig.umbrella));
+    loader.logic()->onStart(rig.world);
+    rt.onVariableChanged = [&](HorizonCode::InstanceId owner, const std::string& var,
+                               const HorizonCode::Value& old, const HorizonCode::Value& now,
+                               const std::vector<uint64_t>& tokens)
+    { HcWatchEvents::dispatch(rt, owner, var, old, now, tokens, nullptr, nullptr, loader.logic()); };
+
+    CHECK(probe->doHcAvailable());
+    CHECK(probe->doHcWatch(0, "Score"));
+    CHECK_FALSE(probe->doHcWatch(0, "Hidden"));          // private: no door from outside
+    CHECK_FALSE(probe->doHcWatch(0, "Nope"));
+    char buf[64] = {};
+    CHECK(probe->doHcValueJson(0, "Score", buf, sizeof buf) == 1);
+    CHECK(std::string(buf) == "5");
+    CHECK(probe->doHcValueJson(0, "Hidden", buf, sizeof buf) == 0);
+
+    rt.exchangeState();                                    // baseline
+    CHECK(probe->hcChangedCount() == 0);
+    rt.setVariable(gi, "Score", HorizonCode::Value::ofInt(42));
+    rt.exchangeState();
+    CHECK(probe->hcChangedCount() == 1);
+    CHECK(probe->hcChangedEntity() == 0u);                 // the Game Instance
+    probe->hcChangedName(buf, sizeof buf);
+    CHECK(std::string(buf) == "Score");
+    probe->hcChangedJson(buf, sizeof buf);
+    CHECK(std::string(buf) == "42");                       // read back inside the callback
+
+    probe->doHcUnwatch(0, "Score");
+    rt.setVariable(gi, "Score", HorizonCode::Value::ofInt(43));
+    rt.exchangeState();
+    CHECK(probe->hcChangedCount() == 1);
+
+    rt.onVariableChanged = nullptr;
     loader.unload(rig.world);
 }

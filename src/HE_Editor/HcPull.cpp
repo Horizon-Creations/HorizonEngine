@@ -81,6 +81,7 @@ namespace
 		v.scope = 0;
 		v.replicated = v.repNotify = v.saveGame = false;
 		v.pullSource.clear(); v.pullVar.clear(); v.pullMember.clear(); v.pullClass.clear();
+		v.bindTo = false; v.pullRef.clear();
 		return v;
 	}
 }
@@ -141,23 +142,32 @@ Status check(const Variable& target, const std::vector<SourceVar>* source)
 		st.ok = false;
 		st.why = why;
 		st.text = HorizonCode::pullFailureText(why, target.pullSource, target.pullVar,
-		                                       target.pullMember, detail);
+		                                       target.pullMember, detail, target.pullRef);
 		return st;
 	};
 	if (!HorizonCode::isKnownPullSource(target.pullSource)) return fail(PullFailure::UnknownSource);
-	const std::string path = HorizonCode::pullSourceLabel(target.pullSource) + kSep +
+	const bool viaRef = target.pullSource == HorizonCode::kPullFromRef;
+	if (viaRef && target.pullRef.empty())
+	{
+		st.text = "pick the object reference variable to bind through";
+		return st;
+	}
+	const std::string label = HorizonCode::pullSourceLabel(target.pullSource, target.pullRef);
+	const std::string path = label + kSep +
 	                         (target.pullVar.empty() ? std::string("?") : target.pullVar) +
 	                         (target.pullMember.empty() ? std::string() : kSep + target.pullMember);
 	if (target.pullVar.empty())
 	{
-		st.text = "pick a variable of the " + HorizonCode::pullSourceLabel(target.pullSource);
+		st.text = "pick a variable of the " + label;
 		return st;
 	}
 	if (!source)
 	{
-		// A creator without an expected class: whatever creates it decides.
+		// A creator without an expected class, or a reference of no known
+		// class: whatever it holds at run time decides.
 		st.ok = true;
-		st.text = path + " (checked when it is created)";
+		st.text = path + (viaRef ? " (class unknown, checked at run time)"
+		                         : " (checked when it is created)");
 		return st;
 	}
 	const SourceVar* sv = findSource(*source, target.pullVar);
@@ -184,7 +194,8 @@ Status check(const Variable& target, const std::vector<SourceVar>* source)
 std::string describe(const Variable& v)
 {
 	if (v.pullSource.empty()) return {};
-	std::string s = "Pulled from " + HorizonCode::pullSourceLabel(v.pullSource);
+	std::string s = (v.bindTo ? "Bound to " : "Pulled from ") +
+	                HorizonCode::pullSourceLabel(v.pullSource, v.pullRef);
 	if (v.pullSource == HorizonCode::kPullFromCreator && !v.pullClass.empty())
 	{
 		std::string stem = v.pullClass;
@@ -195,6 +206,28 @@ std::string describe(const Variable& v)
 	s += kSep + v.pullVar;
 	if (!v.pullMember.empty()) s += kSep + v.pullMember;
 	return s;
+}
+
+std::vector<std::string> refVariables(const HorizonCode::Graph& owner)
+{
+	std::vector<std::string> out;
+	for (const Variable& v : owner.variables)
+		if (v.scope == 0 && v.type == PinType::Ref && !v.isArray) out.push_back(v.name);
+	return out;
+}
+
+std::string refClassOf(const HorizonCode::Graph& owner, const std::string& ref)
+{
+	const Variable* r = owner.findVariable(ref);
+	return r && r->scope == 0 && r->type == PinType::Ref && !r->isArray ? r->className
+	                                                                    : std::string();
+}
+
+std::string sourceClassOf(const Variable& v, const HorizonCode::Graph& owner)
+{
+	if (v.pullSource == HorizonCode::kPullFromCreator) return v.pullClass;
+	if (v.pullSource == HorizonCode::kPullFromRef)     return refClassOf(owner, v.pullRef);
+	return {};
 }
 
 Add addToTarget(HorizonCode::Graph& source, const Variable& target,

@@ -297,12 +297,18 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 		for (const HorizonCode::Variable& v : g.variables)
 		{
 			if (v.scope != 0 || v.pullSource.empty() || v.pullVar != t.oldName) continue;
+			// Bind To through a reference: the class the reference variable is
+			// declared to hold, the same proof a Get (Ref) node's className is.
+			const HorizonCode::Variable* ref = v.pullSource == HorizonCode::kPullFromRef
+			                                 ? g.findVariable(v.pullRef) : nullptr;
 			const std::string key = v.pullSource == HorizonCode::kPullFromGameInstance ? giKey
 			                      : v.pullSource == HorizonCode::kPullFromCreator   ? v.pullClass
+			                      : ref                                             ? ref->className
 			                      : std::string();
 			const Hit hit{ 0, kPullDeclPrefix + v.name,
-			               "Pull on Construct of \"" + v.name + "\" (from " +
-			               HorizonCode::pullSourceLabel(v.pullSource) + ")" };
+			               std::string(v.bindTo ? "Bind To" : "Pull on Construct") + " of \"" +
+			               v.name + "\" (from " +
+			               HorizonCode::pullSourceLabel(v.pullSource, v.pullRef) + ")" };
 			if (key.empty())                   p.unsure.push_back(hit);
 			else if (contains(targetKeys, key)) p.rename.push_back(hit);
 		}
@@ -426,6 +432,10 @@ bool apply(HorizonCode::Graph& g, const Plan& p, const Target& t)
 				v->name = t.newName;
 				// The class's own Extract on Destruct table names it too.
 				HcExtract::renameVariable(g, h.decl, t.newName);
+				// And a Bind To that reads through it, when it is a reference.
+				for (HorizonCode::Variable& o : g.variables)
+					if (o.pullSource == HorizonCode::kPullFromRef && o.pullRef == h.decl)
+						o.pullRef = t.newName;
 				changed = true;
 			}
 		}

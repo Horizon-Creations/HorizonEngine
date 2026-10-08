@@ -1,0 +1,2 @@
+# Profiler dumps are 6-10 MB each; only the summaries and logs are kept.
+*.profile.json

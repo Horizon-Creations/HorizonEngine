@@ -314,11 +314,19 @@ und er trifft den Software-Pfad praktisch pixelgleich.
    zwei pro Built-in-Draw und Frame. Spec-widrig: alle Draws teilen einen UBO.
 3. **Bildlayout mit GI an.** Einmal pro Frame
    `UNASSIGNED-CoreValidation-DrawState-InvalidImageLayout`. Der Engine-Logger kürzt die
-   Meldung vor den Layout-Namen; welches Bild es ist, ist offen.
+   Meldung vor den Layout-Namen. **Behoben in Thema 145:** Es war das SSAO-Blur-Ziel.
+   `createSSAOTargets` legt Scene-Binding 3 für jeden Frame darauf. Gezeichnet wird es
+   aber nur in `runSSAO`, und das läuft bei GI an nicht (die Proben ersetzen AO), ebenso
+   bei SSAO aus. Das frische Bild blieb UNDEFINED, der Deskriptor erwartet
+   SHADER_READ_ONLY. Seit dem Fix setzt `createSSAOTargets` das Bild einmal in dieses
+   Layout (`primeShaderReadLayout`). Den Wert liest `scene.frag` nur bei
+   `viewport.z == 1`, die Bilder sind vor und nach dem Fix bytegleich. Die GI- und
+   SSAO-Ziele tragen jetzt Debug-Namen (`nameImage`), damit die Meldung das Bild nennt
+   (`VkImage 0x…[SSAO blur]`). Der Name steht vor der 512-Byte-Grenze des Loggers.
 
-2 und 3 stehen in der Allowlist des Skripts (`ALLOWED_VALIDATION`, je Fall und Variante,
+2 steht in der Allowlist des Skripts (`ALLOWED_VALIDATION`, je Fall und Variante,
 mit Grund). Nebula und Clustered erlauben nichts. Jede neue Meldung färbt den Fall rot. Ist
-ein Fehler behoben, wird sein Eintrag gelöscht.
+ein Fehler behoben, wird sein Eintrag gelöscht; `gi_layout` ist mit Thema 145 entfallen.
 
 **Offen nach Schritt 2:**
 - Pool-Zähler für Clustered (heute: mittlere |Δ|; die Bilder zeigen 16 gegen 7 Pools eindeutig).

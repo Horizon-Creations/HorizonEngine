@@ -1,7 +1,10 @@
 #include "doctest.h"
 #include "TestFsUtil.h"
+#include <chrono>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/SceneJsonParse.h>
+#include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
@@ -2879,4 +2882,266 @@ TEST_CASE("A joint saved before the motor existed loads with no motor and no bre
 	CHECK(out->motorMaxForce == doctest::Approx(0.0f));
 	CHECK(out->breakForce    == doctest::Approx(0.0f));
 	CHECK_FALSE(out->collideConnected);
+}
+
+// ─── Parallel scene parse (Thema 153, Schritt 3) ─────────────────────────────
+// parseSceneText cuts the entities array at its element boundaries with its own
+// scanner. Whatever the scanner gets wrong must either still give exactly
+// json::parse's result or fall back to it, so these feed it the strings that
+// trip a naive bracket counter.
+
+TEST_CASE("parseSceneText: split parse equals json::parse, tricky strings included")
+{
+    using nlohmann::json;
+    // Escaped quotes and a trailing escaped backslash right before a closing
+    // quote, brackets inside strings, an entity literally named "entities" and a
+    // nested "entities" key below the top level.
+    std::string text = R"({"version": 3, "levelScript": {"a": [1, 2, {"entities": [7]}]}, "entities": [)";
+    for (int i = 0; i < 40; ++i)
+    {
+        if (i) text += ",\n  ";
+        text += R"({"name": "e)" + std::to_string(i);
+        text += R"( \"q\" ] [x} {y \\", "components": {"t": [1.5, -2e3, null, true, "]"]}, "children": []})";
+    }
+    text += R"(, {"name": "entities", "nested": {"entities": [{"x": "]"}]}}], "zz": "after"})";
+    const json whole = json::parse(text, nullptr, false);
+    REQUIRE_FALSE(whole.is_discarded());
+    REQUIRE(whole["entities"].size() == 41);
+    for (size_t piece : { size_t(1), size_t(16), size_t(200), size_t(1) << 20 })
+    {
+        CAPTURE(piece);
+        size_t pieces = 0;
+        CHECK(HE::parseSceneText(text, piece, &pieces) == whole);
+        // Really split (a scanner that always fell back would pass the line
+        // above too), except where the text is smaller than two pieces.
+        if (piece <= 200) CHECK(pieces > 1);
+        else              CHECK(pieces == 1);
+    }
+}
+
+TEST_CASE("parseSceneText: shapes it does not split, and broken text, read as json::parse does")
+{
+    using nlohmann::json;
+    const char* cases[] = {
+        R"({"entities": [{"a": 1}, 2, {"b": 2}]})",                          // a scalar element
+        R"({"entities": "none", "x": [{"a": 1}, {"b": 2}]})",                 // not an array
+        R"({"entities": [{"a": 1}, {"b": 2}], "entities": [{"c": 3}, {"d": 4}]})", // the key twice
+        R"({"entit\u0069es": [{"a": 1}, {"b": 2}]})",                    // an escaped key
+        R"([{"a": 1}, {"b": 2}])",                                            // not an object
+        R"({"entities": [{"a": 1}, {"b": 2]})",                               // mismatched bracket
+        R"({"entities": [{"a": 1}, {"b": 2}] )",                              // truncated
+        R"({"entities": [{"a": 1}, {"b": "unterminated}]})",                  // open string
+        R"({"entities": [{"a": 1}, {"b": 2}]} trailing)",                     // junk after the object
+    };
+    for (const char* c : cases)
+    {
+        const std::string s = c;
+        CAPTURE(s);
+        const json whole = json::parse(s, nullptr, false);
+        size_t pieces = 0;
+        const json split = HE::parseSceneText(s, 1, &pieces);
+        CHECK(pieces == 1);   // every one of them takes the plain parse
+        CHECK(split.is_discarded() == whole.is_discarded());
+        if (!whole.is_discarded()) CHECK(split == whole);
+    }
+}
+
+TEST_CASE("SceneSerializer::load takes the split parse for a large scene and builds it whole")
+{
+    // Big enough (> 2 MiB of pretty-printed JSON) for the default piece size, so
+    // this is the path a large level really takes.
+    const auto path = std::filesystem::temp_directory_path() / "he_split_parse.hescene";
+    constexpr int kCount = 8000;
+    {
+        HorizonWorld src;
+        for (int i = 0; i < kCount; ++i)
+        {
+            auto e = src.createEntity("split \"" + std::to_string(i) + "\" ]");
+            MeshComponent mc; mc.meshAssetId = HE::UUID{ 0x5E11, static_cast<uint64_t>(i + 1) };
+            src.addComponent(e, mc);
+        }
+        SceneSerializer ser;
+        REQUIRE(ser.save(src, path, SerializeFormat::JSON));
+    }
+    REQUIRE(std::filesystem::file_size(path) > (size_t(2) << 20));
+    {
+        // What the saver writes is a shape the splitter takes, at the default size.
+        std::ifstream in(path, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        size_t pieces = 0;
+        CHECK_FALSE(HE::parseSceneText(text, size_t(1) << 20, &pieces).is_discarded());
+        CHECK(pieces > 1);
+    }
+
+    HorizonWorld dst;
+    SceneSerializer ser;
+    REQUIRE(ser.load(dst, path, SerializeFormat::JSON));
+    size_t meshes = 0;
+    bool   allNamed = true;
+    for (auto [e, mc] : dst.registry().view<MeshComponent>().each())
+    {
+        ++meshes;
+        const uint64_t i = mc.meshAssetId.lo - 1;
+        const auto* nc = dst.registry().try_get<NameComponent>(e);
+        allNamed = allNamed && nc && nc->name == "split \"" + std::to_string(i) + "\" ]";
+    }
+    CHECK(meshes == kCount);
+    CHECK(allNamed);
+    he_test::removeQuiet(path);
+}
+
+// ─── Parallel CBOR scene parse (Thema 153, Schritt 5) ────────────────────────
+// parseSceneCbor walks the CBOR item heads to find the elements. It must give
+// exactly json::from_cbor's result or fall back to it.
+
+TEST_CASE("parseSceneCbor: split decode equals json::from_cbor")
+{
+    using nlohmann::json;
+    // Every kind of item an entity can carry: strings with brackets, a nested
+    // "entities" key, negative and large integers, floats, null, booleans, a
+    // byte string, empty containers, and keys long enough for a 1-byte length.
+    json scene = { { "version", 3 }, { "levelScript", { { "entities", json::array({ 7 }) } } } };
+    json& ents = scene["entities"];
+    ents = json::array();
+    for (int i = 0; i < 40; ++i)
+        ents.push_back({ { "name", "e" + std::to_string(i) + " ] [x} {y" },
+                         { "components", { { "t", { 1.5, -2e3, nullptr, true, "]", -70000, 5000000000LL,
+                                                    json::binary({ 1, 2, 3 }) } },
+                                           { "a key well over twenty-three bytes long", json::object() } } },
+                         { "children", json::array() } });
+    scene["zz"] = "after";
+    const std::vector<uint8_t> cbor = json::to_cbor(scene);
+    const json whole = json::from_cbor(cbor, true, false);
+    REQUIRE_FALSE(whole.is_discarded());
+    for (size_t piece : { size_t(1), size_t(16), size_t(200), size_t(1) << 20 })
+    {
+        CAPTURE(piece);
+        size_t pieces = 0;
+        CHECK(HE::parseSceneCbor(cbor, piece, &pieces) == whole);
+        if (piece <= 200) CHECK(pieces > 1);   // really split, not a fallback
+        else              CHECK(pieces == 1);
+    }
+}
+
+TEST_CASE("parseSceneCbor: shapes it does not split, and broken bytes, read as json::from_cbor does")
+{
+    using nlohmann::json;
+    const std::vector<uint8_t> good =
+        json::to_cbor(json{ { "entities", json::array({ json{ { "a", 1 } }, json{ { "b", 2 } } }) } });
+    std::vector<std::vector<uint8_t>> cases = {
+        json::to_cbor(json{ { "entities", json::array({ json{ { "a", 1 } }, 2, json{ { "b", 2 } } }) } }),
+        json::to_cbor(json{ { "entities", "none" }, { "x", json::array({ json::object(), json::object() }) } }),
+        json::to_cbor(json::array({ json{ { "a", 1 } }, json{ { "b", 2 } } })),
+    };
+    // "entities" twice in one map (to_cbor cannot write that, so by hand).
+    cases.push_back({ 0xA2, 0x68, 'e', 'n', 't', 'i', 't', 'i', 'e', 's', 0x82, 0xA0, 0xA0,
+                            0x68, 'e', 'n', 't', 'i', 't', 'i', 'e', 's', 0x82, 0xA0, 0xA0 });
+    // An indefinite-length entities array (0x9F ... 0xFF).
+    cases.push_back({ 0xA1, 0x68, 'e', 'n', 't', 'i', 't', 'i', 'e', 's', 0x9F, 0xA0, 0xA0, 0xFF });
+    // A tagged element.
+    cases.push_back({ 0xA1, 0x68, 'e', 'n', 't', 'i', 't', 'i', 'e', 's', 0x82, 0xA0, 0xC1, 0xA0 });
+    {
+        std::vector<uint8_t> truncated(good.begin(), good.end() - 1);
+        cases.push_back(truncated);
+        std::vector<uint8_t> trailing = good;
+        trailing.push_back(0x00);
+        cases.push_back(trailing);
+        std::vector<uint8_t> overlong = good;
+        overlong[1] = 0x7B;   // the key claims 2^64-ish bytes
+        cases.push_back(overlong);
+    }
+    for (size_t i = 0; i < cases.size(); ++i)
+    {
+        CAPTURE(i);
+        const json whole = json::from_cbor(cases[i], true, false);
+        size_t pieces = 0;
+        const json split = HE::parseSceneCbor(cases[i], 1, &pieces);
+        CHECK(pieces == 1);   // every one of them takes the plain decode
+        CHECK(split.is_discarded() == whole.is_discarded());
+        if (!whole.is_discarded()) CHECK(split == whole);
+    }
+    // Positive control: the well-formed scene does split at the same piece size.
+    size_t pieces = 0;
+    CHECK(HE::parseSceneCbor(good, 1, &pieces) == json::from_cbor(good, true, false));
+    CHECK(pieces == 2);
+}
+
+TEST_CASE("SceneSerializer binary load and snapshot restore take the split decode for a large scene")
+{
+    const auto path = std::filesystem::temp_directory_path() / "he_split_parse.hescene.bin";
+    constexpr int kCount = 30000;
+    HorizonWorld src;
+    for (int i = 0; i < kCount; ++i)
+    {
+        auto e = src.createEntity("cbor \"" + std::to_string(i) + "\" ]");
+        MeshComponent mc; mc.meshAssetId = HE::UUID{ 0xCB0, static_cast<uint64_t>(i + 1) };
+        src.addComponent(e, mc);
+    }
+    SceneSerializer ser;
+    REQUIRE(ser.save(src, path, SerializeFormat::Binary));
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(src, bytes));
+    REQUIRE(bytes.size() > (size_t(2) << 20));
+    {
+        // What the saver writes is a shape the splitter takes, at the default size.
+        size_t pieces = 0;
+        CHECK_FALSE(HE::parseSceneCbor(bytes, size_t(1) << 20, &pieces).is_discarded());
+        CHECK(pieces > 1);
+    }
+
+    auto check = [&](HorizonWorld& dst)
+    {
+        size_t meshes   = 0;
+        bool   allNamed = true;
+        for (auto [e, mc] : dst.registry().view<MeshComponent>().each())
+        {
+            ++meshes;
+            const uint64_t i = mc.meshAssetId.lo - 1;
+            const auto* nc = dst.registry().try_get<NameComponent>(e);
+            allNamed = allNamed && nc && nc->name == "cbor \"" + std::to_string(i) + "\" ]";
+        }
+        CHECK(meshes == kCount);
+        CHECK(allNamed);
+    };
+    HorizonWorld fromFile;
+    REQUIRE(ser.load(fromFile, path, SerializeFormat::Binary));
+    check(fromFile);
+    HorizonWorld fromMemory;
+    REQUIRE(ser.loadFromMemory(fromMemory, bytes));
+    check(fromMemory);
+    he_test::removeQuiet(path);
+}
+
+// Not a check, a measurement (does not run in CI): the CBOR decode of a
+// 200 000-entity scene, sequential against split. Release build:
+//   out/build/release/tests/he_tests --no-skip --test-case='Scene CBOR bench*'
+TEST_CASE("Scene CBOR bench: sequential against split decode, 200k entities" * doctest::skip())
+{
+    using Clock = std::chrono::steady_clock;
+    HorizonWorld src;
+    for (int i = 0; i < 200000; ++i)
+    {
+        auto e = src.createEntity("Mesh_" + std::to_string(i));
+        auto& tc = src.registry().emplace_or_replace<TransformComponent>(e);
+        tc.position = { float(i % 1000) * 8.0f, 0.0f, float(i / 1000) * 8.0f };
+        tc.rotation = { 0.0f, float(i % 360), 0.0f };
+        MeshComponent mc; mc.meshAssetId = HE::UUID{ 0xB, static_cast<uint64_t>(i % 2 + 1) };
+        src.addComponent(e, mc);
+    }
+    std::vector<uint8_t> bytes;
+    SceneSerializer ser;
+    REQUIRE(ser.saveToMemory(src, bytes));
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    for (int run = 0; run < 3; ++run)
+    {
+        const Clock::time_point t0 = Clock::now();
+        const nlohmann::json a = nlohmann::json::from_cbor(bytes, true, false);
+        const Clock::time_point t1 = Clock::now();
+        size_t pieces = 0;
+        const nlohmann::json b = HE::parseSceneCbor(bytes, size_t(1) << 20, &pieces);
+        const Clock::time_point t2 = Clock::now();
+        CHECK(a == b);
+        MESSAGE("CBOR " << bytes.size() / (1024 * 1024) << " MiB: sequential " << ms(t1 - t0)
+                << " ms, split " << ms(t2 - t1) << " ms in " << pieces << " pieces");
+    }
 }

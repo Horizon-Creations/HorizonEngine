@@ -132,7 +132,8 @@ AREAS: dict[str, list[str]] = {
     "export": ["ExportDialogPanel.cpp", "BuildProgressDialog.cpp", "ProfilerPanel.cpp"],
     "collab": ["CollabPanel.cpp", "CollabPresenceBar.cpp", "SourceControlPanel.cpp",
                "GitMissingDialog.cpp", "EngineContentPublishDialog.cpp",
-               "ReportIssueDialog.cpp"],
+               "ReportIssueDialog.cpp", "GitCloneDialog.cpp",
+               "GitHubSignIn.cpp", "GitHubSignInView.cpp"],
 }
 
 # The gap as it stands, per area. A number that goes UP is a control somebody

@@ -11,12 +11,37 @@ namespace HE {
 
 namespace {
 
+    bool localCacheMatches(const TransformComponent& t)
+    {
+        return t.localCacheValid
+            && t.localCachePosition == t.position
+            && t.localCacheRotation == t.rotation
+            && t.localCacheScale    == t.scale;
+    }
+
+    // The local matrix through the cache: rebuilt (and the cache refilled) only
+    // when position/rotation/scale differ from what it was built from. Only
+    // propagateTransforms WRITES the cache — it is the one place that already
+    // writes worldMatrix, so it adds no writer the per-entity queries race with.
+    const glm::mat4& refreshLocal(TransformComponent& t)
+    {
+        if (!localCacheMatches(t))
+        {
+            t.localCache         = localMatrix(t);
+            t.localCachePosition = t.position;
+            t.localCacheRotation = t.rotation;
+            t.localCacheScale    = t.scale;
+            t.localCacheValid    = true;
+        }
+        return t.localCache;
+    }
+
     void propagateFrom(entt::registry& reg, entt::entity e, const glm::mat4& parentWorld)
     {
         glm::mat4 world = parentWorld;
         if (auto* t = reg.try_get<TransformComponent>(e))
         {
-            world          = parentWorld * localMatrix(*t);
+            world          = parentWorld * refreshLocal(*t);
             t->worldMatrix = world;
             t->dirty       = false;
         }
@@ -35,6 +60,11 @@ glm::mat4 localMatrix(const TransformComponent& t)
          * glm::scale(glm::mat4(1.0f), t.scale);
 }
 
+glm::mat4 cachedLocalMatrix(const TransformComponent& t)
+{
+    return localCacheMatches(t) ? t.localCache : localMatrix(t);
+}
+
 glm::mat4 worldMatrixOf(HorizonWorld& world, entt::entity e)
 {
     entt::registry& reg = world.registry();
@@ -44,10 +74,24 @@ glm::mat4 worldMatrixOf(HorizonWorld& world, entt::entity e)
     // way up would need the inverse order and would not match propagateFrom's
     // parentWorld * local — and "the same maths written twice" is exactly the
     // drift localMatrix exists to prevent.
-    std::vector<entt::entity> chain;
+    //
+    // On the stack for any realistic depth: LODSystem asks this for every LOD
+    // entity every tick, and a heap vector per call was a measurable part of it
+    // (baseline §4.5). Deeper chains spill into the vector.
+    constexpr size_t kInlineDepth = 32;
+    const TransformComponent* inlineChain[kInlineDepth];
+    std::vector<const TransformComponent*> spill;
+    size_t depth = 0;
     for (entt::entity cur = e; cur != entt::null && reg.valid(cur); )
     {
-        chain.push_back(cur);
+        const TransformComponent* t = reg.try_get<TransformComponent>(cur);
+        if (depth < kInlineDepth) inlineChain[depth] = t;
+        else
+        {
+            if (spill.empty()) spill.assign(inlineChain, inlineChain + kInlineDepth);
+            spill.push_back(t);
+        }
+        ++depth;
         const auto* h = reg.try_get<HierarchyComponent>(cur);
         entt::entity parent = h ? h->parent : entt::null;
         // The world root carries no transform of its own; stopping here also
@@ -56,10 +100,11 @@ glm::mat4 worldMatrixOf(HorizonWorld& world, entt::entity e)
         cur = parent;
     }
 
+    const TransformComponent* const* chain = spill.empty() ? inlineChain : spill.data();
     glm::mat4 m(1.0f);
-    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
-        if (const auto* t = reg.try_get<TransformComponent>(*it))
-            m = m * localMatrix(*t);
+    for (size_t i = depth; i-- > 0; )
+        if (const TransformComponent* t = chain[i])
+            m = m * cachedLocalMatrix(*t);
     return m;
 }
 
@@ -91,7 +136,7 @@ void propagateTransforms(HorizonWorld& world)
     // Entities outside the root hierarchy (no HierarchyComponent)
     for (auto [e, t] : reg.view<TransformComponent>(entt::exclude<HierarchyComponent>).each())
     {
-        t.worldMatrix = localMatrix(t);
+        t.worldMatrix = refreshLocal(t);
         t.dirty       = false;
     }
 }

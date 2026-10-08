@@ -1,0 +1,13 @@
+s6vorher-10000.profile.json {'OnRender': 10.42, 'OutlinerPanel::render': 0.0, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 10.38, 'Render': 11.55} cpu 22.2
+s6vorher-50000.profile.json {'OnRender': 57.65, 'OutlinerPanel::render': 0.0, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 63.13, 'Render': 59.46} cpu 116.7
+s6pick-10000.profile.json {'OnRender': 6.16, 'OutlinerPanel::render': 0.0, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 7.21, 'Render': 12.43} cpu 18.8
+s6pick-50000.profile.json {'OnRender': 30.88, 'OutlinerPanel::render': 0.0, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 38.48, 'Render': 63.0} cpu 94.0
+s6outl-vorher-10000.profile.json {'OnRender': 6.22, 'OutlinerPanel::render': 4.65, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 7.03, 'Render': 12.16} cpu 18.6
+s6outl-vorher-50000.profile.json {'OnRender': 29.07, 'OutlinerPanel::render': 23.48, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 37.95, 'Render': 61.79} cpu 90.7
+s6outl-nachher-10000.profile.json {'OnRender': 2.33, 'OutlinerPanel::render': 0.54, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 7.02, 'Render': 12.67} cpu 15.2
+s6outl-nachher-50000.profile.json {'OnRender': 8.75, 'OutlinerPanel::render': 2.39, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 35.78, 'Render': 59.01} cpu 67.1
+s6end-1000.profile.json {'OnRender': 0.7, 'OutlinerPanel::render': 0.12, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 0.69, 'Render': 2.27} cpu 10.1
+s6end-10000.profile.json {'OnRender': 2.1, 'OutlinerPanel::render': 0.54, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 6.41, 'Render': 11.74} cpu 14.1
+s6end-100000.profile.json {'OnRender': 17.61, 'OutlinerPanel::render': 4.7, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 76.57, 'Render': 127.77} cpu 145.4
+s6end-200000.profile.json {'OnRender': 34.46, 'OutlinerPanel::render': 9.29, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 146.1, 'Render': 253.1} cpu 286.8
+s6end-50000.profile.json {'OnRender': 7.65, 'OutlinerPanel::render': 2.39, 'ViewportPanel::sceneSnapshot': 0.0, 'RenderExtractor::extract': 33.4, 'Render': 55.99} cpu 62.4
