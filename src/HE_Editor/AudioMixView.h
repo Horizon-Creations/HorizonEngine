@@ -72,6 +72,10 @@ namespace HE::Ed::AudioMix
 	{
 		bool edited    = false;   // the EQ changed this frame (a drag in progress too)
 		bool committed = false;   // …and that change is finished: an undo point
+		// Where the graph landed on screen, for the tests: a band at frequency f
+		// and gain g sits at graphMin + (xOfFreq(f, w), yOfDb(g, h)).
+		ImVec2 graphMin  = ImVec2(0.0f, 0.0f);
+		ImVec2 graphSize = ImVec2(0.0f, 0.0f);
 	};
 
 	// The whole EQ block: bypass and Add Band on top, the response graph

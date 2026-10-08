@@ -220,6 +220,7 @@ add_executable(he_tests
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp
     test_audio_waveform_view.cpp
+    test_audio_mix_view.cpp
     test_widget_designer_ui.cpp
     test_texture_viewer.cpp
     ImGuiSoftwareRaster.cpp

@@ -16,6 +16,7 @@
 #include "CinematicTimeline.h"   // the Cinematic tab's strip, over an in-memory sequence
 #include "UITimelineMath.h"
 #include "AudioWaveformView.h"    // the Audio Editor's canvas, over synthetic PCM
+#include "AudioMixView.h"         // …and its bus dropdown and EQ graph
 
 #include <ContentManager/ContentManager.h>
 #include <HorizonCode/HorizonCode.h>
@@ -2685,4 +2686,105 @@ TEST_CASE("ui shot: audio waveform with a volume curve being edited")
 			if (int(r) > 200 && int(g) > 190) ++labelInk;
 		}
 	CHECK(labelInk > 30);
+}
+
+// The Audio Editor's mix controls (Thema 168, step 5): the "Mixer bus"
+// section of the left column with a bus the project no longer has — shown as
+// missing, in orange, with the sentence that the clip plays on Master — and
+// the EQ pane under the waveform with three bands, on a 32 kHz clip so the
+// part above its Nyquist is shaded. The curve is checked where its response
+// says it is: on the bell's centre, on the shelf, and flat in between.
+TEST_CASE("ui shot: audio editor bus dropdown with a missing bus, and an EQ")
+{
+	namespace AM = HE::Ed::AudioMix;
+	constexpr int W = 1240, H = 330;
+	constexpr float leftW = 290.0f;
+	Harness harness(W, H);
+
+	HE::AudioBusConfig buses;   // what the mixer has: "Ambience" was removed
+	buses.add("Music"); buses.add("SFX"); buses.add("Voice");
+	std::string assetBus = "Ambience";
+
+	HE::AudioEq eq;
+	auto band = [](HE::AudioEqBandType t, float f, float g, float q) {
+		HE::AudioEqBand b; b.type = t; b.freqHz = f; b.gainDb = g; b.q = q; return b;
+	};
+	eq.bands = { band(HE::AudioEqBandType::HighPass, 40.0f, 0.0f, 0.7071f),
+	             band(HE::AudioEqBandType::Peak, 900.0f, 9.0f, 1.2f),
+	             band(HE::AudioEqBandType::HighShelf, 6000.0f, -8.0f, 0.7071f) };
+	const double rate = 32000.0;
+	AM::EqView view;
+	view.selBand = 2;   // the shelf: its handle sits off the curve, the bell's stays green
+
+	AM::BusChoice choice;
+	AM::EqResult  res;
+	const he_ui::Image img = shoot("audio_editor_bus_eq", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::BeginChild("##left", ImVec2(leftW, 0.0f), true);
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::SeparatorText("Mixer bus");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		AM::drawBusCombo(&buses, assetBus, true);
+		choice = AM::busChoice(&buses, assetBus);
+		if (choice.missing)
+			ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.38f, 1.0f), "%s", choice.hint.c_str());
+		ImGui::PopTextWrapPos();
+		ImGui::EndChild();
+		ImGui::SameLine();
+		ImGui::BeginChild("##right", ImVec2(0.0f, 0.0f), true);
+		ImGui::SeparatorText("EQ");
+		res = AM::drawEq(eq, view, rate, ImVec2(ImGui::GetContentRegionAvail().x,
+		                                        ImGui::GetContentRegionAvail().y), true);
+		ImGui::EndChild();
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(choice.missing);
+	CHECK(choice.preview == "Ambience (missing)");
+	CHECK(choice.hint.find("plays on Master") != std::string::npos);
+	CHECK(assetBus == "Ambience");   // drawing changes nothing
+	CHECK_FALSE(res.edited);
+	REQUIRE(res.graphSize.x > 400.0f);
+
+	std::uint8_t r, g, b, a;
+	// The combo's closed text is orange: count warm pixels in its row.
+	int orange = 0;
+	for (int x = 12; x < int(leftW) - 12; ++x)
+		for (int y = 50; y < 80; ++y)   // the combo's row, above the orange hint
+		{
+			img.pixel(x, y, r, g, b, a);
+			if (int(r) > 200 && int(g) > 110 && int(g) < 190 && int(b) < 120) ++orange;
+		}
+	CHECK(orange > 40);
+
+	// The curve's green within a few pixels of where the response puts it.
+	const float gx = res.graphMin.x, gy = res.graphMin.y, gw = res.graphSize.x, gh = res.graphSize.y;
+	auto green = [&](int x, int y) {
+		img.pixel(x, y, r, g, b, a);
+		return int(g) > 190 && int(r) > 90 && int(r) < 170 && int(b) > 120 && int(b) < 200;
+	};
+	auto curveNear = [&](double f, double db) {
+		const int x = int(std::lround(gx + AM::xOfFreq(f, gw)));
+		const int y = int(std::lround(gy + AM::yOfDb(db, gh)));
+		for (int dy = -3; dy <= 3; ++dy)
+			if (green(x, y + dy)) return true;
+		return false;
+	};
+	for (const double f : { 900.0, 250.0, 9000.0 })
+	{
+		CAPTURE(f);
+		CHECK(curveNear(f, eq.responseDb(f, rate)));
+	}
+	CHECK(eq.responseDb(900.0, rate) > 8.0);    // so the three points are not one flat line
+	CHECK(eq.responseDb(9000.0, rate) < -6.0);
+	CHECK_FALSE(curveNear(900.0, 0.0));         // negative control: not on the 0 dB line at the bell
+
+	// Above 16 kHz (the clip's Nyquist) the graph is shaded darker than below.
+	auto lum = [&](int x, int y) { img.pixel(x, y, r, g, b, a); return int(r) + int(g) + int(b); };
+	const int yMid = int(gy + gh * 0.85f);
+	CHECK(lum(int(gx + AM::xOfFreq(18000.0, gw)), yMid) < lum(int(gx + AM::xOfFreq(12000.0, gw)), yMid));
 }

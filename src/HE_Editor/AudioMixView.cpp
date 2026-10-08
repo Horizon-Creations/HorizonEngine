@@ -160,6 +160,8 @@ namespace
 		EditorWidgets::helpForKey("Audio Editor/EQ Graph");
 		const bool hovered = ImGui::IsItemHovered();
 		const ImVec2 br(o.x + w, o.y + h);
+		r.graphMin  = o;
+		r.graphSize = ImVec2(w, h);
 
 		dl->AddRectFilled(o, br, kBg);
 		dl->PushClipRect(o, br, true);
@@ -210,9 +212,13 @@ namespace
 			const double f = freqOfX(float(i), w);
 			line.emplace_back(o.x + float(i), o.y + yOfDb(sumAt(f), h));
 		}
+		// The area between the curve and 0 dB, one pixel column at a time. Plain
+		// rects: they carry no anti-aliased fringe, so neighbouring columns do
+		// not overlap into stripes the way thin quads did.
 		if (eq.enabled)
-			for (size_t i = 1; i < line.size(); ++i)
-				dl->AddQuadFilled(ImVec2(line[i - 1].x, zeroY), line[i - 1], line[i], ImVec2(line[i].x, zeroY), kFill);
+			for (size_t i = 0; i + 1 < line.size(); ++i)
+				dl->AddRectFilled(ImVec2(line[i].x, std::min(zeroY, line[i].y)),
+				                  ImVec2(line[i].x + 1.0f, std::max(zeroY, line[i].y)), kFill);
 		// The selected band's own share, so a band among several can be read.
 		if (v.selBand >= 0 && v.selBand < static_cast<int>(coeffs.size()) && !coeffs[size_t(v.selBand)].isIdentity())
 		{
@@ -381,7 +387,10 @@ namespace
 EqResult drawEq(HE::AudioEq& eq, EqView& v, double sampleRate, const ImVec2& size, bool enabled)
 {
 	EqResult r;
-	auto merge = [&r](const EqResult& o) { r.edited |= o.edited; r.committed |= o.committed; };
+	auto merge = [&r](const EqResult& o) {
+		r.edited |= o.edited; r.committed |= o.committed;
+		if (o.graphSize.x > 0.0f) { r.graphMin = o.graphMin; r.graphSize = o.graphSize; }
+	};
 	if (v.selBand >= static_cast<int>(eq.bands.size())) v.selBand = -1;
 
 	ImGui::BeginDisabled(!enabled);
@@ -411,7 +420,13 @@ EqResult drawEq(HE::AudioEq& eq, EqView& v, double sampleRate, const ImVec2& siz
 	ImGui::EndDisabled();
 
 	// Graph beside the band list when there is room for both, above it when not.
-	const float  rowW   = ImGui::GetFontSize() * 27.0f;
+	// One band row, measured from what drawBandRow puts in it: number, check
+	// box, type, frequency, gain, Q, Remove, the spacing between them and room
+	// for the child's scrollbar.
+	const ImGuiStyle& style = ImGui::GetStyle();
+	const float rowW = ImGui::GetFontSize() * (1.2f + 6.0f + 5.0f + 4.5f + 4.0f) + ImGui::GetFrameHeight() +
+	                   ImGui::CalcTextSize("Remove").x + style.FramePadding.x * 2.0f +
+	                   style.ItemSpacing.x * 7.0f + style.ScrollbarSize;
 	const ImVec2 avail(size.x, std::max(48.0f, size.y - ImGui::GetFrameHeightWithSpacing()));
 	const bool   beside = avail.x > rowW + 320.0f;
 	const ImVec2 graph  = beside ? ImVec2(avail.x - rowW - ImGui::GetStyle().ItemSpacing.x, avail.y)
