@@ -102,6 +102,9 @@ struct Ctx
 	// name is); the test clicks it to make it take the keyboard.
 	bool   textField = false;
 	ImVec2 textFieldCenter{ 0, 0 };
+	// A drag-drop source above the canvas carrying this payload type (nullptr = none).
+	const char* sourceType = nullptr;
+	ImVec2      sourceCenter{ 0, 0 };
 
 	Ctx()
 	{
@@ -132,6 +135,20 @@ struct Ctx
 			ImGui::InputText("##rename", buf, sizeof buf);
 			textFieldCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
 			                         (ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+		}
+		if (sourceType)
+		{
+			// A side-list row that drags a payload (what LevelScriptPanel's
+			// variable rows are), for the drag-cue payload cases.
+			ImGui::Button("##src", ImVec2(80.0f, 20.0f));
+			sourceCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+			                      (ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+			if (ImGui::BeginDragDropSource())
+			{
+				const int v = 42;
+				ImGui::SetDragDropPayload(sourceType, &v, sizeof v);
+				ImGui::EndDragDropSource();
+			}
 		}
 		canvasOrigin = ImGui::GetCursorScreenPos();
 		const bool changed = GraphEditor::draw("##canvas", h.model, h.state, ImVec2(kCanvasW, kCanvasH));
@@ -549,4 +566,270 @@ TEST_CASE("GraphEditor hit-test: Alt+click on a pin still clears its links")
 	CHECK(h.clearedPins.front() == 0);
 	CHECK(h.state.linkSrcNode == 0);    // clearing is not the start of a drag
 	CHECK(h.state.dragNode == 0);       // …and it must not move the node either
+}
+
+// ── Drag cues (EditorDragCues.h, topic 140) ──────────────────────────────────
+// The canvas reports pickup / over a pin that fits or not / drop / cancel
+// through Model::onDragCue, once per event. These press the real gestures and
+// read the sequence; the last case checks the drag itself does exactly the same
+// with and without the callback.
+
+namespace
+{
+using Cue = GraphEditor::DragCue;
+
+struct CueLog
+{
+	std::vector<Cue> cues;
+	void attach(Harness& h) { h.model.onDragCue = [this](Cue c){ cues.push_back(c); }; }
+};
+
+// Press on `from`, move through `path` (two frames each, so a pin is entered
+// once and then rested on), release on the last point.
+void dragWire(Ctx& ctx, Harness& h, ImVec2 from, const std::vector<ImVec2>& path)
+{
+	ctx.mouse(from);
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+	for (const ImVec2& p : path) { ctx.mouse(p); ctx.frame(h); ctx.frame(h); }
+	ctx.button(false);
+	ctx.frame(h);
+	ctx.frame(h);
+}
+} // namespace
+
+TEST_CASE("GraphEditor drag cues: pickup, hover edges and a drop")
+{
+	Ctx ctx;
+	Harness h;
+	CueLog log;
+	log.attach(h);
+	// Node 2 refuses this wire; everything else fits.
+	h.model.canConnect = [](int, int, int iN, int){ return iN != 2; };
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode& n1 = *h.find(1);
+	const TestNode& n2 = *h.find(2);
+	const TestNode& n3 = *h.find(3);
+	dragWire(ctx, h, outputPin(ctx, h, n1, 0), {
+		inputPin(ctx, h, n3, 0),    // fits
+		inputPin(ctx, h, n2, 0),    // canConnect says no
+		outputPin(ctx, h, n2, 0),   // output on output: wrong side
+		emptySpot(ctx, h),          // leaving a pin is silent
+		inputPin(ctx, h, n3, 0),    // fits again — and released here
+	});
+
+	const std::vector<Cue> want = { Cue::Pickup, Cue::OverValid, Cue::OverInvalid,
+	                                Cue::OverInvalid, Cue::OverValid, Cue::Drop };
+	CHECK(log.cues == want);
+	REQUIRE(h.links.size() == 2);
+	CHECK(h.links.back() == std::array<int,4>{ 1, 1, 3, 0 });
+}
+
+TEST_CASE("GraphEditor drag cues: a refused drop and a drop on its own node cancel")
+{
+	Ctx ctx;
+	Harness h;
+	CueLog log;
+	log.attach(h);
+	h.model.connect = [&h](int oN, int oP, int iN, int iP){
+		if (iN == 2) return false;           // the host refuses (a type mismatch)
+		h.links.push_back({ oN, oP, iN, iP });
+		return true; };
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode& n1 = *h.find(1);
+	const TestNode& n2 = *h.find(2);
+	dragWire(ctx, h, outputPin(ctx, h, n1, 0), { inputPin(ctx, h, n2, 0) });
+	// canConnect unset: by side alone it looked fine; the release says no.
+	CHECK(log.cues == std::vector<Cue>{ Cue::Pickup, Cue::OverValid, Cue::Cancel });
+	CHECK(h.links.size() == 1);
+
+	log.cues.clear();
+	dragWire(ctx, h, outputPin(ctx, h, n1, 0), { inputPin(ctx, h, n1, 0) });
+	CHECK(log.cues == std::vector<Cue>{ Cue::Pickup, Cue::OverInvalid, Cue::Cancel });
+	CHECK(h.links.size() == 1);
+}
+
+TEST_CASE("GraphEditor drag cues: a detached wire let go in empty space cancels")
+{
+	Ctx ctx;
+	Harness h;
+	CueLog log;
+	log.attach(h);
+	ctx.settle(h, emptySpot(ctx, h));
+
+	// Node 2's input is wired (1 → 2): grabbing it lifts the wire off.
+	dragWire(ctx, h, inputPin(ctx, h, *h.find(2), 0), { emptySpot(ctx, h) });
+	CHECK(h.clearedPins == std::vector<int>{ 0 });
+	CHECK(log.cues == std::vector<Cue>{ Cue::Pickup, Cue::Cancel });
+}
+
+TEST_CASE("GraphEditor drag cues: the drag-off menu drops or cancels when it ends")
+{
+	Ctx ctx;
+	Harness h;
+	CueLog log;
+	log.attach(h);
+	int menuFrames = 0;
+	bool pick = true;
+	h.model.drawPinDragMenu = [&](int, int, bool, ImVec2) -> int {
+		// Open for a couple of frames, then the user picks (or not).
+		if (++menuFrames < 3) return 0;
+		ImGui::CloseCurrentPopup();
+		if (!pick) return 0;
+		h.nodes.push_back({ h.nextId, 500.0f, 400.0f });
+		return h.nextId++; };
+	ctx.settle(h, emptySpot(ctx, h));
+
+	dragWire(ctx, h, outputPin(ctx, h, *h.find(1), 0), { emptySpot(ctx, h) });
+	// Released: the menu is up, and that is no cue yet.
+	CHECK(log.cues == std::vector<Cue>{ Cue::Pickup });
+	for (int i = 0; i < 4; ++i) ctx.frame(h);
+	CHECK(log.cues == std::vector<Cue>{ Cue::Pickup, Cue::Drop });
+
+	log.cues.clear();
+	menuFrames = 0;
+	pick = false;
+	dragWire(ctx, h, outputPin(ctx, h, *h.find(1), 0), { emptySpot(ctx, h) });
+	for (int i = 0; i < 4; ++i) ctx.frame(h);
+	CHECK(log.cues == std::vector<Cue>{ Cue::Pickup, Cue::Cancel });
+}
+
+TEST_CASE("GraphEditor drag cues: a quick-spawn key mid-drag drops")
+{
+	Ctx ctx;
+	Harness h;
+	CueLog log;
+	log.attach(h);
+	ctx.settle(h, emptySpot(ctx, h));
+
+	ctx.mouse(outputPin(ctx, h, *h.find(1), 0));
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+	ctx.mouse(emptySpot(ctx, h));
+	ctx.frame(h);
+	ctx.key(ImGuiKey_B, true);
+	ctx.frame(h);
+	ctx.key(ImGuiKey_B, false);
+	ctx.button(false);
+	ctx.frame(h);
+	ctx.frame(h);
+
+	REQUIRE(h.spawnCalls == 1);
+	CHECK(log.cues == std::vector<Cue>{ Cue::Pickup, Cue::Drop });
+}
+
+TEST_CASE("GraphEditor drag cues: moving a node and clicking the canvas stay silent")
+{
+	Ctx ctx;
+	Harness h;
+	CueLog log;
+	log.attach(h);
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode& n3 = *h.find(3);
+	const ImVec2 body = ctx.toScreen(h, n3.x + 40.0f, n3.y + 6.0f);   // the title bar
+	dragWire(ctx, h, body, { ImVec2(body.x + 60.0f, body.y + 30.0f) });
+	CHECK(h.find(3)->x != doctest::Approx(300.0f));   // it did move
+	dragWire(ctx, h, emptySpot(ctx, h), { ImVec2(emptySpot(ctx, h).x + 30.0f, emptySpot(ctx, h).y + 20.0f) });
+	CHECK(log.cues.empty());
+}
+
+TEST_CASE("GraphEditor drag cues: a payload from a side list")
+{
+	Ctx ctx;
+	Harness h;
+	CueLog log;
+	log.attach(h);
+	int drops = 0;
+	h.model.dropPayloads = { "HC_TEST_VAR" };
+	h.model.onDrop = [&drops](const char*, const void* data, ImVec2){
+		CHECK(*static_cast<const int*>(data) == 42);
+		++drops; };
+
+	auto dragFromSource = [&](ImVec2 to) {
+		ctx.mouse(ctx.sourceCenter);
+		ctx.frame(h);
+		ctx.button(true);
+		ctx.frame(h);
+		// Past the drag threshold but still on the source row (the canvas
+		// starts right below it): the drag starts without touching the canvas.
+		ctx.mouse(ImVec2(ctx.sourceCenter.x + 30.0f, ctx.sourceCenter.y));
+		ctx.frame(h);
+		ctx.frame(h);
+		ctx.mouse(to);
+		ctx.frame(h);
+		ctx.frame(h);
+		ctx.button(false);
+		ctx.frame(h);
+		ctx.frame(h);
+		ctx.frame(h);
+	};
+
+	SUBCASE("dropped on the canvas")
+	{
+		ctx.sourceType = "HC_TEST_VAR";
+		ctx.settle(h, emptySpot(ctx, h));
+		dragFromSource(emptySpot(ctx, h));
+		CHECK(drops == 1);
+		CHECK(log.cues == std::vector<Cue>{ Cue::Pickup, Cue::OverValid, Cue::Drop });
+	}
+	SUBCASE("let go outside the canvas")
+	{
+		ctx.sourceType = "HC_TEST_VAR";
+		ctx.settle(h, emptySpot(ctx, h));
+		dragFromSource(ImVec2(1100.0f, 680.0f));   // outside the canvas window
+		CHECK(drops == 0);
+		CHECK(log.cues == std::vector<Cue>{ Cue::Pickup, Cue::Cancel });
+	}
+	SUBCASE("a type the canvas does not take")
+	{
+		ctx.sourceType = "HE_ASSET_PATH";
+		ctx.settle(h, emptySpot(ctx, h));
+		dragFromSource(emptySpot(ctx, h));
+		CHECK(drops == 0);
+		// Not ours to pick up or cancel — only "this does not go here".
+		CHECK(log.cues == std::vector<Cue>{ Cue::OverInvalid });
+	}
+}
+
+TEST_CASE("GraphEditor drag cues: the drag does the same with and without them")
+{
+	// One script of gestures, run on two identical graphs: one listening (and
+	// with a canConnect that says no to everything, the worst case for a
+	// predicate leaking into the drop), one plain. Links, cleared pins,
+	// selection, node positions and every frame's return value must match.
+	struct Run { std::vector<std::array<int,4>> links; std::vector<int> cleared;
+	             std::vector<int> selection; std::vector<float> xs; std::vector<bool> changed; };
+	auto script = [](bool cues) {
+		Ctx ctx;
+		Harness h;
+		CueLog log;
+		if (cues) { log.attach(h); h.model.canConnect = [](int, int, int, int){ return false; }; }
+		Run r;
+		auto f = [&]{ r.changed.push_back(ctx.frame(h)); };
+		ctx.settle(h, emptySpot(ctx, h));
+		auto drag = [&](ImVec2 from, std::vector<ImVec2> path) {
+			ctx.mouse(from); f(); ctx.button(true); f();
+			for (auto p : path) { ctx.mouse(p); f(); f(); }
+			ctx.button(false); f(); f();
+		};
+		drag(outputPin(ctx, h, *h.find(1), 0), { inputPin(ctx, h, *h.find(2), 0), inputPin(ctx, h, *h.find(3), 0) });
+		drag(inputPin(ctx, h, *h.find(2), 0), { emptySpot(ctx, h) });
+		drag(outputPin(ctx, h, *h.find(2), 0), { inputPin(ctx, h, *h.find(2), 0) });
+		drag(ctx.toScreen(h, 340.0f, 306.0f), { ctx.toScreen(h, 380.0f, 340.0f) });
+		r.links = h.links; r.cleared = h.clearedPins; r.selection = h.state.selection;
+		for (auto& n : h.nodes) r.xs.push_back(n.x);
+		if (cues) CHECK_FALSE(log.cues.empty());
+		return r;
+	};
+	const Run with = script(true), without = script(false);
+	CHECK(with.links == without.links);
+	CHECK(with.cleared == without.cleared);
+	CHECK(with.selection == without.selection);
+	CHECK(with.xs == without.xs);
+	CHECK(with.changed == without.changed);
 }

@@ -12,6 +12,8 @@
 #include <SourceControl/GitService.h>
 #include <SourceControl/RepoStatus.h>
 
+#include "EditorRewards.h"   // SyncWatch (ImGui-free)
+
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -92,6 +94,16 @@ public:
 
 	const std::string& lastInfo()  const { return m_service.lastInfo(); }
 	const std::string& remoteUrl() const { return m_service.remoteUrl(); }
+
+	// Reward moment (EditorRewards.h): COMMITTED. A commit or push the user
+	// asked for went through: kSyncCommit | kSyncPush, handed out once (the
+	// next call returns 0), or 0. EditorApplication fires it after update().
+	int takeSyncMoment()
+	{
+		const int f = m_syncMoment;
+		m_syncMoment = 0;
+		return f;
+	}
 
 	// ── Clone an existing repository as a new project ────────────────────────
 	// Runs on a GitService of its own, not the project's: GitService::requestClone
@@ -191,6 +203,9 @@ private:
 	// only then: idle before the pump means the pump got everything.
 	bool                  m_cloneBusy = false;
 	std::filesystem::path m_projectRoot;
+	// The user's commit/push, judged by the same "idle before the pump" rule.
+	HE::Ed::Rewards::SyncWatch m_syncWatch;
+	int                        m_syncMoment = 0;
 
 	// Repository list. The thread writes only the m_listResult* members, under
 	// m_listMutex; everything else is main-thread-only.

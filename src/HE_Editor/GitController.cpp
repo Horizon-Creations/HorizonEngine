@@ -137,6 +137,10 @@ void GitController::closeProject()
 	m_projectRoot.clear();
 	m_lastPollMs  = 0;
 	m_lastFetchMs = 0;
+	// A commit cut off by the close has no result to judge — and close() keeps
+	// the old lastInfo, which must not answer for it.
+	m_syncWatch  = {};
+	m_syncMoment = 0;
 }
 
 void GitController::requestRefresh()
@@ -154,6 +158,14 @@ void GitController::requestCommitAll(const std::string& message)
 {
 	if (!mayModify() || message.empty()) return;
 	m_service.requestCommitAll(message, autoPushAfterCommit);
+	// Reward moment (EditorRewards.h): armed only if the service queued it
+	// (busy at once) — without a worker the request vanishes, and an old
+	// "Committed." in lastInfo must not answer for it. The service pushes
+	// after the commit only where there is a remote.
+	if (m_service.busy())
+		m_syncWatch.requested(HE::Ed::Rewards::kSyncCommit
+		                      | (autoPushAfterCommit && !m_service.remoteUrl().empty()
+		                             ? HE::Ed::Rewards::kSyncPush : 0));
 }
 
 void GitController::requestRestoreTo(const std::string& commit, const std::string& shortOid)
@@ -189,6 +201,8 @@ void GitController::requestPush()
 {
 	if (!mayModify()) return;
 	m_service.requestPush(!m_service.status().upstream.empty());
+	// Reward moment (EditorRewards.h): as in requestCommitAll.
+	if (m_service.busy()) m_syncWatch.requested(HE::Ed::Rewards::kSyncPush);
 }
 
 void GitController::requestPull()
@@ -209,7 +223,12 @@ void GitController::update(std::uint64_t nowMs)
 	// isRepo() true, so gating this on isRepo() would mean the answer that
 	// creates the state is never collected — the same ordering trap
 	// CollabController::pumpDirectory documents.
+	// busy() BEFORE the pump, for the user's commit/push: idle now means this
+	// pump collects its result (see m_cloneBusy).
+	const bool serviceIdle = !m_service.busy();
 	m_service.pump();
+	if (const int f = m_syncWatch.poll(serviceIdle, m_service.lastError(), m_service.lastInfo()))
+		m_syncMoment |= f;
 	// The clone and the repository list run before any project is open, so
 	// they are collected before the project gate below as well.
 	const bool cloneIdle = !m_cloneService.busy();

@@ -6,6 +6,7 @@
 #include <imgui.h>
 #include "EditorWidgets.h"
 #include "EditorHelp.h"   // WrapText — everything a notification shows is a sentence
+#include "EditorRewards.h"   // V8: the bell's ring and the problem tone
 #endif
 
 #include <algorithm>
@@ -45,6 +46,9 @@ namespace
 		std::size_t               unseen = 0;
 		NoteLevel                 worstUnseen = NoteLevel::Info;
 		std::uint64_t             nowMs = 0;    // the clock every age on screen is measured against
+		// The newest Problem's stamp, seen or not (0: none) — a repeat restamps
+		// it, so a rise is "a problem just arrived" (EditorRewards.h V8).
+		std::uint64_t             newestProblemMs = 0;
 	};
 	Cache s_cache;
 
@@ -57,6 +61,7 @@ namespace
 		s_cache.unseen      = 0;
 		s_cache.worstUnseen = NoteLevel::Info;
 		s_cache.nowMs       = HE::Ed::NotificationStore::nowMs();
+		s_cache.newestProblemMs = 0;
 		s_cache.entries.clear();
 
 		if (ctx.notifications)
@@ -64,6 +69,8 @@ namespace
 			s_cache.entries = ctx.notifications->snapshot();
 			for (const Notification& n : s_cache.entries)
 			{
+				if (n.level == NoteLevel::Problem)
+					s_cache.newestProblemMs = std::max(s_cache.newestProblemMs, n.whenMs);
 				if (n.seen) continue;
 				++s_cache.unseen;
 				if (n.level > s_cache.worstUnseen) s_cache.worstUnseen = n.level;
@@ -540,6 +547,16 @@ void DrawFooter(AppContext& ctx)
 		dl->AddText(ImVec2(origin.x + layout.bellW + kGap, origin.y), col,
 		            layout.countLabel);
 	}
+
+	// Visual cue V8 + the problem tone (EditorRewards.h): a new Problem rings
+	// the bell once. Asked every frame so the edge is seen whatever is shown.
+	const double ring =
+		HE::Ed::Rewards::problemSeen(ctx, static_cast<unsigned long long>(c.newestProblemMs));
+	if (ring >= 0.0)
+		HE::Ed::Rewards::drawProblemRing(origin.x, origin.y, origin.x + layout.bellW,
+		                                 origin.y + layout.slotH, ring,
+		                                 HE::Ed::Rewards::reducedMotion(ctx),
+		                                 ImGui::GetColorU32(levelColor(NoteLevel::Problem)));
 
 	s_bellMin     = origin;
 	s_bellMax     = ImVec2(origin.x + layout.width, origin.y + layout.slotH);

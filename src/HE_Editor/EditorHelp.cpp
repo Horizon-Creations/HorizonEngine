@@ -3394,26 +3394,50 @@ namespace
 	  "that, writing the scene is itself the pause it was meant to spare you.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Feedback", "",
-	  "When a save you made, a build or an import has just worked, the middle of "
+	  "When a save you made, a build, an import, a HorizonCode compile, a commit "
+	  "or push, or the last step of the tutorial has just worked, the middle of "
 	  "the footer says so for about a second and a half (\"Saved\", \"Build "
-	  "succeeded\", \"Imported 3 assets\") and then goes back to \"Ready\". "
+	  "succeeded\", \"Imported 3 assets\", \"Compiles clean\", \"Committed and "
+	  "pushed\", \"Tutorial complete\") and then goes back to \"Ready\". "
 	  "Nothing opens, nothing takes focus and nothing waits for it. Saves by an "
-	  "MCP client or a script, the autosave and failed builds show nothing (a "
-	  "failed build can have a sound of its own, see Build Failed Sound). Off: "
-	  "no feedback at all, no sound and no progress counted.",
+	  "MCP client or a script, the autosave, failed builds and compiles that "
+	  "found a problem show nothing (each can have a sound of its own, see "
+	  "Build Failed Sound and Compile Failed Sound). Off: no feedback at all, "
+	  "no sound, no pulse and no progress counted.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Compile Moment", "",
+	  "\"Compiles clean\" in the footer when the Compile button of a HorizonCode "
+	  "graph (level script, Game Instance, a class or a widget's script) found "
+	  "nothing that would keep it from shipping compiled. A compile that found "
+	  "a problem shows nothing here: the graph already jumps to the node. Off: "
+	  "not shown, but the day still counts as one you worked on.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Commit Moment", "",
+	  "\"Committed\", \"Pushed\" or \"Committed and pushed\" in the footer when "
+	  "a commit or push you started in the Source Control panel went through. "
+	  "Pull and fetch say nothing, and neither does a commit whose automatic "
+	  "push failed (the panel says why). Commits are counted per day for the "
+	  "Recent Days Tooltip. Off: not shown, still counted.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Tutorial Moment", "",
+	  "\"Tutorial complete\" in the footer once, when the last step of the "
+	  "interactive tutorial is done. Single steps keep their own \"Done.\" in "
+	  "the tutorial card. Off: not shown, still counted.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Visual Cues", "",
 	  "The moment's line in the middle of the footer (\"Saved\", \"Build "
 	  "succeeded\", \"Imported 3 assets\") and the thin line under it, with its "
 	  "check mark and light edge below. Off: the footer stays on \"Ready\" and "
 	  "the progress counters, the sound (if on) still plays and counting goes "
-	  "on. The tab check and the import highlight have switches of their own.",
+	  "on. The tab check, the import highlight and the problem pulse have "
+	  "switches of their own.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Check Mark", "",
 	  "A small check drawn beside the footer line, so \"it worked\" does not "
 	  "rest on the green alone. It is written in a sixth of a second, or "
 	  "appears whole with reduced motion, and fades with the line. Saving "
-	  "again right after does not draw it again.",
+	  "again right after does not draw it again. The same check is written "
+	  "into a HorizonCode graph's \"compiles clean\" readout after Compile.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Light Edge", "",
 	  "One thin line of light along the top edge of the footer that spreads "
@@ -3440,8 +3464,10 @@ namespace
 	  "blinks either way.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Sound", "",
-	  "Short, quiet sounds when a save, a build or an import worked, and when a "
-	  "build failed; each can be switched off below. Off by default, and works "
+	  "Short, quiet sounds when a save, a build, an import, a HorizonCode "
+	  "compile, a commit or push or the tutorial worked, when a build or a "
+	  "compile failed, and when a problem arrives while you are in another "
+	  "app; each can be switched off below. Off by default, and works "
 	  "with or without Visual Cues. At most one sound every two seconds; saves "
 	  "are heard at most every twenty seconds, and the same moment again right "
 	  "after is not heard at all. Silent during Play. The editor plays these on "
@@ -3471,9 +3497,54 @@ namespace
 	  "A short pop when files were imported as assets. The same sound for one "
 	  "file or fifty.",
 	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Compile Sound", "",
+	  "Two short notes stepping up when the Compile button of a HorizonCode "
+	  "graph found nothing to fix. It plays with the editor in front, since the "
+	  "compile runs on your click; quieter than the build chime.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Compile Failed Sound", "",
+	  "The same two notes stepping down, with a softer start, when the Compile "
+	  "button found a problem. The graph jumps to the node and its red halo "
+	  "pulses once (Problem Pulse); the sound is for when you look away while "
+	  "it runs. No buzzer, no low note.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Commit Sound", "",
+	  "Three rising notes when a commit or push you started in the Source "
+	  "Control panel went through. Like the build sounds it only plays while "
+	  "the editor is in the background: a push can take a while, and one you "
+	  "watched finish needs no sound.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Tutorial Sound", "",
+	  "The build chime with a third note on top when the last step of the "
+	  "interactive tutorial is done. Once per run through the tutorial.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Problem Sound", "",
+	  "Two quiet knocks when a new problem arrives in the notifications behind "
+	  "the footer bell, played only while the editor is in the background (in "
+	  "front of it the bell's ring says it, see Problem Pulse) and at most once "
+	  "every thirty seconds, however many errors arrive at once.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Drag and Drop Sound", "",
+	  "Short, quiet cues for drag and drop in the HorizonCode graphs (Level "
+	  "Script, Game Instance, classes, widget graphs): a blip when a wire or a "
+	  "variable is picked up, a light tick over a pin it would connect to and a "
+	  "muted one over a pin it would not, a snap when it lands and a falling "
+	  "blip when the drop is cancelled or refused. Once per event, never per "
+	  "frame; dragging a node around stays silent. Same volume and mute as the "
+	  "other feedback sounds. Preview plays all five in a row.",
+	  "", "horizoncode#graphs" },
+	{ "Preferences/Feedback/Problem Pulse", "",
+	  "When a new problem arrives in the notifications, one thin ring widens "
+	  "around the footer bell and fades within about half a second; with "
+	  "reduced motion it only fades. When a HorizonCode compile found a "
+	  "problem, the red halo of the node it jumps to brightens once. One "
+	  "pulse each, never a blink; the bell's colour and count stay as they "
+	  "were.",
+	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Preview", "",
 	  "Play this sound once at the current volume, whether its switch is on or "
-	  "not, so you can hear it without waiting for a save, build or import.",
+	  "not, so you can hear it without waiting for a save, build, import, "
+	  "compile, commit or problem.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Mute Editor Sounds", "",
 	  "Silence the sounds the editor plays on its own output (the feedback "
@@ -3483,8 +3554,9 @@ namespace
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Show Progress", "",
 	  "Beside \"Ready\" in the footer: how many builds succeeded today, and from "
-	  "the second day on how many days in a row you have saved, built or "
-	  "imported something. A day counts from its first such action, not from "
+	  "the second day on how many days in a row you have saved, built, "
+	  "imported, compiled or committed something or finished the tutorial. A "
+	  "day counts from its first such action, not from "
 	  "opening the editor. No points, no levels, nothing shared: the numbers "
 	  "stay in this computer's editor settings. Off hides them; they keep "
 	  "counting while Success Feedback is on, and Success Feedback off stops "
@@ -3498,9 +3570,11 @@ namespace
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Recent Days Tooltip", "",
 	  "Rest the mouse on the counters beside \"Ready\" to see the last seven "
-	  "days: a dot for each day you saved, built or imported something, and "
-	  "that day's successful builds. It only appears while you hover, never "
-	  "on its own.",
+	  "days: a dot for each day you saved, built, imported, compiled or "
+	  "committed something or finished the tutorial, that day's successful "
+	  "builds, and in green below them its commits (a row that only appears "
+	  "once there were any). It only appears while you hover, never on its "
+	  "own.",
 	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "

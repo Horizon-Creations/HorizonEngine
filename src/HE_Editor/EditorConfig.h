@@ -95,6 +95,9 @@ struct EditorConfig
 	bool  RewardsVisual        = true;   // the footer's "Saved"/"Build succeeded" line
 	bool  RewardsCheckMark     = true;   // V1: its drawn check (under Visual)
 	bool  RewardsLightEdge     = true;   // V2b: its pulse along the footer's top (under Visual)
+	bool  RewardsMomentCompile  = true;  // moment 4 "Compiles clean" — the moment only;
+	bool  RewardsMomentCommit   = true;  // moment 5 "Committed"        counting goes on
+	bool  RewardsMomentTutorial = true;  // moment 6 "Tutorial complete" (topic 140)
 	bool  RewardsTabCheck      = true;   // V4: a saved tab's " *" becomes a check
 	bool  RewardsImportHighlight = true; // V5: just-imported tiles get a fading frame
 	int   RewardsReducedMotion = 0;      // 0 = follow the system, 1 = off (full motion)
@@ -104,6 +107,13 @@ struct EditorConfig
 	bool  RewardsSoundBuild       = true;   // RewardsSound (the one that starts
 	bool  RewardsSoundBuildFailed = true;   // off); the two build tones only
 	bool  RewardsSoundImport      = true;   // play with the editor unfocused
+	bool  RewardsSoundCompile       = true; // topic 140: compiled clean,
+	bool  RewardsSoundCompileFailed = true; // compile failed, committed (only
+	bool  RewardsSoundCommit        = true; // unfocused), tour finished, a new
+	bool  RewardsSoundTutorial      = true; // problem (only unfocused) — all
+	bool  RewardsSoundProblem       = true; // under RewardsSound
+	bool  RewardsSoundDragDrop      = true; // HC graph drag and drop cues (EditorDragCues.h)
+	bool  RewardsProblemPulse  = true;   // V8/V9: the bell rings out, a failed node pulses
 	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
 	bool  RewardsCounterTick   = true;   // V3: a number that rose lights up (under Progress)
 	bool  RewardsStreakTooltip = true;   // hovering the counters: the last 7 days (under Progress)
