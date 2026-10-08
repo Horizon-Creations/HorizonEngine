@@ -7,6 +7,7 @@
 #include "EditorUndo.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "HcEditorUtil.h"     // listAssets: what the material picker offers
 
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>
@@ -19,13 +20,20 @@
 #include <HorizonScene/Components/NetworkComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/DefaultAssets.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>   // GetHoveredID, the open-popup stack
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -799,3 +807,160 @@ TEST_CASE("inspector ui: Add Component is grouped, and a typed search ends on En
 	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
 		he_ui::writeBmp(empty, std::string(dir) + "/inspector-add-component-nomatch.bmp");
 }
+
+// ── The engine water material on the panel (Thema 152) ──────────────────────
+// Engine/Materials/Water.hasset is the first material that ships with fifteen
+// parameters, three of them packed Vec4s. What the Details panel owes it: every
+// one of them on the panel, and every one an edit of THIS entity (an override),
+// not of the shared engine asset. Driven like the cases above, in a window tall
+// enough for the whole Material section, edited bottom-up because an edit adds
+// a "Reset to material default" button under its row and moves everything below.
+#ifdef HE_EDITOR_DEPS_DIR
+TEST_CASE("inspector ui: the engine water material shows all fifteen parameters, and each one edits this entity")
+{
+	Harness harness;
+	constexpr int TW = 420, TH = 2400;
+	ImGui::GetIO().DisplaySize = ImVec2(float(TW), float(TH));
+
+	namespace fs = std::filesystem;
+	const fs::path scratch = fs::temp_directory_path() /
+		("he_insp_water_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+	fs::create_directories(scratch);
+	struct Cleanup { fs::path p; ~Cleanup() { std::error_code ec; fs::remove_all(p, ec); } } cleanup{ scratch };
+
+	ContentManager cm(scratch.string());
+	cm.setEngineContentRoot((fs::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	const HE::UUID waterId = cm.loadAsset("Engine/Materials/Water.hasset");
+	REQUIRE(waterId == HE::kEngineWaterMaterialId);
+	std::vector<float> sharedBefore;
+	std::set<std::string> names;
+	{
+		const MaterialAsset* m = cm.getMaterial(waterId);
+		REQUIRE(m);
+		sharedBefore = m->shaderParamData;
+		names.insert(m->graphParamNames.begin(), m->graphParamNames.end());
+	}
+	REQUIRE(names.size() == 15);
+
+	// Selectable without any setup: the material slot's picker lists it
+	// (EditorWidgets → HcEditorUtil::listAssets, the same scan the panel runs).
+	bool listed = false;
+	for (const HcEditorUtil::ClassRef& r : HcEditorUtil::listAssets(&cm, HE::AssetType::Material))
+		listed = listed || r.path == "Engine/Materials/Water.hasset";
+	CHECK(listed);
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+	const Entity lake = world.createEntity("Lake");
+	reg.emplace<TransformComponent>(lake);
+	MaterialComponent mc;
+	mc.materialAssetId = waterId;
+	reg.emplace<MaterialComponent>(lake, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+
+	// The two buttons that frame the parameter rows: the material's last
+	// control above them, and the Save button below. CollapsingHeader opens no
+	// id scope, so their ids are the window's.
+	ImGuiID texSlotBtn = 0, saveBtn = 0;
+	auto tallFrame = [&](bool left, he_ui::Image* shot = nullptr) -> ImGuiID {
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, left);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(TW) - 20.0f, float(TH) - 20.0f));
+		ImGui::Begin("Details");
+		texSlotBtn = ImGui::GetID("+ Texture Slot");
+		saveBtn    = ImGui::GetID("Save Material");
+		InspectorPanel::renderFor(ctx, world, lake, &undo);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), TW, TH);
+		return hovered;
+	};
+	auto idAtT = [&](float x, float y) {
+		ImGui::GetIO().AddMousePosEvent(x, y);
+		tallFrame(false);
+		return tallFrame(false);
+	};
+
+	ImGui::GetIO().AddMousePosEvent(float(TW) - 2.0f, float(TH) - 2.0f);
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) tallFrame(false, i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-water.bmp");
+
+	// Down the panel at the first field's x, item by item.
+	const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 40.0f;
+	struct Item { ImGuiID id; float y; };
+	std::vector<Item> items;
+	{
+		ImGuiID last = 0;
+		for (float y = 12.0f; y < float(TH) - 12.0f; y += 2.0f)
+		{
+			const ImGuiID id = idAtT(x, y);
+			if (id != 0 && id != last) items.push_back({ id, y + 3.0f });
+			last = id;
+		}
+	}
+	int texAt = -1, saveAt = -1;
+	for (int i = 0; i < static_cast<int>(items.size()); ++i)
+	{
+		if (items[i].id == texSlotBtn) texAt = i;
+		if (items[i].id == saveBtn)    saveAt = i;
+	}
+	REQUIRE_MESSAGE(texAt >= 0, "'+ Texture Slot' not found on the panel");
+	REQUIRE_MESSAGE(saveAt > texAt, "'Save Material' not found below the texture slots");
+	// Every parameter is a row of its own between the two — fifteen controls.
+	CHECK(saveAt - texAt - 1 == static_cast<int>(names.size()));
+
+	// Edit each one, last row first: press on its first field, drag right, let go.
+	for (int i = saveAt - 1; i > texAt; --i)
+	{
+		const float y = items[static_cast<size_t>(i)].y;
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMousePosEvent(x, y);
+		tallFrame(false); tallFrame(false);
+		tallFrame(true);
+		io.AddMousePosEvent(x + 25.0f, y);
+		tallFrame(true);
+		io.AddMousePosEvent(x + 60.0f, y);
+		tallFrame(true);
+		tallFrame(false); tallFrame(false);
+	}
+
+	const MaterialComponent& after = reg.get<MaterialComponent>(lake);
+	std::set<std::string> edited;
+	for (const MaterialParamOverride& ov : after.paramOverrides) edited.insert(ov.name);
+	CHECK(edited == names);
+	// …and the shared engine asset did not move: overrides are per entity.
+	CHECK(cm.getMaterial(waterId)->shaderParamData == sharedBefore);
+
+	// The overrides survive the scene file, by name.
+	const fs::path scene = scratch / "lake.hescene";
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, scene, SerializeFormat::JSON));
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, scene, SerializeFormat::JSON));
+	std::set<std::string> reloaded;
+	for (auto [le, lm] : loaded.registry().view<MaterialComponent>().each())
+	{
+		CHECK(lm.materialAssetId == waterId);
+		for (const MaterialParamOverride& ov : lm.paramOverrides)
+		{
+			reloaded.insert(ov.name);
+			for (const MaterialParamOverride& want : after.paramOverrides)
+				if (want.name == ov.name)
+					for (int c = 0; c < 4; ++c) CHECK(ov.value[c] == doctest::Approx(want.value[c]));
+		}
+	}
+	CHECK(reloaded == names);
+}
+#endif

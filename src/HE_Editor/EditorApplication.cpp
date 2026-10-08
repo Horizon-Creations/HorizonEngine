@@ -126,6 +126,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -5695,6 +5696,85 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
+	}
+
+	// ── Engine water witness (HE_DUMP_WATERTEST, Thema 152): the SHIPPED
+	// Engine/Materials/Water.hasset on the engine plane (one quad — the waves are
+	// normals only), 40 m square at y = 0, and no other graph material — the case
+	// in which GL forward handed the translucent water a stale HeLighting (no
+	// clock, no sky). =floor adds a grey opaque slab 1.5 m below so the
+	// transparency has something to show. Frame it with SKYTEST (e.g. CAMY=4
+	// CAMZ=6 PITCH=-25): two shots at different HE_SKY_TIME differ only if the
+	// clock reaches the material, the same time twice is the noise floor.
+	if (const char* wt = std::getenv("HE_DUMP_WATERTEST"); wt && *wt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const HE::UUID waterId = contentManager().loadAsset("Engine/Materials/Water.hasset");
+		const HE::UUID planeId = contentManager().loadAsset("Engine/Meshes/Plane.hasset");
+		if (waterId == HE::UUID{} || planeId == HE::UUID{})
+			HE_LOG_WARN(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST could not load "
+			                          "Engine/Materials/Water.hasset or Engine/Meshes/Plane.hasset");
+		else
+		{
+			auto e = m_editorWorld->createEntity("WaterTest");
+			TransformComponent tc;
+			tc.position = glm::vec3(0.0f, 0.0f, -8.0f);
+			tc.scale    = glm::vec3(40.0f, 1.0f, 40.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
+			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
+			// HE_DUMP_WATERPARAMS="FresnelPower=10;DeepColor=1,0,0": per-entity
+			// overrides, the same MaterialComponent::paramOverrides the Details
+			// panel writes, so a shot pair can show what ONE knob does. Components
+			// left out keep the material's default.
+			if (const char* wp = std::getenv("HE_DUMP_WATERPARAMS"); wp && *wp)
+				if (const MaterialAsset* wm = contentManager().getMaterial(waterId))
+				{
+					std::stringstream all(wp);
+					std::string item;
+					while (std::getline(all, item, ';'))
+					{
+						const size_t eq = item.find('=');
+						if (eq == std::string::npos) continue;
+						MaterialParamOverride ov;
+						ov.name = item.substr(0, eq);
+						size_t slot = 0;
+						while (slot < wm->graphParamNames.size() && wm->graphParamNames[slot] != ov.name) ++slot;
+						if (slot == wm->graphParamNames.size())
+						{
+							HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_WATERPARAMS: no parameter '%s'",
+							            ov.name.c_str());
+							continue;
+						}
+						for (int k = 0; k < 4 && slot * 4 + k < wm->shaderParamData.size(); ++k)
+							ov.value[k] = wm->shaderParamData[slot * 4 + k];
+						std::stringstream vals(item.substr(eq + 1));
+						std::string v;
+						for (int k = 0; k < 4 && std::getline(vals, v, ','); ++k)
+							ov.value[k] = std::strtof(v.c_str(), nullptr);
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERPARAMS %s = (%g, %g, %g, %g)",
+						            ov.name.c_str(), ov.value[0], ov.value[1], ov.value[2], ov.value[3]);
+						wmc.paramOverrides.push_back(std::move(ov));
+					}
+				}
+			if (std::string(wt) == "floor")
+			{
+				MaterialAsset grey;
+				grey.type = HE::AssetType::Material;
+				grey.name = "WaterTestFloor";
+				grey.baseColor[0] = grey.baseColor[1] = grey.baseColor[2] = 0.5f;
+				grey.roughness = 0.8f;
+				auto fe = m_editorWorld->createEntity("WaterTestFloor");
+				TransformComponent ftc;
+				ftc.position = glm::vec3(0.0f, -1.5f, -8.0f);
+				ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+				reg.emplace<TransformComponent>(fe, ftc);
+				reg.emplace<MeshComponent>(fe, MeshComponent{ HE::kDefaultCubeMeshId });
+				reg.emplace<MaterialComponent>(fe,
+					MaterialComponent{ contentManager().registerMaterial(std::move(grey)) });
+			}
+			HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST engine water plane added");
+		}
 	}
 
 	// ── sRGB-texture witness (HE_DUMP_SRGBTEST=1): two cubes side by side, both

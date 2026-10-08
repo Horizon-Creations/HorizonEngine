@@ -244,11 +244,15 @@ namespace
 	  "", "rendering#lighting" },
 	{ "Material/Roughness", "",
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
-	  "that decides whether something reads as wet, polished or worn.",
+	  "that decides whether something reads as wet, polished or worn. On the "
+	  "engine water it is a parameter of its own: keep it low for sharp "
+	  "reflections and a tight sun glint.",
 	  "", "rendering#lighting" },
 	{ "Material/Opacity", "",
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
-	  "the transparent pass — so it no longer writes depth.",
+	  "the transparent pass — so it no longer writes depth. On the engine water "
+	  "(already transparent) the parameter of that name is the opacity looking "
+	  "straight down into clear water; depth tint, Fresnel and foam raise it.",
 	  "", "rendering#lighting" },
 	{ "Material/Slot Overrides", "Slot Overrides",
 	  "One picker per material slot of the entity's mesh (its LOD 0 mesh, when "
@@ -259,6 +263,77 @@ namespace
 	  "slot override wins over it. LOD levels follow along: their sections are "
 	  "matched to LOD 0's slots by material, else by position.",
 	  "", "materials#concept" },
+
+	// The engine water's knobs (Engine/Materials/Water.hasset, docs/water-shader-
+	// plan.md). They are rows of "Material Parameters (this entity)", whose label
+	// is the parameter's NAME — data, so editor_help_audit cannot see them;
+	// test_engine_materials walks the shipped asset's names against this table.
+	// Roughness and Opacity share the entries above with the Surface block.
+	{ "Material/ShallowColor", "",
+	  "Water colour where the view ray through the water is short — looking "
+	  "straight down. Blends toward Deep Color as the path through the water "
+	  "grows.",
+	  "", "materials#water" },
+	{ "Material/DeepColor", "",
+	  "Water colour where the view ray through the water is long — toward the "
+	  "horizon, or in murky water. Usually a darker, bluer version of Shallow "
+	  "Color.",
+	  "", "materials#water" },
+	{ "Material/Turbidity", "",
+	  "x = absorption per metre: higher is murkier, the deep colour arrives "
+	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
+	  "below the surface is not read yet.",
+	  "", "materials#water" },
+	{ "Material/WaveA", "",
+	  "The swell, the largest of three wave trains. x = direction in degrees "
+	  "(0 = +X, 90 = +Z), y = speed in m/s, z = wavelength in metres, "
+	  "w = steepness (0 is flat, about 0.4 is choppy). The waves bend the "
+	  "normal only, the mesh stays flat.",
+	  "", "materials#water" },
+	{ "Material/WaveB", "",
+	  "Second wave train, laid across the swell so the crests do not line up. "
+	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "
+	  "w = steepness. A steepness of 0 switches it off.",
+	  "", "materials#water" },
+	{ "Material/WaveC", "",
+	  "Fine ripples on top of the two larger trains. x = direction in degrees, "
+	  "y = speed in m/s, z = wavelength in metres, w = steepness.",
+	  "", "materials#water" },
+	{ "Material/FresnelPower", "",
+	  "How quickly the surface turns reflective toward grazing angles. 5 is "
+	  "physical water; lower values make the water mirror-like even when you "
+	  "look down into it.",
+	  "", "materials#water" },
+	{ "Material/Reflection", "",
+	  "How strongly sky and scene reflection cover the water. Scales both the "
+	  "Fresnel lift of the opacity and the specular strength, so 0 leaves only "
+	  "the water colour.",
+	  "", "materials#water" },
+	{ "Material/Specular", "",
+	  "Strength of the specular reflection for a non-metal (0.5 = F0 0.04). It "
+	  "is multiplied by Reflection; about 0.3 gives water's real F0 of 0.02.",
+	  "", "materials#water" },
+	{ "Material/Refraction", "",
+	  "How much the waves bend the view into the water: the depth tint and the "
+	  "caustics move with the waves. The scene behind the water is not "
+	  "distorted yet.",
+	  "", "materials#water" },
+	{ "Material/FoamColor", "",
+	  "Colour of the foam on the wave crests. Near-white reads as foam; a "
+	  "tinted value suits murky or polluted water.",
+	  "", "materials#water" },
+	{ "Material/Foam", "",
+	  "x = coverage, the share of the wave crests that foam (0 = none), "
+	  "y = strength 0..1, z = size of the noise that breaks it up, in metres, "
+	  "w = drift speed in m/s. Foam sits on the crests, not at the shore — "
+	  "there is no scene depth to find a shoreline yet.",
+	  "", "materials#water" },
+	{ "Material/Caustics", "",
+	  "The shimmering light pattern on the surface. x = strength (0 = off), "
+	  "y = pattern size in metres, z = speed, w = camera distance in metres at "
+	  "which the pattern has faded out, so it does not shimmer into moiré far "
+	  "away.",
+	  "", "materials#water" },
 
 	// ── Light ────────────────────────────────────────────────────────────────
 	{ "Light/Type", "",

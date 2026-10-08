@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-10-02",
+ "generated": "2026-10-06",
  "groups": [
   {
    "pages": [
@@ -14635,6 +14635,597 @@
      "id": "functions",
      "text": "Reusable sub-graphs stored as their own assets (Create » Material Function in the Content Browser). A function's interface is defined by its Function Input / Function Output nodes (each named and typed). Any material — project-wide — can insert it from the palette; the call node shows the function's pins and the compiler inlines the body into the generated shader, so functions have zero runtime cost. Recursion is detected and rejected safely.",
      "title": "Material Functions"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "The engine ships a ready made water material, "
+        },
+        {
+         "s": "c",
+         "t": "Engine/Materials/Water.hasset"
+        },
+        {
+         "s": "",
+         "t": ". It is an ordinary node graph material (lit, Translucent blend), built entirely from procedural nodes, so it needs no textures and runs on Metal, OpenGL, D3D11, D3D12 and Vulkan. It is offered in addition to the default material and replaces nothing: meshes without a material stay grey."
+        }
+       ]
+      },
+      {
+       "alt": "The engine water material on a plane: three wave trains, sky reflection, caustic lines and foam on the crests",
+       "k": "figure",
+       "src": "water_engine.jpg"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Using it"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Add a "
+         },
+         {
+          "s": "b",
+          "t": "Plane"
+         },
+         {
+          "s": "",
+          "t": " and pick "
+         },
+         {
+          "s": "c",
+          "t": "Engine/Materials/Water"
+         },
+         {
+          "s": "",
+          "t": " in the material slot of its Material component. No setup is needed: the material is listed there and in the Content Browser under "
+         },
+         {
+          "s": "c",
+          "t": "Engine/Materials"
+         },
+         {
+          "s": "",
+          "t": " in every project."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Every parameter is editable per entity in the Details panel under "
+         },
+         {
+          "s": "b",
+          "t": "Material Parameters (this entity)"
+         },
+         {
+          "s": "",
+          "t": ". Hover a row for its tooltip, F1 opens its reference entry. Leaving a value untouched keeps the material default."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "For reusable variants (lake, ocean, swamp) right click "
+         },
+         {
+          "s": "c",
+          "t": "Water.hasset"
+         },
+         {
+          "s": "",
+          "t": " and choose "
+         },
+         {
+          "s": "b",
+          "t": "Create Material Instance"
+         },
+         {
+          "s": "",
+          "t": ". That creates a new project asset with Water as parent; the engine material itself is never modified."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "At runtime, "
+         },
+         {
+          "s": "c",
+          "t": "horizon.setMaterialParam(entity, \"Turbidity\", 0.1, 3.0)"
+         },
+         {
+          "s": "",
+          "t": " takes one to four numbers. It writes the material asset, so every entity using the same material changes with it; give an entity its own instance if it should change alone."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The water animates on its own from the engine clock. The order of the rows in the Details panel can differ between platforms, so look rows up by name."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Parameters"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Parameter"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Type"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Default"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "ShallowColor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Color"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Colour where the water is clear or shallow."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.10, 0.42, 0.45"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "DeepColor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Color"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Colour the water fades to with depth and absorption."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.01, 0.07, 0.12"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Turbidity"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec2"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "x: absorption per metre. y: assumed water depth in metres. 0 absorption gives clear water."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.35, 3.0"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "WaveA"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "WaveB"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "WaveC"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Three wave trains. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "A: 30, 1.2, 8, 0.25\nB: 310, 0.8, 3.5, 0.18\nC: 100, 0.5, 1.2, 0.12"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "FresnelPower"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 1 to 10"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Exponent of the Fresnel term computed from the wave normal. Higher values keep the reflection to grazing angles."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "5"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Reflection"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Strength of the sky and scene reflection; also raises opacity at grazing angles."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.8"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Roughness"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Surface roughness of the highlight and reflection."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.06"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Specular"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Specular reflectance; the shader uses Specular × Reflection."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.3"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Opacity"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Transparency looking straight down into clear water. Depth, Fresnel and foam raise it from there."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.55"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Refraction"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Float 0 to 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Bends the view ray towards the wave normal, so the depth tint and the caustics move with the waves."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.3"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "FoamColor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Color"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Colour of the foam."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.92, 0.95, 0.97"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Foam"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "x: share of the wave crests covered (0 to 1). y: strength, 0 turns foam off. z: noise size in metres. w: drift in m/s."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.18, 0.8, 1.5, 0.3"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Caustics"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance)."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.35, 2.5, 0.25, 25"
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Limits"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from "
+         },
+         {
+          "s": "c",
+          "t": "Turbidity"
+         },
+         {
+          "s": "",
+          "t": ", foam sits on the wave crests rather than along a shoreline, caustics are drawn on the water surface, and the scene seen through the water is not distorted."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Waves move the normals, not the vertices, and assume a roughly horizontal surface. The engine plane is a single quad, so there is no visible displacement at the silhouette."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "With the default turbidity the water is nearly opaque, which makes "
+         },
+         {
+          "s": "c",
+          "t": "FresnelPower"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "Reflection"
+         },
+         {
+          "s": "",
+          "t": " subtle. Lower the absorption (for example "
+         },
+         {
+          "s": "c",
+          "t": "Turbidity"
+         },
+         {
+          "s": "",
+          "t": " 0.05, 3) for clear water where both show clearly."
+         }
+        ]
+       ],
+       "k": "ul"
+      }
+     ],
+     "eyebrow": "Engine content",
+     "id": "water",
+     "text": "The engine ships a ready made water material, Engine/Materials/Water.hasset. It is an ordinary node graph material (lit, Translucent blend), built entirely from procedural nodes, so it needs no textures and runs on Metal, OpenGL, D3D11, D3D12 and Vulkan. It is offered in addition to the default material and replaces nothing: meshes without a material stay grey. The engine water material on a plane: three wave trains, sky reflection, caustic lines and foam on the crests Using it Add a Plane and pick Engine/Materials/Water in the material slot of its Material component. No setup is needed: the material is listed there and in the Content Browser under Engine/Materials in every project. Every parameter is editable per entity in the Details panel under Material Parameters (this entity). Hover a row for its tooltip, F1 opens its reference entry. Leaving a value untouched keeps the material default. For reusable variants (lake, ocean, swamp) right click Water.hasset and choose Create Material Instance. That creates a new project asset with Water as parent; the engine material itself is never modified. At runtime, horizon.setMaterialParam(entity, \"Turbidity\", 0.1, 3.0) takes one to four numbers. It writes the material asset, so every entity using the same material changes with it; give an entity its own instance if it should change alone. The water animates on its own from the engine clock. The order of the rows in the Details panel can differ between platforms, so look rows up by name. Parameters Parameter Type Meaning Default ShallowColor Color Colour where the water is clear or shallow. 0.10, 0.42, 0.45 DeepColor Color Colour the water fades to with depth and absorption. 0.01, 0.07, 0.12 Turbidity Vec2 x: absorption per metre. y: assumed water depth in metres. 0 absorption gives clear water. 0.35, 3.0 WaveA, WaveB, WaveC Vec4 Three wave trains. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off. A: 30, 1.2, 8, 0.25\nB: 310, 0.8, 3.5, 0.18\nC: 100, 0.5, 1.2, 0.12 FresnelPower Float 1 to 10 Exponent of the Fresnel term computed from the wave normal. Higher values keep the reflection to grazing angles. 5 Reflection Float 0 to 1 Strength of the sky and scene reflection; also raises opacity at grazing angles. 0.8 Roughness Float 0 to 1 Surface roughness of the highlight and reflection. 0.06 Specular Float 0 to 1 Specular reflectance; the shader uses Specular × Reflection. 0.3 Opacity Float 0 to 1 Transparency looking straight down into clear water. Depth, Fresnel and foam raise it from there. 0.55 Refraction Float 0 to 1 Bends the view ray towards the wave normal, so the depth tint and the caustics move with the waves. 0.3 FoamColor Color Colour of the foam. 0.92, 0.95, 0.97 Foam Vec4 x: share of the wave crests covered (0 to 1). y: strength, 0 turns foam off. z: noise size in metres. w: drift in m/s. 0.18, 0.8, 1.5, 0.3 Caustics Vec4 x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance). 0.35, 2.5, 0.25, 25 Limits The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from Turbidity, foam sits on the wave crests rather than along a shoreline, caustics are drawn on the water surface, and the scene seen through the water is not distorted. Waves move the normals, not the vertices, and assume a roughly horizontal surface. The engine plane is a single quad, so there is no visible displacement at the silhouette. With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.05, 3) for clear water where both show clearly.",
+     "title": "Engine Water"
     }
    ],
    "summary": "",

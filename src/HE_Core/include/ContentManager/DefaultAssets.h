@@ -77,4 +77,18 @@ constexpr UUID kEditorIconAudioSourceMaterialId      = { 0x0000000000000012ULL, 
 // Pixel size of the editor icon textures above.
 constexpr int kEditorIconTextureSize = 64;
 
+// ── Engine materials (FILES, not registered here) ───────────────────────────
+// Unlike everything above, these are NOT created by initDefaultAssets: they
+// live as .hasset files in EditorDeps/EngineContent/Materials, generated and
+// committed by mat_gen (UUID block hi = 0x400, entry index + 1 … append only).
+// A file is what the Content Browser and the material picker list and what an
+// export ships; a mem:// default would be invisible to both. The constant is
+// here so code can find one by UUID once its file is loaded — registering the
+// same UUID in memory as well would collide with the file.
+
+// Water: lit, translucent node-graph material with three animated wave trains,
+// depth tint, Fresnel, foam and caustics, 15 parameters for the Inspector.
+// Content path "Engine/Materials/Water.hasset". docs/water-shader-plan.md.
+constexpr UUID kEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000001ULL };
+
 } // namespace HE
