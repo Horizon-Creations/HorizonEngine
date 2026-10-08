@@ -824,7 +824,8 @@ die Session-Zusammenfassung meldet auf beiden „1 frames“.
   Nässe/Schnee und Specular-AA fehlen also auch im Resolve, genau wie bei D3D11-Graph-Materialien im
   Forward-Pfad.
 - *SSR* läuft in einem Deferred-Frame nicht. *Decals* bleiben selbst beleuchtet über dem Resolve,
-  *SSAO* liest das Prepass-Ergebnis. All das ist Schritt 5.
+  *SSAO* liest das Prepass-Ergebnis. All das ist Schritt 5. **Erledigt in Schritt 5:** SSR und
+  Decals in GB0, SSAO bleibt beim Prepass, siehe 10.12.
 - *Debug-Layer*: Der D3D11-Renderer legt kein Debug-Gerät an (`HE_GPU_DEBUG` wirkt auf D3D11
   nicht). Laufzeitmeldungen hat nur WARP in `he_tests` gesehen.
 
@@ -891,7 +892,7 @@ anders verlangt:
     G-Buffer-Varianten mit.
   - Der Deferred-Pfad gilt nur im HDR-Viewport-Frame (`usingHDR`). Den fährt der Editor-Viewport,
     und das exportierte Spiel fährt ihn über `SetSwapchainPostProcessing`.
-- **SSR** läuft im Deferred-Frame nicht, wie auf D3D11 (Schritt 5).
+- **SSR** läuft im Deferred-Frame nicht, wie auf D3D11 (Schritt 5). Erledigt in Schritt 5, 10.12.
 - Belegzeilen im Log: `D3D12Renderer: deferred path ready (G-buffer + clustered resolve)` und
   `D3D12Renderer: deferred frame (…)`.
 - Validator: Der `GBufPS`-Eintrag aus Schritt 2 deckt die D3D12-Kopie mit ab (53 HLSL-Shader, 0
@@ -1020,7 +1021,8 @@ und keine Device-Removal. Drei Warnungstexte kommen vor:
 - D3D12 füllt wie D3D11 `lit.weather`, `lit.specAA` und `lit.viewMode` nicht. Nässe/Schnee und
   Specular-AA fehlen also auch im Resolve.
 - *SSR* läuft im Deferred-Frame nicht. *Decals* bleiben selbst beleuchtet über dem Resolve.
-  *SSAO* liest das Prepass-Ergebnis. Das alles ist Schritt 5.
+  *SSAO* liest das Prepass-Ergebnis. Das alles ist Schritt 5. **Erledigt in Schritt 5:** SSR und
+  Decals in GB0, SSAO bleibt beim Prepass, siehe 10.12.
 - *Kein Tile/Single-Pass* (10.6).
 
 ### 10.11 Schritt 4 umgesetzt: Vulkan (Stand 2026-10-08)
@@ -1102,7 +1104,7 @@ verlangt.
   Init nach Szenen- und PostFX-Pipelines. `HE_RENDER_PATH`/`HE_DUMP_GBUFFER` und der Warmup der
   G-Buffer-Varianten wie auf D3D. Ein Deferred-Frame ist nur der HDR-Viewport-Frame, also der
   Editor-Viewport und das exportierte Spiel über `SetSwapchainPostProcessing`.
-- **SSR** läuft im Deferred-Frame nicht, wie auf D3D11/D3D12 (Schritt 5).
+- **SSR** läuft im Deferred-Frame nicht, wie auf D3D11/D3D12 (Schritt 5). Erledigt in Schritt 5, 10.12.
 - Belegzeilen im Log: `VulkanRenderer: deferred path ready (G-buffer + clustered resolve)` und
   `VulkanRenderer: deferred frame (…)`.
 - **Validator:** `gbuffer.frag` ist eine Datei, die glslc beim Build übersetzt. Ein kaputter
@@ -1225,7 +1227,9 @@ rund 330 bzw. 430 Zeilen aus release). Beide Deferred-Pfade sind danach zur Lauf
   Specular-AA fehlen also auch im Resolve.
 - *SSR* läuft im Deferred-Frame nicht. *Decals* bleiben selbst beleuchtet über dem Resolve, mit
   dem Tiefen-Vorpass wie forward. *SSAO* liest das Prepass-Ergebnis. Das alles ist Schritt 5;
-  GB3 liegt für Decals/SSR/SSAO schon bereit.
+  GB3 liegt für Decals/SSR/SSAO schon bereit. **Erledigt in Schritt 5:** SSR und Decals in GB0
+  (der Decal sampelt GB3, der Tiefen-Vorpass entfällt im Deferred-Frame), SSAO bleibt beim
+  Prepass, siehe 10.12.
 - *Kosten:* zwei zusätzliche Pass-Wechsel je Deferred-Frame (Himmel-Pass endet, G-Buffer-Pass)
   und 24 Byte/px G-Buffer (GB3 eingeschlossen). Nicht gemessen; ein Perf-Vergleich gehört zu
   Schritt 6.
@@ -1368,8 +1372,13 @@ Deferred-Frame SSR still ab, obwohl der Schalter im Editor an war; das ist behob
   - Mit der alten `HorizonCore.dll` aus `game12` neben der neuen `HorizonRendering.dll` startet das
     Spiel ohne Fenster und ohne Log (der Loader-Fehler bleibt unsichtbar). `deploy\Game\*` muss mit
     über die Kopie.
-  - `deploy\Game\Shaders` hat kein `gbuffer.frag.spv`. Dann bleibt Vulkan mit einer WARN-Zeile
-    („the deferred path stays off“) still forward.
+  - Im Build-Baum dieses Schritts fehlte `gbuffer.frag.spv` in `deploy\Game\Shaders`, weil
+    HorizonGame seit Schritt 4 nicht neu gelinkt war. Dann bleibt Vulkan mit einer WARN-Zeile („the
+    deferred path stays off“) forward. Das ist **keine Lücke im Export**:
+    - Der POST_BUILD von HorizonGame kopiert das ganze Build-Verzeichnis `Shaders/`.
+    - Nach einem Relink von HorizonGame und HorizonEditor liegt die Datei md5-gleich in
+      `deploy\Game\Shaders` und `deploy\Editor\Game\Shaders`.
+    - Der Exporter kopiert `Game/Shaders` mit (`04de39bd` ist im Zweig).
 
 **Was offen bleibt.**
 - **SSAO aus der G-Buffer-Tiefe (P5)** ist nicht portiert. Das AO-Bild ist dasselbe (Tabelle oben).
@@ -1378,4 +1387,9 @@ Deferred-Frame SSR still ab, obwohl der Schalter im Editor an war; das ist behob
   auch SSR aus dem G-Buffer trace. Beides gehört zusammen, als eigenes Perf-Thema nach Schritt 6.
 - **lavapipe/WARP:** Die neuen Wege (SSR im Resolve, GB0-Decals, `m_gbDecalRP`) haben nur die RTX
   gesehen. Fälle dafür gehören in Schritt 6.
+- **Ungeprüft (gelesen, nicht gelaufen):**
+  - der Forward-Decal-Rückfall im Deferred-Frame (er greift nur, wenn die GB-Variante nicht baut;
+    auf Vulkan liest er jetzt GB3 statt des Vorpasses);
+  - ein texturierter Decal in GB0 (der Zeuge ist untexturiert);
+  - SSR zusammen mit TAA im Deferred-Frame.
 - Nicht geprüft: AMD/Intel, MoltenVK.
