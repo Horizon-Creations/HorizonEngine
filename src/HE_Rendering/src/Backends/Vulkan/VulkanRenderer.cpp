@@ -745,10 +745,11 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // Replaces the CSM lookup AND SSAO in scene.frag when it runs.
         runGi(cmd, m_viewportW, m_viewportH);
 
-        // ── Deferred render path (Thema 150): decided here, before SSR, which a
-        // deferred frame does not run — GL's, D3D11's and D3D12's rule; the
-        // deferred SSR (trace from GB1 + depth, composite after the resolve) is
-        // step 5 of the port. Only on this HDR frame, like SSR and TAA. The
+        // ── Deferred render path (Thema 150): decided here, before SSR. A
+        // deferred frame runs the SAME forward trace below, and the resolve
+        // composites it through heLitP's heSSRFwd stage (binding 31), the
+        // stage graph materials already use here (step 5, plan §10.12). Only
+        // on this HDR frame, like SSR and TAA. The
         // G-buffer is built lazily at the viewport size; a failed allocation
         // keeps the frame forward (one log line).
         m_deferredFrame = m_renderPath == HE::RenderPath::Deferred && m_deferredReady && m_matReady
@@ -760,8 +761,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // asks for the chain (SetSwapchainPostProcessing, plan C6 closed); only
         // the direct swapchain fallback (application mode, sRGB-only
         // swapchain) has no SSR.
-        if (m_ssrEnabled && !m_deferredFrame) EnsureSSRPipelines();
-        const bool ssrWanted = !m_deferredFrame && ssrWantedThisFrame();
+        if (m_ssrEnabled) EnsureSSRPipelines();
+        const bool ssrWanted = ssrWantedThisFrame();
 
         // ── SSAO position prepass + occlusion compute + blur ───────────
         // runSSAO() extracts the scene itself (like EncodeShadowMap) so it
@@ -8414,11 +8415,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 const VkDescriptorImageInfo giVisII{ clampSampler,
                     matGiProbes ? m_giVisAtlas.view : m_whiteAlbedoView,
                     matGiProbes ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                // heSSRFwd: no trace in a deferred frame (ssr.x is 0), the
-                // transparent-black stand-in like a graph material without one.
+                // heSSRFwd: this frame's forward trace, exactly what a graph-
+                // material draw binds (frameMatLight carries ssr.x from the same
+                // m_ssrRanThisFrame); transparent black when no trace ran.
                 const VkDescriptorImageInfo ssrII{
                     m_ssrLinearSampler ? m_ssrLinearSampler : m_albedoSampler,
-                    m_ssrBlackRT.view ? m_ssrBlackRT.view : m_whiteAlbedoView,
+                    (m_ssrRanThisFrame && m_ssrResultView) ? m_ssrResultView
+                        : (m_ssrBlackRT.view ? m_ssrBlackRT.view : m_whiteAlbedoView),
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                 VkDescriptorImageInfo gbII[k_gbTargets];
                 for (uint32_t i = 0; i < k_gbTargets; ++i)

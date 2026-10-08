@@ -6459,13 +6459,10 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
         // lit.ssr stays 0, and that is NOT an oversight: the built-in
         // scene shader gets the forward reflection cascade (uSSRParams above),
-        // graph materials do not. Their consumer is heSSRFwd on binding 31, and
-        // the shared lighting preamble is emitted UNPINNED — SPIRV-Cross spells
-        // that register(t31)/register(s31), and D3D11 has 16 sampler slots, so
-        // the API cannot bind it. Setting the gate without the descriptor would
-        // make every graph material sample an unbound sampler. Closing it means
-        // pinning the whole preamble, which is its own, larger job
-        // (docs/ssr-cross-backend-plan.md §2.3 head 1 / C5).
+        // forward graph materials do not (docs/ssr-cross-backend-plan.md C5).
+        // The preamble is pinned now (heSSRFwd → t31/s8), but no material draw
+        // binds t31, so the gate would sample nothing. The deferred resolve
+        // sets it in its OWN copy of this block and binds t31 (Thema 150 S5).
         //
         // Height fog + the two image gates, the GL/Metal/Vulkan fill (Thema
         // 126; lit.fog stayed all-zero here before, so graph materials had no
@@ -6678,12 +6675,13 @@ void D3D11Renderer::DrawScene(int width, int height)
         // ready) draws straight into the backbuffer, has no HDR target, and
         // therefore no SSR.
         //
-        // ── Deferred render path (Thema 150): decided here, before SSR, which a
-        // deferred frame does not run — GL's rule; the deferred SSR (trace from
-        // GB1 + depth, composite after the resolve) is step 5 of the port. Only
+        // ── Deferred render path (Thema 150): decided here, before SSR. Only
         // where the viewport frame bound the HDR target AND a depth this pass
         // can sample: the direct-swapchain branch and the world previews stay
-        // forward, like SSR and TAA.
+        // forward, like SSR and TAA. A deferred frame runs the SAME forward
+        // trace (reflection pre-pass, trace, blur against last frame's HDR);
+        // the resolve composites it through heLitP's heSSRFwd stage — step 5,
+        // plan §10.12. Not Metal-tile's lag-free G-buffer composite.
         ID3D11ShaderResourceView* deferredDepthSRV = nullptr;
         bool deferredActive = false;
         if (m_renderPath == HE::RenderPath::Deferred && p.deferredReady && p.hdrRTV)
@@ -6705,7 +6703,7 @@ void D3D11Renderer::DrawScene(int width, int height)
             ComPtr<ID3D11RenderTargetView> boundRTV;
             ctx->OMGetRenderTargets(1, boundRTV.GetAddressOf(), nullptr);
             const bool hdrBound = p.hdrRTV && boundRTV.Get() == p.hdrRTV.Get();
-            ssrFrameActive = p.ssrEnabled && hdrBound && !deferredActive
+            ssrFrameActive = p.ssrEnabled && hdrBound
                           && p.EnsureReflPrepassPipeline() && p.EnsureSSRPipelines();
         }
 #endif
@@ -7303,6 +7301,19 @@ void D3D11Renderer::DrawScene(int width, int height)
                 // A separate CB: the forward replay below still needs the full one.
                 MSL::Lighting rl = frameMatLight;
                 rl.specAA[1] = 0.0f;
+                // SSR (step 5): the forward trace result through heLitP's
+                // heSSRFwd stage, the stage Vulkan's graph materials already use.
+                // The gate goes into THIS block only — frameMatLight keeps
+                // ssr.x = 0, because the replay and the transparent graph draws
+                // have nothing bound on t31 (their forward SSR is plan C5).
+                // giParams.xy is the viewport here, the lookup's divisor.
+                if (ssrActive)
+                {
+                    rl.ssr[0] = 1.0f;
+                    rl.ssr[1] = p.ssrIntensity;
+                    rl.ssr[2] = p.ssrMaxRoughness;
+                    rl.ssr[3] = 0.0f;
+                }
                 MSL::ResolveUniforms ru;
                 // World-pos reconstruction from the depth this frame rasterised
                 // with: the JITTERED viewProj (§10.7 #3), and the decal pass's
@@ -7367,6 +7378,14 @@ void D3D11Renderer::DrawScene(int width, int height)
                     giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
                     giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
                     p.m_matWeightSampler.Get());
+                // heSSRFwd on its pinned t31/s8 (kHlslMaterialPins). The trace
+                // sampler: linear clamp, the one the built-in uSSRFwd lookup uses.
+                constexpr UINT kSSRFwdReg = 31, kSSRFwdSampler = 8;
+                if (ssrActive)
+                {
+                    ctx->PSSetShaderResources(kSSRFwdReg, 1, &ssrSRV);
+                    ctx->PSSetSamplers(kSSRFwdSampler, 1, p.ssrLinearClamp.GetAddressOf());
+                }
 
                 ctx->IASetInputLayout(nullptr);
                 ID3D11Buffer* noVB = nullptr; UINT zero = 0;
@@ -7394,6 +7413,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                 // b0 = PerObject.
                 ID3D11ShaderResourceView* noIn[4] = {};
                 ctx->PSSetShaderResources(MSL::kHlslResolveGB0Reg, 4, noIn);
+                if (ssrActive) // the next frame's trace renders into it again
+                    ctx->PSSetShaderResources(kSSRFwdReg, 1, noIn);
                 HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
                 {
                     HE::d3d11mat::BuiltinGISlots builtin;

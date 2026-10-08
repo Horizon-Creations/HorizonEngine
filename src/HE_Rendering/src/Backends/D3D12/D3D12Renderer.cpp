@@ -10492,10 +10492,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // chain not ready) draws straight into the backbuffer, has no HDR
         // target, and therefore no SSR.
         //
-        // ── Deferred render path (Thema 150): decided here, before SSR, which a
-        // deferred frame does not run — GL's and D3D11's rule; the deferred SSR
-        // (trace from GB1 + depth, composite after the resolve) is step 5 of the
-        // port. Only on the HDR viewport frame (usingHDR: hdrRT + the viewport
+        // ── Deferred render path (Thema 150): decided here, before SSR. A
+        // deferred frame runs the SAME forward trace (reflection pre-pass,
+        // trace, blur against last frame's HDR) and the resolve composites it
+        // through heLitP's heSSRFwd stage (step 5, plan §10.12), as on D3D11.
+        // Only on the HDR viewport frame (usingHDR: hdrRT + the viewport
         // depth, whose R32_FLOAT view the resolve samples), like SSR and TAA.
         // The resolve's SRV table (17 material slots + 4 G-buffer inputs = two
         // consecutive material-ring blocks) is reserved NOW: a frame that has
@@ -10516,7 +10517,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         }
         bool ssrFrameActive = false;
 #if defined(HE_HAVE_SHADERC)
-        ssrFrameActive = p.ssrEnabled && p.usingHDR && p.hdrRT && !deferredActive
+        ssrFrameActive = p.ssrEnabled && p.usingHDR && p.hdrRT
                       && p.EnsureReflPrepassPipeline() && p.EnsureSSRPipelines();
 #endif
         // ── SSAO: run 3-pass (pos prepass → ssao → blur) before sky/geometry ─
@@ -11104,14 +11105,30 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     p.srvIntoHeapSlot(p.gbTex[i].Get(), D3D12RendererImpl::k_gbFormats[i],
                                       p.matSrvCpu(blk + dm::kResolveSlotGB0 + i));
                 p.srvIntoHeapSlot(depthRes, DXGI_FORMAT_R32_FLOAT, p.matSrvCpu(blk + dm::kResolveSlotDepth));
+                // SSR (step 5): the forward trace result on t31 (slot 14, the
+                // template holds a null view there), sampled through the static
+                // linear-clamp s8. It is in PIXEL_SHADER_RESOURCE already — the
+                // built-in pass reads the same texture on t16.
+                if (ssrResult)
+                    p.srvIntoHeapSlot(ssrResult, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                      p.matSrvCpu(blk + dm::kSlotSSRFwd));
 
                 // The resolve's OWN lighting block: the frame's graph-material
                 // fill, specular AA off (its "normal" is a G-buffer texel whose
                 // derivative jumps at every silhouette — plan §10.7 #1), and in
                 // the clustered variant a directional-only window (heLitP walks
                 // the whole window; the point/spot lights come from the lists).
+                // The SSR gate only here: frameMatLight keeps ssr.x = 0, the
+                // replay and the transparent graph draws bind nothing on t31.
                 MSL::Lighting rl = frameMatLight;
                 rl.specAA[1] = 0.0f;
+                if (ssrResult)
+                {
+                    rl.ssr[0] = 1.0f;
+                    rl.ssr[1] = p.ssrIntensity;
+                    rl.ssr[2] = p.ssrMaxRoughness;
+                    rl.ssr[3] = 0.0f;
+                }
                 MSL::ResolveUniforms ru;
                 // World-pos reconstruction from the depth this frame rasterised
                 // with: the JITTERED viewProj (§10.7 #3), and the decal pass's
