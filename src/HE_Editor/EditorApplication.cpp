@@ -1248,6 +1248,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsVisual                = globalstate.getCustomConfigBool("RewardsVisual", m_editorConfig.RewardsVisual);
 	m_editorConfig.RewardsCheckMark             = globalstate.getCustomConfigBool("RewardsCheckMark", m_editorConfig.RewardsCheckMark);
 	m_editorConfig.RewardsLightEdge             = globalstate.getCustomConfigBool("RewardsLightEdge", m_editorConfig.RewardsLightEdge);
+	m_editorConfig.RewardsMomentCompile         = globalstate.getCustomConfigBool("RewardsMomentCompile", m_editorConfig.RewardsMomentCompile);
+	m_editorConfig.RewardsMomentCommit          = globalstate.getCustomConfigBool("RewardsMomentCommit", m_editorConfig.RewardsMomentCommit);
+	m_editorConfig.RewardsMomentTutorial        = globalstate.getCustomConfigBool("RewardsMomentTutorial", m_editorConfig.RewardsMomentTutorial);
 	m_editorConfig.RewardsTabCheck              = globalstate.getCustomConfigBool("RewardsTabCheck", m_editorConfig.RewardsTabCheck);
 	m_editorConfig.RewardsImportHighlight       = globalstate.getCustomConfigBool("RewardsImportHighlight", m_editorConfig.RewardsImportHighlight);
 	m_editorConfig.RewardsReducedMotion         = std::clamp(globalstate.getCustomConfigInt("RewardsReducedMotion", m_editorConfig.RewardsReducedMotion), 0, 1);
@@ -1257,6 +1260,13 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsSoundBuild            = globalstate.getCustomConfigBool("RewardsSoundBuild", m_editorConfig.RewardsSoundBuild);
 	m_editorConfig.RewardsSoundBuildFailed      = globalstate.getCustomConfigBool("RewardsSoundBuildFailed", m_editorConfig.RewardsSoundBuildFailed);
 	m_editorConfig.RewardsSoundImport           = globalstate.getCustomConfigBool("RewardsSoundImport", m_editorConfig.RewardsSoundImport);
+	m_editorConfig.RewardsSoundCompile          = globalstate.getCustomConfigBool("RewardsSoundCompile", m_editorConfig.RewardsSoundCompile);
+	m_editorConfig.RewardsSoundCompileFailed    = globalstate.getCustomConfigBool("RewardsSoundCompileFailed", m_editorConfig.RewardsSoundCompileFailed);
+	m_editorConfig.RewardsSoundCommit           = globalstate.getCustomConfigBool("RewardsSoundCommit", m_editorConfig.RewardsSoundCommit);
+	m_editorConfig.RewardsSoundTutorial         = globalstate.getCustomConfigBool("RewardsSoundTutorial", m_editorConfig.RewardsSoundTutorial);
+	m_editorConfig.RewardsSoundProblem          = globalstate.getCustomConfigBool("RewardsSoundProblem", m_editorConfig.RewardsSoundProblem);
+	m_editorConfig.RewardsSoundDragDrop         = globalstate.getCustomConfigBool("RewardsSoundDragDrop", m_editorConfig.RewardsSoundDragDrop);
+	m_editorConfig.RewardsProblemPulse          = globalstate.getCustomConfigBool("RewardsProblemPulse", m_editorConfig.RewardsProblemPulse);
 	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
 	m_editorConfig.RewardsCounterTick           = globalstate.getCustomConfigBool("RewardsCounterTick", m_editorConfig.RewardsCounterTick);
 	m_editorConfig.RewardsStreakTooltip         = globalstate.getCustomConfigBool("RewardsStreakTooltip", m_editorConfig.RewardsStreakTooltip);
@@ -4367,6 +4377,10 @@ void EditorApplication::OnRender(float dt)
 
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
+	// Reward moment (EditorRewards.h): COMMITTED — no AppContext here, so
+	// post(): fired by the next frame's pollBuild.
+	if (const int sync = m_git.takeSyncMoment())
+		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::Committed, sync);
 
 		if (m_collab.inSession()) syncStructuralChanges();
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
@@ -11880,6 +11894,9 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsVisual",              m_editorConfig.RewardsVisual);
 	globalstate.setCustomConfigEntry("RewardsCheckMark",           m_editorConfig.RewardsCheckMark);
 	globalstate.setCustomConfigEntry("RewardsLightEdge",           m_editorConfig.RewardsLightEdge);
+	globalstate.setCustomConfigEntry("RewardsMomentCompile",       m_editorConfig.RewardsMomentCompile);
+	globalstate.setCustomConfigEntry("RewardsMomentCommit",        m_editorConfig.RewardsMomentCommit);
+	globalstate.setCustomConfigEntry("RewardsMomentTutorial",      m_editorConfig.RewardsMomentTutorial);
 	globalstate.setCustomConfigEntry("RewardsTabCheck",            m_editorConfig.RewardsTabCheck);
 	globalstate.setCustomConfigEntry("RewardsImportHighlight",     m_editorConfig.RewardsImportHighlight);
 	globalstate.setCustomConfigEntry("RewardsReducedMotion",       m_editorConfig.RewardsReducedMotion);
@@ -11889,6 +11906,13 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsSoundBuild",          m_editorConfig.RewardsSoundBuild);
 	globalstate.setCustomConfigEntry("RewardsSoundBuildFailed",    m_editorConfig.RewardsSoundBuildFailed);
 	globalstate.setCustomConfigEntry("RewardsSoundImport",         m_editorConfig.RewardsSoundImport);
+	globalstate.setCustomConfigEntry("RewardsSoundCompile",        m_editorConfig.RewardsSoundCompile);
+	globalstate.setCustomConfigEntry("RewardsSoundCompileFailed",  m_editorConfig.RewardsSoundCompileFailed);
+	globalstate.setCustomConfigEntry("RewardsSoundCommit",         m_editorConfig.RewardsSoundCommit);
+	globalstate.setCustomConfigEntry("RewardsSoundTutorial",       m_editorConfig.RewardsSoundTutorial);
+	globalstate.setCustomConfigEntry("RewardsSoundProblem",        m_editorConfig.RewardsSoundProblem);
+	globalstate.setCustomConfigEntry("RewardsSoundDragDrop",       m_editorConfig.RewardsSoundDragDrop);
+	globalstate.setCustomConfigEntry("RewardsProblemPulse",        m_editorConfig.RewardsProblemPulse);
 	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
 	globalstate.setCustomConfigEntry("RewardsCounterTick",         m_editorConfig.RewardsCounterTick);
 	globalstate.setCustomConfigEntry("RewardsStreakTooltip",       m_editorConfig.RewardsStreakTooltip);

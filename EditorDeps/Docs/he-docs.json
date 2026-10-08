@@ -9826,6 +9826,122 @@
           "s": "",
           "t": " (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself."
          }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Feedback"
+         },
+         {
+          "s": "",
+          "t": " — small, optional signs that something just worked. A save, a finished build, an import, a clean HorizonCode compile, a commit or push and the end of the tutorial each show a word in the middle of the footer ("
+         },
+         {
+          "s": "i",
+          "t": "Saved"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "i",
+          "t": "Build succeeded"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "i",
+          "t": "Compiles clean"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "i",
+          "t": "Committed and pushed"
+         },
+         {
+          "s": "",
+          "t": "…) with a drawn check mark, then the footer returns to "
+         },
+         {
+          "s": "i",
+          "t": "Ready"
+         },
+         {
+          "s": "",
+          "t": ". Nothing opens, nothing takes focus, nothing waits for it. The compile readout in a graph's strip writes the same check; a compile that found a problem makes the offending node's red halo pulse once, and a new problem notification rings the footer bell once ("
+         },
+         {
+          "s": "i",
+          "t": "Problem Pulse"
+         },
+         {
+          "s": "",
+          "t": "). Beside "
+         },
+         {
+          "s": "i",
+          "t": "Ready"
+         },
+         {
+          "s": "",
+          "t": " the footer can show today's builds and your days in a row; hovering them shows the last seven days. No points, levels or goals."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Feedback sounds"
+         },
+         {
+          "s": "",
+          "t": " — off until you switch on "
+         },
+         {
+          "s": "i",
+          "t": "Success Sound"
+         },
+         {
+          "s": "",
+          "t": ". Then each event has its own quiet tone and its own switch with a "
+         },
+         {
+          "s": "i",
+          "t": "Preview"
+         },
+         {
+          "s": "",
+          "t": " button: save, build, build failed, import, compile, compile failed, commit, tutorial and problem. "
+         },
+         {
+          "s": "i",
+          "t": "Sound Volume"
+         },
+         {
+          "s": "",
+          "t": " sets them all; "
+         },
+         {
+          "s": "i",
+          "t": "Mute Editor Sounds"
+         },
+         {
+          "s": "",
+          "t": " silences them at once and keeps the switches as they are. The build, commit and problem tones only play while the editor is in the background; at most one tone plays every two seconds, the problem tone at most every thirty, and none during Play. They play on an output of the editor's own, which is only opened while sound is on, so the project's mixer and mute do not touch them. "
+         },
+         {
+          "s": "i",
+          "t": "Reduced Motion"
+         },
+         {
+          "s": "",
+          "t": " follows the system: check marks appear whole, rings and lines stop moving, fades stay."
+         }
         ]
        ],
        "k": "ul"
@@ -9833,7 +9949,7 @@
      ],
      "eyebrow": "Setup",
      "id": "preferences",
-     "text": "Edit » Preferences (Ctrl/Cmd + ,) holds machine-level settings: Renderer — graphics backend picker (OpenGL everywhere; Metal on macOS; Direct3D 11/12 on Windows; Vulkan where enabled), VSync, GPU weather particles. Post-processing — Bloom (threshold, intensity) and ambient occlusion (method SSAO / HBAO / GTAO, radius, intensity). See Post-Processing. Source Control » Repository — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Between the two sits your GitHub account: signed in, or a button to sign in. Commits and pushes themselves live in View » Source Control. Tools » Status — everything the editor needs from outside itself in one table: git and Git LFS, CMake and a C++ compiler, the local network and the router. Rows that are not green offer a Fix. A \"C++ Toolchain Not Found\" dialog also appears at startup when CMake or the compiler are missing, offering automatic installation — the toolchain is needed for C++ projects and for compiling HorizonCode at export. Collaboration — whether the editor announces and listens for sessions on the local network; whether it will carry large assets (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself.",
+     "text": "Edit » Preferences (Ctrl/Cmd + ,) holds machine-level settings: Renderer — graphics backend picker (OpenGL everywhere; Metal on macOS; Direct3D 11/12 on Windows; Vulkan where enabled), VSync, GPU weather particles. Post-processing — Bloom (threshold, intensity) and ambient occlusion (method SSAO / HBAO / GTAO, radius, intensity). See Post-Processing. Source Control » Repository — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Between the two sits your GitHub account: signed in, or a button to sign in. Commits and pushes themselves live in View » Source Control. Tools » Status — everything the editor needs from outside itself in one table: git and Git LFS, CMake and a C++ compiler, the local network and the router. Rows that are not green offer a Fix. A \"C++ Toolchain Not Found\" dialog also appears at startup when CMake or the compiler are missing, offering automatic installation — the toolchain is needed for C++ projects and for compiling HorizonCode at export. Collaboration — whether the editor announces and listens for sessions on the local network; whether it will carry large assets (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself. Feedback — small, optional signs that something just worked. A save, a finished build, an import, a clean HorizonCode compile, a commit or push and the end of the tutorial each show a word in the middle of the footer (Saved, Build succeeded, Compiles clean, Committed and pushed…) with a drawn check mark, then the footer returns to Ready. Nothing opens, nothing takes focus, nothing waits for it. The compile readout in a graph's strip writes the same check; a compile that found a problem makes the offending node's red halo pulse once, and a new problem notification rings the footer bell once (Problem Pulse). Beside Ready the footer can show today's builds and your days in a row; hovering them shows the last seven days. No points, levels or goals. Feedback sounds — off until you switch on Success Sound. Then each event has its own quiet tone and its own switch with a Preview button: save, build, build failed, import, compile, compile failed, commit, tutorial and problem. Sound Volume sets them all; Mute Editor Sounds silences them at once and keeps the switches as they are. The build, commit and problem tones only play while the editor is in the background; at most one tone plays every two seconds, the problem tone at most every thirty, and none during Play. They play on an output of the editor's own, which is only opened while sound is on, so the project's mixer and mute do not touch them. Reduced Motion follows the system: check marks appear whole, rings and lines stop moving, fades stay.",
      "title": "Preferences"
     },
     {
@@ -12985,11 +13101,36 @@
          "t": "The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins."
         }
        ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "With "
+        },
+        {
+         "s": "b",
+         "t": "Preferences » Feedback » Success Sound"
+        },
+        {
+         "s": "",
+         "t": " on, dragging makes short, quiet sounds: a blip when a wire or a variable is picked up, a light tick over a pin it would connect to and a muted one over a pin it would not, a snap when it lands and a falling blip when the drop is cancelled or refused. Each sound plays once per event, never per frame, and moving a node stays silent. "
+        },
+        {
+         "s": "b",
+         "t": "Drag and Drop Sound"
+        },
+        {
+         "s": "",
+         "t": " switches them off on their own; volume and mute are shared with the other feedback sounds."
+        }
+       ]
       }
      ],
      "eyebrow": "Mechanics",
      "id": "graphs",
-     "text": "A graph is built from nodes connected by two kinds of wire. Execution links (white) define control flow — they run in order from an event. Data links are typed (Float, Bool, Int, String, Vec2, Color, Transform, or an object Reference) and are evaluated on demand when a node needs a value. Nothing runs until an event fires from the host — a button click, the frame tick, a level loading, an input action. The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins.",
+     "text": "A graph is built from nodes connected by two kinds of wire. Execution links (white) define control flow — they run in order from an event. Data links are typed (Float, Bool, Int, String, Vec2, Color, Transform, or an object Reference) and are evaluated on demand when a node needs a value. Nothing runs until an event fires from the host — a button click, the frame tick, a level loading, an input action. The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins. With Preferences » Feedback » Success Sound on, dragging makes short, quiet sounds: a blip when a wire or a variable is picked up, a light tick over a pin it would connect to and a muted one over a pin it would not, a snap when it lands and a falling blip when the drop is cancelled or refused. Each sound plays once per event, never per frame, and moving a node stays silent. Drag and Drop Sound switches them off on their own; volume and mute are shared with the other feedback sounds.",
      "title": "How a Graph Works"
     },
     {

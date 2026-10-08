@@ -20,6 +20,7 @@
 #include "GraphEditor.h"         // shared node-graph canvas
 #include "HcGraphHost.h"         // shared HorizonCode canvas host (pins, menus, clipboard)
 #include "HcExecTrace.h"         // run-time node hits + "go to node" reveals
+#include "EditorRewards.h"       // reward moment: Compiles clean (post)
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/Net/ValueWire.h>   // which types may replicate at all
@@ -247,6 +248,9 @@ void runCompileCheck(const HC::Graph& graph, const char* title,
 		g.compileOk   = false;
 		g.compileMsg  = mine->reason;
 		g.compileNode = mine->node;
+		// Reward tone (EditorRewards.h): COMPILE FAILED — no moment, only its
+		// sound; postSound(), this code has no AppContext.
+		HE::Ed::Rewards::postSound(HE::Ed::Rewards::Tone::CompileFailed);
 		// Jump to the offending node: open its sub-graph and center on it.
 		if (const HC::Node* n = graph.findNode(g.compileNode))
 		{
@@ -262,6 +266,9 @@ void runCompileCheck(const HC::Graph& graph, const char* title,
 		for (const auto& f : res.files)
 			lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
 		g.compileOk  = true;
+		// Reward moment (EditorRewards.h): COMPILED CLEAN — post(), this code
+		// has no AppContext. Only the Compile button calls this.
+		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::CompiledClean);
 		// The line count covers the whole ancestry when there is one — which is
 		// honest: that is what an export builds to make THIS class native.
 		g.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
@@ -1195,6 +1202,9 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	host.selfKey      = g.graphFor;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (g.compileHas && !g.compileOk) ? g.compileNode : 0;
+	// …which pulses once after the compile (visual cue V9, EditorRewards.h).
+	if (host.errorNode != 0)
+		host.errorPulse = HE::Ed::Rewards::errorPulse(ImGui::GetTime() - g.compileAt);
 	// …and a node the interpreter just ran a fading amber one.
 	host.traceKey     = g.traceKey;
 	host.title        = [](const HC::Node& n){ return nodeTitle(n); };
@@ -1528,8 +1538,20 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		if (showCompile)
 		{
 			bar.group();
-			bar.readout(g.compileOk ? T::iconCheck : T::iconWarning,
-			            g.compileMsg.c_str(), g.compileOk ? T::kGood : T::kBad);
+			// Visual cue V9 (EditorRewards.h): a clean result writes the
+			// footer's check into the icon slot; < 0 = the static icon.
+			const float stroke = g.compileOk
+				? HE::Ed::Rewards::compileCheck(ImGui::GetTime() - g.compileAt) : -1.0f;
+			if (stroke >= 0.0f)
+			{
+				const ImVec2 c = bar.readout([](ImDrawList*, const ImVec2&, float, ImU32) {},
+				                             g.compileMsg.c_str(), T::kGood);
+				const float s = bar.iconSize();
+				HE::Ed::Rewards::drawCheckMark(c.x - s * 0.5f, c.y - s * 0.5f, s, stroke, 1.0f);
+			}
+			else
+				bar.readout(g.compileOk ? T::iconCheck : T::iconWarning,
+				            g.compileMsg.c_str(), g.compileOk ? T::kGood : T::kBad);
 			bar.endGroup();
 		}
 

@@ -6,6 +6,7 @@
 #include "EditorTheme.h"         // brand palette (the action line)
 #include "EditorAssetTypeCache.h" // asset-type sniff for the create/open checks
 #include "PanelSpotlight.h"      // the pulsing panel outline, shared with the docs reader
+#include "EditorRewards.h"       // reward moment: Tutorial complete
 #include "HorizonVersion.h"
 
 #include <HorizonScene/HorizonWorld.h>
@@ -107,6 +108,17 @@ namespace
 		s_readToEnd  = false;
 		s_visitedPanels.clear();
 		persist(gs);
+	}
+
+	// Forward one step — the Finish/Next button and the auto-advance, the only
+	// two ways the tour moves on (Back and Start Over use gotoCursor).
+	void advanceStep(AppContext& ctx)
+	{
+		const bool lastStep = !tut::finished(s_cursor) && tut::finished(tut::advance(s_cursor));
+		gotoCursor(tut::advance(s_cursor), ctx.globalState);
+		// Reward moment (EditorRewards.h): TOUR FINISHED — once per run, the
+		// step from the last step to finished.
+		if (lastStep) HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::TourFinished);
 	}
 
 	// HE::AssetType → the tour's own Asset enum. Only the kinds a step asks for
@@ -775,7 +787,7 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 			// — waiting out the confirmation delay for a card the user just
 			// dismissed would only feel unresponsive.
 			s_ackPressed = true;
-			gotoCursor(tut::advance(s_cursor), ctx.globalState);
+			advanceStep(ctx);
 		}
 		ImGui::EndDisabled();
 		if (!ready && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -792,7 +804,7 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	{
 		s_doneTimer += dt;
 		if (s_doneTimer >= kAutoAdvanceDelay)
-			gotoCursor(tut::advance(s_cursor), ctx.globalState);
+			advanceStep(ctx);
 	}
 
 	if (!s_stepDone)

@@ -14,6 +14,7 @@
 #include "GraphEditor.h"                        // shared node-graph canvas
 #include "HcGraphHost.h"                        // shared HorizonCode canvas host (pins, menus, clipboard)
 #include "HcExecTrace.h"                        // run-time node hits + "go to node" reveals
+#include "EditorRewards.h"                      // reward moment: Compiles clean
 #include "HcEditorUtil.h"                       // Create Object class picker
 #include "HcRenameDialog.h"                     // "that rename reaches other files"
 #include "HcPullUi.h"                           // Pull on Construct in the variable details
@@ -6183,6 +6184,9 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	host.selfKey      = st.relPath;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (st.compileHas && !st.compileOk) ? st.compileNode : 0;
+	// …which pulses once after the compile (visual cue V9, EditorRewards.h).
+	if (host.errorNode != 0)
+		host.errorPulse = HE::Ed::Rewards::errorPulse(ImGui::GetTime() - st.compileAt);
 	// …and a node the interpreter just ran a fading amber one. The runtime
 	// keys a widget's instances by the asset path it was created from, which
 	// is this content-relative path.
@@ -7133,8 +7137,20 @@ void render(AppContext& ctx, const std::string& assetPath,
 		if (showCompile)
 		{
 			uiBar.group();
-			uiBar.readout(st.compileOk ? T::iconCheck : T::iconWarning,
-			              st.compileMsg.c_str(), st.compileOk ? T::kGood : T::kBad);
+			// Visual cue V9 (EditorRewards.h): the written check, as in the
+			// class graph's strip.
+			const float stroke = st.compileOk
+				? HE::Ed::Rewards::compileCheck(ImGui::GetTime() - st.compileAt) : -1.0f;
+			if (stroke >= 0.0f)
+			{
+				const ImVec2 c = uiBar.readout([](ImDrawList*, const ImVec2&, float, ImU32) {},
+				                               st.compileMsg.c_str(), T::kGood);
+				const float s = uiBar.iconSize();
+				HE::Ed::Rewards::drawCheckMark(c.x - s * 0.5f, c.y - s * 0.5f, s, stroke, 1.0f);
+			}
+			else
+				uiBar.readout(st.compileOk ? T::iconCheck : T::iconWarning,
+				              st.compileMsg.c_str(), st.compileOk ? T::kGood : T::kBad);
 			uiBar.endGroup();
 		}
 		uiBar.rightGroup(uiBar.labelGroupWidth({ "Compile" }));
@@ -7160,6 +7176,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 				st.compileOk   = false;
 				st.compileMsg  = res.fallbacks[0].reason;
 				st.compileNode = res.fallbacks[0].node;
+				// Reward tone (EditorRewards.h): COMPILE FAILED — no moment.
+				HE::Ed::Rewards::sound(ctx, HE::Ed::Rewards::Tone::CompileFailed);
 				if (const HC::Node* n = st.graph.findNode(st.compileNode))
 				{
 					st.currentGraph      = n->subgraph;
@@ -7175,6 +7193,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 					lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
 				st.compileOk  = true;
 				st.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+				// Reward moment (EditorRewards.h): COMPILED CLEAN.
+				HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::CompiledClean);
 				for (const auto& w : res.warnings)
 					HE_LOG_WARN(Editor, "%s",
 						("HorizonCode compile check: " + w).c_str());
