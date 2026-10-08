@@ -7075,10 +7075,26 @@ void EditorApplication::dumpFrameHeadless()
 
 	// Witness the material-preview offscreen path (HE_DUMP_PREVIEW + HE_PREVIEW_DUMP):
 	// render the test material's preview sphere and let the backend dump it.
-	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && s_matTestId != HE::UUID{})
+	// HE_DUMP_PREVIEWMAT=<content-relative .hasset> previews THAT material instead
+	// (e.g. "Engine/Materials/Water.hasset"), and HE_DUMP_PREVIEWTIME=<seconds> hands
+	// the preview the engine clock the Material Editor hands it every frame — two runs
+	// at different times must differ for a material that reads Time, and match for one
+	// that does not (the noise floor). Without it the preview is the frozen still the
+	// Content Browser thumbnails use.
+	HE::UUID pvMat = s_matTestId;
+	if (const char* pmat = std::getenv("HE_DUMP_PREVIEWMAT"); pmat && *pmat && std::getenv("HE_DUMP_PREVIEW"))
+	{
+		pvMat = contentManager().loadAsset(pmat);
+		HE_LOG_INFO(Editor, "%s", (std::string("EditorApplication: preview material '") + pmat
+			+ (pvMat != HE::UUID{} ? "' loaded" : "' NOT FOUND")).c_str());
+	}
+	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && pvMat != HE::UUID{})
 	{
 		// HE_DUMP_PREVIEW=1 → sphere (default); =2 cube, =3 plane (the editor's primitives).
 		const int shape = std::clamp(std::atoi(pv) - 1, 0, 2);
+		float pvTime = -1.0f;
+		if (const char* pt = std::getenv("HE_DUMP_PREVIEWTIME"); pt && *pt)
+			pvTime = static_cast<float>(std::atof(pt));
 		// HE_DUMP_PREVIEWMESH=<content-relative path> witnesses the OTHER preview
 		// subject: any static mesh the Material Editor's picker can choose (e.g.
 		// "Engine/Meshes/Torus.hasset"), auto-framed on its bounds.
@@ -7089,11 +7105,11 @@ void EditorApplication::dumpFrameHeadless()
 			HE_LOG_INFO(Editor, "%s", (std::string("EditorApplication: preview mesh '") + pm
 				+ (pvMesh != HE::UUID{} ? "' loaded" : "' NOT FOUND")).c_str());
 		}
-		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f, shape, pvMesh);
+		r->RenderMaterialPreview(contentManager(), pvMat, 512, 0.6f, 0.35f, 3.1f, shape, pvMesh, pvTime);
 		// Stress the property-change→re-preview path (repro for the side-panel crash):
 		// mutate the material's shader source + params like an editor edit would, then
 		// re-preview. HE_DUMP_PREVIEW_STRESS=N repeats N times.
-		if (const char* sp = std::getenv("HE_DUMP_PREVIEW_STRESS"); sp && *sp)
+		if (const char* sp = std::getenv("HE_DUMP_PREVIEW_STRESS"); sp && *sp && pvMat == s_matTestId)
 		{
 			const int reps = std::max(1, std::atoi(sp));
 			for (int k = 0; k < reps; ++k)

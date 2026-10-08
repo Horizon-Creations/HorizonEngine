@@ -729,6 +729,88 @@ TEST_CASE("Wind Sway inside a function called from WPO still gets the bend mask"
 	CHECK(gen.glsl.find("pos.y") == std::string::npos);
 }
 
+// ═══ Material Editor preview: does the shader on screen read the clock? ════════
+// The preview redraws every frame for exactly these shaders and only on edits for
+// the rest, so the question has to be answered from the text the GPU runs — and
+// answered "no" for everything that does not move, or an idle editor burns a core
+// re-rendering a still sphere.
+TEST_CASE("matGlslUsesTime: every clock reader says yes, everything else says no")
+{
+	// A graph with nothing animated in it: the fresh material, a lit colour with a
+	// Fresnel rim, the environment wind alone (a constant between two edits).
+	{
+		const HE::MatShaderGen gen = HE::generateFragment(MaterialGraph::makeDefault());
+		CHECK_FALSE(HE::matGlslUsesTime(gen.glsl));
+		CHECK_FALSE(HE::matGlslUsesTime(gen.vertexBody));
+	}
+	{
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int fres = g.addNode(MatNodeType::Fresnel);
+		REQUIRE(g.connect(fres, 0, out, HE::kMatOutputMetallicPin));
+		CHECK_FALSE(HE::matGlslUsesTime(HE::generateFragment(g).glsl));
+	}
+	{
+		MaterialGraph g;
+		const int out  = g.addNode(MatNodeType::Output);
+		const int wind = g.addNode(MatNodeType::Wind);
+		REQUIRE(g.connect(wind, 1, out, HE::kMatOutputMetallicPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		CHECK(gen.glsl.find("heLight.camPos.w") != std::string::npos); // it reads wind…
+		CHECK_FALSE(HE::matGlslUsesTime(gen.glsl));                    // …not the clock
+	}
+
+	// The Time node, wherever it lands: the demo graph's sin(Time) → Metallic.
+	CHECK(HE::matGlslUsesTime(HE::generateFragment(makeDemoGraph()).glsl));
+
+	// Panner scrolls UVs by Speed * Time.
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int uv  = g.addNode(MatNodeType::UV);
+		const int pan = g.addNode(MatNodeType::Panner);
+		const int nz  = g.addNode(MatNodeType::ValueNoise);
+		REQUIRE(g.connect(uv,  0, pan, 0));
+		REQUIRE(g.connect(pan, 0, nz,  0));
+		REQUIRE(g.connect(nz,  0, out, HE::kMatOutputMetallicPin));
+		CHECK(HE::matGlslUsesTime(HE::generateFragment(g).glsl));
+	}
+
+	// Wind Sway in the WPO pin lives in the VERTEX body only; the fragment text is
+	// clean, so a scan of the fragment alone would call a swaying plant still.
+	{
+		MaterialGraph g;
+		const int out  = g.addNode(MatNodeType::Output);
+		const int sway = g.addNode(MatNodeType::WindSway);
+		REQUIRE(g.connect(sway, 0, out, HE::kMatOutputWPOPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.vertexBody.empty());
+		CHECK(HE::matGlslUsesTime(gen.vertexBody));
+		CHECK_FALSE(HE::matGlslUsesTime(gen.glsl));
+	}
+
+	// A Time inside a called material function reaches the caller's text.
+	{
+		MaterialGraph fn;
+		const int t  = fn.addNode(MatNodeType::Time);
+		const int fo = fn.addNode(MatNodeType::FnOutput);
+		fn.findNode(fo)->s    = "Phase";
+		fn.findNode(fo)->p[0] = 0.0f; // Float
+		REQUIRE(fn.connect(t, 0, fo, 0));
+		MaterialGraph g;
+		const int out  = g.addNode(MatNodeType::Output);
+		const int call = g.addNode(MatNodeType::FunctionCall);
+		g.findNode(call)->s = "Fns/Phase.hasset";
+		REQUIRE(g.connect(call, 0, out, HE::kMatOutputMetallicPin));
+		HE::MatFunctionLoader loader = [&](const std::string& path) -> const MaterialGraph*
+		{ return path == "Fns/Phase.hasset" ? &fn : nullptr; };
+		CHECK(HE::matGlslUsesTime(HE::generateFragment(g, loader).glsl));
+	}
+
+	CHECK_FALSE(HE::matGlslUsesTime(""));
+}
+
 TEST_CASE("FillMaterialWind: the cloud compass, a unit direction and the raw strength")
 {
 	IRenderer::EnvironmentSettings env;
