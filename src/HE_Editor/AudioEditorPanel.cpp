@@ -8,6 +8,8 @@
 #include "EditorWidgets.h"        // WrapText
 #include "AudioImporter.h"        // raw .wav/.ogg decode + the Import button
 #include "AudioWaveformView.h"    // the canvas: peaks, zoom/scroll, playhead, selection
+#include "AudioMixView.h"         // the clip's bus dropdown and its EQ
+#include "ProjectManager.h"       // the project's bus list — the one the Audio Mixer edits
 #include "ImporterCommon.h"       // readAssetChunk — the edit chunk as the file has it
 #include <Audio/AudioEdit.h>
 #include <ContentManager/ContentManager.h>
@@ -138,6 +140,12 @@ struct State
 	// Extract multiplies the volume curve into the new clip's samples instead of
 	// handing it over as an edit (AudioImporter::extractRange, bakeCurve).
 	bool        bakeCurve        = false;
+
+	// The EQ pane under the waveform (toolbar "EQ"): open on the first frame
+	// when the clip already has bands, so an EQ'd clip says so when it opens.
+	bool                     showEq     = false;
+	bool                     showEqInit = false;
+	HE::Ed::AudioMix::EqView eqView;
 };
 
 AssetPanelState<State> s_states;
@@ -324,7 +332,7 @@ HE::Ed::AudioWave::Clip waveClipOf(const AudioAsset& a)
 // engine copies whatever play() is handed anyway (AudioEngine.h), so the slice
 // can die at the end of this function; for the whole clip there is no slice
 // at all — the asset's buffer goes straight in, as before.
-void startPreview(const AudioAsset& clip, State& st, const HE::AudioEnvelope* curve)
+void startPreview(const AudioAsset& clip, State& st, const HE::AudioEdit* edit)
 {
 	if (!st.audio || !st.audio->isInitialized()) return;
 	stopPreview(st);
@@ -337,14 +345,18 @@ void startPreview(const AudioAsset& clip, State& st, const HE::AudioEnvelope* cu
 	// An asset's voice carries its volume curve, offset to where the played
 	// range sits in the clip, so the preview hears it where it is drawn — and,
 	// because the curve stage is in even for an empty curve, hears every edit of
-	// it while it plays (setSoundEnvelope after each change). A raw file has no
-	// curve and plays as it is.
+	// it while it plays (setSoundEnvelope after each change). The same stage
+	// runs its EQ (setSoundEq), and the voice goes through the bus the game
+	// would route the clip to, so the mixer's fader, mute and solo — and its
+	// voice count — apply to the preview too. A raw file has none of these and
+	// plays as it is, on master.
+	const std::string bus = edit ? st.audio->routeFor({}, edit->bus) : std::string();
 	auto playBytes = [&](const std::vector<uint8_t>& bytes)
 	{
-		return curve ? st.audio->play(bytes, clip.sampleRate, clip.channels, *curve, r.begin,
-		                              st.volume, st.pitch, st.loop, {})
-		             : st.audio->play(bytes, clip.sampleRate, clip.channels,
-		                              st.volume, st.pitch, st.loop, {});
+		return edit ? st.audio->play(bytes, clip.sampleRate, clip.channels, edit->envelope, r.begin,
+		                             st.volume, st.pitch, st.loop, bus, &edit->eq)
+		            : st.audio->play(bytes, clip.sampleRate, clip.channels,
+		                             st.volume, st.pitch, st.loop, {});
 	};
 	if (r.begin == 0 && r.end == frames)
 		st.handle = playBytes(clip.audioData);
@@ -476,6 +488,24 @@ void curveChanged(State& st, AudioAsset& a, bool commit)
 	st.dirty = true;
 	if (st.handle && st.audio) st.audio->setSoundEnvelope(st.handle, a.edit.envelope);
 	if (commit) pushUndo(st, a.edit);
+}
+
+// The same for the EQ: heard at once in a running preview, an undo point when
+// the gesture is finished.
+void eqChanged(State& st, AudioAsset& a, bool commit)
+{
+	st.dirty = true;
+	if (st.handle && st.audio) st.audio->setSoundEq(st.handle, a.edit.eq);
+	if (commit) pushUndo(st, a.edit);
+}
+
+// The project's bus list — THE one the Audio Mixer edits, read every frame, so
+// a bus added or removed there is in (or missing from) the dropdown at once.
+// Null when no project is open.
+const HE::AudioBusConfig* projectBuses(AppContext& ctx)
+{
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty()) return nullptr;
+	return &ctx.projectManager->currentProject().audioBuses;
 }
 
 // Where a file this tab writes lands: next to the clip, or — for a clip in the
@@ -704,6 +734,11 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	const bool  canEdit     = editable != nullptr && !editsLocked;
 	// The baseline undo goes back to, taken on the first frame the asset is there.
 	if (editable && st.undoPos < 0) pushUndo(st, editable->edit);
+	if (editable && !st.showEqInit)
+	{
+		st.showEqInit = true;
+		st.showEq     = !editable->edit.eq.bands.empty();
+	}
 	syncTrimView(st, editable, frames);
 
 	// ── Follow the running voice ─────────────────────────────────────────────
@@ -827,6 +862,16 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			curveChanged(st, *editable, true);
 		}
 		bar.endGroup();
+
+		// The EQ pane under the waveform. (The bus is a dropdown in the left
+		// column: a list of names does not fit a toolbar cell.)
+		bar.group();
+		if (bar.item("##audioeq", nullptr, "EQ", st.showEq && editable != nullptr, editable != nullptr,
+		             editable ? "Show the clip's EQ under the waveform"
+		                      : "A source file has no asset to keep an EQ in — import it first",
+		             "Audio Editor/EQ"))
+			st.showEq = !st.showEq;
+		bar.endGroup();
 		// The buttons above may have changed the trim; the canvas below and the
 		// transport draw this frame's.
 		syncTrimView(st, editable, frames);
@@ -849,7 +894,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		                        : "No audio device — the editor's audio engine failed to start",
 		             "Audio Editor/Play"))
 		{
-			if (!st.handle)          startPreview(*clip, st, editable ? &editable->edit.envelope : nullptr);
+			if (!st.handle)          startPreview(*clip, st, editable ? &editable->edit : nullptr);
 			else if (st.paused)      { st.audio->resumeSound(st.handle); st.paused = false; }
 			else                     { st.audio->pauseSound(st.handle);  st.paused = true;  }
 		}
@@ -998,6 +1043,39 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			                    "the waveform to add points.");
 		else
 			ImGui::TextDisabled("Only an imported, editable asset can carry a volume curve.");
+
+		// ── Mixer bus ────────────────────────────────────────────────────────
+		// Which Audio Mixer bus the clip plays through wherever the game plays
+		// it, unless an Audio Source names one of its own. The list is the
+		// project's (the mixer's), read every frame.
+		ImGui::SeparatorText("Mixer bus");
+		if (editable)
+		{
+			const HE::AudioBusConfig* buses = projectBuses(ctx);
+			std::string bus = editable->edit.bus;
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			if (HE::Ed::AudioMix::drawBusCombo(buses, bus, canEdit))
+			{
+				editable->edit.bus = bus;
+				commitEdit(st, editable->edit);
+				// A voice cannot change buses while it plays: start it again
+				// on the new one, from where it is.
+				if (st.handle && !st.paused) startPreview(*clip, st, &editable->edit);
+				else                         stopPreview(st);
+			}
+			const HE::Ed::AudioMix::BusChoice bc = HE::Ed::AudioMix::busChoice(buses, editable->edit.bus);
+			if (bc.missing)
+				ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.38f, 1.0f), "%s", bc.hint.c_str());
+			else if (!buses)
+				ImGui::TextDisabled("Open a project to choose one of its mixer buses.");
+			else if (buses->buses.empty())
+				ImGui::TextDisabled("The project has no buses yet: add them in Window > Audio Mixer.");
+			else
+				ImGui::TextDisabled("An Audio Source with a Bus of its own still overrides this.");
+		}
+		else
+			ImGui::TextDisabled("Only an imported asset can be assigned to a bus.");
+
 		if (!st.lastSaveError.empty())
 			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", st.lastSaveError.c_str());
 
@@ -1109,9 +1187,11 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		const float whereH  = ImGui::CalcTextSize(where.c_str(), nullptr, false, wrapW).y;
 		const float hintH   = ImGui::CalcTextSize(hint, nullptr, false, wrapW).y;
 		const float footerH = whereH + hintH + ImGui::GetStyle().ItemSpacing.y * 2.0f;
+		// The EQ pane, when it is open, takes the bottom of the column.
+		const float eqH = st.showEq && editable ? std::clamp(avail.y * 0.42f, 200.0f, 280.0f) : 0.0f;
 
 		const AW::Result res = AW::draw(wclip, st.peaks, st.view,
-			ImVec2(canvasW, std::max(80.0f + AW::metrics().overviewH, avail.y - footerH)),
+			ImVec2(canvasW, std::max(80.0f + AW::metrics().overviewH, avail.y - footerH - eqH)),
 			EditorInput::trackpadPointer(ctx),
 			editable ? &editable->edit.envelope : nullptr, canEdit);
 		st.canvasW    = res.canvasW;
@@ -1128,7 +1208,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			if (res.selectionChanged)
 			{
 				if (st.paused) stopPreview(st);
-				else           startPreview(*clip, st, editable ? &editable->edit.envelope : nullptr);
+				else           startPreview(*clip, st, editable ? &editable->edit : nullptr);
 			}
 			else if (res.seek)
 			{
@@ -1144,6 +1224,15 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			EditorWidgets::WrapText wrap;
 			ImGui::TextUnformatted(where.c_str());
 			ImGui::TextDisabled("%s", hint);
+		}
+
+		if (eqH > 0.0f)
+		{
+			ImGui::SeparatorText("EQ");
+			const HE::Ed::AudioMix::EqResult er = HE::Ed::AudioMix::drawEq(
+				editable->edit.eq, st.eqView, rate,
+				ImVec2(canvasW, std::max(80.0f, ImGui::GetContentRegionAvail().y)), canEdit);
+			if (er.edited || er.committed) eqChanged(st, *editable, er.committed);
 		}
 	}
 	ImGui::EndChild();

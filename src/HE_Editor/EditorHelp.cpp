@@ -790,7 +790,9 @@ namespace
 	{ "Audio Source/Asset ID", "", "The sound this source plays.", "", "systems#audio" },
 	{ "Audio Source/Bus", "",
 	  "Which mixer bus the sound goes through — music, sfx, voice — so a whole "
-	  "group can be turned down at once. Empty is the master bus.",
+	  "group can be turned down at once. Empty uses the bus the clip itself was "
+	  "given in the Audio Editor, or the master bus when it has none. A name the "
+	  "mixer does not have is skipped the same way, with a warning in the log.",
 	  "", "systems#audio" },
 	{ "Audio Source/Volume", "", "Playback volume. 1 is the file as recorded.",
 	  "", "systems#audio" },
@@ -6814,6 +6816,66 @@ namespace
 	{ "Audio Editor/Clear Curve", "",
 	  "Removes every point of the volume curve, so the clip plays at its own "
 	  "level again. Undoable.",
+	  "", "systems#audio" },
+	// Bus and EQ (AudioMixView.cpp). Unlabelled cells, looked up by key.
+	{ "Audio Editor/Bus", "Mixer Bus",
+	  "The Audio Mixer bus this clip plays through, wherever the game plays it: "
+	  "its fader, mute and solo apply to it. The list is the project's own, the "
+	  "one Window > Audio Mixer edits. An Audio Source whose Bus field names a "
+	  "bus still overrides this for that source. When the bus has since been "
+	  "removed or renamed in the mixer, it is shown as missing and the clip plays "
+	  "on Master; the name is kept, so the clip finds the bus again if it comes "
+	  "back. The preview in this tab plays through the same bus. Undoable, saved "
+	  "with the asset.",
+	  "", "systems#audio" },
+	{ "Audio Editor/EQ", "Show EQ",
+	  "Shows the clip's EQ under the waveform: the response curve and one row per "
+	  "band. The EQ is an edit like the trim and the curve: heard at once in the "
+	  "preview, applied wherever the game plays the clip, undoable, saved with "
+	  "the asset, the samples untouched. Hiding the pane does not switch it off; "
+	  "EQ On does.",
+	  "", "systems#audio" },
+	{ "Audio Editor/EQ On", "",
+	  "Switches the whole EQ in or out. Off keeps every band as it is but filters "
+	  "nothing, which is the quickest way to compare the clip with and without it.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Add Band", "",
+	  "Adds a bell band at 0 dB at a frequency no other band uses yet, so it "
+	  "changes nothing until you drag it. Up to eight bands.",
+	  "", "systems#audio" },
+	{ "Audio Editor/EQ Graph", "EQ response",
+	  "The EQ's summed response, from 20 Hz to 20 kHz on a log axis and ±18 dB. "
+	  "Each numbered handle is a band: drag it to move its frequency and gain, "
+	  "use the wheel over it to change its width (Q), right-click it to remove "
+	  "it. Double-click an empty spot to add a bell there. The faint line is the "
+	  "selected band on its own. The shaded part on the right lies above the "
+	  "clip's Nyquist frequency, half its sample rate: nothing can be shaped "
+	  "there, because the clip holds nothing that high.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Band On", "",
+	  "Switches this band in or out without losing its settings.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Band Type", "",
+	  "Bell lifts or cuts around its frequency. Low Shelf and High Shelf lift or "
+	  "cut everything below or above it. Low Pass and High Pass cut away "
+	  "everything above or below it; they have no gain, and Q sets how sharp "
+	  "the corner is.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Band Frequency", "",
+	  "The band's centre or corner frequency, 10 Hz to 22 kHz. Drag, or "
+	  "double-click to type a value.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Band Gain", "",
+	  "How far the band lifts or cuts, from -24 to +24 dB. Greyed out for the "
+	  "pass filters, which only cut.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Band Q", "",
+	  "The band's width: low values shape a broad region, high values a narrow "
+	  "one. For the pass filters it is the resonance at the corner; 0.71 is the "
+	  "plain, flat one.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Remove Band", "",
+	  "Deletes this band. Undoable.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Loop", "",
 	  "Whether playback wraps round at the end or stops there. With a selection "

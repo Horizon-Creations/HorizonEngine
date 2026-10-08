@@ -574,6 +574,9 @@ add_executable(he_tests
     # selection drag — over int16 samples and a View, never AppContext or the
     # AudioEngine, so the shot test can drag a selection across a synthetic clip.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioWaveformView.cpp
+    # …and its bus dropdown and EQ graph, over an AudioEdit and a bus list —
+    # the same reason: the shot test draws them without a project.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixView.cpp
     # The Cinematic tab's strip (a Sequence's bindings, cuts, sections, events)
     # and its preview bracket (save, write, restore), both without AppContext —
     # the same reason as the Sequencer's strip above.
