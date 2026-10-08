@@ -2496,3 +2496,98 @@ TEST_CASE("ui shot: audio waveform with a selection and a playhead")
 	}
 	CHECK(waveInk > 100);
 }
+
+// The trim (Thema 168, step 3): what does not play is shaded over the samples,
+// so they stay visible but read as cut away; a warm line marks each end, and
+// the overview strip shades the same frames.
+TEST_CASE("ui shot: audio waveform with a trim")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	// Three seconds of a steady stereo tone: the same ink everywhere, so any
+	// difference between inside and outside the trim is the shading.
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t = double(f) / rate;
+		pcm[f * 2 + 0] = int16_t(std::lround(24000.0 * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(12000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	// Trimmed to [0.6 s, 2.4 s): fitted at 150 frames a pixel, x = 192 to 768.
+	AW::View view;
+	view.trimBegin = size_t(rate * 0.6);
+	view.trimEnd   = size_t(rate * 2.4);
+	// The playhead away from both ends, so the warm lines checked below are the trim's.
+	view.playhead  = size_t(rate * 1.5);
+
+	const he_ui::Image img = shoot("audio_waveform_trim", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false);
+		const std::string where = AW::readout(view, clip, -1.0);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+
+	// The same tone inside and outside: bright wave ink inside the trim, the
+	// shaded (dark) version of it outside, on both sides.
+	const AW::Metrics& M = AW::metrics();
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const int   lane2Mid    = int(M.rulerH + (lanesBottom - M.rulerH) * 0.75f);
+	std::uint8_t r, g, b, a;
+	auto inkIn = [&](int x0, int x1)
+	{
+		int n = 0;
+		for (int x = x0; x < x1; x += 2)
+		{
+			img.pixel(x, lane2Mid - 4, r, g, b, a);
+			if (int(b) > 150) ++n;
+		}
+		return n;
+	};
+	CHECK(inkIn(220, 740) > 200);   // inside: the wave reads as it always did
+	CHECK(inkIn(0, 180) == 0);      // before the trim: shaded
+	CHECK(inkIn(780, W) == 0);      // after it: shaded
+	// …but still there: the shaded columns are not plain background.
+	img.pixel(90, lane2Mid - 4, r, g, b, a);
+	CHECK(int(b) > int(kBgB) + 20);
+
+	// The trim's ends are warm lines.
+	const int nearTop = int(M.rulerH) + 3;
+	for (int x : { 192, 768 })
+	{
+		img.pixel(x, nearTop, r, g, b, a);
+		CHECK(int(r) > 180);
+		CHECK(int(r) > int(b) + 60);
+	}
+
+	// The overview strip shades the same frames.
+	const int overMid = int(canvasH - M.overviewH * 0.5f) - 2;
+	auto overInk = [&](int x0, int x1)
+	{
+		int n = 0;
+		for (int x = x0; x < x1; x += 2)
+		{
+			img.pixel(x, overMid, r, g, b, a);
+			if (int(b) > 100) ++n;
+		}
+		return n;
+	};
+	CHECK(overInk(220, 740) > overInk(0, 180) * 4 + 10);
+}

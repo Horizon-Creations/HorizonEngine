@@ -304,7 +304,7 @@ std::string readout(const View& v, const Clip& clip, double hoverFrame)
 	else
 		s += "   \xc2\xb7   No selection";
 	if (v.hasTrim())
-		s += "   \xc2\xb7   Trimmed to " + formatTime(double(v.trimBegin) / rate) + " to " +
+		s += "   \xc2\xb7   Trim " + formatTime(double(v.trimBegin) / rate) + " to " +
 		     formatTime(double(v.trimEnd) / rate) + " (frames " + formatFrames(v.trimBegin) +
 		     " to " + formatFrames(v.trimEnd) + ")";
 	if (hoverFrame >= 0.0)

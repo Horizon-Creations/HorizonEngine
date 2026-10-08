@@ -272,14 +272,14 @@ TEST_CASE("audio waveform: a trim is what Play plays when nothing is selected")
 	clearSelection(v);
 	TestClip t(frames, 1, 48'000);
 	const std::string s = readout(v, t.clip, -1.0);
-	CHECK(s.find("Trimmed to 0:00.250 to 0:01.250 (frames 12,000 to 60,000)") != std::string::npos);
+	CHECK(s.find("Trim 0:00.250 to 0:01.250 (frames 12,000 to 60,000)") != std::string::npos);
 
 	// Untrimmed again: the whole clip.
 	v.trimBegin = v.trimEnd = 0;
 	r = playRange(v, frames);
 	CHECK(r.begin == 0);
 	CHECK(r.end == frames);
-	CHECK(readout(v, t.clip, -1.0).find("Trimmed") == std::string::npos);
+	CHECK(readout(v, t.clip, -1.0).find("Trim ") == std::string::npos);
 }
 
 TEST_CASE("audio waveform: time and frame readouts")
