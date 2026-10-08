@@ -1,4 +1,5 @@
 #pragma once
+#include <Audio/AudioEdit.h>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -107,6 +108,16 @@ namespace HE::Ed::AudioWave
 
 		bool rulerInSamples = false;   // ruler labels: time (default) or frame numbers
 
+		// Volume-curve editing (the curve itself lives in the asset's AudioEdit
+		// and is handed to draw()). In curve mode the lanes stop selecting and
+		// edit points instead: press on empty lane space adds a point there and
+		// drags it, press on a point drags it, right-click or double-click on a
+		// point deletes it. `curveSel` is the point the toolbar's Linear/Smooth
+		// act on (-1 = none); `curveDragIdx` the point held by the drag.
+		bool curveMode    = false;
+		int  curveSel     = -1;
+		int  curveDragIdx = -1;
+
 		// The clip's trim (AudioEdit, stored on the asset) as the canvas shows it:
 		// [trimBegin, trimEnd) is what plays, everything outside it is drawn
 		// dimmed. Both 0 = untrimmed. The panel copies it in from the asset every
@@ -117,7 +128,7 @@ namespace HE::Ed::AudioWave
 		// Interaction in flight; not meant to be set from outside. Grabbing a
 		// selection edge is a Select drag anchored on the OTHER edge, so the two
 		// edges may cross mid-drag without a special case.
-		enum class Drag { None, Scrub, Select, Overview };
+		enum class Drag { None, Scrub, Select, Overview, CurvePoint };
 		Drag   drag         = Drag::None;
 		size_t dragAnchor   = 0;      // frame the selection drag is anchored on
 		float  pressX       = 0.0f;   // pointer x at the press, to tell click from drag
@@ -164,6 +175,38 @@ namespace HE::Ed::AudioWave
 	// end (the last play ran off it) restarts from the beginning.
 	PlayRange playRange(const View& v, size_t frames);
 
+	// ── Volume curve ─────────────────────────────────────────────────────────
+	// The curve is drawn over the lanes on a dB scale — a fade reads as the
+	// straight-ish line it sounds like, which a linear-amplitude axis squashes
+	// into the bottom few pixels. The top edge is the highest gain a point may
+	// hold (AudioEnvelope::kMaxGain, +12 dB), kCurveFloorDb sits just above the
+	// bottom edge, and the bottom edge itself is silence (gain 0).
+	constexpr double kCurveFloorDb = -48.0;
+	constexpr float  kCurveSilentFrac = 0.04f;   // the band at the bottom that means "silent"
+
+	// Gain → height in the lanes as a fraction from the bottom (0 = silent,
+	// 1 = kMaxGain), and back. Below the floor the inverse snaps to 0, so a
+	// point dragged to the bottom really is silence.
+	float curveFracOfGain(float gain);
+	float curveGainOfFrac(float frac);
+	// "-6.0 dB (x0.50)"; "-inf dB (x0)" for silence.
+	std::string formatGain(float gain);
+
+	// The point nearest to (px, py) — canvas x from the canvas' left edge, y as
+	// a fraction of the lanes from the bottom scaled by `lanesH` pixels — within
+	// `radiusPx`; -1 when none is. Points are tested in screen space, so a point
+	// is as easy to hit at any zoom.
+	int curvePointAt(const HE::AudioEnvelope& env, const View& v, double rate, float lanesH,
+	                 float px, float pyFromBottom, float radiusPx);
+	// Add a point, keeping the list sorted; returns its index. A point at a time
+	// another one already holds goes AFTER it (the later one wins a jump).
+	int  curveInsert(HE::AudioEnvelope& env, double tSec, float gain, HE::AudioCurveInterp interp);
+	// Move point `i`: its time is held between its neighbours' (so the index —
+	// and the order — never changes under a drag) and inside [0, clipSec], its
+	// gain inside [0, kMaxGain].
+	void curveMove(HE::AudioEnvelope& env, int i, double tSec, float gain, double clipSec);
+	void curveErase(HE::AudioEnvelope& env, int i);
+
 	// ── Formatting ───────────────────────────────────────────────────────────
 	// "1:02.345", "1:02:03.456" past an hour.
 	std::string formatTime(double sec);
@@ -174,8 +217,11 @@ namespace HE::Ed::AudioWave
 	// unreadable without it.
 	std::string formatFrames(size_t frames);
 	// The line under the canvas: playhead, selection, pointer — each as time
-	// AND frame number. `hoverFrame` < 0 leaves the pointer out.
-	std::string readout(const View& v, const Clip& clip, double hoverFrame);
+	// AND frame number. `hoverFrame` < 0 leaves the pointer out. With a
+	// non-empty `curve`, the curve's gain at the pointer (or, without one, at
+	// the playhead) is added — the number a fade is set by.
+	std::string readout(const View& v, const Clip& clip, double hoverFrame,
+	                    const HE::AudioEnvelope* curve = nullptr);
 
 #if __has_include(<imgui.h>)
 	// What draw() did this frame that the panel has to act on — the transport
@@ -184,6 +230,8 @@ namespace HE::Ed::AudioWave
 	{
 		bool   seek = false;              // playhead moved by the pointer (scrub / click)
 		bool   selectionChanged = false;  // a selection drag finished, or one was cleared
+		bool   curveEdited = false;       // the curve changed this frame (also mid-drag)
+		bool   curveCommitted = false;    // a curve edit finished: an undo point
 		double hoverFrame = -1.0;         // frame under the pointer, -1 when not over the canvas
 		float  canvasW = 0.0f;            // canvas width the view was laid out for
 	};
@@ -207,7 +255,14 @@ namespace HE::Ed::AudioWave
 	//  * Overview strip: click or drag moves the visible window.
 	//  * Wheel zooms around the pointer, shift+wheel pans; with `trackpad`
 	//    the swipe pans and Cmd/Ctrl+scroll zooms. Middle-drag pans in both.
+	//  * Curve mode (view.curveMode with an editable `curve`): the lanes edit
+	//    the curve's points instead of the selection — see View::curveMode.
+	//    Shift while dragging a point changes only its gain.
+	//
+	// `curve`: the clip's volume curve, drawn over the lanes when it has points
+	// (and, in curve mode, always, with a dB scale). `curveEditable` = false
+	// shows it but never edits it (a raw file, read-only engine content).
 	Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size,
-	            bool trackpad);
+	            bool trackpad, HE::AudioEnvelope* curve = nullptr, bool curveEditable = false);
 #endif
 }

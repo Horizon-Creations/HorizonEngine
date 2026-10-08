@@ -747,3 +747,197 @@ TEST_CASE("AudioImporter::extractRange: sample-exact, a new asset, the original 
 	const bool untouched = fileBytes(origFile) == origBefore;
 	CHECK(untouched);
 }
+
+// ─── The curve applied to samples (Thema 168, step 4) ────────────────────────
+// AudioEnvelope::rampedGain / apply / applyPcm16: the one gain function behind
+// the engine's voices, the editor's preview and Extract's "bake the curve in".
+
+namespace
+{
+	// Every interpolation, with points on the 128-frame grid at 48 kHz
+	// (t·48000 a multiple of 128: 0, 1, 2, 3, 3.2 s) and a jump at 3.2 s.
+	AudioEnvelope gridCurve()
+	{
+		AudioEnvelope e;
+		e.points = { { 0.0, 0.0f,  AudioCurveInterp::Linear },
+		             { 1.0, 1.0f,  AudioCurveInterp::Smooth },
+		             { 2.0, 0.25f, AudioCurveInterp::Exponential },
+		             { 3.0, 2.0f,  AudioCurveInterp::Hold },
+		             { 3.2, 0.5f,  AudioCurveInterp::Linear } };
+		return e;
+	}
+}
+
+TEST_CASE("AudioEnvelope::rampedGain: the curve's value at every point, unity without a curve")
+{
+	const double   rate = 48000.0;
+	const AudioEnvelope e = gridCurve();
+	// "Kurvenwert an den Punkten": on a point the gain IS the point's gain —
+	// through evalGain and through the playback function, for every interpolation.
+	for (const AudioEnvelopePoint& p : e.points)
+	{
+		const uint64_t f = static_cast<uint64_t>(std::llround(p.timeSec * rate));
+		REQUIRE(f % AudioEnvelope::kRampFrames == 0);
+		CHECK(e.evalGain(p.timeSec) == doctest::Approx(p.gain).epsilon(1e-6));
+		CHECK(e.rampedGain(f, rate) == doctest::Approx(p.gain).epsilon(1e-6));
+	}
+	// Inside a Linear segment the ramp IS the line, at any frame.
+	for (uint64_t f : { 1ull, 127ull, 129ull, 12345ull, 47999ull })
+		CHECK(e.rampedGain(f, rate) == doctest::Approx(e.evalGain(double(f) / rate)).epsilon(1e-6));
+	// Before the first point and after the last the ends hold.
+	CHECK(e.rampedGain(10'000'000, rate) == doctest::Approx(0.5f));
+
+	// No curve: exactly 1, whatever the frame.
+	const AudioEnvelope none;
+	CHECK(none.rampedGain(0, rate) == 1.0f);
+	CHECK(none.rampedGain(123456, rate) == 1.0f);
+	CHECK(e.rampedGain(500, 0.0) == 1.0f);   // no rate, no curve
+}
+
+TEST_CASE("AudioEnvelope::rampedGain: a step becomes a ramp — no frame jumps more than one block's share")
+{
+	// The click guard. A Hold step 2.0 -> 0.5 at 3.2 s, and a 0 -> 4 jump
+	// between two points at one time: as samples, neither may move by more
+	// than (jump / kRampFrames) from one frame to the next.
+	const double rate = 48000.0;
+	AudioEnvelope e = gridCurve();
+	e.points.push_back({ 4.0, 0.0f, AudioCurveInterp::Linear });
+	e.points.push_back({ 4.0, AudioEnvelope::kMaxGain, AudioCurveInterp::Linear });   // a jump
+	e.sort();
+
+	const auto worstStep = [&](uint64_t f0, uint64_t f1)
+	{
+		double worst = 0.0;
+		for (uint64_t f = f0; f + 1 < f1; ++f)
+			worst = std::max(worst, std::fabs(double(e.rampedGain(f + 1, rate)) - double(e.rampedGain(f, rate))));
+		return worst;
+	};
+	const double R = double(AudioEnvelope::kRampFrames);
+	CHECK(worstStep(153600 - 300, 153600 + 300) <= 1.5 / R + 1e-6);   // the Hold step at 3.2 s
+	CHECK(worstStep(192000 - 300, 192000 + 300) <= 4.0 / R + 1e-6);   // the jump at 4 s
+	// … and the ramp really gets there: one block on, the new gain holds exactly.
+	CHECK(e.rampedGain(153600, rate) == doctest::Approx(0.5f));
+	CHECK(e.rampedGain(192000, rate) == doctest::Approx(AudioEnvelope::kMaxGain));
+	// Negative control: evalGain itself — the curve as authored — DOES jump.
+	CHECK(std::fabs(e.evalGain(192000.0 / rate) - e.evalGain(191999.0 / rate)) > 3.9);
+}
+
+TEST_CASE("AudioEnvelope::apply: the same samples however the reads are sliced, nothing touched without a curve")
+{
+	const double rate = 48000.0;
+	const int    ch   = 2;
+	const AudioEnvelope e = gridCurve();
+	const uint64_t first = 47000, frames = 3000;   // straddles the point at 1 s
+	std::vector<float> src(size_t(frames) * ch);
+	for (size_t i = 0; i < src.size(); ++i) src[i] = std::sin(double(i) * 0.01) * 0.8f;
+
+	std::vector<float> whole = src;
+	e.apply(whole.data(), frames, ch, first, rate);
+	for (uint64_t f = 0; f < frames; ++f)
+		for (int c = 0; c < ch; ++c)
+			REQUIRE(whole[size_t(f) * ch + c] == src[size_t(f) * ch + c] * e.rampedGain(first + f, rate));
+
+	// The mixer reads in whatever pieces it likes; the result may not care.
+	std::vector<float> pieces = src;
+	uint64_t done = 0;
+	for (uint64_t n : { 1ull, 7ull, 128ull, 129ull, 333ull, 1000ull })
+	{
+		const uint64_t k = std::min(n, frames - done);
+		e.apply(pieces.data() + size_t(done) * ch, k, ch, first + done, rate);
+		done += k;
+	}
+	e.apply(pieces.data() + size_t(done) * ch, frames - done, ch, first + done, rate);
+	const bool same = pieces == whole;
+	CHECK(same);
+
+	// No curve: not even multiplied by one.
+	std::vector<float> untouched = src;
+	AudioEnvelope{}.apply(untouched.data(), frames, ch, first, rate);
+	const bool unchanged = untouched == src;
+	CHECK(unchanged);
+}
+
+TEST_CASE("AudioEnvelope::applyPcm16: rounded, clamped at full scale, and the clamps counted")
+{
+	AudioEnvelope up;
+	up.points = { { 0.0, AudioEnvelope::kMaxGain, AudioCurveInterp::Linear } };   // +12 dB flat
+	std::vector<int16_t> s = { 1000, -1000, 9000, -9000, 32767, -32768 };
+	CHECK(up.applyPcm16(s.data(), 3, 2, 0, 48000.0) == 4);
+	CHECK(s[0] == 4000);
+	CHECK(s[1] == -4000);
+	CHECK(s[2] == 32767);
+	CHECK(s[3] == -32768);
+	CHECK(s[4] == 32767);
+	CHECK(s[5] == -32768);
+
+	AudioEnvelope half;
+	half.points = { { 0.0, 0.5f, AudioCurveInterp::Linear } };
+	std::vector<int16_t> h = { 3, -3, 101 , 0 };
+	CHECK(half.applyPcm16(h.data(), 2, 2, 0, 48000.0) == 0);
+	CHECK(h[0] == 2);    // 1.5 rounds away from zero
+	CHECK(h[1] == -2);
+	CHECK(h[2] == 51);
+}
+
+TEST_CASE("AudioImporter::extractRange: baking the curve multiplies it into the samples")
+{
+	TempDir root("he_test_audio_bake");
+	fs::create_directories(root.path / "Audio");
+	const int rate = 48000, channels = 2;
+	const uint64_t frames = 96000;
+	AudioAsset clip;
+	clip.type       = AssetType::Audio;
+	clip.name       = "Wind";
+	clip.sampleRate = rate;
+	clip.channels   = channels;
+	clip.encoding   = AudioEncoding::PCM16;
+	clip.audioData.resize(size_t(frames) * channels * sizeof(int16_t));
+	auto* pcm = reinterpret_cast<int16_t*>(clip.audioData.data());
+	for (size_t i = 0; i < size_t(frames) * channels; ++i)
+		pcm[i] = static_cast<int16_t>((int(i % 2000) - 1000) * 12);
+	clip.edit.envelope.points = { { 0.25, 1.0f, AudioCurveInterp::Linear },
+	                              { 0.75, 0.0f, AudioCurveInterp::Smooth },
+	                              { 1.5,  2.0f, AudioCurveInterp::Linear } };
+
+	const uint64_t b = 6001, e = 80013;   // off the grid on purpose
+	const AudioEdit carried = clip.edit.forRange(double(b) / rate, double(e) / rate);
+
+	AudioImporter::ExtractResult baked, plain;
+	REQUIRE(AudioImporter::extractRange(clip, b, e, root.path, "Audio", "Wind_extract", carried, baked,
+	                                    &clip.edit.envelope));
+	REQUIRE(AudioImporter::extractRange(clip, b, e, root.path, "Audio", "Wind_extract", carried, plain));
+
+	// Copies: a second loadAsset may move the first asset (ContentManager.h).
+	ContentManager cm(root.path.string());
+	const UUID xId = cm.loadAsset(baked.path);
+	const UUID yId = cm.loadAsset(plain.path);
+	REQUIRE(cm.getAudio(xId));
+	REQUIRE(cm.getAudio(yId));
+	const AudioAsset xa = *cm.getAudio(xId), ya = *cm.getAudio(yId);
+	const AudioAsset* x = &xa;
+	const AudioAsset* y = &ya;
+	REQUIRE(audioPcmFrameCount(*x) == e - b);
+
+	// Baked: every sample is the original's at the same ORIGINAL frame, times
+	// the gain a voice of the original applies there.
+	const auto* xs = reinterpret_cast<const int16_t*>(x->audioData.data());
+	size_t wrong = 0;
+	for (uint64_t f = 0; f < e - b; ++f)
+		for (int c = 0; c < channels; ++c)
+		{
+			const double want = double(pcm[size_t(b + f) * channels + c]) *
+			                    double(clip.edit.envelope.rampedGain(b + f, rate));
+			const long   w    = std::clamp(std::lround(want), -32768L, 32767L);
+			if (xs[size_t(f) * channels + c] != w) ++wrong;
+		}
+	CHECK(wrong == 0);
+	CHECK(x->edit.envelope.empty());   // the curve is in the samples now, not on top
+	CHECK(baked.clampedSamples == 0);  // 2x of ±12000 stays inside full scale
+
+	// Not baked: the samples untouched, the curve rides along as an edit.
+	const std::vector<uint8_t> expect(clip.audioData.begin() + std::ptrdiff_t(b * channels * 2),
+	                                  clip.audioData.begin() + std::ptrdiff_t(e * channels * 2));
+	const bool copied = y->audioData == expect;
+	CHECK(copied);
+	CHECK(y->edit.envelope.points.size() == carried.envelope.points.size());
+}

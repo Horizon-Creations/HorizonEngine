@@ -1402,3 +1402,261 @@ TEST_CASE("AudioEngine: a clip asset's trim is the voice's range")
 
     engine.shutdown();
 }
+
+// ─── An asset's volume curve (Audio Editor, Thema 168 step 4) ────────────────
+// The curve is applied in the voice (a data-source stage in front of the PCM
+// buffer / the Vorbis decoder), against frames of the ORIGINAL clip, by the
+// same AudioEnvelope::apply the editor and Extract use. In noDevice mode at the
+// engine's own rate the mixer passes a 2D voice through unscaled, so what comes
+// out can be held against the samples times the curve, frame by frame — with
+// two properties of miniaudio's sound node that hold with or without a curve
+// (measured on the raw-PCM path, which has never known about curves): the
+// linear resampler delays the voice by exactly ONE frame (mix[i] is source
+// frame i-1, mix[0] is silence), and a voice that ends stops a couple of
+// hundred frames before its last one comes out. Hence the comparison skips
+// frame 0 and the tail.
+
+namespace
+{
+    constexpr int kCurveRate = 48000;
+
+    AudioAsset patternClip(int frames)
+    {
+        AudioAsset a;
+        a.type       = HE::AssetType::Audio;
+        a.sampleRate = kCurveRate;
+        a.channels   = 2;
+        a.encoding   = AudioEncoding::PCM16;
+        a.audioData.resize(static_cast<size_t>(frames) * 2 * sizeof(int16_t));
+        auto* s = reinterpret_cast<int16_t*>(a.audioData.data());
+        for (int f = 0; f < frames; ++f)
+            for (int c = 0; c < 2; ++c)
+                s[f * 2 + c] = static_cast<int16_t>(((f * 37 + c * 1000) % 20000) - 10000);
+        return a;
+    }
+
+    float sampleOf(const AudioAsset& a, uint64_t frame, int c)
+    {
+        const auto* s = reinterpret_cast<const int16_t*>(a.audioData.data());
+        return static_cast<float>(s[frame * 2 + static_cast<uint64_t>(c)]) / 32768.0f;
+    }
+
+    // What the output device would pull, in uneven pieces (the mixer's period
+    // is not the curve's grid, and must not need to be).
+    std::vector<float> pullMix(AudioEngine& engine, uint64_t frames, uint64_t piece = 441)
+    {
+        std::vector<float> out(static_cast<size_t>(frames) * 2, 0.0f);
+        uint64_t done = 0;
+        while (done < frames)
+        {
+            const uint64_t n = std::min(piece, frames - done);
+            const uint64_t got = engine.readMixedFrames(out.data() + done * 2, n);
+            if (got == 0) break;
+            done += got;
+        }
+        return out;
+    }
+
+    // Worst difference between the mix and, one frame later (see above), the
+    // clip's frame `frameOf(i)` — i counting the frames the voice was fed —
+    // times the curve's gain there.
+    constexpr uint64_t kMixDelay = 1;
+    constexpr uint64_t kMixTail  = 256;
+    template <typename FrameOf>
+    double worstAgainstCurve(const std::vector<float>& mix, const AudioAsset& clip,
+                             const HE::AudioEnvelope& curve, uint64_t frames, FrameOf frameOf)
+    {
+        double worst = 0.0;
+        for (uint64_t i = 0; i + kMixDelay < frames - kMixTail; ++i)
+        {
+            const uint64_t f = frameOf(i);
+            const float    g = curve.rampedGain(f, kCurveRate);
+            const uint64_t m = i + kMixDelay;
+            for (int c = 0; c < 2; ++c)
+                worst = std::max(worst, std::fabs(double(mix[m * 2 + c]) - double(sampleOf(clip, f, c) * g)));
+        }
+        return worst;
+    }
+
+    HE::AudioEnvelope testCurve()
+    {
+        HE::AudioEnvelope e;
+        e.points = { { 0.0,  0.0f,  HE::AudioCurveInterp::Linear },
+                     { 0.05, 1.0f,  HE::AudioCurveInterp::Smooth },
+                     { 0.1,  0.25f, HE::AudioCurveInterp::Hold },
+                     { 0.15, 2.0f,  HE::AudioCurveInterp::Exponential },
+                     { 0.19, 0.5f,  HE::AudioCurveInterp::Linear } };
+        return e;
+    }
+}
+
+TEST_CASE("AudioEngine: an asset's volume curve is what the mixer puts out, sample for sample")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    REQUIRE(engine.outputChannels() == 2);
+
+    AudioAsset clip = patternClip(9600);   // 0.2 s
+    clip.edit.envelope = testCurve();
+
+    SUBCASE("the whole clip")
+    {
+        const uint64_t h = engine.play(clip);
+        REQUIRE(h != 0);
+        CHECK(engine.hasSoundEnvelope(h));
+        const std::vector<float> mix = pullMix(engine, 9600);
+        CHECK(worstAgainstCurve(mix, clip, clip.edit.envelope, 9600, [](uint64_t i) { return i; }) < 1e-6);
+        // Negative control: the same mix against the samples WITHOUT the curve
+        // is far off (the fade-in alone starts at silence).
+        CHECK(worstAgainstCurve(mix, clip, HE::AudioEnvelope{}, 9600, [](uint64_t i) { return i; }) > 0.1);
+        engine.stop(h);
+    }
+    SUBCASE("trimmed and looping: the curve stays on the original's frames, also after the wrap")
+    {
+        clip.edit.trim = HE::AudioTrim::fromRange(2000, 4000, 9600);
+        const uint64_t h = engine.play(clip, 1.0f, 1.0f, true);
+        REQUIRE(h != 0);
+        const std::vector<float> mix = pullMix(engine, 5000);   // two and a half laps
+        CHECK(worstAgainstCurve(mix, clip, clip.edit.envelope, 5000,
+                                [](uint64_t i) { return 2000 + i % 2000; }) < 1e-6);
+        CHECK(engine.getSoundLengthFrames(h) == 2000);   // the trim contract still holds
+        engine.stop(h);
+    }
+    SUBCASE("spatial voices carry it too")
+    {
+        const uint64_t h = engine.playSpatial(clip, 1.0f, 1.0f, false, 0.0f, 0.0f, 0.0f);
+        REQUIRE(h != 0);
+        CHECK(engine.hasSoundEnvelope(h));
+        engine.stop(h);
+    }
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: an asset without a curve sounds exactly as before")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    const AudioAsset clip = patternClip(4800);
+
+    // The reference: the raw-PCM path, which has never known about curves.
+    uint64_t h = engine.play(clip.audioData, kCurveRate, 2);
+    REQUIRE(h != 0);
+    const std::vector<float> raw = pullMix(engine, 4800);
+    engine.stop(h);
+
+    // An asset with no curve takes no extra stage at all …
+    h = engine.play(clip);
+    REQUIRE(h != 0);
+    CHECK_FALSE(engine.hasSoundEnvelope(h));
+    const std::vector<float> asset = pullMix(engine, 4800);
+    engine.stop(h);
+    const bool sameAsRaw = asset == raw;
+    CHECK(sameAsRaw);
+
+    // … and the editor's preview, which always has the stage in (so a curve can
+    // be drawn while it plays), is bit-identical with an empty curve as well —
+    // up to the tail: the raw path loses its last ~200 frames (see above), the
+    // stage hands them out. So the staged voice is compared before the tail, and
+    // it must still END like any voice (the editor reaps a preview by it).
+    h = engine.play(clip.audioData, kCurveRate, 2, HE::AudioEnvelope{}, 0);
+    REQUIRE(h != 0);
+    CHECK(engine.hasSoundEnvelope(h));
+    const std::vector<float> staged = pullMix(engine, 4800);
+    const bool sameThroughStage = std::equal(staged.begin(), staged.end() - kMixTail * 2, raw.begin());
+    CHECK(sameThroughStage);
+    pullMix(engine, 4800);
+    CHECK_FALSE(engine.isPlaying(h));
+    engine.stop(h);
+
+    // And all of them are the clip's own samples.
+    CHECK(worstAgainstCurve(raw, clip, HE::AudioEnvelope{}, 4800, [](uint64_t i) { return i; }) < 1e-6);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: the preview's curve lands at its offset and can change while it plays")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    AudioAsset clip = patternClip(9600);
+    const HE::AudioEnvelope curve = testCurve();
+
+    // A selection [3000, 6000) played as a copy, the curve offset to 3000, is
+    // the same signal as the asset trimmed to that range.
+    const size_t bpf = 2 * sizeof(int16_t);
+    const std::vector<uint8_t> slice(clip.audioData.begin() + 3000 * bpf, clip.audioData.begin() + 6000 * bpf);
+    uint64_t h = engine.play(slice, kCurveRate, 2, curve, 3000);
+    REQUIRE(h != 0);
+    const std::vector<float> preview = pullMix(engine, 3000);
+    engine.stop(h);
+    CHECK(worstAgainstCurve(preview, clip, curve, 3000, [](uint64_t i) { return 3000 + i; }) < 1e-6);
+
+    clip.edit.envelope = curve;
+    clip.edit.trim     = HE::AudioTrim::fromRange(3000, 6000, 9600);
+    h = engine.play(clip);
+    REQUIRE(h != 0);
+    const std::vector<float> trimmed = pullMix(engine, 3000);
+    engine.stop(h);
+    const bool same = preview == trimmed;
+    CHECK(same);
+
+    // Live edit: the curve swapped mid-play is heard once the frames miniaudio
+    // had already pulled ahead are out — measured 65 frames (1.4 ms) at 48 kHz;
+    // allowed up to 256 — and from then on exactly.
+    h = engine.play(clip.audioData, kCurveRate, 2, HE::AudioEnvelope{}, 0);
+    REQUIRE(h != 0);
+    const std::vector<float> before = pullMix(engine, 960);
+    HE::AudioEnvelope half;
+    half.points = { { 0.0, 0.5f, HE::AudioCurveInterp::Linear } };
+    CHECK(engine.setSoundEnvelope(h, half));
+    const std::vector<float> after = pullMix(engine, 960);
+    CHECK(worstAgainstCurve(before, clip, HE::AudioEnvelope{}, 960, [](uint64_t i) { return i; }) < 1e-6);
+    // after[i] is source frame 959 + i (the one-frame delay).
+    uint64_t sw = 960;
+    for (uint64_t i = 0; i < 960 && sw == 960; ++i)
+        if (std::fabs(after[i * 2] - sampleOf(clip, 959 + i, 0)) > 1e-6) sw = i;
+    CHECK(sw <= 256);
+    double worst = 0.0;
+    for (uint64_t i = sw; i < 960; ++i)
+        worst = std::max(worst, std::fabs(double(after[i * 2]) - 0.5 * double(sampleOf(clip, 959 + i, 0))));
+    CHECK(worst < 1e-6);
+    engine.stop(h);
+
+    // A voice without the stage refuses (nothing to swap into), as does a dead handle.
+    h = engine.play(clip.audioData, kCurveRate, 2);
+    REQUIRE(h != 0);
+    CHECK_FALSE(engine.setSoundEnvelope(h, half));
+    engine.stop(h);
+    CHECK_FALSE(engine.setSoundEnvelope(h, half));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: a Vorbis voice is curved after decoding, before the resampler")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    AudioAsset clip = makeVorbisClip();   // 22050 Hz mono: resampled and spread to stereo
+
+    uint64_t h = engine.play(clip);
+    REQUIRE(h != 0);
+    const std::vector<float> plain = pullMix(engine, 4800);
+    engine.stop(h);
+
+    clip.edit.envelope.points = { { 0.0, 0.5f, HE::AudioCurveInterp::Linear } };
+    h = engine.play(clip);
+    REQUIRE(h != 0);
+    CHECK(engine.hasSoundEnvelope(h));
+    const std::vector<float> curved = pullMix(engine, 4800);
+    engine.stop(h);
+
+    // A flat -6 dB curve: everything downstream is linear, so the mix is the
+    // plain one halved.
+    double worst = 0.0, peak = 0.0;
+    for (size_t i = 0; i < plain.size(); ++i)
+    {
+        worst = std::max(worst, std::fabs(double(curved[i]) - 0.5 * double(plain[i])));
+        peak  = std::max(peak, std::fabs(double(plain[i])));
+    }
+    CHECK(peak > 0.3);
+    CHECK(worst < 1e-5);
+    engine.shutdown();
+}

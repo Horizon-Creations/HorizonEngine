@@ -33,6 +33,8 @@
 #include <Audio/AudioBusConfig.h>
 #include <Diagnostics/Log.h>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 #include <cstring>
 #include <string>
@@ -41,6 +43,155 @@
 // re-triggered every frame) leaks voices until the mixer chokes. Warn once the
 // count gets unreasonable rather than letting the audio quietly fall apart.
 static constexpr size_t kVoiceWarnThreshold = 128;
+
+// ─── Volume curve stage ──────────────────────────────────────────────────────
+// A clip's volume curve (AudioEdit::envelope) as a miniaudio data source in
+// front of the voice's own (the PCM buffer or the Vorbis decoder): it reads the
+// inner source, converts to f32 and multiplies by AudioEnvelope::apply. The
+// ma_sound reads this one instead, so everything miniaudio does on top — the
+// resampler, pitch, volume, spatialisation, the bus — sees the curved signal.
+//
+// Range and looping stay on the INNER source: its range is the trim, and this
+// stage reports its cursor and length unchanged, so the cursor/length/seek
+// contract of the header holds with or without a curve. Looping is driven from
+// out here (miniaudio's ma_data_source_read_pcm_frames seeks this source back
+// to 0 at the inner's end, and onSeek passes that on), which is also why the
+// gain must be a pure function of the frame: after the wrap the next read asks
+// the inner cursor and lands on the curve's start again.
+struct EnvelopeSource;
+struct EnvelopeNode
+{
+    ma_data_source_base base;     // first: miniaudio hands &base back to the callbacks
+    EnvelopeSource*     owner;
+};
+
+struct EnvelopeSource
+{
+    EnvelopeNode     node{};
+    bool             nodeOk      = false;
+    ma_data_source*  inner       = nullptr;
+    ma_format        innerFormat = ma_format_unknown;
+    ma_uint32        channels    = 0;
+    ma_uint32        sampleRate  = 0;
+    // Original-clip frame of the inner source's frame 0: 0 for an asset (its
+    // bytes ARE the clip), the selection's start for the editor's preview copy.
+    uint64_t         frameOffset = 0;
+
+    // The curve the mixer thread applies. Only the mixer thread touches
+    // `curve`; setSoundEnvelope parks a new one in `pending` and the next read
+    // takes it, without ever waiting for the lock (try_lock — a read that
+    // misses it keeps the old curve for one more period).
+    std::shared_ptr<const HE::AudioEnvelope> curve;
+    std::mutex                               pendingMutex;
+    std::shared_ptr<const HE::AudioEnvelope> pending;
+    std::atomic<bool>                        hasPending{ false };
+
+    // Inner-format frames for one chunk of a read; sized once at start so the
+    // mixer thread never allocates. Unused when the inner source is already f32.
+    static constexpr ma_uint64 kChunkFrames = 512;
+    std::vector<uint8_t>       scratch;
+
+    void release()
+    {
+        if (nodeOk) { ma_data_source_uninit(&node.base); nodeOk = false; }
+    }
+    ~EnvelopeSource() { release(); }
+};
+
+static EnvelopeSource& envOf(ma_data_source* ds)
+{
+    return *reinterpret_cast<EnvelopeNode*>(ds)->owner;
+}
+
+static ma_result envRead(ma_data_source* ds, void* out, ma_uint64 frameCount, ma_uint64* framesRead)
+{
+    EnvelopeSource& e = envOf(ds);
+    if (framesRead) *framesRead = 0;
+
+    if (e.hasPending.load(std::memory_order_acquire))
+    {
+        std::unique_lock<std::mutex> lock(e.pendingMutex, std::try_to_lock);
+        if (lock.owns_lock())
+        {
+            // Swapped, not moved: the old curve stays parked in `pending` and is
+            // freed by the next setSoundEnvelope on the caller's thread, so the
+            // mixer thread never runs a deallocation.
+            std::swap(e.curve, e.pending);
+            e.hasPending.store(false, std::memory_order_release);
+        }
+    }
+
+    // Where in the ORIGINAL clip this read starts: the inner cursor counts from
+    // its range (the trim), so the range's start goes back on.
+    ma_uint64 cursor = 0, rangeBeg = 0, rangeEnd = 0;
+    ma_data_source_get_cursor_in_pcm_frames(e.inner, &cursor);
+    ma_data_source_get_range_in_pcm_frames(e.inner, &rangeBeg, &rangeEnd);
+    const uint64_t first = e.frameOffset + rangeBeg + cursor;
+
+    const HE::AudioEnvelope* curve = e.curve.get();
+    float*    dst   = static_cast<float*>(out);
+    ma_uint64 total = 0;
+    ma_result rc    = MA_SUCCESS;
+    while (total < frameCount)
+    {
+        const bool direct = e.innerFormat == ma_format_f32 || dst == nullptr;
+        const ma_uint64 want = direct ? frameCount - total
+                                      : std::min<ma_uint64>(frameCount - total, EnvelopeSource::kChunkFrames);
+        ma_uint64 got = 0;
+        void* target = dst == nullptr ? nullptr
+                     : direct         ? static_cast<void*>(dst + total * e.channels)
+                                      : static_cast<void*>(e.scratch.data());
+        rc = ma_data_source_read_pcm_frames(e.inner, target, want, &got);
+        if (dst && got > 0)
+        {
+            float* f = dst + total * e.channels;
+            if (!direct)
+                ma_pcm_convert(f, ma_format_f32, e.scratch.data(), e.innerFormat,
+                               got * e.channels, ma_dither_mode_none);
+            if (curve)
+                curve->apply(f, got, static_cast<int>(e.channels), first + total,
+                             static_cast<double>(e.sampleRate));
+        }
+        total += got;
+        if (rc != MA_SUCCESS || got < want) break;
+    }
+    if (framesRead) *framesRead = total;
+    if (rc == MA_SUCCESS && total == 0) rc = MA_AT_END;
+    return rc;
+}
+
+static ma_result envSeek(ma_data_source* ds, ma_uint64 frame)
+{
+    return ma_data_source_seek_to_pcm_frame(envOf(ds).inner, frame);
+}
+
+static ma_result envFormat(ma_data_source* ds, ma_format* format, ma_uint32* channels,
+                           ma_uint32* sampleRate, ma_channel* channelMap, size_t channelMapCap)
+{
+    EnvelopeSource& e = envOf(ds);
+    if (format)     *format     = ma_format_f32;
+    if (channels)   *channels   = e.channels;
+    if (sampleRate) *sampleRate = e.sampleRate;
+    if (channelMap && channelMapCap > 0)
+        ma_data_source_get_data_format(e.inner, nullptr, nullptr, nullptr, channelMap, channelMapCap);
+    return MA_SUCCESS;
+}
+
+static ma_result envCursor(ma_data_source* ds, ma_uint64* cursor)
+{
+    return ma_data_source_get_cursor_in_pcm_frames(envOf(ds).inner, cursor);
+}
+
+static ma_result envLength(ma_data_source* ds, ma_uint64* length)
+{
+    return ma_data_source_get_length_in_pcm_frames(envOf(ds).inner, length);
+}
+
+static ma_data_source_vtable g_envelopeVtable = {
+    envRead, envSeek, envFormat, envCursor, envLength,
+    nullptr,   // onSetLooping: the base keeps the flag, the read loop above acts on it
+    0
+};
 
 // ─── PIMPL ────────────────────────────────────────────────────────────────────
 
@@ -68,11 +219,18 @@ struct ActiveSound
     // What the voice attenuates with; only meaningful for a spatial voice.
     AudioAttenuation     attenuation = AudioAttenuation::Linear;
     bool                 spatial     = false;
+    // The volume-curve stage in front of `source`, when the voice has one
+    // (EnvelopeSource above); the sound then reads from it instead.
+    std::unique_ptr<EnvelopeSource> env;
 
-    // Order matters: the sound reads from the data source, so it goes first.
+    ma_data_source* voiceSource() { return env ? &env->node.base : source; }
+
+    // Order matters: the sound reads from the curve stage, the curve stage from
+    // the data source, so they go in that order.
     void release()
     {
         if (soundOk)   { ma_sound_stop(&sound); ma_sound_uninit(&sound); soundOk = false; }
+        env.reset();
         if (bufferOk)  { ma_audio_buffer_uninit(&buffer); bufferOk = false; }
         if (decoderOk) { ma_decoder_uninit(&decoder);     decoderOk = false; }
         source = nullptr;
@@ -332,7 +490,9 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
                                   float volume, float pitch, bool loop,
                                   const std::string& busName,
                                   const SpatialParams* spatial,
-                                  const HE::AudioTrim* trim)
+                                  const HE::AudioTrim* trim,
+                                  const HE::AudioEnvelope* envelope,
+                                  uint64_t envelopeOffset)
 {
     if (!m_initialized)
     {
@@ -436,6 +596,34 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
                         static_cast<unsigned long long>(beg), static_cast<unsigned long long>(end));
     }
 
+    // The volume curve, as a stage the sound reads through (EnvelopeSource).
+    // Built after the trim so it sees the trimmed inner source.
+    if (envelope)
+    {
+        auto env = std::make_unique<EnvelopeSource>();
+        env->inner       = snd->source;
+        env->frameOffset = envelopeOffset;
+        ma_data_source_get_data_format(snd->source, &env->innerFormat, &env->channels,
+                                       &env->sampleRate, nullptr, 0);
+        if (!envelope->empty())
+            env->curve = std::make_shared<const HE::AudioEnvelope>(*envelope);
+        env->scratch.resize(static_cast<size_t>(EnvelopeSource::kChunkFrames) * env->channels *
+                            ma_get_bytes_per_sample(env->innerFormat));
+        env->node.owner = env.get();
+        ma_data_source_config dscfg = ma_data_source_config_init();
+        dscfg.vtable = &g_envelopeVtable;
+        if (env->channels == 0 || env->sampleRate == 0 ||
+            ma_data_source_init(&dscfg, &env->node.base) != MA_SUCCESS)
+        {
+            HE_LOG_ERROR(Audio, "%s", "Could not set up the clip's volume curve — playing it without");
+        }
+        else
+        {
+            env->nodeOk = true;
+            snd->env    = std::move(env);
+        }
+    }
+
     // Route through bus if found, otherwise null (master)
     ma_sound_group* busGroup = nullptr;
     if (!busName.empty()) {
@@ -453,7 +641,7 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
     // Spatial sounds pass no flag — positioning enabled.
     ma_uint32 flags = spatial ? 0u : MA_SOUND_FLAG_NO_SPATIALIZATION;
     if (ma_sound_init_from_data_source(&m_impl->engine,
-                                        snd->source,
+                                        snd->voiceSource(),
                                         flags, busGroup,
                                         &snd->sound) != MA_SUCCESS)
     {
@@ -482,16 +670,18 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
     }
 
     uint64_t handle = m_nextHandle++;
+    const bool snd_hasCurve = snd->env && snd->env->curve;
     m_impl->sounds.emplace(handle, std::move(snd));
 
     HE_LOG_TRACE(Audio, "Started %s %s sound #%llu: %llu frames%s, %d Hz, %d ch, vol %.2f, "
-                        "pitch %.2f%s, bus '%s'",
+                        "pitch %.2f%s%s, bus '%s'",
                  spatial ? "spatial" : "2D",
                  encoding == AudioEncoding::Vorbis ? "Vorbis (streamed)" : "PCM",
                  static_cast<unsigned long long>(handle),
                  static_cast<unsigned long long>(frameCount), trimmed ? " (trimmed)" : "",
                  sampleRate, channels,
                  volume, pitch, loop ? ", looping" : "",
+                 snd_hasCurve ? ", volume curve" : "",
                  busName.empty() ? "master" : busName.c_str());
 
     if (m_impl->sounds.size() >= kVoiceWarnThreshold)
@@ -515,7 +705,36 @@ uint64_t AudioEngine::play(const AudioAsset& clip,
                             const std::string& busName)
 {
     return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
-                      volume, pitch, loop, busName, nullptr, &clip.edit.trim);
+                      volume, pitch, loop, busName, nullptr, &clip.edit.trim,
+                      clip.edit.envelope.empty() ? nullptr : &clip.edit.envelope);
+}
+
+uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
+                           const HE::AudioEnvelope& envelope, uint64_t envelopeFrameOffset,
+                           float volume, float pitch, bool loop, const std::string& busName)
+{
+    return startSound(pcmData, AudioEncoding::PCM16, sampleRate, channels,
+                      volume, pitch, loop, busName, nullptr, nullptr,
+                      &envelope, envelopeFrameOffset);
+}
+
+bool AudioEngine::setSoundEnvelope(uint64_t handle, const HE::AudioEnvelope& envelope)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->env) return false;
+    EnvelopeSource& e = *it->second->env;
+    std::shared_ptr<const HE::AudioEnvelope> next;
+    if (!envelope.empty()) next = std::make_shared<const HE::AudioEnvelope>(envelope);
+    std::lock_guard<std::mutex> lock(e.pendingMutex);
+    e.pending = std::move(next);
+    e.hasPending.store(true, std::memory_order_release);
+    return true;
+}
+
+bool AudioEngine::hasSoundEnvelope(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    return it != m_impl->sounds.end() && it->second->env != nullptr;
 }
 
 void AudioEngine::stop(uint64_t handle)
@@ -555,7 +774,8 @@ uint64_t AudioEngine::playSpatial(const AudioAsset& clip,
 {
     const SpatialParams sp{ x, y, z, minDist, maxDist, attenuation, rolloff };
     return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
-                      volume, pitch, loop, busName, &sp, &clip.edit.trim);
+                      volume, pitch, loop, busName, &sp, &clip.edit.trim,
+                      clip.edit.envelope.empty() ? nullptr : &clip.edit.envelope);
 }
 
 void AudioEngine::setSoundPosition(uint64_t handle, float x, float y, float z)

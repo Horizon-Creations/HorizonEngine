@@ -484,3 +484,152 @@ TEST_CASE("audio waveform: the wheel zooms around the pointer and the overview s
 	CHECK(v.playhead == 0);
 	CHECK_FALSE(v.hasSelection());
 }
+
+// ── The volume curve over the waveform (Thema 168, step 4) ───────────────────
+
+TEST_CASE("audio waveform: the curve's dB axis, its labels and the point helpers")
+{
+	const float top = HE::AudioEnvelope::kMaxGain;
+	CHECK(curveFracOfGain(0.0f) == 0.0f);
+	CHECK(curveFracOfGain(top) == doctest::Approx(1.0f));
+	CHECK(curveFracOfGain(100.0f) == doctest::Approx(1.0f));   // above the top: the top
+	// Round trip over the editable range: the y a point is drawn at gives its gain back.
+	for (float g : { 0.004f, 0.01f, 0.1f, 0.5f, 1.0f, 1.7f, top })
+		CHECK(curveGainOfFrac(curveFracOfGain(g)) == doctest::Approx(g).epsilon(1e-4));
+	// Unity sits above the middle: the room under it is for fades.
+	CHECK(curveFracOfGain(1.0f) > 0.75f);
+	// The bottom band is silence, so a point dragged down really goes quiet.
+	CHECK(curveGainOfFrac(kCurveSilentFrac * 0.5f) == 0.0f);
+	CHECK(curveGainOfFrac(-1.0f) == 0.0f);
+
+	CHECK(formatGain(1.0f)  == "+0.0 dB (x1.00)");
+	CHECK(formatGain(0.5f)  == "-6.0 dB (x0.50)");
+	CHECK(formatGain(2.0f)  == "+6.0 dB (x2.00)");
+	CHECK(formatGain(0.0f)  == "-inf dB (x0)");
+
+	HE::AudioEnvelope e;
+	CHECK(curveInsert(e, 1.0, 0.5f, HE::AudioCurveInterp::Linear) == 0);
+	CHECK(curveInsert(e, 0.5, 1.0f, HE::AudioCurveInterp::Smooth) == 0);   // sorted in front
+	CHECK(curveInsert(e, 1.0, 2.0f, HE::AudioCurveInterp::Linear) == 2);   // same time: after
+	CHECK(curveInsert(e, 9.0, 99.0f, HE::AudioCurveInterp::Linear) == 3);
+	CHECK(e.points[3].gain == top);                                        // clamped
+	// A move is held between the neighbours, so the order never changes.
+	curveMove(e, 1, 0.1, 0.25f, 10.0);
+	CHECK(e.points[1].timeSec == doctest::Approx(0.5));
+	curveMove(e, 3, 20.0, 1.0f, 10.0);
+	CHECK(e.points[3].timeSec == doctest::Approx(10.0));                   // and inside the clip
+	curveErase(e, 0);
+	CHECK(e.points.size() == 3);
+	curveErase(e, 7);                                                      // out of range: nothing
+	CHECK(e.points.size() == 3);
+
+	// The readout gives the curve's gain where the pointer is.
+	TestClip t(48'000, 1, 48'000);
+	View v;
+	HE::AudioEnvelope half;
+	half.points = { { 0.0, 0.5f, HE::AudioCurveInterp::Linear } };
+	CHECK(readout(v, t.clip, 100.0, &half).find("Curve -6.0 dB (x0.50) at the pointer") != std::string::npos);
+	CHECK(readout(v, t.clip, -1.0, &half).find("at the playhead") != std::string::npos);
+	CHECK(readout(v, t.clip, 100.0, nullptr).find("Curve") == std::string::npos);
+	CHECK(readout(v, t.clip, 100.0, &e).find("Curve") != std::string::npos);
+}
+
+namespace
+{
+	Result curveFrame(const Clip& clip, const Peaks& peaks, View& view, HE::AudioEnvelope& env, bool editable)
+	{
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(kW, kH));
+		ImGui::Begin("##awtest", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+		const Result r = draw(clip, peaks, view, ImVec2(kW, kH), false, &env, editable);
+		ImGui::End();
+		ImGui::Render();
+		return r;
+	}
+
+	// The lanes run from under the ruler to just above the overview (draw()).
+	float lanesTop()    { return metrics().rulerH; }
+	float lanesBottom() { return kH - metrics().overviewH - 4.0f; }
+	float yOfGain(float g) { return lanesBottom() - curveFracOfGain(g) * (lanesBottom() - lanesTop()); }
+}
+
+TEST_CASE("audio waveform: in curve mode a click adds a point, a drag moves it, a right-click deletes it")
+{
+	ImGuiCtx ctx;
+	TestClip t(100'000, 2, 50'000);   // 2 s; 100 frames per px once fitted
+	const Peaks p = buildPeaks(t.clip);
+	View v;
+	HE::AudioEnvelope env;
+	curveFrame(t.clip, p, v, env, true);
+	curveFrame(t.clip, p, v, env, true);
+	v.curveMode = true;
+
+	// Click at 0.4 s, at the height of -6 dB: one point, there.
+	mouseAt(200.0f, yOfGain(0.5f)); curveFrame(t.clip, p, v, env, true);
+	mouseButton(true);  Result r = curveFrame(t.clip, p, v, env, true);
+	CHECK(r.curveEdited);
+	CHECK_FALSE(r.curveCommitted);   // still held
+	REQUIRE(env.points.size() == 1);
+	CHECK(env.points[0].timeSec == doctest::Approx(0.4));
+	CHECK(env.points[0].gain == doctest::Approx(0.5f).epsilon(0.02));
+	mouseButton(false); r = curveFrame(t.clip, p, v, env, true);
+	CHECK(r.curveCommitted);         // one undo point per gesture
+	CHECK_FALSE(v.hasSelection());   // the lanes did not select
+
+	// A second point at 1.2 s, dragged on to 1.4 s and +6 dB in the same press.
+	mouseAt(600.0f, yOfGain(1.0f)); curveFrame(t.clip, p, v, env, true);
+	mouseButton(true);  curveFrame(t.clip, p, v, env, true);
+	mouseAt(700.0f, yOfGain(2.0f)); r = curveFrame(t.clip, p, v, env, true);
+	CHECK(r.curveEdited);
+	mouseButton(false); r = curveFrame(t.clip, p, v, env, true);
+	CHECK(r.curveCommitted);
+	REQUIRE(env.points.size() == 2);
+	CHECK(env.points[1].timeSec == doctest::Approx(1.4));
+	CHECK(env.points[1].gain == doctest::Approx(2.0f).epsilon(0.02));
+	CHECK(v.curveSel == 1);
+
+	// Grab the first point and drag it past the second: it stops at its
+	// neighbour, the order holds.
+	mouseAt(200.0f, yOfGain(0.5f)); curveFrame(t.clip, p, v, env, true);
+	mouseButton(true);  curveFrame(t.clip, p, v, env, true);
+	mouseAt(900.0f, yOfGain(0.5f)); curveFrame(t.clip, p, v, env, true);
+	mouseButton(false); curveFrame(t.clip, p, v, env, true);
+	REQUIRE(env.points.size() == 2);
+	CHECK(env.points[0].timeSec == doctest::Approx(1.4));
+	CHECK(env.points[0].gain == doctest::Approx(0.5f).epsilon(0.02));
+
+	// Pressing a point and letting go in place is no edit.
+	mouseAt(700.0f, yOfGain(2.0f)); curveFrame(t.clip, p, v, env, true);
+	mouseButton(true);  r = curveFrame(t.clip, p, v, env, true);
+	CHECK_FALSE(r.curveEdited);
+	mouseButton(false); r = curveFrame(t.clip, p, v, env, true);
+	CHECK_FALSE(r.curveCommitted);
+
+	// Right-click on it deletes it.
+	ImGui::GetIO().AddMouseButtonEvent(1, true);  r = curveFrame(t.clip, p, v, env, true);
+	ImGui::GetIO().AddMouseButtonEvent(1, false); curveFrame(t.clip, p, v, env, true);
+	CHECK(r.curveCommitted);
+	CHECK(env.points.size() == 1);
+
+	// Curve mode on a curve that is shown read-only (engine content): the lanes
+	// select as always, the curve is left alone.
+	const HE::AudioEnvelope kept = env;
+	mouseAt(300.0f, lanesY()); curveFrame(t.clip, p, v, env, false);
+	mouseButton(true);  curveFrame(t.clip, p, v, env, false);
+	mouseAt(400.0f, lanesY()); curveFrame(t.clip, p, v, env, false);
+	mouseButton(false); r = curveFrame(t.clip, p, v, env, false);
+	CHECK(r.selectionChanged);
+	CHECK_FALSE(r.curveEdited);
+	CHECK(env.points.size() == kept.points.size());
+
+	// And with curve mode off, the same.
+	v.curveMode = false;
+	mouseAt(100.0f, yOfGain(1.0f)); curveFrame(t.clip, p, v, env, true);
+	mouseButton(true);  curveFrame(t.clip, p, v, env, true);
+	mouseButton(false); r = curveFrame(t.clip, p, v, env, true);
+	CHECK_FALSE(r.curveEdited);
+	CHECK(env.points.size() == kept.points.size());
+}

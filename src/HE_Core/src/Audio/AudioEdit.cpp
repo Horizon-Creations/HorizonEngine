@@ -192,6 +192,88 @@ AudioEnvelope AudioEnvelope::slice(double t0Sec, double t1Sec) const
 	return out;
 }
 
+namespace {
+
+// The ramp across one grid block: gain at grid point `k` and at `k + 1`, and
+// the step between them. Shared by rampedGain and the two apply loops, so all
+// three compute the very same float for a frame.
+struct RampBlock
+{
+	double g0 = 1.0, dg = 0.0;
+	float at(uint64_t i) const   // i = frames into the block, < kRampFrames
+	{
+		return static_cast<float>(g0 + dg * (static_cast<double>(i) / static_cast<double>(AudioEnvelope::kRampFrames)));
+	}
+};
+
+RampBlock rampBlock(const AudioEnvelope& env, uint64_t block, double sampleRate)
+{
+	const uint64_t f0 = block * AudioEnvelope::kRampFrames;
+	const double   g0 = env.evalGain(static_cast<double>(f0) / sampleRate);
+	const double   g1 = env.evalGain(static_cast<double>(f0 + AudioEnvelope::kRampFrames) / sampleRate);
+	return RampBlock{ g0, g1 - g0 };
+}
+
+// Walk [firstFrame, firstFrame + frameCount) block by block and hand every
+// frame's gain to `fn(frameIndexInCall, gain)`.
+template <typename Fn>
+void forEachRampedGain(const AudioEnvelope& env, uint64_t frameCount, uint64_t firstFrame,
+                       double sampleRate, Fn&& fn)
+{
+	uint64_t done = 0;
+	while (done < frameCount)
+	{
+		const uint64_t frame = firstFrame + done;
+		const uint64_t block = frame / AudioEnvelope::kRampFrames;
+		const uint64_t into  = frame - block * AudioEnvelope::kRampFrames;
+		const uint64_t n     = std::min(frameCount - done, AudioEnvelope::kRampFrames - into);
+		const RampBlock r    = rampBlock(env, block, sampleRate);
+		for (uint64_t i = 0; i < n; ++i)
+			fn(done + i, r.at(into + i));
+		done += n;
+	}
+}
+
+} // namespace
+
+float AudioEnvelope::rampedGain(uint64_t frame, double sampleRate) const
+{
+	if (points.empty() || !(sampleRate > 0.0)) return 1.0f;
+	const uint64_t block = frame / kRampFrames;
+	return rampBlock(*this, block, sampleRate).at(frame - block * kRampFrames);
+}
+
+void AudioEnvelope::apply(float* interleaved, uint64_t frameCount, int channels,
+                          uint64_t firstFrame, double sampleRate) const
+{
+	if (points.empty() || !interleaved || channels <= 0 || !(sampleRate > 0.0)) return;
+	const size_t ch = static_cast<size_t>(channels);
+	forEachRampedGain(*this, frameCount, firstFrame, sampleRate, [&](uint64_t i, float g)
+	{
+		float* f = interleaved + static_cast<size_t>(i) * ch;
+		for (size_t c = 0; c < ch; ++c) f[c] *= g;
+	});
+}
+
+size_t AudioEnvelope::applyPcm16(int16_t* interleaved, uint64_t frameCount, int channels,
+                                 uint64_t firstFrame, double sampleRate) const
+{
+	if (points.empty() || !interleaved || channels <= 0 || !(sampleRate > 0.0)) return 0;
+	const size_t ch = static_cast<size_t>(channels);
+	size_t clamped = 0;
+	forEachRampedGain(*this, frameCount, firstFrame, sampleRate, [&](uint64_t i, float g)
+	{
+		int16_t* f = interleaved + static_cast<size_t>(i) * ch;
+		for (size_t c = 0; c < ch; ++c)
+		{
+			const long v = std::lround(static_cast<double>(f[c]) * static_cast<double>(g));
+			if (v > 32767 || v < -32768) ++clamped;
+			f[c] = static_cast<int16_t>(clampTo(v, -32768L, 32767L));
+		}
+	});
+	return clamped;
+}
+
 void AudioEnvelope::toJson(nlohmann::json& out) const
 {
 	out = nlohmann::json::array();

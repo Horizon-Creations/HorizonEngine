@@ -79,7 +79,11 @@ public:
     // range, and its cursor, length and seek count from the trim's start, so
     // "frames of what was played" (see getSoundCursorFrames) stays true. The
     // samples themselves are not cut; an untrimmed clip plays exactly as before.
-    // PCM16 copies the samples into
+    // So is its volume curve (edit.envelope): the voice's samples are multiplied
+    // by AudioEnvelope::apply on the mixer thread, against frames of the
+    // ORIGINAL clip, so a trimmed voice hears the curve where it was drawn. A
+    // clip without a curve gets no extra stage at all and plays bit-identical
+    // to before. PCM16 copies the samples into
     // the voice (as the raw overload below); Vorbis copies only the Ogg bytes
     // and decodes them as the mixer pulls frames, so a five-minute track costs
     // its compressed size per voice, not its PCM size. Both copy because the
@@ -106,6 +110,26 @@ public:
     uint64_t play(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
                   float volume = 1.0f, float pitch = 1.0f, bool loop = false,
                   const std::string& busName = {});
+
+    // The same with a volume curve — the Audio Editor's preview, which plays a
+    // copy of a selection rather than the asset. `envelopeFrameOffset` is the
+    // frame of the original clip that pcmData's first frame is, so the curve
+    // lands where it was drawn. Unlike the asset overloads this ALWAYS puts the
+    // curve stage in, even for an empty curve, so setSoundEnvelope can change
+    // the curve of the running voice while it is being edited.
+    uint64_t play(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
+                  const HE::AudioEnvelope& envelope, uint64_t envelopeFrameOffset,
+                  float volume = 1.0f, float pitch = 1.0f, bool loop = false,
+                  const std::string& busName = {});
+
+    // Swap the curve of a running voice; the mixer picks it up on its next
+    // read (the click guard keeps that seamless). Returns false — and changes
+    // nothing — for an unknown handle or a voice started without a curve
+    // stage (an asset without a curve, or a raw-PCM play).
+    bool setSoundEnvelope(uint64_t handle, const HE::AudioEnvelope& envelope);
+    // Whether the voice runs through a curve stage — what a test checks to
+    // know a clip without a curve took the untouched path.
+    bool hasSoundEnvelope(uint64_t handle) const;
 
     // Play spatial sound at world-space position. minDist = full-volume radius,
     // maxDist = silence radius. Uses linear attenuation. Returns 0 on failure.
@@ -215,10 +239,13 @@ private:
     // `encoding` (PCM16 needs sampleRate/channels, Vorbis carries its own).
     // `trim`: the asset's AudioTrim (the asset overloads pass it, the raw-PCM
     // ones nullptr) — the voice plays only that range, see play(const AudioAsset&).
+    // `envelope`: the curve stage; nullptr = none. `envelopeOffset`: original-
+    // clip frame of the bytes' first frame (0 for an asset, which is the whole clip).
     uint64_t startSound(const std::vector<uint8_t>& bytes, AudioEncoding encoding,
                         int sampleRate, int channels,
                         float volume, float pitch, bool loop, const std::string& busName,
-                        const SpatialParams* spatial, const HE::AudioTrim* trim = nullptr);
+                        const SpatialParams* spatial, const HE::AudioTrim* trim = nullptr,
+                        const HE::AudioEnvelope* envelope = nullptr, uint64_t envelopeOffset = 0);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

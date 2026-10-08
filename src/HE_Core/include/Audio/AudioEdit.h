@@ -116,6 +116,36 @@ struct HE_API AudioEnvelope
 	// An empty curve stays empty.
 	AudioEnvelope slice(double t0Sec, double t1Sec) const;
 
+	// ── Applying it to samples ──────────────────────────────────────────────
+	// One function for every place the curve is heard: the engine's voices at
+	// runtime, the Audio Editor's preview, and Extract when it bakes the curve
+	// into the new clip — so the three cannot sound different.
+	//
+	// The gain is evaluated (evalGain) once every kRampFrames frames on a grid
+	// anchored at frame 0 of the ORIGINAL clip, and ramped linearly in between.
+	// That is the click guard: a Hold step, or a jump between two points at one
+	// time, becomes a ramp of kRampFrames instead of a one-sample step (~2.7 ms
+	// at 48 kHz: no click, still a cut). On the grid the gain is exactly
+	// evalGain; inside one Linear segment it is exactly the line between. And
+	// because it is a pure function of the frame, the result does not depend on
+	// how the mixer slices its reads, nor on seeks or loop wraps.
+	static constexpr uint64_t kRampFrames = 128;
+
+	// The gain sample `frame` of the original clip is multiplied by. 1 for an
+	// empty curve or a sampleRate ≤ 0.
+	float rampedGain(uint64_t frame, double sampleRate) const;
+
+	// Multiply `frameCount` interleaved frames whose first one is frame
+	// `firstFrame` of the original clip by rampedGain. An empty curve leaves the
+	// samples untouched (not even multiplied by 1).
+	void apply(float* interleaved, uint64_t frameCount, int channels,
+	           uint64_t firstFrame, double sampleRate) const;
+	// The same on int16, rounded and clamped to full scale. Returns how many
+	// samples had to be clamped (a curve above unity can drive a loud clip
+	// past full scale; Extract reports it).
+	size_t applyPcm16(int16_t* interleaved, uint64_t frameCount, int channels,
+	                  uint64_t firstFrame, double sampleRate) const;
+
 	void toJson(nlohmann::json& out) const;    // a JSON array
 	void fromJson(const nlohmann::json& in);   // anything but an array → empty
 };

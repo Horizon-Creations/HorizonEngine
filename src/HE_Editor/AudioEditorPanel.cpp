@@ -135,6 +135,9 @@ struct State
 	bool        extractRequested = false;
 	std::string extractStatus;    // what was written, or why nothing was
 	bool        extractFailed    = false;
+	// Extract multiplies the volume curve into the new clip's samples instead of
+	// handing it over as an edit (AudioImporter::extractRange, bakeCurve).
+	bool        bakeCurve        = false;
 };
 
 AssetPanelState<State> s_states;
@@ -321,7 +324,7 @@ HE::Ed::AudioWave::Clip waveClipOf(const AudioAsset& a)
 // engine copies whatever play() is handed anyway (AudioEngine.h), so the slice
 // can die at the end of this function; for the whole clip there is no slice
 // at all — the asset's buffer goes straight in, as before.
-void startPreview(const AudioAsset& clip, State& st)
+void startPreview(const AudioAsset& clip, State& st, const HE::AudioEnvelope* curve)
 {
 	if (!st.audio || !st.audio->isInitialized()) return;
 	stopPreview(st);
@@ -331,18 +334,26 @@ void startPreview(const AudioAsset& clip, State& st)
 	const AW::PlayRange r = AW::playRange(st.view, frames);
 	if (r.end <= r.begin) return;
 
-	if (r.begin == 0 && r.end == frames)
+	// An asset's voice carries its volume curve, offset to where the played
+	// range sits in the clip, so the preview hears it where it is drawn — and,
+	// because the curve stage is in even for an empty curve, hears every edit of
+	// it while it plays (setSoundEnvelope after each change). A raw file has no
+	// curve and plays as it is.
+	auto playBytes = [&](const std::vector<uint8_t>& bytes)
 	{
-		st.handle = st.audio->play(clip.audioData, clip.sampleRate, clip.channels,
-		                           st.volume, st.pitch, st.loop, {});
-	}
+		return curve ? st.audio->play(bytes, clip.sampleRate, clip.channels, *curve, r.begin,
+		                              st.volume, st.pitch, st.loop, {})
+		             : st.audio->play(bytes, clip.sampleRate, clip.channels,
+		                              st.volume, st.pitch, st.loop, {});
+	};
+	if (r.begin == 0 && r.end == frames)
+		st.handle = playBytes(clip.audioData);
 	else
 	{
 		const size_t bytesPerFrame = sizeof(int16_t) * static_cast<size_t>(clip.channels);
 		const std::vector<uint8_t> slice(clip.audioData.begin() + std::ptrdiff_t(r.begin * bytesPerFrame),
 		                                 clip.audioData.begin() + std::ptrdiff_t(r.end   * bytesPerFrame));
-		st.handle = st.audio->play(slice, clip.sampleRate, clip.channels,
-		                           st.volume, st.pitch, st.loop, {});
+		st.handle = playBytes(slice);
 	}
 	if (!st.handle)
 	{
@@ -457,6 +468,16 @@ void applyTrim(State& st, AudioAsset& a, const HE::AudioTrim& t)
 	commitEdit(st, a.edit);
 }
 
+// The curve changed (a drag in progress, a toolbar button, a delete): the
+// edit is unsaved, and a voice that is playing hears the new curve at once.
+// `commit` makes it an undo point — a drag commits once, when it lets go.
+void curveChanged(State& st, AudioAsset& a, bool commit)
+{
+	st.dirty = true;
+	if (st.handle && st.audio) st.audio->setSoundEnvelope(st.handle, a.edit.envelope);
+	if (commit) pushUndo(st, a.edit);
+}
+
 // Where a file this tab writes lands: next to the clip, or — for a clip in the
 // engine library, which is read-only outside engine-content dev mode — in the
 // project's own Content/Audio, which is somewhere the project can actually
@@ -519,16 +540,26 @@ void runExtract(AppContext& ctx, State& st, const std::string& assetPath)
 		                           static_cast<double>(st.view.selEnd)   / rate);
 	const std::string stem = std::filesystem::path(assetPath).stem().string() + "_extract";
 
+	// Baking multiplies the original's curve into the samples — against the
+	// original's frame numbers, the gain its own voice applies there — and the
+	// extract then carries no curve of its own (extractRange clears it).
+	const AudioAsset*        owner = editableOf(ctx, st);
+	const HE::AudioEnvelope* bake  = (st.bakeCurve && owner && !owner->edit.envelope.empty())
+		? &owner->edit.envelope : nullptr;
+
 	AudioImporter::ExtractResult r;
 	if (!AudioImporter::extractRange(*clip, st.view.selBegin, st.view.selEnd,
-	                                 t.root, t.relDir, stem, carried, r))
+	                                 t.root, t.relDir, stem, carried, r, bake))
 	{
 		st.extractStatus = "Nothing extracted: the new asset could not be written (the log says why).";
 		return;
 	}
 	st.extractFailed = false;
 	st.extractStatus = "Extracted " + HE::Ed::AudioWave::formatFrames(static_cast<size_t>(r.frames)) +
-	                   " frames to " + r.path;
+	                   " frames to " + r.path + (bake ? ", volume curve baked in" : "");
+	if (r.clampedSamples > 0)
+		st.extractStatus += " (" + std::to_string(r.clampedSamples) +
+		                    " samples clipped at full scale: the curve lifts it past 0 dBFS)";
 	ctx.contentRefreshPending = true;
 }
 
@@ -751,6 +782,51 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		             "Audio Editor/Extract"))
 			st.extractRequested = true;
 		bar.endGroup();
+
+		// Volume curve. "Curve" switches the lanes from selecting to editing
+		// points; Linear/Smooth shape the segment that starts at the selected
+		// point (the left point owns its segment, AudioEdit.h).
+		bar.group();
+		if (bar.item("##audiocurve", nullptr, "Curve", st.view.curveMode, canEdit,
+		             !canEdit ? (st.isRawFile ? "A source file has no asset to keep a curve in — import it first"
+		                                      : "Engine content is read-only")
+		                      : "Edit the volume curve: click to add a point, drag to move it, "
+		                        "right-click or double-click to delete it",
+		             "Audio Editor/Curve"))
+		{
+			st.view.curveMode = !st.view.curveMode;
+			st.view.curveSel  = -1;
+		}
+		const int  sel      = st.view.curveSel;
+		const bool hasPoint = canEdit && st.view.curveMode && sel >= 0 &&
+		                      sel < static_cast<int>(editable->edit.envelope.points.size());
+		const HE::AudioCurveInterp selInterp = hasPoint
+			? editable->edit.envelope.points[static_cast<size_t>(sel)].interp : HE::AudioCurveInterp::Linear;
+		if (bar.item("##audiocurvelinear", nullptr, "Linear", hasPoint && selInterp == HE::AudioCurveInterp::Linear,
+		             hasPoint, hasPoint ? "A straight line from the selected point to the next one"
+		                                : "Select a curve point first",
+		             "Audio Editor/Linear") && hasPoint)
+		{
+			editable->edit.envelope.points[static_cast<size_t>(sel)].interp = HE::AudioCurveInterp::Linear;
+			curveChanged(st, *editable, true);
+		}
+		if (bar.item("##audiocurvesmooth", nullptr, "Smooth", hasPoint && selInterp == HE::AudioCurveInterp::Smooth,
+		             hasPoint, hasPoint ? "An eased curve from the selected point to the next one — no corner at either end"
+		                                : "Select a curve point first",
+		             "Audio Editor/Smooth") && hasPoint)
+		{
+			editable->edit.envelope.points[static_cast<size_t>(sel)].interp = HE::AudioCurveInterp::Smooth;
+			curveChanged(st, *editable, true);
+		}
+		if (bar.item("##audiocurveclear", nullptr, "Clear Curve", false,
+		             canEdit && !editable->edit.envelope.empty(),
+		             "Remove every point: the clip plays at its own level again", "Audio Editor/Clear Curve"))
+		{
+			editable->edit.envelope.points.clear();
+			st.view.curveSel = -1;
+			curveChanged(st, *editable, true);
+		}
+		bar.endGroup();
 		// The buttons above may have changed the trim; the canvas below and the
 		// transport draw this frame's.
 		syncTrimView(st, editable, frames);
@@ -773,7 +849,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		                        : "No audio device — the editor's audio engine failed to start",
 		             "Audio Editor/Play"))
 		{
-			if (!st.handle)          startPreview(*clip, st);
+			if (!st.handle)          startPreview(*clip, st, editable ? &editable->edit.envelope : nullptr);
 			else if (st.paused)      { st.audio->resumeSound(st.handle); st.paused = false; }
 			else                     { st.audio->pauseSound(st.handle);  st.paused = true;  }
 		}
@@ -897,9 +973,31 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			                    "writes the selection into the project instead.");
 		else
 			ImGui::TextDisabled("Untrimmed. Select a range and press Trim to play only that.");
+		if (editable && !editable->edit.envelope.empty())
+		{
+			ImGui::Checkbox("Bake Curve into Extract", &st.bakeCurve);
+			EditorWidgets::helpForLabel("Bake Curve into Extract");
+		}
 		if (!st.extractStatus.empty())
 			ImGui::TextColored(st.extractFailed ? ImVec4(1.0f, 0.6f, 0.4f, 1.0f) : ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
 			                   "%s", st.extractStatus.c_str());
+
+		ImGui::SeparatorText("Volume curve");
+		if (editable && !editable->edit.envelope.empty())
+		{
+			const HE::AudioEnvelope& env = editable->edit.envelope;
+			float lo = env.points.front().gain, hi = lo;
+			for (const HE::AudioEnvelopePoint& p : env.points) { lo = std::min(lo, p.gain); hi = std::max(hi, p.gain); }
+			ImGui::Text("%zu point%s", env.points.size(), env.points.size() == 1 ? "" : "s");
+			ImGui::Text("Low   %s", AW::formatGain(lo).c_str());
+			ImGui::Text("High  %s", AW::formatGain(hi).c_str());
+			ImGui::TextDisabled("Heard in this preview and wherever the game plays the clip.");
+		}
+		else if (canEdit)
+			ImGui::TextDisabled("No curve: the clip plays at its own level. Press Curve and click "
+			                    "the waveform to add points.");
+		else
+			ImGui::TextDisabled("Only an imported, editable asset can carry a volume curve.");
 		if (!st.lastSaveError.empty())
 			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", st.lastSaveError.c_str());
 
@@ -981,7 +1079,8 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// number — the frame is what a cut in the next step will be made at. The
 		// second is the pointer grammar, which is the first thing to go over the
 		// right edge of a narrow tab, so both rows wrap instead of clipping.
-		const std::string where = AW::readout(st.view, wclip, st.hoverFrame);
+		const std::string where = AW::readout(st.view, wclip, st.hoverFrame,
+		                                      editable ? &editable->edit.envelope : nullptr);
 
 		// framesPerPx is still zero the first time a clip is opened — AW::draw
 		// fits the whole clip to the canvas below. Anticipate that fit rather than
@@ -990,6 +1089,13 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			? st.view.framesPerPx
 			: static_cast<double>(frames) / static_cast<double>(std::max(64.0f, canvasW));
 		char hint[320];
+		if (st.view.curveMode && canEdit)
+			std::snprintf(hint, sizeof(hint),
+				"%s long  |  %.3g s visible  |  curve: click to add a point, drag to move it "
+				"(Shift: gain only), right-click, double-click or Delete to remove it, "
+				"Linear/Smooth shape the segment after the selected point",
+				AW::formatTime(an.durationSec).c_str(), fpp * canvasW / rate);
+		else
 		std::snprintf(hint, sizeof(hint), EditorInput::trackpadPointer(ctx)
 			? "%s long  |  %.3g s visible  |  drag the waveform to select, click to place the "
 			  "playhead, shift-click to extend, drag the ruler to scrub, swipe to pan, "
@@ -1006,9 +1112,12 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 		const AW::Result res = AW::draw(wclip, st.peaks, st.view,
 			ImVec2(canvasW, std::max(80.0f + AW::metrics().overviewH, avail.y - footerH)),
-			EditorInput::trackpadPointer(ctx));
+			EditorInput::trackpadPointer(ctx),
+			editable ? &editable->edit.envelope : nullptr, canEdit);
 		st.canvasW    = res.canvasW;
 		st.hoverFrame = res.hoverFrame;
+		if (editable && (res.curveEdited || res.curveCommitted))
+			curveChanged(st, *editable, res.curveCommitted);
 
 		// What the canvas did, applied to the voice. A new selection (or one
 		// cleared by a click) changes what Play means, so a running voice is
@@ -1019,7 +1128,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			if (res.selectionChanged)
 			{
 				if (st.paused) stopPreview(st);
-				else           startPreview(*clip, st);
+				else           startPreview(*clip, st, editable ? &editable->edit.envelope : nullptr);
 			}
 			else if (res.seek)
 			{
@@ -1049,6 +1158,16 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		const ImGuiIO& io   = ImGui::GetIO();
 		const bool     ctrl = io.KeyCtrl || io.KeySuper;
 		if (ctrl && ImGui::IsKeyPressed(ImGuiKey_S) && st.dirty) saveState(ctx, st);
+		// Delete / Backspace removes the selected curve point.
+		AudioAsset* ed = canEdit ? editableOf(ctx, st) : nullptr;
+		if (ed && st.view.curveMode && st.view.curveSel >= 0 &&
+		    st.view.curveSel < static_cast<int>(ed->edit.envelope.points.size()) &&
+		    (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)))
+		{
+			HE::Ed::AudioWave::curveErase(ed->edit.envelope, st.view.curveSel);
+			st.view.curveSel = -1;
+			curveChanged(st, *ed, true);
+		}
 		if (ctrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z) &&
 		    restoreSnapshot(ctx, st, st.undoPos - 1))
 			stopPreview(st);

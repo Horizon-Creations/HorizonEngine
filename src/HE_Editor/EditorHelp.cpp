@@ -6737,7 +6737,8 @@ namespace
 	  "the playhead. Press on an edge of the selection to move just that edge. "
 	  "The wheel zooms around the pointer, Shift+wheel or a middle-drag pans; "
 	  "on a trackpad the swipe pans and Cmd/Ctrl+scroll zooms. Zoomed in far "
-	  "enough, the single samples appear as points.",
+	  "enough, the single samples appear as points. With Curve switched on in "
+	  "the toolbar the lanes edit the volume curve instead of the selection.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Ruler", "Time ruler",
 	  "Drag along it to scrub: the playhead follows the pointer, and a clip "
@@ -6781,7 +6782,38 @@ namespace
 	  "its own and the same bus and EQ. Over its range it also keeps the volume "
 	  "curve. The clip you cut from is left exactly as it was. The new asset has "
 	  "no source file, so Reimport cannot overwrite it with the whole recording. "
-	  "Engine content goes into the project's own Content/Audio.",
+	  "Engine content goes into the project's own Content/Audio. With Bake Curve "
+	  "into Extract ticked, the curve is multiplied into the new samples instead.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Bake Curve into Extract", "",
+	  "Extract writes the selection with the volume curve already applied to the "
+	  "samples, so the new clip sounds exactly as the range plays here and needs "
+	  "no curve of its own. Off, the samples are copied untouched and the curve "
+	  "goes along as an edit you can still change. Where the curve lifts a loud "
+	  "passage past full scale, those samples are clipped, and the status line "
+	  "says how many. Only shown when the clip has a curve.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Curve", "Volume Curve",
+	  "Switches the waveform to editing the clip's volume curve, drawn in yellow "
+	  "on a dB scale from silence at the bottom to +12 dB at the top. Click to add "
+	  "a point, drag a point to move it (hold Shift to change only its gain), "
+	  "right-click or double-click a point, or press Delete, to remove it. The "
+	  "gain of the point under the pointer is shown beside it, and the readout "
+	  "gives the curve's gain at the pointer. The curve is heard at once in the "
+	  "preview, and it applies wherever the game plays the clip. It is an edit "
+	  "like the trim: undoable, saved with the asset, the samples untouched.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Linear", "",
+	  "The segment from the selected curve point to the next one becomes a "
+	  "straight line in level. Click a point with Curve on to select it.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Smooth", "",
+	  "The segment from the selected curve point to the next one becomes an eased "
+	  "curve, flat at both ends, so the level glides in and out without a corner.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Clear Curve", "",
+	  "Removes every point of the volume curve, so the clip plays at its own "
+	  "level again. Undoable.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Loop", "",
 	  "Whether playback wraps round at the end or stops there. With a selection "

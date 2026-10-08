@@ -232,6 +232,86 @@ PlayRange playRange(const View& v, size_t frames)
 	return r;
 }
 
+// ── Volume curve ─────────────────────────────────────────────────────────────
+
+namespace
+{
+	double curveTopDb() { return 20.0 * std::log10(double(HE::AudioEnvelope::kMaxGain)); }
+}
+
+float curveFracOfGain(float gain)
+{
+	if (!(gain > 0.0f)) return 0.0f;
+	const double floorGain = std::pow(10.0, kCurveFloorDb / 20.0);
+	if (double(gain) < floorGain)   // under the floor: a straight run down to silence
+		return float(double(kCurveSilentFrac) * double(gain) / floorGain);
+	const double db = std::min(20.0 * std::log10(double(gain)), curveTopDb());
+	return float(double(kCurveSilentFrac) +
+	             (1.0 - double(kCurveSilentFrac)) * (db - kCurveFloorDb) / (curveTopDb() - kCurveFloorDb));
+}
+
+float curveGainOfFrac(float frac)
+{
+	if (!(frac > kCurveSilentFrac)) return 0.0f;
+	const double t  = std::min(1.0, double(frac - kCurveSilentFrac) / (1.0 - double(kCurveSilentFrac)));
+	const double db = kCurveFloorDb + t * (curveTopDb() - kCurveFloorDb);
+	return std::min(HE::AudioEnvelope::kMaxGain, float(std::pow(10.0, db / 20.0)));
+}
+
+std::string formatGain(float gain)
+{
+	if (!(gain > 0.0f)) return "-inf dB (x0)";
+	char buf[48];
+	const double db = 20.0 * std::log10(double(gain));
+	// "+0.0" for unity rather than "-0.0": the rounding of a float that is
+	// a hair under 1 must not read as a cut.
+	std::snprintf(buf, sizeof(buf), "%+.1f dB (x%.2f)", std::fabs(db) < 0.05 ? 0.0 : db, double(gain));
+	return buf;
+}
+
+int curvePointAt(const HE::AudioEnvelope& env, const View& v, double rate, float lanesH,
+                 float px, float pyFromBottom, float radiusPx)
+{
+	int   best  = -1;
+	float bestD = radiusPx * radiusPx;
+	for (size_t i = 0; i < env.points.size(); ++i)
+	{
+		const HE::AudioEnvelopePoint& p = env.points[i];
+		const float dx = pxAtFrame(v, p.timeSec * rate) - px;
+		const float dy = curveFracOfGain(p.gain) * lanesH - pyFromBottom;
+		const float d  = dx * dx + dy * dy;
+		if (d <= bestD) { bestD = d; best = int(i); }
+	}
+	return best;
+}
+
+int curveInsert(HE::AudioEnvelope& env, double tSec, float gain, HE::AudioCurveInterp interp)
+{
+	const auto at = std::upper_bound(env.points.begin(), env.points.end(), tSec,
+	                                 [](double t, const HE::AudioEnvelopePoint& p) { return t < p.timeSec; });
+	HE::AudioEnvelopePoint p;
+	p.timeSec = std::max(0.0, tSec);
+	p.gain    = std::clamp(gain, 0.0f, HE::AudioEnvelope::kMaxGain);
+	p.interp  = interp;
+	return int(env.points.insert(at, p) - env.points.begin());
+}
+
+void curveMove(HE::AudioEnvelope& env, int i, double tSec, float gain, double clipSec)
+{
+	if (i < 0 || size_t(i) >= env.points.size()) return;
+	const double lo = i > 0 ? env.points[size_t(i) - 1].timeSec : 0.0;
+	const double hi = size_t(i) + 1 < env.points.size() ? env.points[size_t(i) + 1].timeSec
+	                                                    : std::max(lo, clipSec);
+	env.points[size_t(i)].timeSec = std::clamp(tSec, lo, std::max(lo, hi));
+	env.points[size_t(i)].gain    = std::clamp(gain, 0.0f, HE::AudioEnvelope::kMaxGain);
+}
+
+void curveErase(HE::AudioEnvelope& env, int i)
+{
+	if (i < 0 || size_t(i) >= env.points.size()) return;
+	env.points.erase(env.points.begin() + i);
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 std::string formatTime(double sec)
@@ -289,7 +369,7 @@ std::string formatFrames(size_t frames)
 	return out;
 }
 
-std::string readout(const View& v, const Clip& clip, double hoverFrame)
+std::string readout(const View& v, const Clip& clip, double hoverFrame, const HE::AudioEnvelope* curve)
 {
 	const double rate = clip.sampleRate > 0 ? double(clip.sampleRate) : 48000.0;
 	std::string s = "Playhead " + formatTime(double(v.playhead) / rate) +
@@ -312,6 +392,13 @@ std::string readout(const View& v, const Clip& clip, double hoverFrame)
 		const size_t f = size_t(std::min(hoverFrame, double(clip.frames)));
 		s += "   \xc2\xb7   Pointer " + formatTime(double(f) / rate) +
 		     " (frame " + formatFrames(f) + ")";
+	}
+	if (curve && !curve->empty())
+	{
+		const bool   atPointer = hoverFrame >= 0.0;
+		const double f = atPointer ? std::min(hoverFrame, double(clip.frames)) : double(v.playhead);
+		s += "   \xc2\xb7   Curve " + formatGain(curve->evalGain(f / rate)) +
+		     (atPointer ? " at the pointer" : " at the playhead");
 	}
 	return s;
 }
@@ -347,6 +434,14 @@ namespace
 	// Outside the trim: the clip is still there, it just does not play.
 	const ImU32 kTrimShade = IM_COL32(8, 8, 10, 170);
 	const ImU32 kTrimEdge  = IM_COL32(255, 120, 90, 220);
+	// The volume curve: bright while it is being edited, a quieter line otherwise
+	// (it is still there and still heard, it just is not what the lanes edit).
+	const ImU32 kCurve      = IM_COL32(255, 214, 92, 235);
+	const ImU32 kCurveIdle  = IM_COL32(255, 214, 92, 120);
+	const ImU32 kCurveGrid  = IM_COL32(255, 214, 92, 30);
+	const ImU32 kCurveLabel = IM_COL32(255, 214, 92, 150);
+	// How close (px) a press has to land to a curve point to take hold of it.
+	constexpr float kPointGrabPx = 7.0f;
 
 	// 1-2-5 steps in frames for the sample ruler.
 	double frameTickStep(double framesPerPx)
@@ -368,7 +463,8 @@ const Metrics& metrics()
 	return m;
 }
 
-Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size, bool trackpad)
+Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size, bool trackpad,
+            HE::AudioEnvelope* curve, bool curveEditable)
 {
 	Result out;
 	const Metrics& M = metrics();
@@ -387,6 +483,12 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 	const float overTop     = origin.y + height - M.overviewH;
 	const float lanesBottom = overTop - 4.0f;
 	const float right       = origin.x + width;
+	const float lanesH      = std::max(1.0f, lanesBottom - rulerBottom);
+	// The lanes edit the curve instead of the selection.
+	const bool  curveOn     = view.curveMode && curve != nullptr && curveEditable;
+	const double clipSec    = double(frames) / rate;
+	if (!curve || view.curveDragIdx >= int(curve->points.size())) view.curveDragIdx = -1;
+	if (!curve || view.curveSel     >= int(curve->points.size())) view.curveSel     = -1;
 
 	// ── Hit areas ────────────────────────────────────────────────────────────
 	// Three buttons, one per strip, so each answers hover with its own help
@@ -414,6 +516,12 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 	ImGuiIO&     io    = ImGui::GetIO();
 	const ImVec2 mouse = io.MousePos;
 	const float  mpx   = mouse.x - origin.x;
+	const float  mpyB  = lanesBottom - mouse.y;   // pointer height above the lanes' bottom
+	// The curve point under the pointer (curve mode only), for the grab, the
+	// delete, the cursor and the gain label.
+	// Reset to -1 by a delete below: the index would name the next point, or none.
+	int curveHover = (curveOn && lanesHovered)
+		? curvePointAt(*curve, view, rate, lanesH, mpx, mpyB, kPointGrabPx) : -1;
 	auto frameUnderPointer = [&]() -> size_t
 	{
 		return size_t(std::clamp(std::llround(frameAtPx(view, mpx)), 0LL, (long long)frames));
@@ -451,6 +559,39 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 	// ── Presses ──────────────────────────────────────────────────────────────
 	if (rulerActivated)
 		view.drag = View::Drag::Scrub;
+	else if (lanesPressed && curveOn)
+	{
+		// A double-click on a point deletes it (its first click already took
+		// hold of it, or made it).
+		if (curveHover >= 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+		{
+			curveErase(*curve, curveHover);
+			view.curveSel = view.curveDragIdx = curveHover = -1;
+			out.curveEdited = out.curveCommitted = true;
+		}
+		else
+		{
+			int i = curveHover;
+			view.dragMoved = false;
+			if (i < 0)
+			{
+				// A new point where the pointer is, shaped like the segment it
+				// lands in (the left point's interpolation), held at once so
+				// the same press can drag it into place.
+				const double t = std::clamp(frameAtPx(view, mpx), 0.0, double(frames)) / rate;
+				HE::AudioCurveInterp interp = HE::AudioCurveInterp::Linear;
+				for (const HE::AudioEnvelopePoint& p : curve->points)
+					if (p.timeSec <= t) interp = p.interp;
+				i = curveInsert(*curve, t, curveGainOfFrac(mpyB / lanesH), interp);
+				out.curveEdited = true;
+				view.dragMoved  = true;   // the release is an undo point, moved or not
+			}
+			view.curveSel     = i;
+			view.curveDragIdx = i;
+			view.pressX       = mouse.x;
+			view.drag         = View::Drag::CurvePoint;
+		}
+	}
 	else if (lanesPressed)
 	{
 		const size_t f = frameUnderPointer();
@@ -494,6 +635,15 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 		// clicking beside it brings the window's centre to the pointer.
 		view.overviewGrab = (at >= view.viewStart && at <= view.viewStart + span)
 			? at - view.viewStart : span * 0.5;
+	}
+
+	// Right-click on a point deletes it.
+	if (curveOn && curveHover >= 0 && view.drag == View::Drag::None &&
+	    ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+	{
+		curveErase(*curve, curveHover);
+		view.curveSel = curveHover = -1;
+		out.curveEdited = out.curveCommitted = true;
 	}
 
 	// ── Drags ────────────────────────────────────────────────────────────────
@@ -553,6 +703,29 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 				clampView(view, frames, width);
 			}
 			break;
+		case View::Drag::CurvePoint:
+			if (!curve || view.curveDragIdx < 0)
+				break;
+			if (down)
+			{
+				const HE::AudioEnvelopePoint was = curve->points[size_t(view.curveDragIdx)];
+				// Shift holds the time: only the gain follows the pointer.
+				const double t = io.KeyShift ? was.timeSec
+				               : std::clamp(frameAtPx(view, mpx), 0.0, double(frames)) / rate;
+				curveMove(*curve, view.curveDragIdx, t, curveGainOfFrac(mpyB / lanesH), clipSec);
+				const HE::AudioEnvelopePoint& now = curve->points[size_t(view.curveDragIdx)];
+				if (now.timeSec != was.timeSec || now.gain != was.gain)
+				{
+					out.curveEdited = true;
+					view.dragMoved  = true;
+				}
+			}
+			else
+			{
+				if (view.dragMoved) out.curveCommitted = true;
+				view.curveDragIdx = -1;
+			}
+			break;
 		case View::Drag::None:
 			break;
 		}
@@ -560,13 +733,15 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 	}
 
 	// The edge cursor, so the grab is discoverable.
-	if (lanesHovered && view.drag == View::Drag::None && view.hasSelection())
+	if (lanesHovered && view.drag == View::Drag::None && view.hasSelection() && !curveOn)
 	{
 		const float xb = pxAtFrame(view, double(view.selBegin));
 		const float xe = pxAtFrame(view, double(view.selEnd));
 		if (std::fabs(mpx - xb) <= kEdgeGrabPx || std::fabs(mpx - xe) <= kEdgeGrabPx)
 			ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 	}
+	if (curveOn && (curveHover >= 0 || view.drag == View::Drag::CurvePoint))
+		ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 	if (rulerHovered || lanesHovered)
 		out.hoverFrame = std::clamp(frameAtPx(view, mpx), 0.0, double(frames));
 
@@ -689,6 +864,64 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 			dl->AddRectFilled(ImVec2(std::max(tx1, origin.x), rulerBottom), br, kTrimShade);
 		dl->AddLine(ImVec2(tx0, origin.y), ImVec2(tx0, br.y), kTrimEdge, 1.5f);
 		dl->AddLine(ImVec2(tx1, origin.y), ImVec2(tx1, br.y), kTrimEdge, 1.5f);
+	}
+
+	// The volume curve, over the waveform and the trim shade: in curve mode
+	// with its dB scale and handles, otherwise as a quiet line when it has
+	// points (an asset with no curve shows nothing at all).
+	if (curve && (curveOn || !curve->empty()))
+	{
+		auto yOfGain = [&](float g) { return lanesBottom - curveFracOfGain(g) * lanesH; };
+		if (curveOn)
+		{
+			for (double db : { 12.0, 6.0, 0.0, -6.0, -12.0, -24.0, -48.0 })
+			{
+				const float y = yOfGain(float(std::pow(10.0, db / 20.0)));
+				dl->AddLine(ImVec2(origin.x, y), ImVec2(right, y),
+				            db == 0.0 ? IM_COL32(255, 214, 92, 70) : kCurveGrid);
+				char lbl[16];
+				std::snprintf(lbl, sizeof(lbl), "%+.0f dB", db);
+				dl->AddText(ImVec2(right - 46.0f, y - 14.0f), kCurveLabel, db == 0.0 ? "0 dB" : lbl);
+			}
+		}
+		// One vertex per pixel column, from evalGain itself: Hold steps,
+		// smooth ease and dB-linear fades all come out as they sound.
+		std::vector<ImVec2> line;
+		line.reserve(size_t(width) + 2);
+		for (int px = 0; px <= int(width); ++px)
+		{
+			const double f = std::clamp(frameAtPx(view, float(px)), 0.0, double(frames));
+			line.emplace_back(origin.x + float(px), yOfGain(curve->evalGain(f / rate)));
+		}
+		dl->AddPolyline(line.data(), int(line.size()), curveOn ? kCurve : kCurveIdle, 0, curveOn ? 2.0f : 1.5f);
+
+		if (curveOn)
+		{
+			for (size_t i = 0; i < curve->points.size(); ++i)
+			{
+				const HE::AudioEnvelopePoint& p = curve->points[i];
+				const ImVec2 c(origin.x + pxAtFrame(view, p.timeSec * rate), yOfGain(p.gain));
+				if (c.x < origin.x - 8.0f || c.x > right + 8.0f) continue;
+				const bool sel = int(i) == view.curveSel;
+				const bool hot = int(i) == curveHover || int(i) == view.curveDragIdx;
+				dl->AddCircleFilled(c, sel || hot ? 5.5f : 4.0f, sel ? IM_COL32(255, 245, 210, 255) : kCurve);
+				dl->AddCircle(c, sel || hot ? 5.5f : 4.0f, IM_COL32(20, 21, 25, 255), 0, 1.5f);
+			}
+			// The gain of the point in hand (or under the pointer), beside it.
+			const int shown = view.curveDragIdx >= 0 ? view.curveDragIdx : curveHover;
+			if (shown >= 0)
+			{
+				const HE::AudioEnvelopePoint& p = curve->points[size_t(shown)];
+				const std::string lbl = formatGain(p.gain) + "  " + formatTime(p.timeSec);
+				const ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
+				float lx = origin.x + pxAtFrame(view, p.timeSec * rate) + 10.0f;
+				if (lx + ts.x + 6.0f > right) lx -= ts.x + 26.0f;
+				const float ly = std::clamp(yOfGain(p.gain) - ts.y - 8.0f, rulerBottom + 2.0f, br.y - ts.y - 4.0f);
+				dl->AddRectFilled(ImVec2(lx - 4.0f, ly - 2.0f), ImVec2(lx + ts.x + 4.0f, ly + ts.y + 2.0f),
+				                  IM_COL32(20, 21, 25, 230), 3.0f);
+				dl->AddText(ImVec2(lx, ly), IM_COL32(255, 235, 180, 255), lbl.c_str());
+			}
+		}
 	}
 
 	// Pointer line (only while nothing is being dragged), then the playhead.

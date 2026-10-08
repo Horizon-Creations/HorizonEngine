@@ -389,7 +389,8 @@ bool AudioImporter::extractRange(const AudioAsset&            clip,
                                  const std::filesystem::path& relativeOutputDir,
                                  const std::string&           stem,
                                  const HE::AudioEdit&         edit,
-                                 ExtractResult&               out)
+                                 ExtractResult&               out,
+                                 const HE::AudioEnvelope*     bakeCurve)
 {
 	const uint64_t frames = audioPcmFrameCount(clip);
 	if (clip.encoding != AudioEncoding::PCM16 || clip.sampleRate <= 0 || frames == 0 ||
@@ -414,6 +415,16 @@ bool AudioImporter::extractRange(const AudioAsset&            clip,
 	const size_t bytesPerFrame = sizeof(int16_t) * static_cast<size_t>(clip.channels);
 	asset.audioData.assign(clip.audioData.begin() + static_cast<std::ptrdiff_t>(beginFrame * bytesPerFrame),
 	                       clip.audioData.begin() + static_cast<std::ptrdiff_t>(endFrame   * bytesPerFrame));
+	size_t clamped = 0;
+	if (bakeCurve && !bakeCurve->empty())
+	{
+		// audioData is a byte vector of int16 frames; its storage is suitably
+		// aligned (operator new) for the reinterpretation.
+		clamped = bakeCurve->applyPcm16(reinterpret_cast<int16_t*>(asset.audioData.data()),
+		                                endFrame - beginFrame, clip.channels, beginFrame,
+		                                static_cast<double>(clip.sampleRate));
+	}
+	if (bakeCurve) asset.edit.envelope = HE::AudioEnvelope{};
 
 	const auto target = Importer::resolveOutput(uniqueOutputPath(contentRoot, relativeOutputDir, stem), {}, {});
 	asset.path = target.path;
@@ -425,9 +436,13 @@ bool AudioImporter::extractRange(const AudioAsset&            clip,
 	out.path   = asset.path;
 	out.id     = asset.id;
 	out.frames = endFrame - beginFrame;
-	HE_LOG_INFO(Tool, "AudioImporter: frames [%llu, %llu) of %s -> %s (%llu frames, %d Hz, %d ch, PCM)",
+	out.clampedSamples = clamped;
+	HE_LOG_INFO(Tool, "AudioImporter: frames [%llu, %llu) of %s -> %s (%llu frames, %d Hz, %d ch, PCM%s)",
 	            static_cast<unsigned long long>(beginFrame), static_cast<unsigned long long>(endFrame),
 	            clip.name.c_str(), asset.path.c_str(), static_cast<unsigned long long>(out.frames),
-	            asset.sampleRate, asset.channels);
+	            asset.sampleRate, asset.channels, bakeCurve ? ", volume curve baked in" : "");
+	if (clamped > 0)
+		HE_LOG_WARN(Tool, "AudioImporter: baking the volume curve into %s clipped %zu sample(s) at full scale",
+		            asset.path.c_str(), clamped);
 	return true;
 }

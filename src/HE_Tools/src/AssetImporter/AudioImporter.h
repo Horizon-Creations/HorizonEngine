@@ -87,10 +87,18 @@ public:
 		std::string path;     // content-relative, forward slashes
 		HE::UUID    id;
 		uint64_t    frames = 0;
+		size_t      clampedSamples = 0;   // baking a curve above unity drove these past full scale
 	};
 	// `edit` is what the new asset carries (AudioEdit::forRange of the original's
 	// edit — bus, EQ and the curve over the range). False, writing nothing, for a
 	// clip that is not PCM16, an empty or out-of-range selection, or a failed write.
+	//
+	// `bakeCurve`: the ORIGINAL clip's volume curve, to be multiplied into the new
+	// samples (AudioEnvelope::applyPcm16, against the original's frame numbers —
+	// the very gain a voice of the original applies there, so the extract sounds
+	// as the range played). The new asset then must not carry a curve on top:
+	// its edit's envelope is cleared, whatever `edit` said. nullptr = the samples
+	// are copied as they are and `edit`'s curve rides along as an edit.
 	static bool extractRange(const AudioAsset&            clip,
 	                         uint64_t                     beginFrame,
 	                         uint64_t                     endFrame,
@@ -98,7 +106,8 @@ public:
 	                         const std::filesystem::path& relativeOutputDir,
 	                         const std::string&           stem,
 	                         const HE::AudioEdit&         edit,
-	                         ExtractResult&               out);
+	                         ExtractResult&               out,
+	                         const HE::AudioEnvelope*     bakeCurve = nullptr);
 
 	// The first of "<dir>/<stem>.hasset", "<dir>/<stem>_2.hasset", "_3", … that
 	// does not exist under `contentRoot` (content-relative, forward slashes).
