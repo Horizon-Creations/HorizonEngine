@@ -414,6 +414,14 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         return nullptr;
     };
 
+    // The view as the node list above was laid out in. Everything below that moves
+    // the pan or the zoom (a focus jump, the wheel, a drag) is applied to the
+    // laid-out nodes afterwards, or they would be drawn where the view WAS while
+    // the grid and the comments already sit where it IS — a visible lag behind the
+    // background on a fast pan, which is not a performance problem but this order.
+    const ImVec2 panLaidOut  = st.pan;
+    const float  zoomLaidOut = st.zoom;
+
     // ── Recenter on a focus node ─────────────────────────────────────────────
     if (st.focusNode != 0)
     {
@@ -502,6 +510,24 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     {
         st.pan.x += ImGui::GetIO().MouseDelta.x;
         st.pan.y += ImGui::GetIO().MouseDelta.y;
+    }
+
+    // Bring the laid-out nodes (and their pins) to the view as it ends up this
+    // frame: a pure shift for a pan, a scale about the canvas origin for a zoom.
+    if (st.pan.x != panLaidOut.x || st.pan.y != panLaidOut.y || st.zoom != zoomLaidOut)
+    {
+        const float k = zoomLaidOut != 0.0f ? st.zoom / zoomLaidOut : 1.0f;
+        const auto remap = [&](ImVec2& p)
+        {
+            p.x = origin.x + st.pan.x + (p.x - origin.x - panLaidOut.x) * k;
+            p.y = origin.y + st.pan.y + (p.y - origin.y - panLaidOut.y) * k;
+        };
+        for (Drawn& d : nodes)
+        {
+            remap(d.pos);
+            for (ImVec2& p : d.pinPos) remap(p);
+            d.size.x *= k; d.size.y *= k;
+        }
     }
 
     // ── Background + grid ────────────────────────────────────────────────────
