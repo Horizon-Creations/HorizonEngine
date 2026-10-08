@@ -56,6 +56,7 @@ add_library(HorizonCore SHARED
 	src/Renderer/UIFont.cpp
 	src/Physics/CollisionLayers.cpp
 	src/Audio/AudioBusConfig.cpp
+	src/Audio/AudioEdit.cpp
 	src/Project/ProjectSettings.cpp
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp

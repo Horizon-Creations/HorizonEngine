@@ -121,6 +121,11 @@ public:
 	const TextureAsset*        getTexture(HE::UUID id) const;
 	const MaterialAsset*       getMaterial(HE::UUID id) const;
 	const AudioAsset*          getAudio(HE::UUID id) const;
+	// Mutable for the Audio Editor: a clip's edits (AudioAsset::edit — trim, curve,
+	// bus, EQ) are edited on the loaded asset, so what the tab shows is what a voice
+	// started from it plays, and saveAsset() persists them. The samples are never
+	// written through this; the edits are a description applied on the way out.
+	AudioAsset*                getAudioMutable(HE::UUID id);
 	const FontAsset*           getFont(HE::UUID id) const;
 	const ScriptAsset*         getScript(HE::UUID id) const;
 	const MaterialFunctionAsset* getMaterialFunction(HE::UUID id) const;

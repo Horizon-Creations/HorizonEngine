@@ -513,6 +513,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		{ a.audioData = c->data; a.encoding = AudioEncoding::Vorbis; }
 		else if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD))
 		{ a.audioData = c->data; a.encoding = AudioEncoding::PCM16; }
+		// No chunk = never edited (or written before edits existed) = default.
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_AUED))
+		{
+			if (!a.edit.fromChunkText(std::string(reinterpret_cast<const char*>(c->data.data()), c->data.size())))
+				HE_LOG_WARN(Asset, "Audio '%s': unreadable edit chunk, playing it unedited",
+				               relativePath.c_str());
+		}
 		handle = m_audioAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Font:
@@ -2058,6 +2065,13 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		}
 		w.addChunk(a.encoding == AudioEncoding::Vorbis ? HAsset::CHUNK_OGGD : HAsset::CHUNK_PCMD,
 		           a.audioData.data(), a.audioData.size());
+		// Only when something was edited: an untouched clip keeps the exact
+		// chunk list it had before edits existed.
+		if (!a.edit.isDefault())
+		{
+			const std::string text = a.edit.toChunkText();
+			w.addChunk(HAsset::CHUNK_AUED, text.data(), text.size());
+		}
 		break;
 	}
 	case HE::AssetType::Font:
@@ -2428,6 +2442,7 @@ SkeletalMeshAsset*        ContentManager::getSkeletalMeshMutable(HE::UUID id) { 
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
 const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+AudioAsset*               ContentManager::getAudioMutable(HE::UUID id)             { return lookupAssetMutable(m_handleToUUID, m_audioAssets, id); }
 const FontAsset*          ContentManager::getFont(HE::UUID id) const          { return lookupAsset(m_handleToUUID, m_fontAssets, id); }
 const ScriptAsset*        ContentManager::getScript(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
 const MaterialFunctionAsset* ContentManager::getMaterialFunction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_materialFunctionAssets, id); }

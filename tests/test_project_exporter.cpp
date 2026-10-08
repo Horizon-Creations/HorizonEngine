@@ -212,6 +212,10 @@ TEST_CASE("ProjectConfigLoader collision layers ride a tail nobody else pays for
         cfg.audioBuses.masterVolume = 0.75f;
         REQUIRE(cfg.audioBuses.add("Music", 0.5f));
         REQUIRE(cfg.audioBuses.add("SFX"));
+        // The Audio Mixer's bus EQ (Thema 168) rides along in the same block.
+        HE::AudioEqBand shelf;
+        shelf.type = HE::AudioEqBandType::LowShelf; shelf.freqHz = 120.0f; shelf.gainDb = -4.0f;
+        cfg.audioBuses.buses[0].eq.bands = { shelf };
         REQUIRE(ProjectConfigLoader::save(tmpDir, cfg));
         CHECK(versionOf() == 7);
 
@@ -223,6 +227,11 @@ TEST_CASE("ProjectConfigLoader collision layers ride a tail nobody else pays for
         CHECK(loaded.audioBuses.buses[0].volume == doctest::Approx(0.5f));
         CHECK(loaded.audioBuses.buses[1].name == "SFX");
         CHECK(loaded.audioBuses.buses[1].volume == doctest::Approx(1.0f));
+        REQUIRE(loaded.audioBuses.buses[0].eq.bands.size() == 1);
+        CHECK(loaded.audioBuses.buses[0].eq.bands[0].type == HE::AudioEqBandType::LowShelf);
+        CHECK(loaded.audioBuses.buses[0].eq.bands[0].freqHz == doctest::Approx(120.0f));
+        CHECK(loaded.audioBuses.buses[0].eq.bands[0].gainDb == doctest::Approx(-4.0f));
+        CHECK(loaded.audioBuses.buses[1].eq.bands.empty());
         // An untouched matrix stays default even though the file is v7.
         CHECK(loaded.collisionLayers.isDefault());
     }

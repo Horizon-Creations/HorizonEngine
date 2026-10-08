@@ -46,7 +46,14 @@ void AudioBusConfig::toJson(nlohmann::json& out) const
     out["master"] = masterVolume;
     nlohmann::json arr = nlohmann::json::array();
     for (const AudioBusDef& b : buses)
-        arr.push_back({ { "name", b.name }, { "volume", b.volume } });
+    {
+        nlohmann::json jb = { { "name", b.name }, { "volume", b.volume } };
+        // Only an authored EQ: no bands and switched on is "none", and a key
+        // that says nothing would change every existing project file.
+        if (!b.eq.bands.empty() || !b.eq.enabled)
+            b.eq.toJson(jb["eq"]);
+        arr.push_back(std::move(jb));
+    }
     out["buses"] = std::move(arr);
 }
 
@@ -64,7 +71,9 @@ void AudioBusConfig::fromJson(const nlohmann::json& in)
                                  ? b["volume"].get<float>() : 1.0f;
         // add() drops an empty or repeated name, so a hand-edited file cannot
         // produce two groups the mixer would show as one.
-        add(b["name"].get<std::string>(), volume);
+        if (add(b["name"].get<std::string>(), volume))
+            if (const auto eq = b.find("eq"); eq != b.end())
+                buses.back().eq.fromJson(*eq);
     }
 }
 

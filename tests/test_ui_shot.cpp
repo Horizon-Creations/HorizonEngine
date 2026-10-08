@@ -15,6 +15,8 @@
 #include "SequencerTimeline.h"   // the sequencer's strip, over an in-memory clip
 #include "CinematicTimeline.h"   // the Cinematic tab's strip, over an in-memory sequence
 #include "UITimelineMath.h"
+#include "AudioWaveformView.h"    // the Audio Editor's canvas, over synthetic PCM
+#include "AudioMixView.h"         // …and its bus dropdown and EQ graph
 #include "PanelSpotlight.h"      // the tour card's step-aside, over a real dock layout
 #include "TutorialSteps.h"       // …and the curriculum steps it is tested with
 #include "GitHubSignInView.h"    // the device-flow dialog's body
@@ -2475,6 +2477,381 @@ TEST_CASE("ui shot: cinematic strip with every kind of row")
 			if (int(r) > 180 && int(g) < 130 && int(b) < 130) ++reddest;
 		}
 	CHECK(reddest > 10);
+}
+
+// ── The Audio Editor's waveform ──────────────────────────────────────────────
+// The hit tests and the arithmetic are asserted in test_audio_waveform_view.cpp;
+// what only a picture shows is that the pieces land where the View says: the
+// selection tints exactly its frames and nothing beside it, the playhead's
+// warm line stands at its frame, both lanes of a stereo clip draw, and the
+// overview strip and the readout under the canvas are there at all.
+TEST_CASE("ui shot: audio waveform with a selection and a playhead")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	// Three seconds of stereo at 48 kHz: a tone that swells and fades on the
+	// left, a faster, quieter one on the right — two lanes that look different.
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t   = double(f) / rate;
+		const double env = std::sin(3.14159265 * t / 3.0);
+		pcm[f * 2 + 0] = int16_t(std::lround(28000.0 * env * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(12000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	AW::View view;
+	AW::select(view, size_t(rate * 0.75), size_t(rate * 1.5), frames);
+	view.playhead = size_t(rate * 2.25);
+
+	const he_ui::Image img = shoot("audio_waveform", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false);
+		const std::string where = AW::readout(view, clip, 0.5 * rate);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::TextDisabled("%s long  |  drag the waveform to select, click to place the playhead",
+		                    AW::formatTime(clip.seconds()).c_str());
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 40000);
+
+	// Fitted: 3 s over 960 px is 150 frames a pixel, so the selection runs from
+	// x = 240 to x = 480 and the playhead stands at x = 720.
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+	const AW::Metrics& M = AW::metrics();
+	const int nearTop = int(M.rulerH) + 3;   // above the loudest sample of lane one
+	std::uint8_t r, g, b, a;
+	img.pixel(360, nearTop, r, g, b, a);     // inside the selection
+	CHECK(int(b) > int(r) + 25);
+	img.pixel(120, nearTop, r, g, b, a);     // beside it: canvas background
+	CHECK(int(b) < 40);
+	img.pixel(600, nearTop, r, g, b, a);     // and past its end
+	CHECK(int(b) < 40);
+
+	// The playhead: bright warm at its x, dark a dozen pixels on.
+	const int laneMid = int(M.rulerH + (canvasH - M.rulerH - M.overviewH - 4.0f) * 0.25f) + 30;
+	img.pixel(720, laneMid, r, g, b, a);
+	CHECK(int(r) > 180);
+	CHECK(int(r) > int(b) + 60);
+	img.pixel(732, nearTop, r, g, b, a);
+	CHECK(int(r) < 90);
+
+	// Lane two draws too: there is waveform ink across its centre line.
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const int   lane2Mid    = int(M.rulerH + (lanesBottom - M.rulerH) * 0.75f);
+	int waveInk = 0;
+	for (int x = 0; x < W; x += 3)
+	{
+		img.pixel(x, lane2Mid - 6, r, g, b, a);
+		if (int(b) > 150) ++waveInk;
+	}
+	CHECK(waveInk > 100);
+}
+
+// The trim (Thema 168, step 3): what does not play is shaded over the samples,
+// so they stay visible but read as cut away; a warm line marks each end, and
+// the overview strip shades the same frames.
+TEST_CASE("ui shot: audio waveform with a trim")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	// Three seconds of a steady stereo tone: the same ink everywhere, so any
+	// difference between inside and outside the trim is the shading.
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t = double(f) / rate;
+		pcm[f * 2 + 0] = int16_t(std::lround(24000.0 * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(12000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	// Trimmed to [0.6 s, 2.4 s): fitted at 150 frames a pixel, x = 192 to 768.
+	AW::View view;
+	view.trimBegin = size_t(rate * 0.6);
+	view.trimEnd   = size_t(rate * 2.4);
+	// The playhead away from both ends, so the warm lines checked below are the trim's.
+	view.playhead  = size_t(rate * 1.5);
+
+	const he_ui::Image img = shoot("audio_waveform_trim", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false);
+		const std::string where = AW::readout(view, clip, -1.0);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+
+	// The same tone inside and outside: bright wave ink inside the trim, the
+	// shaded (dark) version of it outside, on both sides.
+	const AW::Metrics& M = AW::metrics();
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const int   lane2Mid    = int(M.rulerH + (lanesBottom - M.rulerH) * 0.75f);
+	std::uint8_t r, g, b, a;
+	auto inkIn = [&](int x0, int x1)
+	{
+		int n = 0;
+		for (int x = x0; x < x1; x += 2)
+		{
+			img.pixel(x, lane2Mid - 4, r, g, b, a);
+			if (int(b) > 150) ++n;
+		}
+		return n;
+	};
+	CHECK(inkIn(220, 740) > 200);   // inside: the wave reads as it always did
+	CHECK(inkIn(0, 180) == 0);      // before the trim: shaded
+	CHECK(inkIn(780, W) == 0);      // after it: shaded
+	// …but still there: the shaded columns are not plain background.
+	img.pixel(90, lane2Mid - 4, r, g, b, a);
+	CHECK(int(b) > int(kBgB) + 20);
+
+	// The trim's ends are warm lines.
+	const int nearTop = int(M.rulerH) + 3;
+	for (int x : { 192, 768 })
+	{
+		img.pixel(x, nearTop, r, g, b, a);
+		CHECK(int(r) > 180);
+		CHECK(int(r) > int(b) + 60);
+	}
+
+	// The overview strip shades the same frames.
+	const int overMid = int(canvasH - M.overviewH * 0.5f) - 2;
+	auto overInk = [&](int x0, int x1)
+	{
+		int n = 0;
+		for (int x = x0; x < x1; x += 2)
+		{
+			img.pixel(x, overMid, r, g, b, a);
+			if (int(b) > 100) ++n;
+		}
+		return n;
+	};
+	CHECK(overInk(220, 740) > overInk(0, 180) * 4 + 10);
+}
+
+// The volume curve (Thema 168, step 4), in curve mode: a yellow line on the dB
+// axis over the waveform, at the height its gain says, with the scale's lines,
+// the points as handles and the gain of the point in hand written beside it.
+TEST_CASE("ui shot: audio waveform with a volume curve being edited")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t = double(f) / rate;
+		pcm[f * 2 + 0] = int16_t(std::lround(20000.0 * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(10000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	// A smooth fade in over the first half second, unity to 1.5 s, a straight
+	// line down to -12 dB at 2.5 s. Fitted at 150 frames a pixel: 320 px a second.
+	HE::AudioEnvelope curve;
+	curve.points = { { 0.0, 0.0f,  HE::AudioCurveInterp::Smooth },
+	                 { 0.5, 1.0f,  HE::AudioCurveInterp::Linear },
+	                 { 1.5, 1.0f,  HE::AudioCurveInterp::Linear },
+	                 { 2.5, 0.25f, HE::AudioCurveInterp::Linear } };
+	AW::View view;
+	view.curveMode    = true;
+	view.curveSel     = 2;   // the point at 1.5 s, selected and in hand: its label shows
+	view.curveDragIdx = 2;
+	view.playhead     = size_t(rate * 2.5);   // x = 800, clear of every column checked below
+
+	std::string where;
+	const he_ui::Image img = shoot("audio_waveform_curve", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false, &curve, true);
+		where = AW::readout(view, clip, -1.0, &curve);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::TextDisabled("curve: click to add a point, drag to move it, right-click to remove it");
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+	CHECK(where.find("Curve -12.0 dB (x0.25) at the playhead") != std::string::npos);
+	CHECK(curve.points.size() == 4);   // drawing edits nothing
+
+	const AW::Metrics& M = AW::metrics();
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const float lanesH      = lanesBottom - M.rulerH;
+	auto yOf = [&](float g) { return int(std::lround(lanesBottom - AW::curveFracOfGain(g) * lanesH)); };
+	std::uint8_t r, g, b, a;
+	auto yellow = [&](int x, int y)
+	{
+		img.pixel(x, y, r, g, b, a);
+		return int(r) > 200 && int(g) > 160 && int(b) < 140;
+	};
+	// The curve's yellow in a column, within a couple of pixels of where its gain says.
+	auto curveNear = [&](int x, int y)
+	{
+		for (int dy = -2; dy <= 2; ++dy)
+			if (yellow(x, y + dy)) return true;
+		return false;
+	};
+	CHECK(curveNear(320, yOf(1.0f)));                  // 1.0 s: unity
+	CHECK(curveNear(640, yOf(curve.evalGain(2.0))));   // 2.0 s: halfway down the straight line
+	CHECK(curveNear(880, yOf(0.25f)));                 // 2.75 s, past the last point: it holds -12 dB
+	CHECK(curveNear(80, yOf(curve.evalGain(0.25))));   // in the fade-in
+	// … and not at unity where it is not: at 2.4 s the curve is well below 0 dB.
+	CHECK_FALSE(curveNear(768, yOf(1.0f)));
+
+	// The handle of the point in hand (x = 480) stands out bright, and its
+	// label sits beside it, right of the point, on a dark plate.
+	img.pixel(480, yOf(1.0f), r, g, b, a);
+	CHECK(int(r) > 230);
+	CHECK(int(b) > 150);   // the selected handle is pale, not the curve's yellow
+	int labelInk = 0;
+	for (int x = 492; x < 640; ++x)
+		for (int y = yOf(1.0f) - 26; y < yOf(1.0f) - 6; ++y)
+		{
+			img.pixel(x, y, r, g, b, a);
+			if (int(r) > 200 && int(g) > 190) ++labelInk;
+		}
+	CHECK(labelInk > 30);
+}
+
+// The Audio Editor's mix controls (Thema 168, step 5): the "Mixer bus"
+// section of the left column with a bus the project no longer has — shown as
+// missing, in orange, with the sentence that the clip plays on Master — and
+// the EQ pane under the waveform with three bands, on a 32 kHz clip so the
+// part above its Nyquist is shaded. The curve is checked where its response
+// says it is: on the bell's centre, on the shelf, and flat in between.
+TEST_CASE("ui shot: audio editor bus dropdown with a missing bus, and an EQ")
+{
+	namespace AM = HE::Ed::AudioMix;
+	constexpr int W = 1240, H = 330;
+	constexpr float leftW = 290.0f;
+	Harness harness(W, H);
+
+	HE::AudioBusConfig buses;   // what the mixer has: "Ambience" was removed
+	buses.add("Music"); buses.add("SFX"); buses.add("Voice");
+	std::string assetBus = "Ambience";
+
+	HE::AudioEq eq;
+	auto band = [](HE::AudioEqBandType t, float f, float g, float q) {
+		HE::AudioEqBand b; b.type = t; b.freqHz = f; b.gainDb = g; b.q = q; return b;
+	};
+	eq.bands = { band(HE::AudioEqBandType::HighPass, 40.0f, 0.0f, 0.7071f),
+	             band(HE::AudioEqBandType::Peak, 900.0f, 9.0f, 1.2f),
+	             band(HE::AudioEqBandType::HighShelf, 6000.0f, -8.0f, 0.7071f) };
+	const double rate = 32000.0;
+	AM::EqView view;
+	view.selBand = 2;   // the shelf: its handle sits off the curve, the bell's stays green
+
+	AM::BusChoice choice;
+	AM::EqResult  res;
+	const he_ui::Image img = shoot("audio_editor_bus_eq", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::BeginChild("##left", ImVec2(leftW, 0.0f), true);
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::SeparatorText("Mixer bus");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		AM::drawBusCombo(&buses, assetBus, true);
+		choice = AM::busChoice(&buses, assetBus);
+		if (choice.missing)
+			ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.38f, 1.0f), "%s", choice.hint.c_str());
+		ImGui::PopTextWrapPos();
+		ImGui::EndChild();
+		ImGui::SameLine();
+		ImGui::BeginChild("##right", ImVec2(0.0f, 0.0f), true);
+		ImGui::SeparatorText("EQ");
+		res = AM::drawEq(eq, view, rate, ImVec2(ImGui::GetContentRegionAvail().x,
+		                                        ImGui::GetContentRegionAvail().y), true);
+		ImGui::EndChild();
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(choice.missing);
+	CHECK(choice.preview == "Ambience (missing)");
+	CHECK(choice.hint.find("plays on Master") != std::string::npos);
+	CHECK(assetBus == "Ambience");   // drawing changes nothing
+	CHECK_FALSE(res.edited);
+	REQUIRE(res.graphSize.x > 400.0f);
+
+	std::uint8_t r, g, b, a;
+	// The combo's closed text is orange: count warm pixels in its row.
+	int orange = 0;
+	for (int x = 12; x < int(leftW) - 12; ++x)
+		for (int y = 50; y < 80; ++y)   // the combo's row, above the orange hint
+		{
+			img.pixel(x, y, r, g, b, a);
+			if (int(r) > 200 && int(g) > 110 && int(g) < 190 && int(b) < 120) ++orange;
+		}
+	CHECK(orange > 40);
+
+	// The curve's green within a few pixels of where the response puts it.
+	const float gx = res.graphMin.x, gy = res.graphMin.y, gw = res.graphSize.x, gh = res.graphSize.y;
+	auto green = [&](int x, int y) {
+		img.pixel(x, y, r, g, b, a);
+		return int(g) > 190 && int(r) > 90 && int(r) < 170 && int(b) > 120 && int(b) < 200;
+	};
+	auto curveNear = [&](double f, double db) {
+		const int x = int(std::lround(gx + AM::xOfFreq(f, gw)));
+		const int y = int(std::lround(gy + AM::yOfDb(db, gh)));
+		for (int dy = -3; dy <= 3; ++dy)
+			if (green(x, y + dy)) return true;
+		return false;
+	};
+	for (const double f : { 900.0, 250.0, 9000.0 })
+	{
+		CAPTURE(f);
+		CHECK(curveNear(f, eq.responseDb(f, rate)));
+	}
+	CHECK(eq.responseDb(900.0, rate) > 8.0);    // so the three points are not one flat line
+	CHECK(eq.responseDb(9000.0, rate) < -6.0);
+	CHECK_FALSE(curveNear(900.0, 0.0));         // negative control: not on the 0 dB line at the bell
+
+	// Above 16 kHz (the clip's Nyquist) the graph is shaded darker than below.
+	auto lum = [&](int x, int y) { img.pixel(x, y, r, g, b, a); return int(r) + int(g) + int(b); };
+	const int yMid = int(gy + gh * 0.85f);
+	CHECK(lum(int(gx + AM::xOfFreq(18000.0, gw)), yMid) < lum(int(gx + AM::xOfFreq(12000.0, gw)), yMid));
 }
 
 // ── The tour's card keeps off the panel it points at ─────────────────────────
