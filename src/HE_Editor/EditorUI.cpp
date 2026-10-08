@@ -1143,6 +1143,28 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 // Raised by an asset editor's Save button (EditorToolbar::setSaveHook), consumed
 // where the Save chord is read.
 static bool s_saveFromToolbar = false;
+
+// Does the active tab's undo live on the world's stack? The scene tab, and two
+// asset tabs that snapshot into ctx.undoSys after each edit: the Level Script
+// (it saves with the scene) and a Particle Graph. Every other asset editor is an
+// asset with its own dirty flag and, where it has undo at all, its own stack
+// bound to the same chord inside the panel (material graph, UI editor,
+// sequencer, cinematic, audio editor, the mesh slot editors). The footer reads
+// its keys BEFORE the tab renders, so it cannot ask "did the panel take
+// Ctrl+Z" — it asks whose tab this is, and an allow-list on purpose: an editor
+// that snapshots into the world stack and is forgotten here gets a Ctrl+Z that
+// does nothing (loud), where a deny-list gets a Ctrl+Z that quietly undoes the
+// scene as well (the bug this replaces). Read from ctx here and now: the tab can
+// have changed since `sceneTabActiveNow` was taken at the top of the frame.
+static bool activeTabUsesWorldUndo(const AppContext& ctx)
+{
+	if (ctx.activeTab < 0 || ctx.activeTab >= static_cast<int>(ctx.tabs.size()))
+		return true;
+	const std::string& path = ctx.tabs[ctx.activeTab].assetPath;
+	return path.empty()
+	    || path == LevelScriptPanel::kTabPath
+	    || ParticleGraphEditorPanel::isParticleAsset(path);
+}
 #endif
 
 void EditorUI::renderEditor(AppContext& ctx, float dt)
@@ -3188,10 +3210,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			ImGui::EndDisabled();
 
 			// Keyboard shortcuts: Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Ctrl+Y) by
-			// default — whatever Preferences ▸ Shortcuts says now.
-			if (EditorShortcuts::pressed("edit.undo"))    doUndo = true;
-			if (EditorShortcuts::pressed("edit.redo") ||
-			    EditorShortcuts::pressed("edit.redoAlt")) doRedo = true;
+			// default — whatever Preferences ▸ Shortcuts says now. Only where the
+			// tab's undo IS the world's (see activeTabUsesWorldUndo): the chord on
+			// an asset editor with its own stack belongs to that editor, and
+			// answering it here too would take the last scene edit back with it.
+			// The buttons above stay the way onto the scene stack from any tab.
+			if (activeTabUsesWorldUndo(ctx))
+			{
+				if (EditorShortcuts::pressed("edit.undo"))    doUndo = true;
+				if (EditorShortcuts::pressed("edit.redo") ||
+				    EditorShortcuts::pressed("edit.redoAlt")) doRedo = true;
+			}
 
 			if (doUndo && canUndo && ctx.undo) ctx.undo();
 			if (doRedo && canRedo && ctx.redo) ctx.redo();
