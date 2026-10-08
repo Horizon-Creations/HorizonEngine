@@ -881,7 +881,13 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 				            db == 0.0 ? IM_COL32(255, 214, 92, 70) : kCurveGrid);
 				char lbl[16];
 				std::snprintf(lbl, sizeof(lbl), "%+.0f dB", db);
-				dl->AddText(ImVec2(right - 46.0f, y - 14.0f), kCurveLabel, db == 0.0 ? "0 dB" : lbl);
+				const char*  text = db == 0.0 ? "0 dB" : lbl;
+				const ImVec2 ts   = ImGui::CalcTextSize(text);
+				const ImVec2 at(right - ts.x - 6.0f, y - ts.y - 1.0f);
+				// On a plate: the scale sits over the waveform and must read on it.
+				dl->AddRectFilled(ImVec2(at.x - 3.0f, at.y), ImVec2(right - 2.0f, at.y + ts.y),
+				                  IM_COL32(20, 21, 25, 200), 2.0f);
+				dl->AddText(at, kCurveLabel, text);
 			}
 		}
 		// One vertex per pixel column, from evalGain itself: Hold steps,

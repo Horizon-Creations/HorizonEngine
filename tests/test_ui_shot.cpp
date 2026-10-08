@@ -2591,3 +2591,98 @@ TEST_CASE("ui shot: audio waveform with a trim")
 	};
 	CHECK(overInk(220, 740) > overInk(0, 180) * 4 + 10);
 }
+
+// The volume curve (Thema 168, step 4), in curve mode: a yellow line on the dB
+// axis over the waveform, at the height its gain says, with the scale's lines,
+// the points as handles and the gain of the point in hand written beside it.
+TEST_CASE("ui shot: audio waveform with a volume curve being edited")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t = double(f) / rate;
+		pcm[f * 2 + 0] = int16_t(std::lround(20000.0 * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(10000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	// A smooth fade in over the first half second, unity to 1.5 s, a straight
+	// line down to -12 dB at 2.5 s. Fitted at 150 frames a pixel: 320 px a second.
+	HE::AudioEnvelope curve;
+	curve.points = { { 0.0, 0.0f,  HE::AudioCurveInterp::Smooth },
+	                 { 0.5, 1.0f,  HE::AudioCurveInterp::Linear },
+	                 { 1.5, 1.0f,  HE::AudioCurveInterp::Linear },
+	                 { 2.5, 0.25f, HE::AudioCurveInterp::Linear } };
+	AW::View view;
+	view.curveMode    = true;
+	view.curveSel     = 2;   // the point at 1.5 s, selected and in hand: its label shows
+	view.curveDragIdx = 2;
+	view.playhead     = size_t(rate * 2.5);   // x = 800, clear of every column checked below
+
+	std::string where;
+	const he_ui::Image img = shoot("audio_waveform_curve", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false, &curve, true);
+		where = AW::readout(view, clip, -1.0, &curve);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::TextDisabled("curve: click to add a point, drag to move it, right-click to remove it");
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+	CHECK(where.find("Curve -12.0 dB (x0.25) at the playhead") != std::string::npos);
+	CHECK(curve.points.size() == 4);   // drawing edits nothing
+
+	const AW::Metrics& M = AW::metrics();
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const float lanesH      = lanesBottom - M.rulerH;
+	auto yOf = [&](float g) { return int(std::lround(lanesBottom - AW::curveFracOfGain(g) * lanesH)); };
+	std::uint8_t r, g, b, a;
+	auto yellow = [&](int x, int y)
+	{
+		img.pixel(x, y, r, g, b, a);
+		return int(r) > 200 && int(g) > 160 && int(b) < 140;
+	};
+	// The curve's yellow in a column, within a couple of pixels of where its gain says.
+	auto curveNear = [&](int x, int y)
+	{
+		for (int dy = -2; dy <= 2; ++dy)
+			if (yellow(x, y + dy)) return true;
+		return false;
+	};
+	CHECK(curveNear(320, yOf(1.0f)));                  // 1.0 s: unity
+	CHECK(curveNear(640, yOf(curve.evalGain(2.0))));   // 2.0 s: halfway down the straight line
+	CHECK(curveNear(880, yOf(0.25f)));                 // 2.75 s, past the last point: it holds -12 dB
+	CHECK(curveNear(80, yOf(curve.evalGain(0.25))));   // in the fade-in
+	// … and not at unity where it is not: at 2.4 s the curve is well below 0 dB.
+	CHECK_FALSE(curveNear(768, yOf(1.0f)));
+
+	// The handle of the point in hand (x = 480) stands out bright, and its
+	// label sits beside it, right of the point, on a dark plate.
+	img.pixel(480, yOf(1.0f), r, g, b, a);
+	CHECK(int(r) > 230);
+	CHECK(int(b) > 150);   // the selected handle is pale, not the curve's yellow
+	int labelInk = 0;
+	for (int x = 492; x < 640; ++x)
+		for (int y = yOf(1.0f) - 26; y < yOf(1.0f) - 6; ++y)
+		{
+			img.pixel(x, y, r, g, b, a);
+			if (int(r) > 200 && int(g) > 190) ++labelInk;
+		}
+	CHECK(labelInk > 30);
+}
