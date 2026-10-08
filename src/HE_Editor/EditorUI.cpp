@@ -483,14 +483,26 @@ void graphViewsLoad(GlobalState& gs, const std::string& project)
 {
 	GraphViewStore::Table& t = GraphViewStore::table();
 	t.views.clear();
+	t.tabs.clear();
 	t.dirty = false;
 	if (project.empty()) return;
 	const std::string raw = gs.getCustomConfigString(graphViewsKey(project), "");
 	if (raw.empty()) return;
 	const nlohmann::json j = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false);
 	if (j.is_discarded() || !j.is_object()) return;
+	// Open graph tabs ride along under one reserved key: {"__tabs": {key: [active, id…]}}.
+	if (const auto tabsIt = j.find("__tabs"); tabsIt != j.end() && tabsIt->is_object())
+		for (auto it = tabsIt->begin(); it != tabsIt->end(); ++it)
+			if (it.value().is_array() && !it.value().empty() && it.value()[0].is_number_integer())
+			{
+				GraphViewStore::OpenTabs ot;
+				ot.active = it.value()[0].get<int>();
+				for (std::size_t i = 1; i < it.value().size(); ++i)
+					if (it.value()[i].is_number_integer()) ot.open.push_back(it.value()[i].get<int>());
+				t.tabs[it.key()] = std::move(ot);
+			}
 	for (auto it = j.begin(); it != j.end(); ++it)
-		if (it.value().is_array() && it.value().size() == 3 &&
+		if (it.key() != "__tabs" && it.value().is_array() && it.value().size() == 3 &&
 		    it.value()[0].is_number() && it.value()[1].is_number() && it.value()[2].is_number())
 			t.views[it.key()] = { it.value()[0].get<float>(), it.value()[1].get<float>(),
 			                      it.value()[2].get<float>() };
@@ -502,6 +514,17 @@ bool graphViewsStore(GlobalState& gs, const std::string& project)
 	if (project.empty() || !t.dirty) return false;
 	nlohmann::json j = nlohmann::json::object();
 	for (const auto& [key, v] : t.views) j[key] = nlohmann::json::array({ v.panX, v.panY, v.zoom });
+	if (!t.tabs.empty())
+	{
+		nlohmann::json tj = nlohmann::json::object();
+		for (const auto& [key, ot] : t.tabs)
+		{
+			nlohmann::json a = nlohmann::json::array({ ot.active });
+			for (int id : ot.open) a.push_back(id);
+			tj[key] = std::move(a);
+		}
+		j["__tabs"] = std::move(tj);
+	}
 	// "replace": a path with invalid UTF-8 must not abort the editor in dump().
 	gs.setCustomConfigEntry(graphViewsKey(project),
 		j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
