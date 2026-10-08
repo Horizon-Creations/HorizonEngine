@@ -67,6 +67,7 @@
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <HorizonRendering/GiLandscape.h>   // HE_DUMP_AUTOLANDMIRROR: the GI auto entry
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <material/MaterialShaderBake.h>
 #include <glm/gtc/quaternion.hpp>
@@ -6848,6 +6849,70 @@ void EditorApplication::dumpFrameHeadless()
 			al, what.c_str(), ma ? ma->graphTexturePaths.size() : size_t(0),
 			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
 			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
+
+		// HE_DUMP_AUTOLANDMIRROR=1 (Thema 173): two mirrors on the plain, for the
+		// GI-reflection question "does a mirror show the sky and the auto
+		// material?". The camera-facing one (x -40, z -14) reflects the plain
+		// behind the camera in its lower half and the sky in its upper half; the
+		// one yawed 45° (x -54, z -10) throws its rays toward +x, onto the rock
+		// slope and the snow plateau. Camera: CAMX=-40 CAMY=304 CAMZ=14 PITCH=-4.
+		if (const char* mm = std::getenv("HE_DUMP_AUTOLANDMIRROR"); mm && *mm)
+		{
+			MaterialAsset mirror;
+			mirror.type = HE::AssetType::Material;
+			mirror.name = "AutoLandscapeMirror";
+			mirror.baseColor[0] = mirror.baseColor[1] = mirror.baseColor[2] = 0.9f;
+			mirror.metallic  = 1.0f;
+			mirror.roughness = 0.05f;
+			const HE::UUID mirrorId = contentManager().registerMaterial(std::move(mirror));
+			auto addMirror = [&](const char* name, glm::vec3 pos, float yawDeg, glm::vec3 scale)
+			{
+				auto e = m_editorWorld->createEntity(name);
+				TransformComponent tf;
+				tf.position = pos;
+				tf.rotation = glm::vec3(0.0f, yawDeg, 0.0f);
+				tf.scale    = scale;
+				reg.emplace<TransformComponent>(e, tf);
+				reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+				reg.emplace<MaterialComponent>(e, MaterialComponent{ mirrorId });
+			};
+			addMirror("AutoLandscapeMirror", glm::vec3(-40.0f, kBaseY + 5.0f, -14.0f), 0.0f,
+			          glm::vec3(14.0f, 10.0f, 0.4f));
+			addMirror("AutoLandscapeMirrorAngled", glm::vec3(-54.0f, kBaseY + 4.0f, -10.0f), 45.0f,
+			          glm::vec3(10.0f, 8.0f, 0.4f));
+			// What a GI hit on this landscape is shaded with: the CPU fold of the
+			// material (re-fetched — registerMaterial may move the asset table).
+			const MaterialAsset* lma = contentManager().getMaterial(amId);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDMIRROR mirrors added "
+				"(landscape GI fold: approxBaseColor %.3f %.3f %.3f, approxLayerCount %d)",
+				lma ? lma->approxBaseColor[0] : -1.0f, lma ? lma->approxBaseColor[1] : -1.0f,
+				lma ? lma->approxBaseColor[2] : -1.0f, lma ? lma->approxLayerCount : -1);
+			// Since Schritt 3 an auto material gets its own GI landscape entry
+			// (GiLandscape.h): the slice means and the mask parameters the
+			// kernels see — the numeric oracle for the mirror's colours.
+			HE::GiLandscape gl;
+			HE::UUID    texId{};
+			std::string texPath;
+			const int slot = lma ? HE::giAutoLandscapeParams(*lma, {}, gl) : -1;
+			if (slot >= 0)
+			{
+				if (static_cast<size_t>(slot) < lma->graphTextureIds.size())   texId   = lma->graphTextureIds[slot];
+				if (static_cast<size_t>(slot) < lma->graphTexturePaths.size()) texPath = lma->graphTexturePaths[slot];
+			}
+			const TextureAsset* arr = slot >= 0 ? contentManager().resolveTextureRef(texId, texPath) : nullptr;
+			const bool means = arr && HE::giAutoLandscapeSliceMeans(*arr, gl);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDMIRROR GI auto entry: slot %d, means %s "
+				"(grass %.3f %.3f %.3f, dirt %.3f %.3f %.3f, rock %.3f %.3f %.3f, snow %.3f %.3f %.3f, "
+				"puddle %.3f %.3f %.3f share %.2f), rock %.2f+%.2f, dirt %.2f, snow y %.0f+%.1f max slope %.2f, "
+				"puddle max slope %.3f", slot, means ? "yes" : "NO",
+				gl.layerColor[0].x, gl.layerColor[0].y, gl.layerColor[0].z,
+				gl.layerColor[1].x, gl.layerColor[1].y, gl.layerColor[1].z,
+				gl.layerColor[2].x, gl.layerColor[2].y, gl.layerColor[2].z,
+				gl.layerColor[3].x, gl.layerColor[3].y, gl.layerColor[3].z,
+				gl.autoWet.x, gl.autoWet.y, gl.autoWet.z, gl.autoWet.w,
+				gl.autoSlope.x, gl.autoSlope.y, gl.autoSlope.z,
+				gl.autoSnow.x, gl.autoSnow.y, gl.autoSnow.z, gl.autoSlope.w);
+		}
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
