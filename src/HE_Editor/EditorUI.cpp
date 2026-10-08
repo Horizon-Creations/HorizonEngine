@@ -1049,12 +1049,20 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 }
 
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
+#ifdef HE_IMGUI_ENABLED
+// Raised by an asset editor's Save button (EditorToolbar::setSaveHook), consumed
+// where the Save chord is read.
+static bool s_saveFromToolbar = false;
+#endif
+
 void EditorUI::renderEditor(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
 	// The asset tabs' "Show in Content Browser" button lives in the shared
 	// toolbar, which cannot reach the panel itself. A pointer store per frame.
 	EditorToolbar::setRevealAssetHook(&ContentBrowserPanel::revealAsset);
+	// …and so does its Save: the button must be the keystroke, cues included.
+	EditorToolbar::setSaveHook([] { s_saveFromToolbar = true; });
 	// Runs every frame regardless of which tab/panel is active (before any early-out):
 	// guarantees the RMB fly-look capture can never stay stuck once the button is released.
 	ViewportPanel::enforceViewportLookCaptureInvariant(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
@@ -2700,9 +2708,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // rebinds it, and the menu rows print the same table), which also
     // carries the "not while typing" guard and the exact-modifier rule.
     {
+        // A Save button in an asset editor's header (EditorToolbar::saveButton)
+        // asked for the same thing the chord does. Consumed every frame so a
+        // press can never wait for a later, unrelated one.
+        const bool toolbarSave = std::exchange(s_saveFromToolbar, false);
         if (EditorShortcuts::pressed("file.saveSceneAs")) triggerSaveSceneAs();
         else if (EditorShortcuts::pressed("file.saveAll")) doSaveAll();
-        else if (EditorShortcuts::pressed("file.save"))    doSaveActiveTab();
+        else if (EditorShortcuts::pressed("file.save") || toolbarSave) doSaveActiveTab();
         // Ctrl/Cmd+, opens the Preferences tab (matches the Edit menu shortcut label).
         if (EditorShortcuts::pressed("edit.preferences"))
             openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);

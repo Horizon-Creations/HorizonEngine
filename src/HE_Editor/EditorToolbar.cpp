@@ -434,6 +434,15 @@ float Bar::remaining() const
 static RevealAssetFn s_revealAssetHook = nullptr;
 void setRevealAssetHook(RevealAssetFn fn) { s_revealAssetHook = fn; }
 
+static SaveFn s_saveHook = nullptr;
+void setSaveHook(SaveFn fn) { s_saveHook = fn; }
+bool requestSave()
+{
+	if (!s_saveHook) return false;
+	s_saveHook();
+	return true;
+}
+
 void assetHeader(Bar& bar, const std::string& assetPath, bool dirty)
 {
 	// The "unsaved" mark is the Save glyph's to draw (saveButton): a word would
@@ -466,6 +475,8 @@ bool saveButton(Bar& bar, bool enabled, bool atLeft)
 		dl->AddCircleFilled(c, 3.4f, kWarn);
 	}
 	bar.endGroup();
+	// Through the editor's own Save when it has one (see setSaveHook).
+	if (pressed && requestSave()) return false;
 	return pressed;
 }
 

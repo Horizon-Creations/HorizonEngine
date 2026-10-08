@@ -338,7 +338,9 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		             "Save the clip's notifies and root-motion switch",
 		             "anim.clip-save"))
 		{
-			save(ctx, clipPath);
+			// Through the editor's Save, like Ctrl/Cmd+S: the clip is what
+			// dirtyClipForTab hands it, and the saved cues come with it.
+			if (!T::requestSave()) save(ctx, clipPath);
 		}
 		bar.endGroup();
 	}

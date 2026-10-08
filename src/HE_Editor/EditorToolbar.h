@@ -268,6 +268,18 @@ void assetHeader(Bar& bar, const std::string& assetPath, bool dirty);
 using RevealAssetFn = void (*)(const std::string& absPath);
 void setRevealAssetHook(RevealAssetFn fn);
 
+// What pressing Save does. The editor registers a hook that runs the SAME path
+// as Ctrl/Cmd+S and File ▸ Save, so the check mark, the sound and the tab's
+// "saved" mark come with it; a button that wrote the file by itself got none of
+// them. With a hook set, saveButton() reports the press to the hook and returns
+// false — the caller's own write never runs a second time. Unset (tests,
+// tooling) saveButton() returns true and the caller saves as before.
+using SaveFn = void (*)();
+void setSaveHook(SaveFn fn);
+// For a save cell a panel draws itself: the same press, routed the same way.
+// False when no hook is set (the caller should then save directly).
+bool requestSave();
+
 // The right-hand Save. True when pressed. `enabled` is the panel's answer to
 // "is there anything to write, and did the asset even load".
 // `atLeft` puts the button in the next left-hand well (right after the asset

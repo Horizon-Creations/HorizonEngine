@@ -7120,33 +7120,37 @@ void render(AppContext& ctx, const std::string& assetPath,
 				             hot ? IM_COL32(240, 240, 245, 255) : IM_COL32(190, 192, 202, 255));
 				// The label: on one line when it fits, else broken at its space
 				// ("Horizontal" / "Box"), and only then shortened — never cut
-				// mid-letter.
+				// mid-letter. A notch smaller than body text: the tiles are narrow
+				// on purpose.
+				ImFont* font   = ImGui::GetFont();
+				const float fs = ImGui::GetFontSize() * 0.85f;
+				const auto widthOf = [&](const std::string& t)
+				{ return font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.c_str()).x; };
 				const float maxW = size.x - 4.0f;
 				const auto fitLine = [&](std::string line)
 				{
-					while (line.size() > 3 && ImGui::CalcTextSize(line.c_str()).x > maxW)
+					while (line.size() > 3 && widthOf(line) > maxW)
 					{
 						line.pop_back();
-						if (ImGui::CalcTextSize((line + "...").c_str()).x <= maxW) { line += "..."; break; }
+						if (widthOf(line + "...") <= maxW) { line += "..."; break; }
 					}
 					return line;
 				};
 				std::string full = spacedTypeName(typeName(t));
 				std::vector<std::string> lines;
 				const size_t sp = full.find(' ');
-				if (ImGui::CalcTextSize(full.c_str()).x <= maxW || sp == std::string::npos)
+				if (widthOf(full) <= maxW || sp == std::string::npos)
 					lines.push_back(fitLine(full));
 				else
 				{
 					lines.push_back(fitLine(full.substr(0, sp)));
 					lines.push_back(fitLine(full.substr(sp + 1)));
 				}
-				const float lineH = ImGui::GetTextLineHeight();
-				float ty = p1.y - lineH * lines.size() - 4.0f;
+				const float lineH = fs + 1.0f;
+				float ty = p1.y - lineH * lines.size() - 3.0f;
 				for (const std::string& ln : lines)
 				{
-					const ImVec2 ts = ImGui::CalcTextSize(ln.c_str());
-					dl->AddText(ImVec2((p0.x + p1.x - ts.x) * 0.5f, ty),
+					dl->AddText(font, fs, ImVec2((p0.x + p1.x - widthOf(ln)) * 0.5f, ty),
 					            IM_COL32(215, 215, 222, 255), ln.c_str());
 					ty += lineH;
 				}
@@ -7197,18 +7201,15 @@ void render(AppContext& ctx, const std::string& assetPath,
 				if (!placed) other.push_back(t);
 			}
 
-			// Tiles scale with the pane between a floor and a ceiling, then the
-			// row wraps: as many columns as fit at the floor, each as wide as its
-			// share of the row but never past the ceiling. A wide pane gets more
-			// tiles in a row instead of a few stretched ones; a narrow one gets
-			// fewer, slightly smaller ones instead of clipped text. Left-aligned,
-			// so the spare pixels sit at the right edge rather than inflating the
-			// tiles.
-			constexpr float kMinW = 50.0f, kMaxW = 60.0f, kTileH = 58.0f;
+			// The tiles share the column's width equally. The column count is
+			// the most that keep a tile at least kMinW wide; when the pane is too
+			// narrow for that many, there is one column fewer and every tile is
+			// correspondingly larger.
+			constexpr float kMinW = 46.0f, kTileH = 56.0f;
 			const float spacing = ImGui::GetStyle().ItemSpacing.x;
 			const float availW  = ImGui::GetContentRegionAvail().x;
 			const int   cols    = std::max(1, static_cast<int>((availW + spacing) / (kMinW + spacing)));
-			const ImVec2 tileSz(std::min(kMaxW, (availW - spacing * (cols - 1)) / cols), kTileH);
+			const ImVec2 tileSz(std::floor((availW - spacing * (cols - 1)) / cols), kTileH);
 
 			const auto drawGroup = [&](const char* title, const std::vector<UIWidgetType>& types)
 			{
