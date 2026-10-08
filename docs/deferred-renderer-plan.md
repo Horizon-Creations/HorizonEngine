@@ -368,22 +368,23 @@ weil es sie auf diesen drei Backends auch im Forward-Pfad nicht gibt (10.6).
 ### 10.3 Pass × Backend
 
 **Übersicht.** `JA` = vorhanden · `fwd` = nur im Forward-Pfad · `--` = fehlt. Die D3D11-Spalte
-ist der Stand nach Schritt 2 (10.9), die anderen Spalten der Stand der Bestandsaufnahme.
+ist der Stand nach Schritt 2 (10.9), die D3D12-Spalte der nach Schritt 3 (10.10), die
+Vulkan-Spalte der Stand der Bestandsaufnahme.
 
-| Pass | Metal | GL | D3D11 (S2) | D3D12 | Vulkan |
+| Pass | Metal | GL | D3D11 (S2) | D3D12 (S3) | Vulkan |
 |---|:--:|:--:|:--:|:--:|:--:|
-| G-Buffer | JA | JA | JA | -- | -- |
-| Lighting-Resolve | JA | JA | JA | -- | -- |
-| Clustered im Resolve | JA | -- | JA | -- (fwd JA) | -- (fwd JA) |
-| CSM + Point/Spot-Atlas | JA | JA | JA (über heLitP im Resolve) | fwd | fwd |
-| Sky / SkyEnv | JA | JA | JA | fwd | fwd |
-| AO (SSAO) | JA (aus G-Buffer) | JA (aus G-Buffer) | JA (Prepass-Ergebnis, v1; aus G-Buffer = S5) | fwd (Prepass) | fwd (Prepass) |
-| GI (DDGI, Masken) | JA | JA | JA | fwd | fwd |
-| Decals | nur Tile | JA | fwd-Decal über dem Resolve (S5: GB0) | fwd (selbst beleuchtet) | fwd (selbst beleuchtet) |
-| SSR | nur Tile | -- (fwd JA) | -- im Deferred-Frame (S5) | fwd | fwd |
-| AA / TAA | JA | JA | JA | fwd | fwd |
-| Transparenz (Forward-Schwanz) | JA | JA | JA | fwd | fwd |
-| `supportsDeferredRendering` | JA | JA | JA | -- | -- |
+| G-Buffer | JA | JA | JA | JA | -- |
+| Lighting-Resolve | JA | JA | JA | JA | -- |
+| Clustered im Resolve | JA | -- | JA | JA | -- (fwd JA) |
+| CSM + Point/Spot-Atlas | JA | JA | JA (über heLitP im Resolve) | JA (wie D3D11) | fwd |
+| Sky / SkyEnv | JA | JA | JA | JA | fwd |
+| AO (SSAO) | JA (aus G-Buffer) | JA (aus G-Buffer) | JA (Prepass-Ergebnis, v1; aus G-Buffer = S5) | JA (wie D3D11, v1) | fwd (Prepass) |
+| GI (DDGI, Masken) | JA | JA | JA | JA | fwd |
+| Decals | nur Tile | JA | fwd-Decal über dem Resolve (S5: GB0) | wie D3D11 (S5: GB0) | fwd (selbst beleuchtet) |
+| SSR | nur Tile | -- (fwd JA) | -- im Deferred-Frame (S5) | -- im Deferred-Frame (S5) | fwd |
+| AA / TAA | JA | JA | JA | JA | fwd |
+| Transparenz (Forward-Schwanz) | JA | JA | JA | JA | fwd |
+| `supportsDeferredRendering` | JA | JA | JA | JA | -- |
 
 **Ressourcen und Bedarf je Pass.** „Ist“ ist der heutige Forward-Pfad, „Bedarf“ das, was der
 Deferred-Pfad zusätzlich braucht.
@@ -824,3 +825,174 @@ die Session-Zusammenfassung meldet auf beiden „1 frames“.
   *SSAO* liest das Prepass-Ergebnis. All das ist Schritt 5.
 - *Debug-Layer*: Der D3D11-Renderer legt kein Debug-Gerät an (`HE_GPU_DEBUG` wirkt auf D3D11
   nicht). Laufzeitmeldungen hat nur WARP in `he_tests` gesehen.
+
+### 10.10 Schritt 3 umgesetzt: D3D12 (Stand 2026-10-08)
+
+> Zweig wie oben, Code-Commit `9d2d6c54`. Gemessen auf NN-WS03 (RTX 4070, Release-Build in einem
+> privaten Deploy, eigenes APPDATA je Lauf, **D3D12-Debug-Layer an** über `HE_GPU_DEBUG=1`) und auf
+> WARP in `he_tests`. „Echte Hardware“ heißt auch hier nur diese eine NVIDIA-Karte.
+
+**Was gebaut ist.** Dieselben Passes und dieselben Shader wie D3D11 (10.9). Der Resolve und die
+G-Buffer-Tails der Graph-Materialien kommen unverändert aus `MaterialShaderLibrary`
+(`deferredResolve[Clustered](HLSL)`, `fullscreenVertex`, `resolveGBufferShaders`). Nichts davon ist
+für D3D12 kopiert. Neu ist nur, was D3D12 anders verlangt:
+
+- **Resolve-Root-Signatur** (`HE::d3d12mat::DescribeResolveRootSignature` in
+  `D3D12MaterialRootSignature.h`, Renderer und `he_tests` lesen dieselbe Beschreibung):
+  - Sie ist die Material-Signatur plus `HeResolve` als Root-CBV b4 (Param 9) plus t27..t30 als
+    vier weitere Slots in **derselben** Tabelle (Slots 17..20 hinter dem 17er-Materialblock).
+  - Params 0..8 behalten ihre Indizes, `bindClusterRoots` setzt die Cluster-Listen t24..t26
+    weiter auf 6..8.
+  - **Eigene Signatur, nicht `m_matRootSig`:** Statische Sampler hängen fest am Register, und
+    die Material-Signatur legt auf s2/s4/s5/s6 linear-WRAP (für `heTex0`/`heTexP*`). Der Resolve
+    braucht dort point-clamp wie auf D3D11. Ein wrappender Tiefen-Lookup am Bildrand liest sonst
+    die gegenüberliegende Kante.
+- **Deskriptoren:** Die Resolve-Tabelle sind zwei aufeinanderfolgende Blöcke des Material-Rings
+  (`m_matSrvHeap`), reserviert in dem Moment, in dem der Frame sich für Deferred entscheidet. Ein
+  Frame, der den G-Buffer schon gefüllt hat, kann also immer auflösen. Inhalt: die
+  Material-Vorlage (GI-Masken, CSM, Local-Atlas, DDGI-Atlanten), Sky-Cube und SSAO unter denselben
+  Gates wie ein Graph-Material-Draw, dann GB0..2 und eine `R32_FLOAT`-Sicht der Viewport-Tiefe.
+  Damit liegt alles in dem einen shader-sichtbaren Heap, den der Frame-Fence schon schützt.
+- **Konstanten:** eigener `HeLighting`- und `HeResolve`-Puffer je Frame-Slot. Upload-Speicher wird
+  erst bei der Ausführung gelesen. Würde der Resolve sein gekürztes Fenster (`specAA[1] = 0`,
+  im clustered Fall nur Richtungslichter) in `m_matLightCB` schreiben, bekämen Forward-Replay
+  und Transparenz im selben Frame dieses Fenster.
+- **G-Buffer-PSOs:** `GBufPS` neben `PSMain` im D3D12-`kSceneHLSL` (D3D11s Regel auf
+  `uAlbedo`/`uAlbedoSamp`), mit `VSMain` und `VSMainInstanced` auf der Szenen-Signatur, drei MRTs
+  gegen D32. Graph-Materialien bekommen die PSO-Dimension `gbuffer`. Sie hat einen eigenen
+  Schlüsselraum im PSO-Cache **und** im FXC-Bytecode-Cache, der nur nach dem Hash geht. Sie wird
+  nie aus einer gebackenen Pak-Variante gebaut und nie clustered.
+- **Ablauf und Barrieren:**
+  - Ablauf: G-Buffer-Pass, Resolve, Forward-Replay der Graph-Materialien ohne G-Buffer-Variante.
+    Danach Skinned, Velocity, Decals, Transparenz und Debug-Linien unverändert.
+  - Vor dem Resolve wie in `EncodeDecals`: erst die DSV vom Output-Merger, dann die Tiefe
+    DEPTH_WRITE → PIXEL_SHADER_RESOURCE und der G-Buffer RENDER_TARGET → PIXEL_SHADER_RESOURCE.
+  - Danach zurück, und erst dann kommt die Tiefe wieder auf den OM.
+  - Der instanzierte Built-in-Zweig stellt jetzt den PSO des laufenden Passes wieder her
+    (`activeScenePso`), nicht hart den Forward-PSO. Im G-Buffer-Pass stünde sonst ein PSO mit
+    einem Ziel auf drei gebundenen Zielen.
+- **Zerstörung und Größe** (`docs/d3d12-swapchain-resize-befund.md`):
+  - Der G-Buffer wird lazy in Szenengröße angelegt. Bei einer Größenänderung kommt erst
+    `waitForAllFrames()` (die Regel von `createSSAOTargets`), dann die neuen Ziele.
+  - Die optimierten Clear-Werte sind die Clears des Passes, also GB1 = (0,5; 0,5; 1; 0,5).
+  - `Shutdown` gibt alles bei leerem Gerät frei.
+- **Flag und Schalter:**
+  - `supportsDeferredRendering = postFxReady && deferredReady`.
+  - Gebaut wird nach `createPostFXPipelines()`. Auf D3D12 entstehen die PostFX-Pipelines erst nach
+    `createPipeline`, anders als auf D3D11.
+  - `HE_RENDER_PATH` und `HE_DUMP_GBUFFER` wie auf GL und D3D11. Der Warmup baut die
+    G-Buffer-Varianten mit.
+  - Der Deferred-Pfad gilt nur im HDR-Viewport-Frame (`usingHDR`). Den fährt der Editor-Viewport,
+    und das exportierte Spiel fährt ihn über `SetSwapchainPostProcessing`.
+- **SSR** läuft im Deferred-Frame nicht, wie auf D3D11 (Schritt 5).
+- Belegzeilen im Log: `D3D12Renderer: deferred path ready (G-buffer + clustered resolve)` und
+  `D3D12Renderer: deferred frame (…)`.
+- Validator: Der `GBufPS`-Eintrag aus Schritt 2 deckt die D3D12-Kopie mit ab (53 HLSL-Shader, 0
+  gescheitert).
+
+**GB3 ist nicht gebunden.** Der G-Buffer-Tail schreibt `oGB3` auf `SV_Target3`. Der D3D12-Debug-
+Layer sagt dazu bei jeder G-Buffer-Material-PSO einmal: „expects a Render Target View bound to
+slot 3 … This is OK, as writes of an unbound Render Target View are discarded“. Das ist eine
+Info-Warnung, kein Fehler, auf WARP und auf der RTX gleich. Wer sie loswerden will, bindet GB3 als
+viertes Ziel (Weg B aus 10.5, den Vulkan ohnehin nehmen soll).
+
+**Messungen auf der RTX 4070.**
+- Headless (`HE_DUMP_*`), `HE_SKY_TIME=6.2832`, AA/Bloom/DOF/Motion Blur aus, Wolken aus.
+- Szenen und Kamera:
+  - Die Graph-Kugel (`MATERIALTEST`, GI) wird mit `SKYTEST` bei TOD 0,45 aufgenommen.
+  - `MANYLIGHTS` und `LOCALSHADOW` bei TOD 0 mit CAMY 207 / CAMZ 2 / PITCH −38.
+  - `LANDSCAPELAYERS` mit CAMY 340 / CAMZ 70 / PITCH −35.
+- **Ohne `SKYTEST` ist es Mitternacht ohne Himmel**, und die Kamera-Knöpfe wirken nicht. Die
+  ersten Aufnahmen dieses Schritts waren deshalb schwarz oder leer (`draws=0`), mit dem Ergebnis
+  „forward = deferred = D3D11“ zum Byte.
+- Gemessen wird im Band y = 200..720, die Kugelwerte in der Scheibe um die Bildmitte (r = 190).
+
+| Szene | Vergleich | mittlere Abw. | max |
+|---|---|--:|--:|
+| `MATERIALTEST=matte` (Graph-Kugel) | D3D12 forward ↔ deferred, Bild | 0,037/255 | 3 |
+| dieselbe | Kugel | 0,202/255 | 1 |
+| dieselbe | D3D11 deferred ↔ D3D12 deferred | 0,000/255 | 1 |
+| dieselbe | GL deferred ↔ D3D12 deferred, Bild / Kugel | 0,054 / 0,309 | 4 |
+| `MANYLIGHTS=16` (Graph-Boden, 16 Punktlichter) | D3D12 forward ↔ deferred, clustered | 0,013/255 | 1 |
+| dieselbe, `HE_FORWARD_CLUSTER=0` | forward ↔ deferred, 8-Licht-Fenster | 0,006/255 | 1 |
+| dieselbe | deferred clustered ↔ deferred 8-Licht (Gegenprobe) | 3,881/255 | 65 |
+| dieselbe | D3D11 deferred ↔ D3D12 deferred | 0,000/255 | 0 |
+| `MATERIALTEST=1 GIBLEED=3`, GI an | Kugel forward ↔ deferred | 0,203/255 | 5 |
+| dieselbe | Kugel deferred, GI an ↔ aus (Gegenprobe) | 28,0/255 | 130 |
+| `LOCALSHADOW=point` (Graph-Boden, Atlas-Schatten) | GL deferred ↔ D3D12 deferred | 0,003/255 | 63 |
+| `LOCALSHADOW=spot` | GL deferred ↔ D3D12 deferred | 0,005/255 | 37 |
+| `LOCALSHADOW=point` | D3D11 deferred ↔ D3D12 deferred | 0,000/255 | 0 |
+| `LOCALSHADOW=point` | GL forward ↔ GL deferred (Referenz) | 0,027/255 | 48 |
+| `LOCALSHADOW=point` / `spot` | D3D12 forward ↔ D3D12 deferred | 15,8 / 36,6 | 115 / 61 |
+| `LANDSCAPELAYERS=1` | D3D12 forward ↔ deferred | 0,043/255 | 16 |
+| `SHADOWINSTTEST` (nur eingebaute Materialien) | GL deferred ↔ D3D12 deferred | 0,038/255 | 12 |
+| dieselbe | D3D12 forward ↔ D3D12 deferred | 2,35/255 | 28 |
+| dieselbe, G-Buffer-Ansicht 1..4 | GL ↔ D3D12 | 0,000 / 0,012 / 0,210 / 0,629 | 1 / 4 / 4 / 4 |
+
+Was die Tabelle zeigt:
+- D3D12 deferred ist mit D3D11 deferred byte- oder fast byte-gleich. Die Shader sind dieselben,
+  nur die Bindung ist neu.
+- D3D12 deferred trifft GL deferred bei Graph-Materialien, Atlas-Schatten und eingebauten
+  Materialien.
+- Die Gegenproben zeigen: Der clustered Resolve lichtet alle 16 Lichter, und GI wirkt im Resolve.
+- `MANYLIGHTS` gegen GL deferred liegt bei 3,9/255. Das ist genau die Gegenprobe oben: GL hat
+  keinen clustered Resolve (10.3), sein Deferred-Bild ist das 8-Licht-Fenster.
+
+**Debug-Layer.** In allen 21 D3D12-Editorläufen und den drei Spielläufen gab es **0 Fehler**
+und keine Device-Removal. Drei Warnungstexte kommen vor:
+- „slot 3 … discarded“: einmal je G-Buffer-Material-PSO, siehe oben.
+- „ClearRenderTargetView: The clear values do not match …“: vorbestehend, gleich oft in Forward-
+  und Deferred-Läufen (Spiel 2/2, `MATERIALTEST` 1/1). Der G-Buffer selbst ist mit seinen
+  Clear-Werten angelegt.
+- „CreateCommittedResource: Ignoring InitialState UNORDERED_ACCESS“: vorbestehend, im GI-Lauf
+  forward wie deferred.
+
+**Spielpfad.** Das Depthy-Spiel aus Thema 130 läuft mit den Binärdateien dieses Zweigs und
+`GameBackend=D3D12` (`HorizonRendering.dll` aus dem Build-Baum, siehe Lesson zum veralteten
+`deploy/Game`), aufgenommen per `PrintWindow` über `docs/spielpfad-postfx-run-game.ps1`.
+- Mit `RenderPath=1` loggt es `swapchain post chain active (2000x1125)` und dann
+  `deferred frame (2000x1125, clustered resolve, G-buffer view 0)`. Das Bild zeigt Geometrie,
+  CSM-Schatten und Himmel vollständig.
+- Mit `RenderPath=0` erscheint keine Deferred-Zeile.
+- **Resize** (`-Mode resize`, acht Schritte zwischen 960×540 und 1800×1000, dazu schnelles und
+  langsames Ziehen und Wiederherstellen): 173 Resize- und Post-Chain-Zeilen,
+  0 Fehler, keine Device-Removal. Jedes Bild ist vollständig, auch das kleinste nach dem großen.
+
+**WARP (`he_tests`).**
+- „D3D12: the deferred resolve and G-buffer PSOs build against their signatures“:
+  - Die Resolve-Signatur nimmt den 8-Licht- und den clustered Resolve an.
+  - Die Material-Signatur lehnt beide mit `E_INVALIDARG` ab (Gegenprobe).
+  - Die G-Buffer-Material-PSO mit drei MRTs ist legal.
+  - Die Reflexion zeigt t27..t30, t24..t26 als ByteAddressBuffer und b4.
+- „D3D12: G-buffer + deferred resolve shade a graph material like its forward draw“, der
+  D3D11-Fall auf D3D12: dieselben zwei Signaturen, die 17+4-Tabelle, R32_TYPELESS-Tiefe mit
+  D32-DSV und R32_FLOAT-SRV, explizite Barrieren, Cluster-Listen als Root-SRVs.
+  - Forward ↔ deferred: Mittel 0,0021, Maximum 0,0048.
+  - Clustered: Mittel 0,0016, Maximum 0,0044.
+  - Gegenproben: uv-Vorzeichen max 0,217; 8-Licht-Resolve 0,34; die BaseColor-Ansicht zeigt
+    0,25 / 0,5 / 0,75.
+  - Debug-Layer im Pixeltest: keine Meldung.
+- Gesamtlauf `he_tests` (Release): 4188 von 4190 Fällen grün. Die zwei roten sind die bekannten
+  Zwischenablage-Fälle in `test_inspector_ui`, vorbestehend und ohne Bezug zu diesem Schritt.
+
+**Abweichungen zu Metal/GL (D3D12).**
+- *Eingebaute Materialien* sehen in D3D12 deferred anders aus als in D3D12 forward. Gemessen sind
+  2,35/255 in `SHADOWINSTTEST`, und sie entsprechen dann GL (0,038/255). Das ist dieselbe Lage wie
+  auf D3D11 (10.6, 10.9).
+- *D3D12 forward bei Atlas-Schatten* weicht von GL ab: 15,8/255 gegen GL forward, dasselbe Bild wie
+  D3D11 forward in 10.9. Der Deferred-Pfad trifft GL.
+- *Landscape-Gewichte fehlen auf D3D12 ganz*, vorbestehend und forward wie deferred.
+  - Der Renderer schreibt nie eine Gewichtskarte in den Slot `kSlotLandscapeWeights` (t14), die
+    Vorlage hält dort eine Null-Sicht.
+  - Ein bemaltes Terrain zeigt deshalb nur Layer 0: 11,3/255 gegen GL und D3D11 deferred in
+    `LANDSCAPELAYERS`.
+  - D3D11 bindet t14 seit Thema 57 je Draw (`D3D11MaterialBindings.h`). D3D12 hat dafür keine
+    Entsprechung.
+  - Nicht hier behoben. Das ist eine Lücke der Graph-Material-Parität von D3D12 forward, also
+    außerhalb dieses Themas. Für einen eigenen Befund reproduziert der Witness oben sie in
+    Sekunden.
+- D3D12 füllt wie D3D11 `lit.weather`, `lit.specAA` und `lit.viewMode` nicht. Nässe/Schnee und
+  Specular-AA fehlen also auch im Resolve.
+- *SSR* läuft im Deferred-Frame nicht. *Decals* bleiben selbst beleuchtet über dem Resolve.
+  *SSAO* liest das Prepass-Ergebnis. Das alles ist Schritt 5.
+- *Kein Tile/Single-Pass* (10.6).
