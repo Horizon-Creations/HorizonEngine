@@ -793,7 +793,7 @@ namespace
 	  "group can be turned down at once. Empty uses the bus the clip itself was "
 	  "given in the Audio Editor, or the master bus when it has none. A name the "
 	  "mixer does not have is skipped the same way, with a warning in the log.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Source/Volume", "", "Playback volume. 1 is the file as recorded.",
 	  "", "systems#audio" },
 	{ "Audio Source/Pitch", "",
@@ -2534,7 +2534,7 @@ namespace
 	  "are mixed, with the same bands and graph as a clip's EQ in the Audio "
 	  "Editor, and a clip's own EQ comes first. Heard at once, saved with the "
 	  "project and used by the exported game.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Mixer/Add Bus", "",
 	  "Creates the bus named on the left, at 0 dB, and saves it with the "
 	  "project.",
@@ -6728,12 +6728,12 @@ namespace
 	  "How loud this tab plays the clip, from silent to twice the recorded level. "
 	  "It moves a preview that is already running. Preview only: an Audio Source "
 	  "component in the scene carries its own volume.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Pitch", "Preview Pitch",
 	  "Playback rate for the preview, from a quarter speed to double. Speed and "
 	  "pitch move together, so raising it both shortens the clip and lifts it. "
 	  "Preview only, like the volume above it.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	// The waveform canvas (AudioWaveformView.cpp) and the toolbar above it.
 	// Toolbar cells and canvas strips have no visible label, so these are
 	// looked up by key.
@@ -6748,18 +6748,18 @@ namespace
 	  "on a trackpad the swipe pans and Cmd/Ctrl+scroll zooms. Zoomed in far "
 	  "enough, the single samples appear as points. With Curve switched on in "
 	  "the toolbar the lanes edit the volume curve instead of the selection.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Ruler", "Time ruler",
 	  "Drag along it to scrub: the playhead follows the pointer, and a clip "
 	  "that is playing jumps with it. Unlike the waveform below it, the ruler "
 	  "never touches the selection. The labels are time, or frame numbers with "
 	  "Samples switched on in the toolbar.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Overview", "Overview",
 	  "The whole clip in one strip, with the part the canvas shows framed, the "
 	  "selection shaded and the playhead as a line. Drag the frame to scroll, "
 	  "or click beside it to bring that part of the clip into view.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Play", "Play / Pause",
 	  "Plays the selection if there is one, otherwise the clip as the game plays "
 	  "it: the trimmed part, or all of it when it has no trim. It starts at the "
@@ -6767,11 +6767,11 @@ namespace
 	  "does not. With Loop on, the selection repeats on its own. Marking a new "
 	  "selection while it plays restarts playback on the new range. Pause "
 	  "keeps the position. Greyed out when the editor has no audio device.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Stop", "",
 	  "Stops playback and puts the playhead back to the start of the selection, "
 	  "or of the trim, or of the clip when there is neither.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Trim", "Trim to Selection",
 	  "Keeps only the selected range: from now on the clip plays from the start "
 	  "of the selection to its end, in this tab and wherever the game plays it. "
@@ -6779,11 +6779,11 @@ namespace
 	  "and Clear Trim brings it back. Ctrl+Z (Cmd+Z) undoes it, and Save writes "
 	  "it into the asset. Only an imported asset can be trimmed: a source "
 	  ".wav or .ogg has nowhere to keep a trim, and engine content is read-only.",
-	  "", "systems#audio" },
+	  "", "systems#audio-trim" },
 	{ "Audio Editor/Clear Trim", "",
 	  "Removes the trim, so the whole clip plays again. Undoable like the trim "
 	  "itself.",
-	  "", "systems#audio" },
+	  "", "systems#audio-trim" },
 	{ "Audio Editor/Extract", "Extract Selection",
 	  "Writes the selected range as a new audio asset next to this one, named "
 	  "after it with _extract (then _extract_2 and so on, never over an existing "
@@ -6793,7 +6793,7 @@ namespace
 	  "no source file, so Reimport cannot overwrite it with the whole recording. "
 	  "Engine content goes into the project's own Content/Audio. With Bake Curve "
 	  "into Extract ticked, the curve is multiplied into the new samples instead.",
-	  "", "systems#audio" },
+	  "", "systems#audio-trim" },
 	{ "Audio Editor/Bake Curve into Extract", "",
 	  "Extract writes the selection with the volume curve already applied to the "
 	  "samples, so the new clip sounds exactly as the range plays here and needs "
@@ -6801,7 +6801,7 @@ namespace
 	  "goes along as an edit you can still change. Where the curve lifts a loud "
 	  "passage past full scale, those samples are clipped, and the status line "
 	  "says how many. Only shown when the clip has a curve.",
-	  "", "systems#audio" },
+	  "", "systems#audio-trim" },
 	{ "Audio Editor/Curve", "Volume Curve",
 	  "Switches the waveform to editing the clip's volume curve, drawn in yellow "
 	  "on a dB scale from silence at the bottom to +12 dB at the top. Click to add "
@@ -6811,19 +6811,19 @@ namespace
 	  "gives the curve's gain at the pointer. The curve is heard at once in the "
 	  "preview, and it applies wherever the game plays the clip. It is an edit "
 	  "like the trim: undoable, saved with the asset, the samples untouched.",
-	  "", "systems#audio" },
+	  "", "systems#audio-curve" },
 	{ "Audio Editor/Linear", "",
 	  "The segment from the selected curve point to the next one becomes a "
 	  "straight line in level. Click a point with Curve on to select it.",
-	  "", "systems#audio" },
+	  "", "systems#audio-curve" },
 	{ "Audio Editor/Smooth", "",
 	  "The segment from the selected curve point to the next one becomes an eased "
 	  "curve, flat at both ends, so the level glides in and out without a corner.",
-	  "", "systems#audio" },
+	  "", "systems#audio-curve" },
 	{ "Audio Editor/Clear Curve", "",
 	  "Removes every point of the volume curve, so the clip plays at its own "
 	  "level again. Undoable.",
-	  "", "systems#audio" },
+	  "", "systems#audio-curve" },
 	// Bus and EQ (AudioMixView.cpp). Unlabelled cells, looked up by key.
 	{ "Audio Editor/Bus", "Mixer Bus",
 	  "The Audio Mixer bus this clip plays through, wherever the game plays it: "
@@ -6834,22 +6834,22 @@ namespace
 	  "on Master; the name is kept, so the clip finds the bus again if it comes "
 	  "back. The preview in this tab plays through the same bus. Undoable, saved "
 	  "with the asset.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/EQ", "Show EQ",
 	  "Shows the clip's EQ under the waveform: the response curve and one row per "
 	  "band. The EQ is an edit like the trim and the curve: heard at once in the "
 	  "preview, applied wherever the game plays the clip, undoable, saved with "
 	  "the asset, the samples untouched. Hiding the pane does not switch it off; "
 	  "EQ On does.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/EQ On", "",
 	  "Switches the whole EQ in or out. Off keeps every band as it is but filters "
 	  "nothing, which is the quickest way to compare the sound with and without it.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/Add Band", "",
 	  "Adds a bell band at 0 dB at a frequency no other band uses yet, so it "
 	  "changes nothing until you drag it. Up to eight bands.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/EQ Graph", "EQ response",
 	  "The EQ's summed response, from 20 Hz to 20 kHz on a log axis and ±18 dB. "
 	  "Each numbered handle is a band: drag it to move its frequency and gain, "
@@ -6859,51 +6859,51 @@ namespace
 	  "its Nyquist frequency, half its sample rate: nothing can be shaped there, "
 	  "because the clip holds nothing that high. In the Audio Mixer the same graph "
 	  "shapes a whole bus.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/Band On", "",
 	  "Switches this band in or out without losing its settings.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/Band Type", "",
 	  "Bell lifts or cuts around its frequency. Low Shelf and High Shelf lift or "
 	  "cut everything below or above it. Low Pass and High Pass cut away "
 	  "everything above or below it; they have no gain, and Q sets how sharp "
 	  "the corner is.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/Band Frequency", "",
 	  "The band's centre or corner frequency, 10 Hz to 22 kHz. Drag, or "
 	  "double-click to type a value.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/Band Gain", "",
 	  "How far the band lifts or cuts, from -24 to +24 dB. Greyed out for the "
 	  "pass filters, which only cut.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/Band Q", "",
 	  "The band's width: low values shape a broad region, high values a narrow "
 	  "one. For the pass filters it is the resonance at the corner; 0.71 is the "
 	  "plain, flat one.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/Remove Band", "",
 	  "Deletes this band. Undoable.",
-	  "", "systems#audio" },
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Editor/Loop", "",
 	  "Whether playback wraps round at the end or stops there. With a selection "
 	  "it loops exactly the selected range, which is the quickest way to hear "
 	  "whether a cut point will click. Preview only: how a sound loops in the "
 	  "game is the Loop switch on its Audio Source.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Zoom to Selection", "",
 	  "Fills the canvas with the selection, with a sliver of room either side "
 	  "so both edges stay visible. Greyed out when nothing is selected.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Fit", "",
 	  "The whole clip across the canvas again, from the start. The way back "
 	  "after zooming into a long clip.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Samples", "",
 	  "Labels the ruler with frame numbers instead of time. A frame is one "
 	  "sample on every channel; frame 48,000 of a 48 kHz clip is one second in. "
 	  "The readout under the canvas always shows both.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Import as Audio Asset", "",
 	  "Turns the source .wav or .ogg open in this tab into an asset the project "
 	  "can reference, at the path printed under the button. It only appears for a "

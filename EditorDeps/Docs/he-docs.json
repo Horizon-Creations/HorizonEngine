@@ -8764,6 +8764,25 @@
          [
           {
            "s": "b",
+           "t": "Audio Editor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Waveform with zoom and selection, trim, extract to a new asset, volume curve, mixer bus and EQ, all non-destructive. "
+          },
+          {
+           "h": "systems.html#audio-editor",
+           "s": "l",
+           "t": "Audio ->"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
            "t": "Input assets"
           }
          ],
@@ -8828,7 +8847,7 @@
      ],
      "eyebrow": "Deep dives",
      "id": "asset-editors",
-     "text": "Double-clicking an asset opens a dedicated editor tab next to the Scene tab. Material graphs, HorizonCode graphs, the Level Script, the Game Instance, particle graphs and animator state machines all share one node-graph canvas — learn it once (pan with the right mouse button, box-select with the left, zoom with the wheel) and every graph editor works the same way. Tab What it does Material graph Node-based shader authoring with live preview — the graph is the shader. Materials -> UI Widget designer UMG-style Designer (palette, WYSIWYG canvas, hierarchy, per-element details) plus a Graph mode for the widget's logic. UI -> HorizonCode Class Event graph, variables and functions of a reusable visual-scripting class. HorizonCode -> Level Script (View menu) The current scene's graph — reacts to OnLevelLoaded / OnLevelUnloaded; saved inside the scene. Game Instance (View menu) The app-wide graph that outlives scene changes — OnInit, OnShutdown, OnWindowFocusChanged. Skeletal Mesh editor Joint hierarchy tree, orbit-camera preview, Show Skeleton bone overlay, and an optional animation-clip scrubber. Animator State Machine States as nodes, transitions as links — parameters, thresholds and crossfade durations. Animation -> Particle graph Emitter node graph with a live simulated preview. Particles -> Input assets Input Action (Button/Axis) and Input Mapping Context (key and axis bindings). Script editor Syntax-highlighted Lua/Python editing in-editor. C++ Class editor A .h/.cpp pair as one tab with a header/source toggle (C++ projects). The UI Widget Designer tab: palette, WYSIWYG canvas and per-element details",
+     "text": "Double-clicking an asset opens a dedicated editor tab next to the Scene tab. Material graphs, HorizonCode graphs, the Level Script, the Game Instance, particle graphs and animator state machines all share one node-graph canvas — learn it once (pan with the right mouse button, box-select with the left, zoom with the wheel) and every graph editor works the same way. Tab What it does Material graph Node-based shader authoring with live preview — the graph is the shader. Materials -> UI Widget designer UMG-style Designer (palette, WYSIWYG canvas, hierarchy, per-element details) plus a Graph mode for the widget's logic. UI -> HorizonCode Class Event graph, variables and functions of a reusable visual-scripting class. HorizonCode -> Level Script (View menu) The current scene's graph — reacts to OnLevelLoaded / OnLevelUnloaded; saved inside the scene. Game Instance (View menu) The app-wide graph that outlives scene changes — OnInit, OnShutdown, OnWindowFocusChanged. Skeletal Mesh editor Joint hierarchy tree, orbit-camera preview, Show Skeleton bone overlay, and an optional animation-clip scrubber. Animator State Machine States as nodes, transitions as links — parameters, thresholds and crossfade durations. Animation -> Particle graph Emitter node graph with a live simulated preview. Particles -> Audio Editor Waveform with zoom and selection, trim, extract to a new asset, volume curve, mixer bus and EQ, all non-destructive. Audio -> Input assets Input Action (Button/Axis) and Input Mapping Context (key and axis bindings). Script editor Syntax-highlighted Lua/Python editing in-editor. C++ Class editor A .h/.cpp pair as one tab with a header/source toggle (C++ projects). The UI Widget Designer tab: palette, WYSIWYG canvas and per-element details",
      "title": "Asset Editor Tabs"
     },
     {
@@ -10203,6 +10222,28 @@
            "t": "Add to / range-select in the Content Browser"
           }
          ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Delete"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "Backspace"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Remove the selected volume-curve point (Audio Editor, Curve on)"
+          }
+         ]
         ]
        ]
       },
@@ -10266,7 +10307,7 @@
      ],
      "eyebrow": "Muscle memory",
      "id": "shortcuts",
-     "text": "Shortcut Action W / E / R Gizmo: translate / rotate / scale F Frame selected entity Ctrl/Cmd + N · Ctrl/Cmd + O New / open project Ctrl/Cmd + S · Ctrl/Cmd + Shift + S Save scene / save scene as Ctrl/Cmd + Z · Ctrl + Y / Shift + Ctrl/Cmd + Z Undo / redo Ctrl/Cmd + , Preferences F9 Start / stop a profiler benchmark capture F11 Toggle fullscreen Escape Exit play mode; close popups F2 Rename the selected asset (Content Browser) Delete Delete the selection, after a confirmation (Content Browser) Enter Open the selected asset (Content Browser) Ctrl/Cmd + click · Shift + click Add to / range-select in the Content Browser In play mode the default fly camera uses W A S D, E/Space up, Q/Ctrl down and Shift for 3× speed.",
+     "text": "Shortcut Action W / E / R Gizmo: translate / rotate / scale F Frame selected entity Ctrl/Cmd + N · Ctrl/Cmd + O New / open project Ctrl/Cmd + S · Ctrl/Cmd + Shift + S Save scene / save scene as Ctrl/Cmd + Z · Ctrl + Y / Shift + Ctrl/Cmd + Z Undo / redo Ctrl/Cmd + , Preferences F9 Start / stop a profiler benchmark capture F11 Toggle fullscreen Escape Exit play mode; close popups F2 Rename the selected asset (Content Browser) Delete Delete the selection, after a confirmation (Content Browser) Enter Open the selected asset (Content Browser) Ctrl/Cmd + click · Shift + click Add to / range-select in the Content Browser Delete / Backspace Remove the selected volume-curve point (Audio Editor, Curve on) In play mode the default fly camera uses W A S D, E/Space up, Q/Ctrl down and Shift for 3× speed.",
      "title": "Shortcut Reference"
     }
    ],
@@ -68304,7 +68345,15 @@
          },
          {
           "s": "",
-          "t": ", …); scripts set bus volumes at runtime ("
+          "t": ", …): the source's own Bus field, else the bus the clip was given in the Audio Editor, else Master. Each bus has a fader and an optional EQ ("
+         },
+         {
+          "s": "b",
+          "t": "Window » Audio Mixer"
+         },
+         {
+          "s": "",
+          "t": "); scripts set bus volumes at runtime ("
          },
          {
           "s": "c",
@@ -68356,17 +68405,786 @@
          },
          {
           "s": "",
-          "t": " — WAV import today, stored as PCM inside the asset."
+          "t": " — "
+         },
+         {
+          "s": "c",
+          "t": ".wav"
+         },
+         {
+          "s": "",
+          "t": " is imported as PCM inside the asset; "
+         },
+         {
+          "s": "c",
+          "t": ".ogg"
+         },
+         {
+          "s": "",
+          "t": " keeps its Ogg Vorbis stream and is decoded while it plays."
          }
         ]
        ],
        "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "To look at a clip and edit it (trim, extract a range, volume curve, bus and EQ) open it in the "
+        },
+        {
+         "h": "#audio-editor",
+         "s": "l",
+         "t": "Audio Editor"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
       }
      ],
      "eyebrow": "Listen",
      "id": "audio",
-     "text": "An Audio Source component references an audio asset and plays it with volume, pitch, loop and Play on Start. Enabling Spatial gives it 3D positioning with linear attenuation between an inner (full-volume) and outer (silence) range. The first Audio Listener in the scene — typically on the camera or player — receives the mix and sets the master volume. Mixer buses — sources route to named buses (music, sfx, …); scripts set bus volumes at runtime (audio.setBusVolume). Script playback — audio.play, audio.playAt (3D position), audio.stop / stopAll / isPlaying / setSoundPosition. Formats — WAV import today, stored as PCM inside the asset.",
+     "text": "An Audio Source component references an audio asset and plays it with volume, pitch, loop and Play on Start. Enabling Spatial gives it 3D positioning with linear attenuation between an inner (full-volume) and outer (silence) range. The first Audio Listener in the scene — typically on the camera or player — receives the mix and sets the master volume. Mixer buses — sources route to named buses (music, sfx, …): the source's own Bus field, else the bus the clip was given in the Audio Editor, else Master. Each bus has a fader and an optional EQ (Window » Audio Mixer); scripts set bus volumes at runtime (audio.setBusVolume). Script playback — audio.play, audio.playAt (3D position), audio.stop / stopAll / isPlaying / setSoundPosition. Formats — .wav is imported as PCM inside the asset; .ogg keeps its Ogg Vorbis stream and is decoded while it plays. To look at a clip and edit it (trim, extract a range, volume curve, bus and EQ) open it in the Audio Editor.",
      "title": "Audio"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Double-click an audio asset in the Content Browser and it opens in the "
+        },
+        {
+         "s": "b",
+         "t": "Audio Editor"
+        },
+        {
+         "s": "",
+         "t": " tab: the clip as a waveform you can zoom into, select from, play from and edit. Every edit there (trim, volume curve, bus, EQ) is "
+        },
+        {
+         "s": "i",
+         "t": "non-destructive"
+        },
+        {
+         "s": "",
+         "t": ". It is stored next to the samples in the asset, the samples themselves are never rewritten, and every edit can be undone or cleared again. A source "
+        },
+        {
+         "s": "c",
+         "t": ".wav"
+        },
+        {
+         "s": "",
+         "t": " or "
+        },
+        {
+         "s": "c",
+         "t": ".ogg"
+        },
+        {
+         "s": "",
+         "t": " that is not yet an asset opens read-only, with "
+        },
+        {
+         "s": "b",
+         "t": "Import as Audio Asset"
+        },
+        {
+         "s": "",
+         "t": " to turn it into one."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Waveform"
+         },
+         {
+          "s": "",
+          "t": " — one lane per channel, drawn from the loudest and quietest sample under each pixel, so even an hour-long clip draws at once. Zoomed in far enough, single samples appear as points."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Zoom and scroll"
+         },
+         {
+          "s": "",
+          "t": " — the wheel zooms around the pointer; Shift+wheel or a middle-drag pans; on a trackpad the swipe pans and Ctrl/Cmd+scroll zooms. "
+         },
+         {
+          "s": "b",
+          "t": "Fit"
+         },
+         {
+          "s": "",
+          "t": " shows the whole clip again, "
+         },
+         {
+          "s": "b",
+          "t": "Zoom to Selection"
+         },
+         {
+          "s": "",
+          "t": " fills the canvas with the selection."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Overview"
+         },
+         {
+          "s": "",
+          "t": " — the strip under the lanes is the whole clip, with the visible part framed. Drag the frame to scroll, click beside it to jump there."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Ruler"
+         },
+         {
+          "s": "",
+          "t": " — drag along it to scrub the playhead, even while the clip plays. It never changes the selection. "
+         },
+         {
+          "s": "b",
+          "t": "Samples"
+         },
+         {
+          "s": "",
+          "t": " labels it with frame numbers instead of time; a frame is one sample on every channel."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Selecting."
+        },
+        {
+         "s": "",
+         "t": " Drag across the lanes to select a range. The readout under the canvas gives its start, end and length in time "
+        },
+        {
+         "s": "i",
+         "t": "and"
+        },
+        {
+         "s": "",
+         "t": " in frames. A click without a drag moves the playhead and drops the selection, Shift-click stretches the selection to the pointer, and pressing on an edge of the selection moves just that edge."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Listening."
+        },
+        {
+         "s": "",
+         "t": " "
+        },
+        {
+         "s": "b",
+         "t": "Play"
+        },
+        {
+         "s": "",
+         "t": " plays the selection if there is one, otherwise the clip as the game plays it (the trimmed part, with its curve, bus and EQ). It starts at the playhead when that lies inside the range. With "
+        },
+        {
+         "s": "b",
+         "t": "Loop"
+        },
+        {
+         "s": "",
+         "t": " on the selection repeats seamlessly, the quickest way to hear whether a cut point clicks. Marking a new selection while playing restarts on the new range; "
+        },
+        {
+         "s": "b",
+         "t": "Stop"
+        },
+        {
+         "s": "",
+         "t": " returns the playhead to the start of the range. The "
+        },
+        {
+         "s": "b",
+         "t": "Volume"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "b",
+         "t": "Pitch"
+        },
+        {
+         "s": "",
+         "t": " sliders in the tab change only this preview. In the game, the Audio Source component has its own."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "See the sound",
+     "id": "audio-editor",
+     "text": "Double-click an audio asset in the Content Browser and it opens in the Audio Editor tab: the clip as a waveform you can zoom into, select from, play from and edit. Every edit there (trim, volume curve, bus, EQ) is non-destructive. It is stored next to the samples in the asset, the samples themselves are never rewritten, and every edit can be undone or cleared again. A source .wav or .ogg that is not yet an asset opens read-only, with Import as Audio Asset to turn it into one. Waveform — one lane per channel, drawn from the loudest and quietest sample under each pixel, so even an hour-long clip draws at once. Zoomed in far enough, single samples appear as points. Zoom and scroll — the wheel zooms around the pointer; Shift+wheel or a middle-drag pans; on a trackpad the swipe pans and Ctrl/Cmd+scroll zooms. Fit shows the whole clip again, Zoom to Selection fills the canvas with the selection. Overview — the strip under the lanes is the whole clip, with the visible part framed. Drag the frame to scroll, click beside it to jump there. Ruler — drag along it to scrub the playhead, even while the clip plays. It never changes the selection. Samples labels it with frame numbers instead of time; a frame is one sample on every channel. Selecting. Drag across the lanes to select a range. The readout under the canvas gives its start, end and length in time and in frames. A click without a drag moves the playhead and drops the selection, Shift-click stretches the selection to the pointer, and pressing on an edge of the selection moves just that edge. Listening. Play plays the selection if there is one, otherwise the clip as the game plays it (the trimmed part, with its curve, bus and EQ). It starts at the playhead when that lies inside the range. With Loop on the selection repeats seamlessly, the quickest way to hear whether a cut point clicks. Marking a new selection while playing restarts on the new range; Stop returns the playhead to the start of the range. The Volume and Pitch sliders in the tab change only this preview. In the game, the Audio Source component has its own.",
+     "title": "Audio Editor"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Two ways to cut a clip, both starting from a selection in the "
+        },
+        {
+         "h": "#audio-editor",
+         "s": "l",
+         "t": "Audio Editor"
+        },
+        {
+         "s": "",
+         "t": ":"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Button"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What happens"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The original"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Trim to Selection"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The clip plays only the selected range from now on, in this tab and wherever the game plays it. The rest is shaded on the waveform; "
+          },
+          {
+           "s": "b",
+           "t": "Clear Trim"
+          },
+          {
+           "s": "",
+           "t": " brings it back."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Same asset, samples untouched; the trim is saved as an edit."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Extract Selection"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Writes the range as a new audio asset next to this one, named "
+          },
+          {
+           "s": "c",
+           "t": "<clip>_extract"
+          },
+          {
+           "s": "",
+           "t": " (then "
+          },
+          {
+           "s": "c",
+           "t": "_extract_2"
+          },
+          {
+           "s": "",
+           "t": ", …, never over an existing file)."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Left exactly as it was."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Trim"
+        },
+        {
+         "s": "",
+         "t": " is an edit like any other in the tab: Ctrl/Cmd+Z undoes it, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes it, and "
+        },
+        {
+         "s": "b",
+         "t": "Save"
+        },
+        {
+         "s": "",
+         "t": " (Ctrl/Cmd+S) writes it into the asset. Until then the tab is marked unsaved, like every other asset editor. Only an imported asset can be trimmed: a raw "
+        },
+        {
+         "s": "c",
+         "t": ".wav"
+        },
+        {
+         "s": "",
+         "t": " or "
+        },
+        {
+         "s": "c",
+         "t": ".ogg"
+        },
+        {
+         "s": "",
+         "t": " has nowhere to keep a trim, and engine content is read-only."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Extract"
+        },
+        {
+         "s": "",
+         "t": " creates a PCM asset holding exactly the selected frames, with a new asset id of its own. It takes over the clip's bus and EQ and, over its range, the volume curve. Tick "
+        },
+        {
+         "s": "b",
+         "t": "Bake Curve into Extract"
+        },
+        {
+         "s": "",
+         "t": " to multiply the curve into the new samples instead. The new clip then sounds exactly like the range did here and needs no curve; where the curve lifts a passage past full scale, the status line says how many samples were clipped. An extract from engine content goes into the project's own "
+        },
+        {
+         "s": "c",
+         "t": "Content/Audio"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "",
+           "t": "An extracted asset has no source file, so "
+          },
+          {
+           "s": "b",
+           "t": "Reimport"
+          },
+          {
+           "s": "",
+           "t": " can never overwrite it with the whole recording. Reimporting the "
+          },
+          {
+           "s": "i",
+           "t": "original"
+          },
+          {
+           "s": "",
+           "t": " asset replaces its samples and keeps its trim, curve, bus and EQ."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "tip"
+      }
+     ],
+     "eyebrow": "Cut",
+     "id": "audio-trim",
+     "text": "Two ways to cut a clip, both starting from a selection in the Audio Editor: Button What happens The original Trim to Selection The clip plays only the selected range from now on, in this tab and wherever the game plays it. The rest is shaded on the waveform; Clear Trim brings it back. Same asset, samples untouched; the trim is saved as an edit. Extract Selection Writes the range as a new audio asset next to this one, named <clip>_extract (then _extract_2, …, never over an existing file). Left exactly as it was. Trim is an edit like any other in the tab: Ctrl/Cmd+Z undoes it, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes it, and Save (Ctrl/Cmd+S) writes it into the asset. Until then the tab is marked unsaved, like every other asset editor. Only an imported asset can be trimmed: a raw .wav or .ogg has nowhere to keep a trim, and engine content is read-only. Extract creates a PCM asset holding exactly the selected frames, with a new asset id of its own. It takes over the clip's bus and EQ and, over its range, the volume curve. Tick Bake Curve into Extract to multiply the curve into the new samples instead. The new clip then sounds exactly like the range did here and needs no curve; where the curve lifts a passage past full scale, the status line says how many samples were clipped. An extract from engine content goes into the project's own Content/Audio. An extracted asset has no source file, so Reimport can never overwrite it with the whole recording. Reimporting the original asset replaces its samples and keeps its trim, curve, bus and EQ.",
+     "title": "Trim & Extract"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Switch on "
+        },
+        {
+         "s": "b",
+         "t": "Curve"
+        },
+        {
+         "s": "",
+         "t": " in the Audio Editor toolbar and the lanes edit the clip's volume curve instead of the selection. It is drawn in yellow on a dB scale from silence at the bottom to +12 dB at the top."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Add"
+         },
+         {
+          "s": "",
+          "t": " — click on the lanes. "
+         },
+         {
+          "s": "b",
+          "t": "Move"
+         },
+         {
+          "s": "",
+          "t": " — drag a point; hold Shift to change only its gain. "
+         },
+         {
+          "s": "b",
+          "t": "Remove"
+         },
+         {
+          "s": "",
+          "t": " — right-click or double-click a point, or select it and press Delete or Backspace."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Linear"
+         },
+         {
+          "s": "",
+          "t": " / "
+         },
+         {
+          "s": "b",
+          "t": "Smooth"
+         },
+         {
+          "s": "",
+          "t": " — the shape of the segment from the selected point to the next: a straight line in level, or an eased glide that is flat at both ends."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Clear Curve"
+         },
+         {
+          "s": "",
+          "t": " — removes every point, so the clip plays at its own level again."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The curve is heard at once in the preview and applies wherever the game plays the clip. Before the first point and after the last, the level of that point holds. Points are placed in seconds from the start of the "
+        },
+        {
+         "s": "i",
+         "t": "whole"
+        },
+        {
+         "s": "",
+         "t": " clip, so a trim does not shift them. A sharp step is softened into a ramp of a few milliseconds, so the curve never clicks. Like the trim, the curve is undoable, saved with the asset, and leaves the samples untouched unless you bake it into an extract."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Shape the level",
+     "id": "audio-curve",
+     "text": "Switch on Curve in the Audio Editor toolbar and the lanes edit the clip's volume curve instead of the selection. It is drawn in yellow on a dB scale from silence at the bottom to +12 dB at the top. Add — click on the lanes. Move — drag a point; hold Shift to change only its gain. Remove — right-click or double-click a point, or select it and press Delete or Backspace. Linear / Smooth — the shape of the segment from the selected point to the next: a straight line in level, or an eased glide that is flat at both ends. Clear Curve — removes every point, so the clip plays at its own level again. The curve is heard at once in the preview and applies wherever the game plays the clip. Before the first point and after the last, the level of that point holds. Points are placed in seconds from the start of the whole clip, so a trim does not shift them. A sharp step is softened into a ramp of a few milliseconds, so the curve never clicks. Like the trim, the curve is undoable, saved with the asset, and leaves the samples untouched unless you bake it into an extract.",
+     "title": "Volume Curve"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Bus."
+        },
+        {
+         "s": "",
+         "t": " The "
+        },
+        {
+         "s": "b",
+         "t": "Bus"
+        },
+        {
+         "s": "",
+         "t": " drop-down in the Audio Editor toolbar picks the Audio Mixer bus the clip plays through, wherever the game plays it, so that bus's fader, mute and solo apply to it. The list is the project's own, the one "
+        },
+        {
+         "s": "b",
+         "t": "Window » Audio Mixer"
+        },
+        {
+         "s": "",
+         "t": " edits. Which bus a sound ends up on:"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "the "
+         },
+         {
+          "s": "b",
+          "t": "Bus"
+         },
+         {
+          "s": "",
+          "t": " field of the Audio Source that plays it, if set;"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "otherwise the bus given to the clip in the Audio Editor;"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "otherwise "
+         },
+         {
+          "s": "b",
+          "t": "Master"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ]
+       ],
+       "k": "ol"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A bus that has since been removed or renamed in the mixer is skipped. The drop-down shows it as missing, the sound plays on the next choice down the list, never silent, and the log says so. The name is kept, so the clip finds the bus again if it comes back. The preview in the tab plays through the same bus."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "EQ."
+        },
+        {
+         "s": "",
+         "t": " "
+        },
+        {
+         "s": "b",
+         "t": "Show EQ"
+        },
+        {
+         "s": "",
+         "t": " opens the clip's equaliser under the waveform: the summed response (20 Hz to 20 kHz, -18 to +18 dB) and one row per band. Up to eight bands, each a "
+        },
+        {
+         "s": "b",
+         "t": "Bell"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "b",
+         "t": "Low Shelf"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "b",
+         "t": "High Shelf"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "b",
+         "t": "Low Pass"
+        },
+        {
+         "s": "",
+         "t": " or "
+        },
+        {
+         "s": "b",
+         "t": "High Pass"
+        },
+        {
+         "s": "",
+         "t": ", with frequency (10 Hz–22 kHz), gain (-24 to +24 dB, not for the pass filters) and Q. "
+        },
+        {
+         "s": "b",
+         "t": "Add Band"
+        },
+        {
+         "s": "",
+         "t": " adds a bell at 0 dB, which changes nothing until you move it. On the graph, drag a numbered handle to move frequency and gain, use the wheel over it for Q, right-click it to remove it, and double-click an empty spot to add a bell there. "
+        },
+        {
+         "s": "b",
+         "t": "EQ On"
+        },
+        {
+         "s": "",
+         "t": " switches the whole EQ in or out without losing the bands, the quickest A/B. A shaded part on the right lies above the clip's Nyquist frequency (half its sample rate), where it holds nothing to shape."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Bus EQ."
+        },
+        {
+         "s": "",
+         "t": " Every bus in the Audio Mixer has an "
+        },
+        {
+         "s": "b",
+         "t": "EQ"
+        },
+        {
+         "s": "",
+         "t": " button with the same bands and graph. It shapes everything the bus plays, after the sounds on it are mixed. It is heard at once, saved with the project, and used by the exported game."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The order a sound passes through:"
+        }
+       ]
+      },
+      {
+       "k": "flow",
+       "steps": [
+        {
+         "label": "Clip",
+         "sub": "samples, trim, volume curve, clip EQ"
+        },
+        {
+         "label": "Source",
+         "sub": "volume, pitch, 3D position"
+        },
+        {
+         "label": "Bus",
+         "sub": "fader, mute/solo, then bus EQ"
+        },
+        {
+         "label": "Master",
+         "sub": "master volume, output"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A clip or a bus whose EQ is off or flat gets no filter at all, so it costs nothing and sounds bit-for-bit as before. Clip EQ, bus and curve are edits like the trim: undoable, saved with the asset, samples untouched."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Route and shape",
+     "id": "audio-bus-eq",
+     "text": "Bus. The Bus drop-down in the Audio Editor toolbar picks the Audio Mixer bus the clip plays through, wherever the game plays it, so that bus's fader, mute and solo apply to it. The list is the project's own, the one Window » Audio Mixer edits. Which bus a sound ends up on: the Bus field of the Audio Source that plays it, if set; otherwise the bus given to the clip in the Audio Editor; otherwise Master. A bus that has since been removed or renamed in the mixer is skipped. The drop-down shows it as missing, the sound plays on the next choice down the list, never silent, and the log says so. The name is kept, so the clip finds the bus again if it comes back. The preview in the tab plays through the same bus. EQ. Show EQ opens the clip's equaliser under the waveform: the summed response (20 Hz to 20 kHz, -18 to +18 dB) and one row per band. Up to eight bands, each a Bell, Low Shelf, High Shelf, Low Pass or High Pass, with frequency (10 Hz–22 kHz), gain (-24 to +24 dB, not for the pass filters) and Q. Add Band adds a bell at 0 dB, which changes nothing until you move it. On the graph, drag a numbered handle to move frequency and gain, use the wheel over it for Q, right-click it to remove it, and double-click an empty spot to add a bell there. EQ On switches the whole EQ in or out without losing the bands, the quickest A/B. A shaded part on the right lies above the clip's Nyquist frequency (half its sample rate), where it holds nothing to shape. Bus EQ. Every bus in the Audio Mixer has an EQ button with the same bands and graph. It shapes everything the bus plays, after the sounds on it are mixed. It is heard at once, saved with the project, and used by the exported game. The order a sound passes through: Clip samples, trim, volume curve, clip EQ Source volume, pitch, 3D position Bus fader, mute/solo, then bus EQ Master master volume, output A clip or a bus whose EQ is off or flat gets no filter at all, so it costs nothing and sounds bit-for-bit as before. Clip EQ, bus and curve are edits like the trim: undoable, saved with the asset, samples untouched.",
+     "title": "Mixer Bus & EQ"
     },
     {
      "blocks": [
