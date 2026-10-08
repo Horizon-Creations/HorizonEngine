@@ -274,8 +274,9 @@ Weggelassen, weil Texel-Detail, das ein Reflexionstreffer nicht zeigen kann: die
 selbst, Bombing, das Fbm der Erdflecken und Pfützen, der Height-Blend jeder Kante. In beiden
 Metal-Kerneln steht der Landscape-Aufruf jetzt **hinter** der Normalen-Berechnung (vorher
 davor, die Normale gab es dort noch nicht). Metal HW ohne Mesh-Daten (`P.extra.y = 0`) hat
-als Normale nur `−rd`, die Steigung ist dann geraten; im Zeugen ist die Mesh-Daten-Normale
-aktiv.
+als Normale nur `−rd`, die Steigung ist dann geraten. Dass im Zeugen die echte Normale
+greift, ist nur indirekt belegt: HW (Vertex-Normale) und SW (Dreiecksnormale) liefern
+pixelgleiche Spiegelfarben, mit `−rd` wäre der HW-Spiegel anders.
 
 **Unverändert:** das Rasterbild jedes Auto-Materials (kein Shader angefasst), der
 DDGI-Bounce (flache Instanzfarbe, weiterhin weiß für das Auto-Material, siehe unten),
@@ -318,6 +319,18 @@ Pfützenanteil 0,20.
 ![Nachher mit GI-Diffus](gi-reflexionen-ursache-2026-10-08/AL1-Metal-r1gi-autoland.png)
 
 Vorher-Bild: `AL1-Metal-r1-himmel.png` (§6, gleiche md5 383f10d4).
+
+**GI-Diffus an, Reflexionen aus** (das „normale Rendering“ mit GI): Hier tragen die Chunks
+der Auto-Landschaft jetzt einen Landscape-Index in die Instanz-Arrays, den aber kein Probe-
+oder Schattenkernel liest (`kGIProbeMSL`, `kGIShadowMSL`, `giProbeUpdateSw`, `kGiProbeCS`,
+`kGiShadowCS` greppt). Per md5 lässt sich das nicht belegen: Mit `GI=1` sind schon zwei
+gleiche Läufe nicht bitgleich (je ≤ 1 LSB, 0 Pixel > 2). An vs. `HE_GIREFL_AUTOLAND=0`
+unterscheidet sich genauso: mittlere Abweichung 0,016 bzw. 0,024, max. 1 LSB, also im
+Lauf-zu-Lauf-Rauschen.
+
+Bekannte Grenze: Ein gepacktes Asset trägt nur `graphTextureIds`, keine Pfade. Dann nimmt
+die Erkennung Slot 0 (die Konvention des Builders, heTexP0 = Albedo). Eine Kopie mit
+umsortierten Texturslots würde im gepackten Spiel das falsche Array mitteln.
 
 **Der gespiegelte Hang ist dunkler als der direkt gesehene** (direkt 33,47,75 im Kasten
 x 980–1100, y 150–300; gespiegelt 21,24,34). Das ist Beleuchtung, nicht Albedo: Der Hang
