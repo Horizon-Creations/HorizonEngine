@@ -1709,6 +1709,8 @@ Auf diesem Gerät nicht lauffähig, also **nicht gerendert**. Rezept auf NN-WS03
 Neulinken des Editors neu, §14.5). Die Metal-/GL-Zahlen aus §15.2 sind die Vergleichswerte.
 Mips sind hier kein Hindernis: D3D und Vulkan erzeugen für `mipLevels = 1` keine Kette selbst, aber
 die drei Arrays, die das Auto-Material liest, tragen 12 gebackene Mips (§14.3).
+**Erledigt in Schritt 4 (§17):** auf NN-WS03 nicht übertragen, sondern aus denselben
+Poly-Haven-Quellen neu erzeugt (md5-gleich) und gerendert — stimmt mit OpenGL/Metal überein.
 
 ## 16. Pfützen als Overlay statt WetGround-Schicht (Thema 177, Schritt 3)
 
@@ -1794,19 +1796,128 @@ GL-Forward-Schattens bei Graph-Materialien.)
 
 ### 16.5 Was offen bleibt
 
-- **D3D11/D3D12/Vulkan** nicht gerendert (Schritt 4). Die neuen Knoten sind Standardknoten
-  (Multiply/Lerp/Split auf vorhandenen Werten), der Shadertext wird wie bisher nur durch die
-  Cross-Compile-Tests geprüft; ein Compile-Fehler wäre dort schon aufgefallen, bildgleich ist es
-  damit nicht belegt.
+- ~~**D3D11/D3D12/Vulkan** nicht gerendert (Schritt 4).~~ Erledigt: §17, bildgleich zu OpenGL
+  innerhalb der Toleranz aus §7.5.
 - Slice 4 aus den Arrays nehmen: Id-Verschiebung (§16.2), neue Arrays und neue Platzhalter-
   Assets, `HE_DUMP_TEXARRAY`/`HE_DUMP_TEXBOMB` (fünf Streifen) und die `ana158*`-Skripte anpassen.
   Lohnt sich erst zusammen mit der Wahl der Kompression (BC7, §8.5).
 - Die Wasserfarbe hängt weiter vom Himmel (§15.2), die Faktoren (0,6 / 0,5 / 0,35) sind ungetunt.
 
-### 16.6 Nebenbefund: das „flackernde“ `bmp=NO` von `cap158auto.sh`
+### 16.6 Nebenbefund: das „flackernde” `bmp=NO` von `cap158auto.sh`
 
 Die leere Aufnahme mit 0-Byte-Log (§15.1, Hive-Lesson 132) hat eine feste Ursache: `script(1)` endet
 mit Code 1, wenn stdin der von einem Agent-Harness vererbte Deskriptor ist. Mit `</dev/null` am
 `script`-Aufruf läuft jede Aufnahme; das Skript tut das jetzt. (Ohne die Umleitung schlugen hier alle
 fünf Wiederholungen in Folge fehl, mit ihr gelangen alle 15 Aufnahmen dieses Schritts beim ersten Versuch.)
+
+## 17. Schritt 4: D3D11, D3D12 und Vulkan (Thema 177)
+
+Stand: derselbe Zweig, NN-WS03 (NVIDIA RTX 4070, Windows 11), Release-Build von `HorizonEditor` und
+`landscape_tex_gen` in einem eigenen Baum `C:/hw177` (`-DDEPLOY_DIR=C:/hw177/deploy`, damit der
+Worktree-Build nicht das Deploy berührt, das der Mensch gerade im Editor laufen hat). Es ist kein
+Engine-Code geändert. Rezept: §11.4 mit `cap158auto.ps1`.
+
+### 17.1 Die echten Texturen unabhängig neu erzeugt, nicht übertragen
+
+Die 560 MiB aus `out/landscape-real` (§14.3) liegen nur auf dem Mac, nicht in git und nicht auf
+diesem Gerät. Statt sie zu übertragen: dieselben 16 Poly-Haven-Dateien aus §14.1 direkt über die
+`api.polyhaven.com/files/<id>`-URLs neu heruntergeladen (4K, dieselben Formate: Diffuse jpg, `nor_gl`
+exr, Rough exr bei Grass/Dirt und jpg bei Rock/Snow, Displacement png). **16/16 md5-gleich** zu den
+Werten, die `api.polyhaven.com` für diese Dateien meldet — also byteidentisch zu den Quellen, die
+Schritt 1 auf dem Mac benutzt hat. `stage_polyhaven.py` (eigene venv, `OpenEXR` hat für Python 3.14
+auf Windows ein fertiges Wheel, keine Sonderbehandlung nötig) lieferte dieselben Kennzahlen wie
+§14.4: Normal-Renormierung vor der Mittelung 0,874/0,980/0,981/1,018 (Grass/Dirt/Rock/Snow, Doku
+„0,87 bis 1,02”), Höhen-Streckung 0,166..0,581 (Grass, Doku „0,17..0,58”) und 0,322..0,918 (Rock,
+Doku „0,32..0,92”). `landscape_tex_gen --pack` (Variante **ohne AO**, wie die `real`-Basiswerte aus
+§15.2, nicht `realao`: die AO-Frage ist weiter offen, §15.5) schrieb 15/15 Einzeltexturen und 3/3
+Arrays, UUIDs `0x40F..0x411`, 2048², 5 Slices, 12 Mips — bitgenau wie §14.3. Gegenprobe mit
+`hasset_tex.py`: Mittel der Albedo-Slices Grass (109,9/96,3/61,9), Dirt (99,0/82,2/62,2), Snow
+(165,3/165,2/167,2) — alle drei stimmen mit §14.4 überein (Grass „110/96/62”, Dirt „99/82/62”,
+Snow „165”). Die 18 `.hasset`-Dateien ersetzten die Platzhalter in `C:/hw177/deploy/Editor/
+EngineContent/Textures/Landscape/` (die Arrays dort danach 107 MiB statt 437 KB, geprüft). Der
+Build enthält den Zeugen (`findstr “AUTOLAND witness” HorizonEditor.exe` trifft).
+
+### 17.2 Aufnahmen
+
+`cap158auto.ps1 -Backends OpenGL,D3D11,D3D12,Vulkan`, Modi `masks ground normal surface` (je einmal)
+und `1 nobomb plaingraph builtin` (je einmal ohne Zusatz und einmal mit
+`-Extra @{HE_DUMP_SHADOW='0.1'} -Tag _s01`, siehe §11.3/§11.4) — 48 Läufe, dazu ein D3D12-Lauf mit
+`HE_GPU_DEBUG=1` (Debug-Layer + DRED). **Alle 49 Läufe: `bmp=True`, kein `[ERROR]`**, der Zeuge
+meldet durchgehend `3 graph textures, array mask 7` bei Modus `1`/`nobomb` (alle drei Arrays live,
+heTexP0..2) und `14`/`13` Parameter wie in Schritt 3. Vulkan-Validation: in allen 13 Vulkan-Logs
+genau die eine bekannte Info-Zeile `validation layer ENABLED`, sonst nichts (§8.3/§12-Präzedenz).
+
+### 17.3 Masken-Orakel
+
+`ana158auto.py masks` auf `masks`/`ground`, alle vier Backends: **alle 15 Erwartungen erfüllt**,
+auch der Pfützenrand (`wet` auf der Ebene: 22,9 % auf allen vier Backends — exakt der Wert aus
+Schritt 3, §16.3, Metal/GL). D3D11 und D3D12 sind untereinander **md5-gleich**, Vulkan weicht nur in
+Rundungsfehlern ab (siehe §17.5).
+
+### 17.4 Bildvergleich gegen OpenGL — zwei verschiedene Geschichten
+
+**Unlit-Debugansichten** (`masks`, `ground`, `normal`, `surface`, keine Beleuchtung im Spiel):
+mean|Δ| 2,8 / 3,2 / 0,001 / 1,33, **0,000 % Pixel > 8** auf allen drei Backends. Das ist derselbe
+feste Schwarzpegel-Versatz (0 → 4 von 255), den §12 für die alten Platzhalter-Texturen schon
+dokumentiert hat, kein neuer Befund und ohne jede Wirkung auf den Pixel-Anteil-Test.
+
+**Modus `1`/`nobomb` mit Standard-Schattendistanz:** mean|Δ| 2,5 / 3,4 insgesamt, aber **konzentriert
+in der Zone `foot`** (74,9 / 78,2 mean|Δ|, 100 % > 8) — das ist §11.3: OpenGL zeichnet im
+Forward-Pfad für Graph-Materialien **keinen** Sonnenschatten, D3D11/D3D12/Vulkan tun es. Kein
+Materialfehler, sondern der bekannte, hier erneut bestätigte Pfadunterschied. Die anderen drei
+Zonen liegen bei 0,00–0,04.
+
+**Modus `1`/`nobomb`, schattenneutralisiert (`_s01`, die eigentliche Materialprobe):**
+
+| Vergleich (D3D11/D3D12/Vulkan gegen OpenGL) | mean\|Δ\| | Pixel > 8 |
+|---|---|---|
+| `1_s01` | 0,005–0,006 | 0,000 % |
+| `nobomb_s01` | 0,004 | 0,000 % |
+| `plaingraph_s01` (Kontrolle) | 0,001 | 0,000 % |
+| `builtin_s01` (Kontrolle, Standardmaterial) | 45,8 | 99,9 % |
+
+`builtin` weicht erwartungsgemäß stark ab (kein Teil dieses Themas, dieselbe Kontrolle wie in §12/§13:
+das eingebaute Terrain-Material behandelt Umgebungslicht auf D3D/Vulkan anders). Für das
+Auto-Material selbst liegt die Abweichung bei 0,004–0,006 — eine Größenordnung unter der
+Toleranz aus §7.5 (mean|Δ| ≤ 1,0, ≤ 0,5 % > 8) und im selben Rauschband wie die
+D3D12-Debug-Layer-Gegenprobe (§17.5). **Die echten Texturen, die drei Arrays und das
+Pfützen-Overlay aus Schritt 3 rendern auf D3D11, D3D12 und Vulkan praktisch bitgleich zu OpenGL.**
+
+### 17.5 Schatten- und Bombing-Orakel, Gegenproben
+
+- **Schatten vorhanden:** `ana158auto.py shadow` bestätigt für Modus `1`/`nobomb`: OpenGL-forward
+  Verhältnis 1,00 (`MISSING`, wie erwartet), D3D11/D3D12/Vulkan 0,37 (Modus `1`) bzw. 0,32
+  (`nobomb`), alle `PRESENT`.
+  **Nachtrag gegenüber §12:** Das Verhältnis 0,37 trifft jetzt genau Metals alten Wert aus §11.2
+  (0,37 forward/deferred), nicht mehr die alten 0,30 aus §12, die vor dem Merge von PR #98
+  (Graph-Material SkyEnv/AO auf Vulkan/D3D11/D3D12) gemessen wurden. PR #98 ist auf diesem Zweig
+  bereits gemergt (siehe Commit-Liste oben); die alte Abweichung „kein Himmels-IBL für
+  Graph-Materialien” aus §12/§13 gilt für diesen Zweig **nicht mehr**.
+- **Bombing-Orakel** (`ana158auto.py repeat`, `1_s01` gegen `nobomb_s01`): mit Bombing keine
+  periodischen Minima (Oszillation 0,03/0,01), ohne Bombing Minima bei 12/25/37 px (Oszillation
+  0,19/0,10) — auf **allen vier Backends identisch**, bis auf die dritte Nachkommastelle.
+- **D3D12 mit `HE_GPU_DEBUG=1`** (Debug-Layer + DRED), Modus `1`: 0 zusätzliche Meldungen, Bild
+  **md5-gleich** zum Lauf ohne Debug-Layer.
+- **D3D11 = D3D12** (md5-gleich) bei `1`, `nobomb` und deren `_s01`-Varianten. Vulkan weicht in
+  Rundungsfehlern ab (eigene md5, mean|Δ| gegen D3D11/D3D12 < 0,01 in allen vier Debug-Modi),
+  derselbe Compiler-Unterschied wie in §7.5/§13.
+
+### 17.6 Was das belegt, was nicht
+
+Belegt: Die echten Poly-Haven-Texturen, die drei Textur-Arrays (`heTexP0..2`, Array-Maske 7, 107 MiB
+je Array mit 12 gebackenen Mips) und das Pfützen-Overlay aus Schritt 3 laden und rendern auf D3D11,
+D3D12 und Vulkan **ohne stillen Rückfall auf eingebautes PBR** (Array-Maske und Parameterzahl im
+Zeugen stimmen durchgehend), ohne Vulkan-Validation-Meldung und ohne D3D12-Debug-Layer-Meldung, und
+stimmen mit OpenGL im Rahmen der Toleranz aus §7.5 überein, sobald der bekannte GL-Forward-Schatten-
+Unterschied (§11.3) herausgerechnet ist. Bombing und Pfützenränder messen auf allen vier Backends
+dieselben Zahlen wie auf Metal/GL in Schritt 2/3 (22,9 % wet, Masken-Erwartungen). CI auf diesem
+Zweig (Lauf 37822782616): **alle vier Jobs grün** (Linux, Linux · Vulkan lavapipe, macOS, Windows).
+
+**Nicht** geprüft: die drei offenen Geschmacksentscheidungen aus §15.5 (Schnee bomben, Fels
+Triplanar/Biplanar, AO übernehmen) — die bleiben für Schritt 4 unverändert offen. Kein Metal auf
+diesem Gerät (siehe §11.2/§13.4 für den Metal-Nachweis mit der alten Platzhalter-Textur; ein
+Metal-Lauf mit den echten Texturen ist bereits in Schritt 2/3 erfolgt). Kein Mip-Flimmern geprüft
+(der Draufsicht-Zeuge löst Minifikation in der Ferne nicht auf; die Arrays backen ihre eigene
+Mip-Kette, unabhängig vom Backend, §8.1/§15.6). Leistung/GPU-Speicher mit den 2K-Arrays weiter nicht
+gemessen (§15.4).
 
