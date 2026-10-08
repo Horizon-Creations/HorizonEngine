@@ -167,3 +167,126 @@ export, and where it is pinned (`tests/test_engine_weather_sounds.cpp`):
   publish scan, the registry and the pak all skip it; the Content Browser shows it
   as a loose file beside the sounds.
 
+## CI credentials across platforms (Thema 167 step 4)
+
+`.github/workflows/ci.yml` passes the `HE_ENGINE_CONTENT_HOST/USER/PASSWORD`
+repository secrets as environment variables (never `-D`, see the comment at
+`src/HE_ContentSync/CMakeLists.txt:59`) into whichever `Configure` step builds a
+target that links `HorizonContentSync`. Two different questions, checked
+separately, because the configure-time log line only answers the first one:
+
+1. **Do the credentials reach the compile definitions** of whatever links
+   `HorizonContentSync`? Witnessed yes on macOS, Linux and Windows; the lavapipe
+   fix below is expected to make it yes there too, but no completed run has
+   shown that line yet (the dispatch at the end of this step will be the
+   witness — check the newest run on this branch, not the ones linked here).
+   Verified by reading two completed runs' job logs directly
+   (`gh api .../actions/jobs/<id>/logs`, grepped for the line below — not taken
+   on faith from an earlier survey):
+   - A green push run on `main`, 2026-10-08 08:56
+     (`https://github.com/Horizon-Creations/HorizonEngine/actions/runs/37753155172`):
+     macOS, Linux and Windows (all hosted runners) each log
+     `HorizonContentSync: EngineContent endpoint ***@***:22` once, from the main
+     `Configure (<platform>)` step.
+   - A push run on `release/0.7.0`, 2026-10-08 14:50
+     (`.../actions/runs/37795709487`, overall `failure` on an unrelated build
+     break, but every `Configure` step itself succeeded): same line on macOS,
+     Linux, Windows; the **lavapipe** job instead logs
+     `HorizonContentSync: EngineContent endpoint not configured — the remote
+     library stays off` (job conclusion: `success` — no credentials is not an
+     error, the build just proceeds with the feature off) — the negative
+     control for the gap this step closes (its `Configure` step had no `env:`
+     block; fixed by adding the same three lines the three matrix jobs already
+     had). This is also the witnessed instance of point 6's "no secrets" case
+     below, not a hypothetical.
+2. **Does the sync actually run** — does any CI job make a live SFTP connection
+   or fetch an asset? **No, on every job, regardless of credentials.** Traced
+   through the code, not just inferred from logs. Two ways a sync can start:
+   - **Automatically at startup**: `EditorApplication::startSftpProbe()`
+     (`EditorApplication.cpp:2074`), called once from `OnInit()` — but guarded
+     by `if (m_dumpPath.empty())` (`:1967`), and `m_dumpPath` is set whenever
+     `HE_DUMP_PATH` is in the environment (`:818`). No CI job ever launches
+     `HorizonEditor` without `HE_DUMP_PATH` set: the only job that runs the
+     real binary at all is Linux · Vulkan (lavapipe), through
+     `scripts/he_vk_imagetests.py`, which sets `HE_DUMP_PATH` for every single
+     invocation (headless frame dump, one BMP per shot) — so `startSftpProbe()`,
+     along with the toolchain/git/router probes next to it, never fires there
+     either. The matrix jobs never launch the editor binary at all — checked
+     every `add_test()` in `tests/CMakeLists.txt`: `he_tests` itself doesn't
+     compile `EditorApplication.cpp` (no `ContentSync` doctest exists to need
+     it), `editor_help_audit` and `test_he_mcp.py` read source/fake a socket
+     without an editor process, and the `runtime_size*` cases only stat files
+     on disk.
+   - **Manually, from a button**: `refreshEngineContentManifest()`
+     (`:2163`, which is what encloses the `refreshManifestBlocking()` call at
+     `:2174`) and `publishEngineContentBlocking` both run only after the user
+     clicks "Publish Engine Content" or "Rebuild Manifest from Server"
+     (`EditorUI.cpp`'s `EngineContentSyncBar` only draws the footer's queue
+     status, it triggers nothing itself) — no CI job clicks a button.
+
+   So the configured endpoint line proves the credentials are compiled in, not
+   that anything was fetched — there is no "assets fetched" log line to show
+   from any CI run, on any platform, because no CI job exercises either code
+   path above. Out of scope for this step to change (it would mean adding a
+   real runtime check that opens a real network connection from CI, which is a
+   product/ops decision for whoever runs the EngineContent server, not a
+   build-credentials fix).
+3. **A secondary, harmless source of "not configured" lines**: on a push, each
+   matrix job's "Build the two app runtimes" step calls
+   `scripts/build_runtimes.py`, which runs `cmake -B <tree>` again for the
+   `app-advanced` and `app-basic` flavours — fresh build trees, and the
+   step has no `env:` block of its own (a step's `env:` does not carry over to
+   a later step). Confirmed in the same green `main` run: Linux, macOS and
+   Windows each log the real endpoint once (the main `Configure` step) and then
+   `... not configured` twice more (the two flavour configures). Harmless,
+   because `HorizonGame` (what every flavour actually builds) never links
+   `HorizonContentSync` — see point 4 — but worth naming here so the repeated
+   "not configured" lines inside an otherwise-credentialed job don't look like
+   a bug to the next person reading the log.
+4. **Runtime flavours** (`runtime-flavors.yml`) needs no credentials at all:
+   `build_runtimes.py` runs `cmake --build --target HorizonGame` specifically,
+   never `all`; `HorizonGame` does not depend on `HorizonContentSync` (editor-only;
+   `add_subdirectory(src/HE_ContentSync)` is still configured into the tree, but
+   Ninja never builds a target nothing asked for). `claude.yml` doesn't configure
+   or build the engine at all, so it is out of scope too.
+5. **The self-hosted Windows path (NN-WS03) was not witnessed.** Both runs
+   checked above, and the in-progress run this branch already had at the start
+   of this step (`.../actions/runs/37820790573`), ran `Windows` on the hosted
+   `windows-latest` runner (`gh api .../jobs/<id> --jq .runner_name/.labels`) —
+   two because they were `push` events (the runner condition requires
+   `github.event_name != 'push'` for self-hosted), the third because the Hive
+   had `vars.WINDOWS_RUNNER` pointed back at the hosted runner while NN-WS03 was
+   busy with other bees. The Windows job is the same job either way — same
+   `Configure (Windows)` step, same three secrets — so there is no separate code
+   path to fix, only a runner to land on while it's free; this is a "not
+   witnessed yet", not an open gap.
+6. **A fork pull request gets no secrets at all** (GitHub policy, not something
+   this repository configures): `secrets.ENGINE_CONTENT_HOST` etc. evaluate to
+   empty strings for a fork PR, so `HE_ENGINE_CONTENT_HOST`/`_USER`/`_PASSWORD`
+   reach the environment as set-but-empty — the `CMakeLists.txt` block treats
+   that exactly like an unset variable or a clone with no local
+   `cmake/EngineContentCredentials.cmake`: host and user stay empty, the
+   configure log says "not configured" (`message(STATUS ...)`, not an error),
+   and the build proceeds. Not separately witnessed this step (no fork PR
+   exists on this repository to point at), but it is the same CMake branch as
+   the lavapipe job in `37795709487` above (point 1) — a real, witnessed,
+   green "no credentials" run, not just a hypothetical.
+7. **Release/packaging steps** (`Package Windows editor` / `Package macOS
+   editor (DMG)` / `Package Linux editor`, and `Stage the app runtimes into the
+   editor package`) are not separate `Configure` calls — they zip/tar/dmg
+   whatever the one credentialed build tree above already produced, so
+   whatever that job logged for the endpoint is what the uploaded editor
+   artifact was built from. `Package Windows editor` is additionally gated on
+   `runner.environment != 'self-hosted'` (NN-WS03 keeps its incremental
+   `package/` instead of zipping it), which is orthogonal to credentials — the
+   `Configure (Windows)` step upstream runs either way. The staged app runtimes
+   (point 3) need no credentials, same reasoning as point 4.
+
+Why the lavapipe job got the `env:` block added rather than a "this is
+intentional" note: the job already builds `HorizonEditor` (for the image
+tests), so it already links `HorizonContentSync` — leaving the block out bought
+nothing, and made the one job's configure log read "not configured" next to
+three jobs reading the real endpoint, which is exactly the kind of asymmetry
+this step was asked to find. Per point 2, it changes nothing the image tests
+actually do.
+
