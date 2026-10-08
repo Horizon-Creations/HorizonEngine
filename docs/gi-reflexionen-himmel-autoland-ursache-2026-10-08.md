@@ -241,3 +241,105 @@ Vorher/nachher an EINEM Binary: `HE_GIREFL_SKY=0` stellt das alte Verhalten bitg
 `glslangValidator -S comp` (`#version 430 core` + `kGiTraversalGLSL` + `kGiReflCS`), C++ baut.
 Einen Laufzeittest für GI-Reflexionen gibt es weder in `tests/` noch in `.github/`, die CI
 übersetzt den GL-Pfad also nur, sie führt ihn nicht aus.
+
+## 7. Schritt 3: Auto-Landschaftsmaterial im Treffer (umgesetzt)
+
+Commit `f37c8542`. Die Landscape-Geometrie war schon in TLAS und SW-BVH (§1), es fehlte nur
+die Farbe. Umgesetzt ist der Vorschlag aus §5: eine Beschreibung pro Auto-Landscape, die
+der Kernel am Trefferpunkt auswertet.
+
+**Eintrag in der GI-Landscape-Tabelle.** `HE::GiLandscape` (`GiLandscape.h`) kennt jetzt
+eine zweite Art Eintrag, `layerCount = kGiLandAuto` (−1, im Kernel `cfg.w < 0`):
+
+- `layerColor[0..3]` = Mittelfarbe der Slices Grass, Dirt, Rock, Snow, `autoWet.rgb` = Wet
+  Ground × 0,675 (halb Rand, halb Wasser, das der Graph auf 0,35 abdunkelt). Gerechnet in
+  `GiAutoLandscape.cpp` aus der kleinsten Mip ≤ 16×16 des Albedo-Arrays, **sRGB-dekodiert**
+  (linear wie jede andere Kernel-Albedo). Das sind ein paar hundert Texel pro Slice, darum
+  jedes Frame neu und ohne Cache (ein reimportiertes Array ist nie veraltet).
+- `autoSlope`, `autoSnow`, `autoWet.w` = die Masken-Parameter Rock Slope/Blend, Dirt Amount,
+  Snow Height/Blend/Max Slope, Puddle Max Slope und der Pfützenanteil aus Puddle Amount
+  (laut Parameterbeschreibung 0,32 ≈ 1/5, 0,5 ≈ halb, also `(amount − 0,2) / 0,6`). Live
+  gelesen: Slot-Wert des Assets (eine Instanz trägt die volle Slot-Liste des Eltern-Assets
+  mit ihren Overrides), davor der Per-Entity-Override der Landscape-Entity.
+- Erkannt wird das Material an seinen **Parameternamen** (`kAutoLandscapeParam*`) plus dem
+  Albedo-Array unter seinen Graph-Texturen, nicht an der UUID: Instanzen und Kopien von
+  `M_AutoLandscape` zählen mit.
+
+**Kernel** (Metal HW `kGIReflMSL`, Metal SW `kGISWMSL`, GL `kGiReflCS`, je eine Kopie von
+`HE::giAutoLandscapeAlbedo`): Steigung `1 − N.y` aus der Treffer-Normalen, Welthöhe aus dem
+Trefferpunkt, dann die Stufen des Graphen in seiner Reihenfolge: Boden (Gras ← Erde, Erde
+als Erwartungsanteil Dirt Amount plus Geröllgürtel unter dem Felshang) → Fels → Schnee (über
+der Schneehöhe, nicht an Klippen) → Pfützen (Anteil nur auf flachem Boden ohne Schnee).
+Weggelassen, weil Texel-Detail, das ein Reflexionstreffer nicht zeigen kann: die Texturen
+selbst, Bombing, das Fbm der Erdflecken und Pfützen, der Height-Blend jeder Kante. In beiden
+Metal-Kerneln steht der Landscape-Aufruf jetzt **hinter** der Normalen-Berechnung (vorher
+davor, die Normale gab es dort noch nicht). Metal HW ohne Mesh-Daten (`P.extra.y = 0`) hat
+als Normale nur `−rd`, die Steigung ist dann geraten; im Zeugen ist die Mesh-Daten-Normale
+aktiv.
+
+**Unverändert:** das Rasterbild jedes Auto-Materials (kein Shader angefasst), der
+DDGI-Bounce (flache Instanzfarbe, weiterhin weiß für das Auto-Material, siehe unten),
+D3D11/D3D12/Vulkan (lesen die Tabelle nicht). `HE_GIREFL_AUTOLAND=0` schaltet den Eintrag ab
+und stellt das alte Verhalten bitgenau her.
+
+**Messung (Metal, Zeuge §2, `ana173sky.py`, gleiche Kommandos wie §2):**
+
+| Lauf | md5 vorher (Deploy von `d18a8781`) | md5 nachher |
+|---|---|---|
+| `r0` GIRefl aus | ce9749e7… | ce9749e7… (gleich) |
+| `builtin` GIRefl an | a30a88f1… | a30a88f1… (gleich) |
+| `r1` HW, `HE_GIREFL_AUTOLAND=0` | 383f10d4… | 383f10d4… (gleich) |
+| `r1sw` SW, `HE_GIREFL_AUTOLAND=0` | 7a942aa9… | 7a942aa9… (gleich) |
+| `r1` HW | 383f10d4… | 2e3d49f2… |
+| `r1sw` SW-BVH | 7a942aa9… | 71ea0364… |
+| `r1def` deferred | 463ce390… | 0c26a78d… |
+
+| Lauf | Spiegel vorn, unten (Ebene) | gegiert, unten (Ebene) | gegiert, oben (Hang) |
+|---|---|---|---|
+| vorher `r1` | 239,240,240 | 239,240,240 | 78,85,108 |
+| nachher `r1` HW | **103,143,53** | **103,143,53** | 21,24,34 |
+| nachher `r1sw` SW | 103,143,53 | 103,143,53 | 21,24,34 |
+| nachher `r1def` deferred | 109,143,59 | 112,144,60 | 52,60,58 |
+| nachher `r1` + GI-Diffus an | 119,159,62 | 119,159,62 | 18,21,29 |
+| nachher `r1` + GI-Diffus, `HE_GIREFL_AUTOLAND=0` | 244,244,244 | 243,244,244 | 67,73,94 |
+
+Kästen statt Punkte (`r1`): direkt gesehene Ebene (y 450–720) im Mittel 136,140,68, ihr
+Spiegelbild (vorn, x 500–780, y 345–400) 102,142,53; gleicher Farbton, im Spiegel etwas
+weniger Erdbraun (der Vordergrund liegt zufällig auf einem großen Erdfleck). Zwischen Hang
+und Ebene zeigt der gegierte Spiegel einen dunkelbraunen Streifen (20,15,12): der
+Geröllgürtel am Hangfuß.
+
+Zahlen-Orakel aus dem Log (`HE_DUMP_AUTOLANDMIRROR ... GI auto entry`): Gras 0,056 0,199 0,026,
+Erde 0,145 0,073 0,028, Fels 0,152 0,167 0,192, Schnee 0,607 0,634 0,671 (linear), Fels
+0,12 + 0,12, Erde 0,35, Schnee y 320 + 6 (der Instanz-Override des Zeugen kommt an),
+Pfützenanteil 0,20.
+
+![Nachher: Auto-Landschaft im Spiegel](gi-reflexionen-ursache-2026-10-08/AL1-Metal-r1-autoland.png)
+![Nachher mit GI-Diffus](gi-reflexionen-ursache-2026-10-08/AL1-Metal-r1gi-autoland.png)
+
+Vorher-Bild: `AL1-Metal-r1-himmel.png` (§6, gleiche md5 383f10d4).
+
+**Der gespiegelte Hang ist dunkler als der direkt gesehene** (direkt 33,47,75 im Kasten
+x 980–1100, y 150–300; gespiegelt 21,24,34). Das ist Beleuchtung, nicht Albedo: Der Hang
+liegt im Zeugen außerhalb der Sonne, direkt bekommt er das Himmels-IBL (daher blau), ein
+GI-Treffer nur Sonne × Sichtbarkeit, den Ambient-Boden und mit GI-Diffus die Probe-
+Irradiance (§3). Mit weißer Albedo war derselbe Hang 78,85,108, die Felsfarbe (≈ 0,16 linear)
+dunkelt ihn also im richtigen Verhältnis ab. Schnee ist im Spiegel nicht zu sehen, weil die
+Strahlen des gegierten Spiegels (y ≈ 304–308) den Hang unterhalb der Schneegrenze (y 320)
+treffen. Die Schnee-Stufe belegt der Unit-Test.
+
+**Tests:** `test_culling.cpp`, drei neue Fälle: Referenzformel (Gras flach/tief, Fels steil,
+Geröllgürtel, Schnee hoch/flach, Klippe hoch/steil = Fels, Dirt-Anteil, Pfützen nur flach),
+Erkennung + Parameter + Override + sRGB-Mittel an einem handgebauten Material und Array,
+und ein Pin, dass die drei Kernel-Kopien die Masken-Terme der Referenz tragen und die
+Normale übergeben. `he_tests` über alle 24 Testdateien mit Extraktor/Terrain: 587 Fälle grün.
+
+**OpenGL:** auf dem Mac nicht lauffähig (§4.4). Geprüft: `kGiReflCS`, `kGiProbeCS`,
+`kGiShadowCS` jeweils mit `kGiTraversalGLSL` (der `GiLand`-Struct ist gewachsen) per
+`glslangValidator -S comp`, C++ baut. Laufzeit erst in Linux-/Windows-CI, und auch dort nur
+übersetzt (kein GI-Reflexionstest).
+
+**Offen (für die Queen):** Der DDGI-Bounce der Auto-Landschaft ist weiterhin weiß (flache
+Instanzfarbe aus `giInstanceSurface`, Fold = 1,1,1). Ihn auf die Terrain-Mittelfarbe zu
+setzen würde das Bild mit GI-Diffus an verändern und gehört nicht in diesen Schritt
+("bestehende Auto-Materialien dürfen sich im normalen Rendering nicht ändern").
