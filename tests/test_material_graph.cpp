@@ -3517,6 +3517,61 @@ TEST_CASE("Export bake: every backend carries the clustered twin, GL as a linkin
 	}
 }
 
+TEST_CASE("Deferred resolve HLSL registers stay inside SM 5.0's bindable range (Thema 150)")
+{
+	// docs/deferred-renderer-plan.md §10.4. Unpinned, SPIRV-Cross put the
+	// G-buffer on s19..s22, the preamble's 16..18/31..33 samplers on s16+ and
+	// HeResolve on b23 — FXC rejects that (X4509) and D3D11/D3D12 would silently
+	// stay forward. This is the net on the emitted text for macOS/Linux; the FXC
+	// and WARP cases below are the proof on Windows.
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	MSL lib;
+	const MSL::Compiled& plain = lib.deferredResolve(B::HLSL);
+	const MSL::Compiled& clus  = lib.deferredResolveClustered(B::HLSL);
+	REQUIRE_MESSAGE(plain.ok, plain.log);
+	REQUIRE_MESSAGE(clus.ok, clus.log);
+	auto reg = [](char k, int n) { return "register(" + std::string(1, k) + std::to_string(n) + ")"; };
+	for (const std::string* ps : { &plain.source, &clus.source })
+	{
+		CHECK(ps->find(reg('b', MSL::kHlslResolveUboReg)) != std::string::npos);  // HeResolve
+		CHECK(ps->find(reg('b', 0)) != std::string::npos);                         // HeLighting
+		CHECK(ps->find(reg('t', MSL::kHlslResolveGB0Reg))   != std::string::npos);
+		CHECK(ps->find(reg('s', MSL::kHlslResolveGB0Sampler)) != std::string::npos);
+		CHECK(ps->find(reg('t', MSL::kHlslResolveGB1Reg))   != std::string::npos);
+		CHECK(ps->find(reg('s', MSL::kHlslResolveGB1Sampler)) != std::string::npos);
+		CHECK(ps->find(reg('t', MSL::kHlslResolveGB2Reg))   != std::string::npos);
+		CHECK(ps->find(reg('s', MSL::kHlslResolveGB2Sampler)) != std::string::npos);
+		CHECK(ps->find(reg('t', MSL::kHlslResolveDepthReg)) != std::string::npos);
+		CHECK(ps->find(reg('s', MSL::kHlslResolveDepthSampler)) != std::string::npos);
+		// The canonical numbers are gone, every sampler and cbuffer register exists.
+		CHECK(ps->find("register(b23)") == std::string::npos);
+		CHECK_MESSAGE(maxRegister(*ps, 's') <= 15, "a resolve sampler past s15: s", maxRegister(*ps, 's'));
+		CHECK_MESSAGE(maxRegister(*ps, 'b') <= 13, "a resolve cbuffer past b13: b", maxRegister(*ps, 'b'));
+		CHECK_FALSE_MESSAGE(twoLiveSamplersShareRegister(*ps), "two live samplers on one register (FXC X4500)");
+		// The G-buffer keeps clear of the built-in scene shader's structured
+		// cluster lists (t18..t20) — a view left there would be read as a grid.
+		for (int t : { 19, 20, 21, 22 })
+			CHECK_MESSAGE(ps->find(reg('t', t)) == std::string::npos, "the resolve binds t", t);
+	}
+	// The cluster lists only in the clustered variant, as raw buffers on t24..t26.
+	for (int t : { 24, 25, 26 })
+	{
+		CHECK(clus.source.find(reg('t', t)) != std::string::npos);
+		CHECK(plain.source.find(reg('t', t)) == std::string::npos);
+	}
+	CHECK(clus.source.find("ByteAddressBuffer") != std::string::npos);
+
+	// The variant gates: tile is Metal-only, GL 4.1 has no SSBO for the
+	// clustered one, Vulkan gets it with the canonical bindings (step 4).
+	CHECK_FALSE(lib.deferredResolveTile(B::HLSL).ok);
+	CHECK_FALSE(lib.deferredResolveClustered(B::GLSL410).ok);
+	CHECK(lib.deferredResolve(B::GLSL410).ok);
+	const MSL::Compiled& vkClus = lib.deferredResolveClustered(B::SpirV);
+	CHECK_MESSAGE(vkClus.ok, vkClus.log);
+	CHECK(lib.fullscreenVertex(B::HLSL).ok);
+}
+
 #if defined(_WIN32)
 TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile it")
 {
@@ -5106,6 +5161,421 @@ TEST_CASE("D3D11: a clustered graph material is lit by cluster lights beyond the
 	const Pixel11 fallback = draw(clusterPS.Get(), redWindow.Get(), "clustered PS, gate off, red window light");
 	CHECK_MESSAGE((near8(fallback.r, ref.r, 1) && fallback.g < 4 && fallback.b < 4),
 	              "gate 0 should shade the window like fragment(): ", int(fallback.r), " vs ", int(ref.r));
+}
+
+TEST_CASE("D3D11: G-buffer + deferred resolve shade a graph material like its forward draw (WARP, Thema 150)")
+{
+	// The P4 gate of docs/deferred-renderer-plan.md on a software device: the
+	// SAME graph drawn (a) forward through fragment() and (b) through its
+	// G-buffer tail into the renderer's three targets + typeless depth, then
+	// lit by deferredResolve over a fullscreen triangle — with the D3D11
+	// renderer's registers (kHlslResolve*) and depth convention (-1, 1, 0).
+	// 8x8 and a TILTED triangle under an off-centre point light, so every pixel
+	// has its own world position: a wrong uv→NDC sign or depth scale moves P
+	// and changes the light falloff (negative control 1). Then the clustered
+	// resolve against the clustered forward variant with 12 list lights, four
+	// of them lit, past an 8-light window of black ones.
+	using Microsoft::WRL::ComPtr;
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	MESSAGE(w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+	constexpr UINT kW = 8, kH = 8;
+
+	// ── Shaders, through FXC as the renderer compiles them.
+	MSL lib;
+	const auto gen = HE::generateFragment(plainColourGraph());
+	REQUIRE_FALSE(gen.glslGBuffer.empty());
+	const uint64_t fwdHash = std::hash<std::string>{}(gen.glsl);
+	const uint64_t gbHash  = std::hash<std::string>{}(gen.glslGBuffer);
+	auto blobOf = [&](const MSL::Compiled& c, const char* profile, const char* what) {
+		std::string err;
+		REQUIRE_MESSAGE(c.ok, what, ": ", c.log);
+		ComPtr<ID3DBlob> b = fxcBlob(c.source, profile, err);
+		REQUIRE_MESSAGE(b.Get() != nullptr, what, ": ", err);
+		return b;
+	};
+	ComPtr<ID3DBlob> vsB    = blobOf(lib.standardVertex(B::HLSL), "vs_5_0", "standard vertex");
+	ComPtr<ID3DBlob> fwdB   = blobOf(lib.fragment(fwdHash, gen.glsl, B::HLSL), "ps_5_0", "forward fragment");
+	ComPtr<ID3DBlob> fwdClB = blobOf(lib.fragmentClustered(fwdHash, gen.glsl, B::HLSL), "ps_5_0", "forward clustered fragment");
+	ComPtr<ID3DBlob> gbB    = blobOf(lib.fragment(gbHash, gen.glslGBuffer, B::HLSL), "ps_5_0", "G-buffer fragment");
+	ComPtr<ID3DBlob> fsB    = blobOf(lib.fullscreenVertex(B::HLSL), "vs_5_0", "fullscreen vertex");
+	ComPtr<ID3DBlob> resB   = blobOf(lib.deferredResolve(B::HLSL), "ps_5_0", "deferred resolve");
+	ComPtr<ID3DBlob> resClB = blobOf(lib.deferredResolveClustered(B::HLSL), "ps_5_0", "clustered deferred resolve");
+
+	// What the resolve bytecode really binds (FXC strips what is dead): the
+	// renderer binds exactly these registers.
+	for (ID3DBlob* rb : { resB.Get(), resClB.Get() })
+	{
+		const std::vector<Binding> b = reflectBindings(rb);
+		CHECK(binds(b, D3D_SIT_CBUFFER, 0));
+		CHECK(binds(b, D3D_SIT_CBUFFER, MSL::kHlslResolveUboReg));
+		for (UINT t : { UINT(MSL::kHlslResolveGB0Reg), UINT(MSL::kHlslResolveGB1Reg),
+		                UINT(MSL::kHlslResolveGB2Reg), UINT(MSL::kHlslResolveDepthReg) })
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, t), "the resolve does not read t", t);
+		for (UINT s : { UINT(MSL::kHlslResolveGB0Sampler), UINT(MSL::kHlslResolveGB1Sampler),
+		                UINT(MSL::kHlslResolveGB2Sampler), UINT(MSL::kHlslResolveDepthSampler) })
+			CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, s), "the resolve does not sample through s", s);
+		for (const Binding& x : b)
+			if (x.type == D3D_SIT_SAMPLER) CHECK_MESSAGE(x.reg <= 15u, x.name, " on s", x.reg);
+	}
+	for (UINT t : { 24u, 25u, 26u })
+		CHECK(binds(reflectBindings(resClB.Get()), D3D_SIT_BYTEADDRESS, t));
+
+	ComPtr<ID3D11VertexShader> vs, fsVS;
+	ComPtr<ID3D11PixelShader> fwdPS, fwdClPS, gbPS, resPS, resClPS;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &vs)));
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(fsB->GetBufferPointer(), fsB->GetBufferSize(), nullptr, &fsVS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(fwdB->GetBufferPointer(), fwdB->GetBufferSize(), nullptr, &fwdPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(fwdClB->GetBufferPointer(), fwdClB->GetBufferSize(), nullptr, &fwdClPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(gbB->GetBufferPointer(), gbB->GetBufferSize(), nullptr, &gbPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(resB->GetBufferPointer(), resB->GetBufferSize(), nullptr, &resPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(resClB->GetBufferPointer(), resClB->GetBufferSize(), nullptr, &resClPS)));
+	static const D3D11_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsB->GetBufferPointer(), vsB->GetBufferSize(), &il)));
+	ComPtr<ID3D11RasterizerState> rasterNoCull;
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
+	ComPtr<ID3D11DepthStencilState> depthLess;
+	{
+		D3D11_DEPTH_STENCIL_DESC dd{};
+		dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dd.DepthFunc = D3D11_COMPARISON_LESS;
+		REQUIRE(SUCCEEDED(dev->CreateDepthStencilState(&dd, &depthLess)));
+	}
+	ComPtr<ID3D11SamplerState> pointClamp;
+	{
+		D3D11_SAMPLER_DESC sd{};
+		sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+		sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		sd.MaxLOD = D3D11_FLOAT32_MAX;
+		REQUIRE(SUCCEEDED(dev->CreateSamplerState(&sd, &pointClamp)));
+	}
+
+	// ── Targets: two float outputs (forward / resolve), the renderer's G-buffer
+	// formats, and its typeless depth with a DSV and an SRV (createDepthViews).
+	auto makeRT = [&](DXGI_FORMAT fmt, ComPtr<ID3D11Texture2D>& tex, ComPtr<ID3D11RenderTargetView>& rtv,
+	                  ComPtr<ID3D11ShaderResourceView>* srv) {
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = kW; td.Height = kH; td.MipLevels = td.ArraySize = 1;
+		td.Format = fmt; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+		td.BindFlags = D3D11_BIND_RENDER_TARGET | (srv ? D3D11_BIND_SHADER_RESOURCE : 0u);
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &tex)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(tex.Get(), nullptr, &rtv)));
+		if (srv) REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), nullptr, srv->GetAddressOf())));
+	};
+	ComPtr<ID3D11Texture2D> outTex, gbTex[3], staging;
+	ComPtr<ID3D11RenderTargetView> outRTV, gbRTV[3];
+	ComPtr<ID3D11ShaderResourceView> gbSRV[3];
+	makeRT(DXGI_FORMAT_R32G32B32A32_FLOAT, outTex, outRTV, nullptr);
+	makeRT(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, gbTex[0], gbRTV[0], &gbSRV[0]);
+	makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT,  gbTex[1], gbRTV[1], &gbSRV[1]);
+	makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT,  gbTex[2], gbRTV[2], &gbSRV[2]);
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		outTex->GetDesc(&td);
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+	ComPtr<ID3D11Texture2D> depthTex;
+	ComPtr<ID3D11DepthStencilView> dsv;
+	ComPtr<ID3D11ShaderResourceView> depthSRV;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = kW; td.Height = kH; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R24G8_TYPELESS; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+		td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &depthTex)));
+		D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+		dvd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+		REQUIRE(SUCCEEDED(dev->CreateDepthStencilView(depthTex.Get(), &dvd, &dsv)));
+		D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+		svd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		svd.Texture2D.MipLevels = 1;
+		REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(depthTex.Get(), &svd, &depthSRV)));
+	}
+
+	// ── Geometry: one triangle over the whole 8x8 viewport, depth 0.3 → 0.7
+	// across it, normal tilted off +Z. Identity mvp/model: world = clip.
+	const glm::vec3 nrm = glm::normalize(glm::vec3(0.3f, -0.2f, 1.0f));
+	const MatVertex11 tri[3] = {
+		{ { -1.0f, -1.0f, 0.3f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+		{ {  3.0f, -1.0f, 0.5f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+		{ { -1.0f,  3.0f, 0.7f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+	};
+	ComPtr<ID3D11Buffer> vb;
+	{
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = sizeof(tri); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA init{ tri, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &vb)));
+	}
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[1] = 0.5f; u.pbr[2] = 1.0f;
+	ComPtr<ID3D11Buffer> uCB = makeConstantBuffer11(dev, &u, sizeof(u));
+
+	// ── Lighting: one point light off-centre in front of the surface, a little
+	// ambient, the camera in front; every image gate (GI, CSM, sky, AO) at 0.
+	MSL::Lighting lit{};
+	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.05f;
+	lit.camPos[0] = 0.2f; lit.camPos[1] = 0.1f; lit.camPos[2] = 3.0f;
+	lit.giParams[0] = float(kW); lit.giParams[1] = float(kH); // the resolve's uv divides by it
+	lit.lightPos[0][0] = 0.4f; lit.lightPos[0][1] = -0.3f; lit.lightPos[0][2] = 1.4f; lit.lightPos[0][3] = 1.0f;
+	lit.lightDir[0][2] = -1.0f;
+	lit.lightColor[0][0] = 1.0f; lit.lightColor[0][1] = 0.9f; lit.lightColor[0][2] = 0.8f; lit.lightColor[0][3] = 3.0f;
+	lit.lightParams[0][0] = 4.0f;
+	lit.counts[0] = 1.0f;
+	ComPtr<ID3D11Buffer> litCB = makeConstantBuffer11(dev, &lit, sizeof(lit));
+	MSL::ResolveUniforms ru;
+	for (int i = 0; i < 4; ++i) ru.invViewProj[i * 5] = 1.0f; // inverse(identity)
+	ru.depthParams[0] = -1.0f; ru.depthParams[1] = 1.0f; ru.depthParams[2] = 0.0f; ru.depthParams[3] = 0.0f;
+	ComPtr<ID3D11Buffer> ruCB = makeConstantBuffer11(dev, &ru, sizeof(ru));
+
+	D3D11_VIEWPORT vp{}; vp.Width = float(kW); vp.Height = float(kH); vp.MaxDepth = 1.0f;
+	ctx->RSSetViewports(1, &vp);
+	ctx->RSSetState(rasterNoCull.Get());
+	const UINT stride = sizeof(MatVertex11), offset = 0;
+	auto bindMesh = [&]() {
+		ctx->IASetInputLayout(il.Get());
+		ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
+		ctx->VSSetShader(vs.Get(), nullptr, 0);
+		ctx->VSSetConstantBuffers(1, 1, uCB.GetAddressOf());
+		ctx->OMSetDepthStencilState(depthLess.Get(), 0);
+	};
+	auto readOut = [&]() {
+		ctx->CopyResource(staging.Get(), outTex.Get());
+		std::vector<float> px(kW * kH * 4, 0.0f);
+		D3D11_MAPPED_SUBRESOURCE m{};
+		if (SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
+		{
+			for (UINT y = 0; y < kH; ++y)
+				std::memcpy(&px[y * kW * 4], static_cast<const uint8_t*>(m.pData) + y * m.RowPitch, kW * 16);
+			ctx->Unmap(staging.Get(), 0);
+		}
+		return px;
+	};
+	const float black[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	auto drawForward = [&](ID3D11PixelShader* ps, ID3D11Buffer* lcb) {
+		ctx->ClearRenderTargetView(outRTV.Get(), black);
+		ctx->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+		ID3D11RenderTargetView* rt = outRTV.Get();
+		ctx->OMSetRenderTargets(1, &rt, dsv.Get());
+		bindMesh();
+		ctx->PSSetShader(ps, nullptr, 0);
+		ctx->PSSetConstantBuffers(0, 1, &lcb);
+		ctx->Draw(3, 0);
+		return readOut();
+	};
+	// The renderer's G-buffer pass: three MRTs + depth, GL's clear values.
+	auto drawGBuffer = [&]() {
+		const float c1[4] = { 0.5f, 0.5f, 1.0f, 0.5f };
+		ctx->ClearRenderTargetView(gbRTV[0].Get(), black);
+		ctx->ClearRenderTargetView(gbRTV[1].Get(), c1);
+		ctx->ClearRenderTargetView(gbRTV[2].Get(), black);
+		ctx->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+		ID3D11RenderTargetView* rts[3] = { gbRTV[0].Get(), gbRTV[1].Get(), gbRTV[2].Get() };
+		ctx->OMSetRenderTargets(3, rts, dsv.Get());
+		bindMesh();
+		ctx->PSSetShader(gbPS.Get(), nullptr, 0);
+		ctx->PSSetConstantBuffers(0, 1, litCB.GetAddressOf());
+		ctx->Draw(3, 0);
+		ID3D11RenderTargetView* none = nullptr;
+		ctx->OMSetRenderTargets(1, &none, nullptr); // depth OFF before its SRV goes on
+	};
+	// The renderer's resolve draw: no vertex buffer, inputs on t27..t30.
+	auto drawResolve = [&](ID3D11PixelShader* ps, ID3D11Buffer* lcb, ID3D11Buffer* rcb) {
+		ctx->ClearRenderTargetView(outRTV.Get(), black);
+		ID3D11RenderTargetView* rt = outRTV.Get();
+		ctx->OMSetRenderTargets(1, &rt, nullptr);
+		ctx->IASetInputLayout(nullptr);
+		ID3D11Buffer* noVB = nullptr; UINT zero = 0;
+		ctx->IASetVertexBuffers(0, 1, &noVB, &zero, &zero);
+		ctx->VSSetShader(fsVS.Get(), nullptr, 0);
+		ctx->PSSetShader(ps, nullptr, 0);
+		ctx->PSSetConstantBuffers(0, 1, &lcb);
+		ctx->PSSetConstantBuffers(MSL::kHlslResolveUboReg, 1, &rcb);
+		ID3D11ShaderResourceView* in[4] = { gbSRV[0].Get(), gbSRV[1].Get(), gbSRV[2].Get(), depthSRV.Get() };
+		ctx->PSSetShaderResources(MSL::kHlslResolveGB0Reg, 4, in);
+		ID3D11SamplerState* pc = pointClamp.Get();
+		for (int s : { MSL::kHlslResolveGB0Sampler, MSL::kHlslResolveGB1Sampler,
+		               MSL::kHlslResolveGB2Sampler, MSL::kHlslResolveDepthSampler })
+			ctx->PSSetSamplers(UINT(s), 1, &pc);
+		ctx->Draw(3, 0);
+		std::vector<float> px = readOut();
+		ID3D11ShaderResourceView* nulls[4] = {};
+		ctx->PSSetShaderResources(MSL::kHlslResolveGB0Reg, 4, nulls);
+		return px;
+	};
+	struct Diff { float mean = 0, max = 0, lumMin = 1e9f, lumMax = 0; };
+	auto compare = [&](const std::vector<float>& a, const std::vector<float>& b) {
+		Diff d;
+		for (UINT i = 0; i < kW * kH; ++i)
+		{
+			for (int k = 0; k < 3; ++k)
+			{
+				const float e = std::fabs(a[i * 4 + k] - b[i * 4 + k]);
+				d.mean += e; d.max = std::max(d.max, e);
+			}
+			const float l = a[i * 4] + a[i * 4 + 1] + a[i * 4 + 2];
+			d.lumMin = std::min(d.lumMin, l); d.lumMax = std::max(d.lumMax, l);
+		}
+		d.mean /= float(kW * kH * 3);
+		return d;
+	};
+
+	// 1. Forward vs deferred, 8-light window.
+	drainInfoQueue11(w);
+	const std::vector<float> fwd = drawForward(fwdPS.Get(), litCB.Get());
+	drawGBuffer();
+	const std::vector<float> def = drawResolve(resPS.Get(), litCB.Get(), ruCB.Get());
+	const std::string why = drainInfoQueue11(w);
+	const Diff d = compare(fwd, def);
+	MESSAGE("forward vs deferred: mean ", d.mean, " max ", d.max, " (forward luminance ",
+	        d.lumMin, "..", d.lumMax, ")", why.empty() ? "" : " — debug layer: ", why);
+	// The rig is only a witness if the light really varies across it.
+	REQUIRE_MESSAGE(d.lumMax - d.lumMin > 0.05f, "the point light does not vary over the 8x8 surface");
+	CHECK_MESSAGE(d.mean < 1.0f / 255.0f, "deferred drifts from forward: mean ", d.mean);
+	CHECK_MESSAGE(d.max  < 4.0f / 255.0f, "deferred drifts from forward: max ", d.max);
+
+	// Negative control 1: the GL/Vulkan uv→NDC sign instead of D3D's. P moves,
+	// the falloff changes — the comparison above would have caught it.
+	MSL::ResolveUniforms ruFlip = ru;
+	ruFlip.depthParams[0] = 1.0f;
+	ComPtr<ID3D11Buffer> ruFlipCB = makeConstantBuffer11(dev, &ruFlip, sizeof(ruFlip));
+	const Diff dFlip = compare(fwd, drawResolve(resPS.Get(), litCB.Get(), ruFlipCB.Get()));
+	MESSAGE("negative control (wrong uv sign): mean ", dFlip.mean, " max ", dFlip.max);
+	CHECK_MESSAGE(dFlip.max > 8.0f / 255.0f, "a wrong uv sign went unnoticed — the rig is blind to P");
+
+	// Negative control 2: the G-buffer base-colour view (depthParams.w = 1)
+	// shows the graph's 0.25/0.5/0.75 unlit — proof the resolve read GB0 and
+	// not a stale or unbound view.
+	MSL::ResolveUniforms ruView = ru;
+	ruView.depthParams[3] = 1.0f;
+	ComPtr<ID3D11Buffer> ruViewCB = makeConstantBuffer11(dev, &ruView, sizeof(ruView));
+	const std::vector<float> view = drawResolve(resPS.Get(), litCB.Get(), ruViewCB.Get());
+	CHECK_MESSAGE((std::fabs(view[0] - 0.25f) < 0.01f && std::fabs(view[1] - 0.5f) < 0.01f
+	               && std::fabs(view[2] - 0.75f) < 0.01f),
+	              "G-buffer base-colour view: ", view[0], ",", view[1], ",", view[2]);
+
+	// 2. Clustered: 12 point lights in the lists, 0..7 black (they fill the
+	// forward variant's window), 8..11 coloured and placed apart.
+	const int kLists = 12, kBlack = 8;
+	std::vector<float> lights(size_t(kLists) * 16, 0.0f);
+	const float pos[4][3] = { { -0.6f, 0.5f, 1.2f }, { 0.7f, 0.6f, 1.0f }, { -0.4f, -0.7f, 1.5f }, { 0.5f, -0.5f, 0.9f } };
+	const float col[4][3] = { { 1.0f, 0.2f, 0.2f }, { 0.2f, 1.0f, 0.2f }, { 0.2f, 0.3f, 1.0f }, { 1.0f, 1.0f, 0.3f } };
+	for (int i = 0; i < kLists; ++i)
+	{
+		float* l = &lights[size_t(i) * 16];
+		const float* p = i >= kBlack ? pos[i - kBlack] : pos[0];
+		l[0] = p[0]; l[1] = p[1]; l[2] = p[2]; l[3] = 1.0f; // point
+		l[6] = -1.0f;
+		if (i >= kBlack) { l[8] = col[i - kBlack][0]; l[9] = col[i - kBlack][1]; l[10] = col[i - kBlack][2]; l[11] = 1.5f; }
+		l[12] = 3.0f; // range, no atlas, no GI channel
+	}
+	const uint32_t grid[2] = { 0u, uint32_t(kLists) };
+	std::vector<uint32_t> indices(kLists);
+	for (int i = 0; i < kLists; ++i) indices[i] = uint32_t(i);
+	ComPtr<ID3D11Buffer> rawBuf[3];
+	ComPtr<ID3D11ShaderResourceView> rawSrv[3];
+	const UINT rawBytes[3] = { UINT(lights.size() * sizeof(float)), sizeof(grid), UINT(indices.size() * sizeof(uint32_t)) };
+	const void* rawData[3] = { lights.data(), grid, indices.data() };
+	for (int i = 0; i < 3; ++i)
+	{
+		REQUIRE(HE::d3d11mat::CreateClusterRawBuffer(dev, rawBytes[i], &rawBuf[i], &rawSrv[i]));
+		D3D11_MAPPED_SUBRESOURCE m{};
+		REQUIRE(SUCCEEDED(ctx->Map(rawBuf[i].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)));
+		std::memcpy(m.pData, rawData[i], rawBytes[i]);
+		ctx->Unmap(rawBuf[i].Get(), 0);
+	}
+	ID3D11ShaderResourceView* lists[3] = { rawSrv[0].Get(), rawSrv[1].Get(), rawSrv[2].Get() };
+	HE::d3d11mat::BindClusterLists(ctx, lists);
+
+	// Forward: the full window (eight black point lights, the renderer's
+	// FillMaterialLightWindow) + the gate in heLight. Resolve: the window the
+	// renderer gives it — FillMaterialDirectionalWindow over the same 12 point
+	// lights, i.e. EMPTY — and the grid in HeResolve.
+	MSL::Lighting fwdLit = lit;
+	for (int i = 0; i < 8; ++i)
+	{
+		for (int k = 0; k < 4; ++k) { fwdLit.lightPos[i][k] = 0; fwdLit.lightColor[i][k] = 0; fwdLit.lightParams[i][k] = 0; }
+		fwdLit.lightPos[i][0] = pos[0][0]; fwdLit.lightPos[i][1] = pos[0][1]; fwdLit.lightPos[i][2] = pos[0][2];
+		fwdLit.lightPos[i][3] = 1.0f;
+		fwdLit.lightParams[i][0] = 3.0f;
+	}
+	fwdLit.counts[0] = 8.0f;
+	fwdLit.clusterParams[0] = fwdLit.clusterParams[1] = fwdLit.clusterParams[2] = 1.0f;
+	fwdLit.clusterCamFwd[2] = -1.0f; fwdLit.clusterCamFwd[3] = 0.1f;
+	RenderWorld rw;
+	for (int i = 0; i < kLists; ++i)
+	{
+		LightData ld;
+		ld.type = 1; // point
+		ld.position = glm::vec3(lights[size_t(i) * 16], lights[size_t(i) * 16 + 1], lights[size_t(i) * 16 + 2]);
+		rw.lights.push_back(ld);
+	}
+	MSL::Lighting resLit = fwdLit;
+	HE::FillMaterialDirectionalWindow(rw, resLit);
+	CHECK(resLit.counts[0] == 0.0f);
+	CHECK(resLit.lightColor[0][3] == 0.0f);
+	MSL::ResolveUniforms ruCl = ru;
+	ruCl.clusterParams[0] = ruCl.clusterParams[1] = ruCl.clusterParams[2] = 1.0f;
+	ruCl.clusterCamFwd[2] = -1.0f; ruCl.clusterCamFwd[3] = 0.1f;
+	ComPtr<ID3D11Buffer> fwdLitCB = makeConstantBuffer11(dev, &fwdLit, sizeof(fwdLit));
+	ComPtr<ID3D11Buffer> resLitCB = makeConstantBuffer11(dev, &resLit, sizeof(resLit));
+	ComPtr<ID3D11Buffer> ruClCB   = makeConstantBuffer11(dev, &ruCl, sizeof(ruCl));
+
+	drainInfoQueue11(w);
+	const std::vector<float> fwdCl = drawForward(fwdClPS.Get(), fwdLitCB.Get());
+	drawGBuffer();
+	const std::vector<float> defCl = drawResolve(resClPS.Get(), resLitCB.Get(), ruClCB.Get());
+	const std::string whyCl = drainInfoQueue11(w);
+	const Diff dc = compare(fwdCl, defCl);
+	MESSAGE("clustered forward vs clustered deferred: mean ", dc.mean, " max ", dc.max, " (luminance ",
+	        dc.lumMin, "..", dc.lumMax, ")", whyCl.empty() ? "" : " — debug layer: ", whyCl);
+	REQUIRE_MESSAGE(dc.lumMax > 0.2f, "the four list lights do not reach the surface");
+	CHECK_MESSAGE(dc.mean < 1.0f / 255.0f, "clustered deferred drifts from clustered forward: mean ", dc.mean);
+	CHECK_MESSAGE(dc.max  < 4.0f / 255.0f, "clustered deferred drifts from clustered forward: max ", dc.max);
+
+	// Negative control 3: the 8-light resolve over the same G-buffer sees only
+	// the black window — the four lit lights reach the deferred image through
+	// the lists alone.
+	const Diff dWin = compare(fwdCl, drawResolve(resPS.Get(), fwdLitCB.Get(), ruClCB.Get()));
+	MESSAGE("negative control (8-light resolve, black window): mean ", dWin.mean);
+	CHECK_MESSAGE(dWin.mean > 0.05f, "the window resolve matched the clustered image — the lists were not needed");
+	// Negative control 4, why the resolve gets a trimmed window: hand the
+	// clustered resolve a window holding the four LIT lights (what
+	// FillMaterialLightWindow gives a scene whose first lights shine) and they
+	// are counted twice — heLitP walks the window, heClusterLighting the lists.
+	MSL::Lighting fullLit = fwdLit;
+	for (int i = 0; i < 4; ++i)
+	{
+		const float* l = &lights[size_t(kBlack + i) * 16];
+		for (int k = 0; k < 4; ++k)
+		{
+			fullLit.lightPos[i][k]    = l[k];
+			fullLit.lightColor[i][k]  = l[8 + k];
+			fullLit.lightParams[i][k] = l[12 + k];
+		}
+	}
+	fullLit.counts[0] = 4.0f;
+	ComPtr<ID3D11Buffer> fullLitCB = makeConstantBuffer11(dev, &fullLit, sizeof(fullLit));
+	const Diff dFull = compare(fwdCl, drawResolve(resClPS.Get(), fullLitCB.Get(), ruClCB.Get()));
+	MESSAGE("negative control (untrimmed window, lit lights): mean ", dFull.mean);
+	CHECK_MESSAGE(dFull.mean > 0.05f, "lit window lights were not counted twice — the control is blind");
 }
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC

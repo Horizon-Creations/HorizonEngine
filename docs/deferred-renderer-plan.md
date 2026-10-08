@@ -367,22 +367,23 @@ weil es sie auf diesen drei Backends auch im Forward-Pfad nicht gibt (10.6).
 
 ### 10.3 Pass × Backend
 
-**Übersicht.** `JA` = vorhanden · `fwd` = nur im Forward-Pfad · `--` = fehlt.
+**Übersicht.** `JA` = vorhanden · `fwd` = nur im Forward-Pfad · `--` = fehlt. Die D3D11-Spalte
+ist der Stand nach Schritt 2 (10.9), die anderen Spalten der Stand der Bestandsaufnahme.
 
-| Pass | Metal | GL | D3D11 | D3D12 | Vulkan |
+| Pass | Metal | GL | D3D11 (S2) | D3D12 | Vulkan |
 |---|:--:|:--:|:--:|:--:|:--:|
-| G-Buffer | JA | JA | -- | -- | -- |
-| Lighting-Resolve | JA | JA | -- | -- | -- |
-| Clustered im Resolve | JA | -- | -- (fwd JA) | -- (fwd JA) | -- (fwd JA) |
-| CSM + Point/Spot-Atlas | JA | JA | fwd | fwd | fwd |
-| Sky / SkyEnv | JA | JA | fwd | fwd | fwd |
-| AO (SSAO) | JA (aus G-Buffer) | JA (aus G-Buffer) | fwd (Prepass) | fwd (Prepass) | fwd (Prepass) |
-| GI (DDGI, Masken) | JA | JA | fwd | fwd | fwd |
-| Decals | nur Tile | JA | fwd (selbst beleuchtet) | fwd (selbst beleuchtet) | fwd (selbst beleuchtet) |
-| SSR | nur Tile | -- (fwd JA) | fwd | fwd | fwd |
-| AA / TAA | JA | JA | fwd | fwd | fwd |
-| Transparenz (Forward-Schwanz) | JA | JA | fwd | fwd | fwd |
-| `supportsDeferredRendering` | JA | JA | -- | -- | -- |
+| G-Buffer | JA | JA | JA | -- | -- |
+| Lighting-Resolve | JA | JA | JA | -- | -- |
+| Clustered im Resolve | JA | -- | JA | -- (fwd JA) | -- (fwd JA) |
+| CSM + Point/Spot-Atlas | JA | JA | JA (über heLitP im Resolve) | fwd | fwd |
+| Sky / SkyEnv | JA | JA | JA | fwd | fwd |
+| AO (SSAO) | JA (aus G-Buffer) | JA (aus G-Buffer) | JA (Prepass-Ergebnis, v1; aus G-Buffer = S5) | fwd (Prepass) | fwd (Prepass) |
+| GI (DDGI, Masken) | JA | JA | JA | fwd | fwd |
+| Decals | nur Tile | JA | fwd-Decal über dem Resolve (S5: GB0) | fwd (selbst beleuchtet) | fwd (selbst beleuchtet) |
+| SSR | nur Tile | -- (fwd JA) | -- im Deferred-Frame (S5) | fwd | fwd |
+| AA / TAA | JA | JA | JA | fwd | fwd |
+| Transparenz (Forward-Schwanz) | JA | JA | JA | fwd | fwd |
+| `supportsDeferredRendering` | JA | JA | JA | -- | -- |
 
 **Ressourcen und Bedarf je Pass.** „Ist“ ist der heutige Forward-Pfad, „Bedarf“ das, was der
 Deferred-Pfad zusätzlich braucht.
@@ -512,8 +513,8 @@ Metal und GL.
    | 16 | `heAO` (`texelFetch`, Sampler tot) | t16/s0 (wie Material) |
    | 17, 18 | DDGI-Atlanten | t17/s1, t18/s3 (wie Material) |
    | 31, 32, 33 | Forward-SSR, GI-Refl, Cloud-Shadow | t31/s8, t32/s9, t33/s14 (wie Material) |
-   | 19, 20, 21, 22 | `heGB0..2`, `heGBDepth` | **t19/s2, t20/s4, t21/s5, t22/s6** (neu: der Resolve deklariert weder `heTex0` noch `heTexP0..3`, deren Sampler sind frei) |
-   | 23 | `HeResolve` | **b-Register ≤ b13**, Vorschlag b4 (im Resolve-Draw nur neben b0 belegt) |
+   | 19, 20, 21, 22 | `heGB0..2`, `heGBDepth` | **t19/s2, t20/s4, t21/s5, t22/s6** (neu: der Resolve deklariert weder `heTex0` noch `heTexP0..3`, deren Sampler sind frei). **Umgesetzt in Schritt 2 als t27..t30** mit denselben Samplern, siehe 10.9 |
+   | 23 | `HeResolve` | **b-Register ≤ b13**, Vorschlag b4 (im Resolve-Draw nur neben b0 belegt) — so umgesetzt |
    | 24, 25, 26 | Cluster-Listen | t24–t26 als `ByteAddressBuffer`, kein Sampler (Vertrag aus Thema 117) |
 
    `heLandscapeWeights` (14) kommt aus dem Graph-Codegen, nicht aus der Preamble, der Resolve
@@ -653,3 +654,146 @@ Beleg mit `HE_CAPTURE_FRAME` bzw. exportiertem Spiel.
 Matrix in `backend-parity-plan.md` nachziehen. Ein End-to-End-Lauf des Editors auf WARP bräuchte
 einen neuen Renderer-Schalter (es gibt heute keinen); ob der sich lohnt, entscheidet Schritt 6.
 **Echte-Hardware-Abnahme bleibt offen** und wird im Befund so ausgewiesen.
+
+### 10.9 Schritt 2 umgesetzt: D3D11 (Stand 2026-10-08)
+
+> Zweig wie oben, Commits ab `70ab9cd9`. Gemessen auf NN-WS03 (RTX 4070, Release-Build in einem
+> privaten Deploy, eigenes APPDATA je Lauf) und auf WARP in `he_tests`. „Echte Hardware“ heißt hier:
+> diese eine NVIDIA-Karte. AMD, Intel und andere Treiber hat der Pfad nicht gesehen.
+
+**Was gebaut ist.**
+
+- `MaterialShaderLibrary`:
+  - `deferredResolve[Clustered](HLSL)` ist gepinnt (`compileResolveVariant`). Die Präambel liegt
+    auf den Registern von `kHlslMaterialPins` (b0, t10..t18, t31..t33 mit den verschobenen
+    Samplern), `HeResolve` auf **b4**, der G-Buffer auf **t27..t30 / s2, s4, s5, s6**. Der Vertrag
+    steht als `kHlslResolve*` im Header, Renderer und Tests lesen dieselben Konstanten.
+  - Die Clustered-Sperre ist für HLSL und SPIR-V offen, für GLSL 4.1 bleibt sie zu.
+  - Metal ist unverändert: Der Metal-Zweig von `compileResolveVariant` ist textgleich, und
+    `buildDeferredResolveSource` liefert für Metal dieselben Bytes.
+- `LightPacking`: Neu ist `FillMaterialDirectionalWindow`, das Lichtfenster des clustered Resolve
+  mit nur den Richtungslichtern. Es ist Metals `EncodeClusterData` als gemeinsame Funktion für
+  D3D11, D3D12 und Vulkan.
+- `D3D11Renderer`:
+  - `GBufPS` steht neben `PSMain` in `kSceneHLSL` und wird von `VSMain` und `VSMainInstanced`
+    gespeist.
+  - Der G-Buffer (GB0 `R8G8B8A8_UNORM_SRGB`, GB1/GB2 `R16G16B16A16_FLOAT`) wird beim ersten
+    Deferred-Frame in Szenengröße angelegt. Die Tiefe ist die vorhandene typeless Szenentiefe:
+    beim Schreiben als DSV, im Resolve als SRV. Die DSV kommt vom Output-Merger, bevor die SRV
+    gebunden wird, wie im Decal-Pass.
+  - Routing im Draw-Loop:
+    - Ein Graph-Material mit G-Buffer-Variante geht in den G-Buffer.
+    - Ein Graph-Material ohne Variante, oder mit einer, die sich nicht bauen lässt, wird nach dem
+      Resolve forward gezeichnet.
+    - Eingebaute Materialien laufen über `GBufPS`.
+    - Skinned, Decals, Transparenz und Debug-Linien bleiben im Forward-Schwanz.
+  - Der Resolve hat einen **eigenen** Lighting-CB: die Material-Füllung des Frames mit
+    `specAA[1] = 0`. Im clustered Fall kommt das Fenster aus `FillMaterialDirectionalWindow`.
+    Danach bekommt der Built-in-Pass seine Register t15..t18, s1, s2, s3 und b0 zurück.
+  - G-Buffer-Varianten der Materialien:
+    - Sie haben einen eigenen Schlüsselraum (10.7 #4).
+    - Sie werden nur querkompiliert, nie aus einer gebackenen Pak-Variante.
+    - Der Warmup baut sie mit.
+  - Velocity läuft nach dem G-Buffer-Pass gegen die gefüllte Tiefe (10.7 #2). Der Resolve
+    rekonstruiert mit der gejitterten Matrix (10.7 #3).
+  - `supportsDeferredRendering` wird beim Init gebaut, wie die GI-Kernel. Der Editor liest das Flag
+    beim Start und wendet ein gespeichertes „Deferred“ nur an, wenn es dann schon `true` ist.
+  - `HE_RENDER_PATH` und `HE_DUMP_GBUFFER` verhalten sich wie bei GL.
+  - Belegzeilen im Log: `D3D11Renderer: deferred path ready (G-buffer + clustered resolve)` und
+    `D3D11Renderer: deferred frame (…)`.
+- Spielpfad: `GameApplication` liest `RenderPath` aus der config.json, prüft das Flag und fährt über
+  `SetSwapchainPostProcessing` den Viewport-Frame. Damit erbt es den Pfad (Beleg unten). Forward
+  bleiben der direkte Swapchain-Zweig ohne HDR-Ziel und `RenderWorldPreview`.
+- Validator: `GBufPS` steht in `HLSL_ENTRY_PROFILE`.
+
+**Abweichungen vom Bauplan, mit Grund.**
+
+1. **G-Buffer auf t27..t30 statt t19..t22.** Der eingebaute Szenenshader von D3D11 hält seine
+   strukturierten Cluster-Listen auf t18..t20. Eine G-Buffer-Ansicht auf t19 oder t20 würde der
+   nächste Built-in-Draw (Skinned, Transparenz) still als Cluster-Gitter lesen. SRVs sind nicht
+   knapp. Die Sampler bleiben die vorgeschlagenen, und D3D12 erbt denselben Vertrag.
+2. **Clustered Resolve mit explizitem LOD.** FXC lehnte `deferredResolveClustered(HLSL)` ab
+   (Gradient-Sample in der Lichtschleife, deren Länge pro Pixel variiert, X3570 und dann Abbruch).
+   Gemessen auf der RTX: Der erste Lauf meldete `resolveClusteredPS compile failed` und blieb beim
+   8-Licht-Fenster. `explicitLodClusterSamples` schreibt die zwei Samples deshalb auf
+   `textureLod(…, 0.0)` um, genau wie im Forward-Zwilling. Das geschieht nur im **gebauten** Text
+   für Nicht-Metal. Das Literal bleibt, also bleiben auch der Drift-Wächter in `test_culling.cpp`
+   und Metals Bytes unverändert.
+3. **Basisfarbe eingebauter Materialien im G-Buffer nach der GL/Metal-Regel.** Ohne Material
+   0,55 grau, unter einer Textur 1,0 × Textur, der Instanz-Tint wird multipliziert. Das gilt nur im
+   G-Buffer, D3D11 forward bleibt unverändert. Forward gibt einem Mesh ohne Material das Weiß des
+   `RenderObject`-Defaults und lässt die Textur `uColor` ersetzen. Gemessen: Der
+   D3D11-Deferred-Boden der `SHADOWINSTTEST`-Szene lag damit 22,7/255 über GL-Deferred, mit der
+   Regel sind es 11,3/255. Den Rest erklärt der nächste Abschnitt.
+4. **GB3 wird nicht gebunden.** Der G-Buffer-Tail der Graph-Materialien schreibt `oGB3` auf
+   `SV_Target3`. Ohne viertes Ziel verwirft D3D11 das. Der WARP-Debug-Layer meldet dazu nichts.
+
+**Messungen auf der RTX 4070.** Headless aufgenommen (`HE_DUMP_*`), `HE_SKY_TIME=6.2832`. AA,
+Bloom, DOF und Motion Blur sind aus, soweit nicht anders genannt. Die Bildwerte stammen aus dem Band
+y = 200..720, weil der animierte Himmel darüber liegt. Die Kugelwerte stammen aus der Scheibe der
+Graph-Material-Kugel.
+
+| Szene | Vergleich | mittlere Abw. | max |
+|---|---|--:|--:|
+| `MATERIALTEST=matte` (Graph-Kugel) | D3D11 forward ↔ deferred, Bild | 0,031/255 | 2 |
+| dieselbe | Kugel | 0,167/255 | 2 |
+| `MANYLIGHTS=16` (Graph-Boden, 16 Punktlichter) | forward ↔ deferred, clustered | 0,013/255 | 1 |
+| dieselbe, `HE_FORWARD_CLUSTER=0` | forward ↔ deferred, 8-Licht-Fenster | 0,006/255 | 1 |
+| dieselbe | deferred clustered ↔ deferred 8-Licht (Gegenprobe) | 3,874/255 | 65 |
+| `MATERIALTEST=1 GIBLEED=3`, GI an | Kugel forward ↔ deferred | 0,175/255 | 2 |
+| dieselbe | Kugel deferred, GI an ↔ aus (Gegenprobe) | 7,232/255 | 79 |
+| dieselbe, TAA | Kugel forward ↔ deferred | 0,163/255 | 3 |
+| dieselbe, SSAO, TOD 0,26 | Kugel forward ↔ deferred | 0,196/255 | 8 |
+| `MATERIALTEST=matte` | GL ↔ D3D11, forward | 2,495/255 | 38 |
+| dieselbe | GL ↔ D3D11, deferred | 2,493/255 | 32 |
+| `SHADOWINSTTEST` (nur eingebaute Materialien) | GL deferred ↔ D3D11 deferred | 11,3/255 | 59 |
+| dieselbe | D3D11 forward ↔ D3D11 deferred | 12,4/255 | 69 |
+
+Die Gegenproben zeigen zwei Dinge: Der clustered Resolve lichtet alle 16 Lichter, nicht nur das
+Fenster, und GI wirkt im Resolve. Die G-Buffer-Ansichten (`HE_DUMP_GBUFFER=1..4`) von GL und D3D11
+stimmen im selben Bild bei Normale und Rough/Spec überein. Bei BaseColor stimmen sie erst nach
+Punkt 3 überein.
+
+**WARP (`he_tests`).**
+
+- „D3D11: G-buffer + deferred resolve shade a graph material like its forward draw“, ein 8×8-Bild
+  mit gekipptem Dreieck und außermittigem Punktlicht:
+  - Forward ↔ deferred: Mittel 0,0021, Maximum 0,0048, bei einer HDR-Luminanz von 0,85..2,29.
+  - Clustered (12 Listenlichter hinter einem Fenster aus 8 schwarzen): Mittel 0,0016, Maximum
+    0,0044.
+- Gegenproben:
+  - Falsches uv-Vorzeichen: 0,073 im Mittel, 0,217 im Maximum.
+  - 8-Licht-Resolve über demselben G-Buffer: 0,34.
+  - Ungekürztes Fenster mit leuchtenden Lichtern: 0,34. Das ist die Doppelzählung, die
+    `FillMaterialDirectionalWindow` verhindert.
+  - Die BaseColor-Ansicht zeigt 0,25 / 0,5 / 0,75.
+- Die Reflexion der Resolve-Bytecodes zeigt b0, b4, t27..t30 und s2/s4/s5/s6, im clustered Fall
+  zusätzlich t24..t26 als ByteAddressBuffer.
+- „Deferred resolve HLSL registers stay inside SM 5.0's bindable range“ prüft den Text auf allen
+  Plattformen.
+
+**Offline-Prüfung der eingebetteten Shader.**
+
+- `glslangValidator -D -V -S frag -e GBufPS` auf `kSkyFuncHLSL + kSceneHLSL`: rc 0. Mit
+  verfälschtem Funktionsnamen (Negativkontrolle): rc 2.
+- `scripts/validate_embedded_shaders.py` mit FXC: 52 HLSL- und 57 GLSL-Shader übersetzt, 0
+  gescheitert. Mit verfälschtem `GBufPS`: exit 1.
+
+**Abweichungen zu Metal/GL (D3D11).**
+
+- *Eingebaute Materialien* sehen in D3D11 deferred anders aus als in D3D11 forward (siehe 10.6),
+  gemessen 12,4/255 in `SHADOWINSTTEST`. Wer auf D3D11 den Pfad umschaltet, sieht eingebaute
+  Materialien heller und stärker vom Himmel getönt. So sehen sie auf GL und Metal in beiden Pfaden
+  aus.
+- *Graph-Materialien sind auf D3D11 heller als auf GL*, in beiden Pfaden gleich: die Kugel 224 →
+  236 im 8-Bit-Bild, 2,5/255 bildweit, forward wie deferred. Das ist ein vorbestehender
+  Unterschied in der Material-Füllung, kein Effekt des Deferred-Pfads. Er erklärt auch den Rest der
+  11,3/255 bei eingebauten Materialien (der Boden liegt +18 in dieselbe Richtung). Die Ursache ist
+  nicht untersucht; sie gehört zur Graph-Material-Parität, die das Thema ausschließt.
+- Ebenfalls vorbestehend: D3D11 füllt `lit.weather`, `lit.specAA` und `lit.viewMode` nicht.
+  Nässe/Schnee und Specular-AA fehlen also auch im Resolve, genau wie bei D3D11-Graph-Materialien im
+  Forward-Pfad.
+- *SSR* läuft in einem Deferred-Frame nicht. *Decals* bleiben selbst beleuchtet über dem Resolve,
+  *SSAO* liest das Prepass-Ergebnis. All das ist Schritt 5.
+- *Debug-Layer*: Der D3D11-Renderer legt kein Debug-Gerät an (`HE_GPU_DEBUG` wirkt auf D3D11
+  nicht). Laufzeitmeldungen hat nur WARP in `he_tests` gesehen.
