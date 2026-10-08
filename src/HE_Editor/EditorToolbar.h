@@ -202,6 +202,11 @@ public:
 	ImVec2 readout(IconFn icon, const char* label, ImU32 fg = kFg);
 	// The icon slot's size (square), as readout lays it out.
 	float iconSize() const { return m_m.icon; }
+	// "This asset has unsaved edits" — set by assetHeader, drawn by saveButton as
+	// a dot on the Save glyph's corner, so the mark sits on the thing that fixes
+	// it instead of widening the folder button.
+	void markDirty(bool d) { m_dirty = d; }
+	bool dirty() const     { return m_dirty; }
 	// A hairline between two cells inside one well, for a group that holds two
 	// unrelated things and is not worth splitting.
 	void divider();
@@ -239,6 +244,7 @@ private:
 	bool        m_inGroup   = false;
 	bool        m_groupIsRight = false;
 	bool        m_first     = true;   // no separating gap before the first cell
+	bool        m_dirty     = false;  // see markDirty()
 };
 
 // ── Asset-editor header ──────────────────────────────────────────────────────
@@ -249,7 +255,8 @@ private:
 
 // The left-hand group: a "Show in Content Browser" button for `assetPath` (the
 // absolute path the tab was opened with; empty = no file behind the tab, no
-// button) and an "unsaved" mark when there are pending edits. The asset's name
+// button). `dirty` is remembered on the bar and drawn by saveButton as a dot on
+// the Save glyph. The asset's name
 // and path are deliberately NOT repeated here — the tab above already carries
 // the name, and a second copy only took room from the tools.
 void assetHeader(Bar& bar, const std::string& assetPath, bool dirty);

@@ -7121,7 +7121,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				// The label: on one line when it fits, else broken at its space
 				// ("Horizontal" / "Box"), and only then shortened — never cut
 				// mid-letter.
-				const float maxW = size.x - 8.0f;
+				const float maxW = size.x - 4.0f;
 				const auto fitLine = [&](std::string line)
 				{
 					while (line.size() > 3 && ImGui::CalcTextSize(line.c_str()).x > maxW)
@@ -7198,17 +7198,16 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 
 			// Tiles scale with the pane between a floor and a ceiling, then the
-			// row wraps: as many columns as it takes to keep a tile from growing
-			// past kMaxW, but never so many that one shrinks below kMinW. A wide
-			// pane gets more, same-sized tiles instead of a few stretched ones; a
-			// narrow one gets fewer, slightly smaller ones instead of clipped
-			// text.
-			constexpr float kMinW = 64.0f, kMaxW = 92.0f, kTileH = 58.0f;
+			// row wraps: as many columns as fit at the floor, each as wide as its
+			// share of the row but never past the ceiling. A wide pane gets more
+			// tiles in a row instead of a few stretched ones; a narrow one gets
+			// fewer, slightly smaller ones instead of clipped text. Left-aligned,
+			// so the spare pixels sit at the right edge rather than inflating the
+			// tiles.
+			constexpr float kMinW = 50.0f, kMaxW = 60.0f, kTileH = 58.0f;
 			const float spacing = ImGui::GetStyle().ItemSpacing.x;
 			const float availW  = ImGui::GetContentRegionAvail().x;
-			const int   wanted  = static_cast<int>(std::ceil((availW + spacing) / (kMaxW + spacing)));
-			const int   fits    = static_cast<int>((availW + spacing) / (kMinW + spacing));
-			const int   cols    = std::max(1, std::min(wanted, std::max(1, fits)));
+			const int   cols    = std::max(1, static_cast<int>((availW + spacing) / (kMinW + spacing)));
 			const ImVec2 tileSz(std::min(kMaxW, (availW - spacing * (cols - 1)) / cols), kTileH);
 
 			const auto drawGroup = [&](const char* title, const std::vector<UIWidgetType>& types)
@@ -7308,11 +7307,19 @@ void render(AppContext& ctx, const std::string& assetPath,
 				// What ships with the engine (docs/he-apps-plan.md D2). Copyable
 				// and editable like anything else under Engine/: a project that
 				// wants a different form row saves over it and gets its own.
-				ImGui::Spacing();
-				ImGui::TextDisabled("Components");
-				ImGui::Separator();
-				for (const auto& a : widgets)
-					if (a.path != st.relPath && isEngine(a.path)) drawOne(a);
+				//
+				// Application projects only: the shipped components are an
+				// application's vocabulary (title bar, form rows, status bar),
+				// and a game's widget has no use for them. They stay on disk and
+				// in the Content Browser; only the palette stops offering them.
+				if (ctx.projectManager && ctx.projectManager->currentProject().appProject)
+				{
+					ImGui::Spacing();
+					ImGui::TextDisabled("Components");
+					ImGui::Separator();
+					for (const auto& a : widgets)
+						if (a.path != st.relPath && isEngine(a.path)) drawOne(a);
+				}
 			}
 			ImGui::EndChild();
 

@@ -436,16 +436,16 @@ void setRevealAssetHook(RevealAssetFn fn) { s_revealAssetHook = fn; }
 
 void assetHeader(Bar& bar, const std::string& assetPath, bool dirty)
 {
-	if (assetPath.empty() && !dirty) return;   // an empty well would still be drawn
+	// The "unsaved" mark is the Save glyph's to draw (saveButton): a word would
+	// be read once and then stop being noticed, a dot in the one colour the
+	// editor uses for "needs attention", sitting on the button that clears it,
+	// keeps working from the corner of the eye.
+	bar.markDirty(dirty);
+	if (assetPath.empty()) return;   // an empty well would still be drawn
 	bar.group();
-	if (!assetPath.empty() &&
-	    bar.item("##revealAsset", iconFolder, nullptr, false, true, "Show in Content Browser") &&
+	if (bar.item("##revealAsset", iconFolder, nullptr, false, true, "Show in Content Browser") &&
 	    s_revealAssetHook)
 		s_revealAssetHook(assetPath);
-	// The dot is the whole message: a word would be read once and then stop
-	// being noticed, a mark in the one colour the editor uses for "needs
-	// attention" keeps working from the corner of the eye.
-	if (dirty) bar.readout(nullptr, "\xe2\x97\x8f", kWarn);
 	bar.endGroup();
 }
 
@@ -455,6 +455,16 @@ bool saveButton(Bar& bar, bool enabled, bool atLeft)
 	else        bar.rightGroup(bar.iconGroupWidth(1));
 	const bool pressed = bar.item("##save", iconSave, nullptr, false, enabled,
 	                              enabled ? "Save (Cmd/Ctrl+S)" : "Nothing to save");
+	if (bar.dirty())
+	{
+		// Top-right corner of the cell, ringed in the bar's own dark so it
+		// reads on any well colour.
+		const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+		const ImVec2 c(mx.x - 7.0f, mn.y + 7.0f);
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddCircleFilled(c, 5.0f, IM_COL32(20, 20, 22, 255));
+		dl->AddCircleFilled(c, 3.4f, kWarn);
+	}
 	bar.endGroup();
 	return pressed;
 }
