@@ -748,11 +748,30 @@ Graph-Material-Kugel.
 | dieselbe | GL ↔ D3D11, deferred | 2,493/255 | 32 |
 | `SHADOWINSTTEST` (nur eingebaute Materialien) | GL deferred ↔ D3D11 deferred | 11,3/255 | 59 |
 | dieselbe | D3D11 forward ↔ D3D11 deferred | 12,4/255 | 69 |
+| `LOCALSHADOW=point` (Graph-Boden, Punktlicht mit Atlas-Schatten, TOD 0) | GL deferred ↔ D3D11 deferred | 0,003/255 | 45 |
+| `LOCALSHADOW=spot` (Spotlicht mit Atlas-Schatten) | GL deferred ↔ D3D11 deferred | 0,004/255 | 41 |
+| beide | GL forward ↔ GL deferred (Referenz) | 0,030 / 0,023 | 106 / 40 |
+| beide | D3D11 forward ↔ D3D11 deferred | 15,7 / 37,8 | 151 / 93 |
+| `LANDSCAPELAYERS=1` (Graph-Terrain, Weightmap t14/s0) | D3D11 forward ↔ deferred | 0,235/255 | 12 |
 
-Die Gegenproben zeigen zwei Dinge: Der clustered Resolve lichtet alle 16 Lichter, nicht nur das
-Fenster, und GI wirkt im Resolve. Die G-Buffer-Ansichten (`HE_DUMP_GBUFFER=1..4`) von GL und D3D11
-stimmen im selben Bild bei Normale und Rough/Spec überein. Bei BaseColor stimmen sie erst nach
-Punkt 3 überein.
+Die Gegenproben zeigen:
+- Der clustered Resolve lichtet alle 16 Lichter, nicht nur das Fenster.
+- GI wirkt im Resolve.
+
+G-Buffer-Ansichten (`HE_DUMP_GBUFFER=1..4`) in `SHADOWINSTTEST`, GL ↔ D3D11:
+- Normale und Rough/Spec stimmen überein.
+- BaseColor lag vor Punkt 3 bei 209 gegen 231. Nach Punkt 3 neu gemessen ist sie an vier
+  Messpunkten byte-gleich (209,209,209).
+
+Point/Spot-Atlas-Schatten (`heClusterShadow` mit den D3D-gebackenen `localShadowVP`):
+- Sie treffen GL deferred auf 0,003–0,004/255.
+- An den Messpunkten sind GL forward, GL deferred und D3D11 deferred byte-gleich, außerhalb des
+  Kegels (157,168,192).
+- D3D11 **forward** liegt dort bei (105,116,144), auch mit `HE_DUMP_SSAO=0`. Abweichend ist also
+  D3D11 forward, nicht der neue Pfad (siehe unten).
+
+Die GL- und die D3D11-Aufnahmen rendern ihre Settle-Frames auf dieselbe Weise innerhalb des Dumps;
+die Session-Zusammenfassung meldet auf beiden „1 frames“.
 
 **Spielpfad.** Ein exportiertes D3D11-Spiel wurde auf der RTX gestartet: das Depthy-Projekt aus Thema 130 mit den Binärdateien dieses Zweigs, Fenster 1600×900, Aufnahme per `PrintWindow` über `docs/spielpfad-postfx-run-game.ps1`. Mit `RenderPath=1` in der config.json loggt es `swapchain post chain active (1600x900)` und dann `deferred frame (1600x900, clustered resolve, …)`. Mit `RenderPath=0` erscheint keine Deferred-Zeile. Das Bild zeigt Geometrie, CSM-Schatten und Himmel vollständig. Die eingebauten Würfel tragen den heLitP-Look (siehe die Abweichungen zu Metal/GL unten).
 
@@ -787,11 +806,17 @@ Punkt 3 überein.
   gemessen 12,4/255 in `SHADOWINSTTEST`. Wer auf D3D11 den Pfad umschaltet, sieht eingebaute
   Materialien heller und stärker vom Himmel getönt. So sehen sie auf GL und Metal in beiden Pfaden
   aus.
-- *Graph-Materialien sind auf D3D11 heller als auf GL*, in beiden Pfaden gleich: die Kugel 224 →
-  236 im 8-Bit-Bild, 2,5/255 bildweit, forward wie deferred. Das ist ein vorbestehender
-  Unterschied in der Material-Füllung, kein Effekt des Deferred-Pfads. Er erklärt auch den Rest der
-  11,3/255 bei eingebauten Materialien (der Boden liegt +18 in dieselbe Richtung). Die Ursache ist
-  nicht untersucht; sie gehört zur Graph-Material-Parität, die das Thema ausschließt.
+- *D3D11 ↔ GL bei Graph-Materialien* (vorbestehend, Ursache offen):
+  - In `MATERIALTEST` ist die Kugel auf D3D11 heller als auf GL: 224 → 236 im 8-Bit-Bild, 2,5/255
+    bildweit. Forward und deferred zeigen das gleich, der Deferred-Pfad reicht den Unterschied nur
+    durch.
+  - Der Rest von 11,3/255 bei eingebauten Materialien in `SHADOWINSTTEST` geht in dieselbe
+    Richtung: Der Boden liegt um 18 höher.
+  - In `LOCALSHADOW` ist es umgekehrt: D3D11 deferred = GL, D3D11 forward ist außerhalb des
+    Lichtkegels dunkler, 105 statt 157, unabhängig von SSAO.
+  - Die Ursachen sind nicht untersucht. Sie gehören zur Graph-Material-Parität von D3D11 forward,
+    die dieses Thema ausschließt. Für einen eigenen Befund reproduzieren die Witness-Szenen oben
+    beide Fälle in Sekunden.
 - Ebenfalls vorbestehend: D3D11 füllt `lit.weather`, `lit.specAA` und `lit.viewMode` nicht.
   Nässe/Schnee und Specular-AA fehlen also auch im Resolve, genau wie bei D3D11-Graph-Materialien im
   Forward-Pfad.
