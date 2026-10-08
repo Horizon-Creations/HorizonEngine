@@ -611,6 +611,31 @@ TEST_CASE("each lightning strike is one thunder roll, a distance away")
     CHECK(t == doctest::Approx(wait).epsilon(0.1));
 }
 
+// MUTATION: in WeatherAudio::update's thunder prune, drop the `engine.stop(h)` call
+// (the handle is forgotten but the finished voice stays in the engine) — the voice
+// count below stays at 1 and the last CHECK fails.
+TEST_CASE("a roll that has run out is reaped, not left in the engine holding its samples")
+{
+    Rig rig(WeatherKind::Storm);
+    addClip(rig.content, HE::kEngineWeatherThunderSoundId);   // one second long
+    rig.audio(0.05f, 0.05f);
+    rig.weather->strikeCount += 1;
+    for (int i = 0; i < 400 && rig.state.thunder.empty(); ++i) rig.audio(0.05f, 0.05f);
+    REQUIRE(rig.state.thunder.size() == 1);
+    CHECK(rig.engine.busVoiceCount("") == 1);
+
+    // Let the mixer play the clip to its end, as a device would.
+    const int channels = rig.engine.outputChannels();
+    REQUIRE(channels > 0);
+    std::vector<float> out(static_cast<size_t>(channels) * 48000u * 3u);
+    rig.engine.readMixedFrames(out.data(), 48000u * 3u);
+    CHECK_FALSE(rig.engine.isPlaying(rig.state.thunder[0]));
+
+    rig.audio(0.05f, 0.05f);
+    CHECK(rig.state.thunder.empty());
+    CHECK(rig.engine.busVoiceCount("") == 0);
+}
+
 TEST_CASE("thunder follows the component's volume")
 {
     Rig rig(WeatherKind::Storm);

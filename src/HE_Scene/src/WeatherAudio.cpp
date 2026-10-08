@@ -311,8 +311,15 @@ namespace WeatherAudio
             return;
         }
 
+        // A roll that has run out is still a voice in the engine, holding its copy of
+        // the samples, until somebody stops it: that is this loop's job.
         state.thunder.erase(std::remove_if(state.thunder.begin(), state.thunder.end(),
-                                [&](uint64_t h) { return !engine.isPlaying(h); }),
+                                [&](uint64_t h)
+                                {
+                                    if (engine.isPlaying(h)) return false;
+                                    engine.stop(h);
+                                    return true;
+                                }),
                             state.thunder.end());
 
         for (size_t i = 0; i < state.pending.size();)
