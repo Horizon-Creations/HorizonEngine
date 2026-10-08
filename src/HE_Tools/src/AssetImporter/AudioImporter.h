@@ -69,4 +69,49 @@ public:
 		const std::filesystem::path& contentRoot,
 		const std::filesystem::path& relativeOutputDir = {})
 	{ return import(sourcePath, contentRoot, relativeOutputDir, ImportSettings{}); }
+
+	// ─── Extract ─────────────────────────────────────────────────────────────
+	// The Audio Editor's "Extract Selection": a range of a clip becomes a NEW
+	// audio asset of its own. The clip it was cut from is only read — its file is
+	// never opened for writing, so it stays byte-identical.
+	//
+	// The new asset is int16 PCM made of exactly the frames [beginFrame,
+	// endFrame) of `clip`, which must be PCM16 (the editor hands in its decoded
+	// copy of a Vorbis clip — there is no Vorbis encoder to cut the stream with).
+	// It gets a fresh UUID and a file name nothing in the folder has yet
+	// (uniqueOutputPath), and records NO source file: the source the original was
+	// imported from is the whole clip, and a Reimport that went back to it would
+	// silently replace the extract with everything it was cut from.
+	struct ExtractResult
+	{
+		std::string path;     // content-relative, forward slashes
+		HE::UUID    id;
+		uint64_t    frames = 0;
+		size_t      clampedSamples = 0;   // baking a curve above unity drove these past full scale
+	};
+	// `edit` is what the new asset carries (AudioEdit::forRange of the original's
+	// edit — bus, EQ and the curve over the range). False, writing nothing, for a
+	// clip that is not PCM16, an empty or out-of-range selection, or a failed write.
+	//
+	// `bakeCurve`: the ORIGINAL clip's volume curve, to be multiplied into the new
+	// samples (AudioEnvelope::applyPcm16, against the original's frame numbers —
+	// the very gain a voice of the original applies there, so the extract sounds
+	// as the range played). The new asset then must not carry a curve on top:
+	// its edit's envelope is cleared, whatever `edit` said. nullptr = the samples
+	// are copied as they are and `edit`'s curve rides along as an edit.
+	static bool extractRange(const AudioAsset&            clip,
+	                         uint64_t                     beginFrame,
+	                         uint64_t                     endFrame,
+	                         const std::filesystem::path& contentRoot,
+	                         const std::filesystem::path& relativeOutputDir,
+	                         const std::string&           stem,
+	                         const HE::AudioEdit&         edit,
+	                         ExtractResult&               out,
+	                         const HE::AudioEnvelope*     bakeCurve = nullptr);
+
+	// The first of "<dir>/<stem>.hasset", "<dir>/<stem>_2.hasset", "_3", … that
+	// does not exist under `contentRoot` (content-relative, forward slashes).
+	static std::string uniqueOutputPath(const std::filesystem::path& contentRoot,
+	                                    const std::filesystem::path& relativeOutputDir,
+	                                    const std::string&           stem);
 };

@@ -739,9 +739,19 @@ public:
     // never has to pre-check: the preview shows the primitive instead. The CALLER
     // owns getting the asset into the ContentManager (the editor streams it
     // asynchronously and shows progress) — this does no blocking disk I/O.
+    //
+    // `timeSeconds` is the clock the material's Time input (and Panner / Wind
+    // Sway / the engine water's waves) reads. Negative = a frozen still, the
+    // default: Time is 0 and there is no wind, so the same call always draws the
+    // same picture (what the Content Browser thumbnails rely on). Zero or more =
+    // a live preview at that engine time, with the scene's wind
+    // (EnvironmentSettings) riding along like it does in the viewport, so the
+    // Material Editor can step it every frame and a water or wind-sway material
+    // moves the way it will in the scene.
     virtual void* RenderMaterialPreview(class ContentManager& /*cm*/, const HE::UUID& /*materialId*/,
                                         uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/,
-                                        int /*shape*/ = 0, const HE::UUID& /*meshId*/ = HE::UUID{})
+                                        int /*shape*/ = 0, const HE::UUID& /*meshId*/ = HE::UUID{},
+                                        float /*timeSeconds*/ = -1.0f)
     { return nullptr; }
 
     // ── Skeletal mesh preview ──────────────────────────────────────────────

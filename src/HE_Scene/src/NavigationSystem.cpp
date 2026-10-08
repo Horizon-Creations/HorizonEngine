@@ -409,16 +409,25 @@ namespace
     // Shared by the per-frame update and moveTo() on purpose: a script asking
     // "can this NPC get there" and the system's own re-planning must never
     // disagree about what is reachable.
+    //
+    // `navOffset` is what turns a world position into navmesh space: the
+    // world's floating origin (HorizonWorld::origin). The navmesh is baked in
+    // the editor, where the origin never moves, so its coordinates are absolute;
+    // a game that moved its origin has to add it on the way in and take it off
+    // the waypoints on the way out.
     bool planPath(NavAgentComponent& agent, const glm::vec3& worldPos,
-                  dtNavMeshQuery& query, std::uint32_t id)
+                  dtNavMeshQuery& query, std::uint32_t id,
+                  const glm::vec3& navOffset = glm::vec3(0.0f))
     {
         const dtQueryFilter filter;
         // Search box around each end: an agent standing slightly above the floor
         // or a target clicked a metre off the mesh still finds its polygon.
         const float extents[3] = { 2.0f, 4.0f, 2.0f };
 
-        const float startPos[3] = { worldPos.x, worldPos.y, worldPos.z };
-        const float endPos[3]   = { agent.targetPos.x, agent.targetPos.y, agent.targetPos.z };
+        const glm::vec3 navStart = worldPos + navOffset;
+        const glm::vec3 navEnd   = agent.targetPos + navOffset;
+        const float startPos[3] = { navStart.x, navStart.y, navStart.z };
+        const float endPos[3]   = { navEnd.x, navEnd.y, navEnd.z };
 
         dtPolyRef startRef, endRef;
         float nearestStart[3], nearestEnd[3];
@@ -467,7 +476,8 @@ namespace
 
         agent.path.clear();
         for (int i = 0; i < straightPathLen; ++i)
-            agent.path.push_back({ straightPath[i*3+0], straightPath[i*3+1], straightPath[i*3+2] });
+            agent.path.push_back(glm::vec3(straightPath[i*3+0], straightPath[i*3+1], straightPath[i*3+2])
+                                 - navOffset);
 
         // Skip the first waypoint — it is the start position (nearestStart),
         // not a future goal. Start from index 1 if possible.
@@ -509,7 +519,7 @@ bool NavigationSystem::moveTo(HorizonWorld& world, entt::entity e, const glm::ve
     NavMeshComponent* nmc = sceneNavMesh(reg);
     const bool planned = nmc && nmc->navQuery &&
                          planPath(*agent, HE::worldPositionOf(world, e), *nmc->navQuery,
-                                  static_cast<std::uint32_t>(e));
+                                  static_cast<std::uint32_t>(e), glm::vec3(world.origin()));
     if (!planned)
     {
         if (!nmc || !nmc->navQuery)
@@ -643,7 +653,7 @@ void NavigationSystem::update(HorizonWorld& world, float dt, PhysicsWorld* physi
         // No path, or the one it had was just thrown away: find one. Same search
         // a script's moveTo() runs, so an agent that started walking by itself
         // and one that was told to cannot end up on different routes.
-        if (!agent.hasPath && !planPath(agent, worldPos, *query, id))
+        if (!agent.hasPath && !planPath(agent, worldPos, *query, id, glm::vec3(world.origin())))
         {
             releaseCharacter();
             continue;

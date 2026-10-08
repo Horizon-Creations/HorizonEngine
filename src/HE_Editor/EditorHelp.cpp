@@ -244,11 +244,15 @@ namespace
 	  "", "rendering#lighting" },
 	{ "Material/Roughness", "",
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
-	  "that decides whether something reads as wet, polished or worn.",
+	  "that decides whether something reads as wet, polished or worn. On the "
+	  "engine water it is a parameter of its own: keep it low for sharp "
+	  "reflections and a tight sun glint.",
 	  "", "rendering#lighting" },
 	{ "Material/Opacity", "",
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
-	  "the transparent pass — so it no longer writes depth.",
+	  "the transparent pass — so it no longer writes depth. On the engine water "
+	  "(already transparent) the parameter of that name is the opacity looking "
+	  "straight down into clear water; depth tint, Fresnel and foam raise it.",
 	  "", "rendering#lighting" },
 	{ "Material/Slot Overrides", "Slot Overrides",
 	  "One picker per material slot of the entity's mesh (its LOD 0 mesh, when "
@@ -259,6 +263,77 @@ namespace
 	  "slot override wins over it. LOD levels follow along: their sections are "
 	  "matched to LOD 0's slots by material, else by position.",
 	  "", "materials#concept" },
+
+	// The engine water's knobs (Engine/Materials/Water.hasset, docs/water-shader-
+	// plan.md). They are rows of "Material Parameters (this entity)", whose label
+	// is the parameter's NAME — data, so editor_help_audit cannot see them;
+	// test_engine_materials walks the shipped asset's names against this table.
+	// Roughness and Opacity share the entries above with the Surface block.
+	{ "Material/ShallowColor", "",
+	  "Water colour where the view ray through the water is short — looking "
+	  "straight down. Blends toward Deep Color as the path through the water "
+	  "grows.",
+	  "", "materials#water" },
+	{ "Material/DeepColor", "",
+	  "Water colour where the view ray through the water is long — toward the "
+	  "horizon, or in murky water. Usually a darker, bluer version of Shallow "
+	  "Color.",
+	  "", "materials#water" },
+	{ "Material/Turbidity", "",
+	  "x = absorption per metre: higher is murkier, the deep colour arrives "
+	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
+	  "below the surface is not read yet.",
+	  "", "materials#water" },
+	{ "Material/WaveA", "",
+	  "The swell, the largest of three wave trains. x = direction in degrees "
+	  "(0 = +X, 90 = +Z), y = speed in m/s, z = wavelength in metres, "
+	  "w = steepness (0 is flat, about 0.4 is choppy). The waves bend the "
+	  "normal only, the mesh stays flat.",
+	  "", "materials#water" },
+	{ "Material/WaveB", "",
+	  "Second wave train, laid across the swell so the crests do not line up. "
+	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "
+	  "w = steepness. A steepness of 0 switches it off.",
+	  "", "materials#water" },
+	{ "Material/WaveC", "",
+	  "Fine ripples on top of the two larger trains. x = direction in degrees, "
+	  "y = speed in m/s, z = wavelength in metres, w = steepness.",
+	  "", "materials#water" },
+	{ "Material/FresnelPower", "",
+	  "How quickly the surface turns reflective toward grazing angles. 5 is "
+	  "physical water; lower values make the water mirror-like even when you "
+	  "look down into it.",
+	  "", "materials#water" },
+	{ "Material/Reflection", "",
+	  "How strongly sky and scene reflection cover the water. Scales both the "
+	  "Fresnel lift of the opacity and the specular strength, so 0 leaves only "
+	  "the water colour.",
+	  "", "materials#water" },
+	{ "Material/Specular", "",
+	  "Strength of the specular reflection for a non-metal (0.5 = F0 0.04). It "
+	  "is multiplied by Reflection; about 0.3 gives water's real F0 of 0.02.",
+	  "", "materials#water" },
+	{ "Material/Refraction", "",
+	  "How much the waves bend the view into the water: the depth tint and the "
+	  "caustics move with the waves. The scene behind the water is not "
+	  "distorted yet.",
+	  "", "materials#water" },
+	{ "Material/FoamColor", "",
+	  "Colour of the foam on the wave crests. Near-white reads as foam; a "
+	  "tinted value suits murky or polluted water.",
+	  "", "materials#water" },
+	{ "Material/Foam", "",
+	  "x = coverage, the share of the wave crests that foam (0 = none), "
+	  "y = strength 0..1, z = size of the noise that breaks it up, in metres, "
+	  "w = drift speed in m/s. Foam sits on the crests, not at the shore — "
+	  "there is no scene depth to find a shoreline yet.",
+	  "", "materials#water" },
+	{ "Material/Caustics", "",
+	  "The shimmering light pattern on the surface. x = strength (0 = off), "
+	  "y = pattern size in metres, z = speed, w = camera distance in metres at "
+	  "which the pattern has faded out, so it does not shimmer into moiré far "
+	  "away.",
+	  "", "materials#water" },
 
 	// ── Light ────────────────────────────────────────────────────────────────
 	{ "Light/Type", "",
@@ -790,8 +865,10 @@ namespace
 	{ "Audio Source/Asset ID", "", "The sound this source plays.", "", "systems#audio" },
 	{ "Audio Source/Bus", "",
 	  "Which mixer bus the sound goes through — music, sfx, voice — so a whole "
-	  "group can be turned down at once. Empty is the master bus.",
-	  "", "systems#audio" },
+	  "group can be turned down at once. Empty uses the bus the clip itself was "
+	  "given in the Audio Editor, or the master bus when it has none. A name the "
+	  "mixer does not have is skipped the same way, with a warning in the log.",
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Source/Volume", "", "Playback volume. 1 is the file as recorded.",
 	  "", "systems#audio" },
 	{ "Audio Source/Pitch", "",
@@ -2049,6 +2126,14 @@ namespace
 	  "Also the screenshot cameras of connected MCP clients (Remote Control): a "
 	  "frustum in the scene and an MCP #n tag over it, one per client.",
 	  "", "editor#viewport" },
+	{ "Viewport Show/Streaming Cells", "",
+	  "For a scene split into streaming cells: their squares on the ground and "
+	  "two rings around the camera. Green squares lie within the load radius, the "
+	  "game builds them from here; orange ones within the unload radius, it keeps "
+	  "them once built; grey ones it drops. The rings are the two radii. Nothing "
+	  "shows for a scene without cells. The numbers are in the profiler's "
+	  "Streaming tab.",
+	  "", "editor#viewport" },
 	{ "Viewport Show/Stats", "",
 	  "The frame's counters in the corner of the viewport: frame rate and frame "
 	  "time, draw calls, triangles, visible objects out of all of them, and GPU "
@@ -2271,6 +2356,30 @@ namespace
 	  "moved; a .hasset beside it records where it came from. Greyed out for an "
 	  "FBX/OBJ/COLLADA file when this build of the editor has no Assimp to read it.",
 	  "", "editor#content-browser" },
+	{ "Content Browser/Import to Project", "",
+	  "For source files inside the engine's own content (a sound, a picture, a "
+	  "model) — one, a whole selection, or a folder: copies them into this "
+	  "project's Content folder, in the same sub-folders, and imports the copies "
+	  "as new assets there. The engine's files are left as they are, and a name "
+	  "already taken in the project gets a number instead of being overwritten.",
+	  "", "editor#engine-content" },
+	{ "Content Browser/Import to Project...", "",
+	  "The same as Import to Project, but asks where first: pick a folder of the "
+	  "project, optionally name a new one, and say whether the engine's own "
+	  "sub-folders are kept underneath.",
+	  "", "editor#engine-content" },
+	{ "Import to Project/Content", "",
+	  "The project's Content root as the target folder. Pick a sub-folder below "
+	  "it to import there instead.",
+	  "", "editor#engine-content" },
+	{ "Import to Project/Import", "",
+	  "Copies the listed engine files into the target folder and imports the "
+	  "copies as new assets. The engine's own files are left as they are.",
+	  "", "editor#engine-content" },
+	{ "Import to Project/Keep the engine's folder structure", "",
+	  "On: Engine/Audio/click.wav lands in <target>/Audio/. Off: every file goes "
+	  "straight into the target folder.",
+	  "", "editor#engine-content" },
 	{ "Content Browser/Reimport", "",
 	  "Reads the source file again and rebuilds the asset from it — after the "
 	  "model was changed in the program it came from. A texture keeps its "
@@ -2526,6 +2635,13 @@ namespace
 	  "script's Set Bus Volume refer to, so keep it short and spell it the same "
 	  "way everywhere.",
 	  "", "systems#audio" },
+	{ "Audio Mixer/EQ", "Bus EQ",
+	  "Opens this bus's EQ under the strips; press again to close it. Lit while "
+	  "the EQ filters. It shapes everything the bus plays, after the sounds on it "
+	  "are mixed, with the same bands and graph as a clip's EQ in the Audio "
+	  "Editor, and a clip's own EQ comes first. Heard at once, saved with the "
+	  "project and used by the exported game.",
+	  "", "systems#audio-bus-eq" },
 	{ "Audio Mixer/Add Bus", "",
 	  "Creates the bus named on the left, at 0 dB, and saves it with the "
 	  "project.",
@@ -2576,6 +2692,12 @@ namespace
 	{ "Project Hub/Start the tutorial", "",
 	  "Creates a sandbox project and starts the guided tour in it. Nothing you "
 	  "build there is lost — it is an ordinary project.",
+	  "", "getting-started#first-project" },
+	{ "Project Hub/Include the HorizonCode chapter", "",
+	  "Whether the guided tour walks through HorizonCode, the visual scripting "
+	  "language. Untick it if you will write gameplay in Lua, Python or C++ — the "
+	  "tour then goes straight from the UI chapter to gameplay logic. Remembered "
+	  "for the next time the tour starts.",
 	  "", "getting-started#first-project" },
 	{ "Project Hub/Not now", "",
 	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
@@ -3305,26 +3427,50 @@ namespace
 	  "that, writing the scene is itself the pause it was meant to spare you.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Feedback", "",
-	  "When a save you made, a build or an import has just worked, the middle of "
+	  "When a save you made, a build, an import, a HorizonCode compile, a commit "
+	  "or push, or the last step of the tutorial has just worked, the middle of "
 	  "the footer says so for about a second and a half (\"Saved\", \"Build "
-	  "succeeded\", \"Imported 3 assets\") and then goes back to \"Ready\". "
+	  "succeeded\", \"Imported 3 assets\", \"Compiles clean\", \"Committed and "
+	  "pushed\", \"Tutorial complete\") and then goes back to \"Ready\". "
 	  "Nothing opens, nothing takes focus and nothing waits for it. Saves by an "
-	  "MCP client or a script, the autosave and failed builds show nothing (a "
-	  "failed build can have a sound of its own, see Build Failed Sound). Off: "
-	  "no feedback at all, no sound and no progress counted.",
+	  "MCP client or a script, the autosave, failed builds and compiles that "
+	  "found a problem show nothing (each can have a sound of its own, see "
+	  "Build Failed Sound and Compile Failed Sound). Off: no feedback at all, "
+	  "no sound, no pulse and no progress counted.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Compile Moment", "",
+	  "\"Compiles clean\" in the footer when the Compile button of a HorizonCode "
+	  "graph (level script, Game Instance, a class or a widget's script) found "
+	  "nothing that would keep it from shipping compiled. A compile that found "
+	  "a problem shows nothing here: the graph already jumps to the node. Off: "
+	  "not shown, but the day still counts as one you worked on.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Commit Moment", "",
+	  "\"Committed\", \"Pushed\" or \"Committed and pushed\" in the footer when "
+	  "a commit or push you started in the Source Control panel went through. "
+	  "Pull and fetch say nothing, and neither does a commit whose automatic "
+	  "push failed (the panel says why). Commits are counted per day for the "
+	  "Recent Days Tooltip. Off: not shown, still counted.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Tutorial Moment", "",
+	  "\"Tutorial complete\" in the footer once, when the last step of the "
+	  "interactive tutorial is done. Single steps keep their own \"Done.\" in "
+	  "the tutorial card. Off: not shown, still counted.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Visual Cues", "",
 	  "The moment's line in the middle of the footer (\"Saved\", \"Build "
 	  "succeeded\", \"Imported 3 assets\") and the thin line under it, with its "
 	  "check mark and light edge below. Off: the footer stays on \"Ready\" and "
 	  "the progress counters, the sound (if on) still plays and counting goes "
-	  "on. The tab check and the import highlight have switches of their own.",
+	  "on. The tab check, the import highlight and the problem pulse have "
+	  "switches of their own.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Check Mark", "",
 	  "A small check drawn beside the footer line, so \"it worked\" does not "
 	  "rest on the green alone. It is written in a sixth of a second, or "
 	  "appears whole with reduced motion, and fades with the line. Saving "
-	  "again right after does not draw it again.",
+	  "again right after does not draw it again. The same check is written "
+	  "into a HorizonCode graph's \"compiles clean\" readout after Compile.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Light Edge", "",
 	  "One thin line of light along the top edge of the footer that spreads "
@@ -3351,8 +3497,10 @@ namespace
 	  "blinks either way.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Sound", "",
-	  "Short, quiet sounds when a save, a build or an import worked, and when a "
-	  "build failed; each can be switched off below. Off by default, and works "
+	  "Short, quiet sounds when a save, a build, an import, a HorizonCode "
+	  "compile, a commit or push or the tutorial worked, when a build or a "
+	  "compile failed, and when a problem arrives while you are in another "
+	  "app; each can be switched off below. Off by default, and works "
 	  "with or without Visual Cues. At most one sound every two seconds; saves "
 	  "are heard at most every twenty seconds, and the same moment again right "
 	  "after is not heard at all. Silent during Play. The editor plays these on "
@@ -3382,9 +3530,54 @@ namespace
 	  "A short pop when files were imported as assets. The same sound for one "
 	  "file or fifty.",
 	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Compile Sound", "",
+	  "Two short notes stepping up when the Compile button of a HorizonCode "
+	  "graph found nothing to fix. It plays with the editor in front, since the "
+	  "compile runs on your click; quieter than the build chime.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Compile Failed Sound", "",
+	  "The same two notes stepping down, with a softer start, when the Compile "
+	  "button found a problem. The graph jumps to the node and its red halo "
+	  "pulses once (Problem Pulse); the sound is for when you look away while "
+	  "it runs. No buzzer, no low note.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Commit Sound", "",
+	  "Three rising notes when a commit or push you started in the Source "
+	  "Control panel went through. Like the build sounds it only plays while "
+	  "the editor is in the background: a push can take a while, and one you "
+	  "watched finish needs no sound.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Tutorial Sound", "",
+	  "The build chime with a third note on top when the last step of the "
+	  "interactive tutorial is done. Once per run through the tutorial.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Problem Sound", "",
+	  "Two quiet knocks when a new problem arrives in the notifications behind "
+	  "the footer bell, played only while the editor is in the background (in "
+	  "front of it the bell's ring says it, see Problem Pulse) and at most once "
+	  "every thirty seconds, however many errors arrive at once.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Drag and Drop Sound", "",
+	  "Short, quiet cues for drag and drop in the HorizonCode graphs (Level "
+	  "Script, Game Instance, classes, widget graphs): a blip when a wire or a "
+	  "variable is picked up, a light tick over a pin it would connect to and a "
+	  "muted one over a pin it would not, a snap when it lands and a falling "
+	  "blip when the drop is cancelled or refused. Once per event, never per "
+	  "frame; dragging a node around stays silent. Same volume and mute as the "
+	  "other feedback sounds. Preview plays all five in a row.",
+	  "", "horizoncode#graphs" },
+	{ "Preferences/Feedback/Problem Pulse", "",
+	  "When a new problem arrives in the notifications, one thin ring widens "
+	  "around the footer bell and fades within about half a second; with "
+	  "reduced motion it only fades. When a HorizonCode compile found a "
+	  "problem, the red halo of the node it jumps to brightens once. One "
+	  "pulse each, never a blink; the bell's colour and count stay as they "
+	  "were.",
+	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Preview", "",
 	  "Play this sound once at the current volume, whether its switch is on or "
-	  "not, so you can hear it without waiting for a save, build or import.",
+	  "not, so you can hear it without waiting for a save, build, import, "
+	  "compile, commit or problem.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Mute Editor Sounds", "",
 	  "Silence the sounds the editor plays on its own output (the feedback "
@@ -3394,8 +3587,9 @@ namespace
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Show Progress", "",
 	  "Beside \"Ready\" in the footer: how many builds succeeded today, and from "
-	  "the second day on how many days in a row you have saved, built or "
-	  "imported something. A day counts from its first such action, not from "
+	  "the second day on how many days in a row you have saved, built, "
+	  "imported, compiled or committed something or finished the tutorial. A "
+	  "day counts from its first such action, not from "
 	  "opening the editor. No points, no levels, nothing shared: the numbers "
 	  "stay in this computer's editor settings. Off hides them; they keep "
 	  "counting while Success Feedback is on, and Success Feedback off stops "
@@ -3409,9 +3603,11 @@ namespace
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Recent Days Tooltip", "",
 	  "Rest the mouse on the counters beside \"Ready\" to see the last seven "
-	  "days: a dot for each day you saved, built or imported something, and "
-	  "that day's successful builds. It only appears while you hover, never "
-	  "on its own.",
+	  "days: a dot for each day you saved, built, imported, compiled or "
+	  "committed something or finished the tutorial, that day's successful "
+	  "builds, and in green below them its commits (a row that only appears "
+	  "once there were any). It only appears while you hover, never on its "
+	  "own.",
 	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "
@@ -3476,10 +3672,9 @@ namespace
 	  "hosting side; the other direction is the awkward one.",
 	  "", "editor#preferences" },
 	{ "Source Control/Create & push", "Create & push",
-	  "Creates the repository on GitHub with the token above, points this project "
-	  "at it and pushes what is committed. The token is handed to git's "
-	  "credential helper and wiped from the field, never written to a project "
-	  "file.",
+	  "Creates the repository on the GitHub account you signed in with above, "
+	  "points this project at it and pushes what is committed. Needs the GitHub "
+	  "sign-in; there is no token to type.",
 	  "", "editor#preferences" },
 	// "Clone from GitHub..." and the dialog it opens (GitCloneDialog.cpp), which
 	// pushes this same scope — the reverse of Create & push, one chapter.
@@ -3488,20 +3683,15 @@ namespace
 	  "is cloned into a new folder, Git LFS assets included, and opened as a "
 	  "project. The project open now is not touched.",
 	  "", "editor#preferences" },
-	{ "Source Control/Load my repositories", "",
-	  "Asks GitHub for every repository the token above can see — yours, and "
-	  "those of organisations you belong to — newest first. The token is sent in "
-	  "a request header only, never in an address.",
-	  "", "editor#preferences" },
 	{ "Source Control/Browse##clone", "Browse",
 	  "Choose the folder the clone goes INTO. A new folder with the name below "
 	  "is made there for the repository.",
 	  "", "editor#preferences" },
 	{ "Source Control/Clone", "",
 	  "Clones the chosen repository into the folder shown above it, which must "
-	  "be new or empty, then downloads its Git LFS assets. The token goes to "
-	  "git's credential helper, so later pushes and pulls need no retyping. "
-	  "Once started it cannot be stopped.",
+	  "be new or empty, then downloads its Git LFS assets. It uses your GitHub "
+	  "sign-in, and so do later pushes and pulls. Once started it cannot be "
+	  "stopped.",
 	  "", "editor#preferences" },
 	{ "Source Control/Download LFS assets again", "",
 	  "The repository was cloned but its large files were not downloaded — "
@@ -3518,10 +3708,48 @@ namespace
 	  "when somebody else made the repository.",
 	  "", "editor#preferences" },
 	{ "Source Control/Save token", "Save token",
-	  "Stores an access token for pushing and pulling. It goes straight into the "
-	  "system keychain through git's credential helper; the engine keeps no copy "
-	  "and no project or engine file ever contains it.",
+	  "Stores an access token for pushing and pulling on GitLab, Azure DevOps "
+	  "and other hosts (github.com uses the GitHub sign-in instead). It goes "
+	  "straight into the system keychain through git's credential helper; the "
+	  "engine keeps no copy and no project or engine file ever contains it.",
 	  "", "editor#preferences" },
+	// The GitHub sign-in (GitHubSignIn.cpp, GitHubSignInView.cpp): the account
+	// row on this page and in the clone dialog, and the code dialog itself.
+	{ "Source Control/Sign in with GitHub...", "Sign in with GitHub",
+	  "Signs the editor in to your GitHub account without a token to create by "
+	  "hand. You get a short code, approve it on github.com in your browser, and "
+	  "the editor receives access to your repositories and gists. It is kept in "
+	  "git's credential helper (the system keychain), where git finds it for "
+	  "every push and pull.",
+	  "", "editor#github" },
+	{ "Source Control/Sign out", "Sign out",
+	  "Removes the GitHub token from git's credential helper, so neither the "
+	  "editor nor git on this machine uses it any more. GitHub still lists "
+	  "Horizon Engine under Settings \xe2\x96\xb8 Applications until you revoke it "
+	  "there.",
+	  "", "editor#github" },
+	{ "Source Control/Copy code & open GitHub", "Copy code & open GitHub",
+	  "Puts the code on the clipboard and opens GitHub's device page in your "
+	  "browser. Paste the code there and approve. The editor notices on its own.",
+	  "", "editor#github" },
+	{ "Source Control/Copy code", "Copy code",
+	  "Puts the code on the clipboard, for when the browser is on another "
+	  "machine or already open.",
+	  "", "editor#github" },
+	{ "Source Control/Get a new code", "Get a new code",
+	  "The old code ran out (they last about fifteen minutes). Asks GitHub for a "
+	  "fresh one.",
+	  "", "editor#github" },
+	{ "Source Control/Try again", "Try again",
+	  "Starts the sign-in over with a fresh code.",
+	  "", "editor#github" },
+	// The clone dialog's "Load my repositories", shown once signed in. The
+	// suffix stayed from when a token field had a button of the same name.
+	{ "Source Control/Load my repositories##signin", "Load my repositories",
+	  "Asks GitHub for every repository your sign-in can see \xe2\x80\x94 yours, and "
+	  "those of organisations you belong to \xe2\x80\x94 newest first. No token to "
+	  "type: the editor reads the sign-in from git's credential helper.",
+	  "", "editor#github" },
 	{ "Source Control/Push automatically after each commit", "",
 	  "Send every commit to the remote as it is made. Convenient alone, and a "
 	  "way to publish half-finished work when several people share the branch.",
@@ -3899,6 +4127,19 @@ namespace
 	  "", "systems#physics" },
 	{ "Physics/Earth", "Earth",
 	  "Puts gravity back to 0, −9.81, 0.",
+	  "", "systems#physics" },
+	{ "Physics/Floating origin radius", "Floating origin radius",
+	  "Positions are 32-bit floats: 30 km from the origin objects start to shake "
+	  "by a pixel, at 250 km a walking step is rounded away. With a radius set, "
+	  "the exported game moves the whole world back by whole multiples of it "
+	  "once the camera is further out than this on any axis — entities, physics "
+	  "bodies, particles, trails, rain, the rig camera, nav agents — and keeps "
+	  "the absolute offset itself. Savegames and multiplayer carry absolute "
+	  "positions, the navmesh is queried with the offset added.\n\n"
+	  "0 is off, the default. What does not move along: positions a script "
+	  "keeps in its own variables, keyframes that set a top-level entity's "
+	  "position, and GPU particles — each jumps by the shift. The editor and its "
+	  "Play keep absolute coordinates. 5 000–10 000 m is a good radius.",
 	  "", "systems#physics" },
 	// ── Audio ▸ Buses ────────────────────────────────────────────────────────
 	{ "Audio Buses/Open Audio Mixer", "Open Audio Mixer",
@@ -5112,7 +5353,9 @@ namespace
 	  "", "ui#designer" },
 
 	// ── The widget's Pre Construct, run while designing ──────────────────────
-	{ "ui.pre-construct", "Pre Construct",
+	// A Preferences ▸ Editor ▸ Panels ▸ Widgets checkbox; it used to be a cell on
+	// the designer's toolbar.
+	{ "Widgets/Run Pre Construct", "",
 	  "Runs the widget's Pre Construct event on the canvas, the way the game "
 	  "runs it before the first frame, so text and colours your graph sets show "
 	  "here too. Embedded widgets run theirs as well. Only Pre Construct runs, "
@@ -5911,15 +6154,23 @@ namespace
 	  "sees it. Left alone, the input keeps the default shown here. Public "
 	  "variables only.",
 	  "", "ui#graph" },
-	{ "UI Variable/Pull on Construct", "",
-	  "Fills this variable from somewhere else the moment the widget is created, "
-	  "before PreConstruct runs. Once, not continuously. When the source cannot "
+	{ "UI Variable/Source Mode", "",
+	  "Pull on Construct fills this variable from somewhere else the moment the "
+	  "widget is created, before PreConstruct runs, once. Bind To keeps it "
+	  "following the source: at the end of every frame a changed source value "
+	  "is written here, in time for that frame's picture. When the source cannot "
 	  "answer, the default (now called Fallback) stays, and the log says why "
 	  "once per widget class.",
 	  "", "ui#graph" },
 	{ "UI Variable/Source", "",
 	  "Game Instance: one of its public variables. Creator: a public variable of "
-	  "whoever ran the Create Widget that made this one.",
+	  "whoever ran the Create Widget that made this one. Reference (Bind To "
+	  "only): a public variable of whatever an object variable of this widget "
+	  "holds.",
+	  "", "ui#graph" },
+	{ "UI Variable/Reference", "",
+	  "The object variable to bind through. Whatever it holds is the source; "
+	  "empty means the Initial Value stays, without a warning.",
 	  "", "ui#graph" },
 	{ "UI Variable/Creator Class", "",
 	  "The class expected to create this widget. It fills the Variable list and "
@@ -6560,6 +6811,24 @@ namespace
 	  "is slow on the CPU. It appears only when the frames on screen carry GPU "
 	  "times at all.",
 	  "", "editor#profiler" },
+	{ "Profiler/Show the cells in the Scene window", "",
+	  "The same switch as Show > Streaming Cells in the Scene window: the cell "
+	  "squares on the ground, coloured by what the game would load, keep or drop "
+	  "from the editor camera, and the load and unload radius around it.",
+	  "", "editor#profiler" },
+	{ "Profiler/Split into Streaming Cells", "",
+	  "Moves the scene's placed things (meshes, point and spot lights, static "
+	  "bodies, decals) into one scene file per grid square, next to the scene in "
+	  "a folder named after it. The rest stays: sky, terrain, cameras, scripts, "
+	  "characters, dynamic bodies, prefab instances. The game then loads the "
+	  "squares around its camera and drops the far ones. One undo step; save the "
+	  "scene to keep it. The scene has to have been saved once.",
+	  "", "editor#profiler" },
+	{ "Profiler/Merge Cells into the Scene", "",
+	  "Loads every cell of a split scene back into it as ordinary entities and "
+	  "drops the cell list, so the scene is one piece again and everything in it "
+	  "can be edited. Split again when done. One undo step; save to keep it.",
+	  "", "editor#profiler" },
 	{ "Profiler/Fit", "",
 	  "Resets the timeline's zoom and pan so the whole capture fits the view "
 	  "again. The way back after wheel-zooming into one span.",
@@ -6735,12 +7004,182 @@ namespace
 	  "How loud this tab plays the clip, from silent to twice the recorded level. "
 	  "It moves a preview that is already running. Preview only: an Audio Source "
 	  "component in the scene carries its own volume.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Pitch", "Preview Pitch",
 	  "Playback rate for the preview, from a quarter speed to double. Speed and "
 	  "pitch move together, so raising it both shortens the clip and lifts it. "
 	  "Preview only, like the volume above it.",
-	  "", "systems#audio" },
+	  "", "systems#audio-editor" },
+	// The waveform canvas (AudioWaveformView.cpp) and the toolbar above it.
+	// Toolbar cells and canvas strips have no visible label, so these are
+	// looked up by key.
+	{ "Audio Editor/Waveform", "Waveform",
+	  "One lane per channel, drawn from the loudest and quietest sample under "
+	  "each pixel. Drag across it to select a range; the readout under the "
+	  "canvas gives its start, end and length in time and in frames. A click "
+	  "without a drag puts the playhead there and drops the selection. "
+	  "Shift-click stretches the selection to the pointer, or makes one from "
+	  "the playhead. Press on an edge of the selection to move just that edge. "
+	  "The wheel zooms around the pointer, Shift+wheel or a middle-drag pans; "
+	  "on a trackpad the swipe pans and Cmd/Ctrl+scroll zooms. Zoomed in far "
+	  "enough, the single samples appear as points. With Curve switched on in "
+	  "the toolbar the lanes edit the volume curve instead of the selection.",
+	  "", "systems#audio-editor" },
+	{ "Audio Editor/Ruler", "Time ruler",
+	  "Drag along it to scrub: the playhead follows the pointer, and a clip "
+	  "that is playing jumps with it. Unlike the waveform below it, the ruler "
+	  "never touches the selection. The labels are time, or frame numbers with "
+	  "Samples switched on in the toolbar.",
+	  "", "systems#audio-editor" },
+	{ "Audio Editor/Overview", "Overview",
+	  "The whole clip in one strip, with the part the canvas shows framed, the "
+	  "selection shaded and the playhead as a line. Drag the frame to scroll, "
+	  "or click beside it to bring that part of the clip into view.",
+	  "", "systems#audio-editor" },
+	{ "Audio Editor/Play", "Play / Pause",
+	  "Plays the selection if there is one, otherwise the clip as the game plays "
+	  "it: the trimmed part, or all of it when it has no trim. It starts at the "
+	  "playhead when that sits inside the range and at the range's start when it "
+	  "does not. With Loop on, the selection repeats on its own. Marking a new "
+	  "selection while it plays restarts playback on the new range. Pause "
+	  "keeps the position. Greyed out when the editor has no audio device.",
+	  "", "systems#audio-editor" },
+	{ "Audio Editor/Stop", "",
+	  "Stops playback and puts the playhead back to the start of the selection, "
+	  "or of the trim, or of the clip when there is neither.",
+	  "", "systems#audio-editor" },
+	{ "Audio Editor/Trim", "Trim to Selection",
+	  "Keeps only the selected range: from now on the clip plays from the start "
+	  "of the selection to its end, in this tab and wherever the game plays it. "
+	  "Nothing is deleted. The rest stays in the asset, shaded on the waveform, "
+	  "and Clear Trim brings it back. Ctrl+Z (Cmd+Z) undoes it, and Save writes "
+	  "it into the asset. Only an imported asset can be trimmed: a source "
+	  ".wav or .ogg has nowhere to keep a trim, and engine content is read-only.",
+	  "", "systems#audio-trim" },
+	{ "Audio Editor/Clear Trim", "",
+	  "Removes the trim, so the whole clip plays again. Undoable like the trim "
+	  "itself.",
+	  "", "systems#audio-trim" },
+	{ "Audio Editor/Extract", "Extract Selection",
+	  "Writes the selected range as a new audio asset next to this one, named "
+	  "after it with _extract (then _extract_2 and so on, never over an existing "
+	  "file). The new asset is PCM with exactly the selected frames, a new id of "
+	  "its own and the same bus and EQ. Over its range it also keeps the volume "
+	  "curve. The clip you cut from is left exactly as it was. The new asset has "
+	  "no source file, so Reimport cannot overwrite it with the whole recording. "
+	  "Engine content goes into the project's own Content/Audio. With Bake Curve "
+	  "into Extract ticked, the curve is multiplied into the new samples instead.",
+	  "", "systems#audio-trim" },
+	{ "Audio Editor/Bake Curve into Extract", "",
+	  "Extract writes the selection with the volume curve already applied to the "
+	  "samples, so the new clip sounds exactly as the range plays here and needs "
+	  "no curve of its own. Off, the samples are copied untouched and the curve "
+	  "goes along as an edit you can still change. Where the curve lifts a loud "
+	  "passage past full scale, those samples are clipped, and the status line "
+	  "says how many. Only shown when the clip has a curve.",
+	  "", "systems#audio-trim" },
+	{ "Audio Editor/Curve", "Volume Curve",
+	  "Switches the waveform to editing the clip's volume curve, drawn in yellow "
+	  "on a dB scale from silence at the bottom to +12 dB at the top. Click to add "
+	  "a point, drag a point to move it (hold Shift to change only its gain), "
+	  "right-click or double-click a point, or press Delete, to remove it. The "
+	  "gain of the point under the pointer is shown beside it, and the readout "
+	  "gives the curve's gain at the pointer. The curve is heard at once in the "
+	  "preview, and it applies wherever the game plays the clip. It is an edit "
+	  "like the trim: undoable, saved with the asset, the samples untouched.",
+	  "", "systems#audio-curve" },
+	{ "Audio Editor/Linear", "",
+	  "The segment from the selected curve point to the next one becomes a "
+	  "straight line in level. Click a point with Curve on to select it.",
+	  "", "systems#audio-curve" },
+	{ "Audio Editor/Smooth", "",
+	  "The segment from the selected curve point to the next one becomes an eased "
+	  "curve, flat at both ends, so the level glides in and out without a corner.",
+	  "", "systems#audio-curve" },
+	{ "Audio Editor/Clear Curve", "",
+	  "Removes every point of the volume curve, so the clip plays at its own "
+	  "level again. Undoable.",
+	  "", "systems#audio-curve" },
+	// Bus and EQ (AudioMixView.cpp). Unlabelled cells, looked up by key.
+	{ "Audio Editor/Bus", "Mixer Bus",
+	  "The Audio Mixer bus this clip plays through, wherever the game plays it: "
+	  "its fader, mute and solo apply to it. The list is the project's own, the "
+	  "one Window > Audio Mixer edits. An Audio Source whose Bus field names a "
+	  "bus still overrides this for that source. When the bus has since been "
+	  "removed or renamed in the mixer, it is shown as missing and the clip plays "
+	  "on Master; the name is kept, so the clip finds the bus again if it comes "
+	  "back. The preview in this tab plays through the same bus. Undoable, saved "
+	  "with the asset.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/EQ", "Show EQ",
+	  "Shows the clip's EQ under the waveform: the response curve and one row per "
+	  "band. The EQ is an edit like the trim and the curve: heard at once in the "
+	  "preview, applied wherever the game plays the clip, undoable, saved with "
+	  "the asset, the samples untouched. Hiding the pane does not switch it off; "
+	  "EQ On does.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/EQ On", "",
+	  "Switches the whole EQ in or out. Off keeps every band as it is but filters "
+	  "nothing, which is the quickest way to compare the sound with and without it.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/Add Band", "",
+	  "Adds a bell band at 0 dB at a frequency no other band uses yet, so it "
+	  "changes nothing until you drag it. Up to eight bands.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/EQ Graph", "EQ response",
+	  "The EQ's summed response, from 20 Hz to 20 kHz on a log axis and ±18 dB. "
+	  "Each numbered handle is a band: drag it to move its frequency and gain, "
+	  "use the wheel over it to change its width (Q), right-click it to remove "
+	  "it. Double-click an empty spot to add a bell there. The faint line is the "
+	  "selected band on its own. For a clip, a shaded part on the right lies above "
+	  "its Nyquist frequency, half its sample rate: nothing can be shaped there, "
+	  "because the clip holds nothing that high. In the Audio Mixer the same graph "
+	  "shapes a whole bus.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/Band On", "",
+	  "Switches this band in or out without losing its settings.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/Band Type", "",
+	  "Bell lifts or cuts around its frequency. Low Shelf and High Shelf lift or "
+	  "cut everything below or above it. Low Pass and High Pass cut away "
+	  "everything above or below it; they have no gain, and Q sets how sharp "
+	  "the corner is.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/Band Frequency", "",
+	  "The band's centre or corner frequency, 10 Hz to 22 kHz. Drag, or "
+	  "double-click to type a value.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/Band Gain", "",
+	  "How far the band lifts or cuts, from -24 to +24 dB. Greyed out for the "
+	  "pass filters, which only cut.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/Band Q", "",
+	  "The band's width: low values shape a broad region, high values a narrow "
+	  "one. For the pass filters it is the resonance at the corner; 0.71 is the "
+	  "plain, flat one.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/Remove Band", "",
+	  "Deletes this band. Undoable.",
+	  "", "systems#audio-bus-eq" },
+	{ "Audio Editor/Loop", "",
+	  "Whether playback wraps round at the end or stops there. With a selection "
+	  "it loops exactly the selected range, which is the quickest way to hear "
+	  "whether a cut point will click. Preview only: how a sound loops in the "
+	  "game is the Loop switch on its Audio Source.",
+	  "", "systems#audio-editor" },
+	{ "Audio Editor/Zoom to Selection", "",
+	  "Fills the canvas with the selection, with a sliver of room either side "
+	  "so both edges stay visible. Greyed out when nothing is selected.",
+	  "", "systems#audio-editor" },
+	{ "Audio Editor/Fit", "",
+	  "The whole clip across the canvas again, from the start. The way back "
+	  "after zooming into a long clip.",
+	  "", "systems#audio-editor" },
+	{ "Audio Editor/Samples", "",
+	  "Labels the ruler with frame numbers instead of time. A frame is one "
+	  "sample on every channel; frame 48,000 of a 48 kHz clip is one second in. "
+	  "The readout under the canvas always shows both.",
+	  "", "systems#audio-editor" },
 	{ "Audio Editor/Import as Audio Asset", "",
 	  "Turns the source .wav or .ogg open in this tab into an asset the project "
 	  "can reference, at the path printed under the button. It only appears for a "
@@ -7015,6 +7454,16 @@ namespace
 	  "calls its own handler after the Set. Untick and tick again and the "
 	  "existing function is kept, not duplicated.",
 	  "", "horizoncode#functions" },
+	{ "Script Variable/Notify on Change", "",
+	  "The variable reports its own change. At the end of every frame the engine "
+	  "compares it with the value it had at the end of the last one, and when it "
+	  "moved, calls OnChanged_<variable> with the old value as its one parameter "
+	  "(ticking the box writes that function for you, private). Instances bound "
+	  "to this one with Bind Event get the event <variable>Changed with the new "
+	  "value. It does not matter what wrote it: a node, Bind To, the network or a "
+	  "save. Several writes in one frame report once, a write undone in the same "
+	  "frame not at all, and the starting value (default, pull, Construct) never.",
+	  "", "horizoncode#functions" },
 	{ "Script Variable/Save Game", "",
 	  "Part of the savegame. When an entity running this class has a Save State "
 	  "component, entity.saveState writes this variable's value into the active "
@@ -7023,20 +7472,32 @@ namespace
 	  "at something that exists only in this run — save a name or an id "
 	  "instead.",
 	  "", "horizoncode#functions" },
-	// Pull on Construct (HcPullUi draws it; the same block sits in the widget
-	// editor under "UI Variable/" below).
-	{ "Script Variable/Pull on Construct", "",
-	  "Fills this variable from somewhere else the moment an instance is created, "
-	  "before any of its own events run: PreConstruct, Construct and BeginPlay "
-	  "already see the pulled value. It happens once; a later change at the "
-	  "source does not follow. When the source cannot answer, the default below "
-	  "(now called Fallback) stays, and the log says why once per class.",
+	// Pull on Construct and Bind To (HcPullUi draws them; the same block sits
+	// in the widget editor under "UI Variable/" below).
+	{ "Script Variable/Source Mode", "",
+	  "Whether this variable takes its value from somewhere else. Pull on "
+	  "Construct fills it once, the moment an instance is created, before any of "
+	  "its own events run: PreConstruct, Construct and BeginPlay already see the "
+	  "pulled value, and a later change at the source does not follow. Bind To "
+	  "does the same and then keeps following: at the end of every frame, when "
+	  "the source has changed, the new value is written here (a value you set "
+	  "yourself stays until the source changes again). When the source cannot "
+	  "answer, the default below (now called Fallback) stays, and the log says "
+	  "why once per class. Bind To is not offered on a Replicated variable.",
 	  "", "horizoncode#functions" },
 	{ "Script Variable/Source", "",
 	  "Where the value comes from. Game Instance: one of its public variables, "
 	  "which exist before anything else is created. Creator: a public variable of "
 	  "whoever ran the Create Object or Create Widget that made this instance. A "
-	  "placed object has no creator and keeps its fallback.",
+	  "placed object has no creator and keeps its fallback. Reference (Bind To "
+	  "only): a public variable of whatever one of this class's object variables "
+	  "holds right now.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Reference", "",
+	  "The object variable of this class to bind through. Whatever it holds is "
+	  "the source; point it at another object and the value follows that one. "
+	  "While it is empty the variable keeps its Initial Value, without a "
+	  "warning. Its declared class fills the Variable list.",
 	  "", "horizoncode#functions" },
 	{ "Script Variable/Creator Class", "",
 	  "The class the creator is expected to be. It fills the Variable list and "
@@ -7678,6 +8139,12 @@ namespace
 	  "Puts the full path of the log file on the clipboard, for opening it in "
 	  "something else or pasting it into a message.",
 	  "", "advanced#diagnostics" },
+	{ "Report Issue/Sign in with GitHub...", "Sign in with GitHub",
+	  "Signs the editor in to GitHub with a code you approve in your browser, "
+	  "right here in this dialog. Afterwards the issue can be filed directly "
+	  "under your account and the whole log uploaded. The sign-in stays for "
+	  "source control too.",
+	  "", "editor#github" },
 	{ "Report Issue/Create a token", "",
 	  "Opens GitHub's personal access token page. A token with issues and gist "
 	  "access is what lets the editor file the report and upload the whole log "
@@ -7823,6 +8290,9 @@ namespace
 		// Raised from the Content Browser (and File ▸ Import Asset), so it is
 		// read under the same heading.
 		{ "Texture Color Space/", "editor-interface", "Editor Interface", "Content Browser" },
+		// The target-folder dialog of "Import to Project...", raised from the same
+		// context menu.
+		{ "Import to Project/", "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
@@ -7902,6 +8372,7 @@ namespace
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Asset Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
+		{ "Widgets/",          "editor-settings", "Settings Reference", "Widgets" },
 		{ "Shortcuts/",        "editor-settings", "Settings Reference", "Shortcuts" },
 		{ "shortcuts.",        "editor-settings", "Settings Reference", "Shortcuts" },
 		// ── The asset editors ────────────────────────────────────────────────

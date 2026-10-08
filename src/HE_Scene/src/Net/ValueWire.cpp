@@ -260,58 +260,8 @@ const char* replicationRefusalReason(PinType t)
 bool writeValue(BitWriter& w, const Value& v) { return writeValueAt(w, v, 0); }
 bool readValue(BitReader& r, Value& out)      { return readValueAt(r, out, 0); }
 
-bool valueTypesMatch(const Value& a, const Value& b)
-{
-	if (a.type != b.type) return false;
-	if (a.kind() != b.kind()) return false;
-	if (a.kind() == CK::Map && a.keyType != b.keyType) return false;
-	// Enum and Struct are only the same property when they name the same
-	// definition: two Structs of different shapes have nothing in common but
-	// the word.
-	if ((a.type == PinType::Enum || a.type == PinType::Struct) &&
-	    !a.typeName.empty() && !b.typeName.empty() && a.typeName != b.typeName)
-		return false;
-	return true;
-}
-
-bool valuesEqual(const Value& a, const Value& b)
-{
-	if (a.type != b.type) return false;
-	const CK kind = a.kind();
-	if (kind != b.kind()) return false;
-
-	if (kind == CK::None)
-	{
-		if (a.type == PinType::Struct)
-		{
-			// scalarValueEquals has no Struct case, which is the whole reason
-			// this function exists (see the header).
-			if (a.typeName != b.typeName) return false;
-			if (a.items.size() != b.items.size()) return false;
-			for (std::size_t i = 0; i < a.items.size(); ++i)
-				if (!valuesEqual(a.items[i], b.items[i])) return false;
-			return true;
-		}
-		if (a.type == PinType::Enum && a.typeName != b.typeName) return false;
-		return HorizonCode::scalarValueEquals(a, b, a.type);
-	}
-
-	if (a.items.size() != b.items.size()) return false;
-	if (kind == CK::Map)
-	{
-		if (a.keyType != b.keyType) return false;
-		if (a.keys.size() != b.keys.size()) return false;
-		// Position by position, NOT set-wise: iteration order is insertion order
-		// and it is part of a map's observable value here (the containers plan's
-		// §1.2), so two maps holding the same pairs in a different order really
-		// are different and really do need to replicate.
-		for (std::size_t i = 0; i < a.keys.size(); ++i)
-			if (!valuesEqual(a.keys[i], b.keys[i])) return false;
-	}
-	for (std::size_t i = 0; i < a.items.size(); ++i)
-		if (!valuesEqual(a.items[i], b.items[i])) return false;
-	return true;
-}
+// valuesEqual / valueTypesMatch live in HE_Core now (HorizonCode.h), where Bind
+// To's frame-end compare needs the same answer; ValueWire.h names them here.
 
 // ── A call's arguments as JSON (plan §7.2) ───────────────────────────────────
 

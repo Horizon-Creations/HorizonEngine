@@ -526,7 +526,7 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.theme.name.c_str(), T::iconGear, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 		bar.group();
 		bar.readout(nullptr, "Theme", T::kFgDim);
 		bar.endGroup();

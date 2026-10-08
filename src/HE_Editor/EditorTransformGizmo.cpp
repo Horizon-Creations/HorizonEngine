@@ -5,6 +5,7 @@
 #include "EditorShortcuts.h"   // W/E/R, or whatever they were rebound to
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
+#include <HorizonScene/TransformHierarchy.h>   // worldMatrixOf
 #include <ImGuizmo.h>
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -60,12 +61,18 @@ ImGuizmo::OPERATION beginFrame(const ImVec2& rectMin, const ImVec2& rectMax,
 
 // The parent's world matrix, which is what a world-space result is divided by
 // to land in the entity's own (parent-relative) TransformComponent.
-glm::mat4 parentWorldOf(entt::registry& registry, Entity entity)
+//
+// Every world matrix the gizmo reads is composed on the spot (worldMatrixOf),
+// never read off TransformComponent::worldMatrix: that is only as fresh as the
+// last propagateTransforms, and the Scene window no longer propagates the whole
+// world every frame just for its pick snapshot (Thema 153, Schritt 6). An edit in
+// the Details panel would otherwise put the gizmo a frame behind the object.
+glm::mat4 parentWorldOf(HorizonWorld& world, Entity entity)
 {
+	auto& registry = world.registry();
 	if (auto* h = registry.try_get<HierarchyComponent>(entity);
-	    h && h->parent != entt::null)
-		if (auto* pt = registry.try_get<TransformComponent>(h->parent))
-			return pt->worldMatrix;
+	    h && h->parent != entt::null && registry.all_of<TransformComponent>(h->parent))
+		return HE::worldMatrixOf(world, h->parent);
 	return glm::mat4(1.0f);
 }
 
@@ -134,7 +141,7 @@ bool manipulateOne(HorizonWorld& world, Entity entity,
 	// different matrix and the values visibly jittered mid-drag.
 	static bool      s_wasUsing = false;
 	static glm::mat4 s_world(1.0f);
-	glm::mat4 gizmoWorld = s_wasUsing ? s_world : t->worldMatrix;
+	glm::mat4 gizmoWorld = s_wasUsing ? s_world : HE::worldMatrixOf(world, entity);
 	// Snapping quantises the drag to the increment of whichever operation is
 	// armed, or moves freely when activeSnap() hands back nullptr.
 	ImGuizmo::Manipulate(&view[0][0], &proj[0][0],
@@ -150,7 +157,7 @@ bool manipulateOne(HorizonWorld& world, Entity entity,
 	if (ImGuizmo::IsUsing())
 	{
 		// world → local: divide out the parent's world matrix.
-		const glm::mat4 local = glm::inverse(parentWorldOf(registry, entity)) * gizmoWorld;
+		const glm::mat4 local = glm::inverse(parentWorldOf(world, entity)) * gizmoWorld;
 
 		float pos[3], rot[3], scale[3];
 		ImGuizmo::DecomposeMatrixToComponents(&local[0][0], pos, rot, scale);
@@ -221,15 +228,17 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
 		// group's, not any member's, and a scale drag reads the factor off it.
 		glm::vec3 centroid(0.0f);
 		float     count = 0.0f;
-		const TransformComponent* primary = nullptr;
+		bool      havePrimary = false;
+		glm::mat4 primaryWorld(1.0f);
 		for (const Entity e : members)
-			if (const auto* t = registry.try_get<TransformComponent>(e))
+			if (registry.all_of<TransformComponent>(e))
 			{
-				centroid += glm::vec3(t->worldMatrix[3]);
-				count    += 1.0f;
-				primary   = t;
+				primaryWorld = HE::worldMatrixOf(world, e);
+				centroid    += glm::vec3(primaryWorld[3]);
+				count       += 1.0f;
+				havePrimary  = true;
 			}
-		if (count < 2.0f || !primary) return false;
+		if (count < 2.0f || !havePrimary) return false;
 		centroid /= count;
 
 		glm::mat4 basis(1.0f);
@@ -239,7 +248,7 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
 			// degenerate axis (scale 0) falls back to the world axes.
 			for (int c = 0; c < 3; ++c)
 			{
-				const glm::vec3 axis(primary->worldMatrix[c]);
+				const glm::vec3 axis(primaryWorld[c]);
 				const float     len = glm::length(axis);
 				if (len < 1e-6f) { basis = glm::mat4(1.0f); break; }
 				basis[c] = glm::vec4(axis / len, 0.0f);
@@ -264,7 +273,7 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
 		s_members.clear();
 		for (const Entity e : members)
 			if (const auto* t = registry.try_get<TransformComponent>(e))
-				s_members.push_back({ e, t->worldMatrix, t->scale });
+				s_members.push_back({ e, HE::worldMatrixOf(world, e), t->scale });
 	}
 	undoEdges(undo, s_wasUsing, effectiveOp);
 	s_wasUsing = ImGuizmo::IsUsing();
@@ -295,7 +304,7 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
 			auto* t = registry.try_get<TransformComponent>(m.entity);
 			if (!t) continue;
 			const glm::mat4 worldNow = delta * m.startWorld;
-			const glm::mat4 local    = glm::inverse(parentWorldOf(registry, m.entity)) * worldNow;
+			const glm::mat4 local    = glm::inverse(parentWorldOf(world, m.entity)) * worldNow;
 
 			float pos[3], rot[3], scale[3];
 			ImGuizmo::DecomposeMatrixToComponents(&local[0][0], pos, rot, scale);

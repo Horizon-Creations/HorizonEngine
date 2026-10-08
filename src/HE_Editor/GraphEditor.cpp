@@ -1,4 +1,5 @@
 #include "GraphEditor.h"
+#include "GraphViewStore.h" // the remembered pan/zoom
 #include "EditorInput.h" // pointer-device grammar (trackpad swipe pans, modifier-scroll zooms)
 #include "EditorWidgets.h" // WrapText — header-only, so the test binary needs no extra link
 #include <imgui_internal.h> // ImBezierCubicCalc: the wire double-click samples the drawn curve
@@ -117,6 +118,24 @@ const ImVec2* findPin(const Drawn& n, int pinId, bool input)
 
 bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
 {
+    // Remembered view: adopt it on the first frame, then record each frame's view
+    // (the one the user left it in at the end of the last frame).
+    if (!st.viewKey.empty())
+    {
+        if (!st.viewRestored)
+        {
+            st.viewRestored = true;
+            GraphViewStore::View v;
+            if (GraphViewStore::get(st.viewKey, v))
+            {
+                st.pan  = ImVec2(v.panX, v.panY);
+                st.zoom = std::clamp(v.zoom, 0.3f, 2.5f);
+            }
+        }
+        else
+            GraphViewStore::put(st.viewKey, st.pan.x, st.pan.y, st.zoom, ImGui::GetTime());
+    }
+
     bool changed = false;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -204,16 +223,54 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         return nullptr;
     };
 
+    // Drag cue (EditorDragCues.h): observing only, a no-op without onDragCue.
+    auto cue = [&](DragCue c) { if (model.onDragCue) model.onDragCue(c); };
+    auto payloadIsOurs = [&](const ImGuiPayload* p) {
+        if (p) for (const char* pt : model.dropPayloads) if (p->IsDataType(pt)) return true;
+        return false;
+    };
+    const bool payloadCues = model.onDragCue && !model.dropPayloads.empty() && model.onDrop;
+    // A payload this canvas takes started (Pickup) or ended without landing
+    // here (Cancel) — seen from the canvas, wherever the source is. One
+    // delivered elsewhere (Delivery) is neither ours to drop nor a cancel.
+    if (payloadCues)
+    {
+        const ImGuiPayload* p = ImGui::GetDragDropPayload();
+        const bool ours = payloadIsOurs(p);
+        if (ours && p->Delivery) st.cuePayloadDropped = true;
+        if (ours && !st.cuePayload) { st.cuePayload = true; st.cuePayloadDropped = false; cue(DragCue::Pickup); }
+        else if (!ours && st.cuePayload)
+        {
+            st.cuePayload = false;
+            if (!st.cuePayloadDropped) cue(DragCue::Cancel);
+        }
+    }
+
     // Canvas drop targets (elements, variables, …) — bound to the InvisibleButton.
+    bool payloadOver = false;
     if (!model.dropPayloads.empty() && model.onDrop && ImGui::BeginDragDropTarget())
     {
+        payloadOver = true;
+        // Drag cue: entering the canvas with a payload it takes, or one it does not.
+        if (payloadCues)
+        {
+            const int over = payloadIsOurs(ImGui::GetDragDropPayload()) ? 1 : 2;
+            if (over != st.cuePayloadOver)
+                cue(over == 1 ? DragCue::OverValid : DragCue::OverInvalid);
+            st.cuePayloadOver = over;
+        }
         const ImVec2 gp((mouse.x - origin.x - st.pan.x) / st.zoom,
                         (mouse.y - origin.y - st.pan.y) / st.zoom);
         for (const char* pt : model.dropPayloads)
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(pt))
-                { model.onDrop(pt, p->Data, gp); break; }
+            {
+                if (payloadCues) { st.cuePayloadDropped = true; cue(DragCue::Drop); }
+                model.onDrop(pt, p->Data, gp);
+                break;
+            }
         ImGui::EndDragDropTarget();
     }
+    if (!payloadOver) st.cuePayloadOver = 0;
 
     auto toScreen = [&](float gx, float gy) {
         return ImVec2(origin.x + st.pan.x + gx * st.zoom, origin.y + st.pan.y + gy * st.zoom);
@@ -376,6 +433,14 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         return nullptr;
     };
 
+    // The view as the node list above was laid out in. Everything below that moves
+    // the pan or the zoom (a focus jump, the wheel, a drag) is applied to the
+    // laid-out nodes afterwards, or they would be drawn where the view WAS while
+    // the grid and the comments already sit where it IS — a visible lag behind the
+    // background on a fast pan, which is not a performance problem but this order.
+    const ImVec2 panLaidOut  = st.pan;
+    const float  zoomLaidOut = st.zoom;
+
     // ── Recenter on a focus node ─────────────────────────────────────────────
     if (st.focusNode != 0)
     {
@@ -413,10 +478,23 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         mouse.x <  origin.x + size.x && mouse.y < origin.y + size.y &&
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-    if (wheelHovered && !st.suppressInteraction && !behindConsumed)
+    // Not gated on behindConsumed: that flag means "the pointer is over a comment's
+    // title bar or resize grip", which owns the MOUSE BUTTONS there but has no use
+    // for the wheel — and gating on it made a two-finger swipe die the moment the
+    // cursor crossed a comment title.
+    if (wheelHovered && !st.suppressInteraction)
     {
         ImGuiIO& gio = ImGui::GetIO();
         const bool zoomMod = gio.KeyCtrl || gio.KeySuper;
+        // The pinch (macOS: the native magnify event, see EditorInput.h) zooms
+        // about the cursor like the Ctrl/Cmd+scroll below.
+        if (const float pinch = EditorInput::pinchDelta(); pinch != 0.0f)
+        {
+            const ImVec2 before = toGraph(mouse);
+            st.zoom = std::clamp(st.zoom * std::max(0.1f, 1.0f + pinch * 2.0f), 0.3f, 2.5f);
+            st.pan.x = mouse.x - origin.x - before.x * st.zoom;
+            st.pan.y = mouse.y - origin.y - before.y * st.zoom;
+        }
         if (EditorInput::trackpadActive() && !zoomMod)
         {
             constexpr float kSwipeToPx = 16.0f; // wheel units → canvas pixels
@@ -451,6 +529,24 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     {
         st.pan.x += ImGui::GetIO().MouseDelta.x;
         st.pan.y += ImGui::GetIO().MouseDelta.y;
+    }
+
+    // Bring the laid-out nodes (and their pins) to the view as it ends up this
+    // frame: a pure shift for a pan, a scale about the canvas origin for a zoom.
+    if (st.pan.x != panLaidOut.x || st.pan.y != panLaidOut.y || st.zoom != zoomLaidOut)
+    {
+        const float k = zoomLaidOut != 0.0f ? st.zoom / zoomLaidOut : 1.0f;
+        const auto remap = [&](ImVec2& p)
+        {
+            p.x = origin.x + st.pan.x + (p.x - origin.x - panLaidOut.x) * k;
+            p.y = origin.y + st.pan.y + (p.y - origin.y - panLaidOut.y) * k;
+        };
+        for (Drawn& d : nodes)
+        {
+            remap(d.pos);
+            for (ImVec2& p : d.pinPos) remap(p);
+            d.size.x *= k; d.size.y *= k;
+        }
     }
 
     // ── Background + grid ────────────────────────────────────────────────────
@@ -555,6 +651,13 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = true; }
             }
             else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = false; }
+            // Drag cue: a wire is in hand (Alt+click only cleared). The pin it
+            // left is where the hover edge starts, so it does not tick itself.
+            if (st.linkSrcNode != 0)
+            {
+                st.cueNode = pn; st.cuePin = pp2; st.cueInput = pin_in;
+                cue(DragCue::Pickup);
+            }
             // The same press must not also start a box-select or drop a
             // quick-spawn node: both of those read "no node under the cursor" as
             // "empty canvas", and a pin grab off the outer half of a pin is
@@ -1010,6 +1113,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 ctx.linkInput = st.linkSrcInput;
                 const int created = qs->spawn(ctx);
                 if (created != 0) { st.selected = created; st.selection = { created }; changed = true; }
+                cue(created != 0 ? DragCue::Drop : DragCue::Cancel);
                 if (qs->key == ImGuiKey_F) st.fSpawned = true;
                 // The drag is over either way; the mouse button is still down,
                 // so clearing the source here also stops the release below from
@@ -1019,18 +1123,41 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             }
         }
 
+        // Drag cue: the wire entered another pin — would it connect there?
+        // Asked on the edge only (canConnect must not change the graph); leaving
+        // a pin for empty canvas is silent.
+        if (st.linkSrcNode != 0 && model.onDragCue && !ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        {
+            int hn = 0, hp = 0; bool hi = false;
+            if (!pinAt(mouse, hn, hp, hi)) { hn = 0; hp = 0; hi = false; }
+            if (hn != st.cueNode || hp != st.cuePin || hi != st.cueInput)
+            {
+                st.cueNode = hn; st.cuePin = hp; st.cueInput = hi;
+                if (hn != 0)
+                {
+                    bool fits = hn != st.linkSrcNode && hi != st.linkSrcInput && model.connect;
+                    if (fits && model.canConnect)
+                        fits = st.linkSrcInput ? model.canConnect(hn, hp, st.linkSrcNode, st.linkSrcPin)
+                                               : model.canConnect(st.linkSrcNode, st.linkSrcPin, hn, hp);
+                    cue(fits ? DragCue::OverValid : DragCue::OverInvalid);
+                }
+            }
+        }
+
         if (st.linkSrcNode != 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
         {
             int tn = 0, tp = 0; bool ti = false;
             if (pinAt(mouse, tn, tp, ti))
             {
+                bool ok = false;
                 if (tn != st.linkSrcNode && model.connect)
                 {
-                    bool ok = false;
                     if (!st.linkSrcInput && ti)      ok = model.connect(st.linkSrcNode, st.linkSrcPin, tn, tp);
                     else if (st.linkSrcInput && !ti) ok = model.connect(tn, tp, st.linkSrcNode, st.linkSrcPin);
                     if (ok) changed = true;
                 }
+                // Drag cue: landed, or refused (same node, wrong side, type).
+                cue(ok ? DragCue::Drop : DragCue::Cancel);
             }
             else if (model.drawPinDragMenu && !st.linkGrab)
             {
@@ -1042,7 +1169,12 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 st.dragOffInput = st.linkSrcInput;
                 st.addMenuGraphPos = toGraph(mouse);
                 ImGui::OpenPopup("##ge_pindrag");
+                // Drag cue: none yet — the gesture goes on in the menu.
+                st.cueMenu = true;
             }
+            // Drag cue: a detached wire let go in empty space (it stays
+            // removed), or nowhere to drop it.
+            else cue(DragCue::Cancel);
             st.linkSrcNode = 0;
             st.linkGrab = false;
         }
@@ -1287,8 +1419,11 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         const int created = model.drawPinDragMenu(st.dragOffNode, st.dragOffPin,
                                                   st.dragOffInput, st.addMenuGraphPos);
         if (created != 0) { st.selected = created; st.selection = { created }; changed = true; }
+        if (created != 0 && st.cueMenu) { st.cueMenu = false; cue(DragCue::Drop); }
         ImGui::EndPopup();
     }
+    // Drag cue: the drag-off menu closed with nothing picked.
+    if (st.cueMenu && !ImGui::IsPopupOpen("##ge_pindrag")) { st.cueMenu = false; cue(DragCue::Cancel); }
 
     // Per-node context menu.
     if (model.drawNodeContextMenu && ImGui::BeginPopup("##ge_nodectx"))

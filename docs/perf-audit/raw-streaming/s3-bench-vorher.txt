@@ -1,0 +1,15 @@
+[doctest] run with "--help" for options
+===============================================================================
+tests/test_hpak.cpp:1969:
+TEST CASE:  Streaming bench: pak throughput, small and large assets
+
+tests/test_hpak.cpp:2018: MESSAGE: run 0 | small x4000: wall 1018.24 ms, main 18.9026 ms, worst poll 0.896417 ms, polls 1243 | large x128 (1 MiB): wall 328.245 ms, main 16.672 ms, worst poll 1.08054 ms, polls 1674
+
+tests/test_hpak.cpp:2018: MESSAGE: run 1 | small x4000: wall 1001.83 ms, main 17.7539 ms, worst poll 0.444917 ms, polls 1485 | large x128 (1 MiB): wall 328.821 ms, main 16.0368 ms, worst poll 0.763375 ms, polls 4738
+
+tests/test_hpak.cpp:2018: MESSAGE: run 2 | small x4000: wall 980.551 ms, main 17.1922 ms, worst poll 0.471458 ms, polls 1119 | large x128 (1 MiB): wall 326.294 ms, main 16.7003 ms, worst poll 0.879334 ms, polls 5098
+
+===============================================================================
+[doctest] test cases:   1 |   1 passed | 0 failed | 4233 skipped
+[doctest] assertions: 148 | 148 passed | 0 failed |
+[doctest] Status: SUCCESS!

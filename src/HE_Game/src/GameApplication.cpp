@@ -1,7 +1,10 @@
 #include "GameApplication.h"
+#include <chrono>
 #include <cstdint>
 #include "EmbeddedPakKey.h"
 #include <fstream>
+#include <iterator>
+#include <utility>
 #include <Hpak/ProjectConfig.h>
 #include <Application/AppIcon.h>       // the window icon the export generated
 #include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
@@ -35,12 +38,14 @@
 #include <HorizonCode/HcClassResolve.h>
 #include "HorizonVersion.h"          // HE_VERSION_STRING (compiled-classes handshake)
 #include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/HcWatchEvents.h>            // horizon.hc.watch / he::hc::watch delivery
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the editor)
 #include <HorizonScene/FlyCameraController.h>  // free-fly camera (shared with the editor's PIE)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
+#include <HorizonScene/FloatingOrigin.h>
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -925,6 +930,19 @@ void GameApplication::OnInit()
 	// runtime directly (not m_world), which is what lets OnInit fire FIRST — before
 	// any world exists.
 	m_widgets.setRuntime(&m_gameInstance.runtime());
+	// Script and native subscriptions to HorizonCode variables (horizon.hc.watch,
+	// he::hc::watch) are reported through this one hook at the frame-end
+	// compare; HcWatchEvents routes them, the same code the editor's play mode
+	// runs. Everything is looked up at call time: the script context is
+	// replaced on every scene switch and the module may be reloaded.
+	m_gameInstance.runtime().onVariableChanged =
+		[this](HorizonCode::InstanceId owner, const std::string& var, const HorizonCode::Value& old,
+		       const HorizonCode::Value& now, const std::vector<uint64_t>& tokens)
+		{
+			HcWatchEvents::dispatch(m_gameInstance.runtime(), owner, var, old, now, tokens,
+			                        m_scriptContext.get(), &m_scriptInstances,
+			                        logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+		};
 	{
 		HorizonCode::Runtime::Services svc;
 		svc.createWidget  = [this](const std::string& p, const HorizonCode::SpawnValues& spawn)
@@ -1362,9 +1380,12 @@ void GameApplication::OnInit()
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
 	if (!m_appMode)
+	{
+		m_sceneStreamToken = HE::CancelToken::create();
 		HE_LOG_INFO(Core, "%s",
-			("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
+			("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world, m_sceneStreamToken)) +
 			 " scene-referenced asset roots").c_str());
+	}
 
 	// Native C++ game logic: an optional GameLogic library next to the executable
 	// (built from the game's C++ project). Once loaded, the base Application loop
@@ -1389,12 +1410,15 @@ void GameApplication::OnInit()
 		m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
 		m_gameServicesBinding.content = &contentManager();
 		m_gameServicesBinding.antiCheat = [this]() { return &m_antiCheat; };
+		m_gameServicesBinding.runtime   = [this]() { return &m_gameInstance.runtime(); };
+		m_gameServicesBinding.entities  = [this]() { return &m_entityHost; };
 		HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
 		HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
 		HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
 		HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
 		HE::api::fillAntiCheatServices(m_antiCheatServices, &m_gameServicesBinding);
 		HE::api::fillNetServices(m_netServices, &m_gameServicesBinding);
+		HE::api::fillHcServices(m_hcServices, &m_gameServicesBinding);
 		m_engineServices = {};
 		m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 		m_engineServices.save       = &m_saveServices;
@@ -1403,6 +1427,7 @@ void GameApplication::OnInit()
 		m_engineServices.content    = &m_contentServices;
 		m_engineServices.anticheat  = &m_antiCheatServices;
 		m_engineServices.net        = &m_netServices;
+		m_engineServices.hc         = &m_hcServices;
 		logicLoader().injectServices(&m_engineServices);
 		logicLoader().logic()->onStart(*m_world);
 		HE_LOG_INFO(Core, "%s", "GameApplication: native game logic started");
@@ -1446,11 +1471,124 @@ bool GameApplication::ensureDefaultCamera(HorizonWorld& world)
 	return true;
 }
 
-size_t GameApplication::streamSceneAssets(HorizonWorld& world)
+size_t GameApplication::streamSceneAssets(HorizonWorld& world, const HE::CancelToken& token,
+                                          const std::vector<uint32_t>* onlyEntities)
 {
-	const auto refs = SceneSystems::collectAssetRefs(world);
-	for (HE::UUID r : refs) contentManager().loadAssetAsync(r);
+	const auto refs = onlyEntities ? SceneSystems::collectAssetRefs(world, *onlyEntities)
+	                               : SceneSystems::collectAssetRefs(world);
+	HE::AsyncLoadOptions options;   // Low: never ahead of the frame's own work
+	options.cancel = token;
+	for (HE::UUID r : refs) contentManager().loadAssetAsync(r, {}, options);
 	return refs.size();
+}
+
+void GameApplication::cancelZoneStreaming()
+{
+	for (auto& [zone, token] : m_zoneStreamTokens) token.cancel();
+	m_zoneStreamTokens.clear();
+}
+
+void GameApplication::updateCellStreaming(float dt)
+{
+	const std::string& manifestJson = m_world->cellManifestJson();
+	if (m_cellWorld != m_world.get() || manifestJson != m_cellManifestJson)
+	{
+		for (auto& [root, token] : m_cellStreamTokens) token.cancel();
+		m_cellStreamTokens.clear();
+		m_cellStreamer.reset();
+		m_cellWorld         = m_world.get();
+		m_cellManifestJson  = manifestJson;
+		m_cellHasLastCamera = false;
+		HE::CellManifest manifest;
+		if (manifestJson.empty()) return;
+		if (!HE::CellManifest::parse(manifestJson, manifest) || manifest.empty())
+		{
+			HE_LOG_WARN(Core, "%s", "GameApplication: the scene's cell manifest is malformed; "
+			                        "only the base scene is loaded");
+			return;
+		}
+
+		// A cell file: the scene's entry in a mounted pak (shipped builds), else
+		// the loose file in the project or next to the executable — the order
+		// loadSceneInto looks in. The worker gets everything by value.
+		auto reader = [this](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
+		{
+			if (auto pak = contentManager().detachedMountedEntryReader(sceneUuidForPath(path)))
+				return [pak = std::move(pak)](std::vector<uint8_t>& out) { out = pak(); return !out.empty(); };
+			std::vector<std::filesystem::path> candidates;
+			if (!contentManager().contentRoot().empty())
+				candidates.push_back(std::filesystem::path(contentManager().contentRoot()).parent_path() / path);
+			if (const char* base = SDL_GetBasePath()) candidates.push_back(std::filesystem::path(base) / path);
+			std::error_code ec;
+			for (const auto& file : candidates)
+				if (std::filesystem::exists(file, ec))
+					return [file](std::vector<uint8_t>& out)
+					{
+						std::ifstream in(file, std::ios::binary);
+						out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+						return !out.empty();
+					};
+			return {};
+		};
+		HE::CellStreamer::Hooks hooks;
+		// What a zone gets when it streams in (executeSceneRequests): collision,
+		// and its assets under a token of its own. Cells carry no scripts.
+		hooks.loaded = [this](entt::entity root, const std::vector<entt::entity>& created)
+		{
+			if (m_physicsWorld)
+				for (entt::entity e : created) m_physicsWorld->addEntity(*m_world, (uint32_t)e);
+			std::vector<uint32_t> ids;
+			ids.reserve(created.size());
+			for (entt::entity e : created) ids.push_back((uint32_t)e);
+			HE::CancelToken& token = m_cellStreamTokens[(uint32_t)root];
+			token = HE::CancelToken::create();
+			streamSceneAssets(*m_world, token, &ids);
+		};
+		hooks.unloading = [this](entt::entity root)
+		{
+			if (m_physicsWorld)
+			{
+				std::vector<entt::entity> stack{ root };
+				while (!stack.empty())
+				{
+					const entt::entity e = stack.back();
+					stack.pop_back();
+					m_physicsWorld->removeEntity((uint32_t)e);
+					if (const auto* h = m_world->registry().try_get<HierarchyComponent>(e))
+						stack.insert(stack.end(), h->children.begin(), h->children.end());
+				}
+			}
+			if (const auto t = m_cellStreamTokens.find((uint32_t)root); t != m_cellStreamTokens.end())
+			{
+				t->second.cancel();
+				m_cellStreamTokens.erase(t);
+			}
+		};
+		m_cellStreamer.begin(manifest, std::move(reader), std::move(hooks));
+	}
+	if (!m_cellStreamer.active()) return;
+
+	glm::dvec3 camera(0.0);
+	bool       haveCamera = false;
+	for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
+	{
+		camera     = glm::dvec3(HE::worldPositionOf(*m_world, e)) + m_world->origin();
+		haveCamera = true;
+		break;
+	}
+	if (!haveCamera) return;
+	// The lookahead follows the camera's motion; a jump (a teleport, a respawn)
+	// is not a speed, so anything faster than an airliner counts as standing.
+	glm::vec3 velocity(0.0f);
+	if (m_cellHasLastCamera && dt > 0.0f)
+	{
+		velocity = glm::vec3((camera - m_cellLastCamera) / static_cast<double>(dt));
+		if (glm::length(velocity) > 300.0f) velocity = glm::vec3(0.0f);
+	}
+	m_cellLastCamera    = camera;
+	m_cellHasLastCamera = true;
+	HE_PROFILE_SCOPE_N("CellStreaming");
+	m_cellStreamer.update(*m_world, camera, velocity, /*budgetMs=*/4.0);
 }
 
 // ── Scene transitions ────────────────────────────────────────────────────────
@@ -1673,12 +1811,27 @@ bool GameApplication::performSceneSwitch(const std::string& scenePath)
 			 "(packed entry, project file, exe dir)").c_str());
 		return false;
 	}
-	swapToWorld(std::move(newWorld), scenePath);
+	swapToWorld(std::move(newWorld), scenePath, HE::CancelToken::create());
 	return true;
 }
 
-void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label)
+void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label,
+                                  HE::CancelToken streamToken)
 {
+	// The old scene's (and its zones') loads that have not started are not
+	// wanted any more. Assets the new scene shares with it survive: it asks for
+	// them below under its own token. A worker may drop such a load in between —
+	// then pollAsyncResults sees the new requester and starts it over.
+	m_sceneStreamToken.cancel();
+	cancelZoneStreaming();
+	m_sceneStreamToken = std::move(streamToken);
+	// The old world's cells go with it; the new one starts its own next frame.
+	for (auto& [root, token] : m_cellStreamTokens) token.cancel();
+	m_cellStreamTokens.clear();
+	m_cellStreamer.reset();
+	m_cellWorld = nullptr;
+	m_cellManifestJson.clear();
+
 	// Tear down the old scene: unload event first (handlers still see the world),
 	// then scripts (finalizers may touch entities), sounds, zones. The app-level
 	// UI (m_widgets, the GameInstance's widgets) is deliberately NOT cleared — it
@@ -1726,7 +1879,7 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 
 	// Seamlessness comes from the async streaming pipeline: the swap itself is a
 	// cheap main-thread deserialize; meshes/textures stream in the background.
-	const size_t refCount = streamSceneAssets(*m_world);
+	const size_t refCount = streamSceneAssets(*m_world, m_sceneStreamToken);
 
 	startPhysics();
 	startScripts();
@@ -1763,11 +1916,14 @@ void GameApplication::executeSceneRequests()
 				break;
 			}
 			// Warm the pending scene's assets NOW so the later activate() swap
-			// presents without a streaming pop.
-			const size_t refCount = streamSceneAssets(*pending);
+			// presents without a streaming pop. A level preloaded before it and
+			// never activated is replaced: its loads are dropped first.
 			if (m_pendingWorld)
 				HE_LOG_WARN(Core, "%s",
 					("GameApplication: replacing pending scene '" + m_pendingScenePath + "'").c_str());
+			m_pendingStreamToken.cancel();
+			m_pendingStreamToken = HE::CancelToken::create();
+			const size_t refCount = streamSceneAssets(*pending, m_pendingStreamToken);
 			m_pendingWorld     = std::move(pending);
 			m_pendingScenePath = r.path;
 			HE::api::scene::notePendingLevel(true);
@@ -1784,7 +1940,10 @@ void GameApplication::executeSceneRequests()
 					"GameApplication: scene.activate with no pending scene (load hidden first)");
 				break;
 			}
-			swapToWorld(std::move(m_pendingWorld), m_pendingScenePath);
+			// Not cancelled: the preloaded world becomes the scene and still
+			// wants everything it asked for — its token just changes owner.
+			swapToWorld(std::move(m_pendingWorld), m_pendingScenePath,
+			            std::exchange(m_pendingStreamToken, HE::CancelToken{}));
 			m_pendingScenePath.clear();
 			HE::api::scene::notePendingLevel(false);
 			break;
@@ -1841,7 +2000,19 @@ void GameApplication::executeSceneRequests()
 			// Stream the merged zone's assets + start its ECS scripts. playOnStart
 			// audio is deliberately NOT re-fired (it would restart existing
 			// sources); zone audio starts from its scripts/graphs.
-			streamSceneAssets(*m_world);
+			//
+			// Only what the zone brought in, under the zone's own token: the
+			// rest of the world is already streaming under the scene's, and
+			// unloading the zone must drop exactly the zone's loads.
+			{
+				std::vector<uint32_t> zoneIds;
+				zoneIds.reserve(created.size());
+				for (entt::entity e : created) zoneIds.push_back((uint32_t)e);
+				HE::CancelToken& zoneToken = m_zoneStreamTokens[r.zone];
+				zoneToken.cancel();   // the same id loaded again: the old loads are stale
+				zoneToken = HE::CancelToken::create();
+				streamSceneAssets(*m_world, zoneToken, &zoneIds);
+			}
 			const int started = startScriptsFor(created);
 			HE_LOG_INFO(Core, "%s",
 				("GameApplication: zone " + std::to_string(r.zone) + " loaded ('" + r.path +
@@ -1888,12 +2059,21 @@ void GameApplication::executeSceneRequests()
 			{
 				const auto e = (entt::entity)id;
 				if (!reg.valid(e)) continue;
-				// Drop the per-entity script instance before the entity dies.
+				// Drop the per-entity script instance before the entity dies,
+				// and what it subscribed to (horizon.hc.watch) with it.
 				m_scriptInstances.erase(id);
+				m_gameInstance.runtime().unwatch(HE::api::hc::scriptToken(id));
 				ScriptApi::destroy(*m_world, id);
 				++gone;
 			}
 			HE::api::scene::noteZoneUnloaded(r.zone);
+			// Loads still queued for the zone are dropped, unless the rest of
+			// the world asked for the same asset.
+			if (const auto t = m_zoneStreamTokens.find(r.zone); t != m_zoneStreamTokens.end())
+			{
+				t->second.cancel();
+				m_zoneStreamTokens.erase(t);
+			}
 			HE_LOG_INFO(Core, "%s",
 				("GameApplication: zone " + std::to_string(r.zone) + " unloaded ("
 				 + std::to_string(gone) + " entities)").c_str());
@@ -2946,15 +3126,30 @@ void GameApplication::OnRender(float deltaTime)
 	// safe point for the SlotMaps, never during draw). Budgeted so a burst of
 	// simultaneously-finished loads is spread across frames instead of freezing one;
 	// the rest stay queued for the next frame. Cheap no-op once fully streamed in.
-	constexpr size_t kStreamRegistrationsPerFrame = 16;
-	const std::vector<HE::UUID> justRegistered =
-		contentManager().pollAsyncResults(kStreamRegistrationsPerFrame);
-	// Warm up node-graph material pipelines the moment their material becomes
-	// resident — building the pipeline here (before the material is first drawn)
-	// keeps the first frame that shows it from stalling on a synchronous
-	// cross-compile inside the encoder loop. Non-material ids are skipped.
-	if (!justRegistered.empty() && r)
-		r->WarmupMaterials(justRegistered);
+	// The budget is TIME, a quarter of a 60 Hz frame, and covers registration and
+	// the material warmup together, taken in batches of 16 while time is left. A
+	// fixed 16 per frame made a level of 4 000 small assets take 250 frames
+	// however cheap each one was (Thema 153).
+	{
+		using Clock = std::chrono::steady_clock;
+		constexpr size_t kStreamBatch    = 16;
+		constexpr double kStreamBudgetMs = 4.0;
+		const Clock::time_point streamStart = Clock::now();
+		double spentMs = 0.0;
+		while (spentMs < kStreamBudgetMs)
+		{
+			const std::vector<HE::UUID> justRegistered =
+				contentManager().pollAsyncResults(kStreamBatch, kStreamBudgetMs - spentMs);
+			// Warm up node-graph material pipelines the moment their material becomes
+			// resident — building the pipeline here (before the material is first drawn)
+			// keeps the first frame that shows it from stalling on a synchronous
+			// cross-compile inside the encoder loop. Non-material ids are skipped.
+			if (!justRegistered.empty() && r)
+				r->WarmupMaterials(justRegistered);
+			if (justRegistered.size() < kStreamBatch) break;   // drained, or out of time
+			spentMs = std::chrono::duration<double, std::milli>(Clock::now() - streamStart).count();
+		}
+	}
 
 	// Per-frame ECS script update (Lua/Python onUpdate), before the systems tick so
 	// script-driven transforms/params are reflected the same frame.
@@ -2998,6 +3193,22 @@ void GameApplication::OnRender(float deltaTime)
 	// frame has a viewpoint, and a fly-camera controller there would answer WASD
 	// while the user is typing into a text field.
 	if (!m_appMode) updateCameraController(gameDt);
+
+	// Floating origin, when the project switched it on: once the camera is far
+	// out, the world moves back under it (HE::shiftWorldOrigin). Here, after
+	// physics and the camera and before anything else reads a position this
+	// frame — never between two extracts of a frame (RenderExtractor::FrameScope).
+	if (m_world && !m_appMode && m_projectSettings.physics.floatingOriginRadius > 0.0f)
+	{
+		for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
+		{
+			HE::updateFloatingOrigin(*m_world, m_physicsWorld.get(), HE::worldPositionOf(*m_world, e),
+			                         m_projectSettings.physics.floatingOriginRadius);
+			break;   // the camera the systems tick below follows, too
+		}
+	}
+	// Then the cells of a split scene, against the camera where it now stands.
+	if (m_world && !m_appMode) updateCellStreaming(gameDt);
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
@@ -3301,6 +3512,16 @@ void GameApplication::OnRender(float deltaTime)
 	// window in front of it.
 	dispatchNetEvents();
 
+	// ── Frame end: Bind To (docs/bind-to-variable-binding-plan.md §3.4) ──────
+	// Every bound variable whose source moved this frame takes the new value.
+	// After every script of the frame (ticks, Delays, UI clicks, OnRep above),
+	// so whatever was written in frame N is bound at the end of frame N, and
+	// before anything is drawn, so a bound HUD shows it in this very image.
+	// Also while the game is paused: a pause menu bound to the Game Instance
+	// follows it like the widget tick does. An event-driven app would not draw
+	// a written value until the next input — hence the redraw.
+	if (m_gameInstance.runtime().exchangeState() > 0) requestRedraw();
+
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// LAST in the frame, after every script had its turn: a kick decided at the
 	// frame's start is executed here, so a handler had the whole frame to
@@ -3424,6 +3645,12 @@ void GameApplication::OnShutdown()
 	g_menuDirty = false;
 #endif
 
+	// Nothing streams for a game that is closing. Without this the process waits
+	// at exit for every queued load: the pool drains its queue before it stops.
+	m_sceneStreamToken.cancel();
+	m_pendingStreamToken.cancel();
+	cancelZoneStreaming();
+
 	// Stop audio first: sounds reference asset PCM the ContentManager owns.
 	m_audioEngine.shutdown();
 
@@ -3469,5 +3696,7 @@ void GameApplication::OnShutdown()
 	// Stop + unload native game logic before the world is torn down.
 	if (m_world && logicLoader().isLoaded())
 		logicLoader().unload(*m_world);
+	HcWatchEvents::dropNative(m_gameInstance.runtime());
+	m_gameInstance.runtime().onVariableChanged = nullptr;
 	HE_LOG_INFO(Core, "%s", "GameApplication::OnShutdown");
 }

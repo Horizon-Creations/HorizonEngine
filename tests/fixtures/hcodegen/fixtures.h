@@ -3079,6 +3079,35 @@ inline HE::hccg::ClassSource fxPullSpawner()
     return f.done("pull_spawner");
 }
 
+// 46b — Bind To (docs/bind-to-variable-binding-plan.md §2.3): again no CODE is
+// generated, the Runtime's frame-end compare binds both backends from the
+// declarations. What this proves is that the generated table carries the flag
+// and the reference name behind the pull strings, and that both paths follow
+// the source the same way: a Game Instance scalar, a struct member, and a
+// Ref source (`target`, assigned by the test) that pulls nothing at
+// registration.
+inline HE::hccg::ClassSource fxBindTo()
+{
+    Fx f;
+    auto bind = [&f](const char* src, const char* var, const char* member = "",
+                     const char* ref = "")
+    {
+        Variable& v = f.g.variables.back();
+        v.pullSource = src; v.pullVar = var; v.pullMember = member;
+        v.bindTo = true; v.pullRef = ref;
+    };
+    f.var("bonus", PT::Float, -1.0f);    bind(HorizonCode::kPullFromGameInstance, "bonus");
+    f.var("hp", PT::Float, -1.0f);       bind(HorizonCode::kPullFromGameInstance, "run", "hp");
+    f.var("target", PT::Ref);
+    f.var("viaRef", PT::Float, -1.0f);   bind(HorizonCode::kPullFromRef, "bonus", "", "target");
+    f.var("plain", PT::Float, -1.0f);
+    const int ev = f.event("Construct");
+    const int s = f.setVar("plain", PT::Float);
+    f.data(f.getVar("bonus", PT::Float), 0, s, 0);
+    f.exec(ev, s);
+    return f.done("bind_to");
+}
+
 // 47 — Extract on Destruct (docs/state-driven-data-exchange-design.md §3.7):
 // the generated extractOnDestruct is NATIVE (S_FixStats filled member by
 // member), the interpreter builds the same struct from the graph's table.
@@ -3150,7 +3179,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
         fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxPlayerSlots(),
-        fxPullConstruct(), fxPullSpawner(),
+        fxPullConstruct(), fxPullSpawner(), fxBindTo(),
         fxExtractDestruct(), fxExtractDerived(), fxExtractListener(),
     };
 }

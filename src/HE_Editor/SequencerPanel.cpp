@@ -567,7 +567,7 @@ void SequencerPanel::render(AppContext& ctx, const std::string& assetPath,
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.name.c_str(), T::iconPlay, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 		bar.group();
 		bar.readout(nullptr, "Property Animation", T::kFgDim);
 		bar.endGroup();

@@ -144,6 +144,42 @@ missing source variable (or struct variable / struct field) into the Game Instan
 or the creator class. Renaming a source variable carries the pull along when its
 class is provable (Game Instance, or a Creator Class).
 
+**Bind To** (the same block: **Source Mode** = Off / Pull on Construct / Bind To;
+`docs/bind-to-variable-binding-plan.md`). The same declaration, kept alive: the
+pull still runs at registration, and afterwards the runtime compares the source
+with what it last saw **once per frame, at the frame's end** (after every script,
+Delay, UI click and `OnRep_` of the frame, before anything is drawn — so a bound
+HUD shows the new value in the same picture). When the source value changed, or
+the source is another instance now, the new value is written; otherwise nothing.
+A value written locally into a bound variable therefore stays until the source
+moves again (as does an Expose on Spawn value or a hot-reload restore).
+
+| Source | Bind To reads |
+|--------|---------------|
+| **Game Instance** / **Creator** | as for Pull on Construct, but continuously |
+| **Reference** (Bind To only) | a public variable of whatever the chosen object variable (**Reference**) of this class holds at the moment of the compare. No pull at registration (the reference is still empty); the default is the **Initial Value** until it first points somewhere, and an empty reference is no error. Re-pointing it pushes at once, even when the value is the same. |
+
+* When the source cannot answer (destroyed creator or referenced object, private,
+  missing, type does not fit, the reference variable renamed away) the binding
+  **rests**: the variable keeps its last value, the log says why once per class,
+  variable and reason, and the first frame in which the source answers again
+  writes.
+* Chains (A bound to B bound to C) settle within one frame. A chain longer than
+  eight links finishes in the next frame, with one warning per session.
+* Not on a **Replicated** variable (the replicator and the binding would both
+  write on a client); the editor does not offer it and the loader drops it.
+  Function-locals cannot bind. Each machine binds for itself.
+* The Game Instance itself never binds. An instance that dies mid-frame does not
+  report its last changes to anyone bound to it — that is Extract on Destruct's job.
+* Under the editor's pause the bindings stand still with the rest of the script
+  world; in the editor preview a bound value may appear one frame after the
+  shipped game shows it.
+* Runtime: `Runtime::exchangeState()` (called by both hosts; returns the number of
+  writes, an event-driven app redraws when it is > 0) and `boundVariablesOf`. The
+  codegen only carries `bindTo`/`pullRef` in `CompiledVarInfo`; both backends bind
+  through the same runtime function. A project with Bind To opened in an older
+  engine falls back to a one-time pull (a Reference source is dropped there).
+
 **Extract on Destruct** (class sidebar, section of the same name;
 `docs/state-driven-data-exchange-design.md` §3). A class names **one struct** and,
 per struct member, which of its instance variables fills it (**From**: any

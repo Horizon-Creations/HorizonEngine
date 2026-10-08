@@ -17,11 +17,15 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/AudioSourceComponent.h>
+#include <JobSystem/JobSystem.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <thread>
 #include <cstring>
 
@@ -1762,4 +1766,471 @@ TEST_CASE("Pack skips PSHD when no backends selected")
 
     removeQuiet(pak);
     he_test::removeAllQuiet(dir);
+}
+
+// ─── Pak streaming cancellation (Thema 153, Schritt 2) ───────────────────────
+
+namespace {
+
+// Every global-pool worker parked in a Normal task until release(): pak loads
+// requested meanwhile stay queued, so "cancelled before start" is deterministic.
+struct HeldGlobalPool
+{
+    std::atomic<bool> go{ false };
+    std::atomic<size_t> parked{ 0 };
+    std::vector<std::future<void>> blockers;
+    HeldGlobalPool()
+    {
+        ThreadPool& pool = globalPool();
+        for (size_t i = 0; i < pool.threadCount(); ++i)
+            blockers.push_back(pool.submit([this] {
+                parked.fetch_add(1);
+                while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }, "TestHeldGlobalPool"));
+        while (parked.load() < pool.threadCount()) std::this_thread::yield();
+    }
+    void release()
+    {
+        go.store(true);
+        for (auto& b : blockers) if (b.valid()) b.get();
+    }
+    ~HeldGlobalPool() { release(); }
+};
+
+HE::AsyncLoadOptions pakWithToken(const HE::CancelToken& t)
+{
+    HE::AsyncLoadOptions o;
+    o.cancel = t;
+    return o;
+}
+
+void pumpUntil(ContentManager& cm, const std::function<bool()>& done, int rounds = 500)
+{
+    for (int i = 0; i < rounds && !done(); ++i)
+    {
+        cm.pollAsyncResults();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
+
+} // namespace
+
+TEST_CASE("Pak streaming: cancelled loads drop, shared or re-requested ones still arrive")
+{
+    const HE::UUID a{0xCA11, 1}, b{0xCA12, 2}, c{0xCA13, 3};
+    HpakWriter p;
+    p.addEntry(a, makeMaterialBlob(a, "cancel_a"), {Hpak::Codec::Zstd});
+    p.addEntry(b, makeMaterialBlob(b, "cancel_b"), {Hpak::Codec::LZ4});
+    p.addEntry(c, makeMaterialBlob(c, "cancel_c"));
+    auto pak = std::filesystem::temp_directory_path() / "he_stream_cancel.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+
+    int aCalls = 0;
+    HE::UUID aGot{ 1, 1 };
+    {
+        HeldGlobalPool held;
+        HE::CancelToken zone  = HE::CancelToken::create();
+        HE::CancelToken scene = HE::CancelToken::create();
+        HE::CancelToken again = HE::CancelToken::create();
+        cm.loadAssetAsync(a, [&](HE::UUID u) { ++aCalls; aGot = u; }, pakWithToken(zone));
+        cm.loadAssetAsync(b, {}, pakWithToken(zone));
+        cm.loadAssetAsync(b, {}, pakWithToken(scene));   // b is shared with the scene
+        cm.loadAssetAsync(c, {}, pakWithToken(zone));
+        zone.cancel();                                  // the zone unloads...
+        cm.loadAssetAsync(c, {}, pakWithToken(again));  // ...and c is wanted again at once
+        CHECK(cm.asyncInFlightCount() == 3);
+    }
+    pumpUntil(cm, [&] { return cm.asyncInFlightCount() == 0; });
+    CHECK(cm.asyncInFlightCount() == 0);
+    CHECK_FALSE(cm.isLoaded(a));     // nobody wanted it any more
+    CHECK(aCalls == 1);
+    CHECK(aGot == HE::UUID{});
+    CHECK(cm.isLoaded(b));
+    CHECK(cm.isLoaded(c));
+
+    // The pak:// key of the dropped load is free again.
+    cm.loadAssetAsync(a);
+    pumpUntil(cm, [&] { return cm.isLoaded(a); });
+    CHECK(cm.isLoaded(a));
+
+    removeQuiet(pak);
+}
+
+// Thema 153, Schritt 5: a started pak load can be dropped too. The reader asks
+// its stop condition between 4 MiB read blocks, before each decode step and
+// between 4 MiB zstd windows.
+TEST_CASE("HpakReader::readEntry with a stop condition: the same bytes, or stopped mid-read and mid-decode")
+{
+    const HE::UUID z{0x570A, 1}, s{0x570B, 2}, l{0x570C, 3};
+    std::vector<uint8_t> big(24u << 20);
+    uint32_t x = 0x9E3779B9u;
+    for (size_t b = 0; b < big.size(); ++b)
+    {
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        big[b] = static_cast<uint8_t>((b & 0xF0) | (x & 0x0F));   // half-compressible
+    }
+    auto pak = std::filesystem::temp_directory_path() / "he_stop_read.hpak";
+    {
+        HpakWriter p;
+        p.addEntry(z, big, {Hpak::Codec::Zstd});
+        p.addEntry(s, big, {Hpak::Codec::Store});
+        p.addEntry(l, big, {Hpak::Codec::LZ4});
+        REQUIRE(p.write(pak.string()));
+    }
+    {   // the reader closes before the file goes (Windows)
+    HpakReader r;
+    REQUIRE(r.open(pak.string()));
+
+    for (const HE::UUID& id : { z, s, l })
+    {
+        CAPTURE(id.hi);
+        // Never stopping: byte for byte the plain read. For zstd this is the
+        // windowed decode, so it also checks that against ZSTD_decompress.
+        int  asks    = 0;
+        bool stopped = true;
+        CHECK(r.readEntry(id, nullptr, [&] { ++asks; return false; }, &stopped) == big);
+        CHECK_FALSE(stopped);
+        CHECK(asks >= 2);   // asked during the read, not only once
+        // Stopping at the second question: during the read (the stored bytes are
+        // over 4 MiB for every codec here).
+        int n = 0;
+        CHECK(r.readEntry(id, nullptr, [&] { return ++n >= 2; }, &stopped).empty());
+        CHECK(stopped);
+        // At the last question: for zstd that is in the decode, in its final window.
+        n = 0;
+        CHECK(r.readEntry(id, nullptr, [&] { return ++n >= asks; }, &stopped).empty());
+        CHECK(stopped);
+        // The reader is fine afterwards, and a plain read is not "stopped".
+        CHECK(r.readEntry(id, nullptr, [] { return false; }, &stopped) == big);
+        CHECK_FALSE(stopped);
+    }
+    // A failure is not a stop.
+    bool stopped = true;
+    CHECK(r.readEntry(HE::UUID{0xDEAD, 1}, nullptr, [] { return false; }, &stopped).empty());
+    CHECK_FALSE(stopped);
+    }
+    removeQuiet(pak);
+}
+
+TEST_CASE("Reference-graph streaming: dependencies are dropped with the asset that pulled them")
+{
+    // mesh → material → texture. The material and texture are requested by the
+    // frontier on the mesh's behalf, so they inherit the mesh's requesters: when
+    // the zone that asked for the mesh is gone, the rest of its closure is not
+    // loaded for nobody.
+    auto dir = std::filesystem::temp_directory_path() / "he_closure_cancel";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+
+    ContentManager cmSrc(dir.string());
+    TextureAsset tex; tex.type = HE::AssetType::Texture; tex.name = "tex"; tex.path = "tex.hasset";
+    tex.width = 2; tex.height = 2; tex.channels = 4; tex.data = std::vector<uint8_t>(16, 0x44);
+    REQUIRE(cmSrc.saveAsset(tex));
+    MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "mat"; mat.path = "mat.hasset";
+    mat.texturePaths = {"tex.hasset"};
+    REQUIRE(cmSrc.saveAsset(mat));
+    StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "mesh"; mesh.path = "mesh.hasset";
+    mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0}; mesh.indices = {0,1,2};
+    REQUIRE(cmSrc.saveAsset(mesh));
+
+    HpakWriter packer;
+    CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 3);
+    auto pak = std::filesystem::temp_directory_path() / "he_closure_cancel.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    HE::CancelToken zone = HE::CancelToken::create();
+    bool meshArrived = false, meshDropped = false;
+    cm.loadAssetAsync(mesh.id, [&](HE::UUID u) { (u == mesh.id ? meshArrived : meshDropped) = true; },
+                      pakWithToken(zone));
+    // Let the mesh read finish (it is not cancellable once started), then drop
+    // the zone BEFORE the poll that registers the mesh and expands its frontier.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    zone.cancel();
+    pumpUntil(cm, [&] { return (meshArrived || meshDropped) && cm.asyncInFlightCount() == 0; });
+    if (meshDropped)
+    {
+        // A loaded machine did not start the mesh within 200 ms, so the zone's
+        // cancel caught the mesh itself. Correct, but nothing left to check here.
+        MESSAGE("mesh load was dropped before it started; frontier inheritance not exercised");
+    }
+    else
+    {
+        REQUIRE(meshArrived);
+        CHECK(cm.isLoaded(mesh.id));
+        CHECK_FALSE(cm.isLoaded(mat.id));   // inherited the cancelled zone token
+        CHECK_FALSE(cm.isLoaded(tex.id));
+    }
+    CHECK(cm.asyncInFlightCount() == 0);
+
+    // A plain request afterwards streams the closure as usual: no stale keys.
+    cm.loadAssetAsync(mesh.id);
+    cm.loadAssetAsync(mat.id);
+    pumpUntil(cm, [&] { return cm.isLoaded(mat.id) && cm.isLoaded(tex.id); });
+    CHECK(cm.isLoaded(mat.id));
+    CHECK(cm.isLoaded(tex.id));
+
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
+}
+
+// ─── Streaming throughput bench (Thema 153, Schritt 3) ───────────────────────
+// Not a correctness test: the game-runtime streaming path (mounted .hpak →
+// loadAssetAsync → pollAsyncResults) cannot be driven by he_perf_capture, which
+// only launches the editor, so this is the before/after measure for it. Skipped
+// by default; run it from a Release build with
+//   he_tests --no-skip --test-case='Streaming bench*'
+// Two workloads: many tiny assets (per-job overhead: opening the pak, its table
+// of contents, the result hand-off) and fewer 1 MiB ones (bytes moved, copies).
+// Reports wall time until everything is resident, and the main-thread time
+// spent inside pollAsyncResults, which is what a frame pays.
+namespace {
+
+struct StreamBenchResult { double wallMs = 0; double mainMs = 0; double worstPollMs = 0; size_t polls = 0; };
+
+StreamBenchResult runStreamBench(const std::filesystem::path& pak, size_t expected,
+                                 size_t maxPerPoll)
+{
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    StreamBenchResult res;
+    size_t registered = 0;
+    const Clock::time_point t0 = Clock::now();
+    REQUIRE(cm.streamMountedAssets() == expected);
+    // Spin, never sleep: in low-power mode a 2 ms sleep takes ~150 ms and would
+    // be all this measures.
+    while (registered < expected && ms(Clock::now() - t0) < 120000.0)
+    {
+        const Clock::time_point p0 = Clock::now();
+        registered += cm.pollAsyncResults(maxPerPoll).size();
+        const double pollMs = ms(Clock::now() - p0);
+        res.mainMs += pollMs;
+        res.worstPollMs = std::max(res.worstPollMs, pollMs);
+        ++res.polls;
+        if (registered < expected) std::this_thread::yield();
+    }
+    res.wallMs = ms(Clock::now() - t0);
+    CHECK(registered == expected);
+    return res;
+}
+
+} // namespace
+
+TEST_CASE("Streaming bench: pak throughput, small and large assets" * doctest::skip())
+{
+    constexpr size_t kSmall = 4000;
+    constexpr size_t kLarge = 128;
+    constexpr size_t kLargeBytes = 1u << 20;
+
+    auto smallPak = std::filesystem::temp_directory_path() / "he_bench_small.hpak";
+    auto largePak = std::filesystem::temp_directory_path() / "he_bench_large.hpak";
+    {
+        HpakWriter p;
+        for (size_t i = 0; i < kSmall; ++i)
+        {
+            const HE::UUID id{0xBE7C000000000000ull + i, i + 1};
+            p.addEntry(id, makeMaterialBlob(id, "bench_s" + std::to_string(i)), {Hpak::Codec::Zstd});
+        }
+        REQUIRE(p.write(smallPak.string()));
+    }
+    {
+        HpakWriter p;
+        std::vector<uint8_t> pad(kLargeBytes);
+        for (size_t i = 0; i < kLarge; ++i)
+        {
+            const HE::UUID id{0xBE7D000000000000ull + i, i + 1};
+            // Half-compressible payload, like vertex data: a ramp with noise.
+            uint32_t x = static_cast<uint32_t>(i) * 2654435761u + 1u;
+            for (size_t b = 0; b < pad.size(); ++b)
+            {
+                x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+                pad[b] = static_cast<uint8_t>((b & 0xF0) | (x & 0x0F));
+            }
+            HAsset::Reader base;
+            REQUIRE(base.openData(makeMaterialBlob(id, "bench_l" + std::to_string(i))));
+            HAsset::Writer w;
+            for (const auto& c : base.chunks()) w.addChunk(c.id, c.data.data(), c.data.size());
+            w.addChunk(HAsset::makeChunkId('P','A','D','B'), pad.data(), pad.size());
+            p.addEntry(id, w.toBytes(static_cast<uint16_t>(HE::AssetType::Material)),
+                       {Hpak::Codec::Zstd});
+        }
+        REQUIRE(p.write(largePak.string()));
+    }
+
+    for (int run = 0; run < 3; ++run)
+    {
+        const StreamBenchResult s  = runStreamBench(smallPak, kSmall, 16);
+        const StreamBenchResult l  = runStreamBench(largePak, kLarge, 16);
+        MESSAGE("run " << run
+                << " | small x" << kSmall << ": wall " << s.wallMs << " ms, main " << s.mainMs
+                << " ms, worst poll " << s.worstPollMs << " ms, polls " << s.polls
+                << " | large x" << kLarge << " (1 MiB): wall " << l.wallMs << " ms, main "
+                << l.mainMs << " ms, worst poll " << l.worstPollMs << " ms, polls " << l.polls);
+    }
+
+    removeQuiet(smallPak);
+    removeQuiet(largePak);
+}
+
+// ─── Shared TOC, worker-side split, time budget (Thema 153, Schritt 3) ───────
+
+TEST_CASE("HpakReader::openShared reads through the mount's TOC and refuses a replaced package")
+{
+    const HE::UUID a{0x5A, 1}, b{0x5B, 2};
+    auto pak = std::filesystem::temp_directory_path() / "he_shared_toc.hpak";
+    {
+        HpakWriter p;
+        p.addEntry(a, makeMaterialBlob(a, "shared_a"), {Hpak::Codec::Zstd});
+        p.addEntry(b, makeMaterialBlob(b, "shared_b"));
+        REQUIRE(p.write(pak.string()));
+    }
+    std::shared_ptr<const HpakReader::Toc> toc;
+    {
+        HpakReader mount;
+        REQUIRE(mount.open(pak.string()));
+        toc = mount.sharedToc();
+        REQUIRE(toc != nullptr);
+
+        HpakReader job;
+        REQUIRE(job.openShared(pak.string(), toc));
+        CHECK(job.tocHash() == mount.tocHash());
+        CHECK(job.hasEntry(a));
+        CHECK(job.hasEntry(b));
+        CHECK(job.enumerate() == mount.enumerate());
+        CHECK(job.readEntry(a) == makeMaterialBlob(a, "shared_a"));
+        CHECK(job.readEntry(b) == makeMaterialBlob(b, "shared_b"));
+    }
+    HpakReader none;
+    CHECK_FALSE(none.openShared(pak.string(), nullptr));
+
+    // Replaced by a different archive (every reader closed first, so Windows
+    // lets it be rewritten): refused, not read at the old offsets.
+    {
+        HpakWriter p;
+        p.addEntry(a, makeMaterialBlob(a, "replaced_a"));
+        REQUIRE(p.write(pak.string()));
+    }
+    HpakReader stale;
+    CHECK_FALSE(stale.openShared(pak.string(), toc));
+    CHECK_FALSE(stale.hasEntry(a));
+    CHECK(stale.readEntry(a).empty());
+    removeQuiet(pak);
+}
+
+#ifndef _WIN32
+// Windows cannot rewrite a file the mount still holds open, so the situation
+// this guards (a patch written over a mounted package) does not arise there.
+TEST_CASE("Pak streaming: a package replaced after the mount streams from the new file")
+{
+    const HE::UUID a{0x5C, 1};
+    auto pak = std::filesystem::temp_directory_path() / "he_shared_toc_replaced.hpak";
+    {
+        HpakWriter p;
+        p.addEntry(a, makeMaterialBlob(a, "before"), {Hpak::Codec::Zstd});
+        REQUIRE(p.write(pak.string()));
+    }
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    {
+        HpakWriter p;
+        p.addEntry(a, makeMaterialBlob(a, "after"), {Hpak::Codec::LZ4});
+        p.addEntry(HE::UUID{0x5D, 2}, makeMaterialBlob(HE::UUID{0x5D, 2}, "extra"));
+        REQUIRE(p.write(pak.string()));
+    }
+    bool arrived = false;
+    cm.loadAssetAsync(a, [&](HE::UUID u) { arrived = (u == a); });
+    pumpUntil(cm, [&] { return arrived || cm.asyncInFlightCount() == 0; });
+    REQUIRE(arrived);
+    REQUIRE(cm.getMaterial(a) != nullptr);
+    CHECK(cm.getMaterial(a)->name == "after");
+    CHECK(cm.asyncInFlightCount() == 0);   // the coalesce key was released
+    removeQuiet(pak);
+}
+#endif
+
+TEST_CASE("pollAsyncResults with a time budget handles at least one result, then stops")
+{
+    constexpr size_t kCount = 10;
+    HpakWriter p;
+    std::vector<HE::UUID> ids;
+    for (size_t i = 0; i < kCount; ++i)
+    {
+        ids.push_back(HE::UUID{0xB0D6E7, i + 1});
+        p.addEntry(ids.back(), makeMaterialBlob(ids.back(), "budget" + std::to_string(i)));
+    }
+    auto pak = std::filesystem::temp_directory_path() / "he_poll_budget.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    REQUIRE(cm.streamMountedAssets() == kCount);
+    // A budget no parse can stay under: after the first result it is always
+    // spent, so every call registers at most one, and none is ever lost.
+    size_t total = 0, most = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (total < kCount && std::chrono::steady_clock::now() < deadline)
+    {
+        const size_t n = cm.pollAsyncResults(SIZE_MAX, 1e-9).size();
+        most = std::max(most, n);
+        total += n;
+        if (n == 0) std::this_thread::yield();
+    }
+    CHECK(total == kCount);
+    CHECK(most == 1);
+    for (const HE::UUID& id : ids) CHECK(cm.isLoaded(id));
+    CHECK(cm.asyncInFlightCount() == 0);
+    removeQuiet(pak);
+}
+
+TEST_CASE("Async loads arrive split into chunks and register like a synchronous load")
+{
+    // Worker-side split (AsyncResult::asset): the main thread parses chunks it
+    // never copied. Same asset either way, from a pak and from loose content.
+    const HE::UUID id{0x5917, 1};
+    const std::vector<uint8_t> blob = makeMaterialBlob(id, "split_mat", 0.25f, 0.5f, 0.75f);
+    HpakWriter p;
+    p.addEntry(id, blob, {Hpak::Codec::Zstd});
+    auto pak = std::filesystem::temp_directory_path() / "he_split_chunks.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager streamed;
+    REQUIRE(streamed.mountPak(pak.string()));
+    bool arrived = false;
+    streamed.loadAssetAsync(id, [&](HE::UUID u) { arrived = (u == id); });
+    pumpUntil(streamed, [&] { return arrived; });
+    REQUIRE(arrived);
+
+    ContentManager direct;
+    REQUIRE(direct.loadAssetFromMemory(blob) == id);
+
+    const MaterialAsset* s = streamed.getMaterial(id);
+    const MaterialAsset* d = direct.getMaterial(id);
+    REQUIRE(s != nullptr);
+    REQUIRE(d != nullptr);
+    CHECK(s->name == d->name);
+    CHECK(s->shaderPath == d->shaderPath);
+    CHECK(s->texturePaths == d->texturePaths);
+    removeQuiet(pak);
+}
+
+TEST_CASE("SceneSystems::collectAssetRefs names each asset once, in first-seen order")
+{
+    HorizonWorld world;
+    const HE::UUID meshId{0x61, 1}, matId{0x62, 2};
+    for (int i = 0; i < 3; ++i)
+    {
+        auto e = world.createEntity("shared" + std::to_string(i));
+        { MeshComponent mc; mc.meshAssetId = meshId; world.addComponent(e, mc); }
+        { MaterialComponent mc; mc.materialAssetId = matId; world.addComponent(e, mc); }
+    }
+    const auto refs = SceneSystems::collectAssetRefs(world);
+    REQUIRE(refs.size() == 2);
+    CHECK(refs[0] == meshId);   // meshes are gathered before materials
+    CHECK(refs[1] == matId);
 }

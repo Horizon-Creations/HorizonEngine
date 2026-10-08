@@ -51,7 +51,8 @@ public:
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
-	                            int shape = 0, const HE::UUID& meshId = HE::UUID{}) override;
+	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
+	                            float timeSeconds = -1.0f) override;
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t width, uint32_t height,
@@ -394,9 +395,12 @@ private:
 	// program — the thumbnail path then falls back to m_meshPreviewProgram.
 	// `meshId` (optional) draws that static mesh instead of the primitive, framed
 	// on its own bounds; an unresolvable mesh falls back to `shape`.
+	// `timeSeconds` < 0 = a frozen still (Time 0, no wind — thumbnails); >= 0 = the
+	// engine clock the Time input reads, plus the scene's wind (see IRenderer).
 	bool DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
 	                                 float dist, int shape,
-	                                 const HE::UUID& meshId = HE::UUID{});
+	                                 const HE::UUID& meshId = HE::UUID{},
+	                                 float timeSeconds = -1.0f);
 	// Compile the billboard program + instance VAO once; false on failure.
 	bool EnsureParticlePreviewProgram();
 	// Draw the particle cloud into the CURRENTLY BOUND target — shared by the
@@ -1158,10 +1162,13 @@ private:
 	struct GILandGpu
 	{
 		glm::mat4 worldToLocal{1.0f};
-		glm::vec4 cfg{0.0f};      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
-		glm::vec4 layer[4]{};     // per-layer folded colour (rgb)
+		glm::vec4 cfg{0.0f};      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
+		glm::vec4 layer[4]{};     // per-layer folded colour (rgb); auto: Grass, Dirt, Rock, Snow
+		glm::vec4 autoWet{0.0f};  // auto only — HE::GiLandscape::autoWet / autoSlope / autoSnow
+		glm::vec4 autoSlope{0.0f};
+		glm::vec4 autoSnow{0.0f};
 	};
-	static_assert(sizeof(GILandGpu) == 64 + 5 * 16, "must match the GLSL GiLand layout");
+	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the GLSL GiLand layout");
 	// How far, in SCREEN pixels, the widest allowed lobe scatters — the span the
 	// blur must cover for the rays not to show as noise. Same constant and same
 	// meaning as MetalRenderer::kGIReflLobeScreenPx; keep them together.
@@ -1197,6 +1204,15 @@ private:
 	// pass could not run. probesValid = the DDGI atlases hold real data.
 	unsigned int RenderGIReflections(int width, int height, const glm::mat4& viewProj,
 	                                 bool probesValid);
+	// GI-reflection sky (topic 173): the sky pass (DrawSkyFullscreen — clouds,
+	// weather, stars) drawn into a small cube around the camera each frame the
+	// reflections trace, so a ray that misses the scene returns the sky the
+	// viewer sees instead of nothing (the composite's cloudless m_skyEnvCube).
+	// Mirrors MetalRenderer::EncodeSkyReflCube; HE_GIREFL_SKY=0 turns it off.
+	void         RenderSkyReflCube();
+	unsigned int m_skyReflCube  = 0;     // GL_TEXTURE_CUBE_MAP RGBA16F, kSkyReflCubeSize²
+	unsigned int m_skyReflFBO   = 0;
+	bool         m_skyReflValid = false; // the cube holds THIS frame's sky
 	void         DispatchGIProbeUpdate();
 
 	static constexpr int   kGIProbeOctSize     = 8;    // octahedral tile size

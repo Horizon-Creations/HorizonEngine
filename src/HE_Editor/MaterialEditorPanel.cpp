@@ -58,6 +58,13 @@ struct State
 	float         previewYaw = 0.6f, previewPitch = 0.35f, previewDist = 3.1f;
 	void*         previewTex   = nullptr;
 	bool          previewDirty = true;
+	// The shader the preview last drew reads the engine clock (Time, Panner, Wind
+	// Sway, the water's waves). Such a preview is stale one frame after it was drawn,
+	// so it stays dirty and re-renders every frame; every other material keeps the
+	// draw-on-change rule and costs nothing while it sits still. Set from the very
+	// source handed to the renderer, so a per-node preview of a node that does not
+	// touch the clock stops redrawing even when the material as a whole does.
+	bool          previewAnimated = false;
 	int           previewPx    = 0;
 	int           previewShape = 0;  // 0 sphere / 1 cube / 2 plane (RenderMaterialPreview)
 	// Preview subject: a built-in primitive (previewShape) or ANY static mesh from the
@@ -1420,6 +1427,8 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	// The component takes its origin from the cursor screen-pos at entry — capture the
 	// same point so paste/duplicate can map the mouse into graph space afterwards.
 	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
+	// Opens where it was left (GraphViewStore.h) — view state, never the asset's.
+	if (st.geState.viewKey.empty() && !st.relPath.empty()) st.geState.viewKey = "mat:" + st.relPath;
 	const bool changed = GraphEditor::draw("##mat_graphcanvas", m, st.geState, avail);
 	if (changed) structuralEdit = true; // add / connect / delete / move → snapshot
 	// Mid-drag the node has already moved. Kept OUT of structuralEdit on
@@ -1654,7 +1663,10 @@ void applyPreviewMesh(State& st, AppContext& ctx, const std::string& path,
 void startPreviewMeshLoad(State& st, AppContext& ctx, const std::string& path, const std::string& label)
 {
 	if (!ctx.contentManager) return;
-	ctx.contentManager->loadAssetAsync(path);
+	// Normal, not the streaming default Low: someone is looking at a progress bar.
+	HE::AsyncLoadOptions options;
+	options.priority = HE::JobPriority::Normal;
+	ctx.contentManager->loadAssetAsync(path, {}, options);
 	st.pendingMeshPath  = path;
 	st.pendingMeshLabel = label;
 	st.pendingMeshStart = ImGui::GetTime();
@@ -2133,17 +2145,43 @@ void render(AppContext& ctx, const std::string& assetPath,
 		namespace T = EditorToolbar;
 		T::Bar bar;
 
-		const char* kind = st.isInstance ? "material instance"
-		                 : st.isFunction ? "material function"
-		                                 : "material graph";
-		T::assetHeader(bar, st.name.c_str(), T::iconLayers, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
+		// Folder, then Save: the two things every asset tab opens with. The right
+		// edge belongs to the view switch.
+		if (T::saveButton(bar, assetOk, /*atLeft=*/true)) saveToDisk(st, ctx, assetPath);
 
-		bar.group();
-		bar.readout(nullptr, kind, T::kFgDim);
-		// Shader complexity gauge (updated on every regenerate).
+		// Graph|Overrides / Shader-code toggle for the right pane, at the right
+		// edge. A function has no shader of its own, so it has no second view
+		// either. Declared before the wells to its left so they know how much
+		// room is theirs.
+		if (!st.isFunction)
+		{
+			const char* graphLabel = st.isInstance ? "Overrides" : "Graph";
+			bar.rightGroup(bar.labelGroupWidth({ graphLabel, "Shader Code" }));
+			if (bar.item("##vgraph", T::iconLayers, graphLabel,
+			             st.viewMode == 0, true,
+			             st.isInstance ? "The values this instance overrides"
+			                           : "The node graph"))
+			{
+				st.viewMode = 0;
+			}
+			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
+			             "The generated shader source"))
+			{
+				st.viewMode = 1;
+			}
+			bar.endGroup();
+		}
+
+		// Shader complexity gauge (updated on every regenerate). The tab already
+		// says what kind of material this is, so there is no "material graph"
+		// badge in front of it.
 		if (!st.isFunction && !st.complexity.empty())
+		{
+			bar.group();
 			bar.readout(nullptr, st.complexity.c_str(), T::kFgDim);
-		bar.endGroup();
+			bar.endGroup();
+		}
 
 		// Blend mode — a MATERIAL-level setting (it changes the Output node's pins
 		// and which render pass the material uses), so it belongs to the bar and
@@ -2194,26 +2232,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 		}
 
-		// Graph|Overrides / Shader-code toggle for the right pane. A function has
-		// no shader of its own, so it has no second view either.
-		if (!st.isFunction)
-		{
-			bar.group();
-			if (bar.item("##vgraph", T::iconLayers, st.isInstance ? "Overrides" : "Graph",
-			             st.viewMode == 0, true,
-			             st.isInstance ? "The values this instance overrides"
-			                           : "The node graph"))
-			{
-				st.viewMode = 0;
-			}
-			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
-			             "The generated shader source"))
-			{
-				st.viewMode = 1;
-			}
-			bar.endGroup();
-		}
-
 		if (st.isInstance && mat)
 		{
 			bar.group();
@@ -2228,7 +2246,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 
 		if (!assetOk) bar.label("Asset could not be loaded", T::kBad);
-		if (T::saveButton(bar, assetOk)) saveToDisk(st, ctx, assetPath);
 	}
 
 	// Edit flags — both columns contribute; applied once at the end.
@@ -2285,6 +2302,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// change (camera/size/material edit). Reuse the handle otherwise.
 			static HE::UUID s_lastPreviewMat{};
 			if (s_lastPreviewMat != st.materialId) st.previewDirty = true;
+			// Time-driven material: the picture it showed last frame is already
+			// out of date. The editor draws every frame (no event-driven idle),
+			// so marking it dirty here is all it takes to keep it running.
+			if (st.previewAnimated) st.previewDirty = true;
+			// The clock the preview's Time input reads — the UI clock, which runs
+			// from the editor's start like the scene's engine seconds do.
+			const float previewClock = static_cast<float>(ImGui::GetTime());
 			// What this tab SHOWS is the canvas graph, and that graph is allowed to have no
 			// counterpart on the asset yet: a material created in the Content Browser is born
 			// with nothing but its META chunk, so the default graph stateFor() builds lives
@@ -2341,9 +2365,16 @@ void render(AppContext& ctx, const std::string& assetPath,
 						swapped = true;
 					}
 				}
+				// Asked of the text the GPU is about to run (the swapped-in source
+				// for a node preview), fragment and WPO vertex stage both.
+				const bool usesTime = HE::matGlslUsesTime(mat->customShaderFragGlsl)
+				                   || HE::matGlslUsesTime(mat->customShaderVertGlsl);
 				st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
 					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist, st.previewShape,
-					st.previewMeshId);
+					st.previewMeshId, previewClock);
+				// A render that produced nothing (a shader that does not build) is
+				// not worth retrying 60 times a second — the next edit asks again.
+				st.previewAnimated = usesTime && st.previewTex != nullptr;
 				if (swapped && mat)
 				{
 					mat->customShaderFragGlsl = std::move(origGlsl);
@@ -2399,7 +2430,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 						sm->graphLayerNames   = gen.layerNames;
 						st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager,
 							st.fnPreviewMatId, (uint32_t)px, st.previewYaw, st.previewPitch,
-							st.previewDist, st.previewShape, st.previewMeshId);
+							st.previewDist, st.previewShape, st.previewMeshId, previewClock);
+						st.previewAnimated = HE::matGlslUsesTime(gen.glsl) && st.previewTex != nullptr;
 						// Consumed only where a render was actually ATTEMPTED — bailing out
 						// above (no output pin yet, unsaved path) used to clear the flag too,
 						// which left the preview blank until the next edit re-set it.

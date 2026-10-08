@@ -36,7 +36,7 @@ namespace EditorSettingsPanel
 		// the answer is a different one: a collaborator is a person who was
 		// invited, a remote client is a program on this machine.
 		// Shortcuts is the keyboard: every editor-wide chord, rebindable.
-		HorizonCode, Shortcuts, CollabGeneral, RemoteControl, Repository, Status,
+		Panels, Shortcuts, CollabGeneral, RemoteControl, Repository, Status,
 		// Rendering
 		Display, PostProcessing, GlobalIllumination, Effects,
 		// (The pages that edit the PROJECT — Application, Permissions, Fonts,
@@ -49,13 +49,19 @@ namespace EditorSettingsPanel
 
 	// How the HorizonCode graph editor spells a variable in its variable list:
 	// Detailed puts the name and the (coloured) type on two lines, Compact puts
-	// both on one. Set on the Editor ▸ HorizonCode page.
+	// both on one. Set on the Editor ▸ Panels page, under HorizonCode.
 	enum class HcVariableStyle { Detailed = 0, Compact = 1 };
 
 	// The setting, read back for whoever draws the list. An accessor rather than
 	// a shared key so the graph editor never has to know where this is persisted,
 	// and so an absent or damaged value has ONE place to fall back to Detailed.
 	HcVariableStyle hcVariableStyle();
+
+	// Whether the widget designer runs the widget's Pre Construct on its canvas
+	// (sandboxed, never saved). On by default, like UMG. Set on the Editor ▸
+	// Panels page, under Widgets; read by the designer every frame so the
+	// checkbox and the canvas cannot disagree.
+	bool widgetRunPreConstruct();
 
 	// Renders the engine-settings catalog. Each `row(key, category, widget)` is a
 	// logical setting group; `widget` draws its control(s). `categoryFilter`

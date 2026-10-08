@@ -492,6 +492,15 @@ inline constexpr int kMatMaxGraphTextures = 4;
 // fixed position. Hand-written GLSL without the line → 0 (all plain 2D).
 HE_API uint32_t matGlslTextureArrayMask(const std::string& glsl);
 
+// Does this generated GLSL (fragment body, or the WPO vertex body) read the engine
+// clock — heLight.sunDir.w? Every node that moves with time (Time, Panner,
+// Wind Sway, the engine water's waves) ends up there, including the ones that sit
+// inside a called material function, so the answer comes from the text the GPU
+// will run and not from walking the graph. The Material Editor asks it to decide
+// whether its preview has to be redrawn every frame or only when something was
+// edited.
+HE_API bool matGlslUsesTime(const std::string& glsl);
+
 // Exposed parameters a single material graph may declare — the length of the
 // HeParams UBO array (`uniform HeParams { vec4 v[kMatMaxParams]; }`, emitted by
 // generateFragment and mirrored in MaterialShaderLibrary's WPO preamble).

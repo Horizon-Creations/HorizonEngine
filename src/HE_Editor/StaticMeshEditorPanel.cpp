@@ -406,14 +406,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		bar.group();
-		bar.readout(T::iconLayers,
-		            mesh->name.empty() ? st.name.c_str() : mesh->name.c_str());
-		bar.endGroup();
-
-		bar.group();
-		bar.readout(nullptr, st.relPath.c_str(), T::kFgDim);
-		bar.endGroup();
+		T::assetHeader(bar, assetPath, false);
 
 		// Which of the two views the right pane holds. The 3D view is the one you
 		// open a mesh to see; the unwrap is what you switch to when the question

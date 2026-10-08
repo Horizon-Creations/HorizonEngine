@@ -5,6 +5,7 @@
 #include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
 #include "GitCloneDialog.h"              // "Clone from GitHub..." beside "Create & push"
+#include "GitHubSignIn.h"                // the GitHub account row
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
@@ -14,6 +15,7 @@
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include "EditorRewards.h"             // Feedback > each tone's "Preview"
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
+#include <SourceControl/GitHubTokenStore.h>  // kHost: which remote the sign-in covers
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
 #include <Net/RouterProbe.h>
@@ -93,11 +95,17 @@ static void toggleFavorite(EditorConfig& cfg, const char* key)
 		cfg.QuickSettingsFavorites += (i ? "," : "") + keys[i];
 }
 
-// ─── Editor ▸ HorizonCode ────────────────────────────────────────────────────
+// ─── Editor ▸ Panels ─────────────────────────────────────────────────────────
 // The config key, in the one file that owns it. Outside the ImGui guard because
 // this is a plain value read: whoever draws the variable list asks for the
 // setting, not for the page that sets it.
 static const char* kHcVariableDisplayKey = "HcVariableDisplay";
+static const char* kWidgetRunPreConstructKey = "WidgetRunPreConstruct";
+
+bool widgetRunPreConstruct()
+{
+	return GlobalState::getInstance().getCustomConfigBool(kWidgetRunPreConstructKey, true);
+}
 
 HcVariableStyle hcVariableStyle()
 {
@@ -916,8 +924,17 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 				EditorWidgets::checkbox("Check Mark", &cfg.RewardsCheckMark);
 				EditorWidgets::checkbox("Light Edge", &cfg.RewardsLightEdge);
 			}
+			// Moments 4–6 (topic 140): each switches off only its moment, the
+			// counting goes on — so they are not under Visual Cues, which
+			// does not silence a moment's sound either.
+			EditorWidgets::checkbox("Compile Moment", &cfg.RewardsMomentCompile);
+			EditorWidgets::checkbox("Commit Moment", &cfg.RewardsMomentCommit);
+			EditorWidgets::checkbox("Tutorial Moment", &cfg.RewardsMomentTutorial);
 			EditorWidgets::checkbox("Tab Check on Save", &cfg.RewardsTabCheck);
 			EditorWidgets::checkbox("Highlight Imports", &cfg.RewardsImportHighlight);
+			// V8 + V9's failed-node pulse: "look here", for a problem — not
+			// part of a moment's line, so a sibling of Visual Cues too.
+			EditorWidgets::checkbox("Problem Pulse", &cfg.RewardsProblemPulse);
 			static const char* motionItems[] = { "Follow System", "Off" };
 			cfg.RewardsReducedMotion = std::clamp(cfg.RewardsReducedMotion, 0, 1);
 			Row::combo("Reduced Motion", &cfg.RewardsReducedMotion, motionItems,
@@ -947,6 +964,31 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 				ImGui::SameLine();
 				if (EditorWidgets::button("Preview##import"))
 					HE::Ed::Rewards::preview(ctx, Tone::ImportPop);
+				// Topic 140's tones (EditorRewards.h, "The tones").
+				EditorWidgets::checkbox("Compile Sound", &cfg.RewardsSoundCompile);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##compile"))
+					HE::Ed::Rewards::preview(ctx, Tone::CompileClean);
+				EditorWidgets::checkbox("Compile Failed Sound", &cfg.RewardsSoundCompileFailed);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##compilefailed"))
+					HE::Ed::Rewards::preview(ctx, Tone::CompileFailed);
+				EditorWidgets::checkbox("Commit Sound", &cfg.RewardsSoundCommit);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##commit"))
+					HE::Ed::Rewards::preview(ctx, Tone::Commit);
+				EditorWidgets::checkbox("Tutorial Sound", &cfg.RewardsSoundTutorial);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##tutorial"))
+					HE::Ed::Rewards::preview(ctx, Tone::TourDone);
+				EditorWidgets::checkbox("Problem Sound", &cfg.RewardsSoundProblem);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##problem"))
+					HE::Ed::Rewards::preview(ctx, Tone::Problem);
+				EditorWidgets::checkbox("Drag and Drop Sound", &cfg.RewardsSoundDragDrop);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##dragdrop"))
+					HE::Ed::Rewards::previewDragCues(ctx);
 			}
 			EditorWidgets::checkbox("Show Progress", &cfg.RewardsShowProgress);
 			{
@@ -956,11 +998,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			}
 		}
 		EditorWidgets::checkbox("Mute Editor Sounds", &cfg.EditorSoundsMuted);
-		hint("A saved scene or asset, a finished build and an import say so for a "
+		hint("A saved scene or asset, a finished build, an import, a clean compile, "
+		     "a commit or push and the end of the tutorial say so for a "
 		     "moment in the middle of the footer. Nothing opens, nothing takes focus, "
 		     "and nothing waits for it. The sound is off unless you turn it on, and "
-		     "works with or without the visual cue; the build sounds only play while "
-		     "the editor is in the background. Show Progress adds today's builds and "
+		     "works with or without the visual cue; the build, commit and problem "
+		     "sounds only play while the editor is in the background. A new problem "
+		     "rings the footer bell once (Problem Pulse). Show Progress adds today's builds and "
 		     "your days in a row beside \"Ready\"; they are only kept on this "
 		     "computer.");
 	});
@@ -991,16 +1035,16 @@ bool sourceControlPageActive() { return s_scPageFrame == ImGui::GetFrameCount();
 
 namespace {
 
-// GitHub setup inputs. The token buffer is wiped the moment it is handed off —
-// it must not sit in static memory for the rest of the session.
+// GitHub setup inputs. No token among them: "Create & push" uses the GitHub
+// sign-in.
 char s_remoteUrl[512]  = "";
 char s_ghRepoName[128] = "";
-char s_ghToken[256]    = "";
 bool s_ghPrivate       = true;
 
-// Standalone "store a token for this remote" form (separate buffers from the
-// GitHub-create form above — the two are different flows and clearing one must
-// not disturb the other).
+// Standalone "store a token for this remote" form, for the hosts the GitHub
+// sign-in does not cover (GitLab, Azure DevOps, GitHub Enterprise, self-hosted).
+// The token buffer is wiped the moment it is handed off — it must not sit in
+// static memory for the rest of the session.
 char s_credHost[128]  = "";
 char s_credUser[128]  = "";
 char s_credToken[256] = "";
@@ -1066,7 +1110,7 @@ void drawGitMessages(GitController* git)
 	if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
 
-// Repository half of the page: init, remote / GitHub setup (token), auto-push.
+// Repository half of the page: init, remote / GitHub setup, auto-push.
 // Commit, push, pull and the change list stay in the Source Control window
 // (View menu) — this page is the one-time setup, that window is the daily
 // driver.
@@ -1176,22 +1220,17 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::SameLine();
 		EditorWidgets::checkbox("Private", &s_ghPrivate);
 
-		ImGui::SetNextItemWidth(-140.0f);
-		ImGui::InputTextWithHint("##ghtoken", "Personal access token",
-		                         s_ghToken, sizeof(s_ghToken),
-		                         ImGuiInputTextFlags_Password);
-		ImGui::SameLine();
-		ImGui::BeginDisabled(git->busy() || s_ghToken[0] == '\0' ||
+		// The GitHub account (above) is the only way in: an empty token makes the
+		// service read the sign-in from the credential helper itself.
+		const bool signedIn = GitHubSignIn::account() == GitHubSignIn::Account::SignedIn;
+		ImGui::BeginDisabled(git->busy() || !signedIn ||
 		                     s_ghRepoName[0] == '\0' || st.initialCommit);
 		if (EditorWidgets::primaryButton("Create & push", ImVec2(130.0f, 0.0f)))
-		{
-			git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, std::string(s_ghToken));
-			// Wipe, not clear: the bytes must go, not just the length.
-			std::fill(std::begin(s_ghToken), std::end(s_ghToken), '\0');
-		}
+			git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, {});
 		ImGui::EndDisabled();
-		ImGui::TextDisabled("Token: github.com/settings/tokens — classic, 'repo' scope. "
-		                    "It is handed to git's credential helper, stored nowhere else.");
+		ImGui::SameLine();
+		ImGui::TextDisabled(signedIn ? "Uses your GitHub sign-in."
+		                             : "Sign in with GitHub above first.");
 		if (st.initialCommit)
 			ImGui::TextDisabled("Make the first commit before setting up the remote.");
 
@@ -1290,9 +1329,10 @@ void drawRepositorySection(AppContext& ctx)
 	}
 
 	// ── Access token ─────────────────────────────────────────────────────────
-	// Available whatever route the remote took: the GitHub-create flow above
-	// stores its token on the way through, but a pasted URL, a cloned project
-	// or an expired token all end up here, with no repository being created.
+	// For a pasted URL on a host the GitHub sign-in does not reach: GitLab,
+	// Azure DevOps, GitHub Enterprise, anything self-hosted. A github.com remote
+	// pushes and pulls with the sign-in (the account row above writes the very
+	// entry this form would), so it gets no token field of its own.
 	ImGui::Spacing();
 	ImGui::SeparatorText("Access token");
 
@@ -1305,6 +1345,12 @@ void drawRepositorySection(AppContext& ctx)
 	{
 		ImGui::TextWrapped("origin uses SSH, which authenticates with your SSH key. "
 		                   "Access tokens apply to https:// remotes only.");
+	}
+	else if (hostFromRemote(remote) == HE::Sc::GitHubTokenStore::kHost)
+	{
+		ImGui::TextWrapped("origin is on github.com, which uses your GitHub sign-in "
+		                   "(GitHub account, above) for pushing and pulling. No token "
+		                   "to create by hand.");
 	}
 	else
 	{
@@ -1346,7 +1392,8 @@ void drawRepositorySection(AppContext& ctx)
 			std::fill(std::begin(s_credToken), std::end(s_credToken), '\0');
 		}
 		ImGui::EndDisabled();
-		ImGui::TextDisabled("GitHub: github.com/settings/tokens — classic, 'repo' scope.");
+		ImGui::TextDisabled("GitLab: a personal access token with write_repository. "
+		                    "Azure DevOps: a PAT with Code (Read & write).");
 	}
 
 	drawGitMessages(git);
@@ -1484,6 +1531,13 @@ void drawSourceControlPage(AppContext& ctx)
 
 	ImGui::SeparatorText("Git on this machine");
 	drawGitSetupSection(ctx);
+
+	// Between the two halves: it needs git (the first) and works without a
+	// project (unlike the second). The only way in for github.com; the token
+	// form further down is for GitLab, Azure DevOps and other hosts.
+	ImGui::Spacing();
+	ImGui::SeparatorText("GitHub account");
+	GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/false);
 
 	ImGui::Spacing();
 	ImGui::SeparatorText("Repository");
@@ -1880,20 +1934,22 @@ void drawStatusPage(AppContext& ctx)
 // table's cmake and compiler rows already say, so the rows kept the facts and
 // their Fix button opens the install dialog that carries the remedy.
 
-// ─── HorizonCode page (Editor) ───────────────────────────────────────────────
-// Settings of the HorizonCode graph editor itself. A bespoke page rather than a
-// catalog category: nothing here is engine state worth pinning to Quick
-// Settings, and it persists through GlobalState rather than EditorConfig.
+// ─── Panels page (Editor) ────────────────────────────────────────────────────
+// Settings of the editor's asset panels themselves, one heading per panel
+// family: HorizonCode (the graph editor) and Widgets (the UI designer). A
+// bespoke page rather than a catalog category: nothing here is engine state
+// worth pinning to Quick Settings, and it persists through GlobalState rather
+// than EditorConfig.
 
 // Its own scope: this page is not the settings CATALOGUE (which keys by
 // category) and not the tool status above it.
-void drawHorizonCodePage()
+void drawPanelsPage()
 {
 	// Every explanation below is a full sentence and the tab is as wide as the
 	// user left it.
 	EditorWidgets::WrapText wrap;
 
-	ImGui::SeparatorText("Variables");
+	ImGui::SeparatorText("HorizonCode");
 	ImGui::TextWrapped("How the graph editor's variable list spells a variable.");
 	ImGui::Spacing();
 
@@ -1942,6 +1998,28 @@ void drawHorizonCodePage()
 	EditorWidgets::hint("Name and type on one line. Half the height per variable, so a "
 	                    "long list stays readable without scrolling.");
 	ImGui::Unindent();
+
+	ImGui::Spacing();
+	ImGui::SeparatorText("Widgets");
+	HE::Ed::Help::Scope widgetScope("Widgets");
+	bool runPreConstruct = widgetRunPreConstruct();
+	if (EditorWidgets::checkbox("Run Pre Construct", &runPreConstruct))
+	{
+		GlobalState& gs = GlobalState::getInstance();
+		gs.setCustomConfigEntry(kWidgetRunPreConstructKey, runPreConstruct);
+		// Same reasoning as the variable display above: a look picked once is
+		// written now, and a failed write is said out loud.
+		if (!gs.writeConfig())
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the Pre Construct setting",
+			               "The choice applies now, but this session's config file could "
+			               "not be written \xe2\x80\x94 the next launch will use the old one.");
+	}
+	ImGui::Indent();
+	EditorWidgets::hint("Show what a widget's Pre Construct sets on the designer's canvas. "
+	                    "Sandboxed and never saved \xe2\x80\x94 Details still shows the "
+	                    "authored values.");
+	ImGui::Unindent();
 }
 
 // ─── Navigation + page plumbing ──────────────────────────────────────────────
@@ -1962,7 +2040,7 @@ constexpr NavItem kGeneralItems[] = {
 // and said nothing the page titles did not. The labels grew back what the
 // headings carried — "Sessions" under no heading is not a topic.
 constexpr NavItem kEditorItems[] = {
-	{ Page::HorizonCode,   "HorizonCode" },
+	{ Page::Panels,        "Panels" },
 	{ Page::Shortcuts,     "Shortcuts" },
 	{ Page::CollabGeneral, "Collaboration" },
 	{ Page::RemoteControl, "Remote Control" },
@@ -2095,7 +2173,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	}
 	else if (s_page == Page::Repository)  drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
-	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
+	else if (s_page == Page::Panels)      drawPanelsPage();
 	else if (s_page == Page::Shortcuts)   ShortcutsPage::draw();
 	ImGui::EndChild();
 
@@ -2118,6 +2196,9 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsVisual        = true;
 			cfg.RewardsCheckMark     = true;
 			cfg.RewardsLightEdge     = true;
+			cfg.RewardsMomentCompile  = true;
+			cfg.RewardsMomentCommit   = true;
+			cfg.RewardsMomentTutorial = true;
 			cfg.RewardsTabCheck      = true;
 			cfg.RewardsImportHighlight = true;
 			cfg.RewardsReducedMotion = 0;
@@ -2127,6 +2208,13 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsSoundBuild       = true;
 			cfg.RewardsSoundBuildFailed = true;
 			cfg.RewardsSoundImport      = true;
+			cfg.RewardsSoundCompile       = true;
+			cfg.RewardsSoundCompileFailed = true;
+			cfg.RewardsSoundCommit        = true;
+			cfg.RewardsSoundTutorial      = true;
+			cfg.RewardsSoundProblem       = true;
+			cfg.RewardsSoundDragDrop      = true;
+			cfg.RewardsProblemPulse       = true;
 			cfg.RewardsShowProgress  = true;
 			cfg.RewardsCounterTick   = true;
 			cfg.RewardsStreakTooltip = true;

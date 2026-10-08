@@ -152,7 +152,17 @@ LIMITS = {
     # carry. Windows is the smallest of the three platforms here, and almost all
     # of the difference is its python: 9.8 MB against Linux's 22.7 MB.
     "win32": {
-        "game":         (45.0, 34.0),
+        # game: (45.0, 34.0) until 06.10.2026, raised on purpose. Thema 153
+        # Schritt 5 (run 37463169927, windows-latest, the ci.yml recipe) weighed
+        # 43.9 MB total, 34.1 MB without python (scene 17.8, rendering 5.6, core
+        # 5.3) and went red by 0.1 MB. The growth is world streaming in
+        # HorizonScene, nothing linked in from outside: CellStreamer (~110 KB
+        # text on arm64), FloatingOrigin (~50 KB), the CBOR split in
+        # SceneJsonParse (~100 KB of from_cbor instantiations) and Jolt's
+        # JobSystemThreadPool. A green run prints no report, so the number before
+        # is only known as "at most 34.0". New limits: measured plus 10 percent,
+        # the rule the darwin game row above follows.
+        "game":         (48.0, 38.0),
         "app-advanced": (41.0, 30.0),
         "app-basic":    (40.0, 29.0),
     },

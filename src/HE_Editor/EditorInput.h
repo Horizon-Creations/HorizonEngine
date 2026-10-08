@@ -44,4 +44,28 @@ namespace EditorInput
 	// dependency just to read a cached bool (it stays false there).
 	namespace detail { inline bool g_trackpadActive = false; }
 	inline bool trackpadActive() { return detail::g_trackpadActive; }
+
+	// ── The pinch gesture ────────────────────────────────────────────────────
+	// SDL 3.2 delivers no pinch event, and macOS does not turn the trackpad's
+	// pinch into Ctrl+scroll the way Windows' precision touchpads do — so on a
+	// MacBook the zoom gesture reached nobody. The Mac build listens for the
+	// native magnify event itself (EditorInputMac.mm) and parks the sum here;
+	// beginFrame() publishes it once per frame so every canvas under the pointer
+	// can ask the same question. Zero everywhere else, which keeps the
+	// Ctrl/Cmd+scroll route as the zoom gesture there.
+	//
+	// The value is NSEvent.magnification summed over the frame: positive spreads
+	// the fingers (zoom in), a full pinch adds up to roughly ±1.
+	namespace detail
+	{
+		inline float g_pinchPending = 0.0f;   // written by the platform hook
+		inline float g_pinchFrame   = 0.0f;   // what this frame's panels read
+	}
+	inline float pinchDelta() { return detail::g_pinchFrame; }
+
+	// Once per frame, before any panel draws (EditorUI::render). Installs the
+	// platform hook on first use and publishes the pending pinch.
+	void beginFrame();
+	// Platform half: macOS installs the magnify monitor, everyone else nothing.
+	void pinchPlatformInstall();
 }

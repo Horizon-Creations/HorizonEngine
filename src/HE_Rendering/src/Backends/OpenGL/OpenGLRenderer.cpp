@@ -1792,7 +1792,9 @@ struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
 struct GiInst { mat4 invTransform; vec4 baseColor; vec4 emissive; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset, .z = landscape index (-1 = none)
 // Painted landscape — HE::GiLandscape / GILandGpu. std430 keeps the mat4 and the
 // vec4s naturally aligned, so the CPU struct maps 1:1.
-struct GiLand { mat4 worldToLocal; vec4 cfg; vec4 layer[4]; }; // cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+// cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto landscape:
+// layer = Grass/Dirt/Rock/Snow means, autoWet/autoSlope/autoSnow = GiLandscape.h).
+struct GiLand { mat4 worldToLocal; vec4 cfg; vec4 layer[4]; vec4 autoWet; vec4 autoSlope; vec4 autoSnow; };
 layout(std430, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
 layout(std430, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
 layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
@@ -2425,8 +2427,32 @@ uniform vec4 uFrame;       // x = jitter seed, y = width, z = height, w = 1 → 
 uniform vec4 uLightPosRange[8];  // xyz pos, w range
 uniform vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
 uniform vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+// The real sky (clouds, weather) for rays that miss, baked around the camera
+// this frame (RenderSkyReflCube). uSkyReflValid = 0: no bake, a miss returns
+// nothing and the composite's cloudless cubemap shows instead.
+uniform samplerCube uSkyRefl;
+uniform float uSkyReflValid;
 
 const int kOctSize = 8; // must match OpenGLRenderer::kGIProbeOctSize
+
+// Auto landscape material at a hit: the graph's masks from the hit's slope and
+// world height over the slices' mean colours. Mirrors HE::giAutoLandscapeAlbedo
+// (GiLandscape.h) and the Metal kernels' giAutoLandAlbedo line for line.
+vec3 giAutoLandAlbedo(int li, vec3 pos, vec3 n)
+{
+	float slope = clamp(1.0 - n.y, 0.0, 1.0);
+	float rs = giLands[li].autoSlope.x, rb = giLands[li].autoSlope.y;
+	float dirt  = clamp(giLands[li].autoSlope.z + smoothstep(rs - rb, rs, slope), 0.0, 1.0);
+	vec3 ground = mix(giLands[li].layer[0].rgb, giLands[li].layer[1].rgb, dirt);
+	float rock  = smoothstep(rs, rs + rb, slope);
+	vec3 s1     = mix(ground, giLands[li].layer[2].rgb, rock);
+	float snow  = smoothstep(giLands[li].autoSnow.x, giLands[li].autoSnow.x + giLands[li].autoSnow.y, pos.y)
+	            * (1.0 - smoothstep(giLands[li].autoSnow.z, giLands[li].autoSnow.z + 0.1, slope));
+	vec3 s2     = mix(s1, giLands[li].layer[3].rgb, snow);
+	float pms   = giLands[li].autoSlope.w;
+	float flat_ = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, giLands[li].autoWet.rgb, giLands[li].autoWet.w * flat_);
+}
 
 // SYNC: byte-for-byte the scene shader's giOctEncode / sampleDDGIIrradiance
 // (kUnlitFS above) — the sampled variant WITH the Chebyshev visibility test, not
@@ -2585,7 +2611,19 @@ void main()
 
 	float dist; int tri;
 	int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
-	if (hitInst < 0) continue; // miss → this sample contributes nothing (sky)
+	if (hitInst < 0)
+	{
+		// Miss → the sky. With the bake it is a full sample (the receiver's
+		// confidence, like a hit at close range) carrying the real sky, so the
+		// mirror shows clouds and a part-miss glossy lobe averages hit and sky
+		// instead of weighting its hits by f². Without it: nothing, as before.
+		if (uSkyReflValid > 0.5)
+		{
+			outRadiance += texture(uSkyRefl, Rs).rgb;
+			outConf     += 1.0;
+		}
+		continue;
+	}
 
 	vec3 hitPos = origin + Rs * dist;
 	vec3 hitN   = giHitNormal(hitInst, tri, Rs);
@@ -2595,7 +2633,11 @@ void main()
 	// rect whose mesh UVs are linear in it, so the hit POSITION recovers the UV
 	// — no per-vertex UV in the BVH. Mirrors the Metal kernels (GiLandscape.h).
 	int li = giInsts[hitInst].offsets.z;
-	if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
+	// Auto landscape (cfg.w < 0): no paint, its colour follows the hit's slope
+	// and height (hitN faces the ray).
+	if (li >= 0 && li < uGiLandCount && li < 4 && giLands[li].cfg.w < -0.5)
+		albedo = giAutoLandAlbedo(li, hitPos, hitN);
+	else if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
 	{
 		vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
 		vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
@@ -5691,13 +5733,19 @@ void OpenGLRenderer::UpdateGIAccel()
 		for (const HE::GiLandscape& ls : m_renderWorld.landscapes)
 		{
 			if (static_cast<int>(lands.size()) >= HE::kGiMaxLandscapes) break;
-			const unsigned int wm = ResolveGraphTexture(ls.weightmapId, {});
+			// An AUTO entry has no weightmap (its masks come from the hit's slope
+			// and height); its unit takes the black dummy, never sampled.
+			const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+			const unsigned int wm = autoLand ? m_blackTex : ResolveGraphTexture(ls.weightmapId, {});
 			if (!wm) continue;   // not resident yet → keep the flat colour
 			GILandGpu g;
 			g.worldToLocal = ls.worldToLocal;
 			g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling,
 			                  static_cast<float>(ls.layerCount));
 			for (int i = 0; i < 4; ++i) g.layer[i] = ls.layerColor[i];
+			g.autoWet   = ls.autoWet;
+			g.autoSlope = ls.autoSlope;
+			g.autoSnow  = ls.autoSnow;
 			lands.push_back(g);
 			m_giLandWeightTex.push_back(wm);
 		}
@@ -6031,6 +6079,9 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	if (m_giReflFBO)     { glDeleteFramebuffers(1, &m_giReflFBO);     m_giReflFBO = 0; }
 	if (m_giReflTex)     { glDeleteTextures(1, &m_giReflTex);         m_giReflTex = 0; }
 	if (m_giReflRawTex)  { glDeleteTextures(1, &m_giReflRawTex);      m_giReflRawTex = 0; }
+	if (m_skyReflFBO)    { glDeleteFramebuffers(1, &m_skyReflFBO);    m_skyReflFBO = 0; }
+	if (m_skyReflCube)   { glDeleteTextures(1, &m_skyReflCube);       m_skyReflCube = 0; }
+	m_skyReflValid = false;
 	if (m_giReflBlurFBO) { glDeleteFramebuffers(1, &m_giReflBlurFBO); m_giReflBlurFBO = 0; }
 	if (m_giReflBlurTex) { glDeleteTextures(1, &m_giReflBlurTex);     m_giReflBlurTex = 0; }
 	for (int i = 0; i < 2; ++i)
@@ -6341,10 +6392,70 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 // `probesValid` = the DDGI atlases hold real data this frame. Reflections run
 // WITHOUT them (sun + local lights + the flat ambient floor at each hit), which
 // is why the whole pass is independent of the diffuse GI toggle.
+// GI-reflection sky cube (topic 173) — see the header and Metal's
+// EncodeSkyReflCube, which this mirrors: six faces of the real sky pass around
+// the camera, low-res clouds off (that buffer is screen-space, a face is not).
+// Leaves the caller's framebuffer, viewport and depth-test state as it found them.
+static constexpr int kSkyReflCubeSize = 128;
+void OpenGLRenderer::RenderSkyReflCube()
+{
+	m_skyReflValid = false;
+	static const bool s_off = [] {
+		const char* e = std::getenv("HE_GIREFL_SKY");
+		return e && e[0] == '0';
+	}();
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	if (s_off || !m_skyProgram || !env.skyEnabled) return;
+	if (!m_skyReflCube)
+	{
+		glGenTextures(1, &m_skyReflCube);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflCube);
+		for (int f = 0; f < 6; ++f)
+			glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA16F,
+			             kSkyReflCubeSize, kSkyReflCubeSize, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+	}
+	if (!m_skyReflFBO) glGenFramebuffers(1, &m_skyReflFBO);
+
+	GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+	const GLboolean depthWasOn = glIsEnabled(GL_DEPTH_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_skyReflFBO);
+	glViewport(0, 0, kSkyReflCubeSize, kSkyReflCubeSize);
+	glDisable(GL_DEPTH_TEST); // no depth attachment: every texel is sky
+	const glm::vec3 camPos = m_renderWorld.camera.position;
+	bool complete = true;
+	for (int f = 0; f < 6 && complete; ++f)
+	{
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		                       GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, m_skyReflCube, 0);
+		complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+		if (complete)
+			DrawSkyFullscreen(HE::SkyCubeFaceInvViewProj(f, camPos, /*rowZeroAtTop=*/false),
+			                  m_renderWorld.sunDirection, camPos, env,
+			                  /*allowLowResClouds=*/false, kSkyReflCubeSize, kSkyReflCubeSize);
+	}
+	// DrawSkyFullscreen leaves GL_LESS + depth writes (the frame default); the
+	// test itself goes back to what the caller had.
+	if (depthWasOn) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
+	glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+	m_skyReflValid = complete;
+}
+
 unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
                                                  const glm::mat4& viewProj, bool probesValid)
 {
 	if (!m_giReflCSProgram || !m_giGBufFBO || !m_giReflRawTex) return 0;
+
+	// The real sky for rays that miss (clouds, weather) — before the trace binds
+	// its own program and units.
+	RenderSkyReflCube();
 
 	// ── 1. Trace: one specular ray per pixel against the BVH SSBOs ───────────
 	glUseProgram(m_giReflCSProgram);
@@ -6414,6 +6525,14 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		        i < static_cast<int>(m_giLandWeightTex.size()) ? m_giLandWeightTex[i] : m_blackTex,
 		        5 + i);
 	}
+	// Baked sky cube on unit 9 (after the weightmaps). The IBL cube stands in
+	// while the bake is off so the samplerCube always has a complete texture;
+	// uSkyReflValid = 0 keeps the kernel from reading it then.
+	glActiveTexture(GL_TEXTURE9);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflValid ? m_skyReflCube : m_skyEnvCube);
+	glUniform1i(loc("uSkyRefl"), 9);
+	glUniform1f(loc("uSkyReflValid"), m_skyReflValid ? 1.0f : 0.0f);
+	glActiveTexture(GL_TEXTURE0);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 
@@ -8569,7 +8688,8 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 // the Material Editor is showing. The caller owns FBO/viewport/clear and the
 // depth/blend/cull state; this only touches program, UBOs, textures and the VAO.
 bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
-                                                 float dist, int shape, const HE::UUID& meshId)
+                                                 float dist, int shape, const HE::UUID& meshId,
+                                                 float timeSeconds)
 {
 	// Resolve the material's node-graph program (built-in-PBR materials have none →
 	// nothing to draw). Reuses the same program cache + precompiled-variant path.
@@ -8654,10 +8774,18 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 
 	HE::MaterialShaderLibrary::Lighting lit{};
 	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
-	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
+	// Engine clock for the Time input. A live preview (the Material Editor) hands
+	// it in, a still (thumbnails) leaves it at 0 — and then must not pick up wind
+	// either, or a sway material's thumbnail would lean with whatever scene is open.
+	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
+	lit.sunDir[3] = timeSeconds >= 0.0f ? timeSeconds : 0.0f;
 	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	// Wind / Wind Sway nodes read the .w of sunColor / ambient / camPos. The three
+	// are spare in this block, so the wind rides in AFTER the studio values above
+	// (FillMaterialWind writes only those .w channels).
+	if (timeSeconds >= 0.0f) HE::FillMaterialWind(GetEnvironment(), lit);
 	// Studio sun as the single array light so heLitP() previews shade correctly.
 	lit.lightPos[0][3]   = 0.0f; // directional
 	lit.lightDir[0][0]   = -sd.x; lit.lightDir[0][1] = -sd.y; lit.lightDir[0][2] = -sd.z;
@@ -8924,7 +9052,7 @@ bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
 
 void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
                                            uint32_t size, float yaw, float pitch, float dist,
-                                           int shape, const HE::UUID& meshId)
+                                           int shape, const HE::UUID& meshId, float timeSeconds)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -8969,7 +9097,7 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
-	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape, meshId))
+	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape, meshId, timeSeconds))
 	{
 		glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
 		glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
@@ -11168,8 +11296,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                // node-graph textures (0 → the built-in blend program).
 		                unsigned int matProg = 0; std::vector<float> params;
 		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0;
-		                // Deferred forward-routed opaque draws only: the landscape
-		                // weightmap resolved at collect time (0 → layer-0 default).
+		                // Custom-material draws (deferred forward-routed opaque and
+		                // translucent): the landscape weightmap for unit 13, resolved at
+		                // collect time (0 → leave the unit as it is).
 		                unsigned int wmTex = 0;
 		                // Section draw: byte offset into the EBO (nullptr = from the
 		                // start, which is every whole-mesh draw). Trailing + defaulted
@@ -11379,6 +11508,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				if (opacity < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					// Same collection as the forward loop's transparent branch.
+					const unsigned int wm = matProg ? ResolveGraphTexture(dc.weightmapTextureId != HE::UUID{}
+						? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId, {}) : 0u;
 					auto pushTP = [&](const glm::mat4& t) {
 						TPDraw tp{ viewProj * t, t, baseColor,
 						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
@@ -11389,6 +11520,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						tp.params  = mParams;
 						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
 						tp.gtexCount = mGtexCount;
+						tp.wmTex     = wm;
 						transparent.push_back(std::move(tp));
 					};
 					if (!dc.instanceTransforms.empty())
@@ -11599,6 +11731,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 #endif
 				// Transparent instanced batches: push one TPDraw per instance so
 				// each object is sorted individually by distance.
+				const unsigned int tpWm = tpProg ? ResolveGraphTexture(dc.weightmapTextureId != HE::UUID{}
+					? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId, {}) : 0u;
 				auto pushTP = [&](const glm::mat4& t) {
 					TPDraw tp{ viewProj * t, t, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
@@ -11609,6 +11743,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					tp.params  = tpParams;
 					for (int i = 0; i < tpGtexCount; ++i) tp.gtex[i] = tpGtex[i];
 					tp.gtexCount = tpGtexCount;
+					tp.wmTex     = tpWm;
 					transparent.push_back(std::move(tp));
 				};
 				if (!dc.instanceTransforms.empty())
@@ -12302,6 +12437,23 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
 					m_haveMatParams = false; // opaque-pass dedup cache no longer matches
+#if defined(HE_HAVE_SHADERC)
+					// The shared lighting block. Forward, only the OPAQUE custom-material
+					// draw used to upload it — with no opaque graph material in view the
+					// translucent one read whatever the UI pass or a material preview had
+					// left there (fog.z = 0: no sky; sunDir.w = 0: no clock, so a Time-driven
+					// graph like the engine water stood still). Same once-per-frame rule as
+					// the opaque branch; deferred has uploaded it after the resolve already.
+					if (!m_matLightUploadedThisFrame)
+					{
+						HE::MaterialShaderLibrary::Lighting lit{};
+						fillMatLight(lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						m_matLightUploadedThisFrame = true;
+					}
+#endif
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
@@ -12313,6 +12465,24 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
 						BindGraphTexture(t.gtex[i]);
 					}
+					// Units 13..17, exactly as the opaque custom-material draw binds them
+					// (only material programs read these units): the weightmap, the sky
+					// cube (14, gated by heLight.fog.z), the AO (15, fog.w) and the DDGI
+					// atlases (16/17, giProbe.y). Forward, nothing else binds them when no
+					// opaque graph material is in view.
+					if (t.wmTex)
+					{
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, t.wmTex);
+					}
+					glActiveTexture(GL_TEXTURE14);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glActiveTexture(GL_TEXTURE15);
+					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+					glActiveTexture(GL_TEXTURE16);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+					glActiveTexture(GL_TEXTURE17);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
 					glActiveTexture(GL_TEXTURE0);
 					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program
