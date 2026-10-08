@@ -754,7 +754,7 @@ Fenster, und GI wirkt im Resolve. Die G-Buffer-Ansichten (`HE_DUMP_GBUFFER=1..4`
 stimmen im selben Bild bei Normale und Rough/Spec überein. Bei BaseColor stimmen sie erst nach
 Punkt 3 überein.
 
-**Spielpfad.** Ein exportiertes D3D11-Spiel wurde auf der RTX gestartet: das Depthy-Projekt aus Thema 130 mit den Binärdateien dieses Zweigs, Fenster 1600×900, Aufnahme per `PrintWindow` über `docs/spielpfad-postfx-run-game.ps1`. Mit `RenderPath=1` in der config.json loggt es `swapchain post chain active (1600x900)` und dann `deferred frame (1600x900, clustered resolve, …)`. Mit `RenderPath=0` erscheint keine Deferred-Zeile. Das Bild zeigt Geometrie, CSM-Schatten und Himmel vollständig. Die eingebauten Würfel tragen den heLitP-Look aus dem vorletzten Absatz.
+**Spielpfad.** Ein exportiertes D3D11-Spiel wurde auf der RTX gestartet: das Depthy-Projekt aus Thema 130 mit den Binärdateien dieses Zweigs, Fenster 1600×900, Aufnahme per `PrintWindow` über `docs/spielpfad-postfx-run-game.ps1`. Mit `RenderPath=1` in der config.json loggt es `swapchain post chain active (1600x900)` und dann `deferred frame (1600x900, clustered resolve, …)`. Mit `RenderPath=0` erscheint keine Deferred-Zeile. Das Bild zeigt Geometrie, CSM-Schatten und Himmel vollständig. Die eingebauten Würfel tragen den heLitP-Look (siehe die Abweichungen zu Metal/GL unten).
 
 **WARP (`he_tests`).**
 
