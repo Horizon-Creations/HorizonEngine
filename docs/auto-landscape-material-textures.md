@@ -1551,6 +1551,8 @@ diesem Schritt **nicht** dabei, sie sind hier also nicht ausprobiert.
   (§10.5). Gerendert ist in diesem Schritt nichts, geprüft ist nur der Inhalt der Dateien.
   **Nachtrag Thema 177, Schritt 2:** Metal und OpenGL sind gerendert, AO ist geklärt, siehe §15.
 - Dauerhafter Speicherort und Kompression (BC7 für Arrays).
+  **Nachtrag Thema 177, Schritt 5:** Ein Upload auf den EngineContent-Server allein macht die
+  echten Texturen nicht wirksam (der ausgelieferte Platzhalter schlägt den Cache), siehe §18.
 
 ## 15. Verifikation mit den echten Texturen und die AO-Frage (Thema 177, Schritt 2)
 
@@ -1920,4 +1922,86 @@ Metal-Lauf mit den echten Texturen ist bereits in Schritt 2/3 erfolgt). Kein Mip
 (der Draufsicht-Zeuge löst Minifikation in der Ferne nicht auf; die Arrays backen ihre eigene
 Mip-Kette, unabhängig vom Backend, §8.1/§15.6). Leistung/GPU-Speicher mit den 2K-Arrays weiter nicht
 gemessen (§15.4).
+
+## 18. Schritt 5: Auslieferung über den Engine-Default-Server (Thema 177)
+
+Auftrag: die vier echten Schichten (2K, `out/landscape-real`) auf den Engine-Default-Server
+(EngineContent-SFTP, `src/HE_ContentSync`) legen und prüfen, dass Build, Cook und Deploy sie von dort
+holen. **Hochgeladen ist nichts**, und die Prüfung ergibt, dass ein Upload allein die Texturen auch
+nicht ins Material bringen würde. Der Stand, mit Belegstellen:
+
+### 18.1 Warum ein Upload allein nichts ändert
+
+- **Der ausgelieferte Default schlägt den Server-Cache.** `ContentManager::resolveAbsolutePath`
+  (`ContentManager.cpp:965-984`) prüft für `Engine/…` der Reihe nach Projekt-Override, ausgelieferten
+  Default (`<exe>/EngineContent`, kommt aus `EditorDeps/EngineContent`, dort liegen die 18
+  128-px-Platzhalter, in git) und erst **zuletzt** den SFTP-Cache. Der Kommentar im Code sagt es
+  selbst: „a real shipped default always wins over a cached copy".
+- **Die echten Texturen werden nie als Remote-Asset registriert.** `registerRemoteAsset`
+  (`ContentManager.cpp:1392`) kehrt sofort zurück, wenn die UUID schon in `m_diskRegistry` steht, und
+  `scanContentDirectory` (`:2917-2922`) trägt die Platzhalter dort ein. Die echten Texturen haben
+  dieselben festen UUIDs (`hi` = 0x400 + Index, §6) wie die Platzhalter, genau damit Materialien heil
+  bleiben (§4.4). Das Manifest des Servers würde also zwar die Kacheln im Content Browser zeigen, aber
+  `ensureResident` lädt weiter den Platzhalter von der Platte.
+- **Das Material lädt sie über dieselben Pfade.** `kAutoLandscape{Albedo,Normal,Mask}Array` sind
+  `Engine/Textures/Landscape/T_Landscape_*_Array.hasset`
+  (`AutoLandscapeMaterial.h:62-64`), also genau die Pfade, die der ausgelieferte Default belegt.
+
+### 18.2 „CMake/Cook holt die Texturen vom Server" gibt es nicht
+
+- Das Design (`docs/engine-content-sftp-sync-design.md`, „Explicitly out of scope") nimmt Cook und
+  Pak ausdrücklich aus. SFTP ist ein Nachlade-Weg des Editors, kein Build-Schritt. Das Wiring in
+  `src/HE_ContentSync/CMakeLists.txt` bringt nur den **Endpunkt** (Host, Benutzer, Passwort als
+  Compile-Definition) in die Bibliothek, nie Inhalte.
+- Der Exporter packt `settings.engineContentDir` (`ProjectExporter.cpp:782`), das ist
+  `contentManager().engineContentRoot()` (`ExportDialogPanel.cpp:1601`), also das ausgelieferte
+  Verzeichnis neben der exe, **nie den SFTP-Cache**. Ein exportiertes Spiel enthält so immer die
+  Platzhalter. Würde man sie aus der Auslieferung nehmen, enthielte es die Texturen gar nicht, auch
+  nicht, wenn der Editor sie längst im Cache hat.
+- Der Deploy kopiert `EditorDeps/` ganz neben die exe und nach `out/deploy/Editor`
+  (`src/HE_Editor/CMakeLists.txt`, POST_BUILD, §14.5). Ein „Deploy enthält die echten Texturen" gibt es
+  damit nur durch das manuelle Zurückkopieren aus §14.5. Der lokale Deploy dieses Zweigs hat echte
+  Texturen (von Hand kopiert), ein frisch gebauter Baum nicht. **Aber nicht den Satz aus
+  `out/landscape-real`:** Gemessen (`cmp`, Schritt 5) sind 13 der 18 Dateien dort identisch, die
+  fünf Masken (Dirt, Grass, Rock, Snow und `T_Landscape_Mask_Array`) sind die AO-Variante aus
+  Schritt 2 (`out/landscape-real-ao`, byte-gleich). Ob AO übernommen wird, ist offen (§15.5): aus
+  `out/deploy` also **nicht** veröffentlichen.
+
+### 18.3 Zwei Fallen beim Veröffentlichen
+
+- **Das Manifest ist der volle lokale Scan.** `publishEngineContentBlocking`
+  (`EngineContentPublish.cpp:149-154`) lädt als `manifest.json` genau die `.hasset`-Dateien hoch, die
+  im lokalen Wurzelverzeichnis liegen, **zuletzt**. Aus einem Teilordner (nur die 18 Texturen) würde das
+  Manifest auf 18 Einträge schrumpfen: die Dateien blieben auf dem Server, aber jeder Editor verlöre
+  alle anderen Assets aus dem Katalog. Nur aus einem **vollständigen** EngineContent-Verzeichnis
+  veröffentlichen.
+- **Platzhalter überschreiben die echten Texturen.** Der Diff läuft über `Hpak::hash64` je Datei. Wer
+  „Publish Engine Content to Server" aus einem Checkout mit den eingecheckten Platzhaltern drückt,
+  ersetzt die echten Texturen auf dem Server durch die 128-px-Platzhalter (Hash weicht ab, also
+  Upload). Vor dem Veröffentlichen die 18 Dateien im Wurzelverzeichnis durch die echten ersetzen
+  (und beachten, dass jedes Neulinken von `HorizonEditor` sie zurücksetzt, §14.5).
+- Außerdem nicht schreibfrei: `rebuildManifestFromServerBlocking` („Rebuild Manifest from Server")
+  lädt am Ende ebenfalls `manifest.json` hoch.
+
+### 18.4 Wege, das tatsächlich zu liefern (offen, Entscheidung des Menschen)
+
+| Weg | Was nötig ist | Folge |
+|---|---|---|
+| Nur Ablage | Upload der 644 MiB, keine Codeänderung | Material bleibt auf Platzhaltern. Kein „funktioniert damit". |
+| Platzhalter aus git und Auslieferung | Editor holt on demand, Exporter muss den Cache zusätzlich packen (vorher herunterladen) | Frischer Klon, Forks und CI (Zugangsdaten sind Secrets) haben keine Landschaftstexturen. |
+| Build-/Cook-Schritt, der sie holt | Neuer Mechanismus, kein Prüfen | Offline-Builds brauchen weiterhin einen Rückfall. |
+
+Keine der Tests in `tests/` nennt `T_Landscape` oder `Textures/Landscape`; die Pfade hängen an den
+Aufnahmeskripten (`scripts/auto-landscape-repro/*`), die den Deploy benutzen.
+
+### 18.5 Was in diesem Schritt nicht ging
+
+Der Upload wurde **nicht ausgeführt**: Die Zugangsdaten stehen in
+`cmake/EngineContentCredentials.cmake` (gitignored, nur im Haupt-Checkout). Der Zugriff darauf wurde
+von der Sicherheitsprüfung der Sitzung abgelehnt, und es gibt kein Kommandozeilenwerkzeug fürs
+Veröffentlichen (nur den Editor-Dialog, `EngineContentPublishDialog.cpp`). Wer den Upload später macht:
+Editor aus dem Haupt-Checkout (der den Endpunkt eingebaut hat) bauen, die 18 echten Dateien aus
+`out/landscape-real/Engine/Textures/Landscape` nach `<exe>/EngineContent/Textures/Landscape/` kopieren,
+mit `HE_ENGINE_CONTENT_EDITABLE=1` starten und „Assets ▸ Publish Engine Content to Server" wählen.
+**Vorher** den Server lesend ansehen (Engine-Ordner im Content Browser nach dem Probe-Lauf).
 
