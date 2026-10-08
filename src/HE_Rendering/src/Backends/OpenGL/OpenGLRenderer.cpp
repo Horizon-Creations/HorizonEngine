@@ -1792,7 +1792,9 @@ struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
 struct GiInst { mat4 invTransform; vec4 baseColor; vec4 emissive; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset, .z = landscape index (-1 = none)
 // Painted landscape — HE::GiLandscape / GILandGpu. std430 keeps the mat4 and the
 // vec4s naturally aligned, so the CPU struct maps 1:1.
-struct GiLand { mat4 worldToLocal; vec4 cfg; vec4 layer[4]; }; // cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+// cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto landscape:
+// layer = Grass/Dirt/Rock/Snow means, autoWet/autoSlope/autoSnow = GiLandscape.h).
+struct GiLand { mat4 worldToLocal; vec4 cfg; vec4 layer[4]; vec4 autoWet; vec4 autoSlope; vec4 autoSnow; };
 layout(std430, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
 layout(std430, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
 layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
@@ -2433,6 +2435,25 @@ uniform float uSkyReflValid;
 
 const int kOctSize = 8; // must match OpenGLRenderer::kGIProbeOctSize
 
+// Auto landscape material at a hit: the graph's masks from the hit's slope and
+// world height over the slices' mean colours. Mirrors HE::giAutoLandscapeAlbedo
+// (GiLandscape.h) and the Metal kernels' giAutoLandAlbedo line for line.
+vec3 giAutoLandAlbedo(int li, vec3 pos, vec3 n)
+{
+	float slope = clamp(1.0 - n.y, 0.0, 1.0);
+	float rs = giLands[li].autoSlope.x, rb = giLands[li].autoSlope.y;
+	float dirt  = clamp(giLands[li].autoSlope.z + smoothstep(rs - rb, rs, slope), 0.0, 1.0);
+	vec3 ground = mix(giLands[li].layer[0].rgb, giLands[li].layer[1].rgb, dirt);
+	float rock  = smoothstep(rs, rs + rb, slope);
+	vec3 s1     = mix(ground, giLands[li].layer[2].rgb, rock);
+	float snow  = smoothstep(giLands[li].autoSnow.x, giLands[li].autoSnow.x + giLands[li].autoSnow.y, pos.y)
+	            * (1.0 - smoothstep(giLands[li].autoSnow.z, giLands[li].autoSnow.z + 0.1, slope));
+	vec3 s2     = mix(s1, giLands[li].layer[3].rgb, snow);
+	float pms   = giLands[li].autoSlope.w;
+	float flat_ = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, giLands[li].autoWet.rgb, giLands[li].autoWet.w * flat_);
+}
+
 // SYNC: byte-for-byte the scene shader's giOctEncode / sampleDDGIIrradiance
 // (kUnlitFS above) — the sampled variant WITH the Chebyshev visibility test, not
 // the probe kernel's imageLoad twin. A drift here shows up as a reflected
@@ -2612,7 +2633,11 @@ void main()
 	// rect whose mesh UVs are linear in it, so the hit POSITION recovers the UV
 	// — no per-vertex UV in the BVH. Mirrors the Metal kernels (GiLandscape.h).
 	int li = giInsts[hitInst].offsets.z;
-	if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
+	// Auto landscape (cfg.w < 0): no paint, its colour follows the hit's slope
+	// and height (hitN faces the ray).
+	if (li >= 0 && li < uGiLandCount && li < 4 && giLands[li].cfg.w < -0.5)
+		albedo = giAutoLandAlbedo(li, hitPos, hitN);
+	else if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
 	{
 		vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
 		vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
@@ -5708,13 +5733,19 @@ void OpenGLRenderer::UpdateGIAccel()
 		for (const HE::GiLandscape& ls : m_renderWorld.landscapes)
 		{
 			if (static_cast<int>(lands.size()) >= HE::kGiMaxLandscapes) break;
-			const unsigned int wm = ResolveGraphTexture(ls.weightmapId, {});
+			// An AUTO entry has no weightmap (its masks come from the hit's slope
+			// and height); its unit takes the black dummy, never sampled.
+			const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+			const unsigned int wm = autoLand ? m_blackTex : ResolveGraphTexture(ls.weightmapId, {});
 			if (!wm) continue;   // not resident yet → keep the flat colour
 			GILandGpu g;
 			g.worldToLocal = ls.worldToLocal;
 			g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling,
 			                  static_cast<float>(ls.layerCount));
 			for (int i = 0; i < 4; ++i) g.layer[i] = ls.layerColor[i];
+			g.autoWet   = ls.autoWet;
+			g.autoSlope = ls.autoSlope;
+			g.autoSnow  = ls.autoSnow;
 			lands.push_back(g);
 			m_giLandWeightTex.push_back(wm);
 		}

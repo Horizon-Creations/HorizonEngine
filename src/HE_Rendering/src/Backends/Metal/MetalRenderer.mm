@@ -2684,25 +2684,50 @@ struct GIMeshPtrs {
 // by MetalRenderer::GILandGpu.
 struct GILand {
 	float4x4 worldToLocal;
-	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
-	float4   layer[4]; // per-layer folded colour (rgb)
+	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
+	float4   layer[4]; // per-layer folded colour (rgb); auto: Grass, Dirt, Rock, Snow means
+	float4   autoWet;  // auto: rgb puddle colour, a puddle share of flat ground
+	float4   autoSlope;// auto: Rock Slope, Rock Blend, Dirt Amount, Puddle Max Slope
+	float4   autoSnow; // auto: Snow Height, Snow Blend, Snow Max Slope
 };
 
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
+
+// Auto landscape material at a hit: the graph's masks from the hit's slope and
+// world height over the slices' mean colours. Mirrors HE::giAutoLandscapeAlbedo
+// (GiLandscape.h) line for line — keep the three kernel copies on it.
+static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
+{
+	const float slope = saturate(1.0 - n.y);
+	const float rs = L.autoSlope.x, rb = L.autoSlope.y;
+	const float dirt  = saturate(L.autoSlope.z + smoothstep(rs - rb, rs, slope));
+	const float3 ground = mix(L.layer[0].rgb, L.layer[1].rgb, dirt);
+	const float rock  = smoothstep(rs, rs + rb, slope);
+	const float3 s1   = mix(ground, L.layer[2].rgb, rock);
+	const float snow  = smoothstep(L.autoSnow.x, L.autoSnow.x + L.autoSnow.y, pos.y)
+	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
+	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
+	const float pms   = L.autoSlope.w;
+	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
+}
 
 // Albedo of a landscape hit, sampled at the PAINT rather than averaged over the
 // whole terrain. A landscape is a heightfield over an axis-aligned local rect
 // whose mesh UVs are linear in it, so the hit's UV comes straight out of the hit
 // POSITION — no per-vertex UV in the acceleration structure. Weights are read
 // with the same clamp+linear the rasterizer uses, so mirror and surface agree.
+// An auto landscape (cfg.w < 0) has no paint: its colour follows the hit's
+// slope and height instead (hitN = the world normal facing the ray).
 // Returns false when this instance is not a landscape (caller keeps its flat
 // per-instance albedo).
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
 	const float3 lp = (L.worldToLocal * float4(hitPos, 1.0)).xyz;
@@ -2935,15 +2960,6 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			const float3 emissive = emi4.rgb;
 			const float  dist   = q.get_committed_distance();
 			const float3 hitPos = ro + rd * dist;
-			// Landscape hit: replace the flat per-instance tint with the paint at
-			// THIS point, or a red ridge on a green hillside mirrors as one
-			// averaged colour. Non-landscape hits leave `albedo` untouched.
-			{
-				float3 painted;
-				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
-				                      landWeights, hitPos, painted))
-					albedo = painted;
-			}
 
 			// Hit normal: true interpolated vertex normal through the mesh-pointer
 			// argument buffer when available (P4); -rayDir fallback otherwise
@@ -2972,6 +2988,17 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 					hitN = normalize(nW);
 					if (dot(hitN, rd) > 0.0) hitN = -hitN; // face the incoming ray (two-sided)
 				}
+			}
+			// Landscape hit: replace the flat per-instance tint with the paint at
+			// THIS point, or a red ridge on a green hillside mirrors as one
+			// averaged colour (auto material: its slope/height masks — the reason
+			// this waits for hitN; without mesh data hitN is -rd, so the slope
+			// there is a guess). Non-landscape hits leave `albedo` untouched.
+			{
+				float3 painted;
+				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
+				                      landWeights, hitPos, hitN, painted))
+					albedo = painted;
 			}
 
 			// Direct sun at the hit: one hard occlusion ray. Skipped when the
@@ -3118,18 +3145,41 @@ struct GiInst { float4x4 invTransform; float4 baseColor; float4 emissive; int4 o
 // exactly like GIReflParams and the octahedral helpers are.
 struct GILand {
 	float4x4 worldToLocal;
-	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
 	float4   layer[4];
+	float4   autoWet;
+	float4   autoSlope;
+	float4   autoSnow;
 };
 
+// Auto landscape material at a hit — copy of the HW kernel's giAutoLandAlbedo
+// (HE::giAutoLandscapeAlbedo, GiLandscape.h).
+static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
+{
+	const float slope = saturate(1.0 - n.y);
+	const float rs = L.autoSlope.x, rb = L.autoSlope.y;
+	const float dirt  = saturate(L.autoSlope.z + smoothstep(rs - rb, rs, slope));
+	const float3 ground = mix(L.layer[0].rgb, L.layer[1].rgb, dirt);
+	const float rock  = smoothstep(rs, rs + rb, slope);
+	const float3 s1   = mix(ground, L.layer[2].rgb, rock);
+	const float snow  = smoothstep(L.autoSnow.x, L.autoSnow.x + L.autoSnow.y, pos.y)
+	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
+	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
+	const float pms   = L.autoSlope.w;
+	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
+}
+
 // Albedo of a landscape hit sampled at the PAINT — see the HW kernel's copy for
-// why the hit POSITION is enough to recover the UV. false = not a landscape.
+// why the hit POSITION is enough to recover the UV; an auto landscape follows
+// the hit's slope and height. false = not a landscape.
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
 	const float3 lp = (L.worldToLocal * float4(hitPos, 1.0)).xyz;
@@ -3722,13 +3772,6 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			const float4 emi4     = insts[hitInst].emissive;  // rgb emissive, a roughness
 			float3       albedo   = alb4.rgb;
 			const float3 hitPos = ro + rd * dist;
-			// Landscape hit → the paint at THIS point, not the terrain-wide mean.
-			{
-				float3 painted;
-				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
-				                      landWeights, hitPos, painted))
-					albedo = painted;
-			}
 			// Geometric triangle normal, object → world via the row-vector product
 			// with the stored INVERSE transform ((M^-1)^T · n) — two-sided.
 			float3 hitN = -rd;
@@ -3742,6 +3785,14 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 					hitN = normalize(nW);
 					if (dot(hitN, rd) > 0.0) hitN = -hitN;
 				}
+			}
+			// Landscape hit → the paint at THIS point, not the terrain-wide mean
+			// (auto material: its slope/height masks, hence after hitN).
+			{
+				float3 painted;
+				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
+				                      landWeights, hitPos, hitN, painted))
+					albedo = painted;
 			}
 			// Occlusion ray skipped when the sun term is black anyway (night) —
 			// same shortcut as the HW kernel.
@@ -7954,7 +8005,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 // for the kernel's texture array. Without this a landscape hit can only be one
 // flat colour for the whole terrain — a red ridge on a green hillside mirrors as
 // the average of the two, which is visibly not what the terrain looks like.
-// Rebuilt per frame: it is a handful of 144-byte entries, and the weightmap
+// Rebuilt per frame: it is a handful of 192-byte entries, and the weightmap
 // TEXTURES come from the same UUID-keyed cache the raster path uses (uploaded
 // once, re-uploaded only when the paint changes).
 int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
@@ -7971,13 +8022,19 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 		// No resident weightmap (still streaming, or unpainted) → skip the entry;
 		// those chunks keep their flat per-instance colour, which for an unpainted
 		// terrain is layer 0 and therefore already right.
-		void* wm = ResolveGraphTexture(ls.weightmapId, {});
-		if (!wm) continue;
+		// An AUTO entry has no weightmap at all (its masks come from the hit's
+		// slope and height); its texture slot takes the dummy.
+		const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+		void* wm = autoLand ? nullptr : ResolveGraphTexture(ls.weightmapId, {});
+		if (!wm && !autoLand) continue;
 		GILandGpu g;
 		g.worldToLocal = ls.worldToLocal;
 		g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling,
 		                  static_cast<float>(ls.layerCount));
 		for (int i = 0; i < 4; ++i) g.layer[i] = ls.layerColor[i];
+		g.autoWet   = ls.autoWet;
+		g.autoSlope = ls.autoSlope;
+		g.autoSnow  = ls.autoSnow;
 		gpu.push_back(g);
 		outWeightTex.push_back(wm);
 	}

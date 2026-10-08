@@ -15,6 +15,9 @@
 #include <HorizonRendering/WeatherParticleSeed.h>
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
+#include <HorizonRendering/GiLandscape.h>
+#include <ContentManager/TextureArrayBuild.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
 #include "TestFsUtil.h"
 #include <HorizonScene/Components/TransformComponent.h>
@@ -3697,4 +3700,177 @@ TEST_CASE("OcclusionCuller: occluder budget — small things and heavy meshes ar
 	oc.setSettings(s);
 	CHECK(sc.run(oc)[hidden] == 1);
 	CHECK(oc.stats().occluders == 0);
+}
+
+// ─── GI reflections on the auto landscape material (Thema 173, Schritt 3) ─────
+// The auto material's BaseColor hangs on texture-array samples the CPU fold
+// cannot reach, so a reflection hit on it was plain white. Its GI landscape
+// entry (GiLandscape.h, layerCount = kGiLandAuto) rebuilds the graph's masks
+// from the hit's slope and height over the slices' mean colours.
+namespace
+{
+HE::GiLandscape autoLandFixture()
+{
+	HE::GiLandscape L;
+	L.layerCount    = HE::kGiLandAuto;
+	L.layerColor[0] = { 1, 0, 0, 0 }; // grass
+	L.layerColor[1] = { 0, 1, 0, 0 }; // dirt
+	L.layerColor[2] = { 0, 0, 1, 0 }; // rock
+	L.layerColor[3] = { 1, 1, 1, 0 }; // snow
+	L.autoWet   = { 0.5f, 0.5f, 0.5f, 0.0f };   // no puddles
+	L.autoSlope = { 0.12f, 0.12f, 0.0f, 0.03f }; // rock 0.12+0.12, no dirt patches
+	L.autoSnow  = { 320.0f, 6.0f, 0.45f, 0.0f }; // the witness's snow line
+	return L;
+}
+glm::vec3 slopeNormal(float slope) // 1 - n.y = slope, leaning toward +x
+{
+	const float ny = 1.0f - slope;
+	return { std::sqrt(std::max(0.0f, 1.0f - ny * ny)), ny, 0.0f };
+}
+bool near3(const glm::vec3& a, const glm::vec3& b, float eps = 1e-4f)
+{
+	return glm::all(glm::lessThan(glm::abs(a - b), glm::vec3(eps)));
+}
+} // namespace
+
+TEST_CASE("GI auto landscape: the hit colour follows the material's slope and height masks")
+{
+	HE::GiLandscape L = autoLandFixture();
+	const glm::vec3 low(0.0f, 300.0f, 0.0f), high(0.0f, 330.0f, 0.0f);
+	// Flat, below the snow line → grass.
+	CHECK(near3(HE::giAutoLandscapeAlbedo(L, low, slopeNormal(0.0f)), { 1, 0, 0 }));
+	// Past Rock Slope + Rock Blend → rock.
+	CHECK(near3(HE::giAutoLandscapeAlbedo(L, low, slopeNormal(0.5f)), { 0, 0, 1 }));
+	// Just below the rock slope: the scree belt turns the ground to dirt.
+	const glm::vec3 belt = HE::giAutoLandscapeAlbedo(L, low, slopeNormal(0.115f));
+	CHECK(belt.y > 0.9f);
+	CHECK(belt.x < 0.1f);
+	// Above the snow line and flat → snow; above it but a cliff → rock shows through.
+	CHECK(near3(HE::giAutoLandscapeAlbedo(L, high, slopeNormal(0.0f)), { 1, 1, 1 }));
+	CHECK(near3(HE::giAutoLandscapeAlbedo(L, high, slopeNormal(0.6f)), { 0, 0, 1 }));
+	// Halfway up the snow blend: half snow.
+	const glm::vec3 halfSnow = HE::giAutoLandscapeAlbedo(L, glm::vec3(0, 323, 0), slopeNormal(0.0f));
+	CHECK(halfSnow.y == doctest::Approx(0.5f).epsilon(0.01));
+	// Dirt Amount = the patches' expected share of the flat ground.
+	L.autoSlope.z = 0.35f;
+	CHECK(near3(HE::giAutoLandscapeAlbedo(L, low, slopeNormal(0.0f)), { 0.65f, 0.35f, 0.0f }));
+	// Puddles: their share of FLAT ground only — not on slopes, not under snow.
+	L.autoSlope.z = 0.0f;
+	L.autoWet.w   = 0.5f;
+	CHECK(near3(HE::giAutoLandscapeAlbedo(L, low, slopeNormal(0.0f)), { 0.75f, 0.25f, 0.25f }));
+	CHECK(near3(HE::giAutoLandscapeAlbedo(L, low, slopeNormal(0.5f)), { 0, 0, 1 }));
+	CHECK(near3(HE::giAutoLandscapeAlbedo(L, high, slopeNormal(0.0f)), { 1, 1, 1 }));
+}
+
+TEST_CASE("GI auto landscape: recognised by its parameter names, slice means sRGB-decoded")
+{
+	// The parameter block of an auto material as an instance carries it (one
+	// vec4 slot per name), plus a per-entity override of Snow Height.
+	const std::vector<std::pair<const char*, float>> params = {
+		{ HE::kAutoLandscapeParamGroundTile, 2.0f },  { HE::kAutoLandscapeParamRockSlope, 0.2f },
+		{ HE::kAutoLandscapeParamRockBlend, 0.0f },   { HE::kAutoLandscapeParamDirtAmount, 0.35f },
+		{ HE::kAutoLandscapeParamSnowHeight, 60.0f }, { HE::kAutoLandscapeParamSnowBlend, 6.0f },
+		{ HE::kAutoLandscapeParamSnowMaxSlope, 0.45f },
+		{ HE::kAutoLandscapeParamPuddleAmount, 0.32f }, { HE::kAutoLandscapeParamPuddleMaxSlope, 0.03f } };
+	MaterialAsset ma;
+	for (const auto& [name, v] : params)
+	{
+		ma.graphParamNames.push_back(name);
+		ma.shaderParamData.insert(ma.shaderParamData.end(), { v, 0.0f, 0.0f, 0.0f });
+	}
+	ma.graphTexturePaths = { HE::kAutoLandscapeNormalArray, HE::kAutoLandscapeAlbedoArray };
+	auto ov = [](const std::string& name, float& v) {
+		if (name != HE::kAutoLandscapeParamSnowHeight) return false;
+		v = 320.0f;
+		return true;
+	};
+	HE::GiLandscape L;
+	CHECK(HE::giAutoLandscapeParams(ma, ov, L) == 1); // the albedo array's slot, wherever it sits
+	CHECK(L.layerCount == HE::kGiLandAuto);
+	CHECK(L.autoSlope.x == doctest::Approx(0.2f));
+	CHECK(L.autoSlope.y == doctest::Approx(0.01f)); // width floored: no smoothstep(e, e, x)
+	CHECK(L.autoSlope.z == doctest::Approx(0.35f));
+	CHECK(L.autoSlope.w == doctest::Approx(0.03f));
+	CHECK(L.autoSnow.x == doctest::Approx(320.0f)); // the override wins over the slot
+	CHECK(L.autoSnow.y == doctest::Approx(6.0f));
+	CHECK(L.autoSnow.z == doctest::Approx(0.45f));
+	CHECK(L.autoWet.w == doctest::Approx(0.2f));    // Puddle Amount 0.32 ≈ 1/5 of flat ground
+
+	// A layer-blend or plain graph material lacks the names → not auto.
+	MaterialAsset other = ma;
+	other.graphParamNames.erase(other.graphParamNames.begin() + 4); // no Snow Height
+	other.shaderParamData.resize(other.graphParamNames.size() * 4);
+	HE::GiLandscape untouched;
+	CHECK(HE::giAutoLandscapeParams(other, {}, untouched) == -1);
+	CHECK(untouched.layerCount == 0);
+	// Without the albedo array among its textures → not auto either.
+	other = ma;
+	other.graphTexturePaths = { HE::kAutoLandscapeNormalArray };
+	CHECK(HE::giAutoLandscapeParams(other, {}, untouched) == -1);
+
+	// Five solid slices, 32×32 with the full mip chain, sRGB: the mean is the
+	// decoded colour (188/255 sRGB ≈ 0.5 linear), not the raw byte.
+	TextureAsset t;
+	t.width = t.height = 32;
+	t.channels = 4;
+	t.mipLevels = 6;
+	t.layers = 5;
+	t.srgb = true;
+	const size_t slice = HE::textureArraySliceBytes(32, 32, 6);
+	t.data.resize(slice * 5);
+	const uint8_t cols[5][3] = { { 188, 0, 0 }, { 0, 188, 0 }, { 0, 0, 188 }, { 255, 255, 255 }, { 188, 188, 188 } };
+	for (size_t s = 0; s < 5; ++s)
+		for (size_t i = 0; i < slice; i += 4)
+		{
+			uint8_t* p = t.data.data() + s * slice + i;
+			p[0] = cols[s][0]; p[1] = cols[s][1]; p[2] = cols[s][2]; p[3] = 255;
+		}
+	REQUIRE(HE::giAutoLandscapeSliceMeans(t, L));
+	const float half = std::pow((188.0f / 255.0f + 0.055f) / 1.055f, 2.4f);
+	CHECK(near3(glm::vec3(L.layerColor[0]), { half, 0, 0 }));
+	CHECK(near3(glm::vec3(L.layerColor[2]), { 0, 0, half }));
+	CHECK(near3(glm::vec3(L.layerColor[3]), { 1, 1, 1 }));
+	CHECK(near3(glm::vec3(L.autoWet), glm::vec3(half * 0.675f))); // half rim, half water
+	CHECK(L.autoWet.w == doctest::Approx(0.2f));                   // the share survives
+	// Linear (non-sRGB) data stays as stored.
+	t.srgb = false;
+	REQUIRE(HE::giAutoLandscapeSliceMeans(t, L));
+	CHECK(near3(glm::vec3(L.layerColor[0]), { 188.0f / 255.0f, 0, 0 }));
+	// Fewer than five slices → no entry.
+	t.layers = 4;
+	t.data.resize(slice * 4);
+	CHECK_FALSE(HE::giAutoLandscapeSliceMeans(t, L));
+}
+
+TEST_CASE("GI auto landscape: the three kernel copies carry the reference's masks (Thema 173)")
+{
+	// No GPU under ctest: pin the copies of HE::giAutoLandscapeAlbedo in the
+	// Metal HW/SW reflection kernels and the GL one to the reference's terms,
+	// and that each kernel hands the HIT NORMAL to the landscape lookup.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - GI auto landscape pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::string mtl = stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm"));
+	const std::string gl  = stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp"));
+	REQUIRE(!mtl.empty());
+	REQUIRE(!gl.empty());
+	auto count = [](const std::string& s, const std::string& needle) {
+		size_t n = 0;
+		for (size_t at = s.find(needle); at != std::string::npos; at = s.find(needle, at + 1)) ++n;
+		return n;
+	};
+	for (const char* term : { "smoothstep(rs - rb, rs, slope)", "smoothstep(rs, rs + rb, slope)",
+	                          "autoSnow.z + 0.1, slope)", "smoothstep(0.5 * pms, pms, slope)" })
+	{
+		CHECK_MESSAGE(count(mtl, term) == 2, "Metal: ", term);
+		CHECK_MESSAGE(count(gl, term) == 1, "OpenGL: ", term);
+	}
+	CHECK(count(mtl, "landWeights, hitPos, hitN, painted)") == 2);
+	CHECK(count(mtl, "if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }") == 2);
+	CHECK(count(gl, "albedo = giAutoLandAlbedo(li, hitPos, hitN);") == 1);
 }

@@ -67,6 +67,7 @@
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <HorizonRendering/GiLandscape.h>   // HE_DUMP_AUTOLANDMIRROR: the GI auto entry
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <material/MaterialShaderBake.h>
 #include <glm/gtc/quaternion.hpp>
@@ -6886,6 +6887,31 @@ void EditorApplication::dumpFrameHeadless()
 				"(landscape GI fold: approxBaseColor %.3f %.3f %.3f, approxLayerCount %d)",
 				lma ? lma->approxBaseColor[0] : -1.0f, lma ? lma->approxBaseColor[1] : -1.0f,
 				lma ? lma->approxBaseColor[2] : -1.0f, lma ? lma->approxLayerCount : -1);
+			// Since Schritt 3 an auto material gets its own GI landscape entry
+			// (GiLandscape.h): the slice means and the mask parameters the
+			// kernels see — the numeric oracle for the mirror's colours.
+			HE::GiLandscape gl;
+			HE::UUID    texId{};
+			std::string texPath;
+			const int slot = lma ? HE::giAutoLandscapeParams(*lma, {}, gl) : -1;
+			if (slot >= 0)
+			{
+				if (static_cast<size_t>(slot) < lma->graphTextureIds.size())   texId   = lma->graphTextureIds[slot];
+				if (static_cast<size_t>(slot) < lma->graphTexturePaths.size()) texPath = lma->graphTexturePaths[slot];
+			}
+			const TextureAsset* arr = slot >= 0 ? contentManager().resolveTextureRef(texId, texPath) : nullptr;
+			const bool means = arr && HE::giAutoLandscapeSliceMeans(*arr, gl);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDMIRROR GI auto entry: slot %d, means %s "
+				"(grass %.3f %.3f %.3f, dirt %.3f %.3f %.3f, rock %.3f %.3f %.3f, snow %.3f %.3f %.3f, "
+				"puddle %.3f %.3f %.3f share %.2f), rock %.2f+%.2f, dirt %.2f, snow y %.0f+%.1f max slope %.2f, "
+				"puddle max slope %.3f", slot, means ? "yes" : "NO",
+				gl.layerColor[0].x, gl.layerColor[0].y, gl.layerColor[0].z,
+				gl.layerColor[1].x, gl.layerColor[1].y, gl.layerColor[1].z,
+				gl.layerColor[2].x, gl.layerColor[2].y, gl.layerColor[2].z,
+				gl.layerColor[3].x, gl.layerColor[3].y, gl.layerColor[3].z,
+				gl.autoWet.x, gl.autoWet.y, gl.autoWet.z, gl.autoWet.w,
+				gl.autoSlope.x, gl.autoSlope.y, gl.autoSlope.z,
+				gl.autoSnow.x, gl.autoSnow.y, gl.autoSnow.z, gl.autoSlope.w);
 		}
 	}
 

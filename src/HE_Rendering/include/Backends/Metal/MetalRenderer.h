@@ -1154,10 +1154,13 @@ private:
 	struct GILandGpu
 	{
 		glm::mat4 worldToLocal{1.0f};
-		glm::vec4 cfg{0.0f};       // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
-		glm::vec4 layer[4]{};      // per-layer folded colour (rgb)
+		glm::vec4 cfg{0.0f};       // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
+		glm::vec4 layer[4]{};      // per-layer folded colour (rgb); auto: Grass, Dirt, Rock, Snow
+		glm::vec4 autoWet{0.0f};   // auto only — HE::GiLandscape::autoWet / autoSlope / autoSnow
+		glm::vec4 autoSlope{0.0f};
+		glm::vec4 autoSnow{0.0f};
 	};
-	static_assert(sizeof(GILandGpu) == 64 + 5 * 16, "must match the MSL GILand layout");
+	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the MSL GILand layout");
 	void* m_giLandBuf         = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
 	void* m_giInstanceLandBuf = nullptr; // id<MTLBuffer> (retained), HW per-instance index
 	// Packs RenderWorld::landscapes into m_giLandBuf and returns how many made it

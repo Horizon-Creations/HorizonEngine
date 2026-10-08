@@ -1,5 +1,6 @@
 #include "HorizonRendering/RenderExtractor.h"
 #include <cstdint>
+#include <cstdlib>
 #include "HorizonRendering/RenderWorld.h"
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
 #include <Diagnostics/Profiler.h>
@@ -298,6 +299,8 @@ namespace
 			ls.invSize      = { 1.0f / std::max(tc.sizeX, 1e-4f), 1.0f / std::max(tc.sizeZ, 1e-4f) };
 			ls.uvTiling     = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
 			ls.weightmapId  = tc.weightmapTextureId;
+			HE::UUID    autoTexId{};   // auto material's albedo array, resolved below
+			std::string autoTexPath;
 			if (contentManager)
 				if (const auto* lmat = reg.try_get<MaterialComponent>(te))
 					if (const MaterialAsset* ma = contentManager->getMaterial(lmat->materialAssetId))
@@ -306,7 +309,43 @@ namespace
 						for (int i = 0; i < ls.layerCount; ++i)
 							ls.layerColor[i] = { ma->approxLayerColor[i][0], ma->approxLayerColor[i][1],
 							                     ma->approxLayerColor[i][2], 0.0f };
+						// Auto landscape material (no layers, no weightmap): its masks
+						// are rebuilt in the kernels from slope and height, see
+						// GiLandscape.h. HE_GIREFL_AUTOLAND=0 = the old flat colour
+						// (white), the A/B switch at one binary.
+						static const bool autoOn = [] {
+							const char* v = std::getenv("HE_GIREFL_AUTOLAND");
+							return !(v && v[0] == '0');
+						}();
+						if (ls.layerCount <= 0 && autoOn)
+						{
+							auto ov = [lmat](const std::string& name, float& v) {
+								for (const auto& o : lmat->paramOverrides)
+									if (o.name == name) { v = o.value[0]; return true; }
+								return false;
+							};
+							const int slot = HE::giAutoLandscapeParams(*ma, ov, ls);
+							if (slot >= 0)
+							{
+								// Copied out: resolving may loadAsset, which moves `ma`.
+								if (static_cast<size_t>(slot) < ma->graphTextureIds.size())
+									autoTexId = ma->graphTextureIds[slot];
+								if (static_cast<size_t>(slot) < ma->graphTexturePaths.size())
+									autoTexPath = ma->graphTexturePaths[slot];
+							}
+						}
 					}
+			if (ls.layerCount == HE::kGiLandAuto)
+			{
+				// The array is the material's own (already loaded for the raster
+				// path); not resident or not an array → no entry, the flat colour.
+				const TextureAsset* arr = contentManager->resolveTextureRef(autoTexId, autoTexPath);
+				if (!arr || !HE::giAutoLandscapeSliceMeans(*arr, ls)) continue;
+				landscapeOf.emplace(static_cast<uint32_t>(te),
+				                    static_cast<int32_t>(out.landscapes.size()));
+				out.landscapes.push_back(ls);
+				continue;
+			}
 			// No layer split (plain material, or a BaseColor the fold could not
 			// reach) → nothing to blend per texel; the flat colour already says
 			// everything this landscape can say.
