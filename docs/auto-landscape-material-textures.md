@@ -1543,4 +1543,163 @@ diesem Schritt **nicht** dabei, sie sind hier also nicht ausprobiert.
 - **Bildprüfung** mit den echten Texturen auf den Backends, die Vorgaben aus §10.2
   (Steigungen, Pfützenmenge, Kachelgrößen) nachstellen, Triplanar-Frage für den Fels
   (§10.5). Gerendert ist in diesem Schritt nichts, geprüft ist nur der Inhalt der Dateien.
+  **Nachtrag Thema 177, Schritt 2:** Metal und OpenGL sind gerendert, AO ist geklärt, siehe §15.
 - Dauerhafter Speicherort und Kompression (BC7 für Arrays).
+
+## 15. Verifikation mit den echten Texturen und die AO-Frage (Thema 177, Schritt 2)
+
+Stand: Zweig `claude/auto-landscape-material-texturen-importieren-arrays-bauen-ve`,
+MacBook Air (Apple M5), Release-Build von `HorizonEditor` (`out/build/macos-release`),
+**Metal und OpenGL**. D3D11, D3D12 und Vulkan sind auf diesem Gerät nicht lauffähig und
+**nicht gerendert** (§15.6). Es ist kein Engine-Code geändert. Bilder liegen unter
+`docs/img/auto-landscape-echte-texturen-2026-10-08/`.
+
+### 15.1 Aufbau
+
+- **Texturen:** drei Varianten, jeweils die 18 `.hasset` aus §14 nach
+  `out/deploy/Editor/EngineContent/Textures/Landscape/` kopiert (der Editor liest sie dort,
+  §14.5): `ph` = die eingecheckten 128er-Platzhalter, `real` = Ausgabe von Schritt 1
+  (Masken-R weiß), `realao` = dieselben Quellen **plus Poly-Haven-AO** (§15.3, 4K-JPG,
+  MD5 gegen `api.polyhaven.com/files/<id>` geprüft, mit `stage_polyhaven.py` und
+  `--pack` wie in §14.3 gepackt, **nur lokal, nicht in git**).
+- **Zeuge** `HE_DUMP_AUTOLAND=1` (§10.4: das ausgelieferte Asset, 128-m-Relief auf y = 300),
+  `scripts/auto-landscape-repro/cap158auto.sh`. Draufsicht wie in §10.4 (TOD 0,4, forward,
+  GI/SSAO/AA aus). Dazu vier Schrägansichten von der Ebene (−x) nach +x, **deferred**, TOD
+  0,6 (Sonne hinter der Kamera): `wide` (−62, 314, Nick −12°), `plain` (−50, 301,8, −30°),
+  `rock` (−19, 313,5, −8°), `snow` (14, 341,8, −30°); alle Yaw 90°.
+- Keine `[ERROR]`-, Link- oder Compile-Zeile in einem der 43 Läufe (alle Logs durchsucht).
+  Draw-Counter: 4 Draws (forward), 5 (deferred), wie in §10.4.
+- Kleinigkeit am Skript: `cap158auto.sh` verlangte einen **absoluten** Ausgabeordner (jede
+  Aufnahme läuft nach einem `cd` in den Deploy-Ordner, ein relativer Pfad legte nur eine leere
+  Logdatei an und meldete `bmp=NO`). Jetzt wird der Pfad aufgelöst.
+
+### 15.2 Das Bild
+
+Metal gegen OpenGL mit den echten Texturen (`real`), Differenz pro Pixel (Mittel / Anteil
+> 8 von 255):
+
+| Ansicht (deferred) | Metal gegen GL |
+|---|---|
+| `wide` / `plain` / `rock` / `snow` | 0,004 / 0,011 / 0,010 / 0,002 (Anteil > 8: 0,000 / 0,004 / 0,000 / 0,000 %) |
+| Draufsicht TOD 0,4, Spalten Ebene / Hangfuß / Fels / Plateau | 0,001 / 0,001 / 0,004 / 0,000 |
+
+Die echten Texturen laufen im Auto-Material **auf beiden Backends gleich**; die Normal-Maps
+stehen richtig herum (die Beulen lesen sich konvex, und die Normal-Maps der vier Sets
+korrelieren mit dem Gradienten ihrer Höhenkarte so, wie es die GL-Konvention verlangt:
+n.x gegen dh/dSpalte −0,57 bis −0,86, n.y gegen dh/dZeile +0,56 bis +0,84, jeweils Grass,
+Dirt, Rock, Snow). Forward mit Schatten unterscheidet sich weiter am Hangfuß
+(GL-Forward zeichnet bei Graph-Materialien keinen Sonnenschatten, §11.3); das ist nicht neu.
+
+Was die Bilder zeigen (`echte-texturen-vier-ansichten.png`, `draufsicht-platzhalter-echt-ao.png`):
+
+- **Grass und Erde sind gut zu unterscheiden** (olivgelb gegen Braun, auch in der Weitsicht).
+  Die Sorge aus §14.4 trifft nicht zu. Das Gras ist trocken, nicht grün; das ist das Set.
+- **Bombing wirkt mit den echten Texturen** (`ana158auto.py repeat`, Ebene: Oszillation
+  0,11 horizontal / 0,06 vertikal, kein periodisches Minimum außer dem einen bei 37 px, das auch
+  die Platzhalter haben).
+- **Schnee kachelt sichtbar.** Das Set `snow_02` hat markante dunkle Spuren, und Schnee wird
+  nicht gebombt (§9.4, `snow`-Seed −1 in `AutoLandscapeMaterial.cpp`). Draufsicht, Plateau,
+  Verschiebungs-Differenz D(k): Minima genau bei **42 px und 83 px**, das sind 4 m und 8 m
+  (4 m ≙ 41,6 px bei 10,39 px/m), also die `Rock Tile Size`. Im Bild eine Gitterstruktur aus
+  gleichen Spuren (auch in `draufsicht-…png` rechts). Behebung wäre ein Seed für Schnee (6 Zugriffe
+  mehr, 33 → 39); das ist eine Änderung am Builder, am generierten Asset und am Wächtertest,
+  nicht Teil dieses Schritts.
+- **Fels am Steilhang streckt sich.** `rocks_ground_08` ist ein warmes, sandfarbenes Geröll,
+  kein graues Kliff. Bei 55–62° wird es über Welt-XZ ≈ 2-fach in Hangrichtung gezogen
+  (1/cos 62° = 2,1) und liest sich in der Weitsicht als senkrecht gestreifte Wand (`wide`),
+  ähnlich wie Stroh. Aus der Nähe (`rock`) wirkt es als Gestein. Das ist die Frage aus
+  §10.5 (Triplanar/Biplanar, 2 bis 3-mal so viele Zugriffe); jetzt mit Bild belegt, noch nicht
+  entschieden.
+- **Pfützen** zeigen am Rand das **WetGround-Platzhalter-Schachbrett** (L-Marken), wie
+  erwartet (§14.1). Die Wasserfarbe hängt stark vom Himmel (tief marineblau von oben, hellblau
+  schräg).
+- Schnee ist hell und grau (Mittel sRGB 165), nicht reinweiß (§14.4); im Bild kein Problem.
+
+Die Vorgaben aus §10.2 (Steigungen 0,12 / 0,12, Pfützenmenge 0,32, Kachelgrößen 2 m / 4 m,
+Dirt 0,35) wurden **nicht verändert**. Mit den echten Texturen sehen Verteilung und
+Größenverhältnisse in den Bildern plausibel aus; eine Feinabstimmung am Geschmack ist offen.
+
+### 15.3 AO: Quelle, Verwendung, Wirkung
+
+**Quelle.** Für alle vier Sets bietet Poly Haven eine AO-Karte (`AO`, `arm`, 1K bis 8K, EXR/JPG/PNG).
+Sie fehlte nur, weil sie nicht mitgeliefert wurde. `stage_polyhaven.py` nimmt `*_ao_*`
+automatisch. AO der JPG ist linear wie die Rauheit (§14.3), kein Decode nötig.
+
+| Schicht | AO-Mittel | 0,5 %-Perzentil | 99,5 %-Perzentil | Maximum |
+|---|---|---|---|---|
+| Grass | 0,80 | 0,46 | 0,97 | 1,00 |
+| Dirt | 0,90 | 0,60 | 0,97 | 1,00 |
+| Rock | 0,71 | 0,36 | 0,88 | 1,00 |
+| Snow | **0,55** | 0,42 | **0,61** | **0,64** |
+
+`snow_02` ist die Ausnahme: Seine AO liegt flächig bei 0,55 und erreicht nie weiß. Ungeprüft
+übernommen würde sie jede Schneefläche im Indirekten um fast die Hälfte abdunkeln.
+
+**Wie die Engine AO benutzt** (Code, nicht Bild): Masken-R geht an den AO-Pin des
+Ausgabeknotens (`AutoLandscapeMaterial.cpp:243`). In `heLitP`
+(`MaterialShaderLibrary.cpp:738-750`) wirkt sie als
+`(ambDiff * 0,35 + ambSpec) * ao + Umgebungsboden * Diffus`, mit `ao = Material-AO * SSAO`.
+Deferred rechnet denselben Faktor: Diffus im Resolve (`heLitP(…, g2.a)`, `:1283`), der
+Spiegelanteil `ambSpec` im Reflexionspass (`:1775-1781`, gleiche Gate `giProbe.y`):
+
+- sie dunkelt **nur das indirekte Licht** ab, **nie das direkte Sonnenlicht**,
+- sie dunkelt den **Umgebungsboden** (`ambient`) nicht ab,
+- **mit GI an** (`giProbe.y > 0,5`) wird sie **ganz übergangen**, die Sonden tragen die
+  Verdeckung selbst. Im Editor ist GI standardmäßig **aus** (`EditorConfig.h:193`).
+
+**Gemessen** (`real` gegen `realao`, Metal, Mittel |Δ| von 255 / Anteil > 8):
+
+| Ansicht | GI aus | GI aus + SSAO an | GI an |
+|---|---|---|---|
+| Draufsicht TOD 0,4, **Fels** (liegt im Schatten, nur Indirektes) | **6,94 / 67,3 %** | 6,92 / 66,8 % | 0,004 / 0 % |
+| Draufsicht, Ebene / Hangfuß / Plateau | 0,70 / 1,43 / 0,91 | 0,70 / 1,42 / 0,90 | 0,01 / 0,05 / 0,00 |
+| Schräg `rock` (TOD 0,6, Fels sonnenbeschienen) | 2,21 / 0,68 % | 2,20 / 0,65 % | 0,004 / 0 % |
+| Schräg `wide` | 1,42 / 0,02 % | 1,40 / 0,02 % | 0,016 / 0 % |
+| Deferred, Draufsicht, ganzes Bild | 1,80 / 9,3 % (Forward 1,79 / 9,2 %) | | 0,006 / 0 % |
+
+- AO ist **sichtbar nur dort, wo das Indirekte dominiert** (Schattenseite von Fels, bei
+  niedriger Sonne), sonst um 1 bis 2 von 255 (`ao-wirkung-gi-aus-an.png`).
+- **GI an: AO hat keine Wirkung** (Metal forward und deferred). Das entspricht dem Code.
+- **SSAO** ändert auf diesem glatten Relief fast nichts (0,03 bis 0,08), die beiden Verdeckungen
+  addieren sich hier also nicht merklich.
+- **OpenGL:** `HE_DUMP_GI=1` liefert in diesem Zeugen ein **bitgleiches** Bild zu `GI=0` (forward und
+  deferred). Dort war GI also nicht wirksam; die GI-Spalte gilt nur für Metal. Nicht weiter
+  untersucht, hat mit AO nichts zu tun.
+
+**Urteil.** AO lohnt sich, kostet nichts (kein neuer Sampler, Masken-R wird schon gelesen) und
+macht die Schattenseiten von Fels und Gras ein wenig plastischer, **aber der Effekt ist klein und
+verschwindet mit GI**. Für Grass, Dirt und Rock ist die Karte unverändert brauchbar. **Snow braucht eine
+Normierung** (99,5 %-Perzentil auf 1 strecken, wie es `stage_polyhaven.py` mit der Höhe macht),
+sonst wird der Schnee im Schatten zu dunkel. Das Skript tut das für AO **nicht**. Für die Albedo ändert
+sich nichts: die Poly-Haven-Albedo ist delit (§4.1), AO wird nicht doppelt gezählt.
+Wer AO nutzen will, lädt die vier `*_ao_4k.jpg` zu den Quellen (`https://api.polyhaven.com/files/<id>`,
+Schlüssel `AO`), staged und packt neu (§14.3, `--arrays-only` genügt nicht, die Einzeltexturen
+ändern sich).
+
+### 15.4 Was bestätigt, was nicht
+
+Bestätigt (Bild, Metal + OpenGL): die echten Texturen laden und kacheln im Auto-Material,
+Verteilung (Fels am Hang, Schnee oben, Erdflecken, Pfützen) stimmt mit §10.4 überein, Metal und
+OpenGL stimmen im Deferred-Pfad auf < 0,02 überein, Bombing wirkt, Normal-Maps stehen richtig herum.
+
+**Nicht** geprüft: D3D11, D3D12, Vulkan (§15.6); Leistung und GPU-Speicher mit 2K-Arrays
+(§14.4: ≈ 320 MiB, nicht gemessen); die Last der 33 Zugriffe; WetGround (Platzhalter);
+Schnee unter Schatten oder Bewölkung; der Editor im Normalbetrieb (nur der Dump-Pfad).
+
+### 15.5 Was offen bleibt
+
+- **Schnee bomben** (Seed), sonst sichtbare 4-m-Kachelung (§15.2).
+- **Fels am Steilhang**: Triplanar/Biplanar entscheiden (§10.5), das Bild liegt jetzt vor. Ein
+  grauerer Fels wäre eine Frage der Wahl des Sets (`rocks_ground_08` ist sandfarben).
+- **AO**: übernehmen (dann Snow normieren) oder weglassen (§15.3).
+- **WetGround** vom Menschen, danach `stage_polyhaven.py` und `--pack` neu.
+- Dauerhafter Speicherort der 2K-Texturen und der Rohquellen (§14.5), BC7 für Arrays (§8.5).
+
+### 15.6 D3D11, D3D12, Vulkan
+
+Auf diesem Gerät nicht lauffähig, also **nicht gerendert**. Rezept auf NN-WS03: §11.4 mit
+`cap158auto.ps1`, **vorher** die 18 Dateien von `out/landscape-real/Engine/Textures/Landscape/`
+(560 MiB, nicht in git) nach `out/deploy/Editor/EngineContent/Textures/Landscape/` kopieren (nach jedem
+Neulinken des Editors neu, §14.5). Die Metal-/GL-Zahlen aus §15.2 sind die Vergleichswerte.
+Mips sind hier kein Hindernis: D3D und Vulkan erzeugen für `mipLevels = 1` keine Kette selbst, aber
+die drei Arrays, die das Auto-Material liest, tragen 12 gebackene Mips (§14.3).

@@ -14,7 +14,7 @@
 # (a clean exit rewrites config.json) and its own log via script(1) (a pty, so
 # the log is line-buffered even when the teardown segfaults after the dump).
 set -u
-OUT=$1; MODE=$2; shift 2
+OUT=${1:A}; MODE=$2; shift 2   # absolute: each capture runs after a cd into the deploy folder
 RHIS=()
 while (( $# )) && [[ $1 != "--" ]]; do RHIS+=$1; shift; done
 (( $# )) && shift
