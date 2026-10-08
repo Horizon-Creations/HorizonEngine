@@ -2481,7 +2481,7 @@ bool drawGraphTabs(GraphTabs& tabs, const HC::Graph& graph, int& currentGraph,
 	// The graph on screen changed — by a tab, the list on the left, a new
 	// function, a jump to a node: whichever, the canvas moves to that graph's own
 	// view and the function gets its tab.
-	if (currentGraph != tabs.lastShown)
+	const auto enterGraph = [&]()
 	{
 		if (tabs.lastShown >= 0 && !ge.viewKey.empty())
 			GraphViewStore::put(graphViewKey(viewKeyBase, tabs.lastShown),
@@ -2504,7 +2504,8 @@ bool drawGraphTabs(GraphTabs& tabs, const HC::Graph& graph, int& currentGraph,
 		ge.viewRestored = false;       // the next draw adopts the stored view, if any
 		tabs.lastShown  = currentGraph;
 		tabs.forceSelect = 2;
-	}
+	};
+	if (currentGraph != tabs.lastShown) enterGraph();
 
 	int closeId = -1;
 	int pickId  = currentGraph;
@@ -2552,6 +2553,12 @@ bool drawGraphTabs(GraphTabs& tabs, const HC::Graph& graph, int& currentGraph,
 		userSwitched = true;
 	}
 	if (pickId != currentGraph) { currentGraph = pickId; userSwitched = true; }
+	// A click on a tab moved currentGraph just now, AFTER the canvas state above
+	// was set up for the old graph — and the canvas below is drawn this very
+	// frame. Entering the new graph here, not next frame, is what keeps the
+	// nodes from appearing for one frame in the previous graph's view and then
+	// jumping to their own.
+	if (currentGraph != tabs.lastShown) enterGraph();
 	return userSwitched;
 }
 
