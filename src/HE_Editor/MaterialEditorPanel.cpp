@@ -2140,6 +2140,32 @@ void render(AppContext& ctx, const std::string& assetPath,
 		                 : st.isFunction ? "material function"
 		                                 : "material graph";
 		T::assetHeader(bar, assetPath, st.dirty);
+		// Folder, then Save: the two things every asset tab opens with. The right
+		// edge belongs to the view switch.
+		if (T::saveButton(bar, assetOk, /*atLeft=*/true)) saveToDisk(st, ctx, assetPath);
+
+		// Graph|Overrides / Shader-code toggle for the right pane, at the right
+		// edge. A function has no shader of its own, so it has no second view
+		// either. Declared before the wells to its left so they know how much
+		// room is theirs.
+		if (!st.isFunction)
+		{
+			const char* graphLabel = st.isInstance ? "Overrides" : "Graph";
+			bar.rightGroup(bar.labelGroupWidth({ graphLabel, "Shader Code" }));
+			if (bar.item("##vgraph", T::iconLayers, graphLabel,
+			             st.viewMode == 0, true,
+			             st.isInstance ? "The values this instance overrides"
+			                           : "The node graph"))
+			{
+				st.viewMode = 0;
+			}
+			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
+			             "The generated shader source"))
+			{
+				st.viewMode = 1;
+			}
+			bar.endGroup();
+		}
 
 		bar.group();
 		bar.readout(nullptr, kind, T::kFgDim);
@@ -2197,26 +2223,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 		}
 
-		// Graph|Overrides / Shader-code toggle for the right pane. A function has
-		// no shader of its own, so it has no second view either.
-		if (!st.isFunction)
-		{
-			bar.group();
-			if (bar.item("##vgraph", T::iconLayers, st.isInstance ? "Overrides" : "Graph",
-			             st.viewMode == 0, true,
-			             st.isInstance ? "The values this instance overrides"
-			                           : "The node graph"))
-			{
-				st.viewMode = 0;
-			}
-			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
-			             "The generated shader source"))
-			{
-				st.viewMode = 1;
-			}
-			bar.endGroup();
-		}
-
 		if (st.isInstance && mat)
 		{
 			bar.group();
@@ -2231,7 +2237,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 
 		if (!assetOk) bar.label("Asset could not be loaded", T::kBad);
-		if (T::saveButton(bar, assetOk)) saveToDisk(st, ctx, assetPath);
 	}
 
 	// Edit flags — both columns contribute; applied once at the end.
