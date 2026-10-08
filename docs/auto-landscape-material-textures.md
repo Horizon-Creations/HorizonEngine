@@ -1488,6 +1488,8 @@ Python, kennt nur das Dateiformat):
 | Masken-Array Slice 1 (Dirt): G gegen `Dirt_Roughness`, B gegen `Dirt_Height` | max. Abweichung **0** |
 | Negativkontrolle: Masken-R gegen `Dirt_Roughness` | max. 29, Mittel 14,2 (R ist weiß, Rauheit liegt bei 0,94: der Vergleich unterscheidet also) |
 | Sichtprüfung aller 15 Slices (Mip 3) | Normal-Maps sind blau-violett (+Z), Slice 4 ist das Platzhalter-Schachbrett, die übrigen vier zeigen die echten Oberflächen |
+| `landscape_tex_gen <Ordner>` ohne Flags (Platzhalter), nach dem cherry-pick | alle 18 Dateien **byteidentisch** zu `EditorDeps/EngineContent/Textures/Landscape/`: der Pack-Modus berührt den alten Pfad nicht |
+| Rauheit als JPG (Rock, Snow) und als EXR (Grass, Dirt) gleich behandelt: Sind die 8-Bit-JPGs linear? | Ja. `dirt_rough_4k.jpg` (neu von Poly Haven, MD5 passt) hat Mittel 240,8, die EXR derselbe Wert 240,8, mittlere Abweichung 0,0016. Mit sRGB-Kodierung läge es bei 248,6 |
 
 Mit `--arrays-only` lassen sich die Arrays aus den 15 Einzeldateien ohne neues Packen
 neu bauen (wenn zum Beispiel eine Schicht ersetzt wurde).
@@ -1525,6 +1527,14 @@ diesem Schritt **nicht** dabei, sie sind hier also nicht ausprobiert.
 - Wohin die echten Texturen **dauerhaft** gehören (SFTP-Veröffentlichung, Projekt-Override
   oder LFS, §4.4) ist weiter offen und Sache des Menschen. Bis dahin nichts davon
   committen. `EditorDeps/Images/Landscape/` ist deshalb in `.gitignore`.
+- **Fallstrick beim Quellordner:** `.gitignore` hält die Rohdateien (rund 400 MB) nur aus
+  git, nicht aus dem Build. Der POST_BUILD von `HorizonEditor` kopiert `EditorDeps/`
+  **ganz** (`copy_directory`, `src/HE_Editor/CMakeLists.txt:457-462`) neben die exe und in
+  den Deploy, und `scripts/package_macos.sh:179-181` kopiert `EditorDeps/Images` in die
+  `.app`. Die Quellen landen so in jedem Editor-Deploy und im DMG. Sie gehören langfristig
+  außerhalb von `EditorDeps/` (das Staging-Skript nimmt jeden Ordner). Das gilt genauso für
+  die Variante 2 in §4.4 (`…/Landscape/Source/`). Auf dem Haupt-Checkout (Zweig
+  `release/0.7.0`) zeigt `git status` den Ordner bis zum Merge weiter als nicht verfolgt.
 
 ### 14.6 Was offen bleibt
 
