@@ -2030,3 +2030,112 @@ Editor aus dem Haupt-Checkout (der den Endpunkt eingebaut hat) bauen, die 18 ech
 mit `HE_ENGINE_CONTENT_EDITABLE=1` starten und „Assets ▸ Publish Engine Content to Server" wählen.
 **Vorher** den Server lesend ansehen (Engine-Ordner im Content Browser nach dem Probe-Lauf).
 
+## 19. Schritt 6: echte Texturen im Ausliefer-Ordner, lose Einzeltexturen (Thema 177)
+
+Stand: Zweig `claude/auto-landscape-material-texturen-importieren-arrays-bauen-ve`, MacBook Air
+(Apple M5). Anweisung der Queen nach Schritt 5: die Arrays aus den lokalen Texturen
+(`out/landscape-real`, vier Poly-Haven-Schichten, 2K) bauen, in
+`EditorDeps/EngineContent/Textures/Landscape` die Platzhalter ersetzen, alle Einzeltexturen
+zusätzlich als lose Assets bereitlegen und den Upload auf den Engine-Default-Server vorbereiten.
+**Eingecheckt sind nur Code und diese Doku. Die Texturen sind im Arbeitsbaum, nicht in git** (§19.4).
+
+### 19.1 Was im Ordner liegt
+
+`EditorDeps/EngineContent/Textures/Landscape/` hat jetzt 30 Dateien, 752 MiB:
+
+| Gruppe | Dateien | UUID `hi` | Größe je Datei | Herkunft |
+|---|---|---|---|---|
+| 3 Arrays (`T_Landscape_{Albedo,Normal,Mask}_Array`) | 3 | 0x40F..0x411 | 106,7 MiB | `out/landscape-real`, **ersetzt** die 128-px-Platzhalter, 5 Slices, 12 Mips |
+| Je Schicht `_Albedo`, `_Normal`, `_Mask` (Grass, Dirt, Rock, Snow) | 12 | 0x400..0x40B | 16 MiB | `out/landscape-real`, **ersetzt** die Platzhalter |
+| Je Schicht `_Albedo`, `_Normal`, `_Mask` (WetGround) | 3 | 0x40C..0x40E | 16 MiB | `out/landscape-real`, **ersetzt**, aber weiter das **hochskalierte Schachbrett** (es gibt kein WetGround-Set, §14.1) |
+| **Neu:** je Schicht `_Roughness`, `_AO`, `_Height` (Grass, Dirt, Rock, Snow) | 12 | 0x420..0x42B | 16 MiB | `landscape_tex_gen --loose`, **neue Dateien**, keine UUID wird wiederverwendet |
+
+Die Arrays und `_Mask` sind die **Variante ohne AO** (Masken-R weiß), so wie die Queen
+`out/landscape-real` verlangt hat. Ob AO in die Maske kommt, ist weiter offen (§15.5). Die losen
+`_AO`-Texturen ändern daran nichts, sie liegen nur bereit.
+
+**Die „20 Einzeltexturen“** sind 4 Schichten × 5 Maps (Albedo, Normal, Roughness, AO, Height). Sie
+existieren jetzt alle als eigene Assets, aber nicht alle sind neu:
+
+- `T_Landscape_<Schicht>_Albedo` und `_Normal` (8 Stück) gab es schon als lose Dateien seit Schritt 1
+  (sie sind Teil des Pakets, aus dem die Arrays entstehen). Sie bleiben mit ihren UUIDs
+  (0x400, 0x401, 0x403, 0x404, 0x406, 0x407, 0x409, 0x40A), eine zweite Kopie unter anderem Namen
+  hätte nur die Verweise verdoppelt.
+- `_Roughness`, `_AO`, `_Height` (12 Stück) steckten bisher nur als Kanäle G, R, B in `_Mask`. Sie sind
+  neu und tragen ab 0x420.
+- Die 5. Schicht (WetGround) hat keine Einzeltexturen dieser Art: es gibt kein Set (§14.1, §16).
+  Ihr Block 0x42C..0x42E bleibt frei.
+
+### 19.2 Das Werkzeug: `landscape_tex_gen --loose`
+
+```
+landscape_tex_gen <Ziel> --loose <png-ordner> [--size 2048]
+```
+
+Liest `<Schicht>_{Roughness,AO,Height}.png` (dieselben Schreibweisen wie `--pack`, über dieselbe
+`loadImage`, also derselbe Decoder und dieselbe Spiegelung), schreibt `T_Landscape_<Schicht>_<Map>.hasset`.
+Linear, RGBA8 mit R=G=B (grau), ein Mip, wie ein importiertes PNG. Eine Ein-Kanal-Textur gibt es im
+Format nicht (`TextureFormat` kennt nur RGBA8 und die Blockformate), deshalb 16 MiB statt 4. Die UUID ist
+`0x420 + Schicht·3 + Map` in der Reihenfolge von `kLayers` (Roughness, AO, Height). Wird eine Schicht
+angehängt, verschiebt sich keine bestehende ID. `0x412` ist `M_AutoLandscape`
+(`kAutoLandscapeMaterialId`), deshalb beginnt der Block nicht bei 0x412.
+
+`--pack`, `--arrays-only`, `--material` und der Platzhalter-Lauf sind unverändert: ein Lauf ohne Flags
+liefert alle 18 Platzhalter **byteidentisch** zum eingecheckten Stand (`cmp`, Schritt 6).
+
+Neu erzeugen (die Quelle der AO-PNGs ist `out/landscape-real-ao/staging`, sie enthält auch die 16 anderen,
+byteidentisch zu `out/landscape-real/staging`):
+
+```
+landscape_tex_gen out/landscape-loose/Engine/Textures/Landscape --loose out/landscape-real-ao/staging --size 2048
+```
+
+### 19.3 Nachweis
+
+`hasset_tex.py --compare` gegen die gestagten PNGs, jede Datei einzeln, Mip 0:
+
+| Prüfung | Ergebnis |
+|---|---|
+| 12 neue lose Texturen (`_Roughness`, `_AO`, `_Height`) gegen `<Schicht>_<Map>.png`, Kanäle R, G, B | max. Abweichung **0** in allen 36 Werten |
+| Header der 12 | 2048², 4 Kanäle, 1 Mip, RGBA8, **linear**, UUID 0x420..0x42B, Low-Wort 1 |
+| 8 vorhandene lose `_Albedo`/`_Normal` gegen die PNGs | max. Abweichung **0**; Albedo sRGB, Normal linear |
+| Negativkontrolle: `Dirt_Roughness.hasset` gegen `Dirt_Height.png` | max. 251, Mittel 130,4: der Vergleich unterscheidet |
+| Kopie nach `EditorDeps/…/Landscape` | `cmp` aller 30 Dateien gegen ihre Quelle: gleich |
+| UUIDs | 62 Assets in `EditorDeps/EngineContent`, **62 verschiedene** UUIDs, keine doppelt |
+| `landscape_tex_gen` (Platzhalter-Lauf) gegen eingechecktes `EditorDeps/…/Landscape` und `out/landscape-ph` | 18/18 byteidentisch |
+
+Das ist der **Dateiinhalt**. Gerendert wurde in diesem Schritt nichts neu: Die Arrays und die Masken
+sind dieselben Bytes wie in Schritt 1 bis 4 (die Bilder aus §15 und §17 gelten also weiter).
+
+### 19.4 Warum die Dateien nicht in git sind
+
+Die drei Arrays haben je 111 848 271..275 Byte (106,7 MiB) und liegen über GitHubs Grenze von 100 MiB
+je Datei (§18.4). Ein Push mit ihnen wird abgelehnt. Der Auftrag lautete deshalb „Platzhalter
+ersetzen und vorbereiten“, nicht „einchecken“. Folgen für den, der als Nächstes in diesem Baum committet:
+
+- `git status` zeigt 18 geänderte (die ersetzten Platzhalter) und 12 neue Dateien in
+  `EditorDeps/EngineContent/Textures/Landscape`. **Nie `git add -A` oder `git commit -a`**, immer Pfade
+  einzeln. Der Merge-Weg der Queen nimmt nur Commits mit, die Texturen reisen dabei nicht mit.
+- Jedes Neulinken von `HorizonEditor` kopiert `EditorDeps/` neben die exe und nach `out/deploy/Editor`
+  (§14.5). Mit diesen 752 MiB ist das jetzt der echte Satz, nicht mehr der Platzhalter.
+
+### 19.5 Upload auf den Engine-Default-Server: was zu beachten ist
+
+Der Server bekommt die 30 Dateien aus `EditorDeps/EngineContent/Textures/Landscape` (Prüfsummen:
+`out/landscape-upload-SHA256SUMS.txt`, `shasum -a 256 -c`). Drei Dinge, die ein bloßes Hochkopieren
+nicht erledigt:
+
+1. **`manifest.json`.** Der Editor findet Server-Assets nur über das Manifest (`{path, uuid,
+   contentHash, size}`). Ein Kopieren per SFTP legt die Dateien ab, das Manifest kennt sie nicht. Es
+   entsteht nur durch „Publish Engine Content to Server“ (aus einem **vollständigen** EngineContent-Ordner,
+   §18.3) oder durch „Rebuild Manifest from Server“, und beide schreiben `manifest.json`.
+2. **Der ausgelieferte Platzhalter schlägt den Server-Cache** (§18.1). Für die 18 ersetzten Dateien gilt:
+   dieselbe UUID, der Platzhalter aus git gewinnt, die echte Textur vom Server erreicht das Material
+   **nicht**. Wirksam wird der Server nur für die 12 neuen Texturen (neue UUIDs): im Content Browser
+   erscheinen sie mit Download-Marke und lassen sich in Materialien benutzen.
+3. **Publish aus einem Checkout mit Platzhaltern überschreibt die echten Texturen** (§18.3). Dieser
+   Baum hat die echten Dateien, ein Checkout von `main` hat weiter die Platzhalter. Veröffentlicht wird
+   nur aus einem Baum, in dem die 30 Dateien so liegen wie hier.
+
+Die Entscheidung, wie die Arrays dauerhaft ins Spiel kommen (vier Slices, LFS oder Auslieferung über den
+Server mit Exporter-Anpassung), bleibt bei dem Menschen (§18.4).

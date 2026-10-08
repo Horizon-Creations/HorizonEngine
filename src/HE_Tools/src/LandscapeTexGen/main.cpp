@@ -19,6 +19,13 @@
 //   <YourProject>/Content/Engine/Textures/Landscape to override the shipped
 //   placeholders for that one project, without touching the repo.
 //
+//          landscape_tex_gen <output-dir> --loose <png-dir> [--size N]
+//   writes the maps --pack hides inside the packed _Mask as loose textures of their
+//   own, T_Landscape_<Layer>_{Roughness,AO,Height}.hasset (linear, RGBA8 grey, one
+//   mip like an imported PNG). _Albedo and _Normal are already loose per layer, so
+//   they are not written a second time. Touches nothing --pack or the placeholders
+//   wrote, and takes a UUID block of its own (kLooseIndexBase).
+//
 //          landscape_tex_gen <output-dir> --material
 //   writes the auto landscape material M_AutoLandscape.hasset instead (Schritt 5,
 //   HE::buildAutoLandscapeGraph) — run it on EditorDeps/EngineContent/Materials.
@@ -71,6 +78,13 @@ constexpr float kPi = 3.14159265358979323846f;
 // 0x100 / widget_gen's 0x200 / matfn_gen's 0x300: hi far below the version-4
 // bit pattern and clear of the DefaultAssets sentinels.
 constexpr uint64_t kTexBaseHi = 0x0000000000000400ULL;
+
+// The loose Roughness / AO / Height maps (--loose) count on from kTexBaseHi + 0x20
+// = 0x420. 0x400..0x411 are the 15 layer textures and 3 arrays, 0x412 is
+// M_AutoLandscape (kAutoLandscapeMaterialId), 0x413..0x41F stay free for more
+// landscape materials. Index = kLooseIndexBase + layer * 3 + map, per kLayers order
+// (WetGround would get 0x42C..0x42E), so a layer added later never shifts one.
+constexpr int kLooseIndexBase = 0x20;
 
 constexpr int kSize  = 128;          // texels per side
 constexpr int kCells = 4;            // checker cells per side
@@ -458,6 +472,64 @@ int packReal(const std::string& outDir, const std::string& pngDir, int requested
     return ok == total && arrays == MapCount ? 0 : 1;
 }
 
+// The maps the packed _Mask hides (Thema 177, Schritt 6): Roughness, AO and Height of
+// every layer that has a PNG for them, as loose linear RGBA8 textures. Read the way
+// --pack reads them (loadImage: same decoder, same flip), so a loose map holds
+// exactly the bytes the _Mask carries in its G, R and B channel.
+int writeLoose(const std::string& outDir, const std::string& pngDir, int requestedSize)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(pngDir, ec))
+    {
+        std::fprintf(stderr, "landscape_tex_gen: %s is not a folder\n", pngDir.c_str());
+        return 1;
+    }
+    std::map<std::string, fs::path> files;
+    for (const auto& e : fs::directory_iterator(pngDir, ec))
+        if (e.is_regular_file()) files[lowered(e.path().filename().string())] = e.path();
+
+    // Name = the suffix of the asset; the file spellings are the ones --pack accepts.
+    struct LooseMap { const char* name; const char* alias; const char* alias2; };
+    const LooseMap kLoose[] = {
+        { "Roughness", "Roughness", "Roughness" },
+        { "AO",        "AO",        "AmbientOcclusion" },
+        { "Height",    "Height",    "Displacement" },
+    };
+
+    int ok = 0, total = 0;
+    for (size_t li = 0; li < std::size(kLayers); ++li)
+        for (size_t k = 0; k < std::size(kLoose); ++k)
+        {
+            const fs::path p = findMap(files, kLayers[li].name, { kLoose[k].alias, kLoose[k].alias2 });
+            if (p.empty()) continue;
+            ++total;
+            Image img;
+            if (!loadImage(p, img))
+            {
+                std::fprintf(stderr, "  %s %s: could not read %s\n", kLayers[li].name, kLoose[k].name,
+                             p.string().c_str());
+                continue;
+            }
+            if (requestedSize > 0 && (img.w != requestedSize || img.h != requestedSize))
+            {
+                std::printf("  %-10s %-9s resized %dx%d -> %dx%d\n", kLayers[li].name, kLoose[k].name,
+                            img.w, img.h, requestedSize, requestedSize);
+                img = resized(img, requestedSize, requestedSize);
+            }
+            const std::string name = std::string("T_Landscape_") + kLayers[li].name + "_" + kLoose[k].name;
+            const int index = kLooseIndexBase + static_cast<int>(li) * static_cast<int>(std::size(kLoose)) +
+                              static_cast<int>(k);
+            if (saveLayerTexture(outDir, name, index, img.w, img.h, /*srgb=*/false, std::move(img.px)))
+            {
+                std::printf("  %-34s %s (%dx%d)\n", name.c_str(), p.filename().string().c_str(), img.w, img.h);
+                ++ok;
+            }
+        }
+    std::printf("landscape_tex_gen: wrote %d/%d loose maps to %s\n", ok, total, outDir.c_str());
+    return total > 0 && ok == total ? 0 : 1;
+}
+
 // The auto landscape MATERIAL (Thema 158, Schritt 5): HE::buildAutoLandscapeGraph
 // saved as M_AutoLandscape.hasset with the fixed kAutoLandscapeMaterialId. Only the
 // graph is the source; the baked GLSL and the parameter layout come from the
@@ -508,8 +580,10 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--arrays-only | --material | --pack <png-dir> [--size N]]\n"
+        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--arrays-only | --material | --pack <png-dir> [--size N] | --loose <png-dir> [--size N]]\n"
                              "  --pack         pack real <Layer>_<Map>.png files from <png-dir> (see the header)\n"
+                             "  --loose        write the Roughness / AO / Height PNGs of <png-dir> as loose\n"
+                             "                 textures of their own (see the header)\n"
                              "  --arrays-only  only (re)assemble the three _Array textures from the\n"
                              "                 per-layer files already in <output-dir>\n"
                              "  --material     write the auto landscape material M_AutoLandscape.hasset\n"
@@ -527,6 +601,14 @@ int main(int argc, char** argv)
         for (int i = 4; i + 1 < argc; ++i)
             if (std::string(argv[i]) == "--size") size = std::atoi(argv[i + 1]);
         return packReal(outDir, argv[3], size);
+    }
+
+    if (argc > 3 && std::string(argv[2]) == "--loose")
+    {
+        int size = 0;
+        for (int i = 4; i + 1 < argc; ++i)
+            if (std::string(argv[i]) == "--size") size = std::atoi(argv[i + 1]);
+        return writeLoose(outDir, argv[3], size);
     }
 
     if (argc > 2 && std::string(argv[2]) == "--material")
