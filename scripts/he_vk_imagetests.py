@@ -92,7 +92,10 @@ CASES = {
     # resolve really ran: it replaces the lit sphere with its raw albedo.
     # Built-in materials are NOT comparable (plan §10.6: Vulkan's built-in
     # forward shader is a reduced copy, the resolve shades with heLitP), so the
-    # scene is the graph sphere in front of the sky alone.
+    # scene is the graph sphere in front of the sky alone. Measured on an RTX
+    # 4070 (Vulkan, validation on, 08.10.2026): forward vs deferred 0.0063,
+    # deferred vs gbuffer 5.16; no lavapipe number yet — the bounds leave room
+    # for a software rasteriser's own rounding, not for a missing light term.
     "deferred": {
         "base": {"SKYTEST": "1", "MATERIALTEST": "matte", "TOD": "0.45", "CLOUDMODE": "0",
                  "COVERAGE": "0", "AA": "0", "BLOOM": "0", "DOF": "0", "MOTIONBLUR": "0",
@@ -110,7 +113,8 @@ CASES = {
     # The clustered resolve: the 16 lights of the "clustered" case through the
     # deferred path. deferred ≈ forward (both clustered), and the 8-light window
     # resolve (HE_FORWARD_CLUSTER=0) must lose the pools beyond it — the same
-    # A/B as "clustered", now on the resolve.
+    # A/B as "clustered", now on the resolve. RTX 4070 (08.10.2026): forward vs
+    # deferred 0.0091, window vs deferred 2.80 ("clustered" there: 3.09).
     "deferred_clustered": {
         "base": {"SKYTEST": "1", "MANYLIGHTS": "16", "TOD": "0", "CAMY": "207",
                  "CAMZ": "2", "PITCH": "-38", "CLOUDMODE": "0", "COVERAGE": "0",
