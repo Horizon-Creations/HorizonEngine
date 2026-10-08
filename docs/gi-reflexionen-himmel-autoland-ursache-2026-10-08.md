@@ -194,7 +194,21 @@ Wolken, deren Puffer liegt im Bildraum). Strahlen ohne Treffer lesen diese Cubem
   `tests/test_culling.cpp` gegen `SkyEnvFaceDirection` für beide Zeilenordnungen (Metal: NDC
   y = +1 in Zeile 0, GL: y = −1).
 
-Kosten: 6 × 128² = 98 304 Himmelspixel pro Frame, etwa ein Zehntel eines 720p-Himmelspasses.
+Kosten: 6 × 128² = 98 304 Himmelspixel pro Frame, **nicht gemessen**. Der Himmelspass im Bild
+läuft nur auf Hintergrundpixeln (Tiefentest), in einer Szene, die das Gelände füllt, kann die
+Cubemap also teurer sein als der Himmel im Bild, mit volumetrischen Wolken entsprechend mehr.
+Stellschraube ist `kSkyReflCubeSize` (Metal und GL je eine Konstante); Überspringen bei
+unveränderter Sonne geht nicht, weil die Wolken mit der Uhr ziehen. Bleibt: kleinere Auflösung
+oder an die Qualitätsstufe koppeln (Entscheidung für Schritt 4 bzw. die Queen).
+
+Verhaltensänderung unter dem Horizont: SkyEnv hatte dort einen pauschalen Bodenton, der
+Himmelspass zeigt dort die horizontgeklemmte Atmosphäre. Ein Miss nach unten (Szene ohne
+Boden) spiegelt jetzt hellen Horizonthimmel statt dunklem Boden, also dasselbe, was das Bild
+selbst für nach unten blickende Hintergrundpixel zeigt.
+
+Ausrichtung: Links/rechts ist nur durch den Unit-Test belegt, nicht durch das Bild. Die
+Spiegel des Zeugen blicken hinter die Kamera, der gespiegelte Himmel ist im Bild nicht zu
+sehen. Belegt ist im Bild: Horizont in derselben Zeile wie vorher, Wolken oben.
 
 **Messung (Metal, gleicher Zeuge wie §2/§3, `scripts/auto-landscape-repro/ana173sky.py`):**
 
@@ -216,6 +230,14 @@ Schritt 3.
 
 ![Nachher: Wolken im Spiegel](gi-reflexionen-ursache-2026-10-08/AL1-Metal-r1-himmel.png)
 
+Volumetrische Wolken (`CLOUDMODE=1 COVERAGE=0.5 CLOUDHEIGHT=400`, sonst gleich): mit Bake
+Luma-Streuung 25,1 (md5 27980b8a…), mit `HE_GIREFL_SKY=0` 7,1 (da448b3c…), echter Himmel 21,7;
+kein `[ERROR]`. `CLOUDSTYLE=1` ergibt in beiden Fällen dieselbe md5, der Schalter ändert in
+diesem Zeugen nichts (vermutlich schon der Standard, nicht weiter geprüft).
+
+Vorher/nachher an EINEM Binary: `HE_GIREFL_SKY=0` stellt das alte Verhalten bitgenau her.
+
 **OpenGL:** gleich gebaut, aber auf dem Mac nicht lauffähig (§4.4). Geprüft: `kGiReflCS` mit
 `glslangValidator -S comp` (`#version 430 core` + `kGiTraversalGLSL` + `kGiReflCS`), C++ baut.
-Laufzeit erst in der Linux-/Windows-CI.
+Einen Laufzeittest für GI-Reflexionen gibt es weder in `tests/` noch in `.github/`, die CI
+übersetzt den GL-Pfad also nur, sie führt ihn nicht aus.
