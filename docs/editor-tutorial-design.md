@@ -24,6 +24,14 @@
    Nutzer verschieben.
 5. **Die Sandbox ist ein ganz normales Projekt.** Kein Sonderformat, keine Read-only-
    Flags: alles, was jemand während des Rundgangs baut, behält er.
+6. **Erst das Warum, dann die eine Aktion.** Der `body` erklärt zuerst, wozu das Ding da
+   ist und wann man es braucht, danach das Wie. Weitere Tasten oder Menüs stehen dort als
+   Beschreibung, nie als Aufforderung: die einzige Aufforderung ist die `action`-Zeile,
+   denn nur sie wird beobachtet. Der Body scrollt in der Karte (430×340), die
+   `action`-Zeile und der Status bleiben darunter stehen. Längerer Text ändert also weder
+   die Kartengröße noch das Ausweichen. Wer einen Text umschreibt, lässt `id`, `check`,
+   `arg`, `action` und `focusWindow` unangetastet, sonst bricht gespeicherter Fortschritt
+   oder die Erkennung.
 
 ## Bestandteile
 
@@ -48,9 +56,44 @@ Stoppen, `EntityAdded`/`AssetAdded` nur bei echtem Zuwachs.
 Position auf eine gültige ab, sodass kein Aufrufer vor dem Indizieren prüfen muss. Ein
 Cursor mit `chapter == chapterCount()` ist die eine kanonische „fertig"-Position.
 
-**18 Kapitel, 41 Schritte:** Orientierung · Navigation · Entities · Komponenten · Assets ·
-Materialien · Sky/Wetter/Licht · Landschaft · Physik · Partikel · Animation · Navigation ·
-UI · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler · Packaging · Abschluss.
+**20 Kapitel, 63 Schritte:** Orientierung · Navigation · Entities · Komponenten · Assets ·
+Asset-Typen · Materialien · Sky/Wetter/Licht · Landschaft · Physik · Partikel · Animation ·
+Navigation · UI · HorizonCode · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler ·
+Packaging · Abschluss. Ohne das HorizonCode-Kapitel (siehe unten) sind es 19 Kapitel und
+57 Schritte.
+
+**Das HorizonCode-Kapitel ist abwählbar (Thema 151, Schritt 4).** `tut::Options`
+(`horizonCode`, Vorgabe `true`) geht als Default-Parameter an jede Cursor-Funktion
+(`clamp`, `advance`, `retreat`, `nextChapter`, `finished`, `stepAt`, `chapterAt`,
+`chapterNumber`, `flatIndex`, `fromFlat`, `serialize`, `deserialize`) und an die
+Zählfunktionen `chapterCount(o)`/`totalSteps(o)`. Ein ausgeschlossenes Kapitel behandelt
+`clamp` wie ein leeres: Ein Cursor darin rollt zum nächsten eingeschlossenen Schritt vor.
+`findStep` kennt die Optionen bewusst **nicht**. Eine gespeicherte `hc-*`-ID bleibt also
+bekannt und wird nach dem Abwählen zu `language` (erste Karte nach dem Kapitel), statt
+als unbekannte ID „fertig" zu bedeuten. Die Sprache der Sandbox bleibt HorizonCode: Das
+Kapitel arbeitet nur mit Level Script und Game Instance, die jedes Projekt hat. Die
+Checkbox wählt also die Führung durch das visuelle Scripting ab, nicht die Sprache.
+
+**Jeder Asset-Typ des Content Browsers kommt vor (Thema 151, Schritt 3).** Was der
+Editor anlegen kann, wird auch angelegt und beobachtet (`AssetOfTypeAdded` bzw.
+`TabOfTypeOpened`), und zwar dort, wo es gebraucht wird:
+
+| Kapitel | Asset-Typen mit eigenem Schritt |
+|---|---|
+| Asset-Typen | Scene, Prefab (Outliner ▸ Save as Prefab), Static Mesh (Engine-Wurzel ▸ Cube öffnen), Audio (Audio Source), Struct, Enum, SaveGame Template |
+| Materialien | Material, Material Function |
+| Partikel | Particle System |
+| Animation | Animator State Machine, Bone Mask, Blend Space, Property Animation Clip, Sequence |
+| UI | UI Widget, Theme |
+| Gameplay-Logik | Input Action, Input Mapping Context |
+
+Texture, Skeletal Mesh, Font, Animation Clip und Shader kommen nur per Import herein;
+die Sandbox enthält keine, deshalb werden sie auf Lesekarten erklärt. Script und
+HorizonCode Class gibt es nur in einem Projekt der jeweiligen Sprache und bleiben
+beim Sprach-Kapitel. Das Create-Menü bietet seit 8a7ffa29 (12.08.) weder Texture
+noch Static Mesh an. Die Schritte `asset-texture` (jetzt Lesekarte) und `asset-mesh`
+(jetzt den eingebauten Würfel öffnen) waren seitdem nicht abzuschließen. Ihre IDs
+bleiben, weil `findStep` eine unbekannte gespeicherte ID als „fertig“ liest.
 
 ### 2. `TutorialPanel` (`src/HE_Editor/TutorialPanel.{h,cpp}`)
 
@@ -58,7 +101,8 @@ UI · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler · Packaging 
   `Tutorial.Offered` nicht in der Editor-Config steht, legt bei „Start the tutorial" die
   Sandbox selbst an (`ProjectPreset::Tutorial`, Sprache HorizonCode) und öffnet den
   Rundgang. „Not now" setzt dasselbe Flag — danach kommt die Karte nur noch über
-  Help ▸ Interactive Tutorial zurück (`showWelcome()`).
+  Help ▸ Interactive Tutorial zurück (`showWelcome()`). Die Checkbox „Include the
+  HorizonCode chapter" darüber schreibt `Tutorial.HorizonCode`.
 - **`render(ctx, dt, flags)`** — die schwebende Karte im Editor. Sampelt einmal pro Frame
   die `Signals` (Entity-Count über `view<NameComponent>`, Komponenten-Maske über
   `registry.view<T>().empty()`, Asset-Count durch **iteratives** Ablaufen des
@@ -72,6 +116,21 @@ UI · Gameplay-Logik · Play-in-Editor · Einstellungen & Profiler · Packaging 
 
 Die Karte ist bewusst `NoDocking`: sie zeigt auf die angedockten Panels und muss darüber
 schweben, statt selbst eins zu werden.
+
+**Die Karte weicht dem Panel aus, auf das sie zeigt.** Mit dem Standard-Layout und ihrer
+Standardecke unten rechts lag sie genau auf Details und auf dem Content Browser, also auf
+den Panels, um die es in einem Drittel der Schritte geht. `HE::Ed::Spotlight::KeepClear`
+(`PanelSpotlight.{h,cpp}`) prüft deshalb vor jedem `Begin("Tutorial")` die Rechtecke der
+`focusWindow`-Panels gegen die Karte vom Vorframe. Es sind dieselben Rechtecke, die der
+pulsierende Rahmen zeichnet (`Spotlight::panelRect`, also der Dock-Knoten samt Tab-Leiste).
+Überlappen sie, gleitet die Karte zur nächstgelegenen freien Stelle; Kandidaten sind die
+Ecken des Editorfensters und die vier Seiten jedes Panels. Ist keine Stelle frei (der
+„besuche vier Panels"-Schritt deckt fast den ganzen Editor ab), nimmt sie die mit der
+kleinsten Überdeckung, und bei einem schon besuchten Panel darf sie liegen. Geprüft wird
+jeden Frame, weil ein Ziel auch spät erscheinen kann (der Profiler öffnet sich, wo er
+zuletzt war). Damit die Karte nicht mit dem Nutzer kämpft, gilt: Hat er sie in diesem
+Schritt selbst verschoben, bleibt sie bis zum nächsten Schritt dort (`reset()` aus
+`gotoCursor`). Beim Verkleinern oder Anklicken der Karte wartet sie nur ab.
 
 ### 3. `ProjectPreset::Tutorial` (`src/HE_Tools/.../ProjectManager.cpp`)
 
@@ -107,12 +166,16 @@ Template-Liste; sie teilen jetzt `ProjectHubPanel::kPresetNames/kPresetDescs`.
 
 ## Persistenz
 
-Zwei Einträge in der globalen Editor-Config (`config.json`, `CustomConfig`):
+Drei Einträge in der globalen Editor-Config (`config.json`, `CustomConfig`):
 
 | Key | Bedeutung |
 |---|---|
 | `Tutorial.Offered` | Die Willkommenskarte wurde einmal beantwortet (egal wie). |
 | `Tutorial.Step` | Serialisierter Cursor: die Schritt-ID, oder `"done"`. |
+| `Tutorial.HorizonCode` | Gehört das HorizonCode-Kapitel zum Rundgang? Fehlt der Eintrag, ja. |
+
+`loadOnce` liest `Tutorial.HorizonCode` **vor** `Tutorial.Step`, damit eine Position im
+abgewählten Kapitel gleich beim Laden auf den nächsten eingeschlossenen Schritt rollt.
 
 Eine unbekannte ID (Schritt in einer neueren Version entfernt) wird als „fertig" gelesen,
 nicht als Fehler — niemand soll auf einem Schritt stranden, der nicht mehr gerendert
@@ -128,16 +191,28 @@ werden kann.
 
 ## Was geprüft ist
 
-`tests/test_tutorial.cpp` (15 Testfälle):
+`tests/test_tutorial.cpp` (27 Testfälle):
 
 - Curriculum-Integrität: keine doppelten Schritt-/Kapitel-IDs, kein leerer Text, jeder
-  `ComponentPresent`-Schritt nennt eine existierende Komponente, jeder `TabOpen` ein
+  `ComponentAdded`-Schritt nennt eine existierende Komponente, jeder `TabOpen` ein
   nicht-leeres Muster.
+- Asset-Abdeckung („every asset kind is walked through or at least named“): Jeder Wert
+  von `tut::Asset` steckt in genau einem Topf. „Angelegt“ braucht einen beobachtenden
+  Schritt, „importiert“ muss in einem Kartentext vorkommen, „sprachgebunden“ ist
+  ausgenommen. Ein neuer Typ ohne Einordnung lässt den Test scheitern. Gegenprobe: Der
+  Theme-Schritt auf `widget` umgebogen ergibt `kind := theme`, rot.
 - Cursor-Arithmetik: `advance` besucht jeden Schritt genau einmal und terminiert,
   `retreat` ist die Umkehrung, `nextChapter` landet immer auf Schritt 0, `clamp` repariert
   Müll, `flatIndex`/`fromFlat` sind invers.
 - Fortschritt: Round-Trip über die serialisierte Form für jeden Schritt, plus die beiden
   Sonderfälle (leer, unbekannte ID).
+- HorizonCode-Kapitel mit und ohne: Nur dieses Kapitel ist optional, `Options{true}`
+  rechnet wie die Vorgabe. Ohne betritt `advance` das Kapitel nie, `retreat` und
+  `nextChapter` springen darüber, `chapterNumber` zählt lückenlos bis
+  `chapterCount(o)`, `flatIndex`/`fromFlat` bleiben invers. Jede `hc-*`-ID wird ohne das
+  Kapitel zu `language` (nicht „fertig"), eine Position dahinter wird beim Wiedereinschalten
+  nicht zurückgespult. Gegenprobe: `clamp` ohne die Option gebaut, drei der neuen Fälle rot
+  (42 Assertions).
 - Prädikate: jede `Check`-Variante, inklusive der Übergangs-Semantik von `SceneSaved` und
   `PlayCycled`.
 - Sandbox: Ordner, Manifest-Preset, Szenen-JSON **und** ein Ladetest durch den echten
@@ -153,10 +228,100 @@ gerichteten Schlagschatten, den derselbe Dump mit den Struct-Defaults *nicht* ha
 den `EditorCam*`-Config-Werten und blickt leicht nach unten, es ist also kaum Himmel im
 Bild.
 
+Das Ausweichen der Karte prüft `tests/test_ui_shot.cpp` („the tutorial card steps off the
+panel its step points at"). Der Test baut das echte Standard-Dock-Layout nach (die Teilungen
+aus `BuildDefaultDockLayout`), nimmt das Zielpanel aus einem echten Schritt des Curriculums
+und lässt dasselbe `KeepClear` laufen wie der Rundgang. Je ein Fall für links (Quick
+Settings), rechts oben (World Outliner), rechts unten (Details), unten (Content Browser) und
+oben (schwebender Performance Profiler). Ohne `KeepClear` überdeckt die Karte das Panel,
+mit `KeepClear` keinen Pixel davon. Mit `HE_UI_DUMP_DIR` entsteht je Seite ein Vorher/Nachher-Bild.
+Ein zweiter Fall zieht die Karte per simulierter Maus zurück aufs Panel: sie bleibt dort,
+bis `reset()` den nächsten Schritt anzeigt.
+
+Im **laufenden Editor** belegt es der Zeuge `HE_DUMP_TUTORIALUI=<ordner>` mit
+`HE_DUMP_TUTORIALUI_STEPS=id,id,…` (in `TutorialPanel.cpp`). Er öffnet den Rundgang
+nacheinander auf diesen Schritten, ohne die Position in die Config zu schreiben, und hält
+jeden 120 Frames lang. Dann rastert er die ImGui-Zeichendaten dieses Frames auf der CPU
+(`tests/ImGuiSoftwareRaster`, über einen Klon mit umgehängten Texturen, damit das
+GPU-Backend seinen Font-Atlas behält) und schreibt `tutorial-ui-<id>.bmp`. Ins Log kommen
+das Rechteck der Karte, die Rechtecke der Zielpanels und die überdeckte Fläche. Danach
+beendet sich der Editor. Mit `HE_DUMP_TUTORIALUI_NOAVOID=1` weicht die Karte nicht aus;
+das ist der Kontrolllauf. Das Bild der Szene selbst fehlt dabei (grau), weil es eine
+GPU-Textur ist. Rezept: frisches `HE_CONFIG_DIR` mit `LastProjectPath` auf eine Kopie der
+Sandbox und `Tutorial.Offered: true` (so entsteht das Standard-Layout aus einer leeren
+imgui.ini), dazu `HE_EXIT_AFTER_FRAMES=20000` (verstecktes Fenster, keine Drosselung).
+
+Messwerte vom 06.10.2026, Debug-Editor, Metal, Fenster 1600×900 pt:
+
+| Schritt | Zielpanel | Überdeckt ohne Ausweichen | Überdeckt mit Ausweichen |
+|---|---|---|---|
+| `add-mesh` | Details (rechts unten) | 109 140 pt² | 0 |
+| `create-asset` | Content Browser (unten) | 28 248 pt² | 0 |
+| `sculpt` | Quick Settings (links) | – | 0 |
+| `outliner` | World Outliner (rechts oben) | – | 0 |
+| `sky-tuning` | World Outliner + Details | – | 0 |
+| `fly` | Scene (Mitte) | – | 3 990 pt² |
+| `layout` | Scene + Outliner + Details + Content Browser | – | 47 680 pt² (nur Scene) |
+
+Dazu ein Lauf über **alle 27 Schritte**, deren Zielpanel Details oder der Content Browser
+ist, in der Reihenfolge des Rundgangs (die Karte wandert also von Schritt zu Schritt mit,
+wie beim Nutzer): von `add-mesh` bis `input-mapping` überall 0 pt² überdeckt.
+
+Bei `fly` und `layout` passt die 430×340 große Karte in keine Lücke des Standard-Layouts.
+Die linke Spalte ist 287 pt breit, die rechte 341 pt, der Content Browser 280 pt hoch.
+Die Karte nimmt dann die Stelle, die am wenigsten überdeckt. Bilder:
+[Details vorher/nachher](img/tutorial-card-2026-10-06/details-vorher-nachher.png),
+[Content Browser vorher/nachher](img/tutorial-card-2026-10-06/content-browser-vorher-nachher.png),
+[weitere Schritte](img/tutorial-card-2026-10-06/weitere-schritte.png).
+
+Die ausgebauten Texte der ersten Karten (Thema 151, Schritt 2) im laufenden Editor,
+derselbe Zeuge mit `HE_DUMP_TUTORIALUI_STEPS=welcome,layout,fly,orbit`. Die Überdeckung
+ist dabei unverändert (`layout` 47 680 pt², `fly`/`orbit` 3 990 pt², `welcome` 0):
+[welcome](img/tutorial-card-2026-10-06/text-welcome.png),
+[layout](img/tutorial-card-2026-10-06/text-layout.png),
+[fly](img/tutorial-card-2026-10-06/text-fly.png),
+[orbit](img/tutorial-card-2026-10-06/text-orbit.png).
+
+Die abwählbare HorizonCode-Option im laufenden Editor (Thema 151, Schritt 4), derselbe
+Zeuge mit `HE_DUMP_TUTORIALUI_STEPS=hc-intro,language` und `Tutorial.HorizonCode` in der
+Config. Mit `false` meldet das Log `step 'hc-intro' NOT on screen (tour is at
+'language')`: Der Editor liest die Option und rollt aus dem Kapitel heraus. Mit `true`
+steht die Karte auf `hc-intro`. Die Kapitelzeile auf `language` zeigt ohne das Kapitel
+„Chapter 15/19", mit „Chapter 16/20":
+[ohne](img/tutorial-card-2026-10-06/horizoncode-aus-language.png),
+[mit](img/tutorial-card-2026-10-06/horizoncode-an-language.png).
+
+### Abnahme Thema 151 (Schritt 5, 06.10.2026, Stand 3e7f94f2)
+
+Debug-Build, Metal, Fenster 1600×900 pt, deployter Editor byte-gleich mit dem Build.
+
+| Punkt | Ergebnis | Beleg |
+|---|---|---|
+| Vollbau | PASS | `cmake --build . -j8` rc=0, alle Targets |
+| `test_tutorial` | PASS | 27 Fälle, 2522 Assertions |
+| Betroffene Editor-Tests | PASS | `test_ui_shot` (31 Fälle), `test_editor_help`, `editor_help_audit` |
+| Voller ctest | PASS bis auf einen Flake | 232 grün, 3 übersprungen (`runtime_size*`). `test_collab_controller` war im Volllauf rot (`pumpUntil` in Z. 2089, zeitgleich mit `test_material_graph` und einem Live-Editor). Einzeln lief er 3 von 3 Mal grün. Der Zweig berührt keinen Collab-/Net-Code. |
+| Karte weicht aus | PASS | Zeuge wie oben. Die Karte steht an drei verschiedenen Stellen: (817,520) bei `add-mesh` (Details), (817,244) bei `create-asset`/`asset-struct`/`bone-mask` (Content Browser), (1150,244) bei `theme`. Überall 0 pt² überdeckt, auch bei `sculpt`, `outliner` und `asset-prefab`. Die Kontrolle mit `_NOAVOID` bleibt in der Standardecke (1150,520): Details 109 140 pt², Content Browser 28 248 pt². |
+| Neue Asset-Schritte | PASS (Doppelklick nicht ausgeführt) | Live-Lauf mit `HE_MCP=1`, dazu Zeuge, der `asset-prefab` und `asset-audio` je 40-mal hält. Die ersten drei Runden ohne Aktion bleiben offen. Nach `prefab_save` (schreibt dieselbe Datei wie Outliner ▸ Save as Prefab) rückt der Rundgang selbst auf `asset-texture` weiter. Das Prefab erscheint als `Prefabs/Cube.hasset` (Typ Prefab) im Content-Baum. Nach Audio Source per `entity_set_components` rückt er auf `asset-imported` weiter. Struct, Enum, SaveGame Template, Theme, Bone Mask, Blend Space, Property Animation Clip und Sequence, angelegt über `asset_create` (derselbe `AssetStubWriter` wie das Create-Menü), liest `EditorAssetTypeCache` jeweils als genau diesen Typ. Dieselbe Funktion nutzen `sample()` und die Öffnen-Prädikate im Doppelklick-Pfad. Den ImGui-Doppelklick, der den Tab öffnet (`TabOfTypeOpened`), kann von hier niemand auslösen. |
+| `asset-mesh` erfüllbar | PASS (Datei) | `Engine/Meshes/Cube.hasset` ist eingecheckt (`EditorDeps/EngineContent/Meshes`) und liegt im Deploy lokal. Der Doppelklick geht also zum Tab, nicht zum Download-Popup für Dateien, die nur auf dem Server liegen. |
+| HorizonCode abgewählt | PASS | `Tutorial.HorizonCode=false`: Die Karte zählt „Chapter 1/19" (welcome), „14/19 – User interface" (`theme`). `hc-intro` ist nicht erreichbar (`tour is at 'language'`), `language` folgt lückenlos als „15/19 – Gameplay logic". Mit dem Kapitel steht dort „16/20". |
+
 ## Offen
 
-- Die ImGui-Oberfläche selbst (Karte, Rahmen-Highlight, Willkommensmodal) ist **nicht**
-  optisch verifiziert — der Headless-Dump rendert die Szene ohne ImGui-Overlay.
+- Die `TabOfTypeOpened`-Schritte der neuen Asset-Typen (`asset-struct`, `asset-enum`,
+  `asset-savegame`, `bone-mask`, `blend-space`, `property-clip`, `sequence`, `theme`) sind
+  nur bis zum Typ-Sniff live belegt (Abnahme oben). Der Doppelklick selbst ist im
+  laufenden Editor nie ausgeführt worden.
+
+- Das Willkommensmodal ist **nicht** in der laufenden App optisch verifiziert (der
+  Zeuge oben setzt erst im geöffneten Projekt ein). Das gilt auch für die Checkbox
+  „Include the HorizonCode chapter": Sie ist gebaut und hat ihren Help-Eintrag, wurde
+  aber nie angeklickt.
+- Die HorizonCode-Option lässt sich nur auf der Willkommenskarte ändern. Wer im offenen
+  Projekt über Help ▸ Interactive Tutorial einsteigt, behält die gespeicherte Wahl.
+- Der pulsierende Rahmen liegt auf der Foreground-Drawlist und damit **über** der Karte.
+  Wo die Karte ein Zielpanel nicht ganz meiden kann (`layout`, Scene-Schritte), läuft die
+  Rahmenlinie durch die Karte.
 - Ohne offenes Projekt gibt es außerhalb von macOS kein Menü im Hub, also dort auch keinen
   Weg zurück zur Willkommenskarte, wenn sie einmal weggeklickt wurde. Der Hub hätte gern
   eine eigene kleine Menüzeile.

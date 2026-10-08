@@ -12,8 +12,9 @@
 #include "EditorWidgets.h"              // pinDialogToEditorWindow
 #include "HorizonVersion.h"             // HE_VERSION_STRING / HE_VERSION_CODENAME
 #include <Diagnostics/GlobalState.h>    // project path — cwd for the credential probe
-#include <SourceControl/GitCli.h>       // reading a stored GitHub token back
+#include "GitHubSignIn.h"               // signing in from here instead of pasting a token
 #include <SourceControl/GitHubApi.h>    // gist upload + issue creation
+#include <SourceControl/GitHubTokenStore.h>  // reading a stored GitHub token back
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>      // InputText overloads for std::string
 #include <SDL3/SDL.h>                   // SDL_OpenURL
@@ -356,6 +357,10 @@ std::string s_pastedToken;
 // or it will not see the token the Source Control panel stored.
 std::filesystem::path s_credentialRoot;
 
+// GitHubSignIn::accountGeneration() as of the last probe: a sign-in (or
+// sign-out) since then, from here or from Preferences, means probe again.
+std::uint64_t s_seenSignInGeneration = 0;
+
 struct WorkerView   // a UI-thread snapshot, taken under one lock
 {
 	Phase       phase = Phase::Idle;
@@ -445,10 +450,13 @@ void revealLogFile()
 //
 // `root` is passed rather than read from the static: reopening the dialog
 // rewrites s_credentialRoot, and a worker still reading it would be a race.
+//
+// Through GitHubTokenStore so it asks the same helper the sign-in stored into —
+// with none configured anywhere that is the platform default, passed per call.
 std::string storedGitHubToken(const std::filesystem::path& root)
 {
-	std::string user, secret;
-	if (!HE::Sc::GitCli::fillCredential(root, "github.com", user, secret))
+	std::string secret;
+	if (!HE::Sc::GitHubTokenStore::load(root, secret))
 		return {};
 	return secret;
 }
@@ -685,12 +693,23 @@ void DrawReportIssueDialog(AppContext& ctx)
 			s_gistNote.clear();
 		}
 		wipe(s_pastedToken);
+		s_seenSignInGeneration = GitHubSignIn::accountGeneration();
 		startTokenProbe();
 
 		ImGui::OpenPopup(kPopupId);
 	}
 
 	if (!s_isOpen) return;
+
+	// Signed in (or out) since the last look: ask again, so the dialog names the
+	// account the issue would actually be filed under.
+	if (GitHubSignIn::accountGeneration() != s_seenSignInGeneration &&
+	    GitHubSignIn::account() != GitHubSignIn::Account::Checking &&
+	    !s_workerRunning.load(std::memory_order_acquire))
+	{
+		s_seenSignInGeneration = GitHubSignIn::accountGeneration();
+		startTokenProbe();
+	}
 
 	// Escape closes an ImGui modal, and there is no flag to stop it. While a
 	// submit is in flight that would throw away the one thing the user is
@@ -704,8 +723,10 @@ void DrawReportIssueDialog(AppContext& ctx)
 	EditorWidgets::pinDialogToEditorWindow(ImVec2(520.0f, 0.0f));
 	if (!ImGui::BeginPopupModal(kPopupId, nullptr, ImGuiWindowFlags_NoCollapse))
 	{
-		// Dismissed with Escape rather than through a button.
+		// Dismissed with Escape rather than through a button. A sign-in shown in
+		// here goes with it (an approved token is still saved).
 		s_isOpen = false;
+		GitHubSignIn::endFlow();
 		return;
 	}
 
@@ -885,14 +906,26 @@ void DrawReportIssueDialog(AppContext& ctx)
 		ImGui::Text("Signed in to GitHub as %s.", w.login.c_str());
 		ImGui::TextDisabled("Filing directly posts the issue under that account.");
 	}
+	else if (GitHubSignIn::drawInline(ctx))
+	{
+		// The sign-in in place of the token field while it runs: this dialog is
+		// a modal, and the sign-in's own modal would close it. Once it is done
+		// the generation check above re-probes and names the account.
+	}
 	else
 	{
 		ImGui::PushTextWrapPos(0.0f);
 		ImGui::TextDisabled(
 			"Not signed in to GitHub. The browser route needs no account. To file "
-			"directly — and upload the whole log — paste a token with 'issues' and "
-			"'gist' access; it is used once and never stored.");
+			"directly — and upload the whole log — sign in with GitHub, or paste a "
+			"token with 'issues' and 'gist' access; a pasted one is used once and "
+			"never stored.");
 		ImGui::PopTextWrapPos();
+		// Stored where this dialog reads (s_credentialRoot), so the probe finds it.
+		ImGui::BeginDisabled(busy);
+		if (EditorWidgets::button("Sign in with GitHub...", ImVec2(200.0f, 0.0f)))
+			GitHubSignIn::startFlow(s_credentialRoot);
+		ImGui::EndDisabled();
 		if (!w.error.empty())
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
@@ -984,6 +1017,7 @@ void DrawReportIssueDialog(AppContext& ctx)
 	if (ImGui::Button("Close", ImVec2(100.0f, 0.0f)))
 	{
 		s_isOpen = false;
+		GitHubSignIn::endFlow();
 		ImGui::CloseCurrentPopup();
 	}
 

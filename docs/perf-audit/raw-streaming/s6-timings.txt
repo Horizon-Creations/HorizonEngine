@@ -1,0 +1,32 @@
+vorher: [18:00:09.419] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=10168 parseMs=138.17 buildMs=79.57
+vorher: [18:00:11.080] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=217.93 prefabSyncMs=0.06 preloadMs=6.44 warmupMs=1653.99 totalMs=1878.42
+vorher: [18:00:18.520] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=50568 parseMs=648.85 buildMs=379.17
+vorher: [18:00:20.174] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=1028.23 prefabSyncMs=0.02 preloadMs=1.96 warmupMs=1652.13 totalMs=2682.35
+a: [18:07:20.631] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=50568 parseMs=647.37 buildMs=366.43
+a: [18:07:22.258] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=1014.01 prefabSyncMs=0.02 preloadMs=2.36 warmupMs=1623.92 totalMs=2640.31
+a: [18:07:06.251] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=1078 parseMs=22.37 buildMs=11.23
+a: [18:07:07.951] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=34.00 prefabSyncMs=0.05 preloadMs=1.66 warmupMs=1698.42 totalMs=1734.14
+a: [18:07:12.266] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=10168 parseMs=149.20 buildMs=72.65
+a: [18:07:13.868] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=222.03 prefabSyncMs=0.02 preloadMs=1.00 warmupMs=1600.85 totalMs=1823.89
+b: [18:47:07.058] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=50568 parseMs=623.45 buildMs=341.56
+b: [18:47:08.677] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=965.22 prefabSyncMs=0.03 preloadMs=2.81 warmupMs=1615.86 totalMs=2583.93
+b: [18:46:53.263] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=1078 parseMs=19.26 buildMs=7.84
+b: [18:46:54.826] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=27.47 prefabSyncMs=0.05 preloadMs=1.19 warmupMs=1561.64 totalMs=1590.35
+b: [18:46:59.133] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=10168 parseMs=140.35 buildMs=56.29
+b: [18:47:00.606] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=196.83 prefabSyncMs=0.03 preloadMs=1.00 warmupMs=1471.02 totalMs=1668.87
+c: [18:54:35.654] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=10168 parseMs=133.35 buildMs=62.16
+c: [18:54:37.157] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=195.67 prefabSyncMs=0.03 preloadMs=0.99 warmupMs=1502.39 totalMs=1699.08
+c: [18:54:29.924] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=1078 parseMs=19.25 buildMs=10.12
+c: [18:54:31.464] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=29.72 prefabSyncMs=0.05 preloadMs=1.51 warmupMs=1537.98 totalMs=1569.26
+c: [18:54:43.323] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=50568 parseMs=619.26 buildMs=327.91
+c: [18:54:44.923] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=947.40 prefabSyncMs=0.04 preloadMs=13.28 warmupMs=1586.86 totalMs=2547.57
+end: [18:59:53.644] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=101068 parseMs=1163.32 buildMs=740.97
+end: [18:59:55.276] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=1904.46 prefabSyncMs=0.04 preloadMs=3.48 warmupMs=1628.74 totalMs=3536.72
+end: [19:00:19.742] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=202068 parseMs=2162.34 buildMs=1274.67
+end: [19:00:21.380] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=3437.16 prefabSyncMs=0.02 preloadMs=5.67 warmupMs=1632.34 totalMs=5075.19
+end: [18:59:17.996] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=1078 parseMs=14.84 buildMs=6.55
+end: [18:59:19.607] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=21.72 prefabSyncMs=0.01 preloadMs=0.34 warmupMs=1610.74 totalMs=1632.80
+end: [18:59:26.391] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=10168 parseMs=121.56 buildMs=28.27
+end: [18:59:27.802] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=149.89 prefabSyncMs=0.01 preloadMs=0.32 warmupMs=1410.92 totalMs=1561.15
+end: [18:59:33.863] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=50568 parseMs=646.42 buildMs=292.40
+end: [18:59:35.360] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=938.90 prefabSyncMs=0.01 preloadMs=1.38 warmupMs=1496.24 totalMs=2436.53

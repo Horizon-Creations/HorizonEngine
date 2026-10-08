@@ -11,10 +11,49 @@
 #include <algorithm>
 #include <cstring>
 
+struct HpakReader::Toc
+{
+    std::vector<EntryMeta> entries;
+    uint64_t               hash = 0;   // FileHeader::tocHash it was validated against
+};
+
+bool HpakReader::openShared(const std::string& path, std::shared_ptr<const Toc> toc)
+{
+    m_path = path;
+    m_toc.reset();
+    m_tocHash = 0;
+    if (m_file.is_open()) m_file.close();
+    if (!toc) return false;
+
+    m_file.open(path, std::ios::binary);
+    if (!m_file)
+    {
+        HE_LOG_ERROR(Pak, "Cannot open package '%s'", path.c_str());
+        return false;
+    }
+    // The header carries the hash of the table it was written with: the same
+    // hash means the same entries at the same offsets. A package replaced since
+    // it was mounted (a patch over the old file) is refused, not misread.
+    Hpak::FileHeader hdr{};
+    m_file.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+    if (!m_file || std::memcmp(hdr.magic, Hpak::k_magic, 4) != 0 ||
+        hdr.version != Hpak::k_version || hdr.tocHash != toc->hash ||
+        hdr.entryCount != toc->entries.size())
+    {
+        HE_LOG_WARN(Pak, "Package '%s' changed since it was mounted (header differs)",
+                     path.c_str());
+        m_file.close();
+        return false;
+    }
+    m_tocHash = hdr.tocHash;
+    m_toc     = std::move(toc);
+    return true;
+}
+
 bool HpakReader::open(const std::string& path)
 {
     m_path = path;
-    m_entries.clear();
+    m_toc.reset();
     if (m_file.is_open()) m_file.close();
 
     // A packaged build that cannot mount its .hpak has no assets at all, so each
@@ -69,12 +108,14 @@ bool HpakReader::open(const std::string& path)
     }
     m_tocHash = hdr.tocHash;
 
-    m_entries.resize(hdr.entryCount);
+    auto table = std::make_shared<Toc>();
+    table->hash = hdr.tocHash;
+    table->entries.resize(hdr.entryCount);
     for (uint32_t i = 0; i < hdr.entryCount; ++i)
     {
         Hpak::EntryDesc desc{};
         std::memcpy(&desc, toc.data() + static_cast<size_t>(i) * sizeof(desc), sizeof(desc));
-        EntryMeta& e = m_entries[i];
+        EntryMeta& e = table->entries[i];
         e.uuid        = { desc.uuidHi, desc.uuidLo };
         e.origSize    = desc.origSize;
         e.dataSize    = desc.dataSize;
@@ -84,18 +125,21 @@ bool HpakReader::open(const std::string& path)
         e.codec       = desc.codec;
         e.flags       = desc.entryFlags;
     }
+    m_toc = std::move(table);
     HE_LOG_INFO(Pak, "Mounted package '%s': %u entry/-ies", path.c_str(), hdr.entryCount);
     return true;
 }
 
 const HpakReader::EntryMeta* HpakReader::find(const HE::UUID& id) const
 {
+    if (!m_toc) return nullptr;
+    const std::vector<EntryMeta>& entries = m_toc->entries;
     // TOC is ascending by (hi,lo) → binary search.
-    auto it = std::lower_bound(m_entries.begin(), m_entries.end(), id,
+    auto it = std::lower_bound(entries.begin(), entries.end(), id,
         [](const EntryMeta& e, const HE::UUID& key) {
             return e.uuid.hi != key.hi ? e.uuid.hi < key.hi : e.uuid.lo < key.lo;
         });
-    if (it != m_entries.end() && it->uuid == id) return &*it;
+    if (it != entries.end() && it->uuid == id) return &*it;
     return nullptr;
 }
 
@@ -107,14 +151,17 @@ bool HpakReader::hasEntry(const HE::UUID& id) const
 std::vector<HE::UUID> HpakReader::enumerate() const
 {
     std::vector<HE::UUID> ids;
-    ids.reserve(m_entries.size());
-    for (const auto& e : m_entries)
+    if (!m_toc) return ids;
+    ids.reserve(m_toc->entries.size());
+    for (const auto& e : m_toc->entries)
         ids.push_back(e.uuid);
     return ids;
 }
 
 const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
-                                                         std::vector<uint8_t>& out) const
+                                                         std::vector<uint8_t>& out,
+                                                         const std::function<bool()>& stop,
+                                                         bool* stopped) const
 {
     const EntryMeta* e = find(id);
     // Use is_open() (independent of stream state), NOT operator bool(): a prior
@@ -153,10 +200,18 @@ const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
     }
 
     out.resize(e->dataSize);
-    if (e->dataSize > 0)
+    // In blocks, so a caller with a stop condition can leave a large entry half-read.
+    constexpr uint64_t kBlock = 4ull << 20; // 4 MiB
+    for (uint64_t done = 0; done < e->dataSize;)
     {
-        m_file.read(reinterpret_cast<char*>(out.data()),
-                    static_cast<std::streamsize>(e->dataSize));
+        if (done > 0 && stop && stop())
+        {
+            if (stopped) *stopped = true;
+            std::vector<uint8_t>().swap(out);
+            return nullptr;
+        }
+        const uint64_t n = std::min<uint64_t>(kBlock, e->dataSize - done);
+        m_file.read(reinterpret_cast<char*>(out.data() + done), static_cast<std::streamsize>(n));
         if (!m_file)
         {
             HE_LOG_ERROR(Pak, "Package read of %u byte(s) failed for entry %016llx%016llx "
@@ -165,6 +220,13 @@ const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
                          static_cast<unsigned long long>(id.lo));
             return nullptr;
         }
+        done += n;
+    }
+    if (stop && stop())
+    {
+        if (stopped) *stopped = true;
+        std::vector<uint8_t>().swap(out);
+        return nullptr;
     }
 
     // Content-hash check on the stored bytes (corruption detection). Verified here,
@@ -198,8 +260,21 @@ bool HpakReader::readStoredEntry(const HE::UUID& id, StoredEntry& out) const
 
 std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key[32]) const
 {
+    return readEntry(id, key, {}, nullptr);
+}
+
+std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key[32],
+                                           const std::function<bool()>& stop, bool* stopped) const
+{
+    if (stopped) *stopped = false;
+    const auto stopNow = [&]
+    {
+        if (!stop || !stop()) return false;
+        if (stopped) *stopped = true;
+        return true;
+    };
     std::vector<uint8_t> raw;
-    const EntryMeta* e = readStoredBytes(id, raw);
+    const EntryMeta* e = readStoredBytes(id, raw, stop, stopped);
     if (!e) return {};
 
     // Reserved entry flags this build cannot honour. kFlagUsesDict says the payload
@@ -243,6 +318,7 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
             return {};                        // wrong key / tampered / no backend
         }
         raw = std::move(pt);
+        if (stopNow()) return {};
     }
 
     // Step 2: decompress by codec
@@ -280,8 +356,31 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
 #ifdef HE_HAVE_ZSTD
         if (e->origSize == 0) return {};
         std::vector<uint8_t> out(e->origSize);
-        const size_t result = ZSTD_decompress(
-            out.data(), out.size(), raw.data(), raw.size());
+        size_t result = 0;
+        if (!stop)
+            result = ZSTD_decompress(out.data(), out.size(), raw.data(), raw.size());
+        else
+        {
+            // Stoppable: the same decode in 4 MiB output windows. Ends like
+            // ZSTD_decompress does, every frame complete and nothing left over.
+            std::unique_ptr<ZSTD_DCtx, size_t (*)(ZSTD_DCtx*)> dctx(ZSTD_createDCtx(), ZSTD_freeDCtx);
+            if (!dctx) return {};
+            ZSTD_inBuffer in{ raw.data(), raw.size(), 0 };
+            size_t pending = 1;   // last return of decompressStream: 0 = frame complete
+            constexpr size_t kWindow = size_t(4) << 20;
+            while (result < out.size() || in.pos < in.size)
+            {
+                if (stopNow()) return {};
+                ZSTD_outBuffer o{ out.data(), std::min(out.size(), result + kWindow), result };
+                const size_t before = o.pos, consumed = in.pos;
+                pending = ZSTD_decompressStream(dctx.get(), &o, &in);
+                if (ZSTD_isError(pending)) { result = pending; break; }
+                result = o.pos;
+                if (o.pos == before && in.pos == consumed) break;   // no progress: truncated or too long
+            }
+            // A frame cut short, or input left over that did not fit.
+            if (!ZSTD_isError(result) && (pending != 0 || in.pos != in.size)) result = 0;
+        }
         if (ZSTD_isError(result) || result != e->origSize)
         {
             HE_LOG_ERROR(Pak, "zstd decode of entry %016llx%016llx failed: %s",

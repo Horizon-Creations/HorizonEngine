@@ -145,6 +145,22 @@ public:
                            const HorizonCode::Value& oldValue)
     { (void)id; (void)varName; (void)oldValue; return true; }
 
+    // A HorizonCode variable this instance subscribed to (horizon.hc.watch)
+    // changed (docs/bind-to-variable-binding-plan.md §4.5):
+    // onChanged_<name>(self, source, old, new) in Lua,
+    // on_changed_<name>(self, source, old, new) in Python. `source` is the
+    // entity whose class owns the variable, 0 for the Game Instance. Unlike
+    // onRep both values come along: the variable is somebody else's, and the
+    // script has no field of its own to read the new one from.
+    //
+    // Addressed like callOnRep, and like it the Lua half lives in
+    // ScriptContext (the marshaller is there); this is the Python path.
+    // Defaulted like callOnRep, for the same reason.
+    virtual bool callOnChanged(InstanceId id, const std::string& varName, uint32_t source,
+                               const HorizonCode::Value& oldValue,
+                               const HorizonCode::Value& newValue)
+    { (void)id; (void)varName; (void)source; (void)oldValue; (void)newValue; return true; }
+
     // A remote call arrived for this instance (plan §7.2): run the method of
     // that name with `args`. The name is used VERBATIM — a graph's `Open` is a
     // script's `Open`, because the two sides have to agree on one spelling and

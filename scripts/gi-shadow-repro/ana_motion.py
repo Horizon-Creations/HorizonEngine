@@ -2,7 +2,8 @@
 # usage: ana_motion.py NEW.bmp OLD.bmp MOVED.bmp [label]
 #   NEW   = static capture at the real TOD (settled, e.g. HE_DUMP_FRAMES=60)
 #   OLD   = static capture at TOD - step (where the shadow was before the move)
-#   MOVED = HE_DUMP_TODSTEP=step capture: settled at TOD - step, ONE frame at TOD
+#   MOVED = HE_DUMP_TODSTEP=step capture: settled at TOD - step, then TWO frames
+#           at TOD (one with HE_DUMP_TODSTEPFRAMES=1, Thema 146)
 # swept = floor pixels where OLD and NEW differ by > 8 grey levels (the area the
 # shadow edge moved over). ghost = mean |MOVED - NEW| / mean |OLD - NEW| there:
 # 0 = the moved edge is fully in place after one frame, 1 = the old shadow is

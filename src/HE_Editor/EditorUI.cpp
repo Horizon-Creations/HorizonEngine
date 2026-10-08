@@ -57,6 +57,7 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
+#include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
@@ -376,6 +377,8 @@ void EditorUI::joinPendingExport()
 	// log or filing an issue, and a joinable std::thread destroyed at teardown
 	// terminates the process.
 	ReportIssueDialog::joinPendingWork();
+	// And the GitHub sign-in: its poll thread and the worker that stores a token.
+	GitHubSignIn::joinPendingWork();
 }
 
 void EditorUI::joinPendingGameLogicBuild()
@@ -673,6 +676,10 @@ void EditorUI::render(AppContext& ctx, float dt)
     // over both. It only leaves a .heproj path behind; the Hub and the editor
     // each open it through their own path (takeOpenRequest).
     GitCloneDialog::Draw(ctx);
+    // Preferences ▸ Source Control ▸ Sign in with GitHub. Drawn every frame,
+    // dialog open or not: it also saves a token the user approved after the
+    // dialog that showed the code was closed.
+    GitHubSignIn::Draw(ctx);
 
     // ── "The last session left unsaved work behind" ──────────────────────────
     // After the two checks above on purpose: all three raise root-level modals
@@ -759,6 +766,9 @@ void EditorUI::render(AppContext& ctx, float dt)
     }
 
     ImGui::Render();
+    // HE_DUMP_TUTORIALUI only: the tour card's placement, pictured from this
+    // frame's draw data (a no-op without the variable).
+    TutorialPanel::witnessAfterRender();
 
     // ── Multi-viewport / platform windows ─────────────────────────────────────
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -810,6 +820,7 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       BlendSpacePanel::isDirty(assetPath)          ||
 	       SequencerPanel::isDirty(assetPath)           ||
        CinematicPanel::isDirty(assetPath)           ||
+	       AudioEditorPanel::isDirty(assetPath)         ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
 	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
 	       SkeletalMeshEditorPanel::isDirty(assetPath);
@@ -835,6 +846,7 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	BlendSpacePanel::appendDirtyPaths(out);
 	SequencerPanel::appendDirtyPaths(out);
 	CinematicPanel::appendDirtyPaths(out);
+	AudioEditorPanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
 	SkeletalMeshEditorPanel::appendDirtyPaths(out);
@@ -864,6 +876,7 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = BlendSpacePanel::save(ctx, assetPath)                       && ok;
 	ok = SequencerPanel::save(ctx, assetPath)                        && ok;
 	ok = CinematicPanel::save(ctx, assetPath)                        && ok;
+	ok = AudioEditorPanel::save(ctx, assetPath)                      && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
 	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
@@ -888,6 +901,7 @@ void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSn
 	BoneMaskPanel::appendSnapshots(ctx, out);
 	BlendSpacePanel::appendSnapshots(ctx, out);
 	SequencerPanel::appendSnapshots(ctx, out);
+	AudioEditorPanel::appendSnapshots(ctx, out);
 	ParticleGraphEditorPanel::appendSnapshots(ctx, out);
 	AnimatorStateMachineEditorPanel::appendSnapshots(ctx, out);
 	SkeletalMeshEditorPanel::appendSnapshots(ctx, out);
@@ -1025,6 +1039,7 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 	any = BlendSpacePanel::reloadFromDisk(assetPath)                      || any;
 	any = SequencerPanel::reloadFromDisk(assetPath)                       || any;
 	any = CinematicPanel::reloadFromDisk(assetPath)                       || any;
+	any = AudioEditorPanel::reloadFromDisk(assetPath)                     || any;
 	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
 	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
 	return any;

@@ -128,7 +128,20 @@ public:
     // teardown counterpart to the "Construct" fired on create. Use this (not
     // remove) whenever an object/widget is intentionally destroyed so its
     // destructor graph runs; no-op if the id is already gone.
+    //
+    // Extract on Destruct (docs/state-driven-data-exchange-design.md §3.4):
+    // between its own Destruct and the unregistering, the instance's extract
+    // struct is built (buildExtract) and sent as "OnDestroyed" to every
+    // instance bound to it — never to the instance itself. Instances that only
+    // go through remove() or clear() send nothing.
     void       destroy(InstanceId id);
+    // The value Extract on Destruct would send for `id` right now: its class's
+    // struct filled from its variables, members nobody maps at the struct
+    // default. An empty Value when the class extracts nothing or the struct is
+    // not registered. Interpreted: from the leaf-most level that names a
+    // struct; compiled: the generated extractOnDestruct. Public for the parity
+    // suite and tools; destroy() is the one caller that matters.
+    Value      buildExtract(InstanceId id);
     bool       alive(InstanceId id) const;
     // Drop every instance (whole-runtime teardown).
     void       clear();
@@ -161,6 +174,11 @@ public:
     // no such instance, or no public variable of that name — nothing written,
     // and saying so is the caller's business.
     bool  setPublicVariable(InstanceId id, const std::string& name, const Value& v);
+    // …and the read with Get (Ref)'s rule, for the frontends that are not a
+    // graph (hc.getJson, the native module's reader). false = no such instance
+    // or no public variable of that name; `out` is then left alone.
+    bool  getPublicVariable(InstanceId id, const std::string& name, Value& out) const;
+    bool  isPublicVariable(InstanceId id, const std::string& name) const;
     // Reset an instance's variables to its graph's declared defaults (used to
     // give the persistent GameInstance a fresh start each play session).
     void  reseedVariables(InstanceId id);
@@ -200,6 +218,90 @@ public:
     // the save itself is name-keyed, so it carries no meaning beyond being
     // deterministic.
     std::vector<std::string> savedVariablesOf(InstanceId id) const;
+
+    // ── Pull on Construct (docs/state-driven-data-exchange-design.md §2) ─────
+    // Every registration — add, addLevels, addCompiled — ends by copying each
+    // variable that names a pull source over its default, BEFORE any host fires
+    // the instance's first event. That is the whole guarantee: PreConstruct,
+    // Construct, BeginPlay and OnLevelLoaded see the pulled value or the
+    // default, never something in between. Once: a later change at the source
+    // does not follow. The Game Instance is registered without it (it would be
+    // its own source, and fireInit reseeds it anyway).
+    //
+    // What happened, per pulling variable, for tests and tools. `reason` is the
+    // sentence the log warned with (pullFailureText), empty when it pulled.
+    struct PullOutcome
+    {
+        std::string name;
+        bool        pulled = false;
+        PullFailure why    = PullFailure::None;
+        std::string reason;
+    };
+    std::vector<PullOutcome> pulledVariablesOf(InstanceId id) const;
+    // Who created this instance: the instance whose Create Object, Create
+    // Widget or engine-API call was running when it was registered. 0 for one
+    // placed in the level, the Game Instance, the level script, and anything
+    // spawned from outside HorizonCode. The id may since have died — alive()
+    // says so.
+    InstanceId creatorOf(InstanceId id) const;
+
+    // ── Bind To (docs/bind-to-variable-binding-plan.md §3) ───────────────────
+    // A variable whose pull is marked Variable::bindTo stays bound to its source
+    // for the instance's whole life. The bindings are made at registration, in
+    // the same pass that pulls; the Game Instance binds nothing (it registers
+    // without a pull). The host calls exchangeState() ONCE PER FRAME, at the
+    // frame's end — after every script of the frame has run, before anything is
+    // drawn — and each binding whose source value moved since the last compare
+    // (or whose source is another instance now) writes the new value into its
+    // variable. A source that did not move writes nothing, so a local write to
+    // a bound variable stays until the source changes again.
+    //
+    // Chains (A bound to B bound to C) settle within one call; a cycle stops
+    // after kMaxBindRounds rounds with one warning and continues next frame.
+    // Returns how many variables were written plus how many rounds ran change
+    // handlers (Notify on Change, below), so an event-driven host knows whether
+    // to redraw (0 = nothing moved and nothing ran).
+    int exchangeState();
+    // Each binding of `id`, for tests and tools: where it looks now (`boundTo`,
+    // 0 while it rests or waits for a null reference) and why it rests (`why`,
+    // None while bound or waiting).
+    struct BindOutcome
+    {
+        std::string name;
+        std::string source;          // Variable::pullSource
+        InstanceId  boundTo = 0;
+        PullFailure why     = PullFailure::None;
+    };
+    std::vector<BindOutcome> boundVariablesOf(InstanceId id) const;
+
+    // ── Notify on Change (docs/bind-to-variable-binding-plan.md §4) ──────────
+    // A variable marked Variable::notifyChange is watched from registration on.
+    // exchangeState() compares it with what it held at the previous compare and,
+    // when it moved, calls the owner's private OnChanged_<Name>(Old) (silently
+    // nothing when the class has none) and sends "<Name>Changed" with the NEW
+    // value to every instance bound to the owner per Bind Event (directly, typed
+    // per listener, never passed on to the listener's listeners). The first
+    // compare an instance appears in only takes the baseline: defaults, pulls,
+    // spawn values and whatever Construct set are its starting state. A Bind To
+    // push always reports, the first one included.
+    //
+    // Script frontends subscribe through watch(): the same compare, without the
+    // HorizonCode side (no OnChanged_, no <Name>Changed), reported through
+    // onVariableChanged. Only PUBLIC instance variables can be watched — the
+    // door Get (Ref) uses. `token` belongs to the caller (one per script
+    // instance, say); unwatch(token) drops all of its subscriptions. False =
+    // no such instance or no such public variable.
+    bool watch(InstanceId owner, const std::string& var, uint64_t token);
+    void unwatch(uint64_t token);
+    void unwatch(InstanceId owner, const std::string& var, uint64_t token);
+    // Every subscription whose token `drop` says yes to — a host that hands
+    // out tokens by kind sweeps a whole kind when its frontend goes away.
+    void unwatchIf(const std::function<bool(uint64_t token)>& drop);
+    // Called once per reported change of a variable somebody watch()ed, after
+    // the HorizonCode side of it. One hook, set by the host, like the debug hooks.
+    // `tokens` are the subscribers to hand it to.
+    std::function<void(InstanceId owner, const std::string& var, const Value& old,
+                       const Value& now, const std::vector<uint64_t>& tokens)> onVariableChanged;
 
     // ── One function's multiplayer face (plan §7.6) ─────────────────────────
     // Here for exactly the reason replicatedVariablesOf is: it is the question
@@ -563,6 +665,10 @@ private:
         // exactly the same field.
         ClassIdentity                           cls;
         uint32_t                                ownedEntity = 0;
+        // Pull on Construct: who created it (creatorOf), and what its pulls
+        // did (pulledVariablesOf). Filled once, at registration.
+        InstanceId                              creator = 0;
+        std::vector<PullOutcome>                pulls;
         // Interpreted: the private variable store. Compiled: OVERFLOW store for
         // undeclared names only (Set on an undeclared name still creates an entry).
         std::unordered_map<std::string, Value>  vars;
@@ -591,6 +697,81 @@ private:
                            bool realTime = false; };
     Inst*       find(InstanceId id);
     const Inst* find(InstanceId id) const;
+    // The registrations behind add/addLevels/addCompiled. `pull` false is the
+    // Game Instance's way in (setGameInstance*): it must not pull, and a check
+    // inside pullOnConstruct could not tell — m_gameInstance is set only after
+    // registration returns, and the old one is already gone by then.
+    InstanceId registerLevels(std::vector<Graph> levels, HostBindings bindings,
+                              ClassIdentity cls, bool pull);
+    InstanceId registerCompiled(CompiledPtr inst, HostBindings bindings,
+                                ClassIdentity cls, bool pull);
+    // The engine phase between "defaults set" and the first event (§2.5).
+    void pullOnConstruct(InstanceId id);
+    // Who is creating right now: pushed by the Context's createObject /
+    // createWidget / callApi around the synchronous service call, so the
+    // registration it leads to can read the creator off the top. A stack, not
+    // a slot, because creation nests — B's Construct, fired inside A's Create
+    // Object, may create C, whose creator is B and not A.
+    std::vector<InstanceId> m_creatorStack;
+    struct CreatorScope
+    {
+        std::vector<InstanceId>& stack;
+        CreatorScope(std::vector<InstanceId>& s, InstanceId id) : stack(s) { stack.push_back(id); }
+        ~CreatorScope() { stack.pop_back(); }
+        CreatorScope(const CreatorScope&) = delete;
+        CreatorScope& operator=(const CreatorScope&) = delete;
+    };
+    // Pull warnings already printed, keyed "class|variable|reason": a HUD
+    // spawned per enemy has one thing wrong with it, not one per enemy. Bind To
+    // files its own under "bind|class|variable|reason".
+    std::unordered_set<std::string> m_pullWarned;
+    // The value a pull or a binding reads off `src`: its PUBLIC instance
+    // variable `var` (the door Get (Ref) uses), and of that optionally one
+    // struct `member` (formerNames followed). `src` must be alive.
+    PullFailure readPullSource(InstanceId src, const std::string& var,
+                               const std::string& member, Value& out) const;
+
+    // ── Bind To (§3.1) ───────────────────────────────────────────────────────
+    struct Binding
+    {
+        InstanceId  owner = 0;
+        std::string name;                           // the bound (target) variable
+        std::string src, var, member, cls, ref;     // the pull spec it extends
+        std::string clsKey;                         // owner's class, for warnings
+        InstanceId  boundTo = 0;                    // source at the last compare (0 = none)
+        Value       sourceShadow;                   // source value then, after the member pick
+        bool        haveShadow = false;
+        PullFailure why = PullFailure::None;        // why it rests (None = bound / waiting)
+    };
+    // Registration order. A flat vector: the compare walks all of them every
+    // frame, and remove() is the only thing that takes one out.
+    std::vector<Binding> m_bindings;
+    static constexpr int kMaxBindRounds = 8;
+    // The owner's source instance for `b` right now, or 0 with the reason (None
+    // and 0 together = a Ref source that holds null, which is no failure).
+    InstanceId resolveBindSource(const Binding& b, PullFailure& why) const;
+
+    // ── Notify on Change (§4.2) ──────────────────────────────────────────────
+    // One watched variable: declared (Notify on Change) and/or subscribed by
+    // scripts. Both share the shadow and the compare, nothing else.
+    struct Watched
+    {
+        InstanceId  owner = 0;
+        std::string name;
+        bool        declared = false;       // Notify on Change: OnChanged_ + <Name>Changed
+        std::vector<uint64_t> tokens;       // script subscriptions: onVariableChanged
+        Value       shadow;
+        bool        baselined = false;
+    };
+    std::vector<Watched> m_watched;
+    static constexpr int kMaxChangeFires = 256;
+    // The declared watches of a freshly registered instance (both backends).
+    void watchDeclared(InstanceId id);
+    Watched* findWatched(InstanceId owner, const std::string& name);
+    // Phase 2 of exchangeState: one pass over m_watched. Returns how many fired.
+    int reportChanges(int& budget);
+    // "<name>Changed" to everyone bound to `owner`, typed per listener, direct.
+    void dispatchChanged(InstanceId owner, const std::string& name, const Value& now);
     // Build a Context that routes variable access to the instance's private
     // store, property/show/hide to its host bindings, and the delegation hooks
     // (emit/bind/callExternal/self/gameInstance) back to the runtime.
@@ -625,6 +806,17 @@ private:
     void dispatchToListeners(InstanceId owner, EventId ev, const std::string& name,
                              const Value& arg);
     void dispatchToListeners(InstanceId owner, const std::string& name, const Value& arg);
+    // "OnDestroyed" to everyone bound to `owner` (design §3.3). Unlike
+    // dispatchToListeners it checks each listener's handler signature first —
+    // no argument: fired without the payload; a struct of the payload's type:
+    // fired with it; anything else: skipped with one warning per (listener
+    // class, payload type) — and it runs the handler DIRECTLY, without the
+    // trailing pass to the listener's own listeners that fireEvent adds: their
+    // OnDestroyed means "the object I am bound to died", which this is not.
+    void dispatchDestroyed(InstanceId owner, const Value& payload);
+    // Warnings already printed by buildExtract / dispatchDestroyed, keyed like
+    // m_pullWarned: one per class and cause, not one per instance.
+    std::unordered_set<std::string> m_extractWarned;
 
     std::unordered_map<InstanceId, Inst> m_insts;
     // owner → event name → subscribed listener instances.

@@ -160,6 +160,9 @@ struct Host
 	std::string         selfKey;
 	// Node whose compile error gets a red halo (0 = none).
 	int                 errorNode    = 0;
+	// 0..1: how much brighter that halo is right now — one pulse after the
+	// compile that found it (EditorRewards.h V9, Rewards::errorPulse).
+	float               errorPulse   = 0.0f;
 	// The key HcExecTrace files this graph's run-time hits under — the class
 	// panel's content-relative path, the widget editor's relPath, the reserved
 	// tab path for the level script / GameInstance. A node that just ran gets

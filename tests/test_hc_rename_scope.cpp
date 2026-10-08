@@ -270,6 +270,90 @@ TEST_CASE("HorizonCode rename: variables and events reach in through their own n
 	}
 }
 
+TEST_CASE("HorizonCode rename: a Pull on Construct spec follows the variable it names")
+{
+	// A pull names a variable of ANOTHER class on a declaration, and it says
+	// which class — so it is followed exactly when that class is provably the
+	// renamed one, and reported when it could be anything.
+	auto pullVar = [](const char* name, const char* src, const char* var, const char* cls = "")
+	{
+		Variable v; v.name = name; v.type = PinType::Int;
+		v.pullSource = src; v.pullVar = var; v.pullClass = cls;
+		return v;
+	};
+	Graph g;
+	g.variables = { pullVar("Score", kPullFromGameInstance, "Score"),
+	                pullVar("Gift", kPullFromCreator, "Score", kEnemy),
+	                pullVar("Any", kPullFromCreator, "Score"),             // no class: unprovable
+	                pullVar("Other", kPullFromCreator, "Score", kChest) }; // someone else's
+
+	SUBCASE("renaming the Game Instance's variable")
+	{
+		const HcRename::Target t{ kGI, Member::Variable, "Score", "Points" };
+		const HcRename::Plan p = HcRename::planGraph(g, Role::Other, keys({ kGI }), "Hud.hasset", kGI, t);
+		REQUIRE(p.rename.size() == 1);
+		CHECK(p.unsure.size() == 1);          // the class-less creator pull
+		CHECK(HcRename::apply(g, p, t));
+		CHECK(g.findVariable("Score")->pullVar == "Points");
+		CHECK(g.findVariable("Score")->name == "Score");   // the declaration here is not the renamed one
+		CHECK(g.findVariable("Gift")->pullVar == "Score");
+		CHECK(g.findVariable("Any")->pullVar == "Score");
+	}
+	SUBCASE("renaming the creator class's variable, a derived creator included")
+	{
+		const HcRename::Target t{ kEnemy, Member::Variable, "Score", "Points" };
+		const HcRename::Plan p = HcRename::planGraph(g, Role::Other, keys({ kEnemy, kGoblin }),
+		                                             "Hud.hasset", kGI, t);
+		REQUIRE(p.rename.size() == 1);
+		CHECK(HcRename::apply(g, p, t));
+		CHECK(g.findVariable("Gift")->pullVar == "Points");
+		CHECK(g.findVariable("Score")->pullVar == "Score");
+		CHECK(g.findVariable("Other")->pullVar == "Score");
+	}
+}
+
+TEST_CASE("HorizonCode rename: Bind To through a reference follows both of its names")
+{
+	// The source class is the reference variable's declared class, so a
+	// binding through a typed reference is as provable as a Creator Class.
+	auto refVar = [](const char* name, const char* cls)
+	{
+		Variable v; v.name = name; v.type = PinType::Ref; v.className = cls;
+		return v;
+	};
+	auto viaRef = [](const char* name, const char* var, const char* ref)
+	{
+		Variable v; v.name = name; v.type = PinType::Int;
+		v.pullSource = kPullFromRef; v.pullVar = var; v.bindTo = true; v.pullRef = ref;
+		return v;
+	};
+	Graph g;
+	g.variables = { refVar("Target", kEnemy), refVar("Loose", ""),
+	                viaRef("Hp", "Score", "Target"), viaRef("Any", "Score", "Loose") };
+
+	SUBCASE("renaming the variable the binding reads")
+	{
+		const HcRename::Target t{ kEnemy, Member::Variable, "Score", "Points" };
+		const HcRename::Plan p = HcRename::planGraph(g, Role::Other, keys({ kEnemy }),
+		                                             "Hud.hasset", kGI, t);
+		REQUIRE(p.rename.size() == 1);
+		CHECK(p.unsure.size() == 1);   // the untyped reference: unprovable
+		CHECK(HcRename::apply(g, p, t));
+		CHECK(g.findVariable("Hp")->pullVar == "Points");
+		CHECK(g.findVariable("Any")->pullVar == "Score");
+	}
+	SUBCASE("renaming the reference variable itself")
+	{
+		const HcRename::Target t{ "Hud.hasset", Member::Variable, "Target", "Foe" };
+		const HcRename::Plan p = HcRename::planGraph(g, Role::Declares, keys({ "Hud.hasset" }),
+		                                             "Hud.hasset", kGI, t);
+		CHECK(HcRename::apply(g, p, t));
+		REQUIRE(g.findVariable("Foe") != nullptr);
+		CHECK(g.findVariable("Hp")->pullRef == "Foe");
+		CHECK(g.findVariable("Any")->pullRef == "Loose");
+	}
+}
+
 TEST_CASE("HorizonCode rename: the declaring class and an overriding one carry their own")
 {
 	SUBCASE("the class itself renames its declaration and everything using it")

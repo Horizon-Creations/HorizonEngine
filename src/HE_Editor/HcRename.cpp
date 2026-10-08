@@ -1,4 +1,5 @@
 #include "HcRename.h"
+#include "HcExtract.h"
 
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>   // which parameter names an animation is the registry's answer
@@ -287,6 +288,31 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 				for (const HorizonCode::FuncParam& prm : n.params)
 					if (prm.name == t.oldName) { p.rename.push_back({ n.id, {}, line(n) }); break; }
 
+	// Pull on Construct names a variable of ANOTHER class too, but on a
+	// variable declaration rather than a node — and it says which class: the
+	// Game Instance, or the creator's expected class (pullClass). That makes it
+	// provable the same way a recorded Node::className is. A creator pull that
+	// names no class could be pulling from anything, so it is reported.
+	if (t.member == Member::Variable)
+		for (const HorizonCode::Variable& v : g.variables)
+		{
+			if (v.scope != 0 || v.pullSource.empty() || v.pullVar != t.oldName) continue;
+			// Bind To through a reference: the class the reference variable is
+			// declared to hold, the same proof a Get (Ref) node's className is.
+			const HorizonCode::Variable* ref = v.pullSource == HorizonCode::kPullFromRef
+			                                 ? g.findVariable(v.pullRef) : nullptr;
+			const std::string key = v.pullSource == HorizonCode::kPullFromGameInstance ? giKey
+			                      : v.pullSource == HorizonCode::kPullFromCreator   ? v.pullClass
+			                      : ref                                             ? ref->className
+			                      : std::string();
+			const Hit hit{ 0, kPullDeclPrefix + v.name,
+			               std::string(v.bindTo ? "Bind To" : "Pull on Construct") + " of \"" +
+			               v.name + "\" (from " +
+			               HorizonCode::pullSourceLabel(v.pullSource, v.pullRef) + ")" };
+			if (key.empty())                   p.unsure.push_back(hit);
+			else if (contains(targetKeys, key)) p.rename.push_back(hit);
+		}
+
 	// A Bind Event uses ONE name for both ends: when the Target fires event X,
 	// THIS graph's own "Event X" node runs. So a proven bind has to drag the local
 	// handler along — and that is only safe while X means one thing here.
@@ -391,9 +417,27 @@ bool apply(HorizonCode::Graph& g, const Plan& p, const Target& t)
 			}
 			if (n && n->s != t.newName) { n->s = t.newName; changed = true; }
 		}
+		else if (t.member == Member::Variable && h.decl.rfind(kPullDeclPrefix, 0) == 0)
+		{
+			// A pull spec naming the renamed variable of another class.
+			const std::string owner = h.decl.substr(std::string(kPullDeclPrefix).size());
+			if (HorizonCode::Variable* v = g.findVariable(owner);
+			    v && v->pullVar == t.oldName)
+			{ v->pullVar = t.newName; changed = true; }
+		}
 		else if (!h.decl.empty() && t.member == Member::Variable)
 		{
-			if (HorizonCode::Variable* v = g.findVariable(h.decl)) { v->name = t.newName; changed = true; }
+			if (HorizonCode::Variable* v = g.findVariable(h.decl))
+			{
+				v->name = t.newName;
+				// The class's own Extract on Destruct table names it too.
+				HcExtract::renameVariable(g, h.decl, t.newName);
+				// And a Bind To that reads through it, when it is a reference.
+				for (HorizonCode::Variable& o : g.variables)
+					if (o.pullSource == HorizonCode::kPullFromRef && o.pullRef == h.decl)
+						o.pullRef = t.newName;
+				changed = true;
+			}
 		}
 		else if (!h.decl.empty() && t.member == Member::Event)
 		{

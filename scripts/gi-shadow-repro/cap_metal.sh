@@ -3,6 +3,7 @@
 # usage: scripts/gi-shadow-repro/cap_metal.sh NAME [ENV=VAL ...]
 #   e.g. cap_metal.sh hw_gi1 HE_DUMP_GI=1 HE_DUMP_FRAMES=60
 #        cap_metal.sh sw_gi1 HE_DUMP_GI=1 HE_GI_FORCE_SW=1
+#        GI_CAP_CONFIG=scripts/gi-shadow-repro/config_r6.json cap_metal.sh r6_f60 HE_DUMP_GI=1 HE_DUMP_FRAMES=60
 #        cap_metal.sh refl HE_DUMP_SHADOWINSTTEST= HE_DUMP_GIREFLTEST=1 HE_DUMP_GI=1 HE_DUMP_GIREFL=1 \
 #                     HE_DUMP_TOD=0.5 HE_DUMP_PITCH=-8 HE_DUMP_CAMX=0 HE_DUMP_CAMY=2.5 HE_DUMP_CAMZ=2
 # Runs THIS tree's out/deploy/Editor (build macos-release first), private empty
@@ -17,6 +18,8 @@ ED=$ROOT/out/deploy/Editor
 OUT=${GI_CAP_OUT:-/tmp/gi-cap}
 mkdir -p $OUT
 rm -rf $OUT/cfg-$NAME; mkdir -p $OUT/cfg-$NAME
+# GI_CAP_CONFIG=<config.json template> (e.g. config_r6.json for GILightRadius 6°), like cap.ps1 -Config.
+[ -n "$GI_CAP_CONFIG" ] && cp "$GI_CAP_CONFIG" $OUT/cfg-$NAME/config.json
 rm -f $OUT/$NAME.bmp $OUT/$NAME.log
 cd $ED || exit 1
 env -i HOME=$HOME PATH=$PATH USER=$USER TMPDIR=$TMPDIR \

@@ -1,5 +1,6 @@
 #pragma once
 #include <glm/glm.hpp>
+#include <cstdint>
 #include <vector>
 #include <Types/UUID.h>
 
@@ -28,6 +29,10 @@ namespace SceneSystems
     // (and their baked transitive dependencies) are streamed, so unused assets in
     // the pak are never loaded. Duplicates are fine — the loader coalesces.
     std::vector<HE::UUID> collectAssetRefs(HorizonWorld& world);
+    // The same, limited to the given entities (ids as entt::entity values) — what
+    // an additively loaded zone brings in, so its streaming can be cancelled with
+    // the zone without taking the rest of the world's assets along.
+    std::vector<HE::UUID> collectAssetRefs(HorizonWorld& world, const std::vector<uint32_t>& onlyEntities);
 
     // Synchronously make every scene-referenced asset resident (collectAssetRefs →
     // ContentManager::ensureResident, which resolves from mounted paks or the disk

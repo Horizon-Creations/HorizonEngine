@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <Renderer/UIFont.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -143,6 +144,9 @@ namespace
         // axis, w = near (HE::ClusterLightBuild). Appended last.
         glm::vec4  clusterParams;
         glm::vec4  clusterCamFwd;
+        // rgb = RenderWorld::ambient, read only by scene.frag's GI branch
+        // (Thema 159) — must match scene.frag's Frame block. Appended last.
+        glm::vec4  ambient;
     };
 
     // Sky pass UBO of the FALLBACK shader (set=0 binding=0 in shaders/sky.frag)
@@ -236,15 +240,16 @@ void VulkanRenderer::Shutdown()
     if (m_giGBufPipe)     { vkDestroyPipeline(m_device, m_giGBufPipe, nullptr);     m_giGBufPipe = VK_NULL_HANDLE; }
     if (m_giGBufInstancedPipe) { vkDestroyPipeline(m_device, m_giGBufInstancedPipe, nullptr); m_giGBufInstancedPipe = VK_NULL_HANDLE; }
     if (m_giTemporalPipe){ vkDestroyPipeline(m_device, m_giTemporalPipe, nullptr); m_giTemporalPipe = VK_NULL_HANDLE; }
-    if (m_giBlurPipe)     { vkDestroyPipeline(m_device, m_giBlurPipe, nullptr);     m_giBlurPipe = VK_NULL_HANDLE; }
+    if (m_giAtrousPipe)     { vkDestroyPipeline(m_device, m_giAtrousPipe, nullptr);     m_giAtrousPipe = VK_NULL_HANDLE; }
     if (m_giShadowPipe)   { vkDestroyPipeline(m_device, m_giShadowPipe, nullptr);   m_giShadowPipe = VK_NULL_HANDLE; }
     if (m_giProbePipe)    { vkDestroyPipeline(m_device, m_giProbePipe, nullptr);    m_giProbePipe = VK_NULL_HANDLE; }
     if (m_giGBufRP)       { vkDestroyRenderPass(m_device, m_giGBufRP, nullptr);     m_giGBufRP = VK_NULL_HANDLE; }
     if (m_giTemporalRP)   { vkDestroyRenderPass(m_device, m_giTemporalRP, nullptr); m_giTemporalRP = VK_NULL_HANDLE; }
-    if (m_giBlurRP)       { vkDestroyRenderPass(m_device, m_giBlurRP, nullptr);     m_giBlurRP = VK_NULL_HANDLE; }
+    if (m_giAtrousRP)       { vkDestroyRenderPass(m_device, m_giAtrousRP, nullptr);     m_giAtrousRP = VK_NULL_HANDLE; }
     if (m_giShadowPL)     { vkDestroyPipelineLayout(m_device, m_giShadowPL, nullptr); m_giShadowPL = VK_NULL_HANDLE; }
     if (m_giProbePL)      { vkDestroyPipelineLayout(m_device, m_giProbePL, nullptr);  m_giProbePL = VK_NULL_HANDLE; }
     if (m_giFsPL)         { vkDestroyPipelineLayout(m_device, m_giFsPL, nullptr);     m_giFsPL = VK_NULL_HANDLE; }
+    if (m_giAtrousPL)     { vkDestroyPipelineLayout(m_device, m_giAtrousPL, nullptr); m_giAtrousPL = VK_NULL_HANDLE; }
     if (m_giGBufPL)       { vkDestroyPipelineLayout(m_device, m_giGBufPL, nullptr);   m_giGBufPL = VK_NULL_HANDLE; }
     if (m_giShadowDSL)    { vkDestroyDescriptorSetLayout(m_device, m_giShadowDSL, nullptr); m_giShadowDSL = VK_NULL_HANDLE; }
     if (m_giProbeDSL)     { vkDestroyDescriptorSetLayout(m_device, m_giProbeDSL, nullptr);  m_giProbeDSL = VK_NULL_HANDLE; }
@@ -294,8 +299,10 @@ void VulkanRenderer::Shutdown()
     if (m_skinnedPipeLayout)   { vkDestroyPipelineLayout(m_device, m_skinnedPipeLayout,  nullptr);  m_skinnedPipeLayout   = VK_NULL_HANDLE; }
     if (m_skinnedDescPool)     { vkDestroyDescriptorPool(m_device, m_skinnedDescPool,    nullptr);  m_skinnedDescPool     = VK_NULL_HANDLE; }
     if (m_skinnedBonesDSL)     { vkDestroyDescriptorSetLayout(m_device, m_skinnedBonesDSL, nullptr); m_skinnedBonesDSL    = VK_NULL_HANDLE; }
-    // UI canvas pipeline + font atlases
+    // UI canvas pipeline + font atlases + quad images
     destroyUIFontAtlases();
+    destroyUIImages();
+    if (m_uiImageDescPool)    { vkDestroyDescriptorPool (m_device, m_uiImageDescPool,   nullptr); m_uiImageDescPool   = VK_NULL_HANDLE; }
     if (m_uiViewportFB)       { vkDestroyFramebuffer    (m_device, m_uiViewportFB,      nullptr); m_uiViewportFB      = VK_NULL_HANDLE; }
     if (m_uiViewportPipeline) { vkDestroyPipeline       (m_device, m_uiViewportPipeline,nullptr); m_uiViewportPipeline = VK_NULL_HANDLE; }
     if (m_uiPipeline)         { vkDestroyPipeline       (m_device, m_uiPipeline,        nullptr); m_uiPipeline        = VK_NULL_HANDLE; }
@@ -392,6 +399,17 @@ void VulkanRenderer::Render()
     m_ssrResultView    = VK_NULL_HANDLE;
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
     m_instCursor = 0; // this frame's instance-buffer slots start from the top
+    m_sceneMatCursor = 0; m_sceneMatOffset = 0; // ...and its built-in material-ring slots
+
+    // This frame's sun, once, before the first extraction. The cascades, the
+    // decal depth pre-pass, GI and SSAO all extract on their own ahead of
+    // DrawScene(); with the day-night state fed only there they fit and traced
+    // against the previous frame's sun (Thema 131 for GI, 146 for the rest).
+    // RenderSceneImage() does the same at its top.
+    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                            m_environment.sunColor, m_environment.sunIntensity,
+                            m_environment.moonColor, m_environment.moonIntensity,
+                            m_environment.cloudCoverage);
 
     // Drop caches for materials/meshes edited since last frame, before any recording — the
     // frame's DrawScene then re-resolves them fresh from the ContentManager.
@@ -665,8 +683,11 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 {
     // The shadow, GI and SSAO depth passes and the geometry pass below all take
     // instance-buffer slots from this frame's m_instCursor. Reset here too, not
-    // only in Render(): RenderSceneImage records this frame on its own.
+    // only in Render(): RenderSceneImage records this frame on its own. Same for
+    // the built-in material ring (m_sceneMatBuf) the geometry pass fills.
     m_instCursor = 0;
+    m_sceneMatCursor = 0;
+    m_sceneMatOffset = 0;
 
     const bool useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB;
 
@@ -709,8 +730,10 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 
         // ── Forward SSR (docs/ssr-cross-backend-plan.md checkpoint B) ──
         // Built lazily, and only here: the trace's radiance source is the
-        // HDR target of THIS branch, so SSR does not exist in the swapchain
-        // path at all (plan §2.2 — reported, not hidden).
+        // HDR target of THIS branch. The packaged game reaches it too when it
+        // asks for the chain (SetSwapchainPostProcessing, plan C6 closed); only
+        // the direct swapchain fallback (application mode, sRGB-only
+        // swapchain) has no SSR.
         if (m_ssrEnabled) EnsureSSRPipelines();
         const bool ssrWanted = ssrWantedThisFrame();
 
@@ -979,7 +1002,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         }
     }
     // The jitter belongs to this frame's viewport passes only; whatever draws
-    // after them (a world preview, the swapchain path) rasterises unjittered.
+    // after them (a world preview, the swapchain pass — the game's present
+    // blit or the direct fallback) rasterises unjittered.
     m_taaFrame = false;
 }
 
@@ -988,7 +1012,9 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     Capabilities c;
     c.supportsShadows        = true;
     c.supportsPostProcessing = m_postFxReady;
-    c.supportsHDR            = false;
+    // The HDR scene target lives and dies with the post chain, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing) both run.
+    c.supportsHDR            = m_postFxReady;
     c.supportsGpuParticles   = false;
     // Software compute ray tracing (gi_*.comp) — compute is core Vulkan, so no
     // extension gate. If pipeline creation fails at runtime, runGi() leaves
@@ -999,14 +1025,15 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // B) — the reflection MRT pre-pass plus last frame's HDR copy, Metal's
     // Option-A path. There is no deferred composite here because there is no
     // G-buffer. Reported alongside supportsPostProcessing on purpose: the HDR
-    // target the trace reads is the PostFX scene target, and it exists only in
-    // the editor viewport (§2.2) — in the swapchain path the toggle is honoured
-    // by doing nothing. The shaders come from the cross-compiler, hence the #if.
+    // target the trace reads is the PostFX scene target, which the editor
+    // viewport and the packaged game (SetSwapchainPostProcessing, plan C6) both
+    // run; only the direct swapchain fallback (application mode, sRGB-only
+    // swapchain) has none. The shaders come from the cross-compiler, hence the #if.
     c.supportsScreenSpaceReflections = m_postFxReady;
 #endif
-    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the editor
-    // viewport's post chain — false only if a TAA shader (.spv) or pipeline is
-    // missing. The swapchain path renders unjittered either way (m_taaFrame).
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same post
+    // chain — false only if a TAA shader (.spv) or pipeline is missing. Only
+    // the direct swapchain fallback renders unjittered (m_taaFrame).
     c.supportsTemporalAA = taaReady();
     return c;
 }
@@ -1137,6 +1164,19 @@ void VulkanRenderer::createInstance()
             create(m_instance, &dci, nullptr, &m_debugMessenger);
         }
     }
+    if (haveDebugUtils)
+        m_setObjectName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+            vkGetInstanceProcAddr(m_instance, "vkSetDebugUtilsObjectNameEXT"));
+}
+
+void VulkanRenderer::nameImage(VkImage img, const char* name) const
+{
+    if (!m_setObjectName || !m_device || !img) return;
+    VkDebugUtilsObjectNameInfoEXT ni{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    ni.objectType   = VK_OBJECT_TYPE_IMAGE;
+    ni.objectHandle = reinterpret_cast<uint64_t>(img);
+    ni.pObjectName  = name;
+    m_setObjectName(m_device, &ni);
 }
 
 void VulkanRenderer::createSurface()
@@ -1866,8 +1906,8 @@ void VulkanRenderer::createScenePipeline()
     binds[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     binds[1].descriptorCount = 1;
     binds[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-    binds[2].binding         = 2;
-    binds[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binds[2].binding         = 2;  // per-draw material block: dynamic offset into m_sceneMatBuf
+    binds[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     binds[2].descriptorCount = 1;
     binds[2].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
     binds[3].binding         = 3;  // uAO: SSAO occlusion (1x1 white fallback when disabled)
@@ -1905,18 +1945,36 @@ void VulkanRenderer::createScenePipeline()
     slci.pBindings    = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_sceneSetLayout), "descriptor set layout");
 
-    // Create the per-draw material UBO (32 bytes, host-coherent, written per-draw via vkCmdUpdateBuffer).
+    // The per-draw material ring behind binding 2 (see m_sceneMatBuf): one per frame in
+    // flight, host-visible + coherent and persistently mapped like the Frame UBO, so a
+    // draw's block is written while recording and never by a transfer inside the pass.
     {
-        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = 32;
-        bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &m_matUBO), "mat ubo");
-        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, m_matUBO, &req);
-        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = req.size;
-        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_matMem), "mat ubo mem");
-        vkBindBufferMemory(m_device, m_matUBO, m_matMem, 0);
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        const VkDeviceSize align = std::max<VkDeviceSize>(props.limits.minUniformBufferOffsetAlignment, 1);
+        m_sceneMatStride = (32 + align - 1) / align * align;
+        const VkDeviceSize bytes = m_sceneMatStride * k_sceneMatSlots;
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        {
+            MatFrameBuf& rb = m_sceneMatBuf[i];
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size  = bytes;
+            bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &rb.buf), "scene material ring");
+            VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, rb.buf, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = req.size;
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &rb.mem), "scene material ring mem");
+            vkBindBufferMemory(m_device, rb.buf, rb.mem, 0);
+            vkCheck(vkMapMemory(m_device, rb.mem, 0, bytes, 0, &rb.mapped), "scene material ring map");
+            // Slot 0 holds a valid block before the first draw writes one: the
+            // binds ahead of any built-in draw use offset 0.
+            std::memset(rb.mapped, 0, static_cast<size_t>(m_sceneMatStride));
+        }
+        m_sceneMatCursor = 0;
+        m_sceneMatOffset = 0;
     }
 
     // Base-color descriptor set layout (set = 2: one combined image sampler, fragment stage)
@@ -1952,14 +2010,15 @@ void VulkanRenderer::createScenePipeline()
     vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_scenePipelineLayout), "pipeline layout");
 
     // Per-frame UBO buffers + descriptor sets (one per frame in flight).
-    VkDescriptorPoolSize ps[3] = {
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 2 },  // binding0 + binding2
+    VkDescriptorPoolSize ps[4] = {
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 1 },  // binding0
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, k_maxFramesInFlight * 1 },  // binding2 (material ring)
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 },  // binding1(shadow) + binding3(AO) + bindings4-7(GI) + binding8(SSR) + binding9(local atlas)
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 3 },  // bindings10-12 (cluster lists)
     };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = k_maxFramesInFlight;
-    dpci.poolSizeCount = 3;
+    dpci.poolSizeCount = 4;
     dpci.pPoolSizes    = ps;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_descPool), "descriptor pool");
 
@@ -2028,7 +2087,7 @@ void VulkanRenderer::createScenePipeline()
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo  lii{ m_shadowSampler, m_localShadowView,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorBufferInfo matDbi{ m_matUBO, 0, 32 };
+        VkDescriptorBufferInfo matDbi{ m_sceneMatBuf[i].buf, 0, 32 };  // + dynamic offset per draw
         // Binding 3 (AO): filled in by createSSAOPipeline() with the white fallback
         // view after it creates the 1x1 white texture; left unwritten here.
         // Binding 9 (local atlas) goes in with binding 1 — both exist once
@@ -2050,7 +2109,7 @@ void VulkanRenderer::createScenePipeline()
         w[2].dstSet          = m_frameUBO[i].set;
         w[2].dstBinding      = 2;
         w[2].descriptorCount = 1;
-        w[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         w[2].pBufferInfo     = &matDbi;
         w[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[3].dstSet          = m_frameUBO[i].set;
@@ -2372,6 +2431,10 @@ void VulkanRenderer::destroyScenePipeline()
         if (m_instanceBuf[i].buf)    vkDestroyBuffer(m_device, m_instanceBuf[i].buf, nullptr);
         if (m_instanceBuf[i].mem)    vkFreeMemory   (m_device, m_instanceBuf[i].mem, nullptr);
         m_instanceBuf[i] = {};
+        if (m_sceneMatBuf[i].mapped) vkUnmapMemory(m_device, m_sceneMatBuf[i].mem);
+        if (m_sceneMatBuf[i].buf)    vkDestroyBuffer(m_device, m_sceneMatBuf[i].buf, nullptr);
+        if (m_sceneMatBuf[i].mem)    vkFreeMemory   (m_device, m_sceneMatBuf[i].mem, nullptr);
+        m_sceneMatBuf[i] = {};
         for (ClusterBuffer* cb : { &m_clusterLights[i], &m_clusterGrid[i], &m_clusterIdx[i] })
         {
             if (cb->mapped) vkUnmapMemory(m_device, cb->mem);
@@ -2381,8 +2444,6 @@ void VulkanRenderer::destroyScenePipeline()
         }
     }
     m_clusterReady = false;
-    if (m_matUBO)              { vkDestroyBuffer(m_device, m_matUBO, nullptr); m_matUBO = VK_NULL_HANDLE; }
-    if (m_matMem)              { vkFreeMemory   (m_device, m_matMem, nullptr); m_matMem = VK_NULL_HANDLE; }
     if (m_descPool)            { vkDestroyDescriptorPool(m_device, m_descPool, nullptr);            m_descPool = VK_NULL_HANDLE; }
     // Base-color texture resources (per-mesh images are freed with their caches; the pool
     // destroy frees every albedo descriptor set incl. m_whiteAlbedoSet).
@@ -2533,16 +2594,49 @@ void VulkanRenderer::createMaterialResources()
         }
         return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     };
+    // heLandscapeWeights brings the fragment stage to 17 combined samplers, one over
+    // the spec minimum of the per-stage limits. A device AT that minimum gets the
+    // layout without its row (and layer-blend materials draw built-in, see drawDCVk)
+    // rather than a layout it cannot create. The line is the evidence either way.
+    // HE_VK_MAX_STAGE_SAMPLERS=<n> caps both limits as if the device reported n — the
+    // only way to walk the fallback on hardware that reports a million.
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        uint32_t maxSamplers = props.limits.maxPerStageDescriptorSamplers;
+        uint32_t maxImages   = props.limits.maxPerStageDescriptorSampledImages;
+        const char* cap = std::getenv("HE_VK_MAX_STAGE_SAMPLERS");
+        if (cap && *cap)
+        {
+            const uint32_t n = static_cast<uint32_t>(std::strtoul(cap, nullptr, 10));
+            maxSamplers = std::min(maxSamplers, n);
+            maxImages   = std::min(maxImages, n);
+        }
+        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages);
+        char line[384];
+        std::snprintf(line, sizeof line,
+            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
+            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s",
+            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentSamplerCount(false),
+            maxSamplers, maxImages, (cap && *cap) ? " (capped by HE_VK_MAX_STAGE_SAMPLERS)" : "",
+            m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)");
+        if (m_matLandscapeWeights) HE_LOG_INFO(RHI, "%s", line);
+        else                       HE_LOG_WARN(RHI, "%s", line);
+    }
     VkDescriptorSetLayoutBinding b[HE::vkmat::kBindingCount]{};
+    uint32_t nb = 0;
     for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
     {
-        b[i].binding         = HE::vkmat::kBindings[i].binding;
-        b[i].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
-        b[i].descriptorCount = 1;
-        b[i].stageFlags      = HE::vkmat::kBindings[i].stages;
+        if (!m_matLandscapeWeights && HE::vkmat::kBindings[i].binding == HE::vkmat::kLandscapeWeightsBinding)
+            continue;
+        b[nb].binding         = HE::vkmat::kBindings[i].binding;
+        b[nb].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
+        b[nb].descriptorCount = 1;
+        b[nb].stageFlags      = HE::vkmat::kBindings[i].stages;
+        ++nb;
     }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = HE::vkmat::kBindingCount;
+    slci.bindingCount = nb;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -2587,7 +2681,7 @@ void VulkanRenderer::createMaterialResources()
         using HE::vkmat::countOf;
         VkDescriptorPoolSize ps[3] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         countOf(DescKind::UniformBuffer)        * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b13,b15-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -2794,6 +2888,20 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
                                                       const MaterialShaderVariant* precompiled,
                                                       bool hdr, bool transparent)
 {
+    // A layer-blend graph samples heLandscapeWeights; on a device whose layout had to
+    // leave binding 14 out (createMaterialResources) its pipeline would be invalid. No
+    // pipeline then — drawDCVk draws it built-in PBR, the warm-up skips it. Checked
+    // HERE so both callers go through it.
+    if (!m_matLandscapeWeights && frag.find("heLandscapeWeights") != std::string::npos)
+    {
+        if (!m_matLandscapeWarned)
+        {
+            m_matLandscapeWarned = true;
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: a Landscape Layer Blend material draws built-in "
+                                   "PBR — this device has no sampler slot left for heLandscapeWeights");
+        }
+        return VK_NULL_HANDLE;
+    }
     // Cache key mixes the shader hash with the render-target + blend variant so LDR (swapchain)
     // / HDR (RGBA16F offscreen) / opaque / transparent pipelines never collide.
     const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
@@ -3286,17 +3394,18 @@ const VkImageView* VulkanRenderer::resolveDecalTexture(const HE::UUID& textureId
     return res.first->second.view ? &res.first->second.view : nullptr;
 }
 
-VkImageView VulkanRenderer::resolveGraphTexture(const HE::UUID& id, const std::string& path)
+VkImageView VulkanRenderer::resolveGraphTexture(const HE::UUID& id, const std::string& path, bool array)
 {
-    const std::string key = graphTexKey(id, path);
+    std::string key = graphTexKey(id, path);
     if (key.empty() || !m_contentManager) return VK_NULL_HANDLE;
+    if (array) key += "#arr"; // the same asset can be 2D in one material, an array in another
     if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
         return it->second.view;
     // Unlike the decal cache this caches a null asset too: resolveTextureRef loads
     // synchronously, so "still null" means unloadable, not "not yet" (mirrors GL).
     MaterialTexVk mt;
     if (const TextureAsset* tex = m_contentManager->resolveTextureRef(id, path))
-        uploadTextureImage(tex, mt.image, mt.mem, mt.view); // unsupported format → view stays null
+        uploadTextureImage(tex, mt.image, mt.mem, mt.view, array); // unsupported format → view stays null
     auto res = m_graphTexCache.emplace(key, mt);
     return res.first->second.view;
 }
@@ -5020,6 +5129,11 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
         m_ssrRanThisFrame  = false;
         m_ssrResultView    = VK_NULL_HANDLE;
         m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;
+        // This frame's sun before DrawViewportFrame's first extraction, as in Render().
+        m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                                m_environment.sunColor, m_environment.sunIntensity,
+                                m_environment.moonColor, m_environment.moonIntensity,
+                                m_environment.cloudCoverage);
 
         // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
         // decal depth) are torn down and rebuilt, and the one-shot buffer below
@@ -6207,7 +6321,8 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
 // into one buffer and copied per-mip; block formats use no runtime mip generation.
 // Returns false when the device can't sample the shipped format (→ untextured draw).
 bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
-                                        VkImage& image, VkDeviceMemory& memory, VkImageView& view)
+                                        VkImage& image, VkDeviceMemory& memory, VkImageView& view,
+                                        bool asArray, bool honourSrgb)
 {
     image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
     if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
@@ -6223,7 +6338,7 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     // colour textures shade in linear light and only the tonemap's gamma encode
     // re-curves them. Twins share block/byte layout, so the level math is unchanged
     // and the format-properties check below validates whichever twin we picked.
-    const bool srgb = tex->srgb;
+    const bool srgb = tex->srgb && honourSrgb;
     VkFormat vkFmt; bool isBlock;
     switch (tex->format)
     {
@@ -6232,6 +6347,13 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     case TextureFormat::BC3:   vkFmt = srgb ? VK_FORMAT_BC3_SRGB_BLOCK  : VK_FORMAT_BC3_UNORM_BLOCK; isBlock = true;  break;
     default: return false;
     }
+    // Texture ARRAY (Thema 158): every slice of a layers > 1 asset, one after the
+    // other in the staging buffer exactly as HE::buildTextureArray stores them
+    // (slice-major, each slice with its full chain). RGBA8 only. A 2D asset in an
+    // array slot is one slice; an array asset in a 2D slot reads slice 0 -- its
+    // leading bytes -- through the plain path below.
+    const uint32_t layers = asArray ? std::max<uint32_t>(1, tex->layers) : 1;
+    if (layers > 1 && (isBlock || !HE::textureArrayPayloadValid(*tex))) return false;
     // Device must actually sample this format (BC support is optional in Vulkan).
     VkFormatProperties fp{};
     vkGetPhysicalDeviceFormatProperties(m_physDevice, vkFmt, &fp);
@@ -6248,6 +6370,8 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
       for (uint32_t l = 0; l < mips; ++l)
       { offsets[l] = total; total += levelBytes(lw, lh);
         lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1; } }
+    const VkDeviceSize sliceBytes = total;     // one slice's chain
+    total *= layers;
     if (tex->data.size() < total) return false; // truncated payload
 
     // Staging buffer holding the whole (already tightly packed) mip chain.
@@ -6277,7 +6401,7 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     ici.format        = vkFmt;
     ici.extent        = { width, height, 1 };
     ici.mipLevels     = mips;
-    ici.arrayLayers   = 1;
+    ici.arrayLayers   = layers;
     ici.samples       = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
     ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -6313,18 +6437,20 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
         bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar.image            = image;
-        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
         bar.srcAccessMask    = 0;
         bar.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
+    for (uint32_t s = 0; s < layers; ++s)
     { uint32_t lw = width, lh = height;
       for (uint32_t l = 0; l < mips; ++l)
       {
         VkBufferImageCopy region{};
-        region.bufferOffset     = offsets[l]; // multiple of 16 → satisfies block/4-byte alignment
-        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1 };
+        // Multiple of 16 for blocks; a multiple of 4 for RGBA8 (the only array format).
+        region.bufferOffset     = s * sliceBytes + offsets[l];
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, s, 1 };
         region.imageExtent      = { lw, lh, 1 };
         vkCmdCopyBufferToImage(oneCB, stageBuf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
@@ -6336,7 +6462,7 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
         bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar.image            = image;
-        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
         bar.srcAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
         bar.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -6354,9 +6480,9 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
 
     VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     ivci.image            = image;
-    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.viewType         = asArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     ivci.format           = vkFmt;
-    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
     if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS)
     {
         view = VK_NULL_HANDLE;
@@ -6446,8 +6572,14 @@ void VulkanRenderer::processPendingInvalidations()
         { destroyMaterialTex(it->second); m_materialTexCache.erase(it); }
     m_pendingMatInval.clear();
     for (const HE::UUID& id : m_pendingTexInval)
-        if (auto it = m_graphTexCache.find(graphTexKey(id, {})); it != m_graphTexCache.end())
-        { destroyMaterialTex(it->second); m_graphTexCache.erase(it); }
+    {
+        // The texture-array upload of the same asset lives under "#arr" (Thema 158).
+        for (const std::string& key : { graphTexKey(id, {}), graphTexKey(id, {}) + "#arr" })
+            if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+            { destroyMaterialTex(it->second); m_graphTexCache.erase(it); }
+        if (auto it = m_uiImageCache.find(graphTexKey(id, {})); it != m_uiImageCache.end())
+        { destroyUIImage(it->second); m_uiImageCache.erase(it); }
+    }
     m_pendingTexInval.clear();
 
     for (const HE::UUID& id : m_pendingMeshInval)
@@ -6607,6 +6739,34 @@ const VulkanRenderer::GpuMesh* VulkanRenderer::resolveMesh(const HE::UUID& asset
     return &m_meshCache.emplace(assetId, mesh).first->second;
 }
 
+uint32_t VulkanRenderer::pushSceneMaterial(const void* data, size_t bytes)
+{
+    MatFrameBuf& rb = m_sceneMatBuf[m_currentFrame];
+    if (!rb.mapped || bytes > sizeof(m_sceneMatLast)) return m_sceneMatOffset;
+    auto* base = static_cast<uint8_t*>(rb.mapped);
+    // Same block as the draw before → same slot. Compared against a CPU copy:
+    // the ring is mapped write-combined on discrete GPUs, slow to read back.
+    if (m_sceneMatCursor > 0 && std::memcmp(m_sceneMatLast, data, bytes) == 0)
+        return m_sceneMatOffset;
+    if (m_sceneMatCursor >= k_sceneMatSlots)
+    {
+        if (!m_sceneMatWarned)
+        {
+            m_sceneMatWarned = true;
+            HE_LOG_WARN(RHI, "%s",
+                ("VulkanRenderer: more than " + std::to_string(k_sceneMatSlots)
+                 + " built-in material blocks in one frame — the surplus draws reuse the "
+                   "last one's material; raise k_sceneMatSlots").c_str());
+        }
+        return m_sceneMatOffset;
+    }
+    const VkDeviceSize off = static_cast<VkDeviceSize>(m_sceneMatCursor++) * m_sceneMatStride;
+    std::memcpy(base + off, data, bytes);
+    std::memcpy(m_sceneMatLast, data, bytes);
+    m_sceneMatOffset = static_cast<uint32_t>(off);
+    return m_sceneMatOffset;
+}
+
 void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr)
 {
     if (!m_world || m_scenePipeline == VK_NULL_HANDLE || width == 0 || height == 0) return;
@@ -6615,12 +6775,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // before any draw below can stall on them.
     drainMaterialWarmup(hdr);
 
-    // Feed time-of-day so the extractor recomputes the sun/moon direction (otherwise the
-    // sky never responds to the time slider). Mirrors OpenGL/Metal.
-    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
-                            m_environment.sunColor, m_environment.sunIntensity,
-                            m_environment.moonColor, m_environment.moonIntensity,
-                            m_environment.cloudCoverage);
+    // The day-night state (sun/moon direction for the sky and the lights) was
+    // fed once at the top of Render() / RenderSceneImage(), so this extraction
+    // sees the same sun as the cascades, GI and SSAO before it.
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
@@ -6779,6 +6936,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         f.giGridCounts  = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
                                     float(m_giGridCounts.z), float(m_giProbesPerRow));
         f.giParams      = glm::vec4(m_giIndirectIntensity, m_giRanThisFrame ? 1.0f : 0.0f, 0.0f, 0.0f);
+        f.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f); // GI-branch floor only
         // Forward SSR: the gate is a REAL trace result this frame, nothing weaker
         // — the same shape as m_ssaoRanThisFrame above.
         f.ssrParams     = glm::vec4(m_ssrRanThisFrame ? 1.0f : 0.0f, m_ssrIntensity,
@@ -6928,7 +7086,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                            0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                            0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
 
     // Per-pass sink: today the only pass renders to the backbuffer (the active
     // render pass). Offscreen targets (id != backbuffer) arrive with shadows/HDR.
@@ -6942,7 +7100,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
             hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                                0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
 
         const glm::vec3 camPos = m_renderWorld.camera.position;
         // Shared opaque/blended split + back-to-front order. The split now weighs
@@ -7100,14 +7258,22 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         // list is snapshotted BEFORE any resolve: a resolve may load, and a
                         // load can move the material asset out from under a held pointer —
                         // which is also why `ma` below is fetched only AFTER this block.
+                        //
+                        // A sampler2DArray slot (Texture Array Sample, Thema 158) needs a
+                        // 2D_ARRAY view -- the white ARRAY view when empty -- or validation
+                        // flags the view type at the draw.
                         VkImageView heTexP[HE::kMatMaxGraphTextures] = {
                             m_whiteAlbedoView, m_whiteAlbedoView, m_whiteAlbedoView, m_whiteAlbedoView };
                         {
                             HE::UUID    gIds[HE::kMatMaxGraphTextures]{};
                             std::string gPaths[HE::kMatMaxGraphTextures];
                             size_t nTex = 0;
+                            uint32_t arrMask = 0;
                             if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
                             {
+                                arrMask = HE::matGlslTextureArrayMask(ma0->customShaderFragGlsl);
+                                for (int i = 0; i < HE::kMatMaxGraphTextures; ++i)
+                                    if ((arrMask >> i) & 1u) heTexP[i] = m_whiteArrayView;
                                 nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
                                     std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
                                 for (size_t i = 0; i < nTex; ++i)
@@ -7117,9 +7283,21 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 }
                             }
                             for (size_t i = 0; i < nTex; ++i)
-                                if (VkImageView v = resolveGraphTexture(gIds[i], gPaths[i]))
+                                if (VkImageView v = resolveGraphTexture(gIds[i], gPaths[i], (arrMask >> i) & 1u))
                                     heTexP[i] = v;
                         }
+                        // heLandscapeWeights (binding 14) = the object's landscape weightmap,
+                        // PER DRAW like D3D11 t14 / GL unit 13 / Metal slot 13: it belongs to
+                        // the terrain the chunk is part of, not to the material. Anything that
+                        // is not a landscape chunk gets the 1x1 (1,0,0,0) default, so a layer
+                        // blend resolves to layer 0 instead of black; white is the last
+                        // resort. Resolved before `ma` below for the same reason as heTexP.
+                        VkImageView heWeights = VK_NULL_HANDLE;
+                        if (dc.weightmapTextureId != HE::UUID{})
+                            heWeights = resolveGraphTexture(dc.weightmapTextureId, {});
+                        if (!heWeights)
+                            heWeights = resolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+                        if (!heWeights) heWeights = m_whiteAlbedoView;
 
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
@@ -7298,9 +7476,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // HE_FORWARD_CLUSTER=0): a clustered pipeline statically uses
                             // them, so its set must be complete. Without them every
                             // pipeline is the plain variant, which uses none of the three.
-                            static_assert(HE::vkmat::kPreClusterBindingCount == 21,
-                                          "one fixed write (w[0..20]) per non-cluster layout row");
-                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount;
+                            // heLandscapeWeights (14): the weightmap resolved above,
+                            // linear-CLAMP like D3D11's s0 (a [0,1] weight field; a
+                            // repeating sampler would bleed the far edge's paint in).
+                            // Only when the layout has the row (m_matLandscapeWeights).
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 22,
+                                          "fixed writes w[0..20] + w[21] heLandscapeWeights, one per non-cluster row");
+                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 1;
+                            VkDescriptorImageInfo weightsII{ m_ssaoSampler ? m_ssaoSampler : m_albedoSampler,
+                                                             heWeights, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            if (m_matLandscapeWeights)
+                                wr(static_cast<int>(nWrites++), HE::vkmat::kLandscapeWeightsBinding,
+                                   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &weightsII);
                             VkDescriptorBufferInfo clusterBI[3]{};
                             if (m_clusterReady)
                             {
@@ -7342,7 +7529,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         // per-frame UBO (view-proj/lighting/shadow/AO), not the material descriptors.
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                 m_scenePipelineLayout, 0, 1,
-                                                &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                                &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
                         return;
                     }
                 }
@@ -7359,23 +7546,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             }
             if (!albedoSet) albedoSet = m_whiteAlbedoSet;       // flat draws bind the white default
 
-            if (m_matUBO)
+            // This draw's material block: its own slot in the frame's material ring,
+            // selected by set 0's dynamic offset (no transfer inside the render pass).
             {
-                struct MatData { float r,g,b,met; float rough,opacity,hasTex,noShadow; } md{
+                const SceneMatData md{
                     dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
                     dc.roughness, dc.opacity, textured ? 1.0f : 0.0f,
                     dc.receivesShadow ? 0.0f : 1.0f
                 };
-                vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
-                VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-                bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                bar.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
-                bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bar.buffer = m_matUBO; bar.offset = 0; bar.size = VK_WHOLE_SIZE;
-                vkCmdPipelineBarrier(cmd,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    0, 0, nullptr, 1, &bar, 0, nullptr);
+                pushSceneMaterial(&md, sizeof(md));
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                        0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
             }
 
             // Bind the effective base-color texture at set 2 (albedoSet resolved above).
@@ -7453,7 +7634,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             EncodeDecals(cmd, *m_decalDepthActive, width, height, hdr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
 
         const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
@@ -7479,7 +7660,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             // set=0 (scene.frag per-frame data) is already bound from DrawScene preamble.
             // Re-bind it here because the sky / transparent passes may have changed state.
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
-                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
 
             constexpr int          kMaxBones     = 128;
             constexpr VkDeviceSize kBoneSlotSize = 128 * sizeof(glm::mat4);
@@ -7523,24 +7704,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 }
                 if (!albedoSet) albedoSet = m_whiteAlbedoSet;
 
-                // Update material UBO (same as drawDCVk).
-                if (m_matUBO)
+                // Material block → its ring slot + set 0 at that offset (same as drawDCVk).
                 {
-                    struct MatData { float r,g,b,met; float rough,opacity,hasTex,noShadow; } md{
+                    const SceneMatData md{
                         dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
                         dc.roughness, dc.opacity, textured ? 1.0f : 0.0f,
                         dc.receivesShadow ? 0.0f : 1.0f
                     };
-                    vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
-                    VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-                    bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-                    bar.dstAccessMask       = VK_ACCESS_UNIFORM_READ_BIT;
-                    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    bar.buffer = m_matUBO; bar.offset = 0; bar.size = VK_WHOLE_SIZE;
-                    vkCmdPipelineBarrier(cmd,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        0, 0, nullptr, 1, &bar, 0, nullptr);
+                    pushSceneMaterial(&md, sizeof(md));
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
+                                            0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
                 }
 
                 // Bind the effective base-color texture at set 2 (albedoSet resolved above).
@@ -7578,7 +7751,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
 
         // Debug lines on top of opaque+transparent geometry, before post-process.
@@ -8607,13 +8780,16 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
     m_giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
     m_giRaysPerProbe        = std::clamp(s.raysPerProbe, 8, 1024);
     m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+    m_giShadowRays          = std::clamp(s.shadowRays, 1, 256);
+    m_giShadowHistoryWeight       = std::clamp(s.shadowHistory, 0.0f, 0.98f);
+    m_giShadowFilter        = s.shadowFilter;
 }
 
 // Screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint B1). The
 // trace is a fragment shader over a rasterized pre-pass — no compute, no BVH,
 // no extension — so unlike the ray-traced GI it has no device gate here. What
-// it does need is the shader cross-compiler and the editor viewport's HDR
-// target; both are checked in ssrWantedThisFrame().
+// it does need is the shader cross-compiler and the post chain's HDR target
+// (editor viewport or packaged game); both are checked in ssrWantedThisFrame().
 void VulkanRenderer::SetShadowSettings(const ShadowSettings& s)
 {
     // The images are not touched here: this is called from the editor's frame
@@ -8750,6 +8926,14 @@ void VulkanRenderer::updateGiAccel()
             it = m_giHwBlasCache.emplace(id, buildGiHwBlas(id)).first;
         return it->second;
     };
+    // HE_GI_LOG_INSTANCES=N: log every instance's bounce colour once, on the
+    // N-th call — what the probe kernels multiply in (Thema 154 witness).
+    static const int s_giLogAt = [] {
+        const char* v = std::getenv("HE_GI_LOG_INSTANCES");
+        return v && *v ? std::atoi(v) : 0;
+    }();
+    static int s_giLogCall = 0;
+    const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
     for (const RenderObject& obj : m_renderWorld.objects)
     {
         if (!obj.castsShadow) continue;
@@ -8766,6 +8950,12 @@ void VulkanRenderer::updateGiAccel()
         inst.nodeOffset   = range.nodeOffset;
         inst.triOffset    = range.triOffset;
         instances.push_back(inst);
+        if (logInst)
+            HE_LOG_INFO(RHI, "VulkanRenderer: GI instance %zu pos (%.2f, %.2f, %.2f) mat %016llx "
+                        "baseColor (%.3f, %.3f, %.3f)", instances.size() - 1,
+                        obj.transform[3].x, obj.transform[3].y, obj.transform[3].z,
+                        static_cast<unsigned long long>(obj.materialAssetId.lo),
+                        inst.baseColor.r, inst.baseColor.g, inst.baseColor.b);
 
         if (hwAll)
         {
@@ -9149,16 +9339,23 @@ struct GiShadowUBOData
     glm::vec4 sunDirRadius;     // xyz = toward light, w = angular radius (radians)
     glm::vec4 frame;            // x = jitter seed, y/z = tex size, w = instance count
     glm::vec4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
-    glm::vec4 localExtra;       // x = local light count
+    glm::vec4 localExtra;       // x = local light count, y = sun rays per pixel
 };
 static_assert(sizeof(GiShadowUBOData) == 7 * 16, "must match gi_shadow.comp's GiShadowUBO");
-struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::vec4 blend; };
+struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::mat4 curViewProj; glm::vec4 blend; };
+static_assert(sizeof(GiTemporalUBOData) == 2 * 64 + 16, "must match gi_temporal.frag's GiTemporalUBO");
 struct GiProbeUBOData
 {
     glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
     glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
 };
 static_assert(sizeof(GiProbeUBOData) == (6 + 24) * 16, "must match gi_probe.comp's GiProbeUBO");
+// The G-buffer position is the shadow-ray ORIGIN (pos + N*0.05). It holds the
+// ABSOLUTE world position, so it must be fp32: as RGBA16F the ULP passes the
+// 5 cm normal offset at |coord| >= ~100 m and every surface self-shadows in
+// height bands (Thema 159). Every consumer point-samples/texelFetches it, so
+// 32F filterability does not matter. Normals stay RGBA16F.
+constexpr VkFormat kGiGBufPosFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
 } // namespace
 
 // Builds the five GI pipelines + layouts + render passes once (first GI-active
@@ -9248,19 +9445,20 @@ void VulkanRenderer::createGiPipelines()
     ok = makePL(m_giShadowDSL, 0, 0, m_giShadowPL)
       && makePL(m_giProbeDSL,  0, 0, m_giProbePL)
       && makePL(m_giFsDSL,     0, 0, m_giFsPL)
+      && makePL(m_giFsDSL,     sizeof(HE::GIShadowAtrousStep), VK_SHADER_STAGE_FRAGMENT_BIT, m_giAtrousPL)
       && makePL(VK_NULL_HANDLE, sizeof(PushConstants), VK_SHADER_STAGE_VERTEX_BIT, m_giGBufPL);
     if (!ok)
     { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI pipeline layouts failed"); return; }
 
     // ── Render passes ─────────────────────────────────────────────────────────
-    // G-buffer: 2x RGBA16F (CLEAR → SHADER_READ_ONLY) + depth. The end
+    // G-buffer: RGBA32F pos + RGBA16F normal (CLEAR → SHADER_READ_ONLY) + depth. The end
     // dependency covers FRAGMENT **and** COMPUTE consumers — the shadow-ray
     // KERNEL reads gPos/gNorm, unlike SSAO whose consumer is a fragment pass.
     {
         VkAttachmentDescription atts[3]{};
         for (int i = 0; i < 2; ++i)
         {
-            atts[i].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+            atts[i].format         = (i == 0) ? kGiGBufPosFormat : VK_FORMAT_R16G16B16A16_SFLOAT;
             atts[i].samples        = VK_SAMPLE_COUNT_1_BIT;
             atts[i].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
             atts[i].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
@@ -9346,7 +9544,7 @@ void VulkanRenderer::createGiPipelines()
         return vkCreateRenderPass(m_device, &rpci, nullptr, &rp) == VK_SUCCESS;
     };
     if (!makeFsRP(VK_FORMAT_R16G16B16A16_SFLOAT, m_giTemporalRP) ||
-        !makeFsRP(VK_FORMAT_R16_SFLOAT,          m_giBlurRP))
+        !makeFsRP(VK_FORMAT_R16_SFLOAT,          m_giAtrousRP))
     { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI fs render passes failed"); return; }
 
     // ── Shader modules ────────────────────────────────────────────────────────
@@ -9354,15 +9552,15 @@ void VulkanRenderer::createGiPipelines()
     VkShaderModule gbufFS   = loadShaderModule("gi_gbuf.frag.spv");
     VkShaderModule fsVS     = loadShaderModule("postfx.vert.spv");
     VkShaderModule tempFS   = loadShaderModule("gi_temporal.frag.spv");
-    VkShaderModule blurFS   = loadShaderModule("gi_blur.frag.spv");
+    VkShaderModule atrousFS = loadShaderModule("gi_atrous.frag.spv");
     VkShaderModule shadowCS = loadShaderModule("gi_shadow.comp.spv");
     VkShaderModule probeCS  = loadShaderModule("gi_probe.comp.spv");
     auto destroyModules = [&]()
     {
-        for (auto m : { gbufVS, gbufFS, fsVS, tempFS, blurFS, shadowCS, probeCS })
+        for (auto m : { gbufVS, gbufFS, fsVS, tempFS, atrousFS, shadowCS, probeCS })
             if (m) vkDestroyShaderModule(m_device, m, nullptr);
     };
-    if (!gbufVS || !gbufFS || !fsVS || !tempFS || !blurFS || !shadowCS || !probeCS)
+    if (!gbufVS || !gbufFS || !fsVS || !tempFS || !atrousFS || !shadowCS || !probeCS)
     {
         HE_LOG_WARN(RHI, "%s", "VulkanRenderer: GI shaders missing — GI disabled");
         destroyModules();
@@ -9437,10 +9635,11 @@ void VulkanRenderer::createGiPipelines()
                 vkDestroyShaderModule(m_device, gbufIVS, nullptr);
             }
     }
-    // Temporal + blur (attribute-less fullscreen, no depth).
+    // Temporal + a-trous (attribute-less fullscreen, no depth).
     VkPipelineVertexInputStateCreateInfo fsVI{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     VkPipelineDepthStencilStateCreateInfo nods{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
-    auto makeFsPipe = [&](VkShaderModule fs, VkRenderPass rp, VkPipeline& out) -> bool
+    auto makeFsPipe = [&](VkShaderModule fs, VkRenderPass rp, VkPipeline& out,
+                          VkPipelineLayout layout) -> bool
     {
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -9453,11 +9652,11 @@ void VulkanRenderer::createGiPipelines()
         pci.pViewportState = &vps;     pci.pRasterizationState = &rs;
         pci.pMultisampleState = &ms;   pci.pDepthStencilState = &nods;
         pci.pColorBlendState = &cb1;   pci.pDynamicState = &dyn;
-        pci.layout = m_giFsPL;         pci.renderPass = rp;
+        pci.layout = layout;           pci.renderPass = rp;
         return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
     };
-    pipesOk = pipesOk && makeFsPipe(tempFS, m_giTemporalRP, m_giTemporalPipe);
-    pipesOk = pipesOk && makeFsPipe(blurFS, m_giBlurRP,     m_giBlurPipe);
+    pipesOk = pipesOk && makeFsPipe(tempFS,   m_giTemporalRP, m_giTemporalPipe, m_giFsPL);
+    pipesOk = pipesOk && makeFsPipe(atrousFS, m_giAtrousRP,   m_giAtrousPipe,   m_giAtrousPL);
     // Compute kernels.
     auto makeCompute = [&](VkShaderModule cs, VkPipelineLayout pl, VkPipeline& out) -> bool
     {
@@ -9477,32 +9676,34 @@ void VulkanRenderer::createGiPipelines()
 
     // ── Descriptor pool + per-in-flight-frame sets + params UBOs ─────────────
     {
+        // Per frame: shadow, probe, temporal and one a-trous set per iteration.
         VkDescriptorPoolSize ps[4] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 6 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 11 }, // shadow 2, temporal 3, a-trous 2x3
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          k_maxFramesInFlight * 4 }, // shadow raw+local, probe irr+vis
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 4 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 5 },
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-        dpci.maxSets       = k_maxFramesInFlight * 4;
+        dpci.maxSets       = k_maxFramesInFlight * 5;
         dpci.poolSizeCount = 4;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_giDescPool) != VK_SUCCESS)
         { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI descriptor pool failed"); return; }
         for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
         {
-            VkDescriptorSetLayout layouts[4] = { m_giShadowDSL, m_giProbeDSL, m_giFsDSL, m_giFsDSL };
-            VkDescriptorSet sets[4]{};
+            VkDescriptorSetLayout layouts[5] = { m_giShadowDSL, m_giProbeDSL, m_giFsDSL, m_giFsDSL, m_giFsDSL };
+            VkDescriptorSet sets[5]{};
             VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
             dsai.descriptorPool     = m_giDescPool;
-            dsai.descriptorSetCount = 4;
+            dsai.descriptorSetCount = 5;
             dsai.pSetLayouts        = layouts;
             if (vkAllocateDescriptorSets(m_device, &dsai, sets) != VK_SUCCESS)
             { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI descriptor sets failed"); return; }
-            m_giShadowSet[i]   = sets[0];
-            m_giProbeSet[i]    = sets[1];
-            m_giTemporalSet[i] = sets[2];
-            m_giBlurSet[i]     = sets[3];
+            m_giShadowSet[i]    = sets[0];
+            m_giProbeSet[i]     = sets[1];
+            m_giTemporalSet[i]  = sets[2];
+            m_giAtrousSet[i][0] = sets[3];
+            m_giAtrousSet[i][1] = sets[4];
         }
     }
     m_giReady = true;
@@ -9671,7 +9872,7 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
         return vkCreateImageView(m_device, &vci, nullptr, &out.view) == VK_SUCCESS;
     };
     const VkImageUsageFlags kRT = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    bool ok = makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufPos)
+    bool ok = makeImg(kGiGBufPosFormat, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufPos)
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufNorm)
            && makeImg(m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                       VK_IMAGE_ASPECT_DEPTH_BIT, m_giGBufDepth)
@@ -9681,13 +9882,23 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
                       VK_IMAGE_ASPECT_COLOR_BIT, m_giLocalMask)
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giHist[0])
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giHist[1])
-           && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giResult);
+           && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giResult)
+           && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giFilterTmp);
     if (!ok)
     {
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI target creation failed");
         destroyGiTargets();
         return;
     }
+    nameImage(m_giGBufPos.img,   "GI gbuffer position");
+    nameImage(m_giGBufNorm.img,  "GI gbuffer normal");
+    nameImage(m_giGBufDepth.img, "GI gbuffer depth");
+    nameImage(m_giRaw.img,       "GI raw mask");
+    nameImage(m_giLocalMask.img, "GI local mask");
+    nameImage(m_giHist[0].img,   "GI history 0");
+    nameImage(m_giHist[1].img,   "GI history 1");
+    nameImage(m_giResult.img,    "GI mask");
+    nameImage(m_giFilterTmp.img, "GI filter scratch");
 
     // Framebuffers.
     {
@@ -9706,9 +9917,11 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
         if (ok)
         {
             VkFramebufferCreateInfo rci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-            rci.renderPass = m_giBlurRP; rci.attachmentCount = 1; rci.pAttachments = &m_giResult.view;
+            rci.renderPass = m_giAtrousRP; rci.attachmentCount = 1; rci.pAttachments = &m_giResult.view;
             rci.width = w; rci.height = h; rci.layers = 1;
             ok = vkCreateFramebuffer(m_device, &rci, nullptr, &m_giResultFB) == VK_SUCCESS;
+            rci.pAttachments = &m_giFilterTmp.view;
+            ok = ok && vkCreateFramebuffer(m_device, &rci, nullptr, &m_giFilterTmpFB) == VK_SUCCESS;
         }
     }
     if (!ok)
@@ -9767,8 +9980,10 @@ void VulkanRenderer::destroyGiTargets()
     for (int i = 0; i < 2; ++i)
         if (m_giHistFB[i]) { vkDestroyFramebuffer(m_device, m_giHistFB[i], nullptr); m_giHistFB[i] = VK_NULL_HANDLE; }
     if (m_giResultFB) { vkDestroyFramebuffer(m_device, m_giResultFB, nullptr); m_giResultFB = VK_NULL_HANDLE; }
+    if (m_giFilterTmpFB) { vkDestroyFramebuffer(m_device, m_giFilterTmpFB, nullptr); m_giFilterTmpFB = VK_NULL_HANDLE; }
     destroy(m_giGBufPos); destroy(m_giGBufNorm); destroy(m_giGBufDepth);
     destroy(m_giRaw); destroy(m_giLocalMask); destroy(m_giHist[0]); destroy(m_giHist[1]); destroy(m_giResult);
+    destroy(m_giFilterTmp);
     m_giW = m_giH = 0;
     m_giHistValid = false;
 }
@@ -9870,6 +10085,8 @@ void VulkanRenderer::ensureGiProbeAtlas()
         destroyGiProbeAtlas();
         return;
     }
+    nameImage(m_giIrrAtlas.img, "GI irradiance atlas");
+    nameImage(m_giVisAtlas.img, "GI visibility atlas");
 
     // Transition both to GENERAL (imageLoad/Store + sampling live there) and
     // zero-fill — the probe kernel EMA-reads its own previous texel.
@@ -9935,19 +10152,22 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // Extract with the scene pass's aspect (Metal lesson 5846efc: a mismatched
     // camera misaligns the screen-space mask → swimming shadows).
     const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
-    // And with this frame's sun: runGi() runs before DrawScene(), which used to
-    // be the only place feeding the day-night state, so the GI mask traced
-    // against the previous frame's sun (Thema 131). Same call as DrawScene.
-    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
-                            m_environment.sunColor, m_environment.sunIntensity,
-                            m_environment.moonColor, m_environment.moonIntensity,
-                            m_environment.cloudCoverage);
+    // This frame's sun comes from the setDayNight() at the top of Render() /
+    // RenderSceneImage(): runGi() runs before DrawScene(), which used to be the
+    // only place feeding it, so the GI mask traced against the previous
+    // frame's sun (Thema 131).
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
     for (RenderObject& obj : m_renderWorld.objects)
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+    // The extractor leaves baseColor at white, and this extraction throws away
+    // DrawScene's resolve (which runs later anyway). Without it every GI
+    // instance bounced white: a red and a grey floor gave the same probe field,
+    // colour bleed exactly 0 (Thema 154). D3D11/D3D12 resolve right before
+    // their updateGiAccel as well.
+    HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
 
     updateGiAccel();
     if (m_giInstanceCount == 0) return;
@@ -9958,7 +10178,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
 
     const uint32_t gw = std::max(1u, w / 2), gh = std::max(1u, h / 2); // half-res like GL/Metal
     createGiTargets(gw, gh);
-    if (!m_giGBufFB || !m_giResultFB) return;
+    if (!m_giGBufFB || !m_giResultFB || !m_giFilterTmpFB) return;
     ensureGiProbeGrid();
     if (m_giProbeGridBuilt) ensureGiProbeAtlas();
 
@@ -9987,14 +10207,15 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         static_assert(sizeof(shadowUbo.localPosRange) == sizeof(ml.posRange),
                       "gi_shadow.comp's local light slots must match HE::kMaxMaskedLocalLights");
         std::memcpy(shadowUbo.localPosRange, ml.posRange, sizeof(shadowUbo.localPosRange));
-        shadowUbo.localExtra = glm::vec4(float(ml.count), 0.0f, 0.0f, 0.0f);
+        shadowUbo.localExtra = glm::vec4(float(ml.count), float(m_giShadowRays), 0.0f, 0.0f);
     }
     if (!uploadGiBuffer(m_giShadowUBO[fi], &shadowUbo, sizeof(shadowUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
 
     GiTemporalUBOData tempUbo{};
     tempUbo.prevViewProj = m_giPrevViewProj;
-    tempUbo.blend        = glm::vec4(m_giHistValid ? 0.9f : 0.0f, 0.0f, 0.0f, 0.0f);
+    tempUbo.curViewProj  = vp; // clip-fixed like prevViewProj; becomes it below
+    tempUbo.blend        = glm::vec4(m_giHistValid ? m_giShadowHistoryWeight : 0.0f, 0.0f, 0.0f, 0.0f);
     if (!uploadGiBuffer(m_giTemporalUBO[fi], &tempUbo, sizeof(tempUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
 
@@ -10082,12 +10303,17 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         wImg(m_giTemporalSet[fi], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &rawSamp);
         wImg(m_giTemporalSet[fi], 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histBI);
         wBuf(m_giTemporalSet[fi], 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &tUboBI);
-        // Blur set: reads history[cur]; bindings 1/2 get valid fillers, UBO reused.
+        // A-trous sets: source (iteration 0 history[cur], iteration 1 the
+        // scratch), gPos, gNorm; the UBO binding is unused, valid filler.
         VkDescriptorImageInfo histCurBI{ VK_NULL_HANDLE, m_giHist[curIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        wImg(m_giBlurSet[fi], 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
-        wImg(m_giBlurSet[fi], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
-        wImg(m_giBlurSet[fi], 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
-        wBuf(m_giBlurSet[fi], 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &tUboBI);
+        VkDescriptorImageInfo tmpBI    { VK_NULL_HANDLE, m_giFilterTmp.view,    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
+        {
+            wImg(m_giAtrousSet[fi][it], 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, it == 0 ? &histCurBI : &tmpBI);
+            wImg(m_giAtrousSet[fi][it], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &posBI);
+            wImg(m_giAtrousSet[fi][it], 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normBI);
+            wBuf(m_giAtrousSet[fi][it], 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &tUboBI);
+        }
         // Probe kernel set.
         VkDescriptorBufferInfo pUboBI{ m_giProbeUBO[fi].buf, 0, sizeof(GiProbeUBOData) };
         VkDescriptorImageInfo  irrSI { VK_NULL_HANDLE, m_giIrrAtlas.view, VK_IMAGE_LAYOUT_GENERAL };
@@ -10206,16 +10432,23 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     m_giHistIdx      = prevIdx;
     m_giPrevViewProj = vp; // clip-fixed, matching the G-buffer raster + temporal math
 
-    // ── 4. Spatial blur (fullscreen → result) ────────────────────────────────
+    // ── 4. Edge-aware a-trous (fullscreen: hist[cur] → scratch → result) ────
+    // The render pass's external dependencies order the scratch write before
+    // the second iteration's read (COLOR_ATTACHMENT_OUTPUT → FRAGMENT_SHADER).
+    static_assert(HE::kGIShadowAtrousIterations == 2, "scratch → result ping assumes two iterations");
+    for (int it = 0; it < HE::kGIShadowAtrousIterations; ++it)
     {
         VkRenderPassBeginInfo bRPBI{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-        bRPBI.renderPass        = m_giBlurRP;
-        bRPBI.framebuffer       = m_giResultFB;
+        bRPBI.renderPass        = m_giAtrousRP;
+        bRPBI.framebuffer       = it == 0 ? m_giFilterTmpFB : m_giResultFB;
         bRPBI.renderArea.extent = { gw, gh };
         vkCmdBeginRenderPass(cmd, &bRPBI, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giBlurPipe);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giFsPL,
-                                0, 1, &m_giBlurSet[fi], 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giAtrousPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giAtrousPL,
+                                0, 1, &m_giAtrousSet[fi][it], 0, nullptr);
+        const HE::GIShadowAtrousStep step = HE::GIShadowAtrousParams(it, m_giShadowFilter,
+                                                                     m_giShadowHistoryWeight, m_giShadowRays);
+        vkCmdPushConstants(cmd, m_giAtrousPL, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(step), &step);
         vkCmdSetViewport(cmd, 0, 1, &vvp);
         vkCmdSetScissor(cmd, 0, 1, &vsc);
         vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -10987,6 +11220,17 @@ void VulkanRenderer::createSSAOTargets(uint32_t w, uint32_t h)
     // Blurred AO: R8_UNORM
     ssaoMakeImage(m_device, 0, VK_FORMAT_R8_UNORM, w, h, colorRT,
                   VK_IMAGE_ASPECT_COLOR_BIT, m_ssaoBlurRT.image, m_ssaoBlurRT.memory, m_ssaoBlurRT.view, fmem);
+    nameImage(m_ssaoPosRT.image,    "SSAO position");
+    nameImage(m_ssaoPosDepth.image, "SSAO position depth");
+    nameImage(m_ssaoRT.image,       "SSAO raw");
+    nameImage(m_ssaoBlurRT.image,   "SSAO blur");
+    // Scene binding 3 is pointed at the blur target below, for every frame —
+    // also the ones runSSAO skips (SSAO off, or GI on: the probes replace AO).
+    // Its render pass is then the only thing that would ever leave UNDEFINED, so
+    // every such frame sampled an UNDEFINED image (validation: InvalidImageLayout
+    // once per submit, Thema 145). scene.frag ignores the value while
+    // viewport.z == 0; the layout must be valid regardless.
+    primeShaderReadLayout(m_ssaoBlurRT.image);
 
     // Framebuffers.
     {
@@ -11288,7 +11532,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
 // on frame one (the blend weight is zero, the READ is not), and sampling an
 // image still in UNDEFINED is invalid however the value is used afterwards.
 // Same one-time-submit shape as the dummy image in createPostFXPipelines.
-void VulkanRenderer::ssrPrimeLayout(VkImage img)
+void VulkanRenderer::primeShaderReadLayout(VkImage img)
 {
     if (!img || !m_cmdPool) return;
     VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
@@ -11797,8 +12041,8 @@ bool VulkanRenderer::ensureReflPrepassTargets()
     // Both are written by the pass before they are read, so they need no priming
     // — but the trace's descriptor is written before the first pass on a frame
     // where the pre-pass was skipped, so park them anyway.
-    ssrPrimeLayout(m_reflAttrRT.image);
-    ssrPrimeLayout(m_reflNdcRT.image);
+    primeShaderReadLayout(m_reflAttrRT.image);
+    primeShaderReadLayout(m_reflNdcRT.image);
     VkImageView atts[4] = { m_ssaoPosRT.view, m_reflAttrRT.view, m_reflNdcRT.view,
                             m_ssaoPosDepth.view };
     VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -11841,7 +12085,7 @@ void VulkanRenderer::createSSRTargets(uint32_t w, uint32_t h)
     auto make = [&](SSAORenderTarget& rt) {
         ssaoMakeImage(m_device, 0, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, colorRT,
                       VK_IMAGE_ASPECT_COLOR_BIT, rt.image, rt.memory, rt.view, fmem);
-        ssrPrimeLayout(rt.image);
+        primeShaderReadLayout(rt.image);
     };
     for (int i = 0; i < 2; ++i)
     {
@@ -11901,8 +12145,9 @@ void VulkanRenderer::destroySSRTargets()
 
 // One gate for the whole frame, asked before the pre-pass and again before the
 // trace. `m_postFxReady`/`m_hdrImage` are the honest part: this backend's only
-// HDR radiance source is the editor viewport's PostFX target (plan §2.2), so in
-// the swapchain path SSR is silently inactive rather than half-wired.
+// HDR radiance source is the PostFX target (plan §2.2) — the editor viewport's,
+// or the packaged game's since it runs the chain too (plan C6) — so in the
+// direct swapchain fallback SSR is silently inactive rather than half-wired.
 bool VulkanRenderer::ssrWantedThisFrame() const
 {
     return m_ssrEnabled && m_ssrIntensity > 0.0f && m_ssrReady
@@ -11929,7 +12174,7 @@ void VulkanRenderer::CaptureSSRColorHistory(VkCommandBuffer cmd, uint32_t w, uin
                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                       VK_IMAGE_ASPECT_COLOR_BIT,
                       m_ssrColorHist.image, m_ssrColorHist.memory, m_ssrColorHist.view, fmem);
-        ssrPrimeLayout(m_ssrColorHist.image);
+        primeShaderReadLayout(m_ssrColorHist.image);
         m_ssrColorHistW = w; m_ssrColorHistH = h;
     }
     if (!m_ssrColorHist.image) return;
@@ -12493,11 +12738,15 @@ void VulkanRenderer::createUIPipeline()
         return;
     }
 
-    // Linear clamp sampler for the R8 font atlases (immutable in the set layout).
+    // Linear clamp sampler for the R8 font atlases and the UI quad images
+    // (immutable in the set layout). Trilinear like GL's UI textures: an image
+    // brings its cooked mip chain, an atlas has one level and reads it as before.
     {
         VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
         sci.magFilter    = VK_FILTER_LINEAR;
         sci.minFilter    = VK_FILTER_LINEAR;
+        sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sci.maxLod       = VK_LOD_CLAMP_NONE;
         sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -12524,6 +12773,16 @@ void VulkanRenderer::createUIPipeline()
         dpci.poolSizeCount = 1;
         dpci.pPoolSizes    = &ps;
         vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_uiAtlasDescPool), "ui atlas desc pool");
+
+        // UI quad images (resolveUIImageSet): same layout, own pool, FREE bit so
+        // an invalidated texture gives its set back.
+        VkDescriptorPoolSize ips{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256 };
+        VkDescriptorPoolCreateInfo ipci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        ipci.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        ipci.maxSets       = 256;
+        ipci.poolSizeCount = 1;
+        ipci.pPoolSizes    = &ips;
+        vkCheck(vkCreateDescriptorPool(m_device, &ipci, nullptr, &m_uiImageDescPool), "ui image desc pool");
     }
 
     // Push constant layout: UIPush (128 bytes, the guaranteed minimum of
@@ -12677,14 +12936,22 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
                     glm::vec4 cornerRadius; glm::vec4 style; glm::uvec4 colors; };
     static_assert(sizeof(UIPush) == 128, "UIPush must match ui.vert/ui.frag and the 128-byte range");
 
-    // The atlas set must be bound for EVERY draw (the fragment shader statically
-    // uses the sampler even for solid quads). Default to the shared font (key 0);
-    // glyph quads re-bind when they reference an imported font's atlas.
+    // A set must be bound for EVERY draw (the fragment shader statically uses
+    // the sampler even for solid quads). Default to the shared font (key 0);
+    // glyph quads re-bind their font's atlas, textured quads their image, and
+    // solid quads keep whatever is bound (mode 0 ignores it).
     VkDescriptorSet atlasSet = uiFontAtlasSet(0);
     if (!atlasSet) return;  // device-level upload failure — nothing valid to bind
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeLayout,
                             0, 1, &atlasSet, 0, nullptr);
-    uint32_t boundAtlasKey = 0;
+    VkDescriptorSet boundSet = atlasSet;
+    auto bindSet = [&](VkDescriptorSet s)
+    {
+        if (s == boundSet) return;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeLayout,
+                                0, 1, &s, 0, nullptr);
+        boundSet = s;
+    };
 
     // Clipping is a scissor rectangle, set only when it CHANGES — a widget tree
     // emits its quads in tree order, so equally-clipped quads arrive in runs.
@@ -12719,13 +12986,19 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
     {
         applyClip(obj.clipRect);
         // A glyph quad may use an imported font's atlas — bind its set.
-        if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
+        if (obj.type == 2)
         {
-            if (VkDescriptorSet s = uiFontAtlasSet(obj.fontAtlasKey))
+            if (VkDescriptorSet s = uiFontAtlasSet(obj.fontAtlasKey)) bindSet(s);
+        }
+        // A textured quad (Image widget, textured Panel/Border/Button) samples its
+        // own image in mode 2; unresolvable → its tint, as on GL (mode 0).
+        bool textured = false;
+        if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+        {
+            if (VkDescriptorSet s = resolveUIImageSet(obj.textureAssetId))
             {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeLayout,
-                                        0, 1, &s, 0, nullptr);
-                boundAtlasKey = obj.fontAtlasKey;
+                bindSet(s);
+                textured = true;
             }
         }
         UIPush push{};
@@ -12733,7 +13006,7 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
         push.color    = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
         push.uvRect   = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
         push.viewport = glm::vec2(float(width), float(height));
-        push.params   = glm::vec2(obj.type == 2 ? 1.0f : 0.0f, obj.borderWidth);
+        push.params   = glm::vec2(obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f), obj.borderWidth);
         push.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y,
                                   obj.gradientAngleDeg);
         push.cornerRadius = obj.cornerRadius;
@@ -12942,6 +13215,69 @@ void VulkanRenderer::destroyUIFontAtlases()
         // Descriptor sets are freed with m_uiAtlasDescPool in Shutdown().
     }
     m_uiFontAtlases.clear();
+}
+
+// The image of a UI quad (Image widget, textured Border/Button) as a set in the
+// font-atlas layout — Vulkan's ResolveUITexture. Uploaded UNORM even for an
+// sRGB-flagged asset: UI colours are sRGB numbers end to end, an _SRGB view would
+// decode them and the picture comes out too dark ("the orange logo turns red",
+// Thema 107). Not shared with m_graphTexCache on purpose: a material samples the
+// same asset in linear light, which is right there. A miss is cached like GL's
+// (resolveTextureRef loads synchronously: still null = unloadable).
+VkDescriptorSet VulkanRenderer::resolveUIImageSet(const HE::UUID& id)
+{
+    const std::string key = graphTexKey(id, {});
+    if (auto it = m_uiImageCache.find(key); it != m_uiImageCache.end())
+        return it->second.set;
+    if (!m_contentManager || !m_uiAtlasDSLayout || !m_uiImageDescPool) return VK_NULL_HANDLE;
+
+    UIFontAtlas img;
+    if (const TextureAsset* tex = m_contentManager->resolveTextureRef(id, std::string{}))
+        uploadTextureImage(tex, img.image, img.memory, img.view, /*asArray=*/false, /*honourSrgb=*/false);
+    if (img.view)
+    {
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsai.descriptorPool     = m_uiImageDescPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts        = &m_uiAtlasDSLayout;
+        if (vkAllocateDescriptorSets(m_device, &dsai, &img.set) != VK_SUCCESS)
+        {
+            img.set = VK_NULL_HANDLE;
+            if (!m_uiImagePoolWarned)
+            {
+                m_uiImagePoolWarned = true;
+                HE_LOG_WARN(RHI, "%s", "VulkanRenderer: UI image descriptor pool exhausted "
+                                       "(256 images) — further UI images draw their tint");
+            }
+        }
+        else
+        {
+            VkDescriptorImageInfo dii{ VK_NULL_HANDLE, img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            wr.dstSet          = img.set;
+            wr.dstBinding      = 0;
+            wr.descriptorCount = 1;
+            wr.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            wr.pImageInfo      = &dii;
+            vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+        }
+    }
+    return m_uiImageCache.emplace(key, img).first->second.set;
+}
+
+void VulkanRenderer::destroyUIImage(UIFontAtlas& img)
+{
+    if (img.set)    vkFreeDescriptorSets(m_device, m_uiImageDescPool, 1, &img.set); // pool has the FREE bit
+    if (img.view)   vkDestroyImageView(m_device, img.view,   nullptr);
+    if (img.image)  vkDestroyImage    (m_device, img.image,  nullptr);
+    if (img.memory) vkFreeMemory      (m_device, img.memory, nullptr);
+    img = UIFontAtlas{};
+}
+
+void VulkanRenderer::destroyUIImages()
+{
+    for (auto& [key, img] : m_uiImageCache) destroyUIImage(img);
+    m_uiImageCache.clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

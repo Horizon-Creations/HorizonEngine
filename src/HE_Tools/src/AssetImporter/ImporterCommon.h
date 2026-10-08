@@ -359,6 +359,14 @@ namespace Importer
 	// a context menu is open, so this may not read the asset's payload at all.
 	std::string sourceFileOf(const std::filesystem::path& assetFile);
 
+	// The payload of the first chunk `chunkId` in `assetFile`, STREAMED the same
+	// way (every other payload is seeked past). False for an unreadable or pre-v2
+	// file and for one without that chunk. For a re-import that must carry over
+	// something the user authored on the asset (AudioImporter: CHUNK_AUED) without
+	// reading the samples it is about to replace.
+	bool readAssetChunk(const std::filesystem::path& assetFile, uint32_t chunkId,
+	                    std::vector<uint8_t>& payload);
+
 	// Re-runs the import that produced `assetFile`, back onto `assetFile` ITSELF:
 	// not just into the asset's current folder but under its current FILE NAME,
 	// so the asset every scene already references is the one that gets updated

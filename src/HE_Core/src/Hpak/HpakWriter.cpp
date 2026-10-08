@@ -493,10 +493,11 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 HAsset::Writer::appendPOD(mtrl, slotOf(ap.emissiveParam));
                 HAsset::Writer::appendPOD(mtrl, ap.metallic);
                 HAsset::Writer::appendPOD(mtrl, ap.roughness);
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < HE::kMatApproxLayerColors; ++i)
                     for (int k = 0; k < 3; ++k)
                         HAsset::Writer::appendPOD(mtrl, ap.layerColor[i][k]);
-                HAsset::Writer::appendPOD(mtrl, ap.layerCount);
+                const int32_t layerCount = std::min(ap.layerCount, HE::kMatApproxLayerColors);
+                HAsset::Writer::appendPOD(mtrl, layerCount);
                 // Skip the source's own approx block (92 B current, 40 B the
                 // pre-landscape-split revision, 32 B the pre-metallic one, 0 B
                 // pre-feature) and pass any FUTURE fields after it verbatim.
@@ -717,6 +718,12 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     uint8_t srgb = 0;
     if (o + 1 <= tm->data.size()) { uint8_t f = 0; HAsset::Reader::readPOD(tm->data, o, f); }
     if (o + 1 <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, srgb);
+    // A texture ARRAY (Thema 158) is never cooked: buildTextureArray already baked
+    // its mips, and the rewrite below would drop the slice count. {} = the blob
+    // ships unchanged.
+    uint32_t layers = 1;
+    if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, layers);
+    if (layers > 1) return {};
 
     // Only cook plain single-level RGBA8 base textures (skip already-cooked,
     // sub-2px, or non-RGBA8/odd-sized payloads — nothing to gain / can't halve).

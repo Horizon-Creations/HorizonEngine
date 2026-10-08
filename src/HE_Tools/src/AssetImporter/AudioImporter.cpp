@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 #include "ImporterCommon.h"
+#include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"
 
 #define DR_WAV_IMPLEMENTATION
@@ -339,6 +340,16 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 	asset->name = out.name;
 	asset->path = out.path;
 
+	// A re-import replaces the samples, not what the user did with them: the
+	// trim, volume curve, bus and EQ the asset already carries (CHUNK_AUED) go
+	// onto the fresh asset, the way writeAsset keeps the UUID. Read straight off
+	// the old file, streamed, so the samples about to be replaced are not loaded.
+	{
+		std::vector<uint8_t> edit;
+		if (Importer::readAssetChunk(contentRoot / asset->path, HAsset::CHUNK_AUED, edit))
+			asset->edit.fromChunkText(std::string(edit.begin(), edit.end()));
+	}
+
 	const unsigned int sampleRate = static_cast<unsigned int>(asset->sampleRate);
 	const unsigned int channels   = static_cast<unsigned int>(asset->channels);
 
@@ -356,4 +367,82 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 		                                             : "PCM, ")
 		 + std::to_string(asset->audioData.size() / 1024) + " KiB)").c_str());
 	return asset;
+}
+
+std::string AudioImporter::uniqueOutputPath(const std::filesystem::path& contentRoot,
+                                            const std::filesystem::path& relativeOutputDir,
+                                            const std::string&           stem)
+{
+	std::error_code ec;
+	for (int n = 1;; ++n)
+	{
+		const std::string name = n == 1 ? stem : stem + "_" + std::to_string(n);
+		const std::string rel  = Importer::toAssetPath(relativeOutputDir / (name + ".hasset"));
+		if (!std::filesystem::exists(contentRoot / rel, ec)) return rel;
+	}
+}
+
+bool AudioImporter::extractRange(const AudioAsset&            clip,
+                                 uint64_t                     beginFrame,
+                                 uint64_t                     endFrame,
+                                 const std::filesystem::path& contentRoot,
+                                 const std::filesystem::path& relativeOutputDir,
+                                 const std::string&           stem,
+                                 const HE::AudioEdit&         edit,
+                                 ExtractResult&               out,
+                                 const HE::AudioEnvelope*     bakeCurve)
+{
+	const uint64_t frames = audioPcmFrameCount(clip);
+	if (clip.encoding != AudioEncoding::PCM16 || clip.sampleRate <= 0 || frames == 0 ||
+	    beginFrame >= endFrame || endFrame > frames)
+	{
+		HE_LOG_ERROR(Tool, "AudioImporter: cannot extract frames [%llu, %llu) of %s "
+		                   "(%llu PCM frames, %d Hz)",
+		             static_cast<unsigned long long>(beginFrame), static_cast<unsigned long long>(endFrame),
+		             clip.name.c_str(), static_cast<unsigned long long>(frames), clip.sampleRate);
+		return false;
+	}
+
+	// Field by field, NOT a copy of `clip`: a copy would bring its UUID, its path
+	// and — the dangerous one — its recorded source along (see the header).
+	AudioAsset asset;
+	asset.type       = HE::AssetType::Audio;
+	asset.id         = HE::UUID::generate();
+	asset.sampleRate = clip.sampleRate;
+	asset.channels   = clip.channels;
+	asset.encoding   = AudioEncoding::PCM16;
+	asset.edit       = edit;
+	const size_t bytesPerFrame = sizeof(int16_t) * static_cast<size_t>(clip.channels);
+	asset.audioData.assign(clip.audioData.begin() + static_cast<std::ptrdiff_t>(beginFrame * bytesPerFrame),
+	                       clip.audioData.begin() + static_cast<std::ptrdiff_t>(endFrame   * bytesPerFrame));
+	size_t clamped = 0;
+	if (bakeCurve && !bakeCurve->empty())
+	{
+		// audioData is a byte vector of int16 frames; its storage is suitably
+		// aligned (operator new) for the reinterpretation.
+		clamped = bakeCurve->applyPcm16(reinterpret_cast<int16_t*>(asset.audioData.data()),
+		                                endFrame - beginFrame, clip.channels, beginFrame,
+		                                static_cast<double>(clip.sampleRate));
+	}
+	if (bakeCurve) asset.edit.envelope = HE::AudioEnvelope{};
+
+	const auto target = Importer::resolveOutput(uniqueOutputPath(contentRoot, relativeOutputDir, stem), {}, {});
+	asset.path = target.path;
+	asset.name = target.name;
+
+	if (!Importer::writeAsset(asset, contentRoot))
+		return false;
+
+	out.path   = asset.path;
+	out.id     = asset.id;
+	out.frames = endFrame - beginFrame;
+	out.clampedSamples = clamped;
+	HE_LOG_INFO(Tool, "AudioImporter: frames [%llu, %llu) of %s -> %s (%llu frames, %d Hz, %d ch, PCM%s)",
+	            static_cast<unsigned long long>(beginFrame), static_cast<unsigned long long>(endFrame),
+	            clip.name.c_str(), asset.path.c_str(), static_cast<unsigned long long>(out.frames),
+	            asset.sampleRate, asset.channels, bakeCurve ? ", volume curve baked in" : "");
+	if (clamped > 0)
+		HE_LOG_WARN(Tool, "AudioImporter: baking the volume curve into %s clipped %zu sample(s) at full scale",
+		            asset.path.c_str(), clamped);
+	return true;
 }

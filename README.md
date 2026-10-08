@@ -42,8 +42,10 @@ system with its own designer, packaging into compressed and optionally encrypted
 `.hpak` archives with on-demand streaming, and an export pipeline that produces
 a runnable build for Windows, macOS or Linux.
 
-Source control (git + LFS, with GitHub/GitLab/Azure DevOps sign-in) is built
-into the editor, so a project can be versioned without leaving it.
+Source control (git + LFS) is built into the editor, so a project can be
+versioned without leaving it. GitHub sign-in takes a code you approve in the
+browser (no token to create by hand); GitLab and Azure DevOps use an access
+token.
 
 ## Status
 

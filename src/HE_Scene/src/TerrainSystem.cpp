@@ -8,6 +8,7 @@
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TerrainHeightmap.h"
+#include "HorizonScene/TerrainPaint.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include <Diagnostics/Log.h>
@@ -64,8 +65,8 @@ namespace
     // the flat approximation has to agree — layer 0 alone, not an even split.
     void setUnpaintedLayerAverage(TerrainComponent& tc)
     {
+        for (float& w : tc.avgLayerWeights) w = 0.0f;
         tc.avgLayerWeights[0] = 1.0f;
-        tc.avgLayerWeights[1] = tc.avgLayerWeights[2] = tc.avgLayerWeights[3] = 0.0f;
     }
 
     // Mean painted weight per layer over the whole terrain, normalised to Σ = 1 —
@@ -73,21 +74,30 @@ namespace
     // the flat-shaded consumers (GI hits) to reproduce the terrain's colour.
     // Normalising per texel first matches the shader, which divides each texel's
     // blend by that texel's weight sum, so half-painted texels don't count less.
+    // Both pages count: a texel half on layer 5 has only half its weight left
+    // for layers 0..3.
     void computeAverageLayerWeights(TerrainComponent& tc)
     {
-        double acc[4] = { 0.0, 0.0, 0.0, 0.0 };
+        constexpr int L = kTerrainMaxLayers;
+        double acc[L] = {};
         size_t texels = 0;
+        const bool second = tc.layerWeights2.size() == tc.layerWeights.size();
         for (size_t i = 0; i + 3 < tc.layerWeights.size(); i += 4)
         {
-            const double w[4] = { tc.layerWeights[i + 0] / 255.0, tc.layerWeights[i + 1] / 255.0,
-                                  tc.layerWeights[i + 2] / 255.0, tc.layerWeights[i + 3] / 255.0 };
-            const double s = w[0] + w[1] + w[2] + w[3];
+            double w[L] = {};
+            double s = 0.0;
+            for (int k = 0; k < 4; ++k)
+            {
+                w[k]     = tc.layerWeights[i + k] / 255.0;
+                w[k + 4] = second ? tc.layerWeights2[i + k] / 255.0 : 0.0;
+            }
+            for (int k = 0; k < L; ++k) s += w[k];
             if (s <= 1e-4) continue;                       // blank texel: the shader's
-            for (int k = 0; k < 4; ++k) acc[k] += w[k] / s; // 1e-4 floor, same skip
+            for (int k = 0; k < L; ++k) acc[k] += w[k] / s; // 1e-4 floor, same skip
             ++texels;
         }
         if (texels == 0) { setUnpaintedLayerAverage(tc); return; }
-        for (int k = 0; k < 4; ++k)
+        for (int k = 0; k < L; ++k)
             tc.avgLayerWeights[k] = static_cast<float>(acc[k] / static_cast<double>(texels));
     }
 
@@ -360,6 +370,8 @@ namespace TerrainSystem
         // a texture the chunks' draw calls carry, so a material's Landscape Layer
         // Blend node can sample them. Registered once and REPLACED in place on
         // later paints, so the UUID stays stable for anything already holding it.
+        // Layers 4..7 ride in the same texture, as its right half
+        // (TerrainPaint::buildWeightTexture) — one binding, one sampler.
         for (entt::entity te : terrains)
         {
             auto& tc = reg.get<TerrainComponent>(te);
@@ -384,14 +396,15 @@ namespace TerrainSystem
             if (have && !tc.weightsDirty) continue;
             computeAverageLayerWeights(tc);           // paint changed → refresh the mean
 
+            uint32_t texW = 0, texH = 0;
             TextureAsset tex;
             tex.type     = HE::AssetType::Texture;
             tex.name     = "terrain_weightmap";
             tex.path     = "mem://terrain_weightmap";
-            tex.width    = static_cast<int>(wr);
-            tex.height   = static_cast<int>(wr);
+            tex.data     = TerrainPaint::buildWeightTexture(tc, texW, texH);
+            tex.width    = texW;
+            tex.height   = texH;
             tex.channels = 4;
-            tex.data     = tc.layerWeights;
             if (have)
             {
                 cm.replaceTexture(tc.weightmapTextureId, std::move(tex));

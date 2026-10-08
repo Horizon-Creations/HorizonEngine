@@ -486,6 +486,42 @@ struct Variable
     // before this existed. INSTANCE variables only, and never a Ref (an object
     // handle names nothing in the next run) — see isSaveableType.
     bool        saveGame   = false;
+    // ── Pull on Construct (docs/state-driven-data-exchange-design.md §2) ─────
+    // At registration, before any of the instance's own code runs (PreConstruct,
+    // Construct, BeginPlay, OnLevelLoaded), the runtime copies a value from
+    // `pullSource` over the default. The default stays the fallback when the
+    // source cannot be resolved — there is no second "fallback" field, because
+    // nobody can see the default before the pull happens.
+    //
+    // No separate on/off flag: an empty pullSource IS off, so there is no half
+    // state (ticked, but no source). INSTANCE variables only, like `replicated`.
+    std::string pullSource;   // "" = off | kPullFromGameInstance | kPullFromCreator | kPullFromRef
+    std::string pullVar;      // public instance variable of the source
+    std::string pullMember;   // optional: field of pullVar when that is a Struct
+    // Creator only, optional: the class the creator is expected to be (asset
+    // path). The editor lists that class's variables from it and "Add to
+    // Target" writes into it; at run time a creator that is not one (derived
+    // classes count) falls back to the default. Empty = any creator.
+    std::string pullClass;
+    // ── Bind To (docs/bind-to-variable-binding-plan.md) ──────────────────────
+    // Keeps the pull's source BOUND for the instance's whole life: at the end of
+    // every frame the runtime compares the source value with what it last saw and,
+    // when it moved (or the source is another instance now), writes it here. The
+    // construct-time pull above still runs first, so the value is there before
+    // PreConstruct. A local write stays until the SOURCE changes again.
+    // INSTANCE variables only; never together with `replicated` (the loader drops
+    // bindTo then).
+    bool        bindTo  = false;
+    // Source kPullFromRef only: the name of a Ref INSTANCE variable of this class;
+    // the source is whatever that reference holds at the moment of the compare.
+    std::string pullRef;
+    // ── Notify on Change (docs/bind-to-variable-binding-plan.md §4) ──────────
+    // The variable reports its own change: at the frame-end compare the runtime
+    // calls this class's private OnChanged_<Name>(Old) and sends "<Name>Changed"
+    // with the new value to every instance bound to it per Bind Event. Whatever
+    // wrote it (a node, Bind To, the replicator, a save) — one report per frame,
+    // none for a write that was undone in the same frame. INSTANCE variables only.
+    bool        notifyChange = false;
     // ── Expose on Spawn (docs/widget-pre-construct-design.md §6) ─────────────
     // A Create Widget naming this graph's widget grows an input pin for the
     // variable, and the value arrives before the widget's PreConstruct. Opt-in
@@ -503,6 +539,107 @@ struct Variable
 // Exec, which is no value at all. One rule for the checkbox, the loader and the
 // runtime's enumeration.
 inline bool isSaveableType(PinType t) { return t != PinType::Ref && t != PinType::Exec; }
+
+// ── Pull on Construct: the shared rules ─────────────────────────────────────
+// One spelling of each source, one compatibility rule and one sentence per
+// failure, used by the runtime (which warns) and the editor (which shows the
+// same sentence in red before anything runs).
+inline constexpr const char* kPullFromGameInstance = "GameInstance";
+inline constexpr const char* kPullFromCreator      = "Creator";
+// Bind To only: whatever a Ref instance variable of the class (Variable::pullRef)
+// holds. Never a construct-time pull — at registration the Ref is still null.
+inline constexpr const char* kPullFromRef          = "Ref";
+// A source this build understands. The loader drops anything else with a
+// warning — a project saved by a newer engine names sources this one lacks.
+HE_API bool        isKnownPullSource(const std::string& src);
+// "Game Instance" / "Creator" / "Reference 'Target'" — what the editor and the
+// log call a source. `ref` is Variable::pullRef and only read for kPullFromRef.
+HE_API std::string pullSourceLabel(const std::string& src, const std::string& ref = {});
+
+// Can a value of the source's shape land in the target's? Same container kind
+// (and map key), same type — Int, Float and Double convert into each other as
+// SCALARS — and for an Enum/Struct the same definition. An empty typeName on
+// either side is no evidence against a match: an array of enums carries none
+// (variableDefaultValue, slotRead). A Ref fits any Ref; which class it holds
+// is the editor's to check, the runtime cannot see a declaration's className.
+// `why`, when given, receives the editor's tooltip ("Float, needs Int").
+HE_API bool pullShapesCompatible(PinType srcType, ContainerKind srcKind, PinType srcKey,
+                                 const std::string& srcTypeName,
+                                 PinType dstType, ContainerKind dstKind, PinType dstKey,
+                                 const std::string& dstTypeName, std::string* why = nullptr);
+// The same, for two live values (the target's current value stands for its
+// declaration — at registration it IS the declared default).
+HE_API bool  pullValuesCompatible(const Value& src, const Value& dstShape);
+// The value that is written: `src` converted to the target's scalar type when
+// the two are numeric and differ, unchanged otherwise. Only meaningful after
+// pullValuesCompatible said yes.
+HE_API Value pullConvert(const Value& src, const Value& dstShape);
+
+// Why a pull fell back to the default. Order is not persisted anywhere.
+enum class PullFailure : uint8_t
+{
+    None,
+    NoGameInstance,     // the runtime has no Game Instance
+    NoCreator,          // placed in the level / spawned from outside HorizonCode
+    CreatorGone,        // the creator was destroyed before the pull ran
+    CreatorWrongClass,  // pullClass set and the creator is not one
+    NoPublicVariable,   // the source has no PUBLIC instance variable of that name
+    NotAStruct,         // a member was asked for, but the variable is no Struct
+    NoSuchMember,       // the struct has no field of that name (formerNames tried)
+    TypeMismatch,       // pullShapesCompatible said no
+    UnknownSource,      // pullSource names nothing this build knows
+    // Bind To with a Ref source (appended: the order is not persisted, but
+    // nothing has to move for these either).
+    NoRefVariable,      // pullRef names no Ref instance variable of the class
+    RefTargetGone,      // the reference holds an instance that was destroyed
+};
+// The reason as one sentence, e.g. "Game Instance has no public variable
+// 'Score'". `src` is the Variable's pullSource; `detail` fills in what only
+// the caller knows (the type pair for a mismatch, the class for a creator).
+// `ref` is Variable::pullRef, named in the sentence for a Ref source.
+HE_API std::string pullFailureText(PullFailure why, const std::string& src,
+                                   const std::string& var, const std::string& member,
+                                   const std::string& detail = {},
+                                   const std::string& ref = {});
+
+// ── Extract on Destruct (docs/state-driven-data-exchange-design.md §3) ──────
+// A class names ONE struct and, per struct member, which of its instance
+// variables goes in. When the instance is destroyed (Runtime::destroy, after
+// its own Destruct and before it is unregistered) the engine fills a value of
+// that struct and sends it through "OnDestroyed" to every instance bound to it.
+// Members nobody maps keep the struct's default. Lives on the GRAPH, not on a
+// variable: the struct decides what comes out, and one table is the shape the
+// C++ codegen needs.
+//
+// The mapping entries ARE the "marked fields": there is no second flag on the
+// variable that could disagree with the table.
+inline constexpr const char* kExtractSelf    = "@Self";        // pseudo-variable: Ref to the dying instance
+inline constexpr const char* kOnDestroyed    = "OnDestroyed";  // the listener-side event
+struct ExtractMapEntry
+{
+    std::string member;   // struct field (live name; formerNames resolve on load/run)
+    std::string var;      // instance variable of the class, or kExtractSelf
+};
+struct ExtractSpec
+{
+    std::string                  structPath;   // "" = the class extracts nothing
+    std::vector<ExtractMapEntry> map;
+    bool empty() const { return structPath.empty(); }
+    // The entry filling `member`, or null.
+    const ExtractMapEntry* entryFor(const std::string& member) const;
+};
+// Why one mapping entry could not be filled; the member then keeps its default.
+enum class ExtractFailure : uint8_t
+{
+    None,
+    NoSuchMember,     // the struct has no field of that name (formerNames tried)
+    NoSuchVariable,   // the class has no instance variable of that name (deleted/renamed)
+    TypeMismatch,     // pullShapesCompatible said no
+    SelfNotRef,       // @Self mapped onto a member that is not a scalar Ref
+};
+// One sentence, the runtime's warning and the editor's red row alike.
+HE_API std::string extractFailureText(ExtractFailure why, const std::string& member,
+                                      const std::string& var, const std::string& detail = {});
 
 // Where a function runs, for Node::runOn below. The numbers travel in kMsgRpc's
 // `target` byte, so they are frozen: a saved graph and a datagram agree on them.
@@ -694,6 +831,9 @@ struct HE_API Graph
     // Editor chrome, see GraphComment. Absent from every graph written before
     // it existed, which fromJson reads as "none".
     std::vector<GraphComment> comments;
+    // Extract on Destruct (ExtractSpec above). Empty = extracts nothing; JSON
+    // key "extract", written only when a struct is set.
+    ExtractSpec extract;
     int nextId = 1;
 
     // ── What this graph INHERITS, for the editor only ────────────────────────
@@ -949,6 +1089,17 @@ HE_API bool connectWithConversion(Graph& g, int srcNode, int srcPin,
 // it, and generated C++ mirrors it (hc::sameScalar). Types with no meaningful
 // identity (Struct) compare unequal, which is also why they cannot key a map.
 HE_API bool scalarValueEquals(const Value& a, const Value& b, PinType t);
+
+// Exact equality of two WHOLE values, recursing through containers and struct
+// fields (scalarValueEquals is the leaf). Different types are never equal —
+// including "Array of Int" against "scalar Int". A map compares position by
+// position: insertion order is part of its value. Moved here from the
+// replicator's ValueWire so the Bind To compare (Runtime::exchangeState) and
+// dirty tracking mean one thing by "changed".
+HE_API bool valuesEqual(const Value& a, const Value& b);
+// Do these two describe the same property? Type, container kind, map key and,
+// for Enum/Struct, the definition name; the payload is ignored.
+HE_API bool valueTypesMatch(const Value& a, const Value& b);
 
 HE_API void inferUserTypeNames(Graph& g);
 

@@ -250,7 +250,10 @@ private:
 	// the material was found (outTex may still be 0 = material has no texture);
 	// false when the UUID is null or the material is not loaded yet.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex);
-	unsigned int ResolveGraphTexture(const HE::UUID& id, const std::string& path);
+	// `array` = a sampler2DArray slot (Thema 158) → GL_TEXTURE_2D_ARRAY, white
+	// array when missing. Bind the result with BindGraphTexture.
+	unsigned int ResolveGraphTexture(const HE::UUID& id, const std::string& path, bool array = false);
+	void         BindGraphTexture(unsigned int tex);
 	// A UI quad's image: same asset, uploaded without the sRGB decode, because
 	// the UI pass writes sRGB numbers straight to the target (Thema 107).
 	unsigned int ResolveUITexture(const HE::UUID& id, const std::string& path);
@@ -632,6 +635,8 @@ private:
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
+	std::unordered_set<unsigned int> m_glArrayTex;   // graph textures stored as GL_TEXTURE_2D_ARRAY
+	unsigned int m_whiteArrayTex = 0;                // 1×1×1 white array (missing array slot)
 	std::unordered_map<std::string, unsigned int> m_uiTexCache; // UI quad images, same keys, never sRGB
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 	std::vector<HE::UUID>                       m_pendingMeshInvalidations;
@@ -1203,7 +1208,7 @@ private:
 	int          m_uGiGBufInstViewProj    = -1;
 	unsigned int m_giShadowCSProgram  = 0;
 	unsigned int m_giTemporalProgram  = 0;
-	unsigned int m_giBlurProgram      = 0;
+	unsigned int m_giAtrousProgram    = 0; // edge-aware a-trous on the shadow mask (Thema 134)
 	unsigned int m_giProbeCSProgram   = 0;
 	unsigned int m_giReflCSProgram       = 0; // specular trace (GLSL 430 compute)
 	unsigned int m_giReflTemporalProgram = 0; // MRT: radiance+confidence / receiver pos
@@ -1215,6 +1220,7 @@ private:
 	unsigned int m_giLocalMaskTex = 0;                    // rgba16f, per-pixel local-light visibility (1 channel per light, first 4)
 	unsigned int m_giHistFBO[2] = { 0, 0 }, m_giHistTex[2] = { 0, 0 }; // RGBA16F ping-pong
 	unsigned int m_giResultFBO = 0, m_giResultTex = 0;    // r16f, sampled by the scene
+	unsigned int m_giFilterTmpFBO = 0, m_giFilterTmpTex = 0; // r16f, between the two a-trous iterations
 	// Reflection chain: raw compute output → optional temporal ping-pong →
 	// optional separable blur ending in m_giReflTex. All rgba16f half-res
 	// (rgb = radiance arriving along the mirror ray, a = confidence).
@@ -1268,6 +1274,9 @@ private:
 	float        m_giLightRadius       = 0.5f;        // degrees, shadow-ray cone
 	int          m_giRaysPerProbe        = 128;
 	int          m_giProbeBudgetPerFrame = 256;
+	int          m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
+	float        m_giShadowHistoryWeight       = 0.9f;  // shadow-mask temporal history weight
+	bool         m_giShadowFilter        = true;  // edge-aware a-trous on the mask
 	// ── Ray-traced GI reflections (docs/gi-reflections-plan.md §10) ──────────
 	// Independent of m_giEnabled: the pass needs the acceleration structures and
 	// the half-res pre-pass, not the diffuse probe field (which it uses when it

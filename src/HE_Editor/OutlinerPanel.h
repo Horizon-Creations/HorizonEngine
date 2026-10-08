@@ -13,6 +13,11 @@ namespace OutlinerPanel
 {
 	void render(AppContext& ctx);
 
+	// Rows scrolled out of the panel are skipped, not submitted (render's
+	// "Rows scrolled out of the panel" note). On by default; off draws every
+	// row as before, which is what the test compares the clipped panel with.
+	void setRowClipping(bool on);
+
 #ifdef HE_IMGUI_ENABLED
 	// The "New Entity" list (Empty, Cube, Camera ▸, Light ▸, Rope, Trail) as
 	// menu rows, creating the pick at the world root with an undo step — the

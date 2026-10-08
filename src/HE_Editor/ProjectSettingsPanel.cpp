@@ -875,6 +875,16 @@ void drawSimulationPage(AppContext& ctx)
 		commit = true;
 	}
 	EditorWidgets::helpForLabel("Earth");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Large worlds");
+	Row::dragFloat("Floating origin radius##floatorigin", &ph.floatingOriginRadius, 100.0f,
+	               0.0f, HE::ProjectPhysicsSettings::kMaxFloatingOriginRadius, "%.0f m");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("0 is off. Above 0, the exported game moves the whole world back under "
+	     "the camera once it is this far from the origin, so positions stay "
+	     "precise in worlds tens of kilometres across. Scripts that keep "
+	     "positions of their own jump by the shift.");
 
 	if (commit)
 	{

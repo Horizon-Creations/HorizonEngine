@@ -1233,7 +1233,9 @@ V3 perturbNormal(V3 N, V3 mapN, V3 dp1, V3 dp2, float duv1[2], float duv2[2])
 	const V3 dp1perp = cross(N, dp1);
 	const V3 T = add(scale(dp2perp, duv1[0]), scale(dp1perp, duv2[0]));
 	const V3 B = add(scale(dp2perp, duv1[1]), scale(dp1perp, duv2[1]));
-	const float invmax = 1.0f / std::sqrt(std::max(dot(T, T), dot(B, B)));
+	float invmax = 1.0f / std::sqrt(std::max(dot(T, T), dot(B, B)));
+	// The screen basis' handedness (dFdy points up on GL, down on D3D/Vulkan/Metal).
+	if (dot(cross(dp1, dp2), N) < 0.0f) invmax = -invmax;
 	// mat3(T*invmax, B*invmax, N) * mapN — columns, GLSL convention.
 	return normalize(add(add(scale(T, invmax * mapN.x), scale(B, invmax * mapN.y)),
 	                     scale(N, mapN.z)));
@@ -1287,10 +1289,11 @@ TEST_CASE("an imported glTF normal map's green channel points to the top of the 
 	                                       mesh->vertices[i*3+2] }; };
 
 	// The screen basis of a camera looking down -Z at this front-facing triangle:
-	// screen X is world +X, screen Y is world +Y. It has to be a proper (unmirrored)
-	// view — hePerturbNormal's frame is the true tangent frame times the UV
-	// Jacobian's DETERMINANT, so feeding it a mirrored basis flips the frame, which
-	// on screen only happens when you are looking at the back face.
+	// screen X is world +X, screen Y is world +Y (OpenGL: dFdy runs UP the screen).
+	// The raw cotangent frame is the true tangent frame times the UV Jacobian's
+	// DETERMINANT, so a mirrored screen basis would flip it — which is what D3D,
+	// Vulkan and Metal (dFdy runs DOWN) hand it for every front face. The
+	// handedness term in hePerturbNormal cancels that; checked below.
 	const V3 dp1 = sub(P(1), P(0));   // +X
 	const V3 dp2 = sub(P(2), P(0));   // +Y
 	float duv1[2] = { mesh->uvs[2] - mesh->uvs[0], mesh->uvs[3] - mesh->uvs[1] };
@@ -1317,6 +1320,27 @@ TEST_CASE("an imported glTF normal map's green channel points to the top of the 
 	float rawDuv2[2] = { duv2[0], -duv2[1] };
 	const V3 unflipped = perturbNormal(N, { 0.0f, 1.0f, 0.0f }, dp1, dp2, rawDuv1, rawDuv2);
 	CHECK(unflipped.y == doctest::Approx(-1.0f));
+
+	// The same front face on D3D/Vulkan/Metal: screen Y runs DOWN, so dFdy of
+	// position AND of uv change sign. The texel must still tilt toward the top of
+	// the image (Thema 158 Schritt 4 measured the opposite on those backends before
+	// the handedness term: corr(height slope, N) +0.93 against GL's -0.93).
+	const V3 dp2Down = scale(dp2, -1.0f);
+	float duv2Down[2] = { -duv2[0], -duv2[1] };
+	const V3 greenUpD3D = perturbNormal(N, { 0.0f, 1.0f, 0.0f }, dp1, dp2Down, duv1, duv2Down);
+	CHECK(greenUpD3D.y == doctest::Approx(1.0f));
+	CHECK(greenUpD3D.x == doctest::Approx(0.0f));
+	const V3 redRightD3D = perturbNormal(N, { 1.0f, 0.0f, 0.0f }, dp1, dp2Down, duv1, duv2Down);
+	CHECK(redRightD3D.x == doctest::Approx(1.0f));
+	// ...and the transcription is what the codegen emits.
+	{
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		const int nm  = g.addNode(HE::MatNodeType::NormalMapSample);
+		REQUIRE(g.connect(nm, 0, out, HE::kMatOutputNormalPin));
+		CHECK(HE::generateFragment(g).glsl.find(
+		          "invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;") != std::string::npos);
+	}
 
 	he_test::removeAllQuiet(dir);
 }

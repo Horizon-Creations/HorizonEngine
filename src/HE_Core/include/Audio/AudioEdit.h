@@ -1,0 +1,300 @@
+#pragma once
+#include <Types/Defines.h>
+#include <nlohmann/json_fwd.hpp>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace HE {
+
+struct AudioBusConfig;
+
+// ─── Non-destructive audio edits ──────────────────────────────────────────────
+// What the Audio Editor lets you do to a clip WITHOUT touching its samples: a
+// trim, a volume curve, the mixer bus it plays through and an EQ. All of it is
+// a description applied on the way out; the PCMD/OGGD bytes the importer wrote
+// are never rewritten, so every edit can be taken back and a re-import of the
+// source lands under the same edits (AudioImporter carries them over, the way
+// writeAsset carries the UUID).
+//
+// WHERE IT IS STORED: a JSON chunk (CHUNK_AUED) inside the audio .hasset, next
+// to the data chunk — not a sidecar file next to the source. The source .wav/.ogg
+// is an absolute path that may sit outside the content root (or on another
+// machine), and a sidecar would need its own pack, rename, delete and git
+// handling; a chunk travels with the asset through all of those for free (the
+// pak copies an audio .hasset verbatim). AudioEdit::isDefault() decides whether
+// the chunk is written at all, so a clip nobody edited stays byte-identical to
+// what it was before this existed.
+//
+// OLDER ASSETS: no chunk → a default-constructed AudioEdit, which is exactly
+// "play the whole clip at unity on master with no EQ" — what they always did.
+// Every key inside the chunk is optional for the same reason, so a field added
+// later reads as its default from a file written now. An older engine skips
+// the unknown chunk id and plays the untrimmed clip.
+//
+// Why HE_Core: the same road as AudioBusConfig. The editor writes it, the
+// importer preserves it, the runtime (HorizonScene) applies it — HE_Core is the
+// one module all three see.
+
+// ─── Trim ─────────────────────────────────────────────────────────────────────
+// In FRAMES (one frame = one sample per channel — what the editor's playhead and
+// waveform count in), half-open [startFrame, endFrame). endFrame == 0 means "to
+// the end of the clip": the all-zero default is "untrimmed", and a Vorbis clip,
+// whose length is only known once it is decoded, needs no number to say so.
+struct HE_API AudioTrim
+{
+	uint64_t startFrame = 0;
+	uint64_t endFrame   = 0;   // exclusive; 0 = through the last frame
+
+	struct Range { uint64_t begin = 0, end = 0; };
+
+	// The trim against a clip of `totalFrames`: both ends clamped into the clip.
+	// A trim that leaves nothing (start at or past end — a hand-edited file, or a
+	// clip re-imported shorter than the trim) resolves to the WHOLE clip, never
+	// to silence: an asset that plays untrimmed is a visible mistake, one that
+	// plays nothing is a bug report.
+	Range resolve(uint64_t totalFrames) const;
+
+	// The trim that keeps exactly [begin, end) of a clip of `totalFrames` — what
+	// the editor's "Trim to Selection" stores. Normalised so the file says no more
+	// than it has to: an end at (or past) the clip's end is stored as 0 ("to the
+	// end", which survives a re-import that makes the clip longer), and a range
+	// covering the whole clip is the default trim, so trimming to everything
+	// leaves an untouched asset untouched. An empty range is the default too.
+	static AudioTrim fromRange(uint64_t begin, uint64_t end, uint64_t totalFrames);
+
+	bool isDefault() const { return startFrame == 0 && endFrame == 0; }
+};
+
+// ─── Volume curve (envelope) ─────────────────────────────────────────────────
+// How a segment gets from its point to the next one. The LEFT point owns the
+// segment: its `interp` shapes the way to the following point.
+enum class AudioCurveInterp : uint8_t
+{
+	Linear      = 0,   // straight line in amplitude
+	Hold        = 1,   // keep this point's gain until the next point (a step)
+	Smooth      = 2,   // smoothstep in amplitude — eases in and out, no kink
+	Exponential = 3,   // straight line in dB — what a natural fade sounds like
+};
+
+struct HE_API AudioEnvelopePoint
+{
+	// Seconds from the start of the ORIGINAL clip, not of the trim: moving the
+	// trim must not slide the curve along the audio it was drawn against.
+	// Seconds rather than frames so a re-import at another sample rate keeps the
+	// curve on the same moment of the sound.
+	double           timeSec = 0.0;
+	float            gain    = 1.0f;   // linear multiplier, 1 = unity (like every volume here)
+	AudioCurveInterp interp  = AudioCurveInterp::Linear;
+};
+
+struct HE_API AudioEnvelope
+{
+	// Kept sorted by time (sort() / fromJson). Two points may share a time —
+	// that is a jump, and the later one in the list wins from that time on.
+	std::vector<AudioEnvelopePoint> points;
+
+	// Highest gain a point may hold (+12 dB). Enough to lift a quiet take, low
+	// enough that a typo does not clip the mix to pieces.
+	static constexpr float kMaxGain = 4.0f;
+
+	// Gain at `tSec` (same time base as the points). No points → 1 (an empty
+	// curve is "no curve"); before the first point → the first point's gain,
+	// after the last → the last one's.
+	float evalGain(double tSec) const;
+
+	void sort();
+	bool empty() const { return points.empty(); }
+
+	// The curve over [t0Sec, t1Sec] moved to start at 0 — what a clip cut out
+	// of that range carries. Points inside are kept (shifted); where no point
+	// sits on an end, one is added there holding the gain the curve has at that
+	// moment, with the interpolation of the segment it cuts. That is exact for
+	// Linear, Hold and Exponential segments (a piece of a straight line is a
+	// straight line); a Smooth segment cut in two restarts its ease on the piece.
+	// An empty curve stays empty.
+	AudioEnvelope slice(double t0Sec, double t1Sec) const;
+
+	// ── Applying it to samples ──────────────────────────────────────────────
+	// One function for every place the curve is heard: the engine's voices at
+	// runtime, the Audio Editor's preview, and Extract when it bakes the curve
+	// into the new clip — so the three cannot sound different.
+	//
+	// The gain is evaluated (evalGain) once every kRampFrames frames on a grid
+	// anchored at frame 0 of the ORIGINAL clip, and ramped linearly in between.
+	// That is the click guard: a Hold step, or a jump between two points at one
+	// time, becomes a ramp of kRampFrames instead of a one-sample step (~2.7 ms
+	// at 48 kHz: no click, still a cut). On the grid the gain is exactly
+	// evalGain; inside one Linear segment it is exactly the line between. And
+	// because it is a pure function of the frame, the result does not depend on
+	// how the mixer slices its reads, nor on seeks or loop wraps.
+	static constexpr uint64_t kRampFrames = 128;
+
+	// The gain sample `frame` of the original clip is multiplied by. 1 for an
+	// empty curve or a sampleRate ≤ 0.
+	float rampedGain(uint64_t frame, double sampleRate) const;
+
+	// Multiply `frameCount` interleaved frames whose first one is frame
+	// `firstFrame` of the original clip by rampedGain. An empty curve leaves the
+	// samples untouched (not even multiplied by 1).
+	void apply(float* interleaved, uint64_t frameCount, int channels,
+	           uint64_t firstFrame, double sampleRate) const;
+	// The same on int16, rounded and clamped to full scale. Returns how many
+	// samples had to be clamped (a curve above unity can drive a loud clip
+	// past full scale; Extract reports it).
+	size_t applyPcm16(int16_t* interleaved, uint64_t frameCount, int channels,
+	                  uint64_t firstFrame, double sampleRate) const;
+
+	void toJson(nlohmann::json& out) const;    // a JSON array
+	void fromJson(const nlohmann::json& in);   // anything but an array → empty
+};
+
+// ─── EQ ───────────────────────────────────────────────────────────────────────
+// A small parametric EQ: a list of second-order (biquad) bands in series. One
+// struct for both places an EQ can sit — an asset (here) and a mixer bus
+// (AudioBusDef::eq, same JSON shape) — so the editor draws one EQ widget
+// (AudioMixView) and the engine runs one filter (an asset's in its voice, a
+// bus's after its voices are summed).
+enum class AudioEqBandType : uint8_t
+{
+	Peak      = 0,   // bell around freqHz: ±gainDb, width by q
+	LowShelf  = 1,   // everything below freqHz by gainDb
+	HighShelf = 2,   // everything above freqHz by gainDb
+	LowPass   = 3,   // cut above freqHz (gainDb unused; q = resonance)
+	HighPass  = 4,   // cut below freqHz (gainDb unused; q = resonance)
+};
+
+struct HE_API AudioEqBand
+{
+	AudioEqBandType type    = AudioEqBandType::Peak;
+	float           freqHz  = 1000.0f;
+	float           gainDb  = 0.0f;
+	float           q       = 0.7071f;   // 1/√2: Butterworth for the passes, an octave-ish bell
+	bool            enabled = true;
+
+	// What biquadCoefficients clamps to. Frequencies above the filter's own
+	// Nyquist are clamped there too (see biquadCoefficients).
+	static constexpr float kMinFreqHz = 10.0f;
+	static constexpr float kMaxFreqHz = 22000.0f;
+	static constexpr float kMinGainDb = -24.0f;
+	static constexpr float kMaxGainDb = 24.0f;
+	static constexpr float kMinQ      = 0.1f;
+	static constexpr float kMaxQ      = 24.0f;
+};
+
+// Normalised biquad (a0 = 1): y = b0·x + b1·x₋₁ + b2·x₋₂ − a1·y₋₁ − a2·y₋₂.
+// Default-constructed = the identity (passes the signal through untouched).
+struct HE_API BiquadCoeffs
+{
+	double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0;
+
+	bool isIdentity() const { return b0 == 1.0 && b1 == 0.0 && b2 == 0.0 && a1 == 0.0 && a2 == 0.0; }
+
+	// |H(e^jω)| in dB at `freqHz` for a filter running at `sampleRate` — what
+	// the EQ widget plots, and what the tests measure the formulas against.
+	double magnitudeDb(double freqHz, double sampleRate) const;
+};
+
+// The RBJ "Audio EQ Cookbook" coefficients of one band, for a filter running at
+// `sampleRate`. That rate is the one the samples have WHERE THE FILTER RUNS.
+// An asset's EQ runs in the voice's own stage in front of miniaudio's
+// resampler (AudioEngine.cpp, with the volume curve), so it is the CLIP's rate
+// — and the Audio Editor plots the response at that rate too. (A voice pitched
+// up therefore hears its EQ shifted with it, as if it were baked into the
+// clip.) A 22 kHz clip cannot be shaped above its own ~11 kHz Nyquist; the
+// frequency clamp below says so. Out-of-range inputs are clamped
+// to the kMin*/kMax* above (frequency also to 0.49 · sampleRate). A disabled
+// band, a peak/shelf at 0 dB and a sampleRate ≤ 0 return the identity exactly,
+// so the playback side can skip them without comparing floats itself.
+HE_API BiquadCoeffs biquadCoefficients(const AudioEqBand& band, double sampleRate);
+
+// One channel's filter memory (transposed direct form II — the form that stays
+// well-behaved in floating point). A stereo voice keeps one per channel per band.
+struct HE_API BiquadState
+{
+	double z1 = 0.0, z2 = 0.0;
+	float process(const BiquadCoeffs& c, float x)
+	{
+		const double y = c.b0 * x + z1;
+		z1 = c.b1 * x - c.a1 * y + z2;
+		z2 = c.b2 * x - c.a2 * y;
+		return static_cast<float>(y);
+	}
+	void reset() { z1 = z2 = 0.0; }
+};
+
+struct HE_API AudioEq
+{
+	bool                     enabled = true;   // the bypass switch; bands keep their settings
+	std::vector<AudioEqBand> bands;            // in series, in this order
+
+	// The widget offers no more than this; fromJson drops the rest.
+	static constexpr size_t kMaxBands = 8;
+
+	// True when running the EQ would change nothing: bypassed, or every band
+	// is disabled / at 0 dB. The playback side skips the filter entirely then.
+	bool isNeutral() const;
+
+	// Summed response of every active band, in dB (0 when neutral).
+	double responseDb(double freqHz, double sampleRate) const;
+
+	void toJson(nlohmann::json& out) const;    // { "enabled": true, "bands": [ … ] }
+	void fromJson(const nlohmann::json& in);
+};
+
+// ─── The whole edit ───────────────────────────────────────────────────────────
+struct HE_API AudioEdit
+{
+	AudioTrim     trim;
+	AudioEnvelope envelope;
+
+	// The mixer bus this clip plays through, BY NAME — buses have no other
+	// identity (AudioBusDef is a name and a volume; AudioSourceComponent::busName
+	// is a string too). "" = master. A name the project no longer has falls back
+	// to master (resolveBus), the same thing the engine has always done for a
+	// source naming an unknown bus. Renaming a bus in the mixer orphans this
+	// like it orphans a source's busName: the Audio Editor then shows the name
+	// as missing (it is kept — a bus re-added under it is picked up again).
+	std::string   bus;
+
+	AudioEq       eq;
+
+	// Nothing authored: no trim, no curve, master, no EQ bands. The writer leaves
+	// the chunk out for a default edit.
+	bool isDefault() const;
+
+	// The curve's gain at `tSec` seconds into the ORIGINAL clip.
+	float evalGain(double tSec) const { return envelope.evalGain(tSec); }
+
+	// The edit a new clip cut out of [t0Sec, t1Sec) of this one starts with
+	// (the Audio Editor's Extract). Bus and EQ come along — they say what kind of
+	// sound it is and where it is mixed. The curve comes along over that range
+	// (AudioEnvelope::slice), so the extract sounds as the range did. The trim
+	// does not: the extract IS the cut, and its frames start at 0.
+	AudioEdit forRange(double t0Sec, double t1Sec) const;
+
+	// Which bus a voice of this clip plays through. Precedence: the component's
+	// own busName (an explicit per-source choice) if the project has that bus,
+	// else the asset's `bus` if the project has it, else "" — master. A name
+	// that does not resolve is skipped rather than honoured, so a deleted bus
+	// never silences a sound. `busExists` asks whatever knows the live list (the
+	// AudioEngine at runtime); the second overload asks a project's config.
+	static std::string resolveBus(const std::string& componentBus, const std::string& assetBus,
+	                              const std::function<bool(const std::string&)>& busExists);
+	static std::string resolveBus(const std::string& componentBus, const std::string& assetBus,
+	                              const AudioBusConfig& config);
+
+	// { "version": 1, "trim": {…}, "envelope": […], "bus": "…", "eq": {…} }.
+	// Every key optional on read; unknown keys ignored.
+	void toJson(nlohmann::json& out) const;
+	void fromJson(const nlohmann::json& in);
+
+	// The CHUNK_AUED payload (UTF-8 JSON text). fromChunkText resets to the
+	// default first and returns false for text that is not a JSON object —
+	// leaving the default, so a damaged chunk costs the edits, not the clip.
+	std::string toChunkText() const;
+	bool        fromChunkText(const std::string& text);
+};
+
+} // namespace HE

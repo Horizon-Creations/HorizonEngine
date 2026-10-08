@@ -636,7 +636,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		}
 		else
 		{
-			ImGui::TextWrapped("Repository setup (init, remote, GitHub token) lives "
+			ImGui::TextWrapped("Repository setup (init, remote, GitHub sign-in) lives "
 			                   "in Preferences \xe2\x96\xb8 Source Control.");
 			ImGui::Spacing();
 			if (EditorWidgets::button("Set up in Preferences…", ImVec2(240.0f, 0.0f)))
