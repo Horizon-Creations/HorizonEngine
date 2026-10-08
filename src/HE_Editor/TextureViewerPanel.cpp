@@ -194,9 +194,16 @@ void load(AppContext& ctx, const std::string& assetPath, State& st)
 // the canvas around it stays the plain panel colour, so where the image ends is
 // never in doubt. Cells are fixed on screen, not per texel — a 4K texture at
 // fit would otherwise turn them into noise.
-void drawChecker(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 clip0, ImVec2 clip1)
+// The checks belong to the PICTURE: a cell is kCellTexels texels wide and the grid
+// starts at the picture's corner, so zooming scales them with the image instead of
+// leaving a screen-fixed pattern that only slides underneath. Once the cells would
+// shrink to dust (a big image zoomed far out) they double until they are legible,
+// which keeps them aligned with the corner and never moiré.
+void drawChecker(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 clip0, ImVec2 clip1, float zoom)
 {
-	constexpr float kCell = 12.0f;
+	constexpr float kCellTexels = 16.0f, kMinCellPx = 6.0f;
+	float kCell = kCellTexels * zoom;
+	while (kCell < kMinCellPx) kCell *= 2.0f;
 	const ImVec2 a{ std::max(p0.x, clip0.x), std::max(p0.y, clip0.y) };
 	const ImVec2 b{ std::min(p1.x, clip1.x), std::min(p1.y, clip1.y) };
 	if (b.x <= a.x || b.y <= a.y) return;
@@ -399,7 +406,7 @@ void drawCanvas(State& st)
 	const ImVec2 p1{ p0.x + w * st.zoom, p0.y + h * st.zoom };
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(c0, c1, true);
-	if (st.checker) drawChecker(dl, p0, p1, c0, c1);
+	if (st.checker) drawChecker(dl, p0, p1, c0, c1, st.zoom);
 	if (st.texture)
 		// uv (0,0) at the top-left: the uploaded pixels are already top-down.
 		dl->AddImage(reinterpret_cast<ImTextureID>(st.texture), p0, p1,
