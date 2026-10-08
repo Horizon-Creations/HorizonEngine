@@ -8,8 +8,11 @@
 #include "EditorWidgets.h"        // WrapText
 #include "AudioImporter.h"        // raw .wav/.ogg decode + the Import button
 #include "AudioWaveformView.h"    // the canvas: peaks, zoom/scroll, playhead, selection
+#include "ImporterCommon.h"       // readAssetChunk — the edit chunk as the file has it
+#include <Audio/AudioEdit.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/HAsset.h>
 #include <Diagnostics/Logger.h>
 #include <Types/Enums.h>
 #include <imgui.h>
@@ -109,6 +112,29 @@ struct State
 	HE::Ed::AudioWave::View view;
 	float  canvasW    = 0.0f;   // last laid-out canvas width, for the toolbar's zoom buttons
 	double hoverFrame = -1.0;   // pointer over the canvas last frame, for the readout
+
+	// ── Edits ────────────────────────────────────────────────────────────────
+	// The asset's AudioEdit (trim, and what the later tools add to it) is edited
+	// on the ContentManager's loaded copy (getAudioMutable): the loaded asset IS
+	// the edit buffer, as in the Sequencer, so a voice started from it in play
+	// mode plays the trim this tab shows. Only an imported .hasset has one; a raw
+	// .wav/.ogg has nowhere to keep an edit and offers Extract only.
+	bool dirty = false;
+	// The tab's own undo over the edit, as whole snapshots in the chunk's own
+	// form (AudioEdit::toChunkText): a few hundred bytes each, and every field a
+	// later tool adds to the edit is covered without touching this. -1 = no
+	// baseline yet.
+	std::vector<std::string> undo;
+	int         undoPos    = -1;
+	bool        editsStale = false;   // reloadFromDisk: re-read the edit chunk next frame
+	std::string lastSaveError;
+
+	// Extract runs AFTER the tab's window has ended (render, at the bottom): the
+	// button only asks for it, so nothing that writes files runs while `clip` —
+	// a pointer into the ContentManager — is held.
+	bool        extractRequested = false;
+	std::string extractStatus;    // what was written, or why nothing was
+	bool        extractFailed    = false;
 };
 
 AssetPanelState<State> s_states;
@@ -329,6 +355,183 @@ void startPreview(const AudioAsset& clip, State& st)
 	if (r.start > r.begin) st.audio->seekSound(st.handle, r.start - r.begin);
 }
 
+// ── Edits ────────────────────────────────────────────────────────────────────
+
+// The asset whose `edit` this tab changes: the ContentManager's own loaded copy.
+// Fetched per use and never held — any load can move it (ContentManager.h).
+AudioAsset* editableOf(AppContext& ctx, const State& st)
+{
+	if (st.isRawFile || !ctx.contentManager) return nullptr;
+	return ctx.contentManager->getAudioMutable(st.clipId);
+}
+
+// The edit as it is now becomes the newest undo point. The same as the one
+// already on top is no step at all, so a click that changed nothing costs none.
+void pushUndo(State& st, const HE::AudioEdit& edit)
+{
+	std::string snap = edit.toChunkText();
+	if (st.undoPos >= 0 && st.undoPos < static_cast<int>(st.undo.size()) && st.undo[st.undoPos] == snap)
+		return;
+	st.undo.resize(static_cast<size_t>(st.undoPos + 1));
+	st.undo.push_back(std::move(snap));
+	if (st.undo.size() > 64) st.undo.erase(st.undo.begin());
+	st.undoPos = static_cast<int>(st.undo.size()) - 1;
+}
+
+bool restoreSnapshot(AppContext& ctx, State& st, int pos)
+{
+	if (pos < 0 || pos >= static_cast<int>(st.undo.size())) return false;
+	AudioAsset* a = editableOf(ctx, st);
+	if (!a) return false;
+	a->edit.fromChunkText(st.undo[pos]);
+	st.undoPos = pos;
+	st.dirty   = true;
+	return true;
+}
+
+// A finished edit: dirty, and an undo point.
+void commitEdit(State& st, const HE::AudioEdit& edit)
+{
+	st.dirty = true;
+	pushUndo(st, edit);
+}
+
+bool saveState(AppContext& ctx, State& st)
+{
+	st.lastSaveError.clear();
+	AudioAsset* a = editableOf(ctx, st);
+	if (!a)
+	{
+		st.lastSaveError = "Not saved: this clip is no longer loaded.";
+		return false;
+	}
+	// The samples go back into the file exactly as they were loaded — the same
+	// bytes in the same chunk — so the edit chunk is the only thing that changes.
+	if (!ctx.contentManager->saveAsset(*a))
+	{
+		st.lastSaveError = "Not saved: the file could not be written.";
+		return false;
+	}
+	st.dirty = false;
+	return true;
+}
+
+// Edits thrown away (reloadFromDisk): the edit chunk as the file has it now goes
+// back onto the loaded asset. The samples are not re-read — nothing here ever
+// changes them.
+void reloadEdits(AppContext& ctx, State& st, const std::string& assetPath)
+{
+	if (AudioAsset* a = editableOf(ctx, st))
+	{
+		std::vector<uint8_t> bytes;
+		if (Importer::readAssetChunk(assetPath, HAsset::CHUNK_AUED, bytes))
+			a->edit.fromChunkText(std::string(bytes.begin(), bytes.end()));
+		else
+			a->edit = HE::AudioEdit{};
+	}
+	st.undo.clear();
+	st.undoPos = -1;
+	st.dirty   = false;
+}
+
+// The trim as the canvas draws it and Play plays it, read off the asset every
+// frame, so an undo, a reload or a save shows at once. A trim that resolves to
+// the whole clip is drawn as none.
+void syncTrimView(State& st, const AudioAsset* editable, size_t frames)
+{
+	st.view.trimBegin = st.view.trimEnd = 0;
+	if (!editable || editable->edit.trim.isDefault()) return;
+	const HE::AudioTrim::Range r = editable->edit.trim.resolve(frames);
+	if (r.begin == 0 && r.end == frames) return;
+	st.view.trimBegin = static_cast<size_t>(r.begin);
+	st.view.trimEnd   = static_cast<size_t>(r.end);
+}
+
+void applyTrim(State& st, AudioAsset& a, const HE::AudioTrim& t)
+{
+	if (a.edit.trim.startFrame == t.startFrame && a.edit.trim.endFrame == t.endFrame) return;
+	// What Play means just changed under a running voice; start over rather
+	// than keep playing a range that is no longer the clip.
+	stopPreview(st);
+	a.edit.trim = t;
+	commitEdit(st, a.edit);
+}
+
+// Where a file this tab writes lands: next to the clip, or — for a clip in the
+// engine library, which is read-only outside engine-content dev mode — in the
+// project's own Content/Audio, which is somewhere the project can actually
+// reference. Import and Extract share it. An empty root = no project open.
+struct WriteTarget
+{
+	std::filesystem::path root, relDir;
+	bool                  engineLocked = false;
+};
+
+WriteTarget writeTargetFor(AppContext& ctx, const std::string& assetPath)
+{
+	WriteTarget t;
+	if (!ctx.contentManager) return t;
+	const std::filesystem::path src(assetPath);
+	t.engineLocked = ctx.contentManager->isEngineDefaultPath(assetPath) &&
+	                 !ContentManager::isEngineContentDevMode();
+	if (t.engineLocked)
+	{
+		t.root   = ctx.contentManager->contentRoot();
+		t.relDir = "Audio";
+	}
+	else
+	{
+		t.root = ctx.contentManager->isEngineDefaultPath(assetPath)
+			? std::filesystem::path(ctx.contentManager->engineContentRoot())
+			: std::filesystem::path(ctx.contentManager->contentRoot());
+		std::error_code ec;
+		t.relDir = std::filesystem::relative(src.parent_path(), t.root, ec);
+		if (ec || t.relDir == ".") t.relDir.clear();
+	}
+	return t;
+}
+
+// Extract Selection, run after the window has ended. The clip is fetched again
+// (no pointer from the frame lives this long), what the new asset carries is
+// copied out of the original's edit, and the original's file is never opened
+// for writing: the importer writes a NEW file through a ContentManager of its
+// own, and the editor's picks it up with the content refresh asked for here.
+void runExtract(AppContext& ctx, State& st, const std::string& assetPath)
+{
+	st.extractFailed = true;
+	const AudioAsset* clip   = clipOf(ctx, st);
+	const size_t      frames = clip ? frameCountOf(*clip) : 0;
+	if (!clip || clip->sampleRate <= 0 || !st.view.hasSelection() || st.view.selEnd > frames)
+	{
+		st.extractStatus = "Nothing extracted: select a range first.";
+		return;
+	}
+	const WriteTarget t = writeTargetFor(ctx, assetPath);
+	if (t.root.empty())
+	{
+		st.extractStatus = "Nothing extracted: open a project first.";
+		return;
+	}
+	const double  rate = static_cast<double>(clip->sampleRate);
+	HE::AudioEdit carried;
+	if (const AudioAsset* a = editableOf(ctx, st))
+		carried = a->edit.forRange(static_cast<double>(st.view.selBegin) / rate,
+		                           static_cast<double>(st.view.selEnd)   / rate);
+	const std::string stem = std::filesystem::path(assetPath).stem().string() + "_extract";
+
+	AudioImporter::ExtractResult r;
+	if (!AudioImporter::extractRange(*clip, st.view.selBegin, st.view.selEnd,
+	                                 t.root, t.relDir, stem, carried, r))
+	{
+		st.extractStatus = "Nothing extracted: the new asset could not be written (the log says why).";
+		return;
+	}
+	st.extractFailed = false;
+	st.extractStatus = "Extracted " + HE::Ed::AudioWave::formatFrames(static_cast<size_t>(r.frames)) +
+	                   " frames to " + r.path;
+	ctx.contentRefreshPending = true;
+}
+
 } // namespace
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -343,6 +546,44 @@ void forget(const std::string& assetPath)
 {
 	if (State* st = s_states.find(assetPath)) stopPreview(*st);
 	s_states.forget(assetPath);
+}
+
+bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
+
+void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+
+void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!st.dirty || st.isRawFile || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			// The loaded clip IS the edit buffer (saveState writes it as it is).
+			const AudioAsset* a = cm->getAudio(st.clipId);
+			if (!a) return false;
+			AudioAsset copy = *a;
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
+bool save(AppContext& ctx, const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	if (!st || !st->dirty) return true;   // "not mine" reads as success
+	return saveState(ctx, *st);
+}
+
+bool reloadFromDisk(const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	if (!st || st->isRawFile) return false;
+	// The next render puts the file's edit back onto the loaded asset; that
+	// needs the ContentManager, which only render() is handed.
+	st->editsStale = true;
+	st->dirty      = false;
+	return true;
 }
 
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
@@ -421,6 +662,19 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	const double    rate   = static_cast<double>(clip->sampleRate);
 	const bool      audioReady = st.audio && st.audio->isInitialized();
 
+	// ── The edit ─────────────────────────────────────────────────────────────
+	// Engine content is read-only outside engine-content dev mode: its edits
+	// could not be saved, so they cannot be made either. Extract still works —
+	// it writes into the project (writeTargetFor).
+	if (st.editsStale) { st.editsStale = false; reloadEdits(ctx, st, assetPath); }
+	AudioAsset* editable    = editableOf(ctx, st);
+	const bool  editsLocked = ctx.contentManager && ctx.contentManager->isEngineDefaultPath(assetPath) &&
+	                          !ContentManager::isEngineContentDevMode();
+	const bool  canEdit     = editable != nullptr && !editsLocked;
+	// The baseline undo goes back to, taken on the first frame the asset is there.
+	if (editable && st.undoPos < 0) pushUndo(st, editable->edit);
+	syncTrimView(st, editable, frames);
+
 	// ── Follow the running voice ─────────────────────────────────────────────
 	// A paused voice is alive but not playing, so it must be excluded from the
 	// finished-voice reaping below — otherwise Pause would free the clip and the
@@ -460,9 +714,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		bar.group();
-		bar.readout(T::iconWave, st.name.c_str());
-		bar.endGroup();
+		T::assetHeader(bar, st.name.c_str(), T::iconWave, st.dirty);
 
 		bar.group();
 		bar.readout(nullptr, st.relPath.c_str(), T::kFgDim);
@@ -473,8 +725,40 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		}
 		bar.endGroup();
 
-		// Right-hand groups stack leftwards: the ruler-unit switch sits flush
-		// right, the transport and the zoom buttons to its left.
+		// Cutting. Trim is an edit of THIS asset — nothing is deleted, it is
+		// undoable and saved with the asset. Extract writes a NEW asset made of
+		// the selected frames and leaves this one as it is.
+		const bool hasSel = st.view.hasSelection();
+		bar.group();
+		if (bar.item("##audiotrim", nullptr, "Trim", false, canEdit && hasSel,
+		             !canEdit ? (st.isRawFile ? "A source file has no asset to keep a trim in — import it first"
+		                                      : "Engine content is read-only — Extract the range instead")
+		                      : hasSel ? "Play only the selection from now on — nothing is deleted"
+		                               : "Select a range to trim the clip to",
+		             "Audio Editor/Trim"))
+		{
+			applyTrim(st, *editable, HE::AudioTrim::fromRange(st.view.selBegin, st.view.selEnd, frames));
+			st.view.playhead = st.view.selBegin;
+			AW::clearSelection(st.view);
+		}
+		if (bar.item("##audiountrim", nullptr, "Clear Trim", false, canEdit && st.view.hasTrim(),
+		             "Play the whole clip again", "Audio Editor/Clear Trim"))
+			applyTrim(st, *editable, HE::AudioTrim{});
+		bar.divider();
+		if (bar.item("##audioextract", nullptr, "Extract", false, hasSel && ctx.contentManager != nullptr,
+		             hasSel ? "Write the selection as a new audio asset beside this one"
+		                    : "Select a range to extract",
+		             "Audio Editor/Extract"))
+			st.extractRequested = true;
+		bar.endGroup();
+		// The buttons above may have changed the trim; the canvas below and the
+		// transport draw this frame's.
+		syncTrimView(st, editable, frames);
+
+		// Right-hand groups stack leftwards: Save sits flush right, then the
+		// ruler-unit switch, the transport and the zoom buttons to its left.
+		if (T::saveButton(bar, st.dirty && editable != nullptr)) saveState(ctx, st);
+
 		bar.rightGroup(bar.labelGroupWidth({ "Samples" }));
 		if (bar.item("##audiosamples", nullptr, "Samples", st.view.rulerInSamples, true,
 		             "Label the ruler in frames instead of time", "Audio Editor/Samples"))
@@ -485,7 +769,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		const bool playing = st.handle != 0 && !st.paused;
 		if (bar.item("##audioplay", playing ? T::iconPause : T::iconPlay, nullptr,
 		             playing, audioReady,
-		             audioReady ? "Play / Pause — the selection if there is one, else the clip"
+		             audioReady ? "Play / Pause — the selection if there is one, else the (trimmed) clip"
 		                        : "No audio device — the editor's audio engine failed to start",
 		             "Audio Editor/Play"))
 		{
@@ -497,7 +781,8 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		             "Audio Editor/Stop"))
 		{
 			stopPreview(st);
-			st.view.playhead = st.view.hasSelection() ? st.view.selBegin : 0;
+			st.view.playhead = st.view.hasSelection() ? st.view.selBegin
+			                 : st.view.hasTrim()      ? st.view.trimBegin : 0;
 		}
 		if (bar.item("##audioloop", T::iconRefresh, nullptr, st.loop, true,
 		             "Loop the selection, or the clip — the seam check says whether the clip's loop clicks",
@@ -595,6 +880,29 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::TextWrapped("The two ends sit at different loudness — the loop will breathe "
 			                   "even without a click. A crossfade fixes both.");
 
+		ImGui::SeparatorText("Cut");
+		if (st.view.hasTrim())
+		{
+			ImGui::Text("Plays %s of %s",
+			            AW::formatTime(static_cast<double>(st.view.trimEnd - st.view.trimBegin) / rate).c_str(),
+			            AW::formatTime(an.durationSec).c_str());
+			ImGui::TextDisabled("Frames %s to %s. Nothing is deleted; Clear Trim brings the rest back.",
+			                    AW::formatFrames(st.view.trimBegin).c_str(),
+			                    AW::formatFrames(st.view.trimEnd).c_str());
+		}
+		else if (st.isRawFile)
+			ImGui::TextDisabled("A source file cannot be trimmed: import it first. Extract works on it as it is.");
+		else if (editsLocked)
+			ImGui::TextDisabled("Engine content is read-only, so it cannot be trimmed here. Extract "
+			                    "writes the selection into the project instead.");
+		else
+			ImGui::TextDisabled("Untrimmed. Select a range and press Trim to play only that.");
+		if (!st.extractStatus.empty())
+			ImGui::TextColored(st.extractFailed ? ImVec4(1.0f, 0.6f, 0.4f, 1.0f) : ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+			                   "%s", st.extractStatus.c_str());
+		if (!st.lastSaveError.empty())
+			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", st.lastSaveError.c_str());
+
 		ImGui::SeparatorText("Preview");
 		if (!audioReady)
 			ImGui::TextDisabled("No audio device.");
@@ -611,27 +919,12 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		{
 			ImGui::SeparatorText("Import");
 			const std::filesystem::path src(assetPath);
-			const bool engineLocked = ctx.contentManager->isEngineDefaultPath(assetPath) &&
-			                          !ContentManager::isEngineContentDevMode();
-
-			// Where the .hasset lands. Normally next to the source; for a locked engine
-			// file there is no writable spot beside it, so it goes to the project's own
-			// Content/Audio — which is somewhere the project can actually reference.
-			std::filesystem::path root, relDir;
-			if (engineLocked)
-			{
-				root   = ctx.contentManager->contentRoot();
-				relDir = "Audio";
-			}
-			else
-			{
-				root = ctx.contentManager->isEngineDefaultPath(assetPath)
-					? std::filesystem::path(ctx.contentManager->engineContentRoot())
-					: std::filesystem::path(ctx.contentManager->contentRoot());
-				std::error_code ec;
-				relDir = std::filesystem::relative(src.parent_path(), root, ec);
-				if (ec || relDir == ".") relDir.clear();
-			}
+			// Where the .hasset lands: next to the source, or the project's own
+			// Content/Audio for a locked engine file (writeTargetFor).
+			const WriteTarget             wt           = writeTargetFor(ctx, assetPath);
+			const bool                    engineLocked = wt.engineLocked;
+			const std::filesystem::path&  root         = wt.root;
+			const std::filesystem::path&  relDir       = wt.relDir;
 
 			const std::string target =
 				(relDir.empty() ? src.stem().string() : (relDir / src.stem()).string()) + ".hasset";
@@ -746,7 +1039,34 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	}
 	ImGui::EndChild();
 
+	// ── Keyboard shortcuts (skip while typing in a field) ────────────────────
+	// The tab's own undo, like the Sequencer's: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or
+	// Ctrl/Cmd+Y, Ctrl/Cmd+S. An undo changes the trim under a running voice, so
+	// it stops the voice the way the Trim button does.
+	const bool typing = ImGui::IsAnyItemActive() || ImGui::GetIO().WantTextInput;
+	if (!typing && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
+	{
+		const ImGuiIO& io   = ImGui::GetIO();
+		const bool     ctrl = io.KeyCtrl || io.KeySuper;
+		if (ctrl && ImGui::IsKeyPressed(ImGuiKey_S) && st.dirty) saveState(ctx, st);
+		if (ctrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z) &&
+		    restoreSnapshot(ctx, st, st.undoPos - 1))
+			stopPreview(st);
+		if (((ctrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)) ||
+		     (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y))) &&
+		    restoreSnapshot(ctx, st, st.undoPos + 1))
+			stopPreview(st);
+	}
+
 	ImGui::End();
+
+	// Deferred to here, see State::extractRequested. `clip` and `editable` are
+	// not used past this point.
+	if (st.extractRequested)
+	{
+		st.extractRequested = false;
+		runExtract(ctx, st, assetPath);
+	}
 }
 
 } // namespace AudioEditorPanel

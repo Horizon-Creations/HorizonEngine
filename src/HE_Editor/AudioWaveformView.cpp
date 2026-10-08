@@ -218,6 +218,11 @@ PlayRange playRange(const View& v, size_t frames)
 		r.begin = v.selBegin;
 		r.end   = std::min(v.selEnd, frames);
 	}
+	else if (v.hasTrim() && v.trimBegin < frames)
+	{
+		r.begin = v.trimBegin;
+		r.end   = std::min(v.trimEnd, frames);
+	}
 	else
 	{
 		r.begin = 0;
@@ -298,6 +303,10 @@ std::string readout(const View& v, const Clip& clip, double hoverFrame)
 	}
 	else
 		s += "   \xc2\xb7   No selection";
+	if (v.hasTrim())
+		s += "   \xc2\xb7   Trimmed to " + formatTime(double(v.trimBegin) / rate) + " to " +
+		     formatTime(double(v.trimEnd) / rate) + " (frames " + formatFrames(v.trimBegin) +
+		     " to " + formatFrames(v.trimEnd) + ")";
 	if (hoverFrame >= 0.0)
 	{
 		const size_t f = size_t(std::min(hoverFrame, double(clip.frames)));
@@ -335,6 +344,9 @@ namespace
 	const ImU32 kOverWave  = IM_COL32(110, 200, 255, 120);
 	const ImU32 kOverWin   = IM_COL32(255, 255, 255, 30);
 	const ImU32 kOverWinLn = IM_COL32(255, 255, 255, 120);
+	// Outside the trim: the clip is still there, it just does not play.
+	const ImU32 kTrimShade = IM_COL32(8, 8, 10, 170);
+	const ImU32 kTrimEdge  = IM_COL32(255, 120, 90, 220);
 
 	// 1-2-5 steps in frames for the sample ruler.
 	double frameTickStep(double framesPerPx)
@@ -665,6 +677,20 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 		}
 	}
 
+	// The trim, OVER the waveform: what does not play is shaded, so the part
+	// that does reads at a glance and the samples cut away stay visible.
+	if (view.hasTrim())
+	{
+		const float tx0 = xAt(double(view.trimBegin));
+		const float tx1 = xAt(double(std::min(view.trimEnd, frames)));
+		if (tx0 > origin.x)
+			dl->AddRectFilled(ImVec2(origin.x, rulerBottom), ImVec2(std::min(tx0, right), br.y), kTrimShade);
+		if (tx1 < right)
+			dl->AddRectFilled(ImVec2(std::max(tx1, origin.x), rulerBottom), br, kTrimShade);
+		dl->AddLine(ImVec2(tx0, origin.y), ImVec2(tx0, br.y), kTrimEdge, 1.5f);
+		dl->AddLine(ImVec2(tx1, origin.y), ImVec2(tx1, br.y), kTrimEdge, 1.5f);
+	}
+
 	// Pointer line (only while nothing is being dragged), then the playhead.
 	if (lanesHovered && view.drag == View::Drag::None)
 		dl->AddLine(ImVec2(mouse.x, rulerBottom), ImVec2(mouse.x, br.y), IM_COL32(255, 255, 255, 50));
@@ -713,6 +739,13 @@ Result draw(const Clip& clip, const Peaks& peaks, View& view, const ImVec2& size
 			dl->AddRectFilled(ImVec2(ox(double(view.selBegin)), o0.y),
 			                  ImVec2(std::max(ox(double(view.selEnd)), ox(double(view.selBegin)) + 1.0f), o1.y),
 			                  kSelFill);
+		if (view.hasTrim())
+		{
+			const float tx0 = ox(double(view.trimBegin));
+			const float tx1 = ox(double(std::min(view.trimEnd, frames)));
+			dl->AddRectFilled(o0, ImVec2(tx0, o1.y), kTrimShade);
+			dl->AddRectFilled(ImVec2(tx1, o0.y), o1, kTrimShade);
+		}
 		const float wx0 = ox(view.viewStart);
 		const float wx1 = std::max(wx0 + 4.0f, ox(viewEnd));
 		dl->AddRectFilled(ImVec2(wx0, o0.y), ImVec2(wx1, o1.y), kOverWin);

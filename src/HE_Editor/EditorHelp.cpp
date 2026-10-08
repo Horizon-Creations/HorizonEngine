@@ -6751,15 +6751,37 @@ namespace
 	  "or click beside it to bring that part of the clip into view.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Play", "Play / Pause",
-	  "Plays the selection if there is one, otherwise the whole clip, starting "
-	  "at the playhead when it sits inside that range and at its start when it "
+	  "Plays the selection if there is one, otherwise the clip as the game plays "
+	  "it: the trimmed part, or all of it when it has no trim. It starts at the "
+	  "playhead when that sits inside the range and at the range's start when it "
 	  "does not. With Loop on, the selection repeats on its own. Marking a new "
 	  "selection while it plays restarts playback on the new range. Pause "
 	  "keeps the position. Greyed out when the editor has no audio device.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Stop", "",
 	  "Stops playback and puts the playhead back to the start of the selection, "
-	  "or of the clip when nothing is selected.",
+	  "or of the trim, or of the clip when there is neither.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Trim", "Trim to Selection",
+	  "Keeps only the selected range: from now on the clip plays from the start "
+	  "of the selection to its end, in this tab and wherever the game plays it. "
+	  "Nothing is deleted. The rest stays in the asset, shaded on the waveform, "
+	  "and Clear Trim brings it back. Ctrl+Z (Cmd+Z) undoes it, and Save writes "
+	  "it into the asset. Only an imported asset can be trimmed: a source "
+	  ".wav or .ogg has nowhere to keep a trim, and engine content is read-only.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Clear Trim", "",
+	  "Removes the trim, so the whole clip plays again. Undoable like the trim "
+	  "itself.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Extract", "Extract Selection",
+	  "Writes the selected range as a new audio asset next to this one, named "
+	  "after it with _extract (then _extract_2 and so on, never over an existing "
+	  "file). The new asset is PCM with exactly the selected frames, a new id of "
+	  "its own and the same bus and EQ. Over its range it also keeps the volume "
+	  "curve. The clip you cut from is left exactly as it was. The new asset has "
+	  "no source file, so Reimport cannot overwrite it with the whole recording. "
+	  "Engine content goes into the project's own Content/Audio.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Loop", "",
 	  "Whether playback wraps round at the end or stops there. With a selection "

@@ -331,7 +331,8 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
                                   int sampleRate, int channels,
                                   float volume, float pitch, bool loop,
                                   const std::string& busName,
-                                  const SpatialParams* spatial)
+                                  const SpatialParams* spatial,
+                                  const HE::AudioTrim* trim)
 {
     if (!m_initialized)
     {
@@ -412,6 +413,29 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
         snd->source   = &snd->buffer;
     }
 
+    // The asset's trim: the data source's range, which miniaudio honours for the
+    // PCM buffer and the Vorbis decoder alike — reading, looping (loop points are
+    // relative to the range) and seeking all stay inside it, and cursor/length
+    // count from its start. Set before the sound exists, so not a frame outside
+    // the range is ever mixed. A Vorbis stream whose length the decoder cannot
+    // tell (0) keeps "to the end" as an open end rather than resolving against 0.
+    bool trimmed = false;
+    if (trim && !trim->isDefault())
+    {
+        ma_uint64 beg = trim->startFrame;
+        ma_uint64 end = trim->endFrame == 0 ? ~static_cast<ma_uint64>(0) : trim->endFrame;
+        if (frameCount > 0)
+        {
+            const HE::AudioTrim::Range r = trim->resolve(frameCount);
+            beg = r.begin;
+            end = r.end;
+        }
+        trimmed = ma_data_source_set_range_in_pcm_frames(snd->source, beg, end) == MA_SUCCESS;
+        if (!trimmed)
+            HE_LOG_WARN(Audio, "Could not apply the clip's trim [%llu, %llu) — playing it whole",
+                        static_cast<unsigned long long>(beg), static_cast<unsigned long long>(end));
+    }
+
     // Route through bus if found, otherwise null (master)
     ma_sound_group* busGroup = nullptr;
     if (!busName.empty()) {
@@ -460,12 +484,13 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
     uint64_t handle = m_nextHandle++;
     m_impl->sounds.emplace(handle, std::move(snd));
 
-    HE_LOG_TRACE(Audio, "Started %s %s sound #%llu: %llu frames, %d Hz, %d ch, vol %.2f, "
+    HE_LOG_TRACE(Audio, "Started %s %s sound #%llu: %llu frames%s, %d Hz, %d ch, vol %.2f, "
                         "pitch %.2f%s, bus '%s'",
                  spatial ? "spatial" : "2D",
                  encoding == AudioEncoding::Vorbis ? "Vorbis (streamed)" : "PCM",
                  static_cast<unsigned long long>(handle),
-                 static_cast<unsigned long long>(frameCount), sampleRate, channels,
+                 static_cast<unsigned long long>(frameCount), trimmed ? " (trimmed)" : "",
+                 sampleRate, channels,
                  volume, pitch, loop ? ", looping" : "",
                  busName.empty() ? "master" : busName.c_str());
 
@@ -490,7 +515,7 @@ uint64_t AudioEngine::play(const AudioAsset& clip,
                             const std::string& busName)
 {
     return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
-                      volume, pitch, loop, busName, nullptr);
+                      volume, pitch, loop, busName, nullptr, &clip.edit.trim);
 }
 
 void AudioEngine::stop(uint64_t handle)
@@ -530,7 +555,7 @@ uint64_t AudioEngine::playSpatial(const AudioAsset& clip,
 {
     const SpatialParams sp{ x, y, z, minDist, maxDist, attenuation, rolloff };
     return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
-                      volume, pitch, loop, busName, &sp);
+                      volume, pitch, loop, busName, &sp, &clip.edit.trim);
 }
 
 void AudioEngine::setSoundPosition(uint64_t handle, float x, float y, float z)

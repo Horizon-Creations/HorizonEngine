@@ -810,6 +810,7 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       BlendSpacePanel::isDirty(assetPath)          ||
 	       SequencerPanel::isDirty(assetPath)           ||
        CinematicPanel::isDirty(assetPath)           ||
+	       AudioEditorPanel::isDirty(assetPath)         ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
 	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
 	       SkeletalMeshEditorPanel::isDirty(assetPath);
@@ -835,6 +836,7 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	BlendSpacePanel::appendDirtyPaths(out);
 	SequencerPanel::appendDirtyPaths(out);
 	CinematicPanel::appendDirtyPaths(out);
+	AudioEditorPanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
 	SkeletalMeshEditorPanel::appendDirtyPaths(out);
@@ -864,6 +866,7 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = BlendSpacePanel::save(ctx, assetPath)                       && ok;
 	ok = SequencerPanel::save(ctx, assetPath)                        && ok;
 	ok = CinematicPanel::save(ctx, assetPath)                        && ok;
+	ok = AudioEditorPanel::save(ctx, assetPath)                      && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
 	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
@@ -888,6 +891,7 @@ void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSn
 	BoneMaskPanel::appendSnapshots(ctx, out);
 	BlendSpacePanel::appendSnapshots(ctx, out);
 	SequencerPanel::appendSnapshots(ctx, out);
+	AudioEditorPanel::appendSnapshots(ctx, out);
 	ParticleGraphEditorPanel::appendSnapshots(ctx, out);
 	AnimatorStateMachineEditorPanel::appendSnapshots(ctx, out);
 	SkeletalMeshEditorPanel::appendSnapshots(ctx, out);
@@ -1025,6 +1029,7 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 	any = BlendSpacePanel::reloadFromDisk(assetPath)                      || any;
 	any = SequencerPanel::reloadFromDisk(assetPath)                       || any;
 	any = CinematicPanel::reloadFromDisk(assetPath)                       || any;
+	any = AudioEditorPanel::reloadFromDisk(assetPath)                     || any;
 	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
 	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
 	return any;

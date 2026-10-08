@@ -99,6 +99,17 @@ AudioTrim::Range AudioTrim::resolve(uint64_t totalFrames) const
 	return r;
 }
 
+AudioTrim AudioTrim::fromRange(uint64_t begin, uint64_t end, uint64_t totalFrames)
+{
+	end   = std::min(end, totalFrames);
+	begin = std::min(begin, end);
+	if (begin >= end || (begin == 0 && end == totalFrames)) return AudioTrim{};
+	AudioTrim t;
+	t.startFrame = begin;
+	t.endFrame   = end == totalFrames ? 0 : end;
+	return t;
+}
+
 // ─── Envelope ─────────────────────────────────────────────────────────────────
 
 void AudioEnvelope::sort()
@@ -146,6 +157,39 @@ float AudioEnvelope::evalGain(double tSec) const
 		break;
 	}
 	return static_cast<float>(a.gain + (b.gain - a.gain) * f);
+}
+
+AudioEnvelope AudioEnvelope::slice(double t0Sec, double t1Sec) const
+{
+	AudioEnvelope out;
+	if (points.empty()) return out;
+	if (t1Sec < t0Sec) std::swap(t0Sec, t1Sec);
+
+	// The interpolation of the segment that `t` falls in: its left point's, or
+	// Linear before the first point (where the curve is flat anyway).
+	auto interpAt = [&](double t)
+	{
+		const auto next = std::upper_bound(points.begin(), points.end(), t,
+		                                   [](double x, const AudioEnvelopePoint& p) { return x < p.timeSec; });
+		return next == points.begin() ? AudioCurveInterp::Linear : (next - 1)->interp;
+	};
+
+	bool startPinned = false, endPinned = false;
+	for (const AudioEnvelopePoint& p : points)
+	{
+		if (p.timeSec < t0Sec || p.timeSec > t1Sec) continue;
+		startPinned = startPinned || p.timeSec == t0Sec;
+		endPinned   = endPinned   || p.timeSec == t1Sec;
+		AudioEnvelopePoint q = p;
+		q.timeSec = p.timeSec - t0Sec;
+		out.points.push_back(q);
+	}
+	if (!startPinned)
+		out.points.insert(out.points.begin(),
+		                  AudioEnvelopePoint{ 0.0, evalGain(t0Sec), interpAt(t0Sec) });
+	if (!endPinned)
+		out.points.push_back(AudioEnvelopePoint{ t1Sec - t0Sec, evalGain(t1Sec), interpAt(t1Sec) });
+	return out;
 }
 
 void AudioEnvelope::toJson(nlohmann::json& out) const
@@ -333,6 +377,15 @@ bool AudioEdit::isDefault() const
 	// eq.bands rather than eq.isNeutral(): a band somebody placed at 0 dB is
 	// still authored (they will drag it next), so the chunk keeps it.
 	return trim.isDefault() && envelope.empty() && bus.empty() && eq.bands.empty() && eq.enabled;
+}
+
+AudioEdit AudioEdit::forRange(double t0Sec, double t1Sec) const
+{
+	AudioEdit out;
+	out.envelope = envelope.slice(t0Sec, t1Sec);
+	out.bus      = bus;
+	out.eq       = eq;
+	return out;
 }
 
 std::string AudioEdit::resolveBus(const std::string& componentBus, const std::string& assetBus,

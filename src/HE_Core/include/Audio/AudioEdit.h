@@ -56,6 +56,14 @@ struct HE_API AudioTrim
 	// plays nothing is a bug report.
 	Range resolve(uint64_t totalFrames) const;
 
+	// The trim that keeps exactly [begin, end) of a clip of `totalFrames` — what
+	// the editor's "Trim to Selection" stores. Normalised so the file says no more
+	// than it has to: an end at (or past) the clip's end is stored as 0 ("to the
+	// end", which survives a re-import that makes the clip longer), and a range
+	// covering the whole clip is the default trim, so trimming to everything
+	// leaves an untouched asset untouched. An empty range is the default too.
+	static AudioTrim fromRange(uint64_t begin, uint64_t end, uint64_t totalFrames);
+
 	bool isDefault() const { return startFrame == 0 && endFrame == 0; }
 };
 
@@ -98,6 +106,15 @@ struct HE_API AudioEnvelope
 
 	void sort();
 	bool empty() const { return points.empty(); }
+
+	// The curve over [t0Sec, t1Sec] moved to start at 0 — what a clip cut out
+	// of that range carries. Points inside are kept (shifted); where no point
+	// sits on an end, one is added there holding the gain the curve has at that
+	// moment, with the interpolation of the segment it cuts. That is exact for
+	// Linear, Hold and Exponential segments (a piece of a straight line is a
+	// straight line); a Smooth segment cut in two restarts its ease on the piece.
+	// An empty curve stays empty.
+	AudioEnvelope slice(double t0Sec, double t1Sec) const;
 
 	void toJson(nlohmann::json& out) const;    // a JSON array
 	void fromJson(const nlohmann::json& in);   // anything but an array → empty
@@ -213,6 +230,13 @@ struct HE_API AudioEdit
 
 	// The curve's gain at `tSec` seconds into the ORIGINAL clip.
 	float evalGain(double tSec) const { return envelope.evalGain(tSec); }
+
+	// The edit a new clip cut out of [t0Sec, t1Sec) of this one starts with
+	// (the Audio Editor's Extract). Bus and EQ come along — they say what kind of
+	// sound it is and where it is mixed. The curve comes along over that range
+	// (AudioEnvelope::slice), so the extract sounds as the range did. The trim
+	// does not: the extract IS the cut, and its frames start at 0.
+	AudioEdit forRange(double t0Sec, double t1Sec) const;
 
 	// Which bus a voice of this clip plays through. Precedence: the component's
 	// own busName (an explicit per-source choice) if the project has that bus,

@@ -239,6 +239,49 @@ TEST_CASE("audio waveform: selection and what Play plays")
 	CHECK(playRange(v, frames).start == 20'000);
 }
 
+TEST_CASE("audio waveform: a trim is what Play plays when nothing is selected")
+{
+	const size_t frames = 96'000;
+	View v;
+	CHECK_FALSE(v.hasTrim());
+
+	// Trimmed to [12'000, 60'000): Play without a selection plays that range,
+	// as a voice of the asset in the game does.
+	v.trimBegin = 12'000;
+	v.trimEnd   = 60'000;
+	REQUIRE(v.hasTrim());
+	v.playhead = 30'000;
+	PlayRange r = playRange(v, frames);
+	CHECK(r.begin == 12'000);
+	CHECK(r.end == 60'000);
+	CHECK(r.start == 30'000);
+	// A playhead in the cut-away part starts at the trim's start.
+	v.playhead = 70'000;
+	CHECK(playRange(v, frames).start == 12'000);
+	v.playhead = 1'000;
+	CHECK(playRange(v, frames).start == 12'000);
+
+	// A selection still wins — even one outside the trim: auditioning a part
+	// that was cut away is how you decide to bring it back.
+	select(v, 70'000, 80'000, frames);
+	r = playRange(v, frames);
+	CHECK(r.begin == 70'000);
+	CHECK(r.end == 80'000);
+
+	// The readout says what the trim is, in time and frames.
+	clearSelection(v);
+	TestClip t(frames, 1, 48'000);
+	const std::string s = readout(v, t.clip, -1.0);
+	CHECK(s.find("Trimmed to 0:00.250 to 0:01.250 (frames 12,000 to 60,000)") != std::string::npos);
+
+	// Untrimmed again: the whole clip.
+	v.trimBegin = v.trimEnd = 0;
+	r = playRange(v, frames);
+	CHECK(r.begin == 0);
+	CHECK(r.end == frames);
+	CHECK(readout(v, t.clip, -1.0).find("Trimmed") == std::string::npos);
+}
+
 TEST_CASE("audio waveform: time and frame readouts")
 {
 	CHECK(formatTime(0.0) == "0:00.000");

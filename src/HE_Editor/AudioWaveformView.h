@@ -107,6 +107,13 @@ namespace HE::Ed::AudioWave
 
 		bool rulerInSamples = false;   // ruler labels: time (default) or frame numbers
 
+		// The clip's trim (AudioEdit, stored on the asset) as the canvas shows it:
+		// [trimBegin, trimEnd) is what plays, everything outside it is drawn
+		// dimmed. Both 0 = untrimmed. The panel copies it in from the asset every
+		// frame; nothing in here edits it.
+		size_t trimBegin = 0;
+		size_t trimEnd   = 0;
+
 		// Interaction in flight; not meant to be set from outside. Grabbing a
 		// selection edge is a Select drag anchored on the OTHER edge, so the two
 		// edges may cross mid-drag without a special case.
@@ -119,6 +126,7 @@ namespace HE::Ed::AudioWave
 		size_t pressSelBegin = 0, pressSelEnd = 0;   // the selection at the press, to tell a real change
 
 		bool   hasSelection() const { return selEnd > selBegin; }
+		bool   hasTrim() const { return trimEnd > trimBegin; }
 		size_t selectionLength() const { return hasSelection() ? selEnd - selBegin : 0; }
 	};
 
@@ -148,7 +156,8 @@ namespace HE::Ed::AudioWave
 	void   select(View& v, size_t a, size_t b, size_t frames);
 	void   clearSelection(View& v);
 
-	// What Play plays: the selection if there is one, else the whole clip.
+	// What Play plays: the selection if there is one, else the trimmed clip
+	// (the whole clip when it has no trim) — what a voice of the asset plays.
 	struct PlayRange { size_t begin = 0, end = 0, start = 0; };
 	// `start` is where in the range playback begins: the playhead when it sits
 	// inside the range, else the range's start. A playhead parked at the very

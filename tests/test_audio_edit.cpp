@@ -5,6 +5,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/HAsset.h>
 #include "ImporterCommon.h"   // importSource — the re-import keeps the edits
+#include "AudioImporter.h"    // extractRange — Extract Selection
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <random>
 #include <string>
 #include <vector>
@@ -476,4 +478,272 @@ TEST_CASE("AudioImporter: a re-import replaces the samples and keeps the edits")
 	REQUIRE(again);
 	CHECK(again->audioData.size() == 3000 * 2);   // new samples …
 	CHECK(sameEdit(again->edit, edit));           // … same edits
+}
+
+// ─── Cutting (Thema 168, step 3): Trim to Selection and Extract ─────────────
+// The Audio Editor's two cuts. Trim is an edit of the asset (AudioTrim, stored
+// in CHUNK_AUED); Extract writes the selected frames as a NEW asset through
+// AudioImporter. Both promise that the samples they were cut from never change.
+
+namespace
+{
+	// 16-bit PCM WAV with `channels` channels; every sample is distinct from its
+	// neighbours (frame and channel both move it), so a slice that is one frame
+	// or one channel off compares unequal.
+	bool writeWavN(const fs::path& file, int frames, int rate, int channels)
+	{
+		std::ofstream f(file, std::ios::binary | std::ios::trunc);
+		if (!f) return false;
+		auto u32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+		auto u16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+		const uint32_t blockAlign = static_cast<uint32_t>(channels) * 2;
+		const uint32_t dataBytes  = static_cast<uint32_t>(frames) * blockAlign;
+		f.write("RIFF", 4); u32(36 + dataBytes); f.write("WAVE", 4);
+		f.write("fmt ", 4); u32(16); u16(1); u16(static_cast<uint16_t>(channels));
+		u32(static_cast<uint32_t>(rate)); u32(static_cast<uint32_t>(rate) * blockAlign);
+		u16(static_cast<uint16_t>(blockAlign)); u16(16);
+		f.write("data", 4); u32(dataBytes);
+		for (int i = 0; i < frames; ++i)
+			for (int c = 0; c < channels; ++c)
+				u16(static_cast<uint16_t>(static_cast<int16_t>(i * 7 + c * 3001 + 1)));
+		return static_cast<bool>(f);
+	}
+
+	std::vector<uint8_t> fileBytes(const fs::path& file)
+	{
+		std::ifstream f(file, std::ios::binary);
+		return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	}
+
+	size_t filesIn(const fs::path& dir)
+	{
+		size_t n = 0;
+		for (const auto& e : fs::directory_iterator(dir)) n += e.is_regular_file() ? 1 : 0;
+		return n;
+	}
+}
+
+TEST_CASE("AudioTrim::fromRange: stores no more than it must")
+{
+	const uint64_t total = 1000;
+
+	// The whole clip, an empty range and a range past the end that clamps to the
+	// whole clip are all "untrimmed" — trimming to everything leaves an
+	// untouched asset untouched (no edit chunk).
+	CHECK(AudioTrim::fromRange(0, total, total).isDefault());
+	CHECK(AudioTrim::fromRange(0, total + 50, total).isDefault());
+	CHECK(AudioTrim::fromRange(300, 300, total).isDefault());
+	CHECK(AudioTrim::fromRange(700, 200, total).isDefault());   // backwards = empty
+
+	// A head cut ends "at the end": 0, which survives a longer re-import.
+	const AudioTrim head = AudioTrim::fromRange(250, total, total);
+	CHECK(head.startFrame == 250);
+	CHECK(head.endFrame   == 0);
+
+	const AudioTrim mid = AudioTrim::fromRange(100, 200, total);
+	CHECK(mid.startFrame == 100);
+	CHECK(mid.endFrame   == 200);
+	const AudioTrim::Range r = mid.resolve(total);
+	CHECK(r.begin == 100);
+	CHECK(r.end   == 200);
+
+	const AudioTrim tail = AudioTrim::fromRange(0, 1, total);   // a single frame
+	CHECK(tail.resolve(total).begin == 0);
+	CHECK(tail.resolve(total).end   == 1);
+}
+
+TEST_CASE("AudioEnvelope::slice and AudioEdit::forRange: what an extract carries")
+{
+	SUBCASE("an empty curve stays empty")
+	{
+		CHECK(AudioEnvelope{}.slice(0.5, 1.5).empty());
+	}
+	SUBCASE("the cut-out range sounds as it did, from 0")
+	{
+		AudioEnvelope e;
+		e.points = { { 0.0, 1.0f, AudioCurveInterp::Linear },
+		             { 1.0, 0.5f, AudioCurveInterp::Exponential },
+		             { 2.0, 0.125f, AudioCurveInterp::Hold },
+		             { 3.0, 1.0f, AudioCurveInterp::Linear } };
+		const AudioEnvelope s = e.slice(0.5, 2.5);
+		// Boundary points at 0 and 2.0, the two inner points shifted by 0.5.
+		REQUIRE(s.points.size() == 4);
+		CHECK(s.points.front().timeSec == doctest::Approx(0.0));
+		CHECK(s.points.back().timeSec  == doctest::Approx(2.0));
+		CHECK(s.points[1].timeSec == doctest::Approx(0.5));
+		CHECK(s.points[2].timeSec == doctest::Approx(1.5));
+		CHECK(s.points.front().interp == AudioCurveInterp::Linear);   // the segment it cuts
+		CHECK(s.points.back().interp  == AudioCurveInterp::Hold);
+		// Linear, Exponential and Hold pieces are exact: the slice at t equals
+		// the original at t + 0.5 everywhere in the range.
+		for (double t = 0.0; t <= 2.0; t += 0.0625)
+			CHECK(s.evalGain(t) == doctest::Approx(e.evalGain(t + 0.5)).epsilon(1e-5));
+	}
+	SUBCASE("points on the ends are kept, not doubled")
+	{
+		AudioEnvelope e;
+		e.points = { { 1.0, 0.25f, AudioCurveInterp::Linear }, { 2.0, 1.0f, AudioCurveInterp::Linear } };
+		const AudioEnvelope s = e.slice(1.0, 2.0);
+		REQUIRE(s.points.size() == 2);
+		CHECK(s.points[0].gain == doctest::Approx(0.25f));
+		CHECK(s.points[1].timeSec == doctest::Approx(1.0));
+	}
+	SUBCASE("forRange: bus and EQ come along, the trim does not")
+	{
+		const AudioEdit src = sampleEdit();
+		const AudioEdit out = src.forRange(0.25, 1.75);
+		CHECK(out.trim.isDefault());
+		CHECK(out.bus == src.bus);
+		CHECK(out.eq.bands.size() == src.eq.bands.size());
+		CHECK(out.eq.enabled == src.eq.enabled);
+		CHECK(out.evalGain(1.0) == doctest::Approx(src.evalGain(1.25)).epsilon(1e-5));
+	}
+}
+
+TEST_CASE("Trim saved through the ContentManager: only the edit chunk changes")
+{
+	TempDir root("he_test_audio_trim_save");
+	TempDir src("he_test_audio_trim_src");
+	const fs::path wav = src.path / "Wind.wav";
+	REQUIRE(writeWavN(wav, 9000, 48000, 2));
+	REQUIRE(Importer::importSource(wav, root.path, "Audio"));
+	const fs::path file = root.path / "Audio/Wind.hasset";
+
+	std::vector<uint8_t> pcmBefore;
+	REQUIRE(Importer::readAssetChunk(file, HAsset::CHUNK_PCMD, pcmBefore));
+	const std::string sourceBefore = Importer::sourceFileOf(file);
+	CHECK(!sourceBefore.empty());
+
+	// What the Audio Editor does: the loaded asset IS the edit buffer.
+	{
+		ContentManager cm(root.path.string());
+		const UUID id = cm.loadAsset("Audio/Wind.hasset");
+		AudioAsset* a = cm.getAudioMutable(id);
+		REQUIRE(a);
+		a->edit.trim = AudioTrim::fromRange(1234, 5678, audioPcmFrameCount(*a));
+		REQUIRE(cm.saveAsset(*a));
+	}
+
+	std::vector<uint8_t> pcmAfter;
+	REQUIRE(Importer::readAssetChunk(file, HAsset::CHUNK_PCMD, pcmAfter));
+	const bool samplesKept = pcmAfter == pcmBefore;   // a bool: CHECK on the vectors prints megabytes
+	CHECK(samplesKept);                               // the samples are not cut
+	CHECK(Importer::sourceFileOf(file) == sourceBefore);   // Reimport still knows its source
+
+	ContentManager cm(root.path.string());
+	const AudioAsset* back = cm.getAudio(cm.loadAsset("Audio/Wind.hasset"));
+	REQUIRE(back);
+	CHECK(back->edit.trim.startFrame == 1234);
+	CHECK(back->edit.trim.endFrame   == 5678);
+	CHECK(audioPcmFrameCount(*back) == 9000);
+}
+
+TEST_CASE("AudioImporter::extractRange: sample-exact, a new asset, the original byte-identical")
+{
+	TempDir root("he_test_audio_extract");
+	TempDir src("he_test_audio_extract_src");
+	const int frames = 48001, rate = 48000, channels = 2;
+	const fs::path wav = src.path / "Rain.wav";
+	REQUIRE(writeWavN(wav, frames, rate, channels));
+	REQUIRE(Importer::importSource(wav, root.path, "Audio"));
+	const std::string origRel  = "Audio/Rain.hasset";
+	const fs::path    origFile = root.path / origRel;
+
+	// Give the original an edit, so there is something for the extract to carry.
+	{
+		ContentManager cm(root.path.string());
+		AudioAsset* a = cm.getAudioMutable(cm.loadAsset(origRel));
+		REQUIRE(a);
+		a->edit = sampleEdit();
+		REQUIRE(cm.saveAsset(*a));
+	}
+	const std::vector<uint8_t> origBefore = fileBytes(origFile);
+	REQUIRE(!origBefore.empty());
+
+	ContentManager cm(root.path.string());
+	const UUID origId = cm.loadAsset(origRel);
+	const AudioAsset* clip = cm.getAudio(origId);
+	REQUIRE(clip);
+	REQUIRE(audioPcmFrameCount(*clip) == static_cast<size_t>(frames));
+	const size_t bpf = sizeof(int16_t) * channels;
+	// Copied out before anything below runs: the pointer is the ContentManager's.
+	const std::vector<uint8_t> origPcm  = clip->audioData;
+	const AudioEdit            origEdit = clip->edit;
+
+	auto loadExtract = [&](const std::string& rel, AudioAsset& out)
+	{
+		ContentManager fresh(root.path.string());
+		const AudioAsset* a = fresh.getAudio(fresh.loadAsset(rel));
+		if (!a) return false;
+		out = *a;
+		return true;
+	};
+
+	SUBCASE("an odd range up to the very last frame")
+	{
+		const uint64_t b = 1237, e = static_cast<uint64_t>(frames);
+		AudioImporter::ExtractResult r;
+		REQUIRE(AudioImporter::extractRange(*clip, b, e, root.path, "Audio", "Rain_extract",
+		                                    origEdit.forRange(double(b) / rate, double(e) / rate), r));
+		CHECK(r.path == "Audio/Rain_extract.hasset");
+		CHECK(r.frames == e - b);
+		CHECK(r.id != UUID{});
+		CHECK(r.id != origId);
+
+		AudioAsset x;
+		REQUIRE(loadExtract(r.path, x));
+		CHECK(x.id == r.id);
+		CHECK(x.encoding == AudioEncoding::PCM16);
+		CHECK(x.sampleRate == rate);
+		CHECK(x.channels == channels);
+		CHECK(audioPcmFrameCount(x) == e - b);   // the extracted length
+		// Sample-exact: the bytes are the original's [b, e) and nothing else.
+		const std::vector<uint8_t> expect(origPcm.begin() + std::ptrdiff_t(b * bpf),
+		                                  origPcm.begin() + std::ptrdiff_t(e * bpf));
+		const bool exact = x.audioData == expect;
+		CHECK(exact);
+		// Carried: bus and EQ; not carried: the trim, and the source — a Reimport
+		// must not turn the extract back into the whole recording.
+		CHECK(x.edit.bus == "Music");
+		CHECK(x.edit.eq.bands.size() == origEdit.eq.bands.size());
+		CHECK(x.edit.trim.isDefault());
+		CHECK(Importer::sourceFileOf(root.path / r.path).empty());
+	}
+	SUBCASE("from frame 0, then a name collision, then the whole clip")
+	{
+		AudioImporter::ExtractResult r1, r2, r3;
+		REQUIRE(AudioImporter::extractRange(*clip, 0, 1, root.path, "Audio", "Rain_extract", {}, r1));
+		REQUIRE(AudioImporter::extractRange(*clip, 0, 1, root.path, "Audio", "Rain_extract", {}, r2));
+		REQUIRE(AudioImporter::extractRange(*clip, 0, frames, root.path, "Audio", "Rain_extract", {}, r3));
+		CHECK(r1.path == "Audio/Rain_extract.hasset");
+		CHECK(r2.path == "Audio/Rain_extract_2.hasset");   // never over an existing file
+		CHECK(r3.path == "Audio/Rain_extract_3.hasset");
+		CHECK(r1.id != r2.id);
+
+		AudioAsset one, all;
+		REQUIRE(loadExtract(r2.path, one));
+		REQUIRE(audioPcmFrameCount(one) == 1);
+		CHECK(std::equal(one.audioData.begin(), one.audioData.end(), origPcm.begin()));
+		REQUIRE(loadExtract(r3.path, all));
+		const bool whole = all.audioData == origPcm;
+		CHECK(whole);
+	}
+	SUBCASE("nothing is written for a range it cannot cut")
+	{
+		const size_t before = filesIn(root.path / "Audio");
+		AudioImporter::ExtractResult r;
+		CHECK_FALSE(AudioImporter::extractRange(*clip, 500, 500, root.path, "Audio", "Rain_extract", {}, r));
+		CHECK_FALSE(AudioImporter::extractRange(*clip, 600, 500, root.path, "Audio", "Rain_extract", {}, r));
+		CHECK_FALSE(AudioImporter::extractRange(*clip, 0, frames + 1, root.path, "Audio", "Rain_extract", {}, r));
+		AudioAsset vorbis = *clip;
+		vorbis.encoding = AudioEncoding::Vorbis;   // a compressed stream cannot be cut here
+		CHECK_FALSE(AudioImporter::extractRange(vorbis, 0, 10, root.path, "Audio", "Rain_extract", {}, r));
+		CHECK(filesIn(root.path / "Audio") == before);
+		CHECK(r.path.empty());
+	}
+
+	// Whatever was extracted, the clip it was cut from is the same file, byte
+	// for byte — not merely the same samples.
+	const bool untouched = fileBytes(origFile) == origBefore;
+	CHECK(untouched);
 }

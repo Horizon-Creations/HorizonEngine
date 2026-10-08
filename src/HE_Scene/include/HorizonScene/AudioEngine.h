@@ -74,7 +74,12 @@ public:
 
     // ─── Playback ────────────────────────────────────────────────────────────
 
-    // Play a clip asset, whatever its encoding. PCM16 copies the samples into
+    // Play a clip asset, whatever its encoding. The asset's trim (edit.trim, set
+    // in the Audio Editor) is honoured: the voice plays — and loops — only that
+    // range, and its cursor, length and seek count from the trim's start, so
+    // "frames of what was played" (see getSoundCursorFrames) stays true. The
+    // samples themselves are not cut; an untrimmed clip plays exactly as before.
+    // PCM16 copies the samples into
     // the voice (as the raw overload below); Vorbis copies only the Ogg bytes
     // and decodes them as the mixer pulls frames, so a five-minute track costs
     // its compressed size per voice, not its PCM size. Both copy because the
@@ -140,7 +145,8 @@ public:
     // Everything below is a no-op (or 0) for an unknown handle.
 
     // Playback position and total length, both in SOURCE PCM frames — i.e. frames
-    // of the buffer that was handed to play(), not of the engine's output rate. So
+    // of the buffer that was handed to play() (for a trimmed asset: of the trimmed
+    // range, from its start), not of the engine's output rate. So
     // `cursor / asset.sampleRate` is the position in seconds no matter what pitch
     // the sound is running at, and no resampler compensation is needed anywhere.
     uint64_t getSoundCursorFrames(uint64_t handle) const;
@@ -207,10 +213,12 @@ private:
     // flag and in the positional setup applied before the sound starts.
     // spatial == nullptr ⇒ non-spatial (play()). `bytes` are interpreted by
     // `encoding` (PCM16 needs sampleRate/channels, Vorbis carries its own).
+    // `trim`: the asset's AudioTrim (the asset overloads pass it, the raw-PCM
+    // ones nullptr) — the voice plays only that range, see play(const AudioAsset&).
     uint64_t startSound(const std::vector<uint8_t>& bytes, AudioEncoding encoding,
                         int sampleRate, int channels,
                         float volume, float pitch, bool loop, const std::string& busName,
-                        const SpatialParams* spatial);
+                        const SpatialParams* spatial, const HE::AudioTrim* trim = nullptr);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

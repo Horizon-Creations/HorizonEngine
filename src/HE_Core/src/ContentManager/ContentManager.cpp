@@ -2144,6 +2144,7 @@ SkeletalMeshAsset*        ContentManager::getSkeletalMeshMutable(HE::UUID id) { 
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
 const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+AudioAsset*               ContentManager::getAudioMutable(HE::UUID id)             { return lookupAssetMutable(m_handleToUUID, m_audioAssets, id); }
 const FontAsset*          ContentManager::getFont(HE::UUID id) const          { return lookupAsset(m_handleToUUID, m_fontAssets, id); }
 const ScriptAsset*        ContentManager::getScript(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
 const MaterialFunctionAsset* ContentManager::getMaterialFunction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_materialFunctionAssets, id); }

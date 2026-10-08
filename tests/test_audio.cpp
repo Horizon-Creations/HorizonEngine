@@ -1346,3 +1346,59 @@ TEST_CASE("AudioEngine: the mixer decodes a Vorbis voice as it pulls frames")
     engine.stop(h);
     engine.shutdown();
 }
+
+// ─── An asset's trim (Audio Editor, Thema 168) ───────────────────────────────
+// play(const AudioAsset&) plays only the asset's trim, through the data
+// source's range: length, cursor and seek all count from the trim's start.
+
+TEST_CASE("AudioEngine: a clip asset's trim is the voice's range")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    AudioAsset clip;
+    clip.type = HE::AssetType::Audio;
+    clip.sampleRate = 48000;
+    clip.channels   = 2;
+    clip.encoding   = AudioEncoding::PCM16;
+    clip.audioData  = makeSilence(4800, 2);
+
+    // Untrimmed: exactly as before.
+    uint64_t h = engine.play(clip);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundLengthFrames(h) == 4800);
+    engine.stop(h);
+
+    // [1000, 3000): 2000 frames, and seeking is relative to the trim's start.
+    clip.edit.trim = HE::AudioTrim::fromRange(1000, 3000, 4800);
+    h = engine.play(clip, 1.0f, 1.0f, true);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundLengthFrames(h) == 2000);
+    CHECK(engine.getSoundCursorFrames(h) == 0);
+    engine.seekSound(h, 500);
+    CHECK(engine.getSoundCursorFrames(h) == 500);
+    engine.stop(h);
+
+    // A head cut runs to the end ("endFrame 0"), spatial voices too.
+    clip.edit.trim = HE::AudioTrim::fromRange(1800, 4800, 4800);
+    h = engine.playSpatial(clip, 1.0f, 1.0f, false, 0.0f, 0.0f, 0.0f);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundLengthFrames(h) == 3000);
+    engine.stop(h);
+
+    // A trim that leaves nothing plays the whole clip, never silence.
+    clip.edit.trim.startFrame = 9000;
+    clip.edit.trim.endFrame   = 0;
+    h = engine.play(clip);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundLengthFrames(h) == 4800);
+    engine.stop(h);
+
+    // The raw-PCM overload knows nothing of trims.
+    h = engine.play(clip.audioData, 48000, 2);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundLengthFrames(h) == 4800);
+    engine.stop(h);
+
+    engine.shutdown();
+}
