@@ -2,6 +2,7 @@
 #include <imgui_internal.h>   // ShadeVertsLinearColorGradientKeepAlpha — see drawSurfacePreview
 #include <Types/TypeRegistry.h>
 #include "EditorToolbar.h"   // shared toolbar strip
+#include "EditorSettingsPanel.h"   // widgetRunPreConstruct — Preferences ▸ Panels ▸ Widgets
 
 #include <cstdio>
 #include <cstdint>
@@ -197,10 +198,10 @@ struct State
 	bool   cornerPerSide = false;
 
 	// ── Pre Construct at design time (docs/widget-pre-construct-design.md §5) ─
-	// The toolbar switch (on by default, like UMG), and what the last sandboxed
-	// run of the widget's PreConstruct left behind. View state, never saved:
-	// the canvas shows these values for one frame at a time (DesignTimePreview).
-	bool   designPreConstruct = true;
+	// Whether it runs is Preferences ▸ Editor ▸ Panels ▸ Widgets (on by default,
+	// like UMG). This is what the last sandboxed run of the widget's PreConstruct
+	// left behind. View state, never saved: the canvas shows these values for one
+	// frame at a time (DesignTimePreview).
 	struct DesignView
 	{
 		bool ran = false;
@@ -4367,7 +4368,7 @@ void applyDesignWrites(HE::UIWidgetTree& t, int offset)
 // design-time Services: no world, no files, no network (HE::api::designTimeCallApi).
 void refreshDesignTimeRun(State& st, AppContext& ctx)
 {
-	if (!st.designPreConstruct || !ctx.contentManager)
+	if (!EditorSettingsPanel::widgetRunPreConstruct() || !ctx.contentManager)
 	{
 		st.design = {};
 		st.designWasOn = false;
@@ -4446,7 +4447,7 @@ struct DesignTimePreview
 
 	explicit DesignTimePreview(State& st)
 	{
-		if (!st.designPreConstruct || !st.design.ran || st.design.writes.empty()) return;
+		if (!EditorSettingsPanel::widgetRunPreConstruct() || !st.design.ran || st.design.writes.empty()) return;
 		tree = &st.tree;
 		for (const auto& [elem, props] : st.design.writes)
 		{
@@ -4739,6 +4740,31 @@ struct ScrubPreview
 	ScrubPreview& operator=(const ScrubPreview&) = delete;
 };
 
+// The reset-view button in the corner of a canvas (bottom right): it zooms the
+// view back until the whole thing fits again. Drawn over the canvas as a small
+// plate; called inside the canvas's own child window, after the canvas has been
+// submitted, so it sits on top of it and takes the mouse before the surface does.
+bool fitCornerButton(const char* id)
+{
+	const float  size = ImGui::GetFrameHeight() + 4.0f;
+	const float  gap  = 10.0f;
+	const ImVec2 wp   = ImGui::GetWindowPos();
+	const ImVec2 ws   = ImGui::GetWindowSize();
+	const ImVec2 p0(wp.x + ws.x - size - gap, wp.y + ws.y - size - gap);
+	const ImVec2 p1(p0.x + size, p0.y + size);
+
+	ImGui::SetCursorScreenPos(p0);
+	const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
+	const bool hot     = ImGui::IsItemHovered();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(p0, p1, hot ? IM_COL32(58, 58, 64, 235) : IM_COL32(32, 32, 36, 215), 5.0f);
+	dl->AddRect(p0, p1, IM_COL32(255, 255, 255, hot ? 60 : 30), 5.0f);
+	EditorToolbar::iconFit(dl, ImVec2((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f),
+	                       size * 0.55f, hot ? IM_COL32(235, 235, 240, 255) : IM_COL32(190, 190, 198, 255));
+	if (hot) ImGui::SetTooltip("Fit the view \xe2\x80\x94 zoom and pan back until everything is in");
+	return pressed;
+}
+
 void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 {
 	// What a bound colour resolves to, for everything this frame draws — taken
@@ -4783,7 +4809,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	struct DesignScope
 	{
 		explicit DesignScope(const State& s)
-		{ g_design = s.designPreConstruct && s.design.ran ? &s.design : nullptr; }
+		{ g_design = EditorSettingsPanel::widgetRunPreConstruct() && s.design.ran ? &s.design : nullptr; }
 		~DesignScope() { g_design = nullptr; }
 	} const designScope(st);
 	const DesignTimePreview designPreview(st);
@@ -6644,10 +6670,15 @@ void render(AppContext& ctx, const std::string& assetPath,
 		namespace T = EditorToolbar;
 		T::Bar bar;
 		T::assetHeader(bar, assetPath, st.dirty);
+		// Save sits right beside the folder button: the two things you reach for
+		// on every tab, in the same place. The right edge is the view switch's.
+		if (T::saveButton(bar, st.dirty, /*atLeft=*/true)) saveState(st, ctx);
 
-		// Designer | Graph, the UMG split. Two radio buttons became a segmented
-		// pair in one well: they are one choice, and the well is what says so.
-		bar.group();
+		// Designer | Graph, the UMG split, at the right edge. Two radio buttons
+		// became a segmented pair in one well: they are one choice, and the well
+		// is what says so. Declared first only so the left-hand wells below know
+		// how much room is theirs; it is drawn at the right regardless.
+		bar.rightGroup(bar.labelGroupWidth({ "Designer", "Graph" }));
 		if (bar.item("##uidesigner", T::iconWidget, "Designer", st.viewMode == 0, true,
 		             "Lay the widget out"))
 		{
@@ -6660,17 +6691,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 		bar.endGroup();
 
-		bar.group();
-		if (bar.item("##uifit", T::iconFit, nullptr, false, true,
-		             "Reset the view (zoom and pan)"))
-		{
-			if (st.viewMode == 0) { st.zoom = 1.0f; st.pan = ImVec2(0, 0); }
-			else                  { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
-		}
-		bar.endGroup();
-
-		// Snapping sits beside the view controls because that is what it is: a
-		// way of DRAGGING, not a property of the widget. Nothing here is saved.
+		// Snapping is a way of DRAGGING, not a property of the widget. Nothing
+		// here is saved. (The reset-view button lives in the canvas corner.)
 		if (st.viewMode == 0)
 		{
 			bar.group();
@@ -6692,9 +6714,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 
 		// Which theme the canvas draws with. In the bar rather than in Details
-		// because it is a way of LOOKING at the widget, like the zoom beside it,
-		// and because it has to be one click away: the whole use of it is
-		// flicking between two themes and watching what moves.
+		// because it is a way of LOOKING at the widget, and because it has to be
+		// one click away: the whole use of it is flicking between two themes and
+		// watching what moves. (Pre Construct is a Preferences setting now:
+		// Editor ▸ Panels ▸ Widgets.)
 		if (st.viewMode == 0)
 		{
 			bar.group();
@@ -6708,21 +6731,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				openThemePopup = true;
 			}
 			bar.endGroup();
-
-			// The widget's Pre Construct, run on the canvas in a sandbox
-			// (docs/widget-pre-construct-design.md §5). Beside the theme because
-			// it is the same kind of switch: a way of looking, never saved.
-			bar.group();
-			if (bar.item("##uipreconstruct", T::iconCode, "Pre Construct", st.designPreConstruct,
-			             true, "Show what the widget's Pre Construct sets (sandboxed)",
-			             "ui.pre-construct"))
-			{
-				st.designPreConstruct = !st.designPreConstruct;
-			}
-			bar.endGroup();
 		}
-
-		if (T::saveButton(bar, st.dirty)) saveState(st, ctx);
 	}
 
 	// Outside the bar: a popup has to be opened after the strip's draw channels
@@ -7072,6 +7081,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 		drawCanvas(st, ctx, ImGui::GetContentRegionAvail());
+		if (fitCornerButton("##uifit")) { st.zoom = 1.0f; st.pan = ImVec2(0, 0); }
 		ImGui::EndChild();
 		drawTimeline(st, ctx, timelineH);
 		ImGui::EndChild();
@@ -7220,6 +7230,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 		}
 		drawGraphCanvas(st, ctx, ImGui::GetContentRegionAvail());
+		if (fitCornerButton("##uigfit")) { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
 		ImGui::EndChild();
 
 		ImGui::SameLine();

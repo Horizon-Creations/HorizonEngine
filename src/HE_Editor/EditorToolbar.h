@@ -263,7 +263,10 @@ void setRevealAssetHook(RevealAssetFn fn);
 
 // The right-hand Save. True when pressed. `enabled` is the panel's answer to
 // "is there anything to write, and did the asset even load".
-bool saveButton(Bar& bar, bool enabled);
+// `atLeft` puts the button in the next left-hand well (right after the asset
+// header's folder button) instead of at the right edge — for bars that keep the
+// right edge for a view switch.
+bool saveButton(Bar& bar, bool enabled, bool atLeft = false);
 
 // ── Icons shared by more than one bar ────────────────────────────────────────
 void iconGear(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);

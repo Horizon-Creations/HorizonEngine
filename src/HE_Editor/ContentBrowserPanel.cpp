@@ -909,6 +909,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			const auto norm = [](const std::string& p)
 			{ return fs::path(p).lexically_normal().generic_string(); };
 			const std::string targetNorm = norm(target);
+			const std::string targetName = fs::path(target).filename().string();
+			// The tab's path and the tree's path are not always the same file: an
+			// "Engine/..." asset can be open under the shipped default while the
+			// tree shows the project's override of it (or the other way round), a
+			// tab can be keyed by the content-relative form, and separators differ
+			// per platform. The content-relative path is the asset's identity in
+			// all of those, so it is the second key — tried per same-named file
+			// only, since it costs a filesystem lookup.
+			std::string targetRel;
+			if (ctx.contentManager)
+				targetRel = fs::path(target).is_absolute()
+					? ctx.contentManager->toContentRelativePath(target)
+					: fs::path(target).generic_string();
+			const auto sameAsset = [&](const HE::File* f)
+			{
+				if (f->fullPath == target || norm(f->fullPath) == targetNorm) return true;
+				if (targetRel.empty() || !ctx.contentManager || f->name != targetName) return false;
+				return ctx.contentManager->toContentRelativePath(f->fullPath) == targetRel;
+			};
 
 			int                             foundKind   = -1;
 			const HE::Folder*               foundFolder = nullptr;
@@ -917,7 +936,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			std::function<bool(const HE::Folder*)> findFile = [&](const HE::Folder* cur) -> bool
 			{
 				for (const HE::File* f : cur->files)
-					if (f->fullPath == target || norm(f->fullPath) == targetNorm)
+					if (sameAsset(f))
 					{ foundFolder = cur; foundFile = f; return true; }
 				for (const HE::Folder* sub : cur->subfolders)
 				{
@@ -972,6 +991,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_revealExpandRoot = foundKind;
 				s_revealExpand.clear();
 				for (const HE::Folder* f : chain) s_revealExpand.push_back(f->fullPath);
+			}
+			else
+			{
+				// Said out loud: a click that lands on the scene tab and shows
+				// nothing reads as a broken button.
+				HE::Ed::notify(HE::Ed::NoteLevel::Warning, "Not in the Content Browser",
+					"\"" + fs::path(target).filename().string() +
+					"\" is not listed under Content, Engine or Source.");
 			}
 			// If the panel is a tab behind another dock sibling, bring it forward.
 			ImGui::SetWindowFocus("Content Browser");

@@ -449,9 +449,10 @@ void assetHeader(Bar& bar, const std::string& assetPath, bool dirty)
 	bar.endGroup();
 }
 
-bool saveButton(Bar& bar, bool enabled)
+bool saveButton(Bar& bar, bool enabled, bool atLeft)
 {
-	bar.rightGroup(bar.iconGroupWidth(1));
+	if (atLeft) bar.group();
+	else        bar.rightGroup(bar.iconGroupWidth(1));
 	const bool pressed = bar.item("##save", iconSave, nullptr, false, enabled,
 	                              enabled ? "Save (Cmd/Ctrl+S)" : "Nothing to save");
 	bar.endGroup();

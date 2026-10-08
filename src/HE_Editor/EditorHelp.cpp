@@ -5329,7 +5329,9 @@ namespace
 	  "", "ui#designer" },
 
 	// ── The widget's Pre Construct, run while designing ──────────────────────
-	{ "ui.pre-construct", "Pre Construct",
+	// A Preferences ▸ Editor ▸ Panels ▸ Widgets checkbox; it used to be a cell on
+	// the designer's toolbar.
+	{ "Widgets/Run Pre Construct", "",
 	  "Runs the widget's Pre Construct event on the canvas, the way the game "
 	  "runs it before the first frame, so text and colours your graph sets show "
 	  "here too. Embedded widgets run theirs as well. Only Pre Construct runs, "
@@ -8343,6 +8345,7 @@ namespace
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Asset Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
+		{ "Widgets/",          "editor-settings", "Settings Reference", "Widgets" },
 		{ "Shortcuts/",        "editor-settings", "Settings Reference", "Shortcuts" },
 		{ "shortcuts.",        "editor-settings", "Settings Reference", "Shortcuts" },
 		// ── The asset editors ────────────────────────────────────────────────

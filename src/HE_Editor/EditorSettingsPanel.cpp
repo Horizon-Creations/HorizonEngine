@@ -95,11 +95,17 @@ static void toggleFavorite(EditorConfig& cfg, const char* key)
 		cfg.QuickSettingsFavorites += (i ? "," : "") + keys[i];
 }
 
-// ─── Editor ▸ HorizonCode ────────────────────────────────────────────────────
+// ─── Editor ▸ Panels ─────────────────────────────────────────────────────────
 // The config key, in the one file that owns it. Outside the ImGui guard because
 // this is a plain value read: whoever draws the variable list asks for the
 // setting, not for the page that sets it.
 static const char* kHcVariableDisplayKey = "HcVariableDisplay";
+static const char* kWidgetRunPreConstructKey = "WidgetRunPreConstruct";
+
+bool widgetRunPreConstruct()
+{
+	return GlobalState::getInstance().getCustomConfigBool(kWidgetRunPreConstructKey, true);
+}
 
 HcVariableStyle hcVariableStyle()
 {
@@ -1928,20 +1934,22 @@ void drawStatusPage(AppContext& ctx)
 // table's cmake and compiler rows already say, so the rows kept the facts and
 // their Fix button opens the install dialog that carries the remedy.
 
-// ─── HorizonCode page (Editor) ───────────────────────────────────────────────
-// Settings of the HorizonCode graph editor itself. A bespoke page rather than a
-// catalog category: nothing here is engine state worth pinning to Quick
-// Settings, and it persists through GlobalState rather than EditorConfig.
+// ─── Panels page (Editor) ────────────────────────────────────────────────────
+// Settings of the editor's asset panels themselves, one heading per panel
+// family: HorizonCode (the graph editor) and Widgets (the UI designer). A
+// bespoke page rather than a catalog category: nothing here is engine state
+// worth pinning to Quick Settings, and it persists through GlobalState rather
+// than EditorConfig.
 
 // Its own scope: this page is not the settings CATALOGUE (which keys by
 // category) and not the tool status above it.
-void drawHorizonCodePage()
+void drawPanelsPage()
 {
 	// Every explanation below is a full sentence and the tab is as wide as the
 	// user left it.
 	EditorWidgets::WrapText wrap;
 
-	ImGui::SeparatorText("Variables");
+	ImGui::SeparatorText("HorizonCode");
 	ImGui::TextWrapped("How the graph editor's variable list spells a variable.");
 	ImGui::Spacing();
 
@@ -1990,6 +1998,28 @@ void drawHorizonCodePage()
 	EditorWidgets::hint("Name and type on one line. Half the height per variable, so a "
 	                    "long list stays readable without scrolling.");
 	ImGui::Unindent();
+
+	ImGui::Spacing();
+	ImGui::SeparatorText("Widgets");
+	HE::Ed::Help::Scope widgetScope("Widgets");
+	bool runPreConstruct = widgetRunPreConstruct();
+	if (EditorWidgets::checkbox("Run Pre Construct", &runPreConstruct))
+	{
+		GlobalState& gs = GlobalState::getInstance();
+		gs.setCustomConfigEntry(kWidgetRunPreConstructKey, runPreConstruct);
+		// Same reasoning as the variable display above: a look picked once is
+		// written now, and a failed write is said out loud.
+		if (!gs.writeConfig())
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the Pre Construct setting",
+			               "The choice applies now, but this session's config file could "
+			               "not be written \xe2\x80\x94 the next launch will use the old one.");
+	}
+	ImGui::Indent();
+	EditorWidgets::hint("Show what a widget's Pre Construct sets on the designer's canvas. "
+	                    "Sandboxed and never saved \xe2\x80\x94 Details still shows the "
+	                    "authored values.");
+	ImGui::Unindent();
 }
 
 // ─── Navigation + page plumbing ──────────────────────────────────────────────
@@ -2010,7 +2040,7 @@ constexpr NavItem kGeneralItems[] = {
 // and said nothing the page titles did not. The labels grew back what the
 // headings carried — "Sessions" under no heading is not a topic.
 constexpr NavItem kEditorItems[] = {
-	{ Page::HorizonCode,   "HorizonCode" },
+	{ Page::Panels,        "Panels" },
 	{ Page::Shortcuts,     "Shortcuts" },
 	{ Page::CollabGeneral, "Collaboration" },
 	{ Page::RemoteControl, "Remote Control" },
@@ -2143,7 +2173,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	}
 	else if (s_page == Page::Repository)  drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
-	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
+	else if (s_page == Page::Panels)      drawPanelsPage();
 	else if (s_page == Page::Shortcuts)   ShortcutsPage::draw();
 	ImGui::EndChild();
 
