@@ -7,6 +7,7 @@
 #include "EditorWidgets.h"       // dangerMenuItem for node deletion
 #include "EditorTheme.h"         // the hover tooltip's dim tier
 #include "EditorSettingsPanel.h" // which of the two variable-list looks the user picked
+#include "GraphViewStore.h"      // each graph tab keeps its own pan and zoom
 #include "DocsPanel.h"           // F1 over a node opens its entry in the manual
 #include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
 #include "HcExecTrace.h"         // which node just ran — the fading amber halo
@@ -2449,6 +2450,109 @@ void handleGraphKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& av
 			h.onEdit(true);
 		}
 	}
+}
+
+
+// ─── Graph tabs ──────────────────────────────────────────────────────────────
+namespace
+{
+std::string graphViewKey(const std::string& base, int graphId)
+{
+	// The event graph keeps the plain key it always had; a function's is suffixed.
+	return graphId == 0 ? base : base + "#" + std::to_string(graphId);
+}
+} // namespace
+
+bool drawGraphTabs(GraphTabs& tabs, const HC::Graph& graph, int& currentGraph,
+                   GraphEditor::State& ge, const std::string& viewKeyBase)
+{
+	bool userSwitched = false;
+	const auto isFunction = [&](int id)
+	{
+		const HC::Node* n = graph.findNode(id);
+		return n && n->type == HC::NodeType::FunctionEntry;
+	};
+
+	// Functions that no longer exist lose their tab.
+	tabs.open.erase(std::remove_if(tabs.open.begin(), tabs.open.end(),
+		[&](int id) { return !isFunction(id); }), tabs.open.end());
+	if (currentGraph != 0 && !isFunction(currentGraph)) currentGraph = 0;
+
+	// The graph on screen changed — by a tab, the list on the left, a new
+	// function, a jump to a node: whichever, the canvas moves to that graph's own
+	// view and the function gets its tab.
+	if (currentGraph != tabs.lastShown)
+	{
+		if (tabs.lastShown >= 0 && !ge.viewKey.empty())
+			GraphViewStore::put(graphViewKey(viewKeyBase, tabs.lastShown),
+			                    ge.pan.x, ge.pan.y, ge.zoom, ImGui::GetTime());
+		if (currentGraph != 0 &&
+		    std::find(tabs.open.begin(), tabs.open.end(), currentGraph) == tabs.open.end())
+			tabs.open.push_back(currentGraph);
+		if (tabs.lastShown >= 0)
+		{
+			// What was selected belonged to the graph just left.
+			ge.selection.clear();
+			ge.selected = 0;
+			ge.dragNode = 0;
+			// A graph never seen has no stored view: it starts at the default
+			// rather than inheriting the previous graph's.
+			ge.pan  = ImVec2(40.0f, 40.0f);
+			ge.zoom = 1.0f;
+		}
+		ge.viewKey      = graphViewKey(viewKeyBase, currentGraph);
+		ge.viewRestored = false;       // the next draw adopts the stored view, if any
+		tabs.lastShown  = currentGraph;
+		tabs.forceSelect = 2;
+	}
+
+	int closeId = -1;
+	int pickId  = currentGraph;
+	if (ImGui::BeginTabBar("##hc_graph_tabs",
+	        ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_NoCloseWithMiddleMouseButton |
+	        ImGuiTabBarFlags_Reorderable))
+	{
+		const auto flagsFor = [&](int id)
+		{ return (tabs.forceSelect > 0 && id == currentGraph) ? ImGuiTabItemFlags_SetSelected
+		                                                      : ImGuiTabItemFlags_None; };
+		// Always first, never closable: reordering must not carry it away.
+		if (ImGui::BeginTabItem("Event Graph###hc_tab_event", nullptr,
+		                        flagsFor(0) | ImGuiTabItemFlags_Leading))
+		{
+			if (tabs.forceSelect == 0) pickId = 0;
+			ImGui::EndTabItem();
+		}
+		for (int id : tabs.open)
+		{
+			const HC::Node* n = graph.findNode(id);
+			std::string label = (n && !n->s.empty()) ? n->s : std::string("(unnamed)");
+			label += "###hc_tab_fn" + std::to_string(id);
+			bool keep = true;
+			if (ImGui::BeginTabItem(label.c_str(), &keep, flagsFor(id)))
+			{
+				if (tabs.forceSelect == 0) pickId = id;
+				ImGui::EndTabItem();
+			}
+			if (!keep) closeId = id;
+		}
+		ImGui::EndTabBar();
+	}
+	if (tabs.forceSelect > 0) --tabs.forceSelect;
+
+	if (closeId >= 0)
+	{
+		// Closing the graph on screen hands the canvas to its neighbour on the
+		// left (the event graph when it was the first function tab).
+		if (closeId == currentGraph)
+		{
+			const auto it = std::find(tabs.open.begin(), tabs.open.end(), closeId);
+			pickId = (it == tabs.open.begin() || it == tabs.open.end()) ? 0 : *(it - 1);
+		}
+		tabs.open.erase(std::remove(tabs.open.begin(), tabs.open.end(), closeId), tabs.open.end());
+		userSwitched = true;
+	}
+	if (pickId != currentGraph) { currentGraph = pickId; userSwitched = true; }
+	return userSwitched;
 }
 
 } // namespace HcGraphHost

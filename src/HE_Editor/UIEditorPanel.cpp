@@ -228,6 +228,7 @@ struct State
 	// drag; these are the host-side bits it can't own.
 	int    selectedGraphNode = 0;
 	int    currentGraph = 0;         // visible sub-graph: 0 = event graph, else a FunctionEntry id
+	HGH::GraphTabs graphTabs;        // the tab strip over the canvas, and each graph's own view
 	bool   gFocusSelected = false;   // center on selectedGraphNode next frame
 	GraphEditor::State geState;
 	int    gDropElem = 0;            // element dragged onto the graph (Get/Set popup)
@@ -6540,7 +6541,6 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Submitted before the canvas so it gets the click (see FitCorner).
 	const FitCorner gFit = fitCornerSubmit("##uigfit", canvasOrigin, avail);
 	if (gFit.pressed) { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
-	if (st.geState.viewKey.empty() && !st.relPath.empty()) st.geState.viewKey = "widget:" + st.relPath;
 	const bool changed = GraphEditor::draw("##hc_graphcanvas", m, st.geState, avail);
 	fitCornerDraw(gFit);
 	st.selectedGraphNode = st.geState.selected;
@@ -7437,20 +7437,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImVec2(ImGui::GetContentRegionAvail().x - rightW - ImGui::GetStyle().ItemSpacing.x, 0),
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-		// Which sub-graph is shown, the compile result, and the check itself —
-		// the canvas gets its own strip, same as the HorizonCode class tab.
+		// The graph tabs (Event Graph + one per open function, each with its own
+		// pan and zoom), then the compile result and the check itself — the canvas
+		// gets its own strip, same as the HorizonCode class tab.
 		namespace T = EditorToolbar;
-		std::string uiWhere = "Event Graph";
-		if (st.currentGraph != 0)
-		{
-			const HC::Node* e = st.graph.findNode(st.currentGraph);
-			uiWhere = std::string("Function: ") +
-			          (e && !e->s.empty() ? e->s.c_str() : "(unnamed)");
-		}
+		if (HGH::drawGraphTabs(st.graphTabs, st.graph, st.currentGraph, st.geState,
+		                       "widget:" + st.relPath))
+		{ st.selectedGraphNode = 0; st.selectedVar.clear(); }
 		T::Bar uiBar;
-		uiBar.group();
-		uiBar.readout(st.currentGraph == 0 ? T::iconList : T::iconCode, uiWhere.c_str());
-		uiBar.endGroup();
 		// Success fades after a few seconds; an error stays until it is fixed
 		// or the next check — same reasoning as the class graph's strip.
 		const bool showCompile = st.compileHas &&

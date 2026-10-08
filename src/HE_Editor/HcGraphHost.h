@@ -248,4 +248,30 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 // itself owns Delete, Space, Ctrl+A, Home, F and Q.
 void handleGraphKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& avail);
 
+// ── Graph tabs ───────────────────────────────────────────────────────────────
+// The tab strip above a HorizonCode canvas: "Event Graph" first and never
+// closable, then one tab per OPEN function body, each closable. Opening a
+// function anywhere (the list on the left, a double-click on a call node, a new
+// function) just sets the host's currentGraph; the strip notices the change and
+// gives that function a tab, so no opener has to know tabs exist.
+//
+// Every graph keeps its own view: the pan and zoom of the graph being left are
+// filed under its key (GraphViewStore) and the one being entered is adopted from
+// there — so each function and the event graph open where they were left, across
+// sessions too.
+struct GraphTabs
+{
+	std::vector<int> open;        // FunctionEntry ids that have a tab, in tab order
+	int  lastShown   = -1;        // the graph the canvas state below belongs to (-1: none yet)
+	int  forceSelect = 0;         // frames left to push the host's choice into the tab bar
+};
+
+// Draw the strip (in the current window, at the cursor) and keep `tabs`, the
+// canvas view and `currentGraph` in step. `viewKeyBase` identifies the asset
+// (the event graph's own key; a function's is that + "#" + its id). True when the
+// user switched or closed a tab THIS frame, so the host can drop selection state
+// that belonged to the graph it left.
+bool drawGraphTabs(GraphTabs& tabs, const HC::Graph& graph, int& currentGraph,
+                   GraphEditor::State& ge, const std::string& viewKeyBase);
+
 } // namespace HcGraphHost

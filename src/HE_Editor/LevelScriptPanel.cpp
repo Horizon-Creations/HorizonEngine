@@ -129,6 +129,7 @@ struct LSState
 	int         selectedNode = 0;
 	bool        focusSelected = false;
 	int         currentGraph = 0;   // visible sub-graph: 0 = event graph, else a FunctionEntry id
+	HGH::GraphTabs tabs;            // the tab strip over the canvas, and each graph's own view
 	std::string selectedVar;        // variable selected in the left panel
 	std::string selectedEvent;      // declared event shown in the details pane
 	// The class's Extract on Destruct entry is shown in the details pane. Only
@@ -1411,10 +1412,6 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 			else
 				g = LSState{};
 			g.graphFor = key;
-			// The canvas remembers where it was looked at, per graph (the class's
-			// path, or "Level Script" / "Game Instance").
-			g.ge.viewKey      = "hc:" + key;
-			g.ge.viewRestored = false;
 			// The two editor-owned graphs are keyed by their titles here but by
 			// their reserved tab paths everywhere the trace is concerned; a class
 			// is its content path in both worlds.
@@ -1513,22 +1510,17 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
 	// A stale compile result from another tab must not anchor to this graph.
 	if (g.compileHas && g.compileFor != title) g.compileHas = false;
-	// Which sub-graph is shown, and the compile check — the canvas gets its own
-	// strip, in the same language as the tab's own bar above it.
+	// The graph tabs: the Event Graph (always there) and every open function, one
+	// tab each. Each graph keeps its own pan and zoom (GraphViewStore). Before
+	// anything below reads currentGraph, so the canvas this frame is the one the
+	// strip shows.
+	if (HGH::drawGraphTabs(g.tabs, graph, g.currentGraph, g.ge, "hc:" + g.graphFor))
+	{ g.selectedNode = 0; g.selectedVar.clear(); g.selectedEvent.clear(); }
+	// The compile check — the canvas gets its own strip, in the same language as
+	// the tab's own bar above it.
 	{
 		namespace T = EditorToolbar;
-		std::string where = "Event Graph";
-		if (g.currentGraph != 0)
-		{
-			const HC::Node* e = graph.findNode(g.currentGraph);
-			where = std::string("Function: ") +
-			        (e && !e->s.empty() ? e->s.c_str() : "(unnamed)");
-		}
-
 		T::Bar bar;
-		bar.group();
-		bar.readout(g.currentGraph == 0 ? T::iconList : T::iconCode, where.c_str());
-		bar.endGroup();
 
 		// The compile result belongs on the strip too: it is a state of this
 		// graph, and as a line underneath it pushed the canvas down and up again
