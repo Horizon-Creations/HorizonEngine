@@ -37,6 +37,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #if defined(_WIN32)
 #include <d3d11.h>
+#include <cstddef>
+#include <cstdint>
 
 namespace HE::d3d11mat
 {
@@ -217,6 +219,50 @@ inline void RestoreBuiltinSkyEnvAOSlots(ID3D11DeviceContext* ctx, ID3D11ShaderRe
     ID3D11ShaderResourceView* nullSrv = nullptr;
     ctx->PSSetShaderResources(kSkyEnvSrvSlot, 1, &nullSrv);
     ctx->PSSetShaderResources(kAOSrvSlot, 1, &builtinSSR);
+}
+
+// The sky cube itself: RGBA16F, six array slices flagged as a cube, one mip.
+// The view must say TEXTURECUBE explicitly — a null description on a
+// cube-flagged texture gives a Texture2DArray view, which the TextureCube
+// heSkyEnv register does not accept.
+inline D3D11_TEXTURE2D_DESC SkyEnvCubeDesc(UINT faceN)
+{
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width            = faceN;
+    td.Height           = faceN;
+    td.MipLevels        = 1;
+    td.ArraySize        = 6;
+    td.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Usage            = D3D11_USAGE_DEFAULT;
+    td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+    td.MiscFlags        = D3D11_RESOURCE_MISC_TEXTURECUBE;
+    return td;
+}
+inline D3D11_SHADER_RESOURCE_VIEW_DESC SkyEnvCubeSrvDesc()
+{
+    D3D11_SHADER_RESOURCE_VIEW_DESC cv{};
+    cv.Format                      = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    cv.ViewDimension               = D3D11_SRV_DIMENSION_TEXTURECUBE;
+    cv.TextureCube.MostDetailedMip = 0;
+    cv.TextureCube.MipLevels       = 1;
+    return cv;
+}
+
+// The bake (HE::BuildSkyEnvFaceRow, packed to halves) into the cube: faces in
+// the bake's order +X,-X,+Y,-Y,+Z,-Z onto array slices 0..5, each face row 0
+// first (v = -1, SkyEnvFaceDirection's top). D3D's cube convention is GL's,
+// so nothing flips — the claim SkyEnvBake.h makes for GL/Metal/Vulkan. The WARP
+// case in test_material_graph.cpp uploads through this very function and
+// samples every texel back by its bake direction.
+inline void UploadSkyEnvCube(ID3D11DeviceContext* ctx, ID3D11Texture2D* cube, UINT faceN,
+                             const uint16_t* halfRGBA)
+{
+    const size_t faceHalfs = static_cast<size_t>(faceN) * faceN * 4;
+    const UINT   rowPitch  = faceN * 4u * static_cast<UINT>(sizeof(uint16_t));
+    for (UINT f = 0; f < 6; ++f)
+        ctx->UpdateSubresource(cube, D3D11CalcSubresource(0, f, 1), nullptr,
+                               halfRGBA + f * faceHalfs, rowPitch, rowPitch * faceN);
 }
 } // namespace HE::d3d11mat
 

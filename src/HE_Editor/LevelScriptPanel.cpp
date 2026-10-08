@@ -745,6 +745,41 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		// A Ref can never travel — an object handle names nothing on the other
 		// machine — so the box is disabled rather than merely refused later,
 		// with the reason where the question is asked.
+		// Ticking Notify (OnRep_) or Notify on Change (OnChanged_) WRITES THE
+		// HANDLER, the way the right-click "Add Function" does — so nobody has
+		// to guess the spelling of a name the runtime composes. Only when there
+		// is not one already: re-ticking the box must not leave two functions of
+		// the same name, which is dead code (calls resolve by name, first wins).
+		auto ensureVarHandler = [&](const std::string& prefix)
+		{
+			const std::string fnName = prefix + v->name;
+			for (const auto& n : graph.nodes)
+				if (n.type == NT::FunctionEntry && n.s == fnName) return;
+			if (v->name.empty()) return;
+			const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
+			HC::Node* entry = graph.findNode(fnId);
+			entry->s        = fnName;
+			entry->subgraph = fnId;
+			entry->access   = 1;   // private: nobody outside the class calls it
+			// ONE parameter, the variable's own type: the value it held before.
+			// The WHOLE shape, not just the PinType — an array of structs and a
+			// scalar struct are different pins, and a parameter declared as the
+			// wrong one would mistype the old value for the composite cases.
+			HC::FuncParam old;
+			old.name        = "Old";
+			old.type        = v->type;
+			old.isArray     = v->isArray;
+			old.container   = v->container;
+			old.typeName    = v->typeName;
+			old.keyType     = v->keyType;
+			old.keyTypeName = v->keyTypeName;
+			entry->params   = { old };
+			g.currentGraph  = fnId;
+			const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
+			graph.findNode(retId)->s = fnName;
+			HC::syncFunctionSignatures(graph);
+		};
+
 		const bool canReplicate = HE::Net::Game::isReplicableType(v->type);
 		ImGui::BeginDisabled(!canReplicate);
 		bool rep = v->replicated && canReplicate;
@@ -767,46 +802,25 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 			{
 				v->repNotify = notify;
 				edited = true;
-				// Ticking it WRITES THE HANDLER, the way the right-click "Add
-				// Function" does — so nobody has to guess the spelling of a
-				// name the dispatcher composes (OnRep_<Name>). Only when there
-				// is not one already: re-ticking the box must not leave two
-				// functions of the same name, which is dead code (calls
-				// resolve by name, first one wins).
-				const std::string fnName = "OnRep_" + v->name;
-				bool exists = false;
-				for (const auto& n : graph.nodes)
-					if (n.type == NT::FunctionEntry && n.s == fnName) { exists = true; break; }
-				if (notify && !exists && !v->name.empty())
-				{
-					const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
-					HC::Node* entry = graph.findNode(fnId);
-					entry->s        = fnName;
-					entry->subgraph = fnId;
-					entry->access   = 1;   // private: nobody outside the class calls it
-					// ONE parameter, the variable's own type: the value this
-					// machine held before the one that just arrived (§6.4).
-					// The WHOLE shape, not just the PinType — an array of
-					// structs and a scalar struct are different pins, and a
-					// parameter declared as the wrong one would mistype the old
-					// value for exactly the composite cases that do replicate.
-					HC::FuncParam old;
-					old.name        = "Old";
-					old.type        = v->type;
-					old.isArray     = v->isArray;
-					old.container   = v->container;
-					old.typeName    = v->typeName;
-					old.keyType     = v->keyType;
-					old.keyTypeName = v->keyTypeName;
-					entry->params   = { old };
-					g.currentGraph  = fnId;
-					const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
-					graph.findNode(retId)->s = fnName;
-					HC::syncFunctionSignatures(graph);
-				}
+				// OnRep_<Name>(Old): the value this machine held before the
+				// one that just arrived (§6.4).
+				if (notify) ensureVarHandler("OnRep_");
 			}
 			EditorWidgets::helpForLabel("Notify");
 		}
+
+		// ── Notify on Change (docs/bind-to-variable-binding-plan.md §4) ──────
+		// Any type, Ref included (locally an instance id is a value). The box
+		// writes OnChanged_<Name>(Old); listeners bound per Bind Event get
+		// "<Name>Changed" with the new value.
+		bool onChange = v->notifyChange;
+		if (EditorWidgets::checkbox("Notify on Change", &onChange))
+		{
+			v->notifyChange = onChange;
+			edited = true;
+			if (onChange) ensureVarHandler("OnChanged_");
+		}
+		EditorWidgets::helpForLabel("Notify on Change");
 
 		// ── Savegames (SaveStateComponent, entity.saveState) ─────────────────
 		// Like Replicated, the checkbox is the whole declaration: saveState

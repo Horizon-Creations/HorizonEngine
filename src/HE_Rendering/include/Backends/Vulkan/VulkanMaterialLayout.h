@@ -26,6 +26,14 @@
 // shader does not use is legal, so one layout serves both variants. They are
 // the LAST entries, so the first kPreClusterBindingCount rows are the layout
 // as it was before — the test's negative control.
+//
+// heLandscapeWeights (Thema 143): binding 14, the painted terrain's weightmap
+// (Landscape Layer Blend). Its row brings the fragment stage to 17 combined
+// image samplers, one over the spec minimum of maxPerStageDescriptorSamplers /
+// …SampledImages (16). A device at that minimum cannot create the full layout
+// at all, so the renderer then builds it WITHOUT this one row (landscapeWeightsFit)
+// and draws a layer-blend material through the built-in path instead: losing
+// the paint there beats losing every graph material.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <cstdint>
 
@@ -46,6 +54,7 @@ struct Binding
 constexpr uint32_t kClusterLightsBinding = 24; // HeClusterLights { vec4 clLights[]; }
 constexpr uint32_t kClusterGridBinding   = 25; // HeClusterGrid   { uvec2 clGrid[]; }
 constexpr uint32_t kClusterIdxBinding    = 26; // HeClusterIdx    { uint clIdx[]; }
+constexpr uint32_t kLandscapeWeightsBinding = 14; // heLandscapeWeights (MaterialGraph.cpp)
 
 inline constexpr Binding kBindings[] = {
 	{  0, DescKind::UniformBuffer,        kStageFragment }, // HeLighting
@@ -71,6 +80,10 @@ inline constexpr Binding kBindings[] = {
 	// heLocalShadow (sampler2DArray): the local (point/spot) shadow atlas the
 	// built-in scene shader samples at binding 9. Gated by lightParams[i].y.
 	{ 13, DescKind::CombinedImageSampler, kStageFragment }, // heLocalShadow
+	// heLandscapeWeights: only a Landscape Layer Blend graph declares it, but
+	// that SPIR-V uses it statically; without the row lavapipe crashes in the
+	// draw (Thema 143). Bound per DRAW from the terrain's weightmap.
+	{ kLandscapeWeightsBinding, DescKind::CombinedImageSampler, kStageFragment }, // heLandscapeWeights
 	// The rest of the preamble's fixed samplers (Thema 120). Its SPIR-V uses
 	// all of them statically, so the layout declares them even where the gate
 	// never opens on this backend (a pipeline whose shader uses a binding its
@@ -108,10 +121,35 @@ constexpr uint32_t countOf(DescKind kind, uint32_t bindingCount = kBindingCount)
 	return n;
 }
 
-static_assert(kBindingCount == 24, "material set 0: 21 canonical bindings + 3 cluster lists");
+// Combined image samplers the FRAGMENT stage sees — what the device's
+// per-stage sampler and sampled-image limits are held against (a combined
+// descriptor counts against both).
+constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true)
+{
+	uint32_t n = 0;
+	for (uint32_t i = 0; i < kBindingCount; ++i)
+		if (kBindings[i].kind == DescKind::CombinedImageSampler && (kBindings[i].stages & kStageFragment)
+		    && (withLandscapeWeights || kBindings[i].binding != kLandscapeWeightsBinding))
+			++n;
+	return n;
+}
+
+// Does the full layout (heLandscapeWeights included) fit the device's
+// maxPerStageDescriptorSamplers / maxPerStageDescriptorSampledImages? If not,
+// the renderer leaves the heLandscapeWeights row out of the layout.
+constexpr bool landscapeWeightsFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages)
+{
+	return fragmentSamplerCount(true) <= maxPerStageSamplers
+	    && fragmentSamplerCount(true) <= maxPerStageSampledImages;
+}
+
+static_assert(kBindingCount == 25, "material set 0: 22 canonical bindings + 3 cluster lists");
 static_assert(countOf(DescKind::UniformBuffer) == 5);        // b0, b1, b3, b8, b9
-static_assert(countOf(DescKind::CombinedImageSampler) == 16); // b2, b4-b7, b10-b13, b15-b18, b31-b33
+static_assert(countOf(DescKind::CombinedImageSampler) == 17); // b2, b4-b7, b10-b18, b31-b33
 static_assert(countOf(DescKind::StorageBuffer) == 3);         // b24-b26
+static_assert(fragmentSamplerCount(true) == 17 && fragmentSamplerCount(false) == 16,
+              "without heLandscapeWeights the layout must fit the spec minimum of 16");
+static_assert(!landscapeWeightsFit(16, 16) && landscapeWeightsFit(17, 17));
 static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
               "the cluster lists must be the last rows (negative control slices them off)");
 } // namespace HE::vkmat

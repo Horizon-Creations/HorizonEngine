@@ -1850,6 +1850,23 @@ namespace
 	  "entity's HorizonCode class? The one row that tells a missing declaration "
 	  "apart from a value still at its default." },
 
+	// ── Variable Watch ───────────────────────────────────────────────────────
+	// Made for Lua and Python: a graph has Notify on Change and Bind Event.
+	{ "hc.watch",
+	  "Lets the Lua or Python script on Entity hear whenever a public variable "
+	  "of Target changes: its onChanged_<Variable>(self, source, old, new) runs "
+	  "at the end of the frame (on_changed_<Variable> in Python). Target is an "
+	  "entity with a HorizonCode class, or 0 for the Game Instance. Ok is false "
+	  "when there is no such class or no public variable of that name. A graph "
+	  "does not hear it itself — for that, tick Notify on Change on the variable." },
+	{ "hc.unwatch",
+	  "Stops what Watch Variable started for the script on Entity. Nothing "
+	  "happens when it was not watching." },
+	{ "hc.getJson",
+	  "A public variable of Target (0 = the Game Instance) as JSON text: "
+	  "numbers, text, lists, and structs as objects. Empty when there is no "
+	  "such class or no public variable of that name." },
+
 	// ── Save ─────────────────────────────────────────────────────────────────
 	{ "save.create",
 	  "Starts a NEW save from the project's SaveGame Template, with the fields "

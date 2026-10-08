@@ -17,6 +17,7 @@
 #include "UITimelineMath.h"
 #include "PanelSpotlight.h"      // the tour card's step-aside, over a real dock layout
 #include "TutorialSteps.h"       // …and the curriculum steps it is tested with
+#include "GitHubSignInView.h"    // the device-flow dialog's body
 
 #include <ContentManager/ContentManager.h>
 #include <HorizonCode/HorizonCode.h>
@@ -2700,4 +2701,123 @@ TEST_CASE("ui shot: a tutorial card the user dragged onto the panel stays until 
 	scene.keep.reset();
 	run(90);
 	CHECK(coveredByCard(panels) == 0.0f);
+}
+
+// ── Sign in with GitHub ──────────────────────────────────────────────────────
+// The device-flow dialog's body (GitHubSignInView), the same function the
+// editor draws in its own popup and inline in the Clone and Report Issue
+// dialogs. Three states a user actually sees: the code to type, the result,
+// and a code that ran out.
+namespace
+{
+	he_ui::Image shootSignIn(const char* name, const Harness& h,
+	                         const GitHubSignInView::View& view)
+	{
+		constexpr int W = 560, H = 420;
+		GitHubSignInView::Fonts fonts;
+		fonts.heading = h.heading;
+		return shoot(name, W, H, 3, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+			ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+			ImGui::Begin("Sign in with GitHub", nullptr,
+			             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+			             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+			{
+				// Braces: the guard must pop before End(), on this window.
+				EditorWidgets::WrapText wrap;
+				GitHubSignInView::drawBody(view, fonts);
+			}
+			ImGui::End();
+		});
+	}
+
+	// Pixels of the "success" green the body uses for "Signed in" / "Copied".
+	int greenPixels(const he_ui::Image& img)
+	{
+		int n = 0;
+		std::uint8_t r, g, b, a;
+		for (int y = 0; y < img.height; ++y)
+			for (int x = 0; x < img.width; ++x)
+			{
+				img.pixel(x, y, r, g, b, a);
+				if (int(g) > 170 && int(r) < 175 && int(b) < 175 && int(g) - int(r) > 40) ++n;
+			}
+		return n;
+	}
+
+	// Light text: the body text and the heading-coloured code, not the dim hints.
+	int brightPixels(const he_ui::Image& img)
+	{
+		int n = 0;
+		std::uint8_t r, g, b, a;
+		for (int y = 0; y < img.height; ++y)
+			for (int x = 0; x < img.width; ++x)
+			{
+				img.pixel(x, y, r, g, b, a);
+				if (int(r) > 200 && int(g) > 180 && int(b) > 120) ++n;
+			}
+		return n;
+	}
+} // namespace
+
+TEST_CASE("GitHub sign-in: the countdown reads as minutes and seconds")
+{
+	CHECK(GitHubSignInView::formatCountdown(845) == "14:05");
+	CHECK(GitHubSignInView::formatCountdown(9) == "0:09");
+	CHECK(GitHubSignInView::formatCountdown(0) == "0:00");
+	CHECK(GitHubSignInView::formatCountdown(-3) == "0:00");
+}
+
+TEST_CASE("ui shot: GitHub sign-in shows the code large, with its countdown")
+{
+	Harness harness(560, 420);
+
+	GitHubSignInView::View v;
+	v.phase           = GitHubSignInView::Phase::WaitingForUser;
+	v.userCode        = "WDJB-MJHT";
+	v.verificationUri = "https://github.com/login/device";
+	v.secondsLeft     = 845;
+	v.copied          = true;
+	const he_ui::Image withCode = shootSignIn("github-signin-code", harness, v);
+	REQUIRE(withCode.valid());
+
+	// Negative control: the same screen with no code in the box. The difference
+	// in bright text pixels is the code's own — large glyphs, so a lot of them.
+	// A code drawn in the body font (or not at all) would leave a few hundred at
+	// most. (Plain ink would not do: the window's own background counts as ink.)
+	GitHubSignInView::View noCode = v;
+	noCode.userCode.clear();
+	const he_ui::Image without = shootSignIn("github-signin-nocode", harness, noCode);
+	const int brightWith    = brightPixels(withCode);
+	const int brightWithout = brightPixels(without);
+	INFO("bright pixels with code " << brightWith << ", without " << brightWithout);
+	CHECK(brightWithout > 500);   // the instructions are there either way
+	CHECK(brightWith - brightWithout > 1000);   // ~1800 at 40 px in Roboto Condensed
+
+	// "Copied." confirms the button press in green.
+	CHECK(greenPixels(withCode) > 30);
+	GitHubSignInView::View notCopied = v;
+	notCopied.copied = false;
+	CHECK(greenPixels(shootSignIn("github-signin-notcopied", harness, notCopied)) == 0);
+}
+
+TEST_CASE("ui shot: GitHub sign-in names the account once it is done")
+{
+	Harness harness(560, 420);
+
+	GitHubSignInView::View v;
+	v.phase = GitHubSignInView::Phase::SignedIn;
+	v.login = "octocat";
+	const he_ui::Image img = shootSignIn("github-signin-done", harness, v);
+	REQUIRE(img.valid());
+	CHECK(brightPixels(img) > 500);
+	CHECK(greenPixels(img) > 100);
+
+	// And a code that ran out offers a new one instead of a dead end.
+	GitHubSignInView::View expired;
+	expired.phase = GitHubSignInView::Phase::Expired;
+	expired.error = "The sign-in code expired. Start again for a new one.";
+	const he_ui::Image exp = shootSignIn("github-signin-expired", harness, expired);
+	CHECK(brightPixels(exp) > 300);
+	CHECK(greenPixels(exp) == 0);
 }

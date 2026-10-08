@@ -54,12 +54,16 @@
 #include <ContentManager/ContentManager.h> // syncPrefabInstances: the asset blobs
 #include <ContentManager/Assets.h>
 #include <Diagnostics/Log.h>
+#include <JobSystem/JobSystem.h>   // releaseOnWorker
+#include "HorizonScene/SceneJsonParse.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <cstring>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -580,6 +584,12 @@ namespace
 				tc["weightRes"]     = t->weightRes;
 				tc["layerWeightsB64"] = base64Encode(t->layerWeights.data(),
 				                                     t->layerWeights.size());
+				// Layers 4..7 under their own key, so layerWeightsB64 keeps
+				// its weightRes² × 4 meaning and older builds still read the
+				// first four layers of a scene written by this one.
+				if (t->layerWeights2.size() == t->layerWeights.size())
+					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
+					                                      t->layerWeights2.size());
 			}
 			if (!t->sculptHeights.empty())
 			{
@@ -967,6 +977,9 @@ namespace
 		const std::string ls = world.levelScriptJson();
 		if (!ls.empty())
 			scene["levelScript"] = json::parse(ls, nullptr, /*allow_exceptions=*/false);
+		// Cell manifest of a split scene (HE::CellStreamer), verbatim.
+		if (const std::string& cells = world.cellManifestJson(); !cells.empty())
+			scene["cells"] = json::parse(cells, nullptr, /*allow_exceptions=*/false);
 
 		return scene;
 	}
@@ -1419,6 +1432,15 @@ namespace
 				if (t.layerWeights.size() != static_cast<size_t>(t.weightRes) * t.weightRes * 4)
 					t.layerWeights.clear();
 				t.weightsDirty = !t.layerWeights.empty();
+			}
+			// Absent in every scene written before there were eight layers →
+			// empty = layers 4..7 all zero, the look those scenes always had.
+			if (!t.layerWeights.empty() && c.contains("layerWeights2B64")
+			    && c["layerWeights2B64"].is_string())
+			{
+				t.layerWeights2 = base64Decode(c["layerWeights2B64"].get<std::string>());
+				if (t.layerWeights2.size() != t.layerWeights.size())
+					t.layerWeights2.clear();
 			}
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
@@ -1967,6 +1989,8 @@ namespace
 		// return so an entity-less scene still restores its script.
 		if (scene.contains("levelScript"))
 			world.setLevelScriptJson(scene["levelScript"].dump());
+		if (const auto cells = scene.find("cells"); cells != scene.end() && cells->is_object())
+			world.setCellManifestJson(cells->dump());
 
 		if (!scene.contains("entities")) return true; // empty scene — valid
 
@@ -2642,6 +2666,38 @@ bool SceneSerializer::save(const HorizonWorld& world,
     return false;
 }
 
+namespace {
+
+// The whole file in one sized read. nlohmann parses an std::istream one
+// character at a time through the streambuf, and an istreambuf_iterator range
+// grows its vector by doubling; parsing from one contiguous buffer is what took
+// the scene load down in Thema 153 (docs/world-streaming-baseline-2026-10-06.md).
+template<typename Buffer>
+bool readWholeFile(const std::filesystem::path& path, Buffer& out)
+{
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) return false;
+    const std::streamoff end = in.tellg();
+    if (end < 0) return false;
+    out.resize(static_cast<size_t>(end));
+    in.seekg(0, std::ios::beg);
+    if (end > 0 && !in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(end)))
+        return false;
+    return true;
+}
+
+// A parsed 200k-entity scene is millions of json nodes, and freeing them at the
+// end of the load cost the main thread ~11 % of it. A worker frees them instead;
+// nothing else refers to the tree once the world is built.
+void releaseOnWorker(json&& tree)
+{
+    auto holder = std::make_shared<json>(std::move(tree));
+    globalPool().post([holder]() mutable { holder.reset(); }, "SceneJsonRelease", 1,
+                      HE::JobPriority::Low);
+}
+
+} // namespace
+
 bool SceneSerializer::load(HorizonWorld& world,
                             const std::filesystem::path& path,
                             SerializeFormat format) {
@@ -2660,54 +2716,67 @@ bool SceneSerializer::loadAdditive(HorizonWorld& world,
     HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::loadAdditive");
     if (format == SerializeFormat::Binary)
     {
-        std::ifstream in(path, std::ios::binary);
-        if (!in.is_open())
+        std::vector<uint8_t> bytes;
+        if (!readWholeFile(path, bytes))
         {
             HE_LOG_ERROR(Serialize, "Additive scene load: cannot open '%s'", path.string().c_str());
             return false;
         }
-        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
-                                          std::istreambuf_iterator<char>());
-        json scene = json::from_cbor(bytes, true, false);
+        json scene = HE::parseSceneCbor(bytes);
         if (scene.is_discarded())
         {
             HE_LOG_ERROR(Serialize, "Additive scene load: '%s' is not valid CBOR (%zu bytes)",
                          path.string().c_str(), bytes.size());
             return false;
         }
+        std::vector<uint8_t>().swap(bytes);
         HE_LOG_INFO(Serialize, "Additive scene load (binary): '%s', %zu entity/-ies",
                     path.string().c_str(), sceneEntityCount(scene));
-        return applyAdditiveJson(world, scene, outCreated);
+        const bool ok = applyAdditiveJson(world, scene, outCreated);
+        releaseOnWorker(std::move(scene));
+        return ok;
     }
     // Default: JSON
-    std::ifstream in(path);
-    if (!in.is_open())
+    std::string text;
+    if (!readWholeFile(path, text))
     {
         HE_LOG_ERROR(Serialize, "Additive scene load: cannot open '%s'", path.string().c_str());
         return false;
     }
-    json scene = json::parse(in, nullptr, false);
+    json scene = HE::parseSceneText(text);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Additive scene load: '%s' is not valid JSON", path.string().c_str());
         return false;
     }
+    std::string().swap(text);
     HE_LOG_INFO(Serialize, "Additive scene load (JSON): '%s', %zu entity/-ies",
                 path.string().c_str(), sceneEntityCount(scene));
-    return applyAdditiveJson(world, scene, outCreated);
+    const bool ok = applyAdditiveJson(world, scene, outCreated);
+    releaseOnWorker(std::move(scene));
+    return ok;
 }
 
 bool SceneSerializer::loadAdditiveFromMemory(HorizonWorld& world,
                                              const std::vector<uint8_t>& data,
                                              std::vector<Entity>* outCreated)
 {
-    json scene = json::from_cbor(data, true, false);
+    json scene = HE::parseSceneCbor(data);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Additive scene load from memory: not valid CBOR (%zu bytes)",
                      data.size());
         return false;
     }
+    const bool ok = applyAdditiveJson(world, scene, outCreated);
+    releaseOnWorker(std::move(scene));
+    return ok;
+}
+
+bool SceneSerializer::loadAdditiveFromJson(HorizonWorld& world, const json& scene,
+                                           std::vector<Entity>* outCreated)
+{
+    if (!scene.is_object()) return false;
     return applyAdditiveJson(world, scene, outCreated);
 }
 
@@ -2736,26 +2805,60 @@ bool SceneSerializer::saveJSON(const HorizonWorld& world, const std::filesystem:
     return true;
 }
 
+namespace
+{
+std::mutex                  g_lastLoadMutex;
+SceneSerializer::LoadTiming g_lastLoad;
+
+void recordLoadTiming(size_t entities, double parseMs, double buildMs, bool binary,
+                      const std::filesystem::path& path)
+{
+    std::lock_guard<std::mutex> lock(g_lastLoadMutex);
+    g_lastLoad = { entities, parseMs, buildMs, binary, path.string() };
+}
+} // namespace
+
+SceneSerializer::LoadTiming SceneSerializer::lastLoadTiming()
+{
+    std::lock_guard<std::mutex> lock(g_lastLoadMutex);
+    return g_lastLoad;
+}
+
 bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path& path)
 {
     HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::loadJSON");
-    std::ifstream in(path);
-    if (!in.is_open())
+
+    // Parse and build are timed apart because they scale differently with the
+    // entity count, and the world-streaming baseline (Thema 153) needs to know
+    // which of the two a large scene actually waits on. parseMs includes the read.
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point t0 = Clock::now();
+    std::string text;
+    if (!readWholeFile(path, text))
     {
         HE_LOG_ERROR(Serialize, "Scene load: cannot open '%s'", path.string().c_str());
         return false;
     }
-
-    json scene = json::parse(in, nullptr, false);
+    json scene = HE::parseSceneText(text);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Scene load: '%s' is not valid JSON", path.string().c_str());
         return false;
     }
+    std::string().swap(text);
+    const Clock::time_point t1 = Clock::now();
 
+    const size_t entityCount = sceneEntityCount(scene);
     HE_LOG_INFO(Serialize, "Scene loaded (JSON): '%s', %zu entity/-ies",
-                path.string().c_str(), sceneEntityCount(scene));
-    return applySceneJson(world, scene);
+                path.string().c_str(), entityCount);
+    const bool ok = applySceneJson(world, scene);
+    const Clock::time_point t2 = Clock::now();
+    releaseOnWorker(std::move(scene));
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    HE_LOG_INFO(Serialize, "SceneLoadTiming: entities=%zu parseMs=%.2f buildMs=%.2f",
+                entityCount, ms(t1 - t0), ms(t2 - t1));
+    recordLoadTiming(entityCount, ms(t1 - t0), ms(t2 - t1), false, path);
+    return ok;
 }
 
 // ── In-memory snapshots (CBOR) ────────────────────────────────────────────────
@@ -2770,14 +2873,16 @@ bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_
 
 bool SceneSerializer::loadFromMemory(HorizonWorld& world, const std::vector<uint8_t>& data)
 {
-    json scene = json::from_cbor(data, true, false);
+    json scene = HE::parseSceneCbor(data);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Scene restore from memory: not valid CBOR (%zu bytes)", data.size());
         return false;
     }
     HE_LOG_DEBUG(Serialize, "Scene restored from memory: %zu entity/-ies", sceneEntityCount(scene));
-    return applySceneJson(world, scene);
+    const bool ok = applySceneJson(world, scene);
+    releaseOnWorker(std::move(scene));
+    return ok;
 }
 
 // ── Binary (CBOR encoding of the identical JSON structure) ───────────────────
@@ -2809,26 +2914,36 @@ bool SceneSerializer::saveBinary(const HorizonWorld& world, const std::filesyste
 bool SceneSerializer::loadBinary(HorizonWorld& world, const std::filesystem::path& path)
 {
     HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::loadBinary");
-    std::ifstream in(path, std::ios::binary);
-    if (!in.is_open())
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point t0 = Clock::now();
+    std::vector<uint8_t> bytes;
+    if (!readWholeFile(path, bytes))
     {
         HE_LOG_ERROR(Serialize, "Scene load: cannot open '%s'", path.string().c_str());
         return false;
     }
 
-    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
-                                      std::istreambuf_iterator<char>());
-    json scene = json::from_cbor(bytes, true, false);
+    json scene = HE::parseSceneCbor(bytes);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Scene load: '%s' is not valid CBOR (%zu bytes)",
                      path.string().c_str(), bytes.size());
         return false;
     }
+    std::vector<uint8_t>().swap(bytes);
+    const Clock::time_point t1 = Clock::now();
 
+    const size_t entityCount = sceneEntityCount(scene);
     HE_LOG_INFO(Serialize, "Scene loaded (binary): '%s', %zu entity/-ies",
-                path.string().c_str(), sceneEntityCount(scene));
-    return applySceneJson(world, scene);
+                path.string().c_str(), entityCount);
+    const bool ok = applySceneJson(world, scene);
+    const Clock::time_point t2 = Clock::now();
+    releaseOnWorker(std::move(scene));
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    HE_LOG_INFO(Serialize, "SceneLoadTiming: entities=%zu parseMs=%.2f buildMs=%.2f (binary)",
+                entityCount, ms(t1 - t0), ms(t2 - t1));
+    recordLoadTiming(entityCount, ms(t1 - t0), ms(t2 - t1), true, path);
+    return ok;
 }
 
 // ── Prefab API ────────────────────────────────────────────────────────────────
@@ -2879,7 +2994,7 @@ Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
                                           bool preserveIds,
                                           std::vector<PrefabInstanceComponent::Binding>* outBindings)
 {
-    json scene = json::from_cbor(data, true, false);
+    json scene = HE::parseSceneCbor(data);
     if (scene.is_discarded())
     {
         HE_LOG_ERROR(Serialize, "Prefab instantiation failed: payload is not valid CBOR "

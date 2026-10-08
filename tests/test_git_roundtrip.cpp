@@ -589,11 +589,15 @@ TEST_CASE("A credential reaches git's helper via stdin, never argv")
 	const fs::path sink = repo / "cred_sink.txt";
 	const std::string helper =
 		"!f() { test \"$1\" = store && cat >> '" + sink.generic_string() + "'; }; f";
-	REQUIRE(GitCli::run(repo, { "config", "--local", "credential.helper", helper }).ok);
 
+	// The shim as the ONLY helper (override), not as a --local one: approve
+	// feeds every configured helper, and Apple's git has osxkeychain set
+	// system-wide — so a local shim alone wrote this fake github.com token
+	// into the developer's real keychain on every run, where the editor's
+	// GitHub sign-in then found it.
 	std::string err;
 	REQUIRE(GitCli::approveCredential(repo, "github.com", "x-access-token",
-	                                  "tok_TESTVALUE_123", &err));
+	                                  "tok_TESTVALUE_123", &err, helper));
 
 	std::ifstream in(sink);
 	REQUIRE(in.good());

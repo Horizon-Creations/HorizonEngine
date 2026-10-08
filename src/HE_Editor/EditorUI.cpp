@@ -57,6 +57,7 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
+#include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
@@ -376,6 +377,8 @@ void EditorUI::joinPendingExport()
 	// log or filing an issue, and a joinable std::thread destroyed at teardown
 	// terminates the process.
 	ReportIssueDialog::joinPendingWork();
+	// And the GitHub sign-in: its poll thread and the worker that stores a token.
+	GitHubSignIn::joinPendingWork();
 }
 
 void EditorUI::joinPendingGameLogicBuild()
@@ -673,6 +676,10 @@ void EditorUI::render(AppContext& ctx, float dt)
     // over both. It only leaves a .heproj path behind; the Hub and the editor
     // each open it through their own path (takeOpenRequest).
     GitCloneDialog::Draw(ctx);
+    // Preferences ▸ Source Control ▸ Sign in with GitHub. Drawn every frame,
+    // dialog open or not: it also saves a token the user approved after the
+    // dialog that showed the code was closed.
+    GitHubSignIn::Draw(ctx);
 
     // ── "The last session left unsaved work behind" ──────────────────────────
     // After the two checks above on purpose: all three raise root-level modals

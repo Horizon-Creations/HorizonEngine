@@ -240,11 +240,25 @@ public:
 	// interactive modes are disabled, so "nothing stored" comes back as false
 	// rather than as a dialog appearing behind the editor window. Returns false
 	// with an empty `outSecret` for that case — not an error worth showing.
+	// `helperOverride` as in approveCredential: a token stored with an override
+	// is only found again through the same one.
 	static bool fillCredential(const std::filesystem::path& root,
 	                           const std::string& host,
 	                           std::string& outUsername,
 	                           std::string& outSecret,
-	                           std::string* err = nullptr);
+	                           std::string* err = nullptr,
+	                           const std::string& helperOverride = {});
+
+	// Tell the helper to forget a credential (`git credential reject`) — the
+	// sign-out. Pass the username and secret that fillCredential returned: some
+	// helpers (newer osxkeychain) only erase an entry whose password matches.
+	// `secret` travels via stdin, like approve.
+	static bool rejectCredential(const std::filesystem::path& root,
+	                             const std::string& host,
+	                             const std::string& username,
+	                             const std::string& secret,
+	                             std::string* err = nullptr,
+	                             const std::string& helperOverride = {});
 };
 
 } // namespace HE::Sc

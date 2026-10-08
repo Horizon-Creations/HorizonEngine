@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -318,11 +319,11 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 					{ "displacementStrength", tc.displacementStrength },
 					{ "painted",    !tc.layerWeights.empty() },
 					{ "weightRes",   tc.weightRes },
-					// The mean layer mix over the whole landscape, normalised.
-					// Unpainted reads as [1, 0, 0, 0], which is what the shader
-					// falls back to.
-					{ "layerAverage", json::array({ tc.avgLayerWeights[0], tc.avgLayerWeights[1],
-					                                tc.avgLayerWeights[2], tc.avgLayerWeights[3] }) },
+					// The mean layer mix over the whole landscape, normalised,
+					// one entry per layer (eight). Unpainted reads as
+					// [1, 0, …], which is what the shader falls back to.
+					{ "layerAverage", json(std::vector<float>(std::begin(tc.avgLayerWeights),
+					                                          std::end(tc.avgLayerWeights))) },
 				};
 				// Only when it is a surprise. The chunk builder snaps the grid to
 				// 2ⁿ+1 the first time it runs, resampling the heights — a client
@@ -751,7 +752,7 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 		McpTool t;
 		t.name        = "terrain_paint";
 		t.description =
-			"Paint one of the landscape's four material layers at a WORLD position. The "
+			"Paint one of the landscape's eight material layers at a WORLD position. The "
 			"layers are named by the material's Landscape Layer Blend node; the weights "
 			"under the brush stay normalised, so painting a different layer over a spot "
 			"undoes the first. Undoable in the editor like any other change. The first "
@@ -761,9 +762,12 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			{ "uuid",  stringProp("Uuid of the landscape, from terrain_info.") },
 			{ "x",     numberProp("World X of the brush centre.") },
 			{ "z",     numberProp("World Z of the brush centre.") },
-			{ "layer", json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", 3 },
-			                 { "description", "Which of the four layers to paint, 0..3. "
-			                                  "0 is what an unpainted landscape shows." } } },
+			{ "layer", json{ { "type", "integer" }, { "minimum", 0 },
+			                 { "maximum", kTerrainMaxLayers - 1 },
+			                 { "description", "Which of the eight layers to paint, 0..7, in "
+			                                  "the order the material's Landscape Layer Blend "
+			                                  "names them. 0 is what an unpainted landscape "
+			                                  "shows." } } },
 			{ "radius",  numberProp("Full-strength radius in world units. Default 10.") },
 			{ "falloff", numberProp("Width of the linear fade outside `radius`. "
 			                        "Default 5.") },
@@ -781,10 +785,10 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 				               "centre. terrain_info reports the landscape's bounds.");
 
 			const int layer = intArg(args, "layer", -1);
-			if (layer < 0 || layer > 3)
+			if (layer < 0 || layer >= kTerrainMaxLayers)
 				return failFor(CmdError::InvalidPayload,
-				               "'layer' must be 0, 1, 2 or 3 — a landscape blends exactly "
-				               "four material layers.");
+				               "'layer' must be 0..7 — a landscape blends at most eight "
+				               "material layers.");
 
 			const float wx       = static_cast<float>(numArg(args, "x", 0.0));
 			const float wz       = static_cast<float>(numArg(args, "z", 0.0));
@@ -805,7 +809,8 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			const std::uint32_t keepBuiltCps  = work.builtChunksPerSide;
 			const bool          wasDirty      = work.dirty;
 
-			const std::vector<std::uint8_t> before = work.layerWeights;
+			const std::vector<std::uint8_t> before  = work.layerWeights;
+			const std::vector<std::uint8_t> before2 = work.layerWeights2;
 			// paint() answers false for two different things: a landscape with no
 			// extent, and a dab that fell entirely off the weightmap. Only the first
 			// is a mistake the client made — the second is the same "nothing
@@ -821,20 +826,23 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			const std::string uuid = uuidOf(*r.world, r.entity);
 			// The mix at the brush centre afterwards, normalised to 1 — what the
 			// shader will blend by, and the only readable proof the dab landed.
-			json mix = json::array({ 0.0f, 0.0f, 0.0f, 0.0f });
+			// One entry per layer, all eight: layers 4..7 read 0 until a stroke
+			// on one of them gives the landscape its second weight page.
+			json mix = json::array();
+			for (int k = 0; k < kTerrainMaxLayers; ++k) mix.push_back(0.0f);
 			{
 				const std::uint32_t wr = work.weightRes;
 				const float u = (wx - r.worldPos.x + work.sizeX * 0.5f) / work.sizeX;
 				const float v = (wz - r.worldPos.z + work.sizeZ * 0.5f) / work.sizeZ;
+				std::uint8_t px[kTerrainMaxLayers] = {};
 				if (u >= 0.0f && u < 1.0f && v >= 0.0f && v < 1.0f &&
-				    work.layerWeights.size() == static_cast<size_t>(wr) * wr * 4)
+				    TerrainPaint::texelWeights(work,
+				        static_cast<std::uint32_t>(u * static_cast<float>(wr)),
+				        static_cast<std::uint32_t>(v * static_cast<float>(wr)), px))
 				{
-					const auto tx = static_cast<std::uint32_t>(u * static_cast<float>(wr));
-					const auto tz = static_cast<std::uint32_t>(v * static_cast<float>(wr));
-					const std::uint8_t* px =
-						&work.layerWeights[(static_cast<size_t>(tz) * wr + tx) * 4];
-					const float sum = static_cast<float>(px[0] + px[1] + px[2] + px[3]);
-					for (int k = 0; k < 4; ++k)
+					float sum = 0.0f;
+					for (int k = 0; k < kTerrainMaxLayers; ++k) sum += static_cast<float>(px[k]);
+					for (int k = 0; k < kTerrainMaxLayers; ++k)
 						mix[k] = sum > 0.0f ? static_cast<float>(px[k]) / sum : 0.0f;
 				}
 			}
@@ -852,7 +860,7 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			// Allocating the weightmap IS a change even when no texel moved: the
 			// landscape goes from "unpainted, shader falls back to layer 0" to a
 			// real map, and that has to be written or the next call re-allocates it.
-			if (work.layerWeights == before)
+			if (work.layerWeights == before && work.layerWeights2 == before2)
 			{
 				result["changed"]     = false;
 				result["regenerated"] = false;
@@ -866,6 +874,9 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			terrain["weightRes"] = work.weightRes;
 			terrain["layerWeightsB64"] = SceneSerializer::encodeBase64(
 				work.layerWeights.data(), work.layerWeights.size());
+			if (work.layerWeights2.size() == work.layerWeights.size())
+				terrain["layerWeights2B64"] = SceneSerializer::encodeBase64(
+					work.layerWeights2.data(), work.layerWeights2.size());
 
 			CarryOver carry;
 			// The texture is REPLACED in place when its uuid survives, and registered

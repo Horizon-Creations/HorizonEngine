@@ -1369,13 +1369,26 @@ ScriptContext::~ScriptContext()
     // gives itself by nulling g_physics.
     if (s_servicesPublisher == this)
     {
+        dropScriptWatches(s_hostServices.runtime);
         s_hostServices      = {};
         s_servicesPublisher = nullptr;
     }
 }
 
+void ScriptContext::dropScriptWatches(HorizonCode::Runtime* runtime)
+{
+    // Every horizon.hc.watch of this context's scripts sits in the runtime
+    // under a script token (HE::api::hc::scriptToken). The runtime outlives the
+    // context — the Game Instance's lives for the whole application — so a
+    // context that lets go of it takes its subscriptions along; otherwise the
+    // next scene's script on an entity of the same number would hear them.
+    if (runtime) runtime->unwatchIf(HE::api::hc::isScriptToken);
+}
+
 void ScriptContext::setHostServices(HostServices s)
 {
+    if (s_servicesPublisher == this && s_hostServices.runtime != s.runtime)
+        dropScriptWatches(s_hostServices.runtime);
     s_hostServices      = std::move(s);
     s_servicesPublisher = this;
 }
@@ -1749,6 +1762,27 @@ bool ScriptContext::callOnRep(ScriptEngine::InstanceId id, const std::string& va
     HE_SCRIPT_CALL("onRep", m_engine.callInstanceMethod(
         rawId(id), fn.c_str(),
         [&oldValue](lua_State* L) { luaPushFieldValue(L, oldValue, 0); return 1; }));
+}
+
+bool ScriptContext::callOnChanged(ScriptEngine::InstanceId id, const std::string& varName,
+                                  uint32_t source, const HorizonCode::Value& oldValue,
+                                  const HorizonCode::Value& newValue)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    if (langOf(id) == HE::ScriptLanguage::Python)
+        HE_SCRIPT_CALL("onChanged", b->callOnChanged(rawId(id), varName, source, oldValue, newValue));
+
+    // Lua: pushed here with luaPushFieldValue, exactly as callOnRep does it,
+    // and the name verbatim after the prefix for the same reason.
+    const std::string fn = "onChanged_" + varName;
+    HE_SCRIPT_CALL("onChanged", m_engine.callInstanceMethod(
+        rawId(id), fn.c_str(),
+        [&](lua_State* L) {
+            lua_pushinteger(L, static_cast<lua_Integer>(source));
+            luaPushFieldValue(L, oldValue, 0);
+            luaPushFieldValue(L, newValue, 0);
+            return 3;
+        }));
 }
 
 bool ScriptContext::callRpc(ScriptEngine::InstanceId id, const std::string& fn,
