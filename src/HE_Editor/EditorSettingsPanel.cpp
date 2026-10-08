@@ -285,7 +285,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		Row::combo("Render Path", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-			ImGui::SetTooltip("Deferred is available on Metal and OpenGL only.");
+			ImGui::SetTooltip("Deferred needs this backend's G-buffer pipeline to finish setting up.");
 		else if (supported)
 			hint("Deferred: G-buffer + one lighting resolve per visible pixel.");
 	});
@@ -353,8 +353,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (aaMode == 4 && !mfxOK)
 			hint("MetalFX needs Apple Silicon — falls back to TAA.");
 		else if (aaMode >= 3 && !taaOK)
-			hint("TAA needs a velocity buffer — Metal and OpenGL so far (both render paths); "
-			     "this backend falls back to SMAA.");
+			hint("TAA needs a velocity buffer, which this backend does not write yet; falls back to SMAA.");
 		else if (aaMode == 0)
 			hint("No edge smoothing at all; the post chain still runs.");
 		else if (aaMode == 2)
@@ -435,7 +434,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
-			ImGui::SetTooltip("Metal only, and only with Render Path = Deferred.");
+			ImGui::SetTooltip("Needs this backend's post-processing pipeline to finish setting up.");
 		else if (supported)
 			hint("Metallic surfaces reflect the actual scene (deferred path).");
 	});

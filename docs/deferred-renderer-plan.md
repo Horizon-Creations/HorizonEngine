@@ -1392,4 +1392,84 @@ Deferred-Frame SSR still ab, obwohl der Schalter im Editor an war; das ist behob
     auf Vulkan liest er jetzt GB3 statt des Vorpasses);
   - ein texturierter Decal in GB0 (der Zeuge ist untexturiert);
   - SSR zusammen mit TAA im Deferred-Frame.
+
+### 10.13 Schritt 6 umgesetzt: Bildtests, Parität, Doku, Verifikation (Stand 2026-10-08)
+
+> Zweig wie oben, Dokumentations-/Testinfrastruktur-Commits dieses Schritts. Prüfpunkte laut
+> 10.8: WARP-Pixeltests D3D11/D3D12, lavapipe-Fälle, Abweichungstabelle hier, Matrix in
+> `backend-parity-plan.md`, Entscheidung zu einem Editor-Lauf auf WARP, Vollbau + volle Tests.
+
+**WARP (D3D11, D3D12) — läuft, nicht nur Syntax-Zeuge.**
+- Die WARP-Pixeltests aus Schritt 2/3 (`tests/test_material_graph.cpp`, "D3D11: G-buffer +
+  deferred resolve shade a graph material like its forward draw (WARP, Thema 150)" und das
+  D3D12-Gegenstück, plus der D3D12-PSO-Bautest) sind echte Läufe: `createWarpDevice11`/das
+  D3D12-Pendant stehen hinter `REQUIRE`, ein fehlendes WARP-Gerät lässt den Fall rot werden,
+  nicht grün durchrutschen.
+- Windows-CI (Run 37767066003, Commit `63d41ad8`) zeigt `test_material_graph` als ctest #7,
+  **Passed, 485,52 s**, 0 Fehlschläge — das schließt diese WARP-Fälle ein. Der CI-Dispatch auf
+  `feb27c84` (Schritt 5, Run 37775796389) ist seit diesem Schritt ebenfalls grün auf allen vier
+  Jobs (Windows/Linux/Linux-lavapipe/macOS), also mit SSR und Decals im selben Testbinary.
+  Lokal auf NN-WS03 (Release, derselbe HEAD, eigener Build unter `C:/hbs6`, eigenes
+  `%APPDATA%`/`%LOCALAPPDATA%`) siehe Vollbau-Abschnitt unten für die Gegenprobe.
+- **Nicht erweitert:** eine D3D12-PSO-Probe eigens für die GB0-Decal-PSO (SRGB) und die
+  Resolve-Signatur-Slots t31/s8 des SSR-Composite. Die bestehenden Pixeltests decken die
+  resultierende Bildwirkung bereits ab (Decal- und SSR-Code laufen im selben Testbinary mit),
+  eine PSO-Ebenen-Probe wäre zusätzliche, aber keine andere Aussage. Offen für einen
+  Folge-Schritt, falls die PSO-Erstellung selbst mal bricht ohne dass sich das Bild ändert.
+
+**lavapipe (Vulkan) — zwei neue Fälle, als REPORT ONLY.**
+- `deferred` und `deferred_clustered` (Schritt 4) hatten noch keine lavapipe-Zahl. Jetzt da
+  (Run 37767066003, llvmpipe/LLVM 20.1.2, Mesa, 08.10.2026): `deferred` forward↔deferred
+  mean |Δ| 0,0223 (max 4, 0 % > 2), deferred↔gbuffer 5,1681 (max 127, 14,3 % > 2);
+  `deferred_clustered` forward↔deferred 0,0434 (max 1), window↔deferred 2,7911 (max 65,
+  17,8 % > 2). Beide `ok`, 0 Validation-Meldungen. Der Dispatch-Lauf auf `feb27c84`
+  (Run 37775796389, nach SSR+Decals) misst dieselben Zahlen auf dieselben Pixel — SSR steht in
+  beiden Fällen fest auf `SSR=0`, die neuen Wege aus Schritt 5 ändern an ihnen nichts.
+- Neu: `deferred_ssr` (SSRTEST-Spiegelboden + roter Würfel, kein Graph-Material, SSR an/aus) und
+  `deferred_decal` (DECALTEST, deferred gegen die G-Buffer-Basisfarbe) in
+  `scripts/he_vk_imagetests.py`, beide `RENDERPATH=1` fest, require-Zeilen gegen den Log statt
+  einer Zahl. **REPORT ONLY (`min_mean=None`):** die einzige vorhandene Zahl ist die RTX-4070-
+  Tabelle in §10.12, auf einer anderen Szene (Chrom-Graph-Kugel statt dem eingebauten
+  Spiegelboden/roten Würfel) — kein Maß, an dem diese Szene hier geprüft werden kann. Der Fall
+  bleibt bis zum ersten lavapipe-Lauf unbeurteilt; danach aus den gemessenen Zahlen eine echte
+  Schwelle ziehen (derselbe Weg wie bei `deferred`/`deferred_clustered` in Schritt 4→6).
+  `deferred_ssr` erlaubt die eine bekannte Vulkan-Warnung „Vertex attribute at location 2 not
+  consumed" der Refl-Prepass-Pipeline (§10.12, dort auch auf der RTX gesehen) über
+  `ALLOWED_VALIDATION["ssr_prepass_unconsumed"]`.
+- Diese zwei Fälle sind mit diesem Schritt gepusht; ihre ersten echten lavapipe-Zahlen liefert
+  erst der CI-Lauf NACH diesem Push (siehe „CI" im Handoff) — hier noch nicht einsehbar.
+
+**Editor-Lauf auf WARP: Entscheidung Nein.** `grep -rn "D3D_DRIVER_TYPE_WARP\|EnumWarpAdapter"
+src/HE_Rendering/src/Backends/D3D11 src/HE_Rendering/src/Backends/D3D12` trifft NUR die
+Test-Helfer (`createWarpDevice11` u.ä.), nicht `D3D11Renderer`/`D3D12Renderer` selbst — der
+Editor hat keinen Schalter, der ihn auf WARP statt der echten GPU starten lässt. Einen zu bauen
+hieße einen neuen Geräteauswahl-Pfad in beiden Renderern plus einen Software-Compositor-Weg für
+die SwapChain, nur um dasselbe zu zeigen, was die gezielten WARP-Pixeltests oben schon zeigen.
+Lohnt sich nicht gegenüber dem, was es an echter Abdeckung zusätzlich bringt — bleibt aus.
+
+**Abweichungen zu Metal/GL, konsolidiert (siehe auch 10.6, 10.9–10.12):**
+- SSR deferred ist Forward-Trace + Resolve-Composite, nicht Metals lag-freier G-Buffer-Trace
+  (10.12). `frameMatLight` (Graph-Material-Forward-Schwanz) bleibt ohne SSR (Plan C5).
+- SSAO/HBAO/GTAO laufen im Resolve bildgleich zu GL/Metal, aber über den Prepass-Weg statt aus
+  der G-Buffer-Tiefe (P5) — reiner Kostenunterschied, kein Bildunterschied, noch nicht portiert.
+- HBAO/GTAO sind auf D3D11/D3D12 schon FORWARD stärker als auf GL/Vulkan (10.12) — vorbestehend,
+  nicht durch den Deferred-Port verursacht, Ursache nicht untersucht.
+- Tile-Memory-Resolve (Framebuffer-Fetch) bleibt Metal-exklusiv; D3D/Vulkan/GL sampeln den
+  G-Buffer stattdessen, mit gleichem Bild (10.3).
+
+**Vollbau + volle Tests im Vordergrund (NN-WS03, 08.10.2026).** Eigener Out-of-tree-Build
+(`cmake -S . -B C:/hbs6/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDEPLOY_DIR=C:/hbs6/deploy`,
+VS-18-vcvars, HEAD = dieser Zweig) statt der lang verschachtelten Worktree-`out/`-Route — die
+scheitert hier an `Filename longer than 260 characters` in einem FetchContent-Subbuild
+(`nlohmann_json-populate`), siehe Lehre. `HE_ENABLE_SHADERC=ON` und `HE_VULKAN_ENABLED=TRUE`
+per `CMakeCache.txt` bestätigt. Build: **0 Fehler**, `cmake --build C:/hbs6/build -j8`,
+„1846/1846", inklusive der Runtime-Shader-Validierung am Ende (**110/110 eingebettete Shader
+kompilieren**, 53 HLSL + 57 GLSL). `he_tests.exe` mit eigenem `%APPDATA%`/`%LOCALAPPDATA%` unter
+`C:/hbs6` (nicht das echte Profil) und `HE_NET_LOOPBACK_ONLY=1`: **4482/4484 Testfälle,
+618711/618718 Assertions, Exit-Code 1** (aus der Datei gelesen, nicht aus einer Pipe
+abgeleitet). Die zwei Fehlschläge sind beide in `test_inspector_ui.cpp` (Clipboard-Kopie/
+-Einfügen einer Komponente) — deckungsgleich mit der bekannten Vorbestand-Lücke (siehe
+Lehren dieses Themas), keine Regression aus Schritt 2–6. Gamepad- und Netz-Flake aus
+derselben Lehre sind in diesem Lauf nicht aufgetreten (5 „skipped" sind alle
+`HE_GITHUB_LIVE_*`/Plattform-Skips, keine Deferred-Fälle).
 - Nicht geprüft: AMD/Intel, MoltenVK.

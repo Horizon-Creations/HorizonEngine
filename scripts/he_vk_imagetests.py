@@ -94,8 +94,11 @@ CASES = {
     # forward shader is a reduced copy, the resolve shades with heLitP), so the
     # scene is the graph sphere in front of the sky alone. Measured on an RTX
     # 4070 (Vulkan, validation on, 08.10.2026): forward vs deferred 0.0063,
-    # deferred vs gbuffer 5.16; no lavapipe number yet — the bounds leave room
-    # for a software rasteriser's own rounding, not for a missing light term.
+    # deferred vs gbuffer 5.16. lavapipe (run 37767066003, llvmpipe/LLVM 20.1.2,
+    # Mesa, 08.10.2026): forward vs deferred mean |Δ| 0.0223 (max 4, 0 % > 2),
+    # deferred vs gbuffer 5.1681 (max 127, 14.3 % > 2) — both well inside the
+    # bounds below, 0 validation messages; the bounds leave room for a software
+    # rasteriser's own rounding, not for a missing light term.
     "deferred": {
         "base": {"SKYTEST": "1", "MATERIALTEST": "matte", "TOD": "0.45", "CLOUDMODE": "0",
                  "COVERAGE": "0", "AA": "0", "BLOOM": "0", "DOF": "0", "MOTIONBLUR": "0",
@@ -114,7 +117,9 @@ CASES = {
     # deferred path. deferred ≈ forward (both clustered), and the 8-light window
     # resolve (HE_FORWARD_CLUSTER=0) must lose the pools beyond it — the same
     # A/B as "clustered", now on the resolve. RTX 4070 (08.10.2026): forward vs
-    # deferred 0.0091, window vs deferred 2.80 ("clustered" there: 3.09).
+    # deferred 0.0091, window vs deferred 2.80 ("clustered" there: 3.09). lavapipe
+    # (run 37767066003, 08.10.2026): forward vs deferred 0.0434 (max 1, 0 % > 2),
+    # window vs deferred 2.7911 (max 65, 17.8 % > 2) — both ok, 0 validation.
     "deferred_clustered": {
         "base": {"SKYTEST": "1", "MANYLIGHTS": "16", "TOD": "0", "CAMY": "207",
                  "CAMZ": "2", "PITCH": "-38", "CLOUDMODE": "0", "COVERAGE": "0",
@@ -127,6 +132,45 @@ CASES = {
         "pairs": [("forward", "deferred", None, 1.0), ("window", "deferred", 1.5)],
         "require": {"deferred": ["HE_DUMP_MANYLIGHTS witness scene added", "clustered resolve"],
                     "window":   ["deferred frame (", "8-light resolve"]},
+    },
+    # SSR inside the deferred resolve (Thema 150 Schritt 5, docs/deferred-renderer-
+    # plan.md §10.12, commit dfd1e7c2): the resolve composites the forward SSR
+    # trace through heLitP's heSSRFwd stage. Built-in SSRTEST mirror floor + red
+    # cube, no graph material, so this needs no other asset. REPORT ONLY: the
+    # §10.12 table only has an RTX 4070 number, on a different scene (chrome graph
+    # sphere, mean |Δ| 2.81-2.84) — not a bound to judge THIS scene against. Make
+    # it a judged pair once a lavapipe number exists.
+    "deferred_ssr": {
+        "base": {"SKYTEST": "1", "SSRTEST": "1", "CAMY": "3.5", "CAMZ": "6", "PITCH": "-12",
+                 "TOD": "0.45", "CLOUDMODE": "0", "COVERAGE": "0", "AA": "0", "BLOOM": "0",
+                 "GI": "0", "SSAO": "0", "RENDERPATH": "1"},
+        "variants": {
+            "off": {"dump": {"SSR": "0"}},
+            "on":  {"dump": {"SSR": "1"}},
+        },
+        "pairs": [("off", "on", None)],
+        "require": {"off": ["HE_DUMP_SSRTEST witness scene added", "deferred path ready", "deferred frame ("],
+                    "on":  ["HE_DUMP_SSRTEST witness scene added", "deferred path ready", "deferred frame ("]},
+        # The SSR reflection prepass leaves one vertex input unconsumed; §10.12
+        # saw it on the RTX 4070 forward run too, so it is not new to the deferred
+        # path or to lavapipe specifically — allow it rather than guess it away.
+        "allow": {"on": ["ssr_prepass_unconsumed"]},
+    },
+    # Decals in GB0 ahead of the deferred resolve (§10.12, commit 4c8c37ea): the
+    # red decal patch must reach the G-buffer's base colour same as the final
+    # deferred frame. REPORT ONLY, same reason as deferred_ssr: no lavapipe number
+    # yet, only the RTX 4070's shadow/sun ratio table on a different camera.
+    "deferred_decal": {
+        "base": {"SKYTEST": "1", "DECALTEST": "1", "CAMY": "13", "CAMZ": "-1", "PITCH": "-65",
+                 "TOD": "0.45", "CLOUDMODE": "0", "COVERAGE": "0", "AA": "0", "BLOOM": "0",
+                 "GI": "0", "SSAO": "0", "RENDERPATH": "1"},
+        "variants": {
+            "deferred": {},
+            "gbuffer":  {"dump": {"GBUFFER": "1"}},
+        },
+        "pairs": [("deferred", "gbuffer", None)],
+        "require": {"deferred": ["HE_DUMP_DECALTEST witness scene added", "deferred path ready", "deferred frame ("],
+                    "gbuffer":  ["deferred frame ("]},
     },
     # DDGI diffuse on the GI-reflections witness scene (graph-material cubes, one
     # emissive, on a mirror floor), with the reflections pinned OFF so the A/B is
@@ -297,6 +341,9 @@ COLOR_TOL = 12
 # target behind scene binding 3 stayed UNDEFINED because runSSAO never draws
 # with GI on; Thema 145 — createSSAOTargets primes it to SHADER_READ_ONLY).
 ALLOWED_VALIDATION = {
+    # §10.12: the SSR reflection prepass pipeline leaves one vertex input
+    # unconsumed; seen on the RTX 4070's forward run too, not new here.
+    "ssr_prepass_unconsumed": [r"Vertex attribute at location 2 not consumed"],
 }
 
 LOG_MARK_ARMED  = "frame dump armed"
