@@ -7123,7 +7123,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				// mid-letter. A notch smaller than body text: the tiles are narrow
 				// on purpose.
 				ImFont* font   = ImGui::GetFont();
-				const float fs = ImGui::GetFontSize() * 0.85f;
+				const float fs = ImGui::GetFontSize() * 0.82f;
 				const auto widthOf = [&](const std::string& t)
 				{ return font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.c_str()).x; };
 				const float maxW = size.x - 4.0f;
@@ -7201,11 +7201,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 				if (!placed) other.push_back(t);
 			}
 
-			// The tiles share the column's width equally. The column count is
-			// the most that keep a tile at least kMinW wide; when the pane is too
+			// The tiles share the column's width equally. (The pane's own padding
+			// and scrollbar are already out of this number: the child is measured
+			// from inside.) The column count is the most that keep a tile at
+			// least kMinW wide; when the pane is too
 			// narrow for that many, there is one column fewer and every tile is
 			// correspondingly larger.
-			constexpr float kMinW = 46.0f, kTileH = 56.0f;
+			constexpr float kMinW = 42.0f, kTileH = 56.0f;
 			const float spacing = ImGui::GetStyle().ItemSpacing.x;
 			const float availW  = ImGui::GetContentRegionAvail().x;
 			const int   cols    = std::max(1, static_cast<int>((availW + spacing) / (kMinW + spacing)));
@@ -7217,8 +7219,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 				for (UIWidgetType t : types) if (matches(t)) shown.push_back(t);
 				if (shown.empty()) return;
 				if (!needle.empty()) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+				// NoTreePushOnOpen: a tree node indents what is inside it, and the
+				// tiles were sized for the full pane — the indent pushed the last
+				// column past the edge (hence a sideways scroll). Without the push
+				// there is no indent, no TreePop, and the width measured above is
+				// the width the tiles really get.
 				if (!ImGui::TreeNodeEx(title, ImGuiTreeNodeFlags_DefaultOpen |
-				                              ImGuiTreeNodeFlags_SpanAvailWidth)) return;
+				                              ImGuiTreeNodeFlags_SpanAvailWidth |
+				                              ImGuiTreeNodeFlags_NoTreePushOnOpen)) return;
 				int col = 0;
 				for (UIWidgetType t : shown)
 				{
@@ -7233,7 +7241,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 					}
 					col = (col + 1) % cols;
 				}
-				ImGui::TreePop();
 			};
 			for (const Group& g : kGroups) drawGroup(g.title, g.types);
 			if (!other.empty()) drawGroup("Other", other);
