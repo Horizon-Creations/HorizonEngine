@@ -146,6 +146,67 @@ TEST_CASE("tutorial: parameterised checks name something that exists")
 	}
 }
 
+// "The assets chapters cover every kind the Content Browser knows" as a test rather
+// than a promise. Each tut::Asset kind is put in exactly one of three buckets:
+//  * authored — the editor can make it (Create Asset, Save as Prefab) or ships one
+//    to open (the Engine root's meshes), so some step must actually WATCH for it;
+//  * imported — only Import brings it in, and the sandbox has none, so a step body
+//    must at least name it;
+//  * language — exists only in a project of one scripting language, which the tour
+//    cannot ask of everyone (see the HorizonCode chapter's comment).
+// A kind added to tut::Asset without being sorted here fails the first CHECK, so
+// "a new asset type nobody walks through" cannot happen quietly.
+TEST_CASE("tutorial: every asset kind is walked through or at least named")
+{
+	const std::set<std::string> authored = {
+		"scene", "prefab", "staticmesh", "material", "materialfunction",
+		"particlesystem", "animatorstatemachine", "bonemask", "blendspace",
+		"propertyanimclip", "sequence", "widget", "theme", "inputaction",
+		"inputmappingcontext", "struct", "enum", "savegametemplate",
+	};
+	// Kind → the words a body must contain to count as naming it.
+	const std::vector<std::pair<std::string, std::string>> imported = {
+		{ "texture", "Texture" }, { "skeletalmesh", "Skeletal Mesh" },
+		{ "audio", "Audio" }, { "font", "Font" }, { "animationclip", "Animation Clip" },
+	};
+	const std::set<std::string> language = { "script", "horizoncodeclass" };
+
+	for (int i = 0; i < static_cast<int>(tut::Asset::Count); ++i)
+	{
+		const std::string name = tut::assetName(static_cast<tut::Asset>(i));
+		CAPTURE(name);
+		int buckets = static_cast<int>(authored.count(name) + language.count(name));
+		for (const auto& [kind, word] : imported) buckets += (kind == name) ? 1 : 0;
+		CHECK(buckets == 1);
+	}
+
+	std::set<std::string> watched;
+	std::string bodies;
+	for (int ci = 0; ci < tut::chapterCount(); ++ci)
+	{
+		const tut::Chapter& c = tut::chapters()[ci];
+		for (int si = 0; si < c.stepCount; ++si)
+		{
+			const tut::Step& s = c.steps[si];
+			if (s.check == tut::Check::AssetOfTypeAdded ||
+			    s.check == tut::Check::TabOfTypeOpened)
+				watched.insert(s.arg);
+			bodies += s.body;
+			bodies += '\n';
+		}
+	}
+	for (const std::string& kind : authored)
+	{
+		CAPTURE(kind);
+		CHECK(watched.count(kind) == 1);
+	}
+	for (const auto& [kind, word] : imported)
+	{
+		CAPTURE(kind);
+		CHECK(bodies.find(word) != std::string::npos);
+	}
+}
+
 // The whole point of the rework: the tour follows the user. A step that advances
 // on a button press alone would be a step the user can click past without ever
 // touching the thing it teaches.
@@ -357,6 +418,200 @@ TEST_CASE("tutorial: progress round-trips through its serialized form")
 	CHECK(tut::finished(tut::deserialize("a-step-that-was-removed")));
 }
 
+// ─── Optional HorizonCode chapter ─────────────────────────────────────────────
+// The welcome card lets the user leave the HorizonCode chapter out. Everything
+// above runs with the default Options and is therefore the "with" case; the
+// cases below pin that Options{true} really is that default, and that the
+// "without" tour steps over the chapter in every direction while the saved
+// position stays a step id.
+
+namespace
+{
+	int chapterIndexOf(std::string_view id)
+	{
+		for (int i = 0; i < tut::chapterCount(); ++i)
+			if (id == tut::chapters()[i].id) return i;
+		return -1;
+	}
+
+	const tut::Options kWithHc{ true };
+	const tut::Options kNoHc{ false };
+}
+
+TEST_CASE("tutorial: only the HorizonCode chapter is optional")
+{
+	const int hc = chapterIndexOf("horizoncode");
+	// Neither first nor last: both neighbours exist, which is what the walks
+	// below rely on to see the step OVER it.
+	REQUIRE(hc > 0);
+	REQUIRE(hc < tut::chapterCount() - 1);
+
+	for (int i = 0; i < tut::chapterCount(); ++i)
+	{
+		CAPTURE(std::string(tut::chapters()[i].id));
+		CHECK(tut::chapterIncluded(i));
+		CHECK(tut::chapterIncluded(i, kWithHc));
+		CHECK(tut::chapterIncluded(i, kNoHc) == (i != hc));
+	}
+	CHECK_FALSE(tut::chapterIncluded(-1));
+	CHECK_FALSE(tut::chapterIncluded(tut::chapterCount()));
+
+	CHECK(tut::chapterCount(kWithHc) == tut::chapterCount());
+	CHECK(tut::totalSteps(kWithHc)   == tut::totalSteps());
+	CHECK(tut::chapterCount(kNoHc)   == tut::chapterCount() - 1);
+	CHECK(tut::totalSteps(kNoHc)     == tut::totalSteps() - tut::chapters()[hc].stepCount);
+}
+
+TEST_CASE("tutorial: with HorizonCode, the tour walks that chapter like before")
+{
+	const int hc = chapterIndexOf("horizoncode");
+	REQUIRE(hc > 0);
+
+	tut::Cursor c{ 0, 0 };
+	int visited = 0, inHc = 0;
+	while (!tut::finished(c, kWithHc))
+	{
+		// Same cursor either way: Options{true} is the default, not a variant.
+		CHECK(tut::advance(c, kWithHc) == tut::advance(c));
+		CHECK(tut::flatIndex(c, kWithHc) == visited);
+		if (c.chapter == hc) ++inHc;
+		c = tut::advance(c, kWithHc);
+		++visited;
+		REQUIRE(visited <= tut::totalSteps() + 1);
+	}
+	CHECK(visited == tut::totalSteps());
+	CHECK(inHc == tut::chapters()[hc].stepCount);
+	CHECK(tut::deserialize("hc-intro", kWithHc) == tut::Cursor{ hc, 0 });
+}
+
+TEST_CASE("tutorial: without HorizonCode, advancing never enters that chapter")
+{
+	const int hc = chapterIndexOf("horizoncode");
+	REQUIRE(hc > 0);
+
+	tut::Cursor c = tut::clamp(tut::Cursor{ 0, 0 }, kNoHc);
+	int visited = 0, lastNumber = 0;
+	while (!tut::finished(c, kNoHc))
+	{
+		const tut::Chapter* chap = tut::chapterAt(c, kNoHc);
+		REQUIRE(chap != nullptr);
+		REQUIRE(tut::stepAt(c, kNoHc) != nullptr);
+		CHECK(std::string(chap->id) != "horizoncode");
+		CHECK(std::string(tut::stepAt(c, kNoHc)->id).rfind("hc-", 0) != 0);
+		CHECK(tut::flatIndex(c, kNoHc) == visited);
+		// "Chapter n/m" counts without the skipped one: no gap where it was.
+		const int number = tut::chapterNumber(c, kNoHc);
+		CHECK((number == lastNumber || number == lastNumber + 1));
+		lastNumber = number;
+		c = tut::advance(c, kNoHc);
+		++visited;
+		REQUIRE(visited <= tut::totalSteps() + 1);
+	}
+	CHECK(visited == tut::totalSteps(kNoHc));
+	CHECK(lastNumber == tut::chapterCount(kNoHc));
+	CHECK(tut::flatIndex(c, kNoHc) == tut::totalSteps(kNoHc));
+	CHECK(tut::chapterNumber(c, kNoHc) == 0);
+
+	// The seam itself: Next on the last card before the chapter lands on the
+	// first card after it — and on the chapter's own first card with it.
+	const tut::Cursor before{ hc - 1, tut::chapters()[hc - 1].stepCount - 1 };
+	CHECK(tut::advance(before, kNoHc) == tut::Cursor{ hc + 1, 0 });
+	CHECK(tut::advance(before, kWithHc) == tut::Cursor{ hc, 0 });
+	CHECK(std::string(tut::stepAt(tut::advance(before, kNoHc), kNoHc)->id) == "language");
+}
+
+TEST_CASE("tutorial: without HorizonCode, retreat and nextChapter step over it too")
+{
+	const int hc = chapterIndexOf("horizoncode");
+	REQUIRE(hc > 0);
+	const tut::Cursor before{ hc - 1, tut::chapters()[hc - 1].stepCount - 1 };
+	const tut::Cursor after{ hc + 1, 0 };
+
+	// Back from the first card after the chapter goes to the last card before it.
+	CHECK(tut::retreat(after, kNoHc) == before);
+	CHECK(tut::retreat(after, kWithHc) ==
+	      tut::Cursor{ hc, tut::chapters()[hc].stepCount - 1 });
+
+	// retreat is still advance's inverse over the whole shortened tour.
+	tut::Cursor c = tut::clamp(tut::Cursor{ 0, 0 }, kNoHc);
+	CHECK(tut::retreat(c, kNoHc) == c);
+	for (int i = 0; i < tut::totalSteps(); ++i)
+	{
+		const tut::Cursor next = tut::advance(c, kNoHc);
+		if (tut::finished(next, kNoHc)) break;
+		CHECK(tut::retreat(next, kNoHc) == c);
+		c = next;
+	}
+	const tut::Cursor end{ tut::chapterCount(), 0 };
+	CHECK(tut::flatIndex(tut::retreat(end, kNoHc), kNoHc) == tut::totalSteps(kNoHc) - 1);
+
+	// Chapter skipping: one hop per included chapter, never onto the excluded one.
+	CHECK(tut::nextChapter(tut::Cursor{ hc - 1, 0 }, kNoHc) == after);
+	tut::Cursor k = tut::clamp(tut::Cursor{ 0, 0 }, kNoHc);
+	int hops = 0;
+	while (!tut::finished(k, kNoHc))
+	{
+		CHECK(k.chapter != hc);
+		CHECK(k.step == 0);
+		k = tut::nextChapter(k, kNoHc);
+		++hops;
+		REQUIRE(hops <= tut::chapterCount() + 1);
+	}
+	CHECK(hops == tut::chapterCount(kNoHc));
+}
+
+TEST_CASE("tutorial: without HorizonCode, flatIndex and fromFlat still round-trip")
+{
+	for (int i = 0; i < tut::totalSteps(kNoHc); ++i)
+	{
+		const tut::Cursor c = tut::fromFlat(i, kNoHc);
+		CHECK(std::string(tut::chapterAt(c, kNoHc)->id) != "horizoncode");
+		CHECK(tut::flatIndex(c, kNoHc) == i);
+	}
+	CHECK(tut::finished(tut::fromFlat(tut::totalSteps(kNoHc), kNoHc), kNoHc));
+}
+
+TEST_CASE("tutorial: a saved position survives switching the HorizonCode chapter off and on")
+{
+	const int hc = chapterIndexOf("horizoncode");
+	REQUIRE(hc > 0);
+
+	// Every step of the shortened tour round-trips through its id.
+	tut::Cursor c = tut::clamp(tut::Cursor{ 0, 0 }, kNoHc);
+	while (!tut::finished(c, kNoHc))
+	{
+		CAPTURE(tut::serialize(c, kNoHc));
+		CHECK(tut::deserialize(tut::serialize(c, kNoHc), kNoHc) == c);
+		c = tut::advance(c, kNoHc);
+	}
+	CHECK(tut::serialize(c, kNoHc) == "done");
+	CHECK(tut::deserialize("", kNoHc) == tut::Cursor{ 0, 0 });
+
+	// Saved inside the chapter, then the chapter was switched off: the tour
+	// resumes right after it. NOT "finished" — which is what an unknown id would
+	// give, and why findStep stays blind to Options.
+	for (int si = 0; si < tut::chapters()[hc].stepCount; ++si)
+	{
+		const std::string id = tut::chapters()[hc].steps[si].id;
+		CAPTURE(id);
+		CHECK(tut::deserialize(id) == tut::Cursor{ hc, si });
+		CHECK(tut::serialize(tut::deserialize(id)) == id);
+
+		const tut::Cursor resumed = tut::deserialize(id, kNoHc);
+		CHECK_FALSE(tut::finished(resumed, kNoHc));
+		CHECK(resumed == tut::Cursor{ hc + 1, 0 });
+		CHECK(tut::serialize(tut::Cursor{ hc, si }, kNoHc) == "language");
+	}
+
+	// …and switched back on: a position past the chapter is not rewound into it.
+	CHECK(tut::deserialize("language", kWithHc) == tut::Cursor{ hc + 1, 0 });
+	// A position before it is untouched either way.
+	const std::string early = tut::chapters()[hc - 1].steps[0].id;
+	CHECK(tut::deserialize(early, kNoHc) == tut::deserialize(early, kWithHc));
+	// An id that no longer exists still reads as finished, chapter off or on.
+	CHECK(tut::finished(tut::deserialize("a-step-that-was-removed", kNoHc), kNoHc));
+}
+
 // ─── Completion checks ────────────────────────────────────────────────────────
 
 TEST_CASE("tutorial: checks fire on the transition they describe")
@@ -546,6 +801,15 @@ TEST_CASE("tutorial: component and tab checks match on content, not position")
 	now.addTab(tut::Asset::ParticleSystem);
 	CHECK(tut::satisfied(step(tut::Check::TabOfTypeOpened, "particlesystem"), base, now));
 	CHECK_FALSE(tut::satisfied(step(tut::Check::TabOfTypeOpened, "material"), base, now));
+
+	// The kinds Thema 151 added go through the same two checks; a bone mask tab
+	// is not a blend space tab even though both live in the animation block.
+	now.addTab(tut::Asset::BoneMask);
+	CHECK(tut::satisfied(step(tut::Check::TabOfTypeOpened, "bonemask"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::TabOfTypeOpened, "blendspace"), base, now));
+	now.add(tut::Asset::Prefab);
+	CHECK(tut::satisfied(step(tut::Check::AssetOfTypeAdded, "prefab"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::AssetOfTypeAdded, "savegametemplate"), base, now));
 
 	// TabOpen (the synthetic Level Script tab) wants the tab to APPEAR: one that
 	// was already open when the step began does not count.

@@ -15,6 +15,8 @@
 #include "SequencerTimeline.h"   // the sequencer's strip, over an in-memory clip
 #include "CinematicTimeline.h"   // the Cinematic tab's strip, over an in-memory sequence
 #include "UITimelineMath.h"
+#include "PanelSpotlight.h"      // the tour card's step-aside, over a real dock layout
+#include "TutorialSteps.h"       // …and the curriculum steps it is tested with
 #include "GitHubSignInView.h"    // the device-flow dialog's body
 
 #include <ContentManager/ContentManager.h>
@@ -22,11 +24,15 @@
 #include <HorizonScene/EngineApi.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>      // DockBuilder*, FindWindowByName
 
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 // ── Editor UI, rendered without a GPU ────────────────────────────────────────
@@ -2469,6 +2475,290 @@ TEST_CASE("ui shot: cinematic strip with every kind of row")
 			if (int(r) > 180 && int(g) < 130 && int(b) < 130) ++reddest;
 		}
 	CHECK(reddest > 10);
+}
+
+// ── The tour's card keeps off the panel it points at ─────────────────────────
+// The tutorial card floats over the docked editor, and with the editor's default
+// layout and the card's default bottom-right spot it lay squarely on Details and
+// on the Content Browser — the two panels a third of the tour points at. These
+// scenes put the editor's real dock layout (BuildDefaultDockLayout's fractions)
+// under the card, take the target panel from a real step of the curriculum, and
+// run the same Spotlight::KeepClear the tour runs. One case per side of the
+// editor: left (Quick Settings), right top (World Outliner), right bottom
+// (Details), bottom (Content Browser), and a floating window at the top (the
+// Performance Profiler, which opens wherever the user left it).
+//
+//     HE_UI_DUMP_DIR=/tmp/ui ./he_tests -tc="*tutorial card*"
+//
+// writes a before/after pair per side: "-before" is the card where it was, with
+// KeepClear switched off, "-after" the same scene after it has had time to
+// glide. The pulsing outline is in both, so the picture says which panel it is.
+namespace
+{
+	constexpr int   kEdW = 1600, kEdH = 900;
+	constexpr float kCardW = 430.0f, kCardH = 340.0f;
+
+	// The tour's own default, TutorialPanel::render's FirstUseEver position.
+	ImVec2 tourDefaultCardPos()
+	{
+		const ImGuiViewport* vp = ImGui::GetMainViewport();
+		return ImVec2(vp->WorkPos.x + vp->WorkSize.x - 450.0f,
+		              vp->WorkPos.y + vp->WorkSize.y - 380.0f);
+	}
+
+	// A step of the real curriculum whose outline names `panel`, so each case is
+	// about a step the user actually meets rather than a made-up window name.
+	const HE::tut::Step* stepPointingAt(std::string_view panel)
+	{
+		for (int c = 0; c < HE::tut::chapterCount(); ++c)
+		{
+			const HE::tut::Chapter& ch = HE::tut::chapters()[c];
+			for (int s = 0; s < ch.stepCount; ++s)
+				if (std::string_view(ch.steps[s].focusWindow) == panel) return &ch.steps[s];
+		}
+		return nullptr;
+	}
+
+	std::vector<std::string> panelsOf(const HE::tut::Step& step)
+	{
+		std::vector<std::string> out;
+		for (int i = 0; i < HE::tut::listEntryCount(step.focusWindow); ++i)
+			out.emplace_back(HE::tut::listEntry(step.focusWindow, i));
+		return out;
+	}
+
+	struct CardScene
+	{
+		const HE::tut::Step* step     = nullptr;
+		ImVec2               cardFrom = ImVec2(0.0f, 0.0f); // where the card starts
+		// …or the tour's default spot, which can only be computed inside a frame.
+		bool                 fromTourDefault = false;
+		bool                 avoid    = true;               // KeepClear on?
+		HE::Ed::Spotlight::KeepClear keep;
+
+		// One frame of the editor: the dockspace with its default layout, the
+		// docked panels, the floating Profiler, the card, the outline.
+		void frame(int i)
+		{
+			const ImGuiViewport* vp = ImGui::GetMainViewport();
+			const ImGuiID dockId = ImGui::GetID("HeTutorialCardDock");
+			if (i == 0)
+			{
+				// EditorUI.cpp, BuildDefaultDockLayout — same splits, same order.
+				ImGui::DockBuilderRemoveNode(dockId);
+				ImGui::DockBuilderAddNode(dockId,
+					ImGuiDockNodeFlags_DockSpace | ImGuiDockNodeFlags_PassthruCentralNode);
+				ImGui::DockBuilderSetNodeSize(dockId, vp->WorkSize);
+				ImGuiID dockMain = dockId;
+				ImGuiID dockLeft  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left,  0.18f, nullptr, &dockMain);
+				ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.26f, nullptr, &dockMain);
+				ImGuiID dockDown  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,  0.33f, nullptr, &dockMain);
+				ImGuiID dockRightBottom =
+					ImGui::DockBuilderSplitNode(dockRight, ImGuiDir_Down, 0.50f, nullptr, &dockRight);
+				ImGui::DockBuilderDockWindow("Quick Settings",  dockLeft);
+				ImGui::DockBuilderDockWindow("World Outliner",  dockRight);
+				ImGui::DockBuilderDockWindow("Details",         dockRightBottom);
+				ImGui::DockBuilderDockWindow("Content Browser", dockDown);
+				ImGui::DockBuilderDockWindow("Scene",           dockMain);
+				ImGui::DockBuilderFinish(dockId);
+			}
+			ImGui::DockSpaceOverViewport(dockId, vp, ImGuiDockNodeFlags_PassthruCentralNode);
+
+			for (const char* name : { "Quick Settings", "World Outliner", "Details",
+			                          "Content Browser", "Scene" })
+			{
+				ImGui::Begin(name);
+				ImGui::TextUnformatted(name);
+				ImGui::End();
+			}
+			// Floating, along the top edge — the side nothing docks to by default.
+			ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 420.0f, vp->WorkPos.y + 30.0f), ImGuiCond_Always);
+			ImGui::SetNextWindowSize(ImVec2(620.0f, 260.0f), ImGuiCond_Always);
+			ImGui::Begin("Performance Profiler", nullptr, ImGuiWindowFlags_NoDocking);
+			ImGui::TextUnformatted("Performance Profiler");
+			ImGui::End();
+
+			// The card, set up the way TutorialPanel::render sets it up.
+			ImGui::SetNextWindowSize(ImVec2(kCardW, kCardH), ImGuiCond_FirstUseEver);
+			ImGui::SetNextWindowPos(fromTourDefault ? tourDefaultCardPos() : cardFrom,
+			                        ImGuiCond_FirstUseEver);
+			if (avoid) keep.update("Tutorial", panelsOf(*step), ImGui::GetIO().DeltaTime);
+			ImGui::Begin("Tutorial", nullptr, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse);
+			EditorWidgets::clampCurrentWindowToEditorWindow();
+			ImGui::TextWrapped("%s", step->title);
+			ImGui::End();
+
+			for (const std::string& p : panelsOf(*step))
+				HE::Ed::Spotlight::outline(p.c_str(), float(i) / 60.0f);
+		}
+	};
+
+	// The card's rect in the frame just drawn.
+	HE::Ed::Spotlight::Box cardBox()
+	{
+		ImGuiWindow* w = ImGui::FindWindowByName("Tutorial");
+		REQUIRE(w != nullptr);
+		return { w->Pos, ImVec2(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y) };
+	}
+
+	float coveredByCard(const std::vector<std::string>& panels)
+	{
+		std::vector<HE::Ed::Spotlight::Box> boxes;
+		for (const std::string& p : panels)
+		{
+			ImVec2 pos, size;
+			if (HE::Ed::Spotlight::panelRect(p.c_str(), pos, size))
+				boxes.push_back({ pos, ImVec2(pos.x + size.x, pos.y + size.y) });
+		}
+		const HE::Ed::Spotlight::Box c = cardBox();
+		return HE::Ed::Spotlight::coveredArea(c.min, ImVec2(c.max.x - c.min.x, c.max.y - c.min.y), boxes);
+	}
+
+	enum class From { TourDefault, OnTarget };
+
+	// Before (KeepClear off) and after (on) for the step outlining `panel`.
+	// Returns how much of the panel the card covers in each.
+	std::pair<float, float> shootCardCase(const char* side, const char* panel, From from)
+	{
+		const HE::tut::Step* step = stepPointingAt(panel);
+		INFO("panel: " << std::string(panel));
+		REQUIRE(step != nullptr);
+		const std::vector<std::string> panels = panelsOf(*step);
+
+		// Where the card starts. Both spots are measured inside a laid-out frame:
+		// the viewport's work area is all zeroes until the first NewFrame, and
+		// "on the target" needs the real panel rect.
+		ImVec2 at;
+		{
+			Harness h(kEdW, kEdH);
+			ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+			CardScene probe;
+			probe.step  = step;
+			probe.avoid = false;
+			for (int i = 0; i < 2; ++i) { ImGui::NewFrame(); probe.frame(i); ImGui::EndFrame(); }
+			at = tourDefaultCardPos();
+			if (from == From::OnTarget)
+			{
+				ImVec2 pos, size;
+				REQUIRE(HE::Ed::Spotlight::panelRect(panels.front().c_str(), pos, size));
+				at = ImVec2(pos.x + size.x * 0.5f - kCardW * 0.5f, pos.y + size.y * 0.5f - kCardH * 0.5f);
+			}
+		}
+
+		float before = 0.0f, after = 0.0f;
+		for (const bool avoid : { false, true })
+		{
+			// A fresh context per run, so the card's FirstUseEver lands where asked.
+			Harness h(kEdW, kEdH);
+			ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+			CardScene scene;
+			scene.step     = step;
+			scene.avoid    = avoid;
+			scene.cardFrom = at;
+
+			const std::string name = std::string("tutorial-card-") + side + (avoid ? "-after" : "-before");
+			// 90 frames is a second and a half at 60 Hz: the glide is done in
+			// about half of that.
+			shoot(name.c_str(), kEdW, kEdH, avoid ? 90 : 3, [&](int i) { scene.frame(i); });
+			(avoid ? after : before) = coveredByCard(panels);
+			if (avoid) CHECK_FALSE(scene.keep.gliding());
+
+			// Still a whole card inside the editor window, and still pointing:
+			// stepping aside must not cost the outline.
+			const HE::Ed::Spotlight::Box c = cardBox();
+			CHECK(c.min.x >= 0.0f);
+			CHECK(c.min.y >= 0.0f);
+			CHECK(c.max.x <= float(kEdW));
+			CHECK(c.max.y <= float(kEdH));
+			CHECK(HE::Ed::Spotlight::outline(panels.front().c_str(), 0.0f));
+		}
+		return { before, after };
+	}
+} // namespace
+
+TEST_CASE("ui shot: the tutorial card steps off the panel its step points at")
+{
+	struct Case { const char* side; const char* panel; From from; };
+	// Details and the Content Browser from the tour's own default spot — the
+	// layout the bug was seen in. The others from on top of the panel, which is
+	// where a card the user parked in an earlier step can be.
+	const Case cases[] = {
+		{ "right-bottom", "Details",              From::TourDefault },
+		{ "bottom",       "Content Browser",      From::TourDefault },
+		{ "left",         "Quick Settings",       From::OnTarget },
+		{ "right-top",    "World Outliner",       From::OnTarget },
+		{ "top",          "Performance Profiler", From::OnTarget },
+	};
+	for (const Case& c : cases)
+	{
+		INFO("side: " << std::string(c.side));
+		const auto [before, after] = shootCardCase(c.side, c.panel, c.from);
+		CHECK(before > 0.0f);   // without KeepClear the card does cover it
+		CHECK(after == 0.0f);   // with it, not a pixel
+	}
+}
+
+// The other half of stepping aside: not fighting the user. A card the user drags
+// back onto the panel stays there for the rest of the step — a card that slides
+// away from under the cursor every time it is let go is worse than the bug — and
+// steps aside again once the next step begins (KeepClear::reset, which the tour
+// calls from gotoCursor).
+TEST_CASE("ui shot: a tutorial card the user dragged onto the panel stays until the next step")
+{
+	const HE::tut::Step* step = stepPointingAt("Details");
+	REQUIRE(step != nullptr);
+	const std::vector<std::string> panels = panelsOf(*step);
+
+	Harness h(kEdW, kEdH);
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	CardScene scene;
+	scene.step     = step;
+	scene.fromTourDefault = true;
+
+	int frameNo = 0;
+	const auto run = [&](int frames) {
+		for (int i = 0; i < frames; ++i, ++frameNo)
+		{
+			ImGui::NewFrame();
+			scene.frame(frameNo);
+			ImGui::Render();
+		}
+	};
+
+	run(90);
+	REQUIRE(coveredByCard(panels) == 0.0f);   // stepped aside on its own
+
+	// Grab the title bar and drag it to the middle of Details.
+	ImVec2 dpos, dsize;
+	REQUIRE(HE::Ed::Spotlight::panelRect("Details", dpos, dsize));
+	const HE::Ed::Spotlight::Box c = cardBox();
+	const ImVec2 grab(c.min.x + 80.0f, c.min.y + 8.0f);
+	const ImVec2 drop(dpos.x + dsize.x * 0.5f - kCardW * 0.5f + 80.0f,
+	                  dpos.y + dsize.y * 0.5f - kCardH * 0.5f + 8.0f);
+	io.AddMousePosEvent(grab.x, grab.y);
+	run(1);
+	io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+	run(1);
+	for (int s = 1; s <= 10; ++s)
+	{
+		const float t = float(s) / 10.0f;
+		io.AddMousePosEvent(grab.x + (drop.x - grab.x) * t, grab.y + (drop.y - grab.y) * t);
+		run(1);
+	}
+	io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+	run(1);
+	io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);   // mouse away, nothing hovered
+	run(60);
+
+	CHECK(scene.keep.userMoved());
+	const float parked = coveredByCard(panels);
+	CHECK(parked > 0.0f);                       // where the user put it
+
+	// The next step: the card is the tour's to place again.
+	scene.keep.reset();
+	run(90);
+	CHECK(coveredByCard(panels) == 0.0f);
 }
 
 // ── Sign in with GitHub ──────────────────────────────────────────────────────

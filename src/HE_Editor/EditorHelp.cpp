@@ -2660,6 +2660,12 @@ namespace
 	  "Creates a sandbox project and starts the guided tour in it. Nothing you "
 	  "build there is lost — it is an ordinary project.",
 	  "", "getting-started#first-project" },
+	{ "Project Hub/Include the HorizonCode chapter", "",
+	  "Whether the guided tour walks through HorizonCode, the visual scripting "
+	  "language. Untick it if you will write gameplay in Lua, Python or C++ — the "
+	  "tour then goes straight from the UI chapter to gameplay logic. Remembered "
+	  "for the next time the tour starts.",
+	  "", "getting-started#first-project" },
 	{ "Project Hub/Not now", "",
 	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
 	  "whenever you want it.",
