@@ -7,6 +7,18 @@
 //   EditorDeps/EngineContent/Textures/Landscape). It is used verbatim as the
 //   ContentManager content root, and each texture is saved under "<Name>.hasset".
 //
+//          landscape_tex_gen <output-dir> --pack <png-dir> [--size N]
+//   packs REAL textures: reads <Layer>_<Map>.png (Albedo, Normal, Roughness, AO,
+//   Height — the names docs/auto-landscape-material-textures.md §4.3 asks for; the
+//   ambientCG / Poly Haven spellings Color, NormalGL, AmbientOcclusion,
+//   Displacement are accepted too) from <png-dir>, writes the per-layer
+//   T_Landscape_<Layer>_{Albedo,Normal,Mask}.hasset (Mask = R AO, G roughness,
+//   B height; a missing AO is white, a missing height is mid-grey) and assembles
+//   the three _Array textures. A layer with no files keeps its placeholder look,
+//   scaled to the pack size, so the arrays stay one size. Point <output-dir> at
+//   <YourProject>/Content/Engine/Textures/Landscape to override the shipped
+//   placeholders for that one project, without touching the repo.
+//
 //          landscape_tex_gen <output-dir> --material
 //   writes the auto landscape material M_AutoLandscape.hasset instead (Schritt 5,
 //   HE::buildAutoLandscapeGraph) — run it on EditorDeps/EngineContent/Materials.
@@ -34,6 +46,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/TextureArrayBuild.h>
+#include "TextureImporter.h"   // HorizonImporters — decodes the PNGs the way the editor's import does
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <Types/UUID.h>
@@ -42,7 +55,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -226,6 +243,221 @@ int writeArrays(const std::string& outDir)
     return ok;
 }
 
+// ─── Packing real textures ───────────────────────────────────────────────────
+struct Image
+{
+    int w = 0, h = 0;
+    std::vector<uint8_t> px;   // RGBA8, rows bottom-up (TextureImporter's layout)
+    bool valid() const { return w > 0 && h > 0 && px.size() == static_cast<size_t>(w) * h * 4; }
+};
+
+std::string lowered(std::string s)
+{
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool loadImage(const std::filesystem::path& file, Image& out)
+{
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return false;
+    const std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    TextureImporter::ImportSettings settings;
+    settings.flipVertically = true;   // the layout the placeholders and every imported texture have
+    const auto asset = TextureImporter::decodeFromMemory(bytes.data(), bytes.size(), settings);
+    if (!asset) return false;
+    out.w = static_cast<int>(asset->width);
+    out.h = static_cast<int>(asset->height);
+    out.px = asset->data;
+    return out.valid();
+}
+
+// Bilinear, edge-clamped. Only used when the files of one set differ in size (a
+// 1K map among 2K ones) or to bring a placeholder up to the pack size.
+Image resized(const Image& src, int w, int h)
+{
+    if (src.w == w && src.h == h) return src;
+    Image dst;
+    dst.w = w; dst.h = h;
+    dst.px.resize(static_cast<size_t>(w) * h * 4);
+    for (int y = 0; y < h; ++y)
+    {
+        const float fy = (static_cast<float>(y) + 0.5f) * src.h / h - 0.5f;
+        const int   y0 = std::clamp(static_cast<int>(std::floor(fy)), 0, src.h - 1);
+        const int   y1 = std::min(y0 + 1, src.h - 1);
+        const float ty = std::clamp(fy - static_cast<float>(y0), 0.0f, 1.0f);
+        for (int x = 0; x < w; ++x)
+        {
+            const float fx = (static_cast<float>(x) + 0.5f) * src.w / w - 0.5f;
+            const int   x0 = std::clamp(static_cast<int>(std::floor(fx)), 0, src.w - 1);
+            const int   x1 = std::min(x0 + 1, src.w - 1);
+            const float tx = std::clamp(fx - static_cast<float>(x0), 0.0f, 1.0f);
+            for (int c = 0; c < 4; ++c)
+            {
+                const auto at = [&](int xx, int yy) {
+                    return static_cast<float>(src.px[(static_cast<size_t>(yy) * src.w + xx) * 4 + c]); };
+                const float top = at(x0, y0) * (1.0f - tx) + at(x1, y0) * tx;
+                const float bot = at(x0, y1) * (1.0f - tx) + at(x1, y1) * tx;
+                dst.px[(static_cast<size_t>(y) * w + x) * 4 + c] = toByte((top * (1.0f - ty) + bot * ty) / 255.0f);
+            }
+        }
+    }
+    return dst;
+}
+
+// <Layer>_<Alias>.<ext>, case-insensitive; the first alias that exists wins.
+std::filesystem::path findMap(const std::map<std::string, std::filesystem::path>& files,
+                              const char* layer, std::initializer_list<const char*> aliases)
+{
+    static const char* const kExt[] = { "png", "jpg", "jpeg", "tga", "bmp" };
+    for (const char* alias : aliases)
+        for (const char* ext : kExt)
+        {
+            const auto it = files.find(lowered(std::string(layer) + "_" + alias + "." + ext));
+            if (it != files.end()) return it->second;
+        }
+    return {};
+}
+
+bool saveLayerTexture(const std::string& outDir, const std::string& name, int index,
+                      int w, int h, bool srgb, std::vector<uint8_t> data)
+{
+    ContentManager cm(outDir);
+    TextureAsset a;
+    a.type      = HE::AssetType::Texture;
+    a.name      = name;
+    a.path      = name + ".hasset";
+    a.id        = HE::UUID{ kTexBaseHi + static_cast<uint64_t>(index), 0x0000000000000001ULL };
+    a.width     = static_cast<size_t>(w);
+    a.height    = static_cast<size_t>(h);
+    a.channels  = 4;
+    a.mipLevels = 1;   // level 0 only, like TextureImporter; the arrays bake their own chain
+    a.format    = TextureFormat::RGBA8;
+    a.srgb      = srgb;
+    a.data      = std::move(data);
+    if (!cm.saveAsset(a))
+    {
+        std::fprintf(stderr, "  FAILED to write %s.hasset\n", name.c_str());
+        return false;
+    }
+    ContentManager check(outDir);
+    const TextureAsset* t = check.getTexture(check.loadAsset(a.path));
+    if (!t || t->id != a.id || t->srgb != a.srgb || t->data != a.data)
+    {
+        std::fprintf(stderr, "  %s.hasset does NOT read back as written\n", name.c_str());
+        return false;
+    }
+    return true;
+}
+
+int packReal(const std::string& outDir, const std::string& pngDir, int requestedSize)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(pngDir, ec))
+    {
+        std::fprintf(stderr, "landscape_tex_gen: %s is not a folder\n", pngDir.c_str());
+        return 1;
+    }
+    std::map<std::string, fs::path> files;
+    for (const auto& e : fs::directory_iterator(pngDir, ec))
+        if (e.is_regular_file()) files[lowered(e.path().filename().string())] = e.path();
+
+    struct Found { Image albedo, normal, rough, ao, height; bool any = false; };
+    std::vector<Found> found(std::size(kLayers));
+
+    // Pack size: --size, else the first colour map found.
+    int size = requestedSize;
+    for (size_t li = 0; li < std::size(kLayers); ++li)
+    {
+        const char* name = kLayers[li].name;
+        Found& f = found[li];
+        const auto load = [&](Image& img, std::initializer_list<const char*> aliases, const char* what) {
+            const fs::path p = findMap(files, name, aliases);
+            if (p.empty()) return;
+            if (!loadImage(p, img))
+            {
+                std::fprintf(stderr, "  %s: could not read %s\n", what, p.string().c_str());
+                return;
+            }
+            f.any = true;
+            std::printf("  %-10s %-9s %s (%dx%d)\n", name, what, p.filename().string().c_str(), img.w, img.h);
+            if (size <= 0) size = img.w;
+        };
+        load(f.albedo, { "Albedo", "Color", "BaseColor", "Diffuse" }, "Albedo");
+        load(f.normal, { "Normal", "NormalGL" },                      "Normal");
+        load(f.rough,  { "Roughness" },                               "Roughness");
+        load(f.ao,     { "AO", "AmbientOcclusion" },                  "AO");
+        load(f.height, { "Height", "Displacement" },                  "Height");
+    }
+    if (size <= 0)
+    {
+        std::fprintf(stderr, "landscape_tex_gen: no <Layer>_<Map>.png found in %s\n"
+                             "  expected e.g. Grass_Albedo.png, Grass_Normal.png, Grass_Roughness.png,\n"
+                             "  Grass_AO.png, Grass_Height.png (layers: Grass Dirt Rock Snow WetGround)\n",
+                     pngDir.c_str());
+        return 1;
+    }
+    std::printf("landscape_tex_gen: packing at %dx%d\n", size, size);
+
+    int ok = 0, total = 0;
+    int index = 0;
+    for (size_t li = 0; li < std::size(kLayers); ++li)
+    {
+        const Layer& L = kLayers[li];
+        const Found& f = found[li];
+        std::vector<uint8_t> albedo, normal, mask;
+        const size_t n = static_cast<size_t>(size) * size * 4;
+        if (!f.any)
+        {
+            // No files for this layer: its placeholder look at the pack size, so the
+            // arrays stay one size and the layer is still recognisable.
+            std::printf("  %-10s (no files — placeholder)\n", L.name);
+            const auto up = [&](Map m) {
+                Image p; p.w = kSize; p.h = kSize; p.px = makeMap(L, m);
+                return resized(p, size, size).px; };
+            albedo = up(Albedo); normal = up(Normal); mask = up(Mask);
+        }
+        else
+        {
+            const auto fit = [&](const Image& img, const char* what) {
+                if (img.valid() && (img.w != size || img.h != size))
+                    std::printf("  %-10s %-9s resized %dx%d -> %dx%d\n", L.name, what, img.w, img.h, size, size);
+                return img.valid() ? resized(img, size, size) : Image{}; };
+            const Image a = fit(f.albedo, "Albedo"), nm = fit(f.normal, "Normal"),
+                        r = fit(f.rough, "Roughness"), ao = fit(f.ao, "AO"), hg = fit(f.height, "Height");
+            albedo.assign(n, 255);
+            normal.resize(n);
+            mask.resize(n);
+            for (size_t i = 0; i < n; i += 4)
+            {
+                if (a.valid())  { albedo[i] = a.px[i]; albedo[i + 1] = a.px[i + 1]; albedo[i + 2] = a.px[i + 2]; }
+                else            { albedo[i] = L.albedo[0]; albedo[i + 1] = L.albedo[1]; albedo[i + 2] = L.albedo[2]; }
+                if (nm.valid()) { normal[i] = nm.px[i]; normal[i + 1] = nm.px[i + 1]; normal[i + 2] = nm.px[i + 2]; }
+                else            { normal[i] = 128; normal[i + 1] = 128; normal[i + 2] = 255; }   // flat
+                normal[i + 3] = 255;
+                mask[i]     = ao.valid() ? ao.px[i] : 255;                      // R = AO (white = unoccluded)
+                mask[i + 1] = r.valid()  ? r.px[i]  : toByte(L.roughness);      // G = roughness
+                mask[i + 2] = hg.valid() ? hg.px[i] : 128;                      // B = height
+                mask[i + 3] = 255;
+            }
+            if (!f.albedo.valid()) std::printf("  %-10s Albedo    missing — flat layer colour\n", L.name);
+            if (!f.normal.valid()) std::printf("  %-10s Normal    missing — flat normal\n", L.name);
+            if (!f.rough.valid())  std::printf("  %-10s Roughness missing — placeholder roughness\n", L.name);
+            if (!f.ao.valid())     std::printf("  %-10s AO        missing — white\n", L.name);
+            if (!f.height.valid()) std::printf("  %-10s Height    missing — mid-grey\n", L.name);
+        }
+        total += 3;
+        ok += saveLayerTexture(outDir, assetName(L, Albedo), index++, size, size, true,  std::move(albedo)) ? 1 : 0;
+        ok += saveLayerTexture(outDir, assetName(L, Normal), index++, size, size, false, std::move(normal)) ? 1 : 0;
+        ok += saveLayerTexture(outDir, assetName(L, Mask),   index++, size, size, false, std::move(mask))   ? 1 : 0;
+    }
+    std::printf("landscape_tex_gen: wrote %d/%d layer textures to %s\n", ok, total, outDir.c_str());
+    const int arrays = writeArrays(outDir);
+    std::printf("landscape_tex_gen: wrote %d/%d texture arrays to %s\n", arrays, MapCount, outDir.c_str());
+    return ok == total && arrays == MapCount ? 0 : 1;
+}
+
 // The auto landscape MATERIAL (Thema 158, Schritt 5): HE::buildAutoLandscapeGraph
 // saved as M_AutoLandscape.hasset with the fixed kAutoLandscapeMaterialId. Only the
 // graph is the source; the baked GLSL and the parameter layout come from the
@@ -276,7 +508,8 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--arrays-only | --material]\n"
+        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--arrays-only | --material | --pack <png-dir> [--size N]]\n"
+                             "  --pack         pack real <Layer>_<Map>.png files from <png-dir> (see the header)\n"
                              "  --arrays-only  only (re)assemble the three _Array textures from the\n"
                              "                 per-layer files already in <output-dir>\n"
                              "  --material     write the auto landscape material M_AutoLandscape.hasset\n"
@@ -287,6 +520,14 @@ int main(int argc, char** argv)
     const bool arraysOnly = argc > 2 && std::string(argv[2]) == "--arrays-only";
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
+
+    if (argc > 3 && std::string(argv[2]) == "--pack")
+    {
+        int size = 0;
+        for (int i = 4; i + 1 < argc; ++i)
+            if (std::string(argv[i]) == "--size") size = std::atoi(argv[i + 1]);
+        return packReal(outDir, argv[3], size);
+    }
 
     if (argc > 2 && std::string(argv[2]) == "--material")
     {

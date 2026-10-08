@@ -192,7 +192,8 @@ target_include_directories(mat_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/inclu
 add_executable(landscape_tex_gen
     src/LandscapeTexGen/main.cpp
 )
-target_link_libraries(landscape_tex_gen PRIVATE HorizonCore)
+# HorizonImporters: --pack decodes the real PNGs exactly the way the editor's import does.
+target_link_libraries(landscape_tex_gen PRIVATE HorizonCore HorizonImporters)
 target_include_directories(landscape_tex_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
 # HorizonTools is NEVER linked into HorizonGame or any runtime target.
