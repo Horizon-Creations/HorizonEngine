@@ -537,6 +537,13 @@ namespace
 				{ "autoCycle",          w->autoCycle },
 				{ "cycleSeconds",       w->cycleSeconds },
 				{ "thunderSound",       uuidToJson(w->thunderSound) },
+				{ "rainSound",          uuidToJson(w->rainSound) },
+				{ "windSound",          uuidToJson(w->windSound) },
+				{ "snowSound",          uuidToJson(w->snowSound) },
+				{ "stormSound",         uuidToJson(w->stormSound) },
+				{ "soundEnabled",       w->soundEnabled },
+				{ "soundVolume",        w->soundVolume },
+				{ "soundBus",           w->soundBus },
 				{ "maxRainParticles",   w->maxRainParticles },
 				{ "maxSnowParticles",   w->maxSnowParticles },
 				{ "groundLevel",        w->groundLevel },
@@ -1395,6 +1402,13 @@ namespace
 			w.autoCycle          = c.value("autoCycle",          w.autoCycle);
 			w.cycleSeconds       = c.value("cycleSeconds",       w.cycleSeconds);
 			if (c.contains("thunderSound")) w.thunderSound = jsonToUuid(c["thunderSound"]);
+			if (c.contains("rainSound"))    w.rainSound    = jsonToUuid(c["rainSound"]);
+			if (c.contains("windSound"))    w.windSound    = jsonToUuid(c["windSound"]);
+			if (c.contains("snowSound"))    w.snowSound    = jsonToUuid(c["snowSound"]);
+			if (c.contains("stormSound"))   w.stormSound   = jsonToUuid(c["stormSound"]);
+			w.soundEnabled = c.value("soundEnabled", w.soundEnabled);
+			w.soundVolume  = c.value("soundVolume",  w.soundVolume);
+			w.soundBus     = c.value("soundBus",     w.soundBus);
 			w.maxRainParticles = c.value("maxRainParticles", w.maxRainParticles);
 			w.maxSnowParticles = c.value("maxSnowParticles", w.maxSnowParticles);
 			w.groundLevel      = c.value("groundLevel",      w.groundLevel);

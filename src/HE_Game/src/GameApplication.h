@@ -19,6 +19,7 @@
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
+#include <HorizonScene/WeatherAudio.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding (C++ GameLogic services)
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + frame-end responses
 #include <HorizonScene/Net/NetGameSession.h>        // the multiplayer session (plan §5.7)
@@ -298,6 +299,7 @@ private:
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance
     UIInputSystem::InputState m_uiInput;   // frame-to-frame UI pointer tracking
     AudioEngine m_audioEngine;             // game-runtime audio (playOnStart + audio.* API)
+    WeatherAudio::State m_weatherAudio;    // rain/wind/snow/storm beds + thunder, driven by the weather
 
     // ── Scene transitions (HE::api::scene requests, executed at frame start) ──
     void executeSceneRequests();

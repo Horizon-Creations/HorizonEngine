@@ -199,6 +199,7 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
         {
             wx.flashIntensity = 1.0f;
             wx.flashTriggered = true;
+            ++wx.strikeCount;
             std::uniform_real_distribution<float> iv(2.5f, 11.0f);
             wx.lightningCountdown = iv(wx.precipRng) * (1.2f - intensity); // stormier = more frequent
         }

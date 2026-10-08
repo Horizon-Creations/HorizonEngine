@@ -39,6 +39,9 @@ namespace ViewportPanel
 namespace EditorSettingsPanel
 {
 	HcVariableStyle hcVariableStyle() { return HcVariableStyle::Detailed; }
+	// UIEditorPanel asks (since 610fbcd2 moved Pre Construct into Preferences);
+	// the real one reads config.json and answers true when nothing is stored.
+	bool widgetRunPreConstruct() { return true; }
 }
 
 namespace HcRenameDialog

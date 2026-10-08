@@ -597,7 +597,24 @@ jobs:
 
       # Default DEPLOY_DIR (out/deploy): the editor and its Shaders/ land in
       # out/deploy/Editor, which is all the image tests need.
+      #
+      # This job builds HorizonEditor too (for the image tests), so it links
+      # HorizonContentSync the same as the three matrix jobs above — the same
+      # env: block for consistency. Without it the configure log read "not
+      # configured" here while the matrix jobs showed the real endpoint, which
+      # looked like a gap the first time someone compared the two logs (it
+      # was: the three matrix jobs had this block, this job never did).
+      # Harmless either way: he_vk_imagetests.py always sets HE_DUMP_PATH, so
+      # every editor launch in this job takes the headless frame-dump path,
+      # which returns before startSftpProbe() (and every other startup probe)
+      # is ever called (EditorApplication.cpp, the "if (m_dumpPath.empty())"
+      # guard around them) — the image tests never open a network connection
+      # whether or not this block is here.
       - name: Configure
+        env:
+          HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
+          HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
+          HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
 
       - name: Save FetchContent dependencies

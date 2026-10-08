@@ -448,6 +448,10 @@ std::vector<SettingDesc> buildCatalog()
 	                    "gpuparticles", &EditorConfig::GpuParticles,
 	                    "Simulate rain/snow on the GPU instead of the CPU pool. The "
 	                    "backend gates it."));
+	t.push_back(boolRow("effects.weatherSoundInEditor", "Weather Sounds in Edit Mode", "Effects",
+	                    "weathersound", &EditorConfig::WeatherSoundInEditor,
+	                    "Hear the scene's weather (rain, wind, snow, storm, thunder) in the "
+	                    "edit-mode viewport, not only in Play."));
 
 	return t;
 }

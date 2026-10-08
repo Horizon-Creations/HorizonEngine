@@ -1129,6 +1129,54 @@ namespace
 	  "The height where drops and flakes die when nothing else stops them. In play "
 	  "mode collisions override it where they can.",
 	  "", "rendering#weather" },
+	{ "Weather/Weather Sounds", "",
+	  "The weather makes its own sound: rain, wind, snow and storm beds that fade "
+	  "with the weather, and thunder after each lightning strike. Off silences all "
+	  "of it for this weather. The Rain, Wind, Snow, Storm and Thunder slots below "
+	  "replace the engine's sound for just that one; empty plays the default.",
+	  "", "rendering#weather" },
+	{ "Weather/Volume", "",
+	  "How loud all weather sounds are, 0 to 1. The beds still follow the weather "
+	  "inside that: this only turns the whole mix up or down.",
+	  "", "rendering#weather" },
+	{ "Weather/Bus", "",
+	  "The mixer bus the weather plays through (SFX by default). A name the mixer "
+	  "does not have falls back to the clip's own bus, then to master.",
+	  "", "rendering#weather" },
+	{ "Weather/Rain Sound", "Rain Sound",
+	  "The rain bed, a loop that fades in as rain falls and out as it stops. Empty "
+	  "plays the engine's rain (Engine » Audio » Weather » Rain). Click to pick an "
+	  "audio asset or drop one from the Content Browser to use your own; it is played "
+	  "on repeat, so it should loop cleanly. Clear brings the engine's back.",
+	  "", "rendering#weather" },
+	{ "Weather/Wind Sound", "Wind Sound",
+	  "The wind bed. It follows the wind speed and swells with the gusts, and is "
+	  "silent when the air is calm. Empty plays the engine's wind (Engine » Audio » "
+	  "Weather » Wind). Click to pick an audio asset or drop one from the Content "
+	  "Browser to use your own; it is played on repeat, so it should loop cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow Sound", "Snow Sound",
+	  "The snow atmosphere, a quiet hush that fades in as snow falls and cross-fades "
+	  "with the rain when one turns into the other. Empty plays the engine's (Engine » "
+	  "Audio » Weather » Snow). Click to pick an audio asset or drop one from the "
+	  "Content Browser to use your own; it is played on repeat, so it should loop "
+	  "cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Storm Sound", "Storm Sound",
+	  "The storm bed, a heavy roar that comes in when strong wind and heavy rain "
+	  "arrive together. It plays on top of the rain and wind beds, not instead of "
+	  "them. Empty plays the engine's (Engine » Audio » Weather » Storm). Click to "
+	  "pick an audio asset or drop one from the Content Browser to use your own; it "
+	  "is played on repeat, so it should loop cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Thunder Sound", "Thunder Sound",
+	  "The thunder after each lightning strike of a storm. It arrives later and "
+	  "quieter the farther away the strike was, picked at random for every strike. "
+	  "Empty plays the engine's (Engine » Audio » Weather » Thunder). Click to pick "
+	  "an audio asset or drop one from the Content Browser to use your own; it is "
+	  "played once per strike, so it should be a single roll that starts and ends "
+	  "in silence, not a loop.",
+	  "", "rendering#weather" },
 
 	// ── UI ───────────────────────────────────────────────────────────────────
 	{ "UI Canvas/Width", "", "The canvas's width in UI units.", "", "ui#designer" },
@@ -2368,6 +2416,14 @@ namespace
 	  "project, optionally name a new one, and say whether the engine's own "
 	  "sub-folders are kept underneath.",
 	  "", "editor#engine-content" },
+	{ "Import to Project/Content", "",
+	  "The project's Content root as the target folder. Pick a sub-folder below "
+	  "it to import there instead.",
+	  "", "editor#engine-content" },
+	{ "Import to Project/Import", "",
+	  "Copies the listed engine files into the target folder and imports the "
+	  "copies as new assets. The engine's own files are left as they are.",
+	  "", "editor#engine-content" },
 	{ "Import to Project/Keep the engine's folder structure", "",
 	  "On: Engine/Audio/click.wav lands in <target>/Audio/. Off: every file goes "
 	  "straight into the target folder.",
@@ -3338,6 +3394,11 @@ namespace
 	{ "Preferences/Effects/GPU Weather Particles", "",
 	  "Simulate rain and snow on the GPU. Far more drops for the same frame time; "
 	  "it needs a backend that can do it, and falls back quietly where it cannot.",
+	  "", "rendering#weather" },
+	{ "Preferences/Effects/Weather Sounds in Edit Mode", "",
+	  "Hear the scene's weather (rain, wind, snow, storm, thunder) in the edit-mode "
+	  "viewport as well as in Play. Turn it off when a rain loop is in the way; the "
+	  "Weather component's own Weather Sounds switch is the one that counts in Play.",
 	  "", "rendering#weather" },
 	{ "Preferences/Collaboration/Find Sessions on the Local Network", "",
 	  "Announce and discover collaboration sessions on this network, so joining "
@@ -8282,6 +8343,9 @@ namespace
 		// Raised from the Content Browser (and File ▸ Import Asset), so it is
 		// read under the same heading.
 		{ "Texture Color Space/", "editor-interface", "Editor Interface", "Content Browser" },
+		// The target-folder dialog of "Import to Project...", raised from the same
+		// context menu.
+		{ "Import to Project/", "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },

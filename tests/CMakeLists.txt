@@ -247,6 +247,13 @@ add_executable(he_tests
     # press keys, read the binding back out of the pinned config.json.
     test_shortcuts_ui.cpp
     test_weather.cpp
+    # The weather's sound: the gain curves as plain functions, the voices on an
+    # AudioEngine without a device.
+    test_weather_audio.cpp
+    # The committed weather sounds (EditorDeps/EngineContent/Audio/Weather): what
+    # is in the files, that the loops are seamless, that an export ships them and
+    # that a shipped game's weather plays them.
+    test_engine_weather_sounds.cpp
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
     test_gamelogic_build.cpp

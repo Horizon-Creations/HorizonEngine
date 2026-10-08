@@ -16440,7 +16440,25 @@
          },
          {
           "s": "",
-          "t": " adds lightning flashes with an optional thunder sound asset."
+          "t": " adds lightning flashes; each one is followed by thunder, later and quieter the farther away it struck."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Sound"
+         },
+         {
+          "s": "",
+          "t": " — the weather makes its own noise: rain, wind, snow and storm beds that fade in and out with the weather, and a thunder roll after each strike. The sounds ship with the engine (Engine » Audio » Weather in the Content Browser), so a project needs no files of its own and no script starts or fades anything. The Weather component's "
+         },
+         {
+          "s": "b",
+          "t": "Sound"
+         },
+         {
+          "s": "",
+          "t": " section switches it off, sets the volume and the mixer bus, and has a slot for each sound to swap in your own; an empty slot plays the engine's. In the editor viewport outside Play the sounds follow Preferences » Effects » Weather Sounds in Edit Mode."
          }
         ],
         [
@@ -16488,7 +16506,7 @@
      ],
      "eyebrow": "Dynamic",
      "id": "weather",
-     "text": "The Weather entity blends between built-in presets — Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow — and writes cloud coverage, fog, wind, precipitation and wetness into the Environment over a configurable transition time. An Auto-Cycle mode wanders between weathers on its own. Intensity scales the active preset; Transition sets the blend duration. Precipitation — camera-following rain and snow particle pools (with per-type particle caps) that collide with the ground; on capable backends the simulation runs entirely on the GPU. Storm adds lightning flashes with an optional thunder sound asset. Environment sliders stay live — once you hand-tune a field, the weather stops owning it. Scripts can drive weather directly via env.setCloudCoverage, env.setFogDensity, env.setWindSpeed and friends.",
+     "text": "The Weather entity blends between built-in presets — Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow — and writes cloud coverage, fog, wind, precipitation and wetness into the Environment over a configurable transition time. An Auto-Cycle mode wanders between weathers on its own. Intensity scales the active preset; Transition sets the blend duration. Precipitation — camera-following rain and snow particle pools (with per-type particle caps) that collide with the ground; on capable backends the simulation runs entirely on the GPU. Storm adds lightning flashes; each one is followed by thunder, later and quieter the farther away it struck. Sound — the weather makes its own noise: rain, wind, snow and storm beds that fade in and out with the weather, and a thunder roll after each strike. The sounds ship with the engine (Engine » Audio » Weather in the Content Browser), so a project needs no files of its own and no script starts or fades anything. The Weather component's Sound section switches it off, sets the volume and the mixer bus, and has a slot for each sound to swap in your own; an empty slot plays the engine's. In the editor viewport outside Play the sounds follow Preferences » Effects » Weather Sounds in Edit Mode. Environment sliders stay live — once you hand-tune a field, the weather stops owning it. Scripts can drive weather directly via env.setCloudCoverage, env.setFogDensity, env.setWindSpeed and friends.",
      "title": "Weather"
     },
     {
