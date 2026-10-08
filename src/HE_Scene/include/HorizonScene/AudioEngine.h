@@ -72,6 +72,14 @@ public:
     // is untouched too; it belongs to the editor session, not the project.
     void  applyBusConfig(const HE::AudioBusConfig& config);
 
+    // Which bus a voice asked to play on `requestedBus` (a source's own
+    // choice, "" = none) of a clip whose asset names `assetBus` actually plays
+    // through: the request if this engine has that bus, else the asset's if it
+    // has that one, else "" — master (AudioEdit::resolveBus against the live
+    // list). What the asset overloads below route by, and what the Audio
+    // Editor's preview asks so it plays where the game will.
+    std::string routeFor(const std::string& requestedBus, const std::string& assetBus) const;
+
     // ─── Playback ────────────────────────────────────────────────────────────
 
     // Play a clip asset, whatever its encoding. The asset's trim (edit.trim, set
@@ -90,7 +98,13 @@ public:
     // asset lives in ContentManager's dense storage, which the next loadAsset()
     // may relocate under a playing voice. Returns 0 on failure (empty data,
     // bad format, or an Ogg stream the decoder rejects).
-    // busName: route through a named bus ("" = master).
+    // The clip's EQ (edit.eq) runs in the same stage as the curve, after it, at
+    // the clip's own rate; a neutral EQ adds nothing, so a clip with neither
+    // still takes the untouched path.
+    // busName: the source's own bus choice, "" = none. The voice plays through
+    // routeFor(busName, edit.bus): the source's bus, else the clip's (set in
+    // the Audio Editor), else master — a bus that was renamed or removed falls
+    // through, with a warning in the log, and never silences the sound.
     uint64_t play(const AudioAsset& clip,
                   float volume = 1.0f, float pitch = 1.0f, bool loop = false,
                   const std::string& busName = {});
@@ -116,11 +130,13 @@ public:
     // frame of the original clip that pcmData's first frame is, so the curve
     // lands where it was drawn. Unlike the asset overloads this ALWAYS puts the
     // curve stage in, even for an empty curve, so setSoundEnvelope can change
-    // the curve of the running voice while it is being edited.
+    // the curve of the running voice while it is being edited — and setSoundEq
+    // its EQ; `eq` (nullptr = none yet) is the one it starts with. busName is
+    // taken as it is: the preview resolves it with routeFor first.
     uint64_t play(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
                   const HE::AudioEnvelope& envelope, uint64_t envelopeFrameOffset,
                   float volume = 1.0f, float pitch = 1.0f, bool loop = false,
-                  const std::string& busName = {});
+                  const std::string& busName = {}, const HE::AudioEq* eq = nullptr);
 
     // Swap the curve of a running voice; the mixer picks it up on its next
     // read (the click guard keeps that seamless). Returns false — and changes
@@ -130,6 +146,18 @@ public:
     // Whether the voice runs through a curve stage — what a test checks to
     // know a clip without a curve took the untouched path.
     bool hasSoundEnvelope(uint64_t handle) const;
+
+    // Swap the EQ of a running voice, the same way and on the same voices as
+    // setSoundEnvelope (false for one without the stage). A neutral EQ turns
+    // the filtering off; the filter memory is kept across a change, so a band
+    // dragged during playback does not click.
+    bool setSoundEq(uint64_t handle, const HE::AudioEq& eq);
+    // Whether the voice is filtering right now (a non-neutral EQ is set).
+    bool hasSoundEq(uint64_t handle) const;
+
+    // The bus the voice actually plays through ("" = master — also when the
+    // bus it asked for did not exist). "" for an unknown handle.
+    std::string getSoundBus(uint64_t handle) const;
 
     // Play spatial sound at world-space position. minDist = full-volume radius,
     // maxDist = silence radius. Uses linear attenuation. Returns 0 on failure.
@@ -239,13 +267,15 @@ private:
     // `encoding` (PCM16 needs sampleRate/channels, Vorbis carries its own).
     // `trim`: the asset's AudioTrim (the asset overloads pass it, the raw-PCM
     // ones nullptr) — the voice plays only that range, see play(const AudioAsset&).
+    // `eq`: the EQ in the same stage; nullptr = none. Either one puts the stage in.
     // `envelope`: the curve stage; nullptr = none. `envelopeOffset`: original-
     // clip frame of the bytes' first frame (0 for an asset, which is the whole clip).
     uint64_t startSound(const std::vector<uint8_t>& bytes, AudioEncoding encoding,
                         int sampleRate, int channels,
                         float volume, float pitch, bool loop, const std::string& busName,
                         const SpatialParams* spatial, const HE::AudioTrim* trim = nullptr,
-                        const HE::AudioEnvelope* envelope = nullptr, uint64_t envelopeOffset = 0);
+                        const HE::AudioEnvelope* envelope = nullptr, uint64_t envelopeOffset = 0,
+                        const HE::AudioEq* eq = nullptr);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

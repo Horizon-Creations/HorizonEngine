@@ -34,6 +34,7 @@
 #include <Diagnostics/Log.h>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <unordered_map>
 #include <cstring>
@@ -58,6 +59,37 @@ static constexpr size_t kVoiceWarnThreshold = 128;
 // to 0 at the inner's end, and onSeek passes that on), which is also why the
 // gain must be a pure function of the frame: after the wrap the next read asks
 // the inner cursor and lands on the curve's start again.
+//
+// The same stage runs the clip's EQ (AudioEdit::eq), after the curve: one
+// stage in front of the voice rather than two, so a clip with either gets one
+// extra read and a clip with neither gets none. It filters at the INNER
+// source's rate — the clip's own, before miniaudio's resampler — so the
+// coefficients are computed for that rate (AudioEdit.h says so), and a voice
+// pitched up an octave hears its EQ an octave up with it, like a filter baked
+// into the clip would be.
+
+// The EQ as the mixer thread runs it: coefficients computed on the caller's
+// thread (biquadCoefficients is trig — not for the audio thread), identity
+// bands left out, so an EQ whose bands are all at 0 dB costs a copy of nothing.
+struct EqChain
+{
+    std::vector<HE::BiquadCoeffs> bands;
+};
+
+static std::shared_ptr<const EqChain> makeEqChain(const HE::AudioEq& eq, double sampleRate)
+{
+    if (eq.isNeutral()) return nullptr;
+    auto chain = std::make_shared<EqChain>();
+    for (const HE::AudioEqBand& b : eq.bands)
+    {
+        if (chain->bands.size() >= HE::AudioEq::kMaxBands) break;
+        const HE::BiquadCoeffs c = HE::biquadCoefficients(b, sampleRate);
+        if (!c.isIdentity()) chain->bands.push_back(c);
+    }
+    if (chain->bands.empty()) return nullptr;
+    return chain;
+}
+
 struct EnvelopeSource;
 struct EnvelopeNode
 {
@@ -85,6 +117,16 @@ struct EnvelopeSource
     std::mutex                               pendingMutex;
     std::shared_ptr<const HE::AudioEnvelope> pending;
     std::atomic<bool>                        hasPending{ false };
+
+    // The EQ, handed over the same way as the curve (its own pending slot, so a
+    // curve edit and an EQ edit in one frame do not overwrite each other).
+    // `eqState` is the filter memory, kMaxBands per channel, band-major, sized
+    // once at start: it is kept across a swap, so dragging a band while the
+    // clip plays changes the sound without resetting the filter into a click.
+    std::shared_ptr<const EqChain> eq;
+    std::shared_ptr<const EqChain> eqPending;
+    std::atomic<bool>              hasEqPending{ false };
+    std::vector<HE::BiquadState>   eqState;
 
     // Inner-format frames for one chunk of a read; sized once at start so the
     // mixer thread never allocates. Unused when the inner source is already f32.
@@ -120,6 +162,15 @@ static ma_result envRead(ma_data_source* ds, void* out, ma_uint64 frameCount, ma
             e.hasPending.store(false, std::memory_order_release);
         }
     }
+    if (e.hasEqPending.load(std::memory_order_acquire))
+    {
+        std::unique_lock<std::mutex> lock(e.pendingMutex, std::try_to_lock);
+        if (lock.owns_lock())
+        {
+            std::swap(e.eq, e.eqPending);   // the old chain is freed by the caller, as above
+            e.hasEqPending.store(false, std::memory_order_release);
+        }
+    }
 
     // Where in the ORIGINAL clip this read starts: the inner cursor counts from
     // its range (the trim), so the range's start goes back on.
@@ -129,6 +180,7 @@ static ma_result envRead(ma_data_source* ds, void* out, ma_uint64 frameCount, ma
     const uint64_t first = e.frameOffset + rangeBeg + cursor;
 
     const HE::AudioEnvelope* curve = e.curve.get();
+    const EqChain*           eq    = e.eq.get();
     float*    dst   = static_cast<float*>(out);
     ma_uint64 total = 0;
     ma_result rc    = MA_SUCCESS;
@@ -151,6 +203,25 @@ static ma_result envRead(ma_data_source* ds, void* out, ma_uint64 frameCount, ma
             if (curve)
                 curve->apply(f, got, static_cast<int>(e.channels), first + total,
                              static_cast<double>(e.sampleRate));
+            if (eq)
+            {
+                const ma_uint32 ch = e.channels;
+                for (size_t b = 0; b < eq->bands.size(); ++b)
+                {
+                    const HE::BiquadCoeffs& c  = eq->bands[b];
+                    HE::BiquadState*        st = e.eqState.data() + b * ch;
+                    for (ma_uint64 i = 0; i < got; ++i)
+                        for (ma_uint32 k = 0; k < ch; ++k)
+                            f[i * ch + k] = st[k].process(c, f[i * ch + k]);
+                }
+                // A filter ringing out into silence decays towards denormals,
+                // which cost x86 a hundred times a normal multiply — flush them.
+                for (HE::BiquadState& s : e.eqState)
+                {
+                    if (std::fabs(s.z1) < 1.0e-20) s.z1 = 0.0;
+                    if (std::fabs(s.z2) < 1.0e-20) s.z2 = 0.0;
+                }
+            }
         }
         total += got;
         if (rc != MA_SUCCESS || got < want) break;
@@ -219,9 +290,12 @@ struct ActiveSound
     // What the voice attenuates with; only meaningful for a spatial voice.
     AudioAttenuation     attenuation = AudioAttenuation::Linear;
     bool                 spatial     = false;
-    // The volume-curve stage in front of `source`, when the voice has one
+    // The volume-curve/EQ stage in front of `source`, when the voice has one
     // (EnvelopeSource above); the sound then reads from it instead.
     std::unique_ptr<EnvelopeSource> env;
+    // Whether the stage runs a (non-neutral) EQ right now, as the caller last
+    // set it — what hasSoundEq answers without touching the mixer's copy.
+    bool                 eqActive    = false;
 
     ma_data_source* voiceSource() { return env ? &env->node.base : source; }
 
@@ -492,7 +566,8 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
                                   const SpatialParams* spatial,
                                   const HE::AudioTrim* trim,
                                   const HE::AudioEnvelope* envelope,
-                                  uint64_t envelopeOffset)
+                                  uint64_t envelopeOffset,
+                                  const HE::AudioEq* eq)
 {
     if (!m_initialized)
     {
@@ -596,17 +671,20 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
                         static_cast<unsigned long long>(beg), static_cast<unsigned long long>(end));
     }
 
-    // The volume curve, as a stage the sound reads through (EnvelopeSource).
-    // Built after the trim so it sees the trimmed inner source.
-    if (envelope)
+    // The volume curve and the EQ, as a stage the sound reads through
+    // (EnvelopeSource). Built after the trim so it sees the trimmed inner source.
+    if (envelope || eq)
     {
         auto env = std::make_unique<EnvelopeSource>();
         env->inner       = snd->source;
         env->frameOffset = envelopeOffset;
         ma_data_source_get_data_format(snd->source, &env->innerFormat, &env->channels,
                                        &env->sampleRate, nullptr, 0);
-        if (!envelope->empty())
+        if (envelope && !envelope->empty())
             env->curve = std::make_shared<const HE::AudioEnvelope>(*envelope);
+        if (eq)
+            env->eq = makeEqChain(*eq, static_cast<double>(env->sampleRate));
+        env->eqState.assign(HE::AudioEq::kMaxBands * env->channels, HE::BiquadState{});
         env->scratch.resize(static_cast<size_t>(EnvelopeSource::kChunkFrames) * env->channels *
                             ma_get_bytes_per_sample(env->innerFormat));
         env->node.owner = env.get();
@@ -619,8 +697,9 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
         }
         else
         {
-            env->nodeOk = true;
-            snd->env    = std::move(env);
+            env->nodeOk   = true;
+            snd->eqActive = env->eq != nullptr;
+            snd->env      = std::move(env);
         }
     }
 
@@ -671,10 +750,11 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
 
     uint64_t handle = m_nextHandle++;
     const bool snd_hasCurve = snd->env && snd->env->curve;
+    const bool snd_hasEq    = snd->eqActive;
     m_impl->sounds.emplace(handle, std::move(snd));
 
     HE_LOG_TRACE(Audio, "Started %s %s sound #%llu: %llu frames%s, %d Hz, %d ch, vol %.2f, "
-                        "pitch %.2f%s%s, bus '%s'",
+                        "pitch %.2f%s%s%s, bus '%s'",
                  spatial ? "spatial" : "2D",
                  encoding == AudioEncoding::Vorbis ? "Vorbis (streamed)" : "PCM",
                  static_cast<unsigned long long>(handle),
@@ -682,6 +762,7 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
                  sampleRate, channels,
                  volume, pitch, loop ? ", looping" : "",
                  snd_hasCurve ? ", volume curve" : "",
+                 snd_hasEq ? ", EQ" : "",
                  busName.empty() ? "master" : busName.c_str());
 
     if (m_impl->sounds.size() >= kVoiceWarnThreshold)
@@ -700,22 +781,75 @@ uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
                       volume, pitch, loop, busName, nullptr);
 }
 
+std::string AudioEngine::routeFor(const std::string& requestedBus, const std::string& assetBus) const
+{
+    return HE::AudioEdit::resolveBus(requestedBus, assetBus,
+                                     [this](const std::string& n) { return hasBus(n); });
+}
+
+// The bus an asset voice plays through, with the reason in the log when a name
+// did not resolve — the fallback is silent in the mix, so it must not be in the
+// log too. Throttled: a source re-triggered every frame would flood it.
+static std::string routeAsset(const AudioEngine& engine, const std::string& requestedBus,
+                              const AudioAsset& clip)
+{
+    const std::string bus = engine.routeFor(requestedBus, clip.edit.bus);
+    if (!requestedBus.empty() && bus != requestedBus)
+        HE_LOG_THROTTLE(Audio, Warning, 5.0, "Sound routed to unknown bus '%s' — playing on %s%s%s",
+                        requestedBus.c_str(), bus.empty() ? "the master bus" : "the clip's bus '",
+                        bus.c_str(), bus.empty() ? "" : "'");
+    else if (requestedBus.empty() && !clip.edit.bus.empty() && bus.empty())
+        HE_LOG_THROTTLE(Audio, Warning, 5.0, "Clip '%s' names bus '%s', which the mixer does not have "
+                        "(renamed or removed?) — playing on the master bus",
+                        clip.name.c_str(), clip.edit.bus.c_str());
+    return bus;
+}
+
 uint64_t AudioEngine::play(const AudioAsset& clip,
                             float volume, float pitch, bool loop,
                             const std::string& busName)
 {
     return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
-                      volume, pitch, loop, busName, nullptr, &clip.edit.trim,
-                      clip.edit.envelope.empty() ? nullptr : &clip.edit.envelope);
+                      volume, pitch, loop, routeAsset(*this, busName, clip), nullptr, &clip.edit.trim,
+                      clip.edit.envelope.empty() ? nullptr : &clip.edit.envelope, 0,
+                      clip.edit.eq.isNeutral() ? nullptr : &clip.edit.eq);
 }
 
 uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
                            const HE::AudioEnvelope& envelope, uint64_t envelopeFrameOffset,
-                           float volume, float pitch, bool loop, const std::string& busName)
+                           float volume, float pitch, bool loop, const std::string& busName,
+                           const HE::AudioEq* eq)
 {
+    // The stage is always in (envelope non-null), the EQ in it when one is
+    // given — setSoundEq can put one in later either way.
     return startSound(pcmData, AudioEncoding::PCM16, sampleRate, channels,
                       volume, pitch, loop, busName, nullptr, nullptr,
-                      &envelope, envelopeFrameOffset);
+                      &envelope, envelopeFrameOffset, eq);
+}
+
+bool AudioEngine::setSoundEq(uint64_t handle, const HE::AudioEq& eq)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->env) return false;
+    EnvelopeSource& e = *it->second->env;
+    std::shared_ptr<const EqChain> next = makeEqChain(eq, static_cast<double>(e.sampleRate));
+    it->second->eqActive = next != nullptr;
+    std::lock_guard<std::mutex> lock(e.pendingMutex);
+    e.eqPending = std::move(next);
+    e.hasEqPending.store(true, std::memory_order_release);
+    return true;
+}
+
+bool AudioEngine::hasSoundEq(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    return it != m_impl->sounds.end() && it->second->eqActive;
+}
+
+std::string AudioEngine::getSoundBus(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    return it == m_impl->sounds.end() ? std::string() : it->second->busName;
 }
 
 bool AudioEngine::setSoundEnvelope(uint64_t handle, const HE::AudioEnvelope& envelope)
@@ -774,8 +908,9 @@ uint64_t AudioEngine::playSpatial(const AudioAsset& clip,
 {
     const SpatialParams sp{ x, y, z, minDist, maxDist, attenuation, rolloff };
     return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
-                      volume, pitch, loop, busName, &sp, &clip.edit.trim,
-                      clip.edit.envelope.empty() ? nullptr : &clip.edit.envelope);
+                      volume, pitch, loop, routeAsset(*this, busName, clip), &sp, &clip.edit.trim,
+                      clip.edit.envelope.empty() ? nullptr : &clip.edit.envelope, 0,
+                      clip.edit.eq.isNeutral() ? nullptr : &clip.edit.eq);
 }
 
 void AudioEngine::setSoundPosition(uint64_t handle, float x, float y, float z)

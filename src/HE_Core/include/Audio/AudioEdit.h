@@ -196,9 +196,13 @@ struct HE_API BiquadCoeffs
 };
 
 // The RBJ "Audio EQ Cookbook" coefficients of one band, for a filter running at
-// `sampleRate`. That rate is the one the samples have WHERE THE FILTER RUNS —
-// the engine resamples every voice to its mixer rate (48 kHz), so the playback
-// side passes that, not the asset's own rate. Out-of-range inputs are clamped
+// `sampleRate`. That rate is the one the samples have WHERE THE FILTER RUNS.
+// An asset's EQ runs in the voice's own stage in front of miniaudio's
+// resampler (AudioEngine.cpp, with the volume curve), so it is the CLIP's rate
+// — and the Audio Editor plots the response at that rate too. (A voice pitched
+// up therefore hears its EQ shifted with it, as if it were baked into the
+// clip.) A 22 kHz clip cannot be shaped above its own ~11 kHz Nyquist; the
+// frequency clamp below says so. Out-of-range inputs are clamped
 // to the kMin*/kMax* above (frequency also to 0.49 · sampleRate). A disabled
 // band, a peak/shelf at 0 dB and a sampleRate ≤ 0 return the identity exactly,
 // so the playback side can skip them without comparing floats itself.
