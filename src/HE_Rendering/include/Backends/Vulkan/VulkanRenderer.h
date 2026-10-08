@@ -276,10 +276,14 @@ private:
 	// Scene depth from the camera into `d`, opaque static meshes only (see the
 	// limitation note in the plan). No-op without decals in the frame.
 	void EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d);
-	// One unit-cube projector per decal, drawn INSIDE the currently open scene
-	// render pass after the opaque draws. Caller restores its own pipeline/sets.
-	void EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
-	                  uint32_t width, uint32_t height, bool hdr);
+	// One unit-cube projector per decal, drawn INSIDE the currently open render
+	// pass. Caller restores its own pipeline/sets. `depthView` is what the decal
+	// reconstructs from: the DecalDepth pre-pass image in a forward frame, GB3
+	// in a deferred one (both SHADER_READ_ONLY). intoGBuffer (Thema 150 S5):
+	// the unshaded decalFragmentSampled into GB0 inside m_gbDecalRP, lit by the
+	// resolve afterwards — GL's deferred decal.
+	void EncodeDecals(VkCommandBuffer cmd, VkImageView depthView,
+	                  uint32_t width, uint32_t height, bool hdr, bool intoGBuffer = false);
 	bool EnsureDecalPipelines();
 	void destroyDecalPipelines();
 	// Decal base texture by UUID (DecalData::textureId is a TEXTURE, not a
@@ -291,6 +295,7 @@ private:
 	VkPipelineLayout      m_decalPipeLayout   = VK_NULL_HANDLE;
 	VkPipeline            m_decalPipeline     = VK_NULL_HANDLE; // m_renderPass (LDR + viewport)
 	VkPipeline            m_decalPipelineHDR  = VK_NULL_HANDLE; // m_postFxSceneRP (RGBA16F)
+	VkPipeline            m_decalPipelineGB   = VK_NULL_HANDLE; // m_gbDecalRP (GB0 SRGB), optional
 	VkSampler             m_decalDepthSampler = VK_NULL_HANDLE; // NEAREST: no interpolation across silhouettes
 	VkDescriptorPool      m_decalPool[2]      = {};             // per frame in flight, reset whole
 	struct DecalFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
@@ -462,6 +467,10 @@ private:
 	VkDeviceMemory        m_gbMem[k_gbTargets]   = {};
 	VkImageView           m_gbView[k_gbTargets]  = {};
 	VkFramebuffer         m_gbFB                 = VK_NULL_HANDLE; // + m_viewportDepthView
+	// Deferred decals (Thema 150 S5): GB0 alone, LOAD, SHADER_READ_ONLY in and
+	// out, between m_gbufferRP and m_hdrLoadRP; the decal samples GB3.
+	VkRenderPass          m_gbDecalRP            = VK_NULL_HANDLE;
+	VkFramebuffer         m_gbDecalFB            = VK_NULL_HANDLE; // m_gbView[0]
 	uint32_t              m_gbW = 0, m_gbH = 0;
 	bool                  m_gbFailed             = false;          // one log line for a failed allocation
 	VkSampler             m_gbSampler            = VK_NULL_HANDLE; // point-clamp: no interpolation across silhouettes

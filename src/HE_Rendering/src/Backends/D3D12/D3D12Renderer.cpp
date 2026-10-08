@@ -3422,6 +3422,10 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature>  decalRootSig;
     ComPtr<ID3D12PipelineState>  decalLdrPso;   // RGBA8 target  (swapchain / viewport)
     ComPtr<ID3D12PipelineState>  decalHdrPso;   // RGBA16F target (viewport HDR)
+    // Deferred frame (Thema 150 S5): decalFragmentSampled into GB0
+    // (R8G8B8A8_UNORM_SRGB) before the resolve, GL's deferred decal. Same root
+    // signature and registers. Null → the deferred frame keeps the forward decal.
+    ComPtr<ID3D12PipelineState>  decalGBufPso;
     ComPtr<ID3D12Resource>       decalCBRing[k_frameCount];  uint8_t* decalCBPtr[k_frameCount]{};
     // textureId → (uploaded texture, sceneSrvHeap slot). Cached even when the
     // upload failed (slot -1) so a broken decal texture is not retried per frame.
@@ -3486,7 +3490,8 @@ struct D3D12RendererImpl
     }
     int  resolveDecalTexture(ID3D12GraphicsCommandList* cl, const HE::UUID& textureId, ContentManager* cm);
     void EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::mat4& viewProj,
-                      int width, int height, ContentManager* cm);
+                      int width, int height, ContentManager* cm,
+                      const D3D12_CPU_DESCRIPTOR_HANDLE* gb0Rtv = nullptr);
 
     GpuMesh cube;
 
@@ -9084,16 +9089,16 @@ bool D3D12RendererImpl::EnsureDecalPipeline()
     // DSVFormat stays UNKNOWN and DepthEnable FALSE: the pass runs with the depth
     // target UNBOUND (it is being read as a texture), and the box-space clip
     // decides coverage, not the z-test.
-    auto buildPso = [&](bool hdr, ComPtr<ID3D12PipelineState>& out) -> bool
+    auto buildPso = [&](DXGI_FORMAT fmt, ID3DBlob* ps, ComPtr<ID3D12PipelineState>& out) -> bool
     {
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
         pd.pRootSignature        = decalRootSig.Get();
         pd.VS                    = { vsb->GetBufferPointer(), vsb->GetBufferSize() };
-        pd.PS                    = { psb->GetBufferPointer(), psb->GetBufferSize() };
+        pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
         pd.InputLayout           = { nullptr, 0 }; // buffer-less 36-vertex cube
         pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         pd.NumRenderTargets      = 1;
-        pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+        pd.RTVFormats[0]         = fmt;
         pd.DSVFormat             = DXGI_FORMAT_UNKNOWN;
         pd.SampleDesc.Count      = 1;
         pd.SampleMask            = UINT_MAX;
@@ -9122,11 +9127,29 @@ bool D3D12RendererImpl::EnsureDecalPipeline()
                                  | D3D12_COLOR_WRITE_ENABLE_BLUE;
         return SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
     };
-    if (!buildPso(false, decalLdrPso) || !buildPso(true, decalHdrPso))
+    if (!buildPso(DXGI_FORMAT_R8G8B8A8_UNORM, psb.Get(), decalLdrPso)
+        || !buildPso(DXGI_FORMAT_R16G16B16A16_FLOAT, psb.Get(), decalHdrPso))
     {
         HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: decal PSO creation failed");
         decalLdrPso.Reset(); decalHdrPso.Reset(); decalRootSig.Reset();
         return false;
+    }
+    {   // The deferred variant into GB0 — optional: a failure costs the deferred
+        // frame its lit decal, not the forward one. The blend is the same RGB-only
+        // SrcAlpha one; on the _SRGB target it happens in linear, like GL's
+        // FRAMEBUFFER_SRGB and Metal's sRGB attachment, and GB0.a (metallic) stays.
+        const HE::MaterialShaderLibrary::Compiled& gc = m_matShaderLib.decalFragmentSampled(Backend::HLSL);
+        ComPtr<ID3DBlob> gsb, gerr;
+        if (!gc.ok || gc.source.empty()
+            || FAILED(D3DCompile(gc.source.c_str(), gc.source.size(), "decalGBufPS", nullptr, nullptr,
+                                 "main", "ps_5_0", cflags, 0, &gsb, &gerr))
+            || !buildPso(k_gbFormats[0], gsb.Get(), decalGBufPso))
+        {
+            decalGBufPso.Reset();
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: deferred decal PSO unavailable, "
+                "deferred frames draw the forward decal: ")
+                + (gerr ? static_cast<const char*>(gerr->GetBufferPointer()) : "")).c_str());
+        }
     }
 
     // Per-frame constant ring: one 512-B slot per decal, k_maxDecals per frame in
@@ -9177,14 +9200,21 @@ int D3D12RendererImpl::resolveDecalTexture(ID3D12GraphicsCommandList* cl,
 // it. D3D12 says so out loud (the barrier is explicit and the debug layer errors);
 // D3D11 dropped one of the two bindings silently, which is why the same order is
 // written down in both backends.
+//
+// gb0Rtv (deferred frame, Thema 150 S5): called right after the G-buffer pass;
+// the decal blends its UNSHADED colour into GB0 (decalGBufPso) against the
+// viewport depth, and the resolve lights it. GB0 stays in RENDER_TARGET, the
+// depth does the same DEPTH_WRITE → PIXEL_SHADER_RESOURCE → back dance.
 void D3D12RendererImpl::EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::mat4& viewProj,
-                                     int width, int height, ContentManager* cm)
+                                     int width, int height, ContentManager* cm,
+                                     const D3D12_CPU_DESCRIPTOR_HANDLE* gb0Rtv)
 {
 #if !defined(HE_HAVE_SHADERC)
-    (void)cl; (void)viewProj; (void)width; (void)height; (void)cm;
+    (void)cl; (void)viewProj; (void)width; (void)height; (void)cm; (void)gb0Rtv;
 #else
     if (m_renderWorld.decals.empty() || !cl) return;
     if (!EnsureDecalPipeline()) return;
+    if (gb0Rtv && !decalGBufPso) return;
 
     // D3D12 command lists have no OMGetRenderTargets, so the active target is
     // rebuilt from the same three-way the SSAO/GI restore blocks use — that branch
@@ -9212,6 +9242,11 @@ void D3D12RendererImpl::EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::m
         depthRes = depthBuffer.Get(); depthSlot = k_decalSceneDepthSlot;
     }
     else return; // no depth to project onto
+    if (gb0Rtv)
+    {
+        if (!hdr) return; // the deferred frame is always the HDR viewport frame
+        rtv = *gb0Rtv;
+    }
 
     const glm::mat4 invViewProj = glm::inverse(viewProj);
     // The forward variant shades itself, from the same source the material
@@ -9226,7 +9261,7 @@ void D3D12RendererImpl::EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::m
     ID3D12DescriptorHeap* heaps[] = { sceneSrvHeap.Get() };
     cl->SetDescriptorHeaps(1, heaps);
     cl->SetGraphicsRootSignature(decalRootSig.Get());
-    cl->SetPipelineState(hdr ? decalHdrPso.Get() : decalLdrPso.Get());
+    cl->SetPipelineState(gb0Rtv ? decalGBufPso.Get() : hdr ? decalHdrPso.Get() : decalLdrPso.Get());
     cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     // No vertex/index buffer is unbound here on purpose: the PSO carries an EMPTY
     // input layout, so whatever the geometry pass left bound is ignored. (D3D11
@@ -9727,6 +9762,7 @@ void D3D12Renderer::Shutdown()
     m_impl->decalRootSig.Reset();
     m_impl->decalLdrPso.Reset();
     m_impl->decalHdrPso.Reset();
+    m_impl->decalGBufPso.Reset();
     for (UINT f = 0; f < k_frameCount; ++f)
     {
         m_impl->decalCBRing[f].Reset();
@@ -11033,6 +11069,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
             }
         };
+        // Decals into GB0 when this frame is deferred and the variant built;
+        // otherwise the forward decal over the lit colour, as before.
+        const bool gbDecals = deferredActive && !p.m_renderWorld.decals.empty()
+                           && p.EnsureDecalPipeline() && p.decalGBufPso;
         if (!deferredActive)
             for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
         else
@@ -11079,6 +11119,14 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
             gbufferPass    = false;
             activeScenePso = scenePso;
+
+            // ── Decals into GB0 (step 5): after the geometry, before the resolve
+            // reads the attributes — GL's slot. The decal colour becomes base
+            // colour and is lit like everything else; the forward tail below
+            // skips its self-lit decal. Leaves GB0 + depth on the OM, which the
+            // resolve replaces next.
+            if (gbDecals)
+                p.EncodeDecals(cl, viewProj, width, height, m_contentManager, &gbRtvs[0]);
 
             // ── Lighting resolve: fullscreen, into hdrRT. EncodeDecals' order:
             // the depth comes OFF the output merger first, THEN it becomes a
@@ -11361,7 +11409,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // After all opaque + skinned geometry (its depth is what the decal projects
         // onto) and before the transparent draws — the slot Metal and GL use for
         // their G-buffer decals. A frame without decals costs one empty() check.
-        if (!p.m_renderWorld.decals.empty())
+        // A deferred frame put them into GB0 already (gbDecals).
+        if (!p.m_renderWorld.decals.empty() && !gbDecals)
         {
             p.EncodeDecals(cl, viewProj, width, height, m_contentManager);
             // A root-signature switch wipes every root argument, so the scene state

@@ -32,3 +32,24 @@ foreach ($b in $backs) {
 foreach ($rp in "0", "1") {
     Cap "gl_ssr_$rp" "OpenGL" (@{ HE_DUMP_RENDERPATH = $rp } + $ssr + @{ HE_DUMP_SSR = "1" })
 }
+# Decals: DECALTEST (red decal on a grey slab) with the graph sphere hanging over it,
+# so the sphere's CSM shadow falls across the decal. A self-lit (forward) decal
+# ignores the shadow; a decal in GB0 is lit by the resolve and darkens in it.
+$dec = @{ HE_DUMP_DECALTEST = "1"; HE_DUMP_MATERIALTEST = "matte"; HE_DUMP_MATTESTPOS = "2.5,4,-6.5"; HE_DUMP_GI = "0"; HE_DUMP_SSAO = "0";
+         HE_DUMP_CAMY = "13"; HE_DUMP_CAMZ = "-1"; HE_DUMP_PITCH = "-65" }
+foreach ($b in $backs) {
+    foreach ($rp in "0", "1") {
+        Cap "$($b[0])_dec_$rp" $b[1] (@{ HE_GPU_DEBUG = "1"; HE_DUMP_RENDERPATH = $rp } + $dec)
+    }
+}
+foreach ($rp in "0", "1") { Cap "gl_dec_$rp" "OpenGL" (@{ HE_DUMP_RENDERPATH = $rp } + $dec) }
+# Post chain: the graph sphere with bloom + SMAA (AA=2), forward/deferred; the
+# plain deferred capture (bloom off, AA off) is the control that the chain ran.
+$post = @{ HE_DUMP_MATERIALTEST = "matte"; HE_DUMP_BLOOM = "1"; HE_DUMP_AA = "2" }
+foreach ($b in $backs) {
+    foreach ($rp in "0", "1") {
+        Cap "$($b[0])_post_$rp" $b[1] (@{ HE_GPU_DEBUG = "1"; HE_DUMP_RENDERPATH = $rp } + $post)
+    }
+    Cap "$($b[0])_plain_1" $b[1] (@{ HE_GPU_DEBUG = "1"; HE_DUMP_RENDERPATH = "1"; HE_DUMP_MATERIALTEST = "matte" })
+}
+foreach ($rp in "0", "1") { Cap "gl_post_$rp" "OpenGL" (@{ HE_DUMP_RENDERPATH = $rp } + $post) }

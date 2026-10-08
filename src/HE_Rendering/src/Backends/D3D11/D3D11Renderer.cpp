@@ -1422,6 +1422,11 @@ struct D3D11RendererImpl
     // (raw binding 23/19/22 would land past the 14 CB / 16 sampler slot limits).
     ComPtr<ID3D11VertexShader>       decalVS;
     ComPtr<ID3D11PixelShader>        decalPS;
+    // The deferred frame's variant (Thema 150 S5): decalFragmentSampled, the
+    // unshaded colour blended into GB0 before the resolve lights it — GL's
+    // deferred decal. Same registers as decalPS. Null → the deferred frame
+    // keeps the forward decal over the resolve (logged once).
+    ComPtr<ID3D11PixelShader>        decalGBufPS;
     ComPtr<ID3D11Buffer>             decalCB;         // DecalUniforms, WRITE_DISCARD per decal
     ComPtr<ID3D11SamplerState>       decalTexSampler; // s14: linear wrap
     ComPtr<ID3D11SamplerState>       decalDepthSampler; // s15: POINT clamp — uv is texel-exact,
@@ -4785,6 +4790,22 @@ struct D3D11RendererImpl
             HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: decal shader-object creation failed");
             return false;
         }
+        {   // The deferred variant. Optional: a failure costs the deferred frame
+            // its lit decal, not the forward one.
+            const HE::MaterialShaderLibrary::Compiled& gc = m_matShaderLib.decalFragmentSampled(Backend::HLSL);
+            ComPtr<ID3DBlob> gsb, gerr;
+            if (!gc.ok || gc.source.empty()
+                || FAILED(D3DCompile(gc.source.c_str(), gc.source.size(), "decalGBufPS", nullptr, nullptr,
+                                     "main", "ps_5_0", cflags, 0, &gsb, &gerr))
+                || FAILED(device->CreatePixelShader(gsb->GetBufferPointer(), gsb->GetBufferSize(),
+                                                    nullptr, &decalGBufPS)))
+            {
+                decalGBufPS.Reset();
+                HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: deferred decal PS unavailable, "
+                    "deferred frames draw the forward decal: ")
+                    + (gerr ? static_cast<const char*>(gerr->GetBufferPointer()) : "")).c_str());
+            }
+        }
 
         {   // 368 B = 4 mat4 + 7 vec4; already a 16-byte multiple.
             D3D11_BUFFER_DESC bd{};
@@ -4918,14 +4939,22 @@ struct D3D11RendererImpl
     // warns). So the DSV comes off the output merger BEFORE the depth SRV goes on,
     // and back on only after the SRV is gone. Get that backwards and the pass draws
     // nothing, with no error anywhere.
+    //
+    // intoGBuffer (deferred frame, Thema 150 S5): called right after the G-buffer
+    // pass, with GB0..2 + the scene depth on the output merger. The bound RT0 IS
+    // GB0, so the same code blends the UNSHADED decal colour into GB0.rgb (an
+    // _SRGB view: the blend happens in linear, like GL's FRAMEBUFFER_SRGB and
+    // Metal's sRGB attachment) and the resolve lights it. The RGB write mask
+    // keeps GB0.a (metallic); GB1/GB2 are not bound and keep the surface's.
     void EncodeDecals(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
-                      int width, int height, ContentManager* cm)
+                      int width, int height, ContentManager* cm, bool intoGBuffer = false)
     {
 #if !defined(HE_HAVE_SHADERC)
-        (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm;
+        (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm; (void)intoGBuffer;
 #else
         if (m_renderWorld.decals.empty()) return;
         if (!EnsureDecalPipeline()) return;
+        if (intoGBuffer && !decalGBufPS) return;
 
         ComPtr<ID3D11RenderTargetView> curRTV;
         ComPtr<ID3D11DepthStencilView> curDSV;
@@ -4951,7 +4980,7 @@ struct D3D11RendererImpl
         ctx->PSSetShaderResources(15, 1, depthSrvs);   // t15 heGBDepth
 
         ctx->VSSetShader(decalVS.Get(), nullptr, 0);
-        ctx->PSSetShader(decalPS.Get(), nullptr, 0);
+        ctx->PSSetShader(intoGBuffer ? decalGBufPS.Get() : decalPS.Get(), nullptr, 0);
         ctx->IASetInputLayout(nullptr);                 // buffer-less 36-vertex cube
         ID3D11Buffer* noVB = nullptr; UINT zeroStride = 0, zeroOffset = 0;
         ctx->IASetVertexBuffers(0, 1, &noVB, &zeroStride, &zeroOffset);
@@ -6041,7 +6070,7 @@ void D3D11Renderer::Shutdown()
     m_impl->graphTexCache.clear();
     m_impl->uiTexCache.clear();
     m_impl->pendingTexInval.clear();
-    m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalCB.Reset();
+    m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalGBufPS.Reset(); m_impl->decalCB.Reset();
     m_impl->decalTexSampler.Reset(); m_impl->decalDepthSampler.Reset();
     m_impl->decalRast.Reset(); m_impl->decalNoDepth.Reset(); m_impl->decalBlend.Reset();
     m_impl->decalReady = false;
@@ -7256,6 +7285,10 @@ void D3D11Renderer::DrawScene(int width, int height)
             }
         };
 
+        // Decals into GB0 when this frame is deferred and the variant built;
+        // otherwise the forward decal over the lit colour, as before.
+        const bool gbDecals = deferredActive && !p.m_renderWorld.decals.empty()
+                           && p.EnsureDecalPipeline() && p.decalGBufPS;
         if (!deferredActive)
             for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
         else
@@ -7285,6 +7318,13 @@ void D3D11Renderer::DrawScene(int width, int height)
             for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
             gbufferPass = false;
             builtinPS   = p.ps.Get();
+
+            // ── Decals into GB0 (step 5): after the geometry, before the resolve
+            // reads the attributes — GL's slot. The decal colour becomes base
+            // colour and is lit like everything else (shadows, point lights, GI,
+            // SSR); the forward tail below then skips its self-lit decal.
+            if (gbDecals)
+                p.EncodeDecals(ctx, viewProj, width, height, m_contentManager, /*intoGBuffer=*/true);
 
             // ── Lighting resolve: fullscreen, into the HDR target. The depth
             // comes OFF the output merger before its SRV goes on — D3D11 silently
@@ -7517,7 +7557,9 @@ void D3D11Renderer::DrawScene(int width, int height)
         // and before the transparent draws — the slot Metal and GL use for their
         // G-buffer decals. Self-restoring; a frame without decals costs one
         // empty() check.
-        p.EncodeDecals(ctx, viewProj, width, height, m_contentManager);
+        // A deferred frame put them into GB0 already (gbDecals).
+        if (!gbDecals)
+            p.EncodeDecals(ctx, viewProj, width, height, m_contentManager);
 
         if (!transparentDCs.empty()) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)

@@ -718,7 +718,13 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     if (m_taaFrame)
         m_taaJitter = HE::taaJitter(m_taaFrameIndex++);
     m_taaSceneSorted = false;
-    m_deferredFrame  = false; // decided in the HDR branch below (Thema 150)
+    // ── Deferred render path (Thema 150): decided before the first pass, so a
+    // deferred frame can skip the decal depth pre-pass below (its decals read
+    // GB3). Only on the HDR frame, like SSR and TAA. The G-buffer is built
+    // lazily at the viewport size; a failed allocation keeps the frame forward
+    // (one log line).
+    m_deferredFrame = useHDR && m_renderPath == HE::RenderPath::Deferred && m_deferredReady && m_matReady
+                   && ensureGBufferTargets(m_viewportW, m_viewportH);
 
     // Graph materials' sky cube (heSkyEnv): a transfer, so before every pass.
     updateSkyEnvCube(cmd);
@@ -730,9 +736,11 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     // Camera-depth pre-pass for screen-space decals. It must run before the scene
     // pass opens, because the decal draw sits INSIDE that pass and samples this
     // image — the pass's own depth attachment cannot be sampled while bound.
-    // Skips itself when the frame has no decals.
-    m_decalDepthActive = &m_decalDepthVp;
-    EncodeDecalDepth(cmd, m_decalDepthVp);
+    // Skips itself when the frame has no decals. A deferred frame needs none:
+    // its decals reconstruct from GB3, which the G-buffer pass writes anyway.
+    m_decalDepthActive = m_deferredFrame ? nullptr : &m_decalDepthVp;
+    if (!m_deferredFrame)
+        EncodeDecalDepth(cmd, m_decalDepthVp);
 
     VkClearValue clears[2]{};
     clears[0].color        = { { 0.0f, 0.0f, 0.0f, 1.0f } };
@@ -745,15 +753,10 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // Replaces the CSM lookup AND SSAO in scene.frag when it runs.
         runGi(cmd, m_viewportW, m_viewportH);
 
-        // ── Deferred render path (Thema 150): decided here, before SSR. A
-        // deferred frame runs the SAME forward trace below, and the resolve
-        // composites it through heLitP's heSSRFwd stage (binding 31), the
-        // stage graph materials already use here (step 5, plan §10.12). Only
-        // on this HDR frame, like SSR and TAA. The
-        // G-buffer is built lazily at the viewport size; a failed allocation
-        // keeps the frame forward (one log line).
-        m_deferredFrame = m_renderPath == HE::RenderPath::Deferred && m_deferredReady && m_matReady
-                       && ensureGBufferTargets(m_viewportW, m_viewportH);
+        // ── Deferred (Thema 150, decided at the top): a deferred frame runs the
+        // SAME forward trace below, and the resolve composites it through
+        // heLitP's heSSRFwd stage (binding 31), the stage graph materials
+        // already use here (step 5, plan §10.12).
 
         // ── Forward SSR (docs/ssr-cross-backend-plan.md checkpoint B) ──
         // Built lazily, and only here: the trace's radiance source is the
@@ -3653,6 +3656,26 @@ bool VulkanRenderer::EnsureDecalPipelines()
     // editor's no-PostFX fallback pass reuses the LDR one, as DrawScene does.
     const bool okLdr = buildPipeline(m_renderPass,    m_decalPipeline);
     const bool okHdr = buildPipeline(m_postFxSceneRP, m_decalPipelineHDR);
+    // The deferred variant (Thema 150 S5): decalFragmentSampled, the UNSHADED
+    // colour into GB0 inside m_gbDecalRP — same layout, blend and cull. The
+    // SRGB attachment makes the blend linear, as GL's FRAMEBUFFER_SRGB and
+    // Metal's sRGB target do; the RGB mask keeps GB0.a (metallic). Optional:
+    // without it a deferred frame draws the forward decal over the resolve.
+    if (m_gbDecalRP)
+    {
+        const auto& g = m_matShaderLib.decalFragmentSampled(Backend::SpirV);
+        VkShaderModule gfs = (g.ok && !g.spirv.empty()) ? makeModule(g.spirv) : VK_NULL_HANDLE;
+        if (gfs)
+        {
+            std::swap(fs, gfs);
+            if (!buildPipeline(m_gbDecalRP, m_decalPipelineGB)) m_decalPipelineGB = VK_NULL_HANDLE;
+            std::swap(fs, gfs);
+            vkDestroyShaderModule(m_device, gfs, nullptr);
+        }
+        if (!m_decalPipelineGB)
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: deferred decal pipeline unavailable, "
+                                   "deferred frames draw the forward decal");
+    }
     vkDestroyShaderModule(m_device, vs, nullptr);
     vkDestroyShaderModule(m_device, fs, nullptr);
     if (!okLdr || !okHdr)
@@ -3680,6 +3703,7 @@ void VulkanRenderer::destroyDecalPipelines()
     }
     if (m_decalPipeline)     { vkDestroyPipeline(m_device, m_decalPipeline, nullptr);     m_decalPipeline = VK_NULL_HANDLE; }
     if (m_decalPipelineHDR)  { vkDestroyPipeline(m_device, m_decalPipelineHDR, nullptr);  m_decalPipelineHDR = VK_NULL_HANDLE; }
+    if (m_decalPipelineGB)   { vkDestroyPipeline(m_device, m_decalPipelineGB, nullptr);   m_decalPipelineGB = VK_NULL_HANDLE; }
     if (m_decalPipeLayout)   { vkDestroyPipelineLayout(m_device, m_decalPipeLayout, nullptr); m_decalPipeLayout = VK_NULL_HANDLE; }
     if (m_decalSetLayout)    { vkDestroyDescriptorSetLayout(m_device, m_decalSetLayout, nullptr); m_decalSetLayout = VK_NULL_HANDLE; }
     if (m_decalDepthSampler) { vkDestroySampler(m_device, m_decalDepthSampler, nullptr);  m_decalDepthSampler = VK_NULL_HANDLE; }
@@ -3775,15 +3799,15 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     vkCmdEndRenderPass(cmd); // final layout SHADER_READ_ONLY (m_shadowPass's own dependency)
 }
 
-void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
-                                  uint32_t width, uint32_t height, bool hdr)
+void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, VkImageView depthView,
+                                  uint32_t width, uint32_t height, bool hdr, bool intoGBuffer)
 {
 #if !defined(HE_HAVE_SHADERC)
-    (void)cmd; (void)d; (void)width; (void)height; (void)hdr;
+    (void)cmd; (void)depthView; (void)width; (void)height; (void)hdr; (void)intoGBuffer;
 #else
-    if (m_renderWorld.decals.empty() || d.view == VK_NULL_HANDLE) return;
+    if (m_renderWorld.decals.empty() || depthView == VK_NULL_HANDLE) return;
     if (!EnsureDecalPipelines()) return;
-    const VkPipeline pipe = hdr ? m_decalPipelineHDR : m_decalPipeline;
+    const VkPipeline pipe = intoGBuffer ? m_decalPipelineGB : hdr ? m_decalPipelineHDR : m_decalPipeline;
     if (pipe == VK_NULL_HANDLE) return;
 
     const uint32_t fi = m_currentFrame;
@@ -3860,7 +3884,7 @@ void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
         // statically references the sampler; the white default makes it a no-op.
         VkDescriptorImageInfo texInfo{ m_albedoSampler,
             texView ? *texView : m_whiteAlbedoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorImageInfo depthInfo{ m_decalDepthSampler, d.view,
+        VkDescriptorImageInfo depthInfo{ m_decalDepthSampler, depthView,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorBufferInfo bufInfo{ m_decalUBO[fi].buf, off, sizeof(du) };
         VkWriteDescriptorSet w[3]{};
@@ -4039,6 +4063,52 @@ bool VulkanRenderer::createDeferredPipelines()
         rpci.pDependencies   = &dep;
         if (vkCreateRenderPass(m_device, &rpci, nullptr, &m_hdrLoadRP) != VK_SUCCESS)
             return fail("HDR load render pass failed");
+    }
+
+    // ── Deferred decals (step 5): GB0 alone, LOADed and stored, SHADER_READ_ONLY
+    // on both ends (m_gbufferRP's finalLayout in, the resolve's sample out). Its
+    // own pass, not a subpass of m_gbufferRP: the decal SAMPLES GB3, which is an
+    // attachment there. In: the G-buffer pass's colour writes before this pass
+    // loads/blends GB0 and samples GB3. Out: the blend before the resolve's read.
+    {
+        VkAttachmentDescription a{};
+        a.format         = kGBufferFormats[0];
+        a.samples        = VK_SAMPLE_COUNT_1_BIT;
+        a.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        a.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        a.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a.initialLayout  = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        a.finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1;
+        sub.pColorAttachments    = &colorRef;
+        VkSubpassDependency deps[2]{};
+        deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass    = 0;
+        deps[0].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[0].dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                              | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
+                              | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        deps[1].srcSubpass    = 0;
+        deps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 1;
+        rpci.pAttachments    = &a;
+        rpci.subpassCount    = 1;
+        rpci.pSubpasses      = &sub;
+        rpci.dependencyCount = 2;
+        rpci.pDependencies   = deps;
+        if (vkCreateRenderPass(m_device, &rpci, nullptr, &m_gbDecalRP) != VK_SUCCESS)
+            m_gbDecalRP = VK_NULL_HANDLE; // optional: decals stay forward in a deferred frame
     }
 
     // Point-clamp for the G-buffer reads: an interpolated oct normal or depth
@@ -4318,6 +4388,7 @@ void VulkanRenderer::destroyDeferredPipelines()
         }
     if (m_gbSampler) { vkDestroySampler(m_device, m_gbSampler, nullptr);     m_gbSampler = VK_NULL_HANDLE; }
     if (m_hdrLoadRP) { vkDestroyRenderPass(m_device, m_hdrLoadRP, nullptr);  m_hdrLoadRP = VK_NULL_HANDLE; }
+    if (m_gbDecalRP) { vkDestroyRenderPass(m_device, m_gbDecalRP, nullptr);  m_gbDecalRP = VK_NULL_HANDLE; }
     if (m_gbufferRP) { vkDestroyRenderPass(m_device, m_gbufferRP, nullptr);  m_gbufferRP = VK_NULL_HANDLE; }
     // The G-buffer variants of the graph materials were built against
     // m_gbufferRP; they live in m_materialPipelines and go with it.
@@ -4387,6 +4458,19 @@ bool VulkanRenderer::ensureGBufferTargets(uint32_t w, uint32_t h)
         fci.layers          = 1;
         ok = vkCreateFramebuffer(m_device, &fci, nullptr, &m_gbFB) == VK_SUCCESS;
     }
+    if (ok && m_gbDecalRP)
+    {
+        // GB0 alone for the deferred decals. Optional like the pass.
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass      = m_gbDecalRP;
+        fci.attachmentCount = 1;
+        fci.pAttachments    = &m_gbView[0];
+        fci.width           = w;
+        fci.height          = h;
+        fci.layers          = 1;
+        if (vkCreateFramebuffer(m_device, &fci, nullptr, &m_gbDecalFB) != VK_SUCCESS)
+            m_gbDecalFB = VK_NULL_HANDLE;
+    }
     if (!ok)
     {
         destroyGBufferTargets();
@@ -4406,6 +4490,7 @@ void VulkanRenderer::destroyGBufferTargets()
 {
     if (!m_device) return;
     if (m_gbFB) { vkDestroyFramebuffer(m_device, m_gbFB, nullptr); m_gbFB = VK_NULL_HANDLE; }
+    if (m_gbDecalFB) { vkDestroyFramebuffer(m_device, m_gbDecalFB, nullptr); m_gbDecalFB = VK_NULL_HANDLE; }
     for (uint32_t i = 0; i < k_gbTargets; ++i)
     {
         if (m_gbView[i])  { vkDestroyImageView(m_device, m_gbView[i], nullptr); m_gbView[i]  = VK_NULL_HANDLE; }
@@ -8268,6 +8353,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 drawOne(dc.transform);
         };
 
+        // Decals into GB0 when this frame is deferred and the variant built;
+        // otherwise the forward decal over the lit colour, as before.
+        const bool gbDecals = deferred && !m_renderWorld.decals.empty() && EnsureDecalPipelines()
+                           && m_decalPipelineGB && m_gbDecalFB;
         if (!deferred)
         {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -8308,6 +8397,22 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             gbufferPass        = false;
             activeMatScenePipe = hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline;
             vkCmdEndRenderPass(cmd); // GB0..3 → SHADER_READ_ONLY (finalLayout)
+
+            // ── Decals into GB0 (step 5): after the geometry, before the resolve
+            // reads the attributes — GL's slot. The decal colour becomes base
+            // colour and is lit like everything else; the forward tail below
+            // skips its self-lit decal. m_gbDecalRP's own dependencies order it
+            // between the G-buffer pass and the resolve.
+            if (gbDecals)
+            {
+                VkRenderPassBeginInfo dbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+                dbi.renderPass        = m_gbDecalRP;
+                dbi.framebuffer       = m_gbDecalFB;
+                dbi.renderArea.extent = { width, height };
+                vkCmdBeginRenderPass(cmd, &dbi, VK_SUBPASS_CONTENTS_INLINE);
+                EncodeDecals(cmd, m_gbView[3], width, height, hdr, /*intoGBuffer=*/true);
+                vkCmdEndRenderPass(cmd);
+            }
 
             // The sky's colour writes (pass 1) and the G-buffer pass's depth
             // writes must be visible to m_hdrLoadRP's LOADs, its depth test and
@@ -8507,9 +8612,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // pre-pass captured), before the transparent pass — the same slot the
         // Metal/GL paths use inside their G-buffer pass. Binds its own pipeline
         // and set 0, so the scene state is restored right after.
-        if (m_decalDepthActive && !m_renderWorld.decals.empty())
+        // A deferred frame put them into GB0 already (gbDecals); if it could
+        // not, the forward decal reconstructs from GB3 (no pre-pass ran).
+        const VkImageView fwdDecalDepth = deferred ? m_gbView[3]
+                                        : m_decalDepthActive ? m_decalDepthActive->view : VK_NULL_HANDLE;
+        if (fwdDecalDepth && !gbDecals && !m_renderWorld.decals.empty())
         {
-            EncodeDecals(cmd, *m_decalDepthActive, width, height, hdr);
+            EncodeDecals(cmd, fwdDecalDepth, width, height, hdr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
