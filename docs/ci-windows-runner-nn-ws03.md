@@ -13,8 +13,8 @@ NN-WS03, solange der Hive den Rechner frei meldet.
   Repo-Variable `WINDOWS_RUNNER` auf `nn-ws03`, solange
   - der Runner bei GitHub online ist,
   - NN-WS03 im Hive da ist,
-  - dort keine Bienen arbeiten,
-  - und die CPU nicht über 60 % liegt (der eigene Build des Runners zählt nicht).
+  - und die CPU nicht am Anschlag ist, also nicht über 90 % (der eigene Build des Runners
+    zählt nicht). Bienen, die dort arbeiten, sind kein Grund: Der Ryzen 9 9950X schafft beides.
 
   Sonst setzt er sie auf `github`. Geschrieben wird nur bei einem Wechsel, jeder Wechsel
   steht als CI-Ereignis im Verlauf.
@@ -76,8 +76,9 @@ Windows dann dort; im Lauf steht beim Windows-Job der Runner-Name `NN-WS03`.
 
 - **Ein Lauf nach dem anderen:** Der Runner baut immer nur einen Job. Mehrere Themen-Läufe
   warten aufeinander, bei etwa fünf Minuten pro Lauf ist das immer noch schneller als GitHub.
-- **Bienen auf NN-WS03 haben Vorrang:** Solange dort welche arbeiten, gehen *neue* Jobs zu
-  GitHub. Ein Job, der schon an NN-WS03 vergeben ist, läuft trotzdem dort.
+- **Neben den Bienen:** Der Runner baut mit allen Kernen, auch wenn dort Bienen bauen. Erst bei
+  über 90 % CPU gehen *neue* Jobs zu GitHub; ein Job, der schon an NN-WS03 vergeben ist,
+  läuft trotzdem dort.
 - **Zweige mit altem Stand:** Der Workflow kommt bei `workflow_dispatch` aus dem Zweig selbst.
   Ein Themen-Zweig ohne diese `ci.yml` baut weiter bei GitHub, bis er `main` bzw. seinen
   Release-Zweig hereinholt. Pull Requests nehmen die `ci.yml` des Merge-Stands.

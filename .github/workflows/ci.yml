@@ -38,9 +38,10 @@ jobs:
             runner: '"macos-latest"'
             cache: ccache
           # Windows builds on NN-WS03 when the Hive reports it free: the Hive
-          # (ci.py, windows_route) sets the repository variable WINDOWS_RUNNER
-          # to nn-ws03 while that device's self-hosted runner is online and no
-          # bees are working there, and back otherwise. There it builds
+          # (ci.py, route_windows) sets the repository variable WINDOWS_RUNNER
+          # to nn-ws03 while that device's self-hosted runner is online and the
+          # PC isn't at its limit (bees working there are fine — a Ryzen 9
+          # 9950X), and back otherwise. There it builds
           # incrementally in a build tree that stays — minutes instead of the
           # hosted runner's ~50. Only for topic branches (pull requests and
           # dispatches): main and the release branches make the download
@@ -294,7 +295,7 @@ jobs:
           }
 
       # Four jobs on GitHub's four cores; on NN-WS03 Ninja's default (all of
-      # its cores — the Hive only sends work there while no bees run on it).
+      # its 32 threads — it has room for that next to the bees).
       - name: Build
         run: cmake --build build ${{ runner.environment == 'self-hosted' && '--parallel' || '-j 4' }}
 
