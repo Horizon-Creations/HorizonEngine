@@ -523,6 +523,12 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			hint("Simulate rain/snow on the GPU (transform feedback).");
 	});
 
+	row("weathersound", "Effects", [&]{
+		EditorWidgets::checkbox("Weather Sounds in Edit Mode", &cfg.WeatherSoundInEditor);
+		hint("Hear the scene's weather (rain, wind, snow, storm, thunder) in the "
+		     "edit-mode viewport, not only in Play.");
+	});
+
 	row("landiscovery", "Collaboration", [&]{
 		EditorWidgets::checkbox("Find Sessions on the Local Network", &cfg.CollabLanDiscovery);
 		hint("Hosts announce a session on the local network and guests see it in "
@@ -2227,6 +2233,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.SSAOIntensity     = 1.0f;
 			cfg.SSAOMethod        = 0;
 			cfg.GpuParticles      = true;
+			cfg.WeatherSoundInEditor = true;
 			cfg.CollabLanDiscovery = true;
 			// Restore Defaults is the one path that can move CollabSyncLargeAssets
 			// without touching its (disabled) checkbox, so it has to honour the same

@@ -1327,10 +1327,38 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				hint("Drops collide via physics in Play; else they die at Ground Y (the "
 				     "fallback floor).");
 
-				// Thunder sound — drop an audio .hasset here (played on each strike).
-				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
-					HE::AssetType::Audio, "thunder", "(none — drop audio)",
+				// Weather sounds (WeatherAudio). Every slot is optional: empty plays the
+				// EngineContent default, a dropped audio .hasset replaces just that one.
+				EditorWidgets::subHeading("Sound");
+				EditorWidgets::checkbox("Weather Sounds", &w->soundEnabled); trackEdit();
+				ImGui::BeginDisabled(!w->soundEnabled);
+				Row::sliderFloat("Volume##wxs", &w->soundVolume, 0.0f, 1.0f); trackEdit();
+				char wxBus[64];
+				std::strncpy(wxBus, w->soundBus.c_str(), sizeof(wxBus) - 1);
+				wxBus[sizeof(wxBus) - 1] = '\0';
+				if (Row::inputText("Bus##wxs", wxBus, sizeof(wxBus))) { w->soundBus = wxBus; trackEdit(); }
+				const char* kDefaultSlot = "(default)";
+				EditorWidgets::assetDropSlot(ctx, "Rain", w->rainSound,
+					HE::AssetType::Audio, "wxrain", kDefaultSlot,
 					/*rejectNoun=*/nullptr, /*showClear=*/true);
+				EditorWidgets::assetDropSlot(ctx, "Wind", w->windSound,
+					HE::AssetType::Audio, "wxwind", kDefaultSlot,
+					/*rejectNoun=*/nullptr, /*showClear=*/true);
+				EditorWidgets::assetDropSlot(ctx, "Snow", w->snowSound,
+					HE::AssetType::Audio, "wxsnow", kDefaultSlot,
+					/*rejectNoun=*/nullptr, /*showClear=*/true);
+				EditorWidgets::assetDropSlot(ctx, "Storm", w->stormSound,
+					HE::AssetType::Audio, "wxstorm", kDefaultSlot,
+					/*rejectNoun=*/nullptr, /*showClear=*/true);
+				// Thunder: one roll per lightning strike, a random distance away.
+				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
+					HE::AssetType::Audio, "thunder", kDefaultSlot,
+					/*rejectNoun=*/nullptr, /*showClear=*/true);
+				ImGui::EndDisabled();
+				hint("The beds fade with the weather by themselves: rain and snow with how much "
+				     "falls, wind with the wind speed, storm with wind and rain together. An "
+				     "empty slot plays the engine's sound; drop an audio asset to replace it. "
+				     "The bus falls back to the clip's own, then master.");
 
 			}
 			if (!quiet && !only) ImGui::Separator();

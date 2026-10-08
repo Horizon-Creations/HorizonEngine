@@ -1129,6 +1129,20 @@ namespace
 	  "The height where drops and flakes die when nothing else stops them. In play "
 	  "mode collisions override it where they can.",
 	  "", "rendering#weather" },
+	{ "Weather/Weather Sounds", "",
+	  "The weather makes its own sound: rain, wind, snow and storm beds that fade "
+	  "with the weather, and thunder after each lightning strike. Off silences all "
+	  "of it for this weather. The Rain, Wind, Snow, Storm and Thunder slots below "
+	  "replace the engine's sound for just that one; empty plays the default.",
+	  "", "rendering#weather" },
+	{ "Weather/Volume", "",
+	  "How loud all weather sounds are, 0 to 1. The beds still follow the weather "
+	  "inside that: this only turns the whole mix up or down.",
+	  "", "rendering#weather" },
+	{ "Weather/Bus", "",
+	  "The mixer bus the weather plays through (SFX by default). A name the mixer "
+	  "does not have falls back to the clip's own bus, then to master.",
+	  "", "rendering#weather" },
 
 	// ── UI ───────────────────────────────────────────────────────────────────
 	{ "UI Canvas/Width", "", "The canvas's width in UI units.", "", "ui#designer" },
@@ -3338,6 +3352,11 @@ namespace
 	{ "Preferences/Effects/GPU Weather Particles", "",
 	  "Simulate rain and snow on the GPU. Far more drops for the same frame time; "
 	  "it needs a backend that can do it, and falls back quietly where it cannot.",
+	  "", "rendering#weather" },
+	{ "Preferences/Effects/Weather Sounds in Edit Mode", "",
+	  "Hear the scene's weather (rain, wind, snow, storm, thunder) in the edit-mode "
+	  "viewport as well as in Play. Turn it off when a rain loop is in the way; the "
+	  "Weather component's own Weather Sounds switch is the one that counts in Play.",
 	  "", "rendering#weather" },
 	{ "Preferences/Collaboration/Find Sessions on the Local Network", "",
 	  "Announce and discover collaboration sessions on this network, so joining "

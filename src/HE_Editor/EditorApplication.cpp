@@ -1332,6 +1332,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.SpecularAA                  = globalstate.getCustomConfigBool("SpecularAA",          m_editorConfig.SpecularAA);
 	m_editorConfig.SpecularAAStrength          = globalstate.getCustomConfigFloat("SpecularAAStrength", m_editorConfig.SpecularAAStrength);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
+	m_editorConfig.WeatherSoundInEditor        = globalstate.getCustomConfigBool("WeatherSoundInEditor", m_editorConfig.WeatherSoundInEditor);
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
@@ -3412,17 +3413,19 @@ void EditorApplication::OnRender(float dt)
 			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
 		}
 
-		// Thunder: when a lightning strike fired this frame, play the configured sound
-		// (graceful no-op if no thunderSound asset is set on the WeatherComponent).
-		if (m_isPlaying && m_editorWorld)
+		// The weather's sound: rain/wind/snow/storm beds that follow the live weather,
+		// and thunder after each lightning strike. After the tick above, so a strike is
+		// heard the frame it happens. Edit mode too (the Preferences switch is the way
+		// to silence it there); in Play it goes quiet with the pause, like the weather
+		// itself stands still.
+		if (m_editorWorld)
 		{
-			for (auto [e, wx] : m_editorWorld->registry().view<WeatherComponent>().each())
-			{
-				if (wx.flashTriggered && wx.thunderSound != HE::UUID{})
-					if (const auto* a = contentManager().getAudio(wx.thunderSound))
-						m_audioEngine.play(*a);
-				break;
-			}
+			HE_PROFILE_SCOPE_N("WeatherAudio");
+			WeatherAudio::Frame frame;
+			frame.realDt  = dt;
+			frame.gameDt  = gameDt;
+			frame.audible = m_isPlaying ? !m_isPaused : m_editorConfig.WeatherSoundInEditor;
+			WeatherAudio::update(m_weatherAudio, *m_editorWorld, m_audioEngine, contentManager(), frame);
 		}
 
 		// Per-frame script update. `simulating`, not m_isPlaying: onUpdate runs once
@@ -10828,7 +10831,9 @@ void EditorApplication::setPlayMode(bool play)
 			m_widgetTextInputActive = false;
 		}
 
-		// Stop all audio when exiting play mode
+		// Stop all audio when exiting play mode — the weather's state first, so the
+		// beds start from silence again instead of reusing handles stopAll kills.
+		WeatherAudio::stop(m_weatherAudio, m_audioEngine);
 		m_audioEngine.stopAll();
 
 		HE_LOG_INFO(Editor, "%s", "EditorApplication: returned to edit mode");
@@ -12002,6 +12007,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("SpecularAA",                m_editorConfig.SpecularAA);
 	globalstate.setCustomConfigEntry("SpecularAAStrength",        m_editorConfig.SpecularAAStrength);
 	globalstate.setCustomConfigEntry("GpuParticles",              m_editorConfig.GpuParticles);
+	globalstate.setCustomConfigEntry("WeatherSoundInEditor",      m_editorConfig.WeatherSoundInEditor);
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);

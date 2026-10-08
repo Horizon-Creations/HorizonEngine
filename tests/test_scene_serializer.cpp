@@ -1885,6 +1885,13 @@ namespace
 		a.weather.autoCycle          = true;
 		a.weather.cycleSeconds       = 95.0f;
 		a.weather.thunderSound       = HE::UUID::generate();
+		a.weather.rainSound          = HE::UUID::generate();
+		a.weather.windSound          = HE::UUID::generate();
+		a.weather.snowSound          = HE::UUID::generate();
+		a.weather.stormSound         = HE::UUID::generate();
+		a.weather.soundEnabled       = false;
+		a.weather.soundVolume        = 0.35f;
+		a.weather.soundBus           = "Ambience";
 		a.weather.maxRainParticles   = 1500;
 		a.weather.maxSnowParticles   = 900;
 		a.weather.groundLevel        = -3.5f;
@@ -2256,6 +2263,13 @@ namespace
 			CHECK(w->autoCycle          == a.weather.autoCycle);
 			CHECK(w->cycleSeconds       == doctest::Approx(a.weather.cycleSeconds));
 			CHECK(w->thunderSound       == a.weather.thunderSound);
+			CHECK(w->rainSound          == a.weather.rainSound);
+			CHECK(w->windSound          == a.weather.windSound);
+			CHECK(w->snowSound          == a.weather.snowSound);
+			CHECK(w->stormSound         == a.weather.stormSound);
+			CHECK(w->soundEnabled       == a.weather.soundEnabled);
+			CHECK(w->soundVolume        == doctest::Approx(a.weather.soundVolume));
+			CHECK(w->soundBus           == a.weather.soundBus);
 			CHECK(w->maxRainParticles   == a.weather.maxRainParticles);
 			CHECK(w->maxSnowParticles   == a.weather.maxSnowParticles);
 			CHECK(w->groundLevel        == doctest::Approx(a.weather.groundLevel));
