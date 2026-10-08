@@ -2288,6 +2288,10 @@ TEST_CASE("Rewards: posted drag cues play once, on the editor's engine, through 
 	using C = HE::Ed::DragCue;
 	AudioEngine project, ui;
 	REQUIRE(project.init(true));
+	// Without a device, like the tests above: left to pollBuild, the editor's
+	// engine opens a real one, whose thread then mixes alongside loudestOut's
+	// readMixedFrames — a race that crashed this case now and then under ctest.
+	REQUIRE(ui.init(true));
 	RewardsContextBits bits;
 	bits.config.RewardsSound  = true;
 	bits.config.RewardsVolume = 1.0f;
@@ -2306,7 +2310,7 @@ TEST_CASE("Rewards: posted drag cues play once, on the editor's engine, through 
 
 	setDragCueProbe(&probeCue);
 	s_probed.clear();
-	frame();                                    // opens the UI-sound device
+	frame();                                    // keeps the UI-sound engine open
 	REQUIRE(ui.isInitialized());
 
 	postDragCue(C::Pickup);
