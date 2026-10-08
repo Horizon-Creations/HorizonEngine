@@ -68511,7 +68511,7 @@
          },
          {
           "s": "",
-          "t": " — one lane per channel, drawn from the loudest and quietest sample under each pixel, so even an hour-long clip draws at once. Zoomed in far enough, single samples appear as points."
+          "t": " — one lane per channel, drawn from the loudest and quietest sample under each pixel, so even a long clip draws quickly. Zoomed in far enough, single samples appear as points."
          }
         ],
         [
@@ -68617,7 +68617,7 @@
         },
         {
          "s": "",
-         "t": " on the selection repeats seamlessly, the quickest way to hear whether a cut point clicks. Marking a new selection while playing restarts on the new range; "
+         "t": " on the selection repeats on its own, the quickest way to hear whether a cut point clicks. Marking a new selection while playing restarts on the new range; "
         },
         {
          "s": "b",
@@ -68641,14 +68641,22 @@
         },
         {
          "s": "",
-         "t": " sliders in the tab change only this preview. In the game, the Audio Source component has its own."
+         "t": " sliders under "
+        },
+        {
+         "s": "b",
+         "t": "Preview"
+        },
+        {
+         "s": "",
+         "t": " in the side panel change only this preview. In the game, the Audio Source component has its own."
         }
        ]
       }
      ],
      "eyebrow": "See the sound",
      "id": "audio-editor",
-     "text": "Double-click an audio asset in the Content Browser and it opens in the Audio Editor tab: the clip as a waveform you can zoom into, select from, play from and edit. Every edit there (trim, volume curve, bus, EQ) is non-destructive. It is stored next to the samples in the asset, the samples themselves are never rewritten, and every edit can be undone or cleared again. A source .wav or .ogg that is not yet an asset opens read-only, with Import as Audio Asset to turn it into one. Waveform — one lane per channel, drawn from the loudest and quietest sample under each pixel, so even an hour-long clip draws at once. Zoomed in far enough, single samples appear as points. Zoom and scroll — the wheel zooms around the pointer; Shift+wheel or a middle-drag pans; on a trackpad the swipe pans and Ctrl/Cmd+scroll zooms. Fit shows the whole clip again, Zoom to Selection fills the canvas with the selection. Overview — the strip under the lanes is the whole clip, with the visible part framed. Drag the frame to scroll, click beside it to jump there. Ruler — drag along it to scrub the playhead, even while the clip plays. It never changes the selection. Samples labels it with frame numbers instead of time; a frame is one sample on every channel. Selecting. Drag across the lanes to select a range. The readout under the canvas gives its start, end and length in time and in frames. A click without a drag moves the playhead and drops the selection, Shift-click stretches the selection to the pointer, and pressing on an edge of the selection moves just that edge. Listening. Play plays the selection if there is one, otherwise the clip as the game plays it (the trimmed part, with its curve, bus and EQ). It starts at the playhead when that lies inside the range. With Loop on the selection repeats seamlessly, the quickest way to hear whether a cut point clicks. Marking a new selection while playing restarts on the new range; Stop returns the playhead to the start of the range. The Volume and Pitch sliders in the tab change only this preview. In the game, the Audio Source component has its own.",
+     "text": "Double-click an audio asset in the Content Browser and it opens in the Audio Editor tab: the clip as a waveform you can zoom into, select from, play from and edit. Every edit there (trim, volume curve, bus, EQ) is non-destructive. It is stored next to the samples in the asset, the samples themselves are never rewritten, and every edit can be undone or cleared again. A source .wav or .ogg that is not yet an asset opens read-only, with Import as Audio Asset to turn it into one. Waveform — one lane per channel, drawn from the loudest and quietest sample under each pixel, so even a long clip draws quickly. Zoomed in far enough, single samples appear as points. Zoom and scroll — the wheel zooms around the pointer; Shift+wheel or a middle-drag pans; on a trackpad the swipe pans and Ctrl/Cmd+scroll zooms. Fit shows the whole clip again, Zoom to Selection fills the canvas with the selection. Overview — the strip under the lanes is the whole clip, with the visible part framed. Drag the frame to scroll, click beside it to jump there. Ruler — drag along it to scrub the playhead, even while the clip plays. It never changes the selection. Samples labels it with frame numbers instead of time; a frame is one sample on every channel. Selecting. Drag across the lanes to select a range. The readout under the canvas gives its start, end and length in time and in frames. A click without a drag moves the playhead and drops the selection, Shift-click stretches the selection to the pointer, and pressing on an edge of the selection moves just that edge. Listening. Play plays the selection if there is one, otherwise the clip as the game plays it (the trimmed part, with its curve, bus and EQ). It starts at the playhead when that lies inside the range. With Loop on the selection repeats on its own, the quickest way to hear whether a cut point clicks. Marking a new selection while playing restarts on the new range; Stop returns the playhead to the start of the range. The Volume and Pitch sliders under Preview in the side panel change only this preview. In the game, the Audio Source component has its own.",
      "title": "Audio Editor"
     },
     {
@@ -68698,7 +68706,7 @@
          [
           {
            "s": "b",
-           "t": "Trim to Selection"
+           "t": "Trim"
           }
          ],
          [
@@ -68726,7 +68734,7 @@
          [
           {
            "s": "b",
-           "t": "Extract Selection"
+           "t": "Extract"
           }
          ],
          [
@@ -68814,7 +68822,7 @@
         },
         {
          "s": "",
-         "t": " to multiply the curve into the new samples instead. The new clip then sounds exactly like the range did here and needs no curve; where the curve lifts a passage past full scale, the status line says how many samples were clipped. An extract from engine content goes into the project's own "
+         "t": " (side panel, under Cut) to multiply the curve into the new samples instead. The new clip then sounds exactly like the range did here and needs no curve; where the curve lifts a passage past full scale, the status line says how many samples were clipped. An extract from engine content goes into the project's own "
         },
         {
          "s": "c",
@@ -68860,7 +68868,7 @@
      ],
      "eyebrow": "Cut",
      "id": "audio-trim",
-     "text": "Two ways to cut a clip, both starting from a selection in the Audio Editor: Button What happens The original Trim to Selection The clip plays only the selected range from now on, in this tab and wherever the game plays it. The rest is shaded on the waveform; Clear Trim brings it back. Same asset, samples untouched; the trim is saved as an edit. Extract Selection Writes the range as a new audio asset next to this one, named <clip>_extract (then _extract_2, …, never over an existing file). Left exactly as it was. Trim is an edit like any other in the tab: Ctrl/Cmd+Z undoes it, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes it, and Save (Ctrl/Cmd+S) writes it into the asset. Until then the tab is marked unsaved, like every other asset editor. Only an imported asset can be trimmed: a raw .wav or .ogg has nowhere to keep a trim, and engine content is read-only. Extract creates a PCM asset holding exactly the selected frames, with a new asset id of its own. It takes over the clip's bus and EQ and, over its range, the volume curve. Tick Bake Curve into Extract to multiply the curve into the new samples instead. The new clip then sounds exactly like the range did here and needs no curve; where the curve lifts a passage past full scale, the status line says how many samples were clipped. An extract from engine content goes into the project's own Content/Audio. An extracted asset has no source file, so Reimport can never overwrite it with the whole recording. Reimporting the original asset replaces its samples and keeps its trim, curve, bus and EQ.",
+     "text": "Two ways to cut a clip, both starting from a selection in the Audio Editor: Button What happens The original Trim The clip plays only the selected range from now on, in this tab and wherever the game plays it. The rest is shaded on the waveform; Clear Trim brings it back. Same asset, samples untouched; the trim is saved as an edit. Extract Writes the range as a new audio asset next to this one, named <clip>_extract (then _extract_2, …, never over an existing file). Left exactly as it was. Trim is an edit like any other in the tab: Ctrl/Cmd+Z undoes it, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes it, and Save (Ctrl/Cmd+S) writes it into the asset. Until then the tab is marked unsaved, like every other asset editor. Only an imported asset can be trimmed: a raw .wav or .ogg has nowhere to keep a trim, and engine content is read-only. Extract creates a PCM asset holding exactly the selected frames, with a new asset id of its own. It takes over the clip's bus and EQ and, over its range, the volume curve. Tick Bake Curve into Extract (side panel, under Cut) to multiply the curve into the new samples instead. The new clip then sounds exactly like the range did here and needs no curve; where the curve lifts a passage past full scale, the status line says how many samples were clipped. An extract from engine content goes into the project's own Content/Audio. An extracted asset has no source file, so Reimport can never overwrite it with the whole recording. Reimporting the original asset replaces its samples and keeps its trim, curve, bus and EQ.",
      "title": "Trim & Extract"
     },
     {
@@ -68975,15 +68983,15 @@
         },
         {
          "s": "",
-         "t": " The "
+         "t": " The drop-down under "
         },
         {
          "s": "b",
-         "t": "Bus"
+         "t": "Mixer bus"
         },
         {
          "s": "",
-         "t": " drop-down in the Audio Editor toolbar picks the Audio Mixer bus the clip plays through, wherever the game plays it, so that bus's fader, mute and solo apply to it. The list is the project's own, the one "
+         "t": " in the Audio Editor's side panel picks the Audio Mixer bus the clip plays through, wherever the game plays it, so that bus's fader, mute and solo apply to it. The list is the project's own, the one "
         },
         {
          "s": "b",
@@ -69052,15 +69060,15 @@
         },
         {
          "s": "",
-         "t": " "
+         "t": " The "
         },
         {
          "s": "b",
-         "t": "Show EQ"
+         "t": "EQ"
         },
         {
          "s": "",
-         "t": " opens the clip's equaliser under the waveform: the summed response (20 Hz to 20 kHz, -18 to +18 dB) and one row per band. Up to eight bands, each a "
+         "t": " button in the toolbar opens the clip's equaliser under the waveform: the summed response (20 Hz to 20 kHz, -18 to +18 dB) and one row per band. Up to eight bands, each a "
         },
         {
          "s": "b",
@@ -69129,7 +69137,7 @@
         },
         {
          "s": "",
-         "t": " Every bus in the Audio Mixer has an "
+         "t": " Every bus strip in the Audio Mixer except Master has an "
         },
         {
          "s": "b",
@@ -69183,7 +69191,7 @@
      ],
      "eyebrow": "Route and shape",
      "id": "audio-bus-eq",
-     "text": "Bus. The Bus drop-down in the Audio Editor toolbar picks the Audio Mixer bus the clip plays through, wherever the game plays it, so that bus's fader, mute and solo apply to it. The list is the project's own, the one Window » Audio Mixer edits. Which bus a sound ends up on: the Bus field of the Audio Source that plays it, if set; otherwise the bus given to the clip in the Audio Editor; otherwise Master. A bus that has since been removed or renamed in the mixer is skipped. The drop-down shows it as missing, the sound plays on the next choice down the list, never silent, and the log says so. The name is kept, so the clip finds the bus again if it comes back. The preview in the tab plays through the same bus. EQ. Show EQ opens the clip's equaliser under the waveform: the summed response (20 Hz to 20 kHz, -18 to +18 dB) and one row per band. Up to eight bands, each a Bell, Low Shelf, High Shelf, Low Pass or High Pass, with frequency (10 Hz–22 kHz), gain (-24 to +24 dB, not for the pass filters) and Q. Add Band adds a bell at 0 dB, which changes nothing until you move it. On the graph, drag a numbered handle to move frequency and gain, use the wheel over it for Q, right-click it to remove it, and double-click an empty spot to add a bell there. EQ On switches the whole EQ in or out without losing the bands, the quickest A/B. A shaded part on the right lies above the clip's Nyquist frequency (half its sample rate), where it holds nothing to shape. Bus EQ. Every bus in the Audio Mixer has an EQ button with the same bands and graph. It shapes everything the bus plays, after the sounds on it are mixed. It is heard at once, saved with the project, and used by the exported game. The order a sound passes through: Clip samples, trim, volume curve, clip EQ Source volume, pitch, 3D position Bus fader, mute/solo, then bus EQ Master master volume, output A clip or a bus whose EQ is off or flat gets no filter at all, so it costs nothing and sounds bit-for-bit as before. Clip EQ, bus and curve are edits like the trim: undoable, saved with the asset, samples untouched.",
+     "text": "Bus. The drop-down under Mixer bus in the Audio Editor's side panel picks the Audio Mixer bus the clip plays through, wherever the game plays it, so that bus's fader, mute and solo apply to it. The list is the project's own, the one Window » Audio Mixer edits. Which bus a sound ends up on: the Bus field of the Audio Source that plays it, if set; otherwise the bus given to the clip in the Audio Editor; otherwise Master. A bus that has since been removed or renamed in the mixer is skipped. The drop-down shows it as missing, the sound plays on the next choice down the list, never silent, and the log says so. The name is kept, so the clip finds the bus again if it comes back. The preview in the tab plays through the same bus. EQ. The EQ button in the toolbar opens the clip's equaliser under the waveform: the summed response (20 Hz to 20 kHz, -18 to +18 dB) and one row per band. Up to eight bands, each a Bell, Low Shelf, High Shelf, Low Pass or High Pass, with frequency (10 Hz–22 kHz), gain (-24 to +24 dB, not for the pass filters) and Q. Add Band adds a bell at 0 dB, which changes nothing until you move it. On the graph, drag a numbered handle to move frequency and gain, use the wheel over it for Q, right-click it to remove it, and double-click an empty spot to add a bell there. EQ On switches the whole EQ in or out without losing the bands, the quickest A/B. A shaded part on the right lies above the clip's Nyquist frequency (half its sample rate), where it holds nothing to shape. Bus EQ. Every bus strip in the Audio Mixer except Master has an EQ button with the same bands and graph. It shapes everything the bus plays, after the sounds on it are mixed. It is heard at once, saved with the project, and used by the exported game. The order a sound passes through: Clip samples, trim, volume curve, clip EQ Source volume, pitch, 3D position Bus fader, mute/solo, then bus EQ Master master volume, output A clip or a bus whose EQ is off or flat gets no filter at all, so it costs nothing and sounds bit-for-bit as before. Clip EQ, bus and curve are edits like the trim: undoable, saved with the asset, samples untouched.",
      "title": "Mixer Bus & EQ"
     },
     {
