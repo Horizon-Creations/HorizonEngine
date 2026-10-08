@@ -6643,7 +6643,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.name.c_str(), T::iconWidget, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 
 		// Designer | Graph, the UMG split. Two radio buttons became a segmented
 		// pair in one well: they are one choice, and the well is what says so.

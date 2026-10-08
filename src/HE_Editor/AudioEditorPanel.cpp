@@ -780,16 +780,14 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.name.c_str(), T::iconWave, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 
-		bar.group();
-		bar.readout(nullptr, st.relPath.c_str(), T::kFgDim);
 		if (st.isRawFile)
 		{
-			bar.divider();
+			bar.group();
 			bar.readout(nullptr, "source file — not imported", T::kFgDim);
+			bar.endGroup();
 		}
-		bar.endGroup();
 
 		// Cutting. Trim is an edit of THIS asset — nothing is deleted, it is
 		// undoable and saved with the asset. Extract writes a NEW asset made of

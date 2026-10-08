@@ -431,10 +431,17 @@ float Bar::remaining() const
 
 // ─── Asset-editor header ─────────────────────────────────────────────────────
 
-void assetHeader(Bar& bar, const char* name, IconFn kindIcon, bool dirty)
+static RevealAssetFn s_revealAssetHook = nullptr;
+void setRevealAssetHook(RevealAssetFn fn) { s_revealAssetHook = fn; }
+
+void assetHeader(Bar& bar, const std::string& assetPath, bool dirty)
 {
+	if (assetPath.empty() && !dirty) return;   // an empty well would still be drawn
 	bar.group();
-	bar.readout(kindIcon, name && *name ? name : "(unnamed)");
+	if (!assetPath.empty() &&
+	    bar.item("##revealAsset", iconFolder, nullptr, false, true, "Show in Content Browser") &&
+	    s_revealAssetHook)
+		s_revealAssetHook(assetPath);
 	// The dot is the whole message: a word would be read once and then stop
 	// being noticed, a mark in the one colour the editor uses for "needs
 	// attention" keeps working from the corner of the eye.

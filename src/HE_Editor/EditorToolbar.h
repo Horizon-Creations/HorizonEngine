@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 // ── Toolbar look, shared ─────────────────────────────────────────────────────
 // The palette and the drawing primitives behind the editor's toolbars: a darker
@@ -246,9 +247,19 @@ private:
 // saved?") and ends with the same answer ("Save"). Written out per panel that is
 // six copies of one row, each free to drift in wording and spacing.
 
-// The left-hand group: kind icon, asset name, and an "unsaved" mark when there
-// are pending edits.
-void assetHeader(Bar& bar, const char* name, IconFn kindIcon, bool dirty);
+// The left-hand group: a "Show in Content Browser" button for `assetPath` (the
+// absolute path the tab was opened with; empty = no file behind the tab, no
+// button) and an "unsaved" mark when there are pending edits. The asset's name
+// and path are deliberately NOT repeated here — the tab above already carries
+// the name, and a second copy only took room from the tools.
+void assetHeader(Bar& bar, const std::string& assetPath, bool dirty);
+
+// What pressing that button does. The toolbar is ImGui-only on purpose (the UI
+// test target builds it without the editor), so it cannot call the Content
+// Browser itself; the editor registers the Content Browser's revealAsset here.
+// Unset (tests, tooling) the button is drawn and does nothing.
+using RevealAssetFn = void (*)(const std::string& absPath);
+void setRevealAssetHook(RevealAssetFn fn);
 
 // The right-hand Save. True when pressed. `enabled` is the panel's answer to
 // "is there anything to write, and did the asset even load".

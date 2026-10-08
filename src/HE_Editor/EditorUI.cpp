@@ -27,6 +27,7 @@
 #include "ExportDialogPanel.h"           // Build > Export Project modal + packing worker
 #include "GameLogicBuildPanel.h"         // Build > Build and Reload Game Logic (C++ projects)
 #include "ContentBrowserPanel.h"         // bottom dock: folder tree + asset grid
+#include "EditorToolbar.h"                // setRevealAssetHook — the asset tabs' header button
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
@@ -1049,6 +1050,9 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 void EditorUI::renderEditor(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
+	// The asset tabs' "Show in Content Browser" button lives in the shared
+	// toolbar, which cannot reach the panel itself. A pointer store per frame.
+	EditorToolbar::setRevealAssetHook(&ContentBrowserPanel::revealAsset);
 	// Runs every frame regardless of which tab/panel is active (before any early-out):
 	// guarantees the RMB fly-look capture can never stay stuck once the button is released.
 	ViewportPanel::enforceViewportLookCaptureInvariant(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
@@ -1475,6 +1479,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ctx.activeTab      = static_cast<int>(std::distance(ctx.tabs.begin(), it));
 		s_tabSelectRequest = ctx.activeTab;
 	};
+	// "Show in Content Browser" from an asset editor's header: the browser is
+	// docked into the scene tab and is not drawn on any other, so the scene tab
+	// has to come forward before the panel can navigate to the asset.
+	if (ContentBrowserPanel::takeRevealTabSwitch()) openViewportTab();
 	// View-menu panel toggle. Ticking one on has to make it VISIBLE, and where
 	// that is depends on how the user keeps it: a FLOATING panel draws over
 	// whichever tab is open, so it is only pulled to the front (it may already

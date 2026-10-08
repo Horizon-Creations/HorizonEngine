@@ -256,7 +256,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.name.c_str(), T::iconSparkle, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 
 		bar.group();
 		if (bar.item("##ptplay", st.previewPlaying ? T::iconPause : T::iconPlay, nullptr,

@@ -372,7 +372,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.name.c_str(), T::iconBone, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 
 		// The two counts that say whether the machine is worth looking at, as a
 		// readout rather than a sentence — nothing here is clickable and it

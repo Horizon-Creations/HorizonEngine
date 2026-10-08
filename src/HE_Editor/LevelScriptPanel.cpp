@@ -2979,7 +2979,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.name.c_str(), T::iconCode, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 		// Everything on this band goes through the Bar's OWN cells. A raw ImGui
 		// combo or radio drawn here lays itself out in window coordinates while
 		// the Bar places its cells into a draw list — the two do not know about

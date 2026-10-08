@@ -397,6 +397,28 @@ std::string browsedFolderPath() { return s_browsedFolderPath; }
 static bool s_createMenuRequested = false;
 void requestCreateMenu() { s_createMenuRequested = true; }
 
+// "Show in Content Browser" (the button in every asset editor's header). The path
+// waits here until the panel draws — it only does on the scene tab, which
+// takeRevealTabSwitch() lets EditorUI bring forward first.
+static std::string              s_revealRequest;
+static bool                     s_revealTabSwitch = false;
+// Folders to force open in the tree on the next draw so the revealed asset's
+// location is visible there too, plus the root (0/1/2) they hang under (-1: none).
+static std::vector<std::string> s_revealExpand;
+static int                      s_revealExpandRoot = -1;
+void revealAsset(const std::string& absPath)
+{
+	if (absPath.empty()) return;
+	s_revealRequest   = absPath;
+	s_revealTabSwitch = true;
+}
+bool takeRevealTabSwitch()
+{
+	const bool was = s_revealTabSwitch;
+	s_revealTabSwitch = false;
+	return was;
+}
+
 // Raised by the header's Import cell, consumed by EditorUI: the file dialog
 // and everything after it (target folder, importer, refresh) live with the
 // File/Assets ▸ Import Asset handler, and a second copy here would be the
@@ -666,6 +688,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// ID by full path: sibling subtrees may repeat folder names, and the
 			// drop target below must land on THIS node, not a same-named twin.
 			ImGui::PushID(folder->fullPath.c_str());
+			if (!s_revealExpand.empty() &&
+			    std::find(s_revealExpand.begin(), s_revealExpand.end(), folder->fullPath) != s_revealExpand.end())
+				ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 			bool open = ImGui::TreeNodeEx(folder->name.c_str(), flags);
 			// Same rollup the grid tiles use: one hash lookup against the
 			// precomputed dirty-folder set, so the tree costs nothing extra.
@@ -748,6 +773,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		{
 			ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow
 										 | ImGuiTreeNodeFlags_SpanAvailWidth;
+			if (s_revealExpandRoot == 1) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 			bool rootOpen = ImGui::TreeNodeEx("Engine", rootFlags);
 			// The one place the three roots are visible next to each other, and
 			// the question "why can I not edit anything in here" is answered.
@@ -774,6 +800,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		{
 			ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow
 										 | ImGuiTreeNodeFlags_SpanAvailWidth;
+			if (s_revealExpandRoot == 2) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 			bool rootOpen = ImGui::TreeNodeEx("Source", rootFlags);
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
@@ -788,6 +815,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::TreePop();
 			}
 		}
+
+		// The reveal's expansion has been applied by now; the user's own
+		// collapsing must work again from the next frame on.
+		s_revealExpand.clear();
+		s_revealExpandRoot = -1;
 
 		ImGui::EndChild();
 		ImGui::SameLine();
@@ -858,6 +890,91 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			}
 			s_gridFolder         = fresh;
 			s_selectedTreeFolder = fresh;
+		}
+
+		// ── Show in Content Browser ───────────────────────────────────────
+		// Asked for by the header button of an asset editor. By now the panel is
+		// being drawn (the request switched to the scene tab first), so: find the
+		// asset, go to its folder, drop a search or type filter that would hide
+		// it, select it, and let the tile scroll itself into view and flash.
+		static std::string s_searchText;
+		static int         s_typeFilter = 0;
+		static std::string s_revealScrollPath;   // the tile that scrolls itself into view
+		static std::string s_revealFlashPath;    // the tile that draws the attention ring
+		static double      s_revealFlashStart = 0.0;
+		if (!s_revealRequest.empty())
+		{
+			const std::string target = std::move(s_revealRequest);
+			s_revealRequest.clear();
+			const auto norm = [](const std::string& p)
+			{ return fs::path(p).lexically_normal().generic_string(); };
+			const std::string targetNorm = norm(target);
+
+			int                             foundKind   = -1;
+			const HE::Folder*               foundFolder = nullptr;
+			const HE::File*                 foundFile   = nullptr;
+			std::vector<const HE::Folder*>  chain;
+			std::function<bool(const HE::Folder*)> findFile = [&](const HE::Folder* cur) -> bool
+			{
+				for (const HE::File* f : cur->files)
+					if (f->fullPath == target || norm(f->fullPath) == targetNorm)
+					{ foundFolder = cur; foundFile = f; return true; }
+				for (const HE::Folder* sub : cur->subfolders)
+				{
+					chain.push_back(sub);
+					if (findFile(sub)) return true;
+					chain.pop_back();
+				}
+				return false;
+			};
+			for (int kind = 0; kind < 3 && !foundFile; ++kind)
+			{
+				if (kind == 2 && !cbShowSource) continue;
+				chain.clear();
+				if (findFile(&cbRootFolder(kind))) foundKind = kind;
+			}
+
+			if (foundFile)
+			{
+				std::string selectPath = foundFile->fullPath;
+				// In the Source root a class's .cpp is folded into its header's tile.
+				if (foundKind == 2)
+				{
+					const auto lower = [](std::string e)
+					{ for (char& c : e) c = static_cast<char>(::tolower(static_cast<unsigned char>(c))); return e; };
+					const std::string ext = lower(foundFile->extension);
+					if (ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".c")
+					{
+						const std::string stem = fs::path(foundFile->name).stem().string();
+						for (const HE::File* g : foundFolder->files)
+						{
+							const std::string gx = lower(g->extension);
+							if ((gx == ".h" || gx == ".hpp" || gx == ".hh" || gx == ".hxx") &&
+							    fs::path(g->name).stem().string() == stem)
+							{ selectPath = g->fullPath; break; }
+						}
+					}
+				}
+
+				const HE::Folder* root = &cbRootFolder(foundKind);
+				s_selectedRootKind   = foundKind;
+				s_selectedTreeFolder = (foundFolder == root) ? nullptr : foundFolder;
+				s_gridFolder         = s_selectedTreeFolder;
+				s_searchText.clear();
+				s_typeFilter = 0;
+				clearSelection();
+				s_selectedItem     = selectPath;
+				s_selectedIsFolder = false;
+				s_selection.assign(1, selectPath);
+				s_revealScrollPath = selectPath;
+				s_revealFlashPath  = selectPath;
+				s_revealFlashStart = ImGui::GetTime();
+				s_revealExpandRoot = foundKind;
+				s_revealExpand.clear();
+				for (const HE::Folder* f : chain) s_revealExpand.push_back(f->fullPath);
+			}
+			// If the panel is a tab behind another dock sibling, bring it forward.
+			ImGui::SetWindowFocus("Content Browser");
 		}
 
 		// Sync from tree double-click
@@ -988,9 +1105,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// Typing searches the whole subtree under the folder on screen, not just
 		// its top level. A search that only looks in the folder you already opened
 		// is worth nothing: you would have to know the answer to ask the question.
-		static std::string s_searchText;
-		static int         s_typeFilter = 0;
-
 		// The types worth narrowing to, in the order the Create menu offers them —
 		// so the two lists read the same way round. Unknown is the "all" entry.
 		struct TypeFilter { const char* label; HE::AssetType type; };
@@ -1620,6 +1734,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			ImGui::BeginGroup();
 			ImGui::PushID(file->fullPath.c_str());
+			if (!s_revealScrollPath.empty() && file->fullPath == s_revealScrollPath)
+			{
+				ImGui::SetScrollHereY(0.5f);
+				s_revealScrollPath.clear();
+			}
 
 			if (isSel)
 			{
@@ -1668,6 +1787,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					ImGui::GetColorU32(ImVec4(90.0f / 255.0f, 215.0f / 255.0f, 90.0f / 255.0f,
 					                          0.9f * fresh)),
 					ImGui::GetStyle().FrameRounding + 2.0f, 0, 2.0f);
+			}
+
+			// "Show in Content Browser": a ring that fades over 1.6 s, so the eye
+			// finds the tile the click just selected among its neighbours.
+			if (!s_revealFlashPath.empty() && file->fullPath == s_revealFlashPath)
+			{
+				const double age = ImGui::GetTime() - s_revealFlashStart;
+				if (age < 1.6)
+				{
+					const float a = 1.0f - static_cast<float>(age / 1.6);
+					const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+					const ImVec4 c  = HE::Ed::Theme::AccentHi;
+					ImGui::GetWindowDrawList()->AddRect(
+						ImVec2(mn.x - 3.0f, mn.y - 3.0f), ImVec2(mx.x + 3.0f, mx.y + 3.0f),
+						ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, a)),
+						ImGui::GetStyle().FrameRounding + 3.0f, 0, 2.5f);
+				}
+				else
+					s_revealFlashPath.clear();
 			}
 
 			// A material FUNCTION renders as the sphere its own editor tab shows —

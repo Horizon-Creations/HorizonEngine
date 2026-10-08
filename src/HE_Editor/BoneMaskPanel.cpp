@@ -302,7 +302,7 @@ void BoneMaskPanel::render(AppContext& ctx, const std::string& assetPath,
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.mask.name.c_str(), T::iconBranch, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 		bar.group();
 		bar.readout(nullptr, "Bone Mask", T::kFgDim);
 		bar.endGroup();

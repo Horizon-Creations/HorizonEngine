@@ -2139,7 +2139,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 		const char* kind = st.isInstance ? "material instance"
 		                 : st.isFunction ? "material function"
 		                                 : "material graph";
-		T::assetHeader(bar, st.name.c_str(), T::iconLayers, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 
 		bar.group();
 		bar.readout(nullptr, kind, T::kFgDim);

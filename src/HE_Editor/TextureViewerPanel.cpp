@@ -3,6 +3,7 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
 #include "EditorHelp.h"           // "Texture Viewer/<label>" scope for the tooltips
+#include "EditorToolbar.h"        // the asset strip: Show in Content Browser
 #include "EditorRewards.h"        // the Import button's footer moment
 #include "EditorWidgets.h"        // button, checkbox, WrapText
 #include "ImporterCommon.h"       // Importer::importSource / resolveOutput / sourceFamilyPattern
@@ -219,7 +220,6 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 	char buf[64];
 	{
 		EditorWidgets::WrapText wrap;
-		ImGui::TextUnformatted(st.name.c_str());
 		ImGui::TextDisabled(st.isRawFile ? "Image file, not imported yet" : "Texture asset");
 	}
 
@@ -565,13 +565,21 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
 	ImGui::SetNextWindowSize(size, ImGuiCond_Always);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0.0f, 0.0f));
 	ImGui::Begin("##TextureViewer", nullptr,
 		ImGuiWindowFlags_NoTitleBar         | ImGuiWindowFlags_NoResize |
 		ImGuiWindowFlags_NoMove             | ImGuiWindowFlags_NoCollapse |
 		ImGuiWindowFlags_NoScrollbar        | ImGuiWindowFlags_NoScrollWithMouse |
 		ImGuiWindowFlags_NoSavedSettings    | ImGuiWindowFlags_NoBringToFrontOnFocus |
 		ImGuiWindowFlags_NoDocking);
-	ImGui::PopStyleVar();
+	ImGui::PopStyleVar(2);
+
+	// The strip every asset tab opens with: the way back to the asset in the
+	// Content Browser. (The tab above already says what is open.)
+	{
+		EditorToolbar::Bar bar;
+		EditorToolbar::assetHeader(bar, assetPath, false);
+	}
 
 	ImGui::BeginChild("##texInfo", ImVec2(260.0f, 0.0f), true);
 	drawInfo(ctx, assetPath, st);
