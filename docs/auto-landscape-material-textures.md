@@ -136,6 +136,8 @@ Packung sind es 3 (Varianten B/D).
 - Wer packt: Die Platzhalter (§6) liegen schon gepackt vor. Für die echten
   Texturen fehlt noch ein Pack-Schritt, z. B. ein Modus von `landscape_tex_gen`,
   der die Einzel-PNGs liest. Das ist offen und gehört zu einem späteren Schritt.
+  **Nachtrag Thema 177:** Der Modus heißt `landscape_tex_gen --pack` (§4.4), davor sitzt
+  `scripts/landscape-textures/stage_polyhaven.py` für EXR und 4K (§14).
 
 ## 4. Die Liste
 
@@ -637,7 +639,8 @@ eingecheckt, damit Schritt 4/5 ohne den Menschen weiterlaufen.
 - **BC7/BC3/ASTC für Arrays:** Der Packer lässt Arrays unverändert. Für 2K ist
   Kompression aber nötig (§5). Das braucht `cookTexture` pro Slice und die
   Block-Pfade in den vier Array-Uploads.
-- **Pack-Modus für die echten Einzel-PNGs** → `T_Landscape_*_Mask` (§3): weiter offen.
+- ~~**Pack-Modus für die echten Einzel-PNGs** → `T_Landscape_*_Mask` (§3)~~: erledigt,
+  `landscape_tex_gen --pack` (§4.4), mit den echten Texturen benutzt in §14.
 - **Metal** ist per CI gebaut und getestet (§8.3), aber auf keiner Hardware gerendert.
 - D3D12 bindet einen **leeren 2D**-Slot weiterhin als Null-View, also Schwarz, während
   die anderen Backends Weiß binden. Das gab es schon vorher und betrifft keinen
@@ -1413,3 +1416,121 @@ in §11.2 auf Metal gerendert wurde (Modus `1` mit Bombing, gegen GL 0,001 / 0 %
 - Bestehende Noise-Materialien behalten bewusst `heHash21`. Wer in Weltkoordinaten oder
   mit großem Scale rauscht, sollte beim Fbm `p[0] = 1` setzen. Ein Editor-Regler dafür
   wäre ein eigener kleiner Schritt (paramCount 1 ändert jeden Fbm-Knoten in UI und MCP).
+
+## 14. Die echten Texturen: importiert und zu Arrays gebaut (Thema 177, Schritt 1)
+
+Stand: Zweig `claude/auto-landscape-material-texturen-importieren-arrays-bauen-ve`,
+MacBook Air (Apple M5), Release-Build von `landscape_tex_gen`. Es ist **kein Engine-Code**
+geändert. Neu sind der Pack-Modus (`1f99f8fe` von `release/0.7.0`, hier per cherry-pick),
+zwei Skripte unter `scripts/landscape-textures/` und eine Zeile in `.gitignore`.
+
+### 14.1 Was der Mensch geliefert hat
+
+Ordner `EditorDeps/Images/Landscape/` im Haupt-Checkout, **nicht** in git (jetzt
+ignoriert). Alle 16 Dateien sind **byteidentisch zu den Poly-Haven-Originalen** (Größe und
+MD5 gegen `api.polyhaven.com/files/<id>` geprüft). Poly Haven ist CC0.
+
+| Schicht | Poly-Haven-Asset | Autor | Dateien (4K) |
+|---|---|---|---|
+| Grass | `grass_ground` | Charlotte Baglioni | `Grass_Color.jpg` (= `grass_ground_diff_4k.jpg`, nur umbenannt), `_nor_gl` EXR, `_rough` EXR, `_disp` PNG 16 Bit |
+| Dirt | `dirt` | Charlotte Baglioni | `dirt_diff` JPG, `_nor_gl` EXR, `_rough` EXR, `_disp` PNG 16 Bit |
+| Rock | `rocks_ground_08` | Rob Tuytel | `_diff` JPG, `_nor_gl` EXR, `_rough` JPG, `_disp` PNG 8 Bit |
+| Snow | `snow_02` | Rob Tuytel | `_diff` JPG, `_nor_gl` EXR, `_rough` JPG, `_disp` PNG 8 Bit, `_translucent` (ungenutzt) |
+| WetGround | **fehlt** | | |
+
+- **WetGround fehlt.** Entscheidung der Queen: Platzhalter, bis der Mensch das Set nachliefert.
+  Die Schicht zeigt dann das hochskalierte Schachbrett mit L-Marke. Im Auto-Material
+  taucht es am nassen Rand der Pfützen auf. Das ist ein Platzhalter, kein Fehler.
+- **AO fehlt bei allen vier.** Poly Haven bietet AO als eigene Datei an (`_ao_`, oder `_arm_`
+  mit AO in R und Rauheit in G). Das Skript nimmt sie automatisch mit, sobald sie im
+  Schichtordner liegen. Ohne AO ist Masken-R weiß, also kein AO-Anteil.
+- Die Dateien sind 4K, die Doku verlangt 2K (§4.1). Die Normal-Maps sind **EXR mit
+  DWAA-Kompression**. stb_image (der Importer, `--pack`) liest kein EXR, `sips` auch nicht.
+
+### 14.2 Zwischenschritt `stage_polyhaven.py`
+
+`scripts/landscape-textures/stage_polyhaven.py <Quellordner> <Staging> --size 2048` macht
+aus den Poly-Haven-Ordnern den flachen Satz `<Schicht>_<Map>.png`, den `--pack` liest:
+
+- erkennt die Maps am Namen (`diff`/`color`, `nor_gl`, `rough`, `ao`/`arm`, `disp`), lässt
+  `nor_dx` und alles Unbekannte liegen und meldet es,
+- liest EXR über das Python-Modul OpenEXR (`pip install numpy Pillow OpenEXR` in einer
+  Wegwerf-venv, Aufruf mit `python3 -I`),
+- 4K → 2K durch exaktes 2×2-Mitteln in float,
+- **Normal-Maps nach dem Verkleinern neu normiert** (Mittel der Längen vorher 0,87 bis
+  1,02, danach 1), kein Gamma: 0..1-Kodierung bleibt linear,
+- **Höhe über die Kachel auf 0..1 gestreckt** (0,5 %/99,5 %-Perzentil, §4.2). Rohbereiche
+  waren zum Beispiel 0,17..0,58 (Grass) und 0,32..0,92 (Rock). Ohne das hätte die
+  Höhen-Überblendung (§10.2) kaum Spielraum,
+- spiegelt **nichts**: der Importer dreht beim Laden, die Dateien bleiben wie geladen,
+- schreibt `stage_manifest.txt` (welche Quelldatei zu welcher Map wurde).
+
+### 14.3 Packen und Ergebnis
+
+```
+python3 -I scripts/landscape-textures/stage_polyhaven.py EditorDeps/Images/Landscape out/landscape-real/staging --size 2048
+landscape_tex_gen out/landscape-real/Engine/Textures/Landscape --pack out/landscape-real/staging --size 2048
+```
+
+Ausgabe `out/landscape-real/Engine/Textures/Landscape/` (560 MiB, **nicht in git**): 15
+Einzeltexturen je 16 MiB (RGBA8, nur Mip 0) und die drei Arrays je 107 MiB (5 Slices in der
+Reihenfolge Grass, Dirt, Rock, Snow, WetGround, **12 Mips**, die Kette gebacken). Feste
+UUIDs `0x400..0x411`, also bleiben alle Verweise heil. `--pack` meldete 15/15 und 3/3
+geschrieben, jede Datei liest es im selben Lauf zurück.
+
+Unabhängige Gegenprobe mit `scripts/landscape-textures/hasset_tex.py` (liest .hasset in
+Python, kennt nur das Dateiformat):
+
+| Prüfung | Ergebnis |
+|---|---|
+| Arrays | 2048², 5 Slices, 12 Mips, Albedo sRGB, Normal und Maske linear, UUIDs 0x40F/0x410/0x411 |
+| Albedo-Array Slice 0 (Grass), 3 (Snow), Normal-Array Slice 2 (Rock) gegen die gestagten PNGs | max. Abweichung **0** in allen Kanälen |
+| Masken-Array Slice 1 (Dirt): G gegen `Dirt_Roughness`, B gegen `Dirt_Height` | max. Abweichung **0** |
+| Negativkontrolle: Masken-R gegen `Dirt_Roughness` | max. 29, Mittel 14,2 (R ist weiß, Rauheit liegt bei 0,94: der Vergleich unterscheidet also) |
+| Sichtprüfung aller 15 Slices (Mip 3) | Normal-Maps sind blau-violett (+Z), Slice 4 ist das Platzhalter-Schachbrett, die übrigen vier zeigen die echten Oberflächen |
+
+Mit `--arrays-only` lassen sich die Arrays aus den 15 Einzeldateien ohne neues Packen
+neu bauen (wenn zum Beispiel eine Schicht ersetzt wurde).
+
+### 14.4 Befunde an den Quellen (nichts davon ist korrigiert)
+
+- **Grass wirkt trocken, nicht grün.** `grass_ground` ist laut Tags trockenes Gras mit
+  Wurzeln. Grass und Dirt liegen farblich nah beieinander (Mittel sRGB 110/96/62 gegen
+  99/82/62). Ob die Auto-Verteilung dadurch weniger Kontrast zwischen Wiese und Erdflecken
+  zeigt, ist erst am Bild zu sagen (Schritt Verifikation). Wer es grüner will, braucht ein
+  anderes Set.
+- **Schnee ist nicht 0,8.** `snow_02` hat im Mittel sRGB 165 (§4.3 wollte etwa 0,8, also
+  sRGB 204). Er ist grau gegen reinen Schnee.
+- **Rauheit von Dirt** liegt nur zwischen 0,88 und 0,99, fast konstant.
+- Die Höhe von Rock und Snow liegt als **8-Bit-PNG** vor (Grass und Dirt als 16 Bit). Das
+  zeigt sich als Stufen in der Höhen-Überblendung. Wer es schöner will, nimmt die
+  16-Bit-Variante oder die EXR-Displacement-Datei.
+- Die Normal-Map von Snow hat einen mittleren Hang (Mittel R/G 0,56 statt 0,5): eine leichte
+  Vorzugsneigung, die auf der Fläche als einheitlicher Lichtton sichtbar werden kann.
+- Der 2K-Satz ist **unkomprimiert**: Die drei Arrays belegen zusammen etwa 320 MiB im
+  Speicher und auf der Grafikkarte (§5, BC7 für Arrays fehlt weiter, §8.5).
+
+### 14.5 Benutzen
+
+Beide Wege folgen §4.4 und §6. Ein Editor- oder Render-Lauf mit den echten Texturen war in
+diesem Schritt **nicht** dabei, sie sind hier also nicht ausprobiert.
+
+- Die Ausgabe ist ein fertiger **Projekt-Override-Ordner**: den Inhalt von
+  `out/landscape-real/Engine/` nach `<Projekt>/Content/Engine/` kopieren, dann schlägt er
+  die eingecheckten Platzhalter (§4.4).
+- Für einen Editor-Lauf aus dem Build-Baum: die 18 Dateien über
+  `out/deploy/Editor/EngineContent/Textures/Landscape/` kopieren. **Nach jedem Neulinken
+  von `HorizonEditor` neu kopieren**, denn dessen POST_BUILD kopiert ganz `EditorDeps/`
+  zurück und stellt damit die Platzhalter wieder her.
+- Wohin die echten Texturen **dauerhaft** gehören (SFTP-Veröffentlichung, Projekt-Override
+  oder LFS, §4.4) ist weiter offen und Sache des Menschen. Bis dahin nichts davon
+  committen. `EditorDeps/Images/Landscape/` ist deshalb in `.gitignore`.
+
+### 14.6 Was offen bleibt
+
+- **WetGround** nachliefern, dann `stage_polyhaven.py` und `--pack` neu laufen lassen.
+- **AO** der vier Schichten nachladen (optional).
+- **Bildprüfung** mit den echten Texturen auf den Backends, die Vorgaben aus §10.2
+  (Steigungen, Pfützenmenge, Kachelgrößen) nachstellen, Triplanar-Frage für den Fels
+  (§10.5). Gerendert ist in diesem Schritt nichts, geprüft ist nur der Inhalt der Dateien.
+- Dauerhafter Speicherort und Kompression (BC7 für Arrays).
