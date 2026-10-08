@@ -2214,10 +2214,15 @@ Gemessen (macOS Release, Apple M5, `out/build/macos-release`, `-DHE_BUILD_TESTS=
 - Volles `ctest`, seriell (die Tests teilen sich Temp-Ordner): 236 Einträge, **234 bestanden, 2 übersprungen**
   (`runtime_size_app_basic` und `_advanced`, es ist keine App gebaut), 0 Fehler. `test_material_graph` (der
   `M_AutoLandscape`-Wächter liest `Materials/`, nicht die Texturen) und `test_contentmanager` bestehen.
-- **Grenze des Nachweises:** dieser Baum hat die 30 Dateien lokal (20.5). Dass ein Checkout **ohne** sie baut und
-  testet, zeigt erst der CI-Lauf, denn die Dateien sind nicht in git. Der Server selbst wurde nicht angesprochen
-  (keine Zugangsdaten für die Sitzung): Download, Manifest und Fortschrittsanzeige sind hier nicht gelaufen, nur
-  die Seite der `ContentManager`.
+- **Ohne die Dateien:** dieser Baum hat die 30 Dateien lokal (20.5), ein frischer Klon nicht (in git bleibt unter
+  `EditorDeps/EngineContent/Textures/` nichts, der Ordner entsteht gar nicht). Deshalb wurde `Textures/` für einen
+  Lauf aus dem Baum weggeschoben (`mv`, danach zurück, SHA-256 aller 30 wieder gleich) und alles ausgeführt, was
+  `HE_EDITOR_DEPS_DIR/EngineContent` liest: `test_material_graph`, `test_contentmanager`, `test_ui_widgets`,
+  `test_project_exporter`, `test_mcp_tools_material`, `test_docs_library`, `test_ui_shot`, `test_async_streaming`.
+  **8 von 8 bestehen** ohne den Ordner. Das ist die Bedingung eines CI-Checkouts; der CI-Lauf selbst ist damit
+  nicht ersetzt (Linux und Windows haben weitere Eigenheiten).
+- **Grenze:** der Server selbst wurde nicht angesprochen (keine Zugangsdaten für die Sitzung). Download, Manifest
+  und Fortschrittsanzeige sind hier nicht gelaufen, nur die Seite des `ContentManager`.
 
 ### 20.4 Was damit **nicht** gelöst ist
 
