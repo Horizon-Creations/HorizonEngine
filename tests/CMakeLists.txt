@@ -57,6 +57,10 @@ add_executable(he_tests
     test_undo.cpp
     test_editor_selection.cpp
     test_editor_marquee.cpp
+    # Which tab an asset opens in: one tab per asset however the path is spelled
+    # (Content Browser double-click, Open Function, restore), and the tabs
+    # following a rename.
+    test_editor_tabs.cpp
     # The D3D12 ImGui SRV heap's free-list: a freed slot waits for its fence
     # before it is handed out again (Dock-Splitter drag, Thema 113).
     test_deferred_slot_free_list.cpp
@@ -346,6 +350,10 @@ add_executable(he_tests
     # Matrices in, yes/no out — the part of "drag a frame around these" that a
     # test can ask without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorMarquee.cpp
+    # The tab lookup behind every "open this asset": the tab vector and a
+    # ContentManager in, which tab out — no ImGui. AppContext::EditorTab lives
+    # under HE_IMGUI_ENABLED, set per file below.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
     # The viewport's right-click verbs (hide / isolate / show all / group /
     # ungroup): a registry and a selection in, touched entities out — no ImGui.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportActions.cpp
@@ -790,6 +798,8 @@ set_source_files_properties(
     test_texture_viewer.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     test_streaming_view.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
+    test_editor_tabs.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE

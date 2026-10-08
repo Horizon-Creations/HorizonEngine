@@ -5,6 +5,7 @@
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
+#include "EditorTabs.h"            // retarget / dedupe the open asset tabs
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
@@ -721,12 +722,7 @@ void EditorApplication::OnInit()
 			// An open tab follows its asset rather than being closed: the file
 			// still exists, it just lives somewhere else, and closing it would
 			// throw away unsaved work for a move the user did not make.
-			for (AppContext::EditorTab& t : m_tabs)
-			{
-				if (t.assetPath != full) continue;
-				t.assetPath = newFull;
-				t.label     = std::filesystem::path(newFull).stem().string();
-			}
+			EditorTabs::retarget(m_tabs, full, newFull, folder);
 
 			// Every peer retargets, not just the one who asked. The rules follow
 			// from (oldPath, newPath) alone, so identical inputs give identical
@@ -8870,16 +8866,10 @@ void EditorApplication::setupMcpTools()
 	assets.onAssetAppeared = [this](const std::string&) {
 		m_contentRefreshPending = true;
 	};
-	assets.onAssetMoved = [this](const std::string& oldAbs, const std::string& newAbs, bool) {
+	assets.onAssetMoved = [this](const std::string& oldAbs, const std::string& newAbs, bool folder) {
 		AssetThumbnailCache::invalidate(oldAbs);
 		AssetThumbnailCache::invalidate(newAbs);
-		AppContext ctx = makeContext();
-		for (auto& t : ctx.tabs)
-			if (t.assetPath == oldAbs)
-			{
-				t.assetPath = newAbs;
-				t.label     = std::filesystem::path(newAbs).stem().string();
-			}
+		EditorTabs::retarget(m_tabs, oldAbs, newAbs, folder);
 		m_contentRefreshPending = true;
 	};
 	assets.projectRoot = [this] {
@@ -11018,16 +11008,28 @@ void EditorApplication::restoreOpenTabs()
 	m_tabs.erase(std::remove_if(m_tabs.begin(), m_tabs.end(),
 		[](const AppContext::EditorTab& t){ return !t.assetPath.empty(); }), m_tabs.end());
 
+	// `active` is an index into the tab list AS SAVED (the Viewport tab is 0), and
+	// entries dropped below shift everything after them — so remember where each
+	// saved position ended up.
+	std::vector<int> placed{ 0 };
 	for (const auto& t : state.value("tabs", nlohmann::json::array()))
 	{
 		const std::string path = t.value("path", std::string());
 		// Restore virtual tabs (":…") and assets that still exist on disk.
-		if (path.empty()) continue;
-		if (path[0] != ':' && !std::filesystem::exists(path)) continue;
+		if (path.empty() || (path[0] != ':' && !std::filesystem::exists(path)))
+		{
+			placed.push_back(-1);
+			continue;
+		}
+		placed.push_back(static_cast<int>(m_tabs.size()));
 		m_tabs.push_back({ t.value("label", std::string()), path, true, true });
 	}
+	// A list saved while the open path could still make two tabs for one asset
+	// would bring both back every session; keep the first of each.
+	const std::vector<int> merged = EditorTabs::dedupe(m_tabs, &contentManager());
 	const int active = state.value("active", 0);
-	m_activeTab = (active >= 0 && active < (int)m_tabs.size()) ? active : 0;
+	const int at     = (active >= 0 && active < static_cast<int>(placed.size())) ? placed[active] : -1;
+	m_activeTab = (at >= 0 && at < static_cast<int>(merged.size())) ? merged[at] : 0;
 }
 
 // ─── Scene file management ──────────────────────────────────────────────────────
