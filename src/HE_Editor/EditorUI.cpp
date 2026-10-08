@@ -1145,11 +1145,13 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 static bool s_saveFromToolbar = false;
 
 // Does the active tab's undo live on the world's stack? The scene tab, and two
-// asset tabs that snapshot into ctx.undoSys after each edit: the Level Script
-// (it saves with the scene) and a Particle Graph. Every other asset editor is an
-// asset with its own dirty flag and, where it has undo at all, its own stack
-// bound to the same chord inside the panel (material graph, UI editor,
-// sequencer, cinematic, audio editor, the mesh slot editors). The footer reads
+// asset tabs whose every edit snapshots into ctx.undoSys: the Level Script (it
+// saves with the scene) and a Particle Graph. Every other asset editor has its
+// own dirty flag and, where it has undo at all, its own stack bound to the same
+// chord inside the panel (material graph, UI editor, sequencer, cinematic,
+// audio editor, the mesh slot editors). The sequencer also writes one world
+// entry ("Bind Clip"); that one is undone from the footer button or the Edit
+// menu, the chord stays with the sequencer's clip history. The footer reads
 // its keys BEFORE the tab renders, so it cannot ask "did the panel take
 // Ctrl+Z" — it asks whose tab this is, and an allow-list on purpose: an editor
 // that snapshots into the world stack and is forgotten here gets a Ctrl+Z that
