@@ -1994,6 +1994,31 @@ nicht ins Material bringen würde. Der Stand, mit Belegstellen:
 Keine der Tests in `tests/` nennt `T_Landscape` oder `Textures/Landscape`; die Pfade hängen an den
 Aufnahmeskripten (`scripts/auto-landscape-repro/*`), die den Deploy benutzen.
 
+**Nachtrag: „direkt nach `EditorDeps/EngineContent/Textures/Landscape` und nach git“.** Das war die
+spätere Anweisung der Queen (statt der Ablage auf dem Server). Technisch ist das der einfachste Weg,
+denn der Deploy kopiert `EditorDeps/` ohnehin ganz (§18.2), der ausgelieferte Default gewinnt, und der
+Exporter packt ihn. Er ließ sich aber **nicht ausführen**, gemessen am Satz aus `out/landscape-real`
+(18 Dateien, 561 MiB roh):
+
+- **GitHub lehnt einen Push mit Dateien über 100 MiB ab.** Die drei Arrays haben je 111 848 271–275
+  Byte (106,7 MiB; fünf Slices RGBA8 mit gebackenen Mips). `.hasset` hat keine Kompression
+  (`HAsset.h:48`, `flags` reserviert und ungelesen), die Dateien lassen sich also nicht kleiner
+  schreiben. Eine Datei mit vier Slices wäre 89,5 MB (85,3 MiB) groß; dafür müsste Slice 4
+  (WetGround, seit §16 ungelesen) aus dem Pack-Werkzeug fallen. Das verschiebt die Array-UUIDs
+  (`landscape_tex_gen/main.cpp:222`, `hi` = 0x400 + `layerCount`·3 + Map) und damit
+  `M_AutoLandscape.hasset`, die Konstanten in `AutoLandscapeMaterial.h` und die gepinnten Tests.
+- **Verlauf:** Der gesamte Verlauf des Repos ist heute 285 MiB groß (`git count-objects -vH`,
+  size-pack). Der Satz komprimiert auf rund 255 MiB (`gzip -3`, Summe über die 18 Dateien), würde den
+  Klon also fast verdoppeln, **und bei jedem erneuten Packen noch einmal** (AO übernehmen und die
+  anderen Geschmacksentscheidungen aus §15.5 sind offen, §4.4: Binär-Ballast wurde schon einmal aus
+  der Historie gepurgt). Ein Merge nach `main` macht das dauerhaft.
+- Git LFS wäre der übliche Ausweg, ist aber ein Eingriff in jeden Checkout und in jeden CI-Job (jeder
+  Lauf zieht 560 MB je Job; das freie LFS-Kontingent von GitHub ist klein).
+
+Deshalb wurde nichts eingecheckt. Offen für den Menschen: (1) Slice 4 entfernen und einchecken, (2)
+LFS, oder (3) bei Platzhaltern in git bleiben und die Auslieferung über den Server bauen (Cache
+schlägt Platzhalter, Exporter packt den Cache, §18.1/§18.2).
+
 ### 18.5 Was in diesem Schritt nicht ging
 
 Der Upload wurde **nicht ausgeführt**: Die Zugangsdaten stehen in
