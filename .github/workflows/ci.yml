@@ -34,32 +34,47 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            name: macOS
+          - name: macOS
+            runner: '"macos-latest"'
             cache: ccache
-          - os: windows-latest
-            name: Windows
+          # Windows builds on NN-WS03 when the Hive reports it free: the Hive
+          # (ci.py, windows_route) sets the repository variable WINDOWS_RUNNER
+          # to nn-ws03 while that device's self-hosted runner is online and no
+          # bees are working there, and back otherwise. There it builds
+          # incrementally in a build tree that stays — minutes instead of the
+          # hosted runner's ~50. Only for topic branches (pull requests and
+          # dispatches): main and the release branches make the download
+          # packages and stay on GitHub's clean machines. Never for a pull
+          # request from a fork: this repository is public, and a fork's code
+          # must not run on a PC at home.
+          - name: Windows
+            runner: >-
+              ${{ (vars.WINDOWS_RUNNER == 'nn-ws03'
+              && github.event_name != 'push'
+              && github.ref_name != 'main'
+              && !startsWith(github.ref_name, 'release/')
+              && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository))
+              && '["self-hosted","nn-ws03"]' || '"windows-latest"' }}
             cache: sccache
-          - os: ubuntu-latest
-            name: Linux
+          - name: Linux
+            runner: '"ubuntu-latest"'
             cache: ccache
 
     name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-
-    # Every compiler call goes through the cache (step below). As environment,
-    # not on the configure lines: build_runtimes.py configures two more trees
-    # for the app runtimes, and they inherit it — CMake reads these variables
-    # as the default for CMAKE_<LANG>_COMPILER_LAUNCHER (checked: OBJCXX too,
-    # so MetalRenderer.mm and the other .mm files are cached as well).
-    env:
-      CMAKE_C_COMPILER_LAUNCHER: ${{ matrix.cache }}
-      CMAKE_CXX_COMPILER_LAUNCHER: ${{ matrix.cache }}
-      CMAKE_OBJC_COMPILER_LAUNCHER: ${{ matrix.cache }}
-      CMAKE_OBJCXX_COMPILER_LAUNCHER: ${{ matrix.cache }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
 
     steps:
+      # On NN-WS03 the build tree stays between runs — that is the point.
+      # checkout's clean would wipe it (git clean -ffdx); the tidy step below
+      # cleans everything else.
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.environment != 'self-hosted' }}
+
+      - name: Tidy the workspace, keep the build tree (NN-WS03)
+        if: runner.environment == 'self-hosted'
+        run: git clean -ffdx -e build/ -e package/
 
       - name: Install Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
@@ -90,7 +105,7 @@ jobs:
       # after the headers, the import library and glslc are confirmed to be there.
       # No cache: 254 MB from LunarG's CDN restores about as fast as actions/cache.
       - name: Install Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment != 'self-hosted'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -115,6 +130,17 @@ jobs:
           "VULKAN_SDK=$root" >> $env:GITHUB_ENV
           "$root\Bin" >> $env:GITHUB_PATH
           Write-Host "Vulkan SDK $version installed at $root"
+
+      # NN-WS03 has the SDK installed (the installer needs admin rights, the
+      # runner doesn't have them); its installer set VULKAN_SDK system-wide.
+      - name: Vulkan SDK present (NN-WS03)
+        if: runner.os == 'Windows' && runner.environment == 'self-hosted'
+        shell: pwsh
+        run: |
+          if (-not $env:VULKAN_SDK -or -not (Test-Path "$env:VULKAN_SDK\Include\vulkan\vulkan.h")) {
+            throw "VULKAN_SDK is not set or incomplete on this runner — install the Vulkan SDK and restart the runner service"
+          }
+          Write-Host "Vulkan SDK at $env:VULKAN_SDK"
 
       # Linux: SDL3 is compiled from source (FetchContent) and needs the X11/Wayland,
       # OpenGL/EGL, audio and udev/dbus dev headers; the engine also links Python and
@@ -145,13 +171,30 @@ jobs:
       # After the Linux packages: the action installs ccache with apt and
       # relies on the package index that step refreshed. Log.cpp uses
       # __DATE__/__TIME__ and is (rightly) never cached.
+      #
+      # Not on NN-WS03: its build tree stays, Ninja recompiles only what
+      # changed — and the action needs `sh`, which a Windows PC needn't have.
       - name: Compiler cache
+        if: runner.environment != 'self-hosted'
         uses: hendrikmuhs/ccache-action@v1.2.24
         with:
           key: ${{ matrix.name }}
           variant: ${{ matrix.cache }}
           max-size: 1G
           save: ${{ github.event_name != 'pull_request' }}
+
+      # Every compiler call through it. As environment, not on the configure
+      # lines: build_runtimes.py configures two more trees for the app
+      # runtimes and inherits it — CMake takes these variables as the default
+      # for CMAKE_<LANG>_COMPILER_LAUNCHER (checked: OBJCXX too, so
+      # MetalRenderer.mm and the other .mm files are cached as well).
+      - name: Compile through the cache
+        if: runner.environment != 'self-hosted'
+        shell: bash
+        run: |
+          for lang in C CXX OBJC OBJCXX; do
+            echo "CMAKE_${lang}_COMPILER_LAUNCHER=${{ matrix.cache }}" >> "$GITHUB_ENV"
+          done
 
       # FetchContent checkouts (SDL3, assimp, glslang, nlohmann_json, …) so CI
       # does not re-clone them on every run. They were ~850 MB per entry and a
@@ -160,9 +203,10 @@ jobs:
       # cache. Now: restored with a fallback to the previous entry (FetchContent
       # updates what changed), and written only by pushes and dispatches, right
       # after configure — sources only, the compiled dependencies come from the
-      # compiler cache.
+      # compiler cache. (NN-WS03 keeps build/_deps itself.)
       - name: Restore FetchContent dependencies
         id: deps
+        if: runner.environment != 'self-hosted'
         uses: actions/cache/restore@v4
         with:
           path: build/_deps
@@ -218,36 +262,41 @@ jobs:
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
+      # Configure has fetched everything; nothing is compiled yet.
+      - name: Save FetchContent dependencies
+        if: >-
+          runner.environment != 'self-hosted' && github.event_name != 'pull_request'
+          && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/_deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
       # The SDK step above can succeed and the backend still silently fall out of
       # the build: find_package(Vulkan) not seeing the variable, a renamed SDK
       # layout, a future refactor of the detection. CMake only reports that as a
       # STATUS line nobody reads. HE_VULKAN_ENABLED is CACHE INTERNAL, so the
       # resolved answer sits in CMakeCache.txt — fail the job right here if it is
       # not TRUE, because a Windows build without RendererVulkan is exactly the
-      # unchecked state this job exists to end.
-      # Configure has fetched everything; nothing is compiled yet.
-      - name: Save FetchContent dependencies
-        if: github.event_name != 'pull_request' && steps.deps.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: build/_deps
-          key: ${{ steps.deps.outputs.cache-primary-key }}
-
+      # unchecked state this job exists to end. PowerShell, not bash: NN-WS03
+      # needn't have a bash on its PATH. (Select-String reads lines without
+      # their CRLF, so TRUE$ holds.)
       - name: Assert the Vulkan backend is enabled (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          # \r? because CMake on Windows writes the cache with CRLF line ends.
-          if grep -qE $'^HE_VULKAN_ENABLED:INTERNAL=TRUE\r?$' build/CMakeCache.txt; then
-            echo "HE_VULKAN_ENABLED=TRUE — RendererVulkan is part of this build"
-          else
-            echo "::error::HE_VULKAN_ENABLED is not TRUE in build/CMakeCache.txt — the Vulkan SDK was installed but CMake did not pick it up"
-            grep -n 'HE_VULKAN_ENABLED\|Vulkan_' build/CMakeCache.txt || true
+          if (Select-String -Path build/CMakeCache.txt -Pattern '^HE_VULKAN_ENABLED:INTERNAL=TRUE$' -Quiet) {
+            Write-Host "HE_VULKAN_ENABLED=TRUE — RendererVulkan is part of this build"
+          } else {
+            Write-Host "::error::HE_VULKAN_ENABLED is not TRUE in build/CMakeCache.txt — the Vulkan SDK was installed but CMake did not pick it up"
+            Select-String -Path build/CMakeCache.txt -Pattern 'HE_VULKAN_ENABLED|Vulkan_'
             exit 1
-          fi
+          }
 
+      # Four jobs on GitHub's four cores; on NN-WS03 Ninja's default (all of
+      # its cores — the Hive only sends work there while no bees run on it).
       - name: Build
-        run: cmake --build build -j 4
+        run: cmake --build build ${{ runner.environment == 'self-hosted' && '--parallel' || '-j 4' }}
 
       # -j because the suite waits far more than it computes: real git
       # subprocesses, child-process kills, socket handshakes, polling sleeps.
@@ -255,10 +304,11 @@ jobs:
       #
       # HE_NET_LOOPBACK_ONLY=0: tests/main.cpp otherwise binds every listener to
       # loopback, which spares a developer's desktop the Windows Firewall dialog
-      # but skips the dual-stack and LAN-reachability tests. A runner asks nobody.
+      # but skips the dual-stack and LAN-reachability tests. A hosted runner
+      # asks nobody — NN-WS03 is a desktop, there it stays loopback.
       - name: Run tests
         env:
-          HE_NET_LOOPBACK_ONLY: "0"
+          HE_NET_LOOPBACK_ONLY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
         run: ctest --test-dir build --output-on-failure -j4
 
       # The Metal backend compiles its MSL strings at RUNTIME (newLibraryWithSource)
@@ -390,13 +440,17 @@ jobs:
       # Moved below the tests so all three platforms package in the same place in the
       # run. It used to sit before them, which meant Windows uploaded an editor even
       # when ctest was red; it now behaves like macOS and Linux always have.
+      #
+      # Not on NN-WS03: a topic branch's check needs no download package, its
+      # package/ is an incremental deploy that keeps old files, and the zip
+      # would go up through a home connection.
       - name: Package Windows editor
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment != 'self-hosted'
         shell: pwsh
         run: Compress-Archive -Path "package/Editor/*" -DestinationPath "HorizonEditor-windows-x64.zip" -Force
 
       - name: Upload Windows editor package
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && runner.environment != 'self-hosted'
         uses: actions/upload-artifact@v4
         with:
           name: HorizonEditor-windows-x64
