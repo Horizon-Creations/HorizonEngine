@@ -84,6 +84,46 @@ CASES = {
         "pairs": [("window", "clustered", 1.5)],
         "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"]},
     },
+    # Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10.11):
+    # G-buffer pass → resolve (heLitP, the same code graph materials shade with)
+    # → forward tail. The graph-material sphere must look the same both ways —
+    # the first pair with a MAXIMUM (4th element): "deferred ≈ forward". The
+    # G-buffer base-colour view (GBUFFER=1) is the negative control that the
+    # resolve really ran: it replaces the lit sphere with its raw albedo.
+    # Built-in materials are NOT comparable (plan §10.6: Vulkan's built-in
+    # forward shader is a reduced copy, the resolve shades with heLitP), so the
+    # scene is the graph sphere in front of the sky alone.
+    "deferred": {
+        "base": {"SKYTEST": "1", "MATERIALTEST": "matte", "TOD": "0.45", "CLOUDMODE": "0",
+                 "COVERAGE": "0", "AA": "0", "BLOOM": "0", "DOF": "0", "MOTIONBLUR": "0",
+                 "SSR": "0", "GI": "0"},
+        "variants": {
+            "forward":  {"dump": {"RENDERPATH": "0"}},
+            "deferred": {"dump": {"RENDERPATH": "1"}},
+            "gbuffer":  {"dump": {"RENDERPATH": "1", "GBUFFER": "1"}},
+        },
+        "pairs": [("forward", "deferred", None, 1.0), ("deferred", "gbuffer", 2.0)],
+        "require": {"deferred": ["HE_DUMP_MATERIALTEST sphere", "deferred path ready", "deferred frame ("],
+                    "gbuffer":  ["deferred frame (", "G-buffer view 1"]},
+        "forbid":  {"forward": ["deferred frame ("]},
+    },
+    # The clustered resolve: the 16 lights of the "clustered" case through the
+    # deferred path. deferred ≈ forward (both clustered), and the 8-light window
+    # resolve (HE_FORWARD_CLUSTER=0) must lose the pools beyond it — the same
+    # A/B as "clustered", now on the resolve.
+    "deferred_clustered": {
+        "base": {"SKYTEST": "1", "MANYLIGHTS": "16", "TOD": "0", "CAMY": "207",
+                 "CAMZ": "2", "PITCH": "-38", "CLOUDMODE": "0", "COVERAGE": "0",
+                 "AA": "0", "BLOOM": "0", "SSR": "0"},
+        "variants": {
+            "forward":  {"dump": {"RENDERPATH": "0"}},
+            "deferred": {"dump": {"RENDERPATH": "1"}},
+            "window":   {"dump": {"RENDERPATH": "1"}, "env": {"HE_FORWARD_CLUSTER": "0"}},
+        },
+        "pairs": [("forward", "deferred", None, 1.0), ("window", "deferred", 1.5)],
+        "require": {"deferred": ["HE_DUMP_MANYLIGHTS witness scene added", "clustered resolve"],
+                    "window":   ["deferred frame (", "8-light resolve"]},
+    },
     # DDGI diffuse on the GI-reflections witness scene (graph-material cubes, one
     # emissive, on a mirror floor), with the reflections pinned OFF so the A/B is
     # the probe irradiance alone. "sw" forces the software BVH; on lavapipe "on"
@@ -528,7 +568,11 @@ def main():
                     problems.append(f"{vname}: stripes in '{label}', energy {e} > {mx}")
 
         pairs = []
-        for a, b, min_mean in spec["pairs"]:
+        for pair in spec["pairs"]:
+            # (a, b, min_mean) or (a, b, min_mean, max_mean): the optional 4th
+            # element is the most the pair may differ — "B looks like A".
+            a, b, min_mean = pair[0], pair[1], pair[2]
+            max_mean = pair[3] if len(pair) > 3 else None
             sa, sb = shots.get(a), shots.get(b)
             if not (sa and sb and "_pix" in sa and "_pix" in sb):
                 continue
@@ -536,13 +580,20 @@ def main():
                 problems.append(f"{a}/{b}: size differs")
                 continue
             ds = diff_stats(sa["_pix"], sb["_pix"])
-            verdict = "report" if min_mean is None else ("ok" if ds["mean_abs"] >= min_mean else "FAIL")
+            judged = min_mean is not None or max_mean is not None
+            ok = (min_mean is None or ds["mean_abs"] >= min_mean) and \
+                 (max_mean is None or ds["mean_abs"] <= max_mean)
+            verdict = "report" if not judged else ("ok" if ok else "FAIL")
             if verdict == "FAIL":
-                problems.append(f"{a} vs {b}: mean |Δ| {ds['mean_abs']} < {min_mean}")
-            pairs.append({"a": a, "b": b, "min_mean": min_mean, "verdict": verdict, **ds})
+                bound = f"< {min_mean}" if min_mean is not None and ds["mean_abs"] < min_mean else f"> {max_mean}"
+                problems.append(f"{a} vs {b}: mean |Δ| {ds['mean_abs']} {bound}")
+            pairs.append({"a": a, "b": b, "min_mean": min_mean, "max_mean": max_mean,
+                          "verdict": verdict, **ds})
+            limits = ", ".join(s for s in (f"min {min_mean}" if min_mean is not None else "",
+                                           f"max {max_mean}" if max_mean is not None else "") if s)
             print(f"  {a} vs {b}: mean |Δ| {ds['mean_abs']}, max {ds['max_abs']}, "
                   f"{ds['px_changed']} px changed, px>2 {ds['pct_px_over2']} %"
-                  f"  → {verdict}{'' if min_mean is None else f' (min {min_mean})'}")
+                  f"  → {verdict}{f' ({limits})' if limits else ''}")
 
         for p in problems:
             print(f"::error::{case}: {p}")

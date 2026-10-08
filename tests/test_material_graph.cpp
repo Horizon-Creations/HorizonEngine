@@ -4127,6 +4127,130 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 		CHECK_MESSAGE(name.find("(UI domain)") != std::string::npos, name, " uses a binding outside the layout");
 }
 
+// ═══ Thema 150 Schritt 4: the Vulkan deferred resolve's own set layout ═══════
+// VulkanRenderer builds m_resolveSetLayout from HE::vkmat::kResolveBindings and
+// runs deferredResolve[Clustered](SpirV) against it; the G-buffer tails of the
+// graph materials run against the material layout (kBindings) in the G-buffer
+// pass. A binding the layout lacks makes the pipeline invalid (NVIDIA draws
+// garbage with one validation line, lavapipe crashes in the draw), and CI has
+// no Vulkan device to show it. Same method as above: reflection of the
+// statically used descriptors, held against the tables — set, binding, kind
+// AND the fragment stage.
+namespace
+{
+std::string uncoveredVkResolve(const std::vector<VkUse>& uses, uint32_t skipBinding = ~0u)
+{
+	std::string miss;
+	for (const VkUse& u : uses)
+	{
+		bool ok = false;
+		for (uint32_t i = 0; i < HE::vkmat::kResolveBindingCount && !ok; ++i)
+		{
+			const HE::vkmat::Binding& row = HE::vkmat::kResolveBindings[i];
+			ok = row.binding != skipBinding && u.set == 0 && row.binding == u.binding
+			  && static_cast<int>(row.kind) == u.kind && (row.stages & HE::vkmat::kStageFragment);
+		}
+		if (!ok)
+			miss += " " + std::to_string(u.set) + "/" + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
+} // namespace
+
+TEST_CASE("Vulkan: the deferred resolve's set layout covers both resolve variants, and the G-buffer tails fit the material layout (Thema 150)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using HE::vkmat::DescKind;
+	namespace vm = HE::vkmat;
+	HE::MaterialShaderLibrary lib;
+
+	// The table: no duplicate binding, the cluster lists last, and few enough
+	// fragment samplers for the spec minimum of 16 — no device needs a fallback.
+	for (uint32_t i = 0; i < vm::kResolveBindingCount; ++i)
+		for (uint32_t j = i + 1; j < vm::kResolveBindingCount; ++j)
+			CHECK_MESSAGE(vm::kResolveBindings[i].binding != vm::kResolveBindings[j].binding,
+			              "duplicate resolve binding ", vm::kResolveBindings[i].binding);
+	CHECK(vm::kResolveBindings[vm::kResolvePreClusterBindingCount + 0].binding == vm::kClusterLightsBinding);
+	CHECK(vm::kResolveBindings[vm::kResolvePreClusterBindingCount + 1].binding == vm::kClusterGridBinding);
+	CHECK(vm::kResolveBindings[vm::kResolvePreClusterBindingCount + 2].binding == vm::kClusterIdxBinding);
+	uint32_t fragSamplers = 0;
+	for (uint32_t i = 0; i < vm::kResolveBindingCount; ++i)
+		if (vm::kResolveBindings[i].kind == DescKind::CombinedImageSampler
+		    && (vm::kResolveBindings[i].stages & vm::kStageFragment))
+			++fragSamplers;
+	CHECK(fragSamplers == 15);
+	CHECK(fragSamplers <= 16);
+
+	// Both variants, reflected.
+	const auto& plain = lib.deferredResolve(B::SpirV);
+	const auto& clus  = lib.deferredResolveClustered(B::SpirV);
+	REQUIRE_MESSAGE(plain.ok, plain.log);
+	REQUIRE_MESSAGE(clus.ok, clus.log);
+	std::string err;
+	const std::vector<VkUse> up = activeVkDescriptors(plain.spirv, err);
+	REQUIRE_MESSAGE(err.empty(), err);
+	const std::vector<VkUse> uc = activeVkDescriptors(clus.spirv, err);
+	REQUIRE_MESSAGE(err.empty(), err);
+
+	// Positive: every statically used descriptor has its row.
+	CHECK_MESSAGE(uncoveredVkResolve(up).empty(), "8-light resolve outside the layout:", uncoveredVkResolve(up));
+	CHECK_MESSAGE(uncoveredVkResolve(uc).empty(), "clustered resolve outside the layout:", uncoveredVkResolve(uc));
+
+	// The resolve's own inputs are really read: G-buffer 19..22 (sampled) and
+	// HeResolve 23 — a resolve that silently stopped reading GB3 would pass the
+	// coverage check above and draw nothing.
+	const int kCis = static_cast<int>(DescKind::CombinedImageSampler);
+	const int kUbo = static_cast<int>(DescKind::UniformBuffer);
+	const int kSsbo = static_cast<int>(DescKind::StorageBuffer);
+	for (const VkUse& want : { VkUse{ 0, vm::kResolveGB0Binding, kCis }, VkUse{ 0, vm::kResolveGB1Binding, kCis },
+	                           VkUse{ 0, vm::kResolveGB2Binding, kCis }, VkUse{ 0, vm::kResolveDepthBinding, kCis },
+	                           VkUse{ 0, vm::kResolveUboBinding, kUbo }, VkUse{ 0, 0, kUbo } })
+	{
+		CHECK_MESSAGE(std::find(up.begin(), up.end(), want) != up.end(), "8-light resolve does not use ", want.binding);
+		CHECK_MESSAGE(std::find(uc.begin(), uc.end(), want) != uc.end(), "clustered resolve does not use ", want.binding);
+	}
+
+	// Clustered = the 8-light resolve + exactly the three lists.
+	const std::vector<VkUse> lists = { { 0, vm::kClusterLightsBinding, kSsbo },
+	                                   { 0, vm::kClusterGridBinding,   kSsbo },
+	                                   { 0, vm::kClusterIdxBinding,    kSsbo } };
+	std::vector<VkUse> added, dropped;
+	std::set_difference(uc.begin(), uc.end(), up.begin(), up.end(), std::back_inserter(added));
+	std::set_difference(up.begin(), up.end(), uc.begin(), uc.end(), std::back_inserter(dropped));
+	CHECK_MESSAGE(added == lists, "clustered adds", uncoveredVk(added, 0));
+	CHECK_MESSAGE(dropped.empty(), "clustered drops", uncoveredVk(dropped, 0));
+
+	// Negative controls: the table without the GB3 row leaves exactly that use
+	// uncovered, and the MATERIAL layout (which the resolve must not borrow)
+	// lacks the whole G-buffer + HeResolve.
+	CHECK(uncoveredVkResolve(up, vm::kResolveDepthBinding) == " 0/22:1");
+	CHECK(uncoveredVkFragment(up) == " 0/19:1 0/20:1 0/21:1 0/22:1 0/23:0");
+
+	// G-buffer tails (MaterialGraph's glslGBuffer) of every surface node graph:
+	// they run in the G-buffer pass on the MATERIAL layout, so every use must
+	// have a fragment row there — heLandscapeWeights (14) included.
+	int tails = 0;
+	std::set<VkUse> gbGap;
+	for (const HE::MatNodeDesc& d : HE::matNodeRegistry())
+	{
+		if (d.type == MatNodeType::Output || d.type == MatNodeType::FnInput ||
+		    d.type == MatNodeType::FnOutput || d.type == MatNodeType::FunctionCall)
+			continue;
+		const HE::MatShaderGen gen = HE::generateFragment(graphForNode(d.type, HE::MatDomain::Surface));
+		if (gen.glslGBuffer.empty()) continue; // unlit graphs have none
+		const auto& sv = lib.fragment(std::hash<std::string>{}(gen.glslGBuffer), gen.glslGBuffer, B::SpirV);
+		REQUIRE_MESSAGE(sv.ok, d.name, ": ", sv.log);
+		const std::vector<VkUse> uses = activeVkDescriptors(sv.spirv, err);
+		REQUIRE_MESSAGE(err.empty(), d.name, ": ", err);
+		++tails;
+		for (const VkUse& u : uses)
+			if (!uncoveredVkFragment({ u }).empty()) gbGap.insert(u);
+	}
+	CHECK(tails > 40);
+	CHECK_MESSAGE(gbGap.empty(), "G-buffer tail uses outside the material layout:",
+	              uncoveredVk(std::vector<VkUse>(gbGap.begin(), gbGap.end()), 0));
+}
+
 // ═══ Thema 117 Schritt 6: OpenGL 4.3 binds the clustered variant ═════════════
 // OpenGLRenderer links forward graph materials from standardVertex /
 // customVertex(GLSL430) + fragmentClustered(GLSL430) and binds the lists on
