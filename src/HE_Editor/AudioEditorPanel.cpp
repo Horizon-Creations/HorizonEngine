@@ -781,6 +781,45 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		namespace T = EditorToolbar;
 		T::Bar bar;
 		T::assetHeader(bar, assetPath, st.dirty);
+		// Folder, then Save, then the transport: what you do to LISTEN comes first
+		// on the left. The tools that CHANGE the clip (trim, curve, EQ) and the
+		// ruler unit sit together at the right edge.
+		if (T::saveButton(bar, st.dirty && editable != nullptr, /*atLeft=*/true)) saveState(ctx, st);
+
+		bar.group();
+		const bool playing = st.handle != 0 && !st.paused;
+		if (bar.item("##audioplay", playing ? T::iconPause : T::iconPlay, nullptr,
+		             playing, audioReady,
+		             audioReady ? "Play / Pause — the selection if there is one, else the (trimmed) clip"
+		                        : "No audio device — the editor's audio engine failed to start",
+		             "Audio Editor/Play"))
+		{
+			if (!st.handle)          startPreview(*clip, st, editable ? &editable->edit : nullptr);
+			else if (st.paused)      { st.audio->resumeSound(st.handle); st.paused = false; }
+			else                     { st.audio->pauseSound(st.handle);  st.paused = true;  }
+		}
+		if (bar.item("##audiostop", T::iconStop, nullptr, false, st.handle != 0, "Stop and rewind",
+		             "Audio Editor/Stop"))
+		{
+			stopPreview(st);
+			st.view.playhead = st.view.hasSelection() ? st.view.selBegin
+			                 : st.view.hasTrim()      ? st.view.trimBegin : 0;
+		}
+		if (bar.item("##audioloop", T::iconRefresh, nullptr, st.loop, true,
+		             "Loop the selection, or the clip — the seam check says whether the clip's loop clicks",
+		             "Audio Editor/Loop"))
+		{
+			st.loop = !st.loop;
+			if (st.handle) st.audio->setSoundLooping(st.handle, st.loop);
+		}
+		if (bar.item("##audiozoomsel", T::iconSearch, nullptr, false,
+		             st.view.hasSelection() && st.canvasW > 0.0f,
+		             "Zoom to the selection", "Audio Editor/Zoom to Selection"))
+			AW::zoomToRange(st.view, frames, st.canvasW, st.view.selBegin, st.view.selEnd);
+		if (bar.item("##audiofit", T::iconFit, nullptr, false, true, "Fit the whole clip",
+		             "Audio Editor/Fit"))
+			st.view.framesPerPx = 0.0;   // refitted on the next draw, which knows the width
+		bar.endGroup();
 
 		if (st.isRawFile)
 		{
@@ -789,37 +828,30 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			bar.endGroup();
 		}
 
-		// Cutting. Trim is an edit of THIS asset — nothing is deleted, it is
-		// undoable and saved with the asset. Extract writes a NEW asset made of
-		// the selected frames and leaves this one as it is.
-		const bool hasSel = st.view.hasSelection();
-		bar.group();
-		if (bar.item("##audiotrim", nullptr, "Trim", false, canEdit && hasSel,
-		             !canEdit ? (st.isRawFile ? "A source file has no asset to keep a trim in — import it first"
-		                                      : "Engine content is read-only — Extract the range instead")
-		                      : hasSel ? "Play only the selection from now on — nothing is deleted"
-		                               : "Select a range to trim the clip to",
-		             "Audio Editor/Trim"))
-		{
-			applyTrim(st, *editable, HE::AudioTrim::fromRange(st.view.selBegin, st.view.selEnd, frames));
-			st.view.playhead = st.view.selBegin;
-			AW::clearSelection(st.view);
-		}
-		if (bar.item("##audiountrim", nullptr, "Clear Trim", false, canEdit && st.view.hasTrim(),
-		             "Play the whole clip again", "Audio Editor/Clear Trim"))
-			applyTrim(st, *editable, HE::AudioTrim{});
-		bar.divider();
-		if (bar.item("##audioextract", nullptr, "Extract", false, hasSel && ctx.contentManager != nullptr,
-		             hasSel ? "Write the selection as a new audio asset beside this one"
-		                    : "Select a range to extract",
-		             "Audio Editor/Extract"))
-			st.extractRequested = true;
+		// Right-hand wells stack leftwards, so they are declared rightmost first:
+		// ruler unit, EQ, volume curve, cutting. The cutting well is the one that
+		// reads and changes the selection, and nothing below depends on the order
+		// they run in — syncTrimView after them draws this frame's.
+		bar.rightGroup(bar.labelGroupWidth({ "Samples" }));
+		if (bar.item("##audiosamples", nullptr, "Samples", st.view.rulerInSamples, true,
+		             "Label the ruler in frames instead of time", "Audio Editor/Samples"))
+			st.view.rulerInSamples = !st.view.rulerInSamples;
 		bar.endGroup();
 
+
+		// The EQ pane under the waveform. (The bus is a dropdown in the left
+		// column: a list of names does not fit a toolbar cell.)
+		bar.rightGroup(bar.labelGroupWidth({ "EQ" }));
+		if (bar.item("##audioeq", nullptr, "EQ", st.showEq && editable != nullptr, editable != nullptr,
+		             editable ? "Show the clip's EQ under the waveform"
+		                      : "A source file has no asset to keep an EQ in — import it first",
+		             "Audio Editor/EQ"))
+			st.showEq = !st.showEq;
+		bar.endGroup();
 		// Volume curve. "Curve" switches the lanes from selecting to editing
 		// points; Linear/Smooth shape the segment that starts at the selected
 		// point (the left point owns its segment, AudioEdit.h).
-		bar.group();
+		bar.rightGroup(bar.labelGroupWidth({ "Curve", "Linear", "Smooth", "Clear Curve" }));
 		if (bar.item("##audiocurve", nullptr, "Curve", st.view.curveMode, canEdit,
 		             !canEdit ? (st.isRawFile ? "A source file has no asset to keep a curve in — import it first"
 		                                      : "Engine content is read-only")
@@ -861,63 +893,36 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		}
 		bar.endGroup();
 
-		// The EQ pane under the waveform. (The bus is a dropdown in the left
-		// column: a list of names does not fit a toolbar cell.)
-		bar.group();
-		if (bar.item("##audioeq", nullptr, "EQ", st.showEq && editable != nullptr, editable != nullptr,
-		             editable ? "Show the clip's EQ under the waveform"
-		                      : "A source file has no asset to keep an EQ in — import it first",
-		             "Audio Editor/EQ"))
-			st.showEq = !st.showEq;
+		// Cutting. Trim is an edit of THIS asset — nothing is deleted, it is
+		// undoable and saved with the asset. Extract writes a NEW asset made of
+		// the selected frames and leaves this one as it is.
+		const bool hasSel = st.view.hasSelection();
+		bar.rightGroup(bar.labelGroupWidth({ "Trim", "Clear Trim", "Extract" }) + 6.0f);
+		if (bar.item("##audiotrim", nullptr, "Trim", false, canEdit && hasSel,
+		             !canEdit ? (st.isRawFile ? "A source file has no asset to keep a trim in — import it first"
+		                                      : "Engine content is read-only — Extract the range instead")
+		                      : hasSel ? "Play only the selection from now on — nothing is deleted"
+		                               : "Select a range to trim the clip to",
+		             "Audio Editor/Trim"))
+		{
+			applyTrim(st, *editable, HE::AudioTrim::fromRange(st.view.selBegin, st.view.selEnd, frames));
+			st.view.playhead = st.view.selBegin;
+			AW::clearSelection(st.view);
+		}
+		if (bar.item("##audiountrim", nullptr, "Clear Trim", false, canEdit && st.view.hasTrim(),
+		             "Play the whole clip again", "Audio Editor/Clear Trim"))
+			applyTrim(st, *editable, HE::AudioTrim{});
+		bar.divider();
+		if (bar.item("##audioextract", nullptr, "Extract", false, hasSel && ctx.contentManager != nullptr,
+		             hasSel ? "Write the selection as a new audio asset beside this one"
+		                    : "Select a range to extract",
+		             "Audio Editor/Extract"))
+			st.extractRequested = true;
 		bar.endGroup();
+
 		// The buttons above may have changed the trim; the canvas below and the
 		// transport draw this frame's.
 		syncTrimView(st, editable, frames);
-
-		// Right-hand groups stack leftwards: Save sits flush right, then the
-		// ruler-unit switch, the transport and the zoom buttons to its left.
-		if (T::saveButton(bar, st.dirty && editable != nullptr)) saveState(ctx, st);
-
-		bar.rightGroup(bar.labelGroupWidth({ "Samples" }));
-		if (bar.item("##audiosamples", nullptr, "Samples", st.view.rulerInSamples, true,
-		             "Label the ruler in frames instead of time", "Audio Editor/Samples"))
-			st.view.rulerInSamples = !st.view.rulerInSamples;
-		bar.endGroup();
-
-		bar.rightGroup(bar.iconGroupWidth(5));
-		const bool playing = st.handle != 0 && !st.paused;
-		if (bar.item("##audioplay", playing ? T::iconPause : T::iconPlay, nullptr,
-		             playing, audioReady,
-		             audioReady ? "Play / Pause — the selection if there is one, else the (trimmed) clip"
-		                        : "No audio device — the editor's audio engine failed to start",
-		             "Audio Editor/Play"))
-		{
-			if (!st.handle)          startPreview(*clip, st, editable ? &editable->edit : nullptr);
-			else if (st.paused)      { st.audio->resumeSound(st.handle); st.paused = false; }
-			else                     { st.audio->pauseSound(st.handle);  st.paused = true;  }
-		}
-		if (bar.item("##audiostop", T::iconStop, nullptr, false, st.handle != 0, "Stop and rewind",
-		             "Audio Editor/Stop"))
-		{
-			stopPreview(st);
-			st.view.playhead = st.view.hasSelection() ? st.view.selBegin
-			                 : st.view.hasTrim()      ? st.view.trimBegin : 0;
-		}
-		if (bar.item("##audioloop", T::iconRefresh, nullptr, st.loop, true,
-		             "Loop the selection, or the clip — the seam check says whether the clip's loop clicks",
-		             "Audio Editor/Loop"))
-		{
-			st.loop = !st.loop;
-			if (st.handle) st.audio->setSoundLooping(st.handle, st.loop);
-		}
-		if (bar.item("##audiozoomsel", T::iconSearch, nullptr, false,
-		             st.view.hasSelection() && st.canvasW > 0.0f,
-		             "Zoom to the selection", "Audio Editor/Zoom to Selection"))
-			AW::zoomToRange(st.view, frames, st.canvasW, st.view.selBegin, st.view.selEnd);
-		if (bar.item("##audiofit", T::iconFit, nullptr, false, true, "Fit the whole clip",
-		             "Audio Editor/Fit"))
-			st.view.framesPerPx = 0.0;   // refitted on the next draw, which knows the width
-		bar.endGroup();
 	}
 
 	// ── Left: format, levels, loop ───────────────────────────────────────────

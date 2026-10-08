@@ -2136,9 +2136,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 		namespace T = EditorToolbar;
 		T::Bar bar;
 
-		const char* kind = st.isInstance ? "material instance"
-		                 : st.isFunction ? "material function"
-		                                 : "material graph";
 		T::assetHeader(bar, assetPath, st.dirty);
 		// Folder, then Save: the two things every asset tab opens with. The right
 		// edge belongs to the view switch.
@@ -2167,12 +2164,15 @@ void render(AppContext& ctx, const std::string& assetPath,
 			bar.endGroup();
 		}
 
-		bar.group();
-		bar.readout(nullptr, kind, T::kFgDim);
-		// Shader complexity gauge (updated on every regenerate).
+		// Shader complexity gauge (updated on every regenerate). The tab already
+		// says what kind of material this is, so there is no "material graph"
+		// badge in front of it.
 		if (!st.isFunction && !st.complexity.empty())
+		{
+			bar.group();
 			bar.readout(nullptr, st.complexity.c_str(), T::kFgDim);
-		bar.endGroup();
+			bar.endGroup();
+		}
 
 		// Blend mode — a MATERIAL-level setting (it changes the Output node's pins
 		// and which render pass the material uses), so it belongs to the bar and
