@@ -766,6 +766,9 @@ void EditorUI::render(AppContext& ctx, float dt)
     }
 
     ImGui::Render();
+    // HE_DUMP_TUTORIALUI only: the tour card's placement, pictured from this
+    // frame's draw data (a no-op without the variable).
+    TutorialPanel::witnessAfterRender();
 
     // ── Multi-viewport / platform windows ─────────────────────────────────────
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
