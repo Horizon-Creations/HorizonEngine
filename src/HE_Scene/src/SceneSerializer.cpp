@@ -13,6 +13,7 @@
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/DecalComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
+#include "HorizonScene/Components/SplineComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
@@ -381,6 +382,19 @@ namespace
 				{ "twoSided",       rope->twoSidedGeometry },
 				{ "castsShadow",    rope->castsShadow },
 				{ "material",       uuidToJson(rope->materialAssetId) },
+			};
+		}
+		if (auto* spline = registry.try_get<SplineComponent>(entity))
+		{
+			// The whole component is authored data, so the whole component is
+			// written. "closed" is the flag as authored, not Curve::closed(): a
+			// two-point spline saved as closed must come back closed, so that
+			// adding the third point after a reload closes it.
+			json pts = json::array();
+			for (const glm::vec3& p : spline->controlPoints) pts.push_back(vec3ToJson(p));
+			comps["spline"] = {
+				{ "points", pts },
+				{ "closed", spline->closed },
 			};
 		}
 		if (auto* tr = registry.try_get<TrailComponent>(entity))
@@ -1213,6 +1227,16 @@ namespace
 			rope.castsShadow      = c.value("castsShadow",    rope.castsShadow);
 			rope.materialAssetId  = jsonToUuid(c.value("material", json()));
 			registry.emplace_or_replace<RopeComponent>(entity, rope);
+		}
+		if (comps.contains("spline"))
+		{
+			const json& c = comps["spline"];
+			SplineComponent spline;
+			if (auto pts = c.find("points"); pts != c.end() && pts->is_array())
+				for (const json& p : *pts)
+					spline.controlPoints.push_back(jsonToVec3(p, glm::vec3(0.0f)));
+			spline.closed = c.value("closed", spline.closed);
+			registry.emplace_or_replace<SplineComponent>(entity, spline);
 		}
 		if (comps.contains("trail"))
 		{
@@ -2395,6 +2419,7 @@ namespace
 	X("light",               LightComponent) \
 	X("decal",               DecalComponent) \
 	X("rope",                RopeComponent) \
+	X("spline",              SplineComponent) \
 	X("trail",               TrailComponent) \
 	X("rigidbody",           RigidBodyComponent) \
 	X("collider",            ColliderComponent) \
@@ -2656,7 +2681,7 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
-		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "terrain",
+		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "spline", "terrain",
 		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",

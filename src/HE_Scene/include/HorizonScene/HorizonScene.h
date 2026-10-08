@@ -29,6 +29,7 @@
 #include "Components/DecalComponent.h"
 #include "Components/RopeComponent.h"
 #include "Components/TrailComponent.h"
+#include "Components/SplineComponent.h"
 #include "Components/RigidBodyComponent.h"
 #include "Components/ColliderComponent.h"
 #include "Components/CharacterControllerComponent.h"

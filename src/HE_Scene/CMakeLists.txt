@@ -47,6 +47,7 @@ add_library(HorizonScene SHARED
     src/NavigationSystem.cpp
     src/ParticleSystem.cpp
     src/SplineGeometry.cpp
+    src/SplineCurve.cpp
     src/RopeTrailSystem.cpp
     src/LODSystem.cpp
     src/WeatherSystem.cpp

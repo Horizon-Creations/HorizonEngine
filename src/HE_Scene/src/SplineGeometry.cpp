@@ -70,6 +70,67 @@ namespace
 namespace HE::spline
 {
 
+CatmullRomSpan::CatmullRomSpan(const glm::vec3& a, const glm::vec3& b,
+                               const glm::vec3& c, const glm::vec3& d)
+    : p0(a), p1(b), p2(c), p3(d)
+{
+    // Centripetal knot spacing: t_{k+1} = t_k + |p_{k+1} - p_k|^0.5.
+    auto knot = [](float t, const glm::vec3& from, const glm::vec3& to)
+    {
+        return t + std::sqrt(std::sqrt(std::max(len2(to - from), 0.0f)));
+    };
+
+    const float t0 = 0.0f;
+    t1 = knot(t0, p0, p1);
+    t2 = knot(t1, p1, p2);
+    t3 = knot(t2, p2, p3);
+
+    // Coincident control points collapse a knot interval; the Barry-Goldman
+    // recursion would divide by zero, so that span is simply a straight line.
+    degenerate = (t1 - t0) < kEps || (t2 - t1) < kEps || (t3 - t2) < kEps;
+}
+
+glm::vec3 CatmullRomSpan::at(float u) const
+{
+    if (degenerate) return glm::mix(p1, p2, u);
+
+    const float t0 = 0.0f;
+    const float t  = glm::mix(t1, t2, u);
+    const glm::vec3 a1 = ((t1 - t) / (t1 - t0)) * p0 + ((t - t0) / (t1 - t0)) * p1;
+    const glm::vec3 a2 = ((t2 - t) / (t2 - t1)) * p1 + ((t - t1) / (t2 - t1)) * p2;
+    const glm::vec3 a3 = ((t3 - t) / (t3 - t2)) * p2 + ((t - t2) / (t3 - t2)) * p3;
+    const glm::vec3 b1 = ((t2 - t) / (t2 - t0)) * a1 + ((t - t0) / (t2 - t0)) * a2;
+    const glm::vec3 b2 = ((t3 - t) / (t3 - t1)) * a2 + ((t - t1) / (t3 - t1)) * a3;
+    return ((t2 - t) / (t2 - t1)) * b1 + ((t - t1) / (t2 - t1)) * b2;
+}
+
+glm::vec3 CatmullRomSpan::derivative(float u) const
+{
+    if (degenerate) return p2 - p1;
+
+    // The Barry-Goldman pyramid of at(), differentiated level by level (product
+    // rule on every weighted blend). Each blend's own derivative is the plain
+    // difference of its two inputs over the knot interval.
+    const float t0 = 0.0f;
+    const float t  = glm::mix(t1, t2, u);
+    const glm::vec3 a1 = ((t1 - t) / (t1 - t0)) * p0 + ((t - t0) / (t1 - t0)) * p1;
+    const glm::vec3 a2 = ((t2 - t) / (t2 - t1)) * p1 + ((t - t1) / (t2 - t1)) * p2;
+    const glm::vec3 a3 = ((t3 - t) / (t3 - t2)) * p2 + ((t - t2) / (t3 - t2)) * p3;
+    const glm::vec3 da1 = (p1 - p0) / (t1 - t0);
+    const glm::vec3 da2 = (p2 - p1) / (t2 - t1);
+    const glm::vec3 da3 = (p3 - p2) / (t3 - t2);
+
+    const glm::vec3 b1  = ((t2 - t) / (t2 - t0)) * a1 + ((t - t0) / (t2 - t0)) * a2;
+    const glm::vec3 b2  = ((t3 - t) / (t3 - t1)) * a2 + ((t - t1) / (t3 - t1)) * a3;
+    const glm::vec3 db1 = (a2 - a1) / (t2 - t0)
+                        + ((t2 - t) / (t2 - t0)) * da1 + ((t - t0) / (t2 - t0)) * da2;
+    const glm::vec3 db2 = (a3 - a2) / (t3 - t1)
+                        + ((t3 - t) / (t3 - t1)) * da2 + ((t - t1) / (t3 - t1)) * da3;
+
+    return (b2 - b1) / (t2 - t1)
+         + ((t2 - t) / (t2 - t1)) * db1 + ((t - t1) / (t2 - t1)) * db2;
+}
+
 std::vector<glm::vec3> sampleCatmullRom(const std::vector<glm::vec3>& controlPoints,
                                         int samplesPerSpan)
 {
@@ -88,45 +149,18 @@ std::vector<glm::vec3> sampleCatmullRom(const std::vector<glm::vec3>& controlPoi
         return controlPoints[static_cast<size_t>(i)];
     };
 
-    // Centripetal knot spacing: t_{k+1} = t_k + |p_{k+1} - p_k|^0.5.
-    auto knot = [](float t, const glm::vec3& a, const glm::vec3& b)
-    {
-        return t + std::sqrt(std::sqrt(std::max(len2(b - a), 0.0f)));
-    };
-
     std::vector<glm::vec3> out;
     out.reserve((n - 1) * static_cast<size_t>(steps) + 1);
     out.push_back(controlPoints[0]);
 
     for (size_t s = 0; s + 1 < n; ++s)
     {
-        const glm::vec3 p0 = cp(static_cast<std::ptrdiff_t>(s) - 1);
-        const glm::vec3 p1 = cp(static_cast<std::ptrdiff_t>(s));
-        const glm::vec3 p2 = cp(static_cast<std::ptrdiff_t>(s) + 1);
-        const glm::vec3 p3 = cp(static_cast<std::ptrdiff_t>(s) + 2);
-
-        const float t0 = 0.0f;
-        const float t1 = knot(t0, p0, p1);
-        const float t2 = knot(t1, p1, p2);
-        const float t3 = knot(t2, p2, p3);
-
-        // Coincident control points collapse a knot interval; the Barry-Goldman
-        // recursion would divide by zero, so that span is simply a straight line.
-        const bool degenerate = (t1 - t0) < kEps || (t2 - t1) < kEps || (t3 - t2) < kEps;
-
+        const CatmullRomSpan span(cp(static_cast<std::ptrdiff_t>(s) - 1),
+                                  cp(static_cast<std::ptrdiff_t>(s)),
+                                  cp(static_cast<std::ptrdiff_t>(s) + 1),
+                                  cp(static_cast<std::ptrdiff_t>(s) + 2));
         for (int k = 1; k <= steps; ++k)
-        {
-            const float u = static_cast<float>(k) / static_cast<float>(steps);
-            if (degenerate) { out.push_back(glm::mix(p1, p2, u)); continue; }
-
-            const float t = glm::mix(t1, t2, u);
-            const glm::vec3 a1 = ((t1 - t) / (t1 - t0)) * p0 + ((t - t0) / (t1 - t0)) * p1;
-            const glm::vec3 a2 = ((t2 - t) / (t2 - t1)) * p1 + ((t - t1) / (t2 - t1)) * p2;
-            const glm::vec3 a3 = ((t3 - t) / (t3 - t2)) * p2 + ((t - t2) / (t3 - t2)) * p3;
-            const glm::vec3 b1 = ((t2 - t) / (t2 - t0)) * a1 + ((t - t0) / (t2 - t0)) * a2;
-            const glm::vec3 b2 = ((t3 - t) / (t3 - t1)) * a2 + ((t - t1) / (t3 - t1)) * a3;
-            out.push_back(((t2 - t) / (t2 - t1)) * b1 + ((t - t1) / (t2 - t1)) * b2);
-        }
+            out.push_back(span.at(static_cast<float>(k) / static_cast<float>(steps)));
     }
     return out;
 }

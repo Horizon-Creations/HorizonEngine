@@ -27,6 +27,7 @@ namespace
 		{ "Light",                  "light" },
 		{ "Decal",                  "decal" },
 		{ "Rope",                   "rope" },
+		{ "Spline",                 "spline" },
 		{ "Trail",                  "trail" },
 		{ "Rigid Body",             "rigidbody" },
 		{ "Collider",               "collider" },

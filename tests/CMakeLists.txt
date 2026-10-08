@@ -233,6 +233,7 @@ add_executable(he_tests
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
+    test_spline.cpp
     test_editor_icons.cpp
     # A click on a light's icon selects the light: the Scene window's picking
     # rule against a snapshot the real RenderExtractor produced.
