@@ -189,8 +189,11 @@ separately, because the configure-time log line only answers the first one:
    on all three matrix jobs: they come from `7cef67a9` (Import to Project),
    which is on the `release/0.7.0` base (the audit lists the same four open
    controls on an unchanged `release/0.7.0` tree), not from the weather
-   change. The fix `978ac7e1` (topic 176) turns both green on top of this
-   branch; see the step-5 report in the topic.
+   change. The fix `978ac7e1` (topic 176) turns both green; step 6 took it
+   over onto this branch as `256f20fe` (cherry-pick -x), because it was not yet
+   on `release/0.7.0`. Locally afterwards: `editor_help_audit.py --check` rc 0
+   (interface 180/180), `test_editor_help` and `editor_help_audit` pass, full
+   ctest 249/249 (2 skipped, `test_material_graph` left out as unrelated).
    Verified by reading completed runs' job logs directly
    (`gh api .../actions/jobs/<id>/logs`, grepped for the line below — not taken
    on faith from an earlier survey):
