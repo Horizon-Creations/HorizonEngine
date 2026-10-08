@@ -307,30 +307,6 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 void drawCanvas(State& st)
 {
 	HE::Ed::Help::Scope helpScope("Texture Viewer");
-	// ── Toolbar row ─────────────────────────────────────────────────────────
-	if (EditorWidgets::button("Fit")) st.fit = true;
-	ImGui::SameLine();
-	if (EditorWidgets::button("1:1")) { st.fit = false; st.zoom = 1.0f; st.pan = ImVec2(0.0f, 0.0f); }
-	ImGui::SameLine();
-	ImGui::TextDisabled("%.0f%%", st.zoom * 100.0f);
-	ImGui::SameLine(0.0f, 18.0f);
-
-	bool r = st.channelMask & kChannelR, g = st.channelMask & kChannelG,
-	     b = st.channelMask & kChannelB, a = st.channelMask & kChannelA;
-	bool changed = false;
-	changed |= EditorWidgets::checkbox("Red", &r);   ImGui::SameLine();
-	changed |= EditorWidgets::checkbox("Green", &g); ImGui::SameLine();
-	changed |= EditorWidgets::checkbox("Blue", &b);  ImGui::SameLine();
-	changed |= EditorWidgets::checkbox("Alpha", &a); ImGui::SameLine(0.0f, 18.0f);
-	EditorWidgets::checkbox("Checkerboard", &st.checker);
-	if (changed)
-	{
-		const unsigned mask = (r ? kChannelR : 0u) | (g ? kChannelG : 0u) |
-		                      (b ? kChannelB : 0u) | (a ? kChannelA : 0u);
-		// All four off shows nothing at all; keep the last channel instead.
-		if (mask != 0) st.channelMask = mask;
-	}
-
 	// ── The picture ─────────────────────────────────────────────────────────
 	if (st.pixels.empty()) return;
 	if (st.uploadedMask != st.channelMask && !st.uploadFailed)
@@ -577,8 +553,51 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	// The strip every asset tab opens with: the way back to the asset in the
 	// Content Browser. (The tab above already says what is open.)
 	{
-		EditorToolbar::Bar bar;
-		EditorToolbar::assetHeader(bar, assetPath, false);
+		namespace T = EditorToolbar;
+		T::Bar bar;
+		T::assetHeader(bar, assetPath, false);   // no Save: a texture view edits nothing
+
+		// The view controls, in the strip beside the folder button: they used to be
+		// a row of checkboxes inside the canvas pane. Help entries keep their
+		// "Texture Viewer/<label>" keys, so the manual and the tooltips are as before.
+		bar.group();
+		if (bar.item("##texfit", T::iconFit, "Fit", st.fit, true,
+		             "Scale the picture to fill the canvas", "Texture Viewer/Fit"))
+			st.fit = true;
+		if (bar.item("##tex11", nullptr, "1:1", false, true,
+		             "One texel per screen pixel", "Texture Viewer/1:1"))
+		{ st.fit = false; st.zoom = 1.0f; st.pan = ImVec2(0.0f, 0.0f); }
+		char zoomText[24];
+		std::snprintf(zoomText, sizeof(zoomText), "%.0f%%", st.zoom * 100.0f);
+		bar.readout(nullptr, zoomText, T::kFgDim);
+		bar.endGroup();
+
+		// Channels: what the picture shows. Toggles, as the checkboxes were — and
+		// the same rule: all four off would show nothing, so the last one stays.
+		bar.group();
+		unsigned mask = st.channelMask;
+		const auto channel = [&](const char* id, const char* label, unsigned bit, const char* key,
+		                         const char* tip)
+		{
+			if (bar.item(id, nullptr, label, (st.channelMask & bit) != 0, true, tip, key))
+			{
+				const unsigned next = mask ^ bit;
+				if (next != 0) mask = next;
+			}
+		};
+		channel("##texr", "Red",   kChannelR, "Texture Viewer/Red",   "Show the red channel");
+		channel("##texg", "Green", kChannelG, "Texture Viewer/Green", "Show the green channel");
+		channel("##texb", "Blue",  kChannelB, "Texture Viewer/Blue",  "Show the blue channel");
+		channel("##texa", "Alpha", kChannelA, "Texture Viewer/Alpha", "Show the alpha channel");
+		st.channelMask = mask;
+		bar.endGroup();
+
+		bar.group();
+		if (bar.item("##texchecker", T::iconGrid, "Checkerboard", st.checker, true,
+		             "Checks behind the picture, to make transparency visible",
+		             "Texture Viewer/Checkerboard"))
+			st.checker = !st.checker;
+		bar.endGroup();
 	}
 
 	ImGui::BeginChild("##texInfo", ImVec2(260.0f, 0.0f), true);
