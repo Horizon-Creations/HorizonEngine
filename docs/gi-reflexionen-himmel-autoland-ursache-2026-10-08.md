@@ -356,3 +356,108 @@ Normale übergeben. `he_tests` über alle 24 Testdateien mit Extraktor/Terrain: 
 Instanzfarbe aus `giInstanceSurface`, Fold = 1,1,1). Ihn auf die Terrain-Mittelfarbe zu
 setzen würde das Bild mit GI-Diffus an verändern und gehört nicht in diesen Schritt
 ("bestehende Auto-Materialien dürfen sich im normalen Rendering nicht ändern").
+
+## 8. Schritt 4: Verifikation (Build, Tests, Bildvergleich)
+
+Stand `b8ef444a`, macOS (M-Serie), Release-Baum `out/build/macos-release` mit
+`HE_ENABLE_SHADERC=ON`, `HE_BUILD_TESTS=ON`.
+
+**Build.** Der Baum war vom Schritt 3 aktuell (`cmake --build … -j8`: rc 0, nichts zu tun).
+Damit kein veraltetes Objekt durchrutscht, wurden die zwölf auf dem Zweig geänderten Dateien
+unter `src/` und `tests/` per `touch` angefasst und neu gebaut: 56 Compile-/Link-Schritte,
+rc 0, kein `error:`. Das ist kein Bau von null, aber jede Übersetzungseinheit, die der Zweig
+berührt, ist frisch. Der neue `HorizonEditor` und `libHorizonRendering.dylib` sind
+byte-gleich mit `out/deploy/Editor` (`cmp`). Das Anfassen von `tests/CMakeLists.txt` hat
+neu konfiguriert, die Per-Test-`TMPDIR`-Ordner wurden danach angelegt.
+
+**Tests.** `ctest -j4` im Vordergrund: **244/244 bestanden** (100 %), 336 s. Übersprungen
+(Rückgabe 2, kein Fehler): `runtime_size_app_advanced`, `runtime_size_app_basic`, weil in
+diesem Baum keine App-Varianten unter `out/deploy/AppAdvanced|AppBasic` liegen. Die sieben
+Fälle dieses Themas (`SkyCubeFaceInvViewProj`, drei `GI auto landscape: …`, die
+Auto-Landscape-Codegen-Fälle) zusätzlich einzeln: 7/7, 1215 Assertions.
+
+**Offline-Shader.** `scripts/validate_embedded_shaders.py --glsl-only`: 57/57 GLSL-Strings
+übersetzen, darunter `kGiReflCS`, `kGiProbeCS`, `kGiShadowCS` (je mit `kGiTraversalGLSL`).
+Die MSL-Prüfung ist übersprungen (Xcode-Komponente „Metal Toolchain" nicht installiert);
+die Metal-Kernel übersetzt der Renderer zur Laufzeit, in allen Läufen unten ohne `[ERROR]`.
+
+**CI.** Lauf auf `b8ef444a` grün:
+https://github.com/Horizon-Creations/HorizonEngine/actions/runs/37771457370
+
+**Bildvergleich.** Zeuge wie §2 (Spiegel auf dem Auto-Relief, Himmel mit Wolken). Vorher und
+nachher an EINEM Binary: `HE_GIREFL_SKY=0 HE_GIREFL_AUTOLAND=0` sind Prozess-Variablen (keine
+`HE_DUMP_*`-Schlüssel, `he_shot.py` reicht sie nur aus der Shell durch).
+
+```
+D=docs/gi-reflexionen-ursache-2026-10-08
+KV=(SKYTEST=1 TOD=0.4 COVERAGE=0.3 CLOUDMODE=0 CLOUDSHADOWS=0 CAMX=-40 CAMY=304 CAMZ=14
+    PITCH=-4 GI=0 SSAO=0 SSR=0 AA=0 BLOOM=0 DOF=0 MOTIONBLUR=0 RENDERPATH=0 FRAMES=16
+    AUTOLAND=1 AUTOLANDMIRROR=1 GIREFL=1)
+env HE_CONFIG_DIR=/tmp/cfgA HE_COLLAB_OFFLINE=1 HE_SKY_TIME=30 HE_GIREFL_SKY=0 \
+    HE_GIREFL_AUTOLAND=0 python3 scripts/he_shot.py $D/S4-he_shot-vorher.png $KV
+env HE_CONFIG_DIR=/tmp/cfgB HE_COLLAB_OFFLINE=1 HE_SKY_TIME=30 \
+    python3 scripts/he_shot.py $D/S4-he_shot-nachher.png $KV
+```
+
+`HE_CONFIG_DIR` (privat), `HE_COLLAB_OFFLINE=1` und `HE_SKY_TIME=30` braucht es für die
+Pixelgleichheit mit `cap158auto.sh`. Die beiden PNGs sind byte-gleich mit der sips-Wandlung
+der BMPs aus `cap158auto.sh` (gleiche Kommandos wie §2), die Pixel stimmen also überein.
+
+![Vorher (Schalter aus): Spiegel zeigt wolkenlosen Verlauf und weißes Terrain](gi-reflexionen-ursache-2026-10-08/S4-he_shot-vorher.png)
+![Nachher: Wolken und grünes Auto-Terrain im Spiegel](gi-reflexionen-ursache-2026-10-08/S4-he_shot-nachher.png)
+
+md5 der BMPs (`cap158auto.sh`, Kamera wie §2), alle gleich den Werten aus §6/§7:
+
+| Lauf | md5 | Bedeutung |
+|---|---|---|
+| `r0` GIRefl aus | ce9749e7… | unverändert seit Schritt 1 |
+| `r1`, `HE_GIREFL_SKY=0 HE_GIREFL_AUTOLAND=0` | **01243515…** | = Vorher-Binary aus Schritt 1, bitgleich |
+| `r1`, nur `HE_GIREFL_AUTOLAND=0` | 383f10d4… | = Stand nach Schritt 2 |
+| `r1` HW | 2e3d49f2… | nachher; zweiter Lauf `r1b` gleich |
+| `r1sw` SW-BVH | 71ea0364… | nachher |
+| `r1def` deferred | 0c26a78d… | nachher |
+| `builtin` GIRefl an | a30a88f1… | Kontrolle, unverändert |
+
+`ana173sky.py`:
+
+| Lauf | Spiegel vorn, unten (Ebene) | gegiert, oben (Hang) | Luma-Streuung Spiegel-Himmel |
+|---|---|---|---|
+| vorher | 239,240,240 | 78,85,108 | 7,1 |
+| nur Himmel | 239,240,240 | 78,85,108 | 12,5 |
+| nachher HW | **103,143,53** | 21,24,34 | **13,7** |
+| nachher SW | 103,143,53 | 21,24,34 | 13,7 |
+| nachher deferred | 109,143,59 | 52,60,58 | 13,1 |
+| echter Himmel | | | 20,7 |
+
+(13,7 statt 12,5 bei „nachher": der Kasten streift rechts den gespiegelten Hang, dessen
+Farbe sich mit Schritt 3 ändert; das Himmelsmittel 195,210,208 ist gleich.)
+
+Ergebnis: Der kamerazugewandte Spiegel zeigt oben den Himmel mit Wolken, unten die
+Auto-Landschaft in ihrer Farbe. Vorher waren es ein wolkenloser Verlauf und Weiß.
+
+**Befunde.**
+
+- Gespiegelter Felshang fast schwarz (21,24,34 gegen direkt 33,47,75): Beleuchtung am
+  Treffer (kein Himmels-IBL, Hang außerhalb der Sonne), nicht Albedo. Mit weißer Albedo war
+  er 78,85,108, das Verhältnis passt zur Felsfarbe (≈ 0,16 linear). Siehe §7.
+- Gespiegelte Ebene flach grün ohne Texturdetail: gewollt, der Kernel nimmt Mittelfarben,
+  kein Bombing/Noise (§7).
+- Ausrichtung links/rechts des gespiegelten Himmels belegt nur der Unit-Test, nicht das Bild
+  (§6).
+
+**Offen.**
+
+- **OpenGL zur Laufzeit:** Nie ausgeführt. Der Mac hat GL 4.1 (GI braucht 4.3), die CI
+  übersetzt nur. Auf einem Rechner mit GL 4.3 den Zeugen mit `HE_DUMP_RHI=OpenGL` laufen lassen
+  und dieselbe Änderung erwarten (Wolken im Spiegel, grüne Ebene). Bisher hat niemand ein Pixel
+  aus `uSkyRefl` (Unit 9) oder dem GL-Auto-Landscape-Kernel gesehen.
+- **Hardware-Abnahme auf RT-GPU:** Metal HW-RT lief auf diesem Mac (pixelgleich zu SW).
+  Offen ist die Abnahme auf einer dedizierten RT-GPU unter OpenGL (siehe oben). D3D11, D3D12
+  und Vulkan sind nicht Teil des Themas und lesen weder Himmels-Cubemap noch Auto-Eintrag.
+- Kosten des Himmels-Bakes (6 × 128² pro Frame) ungemessen, `kSkyReflCubeSize` bzw. Kopplung
+  an die Qualitätsstufe offen (§6).
+- DDGI-Bounce der Auto-Landschaft weiterhin weiß (Entscheidung der Queen, §7).
+- Gepacktes Asset ohne Pfade: Annahme Slot 0 = Albedo (§7). Fehlt das Albedo-Array, versucht
+  der Extraktor `loadAsset` bei jedem Extract erneut (Randfall).
+- f²-Gewichtung von Teil-Miss-Strahlen (§4.3) ist nur für den Himmelsanteil erledigt.
+- MSL-Offline-Prüfung hier nicht gelaufen (Toolchain fehlt), nur Laufzeitübersetzung.
