@@ -293,7 +293,12 @@ int curveInsert(HE::AudioEnvelope& env, double tSec, float gain, HE::AudioCurveI
 	p.timeSec = std::max(0.0, tSec);
 	p.gain    = std::clamp(gain, 0.0f, HE::AudioEnvelope::kMaxGain);
 	p.interp  = interp;
-	return int(env.points.insert(at, p) - env.points.begin());
+	// Two statements on purpose: in `insert(…) - begin()` the order the two
+	// operands are evaluated in is unspecified, and GCC takes begin() FIRST —
+	// before an insert that may reallocate — so the index came out as garbage
+	// (Linux CI, Thema 168; MSVC happened to evaluate the other way round).
+	const auto it = env.points.insert(at, p);
+	return int(it - env.points.begin());
 }
 
 void curveMove(HE::AudioEnvelope& env, int i, double tSec, float gain, double clipSec)
