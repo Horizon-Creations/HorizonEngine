@@ -835,7 +835,12 @@ die Session-Zusammenfassung meldet auf beiden „1 frames“.
 **Was gebaut ist.** Dieselben Passes und dieselben Shader wie D3D11 (10.9). Der Resolve und die
 G-Buffer-Tails der Graph-Materialien kommen unverändert aus `MaterialShaderLibrary`
 (`deferredResolve[Clustered](HLSL)`, `fullscreenVertex`, `resolveGBufferShaders`). Nichts davon ist
-für D3D12 kopiert. Neu ist nur, was D3D12 anders verlangt:
+für D3D12 kopiert. Die eine Ausnahme ist `GBufPS` für eingebaute Materialien: Es ist eine zweite
+Handkopie neben D3D11s, mit Absicht nach 10.4 Punkt 4. Sie liest den `PerObject`-Puffer und die
+Textur des jeweiligen `kSceneHLSL`, und die Namen unterscheiden sich (`uAlbedo`/`uAlbedoSamp` gegen
+`uTexture`/`uSampler`). Kein Drift-Wächter hält die beiden zehn Zeilen zusammen; die G-Buffer-
+Ansichten 1..4 gegen GL (Tabelle unten) sind der Laufzeitbeleg. Neu ist sonst nur, was D3D12
+anders verlangt:
 
 - **Resolve-Root-Signatur** (`HE::d3d12mat::DescribeResolveRootSignature` in
   `D3D12MaterialRootSignature.h`, Renderer und `he_tests` lesen dieselbe Beschreibung):
@@ -906,6 +911,9 @@ viertes Ziel (Weg B aus 10.5, den Vulkan ohnehin nehmen soll).
   ersten Aufnahmen dieses Schritts waren deshalb schwarz oder leer (`draws=0`), mit dem Ergebnis
   „forward = deferred = D3D11“ zum Byte.
 - Gemessen wird im Band y = 200..720, die Kugelwerte in der Scheibe um die Bildmitte (r = 190).
+- Skripte: `scripts/deferred-witness/` (`cap.ps1` = eine Aufnahme aus dem privaten Deploy, `run12*.ps1`
+  = die Reihen mit allen Knöpfen, `ana12.py`/`img.py` = Band- und Kugelvergleich). Die Pfade zeigen auf
+  `C:\hw150` auf NN-WS03; für einen anderen Baum `$exe`/`$out` in `cap.ps1` umstellen.
 
 | Szene | Vergleich | mittlere Abw. | max |
 |---|---|--:|--:|
@@ -928,6 +936,10 @@ viertes Ziel (Weg B aus 10.5, den Vulkan ohnehin nehmen soll).
 | `SHADOWINSTTEST` (nur eingebaute Materialien) | GL deferred ↔ D3D12 deferred | 0,038/255 | 12 |
 | dieselbe | D3D12 forward ↔ D3D12 deferred | 2,35/255 | 28 |
 | dieselbe, G-Buffer-Ansicht 1..4 | GL ↔ D3D12 | 0,000 / 0,012 / 0,210 / 0,629 | 1 / 4 / 4 / 4 |
+| `MATERIALTEST=1 GIBLEED=3`, GI an, **TAA** (`AA=3`) | Kugel forward ↔ deferred | 0,196/255 | 3 |
+| `SSRTEST` + `MATERIALTEST=matte` (Kugel auf dem Boden), TOD 0,26, SSR aus | **SSAO** an ↔ aus, deferred | 0,215/255 | 30 |
+| dieselbe | SSAO an ↔ aus, forward (Referenz) | 0,230/255 | 33 |
+| `DECALTEST` (roter Decal auf grauem Boden) | D3D12 forward ↔ deferred | 1,00/255 | 20 |
 
 Was die Tabelle zeigt:
 - D3D12 deferred ist mit D3D11 deferred byte- oder fast byte-gleich. Die Shader sind dieselben,
@@ -937,8 +949,20 @@ Was die Tabelle zeigt:
 - Die Gegenproben zeigen: Der clustered Resolve lichtet alle 16 Lichter, und GI wirkt im Resolve.
 - `MANYLIGHTS` gegen GL deferred liegt bei 3,9/255. Das ist genau die Gegenprobe oben: GL hat
   keinen clustered Resolve (10.3), sein Deferred-Bild ist das 8-Licht-Fenster.
+- TAA, SSAO und Decals laufen im Deferred-Frame mit:
+  - SSAO wirkt im Resolve so stark wie forward. Der Resolve bindet den geblurrten SSAO an `kSlotAO`
+    unter demselben Gate wie ein Graph-Material.
+  - Die erste AO-Szene (Kugel ohne Boden) war für AO blind: an ↔ aus 0,05/255 forward wie
+    deferred. Erst die Kugel auf dem `SSRTEST`-Boden zeigt den Kontaktschatten.
+  - Forward ↔ deferred liegt in der `SSRTEST`-Szene bei 35,9/255, weil Boden und Wand eingebaute
+    Materialien sind (10.6).
+  - Der Decal-Lauf ist der einzige, in dem die Tiefe zweimal hintereinander DEPTH_WRITE ↔
+    PIXEL_SHADER_RESOURCE wechselt (Resolve, dann `EncodeDecals`). Er ist mit Debug-Layer
+    fehlerfrei. Der selbst beleuchtete Decal liegt über dem Resolve, die 1,0/255 sind der
+    eingebaute Boden (10.6).
 
-**Debug-Layer.** In allen 21 D3D12-Editorläufen und den drei Spielläufen gab es **0 Fehler**
+**Debug-Layer.** In allen 21 D3D12-Editorläufen der Haupttabelle, den zwölf Läufen für TAA, SSAO
+und Decals und den drei Spielläufen gab es **0 Fehler**
 und keine Device-Removal. Drei Warnungstexte kommen vor:
 - „slot 3 … discarded“: einmal je G-Buffer-Material-PSO, siehe oben.
 - „ClearRenderTargetView: The clear values do not match …“: vorbestehend, gleich oft in Forward-
