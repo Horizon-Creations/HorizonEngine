@@ -76991,6 +76991,22 @@ static void ma_engine_node_process_pcm_frames__sound(ma_node* pNode, const float
                         totalFramesConverted += framesConverted;
                     }
 
+                    /*
+                    HE-PATCH(sound-tail): the loop above keeps reading until the cache is full, so
+                    when the data source runs dry part-way through a chunk (any clip whose length
+                    is not a multiple of the cache size, 512 frames) its last read comes back with
+                    0 frames and MA_AT_END while the cache already holds the clip's final frames.
+                    Marking the sound as at-end then discards them: a non-looping PCM voice lost
+                    everything after its last full 512-frame chunk (4800 frames played 4608), and
+                    a clip shorter than one chunk played nothing at all. The f32 path above never
+                    sees this because ma_data_source_read_pcm_frames() itself only reports
+                    MA_AT_END when it read nothing. Do the same here: frames in the cache are good
+                    and get played, and the next read, which finds the cache empty, reports the end.
+                    */
+                    if (result == MA_AT_END && totalFramesConverted > 0) {
+                        result = MA_SUCCESS;
+                    }
+
                     framesJustRead = totalFramesConverted;
                 }
 

@@ -1409,12 +1409,14 @@ TEST_CASE("AudioEngine: a clip asset's trim is the voice's range")
 // same AudioEnvelope::apply the editor and Extract use. In noDevice mode at the
 // engine's own rate the mixer passes a 2D voice through unscaled, so what comes
 // out can be held against the samples times the curve, frame by frame — with
-// two properties of miniaudio's sound node that hold with or without a curve
+// one property of miniaudio's sound node that holds with or without a curve
 // (measured on the raw-PCM path, which has never known about curves): the
 // linear resampler delays the voice by exactly ONE frame (mix[i] is source
-// frame i-1, mix[0] is silence), and a voice that ends stops a couple of
-// hundred frames before its last one comes out. Hence the comparison skips
-// frame 0 and the tail.
+// frame i-1, mix[0] is silence), and so holds back the clip's very last frame,
+// which is never flushed. Hence the comparison starts at the voice's frame 0
+// one frame late and ends one frame short. (Until Thema 172 a voice also lost
+// everything after its last full 512-frame chunk — see the vendored
+// miniaudio.h, HE-PATCH(sound-tail) — and the comparison had to skip that tail.)
 
 namespace
 {
@@ -1459,15 +1461,15 @@ namespace
 
     // Worst difference between the mix and, one frame later (see above), the
     // clip's frame `frameOf(i)` — i counting the frames the voice was fed —
-    // times the curve's gain there.
+    // times the curve's gain there. Runs up to the last frame the voice puts
+    // out (`frames` - 1), so a voice that stops early shows up as a difference.
     constexpr uint64_t kMixDelay = 1;
-    constexpr uint64_t kMixTail  = 256;
     template <typename FrameOf>
     double worstAgainstCurve(const std::vector<float>& mix, const AudioAsset& clip,
                              const HE::AudioEnvelope& curve, uint64_t frames, FrameOf frameOf)
     {
         double worst = 0.0;
-        for (uint64_t i = 0; i + kMixDelay < frames - kMixTail; ++i)
+        for (uint64_t i = 0; i + kMixDelay < frames; ++i)
         {
             const uint64_t f = frameOf(i);
             const float    g = curve.rampedGain(f, kCurveRate);
@@ -1554,15 +1556,14 @@ TEST_CASE("AudioEngine: an asset without a curve sounds exactly as before")
     CHECK(sameAsRaw);
 
     // … and the editor's preview, which always has the stage in (so a curve can
-    // be drawn while it plays), is bit-identical with an empty curve as well —
-    // up to the tail: the raw path loses its last ~200 frames (see above), the
-    // stage hands them out. So the staged voice is compared before the tail, and
-    // it must still END like any voice (the editor reaps a preview by it).
+    // be drawn while it plays), is bit-identical with an empty curve as well,
+    // to the last frame, and it must still END like any voice (the editor reaps
+    // a preview by it).
     h = engine.play(clip.audioData, kCurveRate, 2, HE::AudioEnvelope{}, 0);
     REQUIRE(h != 0);
     CHECK(engine.hasSoundEnvelope(h));
     const std::vector<float> staged = pullMix(engine, 4800);
-    const bool sameThroughStage = std::equal(staged.begin(), staged.end() - kMixTail * 2, raw.begin());
+    const bool sameThroughStage = staged == raw;
     CHECK(sameThroughStage);
     pullMix(engine, 4800);
     CHECK_FALSE(engine.isPlaying(h));
@@ -1570,6 +1571,125 @@ TEST_CASE("AudioEngine: an asset without a curve sounds exactly as before")
 
     // And all of them are the clip's own samples.
     CHECK(worstAgainstCurve(raw, clip, HE::AudioEnvelope{}, 4800, [](uint64_t i) { return i; }) < 1e-6);
+    engine.shutdown();
+}
+
+// ─── A voice plays to its end (Thema 172) ────────────────────────────────────
+// miniaudio's sound node reads a non-f32 source (the PCM16 buffer) in chunks of
+// 512 frames, and used to drop the part after the last FULL chunk: a 4800-frame
+// clip went silent at frame 4608, a clip under 512 frames played nothing, and a
+// voice with a curve (whose stage reads as f32) played longer than one without.
+// Fixed in the vendored miniaudio.h, HE-PATCH(sound-tail). The voice still comes
+// out one frame late and the resampler keeps the clip's last frame (see above),
+// so a clip of N frames of non-zero samples puts out exactly the frames 1 .. N-1.
+
+namespace
+{
+    AudioAsset constantClip(int frames)
+    {
+        AudioAsset a;
+        a.type       = HE::AssetType::Audio;
+        a.sampleRate = kCurveRate;
+        a.channels   = 2;
+        a.encoding   = AudioEncoding::PCM16;
+        a.audioData.resize(static_cast<size_t>(frames) * 2 * sizeof(int16_t));
+        auto* s = reinterpret_cast<int16_t*>(a.audioData.data());
+        for (int i = 0; i < frames * 2; ++i) s[i] = 8192;
+        return a;
+    }
+
+    // Frames [first, last] of `mix` are non-zero and everything outside is
+    // silent, in either channel. Returns {first, last}, or {~0, 0} for silence.
+    std::pair<uint64_t, uint64_t> soundingSpan(const std::vector<float>& mix, uint64_t& holes)
+    {
+        uint64_t first = ~uint64_t(0), last = 0;
+        const uint64_t frames = mix.size() / 2;
+        for (uint64_t i = 0; i < frames; ++i)
+            if (mix[i * 2] != 0.0f || mix[i * 2 + 1] != 0.0f)
+            {
+                if (first == ~uint64_t(0)) first = i;
+                last = i;
+            }
+        holes = 0;
+        if (first != ~uint64_t(0))
+            for (uint64_t i = first; i <= last; ++i)
+                if (mix[i * 2] == 0.0f || mix[i * 2 + 1] == 0.0f) ++holes;
+        return { first, last };
+    }
+}
+
+namespace
+{
+    // Pull a voice past its end in pieces off the chunk grid and check it came
+    // out as the frames 1 .. expectedLast, without a hole, and then ended.
+    void checkPlaysToEnd(AudioEngine& engine, uint64_t h, uint64_t expectedLast, uint64_t pull)
+    {
+        REQUIRE(h != 0);
+        const std::vector<float> mix = pullMix(engine, pull, 331);
+        uint64_t holes = 0;
+        const auto span = soundingSpan(mix, holes);
+        CHECK(span.first == 1);                  // the one-frame delay
+        CHECK(span.second == expectedLast);
+        CHECK(holes == 0);
+        CHECK_FALSE(engine.isPlaying(h));        // and it ended
+        engine.stop(h);
+    }
+}
+
+TEST_CASE("AudioEngine: a PCM voice plays to its last frame, whatever its length")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    // Around the cache size (512), below it, a multiple of it, and the 4800 of
+    // the original finding. The pull pieces (331) keep off the chunk grid.
+    for (int n : { 2, 100, 511, 512, 513, 1000, 1024, 4800, 9600 })
+    {
+        INFO("clip of " << n << " frames");
+        const AudioAsset clip = constantClip(n);
+        const uint64_t last   = static_cast<uint64_t>(n) - 1;
+        const uint64_t pull   = static_cast<uint64_t>(n) + 2048;
+
+        // raw PCM
+        checkPlaysToEnd(engine, engine.play(clip.audioData, kCurveRate, 2), last, pull);
+
+        // an asset without a curve takes the same path
+        const uint64_t plain = engine.play(clip);
+        REQUIRE(plain != 0);
+        CHECK_FALSE(engine.hasSoundEnvelope(plain));
+        checkPlaysToEnd(engine, plain, last, pull);
+
+        // through the curve stage (reads as f32): the same length as without
+        const uint64_t staged = engine.play(clip.audioData, kCurveRate, 2, HE::AudioEnvelope{}, 0);
+        REQUIRE(staged != 0);
+        CHECK(engine.hasSoundEnvelope(staged));
+        checkPlaysToEnd(engine, staged, last, pull);
+    }
+
+    SUBCASE("a trimmed voice ends where the trim ends")
+    {
+        AudioAsset clip = constantClip(9600);
+        clip.edit.trim  = HE::AudioTrim::fromRange(1000, 3700, 9600);   // 2700 frames: 140 past a chunk
+        const uint64_t h = engine.play(clip);
+        REQUIRE(h != 0);
+        CHECK(engine.getSoundLengthFrames(h) == 2700);
+        checkPlaysToEnd(engine, h, 2699, 6000);
+    }
+
+    SUBCASE("a looping voice is untouched: no gap at the wrap, no end")
+    {
+        const AudioAsset clip = constantClip(1000);   // 488 frames past a chunk
+        const uint64_t h = engine.play(clip.audioData, kCurveRate, 2, 1.0f, 1.0f, true);
+        REQUIRE(h != 0);
+        const std::vector<float> mix = pullMix(engine, 3500, 331);
+        uint64_t holes = 0;
+        const auto span = soundingSpan(mix, holes);
+        CHECK(span.first == 1);
+        CHECK(span.second == 3499);
+        CHECK(holes == 0);
+        CHECK(engine.isPlaying(h));
+        engine.stop(h);
+    }
     engine.shutdown();
 }
 
