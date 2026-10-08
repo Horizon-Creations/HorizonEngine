@@ -176,11 +176,22 @@ target that links `HorizonContentSync`. Two different questions, checked
 separately, because the configure-time log line only answers the first one:
 
 1. **Do the credentials reach the compile definitions** of whatever links
-   `HorizonContentSync`? Witnessed yes on macOS, Linux and Windows; the lavapipe
-   fix below is expected to make it yes there too, but no completed run has
-   shown that line yet (the dispatch at the end of this step will be the
-   witness — check the newest run on this branch, not the ones linked here).
-   Verified by reading two completed runs' job logs directly
+   `HorizonContentSync`? Witnessed yes on macOS, Linux and Windows, and since
+   the fix below also on lavapipe: the run dispatched at the end of step 4
+   (`.../actions/runs/37823613186`, commit 94527920) logs
+   `HorizonContentSync: EngineContent endpoint ***@***:22` in all four jobs
+   (macOS, Linux, Windows, Linux · Vulkan (lavapipe)), and the three
+   `HE_ENGINE_CONTENT_*` variables show up (masked) in the lavapipe job's
+   `Configure` step environment. Witnessed in the step-5 verification, from
+   the finished job logs. In that run Windows again ran on the hosted
+   `windows-latest` runner (point 5 still stands). The run itself ended
+   `failure` on two tests only, `test_editor_help` and `editor_help_audit`,
+   on all three matrix jobs: they come from `7cef67a9` (Import to Project),
+   which is on the `release/0.7.0` base (the audit lists the same four open
+   controls on an unchanged `release/0.7.0` tree), not from the weather
+   change. The fix `978ac7e1` (topic 176) turns both green on top of this
+   branch; see the step-5 report in the topic.
+   Verified by reading completed runs' job logs directly
    (`gh api .../actions/jobs/<id>/logs`, grepped for the line below — not taken
    on faith from an earlier survey):
    - A green push run on `main`, 2026-10-08 08:56
