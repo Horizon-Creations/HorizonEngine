@@ -1967,3 +1967,22 @@ Eine Schicht braucht keine neue Textur; die Arrays bleiben unverändert.
 * Sechs Schichten heißt zweite Weightmap-Seite: das Malen auf Snow/Puddles legt `layerWeights2` an.
 * Die Weightmap hat 256² Texel über das ganze Terrain (`weightRes`) — auf großen Landschaften ist das
   die Pinsel-Auflösung.
+
+### 18.3 Weiche Ränder gemalter Flächen, Schnee ohne Kachelraster
+
+* **Kantige Pinselränder.** Die Weightmap wurde bilinear gelesen: bei 256² Texeln über das ganze Terrain
+  wird aus einem runden Pinselstempel ein Vieleck, dessen Knicke als gerade Facetten zu sehen sind.
+  Der Layer-Blend (`emitLayerBlendNode`, für ALLE Landscape-Materialien) liest die Gewichte jetzt über
+  eine geglättete Koordinate: der Bruchteil der Texelposition geht vor dem bilinearen Fetch durch
+  `smoothstep`, das Gewichtsfeld ist damit an den Texelgrenzen C1 statt stückweise linear. Auf den
+  Texelmitten und bei 0,5 ist das Ergebnis gleich dem alten Fetch; die Koordinate wird auf die
+  Texelmitten der Seite geklemmt (was der Clamp-Sampler vorher mit der rohen uv tat).
+* **Standard-Weightmap 512² statt 256²** (`TerrainComponent::weightRes`). Bereits bemalte Terrains
+  behalten ihre Auflösung — der Regler „Weightmap“ ist nach dem ersten Strich gesperrt; „Clear Paint“
+  entsperrt ihn (das Gemalte geht dabei verloren). Ein Pinsel-Falloff unter etwa zwei Texeln lässt den
+  Rand immer stufig; bei großen Terrains lieber 1024 wählen (4 MiB je Seite, im Szenenfile base64).
+* **Schnee ist jetzt gebombt** (Seed 53, ein Hex-Raster für Albedo/Normal/Maske wie bei den anderen
+  Schichten). Als einfacher Read zeigte eine große Schneefläche das Kachelraster gleicher dunkler
+  Spuren. Das kostet drei weitere Array-Reads je Pixel mit Schnee im Bild (gesamt 24 statt 21 Reads);
+  „Texture Bombing“ aus bleibt der Schalter für den ungebombten Weg. Wer die Kachel auch größer will:
+  „Rock Tile Size“ (gilt für Fels und Schnee).

@@ -2013,7 +2013,7 @@ TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
 	// The sampler is declared at the reserved binding and sampled at the RAW UV
 	// (the weightmap spans the whole terrain; detail tiling is per layer).
 	CHECK(gen.glsl.find("binding = 14) uniform sampler2D heLandscapeWeights") != std::string::npos);
-	CHECK(gen.glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+	CHECK(gen.glsl.find("_wuv);") != std::string::npos);     // the smoothed coordinate, see emitLayerBlendNode
 	// Normalised by the weight sum, so a partly painted texel doesn't darken…
 	CHECK(gen.glsl.find("1e-4") != std::string::npos);
 	// …and a texel with NO weight at all falls back to layer 0 instead of
@@ -2082,7 +2082,7 @@ TEST_CASE("Landscape Layer Blend reads layers 4..7 from the right half of the sa
 		CHECK(g->glsl.find("textureSize(heLandscapeWeights, 0)") != std::string::npos);
 		CHECK(g->glsl.find("textureLod(heLandscapeWeights") != std::string::npos);
 		// … beside the untouched square-map read the blend always made.
-		CHECK(g->glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+		CHECK(g->glsl.find("texture(heLandscapeWeights, ") != std::string::npos);
 	}
 	// Only a blend with a fifth layer reads the second page at all.
 	CHECK(count(three.glsl, "textureLod(heLandscapeWeights") == 1);
@@ -2495,7 +2495,7 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 		CHECK(names[static_cast<size_t>(HE::AutoLandscapePaintLayer::Auto)] == "Auto");
 		CHECK(names[static_cast<size_t>(HE::AutoLandscapePaintLayer::Puddles)] == "Puddles");
 		CHECK(gen.layerNames == names);
-		CHECK(gen.glsl.find("heLandscapeWeights, vUV") != std::string::npos);
+		CHECK(gen.glsl.find("texture(heLandscapeWeights, ") != std::string::npos);
 		size_t blends = 0;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
 			if (n.type == HE::MatNodeType::LandscapeLayerBlend) { ++blends; CHECK(n.s == HE::kAutoLandscapePaintLayerNames); }
@@ -2534,15 +2534,15 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 				sawSnow = sawSnow || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Snow);
 			}
 		}
-		CHECK(reads == 21); // 3 bombed layers x 3 maps x (plain + bombed) + Snow x 3 maps
+		CHECK(reads == 24); // 4 bombed layers (Grass, Dirt, Rock, Snow) x 3 maps x (plain + bombed)
 		CHECK(sawSnow);
 	}
 
-	// Grass, Dirt, Rock each read albedo + normal + mask on ONE grid (three grids
-	// in total); Snow is a plain read. The uv here is a coerced
+	// Grass, Dirt, Rock and Snow each read albedo + normal + mask on ONE grid (four
+	// grids in total). The uv here is a coerced
 	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
 	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 3u);
+	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 4u);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
 	CHECK(gen.switches[0].second);

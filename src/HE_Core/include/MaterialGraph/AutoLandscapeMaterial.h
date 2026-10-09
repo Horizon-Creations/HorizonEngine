@@ -53,9 +53,10 @@
 //
 // Tiling runs in WORLD space (world XZ / tile size), not over the terrain's
 // 0..1 UV, so a texel is the same size on a 100 m and on a 4 km landscape.
-// Rock, Grass and Dirt are read through texture bombing (hex tiling, one grid
-// per layer shared by its albedo/normal/mask, own seed per layer); Snow is read
-// plainly — bombing triples the reads (docs §9.4). The static switch "Texture
+// Rock, Grass, Dirt and Snow are read through texture bombing (hex tiling, one grid
+// per layer shared by its albedo/normal/mask, own seed per layer). Snow used to be
+// read plainly to save the reads (docs §9.4) — on a painted or high field of it the
+// single tile showed as a grid of identical marks. The static switch "Texture
 // Bombing" turns the bombed reads into plain ones at compile time (instance
 // override → own permutation; the witness uses it as the negative control).
 #pragma once

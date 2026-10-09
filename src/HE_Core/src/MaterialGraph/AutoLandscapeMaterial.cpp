@@ -137,7 +137,9 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const LayerReads grass = layer(AutoLandscapeLayer::Grass,     uvGround, 11);
     const LayerReads dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);
     const LayerReads rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
-    const LayerReads snow  = layer(AutoLandscapeLayer::Snow,      uvRock,   -1);
+    // Snow is bombed too: read plainly, its one tile showed as a visible grid of the
+    // same dark marks on any larger painted or high-altitude field of it.
+    const LayerReads snow  = layer(AutoLandscapeLayer::Snow,      uvRock,   53);
     // Slice 4 of the arrays (WetGround) is not read: puddles are an overlay on
     // the ground below, not a layer of their own.
 

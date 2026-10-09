@@ -1026,15 +1026,30 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // only SELECTED by the size test, so no implicit-derivative sample
             // sits in control flow.
             const bool page2 = names.size() > 4;
-            const std::string ts = v + "_ts", wu = v + "_wu";
+            const std::string ts = v + "_ts", wu = v + "_wu", wsz = v + "_wsz", wuv = v + "_wuv";
+            // The weights are read through a SMOOTHED coordinate: the fractional texel
+            // position goes through smoothstep before the bilinear fetch, so the weight
+            // field is C1 across texel borders instead of piecewise linear. Plain
+            // bilinear over a coarse map turns a round brush stamp into a polygon —
+            // the diamond/octagon edge of a painted patch — and the creases of the
+            // linear ramps show as straight facets. At the texel centres and at 0.5 the
+            // result equals the plain fetch; only the shape between them changes. The
+            // coordinate is clamped to the page's texel centres, which is what the
+            // clamp sampler did to the plain uv anyway.
             decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
                  + " bool " + v + "_p2 = " + ts + ".x > 1.5 * " + ts + ".y;"
-                 + " float " + wu + " = clamp(vUV.x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
-                 + " vec4 " + v + "_wf = texture(heLandscapeWeights, vUV);"
-                 + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", vUV.y), 0.0);"
+                 + " vec2 " + wsz + " = vec2(" + v + "_p2 ? " + ts + ".x * 0.5 : " + ts + ".x, " + ts + ".y);"
+                 + " vec2 " + v + "_wt = vUV * " + wsz + " - 0.5;"
+                 + " vec2 " + v + "_wi = floor(" + v + "_wt);"
+                 + " vec2 " + v + "_wq = " + v + "_wt - " + v + "_wi;"
+                 + " vec2 " + wuv + " = clamp((" + v + "_wi + 0.5 + " + v + "_wq * " + v + "_wq * (3.0 - 2.0 * " + v + "_wq)) / " + wsz
+                 + ", 0.5 / " + wsz + ", 1.0 - 0.5 / " + wsz + ");"
+                 + " float " + wu + " = clamp(" + wuv + ".x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
+                 + " vec4 " + v + "_wf = texture(heLandscapeWeights, " + wuv + ");"
+                 + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", " + wuv + ".y), 0.0);"
                  + " vec4 " + v + "_w = " + v + "_p2 ? " + v + "_wl : " + v + "_wf;";
             if (page2)
-                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, vUV.y), 0.0);"
+                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, " + wuv + ".y), 0.0);"
                       + " vec4 " + v + "_w2 = " + v + "_p2 ? " + v + "_wr : vec4(0.0);";
             decl += " float " + v + "_s = " + wsum + ";"
                  + " vec3 " + v + " = " + v + "_s > 1e-4 ? (" + sum + ") / " + v + "_s : "
