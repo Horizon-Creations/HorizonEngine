@@ -52,7 +52,8 @@ public:
 	// mayModify() is enforced HERE, once, so no caller can forget it. The panel
 	// additionally hides the buttons and explains why.
 	void requestInit(bool lfsAvailable);
-	void requestCommitAll(const std::string& message);
+	// `forcePush`: push after this commit even with auto-push off ("Commit & Push").
+	void requestCommitAll(const std::string& message, bool forcePush = false);
 	// ── Per-file operations (Source Control panel) ───────────────────────────
 	// Paths are repository-relative, the keys of status().files.
 	void requestStage(std::vector<std::string> paths);

@@ -8205,11 +8205,110 @@ namespace
 	  "switched off and you move to it once you have committed.",
 	  "", "" },
 	{ "sc.commit", "Commit",
-	  "Records every changed file in one commit with the message above; the "
-	  "button says how many that is. It stays unavailable without a message, with "
+	  "Records a commit with the message above. With files ticked it commits exactly "
+	  "those, and the button says how many; with nothing ticked it commits every "
+	  "changed file, as it always did. It stays unavailable without a message, with "
 	  "nothing changed, and while a conflict is unresolved — a commit that keeps "
-	  "conflict markers preserves the mess for good. With auto-push on, the "
-	  "commit goes to the remote as it is made.",
+	  "conflict markers preserves the mess for good. With auto-push on, the commit "
+	  "goes to the remote as it is made.",
+	  "", "" },
+	{ "sc.commit.more", "More ways to commit",
+	  "Commit and push in one step, commit everything even though some files are "
+	  "ticked, or fold what is staged into the last commit.",
+	  "", "" },
+	{ "Source Control Panel/Commit & Push", "",
+	  "Commits (the ticked files, or everything when none is ticked) and pushes the "
+	  "branch to the remote straight away. If the push fails the commit stays; "
+	  "the message says so.",
+	  "", "" },
+	{ "Source Control Panel/Commit everything (stage all first)", "",
+	  "Stages every changed file and commits them all, ignoring which ones are "
+	  "ticked. For the moment you ticked a few files and then decided you wanted "
+	  "the lot after all.",
+	  "", "" },
+	{ "Source Control Panel/Amend last commit", "",
+	  "Rewrites the last commit: the ticked files are added to it and, if you "
+	  "typed a message, it replaces the old one. Only offered while that commit has "
+	  "not been pushed, because rewriting one the server already has would hurt "
+	  "everyone who pulled it.",
+	  "", "" },
+	{ "sc.row.stage", "Stage",
+	  "Tick to include this file in the next commit. Ticked files are committed "
+	  "alone; leave all unticked to commit everything.",
+	  "", "" },
+	{ "sc.row.unstage", "Unstage",
+	  "Untick to take this file out of the next commit. The file itself is not "
+	  "touched; it moves back to Changes.",
+	  "", "" },
+	{ "sc.row.discard", "Discard changes",
+	  "Throws away your edits to this file and puts it back to how the last commit "
+	  "has it. Asks first, because the edits are not in any commit and cannot be "
+	  "brought back.",
+	  "", "" },
+	{ "sc.row.delete", "Delete new file",
+	  "Deletes this file from the project folder. It is not in any commit yet, so "
+	  "there is no getting it back. Asks first.",
+	  "", "" },
+	{ "sc.row.reveal", "Show in Content Browser",
+	  "Opens the Content Browser at this file and selects it. Double-clicking the "
+	  "row does the same.",
+	  "", "" },
+	{ "sc.row.mine", "Keep mine",
+	  "Resolves the conflict with the version from the branch you are on and "
+	  "stages the file. The other side's edits to it are dropped.",
+	  "", "" },
+	{ "sc.row.theirs", "Take theirs",
+	  "Resolves the conflict with the incoming version and stages the file. Your "
+	  "edits to it are dropped.",
+	  "", "" },
+	{ "sc.stage_all", "Stage all",
+	  "Ticks every file in this group (only the ones the filter shows).",
+	  "", "" },
+	{ "sc.unstage_all", "Unstage all",
+	  "Unticks every staged file (only the ones the filter shows). Nothing on "
+	  "disk changes.",
+	  "", "" },
+	{ "sc.discard_all", "Discard all",
+	  "Throws away your edits to every file in this group (only the ones the filter "
+	  "shows) after asking. Not undoable.",
+	  "", "" },
+	{ "sc.delete_all", "Delete all",
+	  "Deletes every new file in this group (only the ones the filter shows) from "
+	  "the project folder after asking. They are in no commit, so not undoable.",
+	  "", "" },
+	{ "sc.filter", "Filter by type",
+	  "Shows only one kind of asset in the list below: scenes, materials, "
+	  "textures, meshes, code, audio. The number is how many changed files there "
+	  "are of that kind.",
+	  "", "" },
+	{ "Source Control Panel/Switch", "",
+	  "Checks this branch out and replaces the files in the project folder with "
+	  "its contents. With uncommitted changes it asks whether to stash them or "
+	  "carry them over.",
+	  "", "" },
+	{ "Source Control Panel/Check out", "",
+	  "Creates a local branch that follows this one on the server and switches to "
+	  "it. With uncommitted changes it asks whether to stash them or carry them "
+	  "over.",
+	  "", "" },
+	{ "Source Control Panel/Bring back stashed changes", "",
+	  "Re-applies the most recent stash and removes it from the list. If it "
+	  "conflicts with the current files, git keeps the stash and the conflicts "
+	  "show up under Changes.",
+	  "", "" },
+	{ "Source Control Panel/Manage branches…", "",
+	  "Opens the Branches tab: every branch on this computer, the ones that only "
+	  "exist on the server, and any stashed changes.",
+	  "", "" },
+	{ "Source Control Panel/Carry them over", "",
+	  "Switches branch and takes your uncommitted changes along. This works only "
+	  "when the other branch has not changed the same files; otherwise git refuses "
+	  "and nothing moves.",
+	  "", "" },
+	{ "Source Control Panel/Stash & switch", "",
+	  "Puts all uncommitted changes (new files included) in a stash, switches to a "
+	  "clean project on the other branch, and keeps the stash for you to bring "
+	  "back from the Branches tab.",
 	  "", "" },
 
 	// ── The startup dialog for a missing git ─────────────────────────────────

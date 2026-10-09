@@ -154,17 +154,18 @@ void GitController::requestInit(bool lfsAvailable)
 	m_service.requestInit(m_projectRoot, lfsAvailable);
 }
 
-void GitController::requestCommitAll(const std::string& message)
+void GitController::requestCommitAll(const std::string& message, bool forcePush)
 {
 	if (!mayModify() || message.empty()) return;
-	m_service.requestCommitAll(message, autoPushAfterCommit);
+	const bool push = autoPushAfterCommit || forcePush;
+	m_service.requestCommitAll(message, push);
 	// Reward moment (EditorRewards.h): armed only if the service queued it
 	// (busy at once) — without a worker the request vanishes, and an old
 	// "Committed." in lastInfo must not answer for it. The service pushes
 	// after the commit only where there is a remote.
 	if (m_service.busy())
 		m_syncWatch.requested(HE::Ed::Rewards::kSyncCommit
-		                      | (autoPushAfterCommit && !m_service.remoteUrl().empty()
+		                      | (push && !m_service.remoteUrl().empty()
 		                             ? HE::Ed::Rewards::kSyncPush : 0));
 }
 
