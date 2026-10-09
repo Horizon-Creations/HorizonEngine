@@ -811,14 +811,14 @@ TEST_CASE("inspector ui: Add Component is grouped, and a typed search ends on En
 }
 
 // ── The engine water material on the panel (Thema 152) ──────────────────────
-// Engine/Materials/Water.hasset is the first material that ships with fifteen
-// parameters, three of them packed Vec4s. What the Details panel owes it: every
+// Engine/Materials/Water.hasset is the first material that ships with sixteen
+// parameters (the whole HeParams block), most of them packed Vec4s. What the Details panel owes it: every
 // one of them on the panel, and every one an edit of THIS entity (an override),
 // not of the shared engine asset. Driven like the cases above, in a window tall
 // enough for the whole Material section, edited bottom-up because an edit adds
 // a "Reset to material default" button under its row and moves everything below.
 #ifdef HE_EDITOR_DEPS_DIR
-TEST_CASE("inspector ui: the engine water material shows all fifteen parameters, and each one edits this entity")
+TEST_CASE("inspector ui: the engine water material shows all sixteen parameters, and each one edits this entity")
 {
 	Harness harness;
 	constexpr int TW = 420, TH = 2400;
@@ -842,7 +842,7 @@ TEST_CASE("inspector ui: the engine water material shows all fifteen parameters,
 		sharedBefore = m->shaderParamData;
 		names.insert(m->graphParamNames.begin(), m->graphParamNames.end());
 	}
-	REQUIRE(names.size() == 15);
+	REQUIRE(names.size() == 16);
 
 	// Selectable without any setup: the material slot's picker lists it
 	// (EditorWidgets → HcEditorUtil::listAssets, the same scan the panel runs).
@@ -920,7 +920,7 @@ TEST_CASE("inspector ui: the engine water material shows all fifteen parameters,
 	}
 	REQUIRE_MESSAGE(texAt >= 0, "'+ Texture Slot' not found on the panel");
 	REQUIRE_MESSAGE(saveAt > texAt, "'Save Material' not found below the texture slots");
-	// Every parameter is a row of its own between the two — fifteen controls.
+	// Every parameter is a row of its own between the two — sixteen controls.
 	CHECK(saveAt - texAt - 1 == static_cast<int>(names.size()));
 
 	// Edit each one, last row first: press on its first field, drag right, let go.
