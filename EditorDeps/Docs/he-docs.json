@@ -7188,11 +7188,237 @@
        ],
        "k": "callout",
        "tone": "note"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Opening a project from the file manager"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A project file ("
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": ") opens in the editor with a double click in Finder, Explorer or your Linux file manager. The editor takes it the same way the Hub's own Open does: if another project is open and has unsaved changes, it asks first, and if that very project is already open, nothing happens. The path also works on the command line, as in "
+        },
+        {
+         "s": "c",
+         "t": "HorizonEditor MyGame.heproj"
+        },
+        {
+         "s": "",
+         "t": ". If a "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " named at launch is missing, or the path is a folder, the editor shows the Project Hub with the reason instead of the last project. Anything that is not a "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " is only noted in the log."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Platform"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "How the file type is registered"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What you do"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "macOS"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The app's "
+          },
+          {
+           "s": "c",
+           "t": "Info.plist"
+          },
+          {
+           "s": "",
+           "t": " declares the type, so the "
+          },
+          {
+           "s": "c",
+           "t": ".dmg"
+          },
+          {
+           "s": "",
+           "t": " already carries it."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Drag the app into "
+          },
+          {
+           "s": "c",
+           "t": "Applications"
+          },
+          {
+           "s": "",
+           "t": " and start it once. Until the first start macOS does not trust the new type, and a double click may open another program."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Windows"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Registry entries for the current user only, so no administrator is needed."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "After unpacking the "
+          },
+          {
+           "s": "c",
+           "t": ".zip"
+          },
+          {
+           "s": "",
+           "t": ", run "
+          },
+          {
+           "s": "c",
+           "t": "FileTypes\\register_heproj.cmd"
+          },
+          {
+           "s": "",
+           "t": " once. Run it again if you move the folder, because the registry holds the full path. "
+          },
+          {
+           "s": "c",
+           "t": "FileTypes\\unregister_heproj.cmd"
+          },
+          {
+           "s": "",
+           "t": " removes it."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Linux"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "A desktop entry and a MIME type in your own data directory ("
+          },
+          {
+           "s": "c",
+           "t": "~/.local/share"
+          },
+          {
+           "s": "",
+           "t": "), so no root is needed."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "After unpacking the archive, run "
+          },
+          {
+           "s": "c",
+           "t": "FileTypes/install_file_types.sh"
+          },
+          {
+           "s": "",
+           "t": " once, and again after moving the folder. "
+          },
+          {
+           "s": "c",
+           "t": "--uninstall"
+          },
+          {
+           "s": "",
+           "t": " takes it away."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Note:"
+          },
+          {
+           "s": "",
+           "t": " on macOS an editor that is already running receives the file as an open document event and switches to it after the unsaved changes question. Windows and Linux start a new editor for every double click and do not pass the file to one that is already running. To change the project inside a running editor, open it from there."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "note"
       }
      ],
      "eyebrow": "Starting point",
      "id": "project-hub",
-     "text": "The editor launches into the Project Hub: a list of known projects plus a New Project form. Creating a project asks for a template, a scripting language, a name and a directory. Templates Template What it seeds Empty Project Only the basic folder skeleton (Content/, Config/, Shaders/) — no extra content. Game Scripts, Audio, Scenes, Models, Textures, Materials, Prefabs and UI folders, plus a startup scene that already contains a Sky and Weather entity. Simulation Data and Materials folders; startup scene with Sky and Weather. Tool Source and UI folders; a bare world with no Sky — ideal for utilities and non-game apps. Scripting language The language is a whole-project choice, fixed at creation. It gates which gameplay-logic assets the Content Browser offers and which components appear: Language What you write HorizonCode Visual node graphs; compiles to native C++ on export. Unlocks HorizonCode Class and Player Controller / Player Character assets. Lua Lightweight text scripting (the default script backend). Unlocks Script assets and the Script component. Python CPython scripting — needs a Python install on dev machines. Same Script workflow as Lua. C++ A native GameLogic library built with your own toolchain. Scaffolds a compilable Source/ tree (game runtime, GameInstance, a per-scene level script and a CMakeLists.txt). Hidden from the picker when no CMake/compiler is found on the machine. Note: widgets, the Level Script and the Game Instance are always authored in HorizonCode, regardless of the project language — the language choice governs entity scripting and gameplay classes.",
+     "text": "The editor launches into the Project Hub: a list of known projects plus a New Project form. Creating a project asks for a template, a scripting language, a name and a directory. Templates Template What it seeds Empty Project Only the basic folder skeleton (Content/, Config/, Shaders/) — no extra content. Game Scripts, Audio, Scenes, Models, Textures, Materials, Prefabs and UI folders, plus a startup scene that already contains a Sky and Weather entity. Simulation Data and Materials folders; startup scene with Sky and Weather. Tool Source and UI folders; a bare world with no Sky — ideal for utilities and non-game apps. Scripting language The language is a whole-project choice, fixed at creation. It gates which gameplay-logic assets the Content Browser offers and which components appear: Language What you write HorizonCode Visual node graphs; compiles to native C++ on export. Unlocks HorizonCode Class and Player Controller / Player Character assets. Lua Lightweight text scripting (the default script backend). Unlocks Script assets and the Script component. Python CPython scripting — needs a Python install on dev machines. Same Script workflow as Lua. C++ A native GameLogic library built with your own toolchain. Scaffolds a compilable Source/ tree (game runtime, GameInstance, a per-scene level script and a CMakeLists.txt). Hidden from the picker when no CMake/compiler is found on the machine. Note: widgets, the Level Script and the Game Instance are always authored in HorizonCode, regardless of the project language — the language choice governs entity scripting and gameplay classes. Opening a project from the file manager A project file (.heproj) opens in the editor with a double click in Finder, Explorer or your Linux file manager. The editor takes it the same way the Hub's own Open does: if another project is open and has unsaved changes, it asks first, and if that very project is already open, nothing happens. The path also works on the command line, as in HorizonEditor MyGame.heproj. If a .heproj named at launch is missing, or the path is a folder, the editor shows the Project Hub with the reason instead of the last project. Anything that is not a .heproj is only noted in the log. Platform How the file type is registered What you do macOS The app's Info.plist declares the type, so the .dmg already carries it. Drag the app into Applications and start it once. Until the first start macOS does not trust the new type, and a double click may open another program. Windows Registry entries for the current user only, so no administrator is needed. After unpacking the .zip, run FileTypes\\register_heproj.cmd once. Run it again if you move the folder, because the registry holds the full path. FileTypes\\unregister_heproj.cmd removes it. Linux A desktop entry and a MIME type in your own data directory (~/.local/share), so no root is needed. After unpacking the archive, run FileTypes/install_file_types.sh once, and again after moving the folder. --uninstall takes it away. Note: on macOS an editor that is already running receives the file as an open document event and switches to it after the unsaved changes question. Windows and Linux start a new editor for every double click and do not pass the file to one that is already running. To change the project inside a running editor, open it from there.",
      "title": "Project Hub"
     },
     {

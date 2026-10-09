@@ -60,6 +60,7 @@
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
 #include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
+#include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
@@ -1558,6 +1559,42 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// Open Project does, unsaved-work prompt and session teardown included.
 	if (std::string cloned; GitCloneDialog::takeOpenRequest(cloned))
 		requestGuarded(GuardedAction::OpenProjectPath, cloned);
+
+	// A .heproj double-clicked in the file manager while a project is open
+	// (ProjectLaunchOpen.h): the same door as File ▸ Open Project. It waits in its
+	// slot while any popup is up — above all the unsaved-changes prompt, whose
+	// pending action it would otherwise overwrite under the user's cursor.
+	// Said once per wait, naming the dialog: a project that was double-clicked
+	// and then "did nothing" is otherwise waiting behind a dialog nobody noticed.
+	static bool s_launchWaitLogged = false;
+	if (ProjectLaunchOpen::pending() &&
+	    ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+	{
+		if (!s_launchWaitLogged)
+		{
+			const ImGuiContext& g = *ImGui::GetCurrentContext();
+			const ImGuiWindow* top = g.OpenPopupStack.empty() ? nullptr
+			                                                  : g.OpenPopupStack.back().Window;
+			HE_LOG_INFO(Editor, "Editor: a project handed over by the system waits until the "
+			                    "open dialog is closed (%s)", top ? top->Name : "a popup");
+			s_launchWaitLogged = true;
+		}
+	}
+	else if (ProjectLaunchOpen::pending())
+	{
+		s_launchWaitLogged = false;
+		std::string launched;
+		ProjectLaunchOpen::take(launched);
+		const std::string& current = ctx.projectManager->currentProject().path;
+		if (ProjectLaunchOpen::decide(ctx.projectLoaded, current, launched) ==
+		    ProjectLaunchOpen::Action::AlreadyOpen)
+			HE_LOG_INFO(Editor, "Editor: %s is already the open project", launched.c_str());
+		else
+		{
+			HE_LOG_INFO(Editor, "Editor: opening %s (handed over by the system)", launched.c_str());
+			requestGuarded(GuardedAction::OpenProjectPath, launched);
+		}
+	}
 
 	// ── Menu actions shared by the ImGui menu bar and the macOS native menu ────
 	// Open (or focus) the Level Script / Game Instance as editor tabs.

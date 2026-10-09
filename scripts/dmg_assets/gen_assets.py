@@ -2,7 +2,10 @@
 """Generate the HorizonEditor macOS DMG assets from the HC logo.
 
 Subcommands:
-  icon        Build a macOS AppIcon.icns (full HC lockup on a premium light squircle).
+  icon        Build a macOS AppIcon.icns (full HC lockup on a premium light squircle;
+              --format png: the same plate as a 256 px PNG for the Linux desktop entry).
+  docicon     Build ProjectIcon.icns, the Finder icon of .heproj project files
+              (--format ico / png: the same page for Windows and Linux).
   background  Build the DMG window background (1x PNG + @2x PNG) for a given theme.
 
 Everything is derived deterministically from EditorDeps/Images/HC_Logo.png so the
@@ -409,27 +412,108 @@ def render_icon_master(logo_path, size=1024):
     return canvas
 
 
-def cmd_icon(args):
-    master = render_icon_master(args.logo, 1024)
-    workdir = args.workdir or tempfile.mkdtemp(prefix="hcicon_")
-    iconset = os.path.join(workdir, "AppIcon.iconset")
+def render_document_master(logo_path, size=1024):
+    """Project-file (.heproj) document icon: a white page with a folded corner,
+    the HC lockup in the middle and the extension underneath — the shape Finder
+    uses for documents, so it reads as "a file of Horizon Editor", not as the app."""
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+
+    # macOS document proportions: the page fills ~80% of the height, ~62% width.
+    pw, ph = int(size * 0.62), int(size * 0.80)
+    x0, y0 = (size - pw) // 2, (size - ph) // 2
+    fold = int(pw * 0.26)
+
+    page = [(x0, y0), (x0 + pw - fold, y0), (x0 + pw, y0 + fold),
+            (x0 + pw, y0 + ph), (x0, y0 + ph)]
+
+    # soft drop shadow
+    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).polygon([(x + size // 128, y + size // 64) for x, y in page],
+                                   fill=(0, 0, 0, 70))
+    canvas.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(size / 64)))
+
+    body = vgradient(size, size, [(0.0, (255, 255, 255)),
+                                  (1.0, (246, 240, 228))]).convert("RGBA")
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).polygon(page, fill=255)
+    body.putalpha(mask)
+    canvas.alpha_composite(body)
+
+    d = ImageDraw.Draw(canvas)
+    d.line(page + [page[0]], fill=(206, 124, 36, 90), width=max(2, size // 256))
+    d.polygon([(x0 + pw - fold, y0), (x0 + pw - fold, y0 + fold), (x0 + pw, y0 + fold)],
+              fill=(238, 226, 200, 255), outline=(206, 124, 36, 90))
+
+    logo = autocrop_alpha(Image.open(logo_path))
+    target_w = int(pw * 0.70)
+    target_h = int(target_w * logo.height / logo.width)
+    logo = logo.resize((target_w, target_h), Image.LANCZOS)
+    canvas.alpha_composite(logo, ((size - target_w) // 2, y0 + int(ph * 0.42) - target_h // 2))
+
+    label = "HEPROJ"
+    f = font(int(size * 0.075), bold=True)
+    tw = d.textlength(label, font=f)
+    d.text(((size - tw) / 2, y0 + int(ph * 0.74)), label, font=f, fill=AMBER)
+
+    return canvas
+
+
+def write_icns(master, out, workdir=None, name="AppIcon"):
+    workdir_given = workdir is not None
+    workdir = workdir or tempfile.mkdtemp(prefix="hcicon_")
+    iconset = os.path.join(workdir, f"{name}.iconset")
     os.makedirs(iconset, exist_ok=True)
     sizes = [(16, "16x16"), (32, "16x16@2x"), (32, "32x32"), (64, "32x32@2x"),
              (128, "128x128"), (256, "128x128@2x"), (256, "256x256"),
              (512, "256x256@2x"), (512, "512x512"), (1024, "512x512@2x")]
-    for px, name in sizes:
+    for px, slot in sizes:
         master.resize((px, px), Image.LANCZOS).save(
-            os.path.join(iconset, f"icon_{name}.png"))
+            os.path.join(iconset, f"icon_{slot}.png"))
     if shutil.which("iconutil"):
-        subprocess.run(["iconutil", "-c", "icns", iconset, "-o", args.out],
+        subprocess.run(["iconutil", "-c", "icns", iconset, "-o", out],
                        check=True)
-        print(f"  icon: {args.out}")
+        print(f"  icon: {out}")
     else:
         # fallback: Pillow can write .icns directly (fewer sizes, still valid)
-        master.resize((512, 512), Image.LANCZOS).save(args.out, format="ICNS")
-        print(f"  icon (Pillow fallback): {args.out}")
-    if not args.workdir:
+        master.resize((512, 512), Image.LANCZOS).save(out, format="ICNS")
+        print(f"  icon (Pillow fallback): {out}")
+    if not workdir_given:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def cmd_icon(args):
+    master = render_icon_master(args.logo, 1024)
+    if args.format == "png":
+        write_png(master, args.out)
+    else:
+        write_icns(master, args.out, args.workdir)
+
+
+def write_ico(master, out):
+    """Windows icon: one file, the sizes Explorer asks for (16 in a list view, 256 in
+    the large-icon view). Pillow stores each as PNG, which Vista and later read."""
+    sizes = [(s, s) for s in (16, 24, 32, 48, 64, 128, 256)]
+    master.save(out, format="ICO", sizes=sizes)
+    print(f"  icon (ico): {out}")
+
+
+def write_png(master, out, px=256):
+    """Linux: the 256 px entry of the hicolor mimetypes theme."""
+    master.resize((px, px), Image.LANCZOS).save(out, format="PNG", optimize=True)
+    print(f"  icon (png {px}): {out}")
+
+
+def cmd_docicon(args):
+    master = render_document_master(args.logo, 1024)
+    # icns is what package_macos.sh asks for and stays the default; ico and png are
+    # the same page for the Windows ProgID and the Linux MIME type, so the three
+    # platforms show one picture for a .heproj.
+    if args.format == "ico":
+        write_ico(master, args.out)
+    elif args.format == "png":
+        write_png(master, args.out)
+    else:
+        write_icns(master, args.out, args.workdir, name="ProjectIcon")
 
 
 def main():
@@ -440,7 +524,17 @@ def main():
     pi.add_argument("--logo", required=True)
     pi.add_argument("--out", required=True)
     pi.add_argument("--workdir", default=None)
+    pi.add_argument("--format", default="icns", choices=["icns", "png"],
+                    help="icns for the macOS bundle (default), png for the Linux desktop entry")
     pi.set_defaults(func=cmd_icon)
+
+    pd = sub.add_parser("docicon")
+    pd.add_argument("--logo", required=True)
+    pd.add_argument("--out", required=True)
+    pd.add_argument("--workdir", default=None)
+    pd.add_argument("--format", default="icns", choices=["icns", "ico", "png"],
+                    help="icns for the macOS bundle (default), ico for Windows, png for Linux")
+    pd.set_defaults(func=cmd_docicon)
 
     pb = sub.add_parser("background")
     pb.add_argument("--logo", required=True)
