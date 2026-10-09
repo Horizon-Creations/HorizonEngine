@@ -343,6 +343,17 @@ namespace
 	  "transmittance, so it shows in clear, shallow water (low Turbidity) and "
 	  "not in deep or murky water.",
 	  "", "materials#water" },
+	{ "Material/Variation", "",
+	  "Breaks the repeat of the waves, the way texture bombing hides a tiling "
+	  "texture. A sum of waves is periodic, so on a big surface the same bright "
+	  "patch and the same foam dot come back row after row. The water is cut "
+	  "into hexes and each wave train runs once per hex with its own direction "
+	  "and phase; the hexes blend. x = hex size in wavelengths (3.5 = a few "
+	  "waves per hex), y = phase offset between hexes, 0..1 of a wavelength, "
+	  "z = direction offset between hexes in degrees (plus or minus), "
+	  "w = seam sharpness (1 = broad blends, 8 = sharp). y = 0 and z = 0 "
+	  "switch it off.",
+	  "", "materials#water" },
 
 	// ── Light ────────────────────────────────────────────────────────────────
 	{ "Light/Type", "",

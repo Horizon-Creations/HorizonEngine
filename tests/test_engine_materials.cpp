@@ -110,6 +110,7 @@ const Knob kWaterKnobs[] = {
 	{ "FoamColor",    MatParamKind::Color, { 0.82f, 0.88f, 0.90f, 0.0f } },
 	{ "Foam",         MatParamKind::Vec4,  { 0.06f, 0.5f, 0.7f, 0.3f } },
 	{ "Caustics",     MatParamKind::Vec4,  { 0.2f, 2.0f, 0.2f, 18.0f } },
+	{ "Variation",    MatParamKind::Vec4,  { 3.5f, 1.0f, 22.0f, 2.5f } },
 };
 constexpr int kWaterKnobCount = static_cast<int>(sizeof(kWaterKnobs) / sizeof(kWaterKnobs[0]));
 
@@ -155,7 +156,7 @@ Baked readBaked(const fs::path& file)
 }
 } // namespace
 
-TEST_CASE("Engine water material: loads as a lit Translucent graph with all fifteen knobs")
+TEST_CASE("Engine water material: loads as a lit Translucent graph with all sixteen knobs")
 {
 	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
 	Scratch s("load");
@@ -672,7 +673,7 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 	const WaterSources w = loadWaterSources("ubo");
 	REQUIRE(w.ok);
 
-	SUBCASE("CPU: fifteen knobs pack into the 64-float block the renderers upload")
+	SUBCASE("CPU: sixteen knobs pack into the 64-float block the renderers upload")
 	{
 		REQUIRE(static_cast<int>(w.paramNames.size()) == kWaterKnobCount);
 		REQUIRE(w.paramTypes.size() == w.paramNames.size());
