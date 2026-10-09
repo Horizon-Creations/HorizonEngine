@@ -3054,7 +3054,9 @@ namespace
 	  "", "editor#viewport" },
 	{ "viewport.camera-speed", "Camera Speed",
 	  "How fast the editor's fly camera moves, in metres per second. Hold Shift "
-	  "while flying for three times this.",
+	  "while flying for four times this. While flying (right mouse button held), "
+	  "the scroll wheel changes it on the spot: up is faster, down is slower, and "
+	  "this field follows.",
 	  "", "editor#viewport" },
 	{ "viewport.view", "View",
 	  "Which way the scene is looked at: Perspective, or an orthographic Top, "
