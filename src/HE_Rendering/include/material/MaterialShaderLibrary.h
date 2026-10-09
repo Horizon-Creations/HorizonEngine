@@ -407,7 +407,8 @@ public:
         float camPos[4]       = {}; // xyz camera position (normal faces the viewer)
     };
 
-    // Clustered-lighting variants of the two resolves (plan P7, Metal only):
+    // Clustered-lighting variants of the two resolves (plan P7; the sampled one
+    // also for HLSL and SPIR-V since Thema 150, the tile one Metal only):
     // heLitP shades ambient/GI/directional from a DIRECTIONAL-ONLY light window,
     // and all point/spot lights come from per-cluster light lists in SSBOs
     // (bindings 24/25/26 → Metal fragment buffers 4/5/6) — the 8-light limit
@@ -416,6 +417,28 @@ public:
     // GI local masks are not applied to cluster lights (v1 limitation).
     const Compiled& deferredResolveClustered(Backend backend);
     const Compiled& deferredResolveTileClustered(Backend backend);
+
+    // D3D (HLSL SM 5.0) register contract of deferredResolve[Clustered](HLSL),
+    // pinned in compileResolveVariant (Thema 150, docs/deferred-renderer-plan.md
+    // §10.4). Everything the preamble declares keeps the material pin table's
+    // registers (b0, t10..t18, t31..t33 with their moved samplers), the cluster
+    // lists keep t24..t26. Only the resolve's own inputs need numbers:
+    //   HeResolve (binding 23)        → b4   (b0..b13 is all SM 5.0 has)
+    //   heGB0/1/2, heGBDepth (19..22) → t27..t30, samplers s2/s4/s5/s6
+    // t27..t30 rather than the binding numbers: D3D11's built-in scene shader
+    // keeps its structured cluster lists on t18..t20, and a G-buffer view left on
+    // t19/t20 would be read as a cluster grid by the next built-in draw. The
+    // samplers are the ones the resolve leaves free (it declares neither heTex0
+    // nor heTexP0..3); s7 is the one register still unused.
+    static constexpr int kHlslResolveUboReg      = 4;
+    static constexpr int kHlslResolveGB0Reg      = 27;
+    static constexpr int kHlslResolveGB1Reg      = 28;
+    static constexpr int kHlslResolveGB2Reg      = 29;
+    static constexpr int kHlslResolveDepthReg    = 30;
+    static constexpr int kHlslResolveGB0Sampler   = 2;
+    static constexpr int kHlslResolveGB1Sampler   = 4;
+    static constexpr int kHlslResolveGB2Sampler   = 5;
+    static constexpr int kHlslResolveDepthSampler = 6;
 
     // Cross-compile, cached. The Metal backend pins the vertex to verts@0 / Uniforms@1 so
     // it drops into the fixed geometry-pass bind points; other backends use their natural

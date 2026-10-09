@@ -3262,8 +3262,8 @@ namespace
 	{ "Preferences/Display/Backend", "Backend",
 	  "Which graphics API the editor and the game render through. Changing it "
 	  "takes effect on the next start, and the list holds only what this build "
-	  "and this machine actually support — some features (deferred shading, "
-	  "ray-traced GI) exist on some backends and not on others.",
+	  "and this machine actually support — some features (ray-traced GI) exist "
+	  "on some backends and not on others.",
 	  "", "rendering#backends" },
 	{ "Preferences/Display/Render Path", "",
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
@@ -3284,7 +3284,8 @@ namespace
 	  "", "rendering#performance" },
 	{ "Preferences/Post-Processing/Anti-Aliasing", "",
 	  "How jagged edges are smoothed. SMAA is one cheap pass; TAA is steadier in "
-	  "motion but needs a velocity buffer, which only the Metal and OpenGL backends write so far.",
+	  "motion but needs a velocity buffer, which falls back to SMAA on a backend "
+	  "that is not ready to write one yet.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "
