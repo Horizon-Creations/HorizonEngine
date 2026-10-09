@@ -52,13 +52,14 @@ namespace
     template <typename T> uint64_t mix(uint64_t h, const T& v) { return mix(h, &v, sizeof(T)); }
 
     // Everything that is the same for all bodies of a landscape and moves their
-    // mesh without moving a cell.
+    // mesh without moving a cell (the shore clipping settings included).
     uint64_t paramsKeyOf(const TerrainComponent& tc, const glm::vec2& uvOrigin)
     {
         uint64_t h = 1469598103934665603ull;
         h = mix(h, tc.sizeX); h = mix(h, tc.sizeZ); h = mix(h, tc.water.res);
         h = mix(h, uvOrigin.x); h = mix(h, uvOrigin.y);
         h = mix(h, WaterSurface::kUvMetersPerTile);
+        h = mix(h, tc.water.clipToGround); h = mix(h, tc.water.shoreOvershoot);
         return h;
     }
 
@@ -206,6 +207,8 @@ namespace
             SurfaceOptions opt;
             opt.uvOrigin        = glm::vec2(wp.x, wp.z);
             opt.uvMetersPerTile = WaterSurface::kUvMetersPerTile;
+            opt.clipToGround    = f.clipToGround;
+            opt.shoreOvershoot  = f.shoreOvershoot;
             const uint64_t paramsKey = paramsKeyOf(tc, opt.uvOrigin);
 
             // Steady state: nothing was edited, every surface still belongs to a
@@ -263,7 +266,7 @@ namespace
                 if (!candidate) { ++stats.kept; continue; }
 
                 Lattice lattice;
-                if (!buildLattice(tc, body.id, ext, lattice)) continue;
+                if (!buildLattice(tc, body.id, ext, lattice, opt.clipFor(body.level))) continue;
                 const uint64_t hash = surfaceHash(lattice, body.level, opt);
                 if (existing != entt::null)
                 {

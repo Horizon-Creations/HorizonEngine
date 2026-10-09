@@ -11,6 +11,7 @@
 #include "HorizonScene/TerrainPaint.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/WaterSurface.h"
+#include "HorizonScene/WaterField.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
@@ -565,6 +566,12 @@ namespace TerrainSystem
 
                     buildChunk(world, cm, renderer, chunkEnt, field, res, tc, g, cx, cz, disp);
                 }
+
+            // The ground moved, and a water sheet clipped against it has to follow:
+            // hand the rectangle over BEFORE the flags below are cleared (the
+            // surface pass runs after them). Water edits never come back this way.
+            HE::water::noteGroundChanged(tc, rebuildAll || !tc.regionDirty,
+                                         tc.dirtyMinX, tc.dirtyMinZ, tc.dirtyMaxX, tc.dirtyMaxZ);
 
             tc.builtRes           = res;
             tc.builtChunksPerSide = g.chunksPerSide;

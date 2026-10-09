@@ -677,6 +677,85 @@ namespace
     }
 }
 
+TEST_CASE("Water: the shore clipping settings round-trip, and the defaults leave no trace in the scene")
+{
+    TerrainComponent tc = makeTerrain(64.0f, 48);
+    authoredField(tc);
+    SceneSerializer ser;
+
+    SUBCASE("the defaults write no key of their own")
+    {
+        REQUIRE(tc.water.clipToGround);
+        REQUIRE(tc.water.shoreOvershoot == water::kDefaultShoreOvershoot);
+        HorizonWorld world;
+        makeWorld(world, tc);
+        std::vector<uint8_t> blob;
+        REQUIRE(ser.saveToMemory(world, blob));
+        const std::string text(blob.begin(), blob.end());
+        CHECK(text.find("waterBodies") != std::string::npos);
+        CHECK(text.find("waterClip") == std::string::npos);
+        CHECK(text.find("waterShoreOvershoot") == std::string::npos);
+        // A scene from before the setting existed is clipped, with the default margin.
+        HorizonWorld loaded;
+        REQUIRE(ser.loadFromMemory(loaded, blob));
+        const TerrainComponent* t = firstTerrain(loaded);
+        REQUIRE(t != nullptr);
+        CHECK(t->water.clipToGround);
+        CHECK(t->water.shoreOvershoot == water::kDefaultShoreOvershoot);
+    }
+    SUBCASE("changed settings travel, as a file and as an undo snapshot")
+    {
+        water::setShoreClip(tc, false, 0.3f);
+        HorizonWorld world;
+        makeWorld(world, tc);
+        std::vector<uint8_t> blob;
+        REQUIRE(ser.saveToMemory(world, blob));
+        HorizonWorld viaBlob;
+        REQUIRE(ser.loadFromMemory(viaBlob, blob));
+        const TerrainComponent* a = firstTerrain(viaBlob);
+        REQUIRE(a != nullptr);
+        CHECK_FALSE(a->water.clipToGround);
+        CHECK(a->water.shoreOvershoot == 0.3f);
+        CHECK(water::sameContent(a->water, tc.water));
+
+        const fs::path file = fs::temp_directory_path() / "he_test_water_shoreclip.hescene";
+        REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+        HorizonWorld viaFile;
+        REQUIRE(ser.load(viaFile, file, SerializeFormat::JSON));
+        he_test::removeQuiet(file);
+        const TerrainComponent* b = firstTerrain(viaFile);
+        REQUIRE(b != nullptr);
+        CHECK_FALSE(b->water.clipToGround);
+        CHECK(b->water.shoreOvershoot == 0.3f);
+    }
+    SUBCASE("the settings alone are something to save, and they differ in sameContent")
+    {
+        water::Field a, b;
+        REQUIRE(a.pristine());
+        b.clipToGround = false;
+        CHECK_FALSE(b.pristine());
+        CHECK_FALSE(water::sameContent(a, b));
+        b.clipToGround = true;
+        b.shoreOvershoot = 0.5f;
+        CHECK_FALSE(b.pristine());
+        CHECK_FALSE(water::sameContent(a, b));
+        b.shoreOvershoot = water::kDefaultShoreOvershoot;
+        CHECK(b.pristine());
+        CHECK(water::sameContent(a, b));
+    }
+    SUBCASE("a hand-edited value is sanitised on load")
+    {
+        const TerrainComponent t = loadDamaged(tc, [](nlohmann::json& terrain) {
+            terrain["waterShoreOvershoot"] = -4.0;
+            terrain["waterClip"] = "no";                // not a boolean: ignored, the default stays
+        });
+        CHECK(t.water.shoreOvershoot == 0.0f);
+        CHECK(t.water.clipToGround);
+        const TerrainComponent big = loadDamaged(tc, [](nlohmann::json& terrain) { terrain["waterShoreOvershoot"] = 1.0e9; });
+        CHECK(big.water.shoreOvershoot == water::kMaxShoreOvershoot);
+    }
+}
+
 TEST_CASE("Water: a damaged water block loads into something safe")
 {
     TerrainComponent tc = makeTerrain();

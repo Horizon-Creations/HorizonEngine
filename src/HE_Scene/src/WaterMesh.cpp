@@ -1,5 +1,6 @@
 #include "HorizonScene/WaterMesh.h"
 #include "HorizonScene/Components/TerrainComponent.h"
+#include "HorizonScene/TerrainMeshGenerator.h"
 
 #include <glm/glm.hpp>
 
@@ -129,7 +130,8 @@ std::vector<CellRect> allBodyCells(const TerrainComponent& tc)
 }
 
 // ── Lattice ──────────────────────────────────────────────────────────────────
-bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cells, Lattice& out)
+bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cells, Lattice& out,
+                  const ShoreClip& clip)
 {
     out = Lattice{};
     const Field& f = tc.water;
@@ -166,6 +168,38 @@ bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cel
             out.v[static_cast<size_t>(j) * out.w + i] =
                 0.25f * (cell(cx - 1, cz - 1) + cell(cx, cz - 1) + cell(cx - 1, cz) + cell(cx, cz));
         }
+
+    // The ground, where it can matter: at a corner that is water and at the four
+    // corners an edge leads to from it. Nothing else is ever looked at (an edge
+    // needs an inside corner), so a lake in a large box costs its own corners and
+    // a noise landscape is not sampled once per corner of empty land.
+    if (clip.enabled)
+    {
+        constexpr float kFar = 1.0e6f;                 // "deep": not a limit anywhere
+        out.g.assign(out.v.size(), kFar);
+        auto sample = [&](int i, int j)
+        {
+            float& d = out.g[static_cast<size_t>(j) * out.w + i];
+            if (d != kFar) return;
+            const glm::dvec2 p = out.position(i, j);
+            const float x = static_cast<float>(std::clamp(p.x, out.minX, out.maxX));
+            const float z = static_cast<float>(std::clamp(p.y, out.minZ, out.maxZ));
+            const float ground = terrainHeightAt(tc, x, z);
+            d = std::isfinite(ground) ? clip.level + clip.overshoot - ground : -kFar;
+            // A depth of exactly kFar would read as "not sampled yet"; nothing real is that deep.
+            if (d == kFar) d = kFar * 0.5f;
+        };
+        for (int j = 0; j < out.h; ++j)
+            for (int i = 0; i < out.w; ++i)
+            {
+                if (out.at(i, j) < static_cast<float>(kContourIso)) continue;
+                sample(i, j);
+                if (i > 0)         sample(i - 1, j);
+                if (i + 1 < out.w) sample(i + 1, j);
+                if (j > 0)         sample(i, j - 1);
+                if (j + 1 < out.h) sample(i, j + 1);
+            }
+    }
     return true;
 }
 
@@ -183,6 +217,7 @@ std::vector<Contour> extractContours(const Lattice& L, double iso)
 
     std::unordered_map<int64_t, glm::dvec2> points;
     std::unordered_map<int64_t, int64_t>    next;      // crossing → the crossing the contour goes to
+    const bool clip = L.clipped() && L.g.size() == L.v.size();
 
     struct Crossing { int64_t key; bool exit; };
 
@@ -191,7 +226,13 @@ std::vector<Contour> extractContours(const Lattice& L, double iso)
         {
             // Corners counter-clockwise from the lower left (x right, z up).
             const double c[4] = { L.at(i, j), L.at(i + 1, j), L.at(i + 1, j + 1), L.at(i, j + 1) };
-            const bool   in[4] = { c[0] >= iso, c[1] >= iso, c[2] >= iso, c[3] >= iso };
+            // The ground's depth under the water at the same corners; 1 when the
+            // lattice is not clipped, so that its sign never says "outside".
+            const double d[4] = { clip ? L.groundAt(i, j)         : 1.0, clip ? L.groundAt(i + 1, j)         : 1.0,
+                                  clip ? L.groundAt(i + 1, j + 1) : 1.0, clip ? L.groundAt(i, j + 1)         : 1.0 };
+            const bool   wet[4] = { c[0] >= iso, c[1] >= iso, c[2] >= iso, c[3] >= iso };
+            const bool   dry[4] = { d[0] >= 0.0, d[1] >= 0.0, d[2] >= 0.0, d[3] >= 0.0 };   // ground under the sheet
+            const bool   in[4]  = { wet[0] && dry[0], wet[1] && dry[1], wet[2] && dry[2], wet[3] && dry[3] };
             if (in[0] == in[1] && in[1] == in[2] && in[2] == in[3]) continue;
 
             const glm::dvec2 pos[4] = { L.position(i, j), L.position(i + 1, j),
@@ -205,7 +246,16 @@ std::vector<Contour> extractContours(const Lattice& L, double iso)
             {
                 const int a = e, b = (e + 1) & 3;
                 if (in[a] == in[b]) continue;
-                const double t = (iso - c[a]) / (c[b] - c[a]);
+                // Where along a→b the inside ends: the coverage reaches the iso
+                // value at tCov, the ground comes up through the water at tGround.
+                // Leaving the inside the first of them counts, entering it the last.
+                double tCov = -1.0, tGround = -1.0;
+                if (wet[a] != wet[b]) tCov = (iso - c[a]) / (c[b] - c[a]);
+                if (dry[a] != dry[b]) tGround = d[a] / (d[a] - d[b]);
+                double t = 0.5;                                // cannot be missing: the corners differ in one of the two
+                if (in[a]) { t = 2.0; if (tCov >= 0.0) t = std::min(t, tCov); if (tGround >= 0.0) t = std::min(t, tGround); }
+                else       { t = -1.0; if (tCov >= 0.0) t = std::max(t, tCov); if (tGround >= 0.0) t = std::max(t, tGround); }
+                t = std::clamp(t, 0.0, 1.0);
                 points[keys[e]] = pos[a] + (pos[b] - pos[a]) * t;
                 // Walking the cell counter-clockwise, a crossing from a wet corner
                 // to a dry one is where the water's boundary LEAVES the cell edge.
@@ -224,7 +274,10 @@ std::vector<Contour> extractContours(const Lattice& L, double iso)
                 // whether the wet ones are joined through the middle. Joined: each
                 // exit continues to the next entry (a hexagon of water); apart: to
                 // the previous one (two corner triangles).
-                const bool joined = (c[0] + c[1] + c[2] + c[3]) * 0.25 >= iso;
+                // On a clipped lattice the ground says it too: the middle must be
+                // under the sheet as well.
+                const bool joined = (c[0] + c[1] + c[2] + c[3]) * 0.25 >= iso &&
+                                    (d[0] + d[1] + d[2] + d[3]) * 0.25 >= 0.0;
                 for (int k = 0; k < 4; ++k)
                     if (xs[k].exit)
                         next[xs[k].key] = xs[joined ? (k + 1) & 3 : (k + 3) & 3].key;
@@ -308,6 +361,9 @@ uint64_t surfaceHash(const Lattice& l, float level, const SurfaceOptions& opt)
     h = fnv(h, level);
     h = fnv(h, opt.uvOrigin.x); h = fnv(h, opt.uvOrigin.y); h = fnv(h, opt.uvMetersPerTile);
     if (!l.v.empty()) h = fnv(h, l.v.data(), l.v.size() * sizeof(float));
+    // A lake over a hill that was sculpted is a different sheet with the same cells.
+    h = fnv(h, static_cast<uint64_t>(l.g.size()));
+    if (!l.g.empty()) h = fnv(h, l.g.data(), l.g.size() * sizeof(float));
     return h;
 }
 
@@ -319,7 +375,7 @@ bool buildSurface(const TerrainComponent& tc, uint16_t body, const SurfaceOption
     const CellRect cells = bodyCells(tc, body);
     if (!cells.valid()) { out.level = b->level; return true; }       // a body with no water: nothing to draw
     Lattice lattice;
-    if (!buildLattice(tc, body, cells, lattice)) return false;
+    if (!buildLattice(tc, body, cells, lattice, opt.clipFor(b->level))) return false;
     return buildSurface(tc, lattice, cells, b->level, opt, out);
 }
 

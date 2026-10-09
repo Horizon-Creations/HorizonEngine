@@ -637,6 +637,10 @@ namespace
 					bodies.push_back(std::move(bj));
 				}
 				tc["waterBodies"] = std::move(bodies);
+				// The shore clipping settings, only when they are not the default
+				// (a scene with water from before them reads back as clipped).
+				if (!w.clipToGround) tc["waterClip"] = false;
+				if (w.shoreOvershoot != HE::water::kDefaultShoreOvershoot) tc["waterShoreOvershoot"] = w.shoreOvershoot;
 				const std::vector<uint8_t> cells = HE::water::encodeCells(w);
 				if (!cells.empty())
 					tc["waterCellsB64"] = base64Encode(cells.data(), cells.size());
@@ -1520,6 +1524,10 @@ namespace
 				HE::water::Field& w = t.water;
 				w.res = c.value("waterRes", w.res);
 				w.nextBodyId = c.value("waterNextId", w.nextBodyId);
+				if (c.contains("waterClip") && c["waterClip"].is_boolean())
+					w.clipToGround = c["waterClip"].get<bool>();
+				if (c.contains("waterShoreOvershoot") && c["waterShoreOvershoot"].is_number())
+					w.shoreOvershoot = c["waterShoreOvershoot"].get<float>();   // sanitize() clamps it
 				if (c.contains("waterBodies") && c["waterBodies"].is_array())
 					for (const json& bj : c["waterBodies"])
 					{

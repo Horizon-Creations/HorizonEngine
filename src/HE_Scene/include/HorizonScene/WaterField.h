@@ -66,6 +66,10 @@ namespace HE::water
     // Coverage at or above this counts as water for consumers that need a yes/no.
     inline constexpr uint8_t  kWet        = 128;
     inline constexpr uint16_t kNoBody     = 0;
+    // How far above a body's level the ground may stand and still be under its
+    // sheet (metres), see Field::shoreOvershoot.
+    inline constexpr float    kDefaultShoreOvershoot = 0.05f;
+    inline constexpr float    kMaxShoreOvershoot     = 10.0f;
 
     struct Body
     {
@@ -84,6 +88,30 @@ namespace HE::water
         std::vector<Body>     bodies;          // creation order
         uint16_t              nextBodyId = 1;  // next id to try; see createBody
 
+        // ── Shore clipping (Thema 174 Schritt 5) ─────────────────────────────
+        // The surface mesh stops where the ground comes up through the water: a
+        // body's sheet only exists where the terrain stands below its level (plus
+        // the overshoot) AND the field says "water". It is one setting for the
+        // whole landscape and it holds for brushed and lake water alike, because
+        // the clip sits in the mesh builder, not in the cells: the cells are the
+        // intent (what the user painted or drew), the sheet is what is left of it
+        // after the ground has had its say. A hill that is sculpted into a lake
+        // later therefore takes the water off its top without touching the field,
+        // and digging it away brings the water back.
+        //   clipToGround    false = the sheet is the footprint of the cells at
+        //                   the body's level, over rising ground too.
+        //   shoreOvershoot  metres of ground ABOVE the level that still count as
+        //                   under the water. A little margin keeps the sheet's rim
+        //                   under the terrain's own surface instead of a hair
+        //                   short of it (the terrain mesh is not the height field
+        //                   between its vertices once LODs decimate it), so no
+        //                   dry-looking line separates the water from the bank.
+        //                   Vertical, so on a gentle bank it moves the rim
+        //                   further than on a steep one. 0 = exactly where the
+        //                   level meets the ground.
+        bool  clipToGround   = true;
+        float shoreOvershoot = kDefaultShoreOvershoot;
+
         // ── Runtime, never serialised ────────────────────────────────────────
         // An edit that changed cells sets `dirty`, widens the terrain-local XZ
         // rectangle it touched and bumps `revision`. The water surface clears
@@ -100,7 +128,11 @@ namespace HE::water
             return n > 0 && coverage.size() == n && owner.size() == n;
         }
         // Nothing to save: no body, no grid, the default resolution.
-        bool pristine() const { return bodies.empty() && coverage.empty() && owner.empty() && res == kDefaultRes; }
+        bool pristine() const
+        {
+            return bodies.empty() && coverage.empty() && owner.empty() && res == kDefaultRes &&
+                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot;
+        }
 
         const Body* findBody(uint16_t id) const;
         Body*       findBody(uint16_t id);
@@ -116,7 +148,8 @@ namespace HE::water
         uint32_t wetCells(uint16_t id = kNoBody) const;
     };
 
-    // Same bodies (ids, levels, sources, counter) and same cells. An unallocated
+    // Same bodies (ids, levels, sources, counter), same cells and same shore
+    // clipping settings. An unallocated
     // grid equals an allocated all-zero one of the same resolution; the runtime
     // dirty state is ignored.
     bool sameContent(const Field& a, const Field& b);
@@ -151,6 +184,24 @@ namespace HE::water
     // Move a body's surface. The cells do not change, so the dirty rectangle is
     // the whole terrain. False for an unknown body or a non-finite level.
     bool setLevel(TerrainComponent& tc, uint16_t id, float level);
+
+    // Shore clipping on or off and its overshoot (Field::clipToGround,
+    // shoreOvershoot), every surface of the landscape rebuilt. The overshoot is
+    // clamped to 0..kMaxShoreOvershoot; a non-finite one keeps the old value.
+    // Writing the two members directly also works for a surface that exists, but
+    // not for a body whose sheet is clipped away completely (it has no entity to
+    // notice): this is the call that always reaches it.
+    void setShoreClip(TerrainComponent& tc, bool clipToGround, float shoreOvershoot);
+
+    // The GROUND moved: heights were sculpted, generated or the landscape
+    // rebuilt. A clipped sheet follows the ground, so the rectangle (terrain-
+    // local, `whole` = everything) is marked dirty for the water surface, grown
+    // by one terrain cell because the ground is bilinear between its vertices.
+    // Does nothing when there is no water or no clipping. Called by TerrainSystem
+    // where it regenerates chunks; never sets TerrainComponent::dirty or
+    // regionDirty (that direction would loop).
+    void noteGroundChanged(TerrainComponent& tc, bool whole,
+                           float minX = 0.0f, float minZ = 0.0f, float maxX = 0.0f, float maxZ = 0.0f);
 
     // Forget bodies that own no cell and have no source: what a brush leaves
     // behind when its water is wiped out. A lake keeps its body — its spline can

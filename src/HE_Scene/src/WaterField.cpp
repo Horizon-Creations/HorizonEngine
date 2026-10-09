@@ -22,16 +22,10 @@ namespace
     double toCellX(const TerrainComponent& tc, double x) { return (x + tc.sizeX * 0.5) / tc.sizeX * tc.water.res; }
     double toCellZ(const TerrainComponent& tc, double z) { return (z + tc.sizeZ * 0.5) / tc.sizeZ * tc.water.res; }
 
-    // Widen the field's dirty rectangle by a cell rectangle (inclusive).
-    void markCells(TerrainComponent& tc, int x0, int z0, int x1, int z1)
+    // Widen the field's dirty rectangle by a terrain-local rectangle.
+    void markRect(TerrainComponent& tc, float minX, float minZ, float maxX, float maxZ)
     {
         Field& f = tc.water;
-        const float cw = tc.sizeX / static_cast<float>(f.res);
-        const float ch = tc.sizeZ / static_cast<float>(f.res);
-        const float minX = -tc.sizeX * 0.5f + static_cast<float>(x0) * cw;
-        const float minZ = -tc.sizeZ * 0.5f + static_cast<float>(z0) * ch;
-        const float maxX = -tc.sizeX * 0.5f + static_cast<float>(x1 + 1) * cw;
-        const float maxZ = -tc.sizeZ * 0.5f + static_cast<float>(z1 + 1) * ch;
         if (!f.dirty)
         {
             f.dirtyMinX = minX; f.dirtyMinZ = minZ; f.dirtyMaxX = maxX; f.dirtyMaxZ = maxZ;
@@ -43,6 +37,18 @@ namespace
             f.dirtyMaxX = std::max(f.dirtyMaxX, maxX); f.dirtyMaxZ = std::max(f.dirtyMaxZ, maxZ);
         }
         ++f.revision;
+    }
+
+    // … by a cell rectangle (inclusive).
+    void markCells(TerrainComponent& tc, int x0, int z0, int x1, int z1)
+    {
+        const Field& f = tc.water;
+        const float cw = tc.sizeX / static_cast<float>(f.res);
+        const float ch = tc.sizeZ / static_cast<float>(f.res);
+        markRect(tc, -tc.sizeX * 0.5f + static_cast<float>(x0) * cw,
+                     -tc.sizeZ * 0.5f + static_cast<float>(z0) * ch,
+                     -tc.sizeX * 0.5f + static_cast<float>(x1 + 1) * cw,
+                     -tc.sizeZ * 0.5f + static_cast<float>(z1 + 1) * ch);
     }
 
     void markAll(TerrainComponent& tc)
@@ -185,6 +191,7 @@ uint32_t Field::wetCells(uint16_t id) const
 bool sameContent(const Field& a, const Field& b)
 {
     if (a.res != b.res || a.nextBodyId != b.nextBodyId || !bodiesEq(a.bodies, b.bodies)) return false;
+    if (a.clipToGround != b.clipToGround || a.shoreOvershoot != b.shoreOvershoot) return false;
     const size_t n = static_cast<size_t>(a.res) * a.res;
     if (a.allocated() && b.allocated()) return a.coverage == b.coverage && a.owner == b.owner;
     for (size_t i = 0; i < n; ++i)
@@ -296,6 +303,34 @@ bool setLevel(TerrainComponent& tc, uint16_t id, float level)
     b->level = level;
     markAll(tc);    // the whole surface of the body moves, not a rectangle of cells
     return true;
+}
+
+void setShoreClip(TerrainComponent& tc, bool clipToGround, float shoreOvershoot)
+{
+    Field& f = tc.water;
+    const float over = finite(shoreOvershoot) ? std::clamp(shoreOvershoot, 0.0f, kMaxShoreOvershoot)
+                                              : f.shoreOvershoot;
+    if (f.clipToGround == clipToGround && f.shoreOvershoot == over) return;
+    f.clipToGround   = clipToGround;
+    f.shoreOvershoot = over;
+    if (hasArea(tc) && !f.bodies.empty()) markAll(tc);
+}
+
+void noteGroundChanged(TerrainComponent& tc, bool whole, float minX, float minZ, float maxX, float maxZ)
+{
+    Field& f = tc.water;
+    if (!f.clipToGround || f.bodies.empty() || !hasArea(tc)) return;
+    if (whole || !finite(minX) || !finite(minZ) || !finite(maxX) || !finite(maxZ))
+    {
+        markAll(tc);
+        return;
+    }
+    // The ground between two vertices is the bilinear mix of four, so a vertex
+    // that moved changes the height up to one terrain cell away from it.
+    const uint32_t hres = std::clamp(tc.resolution, 2u, 1024u);
+    const float padX = tc.sizeX / static_cast<float>(hres - 1);
+    const float padZ = tc.sizeZ / static_cast<float>(hres - 1);
+    markRect(tc, minX - padX, minZ - padZ, maxX + padX, maxZ + padZ);
 }
 
 uint32_t pruneEmptyBodies(TerrainComponent& tc)
@@ -776,6 +811,8 @@ void sanitize(TerrainComponent& tc)
 {
     Field& f = tc.water;
     f.res = clampRes(f.res);
+    f.shoreOvershoot = finite(f.shoreOvershoot) ? std::clamp(f.shoreOvershoot, 0.0f, kMaxShoreOvershoot)
+                                                : kDefaultShoreOvershoot;
 
     // Bodies: id 0, a repeated id or a level that is not a number cannot be kept.
     std::vector<Body> kept;

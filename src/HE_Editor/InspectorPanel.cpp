@@ -3292,6 +3292,23 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::EndDisabled();
 			}
 
+			// Water: where the sheets of this landscape's lakes and brushed water
+			// end against the ground. The water's own settings, so they go through
+			// setShoreClip and stay out of `changed` — which would regenerate every
+			// chunk of the landscape for a flag that only the water reads.
+			ImGui::SeparatorText("Water");
+			{
+				bool clip = t->water.clipToGround;
+				float over = t->water.shoreOvershoot;
+				bool waterChanged = EditorWidgets::checkbox("Clip To Ground##tcw", &clip); trackEdit();
+				ImGui::BeginDisabled(!clip);
+				waterChanged |= Row::dragFloat("Shore Overshoot##tcw", &over, 0.01f, 0.0f,
+				                               HE::water::kMaxShoreOvershoot, "%.2f m");
+				trackEdit();
+				ImGui::EndDisabled();
+				if (waterChanged) HE::water::setShoreClip(*t, clip, over);
+			}
+
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here
 			// (shown for reference) and can no longer change the terrain.

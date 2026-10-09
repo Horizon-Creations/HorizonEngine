@@ -5,6 +5,8 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TerrainSculpt.h>
+#include <HorizonScene/TerrainMeshGenerator.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
@@ -1102,4 +1104,391 @@ TEST_CASE("Water surface: two landscapes keep their water apart")
     REQUIRE(water::addPolygon(reg.get<TerrainComponent>(second), pond, rect(0, 0, 14, 14)).ok);
     rig.update();
     CHECK(WaterSurface::lastStats().rebuilt == 1);
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Shore clipping: the sheet stops where the ground comes up (Thema 174 Schritt 5)
+// ═════════════════════════════════════════════════════════════════════════════
+
+namespace
+{
+    // A height field of res × res vertices over the terrain, from height(x, z) in
+    // terrain-local metres. res must be 2ⁿ+1 or TerrainSystem would resample it.
+    template <class F> void shapeGround(TerrainComponent& tc, uint32_t res, F height)
+    {
+        tc.resolution = res;
+        tc.sculptHeights.assign(static_cast<size_t>(res) * res, 0.0f);
+        for (uint32_t z = 0; z < res; ++z)
+            for (uint32_t x = 0; x < res; ++x)
+            {
+                const float px = -tc.sizeX * 0.5f + tc.sizeX * static_cast<float>(x) / static_cast<float>(res - 1);
+                const float pz = -tc.sizeZ * 0.5f + tc.sizeZ * static_cast<float>(z) / static_cast<float>(res - 1);
+                tc.sculptHeights[static_cast<size_t>(z) * res + x] = height(px, pz);
+            }
+    }
+
+    water::SurfaceOptions clipped(float overshoot = water::kDefaultShoreOvershoot)
+    {
+        water::SurfaceOptions o;
+        o.clipToGround = true;
+        o.shoreOvershoot = overshoot;
+        return o;
+    }
+
+    // How far the ground stands above the sheet's level, worst over every vertex and
+    // every triangle centroid of the mesh. A clipped sheet has none beyond the overshoot.
+    float groundOverSheet(const TerrainComponent& tc, const Built& b)
+    {
+        float worst = -1e30f;
+        for (const Tri& t : b.tris)
+        {
+            const glm::dvec2 pts[4] = { t.a, t.b, t.c, (t.a + t.b + t.c) / 3.0 };
+            for (const glm::dvec2& p : pts)
+                worst = std::max(worst, terrainHeightAt(tc, static_cast<float>(p.x), static_cast<float>(p.y)) - b.s.level);
+        }
+        return worst;
+    }
+
+    double maxX(const std::vector<Tri>& tris)
+    {
+        double m = -1e300;
+        for (const Tri& t : tris) m = std::max({ m, t.a.x, t.b.x, t.c.x });
+        return m;
+    }
+
+    // The triangles of a body's sheet in a world, terrain-local; empty without a sheet.
+    std::vector<Tri> sheetOf(Rig& rig, uint16_t body)
+    {
+        const Entity e = rig.surfaceOf(body);
+        if (e == entt::null) return {};
+        auto& reg = rig.world.registry();
+        const auto& ws = reg.get<WaterSurfaceComponent>(e);
+        const auto& tf = reg.get<TransformComponent>(e);
+        const StaticMeshAsset* m = rig.cm.getStaticMesh(ws.meshId);
+        REQUIRE(m);
+        return trisOf(*m, { tf.position.x, tf.position.z });
+    }
+}
+
+TEST_CASE("Water shore: a clipped lifted lattice cuts where the ground comes up, by interpolation")
+{
+    // Corners 2..5 are water; the depth of the water over the ground falls one metre
+    // per corner and passes zero three quarters of the way from corner 3 (0.75 m)
+    // to corner 4 (−0.25 m), i.e. at x = 3.75.
+    water::Lattice l;
+    l.w = l.h = 8; l.x0 = l.z0 = 0;
+    l.originX = l.originZ = 0.0; l.cellW = l.cellH = 1.0;
+    l.minX = l.minZ = -20.0; l.maxX = l.maxZ = 20.0;
+    l.v.assign(64, 0.0f);
+    l.g.assign(64, 1.0f);
+    for (int j = 0; j < 8; ++j)
+        for (int i = 0; i < 8; ++i)
+        {
+            if (i >= 2 && i <= 5 && j >= 2 && j <= 5) l.v[static_cast<size_t>(j) * 8 + i] = 255.0f;
+            l.g[static_cast<size_t>(j) * 8 + i] = 3.75f - static_cast<float>(i);
+        }
+
+    const auto cs = water::extractContours(l);
+    REQUIRE(cs.size() == 1);
+    CHECK_FALSE(cs[0].hole());
+    double lo = 1e300, hi = -1e300;
+    for (const auto& p : cs[0].points) { lo = std::min(lo, p.x); hi = std::max(hi, p.x); }
+    CHECK(lo == doctest::Approx(1.5));          // the coverage limit, half-way between a wet and a dry corner
+    CHECK(hi == doctest::Approx(3.75));         // the ground limit, three quarters of the way
+    // 2.25 × 4, less the two coverage-side corners (0.125 each) and the two corners
+    // where both limits meet (0.1875 each): the lattice cuts a corner across its cell.
+    CHECK(cs[0].area == doctest::Approx(9.0 - 0.25 - 0.375).epsilon(1e-9));
+
+    // Without the ground array the same lattice is the coverage alone: [1.5, 5.5].
+    water::Lattice plain = l;
+    plain.g.clear();
+    const auto cp = water::extractContours(plain);
+    REQUIRE(cp.size() == 1);
+    double hiPlain = -1e300;
+    for (const auto& p : cp[0].points) hiPlain = std::max(hiPlain, p.x);
+    CHECK(hiPlain == doctest::Approx(5.5));
+}
+
+TEST_CASE("Water shore: a lake over a slope ends at the line where the ground meets the water")
+{
+    TerrainComponent tc = makeTerrain();                         // 64 m, a metre per cell
+    shapeGround(tc, 65, [](float x, float) { return 0.5f * x; });   // rises 0.5 m per metre to the east
+    const uint16_t id = addLake(tc, rect(-20, -20, 20, 20), 3.0f);
+
+    const Built flat = build(tc, id);                            // the footprint alone
+    const Built b = build(tc, id, clipped());
+    REQUIRE_FALSE(b.s.empty());
+    REQUIRE_FALSE(flat.s.empty());
+
+    // The footprint is the 40 × 40 square, over ground that stands 10 m up at its east edge.
+    CHECK(sumArea(flat.tris) == doctest::Approx(1600.0).epsilon(0.002));
+    CHECK(groundOverSheet(tc, flat) > 5.0f);
+
+    // The shore: 3.05 m of water over a 0.5 slope reaches x = 6.1. Exact, not "about":
+    // the lattice edge from x = 6 to x = 7 has depths 0.05 and −0.45.
+    const double shore = (3.0 + water::kDefaultShoreOvershoot) / 0.5;
+    CHECK(maxX(b.tris) == doctest::Approx(shore).epsilon(1e-5));
+    // 26.1 × 40 less the two cut corners on the west side (half a cell each).
+    CHECK(sumArea(b.tris) == doctest::Approx(26.1 * 40.0 - 1.0).epsilon(0.002));
+    CHECK_FALSE(anyOverlap(b.tris));
+    CHECK(allFaceUp(b.s.mesh));
+    CHECK(b.s.polygons == 1);
+
+    // Wet below the bank, dry over it.
+    CHECK(covered(b.tris, { -10.0, 0.0 }));
+    CHECK(covered(b.tris, { 5.9, 0.0 }));
+    CHECK_FALSE(covered(b.tris, { 6.3, 0.0 }));
+    CHECK_FALSE(covered(b.tris, { 15.0, 0.0 }));
+    // Nothing of the sheet is over the ground (beyond the overshoot).
+    CHECK(groundOverSheet(tc, b) <= water::kDefaultShoreOvershoot + 1e-3f);
+    // The ground is part of the sheet's identity: same cells, another mesh.
+    CHECK(b.s.hash != flat.s.hash);
+    CHECK(b.s.triangles < 20);                                   // still a polygon, not a triangle per cell
+}
+
+TEST_CASE("Water shore: the overshoot moves the line up the bank by its height over the slope")
+{
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 65, [](float x, float) { return 0.5f * x; });
+    const uint16_t id = addLake(tc, rect(-20, -20, 20, 20), 3.0f);
+    CHECK(maxX(build(tc, id, clipped(0.0f)).tris)  == doctest::Approx(6.0).epsilon(1e-5));
+    CHECK(maxX(build(tc, id, clipped(0.05f)).tris) == doctest::Approx(6.1).epsilon(1e-5));
+    CHECK(maxX(build(tc, id, clipped(0.25f)).tris) == doctest::Approx(6.5).epsilon(1e-5));
+    CHECK(maxX(build(tc, id, clipped(1.0f)).tris)  == doctest::Approx(8.0).epsilon(1e-5));
+}
+
+TEST_CASE("Water shore: a bowl gives a round lake with the shore where the water meets the rim")
+{
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 129, [](float x, float z) { return 0.01f * (x * x + z * z); });
+    // Level 4 and 0.05 overshoot: the ground is under the sheet out to r² = 405.
+    const uint16_t id = addLake(tc, rect(-28, -28, 28, 28), 4.0f);
+    const Built b = build(tc, id, clipped());
+    REQUIRE_FALSE(b.s.empty());
+
+    const double radius = std::sqrt((4.0 + water::kDefaultShoreOvershoot) / 0.01);
+    CHECK(sumArea(b.tris) == doctest::Approx(3.14159265358979323846 * radius * radius).epsilon(0.01));
+    CHECK(b.s.contours == 1);
+    CHECK(b.s.polygons == 1);
+    CHECK_FALSE(anyOverlap(b.tris));
+    // Every vertex of the mesh is on the shore, and the shore is a circle.
+    for (size_t i = 0; i < b.s.mesh.vertices.size(); i += 3)
+    {
+        const double x = b.s.mesh.vertices[i] + b.s.center.x;
+        const double z = b.s.mesh.vertices[i + 2] + b.s.center.y;
+        CHECK(std::sqrt(x * x + z * z) == doctest::Approx(radius).epsilon(0.005));
+    }
+    CHECK(covered(b.tris, { 0.0, 0.0 }));
+    CHECK(covered(b.tris, { radius - 0.5, 0.0 }));
+    CHECK_FALSE(covered(b.tris, { radius + 0.5, 0.0 }));
+    CHECK_FALSE(covered(b.tris, { 22.0, 22.0 }));                // inside the lake's square, up the rim
+    CHECK(groundOverSheet(tc, b) <= water::kDefaultShoreOvershoot + 1e-3f);
+}
+
+TEST_CASE("Water shore: a mound in the lake is an island, a ridge between two hollows makes two pools")
+{
+    SUBCASE("a mound")
+    {
+        TerrainComponent tc = makeTerrain();
+        shapeGround(tc, 129, [](float x, float z) { return 6.0f - 0.03f * (x * x + z * z); });
+        const uint16_t id = addLake(tc, rect(-25, -25, 25, 25), 1.0f);
+        const Built b = build(tc, id, clipped());
+        REQUIRE_FALSE(b.s.empty());
+        // The ground is above the sheet inside r² = (6 − 1.05) / 0.03 = 165: a hole.
+        CHECK(b.s.contours == 2);
+        CHECK(b.s.polygons == 1);
+        CHECK(sumArea(b.tris) == doctest::Approx(2500.0 - 3.14159265358979323846 * 165.0).epsilon(0.01));
+        CHECK_FALSE(covered(b.tris, { 0.0, 0.0 }));
+        CHECK_FALSE(covered(b.tris, { 12.0, 0.0 }));
+        CHECK(covered(b.tris, { 14.0, 0.0 }));
+        CHECK(covered(b.tris, { -20.0, 15.0 }));
+        CHECK_FALSE(anyOverlap(b.tris));
+        // The hole is a polygon inscribed in the island's rim, so between two of its
+        // vertices a sliver of sheet reaches under the rim by the chord's sagitta
+        // times the slope (a centimetre or so here): out of sight under the opaque
+        // ground, and the reason this bound is looser than the bowl's.
+        CHECK(groundOverSheet(tc, b) <= water::kDefaultShoreOvershoot + 0.02f);
+    }
+    SUBCASE("two hollows")
+    {
+        TerrainComponent tc = makeTerrain();
+        shapeGround(tc, 129, [](float x, float z) {
+            const float a = (x + 16.0f) * (x + 16.0f) + z * z;
+            const float c = (x - 16.0f) * (x - 16.0f) + z * z;
+            return 0.02f * std::min(a, c);
+        });
+        const uint16_t id = addLake(tc, rect(-30, -12, 30, 12), 2.0f);     // one body over both
+        const Built b = build(tc, id, clipped());
+        REQUIRE_FALSE(b.s.empty());
+        // Two pools of r² = 2.05 / 0.02 = 102.5, with the ridge between them dry.
+        CHECK(b.s.polygons == 2);
+        CHECK(b.s.contours == 2);
+        CHECK(sumArea(b.tris) == doctest::Approx(2.0 * 3.14159265358979323846 * 102.5).epsilon(0.01));
+        CHECK(covered(b.tris, { -16.0, 0.0 }));
+        CHECK(covered(b.tris, { 16.0, 0.0 }));
+        CHECK_FALSE(covered(b.tris, { 0.0, 0.0 }));
+        CHECK_FALSE(anyOverlap(b.tris));
+    }
+}
+
+TEST_CASE("Water shore: brushed water is clipped by the same ground as a lake drawn from a polygon")
+{
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 65, [](float x, float) { return 0.5f * x; });
+
+    // A brush dab: radius 12 with a falloff, centred on the slope.
+    const uint16_t painted = tc.water.createBody(3.0f);
+    REQUIRE(water::addCircle(tc, painted, 0.0f, 0.0f, 12.0f, 4.0f).ok);
+    const Built brush = build(tc, painted, clipped());
+    REQUIRE_FALSE(brush.s.empty());
+
+    const double shore = (3.0 + water::kDefaultShoreOvershoot) / 0.5;
+    CHECK(maxX(brush.tris) == doctest::Approx(shore).epsilon(1e-5));
+    CHECK(covered(brush.tris, { -8.0, 0.0 }));
+    CHECK_FALSE(covered(brush.tris, { 6.5, 0.0 }));
+    CHECK(groundOverSheet(tc, brush) <= water::kDefaultShoreOvershoot + 1e-3f);
+
+    // The lake of a closed spline, on the same ground at the same level: the same line.
+    TerrainComponent tc2 = tc;
+    water::clearAll(tc2);
+    tc2.water.res = tc.water.res;
+    const uint16_t lake = addLake(tc2, rect(-15, -15, 15, 15), 3.0f);
+    CHECK(maxX(build(tc2, lake, clipped()).tris) == doctest::Approx(maxX(brush.tris)).epsilon(1e-5));
+}
+
+TEST_CASE("Water shore: ground under the sheet that is lower than the level changes nothing")
+{
+    // The usual lake: the ground is below the sheet everywhere. Clipped or not,
+    // the mesh is the same bit for bit.
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 65, [](float x, float z) { return -4.0f - 0.01f * (x * x + z * z) * 0.1f; });
+    const uint16_t id = addLake(tc, toVec2(starRing(5, 26.0, 10.5, { 1.3, -2.7 })), 0.5f);
+    const Built a = build(tc, id);
+    const Built b = build(tc, id, clipped());
+    REQUIRE_FALSE(a.s.empty());
+    CHECK(a.s.mesh.vertices == b.s.mesh.vertices);
+    CHECK(a.s.mesh.indices == b.s.mesh.indices);
+}
+
+TEST_CASE("Water shore: ground above the level everywhere is no sheet at all")
+{
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 65, [](float, float) { return 2.0f; });
+    const uint16_t id = addLake(tc, rect(-10, -10, 10, 10), 0.5f);
+    water::Surface s;
+    REQUIRE(water::buildSurface(tc, id, clipped(), s));
+    CHECK(s.empty());
+    CHECK(s.polygons == 0);
+    // The footprint alone is still there when asked for.
+    CHECK_FALSE(build(tc, id).s.empty());
+}
+
+TEST_CASE("Water shore: sculpting a hill into a lake takes the water off the hill, digging it away brings it back")
+{
+    Rig rig;
+    const uint16_t lake = addLake(rig.tc(), rect(-20, -20, 20, 20), 1.0f);
+    rig.update();
+    REQUIRE((rig.surfaceOf(lake) != entt::null));
+    {
+        const auto tris = sheetOf(rig, lake);
+        CHECK(sumArea(tris) == doctest::Approx(1600.0).epsilon(0.01));
+        CHECK(covered(tris, { 0.0, 0.0 }));
+    }
+
+    // A hill: 4 m high in the middle, 6 m of falloff around a 6 m radius.
+    REQUIRE(TerrainSculpt::apply(rig.tc(), 0.0f, 0.0f, TerrainSculpt::Op::Raise, 6.0f, 6.0f, 4.0f).ok);
+    rig.update();
+    CHECK(WaterSurface::lastStats().rebuilt == 1);               // the ground moved, the sheet followed
+    CHECK_FALSE(rig.tc().water.dirty);
+    {
+        const auto tris = sheetOf(rig, lake);
+        REQUIRE_FALSE(tris.empty());
+        CHECK_FALSE(covered(tris, { 0.0, 0.0 }));                // the top of the hill is dry
+        CHECK(covered(tris, { -18.0, -18.0 }));                  // the rest of the lake is not
+        CHECK(covered(tris, { 17.0, 3.0 }));
+        CHECK(sumArea(tris) < 1550.0);                           // a hill of about 13 m radius is out
+        CHECK(sumArea(tris) > 800.0);
+        // The field did not change: the cells are still the whole 40 × 40.
+        CHECK(rig.tc().water.wetCells(lake) == 1600u);
+    }
+    // The landscape's chunks did their own thing and the water did not make them redo it.
+    CHECK_FALSE(rig.tc().dirty);
+    CHECK_FALSE(rig.tc().regionDirty);
+
+    // Level the hill again: the water is back, over the same cells.
+    REQUIRE(TerrainSculpt::apply(rig.tc(), 0.0f, 0.0f, TerrainSculpt::Op::Set, 40.0f, 0.0f, 0.0f).ok);
+    rig.update();
+    {
+        const auto tris = sheetOf(rig, lake);
+        REQUIRE_FALSE(tris.empty());
+        CHECK(covered(tris, { 0.0, 0.0 }));
+        CHECK(sumArea(tris) == doctest::Approx(1600.0).epsilon(0.01));
+    }
+}
+
+TEST_CASE("Water shore: a sculpt far from every lake does not rebuild it, and with clipping off no ground edit does")
+{
+    Rig rig;
+    const uint16_t lake = addLake(rig.tc(), rect(8, 8, 24, 24), 1.0f);
+    rig.update();
+    REQUIRE((rig.surfaceOf(lake) != entt::null));
+
+    REQUIRE(TerrainSculpt::apply(rig.tc(), -24.0f, -24.0f, TerrainSculpt::Op::Raise, 3.0f, 2.0f, 2.0f).ok);
+    rig.update();
+    CHECK_FALSE(WaterSurface::lastStats().worked());
+    CHECK(WaterSurface::lastStats().kept == 1);
+
+    water::setShoreClip(rig.tc(), false, water::kDefaultShoreOvershoot);
+    rig.update();                                                // the setting itself rebuilds
+    CHECK(WaterSurface::lastStats().rebuilt == 1);
+    REQUIRE(TerrainSculpt::apply(rig.tc(), 16.0f, 16.0f, TerrainSculpt::Op::Raise, 4.0f, 2.0f, 5.0f).ok);
+    rig.update();
+    CHECK_FALSE(WaterSurface::lastStats().worked());             // under the lake, but nobody listens
+    CHECK(covered(sheetOf(rig, lake), { 16.0, 16.0 }));          // the footprint stands over the new hill
+}
+
+TEST_CASE("Water shore: clipping on and off, and a sheet clipped away entirely comes back when it is switched off")
+{
+    Rig rig;
+    // Under the ground everywhere: the flat landscape stands at 0, the lake at −5.
+    const uint16_t lake = addLake(rig.tc(), rect(-10, -10, 10, 10), -5.0f);
+    rig.update();
+    CHECK((rig.surfaceOf(lake) == entt::null));                  // nothing to draw: no entity
+    CHECK(rig.tc().water.wetCells(lake) == 400u);               // the water is still there as intent
+
+    water::setShoreClip(rig.tc(), false, water::kDefaultShoreOvershoot);
+    rig.update();
+    REQUIRE((rig.surfaceOf(lake) != entt::null));
+    CHECK(sumArea(sheetOf(rig, lake)) == doctest::Approx(400.0).epsilon(0.01));
+
+    water::setShoreClip(rig.tc(), true, water::kDefaultShoreOvershoot);
+    rig.update();
+    CHECK((rig.surfaceOf(lake) == entt::null));                  // clipped away again, entity and mesh gone
+
+    // Raising the lake out of the ground brings it back.
+    REQUIRE(water::setLevel(rig.tc(), lake, 0.5f));
+    rig.update();
+    CHECK((rig.surfaceOf(lake) != entt::null));
+}
+
+TEST_CASE("Water shore: the settings are clamped, and a bad one keeps the old")
+{
+    TerrainComponent tc = makeTerrain();
+    water::setShoreClip(tc, true, -3.0f);
+    CHECK(tc.water.shoreOvershoot == 0.0f);
+    water::setShoreClip(tc, true, 1.0e9f);
+    CHECK(tc.water.shoreOvershoot == water::kMaxShoreOvershoot);
+    water::setShoreClip(tc, true, 0.4f);
+    water::setShoreClip(tc, false, std::numeric_limits<float>::quiet_NaN());
+    CHECK(tc.water.shoreOvershoot == 0.4f);
+    CHECK_FALSE(tc.water.clipToGround);
+
+    // sanitize (what a loaded file goes through) does the same for a hand-edited value.
+    tc.water.shoreOvershoot = std::numeric_limits<float>::infinity();
+    water::sanitize(tc);
+    CHECK(tc.water.shoreOvershoot == water::kDefaultShoreOvershoot);
+    tc.water.shoreOvershoot = -1.0f;
+    water::sanitize(tc);
+    CHECK(tc.water.shoreOvershoot == 0.0f);
 }

@@ -763,6 +763,19 @@ namespace
 	  "How many times the displacement map repeats across the whole landscape. "
 	  "0 follows Texture Tiling, so it lines up with the material.",
 	  "", "scenes#terrain" },
+	{ "Terrain/Clip To Ground", "",
+	  "Water stops where the ground comes up through it: a lake over a slope ends "
+	  "at the bank instead of floating over the hill. Brushed water and lakes "
+	  "alike. Off draws every water body as the flat shape it was painted or "
+	  "drawn in, at its own height. The painted shape is never changed, so "
+	  "switching back restores the bank.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Shore Overshoot", "",
+	  "How far above the water the ground may stand and still be covered by it, "
+	  "in metres. A little keeps the water's rim tucked under the bank instead of "
+	  "a hair short of it. On a gentle bank it pushes the rim further than on a "
+	  "steep one. 0 ends it exactly where the surface meets the ground.",
+	  "", "scenes#terrain" },
 	{ "Terrain/Seed", "",
 	  "Which random landscape is generated. 0 is flat ground; any other number is "
 	  "a different set of hills, reproduced exactly on every load.",

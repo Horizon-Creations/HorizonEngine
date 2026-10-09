@@ -35,10 +35,20 @@ struct TerrainComponent;
 //      shore, an island and two separate bays need nothing special. The mesh
 //      therefore has about one triangle per contour vertex, not one per cell.
 //
-// Shore clipping against the ground is NOT here (Thema 174 Schritt 5): the surface
-// is the water's footprint as the field says it, at the body's level. Schritt 5's
-// natural seam is step 1 — the lattice is a plain array of 0..255 values, and
-// "wet AND below the surface" is the minimum of two such arrays.
+// SHORE CLIPPING (Thema 174 Schritt 5). With `clipToGround` the sheet exists only
+// where the terrain stands below the body's level. The seam is step 1: next to the
+// coverage the lattice carries a second array `g`, the depth of the water above the
+// ground at each corner (level + overshoot − ground height, metres; ≥ 0 = the ground
+// is under the sheet), and step 2 cuts BOTH: a corner is inside when its coverage is
+// at the iso value AND its depth is not negative. Where an edge of the lattice runs
+// from inside to outside the crossing sits at whichever of the two limits is met
+// first, each placed by linear interpolation — on a planar bank the contour is
+// exactly where the water meets the ground, on a curved one it is the chord across
+// the lattice cell (the shore is only as fine as the water grid: a larger landscape
+// wants a higher Field::res). Steps 3 and
+// 4 do not know about the ground at all: a bank, an island the ground raises out of
+// a lake and a pool in a hollow are contours, outer boundaries and holes, like any
+// other. The same cells give the same sheet whether a brush or a lake tool drew them.
 //
 // SPACE. Contours are terrain-local XZ like every public WaterField function, in
 // double so a long straight shore stays collinear to the last bit. The mesh is in
@@ -52,6 +62,14 @@ namespace HE::water
     // through them and the polygon's edge is where it was drawn (kWet, 128, is the
     // "is this CELL water" cut and a different question).
     inline constexpr double kContourIso = 127.5;
+
+    // The ground's say in the sheet (`Lattice::g`), per body.
+    struct ShoreClip
+    {
+        bool  enabled  = false;
+        float level    = 0.0f;                      // the body's level
+        float overshoot = kDefaultShoreOvershoot;   // metres of ground above it that still count as under water
+    };
 
     using Ring = std::vector<glm::dvec2>;
 
@@ -83,6 +101,14 @@ namespace HE::water
         int x0 = 0, z0 = 0;                  // global index of the first corner (may be −1)
         int w = 0, h = 0;                    // corner count per axis
         std::vector<float> v;                // w·h, row-major, 0..255
+        // The ground (empty = no clipping): w·h, row-major, METRES of water above
+        // the ground at the corner, level + overshoot − terrainHeightAt. A corner
+        // only counts as water when this is ≥ 0. Filled where it can matter (a
+        // corner with water next to it); everywhere else a large positive value.
+        // A non-finite ground height reads as far above the water.
+        std::vector<float> g;
+        bool  clipped() const { return !g.empty(); }
+        float groundAt(int i, int j) const { return g[static_cast<size_t>(j) * w + i]; }
         double originX = 0.0, originZ = 0.0; // position of corner (0, 0)
         double cellW = 1.0, cellH = 1.0;
         double minX = 0.0, maxX = 0.0, minZ = 0.0, maxZ = 0.0;   // the terrain
@@ -102,8 +128,10 @@ namespace HE::water
     std::vector<CellRect> allBodyCells(const TerrainComponent& tc);
 
     // False when the field has no grid, the box is invalid or the terrain has no
-    // area.
-    bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cells, Lattice& out);
+    // area. `clip` enabled fills `Lattice::g` from the terrain's height field
+    // (terrainHeightAt; the terrain is only read, never changed).
+    bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cells, Lattice& out,
+                      const ShoreClip& clip = {});
 
     struct Contour
     {
@@ -111,8 +139,8 @@ namespace HE::water
         double area = 0.0;                   // signed; > 0 outer boundary, < 0 hole
         bool   hole() const { return area < 0.0; }
     };
-    // Closed contours at `iso`, in a deterministic order (by where they start on the
-    // lattice). Loops smaller than a fiftieth of a cell are dropped; consecutive
+    // Closed contours at `iso` (and, on a clipped lattice, at depth 0 of `g`), in a
+    // deterministic order (by where they start on the lattice). Loops smaller than a fiftieth of a cell are dropped; consecutive
     // duplicates and collinear points are merged. A convex corner of a grid-aligned
     // shape is cut diagonally across its cell (half a cell of area) — the price of
     // a lattice contour, invisible on a shore that is not a rectangle.
@@ -134,6 +162,12 @@ namespace HE::water
         // uv = (terrain-local xz + uvOrigin) / uvMetersPerTile.
         glm::vec2 uvOrigin{ 0.0f, 0.0f };
         float     uvMetersPerTile = 1.0f;
+        // Shore clipping against the ground. Off here, on in the field
+        // (Field::clipToGround): WaterSurface passes the field's settings, a caller
+        // that wants only the footprint of the cells gets exactly that.
+        bool      clipToGround = false;
+        float     shoreOvershoot = kDefaultShoreOvershoot;
+        ShoreClip clipFor(float level) const { return { clipToGround, level, shoreOvershoot }; }
     };
 
     struct Surface
@@ -149,7 +183,7 @@ namespace HE::water
         bool empty() const { return mesh.indices.empty(); }
     };
 
-    // Hash of the lattice and the options: equal hash, same mesh. Lets the caller
+    // Hash of the lattice (ground included) and the options: equal hash, same mesh. Lets the caller
     // skip a rebuild when an edit near a body did not change it.
     uint64_t surfaceHash(const Lattice& lattice, float level, const SurfaceOptions& opt);
 

@@ -6935,25 +6935,35 @@ void EditorApplication::dumpFrameHeadless()
 		}
 	}
 
-	// ── Water surface witness (HE_DUMP_WATERLAKE, Thema 174 Schritt 4): a flat
+	// ── Water surface witness (HE_DUMP_WATERLAKE, Thema 174 Schritte 4 und 5): a
 	// 128 m landscape at y=300 and water drawn into its water field the way the lake
 	// tool will — polygons through HE::water::addPolygon — then updateTerrains, which
 	// builds the surface meshes and their entities. The shapes are the ones the mesh
-	// has to get right:
+	// has to get right (all on flat ground at the water's level unless noted):
 	//   =l     an L (concave corner)
 	//   =star  a five-pointed star (five concave notches, off the grid)
 	//   =ring  a square lake with a square island and a pond on the island
 	//   =two   two lakes side by side, two bodies 0.8 m apart in level
+	//   =slope a lake over a BANK (Schritt 5): the ground rises to the east (0.12 m
+	//          per metre, a wobble across z) and the lake polygon runs on over the hill
+	//   =bowl  a lake drawn bigger than the hollow it lies in (round bank, Schritt 5)
+	//   =brush the same bank, with the water painted by brush dabs instead of a polygon
 	//   =none  the landscape and no water: the control for every other frame
-	// HE_DUMP_WATERLEVEL moves the surface above the ground (default 0.4 m). The
-	// ground is flat, so with no shore clipping yet (Schritt 5) the sheet floats over
-	// it; what the frame shows is the footprint. Camera: CAMY=370 CAMZ=60 PITCH=-62.
+	// HE_DUMP_WATERLEVEL moves the surface above the ground (default 0.4 m, 2 m for
+	// the bank shapes). HE_DUMP_WATERCLIP=0 switches the shore clipping off (the A of
+	// the A/B; default on), HE_DUMP_WATEROVERSHOOT sets the margin in metres,
+	// HE_DUMP_WATERHIDEGROUND=1 hides the landscape's own chunks so the frame shows
+	// the sheets alone (from above the terrain hides every part of a sheet that is
+	// under it, which is exactly why the clipped and the unclipped picture look the
+	// same there). The log line carries the numbers as a twin to the image.
+	// Camera: CAMY=375 CAMZ=48 PITCH=-60.
 	if (const char* wl = std::getenv("HE_DUMP_WATERLAKE"); wl && *wl && m_editorWorld)
 	{
 		namespace water = HE::water;
 		auto& reg = m_editorWorld->registry();
 		const std::string_view mode(wl);
-		const float level = [] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : 0.4f; }();
+		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush";
+		const float level = [bank] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : (bank ? 2.0f : 0.4f); }();
 		auto land = m_editorWorld->createEntity("WaterLakeLandscape");
 		TransformComponent ltf;
 		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);   // clear of any loaded scene
@@ -6965,6 +6975,27 @@ void EditorApplication::dumpFrameHeadless()
 		ltc.seed        = 0;
 		ltc.dirty       = true;
 		ltc.water.res   = 256;
+		if (bank)
+		{
+			// The ground, as a sculpted height field (terrain-local metres). 129 is
+			// 2^7+1, so TerrainSystem does not resample it.
+			const uint32_t hr = 129;
+			ltc.resolution = hr;
+			ltc.sculptHeights.assign(static_cast<size_t>(hr) * hr, 0.0f);
+			for (uint32_t zi = 0; zi < hr; ++zi)
+				for (uint32_t xi = 0; xi < hr; ++xi)
+				{
+					const float x = -64.0f + 128.0f * static_cast<float>(xi) / static_cast<float>(hr - 1);
+					const float z = -64.0f + 128.0f * static_cast<float>(zi) / static_cast<float>(hr - 1);
+					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
+						mode == "bowl" ? 0.0018f * (x * x + z * z) - 6.0f
+						               : 0.12f * x + 1.2f * std::sin(0.15f * z);
+				}
+		}
+		if (const char* c = std::getenv("HE_DUMP_WATERCLIP"); c && *c)
+			ltc.water.clipToGround = std::atoi(c) != 0;
+		if (const char* o = std::getenv("HE_DUMP_WATEROVERSHOOT"); o && *o)
+			ltc.water.shoreOvershoot = std::clamp(static_cast<float>(std::atof(o)), 0.0f, water::kMaxShoreOvershoot);
 
 		auto rect = [](float x0, float z0, float x1, float z1) {
 			return std::vector<glm::vec2>{ { x0, z0 }, { x1, z0 }, { x1, z1 }, { x0, z1 } };
@@ -6994,6 +7025,27 @@ void EditorApplication::dumpFrameHeadless()
 			  && water::removePolygon(ltc, { { -22, -16 }, { 20, -22 }, { 26, 14 }, { -14, 20 } }).ok   // a slanted island
 			  && water::addPolygon(ltc, b, { { -6, -4 }, { 6, -4 }, { 8, 4 }, { -4, 6 } }).ok;           // a pond on it
 		}
+		else if (mode == "slope")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -60, -46 }, { 20, -52 }, { 58, -30 }, { 60, 44 }, { 6, 52 }, { -58, 40 } }).ok;
+		}
+		else if (mode == "bowl")
+		{
+			// The hollow is r² = (level + 6) / 0.0018 deep: its rim stands well inside the polygon.
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -54, -50 }, { 50, -56 }, { 58, 40 }, { -48, 52 } }).ok;
+		}
+		else if (mode == "brush")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = true;
+			for (int i = 0; i < 9; ++i)       // a trail of dabs across the bank, like a stroke
+			{
+				const float t = static_cast<float>(i) / 8.0f;
+				ok = ok && water::addCircle(ltc, b, -34.0f + 62.0f * t, -26.0f + 50.0f * std::sin(t * 3.0f), 17.0f, 6.0f).ok;
+			}
+		}
 		else if (mode == "two")
 		{
 			const uint16_t a = ltc.water.createBody(level);
@@ -7004,9 +7056,29 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<TerrainComponent>(land, ltc);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		// The sheet alone: the landscape's chunks stay in the world (collision, the
+		// field) but are not drawn.
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		// The number that says what the picture cannot: how far the ground stands
+		// above the sheet's level at the sheet's own vertices (a clipped sheet has
+		// the overshoot at most), and the vertex span in x.
+		float worstOver = -1.0e30f, lo = 1.0e30f, hi = -1.0e30f;
+		uint32_t verts = 0;
+		for (auto [we, wsc, wtf] : reg.view<WaterSurfaceComponent, TransformComponent>().each())
+			if (const StaticMeshAsset* m = contentManager().getStaticMesh(wsc.meshId))
+				for (size_t i = 0; i + 2 < m->vertices.size(); i += 3, ++verts)
+				{
+					const float x = m->vertices[i] + wtf.position.x, z = m->vertices[i + 2] + wtf.position.z;
+					worstOver = std::max(worstOver, terrainHeightAt(reg.get<TerrainComponent>(land), x, z) - wsc.level);
+					lo = std::min(lo, x); hi = std::max(hi, x);
+				}
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE witness landscape added "
-			"(mode %s, polygons %s, surfaces created %u, triangles %u, level %.2f)",
-			wl, ok ? "ok" : "FAILED", ws.created, ws.triangles, level);
+			"(mode %s, polygons %s, surfaces created %u, triangles %u, level %.2f, clip %d, overshoot %.2f, "
+			"vertices %u, x span %.2f..%.2f, ground over sheet at the vertices at most %.3f m)",
+			wl, ok ? "ok" : "FAILED", ws.created, ws.triangles, level,
+			ltc.water.clipToGround ? 1 : 0, ltc.water.shoreOvershoot, verts, lo, hi, worstOver);
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
