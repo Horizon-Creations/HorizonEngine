@@ -152,9 +152,34 @@ LIMITS = {
     # carry. Windows is the smallest of the three platforms here, and almost all
     # of the difference is its python: 9.8 MB against Linux's 22.7 MB.
     "win32": {
-        "game":         (45.0, 34.0),
-        "app-advanced": (41.0, 30.0),
-        "app-basic":    (40.0, 29.0),
+        # game: (45.0, 34.0) until 06.10.2026, raised on purpose. Thema 153
+        # Schritt 5 (run 37463169927, windows-latest, the ci.yml recipe) weighed
+        # 43.9 MB total, 34.1 MB without python (scene 17.8, rendering 5.6, core
+        # 5.3) and went red by 0.1 MB. The growth is world streaming in
+        # HorizonScene, nothing linked in from outside: CellStreamer (~110 KB
+        # text on arm64), FloatingOrigin (~50 KB), the CBOR split in
+        # SceneJsonParse (~100 KB of from_cbor instantiations) and Jolt's
+        # JobSystemThreadPool. A green run prints no report, so the number before
+        # is only known as "at most 34.0". New limits: measured plus 10 percent,
+        # the rule the darwin game row above follows.
+        "game":         (48.0, 38.0),
+        # app-advanced/app-basic: (41.0, 30.0) / (40.0, 29.0) until 08.10.2026,
+        # unmeasured since 05.09.2026 — a month of unrelated growth across the
+        # whole engine (world streaming, multiplayer, …), not a re-check after
+        # any one feature. Thema 150 Schritt 4 (run 37767060253, windows-latest,
+        # the ci.yml recipe; the push that tripped this path-filtered workflow by
+        # touching src/HE_Rendering/CMakeLists.txt for shaders/gbuffer.frag)
+        # weighed 40.0 MB total, 30.2 MB without python (rendering 1.1) for
+        # app-advanced and 39.4 MB total, 29.6 MB without python (rendering 0.4)
+        # for app-basic, both red by ~0.2-0.6 MB. Of that, only the rendering
+        # column is this topic's: 0.9→1.1 MB (app-advanced) and 0.3→0.4 MB
+        # (app-basic) against the 05.09. baseline, i.e. well under 0.5 MB for the
+        # whole D3D11/D3D12/Vulkan deferred G-buffer/resolve/SSR/decal port
+        # across both flavours — the rest of the ~8 MB gap is the same general
+        # drift the game row above already named for its own month. New limits:
+        # measured plus 10 percent, same rule.
+        "app-advanced": (44.0, 33.0),
+        "app-basic":    (43.0, 33.0),
     },
     # ── Linux/x64 ───────────────────────────────────────────────────────────
     # Measured 05.09.2026 on ubuntu-latest, same run, same recipe:

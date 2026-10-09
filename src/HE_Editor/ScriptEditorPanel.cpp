@@ -170,8 +170,7 @@ namespace ScriptEditorPanel
 			namespace T = EditorToolbar;
 			if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 			T::Bar bar;
-			T::assetHeader(bar, st.name.empty() ? "script" : st.name.c_str(),
-			               T::iconCode, dirty);
+			T::assetHeader(bar, path, dirty);
 			bar.group();
 			bar.readout(nullptr, st.python ? "Python" : "Lua", T::kFgDim);
 			bar.endGroup();

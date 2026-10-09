@@ -429,7 +429,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.name.c_str(), T::iconGear, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 		bar.group();
 		bar.readout(nullptr, st.isEnum ? "Enum" : st.isTemplate ? "SaveGame Template" : "Struct", T::kFgDim);
 		bar.endGroup();

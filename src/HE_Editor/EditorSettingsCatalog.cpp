@@ -123,8 +123,9 @@ std::vector<SettingDesc> buildCatalog()
 	// ── General ▸ Feedback ──────────────────────────────────────────────────
 	t.push_back(boolRow("rewards.enabled", "Success Feedback", "Feedback", "rewards",
 	                    &EditorConfig::RewardsEnabled,
-	                    "Briefly show \"Saved\", \"Build succeeded\" or \"Imported N "
-	                    "assets\" in the footer when one of those just worked. "
+	                    "Briefly show \"Saved\", \"Build succeeded\", \"Imported N "
+	                    "assets\", \"Compiles clean\", \"Committed\" or \"Tutorial "
+	                    "complete\" in the footer when one of those just worked. "
 	                    "Off: nothing is shown, played or counted."));
 	t.push_back(boolRow("rewards.visual", "Visual Cues", "Feedback", "rewards",
 	                    &EditorConfig::RewardsVisual,
@@ -138,6 +139,22 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsLightEdge,
 	                    "One soft line of light along the top of the footer when "
 	                    "the line appears. Needs Visual Cues on."));
+	t.push_back(boolRow("rewards.momentCompile", "Compile Moment", "Feedback", "rewards",
+	                    &EditorConfig::RewardsMomentCompile,
+	                    "Say \"Compiles clean\" when a HorizonCode graph's Compile "
+	                    "button found nothing to fix. Off: not shown, still "
+	                    "counted. Needs Success Feedback on."));
+	t.push_back(boolRow("rewards.momentCommit", "Commit Moment", "Feedback", "rewards",
+	                    &EditorConfig::RewardsMomentCommit,
+	                    "Say \"Committed\", \"Pushed\" or \"Committed and pushed\" "
+	                    "when a commit or push from the Source Control panel went "
+	                    "through. Off: not shown, still counted. Needs Success "
+	                    "Feedback on."));
+	t.push_back(boolRow("rewards.momentTutorial", "Tutorial Moment", "Feedback", "rewards",
+	                    &EditorConfig::RewardsMomentTutorial,
+	                    "Say \"Tutorial complete\" when the last step of the "
+	                    "interactive tutorial is done. Off: not shown, still "
+	                    "counted. Needs Success Feedback on."));
 	t.push_back(boolRow("rewards.tabCheck", "Tab Check on Save", "Feedback", "rewards",
 	                    &EditorConfig::RewardsTabCheck,
 	                    "A saved tab's unsaved marker turns into a check for a "
@@ -147,6 +164,12 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Assets an import just wrote get a frame in the Content "
 	                    "Browser that fades after about two seconds. Needs "
 	                    "Success Feedback on."));
+	t.push_back(boolRow("rewards.problemPulse", "Problem Pulse", "Feedback", "rewards",
+	                    &EditorConfig::RewardsProblemPulse,
+	                    "A new problem notification draws one ring around the "
+	                    "footer bell, and the node a HorizonCode compile failed "
+	                    "on pulses once. Never a blink. Needs Success Feedback "
+	                    "on."));
 	t.push_back(enumRow("rewards.reducedMotion", "Reduced Motion", "Feedback", "rewards",
 	                    &EditorConfig::RewardsReducedMotion,
 	                    { "Follow System", "Off" },
@@ -156,7 +179,8 @@ std::vector<SettingDesc> buildCatalog()
 	t.push_back(boolRow("rewards.sound", "Success Sound", "Feedback", "rewards",
 	                    &EditorConfig::RewardsSound,
 	                    "Play a short sound when a moment happens (and when a "
-	                    "build fails); each sound has its own switch below. Needs "
+	                    "build or compile fails, or a problem arrives while you "
+	                    "are elsewhere); each sound has its own switch below. Needs "
 	                    "Success Feedback on; independent of Visual Cues. At most "
 	                    "one sound every 2 s, a save's at most every 20 s, none "
 	                    "during Play. Played on the editor's own output, not the "
@@ -180,6 +204,33 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsSoundImport,
 	                    "A short pop when files were imported as assets. Needs "
 	                    "Success Sound on."));
+	t.push_back(boolRow("rewards.soundCompile", "Compile Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundCompile,
+	                    "A small step up when a HorizonCode graph's Compile button "
+	                    "found nothing to fix. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundCompileFailed", "Compile Failed Sound", "Feedback",
+	                    "rewards", &EditorConfig::RewardsSoundCompileFailed,
+	                    "The same step down, softer, when the Compile button found "
+	                    "a problem. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundCommit", "Commit Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundCommit,
+	                    "Three rising notes when a commit or push went through, only "
+	                    "while the editor is in the background. Needs Success Sound "
+	                    "on."));
+	t.push_back(boolRow("rewards.soundTutorial", "Tutorial Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundTutorial,
+	                    "The build chime with one note more when the tutorial is "
+	                    "finished. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundProblem", "Problem Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundProblem,
+	                    "Two quiet knocks when a new problem notification arrives, "
+	                    "only while the editor is in the background and at most "
+	                    "every 30 s. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundDragDrop", "Drag and Drop Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundDragDrop,
+	                    "Short, quiet clicks while dragging wires and variables in "
+	                    "the HorizonCode graphs: pick up, over a pin that fits or "
+	                    "not, dropped, cancelled. Needs Success Sound on."));
 	t.push_back(boolRow("rewards.showProgress", "Show Progress", "Feedback", "rewards",
 	                    &EditorConfig::RewardsShowProgress,
 	                    "Show successful builds today and days in a row with the "
@@ -191,8 +242,9 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Needs Show Progress on."));
 	t.push_back(boolRow("rewards.streakTooltip", "Recent Days Tooltip", "Feedback",
 	                    "rewards", &EditorConfig::RewardsStreakTooltip,
-	                    "Hovering the counters shows the last seven days. Only on "
-	                    "hover, never on its own. Needs Show Progress on."));
+	                    "Hovering the counters shows the last seven days, with "
+	                    "each day's builds and commits. Only on hover, never on "
+	                    "its own. Needs Show Progress on."));
 	t.push_back(boolRow("rewards.muteEditorSounds", "Mute Editor Sounds", "Feedback",
 	                    "rewards", &EditorConfig::EditorSoundsMuted,
 	                    "Silence the sounds the editor plays on its own output "
@@ -277,7 +329,7 @@ std::vector<SettingDesc> buildCatalog()
 	}
 	t.push_back(enumRow("display.renderPath", "Render Path", "Display", "renderpath",
 	                    &EditorConfig::RenderPath, { "Forward", "Deferred" },
-	                    "Deferred needs a backend that supports it (Metal, OpenGL); "
+	                    "Deferred needs the backend's G-buffer pipeline ready; "
 	                    "an unsupported choice falls back at push time."));
 
 	t.push_back(boolRow("display.occlusionCulling", "Occlusion Culling", "Display",
@@ -345,7 +397,8 @@ std::vector<SettingDesc> buildCatalog()
 	                     0.0, 128.0, "Longest streak in pixels at 720p."));
 	t.push_back(boolRow("postProcess.ssrEnabled", "Screen-Space Reflections",
 	                    "Post-Processing", "ssr", &EditorConfig::SSREnabled,
-	                    "Metal + the deferred render path; the backend gates it."));
+	                    "All five backends once their post-processing pipeline is ready; "
+	                    "the backend gates it."));
 	t.push_back(floatRow("postProcess.ssrIntensity", "SSR Intensity",
 	                     "Post-Processing", "ssr", &EditorConfig::SSRIntensity,
 	                     0.0, 2.0, ""));
@@ -396,6 +449,10 @@ std::vector<SettingDesc> buildCatalog()
 	                    "gpuparticles", &EditorConfig::GpuParticles,
 	                    "Simulate rain/snow on the GPU instead of the CPU pool. The "
 	                    "backend gates it."));
+	t.push_back(boolRow("effects.weatherSoundInEditor", "Weather Sounds in Edit Mode", "Effects",
+	                    "weathersound", &EditorConfig::WeatherSoundInEditor,
+	                    "Hear the scene's weather (rain, wind, snow, storm, thunder) in the "
+	                    "edit-mode viewport, not only in Play."));
 
 	return t;
 }

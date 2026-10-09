@@ -229,4 +229,21 @@ DirectionalLightWindow BuildDirectionalLightWindow(const RenderWorld& rw)
 	return out;
 }
 
+void FillMaterialDirectionalWindow(const RenderWorld& rw, MaterialShaderLibrary::Lighting& out)
+{
+	const DirectionalLightWindow w = BuildDirectionalLightWindow(rw);
+	for (int i = 0; i < kMaxLightWindow; ++i)
+		for (int k = 0; k < 4; ++k)
+		{
+			const bool on = i < w.count;
+			out.lightPos[i][k]    = on ? w.pos[i][k]   : 0.0f;
+			out.lightDir[i][k]    = on ? w.dir[i][k]   : 0.0f;
+			out.lightColor[i][k]  = on ? w.color[i][k] : 0.0f;
+			// x = range; y = 0 ("no local atlas layer" in the heLitP window,
+			// not BuildDirectionalLightWindow's built-in -1).
+			out.lightParams[i][k] = (on && k == 0) ? w.params[i][0] : 0.0f;
+		}
+	out.counts[0] = static_cast<float>(w.count);
+}
+
 } // namespace HE

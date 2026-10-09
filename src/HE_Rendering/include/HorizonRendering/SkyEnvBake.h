@@ -165,6 +165,32 @@ inline glm::vec3 SkyEnvFaceDirection(int face, float u, float v)
 	}
 }
 
+// The "inverse view-projection" that makes the sky pass render cube face `face`
+// as seen from `camPos`: the sky shaders only derive the view DIRECTION from it
+// (normalize(M*(ndc,+1,1) - M*(ndc,-1,1)) after the divide), so this is built to
+// give exactly SkyEnvFaceDirection(face, ndc.x, v) there, with the camera as the
+// origin the volumetric clouds march from. `rowZeroAtTop` is the rasteriser's
+// row order: true on Metal (NDC y = +1 lands in texel row 0, the face's v = -1),
+// false on OpenGL (NDC y = -1 lands in row 0). Used by the GI-reflection sky
+// bake (topic 173), which draws the real sky (clouds, weather) into a cube.
+//
+// Layout: xyz = D(x,y) + camPos * w, w = 1 - z/2, with D linear in ndc x/y. At
+// z = +1 the point is camPos + 2D, at z = -1 camPos + D/1.5 — the difference is
+// a positive multiple of D, the face direction.
+inline glm::mat4 SkyCubeFaceInvViewProj(int face, const glm::vec3& camPos, bool rowZeroAtTop)
+{
+	const glm::vec3 c  = SkyEnvFaceDirection(face, 0.0f, 0.0f);
+	const glm::vec3 du = SkyEnvFaceDirection(face, 1.0f, 0.0f) - c;
+	const glm::vec3 dv = SkyEnvFaceDirection(face, 0.0f, 1.0f) - c;
+	const glm::vec3 dy = rowZeroAtTop ? -dv : dv;
+	glm::mat4 m(0.0f);
+	m[0] = glm::vec4(du, 0.0f);
+	m[1] = glm::vec4(dy, 0.0f);
+	m[2] = glm::vec4(-0.5f * camPos, -0.5f);
+	m[3] = glm::vec4(c + camPos, 1.0f);
+	return m;
+}
+
 // One texel ROW of one face as tightly packed RGBA32F (faceN * 4 floats written
 // to `outRow`). Row granularity is what lets a caller parallelise the bake
 // without owning any of the maths: each row is independent and SkyColorCPU is

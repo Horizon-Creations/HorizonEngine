@@ -55,4 +55,15 @@ namespace ContentBrowserPanel
 	// Import Asset handler. True once per click, cleared on read; EditorUI
 	// asks at the top of its frame and runs the same code the menu runs.
 	bool takeImportRequest();
+
+	// "Show this asset in the Content Browser": what the button in every asset
+	// editor's header calls. `absPath` is the asset's absolute path, the same
+	// string its editor tab carries. The panel only draws on the scene tab, so
+	// the request has two halves: EditorUI asks takeRevealTabSwitch() at the top
+	// of its frame and brings the scene tab forward, and the panel (drawn from
+	// then on) navigates to the asset's folder, clears any search that would hide
+	// it, selects it and scrolls it into view.
+	void revealAsset(const std::string& absPath);
+	// True once per revealAsset() call, cleared on read.
+	bool takeRevealTabSwitch();
 }

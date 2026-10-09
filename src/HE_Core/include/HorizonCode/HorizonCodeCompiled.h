@@ -49,6 +49,13 @@ struct CompiledVarInfo
     const char* pullVar    = "";
     const char* pullMember = "";
     const char* pullClass  = "";
+    // Mirrors Variable::bindTo / pullRef (Bind To). Appended last and
+    // defaulted like the pull strings: an older table means "not bound".
+    bool        bindTo     = false;
+    const char* pullRef    = "";
+    // Mirrors Variable::notifyChange (Notify on Change). Appended last and
+    // defaulted: an older table means "reports nothing".
+    bool        notifyChange = false;
 };
 struct CompiledEventInfo
 {

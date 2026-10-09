@@ -160,6 +160,10 @@ jobs:
             libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
             liblz4-dev libzstd-dev python3-dev \
             libcurl4-openssl-dev
+          # desktop-file-utils / shared-mime-info / xdg-utils: not for the build but for
+          # heproj_file_types, which runs the .heproj installer for real and validates
+          # what it writes (desktop-file-validate, update-mime-database, xdg-mime).
+          sudo apt-get install -y desktop-file-utils shared-mime-info xdg-utils
 
       # The build was the whole run: Windows 46 of ~54 minutes, Linux 28,
       # macOS 21 — every run compiled everything from scratch on four cores.
@@ -329,6 +333,17 @@ jobs:
           fi
           python3 scripts/validate_embedded_shaders.py --msl-only --require-msl -v
 
+      # Graph materials have no MSL string to extract: theirs exists only once
+      # MaterialShaderLibrary cross-compiles the graph, so the step above never
+      # sees it, and no he_tests case can reach a Metal compiler (the toolchain
+      # arrives after ctest). he_tests dumps every variant the renderers build
+      # for the engine water material (Thema 152) and the script hands them to
+      # the same compiler, negative control first; --require-msl turns a missing
+      # toolchain into a failure instead of a skip.
+      - name: Compile-check the engine water material's MSL (macOS)
+        if: runner.os == 'macOS' && !cancelled()
+        run: python3 scripts/water_shader_offline_check.py --require-msl --he-tests build/tests/he_tests -v
+
       # ── The two app runtimes ────────────────────────────────────────────────────
       # docs/app-runtimes-release-pipeline-plan.md. The build above deployed ONE
       # runtime, Game, next to the editor. An exported HorizonApp wants a leaner one
@@ -431,6 +446,29 @@ jobs:
               exit 1
             fi
           done
+
+      # .heproj file type (Thema 161): Windows and Linux have no installer, so the
+      # registration is files inside the package, FileTypes/. The ctest case
+      # heproj_file_types judged the SOURCE of those files; this judges what was
+      # DEPLOYED, byte for byte, before it is zipped. On Windows the registry is
+      # also exercised for real: register, read the keys and ask the shell what it
+      # resolves .heproj to, unregister, repeat from a path with spaces and
+      # parentheses. What stays open is a double-click on real hardware.
+      - name: Check the .heproj registration in the package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { 'python3' }
+          & $py tests/test_heproj_file_types.py --package package/Editor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Writes (and removes again) the .heproj keys under HKCU of the account the
+          # runner runs as, after exporting whatever was there; see the script header.
+          & scripts/windows_assets/check_heproj_registration.ps1 -EditorDir package/Editor
+          exit $LASTEXITCODE
+
+      - name: Check the .heproj registration in the package (Linux)
+        if: runner.os == 'Linux'
+        run: python3 tests/test_heproj_file_types.py --package package/Editor
 
       # The editor POST_BUILD deployed a self-contained bundle into package/Editor:
       # HorizonEditor.exe + engine DLLs + SDL3 + EngineContent/Fonts/Images + Vulkan
@@ -586,7 +624,24 @@ jobs:
 
       # Default DEPLOY_DIR (out/deploy): the editor and its Shaders/ land in
       # out/deploy/Editor, which is all the image tests need.
+      #
+      # This job builds HorizonEditor too (for the image tests), so it links
+      # HorizonContentSync the same as the three matrix jobs above — the same
+      # env: block for consistency. Without it the configure log read "not
+      # configured" here while the matrix jobs showed the real endpoint, which
+      # looked like a gap the first time someone compared the two logs (it
+      # was: the three matrix jobs had this block, this job never did).
+      # Harmless either way: he_vk_imagetests.py always sets HE_DUMP_PATH, so
+      # every editor launch in this job takes the headless frame-dump path,
+      # which returns before startSftpProbe() (and every other startup probe)
+      # is ever called (EditorApplication.cpp, the "if (m_dumpPath.empty())"
+      # guard around them) — the image tests never open a network connection
+      # whether or not this block is here.
       - name: Configure
+        env:
+          HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
+          HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
+          HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
 
       - name: Save FetchContent dependencies

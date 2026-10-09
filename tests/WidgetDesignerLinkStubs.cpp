@@ -22,10 +22,26 @@
 #include "HcRenameDialog.h"
 #include "HcPullUi.h"
 #include "HcExtractUi.h"
+#include "ViewportPanel.h"
+
+// The profiler's Streaming tab (StreamingDebugView.cpp, test_streaming_view.cpp)
+// shares the Scene window's Streaming Cells switch; the Scene window itself is
+// the whole viewport. A fresh editor's flags stand in for it.
+namespace ViewportPanel
+{
+	ShowFlags& showFlags()
+	{
+		static ShowFlags s_flags;
+		return s_flags;
+	}
+}
 
 namespace EditorSettingsPanel
 {
 	HcVariableStyle hcVariableStyle() { return HcVariableStyle::Detailed; }
+	// UIEditorPanel asks (since 610fbcd2 moved Pre Construct into Preferences);
+	// the real one reads config.json and answers true when nothing is stored.
+	bool widgetRunPreConstruct() { return true; }
 }
 
 namespace HcRenameDialog

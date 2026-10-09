@@ -132,7 +132,7 @@ if(HE_VULKAN_ENABLED)
         set(HE_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
         file(MAKE_DIRECTORY "${HE_SHADER_OUT_DIR}")
         set(HE_VULKAN_SPV "")
-        foreach(stage scene.vert scene_instanced.vert scene.frag scene_shadow.vert
+        foreach(stage scene.vert scene_instanced.vert scene.frag gbuffer.frag scene_shadow.vert
                       scene_shadow_instanced.vert
                       postfx.vert postfx_tonemap.frag postfx_fxaa.frag
                       postfx_smaa.frag postfx_aa_blit.frag
@@ -319,6 +319,7 @@ add_library(HorizonRendering SHARED
     src/CommandBuffer.cpp
     src/GiBvh.cpp
     src/GiInstanceSurface.cpp
+    src/GiAutoLandscape.cpp
     src/MaterialScalars.cpp
     src/RendererFactory.cpp)
 

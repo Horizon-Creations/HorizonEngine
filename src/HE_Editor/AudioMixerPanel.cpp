@@ -4,6 +4,7 @@
 #include "EditorHelp.h"            // "Audio Mixer/<label>" scope for its controls
 #include "EditorTheme.h"           // the accent for a lit M / S
 #include "NotificationStore.h"     // notify() when the .heproj cannot be written
+#include "AudioMixView.h"          // the EQ block the Audio Editor uses, for a bus
 
 #include <Audio/AudioBusConfig.h>
 #include <HorizonScene/AudioEngine.h>
@@ -49,6 +50,11 @@ std::string            s_listenProject;
 // the project: the project only learns about the bus once Add is pressed.
 std::string s_newBusName;
 
+// Whose EQ is open under the strips ("" = none), and its graph's view state.
+// By name like the listen state, and cleared with it on a project change.
+std::string              s_eqBus;
+HE::Ed::AudioMix::EqView s_eqView;
+
 BusListen& listenFor(const std::string& name)
 {
 	for (BusListen& l : s_listen)
@@ -91,11 +97,12 @@ struct StripResult
 {
 	bool commit = false;   // write the project
 	bool remove = false;   // the strip's Remove was pressed
+	bool eq     = false;   // the strip's EQ was pressed
 };
 
 StripResult drawStrip(const char* id, const char* title, float* volume, bool* muted, bool* solo,
                       int voices, bool removable, const std::function<void(float)>& onVolume,
-                      const std::function<void()>& onListen)
+                      const std::function<void()>& onListen, bool eqLit = false)
 {
 	StripResult r;
 	ImGui::PushID(id);
@@ -173,6 +180,20 @@ StripResult drawStrip(const char* id, const char* title, float* volume, bool* mu
 
 	if (removable)
 	{
+		// The bus's EQ: lit while it filters; a press opens it under the strips.
+		{
+			const float w = ImGui::GetFrameHeight() * 1.4f * 2.0f + st.ItemSpacing.x;
+			ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (stripW - w) * 0.5f);
+			if (eqLit)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Button,        HE::Ed::Theme::Accent);
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, HE::Ed::Theme::AccentHi);
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  HE::Ed::Theme::Accent);
+			}
+			if (ImGui::Button("EQ", ImVec2(w, 0.0f))) r.eq = true;
+			if (eqLit) ImGui::PopStyleColor(3);
+			EditorWidgets::helpForKey("Audio Mixer/EQ");
+		}
 		const float w = ImGui::CalcTextSize("Remove").x + st.FramePadding.x * 2.0f;
 		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (stripW - w) * 0.5f);
 		if (EditorWidgets::dangerSmallButton("Remove")) r.remove = true;
@@ -224,6 +245,8 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 	{
 		s_listenProject = p.path;
 		s_listen.clear();
+		s_eqBus.clear();
+		s_eqView = {};
 		audio.setMasterMuted(false);
 	}
 	// Every strip's entry exists BEFORE the strips are drawn: a click callback
@@ -272,9 +295,14 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 			const StripResult r = drawStrip(b.name.c_str(), b.name.c_str(), &b.volume,
 				&l.muted, &l.solo, audio.busVoiceCount(b.name), true,
 				[&](float v) { audio.setBusVolume(b.name, v); },
-				listen);
+				listen, !b.eq.isNeutral());
 			commit |= r.commit;
 			if (r.remove) removeBus = b.name;
+			if (r.eq)
+			{
+				s_eqBus  = s_eqBus == b.name ? std::string() : b.name;
+				s_eqView = {};
+			}
 			ImGui::SameLine();
 		}
 
@@ -295,6 +323,28 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 		}
 	}
 	ImGui::EndChild();
+
+	// ── The open bus's EQ ────────────────────────────────────────────────────
+	// The same block the Audio Editor draws for a clip, at the mixer's rate
+	// (what a bus EQ runs at). Every change reaches the engine at once; the
+	// project is written when a gesture ends, like a fader.
+	if (!s_eqBus.empty())
+	{
+		HE::AudioBusDef* def = cfg.find(s_eqBus);
+		if (!def) s_eqBus.clear();   // removed (here or from elsewhere) while open
+		else
+		{
+			ImGui::Separator();
+			ImGui::Text("EQ of %s", def->name.c_str());
+			const float h = std::max(160.0f, std::min(240.0f, ImGui::GetContentRegionAvail().y -
+			                                              ImGui::GetFrameHeightWithSpacing() * 2.0f));
+			const HE::Ed::AudioMix::EqResult er = HE::Ed::AudioMix::drawEq(
+				def->eq, s_eqView, double(audio.outputSampleRate()),
+				ImVec2(ImGui::GetContentRegionAvail().x, h), true, /*forBus=*/true);
+			if (er.edited)    audio.setBusEq(def->name, def->eq);
+			if (er.committed) commit = true;
+		}
+	}
 
 	ImGui::Separator();
 

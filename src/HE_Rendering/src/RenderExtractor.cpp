@@ -1,5 +1,6 @@
 #include "HorizonRendering/RenderExtractor.h"
 #include <cstdint>
+#include <cstdlib>
 #include "HorizonRendering/RenderWorld.h"
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
 #include <Diagnostics/Profiler.h>
@@ -298,6 +299,8 @@ namespace
 			ls.invSize      = { 1.0f / std::max(tc.sizeX, 1e-4f), 1.0f / std::max(tc.sizeZ, 1e-4f) };
 			ls.uvTiling     = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
 			ls.weightmapId  = tc.weightmapTextureId;
+			HE::UUID    autoTexId{};   // auto material's albedo array, resolved below
+			std::string autoTexPath;
 			if (contentManager)
 				if (const auto* lmat = reg.try_get<MaterialComponent>(te))
 					if (const MaterialAsset* ma = contentManager->getMaterial(lmat->materialAssetId))
@@ -306,7 +309,43 @@ namespace
 						for (int i = 0; i < ls.layerCount; ++i)
 							ls.layerColor[i] = { ma->approxLayerColor[i][0], ma->approxLayerColor[i][1],
 							                     ma->approxLayerColor[i][2], 0.0f };
+						// Auto landscape material (no layers, no weightmap): its masks
+						// are rebuilt in the kernels from slope and height, see
+						// GiLandscape.h. HE_GIREFL_AUTOLAND=0 = the old flat colour
+						// (white), the A/B switch at one binary.
+						static const bool autoOn = [] {
+							const char* v = std::getenv("HE_GIREFL_AUTOLAND");
+							return !(v && v[0] == '0');
+						}();
+						if (ls.layerCount <= 0 && autoOn)
+						{
+							auto ov = [lmat](const std::string& name, float& v) {
+								for (const auto& o : lmat->paramOverrides)
+									if (o.name == name) { v = o.value[0]; return true; }
+								return false;
+							};
+							const int slot = HE::giAutoLandscapeParams(*ma, ov, ls);
+							if (slot >= 0)
+							{
+								// Copied out: resolving may loadAsset, which moves `ma`.
+								if (static_cast<size_t>(slot) < ma->graphTextureIds.size())
+									autoTexId = ma->graphTextureIds[slot];
+								if (static_cast<size_t>(slot) < ma->graphTexturePaths.size())
+									autoTexPath = ma->graphTexturePaths[slot];
+							}
+						}
 					}
+			if (ls.layerCount == HE::kGiLandAuto)
+			{
+				// The array is the material's own (already loaded for the raster
+				// path); not resident or not an array → no entry, the flat colour.
+				const TextureAsset* arr = contentManager->resolveTextureRef(autoTexId, autoTexPath);
+				if (!arr || !HE::giAutoLandscapeSliceMeans(*arr, ls)) continue;
+				landscapeOf.emplace(static_cast<uint32_t>(te),
+				                    static_cast<int32_t>(out.landscapes.size()));
+				out.landscapes.push_back(ls);
+				continue;
+			}
 			// No layer split (plain material, or a BaseColor the fold could not
 			// reach) → nothing to blend per texel; the flat colour already says
 			// everything this landscape can say.
@@ -1182,12 +1221,95 @@ void RenderExtractor::setContentManager(ContentManager* cm)
 	m_contentManager       = cm;
 }
 
+void RenderExtractor::beginFrame()
+{
+	m_frameArmed  = true;
+	m_frameCached = false;
+}
+
+void RenderExtractor::endFrame()
+{
+	m_frameArmed  = false;
+	m_frameCached = false;
+	// Keeps its capacity for the next frame; the contents must not outlive it.
+	if (m_frameCopy) m_frameCopy->clear();
+}
+
+RenderExtractor::FrameKey RenderExtractor::makeFrameKey(const HorizonWorld& world,
+                                                        const EditorCameraOverride* editorCam) const
+{
+	FrameKey k;
+	k.world          = &world;
+	k.hasEditorCam   = editorCam != nullptr;
+	if (editorCam) k.editorCam = *editorCam;
+	k.contentManager = m_contentManager;
+	k.materialEpoch  = m_sectionMaterialEpoch;
+	k.shadowDistance = m_shadowDistance;
+	k.cascadeCount   = m_cascadeCount;
+	k.splitLambda    = m_splitLambda;
+	k.shadowMapRes   = m_shadowMapRes;
+	k.dayNight       = m_dayNight;
+	k.timeOfDay      = m_timeOfDay;
+	k.sunColor       = m_sunColor;
+	k.sunIntensity   = m_sunIntensity;
+	k.moonColor      = m_moonColor;
+	k.moonIntensity  = m_moonIntensity;
+	k.cloudCoverage  = m_cloudCoverage;
+	return k;
+}
+
+bool RenderExtractor::sameFrameKey(const FrameKey& a, const FrameKey& b)
+{
+	if (a.hasEditorCam != b.hasEditorCam) return false;
+	if (a.hasEditorCam)
+	{
+		const EditorCameraOverride& x = a.editorCam;
+		const EditorCameraOverride& y = b.editorCam;
+		if (x.active != y.active || x.view != y.view || x.position != y.position
+		    || x.fovDegrees != y.fovDegrees || x.nearPlane != y.nearPlane
+		    || x.farPlane != y.farPlane || x.orthographic != y.orthographic
+		    || x.orthoHalfHeight != y.orthoHalfHeight || x.editorIcons != y.editorIcons)
+			return false;
+	}
+	return a.world == b.world && a.contentManager == b.contentManager
+	    && a.materialEpoch == b.materialEpoch
+	    && a.shadowDistance == b.shadowDistance && a.cascadeCount == b.cascadeCount
+	    && a.splitLambda == b.splitLambda && a.shadowMapRes == b.shadowMapRes
+	    && a.dayNight == b.dayNight && a.timeOfDay == b.timeOfDay
+	    && a.sunColor == b.sunColor && a.sunIntensity == b.sunIntensity
+	    && a.moonColor == b.moonColor && a.moonIntensity == b.moonIntensity
+	    && a.cloudCoverage == b.cloudCoverage;
+}
+
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
                               const EditorCameraOverride* editorCam)
 {
 	HE_PROFILE_SCOPE_N("RenderExtractor::extract");
-	out.clear();
 	auto& reg = world.registry();
+
+	// Second and later call of a frame with the same inputs: the copy of the
+	// first walk, see beginFrame() in the header.
+	if (m_frameArmed && m_frameCached && m_frameCopy
+	    && sameFrameKey(m_frameKey, makeFrameKey(world, editorCam)))
+	{
+		HE_PROFILE_SCOPE_N("RenderExtractor::reuse");
+		out = *m_frameCopy;
+		if (aspectRatio != m_frameAspect)
+		{
+			// The aspect-dependent tail of the walk, in the walk's order: the
+			// projection, then the cascade fit around it and the local layers,
+			// on a shadow block reset the way clear() resets it.
+			extractCamera(reg, out, aspectRatio, editorCam);
+			out.shadow = ShadowData{};
+			fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
+			assignLocalShadowLayers(out);
+		}
+		++m_reusedExtracts;
+		return;
+	}
+
+	++m_fullExtracts;
+	out.clear();
 
 	extractTransforms(world, reg);
 	extractCamera(reg, out, aspectRatio, editorCam);
@@ -1214,6 +1336,24 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// Shadows last: both phases read the finished object + light sets.
 	fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
 	assignLocalShadowLayers(out);
+
+	if (m_frameArmed)
+	{
+		if (!m_frameCopy) m_frameCopy = std::make_unique<RenderWorld>();
+		*m_frameCopy  = out;
+		m_frameKey    = makeFrameKey(world, editorCam);
+		m_frameAspect = aspectRatio;
+		m_frameCached = true;
+	}
+}
+
+void RenderExtractor::extractCameraOnly(HorizonWorld& world, RenderWorld& out, float aspectRatio,
+                                        const EditorCameraOverride* editorCam)
+{
+	HE_PROFILE_SCOPE_N("RenderExtractor::extractCameraOnly");
+	auto& reg = world.registry();
+	if (!(editorCam && editorCam->active)) extractTransforms(world, reg);
+	extractCamera(reg, out, aspectRatio, editorCam);
 }
 
 // ── Environment sun + moon (day-night) ────────────────────────────────────

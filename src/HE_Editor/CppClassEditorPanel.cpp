@@ -212,8 +212,8 @@ namespace CppClassEditorPanel
 			namespace T = EditorToolbar;
 			if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 			T::Bar bar;
-			T::assetHeader(bar, st.className.empty() ? "class" : st.className.c_str(),
-			               T::iconCode, bufDirty(cur));
+			T::assetHeader(bar, !st.header.path.empty() ? st.header.path : st.source.path,
+			               bufDirty(cur));
 
 			bar.group();
 			if (bar.item("##cppHdr", nullptr, ".h", st.active == 0,

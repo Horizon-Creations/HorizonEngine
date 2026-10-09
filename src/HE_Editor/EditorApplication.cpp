@@ -24,6 +24,7 @@
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
@@ -39,6 +40,7 @@
 #include "HcFallbackReport.h"      // which classes an export had to ship interpreted
 #include "EditorRewards.h"         // setSystemMotionQuery — Reduced Motion's "Follow System"
 #include "EditorSystemMotion.h"    // …and the system query it follows
+#include "ProjectLaunchOpen.h"     // a .heproj double-clicked in the file manager
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
@@ -66,6 +68,7 @@
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <HorizonRendering/GiLandscape.h>   // HE_DUMP_AUTOLANDMIRROR: the GI auto entry
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <material/MaterialShaderBake.h>
 #include <glm/gtc/quaternion.hpp>
@@ -96,6 +99,7 @@
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/HcWatchEvents.h>            // horizon.hc.watch / he::hc::watch delivery
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/TimerSystem.h>
@@ -124,6 +128,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -408,6 +413,49 @@ static const char* scriptLogTagFor(ProjectScriptLanguage lang)
 	case ProjectScriptLanguage::HorizonCode:
 	default:                            return "[HC] ";
 	}
+}
+
+// The project this start was asked to open, if any (ProjectLaunchOpen.h).
+// Windows and Linux hand it over as an argument; every argument that is not one
+// is said in the log and otherwise left alone. macOS sends an open event
+// instead, and at launch that event is usually already waiting in SDL's queue
+// by now (the splash pumps it) — so it is PEEKED here, not taken: it still
+// reaches OnEvent on the first frame, finds its project open and does nothing.
+// That way the first project load is the right one, instead of the last
+// session's project followed by a switch. `askedForProject` says a .heproj was
+// named but cannot be opened (moved, deleted): that is still a request, so the
+// caller shows the Hub with the reason rather than the last project.
+static std::string pickLaunchProject(const std::vector<std::string>& args,
+                                     bool& askedForProject)
+{
+	std::error_code ec;
+	const std::filesystem::path cwd = std::filesystem::current_path(ec);
+	ProjectLaunchOpen::LaunchPick pick = ProjectLaunchOpen::pickFromArguments(args, cwd);
+	askedForProject = !pick.project.empty();
+	for (const auto& [arg, why] : pick.rejected)
+	{
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' %s — not opened",
+		            arg.c_str(), ProjectLaunchOpen::describe(why));
+		if (why == ProjectLaunchOpen::PathError::NotFound ||
+		    why == ProjectLaunchOpen::PathError::NotAFile)
+			askedForProject = true;
+	}
+	for (const std::string& p : pick.ignored)
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' not opened — the editor "
+		                    "opens one project at a time", p.c_str());
+	if (!pick.project.empty()) return pick.project;
+
+	SDL_PumpEvents();
+	SDL_Event evs[16];
+	const int n = SDL_PeepEvents(evs, 16, SDL_PEEKEVENT, SDL_EVENT_DROP_FILE, SDL_EVENT_DROP_FILE);
+	for (int i = 0; i < n; ++i)
+	{
+		if (evs[i].drop.windowID != 0 || !evs[i].drop.data) continue;
+		// Unopenable ones are not said here: OnEvent says it when it gets there.
+		const ProjectLaunchOpen::ParsedPath p = ProjectLaunchOpen::parse(evs[i].drop.data, cwd);
+		if (p.ok()) return p.path;
+	}
+	return {};
 }
 
 void EditorApplication::OnInit()
@@ -1245,6 +1293,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsVisual                = globalstate.getCustomConfigBool("RewardsVisual", m_editorConfig.RewardsVisual);
 	m_editorConfig.RewardsCheckMark             = globalstate.getCustomConfigBool("RewardsCheckMark", m_editorConfig.RewardsCheckMark);
 	m_editorConfig.RewardsLightEdge             = globalstate.getCustomConfigBool("RewardsLightEdge", m_editorConfig.RewardsLightEdge);
+	m_editorConfig.RewardsMomentCompile         = globalstate.getCustomConfigBool("RewardsMomentCompile", m_editorConfig.RewardsMomentCompile);
+	m_editorConfig.RewardsMomentCommit          = globalstate.getCustomConfigBool("RewardsMomentCommit", m_editorConfig.RewardsMomentCommit);
+	m_editorConfig.RewardsMomentTutorial        = globalstate.getCustomConfigBool("RewardsMomentTutorial", m_editorConfig.RewardsMomentTutorial);
 	m_editorConfig.RewardsTabCheck              = globalstate.getCustomConfigBool("RewardsTabCheck", m_editorConfig.RewardsTabCheck);
 	m_editorConfig.RewardsImportHighlight       = globalstate.getCustomConfigBool("RewardsImportHighlight", m_editorConfig.RewardsImportHighlight);
 	m_editorConfig.RewardsReducedMotion         = std::clamp(globalstate.getCustomConfigInt("RewardsReducedMotion", m_editorConfig.RewardsReducedMotion), 0, 1);
@@ -1254,6 +1305,13 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsSoundBuild            = globalstate.getCustomConfigBool("RewardsSoundBuild", m_editorConfig.RewardsSoundBuild);
 	m_editorConfig.RewardsSoundBuildFailed      = globalstate.getCustomConfigBool("RewardsSoundBuildFailed", m_editorConfig.RewardsSoundBuildFailed);
 	m_editorConfig.RewardsSoundImport           = globalstate.getCustomConfigBool("RewardsSoundImport", m_editorConfig.RewardsSoundImport);
+	m_editorConfig.RewardsSoundCompile          = globalstate.getCustomConfigBool("RewardsSoundCompile", m_editorConfig.RewardsSoundCompile);
+	m_editorConfig.RewardsSoundCompileFailed    = globalstate.getCustomConfigBool("RewardsSoundCompileFailed", m_editorConfig.RewardsSoundCompileFailed);
+	m_editorConfig.RewardsSoundCommit           = globalstate.getCustomConfigBool("RewardsSoundCommit", m_editorConfig.RewardsSoundCommit);
+	m_editorConfig.RewardsSoundTutorial         = globalstate.getCustomConfigBool("RewardsSoundTutorial", m_editorConfig.RewardsSoundTutorial);
+	m_editorConfig.RewardsSoundProblem          = globalstate.getCustomConfigBool("RewardsSoundProblem", m_editorConfig.RewardsSoundProblem);
+	m_editorConfig.RewardsSoundDragDrop         = globalstate.getCustomConfigBool("RewardsSoundDragDrop", m_editorConfig.RewardsSoundDragDrop);
+	m_editorConfig.RewardsProblemPulse          = globalstate.getCustomConfigBool("RewardsProblemPulse", m_editorConfig.RewardsProblemPulse);
 	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
 	m_editorConfig.RewardsCounterTick           = globalstate.getCustomConfigBool("RewardsCounterTick", m_editorConfig.RewardsCounterTick);
 	m_editorConfig.RewardsStreakTooltip         = globalstate.getCustomConfigBool("RewardsStreakTooltip", m_editorConfig.RewardsStreakTooltip);
@@ -1318,6 +1376,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.SpecularAA                  = globalstate.getCustomConfigBool("SpecularAA",          m_editorConfig.SpecularAA);
 	m_editorConfig.SpecularAAStrength          = globalstate.getCustomConfigFloat("SpecularAAStrength", m_editorConfig.SpecularAAStrength);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
+	m_editorConfig.WeatherSoundInEditor        = globalstate.getCustomConfigBool("WeatherSoundInEditor", m_editorConfig.WeatherSoundInEditor);
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
@@ -1510,6 +1569,19 @@ void EditorApplication::OnInit()
 		g_host.entities = &m_entityHost;
 		g_host.antiCheat = &m_antiCheat;
 		g_host.net       = &m_netSession;
+		// Script and native subscriptions to HorizonCode variables, routed by the
+		// same HcWatchEvents the packaged game uses (GameApplication::OnInit).
+		// Looked up at call time: outside play there is no script context and no
+		// module, and the dispatcher drops what it cannot deliver.
+		m_gameInstance.runtime().onVariableChanged =
+			[this](HorizonCode::InstanceId owner, const std::string& var,
+			       const HorizonCode::Value& old, const HorizonCode::Value& now,
+			       const std::vector<uint64_t>& tokens)
+			{
+				HcWatchEvents::dispatch(m_gameInstance.runtime(), owner, var, old, now, tokens,
+				                        m_scriptContext.get(), &m_scriptInstances,
+				                        logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+			};
 		// The session's hooks into this host, the same two the packaged game
 		// binds (GameApplication) — a preview that spawned differently from the
 		// shipped build would be a preview of something else.
@@ -1872,14 +1944,29 @@ void EditorApplication::OnInit()
 			splashStatus("Loading scene " +
 			             std::filesystem::path(sceneAbsPath).stem().string(), 0.9f);
 			SceneSerializer serializer;
+			// Phase timings for the world-streaming baseline (Thema 153): the
+			// whole startup load is one blocking call chain, and its parts
+			// scale differently with entity count and asset count.
+			using Clock = std::chrono::steady_clock;
+			const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+			const Clock::time_point tLoad = Clock::now();
 			bool ok = serializer.load(*m_editorWorld, sceneAbsPath, SerializeFormat::JSON);
 			if (ok)
 			{
+				const Clock::time_point tSync = Clock::now();
 				m_currentScenePath = sceneAbsPath;
 				syncPrefabInstances("startup"); // same order as openScene: before the preload
+				const Clock::time_point tPreload = Clock::now();
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+				const Clock::time_point tWarmup = Clock::now();
 				splashStatus("Compiling material pipelines", 0.95f);
 				warmupWorldMaterials(); // build custom-material pipelines before the first draw
+				const Clock::time_point tEnd = Clock::now();
+				// The entity count is on the SceneLoadTiming line just before.
+				HE_LOG_INFO(Editor, "SceneOpenTiming: loadMs=%.2f prefabSyncMs=%.2f "
+				                    "preloadMs=%.2f warmupMs=%.2f totalMs=%.2f",
+				            ms(tSync - tLoad), ms(tPreload - tSync), ms(tWarmup - tPreload),
+				            ms(tEnd - tWarmup), ms(tEnd - tLoad));
 				HE_LOG_INFO(Editor, "%s",
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
 			}
@@ -1897,8 +1984,32 @@ void EditorApplication::OnInit()
 		m_savedRevision = m_undo.revision();
 	});
 
+	// A project double-clicked in the file manager wins over the last one. Loaded
+	// the way the Project Hub loads a chosen file (ProjectHubPanel), because at
+	// this point the Hub is what is open. A failure does NOT fall back to the
+	// last project: the user asked for this one, and the Hub says why it did not
+	// open instead of quietly showing something else.
+	bool askedForProject = false;
+	const std::string launchProject = pickLaunchProject(launchArguments(), askedForProject);
+	if (askedForProject && launchProject.empty())
+		m_hubOpenError = "The project file passed at launch could not be found.";
+	else if (!launchProject.empty())
+	{
+		HE_LOG_INFO(Editor, "EditorApplication: opening %s (handed over at launch)",
+		            launchProject.c_str());
+		splashStatus("Opening " + std::filesystem::path(launchProject).stem().string(), 0.75f);
+		if (m_projectManager.loadProject(launchProject))
+		{
+			m_globalState->addKnownProject(launchProject);
+			m_globalState->writeConfig();
+			m_projectLoaded         = true;
+			m_contentRefreshPending = true;
+		}
+		else
+			m_hubOpenError = "Failed to load project file.";
+	}
 	// If a project was previously opened, load it now (triggers the callback above)
-	if (!m_globalState->getLastProjectPath().empty())
+	else if (!m_globalState->getLastProjectPath().empty())
 	{
 		splashStatus("Opening " +
 		             std::filesystem::path(m_globalState->getLastProjectPath())
@@ -2787,7 +2898,16 @@ void EditorApplication::OnRender(float dt)
 	// (registerRemoteAsset, HE_ContentSync) to actually complete once queued —
 	// without this, a passively-triggered download would finish and then sit in
 	// the sink forever, never registered.
-	contentManager().pollAsyncResults(4);
+	// Budgeted by time as well as count, like the game (Thema 153): four large
+	// meshes cost a frame as much as four materials did before. Materials that
+	// arrive are warmed here, so their first draw does not cross-compile.
+	{
+		constexpr size_t kEditorStreamBatch    = 16;
+		constexpr double kEditorStreamBudgetMs = 2.0;
+		const std::vector<HE::UUID> arrived =
+			contentManager().pollAsyncResults(kEditorStreamBatch, kEditorStreamBudgetMs);
+		if (!arrived.empty() && renderer()) renderer()->WarmupMaterials(arrived);
+	}
 
 #ifdef HE_HAVE_LIBSSH2
 	// Apply a freshly fetched EngineContent manifest to ContentManager — see
@@ -3361,17 +3481,19 @@ void EditorApplication::OnRender(float dt)
 			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
 		}
 
-		// Thunder: when a lightning strike fired this frame, play the configured sound
-		// (graceful no-op if no thunderSound asset is set on the WeatherComponent).
-		if (m_isPlaying && m_editorWorld)
+		// The weather's sound: rain/wind/snow/storm beds that follow the live weather,
+		// and thunder after each lightning strike. After the tick above, so a strike is
+		// heard the frame it happens. Edit mode too (the Preferences switch is the way
+		// to silence it there); in Play it goes quiet with the pause, like the weather
+		// itself stands still.
+		if (m_editorWorld)
 		{
-			for (auto [e, wx] : m_editorWorld->registry().view<WeatherComponent>().each())
-			{
-				if (wx.flashTriggered && wx.thunderSound != HE::UUID{})
-					if (const auto* a = contentManager().getAudio(wx.thunderSound))
-						m_audioEngine.play(*a);
-				break;
-			}
+			HE_PROFILE_SCOPE_N("WeatherAudio");
+			WeatherAudio::Frame frame;
+			frame.realDt  = dt;
+			frame.gameDt  = gameDt;
+			frame.audible = m_isPlaying ? !m_isPaused : m_editorConfig.WeatherSoundInEditor;
+			WeatherAudio::update(m_weatherAudio, *m_editorWorld, m_audioEngine, contentManager(), frame);
 		}
 
 		// Per-frame script update. `simulating`, not m_isPlaying: onUpdate runs once
@@ -4114,6 +4236,10 @@ void EditorApplication::OnRender(float dt)
 			// It draws itself only outside play mode (editor furniture), which is
 			// why m_isPlaying travels along rather than being checked here.
 			ViewportPanel::appendGroundGrid(m_editorCamera, m_isPlaying, dbg);
+			// A split scene's streaming cells, coloured by what the game would do
+			// with each from this camera. Editor furniture too: not while playing.
+			if (show.streamingCells && !m_isPlaying && m_editorWorld)
+				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(), dbg);
 
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,
@@ -4323,6 +4449,10 @@ void EditorApplication::OnRender(float dt)
 
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
+	// Reward moment (EditorRewards.h): COMMITTED — no AppContext here, so
+	// post(): fired by the next frame's pollBuild.
+	if (const int sync = m_git.takeSyncMoment())
+		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::Committed, sync);
 
 		if (m_collab.inSession()) syncStructuralChanges();
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
@@ -4455,6 +4585,14 @@ void EditorApplication::OnRender(float dt)
 	// Joins, leaves, connects — queued during the pump and delivered here, never
 	// from inside a message handler (NetEvents.h).
 	dispatchNetEvents();
+
+	// ── Frame end: Bind To (docs/bind-to-variable-binding-plan.md §3.4) ──────
+	// The packaged game's line, on uiLive like the rest of the script world:
+	// under the editor's pause the bindings stand still with the widget tick,
+	// and a single step compares once. Should the game view's UI be collected
+	// before this line, the preview shows a bound value one frame after the
+	// shipped game does (not measured; the plan §3.4 accepts it).
+	if (uiLive && m_gameInstance.runtime().exchangeState() > 0) requestRedraw();
 
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// The same last line the packaged game has, after every script and the UI
@@ -5646,6 +5784,91 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
+	// ── Engine water witness (HE_DUMP_WATERTEST, Thema 152): the SHIPPED
+	// Engine/Materials/Water.hasset on the engine plane (one quad — the waves are
+	// normals only), 40 m square at y = 0, and no other graph material — the case
+	// in which GL forward handed the translucent water a stale HeLighting (no
+	// clock, no sky). =floor adds a grey opaque slab 1.5 m below so the
+	// transparency has something to show. Frame it with SKYTEST (e.g. CAMY=4
+	// CAMZ=6 PITCH=-25): two shots at different HE_SKY_TIME differ only if the
+	// clock reaches the material, the same time twice is the noise floor.
+	if (const char* wt = std::getenv("HE_DUMP_WATERTEST"); wt && *wt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const HE::UUID waterId = contentManager().loadAsset("Engine/Materials/Water.hasset");
+		const HE::UUID planeId = contentManager().loadAsset("Engine/Meshes/Plane.hasset");
+		if (waterId == HE::UUID{} || planeId == HE::UUID{})
+			HE_LOG_WARN(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST could not load "
+			                          "Engine/Materials/Water.hasset or Engine/Meshes/Plane.hasset");
+		else
+		{
+			// HE_DUMP_WATERSIZE=<metres>: side of the square (default 40). The swell
+			// is 14 m long, so a pattern that repeats every few wavelengths only
+			// shows on a plane several times that (Thema 152, Schritt 8).
+			float side = 40.0f;
+			if (const char* ws = std::getenv("HE_DUMP_WATERSIZE"); ws && *ws)
+				side = std::clamp(std::strtof(ws, nullptr), 1.0f, 4000.0f);
+			auto e = m_editorWorld->createEntity("WaterTest");
+			TransformComponent tc;
+			tc.position = glm::vec3(0.0f, 0.0f, -8.0f);
+			tc.scale    = glm::vec3(side, 1.0f, side);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
+			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
+			// HE_DUMP_WATERPARAMS="FresnelPower=10;DeepColor=1,0,0": per-entity
+			// overrides, the same MaterialComponent::paramOverrides the Details
+			// panel writes, so a shot pair can show what ONE knob does. Components
+			// left out keep the material's default.
+			if (const char* wp = std::getenv("HE_DUMP_WATERPARAMS"); wp && *wp)
+				if (const MaterialAsset* wm = contentManager().getMaterial(waterId))
+				{
+					std::stringstream all(wp);
+					std::string item;
+					while (std::getline(all, item, ';'))
+					{
+						const size_t eq = item.find('=');
+						if (eq == std::string::npos) continue;
+						MaterialParamOverride ov;
+						ov.name = item.substr(0, eq);
+						size_t slot = 0;
+						while (slot < wm->graphParamNames.size() && wm->graphParamNames[slot] != ov.name) ++slot;
+						if (slot == wm->graphParamNames.size())
+						{
+							HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_WATERPARAMS: no parameter '%s'",
+							            ov.name.c_str());
+							continue;
+						}
+						for (int k = 0; k < 4 && slot * 4 + k < wm->shaderParamData.size(); ++k)
+							ov.value[k] = wm->shaderParamData[slot * 4 + k];
+						std::stringstream vals(item.substr(eq + 1));
+						std::string v;
+						for (int k = 0; k < 4 && std::getline(vals, v, ','); ++k)
+							ov.value[k] = std::strtof(v.c_str(), nullptr);
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERPARAMS %s = (%g, %g, %g, %g)",
+						            ov.name.c_str(), ov.value[0], ov.value[1], ov.value[2], ov.value[3]);
+						wmc.paramOverrides.push_back(std::move(ov));
+					}
+				}
+			if (std::string(wt) == "floor")
+			{
+				MaterialAsset grey;
+				grey.type = HE::AssetType::Material;
+				grey.name = "WaterTestFloor";
+				grey.baseColor[0] = grey.baseColor[1] = grey.baseColor[2] = 0.5f;
+				grey.roughness = 0.8f;
+				auto fe = m_editorWorld->createEntity("WaterTestFloor");
+				TransformComponent ftc;
+				ftc.position = glm::vec3(0.0f, -1.5f, -8.0f);
+				ftc.scale    = glm::vec3(side, 0.2f, side);
+				reg.emplace<TransformComponent>(fe, ftc);
+				reg.emplace<MeshComponent>(fe, MeshComponent{ HE::kDefaultCubeMeshId });
+				reg.emplace<MaterialComponent>(fe,
+					MaterialComponent{ contentManager().registerMaterial(std::move(grey)) });
+			}
+			HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST engine water plane added");
+		}
+	}
+
 	// ── sRGB-texture witness (HE_DUMP_SRGBTEST=1): two cubes side by side, both
 	// textured with the same solid mid-grey (128/255) on a white material. The
 	// LEFT texture is flagged linear, the RIGHT one sRGB. A backend that honours
@@ -6703,6 +6926,70 @@ void EditorApplication::dumpFrameHeadless()
 			al, what.c_str(), ma ? ma->graphTexturePaths.size() : size_t(0),
 			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
 			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
+
+		// HE_DUMP_AUTOLANDMIRROR=1 (Thema 173): two mirrors on the plain, for the
+		// GI-reflection question "does a mirror show the sky and the auto
+		// material?". The camera-facing one (x -40, z -14) reflects the plain
+		// behind the camera in its lower half and the sky in its upper half; the
+		// one yawed 45° (x -54, z -10) throws its rays toward +x, onto the rock
+		// slope and the snow plateau. Camera: CAMX=-40 CAMY=304 CAMZ=14 PITCH=-4.
+		if (const char* mm = std::getenv("HE_DUMP_AUTOLANDMIRROR"); mm && *mm)
+		{
+			MaterialAsset mirror;
+			mirror.type = HE::AssetType::Material;
+			mirror.name = "AutoLandscapeMirror";
+			mirror.baseColor[0] = mirror.baseColor[1] = mirror.baseColor[2] = 0.9f;
+			mirror.metallic  = 1.0f;
+			mirror.roughness = 0.05f;
+			const HE::UUID mirrorId = contentManager().registerMaterial(std::move(mirror));
+			auto addMirror = [&](const char* name, glm::vec3 pos, float yawDeg, glm::vec3 scale)
+			{
+				auto e = m_editorWorld->createEntity(name);
+				TransformComponent tf;
+				tf.position = pos;
+				tf.rotation = glm::vec3(0.0f, yawDeg, 0.0f);
+				tf.scale    = scale;
+				reg.emplace<TransformComponent>(e, tf);
+				reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+				reg.emplace<MaterialComponent>(e, MaterialComponent{ mirrorId });
+			};
+			addMirror("AutoLandscapeMirror", glm::vec3(-40.0f, kBaseY + 5.0f, -14.0f), 0.0f,
+			          glm::vec3(14.0f, 10.0f, 0.4f));
+			addMirror("AutoLandscapeMirrorAngled", glm::vec3(-54.0f, kBaseY + 4.0f, -10.0f), 45.0f,
+			          glm::vec3(10.0f, 8.0f, 0.4f));
+			// What a GI hit on this landscape is shaded with: the CPU fold of the
+			// material (re-fetched — registerMaterial may move the asset table).
+			const MaterialAsset* lma = contentManager().getMaterial(amId);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDMIRROR mirrors added "
+				"(landscape GI fold: approxBaseColor %.3f %.3f %.3f, approxLayerCount %d)",
+				lma ? lma->approxBaseColor[0] : -1.0f, lma ? lma->approxBaseColor[1] : -1.0f,
+				lma ? lma->approxBaseColor[2] : -1.0f, lma ? lma->approxLayerCount : -1);
+			// Since Schritt 3 an auto material gets its own GI landscape entry
+			// (GiLandscape.h): the slice means and the mask parameters the
+			// kernels see — the numeric oracle for the mirror's colours.
+			HE::GiLandscape gl;
+			HE::UUID    texId{};
+			std::string texPath;
+			const int slot = lma ? HE::giAutoLandscapeParams(*lma, {}, gl) : -1;
+			if (slot >= 0)
+			{
+				if (static_cast<size_t>(slot) < lma->graphTextureIds.size())   texId   = lma->graphTextureIds[slot];
+				if (static_cast<size_t>(slot) < lma->graphTexturePaths.size()) texPath = lma->graphTexturePaths[slot];
+			}
+			const TextureAsset* arr = slot >= 0 ? contentManager().resolveTextureRef(texId, texPath) : nullptr;
+			const bool means = arr && HE::giAutoLandscapeSliceMeans(*arr, gl);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDMIRROR GI auto entry: slot %d, means %s "
+				"(grass %.3f %.3f %.3f, dirt %.3f %.3f %.3f, rock %.3f %.3f %.3f, snow %.3f %.3f %.3f, "
+				"puddle %.3f %.3f %.3f share %.2f), rock %.2f+%.2f, dirt %.2f, snow y %.0f+%.1f max slope %.2f, "
+				"puddle max slope %.3f", slot, means ? "yes" : "NO",
+				gl.layerColor[0].x, gl.layerColor[0].y, gl.layerColor[0].z,
+				gl.layerColor[1].x, gl.layerColor[1].y, gl.layerColor[1].z,
+				gl.layerColor[2].x, gl.layerColor[2].y, gl.layerColor[2].z,
+				gl.layerColor[3].x, gl.layerColor[3].y, gl.layerColor[3].z,
+				gl.autoWet.x, gl.autoWet.y, gl.autoWet.z, gl.autoWet.w,
+				gl.autoSlope.x, gl.autoSlope.y, gl.autoSlope.z,
+				gl.autoSnow.x, gl.autoSnow.y, gl.autoSnow.z, gl.autoSlope.w);
+		}
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
@@ -10522,6 +10809,9 @@ void EditorApplication::setPlayMode(bool play)
 		// logicLoader().logic() is null and the base loop has nothing to tick.
 		if (logicLoader().isLoaded())
 			logicLoader().unload(*m_editorWorld);
+		// The Game Instance's runtime outlives the session; the module's
+		// subscriptions (he::hc::watch) must not.
+		HcWatchEvents::dropNative(m_gameInstance.runtime());
 
 		// Runs stopped at a breakpoint die with the session: the GameInstance's
 		// runtime outlives it, and a stopped run of the GameInstance would
@@ -10615,7 +10905,9 @@ void EditorApplication::setPlayMode(bool play)
 			m_widgetTextInputActive = false;
 		}
 
-		// Stop all audio when exiting play mode
+		// Stop all audio when exiting play mode — the weather's state first, so the
+		// beds start from silence again instead of reusing handles stopAll kills.
+		WeatherAudio::stop(m_weatherAudio, m_audioEngine);
 		m_audioEngine.stopAll();
 
 		HE_LOG_INFO(Editor, "%s", "EditorApplication: returned to edit mode");
@@ -11263,7 +11555,15 @@ void EditorApplication::pushEnvironment(float dt)
 void EditorApplication::warmupWorldMaterials()
 {
 	if (!m_editorWorld || !renderer()) return;
-	renderer()->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
+	std::vector<HE::UUID> ids = SceneSystems::collectAssetRefs(*m_editorWorld);
+	// The billboard icons of lights, cameras and audio sources are graph materials
+	// no component references; the first frame that showed one cross-compiled it
+	// inside Metal::EncodeScene (0.4 + 0.7 s in frames 0/1, Thema 153 Schritt 5).
+	for (const HE::UUID& icon : { HE::kEditorIconPointLightMaterialId, HE::kEditorIconSpotLightMaterialId,
+	                              HE::kEditorIconDirectionalLightMaterialId, HE::kEditorIconCameraMaterialId,
+	                              HE::kEditorIconAudioSourceMaterialId })
+		ids.push_back(icon);
+	renderer()->WarmupMaterials(ids);
 }
 
 bool EditorApplication::openScene(const std::string& path)
@@ -11397,12 +11697,15 @@ void EditorApplication::bindGameServices()
 	m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
 	m_gameServicesBinding.content = &contentManager();
 	m_gameServicesBinding.antiCheat = [this]() { return &m_antiCheat; };
+	m_gameServicesBinding.runtime   = [this]() { return &m_gameInstance.runtime(); };
+	m_gameServicesBinding.entities  = [this]() { return &m_entityHost; };
 	HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
 	HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
 	HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
 	HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
 	HE::api::fillAntiCheatServices(m_antiCheatServices, &m_gameServicesBinding);
 	HE::api::fillNetServices(m_netServices, &m_gameServicesBinding);
+	HE::api::fillHcServices(m_hcServices, &m_gameServicesBinding);
 	m_engineServices            = {};
 	m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 	m_engineServices.save       = &m_saveServices;
@@ -11411,6 +11714,7 @@ void EditorApplication::bindGameServices()
 	m_engineServices.content    = &m_contentServices;
 	m_engineServices.anticheat  = &m_antiCheatServices;
 	m_engineServices.net        = &m_netServices;
+	m_engineServices.hc         = &m_hcServices;
 }
 
 std::filesystem::path EditorApplication::builtGameLogicPath()
@@ -11452,6 +11756,9 @@ bool EditorApplication::reloadGameLogic()
 	if (lib.empty()) return false;
 
 	bindGameServices();
+	// The fresh image subscribes again in its onStart; what the old one asked
+	// for goes with it.
+	HcWatchEvents::dropNative(m_gameInstance.runtime());
 	// One call, because the sequence is the trap: reload() alone hands the fresh
 	// image no service tables and every he::* call in it becomes a silent no-op
 	// (GameLogicLoader.h).
@@ -11586,6 +11893,8 @@ void EditorApplication::OnShutdown()
 	// below, which returns early in a headless build.
 	if (m_scriptContext) m_scriptContext->setHostServices({});
 	g_host = {};
+	HcWatchEvents::dropNative(m_gameInstance.runtime());
+	m_gameInstance.runtime().onVariableChanged = nullptr;
 	// The sink captured `this` and names the script context; drop it here, for
 	// the reason the block above gives.
 	m_antiCheat.setEventSink({});
@@ -11729,6 +12038,9 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsVisual",              m_editorConfig.RewardsVisual);
 	globalstate.setCustomConfigEntry("RewardsCheckMark",           m_editorConfig.RewardsCheckMark);
 	globalstate.setCustomConfigEntry("RewardsLightEdge",           m_editorConfig.RewardsLightEdge);
+	globalstate.setCustomConfigEntry("RewardsMomentCompile",       m_editorConfig.RewardsMomentCompile);
+	globalstate.setCustomConfigEntry("RewardsMomentCommit",        m_editorConfig.RewardsMomentCommit);
+	globalstate.setCustomConfigEntry("RewardsMomentTutorial",      m_editorConfig.RewardsMomentTutorial);
 	globalstate.setCustomConfigEntry("RewardsTabCheck",            m_editorConfig.RewardsTabCheck);
 	globalstate.setCustomConfigEntry("RewardsImportHighlight",     m_editorConfig.RewardsImportHighlight);
 	globalstate.setCustomConfigEntry("RewardsReducedMotion",       m_editorConfig.RewardsReducedMotion);
@@ -11738,6 +12050,13 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsSoundBuild",          m_editorConfig.RewardsSoundBuild);
 	globalstate.setCustomConfigEntry("RewardsSoundBuildFailed",    m_editorConfig.RewardsSoundBuildFailed);
 	globalstate.setCustomConfigEntry("RewardsSoundImport",         m_editorConfig.RewardsSoundImport);
+	globalstate.setCustomConfigEntry("RewardsSoundCompile",        m_editorConfig.RewardsSoundCompile);
+	globalstate.setCustomConfigEntry("RewardsSoundCompileFailed",  m_editorConfig.RewardsSoundCompileFailed);
+	globalstate.setCustomConfigEntry("RewardsSoundCommit",         m_editorConfig.RewardsSoundCommit);
+	globalstate.setCustomConfigEntry("RewardsSoundTutorial",       m_editorConfig.RewardsSoundTutorial);
+	globalstate.setCustomConfigEntry("RewardsSoundProblem",        m_editorConfig.RewardsSoundProblem);
+	globalstate.setCustomConfigEntry("RewardsSoundDragDrop",       m_editorConfig.RewardsSoundDragDrop);
+	globalstate.setCustomConfigEntry("RewardsProblemPulse",        m_editorConfig.RewardsProblemPulse);
 	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
 	globalstate.setCustomConfigEntry("RewardsCounterTick",         m_editorConfig.RewardsCounterTick);
 	globalstate.setCustomConfigEntry("RewardsStreakTooltip",       m_editorConfig.RewardsStreakTooltip);
@@ -11762,6 +12081,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("SpecularAA",                m_editorConfig.SpecularAA);
 	globalstate.setCustomConfigEntry("SpecularAAStrength",        m_editorConfig.SpecularAAStrength);
 	globalstate.setCustomConfigEntry("GpuParticles",              m_editorConfig.GpuParticles);
+	globalstate.setCustomConfigEntry("WeatherSoundInEditor",      m_editorConfig.WeatherSoundInEditor);
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
@@ -11779,6 +12099,11 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);
 	globalstate.setCustomConfigEntry("SSRMaxRoughness",           m_editorConfig.SSRMaxRoughness);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
+	// The graph views that have not been written yet (a pan just before quitting).
+	{
+		AppContext ctx = makeContext();
+		EditorUI::flushGraphViews(ctx, /*write=*/false);
+	}
 	globalstate.writeConfig();
 }
 
@@ -11874,6 +12199,32 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			// Only a drop that landed IN the preview is answered here; one that
 			// missed it stays available to whatever the editor grows next.
 			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
+		}
+	}
+
+	// ── A project handed over by the system (ProjectLaunchOpen.h) ────────────
+	// macOS opens a document by event, also in an editor that is already
+	// running, and SDL delivers it as a DROP_FILE with no window (windowID 0).
+	// A .heproj dropped onto the editor window outside the live preview (which
+	// answered above) means the same thing. Only posted here: the Hub or the
+	// editor takes it on the next frame through its own Open, the editor's with
+	// the unsaved-changes prompt. A window drop of any other file stays silent —
+	// it was aimed at the preview or at nothing; an OS open of one is logged.
+	if (event.type == SDL_EVENT_DROP_FILE && event.drop.data)
+	{
+		const bool fromSystem = event.drop.windowID == 0;
+		std::error_code ec;
+		const ProjectLaunchOpen::ParsedPath p =
+			ProjectLaunchOpen::parse(event.drop.data, std::filesystem::current_path(ec));
+		if (fromSystem || p.error != ProjectLaunchOpen::PathError::WrongExtension)
+		{
+			if (!p.ok())
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' %s — not opened",
+				            event.drop.data, ProjectLaunchOpen::describe(p.error));
+			else if (!ProjectLaunchOpen::post(p.path))
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' not opened — another project is "
+				                    "already waiting to open, one at a time", p.path.c_str());
+			return true;
 		}
 	}
 

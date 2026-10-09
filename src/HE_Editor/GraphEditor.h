@@ -1,4 +1,5 @@
 #pragma once
+#include "EditorDragCues.h"
 #include <imgui.h>
 #include <array>
 #include <functional>
@@ -23,6 +24,8 @@
 // through the body/decoration hooks in the SAME canvas transform.
 
 namespace GraphEditor {
+
+using DragCue = HE::Ed::DragCue;
 
 // Which container a data pin carries, as far as the CANVAS is concerned: it only
 // decides which glyph is drawn. Deliberately the canvas's own enum and not
@@ -99,6 +102,13 @@ struct State
     ImVec2 pan  = ImVec2(40.0f, 40.0f);
     float  zoom = 1.0f;
 
+    // Where this graph was last looked at is remembered under this key (GraphViewStore.h):
+    // set by the host before draw() — an asset-unique string — and left empty for a
+    // canvas that should not remember (a throwaway preview). The first draw adopts
+    // the stored view; every later one records the current one.
+    std::string viewKey;
+    bool        viewRestored = false;
+
     int              selected = 0;   // primary selection (0 = none)
     std::vector<int> selection;      // all selected ids (multi-select)
 
@@ -158,6 +168,16 @@ struct State
     // reading a graph a peer holds, and reading one still means moving around
     // it. See the pan block in draw().
     bool   panning = false;
+    // Drag cue edges (Model::onDragCue): the pin the wire in hand is over
+    // (node 0 = none), the drag-off menu a drop opened (Drop/Cancel when it
+    // ends), and a payload of ours being dragged / over the canvas
+    // (0 none, 1 accepted type, 2 foreign type) / delivered.
+    int    cueNode = 0, cuePin = 0;
+    bool   cueInput = false;
+    bool   cueMenu = false;
+    bool   cuePayload = false;
+    int    cuePayloadOver = 0;
+    bool   cuePayloadDropped = false;
 
     // ── Set by draw(), read by the host ──
     // The document changed THIS FRAME in the middle of a gesture — a node drag
@@ -262,6 +282,16 @@ struct Model
     // payload type and calls `onDrop` with the matched type + data + graph point.
     std::vector<const char*> dropPayloads;
     std::function<void(const char* type, const void* data, ImVec2 graphPos)> onDrop;
+
+    // Drag and drop cues (EditorDragCues.h): told about pickup, entering a pin
+    // or the canvas with something it would / would not take, drop and cancel —
+    // once per event, never per frame. Purely observing: what the drag does is
+    // the same with or without it. Unset = silent and free.
+    std::function<void(DragCue)> onDragCue;
+    // Would connect(outNode, outPin, inNode, inPin) succeed? Asked only when
+    // the wire in hand enters a pin (for onDragCue), never per frame, and must
+    // not change the graph. Unset = any output↔input pair on another node counts.
+    std::function<bool(int outNode, int outPin, int inNode, int inPin)> canConnect;
 
     // Feature flags.
     bool multiSelect = false;

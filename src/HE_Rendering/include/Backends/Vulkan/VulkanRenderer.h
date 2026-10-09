@@ -152,7 +152,7 @@ private:
 	VkPipeline     GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
 	                                           const std::string& vertBody,
 	                                           const MaterialShaderVariant* precompiled,
-	                                           bool hdr, bool transparent);
+	                                           bool hdr, bool transparent, bool gbuffer = false);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
@@ -276,10 +276,14 @@ private:
 	// Scene depth from the camera into `d`, opaque static meshes only (see the
 	// limitation note in the plan). No-op without decals in the frame.
 	void EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d);
-	// One unit-cube projector per decal, drawn INSIDE the currently open scene
-	// render pass after the opaque draws. Caller restores its own pipeline/sets.
-	void EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
-	                  uint32_t width, uint32_t height, bool hdr);
+	// One unit-cube projector per decal, drawn INSIDE the currently open render
+	// pass. Caller restores its own pipeline/sets. `depthView` is what the decal
+	// reconstructs from: the DecalDepth pre-pass image in a forward frame, GB3
+	// in a deferred one (both SHADER_READ_ONLY). intoGBuffer (Thema 150 S5):
+	// the unshaded decalFragmentSampled into GB0 inside m_gbDecalRP, lit by the
+	// resolve afterwards — GL's deferred decal.
+	void EncodeDecals(VkCommandBuffer cmd, VkImageView depthView,
+	                  uint32_t width, uint32_t height, bool hdr, bool intoGBuffer = false);
 	bool EnsureDecalPipelines();
 	void destroyDecalPipelines();
 	// Decal base texture by UUID (DecalData::textureId is a TEXTURE, not a
@@ -291,6 +295,7 @@ private:
 	VkPipelineLayout      m_decalPipeLayout   = VK_NULL_HANDLE;
 	VkPipeline            m_decalPipeline     = VK_NULL_HANDLE; // m_renderPass (LDR + viewport)
 	VkPipeline            m_decalPipelineHDR  = VK_NULL_HANDLE; // m_postFxSceneRP (RGBA16F)
+	VkPipeline            m_decalPipelineGB   = VK_NULL_HANDLE; // m_gbDecalRP (GB0 SRGB), optional
 	VkSampler             m_decalDepthSampler = VK_NULL_HANDLE; // NEAREST: no interpolation across silhouettes
 	VkDescriptorPool      m_decalPool[2]      = {};             // per frame in flight, reset whole
 	struct DecalFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
@@ -432,6 +437,66 @@ private:
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
 	static constexpr uint32_t k_matMaxDraws   = 1024;
 	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
+
+	// ── Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10) ──
+	// The D3D11/D3D12 structure on Vulkan's render-pass model. A deferred frame
+	// (the HDR viewport frame, m_deferredFrame) runs three scene passes:
+	//   1. m_postFxSceneRP as always — the sky, drawn first (no depth test);
+	//      nothing else lands there, the opaques are routed away (below).
+	//   2. m_gbufferRP — the opaque geometry into four colour targets (§3 GB0
+	//      R8G8B8A8_SRGB base + metallic, GB1/GB2 RGBA16F, and GB3 R32F with
+	//      gl_FragCoord.z: plan §10.5 way B, the depth attachment itself is
+	//      never sampled) plus the viewport depth. The colours end in
+	//      SHADER_READ_ONLY (the render pass's finalLayout does the transition).
+	//   3. m_hdrLoadRP — m_postFxSceneRP with LOAD on colour (the sky) and depth
+	//      (the G-buffer's): the fullscreen resolve
+	//      (MaterialShaderLibrary::deferredResolve[Clustered](SpirV), the same
+	//      heLitP graph materials shade with), then the forward tail — graph
+	//      materials without a G-buffer variant, decals, transparency, skinned,
+	//      debug lines. Load ops do not take part in render-pass compatibility,
+	//      so every HDR pipeline is valid in it unchanged.
+	// Built-in materials go through gbuffer.frag (m_gbufPipeline), graph
+	// materials through their G-buffer tail (GetOrBuildMaterialPipeline with
+	// gbuffer = true). The resolve has its own set layout
+	// (HE::vkmat::kResolveBindings) and a persistent set per frame slot, written
+	// after the slot's fence like the scene set's binding 8.
+	static constexpr uint32_t k_gbTargets = 4;
+	VkRenderPass          m_gbufferRP            = VK_NULL_HANDLE;
+	VkRenderPass          m_hdrLoadRP            = VK_NULL_HANDLE;
+	VkImage               m_gbImage[k_gbTargets] = {};
+	VkDeviceMemory        m_gbMem[k_gbTargets]   = {};
+	VkImageView           m_gbView[k_gbTargets]  = {};
+	VkFramebuffer         m_gbFB                 = VK_NULL_HANDLE; // + m_viewportDepthView
+	// Deferred decals (Thema 150 S5): GB0 alone, LOAD, SHADER_READ_ONLY in and
+	// out, between m_gbufferRP and m_hdrLoadRP; the decal samples GB3.
+	VkRenderPass          m_gbDecalRP            = VK_NULL_HANDLE;
+	VkFramebuffer         m_gbDecalFB            = VK_NULL_HANDLE; // m_gbView[0]
+	uint32_t              m_gbW = 0, m_gbH = 0;
+	bool                  m_gbFailed             = false;          // one log line for a failed allocation
+	VkSampler             m_gbSampler            = VK_NULL_HANDLE; // point-clamp: no interpolation across silhouettes
+	VkPipeline            m_gbufPipeline          = VK_NULL_HANDLE; // scene.vert + gbuffer.frag
+	VkPipeline            m_gbufInstancedPipeline = VK_NULL_HANDLE; // scene_instanced.vert + gbuffer.frag (optional)
+	VkDescriptorSetLayout m_resolveSetLayout     = VK_NULL_HANDLE;
+	VkPipelineLayout      m_resolvePipeLayout    = VK_NULL_HANDLE;
+	VkPipeline            m_resolvePipe          = VK_NULL_HANDLE; // 8-light window
+	VkPipeline            m_resolveClusteredPipe = VK_NULL_HANDLE; // optional (cluster SSBOs)
+	VkDescriptorPool      m_resolvePool          = VK_NULL_HANDLE;
+	VkDescriptorSet       m_resolveSet[2]        = {};             // per frame slot
+	// The resolve's OWN HeLighting (specular AA off, directional-only window
+	// when clustered) and HeResolve. NOT m_matLightBuf: host-mapped memory is
+	// read at execution, so trimming the material block for the resolve would
+	// hand the forward replay and the transparent tail the trimmed window.
+	MatFrameBuf           m_resolveLightBuf[2];
+	MatFrameBuf           m_resolveUboBuf[2];
+	// Built once at Initialize (createDeferredPipelines): the editor reads
+	// supportsDeferredRendering at startup and applies a saved "Deferred" only
+	// when it is already true.
+	bool                  m_deferredReady        = false;
+	bool                  m_deferredFrame        = false; // this viewport frame renders deferred
+	bool createDeferredPipelines();
+	void destroyDeferredPipelines();
+	bool ensureGBufferTargets(uint32_t w, uint32_t h);
+	void destroyGBufferTargets();
 
 	// Per-draw material data of the built-in scene shader (32 bytes: baseColor(rgb)+metallic(a)
 	// + roughness + opacity + hasTexture + noShadow), scene set binding 2. That binding is a

@@ -106,6 +106,54 @@ TEST_CASE("Pull editor: the status line says what the runtime would warn")
 	CHECK(HcPull::describe(fromSpawner) == "Pulled from Creator (Spawner) > Gift");
 }
 
+TEST_CASE("Bind To editor: the reference source — its list, its class, its status line")
+{
+	registerStats();
+	Graph owner;
+	Variable target; target.name = "Target"; target.type = PinType::Ref;
+	target.className = "Classes/Enemy.hasset";
+	Variable any; any.name = "Any"; any.type = PinType::Ref;
+	Variable list; list.name = "Many"; list.type = PinType::Ref; list.isArray = true;
+	Variable n; n.name = "N"; n.type = PinType::Int;
+	owner.variables = { target, any, list, n };
+
+	const auto refs = HcPull::refVariables(owner);
+	REQUIRE(refs.size() == 2);   // scalar Refs only: no array, no Int
+	CHECK(refs[0] == "Target");
+	CHECK(refs[1] == "Any");
+	CHECK(HcPull::refClassOf(owner, "Target") == "Classes/Enemy.hasset");
+	CHECK(HcPull::refClassOf(owner, "Any").empty());
+	CHECK(HcPull::refClassOf(owner, "N").empty());
+
+	Variable hp = intTarget(kPullFromRef, "Score");
+	hp.bindTo = true;
+	// Nothing picked yet: the line asks for the reference first.
+	CHECK_FALSE(HcPull::check(hp, nullptr).ok);
+	CHECK(HcPull::check(hp, nullptr).text.find("pick the object reference") != std::string::npos);
+
+	hp.pullRef = "Target";
+	CHECK(HcPull::sourceClassOf(hp, owner) == "Classes/Enemy.hasset");
+	const auto vars = HcPull::publicVariables(giGraph());
+	const HcPull::Status ok = HcPull::check(hp, &vars);
+	CHECK(ok.ok);
+	CHECK(ok.text == "Reference 'Target' > Score (Int)");
+	// A reference of no declared class: the runtime decides.
+	hp.pullRef = "Any";
+	CHECK(HcPull::sourceClassOf(hp, owner).empty());
+	const HcPull::Status unknown = HcPull::check(hp, nullptr);
+	CHECK(unknown.ok);
+	CHECK(unknown.text.find("checked at run time") != std::string::npos);
+
+	CHECK(HcPull::describe(hp) == "Bound to Reference 'Any' > Score");
+	Variable gi = intTarget(kPullFromGameInstance, "Score");
+	gi.bindTo = true;
+	CHECK(HcPull::describe(gi) == "Bound to Game Instance > Score");
+	// The creator source keeps reading its expected class.
+	Variable cr = intTarget(kPullFromCreator, "Gift");
+	cr.pullClass = "Classes/Spawner.hasset";
+	CHECK(HcPull::sourceClassOf(cr, owner) == "Classes/Spawner.hasset");
+}
+
 TEST_CASE("Pull editor: Add to Target writes what is missing, and nothing else")
 {
 	registerStats();

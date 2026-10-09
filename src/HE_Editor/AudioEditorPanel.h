@@ -1,7 +1,9 @@
 #pragma once
 #include "EditorUI.h"
+#include "AssetAutosave.h"
 #include <imgui.h>
 #include <string>
+#include <vector>
 
 // Audio clip editor — a top-level tab opened by double-clicking an Audio .hasset
 // (or a raw .wav/.ogg) in the Content Browser. Before it existed both fell
@@ -23,6 +25,14 @@
 // The panel works on int16 PCM throughout (waveform, analysis, scrubbing). A
 // Vorbis clip — imported asset or raw .ogg — is decoded once into the tab's own
 // copy; that copy is editor-only, in the game the AudioEngine streams the clip.
+//
+// Cutting (Thema 168): Trim keeps only the selection of an imported clip — an
+// edit stored on the asset (AudioAsset::edit), never a change to its samples,
+// undoable in the tab and honoured by every voice the engine starts from the
+// asset. Extract writes the selection as a NEW asset beside the clip (fresh
+// UUID, a name nothing there has yet) and leaves the clip's own file
+// byte-identical. The tab honours the same dirty/save/reload contract as every
+// other asset tab.
 namespace AudioEditorPanel
 {
 	void render(AppContext& ctx, const std::string& assetPath,
@@ -40,4 +50,16 @@ namespace AudioEditorPanel
 	// rename/delete). Stops whatever this tab was auditioning — a closed tab has
 	// no UI left to silence a looping clip with.
 	void forget(const std::string& assetPath);
+
+	// The dirty/save/reload contract (EditorUI's dispatch lists). Only a trim —
+	// an edit of the asset — makes a tab dirty; Extract writes its new file at
+	// once and leaves nothing unsaved.
+	bool isDirty(const std::string& assetPath);
+	void appendDirtyPaths(std::vector<std::string>& out);
+	// Crash-recovery copies of the unsaved tabs (EditorUI::appendAssetSnapshots).
+	void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
+	bool save(AppContext& ctx, const std::string& assetPath);
+	// Throws the tab's edits away: the edit chunk on disk goes back onto the
+	// loaded asset on the next frame, and the undo history starts over.
+	bool reloadFromDisk(const std::string& assetPath);
 }

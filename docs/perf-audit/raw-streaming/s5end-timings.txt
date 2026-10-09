@@ -1,0 +1,20 @@
+== s5end-1000.log
+[14:16:40.312] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=1078 parseMs=9.30 buildMs=5.76
+[14:16:41.341] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: warmed up 4 material pipeline(s)
+[14:16:41.342] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=15.24 prefabSyncMs=0.01 preloadMs=0.52 warmupMs=1029.25 totalMs=1045.02
+== s5end-10000.log
+[14:16:46.938] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=10168 parseMs=99.46 buildMs=42.41
+[14:16:48.112] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: warmed up 4 material pipeline(s)
+[14:16:48.112] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=142.06 prefabSyncMs=0.02 preloadMs=1.13 warmupMs=1172.78 totalMs=1315.98
+== s5end-100000.log
+[14:17:13.022] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=101068 parseMs=958.07 buildMs=624.34
+[14:17:14.226] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: warmed up 4 material pipeline(s)
+[14:17:14.226] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=1582.57 prefabSyncMs=0.02 preloadMs=4.34 warmupMs=1200.04 totalMs=2786.97
+== s5end-200000.log
+[14:17:43.793] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=202068 parseMs=1543.96 buildMs=1214.82
+[14:17:45.188] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: warmed up 4 material pipeline(s)
+[14:17:45.188] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=2758.99 prefabSyncMs=0.02 preloadMs=8.36 warmupMs=1386.25 totalMs=4153.63
+== s5end-50000.log
+[14:16:55.070] [ INFO] [Serialize  ] [Main    ] [f      0] SceneLoadTiming: entities=50568 parseMs=533.07 buildMs=279.70
+[14:16:56.243] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: warmed up 4 material pipeline(s)
+[14:16:56.243] [ INFO] [Editor     ] [Main    ] [f      0] SceneOpenTiming: loadMs=812.94 prefabSyncMs=0.02 preloadMs=12.15 warmupMs=1160.49 totalMs=1985.59

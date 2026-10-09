@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -381,6 +382,75 @@ TEST_CASE("Content Browser badge lookups resolve through the controller")
 	he_test::removeQuiet(repo);
 }
 
+TEST_CASE("A commit the user asked for is one reward moment; a refused one is none")
+{
+	// Topic 140, moment 5 (EditorRewards.h, "COMMITTED"): the controller's
+	// SyncWatch over a real repository and the real worker thread.
+	namespace R = HE::Ed::Rewards;
+
+	// Without an open project the request never reaches a worker: not armed,
+	// so no old lastInfo can answer for it.
+	{
+		GitController none;
+		none.requestCommitAll("nothing open");
+		none.requestPush();
+		for (int i = 0; i < 5; ++i) none.update(static_cast<std::uint64_t>(i + 1));
+		CHECK(none.takeSyncMoment() == 0);
+	}
+
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+	const fs::path repo = makeRepo("syncmoment");
+	writeFile(repo / "a.txt", "one");
+	commitAll(repo, "first");
+
+	GitController git;
+	git.openProject(repo);
+	std::uint64_t now = 1;
+	// Pump until `done` or 20 s, collecting every moment handed out.
+	const auto pumpFor = [&](const std::function<bool()>& done)
+	{
+		int moments = 0, flags = 0;
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			git.update(now);
+			now += 100;
+			if (const int f = git.takeSyncMoment()) { ++moments; flags |= f; }
+			if (done()) break;
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		// A few more frames: a second answer for the same request would show.
+		for (int i = 0; i < 10; ++i)
+		{
+			git.update(now);
+			now += 100;
+			if (const int f = git.takeSyncMoment()) { ++moments; flags |= f; }
+		}
+		return std::make_pair(moments, flags);
+	};
+	pumpFor([&] { return git.status().generation != 0 && !git.busy(); });
+	REQUIRE(git.isRepo());
+
+	// A real commit: exactly one moment, "Committed" (no auto-push asked).
+	writeFile(repo / "a.txt", "two");
+	git.requestCommitAll("second");
+	const auto [moments, flags] = pumpFor([&] { return !git.busy(); });
+	CHECK(git.lastError().empty());
+	CHECK(moments == 1);
+	CHECK(flags == R::kSyncCommit);
+
+	// Nothing to commit: git refuses, an error — no moment.
+	git.requestCommitAll("empty");
+	CHECK(pumpFor([&] { return !git.busy(); }).first == 0);
+
+	// A push with no remote: refused as well — no moment.
+	git.requestPush();
+	CHECK(pumpFor([&] { return !git.busy(); }).first == 0);
+
+	git.closeProject();
+	he_test::removeQuiet(repo);
+}
+
 TEST_CASE("The panel operations round-trip: init, commit, remote, push, pull")
 {
 	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
@@ -589,11 +659,15 @@ TEST_CASE("A credential reaches git's helper via stdin, never argv")
 	const fs::path sink = repo / "cred_sink.txt";
 	const std::string helper =
 		"!f() { test \"$1\" = store && cat >> '" + sink.generic_string() + "'; }; f";
-	REQUIRE(GitCli::run(repo, { "config", "--local", "credential.helper", helper }).ok);
 
+	// The shim as the ONLY helper (override), not as a --local one: approve
+	// feeds every configured helper, and Apple's git has osxkeychain set
+	// system-wide — so a local shim alone wrote this fake github.com token
+	// into the developer's real keychain on every run, where the editor's
+	// GitHub sign-in then found it.
 	std::string err;
 	REQUIRE(GitCli::approveCredential(repo, "github.com", "x-access-token",
-	                                  "tok_TESTVALUE_123", &err));
+	                                  "tok_TESTVALUE_123", &err, helper));
 
 	std::ifstream in(sink);
 	REQUIRE(in.good());

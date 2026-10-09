@@ -7,6 +7,7 @@ add_executable(he_tests
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
     test_material_graph.cpp
+    test_engine_materials.cpp
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
     test_scene_serializer.cpp
@@ -43,6 +44,9 @@ add_executable(he_tests
     # remove its copy, pending at the next start, Restore's backup, and the
     # ContentManager::writeAssetTo path every asset panel's copy takes.
     test_asset_autosave.cpp
+    # A .heproj double-clicked in the file manager: quotes, blanks, relative
+    # paths and wrong extensions, and Hub vs. guarded switch vs. already open.
+    test_project_launch_open.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
@@ -131,6 +135,10 @@ add_executable(he_tests
     test_profiler_stats.cpp
     test_profiler_layout.cpp
     test_audio.cpp
+    # Audio Editor edit model (Thema 168): trim, volume curve, bus, EQ biquads.
+    test_audio_edit.cpp
+    # …and what the engine does with its bus and EQ: routing, measured response.
+    test_audio_bus_eq.cpp
     test_rendermanager.cpp
     test_prefab.cpp
     test_inspector_prefab_keys.cpp
@@ -150,6 +158,8 @@ add_executable(he_tests
     test_horizoncode_reroute.cpp
     test_python_scripting.cpp
     test_physics.cpp
+    test_world_scale.cpp
+    test_cell_split.cpp
     test_collision_system.cpp
     test_entity_host.cpp
     test_player_host.cpp
@@ -157,6 +167,9 @@ add_executable(he_tests
     test_movement.cpp
     test_hc_inheritance.cpp
     test_hc_pull_on_construct.cpp
+    test_hc_bind_to.cpp
+    test_hc_on_changed.cpp
+    test_hc_watch_bridge.cpp
     test_hc_extract_on_destruct.cpp
     test_collider.cpp
     test_raycast.cpp
@@ -215,8 +228,11 @@ add_executable(he_tests
     test_hc_node_docs.cpp
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp
+    test_audio_waveform_view.cpp
+    test_audio_mix_view.cpp
     test_widget_designer_ui.cpp
     test_texture_viewer.cpp
+    test_streaming_view.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
@@ -234,6 +250,13 @@ add_executable(he_tests
     # press keys, read the binding back out of the pinned config.json.
     test_shortcuts_ui.cpp
     test_weather.cpp
+    # The weather's sound: the gain curves as plain functions, the voices on an
+    # AudioEngine without a device.
+    test_weather_audio.cpp
+    # The committed weather sounds (EditorDeps/EngineContent/Audio/Weather): what
+    # is in the files, that the loops are seamless, that an export ships them and
+    # that a shipped game's weather plays them.
+    test_engine_weather_sounds.cpp
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
     test_gamelogic_build.cpp
@@ -289,6 +312,7 @@ add_executable(he_tests
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
+    test_github_oauth.cpp
     test_game_replication.cpp
     # The first real gameplay session: two and three NetGameSessions against
     # each other over LossyTransport, headless and on a simulated clock.
@@ -302,6 +326,7 @@ add_executable(he_tests
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiAutoLandscape.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/OcclusionCuller.cpp
@@ -533,6 +558,9 @@ add_executable(he_tests
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsPanel.cpp
+    # The GitHub sign-in's drawing half (code, countdown, buttons), for the
+    # ui shots. ImGui plus EditorWidgets; the state half needs the editor.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitHubSignInView.cpp
     # The toolbar look — wells and segmented cells. The reader's language
     # switcher is one, and borrowing the primitives is what keeps it from being
     # a second copy of the palette. ImGui-only by construction, so it compiles
@@ -565,6 +593,13 @@ add_executable(he_tests
     # "does a drag on the ruler land the playhead where the ruler says" is a
     # question about arithmetic and hit tests, not about a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SequencerTimeline.cpp
+    # The Audio Editor's waveform — peak pyramid, zoom/scroll, playhead and the
+    # selection drag — over int16 samples and a View, never AppContext or the
+    # AudioEngine, so the shot test can drag a selection across a synthetic clip.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioWaveformView.cpp
+    # …and its bus dropdown and EQ graph, over an AudioEdit and a bus list —
+    # the same reason: the shot test draws them without a project.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixView.cpp
     # The Cinematic tab's strip (a Sequence's bindings, cuts, sections, events)
     # and its preview bracket (save, write, restore), both without AppContext —
     # the same reason as the Sequencer's strip above.
@@ -578,6 +613,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneAutosave.cpp
     # Its sibling for the asset tabs — same clock-in-hand design.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetAutosave.cpp
+    # What a launch argument or a macOS open event means as a project path,
+    # and which Open it takes. SDL- and ImGui-free (see the header).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectLaunchOpen.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
@@ -682,6 +720,9 @@ add_executable(he_tests
     # The reward moments it fires (EditorRewards.h), and test_editor_rewards.cpp:
     # same AppContext, same per-file HE_IMGUI_ENABLED.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
+    # The footer bell, so test_editor_rewards.cpp can draw the real one and its
+    # problem ring (V8) from a real NotificationStore (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
@@ -706,6 +747,11 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
     # linked already.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    # The profiler's Streaming tab and the editor's split/merge of streaming
+    # cells, for test_streaming_view.cpp (Thema 153, Schritt 6). Its one
+    # outside symbol, the Scene window's show flags, is stubbed in
+    # WidgetDesignerLinkStubs.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -740,6 +786,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     test_editor_rewards.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
@@ -754,6 +801,8 @@ set_source_files_properties(
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     test_texture_viewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
+    test_streaming_view.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE
@@ -863,7 +912,7 @@ set(HCGEN_CLASSES
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
     cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
-    pull_construct pull_spawner
+    pull_construct pull_spawner bind_to
     extract_destruct extract_derived extract_listener
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
@@ -1110,6 +1159,21 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME he_mcp_shim
              COMMAND ${Python3_EXECUTABLE}
                      "${CMAKE_SOURCE_DIR}/tests/test_he_mcp.py")
+endif()
+
+# ── "Does a double-click on a .heproj open the editor?" ──────────────────────
+# macOS registers the type in Info.plist; Windows and Linux ship a ZIP / tarball with
+# no installer, so the registration is files inside the package (FileTypes/, from
+# scripts/windows_assets and scripts/linux_assets). This holds those files to ONE
+# name for the type on all three platforms, validates them, and on a POSIX machine
+# runs the Linux installer for real against a throwaway XDG_DATA_HOME. Python, because
+# what it checks is files and a shell script, and because the Windows half of the
+# same question is answered on the Windows runner by check_heproj_registration.ps1.
+# CI additionally passes --package to prove the deployed package carries the files.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME heproj_file_types
+             COMMAND ${Python3_EXECUTABLE}
+                     "${CMAKE_SOURCE_DIR}/tests/test_heproj_file_types.py")
 endif()
 
 # ── "How heavy is what we actually ship?" ────────────────────────────────────

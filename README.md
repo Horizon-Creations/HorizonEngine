@@ -42,8 +42,10 @@ system with its own designer, packaging into compressed and optionally encrypted
 `.hpak` archives with on-demand streaming, and an export pipeline that produces
 a runnable build for Windows, macOS or Linux.
 
-Source control (git + LFS, with GitHub/GitLab/Azure DevOps sign-in) is built
-into the editor, so a project can be versioned without leaving it.
+Source control (git + LFS) is built into the editor, so a project can be
+versioned without leaving it. GitHub sign-in takes a code you approve in the
+browser (no token to create by hand); GitLab and Azure DevOps use an access
+token.
 
 ## Status
 
@@ -53,7 +55,7 @@ in daily use on Catania. It is **not at 1.0**, and the honest gaps are:
 | Area | State |
 |---|---|
 | Metal, OpenGL | Complete |
-| Direct3D 11/12, Vulkan | Close to parity — shadows (cascaded + point/spot atlases) and the material node-graph shader pipeline are now wired on all five backends, still awaiting a manual smoke test on real D3D/Vulkan hardware; the newest sky work (nebula/atmosphere, volumetric clouds) is still Metal/OpenGL only |
+| Direct3D 11/12, Vulkan | Close to parity — shadows (cascaded + point/spot atlases), the material node-graph shader pipeline and the deferred renderer (clustered lighting, decals, SSR, AO, GI) are now wired on all five backends, checked against WARP/lavapipe in CI but still awaiting a manual smoke test on more than one real GPU; the newest sky work (nebula/atmosphere, volumetric clouds) is still Metal/OpenGL only |
 | Linux | Builds and runs, but has had far less real-world use than macOS and Windows |
 | Texture compression | ASTC on Apple hardware; BCn encoders are not written yet |
 

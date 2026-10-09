@@ -312,6 +312,48 @@ TEST_CASE("HorizonCode rename: a Pull on Construct spec follows the variable it 
 	}
 }
 
+TEST_CASE("HorizonCode rename: Bind To through a reference follows both of its names")
+{
+	// The source class is the reference variable's declared class, so a
+	// binding through a typed reference is as provable as a Creator Class.
+	auto refVar = [](const char* name, const char* cls)
+	{
+		Variable v; v.name = name; v.type = PinType::Ref; v.className = cls;
+		return v;
+	};
+	auto viaRef = [](const char* name, const char* var, const char* ref)
+	{
+		Variable v; v.name = name; v.type = PinType::Int;
+		v.pullSource = kPullFromRef; v.pullVar = var; v.bindTo = true; v.pullRef = ref;
+		return v;
+	};
+	Graph g;
+	g.variables = { refVar("Target", kEnemy), refVar("Loose", ""),
+	                viaRef("Hp", "Score", "Target"), viaRef("Any", "Score", "Loose") };
+
+	SUBCASE("renaming the variable the binding reads")
+	{
+		const HcRename::Target t{ kEnemy, Member::Variable, "Score", "Points" };
+		const HcRename::Plan p = HcRename::planGraph(g, Role::Other, keys({ kEnemy }),
+		                                             "Hud.hasset", kGI, t);
+		REQUIRE(p.rename.size() == 1);
+		CHECK(p.unsure.size() == 1);   // the untyped reference: unprovable
+		CHECK(HcRename::apply(g, p, t));
+		CHECK(g.findVariable("Hp")->pullVar == "Points");
+		CHECK(g.findVariable("Any")->pullVar == "Score");
+	}
+	SUBCASE("renaming the reference variable itself")
+	{
+		const HcRename::Target t{ "Hud.hasset", Member::Variable, "Target", "Foe" };
+		const HcRename::Plan p = HcRename::planGraph(g, Role::Declares, keys({ "Hud.hasset" }),
+		                                             "Hud.hasset", kGI, t);
+		CHECK(HcRename::apply(g, p, t));
+		REQUIRE(g.findVariable("Foe") != nullptr);
+		CHECK(g.findVariable("Hp")->pullRef == "Foe");
+		CHECK(g.findVariable("Any")->pullRef == "Loose");
+	}
+}
+
 TEST_CASE("HorizonCode rename: the declaring class and an overriding one carry their own")
 {
 	SUBCASE("the class itself renames its declaration and everything using it")

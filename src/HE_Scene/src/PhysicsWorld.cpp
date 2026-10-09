@@ -1,6 +1,7 @@
 // Must come first — Jolt requires this before any other Jolt include.
 #include <Jolt/Jolt.h>
 #include <algorithm>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <unordered_set>
@@ -10,7 +11,7 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/TempAllocator.h>
-#include <Jolt/Core/JobSystemSingleThreaded.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -270,11 +271,22 @@ public:
         }
     }
 
+    // With Jolt's thread pool the callbacks above arrive from several workers,
+    // in whatever order they finish. Handing the events out sorted by entity
+    // pair keeps what scripts see the same from run to run (Thema 153).
+    static void sortEvents(std::vector<PhysicsWorld::CollisionEvent>& events)
+    {
+        std::sort(events.begin(), events.end(),
+                  [](const PhysicsWorld::CollisionEvent& a, const PhysicsWorld::CollisionEvent& b)
+                  { return a.entityA != b.entityA ? a.entityA < b.entityA : a.entityB < b.entityB; });
+    }
+
     std::vector<PhysicsWorld::CollisionEvent> pollEntered()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_entered);
+        sortEvents(result);
         return result;
     }
 
@@ -283,6 +295,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_enteredOverlap);
+        sortEvents(result);
         return result;
     }
 
@@ -291,6 +304,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_exitedOverlap);
+        sortEvents(result);
         return result;
     }
 
@@ -299,6 +313,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_exited);
+        sortEvents(result);
         return result;
     }
 
@@ -393,7 +408,7 @@ struct PhysicsWorld::Impl
 
     // Both must outlive every Update() call — keep as members.
     JPH::TempAllocatorImpl       tempAllocator{ 10u * 1024u * 1024u };
-    JPH::JobSystemSingleThreaded jobSystem;
+    JPH::JobSystemThreadPool     jobSystem;
     JPH::PhysicsSystem           physicsSystem;
     HEContactListener            contactListener;
 
@@ -558,16 +573,31 @@ struct PhysicsWorld::Impl
     // Hard limits handed to Jolt below. Exceeding them makes CreateAndAddBody
     // return an invalid id, which used to be swallowed silently — the scene then
     // simply had objects that never fell. They are logged instead.
-    static constexpr uint32_t kMaxBodies = 1024;
+    //
+    // They were 1024 each — the numbers from Jolt's HelloWorld, whose own
+    // comment says a real project wants "something in the order of 65536"
+    // bodies and pairs and ~10240 contact constraints. 1024 bodies was the
+    // first wall a larger world hit, long before float precision
+    // (docs/world-streaming-baseline-2026-10-06.md §3.6). Jolt allocates the
+    // body table and broadphase up front from these, a few MB per world.
+    static constexpr uint32_t kMaxBodies             = 65536;
+    static constexpr uint32_t kMaxBodyPairs          = 65536;
+    static constexpr uint32_t kMaxContactConstraints = 10240;
 
     Impl()
     {
-        jobSystem.Init(JPH::cMaxPhysicsJobs);
+        // Jolt's own worker threads (the caller joins in too): up to four,
+        // half the cores minus one, so a step with thousands of bodies in
+        // contact is not one core's work while the engine pool sits next to
+        // it. The simulation stays deterministic whatever the count (Jolt,
+        // Docs/Architecture.md "Deterministic Simulation").
+        const int hw = static_cast<int>(std::thread::hardware_concurrency());
+        jobSystem.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::clamp(hw / 2 - 1, 0, 4));
         physicsSystem.Init(
-            kMaxBodies,   // max bodies
+            kMaxBodies,
             0,      // num body mutexes (0 = auto)
-            1024,   // max body pairs
-            1024,   // max contact constraints
+            kMaxBodyPairs,
+            kMaxContactConstraints,
             bpLayerInterface,
             ovbpFilter,
             ooFilter
@@ -867,7 +897,8 @@ JPH::ShapeSettings::ShapeResult buildConvexHullShape(const StaticMeshAsset& mesh
 // in the surrounding code: the chunk meshes carry downward SKIRTS to hide LOD
 // cracks (as colliders those are invisible walls at every chunk seam), the chunk
 // entities are destroyed and rebuilt whenever the grid changes while a terrain
-// body outlives that, and the body budget is 1024 for the entire world.
+// body outlives that, and the body budget (Impl::kMaxBodies) is shared by the
+// entire world.
 //
 // `worldScale` is the landscape entity's scale from its world matrix, and it has
 // to be applied HERE rather than left to the body: the chunk meshes are child
@@ -883,7 +914,7 @@ JPH::ShapeSettings::ShapeResult buildHeightFieldShape(const TerrainComponent& tc
     // physics build can run before the terrain has ever ticked (initialize() at
     // scene start), and a component this class mutated behind TerrainSystem's
     // back would be a second author of the same data.
-    uint32_t res   = std::clamp(tc.resolution, 2u, 1024u);
+    uint32_t res   = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     uint32_t cells = res - 1, p = 1;
     while (p < cells) p <<= 1;
     const uint32_t snapped = p + 1;
@@ -2384,6 +2415,21 @@ void PhysicsWorld::destroyBodyFor(uint32_t entityId, bool requeueJoints)
     // resolve them from its cache and hand game code an exit event for an entity
     // that is already gone. clear() does the same thing for the whole world.
     m_impl->contactListener.purgeEntity(entityId);
+}
+
+size_t PhysicsWorld::shiftOrigin(const glm::vec3& shift)
+{
+    if (!m_impl) return 0;
+    const JPH::Vec3 d(shift.x, shift.y, shift.z);
+    // All bodies, not only entityToBody: terrain height fields are bodies too.
+    JPH::BodyIDVector ids;
+    m_impl->physicsSystem.GetBodies(ids);
+    JPH::BodyInterface& bodies = m_impl->physicsSystem.GetBodyInterface();
+    for (const JPH::BodyID& id : ids)
+        bodies.SetPosition(id, bodies.GetPosition(id) - d, JPH::EActivation::DontActivate);
+    for (auto& [entityId, character] : m_impl->entityToCharacter)
+        character->SetPosition(character->GetPosition() - d);
+    return ids.size() + m_impl->entityToCharacter.size();
 }
 
 bool PhysicsWorld::setPosition(uint32_t entityId, const glm::vec3& position, bool resetVelocity)

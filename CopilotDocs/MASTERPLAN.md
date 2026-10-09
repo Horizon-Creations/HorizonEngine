@@ -3600,3 +3600,61 @@ geworden.
 
 Offen: CP6 (echter Server-Round-Trip, sobald der User die Zugangsdaten einträgt), Byte-genauer
 Download-Fortschritt (nur „läuft" + n/m), Cache-Bereinigung (wächst unbegrenzt).
+
+---
+
+## Fortsetzung 74 — Audio-Werkzeuge 2.0: Wellenform, Schneiden, Extrahieren, Lautstärkekurve, Bus und EQ (Thema 168, 07.–08.10.2026)
+
+**Branch `claude/audio-werkzeuge-2-0-wellenform-schneiden-bus-eq` (84d1a974…f51f1965 + Doku), für
+`release/0.7.0`.** Der Audio-Editor (`AudioEditorPanel`) war ein reines Abspielfenster. Jetzt ist er
+ein Werkzeug zum Ansehen und Bearbeiten von Audio-Assets. Jede Bearbeitung ist nicht-destruktiv: Die
+Samples im Asset bleiben byte-gleich, das Original wird nie überschrieben.
+
+**Modell (HE_Core, `Audio/AudioEdit.h`).** `HE::AudioEdit` als eigener Chunk CHUNK_AUED am
+`AudioAsset`: Zuschnitt in Frames `[start,end)`, Lautstärkekurve (Punkte in Sekunden ab dem
+ORIGINAL-Clipstart, Gain linear 0..4, Linear/Hold/Smooth/Exponential im Modell, im Editor wählbar
+Linear und Smooth), Bus per Name ("" = Master) und EQ mit bis zu 8 RBJ-Biquad-Bändern (Bell,
+Low/High-Shelf, Low/High-Pass). Ein Reimport liest den Chunk vor `writeAsset` von der alten Datei
+und behält ihn. `AudioEnvelope::rampedGain` wertet die Kurve alle 128 Frames auf einem Raster ab
+Frame 0 aus und rampt dazwischen linear. Das ist der Knack-Schutz, und Laufzeit, Vorhören und Bake
+rechnen denselben Float.
+
+**Editor.** `AudioWaveformView` (Peak-Pyramide, Min/Max pro Pixelspalte, Zoom um den Zeiger, Pan,
+Übersichtsstreifen, Lineal in Zeit oder Frames, Auswahl mit Kantenziehen, Abspielen/Loopen der
+Auswahl). Trim/Clear Trim, Extract (neues PCM-Asset `<name>_extract[_N]`, neue UUID, ohne Quelle,
+also reimport-sicher, optional mit eingebackener Kurve), Kurveneditor auf dB-Skala, Bus-Dropdown aus
+derselben Liste wie der Mixer (fehlender Bus: Hinweis, Name bleibt, spielt auf Master) und EQ-Pane
+mit Antwortkurve (`AudioMixView`). Der Tab hat ein eigenes Undo/Redo (AudioEdit-Schnappschüsse),
+Save und den dirty/autosave-Vertrag von EditorUI. Der Audio Mixer bekommt pro Bus eine EQ-Taste mit
+demselben Graphen.
+
+**Laufzeit (HE_Scene `AudioEngine`).** `play/playSpatial(const AudioAsset&)` routen über
+`routeFor`: Bus der Quelle > Bus des Assets > Master, ein fehlender Bus fällt mit gedrosselter
+Warnung durch und wird nie stumm. Trim als Range im PCM-Puffer bzw. Vorbis-Decoder; Kurve und
+Asset-EQ als eigene `ma_data_source`-Stufe zur Clip-Rate vor dem Resampler. Der Bus-EQ ist ein
+eigener miniaudio-Knoten zwischen Bus-Gruppe und Endpoint. Neutral (keine Kurve, EQ aus oder flach)
+heißt: keine Stufe, also bitgleich zum alten Pfad. Alle Aufrufer (AudioSystem, EngineApi,
+SequenceSystem, Editor-Vorhören) laufen darüber.
+
+**Doku (Schritt 6).** Das In-Engine-Handbuch (`EditorDeps/Docs/he-docs.json`) hat vier neue
+Abschnitte: `systems#audio-editor`, `#audio-trim`, `#audio-curve` und `#audio-bus-eq`. Dazu kommen
+eine Zeile in `editor#asset-editors` und Delete/Backspace in `editor#shortcuts`, und der
+Audio-Überblick nennt jetzt die Bus-Reihenfolge sowie den Ogg-Vorbis-Import. Die 32
+Audio-Tooltips in `EditorHelp.cpp` zeigen mit „Learn more“ auf den passenden Abschnitt statt
+alle auf `systems#audio`. Das Bündel ist direkt bearbeitet (wie 78085057); die Website-Quelle
+(HC-Website `HorizonEngineDocs/systems.html`, `editor.html`) braucht dieselben Abschnitte, sonst
+verwirft der nächste `build_docs_bundle.py`-Lauf sie.
+
+**Verifikation (NN-WS03, Debug, MSVC/VS 18, Build-Baum C:/hw168).** Gesamtbuild grün, 108 eingebettete
+Shader kompilieren. he_tests mit den Audio-, Editor-Hilfe-, Docs-, UI-Shot- und Rewards-Dateien:
+231/231 Fälle, 99 688 Zusicherungen. ctest-Teilmenge audio|editor|docs|help|ui_shot: 28/28 grün,
+`runtime_size*` lokal übersprungen. Fallzahlen gegen die TEST_CASE-Zahl der Dateien geprüft. Als
+Negativkontrolle wurde ein Abschnitt umbenannt; danach meldet test_editor_help genau die vier
+Trim/Extract-Einträge. Die vier Headless-Bilder (Auswahl, Trim, Kurve, Bus+EQ) wurden angesehen.
+
+**Offen.** (1) Kein Hörtest auf echter Hardware: alle Tonbelege laufen über den noDevice-Mixer
+(`readMixedFrames`), sample-genau, aber ungehört. (2) Keine echten Mausklicks im laufenden Editor auf
+Bus-Combo, EQ-Graph und Mixer-EQ, nur ImGui-Mausereignisse in he_tests und Headless-Bilder. (3)
+Website-HTML nachziehen (s. o.). (4) Strg+Z im Asset-Tab löst vermutlich auch das Welt-Undo aus
+(EditorUI-Footer ohne Tab-Prüfung). Das ist themenübergreifend und an die Queen gemeldet. (5) Vorbis
+mit Trim UND nicht-flacher Kurve ist nur mit flacher Kurve getestet.

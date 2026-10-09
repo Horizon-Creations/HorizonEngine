@@ -14,6 +14,7 @@
 #include <algorithm>                     // find/min/max/reverse for the Shift-click range
 #include <functional>
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/Profiler.h>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -319,6 +320,19 @@ namespace
         // drawn about their box's middle.
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + style.FramePadding.y - 1.0f);
 
+        // A row scrolled out of the panel: the same space, nothing drawn and
+        // no subtree walk. The panel lists every row, and the eye and padlock
+        // are ImDrawList paths that ImGui does not clip away by itself — at
+        // 10k entities they were most of the editor's frame
+        // (docs/world-streaming-baseline-2026-10-06.md §3.3). An item nobody
+        // can see cannot be clicked either, so nothing else is lost.
+        const ImVec2 boxMin = ImGui::GetCursorScreenPos();
+        if (!ImGui::IsRectVisible(boxMin, ImVec2(boxMin.x + total, boxMin.y + sz)))
+        {
+            ImGui::Dummy(ImVec2(total, sz));
+            return;
+        }
+
         ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const bool editable = !ctx.isPlaying;
@@ -388,9 +402,13 @@ namespace
 }
 #endif
 
+static bool s_rowClipping = true;
+void setRowClipping(bool on) { s_rowClipping = on; }
+
 void render(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+    HE_PROFILE_SCOPE_N("OutlinerPanel::render");
     // Whatever this panel pushes onto the undo stack without a label of its
     // own (Move Up, Sort Children, the row menu's Lock) reads as "Outliner" in
     // the history window rather than as a bare "Edit".
@@ -666,7 +684,6 @@ void render(AppContext& ctx)
         }
 
         // ── Render from cache ─────────────────────────────────────────────
-        int prevDepth      = -1;
         int skipBelowDepth = INT_MAX; // skip children of closed nodes
 
         // While a filter is on, the tree's open/closed state lives in its own
@@ -676,6 +693,54 @@ void render(AppContext& ctx)
         // under the unfiltered IDs — untouched, so clearing the search puts
         // the tree back exactly as it was.
         if (filterActive) ImGui::PushID("##outliner_filtered");
+
+        // ── Rows scrolled out of the panel are not submitted ──────────────
+        // Every row used to go through TreeNodeEx, which measures its label
+        // even when ImGui clips it away: at 50k entities the Outliner was a
+        // quarter of the editor's frame (23 ms, Thema 153 §11). A row outside
+        // the panel now only answers the two questions the rows after it
+        // depend on — is it open, and what is its ID — and adds its height to
+        // a run that is laid out as ONE Dummy before the next row that shows.
+        //
+        // The ID is the one TreeNodeEx would compute (a pointer id hashed with
+        // the ID of the open row above, which is what TreeNodeEx pushes), so
+        // the open/closed state read from the window's storage is the user's
+        // own, and a row scrolling into view keeps its fold. A visible row
+        // under clipped parents gets their levels pushed first (indent + ID),
+        // exactly as their own TreeNodeEx would have left them. The theme
+        // draws no tree lines, so TreeNodeEx keeps no per-level data that a
+        // bare TreePushOverrideID would miss.
+        //
+        // The row height is measured off two consecutive drawn rows; until
+        // then (the first frame) everything is drawn, as before. The World
+        // root's row is measured on its own: it has no eye or padlock, and the
+        // padlock is what sets the other rows' height.
+        static float s_rowStep  = 0.0f;
+        static float s_rootStep = 0.0f;
+        ImGuiWindow* const outlinerWindow = ImGui::GetCurrentWindow();
+        const ImRect  rowClip   = outlinerWindow->ClipRect;
+        const ImGuiID rowSeed0  = outlinerWindow->IDStack.back();
+        const float   rowStep   = s_rowClipping && s_rootStep > 0.0f ? s_rowStep : 0.0f;
+        const float   rootStep  = s_rootStep;
+        bool measureRoot = false;   // the row measureFrom belongs to is the root
+        std::vector<ImGuiID> pathIds;   // pathIds[d]: the open row at depth d on the current path
+        int   pathDepth   = -1;         // deepest open level on the path
+        int   pushedDepth = -1;         // deepest level really pushed in ImGui
+        float skipped     = 0.0f;       // height of clipped rows not laid out yet
+        float measureFrom = -1.0f;      // where the previous row started, when it was drawn
+        const auto rowId = [&](Entity e, int depth) -> ImGuiID
+        {
+            const void* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(static_cast<uint32_t>(e)));
+            const ImGuiID seed = depth > 0 && depth - 1 < static_cast<int>(pathIds.size())
+                               ? pathIds[static_cast<size_t>(depth - 1)] : rowSeed0;
+            return ImHashData(&ptr, sizeof(void*), seed);
+        };
+        const auto enterPath = [&](int depth, ImGuiID id)
+        {
+            if (static_cast<int>(pathIds.size()) <= depth) pathIds.resize(static_cast<size_t>(depth) + 1);
+            pathIds[static_cast<size_t>(depth)] = id;
+            pathDepth = depth;
+        };
 
         // The rows that were actually DRAWN this frame, top to bottom. A
         // Shift-click selects "everything between the anchor and this row", and
@@ -709,12 +774,48 @@ void render(AppContext& ctx)
                                                   : node.hasChildren;
             visibleRows.push_back(node.entity);
 
-            // Close tree levels we've left
-            while (prevDepth >= node.depth)
+            // Close tree levels we've left: on the path, and in ImGui as far
+            // as they were really pushed.
+            while (pathDepth >= node.depth) --pathDepth;
+            while (pushedDepth > pathDepth)
             {
                 ImGui::TreePop();
-                --prevDepth;
+                --pushedDepth;
             }
+
+            const float cursorY = ImGui::GetCursorScreenPos().y;
+            if (measureFrom >= 0.0f && skipped == 0.0f && cursorY > measureFrom)
+                (measureRoot ? s_rootStep : s_rowStep) = cursorY - measureFrom;
+            measureFrom = -1.0f;
+            const bool  isRootRow = node.entity == ctx.world->rootEntity();
+            const float step      = isRootRow ? rootStep : rowStep;
+            const float rowTop    = cursorY + skipped;
+            if (rowStep > 0.0f && (rowTop + step < rowClip.Min.y || rowTop > rowClip.Max.y))
+            {
+                // Out of view (see above). A leaf is open the way TreeNodeEx's
+                // Leaf flag makes it; under a filter every branch is.
+                const ImGuiID id = rowId(node.entity, node.depth);
+                const bool open = !hasChildren || filterActive
+                               || ImGui::GetStateStorage()->GetInt(id, 1) != 0;   // 1: DefaultOpen
+                skipped += step;
+                if (open) enterPath(node.depth, id);
+                else      skipBelowDepth = node.depth;
+                continue;
+            }
+            // In view: first the clipped run above it, then the levels it opened.
+            if (skipped > 0.0f)
+            {
+                ImGui::Dummy(ImVec2(1.0f, skipped - ImGui::GetStyle().ItemSpacing.y));
+                skipped = 0.0f;
+            }
+            while (pushedDepth < pathDepth)
+            {
+                ++pushedDepth;
+                ImGui::TreePushOverrideID(pathIds[static_cast<size_t>(pushedDepth)]);
+            }
+            measureFrom = ImGui::GetCursorScreenPos().y;
+            measureRoot = isRootRow;
+            const ImGuiID drawnId = rowId(node.entity, node.depth);
 
             // AllowOverlap: the eye and the lock sit at the row's right edge,
             // ON the row (SpanAvailWidth stretches it under them), and this
@@ -1049,15 +1150,22 @@ void render(AppContext& ctx)
                 drawRowIcons(ctx, node.entity);
 
             if (open)
-                prevDepth = node.depth;
+            {
+                // TreeNodeEx pushed this row's level itself.
+                enterPath(node.depth, drawnId);
+                pushedDepth = node.depth;
+            }
             else
                 skipBelowDepth = node.depth; // don't enter children
         }
+        // The clipped run at the bottom still counts towards the scroll range.
+        if (skipped > 0.0f)
+            ImGui::Dummy(ImVec2(1.0f, skipped - ImGui::GetStyle().ItemSpacing.y));
         // Close remaining open levels
-        while (prevDepth >= 0)
+        while (pushedDepth >= 0)
         {
             ImGui::TreePop();
-            --prevDepth;
+            --pushedDepth;
         }
         if (filterActive) ImGui::PopID();
 

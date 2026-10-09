@@ -2669,7 +2669,7 @@ struct GIReflParams {
 	float4 gridOrigin;      // xyz = probe-grid origin, w = spacing
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
 	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w = max bounces (1-4)
-	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier)
+	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube (primary misses read it)
 };
 
 // P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
@@ -2684,25 +2684,50 @@ struct GIMeshPtrs {
 // by MetalRenderer::GILandGpu.
 struct GILand {
 	float4x4 worldToLocal;
-	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
-	float4   layer[4]; // per-layer folded colour (rgb)
+	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
+	float4   layer[4]; // per-layer folded colour (rgb); auto: Grass, Dirt, Rock, Snow means
+	float4   autoWet;  // auto: rgb puddle colour, a puddle share of flat ground
+	float4   autoSlope;// auto: Rock Slope, Rock Blend, Dirt Amount, Puddle Max Slope
+	float4   autoSnow; // auto: Snow Height, Snow Blend, Snow Max Slope
 };
 
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
+
+// Auto landscape material at a hit: the graph's masks from the hit's slope and
+// world height over the slices' mean colours. Mirrors HE::giAutoLandscapeAlbedo
+// (GiLandscape.h) line for line — keep the three kernel copies on it.
+static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
+{
+	const float slope = saturate(1.0 - n.y);
+	const float rs = L.autoSlope.x, rb = L.autoSlope.y;
+	const float dirt  = saturate(L.autoSlope.z + smoothstep(rs - rb, rs, slope));
+	const float3 ground = mix(L.layer[0].rgb, L.layer[1].rgb, dirt);
+	const float rock  = smoothstep(rs, rs + rb, slope);
+	const float3 s1   = mix(ground, L.layer[2].rgb, rock);
+	const float snow  = smoothstep(L.autoSnow.x, L.autoSnow.x + L.autoSnow.y, pos.y)
+	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
+	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
+	const float pms   = L.autoSlope.w;
+	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
+}
 
 // Albedo of a landscape hit, sampled at the PAINT rather than averaged over the
 // whole terrain. A landscape is a heightfield over an axis-aligned local rect
 // whose mesh UVs are linear in it, so the hit's UV comes straight out of the hit
 // POSITION — no per-vertex UV in the acceleration structure. Weights are read
 // with the same clamp+linear the rasterizer uses, so mirror and surface agree.
+// An auto landscape (cfg.w < 0) has no paint: its colour follows the hit's
+// slope and height instead (hitN = the world normal facing the ray).
 // Returns false when this instance is not a landscape (caller keeps its flat
 // per-instance albedo).
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
 	const float3 lp = (L.worldToLocal * float4(hitPos, 1.0)).xyz;
@@ -2879,9 +2904,10 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	// Bounce loop (P.extra.w = max bounces, 1-4): a mirror-like hit (metallic,
 	// low roughness — packed in the instance-shading pair) reflects ONWARD
 	// instead of flattening to its base colour; `throughput` carries the metal
-	// tint. A primary miss keeps confidence 0 (the composite's cubemap is the
-	// exact fallback); a SECONDARY miss samples the sky cube directly — that
-	// ray genuinely reflects the sky.
+	// tint. A SECONDARY miss samples the sky cube directly — that ray genuinely
+	// reflects the sky. A primary miss does the same when the baked sky cube
+	// is bound (P.land.z); otherwise it keeps confidence 0 and the composite's
+	// cubemap is the fallback.
 	float4 sampleOut = float4(0.0);
 	for (int sIdx = 0; sIdx < rays; ++sIdx)
 	{
@@ -2918,7 +2944,13 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			q.next();
 			if (q.get_committed_intersection_type() == intersection_type::none)
 			{
-				if (b > 0) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				// With the baked sky cube bound (P.land.z, EncodeSkyReflCube) a
+				// PRIMARY miss returns the real sky too — clouds, weather — at the
+				// receiver's own confidence, so the composite shows it instead of
+				// its cloudless cubemap. Counting the miss as a full sample also
+				// keeps a part-miss glossy lobe from weighting its hits by f².
+				if (b > 0 || P.land.z > 0.5) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				if (b == 0 && P.land.z > 0.5) conf = roughFade;
 				break;
 			}
 			const uint   instId   = q.get_committed_instance_id();
@@ -2928,15 +2960,6 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			const float3 emissive = emi4.rgb;
 			const float  dist   = q.get_committed_distance();
 			const float3 hitPos = ro + rd * dist;
-			// Landscape hit: replace the flat per-instance tint with the paint at
-			// THIS point, or a red ridge on a green hillside mirrors as one
-			// averaged colour. Non-landscape hits leave `albedo` untouched.
-			{
-				float3 painted;
-				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
-				                      landWeights, hitPos, painted))
-					albedo = painted;
-			}
 
 			// Hit normal: true interpolated vertex normal through the mesh-pointer
 			// argument buffer when available (P4); -rayDir fallback otherwise
@@ -2965,6 +2988,17 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 					hitN = normalize(nW);
 					if (dot(hitN, rd) > 0.0) hitN = -hitN; // face the incoming ray (two-sided)
 				}
+			}
+			// Landscape hit: replace the flat per-instance tint with the paint at
+			// THIS point, or a red ridge on a green hillside mirrors as one
+			// averaged colour (auto material: its slope/height masks — the reason
+			// this waits for hitN; without mesh data hitN is -rd, so the slope
+			// there is a guess). Non-landscape hits leave `albedo` untouched.
+			{
+				float3 painted;
+				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
+				                      landWeights, hitPos, hitN, painted))
+					albedo = painted;
 			}
 
 			// Direct sun at the hit: one hard occlusion ray. Skipped when the
@@ -3111,18 +3145,41 @@ struct GiInst { float4x4 invTransform; float4 baseColor; float4 emissive; int4 o
 // exactly like GIReflParams and the octahedral helpers are.
 struct GILand {
 	float4x4 worldToLocal;
-	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
 	float4   layer[4];
+	float4   autoWet;
+	float4   autoSlope;
+	float4   autoSnow;
 };
 
+// Auto landscape material at a hit — copy of the HW kernel's giAutoLandAlbedo
+// (HE::giAutoLandscapeAlbedo, GiLandscape.h).
+static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
+{
+	const float slope = saturate(1.0 - n.y);
+	const float rs = L.autoSlope.x, rb = L.autoSlope.y;
+	const float dirt  = saturate(L.autoSlope.z + smoothstep(rs - rb, rs, slope));
+	const float3 ground = mix(L.layer[0].rgb, L.layer[1].rgb, dirt);
+	const float rock  = smoothstep(rs, rs + rb, slope);
+	const float3 s1   = mix(ground, L.layer[2].rgb, rock);
+	const float snow  = smoothstep(L.autoSnow.x, L.autoSnow.x + L.autoSnow.y, pos.y)
+	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
+	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
+	const float pms   = L.autoSlope.w;
+	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
+}
+
 // Albedo of a landscape hit sampled at the PAINT — see the HW kernel's copy for
-// why the hit POSITION is enough to recover the UV. false = not a landscape.
+// why the hit POSITION is enough to recover the UV; an auto landscape follows
+// the hit's slope and height. false = not a landscape.
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
 	const float3 lp = (L.worldToLocal * float4(hitPos, 1.0)).xyz;
@@ -3519,7 +3576,7 @@ struct GIReflParams {
 	float4 gridOrigin;
 	float4 gridCounts;
 	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count, w = max bounces
-	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier)
+	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube
 };
 
 // Closest hit that also reports WHICH triangle was hit (global index into the
@@ -3706,20 +3763,15 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			                                         dist, triIdx);
 			if (hitInst < 0)
 			{
-				if (b > 0) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				// Miss → sky; see the HW kernel for the primary-miss rule.
+				if (b > 0 || P.land.z > 0.5) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				if (b == 0 && P.land.z > 0.5) conf = roughFade;
 				break;
 			}
 			const float4 alb4     = insts[hitInst].baseColor; // rgb albedo, a metallic
 			const float4 emi4     = insts[hitInst].emissive;  // rgb emissive, a roughness
 			float3       albedo   = alb4.rgb;
 			const float3 hitPos = ro + rd * dist;
-			// Landscape hit → the paint at THIS point, not the terrain-wide mean.
-			{
-				float3 painted;
-				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
-				                      landWeights, hitPos, painted))
-					albedo = painted;
-			}
 			// Geometric triangle normal, object → world via the row-vector product
 			// with the stored INVERSE transform ((M^-1)^T · n) — two-sided.
 			float3 hitN = -rd;
@@ -3733,6 +3785,14 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 					hitN = normalize(nW);
 					if (dot(hitN, rd) > 0.0) hitN = -hitN;
 				}
+			}
+			// Landscape hit → the paint at THIS point, not the terrain-wide mean
+			// (auto material: its slope/height masks, hence after hitN).
+			{
+				float3 painted;
+				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
+				                      landWeights, hitPos, hitN, painted))
+					albedo = painted;
 			}
 			// Occlusion ray skipped when the sun term is black anyway (night) —
 			// same shortcut as the HW kernel.
@@ -6267,7 +6327,7 @@ struct GIReflParamsCPU
 	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
 	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
-	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel
+	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube)
 };
 static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
@@ -6562,6 +6622,9 @@ void MetalRenderer::Shutdown()
 	if (m_mbBlurPipeline)       { CFBridgingRelease(m_mbBlurPipeline);       m_mbBlurPipeline = nullptr; }
 	m_mbHasPrev = false;
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
+	if (m_skyReflPipeline)      { CFBridgingRelease(m_skyReflPipeline);      m_skyReflPipeline = nullptr; }
+	if (m_skyReflCube)          { CFBridgingRelease(m_skyReflCube);          m_skyReflCube = nullptr; }
+	m_skyReflValid = false;
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
 	DestroyCloudShadowTarget();
@@ -7182,6 +7245,14 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: sky pipeline creation failed: ")
 				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
 		m_skyPipeline = (void*)CFBridgingRetain(skyPso);
+		// Same sky into the GI-reflection sky cube (EncodeSkyReflCube): a face
+		// pass has no depth attachment, so the PSO must not declare one.
+		skyDesc.depthAttachmentPixelFormat = MTLPixelFormatInvalid;
+		id<MTLRenderPipelineState> skyReflPso = [device newRenderPipelineStateWithDescriptor:skyDesc error:&skyError];
+		if (!skyReflPso)
+			throw std::runtime_error(std::string("MetalRenderer: sky-cube pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_skyReflPipeline = (void*)CFBridgingRetain(skyReflPso);
 
 		// ── Cloud pre-pass pipeline (quarter-res clouds-only → RGBA16F (L,T), no depth) ──
 		MTLRenderPipelineDescriptor* cloudDesc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -7934,7 +8005,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 // for the kernel's texture array. Without this a landscape hit can only be one
 // flat colour for the whole terrain — a red ridge on a green hillside mirrors as
 // the average of the two, which is visibly not what the terrain looks like.
-// Rebuilt per frame: it is a handful of 144-byte entries, and the weightmap
+// Rebuilt per frame: it is a handful of 192-byte entries, and the weightmap
 // TEXTURES come from the same UUID-keyed cache the raster path uses (uploaded
 // once, re-uploaded only when the paint changes).
 int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
@@ -7951,13 +8022,19 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 		// No resident weightmap (still streaming, or unpainted) → skip the entry;
 		// those chunks keep their flat per-instance colour, which for an unpainted
 		// terrain is layer 0 and therefore already right.
-		void* wm = ResolveGraphTexture(ls.weightmapId, {});
-		if (!wm) continue;
+		// An AUTO entry has no weightmap at all (its masks come from the hit's
+		// slope and height); its texture slot takes the dummy.
+		const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+		void* wm = autoLand ? nullptr : ResolveGraphTexture(ls.weightmapId, {});
+		if (!wm && !autoLand) continue;
 		GILandGpu g;
 		g.worldToLocal = ls.worldToLocal;
 		g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling,
 		                  static_cast<float>(ls.layerCount));
 		for (int i = 0; i < 4; ++i) g.layer[i] = ls.layerColor[i];
+		g.autoWet   = ls.autoWet;
+		g.autoSlope = ls.autoSlope;
+		g.autoSnow  = ls.autoSnow;
 		gpu.push_back(g);
 		outWeightTex.push_back(wm);
 	}
@@ -9241,6 +9318,12 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
+		// EncodeScene builds the alpha-blended twin of every graph material on its
+		// first draw, whatever the material's opacity (see there): its own MSL
+		// libraries and PSO, ~0.4-0.7 s on an E-core. Without it here the first
+		// two frames after a scene open stalled in Metal::EncodeScene even with
+		// every material warmed (Thema 153 Schritt 5: the editor light icons).
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true)) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
 		if (m_renderPath == HE::RenderPath::Deferred)
@@ -13168,14 +13251,18 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              const glm::vec3& sunDir, float time,
                              const IRenderer::EnvironmentSettings& env,
-                             const glm::vec3& camPos, bool lowResClouds, bool useSkyLut)
+                             const glm::vec3& camPos, bool lowResClouds, bool useSkyLut,
+                             bool cubeBake)
 {
-	if (!m_skyPipeline) return;
+	void* const pso = cubeBake ? m_skyReflPipeline : m_skyPipeline;
+	if (!pso) return;
 	if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyPipeline];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pso];
 	// Depth-test == far, no write — only fills background pixels (drawn after scene).
-	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState];
+	// A cube face has no depth attachment: every texel is sky.
+	if (!cubeBake)
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState];
 	id<MTLTexture> moon = m_moonTexture
 		? (__bridge id<MTLTexture>)m_moonTexture
 		: (__bridge id<MTLTexture>)m_dummyTexture;
@@ -13256,6 +13343,53 @@ void MetalRenderer::DestroySkyViewLut()
 	if (m_skyLutRayleigh) { CFBridgingRelease(m_skyLutRayleigh); m_skyLutRayleigh = nullptr; }
 	if (m_skyLutMie)      { CFBridgingRelease(m_skyLutMie);      m_skyLutMie = nullptr; }
 	m_skyLutValid = false;
+}
+
+// GI-reflection sky cube (topic 173): the sky pass drawn into six faces around
+// the camera, so a reflection ray that misses the scene returns the sky the
+// viewer sees — clouds and weather included — instead of m_skyEnvCube's
+// cloudless CPU atmosphere. Every frame the reflections trace (clouds drift
+// with the clock); 6 × 128² texels is about a tenth of a 720p sky pass. No
+// low-res cloud composite: that buffer is screen-space, a face is not.
+static constexpr int kSkyReflCubeSize = 128;
+void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
+{
+	m_skyReflValid = false;
+	static const bool s_off = [] {
+		const char* e = std::getenv("HE_GIREFL_SKY");
+		return e && e[0] == '0';
+	}();
+	if (s_off || !m_skyReflPipeline || !GetEnvironment().skyEnabled) return;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+	if (!m_skyReflCube)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			textureCubeDescriptorWithPixelFormat:kSceneColorFormat
+			size:kSkyReflCubeSize mipmapped:NO];
+		d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		d.storageMode = MTLStorageModePrivate;
+		m_skyReflCube = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+		if (!m_skyReflCube) return;
+	}
+	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f; // == the scene's drawSky
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	const glm::vec3 camPos = m_renderWorld.camera.position;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	for (int f = 0; f < 6; ++f)
+	{
+		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_skyReflCube;
+		pass.colorAttachments[0].slice       = static_cast<NSUInteger>(f);
+		pass.colorAttachments[0].loadAction  = MTLLoadActionDontCare; // every texel is written
+		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+		EncodeSky((__bridge void*)enc, HE::SkyCubeFaceInvViewProj(f, camPos, /*rowZeroAtTop=*/true),
+		          m_renderWorld.sunDirection, skyClock, GetEnvironment(), camPos,
+		          /*lowResClouds=*/false, /*useSkyLut=*/true, /*cubeBake=*/true);
+		[enc endEncoding];
+	}
+	m_skyReflValid = true;
 }
 
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -15307,8 +15441,12 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// for the whole landscape (see GiLandscape.h).
 		std::vector<void*> landTex;
 		const int landCount = BuildGILandscapeTable(landTex);
+		// The real sky (clouds, weather) for rays that miss — see EncodeSkyReflCube.
+		// Baked on this command buffer ahead of the trace encoder below.
+		EncodeSkyReflCube((__bridge void*)cmdBuf);
 		rp.land         = glm::vec4(static_cast<float>(landCount),
-		                            static_cast<float>(rays), 0.0f, 0.0f);
+		                            static_cast<float>(rays),
+		                            m_skyReflValid ? 1.0f : 0.0f, 0.0f);
 
 		const int curIdx  = m_giReflHistIdx;
 		const int prevIdx = 1 - curIdx;
@@ -15324,9 +15462,14 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[prevIdx] atIndex:5];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistRad[curIdx]  atIndex:6];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[curIdx]  atIndex:7];
-		// Sky cubemap for SECONDARY-bounce misses (a mirror seen in a mirror
-		// reflecting the sky) — the primary miss keeps the composite's fallback.
-		[enc setTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:8];
+		// Sky cubemap for misses. With the baked sky cube (rp.land.z = 1) EVERY
+		// miss reads it — primary misses with full confidence, so the mirror
+		// shows the clouds instead of the composite's cloudless m_skyEnvCube.
+		// Without it only SECONDARY misses (a mirror seen in a mirror reflecting
+		// the sky) read m_skyEnvCube, and the primary miss keeps the composite's
+		// fallback, as before.
+		[enc setTexture:(__bridge id<MTLTexture>)(m_skyReflValid ? m_skyReflCube : m_skyEnvCube)
+		        atIndex:8];
 		if (m_giHwRt)
 		{
 			[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas
@@ -15905,6 +16048,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 {
 	@autoreleasepool
 	{
+		// Every pass below re-extracts (shadow, GI, SSAO, G-buffer, scene) so
+		// their draw sets and cascade fits agree. Inside this scope the world
+		// does not change, so the extractor walks it once and answers the rest
+		// from that walk (RenderExtractor::beginFrame). Closed on every return.
+		RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
 		if (isPrimary)
 		{
 			// Reset the render counters before any early-return below, so a frame

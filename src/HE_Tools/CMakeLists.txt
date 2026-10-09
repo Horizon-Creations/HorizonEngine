@@ -172,6 +172,17 @@ add_executable(matfn_gen
 target_link_libraries(matfn_gen PRIVATE HorizonCore)
 target_include_directories(matfn_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── mat_gen.exe (generates the built-in materials) ───────────────────────────
+# The fourth of the kind: mat_gen <out-dir> writes Water/… .hasset files
+# (Material, node graph + the shader baked from it) via ContentManager. Run
+# manually to (re)populate EditorDeps/EngineContent/Materials; the outputs are
+# committed, so this is not part of the normal build graph.
+add_executable(mat_gen
+    src/MatGen/main.cpp
+)
+target_link_libraries(mat_gen PRIVATE HorizonCore)
+target_include_directories(mat_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
 # ─── landscape_tex_gen.exe (placeholder textures of the auto landscape material)
 # Same bargain: landscape_tex_gen <out-dir> writes T_Landscape_<Layer>_<Map>
 # .hasset files (Texture) via ContentManager, byte-identical to imported ones.
@@ -184,6 +195,18 @@ add_executable(landscape_tex_gen
 # HorizonImporters: --pack decodes the real PNGs exactly the way the editor's import does.
 target_link_libraries(landscape_tex_gen PRIVATE HorizonCore HorizonImporters)
 target_include_directories(landscape_tex_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
+# ─── weather_sound_gen.exe (the engine's weather sounds) ──────────────────────
+# Same bargain: weather_sound_gen <out-dir> writes Rain/Wind/Snow/Storm/Thunder
+# .hasset files (Audio, PCM16) via ContentManager, synthesised from seeded noise
+# so there is nothing third-party to license. Run manually to (re)populate
+# EditorDeps/EngineContent/Audio/Weather; the outputs are committed, so this is
+# not part of the normal build graph.
+add_executable(weather_sound_gen
+    src/WeatherSoundGen/main.cpp
+)
+target_link_libraries(weather_sound_gen PRIVATE HorizonCore)
+target_include_directories(weather_sound_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
 # HorizonTools is NEVER linked into HorizonGame or any runtime target.
 # It is an editor/build-time only dependency.

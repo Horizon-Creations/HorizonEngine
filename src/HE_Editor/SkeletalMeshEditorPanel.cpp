@@ -303,8 +303,8 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		              mesh->skeleton.size() == 1 ? "" : "s");
 
 		T::Bar bar;
+		T::assetHeader(bar, assetPath, false);
 		bar.group();
-		bar.readout(T::iconBone, st.name.c_str());
 		bar.readout(nullptr, joints, T::kFgDim);
 		bar.endGroup();
 
@@ -338,7 +338,9 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		             "Save the clip's notifies and root-motion switch",
 		             "anim.clip-save"))
 		{
-			save(ctx, clipPath);
+			// Through the editor's Save, like Ctrl/Cmd+S: the clip is what
+			// dirtyClipForTab hands it, and the saved cues come with it.
+			if (!T::requestSave()) save(ctx, clipPath);
 		}
 		bar.endGroup();
 	}
@@ -351,9 +353,6 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// 220 px wide. The tree below is unaffected either way — ImGui draws a
 		// TreeNode's label without consulting the wrap position.
 		EditorWidgets::WrapText wrap;
-
-		ImGui::TextDisabled("%s — %zu joint(s)", st.name.c_str(), mesh->skeleton.size());
-		ImGui::Separator();
 
 		// ── Material slots ───────────────────────────────────────────────
 		// The mesh's sections, each with a material picker. Edits the MESH

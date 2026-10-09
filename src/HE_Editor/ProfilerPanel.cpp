@@ -1,5 +1,6 @@
 #include "ProfilerPanel.h"
 #include "EditorApplication.h"           // AppContext
+#include "StreamingDebugView.h"          // the Streaming tab
 #include <Diagnostics/EngineProfiler.h>
 #include <Diagnostics/Logger.h>
 #include <algorithm>
@@ -769,6 +770,8 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
         if (ImGui::BeginTabItem("Overview"))  { DrawOverview(prof);  ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Timeline"))  { DrawTimeline(prof);  ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Scopes"))    { DrawScopes(prof);    ImGui::EndTabItem(); }
+        // Live, like Overview: the job pool, asset loads, cells, world size.
+        if (ImGui::BeginTabItem("Streaming")) { StreamingDebugView::draw(ctx); ImGui::EndTabItem(); }
 
         // ── Capture controls ────────────────────────────────────────────────
         if (ImGui::BeginTabItem("Capture"))

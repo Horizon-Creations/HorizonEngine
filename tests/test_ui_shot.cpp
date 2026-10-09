@@ -15,17 +15,26 @@
 #include "SequencerTimeline.h"   // the sequencer's strip, over an in-memory clip
 #include "CinematicTimeline.h"   // the Cinematic tab's strip, over an in-memory sequence
 #include "UITimelineMath.h"
+#include "AudioWaveformView.h"    // the Audio Editor's canvas, over synthetic PCM
+#include "AudioMixView.h"         // …and its bus dropdown and EQ graph
+#include "PanelSpotlight.h"      // the tour card's step-aside, over a real dock layout
+#include "TutorialSteps.h"       // …and the curriculum steps it is tested with
+#include "GitHubSignInView.h"    // the device-flow dialog's body
 
 #include <ContentManager/ContentManager.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>      // DockBuilder*, FindWindowByName
 
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 // ── Editor UI, rendered without a GPU ────────────────────────────────────────
@@ -1033,6 +1042,64 @@ TEST_CASE("ui shot: the generated editor reference")
 	REQUIRE(img.valid());
 	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
 	DocsPanel::close();
+}
+
+TEST_CASE("ui shot: the editor reference explains every new Feedback switch")
+{
+	// Thema 140 added ten switches to Preferences ▸ Feedback. Each must land on
+	// its own entry when F1 is pressed on it, and that entry's "More about this"
+	// must reach the chapter it names (editor#preferences, horizoncode#graphs).
+	// A key that is spelled differently here than on the panel resolves to
+	// nothing, and a shot of it would just show some other part of the page.
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+	HE::Ed::EditorReference::install(lib);
+
+	static const char* const kNew[] = {
+		"Compile Moment", "Commit Moment", "Tutorial Moment", "Problem Pulse",
+		"Compile Sound", "Compile Failed Sound", "Commit Sound", "Tutorial Sound",
+		"Problem Sound", "Drag and Drop Sound",
+	};
+	for (const char* label : kNew)
+	{
+		const std::string key = std::string("Preferences/Feedback/") + label;
+		INFO("key: " << key);
+		const Help::Entry* e = Help::findKey(key);
+		REQUIRE(e != nullptr);
+		const std::string topic = Help::referenceTopic(key);
+		CHECK(topic == std::string("editor-settings#Preferences.Feedback.") + label);
+		int pg = -1, sec = -1;
+		CHECK(lib.resolve(topic, pg, sec));
+		CHECK(sec >= 0);
+		REQUIRE(e->topic != nullptr);
+		INFO("concept: " << std::string(e->topic));
+		int cpg = -1, csec = -1;
+		CHECK(lib.resolve(e->topic, cpg, csec));
+		CHECK(csec >= 0);
+	}
+
+	// Two pictures: the page sorts by label, so Commit Moment starts a run of
+	// five new entries, and Drag and Drop Sound is the one the graphs link to.
+	const struct { const char* anchor; const char* name; } shots[] = {
+		{ "editor-settings#Preferences.Feedback.Commit Moment", "editor-reference-feedback-commit" },
+		{ "editor-settings#Preferences.Feedback.Drag and Drop Sound", "editor-reference-feedback-dragdrop" },
+	};
+	for (const auto& s : shots)
+	{
+		DocsPanel::openTopic(s.anchor);
+		const he_ui::Image img = shoot(s.name, W, H, 4,
+		                               [&](int) { DocsPanel::draw(host); });
+		REQUIRE(img.valid());
+		CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
+		DocsPanel::close();
+	}
 }
 
 TEST_CASE("ui shot: a page of tables and a diagram")
@@ -2410,4 +2477,782 @@ TEST_CASE("ui shot: cinematic strip with every kind of row")
 			if (int(r) > 180 && int(g) < 130 && int(b) < 130) ++reddest;
 		}
 	CHECK(reddest > 10);
+}
+
+// ── The Audio Editor's waveform ──────────────────────────────────────────────
+// The hit tests and the arithmetic are asserted in test_audio_waveform_view.cpp;
+// what only a picture shows is that the pieces land where the View says: the
+// selection tints exactly its frames and nothing beside it, the playhead's
+// warm line stands at its frame, both lanes of a stereo clip draw, and the
+// overview strip and the readout under the canvas are there at all.
+TEST_CASE("ui shot: audio waveform with a selection and a playhead")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	// Three seconds of stereo at 48 kHz: a tone that swells and fades on the
+	// left, a faster, quieter one on the right — two lanes that look different.
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t   = double(f) / rate;
+		const double env = std::sin(3.14159265 * t / 3.0);
+		pcm[f * 2 + 0] = int16_t(std::lround(28000.0 * env * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(12000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	AW::View view;
+	AW::select(view, size_t(rate * 0.75), size_t(rate * 1.5), frames);
+	view.playhead = size_t(rate * 2.25);
+
+	const he_ui::Image img = shoot("audio_waveform", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false);
+		const std::string where = AW::readout(view, clip, 0.5 * rate);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::TextDisabled("%s long  |  drag the waveform to select, click to place the playhead",
+		                    AW::formatTime(clip.seconds()).c_str());
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 40000);
+
+	// Fitted: 3 s over 960 px is 150 frames a pixel, so the selection runs from
+	// x = 240 to x = 480 and the playhead stands at x = 720.
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+	const AW::Metrics& M = AW::metrics();
+	const int nearTop = int(M.rulerH) + 3;   // above the loudest sample of lane one
+	std::uint8_t r, g, b, a;
+	img.pixel(360, nearTop, r, g, b, a);     // inside the selection
+	CHECK(int(b) > int(r) + 25);
+	img.pixel(120, nearTop, r, g, b, a);     // beside it: canvas background
+	CHECK(int(b) < 40);
+	img.pixel(600, nearTop, r, g, b, a);     // and past its end
+	CHECK(int(b) < 40);
+
+	// The playhead: bright warm at its x, dark a dozen pixels on.
+	const int laneMid = int(M.rulerH + (canvasH - M.rulerH - M.overviewH - 4.0f) * 0.25f) + 30;
+	img.pixel(720, laneMid, r, g, b, a);
+	CHECK(int(r) > 180);
+	CHECK(int(r) > int(b) + 60);
+	img.pixel(732, nearTop, r, g, b, a);
+	CHECK(int(r) < 90);
+
+	// Lane two draws too: there is waveform ink across its centre line.
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const int   lane2Mid    = int(M.rulerH + (lanesBottom - M.rulerH) * 0.75f);
+	int waveInk = 0;
+	for (int x = 0; x < W; x += 3)
+	{
+		img.pixel(x, lane2Mid - 6, r, g, b, a);
+		if (int(b) > 150) ++waveInk;
+	}
+	CHECK(waveInk > 100);
+}
+
+// The trim (Thema 168, step 3): what does not play is shaded over the samples,
+// so they stay visible but read as cut away; a warm line marks each end, and
+// the overview strip shades the same frames.
+TEST_CASE("ui shot: audio waveform with a trim")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	// Three seconds of a steady stereo tone: the same ink everywhere, so any
+	// difference between inside and outside the trim is the shading.
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t = double(f) / rate;
+		pcm[f * 2 + 0] = int16_t(std::lround(24000.0 * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(12000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	// Trimmed to [0.6 s, 2.4 s): fitted at 150 frames a pixel, x = 192 to 768.
+	AW::View view;
+	view.trimBegin = size_t(rate * 0.6);
+	view.trimEnd   = size_t(rate * 2.4);
+	// The playhead away from both ends, so the warm lines checked below are the trim's.
+	view.playhead  = size_t(rate * 1.5);
+
+	const he_ui::Image img = shoot("audio_waveform_trim", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false);
+		const std::string where = AW::readout(view, clip, -1.0);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+
+	// The same tone inside and outside: bright wave ink inside the trim, the
+	// shaded (dark) version of it outside, on both sides.
+	const AW::Metrics& M = AW::metrics();
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const int   lane2Mid    = int(M.rulerH + (lanesBottom - M.rulerH) * 0.75f);
+	std::uint8_t r, g, b, a;
+	auto inkIn = [&](int x0, int x1)
+	{
+		int n = 0;
+		for (int x = x0; x < x1; x += 2)
+		{
+			img.pixel(x, lane2Mid - 4, r, g, b, a);
+			if (int(b) > 150) ++n;
+		}
+		return n;
+	};
+	CHECK(inkIn(220, 740) > 200);   // inside: the wave reads as it always did
+	CHECK(inkIn(0, 180) == 0);      // before the trim: shaded
+	CHECK(inkIn(780, W) == 0);      // after it: shaded
+	// …but still there: the shaded columns are not plain background.
+	img.pixel(90, lane2Mid - 4, r, g, b, a);
+	CHECK(int(b) > int(kBgB) + 20);
+
+	// The trim's ends are warm lines.
+	const int nearTop = int(M.rulerH) + 3;
+	for (int x : { 192, 768 })
+	{
+		img.pixel(x, nearTop, r, g, b, a);
+		CHECK(int(r) > 180);
+		CHECK(int(r) > int(b) + 60);
+	}
+
+	// The overview strip shades the same frames.
+	const int overMid = int(canvasH - M.overviewH * 0.5f) - 2;
+	auto overInk = [&](int x0, int x1)
+	{
+		int n = 0;
+		for (int x = x0; x < x1; x += 2)
+		{
+			img.pixel(x, overMid, r, g, b, a);
+			if (int(b) > 100) ++n;
+		}
+		return n;
+	};
+	CHECK(overInk(220, 740) > overInk(0, 180) * 4 + 10);
+}
+
+// The volume curve (Thema 168, step 4), in curve mode: a yellow line on the dB
+// axis over the waveform, at the height its gain says, with the scale's lines,
+// the points as handles and the gain of the point in hand written beside it.
+TEST_CASE("ui shot: audio waveform with a volume curve being edited")
+{
+	namespace AW = HE::Ed::AudioWave;
+	constexpr int W = 960, H = 330;
+	constexpr float canvasH = 250.0f;
+	Harness harness(W, H);
+
+	const int    rate   = 48000;
+	const size_t frames = size_t(rate) * 3;
+	std::vector<int16_t> pcm(frames * 2);
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const double t = double(f) / rate;
+		pcm[f * 2 + 0] = int16_t(std::lround(20000.0 * std::sin(2.0 * 3.14159265 * 110.0 * t)));
+		pcm[f * 2 + 1] = int16_t(std::lround(10000.0 * std::sin(2.0 * 3.14159265 * 330.0 * t)));
+	}
+	AW::Clip clip;
+	clip.samples = pcm.data(); clip.frames = frames; clip.channels = 2; clip.sampleRate = rate;
+	const AW::Peaks peaks = AW::buildPeaks(clip);
+
+	// A smooth fade in over the first half second, unity to 1.5 s, a straight
+	// line down to -12 dB at 2.5 s. Fitted at 150 frames a pixel: 320 px a second.
+	HE::AudioEnvelope curve;
+	curve.points = { { 0.0, 0.0f,  HE::AudioCurveInterp::Smooth },
+	                 { 0.5, 1.0f,  HE::AudioCurveInterp::Linear },
+	                 { 1.5, 1.0f,  HE::AudioCurveInterp::Linear },
+	                 { 2.5, 0.25f, HE::AudioCurveInterp::Linear } };
+	AW::View view;
+	view.curveMode    = true;
+	view.curveSel     = 2;   // the point at 1.5 s, selected and in hand: its label shows
+	view.curveDragIdx = 2;
+	view.playhead     = size_t(rate * 2.5);   // x = 800, clear of every column checked below
+
+	std::string where;
+	const he_ui::Image img = shoot("audio_waveform_curve", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::PopStyleVar();
+		AW::draw(clip, peaks, view, ImVec2(float(W), canvasH), false, &curve, true);
+		where = AW::readout(view, clip, -1.0, &curve);
+		ImGui::TextUnformatted(where.c_str());
+		ImGui::TextDisabled("curve: click to add a point, drag to move it, right-click to remove it");
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	REQUIRE(view.framesPerPx == doctest::Approx(150.0));
+	CHECK(where.find("Curve -12.0 dB (x0.25) at the playhead") != std::string::npos);
+	CHECK(curve.points.size() == 4);   // drawing edits nothing
+
+	const AW::Metrics& M = AW::metrics();
+	const float lanesBottom = canvasH - M.overviewH - 4.0f;
+	const float lanesH      = lanesBottom - M.rulerH;
+	auto yOf = [&](float g) { return int(std::lround(lanesBottom - AW::curveFracOfGain(g) * lanesH)); };
+	std::uint8_t r, g, b, a;
+	auto yellow = [&](int x, int y)
+	{
+		img.pixel(x, y, r, g, b, a);
+		return int(r) > 200 && int(g) > 160 && int(b) < 140;
+	};
+	// The curve's yellow in a column, within a couple of pixels of where its gain says.
+	auto curveNear = [&](int x, int y)
+	{
+		for (int dy = -2; dy <= 2; ++dy)
+			if (yellow(x, y + dy)) return true;
+		return false;
+	};
+	CHECK(curveNear(320, yOf(1.0f)));                  // 1.0 s: unity
+	CHECK(curveNear(640, yOf(curve.evalGain(2.0))));   // 2.0 s: halfway down the straight line
+	CHECK(curveNear(880, yOf(0.25f)));                 // 2.75 s, past the last point: it holds -12 dB
+	CHECK(curveNear(80, yOf(curve.evalGain(0.25))));   // in the fade-in
+	// … and not at unity where it is not: at 2.4 s the curve is well below 0 dB.
+	CHECK_FALSE(curveNear(768, yOf(1.0f)));
+
+	// The handle of the point in hand (x = 480) stands out bright, and its
+	// label sits beside it, right of the point, on a dark plate.
+	img.pixel(480, yOf(1.0f), r, g, b, a);
+	CHECK(int(r) > 230);
+	CHECK(int(b) > 150);   // the selected handle is pale, not the curve's yellow
+	int labelInk = 0;
+	for (int x = 492; x < 640; ++x)
+		for (int y = yOf(1.0f) - 26; y < yOf(1.0f) - 6; ++y)
+		{
+			img.pixel(x, y, r, g, b, a);
+			if (int(r) > 200 && int(g) > 190) ++labelInk;
+		}
+	CHECK(labelInk > 30);
+}
+
+// The Audio Editor's mix controls (Thema 168, step 5): the "Mixer bus"
+// section of the left column with a bus the project no longer has — shown as
+// missing, in orange, with the sentence that the clip plays on Master — and
+// the EQ pane under the waveform with three bands, on a 32 kHz clip so the
+// part above its Nyquist is shaded. The curve is checked where its response
+// says it is: on the bell's centre, on the shelf, and flat in between.
+TEST_CASE("ui shot: audio editor bus dropdown with a missing bus, and an EQ")
+{
+	namespace AM = HE::Ed::AudioMix;
+	constexpr int W = 1240, H = 330;
+	constexpr float leftW = 290.0f;
+	Harness harness(W, H);
+
+	HE::AudioBusConfig buses;   // what the mixer has: "Ambience" was removed
+	buses.add("Music"); buses.add("SFX"); buses.add("Voice");
+	std::string assetBus = "Ambience";
+
+	HE::AudioEq eq;
+	auto band = [](HE::AudioEqBandType t, float f, float g, float q) {
+		HE::AudioEqBand b; b.type = t; b.freqHz = f; b.gainDb = g; b.q = q; return b;
+	};
+	eq.bands = { band(HE::AudioEqBandType::HighPass, 40.0f, 0.0f, 0.7071f),
+	             band(HE::AudioEqBandType::Peak, 900.0f, 9.0f, 1.2f),
+	             band(HE::AudioEqBandType::HighShelf, 6000.0f, -8.0f, 0.7071f) };
+	const double rate = 32000.0;
+	AM::EqView view;
+	view.selBand = 2;   // the shelf: its handle sits off the curve, the bell's stays green
+
+	AM::BusChoice choice;
+	AM::EqResult  res;
+	const he_ui::Image img = shoot("audio_editor_bus_eq", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("Audio", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::BeginChild("##left", ImVec2(leftW, 0.0f), true);
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::SeparatorText("Mixer bus");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		AM::drawBusCombo(&buses, assetBus, true);
+		choice = AM::busChoice(&buses, assetBus);
+		if (choice.missing)
+			ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.38f, 1.0f), "%s", choice.hint.c_str());
+		ImGui::PopTextWrapPos();
+		ImGui::EndChild();
+		ImGui::SameLine();
+		ImGui::BeginChild("##right", ImVec2(0.0f, 0.0f), true);
+		ImGui::SeparatorText("EQ");
+		res = AM::drawEq(eq, view, rate, ImVec2(ImGui::GetContentRegionAvail().x,
+		                                        ImGui::GetContentRegionAvail().y), true);
+		ImGui::EndChild();
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(choice.missing);
+	CHECK(choice.preview == "Ambience (missing)");
+	CHECK(choice.hint.find("plays on Master") != std::string::npos);
+	CHECK(assetBus == "Ambience");   // drawing changes nothing
+	CHECK_FALSE(res.edited);
+	REQUIRE(res.graphSize.x > 400.0f);
+
+	std::uint8_t r, g, b, a;
+	// The combo's closed text is orange: count warm pixels in its row.
+	int orange = 0;
+	for (int x = 12; x < int(leftW) - 12; ++x)
+		for (int y = 50; y < 80; ++y)   // the combo's row, above the orange hint
+		{
+			img.pixel(x, y, r, g, b, a);
+			if (int(r) > 200 && int(g) > 110 && int(g) < 190 && int(b) < 120) ++orange;
+		}
+	CHECK(orange > 40);
+
+	// The curve's green within a few pixels of where the response puts it.
+	const float gx = res.graphMin.x, gy = res.graphMin.y, gw = res.graphSize.x, gh = res.graphSize.y;
+	auto green = [&](int x, int y) {
+		img.pixel(x, y, r, g, b, a);
+		return int(g) > 190 && int(r) > 90 && int(r) < 170 && int(b) > 120 && int(b) < 200;
+	};
+	auto curveNear = [&](double f, double db) {
+		const int x = int(std::lround(gx + AM::xOfFreq(f, gw)));
+		const int y = int(std::lround(gy + AM::yOfDb(db, gh)));
+		for (int dy = -3; dy <= 3; ++dy)
+			if (green(x, y + dy)) return true;
+		return false;
+	};
+	for (const double f : { 900.0, 250.0, 9000.0 })
+	{
+		CAPTURE(f);
+		CHECK(curveNear(f, eq.responseDb(f, rate)));
+	}
+	CHECK(eq.responseDb(900.0, rate) > 8.0);    // so the three points are not one flat line
+	CHECK(eq.responseDb(9000.0, rate) < -6.0);
+	CHECK_FALSE(curveNear(900.0, 0.0));         // negative control: not on the 0 dB line at the bell
+
+	// Above 16 kHz (the clip's Nyquist) the graph is shaded darker than below.
+	auto lum = [&](int x, int y) { img.pixel(x, y, r, g, b, a); return int(r) + int(g) + int(b); };
+	const int yMid = int(gy + gh * 0.85f);
+	CHECK(lum(int(gx + AM::xOfFreq(18000.0, gw)), yMid) < lum(int(gx + AM::xOfFreq(12000.0, gw)), yMid));
+}
+
+// ── The tour's card keeps off the panel it points at ─────────────────────────
+// The tutorial card floats over the docked editor, and with the editor's default
+// layout and the card's default bottom-right spot it lay squarely on Details and
+// on the Content Browser — the two panels a third of the tour points at. These
+// scenes put the editor's real dock layout (BuildDefaultDockLayout's fractions)
+// under the card, take the target panel from a real step of the curriculum, and
+// run the same Spotlight::KeepClear the tour runs. One case per side of the
+// editor: left (Quick Settings), right top (World Outliner), right bottom
+// (Details), bottom (Content Browser), and a floating window at the top (the
+// Performance Profiler, which opens wherever the user left it).
+//
+//     HE_UI_DUMP_DIR=/tmp/ui ./he_tests -tc="*tutorial card*"
+//
+// writes a before/after pair per side: "-before" is the card where it was, with
+// KeepClear switched off, "-after" the same scene after it has had time to
+// glide. The pulsing outline is in both, so the picture says which panel it is.
+namespace
+{
+	constexpr int   kEdW = 1600, kEdH = 900;
+	constexpr float kCardW = 430.0f, kCardH = 340.0f;
+
+	// The tour's own default, TutorialPanel::render's FirstUseEver position.
+	ImVec2 tourDefaultCardPos()
+	{
+		const ImGuiViewport* vp = ImGui::GetMainViewport();
+		return ImVec2(vp->WorkPos.x + vp->WorkSize.x - 450.0f,
+		              vp->WorkPos.y + vp->WorkSize.y - 380.0f);
+	}
+
+	// A step of the real curriculum whose outline names `panel`, so each case is
+	// about a step the user actually meets rather than a made-up window name.
+	const HE::tut::Step* stepPointingAt(std::string_view panel)
+	{
+		for (int c = 0; c < HE::tut::chapterCount(); ++c)
+		{
+			const HE::tut::Chapter& ch = HE::tut::chapters()[c];
+			for (int s = 0; s < ch.stepCount; ++s)
+				if (std::string_view(ch.steps[s].focusWindow) == panel) return &ch.steps[s];
+		}
+		return nullptr;
+	}
+
+	std::vector<std::string> panelsOf(const HE::tut::Step& step)
+	{
+		std::vector<std::string> out;
+		for (int i = 0; i < HE::tut::listEntryCount(step.focusWindow); ++i)
+			out.emplace_back(HE::tut::listEntry(step.focusWindow, i));
+		return out;
+	}
+
+	struct CardScene
+	{
+		const HE::tut::Step* step     = nullptr;
+		ImVec2               cardFrom = ImVec2(0.0f, 0.0f); // where the card starts
+		// …or the tour's default spot, which can only be computed inside a frame.
+		bool                 fromTourDefault = false;
+		bool                 avoid    = true;               // KeepClear on?
+		HE::Ed::Spotlight::KeepClear keep;
+
+		// One frame of the editor: the dockspace with its default layout, the
+		// docked panels, the floating Profiler, the card, the outline.
+		void frame(int i)
+		{
+			const ImGuiViewport* vp = ImGui::GetMainViewport();
+			const ImGuiID dockId = ImGui::GetID("HeTutorialCardDock");
+			if (i == 0)
+			{
+				// EditorUI.cpp, BuildDefaultDockLayout — same splits, same order.
+				ImGui::DockBuilderRemoveNode(dockId);
+				ImGui::DockBuilderAddNode(dockId,
+					ImGuiDockNodeFlags_DockSpace | ImGuiDockNodeFlags_PassthruCentralNode);
+				ImGui::DockBuilderSetNodeSize(dockId, vp->WorkSize);
+				ImGuiID dockMain = dockId;
+				ImGuiID dockLeft  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left,  0.18f, nullptr, &dockMain);
+				ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.26f, nullptr, &dockMain);
+				ImGuiID dockDown  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,  0.33f, nullptr, &dockMain);
+				ImGuiID dockRightBottom =
+					ImGui::DockBuilderSplitNode(dockRight, ImGuiDir_Down, 0.50f, nullptr, &dockRight);
+				ImGui::DockBuilderDockWindow("Quick Settings",  dockLeft);
+				ImGui::DockBuilderDockWindow("World Outliner",  dockRight);
+				ImGui::DockBuilderDockWindow("Details",         dockRightBottom);
+				ImGui::DockBuilderDockWindow("Content Browser", dockDown);
+				ImGui::DockBuilderDockWindow("Scene",           dockMain);
+				ImGui::DockBuilderFinish(dockId);
+			}
+			ImGui::DockSpaceOverViewport(dockId, vp, ImGuiDockNodeFlags_PassthruCentralNode);
+
+			for (const char* name : { "Quick Settings", "World Outliner", "Details",
+			                          "Content Browser", "Scene" })
+			{
+				ImGui::Begin(name);
+				ImGui::TextUnformatted(name);
+				ImGui::End();
+			}
+			// Floating, along the top edge — the side nothing docks to by default.
+			ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 420.0f, vp->WorkPos.y + 30.0f), ImGuiCond_Always);
+			ImGui::SetNextWindowSize(ImVec2(620.0f, 260.0f), ImGuiCond_Always);
+			ImGui::Begin("Performance Profiler", nullptr, ImGuiWindowFlags_NoDocking);
+			ImGui::TextUnformatted("Performance Profiler");
+			ImGui::End();
+
+			// The card, set up the way TutorialPanel::render sets it up.
+			ImGui::SetNextWindowSize(ImVec2(kCardW, kCardH), ImGuiCond_FirstUseEver);
+			ImGui::SetNextWindowPos(fromTourDefault ? tourDefaultCardPos() : cardFrom,
+			                        ImGuiCond_FirstUseEver);
+			if (avoid) keep.update("Tutorial", panelsOf(*step), ImGui::GetIO().DeltaTime);
+			ImGui::Begin("Tutorial", nullptr, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse);
+			EditorWidgets::clampCurrentWindowToEditorWindow();
+			ImGui::TextWrapped("%s", step->title);
+			ImGui::End();
+
+			for (const std::string& p : panelsOf(*step))
+				HE::Ed::Spotlight::outline(p.c_str(), float(i) / 60.0f);
+		}
+	};
+
+	// The card's rect in the frame just drawn.
+	HE::Ed::Spotlight::Box cardBox()
+	{
+		ImGuiWindow* w = ImGui::FindWindowByName("Tutorial");
+		REQUIRE(w != nullptr);
+		return { w->Pos, ImVec2(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y) };
+	}
+
+	float coveredByCard(const std::vector<std::string>& panels)
+	{
+		std::vector<HE::Ed::Spotlight::Box> boxes;
+		for (const std::string& p : panels)
+		{
+			ImVec2 pos, size;
+			if (HE::Ed::Spotlight::panelRect(p.c_str(), pos, size))
+				boxes.push_back({ pos, ImVec2(pos.x + size.x, pos.y + size.y) });
+		}
+		const HE::Ed::Spotlight::Box c = cardBox();
+		return HE::Ed::Spotlight::coveredArea(c.min, ImVec2(c.max.x - c.min.x, c.max.y - c.min.y), boxes);
+	}
+
+	enum class From { TourDefault, OnTarget };
+
+	// Before (KeepClear off) and after (on) for the step outlining `panel`.
+	// Returns how much of the panel the card covers in each.
+	std::pair<float, float> shootCardCase(const char* side, const char* panel, From from)
+	{
+		const HE::tut::Step* step = stepPointingAt(panel);
+		INFO("panel: " << std::string(panel));
+		REQUIRE(step != nullptr);
+		const std::vector<std::string> panels = panelsOf(*step);
+
+		// Where the card starts. Both spots are measured inside a laid-out frame:
+		// the viewport's work area is all zeroes until the first NewFrame, and
+		// "on the target" needs the real panel rect.
+		ImVec2 at;
+		{
+			Harness h(kEdW, kEdH);
+			ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+			CardScene probe;
+			probe.step  = step;
+			probe.avoid = false;
+			for (int i = 0; i < 2; ++i) { ImGui::NewFrame(); probe.frame(i); ImGui::EndFrame(); }
+			at = tourDefaultCardPos();
+			if (from == From::OnTarget)
+			{
+				ImVec2 pos, size;
+				REQUIRE(HE::Ed::Spotlight::panelRect(panels.front().c_str(), pos, size));
+				at = ImVec2(pos.x + size.x * 0.5f - kCardW * 0.5f, pos.y + size.y * 0.5f - kCardH * 0.5f);
+			}
+		}
+
+		float before = 0.0f, after = 0.0f;
+		for (const bool avoid : { false, true })
+		{
+			// A fresh context per run, so the card's FirstUseEver lands where asked.
+			Harness h(kEdW, kEdH);
+			ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+			CardScene scene;
+			scene.step     = step;
+			scene.avoid    = avoid;
+			scene.cardFrom = at;
+
+			const std::string name = std::string("tutorial-card-") + side + (avoid ? "-after" : "-before");
+			// 90 frames is a second and a half at 60 Hz: the glide is done in
+			// about half of that.
+			shoot(name.c_str(), kEdW, kEdH, avoid ? 90 : 3, [&](int i) { scene.frame(i); });
+			(avoid ? after : before) = coveredByCard(panels);
+			if (avoid) CHECK_FALSE(scene.keep.gliding());
+
+			// Still a whole card inside the editor window, and still pointing:
+			// stepping aside must not cost the outline.
+			const HE::Ed::Spotlight::Box c = cardBox();
+			CHECK(c.min.x >= 0.0f);
+			CHECK(c.min.y >= 0.0f);
+			CHECK(c.max.x <= float(kEdW));
+			CHECK(c.max.y <= float(kEdH));
+			CHECK(HE::Ed::Spotlight::outline(panels.front().c_str(), 0.0f));
+		}
+		return { before, after };
+	}
+} // namespace
+
+TEST_CASE("ui shot: the tutorial card steps off the panel its step points at")
+{
+	struct Case { const char* side; const char* panel; From from; };
+	// Details and the Content Browser from the tour's own default spot — the
+	// layout the bug was seen in. The others from on top of the panel, which is
+	// where a card the user parked in an earlier step can be.
+	const Case cases[] = {
+		{ "right-bottom", "Details",              From::TourDefault },
+		{ "bottom",       "Content Browser",      From::TourDefault },
+		{ "left",         "Quick Settings",       From::OnTarget },
+		{ "right-top",    "World Outliner",       From::OnTarget },
+		{ "top",          "Performance Profiler", From::OnTarget },
+	};
+	for (const Case& c : cases)
+	{
+		INFO("side: " << std::string(c.side));
+		const auto [before, after] = shootCardCase(c.side, c.panel, c.from);
+		CHECK(before > 0.0f);   // without KeepClear the card does cover it
+		CHECK(after == 0.0f);   // with it, not a pixel
+	}
+}
+
+// The other half of stepping aside: not fighting the user. A card the user drags
+// back onto the panel stays there for the rest of the step — a card that slides
+// away from under the cursor every time it is let go is worse than the bug — and
+// steps aside again once the next step begins (KeepClear::reset, which the tour
+// calls from gotoCursor).
+TEST_CASE("ui shot: a tutorial card the user dragged onto the panel stays until the next step")
+{
+	const HE::tut::Step* step = stepPointingAt("Details");
+	REQUIRE(step != nullptr);
+	const std::vector<std::string> panels = panelsOf(*step);
+
+	Harness h(kEdW, kEdH);
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	CardScene scene;
+	scene.step     = step;
+	scene.fromTourDefault = true;
+
+	int frameNo = 0;
+	const auto run = [&](int frames) {
+		for (int i = 0; i < frames; ++i, ++frameNo)
+		{
+			ImGui::NewFrame();
+			scene.frame(frameNo);
+			ImGui::Render();
+		}
+	};
+
+	run(90);
+	REQUIRE(coveredByCard(panels) == 0.0f);   // stepped aside on its own
+
+	// Grab the title bar and drag it to the middle of Details.
+	ImVec2 dpos, dsize;
+	REQUIRE(HE::Ed::Spotlight::panelRect("Details", dpos, dsize));
+	const HE::Ed::Spotlight::Box c = cardBox();
+	const ImVec2 grab(c.min.x + 80.0f, c.min.y + 8.0f);
+	const ImVec2 drop(dpos.x + dsize.x * 0.5f - kCardW * 0.5f + 80.0f,
+	                  dpos.y + dsize.y * 0.5f - kCardH * 0.5f + 8.0f);
+	io.AddMousePosEvent(grab.x, grab.y);
+	run(1);
+	io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+	run(1);
+	for (int s = 1; s <= 10; ++s)
+	{
+		const float t = float(s) / 10.0f;
+		io.AddMousePosEvent(grab.x + (drop.x - grab.x) * t, grab.y + (drop.y - grab.y) * t);
+		run(1);
+	}
+	io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+	run(1);
+	io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);   // mouse away, nothing hovered
+	run(60);
+
+	CHECK(scene.keep.userMoved());
+	const float parked = coveredByCard(panels);
+	CHECK(parked > 0.0f);                       // where the user put it
+
+	// The next step: the card is the tour's to place again.
+	scene.keep.reset();
+	run(90);
+	CHECK(coveredByCard(panels) == 0.0f);
+}
+
+// ── Sign in with GitHub ──────────────────────────────────────────────────────
+// The device-flow dialog's body (GitHubSignInView), the same function the
+// editor draws in its own popup and inline in the Clone and Report Issue
+// dialogs. Three states a user actually sees: the code to type, the result,
+// and a code that ran out.
+namespace
+{
+	he_ui::Image shootSignIn(const char* name, const Harness& h,
+	                         const GitHubSignInView::View& view)
+	{
+		constexpr int W = 560, H = 420;
+		GitHubSignInView::Fonts fonts;
+		fonts.heading = h.heading;
+		return shoot(name, W, H, 3, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+			ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+			ImGui::Begin("Sign in with GitHub", nullptr,
+			             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+			             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+			{
+				// Braces: the guard must pop before End(), on this window.
+				EditorWidgets::WrapText wrap;
+				GitHubSignInView::drawBody(view, fonts);
+			}
+			ImGui::End();
+		});
+	}
+
+	// Pixels of the "success" green the body uses for "Signed in" / "Copied".
+	int greenPixels(const he_ui::Image& img)
+	{
+		int n = 0;
+		std::uint8_t r, g, b, a;
+		for (int y = 0; y < img.height; ++y)
+			for (int x = 0; x < img.width; ++x)
+			{
+				img.pixel(x, y, r, g, b, a);
+				if (int(g) > 170 && int(r) < 175 && int(b) < 175 && int(g) - int(r) > 40) ++n;
+			}
+		return n;
+	}
+
+	// Light text: the body text and the heading-coloured code, not the dim hints.
+	int brightPixels(const he_ui::Image& img)
+	{
+		int n = 0;
+		std::uint8_t r, g, b, a;
+		for (int y = 0; y < img.height; ++y)
+			for (int x = 0; x < img.width; ++x)
+			{
+				img.pixel(x, y, r, g, b, a);
+				if (int(r) > 200 && int(g) > 180 && int(b) > 120) ++n;
+			}
+		return n;
+	}
+} // namespace
+
+TEST_CASE("GitHub sign-in: the countdown reads as minutes and seconds")
+{
+	CHECK(GitHubSignInView::formatCountdown(845) == "14:05");
+	CHECK(GitHubSignInView::formatCountdown(9) == "0:09");
+	CHECK(GitHubSignInView::formatCountdown(0) == "0:00");
+	CHECK(GitHubSignInView::formatCountdown(-3) == "0:00");
+}
+
+TEST_CASE("ui shot: GitHub sign-in shows the code large, with its countdown")
+{
+	Harness harness(560, 420);
+
+	GitHubSignInView::View v;
+	v.phase           = GitHubSignInView::Phase::WaitingForUser;
+	v.userCode        = "WDJB-MJHT";
+	v.verificationUri = "https://github.com/login/device";
+	v.secondsLeft     = 845;
+	v.copied          = true;
+	const he_ui::Image withCode = shootSignIn("github-signin-code", harness, v);
+	REQUIRE(withCode.valid());
+
+	// Negative control: the same screen with no code in the box. The difference
+	// in bright text pixels is the code's own — large glyphs, so a lot of them.
+	// A code drawn in the body font (or not at all) would leave a few hundred at
+	// most. (Plain ink would not do: the window's own background counts as ink.)
+	GitHubSignInView::View noCode = v;
+	noCode.userCode.clear();
+	const he_ui::Image without = shootSignIn("github-signin-nocode", harness, noCode);
+	const int brightWith    = brightPixels(withCode);
+	const int brightWithout = brightPixels(without);
+	INFO("bright pixels with code " << brightWith << ", without " << brightWithout);
+	CHECK(brightWithout > 500);   // the instructions are there either way
+	CHECK(brightWith - brightWithout > 1000);   // ~1800 at 40 px in Roboto Condensed
+
+	// "Copied." confirms the button press in green.
+	CHECK(greenPixels(withCode) > 30);
+	GitHubSignInView::View notCopied = v;
+	notCopied.copied = false;
+	CHECK(greenPixels(shootSignIn("github-signin-notcopied", harness, notCopied)) == 0);
+}
+
+TEST_CASE("ui shot: GitHub sign-in names the account once it is done")
+{
+	Harness harness(560, 420);
+
+	GitHubSignInView::View v;
+	v.phase = GitHubSignInView::Phase::SignedIn;
+	v.login = "octocat";
+	const he_ui::Image img = shootSignIn("github-signin-done", harness, v);
+	REQUIRE(img.valid());
+	CHECK(brightPixels(img) > 500);
+	CHECK(greenPixels(img) > 100);
+
+	// And a code that ran out offers a new one instead of a dead end.
+	GitHubSignInView::View expired;
+	expired.phase = GitHubSignInView::Phase::Expired;
+	expired.error = "The sign-in code expired. Start again for a new one.";
+	const he_ui::Image exp = shootSignIn("github-signin-expired", harness, expired);
+	CHECK(brightPixels(exp) > 300);
+	CHECK(greenPixels(exp) == 0);
 }

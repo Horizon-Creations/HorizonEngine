@@ -210,4 +210,15 @@ struct DirectionalLightWindow
 
 HE_RENDERING_API DirectionalLightWindow BuildDirectionalLightWindow(const RenderWorld& rw);
 
+// The CLUSTERED deferred resolve's light window (Thema 150): rewrites the
+// window half of a graph-material Lighting block to the directional lights
+// only (same pick as BuildDirectionalLightWindow), unused slots zeroed,
+// counts.x = their number. The resolve is injected WITHOUT HE_CLUSTERED, so its
+// heLitP walks the whole window, and heClusterLighting adds every point/spot
+// light from the lists on top — a full window would count them twice. Metal's
+// EncodeClusterData does the same in place. Fill a COPY: the forward-routed and
+// transparent graph materials of the same frame still need the full window.
+HE_RENDERING_API void FillMaterialDirectionalWindow(const RenderWorld&               rw,
+                                                   MaterialShaderLibrary::Lighting& out);
+
 } // namespace HE

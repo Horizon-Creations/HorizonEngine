@@ -72,7 +72,9 @@ public:
 	// The whole GitHub setup in one worker pass: create the repository via the
 	// API, point origin at it, make sure a credential helper exists, hand the
 	// token to that helper, and push. The token lives in the command for the
-	// duration of the flow and is wiped when it completes.
+	// duration of the flow and is wiped when it completes. An empty `token`
+	// means "the GitHub sign-in": read from the helper on the worker
+	// (GitHubTokenStore::load).
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate,
 	                        std::string token);
 

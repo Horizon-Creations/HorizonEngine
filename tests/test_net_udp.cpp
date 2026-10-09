@@ -256,9 +256,15 @@ TEST_CASE("UdpTransport: a Connect without a valid cookie allocates nothing on t
 {
     Pair p = connectedPair();   // one genuine peer, so "nothing changed" is observable
 
+    // Bound WITHOUT SO_REUSEADDR (socketBindUdp sets it). On Linux two reuse
+    // sockets may share a UDP port, and the ephemeral picker hands out a port
+    // the client's reuse socket already holds: the "stranger" then comes from
+    // the client's own address, and its datagram reaches the host as client
+    // data (seen once on Linux CI, run 37544985679).
     SocketHandle raw = socketCreateUdp();
     REQUIRE(raw != kInvalidSocket);
-    REQUIRE(socketBindUdp(raw, 0));
+    REQUIRE(socketBindUdpTo(raw, "127.0.0.1", 0));
+    REQUIRE(socketBoundPort(raw) != p.client->boundPort());
     std::size_t sent = 0;
 
     SUBCASE("first contact is answered statelessly with a Challenge") {

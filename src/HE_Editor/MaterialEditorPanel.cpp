@@ -765,6 +765,16 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			if (EditorWidgets::checkbox("On (default)", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
+		// ── v15: bombing cells — the seed picks the set of numbers; Cell and Blend are pins ──
+		case MatNodeType::BombCells:
+		{
+			int seed = static_cast<int>(std::lround(n.p[0]));
+			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
+			if (ImGui::DragInt("Seed", &seed, 0.2f)) n.p[0] = static_cast<float>(seed);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Seed");
+			break;
+		}
 		// ── v6: procedural texture — inline Scale (bigger = finer speckle) ──
 		case MatNodeType::NoiseTexture:
 			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
@@ -1420,6 +1430,8 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	// The component takes its origin from the cursor screen-pos at entry — capture the
 	// same point so paste/duplicate can map the mouse into graph space afterwards.
 	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
+	// Opens where it was left (GraphViewStore.h) — view state, never the asset's.
+	if (st.geState.viewKey.empty() && !st.relPath.empty()) st.geState.viewKey = "mat:" + st.relPath;
 	const bool changed = GraphEditor::draw("##mat_graphcanvas", m, st.geState, avail);
 	if (changed) structuralEdit = true; // add / connect / delete / move → snapshot
 	// Mid-drag the node has already moved. Kept OUT of structuralEdit on
@@ -1654,7 +1666,10 @@ void applyPreviewMesh(State& st, AppContext& ctx, const std::string& path,
 void startPreviewMeshLoad(State& st, AppContext& ctx, const std::string& path, const std::string& label)
 {
 	if (!ctx.contentManager) return;
-	ctx.contentManager->loadAssetAsync(path);
+	// Normal, not the streaming default Low: someone is looking at a progress bar.
+	HE::AsyncLoadOptions options;
+	options.priority = HE::JobPriority::Normal;
+	ctx.contentManager->loadAssetAsync(path, {}, options);
 	st.pendingMeshPath  = path;
 	st.pendingMeshLabel = label;
 	st.pendingMeshStart = ImGui::GetTime();
@@ -2133,17 +2148,43 @@ void render(AppContext& ctx, const std::string& assetPath,
 		namespace T = EditorToolbar;
 		T::Bar bar;
 
-		const char* kind = st.isInstance ? "material instance"
-		                 : st.isFunction ? "material function"
-		                                 : "material graph";
-		T::assetHeader(bar, st.name.c_str(), T::iconLayers, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
+		// Folder, then Save: the two things every asset tab opens with. The right
+		// edge belongs to the view switch.
+		if (T::saveButton(bar, assetOk, /*atLeft=*/true)) saveToDisk(st, ctx, assetPath);
 
-		bar.group();
-		bar.readout(nullptr, kind, T::kFgDim);
-		// Shader complexity gauge (updated on every regenerate).
+		// Graph|Overrides / Shader-code toggle for the right pane, at the right
+		// edge. A function has no shader of its own, so it has no second view
+		// either. Declared before the wells to its left so they know how much
+		// room is theirs.
+		if (!st.isFunction)
+		{
+			const char* graphLabel = st.isInstance ? "Overrides" : "Graph";
+			bar.rightGroup(bar.labelGroupWidth({ graphLabel, "Shader Code" }));
+			if (bar.item("##vgraph", T::iconLayers, graphLabel,
+			             st.viewMode == 0, true,
+			             st.isInstance ? "The values this instance overrides"
+			                           : "The node graph"))
+			{
+				st.viewMode = 0;
+			}
+			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
+			             "The generated shader source"))
+			{
+				st.viewMode = 1;
+			}
+			bar.endGroup();
+		}
+
+		// Shader complexity gauge (updated on every regenerate). The tab already
+		// says what kind of material this is, so there is no "material graph"
+		// badge in front of it.
 		if (!st.isFunction && !st.complexity.empty())
+		{
+			bar.group();
 			bar.readout(nullptr, st.complexity.c_str(), T::kFgDim);
-		bar.endGroup();
+			bar.endGroup();
+		}
 
 		// Blend mode — a MATERIAL-level setting (it changes the Output node's pins
 		// and which render pass the material uses), so it belongs to the bar and
@@ -2194,26 +2235,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 		}
 
-		// Graph|Overrides / Shader-code toggle for the right pane. A function has
-		// no shader of its own, so it has no second view either.
-		if (!st.isFunction)
-		{
-			bar.group();
-			if (bar.item("##vgraph", T::iconLayers, st.isInstance ? "Overrides" : "Graph",
-			             st.viewMode == 0, true,
-			             st.isInstance ? "The values this instance overrides"
-			                           : "The node graph"))
-			{
-				st.viewMode = 0;
-			}
-			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
-			             "The generated shader source"))
-			{
-				st.viewMode = 1;
-			}
-			bar.endGroup();
-		}
-
 		if (st.isInstance && mat)
 		{
 			bar.group();
@@ -2228,7 +2249,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 
 		if (!assetOk) bar.label("Asset could not be loaded", T::kBad);
-		if (T::saveButton(bar, assetOk)) saveToDisk(st, ctx, assetPath);
 	}
 
 	// Edit flags — both columns contribute; applied once at the end.

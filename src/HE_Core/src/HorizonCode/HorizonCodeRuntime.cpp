@@ -113,6 +113,7 @@ InstanceId Runtime::registerLevels(std::vector<Graph> levels, HostBindings bindi
     // LAST, after the defaults are seeded and before the caller can fire
     // anything — the one point every kind of instance passes through
     // (design §2.4). Hosts fire PreConstruct/Construct/BeginPlay afterwards.
+    watchDeclared(id);   // Notify on Change: every instance, the Game Instance too
     if (pull) pullOnConstruct(id);
     return id;
 }
@@ -149,6 +150,7 @@ InstanceId Runtime::registerCompiled(CompiledPtr inst, HostBindings bindings,
     it->second.compiled->bindContext(makeContext(id));
     // Same place in the sequence as for an interpreted instance: after the
     // defaults (the member initialisers) and the Context, before any event.
+    watchDeclared(id);   // Notify on Change: every instance, the Game Instance too
     if (pull) pullOnConstruct(id);
     return id;
 }
@@ -156,7 +158,41 @@ InstanceId Runtime::registerCompiled(CompiledPtr inst, HostBindings bindings,
 // ── Pull on Construct (design §2.5) ─────────────────────────────────────────
 namespace {
 // One pulling variable, as either backend declares it.
-struct PullSpec { std::string name, src, var, member, cls; };
+struct PullSpec { std::string name, src, var, member, cls; bool bind = false; std::string ref; };
+}
+
+PullFailure Runtime::readPullSource(InstanceId src, const std::string& var,
+                                    const std::string& member, Value& out) const
+{
+    // Its PUBLIC instance variable — the same door Get (Ref) uses, so a
+    // variable nobody may read through a reference is not pullable either.
+    const Inst* si = find(src);
+    if (!si) return PullFailure::NoPublicVariable;
+    bool visible = false;
+    if (si->compiled)
+    {
+        const CompiledVarInfo* vi = findVarInfo(*si->compiled, var);
+        visible = vi && vi->access == 0;
+    }
+    else
+    {
+        const Variable* v = findVarInLevels(si->levels, var);
+        visible = v && v->access == 0 && v->scope == 0;
+    }
+    if (!visible) return PullFailure::NoPublicVariable;
+    out = getVariable(src, var);
+    if (member.empty()) return PullFailure::None;
+
+    // Optionally one field of it. findField follows formerNames, so a member
+    // renamed in the struct keeps being found.
+    HE::StructDef def;
+    if (out.type != PinType::Struct || out.isArray) return PullFailure::NotAStruct;
+    if (!HE::TypeRegistry::instance().getStruct(out.typeName, def)) return PullFailure::NoSuchMember;
+    const HE::StructField* f = def.findField(member);
+    if (!f || (size_t)(f - def.fields.data()) >= out.items.size()) return PullFailure::NoSuchMember;
+    Value field = out.items[(size_t)(f - def.fields.data())];
+    out = std::move(field);
+    return PullFailure::None;
 }
 
 void Runtime::pullOnConstruct(InstanceId id)
@@ -179,13 +215,14 @@ void Runtime::pullOnConstruct(InstanceId id)
         auto str = [](const char* p) { return p ? std::string(p) : std::string(); };
         for (const auto& vi : inst->compiled->varInfos())
             report({ str(vi.name), str(vi.pullSource), str(vi.pullVar), str(vi.pullMember),
-                     str(vi.pullClass) });
+                     str(vi.pullClass), vi.bindTo, str(vi.pullRef) });
     }
     else
         for (const Graph& g : inst->levels)
             for (const Variable& v : g.variables)
                 if (v.scope == 0)
-                    report({ v.name, v.pullSource, v.pullVar, v.pullMember, v.pullClass });
+                    report({ v.name, v.pullSource, v.pullVar, v.pullMember, v.pullClass,
+                             v.bindTo, v.pullRef });
     specs.erase(std::remove_if(specs.begin(), specs.end(),
                                [](const PullSpec& s) { return s.src.empty() || s.var.empty(); }),
                 specs.end());
@@ -196,6 +233,29 @@ void Runtime::pullOnConstruct(InstanceId id)
     std::vector<PullOutcome> outcomes;
     for (const PullSpec& s : specs)
     {
+        // Bind To (plan §3.1): every bound spec becomes a binding here, in the
+        // pass that knows its source and what was pulled from it.
+        Binding bind;
+        if (s.bind)
+        {
+            bind.owner = id;
+            bind.name = s.name;
+            bind.src = s.src; bind.var = s.var; bind.member = s.member;
+            bind.cls = s.cls; bind.ref = s.ref;
+            bind.clsKey = clsKey;
+        }
+        // A reference source pulls nothing at registration — the Ref still
+        // holds its default (null) — and that is no failure, so no outcome and
+        // no warning. Its first value comes with the first compare after the
+        // reference points somewhere (§3.2). Without Bind To it is no state the
+        // loader lets through; one that arrives anyway (hand-built graph) is
+        // skipped the same quiet way.
+        if (s.src == kPullFromRef)
+        {
+            if (s.bind && !s.ref.empty()) m_bindings.push_back(std::move(bind));
+            continue;
+        }
+
         PullOutcome out;
         out.name = s.name;
         std::string detail;
@@ -223,45 +283,10 @@ void Runtime::pullOnConstruct(InstanceId id)
         else
             fail(PullFailure::UnknownSource);
 
-        // 2. Its PUBLIC instance variable — the same door Get (Ref) uses, so a
-        //    variable nobody may read through a reference is not pullable
-        //    either.
+        // 2./3. Its public instance variable, optionally one struct field of it
+        //    (readPullSource, shared with Bind To's compare).
         if (out.why == PullFailure::None)
-        {
-            const Inst* si = find(src);
-            bool visible = false;
-            if (si->compiled)
-            {
-                const CompiledVarInfo* vi = findVarInfo(*si->compiled, s.var);
-                visible = vi && vi->access == 0;
-            }
-            else
-            {
-                const Variable* v = findVarInLevels(si->levels, s.var);
-                visible = v && v->access == 0 && v->scope == 0;
-            }
-            if (!visible) fail(PullFailure::NoPublicVariable);
-            else          val = getVariable(src, s.var);
-        }
-
-        // 3. Optionally one field of it. findField follows formerNames, so a
-        //    member renamed in the struct keeps being found.
-        if (out.why == PullFailure::None && !s.member.empty())
-        {
-            HE::StructDef def;
-            if (val.type != PinType::Struct || val.isArray)
-                fail(PullFailure::NotAStruct);
-            else if (!HE::TypeRegistry::instance().getStruct(val.typeName, def))
-                fail(PullFailure::NoSuchMember);
-            else if (const HE::StructField* f = def.findField(s.member);
-                     !f || (size_t)(f - def.fields.data()) >= val.items.size())
-                fail(PullFailure::NoSuchMember);
-            else
-            {
-                Value field = val.items[(size_t)(f - def.fields.data())];
-                val = std::move(field);
-            }
-        }
+            fail(readPullSource(src, s.var, s.member, val));
 
         // 4. Shape against the target. The target's current value IS its
         //    declared default here, and serves as the declaration for both
@@ -295,6 +320,27 @@ void Runtime::pullOnConstruct(InstanceId id)
             if (m_pullWarned.insert(key).second)
                 hcWarn("Pull on Construct: '" + clsKey + "." + s.name + "' - " + out.reason +
                        "; default used");
+            // A bound variable whose pull failed would say the same thing again
+            // at its first compare; this line already said it.
+            if (s.bind)
+                m_pullWarned.insert("bind|" + key);
+        }
+        if (s.bind)
+        {
+            // Start value (§3.1): a successful pull IS the first compare, so the
+            // first exchangeState sees "unchanged" and writes nothing — a spawn
+            // or hot-reload value set after this stays until the source moves.
+            // A failed pull leaves no shadow, and the first compare that can
+            // resolve the source writes.
+            if (out.pulled)
+            {
+                bind.boundTo = src;
+                bind.sourceShadow = val;
+                bind.haveShadow = true;
+            }
+            else
+                bind.why = out.why;
+            m_bindings.push_back(std::move(bind));
         }
         outcomes.push_back(std::move(out));
     }
@@ -313,6 +359,347 @@ InstanceId Runtime::creatorOf(InstanceId id) const
 {
     const Inst* i = find(id);
     return i ? i->creator : 0;
+}
+
+// ── Bind To (docs/bind-to-variable-binding-plan.md §3) ──────────────────────
+InstanceId Runtime::resolveBindSource(const Binding& b, PullFailure& why) const
+{
+    why = PullFailure::None;
+    if (b.src == kPullFromGameInstance)
+    {
+        // Looked up afresh every time: a Game Instance replaced at play start
+        // is another instance, and the binding follows it.
+        if (!m_gameInstance || !find(m_gameInstance)) { why = PullFailure::NoGameInstance; return 0; }
+        return m_gameInstance;
+    }
+    if (b.src == kPullFromCreator)
+    {
+        const Inst* o = find(b.owner);
+        const InstanceId c = o ? o->creator : 0;
+        if (!c)       { why = PullFailure::NoCreator;   return 0; }
+        if (!find(c)) { why = PullFailure::CreatorGone; return 0; }
+        if (!b.cls.empty() && !instanceIsA(c, b.cls)) { why = PullFailure::CreatorWrongClass; return 0; }
+        return c;
+    }
+    if (b.src == kPullFromRef)
+    {
+        // The reference must be a scalar Ref INSTANCE variable of the owner's
+        // class, at any level (a derived class may bind through an inherited
+        // one; the loader could not check that, so this is where it is).
+        const Inst* o = find(b.owner);
+        if (!o) { why = PullFailure::NoRefVariable; return 0; }
+        bool isRef = false;
+        if (o->compiled)
+        {
+            const CompiledVarInfo* vi = findVarInfo(*o->compiled, b.ref);
+            isRef = vi && vi->type == PinType::Ref && !vi->isArray;
+        }
+        else
+        {
+            const Variable* v = findVarInLevels(o->levels, b.ref);
+            isRef = v && v->scope == 0 && v->type == PinType::Ref && !v->isArray;
+        }
+        if (!isRef) { why = PullFailure::NoRefVariable; return 0; }
+        const InstanceId target = getVariable(b.owner, b.ref).ref;
+        if (!target) return 0;                       // not assigned yet: waiting, not failing
+        if (!find(target)) { why = PullFailure::RefTargetGone; return 0; }
+        return target;
+    }
+    why = PullFailure::UnknownSource;
+    return 0;
+}
+
+int Runtime::exchangeState()
+{
+    if (m_bindings.empty() && m_watched.empty()) return 0;
+    int writes = 0;
+    int changeBudget = kMaxChangeFires;
+
+    // The binding rests: the variable keeps its last value, and the first
+    // compare that can resolve the source again writes, whatever the value.
+    // Warned once per (class, variable, reason) and session; a null reference
+    // is an ordinary state ("not assigned yet") and rests without a word.
+    auto rest = [this](Binding& b, PullFailure why, const std::string& detail)
+    {
+        b.boundTo = 0;
+        b.haveShadow = false;
+        b.why = why;
+        if (why == PullFailure::None) return;
+        const std::string key = "bind|" + b.clsKey + "|" + b.name + "|" + std::to_string((int)why);
+        if (m_pullWarned.insert(key).second)
+            hcWarn("Bind To: '" + b.clsKey + "." + b.name + "' - " +
+                   pullFailureText(why, b.src, b.var, b.member, detail, b.ref) +
+                   "; keeps its last value");
+    };
+
+    int round = 0;
+    for (; round < kMaxBindRounds; ++round)
+    {
+        bool changedAny = false;
+        // By index, re-checked every pass: nothing below runs a script today,
+        // but the change notification that follows (plan §4) will, and a
+        // handler may register or remove instances — and with them bindings.
+        for (size_t i = 0; i < m_bindings.size(); ++i)
+        {
+            if (!find(m_bindings[i].owner)) continue;
+            PullFailure why = PullFailure::None;
+            const InstanceId src = resolveBindSource(m_bindings[i], why);
+            Binding& b = m_bindings[i];
+            if (!src) { rest(b, why, why == PullFailure::CreatorWrongClass ? b.cls : std::string()); continue; }
+
+            Value val;
+            if (const PullFailure r = readPullSource(src, b.var, b.member, val); r != PullFailure::None)
+            { rest(b, r, {}); continue; }
+            // Only a MOVE writes: the value, or which instance it comes from.
+            if (src == b.boundTo && b.haveShadow && valuesEqual(val, b.sourceShadow)) continue;
+
+            const Value shape = getVariable(b.owner, b.name);
+            if (!pullValuesCompatible(val, shape))
+            {
+                std::string detail;
+                pullShapesCompatible(val.type, val.kind(), val.keyType, val.typeName,
+                                     shape.type, shape.kind(), shape.keyType, shape.typeName,
+                                     &detail);
+                rest(b, PullFailure::TypeMismatch, detail);
+                continue;
+            }
+            b.boundTo = src;
+            b.sourceShadow = val;
+            b.haveShadow = true;
+            b.why = PullFailure::None;
+            // A push over a binding always reports (§4.2), the first one too:
+            // a watched target without a baseline gets the value it is about
+            // to lose as one.
+            if (Watched* w = findWatched(b.owner, b.name); w && !w->baselined)
+            {
+                w->shadow = shape;
+                w->baselined = true;
+            }
+            // A copy, as for the pull: containers and structs are values.
+            setVariable(b.owner, b.name, pullConvert(val, shape));
+            changedAny = true;
+            ++writes;
+        }
+        // Phase 2 (§4.2): report what moved — through a binding above, or
+        // through anything else since the last compare. Its handlers may move
+        // bound sources again, so a report keeps the rounds going.
+        if (reportChanges(changeBudget) > 0)
+        {
+            changedAny = true;
+            ++writes;   // a handler ran: an event-driven host redraws
+        }
+        if (!changedAny) break;
+    }
+    if (round == kMaxBindRounds && m_pullWarned.insert("bind|cycle").second)
+        hcWarn("Bind To: bindings still moving after " + std::to_string(kMaxBindRounds) +
+               " rounds - a cycle (A bound to B bound to A)? The rest follows next frame");
+    return writes;
+}
+
+std::vector<Runtime::BindOutcome> Runtime::boundVariablesOf(InstanceId id) const
+{
+    std::vector<BindOutcome> out;
+    for (const Binding& b : m_bindings)
+        if (b.owner == id) out.push_back({ b.name, b.src, b.boundTo, b.why });
+    return out;
+}
+
+// ── Notify on Change (docs/bind-to-variable-binding-plan.md §4) ─────────────
+void Runtime::watchDeclared(InstanceId id)
+{
+    const Inst* inst = find(id);
+    if (!inst) return;
+    // Leaf-most declaration decides, as for the pull: names cannot repeat
+    // across levels, so "any level says notify" is the same thing.
+    std::vector<std::string> names;
+    if (inst->compiled)
+    {
+        for (const auto& vi : inst->compiled->varInfos())
+            if (vi.notifyChange && vi.name) names.emplace_back(vi.name);
+    }
+    else
+        for (const Graph& g : inst->levels)
+            for (const Variable& v : g.variables)
+                if (v.scope == 0 && v.notifyChange) names.push_back(v.name);
+    for (std::string& n : names)
+    {
+        Watched w;
+        w.owner = id;
+        w.name = std::move(n);
+        w.declared = true;
+        m_watched.push_back(std::move(w));
+    }
+}
+
+Runtime::Watched* Runtime::findWatched(InstanceId owner, const std::string& name)
+{
+    for (Watched& w : m_watched)
+        if (w.owner == owner && w.name == name) return &w;
+    return nullptr;
+}
+
+bool Runtime::watch(InstanceId owner, const std::string& var, uint64_t token)
+{
+    // Public instance variables only — the door Get (Ref) uses.
+    if (!isPublicVariable(owner, var)) return false;
+    Watched* w = findWatched(owner, var);
+    if (!w)
+    {
+        Watched n;
+        n.owner = owner;
+        n.name = var;
+        m_watched.push_back(std::move(n));
+        w = &m_watched.back();
+    }
+    if (std::find(w->tokens.begin(), w->tokens.end(), token) == w->tokens.end())
+        w->tokens.push_back(token);
+    return true;
+}
+
+void Runtime::unwatch(InstanceId owner, const std::string& var, uint64_t token)
+{
+    for (Watched& w : m_watched)
+        if (w.owner == owner && w.name == var)
+            w.tokens.erase(std::remove(w.tokens.begin(), w.tokens.end(), token), w.tokens.end());
+    m_watched.erase(std::remove_if(m_watched.begin(), m_watched.end(),
+        [](const Watched& w){ return !w.declared && w.tokens.empty(); }), m_watched.end());
+}
+
+void Runtime::unwatch(uint64_t token)
+{
+    unwatchIf([token](uint64_t t){ return t == token; });
+}
+
+void Runtime::unwatchIf(const std::function<bool(uint64_t token)>& drop)
+{
+    for (Watched& w : m_watched)
+        w.tokens.erase(std::remove_if(w.tokens.begin(), w.tokens.end(), drop), w.tokens.end());
+    m_watched.erase(std::remove_if(m_watched.begin(), m_watched.end(),
+        [](const Watched& w){ return !w.declared && w.tokens.empty(); }), m_watched.end());
+}
+
+int Runtime::reportChanges(int& budget)
+{
+    int fires = 0;
+    // By index and re-read after every handler: a handler may write, create,
+    // destroy (remove() erases entries) or watch — nothing here may hold a
+    // reference into m_watched across a call out.
+    for (size_t i = 0; i < m_watched.size(); ++i)
+    {
+        const InstanceId owner = m_watched[i].owner;
+        if (!find(owner)) continue;
+        Value now = getVariable(owner, m_watched[i].name);
+        Watched& w = m_watched[i];
+        if (!w.baselined) { w.shadow = std::move(now); w.baselined = true; continue; }
+        if (valuesEqual(now, w.shadow)) continue;
+        if (budget <= 0)
+        {
+            if (m_pullWarned.insert("notify|budget").second)
+                hcWarn("Notify on Change: more than " + std::to_string(kMaxChangeFires) +
+                       " change reports in one frame - an OnChanged_ handler feeding another?"
+                       " The rest follows next frame");
+            return fires;
+        }
+        --budget;
+        ++fires;
+        Value old = std::move(w.shadow);
+        w.shadow = now;
+        const std::string name = w.name;
+        const bool declared = w.declared;
+        const std::vector<uint64_t> tokens = w.tokens;   // copy: a handler may unwatch
+        if (declared)
+        {
+            // Private is fine: the runtime calls it on the class's own behalf.
+            // A class without the function gets nothing (callFunction is silent).
+            callFunction(owner, "OnChanged_" + name, /*requirePublic=*/false, { old });
+            if (find(owner)) dispatchChanged(owner, name, now);
+        }
+        if (!tokens.empty() && onVariableChanged)
+            onVariableChanged(owner, name, old, now, tokens);
+    }
+    return fires;
+}
+
+void Runtime::dispatchChanged(InstanceId owner, const std::string& name, const Value& now)
+{
+    if (m_dispatchDepth >= 32) return;   // same bound as dispatchToListeners
+    const std::string evName = name + "Changed";
+    const EventId ev = eventId(evName);
+    auto oit = m_listeners.find(owner);
+    if (oit == m_listeners.end()) return;
+    auto eit = oit->second.find(ev);
+    if (eit == oit->second.end()) return;
+
+    const std::vector<InstanceId> listeners = eit->second;   // copy: a handler may re-bind
+    ++m_dispatchDepth;
+    for (InstanceId l : listeners)
+    {
+        if (l == owner) continue;            // its own change goes to OnChanged_, not here
+        Inst* li = find(l);
+        if (!li) continue;
+        if (++m_dispatchFires > kMaxDispatchFires)
+        {
+            if (m_dispatchFires == kMaxDispatchFires + 1)
+                hcError("event dispatch budget exceeded while dispatching '" + evName + "' - aborting it");
+            break;
+        }
+
+        // The listener's handler signature, as for OnDestroyed.
+        bool handles = false, wantsArg = false;
+        PinType argType = PinType::Float;
+        std::string argTypeName;
+        if (li->compiled)
+        {
+            for (const CompiledEventInfo& e : li->compiled->eventInfos())
+                if (e.name && evName == e.name && e.elem == 0)
+                {
+                    handles  = true;
+                    wantsArg = e.argType >= 0;
+                    argType  = (PinType)e.argType;
+                    argTypeName = e.typeName ? e.typeName : "";
+                }
+        }
+        else if (const int lv = levelHandlingEvent(*li, evName, 0); lv >= 0)
+        {
+            handles = true;
+            for (const Node& n : li->levels[(size_t)lv].nodes)
+                if (n.type == NodeType::Event && n.s == evName && n.elem == 0)
+                {
+                    wantsArg = n.hasArg;
+                    argType  = n.propType;
+                    argTypeName = n.typeName;
+                    break;
+                }
+        }
+        if (!handles) continue;
+
+        Value arg;   // no argument: "it changed" is the message
+        if (wantsArg)
+        {
+            // Checked, not coerced, as for OnDestroyed: a Float handler on an
+            // Int variable takes it (the pull's numeric rule), a String one
+            // on a struct does not.
+            std::string detail;
+            if (!pullShapesCompatible(now.type, now.kind(), now.keyType, now.typeName,
+                                      argType, ContainerKind::None, PinType::String, argTypeName,
+                                      &detail))
+            {
+                const std::string lKey = li->cls.key.empty() ? std::string("<graph>") : li->cls.key;
+                if (m_extractWarned.insert("changed|" + lKey + "|" + evName).second)
+                    hcWarn("Notify on Change: '" + lKey + "' handles '" + evName +
+                           "' with an argument that does not fit (" + detail + "); handler skipped");
+                continue;
+            }
+            Value shape;
+            shape.type = argType;
+            shape.typeName = argTypeName;
+            arg = pullConvert(now, shape);
+        }
+        if (li->compiled) li->compiled->fireEvent(evName, 0, arg);
+        else              runEventOnLevel(*li, l, evName, 0, arg);
+    }
+    --m_dispatchDepth;
+    if (m_dispatchDepth == 0) m_dispatchFires = 0;
 }
 
 bool Runtime::instanceIsA(InstanceId id, const std::string& classKey) const
@@ -374,6 +761,13 @@ void Runtime::remove(InstanceId id)
     // So does a run of its that is stopped at a breakpoint.
     m_suspended.erase(std::remove_if(m_suspended.begin(), m_suspended.end(),
         [&](const SuspendedRun& r){ return r.instance == id; }), m_suspended.end());
+    // Its bindings go (Bind To §3.1). Bindings whose SOURCE it was notice that
+    // themselves at their next compare and rest.
+    m_bindings.erase(std::remove_if(m_bindings.begin(), m_bindings.end(),
+        [&](const Binding& b){ return b.owner == id; }), m_bindings.end());
+    // Its watches too, script subscriptions included: nothing reports a ghost.
+    m_watched.erase(std::remove_if(m_watched.begin(), m_watched.end(),
+        [&](const Watched& w){ return w.owner == id; }), m_watched.end());
     if (id == m_gameInstance) { m_gameInstance = 0; m_gameInstanceCompiled = nullptr; }
 }
 void Runtime::destroy(InstanceId id)
@@ -578,6 +972,8 @@ void Runtime::clear()
     m_listeners.clear();
     m_pending.clear();
     m_suspended.clear();
+    m_bindings.clear();
+    m_watched.clear();
     m_breakNext = false;
     m_gameInstance = 0;
     m_gameInstanceCompiled = nullptr;
@@ -713,6 +1109,26 @@ bool Runtime::setPublicVariable(InstanceId id, const std::string& name, const Va
     const Variable* var = findVarInLevels(i->levels, name);
     if (!var || var->access != 0 || var->scope != 0) return false; // locals are never externally visible
     i->vars[name] = v;
+    return true;
+}
+
+bool Runtime::isPublicVariable(InstanceId id, const std::string& name) const
+{
+    const Inst* i = find(id);
+    if (!i) return false;
+    if (i->compiled)
+    {
+        const CompiledVarInfo* vi = findVarInfo(*i->compiled, name);
+        return vi && vi->access == 0;
+    }
+    const Variable* var = findVarInLevels(i->levels, name);
+    return var && var->access == 0 && var->scope == 0;
+}
+
+bool Runtime::getPublicVariable(InstanceId id, const std::string& name, Value& out) const
+{
+    if (!isPublicVariable(id, name)) return false;
+    out = getVariable(id, name);
     return true;
 }
 

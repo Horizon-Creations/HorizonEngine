@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>             // parse the pak's __asset_index__ / __asset_types__
 #include <Types/TypeRegistry.h>          // struct/enum defs mirror into the registry on load
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -512,6 +513,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		{ a.audioData = c->data; a.encoding = AudioEncoding::Vorbis; }
 		else if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD))
 		{ a.audioData = c->data; a.encoding = AudioEncoding::PCM16; }
+		// No chunk = never edited (or written before edits existed) = default.
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_AUED))
+		{
+			if (!a.edit.fromChunkText(std::string(reinterpret_cast<const char*>(c->data.data()), c->data.size())))
+				HE_LOG_WARN(Asset, "Audio '%s': unreadable edit chunk, playing it unedited",
+				               relativePath.c_str());
+		}
 		handle = m_audioAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Font:
@@ -1101,9 +1109,67 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	return id;
 }
 
+// ─── Load interest (who still wants an in-flight load) ────────────────────────
+ContentManager::LoadRequester ContentManager::LoadRequester::from(const HE::AsyncLoadOptions& options)
+{
+	LoadRequester r;
+	r.priority = options.priority;
+	if (options.cancel.cancellable()) r.tokens.push_back(options.cancel);
+	else                              r.pinned = true;
+	return r;
+}
+
+void ContentManager::LoadInterest::join(const LoadRequester& r)
+{
+	std::lock_guard<std::mutex> lock(m);
+	if (r.pinned) who.pinned = true;
+	if (static_cast<int>(r.priority) < static_cast<int>(who.priority)) who.priority = r.priority;
+	if (who.pinned || r.tokens.empty()) return;
+	// Drop tokens that are already cancelled, so an asset re-requested by every
+	// streamed-in-and-out zone does not grow this list forever. Never leaves it
+	// empty: the joining tokens come next.
+	who.tokens.erase(std::remove_if(who.tokens.begin(), who.tokens.end(),
+	                                [](const HE::CancelToken& t) { return t.cancelled(); }),
+	                 who.tokens.end());
+	// And no duplicates: a scene with 10 000 meshes sharing one material asks
+	// for it 10 000 times under the same token.
+	for (const HE::CancelToken& t : r.tokens)
+		if (std::find(who.tokens.begin(), who.tokens.end(), t) == who.tokens.end())
+			who.tokens.push_back(t);
+}
+
+bool ContentManager::LoadInterest::stale() const
+{
+	std::lock_guard<std::mutex> lock(m);
+	if (who.pinned || who.tokens.empty()) return false;
+	for (const HE::CancelToken& t : who.tokens)
+		if (!t.cancelled()) return false;
+	return true;
+}
+
+ContentManager::LoadRequester ContentManager::LoadInterest::snapshot() const
+{
+	std::lock_guard<std::mutex> lock(m);
+	return who;
+}
+
 // ─── loadAssetAsync ───────────────────────────────────────────────────────────
 void ContentManager::loadAssetAsync(const std::string& relativePath,
                                      std::function<void(HE::UUID)> callback)
+{
+	loadPathAsync(relativePath, std::move(callback), LoadRequester::from({}));
+}
+
+void ContentManager::loadAssetAsync(const std::string& relativePath,
+                                     std::function<void(HE::UUID)> callback,
+                                     const HE::AsyncLoadOptions& options)
+{
+	loadPathAsync(relativePath, std::move(callback), LoadRequester::from(options));
+}
+
+void ContentManager::loadPathAsync(const std::string& relativePath,
+                                    std::function<void(HE::UUID)> callback,
+                                    const LoadRequester& requester)
 {
 	if (isLoaded(relativePath))
 	{
@@ -1115,7 +1181,7 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 	// worker-thread disk read below would fail — there's no loose file).
 	if (const auto it = m_pakPathIndex.find(relativePath); it != m_pakPathIndex.end())
 	{
-		loadAssetAsync(it->second, std::move(callback));
+		loadUuidAsync(it->second, std::move(callback), requester);
 		return;
 	}
 
@@ -1132,21 +1198,78 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 		}
 	}
 
-	auto progress = std::make_shared<AsyncProgress>();
 	{
 		std::unique_lock<std::mutex> lock(m_pendingMutex);
 		if (m_pendingPaths.count(relativePath))
-			return; // already in flight — coalesce
+		{
+			// Already in flight — coalesce, but count this requester in: the job
+			// must not be dropped while it still wants the asset.
+			if (const auto it = m_loadInterest.find(relativePath); it != m_loadInterest.end())
+				it->second->join(requester);
+			return;
+		}
 		m_pendingPaths.insert(relativePath);
-		m_pendingProgress[relativePath] = progress;
+		m_pendingProgress[relativePath] = std::make_shared<AsyncProgress>();
 	}
 
-	const std::string fullPath = resolveAbsolutePath(relativePath);
+	auto interest = std::make_shared<LoadInterest>();
+	interest->join(requester);
+	m_loadInterest[relativePath] = interest;
+	launchPathLoad(relativePath, resolveAbsolutePath(relativePath), std::move(callback),
+	               std::move(interest));
+}
 
-	// Captures the sink and the progress cell, never `this` — the job may outlive
-	// this ContentManager.
-	globalPool().submit([relativePath, fullPath, sink = m_asyncSink, progress,
-	                     cb = std::move(callback)]() mutable
+namespace {
+
+// Worker side of a finished read: split the .hasset into its chunks here and
+// drop the flat copy, so pollAsyncResults on the main thread starts at the
+// parse. Null when the bytes are no .hasset; they stay put, and the main thread
+// rejects them as before.
+std::shared_ptr<HAsset::Reader> splitChunks(std::vector<uint8_t>& bytes)
+{
+	auto reader = std::make_shared<HAsset::Reader>();
+	if (!reader->openData(bytes)) return nullptr;
+	std::vector<uint8_t>().swap(bytes);
+	return reader;
+}
+
+} // namespace
+
+void ContentManager::launchPathLoad(const std::string& relativePath, const std::string& fullPath,
+                                     std::function<void(HE::UUID)> callback,
+                                     std::shared_ptr<LoadInterest> interest)
+{
+	std::shared_ptr<AsyncProgress> progress;
+	{
+		std::unique_lock<std::mutex> lock(m_pendingMutex);
+		auto& cell = m_pendingProgress[relativePath];
+		if (!cell) cell = std::make_shared<AsyncProgress>();
+		cell->bytesRead.store(0, std::memory_order_relaxed);   // a relaunch starts over
+		cell->bytesTotal.store(0, std::memory_order_relaxed);
+		progress = cell;
+	}
+
+	HE::JobDesc desc;
+	desc.name     = "AssetLoad";
+	desc.priority = interest->snapshot().priority;
+	desc.stale    = [interest] { return interest->stale(); };
+	// Dropped before it started: still report, or the coalesce key would stay in
+	// m_pendingPaths forever and swallow every later request for this asset.
+	desc.onCancelled = [relativePath, fullPath, sink = m_asyncSink, cb = callback]
+	{
+		AsyncResult result;
+		result.relativePath = relativePath;
+		result.fullPath     = fullPath;
+		result.callback     = cb;
+		result.cancelled    = true;
+		std::unique_lock<std::mutex> lock(sink->mutex);
+		sink->results.push(std::move(result));
+	};
+
+	// Captures the sink, the progress cell and the interest, never `this` — the
+	// job may outlive this ContentManager.
+	globalPool().schedule([relativePath, fullPath, sink = m_asyncSink, progress, interest,
+	                       cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
 		result.relativePath = relativePath;
@@ -1169,6 +1292,14 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 			std::uint64_t done = 0;
 			while (done < total)
 			{
+				// A several-hundred-megabyte read is worth abandoning half-way when
+				// everyone who wanted it has gone.
+				if (done > 0 && interest->stale())
+				{
+					result.cancelled = true;
+					std::vector<uint8_t>().swap(result.fileBytes);
+					break;
+				}
 				const std::uint64_t n = std::min(kBlock, total - done);
 				if (!f.read(reinterpret_cast<char*>(result.fileBytes.data() + done),
 				            static_cast<std::streamsize>(n)))
@@ -1179,7 +1310,8 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 				done += n;
 				progress->bytesRead.store(done, std::memory_order_relaxed);
 			}
-			if (result.fileBytes.empty()) result.failed = true;
+			if (result.fileBytes.empty() && !result.cancelled) result.failed = true;
+			if (!result.failed && !result.cancelled) result.asset = splitChunks(result.fileBytes);
 		}
 		else
 		{
@@ -1188,11 +1320,16 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 
 		std::unique_lock<std::mutex> lock(sink->mutex);
 		sink->results.push(std::move(result));
-	}, "AssetLoad");
+	}, std::move(desc));
 }
 
 // ─── pollAsyncResults ─────────────────────────────────────────────────────────
 std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
+{
+	return pollAsyncResults(maxRegistrations, 0.0);
+}
+
+std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, double budgetMs)
 {
 	// Drain remote-materialization completions FIRST, on this (main) thread —
 	// see registerRemoteAsset()/loadAssetAsync(UUID)'s remote branch and
@@ -1229,33 +1366,95 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 		}
 	}
 
-	std::vector<AsyncResult> ready;
+	// Take completed jobs one at a time, so the clock can stop the drain between
+	// two of them; leave the rest queued so a burst is spread over frames
+	// (registration/parse runs on this thread). Only what was queued when the
+	// call began: results that land meanwhile (a dependency expandFrontier just
+	// asked for) wait for the next call, as they always have. Dropped loads parse
+	// nothing and do not count against the budget.
+	using Clock = std::chrono::steady_clock;
+	const Clock::time_point start = Clock::now();
+	size_t available = 0;
 	{
 		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
-		// Pull at most `maxRegistrations` completed jobs; leave the rest queued so
-		// a burst is spread over frames (registration/parse runs on this thread).
-		while (!m_asyncSink->results.empty() && ready.size() < maxRegistrations)
-		{
-			ready.push_back(std::move(m_asyncSink->results.front()));
-			m_asyncSink->results.pop();
-		}
+		available = m_asyncSink->results.size();
 	}
+	size_t toRegister = 0;
+	size_t handled    = 0;
 
 	std::vector<HE::UUID> registered;
-	for (auto& r : ready)
+	for (; available > 0 && toRegister < maxRegistrations; --available)
 	{
+		if (budgetMs > 0.0 && toRegister > 0 &&
+		    std::chrono::duration<double, std::milli>(Clock::now() - start).count() >= budgetMs)
+			break;
+		AsyncResult r;
+		{
+			std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
+			if (m_asyncSink->results.empty()) break;
+			r = std::move(m_asyncSink->results.front());
+			m_asyncSink->results.pop();
+		}
+		++handled;
+		if (!r.cancelled) ++toRegister;
+
+		std::shared_ptr<LoadInterest> interest;
+		if (const auto it = m_loadInterest.find(r.relativePath); it != m_loadInterest.end())
+			interest = it->second;
+
+		if (r.cancelled)
+		{
+			// The job gave up because nobody wanted the asset any more. Someone may
+			// have asked again since (a zone streamed out and straight back in):
+			// then start it over under the same key instead of failing them.
+			if (interest && !interest->stale())
+			{
+				if (r.pakId != HE::UUID{})
+				{
+					if (launchPakLoad(r.pakId, r.relativePath, r.callback, interest))
+					{
+						++m_asyncPollStats.restarted;
+						continue;
+					}
+				}
+				else
+				{
+					launchPathLoad(r.relativePath, r.fullPath, r.callback, interest);
+					++m_asyncPollStats.restarted;
+					continue;
+				}
+			}
+			++m_asyncPollStats.dropped;
+			{
+				std::unique_lock<std::mutex> lock(m_pendingMutex);
+				m_pendingPaths.erase(r.relativePath);
+				m_pendingProgress.erase(r.relativePath);
+			}
+			m_loadInterest.erase(r.relativePath);
+			HE_LOG_DEBUG(Asset, "Async load of '%s' dropped: no requester wants it any more",
+			             r.relativePath.c_str());
+			if (r.callback) r.callback(HE::UUID{});
+			continue;
+		}
+
 		{
 			std::unique_lock<std::mutex> lock(m_pendingMutex);
 			m_pendingPaths.erase(r.relativePath);
 			m_pendingProgress.erase(r.relativePath); // the worker's cell dies with it
 		}
+		m_loadInterest.erase(r.relativePath);
 
 		HE::UUID id;
-		if (!r.failed && !r.fileBytes.empty())
+		if (!r.failed && (r.asset || !r.fileBytes.empty()))
 		{
-			HAsset::Reader reader;
-			if (reader.openData(r.fileBytes))
+			// Normally split on the worker already (splitChunks); a blob that did
+			// not split there gets the same check here and fails it the same way.
+			HAsset::Reader local;
+			HAsset::Reader* split = r.asset.get();
+			if (!split && local.openData(r.fileBytes)) split = &local;
+			if (split)
 			{
+				HAsset::Reader& reader = *split;
 				// Register under the asset's REAL embedded META path, not the
 				// synthetic "pak://hi-lo" coalesce key, so a path-based resolver
 				// (loadAsset(materialPath)) hits the m_pathToUUID cache instead of
@@ -1280,10 +1479,15 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 			// Reference-graph frontier: stream this asset's baked UUID dependencies
 			// (mesh→material, material→textures) so the closure loads with pure UUID
 			// traversal — no path lookups. No-op for loose assets (empty ref UUIDs).
-			expandFrontier(id);
+			// The dependencies are wanted by whoever wanted this asset, no longer.
+			expandFrontier(id, interest ? interest->snapshot() : LoadRequester::from({}));
 		}
+		++(id != HE::UUID{} ? m_asyncPollStats.registered : m_asyncPollStats.failed);
 		if (r.callback) r.callback(id);
 	}
+	m_asyncPollStats.lastPollMs      = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+	m_asyncPollStats.lastPollHandled = handled;
+	m_asyncPollStats.lastPollLeft    = available;
 	return registered;
 }
 
@@ -1298,6 +1502,20 @@ size_t ContentManager::asyncInFlightCount() const
 {
 	std::unique_lock<std::mutex> lock(m_pendingMutex);
 	return m_pendingPaths.size();
+}
+
+std::vector<std::string> ContentManager::asyncInFlightPaths(size_t max) const
+{
+	std::vector<std::string> paths;
+	{
+		std::unique_lock<std::mutex> lock(m_pendingMutex);
+		paths.assign(m_pendingPaths.begin(), m_pendingPaths.end());
+	}
+	// Sorted before cut, so the same loads show from frame to frame rather than
+	// whichever the hash set happens to hand out first.
+	std::sort(paths.begin(), paths.end());
+	if (paths.size() > max) paths.resize(max);
+	return paths;
 }
 
 // ─── asyncProgress ────────────────────────────────────────────────────────────
@@ -1319,6 +1537,18 @@ bool ContentManager::asyncProgress(const std::string& relativePath,
 // ─── loadAssetAsync (by UUID, from a mounted pak) ─────────────────────────────
 void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> callback)
 {
+	loadUuidAsync(id, std::move(callback), LoadRequester::from({}));
+}
+
+void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> callback,
+                                     const HE::AsyncLoadOptions& options)
+{
+	loadUuidAsync(id, std::move(callback), LoadRequester::from(options));
+}
+
+void ContentManager::loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> callback,
+                                    const LoadRequester& requester)
+{
 	if (isLoaded(id))
 	{
 		if (callback) callback(id);
@@ -1332,7 +1562,7 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 		// registry (async path-based load; coalesced by path).
 		if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end())
 		{
-			loadAssetAsync(d->second, std::move(callback));
+			loadPathAsync(d->second, std::move(callback), requester);
 			return;
 		}
 		// A remote-only EngineContent asset (see registerRemoteAsset): materialize
@@ -1371,44 +1601,96 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 		if (callback) callback(HE::UUID{}); // unknown UUID
 		return;
 	}
-	const MountedPak& mount = m_mounts[it->second];
-
 	// Coalesce by a synthetic per-UUID key so it shares the pending set with the
 	// path-based overload without colliding with real relative paths.
 	const std::string coalesceKey =
 		"pak://" + std::to_string(id.hi) + "-" + std::to_string(id.lo);
 	{
 		std::unique_lock<std::mutex> lock(m_pendingMutex);
-		if (m_pendingPaths.count(coalesceKey)) return; // already in flight
+		if (m_pendingPaths.count(coalesceKey))
+		{
+			// Already in flight: join it (see loadPathAsync).
+			if (const auto in = m_loadInterest.find(coalesceKey); in != m_loadInterest.end())
+				in->second->join(requester);
+			return;
+		}
 		m_pendingPaths.insert(coalesceKey);
 	}
 
+	auto interest = std::make_shared<LoadInterest>();
+	interest->join(requester);
+	m_loadInterest[coalesceKey] = interest;
+	launchPakLoad(id, coalesceKey, std::move(callback), std::move(interest));
+}
+
+bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
+                                    std::function<void(HE::UUID)> callback,
+                                    std::shared_ptr<LoadInterest> interest)
+{
+	const auto it = m_pakResidency.find(id);
+	if (it == m_pakResidency.end()) return false;   // unmounted since: caller fails it
+	const MountedPak& mount = m_mounts[it->second];
+
 	// Capture everything the worker needs by value — it must not touch the shared
-	// mount reader (single ifstream, not thread-safe), so it opens its own.
+	// mount reader (single ifstream, not thread-safe), so it opens its own. With
+	// the mount's table of contents: reading and hashing the whole table again in
+	// every job made streaming a pak quadratic in its entry count (Thema 153).
 	const std::string       path = mount.path;
 	const bool              enc  = mount.encrypted;
 	std::array<uint8_t, 32> key  = mount.key;
+	std::shared_ptr<const HpakReader::Toc> toc = mount.reader->sharedToc();
+
+	HE::JobDesc desc;
+	desc.name     = "AssetLoadPak";
+	desc.priority = interest->snapshot().priority;
+	desc.stale    = [interest] { return interest->stale(); };
+	// Same reason as in launchPathLoad: the key must come back to be released.
+	desc.onCancelled = [id, coalesceKey, sink = m_asyncSink, cb = callback]
+	{
+		AsyncResult result;
+		result.relativePath = coalesceKey;
+		result.callback     = cb;
+		result.cancelled    = true;
+		result.pakId        = id;
+		std::unique_lock<std::mutex> lock(sink->mutex);
+		sink->results.push(std::move(result));
+	};
 
 	// Captures the sink, never `this` — the job may outlive this ContentManager.
-	globalPool().submit([id, path, enc, key, coalesceKey, sink = m_asyncSink,
-	                     cb = std::move(callback)]() mutable
+	// Once started it can still be dropped: readEntry asks the interest between
+	// 4 MiB blocks of the read and of a zstd decode, and before each decode step.
+	// A dropped read reports `cancelled`, so the coalesce key comes back.
+	globalPool().schedule([id, path, enc, key, toc, coalesceKey, sink = m_asyncSink, interest,
+	                       cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
 		result.relativePath = coalesceKey;
 		result.callback     = std::move(cb);
+		result.pakId        = id;
 
-		HpakReader reader; // worker-local; safe for concurrent reads across jobs
-		if (reader.open(path))
+		// Worker-local, safe for concurrent reads across jobs. A package replaced
+		// on disk since the mount no longer matches the shared table: then read
+		// the new one in full, as every job did before.
+		HpakReader reader;
+		if (reader.openShared(path, toc) || reader.open(path))
 		{
-			auto data = reader.readEntry(id, enc ? key.data() : nullptr);
-			if (!data.empty()) result.fileBytes = std::move(data); // decoded .hasset
-			else               result.failed = true;
+			bool stopped = false;
+			auto data = reader.readEntry(id, enc ? key.data() : nullptr,
+			                             [&interest] { return interest->stale(); }, &stopped);
+			if (!data.empty())
+			{
+				result.fileBytes = std::move(data); // decoded .hasset
+				result.asset     = splitChunks(result.fileBytes);
+			}
+			else if (stopped) result.cancelled = true;
+			else              result.failed    = true;
 		}
 		else result.failed = true;
 
 		std::unique_lock<std::mutex> lock(sink->mutex);
 		sink->results.push(std::move(result));
-	}, "AssetLoadPak");
+	}, std::move(desc));
+	return true;
 }
 
 // ─── registerRemoteAsset ───────────────────────────────────────────────────────
@@ -1499,12 +1781,12 @@ const TextureAsset* ContentManager::resolveTextureRef(HE::UUID bakedId, const st
 }
 
 // ─── expandFrontier (reference-graph closure via baked UUID refs) ─────────────
-void ContentManager::expandFrontier(HE::UUID id)
+void ContentManager::expandFrontier(HE::UUID id, const LoadRequester& requester)
 {
 	auto enqueue = [&](HE::UUID dep) {
-		// loadAssetAsync(uuid) itself skips already-resident + non-mounted UUIDs
-		// and coalesces duplicates, so this is safe to call unconditionally.
-		if (dep != HE::UUID{} && !isLoaded(dep)) loadAssetAsync(dep);
+		// loadUuidAsync itself skips already-resident + non-mounted UUIDs and
+		// coalesces duplicates, so this is safe to call unconditionally.
+		if (dep != HE::UUID{} && !isLoaded(dep)) loadUuidAsync(dep, {}, requester);
 	};
 	// A mesh pulls its own material AND every section's — a two-material glTF
 	// streams both, not just the one MRFU names (which is section 0's anyway).
@@ -1552,6 +1834,22 @@ std::vector<uint8_t> ContentManager::readMountedEntry(HE::UUID id)
 	MountedPak& mount = m_mounts[it->second];
 	if (!mount.reader) return {};
 	return mount.reader->readEntry(id, mount.encrypted ? mount.key.data() : nullptr);
+}
+
+std::function<std::vector<uint8_t>()> ContentManager::detachedMountedEntryReader(HE::UUID id) const
+{
+	const auto it = m_pakResidency.find(id);
+	if (it == m_pakResidency.end()) return {};
+	const MountedPak& mount = m_mounts[it->second];
+	if (!mount.reader) return {};
+	// By value, like launchPakLoad: the function must not reach back into this.
+	return [id, path = mount.path, enc = mount.encrypted, key = mount.key,
+	        toc = mount.reader->sharedToc()]
+	{
+		HpakReader reader;
+		if (!reader.openShared(path, toc) && !reader.open(path)) return std::vector<uint8_t>{};
+		return reader.readEntry(id, enc ? key.data() : nullptr);
+	};
 }
 
 // ─── saveAsset ────────────────────────────────────────────────────────────────
@@ -1807,6 +2105,13 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		}
 		w.addChunk(a.encoding == AudioEncoding::Vorbis ? HAsset::CHUNK_OGGD : HAsset::CHUNK_PCMD,
 		           a.audioData.data(), a.audioData.size());
+		// Only when something was edited: an untouched clip keeps the exact
+		// chunk list it had before edits existed.
+		if (!a.edit.isDefault())
+		{
+			const std::string text = a.edit.toChunkText();
+			w.addChunk(HAsset::CHUNK_AUED, text.data(), text.size());
+		}
 		break;
 	}
 	case HE::AssetType::Font:
@@ -2177,6 +2482,7 @@ SkeletalMeshAsset*        ContentManager::getSkeletalMeshMutable(HE::UUID id) { 
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
 const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+AudioAsset*               ContentManager::getAudioMutable(HE::UUID id)             { return lookupAssetMutable(m_handleToUUID, m_audioAssets, id); }
 const FontAsset*          ContentManager::getFont(HE::UUID id) const          { return lookupAsset(m_handleToUUID, m_fontAssets, id); }
 const ScriptAsset*        ContentManager::getScript(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
 const MaterialFunctionAsset* ContentManager::getMaterialFunction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_materialFunctionAssets, id); }

@@ -1,5 +1,6 @@
 #pragma once
 #include <entt/entt.hpp>
+#include <glm/vec3.hpp>
 #include <string>
 #include <unordered_map>
 #include <HorizonCode/HorizonCode.h>
@@ -61,6 +62,24 @@ public:
 	void   clear();
 	// True when `ancestor` appears on `entity`'s parent chain (or is equal).
 	bool   isAncestorOf(Entity ancestor, Entity entity) const;
+
+	// ── Floating origin (Thema 153) ──────────────────────────────────────────
+	// Where this world's 0,0,0 sits in the absolute world, in metres. Double, so
+	// a game hundreds of kilometres out still adds up exactly. Zero until
+	// HE::shiftWorldOrigin (FloatingOrigin.h) moves the world back towards the
+	// camera; transforms, bodies and particles are all relative to it, so the
+	// absolute position of a root child is its position plus this. clear() puts
+	// it back at zero.
+	const glm::dvec3& origin() const { return m_origin; }
+	void setOrigin(const glm::dvec3& origin) { m_origin = origin; }
+
+	// ── Cell streaming (Thema 153) ───────────────────────────────────────────
+	// The scene file's "cells" object, kept verbatim (HE::CellManifest reads it):
+	// a scene split by scripts/split_scene_cells.py loads its cells by distance
+	// in the game (HE::CellStreamer). Empty for a scene without cells. Written
+	// back when the scene is saved; clear() drops it.
+	const std::string& cellManifestJson() const { return m_cellManifestJson; }
+	void setCellManifestJson(std::string json) { m_cellManifestJson = std::move(json); }
 
 	bool isHierarchyDirty()  const { return m_hierarchyDirty; }
 	void clearHierarchyDirty()     { m_hierarchyDirty = false; }
@@ -210,6 +229,8 @@ private:
 	entt::registry m_registry;
 	Entity         m_rootEntity     = entt::null;
 	bool           m_hierarchyDirty = true;
+	glm::dvec3     m_origin{ 0.0 };
+	std::string    m_cellManifestJson;
 	// Declared before the widget managers so it outlives them (they point at it).
 	HorizonCode::Runtime  m_ownScripts;          // used unless an app runtime is injected
 	HorizonCode::Runtime* m_scriptsPtr = nullptr;

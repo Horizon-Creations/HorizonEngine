@@ -19,6 +19,7 @@
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/AudioSystem.h>
+#include <HorizonScene/WeatherAudio.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotify.h>
@@ -650,6 +651,7 @@ private:
 	HeContentServices            m_contentServices{};
 	HeAntiCheatServices          m_antiCheatServices{};
 	HeNetServices                m_netServices{};
+	HeHcServices                 m_hcServices{};
 	HeEngineServices             m_engineServices{};
 	// The anti-cheat's event/response side for the preview (docs/anti-cheat-
 	// plan.md §6.2.6): in PREVIEW mode from construction, so a report fires
@@ -706,6 +708,9 @@ private:
 
 	// Audio engine — initialised at startup, active always (spatial update only in play mode).
 	AudioEngine m_audioEngine;
+	// The voices of the scene's weather (rain/wind/snow/storm beds, thunder) and the
+	// ramps they are on — fed each frame after the weather tick, edit mode included.
+	WeatherAudio::State m_weatherAudio;
 	// The editor's UI tones (AppContext::uiAudioEngine) — never init()ed here;
 	// EditorRewards opens and closes it.
 	AudioEngine m_uiAudio;

@@ -30,8 +30,24 @@ std::string lineFor(Moment m, int count)
 	case Moment::AssetsImported:
 		return count == 1 ? std::string("Imported 1 asset")
 		                  : "Imported " + std::to_string(std::max(count, 0)) + " assets";
+	case Moment::CompiledClean:  return "Compiles clean";
+	case Moment::Committed:
+		if ((count & kSyncCommit) && (count & kSyncPush)) return "Committed and pushed";
+		return (count & kSyncPush) ? "Pushed" : "Committed";
+	case Moment::TourFinished:   return "Tutorial complete";
 	}
 	return {};
+}
+
+bool momentWanted(const EditorConfig& cfg, Moment m)
+{
+	switch (m)
+	{
+	case Moment::CompiledClean: return cfg.RewardsMomentCompile;
+	case Moment::Committed:     return cfg.RewardsMomentCommit;
+	case Moment::TourFinished:  return cfg.RewardsMomentTutorial;
+	default:                    return true;
+	}
 }
 
 float strengthAt(double age)
@@ -56,10 +72,29 @@ int rankOf(Moment m)
 	switch (m)
 	{
 	case Moment::Saved:          return 0;
-	case Moment::AssetsImported: return 1;
-	case Moment::BuildSucceeded: return 2;
+	case Moment::CompiledClean:  return 1;
+	case Moment::AssetsImported: return 2;
+	case Moment::BuildSucceeded:
+	case Moment::Committed:
+	case Moment::TourFinished:   return 3;
 	}
 	return 0;
+}
+
+bool hasTone(Moment m)
+{
+	// Every moment has one since topic 140, step 3 — a moment added later
+	// answers false here until it gets its own (see "The tones").
+	switch (m)
+	{
+	case Moment::Saved:
+	case Moment::BuildSucceeded:
+	case Moment::AssetsImported:
+	case Moment::CompiledClean:
+	case Moment::Committed:
+	case Moment::TourFinished:   return true;
+	}
+	return false;
 }
 
 Tone toneFor(Moment m)
@@ -69,6 +104,9 @@ Tone toneFor(Moment m)
 	case Moment::Saved:          return Tone::SaveTick;
 	case Moment::BuildSucceeded: return Tone::BuildChime;
 	case Moment::AssetsImported: return Tone::ImportPop;
+	case Moment::CompiledClean:  return Tone::CompileClean;
+	case Moment::Committed:      return Tone::Commit;
+	case Moment::TourFinished:   return Tone::TourDone;
 	}
 	return Tone::SaveTick;
 }
@@ -87,6 +125,13 @@ bool toneWanted(const EditorConfig& cfg, Tone t, bool playing, bool appFocused)
 	case Tone::ImportPop:   return cfg.RewardsSoundImport;
 	case Tone::BuildChime:  return cfg.RewardsSoundBuild && !appFocused;
 	case Tone::BuildFailed: return cfg.RewardsSoundBuildFailed && !appFocused;
+	// The compile runs on the click: the editor always has focus when it ends.
+	case Tone::CompileClean:  return cfg.RewardsSoundCompile;
+	case Tone::CompileFailed: return cfg.RewardsSoundCompileFailed;
+	case Tone::Commit:        return cfg.RewardsSoundCommit && !appFocused;
+	case Tone::TourDone:      return cfg.RewardsSoundTutorial;
+	// In front of the editor the bell's pulse says it (V8).
+	case Tone::Problem:       return cfg.RewardsSoundProblem && !appFocused;
 	}
 	return false;
 }
@@ -104,12 +149,15 @@ Feed::Taken Feed::take(Moment m, int count, double now, int frame, bool soundWan
 	if (showing && m == m_moment)
 	{
 		// Rule 2: the same kind again — one line, counted up, held anew, silent.
-		m_count += std::max(count, 0);
+		// Committed's count is flags: a push after the commit is "and pushed".
+		if (m == Moment::Committed) m_count |= count;
+		else                        m_count += std::max(count, 0);
 		m_at     = now;
 		r.shown  = true;
 		return r;
 	}
 	// Rule 3: a lower moment leaves a higher line alone (the tally has it).
+	// Equal rank, other kind, falls through: the newer one replaces the line.
 	if (showing && rankOf(m) < rankOf(m_moment)) return r;
 
 	m_has    = true;
@@ -119,16 +167,39 @@ Feed::Taken Feed::take(Moment m, int count, double now, int frame, bool soundWan
 	m_since  = now;
 	r.shown  = true;
 
-	r.sound = soundWanted && takeTone(toneFor(m), now);
+	// A moment without a tone books no gap (soundWanted is false for it from
+	// fire(); checked here too, so no caller can make it borrow one).
+	r.sound = soundWanted && hasTone(m) && takeTone(toneFor(m), now);
 	return r;
+}
+
+void SyncWatch::requested(int flags)
+{
+	m_flags |= flags & (kSyncCommit | kSyncPush);
+}
+
+int SyncWatch::poll(bool idleBeforePump, const std::string& lastError, const std::string& lastInfo)
+{
+	if (m_flags == 0 || !idleBeforePump) return 0;
+	const int flags = m_flags;
+	m_flags = 0;
+	// A failed operation sets lastError and clears lastInfo; a status refresh
+	// queued behind it can clear lastError again, but never sets lastInfo —
+	// so both are asked. Known edge: a FETCH queued behind a failed commit
+	// (only the auto-fetch timer can; the buttons are disabled while busy)
+	// sets lastInfo again and would read as success.
+	if (!lastError.empty() || lastInfo.empty()) return 0;
+	return flags;
 }
 
 bool Feed::takeTone(Tone t, double now)
 {
-	// Rules 4 and 5: the gaps run from the last tone that played.
+	// Rules 4 and 5: the gaps run from the last tone that played. A clock
+	// behind that tone is a new clock (a new ImGui context), not a gap.
 	const bool save = t == Tone::SaveTick;
-	if (m_toned && now - m_toneAt < kToneGapSec) return false;
-	if (save && m_saveToned && now - m_saveToneAt < kSaveToneGapSec) return false;
+	if (m_toned && now >= m_toneAt && now - m_toneAt < kToneGapSec) return false;
+	if (save && m_saveToned && now >= m_saveToneAt && now - m_saveToneAt < kSaveToneGapSec)
+		return false;
 	m_toned  = true;
 	m_toneAt = now;
 	if (save)
@@ -217,6 +288,44 @@ Edge edgeAt(double age, bool reduced)
 	const double up = std::min(1.0, t * 6.0);
 	e.alpha = static_cast<float>(0.55 * up * (1.0 - smooth01(t)));
 	return e;
+}
+
+Ring ringAt(double age, bool reduced)
+{
+	Ring r;
+	if (age < 0.0 || age >= kPulseSec) return r;
+	const double t = age / kPulseSec;
+	// Out fast, then settling — the way a ripple slows; up over the first
+	// eighth, then gone. Softer than the light edge: the bell is small.
+	if (!reduced) r.grow = static_cast<float>(1.0 - (1.0 - t) * (1.0 - t));
+	const double up = std::min(1.0, t * 8.0);
+	r.alpha = static_cast<float>(0.8 * up * (1.0 - smooth01(t)));
+	return r;
+}
+
+float pulseAt(double age)
+{
+	if (age < 0.0 || age >= kPulseSec) return 0.0f;
+	const double t = age / kPulseSec;
+	// Up over the first fifth, back down eased: one bump, no plateau.
+	if (t < 0.2) return static_cast<float>(smooth01(t / 0.2));
+	return static_cast<float>(1.0 - smooth01((t - 0.2) / 0.8));
+}
+
+bool ProblemWatch::observe(unsigned long long newestMs)
+{
+	if (!m_known)
+	{
+		m_known = true;
+		m_last  = newestMs;
+		return false;
+	}
+	// The store's clock is steady, so a newer problem (or the last one
+	// posted again, which restamps it) is always a larger number. A smaller
+	// one is the store emptied or the old entry dropped: where it starts now.
+	const bool rose = newestMs > m_last;
+	m_last = newestMs;
+	return rose;
 }
 
 void CounterTick::observe(int value)
@@ -426,26 +535,46 @@ DayUse& recentEntry(std::vector<DayUse>& recent, const std::string& day)
 }
 } // namespace
 
-bool recordUse(Tally& t, const std::string& today, bool build)
+bool recordMoment(Tally& t, const std::string& today, Moment m, int count)
 {
+	const bool build  = m == Moment::BuildSucceeded;
+	const bool commit = m == Moment::Committed && (count & kSyncCommit);
 	Ymd now;
 	if (!parseDay(today, now)) return false;
 	if (t.day == today)
 	{
-		if (!build) return false;   // the day is already counted
-		++t.buildsToday;
-		recentEntry(t.recent, today).builds = t.buildsToday;
+		if (!build && !commit) return false;   // the day is already counted
+		if (build)  ++t.buildsToday;
+		if (commit) ++t.commitsToday;
+		DayUse& e = recentEntry(t.recent, today);
+		e.builds  = t.buildsToday;
+		e.commits = t.commitsToday;
 		return true;
 	}
 	// The clock is behind the stored day. YYYY-MM-DD orders as text.
 	Ymd stored;
 	if (parseDay(t.day, stored) && today < t.day) return false;
 
-	t.streakDays  = (t.day == dayBefore(today) && t.streakDays > 0) ? t.streakDays + 1 : 1;
-	t.day         = today;
-	t.buildsToday = build ? 1 : 0;
-	recentEntry(t.recent, today).builds = t.buildsToday;
+	t.streakDays   = (t.day == dayBefore(today) && t.streakDays > 0) ? t.streakDays + 1 : 1;
+	t.day          = today;
+	t.buildsToday  = build ? 1 : 0;
+	t.commitsToday = commit ? 1 : 0;
+	DayUse& e = recentEntry(t.recent, today);
+	e.builds  = t.buildsToday;
+	e.commits = t.commitsToday;
 	return true;
+}
+
+bool recordUse(Tally& t, const std::string& today, bool build)
+{
+	return recordMoment(t, today, build ? Moment::BuildSucceeded : Moment::Saved);
+}
+
+std::string commitsPhrase(int commits)
+{
+	if (commits <= 0) return {};
+	return commits == 1 ? std::string("1 commit today")
+	                    : std::to_string(commits) + " commits today";
 }
 
 std::string formatRecent(const std::vector<DayUse>& recent)
@@ -455,6 +584,9 @@ std::string formatRecent(const std::vector<DayUse>& recent)
 	{
 		if (!s.empty()) s += ',';
 		s += d.day + ':' + std::to_string(std::max(d.builds, 0));
+		// Only where there were commits: an editor from before the field
+		// drops an entry it cannot parse, so the field costs it nothing else.
+		if (d.commits > 0) s += ':' + std::to_string(d.commits);
 	}
 	return s;
 }
@@ -468,17 +600,24 @@ std::vector<DayUse> parseRecent(const std::string& text)
 		const size_t comma = std::min(text.find(',', at), text.size());
 		const std::string item = text.substr(at, comma - at);
 		at = comma + 1;
-		// "YYYY-MM-DD:n" — anything else (a hand edit) is skipped, not guessed.
+		// "YYYY-MM-DD:n" or "YYYY-MM-DD:n:c" — anything else (a hand edit) is
+		// skipped, not guessed.
 		Ymd v;
 		if (item.size() < 12 || item[10] != ':' || !parseDay(item.substr(0, 10), v)) continue;
-		const std::string n = item.substr(11);
-		if (n.empty() || n.size() > 6
-		    || !std::all_of(n.begin(), n.end(), [](char c) { return c >= '0' && c <= '9'; }))
-			continue;
+		const std::string rest  = item.substr(11);
+		const size_t      colon = rest.find(':');
+		const std::string n     = rest.substr(0, colon);
+		const std::string c     = colon == std::string::npos ? std::string("0") : rest.substr(colon + 1);
+		const auto number = [](const std::string& s)
+		{
+			return !s.empty() && s.size() <= 6
+			    && std::all_of(s.begin(), s.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
+		};
+		if (!number(n) || !number(c)) continue;
 		// Oldest first and one entry per day, whatever the file says.
 		const std::string day = item.substr(0, 10);
 		if (!out.empty() && day <= out.back().day) continue;
-		out.push_back({ day, std::stoi(n) });
+		out.push_back({ day, std::stoi(n), std::stoi(c) });
 	}
 	if (out.size() > static_cast<size_t>(kRecentDays))
 		out.erase(out.begin(), out.end() - kRecentDays);
@@ -493,7 +632,9 @@ void seedRecent(Tally& t)
 	std::string d = t.day;
 	for (int i = 0; i < days && !d.empty(); ++i)
 	{
-		t.recent.insert(t.recent.begin(), DayUse{ d, i == 0 ? std::max(t.buildsToday, 0) : 0 });
+		t.recent.insert(t.recent.begin(),
+		                DayUse{ d, i == 0 ? std::max(t.buildsToday, 0) : 0,
+		                        i == 0 ? std::max(t.commitsToday, 0) : 0 });
 		d = dayBefore(d);
 	}
 }
@@ -521,10 +662,20 @@ std::vector<DayCell> recentDays(const Tally& t, const std::string& today, int n)
 		c.day     = d;
 		c.weekday = weekdayOf(d);
 		for (const DayUse& u : t.recent)
-			if (u.day == d) { c.used = true; c.builds = std::max(u.builds, 0); }
+			if (u.day == d)
+			{
+				c.used    = true;
+				c.builds  = std::max(u.builds, 0);
+				c.commits = std::max(u.commits, 0);
+			}
 		// The tally's own day is used whatever the history says (a tally
 		// seeded before its first write, a hand-edited list).
-		if (d == t.day) { c.used = true; c.builds = std::max(t.buildsToday, 0); }
+		if (d == t.day)
+		{
+			c.used    = true;
+			c.builds  = std::max(t.buildsToday, 0);
+			c.commits = std::max(t.commitsToday, 0);
+		}
 		out.insert(out.begin(), c);
 		d = dayBefore(d);
 	}
@@ -709,14 +860,139 @@ std::vector<uint8_t> buildFailedPcm16(int sampleRate)
 	               sampleRate, kPeak, 0.03);
 }
 
+// ── Topic 140's tones ────────────────────────────────────────────────────────
+// Same rules as above, all struck notes (ringNotes) normalised to a stated
+// peak, all quieter than the chime. The notes: A5 880, C#6 1108.73, E6 1318.51,
+// F#6 1479.98, B5 987.77 — A major pentatonic.
+
+std::vector<uint8_t> compileCleanPcm16(int sampleRate)
+{
+	// C#6 then E6 60 ms later: a small step up, short — it answers a click.
+	constexpr Note   kNotes[]   = { { 1108.73, 0.0, 0.9 }, { 1318.51, 0.06, 1.0 } };
+	constexpr double kLengthSec = 0.18;
+	constexpr double kPeak      = 0.20;       // ≈ −14 dBFS
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.004, 0.045),
+	               sampleRate, kPeak, 0.02);
+}
+
+std::vector<uint8_t> compileFailedPcm16(int sampleRate)
+{
+	// The same step DOWN, E6 then C#6, with a softer onset and a slower
+	// second note: "have a look", not "wrong". No buzz, no low note.
+	constexpr Note   kNotes[]   = { { 1318.51, 0.0, 1.0 }, { 1108.73, 0.08, 0.85 } };
+	constexpr double kLengthSec = 0.24;
+	constexpr double kPeak      = 0.18;       // ≈ −15 dBFS, below the clean one
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.008, 0.055),
+	               sampleRate, kPeak, 0.025);
+}
+
+std::vector<uint8_t> commitPcm16(int sampleRate)
+{
+	// A5, C#6, E6, 55 ms apart: the major triad rolled upwards — "sent".
+	constexpr Note   kNotes[]   = { { 880.0, 0.0, 0.9 }, { 1108.73, 0.055, 0.9 },
+	                                { 1318.51, 0.11, 1.0 } };
+	constexpr double kLengthSec = 0.30;
+	constexpr double kPeak      = 0.24;       // ≈ −12 dBFS
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.004, 0.06),
+	               sampleRate, kPeak, 0.03);
+}
+
+std::vector<uint8_t> tourDonePcm16(int sampleRate)
+{
+	// The build chime's A5 and E6, then F#6: the chime, one note further.
+	constexpr Note   kNotes[]   = { { 880.0, 0.0, 1.0 }, { 1318.51, 0.07, 1.0 },
+	                                { 1479.98, 0.14, 0.9 } };
+	constexpr double kLengthSec = 0.42;
+	constexpr double kPeak      = 0.26;       // ≈ −12 dBFS, under the chime's 0.30
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.004, 0.09),
+	               sampleRate, kPeak, 0.03);
+}
+
+std::vector<uint8_t> problemPcm16(int sampleRate)
+{
+	// B5 twice, short and damped, 120 ms apart: a knock, not a siren. B5 sits
+	// between the others and resolves nowhere — it asks you to look.
+	constexpr Note   kNotes[]   = { { 987.77, 0.0, 1.0 }, { 987.77, 0.12, 0.8 } };
+	constexpr double kLengthSec = 0.26;
+	constexpr double kPeak      = 0.18;       // ≈ −15 dBFS
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.006, 0.03),
+	               sampleRate, kPeak, 0.02);
+}
+
 std::vector<uint8_t> tonePcm16(Tone t, int sampleRate)
 {
 	switch (t)
 	{
-	case Tone::SaveTick:    return saveTickPcm16(sampleRate);
-	case Tone::BuildChime:  return chimePcm16(sampleRate);
-	case Tone::BuildFailed: return buildFailedPcm16(sampleRate);
-	case Tone::ImportPop:   return importPopPcm16(sampleRate);
+	case Tone::SaveTick:      return saveTickPcm16(sampleRate);
+	case Tone::BuildChime:    return chimePcm16(sampleRate);
+	case Tone::BuildFailed:   return buildFailedPcm16(sampleRate);
+	case Tone::ImportPop:     return importPopPcm16(sampleRate);
+	case Tone::CompileClean:  return compileCleanPcm16(sampleRate);
+	case Tone::CompileFailed: return compileFailedPcm16(sampleRate);
+	case Tone::Commit:        return commitPcm16(sampleRate);
+	case Tone::TourDone:      return tourDonePcm16(sampleRate);
+	case Tone::Problem:       return problemPcm16(sampleRate);
+	}
+	return {};
+}
+
+// ── Drag and drop cues (EditorDragCues.h) ────────────────────────────────────
+// Shorter and quieter than the tick (peak 0.16): at most 60 ms, peaks at or
+// below 0.09. Heard many times a minute while wiring, so they stay clicks.
+namespace
+{
+// A sine gliding exponentially fromHz → toHz over the whole length, phase
+// integrated (see importPopPcm16), with an attack and an e-folding decay.
+std::vector<double> glide(int sampleRate, double lengthSec, double fromHz, double toHz,
+                          double attackSec, double decaySec)
+{
+	std::vector<double> v(static_cast<size_t>(lengthSec * sampleRate));
+	double phase = 0.0;
+	for (size_t i = 0; i < v.size(); ++i)
+	{
+		const double t  = static_cast<double>(i) / sampleRate;
+		const double hz = fromHz * std::pow(toHz / fromHz, t / lengthSec);
+		v[i]   = std::sin(phase) * std::min(1.0, t / attackSec) * std::exp(-t / decaySec);
+		phase += kTwoPi * hz / sampleRate;
+	}
+	return v;
+}
+} // namespace
+
+std::vector<uint8_t> dragCuePcm16(DragCue c, int sampleRate)
+{
+	if (sampleRate <= 0) return {};
+	switch (c)
+	{
+	case DragCue::Pickup:        // E6 → A6, a short blip up
+		return toPcm16(glide(sampleRate, 0.035, 1318.51, 1760.0, 0.004, 0.02),
+		               sampleRate, 0.08, 0.008);
+	case DragCue::OverValid:     // C#7, a very light tick
+	{
+		constexpr Note kNotes[] = { { 2217.46, 0.0, 1.0 } };
+		return toPcm16(ringNotes(kNotes, 1, sampleRate, 0.02, 0.004, 0.006),
+		               sampleRate, 0.05, 0.006);
+	}
+	case DragCue::OverInvalid:   // B5, muted and damped quicker — no buzz
+	{
+		constexpr Note kNotes[] = { { 987.77, 0.0, 1.0 } };
+		return toPcm16(ringNotes(kNotes, 1, sampleRate, 0.025, 0.005, 0.006),
+		               sampleRate, 0.05, 0.008);
+	}
+	case DragCue::Drop:          // E6 with its octave as the click: a snap
+	{
+		constexpr Note kNotes[] = { { 1318.51, 0.0, 1.0 }, { 2637.02, 0.0, 0.6 } };
+		return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, 0.04, 0.004, 0.012),
+		               sampleRate, 0.09, 0.01);
+	}
+	case DragCue::Cancel:        // A6 → E6, the pickup turned down, softer onset
+		return toPcm16(glide(sampleRate, 0.045, 1760.0, 1318.51, 0.008, 0.025),
+		               sampleRate, 0.07, 0.012);
 	}
 	return {};
 }
@@ -764,21 +1040,26 @@ void loadTally(AppContext& ctx)
 	s_tally.day         = gs.getCustomConfigString("RewardsDay", "");
 	s_tally.buildsToday = std::max(0, gs.getCustomConfigInt("RewardsBuildsToday", 0));
 	s_tally.streakDays  = std::max(0, gs.getCustomConfigInt("RewardsStreakDays", 0));
+	s_tally.commitsToday = std::max(0, gs.getCustomConfigInt("RewardsCommitsToday", 0));
 	s_tally.recent      = parseRecent(gs.getCustomConfigString("RewardsRecent", ""));
 	seedRecent(s_tally);   // a tally from before the history: its streak
 }
 
 // Before fire()'s once-per-frame fold — see "Rules" in the header.
-void tallyMoment(AppContext& ctx, bool build)
+void tallyMoment(AppContext& ctx, Moment m, int count)
 {
 	loadTally(ctx);
-	if (!recordUse(s_tally, localDay(), build) || !ctx.globalState) return;
-	ctx.globalState->setCustomConfigEntry("RewardsDay",         s_tally.day);
-	ctx.globalState->setCustomConfigEntry("RewardsBuildsToday", s_tally.buildsToday);
-	ctx.globalState->setCustomConfigEntry("RewardsStreakDays",  s_tally.streakDays);
-	ctx.globalState->setCustomConfigEntry("RewardsRecent",      formatRecent(s_tally.recent));
+	if (!recordMoment(s_tally, localDay(), m, count) || !ctx.globalState) return;
+	ctx.globalState->setCustomConfigEntry("RewardsDay",          s_tally.day);
+	ctx.globalState->setCustomConfigEntry("RewardsBuildsToday",  s_tally.buildsToday);
+	ctx.globalState->setCustomConfigEntry("RewardsStreakDays",   s_tally.streakDays);
+	ctx.globalState->setCustomConfigEntry("RewardsCommitsToday", s_tally.commitsToday);
+	ctx.globalState->setCustomConfigEntry("RewardsRecent",       formatRecent(s_tally.recent));
 	ctx.globalState->writeConfig();
 }
+
+// post()'s queue, fired by the next pollBuild.
+std::vector<std::pair<Moment, int>> s_posted;
 
 // V3's two counters, V4's tabs and when the last Saved moment fired, V5's
 // fresh files — see "The visual cues" in the header.
@@ -796,6 +1077,27 @@ std::chrono::steady_clock::time_point s_motionAt;
 
 bool s_appFocused   = true;    // the last pollBuild's word; focused = no build tone
 bool s_uiAudioFailed = false;  // its device would not open — see keepUiAudio
+
+// postSound()'s queue, played by the next pollBuild.
+std::vector<Tone> s_postedSounds;
+
+// postDragCue()'s queue, its pacing, the tests' probe, and the frame the last
+// reward tone played in (a drag cue in that frame is dropped).
+std::vector<DragCue> s_postedDragCues;
+DragCues::Gate       s_dragGate;
+void               (*s_dragProbe)(DragCue) = nullptr;
+int                  s_toneFrame = -2;
+
+// V8's edge and the problem tone's own gap.
+ProblemWatch s_problems;
+double       s_problemAt = -1.0;   // when the bell's ring began (< 0: never)
+
+// V9's switches as the last pollBuild saw them — its callers have no
+// AppContext. Values, not a pointer to the config: a test's config does not
+// outlive its test.
+bool s_compileCheckOn = true;
+bool s_problemPulseOn = true;
+bool s_reducedCached  = false;
 
 // The UI-sound engine ("Routing" in the header): open while a tone is
 // possible, closed while none is. Called every frame from pollBuild, so the
@@ -815,17 +1117,33 @@ void keepUiAudio(AppContext& ctx)
 		s_uiAudioFailed = true;
 }
 
+int frameNo();
+
 void playTone(AppContext& ctx, Tone t, float gain)
+{
+	// Decided to sound, device or not: a drag cue in this frame steps aside.
+	s_toneFrame = frameNo();
+	AudioEngine* a = ctx.uiAudioEngine;
+	if (!a || !a->isInitialized() || !(gain > 0.0f)) return;
+	constexpr int kRate = 44100;
+	// Indexed by Tone, each built on its first play.
+	static std::vector<uint8_t> pcm[kToneCount];
+	const int i = static_cast<int>(t);
+	if (i < 0 || i >= kToneCount) return;
+	if (pcm[i].empty()) pcm[i] = tonePcm16(t, kRate);
+	a->play(pcm[i], kRate, 1, gain);
+}
+
+void playDragCue(AppContext& ctx, DragCue c, float gain)
 {
 	AudioEngine* a = ctx.uiAudioEngine;
 	if (!a || !a->isInitialized() || !(gain > 0.0f)) return;
 	constexpr int kRate = 44100;
-	// Indexed by Tone.
-	static const std::vector<uint8_t> pcm[] = {
-		tonePcm16(Tone::SaveTick, kRate),    tonePcm16(Tone::BuildChime, kRate),
-		tonePcm16(Tone::BuildFailed, kRate), tonePcm16(Tone::ImportPop, kRate),
-	};
-	a->play(pcm[static_cast<int>(t)], kRate, 1, gain);
+	static std::vector<uint8_t> pcm[kDragCueCount];
+	const int i = static_cast<int>(c);
+	if (i < 0 || i >= kDragCueCount) return;
+	if (pcm[i].empty()) pcm[i] = dragCuePcm16(c, kRate);
+	a->play(pcm[i], kRate, 1, gain);
 }
 
 double nowSec()
@@ -849,17 +1167,115 @@ void fire(AppContext& ctx, Moment m, int count)
 {
 	const EditorConfig& cfg = ctx.editorConfig;
 	if (!cfg.RewardsEnabled) return;
-	tallyMoment(ctx, m == Moment::BuildSucceeded);
+	tallyMoment(ctx, m, count);
 	// V4 matches a tab's dirty → clean against this — before the Feed's
 	// once-per-frame fold, so a save that shares its frame still marks its tab.
 	if (m == Moment::Saved) s_lastSaveAt = nowSec();
+	// The moment's own switch (4–6): counted above, neither shown nor heard.
+	if (!momentWanted(cfg, m)) return;
 	// Rule 6: the switches say whether this moment may sound at all; the Feed
 	// says whether it does. Visual off still goes through the Feed, so what
-	// is heard follows the same merging and rank either way.
+	// is heard follows the same merging and rank either way. hasTone first: a
+	// moment without a tone of its own must not ask another tone's switch.
 	const Tone tone        = toneFor(m);
-	const bool soundWanted = toneWanted(cfg, tone, ctx.isPlaying, s_appFocused);
+	const bool soundWanted = hasTone(m) && toneWanted(cfg, tone, ctx.isPlaying, s_appFocused);
 	if (s_feed.take(m, count, nowSec(), frameNo(), soundWanted).sound)
 		playTone(ctx, tone, gainFor(cfg.RewardsVolume));
+}
+
+void post(Moment m, int count)
+{
+	// A handful a frame at most (one per click); a cap so a caller in a loop
+	// cannot grow it without bound before the next pollBuild.
+	if (s_posted.size() < 16) s_posted.emplace_back(m, count);
+}
+
+void sound(AppContext& ctx, Tone t)
+{
+	const EditorConfig& cfg = ctx.editorConfig;
+	if (toneWanted(cfg, t, ctx.isPlaying, s_appFocused) && s_feed.takeTone(t, nowSec()))
+		playTone(ctx, t, gainFor(cfg.RewardsVolume));
+}
+
+void postSound(Tone t)
+{
+	if (s_postedSounds.size() < 16) s_postedSounds.push_back(t);
+}
+
+void postDragCue(DragCue c)
+{
+	if (s_postedDragCues.size() < 16) s_postedDragCues.push_back(c);
+}
+
+bool dragCueWanted(const EditorConfig& cfg, bool playing)
+{
+	return uiSoundPossible(cfg) && cfg.RewardsSoundDragDrop
+	    && gainFor(cfg.RewardsVolume) > 0.0f && !playing;
+}
+
+void setDragCueProbe(void (*probe)(DragCue))
+{
+	s_dragProbe = probe;
+}
+
+void previewDragCues(AppContext& ctx)
+{
+	keepUiAudio(ctx);
+	AudioEngine* a = ctx.uiAudioEngine;
+	const float gain = gainFor(ctx.editorConfig.RewardsVolume);
+	if (!a || !a->isInitialized() || !(gain > 0.0f)) return;
+	// One buffer, the five 90 ms apart — one play() call, so nothing has to
+	// be scheduled across frames.
+	constexpr int    kRate = 44100;
+	constexpr size_t kStep = static_cast<size_t>(0.09 * kRate);
+	std::vector<int16_t> mix(kStep * kDragCueCount + kRate / 10, 0);
+	for (int i = 0; i < kDragCueCount; ++i)
+	{
+		const std::vector<uint8_t> pcm = dragCuePcm16(static_cast<DragCue>(i), kRate);
+		for (size_t k = 0; k + 1 < pcm.size() && i * kStep + k / 2 < mix.size(); k += 2)
+			mix[i * kStep + k / 2] = static_cast<int16_t>(pcm[k] | (pcm[k + 1] << 8));
+	}
+	std::vector<uint8_t> out(mix.size() * 2);
+	for (size_t i = 0; i < mix.size(); ++i)
+	{
+		out[i * 2]     = static_cast<uint8_t>(mix[i] & 0xFF);
+		out[i * 2 + 1] = static_cast<uint8_t>((mix[i] >> 8) & 0xFF);
+	}
+	a->play(out, kRate, 1, gain);
+}
+
+double problemSeen(AppContext& ctx, unsigned long long newestProblemMs)
+{
+	const EditorConfig& cfg = ctx.editorConfig;
+	const double now = nowSec();
+	// Observed whatever the switches say, so switching them on never pulses
+	// or sounds for a problem from before.
+	if (s_problems.observe(newestProblemMs) && cfg.RewardsEnabled)
+	{
+		s_problemAt = now;
+		// Rule 6, then the problem tone's own gap, then the shared one — and
+		// the own gap is only booked when the tone really played.
+		if (toneWanted(cfg, Tone::Problem, ctx.isPlaying, s_appFocused)
+		    && s_problems.toneDue(now) && s_feed.takeTone(Tone::Problem, now))
+		{
+			s_problems.tonePlayed(now);
+			playTone(ctx, Tone::Problem, gainFor(cfg.RewardsVolume));
+		}
+	}
+	if (!cfg.RewardsEnabled || !cfg.RewardsProblemPulse || s_problemAt < 0.0) return -1.0;
+	const double age = now - s_problemAt;
+	return (age >= 0.0 && age < kPulseSec) ? age : -1.0;
+}
+
+float compileCheck(double age)
+{
+	if (!s_compileCheckOn) return -1.0f;
+	return checkStroke(age, s_reducedCached);
+}
+
+float errorPulse(double age)
+{
+	return s_problemPulseOn ? pulseAt(age) : 0.0f;
 }
 
 void preview(AppContext& ctx, Tone t)
@@ -943,6 +1359,26 @@ void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool succ
 {
 	s_appFocused = appFocused;
 	keepUiAudio(ctx);
+	{
+		const EditorConfig& cfg = ctx.editorConfig;
+		s_compileCheckOn = cfg.RewardsEnabled && cfg.RewardsVisual && cfg.RewardsCheckMark;
+		s_problemPulseOn = cfg.RewardsEnabled && cfg.RewardsProblemPulse;
+		s_reducedCached  = reducedMotion(ctx);
+	}
+	// post()'s moments from the last frame, in order. Swapped out first: fire()
+	// never posts, but nothing here should depend on that.
+	if (!s_posted.empty())
+	{
+		std::vector<std::pair<Moment, int>> posted;
+		posted.swap(s_posted);
+		for (const auto& [m, count] : posted) fire(ctx, m, count);
+	}
+	if (!s_postedSounds.empty())
+	{
+		std::vector<Tone> posted;
+		posted.swap(s_postedSounds);
+		for (Tone t : posted) sound(ctx, t);
+	}
 	// Consumed whether or not the feature is on: switching it on later must not
 	// reward a build that finished while it was off.
 	switch (s_feed.buildEnded(run, finished, success))
@@ -951,17 +1387,32 @@ void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool succ
 		fire(ctx, Moment::BuildSucceeded);
 		break;
 	case Feed::BuildEnd::Failed:
-	{
 		// Not a moment (no line, nothing counted) — only its tone, under the
 		// same switches and the same gap as every other.
-		const EditorConfig& cfg = ctx.editorConfig;
-		if (toneWanted(cfg, Tone::BuildFailed, ctx.isPlaying, appFocused)
-		    && s_feed.takeTone(Tone::BuildFailed, nowSec()))
-			playTone(ctx, Tone::BuildFailed, gainFor(cfg.RewardsVolume));
+		sound(ctx, Tone::BuildFailed);
 		break;
-	}
 	case Feed::BuildEnd::None:
 		break;
+	}
+	// postDragCue()'s cues from the last frame, after everything above: a
+	// reward tone that played in this frame wins over them.
+	if (!s_postedDragCues.empty())
+	{
+		std::vector<DragCue> posted;
+		posted.swap(s_postedDragCues);
+		const EditorConfig& cfg = ctx.editorConfig;
+		// No frame counter (no ImGui context) = no frame to share.
+		const int frame = frameNo();
+		if (dragCueWanted(cfg, ctx.isPlaying) && (frame < 0 || s_toneFrame != frame))
+		{
+			const double now = nowSec();
+			for (DragCue c : posted)
+				if (s_dragGate.take(c, now))
+				{
+					if (s_dragProbe) s_dragProbe(c);
+					playDragCue(ctx, c, gainFor(cfg.RewardsVolume));
+				}
+		}
 	}
 }
 
@@ -1061,7 +1512,8 @@ void drawIdle(ImDrawList* dl, ImVec2 at, const IdleText& t, float alpha,
 }
 
 // The recent-days tooltip: seven small columns (weekday, a dot for a day with
-// a moment, its builds), then the counters in words. Neutral on purpose — a
+// a moment, its builds, and — only if any of the seven had one — its commits
+// in a row of their own), then the counters in words. Neutral on purpose — a
 // record of what was, nothing that asks for tomorrow.
 void drawRecentDays(const std::string& today)
 {
@@ -1070,10 +1522,13 @@ void drawRecentDays(const std::string& today)
 	const float  lineH = ImGui::GetTextLineHeight();
 	const float  cellW = ImGui::CalcTextSize("Wed").x + 10.0f;
 	const ImVec4 grey  = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+	const bool   anyCommits = std::any_of(cells.begin(), cells.end(),
+	                                      [](const DayCell& c) { return c.commits > 0; });
+	const float  rows = anyCommits ? 4.0f : 3.0f;
 
 	ImGui::TextDisabled("Last %d days", kRecentDays);
 	const ImVec2 o = ImGui::GetCursorScreenPos();
-	ImGui::Dummy(ImVec2(cellW * static_cast<float>(cells.size()), lineH * 3.0f + 2.0f));
+	ImGui::Dummy(ImVec2(cellW * static_cast<float>(cells.size()), lineH * rows + 2.0f));
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	for (size_t i = 0; i < cells.size(); ++i)
 	{
@@ -1093,13 +1548,29 @@ void drawRecentDays(const std::string& today)
 			dl->AddText(ImVec2(cx - ImGui::CalcTextSize(n.c_str()).x * 0.5f, o.y + lineH * 2.0f + 2.0f),
 			            ImGui::GetColorU32(grey), n.c_str());
 		}
+		// Commits: a row of their own, in the done green at half strength so
+		// it does not read as a second builds row.
+		if (c.commits > 0)
+		{
+			const std::string n = std::to_string(c.commits);
+			dl->AddText(ImVec2(cx - ImGui::CalcTextSize(n.c_str()).x * 0.5f, o.y + lineH * 3.0f + 2.0f),
+			            ImGui::GetColorU32(withAlpha(kDone, 0.7f)), n.c_str());
+		}
 	}
 	const std::string words = progressText(s_tally, today);
 	if (!words.empty()) ImGui::TextUnformatted(words.c_str());
+	const std::string commits =
+		commitsPhrase(s_tally.day == today ? s_tally.commitsToday : 0);
+	if (!commits.empty()) ImGui::TextUnformatted(commits.c_str());
 	ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(cellW * 7.0f, 220.0f));
-	ImGui::TextDisabled("A dot is a day you saved, built or imported something; the "
-	                    "number under it, that day's successful builds. Kept on this "
-	                    "computer only.");
+	ImGui::TextDisabled(anyCommits
+		? "A dot is a day you saved, built, imported, compiled, committed or "
+		  "finished the tutorial; the number under it, that day's successful "
+		  "builds, and below that in green, its commits. Kept on this computer "
+		  "only."
+		: "A dot is a day you saved, built, imported, compiled, committed or "
+		  "finished the tutorial; the number under it, that day's successful "
+		  "builds. Kept on this computer only.");
 	ImGui::PopTextWrapPos();
 }
 } // namespace
@@ -1113,6 +1584,27 @@ void drawCheckMark(float x, float y, float size, float stroke, float alpha)
 	ImGui::GetWindowDrawList()->AddPolyline(v, static_cast<int>(std::min<size_t>(pts.size(), 3)),
 	                                        ImGui::GetColorU32(withAlpha(kDone, alpha)),
 	                                        ImDrawFlags_None, std::max(1.5f, size * 0.14f));
+}
+
+void drawProblemRing(float x0, float y0, float x1, float y1, double age, bool reduced,
+                     unsigned int col)
+{
+	const Ring r = ringAt(age, reduced);
+	if (!(r.alpha > 0.0f)) return;
+	// A circle around the bell's box, widening by up to a third of its height:
+	// the footer is one text line tall, and a ring that left it would be cut.
+	const float  h      = y1 - y0;
+	const ImVec2 c((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+	const float  radius = std::max(x1 - x0, h) * 0.5f + 1.0f + r.grow * h * 0.35f;
+	ImVec4 v = ImGui::ColorConvertU32ToFloat4(col);
+	v.w *= r.alpha;
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	// Past the window's padding, like the light edge: the ring is around the
+	// bell, not inside the footer's content box.
+	const ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+	dl->PushClipRect(wp, ImVec2(wp.x + ws.x, wp.y + ws.y), false);
+	dl->AddCircle(c, radius, ImGui::GetColorU32(v), 0, 1.5f);
+	dl->PopClipRect();
 }
 
 void drawFooterStatus(AppContext& ctx, const char* idleTextIn)
@@ -1233,6 +1725,7 @@ void drawFooterStatus(AppContext& ctx, const char* idleTextIn)
 #else
 void drawFooterStatus(AppContext&, const char*) {}
 void drawCheckMark(float, float, float, float, float) {}
+void drawProblemRing(float, float, float, float, double, bool, unsigned int) {}
 #endif
 
 } // namespace HE::Ed::Rewards

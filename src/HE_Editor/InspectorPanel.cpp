@@ -1327,10 +1327,39 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				hint("Drops collide via physics in Play; else they die at Ground Y (the "
 				     "fallback floor).");
 
-				// Thunder sound — drop an audio .hasset here (played on each strike).
+				// Weather sounds (WeatherAudio). Every slot is optional: empty plays the
+				// EngineContent default, a dropped audio .hasset replaces just that one.
+				EditorWidgets::subHeading("Sound");
+				EditorWidgets::checkbox("Weather Sounds", &w->soundEnabled); trackEdit();
+				ImGui::BeginDisabled(!w->soundEnabled);
+				Row::sliderFloat("Volume##wxs", &w->soundVolume, 0.0f, 1.0f); trackEdit();
+				char wxBus[64];
+				std::strncpy(wxBus, w->soundBus.c_str(), sizeof(wxBus) - 1);
+				wxBus[sizeof(wxBus) - 1] = '\0';
+				if (Row::inputText("Bus##wxs", wxBus, sizeof(wxBus))) { w->soundBus = wxBus; trackEdit(); }
+				// An empty slot plays the engine's sound (Engine/Audio/Weather), so it says
+				// which; the entry behind each slot says how it behaves.
+				EditorWidgets::assetDropSlot(ctx, "Rain", w->rainSound,
+					HE::AssetType::Audio, "wxrain", "(default: Rain)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Rain Sound");
+				EditorWidgets::assetDropSlot(ctx, "Wind", w->windSound,
+					HE::AssetType::Audio, "wxwind", "(default: Wind)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Wind Sound");
+				EditorWidgets::assetDropSlot(ctx, "Snow", w->snowSound,
+					HE::AssetType::Audio, "wxsnow", "(default: Snow)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Snow Sound");
+				EditorWidgets::assetDropSlot(ctx, "Storm", w->stormSound,
+					HE::AssetType::Audio, "wxstorm", "(default: Storm)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Storm Sound");
+				// Thunder: one roll per lightning strike, a random distance away.
 				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
-					HE::AssetType::Audio, "thunder", "(none — drop audio)",
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "thunder", "(default: Thunder)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Thunder Sound");
+				ImGui::EndDisabled();
+				hint("The beds fade with the weather by themselves: rain and snow with how much "
+				     "falls, wind with the wind speed, storm with wind and rain together. An "
+				     "empty slot plays the engine's sound; drop an audio asset to replace it. "
+				     "The bus falls back to the clip's own, then master.");
 
 			}
 			if (!quiet && !only) ImGui::Separator();

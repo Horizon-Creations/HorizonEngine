@@ -132,9 +132,11 @@ def callbacks_from_source() -> tuple[set[str], set[str]]:
     # the instance table; every "on_xxx" in the Python backend likewise.
     lua = set(re.findall(r'"(on[A-Z][A-Za-z0-9]*)"', src("src/HE_Core/src/Scripting/ScriptEngine.cpp")))
     py = set(re.findall(r'"(on_[a-z_0-9]+)"', src("src/HE_Python/src/PyScriptBackend.cpp")))
-    # onRep_<var> is built at runtime from a prefix (ScriptContext.cpp).
-    if '"onRep_"' in src("src/HE_Scene/src/ScriptContext.cpp"):
-        lua.add("onRep_")
+    # onRep_<var> and onChanged_<var> are built at runtime from a prefix
+    # (ScriptContext.cpp).
+    for prefix in ("onRep_", "onChanged_"):
+        if f'"{prefix}"' in src("src/HE_Scene/src/ScriptContext.cpp"):
+            lua.add(prefix)
     return lua, py
 
 

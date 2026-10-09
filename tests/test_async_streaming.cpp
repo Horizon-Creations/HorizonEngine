@@ -528,3 +528,196 @@ TEST_CASE("remote EngineContent asset: a file that is on disk wins, the download
 
     he_test::removeAllQuiet(base);
 }
+
+// ─── Cancellation (Thema 153, Schritt 2) ─────────────────────────────────────
+// Streaming loads run as Low jobs with a stale() check: a load is dropped once
+// every requester's CancelToken is cancelled. The trap these tests guard is not
+// in the job system but in the coalesce key: a dropped job that reported nothing
+// would leave its key in the pending set forever, and every later request for
+// the same asset would be swallowed as "already in flight".
+
+namespace {
+
+// Holds every worker of the global pool inside a Normal task until release(), so
+// loads requested meanwhile stay queued — the only way to cancel "before start"
+// deterministically. Released on destruction too, so a failed REQUIRE cannot
+// wedge the process-wide pool.
+struct HeldPool
+{
+    std::atomic<bool> go{ false };
+    std::atomic<size_t> parked{ 0 };
+    std::vector<std::future<void>> blockers;
+    HeldPool()
+    {
+        ThreadPool& pool = globalPool();
+        for (size_t i = 0; i < pool.threadCount(); ++i)
+            blockers.push_back(pool.submit([this] {
+                parked.fetch_add(1);
+                while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }, "TestHeldPool"));
+        while (parked.load() < pool.threadCount()) std::this_thread::yield();
+    }
+    void release()
+    {
+        go.store(true);
+        for (auto& b : blockers) if (b.valid()) b.get();
+    }
+    ~HeldPool() { release(); }
+};
+
+HE::AsyncLoadOptions withToken(const HE::CancelToken& t)
+{
+    HE::AsyncLoadOptions o;
+    o.cancel = t;
+    return o;
+}
+
+// drainAsync pumps a fixed 100 rounds; these stop as soon as `done` holds. That
+// matters on a Mac in Low Power Mode, where a 5 ms sleep was measured at ~150 ms
+// (timer coalescing) and a fixed drain alone costs 15 s.
+template<typename P>
+void drainUntil(ContentManager& cm, P done, int maxRounds = 2000)
+{
+    for (int i = 0; i < maxRounds; ++i)
+    {
+        cm.pollAsyncResults();
+        if (done()) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+} // namespace
+
+TEST_CASE("loadAssetAsync: cancelled before it starts → empty callback, key released, reload works")
+{
+    const HE::UUID id{0xCA9CE1ED00000001ULL, 0x0000000000000001ULL};
+    const auto full = writeTempAsset("async_cancel_before.hasset", id);
+    ContentManager cm(full.parent_path().string());
+    const std::string rel = "async_cancel_before.hasset";
+
+    bool called = false;
+    HE::UUID got{ 1, 1 };
+    {
+        HeldPool held;
+        HE::CancelToken zone = HE::CancelToken::create();
+        cm.loadAssetAsync(rel, [&](HE::UUID u) { called = true; got = u; }, withToken(zone));
+        CHECK(cm.isAsyncPending(rel));
+        zone.cancel();                       // the zone is gone before its load ran
+    }
+    drainUntil(cm, [&] { return called; });
+    CHECK(called);
+    CHECK(got == HE::UUID{});                // reported like a failed load
+    CHECK_FALSE(cm.isLoaded(rel));
+    CHECK_FALSE(cm.isAsyncPending(rel));     // the key did not leak
+    CHECK(cm.asyncInFlightCount() == 0);
+
+    // The leaked-key failure mode: this request would be swallowed forever.
+    HE::UUID again;
+    cm.loadAssetAsync(rel, [&](HE::UUID u) { again = u; });
+    drainUntil(cm, [&] { return again != HE::UUID{}; });
+    CHECK(again == id);
+    CHECK(cm.isLoaded(rel));
+
+    he_test::removeQuiet(full);
+}
+
+// The editor's streaming view (Thema 153, Schritt 6): which loads are in
+// flight, and what pollAsyncResults did with the ones that came back.
+TEST_CASE("ContentManager: in-flight paths and poll counters for the streaming view")
+{
+    const HE::UUID id{0x5EE0000000000001ULL, 0x0000000000000001ULL};
+    const auto good = writeTempAsset("sv_good.hasset", id);
+    const auto dir  = good.parent_path();
+    writeTempAsset("sv_dropped.hasset", HE::UUID{0x5EE0000000000002ULL, 2});
+    {
+        std::ofstream junk(dir / "sv_junk.hasset", std::ios::binary);
+        junk << "not an asset at all";
+    }
+    ContentManager cm(dir.string());
+    const ContentManager::AsyncPollStats before = cm.asyncPollStats();
+    {
+        HeldPool held;
+        HE::CancelToken zone = HE::CancelToken::create();
+        cm.loadAssetAsync("sv_good.hasset");
+        cm.loadAssetAsync("sv_junk.hasset");
+        cm.loadAssetAsync("sv_dropped.hasset", {}, withToken(zone));
+        // Sorted, and cut at the count asked for.
+        CHECK(cm.asyncInFlightPaths(10) ==
+              std::vector<std::string>{ "sv_dropped.hasset", "sv_good.hasset", "sv_junk.hasset" });
+        CHECK(cm.asyncInFlightPaths(1) == std::vector<std::string>{ "sv_dropped.hasset" });
+        zone.cancel();
+    }
+    drainUntil(cm, [&] { return cm.asyncInFlightCount() == 0; });
+    CHECK(cm.asyncInFlightPaths(10).empty());
+    const ContentManager::AsyncPollStats& after = cm.asyncPollStats();
+    CHECK(after.registered - before.registered == 1);
+    CHECK(after.failed - before.failed == 1);
+    CHECK(after.dropped - before.dropped == 1);
+    CHECK(after.restarted == before.restarted);
+    CHECK(after.lastPollLeft == 0);
+
+    he_test::removeQuiet(good);
+    he_test::removeQuiet(dir / "sv_dropped.hasset");
+    he_test::removeQuiet(dir / "sv_junk.hasset");
+}
+
+TEST_CASE("loadAssetAsync: a shared load is dropped only when EVERY requester cancelled")
+{
+    const HE::UUID idA{0xCA9CE1ED00000002ULL, 0x2ULL};
+    const HE::UUID idB{0xCA9CE1ED00000003ULL, 0x3ULL};
+    const auto fullA = writeTempAsset("async_cancel_shared_a.hasset", idA);
+    const auto fullB = writeTempAsset("async_cancel_shared_b.hasset", idB);
+    ContentManager cm(fullA.parent_path().string());
+
+    {
+        HeldPool held;
+        // A: a zone and the main scene both want it; only the zone goes away.
+        HE::CancelToken zone  = HE::CancelToken::create();
+        HE::CancelToken scene = HE::CancelToken::create();
+        cm.loadAssetAsync("async_cancel_shared_a.hasset", {}, withToken(zone));
+        cm.loadAssetAsync("async_cancel_shared_a.hasset", {}, withToken(scene));
+        // B: a cancellable request plus one without a token, which pins it.
+        HE::CancelToken other = HE::CancelToken::create();
+        cm.loadAssetAsync("async_cancel_shared_b.hasset", {}, withToken(other));
+        cm.loadAssetAsync("async_cancel_shared_b.hasset");
+        zone.cancel();
+        other.cancel();
+    }
+    drainUntil(cm, [&] { return cm.asyncInFlightCount() == 0; });
+    CHECK(cm.isLoaded("async_cancel_shared_a.hasset"));
+    CHECK(cm.isLoaded("async_cancel_shared_b.hasset"));
+
+    he_test::removeQuiet(fullA);
+    he_test::removeQuiet(fullB);
+}
+
+TEST_CASE("loadAssetAsync: asked again after it was dropped → loaded after all")
+{
+    // A zone streamed out and straight back in. Depending on timing the second
+    // request either joins the queued job before it is dropped, or arrives after
+    // the job already gave up and its 'cancelled' result is waiting to be drained
+    // — then pollAsyncResults must start it over instead of failing it. Either
+    // way the asset has to arrive.
+    const HE::UUID id{0xCA9CE1ED00000004ULL, 0x4ULL};
+    const auto full = writeTempAsset("async_cancel_revive.hasset", id);
+    ContentManager cm(full.parent_path().string());
+    const std::string rel = "async_cancel_revive.hasset";
+
+    HE::UUID first{ 1, 1 };
+    {
+        HeldPool held;
+        HE::CancelToken out = HE::CancelToken::create();
+        cm.loadAssetAsync(rel, [&](HE::UUID u) { first = u; }, withToken(out));
+        out.cancel();
+    }
+    // Most likely the job has been dropped by now, its result not yet drained.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    HE::CancelToken backIn = HE::CancelToken::create();
+    cm.loadAssetAsync(rel, {}, withToken(backIn));   // coalesces onto the same key
+    drainUntil(cm, [&] { return cm.asyncInFlightCount() == 0; });
+    CHECK(cm.isLoaded(rel));
+    CHECK(first == id);                     // the one callback the key carries
+    CHECK_FALSE(cm.isAsyncPending(rel));
+
+    he_test::removeQuiet(full);
+}
