@@ -686,7 +686,7 @@ hellt den Körper auf. Foam sitzt auf den Kämmen der kürzeren Züge. Rauheit w
 
 | Vergleich | Metal | OpenGL 4.1 |
 |---|---|---|
-| t = 1.0 zweimal (Rauschboden) | md5-gleich | (Metal-Paar md5-gleich, GL nicht gepaart) |
+| t = 1.0 zweimal (Rauschboden) | md5-gleich | md5-gleich |
 | t = 1.0 gegen 3.5, Wasserband | 10,60 | 10,60 |
 | forward gegen deferred, t = 1.0 | 0,01 | 0,07 |
 | Metal gegen GL, forward t = 1.0 / 3.5 | 0,06 / 0,05 | |
