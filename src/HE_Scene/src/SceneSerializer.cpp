@@ -620,6 +620,27 @@ namespace
 					reinterpret_cast<const uint8_t*>(t->sculptHeights.data()),
 					t->sculptHeights.size() * sizeof(float));
 			}
+			// Water (WaterField.h). Written once there is anything to save, so a
+			// landscape without water saves byte for byte as before. The cells go
+			// out run-length encoded: a dry grid with one lake is a few hundred
+			// bytes where the raw rasters would be a few hundred KB per snapshot.
+			if (!t->water.pristine())
+			{
+				const HE::water::Field& w = t->water;
+				tc["waterRes"]    = w.res;
+				tc["waterNextId"] = w.nextBodyId;
+				json bodies = json::array();
+				for (const HE::water::Body& b : w.bodies)
+				{
+					json bj = { { "id", b.id }, { "level", b.level } };
+					if (b.fromSpline()) bj["sourceSpline"] = uuidToJson(b.sourceSpline);
+					bodies.push_back(std::move(bj));
+				}
+				tc["waterBodies"] = std::move(bodies);
+				const std::vector<uint8_t> cells = HE::water::encodeCells(w);
+				if (!cells.empty())
+					tc["waterCellsB64"] = base64Encode(cells.data(), cells.size());
+			}
 			comps["terrain"] = tc;
 		}
 		if (auto* a = registry.try_get<AudioSourceComponent>(entity))
@@ -1491,6 +1512,36 @@ namespace
 			}
 			else if (c.contains("sculptHeights") && c["sculptHeights"].is_array())
 				t.sculptHeights = c["sculptHeights"].get<std::vector<float>>(); // legacy scenes
+			// Water. Every key is optional and every value is checked: a scene
+			// written before water existed has none of them, and one edited or
+			// merged by hand must not leave a grid the surface can index out of.
+			{
+				HE::water::Field& w = t.water;
+				w.res = c.value("waterRes", w.res);
+				w.nextBodyId = c.value("waterNextId", w.nextBodyId);
+				if (c.contains("waterBodies") && c["waterBodies"].is_array())
+					for (const json& bj : c["waterBodies"])
+					{
+						if (!bj.is_object()) continue;
+						HE::water::Body b;
+						if (bj.contains("id") && bj["id"].is_number_integer())
+						{
+							const long long id = bj["id"].get<long long>();
+							b.id = (id > 0 && id <= 65535) ? static_cast<uint16_t>(id) : HE::water::kNoBody;
+						}
+						if (bj.contains("level") && bj["level"].is_number())
+							b.level = bj["level"].get<float>();
+						if (bj.contains("sourceSpline"))
+							b.sourceSpline = jsonToUuid(bj["sourceSpline"]);
+						w.bodies.push_back(b);
+					}
+				if (c.contains("waterCellsB64") && c["waterCellsB64"].is_string())
+				{
+					const std::vector<uint8_t> bytes = base64Decode(c["waterCellsB64"].get<std::string>());
+					HE::water::decodeCells(w, bytes.data(), bytes.size());   // a bad stream drops the cells, keeps the bodies
+				}
+				HE::water::sanitize(t);
+			}
 			t.dirty       = true; // always regenerate after load
 			registry.emplace_or_replace<TerrainComponent>(entity, t);
 		}

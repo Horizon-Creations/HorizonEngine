@@ -1864,6 +1864,15 @@ namespace
 		a.terrain.layerWeights.resize(a.terrain.weightRes * a.terrain.weightRes * 4);
 		for (size_t i = 0; i < a.terrain.layerWeights.size(); ++i)
 			a.terrain.layerWeights[i] = static_cast<uint8_t>(i * 7 + 1);
+		// Water (WaterField.h): a lake from a spline and a brush pond, at a
+		// resolution of their own, so every key of the water block is written.
+		a.terrain.water.res = 16;
+		{
+			const uint16_t lake = a.terrain.water.createBody(3.5f, HE::UUID::generate());
+			const uint16_t pond = a.terrain.water.createBody(-0.75f);
+			HE::water::addCircle(a.terrain, lake, -40.0f, 10.0f, 30.0f, 10.0f);
+			HE::water::addCircle(a.terrain, pond, 80.0f, -30.0f, 20.0f, 15.0f, 0.7f);
+		}
 		reg.emplace<TerrainComponent>(land, a.terrain);
 
 		a.foliage.visible         = false;
@@ -2237,6 +2246,11 @@ namespace
 			REQUIRE(t->sculptHeights.size() == a.terrain.sculptHeights.size());
 			for (size_t i = 0; i < a.terrain.sculptHeights.size(); ++i)
 				CHECK(t->sculptHeights[i] == doctest::Approx(a.terrain.sculptHeights[i]));
+			// The water: bodies (level, source), counter and every cell.
+			REQUIRE(a.terrain.water.wetCells() > 0);
+			CHECK(HE::water::sameContent(t->water, a.terrain.water));
+			CHECK(t->water.bodies.size() == 2);
+			CHECK(t->water.bodies[0].fromSpline());
 		}
 		{
 			const auto* f = reg.try_get<FoliageComponent>(land);

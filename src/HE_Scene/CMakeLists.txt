@@ -26,6 +26,7 @@ add_library(HorizonScene SHARED
     src/TerrainSystem.cpp
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp
+    src/WaterField.cpp
     src/TerrainHeightmap.cpp
     src/TerrainGenerate.cpp
     src/FoliagePaint.cpp

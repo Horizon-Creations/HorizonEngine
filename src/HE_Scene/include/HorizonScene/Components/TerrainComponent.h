@@ -1,5 +1,6 @@
 #pragma once
 #include <Types/UUID.h>
+#include "HorizonScene/WaterField.h"
 #include <cstdint>
 #include <vector>
 
@@ -73,6 +74,14 @@ struct TerrainComponent {
     // weightmap in the same texture (TerrainPaint::buildWeightTexture), so the
     // shader needs no second sampler or binding on any backend.
     std::vector<uint8_t>  layerWeights2;
+
+    // ── Water ────────────────────────────────────────────────────────────────
+    // The water bodies on this landscape and the raster that says where they are
+    // (WaterField.h). One model for the water brush and the lake tool. Saved with
+    // the terrain, under the "terrain" block, only once there is something to save.
+    // Its edits touch neither `dirty` nor `regionDirty`: a water edit must not
+    // regenerate terrain chunks (Field::dirty is the water surface's own flag).
+    HE::water::Field water;
 
     // ── Runtime weightmap state (never serialised) ──────────────────────────
     // The GPU texture TerrainSystem (re)registers from layerWeights, handed to
