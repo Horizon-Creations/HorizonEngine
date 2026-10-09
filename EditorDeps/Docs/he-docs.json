@@ -13866,7 +13866,7 @@
        ]
       },
       {
-       "alt": "The engine water material on a plane: three wave trains, sky reflection, caustic lines and foam on the crests",
+       "alt": "The engine water material on a plane at sunrise: a spread of wave trains with fine chop, the sky and the sun glittering in the ripples, a few whitecaps",
        "k": "figure",
        "src": "water_engine.jpg"
       },
@@ -13974,6 +13974,15 @@
        ]
       },
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The surface is a spread of waves, not one pattern: each of WaveA, WaveB and WaveC also drives a second, shorter and weaker train at a turned angle, an irregular chop rides on top, and slow gusts make some patches rougher than others. The colour is dark on purpose; most of what you see of real water is the sky in it, so the picture depends on the sky and the time of day. The sun's glitter appears where the waves tilt toward it."
+        }
+       ]
+      },
+      {
        "k": "h3",
        "r": [
         {
@@ -14033,7 +14042,7 @@
          [
           {
            "s": "",
-           "t": "0.10, 0.42, 0.45"
+           "t": "0.045, 0.20, 0.22"
           }
          ]
         ],
@@ -14059,7 +14068,7 @@
          [
           {
            "s": "",
-           "t": "0.01, 0.07, 0.12"
+           "t": "0.004, 0.028, 0.052"
           }
          ]
         ],
@@ -14085,7 +14094,7 @@
          [
           {
            "s": "",
-           "t": "0.35, 3.0"
+           "t": "0.45, 4.0"
           }
          ]
         ],
@@ -14121,13 +14130,13 @@
          [
           {
            "s": "",
-           "t": "Three wave trains. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off."
+           "t": "Three wave trains, each with a shorter companion at a turned angle. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off. The three steepnesses together also set the strength of the chop; all three at 0 is flat."
           }
          ],
          [
           {
            "s": "",
-           "t": "A: 30, 1.2, 8, 0.25\nB: 310, 0.8, 3.5, 0.18\nC: 100, 0.5, 1.2, 0.12"
+           "t": "A: 20, 1.0, 14, 0.07\nB: 335, 0.8, 5, 0.10\nC: 70, 0.5, 1.6, 0.09"
           }
          ]
         ],
@@ -14199,13 +14208,13 @@
          [
           {
            "s": "",
-           "t": "Surface roughness of the highlight and reflection."
+           "t": "Surface roughness of the highlight and reflection. Distant water is made rougher on top."
           }
          ],
          [
           {
            "s": "",
-           "t": "0.06"
+           "t": "0.08"
           }
          ]
         ],
@@ -14257,7 +14266,7 @@
          [
           {
            "s": "",
-           "t": "0.55"
+           "t": "0.5"
           }
          ]
         ],
@@ -14309,7 +14318,7 @@
          [
           {
            "s": "",
-           "t": "0.92, 0.95, 0.97"
+           "t": "0.82, 0.88, 0.90"
           }
          ]
         ],
@@ -14329,13 +14338,13 @@
          [
           {
            "s": "",
-           "t": "x: share of the wave crests covered (0 to 1). y: strength, 0 turns foam off. z: noise size in metres. w: drift in m/s."
+           "t": "x: share of the wave crests covered (0 to 1; 0.3 is a rough sea). y: strength, 0 turns foam off. z: size of the noise that frays it, in metres. w: drift in m/s."
           }
          ],
          [
           {
            "s": "",
-           "t": "0.18, 0.8, 1.5, 0.3"
+           "t": "0.06, 0.5, 0.7, 0.3"
           }
          ]
         ],
@@ -14355,13 +14364,13 @@
          [
           {
            "s": "",
-           "t": "x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance)."
+           "t": "x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance). It brightens the water body and fades with its transmittance, so it shows in clear shallow water, not in deep or murky water."
           }
          ],
          [
           {
            "s": "",
-           "t": "0.35, 2.5, 0.25, 25"
+           "t": "0.2, 2.0, 0.2, 18"
           }
          ]
         ]
@@ -14381,15 +14390,7 @@
         [
          {
           "s": "",
-          "t": "The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from "
-         },
-         {
-          "s": "c",
-          "t": "Turbidity"
-         },
-         {
-          "s": "",
-          "t": ", foam sits on the wave crests rather than along a shoreline, caustics are drawn on the water surface, and the scene seen through the water is not distorted."
+          "t": "The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from Turbidity, foam sits on the wave crests rather than along a shoreline, caustics brighten the water body instead of lighting a floor, and the scene seen through the water is not distorted."
          }
         ],
         [
@@ -14401,31 +14402,7 @@
         [
          {
           "s": "",
-          "t": "With the default turbidity the water is nearly opaque, which makes "
-         },
-         {
-          "s": "c",
-          "t": "FresnelPower"
-         },
-         {
-          "s": "",
-          "t": " and "
-         },
-         {
-          "s": "c",
-          "t": "Reflection"
-         },
-         {
-          "s": "",
-          "t": " subtle. Lower the absorption (for example "
-         },
-         {
-          "s": "c",
-          "t": "Turbidity"
-         },
-         {
-          "s": "",
-          "t": " 0.05, 3) for clear water where both show clearly."
+          "t": "With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.1, 3) for clear water where both show clearly, and where Caustics become visible."
          }
         ]
        ],

@@ -273,7 +273,7 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
 {
     const int s = m.un(T::SplitRGBA, param, 1, row);
     Pin dirDeg{ s, 0 }, speed{ s, 1 }, length{ s, 2 }, steep{ s, 3 };
-    const Pin knobSpeed = speed, knobSteep = steep;
+    const Pin knobSpeed = speed;
     if (tr.turnDeg != 0.0f)     dirDeg = m.op(T::Add, dirDeg, m.k(tr.turnDeg, 1, row + 1), 2, row + 1);
     if (tr.lengthScale != 1.0f)
     {
@@ -322,7 +322,6 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
     w.dirZ   = sinD;
     w.speed  = knobSpeed;
     w.warp   = warp >= 0 ? Pin{ warp } : Pin{};
-    (void)knobSteep;
     return w;
 }
 

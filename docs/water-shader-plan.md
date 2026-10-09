@@ -3,6 +3,8 @@
 Stand 2026-10-05, Schritt 1 (Bestandsaufnahme), vollständig. Nichts am Renderer geändert; Abschnitt 3 nennt Renderer-Fehler, die spätere Schritte beheben müssen.
 Schritt 2 (Material gebaut): §5a. Schritt 3 (Backend-Parität, GL-Fehler 1 behoben): §8.
 Schritt 4 (Bilder auf Metal und GL, Tooltips, Handbuch, Stand 2026-10-06): §9.
+Schritt 7 (Urteil „sieht sehr comichaft aus", realistischeres Aussehen, Stand 2026-10-09): §11. Die
+Defaults in §5a und §9.2 sind seitdem überholt; gültig ist die Tabelle in §11.2.
 
 Ziel: ein Wasser-Material als Engine-Content, gebaut als Material-Node-Graph, auf allen
 fünf Backends über die bestehende Graph-Shader-Pipeline, mit vollem Parametersatz im
@@ -620,3 +622,107 @@ Spiel** auf allen fünf Backends, und das Bedienen im laufenden Editor (alles Bi
 aus dem Headless-Zeugen). Für den GL-Fix aus §8.4 gibt es keinen CI-Test (kein GL-Kontext in
 CI), nur das lokale A/B. Offene Abstimmung: `FresnelPower`/`Reflection` wirken bei der
 Default-Trübung kaum (§9.2).
+
+---
+
+## 11. Realistischeres Aussehen (Schritt 7)
+
+Anlass: das Urteil „ich will ein realistischeres Aussehen, das sieht sehr comichaft aus"
+zum Wasser aus Schritt 4. Es gibt weiter keinen neuen Graph-Knoten, keine neue Textur, keinen
+Renderer-Eingriff und keinen neuen Knopf: dieselben 15 Namen, dieselben Typen, neue Defaults und
+ein umgebauter Graph in `mat_gen` (`src/HE_Tools/src/MatGen/main.cpp`).
+
+### 11.1 Was am alten Bild comichaft war
+
+Bild: `~/.claude/hive/artifacts/thema152-schritt7/old_*.png` gegen `new_*.png` (gleiche
+Kamera, Zeit, Backend; Zeuge wie §9.1).
+
+1. **Ein Gitter gleicher Flecken.** Drei parallele Sinus mit Steilheit 0,25/0,18/0,12 (Summe 0,55,
+   echtes Meer liegt bei 0,05 bis 0,3) kippen die Normale so weit, dass ganze Felder auf den hellen
+   Horizontstreifen des Himmels-Cubes springen. Das Ergebnis sind cremefarbene, weich begrenzte
+   Flecken in Reihen.
+2. **Kaustik-Netzlinien auf der Oberfläche** (Stärke 0,35, `×6`, `pow 5`, additiv). Eine helle
+   Linie auf dem Wasser ist das, was ein Comic zeichnet; echte Kaustik liegt auf dem Grund.
+3. **Weiße Schaumblobs** mit Deckkraft 1 auf jedem Kamm (Abdeckung 0,18, Stärke 0,8).
+4. **Gesättigter Türkiskörper** (0,10/0,42/0,45): Der Himmel trägt in `heLitP` Diffus (`ambDiff ×
+   0,35`) und Reflexion, die Körperfarbe stand dagegen und machte aus dem Cremehimmel ein
+   Graublau. Echtes Wasser ist überwiegend Spiegel, der Körper dunkel.
+5. **Glatte, scharfkantige Reflexion** (Rauheit 0,06 ohne Distanzanteil) und keinerlei kurze,
+   unregelmäßige Wellen: nichts zerlegte den Sonnenstreifen in Glitzer.
+
+### 11.2 Was geändert ist
+
+| Ursache | Änderung im Graph |
+|---|---|
+| Gitter (1) | Jeder Wellenknopf treibt zwei Züge: sich selbst und einen **Begleitzug** (um 38°/−33°/47° gedreht, Wellenlänge ×0,58/0,64/0,71, Steilheit ×0,55/0,55/0,60, Tempo ∝ √Wellenlänge wie Tiefwasser-Dispersion). Der Begleitzug fährt kein eigenes FBM, sondern **erbt das Warp-Feld** des Primärzugs (×0,9), sonst sind seine Kämme geradlinig und kreuzen die gebogenen als Rautengitter (gemessen: ohne Warp-Teilung bleibt das Gitter sichtbar, `WaveC` aus = weg). Zwei Schichten **Chop** (Steigung eines FBM-Höhenfeldes per endlicher Differenz, 2,6 m und 0,9 m, treibt mit Zug B bzw. C): ohne sie bleibt eine Summe von Sinus ein glattes Interferenzmuster. Ein **Böenfeld** (FBM, 22 m) tauscht das Gewicht zwischen Zug und Begleitzug und variiert die Helligkeit des Körpers um ±5 %. Feine Züge und Chop **blenden mit der Entfernung aus** (Sinus unter einem Pixel flimmern, es gibt keine Mips). |
+| Netzlinien (2) | Kaustik **hellt den Körper multiplikativ auf** (`body × (1 + 3·web·Stärke·Transmission·Nähe)`) statt eine weiße Linie zu addieren; Netz breiter und weicher (`×3,5`, `pow 3`). Sie hängt an der Transmission des Wassers, ist also in klarem, flachem Wasser sichtbar (Turbidity 0,1, siehe `new_clear_caustics_user_params.png`) und in tiefem, trübem nicht. Default-Stärke 0,35 → 0,2. |
+| Blobs (3) | Foam-Kamm aus der **Summe von B, seinem Begleitzug und C** statt aus allen sechs (die Summe aller sechs hat Maxima als runde Flecken, drei Sinus ergeben kammförmige Streifen). Zwei Rauschmaßstäbe (grob entscheidet wo, fein franst aus), weichere Kante, Schaumfarbe durch das Rauschen moduliert (nicht flach weiß), Deckkraft höchstens 0,85. Schwelle `0,97 − 0,9·Abdeckung`. Default-Abdeckung 0,18 → 0,06, Stärke 0,8 → 0,5, Rauschgröße 1,5 → 0,7 m. |
+| Körper (4) | Farben dunkler und entsättigt (Tabelle), Absorption 0,35 → 0,45 /m bei 4 m angenommener Tiefe. Auf den **Kämmen der Dünung** (nur Zug A und sein Begleiter, nicht alle sechs: die Summe ergab ein Fleckengitter) kommt ein Zehntel der Flachfarbe zurück (Licht scheint durch dünne Kämme). Deckkraft 0,55 → 0,5. |
+| Reflexion (5) | Rauheit 0,06 → 0,08, dazu **+0,25 mit der Entfernung** (10 m bis 160 m): was ein Pixel nicht mehr auflöst, mittelt eine rauere Fläche. Kein Horizontstreifen aus Einzelpixel-Glitzern. |
+
+Neue Defaults (alle 15 Knöpfe, Test-Tabelle `kWaterKnobs` ist nachgezogen):
+
+| Knopf | alt | neu |
+|---|---|---|
+| `ShallowColor` | 0.10, 0.42, 0.45 | 0.045, 0.20, 0.22 |
+| `DeepColor` | 0.01, 0.07, 0.12 | 0.004, 0.028, 0.052 |
+| `Turbidity` | 0.35, 3.0 | 0.45, 4.0 |
+| `WaveA` | 30, 1.2, 8, 0.25 | 20, 1.0, 14, 0.07 |
+| `WaveB` | 310, 0.8, 3.5, 0.18 | 335, 0.8, 5, 0.10 |
+| `WaveC` | 100, 0.5, 1.2, 0.12 | 70, 0.5, 1.6, 0.09 |
+| `Roughness` | 0.06 | 0.08 |
+| `Opacity` | 0.55 | 0.5 |
+| `FoamColor` | 0.92, 0.95, 0.97 | 0.82, 0.88, 0.90 |
+| `Foam` | 0.18, 0.8, 1.5, 0.3 | 0.06, 0.5, 0.7, 0.3 |
+| `Caustics` | 0.35, 2.5, 0.25, 25 | 0.2, 2.0, 0.2, 18 |
+| `FresnelPower`, `Reflection`, `Specular`, `Refraction` | unverändert | unverändert |
+
+Bedeutungsänderungen, die in Tooltips (`mat_gen`, `EditorHelp.cpp`) und im Handbuch
+(`he-docs.json`, Abschnitt Engine Water) nachgezogen sind: Die drei Wellenknöpfe treiben je zwei
+Züge, und ihre Steilheiten zusammen setzen auch die Stärke des Chops (alle drei 0 = glatt). Kaustik
+hellt den Körper auf. Foam sitzt auf den Kämmen der kürzeren Züge. Rauheit wächst mit der Entfernung.
+
+### 11.3 Messung (Mac M5, Release-Editor des Zweigs, Rezept §9.1, 1280×720)
+
+| Vergleich | Metal | OpenGL 4.1 |
+|---|---|---|
+| t = 1.0 zweimal (Rauschboden) | md5-gleich | (Metal-Paar md5-gleich, GL nicht gepaart) |
+| t = 1.0 gegen 3.5, Wasserband | 10,60 | 10,60 |
+| forward gegen deferred, t = 1.0 | 0,01 | 0,07 |
+| Metal gegen GL, forward t = 1.0 / 3.5 | 0,06 / 0,05 | |
+| Metal gegen GL, deferred | 0,04 | |
+| Metal gegen GL, Blick zur Sonne (TOD 0,33, YAW 90) | 0,10 (Wasserband) | |
+
+Die Animation ist ruhiger als vorher (vorher 25,6), weil die Wellen flacher sind; sie ist weiter
+klar sichtbar (95 % der Pixel ändern sich). Die Metal/GL-Abweichung ist **kleiner** als vorher
+(0,07). Alle FBM-Knoten des Wassers laufen jetzt auf dem Integer-Hash (`Fbm`-Knoten,
+`p[0] = 1`, `heFbmI`), der laut Codegen auf allen Backends bitgleich dasselbe Feld liefert; der
+Float-Hash des einfachen `Fbm` rundet bei großen Weltkoordinaten je GPU anders. Dass der Gewinn
+von dieser Umstellung kommt, ist eine Vermutung, nicht gemessen (keine A/B mit dem Float-Hash).
+
+Andere Einstellungen als die Rezept-Kamera (TOD 0,27/0,33/0,4/0,5, Kamera 2,5 m bis 12 m, Blick
+5° bis 60° nach unten, Sonne im Bild und nicht): Das Gitter ist in keiner der aufgenommenen
+Einstellungen mehr sichtbar, der Sonnenglitzer erscheint, wo die Wellen zur Sonne kippen
+(`new_sun.png`), die Himmelsstreifen sind schmal statt flächig. Das ist Augenschein an etwa
+zwanzig Aufnahmen, keine Messgröße für „realistisch".
+
+### 11.4 Kosten und Grenzen
+
+- Graph: 222 → 497 Knoten, längste Leitung 45 (`mat_gen` meldet sie jetzt, Obergrenze 90: der
+  Codegen rekursiert pro Ebene, siehe `CMakeLists.txt` „MSVC main-thread stack"), 15 Parameter,
+  keine Textur, `HeParams` unverändert.
+- **FBM-Auswertungen pro Pixel 6 → 14** (3 Warps, 6 Chop, 1 Böen, 2 Kaustik, 2 Schaum), je vier
+  Oktaven. **GPU-Zeit nicht gemessen.** Auf dem M5 ist die Aufnahme unauffällig; auf einer
+  schwachen iGPU bei voller Bildschirmfläche ist das der Posten, den man als Erstes prüft. Hebel,
+  falls nötig: die zweite Chop-Schicht und die Kaustik-FBM sind auf Stärke 0 entbehrlich (heute
+  trotzdem gerechnet, weil es keine Static Switches im Inspector gibt, §5a).
+- Der Glanz hängt am Himmel: Bei Sonne im Bild glitzert es, ohne Sonne bleibt das Wasser ein dunkler
+  Spiegel mit hellen Streifen am Horizont. Das ist gewollt, ändert aber den Eindruck mit Tageszeit
+  und Wolken stärker als vorher.
+- Nicht belegt: D3D11/D3D12/Vulkan im Bild (nur Kompilat: he_tests, glslang, spirv-val,
+  spirv-cross; `fxc` und `xcrun metal` laufen in CI), AMD/Intel, das exportierte Spiel,
+  Bedienen im laufenden Editor. Der Integer-Hash-FBM ist in `test_material_graph` für alle
+  Backends geprüft, im Wasser aber nicht auf D3D im Bild gesehen.
+- Das Website-Handbuch (`HC-Website`, `materials.html#water`, Zweig
+  `claude/eigener-wasser-shader-als-engine-default-material`) nennt noch die alten Defaults und
+  zeigt das alte Bild. Anderes Repo, Deploy braucht die Bestätigung des Menschen: nicht angefasst.
