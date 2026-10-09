@@ -21,10 +21,11 @@ Beide Wege münden in `ProjectLaunchOpen` (`src/HE_Editor/ProjectLaunchOpen.h`),
 einen Speicher für genau eine wartende Anfrage. Der Projekt Hub nimmt den Pfad über sein eigenes Laden,
 der Editor über `requestGuarded(GuardedAction::OpenProjectPath, ...)`, also mit der
 Rückfrage bei ungespeicherten Änderungen. Wartet ein Dialog, wartet auch das
-Projekt und das Log nennt den Dialog. Ein Pfad, der nicht existiert, ein Ordner
-oder eine andere Endung wird im Log gemeldet. Wurde ein `.heproj` beim Start
-genannt und lässt sich nicht öffnen, zeigt der Editor den Hub mit dem Grund statt
-des letzten Projekts.
+Projekt und das Log nennt den Dialog. Alles, was nicht geöffnet werden kann,
+steht im Log. Fehlt eine beim Start genannte `.heproj` oder ist der Pfad ein Ordner
+namens `*.heproj`, zeigt der Editor den Hub mit dem Grund statt des letzten
+Projekts. Ein Argument mit anderer Endung wird nur im Log vermerkt, der Start
+verläuft normal. Zur Laufzeit (macOS Ereignis) bleibt es bei der Logzeile.
 
 ## Wo die Teile liegen
 
@@ -131,9 +132,11 @@ Klassifikator abgelehnt, deshalb liegt der Text hier.
             project is open and has unsaved changes, it asks first, and if that
             very project is already open, nothing happens. The path also works
             on the command line, as in
-            <code>HorizonEditor MyGame.heproj</code>. A path that does not
-            exist, is a folder or does not end in <code>.heproj</code> is
-            reported in the log and the editor shows the Project Hub instead.
+            <code>HorizonEditor MyGame.heproj</code>. If a
+            <code>.heproj</code> named at launch is missing, or the path is a
+            folder, the editor shows the Project Hub with the reason instead of
+            the last project. Anything that is not a <code>.heproj</code> is
+            only noted in the log.
           </p>
           <div class="docs-table-wrap">
             <table class="docs-table">
