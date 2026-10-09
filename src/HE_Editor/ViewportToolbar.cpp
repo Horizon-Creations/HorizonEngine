@@ -75,6 +75,21 @@ void iconTerrain(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	                      { c.x + h,          c.y + h * 0.72f }, col);
 }
 
+// A curve through three points — Spline mode.
+void iconSpline(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.5f, t = stroke(s);
+	const ImVec2 a(c.x - h * 0.92f, c.y + h * 0.55f);
+	const ImVec2 b(c.x - h * 0.05f, c.y - h * 0.55f);
+	const ImVec2 d(c.x + h * 0.92f, c.y + h * 0.20f);
+	dl->AddBezierCubic(a, { a.x + h * 0.55f, a.y - h * 1.10f }, { b.x - h * 0.55f, b.y },
+	                   b, col, t);
+	dl->AddBezierCubic(b, { b.x + h * 0.55f, b.y }, { d.x - h * 0.50f, d.y - h * 1.00f },
+	                   d, col, t);
+	for (const ImVec2& p : { a, b, d })
+		dl->AddCircleFilled(p, t * 1.35f, col);
+}
+
 // Four-way arrow — Move.
 void iconMove(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 {
@@ -690,7 +705,8 @@ void render(AppContext& ctx, State& st)
 	auto leftWidth = [&](bool labels, bool snap)
 	{
 		float w = kWellPad * 2.0f + cellWidth(m, labels ? "View" : nullptr) + kSegGap
-		                          + cellWidth(m, labels ? "Landscape" : nullptr);
+		                          + cellWidth(m, labels ? "Landscape" : nullptr) + kSegGap
+		                          + cellWidth(m, labels ? "Spline" : nullptr);
 		w += kGroupGap + kWellPad * 2.0f + m.cell * 3.0f + kSegGap * 2.0f;
 		w += kGroupGap + kWellPad * 2.0f + (labels ? orientW : m.cell);
 		if (snap) w += kGroupGap + kWellPad * 2.0f + m.cell + kSegGap + snapValW;
@@ -729,13 +745,14 @@ void render(AppContext& ctx, State& st)
 	// ── Left zone: what the mouse does in the viewport ───────────────────────
 	float x = origin.x + edgeL;
 
-	// Editor mode. Two entries today, but the row is the natural home for any
+	// Editor mode. Three entries today, but the row is the natural home for any
 	// future one (paint, foliage), so it stays a segmented list rather than a
 	// checkbox pretending to be a mode.
 	{
 		const float wView = cellWidth(m, labels ? "View" : nullptr);
 		const float wLand = cellWidth(m, labels ? "Landscape" : nullptr);
-		well(m, x, kWellPad * 2.0f + wView + kSegGap + wLand);
+		const float wSpl  = cellWidth(m, labels ? "Spline" : nullptr);
+		well(m, x, kWellPad * 2.0f + wView + kSegGap + wLand + kSegGap + wSpl);
 		float cx = x + kWellPad;
 		if (cell(m, cx, wView, "##vpModeView", iconCursor, labels ? "View" : nullptr,
 		         ctx.editorConfig.mode == EditorMode::View, true,
@@ -746,13 +763,25 @@ void render(AppContext& ctx, State& st)
 		         ctx.editorConfig.mode == EditorMode::Landscape, true,
 		         "Landscape mode — sculpt and paint terrain", "viewport.mode"))
 			ctx.editorConfig.mode = EditorMode::Landscape;
-		x += kWellPad * 2.0f + wView + kSegGap + wLand + kGroupGap;
+		cx += wLand + kSegGap;
+		if (cell(m, cx, wSpl, "##vpModeSpline", iconSpline, labels ? "Spline" : nullptr,
+		         ctx.editorConfig.mode == EditorMode::Spline, true,
+		         "Spline mode — draw lines and outlines with points you can move", "viewport.mode"))
+			ctx.editorConfig.mode = EditorMode::Spline;
+		x += kWellPad * 2.0f + wView + kSegGap + wLand + kSegGap + wSpl + kGroupGap;
 	}
 
 	// Manipulation tools. Dead in Landscape mode (the gizmo is suppressed there
 	// so a stray drag can't move the terrain out from under the brush), so they
-	// dim instead of vanishing — the row keeps its shape either way.
-	const bool gizmoUsable = ctx.editorConfig.mode != EditorMode::Landscape;
+	// dim instead of vanishing — the row keeps its shape either way. Spline mode
+	// has a gizmo of its own on the selected point, Move only and always on the
+	// world axes: Move / Rotate / Scale and the axes cell dim there too, and
+	// the snapping beside them stays live because it applies to that gizmo.
+	const bool gizmoUsable = ctx.editorConfig.mode == EditorMode::View;
+	const bool snapUsable  = ctx.editorConfig.mode != EditorMode::Landscape;
+	// The one gizmo a spline point has is Move, so the snap beside it speaks
+	// metres whatever Rotate or Scale was armed in View mode.
+	if (ctx.editorConfig.mode == EditorMode::Spline) st.op = ImGuizmo::TRANSLATE;
 	{
 		well(m, x, kWellPad * 2.0f + m.cell * 3.0f + kSegGap * 2.0f);
 		float cx = x + kWellPad;
@@ -795,7 +824,7 @@ void render(AppContext& ctx, State& st)
 	{
 		well(m, x, kWellPad * 2.0f + m.cell + kSegGap + snapValW);
 		if (cell(m, x + kWellPad, m.cell, "##vpSnap", iconGrid, nullptr,
-		         st.snapEnabled, gizmoUsable, "Snap while dragging the gizmo",
+		         st.snapEnabled, snapUsable, "Snap while dragging the gizmo",
 		         "viewport.snap"))
 			st.snapEnabled = !st.snapEnabled;
 
@@ -803,19 +832,19 @@ void render(AppContext& ctx, State& st)
 		snapText(st, st.op, buf, sizeof(buf));
 		const float vx = x + kWellPad + m.cell + kSegGap;
 		ImGui::SetCursorScreenPos(ImVec2(vx, m.y + kWellPad));
-		if (!gizmoUsable) ImGui::BeginDisabled();
+		if (!snapUsable) ImGui::BeginDisabled();
 		const bool pressed = ImGui::InvisibleButton("##vpSnapValue", ImVec2(snapValW, m.cell));
 		const bool hovered = ImGui::IsItemHovered();
-		if (gizmoUsable) ImGui::SetItemTooltip("Snap increment for the active tool");
-		if (!gizmoUsable) ImGui::EndDisabled();
+		if (snapUsable) ImGui::SetItemTooltip("Snap increment for the active tool");
+		if (!snapUsable) ImGui::EndDisabled();
 		if (hovered)
 			dl->AddRectFilled(ImVec2(vx, m.y + kWellPad),
 			                  ImVec2(vx + snapValW, m.y + kWellPad + m.cell), kHoverBg, kCellRound);
-		const ImU32 fg = !gizmoUsable ? kFgDim : (st.snapEnabled ? kFgOn : kFg);
+		const ImU32 fg = !snapUsable ? kFgDim : (st.snapEnabled ? kFgOn : kFg);
 		const float tw = ImGui::CalcTextSize(buf).x;
 		dl->AddText(ImVec2(std::floor(vx + (snapValW - tw) * 0.5f),
 		                   std::floor(m.cy - ImGui::GetFontSize() * 0.5f)), fg, buf);
-		if (pressed && gizmoUsable) ImGui::OpenPopup("##vpSnapPopup");
+		if (pressed && snapUsable) ImGui::OpenPopup("##vpSnapPopup");
 		if (ImGui::BeginPopup("##vpSnapPopup"))
 		{
 			// The mode rows share the options popup's help scope — same

@@ -31,6 +31,7 @@
 #include "EditorToolbar.h"                // setRevealAssetHook — the asset tabs' header button
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
+#include "SplineTool.h"                  // Spline mode: its panel, and the Delete / Esc keys it takes first
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
 #include "ViewportToolbar.h"             // the View menu draws the toolbar's pickers
 #include "SecondaryViewportPanel.h"      // Scene 2 / 3 / 4: the level from other sides
@@ -3643,7 +3644,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (EditorShortcuts::pressed("entity.selectAll"))
                 selectAllEntities();
             if (escFree && !ctx.selection.empty() && EditorShortcuts::pressed("entity.deselect"))
-                ctx.selection.clear();
+            {
+                // Spline mode with a point held: Esc lets go of the point first,
+                // the second one deselects the spline.
+                if (!SplineTool::escapeKey(ctx))
+                    ctx.selection.clear();
+            }
         }
 
         // The scene tab is not enough on its own: the Content Browser is docked
@@ -3669,7 +3675,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     ctx.copyEntity();
                 if (EditorShortcuts::pressed("entity.cut") && ctx.cutEntity)
                     ctx.cutEntity();
-                if (EditorShortcuts::pressed("entity.delete") && ctx.deleteEntity)
+                // Spline mode with a point selected: Delete takes the point, not
+                // the spline it belongs to (the tool runs after this block in
+                // the frame, so the key has to be offered to it here).
+                if (EditorShortcuts::pressed("entity.delete") && !SplineTool::deleteKey(ctx) &&
+                    ctx.deleteEntity)
                     ctx.deleteEntity();
             }
             if (EditorShortcuts::pressed("entity.paste") && canPasteEntity() && ctx.pasteEntity)
@@ -4004,14 +4014,20 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // DockBuilderDockWindow("Quick Settings") still find this window, across
     // both the mode switch and this rename.
     const bool landscapePanel = ctx.editorConfig.mode == EditorMode::Landscape && ctx.world;
+    const bool splinePanel    = ctx.editorConfig.mode == EditorMode::Spline && ctx.world;
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin(landscapePanel ? "Landscape###Quick Settings"
+               : splinePanel    ? "Spline###Quick Settings"
                                 : "Quick Settings###Quick Settings");
     if (ctx.fontHeading) ImGui::PopFont();
 
     if (landscapePanel)
     {
         TerrainTools::renderPanel(ctx);
+    }
+    else if (splinePanel)
+    {
+        SplineTool::renderPanel(ctx);
     }
     else
     {

@@ -19,6 +19,7 @@
 // (local) position put them beside their entity under any moved parent.
 
 #include <DebugDraw/DebugDraw.h>
+#include "SplineEdit.h"   // GuideState
 
 class ContentManager;
 class EditorSelection;
@@ -59,6 +60,19 @@ namespace HE::Ed::ViewportOverlays
 	                                        const glm::vec3& viewer, float viewportAspect,
 	                                        DebugDrawBuffer& out);
 
+	// Every spline in the world as a line, and the selected ones with a handle
+	// box on each control point. The curve is the one the spline tool picks
+	// against (SplineEdit::kSamplesPerSpan samples a span, sampled in the
+	// entity's local space and moved to world), so the line on screen is the
+	// line a click is measured to. A closed spline's ring ends where it began.
+	// Handles keep a constant size on screen: their half-extent follows the
+	// distance to `viewer` (the editor camera). `tool` is the Spline mode's state
+	// for the spline being edited — the selected point, the hovered point, and
+	// where a click on the curve would insert; pass a default one outside it.
+	void appendSplineGuides(HorizonWorld& world, const EditorSelection& selection,
+	                        const SplineEdit::GuideState& tool, const glm::vec3& viewer,
+	                        DebugDrawBuffer& out);
+
 	// Segment counts of the shapes above, so a test can count what it asks for.
 	constexpr int kRangeSphereSegments = 32;   // per great circle, three circles
 	constexpr int kSpotRingSegments    = 32;   // the ring closing the cone
@@ -72,4 +86,21 @@ namespace HE::Ed::ViewportOverlays
 	constexpr glm::vec3 kSecondarySelectionColor{ 0.8f, 0.6f, 0.05f };
 	constexpr glm::vec3 kColliderColor          { 0.0f, 1.0f, 1.0f };
 	constexpr glm::vec3 kTriggerColor           { 1.0f, 0.0f, 1.0f };
+
+	// Splines: green, so they read apart from the amber of selection and ropes
+	// and the cyan/magenta of colliders. The first point is blue-ish — it says
+	// which way the line runs.
+	constexpr glm::vec3 kSplineColor            { 0.35f, 0.95f, 0.55f };
+	constexpr glm::vec3 kSplineDimColor         { 0.22f, 0.52f, 0.32f };
+	constexpr glm::vec3 kSplineHandleColor      { 0.85f, 1.00f, 0.88f };
+	constexpr glm::vec3 kSplineStartColor       { 0.45f, 0.80f, 1.00f };
+	constexpr glm::vec3 kSplineSelectedColor    { 1.00f, 0.80f, 0.00f };
+	constexpr glm::vec3 kSplineHoverColor       { 1.00f, 1.00f, 1.00f };
+	// Half the side of a handle box as a fraction of its distance from the
+	// viewer: about a dozen pixels on screen at any range.
+	constexpr float     kSplineHandleScale      = 0.008f;
+	// A handle is never thinner than this, however close the viewer stands.
+	constexpr float     kSplineHandleMin        = 0.02f;
+	// A selected or hovered handle is drawn this much larger.
+	constexpr float     kSplineHandleEmphasis   = 1.6f;
 }

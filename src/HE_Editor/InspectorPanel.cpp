@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <HorizonScene/SplineCurve.h>      // the Spline section's length readout
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -2668,6 +2669,64 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RopeComponent>(entity); }
 	}
 
+	// ── Spline ──────────────────────────────────────────────────────────────
+	// A line or an outline through its control points, in the entity's own space.
+	// It renders nothing and builds nothing by itself: the viewport draws it as a
+	// guide, and whatever uses it (a lake shore, a path) reads the points. The
+	// Spline mode of the Scene toolbar draws and edits the same data; this is the
+	// numeric view of it, and the way to type a point in exactly.
+	if (auto* spline = registry.try_get<SplineComponent>(entity))
+	{
+		if (componentHeader("Spline", true, removed))
+		{
+			EditorWidgets::checkbox("Closed##spline", &spline->closed); trackEdit();
+
+			char summary[96];
+			std::snprintf(summary, sizeof summary, "%zu point%s, %.2f m long",
+			              spline->controlPoints.size(),
+			              spline->controlPoints.size() == 1 ? "" : "s",
+			              HE::spline::Curve(*spline).length());
+			ImGui::TextDisabled("%s", summary);
+			if (spline->closed && spline->controlPoints.size() < 3)
+				hint("A closed spline needs at least three points; with fewer it is drawn open.");
+
+			// One fixed label for every row, so the tooltip lookup and the help
+			// audit see a single control rather than "Point 0", "Point 1" … (the
+			// same arrangement as the rope's control points).
+			ImGui::Spacing();
+			EditorWidgets::subHeading("Control Points");
+			for (int i = 0; i < static_cast<int>(spline->controlPoints.size()); ++i)
+			{
+				ImGui::PushID(i);
+				Row::dragFloat3("Point", &spline->controlPoints[static_cast<size_t>(i)].x,
+				                0.05f, -100000.0f, 100000.0f);
+				trackEdit();
+				// A spline may be emptied: every state on the way to a finished
+				// line is a valid component, the viewport tool deletes down to
+				// zero too.
+				if (EditorWidgets::dangerSmallButton("Remove##splinept"))
+				{
+					if (undo) undo->snapshotNow();
+					spline->controlPoints.erase(spline->controlPoints.begin() + i);
+					--i;
+				}
+				ImGui::PopID();
+			}
+			if (ImGui::Button("+ Point"))
+			{
+				if (undo) undo->snapshotNow();
+				// Carries on in the direction of the last segment, so the new point
+				// is somewhere you can see and grab; a lone point steps along +X.
+				const size_t n = spline->controlPoints.size();
+				const glm::vec3 tail = n ? spline->controlPoints[n - 1] : glm::vec3(0.0f);
+				glm::vec3 step = (n >= 2) ? (tail - spline->controlPoints[n - 2]) : glm::vec3(1.0f, 0.0f, 0.0f);
+				if (glm::dot(step, step) < 1e-8f) step = glm::vec3(1.0f, 0.0f, 0.0f);
+				spline->controlPoints.push_back(tail + step);
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SplineComponent>(entity); }
+	}
+
 	// ── Trail ───────────────────────────────────────────────────────────────
 	// The other half of the same feature and the opposite data rate: nothing here
 	// is geometry, it is the rule by which the entity drops points behind itself.
@@ -3645,6 +3704,7 @@ constexpr AddRow kRenderingRows[] = {
 	addRow<FoliageComponent>("Foliage"),
 	addRow<LODComponent>("LOD"),
 	addRow<RopeComponent>("Rope"),
+	addRow<SplineComponent>("Spline"),
 	addRow<TrailComponent>("Trail"),
 };
 constexpr AddRow kPhysicsRows[] = {

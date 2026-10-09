@@ -60,6 +60,12 @@ namespace
 	  "chain, a cable, a grapple line. It is geometry, not simulation: the points "
 	  "are where you put them, or where the entities its ends are attached to are.",
 	  "", "scenes#components" },
+	{ "Component/Spline", "Spline",
+	  "A line or a closed outline through its control points — a lake shore, a "
+	  "path, a fence run. It draws nothing in the game: the editor shows it as a "
+	  "guide, and whatever is built along it reads the points. Draw and edit it "
+	  "with the Spline mode of the Scene toolbar, or type the points in here.",
+	  "", "scenes#components" },
 	{ "Component/Trail", "Trail",
 	  "Leaves a band behind the entity as it moves: a weapon swipe, a tyre mark in "
 	  "the air, a projectile streak. Points are dropped as it travels and fade out "
@@ -1604,6 +1610,37 @@ namespace
 	  "Adds a control point at the far end, carrying on in the direction the last "
 	  "two describe, so it lands somewhere you can see and grab.",
 	  "", "scenes#components" },
+	{ "Spline/Closed", "",
+	  "Joins the last point back to the first, with the curve smooth across the "
+	  "join, so the line becomes an outline. It needs at least three points; with "
+	  "fewer it stays an open line until you add the third.",
+	  "", "scenes#components" },
+	{ "Spline/Point", "",
+	  "One control point, in the entity's own space. The curve passes through every "
+	  "one of them; drag the handle in the Scene view (Spline mode) or type the "
+	  "numbers here.",
+	  "", "scenes#components" },
+	{ "Spline/+ Point", "",
+	  "Adds a control point at the far end, carrying on in the direction of the "
+	  "last segment, so it lands somewhere you can see and grab.",
+	  "", "scenes#components" },
+	{ "Spline/Remove", "",
+	  "Deletes this control point. The spline stays even with none left, so you "
+	  "can start it again.",
+	  "", "scenes#components" },
+	{ "Spline Tool/Closed", "",
+	  "Joins the last point back to the first so the line becomes an outline "
+	  "(it needs three points). One undo step.",
+	  "", "editor#viewport" },
+	{ "Spline Tool/Delete Point", "",
+	  "Removes the selected point from the line. The Delete key does the same "
+	  "while the Scene view has the focus; the neighbouring point is selected "
+	  "next, so holding the key eats the line from the end you are at.",
+	  "", "editor#viewport" },
+	{ "Spline Tool/New Spline", "",
+	  "Lets go of the spline, so the next click on the ground starts a new line "
+	  "instead of adding to this one.",
+	  "", "editor#viewport" },
 	{ "Trail/Visible", "",
 	  "Off hides the band. Points keep being dropped and keep ageing, so switching "
 	  "it back on shows the trail as it would have been.",
@@ -2974,7 +3011,9 @@ namespace
 	  "", "editor#viewport" },
 	{ "viewport.mode", "Viewport Mode",
 	  "Scene is normal editing. Landscape turns the viewport into the terrain "
-	  "sculpting and painting tool, with its brushes in Quick Settings.",
+	  "sculpting and painting tool, with its brushes in Quick Settings. Spline "
+	  "draws lines and outlines: click the ground to add points, click the line "
+	  "to insert one, drag the gizmo to move one, Delete removes it.",
 	  "", "editor#landscape-mode" },
 	{ "viewport.show", "Show",
 	  "Which overlays the editor draws over the scene: the ground grid, the "
@@ -8468,6 +8507,7 @@ namespace
 		{ "env.",                 "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },
 		{ "Landscape/",           "editor-landscape", "Landscape Tools", "Sculpting and painting" },
+		{ "Spline Tool/",         "editor-landscape", "Landscape Tools", "Drawing splines" },
 		{ "Environment Window/",  "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "anim.",                      "editor-animation", "Animation Editors", "Animator" },
 		{ "State Machine/",             "editor-animation", "Animation Editors", "State machine" },

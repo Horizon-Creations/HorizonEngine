@@ -9,6 +9,7 @@
 #include "EditorMarquee.h"               // which objects a drawn frame encloses
 #include "ViewportPick.h"                // which object a click lands on (mesh before terrain)
 #include "PreviewPick.h"                 // screenRay — the surface-snap probe's ray
+#include "SplineTool.h"                  // Spline mode: points, handles, the Move gizmo on one
 #include <HorizonScene/TransformHierarchy.h>          // worldPositionOf — fresh, not a frame old
 #include <HorizonScene/Components/TerrainComponent.h>      // vertex snap skips the landscape
 #include <HorizonScene/Components/TerrainChunkComponent.h>
@@ -1394,8 +1395,63 @@ void render(AppContext& ctx, float dt)
 				// Suppressed in Landscape mode: there LMB belongs to the sculpt
 				// brush, and a stray gizmo drag would silently move/scale the
 				// terrain — which then breaks the brush's world↔grid mapping.
+				// Spline mode has its own: Move on the selected control point.
 				bool gizmoActive = false;
-				if (ctx.editorConfig.mode != EditorMode::Landscape && ctx.world)
+				if (ctx.editorConfig.mode == EditorMode::Spline && ctx.world)
+				{
+					// The same surface / vertex snapping a Move drag has on an
+					// entity, minus the entity: a control point rests on nothing
+					// of its own, so the probe excludes nothing.
+					EditorTransformGizmo::SnapProbe probe;
+					if (s_tb.probeSnapActive() && ctx.contentManager)
+					{
+						probe = [&](ViewportToolbar::State::SnapMode mode,
+						            const ImVec2& screen, glm::vec3& out) -> bool
+						{
+							const std::unordered_set<uint32_t> none;
+							const glm::mat4 viewProj = s_sceneSnapshot.camera.projection
+							                         * s_sceneSnapshot.camera.view;
+							const glm::vec2 rmin(rectMin.x, rectMin.y);
+							const glm::vec2 rsize(rectMax.x - rectMin.x, rectMax.y - rectMin.y);
+							const glm::vec2 at(screen.x, screen.y);
+							if (mode == ViewportToolbar::State::SnapMode::Vertex)
+							{
+								auto& reg = ctx.world->registry();
+								const HE::ScenePick::ObjectFilter base = surfaceFilter(none);
+								const HE::ScenePick::VertexHit hit = HE::ScenePick::nearestVertex(
+									sceneSnapshot(ctx), meshLookup(*ctx.contentManager), viewProj,
+									rmin, rsize, at, s_tb.snapVertexRadiusPx,
+									[&](const RenderObject& obj)
+									{
+										if (!base(obj)) return false;
+										const Entity e = static_cast<Entity>(obj.entityId);
+										return !reg.valid(e) ||
+										       !reg.any_of<TerrainComponent, TerrainChunkComponent>(e);
+									});
+								if (!hit.hit) return false;
+								out = hit.point;
+								return true;
+							}
+							glm::vec3 ro, rd;
+							if (!PreviewPick::screenRay(viewProj, rmin, rsize, at, ro, rd)) return false;
+							return probeSurface(ctx, sceneSnapshot(ctx), ro, rd, none, out);
+						};
+					}
+					// The ground a click lands on: the scene's surface under the
+					// ray, terrain included. Asked only on a click — the first
+					// ask of a frame runs the scene extract.
+					const SplineEdit::GroundProbe ground =
+						[&](const glm::vec3& origin, const glm::vec3& dir, glm::vec3& out) -> bool
+						{
+							const std::unordered_set<uint32_t> none;
+							return probeSurface(ctx, sceneSnapshot(ctx), origin, dir, none, out);
+						};
+					gizmoActive = SplineTool::updateInViewport(
+						ctx, s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
+						rectMin, rectMax, navigating, viewportHovered,
+						ImGui::IsItemClicked(ImGuiMouseButton_Left), s_tb, ground, probe);
+				}
+				if (ctx.editorConfig.mode == EditorMode::View && ctx.world)
 				{
 					// W/E/R switch operation while the viewport is hovered (but not
 					// while flying — W/A/S/D drive the camera then). The toolbar's
@@ -1497,7 +1553,7 @@ void render(AppContext& ctx, float dt)
 				static bool   s_pressArmed = false;  // LMB went down on the image with nothing else claiming it
 				static bool   s_frameLive  = false;  // …and has since moved far enough to be a frame
 				static ImVec2 s_pressPos{};
-				const bool pickable = ctx.editorConfig.mode != EditorMode::Landscape &&
+				const bool pickable = ctx.editorConfig.mode == EditorMode::View &&
 				                      ctx.world && !gizmoActive && !navigating && !io.KeyAlt;
 				if (pickable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
 				{
@@ -1507,7 +1563,7 @@ void render(AppContext& ctx, float dt)
 				}
 				// Whatever took the button mid-gesture — RMB fly-look, Alt orbit, a
 				// mode switch — cancels the gesture rather than finishing it.
-				if (s_pressArmed && (ctx.editorConfig.mode == EditorMode::Landscape ||
+				if (s_pressArmed && (ctx.editorConfig.mode != EditorMode::View ||
 				                     !ctx.world || navigating || io.KeyAlt))
 				{
 					s_pressArmed = false;

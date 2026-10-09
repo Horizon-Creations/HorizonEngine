@@ -234,6 +234,8 @@ add_executable(he_tests
     test_lod.cpp
     test_rope_trail.cpp
     test_spline.cpp
+    # The spline tool's click / delete / drag rules and their undo, headless.
+    test_spline_edit.cpp
     test_editor_icons.cpp
     # A click on a light's icon selects the light: the Scene window's picking
     # rule against a snapshot the real RenderExtractor produced.
@@ -357,6 +359,10 @@ add_executable(he_tests
     # The viewport's right-click verbs (hide / isolate / show all / group /
     # ungroup): a registry and a selection in, touched entities out — no ImGui.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportActions.cpp
+    # The spline tool's rules (pick a handle or the curve, add / insert / delete /
+    # close / move, one undo entry each, survive an undo): registry, camera matrix
+    # and EditorUndo in, no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineEdit.cpp
     # Multi-selection editing: which leaves of the active entity's component
     # state changed, and how they land on the other members. JSON in, JSON
     # out, plus a real world for the write-back — no widgets involved.

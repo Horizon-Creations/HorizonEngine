@@ -34,6 +34,9 @@
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
 #include "ViewportOverlays.h"      // selection boxes + collider outlines, shared with the dump
+#include "SplineTool.h"            // Spline mode: the tool's state for the overlay, the dump witness
+#include <HorizonScene/SplineCurve.h> // the witness aims its hover at a point on the curve
+#include <glm/gtc/matrix_transform.hpp> // perspective — the witness's mouse-to-ground view
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
 #include "GameLogicBuildPanel.h"   // …and the native compile they start the other way
 #include "BuildProgressDialog.h"   // …and the one window both of them report into
@@ -3955,6 +3958,19 @@ void EditorApplication::OnRender(float dt)
 					RopeTrailSystem::appendTrailGuides(*trail, dbg);
 			}
 
+			// Splines: every one as a line, the selected ones with a handle on
+			// each control point, and in Spline mode the point being edited and
+			// the spot a click on the line would insert at. Authoring furniture,
+			// so not while the game runs. Built in ViewportOverlays, the code the
+			// HE_DUMP_SPLINETEST witness draws with.
+			if (show.guides && !m_isPlaying)
+				HE::Ed::ViewportOverlays::appendSplineGuides(
+					*m_editorWorld, m_selection,
+					m_editorConfig.mode == EditorMode::Spline
+						? SplineTool::guides(*m_editorWorld, m_selection)
+						: SplineEdit::GuideState{},
+					m_editorCamera.position(), dbg);
+
 			// NavMesh wireframe(s): baked polygons, per-component toggle — and
 			// the viewport's switch over all of them, for a scene with twenty.
 			if (show.navMesh)
@@ -7875,6 +7891,112 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_LIGHTGIZMOTEST marker lines=%zu reach lines=%zu "
 			"| spot endpoints on its range sphere=%d of %d",
 			markerLines, lines.lines().size() - markerLines, onRange, spotEnds);
+		HE_LOG_INFO(Editor, "%s", line);
+		r->SetDebugLines(lines.lines());
+	}
+
+	// ── Spline tool witness (HE_DUMP_SPLINETEST): a line drawn the way the tool
+	// draws it. Clicks at pixel positions of the 1280x720 picture go through
+	// SplineEdit::Tool::click with this frame's camera — the mouse-to-ground
+	// mapping, the undo steps and the lines all run the code of the viewport —
+	// onto a floor, and the result is drawn by ViewportOverlays. The value is a
+	// list of words: "closed" joins the last point to the first, "undo" takes
+	// the last two edits back through EditorUndo and lets the tool find its
+	// spline again, "redo" brings one back, "hover" puts the cursor on a handle
+	// and then on the line (the highlighted box and the insert cross). The log
+	// line carries the numbers to read without the picture.
+	if (const char* st = std::getenv("HE_DUMP_SPLINETEST"); st && *st && m_editorWorld)
+	{
+		const std::string words(st);
+		auto has = [&](const char* w) { return words.find(w) != std::string::npos; };
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 base = m_editorCamera.position() + camFwd * 9.0f;
+
+		// The ground: a wide slab under the line, so the picture has a surface to
+		// read it against and the frame is not sky only.
+		const float floorTop = base.y - 1.9f;
+		auto floorE = m_editorWorld->createEntity("SplineFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(base.x, floorTop - 0.1f, base.z);
+		ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		m_undo.setWorld(m_editorWorld.get());
+		m_undo.clearHistory();
+		SplineEdit::Tool tool;
+		SplineEdit::View view;
+		{
+			const float aspect = 1280.0f / 720.0f;
+			view.viewProj = glm::perspective(glm::radians(m_editorCamera.fovDegrees()), aspect,
+			                                 m_editorCamera.nearPlane(), m_editorCamera.farPlane())
+			              * m_editorCamera.viewMatrix();
+			view.rectMin  = { 0.0f, 0.0f };
+			view.rectSize = { 1280.0f, 720.0f };
+		}
+		const SplineEdit::GroundProbe ground = [&](const glm::vec3& o, const glm::vec3& d, glm::vec3& out)
+		{
+			return SplineEdit::rayHitsPlaneY(o, d, floorTop, out);
+		};
+		// A bean of seven clicks, left to right then back.
+		const glm::vec2 clicks[] = { { 330, 520 }, { 470, 430 }, { 650, 400 }, { 830, 440 },
+		                             { 950, 530 }, { 800, 620 }, { 520, 630 } };
+		for (const glm::vec2& c : clicks)
+			tool.click(*m_editorWorld, m_selection, &m_undo, view, c, ground);
+		const size_t editsDone = m_undo.undoDepth();
+		if (has("closed"))
+			tool.toggleClosed(*m_editorWorld, m_selection, &m_undo);
+
+		auto splineNow = [&]() -> const SplineComponent* {
+			const Entity e = tool.activeSpline(*m_editorWorld, m_selection);
+			return e != entt::null ? reg.try_get<SplineComponent>(e) : nullptr;
+		};
+		const size_t pointsBefore = splineNow() ? splineNow()->controlPoints.size() : 0;
+		if (has("undo"))
+		{
+			// What Ctrl+Z does in the editor: the history steps back, the
+			// selection is cleared, and the tool picks its spline up again.
+			for (int i = 0; i < 2; ++i)
+				if (m_undo.undo()) m_selection.clear();
+			tool.sync(*m_editorWorld, m_selection, m_undo.revision());
+			if (has("redo"))
+			{
+				if (m_undo.redo()) m_selection.clear();
+				tool.sync(*m_editorWorld, m_selection, m_undo.revision());
+			}
+		}
+		if (has("hover"))
+		{
+			// On the second handle (the box lights up), then on the line between
+			// the third and fourth (the insert cross) — one frame each is all a
+			// picture holds, so the cross is what stays.
+			const SplineComponent* s = splineNow();
+			if (s && s->controlPoints.size() > 3)
+			{
+				const Entity e = tool.activeSpline(*m_editorWorld, m_selection);
+				const glm::mat4 model = HE::worldMatrixOf(*m_editorWorld, e);
+				const HE::spline::Curve curve(*s);
+				glm::vec2 px;
+				if (SplineEdit::project(view, glm::vec3(model * glm::vec4(curve.position(2.5f), 1.0f)), px))
+					tool.hover(*m_editorWorld, m_selection, view, px);
+			}
+		}
+
+		DebugDrawBuffer lines;
+		HE::Ed::ViewportOverlays::appendSplineGuides(
+			*m_editorWorld, m_selection, tool.guides(*m_editorWorld, m_selection),
+			m_editorCamera.position(), lines);
+		const SplineComponent* s = splineNow();
+		char line[384];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_SPLINETEST clicks=%zu edits=%zu points %zu -> %zu closed=%d "
+			"selected point=%d lines=%zu undo depth=%zu redo depth=%zu",
+			sizeof(clicks) / sizeof(clicks[0]), editsDone, pointsBefore, s ? s->controlPoints.size() : 0u,
+			s && s->closed ? 1 : 0, tool.selectedPoint(), lines.lines().size(),
+			m_undo.undoDepth(), m_undo.redoDepth());
 		HE_LOG_INFO(Editor, "%s", line);
 		r->SetDebugLines(lines.lines());
 	}

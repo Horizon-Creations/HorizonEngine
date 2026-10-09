@@ -15,6 +15,7 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/RopeComponent.h>
+#include <HorizonScene/Components/SplineComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
@@ -58,6 +59,7 @@ namespace
 		{ "Foliage",              anyOf<FoliageComponent> },
 		{ "Terrain",              anyOf<TerrainComponent> },
 		{ "Rope",                 anyOf<RopeComponent> },
+		{ "Spline",               anyOf<SplineComponent> },
 		{ "Trail",                anyOf<TrailComponent> },
 		{ "Animator",             anyOf<AnimatorComponent, AnimatorStateMachineComponent> },
 		{ "Navigation",           anyOf<NavMeshComponent, NavAgentComponent> },

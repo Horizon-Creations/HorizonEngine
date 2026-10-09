@@ -278,6 +278,10 @@ add_executable(HorizonEditor WIN32
 	TerrainTools.cpp
 	ViewportPanel.cpp
 	ViewportActions.cpp
+	# The spline tool: what a click, a Delete and a drag do to a SplineComponent
+	# (SplineEdit, no ImGui) and the viewport wiring that feeds it (SplineTool).
+	SplineEdit.cpp
+	SplineTool.cpp
 	ViewportToolbar.cpp
 	SecondaryViewportPanel.cpp
 	EditorToolbar.cpp
