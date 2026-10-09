@@ -121,8 +121,9 @@ Backends.
   dort nachzuziehen wäre; gezeigt ist das aber nur auf Metal und OpenGL. Offen für Schritt 9:
   Rückfälle im Transluzent-Pfad (Docs §3 des Wasser-Shader-Plans, z. B. Vulkan zeichnet Skinned
   nach den Transparenten), die jetzt das Wasser treffen.
-- **Ufer-Beschneidung und Aushub** (Schritte 5 und 6). Die Fläche ist der Fußabdruck des Feldes auf
-  Spiegelhöhe, sie steht über Gelände, das höher liegt. Der Ansatzpunkt für Schritt 5 ist das
+- **Ufer-Beschneidung** ist seit Schritt 5 da, siehe `water-shore-2026-10-09.md`; der Absatz unten
+  beschreibt den Stand von Schritt 4. **Aushub** (Schritt 6) fehlt weiterhin. Die Fläche war der
+  Fußabdruck des Feldes auf Spiegelhöhe, sie stand über Gelände, das höher liegt. Der Ansatzpunkt für Schritt 5 ist das
   Eckengitter (`buildLattice`): "nass UND unter dem Spiegel" ist das Minimum zweier solcher Arrays; und
   Schritt 5 liest die Terrain-Dirty-Flags im selben `updateTerrains`, in dem die Wasserfläche jetzt nachgeführt wird.
 - **Material wählbar**: alle Flächen nehmen das Engine-Wasser. Ein Feld `Field::material` (und

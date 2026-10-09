@@ -123,5 +123,8 @@ von Strichen). Der Editor-Undo braucht es nicht. Bei verschiedener Auflösung gi
   (Rundung), das liegt weit über `kWet`.
 - Wer `TerrainComponent` neu zuweist (`tc = TerrainComponent{...}`), verliert das
   Wasser; die Editor-Wege dafür (Generate, Import Heightmap) ändern nur Höhen.
-- Nicht gebaut: Fläche, Mesh, Ufer-Beschneidung, Aushub, Editor-UI, Inspector-Zeile
+- Seit Schritt 5 im Feld: `clipToGround` (an) und `shoreOvershoot` (0,05 m), siehe
+  `water-shore-2026-10-09.md`. Sie sind Einstellungen der Landschaft, nicht der Zellen; im Szenenformat
+  nur, wenn sie vom Standard abweichen (`waterClip`, `waterShoreOvershoot`).
+- Nicht gebaut (Stand Schritt 3): Fläche, Mesh, Ufer-Beschneidung, Aushub, Editor-UI, Inspector-Zeile
   für `water.res`.

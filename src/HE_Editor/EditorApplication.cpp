@@ -6988,7 +6988,7 @@ void EditorApplication::dumpFrameHeadless()
 					const float x = -64.0f + 128.0f * static_cast<float>(xi) / static_cast<float>(hr - 1);
 					const float z = -64.0f + 128.0f * static_cast<float>(zi) / static_cast<float>(hr - 1);
 					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
-						mode == "bowl" ? 0.0018f * (x * x + z * z) - 6.0f
+						mode == "bowl" ? 0.004f * (x * x + z * z) - 6.0f
 						               : 0.12f * x + 1.2f * std::sin(0.15f * z);
 				}
 		}
@@ -7032,7 +7032,7 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		else if (mode == "bowl")
 		{
-			// The hollow is r² = (level + 6) / 0.0018 deep: its rim stands well inside the polygon.
+			// The hollow's rim stands at r² = (level + 6) / 0.004, 45 m at level 2: inside the polygon.
 			const uint16_t b = ltc.water.createBody(level);
 			ok = water::addPolygon(ltc, b, { { -54, -50 }, { 50, -56 }, { 58, 40 }, { -48, 52 } }).ok;
 		}

@@ -28,8 +28,13 @@ class IRenderer;
 // rebuilds every body. Nothing here touches the terrain's chunks.
 //
 // WHAT IT CLEARS. Field::dirty, once it has caught up. Shore clipping against the
-// ground (Schritt 5) adds a second input to the same pass: the ground's own dirty
-// flags are read in TerrainSystem::updateTerrains right next to the call.
+// ground (Thema 174 Schritt 5, Field::clipToGround) adds a second input to the same
+// pass: where TerrainSystem::updateTerrains regenerates chunks it first hands the
+// rectangle it is about to clear (or the whole terrain) to water::noteGroundChanged,
+// which marks it dirty here. A sculpt stroke under a lake therefore rebuilds that
+// lake's lattice (the ground is part of its hash); the mesh is only replaced when
+// the lattice really differs. The clipping settings are part of paramsKey, so
+// switching them rebuilds every body that has a surface.
 //
 // OWNERSHIP. The meshes are registered once per surface and afterwards replaced in
 // place (the pool of the content manager may move under other holders' pointers on
