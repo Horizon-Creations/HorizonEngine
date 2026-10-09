@@ -116,6 +116,7 @@ add_executable(he_tests
     test_terrain.cpp
     # The water model: bodies, coverage + owner raster, circle/polygon edits, scene format, undo.
     test_water_field.cpp
+    test_water_surface.cpp
     # The refined level near the camera: Catmull-Rom between the samples,
     # displacement, the build/release life cycle and its budget.
     test_terrain_tessellation.cpp

@@ -1426,7 +1426,7 @@ void render(AppContext& ctx, float dt)
 										if (!base(obj)) return false;
 										const Entity e = static_cast<Entity>(obj.entityId);
 										return !reg.valid(e) ||
-										       !reg.any_of<TerrainComponent, TerrainChunkComponent>(e);
+										       !(reg.all_of<TerrainComponent>(e) || HE::isTerrainGenerated(reg, e));
 									});
 								if (!hit.hit) return false;
 								out = hit.point;
@@ -1506,7 +1506,7 @@ void render(AppContext& ctx, float dt)
 										if (!base(obj)) return false;
 										const Entity e = static_cast<Entity>(obj.entityId);
 										return !reg.valid(e) ||
-										       !reg.any_of<TerrainComponent, TerrainChunkComponent>(e);
+										       !(reg.all_of<TerrainComponent>(e) || HE::isTerrainGenerated(reg, e));
 									});
 								if (!hit.hit) return false;
 								out = hit.point;
@@ -1616,7 +1616,7 @@ void render(AppContext& ctx, float dt)
 					{
 						const Entity e = static_cast<Entity>(entityId);
 						if (!reg.valid(e) || !seen.insert(entityId).second) return;
-						if (reg.any_of<TerrainChunkComponent, TerrainComponent>(e)) return;
+						if (reg.all_of<TerrainComponent>(e) || HE::isTerrainGenerated(reg, e)) return;
 						// Locked in the Outliner: not framed, as it is not clicked.
 						if (reg.all_of<EditorLockComponent>(e)) return;
 						const HE::AABB* box = (meshId != HE::UUID{} && ctx.contentManager)

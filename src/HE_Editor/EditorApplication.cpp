@@ -9643,7 +9643,7 @@ void EditorApplication::syncStructuralChanges()
 	// peer, so the allocators are never in lockstep.
 	const auto isLocalOnly = [&reg](Entity e) {
 		return reg.all_of<EnvironmentLightComponent>(e) ||
-		       reg.all_of<TerrainChunkComponent>(e);
+		       HE::isTerrainGenerated(reg, e);
 	};
 
 	std::unordered_set<Entity> current;

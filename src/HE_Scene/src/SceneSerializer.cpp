@@ -966,11 +966,12 @@ namespace
 		auto view = registry.view<NameComponent>();
 		for (auto entity : view)
 		{
-			// The built-in environment sun/moon lights and runtime terrain chunks are
-			// never serialised — both are recreated on load (ensureEnvironmentLights /
-			// TerrainSystem from the TerrainComponent), so the scene file stays clean.
+			// The built-in environment sun/moon lights and what a landscape generates
+			// for itself (terrain chunks, water surfaces) are never serialised — all
+			// are recreated on load (ensureEnvironmentLights / TerrainSystem from the
+			// TerrainComponent), so the scene file stays clean.
 			if (registry.all_of<EnvironmentLightComponent>(entity) ||
-			    registry.all_of<TerrainChunkComponent>(entity))
+			    HE::isTerrainGenerated(registry, entity))
 				continue;
 
 			json eJson;
@@ -1001,7 +1002,7 @@ namespace
 				json children = json::array();
 				for (auto child : hier->children)
 					if (!registry.all_of<EnvironmentLightComponent>(child) &&    // omit built-ins
-					    !registry.all_of<TerrainChunkComponent>(child))          // + terrain chunks
+					    !HE::isTerrainGenerated(registry, child))                // + chunks, water
 						children.push_back(uuidToJson(entityUuid(registry, child)));
 				eJson["children"] = children;
 			}
@@ -2219,7 +2220,7 @@ namespace
 	bool isEngineGenerated(entt::registry& registry, Entity e)
 	{
 		return registry.all_of<EnvironmentLightComponent>(e) ||
-		       registry.all_of<TerrainChunkComponent>(e);
+		       HE::isTerrainGenerated(registry, e);
 	}
 
 	void collectSubtree(entt::registry& registry, Entity root,

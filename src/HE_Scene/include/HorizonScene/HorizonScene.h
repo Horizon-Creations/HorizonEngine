@@ -40,6 +40,7 @@
 #include "Components/WeatherComponent.h"
 #include "Components/TerrainComponent.h"
 #include "Components/TerrainChunkComponent.h"
+#include "Components/WaterSurfaceComponent.h"
 #include "Components/AudioSourceComponent.h"
 #include "Components/AudioListenerComponent.h"
 #include "Components/ParticleSystemComponent.h"
@@ -56,6 +57,7 @@
 #include <UIWidget/WidgetManager.h>
 #include "TerrainMeshGenerator.h"
 #include "TerrainSystem.h"
+#include "WaterSurface.h"
 
 // Re-export EnTT entity type
 #include <entt/entt.hpp>

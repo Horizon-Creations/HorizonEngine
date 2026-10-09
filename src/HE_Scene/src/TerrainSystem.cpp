@@ -10,6 +10,7 @@
 #include "HorizonScene/TerrainHeightmap.h"
 #include "HorizonScene/TerrainPaint.h"
 #include "HorizonScene/TransformHierarchy.h"
+#include "HorizonScene/WaterSurface.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
@@ -579,6 +580,14 @@ namespace TerrainSystem
             if (physics)
                 g_pendingTerrainColliders[&world][static_cast<uint32_t>(te)] = true;
         }
+
+        // ── Water surfaces ───────────────────────────────────────────────────
+        // After the chunks and OUTSIDE the dirty gate above: a water edit leaves
+        // the terrain clean (Field::dirty is the water's own flag, a brush stroke
+        // must not regenerate chunks) and still needs its surface. In this function
+        // rather than in the world tick so that every direct updateTerrains of the
+        // editor — and the headless dump, which renders before any tick — gets it.
+        WaterSurface::update(world, cm, renderer);
 
         // ── The collider catches up when the edit stops ──────────────────────
         // A height-field rebuild is not in the same price class as the mesh

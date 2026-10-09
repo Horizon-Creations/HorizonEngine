@@ -289,9 +289,9 @@ void HorizonWorld::purgeOrphanedGeneratedEntities()
         for (Entity child : hier->children)
         {
             if (!m_registry.valid(child)) continue;
-            if (m_registry.all_of<TerrainChunkComponent>(child)) continue; // live chunk
+            if (HE::isTerrainGenerated(m_registry, child)) continue; // live chunk or water surface
             const auto* n = m_registry.try_get<NameComponent>(child);
-            if (n && n->name == "TerrainChunk")
+            if (n && (n->name == "TerrainChunk" || n->name == "WaterSurface"))
                 ghosts.push_back(child);
         }
     }

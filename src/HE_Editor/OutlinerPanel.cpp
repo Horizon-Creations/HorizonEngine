@@ -541,11 +541,12 @@ void render(AppContext& ctx)
             {
                 if (!registry.valid(entity)) return;
                 // The built-in environment sun/moon lights belong to the World's
-                // Environment, and runtime terrain chunks are generated from the
-                // TerrainComponent — hide both from the Outliner.
+                // Environment, and runtime terrain chunks and water surfaces are
+                // generated from the TerrainComponent — hide all of them from the
+                // Outliner.
                 if (entity != ctx.world->rootEntity() &&
                     (registry.all_of<EnvironmentLightComponent>(entity) ||
-                     registry.all_of<TerrainChunkComponent>(entity)))
+                     HE::isTerrainGenerated(registry, entity)))
                     return;
                 auto* name = registry.try_get<NameComponent>(entity);
                 auto* hier = registry.try_get<HierarchyComponent>(entity);

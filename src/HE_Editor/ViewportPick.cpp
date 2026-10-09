@@ -42,8 +42,10 @@ Entity pick(const RenderWorld& snapshot, entt::registry& reg, const BoxLookup& b
 		Entity terrainOwner = entt::null;
 		if (reg.valid(e))
 		{
-			if (auto* cc = reg.try_get<TerrainChunkComponent>(e)) terrainOwner = cc->terrain;
-			else if (reg.all_of<TerrainComponent>(e))            terrainOwner = e;
+			// A chunk or a water surface answers for its landscape: clicking the
+			// water selects the landscape, never the hidden surface entity.
+			terrainOwner = HE::terrainOwnerOf(reg, e);
+			if (terrainOwner == entt::null && reg.all_of<TerrainComponent>(e)) terrainOwner = e;
 		}
 		// Locked in the Outliner: the click passes through to whatever is
 		// behind. Decided after the terrain lookup so a locked landscape's
