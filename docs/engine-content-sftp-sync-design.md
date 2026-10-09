@@ -304,3 +304,45 @@ three jobs reading the real endpoint, which is exactly the kind of asymmetry
 this step was asked to find. Per point 2, it changes nothing the image tests
 actually do.
 
+
+---
+
+## Referenzen laden von selbst nach — auch per Pfad und transitiv (2026-10-09)
+
+**Vorher:** `registerRemoteAsset` bediente nur Verweise per **UUID** (`ensureResident` / `loadAssetAsync(UUID)` — eine
+Szene, die einen Default-Mesh nennt). Ein Verweis per **Pfad** — die Textur oder das Textur-Array eines Materials,
+sein Parent, eine Funktion im Node-Graph, das Material eines Meshes — läuft über `loadAsset(path)`, und das fand
+keine Datei und gab auf (`Cannot load asset …`); das Material blieb grau/Platzhalter, bis man die Datei von Hand
+im Content Browser herunterlud. Und was ein heruntergeladenes Asset selbst referenziert, wurde erst beim ersten
+Zeichnen angefragt.
+
+**Jetzt** (`ContentManager`):
+
+1. **Pfad → Remote-Eintrag.** `registerRemoteAsset` merkt sich den Eintrag auch unter seinem Pfad
+   (`m_remoteByPath`, „Engine/Textures/…“). `loadAsset(path)` fragt vor dem Plattenzugriff
+   `requestRemotePath(path)`: gibt es für den Pfad einen Remote-Eintrag **und keine lokale Datei** (echt, Override
+   oder Cache — eine lokale Datei gewinnt immer), wird der Download im Hintergrund angestoßen (dedupliziert wie
+   bisher: ein Renderer, der jeden Frame fragt, startet ihn einmal) und `loadAsset` meldet „noch nicht da“
+   (`UUID{}`, ohne Fehlermeldung). Sobald die Datei gelandet ist, liefert die nächste Frage das Asset — mit
+   der UUID, die das Manifest versprochen hat. Ein fehlgeschlagener Download lässt den Eintrag stehen; die nächste
+   Anfrage versucht es erneut.
+2. **Transitiv.** Jedes registrierte Asset (von Platte oder frisch heruntergeladen) stößt beim Registrieren die
+   Downloads dessen an, worauf es zeigt (`prefetchRemoteReferences`): bei einem **Material** Shader, Texturen,
+   **Graph-Texturen/-Arrays**, Parent-Material, **die im Graph aufgerufenen Funktionen** (Pfad und baked UUID);
+   bei einem **Mesh** sein Material und das jeder Section. Die Kette setzt sich fort, weil jedes dabei ankommende
+   Asset dasselbe tut. Ohne Remote-Einträge (jedes ausgelieferte Spiel, jeder Offline-Editor) kostet das einen
+   `empty()`-Test.
+3. **Materialien warten auf ihre Funktionen.** Ein Material mit Graph baut sein GLSL beim Laden neu aus dem Graph;
+   ruft der Graph eine Funktion auf, die noch remote ist, würde das den „missing function“-Platzhalter einbacken.
+   `graphFunctionsReady` lässt die Neuerzeugung dann aus (das mit dem Asset gespeicherte GLSL bleibt) und stößt den
+   Download der Funktion an.
+4. **Instanzen folgen ihrem Parent.** Kommt ein Material per Download an, werden die Instanzen neu abgeleitet
+   (`syncMaterialInstancesOf`), die sich registriert hatten, als ihr Parent noch fehlte.
+
+**Grenzen.** Nur Assets **mit UUID im Manifest** (rohe Dateien ohne `.hasset` gehören weiter dem Content Browser).
+Nur die Verweisarten oben — Widgets (Texturen/Fonts), HorizonCode-Graphen und Sequenzen laden per UUID/Pfad
+bei Bedarf, werden aber nicht vorab nachgezogen. Ein Renderer, der „Textur fehlt“ dauerhaft cachte, würde die
+Ankunft verpassen; die Grafik-Backends lösen Graph-Texturen jeden Frame neu auf (`ResolveGraphTexture`) und holen
+sie deshalb nach. Getestet in `test_contentmanager.cpp` („Remote EngineContent: …“, fünf Fälle mit einem
+simulierten Server: Pfad-Verweis, lokale Datei nicht überschatten, Material zieht Textur, fehlgeschlagener Download,
+Funktion vor Regenerierung).
