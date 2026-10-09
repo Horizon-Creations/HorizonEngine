@@ -168,6 +168,58 @@ void GitController::requestCommitAll(const std::string& message)
 		                             ? HE::Ed::Rewards::kSyncPush : 0));
 }
 
+void GitController::requestStage(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	m_service.requestStage(std::move(paths));
+}
+
+void GitController::requestUnstage(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	m_service.requestUnstage(std::move(paths));
+}
+
+void GitController::requestDiscard(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	m_service.requestDiscard(std::move(paths));
+}
+
+void GitController::requestCommitStaged(const std::string& message, bool push, bool amend)
+{
+	if (!mayModify() || (message.empty() && !amend)) return;
+	m_service.requestCommitStaged(message, push, amend);
+	// Reward moment, as in requestCommitAll.
+	if (m_service.busy())
+		m_syncWatch.requested(HE::Ed::Rewards::kSyncCommit
+		                      | (push && !m_service.remoteUrl().empty()
+		                             ? HE::Ed::Rewards::kSyncPush : 0));
+}
+
+void GitController::requestResolveConflict(const std::string& path, bool keepMine)
+{
+	if (!mayModify() || path.empty()) return;
+	m_service.requestResolveConflict(path, keepMine);
+}
+
+void GitController::requestSwitchBranch(const std::string& name, bool stashFirst)
+{
+	if (!mayModify() || name.empty()) return;
+	m_service.requestSwitchBranch(name, stashFirst);
+}
+
+void GitController::requestStashPop()
+{
+	if (!mayModify()) return;
+	m_service.requestStashPop();
+}
+
+void GitController::requestCommitFiles(const std::string& commit)
+{
+	m_service.requestCommitFiles(commit);
+}
+
 void GitController::requestRestoreTo(const std::string& commit, const std::string& shortOid)
 {
 	if (!mayModify() || commit.empty()) return;

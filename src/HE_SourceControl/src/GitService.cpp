@@ -116,6 +116,79 @@ void GitService::requestCommitAll(const std::string& message, bool pushAfter)
 	push(std::move(c));
 }
 
+void GitService::requestStage(std::vector<std::string> paths)
+{
+	if (!m_worker.joinable() || paths.empty()) return;
+	Command c{ Kind::Stage, {} };
+	c.paths = std::move(paths);
+	push(std::move(c));
+}
+
+void GitService::requestUnstage(std::vector<std::string> paths)
+{
+	if (!m_worker.joinable() || paths.empty()) return;
+	Command c{ Kind::Unstage, {} };
+	c.paths = std::move(paths);
+	push(std::move(c));
+}
+
+void GitService::requestDiscard(std::vector<std::string> paths)
+{
+	if (!m_worker.joinable() || paths.empty()) return;
+	Command c{ Kind::Discard, {} };
+	c.paths = std::move(paths);
+	push(std::move(c));
+}
+
+void GitService::requestCommitStaged(const std::string& message, bool pushAfter, bool amend)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::CommitStaged, {} };
+	c.text  = message;
+	c.flag  = pushAfter;
+	c.flag2 = amend;
+	push(std::move(c));
+}
+
+void GitService::requestResolveConflict(const std::string& path, bool ours)
+{
+	if (!m_worker.joinable() || path.empty()) return;
+	Command c{ Kind::ResolveConflict, {} };
+	c.text = path;
+	c.flag = ours;
+	push(std::move(c));
+}
+
+void GitService::requestSwitchBranch(const std::string& name, bool stashFirst)
+{
+	if (!m_worker.joinable() || name.empty()) return;
+	Command c{ Kind::SwitchBranch, {} };
+	c.text = name;
+	c.flag = stashFirst;
+	push(std::move(c));
+}
+
+void GitService::requestStashPop()
+{
+	if (!m_worker.joinable()) return;
+	push(Command{ Kind::StashPop, {} });
+}
+
+void GitService::requestCommitFiles(const std::string& commit)
+{
+	if (!m_worker.joinable() || commit.empty()) return;
+	Command c{ Kind::CommitFiles, {} };
+	c.text = commit;
+	push(std::move(c));
+}
+
+const std::vector<GitCli::ChangedFile>*
+GitService::commitFiles(const std::string& commit) const
+{
+	const auto it = m_commitFiles.find(commit);
+	return it == m_commitFiles.end() ? nullptr : &it->second;
+}
+
 void GitService::requestRestoreTo(const std::string& commit, const std::string& shortOid)
 {
 	if (!m_worker.joinable()) return;
@@ -200,6 +273,85 @@ void GitService::requestStatus()
 	push(Command{ Kind::Status, {} });
 }
 
+namespace {
+
+// The size pass every path into the index goes through, BEFORE anything is staged:
+// two verdicts, both cheaper now than later. Big media is routed into LFS per file
+// (a blanket `*.png` glob would drag every icon along - and LFS bandwidth is the
+// resource that runs out on GitHub), and an oversized NON-media file refuses the
+// operation with its name while the fix is still trivial. At push time the same
+// file is a rejected push and a history rewrite.
+struct SizeVerdict
+{
+	std::string              error;     // non-empty = refuse
+	std::vector<std::string> tracked;   // newly routed into LFS by this pass
+};
+
+SizeVerdict routeLargeFiles(const std::filesystem::path& root,
+                            const std::vector<std::string>& rels)
+{
+	SizeVerdict v;
+	std::vector<std::string> toTrack;
+	std::string blocked;
+	for (const std::string& rel : rels)
+	{
+		std::error_code ec;
+		const auto size = std::filesystem::file_size(root / rel, ec);
+		if (ec) continue;   // deleted or unreadable - nothing to route
+
+		if (RepoConfig::isAutoLfsCandidate(rel))
+		{
+			if (size >= RepoConfig::kAutoLfsThresholdBytes) toTrack.push_back(rel);
+		}
+		else if (size >= RepoConfig::kHardLimitBytes)
+		{
+			blocked += "\n  " + rel + " (" + std::to_string(size / (1024 * 1024)) + " MB)";
+		}
+	}
+
+	if (!blocked.empty())
+	{
+		v.error = "these files exceed 100 MB and are not media assets, so the "
+		          "push would be rejected:" + blocked + "\nMove them out, or track them "
+		          "through LFS by hand if they truly belong in the repository.";
+		return v;
+	}
+	if (toTrack.empty()) return v;
+
+	if (!GitCli::lfsAvailable(root))
+	{
+		v.error = std::to_string(toTrack.size()) + " large media file(s) "
+		          "need Git LFS, and git-lfs is not installed. Install it and try again.";
+		return v;
+	}
+	for (const std::string& rel : toTrack)
+	{
+		std::string err;
+		if (!GitCli::lfsTrack(root, rel, &err)) { v.error = err; return v; }
+		HE_SC_INFO("LFS: tracking %s (over the size threshold)", rel.c_str());
+		v.tracked.push_back(rel);
+	}
+	return v;
+}
+
+std::vector<std::string> dirtyPaths(const RepoStatus& st)
+{
+	std::vector<std::string> out;
+	for (const auto& [rel, entry] : st.files)
+		if (entry.dirty()) out.push_back(rel);
+	return out;
+}
+
+std::vector<std::string> stagedPaths(const RepoStatus& st)
+{
+	std::vector<std::string> out;
+	for (const auto& [rel, entry] : st.files)
+		if (entry.staged()) out.push_back(rel);
+	return out;
+}
+
+} // namespace
+
 void GitService::workerMain()
 {
 	for (;;)
@@ -272,64 +424,12 @@ void GitService::workerMain()
 		{
 			std::string err;
 
-			// ── Size pass, BEFORE anything is staged ─────────────────────────
-			// Two verdicts, both cheaper now than later: big media gets routed
-			// into LFS per file (a blanket `*.png` glob would drag every icon
-			// along — and LFS bandwidth is the resource that runs out on
-			// GitHub), and an oversized NON-media file refuses the commit with
-			// its name while the fix is still trivial. At push time the same
-			// file is a rejected push and a history rewrite.
+			// Size pass (routeLargeFiles) over everything this commit would take in.
 			{
 				RepoStatus pre;
 				if (!GitCli::status(m_root, pre, &err)) { ev.error = err; break; }
-
-				std::vector<std::string> toTrack;
-				std::string blocked;
-				for (const auto& [rel, entry] : pre.files)
-				{
-					if (!entry.dirty()) continue;
-					std::error_code ec;
-					const auto size = std::filesystem::file_size(m_root / rel, ec);
-					if (ec) continue;   // deleted or unreadable — nothing to route
-
-					if (RepoConfig::isAutoLfsCandidate(rel))
-					{
-						if (size >= RepoConfig::kAutoLfsThresholdBytes)
-							toTrack.push_back(rel);
-					}
-					else if (size >= RepoConfig::kHardLimitBytes)
-					{
-						blocked += "\n  " + rel + " (" +
-						           std::to_string(size / (1024 * 1024)) + " MB)";
-					}
-				}
-
-				if (!blocked.empty())
-				{
-					ev.error = "Commit refused — these files exceed 100 MB and are "
-					           "not media assets, so the push would be rejected:" +
-					           blocked + "\nMove them out, or track them through "
-					           "LFS by hand if they truly belong in the repository.";
-					break;
-				}
-
-				if (!toTrack.empty())
-				{
-					if (!GitCli::lfsAvailable(m_root))
-					{
-						ev.error = "Commit refused — " + std::to_string(toTrack.size()) +
-						           " large media file(s) need Git LFS, and git-lfs is "
-						           "not installed. Install it and commit again.";
-						break;
-					}
-					bool ok = true;
-					for (const std::string& rel : toTrack)
-					{
-						if (!GitCli::lfsTrack(m_root, rel, &err)) { ok = false; break; }
-						HE_SC_INFO("LFS: tracking %s (over the size threshold)", rel.c_str());
-					}
-					if (!ok) { ev.error = err; break; }
-				}
+				const SizeVerdict v = routeLargeFiles(m_root, dirtyPaths(pre));
+				if (!v.error.empty()) { ev.error = "Commit refused - " + v.error; break; }
 			}
 
 			if (!GitCli::addAll(m_root, &err))            { ev.error = err; break; }
@@ -345,6 +445,139 @@ void GitService::workerMain()
 				else ev.error = "Committed, but the push failed: " + err;
 			}
 			wantStatus = true;
+			break;
+		}
+		case Kind::Stage:
+		{
+			std::string err;
+			const SizeVerdict v = routeLargeFiles(m_root, cmd.paths);
+			if (!v.error.empty()) { ev.error = "Staging refused - " + v.error; break; }
+			std::vector<std::string> paths = cmd.paths;
+			// `lfs track` edits .gitattributes; it has to travel with the files it routes.
+			if (!v.tracked.empty()) paths.push_back(".gitattributes");
+			if (!GitCli::stage(m_root, paths, &err)) { ev.error = err; wantStatus = true; break; }
+			wantStatus = true;
+			break;
+		}
+		case Kind::Unstage:
+		{
+			std::string err;
+			if (!GitCli::unstage(m_root, cmd.paths, &err)) ev.error = err;
+			wantStatus = true;
+			break;
+		}
+		case Kind::Discard:
+		{
+			std::string err;
+			if (!GitCli::discard(m_root, cmd.paths, &err)) ev.error = err;
+			else ev.info = cmd.paths.size() == 1 ? "Change discarded."
+			                                     : std::to_string(cmd.paths.size()) + " changes discarded.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::CommitStaged:
+		{
+			std::string err;
+			RepoStatus pre;
+			if (!GitCli::status(m_root, pre, &err)) { ev.error = err; break; }
+			if (pre.hasConflicts())
+			{
+				ev.error = "Resolve the conflicts first.";
+				break;
+			}
+			const std::vector<std::string> staged = stagedPaths(pre);
+			if (staged.empty() && !cmd.flag2)
+			{
+				ev.error = "Nothing is staged - tick the files this commit should contain.";
+				break;
+			}
+			// Files can reach the index without the panel (the command line, an older
+			// version of the editor), so the size pass runs here too. Anything it
+			// routes into LFS now was staged as a plain blob: add it again, filtered.
+			const SizeVerdict v = routeLargeFiles(m_root, staged);
+			if (!v.error.empty()) { ev.error = "Commit refused - " + v.error; break; }
+			if (!v.tracked.empty())
+			{
+				std::vector<std::string> args = { "--literal-pathspecs", "add", "--renormalize", "--" };
+				args.insert(args.end(), v.tracked.begin(), v.tracked.end());
+				args.push_back(".gitattributes");
+				const GitResult r = GitCli::run(m_root, args, 60000);
+				if (!r.ok) { ev.error = r.err; break; }
+			}
+			if (!GitCli::commit(m_root, cmd.text, &err, cmd.flag2)) { ev.error = err; break; }
+			ev.info = cmd.flag2 ? "Amended." : "Committed.";
+			if (cmd.flag && !GitCli::remoteUrl(m_root).empty())
+			{
+				RepoStatus probe;
+				const bool upstream = GitCli::status(m_root, probe) && !probe.upstream.empty();
+				if (GitCli::push(m_root, upstream, &err)) ev.info += " Pushed.";
+				else ev.error = std::string(cmd.flag2 ? "Amended" : "Committed") +
+				                ", but the push failed: " + err;
+			}
+			wantStatus = true;
+			break;
+		}
+		case Kind::ResolveConflict:
+		{
+			std::string err;
+			if (!GitCli::resolveConflict(m_root, cmd.text, cmd.flag, &err)) ev.error = err;
+			wantStatus = true;
+			break;
+		}
+		case Kind::SwitchBranch:
+		{
+			std::string err;
+			bool stashed = false;
+			if (cmd.flag)
+			{
+				RepoStatus pre;
+				if (!GitCli::status(m_root, pre, &err)) { ev.error = err; break; }
+				if (pre.dirtyCount() != 0)
+				{
+					if (!GitCli::stashPush(m_root, "Before switching to " + cmd.text, &err))
+					{
+						ev.error = err;
+						break;
+					}
+					stashed = true;
+				}
+			}
+			if (!GitCli::switchBranch(m_root, cmd.text, &err))
+			{
+				ev.error = err;
+				// Put the work back where it was: a failed switch must not leave it
+				// hiding in a stash the user never asked for.
+				if (stashed)
+				{
+					std::string popErr;
+					if (!GitCli::stashPop(m_root, &popErr))
+						ev.error += "\nYour changes are still in the stash (" + popErr + ")";
+				}
+				wantStatus = true;
+				break;
+			}
+			ev.info = "Switched to " + cmd.text + ".";
+			if (stashed) ev.info += " Your changes are stashed - use \"Bring back stashed changes\" to restore them.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::StashPop:
+		{
+			std::string err;
+			if (!GitCli::stashPop(m_root, &err)) ev.error = err;
+			else ev.info = "Stashed changes restored.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::CommitFiles:
+		{
+			std::string err;
+			if (!GitCli::commitFiles(m_root, cmd.text, ev.commitFiles, &err))
+			{
+				ev.commitFiles.clear();
+				break;   // not worth an error banner: the row just shows nothing
+			}
+			ev.commitFilesFor = cmd.text;
 			break;
 		}
 		case Kind::Push:
@@ -666,6 +899,8 @@ void GitService::workerMain()
 					GitCli::log(m_root, 20, ev.commits);
 					std::string ignoredCurrent;
 					GitCli::listBranches(m_root, ev.branches, ignoredCurrent);
+					GitCli::listRemoteBranches(m_root, ev.remoteBranches);
+					GitCli::stashList(m_root, ev.stashes);
 				}
 				else
 				{
@@ -699,6 +934,12 @@ void GitService::pump(std::size_t maxEvents)
 		}
 
 		if (!ev.clonedRoot.empty()) m_lastClonedRoot = ev.clonedRoot;
+		if (!ev.commitFilesFor.empty())
+		{
+			// Bounded: a long session of expanding commits must not grow this forever.
+			if (m_commitFiles.size() >= 64) m_commitFiles.clear();
+			m_commitFiles[ev.commitFilesFor] = std::move(ev.commitFiles);
+		}
 
 		if (!ev.error.empty())
 		{
@@ -720,6 +961,8 @@ void GitService::pump(std::size_t maxEvents)
 			m_remoteUrl = ev.remoteUrl;
 			m_commits   = std::move(ev.commits);
 			m_branches  = std::move(ev.branches);
+			m_remoteBranches = std::move(ev.remoteBranches);
+			m_stashes        = std::move(ev.stashes);
 		}
 		if (!ev.statusValid)       continue;
 		// Swapped in whole. A partially updated snapshot is the bug class this
