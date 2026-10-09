@@ -90,13 +90,24 @@ CI Lauf 37855344542 auf `ac613e9f` war grün (Windows, Linux, Linux Vulkan lavap
 
 `he_tests` über `test_project_launch_open.cpp` (9 Fälle, 62 Prüfungen: Anführungszeichen,
 Leerraum, relative Pfade, `file://`, falsche Endung, erstes gültiges Argument,
-Hub gegen geführten Wechsel gegen schon offen, Ein Platz Speicher) und die
-Nachbarn (Asset und Szenen Autosave, Dock Zustand, Benachrichtigungen, Report Issue,
-Projekt Einstellungen, Projekt Export): 115 Fälle, 860 Prüfungen, alle grün. Voller
-ctest ohne `test_material_graph`: 235 von 237 grün, `test_culling` und
-`test_widget_designer_ui` liefen bei 240 s ins Zeitlimit (Debug, Last 11 auf dem
-Rechner) und sind einzeln grün (309 s und 125 s). Die drei `runtime_size` Fälle
-werden übersprungen, sie brauchen einen Release Build.
+Hub gegen geführten Wechsel gegen schon offen, ein Platz für genau eine wartende
+Anfrage) und die Nachbarn (Asset und Szenen Autosave, Dock Zustand,
+Benachrichtigungen, Report Issue, Projekt Einstellungen, Projekt Export): 115 Fälle,
+860 Prüfungen, alle grün, auf dem Zweig vor dem Zusammenführen mit `release/0.7.0`.
+Voller ctest ohne `test_material_graph` auf demselben Stand: 235 von 237 grün,
+`test_culling` und `test_widget_designer_ui` liefen bei 240 s ins Zeitlimit (Debug,
+Last 11 auf dem Rechner) und sind einzeln grün (309 s und 125 s).
+
+Danach wurde `release/0.7.0` (265 Commits weiter) in den Zweig gemerged, zwei
+additive Konflikte (Quellenliste in `src/HE_Editor/CMakeLists.txt`, Include Liste in
+`EditorUI.cpp`, jeweils `GitHubSignIn` neben `ProjectLaunchOpen`, beide behalten).
+Auf diesem Stand: Build aller Ziele `-j8` ohne Fehler, gezielte Tests grün
+(`he_tests` 129 Fälle, 8180 Prüfungen, darunter `test_project_launch_open` und
+`test_docs_library`, dazu `heproj_file_types`, `test_editor_help`,
+`test_github_oauth`) und voller ctest ohne `test_material_graph`: 251 Fälle, 248
+gelaufen und alle grün, keine Zeitüberschreitung (Last war niedriger). Die drei
+`runtime_size` Fälle werden übersprungen, sie brauchen einen Release Build. `test_material_graph` wurde nicht
+gelaufen (im Debug Build bekannt langsam, berührt dieses Thema nicht).
 
 ## Offen, braucht Hardware
 
