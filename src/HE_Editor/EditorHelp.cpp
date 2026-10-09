@@ -1139,6 +1139,20 @@ namespace
 	  "Snow strength for the state being shown, 0 to 1.", "", "rendering#weather" },
 	{ "Environment/Wetness", "",
 	  "How wet surfaces look once it has been raining.", "", "rendering#weather" },
+	{ "Weather/Puddles", "",
+	  "How much standing water the scene's materials show, 0 to 1. The auto landscape "
+	  "scales its puddle level by this: 0 = dry ground, 1 = the most it can hold "
+	  "(its Puddle Amount parameter). Any material can read it through the Weather "
+	  "node or the MF_WeatherPuddles function. Not driven by the presets — set it by "
+	  "hand, or from a script.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow Cover", "",
+	  "How much snow lies on the ground in materials that read it, 0 to 1. The auto "
+	  "landscape adds it to its altitude snow (cliffs stay bare) through the "
+	  "MF_WeatherSnow function; any material can read it through the Weather node. "
+	  "It is separate from the white tint every lit surface already takes in a Snow "
+	  "preset, and it is not driven by the presets.",
+	  "", "rendering#weather" },
 	{ "Weather/Max Rain Particles", "",
 	  "Hard ceiling on live raindrops. Emission throttles itself to stay under it, "
 	  "so this is the dial that trades downpour against frame rate.",

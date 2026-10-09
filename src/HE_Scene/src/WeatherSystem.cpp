@@ -167,6 +167,9 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
         drive(env->rainAmount,    wx.lastRain,    dRain);
         drive(env->snowAmount,    wx.lastSnow,    dSnow);
         drive(env->wetness,       wx.lastWetness, dWet);
+        // The two sliders for materials are plain authored values, not preset-driven.
+        env->puddleAmount = std::clamp(wx.puddleAmount, 0.0f, 1.0f);
+        env->snowCover    = std::clamp(wx.snowCover,    0.0f, 1.0f);
         wx.curCloudCoverage = env->cloudCoverage;
         wx.curFogDensity    = env->fogDensity;
         wx.curWindSpeed     = env->windSpeed;

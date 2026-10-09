@@ -1319,6 +1319,14 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				     w->curCloudCoverage, w->curFogDensity,
 				     w->curWindSpeed, w->curPrecip);
 
+				// What MATERIALS read from the weather (the material graph's Weather node,
+				// MF_WeatherPuddles / MF_WeatherSnow): set by hand, not by the presets.
+				EditorWidgets::subHeading("Surface");
+				Row::sliderFloat("Puddles",    &w->puddleAmount, 0.0f, 1.0f); trackEdit();
+				Row::sliderFloat("Snow Cover", &w->snowCover,    0.0f, 1.0f); trackEdit();
+				hint("Read by materials through the Weather node — the auto landscape takes "
+				     "its puddles and ground snow from these two.");
+
 				EditorWidgets::subHeading("Precipitation");
 				Row::dragInt("Max Rain Particles", &w->maxRainParticles, 10.0f, 0, 20000); trackEdit();
 				Row::dragInt("Max Snow Particles", &w->maxSnowParticles, 10.0f, 0, 20000); trackEdit();

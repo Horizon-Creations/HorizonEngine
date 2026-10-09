@@ -117,7 +117,11 @@ inline glm::vec3 giAutoLandscapeAlbedo(const GiLandscape& L, const glm::vec3& po
 HE_RENDERING_API int giAutoLandscapeParams(
 	const MaterialAsset& ma,
 	const std::function<bool(const std::string& name, float& value)>& overrideValue,
-	GiLandscape& out);
+	GiLandscape& out,
+	// The scene's Puddles slider (EnvironmentComponent::puddleAmount): the material's
+	// "Puddle Amount" is the water level AT slider 1, so the share of flat ground the
+	// kernels see as puddles is the parameter scaled by it. 1 = the parameter as stored.
+	float puddleScale = 1.0f);
 
 // giAutoLandscapeSliceMeans: the mean LINEAR colour of slices 0..4 (Grass, Dirt,
 // Rock, Snow, Wet Ground) of the RGBA8 albedo array, read from a mip of at most

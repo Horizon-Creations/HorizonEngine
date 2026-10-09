@@ -28,6 +28,41 @@ TEST_CASE("WeatherComponent defaults")
     CHECK(w.intensity   == doctest::Approx(1.0f));
     CHECK(w.transitionDuration == doctest::Approx(8.0f));
     CHECK(!w.autoCycle);
+    // The material sliders: the puddle level the auto landscape always had (0.64 x its 0.5
+    // maximum = the old 0.32), and no snow on the ground.
+    CHECK(w.puddleAmount == doctest::Approx(0.64f));
+    CHECK(w.snowCover    == doctest::Approx(0.0f));
+}
+
+TEST_CASE("the Weather sliders for materials reach the environment settings the renderer reads")
+{
+    HorizonWorld world;
+    WeatherComponent& w = setupWeatherWorld(world);
+    w.puddleAmount = 0.2f;
+    w.snowCover    = 0.7f;
+    WeatherSystem::update(world, 0.016f);
+
+    // WeatherSystem writes them into the Sky (the root's EnvironmentComponent here) …
+    auto* env = world.registry().try_get<EnvironmentComponent>(world.rootEntity());
+    REQUIRE(env);
+    CHECK(env->puddleAmount == doctest::Approx(0.2f));
+    CHECK(env->snowCover    == doctest::Approx(0.7f));
+    // … and the one push map carries them on.
+    const auto settings = HE::makeEnvironmentSettings(*env, 0.0f);
+    CHECK(settings.puddleAmount == doctest::Approx(0.2f));
+    CHECK(settings.snowCover    == doctest::Approx(0.7f));
+
+    // Out-of-range values never reach a shader.
+    w.puddleAmount = 5.0f;
+    w.snowCover    = -1.0f;
+    WeatherSystem::update(world, 0.016f);
+    CHECK(env->puddleAmount == doctest::Approx(1.0f));
+    CHECK(env->snowCover    == doctest::Approx(0.0f));
+
+    // A scene with no weather keeps the defaults: the landscape's old puddle level.
+    EnvironmentComponent bare;
+    CHECK(HE::makeEnvironmentSettings(bare, 0.0f).puddleAmount == doctest::Approx(0.64f));
+    CHECK(HE::makeEnvironmentSettings(bare, 0.0f).snowCover    == doctest::Approx(0.0f));
 }
 
 TEST_CASE("weatherPreset table is ordered clear -> storm")

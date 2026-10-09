@@ -13025,6 +13025,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 		// no local shadow atlas, so it passes false.
 		HE::FillMaterialLightWindow(m_renderWorld, matLight, /*localShadowsActive=*/false);
 		HE::FillMaterialWind(GetEnvironment(), matLight); // Wind nodes, next to Time
+		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 	}
 
 	// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
@@ -14403,6 +14404,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	HE::FillMaterialLightWindow(m_renderWorld, matLight,
 	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
 	HE::FillMaterialWind(GetEnvironment(), matLight); // Wind / Wind Sway nodes, next to Time
+	HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 	// Local (point/spot) shadow atlas for heLitP — the same matrices the
 	// built-in shaders sample with, Metal depth remap AND top-left UV origin
 	// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
@@ -15737,6 +15739,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// The G-buffer's WPO vertex stage reads this block too: without the wind
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
+		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];

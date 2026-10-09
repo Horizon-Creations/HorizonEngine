@@ -664,6 +664,7 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::CameraPos:           return "CameraPos";
 	case T::CameraDistance:      return "CameraDistance";
 	case T::ScreenPos:           return "ScreenPos";
+	case T::Weather:             return "Weather";
 	case T::ConstBool:           return "ConstBool";
 	case T::ParamVec2:           return "ParamVec2";
 	case T::ParamVec4:           return "ParamVec4";

@@ -1986,3 +1986,53 @@ Eine Schicht braucht keine neue Textur; die Arrays bleiben unverändert.
   Spuren. Das kostet drei weitere Array-Reads je Pixel mit Schnee im Bild (gesamt 24 statt 21 Reads);
   „Texture Bombing“ aus bleibt der Schalter für den ungebombten Weg. Wer die Kachel auch größer will:
   „Rock Tile Size“ (gilt für Fels und Schnee).
+
+---
+
+## 19. Puddles und Schnee kommen vom Wetter (2026-10-09)
+
+Die Pfützen des Auto-Materials hingen an einem festen Parameter, den man pro Material/Instanz setzen musste.
+Jetzt steuert die **Weather-Entity** der Szene sie, über zwei Regler und zwei Material-Funktionen.
+
+### 19.1 Der Weg vom Regler zum Shader
+
+| Stelle | Was |
+|---|---|
+| **Weather details ▸ Surface** | `Puddles` und `Snow Cover`, 0…1 (`WeatherComponent::puddleAmount` Standard 0,64, `snowCover` Standard 0). Von Hand gesetzt, **nicht** von den Presets getrieben; in der Szene gespeichert. |
+| `WeatherSystem` | schreibt beide jeden Tick in die `EnvironmentComponent` (`puddleAmount`, `snowCover`; Laufzeit, nicht serialisiert). Eine Szene ohne Weather-Entity behält die Standardwerte (0,64 / 0), sieht also aus wie bisher. |
+| `EnvironmentSettings` → `Lighting::weather` | `z` = Puddles, `w` = Snow Cover; `x`/`y` sind weiter Wetness und Snow Amount (die generische Reaktion, die `heLitP` jedem Material gibt). Befüllt von `FillMaterialWeather` neben jedem `FillMaterialWind` — **auch D3D11/D3D12/Vulkan**, die x/y bisher nie bekamen und im Regen trocken blieben. |
+| **Material-Knoten `Weather`** (Kategorie Input) | vier Float-Ausgänge: Wetness, Snow Amount, Puddles, Snow Cover (`clamp(heLight.weather, 0, 1)`). Jedes Material kann ihn nutzen. |
+
+### 19.2 Die Material-Funktionen
+
+Erzeugt von `matfn_gen` nach `EditorDeps/EngineContent/MaterialFunctions/Weather/` (eigener Unterordner: die
+UI-Effekte im Ordner darüber werden von einem Test eingesammelt und in der UI-Domäne übersetzt, wo ein
+Weather-Knoten nichts zu suchen hat). Feste UUIDs `0x413` / `0x414`; Quelle sind die Builder in
+`WeatherMaterialFunctions.cpp`.
+
+* **`MF_WeatherPuddles`** — In: *Max Water Level* (0,5). Out: *Water Level* = Puddles-Regler × Max Water
+  Level, *Puddles* (roh), *Wetness*.
+* **`MF_WeatherSnow`** — In: *Slope* (0), *Max Slope* (0,45), *Height Bias* (0). Out: *Snow* (Abdeckung 0…1),
+  *Cover* (roh). `Snow = smoothstep(0, 0,3, Cover × (1 + Bias)) × (1 − smoothstep(MaxSlope, MaxSlope + 0,1, Slope))`
+  — bei Regler 0 immer 0, Klippen bleiben frei, ein positiver Bias lässt den Schnee dort zuerst liegen.
+
+### 19.3 Was sich im Auto-Material ändert
+
+* „**Puddle Amount**“ ist jetzt der Wasserstand **bei Regler 1** (Standard 0,5, vorher 0,32 fix); der Regler
+  skaliert ihn. Regler 0,64 × 0,5 = 0,32 ist das alte Bild. Die Parameterzahl bleibt 14.
+* **Schnee:** zusätzlich zum Höhenschnee („Snow Height…“) liegt Wetter-Schnee (`MF_WeatherSnow`, Slope aus
+  der Geometrie, Max Slope = „Snow Max Slope“, Bias aus den Höhenkarten von Schnee und Boden). Beide addieren
+  sich als Wahrscheinlichkeiten (`a + b − a·b`). Wetter-Schnee nimmt auch die automatischen Pfützen mit.
+* `r.snowMask` bleibt der **Höhenschnee allein**: Masken-Ansichten und Zeuge hängen nicht an der Funktion.
+* **GI:** der Pfützenanteil der GI-Kernel (`giAutoLandscapeParams`) wird mit dem Regler der Szene skaliert.
+  Der Wetter-Schnee-Anteil fehlt dort weiter (wie der gemalte Anteil, §18.2).
+* Das ausgelieferte `M_AutoLandscape.hasset` ist neu erzeugt; es **ruft die Funktionen per Pfad**
+  (`Engine/MaterialFunctions/Weather/…`), die Engine-Content-Wurzel muss sie also finden — im Editor und im
+  Export (alles unter EngineContent wird gepackt) ist das gegeben. Ohne die Dateien wäre der Aufruf Magenta.
+
+### 19.4 Nicht gemacht
+
+* Skript-/HorizonCode-Zugriff auf die beiden Regler (`EngineApi.h` kennt `wetness`/`snowAmount`, die neuen
+  nicht).
+* Presets, die die Regler mitfahren (Rain → Puddles hoch). Bewusst von Hand, wie gewünscht.
+* Übergänge: die Regler wirken sofort, nicht über die Transition-Zeit.

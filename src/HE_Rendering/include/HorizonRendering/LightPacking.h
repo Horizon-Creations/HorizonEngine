@@ -102,6 +102,15 @@ HE_RENDERING_API void FillMaterialLightWindow(const RenderWorld&               r
 HE_RENDERING_API void FillMaterialWind(const ::EnvironmentSettings&     env,
                                        MaterialShaderLibrary::Lighting& out);
 
+// The weather block (Lighting::weather): x wetness and y snow amount — the generic ground
+// response heLitP applies to every lit graph material — and z puddles / w snow cover, the
+// two the Weather details panel sets for MATERIALS (the graph's Weather node reads all
+// four). Call it next to FillMaterialWind. Backends that used to set x/y by hand get the
+// same values; D3D11 / D3D12 / Vulkan, which never filled them, now answer to the weather
+// like OpenGL and Metal do.
+HE_RENDERING_API void FillMaterialWeather(const ::EnvironmentSettings&     env,
+                                          MaterialShaderLibrary::Lighting& out);
+
 // ── Graph-material DDGI probe field (Lighting v2.5) ──────────────────────────
 // Writes giGridOrigin / giGridCounts / giProbe — the SAME grid the built-in
 // shaders' GI uniforms carry, so heLitP's indirect diffuse (heGIIrradianceAt)

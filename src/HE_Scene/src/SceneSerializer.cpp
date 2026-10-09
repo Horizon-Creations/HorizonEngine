@@ -533,6 +533,8 @@ namespace
 				{ "currentKind",        static_cast<int>(w->currentKind) },
 				{ "targetKind",         static_cast<int>(w->targetKind) },
 				{ "intensity",          w->intensity },
+				{ "puddleAmount",       w->puddleAmount },
+				{ "snowCover",          w->snowCover },
 				{ "transitionDuration", w->transitionDuration },
 				{ "autoCycle",          w->autoCycle },
 				{ "cycleSeconds",       w->cycleSeconds },
@@ -1398,6 +1400,8 @@ namespace
 			w.targetKind         = static_cast<WeatherKind>(c.value("targetKind",  static_cast<int>(w.targetKind)));
 			w.prevTarget         = w.targetKind; // no spurious reclaim on load → authored env is respected
 			w.intensity          = c.value("intensity",          w.intensity);
+			w.puddleAmount       = std::clamp(c.value("puddleAmount", w.puddleAmount), 0.0f, 1.0f);
+			w.snowCover          = std::clamp(c.value("snowCover",    w.snowCover),    0.0f, 1.0f);
 			w.transitionDuration = c.value("transitionDuration", w.transitionDuration);
 			w.autoCycle          = c.value("autoCycle",          w.autoCycle);
 			w.cycleSeconds       = c.value("cycleSeconds",       w.cycleSeconds);

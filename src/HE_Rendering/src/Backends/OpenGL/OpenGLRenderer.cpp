@@ -7657,6 +7657,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 				// has no local shadow atlas, so it passes false.
 				HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/false);
 				HE::FillMaterialWind(GetEnvironment(), lit); // Wind nodes, next to Time
+				HE::FillMaterialWeather(GetEnvironment(), lit); // Weather node + the generic wet/snow response
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 				uiLightUploaded = true;
@@ -11374,6 +11375,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (matClustered)
 				HE::FillMaterialClusterParams(frameClusters, lit);
 			HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
+			HE::FillMaterialWeather(GetEnvironment(), lit); // Weather node + the generic wet/snow response
 			// Local (point/spot) shadow atlas for heLitP — same matrices the
 			// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
 			// PRE-BAKED so the shared preamble stays convention-free.

@@ -1,6 +1,7 @@
 // Auto landscape material — see AutoLandscapeMaterial.h for what it does and why
 // it is a plain graph. This file is only the wiring.
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 
 namespace HE
 {
@@ -83,8 +84,9 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
         "Height range over which the snow cover closes, metres.");
     const int pSnowSlope  = w.param(kAutoLandscapeParamSnowMaxSlope, 0.45f, 0.0f, 1.0f, "Snow",
         "Steepest slope that holds snow; steeper faces stay rock.");
-    const int pPudAmt     = w.param(kAutoLandscapeParamPuddleAmount, 0.32f, 0.0f, 1.0f, "Puddles",
-        "Water level in the puddle noise field: 0 = none, 0.32 = scattered puddles (~1/5 of the flat ground), ~0.5 = half.");
+    const int pPudAmt     = w.param(kAutoLandscapeParamPuddleAmount, 0.5f, 0.0f, 1.0f, "Puddles",
+        "Water level in the puddle noise field when the weather's Puddles slider is at 1 (the slider scales it): "
+        "0.32 = scattered puddles (~1/5 of the flat ground), ~0.5 = half.");
     const int pPudSize    = w.param(kAutoLandscapeParamPuddleSize, 10.0f, 0.5f, 100.0f, "Puddles",
         "Size of the puddle hollows, metres.");
     const int pPudSlope   = w.param(kAutoLandscapeParamPuddleMaxSlope, 0.08f, 0.002f, 0.4f, "Puddles",
@@ -194,7 +196,22 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int cliff  = w.ramp(pSnowSlope, cliffW, { r.slope }, 5);
     const int holds  = w.op(T::OneMinus, 5, { { cliff } });
     r.snowMask = w.op(T::Multiply, 5, { { snowHi }, { holds } });
-    const Surface s2 = blend(s1, snow, r.snowMask, 5);
+    // The weather's snow on top of the height snow: MF_WeatherSnow turns the Weather
+    // details panel's Snow Cover slider into a coverage by slope (cliffs stay bare) and by
+    // the layers' height maps (snow settles in the snow texture's high texels first). The
+    // two add as probabilities, a + b - a*b, so neither can push the other past 1.
+    // r.snowMask stays the HEIGHT snow alone — the mask views and the witness read it, and
+    // they must not depend on a function or on the scene's weather.
+    const int snowCall = w.node(T::FunctionCall, 5);
+    r.graph.findNode(snowCall)->s = kWeatherSnowFunctionPath;
+    r.graph.connect(r.slope, 0, snowCall, 0);                       // Slope
+    r.graph.connect(pSnowSlope, 0, snowCall, 1);                    // Max Slope
+    r.graph.connect(heightBias(snow.height, 2, s1Split, 2, one, 5), 0, snowCall, 2);  // Height Bias
+    const int weatherSnow = snowCall;                               // pin 0 = Snow
+    const int snowBoth = w.op(T::Multiply, 5, { { r.snowMask }, { weatherSnow, 0 } });
+    const int snowSum  = w.op(T::Add, 5, { { r.snowMask }, { weatherSnow, 0 } });
+    const int snowAny  = w.op(T::Subtract, 5, { { snowSum }, { snowBoth } });
+    const Surface s2 = blend(s1, snow, snowAny, 5);
 
     // ── Painted layers (column 6) ────────────────────────────────────────────
     // Everything above is the AUTOMATIC distribution (s2). The landscape's painted
@@ -277,7 +294,13 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int invPud = w.op(T::Divide, 7, { { one }, { pPudSize } });
     const int basin  = w.op(T::Fbm, 7, { { xzOff }, { invPud } });
     r.graph.findNode(basin)->p[0] = 1.0f; // integer hash, see dirtFbm
-    const int depth  = w.op(T::Subtract, 7, { { pPudAmt }, { basin } });  // > 0 inside a hollow
+    // The water level comes from the WEATHER: MF_WeatherPuddles turns the Weather details
+    // panel's Puddles slider (0..1) into a fraction of "Puddle Amount", the level at
+    // slider 1. Slider 0 = no hollow reaches the surface = no automatic puddles at all.
+    const int puddleCall = w.node(T::FunctionCall, 7);
+    r.graph.findNode(puddleCall)->s = kWeatherPuddlesFunctionPath;
+    r.graph.connect(pPudAmt, 0, puddleCall, 0);                      // Max Water Level
+    const int depth  = w.op(T::Subtract, 7, { { puddleCall, 0 }, { basin } });  // > 0 inside a hollow
     // Wet rim: from 0.06 below the water line up to it.
     const int rimW   = w.constF(0.06f, 7);
     const int negRim = w.constF(-0.06f, 7);
@@ -301,8 +324,12 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // terrain is left to the automatic rules, plus whatever was painted (a painted
     // puddle is water whatever the slope). Unpainted: puddleKeep = 1, mP = 0 → the
     // automatic masks unchanged.
-    const int wetAutoPart   = w.op(T::Multiply, 7, { { r.wetMask },   { puddleKeep } });
-    const int waterAutoPart = w.op(T::Multiply, 7, { { r.waterMask }, { puddleKeep } });
+    // Weather snow lies over a puddle like it lies over everything else: it takes the
+    // automatic water and its wet rim with it.
+    const int notSnowed     = w.op(T::OneMinus, 7, { { weatherSnow, 0 } });
+    const int keepAuto      = w.op(T::Multiply, 7, { { puddleKeep }, { notSnowed } });
+    const int wetAutoPart   = w.op(T::Multiply, 7, { { r.wetMask },   { keepAuto } });
+    const int waterAutoPart = w.op(T::Multiply, 7, { { r.waterMask }, { keepAuto } });
     const int wetF   = w.op(T::Saturate, 7, { { w.op(T::Add, 7, { { wetAutoPart },   { mP, 1 } }) } });
     const int waterF = w.op(T::Saturate, 7, { { w.op(T::Add, 7, { { waterAutoPart }, { mP, 1 } }) } });
 

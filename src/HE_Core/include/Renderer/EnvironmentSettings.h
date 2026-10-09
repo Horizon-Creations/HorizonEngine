@@ -82,6 +82,12 @@ struct EnvironmentSettings
     float     wetness    = 0.0f;
     float     snowAmount = 0.0f;
     float     rainAmount = 0.0f;   // drives the sky rainbow (rain + sun) — Metal/OpenGL sky pass
+    // What MATERIALS read from the weather (heLight.weather z / w → the material graph's
+    // Weather node), set by the scene's Weather entity: standing puddles and a snow cover
+    // that lies on the ground, 0..1 each. The default puddle level keeps a scene without a
+    // Weather entity looking as the auto landscape always did (0.64 × its 0.5 maximum).
+    float     puddleAmount = 0.64f;
+    float     snowCover    = 0.0f;
     // Cloud render mode (OpenGL): 0 = sky-dome (default), 1 = 3D volumetric clouds
     // anchored in the world so they parallax as the camera moves. cloudHeight = the
     // 3D layer's height above the camera in world units. Other backends ignore these.

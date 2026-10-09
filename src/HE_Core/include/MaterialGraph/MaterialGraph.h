@@ -77,6 +77,10 @@ enum class MatNodeType : uint8_t
     CameraPos,      // heLight.camPos.xyz
     CameraDistance, // length(camPos - worldPos)
     ScreenPos,      // gl_FragCoord.xy (raw pixels)
+    Weather,        // the scene's WEATHER as four floats (heLight.weather): Wetness, Snow Amount (the
+                    // generic ground response every lit surface already gets), and the two the
+                    // Weather details panel sets for MATERIALS to read — Puddles and Snow Cover,
+                    // 0..1 each. What the weather material functions are built on.
 
     // ── v5: baked constants, more parameter types, logic ──
     ConstBool,      // p[0] = 0/1 (baked literal) → float 0.0/1.0

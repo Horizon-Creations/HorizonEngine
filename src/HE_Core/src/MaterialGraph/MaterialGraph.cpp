@@ -133,6 +133,9 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "Dist", F::Float, 0 } }, 0 },
         { MatNodeType::ScreenPos, "Screen Position", "Input",
           {}, { { "XY", F::Vec2, 0 } }, 0 },
+        { MatNodeType::Weather, "Weather", "Input",
+          {}, { { "Wetness", F::Float, 0 }, { "Snow Amount", F::Float, 0 },
+                { "Puddles", F::Float, 0 }, { "Snow Cover", F::Float, 0 } }, 0 },
 
         // ── v11: the widget under the pixel (D5 Schicht 1) ──
         { MatNodeType::ElementSize, "Element Size", "UI",
@@ -753,6 +756,12 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             decl = "float " + v + " = length(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ScreenPos:
             decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
+        case MatNodeType::Weather:
+            // heLight.weather: x wetness, y snow amount (the generic response), z puddles,
+            // w snow cover (set per scene in the Weather details panel).
+            decl = "vec4 " + v + " = clamp(heLight.weather, 0.0, 1.0);";
+            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
+            break;
 
         // ── v11: the widget under the pixel (D5 Schicht 1) ──
         // All of these read heUI, which is a uniform block in a UI material and a

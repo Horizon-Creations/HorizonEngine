@@ -123,6 +123,13 @@ struct EnvironmentComponent
     float snowAmount = 0.0f;   // snow density → flake billboards + ground snow cover
     float wetness    = 0.0f;   // wet-surface darkening + specular boost
 
+    // What MATERIALS read from the weather (the material graph's Weather node): standing
+    // puddles and a ground snow cover, 0..1. Runtime only, like `flash` — the sliders live
+    // on the WeatherComponent (serialized there) and WeatherSystem writes them here every
+    // tick. A scene with no Weather entity keeps these defaults.
+    float puddleAmount = 0.64f;
+    float snowCover    = 0.0f;
+
     // Lightning flash (0..1, runtime only — driven by the WeatherSystem during storms,
     // never serialized). Brightens the sky shader for a brief strike.
     float flash = 0.0f;
