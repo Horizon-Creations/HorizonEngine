@@ -99,6 +99,21 @@ Der Log des Dumps (`dump counters`) belegt: Kontrolle `draws=1 tris=8704`, L `dr
 sind das Engine-Wasser, nicht das graue Ersatzmaterial; die Fläche steht unverändert auf beiden
 Backends.
 
+## Was die Fläche in Ruhe lässt
+
+- **Physik**: Körper entstehen nur für Entities mit `RigidBodyComponent`, Charaktere und
+  Landschaften (`PhysicsWorld::initialize`); die Fläche hat nichts davon, und ein Test lässt eine
+  Kugel über einem See fallen: sie kommt am Boden an, nicht auf dem Wasser. Schwimmen und Auftrieb sind
+  nicht Teil des Themas.
+- **Navigation**: `collectStaticGeometry` überspringt die Fläche (sonst wäre der See ein Boden).
+- **Landschaftspinsel**: er marschiert über das Höhenfeld (`TerrainTools.cpp` `sampleH`), nicht über die
+  Render-Objekte; die Fläche steht ihm nicht im Weg. Das gilt dann auch für den Wasser-Pinsel
+  (Schritt 7), wenn er denselben Weg nimmt, und es stimmt nur für die ERSTE Landschaft der Szene
+  (`tvw.front()`).
+- **Kosten**: `allBodyCells` und `bodyCells` laufen über das ganze Raster, einmal je Neuaufbau-Tick
+  (65 536 Zellen bei der Standardauflösung, 16 Mio. bei 4096). Bei Pinselrate und hoher Auflösung
+  gehört das Rechteck der letzten Änderung als Suchfenster hinein (Schritt 7).
+
 ## Was nicht gemacht ist
 
 - **D3D11, D3D12, Vulkan**: weder Code angefasst noch gelaufen (Schritte 9 und 10, Windows-Hardware).

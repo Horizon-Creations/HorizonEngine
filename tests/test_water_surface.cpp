@@ -6,6 +6,9 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/NavigationSystem.h>
+#include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>
 #include <HorizonScene/Components/WaterSurfaceComponent.h>
@@ -1037,6 +1040,39 @@ TEST_CASE("Water surface: navigation does not bake the lake as a floor")
     REQUIRE(rig.surfaces().size() == 1);
     NavMeshGeometry wet;
     CHECK(NavigationSystem::collectStaticGeometry(rig.world, rig.cm, wet) == groundTris);
+}
+
+TEST_CASE("Water surface: physics does not see the sheet, a body dropped over a lake reaches the ground")
+{
+    Rig rig;
+    auto& reg = rig.world.registry();
+    // A flat landscape at y = 0 with a lake whose surface stands 3 m above it.
+    const uint16_t lake = addLake(rig.tc(), rect(-20, -20, 20, 20), 3.0f);
+    rig.update();
+    const Entity sheet = rig.surfaceOf(lake);
+    REQUIRE((sheet != entt::null));
+
+    const float radius = 0.5f;
+    Entity ball = rig.world.createEntity("Ball");
+    {
+        TransformComponent t;
+        t.position = { 0.0f, 15.0f, 0.0f };
+        rig.world.addComponent(ball, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.mass = 1.0f;
+        rig.world.addComponent(ball, rb);
+        ColliderComponent col; col.shape = ColliderShape::Sphere; col.radius = radius;
+        rig.world.addComponent(ball, col);
+    }
+    PhysicsWorld phys;
+    phys.initialize(rig.world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(rig.terrain)));
+    CHECK_FALSE(phys.hasPhysics(static_cast<uint32_t>(sheet)));     // the sheet has no body
+
+    for (int i = 0; i < 240; ++i) phys.step(rig.world, 1.0f / 60.0f);
+    const float y = reg.get<TransformComponent>(ball).position.y;
+    // On the ground (0 + radius), not on the water (3 + radius).
+    CHECK(y < 1.5f);
+    CHECK(y > -0.5f);
 }
 
 TEST_CASE("Water surface: two landscapes keep their water apart")
