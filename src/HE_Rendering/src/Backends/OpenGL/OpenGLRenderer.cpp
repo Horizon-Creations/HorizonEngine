@@ -2450,7 +2450,7 @@ vec3 giAutoLandAlbedo(int li, vec3 pos, vec3 n)
 	            * (1.0 - smoothstep(giLands[li].autoSnow.z, giLands[li].autoSnow.z + 0.1, slope));
 	vec3 s2     = mix(s1, giLands[li].layer[3].rgb, snow);
 	float pms   = giLands[li].autoSlope.w;
-	float flat_ = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	float flat_ = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
 	return mix(s2, giLands[li].autoWet.rgb, giLands[li].autoWet.w * flat_);
 }
 

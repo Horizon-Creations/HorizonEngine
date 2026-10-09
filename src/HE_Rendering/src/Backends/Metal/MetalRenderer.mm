@@ -2708,7 +2708,7 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
 	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
 	const float pms   = L.autoSlope.w;
-	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	const float flat  = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
 	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
 }
 
@@ -3166,7 +3166,7 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
 	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
 	const float pms   = L.autoSlope.w;
-	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	const float flat  = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
 	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
 }
 

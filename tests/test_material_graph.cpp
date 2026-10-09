@@ -2485,9 +2485,30 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
 		CHECK_MESSAGE(found, name);
 	}
-	// Procedural layers only: no weightmap, no paint layers.
-	CHECK(gen.layerNames.empty());
-	CHECK(gen.glsl.find("heLandscapeWeights, vUV") == std::string::npos);
+	// The paint layers on top of the automatic rules: Auto first — an unpainted
+	// terrain binds the (1,0,0,0) default weightmap and must resolve to it — then
+	// the five textures. Five Landscape Layer Blend nodes read the weightmap (two
+	// extract the weights, three mix albedo / normal / mask), all with the same names.
+	{
+		const std::vector<std::string> names = HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames);
+		REQUIRE(names.size() == static_cast<size_t>(HE::kAutoLandscapePaintLayerCount));
+		CHECK(names[static_cast<size_t>(HE::AutoLandscapePaintLayer::Auto)] == "Auto");
+		CHECK(names[static_cast<size_t>(HE::AutoLandscapePaintLayer::Puddles)] == "Puddles");
+		CHECK(gen.layerNames == names);
+		CHECK(gen.glsl.find("heLandscapeWeights, vUV") != std::string::npos);
+		size_t blends = 0;
+		for (const HE::MatGraphNode& n : a.graph.nodes)
+			if (n.type == HE::MatNodeType::LandscapeLayerBlend) { ++blends; CHECK(n.s == HE::kAutoLandscapePaintLayerNames); }
+		CHECK(blends == 5u);
+	}
+	// The mask views are the AUTOMATIC masks and need no weightmap — the witness
+	// renders them on an unpainted terrain.
+	for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet })
+	{
+		const HE::MatShaderGen mg = HE::generateFragment(HE::buildAutoLandscapeGraph(v).graph);
+		CHECK(mg.layerNames.empty());
+		CHECK(mg.glsl.find("heLandscapeWeights") == std::string::npos);
+	}
 
 	// Puddles are an OVERLAY on the ground below, not a layer: slice 4 of the arrays
 	// (WetGround) stays in them but no read asks for it — every array read takes its
@@ -3317,6 +3338,9 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
 	CHECK(m->graphTexturePaths.size() == 3u);
 	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	// The Landscape tool lists these as the paintable layers — Auto first, so an
+	// unpainted terrain reads the automatic distribution.
+	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
 	CHECK(m->parentMaterialPath.empty());
 }
 #endif // HE_EDITOR_DEPS_DIR

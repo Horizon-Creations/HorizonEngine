@@ -1921,3 +1921,45 @@ Metal-Lauf mit den echten Texturen ist bereits in Schritt 2/3 erfolgt). Kein Mip
 Mip-Kette, unabhängig vom Backend, §8.1/§15.6). Leistung/GPU-Speicher mit den 2K-Arrays weiter nicht
 gemessen (§15.4).
 
+
+---
+
+## 17. Malen auf dem Auto-Material, weichere Pfützen-Kanten (2026-10-09)
+
+**Zwei Änderungen am Builder** (`AutoLandscapeMaterial.cpp`), das ausgelieferte Asset ist neu erzeugt
+(`landscape_tex_gen EditorDeps/EngineContent/Materials --material`).
+
+### 17.1 Pfützen werden nicht mehr an Böschungen abgeschnitten
+
+Das automatische Wasser verschwand innerhalb eines Streifens von `0,5 × … 1 × "Puddle Max Slope"`
+(bei 0,03 also nur 0,015 breit), eine Pfütze endete deshalb an jeder Geländekante auf einer harten
+Linie. Jetzt blendet es über `0,2 × … 1 ×` aus, und der Standardwert ist `0,08` (~23°, vorher 0,03;
+Bereich bis 0,4). Dieselbe Formel steht in den drei GI-Spiegeln (`GiLandscape.h`, OpenGL, Metal —
+`smoothstep(0.2 * pms, pms, slope)`), `test_culling` pinnt den Text.
+
+### 17.2 Alle Schichten sind malbar
+
+Das Material deklariert jetzt sechs Mal-Schichten (`kAutoLandscapePaintLayerNames`), das Landscape-
+Werkzeug listet sie:
+
+| Schicht | Bedeutung |
+|---|---|
+| **Auto** (0) | Was ein unbemaltes Terrain liest (die 1×1-Standard-Weightmap `(1,0,0,0)`): die automatische Verteilung, wie bisher. Zurückmalen gibt eine Stelle wieder den Regeln. |
+| **Grass / Dirt** | Die Textur, wie gemalt (ersetzt dort die automatische Gras/Erde-Mischung). |
+| **Rock** | Bleibt vor allem automatisch (nach Steigung); Malen fügt Fels hinzu. |
+| **Snow** | Die Textur, wie gemalt. |
+| **Puddles** | Stärke des Wasser-Overlays. Ein gemalter Fleck ist Wasser auf jeder Neigung; die automatischen Pfützen bleiben auf flachem Boden und weichen dem, was darüber gemalt wurde. |
+
+Die Gewichte eines Texels summieren sich zu 1: `Oberfläche = Auto × automatisch + Σ Schicht × Textur`;
+„Puddles“ ist keine Oberfläche, ihr Eingang ist wieder die automatische (das Wasser liegt auf dem Boden
+darunter). Umgesetzt mit fünf `Landscape Layer Blend`-Knoten: zwei lesen die Gewichte (Einheitsvektoren
+als Eingänge → die Kanäle des Ergebnisses SIND die Gewichte), drei mischen Albedo / Normal / Maske.
+Eine Schicht braucht keine neue Textur; die Arrays bleiben unverändert.
+
+* Die **Masken-Ansichten** (`MasksRockSnowWater`, `MasksDirtWet`) und damit der Zeuge zeigen weiter die
+  AUTOMATISCHEN Masken und brauchen keine Weightmap.
+* Die **GI-Kernel** kennen die gemalten Gewichte nicht (wie bisher: sie lesen die automatischen
+  Regeln); gemalte Flächen spiegeln das Licht daher noch in der Farbe der automatischen Verteilung.
+* Sechs Schichten heißt zweite Weightmap-Seite: das Malen auf Snow/Puddles legt `layerWeights2` an.
+* Die Weightmap hat 256² Texel über das ganze Terrain (`weightRes`) — auf großen Landschaften ist das
+  die Pinsel-Auflösung.

@@ -101,7 +101,7 @@ inline glm::vec3 giAutoLandscapeAlbedo(const GiLandscape& L, const glm::vec3& po
 	                  * (1.0f - smooth(L.autoSnow.z, L.autoSnow.z + 0.1f, slope));
 	const glm::vec3 s2 = glm::mix(s1, glm::vec3(L.layerColor[3]), snow);
 	const float pms   = L.autoSlope.w;
-	const float flat  = (1.0f - smooth(0.5f * pms, pms, slope)) * (1.0f - snow);
+	const float flat  = (1.0f - smooth(0.2f * pms, pms, slope)) * (1.0f - snow);
 	return glm::mix(s2, glm::vec3(L.autoWet), L.autoWet.w * flat);
 }
 
