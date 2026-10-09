@@ -3144,28 +3144,45 @@ namespace
 	{ "outliner.search", "Search",
 	  "Narrows the tree to entities whose name contains this text, in any case. "
 	  "Every entity in the scene is searched, including those under folded "
-	  "rows. Hits are shown with the rows above them, dimmed, so you can see "
-	  "where each one lives; clearing the box puts the tree back as it was.",
+	  "rows. Hits are shown with the matching letters marked and the rows above "
+	  "them dimmed, so you can see where each one lives; clearing the box puts "
+	  "the tree back as it was.",
 	  "", "editor#outliner" },
 	{ "outliner.type-filter", "Type filter",
-	  "Shows only entities that carry the chosen component, such as every Light "
-	  "or every Camera. An entity is the sum of its components, so this is what "
-	  "\"type\" means here. Combined with the search box, both have to match.",
+	  "One pill per kind of entity the scene contains, with how many there are: "
+	  "click Mesh to see only meshes, click it again to see everything. An "
+	  "entity is the sum of its components, so a kind means \"carries that "
+	  "component\" — the crate that is a Mesh, a Collider and a Rigid Body is "
+	  "counted under all three, and its icon shows the one that tells it apart. "
+	  "Combined with the search box, both have to match. If the pills do not "
+	  "fit, the rest are behind the +N one.",
 	  "", "editor#outliner" },
 	{ "outliner.visibility", "Visibility",
 	  "Hides or shows this entity and everything under it: every mesh, light, "
 	  "particle system, foliage, rope and trail in the subtree is switched off "
 	  "or on. This is the same Visible flag the Details panel and scripts use, "
-	  "so it is saved with the scene and applies in the game too. A row with "
-	  "nothing to draw under it has no eye. One undo step.",
+	  "so it is saved with the scene and applies in the game too. The eye "
+	  "shows while the pointer is on the row; a hidden entity keeps its slashed "
+	  "eye in the accent colour and its row dimmed. A row with nothing to draw "
+	  "under it has no eye. One undo step.",
 	  "", "editor#outliner" },
 	{ "outliner.lock", "Lock",
 	  "Keeps the mouse in the viewport off this entity: a click passes through "
 	  "it to whatever is behind, the selection frame does not take it, and the "
 	  "gizmo will not move it. It can still be selected here and edited in the "
 	  "Details panel. Lock the floor and the walls, and the props in front of "
-	  "them stop being hard to grab. Saved with the scene.",
+	  "them stop being hard to grab. The padlock shows while the pointer is on "
+	  "the row; a locked entity keeps it in the accent colour. Saved with the "
+	  "scene.",
 	  "", "editor#outliner" },
+	{ "outliner.rename", "Rename",
+	  "Double-click a name, or press F2 with the entity selected, to type a new "
+	  "one in place. Enter keeps it, Escape leaves the old name, an empty name "
+	  "changes nothing. One undo step. (Drag a row onto another to parent it; "
+	  "on a row's top or bottom edge, where a line shows, to place it before or "
+	  "after that row instead. Alt-click on a folded row's arrow opens the whole "
+	  "branch.)",
+	  "F2", "editor#outliner" },
 
 	// ── Details panel ────────────────────────────────────────────────────────
 	{ "details.add-component", "Add Component",
