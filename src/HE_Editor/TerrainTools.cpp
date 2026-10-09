@@ -1030,7 +1030,11 @@ void renderPanel(AppContext& ctx)
                 int wres = static_cast<int>(ptc.weightRes);
                 ImGui::Spacing();
                 ImGui::BeginDisabled(!ptc.layerWeights.empty());
-                if (ImGui::SliderInt("Weightmap##paint", &wres, 32, 2048))
+                // A typed field, not a slider: 32..2048 on a few hundred pixels cannot hit
+                // 1024 exactly. Applied (and clamped) as you type — nothing is painted
+                // yet, so an intermediate value costs nothing — and shown clamped once
+                // the field is left.
+                if (ImGui::InputInt("Weightmap##paint", &wres, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
                     ptc.weightRes = static_cast<uint32_t>(std::clamp(wres, 32, 2048));
                 EditorWidgets::helpForLabel("Weightmap##paint");
                 ImGui::EndDisabled();

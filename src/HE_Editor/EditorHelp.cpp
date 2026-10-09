@@ -6474,7 +6474,8 @@ namespace
 	  "only — sculpting and foliage keep the Brush Strength.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Weightmap", "Weightmap Resolution",
-	  "How many texels per side the layer weightmap has, from 32 to 2048, "
+	  "How many texels per side the layer weightmap has, from 32 to 2048 — click "
+	  "the field and type a number, 1024 for instance — "
 	  "stretched over the whole landscape — a large terrain needs more of them "
 	  "before a painted edge stops looking blocky. It is locked as soon as "
 	  "anything has been painted, because changing it would throw the existing "
