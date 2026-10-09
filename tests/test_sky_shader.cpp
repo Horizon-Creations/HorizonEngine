@@ -118,6 +118,32 @@ TEST_CASE("BuildSkyFragmentGLSL450 swaps the GL header for the prelude and keeps
 	CHECK(src.compare(src.size() - body.size(), body.size(), body) == 0);
 }
 
+TEST_CASE("Overcast sky: every cloud threshold goes through cloudLo, and the celestial layer is veiled")
+{
+	// "100 % clouds" has to be a closed deck with nothing of the night sky behind it. That
+	// rests on three things in the shader text, any of which can quietly drift apart: ONE
+	// coverage->threshold function (so the march, its light march, the shadow map and the
+	// god-ray gate agree about the holes), the celestial layer scaled by the overcast
+	// amount, and the deck carried on to the horizon.
+	const std::string fs = HE::glsl::kSkyFS;
+	CHECK(fs.find("float cloudLo(float coverage)") != std::string::npos);
+	CHECK(fs.find("float overcastAmount(float coverage)") != std::string::npos);
+	CHECK(fs.find("vec3 overcastBand(") != std::string::npos);
+	// The old inline mapping must be gone everywhere but cloudLo's own body.
+	size_t inlineMaps = 0;
+	for (size_t at = fs.find("mix(0.70, 0.22"); at != std::string::npos; at = fs.find("mix(0.70, 0.22", at + 1))
+		++inlineMaps;
+	CHECK(inlineMaps == 1);
+	CHECK(fs.find("float celestialVeil = 1.0 - overcastAmount(uCloudCoverage);") != std::string::npos);
+	CHECK(fs.find("celestial * celestialVeil") != std::string::npos);
+	CHECK(fs.find("moonCorona(dir, uSunDir, true, uMoonPhase) * celestialVeil") != std::string::npos);
+	// Full coverage fills whatever thin spot the noise left (three marches: dome, 3D, 3D real).
+	size_t fills = 0;
+	const std::string fill = "smoothstep(0.95, 1.0, coverage)";
+	for (size_t at = fs.find(fill); at != std::string::npos; at = fs.find(fill, at + 1)) ++fills;
+	CHECK(fills == 3);
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
 #include "ShaderCompiler.h"
 
