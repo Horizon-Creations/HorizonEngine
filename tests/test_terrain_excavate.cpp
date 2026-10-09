@@ -121,19 +121,20 @@ namespace
         }
     };
 
-    // Compare every vertex of `after` with what the reference says it should be.
-    // Returns the number of vertices that differ by more than `tol`; vertices within
-    // `skip` of the outline are left out (a slanted edge can put one on either side
-    // by rounding, and the weight there is ~1 either way).
+    // Compare every `stride`-th vertex (in each direction) with what the reference says
+    // it should be. The reference is O(vertices × edges), so a big landscape checks a
+    // sample. Returns the number of vertices that differ by more than `tol`; vertices
+    // within `skip` of the outline are left out (a slanted edge can put one on either
+    // side by rounding, and the weight there is ~1 either way).
     int mismatches(const TerrainComponent& tc, const std::vector<float>& before,
                    const std::vector<glm::vec2>& poly, sculpt::ExcavateMode mode,
-                   float amount, float falloff, double tol = 1e-4, double skip = 1e-3)
+                   float amount, float falloff, uint32_t stride = 1, double tol = 1e-4, double skip = 1e-3)
     {
         const Ref ref{ poly };
         int bad = 0;
         const uint32_t res = tc.resolution;
-        for (uint32_t zi = 0; zi < res; ++zi)
-            for (uint32_t xi = 0; xi < res; ++xi)
+        for (uint32_t zi = 0; zi < res; zi += stride)
+            for (uint32_t xi = 0; xi < res; xi += stride)
             {
                 const glm::vec2 p = posOf(tc, xi, zi);
                 if (ref.dist(p.x, p.y) < skip) continue;
@@ -521,7 +522,8 @@ TEST_CASE("Excavate: a big lake with a long outline on a big landscape takes a m
     REQUIRE(r.ok);
     CHECK(r.changed > 150000u);   // the ground west of x = -100 is below the floor already
     CHECK(ms < 30000.0);        // a Debug build on a loaded runner: this guards the order of growth, not the speed
-    CHECK(mismatches(tc, before, poly, sculpt::ExcavateMode::Floor, 0.0f, 20.0f) == 0);
+    // The reference is O(vertices × edges): a sample of every 13th vertex, not all million.
+    CHECK(mismatches(tc, before, poly, sculpt::ExcavateMode::Floor, 0.0f, 20.0f, 13) == 0);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
