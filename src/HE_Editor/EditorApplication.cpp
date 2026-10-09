@@ -6935,6 +6935,80 @@ void EditorApplication::dumpFrameHeadless()
 		}
 	}
 
+	// ── Water surface witness (HE_DUMP_WATERLAKE, Thema 174 Schritt 4): a flat
+	// 128 m landscape at y=300 and water drawn into its water field the way the lake
+	// tool will — polygons through HE::water::addPolygon — then updateTerrains, which
+	// builds the surface meshes and their entities. The shapes are the ones the mesh
+	// has to get right:
+	//   =l     an L (concave corner)
+	//   =star  a five-pointed star (five concave notches, off the grid)
+	//   =ring  a square lake with a square island and a pond on the island
+	//   =two   two lakes side by side, two bodies 0.8 m apart in level
+	//   =none  the landscape and no water: the control for every other frame
+	// HE_DUMP_WATERLEVEL moves the surface above the ground (default 0.4 m). The
+	// ground is flat, so with no shore clipping yet (Schritt 5) the sheet floats over
+	// it; what the frame shows is the footprint. Camera: CAMY=370 CAMZ=60 PITCH=-62.
+	if (const char* wl = std::getenv("HE_DUMP_WATERLAKE"); wl && *wl && m_editorWorld)
+	{
+		namespace water = HE::water;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(wl);
+		const float level = [] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : 0.4f; }();
+		auto land = m_editorWorld->createEntity("WaterLakeLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);   // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 128.0f;
+		ltc.resolution  = 65;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 256;
+
+		auto rect = [](float x0, float z0, float x1, float z1) {
+			return std::vector<glm::vec2>{ { x0, z0 }, { x1, z0 }, { x1, z1 }, { x0, z1 } };
+		};
+		bool ok = true;
+		if (mode == "l")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -44, -30 }, { 30, -30 }, { 30, -8 }, { -12, -8 }, { -12, 40 }, { -44, 40 } }).ok;
+		}
+		else if (mode == "star")
+		{
+			std::vector<glm::vec2> star;
+			for (int i = 0; i < 10; ++i)
+			{
+				const float a = 3.14159265f * static_cast<float>(i) / 5.0f - 1.5707963f;
+				const float rad = (i & 1) ? 19.0f : 46.0f;
+				star.emplace_back(2.3f + rad * std::cos(a), 3.1f + rad * std::sin(a));
+			}
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, star).ok;
+		}
+		else if (mode == "ring")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, rect(-48, -40, 48, 40)).ok
+			  && water::removePolygon(ltc, { { -22, -16 }, { 20, -22 }, { 26, 14 }, { -14, 20 } }).ok   // a slanted island
+			  && water::addPolygon(ltc, b, { { -6, -4 }, { 6, -4 }, { 8, 4 }, { -4, 6 } }).ok;           // a pond on it
+		}
+		else if (mode == "two")
+		{
+			const uint16_t a = ltc.water.createBody(level);
+			const uint16_t c = ltc.water.createBody(level + 0.8f);
+			ok = water::addPolygon(ltc, a, { { -50, -36 }, { -8, -42 }, { -2, 10 }, { -44, 18 } }).ok
+			  && water::addPolygon(ltc, c, { { 8, -6 }, { 52, -14 }, { 56, 38 }, { 20, 44 }, { 12, 20 } }).ok;
+		}
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE witness landscape added "
+			"(mode %s, polygons %s, surfaces created %u, triangles %u, level %.2f)",
+			wl, ok ? "ok" : "FAILED", ws.created, ws.triangles, level);
+	}
+
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
 	// 240 m landscape at y=300; "after" grows one TerrainGenerate::mountain in a
 	// circle around its centre. The before/after pair is the oracle: the frames

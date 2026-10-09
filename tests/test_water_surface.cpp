@@ -19,6 +19,7 @@
 #include <ContentManager/DefaultAssets.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <string>
@@ -437,7 +438,7 @@ TEST_CASE("Water triangulate: degenerate input gives nothing")
 {
     CHECK(water::triangulate({}).empty());
     CHECK(water::triangulate({ ring({ { 0, 0 }, { 1, 1 } }) }).empty());
-    CHECK(water::triangulate({ ring({ { 0, 0 }, { 1, 0 }, { std::nan(""), 1 } }) }).empty());
+    CHECK(water::triangulate({ ring({ { 0, 0 }, { 1, 0 }, { std::numeric_limits<double>::quiet_NaN(), 1 } }) }).empty());
     // Collinear: no area, no triangle worth keeping.
     const auto flat = water::triangulate({ ring({ { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 } }) });
     CHECK(sumArea(trisOf({ ring({ { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 } }) }, flat)) == doctest::Approx(0.0));

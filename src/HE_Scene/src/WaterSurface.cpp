@@ -88,11 +88,14 @@ namespace
 
     // Material first: with it not resident the renderer would draw the surface
     // with the plain fallback, which is a grey slab and looks like a bug in the
-    // mesh. A missing file (a unit test without EngineContent, a broken install)
-    // is said once.
+    // mesh. By UUID when the engine folder has been scanned (an editor session, a
+    // pak), by path when it has not — a headless dump renders before the scan, and
+    // there the UUID is unknown while the path resolves. A missing file (a unit
+    // test without EngineContent, a broken install) is said once.
     void ensureWaterMaterial(ContentManager& cm)
     {
         if (cm.ensureResident(HE::kEngineWaterMaterialId)) return;
+        if (cm.loadAsset(WaterSurface::kMaterialPath) == HE::kEngineWaterMaterialId) return;
         static bool said = false;
         if (said) return;
         said = true;
