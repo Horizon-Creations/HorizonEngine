@@ -614,6 +614,7 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
+    packSettings.onAsset = settings.onAsset;
     return std::nullopt;
 }
 

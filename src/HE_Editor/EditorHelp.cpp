@@ -2061,6 +2061,11 @@ namespace
 	  "Packages the project as a standalone game: cooked assets, the runtime, "
 	  "and a config beside it. The export profile decides platform and packing.",
 	  "", "export#overview" },
+	{ "Build/Show Last Build Log", "",
+	  "Reopens the Build window on the last export or game-logic build. Click a "
+	  "ring to read that step's log — Package lists every asset that went into "
+	  "the pak. Greyed until something has been built in this session.",
+	  "", "export#overview" },
 	{ "Build/Build and Reload Game Logic", "",
 	  "Compiles this project's Source/ folder into its native GameLogic library "
 	  "and swaps it into a running preview: the play session keeps going, with "

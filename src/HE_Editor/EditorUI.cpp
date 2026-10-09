@@ -1858,6 +1858,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			// native module — the native menu has no per-language gate, so the
 			// row is always live and the answer comes from the action.
 			case MC::BuildGameLogic:  GameLogicBuildPanel::start(ctx);                       break;
+			case MC::ShowBuildLog:    BuildProgressDialog::requestOpen();                    break;
 			case MC::SetViewMode:
 			{
 				const int m = MacMenuBar::arg() - 1;
@@ -2229,6 +2230,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("Export Project..."))
 			openExportDialog();
+		// The last run's rings and per-step logs — what the Build window shows,
+		// reopened after it was closed. Greyed until something has been built.
+		if (EditorWidgets::menuItem("Show Last Build Log", nullptr, false,
+		                            BuildProgressDialog::snapshot().hasRun))
+			BuildProgressDialog::requestOpen();
 		ImGui::EndMenu();
 	}
 	// ── View: how the Scene window draws ────────────────────────────────────

@@ -1066,6 +1066,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         }
         if (!reused) addEntry(pe.id, blob, settings);
         ++count;
+        if (settings.onAsset) settings.onAsset(pe.relPath, reused);
     }
     if (progress) progress(count, total, {});
     return count;
