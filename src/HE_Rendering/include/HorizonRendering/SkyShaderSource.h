@@ -442,29 +442,48 @@ float overcastAmount(float coverage)
 {
 	return smoothstep(0.75, 1.0, clamp(coverage, 0.0, 1.0));
 }
-// What an overcast deck looks like where it is seen edge-on, far away: a shaded grey
-// (lit from above, so mostly dim), warmed at dusk, bled toward the haze of the sky
-// behind it. hazeMix is 0 for the dome path, whose low-res pre-pass has no sky to bleed to.
-vec3 overcastDeck(vec3 hazeSky, float hazeMix, vec3 sunDir, vec3 sunColor)
+// The cloud layer beyond where the march resolves it, and under any thin spot a full
+// coverage leaves: not a flat grey wall but clouds - coarse cloud noise on the layer
+// plane, so the deck breaks into lighter and darker masses that shrink with perspective
+// the way a real overcast does. Toward the horizon the texture is flattened (it would
+// alias there, and a distant deck is just haze anyway) and the deck bleeds into the
+// sky's own colour, so it dissolves into the horizon instead of ending in a band.
+// `deckXZ` is the point on the layer plane the ray reaches, in cloud-noise units.
+vec3 overcastDeck(vec3 dir, vec3 sunDir, vec3 sunColor, vec2 deckXZ)
 {
 	float sunY = clamp(sunDir.y, -0.3, 1.0);
 	float day  = smoothstep(-0.10, 0.10, sunY);
 	float dusk = smoothstep(-0.14, 0.04, sunY) * (1.0 - smoothstep(0.04, 0.26, sunY));
-	vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, 0.35);
-	vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.13, 0.15, 0.24), 0.25);
+	vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, 0.45);
+	vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.13, 0.15, 0.24), 0.30);
 	vec3 col = mix(nightCol, dayCol, day);
 	col = mix(col, sunColor * vec3(1.5, 0.85, 0.42), dusk * 0.5);
-	col = mix(col, hazeSky, hazeMix);
-	return col * uCloudTint;
+	// Cloud masses: three octaves are plenty at this distance; the detail fades with
+	// elevation (calm = 0 at the horizon) so nothing speckles there.
+	float h    = abs(dir.y);
+	float calm = smoothstep(0.0, 0.18, h);
+	float n    = cloudFbm(deckXZ);
+	float mass = smoothstep(0.30, 0.72, n);
+	col *= mix(1.0, mix(0.50, 1.35, mass), calm);
+	col *= uCloudTint;
+	// Distance haze: the deck takes on the sky's colour toward the horizon.
+	float haze = mix(0.90, 0.25, smoothstep(0.0, 0.32, h));
+	return mix(col, skyColor(dir, sunDir), haze);
 }
 // A sky ray the deck covers although the march found nothing (it stopped short of the
-// horizon, or missed the slab): the deck colour at weight `gap`, the sky behind it
-// occluded by the same amount. gap = 0 returns baseSky untouched.
-vec3 overcastBand(vec3 baseSky, float gap, vec3 hazeSky, float hazeMix, vec3 sunDir, vec3 sunColor, out float outT)
+// horizon, or missed the slab): the deck at weight `gap`, the sky behind it occluded
+// by the same amount. gap = 0 returns baseSky untouched.
+vec3 overcastBand(vec3 baseSky, float gap, vec3 dir, vec3 sunDir, vec3 sunColor, vec2 deckXZ, out float outT)
 {
 	outT = 1.0 - gap;
 	if (gap <= 0.0) return baseSky;
-	return baseSky * outT + overcastDeck(hazeSky, hazeMix, sunDir, sunColor) * gap;
+	return baseSky * outT + overcastDeck(dir, sunDir, sunColor, deckXZ) * gap;
+}
+// Where a dome-model ray meets the layer plane (the dome's slab lives at heights 1..2.6
+// of a unit hemisphere), in noise units; the same wind drift as the march.
+vec2 domeDeckXZ(vec3 dir, vec3 wind, float time)
+{
+	return dir.xz / max(dir.y, 0.004) * (1.8 * kCloudScale * 0.5) + wind.xz * time * (kCloudScale * 0.5);
 }
 // Worley (cellular) lookup from the noise volume's G channel — bright at the cell
 // feature points. fBm of it is the billowy cumulus shape. The bake already tiles,
@@ -539,12 +558,12 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	sunDir = normalize(sunDir);
 	// The horizon fade at the end is exactly 0 below dir.y 0.03 (T → 1, L → 0), so
 	// a march there could never show — bail before paying for it.
-	const float ov = overcastAmount(coverage);
+	float ov = overcastAmount(coverage);
 	if (dir.y < 0.03)
 	{
 		// Overcast: the deck runs on to the horizon instead of stopping short of it.
-		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), vec3(0.0), 0.0,
-		                    sunDir, sunColor, outT);
+		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
+		                    domeDeckXZ(dir, wind, time), outT);
 	}
 
 	// Quality (perf knob, uCloudQuality): 0 Low, 1 Med, 2 High. High == original counts.
@@ -648,6 +667,9 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 			cloudCol *= mix(0.5, 1.15, hTone);
 			cloudCol += vec3(0.07, 0.10, 0.17) * ((1.0 - hTone) * day * 0.25);
 			cloudCol *= uCloudTint;                          // user colour tint (dome path)
+			// Overcast: a closed deck must still read as clouds - lighter and darker masses,
+			// from the same large-scale field that shapes the sparse sky.
+			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68, perlin)), ov);
 
 			float opticalDepth = dens * ds * 7.0 * clamp(uCloudDensity, 0.0, 3.0) * (1.0 + 2.0 * ov);
 			float a = 1.0 - exp(-opticalDepth);
@@ -666,8 +688,11 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	// At full coverage the deck is also what fills any thin spot the noise left, so "100 %"
 	// really covers the whole background (and what is behind it - stars, moon - cannot show).
 	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
-	L += T * gap * overcastDeck(vec3(0.0), 0.0, sunDir, sunColor);
-	T *= 1.0 - gap;
+	if (gap > 0.0)
+	{
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, domeDeckXZ(dir, wind, time));
+		T *= 1.0 - gap;
+	}
 	outT = T;
 	return baseSky * T + L;
 }
@@ -720,6 +745,16 @@ float cirrusFbm(vec2 p)
 // higher value now genuinely lifts the deck: clouds move up and shrink.
 const float kCloudRefAltitude = 200.0;
 const float kCloudElevFloor   = 0.06;   // was clamp((cloudH-50)/2500) — grew with altitude
+// Where a 3D-mode view ray meets the middle of the cloud slab, in the deck's noise units
+// (half the march's frequency: this is the far, coarse layer). Unbounded in distance, which
+// is what lets the deck run on to the horizon.
+vec2 deck3DXZ(vec3 camPos, vec3 dir, float cloudH, vec3 wind, float time)
+{
+	float midY = max(cloudH, 1.0) + kCloudRefAltitude * 0.75;
+	float t    = abs(midY - camPos.y) / max(abs(dir.y), 0.004);
+	vec2  xz   = camPos.xz + dir.xz * t;
+	return xz * (1.6 / kCloudRefAltitude * 0.5) + wind.xz * time * 0.5;
+}
 
 // ── Cloud slab intersection ──────────────────────────────────────────────────
 // Entry/exit distance of a view ray through the cloud deck, for ANY camera
@@ -874,10 +909,10 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	if (coverage <= 0.0) return baseSky;
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
-	const float ov = overcastAmount(coverage);
+	float ov = overcastAmount(coverage);
 	if (dir.y < 0.02)                             // at/below the horizon → ray misses the slab above
-		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), baseSky, 0.35,
-		                    sunDir, sunColor, outT);
+		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
+		                    deck3DXZ(camPos, dir, cloudH, wind, time), outT);
 
 	// Quality (perf knob, uCloudQuality): 0 Low, 1 Med, 2 High. High == original counts.
 	float qStepF  = (uCloudQuality <= 0) ? 0.40 : (uCloudQuality == 1 ? 0.30 : 0.22);
@@ -891,7 +926,8 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	float maxDist = cloudH * 60.0;                // fade clouds beyond this (∝ altitude)
 	float tNear, tFar;
 	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
-		return overcastBand(baseSky, ov, baseSky, 0.35, sunDir, sunColor, outT);   // a missed ray is still under the deck
+		return overcastBand(baseSky, ov, dir, sunDir, sunColor,
+		                    deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
 
 	// Step count grows with how much slab the ray crosses (much more near the horizon)
 	// so the world-space sample spacing stays roughly constant — undersampling near the
@@ -1013,6 +1049,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 			cloudCol *= mix(0.30, 1.32, hf);                      // strong base→crown contrast (3D relief)
 			cloudCol += vec3(0.07, 0.10, 0.17) * ((1.0 - hf) * day * 0.25);
 			cloudCol *= uCloudTint;                               // user colour tint
+			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68, cover)), ov);   // overcast masses
 			// Aerial perspective: bleed far clouds toward the sky colour so they lose
 			// CONTRAST (not just opacity) with distance — low contrast hides any residual
 			// horizon speckle and reads as natural haze.
@@ -1045,8 +1082,11 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	// At full coverage the deck is also what fills any thin spot the noise left, so "100 %"
 	// really covers the whole background (and what is behind it - stars, moon - cannot show).
 	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
-	L += T * gap * overcastDeck(baseSky, 0.35, sunDir, sunColor);
-	T *= 1.0 - gap;
+	if (gap > 0.0)
+	{
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, deck3DXZ(camPos, dir, cloudH, wind, time));
+		T *= 1.0 - gap;
+	}
 	outT = T;
 	return baseSky * T + L;
 }
@@ -1068,7 +1108,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	if (coverage <= 0.0) return baseSky;
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
-	const float ov = overcastAmount(coverage);
+	float ov = overcastAmount(coverage);
 	// Slightly higher minimum step count than classic: the sharper silhouettes
 	// show the IGN dither earlier than the soft classic bodies do.
 	float qStepF  = (uCloudQuality <= 0) ? 0.40 : (uCloudQuality == 1 ? 0.28 : 0.20);
@@ -1084,8 +1124,8 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	float maxDist = cloudH * 60.0;
 	float tNear, tFar;
 	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
-		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), baseSky, 0.35,
-		                    sunDir, sunColor, outT);   // a missed ray is still under the deck
+		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
+		                    deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -1180,6 +1220,9 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 		cloudCol *= mix(0.45, 1.15, smoothstep(0.0, 0.55, hf));
 		cloudCol += vec3(0.06, 0.09, 0.15) * ((1.0 - hf) * day * 0.20); // sky bounce under the base
 		cloudCol *= uCloudTint;
+		if (ov > 0.0)   // overcast: lighter and darker masses so a closed deck still reads as clouds
+			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68,
+			                cloudCoverFbm(pos * nscale * 0.35 + wind * time, 0.0))), ov);
 		float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
 		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);
 
@@ -1200,8 +1243,11 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	// At full coverage the deck is also what fills any thin spot the noise left, so "100 %"
 	// really covers the whole background (and what is behind it - stars, moon - cannot show).
 	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
-	L += T * gap * overcastDeck(baseSky, 0.35, sunDir, sunColor);
-	T *= 1.0 - gap;
+	if (gap > 0.0)
+	{
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, deck3DXZ(camPos, dir, cloudH, wind, time));
+		T *= 1.0 - gap;
+	}
 	outT = T;
 	return baseSky * T + L;
 }

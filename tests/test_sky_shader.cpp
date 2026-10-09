@@ -129,6 +129,13 @@ TEST_CASE("Overcast sky: every cloud threshold goes through cloudLo, and the cel
 	CHECK(fs.find("float cloudLo(float coverage)") != std::string::npos);
 	CHECK(fs.find("float overcastAmount(float coverage)") != std::string::npos);
 	CHECK(fs.find("vec3 overcastBand(") != std::string::npos);
+	// The deck that carries on to the horizon is textured cloud, not a flat colour: it takes a
+	// point on the layer plane (domeDeckXZ / deck3DXZ) and blends into the sky's own colour.
+	CHECK(fs.find("vec3 overcastDeck(vec3 dir, vec3 sunDir, vec3 sunColor, vec2 deckXZ)") != std::string::npos);
+	CHECK(fs.find("vec2 domeDeckXZ(") != std::string::npos);
+	CHECK(fs.find("vec2 deck3DXZ(") != std::string::npos);
+	// GLSL 4.10 has no const with a non-constant initialiser (Mesa rejects it; glslang does not).
+	CHECK(fs.find("const float ov = ") == std::string::npos);
 	// The old inline mapping must be gone everywhere but cloudLo's own body.
 	size_t inlineMaps = 0;
 	for (size_t at = fs.find("mix(0.70, 0.22"); at != std::string::npos; at = fs.find("mix(0.70, 0.22", at + 1))
