@@ -1,5 +1,6 @@
 #pragma once
 #include <Types/Defines.h>
+#include <Audio/AudioEdit.h>   // AudioEq — a bus carries the same EQ an asset does
 #include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <vector>
@@ -27,6 +28,11 @@ struct HE_API AudioBusDef
 {
     std::string name;
     float       volume = 1.0f;   // linear gain, 1 = unity; the engine clamps at 0
+    // An EQ on everything the bus plays (the Audio Mixer's EQ button), the same
+    // struct and JSON shape an asset's EQ has. Runs at the mixer's rate, after
+    // the voices are summed — AudioEngine::setBusEq. Written only when one was
+    // authored, so a project from before this reads and writes as it did.
+    AudioEq     eq;
 };
 
 struct HE_API AudioBusConfig
@@ -58,7 +64,8 @@ struct HE_API AudioBusConfig
     bool isDefault() const;
 
     // The same JSON shape on both sides of the road (.heproj and .hcfg):
-    // { "master": 1.0, "buses": [ { "name": "Music", "volume": 0.8 }, … ] }.
+    // { "master": 1.0, "buses": [ { "name": "Music", "volume": 0.8 }, … ] },
+    // a bus with an EQ also { …, "eq": { "enabled": true, "bands": [ … ] } }.
     void toJson(nlohmann::json& out) const;
     void fromJson(const nlohmann::json& in);
 };

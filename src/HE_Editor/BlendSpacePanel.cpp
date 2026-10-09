@@ -332,7 +332,7 @@ void BlendSpacePanel::render(AppContext& ctx, const std::string& assetPath,
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.space.name.c_str(), T::iconBranch, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
 		bar.group();
 		bar.readout(nullptr, "Blend Space", T::kFgDim);
 		bar.endGroup();

@@ -13,6 +13,9 @@
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <ContentManager/ContentManager.h>
+#include <MaterialGraph/MaterialGraph.h>
+#include <nlohmann/json.hpp>
+#include <algorithm>
 
 // ── Geometry correctness ───────────────────────────────────────────────────────
 
@@ -522,7 +525,7 @@ TEST_CASE("TerrainPaint falloff fades with distance and rejects bad layers")
     CHECK(near < 255);
     CHECK(far == 0);
 
-    CHECK_FALSE(TerrainPaint::paint(tc, 0.0f, 0.0f, 4, 4.0f, 0.0f, 1.0f)); // only 4 layers
+    CHECK_FALSE(TerrainPaint::paint(tc, 0.0f, 0.0f, kTerrainMaxLayers, 4.0f, 0.0f, 1.0f)); // only 8 layers
     CHECK_FALSE(TerrainPaint::paint(tc, 0.0f, 0.0f, -1, 4.0f, 0.0f, 1.0f));
 }
 
@@ -551,6 +554,312 @@ TEST_CASE("Painted layer weights round-trip through the scene file")
     REQUIRE(l->layerWeights.size() == expected.size());
     CHECK(l->layerWeights == expected);
     CHECK(l->weightsDirty);   // needs an upload on the first tick after load
+}
+
+// ─── More than four layers (Thema 158, Schritt 2) ─────────────────────────────
+// Layers 4..7 live on a SECOND weight page (TerrainComponent::layerWeights2),
+// uploaded as the right half of the same texture. What has to hold: a landscape
+// that never touches layer 4+ is byte-for-byte what it was with four layers —
+// in memory, in the scene file and on the GPU — and painting crosses the page
+// boundary without breaking the "weights sum to 255" invariant.
+
+static_assert(kTerrainMaxLayers == HE::kMatMaxLandscapeLayers,
+              "the paint tool and the material blend must agree on the layer count");
+static_assert(kTerrainMaxLayers >= 5,
+              "the auto landscape material needs grass, dirt, rock, snow, puddle");
+
+namespace {
+int texelSum(const TerrainComponent& tc, uint32_t x, uint32_t z)
+{
+    uint8_t w[kTerrainMaxLayers] = {};
+    REQUIRE(TerrainPaint::texelWeights(tc, x, z, w));
+    int s = 0;
+    for (int k = 0; k < kTerrainMaxLayers; ++k) s += w[k];
+    return s;
+}
+int texelLayer(const TerrainComponent& tc, uint32_t x, uint32_t z, int layer)
+{
+    uint8_t w[kTerrainMaxLayers] = {};
+    REQUIRE(TerrainPaint::texelWeights(tc, x, z, w));
+    return w[layer];
+}
+} // namespace
+
+TEST_CASE("TerrainPaint paints layers 3, 4 and 5 across the weight-page boundary")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.weightRes = 64;                 // 1 texel = 1 m
+    TerrainPaint::ensureWeightmap(tc);
+    const uint32_t c = tc.weightRes / 2;
+
+    // Layer 3 (index 2) and layer 4 (index 3) are first-page channels: no
+    // second page appears, painting is exactly the four-layer behaviour.
+    REQUIRE(TerrainPaint::paint(tc, -20.0f, 0.0f, 2, 5.0f, 0.0f, 1.0f));
+    REQUIRE(TerrainPaint::paint(tc,   0.0f, -20.0f, 3, 5.0f, 0.0f, 1.0f));
+    CHECK(tc.layerWeights2.empty());
+    CHECK_FALSE(TerrainPaint::usesSecondPage(tc));
+
+    // Layer 5 (index 4) is the first channel of the second page: the stroke
+    // allocates it, and the dab centre is now fully on layer index 4.
+    tc.weightsDirty = false;
+    REQUIRE(TerrainPaint::paint(tc, 0.0f, 0.0f, 4, 6.0f, 4.0f, 1.0f));
+    REQUIRE(tc.layerWeights2.size() == tc.layerWeights.size());
+    CHECK(TerrainPaint::usesSecondPage(tc));
+    CHECK(tc.weightsDirty);
+    CHECK(texelLayer(tc, c, c, 4) == 255);
+    CHECK(texelLayer(tc, c, c, 0) == 0);
+    // In the falloff band layer 0 and layer index 4 share the texel.
+    CHECK(texelLayer(tc, c + 8, c, 4) > 0);
+    CHECK(texelLayer(tc, c + 8, c, 4) < 255);
+    CHECK(texelLayer(tc, c + 8, c, 0) > 0);
+    // The earlier first-page strokes are untouched outside this dab …
+    CHECK(texelLayer(tc, c - 20, c, 2) == 255);
+    CHECK(texelLayer(tc, c, c - 20, 3) == 255);
+
+    // … and the indices 5..7 are reachable as well.
+    REQUIRE(TerrainPaint::paint(tc, 20.0f, 20.0f, 5, 3.0f, 0.0f, 1.0f));
+    REQUIRE(TerrainPaint::paint(tc, -20.0f, 20.0f, 7, 3.0f, 0.0f, 1.0f));
+    CHECK(texelLayer(tc, c + 20, c + 20, 5) == 255);
+    CHECK(texelLayer(tc, c - 20, c + 20, 7) == 255);
+
+    // The invariant spans BOTH pages: every texel sums to exactly 255.
+    for (uint32_t z = 0; z < tc.weightRes; ++z)
+        for (uint32_t x = 0; x < tc.weightRes; ++x)
+            REQUIRE(texelSum(tc, x, z) == 255);
+
+    // Partial strokes converge across the boundary too, and painting a first-
+    // page layer back over a second-page one takes all of its weight.
+    for (int i = 0; i < 40; ++i)
+        TerrainPaint::paint(tc, 0.0f, 0.0f, 1, 6.0f, 0.0f, 0.5f);
+    CHECK(texelLayer(tc, c, c, 1) == 255);
+    CHECK(texelLayer(tc, c, c, 4) == 0);
+    CHECK(texelSum(tc, c, c) == 255);
+}
+
+TEST_CASE("An empty second page paints the first page exactly like four layers did")
+{
+    // The eight-channel path with layers 4..7 all zero must be arithmetic-
+    // identical to the four-channel path: the same strokes on 0..3 give the
+    // same bytes whether or not a second page has been allocated.
+    TerrainComponent a;
+    a.sizeX = a.sizeZ = 48.0f;
+    a.weightRes = 48;
+    TerrainPaint::ensureWeightmap(a);
+    TerrainComponent b = a;
+    b.layerWeights2.assign(b.layerWeights.size(), 0);
+
+    const struct { float x, z; int layer; float r, f, s; } strokes[] = {
+        {  0.0f,  0.0f, 1, 9.0f, 5.0f, 0.35f }, {  4.0f, -3.0f, 3, 6.0f, 2.0f, 0.7f },
+        { -9.0f,  6.0f, 2, 4.0f, 8.0f, 0.15f }, {  0.0f,  0.0f, 0, 3.0f, 3.0f, 0.5f },
+        {  2.0f,  2.0f, 3, 7.0f, 0.0f, 1.0f  }, { -1.0f,  5.0f, 1, 5.0f, 9.0f, 0.05f },
+    };
+    for (const auto& st : strokes)
+    {
+        TerrainPaint::paint(a, st.x, st.z, st.layer, st.r, st.f, st.s);
+        TerrainPaint::paint(b, st.x, st.z, st.layer, st.r, st.f, st.s);
+    }
+    CHECK(a.layerWeights2.empty());               // never allocated by 0..3
+    CHECK(a.layerWeights == b.layerWeights);
+    CHECK(std::all_of(b.layerWeights2.begin(), b.layerWeights2.end(),
+                      [](uint8_t v) { return v == 0; }));
+    CHECK_FALSE(TerrainPaint::usesSecondPage(b));
+}
+
+TEST_CASE("buildWeightTexture keeps a four-layer map as it was and puts layers 4..7 beside it")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 16.0f;
+    tc.weightRes = 8;
+    uint32_t w = 99, h = 99;
+    CHECK(TerrainPaint::buildWeightTexture(tc, w, h).empty());   // no weightmap
+    CHECK(w == 0);
+    CHECK(h == 0);
+
+    TerrainPaint::ensureWeightmap(tc);
+    TerrainPaint::paint(tc, 3.0f, -2.0f, 2, 3.0f, 2.0f, 0.6f);
+    // First page only → the upload IS layerWeights, square, as before.
+    CHECK(TerrainPaint::buildWeightTexture(tc, w, h) == tc.layerWeights);
+    CHECK(w == 8);
+    CHECK(h == 8);
+    // An allocated but all-zero second page changes nothing either.
+    tc.layerWeights2.assign(tc.layerWeights.size(), 0);
+    CHECK(TerrainPaint::buildWeightTexture(tc, w, h) == tc.layerWeights);
+    CHECK(w == 8);
+
+    // A used second page → 2:1, each row = page-0 row then page-1 row.
+    REQUIRE(TerrainPaint::paint(tc, -4.0f, 4.0f, 6, 2.0f, 1.0f, 1.0f));
+    const std::vector<uint8_t> tex = TerrainPaint::buildWeightTexture(tc, w, h);
+    REQUIRE(w == 16);
+    REQUIRE(h == 8);
+    REQUIRE(tex.size() == size_t(16) * 8 * 4);
+    for (uint32_t z = 0; z < 8; ++z)
+        for (uint32_t x = 0; x < 8; ++x)
+            for (int k = 0; k < 4; ++k)
+            {
+                const size_t src = (size_t(z) * 8 + x) * 4 + k;
+                REQUIRE(tex[(size_t(z) * 16 + x) * 4 + k]     == tc.layerWeights[src]);
+                REQUIRE(tex[(size_t(z) * 16 + 8 + x) * 4 + k] == tc.layerWeights2[src]);
+            }
+
+    // A second page that does not match the first is never uploaded …
+    tc.layerWeights2.resize(tc.layerWeights2.size() - 4);
+    CHECK_FALSE(TerrainPaint::usesSecondPage(tc));
+    CHECK(TerrainPaint::buildWeightTexture(tc, w, h) == tc.layerWeights);
+    // … and ensureWeightmap drops it rather than carry a half-sized page.
+    TerrainPaint::ensureWeightmap(tc);
+    CHECK(tc.layerWeights2.empty());
+}
+
+namespace {
+nlohmann::json* terrainJsonOf(nlohmann::json& scene)
+{
+    for (auto& e : scene["entities"])
+        if (e.contains("components") && e["components"].contains("terrain"))
+            return &e["components"]["terrain"];
+    return nullptr;
+}
+const TerrainComponent* onlyTerrain(HorizonWorld& w)
+{
+    const TerrainComponent* t = nullptr;
+    for (auto ent : w.registry().view<TerrainComponent>())
+        t = &w.registry().get<TerrainComponent>(ent);
+    return t;
+}
+} // namespace
+
+TEST_CASE("A four-layer landscape writes the old scene format and an old scene loads unchanged")
+{
+    HorizonWorld world;
+    Entity e = world.createEntity("Landscape");
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 32.0f;
+    tc.weightRes = 16;
+    TerrainPaint::ensureWeightmap(tc);
+    TerrainPaint::paint(tc, 4.0f, -3.0f, 3, 6.0f, 2.0f, 0.7f);
+    TerrainPaint::paint(tc, -6.0f, 5.0f, 1, 4.0f, 4.0f, 0.4f);
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    nlohmann::json scene = nlohmann::json::from_cbor(bytes);
+    nlohmann::json* tj = terrainJsonOf(scene);
+    REQUIRE(tj != nullptr);
+    // Nothing new is written for a landscape that does not use layers 4..7:
+    // the file is what a four-layer build wrote and still reads.
+    CHECK(tj->contains("layerWeightsB64"));
+    CHECK_FALSE(tj->contains("layerWeights2B64"));
+
+    // Loading that (= every scene saved before eight layers) gives no second
+    // page, and the texture the renderer gets is the first page, square.
+    HorizonWorld w2;
+    REQUIRE(ser.loadFromMemory(w2, nlohmann::json::to_cbor(scene)));
+    const TerrainComponent* l = onlyTerrain(w2);
+    REQUIRE(l != nullptr);
+    CHECK(l->layerWeights == tc.layerWeights);
+    CHECK(l->layerWeights2.empty());
+    uint32_t w = 0, h = 0;
+    CHECK(TerrainPaint::buildWeightTexture(*l, w, h) == tc.layerWeights);
+    CHECK(w == 16);
+    CHECK(h == 16);
+}
+
+TEST_CASE("Layers 4..7 round-trip through the scene file, a broken second page is dropped")
+{
+    HorizonWorld world;
+    Entity e = world.createEntity("Landscape");
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 32.0f;
+    tc.weightRes = 16;
+    TerrainPaint::ensureWeightmap(tc);
+    TerrainPaint::paint(tc, 4.0f, -3.0f, 2, 6.0f, 2.0f, 0.7f);
+    TerrainPaint::paint(tc, -5.0f, 6.0f, 4, 5.0f, 3.0f, 0.9f);
+    TerrainPaint::paint(tc, 7.0f, 7.0f, 7, 3.0f, 1.0f, 1.0f);
+    REQUIRE(TerrainPaint::usesSecondPage(tc));
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    {
+        HorizonWorld w2;
+        REQUIRE(ser.loadFromMemory(w2, bytes));
+        const TerrainComponent* l = onlyTerrain(w2);
+        REQUIRE(l != nullptr);
+        CHECK(l->layerWeights  == tc.layerWeights);
+        CHECK(l->layerWeights2 == tc.layerWeights2);
+        CHECK(l->weightsDirty);
+    }
+
+    nlohmann::json scene = nlohmann::json::from_cbor(bytes);
+    nlohmann::json* tj = terrainJsonOf(scene);
+    REQUIRE(tj != nullptr);
+    REQUIRE(tj->contains("layerWeights2B64"));
+    {
+        // Truncated second page → dropped, the first page survives.
+        nlohmann::json bad = scene;
+        (*terrainJsonOf(bad))["layerWeights2B64"] =
+            SceneSerializer::encodeBase64(tc.layerWeights2.data(), tc.layerWeights2.size() - 4);
+        HorizonWorld w3;
+        REQUIRE(ser.loadFromMemory(w3, nlohmann::json::to_cbor(bad)));
+        const TerrainComponent* l = onlyTerrain(w3);
+        REQUIRE(l != nullptr);
+        CHECK(l->layerWeights == tc.layerWeights);
+        CHECK(l->layerWeights2.empty());
+    }
+    {
+        // A second page without a first page has nothing to sit beside.
+        nlohmann::json bad = scene;
+        terrainJsonOf(bad)->erase("layerWeightsB64");
+        HorizonWorld w4;
+        REQUIRE(ser.loadFromMemory(w4, nlohmann::json::to_cbor(bad)));
+        const TerrainComponent* l = onlyTerrain(w4);
+        REQUIRE(l != nullptr);
+        CHECK(l->layerWeights.empty());
+        CHECK(l->layerWeights2.empty());
+    }
+}
+
+TEST_CASE("TerrainSystem uploads a 2:1 weightmap only once layers 4..7 are painted")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto& reg = world.registry();
+    Entity te = world.createEntity("Landscape");
+    reg.emplace<TransformComponent>(te);
+    TerrainComponent tc;
+    tc.resolution = 9;
+    tc.sizeX = tc.sizeZ = 16.0f;
+    tc.weightRes = 8;
+    tc.dirty = true;
+    TerrainPaint::ensureWeightmap(tc);
+    TerrainPaint::paint(tc, 0.0f, 0.0f, 1, 3.0f, 0.0f, 1.0f);
+    reg.emplace<TerrainComponent>(te, tc);
+
+    TerrainSystem::updateTerrains(world, cm);
+    auto& live = reg.get<TerrainComponent>(te);
+    const HE::UUID texId = live.weightmapTextureId;
+    REQUIRE(texId != HE::UUID{});
+    const TextureAsset* t = cm.getTexture(texId);
+    REQUIRE(t != nullptr);
+    CHECK(t->width == 8);           // four layers: the square map, as before
+    CHECK(t->height == 8);
+    CHECK(t->data == live.layerWeights);
+    CHECK(live.avgLayerWeights[4] == 0.0f);
+
+    // A stroke on layer index 5 that covers the whole map → the same texture
+    // id, now 2:1.
+    REQUIRE(TerrainPaint::paint(live, 0.0f, 0.0f, 5, 16.0f, 0.0f, 1.0f));
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(live.weightmapTextureId == texId);
+    t = cm.getTexture(texId);
+    REQUIRE(t != nullptr);
+    CHECK(t->width == 16);
+    CHECK(t->height == 8);
+    // The terrain-wide mean sees the second page: all weight on layer 5.
+    CHECK(live.avgLayerWeights[5] == doctest::Approx(1.0f));
+    CHECK(live.avgLayerWeights[0] == doctest::Approx(0.0f));
 }
 
 // ─── Landscape collision (B2: the player used to fall through the ground) ─────

@@ -250,7 +250,10 @@ private:
 	// the material was found (outTex may still be 0 = material has no texture);
 	// false when the UUID is null or the material is not loaded yet.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex);
-	unsigned int ResolveGraphTexture(const HE::UUID& id, const std::string& path);
+	// `array` = a sampler2DArray slot (Thema 158) → GL_TEXTURE_2D_ARRAY, white
+	// array when missing. Bind the result with BindGraphTexture.
+	unsigned int ResolveGraphTexture(const HE::UUID& id, const std::string& path, bool array = false);
+	void         BindGraphTexture(unsigned int tex);
 	// A UI quad's image: same asset, uploaded without the sRGB decode, because
 	// the UI pass writes sRGB numbers straight to the target (Thema 107).
 	unsigned int ResolveUITexture(const HE::UUID& id, const std::string& path);
@@ -632,6 +635,8 @@ private:
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
+	std::unordered_set<unsigned int> m_glArrayTex;   // graph textures stored as GL_TEXTURE_2D_ARRAY
+	unsigned int m_whiteArrayTex = 0;                // 1×1×1 white array (missing array slot)
 	std::unordered_map<std::string, unsigned int> m_uiTexCache; // UI quad images, same keys, never sRGB
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 	std::vector<HE::UUID>                       m_pendingMeshInvalidations;
@@ -1153,10 +1158,13 @@ private:
 	struct GILandGpu
 	{
 		glm::mat4 worldToLocal{1.0f};
-		glm::vec4 cfg{0.0f};      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
-		glm::vec4 layer[4]{};     // per-layer folded colour (rgb)
+		glm::vec4 cfg{0.0f};      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
+		glm::vec4 layer[4]{};     // per-layer folded colour (rgb); auto: Grass, Dirt, Rock, Snow
+		glm::vec4 autoWet{0.0f};  // auto only — HE::GiLandscape::autoWet / autoSlope / autoSnow
+		glm::vec4 autoSlope{0.0f};
+		glm::vec4 autoSnow{0.0f};
 	};
-	static_assert(sizeof(GILandGpu) == 64 + 5 * 16, "must match the GLSL GiLand layout");
+	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the GLSL GiLand layout");
 	// How far, in SCREEN pixels, the widest allowed lobe scatters — the span the
 	// blur must cover for the rays not to show as noise. Same constant and same
 	// meaning as MetalRenderer::kGIReflLobeScreenPx; keep them together.
@@ -1192,6 +1200,15 @@ private:
 	// pass could not run. probesValid = the DDGI atlases hold real data.
 	unsigned int RenderGIReflections(int width, int height, const glm::mat4& viewProj,
 	                                 bool probesValid);
+	// GI-reflection sky (topic 173): the sky pass (DrawSkyFullscreen — clouds,
+	// weather, stars) drawn into a small cube around the camera each frame the
+	// reflections trace, so a ray that misses the scene returns the sky the
+	// viewer sees instead of nothing (the composite's cloudless m_skyEnvCube).
+	// Mirrors MetalRenderer::EncodeSkyReflCube; HE_GIREFL_SKY=0 turns it off.
+	void         RenderSkyReflCube();
+	unsigned int m_skyReflCube  = 0;     // GL_TEXTURE_CUBE_MAP RGBA16F, kSkyReflCubeSize²
+	unsigned int m_skyReflFBO   = 0;
+	bool         m_skyReflValid = false; // the cube holds THIS frame's sky
 	void         DispatchGIProbeUpdate();
 
 	static constexpr int   kGIProbeOctSize     = 8;    // octahedral tile size

@@ -455,9 +455,23 @@ private:
 	// tried and looked like one. `lowResClouds` false forces the inline raymarch
 	// (the preview runs no quarter-res pre-pass, so there is no buffer to composite).
 	// `useSkyLut` lets the pass read the Sky-View LUT when it holds this sun.
+	// `cubeBake` draws through m_skyReflPipeline instead (no depth attachment, no
+	// depth state) — the GI-reflection sky cube below.
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
 	                float time, const IRenderer::EnvironmentSettings& env,
-	                const glm::vec3& camPos, bool lowResClouds, bool useSkyLut);
+	                const glm::vec3& camPos, bool lowResClouds, bool useSkyLut,
+	                bool cubeBake = false);
+	// GI-reflection sky (topic 173): the REAL sky pass — clouds, weather, stars,
+	// time of day — drawn into a small cube around the camera each frame the
+	// reflections trace, so a ray that misses the scene returns the sky the
+	// viewer actually sees. m_skyEnvCube cannot: it is the CPU atmosphere bake
+	// (no clouds) the lit shaders' IBL ambient reads. Bound in the reflection
+	// kernels in place of m_skyEnvCube while m_skyReflValid; HE_GIREFL_SKY=0
+	// keeps the old cubemap fallback (A/B).
+	void* m_skyReflPipeline = nullptr; // id<MTLRenderPipelineState> skyFragment, RGBA16F, no depth
+	void* m_skyReflCube     = nullptr; // id<MTLTexture> cube RGBA16F, kSkyReflCubeSize²
+	bool  m_skyReflValid    = false;   // the cube holds THIS frame's sky
+	void  EncodeSkyReflCube(void* cmdBuf);
 	// Sky-View LUT (perf audit A4): atmoScatter for the current sun baked into
 	// two 256×128 RGBA16F targets (skyViewLutFragment in kSkyMSL: Rayleigh +
 	// multiple-scatter fill, and the phase-free Mie term), so the sky pass reads
@@ -490,7 +504,8 @@ private:
 	// (unretained, autoreleased) id<MTLTexture> owned by the cache.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex);
 	// Node-graph project texture (Texture Sample nodes), cached by UUID/path key.
-	void* ResolveGraphTexture(const HE::UUID& texId, const std::string& path);
+	// `array` = a sampler2DArray slot (Thema 158): texture2d_array, white array when missing.
+	void* ResolveGraphTexture(const HE::UUID& texId, const std::string& path, bool array = false);
 	// A UI quad's image: same asset, uploaded without the sRGB decode, because
 	// the UI pass writes sRGB numbers straight to a Unorm target (Thema 107).
 	void* ResolveUITexture(const HE::UUID& texId, const std::string& path);
@@ -601,7 +616,13 @@ private:
 	void* m_noDepthState    = nullptr; // id<MTLDepthStencilState> (overlay)
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when shadow/AO/moon texture is absent
+	void* m_whiteArrayTexture = nullptr; // id<MTLTexture>, 1×1×1 white texture2d_array (empty array slot)
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
+	// Graph-material project textures (heTexP0..3, MSL texture/sampler 1..4):
+	// linear + mips like m_linearSampler, but REPEAT. Every other backend tiles
+	// these (GL default wrap, D3D WRAP, Vulkan REPEAT); with the clamping sampler
+	// a material uv past 0..1 smeared the edge texel on Metal only (Thema 158 S5).
+	void* m_materialSampler = nullptr; // id<MTLSamplerState>
 	void* m_noiseTexture    = nullptr; // id<MTLTexture>, 3D R16 value noise (sky)
 	void* m_noiseSampler    = nullptr; // id<MTLSamplerState>, linear + repeat
 	void* m_skyEnvCube      = nullptr; // id<MTLTexture>, baked skyColor IBL cubemap
@@ -1133,10 +1154,13 @@ private:
 	struct GILandGpu
 	{
 		glm::mat4 worldToLocal{1.0f};
-		glm::vec4 cfg{0.0f};       // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
-		glm::vec4 layer[4]{};      // per-layer folded colour (rgb)
+		glm::vec4 cfg{0.0f};       // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
+		glm::vec4 layer[4]{};      // per-layer folded colour (rgb); auto: Grass, Dirt, Rock, Snow
+		glm::vec4 autoWet{0.0f};   // auto only — HE::GiLandscape::autoWet / autoSlope / autoSnow
+		glm::vec4 autoSlope{0.0f};
+		glm::vec4 autoSnow{0.0f};
 	};
-	static_assert(sizeof(GILandGpu) == 64 + 5 * 16, "must match the MSL GILand layout");
+	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the MSL GILand layout");
 	void* m_giLandBuf         = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
 	void* m_giInstanceLandBuf = nullptr; // id<MTLBuffer> (retained), HW per-instance index
 	// Packs RenderWorld::landscapes into m_giLandBuf and returns how many made it

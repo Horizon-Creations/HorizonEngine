@@ -323,3 +323,81 @@ TEST_CASE("outliner ui: nothing to draw under a row means no eye, and the lock i
 	clickAt(ctx, icons[0], groupRow.yMid);
 	CHECK(reg.all_of<EditorLockComponent>(group));
 }
+
+// ── Rows out of view (Thema 153, Schritt 6) ──────────────────────────────────
+// The panel skips rows scrolled out of view instead of submitting them, and
+// rebuilds the IDs, folds and indentation it would have had. Whatever it does,
+// the panel must look and scroll exactly as when every row is drawn: the same
+// picture to the pixel and the same scroll range — at the top, in the middle
+// of a branch, past a folded one, and at the very bottom.
+TEST_CASE("outliner ui: rows out of view are skipped, the panel looks and scrolls exactly as before")
+{
+	Harness h;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	ContextBits bits;
+	AppContext  ctx = bits.make(world, undo);
+	std::vector<Entity> groups;
+	for (int g = 0; g < 10; ++g)
+	{
+		const Entity group = world.createEntity("Group " + std::to_string(g));
+		groups.push_back(group);
+		for (int i = 0; i < 40; ++i)
+		{
+			const Entity e = world.createEntity("Item " + std::to_string(g) + "." + std::to_string(i));
+			world.reparentEntity(e, group);
+		}
+	}
+	world.markHierarchyDirty();
+	ImGui::GetIO().AddMousePosEvent(-1.0f, -1.0f);   // nothing hovered: no highlight to tell apart
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+	ImGuiWindow* win = ImGui::FindWindowByName("World Outliner");
+	REQUIRE(win != nullptr);
+	const float unfolded = win->ContentSize.y;
+
+	// Fold Group 3 the way a click on its arrow does: its id in the window's
+	// storage. The World root's row hangs off the window's own id; Group 3's
+	// off the root's (TreeNodeEx pushes the row's id for its children).
+	const auto idOf = [](Entity e, ImGuiID seed)
+	{
+		const void* ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(static_cast<uint32_t>(e)));
+		return ImHashData(&ptr, sizeof(void*), seed);
+	};
+	win->StateStorage.SetInt(idOf(groups[3], idOf(world.rootEntity(), win->ID)), 0);
+
+	struct Look { he_ui::Image img; float contentH; float scrollMax; float scroll; };
+	const auto look = [&](bool clipping, float scrollY) -> Look
+	{
+		OutlinerPanel::setRowClipping(clipping);
+		ImGui::SetScrollY(win, scrollY);
+		for (int i = 0; i < 3; ++i) frame(ctx, false);   // scroll applied, row height measured
+		Look l;
+		frame(ctx, false, &l.img);
+		l.contentH  = win->ContentSize.y;
+		l.scrollMax = win->ScrollMax.y;
+		l.scroll    = win->Scroll.y;
+		if (const char* dir = std::getenv("HE_UI_DUMP_DIR"))
+		{
+			char name[128];
+			std::snprintf(name, sizeof(name), "%s/outliner_clip_%s_%d.bmp", dir, clipping ? "on" : "off",
+			              static_cast<int>(scrollY));
+			he_ui::writeBmp(l.img, name);
+		}
+		return l;
+	};
+	for (const float scrollY : { 0.0f, 900.0f, 2600.0f, 1.0e6f })
+	{
+		CAPTURE(scrollY);
+		const Look all  = look(false, scrollY);
+		const Look some = look(true, scrollY);
+		CHECK(all.scrollMax > 1000.0f);               // a long list: most rows are out of view
+		CHECK(all.contentH < unfolded - 30 * 15.0f);  // …and Group 3's forty rows are folded away
+		CHECK(some.contentH == all.contentH);
+		CHECK(some.scrollMax == all.scrollMax);
+		CHECK(some.scroll == all.scroll);
+		REQUIRE(some.img.valid());
+		CHECK(some.img.rgba == all.img.rgba);
+	}
+	OutlinerPanel::setRowClipping(true);
+}

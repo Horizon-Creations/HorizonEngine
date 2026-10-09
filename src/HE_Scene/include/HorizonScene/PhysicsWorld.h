@@ -186,6 +186,12 @@ public:
     bool setTransform(uint32_t entityId, const glm::vec3& position, const glm::quat& rotation,
                       bool resetVelocity = false);
 
+    // Floating origin (HE::shiftWorldOrigin): every body, terrain included, and
+    // every character moves by -shift. Velocities stay, sleeping bodies keep
+    // sleeping, joints come along (Jolt keeps their anchors body-relative).
+    // Returns how many bodies and characters were moved.
+    size_t shiftOrigin(const glm::vec3& shift);
+
     // Does this entity have a body or a character controller? For diagnostics,
     // for tests, and for game code that wants to ask before pushing.
     bool hasPhysics(uint32_t entityId) const;

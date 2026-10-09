@@ -27,6 +27,8 @@
 #include "ExportDialogPanel.h"           // Build > Export Project modal + packing worker
 #include "GameLogicBuildPanel.h"         // Build > Build and Reload Game Logic (C++ projects)
 #include "ContentBrowserPanel.h"         // bottom dock: folder tree + asset grid
+#include "GraphViewStore.h"               // remembered graph pan/zoom, per project
+#include "EditorToolbar.h"                // setRevealAssetHook — the asset tabs' header button
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
@@ -57,6 +59,7 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
+#include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
 #include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
@@ -377,6 +380,8 @@ void EditorUI::joinPendingExport()
 	// log or filing an issue, and a joinable std::thread destroyed at teardown
 	// terminates the process.
 	ReportIssueDialog::joinPendingWork();
+	// And the GitHub sign-in: its poll thread and the worker that stores a token.
+	GitHubSignIn::joinPendingWork();
 }
 
 void EditorUI::joinPendingGameLogicBuild()
@@ -465,6 +470,77 @@ static void HideSceneTabBarOnce()
 
 // ─── render ───────────────────────────────────────────────────────────────────
 
+// ─── Remembered graph views ───────────────────────────────────────────────────
+// The persistent half of GraphViewStore: one JSON table per project in the
+// editor's config ("graphViews:<project path>"), {"mat:Materials/X.hasset":
+// [panX, panY, zoom], …}. Nothing about an asset is touched.
+namespace
+{
+std::string s_graphViewProject;   // the project the in-memory table belongs to
+
+std::string graphViewsKey(const std::string& project) { return "graphViews:" + project; }
+
+void graphViewsLoad(GlobalState& gs, const std::string& project)
+{
+	GraphViewStore::Table& t = GraphViewStore::table();
+	t.views.clear();
+	t.tabs.clear();
+	t.dirty = false;
+	if (project.empty()) return;
+	const std::string raw = gs.getCustomConfigString(graphViewsKey(project), "");
+	if (raw.empty()) return;
+	const nlohmann::json j = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false);
+	if (j.is_discarded() || !j.is_object()) return;
+	// Open graph tabs ride along under one reserved key: {"__tabs": {key: [active, id…]}}.
+	if (const auto tabsIt = j.find("__tabs"); tabsIt != j.end() && tabsIt->is_object())
+		for (auto it = tabsIt->begin(); it != tabsIt->end(); ++it)
+			if (it.value().is_array() && !it.value().empty() && it.value()[0].is_number_integer())
+			{
+				GraphViewStore::OpenTabs ot;
+				ot.active = it.value()[0].get<int>();
+				for (std::size_t i = 1; i < it.value().size(); ++i)
+					if (it.value()[i].is_number_integer()) ot.open.push_back(it.value()[i].get<int>());
+				t.tabs[it.key()] = std::move(ot);
+			}
+	for (auto it = j.begin(); it != j.end(); ++it)
+		if (it.key() != "__tabs" && it.value().is_array() && it.value().size() == 3 &&
+		    it.value()[0].is_number() && it.value()[1].is_number() && it.value()[2].is_number())
+			t.views[it.key()] = { it.value()[0].get<float>(), it.value()[1].get<float>(),
+			                      it.value()[2].get<float>() };
+}
+
+bool graphViewsStore(GlobalState& gs, const std::string& project)
+{
+	GraphViewStore::Table& t = GraphViewStore::table();
+	if (project.empty() || !t.dirty) return false;
+	nlohmann::json j = nlohmann::json::object();
+	for (const auto& [key, v] : t.views) j[key] = nlohmann::json::array({ v.panX, v.panY, v.zoom });
+	if (!t.tabs.empty())
+	{
+		nlohmann::json tj = nlohmann::json::object();
+		for (const auto& [key, ot] : t.tabs)
+		{
+			nlohmann::json a = nlohmann::json::array({ ot.active });
+			for (int id : ot.open) a.push_back(id);
+			tj[key] = std::move(a);
+		}
+		j["__tabs"] = std::move(tj);
+	}
+	// "replace": a path with invalid UTF-8 must not abort the editor in dump().
+	gs.setCustomConfigEntry(graphViewsKey(project),
+		j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+	t.dirty = false;
+	return true;
+}
+} // namespace
+
+void EditorUI::flushGraphViews(AppContext& ctx, bool write)
+{
+	if (!ctx.globalState) return;
+	if (graphViewsStore(*ctx.globalState, s_graphViewProject) && write)
+		ctx.globalState->writeConfig();
+}
+
 void EditorUI::render(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -473,6 +549,26 @@ void EditorUI::render(AppContext& ctx, float dt)
     // Refresh the frame-cached pointer-grammar answer for ctx-less call sites
     // (the shared GraphEditor canvas asks via EditorInput::trackpadActive()).
     EditorInput::trackpadPointer(ctx);
+    // …and publish this frame's pinch (macOS), before any canvas asks for it.
+    EditorInput::beginFrame();
+
+    // The remembered graph views: follow the project, and write them a moment
+    // after they stop moving (a pan is dozens of changes a second; the config
+    // file is rewritten once it has been quiet).
+    if (ctx.globalState)
+    {
+        const std::string project = (ctx.projectLoaded && ctx.projectManager)
+            ? ctx.projectManager->currentProject().path : std::string();
+        if (project != s_graphViewProject)
+        {
+            flushGraphViews(ctx);                       // the project we are leaving
+            s_graphViewProject = project;
+            graphViewsLoad(*ctx.globalState, project);  // the one we are entering
+        }
+        else if (GraphViewStore::table().dirty &&
+                 ImGui::GetTime() - GraphViewStore::table().changedAt > 1.5)
+            flushGraphViews(ctx);
+    }
 
     ImGuiIO& io = ImGui::GetIO();
 
@@ -674,6 +770,10 @@ void EditorUI::render(AppContext& ctx, float dt)
     // over both. It only leaves a .heproj path behind; the Hub and the editor
     // each open it through their own path (takeOpenRequest).
     GitCloneDialog::Draw(ctx);
+    // Preferences ▸ Source Control ▸ Sign in with GitHub. Drawn every frame,
+    // dialog open or not: it also saves a token the user approved after the
+    // dialog that showed the code was closed.
+    GitHubSignIn::Draw(ctx);
 
     // ── "The last session left unsaved work behind" ──────────────────────────
     // After the two checks above on purpose: all three raise root-level modals
@@ -760,6 +860,9 @@ void EditorUI::render(AppContext& ctx, float dt)
     }
 
     ImGui::Render();
+    // HE_DUMP_TUTORIALUI only: the tour card's placement, pictured from this
+    // frame's draw data (a no-op without the variable).
+    TutorialPanel::witnessAfterRender();
 
     // ── Multi-viewport / platform windows ─────────────────────────────────────
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -811,6 +914,7 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       BlendSpacePanel::isDirty(assetPath)          ||
 	       SequencerPanel::isDirty(assetPath)           ||
        CinematicPanel::isDirty(assetPath)           ||
+	       AudioEditorPanel::isDirty(assetPath)         ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
 	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
 	       SkeletalMeshEditorPanel::isDirty(assetPath);
@@ -836,6 +940,7 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	BlendSpacePanel::appendDirtyPaths(out);
 	SequencerPanel::appendDirtyPaths(out);
 	CinematicPanel::appendDirtyPaths(out);
+	AudioEditorPanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
 	SkeletalMeshEditorPanel::appendDirtyPaths(out);
@@ -865,6 +970,7 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = BlendSpacePanel::save(ctx, assetPath)                       && ok;
 	ok = SequencerPanel::save(ctx, assetPath)                        && ok;
 	ok = CinematicPanel::save(ctx, assetPath)                        && ok;
+	ok = AudioEditorPanel::save(ctx, assetPath)                      && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
 	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
@@ -889,6 +995,7 @@ void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSn
 	BoneMaskPanel::appendSnapshots(ctx, out);
 	BlendSpacePanel::appendSnapshots(ctx, out);
 	SequencerPanel::appendSnapshots(ctx, out);
+	AudioEditorPanel::appendSnapshots(ctx, out);
 	ParticleGraphEditorPanel::appendSnapshots(ctx, out);
 	AnimatorStateMachineEditorPanel::appendSnapshots(ctx, out);
 	SkeletalMeshEditorPanel::appendSnapshots(ctx, out);
@@ -1026,15 +1133,27 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 	any = BlendSpacePanel::reloadFromDisk(assetPath)                      || any;
 	any = SequencerPanel::reloadFromDisk(assetPath)                       || any;
 	any = CinematicPanel::reloadFromDisk(assetPath)                       || any;
+	any = AudioEditorPanel::reloadFromDisk(assetPath)                     || any;
 	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
 	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
 	return any;
 }
 
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
+#ifdef HE_IMGUI_ENABLED
+// Raised by an asset editor's Save button (EditorToolbar::setSaveHook), consumed
+// where the Save chord is read.
+static bool s_saveFromToolbar = false;
+#endif
+
 void EditorUI::renderEditor(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
+	// The asset tabs' "Show in Content Browser" button lives in the shared
+	// toolbar, which cannot reach the panel itself. A pointer store per frame.
+	EditorToolbar::setRevealAssetHook(&ContentBrowserPanel::revealAsset);
+	// …and so does its Save: the button must be the keystroke, cues included.
+	EditorToolbar::setSaveHook([] { s_saveFromToolbar = true; });
 	// Runs every frame regardless of which tab/panel is active (before any early-out):
 	// guarantees the RMB fly-look capture can never stay stuck once the button is released.
 	ViewportPanel::enforceViewportLookCaptureInvariant(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
@@ -1497,6 +1616,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ctx.activeTab      = static_cast<int>(std::distance(ctx.tabs.begin(), it));
 		s_tabSelectRequest = ctx.activeTab;
 	};
+	// "Show in Content Browser" from an asset editor's header: the browser is
+	// docked into the scene tab and is not drawn on any other, so the scene tab
+	// has to come forward before the panel can navigate to the asset.
+	if (ContentBrowserPanel::takeRevealTabSwitch()) openViewportTab();
 	// View-menu panel toggle. Ticking one on has to make it VISIBLE, and where
 	// that is depends on how the user keeps it: a FLOATING panel draws over
 	// whichever tab is open, so it is only pulled to the front (it may already
@@ -2712,9 +2835,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // rebinds it, and the menu rows print the same table), which also
     // carries the "not while typing" guard and the exact-modifier rule.
     {
+        // A Save button in an asset editor's header (EditorToolbar::saveButton)
+        // asked for the same thing the chord does. Consumed every frame so a
+        // press can never wait for a later, unrelated one.
+        const bool toolbarSave = std::exchange(s_saveFromToolbar, false);
         if (EditorShortcuts::pressed("file.saveSceneAs")) triggerSaveSceneAs();
         else if (EditorShortcuts::pressed("file.saveAll")) doSaveAll();
-        else if (EditorShortcuts::pressed("file.save"))    doSaveActiveTab();
+        else if (EditorShortcuts::pressed("file.save") || toolbarSave) doSaveActiveTab();
         // Ctrl/Cmd+, opens the Preferences tab (matches the Edit menu shortcut label).
         if (EditorShortcuts::pressed("edit.preferences"))
             openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);

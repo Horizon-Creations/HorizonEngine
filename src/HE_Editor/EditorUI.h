@@ -16,6 +16,13 @@ public:
 	// Blocks until a project export running on the worker thread has finished.
 	// Must be called on editor shutdown — destroying a joinable std::thread
 	// terminates the process.
+	// Where each graph was last looked at (GraphViewStore.h), kept per project in
+	// the editor's config: loaded when the project changes, written a moment after
+	// the views stop moving. flushGraphViews writes at once if anything moved —
+	// `write` false only fills the config entry for a caller about to write the
+	// file itself (EditorApplication::writeEditorConfig).
+	static void flushGraphViews(AppContext& ctx, bool write = true);
+
 	static void joinPendingExport();
 
 	// The same rule for the second worker on the Build window: Build ▸ Build and

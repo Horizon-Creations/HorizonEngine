@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 // ── Toolbar look, shared ─────────────────────────────────────────────────────
 // The palette and the drawing primitives behind the editor's toolbars: a darker
@@ -196,7 +197,16 @@ public:
 	// A cell that reports rather than acts: icon and label inside the current
 	// well, with no hit box at all. An InvisibleButton that does nothing still
 	// lights up on hover, which promises a click that never happens.
-	void readout(IconFn icon, const char* label, ImU32 fg = kFg);
+	// Returns the icon's centre, for a caller that draws its own in the slot
+	// (the compile readout's written check, EditorRewards.h V9).
+	ImVec2 readout(IconFn icon, const char* label, ImU32 fg = kFg);
+	// The icon slot's size (square), as readout lays it out.
+	float iconSize() const { return m_m.icon; }
+	// "This asset has unsaved edits" — set by assetHeader, drawn by saveButton as
+	// a dot on the Save glyph's corner, so the mark sits on the thing that fixes
+	// it instead of widening the folder button.
+	void markDirty(bool d) { m_dirty = d; }
+	bool dirty() const     { return m_dirty; }
 	// A hairline between two cells inside one well, for a group that holds two
 	// unrelated things and is not worth splitting.
 	void divider();
@@ -234,6 +244,7 @@ private:
 	bool        m_inGroup   = false;
 	bool        m_groupIsRight = false;
 	bool        m_first     = true;   // no separating gap before the first cell
+	bool        m_dirty     = false;  // see markDirty()
 };
 
 // ── Asset-editor header ──────────────────────────────────────────────────────
@@ -242,13 +253,40 @@ private:
 // saved?") and ends with the same answer ("Save"). Written out per panel that is
 // six copies of one row, each free to drift in wording and spacing.
 
-// The left-hand group: kind icon, asset name, and an "unsaved" mark when there
-// are pending edits.
-void assetHeader(Bar& bar, const char* name, IconFn kindIcon, bool dirty);
+// The left-hand group: a "Show in Content Browser" button for `assetPath` (the
+// absolute path the tab was opened with; empty = no file behind the tab, no
+// button). `dirty` is remembered on the bar and drawn by saveButton as a dot on
+// the Save glyph. The asset's name
+// and path are deliberately NOT repeated here — the tab above already carries
+// the name, and a second copy only took room from the tools.
+void assetHeader(Bar& bar, const std::string& assetPath, bool dirty);
+
+// What pressing that button does. The toolbar is ImGui-only on purpose (the UI
+// test target builds it without the editor), so it cannot call the Content
+// Browser itself; the editor registers the Content Browser's revealAsset here.
+// Unset (tests, tooling) the button is drawn and does nothing.
+using RevealAssetFn = void (*)(const std::string& absPath);
+void setRevealAssetHook(RevealAssetFn fn);
+
+// What pressing Save does. The editor registers a hook that runs the SAME path
+// as Ctrl/Cmd+S and File ▸ Save, so the check mark, the sound and the tab's
+// "saved" mark come with it; a button that wrote the file by itself got none of
+// them. With a hook set, saveButton() reports the press to the hook and returns
+// false — the caller's own write never runs a second time. Unset (tests,
+// tooling) saveButton() returns true and the caller saves as before.
+using SaveFn = void (*)();
+void setSaveHook(SaveFn fn);
+// For a save cell a panel draws itself: the same press, routed the same way.
+// False when no hook is set (the caller should then save directly).
+bool requestSave();
 
 // The right-hand Save. True when pressed. `enabled` is the panel's answer to
-// "is there anything to write, and did the asset even load".
-bool saveButton(Bar& bar, bool enabled);
+// "did the asset even load" — it is also greyed out whenever the bar's asset has
+// no unsaved edits (assetHeader's `dirty`), so call assetHeader first.
+// `atLeft` puts the button in the next left-hand well (right after the asset
+// header's folder button) instead of at the right edge — for bars that keep the
+// right edge for a view switch.
+bool saveButton(Bar& bar, bool enabled, bool atLeft = false);
 
 // ── Icons shared by more than one bar ────────────────────────────────────────
 void iconGear(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);

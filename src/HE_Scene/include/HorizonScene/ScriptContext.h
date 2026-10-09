@@ -164,6 +164,16 @@ public:
     bool callOnRep(ScriptEngine::InstanceId id, const std::string& varName,
                    const HorizonCode::Value& oldValue);
 
+    // onChanged_<name>(self, source, old, new) / on_changed_<name> — a
+    // HorizonCode variable THIS instance subscribed to with horizon.hc.watch
+    // changed (docs/bind-to-variable-binding-plan.md §4.5). Addressed like
+    // onRep: the host routes it to the script on the subscribing entity
+    // (HcWatchEvents). `source` is the entity whose class owns the variable,
+    // 0 for the Game Instance.
+    bool callOnChanged(ScriptEngine::InstanceId id, const std::string& varName,
+                       uint32_t source, const HorizonCode::Value& oldValue,
+                       const HorizonCode::Value& newValue);
+
     // Hot-reload: recompile script and patch function fields in live instances.
     // Data fields (non-function keys in instance tables) are preserved. The
     // 2-arg form routes by which backend owns the name (ambiguous across
@@ -281,6 +291,9 @@ public:
 
 private:
     void registerHorizonApi();
+    // Drops every script subscription (horizon.hc.watch) held in `runtime`:
+    // the context is letting go of it, and its scripts with it.
+    static void dropScriptWatches(HorizonCode::Runtime* runtime);
 
     using InstanceId = ScriptEngine::InstanceId; // == IScriptBackend::InstanceId
 

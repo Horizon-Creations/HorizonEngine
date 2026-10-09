@@ -18,7 +18,7 @@ Thema 127, Schritt 2 (Entwurf korrigiert). Nur Doku, keine Umsetzung. Schritt 3 
 1. **Pull on Construct:** Eine Variable einer Klasse wird beim Initialisieren automatisch von anderswo gezogen. Die Engine sorgt dafür, dass der Wert bei Construct schon da ist. Ist die Quelle nicht verfügbar, gilt ein vorher festgelegter Default. Im Editor legt man pro Variable fest, **welche** Daten gewünscht sind und **woher** sie kommen. Ob dafür Asset-Index oder Registry erweitert werden müssen, prüft §2.10.
 2. **Extract on Destruct:** Beim Zerstören einer Klasse werden Daten automatisch in eine Struct extrahiert und über ein bindbares Event **„On Destroyed“** verfügbar gemacht. Die Klasse hat dafür eine hinterlegte Struct und eine Zuordnung Feld → Struct-Member, die auch die C++-Codegen nutzt. Für diese Zuordnung gibt es eine möglichst intuitive Editor-UI.
 
-**Verworfen** ist der erste Entwurf aus Schritt 1 (Commits ab3afee8, fbb9908c): laufende Änderungsmeldung `OnChanged_<Var>` und Dauerbindung „Bind To“ mit Abgleich am Frame-Ende. Das ist ein anderes Feature (fortlaufender Austausch statt Austausch an den beiden Enden des Lebenszyklus). Sein Inhalt steht in der Git-Historie und wird hier nicht weitergeführt. Wiederverwendet werden nur die Ist-Befunde, die für beide Fassungen gelten (§1).
+**Verworfen** ist der erste Entwurf aus Schritt 1 (Commits ab3afee8, fbb9908c): laufende Änderungsmeldung `OnChanged_<Var>` und Dauerbindung „Bind To“ mit Abgleich am Frame-Ende. Das ist ein anderes Feature (fortlaufender Austausch statt Austausch an den beiden Enden des Lebenszyklus). Als eigenes Feature wird er in Thema 137 weitergeführt: `docs/bind-to-variable-binding-plan.md`. Wiederverwendet werden nur die Ist-Befunde, die für beide Fassungen gelten (§1).
 
 ## 1. Ist-Stand
 
@@ -201,7 +201,7 @@ pullOnConstruct(id):                            // nie für die GI selbst (§2.3
 ### 2.6 Garantien (gehören ins Handbuch)
 
 * **Vor jedem eigenen Code.** PreConstruct, Construct, BeginPlay und OnLevelLoaded sehen den gezogenen Wert bzw. den Fallback, nie einen Zwischenstand.
-* **Einmal.** Pull ist ein Schnappschuss beim Erzeugen. Ändert sich die Quelle später, zieht die Variable nicht nach. Wer laufend nachziehen will, macht das wie heute selbst (Get (Ref) auf die Game Instance).
+* **Einmal.** Pull ist ein Schnappschuss beim Erzeugen. Ändert sich die Quelle später, zieht die Variable nicht nach. Wer laufend nachziehen will, schaltet die Variable auf „Bind To“ (`docs/bind-to-variable-binding-plan.md`): dieselbe Angabe, danach gleicht die Engine am Ende jedes Frames ab.
 * **Quelle nicht verfügbar → Default**, und zwar genau der Default, der in der Variable steht. Eine Warnung pro Klasse und Variable.
 * **Spawn-Werte gewinnen** (§2.4).
 * **Nur lokal.** Auf einem Netz-Client zieht die Variable aus der Game Instance **dieses** Rechners. Ist die Variable zusätzlich Replicated, überschreibt der Replikator den Wert später, wie jeden anderen lokalen Wert auch. Die Kombination ist erlaubt. Anders als bei der verworfenen Dauerbindung schreiben hier keine zwei Quellen dauerhaft gegeneinander.
@@ -499,7 +499,7 @@ Extract on Destruct:
 ## 7. Bewusst nicht in den Schritten 3/4
 
 * Weitere Pull-Quellen (Erzeuger, Savegame, Data Tables), §2.3.
-* Laufendes Nachziehen nach Construct. Das war der verworfene erste Entwurf.
+* Laufendes Nachziehen nach Construct. Das ist „Bind To“, siehe `docs/bind-to-variable-binding-plan.md` (Thema 137).
 * Verschachtelte Zuordnung (`Stats.Kills ← Kills`) und Konstanten als Quelle in der Extract-Tabelle.
 * Extract für Level-Script und Game Instance (§3.5).
 * Lua/Python/C++-Zugriff auf OnDestroyed bzw. Pull-Angaben. Diese Frontends erreichen HC-Variablen heute kaum (erster Entwurf §1), das ist ein eigenes Loch.

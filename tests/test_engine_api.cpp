@@ -3619,6 +3619,45 @@ TEST_CASE("entity save-state: guarded round-trip through the active save")
     save::setPlayMode(false);
 }
 
+TEST_CASE("entity save-state: positions are saved absolute under a floating origin (Thema 153)")
+{
+    SaveTestRig rig;
+    namespace save = HE::api::save;
+
+    HorizonWorld world;
+    HE::api::Ctx c{ &world, nullptr, &rig.cm };
+    auto& reg = world.registry();
+    const auto top = world.createEntity("Hero");
+    reg.emplace<TransformComponent>(top).position = { 4000.5f, 2.0f, -3000.25f };
+    reg.emplace<SaveStateComponent>(top);
+    const auto child = world.createEntity("Sword");
+    world.reparentEntity(child, top);
+    reg.emplace<TransformComponent>(child).position = { 0.5f, 1.0f, 0.0f };
+    reg.emplace<SaveStateComponent>(child);
+
+    save::setPlayMode(true);
+    REQUIRE(save::create("origin", &rig.cm));
+    world.setOrigin({ 96000.0, 0.0, -48000.0 });   // the hero is at 100 000.5 / -51 000.25
+    REQUIRE(HE::api::entity::saveState(c, (HE::api::Entity)top));
+    REQUIRE(HE::api::entity::saveState(c, (HE::api::Entity)child));
+
+    // Loaded where the origin has moved on: same absolute place, other local value.
+    world.setOrigin({ 104000.0, 0.0, -56000.0 });
+    REQUIRE(HE::api::entity::applySavedState(c, (HE::api::Entity)top));
+    CHECK(reg.get<TransformComponent>(top).position.x == doctest::Approx(-3999.5f));
+    CHECK(reg.get<TransformComponent>(top).position.z == doctest::Approx(4999.75f));
+    // Below the top level the position is the parent's business: unchanged.
+    REQUIRE(HE::api::entity::applySavedState(c, (HE::api::Entity)child));
+    CHECK(reg.get<TransformComponent>(child).position.x == doctest::Approx(0.5f));
+
+    // Without an origin the file says what it always said.
+    world.setOrigin({ 0.0, 0.0, 0.0 });
+    REQUIRE(HE::api::entity::applySavedState(c, (HE::api::Entity)top));
+    CHECK(reg.get<TransformComponent>(top).position.x == doctest::Approx(100000.5f));
+
+    save::setPlayMode(false);
+}
+
 TEST_CASE("entity save-state: a class's Save Game variables round-trip, the rest stay out")
 {
     SaveTestRig rig;

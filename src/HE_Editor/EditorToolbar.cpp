@@ -371,7 +371,7 @@ bool Bar::itemTinted(const char* id, IconFn icon, const char* label, ImU32 fg,
 	return EditorToolbar::cellTinted(m_m, x, w, id, icon, label, fg, enabled, tooltip);
 }
 
-void Bar::readout(IconFn icon, const char* label, ImU32 fg)
+ImVec2 Bar::readout(IconFn icon, const char* label, ImU32 fg)
 {
 	const float w = EditorToolbar::cellWidth(m_m, label);
 	if (!m_first) m_cursor += kSegGap;
@@ -383,11 +383,12 @@ void Bar::readout(IconFn icon, const char* label, ImU32 fg)
 	const float iconW    = icon ? m_m.icon : 0.0f;
 	const float gapX     = (icon && label) ? kLabelGap : 0.0f;
 	const float left     = x + (w - (iconW + gapX + labelW)) * 0.5f;
-	if (icon) icon(m_dl, ImVec2(std::floor(left + m_m.icon * 0.5f), std::floor(m_m.cy)),
-	               m_m.icon, fg);
+	const ImVec2 centre(std::floor(left + m_m.icon * 0.5f), std::floor(m_m.cy));
+	if (icon) icon(m_dl, centre, m_m.icon, fg);
 	if (label)
 		m_dl->AddText(ImVec2(std::floor(left + iconW + gapX),
 		                     std::floor(m_m.cy - ImGui::GetFontSize() * 0.5f)), fg, label);
+	return centre;
 }
 
 void Bar::divider()
@@ -430,23 +431,57 @@ float Bar::remaining() const
 
 // ─── Asset-editor header ─────────────────────────────────────────────────────
 
-void assetHeader(Bar& bar, const char* name, IconFn kindIcon, bool dirty)
+static RevealAssetFn s_revealAssetHook = nullptr;
+void setRevealAssetHook(RevealAssetFn fn) { s_revealAssetHook = fn; }
+
+static SaveFn s_saveHook = nullptr;
+void setSaveHook(SaveFn fn) { s_saveHook = fn; }
+bool requestSave()
 {
+	if (!s_saveHook) return false;
+	s_saveHook();
+	return true;
+}
+
+void assetHeader(Bar& bar, const std::string& assetPath, bool dirty)
+{
+	// The "unsaved" mark is the Save glyph's to draw (saveButton): a word would
+	// be read once and then stop being noticed, a dot in the one colour the
+	// editor uses for "needs attention", sitting on the button that clears it,
+	// keeps working from the corner of the eye.
+	bar.markDirty(dirty);
+	if (assetPath.empty()) return;   // an empty well would still be drawn
 	bar.group();
-	bar.readout(kindIcon, name && *name ? name : "(unnamed)");
-	// The dot is the whole message: a word would be read once and then stop
-	// being noticed, a mark in the one colour the editor uses for "needs
-	// attention" keeps working from the corner of the eye.
-	if (dirty) bar.readout(nullptr, "\xe2\x97\x8f", kWarn);
+	if (bar.item("##revealAsset", iconFolder, nullptr, false, true, "Show in Content Browser") &&
+	    s_revealAssetHook)
+		s_revealAssetHook(assetPath);
 	bar.endGroup();
 }
 
-bool saveButton(Bar& bar, bool enabled)
+bool saveButton(Bar& bar, bool enabled, bool atLeft)
 {
-	bar.rightGroup(bar.iconGroupWidth(1));
+	if (atLeft) bar.group();
+	else        bar.rightGroup(bar.iconGroupWidth(1));
+	// Greyed out while there is nothing to write: `dirty` is what assetHeader left
+	// on the bar, so every asset tab gets the same rule without each panel
+	// repeating it (and panels that passed a plain "asset loaded" no longer offer
+	// a Save that does nothing).
+	enabled = enabled && bar.dirty();
 	const bool pressed = bar.item("##save", iconSave, nullptr, false, enabled,
 	                              enabled ? "Save (Cmd/Ctrl+S)" : "Nothing to save");
+	if (bar.dirty())
+	{
+		// Top-right corner of the cell, ringed in the bar's own dark so it
+		// reads on any well colour.
+		const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+		const ImVec2 c(mx.x - 7.0f, mn.y + 7.0f);
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddCircleFilled(c, 5.0f, IM_COL32(20, 20, 22, 255));
+		dl->AddCircleFilled(c, 3.4f, kWarn);
+	}
 	bar.endGroup();
+	// Through the editor's own Save when it has one (see setSaveHook).
+	if (pressed && requestSave()) return false;
 	return pressed;
 }
 

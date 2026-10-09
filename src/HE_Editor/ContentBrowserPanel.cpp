@@ -3,6 +3,7 @@
 #include "EditorTheme.h"     // brand palette (selected tiles, labels)
 #include <algorithm>
 #include <atomic>
+#include <set>
 #include <cstdint>
 #include <mutex>
 #include "EditorApplication.h"           // AppContext, GlobalState folders, ProjectManager
@@ -397,6 +398,28 @@ std::string browsedFolderPath() { return s_browsedFolderPath; }
 static bool s_createMenuRequested = false;
 void requestCreateMenu() { s_createMenuRequested = true; }
 
+// "Show in Content Browser" (the button in every asset editor's header). The path
+// waits here until the panel draws — it only does on the scene tab, which
+// takeRevealTabSwitch() lets EditorUI bring forward first.
+static std::string              s_revealRequest;
+static bool                     s_revealTabSwitch = false;
+// Folders to force open in the tree on the next draw so the revealed asset's
+// location is visible there too, plus the root (0/1/2) they hang under (-1: none).
+static std::vector<std::string> s_revealExpand;
+static int                      s_revealExpandRoot = -1;
+void revealAsset(const std::string& absPath)
+{
+	if (absPath.empty()) return;
+	s_revealRequest   = absPath;
+	s_revealTabSwitch = true;
+}
+bool takeRevealTabSwitch()
+{
+	const bool was = s_revealTabSwitch;
+	s_revealTabSwitch = false;
+	return was;
+}
+
 // Raised by the header's Import cell, consumed by EditorUI: the file dialog
 // and everything after it (target folder, importer, refresh) live with the
 // File/Assets ▸ Import Asset handler, and a second copy here would be the
@@ -504,6 +527,121 @@ static std::vector<std::string> collectFolderContents(const std::string& folderA
 	}
 	std::sort(out.begin(), out.end());
 	return out;
+}
+
+// ─── Import engine content into the project ──────────────────────────────────
+// The engine's own content is read-only ground, but a SOURCE file in it (a sound,
+// a picture, a model) is raw material. These copy such files into the project's
+// Content and import the copies as new assets there — the source stays beside the
+// asset it made, exactly as if the file had been imported from disk.
+
+// Every importable, locally present source file under `paths` (files, and folders
+// walked recursively), without duplicates and in a stable order. A remote-only
+// placeholder has no bytes on disk, so it is not here.
+static void collectEngineSources(const std::vector<std::string>& paths,
+                                 std::vector<std::string>& out)
+{
+	namespace fs = std::filesystem;
+	std::set<std::string> seen(out.begin(), out.end());
+	const auto add = [&](const fs::path& p)
+	{
+		if (Importer::isImportableSource(p) && seen.insert(p.string()).second)
+			out.push_back(p.string());
+	};
+	for (const std::string& path : paths)
+	{
+		std::error_code ec;
+		if (fs::is_directory(path, ec))
+		{
+			fs::recursive_directory_iterator it(path, fs::directory_options::skip_permission_denied, ec);
+			const fs::recursive_directory_iterator end;
+			for (; !ec && it != end; it.increment(ec))
+			{
+				if (it->path().filename().string().rfind('.', 0) == 0)
+				{
+					std::error_code dirEc;
+					if (it->is_directory(dirEc)) it.disable_recursion_pending();
+					continue;
+				}
+				std::error_code fileEc;
+				if (it->is_regular_file(fileEc)) add(it->path());
+			}
+		}
+		else if (fs::is_regular_file(path, ec))
+			add(path);
+	}
+	std::sort(out.begin(), out.end());
+}
+
+// Copy `sources` into Content/<targetRel> and import the copies. With
+// `keepStructure` each file also keeps its sub-folder from the engine tree
+// (Engine/Audio/x.wav → <target>/Audio/x.wav). A name the project already uses
+// gets a number instead of being overwritten. Textures wait for the colour-space
+// dialog like any other texture import; one notification sums the batch up.
+static void runEngineImport(AppContext& ctx, const std::vector<std::string>& sources,
+                            const std::string& targetRel, bool keepStructure)
+{
+	namespace fs = std::filesystem;
+	if (!ctx.contentManager || sources.empty()) return;
+	const fs::path contentRoot(ctx.contentManager->contentRoot());
+	const HE::Ed::Rewards::DirSnapshot before =
+		HE::Ed::Rewards::importSnapshot(ctx, (contentRoot / targetRel).string());
+
+	std::size_t imported = 0, failed = 0;
+	std::vector<std::string> textures, textureDirs;
+	for (const std::string& src : sources)
+	{
+		const fs::path srcPath(src);
+		fs::path relDir = targetRel;
+		if (keepStructure)
+		{
+			std::string rel = ctx.contentManager->toContentRelativePath(src);   // "Engine/…"
+			if (rel.rfind("Engine/", 0) == 0) rel.erase(0, 7);
+			relDir /= fs::path(rel).parent_path();
+		}
+		std::error_code ec;
+		fs::create_directories(contentRoot / relDir, ec);
+		fs::path dest = contentRoot / relDir / srcPath.filename();
+		for (int n = 1; fs::exists(dest, ec); ++n)
+			dest = contentRoot / relDir /
+			       (srcPath.stem().string() + "_" + std::to_string(n) + srcPath.extension().string());
+		fs::copy_file(srcPath, dest, ec);
+		if (ec)
+		{
+			++failed;
+			HE_LOG_ERROR(Editor, "%s", ("Editor: could not copy " + src + " into the project: " +
+			                            ec.message()).c_str());
+			continue;
+		}
+		if (Importer::isTextureSource(dest))
+		{
+			textures.push_back(dest.string());
+			textureDirs.push_back(relDir.generic_string());
+		}
+		else if (Importer::importSource(dest, contentRoot, relDir))
+			++imported;
+		else
+		{
+			++failed;
+			HE_LOG_ERROR(Editor, "%s", ("Editor: import failed for " + dest.string()).c_str());
+		}
+	}
+	if (!textures.empty())
+		TextureColourSpaceDialog::openImport(textures, textureDirs, contentRoot.string());
+	if (imported > 0)
+	{
+		HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported, static_cast<int>(imported));
+		HE::Ed::Rewards::markImported(ctx, before);
+	}
+	ctx.contentRefreshPending = true;
+
+	std::string where = targetRel.empty() ? "Content" : "Content/" + targetRel;
+	std::string text  = "Imported " + std::to_string(imported) + " of " +
+	                    std::to_string(sources.size() - textures.size()) + " file(s) into " + where;
+	if (!textures.empty())
+		text += "; " + std::to_string(textures.size()) + " texture(s) wait for their color space";
+	HE::Ed::notify(failed ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Info,
+	               "Imported into the project", text + (failed ? " (" + std::to_string(failed) + " failed — see the console)" : "") + ".");
 }
 
 void render(AppContext& ctx, int& tabSelectRequest,
@@ -666,6 +804,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// ID by full path: sibling subtrees may repeat folder names, and the
 			// drop target below must land on THIS node, not a same-named twin.
 			ImGui::PushID(folder->fullPath.c_str());
+			if (!s_revealExpand.empty() &&
+			    std::find(s_revealExpand.begin(), s_revealExpand.end(), folder->fullPath) != s_revealExpand.end())
+				ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 			bool open = ImGui::TreeNodeEx(folder->name.c_str(), flags);
 			// Same rollup the grid tiles use: one hash lookup against the
 			// precomputed dirty-folder set, so the tree costs nothing extra.
@@ -748,6 +889,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		{
 			ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow
 										 | ImGuiTreeNodeFlags_SpanAvailWidth;
+			if (s_revealExpandRoot == 1) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 			bool rootOpen = ImGui::TreeNodeEx("Engine", rootFlags);
 			// The one place the three roots are visible next to each other, and
 			// the question "why can I not edit anything in here" is answered.
@@ -774,6 +916,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		{
 			ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow
 										 | ImGuiTreeNodeFlags_SpanAvailWidth;
+			if (s_revealExpandRoot == 2) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 			bool rootOpen = ImGui::TreeNodeEx("Source", rootFlags);
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
@@ -788,6 +931,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::TreePop();
 			}
 		}
+
+		// The reveal's expansion has been applied by now; the user's own
+		// collapsing must work again from the next frame on.
+		s_revealExpand.clear();
+		s_revealExpandRoot = -1;
 
 		ImGui::EndChild();
 		ImGui::SameLine();
@@ -858,6 +1006,118 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			}
 			s_gridFolder         = fresh;
 			s_selectedTreeFolder = fresh;
+		}
+
+		// ── Show in Content Browser ───────────────────────────────────────
+		// Asked for by the header button of an asset editor. By now the panel is
+		// being drawn (the request switched to the scene tab first), so: find the
+		// asset, go to its folder, drop a search or type filter that would hide
+		// it, select it, and let the tile scroll itself into view and flash.
+		static std::string s_searchText;
+		static int         s_typeFilter = 0;
+		static std::string s_revealScrollPath;   // the tile that scrolls itself into view
+		static std::string s_revealFlashPath;    // the tile that draws the attention ring
+		static double      s_revealFlashStart = 0.0;
+		if (!s_revealRequest.empty())
+		{
+			const std::string target = std::move(s_revealRequest);
+			s_revealRequest.clear();
+			const auto norm = [](const std::string& p)
+			{ return fs::path(p).lexically_normal().generic_string(); };
+			const std::string targetNorm = norm(target);
+			const std::string targetName = fs::path(target).filename().string();
+			// The tab's path and the tree's path are not always the same file: an
+			// "Engine/..." asset can be open under the shipped default while the
+			// tree shows the project's override of it (or the other way round), a
+			// tab can be keyed by the content-relative form, and separators differ
+			// per platform. The content-relative path is the asset's identity in
+			// all of those, so it is the second key — tried per same-named file
+			// only, since it costs a filesystem lookup.
+			std::string targetRel;
+			if (ctx.contentManager)
+				targetRel = fs::path(target).is_absolute()
+					? ctx.contentManager->toContentRelativePath(target)
+					: fs::path(target).generic_string();
+			const auto sameAsset = [&](const HE::File* f)
+			{
+				if (f->fullPath == target || norm(f->fullPath) == targetNorm) return true;
+				if (targetRel.empty() || !ctx.contentManager || f->name != targetName) return false;
+				return ctx.contentManager->toContentRelativePath(f->fullPath) == targetRel;
+			};
+
+			int                             foundKind   = -1;
+			const HE::Folder*               foundFolder = nullptr;
+			const HE::File*                 foundFile   = nullptr;
+			std::vector<const HE::Folder*>  chain;
+			std::function<bool(const HE::Folder*)> findFile = [&](const HE::Folder* cur) -> bool
+			{
+				for (const HE::File* f : cur->files)
+					if (sameAsset(f))
+					{ foundFolder = cur; foundFile = f; return true; }
+				for (const HE::Folder* sub : cur->subfolders)
+				{
+					chain.push_back(sub);
+					if (findFile(sub)) return true;
+					chain.pop_back();
+				}
+				return false;
+			};
+			for (int kind = 0; kind < 3 && !foundFile; ++kind)
+			{
+				if (kind == 2 && !cbShowSource) continue;
+				chain.clear();
+				if (findFile(&cbRootFolder(kind))) foundKind = kind;
+			}
+
+			if (foundFile)
+			{
+				std::string selectPath = foundFile->fullPath;
+				// In the Source root a class's .cpp is folded into its header's tile.
+				if (foundKind == 2)
+				{
+					const auto lower = [](std::string e)
+					{ for (char& c : e) c = static_cast<char>(::tolower(static_cast<unsigned char>(c))); return e; };
+					const std::string ext = lower(foundFile->extension);
+					if (ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".c")
+					{
+						const std::string stem = fs::path(foundFile->name).stem().string();
+						for (const HE::File* g : foundFolder->files)
+						{
+							const std::string gx = lower(g->extension);
+							if ((gx == ".h" || gx == ".hpp" || gx == ".hh" || gx == ".hxx") &&
+							    fs::path(g->name).stem().string() == stem)
+							{ selectPath = g->fullPath; break; }
+						}
+					}
+				}
+
+				const HE::Folder* root = &cbRootFolder(foundKind);
+				s_selectedRootKind   = foundKind;
+				s_selectedTreeFolder = (foundFolder == root) ? nullptr : foundFolder;
+				s_gridFolder         = s_selectedTreeFolder;
+				s_searchText.clear();
+				s_typeFilter = 0;
+				clearSelection();
+				s_selectedItem     = selectPath;
+				s_selectedIsFolder = false;
+				s_selection.assign(1, selectPath);
+				s_revealScrollPath = selectPath;
+				s_revealFlashPath  = selectPath;
+				s_revealFlashStart = ImGui::GetTime();
+				s_revealExpandRoot = foundKind;
+				s_revealExpand.clear();
+				for (const HE::Folder* f : chain) s_revealExpand.push_back(f->fullPath);
+			}
+			else
+			{
+				// Said out loud: a click that lands on the scene tab and shows
+				// nothing reads as a broken button.
+				HE::Ed::notify(HE::Ed::NoteLevel::Warning, "Not in the Content Browser",
+					"\"" + fs::path(target).filename().string() +
+					"\" is not listed under Content, Engine or Source.");
+			}
+			// If the panel is a tab behind another dock sibling, bring it forward.
+			ImGui::SetWindowFocus("Content Browser");
 		}
 
 		// Sync from tree double-click
@@ -988,9 +1248,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// Typing searches the whole subtree under the folder on screen, not just
 		// its top level. A search that only looks in the folder you already opened
 		// is worth nothing: you would have to know the answer to ask the question.
-		static std::string s_searchText;
-		static int         s_typeFilter = 0;
-
 		// The types worth narrowing to, in the order the Create menu offers them —
 		// so the two lists read the same way round. Unknown is the "all" entry.
 		struct TypeFilter { const char* label; HE::AssetType type; };
@@ -1214,6 +1471,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static bool                     s_patternNumber = false;
 		static int                      s_patternStart  = 1;
 		static bool                     s_openPatternRenamePopup = false;
+		// Import to Project…: what is being imported, and where it goes.
+		static std::vector<std::string> s_engImportSources;
+		static std::string              s_engImportTarget;       // content-relative folder, "" = Content
+		static bool                     s_engImportKeep        = true;
+		static char                     s_engImportNewFolder[128] = {};
+		static bool                     s_openEngImportPopup   = false;
 		static std::string              s_referencesTarget;
 		static bool                     s_referencesIsFolder  = false;
 		static std::uint64_t            s_referencesScanGen   = 0;
@@ -1620,6 +1883,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			ImGui::BeginGroup();
 			ImGui::PushID(file->fullPath.c_str());
+			if (!s_revealScrollPath.empty() && file->fullPath == s_revealScrollPath)
+			{
+				ImGui::SetScrollHereY(0.5f);
+				s_revealScrollPath.clear();
+			}
 
 			if (isSel)
 			{
@@ -1668,6 +1936,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					ImGui::GetColorU32(ImVec4(90.0f / 255.0f, 215.0f / 255.0f, 90.0f / 255.0f,
 					                          0.9f * fresh)),
 					ImGui::GetStyle().FrameRounding + 2.0f, 0, 2.0f);
+			}
+
+			// "Show in Content Browser": a ring that fades over 1.6 s, so the eye
+			// finds the tile the click just selected among its neighbours.
+			if (!s_revealFlashPath.empty() && file->fullPath == s_revealFlashPath)
+			{
+				const double age = ImGui::GetTime() - s_revealFlashStart;
+				if (age < 1.6)
+				{
+					const float a = 1.0f - static_cast<float>(age / 1.6);
+					const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+					const ImVec4 c  = HE::Ed::Theme::AccentHi;
+					ImGui::GetWindowDrawList()->AddRect(
+						ImVec2(mn.x - 3.0f, mn.y - 3.0f), ImVec2(mx.x + 3.0f, mx.y + 3.0f),
+						ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, a)),
+						ImGui::GetStyle().FrameRounding + 3.0f, 0, 2.5f);
+				}
+				else
+					s_revealFlashPath.clear();
 			}
 
 			// A material FUNCTION renders as the sphere its own editor tab shows —
@@ -2790,6 +3077,65 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::SetTooltip("Frees the disk space. The asset stays on the server "
 				                  "and downloads again when something needs it.");
 #endif
+
+			// ── Engine content → this project ────────────────────────────
+			// Files and folders alike, one or many: whatever in the selection is an
+			// importable source on engine ground. "Import to Project" is the one
+			// click (Content, keeping the engine's sub-folders); the "…" version
+			// asks where the files go first. The walk is cached per selection — a
+			// menu redraws every frame it is open and a folder can be big.
+			if (engineLocked && ctx.contentManager)
+			{
+				static std::string              s_engCacheKey;
+				static std::vector<std::string> s_engCacheSources;
+				std::vector<std::string> picked;
+				if (isSelected(s_ctxMenuItem) && s_selection.size() > 1) picked = s_selection;
+				else picked.push_back(s_ctxMenuItem);
+				std::string key;
+				for (const std::string& p : picked) key += p + "|";
+				if (key != s_engCacheKey)
+				{
+					s_engCacheKey = key;
+					s_engCacheSources.clear();
+					std::vector<std::string> onEngineGround;
+					for (const std::string& p : picked)
+						if (isReadOnlyGround(p)) onEngineGround.push_back(p);
+					collectEngineSources(onEngineGround, s_engCacheSources);
+				}
+				if (!s_engCacheSources.empty())
+				{
+					const std::string count = std::to_string(s_engCacheSources.size()) +
+						(s_engCacheSources.size() == 1 ? " file" : " files");
+					if (EditorWidgets::menuItem("Import to Project"))
+					{
+						runEngineImport(ctx, s_engCacheSources, std::string(), /*keepStructure=*/true);
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("%s: copy into Content, keeping the engine's sub-folders, "
+						                  "and import the copies as assets.", count.c_str());
+					if (EditorWidgets::menuItem("Import to Project..."))
+					{
+						s_engImportSources = s_engCacheSources;
+						s_engImportKeep    = true;
+						s_engImportNewFolder[0] = '\0';
+						// Start where the user is standing, when that is in Content.
+						s_engImportTarget.clear();
+						if (s_selectedRootKind == 0 && !s_browsedFolderPath.empty())
+						{
+							std::error_code relEc;
+							const std::filesystem::path rel = std::filesystem::relative(
+								s_browsedFolderPath, contentFolder.fullPath, relEc);
+							if (!relEc && rel != "." && !rel.empty() && rel.native()[0] != '.')
+								s_engImportTarget = rel.generic_string();
+						}
+						s_openEngImportPopup = true;
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("%s: choose the target folder first.", count.c_str());
+				}
+			}
 
 			// ── Import source file → .hasset ─────────────────────────────
 			if (!s_ctxMenuIsFolder)
@@ -3939,6 +4285,110 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		else if (!s_patternTargets.empty() && !s_openPatternRenamePopup)
 			s_patternTargets.clear();
 
+		// ── Import to Project… (engine content → a folder you pick) ─────────
+		// The one-click menu entry decides for you (Content, engine sub-folders
+		// kept). This asks: which folder of the project, whether to keep the
+		// engine's own sub-folders under it, and optionally a new folder to make.
+		if (s_openEngImportPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_engine_import_popup");
+			s_openEngImportPopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
+		if (ImGui::BeginPopupModal("##cb_engine_import_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			HE::Ed::Help::Scope helpScope("Import to Project");
+			const std::size_t total = s_engImportSources.size();
+			ImGui::Text("Import %d file%s into the project", static_cast<int>(total), total == 1 ? "" : "s");
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			// What goes in: names as the engine tree spells them, a handful of lines.
+			{
+				const float lineH = ImGui::GetTextLineHeightWithSpacing();
+				const float listH = std::clamp(lineH * static_cast<float>(std::min<std::size_t>(total, 6)) + 8.0f,
+				                               lineH * 2.0f, lineH * 6.0f + 8.0f);
+				ImGui::BeginChild("##eng_files", ImVec2(-1.0f, listH), true);
+				for (std::size_t i = 0; i < total; ++i)
+				{
+					std::string rel = ctx.contentManager
+						? ctx.contentManager->toContentRelativePath(s_engImportSources[i]) : std::string();
+					if (rel.empty()) rel = std::filesystem::path(s_engImportSources[i]).filename().string();
+					ImGui::TextUnformatted(rel.c_str());
+				}
+				ImGui::EndChild();
+			}
+
+			ImGui::Spacing();
+			ImGui::TextDisabled("Target folder");
+			ImGui::BeginChild("##eng_target", ImVec2(-1.0f, 170.0f), true);
+			{
+				if (ImGui::Selectable("Content", s_engImportTarget.empty()))
+					s_engImportTarget.clear();
+				EditorWidgets::helpForLabel("Content");
+				std::function<void(const HE::Folder*, const std::string&)> pick =
+					[&](const HE::Folder* folder, const std::string& rel)
+				{
+					for (const HE::Folder* sub : folder->subfolders)
+					{
+						// Content/Engine holds the project's overrides of engine
+						// defaults — not a place to put new work.
+						if (rel.empty() && sub->name == "Engine") continue;
+						const std::string subRel = rel.empty() ? sub->name : rel + "/" + sub->name;
+						ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+						                           ImGuiTreeNodeFlags_SpanAvailWidth;
+						if (sub->subfolders.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+						if (subRel == s_engImportTarget) flags |= ImGuiTreeNodeFlags_Selected;
+						const bool open = ImGui::TreeNodeEx((sub->name + "##engt_" + subRel).c_str(), flags);
+						if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
+							s_engImportTarget = subRel;
+						if (open) { pick(sub, subRel); ImGui::TreePop(); }
+					}
+				};
+				pick(&contentFolder, std::string());
+			}
+			ImGui::EndChild();
+
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::InputTextWithHint("##eng_newfolder", "new sub-folder in the target (optional)",
+			                         s_engImportNewFolder, sizeof(s_engImportNewFolder));
+			ImGui::Checkbox("Keep the engine's folder structure", &s_engImportKeep);
+			EditorWidgets::helpForLabel("Keep the engine's folder structure");
+
+			// The effective target, spelled out — and refused when the new folder
+			// name could not be one.
+			const std::string newName(s_engImportNewFolder);
+			const bool badName = newName.find_first_of("/\\:*?\"<>|") != std::string::npos ||
+			                     newName == "." || newName == "..";
+			std::string effective = s_engImportTarget;
+			if (!newName.empty() && !badName)
+				effective += (effective.empty() ? "" : "/") + newName;
+			ImGui::Spacing();
+			if (badName)
+				ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.45f, 1.0f), "A folder name cannot contain a path or special characters.");
+			else
+				ImGui::TextDisabled("Goes to  Content%s%s", effective.empty() ? "" : "/", effective.c_str());
+			ImGui::Spacing();
+
+			ImGui::BeginDisabled(badName || total == 0);
+			if (EditorWidgets::primaryButton("Import", ImVec2(120, 0)))
+			{
+				runEngineImport(ctx, s_engImportSources, effective, s_engImportKeep);
+				s_engImportSources.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndDisabled();
+			ImGui::SameLine();
+			if (EditorWidgets::button("Cancel", ImVec2(120, 0)))
+			{
+				s_engImportSources.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+
 		// ── "Find References" result ──────────────────────────────────────
 		// Not a confirmation: nothing is about to happen, so there is one way out
 		// and no red button. Opened out here for the same ID-stack reason as the
@@ -4126,6 +4576,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		if (ImGui::BeginPopupModal("##cb_remote_download_popup", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
+			// Outside the context menu's scope, so without its own the Download
+			// button asked the help table for a bare "Download" and got nothing.
+			HE::Ed::Help::Scope helpScope("Content Browser");
 			// TextWrapped already covers the paragraph; the title is the line that
 			// does not. At the 420 px this dialog is pinned to, "Download
 			// \"SM_Rock_Cliff_Weathered_Large\"?" loses its closing quote and its
@@ -4220,6 +4673,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		if (ImGui::BeginPopupModal("##cb_remove_cache_popup", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
+			HE::Ed::Help::Scope helpScope("Content Browser");
 			// Two lines here are longer than the 460 px this dialog is pinned to. The
 			// title carries a full filename, and the dimmed line below is
 			// seventy-eight characters: unwrapped it ends at "the copy in memory", so

@@ -111,6 +111,11 @@ inline constexpr uint32_t CHUNK_PIXL = makeChunkId('P','I','X','L'); // pixel da
 inline constexpr uint32_t CHUNK_AUMI = makeChunkId('A','U','M','I'); // audio meta
 inline constexpr uint32_t CHUNK_PCMD = makeChunkId('P','C','M','D'); // PCM data (AudioEncoding::PCM16)
 inline constexpr uint32_t CHUNK_OGGD = makeChunkId('O','G','G','D'); // Ogg Vorbis stream (AudioEncoding::Vorbis)
+// Non-destructive edits (trim, volume curve, bus, EQ) as JSON — HE::AudioEdit.
+// ABSENT (every clip written before it existed, and every clip nobody edited)
+// = the default edit: whole clip, unity, master, no EQ. The data chunk above
+// is never rewritten for an edit; this one sits next to it.
+inline constexpr uint32_t CHUNK_AUED = makeChunkId('A','U','E','D'); // audio edits (JSON)
 
 // Material
 inline constexpr uint32_t CHUNK_MTRL = makeChunkId('M','T','R','L'); // shader path + tex refs
@@ -568,14 +573,15 @@ private:
 // 32-bit for the same texture). They are uint32 now; the legacy 64-bit layout is
 // still read, told apart by the chunk size alone:
 //   legacy 64-bit : 24 B (width/height/channels only) or 30 B (+ mip/format/srgb tail)
-//   current       : 12 B + the 6-byte tail = 18 B
+//   current       : 12 B + the 6-byte tail = 18 B, or 22 B for a texture ARRAY
+//                   (+ uint32 layers, written only when > 1 — Thema 158)
 // so "chunk >= 24 bytes" can only be the legacy layout, and a legacy 32-bit chunk
 // is byte-identical to the current one and needs no special case. Every reader of
 // TXMI must go through readTextureHeader (ContentManager's loader and the packer's
 // cookTexture both do) or old .hasset files decode to garbage dimensions.
 // CAUTION: the discriminator holds only while the current layout stays under 24
-// bytes, i.e. the optional tail after channels stays ≤ 11 bytes (6 today). A
-// bigger tail needs a real version marker instead.
+// bytes, i.e. the optional tail after channels stays ≤ 11 bytes (10 today, with
+// the array slice count). ONE more byte needs a real version marker instead.
 inline constexpr size_t kTextureHeaderLegacyMinSize = 24;
 
 // Reads width/height/channels at `offset` (advanced past them). False = truncated.

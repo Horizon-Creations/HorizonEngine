@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -161,7 +162,7 @@ std::string estimateComplexity(const std::string& glsl)
 	};
 	const size_t ops   = count(body, ";");
 	const size_t tex   = count(body, "texture(");
-	const size_t fbm   = count(body, "heFbm(") + count(body, "heFbm3(");
+	const size_t fbm   = count(body, "heFbm(") + count(body, "heFbm3(") + count(body, "heFbmI(");
 	const size_t noise = count(body, "heValueNoise(") + count(body, "heValueNoise3(");
 	const size_t alu   = ops + tex * 8 + fbm * 24 + noise * 6;
 	char buf[96];
@@ -534,7 +535,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 				committed = true;
 			}
 			if (static_cast<int>(names.size()) >= HE::kMatMaxLandscapeLayers)
-				ImGui::TextDisabled("4 layers max (one RGBA weightmap)");
+				ImGui::TextDisabled("8 layers max (two RGBA weightmap pages)");
 			// Rebuild `s`. The link surgery below happens ONLY for an explicit ×:
 			// this runs every frame while the user types, and clearing a name
 			// field to retype it (select-all, delete) makes
@@ -582,6 +583,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::NormalMapSample:
+		case MatNodeType::NormalMapArraySample:
 		{
 			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
 			ImGui::DragFloat("Strength", &n.p[0], 0.05f, 0.0f, 4.0f);
@@ -596,7 +598,45 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
 			break;
 		}
+		case MatNodeType::TextureBombSample:
+		case MatNodeType::NormalMapBombSample:
+		case MatNodeType::TextureArrayBombSample:
+		case MatNodeType::NormalMapArrayBombSample:
+		{
+			// The grid (Rot/Blend/Seed) sits in p[0..2] on all four, so the Albedo,
+			// Normal and Mask reads of one layer agree when these three agree.
+			const float w = (kNodeW - 76.0f) * scale;
+			ImGui::SetNextItemWidth(w);
+			ImGui::DragFloat("Rot", &n.p[0], 0.01f, 0.0f, 1.0f);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Rot");
+			ImGui::SetNextItemWidth(w);
+			ImGui::DragFloat("Blend", &n.p[1], 0.1f, 1.0f, 32.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Blend");
+			int seed = static_cast<int>(std::lround(n.p[2]));
+			ImGui::SetNextItemWidth(w);
+			if (ImGui::DragInt("Seed", &seed, 0.2f)) n.p[2] = static_cast<float>(seed);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Seed");
+			if (n.type == MatNodeType::NormalMapBombSample || n.type == MatNodeType::NormalMapArrayBombSample)
+			{
+				ImGui::SetNextItemWidth(w);
+				ImGui::DragFloat("Strength", &n.p[3], 0.05f, 0.0f, 4.0f);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+				EditorWidgets::helpForLabel("Strength");
+			}
+			const std::string label = n.s.empty()
+				? std::string("(mesh texture)")
+				: std::filesystem::path(n.s).filename().string();
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			ImGui::TextWrapped("%s", label.c_str());
+			ImGui::PopStyleColor();
+			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
+			break;
+		}
 		case MatNodeType::TextureSample:
+		case MatNodeType::TextureArraySample:
 		{
 			// A picked texture shows its filename + a clear button; the drop target
 			// itself is the whole node body (handled in the node loop). Empty = the
@@ -737,6 +777,13 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 	return committed;
 }
 
+// Nodes whose `s` is a picked texture path: the filename row, the Content-Browser
+// drop target and the "Set Texture" menu belong to all eight.
+bool isTextureNode(MatNodeType t)
+{
+	return HE::matNodeSamplesTexture(t);
+}
+
 // Vertical space (graph units) the node reserves for its inline VALUE widgets. The
 // editable NAME row (for named nodes) is drawn in the body too now (the header carries
 // the node TYPE name via Model.title), so it is added on top of the value height.
@@ -744,10 +791,10 @@ float nodeValueHeight(const MatGraphNode& n)
 {
 	const MatNodeType type = n.type;
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
-	if (d.paramCount == 0 && type != MatNodeType::TextureSample &&
-	    type != MatNodeType::NormalMapSample) return 0.0f;
-	if (type == MatNodeType::TextureSample ||
-	    type == MatNodeType::NormalMapSample) return 44.0f;       // filename + hint rows
+	if (d.paramCount == 0 && !isTextureNode(type)) return 0.0f;
+	if (HE::matNodeIsBombing(type))                                // Rot/Blend/Seed (+Strength) + filename
+		return 44.0f + 26.0f * static_cast<float>(d.paramCount);
+	if (isTextureNode(type)) return 44.0f;                         // filename + hint rows
 	if (type == MatNodeType::ConstVec4 || type == MatNodeType::ParamVec4) return 30.0f; // vec4 drag row
 	if (type == MatNodeType::UV) return 52.0f;                    // tiling + offset rows
 	if (type == MatNodeType::LandscapeLayerBlend)                 // one row per layer + "+ Layer"
@@ -1026,7 +1073,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		// Texture Sample / Normal Map: the whole body is a Content-Browser drop target.
 		// Submit it FIRST (behind, AllowOverlap) so the label + Clear button drawn on top
 		// still take their clicks.
-		if (n->type == MatNodeType::TextureSample || n->type == MatNodeType::NormalMapSample)
+		if (isTextureNode(n->type))
 		{
 			ImGui::SetCursorScreenPos(bodyMin);
 			ImGui::SetNextItemAllowOverlap();
@@ -1060,7 +1107,8 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			if (ImGui::IsItemDeactivatedAfterEdit()) paramEdit = true; // rename → regenerate
 		}
 		// Inline VALUE widgets (name drawn above, so drawName=false).
-		if (HE::matNodeDesc(n->type).paramCount > 0 || n->type == MatNodeType::TextureSample)
+		if (HE::matNodeDesc(n->type).paramCount > 0 || n->type == MatNodeType::TextureSample ||
+		    n->type == MatNodeType::TextureArraySample)
 			if (nodeParamWidgets(*n, zoom, /*drawName=*/false, &st.graph)) paramEdit = true;
 		popWidgetScale();
 	};
@@ -1210,7 +1258,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		if (!n) return;
 		const bool deletable = n->type != MatNodeType::Output;
 		// Pick a texture from a dropdown (no path typing; drag-drop still works).
-		if (n->type == MatNodeType::TextureSample || n->type == MatNodeType::NormalMapSample)
+		if (isTextureNode(n->type))
 		{
 			// A submenu header cannot be asked about after its body has begun —
 			// by then the last item is inside the popup, not the header. So the
@@ -1372,6 +1420,8 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	// The component takes its origin from the cursor screen-pos at entry — capture the
 	// same point so paste/duplicate can map the mouse into graph space afterwards.
 	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
+	// Opens where it was left (GraphViewStore.h) — view state, never the asset's.
+	if (st.geState.viewKey.empty() && !st.relPath.empty()) st.geState.viewKey = "mat:" + st.relPath;
 	const bool changed = GraphEditor::draw("##mat_graphcanvas", m, st.geState, avail);
 	if (changed) structuralEdit = true; // add / connect / delete / move → snapshot
 	// Mid-drag the node has already moved. Kept OUT of structuralEdit on
@@ -1606,7 +1656,10 @@ void applyPreviewMesh(State& st, AppContext& ctx, const std::string& path,
 void startPreviewMeshLoad(State& st, AppContext& ctx, const std::string& path, const std::string& label)
 {
 	if (!ctx.contentManager) return;
-	ctx.contentManager->loadAssetAsync(path);
+	// Normal, not the streaming default Low: someone is looking at a progress bar.
+	HE::AsyncLoadOptions options;
+	options.priority = HE::JobPriority::Normal;
+	ctx.contentManager->loadAssetAsync(path, {}, options);
 	st.pendingMeshPath  = path;
 	st.pendingMeshLabel = label;
 	st.pendingMeshStart = ImGui::GetTime();
@@ -2085,17 +2138,43 @@ void render(AppContext& ctx, const std::string& assetPath,
 		namespace T = EditorToolbar;
 		T::Bar bar;
 
-		const char* kind = st.isInstance ? "material instance"
-		                 : st.isFunction ? "material function"
-		                                 : "material graph";
-		T::assetHeader(bar, st.name.c_str(), T::iconLayers, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
+		// Folder, then Save: the two things every asset tab opens with. The right
+		// edge belongs to the view switch.
+		if (T::saveButton(bar, assetOk, /*atLeft=*/true)) saveToDisk(st, ctx, assetPath);
 
-		bar.group();
-		bar.readout(nullptr, kind, T::kFgDim);
-		// Shader complexity gauge (updated on every regenerate).
+		// Graph|Overrides / Shader-code toggle for the right pane, at the right
+		// edge. A function has no shader of its own, so it has no second view
+		// either. Declared before the wells to its left so they know how much
+		// room is theirs.
+		if (!st.isFunction)
+		{
+			const char* graphLabel = st.isInstance ? "Overrides" : "Graph";
+			bar.rightGroup(bar.labelGroupWidth({ graphLabel, "Shader Code" }));
+			if (bar.item("##vgraph", T::iconLayers, graphLabel,
+			             st.viewMode == 0, true,
+			             st.isInstance ? "The values this instance overrides"
+			                           : "The node graph"))
+			{
+				st.viewMode = 0;
+			}
+			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
+			             "The generated shader source"))
+			{
+				st.viewMode = 1;
+			}
+			bar.endGroup();
+		}
+
+		// Shader complexity gauge (updated on every regenerate). The tab already
+		// says what kind of material this is, so there is no "material graph"
+		// badge in front of it.
 		if (!st.isFunction && !st.complexity.empty())
+		{
+			bar.group();
 			bar.readout(nullptr, st.complexity.c_str(), T::kFgDim);
-		bar.endGroup();
+			bar.endGroup();
+		}
 
 		// Blend mode — a MATERIAL-level setting (it changes the Output node's pins
 		// and which render pass the material uses), so it belongs to the bar and
@@ -2146,26 +2225,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 		}
 
-		// Graph|Overrides / Shader-code toggle for the right pane. A function has
-		// no shader of its own, so it has no second view either.
-		if (!st.isFunction)
-		{
-			bar.group();
-			if (bar.item("##vgraph", T::iconLayers, st.isInstance ? "Overrides" : "Graph",
-			             st.viewMode == 0, true,
-			             st.isInstance ? "The values this instance overrides"
-			                           : "The node graph"))
-			{
-				st.viewMode = 0;
-			}
-			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
-			             "The generated shader source"))
-			{
-				st.viewMode = 1;
-			}
-			bar.endGroup();
-		}
-
 		if (st.isInstance && mat)
 		{
 			bar.group();
@@ -2180,7 +2239,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 
 		if (!assetOk) bar.label("Asset could not be loaded", T::kBad);
-		if (T::saveButton(bar, assetOk)) saveToDisk(st, ctx, assetPath);
 	}
 
 	// Edit flags — both columns contribute; applied once at the end.

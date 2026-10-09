@@ -1,6 +1,7 @@
 #include "Backends/Metal/MetalRenderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
@@ -176,6 +177,11 @@ void MetalRenderer::SamplePoint(void* encoderPtr, const char* name)
 // pipeline and the ImGui pass descriptor — they must all match.
 static constexpr MTLPixelFormat kSwapchainFormat = MTLPixelFormatBGRA8Unorm;
 static constexpr MTLPixelFormat kDepthFormat     = MTLPixelFormatDepth32Float;
+// GI G-buffer position = the shadow-ray ORIGIN (pos + N*0.05), stored as the
+// ABSOLUTE world position, so fp32: as RGBA16Float its ULP passes the 5 cm
+// normal offset at |coord| >= ~100 m and surfaces self-shadow in height bands
+// (Thema 159). Every consumer read()s or point-samples it; normals stay 16F.
+static constexpr MTLPixelFormat kGiGBufPosFormat = MTLPixelFormatRGBA32Float;
 static constexpr MTLPixelFormat kSceneColorFormat = MTLPixelFormatRGBA16Float; // HDR scene color
 // Deferred G-buffer layout (docs/deferred-renderer-plan.md §3): BaseColor+Metallic
 // in sRGB8, oct-Normal/Roughness/Specular and HDR-Emissive/AO in RGBA16F.
@@ -2663,7 +2669,7 @@ struct GIReflParams {
 	float4 gridOrigin;      // xyz = probe-grid origin, w = spacing
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
 	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w = max bounces (1-4)
-	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier)
+	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube (primary misses read it)
 };
 
 // P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
@@ -2678,25 +2684,50 @@ struct GIMeshPtrs {
 // by MetalRenderer::GILandGpu.
 struct GILand {
 	float4x4 worldToLocal;
-	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
-	float4   layer[4]; // per-layer folded colour (rgb)
+	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
+	float4   layer[4]; // per-layer folded colour (rgb); auto: Grass, Dirt, Rock, Snow means
+	float4   autoWet;  // auto: rgb puddle colour, a puddle share of flat ground
+	float4   autoSlope;// auto: Rock Slope, Rock Blend, Dirt Amount, Puddle Max Slope
+	float4   autoSnow; // auto: Snow Height, Snow Blend, Snow Max Slope
 };
 
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
+
+// Auto landscape material at a hit: the graph's masks from the hit's slope and
+// world height over the slices' mean colours. Mirrors HE::giAutoLandscapeAlbedo
+// (GiLandscape.h) line for line — keep the three kernel copies on it.
+static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
+{
+	const float slope = saturate(1.0 - n.y);
+	const float rs = L.autoSlope.x, rb = L.autoSlope.y;
+	const float dirt  = saturate(L.autoSlope.z + smoothstep(rs - rb, rs, slope));
+	const float3 ground = mix(L.layer[0].rgb, L.layer[1].rgb, dirt);
+	const float rock  = smoothstep(rs, rs + rb, slope);
+	const float3 s1   = mix(ground, L.layer[2].rgb, rock);
+	const float snow  = smoothstep(L.autoSnow.x, L.autoSnow.x + L.autoSnow.y, pos.y)
+	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
+	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
+	const float pms   = L.autoSlope.w;
+	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
+}
 
 // Albedo of a landscape hit, sampled at the PAINT rather than averaged over the
 // whole terrain. A landscape is a heightfield over an axis-aligned local rect
 // whose mesh UVs are linear in it, so the hit's UV comes straight out of the hit
 // POSITION — no per-vertex UV in the acceleration structure. Weights are read
 // with the same clamp+linear the rasterizer uses, so mirror and surface agree.
+// An auto landscape (cfg.w < 0) has no paint: its colour follows the hit's
+// slope and height instead (hitN = the world normal facing the ray).
 // Returns false when this instance is not a landscape (caller keeps its flat
 // per-instance albedo).
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
 	const float3 lp = (L.worldToLocal * float4(hitPos, 1.0)).xyz;
@@ -2873,9 +2904,10 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	// Bounce loop (P.extra.w = max bounces, 1-4): a mirror-like hit (metallic,
 	// low roughness — packed in the instance-shading pair) reflects ONWARD
 	// instead of flattening to its base colour; `throughput` carries the metal
-	// tint. A primary miss keeps confidence 0 (the composite's cubemap is the
-	// exact fallback); a SECONDARY miss samples the sky cube directly — that
-	// ray genuinely reflects the sky.
+	// tint. A SECONDARY miss samples the sky cube directly — that ray genuinely
+	// reflects the sky. A primary miss does the same when the baked sky cube
+	// is bound (P.land.z); otherwise it keeps confidence 0 and the composite's
+	// cubemap is the fallback.
 	float4 sampleOut = float4(0.0);
 	for (int sIdx = 0; sIdx < rays; ++sIdx)
 	{
@@ -2912,7 +2944,13 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			q.next();
 			if (q.get_committed_intersection_type() == intersection_type::none)
 			{
-				if (b > 0) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				// With the baked sky cube bound (P.land.z, EncodeSkyReflCube) a
+				// PRIMARY miss returns the real sky too — clouds, weather — at the
+				// receiver's own confidence, so the composite shows it instead of
+				// its cloudless cubemap. Counting the miss as a full sample also
+				// keeps a part-miss glossy lobe from weighting its hits by f².
+				if (b > 0 || P.land.z > 0.5) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				if (b == 0 && P.land.z > 0.5) conf = roughFade;
 				break;
 			}
 			const uint   instId   = q.get_committed_instance_id();
@@ -2922,15 +2960,6 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			const float3 emissive = emi4.rgb;
 			const float  dist   = q.get_committed_distance();
 			const float3 hitPos = ro + rd * dist;
-			// Landscape hit: replace the flat per-instance tint with the paint at
-			// THIS point, or a red ridge on a green hillside mirrors as one
-			// averaged colour. Non-landscape hits leave `albedo` untouched.
-			{
-				float3 painted;
-				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
-				                      landWeights, hitPos, painted))
-					albedo = painted;
-			}
 
 			// Hit normal: true interpolated vertex normal through the mesh-pointer
 			// argument buffer when available (P4); -rayDir fallback otherwise
@@ -2959,6 +2988,17 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 					hitN = normalize(nW);
 					if (dot(hitN, rd) > 0.0) hitN = -hitN; // face the incoming ray (two-sided)
 				}
+			}
+			// Landscape hit: replace the flat per-instance tint with the paint at
+			// THIS point, or a red ridge on a green hillside mirrors as one
+			// averaged colour (auto material: its slope/height masks — the reason
+			// this waits for hitN; without mesh data hitN is -rd, so the slope
+			// there is a guess). Non-landscape hits leave `albedo` untouched.
+			{
+				float3 painted;
+				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
+				                      landWeights, hitPos, hitN, painted))
+					albedo = painted;
 			}
 
 			// Direct sun at the hit: one hard occlusion ray. Skipped when the
@@ -3105,18 +3145,41 @@ struct GiInst { float4x4 invTransform; float4 baseColor; float4 emissive; int4 o
 // exactly like GIReflParams and the octahedral helpers are.
 struct GILand {
 	float4x4 worldToLocal;
-	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto)
 	float4   layer[4];
+	float4   autoWet;
+	float4   autoSlope;
+	float4   autoSnow;
 };
 
+// Auto landscape material at a hit — copy of the HW kernel's giAutoLandAlbedo
+// (HE::giAutoLandscapeAlbedo, GiLandscape.h).
+static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
+{
+	const float slope = saturate(1.0 - n.y);
+	const float rs = L.autoSlope.x, rb = L.autoSlope.y;
+	const float dirt  = saturate(L.autoSlope.z + smoothstep(rs - rb, rs, slope));
+	const float3 ground = mix(L.layer[0].rgb, L.layer[1].rgb, dirt);
+	const float rock  = smoothstep(rs, rs + rb, slope);
+	const float3 s1   = mix(ground, L.layer[2].rgb, rock);
+	const float snow  = smoothstep(L.autoSnow.x, L.autoSnow.x + L.autoSnow.y, pos.y)
+	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
+	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
+	const float pms   = L.autoSlope.w;
+	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
+}
+
 // Albedo of a landscape hit sampled at the PAINT — see the HW kernel's copy for
-// why the hit POSITION is enough to recover the UV. false = not a landscape.
+// why the hit POSITION is enough to recover the UV; an auto landscape follows
+// the hit's slope and height. false = not a landscape.
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
 	const float3 lp = (L.worldToLocal * float4(hitPos, 1.0)).xyz;
@@ -3513,7 +3576,7 @@ struct GIReflParams {
 	float4 gridOrigin;
 	float4 gridCounts;
 	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count, w = max bounces
-	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier)
+	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube
 };
 
 // Closest hit that also reports WHICH triangle was hit (global index into the
@@ -3700,20 +3763,15 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			                                         dist, triIdx);
 			if (hitInst < 0)
 			{
-				if (b > 0) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				// Miss → sky; see the HW kernel for the primary-miss rule.
+				if (b > 0 || P.land.z > 0.5) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				if (b == 0 && P.land.z > 0.5) conf = roughFade;
 				break;
 			}
 			const float4 alb4     = insts[hitInst].baseColor; // rgb albedo, a metallic
 			const float4 emi4     = insts[hitInst].emissive;  // rgb emissive, a roughness
 			float3       albedo   = alb4.rgb;
 			const float3 hitPos = ro + rd * dist;
-			// Landscape hit → the paint at THIS point, not the terrain-wide mean.
-			{
-				float3 painted;
-				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
-				                      landWeights, hitPos, painted))
-					albedo = painted;
-			}
 			// Geometric triangle normal, object → world via the row-vector product
 			// with the stored INVERSE transform ((M^-1)^T · n) — two-sided.
 			float3 hitN = -rd;
@@ -3727,6 +3785,14 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 					hitN = normalize(nW);
 					if (dot(hitN, rd) > 0.0) hitN = -hitN;
 				}
+			}
+			// Landscape hit → the paint at THIS point, not the terrain-wide mean
+			// (auto material: its slope/height masks, hence after hitN).
+			{
+				float3 painted;
+				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
+				                      landWeights, hitPos, hitN, painted))
+					albedo = painted;
 			}
 			// Occlusion ray skipped when the sun term is black anyway (night) —
 			// same shortcut as the HW kernel.
@@ -6261,7 +6327,7 @@ struct GIReflParamsCPU
 	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
 	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
-	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel
+	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube)
 };
 static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
@@ -6556,6 +6622,9 @@ void MetalRenderer::Shutdown()
 	if (m_mbBlurPipeline)       { CFBridgingRelease(m_mbBlurPipeline);       m_mbBlurPipeline = nullptr; }
 	m_mbHasPrev = false;
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
+	if (m_skyReflPipeline)      { CFBridgingRelease(m_skyReflPipeline);      m_skyReflPipeline = nullptr; }
+	if (m_skyReflCube)          { CFBridgingRelease(m_skyReflCube);          m_skyReflCube = nullptr; }
+	m_skyReflValid = false;
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
 	DestroyCloudShadowTarget();
@@ -6563,7 +6632,9 @@ void MetalRenderer::Shutdown()
 	DestroySkyViewLut();
 	if (m_moonTexture)         { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
+	if (m_whiteArrayTexture) { CFBridgingRelease(m_whiteArrayTexture); m_whiteArrayTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
+	if (m_materialSampler) { CFBridgingRelease(m_materialSampler); m_materialSampler = nullptr; }
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
@@ -6835,6 +6906,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 			if (ResolveMaterialShader(rb.materialAssetId, shKey, shFrag, shVert))
 			{
 				std::vector<HE::UUID>    gtexIds;
+				uint32_t                 gtexArr = 0; // sampler2DArray slots (Thema 158)
 				std::vector<std::string> gtexPaths;
 				const MaterialShaderVariant* pre = nullptr;
 				if (const MaterialAsset* ma = m_contentManager
@@ -6845,6 +6917,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 					if (!ma->shaderParamData.empty()) t.params = ma->shaderParamData;
 					// Snapshot the graph texture slots BEFORE resolving any of them —
 					// ResolveGraphTexture loads, and `ma` would not survive it.
+					gtexArr = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 					const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 						std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 					for (size_t i = 0; i < nTex; ++i)
@@ -6856,7 +6929,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
 				t.wpo      = !shVert.empty();
 				for (size_t i = 0; i < gtexIds.size(); ++i)
-					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i]);
+					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i], (gtexArr >> i) & 1u);
 			}
 #endif
 
@@ -7172,6 +7245,14 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: sky pipeline creation failed: ")
 				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
 		m_skyPipeline = (void*)CFBridgingRetain(skyPso);
+		// Same sky into the GI-reflection sky cube (EncodeSkyReflCube): a face
+		// pass has no depth attachment, so the PSO must not declare one.
+		skyDesc.depthAttachmentPixelFormat = MTLPixelFormatInvalid;
+		id<MTLRenderPipelineState> skyReflPso = [device newRenderPipelineStateWithDescriptor:skyDesc error:&skyError];
+		if (!skyReflPso)
+			throw std::runtime_error(std::string("MetalRenderer: sky-cube pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_skyReflPipeline = (void*)CFBridgingRetain(skyReflPso);
 
 		// ── Cloud pre-pass pipeline (quarter-res clouds-only → RGBA16F (L,T), no depth) ──
 		MTLRenderPipelineDescriptor* cloudDesc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -7234,12 +7315,29 @@ void MetalRenderer::CreateScenePipeline()
 		const uint32_t white = 0xFFFFFFFF;
 		[dummy replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
 		m_dummyTexture = (void*)CFBridgingRetain(dummy);
+		// Its texture2d_array twin: what an empty sampler2DArray heTexP slot (Texture
+		// Array Sample, Thema 158) gets — a 2D texture there is a type mismatch.
+		MTLTextureDescriptor* dummyArrDesc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
+		dummyArrDesc.textureType = MTLTextureType2DArray;
+		dummyArrDesc.arrayLength = 1;
+		dummyArrDesc.usage       = MTLTextureUsageShaderRead;
+		dummyArrDesc.storageMode = MTLStorageModeShared;
+		id<MTLTexture> dummyArr = [device newTextureWithDescriptor:dummyArrDesc];
+		[dummyArr replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0
+		              withBytes:&white bytesPerRow:4 bytesPerImage:4];
+		m_whiteArrayTexture = (void*)CFBridgingRetain(dummyArr);
 
 		MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
 		sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
 		sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
 		sampDesc.mipFilter = MTLSamplerMipFilterLinear; // use baked mip chains (else level 0 only)
 		m_linearSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
+		// The graph-material slots tile, as on every other backend (see the header).
+		sampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
+		sampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
+		sampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
+		m_materialSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
 
 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
@@ -7907,7 +8005,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 // for the kernel's texture array. Without this a landscape hit can only be one
 // flat colour for the whole terrain — a red ridge on a green hillside mirrors as
 // the average of the two, which is visibly not what the terrain looks like.
-// Rebuilt per frame: it is a handful of 144-byte entries, and the weightmap
+// Rebuilt per frame: it is a handful of 192-byte entries, and the weightmap
 // TEXTURES come from the same UUID-keyed cache the raster path uses (uploaded
 // once, re-uploaded only when the paint changes).
 int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
@@ -7924,13 +8022,19 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 		// No resident weightmap (still streaming, or unpainted) → skip the entry;
 		// those chunks keep their flat per-instance colour, which for an unpainted
 		// terrain is layer 0 and therefore already right.
-		void* wm = ResolveGraphTexture(ls.weightmapId, {});
-		if (!wm) continue;
+		// An AUTO entry has no weightmap at all (its masks come from the hit's
+		// slope and height); its texture slot takes the dummy.
+		const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+		void* wm = autoLand ? nullptr : ResolveGraphTexture(ls.weightmapId, {});
+		if (!wm && !autoLand) continue;
 		GILandGpu g;
 		g.worldToLocal = ls.worldToLocal;
 		g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling,
 		                  static_cast<float>(ls.layerCount));
 		for (int i = 0; i < 4; ++i) g.layer[i] = ls.layerColor[i];
+		g.autoWet   = ls.autoWet;
+		g.autoSlope = ls.autoSlope;
+		g.autoSnow  = ls.autoSnow;
 		gpu.push_back(g);
 		outWeightTex.push_back(wm);
 	}
@@ -8209,7 +8313,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		MTLRenderPipelineDescriptor* gDesc = [[MTLRenderPipelineDescriptor alloc] init];
 		gDesc.vertexFunction   = [lib newFunctionWithName:@"giGBufVertex"];
 		gDesc.fragmentFunction = [lib newFunctionWithName:@"giGBufFragment"];
-		gDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+		gDesc.colorAttachments[0].pixelFormat = kGiGBufPosFormat;
 		gDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
 		gDesc.depthAttachmentPixelFormat      = kDepthFormat;
 		id<MTLRenderPipelineState> gPso = [device newRenderPipelineStateWithDescriptor:gDesc error:&error];
@@ -8283,10 +8387,11 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	MTLTextureDescriptor* posDesc = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+		texture2DDescriptorWithPixelFormat:kGiGBufPosFormat width:width height:height mipmapped:NO];
 	posDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	posDesc.storageMode = MTLStorageModePrivate;
 	m_giGBufPosTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
+	posDesc.pixelFormat = MTLPixelFormatRGBA16Float; // normals keep half precision
 	m_giGBufNormTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
 
 	MTLTextureDescriptor* dDesc = [MTLTextureDescriptor
@@ -9071,18 +9176,66 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 	return true;
 }
 
+// The MTLTextureType2DArray twin of uploadMetalTexture for a sampler2DArray heTexP
+// slot (Thema 158): every slice of a texture-array asset (layers > 1, RGBA8, the
+// HE::buildTextureArray layout — slice-major, each slice with its full chain), or a
+// plain 2D asset as one slice. nullptr = unusable → the caller binds the white array.
+static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* tex)
+{
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
+	    || tex->format != TextureFormat::RGBA8)
+		return nullptr;
+	const bool     isArray = tex->layers > 1;
+	if (isArray && !HE::textureArrayPayloadValid(*tex)) return nullptr;
+	const uint32_t layers = isArray ? tex->layers : 1;
+	const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
+	const uint32_t w = tex->width, h = tex->height;
+	if (tex->data.size() < (size_t)layers * HE::textureArraySliceBytes(w, h, mips)) return nullptr;
+
+	MTLTextureDescriptor* desc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:(tex->srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm)
+		width:w height:h mipmapped:(mips > 1)];
+	desc.textureType      = MTLTextureType2DArray;
+	desc.arrayLength      = layers;
+	desc.mipmapLevelCount = mips;
+	desc.usage            = MTLTextureUsageShaderRead;
+	desc.storageMode      = MTLStorageModeShared;
+	id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+	if (!texture) return nullptr;
+	for (uint32_t s = 0; s < layers; ++s)
+	{
+		uint32_t lw = w, lh = h;
+		for (uint32_t l = 0; l < mips; ++l)
+		{
+			[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l slice:s
+			             withBytes:tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l)
+			           bytesPerRow:(size_t)lw * 4 bytesPerImage:(size_t)lw * lh * 4];
+			lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
+		}
+	}
+	return (void*)CFBridgingRetain(texture);
+}
+
 // Resolve a node-graph project texture (UUID for packed assets, path for loose editor
 // assets) to a retained id<MTLTexture>, cached by a stable key. nullptr if not loadable.
-void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::string& path)
+//
+// `array` = a sampler2DArray slot (HE::matGlslTextureArrayMask): a texture2d_array
+// under its own "#arr" key — the same asset can be 2D in one material and an array
+// in another — and NEVER nullptr: a missing one is the white array, so every caller
+// binds the right texture type without knowing about arrays.
+void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::string& path, bool array)
 {
-	const std::string key = texId != HE::UUID{}
+	std::string key = texId != HE::UUID{}
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
-	if (key.empty() || !m_contentManager) return nullptr;
-	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end()) return it->second;
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
-		m_contentManager->resolveTextureRef(texId, path));
+	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
+	if (array) key += "#arr";
+	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
+	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
+	void* retained = array ? uploadMetalTextureArray((__bridge id<MTLDevice>)m_device, asset)
+	                       : uploadMetalTexture((__bridge id<MTLDevice>)m_device, asset);
 	m_graphTexCache.emplace(key, retained);
-	return retained;
+	return retained ? retained : (array ? m_whiteArrayTexture : nullptr);
 }
 
 // The image of a UI quad (Image widget, textured Border/Button). Its own cache,
@@ -9165,6 +9318,12 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
+		// EncodeScene builds the alpha-blended twin of every graph material on its
+		// first draw, whatever the material's opacity (see there): its own MSL
+		// libraries and PSO, ~0.4-0.7 s on an E-core. Without it here the first
+		// two frames after a scene open stalled in Metal::EncodeScene even with
+		// every material warmed (Thema 153 Schritt 5: the editor light icons).
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true)) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
 		if (m_renderPath == HE::RenderPath::Deferred)
@@ -9328,16 +9487,17 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:0]; // heTex0
 	if (ma)
 	{
+		const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 		const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 			std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 		for (size_t i = 0; i < nTex; ++i)
 		{
 			const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 			const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-			if (void* t = ResolveGraphTexture(gid, gp))
+			if (void* t = ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u))
 			{
 				[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:(i + 1)];
-				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 			}
 		}
 	}
@@ -12983,15 +13143,16 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 				const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
 				std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 				for (size_t i = 0; i < HE::kMatMaxGraphTextures; ++i)
 				{
 					const HE::UUID tid = i < ma->graphTextureIds.size() ? ma->graphTextureIds[i] : HE::UUID{};
 					const std::string tp = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string();
-					void* gt = ResolveGraphTexture(tid, tp);
+					void* gt = ResolveGraphTexture(tid, tp, (arrMask >> i) & 1u);
 					id<MTLTexture> tex = gt ? (__bridge id<MTLTexture>)gt
 					                        : (__bridge id<MTLTexture>)m_dummyTexture;
 					[enc setFragmentTexture:tex atIndex:(NSUInteger)(i + 1)];
-					[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler
+					[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler
 					                     atIndex:(NSUInteger)(i + 1)];
 				}
 				// Legacy/mesh texture slot 0 must be bound too (pinned unconditionally).
@@ -13090,14 +13251,18 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              const glm::vec3& sunDir, float time,
                              const IRenderer::EnvironmentSettings& env,
-                             const glm::vec3& camPos, bool lowResClouds, bool useSkyLut)
+                             const glm::vec3& camPos, bool lowResClouds, bool useSkyLut,
+                             bool cubeBake)
 {
-	if (!m_skyPipeline) return;
+	void* const pso = cubeBake ? m_skyReflPipeline : m_skyPipeline;
+	if (!pso) return;
 	if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyPipeline];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pso];
 	// Depth-test == far, no write — only fills background pixels (drawn after scene).
-	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState];
+	// A cube face has no depth attachment: every texel is sky.
+	if (!cubeBake)
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState];
 	id<MTLTexture> moon = m_moonTexture
 		? (__bridge id<MTLTexture>)m_moonTexture
 		: (__bridge id<MTLTexture>)m_dummyTexture;
@@ -13178,6 +13343,53 @@ void MetalRenderer::DestroySkyViewLut()
 	if (m_skyLutRayleigh) { CFBridgingRelease(m_skyLutRayleigh); m_skyLutRayleigh = nullptr; }
 	if (m_skyLutMie)      { CFBridgingRelease(m_skyLutMie);      m_skyLutMie = nullptr; }
 	m_skyLutValid = false;
+}
+
+// GI-reflection sky cube (topic 173): the sky pass drawn into six faces around
+// the camera, so a reflection ray that misses the scene returns the sky the
+// viewer sees — clouds and weather included — instead of m_skyEnvCube's
+// cloudless CPU atmosphere. Every frame the reflections trace (clouds drift
+// with the clock); 6 × 128² texels is about a tenth of a 720p sky pass. No
+// low-res cloud composite: that buffer is screen-space, a face is not.
+static constexpr int kSkyReflCubeSize = 128;
+void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
+{
+	m_skyReflValid = false;
+	static const bool s_off = [] {
+		const char* e = std::getenv("HE_GIREFL_SKY");
+		return e && e[0] == '0';
+	}();
+	if (s_off || !m_skyReflPipeline || !GetEnvironment().skyEnabled) return;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+	if (!m_skyReflCube)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			textureCubeDescriptorWithPixelFormat:kSceneColorFormat
+			size:kSkyReflCubeSize mipmapped:NO];
+		d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		d.storageMode = MTLStorageModePrivate;
+		m_skyReflCube = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+		if (!m_skyReflCube) return;
+	}
+	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f; // == the scene's drawSky
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	const glm::vec3 camPos = m_renderWorld.camera.position;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	for (int f = 0; f < 6; ++f)
+	{
+		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_skyReflCube;
+		pass.colorAttachments[0].slice       = static_cast<NSUInteger>(f);
+		pass.colorAttachments[0].loadAction  = MTLLoadActionDontCare; // every texel is written
+		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+		EncodeSky((__bridge void*)enc, HE::SkyCubeFaceInvViewProj(f, camPos, /*rowZeroAtTop=*/true),
+		          m_renderWorld.sunDirection, skyClock, GetEnvironment(), camPos,
+		          /*lowResClouds=*/false, /*useSkyLut=*/true, /*cubeBake=*/true);
+		[enc endEncoding];
+	}
+	m_skyReflValid = true;
 }
 
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -13708,7 +13920,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						if (t.gtex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.gtex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 					if (t.wpo)
 					{
@@ -13822,13 +14034,14 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						{
 							if (!ma->shaderParamData.empty()) cMaterialParams = &ma->shaderParamData;
 							// Node-graph project textures → fragment texture units 1..4.
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    id = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string p  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p);
+								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -13950,7 +14163,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						if (cGraphTex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)cGraphTex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 				// Landscape layer weightmap → MSL texture 13 (preamble binding 14).
 				// PER DRAW, not per material: it belongs to the terrain the chunk is
@@ -14120,7 +14333,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					if (t.gtex[i])
 					{
 						[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.gtex[i] atIndex:(i + 1)];
-						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 					}
 				if (t.wpo)
 				{
@@ -15228,8 +15441,12 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// for the whole landscape (see GiLandscape.h).
 		std::vector<void*> landTex;
 		const int landCount = BuildGILandscapeTable(landTex);
+		// The real sky (clouds, weather) for rays that miss — see EncodeSkyReflCube.
+		// Baked on this command buffer ahead of the trace encoder below.
+		EncodeSkyReflCube((__bridge void*)cmdBuf);
 		rp.land         = glm::vec4(static_cast<float>(landCount),
-		                            static_cast<float>(rays), 0.0f, 0.0f);
+		                            static_cast<float>(rays),
+		                            m_skyReflValid ? 1.0f : 0.0f, 0.0f);
 
 		const int curIdx  = m_giReflHistIdx;
 		const int prevIdx = 1 - curIdx;
@@ -15245,9 +15462,14 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[prevIdx] atIndex:5];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistRad[curIdx]  atIndex:6];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[curIdx]  atIndex:7];
-		// Sky cubemap for SECONDARY-bounce misses (a mirror seen in a mirror
-		// reflecting the sky) — the primary miss keeps the composite's fallback.
-		[enc setTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:8];
+		// Sky cubemap for misses. With the baked sky cube (rp.land.z = 1) EVERY
+		// miss reads it — primary misses with full confidence, so the mirror
+		// shows the clouds instead of the composite's cloudless m_skyEnvCube.
+		// Without it only SECONDARY misses (a mirror seen in a mirror reflecting
+		// the sky) read m_skyEnvCube, and the primary miss keeps the composite's
+		// fallback, as before.
+		[enc setTexture:(__bridge id<MTLTexture>)(m_skyReflValid ? m_skyReflCube : m_skyEnvCube)
+		        atIndex:8];
 		if (m_giHwRt)
 		{
 			[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas
@@ -15607,13 +15829,14 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
 							if (!ma->shaderParamData.empty()) cMaterialParams = &ma->shaderParamData;
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    id = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string p  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p);
+								cGraphTex[cGraphTexCount++] = ResolveGraphTexture(id, p, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -15725,7 +15948,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						if (cGraphTex[i])
 						{
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)cGraphTex[i] atIndex:(i + 1)];
-							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
 						}
 				// Landscape layer weightmap → MSL texture 13, per draw (same as forward).
 				if (cMaterialPipelineGB)
@@ -15825,6 +16048,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 {
 	@autoreleasepool
 	{
+		// Every pass below re-extracts (shadow, GI, SSAO, G-buffer, scene) so
+		// their draw sets and cascade fits agree. Inside this scope the world
+		// does not change, so the extractor walks it once and answers the rest
+		// from that walk (RenderExtractor::beginFrame). Closed on every return.
+		RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
 		if (isPrimary)
 		{
 			// Reset the render counters before any early-return below, so a frame
@@ -15902,8 +16131,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			for (const HE::UUID& id : m_pendingTexInvalidations)
 			{
 				const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+				// The texture-array upload of the same asset lives under "#arr" (Thema 158).
+				for (const std::string& k : { key, key + "#arr" })
 				for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
-					if (auto it = cache->find(key); it != cache->end())
+					if (auto it = cache->find(k); it != cache->end())
 					{
 						if (it->second) RetireTexture(it->second);
 						cache->erase(it);

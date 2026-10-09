@@ -75,6 +75,16 @@ imgui.ini
 # them from repository secrets instead; see src/HE_ContentSync/CMakeLists.txt.
 cmake/EngineContentCredentials.cmake
 
+# Raw downloaded source textures of the auto landscape material (4K Poly Haven /
+# ambientCG sets, ~400 MB). The repo has no Git LFS and big binaries were purged
+# from history once; where they live for good is still open (docs/auto-landscape-
+# material-textures.md §4.4). Stage and pack them with scripts/landscape-textures/.
+# CAUTION: ignoring is not enough in EditorDeps/: HorizonEditor's POST_BUILD copies
+# the whole folder into every deploy and package_macos.sh copies EditorDeps/Images
+# into the .app, so ~400 MB of sources would ride along. Keep them outside the
+# repo's EditorDeps/ in the long run (the staging script takes any folder).
+EditorDeps/Images/Landscape/
+
 # Python bytecode of the helper scripts in scripts/. A .pyc of build_runtimes.py
 # was committed once (e68ff8ed) simply because nothing here caught it.
 __pycache__/

@@ -9,12 +9,16 @@ add_library(HorizonScene SHARED
 	src/AntiCheat/AntiCheatHost.cpp
 	src/AntiCheat/AntiCheatTelemetry.cpp
     src/HorizonWorld.cpp
+    src/FloatingOrigin.cpp
+    src/CellStreamer.cpp
+    src/CellSplit.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp
     src/AnimatorHost.cpp
     src/MovementSystem.cpp
     src/SceneSerializer.cpp
+    src/SceneJsonParse.cpp
     src/EntityVisibility.cpp
     src/EntityActive.cpp
     src/Components/TransformComponent.cpp
@@ -46,6 +50,7 @@ add_library(HorizonScene SHARED
     src/RopeTrailSystem.cpp
     src/LODSystem.cpp
     src/WeatherSystem.cpp
+    src/WeatherAudio.cpp
     src/SceneSystems.cpp
     src/EnvironmentPush.cpp
     src/FlyCameraController.cpp

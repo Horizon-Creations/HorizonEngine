@@ -20,6 +20,7 @@
 #include "GraphEditor.h"         // shared node-graph canvas
 #include "HcGraphHost.h"         // shared HorizonCode canvas host (pins, menus, clipboard)
 #include "HcExecTrace.h"         // run-time node hits + "go to node" reveals
+#include "EditorRewards.h"       // reward moment: Compiles clean (post)
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/Net/ValueWire.h>   // which types may replicate at all
@@ -128,6 +129,7 @@ struct LSState
 	int         selectedNode = 0;
 	bool        focusSelected = false;
 	int         currentGraph = 0;   // visible sub-graph: 0 = event graph, else a FunctionEntry id
+	HGH::GraphTabs tabs;            // the tab strip over the canvas, and each graph's own view
 	std::string selectedVar;        // variable selected in the left panel
 	std::string selectedEvent;      // declared event shown in the details pane
 	// The class's Extract on Destruct entry is shown in the details pane. Only
@@ -247,6 +249,9 @@ void runCompileCheck(const HC::Graph& graph, const char* title,
 		g.compileOk   = false;
 		g.compileMsg  = mine->reason;
 		g.compileNode = mine->node;
+		// Reward tone (EditorRewards.h): COMPILE FAILED — no moment, only its
+		// sound; postSound(), this code has no AppContext.
+		HE::Ed::Rewards::postSound(HE::Ed::Rewards::Tone::CompileFailed);
 		// Jump to the offending node: open its sub-graph and center on it.
 		if (const HC::Node* n = graph.findNode(g.compileNode))
 		{
@@ -262,6 +267,9 @@ void runCompileCheck(const HC::Graph& graph, const char* title,
 		for (const auto& f : res.files)
 			lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
 		g.compileOk  = true;
+		// Reward moment (EditorRewards.h): COMPILED CLEAN — post(), this code
+		// has no AppContext. Only the Compile button calls this.
+		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::CompiledClean);
 		// The line count covers the whole ancestry when there is one — which is
 		// honest: that is what an export builds to make THIS class native.
 		g.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
@@ -745,6 +753,41 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		// A Ref can never travel — an object handle names nothing on the other
 		// machine — so the box is disabled rather than merely refused later,
 		// with the reason where the question is asked.
+		// Ticking Notify (OnRep_) or Notify on Change (OnChanged_) WRITES THE
+		// HANDLER, the way the right-click "Add Function" does — so nobody has
+		// to guess the spelling of a name the runtime composes. Only when there
+		// is not one already: re-ticking the box must not leave two functions of
+		// the same name, which is dead code (calls resolve by name, first wins).
+		auto ensureVarHandler = [&](const std::string& prefix)
+		{
+			const std::string fnName = prefix + v->name;
+			for (const auto& n : graph.nodes)
+				if (n.type == NT::FunctionEntry && n.s == fnName) return;
+			if (v->name.empty()) return;
+			const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
+			HC::Node* entry = graph.findNode(fnId);
+			entry->s        = fnName;
+			entry->subgraph = fnId;
+			entry->access   = 1;   // private: nobody outside the class calls it
+			// ONE parameter, the variable's own type: the value it held before.
+			// The WHOLE shape, not just the PinType — an array of structs and a
+			// scalar struct are different pins, and a parameter declared as the
+			// wrong one would mistype the old value for the composite cases.
+			HC::FuncParam old;
+			old.name        = "Old";
+			old.type        = v->type;
+			old.isArray     = v->isArray;
+			old.container   = v->container;
+			old.typeName    = v->typeName;
+			old.keyType     = v->keyType;
+			old.keyTypeName = v->keyTypeName;
+			entry->params   = { old };
+			g.currentGraph  = fnId;
+			const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
+			graph.findNode(retId)->s = fnName;
+			HC::syncFunctionSignatures(graph);
+		};
+
 		const bool canReplicate = HE::Net::Game::isReplicableType(v->type);
 		ImGui::BeginDisabled(!canReplicate);
 		bool rep = v->replicated && canReplicate;
@@ -767,46 +810,25 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 			{
 				v->repNotify = notify;
 				edited = true;
-				// Ticking it WRITES THE HANDLER, the way the right-click "Add
-				// Function" does — so nobody has to guess the spelling of a
-				// name the dispatcher composes (OnRep_<Name>). Only when there
-				// is not one already: re-ticking the box must not leave two
-				// functions of the same name, which is dead code (calls
-				// resolve by name, first one wins).
-				const std::string fnName = "OnRep_" + v->name;
-				bool exists = false;
-				for (const auto& n : graph.nodes)
-					if (n.type == NT::FunctionEntry && n.s == fnName) { exists = true; break; }
-				if (notify && !exists && !v->name.empty())
-				{
-					const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
-					HC::Node* entry = graph.findNode(fnId);
-					entry->s        = fnName;
-					entry->subgraph = fnId;
-					entry->access   = 1;   // private: nobody outside the class calls it
-					// ONE parameter, the variable's own type: the value this
-					// machine held before the one that just arrived (§6.4).
-					// The WHOLE shape, not just the PinType — an array of
-					// structs and a scalar struct are different pins, and a
-					// parameter declared as the wrong one would mistype the old
-					// value for exactly the composite cases that do replicate.
-					HC::FuncParam old;
-					old.name        = "Old";
-					old.type        = v->type;
-					old.isArray     = v->isArray;
-					old.container   = v->container;
-					old.typeName    = v->typeName;
-					old.keyType     = v->keyType;
-					old.keyTypeName = v->keyTypeName;
-					entry->params   = { old };
-					g.currentGraph  = fnId;
-					const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
-					graph.findNode(retId)->s = fnName;
-					HC::syncFunctionSignatures(graph);
-				}
+				// OnRep_<Name>(Old): the value this machine held before the
+				// one that just arrived (§6.4).
+				if (notify) ensureVarHandler("OnRep_");
 			}
 			EditorWidgets::helpForLabel("Notify");
 		}
+
+		// ── Notify on Change (docs/bind-to-variable-binding-plan.md §4) ──────
+		// Any type, Ref included (locally an instance id is a value). The box
+		// writes OnChanged_<Name>(Old); listeners bound per Bind Event get
+		// "<Name>Changed" with the new value.
+		bool onChange = v->notifyChange;
+		if (EditorWidgets::checkbox("Notify on Change", &onChange))
+		{
+			v->notifyChange = onChange;
+			edited = true;
+			if (onChange) ensureVarHandler("OnChanged_");
+		}
+		EditorWidgets::helpForLabel("Notify on Change");
 
 		// ── Savegames (SaveStateComponent, entity.saveState) ─────────────────
 		// Like Replicated, the checkbox is the whole declaration: saveState
@@ -1181,6 +1203,9 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	host.selfKey      = g.graphFor;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (g.compileHas && !g.compileOk) ? g.compileNode : 0;
+	// …which pulses once after the compile (visual cue V9, EditorRewards.h).
+	if (host.errorNode != 0)
+		host.errorPulse = HE::Ed::Rewards::errorPulse(ImGui::GetTime() - g.compileAt);
 	// …and a node the interpreter just ran a fading amber one.
 	host.traceKey     = g.traceKey;
 	host.title        = [](const HC::Node& n){ return nodeTitle(n); };
@@ -1485,22 +1510,17 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
 	// A stale compile result from another tab must not anchor to this graph.
 	if (g.compileHas && g.compileFor != title) g.compileHas = false;
-	// Which sub-graph is shown, and the compile check — the canvas gets its own
-	// strip, in the same language as the tab's own bar above it.
+	// The graph tabs: the Event Graph (always there) and every open function, one
+	// tab each. Each graph keeps its own pan and zoom (GraphViewStore). Before
+	// anything below reads currentGraph, so the canvas this frame is the one the
+	// strip shows.
+	if (HGH::drawGraphTabs(g.tabs, graph, g.currentGraph, g.ge, "hc:" + g.graphFor))
+	{ g.selectedNode = 0; g.selectedVar.clear(); g.selectedEvent.clear(); }
+	// The compile check — the canvas gets its own strip, in the same language as
+	// the tab's own bar above it.
 	{
 		namespace T = EditorToolbar;
-		std::string where = "Event Graph";
-		if (g.currentGraph != 0)
-		{
-			const HC::Node* e = graph.findNode(g.currentGraph);
-			where = std::string("Function: ") +
-			        (e && !e->s.empty() ? e->s.c_str() : "(unnamed)");
-		}
-
 		T::Bar bar;
-		bar.group();
-		bar.readout(g.currentGraph == 0 ? T::iconList : T::iconCode, where.c_str());
-		bar.endGroup();
 
 		// The compile result belongs on the strip too: it is a state of this
 		// graph, and as a line underneath it pushed the canvas down and up again
@@ -1514,8 +1534,20 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		if (showCompile)
 		{
 			bar.group();
-			bar.readout(g.compileOk ? T::iconCheck : T::iconWarning,
-			            g.compileMsg.c_str(), g.compileOk ? T::kGood : T::kBad);
+			// Visual cue V9 (EditorRewards.h): a clean result writes the
+			// footer's check into the icon slot; < 0 = the static icon.
+			const float stroke = g.compileOk
+				? HE::Ed::Rewards::compileCheck(ImGui::GetTime() - g.compileAt) : -1.0f;
+			if (stroke >= 0.0f)
+			{
+				const ImVec2 c = bar.readout([](ImDrawList*, const ImVec2&, float, ImU32) {},
+				                             g.compileMsg.c_str(), T::kGood);
+				const float s = bar.iconSize();
+				HE::Ed::Rewards::drawCheckMark(c.x - s * 0.5f, c.y - s * 0.5f, s, stroke, 1.0f);
+			}
+			else
+				bar.readout(g.compileOk ? T::iconCheck : T::iconWarning,
+				            g.compileMsg.c_str(), g.compileOk ? T::kGood : T::kBad);
 			bar.endGroup();
 		}
 
@@ -2943,12 +2975,17 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
-		T::assetHeader(bar, st.name.c_str(), T::iconCode, st.dirty);
+		T::assetHeader(bar, assetPath, st.dirty);
+		// Folder, then Save: what every asset tab opens with. The right edge is the
+		// Viewport | Code switch's.
+		if (T::saveButton(bar, true, /*atLeft=*/true)) saveClassState(st, ctx);
 		// Everything on this band goes through the Bar's OWN cells. A raw ImGui
 		// combo or radio drawn here lays itself out in window coordinates while
 		// the Bar places its cells into a draw list — the two do not know about
 		// each other, and the widget lands on top of the band's own text.
-		bar.group();
+		// Declared first so the base-class cell to its left knows how much room is
+		// its own; it is drawn at the right edge.
+		bar.rightGroup(bar.labelGroupWidth({ "Viewport", "Code" }));
 		if (bar.item("##hcmodeviewport", nullptr, "Viewport", st.showViewport, true,
 		             "The class's body — its components, and what they add up to"))
 			st.showViewport = true;
@@ -3022,7 +3059,6 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 			}
 			ImGui::EndPopup();
 		}
-		if (T::saveButton(bar, true)) saveClassState(st, ctx);
 	}
 
 	// The event catalog is the base-class chain's events (Object contributes

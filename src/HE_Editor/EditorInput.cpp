@@ -44,6 +44,18 @@ bool detectTrackpad()
 	return sawTrackpad;
 }
 
+#ifndef __APPLE__
+void pinchPlatformInstall() {}   // the Mac one is EditorInputMac.mm
+#endif
+
+void beginFrame()
+{
+	static bool installed = false;
+	if (!installed) { installed = true; pinchPlatformInstall(); }
+	detail::g_pinchFrame   = detail::g_pinchPending;
+	detail::g_pinchPending = 0.0f;
+}
+
 bool trackpadPointer(const AppContext& ctx)
 {
 	detail::g_trackpadActive = resolveTrackpad(ctx.editorConfig.PointerInput, detectTrackpad());

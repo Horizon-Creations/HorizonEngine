@@ -6,6 +6,7 @@
 #include "CollabUndo.h"
 
 #include <HorizonScene/TerrainMeshGenerator.h>
+#include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/Components/NameComponent.h>
@@ -604,6 +605,50 @@ TEST_CASE("terrain_paint puts weight on the layer it was given, at the world pos
 	CHECK(f.terrain(after).layerWeights.empty());
 }
 
+TEST_CASE("terrain_paint reaches layers 4..7 on the second weight page, and undo takes it back")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain();
+
+	// A first-page stroke, then one on layer index 5 elsewhere.
+	ToolResult r = f.call("terrain_paint", json{
+		{ "uuid", f.uuid(e) }, { "x", 190.0 }, { "z", -50.0 },
+		{ "layer", 2 }, { "radius", 4.0 }, { "falloff", 0.0 }, { "strength", 1.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(f.terrain(e).layerWeights2.empty());
+	REQUIRE(r.content["mixAtCenter"].size() == 8);
+
+	r = f.call("terrain_paint", json{
+		{ "uuid", f.uuid(e) }, { "x", 210.0 }, { "z", -50.0 },
+		{ "layer", 5 }, { "radius", 4.0 }, { "falloff", 0.0 }, { "strength", 1.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["changed"] == true);
+	REQUIRE(r.content["mixAtCenter"].size() == 8);
+	CHECK(r.content["mixAtCenter"][5].get<float>() == doctest::Approx(1.0f));
+	CHECK(r.content["mixAtCenter"][0].get<float>() == doctest::Approx(0.0f));
+
+	// Both pages landed in the component (they travel as one scene patch).
+	const auto& tc = f.terrain(e);
+	REQUIRE(tc.layerWeights2.size() == tc.layerWeights.size());
+	CHECK(TerrainPaint::usesSecondPage(tc));
+	std::uint8_t w[kTerrainMaxLayers] = {};
+	const std::uint32_t wr = tc.weightRes;
+	// x = 210 is +10 m from the terrain centre (200); map it like the tool does.
+	const auto tx = static_cast<std::uint32_t>((10.0f + tc.sizeX * 0.5f) / tc.sizeX * wr);
+	REQUIRE(TerrainPaint::texelWeights(tc, tx, wr / 2, w));
+	CHECK(static_cast<int>(w[5]) == 255);
+
+	// Undo restores the state before the layer-5 stroke: no second page.
+	const std::string id = f.uuid(e);
+	REQUIRE(f.snapshotUndo.undo());
+	const Entity after = HE::Ed::entityByUuid(f.world, id);
+	REQUIRE((after != entt::null));
+	CHECK_FALSE(f.terrain(after).layerWeights.empty());
+	CHECK(f.terrain(after).layerWeights2.empty());
+}
+
 TEST_CASE("terrain_paint refuses a layer a landscape does not have")
 {
 	Fixture f;
@@ -611,7 +656,10 @@ TEST_CASE("terrain_paint refuses a layer a landscape does not have")
 
 	CHECK(codeOf(f.call("terrain_paint", json{
 		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
-		{ "layer", 4 } })) == "invalid_payload");
+		{ "layer", 8 } })) == "invalid_payload");
+	CHECK(codeOf(f.call("terrain_paint", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
+		{ "layer", -1 } })) == "invalid_payload");
 	CHECK(codeOf(f.call("terrain_paint", json{
 		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
 		{ "layer", 0 }, { "strength", 3.0 } })) == "invalid_payload");

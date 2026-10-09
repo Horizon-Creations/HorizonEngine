@@ -99,6 +99,20 @@ public:
     // Appended at the END and defaulted, like the seven above.
     virtual void onRpc(uint32_t entity, const char* name, const char* argsJson)
     { (void)entity; (void)name; (void)argsJson; }
+
+    // A HorizonCode variable this module subscribed to with he::hc::watch
+    // changed (docs/bind-to-variable-binding-plan.md §4.5). `entity` is the
+    // SOURCE — the entity whose class owns the variable, 0 for the Game
+    // Instance — the same number watch() took as its target. Heard at the
+    // frame-end compare, once per frame however often it was written.
+    //
+    // No value, old or new, for onRep's reason: a HorizonCode::Value does not
+    // cross into a hot-loaded dylib. The new one is read back with
+    // he::hc::valueJson(entity, name); a module that needs the old one keeps it.
+    //
+    // Appended at the END and defaulted, like the eight above.
+    virtual void onHcVariableChanged(uint32_t entity, const char* name)
+    { (void)entity; (void)name; }
 };
 
 // Typedefs for the DLL export function pointers

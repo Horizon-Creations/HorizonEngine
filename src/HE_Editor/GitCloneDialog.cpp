@@ -3,6 +3,7 @@
 #include "EditorHelp.h"               // "Source Control/<label>" for its controls
 #include "EditorWidgets.h"            // pinDialogToEditorWindow, WrapText, buttons
 #include "GitMissingDialog.h"         // "what is missing" when git is not installed
+#include "GitHubSignIn.h"             // the account the list and the clone use
 
 #ifdef _WIN32
 #include <windows.h>  // must come before any header that pulls in rpcdce.h
@@ -53,9 +54,6 @@ namespace {
 
 constexpr float kDialogWidth = 620.0f;
 
-// Token for listing and for the clone. Wiped, not cleared, whenever it has been
-// handed on or the dialog closes — the bytes must go, not just the length.
-char s_token[256]      = "";
 char s_filter[128]     = "";
 char s_parentDir[1024] = "";
 char s_folderName[256] = "";
@@ -77,11 +75,8 @@ std::mutex  s_pickMutex;
 std::string s_pickResult;
 bool        s_pickReady = false;
 
-void wipeToken() { std::fill(std::begin(s_token), std::end(s_token), '\0'); }
-
 void resetForm()
 {
-	wipeToken();
 	s_filter[0]     = '\0';
 	s_folderName[0] = '\0';
 	s_selected.clear();
@@ -323,23 +318,26 @@ void Draw(AppContext& ctx)
 				"folder, Git LFS assets included, and opened as a project.");
 			ImGui::Spacing();
 
-			// ── 1. Token → repository list ───────────────────────────────────
-			ImGui::BeginDisabled(cloning);
-			ImGui::SetNextItemWidth(-190.0f);
-			ImGui::InputTextWithHint("##clonetoken", "Personal access token",
-			                         s_token, sizeof(s_token), ImGuiInputTextFlags_Password);
-			ImGui::SameLine();
-			ImGui::BeginDisabled(s_token[0] == '\0' || git->listingRepos());
-			if (EditorWidgets::primaryButton("Load my repositories", ImVec2(180.0f, 0.0f)))
+			// ── 1. Sign-in → repository list ─────────────────────────────────
+			// The sign-in flow draws in place of this step while it runs: this
+			// dialog is a modal, and the sign-in's own modal would close it.
+			if (!GitHubSignIn::drawInline(ctx))
 			{
-				// A copy: the same token is needed again for the clone itself.
-				git->requestListRepos(std::string(s_token));
-				s_selected.clear();
+				GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/true);
+				if (GitHubSignIn::account() == GitHubSignIn::Account::SignedIn)
+				{
+					// The clone itself then needs no token either: git finds the
+					// sign-in in the same credential helper.
+					ImGui::BeginDisabled(cloning || git->listingRepos());
+					if (EditorWidgets::primaryButton("Load my repositories##signin",
+					                                 ImVec2(180.0f, 0.0f)))
+					{
+						git->requestListReposWithSignIn(GitHubSignIn::credentialRoot(ctx));
+						s_selected.clear();
+					}
+					ImGui::EndDisabled();
+				}
 			}
-			ImGui::EndDisabled();
-			ImGui::EndDisabled();
-			ImGui::TextDisabled("Token: github.com/settings/tokens — classic, 'repo' scope. "
-			                    "It is handed to git's credential helper, stored nowhere else.");
 
 			if (git->listingRepos())
 			{
@@ -435,11 +433,9 @@ void Draw(AppContext& ctx)
 					s_formError.clear();
 					if (targetUsable(s_parentDir, s_folderName, s_formError))
 					{
-						// The token rides along to the credential helper and is
-						// wiped here; a retry after a failure finds it in the
-						// helper, or asks for it again.
-						git->requestClone(chosen->cloneUrl, target, std::string(s_token));
-						wipeToken();
+						// No token of its own: git reads the sign-in from the
+						// credential helper the list came through.
+						git->requestClone(chosen->cloneUrl, target, {});
 						s_cloneStarted  = true;
 						s_resultHandled = false;
 						s_projectFile.clear();
@@ -521,6 +517,9 @@ void Draw(AppContext& ctx)
 	if (close)
 	{
 		if (git && !git->cloneBusy()) git->finishClone();
+		// A sign-in shown in here goes with the dialog. A token already approved
+		// on GitHub is still saved (GitHubSignIn::endFlow).
+		GitHubSignIn::endFlow();
 		resetForm();
 		ImGui::CloseCurrentPopup();
 	}

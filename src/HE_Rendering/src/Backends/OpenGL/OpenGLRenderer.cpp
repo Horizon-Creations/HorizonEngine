@@ -2,6 +2,8 @@
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <MaterialGraph/MaterialGraph.h>         // matGlslTextureArrayMask
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
@@ -1790,7 +1792,9 @@ struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
 struct GiInst { mat4 invTransform; vec4 baseColor; vec4 emissive; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset, .z = landscape index (-1 = none)
 // Painted landscape — HE::GiLandscape / GILandGpu. std430 keeps the mat4 and the
 // vec4s naturally aligned, so the CPU struct maps 1:1.
-struct GiLand { mat4 worldToLocal; vec4 cfg; vec4 layer[4]; }; // cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+// cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto landscape:
+// layer = Grass/Dirt/Rock/Snow means, autoWet/autoSlope/autoSnow = GiLandscape.h).
+struct GiLand { mat4 worldToLocal; vec4 cfg; vec4 layer[4]; vec4 autoWet; vec4 autoSlope; vec4 autoSnow; };
 layout(std430, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
 layout(std430, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
 layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
@@ -2423,8 +2427,32 @@ uniform vec4 uFrame;       // x = jitter seed, y = width, z = height, w = 1 → 
 uniform vec4 uLightPosRange[8];  // xyz pos, w range
 uniform vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
 uniform vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+// The real sky (clouds, weather) for rays that miss, baked around the camera
+// this frame (RenderSkyReflCube). uSkyReflValid = 0: no bake, a miss returns
+// nothing and the composite's cloudless cubemap shows instead.
+uniform samplerCube uSkyRefl;
+uniform float uSkyReflValid;
 
 const int kOctSize = 8; // must match OpenGLRenderer::kGIProbeOctSize
+
+// Auto landscape material at a hit: the graph's masks from the hit's slope and
+// world height over the slices' mean colours. Mirrors HE::giAutoLandscapeAlbedo
+// (GiLandscape.h) and the Metal kernels' giAutoLandAlbedo line for line.
+vec3 giAutoLandAlbedo(int li, vec3 pos, vec3 n)
+{
+	float slope = clamp(1.0 - n.y, 0.0, 1.0);
+	float rs = giLands[li].autoSlope.x, rb = giLands[li].autoSlope.y;
+	float dirt  = clamp(giLands[li].autoSlope.z + smoothstep(rs - rb, rs, slope), 0.0, 1.0);
+	vec3 ground = mix(giLands[li].layer[0].rgb, giLands[li].layer[1].rgb, dirt);
+	float rock  = smoothstep(rs, rs + rb, slope);
+	vec3 s1     = mix(ground, giLands[li].layer[2].rgb, rock);
+	float snow  = smoothstep(giLands[li].autoSnow.x, giLands[li].autoSnow.x + giLands[li].autoSnow.y, pos.y)
+	            * (1.0 - smoothstep(giLands[li].autoSnow.z, giLands[li].autoSnow.z + 0.1, slope));
+	vec3 s2     = mix(s1, giLands[li].layer[3].rgb, snow);
+	float pms   = giLands[li].autoSlope.w;
+	float flat_ = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	return mix(s2, giLands[li].autoWet.rgb, giLands[li].autoWet.w * flat_);
+}
 
 // SYNC: byte-for-byte the scene shader's giOctEncode / sampleDDGIIrradiance
 // (kUnlitFS above) — the sampled variant WITH the Chebyshev visibility test, not
@@ -2583,7 +2611,19 @@ void main()
 
 	float dist; int tri;
 	int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
-	if (hitInst < 0) continue; // miss → this sample contributes nothing (sky)
+	if (hitInst < 0)
+	{
+		// Miss → the sky. With the bake it is a full sample (the receiver's
+		// confidence, like a hit at close range) carrying the real sky, so the
+		// mirror shows clouds and a part-miss glossy lobe averages hit and sky
+		// instead of weighting its hits by f². Without it: nothing, as before.
+		if (uSkyReflValid > 0.5)
+		{
+			outRadiance += texture(uSkyRefl, Rs).rgb;
+			outConf     += 1.0;
+		}
+		continue;
+	}
 
 	vec3 hitPos = origin + Rs * dist;
 	vec3 hitN   = giHitNormal(hitInst, tri, Rs);
@@ -2593,7 +2633,11 @@ void main()
 	// rect whose mesh UVs are linear in it, so the hit POSITION recovers the UV
 	// — no per-vertex UV in the BVH. Mirrors the Metal kernels (GiLandscape.h).
 	int li = giInsts[hitInst].offsets.z;
-	if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
+	// Auto landscape (cfg.w < 0): no paint, its colour follows the hit's slope
+	// and height (hitN faces the ray).
+	if (li >= 0 && li < uGiLandCount && li < 4 && giLands[li].cfg.w < -0.5)
+		albedo = giAutoLandAlbedo(li, hitPos, hitN);
+	else if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
 	{
 		vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
 		vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
@@ -5507,6 +5551,19 @@ void OpenGLRenderer::CreateSSAOPipeline()
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
+	// 1×1×1 white ARRAY — what a sampler2DArray heTexP slot gets when its texture
+	// is missing or unusable (Thema 158): the array twin of the white default the
+	// other backends bind, so a missing array reads white, never a stale layer.
+	{
+		const uint8_t white[4] = { 255, 255, 255, 255 };
+		glGenTextures(1, &m_whiteArrayTex);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_whiteArrayTex);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+		m_glArrayTex.insert(m_whiteArrayTex);
+	}
 	// 1×1 transparent black — the neutral element for anything sampled as
 	// "radiance + confidence" (the reflection result) or as an additive light
 	// source: alpha 0 means "no data", so a bound dummy contributes nothing.
@@ -5676,13 +5733,19 @@ void OpenGLRenderer::UpdateGIAccel()
 		for (const HE::GiLandscape& ls : m_renderWorld.landscapes)
 		{
 			if (static_cast<int>(lands.size()) >= HE::kGiMaxLandscapes) break;
-			const unsigned int wm = ResolveGraphTexture(ls.weightmapId, {});
+			// An AUTO entry has no weightmap (its masks come from the hit's slope
+			// and height); its unit takes the black dummy, never sampled.
+			const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+			const unsigned int wm = autoLand ? m_blackTex : ResolveGraphTexture(ls.weightmapId, {});
 			if (!wm) continue;   // not resident yet → keep the flat colour
 			GILandGpu g;
 			g.worldToLocal = ls.worldToLocal;
 			g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling,
 			                  static_cast<float>(ls.layerCount));
 			for (int i = 0; i < 4; ++i) g.layer[i] = ls.layerColor[i];
+			g.autoWet   = ls.autoWet;
+			g.autoSlope = ls.autoSlope;
+			g.autoSnow  = ls.autoSnow;
 			lands.push_back(g);
 			m_giLandWeightTex.push_back(wm);
 		}
@@ -5915,7 +5978,10 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 	};
 
 	// World-space G-buffer: pos + normal + surface response MRT + depth.
-	m_giGBufPosTex  = makeTex(GL_RGBA16F, GL_NEAREST);
+	// Position = the shadow-ray ORIGIN (pos + N*0.05), stored as the ABSOLUTE
+	// world position, so fp32: as RGBA16F its ULP passes the 5 cm normal offset
+	// at |coord| >= ~100 m and surfaces self-shadow in height bands (Thema 159).
+	m_giGBufPosTex  = makeTex(GL_RGBA32F, GL_NEAREST);
 	m_giGBufNormTex = makeTex(GL_RGBA16F, GL_NEAREST);
 	m_giGBufMatTex  = makeTex(GL_RGBA16F, GL_NEAREST); // r = roughness, g = metallic
 	glGenTextures(1, &m_giGBufDepth);
@@ -6013,6 +6079,9 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	if (m_giReflFBO)     { glDeleteFramebuffers(1, &m_giReflFBO);     m_giReflFBO = 0; }
 	if (m_giReflTex)     { glDeleteTextures(1, &m_giReflTex);         m_giReflTex = 0; }
 	if (m_giReflRawTex)  { glDeleteTextures(1, &m_giReflRawTex);      m_giReflRawTex = 0; }
+	if (m_skyReflFBO)    { glDeleteFramebuffers(1, &m_skyReflFBO);    m_skyReflFBO = 0; }
+	if (m_skyReflCube)   { glDeleteTextures(1, &m_skyReflCube);       m_skyReflCube = 0; }
+	m_skyReflValid = false;
 	if (m_giReflBlurFBO) { glDeleteFramebuffers(1, &m_giReflBlurFBO); m_giReflBlurFBO = 0; }
 	if (m_giReflBlurTex) { glDeleteTextures(1, &m_giReflBlurTex);     m_giReflBlurTex = 0; }
 	for (int i = 0; i < 2; ++i)
@@ -6323,10 +6392,70 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 // `probesValid` = the DDGI atlases hold real data this frame. Reflections run
 // WITHOUT them (sun + local lights + the flat ambient floor at each hit), which
 // is why the whole pass is independent of the diffuse GI toggle.
+// GI-reflection sky cube (topic 173) — see the header and Metal's
+// EncodeSkyReflCube, which this mirrors: six faces of the real sky pass around
+// the camera, low-res clouds off (that buffer is screen-space, a face is not).
+// Leaves the caller's framebuffer, viewport and depth-test state as it found them.
+static constexpr int kSkyReflCubeSize = 128;
+void OpenGLRenderer::RenderSkyReflCube()
+{
+	m_skyReflValid = false;
+	static const bool s_off = [] {
+		const char* e = std::getenv("HE_GIREFL_SKY");
+		return e && e[0] == '0';
+	}();
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	if (s_off || !m_skyProgram || !env.skyEnabled) return;
+	if (!m_skyReflCube)
+	{
+		glGenTextures(1, &m_skyReflCube);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflCube);
+		for (int f = 0; f < 6; ++f)
+			glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA16F,
+			             kSkyReflCubeSize, kSkyReflCubeSize, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+	}
+	if (!m_skyReflFBO) glGenFramebuffers(1, &m_skyReflFBO);
+
+	GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+	const GLboolean depthWasOn = glIsEnabled(GL_DEPTH_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_skyReflFBO);
+	glViewport(0, 0, kSkyReflCubeSize, kSkyReflCubeSize);
+	glDisable(GL_DEPTH_TEST); // no depth attachment: every texel is sky
+	const glm::vec3 camPos = m_renderWorld.camera.position;
+	bool complete = true;
+	for (int f = 0; f < 6 && complete; ++f)
+	{
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		                       GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, m_skyReflCube, 0);
+		complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+		if (complete)
+			DrawSkyFullscreen(HE::SkyCubeFaceInvViewProj(f, camPos, /*rowZeroAtTop=*/false),
+			                  m_renderWorld.sunDirection, camPos, env,
+			                  /*allowLowResClouds=*/false, kSkyReflCubeSize, kSkyReflCubeSize);
+	}
+	// DrawSkyFullscreen leaves GL_LESS + depth writes (the frame default); the
+	// test itself goes back to what the caller had.
+	if (depthWasOn) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
+	glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+	m_skyReflValid = complete;
+}
+
 unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
                                                  const glm::mat4& viewProj, bool probesValid)
 {
 	if (!m_giReflCSProgram || !m_giGBufFBO || !m_giReflRawTex) return 0;
+
+	// The real sky for rays that miss (clouds, weather) — before the trace binds
+	// its own program and units.
+	RenderSkyReflCube();
 
 	// ── 1. Trace: one specular ray per pixel against the BVH SSBOs ───────────
 	glUseProgram(m_giReflCSProgram);
@@ -6396,6 +6525,14 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		        i < static_cast<int>(m_giLandWeightTex.size()) ? m_giLandWeightTex[i] : m_blackTex,
 		        5 + i);
 	}
+	// Baked sky cube on unit 9 (after the weightmaps). The IBL cube stands in
+	// while the bake is off so the samplerCube always has a complete texture;
+	// uSkyReflValid = 0 keeps the kernel from reading it then.
+	glActiveTexture(GL_TEXTURE9);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflValid ? m_skyReflCube : m_skyEnvCube);
+	glUniform1i(loc("uSkyRefl"), 9);
+	glUniform1f(loc("uSkyReflValid"), m_skyReflValid ? 1.0f : 0.0f);
+	glActiveTexture(GL_TEXTURE0);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 
@@ -7552,6 +7689,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 				m_haveMatParams = false; // invalidate the mesh loop's content-skip
 				// Node-graph project textures on units 1..4 (heTexP0..3).
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 				const size_t nTex = std::min<size_t>(4,
 					std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 				for (size_t i = 0; i < nTex; ++i)
@@ -7559,7 +7697,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 					const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 					const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
 					glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-					glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+					BindGraphTexture(ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u));
 				}
 			}
 			glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
@@ -8115,6 +8253,53 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = tru
 	return id;
 }
 
+// The GL_TEXTURE_2D_ARRAY twin of uploadTextureAssetGL for a sampler2DArray heTexP
+// slot (Thema 158). A texture ARRAY asset (layers > 1, RGBA8, HE::buildTextureArray
+// layout: slice-major, each slice with its own chain) uploads every stored level of
+// every slice — no glGenerateMipmap, so GL samples the very levels D3D/Vulkan/Metal
+// do. A plain 2D asset in an array slot becomes a ONE-slice array, mipped the way
+// uploadTextureAssetGL mips it. 0 = unusable (block formats are not array-capable
+// yet) → the caller binds the white array.
+unsigned int uploadTextureArrayGL(const TextureAsset* tex)
+{
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
+	    || tex->format != TextureFormat::RGBA8)
+		return 0;
+	const bool     isArray = tex->layers > 1;
+	if (isArray && !HE::textureArrayPayloadValid(*tex)) return 0;
+	const uint32_t layers  = isArray ? tex->layers : 1;
+	const uint32_t mips    = tex->mipLevels > 0 ? tex->mipLevels : 1;
+	const GLenum   fmt     = tex->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+	const uint32_t w = tex->width, h = tex->height;
+	if (!isArray && tex->data.size() < HE::textureArraySliceBytes(w, h, mips)) return 0;
+
+	unsigned int id = 0;
+	glGenTextures(1, &id);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, id);
+	uint32_t lw = w, lh = h;
+	for (uint32_t l = 0; l < mips; ++l)
+	{
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), static_cast<GLint>(fmt),
+		             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(layers),
+		             0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		for (uint32_t s = 0; s < layers; ++s)
+			glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), 0, 0, static_cast<GLint>(s),
+			                static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1, GL_RGBA, GL_UNSIGNED_BYTE,
+			                tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l));
+		lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1);
+	}
+	if (mips > 1)
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(mips - 1));
+	else
+		glGenerateMipmap(GL_TEXTURE_2D_ARRAY); // a loose single-level 2D asset, as for 2D
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	return id;
+}
+
 } // namespace
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -8370,16 +8555,39 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 
 // Resolve a node-graph project texture (UUID for packed assets, path for loose editor
 // assets) to a GL texture, cached by a stable key. 0 if not loadable.
-unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::string& path)
+//
+// `array` = the slot is a sampler2DArray (HE::matGlslTextureArrayMask): the texture
+// is uploaded as GL_TEXTURE_2D_ARRAY under its own "#arr" key — the same asset
+// can sit in a 2D slot of one material and an array slot of another — and a
+// missing one resolves to the white array instead of 0. Bind the result with
+// BindGraphTexture, which picks the target.
+unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::string& path,
+                                                 bool array)
 {
-	const std::string key = id != HE::UUID{}
+	std::string key = id != HE::UUID{}
 		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
-	if (key.empty() || !m_contentManager) return 0;
-	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end()) return it->second;
-	// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
-	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
+	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTex : 0;
+	if (array) key += "#arr";
+	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+		return it->second ? it->second : (array ? m_whiteArrayTex : 0);
+	unsigned int tex = 0;
+	if (array)
+	{
+		tex = uploadTextureArrayGL(m_contentManager->resolveTextureRef(id, path));
+		if (tex) m_glArrayTex.insert(tex);
+	}
+	else
+		// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
+		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
 	m_graphTexCache.emplace(key, tex);
-	return tex;
+	return tex ? tex : (array ? m_whiteArrayTex : 0);
+}
+
+// Bind a ResolveGraphTexture result to the ACTIVE unit on the target its storage
+// has: GL_TEXTURE_2D_ARRAY for a texture array, GL_TEXTURE_2D otherwise.
+void OpenGLRenderer::BindGraphTexture(unsigned int tex)
+{
+	glBindTexture(m_glArrayTex.count(tex) ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D, tex);
 }
 
 // The image of a UI quad (Image widget, textured Border/Button). Its own cache,
@@ -8595,13 +8803,14 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 	// Node-graph project textures at units 1..4 (heTexP0..3).
 	if (ma)
 	{
+		const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 		const size_t nTex = std::min<size_t>(4, std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 		for (size_t i = 0; i < nTex; ++i)
 		{
 			const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 			const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
 			glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-			glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+			BindGraphTexture(ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u));
 		}
 	}
 
@@ -9833,6 +10042,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_previewVAO)   { glDeleteVertexArrays(1, &m_previewVAO);    m_previewVAO = 0; }
 	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
 	m_graphTexCache.clear();
+	m_glArrayTex.clear();
+	if (m_whiteArrayTex) m_glArrayTex.insert(m_whiteArrayTex);
 	for (auto& [k, t] : m_uiTexCache) if (t) glDeleteTextures(1, &t);
 	m_uiTexCache.clear();
 	// Content-Browser thumbnail target + its mesh program.
@@ -9888,6 +10099,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_skyEnvCube)     { glDeleteTextures(1, &m_skyEnvCube);      m_skyEnvCube = 0; }
 	if (m_ssaoNoiseTex)   { glDeleteTextures(1, &m_ssaoNoiseTex);    m_ssaoNoiseTex = 0; }
 	if (m_whiteTex)       { glDeleteTextures(1, &m_whiteTex);        m_whiteTex = 0; }
+	if (m_whiteArrayTex)  { glDeleteTextures(1, &m_whiteArrayTex);   m_whiteArrayTex = 0; }
 	if (m_blackTex)       { glDeleteTextures(1, &m_blackTex);        m_blackTex = 0; }
 	if (m_ssaoPosProgram)  { glDeleteProgram(m_ssaoPosProgram);  m_ssaoPosProgram = 0; }
 	if (m_ssaoPosInstancedProgram) { glDeleteProgram(m_ssaoPosInstancedProgram); m_ssaoPosInstancedProgram = 0; }
@@ -10345,12 +10557,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	for (const HE::UUID& id : m_pendingTexInvalidations)
 	{
 		const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
-		for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
-			if (auto it = cache->find(key); it != cache->end())
-			{
-				if (it->second) glDeleteTextures(1, &it->second);
-				cache->erase(it);
-			}
+		// The texture-array upload of the same asset lives under "#arr".
+		for (const std::string& k : { key, key + "#arr" })
+			for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
+				if (auto it = cache->find(k); it != cache->end())
+				{
+					if (it->second) { m_glArrayTex.erase(it->second); glDeleteTextures(1, &it->second); }
+					cache->erase(it);
+				}
 	}
 	m_pendingTexInvalidations.clear();
 
@@ -11073,8 +11287,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                // node-graph textures (0 → the built-in blend program).
 		                unsigned int matProg = 0; std::vector<float> params;
 		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0;
-		                // Deferred forward-routed opaque draws only: the landscape
-		                // weightmap resolved at collect time (0 → layer-0 default).
+		                // Custom-material draws (deferred forward-routed opaque and
+		                // translucent): the landscape weightmap for unit 13, resolved at
+		                // collect time (0 → leave the unit as it is).
 		                unsigned int wmTex = 0;
 		                // Section draw: byte offset into the EBO (nullptr = from the
 		                // start, which is every whole-mesh draw). Trailing + defaulted
@@ -11268,13 +11483,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						{
 							mParams = !dc.paramOverride.empty() ? dc.paramOverride
 							                                    : ma->shaderParamData;
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(4,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								mGtex[mGtexCount++] = ResolveGraphTexture(gid, gp);
+								mGtex[mGtexCount++] = ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -11283,6 +11499,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				if (opacity < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					// Same collection as the forward loop's transparent branch.
+					const unsigned int wm = matProg ? ResolveGraphTexture(dc.weightmapTextureId != HE::UUID{}
+						? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId, {}) : 0u;
 					auto pushTP = [&](const glm::mat4& t) {
 						TPDraw tp{ viewProj * t, t, baseColor,
 						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
@@ -11293,6 +11511,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						tp.params  = mParams;
 						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
 						tp.gtexCount = mGtexCount;
+						tp.wmTex     = wm;
 						transparent.push_back(std::move(tp));
 					};
 					if (!dc.instanceTransforms.empty())
@@ -11385,7 +11604,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					for (int i = 0; i < mGtexCount; ++i)
 					{
 						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-						glBindTexture(GL_TEXTURE_2D, mGtex[i]);
+						BindGraphTexture(mGtex[i]);
 					}
 					// Landscape layer weightmap on unit 13, per draw (as forward).
 					{
@@ -11488,13 +11707,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						{
 							tpParams = !dc.paramOverride.empty() ? dc.paramOverride
 							                                     : ma->shaderParamData;
+							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 							const size_t nTex = std::min<size_t>(4,
 								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 							for (size_t i = 0; i < nTex; ++i)
 							{
 								const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 								const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
-								tpGtex[tpGtexCount++] = ResolveGraphTexture(gid, gp);
+								tpGtex[tpGtexCount++] = ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u);
 							}
 						}
 					}
@@ -11502,6 +11722,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 #endif
 				// Transparent instanced batches: push one TPDraw per instance so
 				// each object is sorted individually by distance.
+				const unsigned int tpWm = tpProg ? ResolveGraphTexture(dc.weightmapTextureId != HE::UUID{}
+					? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId, {}) : 0u;
 				auto pushTP = [&](const glm::mat4& t) {
 					TPDraw tp{ viewProj * t, t, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
@@ -11512,6 +11734,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					tp.params  = tpParams;
 					for (int i = 0; i < tpGtexCount; ++i) tp.gtex[i] = tpGtex[i];
 					tp.gtexCount = tpGtexCount;
+					tp.wmTex     = tpWm;
 					transparent.push_back(std::move(tp));
 				};
 				if (!dc.instanceTransforms.empty())
@@ -11623,6 +11846,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					if (const MaterialAsset* ma = m_contentManager
 						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 					{
+						const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 						const size_t nTex = std::min<size_t>(4,
 							std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 						for (size_t i = 0; i < nTex; ++i)
@@ -11630,7 +11854,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
 							const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
 							glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-							glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+							BindGraphTexture(ResolveGraphTexture(gid, gp, (arrMask >> i) & 1u));
 						}
 						glActiveTexture(GL_TEXTURE0);
 					}
@@ -11944,7 +12168,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					for (int i = 0; i < t.gtexCount; ++i)
 					{
 						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
+						BindGraphTexture(t.gtex[i]);
 					}
 					if (t.wmTex)
 					{
@@ -12115,6 +12339,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			unsigned int rbProg = 0; std::vector<float> rbParams;
 			unsigned int rbGtex[4] = { 0, 0, 0, 0 }; int rbGtexCount = 0;
+			uint32_t rbArrMask = 0; // sampler2DArray slots (HE::matGlslTextureArrayMask)
 #if defined(HE_HAVE_SHADERC)
 			{
 				uint64_t shKey = 0; std::string shFrag, shVert;
@@ -12132,6 +12357,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						rbParams = ma->shaderParamData;
 						// Snapshot the graph texture slots BEFORE resolving any of
 						// them — ResolveGraphTexture loads, and `ma` would not survive.
+						rbArrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
 						const size_t nTex = std::min<size_t>(4,
 							std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
 						for (size_t i = 0; i < nTex; ++i)
@@ -12143,7 +12369,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					rbProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 					if (rbProg)
 						for (size_t i = 0; i < gIds.size(); ++i)
-							rbGtex[rbGtexCount++] = ResolveGraphTexture(gIds[i], gPaths[i]);
+							rbGtex[rbGtexCount++] = ResolveGraphTexture(gIds[i], gPaths[i], (rbArrMask >> i) & 1u);
 					else
 						rbParams.clear();
 				}
@@ -12202,6 +12428,23 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
 					m_haveMatParams = false; // opaque-pass dedup cache no longer matches
+#if defined(HE_HAVE_SHADERC)
+					// The shared lighting block. Forward, only the OPAQUE custom-material
+					// draw used to upload it — with no opaque graph material in view the
+					// translucent one read whatever the UI pass or a material preview had
+					// left there (fog.z = 0: no sky; sunDir.w = 0: no clock, so a Time-driven
+					// graph like the engine water stood still). Same once-per-frame rule as
+					// the opaque branch; deferred has uploaded it after the resolve already.
+					if (!m_matLightUploadedThisFrame)
+					{
+						HE::MaterialShaderLibrary::Lighting lit{};
+						fillMatLight(lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						m_matLightUploadedThisFrame = true;
+					}
+#endif
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
@@ -12211,8 +12454,26 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					for (int i = 0; i < t.gtexCount; ++i)
 					{
 						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
-						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
+						BindGraphTexture(t.gtex[i]);
 					}
+					// Units 13..17, exactly as the opaque custom-material draw binds them
+					// (only material programs read these units): the weightmap, the sky
+					// cube (14, gated by heLight.fog.z), the AO (15, fog.w) and the DDGI
+					// atlases (16/17, giProbe.y). Forward, nothing else binds them when no
+					// opaque graph material is in view.
+					if (t.wmTex)
+					{
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, t.wmTex);
+					}
+					glActiveTexture(GL_TEXTURE14);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glActiveTexture(GL_TEXTURE15);
+					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+					glActiveTexture(GL_TEXTURE16);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+					glActiveTexture(GL_TEXTURE17);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
 					glActiveTexture(GL_TEXTURE0);
 					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program

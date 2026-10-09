@@ -1,0 +1,27 @@
+Horizon Engine weather sounds
+============================
+
+Files:   Weather/Rain.hasset, Wind.hasset, Snow.hasset, Storm.hasset, Thunder.hasset
+Credit:  Horizon Creations
+Licence: MIT, the same terms as the Horizon Engine itself (see LICENSE in the
+         repository root). You may use, copy, modify and ship them in your own
+         projects, commercial ones included, without asking and without a credit
+         line in your game.
+
+Origin
+------
+These sounds are not recordings and contain no third-party material. Every sample
+is computed by src/HE_Tools/src/WeatherSoundGen/main.cpp (the weather_sound_gen
+tool) from a seeded noise source and a handful of filters: filtered noise for the
+rain, wind, snow and storm beds, shaped noise bursts for the thunder. Nothing was
+sampled, downloaded or derived from a library, so there is no outside licence to
+carry along.
+
+The four beds (Rain, Wind, Snow, Storm) are seamless loops. Thunder is a single
+roll that starts and ends at silence.
+
+Replacing them
+--------------
+A project that wants other sounds does not need to touch these files: the Weather
+component has a slot for each sound (Inspector > Weather > Sound), and a sound
+dropped there replaces just that one. An empty slot plays the engine's sound.

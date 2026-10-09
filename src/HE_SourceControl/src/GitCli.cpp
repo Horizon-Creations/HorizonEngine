@@ -688,14 +688,16 @@ bool GitCli::fillCredential(const std::filesystem::path& root,
                             const std::string& host,
                             std::string& outUsername,
                             std::string& outSecret,
-                            std::string* err)
+                            std::string* err,
+                            const std::string& helperOverride)
 {
 	outUsername.clear();
 	outSecret.clear();
 
 	HE::Proc::Options o;
 	o.exe       = "git";
-	o.args      = { "credential", "fill" };
+	o.args      = helperOverrideArgs(helperOverride);
+	o.args.insert(o.args.end(), { "credential", "fill" });
 	o.cwd       = root;
 	o.timeoutMs = 15000;
 	// Every door a prompt could come through. Without these, a machine with no
@@ -740,6 +742,37 @@ bool GitCli::fillCredential(const std::filesystem::path& root,
 		// git answered, but with no secret in it. Worth saying, because it means
 		// a helper IS configured and simply holds nothing for this host.
 		if (err) *err = "no stored credential for " + host;
+		return false;
+	}
+	return true;
+}
+
+bool GitCli::rejectCredential(const std::filesystem::path& root,
+                              const std::string& host,
+                              const std::string& username,
+                              const std::string& secret,
+                              std::string* err,
+                              const std::string& helperOverride)
+{
+	HE::Proc::Options o;
+	o.exe       = "git";
+	o.args      = helperOverrideArgs(helperOverride);
+	o.args.insert(o.args.end(), { "credential", "reject" });
+	o.cwd       = root;
+	o.timeoutMs = 15000;
+	o.env.emplace_back("GIT_TERMINAL_PROMPT", "0");
+	o.env.emplace_back("GCM_INTERACTIVE", "never");
+	// Only the fields we know: an empty username or password line would be a
+	// value to match, not a wildcard.
+	o.stdinData = "protocol=https\nhost=" + host + "\n";
+	if (!username.empty()) o.stdinData += "username=" + username + "\n";
+	if (!secret.empty())   o.stdinData += "password=" + secret + "\n";
+	o.stdinData += "\n";
+
+	const HE::Proc::Result r = HE::Proc::run(o);
+	if (!r.ok())
+	{
+		if (err) *err = r.err.empty() ? "git credential reject failed" : trimTrailing(r.err);
 		return false;
 	}
 	return true;

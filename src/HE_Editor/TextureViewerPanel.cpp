@@ -3,6 +3,8 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
 #include "EditorHelp.h"           // "Texture Viewer/<label>" scope for the tooltips
+#include "EditorToolbar.h"        // the asset strip: Show in Content Browser
+#include "EditorInput.h"          // trackpad grammar: swipe pans, pinch zooms
 #include "EditorRewards.h"        // the Import button's footer moment
 #include "EditorWidgets.h"        // button, checkbox, WrapText
 #include "ImporterCommon.h"       // Importer::importSource / resolveOutput / sourceFamilyPattern
@@ -192,9 +194,16 @@ void load(AppContext& ctx, const std::string& assetPath, State& st)
 // the canvas around it stays the plain panel colour, so where the image ends is
 // never in doubt. Cells are fixed on screen, not per texel — a 4K texture at
 // fit would otherwise turn them into noise.
-void drawChecker(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 clip0, ImVec2 clip1)
+// The checks belong to the PICTURE: a cell is kCellTexels texels wide and the grid
+// starts at the picture's corner, so zooming scales them with the image instead of
+// leaving a screen-fixed pattern that only slides underneath. Once the cells would
+// shrink to dust (a big image zoomed far out) they double until they are legible,
+// which keeps them aligned with the corner and never moiré.
+void drawChecker(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 clip0, ImVec2 clip1, float zoom)
 {
-	constexpr float kCell = 12.0f;
+	constexpr float kCellTexels = 16.0f, kMinCellPx = 6.0f;
+	float kCell = kCellTexels * zoom;
+	while (kCell < kMinCellPx) kCell *= 2.0f;
 	const ImVec2 a{ std::max(p0.x, clip0.x), std::max(p0.y, clip0.y) };
 	const ImVec2 b{ std::min(p1.x, clip1.x), std::min(p1.y, clip1.y) };
 	if (b.x <= a.x || b.y <= a.y) return;
@@ -219,7 +228,6 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 	char buf[64];
 	{
 		EditorWidgets::WrapText wrap;
-		ImGui::TextUnformatted(st.name.c_str());
 		ImGui::TextDisabled(st.isRawFile ? "Image file, not imported yet" : "Texture asset");
 	}
 
@@ -307,30 +315,6 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 void drawCanvas(State& st)
 {
 	HE::Ed::Help::Scope helpScope("Texture Viewer");
-	// ── Toolbar row ─────────────────────────────────────────────────────────
-	if (EditorWidgets::button("Fit")) st.fit = true;
-	ImGui::SameLine();
-	if (EditorWidgets::button("1:1")) { st.fit = false; st.zoom = 1.0f; st.pan = ImVec2(0.0f, 0.0f); }
-	ImGui::SameLine();
-	ImGui::TextDisabled("%.0f%%", st.zoom * 100.0f);
-	ImGui::SameLine(0.0f, 18.0f);
-
-	bool r = st.channelMask & kChannelR, g = st.channelMask & kChannelG,
-	     b = st.channelMask & kChannelB, a = st.channelMask & kChannelA;
-	bool changed = false;
-	changed |= EditorWidgets::checkbox("Red", &r);   ImGui::SameLine();
-	changed |= EditorWidgets::checkbox("Green", &g); ImGui::SameLine();
-	changed |= EditorWidgets::checkbox("Blue", &b);  ImGui::SameLine();
-	changed |= EditorWidgets::checkbox("Alpha", &a); ImGui::SameLine(0.0f, 18.0f);
-	EditorWidgets::checkbox("Checkerboard", &st.checker);
-	if (changed)
-	{
-		const unsigned mask = (r ? kChannelR : 0u) | (g ? kChannelG : 0u) |
-		                      (b ? kChannelB : 0u) | (a ? kChannelA : 0u);
-		// All four off shows nothing at all; keep the last channel instead.
-		if (mask != 0) st.channelMask = mask;
-	}
-
 	// ── The picture ─────────────────────────────────────────────────────────
 	if (st.pixels.empty()) return;
 	if (st.uploadedMask != st.channelMask && !st.uploadFailed)
@@ -370,10 +354,20 @@ void drawCanvas(State& st)
 	ImVec2 p0{ centre.x - w * st.zoom * 0.5f, centre.y - h * st.zoom * 0.5f };
 
 	ImGuiIO& io = ImGui::GetIO();
-	if (hovered && io.MouseWheel != 0.0f)
+	// Wheel / swipe / pinch, the grammar of the other editor tabs: mouse wheel
+	// zooms; on a trackpad the two-finger swipe PANS and the pinch (macOS native
+	// gesture, or Ctrl/Cmd+scroll) zooms. Gated on the canvas region rather than
+	// the surface's hover, so nothing drawn over the picture swallows it, and
+	// left to an open popup when there is one.
+	const bool popupOpen =
+		ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+	const bool wheelHot = !popupOpen &&
+		io.MousePos.x >= c0.x && io.MousePos.y >= c0.y && io.MousePos.x < c1.x && io.MousePos.y < c1.y &&
+		ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+	// Zoom about the pointer: the texel under it stays under it.
+	const auto zoomTo = [&](float factor)
 	{
-		// Zoom about the pointer: the texel under it stays under it.
-		const float next = std::clamp(st.zoom * std::pow(1.2f, io.MouseWheel), 1.0f / 64.0f, 64.0f);
+		const float next = std::clamp(st.zoom * factor, 1.0f / 64.0f, 64.0f);
 		const ImVec2 texel{ (io.MousePos.x - p0.x) / st.zoom, (io.MousePos.y - p0.y) / st.zoom };
 		const ImVec2 np0{ io.MousePos.x - texel.x * next, io.MousePos.y - texel.y * next };
 		st.pan.x += (np0.x + w * next * 0.5f) - (p0.x + w * st.zoom * 0.5f);
@@ -381,6 +375,25 @@ void drawCanvas(State& st)
 		st.zoom = next;
 		st.fit  = false;
 		p0 = np0;
+	};
+	if (wheelHot)
+	{
+		const bool zoomMod = io.KeyCtrl || io.KeySuper;
+		if (const float pinch = EditorInput::pinchDelta(); pinch != 0.0f)
+			zoomTo(std::max(0.1f, 1.0f + pinch * 2.0f));
+		if (EditorInput::trackpadActive() && !zoomMod)
+		{
+			constexpr float kSwipeToPx = 16.0f;   // wheel units → screen pixels
+			const float dx = io.MouseWheelH * kSwipeToPx, dy = io.MouseWheel * kSwipeToPx;
+			if (dx != 0.0f || dy != 0.0f)
+			{
+				st.pan.x += dx; st.pan.y += dy;
+				p0.x     += dx; p0.y     += dy;
+				st.fit = false;
+			}
+		}
+		else if (io.MouseWheel != 0.0f)
+			zoomTo(std::pow(1.2f, io.MouseWheel));
 	}
 	if (active && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f))
 	{
@@ -393,7 +406,7 @@ void drawCanvas(State& st)
 	const ImVec2 p1{ p0.x + w * st.zoom, p0.y + h * st.zoom };
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(c0, c1, true);
-	if (st.checker) drawChecker(dl, p0, p1, c0, c1);
+	if (st.checker) drawChecker(dl, p0, p1, c0, c1, st.zoom);
 	if (st.texture)
 		// uv (0,0) at the top-left: the uploaded pixels are already top-down.
 		dl->AddImage(reinterpret_cast<ImTextureID>(st.texture), p0, p1,
@@ -565,13 +578,64 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
 	ImGui::SetNextWindowSize(size, ImGuiCond_Always);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0.0f, 0.0f));
 	ImGui::Begin("##TextureViewer", nullptr,
 		ImGuiWindowFlags_NoTitleBar         | ImGuiWindowFlags_NoResize |
 		ImGuiWindowFlags_NoMove             | ImGuiWindowFlags_NoCollapse |
 		ImGuiWindowFlags_NoScrollbar        | ImGuiWindowFlags_NoScrollWithMouse |
 		ImGuiWindowFlags_NoSavedSettings    | ImGuiWindowFlags_NoBringToFrontOnFocus |
 		ImGuiWindowFlags_NoDocking);
-	ImGui::PopStyleVar();
+	ImGui::PopStyleVar(2);
+
+	// The strip every asset tab opens with: the way back to the asset in the
+	// Content Browser. (The tab above already says what is open.)
+	{
+		namespace T = EditorToolbar;
+		T::Bar bar;
+		T::assetHeader(bar, assetPath, false);   // no Save: a texture view edits nothing
+
+		// The view controls, in the strip beside the folder button: they used to be
+		// a row of checkboxes inside the canvas pane. Help entries keep their
+		// "Texture Viewer/<label>" keys, so the manual and the tooltips are as before.
+		bar.group();
+		if (bar.item("##texfit", T::iconFit, "Fit", st.fit, true,
+		             "Scale the picture to fill the canvas", "Texture Viewer/Fit"))
+			st.fit = true;
+		if (bar.item("##tex11", nullptr, "1:1", false, true,
+		             "One texel per screen pixel", "Texture Viewer/1:1"))
+		{ st.fit = false; st.zoom = 1.0f; st.pan = ImVec2(0.0f, 0.0f); }
+		char zoomText[24];
+		std::snprintf(zoomText, sizeof(zoomText), "%.0f%%", st.zoom * 100.0f);
+		bar.readout(nullptr, zoomText, T::kFgDim);
+		bar.endGroup();
+
+		// Channels: what the picture shows. Toggles, as the checkboxes were — and
+		// the same rule: all four off would show nothing, so the last one stays.
+		bar.group();
+		unsigned mask = st.channelMask;
+		const auto channel = [&](const char* id, const char* label, unsigned bit, const char* key,
+		                         const char* tip)
+		{
+			if (bar.item(id, nullptr, label, (st.channelMask & bit) != 0, true, tip, key))
+			{
+				const unsigned next = mask ^ bit;
+				if (next != 0) mask = next;
+			}
+		};
+		channel("##texr", "Red",   kChannelR, "Texture Viewer/Red",   "Show the red channel");
+		channel("##texg", "Green", kChannelG, "Texture Viewer/Green", "Show the green channel");
+		channel("##texb", "Blue",  kChannelB, "Texture Viewer/Blue",  "Show the blue channel");
+		channel("##texa", "Alpha", kChannelA, "Texture Viewer/Alpha", "Show the alpha channel");
+		st.channelMask = mask;
+		bar.endGroup();
+
+		bar.group();
+		if (bar.item("##texchecker", T::iconGrid, "Checkerboard", st.checker, true,
+		             "Checks behind the picture, to make transparency visible",
+		             "Texture Viewer/Checkerboard"))
+			st.checker = !st.checker;
+		bar.endGroup();
+	}
 
 	ImGui::BeginChild("##texInfo", ImVec2(260.0f, 0.0f), true);
 	drawInfo(ctx, assetPath, st);

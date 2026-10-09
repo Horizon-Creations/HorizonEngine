@@ -7,6 +7,7 @@
 #include "Types/Enums.h"
 #include "Types/UUID.h"
 #include "Scripting/ScriptTypes.h"
+#include "Audio/AudioEdit.h"
 
 // One precompiled material shader variant for a specific graphics backend (baked at
 // export time so the shipped game never cross-compiles). `vertex`/`fragment` hold the
@@ -322,7 +323,7 @@ struct MaterialAsset : public RuntimeAsset
 	float   approxMetallic  = 0.0f;
 	float   approxRoughness = 0.5f;
 	// BaseColor driven by a Landscape Layer Blend: the layers folded separately,
-	// in weightmap-channel order (HE::kMatMaxLandscapeLayers × rgb). Count 0 =
+	// in weightmap-channel order (HE::kMatApproxLayerColors × rgb). Count 0 =
 	// not layer-blended → approxBaseColor is the whole answer. A landscape's GI
 	// hit blends these by the terrain's AVERAGE painted weights, so a terrain
 	// painted all-grass reflects grass instead of the average of every layer.
@@ -547,6 +548,9 @@ struct AudioAsset : public RuntimeAsset
 	int                  sampleRate = 0;
 	int                  channels   = 0;
 	AudioEncoding        encoding   = AudioEncoding::PCM16;
+	// Trim, volume curve, bus and EQ — applied on playback, never baked into
+	// audioData (CHUNK_AUED; default when the chunk is absent). See AudioEdit.h.
+	HE::AudioEdit        edit;
 };
 
 // Frame count of a PCM16 clip (0 for a compressed one — its length is only
@@ -602,6 +606,15 @@ struct TextureAsset : public RuntimeAsset
 	uint32_t             mipLevels = 1;                       // levels stored in `data`
 	TextureFormat        format    = TextureFormat::RGBA8;
 	bool                 srgb      = false;                   // sample as sRGB (color) vs linear (data)
+
+	// Texture ARRAY slices (Thema 158; a Texture Array Sample node reads them as one
+	// sampler2DArray). 1 = an ordinary 2D texture. The slices are stored one after
+	// the other, EACH with its own full mip chain (slice 0 levels 0..n-1, then
+	// slice 1 …) — D3D's subresource order, and slice 0 stays the leading bytes,
+	// so a consumer that knows nothing of arrays reads slice 0 as a 2D texture.
+	// RGBA8 only for now (HE::buildTextureArray). Written to the TXMI tail only
+	// when > 1, so every 2D asset keeps its exact bytes.
+	uint32_t             layers    = 1;
 };
 
 struct ShaderAsset : public RuntimeAsset
