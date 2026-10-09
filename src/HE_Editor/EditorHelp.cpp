@@ -6538,6 +6538,16 @@ namespace
 	  "that node's list IS the set of layers there are to paint — without one "
 	  "this stays greyed out.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Setup", "Landscape Setup",
+	  "The things done once rather than per stroke: the landscape's material, "
+	  "importing a heightmap, the weightmap and foliage-mask resolutions, and the "
+	  "reset buttons. The brush is off while this tab is open.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Fill With Layer", "",
+	  "Puts the selected layer on every texel of the landscape, replacing whatever "
+	  "was painted. A starting point for a landscape built by hand: fill with the "
+	  "base layer, then paint the rest over it. One undo step.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
 	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
@@ -6545,20 +6555,24 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Radius", "Brush Radius",
 	  "The inner, full-strength part of the brush, in metres — the tight circle "
-	  "drawn on the ground. The same value is used for sculpting and for "
-	  "painting, so changing it in one mode changes it in the other.",
+	  "drawn on the ground. The same value is used for sculpting, painting and "
+	  "foliage, so changing it in one mode changes it in the other. In the "
+	  "viewport, [ and ] make it smaller and larger.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Falloff", "Brush Falloff",
 	  "How far past the radius the brush keeps working, in metres — the faint "
 	  "outer circle. Strength falls off linearly from full at the radius to "
 	  "nothing at the outer edge, so 0 gives a hard-edged brush and a large "
-	  "value a very soft one. Shared with painting.",
+	  "value a very soft one. Shared with painting. In the viewport, Shift+[ "
+	  "and Shift+] change it. The curve above the sliders draws the profile.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Strength", "Brush Strength",
-	  "How fast the brush works while the left button is held. Raise and Lower "
-	  "move the ground by roughly this many metres a second under the "
-	  "full-strength part of the brush; Smooth, Flatten and Ramp use it as a "
-	  "rate of blending towards their target instead.",
+	  "How hard the brush works while the left button is held, from 0 to 1. For "
+	  "Raise and Lower the scale is squared, so the gentle end gets most of the "
+	  "slider; at 1 the ground moves about 50 m a second under the full-strength "
+	  "part of the brush. Smooth, Flatten and Ramp use it as a rate of blending "
+	  "towards their target instead. Hold Ctrl while dragging to turn the brush "
+	  "around: Raise lowers, Lower raises.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Paint Strength", "Paint Strength",
 	  "How much of the selected layer a texel takes while you paint, from 0 to 1. "

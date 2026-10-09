@@ -552,3 +552,78 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	clickAt(ctx, rx, ry);
 	CHECK(locate(ctx, panelId("Radius##brush"), rx, ry));
 }
+
+// ── Setup tab and Ctrl-invert ────────────────────────────────────────────────
+// Two things the viewport has to get right that the panel only asks for: the
+// Setup tab is a form, so a drag over the viewport while it is open must not
+// sculpt; and Ctrl turns the armed brush around (Raise lowers) for as long as it
+// is held.
+TEST_CASE("landscape ui: the Setup tab switches the brush off, and Ctrl turns Raise into Lower")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.sculptHeights.assign(129u * 129u, 0.0f);
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MeshComponent mesh;
+	mesh.meshAssetId = HE::kDefaultCubeMeshId;
+	reg.emplace<MeshComponent>(terrain, mesh);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	auto extremes = [&] {
+		const auto& t = reg.get<TerrainComponent>(terrain);
+		float lo = 0.0f, hi = 0.0f;
+		for (float h : t.sculptHeights) { lo = std::min(lo, h); hi = std::max(hi, h); }
+		return std::pair<float, float>(lo, hi);
+	};
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	auto drag = [&] {
+		viewportFrame(ctx, snap, cx, cy, false);
+		viewportFrame(ctx, snap, cx, cy, false);
+		for (int i = 0; i < 4; ++i) viewportFrame(ctx, snap, cx, cy, true);
+		viewportFrame(ctx, snap, cx, cy, false);
+	};
+
+	// ── Setup: the form is there, the brush is not ──
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("##lsSetup"), sx, sy), "no Setup cell in the tab well");
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	CHECK_MESSAGE(locate(ctx, panelId("Reset Sculpting"), bx, by), "Setup shows no Reset Sculpting");
+	CHECK_FALSE(locate(ctx, panelId("Radius##brush"), bx, by));
+	const size_t depth0 = undo.undoDepth();
+	drag();
+	CHECK(extremes().first == 0.0f);
+	CHECK(extremes().second == 0.0f);
+	CHECK(undo.undoDepth() == depth0);
+
+	// ── Back on Sculpt, Raise: the same drag lifts the ground ──
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
+	clickAt(ctx, sx, sy);
+	CHECK_FALSE(locate(ctx, panelId("Reset Sculpting"), bx, by));
+	REQUIRE(locate(ctx, panelId("##lsTool0"), bx, by));
+	clickAt(ctx, bx, by);
+	drag();
+	CHECK(extremes().second > 1.0f);
+	CHECK(extremes().first == 0.0f);
+
+	// ── Ctrl held: Raise lowers ──
+	ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
+	drag();
+	ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
+	viewportFrame(ctx, snap, cx, cy, false);
+	CHECK(extremes().first < -0.5f);
+}

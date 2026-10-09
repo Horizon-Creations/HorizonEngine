@@ -38,6 +38,12 @@ namespace TerrainPaint
     bool paint(TerrainComponent& tc, float localX, float localZ,
                int layer, float radius, float falloff, float strength);
 
+    // Every texel fully on `layer` - "start the landscape from this layer". Allocates the
+    // weightmap if there is none (and the second page for layers 4..7); a first-page
+    // layer clears the second page, whose weights would otherwise outvote it. Sets
+    // tc.weightsDirty. False for a layer outside 0 .. kTerrainMaxLayers-1.
+    bool fillLayer(TerrainComponent& tc, int layer);
+
     // The kTerrainMaxLayers weights of texel (tx, tz), layers 4..7 zero when
     // there is no second page. False (out untouched) when the terrain has no
     // weightmap or the texel is outside it.
