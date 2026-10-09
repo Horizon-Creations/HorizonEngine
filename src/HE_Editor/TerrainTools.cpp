@@ -52,6 +52,9 @@ static float       s_foliageTarget    = 1.0f;   // Grow paints toward this fract
 static float       s_brushRadius     = 10.0f;  // inner full-strength radius (m)
 static float       s_falloffRadius   = 5.0f;   // transition width — strength falls linearly to 0
 static float       s_brushStrength   = 5.0f;
+// Layer painting has its own strength: 0..1, the share of a texel the selected layer takes
+// per stroke step at 60 Hz. 1 = the layer is taken over completely at once.
+static float       s_paintStrength   = 1.0f;
 static bool        s_brushWasDown    = false;   // tracks LMB edge for undo
 // Stroke-scoped state, captured on the LMB-down edge (see the sculpt block):
 static float       s_flattenTarget   = 0.0f;    // Flatten: height to pull toward
@@ -382,11 +385,14 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					// World → terrain-local (the brush works in world XZ).
 					const float lx = hitWS.x - terrainWorldPos.x;
 					const float lz = hitWS.z - terrainWorldPos.z;
-					// Per-second like the sculpt tools, but as a 0..1 blend
-					// factor: the shared 0.1..50 strength slider maps onto a
-					// usable paint rate here.
-					const float amount = std::clamp(
-						s_brushStrength * static_cast<float>(dt) * 0.16f, 0.0f, 1.0f);
+					// Strength is the share of the layer a texel takes per 60 Hz step:
+					// 1 = all of it at once (the first touch paints 100 %), less =
+					// a slower build-up while the button is held. Written as
+					// 1 - (1 - s)^(dt * 60) so the rate does not depend on the frame
+					// rate; at s = 1 the pow is 0 and the amount exactly 1.
+					const float s01    = std::clamp(s_paintStrength, 0.0f, 1.0f);
+					const float amount = s01 >= 1.0f ? 1.0f
+						: 1.0f - std::pow(1.0f - s01, static_cast<float>(dt) * 60.0f);
 					TerrainPaint::paint(tc, lx, lz, s_paintLayer,
 					                    s_brushRadius, s_falloffRadius, amount);
 				}
@@ -1014,8 +1020,8 @@ void renderPanel(AppContext& ctx)
                 EditorWidgets::helpForLabel("Radius##paint");
                 ImGui::DragFloat("Falloff##paint",  &s_falloffRadius, 0.5f, 0.0f, 500.0f, "%.1f m");
                 EditorWidgets::helpForLabel("Falloff##paint");
-                ImGui::DragFloat("Strength##paint", &s_brushStrength, 0.1f, 0.1f,  50.0f, "%.2f");
-                EditorWidgets::helpForLabel("Strength##paint");
+                ImGui::SliderFloat("Strength##paint", &s_paintStrength, 0.0f, 1.0f, "%.2f");
+                EditorWidgets::helpForKey("Landscape/Paint Strength");
                 s_brushRadius   = std::max(0.5f, s_brushRadius);
                 s_falloffRadius = std::max(0.0f, s_falloffRadius);
 

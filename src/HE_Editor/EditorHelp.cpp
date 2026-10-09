@@ -6466,6 +6466,13 @@ namespace
 	  "full-strength part of the brush; Smooth, Flatten and Ramp use it as a "
 	  "rate of blending towards their target instead.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Paint Strength", "Paint Strength",
+	  "How much of the selected layer a texel takes while you paint, from 0 to 1. "
+	  "At 1 the first touch gives the layer 100 % at once, whatever was there "
+	  "before; lower values build it up the longer the left button is held "
+	  "(0.1 takes about half a second to cover a spot). Applies to layer painting "
+	  "only — sculpting and foliage keep the Brush Strength.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Weightmap", "Weightmap Resolution",
 	  "How many texels per side the layer weightmap has, from 32 to 2048, "
 	  "stretched over the whole landscape — a large terrain needs more of them "
