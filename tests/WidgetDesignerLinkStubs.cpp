@@ -39,10 +39,8 @@ namespace ViewportPanel
 namespace EditorSettingsPanel
 {
 	HcVariableStyle hcVariableStyle() { return HcVariableStyle::Detailed; }
-
-	// Preferences ▸ Panels ▸ Widgets "Run PreConstruct" switch (610fbcd2):
-	// default to a fresh editor's value (on), like hcVariableStyle() above —
-	// a stub returning off would silently skip the canvas's PreConstruct run.
+	// UIEditorPanel asks (since 610fbcd2 moved Pre Construct into Preferences);
+	// the real one reads config.json and answers true when nothing is stored.
 	bool widgetRunPreConstruct() { return true; }
 }
 
