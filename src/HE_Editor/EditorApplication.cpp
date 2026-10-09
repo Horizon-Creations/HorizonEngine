@@ -78,6 +78,7 @@
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainGenerate.h>
+#include <HorizonScene/WaterBrush.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
@@ -7079,6 +7080,87 @@ void EditorApplication::dumpFrameHeadless()
 			"vertices %u, x span %.2f..%.2f, ground over sheet at the vertices at most %.3f m)",
 			wl, ok ? "ok" : "FAILED", ws.created, ws.triangles, level,
 			ltc.water.clipToGround ? 1 : 0, ltc.water.shoreOvershoot, verts, lo, hi, worstOver);
+	}
+
+	// ── Water brush witness (HE_DUMP_WATERBRUSH, Thema 174 Schritt 7): a flat
+	// 100 m landscape at y=300, painted the way the Landscape tool's Water mode
+	// paints it — a drag of several dabs through HE::water::brush (begin/dab/end),
+	// the same calls TerrainTools::sculptInViewport makes, not a shortcut through
+	// addCircle. Modes:
+	//   =paint  a straight drag, water at the ground's height plus the default
+	//           offset (no dig): the sheet floats a little above flat ground.
+	//   =dig    the same drag with Dig Bed on: a pit under the water, so the
+	//           sheet has a visible depth instead of a film on the surface.
+	//   =undo   paints, then takes the stroke back through EditorUndo (one
+	//           snapshot before, one undo after) — the A/B for "undo removes a
+	//           whole stroke": compare against =paint at the same settings.
+	// HE_DUMP_WATERLEVEL (default: ground + 0.3, i.e. unset) can pin a fixed
+	// level instead. Camera: CAMY=375 CAMZ=48 PITCH=-60, the WATERLAKE framing.
+	if (const char* wb = std::getenv("HE_DUMP_WATERBRUSH"); wb && *wb && m_editorWorld)
+	{
+		namespace WB = HE::water::brush;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(wb);
+		auto land = m_editorWorld->createEntity("WaterBrushLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution  = 129;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 128;
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat chunks first
+
+		m_undo.setWorld(m_editorWorld.get());
+		m_undo.clearHistory();
+		if (mode == "undo") m_undo.snapshotNow("Paint Water");   // the editor's protocol: snapshot, then the stroke
+
+		WB::Params p;
+		p.radius = 14.0f; p.falloff = 6.0f; p.amount = 1.0f;
+		p.levelFromGround = true; p.levelOffset = 0.3f;
+		if (const char* lv = std::getenv("HE_DUMP_WATERLEVEL"); lv && *lv)
+		{ p.levelFromGround = false; p.level = static_cast<float>(std::atof(lv)); }
+		p.dig = mode == "dig"; p.digDepth = 1.5f;
+
+		auto& ltc2 = reg.get<TerrainComponent>(land);
+		WB::Stroke s;
+		WB::begin(s, ltc2, -24.0f, 0.0f, p);
+		for (int i = 0; i <= 12; ++i)
+			WB::dab(s, ltc2, -24.0f + 48.0f * static_cast<float>(i) / 12.0f, 0.0f, p);
+		const bool created = s.created;
+		const float strokeLevel = s.level;
+		const uint32_t dabs = s.dabs;
+		WB::end(s, ltc2);
+		const uint32_t wetAfterPaint = ltc2.water.wetCells();
+
+		bool undone = false;
+		if (mode == "undo")
+		{
+			undone = m_undo.undo();
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		}
+		else
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+
+		const TerrainComponent& afterTc = [&]() -> const TerrainComponent& {
+			// undo() replaces every entity; find the one landscape again.
+			auto view = reg.view<TerrainComponent>();
+			return reg.get<TerrainComponent>(*view.begin());
+		}();
+		const uint32_t wetNow = afterTc.water.wetCells();
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH witness landscape added "
+			"(mode %s, created %d, level %.2f, dabs %u, wet cells after paint %u, surfaces created %u, "
+			"triangles %u, undone %d, wet cells now %u)",
+			wb, created ? 1 : 0, strokeLevel, dabs, wetAfterPaint, ws.created, ws.triangles,
+			mode == "undo" ? (undone ? 1 : 0) : -1, wetNow);
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
