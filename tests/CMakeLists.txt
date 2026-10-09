@@ -44,6 +44,9 @@ add_executable(he_tests
     # remove its copy, pending at the next start, Restore's backup, and the
     # ContentManager::writeAssetTo path every asset panel's copy takes.
     test_asset_autosave.cpp
+    # A .heproj double-clicked in the file manager: quotes, blanks, relative
+    # paths and wrong extensions, and Hub vs. guarded switch vs. already open.
+    test_project_launch_open.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
@@ -610,6 +613,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneAutosave.cpp
     # Its sibling for the asset tabs — same clock-in-hand design.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetAutosave.cpp
+    # What a launch argument or a macOS open event means as a project path,
+    # and which Open it takes. SDL- and ImGui-free (see the header).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectLaunchOpen.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
@@ -1153,6 +1159,21 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME he_mcp_shim
              COMMAND ${Python3_EXECUTABLE}
                      "${CMAKE_SOURCE_DIR}/tests/test_he_mcp.py")
+endif()
+
+# ── "Does a double-click on a .heproj open the editor?" ──────────────────────
+# macOS registers the type in Info.plist; Windows and Linux ship a ZIP / tarball with
+# no installer, so the registration is files inside the package (FileTypes/, from
+# scripts/windows_assets and scripts/linux_assets). This holds those files to ONE
+# name for the type on all three platforms, validates them, and on a POSIX machine
+# runs the Linux installer for real against a throwaway XDG_DATA_HOME. Python, because
+# what it checks is files and a shell script, and because the Windows half of the
+# same question is answered on the Windows runner by check_heproj_registration.ps1.
+# CI additionally passes --package to prove the deployed package carries the files.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME heproj_file_types
+             COMMAND ${Python3_EXECUTABLE}
+                     "${CMAKE_SOURCE_DIR}/tests/test_heproj_file_types.py")
 endif()
 
 # ── "How heavy is what we actually ship?" ────────────────────────────────────

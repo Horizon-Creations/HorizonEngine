@@ -298,6 +298,7 @@ add_executable(HorizonEditor WIN32
 	GitCloneDialog.cpp
 	GitHubSignIn.cpp
 	GitHubSignInView.cpp
+	ProjectLaunchOpen.cpp
 	ReportIssueDialog.cpp
 	EditorDockState.cpp
 	GitController.cpp
@@ -616,6 +617,38 @@ if(HE_VULKAN_ENABLED OR HE_D3D12_GI_SHADERS)
 		COMMENT "Deploying Vulkan SPIR-V shaders to the editor"
 		VERBATIM
 	)
+endif()
+
+# ── .heproj file type registration (Windows and Linux packages) ───────────────
+# A double-click on a project file only opens the editor once the OS has been told
+# that .heproj is the editor's. macOS says so in Info.plist (package_macos.sh).
+# Windows and Linux ship the editor as a ZIP / tarball with no installer, so there
+# is nothing to write registry keys or a .desktop file at install time; the
+# registration travels INSIDE the package as scripts the user runs once, from
+# <editor>/FileTypes/ (register_heproj.cmd, install_file_types.sh). They cannot be
+# data files a packager installs, because the one thing they must record, where the
+# editor is, is only known after the user has unpacked it.
+# check_heproj_registration.ps1 is a test aid and is deliberately not shipped.
+# macOS is left out: the .app carries its registration in the plist, and these
+# files would be dead weight inside it.
+if(WIN32)
+	set(HE_FILETYPES_DIR "${CMAKE_SOURCE_DIR}/scripts/windows_assets")
+	set(HE_FILETYPES_FILES register_heproj.cmd unregister_heproj.cmd register_heproj.ps1 heproj.ico)
+elseif(UNIX AND NOT APPLE)
+	set(HE_FILETYPES_DIR "${CMAKE_SOURCE_DIR}/scripts/linux_assets")
+	set(HE_FILETYPES_FILES install_file_types.sh horizon-editor.desktop horizon-editor.xml
+	                       application-x-heproj.png horizon-editor.png)
+endif()
+if(HE_FILETYPES_FILES)
+	# copy_if_different keeps the source's mode, which install_file_types.sh needs: it
+	# has to arrive executable in the tarball (tar preserves it, a ZIP never had it).
+	foreach(_ft ${HE_FILETYPES_FILES})
+		add_custom_command(TARGET HorizonEditor POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different
+				"${HE_FILETYPES_DIR}/${_ft}" "${DEPLOY_EDITOR}/FileTypes/${_ft}"
+			COMMENT "Deploying FileTypes/${_ft} (.heproj registration)"
+			VERBATIM)
+	endforeach()
 endif()
 
 # ── macOS DMG packaging ────────────────────────────────────────────────────────
