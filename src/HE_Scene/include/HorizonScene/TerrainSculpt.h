@@ -1,5 +1,7 @@
 #pragma once
+#include <glm/vec2.hpp>
 #include <cstdint>
+#include <vector>
 
 struct TerrainComponent;
 
@@ -81,4 +83,59 @@ namespace TerrainSculpt
     // ok = true with changed = 0 — it is a legal thing to ask and nothing happened.
     Result apply(TerrainComponent& tc, float localX, float localZ, Op op,
                  float radius, float falloff, float amount);
+
+    // ── Excavation under a polygon ───────────────────────────────────────────
+    // The ground inside a polygon goes down to a floor, with a soft bank around
+    // it. What a lake bed is made of, and anything else that wants a pit of a
+    // given shape: a pond, a moat, a foundation.
+    //
+    //   Floor   `amount` is the height of the bottom (terrain-local Y, like the
+    //           heights). Ground above it is lowered to it; ground already below
+    //           it stays where it is — an excavation never raises, so a pit that
+    //           is deeper than asked for is not filled in.
+    //   Dig     `amount` is a depth: every vertex under the polygon goes down by
+    //           that much, the shape of the ground is kept. Negative = 0.
+    enum class ExcavateMode : uint8_t { Floor, Dig };
+
+    struct ExcavateParams
+    {
+        ExcavateMode mode    = ExcavateMode::Floor;
+        float        amount  = 0.0f;
+        // Width of the bank, world units, measured OUTWARD from the polygon's
+        // outline: the weight is 1 on and inside the outline and eases to 0 over
+        // this distance (smoothstep, so the bank meets the old ground without a
+        // crease — the brush's linear ramp would leave a visible edge on a pit
+        // this wide). 0 = a hard edge. Beyond it the ground is not touched at all.
+        float        falloff = 2.0f;
+    };
+
+    // The polygon is terrain-local XZ (x → glm::vec2::x, z → ::y), no closing
+    // duplicate, even-odd fill, any winding — the object water::polygonFromPolyline
+    // returns, so a lake feeds the SAME polygon to the water and to this. Fewer
+    // than three points, a non-finite one, no area or a non-finite amount/falloff
+    // give ok = false and change nothing. The part outside the terrain is
+    // clipped; a polygon entirely off it is ok = true with changed = 0.
+    //
+    // Heights are computed per terrain VERTEX: a vertex inside the outline gets
+    // exactly the floor (or exactly its old height minus the depth), one beyond
+    // the bank keeps its old bits. A vertex on the outline counts as inside, up to
+    // rounding on a slanted edge.
+    //
+    // Like apply: calls ensureHeights first, writes sculptHeights only, and marks
+    // the region-dirty rect (the vertices that moved, plus one grid step so the
+    // chunks that share a border vertex both rebuild). `dirty` stays as it was.
+    // TerrainSystem rebuilds every LOD level of each chunk the rect touches and
+    // hands the same rect to the water surface for its shore clipping.
+    //
+    // UNDO IS THE CALLER'S, as with apply: take the editor's undo step
+    // (EditorUndo::snapshotNow) once, then call this once. sculptHeights is saved
+    // as raw float bytes, so the snapshot gives the old ground back bit for bit,
+    // including the case where this call baked the noise field into sculptHeights
+    // or snapped the resolution.
+    //
+    // Result: changed = vertices whose height moved; min/max over the vertices the
+    // polygon and its bank reach, AFTER the edit; centerHeight = the ground at the
+    // centre of the polygon's bounding box afterwards.
+    Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
+                           const ExcavateParams& params);
 }
