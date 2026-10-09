@@ -5,7 +5,7 @@
 #include "ImporterCommon.h"   // Importer::OutputTargets
 
 // Imports glTF 2.0 (.gltf / .glb) — and, with HE_HAVE_ASSIMP, FBX / OBJ /
-// COLLADA (.fbx / .obj / .dae, see AssimpMeshImport) — into a StaticMeshAsset.
+// COLLADA / Blender (.fbx / .obj / .dae / .blend, see AssimpMeshImport) — into a StaticMeshAsset.
 // All primitives of all scene nodes are baked into one vertex/index buffer with
 // node world transforms applied; primitives sharing a source material become
 // one material SECTION (MeshSection, chunk MSEC), so a multi-material file

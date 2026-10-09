@@ -2418,7 +2418,7 @@ TEST_CASE("Importer::isImportableSource covers every extension the editor offers
 #ifdef HE_HAVE_ASSIMP
 	// The Assimp-backed mesh formats join the list only when Assimp is built in
 	// — offering them without it would be an import that can only fail.
-	for (const char* ext : { ".fbx", ".obj", ".dae" })
+	for (const char* ext : { ".fbx", ".obj", ".dae", ".blend" })
 		CHECK(Importer::isImportableSource(fs::path("Some/Model") += ext));
 #else
 	CHECK_FALSE(Importer::isImportableSource("Some/Model.fbx"));

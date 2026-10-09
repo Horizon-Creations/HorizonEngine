@@ -824,6 +824,10 @@ target_include_directories(he_tests PRIVATE
 # resolves to dllexport (definitions are local to this exe) rather than dllimport,
 # which would emit unresolved __imp_ references for those same locally-built symbols.
 target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+if(HE_HAVE_ASSIMP AND HE_ASSIMP_TEST_MODELS)
+    # test_assimpimport.cpp reads Blender files out of Assimp's sample models.
+    target_compile_definitions(he_tests PRIVATE HE_ASSIMP_TEST_MODELS="${HE_ASSIMP_TEST_MODELS}")
+endif()
 # test_scene_serializer.cpp outgrew the 2^16 COFF sections of a Debug MSVC
 # object (fatal error C1128); CI builds Windows in Release only and never saw it.
 if(MSVC)

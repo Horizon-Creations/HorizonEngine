@@ -585,23 +585,29 @@ if(HE_ENABLE_ASTC)
     endif()
 endif()
 
-# ─── Assimp (optional: FBX / OBJ / COLLADA mesh import) ───────────────────────
+# ─── Assimp (optional: FBX / OBJ / COLLADA / Blender mesh import) ─────────────
 # The mesh importers read glTF natively (cgltf, vendored). Every other DCC
-# interchange format comes in through Assimp, restricted to the three importers
-# we actually route (FBX, OBJ, COLLADA) so the static library stays small and
+# interchange format comes in through Assimp, restricted to the importers we
+# actually route (FBX, OBJ, COLLADA, Blender) so the static library stays small and
 # nothing with a licence question (3DS, MD5, ...) is compiled in at all.
 # Linked ONLY into HorizonImporters (editor + asset_compiler + tests) — never
 # into the shipped game. Disable with -DHE_ENABLE_ASSIMP=OFF; the importer set
 # then falls back to glTF only (HE_HAVE_ASSIMP is not defined).
-option(HE_ENABLE_ASSIMP "Fetch Assimp for FBX/OBJ/COLLADA mesh import" ON)
+#
+# The Blender importer reads .blend files up to Blender 3.4 (gzip-compressed ones
+# too, zstd ones not): Blender 3.5 moved the mesh data into generic attributes
+# and Assimp's reader has no idea where the vertices went. For newer files the
+# importer says so and points at File > Export > glTF 2.0 (AssimpMeshImport.cpp).
+option(HE_ENABLE_ASSIMP "Fetch Assimp for FBX/OBJ/COLLADA/Blender mesh import" ON)
 if(HE_ENABLE_ASSIMP)
-    message(STATUS "HorizonEngine: fetching Assimp (FBX/OBJ/COLLADA importers only)")
+    message(STATUS "HorizonEngine: fetching Assimp (FBX/OBJ/COLLADA/Blender importers only)")
     set(BUILD_SHARED_LIBS_SAVE ${BUILD_SHARED_LIBS})
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE) # static assimp, linked into HorizonImporters only
     set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_FBX_IMPORTER             ON  CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_OBJ_IMPORTER             ON  CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_COLLADA_IMPORTER         ON  CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_BLEND_IMPORTER           ON  CACHE BOOL "" FORCE)
     set(ASSIMP_NO_EXPORT                      ON  CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_TESTS                    OFF CACHE BOOL "" FORCE)
@@ -635,13 +641,16 @@ if(HE_ENABLE_ASSIMP)
     set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVE} CACHE BOOL "" FORCE)
     if(TARGET assimp::assimp)
         set(HE_HAVE_ASSIMP TRUE)
-        message(STATUS "HorizonEngine: Assimp fetched — FBX/OBJ/COLLADA mesh import enabled")
+        # Assimp's own sample files (BSD-licensed, shipped in the source tree): the
+        # tests read .blend fixtures from here instead of carrying binaries of ours.
+        set(HE_ASSIMP_TEST_MODELS "${assimp_SOURCE_DIR}/test/models")
+        message(STATUS "HorizonEngine: Assimp fetched — FBX/OBJ/COLLADA/Blender mesh import enabled")
     else()
         message(WARNING "HorizonEngine: Assimp fetch did not produce a usable target — "
-                         "FBX/OBJ/COLLADA mesh import will be unavailable (glTF only).")
+                         "FBX/OBJ/COLLADA/Blender mesh import will be unavailable (glTF only).")
     endif()
 else()
-    message(STATUS "HorizonEngine: Assimp disabled (pass -DHE_ENABLE_ASSIMP=ON to enable FBX/OBJ/COLLADA import)")
+    message(STATUS "HorizonEngine: Assimp disabled (pass -DHE_ENABLE_ASSIMP=ON to enable FBX/OBJ/COLLADA/Blender import)")
 endif()
 
 # ─── Runtime flavour (docs/he-apps-plan.md A3b) ────────────────────────────────

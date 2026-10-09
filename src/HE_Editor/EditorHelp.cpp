@@ -2092,7 +2092,7 @@ namespace
 	  "", "editor#content-browser" },
 	{ "Assets/Import Asset...", "",
 	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
-	  "COLLADA), textures, audio, fonts — converting it to the engine's own format "
+	  "COLLADA, Blender up to 3.4), textures, audio, fonts — converting it to the engine's own format "
 	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "Assets/Refresh Assets", "",
@@ -2477,7 +2477,7 @@ namespace
 	{ "Content Browser/Import", "",
 	  "Brings this file into the project as an engine asset. The original is not "
 	  "moved; a .hasset beside it records where it came from. Greyed out for an "
-	  "FBX/OBJ/COLLADA file when this build of the editor has no Assimp to read it.",
+	  "FBX/OBJ/COLLADA/Blender file when this build of the editor has no Assimp to read it.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Import to Project", "",
 	  "For source files inside the engine's own content (a sound, a picture, a "
@@ -3335,7 +3335,8 @@ namespace
 	// ── Content Browser ──────────────────────────────────────────────────────
 	{ "content.import", "Import Asset",
 	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
-	  "COLLADA), textures, audio, fonts. It is converted to the engine's own format "
+	  "COLLADA, .blend files saved with Blender 3.4 or older — export newer ones "
+	  "as glTF), textures, audio, fonts. It is converted to the engine's own format "
 	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "content.create", "Create Asset",
