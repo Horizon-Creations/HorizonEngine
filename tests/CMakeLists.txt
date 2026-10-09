@@ -117,6 +117,9 @@ add_executable(he_tests
     # The water model: bodies, coverage + owner raster, circle/polygon edits, scene format, undo.
     test_water_field.cpp
     test_water_surface.cpp
+    # The water brush: which body a stroke paints into and at which level, the
+    # eraser, digging, the sheet that appears, and the stroke through undo and the file.
+    test_water_brush.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp

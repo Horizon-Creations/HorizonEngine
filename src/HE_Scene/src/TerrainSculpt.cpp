@@ -229,6 +229,84 @@ Result apply(TerrainComponent& tc, float localX, float localZ, Op op,
     return r;
 }
 
+Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
+                    float radius, float falloff, float floorY, float blend)
+{
+    Result r;
+    if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return r;
+    if (!std::isfinite(localX) || !std::isfinite(localZ) || !std::isfinite(radius) ||
+        !std::isfinite(falloff) || !std::isfinite(floorY) || !std::isfinite(blend)) return r;
+
+    radius  = std::max(0.0f, radius);
+    falloff = std::max(0.0f, falloff);
+    blend   = std::clamp(blend, 0.0f, 1.0f);
+    const float outer = radius + falloff;
+    if (outer <= 0.0f) return r;
+
+    ensureHeights(tc);
+    const uint32_t res = tc.resolution;
+    if (tc.sculptHeights.size() != static_cast<size_t>(res) * res) return r;
+
+    const float halfX = tc.sizeX * 0.5f;
+    const float halfZ = tc.sizeZ * 0.5f;
+    const float stepX = tc.sizeX / static_cast<float>(res - 1);
+    const float stepZ = tc.sizeZ / static_cast<float>(res - 1);
+
+    r.ok = true;
+    r.centerHeight = terrainHeightAt(tc, localX, localZ);
+    const int x0 = std::max(0, static_cast<int>(std::floor((localX - outer + halfX) / stepX)));
+    const int x1 = std::min<int>(static_cast<int>(res) - 1,
+                                 static_cast<int>(std::ceil((localX + outer + halfX) / stepX)));
+    const int z0 = std::max(0, static_cast<int>(std::floor((localZ - outer + halfZ) / stepZ)));
+    const int z1 = std::min<int>(static_cast<int>(res) - 1,
+                                 static_cast<int>(std::ceil((localZ + outer + halfZ) / stepZ)));
+    if (x0 > x1 || z0 > z1 || blend <= 0.0f) return r;
+
+    float mn = std::numeric_limits<float>::max();
+    float mx = std::numeric_limits<float>::lowest();
+    int cx0 = std::numeric_limits<int>::max(), cx1 = -1, cz0 = std::numeric_limits<int>::max(), cz1 = -1;
+    for (int zi = z0; zi <= z1; ++zi)
+    {
+        const float wz = -halfZ + static_cast<float>(zi) * stepZ;
+        for (int xi = x0; xi <= x1; ++xi)
+        {
+            const float wx = -halfX + static_cast<float>(xi) * stepX;
+            const float dx = wx - localX, dz = wz - localZ;
+            const float dist = std::sqrt(dx * dx + dz * dz);
+            float w = 0.0f;
+            if (dist <= radius)         w = 1.0f;
+            else if (dist < outer && falloff >= 0.001f) w = 1.0f - (dist - radius) / falloff;
+            if (w <= 0.0f) continue;
+
+            float& h = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
+            const float was = h;
+            const float f = std::clamp(w * blend, 0.0f, 1.0f);
+            // f == 1 assigns: h + 1 * (floor - h) is not bit-equal to floor, and
+            // "the bed is at the floor" is what a caller checks.
+            if (h > floorY && f > 0.0f)
+                h = (f >= 1.0f) ? floorY : h + f * (floorY - h);
+            if (h != was)
+            {
+                ++r.changed;
+                cx0 = std::min(cx0, xi); cx1 = std::max(cx1, xi);
+                cz0 = std::min(cz0, zi); cz1 = std::max(cz1, zi);
+            }
+            mn = std::min(mn, h);
+            mx = std::max(mx, h);
+        }
+    }
+
+    if (r.changed > 0)
+        markRegionDirty(tc,
+                        -halfX + static_cast<float>(cx0) * stepX - stepX,
+                        -halfZ + static_cast<float>(cz0) * stepZ - stepZ,
+                        -halfX + static_cast<float>(cx1) * stepX + stepX,
+                        -halfZ + static_cast<float>(cz1) * stepZ + stepZ);
+    if (mn <= mx) { r.minHeight = mn; r.maxHeight = mx; }
+    r.centerHeight = terrainHeightAt(tc, localX, localZ);
+    return r;
+}
+
 Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
                        const ExcavateParams& params)
 {

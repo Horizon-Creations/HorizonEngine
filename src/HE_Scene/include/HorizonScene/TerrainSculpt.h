@@ -84,6 +84,25 @@ namespace TerrainSculpt
     Result apply(TerrainComponent& tc, float localX, float localZ, Op op,
                  float radius, float falloff, float amount);
 
+    // ── Lowering toward a floor under a brush ────────────────────────────────
+    // What a water brush that digs does: ground above `floor` eases down toward
+    // it, ground at or below it is left alone, so it never raises and never fills
+    // a pit in. Per vertex, with the brush weight w (1 inside `radius`, linear to
+    // 0 across `falloff`, like apply) and f = clamp(w · blend, 0, 1):
+    //     h > floor  →  h + f · (floor − h)        (exactly `floor` when f == 1)
+    // Stateless, so a dab repeated at one spot converges on the floor instead of
+    // digging without end, and the bank (the falloff ring) meets the old ground
+    // without a step. `blend` is the caller's pacing: 1 = one dab does all of it,
+    // a held button passes a fraction per frame.
+    //
+    // Same contract as apply: terrain-local coordinates, ensureHeights first, the
+    // region-dirty rect (vertices that moved, one grid step wider) and not `dirty`,
+    // undo is the caller's. ok = false for a degenerate terrain, a non-positive
+    // radius + falloff or a non-finite argument; a dab off the terrain is ok with
+    // changed = 0.
+    Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
+                        float radius, float falloff, float floorY, float blend);
+
     // ── Excavation under a polygon ───────────────────────────────────────────
     // The ground inside a polygon goes down to a floor, with a soft bank around
     // it. What a lake bed is made of, and anything else that wants a pit of a

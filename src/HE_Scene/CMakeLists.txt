@@ -27,6 +27,7 @@ add_library(HorizonScene SHARED
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp
     src/WaterField.cpp
+    src/WaterBrush.cpp
     src/WaterMesh.cpp
     src/WaterTriangulate.cpp
     src/WaterSurface.cpp
