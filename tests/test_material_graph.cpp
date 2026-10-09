@@ -403,10 +403,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// NormalMapArrayBombSample is the LAST enum value today; a node added after it
+	// BombCells is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::NormalMapArrayBombSample; ++t)
+	for (int t = 0; t <= (int)MatNodeType::BombCells; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -1127,6 +1127,99 @@ TEST_CASE("Texture bombing: params are sanitised, and an empty path falls back t
 	CHECK(bn->p[2] == doctest::Approx(-1.4f));
 	CHECK(HE::matNodeSamplesTexture(MatNodeType::NormalMapArrayBombSample));
 	CHECK_FALSE(HE::matNodeIsBombing(MatNodeType::TextureArraySample));
+}
+
+// ═══ Bombing Cells (Thema 152, Schritt 8) ═════════════════════════════════════
+// The hex grid of the bombing nodes as numbers: no texture, so a PROCEDURAL
+// pattern (the water's wave trains) can be bombed. One cell source feeds every
+// read of the three hexes, so the node is cheap by design.
+static MaterialGraph makeBombCellsGraph(float seed, bool wireCell)
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int wp  = g.addNode(MatNodeType::WorldPos);
+	const int ws  = g.addNode(MatNodeType::SplitRGBA);
+	const int uv  = g.addNode(MatNodeType::CombineRGBA);
+	const int hex = g.addNode(MatNodeType::BombCells);
+	g.findNode(hex)->p[0] = seed;
+	const int split = g.addNode(MatNodeType::SplitRGBA);
+	CHECK(g.connect(wp, 0, ws, 0));
+	CHECK(g.connect(ws, 0, uv, 0));
+	CHECK(g.connect(ws, 2, uv, 1));
+	CHECK(g.connect(uv, 0, hex, 0));
+	if (wireCell)
+	{
+		const int cell = g.addNode(MatNodeType::ConstFloat);
+		g.findNode(cell)->p[0] = 24.0f;
+		CHECK(g.connect(cell, 0, hex, 1));
+	}
+	// Weights → base colour, Random A → emissive: both must be readable.
+	CHECK(g.connect(hex, 0, out, HE::kMatOutputBaseColorPin));
+	CHECK(g.connect(hex, 1, split, 0));
+	CHECK(g.connect(split, 0, out, HE::kMatOutputRoughnessPin));
+	CHECK(g.connect(hex, 3, out, HE::kMatOutputEmissivePin));
+	return g;
+}
+
+TEST_CASE("Bombing Cells: the hex grid as numbers, on the texture nodes' integer hash, no texture")
+{
+	const HE::MatShaderGen gen = HE::generateFragment(makeBombCellsGraph(5.0f, true));
+	REQUIRE_FALSE(gen.glsl.empty());
+	CHECK(gen.textures.empty());
+	// One helper, called once; the seed is baked, the Cell pin is the wired constant.
+	CHECK(countOf(gen.glsl, "void heBombCells(") == 1u);
+	CHECK(countOf(gen.glsl, "heBombCells(") == 2u);
+	CHECK(gen.glsl.find(", 5u, n") != std::string::npos);
+	CHECK(gen.glsl.find("24.000000") != std::string::npos);
+	// The hash is the bombing nodes' (pcg3d of the hex index), emitted once, and the
+	// texture helper is NOT dragged in: nothing here reads a texture.
+	CHECK(countOf(gen.glsl, "uvec3 heBombHash(ivec2 cell, uint seed)") == 1u);
+	CHECK(gen.glsl.find("void heBombGrid(") == std::string::npos);
+	CHECK(gen.glsl.find("fract(sin") == std::string::npos);
+	// Three hexes: three hashes, and every random pin is one number per hex.
+	CHECK(countOf(gen.glsl, "heBombHash(b + ivec2(") == 3u);
+	CHECK(gen.glsl.find("vec3(uvec3(h0.x >> 8u, h1.x >> 8u, h2.x >> 8u))") != std::string::npos);
+	// The G-buffer variant carries the same body.
+	CHECK(countOf(gen.glslGBuffer, "heBombCells(") == 2u);
+
+	// Unwired: the registry defaults (8 units, blend 7) and the mesh UV; a negative
+	// seed wraps like the bombing nodes'.
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int hex = g.addNode(MatNodeType::BombCells);
+		g.findNode(hex)->p[0] = -1.4f;
+		CHECK(g.connect(hex, 0, out, HE::kMatOutputBaseColorPin));
+		CHECK(HE::generateFragment(g).glsl.find("heBombCells(vUV, 8.000000, 7.000000, 4294967295u, ")
+		      != std::string::npos);
+	}
+	// Another seed is another call, not another helper; both kinds of bombing in
+	// one graph share the hash and the grid math is each its own.
+	{
+		MaterialGraph g = makeTextureBombGraph();
+		const int hex = g.addNode(MatNodeType::BombCells);
+		const int out = [&] { for (const auto& n : g.nodes) if (n.type == MatNodeType::Output) return n.id; return 0; }();
+		CHECK(g.connect(hex, 1, out, HE::kMatOutputEmissivePin));
+		const std::string glsl = HE::generateFragment(g).glsl;
+		CHECK(countOf(glsl, "uvec3 heBombHash(ivec2 cell, uint seed)") == 1u);
+		CHECK(countOf(glsl, "void heBombGrid(") == 1u);
+		CHECK(countOf(glsl, "void heBombCells(") == 1u);
+	}
+	// Graphs without the node keep their exact text.
+	CHECK(HE::generateFragment(makeTextureBombGraph()).glsl.find("heBombCells") == std::string::npos);
+	CHECK(HE::generateFragment(makeDemoGraph()).glsl.find("heBombHash") == std::string::npos);
+
+	// The seed and the pins survive a save and a reload.
+	{
+		const MaterialGraph g = makeBombCellsGraph(7.0f, true);
+		MaterialGraph back;
+		REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+		int found = 0;
+		for (const auto& n : back.nodes)
+			if (n.type == MatNodeType::BombCells) { ++found; CHECK(n.p[0] == doctest::Approx(7.0f)); }
+		CHECK(found == 1);
+		CHECK(HE::generateFragment(back).glsl == HE::generateFragment(g).glsl);
+	}
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)

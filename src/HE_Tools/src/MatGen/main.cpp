@@ -257,6 +257,23 @@ int longestChain(const MaterialGraph& g)
 // Everything is in WORLD units off World Position (x, z), never the mesh UV:
 // the engine plane's UVs run 0..1 over the whole scaled plane, so UV waves
 // would stretch with it.
+//
+// ── Bombed (docs/water-shader-plan.md §12) ───────────────────────────────────
+// Six sines repeat. However their phases are warped, their crests keep one
+// spacing and their sum is a lattice: on a plane a few hundred metres across the
+// same patch of glow and the same foam dot come back row after row (§12.1). That
+// is tiling, and the cure is the one textures get: texture bombing. The plane is
+// cut into hexes (the Bombing Cells node, the grid of the engine's bombing nodes),
+// and every train is evaluated once per hex of the pixel — three times — with that
+// hex's own direction and phase, the three results blended by the hex weights.
+// Inside a hex the waves are as regular as before; no two hexes agree, so the
+// lattice never gets a second period to repeat on. The warp field is NOT
+// bombed: it is noise, it does not tile, and it is the dear part.
+//
+// A sum of waves of different phase is an interference pattern: at a seam the
+// amplitude is lower or higher than in a hex, depending on the two random phases.
+// The gain below (1/√Σw², from the hex-tiling paper) restores the MEAN power of
+// that, so a seam is not systematically calmer than a hex, only different.
 struct Wave { Pin slopeX, slopeZ, height, steep, dirX, dirZ, speed, warp; };
 
 struct Train
@@ -268,8 +285,77 @@ struct Train
 };
 constexpr Train kPrimary{ 0.0f, 1.0f, 1.0f, true };
 
+// What one Wave knob's hex grid hands its trains: per hex a weight, and a
+// direction offset (degrees) and phase offset (radians) for the primary train and
+// for the companion — all four in the Variation knob's ranges — plus the gain.
+struct Hex
+{
+    Pin weight[3];
+    Pin dirOff[3], dirOffC[3];
+    Pin phOff[3],  phOffC[3];
+    Pin gain;
+};
+
+// max(a, b) out of the library: lerp(a, b, step(a, b)).
+Pin maxOf(Mb& m, Pin a, Pin b, float col, float row)
+{
+    return Pin{ m.op3(T::Lerp, a, b, m.op(T::Step, a, b, col, row), col + 1, row) };
+}
+
+// The hex grid of one Wave knob: cells `Variation.x` wavelengths wide (never under
+// half a wavelength: a cell smaller than the wave only makes noise), the seam
+// sharpness `Variation.w`, offsets in `Variation.y` (phase, 0..1 of a turn) and
+// `Variation.z` (direction, ± degrees). `seed` keeps the three knobs' hexes from
+// choosing the same numbers. y = z = 0 makes the three hexes identical: the
+// unbombed water, the way to switch it off.
+Hex hexCells(Mb& m, int waveParam, int variation, Pin px, Pin pz, float seed, float col, float row)
+{
+    const int vs = m.un(T::SplitRGBA, variation, col, row);
+    const Pin cellWaves{ vs, 0 }, phaseSpread{ vs, 1 }, dirSpread{ vs, 2 }, blend{ vs, 3 };
+    const int ws  = m.un(T::SplitRGBA, waveParam, col, row + 1);
+    const Pin cell = m.op(T::Multiply, maxOf(m, cellWaves, m.k(0.5f, col, row + 2), col + 1, row + 2),
+                          Pin{ ws, 2 }, col + 3, row + 1);
+    const int hex = m.node(T::BombCells, col + 4, row);
+    m.g.findNode(hex)->p[0] = seed;
+    m.link(m.op(T::CombineRGBA, px, pz, col + 3, row), hex, 0);
+    m.link(cell, hex, 1);
+    m.link(blend, hex, 2);
+    const int wS = m.un(T::SplitRGBA, Pin{ hex, 0 }, col + 5, row);
+    const int aS = m.un(T::SplitRGBA, Pin{ hex, 1 }, col + 5, row + 1);
+    const int bS = m.un(T::SplitRGBA, Pin{ hex, 2 }, col + 5, row + 2);
+    const int cS = m.un(T::SplitRGBA, Pin{ hex, 3 }, col + 5, row + 3);
+
+    const Pin dirRange   = m.op(T::Multiply, dirSpread, m.k(2.0f, col + 5, row + 4), col + 6, row + 4);
+    const Pin phaseRange = m.op(T::Multiply, phaseSpread, m.k(kTau, col + 5, row + 5), col + 6, row + 5);
+    const Pin half = m.k(0.5f, col + 6, row + 6);
+    Hex h;
+    for (int i = 0; i < 3; ++i)
+    {
+        const float r = row + 7.0f * static_cast<float>(i);
+        h.weight[i]  = Pin{ wS, i };
+        h.dirOff[i]  = m.op(T::Multiply, m.op(T::Subtract, Pin{ aS, i }, half, col + 7, r), dirRange, col + 8, r);
+        h.dirOffC[i] = m.op(T::Multiply, m.op(T::Subtract, Pin{ cS, i }, half, col + 7, r + 1), dirRange, col + 8, r + 1);
+        h.phOff[i]   = m.op(T::Multiply, Pin{ bS, i }, phaseRange, col + 8, r + 2);
+        h.phOffC[i]  = m.op(T::Multiply, m.un(T::Fract, m.op(T::Add, Pin{ bS, i }, Pin{ cS, i }, col + 7, r + 3), col + 8, r + 3),
+                            phaseRange, col + 9, r + 3);
+    }
+    // Gain: restores the mean power the blend loses where the weights are mixed,
+    // by as much as the hexes differ (phase spread, plus direction spread as a
+    // fraction of 45°); not at all when they do not.
+    const Pin w2 = m.sum({ Pin{ m.op(T::Multiply, h.weight[0], h.weight[0], col + 6, row + 28) },
+                           Pin{ m.op(T::Multiply, h.weight[1], h.weight[1], col + 6, row + 29) },
+                           Pin{ m.op(T::Multiply, h.weight[2], h.weight[2], col + 6, row + 30) } }, col + 7, row + 28);
+    const Pin full = m.op(T::Divide, m.k(1.0f, col + 8, row + 28),
+                          m.op(T::Power, w2, m.k(0.5f, col + 8, row + 29), col + 9, row + 28), col + 10, row + 28);
+    const Pin differ = m.un(T::Saturate, m.op(T::Add, phaseSpread,
+                                               m.op(T::Divide, dirSpread, m.k(45.0f, col + 8, row + 30), col + 9, row + 30),
+                                               col + 10, row + 30), col + 11, row + 30);
+    h.gain = Pin{ m.op3(T::Lerp, m.k(1.0f, col + 11, row + 28), full, differ, col + 12, row + 28) };
+    return h;
+}
+
 Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, const Pin* fade,
-               const Wave* primary, float row)
+               const Wave* primary, const Hex& hx, float row)
 {
     const int s = m.un(T::SplitRGBA, param, 1, row);
     Pin dirDeg{ s, 0 }, speed{ s, 1 }, length{ s, 2 }, steep{ s, 3 };
@@ -284,42 +370,75 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
 
     // Direction in degrees → (cos, sin) on the XZ plane. The library has no
     // Cosine node; Sine(x + π/2) is one.
-    const int rad  = m.op(T::Multiply, dirDeg, m.k(kDegToRad, 1, row + 1), 2, row);
-    const int sinD = m.un(T::Sine, rad, 3, row);
-    const int cosD = m.un(T::Sine, m.op(T::Add, rad, m.k(kHalfPi, 2, row + 1), 3, row + 1), 4, row + 1);
+    struct Dir { int sin, cos; };
+    auto direction = [&](Pin deg, float r) {
+        const int rad = m.op(T::Multiply, deg, m.k(kDegToRad, 1, r + 1), 2, r);
+        return Dir{ m.un(T::Sine, rad, 3, r),
+                    m.un(T::Sine, m.op(T::Add, rad, m.k(kHalfPi, 2, r + 1), 3, r + 1), 4, r + 1) };
+    };
+    // The wave's frame for a direction: `along` runs with the wave, `across` along
+    // its crest. (Both off the raw knob direction for the warp field below; per hex
+    // off that hex's own.)
+    auto alongOf = [&](const Dir& d, float r) {
+        return m.op(T::Add, m.op(T::Multiply, d.cos, px, 5, r),
+                            m.op(T::Multiply, d.sin, pz, 5, r + 0.6f), 6, r);
+    };
+    const int drift = m.op(T::Multiply, speed, time, 6, row + 2.4f);
 
-    // Into the wave's frame: `along` runs with the wave, `across` along its crest.
-    const int along  = m.op(T::Add, m.op(T::Multiply, cosD, px, 5, row),
-                                    m.op(T::Multiply, sinD, pz, 5, row + 0.6f), 6, row);
-    const int travel = m.op(T::Subtract, along, m.op(T::Multiply, speed, time, 6, row + 2.4f), 7, row);
-
+    // The primary's frame, unbombed: the warp field and the direction the chop
+    // drifts along are both read off it.
+    Dir d0{ -1, -1 };
     int warp = -1;
     if (tr.warp)
     {
-        const int across = m.op(T::Subtract, m.op(T::Multiply, cosD, pz, 5, row + 1.2f),
-                                             m.op(T::Multiply, sinD, px, 5, row + 1.8f), 6, row + 1.2f);
-        const int warpUV = m.op(T::CombineRGBA, travel, across, 8, row + 1);
+        d0 = direction(dirDeg, row);
+        const int travel0 = m.op(T::Subtract, alongOf(d0, row), drift, 7, row);
+        const int across  = m.op(T::Subtract, m.op(T::Multiply, d0.cos, pz, 5, row + 1.2f),
+                                              m.op(T::Multiply, d0.sin, px, 5, row + 1.8f), 6, row + 1.2f);
+        const int warpUV = m.op(T::CombineRGBA, travel0, across, 8, row + 1);
         const int fbm    = m.fbm(warpUV, m.op(T::Divide, m.k(1.0f, 7, row + 2), length, 8, row + 2), 9, row + 1);
         warp = m.op(T::Multiply, fbm, m.k(2.5f, 9, row + 2), 10, row + 1);
     }
     else if (primary)
         warp = m.op(T::Multiply, primary->warp, m.k(0.9f, 9, row + 2), 10, row + 1);
 
+    // Once per hex of the pixel: this hex's direction, its own phase, the same
+    // warp. A companion draws its own pair of numbers (dirOffC / phOffC).
     const int kWave = m.op(T::Divide, m.k(kTau, 7, row + 3), length, 8, row + 3);
-    int phase = m.op(T::Multiply, kWave, travel, 9, row);
-    if (warp >= 0) phase = m.op(T::Add, phase, warp, 11, row);
-    const int sinP  = m.un(T::Sine, phase, 12, row);
-    const int cosP  = m.un(T::Sine, m.op(T::Add, phase, m.k(kHalfPi, 11, row + 1), 12, row + 1), 13, row + 1);
-
-    int slope = m.op(T::Multiply, steep, cosP, 14, row + 1);
-    if (fade) slope = m.op(T::Multiply, slope, *fade, 14, row + 2);
+    const Pin* dirOff = tr.warp ? hx.dirOff : hx.dirOffC;
+    const Pin* phOff  = tr.warp ? hx.phOff  : hx.phOffC;
+    Pin tiltX[3], tiltZ[3], sines[3];   // cos(phase)·cos(dir), cos(phase)·sin(dir), sin(phase)
+    for (int i = 0; i < 3; ++i)
+    {
+        const float r = row + 0.3f * static_cast<float>(i);
+        const Dir di = direction(m.op(T::Add, dirDeg, dirOff[i], 2, r + 4), r + 4);
+        const int travel = m.op(T::Subtract, alongOf(di, r + 4), drift, 7, r + 4);
+        int phase = m.op(T::Multiply, kWave, travel, 9, r + 4);
+        if (warp >= 0) phase = m.op(T::Add, phase, warp, 11, r + 4);
+        phase = m.op(T::Add, phase, phOff[i], 11, r + 4.5f);
+        const int sinPh = m.un(T::Sine, phase, 12, r + 4);
+        const int cosPh = m.un(T::Sine, m.op(T::Add, phase, m.k(kHalfPi, 11, r + 5), 12, r + 5), 13, r + 5);
+        tiltX[i] = m.op(T::Multiply, cosPh, di.cos, 14, r + 4);
+        tiltZ[i] = m.op(T::Multiply, cosPh, di.sin, 14, r + 5);
+        sines[i] = Pin{ sinPh };
+    }
+    // Blend by the hex weights, then steepness, the distance fade and the gain.
+    auto blend = [&](const Pin* v, float r) {
+        return Pin{ m.op(T::Add, m.op(T::Add, m.op(T::Multiply, hx.weight[0], v[0], 15, r),
+                                              m.op(T::Multiply, hx.weight[1], v[1], 15, r + 0.4f), 16, r),
+                         m.op(T::Multiply, hx.weight[2], v[2], 15, r + 0.8f), 17, r) };
+    };
+    Pin scale = m.op(T::Multiply, steep, hx.gain, 18, row);
+    if (fade) scale = m.op(T::Multiply, scale, *fade, 18, row + 1);
     Wave w;
-    w.slopeX = m.op(T::Multiply, slope, cosD, 15, row);
-    w.slopeZ = m.op(T::Multiply, slope, sinD, 15, row + 1);
-    w.height = m.op(T::Multiply, steep, sinP, 15, row + 2);   // crest finder for the foam
+    w.slopeX = m.op(T::Multiply, blend(tiltX, row), scale, 19, row);
+    w.slopeZ = m.op(T::Multiply, blend(tiltZ, row + 1), scale, 19, row + 1);
+    // Height, the crest finder for the foam: steepness × the blended sine, without
+    // the distance fade (a crest is a crest however far).
+    w.height = m.op(T::Multiply, blend(sines, row + 2), m.op(T::Multiply, steep, hx.gain, 18, row + 2), 19, row + 2);
     w.steep  = steep;
-    w.dirX   = cosD;
-    w.dirZ   = sinD;
+    w.dirX   = tr.warp ? Pin{ d0.cos } : Pin{};
+    w.dirZ   = tr.warp ? Pin{ d0.sin } : Pin{};
     w.speed  = knobSpeed;
     w.warp   = warp >= 0 ? Pin{ warp } : Pin{};
     return w;
@@ -440,6 +559,12 @@ Mb water()
     const int caus = m.param(T::ParamVec4, "Caustics", { 0.2f, 2.0f, 0.2f, 18.0f }, "Caustics",
         "x = strength (0 = off), y = pattern size (m), z = speed, "
         "w = camera distance (m) at which the pattern has faded out.", 14);
+    const int vari = m.param(T::ParamVec4, "Variation", { 3.5f, 1.0f, 22.0f, 2.5f }, "Waves",
+        "Breaks the repeat of the waves (texture bombing): the water is cut into hexes and every "
+        "wave train runs once per hex with its own direction and phase, the hexes blend. "
+        "x = hex size in wavelengths, y = phase offset between hexes (0..1 of a wavelength), "
+        "z = direction offset between hexes (degrees, +/-), w = seam sharpness (1 = broad blends, "
+        "8 = sharp). y = 0 and z = 0 switch it off.", 15);
 
     // Inputs, column 1 below the wave rows.
     const int wp   = m.node(T::WorldPos, 0, 16);
@@ -481,12 +606,18 @@ Mb water()
     constexpr Train kCompanionA{  38.0f, 0.58f, 0.55f, false };
     constexpr Train kCompanionB{ -33.0f, 0.64f, 0.55f, false };
     constexpr Train kCompanionC{  47.0f, 0.71f, 0.60f, false };
-    const Wave a  = waveTrain(m, waveA, px, pz, time, kPrimary,    &wA1, nullptr, 26);
-    const Wave a2 = waveTrain(m, waveA, px, pz, time, kCompanionA, &wA2, &a,      30);
-    const Wave b  = waveTrain(m, waveB, px, pz, time, kPrimary,    &wB1, nullptr, 34);
-    const Wave b2 = waveTrain(m, waveB, px, pz, time, kCompanionB, &wB2, &b,      38);
-    const Wave c  = waveTrain(m, waveC, px, pz, time, kPrimary,    &wC1, nullptr, 42);
-    const Wave c2 = waveTrain(m, waveC, px, pz, time, kCompanionC, &wC2, &c,      46);
+    // One hex grid per knob (own cell size from its wavelength, own seed), shared by
+    // the knob's train and its companion.
+    const Hex hexA = hexCells(m, waveA, vari, px, pz, 3.0f, 50, 0);
+    const Hex hexB = hexCells(m, waveB, vari, px, pz, 17.0f, 50, 34);
+    const Hex hexC = hexCells(m, waveC, vari, px, pz, 41.0f, 50, 68);
+    m.comment("Bombing: one hex grid per wave knob", 50, 0, 14, 100);
+    const Wave a  = waveTrain(m, waveA, px, pz, time, kPrimary,    &wA1, nullptr, hexA, 26);
+    const Wave a2 = waveTrain(m, waveA, px, pz, time, kCompanionA, &wA2, &a,      hexA, 30);
+    const Wave b  = waveTrain(m, waveB, px, pz, time, kPrimary,    &wB1, nullptr, hexB, 34);
+    const Wave b2 = waveTrain(m, waveB, px, pz, time, kCompanionB, &wB2, &b,      hexB, 38);
+    const Wave c  = waveTrain(m, waveC, px, pz, time, kPrimary,    &wC1, nullptr, hexC, 42);
+    const Wave c2 = waveTrain(m, waveC, px, pz, time, kCompanionC, &wC2, &c,      hexC, 46);
     m.comment("Wave A (swell) and its companion", 1, 26, 15, 8);
     m.comment("Wave B and its companion", 1, 34, 15, 8);
     m.comment("Wave C (ripples) and its companion", 1, 42, 15, 8);
@@ -638,7 +769,7 @@ Mb water()
 const std::set<std::string> kWaterParams = {
     "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "FresnelPower",
     "Reflection", "Roughness", "Specular", "Opacity", "Refraction", "FoamColor", "Foam",
-    "Caustics",
+    "Caustics", "Variation",
 };
 
 // A cap on the longest wire chain, well inside what the editor's own stack

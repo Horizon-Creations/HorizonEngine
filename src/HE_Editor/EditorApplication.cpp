@@ -5665,10 +5665,16 @@ void EditorApplication::dumpFrameHeadless()
 			                          "Engine/Materials/Water.hasset or Engine/Meshes/Plane.hasset");
 		else
 		{
+			// HE_DUMP_WATERSIZE=<metres>: side of the square (default 40). The swell
+			// is 14 m long, so a pattern that repeats every few wavelengths only
+			// shows on a plane several times that (Thema 152, Schritt 8).
+			float side = 40.0f;
+			if (const char* ws = std::getenv("HE_DUMP_WATERSIZE"); ws && *ws)
+				side = std::clamp(std::strtof(ws, nullptr), 1.0f, 4000.0f);
 			auto e = m_editorWorld->createEntity("WaterTest");
 			TransformComponent tc;
 			tc.position = glm::vec3(0.0f, 0.0f, -8.0f);
-			tc.scale    = glm::vec3(40.0f, 1.0f, 40.0f);
+			tc.scale    = glm::vec3(side, 1.0f, side);
 			reg.emplace<TransformComponent>(e, tc);
 			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
 			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
@@ -5716,7 +5722,7 @@ void EditorApplication::dumpFrameHeadless()
 				auto fe = m_editorWorld->createEntity("WaterTestFloor");
 				TransformComponent ftc;
 				ftc.position = glm::vec3(0.0f, -1.5f, -8.0f);
-				ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+				ftc.scale    = glm::vec3(side, 0.2f, side);
 				reg.emplace<TransformComponent>(fe, ftc);
 				reg.emplace<MeshComponent>(fe, MeshComponent{ HE::kDefaultCubeMeshId });
 				reg.emplace<MaterialComponent>(fe,

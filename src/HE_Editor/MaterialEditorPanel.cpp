@@ -765,6 +765,16 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			if (EditorWidgets::checkbox("On (default)", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
+		// ── v15: bombing cells — the seed picks the set of numbers; Cell and Blend are pins ──
+		case MatNodeType::BombCells:
+		{
+			int seed = static_cast<int>(std::lround(n.p[0]));
+			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
+			if (ImGui::DragInt("Seed", &seed, 0.2f)) n.p[0] = static_cast<float>(seed);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Seed");
+			break;
+		}
 		// ── v6: procedural texture — inline Scale (bigger = finer speckle) ──
 		case MatNodeType::NoiseTexture:
 			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
