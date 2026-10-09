@@ -1924,12 +1924,12 @@ gemessen (§15.4).
 
 ---
 
-## 17. Malen auf dem Auto-Material, weichere Pfützen-Kanten (2026-10-09)
+## 18. Malen auf dem Auto-Material, weichere Pfützen-Kanten (2026-10-09)
 
 **Zwei Änderungen am Builder** (`AutoLandscapeMaterial.cpp`), das ausgelieferte Asset ist neu erzeugt
 (`landscape_tex_gen EditorDeps/EngineContent/Materials --material`).
 
-### 17.1 Pfützen werden nicht mehr an Böschungen abgeschnitten
+### 18.1 Pfützen werden nicht mehr an Böschungen abgeschnitten
 
 Das automatische Wasser verschwand innerhalb eines Streifens von `0,5 × … 1 × "Puddle Max Slope"`
 (bei 0,03 also nur 0,015 breit), eine Pfütze endete deshalb an jeder Geländekante auf einer harten
@@ -1937,7 +1937,7 @@ Linie. Jetzt blendet es über `0,2 × … 1 ×` aus, und der Standardwert ist `0
 Bereich bis 0,4). Dieselbe Formel steht in den drei GI-Spiegeln (`GiLandscape.h`, OpenGL, Metal —
 `smoothstep(0.2 * pms, pms, slope)`), `test_culling` pinnt den Text.
 
-### 17.2 Alle Schichten sind malbar
+### 18.2 Alle Schichten sind malbar
 
 Das Material deklariert jetzt sechs Mal-Schichten (`kAutoLandscapePaintLayerNames`), das Landscape-
 Werkzeug listet sie:
