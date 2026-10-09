@@ -13987,6 +13987,45 @@
        "r": [
         {
          "s": "",
+         "t": "No repeating pattern"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A sum of waves repeats exactly, so on a large surface the same bright patches and the same foam dots come back row after row. The water is therefore bombed, the way texture bombing hides a tiling texture: the surface is cut into hexagons, each wave knob (with its shorter companion) is evaluated once for every hexagon a pixel touches, each time with that hexagon's own direction and phase, and the three results are blended. Inside a hexagon the waves are as regular as before; neighbours do not agree. The "
+        },
+        {
+         "s": "c",
+         "t": "Variation"
+        },
+        {
+         "s": "",
+         "t": " parameter sets the hexagon size, the offsets and how sharp the seams are. The same hex grid is available to any material graph as the "
+        },
+        {
+         "s": "b",
+         "t": "Bombing Cells"
+        },
+        {
+         "s": "",
+         "t": " node, which reads no texture."
+        }
+       ]
+      },
+      {
+       "alt": "A 400 m water plane seen from straight above, twice. Left, Variation switched off: the same bright patches and white foam dots repeat in rows. Right, the default: the pattern is irregular.",
+       "k": "figure",
+       "src": "water_variation.jpg"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
          "t": "Parameters"
         }
        ]
@@ -14373,6 +14412,32 @@
            "t": "0.2, 2.0, 0.2, 18"
           }
          ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Variation"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Breaks the repeat of the waves. x: hexagon size in wavelengths. y: phase offset between hexagons, 0 to 1 of a wavelength. z: direction offset between hexagons in degrees (plus or minus). w: seam sharpness (1 = broad blends, 8 = sharp). y = 0 and z = 0 switch it off."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "3.5, 1.0, 22, 2.5"
+          }
+         ]
         ]
        ]
       },
@@ -14404,6 +14469,12 @@
           "s": "",
           "t": "With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.1, 3) for clear water where both show clearly, and where Caustics become visible."
          }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Variation runs every wave train three times per pixel (three sines instead of one; the noise that bends the crests is not repeated). Where two hexagons meet, waves of different phase add up, so a seam is different from a hexagon rather than calmer; turn Variation down (y and z toward 0) if you want one clean wave pattern."
+         }
         ]
        ],
        "k": "ul"
@@ -14411,7 +14482,7 @@
      ],
      "eyebrow": "Engine content",
      "id": "water",
-     "text": "The engine ships a ready made water material, Engine/Materials/Water.hasset. It is an ordinary node graph material (lit, Translucent blend), built entirely from procedural nodes, so it needs no textures and runs on Metal, OpenGL, D3D11, D3D12 and Vulkan. It is offered in addition to the default material and replaces nothing: meshes without a material stay grey. The engine water material on a plane: three wave trains, sky reflection, caustic lines and foam on the crests Using it Add a Plane and pick Engine/Materials/Water in the material slot of its Material component. No setup is needed: the material is listed there and in the Content Browser under Engine/Materials in every project. Every parameter is editable per entity in the Details panel under Material Parameters (this entity). Hover a row for its tooltip, F1 opens its reference entry. Leaving a value untouched keeps the material default. For reusable variants (lake, ocean, swamp) right click Water.hasset and choose Create Material Instance. That creates a new project asset with Water as parent; the engine material itself is never modified. At runtime, horizon.setMaterialParam(entity, \"Turbidity\", 0.1, 3.0) takes one to four numbers. It writes the material asset, so every entity using the same material changes with it; give an entity its own instance if it should change alone. The water animates on its own from the engine clock. The order of the rows in the Details panel can differ between platforms, so look rows up by name. Parameters Parameter Type Meaning Default ShallowColor Color Colour where the water is clear or shallow. 0.10, 0.42, 0.45 DeepColor Color Colour the water fades to with depth and absorption. 0.01, 0.07, 0.12 Turbidity Vec2 x: absorption per metre. y: assumed water depth in metres. 0 absorption gives clear water. 0.35, 3.0 WaveA, WaveB, WaveC Vec4 Three wave trains. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off. A: 30, 1.2, 8, 0.25\nB: 310, 0.8, 3.5, 0.18\nC: 100, 0.5, 1.2, 0.12 FresnelPower Float 1 to 10 Exponent of the Fresnel term computed from the wave normal. Higher values keep the reflection to grazing angles. 5 Reflection Float 0 to 1 Strength of the sky and scene reflection; also raises opacity at grazing angles. 0.8 Roughness Float 0 to 1 Surface roughness of the highlight and reflection. 0.06 Specular Float 0 to 1 Specular reflectance; the shader uses Specular × Reflection. 0.3 Opacity Float 0 to 1 Transparency looking straight down into clear water. Depth, Fresnel and foam raise it from there. 0.55 Refraction Float 0 to 1 Bends the view ray towards the wave normal, so the depth tint and the caustics move with the waves. 0.3 FoamColor Color Colour of the foam. 0.92, 0.95, 0.97 Foam Vec4 x: share of the wave crests covered (0 to 1). y: strength, 0 turns foam off. z: noise size in metres. w: drift in m/s. 0.18, 0.8, 1.5, 0.3 Caustics Vec4 x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance). 0.35, 2.5, 0.25, 25 Limits The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from Turbidity, foam sits on the wave crests rather than along a shoreline, caustics are drawn on the water surface, and the scene seen through the water is not distorted. Waves move the normals, not the vertices, and assume a roughly horizontal surface. The engine plane is a single quad, so there is no visible displacement at the silhouette. With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.05, 3) for clear water where both show clearly.",
+     "text": "The engine ships a ready made water material, Engine/Materials/Water.hasset. It is an ordinary node graph material (lit, Translucent blend), built entirely from procedural nodes, so it needs no textures and runs on Metal, OpenGL, D3D11, D3D12 and Vulkan. It is offered in addition to the default material and replaces nothing: meshes without a material stay grey. The engine water material on a plane at sunrise: a spread of wave trains with fine chop, the sky and the sun glittering in the ripples, a few whitecaps Using it Add a Plane and pick Engine/Materials/Water in the material slot of its Material component. No setup is needed: the material is listed there and in the Content Browser under Engine/Materials in every project. Every parameter is editable per entity in the Details panel under Material Parameters (this entity). Hover a row for its tooltip, F1 opens its reference entry. Leaving a value untouched keeps the material default. For reusable variants (lake, ocean, swamp) right click Water.hasset and choose Create Material Instance. That creates a new project asset with Water as parent; the engine material itself is never modified. At runtime, horizon.setMaterialParam(entity, \"Turbidity\", 0.1, 3.0) takes one to four numbers. It writes the material asset, so every entity using the same material changes with it; give an entity its own instance if it should change alone. The water animates on its own from the engine clock. The order of the rows in the Details panel can differ between platforms, so look rows up by name. The surface is a spread of waves, not one pattern: each of WaveA, WaveB and WaveC also drives a second, shorter and weaker train at a turned angle, an irregular chop rides on top, and slow gusts make some patches rougher than others. The colour is dark on purpose; most of what you see of real water is the sky in it, so the picture depends on the sky and the time of day. The sun's glitter appears where the waves tilt toward it. No repeating pattern A sum of waves repeats exactly, so on a large surface the same bright patches and the same foam dots come back row after row. The water is therefore bombed, the way texture bombing hides a tiling texture: the surface is cut into hexagons, each wave knob (with its shorter companion) is evaluated once for every hexagon a pixel touches, each time with that hexagon's own direction and phase, and the three results are blended. Inside a hexagon the waves are as regular as before; neighbours do not agree. The Variation parameter sets the hexagon size, the offsets and how sharp the seams are. The same hex grid is available to any material graph as the Bombing Cells node, which reads no texture. A 400 m water plane seen from straight above, twice. Left, Variation switched off: the same bright patches and white foam dots repeat in rows. Right, the default: the pattern is irregular. Parameters Parameter Type Meaning Default ShallowColor Color Colour where the water is clear or shallow. 0.045, 0.20, 0.22 DeepColor Color Colour the water fades to with depth and absorption. 0.004, 0.028, 0.052 Turbidity Vec2 x: absorption per metre. y: assumed water depth in metres. 0 absorption gives clear water. 0.45, 4.0 WaveA, WaveB, WaveC Vec4 Three wave trains, each with a shorter companion at a turned angle. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off. The three steepnesses together also set the strength of the chop; all three at 0 is flat. A: 20, 1.0, 14, 0.07\nB: 335, 0.8, 5, 0.10\nC: 70, 0.5, 1.6, 0.09 FresnelPower Float 1 to 10 Exponent of the Fresnel term computed from the wave normal. Higher values keep the reflection to grazing angles. 5 Reflection Float 0 to 1 Strength of the sky and scene reflection; also raises opacity at grazing angles. 0.8 Roughness Float 0 to 1 Surface roughness of the highlight and reflection. Distant water is made rougher on top. 0.08 Specular Float 0 to 1 Specular reflectance; the shader uses Specular × Reflection. 0.3 Opacity Float 0 to 1 Transparency looking straight down into clear water. Depth, Fresnel and foam raise it from there. 0.5 Refraction Float 0 to 1 Bends the view ray towards the wave normal, so the depth tint and the caustics move with the waves. 0.3 FoamColor Color Colour of the foam. 0.82, 0.88, 0.90 Foam Vec4 x: share of the wave crests covered (0 to 1; 0.3 is a rough sea). y: strength, 0 turns foam off. z: size of the noise that frays it, in metres. w: drift in m/s. 0.06, 0.5, 0.7, 0.3 Caustics Vec4 x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance). It brightens the water body and fades with its transmittance, so it shows in clear shallow water, not in deep or murky water. 0.2, 2.0, 0.2, 18 Variation Vec4 Breaks the repeat of the waves. x: hexagon size in wavelengths. y: phase offset between hexagons, 0 to 1 of a wavelength. z: direction offset between hexagons in degrees (plus or minus). w: seam sharpness (1 = broad blends, 8 = sharp). y = 0 and z = 0 switch it off. 3.5, 1.0, 22, 2.5 Limits The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from Turbidity, foam sits on the wave crests rather than along a shoreline, caustics brighten the water body instead of lighting a floor, and the scene seen through the water is not distorted. Waves move the normals, not the vertices, and assume a roughly horizontal surface. The engine plane is a single quad, so there is no visible displacement at the silhouette. With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.1, 3) for clear water where both show clearly, and where Caustics become visible. Variation runs every wave train three times per pixel (three sines instead of one; the noise that bends the crests is not repeated). Where two hexagons meet, waves of different phase add up, so a seam is different from a hexagon rather than calmer; turn Variation down (y and z toward 0) if you want one clean wave pattern.",
      "title": "Engine Water"
     }
    ],

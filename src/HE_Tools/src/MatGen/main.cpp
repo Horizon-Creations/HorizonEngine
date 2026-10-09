@@ -509,6 +509,12 @@ Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin dr
 // white blob. A caustic net drawn ON the surface and white blobs were the two
 // things that read as a cartoon at first sight, so both are quiet by default.
 //
+// Tiling, then (docs/water-shader-plan.md §12): a sum of sines is periodic, and on
+// a surface a few hundred metres across the same bright patch and the same foam dot
+// came back row after row. The wave trains are therefore bombed on a hex grid
+// (waveTrain, hexCells; the Variation knob). Sixteen parameters, every HeParams
+// slot is taken.
+//
 // Assumes a roughly horizontal surface: the wave slope is subtracted from the
 // mesh normal in world XZ.
 Mb water()
