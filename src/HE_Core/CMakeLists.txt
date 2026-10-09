@@ -62,6 +62,7 @@ add_library(HorizonCore SHARED
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp
 	src/ContentManager/AssetRefScan.cpp
+	src/ContentManager/EngineDependencies.cpp
 	src/ContentManager/TextureArrayBuild.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 

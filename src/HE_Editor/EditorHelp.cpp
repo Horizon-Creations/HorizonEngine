@@ -2826,6 +2826,21 @@ namespace
 	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
 	  "whenever you want it.",
 	  "", "getting-started#first-project" },
+	{ "Project Hub/Open Anyway", "",
+	  "Opens the project although some of the engine content it uses could not be "
+	  "downloaded. Materials and meshes that use the missing files look wrong until "
+	  "they arrive; the editor keeps trying to fetch them whenever something needs them.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Close Project", "",
+	  "Does not open the project and goes back to the Project Hub. Nothing was loaded, "
+	  "so nothing needs saving; open it again once the EngineContent server is reachable.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Close Editor", "",
+	  "Quits the editor without opening the project.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Cancel", "",
+	  "Stops checking the project's engine content and does not open it.",
+	  "", "editor#project-hub" },
 	{ "Documentation/Start", "",
 	  "Back to the first page of the manual.", "", "editor#menus" },
 	{ "Documentation/Online", "",

@@ -1,6 +1,7 @@
 #include "ProjectHubPanel.h"
 #include "EditorApplication.h"           // AppContext, ProjectManager, EditorConfig
 #include "EditorWidgets.h"
+#include "ProjectPreflight.h"           // engine-content check in front of every open
 #include "EditorHelp.h"                  // "Project Hub/<label>" for its controls
 #include "EditorTheme.h"                 // brand palette — the hub is the first
                                          // surface after the splash, so it is the
@@ -469,13 +470,10 @@ void render(AppContext& ctx)
 
             if (!exists) ImGui::PopStyleColor(4);
 
-            if (ImGui::IsItemClicked() && exists && ctx.projectManager->loadProject(known[i]))
-            {
-                ctx.globalState->addKnownProject(known[i]);
-                ctx.globalState->writeConfig();
-                ctx.contentRefreshPending = true;
-                ctx.projectLoaded = true;
-            }
+            // Through the preflight: the project's engine-content references are fetched
+            // (and a missing one asked about) BEFORE it loads — see ProjectPreflight.h.
+            if (ImGui::IsItemClicked() && exists && !ProjectPreflight::busy())
+                ProjectPreflight::request(ctx, known[i]);
 
             if (ImGui::BeginPopupContextItem("##KnownCtx"))
             {
@@ -651,17 +649,7 @@ void render(AppContext& ctx)
             ctx.pendingFileResult.clear();
         }
         ctx.hubOpenError.clear();
-        if (ctx.projectManager->loadProject(chosen))
-        {
-            ctx.globalState->addKnownProject(chosen);
-            ctx.globalState->writeConfig();
-            ctx.contentRefreshPending = true;
-            ctx.projectLoaded = true;
-        }
-        else
-        {
-            ctx.hubOpenError = "Failed to load project file.";
-        }
+        ProjectPreflight::request(ctx, chosen);
     }
 
     if (ctx.fontBody) ImGui::PopFont();

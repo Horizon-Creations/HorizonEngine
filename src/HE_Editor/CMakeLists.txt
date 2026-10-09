@@ -283,6 +283,7 @@ add_executable(HorizonEditor WIN32
 	EditorToolbar.cpp
 	OutlinerPanel.cpp
 	ProjectHubPanel.cpp
+	ProjectPreflight.cpp
 	TutorialPanel.cpp
 	TutorialSteps.cpp
 	ProfilerPanel.cpp
@@ -366,7 +367,7 @@ add_executable(HorizonEditor WIN32
 	# for one thing, the HE_DUMP_TUTORIALUI witness (TutorialPanel.cpp), which
 	# pictures the tour card in the running editor. Plain C++ over imgui.h.
 	${CMAKE_SOURCE_DIR}/tests/ImGuiSoftwareRaster.cpp
- "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "AudioEditorPanel.h" "AudioWaveformView.h" "AudioMixView.h" "TextureViewerPanel.h" "EditorInput.h" "ExportDialogPanel.h" "BuildProgressDialog.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "ViewportToolbar.h" "EditorToolbar.h" "OutlinerPanel.h" "ProjectHubPanel.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "ConsolePanel.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ProjectSettingsPanel.h" "ToolchainDialog.h" "ReportIssueDialog.h" "EditorDockState.h" "PlayReportPanel.h" "AudioMixerPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
+ "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "AudioEditorPanel.h" "AudioWaveformView.h" "AudioMixView.h" "TextureViewerPanel.h" "EditorInput.h" "ExportDialogPanel.h" "BuildProgressDialog.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "ViewportToolbar.h" "EditorToolbar.h" "OutlinerPanel.h" "ProjectHubPanel.h" "ProjectPreflight.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "ConsolePanel.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ProjectSettingsPanel.h" "ToolchainDialog.h" "ReportIssueDialog.h" "EditorDockState.h" "PlayReportPanel.h" "AudioMixerPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
 
 if(APPLE)
 	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h

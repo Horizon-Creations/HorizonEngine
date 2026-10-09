@@ -3,6 +3,7 @@ add_executable(he_tests
     test_slotmap.cpp
     test_hasset.cpp
     test_contentmanager.cpp
+    test_engine_dependencies.cpp
     test_asset_ref_retarget.cpp
     test_asset_ref_scan.cpp
     test_scene_pick.cpp

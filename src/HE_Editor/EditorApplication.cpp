@@ -5,6 +5,7 @@
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
+#include "ProjectPreflight.h"      // engine-content check in front of the first project open
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
@@ -1998,7 +1999,13 @@ void EditorApplication::OnInit()
 		HE_LOG_INFO(Editor, "EditorApplication: opening %s (handed over at launch)",
 		            launchProject.c_str());
 		splashStatus("Opening " + std::filesystem::path(launchProject).stem().string(), 0.75f);
-		if (m_projectManager.loadProject(launchProject))
+		if (m_dumpPath.empty())
+		{
+			// The engine-content check (sign in, download, ask about what is missing) runs
+			// on the start screen before the project loads: the first frame hands it over.
+			ProjectPreflight::requestAtStartup(launchProject);
+		}
+		else if (m_projectManager.loadProject(launchProject))
 		{
 			m_globalState->addKnownProject(launchProject);
 			m_globalState->writeConfig();
@@ -2014,7 +2021,9 @@ void EditorApplication::OnInit()
 		splashStatus("Opening " +
 		             std::filesystem::path(m_globalState->getLastProjectPath())
 		                 .stem().string(), 0.75f);
-		if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
+		if (m_dumpPath.empty())
+			ProjectPreflight::requestAtStartup(m_globalState->getLastProjectPath());
+		else if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
 		{
 			m_projectLoaded         = true;
 			m_contentRefreshPending = true;
@@ -11780,6 +11789,7 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	ProjectPreflight::shutdown();   // joins a still-running engine-content check
 	// Give the network back what a session took, FIRST and synchronously: the
 	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits
 	// while hosting never presses "leave", and none of those clean themselves up

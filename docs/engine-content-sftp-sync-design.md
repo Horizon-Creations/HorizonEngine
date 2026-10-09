@@ -346,3 +346,25 @@ Ankunft verpassen; die Grafik-Backends lösen Graph-Texturen jeden Frame neu auf
 sie deshalb nach. Getestet in `test_contentmanager.cpp` („Remote EngineContent: …“, fünf Fälle mit einem
 simulierten Server: Pfad-Verweis, lokale Datei nicht überschatten, Material zieht Textur, fehlgeschlagener Download,
 Funktion vor Regenerierung).
+
+## Preflight beim Projektöffnen (2026-10-09)
+
+Das Nachladen per Pfad (oben) greift erst, wenn ein Projekt geladen ist — die ersten Frames zeigen dann graue
+Flächen. Deshalb läuft vor **jedem** Öffnen eines Projekts (Hub: Recent-Liste, „Open…“, Clone, Datei-Doppelklick;
+Editor: File ▸ Open; Start mit dem zuletzt benutzten/übergebenen Projekt) ein Preflight (`ProjectPreflight`):
+
+1. **Anmelden** am EngineContent-Server (`refreshManifestBlocking`, dieselbe Verbindung wie der Editor-Probe-Check).
+   Ohne Verbindung gilt der gecachte Katalog der letzten guten Sitzung — was schon heruntergeladen ist, zählt weiter.
+2. **Verweise sammeln** (`HE::EngineDeps::resolve`, HE_Core, ohne eigenes Netzwerk): `.heproj`, `.hcode` und
+   `Content/` werden nach `Engine/….hasset`-Pfaden durchsucht (Assets über den 32-Byte-`HAsset`-Header; Texturen/Audio/
+   Fonts werden nicht gelesen), Szenen zusätzlich nach UUIDs, die der Katalog kennt. Danach wird breitenweise
+   durch die Engine-Dateien selbst weitergelaufen (Material → Funktionen → Texturen).
+3. **Fehlendes herunterladen** (`enqueueDownload`, Passive) mit Fortschritt (Datei + Bytes) und Abbrechen-Knopf.
+4. Ist alles da, öffnet sich das Projekt wie bisher. Sonst erscheint eine Warnung mit der Liste (Pfad, Grund,
+   „used by“) und drei Antworten: **Open Anyway** (öffnet; Rest lädt weiter bei Bedarf nach), **Close Project**
+   (Hub bleibt, nichts wurde geladen) oder **Close Editor**.
+
+Beim Wechsel aus dem Editor bleibt das alte Projekt offen, bis der Preflight durch ist; die Sitzung endet erst
+unmittelbar vor dem Laden. `HE_SKIP_PROJECT_PREFLIGHT=1` und der Frame-Dump (`m_dumpPath`) öffnen auf dem alten Weg.
+Getestet: `tests/test_engine_dependencies.cpp` (9 Fälle: Token-Erkennung, Materialkette, Szenen-UUIDs, Katalog fehlt,
+Download scheitert, Abbruch, bereits lokal/Cache/Projekt-Override).
