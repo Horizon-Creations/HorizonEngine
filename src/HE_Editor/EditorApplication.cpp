@@ -6,6 +6,7 @@
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
 #include "ProjectPreflight.h"      // engine-content check in front of the first project open
+#include "SceneDiskWatch.h"        // the open scene's file stamp: our own save is not a pull
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
@@ -11392,6 +11393,11 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	// changes with it, which is what a human sees after the save anyway. An
 	// edit committed in this very frame is marked first, or the sync would be
 	// what undoes it.
+	// The file changed on disk since this editor read or wrote it (a git pull): saving
+	// now would put the stale open scene over it. The reload question is raised and the
+	// save waits for the answer.
+	if (SceneDiskWatch::blocksSave(path)) return false;
+
 	recordPrefabEdits();
 	syncPrefabInstances("save");
 
@@ -11399,6 +11405,7 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
 	{
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);         // our own write, not somebody else's change
 		m_savedRevision    = m_undo.revision(); // scene is now clean
 		// The file now holds everything the snapshot held — and a leftover copy
 		// would be offered as "unsaved work" at the next start.
@@ -11593,6 +11600,7 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		loaded = true;
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);
 		// Before the asset preload: the sync may change which meshes and
 		// materials the placed prefabs reference.
 		syncPrefabInstances("open");

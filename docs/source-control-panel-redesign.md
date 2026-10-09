@@ -43,3 +43,16 @@ a plain blob. `CommitStaged` repeats the pass for files that reached the index s
 other way and re-adds those with `--renormalize`.
 
 Tests: `tests/test_git_panel_ops.cpp` (real repositories, no mocks).
+
+## After a pull: the open scene (2026-10-09)
+A pull (or checkout, restore, stash pop) rewrites the scene file under a running
+editor. Nothing noticed, so the editor kept showing the old version and the next save
+wrote it back over what came from the server - the landscape someone else had
+refined looked coarse again. `SceneDiskWatch` now watches the open scene's file
+(`SceneFileStamp`: size + time as the cheap check, a content hash as the real one, so
+a git touch with identical bytes is not a change). When the bytes differ it asks:
+**Reload Scene** / **Keep My Version**. A save is refused while the file has changed
+and nobody has answered (`SceneDiskWatch::blocksSave`), so a save in the second
+before the poll cannot overwrite a pull either. The scene serializer itself is
+lossless (sculpt heights and weights are stored as raw base64), so the loss was the
+stale scene being written back, not the file format.

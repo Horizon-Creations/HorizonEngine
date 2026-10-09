@@ -2826,6 +2826,16 @@ namespace
 	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
 	  "whenever you want it.",
 	  "", "getting-started#first-project" },
+	{ "Scene Changed/Reload Scene", "",
+	  "Loads the scene file as it is on disk now, replacing what is open. Use it "
+	  "after a git pull that brought a newer version of this scene. Unsaved edits "
+	  "in the open scene are dropped, and the undo history starts over.",
+	  "", "" },
+	{ "Scene Changed/Keep My Version", "",
+	  "Leaves the open scene as it is. Nothing is loaded, and the next save "
+	  "overwrites the file that came from disk with what is open here. Another "
+	  "change to the file on disk asks again.",
+	  "", "" },
 	{ "Project Hub/Open Anyway", "",
 	  "Opens the project although some of the engine content it uses could not be "
 	  "downloaded. Materials and meshes that use the missing files look wrong until "

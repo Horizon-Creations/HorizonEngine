@@ -59,6 +59,7 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "ProjectPreflight.h"            // engine-content check in front of every project open
+#include "SceneDiskWatch.h"             // "the open scene changed on disk (git pull) - reload?"
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
 #include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
 #include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
@@ -818,6 +819,11 @@ void EditorUI::render(AppContext& ctx, float dt)
     // the hub while a project is being opened and over the editor while one is
     // being switched to, and it is what finally flips projectLoaded.
     ProjectPreflight::render(ctx);
+
+    // ── The open scene changed on disk ───────────────────────────────────────
+    // A pull rewrites the scene file under the editor; this asks whether to reload it.
+    if (ctx.projectLoaded && !ProjectPreflight::busy())
+        SceneDiskWatch::render(ctx);
 
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)
