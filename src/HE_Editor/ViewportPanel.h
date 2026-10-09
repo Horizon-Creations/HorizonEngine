@@ -129,7 +129,7 @@ namespace ViewportPanel
 		bool joints        = true;  // joint lines, anchors and hinge arcs
 		bool navMesh       = true;  // baked NavMesh polygons (per component too)
 		bool editorIcons   = true;  // light / camera / audio-source billboards
-		bool guides        = true;  // rope + trail handles, root-motion and look-at previews
+		bool guides        = true;  // rope + trail handles, spline lines, root-motion and look-at previews
 		bool collaborators = true;  // peers' rings, selections and name tags
 		bool scriptDebug   = true;  // debug.* lines from scripts and HorizonCode
 		bool streamingCells = true; // a split scene's cell squares + load/unload radius (StreamingDebugView)

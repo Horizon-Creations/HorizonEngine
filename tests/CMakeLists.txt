@@ -81,6 +81,9 @@ add_executable(he_tests
     # The Landscape panel's Foliage brush, driven the same way: mode well,
     # Grow/Erase well, and a drag over a top-down viewport into the mask.
     test_terrain_tools_ui.cpp
+    # The Spline mode's viewport tool and panel, driven headless like the Landscape
+    # tools above (the real SplineTool, a real AppContext, a hand-fed mouse).
+    test_spline_tool_ui.cpp
     # The Audio Mixer, driven the same way: strips from a real ProjectData, a
     # click on M reaching the device-less AudioEngine as a mute, S as a solo.
     test_audio_mixer_ui.cpp
@@ -699,6 +702,9 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
     # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
+    # The Spline mode's tool, for test_spline_tool_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED; SplineEdit and the point gizmo are already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineTool.cpp
     # The Audio Mixer window, for test_audio_mixer_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads ProjectData (HorizonTools, linked
     # below) and AudioEngine (HorizonScene), both already here.
@@ -774,6 +780,8 @@ set_source_files_properties(
     test_inspector_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
     test_terrain_tools_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineTool.cpp
+    test_spline_tool_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
     test_audio_mixer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp

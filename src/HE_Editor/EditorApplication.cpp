@@ -3961,9 +3961,10 @@ void EditorApplication::OnRender(float dt)
 			// Splines: every one as a line, the selected ones with a handle on
 			// each control point, and in Spline mode the point being edited and
 			// the spot a click on the line would insert at. Authoring furniture,
-			// so not while the game runs. Built in ViewportOverlays, the code the
-			// HE_DUMP_SPLINETEST witness draws with.
-			if (show.guides && !m_isPlaying)
+			// so not while the game runs, and in Spline mode whatever the Guides
+			// switch says: there the splines are the subject. Built in
+			// ViewportOverlays, the code the HE_DUMP_SPLINETEST witness draws with.
+			if ((show.guides || m_editorConfig.mode == EditorMode::Spline) && !m_isPlaying)
 				HE::Ed::ViewportOverlays::appendSplineGuides(
 					*m_editorWorld, m_selection,
 					m_editorConfig.mode == EditorMode::Spline
@@ -7902,9 +7903,9 @@ void EditorApplication::dumpFrameHeadless()
 	// onto a floor, and the result is drawn by ViewportOverlays. The value is a
 	// list of words: "closed" joins the last point to the first, "undo" takes
 	// the last two edits back through EditorUndo and lets the tool find its
-	// spline again, "redo" brings one back, "hover" puts the cursor on a handle
-	// and then on the line (the highlighted box and the insert cross). The log
-	// line carries the numbers to read without the picture.
+	// spline again, "redo" (with "undo") brings one back, "hover" puts the cursor
+	// on the line (the insert cross), "hoverpoint" on a handle (its box lights
+	// up). The log line carries the numbers to read without the picture.
 	if (const char* st = std::getenv("HE_DUMP_SPLINETEST"); st && *st && m_editorWorld)
 	{
 		const std::string words(st);
@@ -7968,19 +7969,20 @@ void EditorApplication::dumpFrameHeadless()
 				tool.sync(*m_editorWorld, m_selection, m_undo.revision());
 			}
 		}
-		if (has("hover"))
+		if (has("hover") || has("hoverpoint"))
 		{
-			// On the second handle (the box lights up), then on the line between
-			// the third and fourth (the insert cross) — one frame each is all a
-			// picture holds, so the cross is what stays.
+			// "hover": the mouse on the line between the third and fourth point
+			// (the insert cross). "hoverpoint": on the third handle itself (its
+			// box lights up). One hover state, so one of the two.
 			const SplineComponent* s = splineNow();
 			if (s && s->controlPoints.size() > 3)
 			{
 				const Entity e = tool.activeSpline(*m_editorWorld, m_selection);
 				const glm::mat4 model = HE::worldMatrixOf(*m_editorWorld, e);
 				const HE::spline::Curve curve(*s);
+				const glm::vec3 local = has("hoverpoint") ? s->controlPoints[2] : curve.position(2.5f);
 				glm::vec2 px;
-				if (SplineEdit::project(view, glm::vec3(model * glm::vec4(curve.position(2.5f), 1.0f)), px))
+				if (SplineEdit::project(view, glm::vec3(model * glm::vec4(local, 1.0f)), px))
 					tool.hover(*m_editorWorld, m_selection, view, px);
 			}
 		}

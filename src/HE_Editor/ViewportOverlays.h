@@ -88,14 +88,17 @@ namespace HE::Ed::ViewportOverlays
 	constexpr glm::vec3 kTriggerColor           { 1.0f, 0.0f, 1.0f };
 
 	// Splines: green, so they read apart from the amber of selection and ropes
-	// and the cyan/magenta of colliders. The first point is blue-ish — it says
-	// which way the line runs.
-	constexpr glm::vec3 kSplineColor            { 0.35f, 0.95f, 0.55f };
-	constexpr glm::vec3 kSplineDimColor         { 0.22f, 0.52f, 0.32f };
-	constexpr glm::vec3 kSplineHandleColor      { 0.85f, 1.00f, 0.88f };
-	constexpr glm::vec3 kSplineStartColor       { 0.45f, 0.80f, 1.00f };
-	constexpr glm::vec3 kSplineSelectedColor    { 1.00f, 0.80f, 0.00f };
-	constexpr glm::vec3 kSplineHoverColor       { 1.00f, 1.00f, 1.00f };
+	// and the cyan/magenta of colliders. The first point is violet — it says
+	// which way the line runs. All of them saturated and none of them pale: the
+	// lines are one pixel wide, and a pale green vanished on a sunlit floor in
+	// the HE_DUMP_SPLINETEST picture (the hover colour white on white most of
+	// all). Orange for the point being edited, rose for the one under the mouse.
+	constexpr glm::vec3 kSplineColor            { 0.10f, 0.85f, 0.30f };
+	constexpr glm::vec3 kSplineDimColor         { 0.10f, 0.50f, 0.25f };
+	constexpr glm::vec3 kSplineHandleColor      { 0.00f, 0.70f, 0.95f };
+	constexpr glm::vec3 kSplineStartColor       { 0.40f, 0.25f, 1.00f };
+	constexpr glm::vec3 kSplineSelectedColor    { 1.00f, 0.45f, 0.00f };
+	constexpr glm::vec3 kSplineHoverColor       { 1.00f, 0.15f, 0.45f };
 	// Half the side of a handle box as a fraction of its distance from the
 	// viewer: about a dozen pixels on screen at any range.
 	constexpr float     kSplineHandleScale      = 0.008f;

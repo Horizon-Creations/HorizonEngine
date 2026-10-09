@@ -262,11 +262,11 @@ void renderPanel(AppContext& ctx)
 
 	ImGui::Spacing();
 	ImGui::SeparatorText("Controls");
-	ImGui::TextDisabled("Click       add a point");
-	ImGui::TextDisabled("Click line  insert a point");
-	ImGui::TextDisabled("Drag gizmo  move the point");
-	ImGui::TextDisabled("Del         delete the point");
-	ImGui::TextDisabled("Esc         let go of the point");
+	ImGui::TextDisabled("Click: add a point");
+	ImGui::TextDisabled("Click the line: insert a point");
+	ImGui::TextDisabled("Drag the gizmo: move the point");
+	ImGui::TextDisabled("Del: delete the point");
+	ImGui::TextDisabled("Esc: let go of the point");
 #else
 	(void)ctx;
 #endif

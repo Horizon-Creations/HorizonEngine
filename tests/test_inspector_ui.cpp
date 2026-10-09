@@ -20,6 +20,7 @@
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/NetworkComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/SplineComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/WeatherComponent.h>
@@ -153,6 +154,9 @@ namespace
 		ImGuiID       networkHeader = 0;   // the "Replication" one, likewise
 		ImGuiID       replicatesBox = 0;   // and the one switch inside it
 		ImGuiID       activeBox     = 0;   // the Active checkbox's id, likewise
+		ImGuiID       splineClosed  = 0;   // the Spline section's Closed switch, likewise
+		ImGuiID       splinePlus    = 0;   // its "+ Point" button
+		ImGuiID       splineRemove0 = 0;   // the Remove button on its first point row
 	};
 
 	// One frame of the panel at a fixed place, with the pointer where the
@@ -171,6 +175,11 @@ namespace
 		p.networkHeader = ImGui::GetID("Replication");
 		p.replicatesBox = ImGui::GetID("Replicates");
 		p.activeBox     = ImGui::GetID("##entity_active");
+		p.splineClosed  = ImGui::GetID("Closed##spline");
+		p.splinePlus    = ImGui::GetID("+ Point");
+		ImGui::PushID(0);
+		p.splineRemove0 = ImGui::GetID("Remove##splinept");
+		ImGui::PopID();
 		InspectorPanel::renderFor(p.ctx, p.world, p.entity, p.ctx.undoSys);
 		ImGui::End();
 		EditorWidgets::drawQueuedHelp();
@@ -287,6 +296,78 @@ TEST_CASE("inspector ui: the Active box is the first thing on the panel and one 
 	CHECK(reg.view<InactiveComponent>().size() == 1);
 	REQUIRE(undo.undo());
 	CHECK(reg.view<InactiveComponent>().size() == 0);
+}
+
+TEST_CASE("inspector ui: a spline's Details section closes the line, adds and removes points, each one undo step")
+{
+	// The numeric half of the spline tool (the Scene toolbar's Spline mode is the
+	// other): the section has to be on the panel for an entity that carries a
+	// SplineComponent, and its three gestures have to land in the world AND in
+	// the undo history, one step each.
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity line = world.createEntity("Shore");
+	SplineComponent spline;
+	spline.controlPoints = { { 0.0f, 0.0f, 0.0f }, { 4.0f, 0.0f, 0.0f } };
+	reg.emplace<SplineComponent>(line, spline);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	Panel p{ ctx, world, line };
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) frame(p, false, false, i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-spline.bmp");
+
+	const float leftX = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+	REQUIRE(p.splineClosed != 0);
+	const float closedY = yOf(p, p.splineClosed, leftX);
+	REQUIRE_MESSAGE(closedY > 0.0f, "an entity with a SplineComponent has no Closed switch on the panel");
+
+	REQUIRE_FALSE(reg.get<SplineComponent>(line).closed);
+	REQUIRE_FALSE(undo.canUndo());
+	clickAt(p, leftX, closedY);
+	CHECK(reg.get<SplineComponent>(line).closed);
+	CHECK(undo.canUndo());
+	CHECK(reg.get<SplineComponent>(line).controlPoints.size() == 2);   // nothing else moved
+
+	// "+ Point" carries on along the last segment (0 -> 4 on X, so the next is 8).
+	const float plusY = yOf(p, p.splinePlus, leftX);
+	REQUIRE_MESSAGE(plusY > 0.0f, "the + Point button is not on the panel");
+	const size_t depth = undo.undoDepth();
+	clickAt(p, leftX, plusY);
+	REQUIRE(reg.get<SplineComponent>(line).controlPoints.size() == 3);
+	CHECK(reg.get<SplineComponent>(line).controlPoints[2].x == doctest::Approx(8.0f));
+	CHECK(undo.undoDepth() == depth + 1);
+
+	// Remove on the first row takes the first point.
+	for (int i = 0; i < 3; ++i) frame(p, false);
+	const float removeX = leftX + 20.0f;   // a small button under the point's three fields
+	const float removeY = yOf(p, p.splineRemove0, removeX);
+	REQUIRE_MESSAGE(removeY > 0.0f, "the first point row has no Remove button");
+	clickAt(p, removeX, removeY);
+	REQUIRE(reg.get<SplineComponent>(line).controlPoints.size() == 2);
+	CHECK(reg.get<SplineComponent>(line).controlPoints[0].x == doctest::Approx(4.0f));
+	CHECK(undo.undoDepth() == depth + 2);
+
+	// Back through all three: the removed point, the added one, the closed flag.
+	auto splineNow = [&]() -> const SplineComponent& {
+		return reg.get<SplineComponent>(reg.view<SplineComponent>().front());
+	};
+	REQUIRE(undo.undo());
+	CHECK(splineNow().controlPoints.size() == 3);
+	CHECK(splineNow().controlPoints[0].x == doctest::Approx(0.0f));
+	REQUIRE(undo.undo());
+	CHECK(splineNow().controlPoints.size() == 2);
+	CHECK(splineNow().closed);
+	REQUIRE(undo.undo());
+	CHECK_FALSE(splineNow().closed);
 }
 
 TEST_CASE("inspector ui: a component header's right-click menu copies, resets and pastes the component")
