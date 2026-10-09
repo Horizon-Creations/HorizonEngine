@@ -51,6 +51,13 @@ UUID wieder aus (`SplineEdit::Tool::sync`); nahm der Schritt die Spline ganz weg
 (Undo des ersten Klicks), wartet es auf das Redo. Wer die Auswahl selbst aufhebt
 (Esc, Outliner), bei dem lässt das Werkzeug los.
 
+Während ein Zug läuft (Maustaste unten), ändert sich die Punktliste nicht: Entf
+wird verschluckt (weder Punkt noch Entity gehen), sonst spränge die Auswahl zum
+Nachbarn, der Zug trüge den falschen Punkt weiter, und sein Eintrag käme NACH dem
+des Löschens, sodass Undo den Punkt in einer Welt "nach dem Zug" zurückbrächte.
+Wird das Werkzeug mitten im Zug abgebrochen (Modus gewechselt, Play), schließt es
+den Eintrag vorher ab, damit er nicht im Verlauf des nächsten Zugs auftaucht.
+
 Entf und Esc laufen in `EditorUI.cpp` vor dem Scene-Fenster. Das Werkzeug bekommt
 sie dort zuerst angeboten (`SplineTool::deleteKey/escapeKey`): mit gewähltem Punkt
 löscht Entf den Punkt, nicht die Entity. Esc nimmt den bestehenden Vorframe-Stempel
@@ -84,7 +91,7 @@ verschwanden im Zeugen auf einem sonnigen Boden (Weiß auf Weiß beim Hover).
 
 Tests (Debug, `env -u HE_CONFIG_DIR HOME=<scratch>`):
 
-- `test_spline_edit` (23 Fälle, 228 Assertions): Picking (Handle vor Kurve, Schluss-
+- `test_spline_edit` (24 Fälle, 243 Assertions): Picking (Handle vor Kurve, Schluss-
   Span einer geschlossenen Spline hängt an), Welt gegen Lokal unter verschobener
   und skalierter Entity, jede Geste genau ein Undo-Eintrag und rückwärts wie
   vorwärts durchgelaufen, abgelehnte Edits ohne Eintrag, der Klickablauf mit
@@ -92,15 +99,16 @@ Tests (Debug, `env -u HE_CONFIG_DIR HOME=<scratch>`):
   Oberflächen-Probe gegen Ebene, Entf/Esc/Closed, ein Zug = ein Eintrag, ein
   Griff ohne Bewegung = keiner, Hover/Guides, Zeilenzahlen und Welt-Lage der
   Overlay-Linien, bildschirmkonstante Handle-Größe.
-- `test_spline_tool_ui` (9 Fälle, 94 Assertions): das echte `SplineTool` in einem
+- `test_spline_tool_ui` (10 Fälle, 108 Assertions): das echte `SplineTool` in einem
   headless ImGui mit echtem `AppContext`: Klick, Zug, Alt+Klick, RMB, View-Modus,
-  Entf/Esc, Einfügen/Auswählen, Gizmo-Zug als ein Undo-Eintrag, Panel (Closed,
-  Delete Point, New Spline), Hinweiszeile.
+  Entf/Esc, Einfügen/Auswählen, Gizmo-Zug als ein Undo-Eintrag, Entf während des
+  Zugs, Panel (Closed, Delete Point, New Spline), Hinweiszeile.
 - `test_inspector_ui`, neuer Fall: der Details-Abschnitt schließt, fügt Punkte
   hinzu und entfernt sie, je ein Undo-Schritt.
 - Negativkontrollen: Insert ohne Snapshot und das Wiederfinden nach Undo
-  herausgenommen (`test_spline_edit` rot), Zug-Erkennung herausgenommen
-  (`test_spline_tool_ui` rot); danach wiederhergestellt.
+  herausgenommen (`test_spline_edit` rot), Zug-Erkennung herausgenommen und der
+  Schutz gegen Entf im Zug herausgenommen (`test_spline_tool_ui` und
+  `test_spline_edit` rot); danach wiederhergestellt.
 - Voller `ctest` ohne `test_material_graph` (Debug, in der Datei unberührt, braucht
   allein über 260 s): 252 Tests grün, 3 übersprungen (`runtime_size*`).
 - `scripts/editor_help_audit.py --check`: 1120 von 1120 Steuerelementen gedeckt.

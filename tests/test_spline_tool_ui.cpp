@@ -470,6 +470,45 @@ TEST_CASE("spline ui: dragging the gizmo on the selected point moves it, as one 
 	CHECK(r.undo.undoDepth() == depth);
 }
 
+TEST_CASE("spline ui: Delete tapped during a gizmo drag is swallowed, and the drag stays one entry")
+{
+	Rig r;
+	r.clickGround({ -4.0f, 0.0f, 0.0f });
+	r.clickGround({ 4.0f, 0.0f, 0.0f });
+	REQUIRE(r.points() == 2);
+	const size_t depth = r.undo.undoDepth();
+
+	const Entity e = r.ctx.selection.primary();
+	const glm::mat4 model = HE::worldMatrixOf(r.world, e);
+	const glm::vec3 before = glm::vec3(model * glm::vec4(r.spline()->controlPoints[1], 1.0f));
+	const ImVec2 at = r.cam.px(before);
+	r.settle(at);
+	REQUIRE(r.gizmoActive);
+	r.button(true);
+	r.frame(true);
+	r.mouse(ImVec2(at.x + 90.0f, at.y - 40.0f));
+	r.frame();
+	REQUIRE(r.gizmoActive);
+
+	// The key is the tool's (true: spent), and nothing was deleted.
+	CHECK(SplineTool::deleteKey(r.ctx));
+	CHECK(r.points() == 2);
+	CHECK(r.splineCount() == 1);
+
+	r.mouse(ImVec2(at.x + 130.0f, at.y - 60.0f));
+	r.frame();
+	r.button(false);
+	r.frame();
+	r.frame();
+	CHECK(r.points() == 2);
+	CHECK(r.undo.undoDepth() == depth + 1);
+	REQUIRE(r.undo.undo());
+	r.ctx.selection.clear();
+	r.frame();
+	CHECK(r.points() == 2);
+	CHECK(r.undo.undoDepth() == depth);
+}
+
 TEST_CASE("spline ui: the panel closes the line and deletes the selected point, undoably")
 {
 	Rig r;

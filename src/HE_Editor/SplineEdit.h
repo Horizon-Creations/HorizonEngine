@@ -172,7 +172,12 @@ namespace SplineEdit
 		// capture as the history entry on the first frame that really changes
 		// something, endMove commits it. A drag that never moved the point leaves
 		// no entry behind.
+		//
+		// While a drag is live (beginMove .. endMove) the point list must not change
+		// under it: deleteSelectedPoint refuses, and dragLive() lets the key handler
+		// swallow the Delete instead of passing it on to the entity.
 		void beginMove(EditorUndo* undo);
+		bool dragLive() const { return m_dragLive; }
 		bool moveSelectedPoint(HorizonWorld& world, const EditorSelection& selection, EditorUndo* undo,
 		                       const glm::vec3& worldPos);
 		void endMove(EditorUndo* undo);
@@ -197,5 +202,6 @@ namespace SplineEdit
 		std::uint64_t m_lastRevision  = 0;
 		std::uint64_t m_lastSelRevision = 0;
 		bool          m_moveStashed   = false; // the drag has written something
+		bool          m_dragLive      = false; // between beginMove and endMove
 	};
 }

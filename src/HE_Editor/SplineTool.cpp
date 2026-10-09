@@ -74,6 +74,9 @@ SplineEdit::GuideState guides(HorizonWorld& world, const EditorSelection& select
 bool deleteKey(AppContext& ctx)
 {
 	if (!modeOn(ctx) || !s_tool.ownsDeleteKey()) return false;
+	// A drag is live: the key is spent on nothing rather than passed on, or the
+	// whole spline entity would go while the point is still in the user's hand.
+	if (s_tool.dragLive()) return true;
 	const Entity active = s_tool.activeSpline(*ctx.world, ctx.selection);
 	if (active == entt::null || locked(ctx, active)) return false;
 	if (!s_tool.deleteSelectedPoint(*ctx.world, ctx.selection, ctx.undoSys)) return false;
@@ -98,6 +101,10 @@ bool updateInViewport(AppContext& ctx,
 {
 	if (!modeOn(ctx))
 	{
+		// A drag that was cut off (Play pressed, the mode switched) still owns an
+		// undo capture: commit it before the state goes, or it would surface in
+		// the history of the next unrelated drag.
+		s_tool.endMove(ctx.undoSys);
 		reset();
 		return false;
 	}
@@ -107,7 +114,11 @@ bool updateInViewport(AppContext& ctx,
 	// The tool is only fed while the Scene window runs. A gap means the mode was
 	// off, or another tab was in front: nothing from before is to be trusted.
 	const int frame = ImGui::GetFrameCount();
-	if (frame - s_lastFrame > 1) s_tool.reset();
+	if (frame - s_lastFrame > 1)
+	{
+		s_tool.endMove(ctx.undoSys);
+		s_tool.reset();
+	}
 	s_lastFrame = frame;
 	s_tool.sync(world, ctx.selection, ctx.undoSys ? ctx.undoSys->revision() : 0);
 

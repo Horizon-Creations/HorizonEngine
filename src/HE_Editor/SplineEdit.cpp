@@ -263,6 +263,7 @@ void Tool::reset()
 	m_selectedPoint = -1;
 	m_hadActive     = false;
 	m_moveStashed   = false;
+	m_dragLive      = false;
 	clearHover();
 }
 
@@ -380,7 +381,11 @@ Tool::Click Tool::click(HorizonWorld& world, EditorSelection& selection, EditorU
 
 bool Tool::deleteSelectedPoint(HorizonWorld& world, const EditorSelection& selection, EditorUndo* undo)
 {
-	if (m_selectedPoint < 0) return false;
+	// Not under a live drag: the selected index would jump to the neighbour and
+	// the drag's next frame would carry the wrong point, and the drag's entry
+	// would be committed after the delete's, so undo would bring the point back
+	// inside a world that is already "after" the drag.
+	if (m_selectedPoint < 0 || m_dragLive) return false;
 	const Entity active = activeSpline(world, selection);
 	if (active == entt::null) return false;
 	if (!removePoint(world, active, undo, m_selectedPoint)) return false;
@@ -408,6 +413,7 @@ bool Tool::toggleClosed(HorizonWorld& world, const EditorSelection& selection, E
 void Tool::beginMove(EditorUndo* undo)
 {
 	m_moveStashed = false;
+	m_dragLive    = true;
 	if (undo) undo->capturePre();
 }
 
@@ -440,6 +446,7 @@ void Tool::endMove(EditorUndo* undo)
 {
 	if (undo && m_moveStashed) undo->commitPending();
 	m_moveStashed = false;
+	m_dragLive    = false;
 }
 
 GuideState Tool::guides(HorizonWorld& world, const EditorSelection& selection) const

@@ -459,6 +459,37 @@ TEST_CASE("Tool: a drag is one undo entry however many frames it runs")
 	CHECK(near(splineOf(r.world, r.spline()).controlPoints[1], { before.x, before.y, before.z + 5.0f }, 0.05f));
 }
 
+TEST_CASE("Tool: Delete during a live drag is refused, and the drag is still one entry")
+{
+	Rig r;
+	r.clickGround({ -4, 0, 0 });
+	r.clickGround({ 4, 0, 0 });
+	r.clickGround({ 4, 0, 6 });
+	const size_t depth = r.undo.undoDepth();
+	REQUIRE(r.tool.selectedPoint() == 2);
+
+	r.tool.beginMove(&r.undo);
+	CHECK(r.tool.dragLive());
+	CHECK(r.tool.moveSelectedPoint(r.world, r.sel, &r.undo, { 4, 0, 9 }));
+	// The key arrives mid-drag: nothing is deleted, the selected point stays.
+	CHECK_FALSE(r.tool.deleteSelectedPoint(r.world, r.sel, &r.undo));
+	CHECK(splineOf(r.world, r.spline()).controlPoints.size() == 3);
+	CHECK(r.tool.selectedPoint() == 2);
+	CHECK(r.tool.moveSelectedPoint(r.world, r.sel, &r.undo, { 4, 0, 11 }));
+	r.tool.endMove(&r.undo);
+	CHECK_FALSE(r.tool.dragLive());
+
+	CHECK(r.undo.undoDepth() == depth + 1);   // the drag, and only the drag
+	undoLikeTheEditor(r.undo, r.sel); r.frame();
+	REQUIRE(splineOf(r.world, r.spline()).controlPoints.size() == 3);
+	// Back at the pre-drag spot: the point is where it was clicked (z = 6 world).
+	const glm::mat4 model = HE::worldMatrixOf(r.world, r.spline());
+	CHECK(near(glm::vec3(model * glm::vec4(splineOf(r.world, r.spline()).controlPoints[2], 1.0f)), { 4, 0, 6 }, 0.05f));
+	// And with the drag over, Delete works again.
+	r.tool.selectPoint(2);
+	CHECK(r.tool.deleteSelectedPoint(r.world, r.sel, &r.undo));
+}
+
 TEST_CASE("Tool: grabbing a handle without moving it leaves no history entry")
 {
 	Rig r;
