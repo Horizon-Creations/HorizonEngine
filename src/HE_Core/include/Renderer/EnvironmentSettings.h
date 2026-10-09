@@ -88,6 +88,7 @@ struct EnvironmentSettings
     // Weather entity looking as the auto landscape always did (0.64 × its 0.5 maximum).
     float     puddleAmount = 0.64f;
     float     snowCover    = 0.0f;
+    float     puddleSize   = 10.0f;   // metres across one puddle hollow (the noise field's scale)
     // Cloud render mode (OpenGL): 0 = sky-dome (default), 1 = 3D volumetric clouds
     // anchored in the world so they parallax as the camera moves. cloudHeight = the
     // 3D layer's height above the camera in world units. Other backends ignore these.

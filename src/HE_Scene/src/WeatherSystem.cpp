@@ -170,6 +170,7 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
         // The two sliders for materials are plain authored values, not preset-driven.
         env->puddleAmount = std::clamp(wx.puddleAmount, 0.0f, 1.0f);
         env->snowCover    = std::clamp(wx.snowCover,    0.0f, 1.0f);
+        env->puddleSize   = std::clamp(wx.puddleSize,   0.5f, 100.0f);
         wx.curCloudCoverage = env->cloudCoverage;
         wx.curFogDensity    = env->fogDensity;
         wx.curWindSpeed     = env->windSpeed;
@@ -194,7 +195,17 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
     // strike frame raises flashTriggered so a consumer can fire thunder audio.
     wx.weatherTime += dt;
     wx.flashTriggered = false;
-    const bool storming = weatherPreset(wx.targetKind).lightning && intensity > 0.05f;
+    // Thunder is a value like the sky ones: the preset sets it (Storm = intensity, else 0,
+    // dropping at once like the old "is the target a storm" test did) and the user may take
+    // it over with the Weather panel's slider — `drive` backs off while it has drifted.
+    {
+        float thunder = wx.thunder;
+        const float dThunder = weatherPreset(wx.targetKind).lightning ? intensity : 0.0f;
+        if (reclaim || std::abs(thunder - wx.lastThunder) <= 1e-4f) { thunder = dThunder; wx.lastThunder = dThunder; }
+        wx.thunder = thunder;
+    }
+    const float thunderAmt = std::clamp(wx.thunder, 0.0f, 1.0f);
+    const bool storming = thunderAmt > 0.05f;
     if (storming)
     {
         wx.lightningCountdown -= dt;
@@ -204,7 +215,7 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
             wx.flashTriggered = true;
             ++wx.strikeCount;
             std::uniform_real_distribution<float> iv(2.5f, 11.0f);
-            wx.lightningCountdown = iv(wx.precipRng) * (1.2f - intensity); // stormier = more frequent
+            wx.lightningCountdown = iv(wx.precipRng) * (1.2f - thunderAmt); // more thunder = more frequent
         }
     }
     wx.flashIntensity = std::max(0.0f, wx.flashIntensity - dt * 6.0f); // fast decay

@@ -135,7 +135,8 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "XY", F::Vec2, 0 } }, 0 },
         { MatNodeType::Weather, "Weather", "Input",
           {}, { { "Wetness", F::Float, 0 }, { "Snow Amount", F::Float, 0 },
-                { "Puddles", F::Float, 0 }, { "Snow Cover", F::Float, 0 } }, 0 },
+                { "Puddles", F::Float, 0 }, { "Snow Cover", F::Float, 0 },
+                { "Puddle Size", F::Float, 0 } }, 0 },
 
         // ── v11: the widget under the pixel (D5 Schicht 1) ──
         { MatNodeType::ElementSize, "Element Size", "UI",
@@ -760,7 +761,9 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             // heLight.weather: x wetness, y snow amount (the generic response), z puddles,
             // w snow cover (set per scene in the Weather details panel).
             decl = "vec4 " + v + " = clamp(heLight.weather, 0.0, 1.0);";
-            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
+            // Puddle Size is metres, not 0..1, and a zero-filled block (previews, UI) must not
+            // divide a noise scale by zero: the node hands out at least half a metre.
+            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w", "max(heLight.weather2.x, 0.5)" };
             break;
 
         // ── v11: the widget under the pixel (D5 Schicht 1) ──

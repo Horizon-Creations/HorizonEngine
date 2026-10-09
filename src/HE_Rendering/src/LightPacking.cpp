@@ -74,6 +74,7 @@ void FillMaterialWeather(const ::EnvironmentSettings& env, MaterialShaderLibrary
     out.weather[1] = env.snowAmount;
     out.weather[2] = env.puddleAmount;
     out.weather[3] = env.snowCover;
+    out.weather2[0] = env.puddleSize;
 }
 
 void FillMaterialGIProbe(MaterialShaderLibrary::Lighting& out,

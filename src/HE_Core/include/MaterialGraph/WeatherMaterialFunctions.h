@@ -1,7 +1,7 @@
 // The weather material functions — what lets a MATERIAL react to the scene's weather.
 //
-// The scene's Weather entity carries two sliders for materials (Weather details panel
-// ▸ Surface): Puddles and Snow Cover, 0..1 each. They travel to the shader in the
+// The scene's Weather entity carries three sliders for materials (Weather details panel
+// ▸ Surface): Puddles and Snow Cover, 0..1 each, and Puddle Size in metres. They travel to the shader in the
 // lighting block (heLight.weather z / w; x / y are the wetness and snow amount every
 // lit surface already answers to) and a material reads all four through the Weather
 // node. The two functions below wrap that node into the thing a surface actually wants:
@@ -12,6 +12,8 @@
 //                                              puddle field used to take a fixed amount
 //                            Puddles           the raw slider
 //                            Wetness           the weather's wetness
+//                            Size              puddle size in metres (the panel's Puddle
+//                                              Size slider, at least 0.5)
 //
 //   MF_WeatherSnow      In:  Slope             1 − normal.y of the surface (0 flat)
 //                            Max Slope         steepest slope that holds snow

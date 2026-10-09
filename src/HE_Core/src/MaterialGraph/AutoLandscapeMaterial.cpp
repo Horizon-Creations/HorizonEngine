@@ -87,8 +87,6 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int pPudAmt     = w.param(kAutoLandscapeParamPuddleAmount, 0.5f, 0.0f, 1.0f, "Puddles",
         "Water level in the puddle noise field when the weather's Puddles slider is at 1 (the slider scales it): "
         "0.32 = scattered puddles (~1/5 of the flat ground), ~0.5 = half.");
-    const int pPudSize    = w.param(kAutoLandscapeParamPuddleSize, 10.0f, 0.5f, 100.0f, "Puddles",
-        "Size of the puddle hollows, metres.");
     const int pPudSlope   = w.param(kAutoLandscapeParamPuddleMaxSlope, 0.08f, 0.002f, 0.4f, "Puddles",
         "Slope (1 - normal.y) where automatic standing water has faded out completely; it starts to thin "
         "out from a fifth of that. 0.08 ~ 23 degrees. Painted puddles ignore it.");
@@ -286,20 +284,21 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int noSnow   = w.op(T::OneMinus, 7, { { r.snowMask } });
     const int flat     = w.op(T::OneMinus, 7, { { steep } });
     r.flatMask = w.op(T::Multiply, 7, { { flat }, { noSnow } });
+    // The water level AND the hollow size come from the WEATHER: MF_WeatherPuddles turns the Weather details
+    // panel's Puddles slider (0..1) into a fraction of "Puddle Amount", the level at
+    // slider 1; "Size" is the panel's Puddle Size in metres. Slider 0 = no hollow reaches the surface = no automatic puddles at all.
+    const int puddleCall = w.node(T::FunctionCall, 7);
+    r.graph.findNode(puddleCall)->s = kWeatherPuddlesFunctionPath;
+    r.graph.connect(pPudAmt, 0, puddleCall, 0);                      // Max Water Level
     // A second field, decorrelated from the dirt patches by an offset.
     const int offs   = w.node(T::ConstVec2, 7);
     r.graph.findNode(offs)->p[0] = 173.1f;
     r.graph.findNode(offs)->p[1] = 419.7f;
     const int xzOff  = w.op(T::Add, 7, { { xz }, { offs } });
-    const int invPud = w.op(T::Divide, 7, { { one }, { pPudSize } });
+    // Hollow size in metres from the weather (MF_WeatherPuddles "Size", the panel's Puddle Size).
+    const int invPud = w.op(T::Divide, 7, { { one }, { puddleCall, 3 } });
     const int basin  = w.op(T::Fbm, 7, { { xzOff }, { invPud } });
     r.graph.findNode(basin)->p[0] = 1.0f; // integer hash, see dirtFbm
-    // The water level comes from the WEATHER: MF_WeatherPuddles turns the Weather details
-    // panel's Puddles slider (0..1) into a fraction of "Puddle Amount", the level at
-    // slider 1. Slider 0 = no hollow reaches the surface = no automatic puddles at all.
-    const int puddleCall = w.node(T::FunctionCall, 7);
-    r.graph.findNode(puddleCall)->s = kWeatherPuddlesFunctionPath;
-    r.graph.connect(pPudAmt, 0, puddleCall, 0);                      // Max Water Level
     const int depth  = w.op(T::Subtract, 7, { { puddleCall, 0 }, { basin } });  // > 0 inside a hollow
     // Wet rim: from 0.06 below the water line up to it.
     const int rimW   = w.constF(0.06f, 7);

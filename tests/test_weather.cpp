@@ -32,6 +32,63 @@ TEST_CASE("WeatherComponent defaults")
     // maximum = the old 0.32), and no snow on the ground.
     CHECK(w.puddleAmount == doctest::Approx(0.64f));
     CHECK(w.snowCover    == doctest::Approx(0.0f));
+    CHECK(w.puddleSize   == doctest::Approx(10.0f));   // metres, the landscape's old Puddle Size
+    CHECK(w.thunder      == doctest::Approx(0.0f));
+}
+
+TEST_CASE("puddle size reaches the environment settings, clamped to half a metre … 100 m")
+{
+    HorizonWorld world;
+    WeatherComponent& w = setupWeatherWorld(world);
+    auto* env = world.registry().try_get<EnvironmentComponent>(world.rootEntity());
+    REQUIRE(env);
+    w.puddleSize = 25.0f;
+    WeatherSystem::update(world, 0.016f);
+    CHECK(env->puddleSize == doctest::Approx(25.0f));
+    CHECK(HE::makeEnvironmentSettings(*env, 0.0f).puddleSize == doctest::Approx(25.0f));
+    w.puddleSize = 0.0f;
+    WeatherSystem::update(world, 0.016f);
+    CHECK(env->puddleSize == doctest::Approx(0.5f));
+    w.puddleSize = 1000.0f;
+    WeatherSystem::update(world, 0.016f);
+    CHECK(env->puddleSize == doctest::Approx(100.0f));
+}
+
+TEST_CASE("thunder is a value of its own: a preset sets it, a moved slider is left alone")
+{
+    HorizonWorld world;
+    WeatherComponent& w = setupWeatherWorld(world);
+
+    // Picking Storm sets thunder to the intensity …
+    w.currentKind = w.targetKind = WeatherKind::Storm;
+    WeatherSystem::update(world, 0.016f, glm::vec3(0.0f));
+    CHECK(w.thunder == doctest::Approx(1.0f));
+    CHECK(w.flashTriggered);                      // the first strike comes at once
+
+    // … the user turns it down to nothing: the storm stays, the lightning stops.
+    w.thunder = 0.0f;
+    w.lightningCountdown = 0.0f;
+    w.flashIntensity = 0.0f;
+    for (int i = 0; i < 40; ++i)
+    {
+        WeatherSystem::update(world, 0.25f, glm::vec3(0.0f));
+        CHECK(!w.flashTriggered);
+    }
+    CHECK(w.thunder == doctest::Approx(0.0f));
+
+    // Clear weather with the slider raised strikes all the same.
+    HorizonWorld calm;
+    WeatherComponent& c = setupWeatherWorld(calm);
+    c.thunder = 0.8f;
+    c.lightningCountdown = 0.0f;
+    WeatherSystem::update(calm, 0.016f, glm::vec3(0.0f));
+    CHECK(c.flashTriggered);
+    CHECK(c.thunder == doctest::Approx(0.8f));   // authored value respected: no preset change, no reclaim
+
+    // A new preset takes it back.
+    c.targetKind = WeatherKind::Rain;
+    WeatherSystem::update(calm, 0.016f, glm::vec3(0.0f));
+    CHECK(c.thunder == doctest::Approx(0.0f));
 }
 
 TEST_CASE("the Weather sliders for materials reach the environment settings the renderer reads")

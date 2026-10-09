@@ -1146,6 +1146,42 @@ namespace
 	  "node or the MF_WeatherPuddles function. Not driven by the presets — set it by "
 	  "hand, or from a script.",
 	  "", "rendering#weather" },
+	{ "Weather/Puddle Size", "",
+	  "How big one puddle is, in metres: the scale of the hollows the standing water "
+	  "collects in. Small values give many small puddles, large ones a few big pools. "
+	  "The auto landscape reads it through MF_WeatherPuddles; any material can through "
+	  "the Weather node.",
+	  "", "rendering#weather" },
+	{ "Weather/Cloud Coverage", "",
+	  "How much of the sky is cloud, 0 to 1 — the Sky's own Coverage, set from here. A "
+	  "preset writes it; once you move it the weather leaves it alone until the next "
+	  "preset pick.",
+	  "", "rendering#weather" },
+	{ "Weather/Fog Density##wx", "",
+	  "Atmospheric fog thickness — the Sky's Density. Moving it takes it away from the "
+	  "preset until the next pick.",
+	  "", "rendering#weather" },
+	{ "Weather/Wind Speed##wx", "",
+	  "Cloud drift and rain slant, 1 = calm. The Sky's Wind Speed, set from here.",
+	  "", "rendering#weather" },
+	{ "Weather/Rain##wx", "",
+	  "How hard it rains, 0 to 1: the density of the rain streaks and the sky rainbow. "
+	  "Independent of the preset once moved.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow##wx", "",
+	  "How hard it snows, 0 to 1: flakes in the air and the white tint on every lit "
+	  "up-facing surface. Not the same as Snow Cover (below), which is what materials "
+	  "that read the Weather node lay on the ground.",
+	  "", "rendering#weather" },
+	{ "Weather/Wetness##wx", "",
+	  "How wet every lit surface looks, 0 to 1: darker and glossier. Rain presets raise it.",
+	  "", "rendering#weather" },
+	{ "Weather/Thunder", "",
+	  "How often lightning strikes, 0 to 1: 0 = never, 1 = the storm rhythm. The Storm "
+	  "preset sets it to the Intensity, every other preset to 0; move it to strike in "
+	  "any weather, or to silence a storm. Each strike flashes the sky and plays the "
+	  "thunder sound.",
+	  "", "rendering#weather" },
 	{ "Weather/Snow Cover", "",
 	  "How much snow lies on the ground in materials that read it, 0 to 1. The auto "
 	  "landscape adds it to its altitude snow (cliffs stay bare) through the "

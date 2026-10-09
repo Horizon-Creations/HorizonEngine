@@ -2011,7 +2011,7 @@ Weather-Knoten nichts zu suchen hat). Feste UUIDs `0x413` / `0x414`; Quelle sind
 `WeatherMaterialFunctions.cpp`.
 
 * **`MF_WeatherPuddles`** — In: *Max Water Level* (0,5). Out: *Water Level* = Puddles-Regler × Max Water
-  Level, *Puddles* (roh), *Wetness*.
+  Level, *Puddles* (roh), *Wetness*, *Size* (m, siehe §19.5).
 * **`MF_WeatherSnow`** — In: *Slope* (0), *Max Slope* (0,45), *Height Bias* (0). Out: *Snow* (Abdeckung 0…1),
   *Cover* (roh). `Snow = smoothstep(0, 0,3, Cover × (1 + Bias)) × (1 − smoothstep(MaxSlope, MaxSlope + 0,1, Slope))`
   — bei Regler 0 immer 0, Klippen bleiben frei, ein positiver Bias lässt den Schnee dort zuerst liegen.
@@ -2036,3 +2036,24 @@ Weather-Knoten nichts zu suchen hat). Feste UUIDs `0x413` / `0x414`; Quelle sind
   nicht).
 * Presets, die die Regler mitfahren (Rain → Puddles hoch). Bewusst von Hand, wie gewünscht.
 * Übergänge: die Regler wirken sofort, nicht über die Transition-Zeit.
+
+### 19.5 Puddle Size, jeder Wert einzeln, Thunder (2026-10-09)
+
+* **Puddle Size** (0,5…100 m, Standard 10): dritter Regler unter *Weather ▸ Surface*, Weg wie die anderen
+  (`WeatherComponent::puddleSize` → `EnvironmentComponent` → `EnvironmentSettings` → **`Lighting::weather2.x`**,
+  ein angehängter vec4, `FillMaterialWeather`). Der Weather-Knoten hat dafür einen fünften Ausgang *Puddle Size*
+  (mindestens 0,5 m, damit ein nullgefüllter Block nie durch 0 teilt), `MF_WeatherPuddles` den vierten Ausgang
+  *Size*. Das Landscape-Material teilt sein Pfützenfeld jetzt durch diesen Wert; der Parameter **„Puddle Size“
+  entfällt** (Parameterzahl 13), die Größe ist eine Eigenschaft der Szene, nicht des Materials. Der angehängte
+  vec4 vergrößert den `HeLighting`-Block auf allen Backends (Größe wird überall per `sizeof` genommen und von
+  `test_engine_materials` gegen die Shader-Seite geprüft).
+* **Jeder Wert einzeln** (*Weather ▸ Conditions*): Cloud Coverage, Fog Density, Wind Speed, Rain, Snow,
+  Wetness und **Thunder** als eigene Regler. Sie bearbeiten die Werte des Skys (`EnvironmentComponent`), also
+  dieselben wie das Sky-Panel; die Presets schreiben sie wie bisher, `WeatherSystem` lässt einen Wert aber in
+  Ruhe, sobald man ihn bewegt hat, bis zum nächsten Preset-Wechsel. Ohne Sky in der Szene zeigt das Panel
+  stattdessen einen Hinweis.
+* **Thunder** (0…1, `WeatherComponent::thunder`, gespeichert) ist jetzt ein eigener Wert statt „das Ziel ist ein
+  Sturm“: der Storm-Preset setzt ihn auf die Intensity, jeder andere auf 0; bewegt man ihn, blitzt es in jedem
+  Wetter (oder in einem Sturm eben nicht), bis ein neuer Preset ihn zurückholt. Abstand zwischen Blitzen
+  `(2,5…11 s) × (1,2 − Thunder)`. Alte Szenen ohne `thunder` bekommen beim Laden den Wert, den ihr Preset
+  ergeben hätte (ein gespeicherter Sturm blitzt weiter).

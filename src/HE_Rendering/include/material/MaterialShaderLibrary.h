@@ -169,6 +169,11 @@ public:
         // same frame still sees its eight lights.
         float clusterParams[4] = {};
         float clusterCamFwd[4] = {};
+        // More of the weather for MATERIALS (append-only, v3.4): x = puddle size in
+        // metres (the Weather details panel's Puddle Size; the graph's Weather node
+        // clamps it to >= 0.5). `weather` above carries the 0..1 values. Zero in the
+        // fill sites that never call HE::FillMaterialWeather (previews, UI).
+        float weather2[4]      = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
     // Clustered variant's light lists (fragmentClustered): GLSL bindings 24/25/26

@@ -53,7 +53,7 @@ struct Fn
 };
 
 // Weather node pins.
-constexpr int kPinWetness = 0, kPinPuddles = 2, kPinSnowCover = 3;
+constexpr int kPinWetness = 0, kPinPuddles = 2, kPinSnowCover = 3, kPinPuddleSize = 4;
 } // namespace
 
 MaterialGraph buildWeatherPuddlesFunction()
@@ -70,6 +70,9 @@ MaterialGraph buildWeatherPuddlesFunction()
     f.link(level, 0, f.out("Water Level", P::Float, 3, 0.0f), 0);
     f.link(wx, kPinPuddles, f.out("Puddles", P::Float, 3, 1.0f), 0);
     f.link(wx, kPinWetness, f.out("Wetness", P::Float, 3, 2.0f), 0);
+    // The hollow size in metres, from the panel's Puddle Size slider — appended last so the
+    // pins a graph already wired keep their index.
+    f.link(wx, kPinPuddleSize, f.out("Size", P::Float, 3, 3.0f), 0);
     return f.g;
 }
 

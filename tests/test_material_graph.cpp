@@ -2343,7 +2343,7 @@ TEST_CASE("A bombed texture layer cross-compiles for all five backends, with gra
 TEST_CASE("The auto landscape material cross-compiles for all five backends, in every view and permutation")
 {
 	// The biggest graph the engine ships: four layers × three array reads, three
-	// hex grids, two noise fields, fourteen parameters. All of it is shader TEXT
+	// hex grids, two noise fields, thirteen parameters. All of it is shader TEXT
 	// in existing slots — what has to hold is that every backend's translator
 	// takes it, the clustered and G-buffer variants included, and that the
 	// bombing-off permutation and the unlit mask views (the witness) do too.
@@ -2451,7 +2451,7 @@ TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambl
 
 // ═══ Auto landscape material (Thema 158, Schritt 5) ═══════════════════════════
 
-TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex grid per bombed layer")
+TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex grid per bombed layer")
 {
 	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
@@ -2480,7 +2480,7 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 	                          HE::kAutoLandscapeParamDirtAmount, HE::kAutoLandscapeParamDirtSize,
 	                          HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowBlend,
 	                          HE::kAutoLandscapeParamSnowMaxSlope, HE::kAutoLandscapeParamPuddleAmount,
-	                          HE::kAutoLandscapeParamPuddleSize, HE::kAutoLandscapeParamPuddleMaxSlope })
+	                          HE::kAutoLandscapeParamPuddleMaxSlope })
 	{
 		const bool found = std::any_of(gen.params.begin(), gen.params.end(),
 		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
@@ -3391,13 +3391,23 @@ TEST_CASE("Weather node: four floats from heLight.weather, one per pin")
 	int out = 0;
 	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
 	const int w = g.addNode(MatNodeType::Weather);
-	REQUIRE(HE::matNodeDesc(MatNodeType::Weather).outputs.size() == 4u);
+	REQUIRE(HE::matNodeDesc(MatNodeType::Weather).outputs.size() == 5u);   // + Puddle Size (metres)
 	REQUIRE(g.connect(w, 2, out, HE::kMatOutputRoughnessPin));   // Puddles
 	REQUIRE(g.connect(w, 3, out, HE::kMatOutputMetallicPin));    // Snow Cover
 	const std::string glsl = HE::generateFragment(g).glsl;
 	CHECK(glsl.find("clamp(heLight.weather, 0.0, 1.0)") != std::string::npos);
 	CHECK(glsl.find(".z") != std::string::npos);
 	CHECK(glsl.find(".w") != std::string::npos);
+	// Puddle Size (pin 4) is metres from the second weather vec4, never below half a metre — a
+	// zero-filled lighting block must not divide a noise scale by zero.
+	{
+		MaterialGraph g2 = MaterialGraph::makeDefault();
+		int out2 = 0;
+		for (auto& n : g2.nodes) if (n.type == MatNodeType::Output) out2 = n.id;
+		const int w2 = g2.addNode(MatNodeType::Weather);
+		REQUIRE(g2.connect(w2, 4, out2, HE::kMatOutputRoughnessPin));
+		CHECK(HE::generateFragment(g2).glsl.find("max(heLight.weather2.x, 0.5)") != std::string::npos);
+	}
 
 	// By name through JSON, like every node.
 	MaterialGraph back;
@@ -3432,8 +3442,9 @@ TEST_CASE("Weather functions: a usable interface, flat, defaults authored, no Pa
 	HE::matFunctionPins(HE::buildWeatherPuddlesFunction(), ins, outs);
 	REQUIRE(ins.size() == 1u);
 	CHECK(std::string(ins[0].name) == "Max Water Level");
-	REQUIRE(outs.size() == 3u);
+	REQUIRE(outs.size() == 4u);
 	CHECK(std::string(outs[0].name) == "Water Level");
+	CHECK(std::string(outs[3].name) == "Size");   // appended last: the pins wired before keep their index
 	HE::matFunctionPins(HE::buildWeatherSnowFunction(), ins, outs);
 	REQUIRE(ins.size() == 3u);
 	CHECK(std::string(ins[0].name) == "Slope");
@@ -3482,7 +3493,10 @@ TEST_CASE("Auto landscape: puddles and ground snow come from the weather functio
 		}
 	CHECK(puddles == 1);
 	CHECK(snow == 1);
-	// "Puddle Amount" is now the level AT slider 1 — the parameter list is unchanged.
+	// "Puddle Amount" is now the level AT slider 1, and "Puddle Size" is gone — the size is the
+	// Weather panel's slider (the function's Size output), not a per-material parameter.
+	for (const HE::MatParamSlot& s : HE::generateFragment(a.graph, HE::weatherFunctionLoader()).params)
+		CHECK(s.name != "Puddle Size");
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 	CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 	CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
