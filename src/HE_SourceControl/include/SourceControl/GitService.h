@@ -189,6 +189,12 @@ public:
 	// A command is queued or running. The UI shows progress rather than a stale
 	// value, the same way the collaboration panel does for directory calls.
 	bool               busy()    const { return m_busy.load(std::memory_order_acquire); }
+	// A command the USER asked for is queued or running (commit, push, pull, a manual
+	// fetch, a switch ...) - as opposed to a status refresh or the quiet timer-driven
+	// fetch, which only bring the numbers up to date. The UI disables its buttons on
+	// this one: a refresh every few seconds used to grey out Push, Pull and Commit each
+	// time, for no reason the user could see.
+	bool               busyWithWork() const { return m_work.load(std::memory_order_acquire) > 0; }
 	const std::string& lastError() const { return m_lastError; }
 
 	// Called from pump(), i.e. on the main thread, after a refresh lands.
@@ -247,6 +253,12 @@ private:
 
 	std::atomic<bool> m_quit{false};
 	std::atomic<bool> m_busy{false};
+	std::atomic<int>  m_work{0};   // queued + running commands that are not background refreshes
+	static bool countsAsWork(const Command& c)
+	{
+		return c.kind != Kind::Status && c.kind != Kind::Open && c.kind != Kind::Quit &&
+		       !(c.kind == Kind::Fetch && c.flag);
+	}
 	// Set when a refresh is already queued, so a burst of requests collapses.
 	std::atomic<bool> m_statusPending{false};
 

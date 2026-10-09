@@ -48,6 +48,11 @@ using namespace HE::Ed;
 namespace
 {
 	constexpr int W = 360, H = 520;
+	// The panel window is taller than the viewport frame: the Landscape panel is a card,
+	// a segmented tab control, a scrolling body and a pinned brush, and the Foliage and
+	// Mountain pages need the room to show every control without scrolling. The viewport
+	// frames keep W x H, so the pixel-to-metre scale the stroke tests rely on is untouched.
+	constexpr int PH = 760;
 
 	struct Harness
 	{
@@ -55,7 +60,7 @@ namespace
 		{
 			ImGui::CreateContext();
 			ImGuiIO& io = ImGui::GetIO();
-			io.DisplaySize = ImVec2(float(W), float(H));
+			io.DisplaySize = ImVec2(float(W), float(PH));
 			io.DeltaTime   = 1.0f / 60.0f;
 			io.IniFilename = nullptr;
 			io.LogFilename = nullptr;
@@ -151,7 +156,7 @@ namespace
 		io.AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
 		ImGui::NewFrame();
 		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
-		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(PH) - 20.0f));
 		ImGui::Begin(kPanelWindow, nullptr,
 		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
 		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
@@ -160,7 +165,7 @@ namespace
 		EditorWidgets::drawQueuedHelp();
 		const ImGuiID hovered = ImGui::GetHoveredID();
 		ImGui::Render();
-		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, PH);
 		return hovered;
 	}
 
@@ -181,23 +186,31 @@ namespace
 		panelFrame(ctx, false);
 	}
 
-	// The id a widget label resolves to inside the panel window. The toolbar
-	// cells are InvisibleButtons under their "##id", a button is its label.
-	ImGuiID panelId(const char* label)
+	// A widget label inside the panel. The panel's own items (the card, the tab control)
+	// live in the window itself; the tab's content and the pinned brush live in two child
+	// windows, and an id is hashed against the window it was submitted in - so a label
+	// can match under any of the three.
+	struct PanelRef { const char* label; };
+	PanelRef panelId(const char* label) { return { label }; }
+
+	bool idMatches(ImGuiID hovered, const PanelRef& ref)
 	{
 		ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
 		REQUIRE(w != nullptr);
-		return w->GetID(label);
+		if (hovered == w->GetID(ref.label)) return true;
+		for (ImGuiWindow* c : w->DC.ChildWindows)
+			if (c && hovered == c->GetID(ref.label)) return true;
+		return false;
 	}
 
 	// Where an item is, found the way a user finds it: by moving the pointer
 	// over the panel until ImGui reports that id. Coarse grid first, so the
 	// scan stays a few thousand frames.
-	bool locate(AppContext& ctx, ImGuiID id, float& outX, float& outY)
+	bool locate(AppContext& ctx, PanelRef ref, float& outX, float& outY)
 	{
-		for (float y = 14.0f; y < float(H) - 14.0f; y += 4.0f)
+		for (float y = 14.0f; y < float(PH) - 14.0f; y += 4.0f)
 			for (float x = 14.0f; x < float(W) - 14.0f; x += 6.0f)
-				if (idAt(ctx, x, y) == id) { outX = x; outY = y; return true; }
+				if (idMatches(idAt(ctx, x, y), ref)) { outX = x; outY = y; return true; }
 		return false;
 	}
 
@@ -427,9 +440,9 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	clickAt(ctx, mx, my);
 	float nx = 0.0f, ny = 0.0f;
 	CHECK_MESSAGE(locate(ctx, panelId("##mtRect"), nx, ny), "Mountain armed shows no Rectangle cell");
-	CHECK_MESSAGE(locate(ctx, panelId("Max Height##mountain"), nx, ny), "Mountain armed shows no Max Height");
+	CHECK_MESSAGE(locate(ctx, panelId("##mountain_maxh"), nx, ny), "Mountain armed shows no Max Height");
 	CHECK_MESSAGE(locate(ctx, panelId("New Seed##mountain"), nx, ny), "Mountain armed shows no New Seed");
-	CHECK_FALSE(locate(ctx, panelId("Radius##brush"), nx, ny));
+	CHECK_FALSE(locate(ctx, panelId("##radius_brush"), nx, ny));
 	{
 		he_ui::Image img;
 		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
@@ -550,7 +563,7 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	clickAt(ctx, rx, ry);
 	REQUIRE(locate(ctx, panelId("##lsTool0"), rx, ry));
 	clickAt(ctx, rx, ry);
-	CHECK(locate(ctx, panelId("Radius##brush"), rx, ry));
+	CHECK(locate(ctx, panelId("##radius_brush"), rx, ry));
 }
 
 // ── Setup tab and Ctrl-invert ────────────────────────────────────────────────
@@ -603,7 +616,7 @@ TEST_CASE("landscape ui: the Setup tab switches the brush off, and Ctrl turns Ra
 	clickAt(ctx, sx, sy);
 	float bx = 0.0f, by = 0.0f;
 	CHECK_MESSAGE(locate(ctx, panelId("Reset Sculpting"), bx, by), "Setup shows no Reset Sculpting");
-	CHECK_FALSE(locate(ctx, panelId("Radius##brush"), bx, by));
+	CHECK_FALSE(locate(ctx, panelId("##radius_brush"), bx, by));
 	const size_t depth0 = undo.undoDepth();
 	drag();
 	CHECK(extremes().first == 0.0f);

@@ -743,7 +743,7 @@ void drawCommitBox(GitController& git, AppContext& ctx, const HE::Sc::RepoStatus
 	const bool conflicts = st.hasConflicts();
 	const bool hasMsg    = s_commitMessage[0] != '\0';
 	const bool hasRemote = !git.remoteUrl().empty();
-	const bool idle      = !git.busy();
+	const bool idle      = !git.busyWithWork();
 	const auto& commits  = git.recentCommits();
 	// A commit that is already on the remote is not rewritten from here: that is a
 	// force-push waiting to happen to whoever else pulled it.
@@ -997,7 +997,7 @@ void drawHistoryTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayWr
 			// Branching is non-destructive as long as it only writes a ref, so it
 			// stays available with a dirty tree - the dialog's "switch to it" is what
 			// the guard applies to.
-			ImGui::BeginDisabled(git.busy() || !mayWrite);
+			ImGui::BeginDisabled(git.busyWithWork() || !mayWrite);
 			if (EditorWidgets::menuItem("Create branch from this commit…"))
 			{
 				s_branchFromOid     = c.shortOid;
@@ -1008,7 +1008,7 @@ void drawHistoryTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayWr
 			}
 			ImGui::EndDisabled();
 
-			ImGui::BeginDisabled(git.busy() || st.dirtyCount() != 0 || !mayWrite);
+			ImGui::BeginDisabled(git.busyWithWork() || st.dirtyCount() != 0 || !mayWrite);
 			if (EditorWidgets::menuItem("Restore project to this commit…"))
 			{
 				s_restoreOid     = c.shortOid;
@@ -1095,7 +1095,7 @@ void drawBranchesTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayW
 	// time a scope-end destructor ran after EndChild that would be the parent.
 	std::optional<EditorWidgets::WrapText> wrap;
 	wrap.emplace();
-	const bool idle = !git.busy();
+	const bool idle = !git.busyWithWork();
 
 	ImGui::BeginDisabled(!(mayWrite && idle && !st.initialCommit));
 	if (EditorWidgets::button("New branch…"))
@@ -1203,12 +1203,12 @@ void drawBranchPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	{
 		// A clean project switches at once; with changes it asks (beginSwitch).
 		for (const std::string& b : git.branches())
-			if (EditorWidgets::menuItem(b.c_str(), nullptr, b == st.branch, mayWrite && !git.busy()))
+			if (EditorWidgets::menuItem(b.c_str(), nullptr, b == st.branch, mayWrite && !git.busyWithWork()))
 				beginSwitch(git, st, b);
 	}
 	ImGui::Separator();
 	if (EditorWidgets::menuItem("Manage branches…")) s_wantBranchesTab = true;
-	ImGui::BeginDisabled(git.busy() || st.initialCommit || !mayWrite);
+	ImGui::BeginDisabled(git.busyWithWork() || st.initialCommit || !mayWrite);
 	if (EditorWidgets::menuItem("New branch…"))
 	{
 		s_branchFromOid.clear();          // empty start = branch off HEAD
@@ -1295,7 +1295,7 @@ void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
 
 	const bool mayWrite  = git.mayModify();
 	const bool hasRemote = !git.remoteUrl().empty();
-	const bool idle      = !git.busy();
+	const bool idle      = !git.busyWithWork();
 
 	const char* branchLabel = st.detached ? "detached"
 	                        : st.branch.empty() ? "(no branch)"
@@ -1524,7 +1524,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 
 		// Errors are not printed here: GitController posts them to the notifications
 		// (the footer bell), where they are seen whichever panel is open.
-		if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
+		if (git->busyWithWork()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 		ImGui::End();
 		return;
 	}
@@ -1680,7 +1680,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::Spacing();
 			bool cancelled = false;
 			const bool create = modalButtonRow(
-				"Create", "Cancel", empty || !nameOk || taken || git->busy(), cancelled);
+				"Create", "Cancel", empty || !nameOk || taken || git->busyWithWork(), cancelled);
 			if (create)
 				git->requestCreateBranch(s_branchName, s_branchFromOid, s_branchCheckout);
 			if (create || cancelled)
@@ -1731,7 +1731,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::Spacing();
 
 			bool cancelled = false;
-			const bool restore = modalButtonRow("Restore", "Cancel", git->busy(), cancelled,
+			const bool restore = modalButtonRow("Restore", "Cancel", git->busyWithWork(), cancelled,
 			                                    /*danger=*/true);
 			if (restore) git->requestRestoreTo(s_restoreOid, s_restoreOid);
 			if (restore || cancelled)
@@ -1769,7 +1769,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::Spacing();
 
 			bool cancelled = false;
-			const bool discard = modalButtonRow("Discard", "Cancel", git->busy(), cancelled, /*danger=*/true);
+			const bool discard = modalButtonRow("Discard", "Cancel", git->busyWithWork(), cancelled, /*danger=*/true);
 			if (discard) git->requestDiscard(s_discardPaths);
 			if (discard || cancelled)
 			{
@@ -1802,7 +1802,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			bool close = false;
 			if (EditorWidgets::cancelButton("Cancel", ImVec2(bw, 0.0f))) close = true;
 			ImGui::SameLine();
-			ImGui::BeginDisabled(git->busy());
+			ImGui::BeginDisabled(git->busyWithWork());
 			if (EditorWidgets::button("Carry them over", ImVec2(bw, 0.0f)))
 			{
 				git->requestSwitchBranch(s_switchTarget, false);

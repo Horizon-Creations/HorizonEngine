@@ -170,6 +170,9 @@ public:
 	bool                     isRepo() const { return m_service.isRepo(); }
 	const HE::Sc::RepoStatus& status() const { return m_service.status(); }
 	bool                     busy()   const { return m_service.busy(); }
+	// Something the user asked for is under way (see GitService::busyWithWork). The panels
+	// disable their buttons on this, not on busy(): a status refresh is not a reason to.
+	bool                     busyWithWork() const { return m_service.busyWithWork(); }
 	const std::string&       lastError() const { return m_service.lastError(); }
 	const std::vector<HE::Sc::GitCli::CommitInfo>& recentCommits() const
 	{

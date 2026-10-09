@@ -1107,7 +1107,7 @@ void drawGitMessages(GitController* git)
 		ImGui::Spacing();
 		ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s", git->lastInfo().c_str());
 	}
-	if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
+	if (git->busyWithWork()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
 
 // Repository half of the page: init, remote / GitHub setup, auto-push.
@@ -1179,10 +1179,10 @@ void drawRepositorySection(AppContext& ctx)
 			ImGui::PopStyleColor();
 		}
 		ImGui::Spacing();
-		if (git->busy()) ImGui::BeginDisabled();
+		if (git->busyWithWork()) ImGui::BeginDisabled();
 		if (EditorWidgets::button("Initialize Git repository", ImVec2(240.0f, 0.0f)))
 			git->requestInit(lfs);
-		if (git->busy()) ImGui::EndDisabled();
+		if (git->busyWithWork()) ImGui::EndDisabled();
 		drawGitMessages(git);
 		return;
 	}
@@ -1223,7 +1223,7 @@ void drawRepositorySection(AppContext& ctx)
 		// The GitHub account (above) is the only way in: an empty token makes the
 		// service read the sign-in from the credential helper itself.
 		const bool signedIn = GitHubSignIn::account() == GitHubSignIn::Account::SignedIn;
-		ImGui::BeginDisabled(git->busy() || !signedIn ||
+		ImGui::BeginDisabled(git->busyWithWork() || !signedIn ||
 		                     s_ghRepoName[0] == '\0' || st.initialCommit);
 		if (EditorWidgets::primaryButton("Create & push", ImVec2(130.0f, 0.0f)))
 			git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, {});
@@ -1249,7 +1249,7 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::InputTextWithHint("##remoteurl", "https://github.com/you/project.git",
 		                         s_remoteUrl, sizeof(s_remoteUrl));
 		ImGui::SameLine();
-		ImGui::BeginDisabled(git->busy() || s_remoteUrl[0] == '\0');
+		ImGui::BeginDisabled(git->busyWithWork() || s_remoteUrl[0] == '\0');
 		if (EditorWidgets::button("Set##remote"))
 		{
 			git->requestSetRemote(s_remoteUrl);
@@ -1383,7 +1383,7 @@ void drawRepositorySection(AppContext& ctx)
 		                         ImGuiInputTextFlags_Password);
 
 		ImGui::Spacing();
-		ImGui::BeginDisabled(git->busy() || s_credHost[0] == '\0' ||
+		ImGui::BeginDisabled(git->busyWithWork() || s_credHost[0] == '\0' ||
 		                     s_credUser[0] == '\0' || s_credToken[0] == '\0');
 		if (EditorWidgets::primaryButton("Save token", ImVec2(140.0f, 0.0f)))
 		{

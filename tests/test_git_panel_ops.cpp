@@ -389,3 +389,38 @@ TEST_CASE("Commit-all still takes everything, staged or not (the size pass is sh
 	CHECK(s.svc.status().dirtyCount() == 0);
 	he_test::removeAllQuiet(repo);
 }
+
+TEST_CASE("A status refresh is not 'work': the buttons stay enabled while it runs")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed - skipped"); return; }
+	const fs::path repo = makeRepo("busy_work");
+	writeFile(repo / "a.txt", "1");
+	commitAll(repo, "first");
+	writeFile(repo / "a.txt", "2");
+
+	Svc s(repo);
+	CHECK_FALSE(s.svc.busyWithWork());
+
+	// A refresh (what the panel's poll does every few seconds) keeps the service busy
+	// for a moment, but it is not something the user asked for.
+	s.svc.requestStatus();
+	CHECK_FALSE(s.svc.busyWithWork());
+	s.settle();
+
+	// A quiet fetch (the timer's) likewise; there is no remote here, so it just fails quietly.
+	s.svc.requestFetch(/*quiet=*/true);
+	CHECK_FALSE(s.svc.busyWithWork());
+	s.settle();
+
+	// A commit is work, from the moment it is queued until its result is in.
+	s.svc.requestStage({ "a.txt" });
+	CHECK(s.svc.busyWithWork());
+	s.settle();
+	CHECK_FALSE(s.svc.busyWithWork());
+	s.svc.requestCommitStaged("two", false, false);
+	CHECK(s.svc.busyWithWork());
+	s.settle();
+	CHECK_FALSE(s.svc.busyWithWork());
+	CHECK(s.svc.recentCommits().front().subject == "two");
+	he_test::removeAllQuiet(repo);
+}

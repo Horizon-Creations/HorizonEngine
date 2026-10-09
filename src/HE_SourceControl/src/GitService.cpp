@@ -17,6 +17,7 @@ GitService::~GitService() { close(); }
 
 void GitService::push(Command c)
 {
+	if (countsAsWork(c)) m_work.fetch_add(1, std::memory_order_acq_rel);
 	{
 		std::lock_guard<std::mutex> lock(m_inMutex);
 		m_in.push_back(std::move(c));
@@ -87,6 +88,7 @@ void GitService::close()
 	m_worker.join();
 
 	m_busy.store(false, std::memory_order_release);
+	m_work.store(0, std::memory_order_release);
 	m_statusPending.store(false, std::memory_order_release);
 	{
 		std::lock_guard<std::mutex> lock(m_outMutex);
@@ -913,6 +915,10 @@ void GitService::workerMain()
 			std::lock_guard<std::mutex> lock(m_outMutex);
 			m_out.push_back(std::move(ev));
 		}
+
+		// Result queued first, THEN the work count falls: the UI reads the count before
+		// it pumps, and "no work left" must mean "its result is already in the queue".
+		if (countsAsWork(cmd)) m_work.fetch_sub(1, std::memory_order_acq_rel);
 
 		// Only idle once the queue is genuinely empty, or a burst of commands
 		// would flicker the UI's busy indicator between each one.
