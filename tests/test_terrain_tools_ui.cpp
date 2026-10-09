@@ -699,6 +699,15 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Shift e
 	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
 	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
 	REQUIRE(land().sculptHeights.empty());
+	// Undo rebuilt the landscape entity from a snapshot: its terrain comes back
+	// "dirty" (a loaded landscape wants its chunks built) and without the mesh
+	// component the terrain system owns. Put the test's premise back.
+	land().dirty = false;
+	{
+		const Entity te = reg.view<TerrainComponent>().front();
+		if (!reg.all_of<MeshComponent>(te)) reg.emplace<MeshComponent>(te, mesh);
+	}
+	invalidations = 0;
 	const size_t depth2 = undo.undoDepth();
 	const float gx = 30.0f, gz = 30.0f;                            // 112 px right and down of the middle
 	const float spx = cx + gx / 0.2665f, spy = cy + gz / 0.2665f;
