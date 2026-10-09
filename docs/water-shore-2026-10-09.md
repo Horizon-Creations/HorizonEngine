@@ -14,7 +14,8 @@ Code: `WaterMesh.h/.cpp` (Gitter und Konturen), `WaterField.h/.cpp` (Einstellung
 `setShoreClip`, `noteGroundChanged`), `WaterSurface.cpp` (Parameter, Neuaufbau), `TerrainSystem.cpp`
 (Übergabe der Geländeänderung), `SceneSerializer.cpp`, `InspectorPanel.cpp` + `EditorHelp.cpp`
 (Terrain, Abschnitt Water), Witness `HE_DUMP_WATERLAKE=slope|bowl|brush` in `EditorApplication.cpp`.
-Tests in `tests/test_water_surface.cpp` (12 neue Fälle) und `tests/test_water_field.cpp` (1).
+Tests in `tests/test_water_surface.cpp` (12 neue Fälle), `tests/test_water_field.cpp` (1) und
+`tests/test_inspector_ui.cpp` (1: echtes Panel im Headless-ImGui, Klick auf den Schalter).
 
 ## Ablauf in einem Absatz
 
@@ -79,6 +80,7 @@ Tests: `he_tests -tc='Water*'`, 73 Fälle (60 aus Schritt 3/4 unverändert grün
 | Welt: Strich weit weg / Beschneidung aus | `kept == 1` bzw. nichts gebaut | ja |
 | Welt: Fläche ganz weggeschnitten (Spiegel −5 über Gelände 0) | keine Entity, Wasser im Feld bleibt; Beschneidung aus: Entity da; an: wieder weg; Spiegel angehoben: wieder da | ja |
 | Einstellungen: klemmen, NaN behält den alten Wert, `sanitize` | | ja |
+| Inspector (Terrain, Abschnitt Water): Klick auf "Clip To Ground" | Schalter kippt, Wasser dirty, Landschaft (`dirty`, `regionDirty`) nicht, ein Undo-Schritt, Undo schaltet zurück | ja |
 | Szenenformat | Standard schreibt keinen Schlüssel; Rundlauf als Datei und als Undo-Snapshot; handgemachte Werte | ja |
 
 Bilder (`docs/water-surface/`), Debug-Editor, Himmel `HE_SKY_TIME=1.0`, `TOD=0.4`, Forward-Pfad, AA aus,
@@ -137,8 +139,9 @@ Landschaft, und in allem, was die Fläche liest statt zeichnet (Dreieckszahl, Ko
   Teil des Themas; wer sie baut, braucht die Beschneidung auch in diesen Abfragen.
 - **D3D11, D3D12, Vulkan** weder angefasst noch gelaufen; die Beschneidung ändert nur das Mesh
   (Schritte 9 und 10 prüfen den Weg auf Windows-Hardware).
-- **Kein Durchlauf mit echter Maus**: der Inspector-Abschnitt ist nur gebaut und im Hilfe-Audit
-  gezählt, nicht im laufenden Editor bedient worden (der Editor-MCP war nicht verbunden).
+- **Kein Durchlauf mit echter Maus im laufenden Editor** (der Editor-MCP war nicht verbunden): der
+  Inspector-Abschnitt ist im Headless-ImGui-Test bedient (Klick, Undo) und im Hilfe-Audit gezählt; der Regler
+  "Shore Overshoot" ist dort nicht gezogen worden.
 
 ## Fallen
 

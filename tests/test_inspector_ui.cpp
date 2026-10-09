@@ -21,6 +21,8 @@
 #include <HorizonScene/Components/NetworkComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/SplineComponent.h>
+#include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/WaterField.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/WeatherComponent.h>
@@ -1135,4 +1137,89 @@ TEST_CASE("inspector ui: each weather sound slot says what it plays and explains
 		io.AddKeyEvent(ImGuiKey_F1, false);
 		frame();
 	}
+}
+
+TEST_CASE("inspector ui: the Terrain section's Water rows switch shore clipping, undoably, without regenerating the landscape")
+{
+    // Thema 174 Schritt 5. The one editor part of the shore clipping: a switch and a
+    // margin on the landscape. They have to be on the panel, a click has to reach the
+    // water field (and mark the water, not the landscape, for a rebuild: a flag only
+    // the water reads must not regenerate every chunk) and land as ONE undo step.
+    Harness harness;
+    constexpr int TW = 420, TH = 1700;
+    ImGui::GetIO().DisplaySize = ImVec2(float(TW), float(TH));
+
+    HorizonWorld world;
+    EditorUndo   undo;
+    undo.setWorld(&world);
+    auto& reg = world.registry();
+    const Entity land = world.createEntity("Landscape");
+    reg.emplace<TransformComponent>(land);
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.resolution = 9;
+    tc.dirty = false;
+    tc.water.res = 64;
+    tc.water.createBody(1.0f);
+    reg.emplace<TerrainComponent>(land, tc);
+
+    ContextBits bits;
+    AppContext ctx = bits.make(world, undo);
+    ImGuiID clipBox = 0;
+    auto tallFrame = [&](bool left) -> ImGuiID {
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, left);
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+        ImGui::SetNextWindowSize(ImVec2(float(TW) - 20.0f, float(TH) - 20.0f));
+        ImGui::Begin("Details");
+        clipBox = ImGui::GetID("Clip To Ground##tcw");
+        InspectorPanel::renderFor(ctx, world, land, &undo);
+        ImGui::End();
+        EditorWidgets::drawQueuedHelp();
+        const ImGuiID hovered = ImGui::GetHoveredID();
+        ImGui::Render();
+        return hovered;
+    };
+    auto idAtT = [&](float x, float y) {
+        ImGui::GetIO().AddMousePosEvent(x, y);
+        tallFrame(false);
+        return tallFrame(false);
+    };
+    auto clickT = [&](float x, float y) {
+        ImGui::GetIO().AddMousePosEvent(x, y);
+        tallFrame(false);
+        tallFrame(false);
+        tallFrame(true);
+        tallFrame(false);
+        tallFrame(false);
+    };
+    auto field = [&]() -> const HE::water::Field& { return reg.get<TerrainComponent>(reg.view<TerrainComponent>().front()).water; };
+
+    ImGui::GetIO().AddMousePosEvent(float(TW) - 2.0f, float(TH) - 2.0f);
+    for (int i = 0; i < 4; ++i) tallFrame(false);
+    REQUIRE(clipBox != 0);
+    const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+    float y = -1.0f;
+    for (float yy = 12.0f; yy < float(TH) - 12.0f && y < 0.0f; yy += 2.0f)
+        if (idAtT(x, yy) == clipBox) y = yy + 3.0f;
+    REQUIRE_MESSAGE(y > 0.0f, "the Terrain section has no Clip To Ground switch on the panel");
+
+    REQUIRE(field().clipToGround);
+    REQUIRE_FALSE(field().dirty);
+    REQUIRE_FALSE(undo.canUndo());
+    clickT(x, y);
+    CHECK_FALSE(field().clipToGround);
+    CHECK(field().dirty);                                  // the water is to be rebuilt ...
+    CHECK_FALSE(reg.get<TerrainComponent>(land).dirty);    // ... the landscape's chunks are not
+    CHECK_FALSE(reg.get<TerrainComponent>(land).regionDirty);
+    CHECK(undo.canUndo());
+    CHECK(field().shoreOvershoot == HE::water::kDefaultShoreOvershoot);
+
+    // One step back is the switch on again, with the body and the margin as they were.
+    const size_t depth = undo.undoDepth();
+    REQUIRE(undo.undo());
+    CHECK(undo.undoDepth() == depth - 1);
+    CHECK(field().clipToGround);
+    CHECK(field().bodies.size() == 1);
 }

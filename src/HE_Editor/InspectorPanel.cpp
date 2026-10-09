@@ -3299,14 +3299,16 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::SeparatorText("Water");
 			{
 				bool clip = t->water.clipToGround;
+				if (EditorWidgets::checkbox("Clip To Ground##tcw", &clip))
+					HE::water::setShoreClip(*t, clip, t->water.shoreOvershoot);
+				trackEdit();
+				ImGui::BeginDisabled(!t->water.clipToGround);
 				float over = t->water.shoreOvershoot;
-				bool waterChanged = EditorWidgets::checkbox("Clip To Ground##tcw", &clip); trackEdit();
-				ImGui::BeginDisabled(!clip);
-				waterChanged |= Row::dragFloat("Shore Overshoot##tcw", &over, 0.01f, 0.0f,
-				                               HE::water::kMaxShoreOvershoot, "%.2f m");
+				if (Row::dragFloat("Shore Overshoot##tcw", &over, 0.01f, 0.0f,
+				                   HE::water::kMaxShoreOvershoot, "%.2f m"))
+					HE::water::setShoreClip(*t, t->water.clipToGround, over);
 				trackEdit();
 				ImGui::EndDisabled();
-				if (waterChanged) HE::water::setShoreClip(*t, clip, over);
 			}
 
 			// Noise is a one-time creation input: it is baked into editable
