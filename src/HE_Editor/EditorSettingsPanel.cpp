@@ -1100,14 +1100,9 @@ bool s_idSeeded      = false;
 
 void drawGitMessages(GitController* git)
 {
-	if (!git->lastError().empty())
-	{
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-		ImGui::TextWrapped("%s", git->lastError().c_str());
-		ImGui::PopStyleColor();
-	}
-	else if (!git->lastInfo().empty())
+	// Errors are posted to the notifications by GitController (the footer bell); what
+	// is printed here is only the outcome of the last thing that worked.
+	if (git->lastError().empty() && !git->lastInfo().empty())
 	{
 		ImGui::Spacing();
 		ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s", git->lastInfo().c_str());

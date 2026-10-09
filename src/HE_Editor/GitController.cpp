@@ -1,4 +1,5 @@
 #include "GitController.h"
+#include "NotificationStore.h"   // errors go to the footer bell
 #include "CollabController.h"
 
 #include <Diagnostics/Log.h>
@@ -270,6 +271,25 @@ void GitController::requestSetRemote(const std::string& url)
 	m_service.requestSetRemote(url);
 }
 
+// An operation failed: say so where the user looks for such things (the footer bell,
+// ringing for a Problem), not as red text inside the panel. The panel used to print
+// lastError() itself, and a message that lives in a window nobody has open is a
+// message nobody read. One notification per distinct error: the service keeps the
+// text until the next operation succeeds, so without the memory below every frame
+// would post it again.
+void GitController::reportNewError()
+{
+	const std::string& err = m_service.lastError();
+	if (err.empty()) { m_notifiedError.clear(); return; }
+	if (err == m_notifiedError) return;
+	m_notifiedError = err;
+
+	// First line as the sentence, everything as the detail.
+	std::string first = err.substr(0, err.find('\n'));
+	if (first.size() > 160) first = first.substr(0, 157) + "...";
+	HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Source control: " + first, err);
+}
+
 void GitController::update(std::uint64_t nowMs)
 {
 	// Drain first, unconditionally. The result of a discovery is what makes
@@ -280,6 +300,7 @@ void GitController::update(std::uint64_t nowMs)
 	// pump collects its result (see m_cloneBusy).
 	const bool serviceIdle = !m_service.busy();
 	m_service.pump();
+	reportNewError();
 	if (const int f = m_syncWatch.poll(serviceIdle, m_service.lastError(), m_service.lastInfo()))
 		m_syncMoment |= f;
 	// The clone and the repository list run before any project is open, so

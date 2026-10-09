@@ -5,6 +5,7 @@
 #include "EditorApplication.h"           // AppContext
 #include "EditorHelp.h"                  // "New Landscape/" and "Landscape/" scopes
 #include "EditorWidgets.h"               // asset drop slot + WrapText (text wraps, never runs off)
+#include "NotificationStore.h"           // failures go to the footer bell, not to red text
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
@@ -71,6 +72,20 @@ static TerrainGenerate::Params s_mountain;      // Max Height, Falloff, Roughnes
 static glm::vec3   s_areaStartWS{};             // Mountain: world-space point where the drag began
 static glm::vec3   s_areaEndWS{};               // Mountain: last ground point the drag reached
 static bool        s_areaValid       = false;   // Mountain: the drag began on the ground
+
+// ── The creation form's own choices ───────────────────────────────────────────
+// What the new landscape starts from besides size and noise: its material, and a
+// heightmap to shape it from the first frame. Transient like the rest of the form
+// (they are not part of the saved scene until Create is pressed).
+static HE::UUID          s_newMaterial;                 // zero = the engine's default terrain material
+static HE::UUID          s_newHeightmapTex;             // a texture asset, or ...
+static std::string       s_newHeightmapFile;            // ... a file off the disk (16-bit PNG, .r16)
+static bool              s_newHmFlipZ    = false;
+static bool              s_newHmAdoptRes = false;
+// The file dialog's result slot for the form (separate from the Heightmap block's, which
+// belongs to an existing landscape). SDL calls back from the dialog, this frame or later.
+static std::string       s_newPickPath;
+static std::atomic<bool> s_newPickReady { false };
 
 namespace
 {
@@ -721,6 +736,67 @@ void renderPanel(AppContext& ctx)
         EditorWidgets::helpForLabel("Resolution");
         ImGui::DragFloat("Height Scale", &np.heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m");
         EditorWidgets::helpForLabel("Height Scale");
+
+        // ── Material ─────────────────────────────────────────────────────
+        // Chosen here so the landscape is born with the layers it will be painted
+        // with; the default is the engine's terrain material, as before.
+        ImGui::SeparatorText("Material");
+        EditorWidgets::assetDropSlot(ctx, "Material", s_newMaterial,
+            HE::AssetType::Material, "newlsmat",
+            "(engine default)", "material", /*showClear=*/true, /*undo=*/false,
+            "New Landscape/Material");
+
+        // ── Heightmap ────────────────────────────────────────────────────
+        // The shape of the ground from a picture, applied as the landscape is
+        // created. With one set, the noise below is not used.
+        ImGui::SeparatorText("Heightmap (optional)");
+        if (s_newPickReady.load(std::memory_order_acquire))
+        {
+            s_newPickReady.store(false, std::memory_order_relaxed);
+            if (!s_newPickPath.empty())
+            {
+                s_newHeightmapFile = s_newPickPath;
+                s_newHeightmapTex  = HE::UUID{};
+            }
+        }
+        const HE::UUID texBefore = s_newHeightmapTex;
+        EditorWidgets::assetDropSlot(ctx, "Texture", s_newHeightmapTex,
+            HE::AssetType::Texture, "newlshm",
+            "(none — drop a greyscale texture here)", "texture", /*showClear=*/true,
+            /*undo=*/false, "New Landscape/Heightmap");
+        if (s_newHeightmapTex != texBefore && s_newHeightmapTex != HE::UUID{})
+            s_newHeightmapFile.clear();                    // one source at a time
+        if (!s_newHeightmapFile.empty())
+        {
+            ImGui::TextWrapped("File: %s", s_newHeightmapFile.c_str());
+            if (EditorWidgets::smallButton("Remove File")) s_newHeightmapFile.clear();
+        }
+        else if (EditorWidgets::button("Choose File..."))
+        {
+            static const SDL_DialogFileFilter kFilters[] = {
+                { "Heightmaps", "png;pgm;r16;raw;jpg;jpeg;bmp;tga;psd" },
+                { "All files",  "*" },
+            };
+            SDL_ShowOpenFileDialog(
+                [](void* /*userdata*/, const char* const* filelist, int /*filter*/)
+                {
+                    s_newPickPath = (filelist && filelist[0]) ? filelist[0] : "";
+                    s_newPickReady.store(true, std::memory_order_release);
+                },
+                nullptr,
+                ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+                kFilters, 2, nullptr, false);
+        }
+        const bool haveHeightmap = s_newHeightmapTex != HE::UUID{} || !s_newHeightmapFile.empty();
+        if (haveHeightmap)
+        {
+            EditorWidgets::checkbox("Flip Z", &s_newHmFlipZ);
+            ImGui::SameLine();
+            EditorWidgets::checkbox("Use Image Resolution", &s_newHmAdoptRes);
+            ImGui::TextDisabled("Black = 0 m, white = Height Scale. Replaces the noise.");
+        }
+
+        ImGui::BeginDisabled(haveHeightmap);
         ImGui::SeparatorText("Noise (seed 0 = flat)");
         ImGui::DragInt  ("Seed",         &np.seed,        1,     0,    0x7fffffff);
         EditorWidgets::helpForLabel("Seed");
@@ -732,6 +808,7 @@ void renderPanel(AppContext& ctx)
         EditorWidgets::helpForLabel("Lacunarity");
         ImGui::DragFloat("Gain",         &np.gain,        0.01f, 0.0f,  1.0f,  "%.2f");
         EditorWidgets::helpForLabel("Gain");
+        ImGui::EndDisabled();
 
         ImGui::Spacing();
         const float btnW = 160.0f;
@@ -758,7 +835,54 @@ void renderPanel(AppContext& ctx)
             // edit directly — the seed/noise is a one-time creation input and
             // no longer feeds the mesh (sculptHeights overrides it). A flat
             // terrain (seed 0) is left empty and stays flat until first sculpt.
-            if (tc.seed != 0)
+            // A heightmap replaces the noise outright. A failure is reported as a
+            // notification and the landscape is still created (flat, or from the noise),
+            // so a bad file never costs the user the form they filled in.
+            bool shapedByHeightmap = false;
+            if (haveHeightmap)
+            {
+                TerrainHeightmap::Options hopts;
+                hopts.flipZ           = s_newHmFlipZ;
+                hopts.adoptResolution = s_newHmAdoptRes;
+                TerrainHeightmap::Result hres;
+                std::string source;
+                if (!s_newHeightmapFile.empty())
+                {
+                    source = s_newHeightmapFile;
+                    hres   = TerrainHeightmap::importFile(tc, s_newHeightmapFile, hopts);
+                }
+                else
+                {
+                    source = "the heightmap texture";
+                    hres.error = "The heightmap texture could not be loaded.";
+                    if (ctx.contentManager)
+                    {
+                        // acquire, not get: a texture the Content Browser only listed is
+                        // not resident until something asks for its pixels.
+                        const auto tex = ctx.contentManager->acquireTexture(s_newHeightmapTex);
+                        if (tex)
+                        {
+                            source = tex->name;
+                            hres   = TerrainHeightmap::importTexture(tc, *tex, hopts);
+                        }
+                    }
+                }
+                if (hres.ok)
+                {
+                    shapedByHeightmap = true;
+                    HE_LOG_INFO(Editor, "Landscape created from heightmap \"%s\": %u x %u (%u-bit)",
+                                source.c_str(), hres.sourceWidth, hres.sourceHeight, hres.sourceBits);
+                }
+                else
+                {
+                    HE_LOG_WARN(Editor, "Heightmap for the new landscape failed: %s", hres.error.c_str());
+                    HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                                   "The heightmap could not be applied - the landscape was created without it.",
+                                   hres.error);
+                }
+            }
+
+            if (!shapedByHeightmap && tc.seed != 0)
             {
                 const StaticMeshAsset gen = generateTerrainMesh(tc);
                 const size_t nVerts = gen.vertices.size() / 3;
@@ -771,8 +895,9 @@ void renderPanel(AppContext& ctx)
             ctx.world->addComponent(e, TransformComponent{});
             ctx.world->addComponent(e, tc);
             MaterialComponent mc;
-            mc.materialAssetId = HE::kDefaultTerrainMaterialId;
+            mc.materialAssetId = s_newMaterial != HE::UUID{} ? s_newMaterial : HE::kDefaultTerrainMaterialId;
             ctx.world->addComponent(e, mc);
+            if (ctx.renderer && s_newMaterial != HE::UUID{}) ctx.renderer->InvalidateMaterial(s_newMaterial);
 
             ctx.world->markHierarchyDirty();
             ctx.selection.set(e);
@@ -1357,17 +1482,17 @@ void drawHeightmapBlock(AppContext& ctx, Entity terrain)
 
 	ImGui::TextDisabled("Black = 0 m, white = Height Scale (%.1f m).", tc->heightScale);
 	ImGui::TextDisabled("Replaces the sculpt; paint and foliage stay.");
-	if (!s_hmStatus.empty())
+	// A failure is a notification (the footer bell rings), not red text in the panel; the
+	// line here is only the outcome of an import that worked.
+	static std::string s_hmReported;
+	if (s_hmStatus.empty()) s_hmReported.clear();
+	if (!s_hmStatus.empty() && s_hmStatusError && s_hmStatus != s_hmReported)
 	{
-		if (s_hmStatusError)
-		{
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
-			ImGui::TextWrapped("%s", s_hmStatus.c_str());
-			ImGui::PopStyleColor();
-		}
-		else
-			ImGui::TextWrapped("%s", s_hmStatus.c_str());
+		s_hmReported = s_hmStatus;
+		HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Heightmap import failed.", s_hmStatus);
 	}
+	if (!s_hmStatus.empty() && !s_hmStatusError)
+		ImGui::TextWrapped("%s", s_hmStatus.c_str());
 	ImGui::PopID();
 #else
 	(void)ctx; (void)terrain;

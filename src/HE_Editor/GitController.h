@@ -210,6 +210,10 @@ public:
 	bool blockedByCollabSession() const;
 
 private:
+	// Posts a notification when the service reports an error it has not reported yet.
+	void reportNewError();
+	std::string m_notifiedError;
+
 	// Absolute → repository-relative with forward slashes, or empty when outside.
 	std::string toRepoRelative(const std::string& absolutePath) const;
 

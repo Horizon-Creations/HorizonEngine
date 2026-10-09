@@ -1522,13 +1522,8 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
 		}
 
-		if (!git->lastError().empty())
-		{
-			ImGui::Spacing();
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-			ImGui::TextWrapped("%s", git->lastError().c_str());
-			ImGui::PopStyleColor();
-		}
+		// Errors are not printed here: GitController posts them to the notifications
+		// (the footer bell), where they are seen whichever panel is open.
 		if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 		ImGui::End();
 		return;
@@ -1566,13 +1561,9 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		                   "others through the session.");
 		ImGui::PopStyleColor();
 	}
-	if (!git->lastError().empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-		ImGui::TextWrapped("%s", git->lastError().c_str());
-		ImGui::PopStyleColor();
-	}
-	else if (!git->lastInfo().empty())
+	// Errors go to the notifications (GitController::reportNewError), not to red text
+	// in here; what stays is the plain outcome of the last thing that worked.
+	if (git->lastError().empty() && !git->lastInfo().empty())
 	{
 		// The one line here that was not already wrapped, and it is a whole
 		// sentence from git ("Fetched: 3 new commits on origin/main") in a panel

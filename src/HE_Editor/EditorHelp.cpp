@@ -6436,6 +6436,35 @@ namespace
 	// Nine numbers that decide what the ground looks like before there is any
 	// ground to look at. Octaves, Lacunarity and Gain are the noise vocabulary,
 	// and nobody should have to know it to make a hill.
+	{ "New Landscape/Material", "",
+	  "The material the new landscape is created with; it decides which layers can "
+	  "be painted. Leave it empty for the engine's default terrain material. It "
+	  "can be changed later from the Landscape panel.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Heightmap", "",
+	  "A greyscale texture that shapes the ground as the landscape is created: "
+	  "black is 0 m, white is the Height Scale. With one set, the noise settings "
+	  "are not used. Project textures are 8-bit; use Choose File for a 16-bit PNG "
+	  "or an .r16 when the terrain is tall.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Choose File...", "",
+	  "Picks a heightmap straight from the disk: 8- or 16-bit PNG, PGM, or a "
+	  "headerless 16-bit .r16/.raw. Reading it directly keeps the full 16-bit "
+	  "precision, which a texture asset does not.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Remove File", "",
+	  "Forgets the chosen heightmap file; the landscape will be created from the "
+	  "noise settings below instead.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Flip Z", "",
+	  "Mirrors the heightmap top-to-bottom before it is laid over the landscape. "
+	  "Some tools export their maps the other way up; this is the fix.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Use Image Resolution", "",
+	  "Gives the landscape the heightmap's own vertex resolution (rounded to the "
+	  "2^n+1 the chunks use, at most 513) instead of resampling the picture onto "
+	  "the Resolution above.",
+	  "", "editor#landscape-mode" },
 	{ "New Landscape/Width (X)", "",
 	  "How wide the new landscape will be along X, in metres. The green preview "
 	  "grid in the viewport is this size.",
