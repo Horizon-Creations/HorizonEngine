@@ -914,7 +914,7 @@ JPH::ShapeSettings::ShapeResult buildHeightFieldShape(const TerrainComponent& tc
     // physics build can run before the terrain has ever ticked (initialize() at
     // scene start), and a component this class mutated behind TerrainSystem's
     // back would be a second author of the same data.
-    uint32_t res   = std::clamp(tc.resolution, 2u, 1024u);
+    uint32_t res   = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     uint32_t cells = res - 1, p = 1;
     while (p < cells) p <<= 1;
     const uint32_t snapped = p + 1;

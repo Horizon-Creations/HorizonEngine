@@ -5,6 +5,14 @@
 
 // Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
 // Must equal HE::kMatMaxLandscapeLayers (MaterialGraph.h) — test_terrain pins it.
+// The largest resolution a landscape can have: 1025 = 2^10 + 1, the top of the 2ⁿ+1
+// ladder every landscape is snapped to (TerrainSystem / TerrainSculpt::ensureHeights).
+// The clamp used to be 1024, which is NOT on that ladder: a landscape of 513..1024
+// snaps UP to 1025, every consumer clamped it back down to 1024, and the height
+// field (1025² samples) never matched the grid it was read as (1024²) — so it was
+// read as flat, and the "snap" ran again every frame (dirty → all 256 chunks rebuilt
+// and re-uploaded per frame).
+inline constexpr uint32_t kTerrainMaxResolution = 1025;
 inline constexpr int kTerrainWeightPages = 2;
 inline constexpr int kTerrainMaxLayers   = 4 * kTerrainWeightPages;
 

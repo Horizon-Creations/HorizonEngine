@@ -475,7 +475,7 @@ namespace TerrainSystem
             // sculpted terrain this resamples sculptHeights one time (near-lossless,
             // e.g. 512→513); for noise it just bumps the resolution. Idempotent.
             {
-                const uint32_t r0 = std::clamp(tc.resolution, 2u, 1024u);
+                const uint32_t r0 = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
                 uint32_t cells = r0 - 1, p = 1; while (p < cells) p <<= 1;
                 const uint32_t snappedRes = p + 1;
                 if (snappedRes != r0)
@@ -487,7 +487,7 @@ namespace TerrainSystem
                 }
             }
 
-            const uint32_t res = std::clamp(tc.resolution, 2u, 1024u);
+            const uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
             const ChunkGrid g  = computeGrid(res);
             const std::vector<float> field = computeTerrainHeightField(tc);
 

@@ -123,7 +123,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 
 			// ── Terrain height sampler (bilinear, local space) ────────
 			// Returns the sculpted height at world XZ; 0 if no sculpt data.
-			const uint32_t tcRes   = std::clamp(tc.resolution, 2u, 1024u);
+			const uint32_t tcRes   = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
 			const float    tcHalfX = tc.sizeX * 0.5f;
 			const float    tcHalfZ = tc.sizeZ * 0.5f;
 			const float    tcStepX = tc.sizeX / static_cast<float>(tcRes - 1);
@@ -738,7 +738,7 @@ void renderPanel(AppContext& ctx)
             TerrainComponent tc;
             tc.sizeX      = np.sizeX;
             tc.sizeZ      = np.sizeZ;
-            tc.resolution = static_cast<uint32_t>(std::clamp(np.resolution, 2, 1024));
+            tc.resolution = static_cast<uint32_t>(std::clamp(np.resolution, 2, static_cast<int>(kTerrainMaxResolution)));
             tc.heightScale= np.heightScale;
             tc.seed       = np.seed;
             tc.octaves    = np.octaves;
