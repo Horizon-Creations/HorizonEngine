@@ -11,6 +11,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <MaterialGraph/MaterialGraph.h>
 // he_materialshader is linked into he_tests in every flavour (the stub answers the
 // compiles); only the cross-compile TEST CASES below are gated on HE_TESTS_HAVE_SHADERC.
@@ -2013,7 +2014,7 @@ TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
 	// The sampler is declared at the reserved binding and sampled at the RAW UV
 	// (the weightmap spans the whole terrain; detail tiling is per layer).
 	CHECK(gen.glsl.find("binding = 14) uniform sampler2D heLandscapeWeights") != std::string::npos);
-	CHECK(gen.glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+	CHECK(gen.glsl.find("_wuv);") != std::string::npos);     // the smoothed coordinate, see emitLayerBlendNode
 	// Normalised by the weight sum, so a partly painted texel doesn't darken…
 	CHECK(gen.glsl.find("1e-4") != std::string::npos);
 	// …and a texel with NO weight at all falls back to layer 0 instead of
@@ -2082,7 +2083,7 @@ TEST_CASE("Landscape Layer Blend reads layers 4..7 from the right half of the sa
 		CHECK(g->glsl.find("textureSize(heLandscapeWeights, 0)") != std::string::npos);
 		CHECK(g->glsl.find("textureLod(heLandscapeWeights") != std::string::npos);
 		// … beside the untouched square-map read the blend always made.
-		CHECK(g->glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+		CHECK(g->glsl.find("texture(heLandscapeWeights, ") != std::string::npos);
 	}
 	// Only a blend with a fifth layer reads the second page at all.
 	CHECK(count(three.glsl, "textureLod(heLandscapeWeights") == 1);
@@ -2342,7 +2343,7 @@ TEST_CASE("A bombed texture layer cross-compiles for all five backends, with gra
 TEST_CASE("The auto landscape material cross-compiles for all five backends, in every view and permutation")
 {
 	// The biggest graph the engine ships: four layers × three array reads, three
-	// hex grids, two noise fields, fourteen parameters. All of it is shader TEXT
+	// hex grids, two noise fields, thirteen parameters. All of it is shader TEXT
 	// in existing slots — what has to hold is that every backend's translator
 	// takes it, the clustered and G-buffer variants included, and that the
 	// bombing-off permutation and the unlit mask views (the witness) do too.
@@ -2351,10 +2352,10 @@ TEST_CASE("The auto landscape material cross-compiles for all five backends, in 
 	const std::map<std::string, bool> noBomb{ { HE::kAutoLandscapeSwitchBombing, false } };
 	struct Variant { const char* name; HE::MatShaderGen gen; };
 	const Variant variants[] = {
-		{ "lit",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph) },
-		{ "nobomb", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, {}, &noBomb) },
-		{ "masks",  HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksRockSnowWater).graph) },
-		{ "ground", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksDirtWet).graph) },
+		{ "lit",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()) },
+		{ "nobomb", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader(), &noBomb) },
+		{ "masks",  HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksRockSnowWater).graph, HE::weatherFunctionLoader()) },
+		{ "ground", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksDirtWet).graph, HE::weatherFunctionLoader()) },
 	};
 	for (const Variant& v : variants)
 	{
@@ -2450,10 +2451,10 @@ TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambl
 
 // ═══ Auto landscape material (Thema 158, Schritt 5) ═══════════════════════════
 
-TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex grid per bombed layer")
+TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex grid per bombed layer")
 {
 	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
-	const HE::MatShaderGen gen = HE::generateFragment(a.graph);
+	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 	REQUIRE_FALSE(gen.glsl.empty());
 	CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle / missing-output magenta
 
@@ -2479,15 +2480,36 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 	                          HE::kAutoLandscapeParamDirtAmount, HE::kAutoLandscapeParamDirtSize,
 	                          HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowBlend,
 	                          HE::kAutoLandscapeParamSnowMaxSlope, HE::kAutoLandscapeParamPuddleAmount,
-	                          HE::kAutoLandscapeParamPuddleSize, HE::kAutoLandscapeParamPuddleMaxSlope })
+	                          HE::kAutoLandscapeParamPuddleMaxSlope })
 	{
 		const bool found = std::any_of(gen.params.begin(), gen.params.end(),
 		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
 		CHECK_MESSAGE(found, name);
 	}
-	// Procedural layers only: no weightmap, no paint layers.
-	CHECK(gen.layerNames.empty());
-	CHECK(gen.glsl.find("heLandscapeWeights, vUV") == std::string::npos);
+	// The paint layers on top of the automatic rules: Auto first — an unpainted
+	// terrain binds the (1,0,0,0) default weightmap and must resolve to it — then
+	// the five textures. Five Landscape Layer Blend nodes read the weightmap (two
+	// extract the weights, three mix albedo / normal / mask), all with the same names.
+	{
+		const std::vector<std::string> names = HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames);
+		REQUIRE(names.size() == static_cast<size_t>(HE::kAutoLandscapePaintLayerCount));
+		CHECK(names[static_cast<size_t>(HE::AutoLandscapePaintLayer::Auto)] == "Auto");
+		CHECK(names[static_cast<size_t>(HE::AutoLandscapePaintLayer::Puddles)] == "Puddles");
+		CHECK(gen.layerNames == names);
+		CHECK(gen.glsl.find("texture(heLandscapeWeights, ") != std::string::npos);
+		size_t blends = 0;
+		for (const HE::MatGraphNode& n : a.graph.nodes)
+			if (n.type == HE::MatNodeType::LandscapeLayerBlend) { ++blends; CHECK(n.s == HE::kAutoLandscapePaintLayerNames); }
+		CHECK(blends == 5u);
+	}
+	// The mask views are the AUTOMATIC masks and need no weightmap — the witness
+	// renders them on an unpainted terrain.
+	for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet })
+	{
+		const HE::MatShaderGen mg = HE::generateFragment(HE::buildAutoLandscapeGraph(v).graph, HE::weatherFunctionLoader());
+		CHECK(mg.layerNames.empty());
+		CHECK(mg.glsl.find("heLandscapeWeights") == std::string::npos);
+	}
 
 	// Puddles are an OVERLAY on the ground below, not a layer: slice 4 of the arrays
 	// (WetGround) stays in them but no read asks for it — every array read takes its
@@ -2513,22 +2535,22 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 				sawSnow = sawSnow || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Snow);
 			}
 		}
-		CHECK(reads == 21); // 3 bombed layers x 3 maps x (plain + bombed) + Snow x 3 maps
+		CHECK(reads == 24); // 4 bombed layers (Grass, Dirt, Rock, Snow) x 3 maps x (plain + bombed)
 		CHECK(sawSnow);
 	}
 
-	// Grass, Dirt, Rock each read albedo + normal + mask on ONE grid (three grids
-	// in total); Snow is a plain read. The uv here is a coerced
+	// Grass, Dirt, Rock and Snow each read albedo + normal + mask on ONE grid (four
+	// grids in total). The uv here is a coerced
 	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
 	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 3u);
+	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 4u);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
 	CHECK(gen.switches[0].second);
 
 	// The bombing-off permutation: no grid at all, the same three slots.
 	const std::map<std::string, bool> off{ { HE::kAutoLandscapeSwitchBombing, false } };
-	const HE::MatShaderGen plain = HE::generateFragment(a.graph, {}, &off);
+	const HE::MatShaderGen plain = HE::generateFragment(a.graph, HE::weatherFunctionLoader(), &off);
 	CHECK(plain.glsl.find("heBomb") == std::string::npos);
 	CHECK(plain.textureArrayMask == 0x7u);
 	CHECK(plain.textures.size() == 3u);
@@ -2544,7 +2566,7 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 		CHECK(m.graph.findNode(m.output)->p[0] == 0.0f);
 		for (int id : { m.slope, m.dirtMask, m.rockMask, m.snowMask, m.flatMask, m.wetMask, m.waterMask })
 			CHECK(m.graph.findNode(id) != nullptr);
-		const HE::MatShaderGen mg = HE::generateFragment(m.graph);
+		const HE::MatShaderGen mg = HE::generateFragment(m.graph, HE::weatherFunctionLoader());
 		CHECK_FALSE(mg.glsl.empty());
 		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 	}
@@ -2552,7 +2574,7 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 	// The graph survives its JSON (what the .hasset stores) byte for byte.
 	MaterialGraph back;
 	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(a.graph), back));
-	CHECK(HE::generateFragment(back).glsl == gen.glsl);
+	CHECK(HE::generateFragment(back, HE::weatherFunctionLoader()).glsl == gen.glsl);
 }
 
 TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
@@ -2591,7 +2613,7 @@ TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
 	using V = HE::AutoLandscapeView;
 	for (V view : { V::Lit, V::MasksRockSnowWater, V::MasksDirtWet, V::Normal, V::Surface })
 	{
-		const std::string glsl = HE::generateFragment(HE::buildAutoLandscapeGraph(view).graph).glsl;
+		const std::string glsl = HE::generateFragment(HE::buildAutoLandscapeGraph(view).graph, HE::weatherFunctionLoader()).glsl;
 		CHECK(glsl.find("heFbmI(") != std::string::npos);
 		CHECK(glsl.find("heHash21") == std::string::npos);
 		CHECK(glsl.find("heFbm(") == std::string::npos);
@@ -3309,6 +3331,9 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 		std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent" / "Materials";
 	REQUIRE(std::filesystem::exists(dir / "M_AutoLandscape.hasset"));
 	ContentManager cm(dir.string());
+	// A load regenerates the GLSL from the graph, and the graph calls the weather functions by
+	// their "Engine/…" path: with the engine root set they resolve to the shipped assets.
+	cm.setEngineContentRoot(dir.parent_path().string());
 	const HE::UUID id = cm.loadAsset("M_AutoLandscape.hasset");
 	CHECK(id == HE::kAutoLandscapeMaterialId);
 	const MaterialAsset* m = cm.getMaterial(id);
@@ -3317,9 +3342,180 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
 	CHECK(m->graphTexturePaths.size() == 3u);
 	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	// The Landscape tool lists these as the paintable layers — Auto first, so an
+	// unpainted terrain reads the automatic distribution.
+	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
 	CHECK(m->parentMaterialPath.empty());
 }
+
+TEST_CASE("The shipped weather functions are exactly what the builders make, and the landscape material resolves them")
+{
+	// Generated by matfn_gen (Weather/ sub-folder) and committed — the tripwire for a change
+	// to HE::buildWeather*Function that did not re-run the generator.
+	const std::filesystem::path root = std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent";
+	const std::filesystem::path dir  = root / "MaterialFunctions" / "Weather";
+	struct Want { const char* file; HE::UUID id; HE::MaterialGraph g; };
+	const std::vector<Want> want = {
+		{ "MF_WeatherPuddles.hasset", HE::kWeatherPuddlesFunctionId, HE::buildWeatherPuddlesFunction() },
+		{ "MF_WeatherSnow.hasset",    HE::kWeatherSnowFunctionId,    HE::buildWeatherSnowFunction() } };
+	ContentManager cm(dir.string());
+	for (const Want& w : want)
+	{
+		CAPTURE(w.file);
+		REQUIRE(std::filesystem::exists(dir / w.file));
+		const HE::UUID id = cm.loadAsset(w.file);
+		CHECK(id == w.id);
+		const MaterialFunctionAsset* f = cm.getMaterialFunction(id);
+		REQUIRE(f);
+		CHECK_MESSAGE(f->nodeGraphJson == HE::materialGraphToJson(w.g),
+		              "re-run: matfn_gen EditorDeps/EngineContent/MaterialFunctions");
+	}
+
+	// The landscape material, loaded with the engine root, found both by their Engine/ path
+	// and compiled real code around them.
+	ContentManager mats((root / "Materials").string());
+	mats.setEngineContentRoot(root.string());
+	const MaterialAsset* m = mats.getMaterial(mats.loadAsset("M_AutoLandscape.hasset"));
+	REQUIRE(m);
+	CHECK(m->customShaderFragGlsl.find("missing function") == std::string::npos);
+	CHECK(m->customShaderFragGlsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
+	CHECK(m->customShaderFragGlsl.find("heLight.weather") != std::string::npos);
+}
 #endif // HE_EDITOR_DEPS_DIR
+
+// ── The Weather node and the weather material functions ─────────────────────
+
+TEST_CASE("Weather node: four floats from heLight.weather, one per pin")
+{
+	MaterialGraph g = MaterialGraph::makeDefault();
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	const int w = g.addNode(MatNodeType::Weather);
+	REQUIRE(HE::matNodeDesc(MatNodeType::Weather).outputs.size() == 5u);   // + Puddle Size (metres)
+	REQUIRE(g.connect(w, 2, out, HE::kMatOutputRoughnessPin));   // Puddles
+	REQUIRE(g.connect(w, 3, out, HE::kMatOutputMetallicPin));    // Snow Cover
+	const std::string glsl = HE::generateFragment(g).glsl;
+	CHECK(glsl.find("clamp(heLight.weather, 0.0, 1.0)") != std::string::npos);
+	CHECK(glsl.find(".z") != std::string::npos);
+	CHECK(glsl.find(".w") != std::string::npos);
+	// Puddle Size (pin 4) is metres from the second weather vec4, never below half a metre — a
+	// zero-filled lighting block must not divide a noise scale by zero.
+	{
+		MaterialGraph g2 = MaterialGraph::makeDefault();
+		int out2 = 0;
+		for (auto& n : g2.nodes) if (n.type == MatNodeType::Output) out2 = n.id;
+		const int w2 = g2.addNode(MatNodeType::Weather);
+		REQUIRE(g2.connect(w2, 4, out2, HE::kMatOutputRoughnessPin));
+		CHECK(HE::generateFragment(g2).glsl.find("max(heLight.weather2.x, 0.5)") != std::string::npos);
+	}
+
+	// By name through JSON, like every node.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	CHECK(HE::generateFragment(back).glsl == glsl);
+}
+
+TEST_CASE("Weather functions: a usable interface, flat, defaults authored, no Param nodes")
+{
+	const std::vector<std::pair<const char*, MaterialGraph>> fns = {
+		{ HE::kWeatherPuddlesFunctionPath, HE::buildWeatherPuddlesFunction() },
+		{ HE::kWeatherSnowFunctionPath,    HE::buildWeatherSnowFunction() } };
+	for (const auto& [path, fn] : fns)
+	{
+		CAPTURE(path);
+		std::vector<HE::MatPinDesc> ins, outs;
+		HE::matFunctionPins(fn, ins, outs);
+		CHECK_FALSE(ins.empty());
+		CHECK_FALSE(outs.empty());
+		for (const HE::MatPinDesc& p : ins)  CHECK(std::string(p.name).size() > 0);
+		for (const HE::MatPinDesc& p : outs) CHECK(std::string(p.name).size() > 0);
+		for (const HE::MatGraphNode& n : fn.nodes)
+		{
+			if (n.type == MatNodeType::FnInput) CHECK(n.p[2] >= 0.5f);
+			CHECK(n.type != MatNodeType::FunctionCall);
+			// Knobs are function INPUTS: a Param node would land in the caller's parameter panel
+			// under a fixed name and collide when the function is used twice.
+			CHECK(n.type != MatNodeType::ParamFloat);
+		}
+	}
+	std::vector<HE::MatPinDesc> ins, outs;
+	HE::matFunctionPins(HE::buildWeatherPuddlesFunction(), ins, outs);
+	REQUIRE(ins.size() == 1u);
+	CHECK(std::string(ins[0].name) == "Max Water Level");
+	REQUIRE(outs.size() == 4u);
+	CHECK(std::string(outs[0].name) == "Water Level");
+	CHECK(std::string(outs[3].name) == "Size");   // appended last: the pins wired before keep their index
+	HE::matFunctionPins(HE::buildWeatherSnowFunction(), ins, outs);
+	REQUIRE(ins.size() == 3u);
+	CHECK(std::string(ins[0].name) == "Slope");
+	CHECK(std::string(ins[1].name) == "Max Slope");
+	CHECK(std::string(ins[2].name) == "Height Bias");
+	CHECK(std::string(outs.at(0).name) == "Snow");
+}
+
+TEST_CASE("Weather functions: an unwired call emits real code that reads the weather")
+{
+	for (const char* path : { HE::kWeatherPuddlesFunctionPath, HE::kWeatherSnowFunctionPath })
+	{
+		CAPTURE(path);
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int call = g.addNode(MatNodeType::FunctionCall);
+		g.findNode(call)->s = path;
+		REQUIRE(g.connect(call, 0, out, HE::kMatOutputRoughnessPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g, HE::weatherFunctionLoader());
+		CHECK(gen.glsl.find("missing function") == std::string::npos);
+		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
+		CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
+		CHECK(gen.params.empty());
+	}
+	// Without a loader the call is the magenta placeholder — what the landscape graph would be
+	// if its two functions did not resolve, which is why every compile of it passes the loader.
+	MaterialGraph g = MaterialGraph::makeDefault();
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	const int call = g.addNode(MatNodeType::FunctionCall);
+	g.findNode(call)->s = HE::kWeatherSnowFunctionPath;
+	REQUIRE(g.connect(call, 0, out, HE::kMatOutputRoughnessPin));
+	CHECK(HE::generateFragment(g).glsl.find("missing function") != std::string::npos);
+}
+
+TEST_CASE("Auto landscape: puddles and ground snow come from the weather functions, the masks stay weather-free")
+{
+	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
+	int puddles = 0, snow = 0;
+	for (const HE::MatGraphNode& n : a.graph.nodes)
+		if (n.type == MatNodeType::FunctionCall)
+		{
+			puddles += n.s == HE::kWeatherPuddlesFunctionPath;
+			snow    += n.s == HE::kWeatherSnowFunctionPath;
+		}
+	CHECK(puddles == 1);
+	CHECK(snow == 1);
+	// "Puddle Amount" is now the level AT slider 1, and "Puddle Size" is gone — the size is the
+	// Weather panel's slider (the function's Size output), not a per-material parameter.
+	for (const HE::MatParamSlot& s : HE::generateFragment(a.graph, HE::weatherFunctionLoader()).params)
+		CHECK(s.name != "Puddle Size");
+	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
+	CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
+	CHECK(gen.glsl.find("missing function") == std::string::npos);
+
+	// The snow mask the views and the witness read is the HEIGHT snow alone: no function call
+	// sits in its cone, so it cannot move with the scene's Snow Cover slider.
+	std::set<int> cone;
+	std::vector<int> todo{ a.snowMask };
+	while (!todo.empty())
+	{
+		const int id = todo.back(); todo.pop_back();
+		if (!cone.insert(id).second) continue;
+		for (const HE::MatGraphLink& l : a.graph.links)
+			if (l.dstNode == id) todo.push_back(l.srcNode);
+	}
+	for (int id : cone)
+		CHECK(a.graph.findNode(id)->type != MatNodeType::FunctionCall);
+}
 
 // ── Thema 51, Schritt 2: instances + overrides never cost a second compile ────
 // What the D3D11/D3D12/Vulkan draw loops key their shader/PSO/pipeline caches on is
@@ -3633,7 +3829,7 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 	// The auto landscape material (Thema 158 Schritt 5) is a graph, not a node
 	// type, so the registry loop never builds it: 33 array taps, two fBm fields
 	// and 14 HeParams slots through FXC, the D3D12 root signature and the GL link.
-	cases.push_back({ "Auto landscape material", HE::generateFragment(HE::buildAutoLandscapeGraph().graph).glsl, {} });
+	cases.push_back({ "Auto landscape material", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()).glsl, {} });
 	return cases;
 }
 
@@ -8123,9 +8319,9 @@ TEST_CASE("Material codegen fits a small thread stack: auto landscape views and 
 	{
 		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(view);
 		std::string glsl;
-		REQUIRE(runOnSmallStack(512 * 1024, [&] { glsl = HE::generateFragment(a.graph).glsl; }));
+		REQUIRE(runOnSmallStack(512 * 1024, [&] { glsl = HE::generateFragment(a.graph, HE::weatherFunctionLoader()).glsl; }));
 		CHECK(!glsl.empty());
-		CHECK(glsl == HE::generateFragment(a.graph).glsl); // the thread changes nothing
+		CHECK(glsl == HE::generateFragment(a.graph, HE::weatherFunctionLoader()).glsl); // the thread changes nothing
 	}
 
 	HE::MaterialGraph g;

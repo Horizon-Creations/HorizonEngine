@@ -1305,8 +1305,33 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				Row::sliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
 				                 ImGuiSliderFlags_Logarithmic); trackEdit();
 				ImGui::EndDisabled();
-				hint("Picking a preset sets clouds/fog/wind/precip; the sliders above stay "
-				     "editable, so you can nudge any value afterwards.");
+				hint("Picking a preset sets every value below; each one stays editable, so "
+				     "you can take over any of them afterwards.");
+
+				// ── Every value of the weather on its own ───────────────────────────
+				// The sliders edit the live Sky values (the same ones the Sky's own panel
+				// shows) — a preset writes them, and WeatherSystem leaves a value alone from
+				// the moment you move it, until the next preset pick takes everything back.
+				// Thunder lives on the weather itself and follows the same rule.
+				EditorWidgets::subHeading("Conditions");
+				{
+					const Entity envEnt = world.environmentEntity();
+					EnvironmentComponent* wenv = (envEnt != entt::null && registry.valid(envEnt))
+						? registry.try_get<EnvironmentComponent>(envEnt) : nullptr;
+					if (wenv)
+					{
+						Row::sliderFloat("Cloud Coverage", &wenv->cloudCoverage, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Fog Density##wx", &wenv->fogDensity, 0.0f, 0.15f, "%.3f"); trackEdit();
+						Row::sliderFloat("Wind Speed##wx", &wenv->windSpeed, 0.0f, 4.0f); trackEdit();
+						Row::sliderFloat("Rain##wx", &wenv->rainAmount, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Snow##wx", &wenv->snowAmount, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Wetness##wx", &wenv->wetness, 0.0f, 1.0f); trackEdit();
+					}
+					else
+						hint("No Sky in the scene — add one (Window ▸ Environment) to dial the "
+						     "clouds, fog, wind, rain, snow and wetness.");
+					Row::sliderFloat("Thunder", &w->thunder, 0.0f, 1.0f); trackEdit();
+				}
 
 				EditorWidgets::subHeading("Current State");
 				if (w->currentKind != w->targetKind)
@@ -1318,6 +1343,16 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				hint("Cloud %.2f  Fog %.3f  Wind %.2f  Precip %.2f",
 				     w->curCloudCoverage, w->curFogDensity,
 				     w->curWindSpeed, w->curPrecip);
+
+				// What MATERIALS read from the weather (the material graph's Weather node,
+				// MF_WeatherPuddles / MF_WeatherSnow): set by hand, not by the presets.
+				EditorWidgets::subHeading("Surface");
+				Row::sliderFloat("Puddles",     &w->puddleAmount, 0.0f, 1.0f); trackEdit();
+				Row::sliderFloat("Puddle Size", &w->puddleSize,   0.5f, 100.0f, "%.1f m",
+				                 ImGuiSliderFlags_Logarithmic); trackEdit();
+				Row::sliderFloat("Snow Cover",  &w->snowCover,    0.0f, 1.0f); trackEdit();
+				hint("Read by materials through the Weather node — the auto landscape takes "
+				     "its puddles, their size and its ground snow from these.");
 
 				EditorWidgets::subHeading("Precipitation");
 				Row::dragInt("Max Rain Particles", &w->maxRainParticles, 10.0f, 0, 20000); trackEdit();

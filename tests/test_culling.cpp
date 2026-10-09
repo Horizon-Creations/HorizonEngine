@@ -3865,7 +3865,7 @@ TEST_CASE("GI auto landscape: the three kernel copies carry the reference's mask
 		return n;
 	};
 	for (const char* term : { "smoothstep(rs - rb, rs, slope)", "smoothstep(rs, rs + rb, slope)",
-	                          "autoSnow.z + 0.1, slope)", "smoothstep(0.5 * pms, pms, slope)" })
+	                          "autoSnow.z + 0.1, slope)", "smoothstep(0.2 * pms, pms, slope)" })
 	{
 		CHECK_MESSAGE(count(mtl, term) == 2, "Metal: ", term);
 		CHECK_MESSAGE(count(gl, term) == 1, "OpenGL: ", term);

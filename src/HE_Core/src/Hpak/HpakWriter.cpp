@@ -293,7 +293,10 @@ static std::vector<uint8_t> rewriteRefsForPack(
     const Hpak::PackSettings& settings,
     // Raw source blobs by addressed/META path — lets the approx re-fold walk a
     // material INSTANCE's parent chain to the nearest graph. Null = no lookup.
-    const std::unordered_map<std::string, const std::vector<uint8_t>*>* blobByPath = nullptr)
+    const std::unordered_map<std::string, const std::vector<uint8_t>*>* blobByPath = nullptr,
+    // Out: everything this call looked up OUTSIDE `blob` — the incremental cache
+    // records it so an unchanged asset can be skipped only while all of it still holds.
+    Hpak::PackDeps* deps = nullptr)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
@@ -307,7 +310,9 @@ static std::vector<uint8_t> rewriteRefsForPack(
 
     auto resolve = [&](const std::string& p) -> HE::UUID {
         auto it = pathToUuid.find(p);
-        return it != pathToUuid.end() ? it->second : HE::UUID{};
+        const HE::UUID id = it != pathToUuid.end() ? it->second : HE::UUID{};
+        if (deps && !p.empty()) deps->refs.emplace_back(p, id);
+        return id;
     };
 
     HAsset::Writer w;
@@ -451,7 +456,11 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 for (int depth = 0; depth < 8 && !walk.empty(); ++depth)
                 {
                     const auto itp = blobByPath->find(walk);
-                    if (itp == blobByPath->end() || !itp->second) break;
+                    const bool have = itp != blobByPath->end() && itp->second;
+                    if (deps)
+                        deps->parents.emplace_back(walk, have
+                            ? Hpak::hash64(itp->second->data(), itp->second->size()) : 0ull);
+                    if (!have) break;
                     std::string pj, pnext;
                     if (!mtrlGraphAndParent(*itp->second, pj, pnext)) break;
                     if (!pj.empty()) { foldGraphJson = pj; break; }
@@ -1006,13 +1015,18 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     }
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
-    // This is the expensive pass (compression + encryption) → progress reports here.
-    // The incremental cache key is hash64 of the REWRITTEN blob (not the source
-    // file): a rename/delete of a *referenced* asset changes the rewrite result
-    // without touching this file, and must invalidate the cached entry.
+    // This is the expensive pass (rewrite, cook, compression, encryption) → progress
+    // reports here. Two reuse levels (see Hpak::IncrementalCache):
+    //   1. an asset whose SOURCE bytes and recorded dependencies are unchanged skips the
+    //      whole pipeline — its stored entry is carried over from the previous archive;
+    //   2. otherwise the pipeline runs, and an output that hashes the same as last time
+    //      still saves the compression + encryption. That hash is of the REWRITTEN blob
+    //      (not the source file): a rename/delete of a *referenced* asset changes the
+    //      rewrite result without touching this file, and must invalidate the entry.
     int count = 0;
     m_reused = 0;
     m_srcHashes.clear();
+    m_entryInfos.clear();
     const int  total         = static_cast<int>(pending.size());
     const bool wantEncrypted = settings.encrypt && Hpak::cryptoAvailable();
     // Source blobs by addressed AND embedded META path (`pending` is stable
@@ -1025,10 +1039,70 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         blobByPath.emplace(pe.relPath, &pe.bytes);
         if (!pe.metaPath.empty()) blobByPath.emplace(pe.metaPath, &pe.bytes);
     }
+
+    // Level-1 validity: does everything the last pipeline run looked at still read the
+    // same? A reference that resolves to a different UUID (or to none) bakes different
+    // bytes into THIS asset, and a changed parent material changes an instance's folded
+    // approximation — neither touches this asset's own file.
+    std::unordered_map<std::string, uint64_t> parentHashMemo;
+    auto parentHash = [&](const std::string& path) -> uint64_t
+    {
+        const auto memo = parentHashMemo.find(path);
+        if (memo != parentHashMemo.end()) return memo->second;
+        const auto it = blobByPath.find(path);
+        const uint64_t h = (it != blobByPath.end() && it->second)
+            ? Hpak::hash64(it->second->data(), it->second->size()) : 0ull;
+        parentHashMemo.emplace(path, h);
+        return h;
+    };
+    auto depsHold = [&](const Hpak::PackDeps& d) -> bool
+    {
+        for (const auto& [path, uuid] : d.refs)
+        {
+            const auto it = pathToUuid.find(path);
+            const HE::UUID now = it != pathToUuid.end() ? it->second : HE::UUID{};
+            if (!(now == uuid)) return false;
+        }
+        for (const auto& [path, h] : d.parents)
+            if (parentHash(path) != h) return false;
+        return true;
+    };
+
     for (auto& pe : pending)
     {
         if (progress) progress(count, total, pe.relPath);
-        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath);
+        const uint64_t inHash = Hpak::hash64(pe.bytes.data(), pe.bytes.size());
+
+        // ── Level 1: nothing changed since the last pack → skip the pipeline ─────
+        if (cache && cache->previousPak)
+        {
+            const auto cit = cache->entries.find(pe.id);
+            if (cit != cache->entries.end() && cit->second.inHash != 0
+                && cit->second.inHash == inHash && depsHold(cit->second.deps))
+            {
+                HpakReader::StoredEntry se;
+                // Same guards as level 2 below, minus the size check (the cooked blob
+                // is not rebuilt here): readStoredEntry verifies the content hash, the
+                // manifest is only loaded for exactly this archive (tocHash), and a
+                // dict-compressed entry can never be carried verbatim.
+                if (cache->previousPak->readStoredEntry(pe.id, se)
+                    && ((se.flags & Hpak::kFlagEncrypted) != 0) == wantEncrypted
+                    && (se.flags & Hpak::kFlagUsesDict) == 0)
+                {
+                    addPackedEntry(pe.id, se);
+                    ++m_reused;
+                    m_srcHashes.emplace_back(pe.id, cit->second.srcHash);
+                    m_entryInfos.emplace_back(pe.id, cit->second);
+                    ++count;
+                    if (settings.onAsset) settings.onAsset(pe.relPath, true);
+                    continue;
+                }
+            }
+        }
+
+        // ── The pipeline, recording what it looked at ───────────────────────────
+        Hpak::PackDeps deps;
+        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath, &deps);
         if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality);
         // After every rewrite above (each of which copies META through verbatim)
         // and BEFORE the hash below: the incremental cache keys on these bytes, so
@@ -1040,6 +1114,20 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         const uint64_t srcHash = Hpak::hash64(blob.data(), blob.size());
         m_srcHashes.emplace_back(pe.id, srcHash);
 
+        // One row per path: the same material is often referenced several times.
+        std::sort(deps.refs.begin(), deps.refs.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        deps.refs.erase(std::unique(deps.refs.begin(), deps.refs.end(),
+                        [](const auto& a, const auto& b) { return a.first == b.first; }),
+                        deps.refs.end());
+        std::sort(deps.parents.begin(), deps.parents.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        deps.parents.erase(std::unique(deps.parents.begin(), deps.parents.end(),
+                           [](const auto& a, const auto& b) { return a.first == b.first; }),
+                           deps.parents.end());
+        m_entryInfos.emplace_back(pe.id, Hpak::CachedEntry{ srcHash, inHash, std::move(deps) });
+
+        // ── Level 2: the output is what the previous archive already holds ──────
         bool reused = false;
         if (cache && cache->previousPak)
         {
@@ -1066,6 +1154,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         }
         if (!reused) addEntry(pe.id, blob, settings);
         ++count;
+        if (settings.onAsset) settings.onAsset(pe.relPath, reused);
     }
     if (progress) progress(count, total, {});
     return count;

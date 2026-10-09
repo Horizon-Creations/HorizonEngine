@@ -589,6 +589,35 @@ bool HorizonWorld::moveChild(Entity entity, int delta)
     return true;
 }
 
+bool HorizonWorld::placeNextTo(Entity entity, Entity target, bool after)
+{
+    if (entity == target || entity == m_rootEntity || target == m_rootEntity)
+        return false;
+    if (!m_registry.valid(entity) || !m_registry.valid(target) || isBuiltin(entity))
+        return false;
+    const auto* th = m_registry.try_get<HierarchyComponent>(target);
+    if (!th || th->parent == entt::null)
+        return false;
+    const Entity parent = th->parent;
+    if (!reparentEntity(entity, parent))
+        return false;
+    // Indices are read AFTER the reparent: it takes `entity` out of its old
+    // list, which can shift `target` when both lived in the same one.
+    auto& ch = m_registry.get<HierarchyComponent>(parent).children;
+    const auto fromIt = std::find(ch.begin(), ch.end(), entity);
+    const auto toIt   = std::find(ch.begin(), ch.end(), target);
+    if (fromIt == ch.end() || toIt == ch.end())
+        return false;
+    const int from = static_cast<int>(fromIt - ch.begin());
+    const int t    = static_cast<int>(toIt - ch.begin());
+    // Taking `entity` out of the list first moves everything behind it up one.
+    const int desired = from < t ? (after ? t : t - 1)
+                                 : (after ? t + 1 : t);
+    moveChild(entity, desired - from);
+    m_hierarchyDirty = true;
+    return true;
+}
+
 bool HorizonWorld::sortChildrenByName(Entity parent)
 {
     if (!m_registry.valid(parent))

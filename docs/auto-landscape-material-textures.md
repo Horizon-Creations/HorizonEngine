@@ -2264,3 +2264,139 @@ In diesem Arbeitsbaum liegen die 30 Dateien weiter unversioniert in `EditorDeps/
 dem Server, genau wie vorher der Platzhalter: Dieser Baum zeigt die echten Texturen, ohne je den Server zu fragen,
 und ist deshalb **kein Beweis**, dass der Server-Weg funktioniert. Der Beweis ist der Test aus 20.3 plus ein Lauf
 auf einer Maschine ohne diese Dateien.
+
+---
+
+## 21. Malen auf dem Auto-Material, weichere Pfützen-Kanten (2026-10-09)
+
+**Zwei Änderungen am Builder** (`AutoLandscapeMaterial.cpp`), das ausgelieferte Asset ist neu erzeugt
+(`landscape_tex_gen EditorDeps/EngineContent/Materials --material`).
+
+### 18.1 Pfützen werden nicht mehr an Böschungen abgeschnitten
+
+Das automatische Wasser verschwand innerhalb eines Streifens von `0,5 × … 1 × "Puddle Max Slope"`
+(bei 0,03 also nur 0,015 breit), eine Pfütze endete deshalb an jeder Geländekante auf einer harten
+Linie. Jetzt blendet es über `0,2 × … 1 ×` aus, und der Standardwert ist `0,08` (~23°, vorher 0,03;
+Bereich bis 0,4). Dieselbe Formel steht in den drei GI-Spiegeln (`GiLandscape.h`, OpenGL, Metal —
+`smoothstep(0.2 * pms, pms, slope)`), `test_culling` pinnt den Text.
+
+### 18.2 Alle Schichten sind malbar
+
+Das Material deklariert jetzt sechs Mal-Schichten (`kAutoLandscapePaintLayerNames`), das Landscape-
+Werkzeug listet sie:
+
+| Schicht | Bedeutung |
+|---|---|
+| **Auto** (0) | Was ein unbemaltes Terrain liest (die 1×1-Standard-Weightmap `(1,0,0,0)`): die automatische Verteilung, wie bisher. Zurückmalen gibt eine Stelle wieder den Regeln. |
+| **Grass / Dirt** | Die Textur, wie gemalt (ersetzt dort die automatische Gras/Erde-Mischung). |
+| **Rock** | Bleibt vor allem automatisch (nach Steigung); Malen fügt Fels hinzu. |
+| **Snow** | Die Textur, wie gemalt. |
+| **Puddles** | Stärke des Wasser-Overlays. Ein gemalter Fleck ist Wasser auf jeder Neigung; die automatischen Pfützen bleiben auf flachem Boden und weichen dem, was darüber gemalt wurde. |
+
+Die Gewichte eines Texels summieren sich zu 1: `Oberfläche = Auto × automatisch + Σ Schicht × Textur`;
+„Puddles“ ist keine Oberfläche, ihr Eingang ist wieder die automatische (das Wasser liegt auf dem Boden
+darunter). Umgesetzt mit fünf `Landscape Layer Blend`-Knoten: zwei lesen die Gewichte (Einheitsvektoren
+als Eingänge → die Kanäle des Ergebnisses SIND die Gewichte), drei mischen Albedo / Normal / Maske.
+Eine Schicht braucht keine neue Textur; die Arrays bleiben unverändert.
+
+* **Übermalen löscht automatische Pfützen schnell:** die Oberfläche folgt den Gewichten linear, die
+  automatischen Pfützen aber verschwinden dreimal so schnell (`Saturate(3 × (Grass+Dirt+Rock+Snow))`
+  nimmt ihnen den Anteil). Ein halb überdeckter Wasserfilm blieb sonst als Schimmer/Reflexion auf
+  gemaltem Boden stehen.
+* Die **Masken-Ansichten** (`MasksRockSnowWater`, `MasksDirtWet`) und damit der Zeuge zeigen weiter die
+  AUTOMATISCHEN Masken und brauchen keine Weightmap.
+* Die **GI-Kernel** kennen die gemalten Gewichte nicht (wie bisher: sie lesen die automatischen
+  Regeln); gemalte Flächen spiegeln das Licht daher noch in der Farbe der automatischen Verteilung.
+* Sechs Schichten heißt zweite Weightmap-Seite: das Malen auf Snow/Puddles legt `layerWeights2` an.
+* Die Weightmap hat 256² Texel über das ganze Terrain (`weightRes`) — auf großen Landschaften ist das
+  die Pinsel-Auflösung.
+
+### 18.3 Weiche Ränder gemalter Flächen, Schnee ohne Kachelraster
+
+* **Kantige Pinselränder.** Die Weightmap wurde bilinear gelesen: bei 256² Texeln über das ganze Terrain
+  wird aus einem runden Pinselstempel ein Vieleck, dessen Knicke als gerade Facetten zu sehen sind.
+  Der Layer-Blend (`emitLayerBlendNode`, für ALLE Landscape-Materialien) liest die Gewichte jetzt über
+  eine geglättete Koordinate: der Bruchteil der Texelposition geht vor dem bilinearen Fetch durch
+  `smoothstep`, das Gewichtsfeld ist damit an den Texelgrenzen C1 statt stückweise linear. Auf den
+  Texelmitten und bei 0,5 ist das Ergebnis gleich dem alten Fetch; die Koordinate wird auf die
+  Texelmitten der Seite geklemmt (was der Clamp-Sampler vorher mit der rohen uv tat).
+* **Standard-Weightmap 512² statt 256²** (`TerrainComponent::weightRes`). Bereits bemalte Terrains
+  behalten ihre Auflösung — der Regler „Weightmap“ ist nach dem ersten Strich gesperrt; „Clear Paint“
+  entsperrt ihn (das Gemalte geht dabei verloren). Ein Pinsel-Falloff unter etwa zwei Texeln lässt den
+  Rand immer stufig; bei großen Terrains lieber 1024 wählen (4 MiB je Seite, im Szenenfile base64).
+* **Schnee ist jetzt gebombt** (Seed 53, ein Hex-Raster für Albedo/Normal/Maske wie bei den anderen
+  Schichten). Als einfacher Read zeigte eine große Schneefläche das Kachelraster gleicher dunkler
+  Spuren. Das kostet drei weitere Array-Reads je Pixel mit Schnee im Bild (gesamt 24 statt 21 Reads);
+  „Texture Bombing“ aus bleibt der Schalter für den ungebombten Weg. Wer die Kachel auch größer will:
+  „Rock Tile Size“ (gilt für Fels und Schnee).
+
+---
+
+## 22. Puddles und Schnee kommen vom Wetter (2026-10-09)
+
+Die Pfützen des Auto-Materials hingen an einem festen Parameter, den man pro Material/Instanz setzen musste.
+Jetzt steuert die **Weather-Entity** der Szene sie, über zwei Regler und zwei Material-Funktionen.
+
+### 19.1 Der Weg vom Regler zum Shader
+
+| Stelle | Was |
+|---|---|
+| **Weather details ▸ Surface** | `Puddles` und `Snow Cover`, 0…1 (`WeatherComponent::puddleAmount` Standard 0,64, `snowCover` Standard 0). Von Hand gesetzt, **nicht** von den Presets getrieben; in der Szene gespeichert. |
+| `WeatherSystem` | schreibt beide jeden Tick in die `EnvironmentComponent` (`puddleAmount`, `snowCover`; Laufzeit, nicht serialisiert). Eine Szene ohne Weather-Entity behält die Standardwerte (0,64 / 0), sieht also aus wie bisher. |
+| `EnvironmentSettings` → `Lighting::weather` | `z` = Puddles, `w` = Snow Cover; `x`/`y` sind weiter Wetness und Snow Amount (die generische Reaktion, die `heLitP` jedem Material gibt). Befüllt von `FillMaterialWeather` neben jedem `FillMaterialWind` — **auch D3D11/D3D12/Vulkan**, die x/y bisher nie bekamen und im Regen trocken blieben. |
+| **Material-Knoten `Weather`** (Kategorie Input) | vier Float-Ausgänge: Wetness, Snow Amount, Puddles, Snow Cover (`clamp(heLight.weather, 0, 1)`). Jedes Material kann ihn nutzen. |
+
+### 19.2 Die Material-Funktionen
+
+Erzeugt von `matfn_gen` nach `EditorDeps/EngineContent/MaterialFunctions/Weather/` (eigener Unterordner: die
+UI-Effekte im Ordner darüber werden von einem Test eingesammelt und in der UI-Domäne übersetzt, wo ein
+Weather-Knoten nichts zu suchen hat). Feste UUIDs `0x413` / `0x414`; Quelle sind die Builder in
+`WeatherMaterialFunctions.cpp`.
+
+* **`MF_WeatherPuddles`** — In: *Max Water Level* (0,5). Out: *Water Level* = Puddles-Regler × Max Water
+  Level, *Puddles* (roh), *Wetness*, *Size* (m, siehe §19.5).
+* **`MF_WeatherSnow`** — In: *Slope* (0), *Max Slope* (0,45), *Height Bias* (0). Out: *Snow* (Abdeckung 0…1),
+  *Cover* (roh). `Snow = smoothstep(0, 0,3, Cover × (1 + Bias)) × (1 − smoothstep(MaxSlope, MaxSlope + 0,1, Slope))`
+  — bei Regler 0 immer 0, Klippen bleiben frei, ein positiver Bias lässt den Schnee dort zuerst liegen.
+
+### 19.3 Was sich im Auto-Material ändert
+
+* „**Puddle Amount**“ ist jetzt der Wasserstand **bei Regler 1** (Standard 0,5, vorher 0,32 fix); der Regler
+  skaliert ihn. Regler 0,64 × 0,5 = 0,32 ist das alte Bild. Die Parameterzahl bleibt 14.
+* **Schnee:** zusätzlich zum Höhenschnee („Snow Height…“) liegt Wetter-Schnee (`MF_WeatherSnow`, Slope aus
+  der Geometrie, Max Slope = „Snow Max Slope“, Bias aus den Höhenkarten von Schnee und Boden). Beide addieren
+  sich als Wahrscheinlichkeiten (`a + b − a·b`). Wetter-Schnee nimmt auch die automatischen Pfützen mit.
+* `r.snowMask` bleibt der **Höhenschnee allein**: Masken-Ansichten und Zeuge hängen nicht an der Funktion.
+* **GI:** der Pfützenanteil der GI-Kernel (`giAutoLandscapeParams`) wird mit dem Regler der Szene skaliert.
+  Der Wetter-Schnee-Anteil fehlt dort weiter (wie der gemalte Anteil, §18.2).
+* Das ausgelieferte `M_AutoLandscape.hasset` ist neu erzeugt; es **ruft die Funktionen per Pfad**
+  (`Engine/MaterialFunctions/Weather/…`), die Engine-Content-Wurzel muss sie also finden — im Editor und im
+  Export (alles unter EngineContent wird gepackt) ist das gegeben. Ohne die Dateien wäre der Aufruf Magenta.
+
+### 19.4 Nicht gemacht
+
+* Skript-/HorizonCode-Zugriff auf die beiden Regler (`EngineApi.h` kennt `wetness`/`snowAmount`, die neuen
+  nicht).
+* Presets, die die Regler mitfahren (Rain → Puddles hoch). Bewusst von Hand, wie gewünscht.
+* Übergänge: die Regler wirken sofort, nicht über die Transition-Zeit.
+
+### 19.5 Puddle Size, jeder Wert einzeln, Thunder (2026-10-09)
+
+* **Puddle Size** (0,5…100 m, Standard 10): dritter Regler unter *Weather ▸ Surface*, Weg wie die anderen
+  (`WeatherComponent::puddleSize` → `EnvironmentComponent` → `EnvironmentSettings` → **`Lighting::weather2.x`**,
+  ein angehängter vec4, `FillMaterialWeather`). Der Weather-Knoten hat dafür einen fünften Ausgang *Puddle Size*
+  (mindestens 0,5 m, damit ein nullgefüllter Block nie durch 0 teilt), `MF_WeatherPuddles` den vierten Ausgang
+  *Size*. Das Landscape-Material teilt sein Pfützenfeld jetzt durch diesen Wert; der Parameter **„Puddle Size“
+  entfällt** (Parameterzahl 13), die Größe ist eine Eigenschaft der Szene, nicht des Materials. Der angehängte
+  vec4 vergrößert den `HeLighting`-Block auf allen Backends (Größe wird überall per `sizeof` genommen und von
+  `test_engine_materials` gegen die Shader-Seite geprüft).
+* **Jeder Wert einzeln** (*Weather ▸ Conditions*): Cloud Coverage, Fog Density, Wind Speed, Rain, Snow,
+  Wetness und **Thunder** als eigene Regler. Sie bearbeiten die Werte des Skys (`EnvironmentComponent`), also
+  dieselben wie das Sky-Panel; die Presets schreiben sie wie bisher, `WeatherSystem` lässt einen Wert aber in
+  Ruhe, sobald man ihn bewegt hat, bis zum nächsten Preset-Wechsel. Ohne Sky in der Szene zeigt das Panel
+  stattdessen einen Hinweis.
+* **Thunder** (0…1, `WeatherComponent::thunder`, gespeichert) ist jetzt ein eigener Wert statt „das Ziel ist ein
+  Sturm“: der Storm-Preset setzt ihn auf die Intensity, jeder andere auf 0; bewegt man ihn, blitzt es in jedem
+  Wetter (oder in einem Sturm eben nicht), bis ein neuer Preset ihn zurückholt. Abstand zwischen Blitzen
+  `(2,5…11 s) × (1,2 − Thunder)`. Alte Szenen ohne `thunder` bekommen beim Laden den Wert, den ihr Preset
+  ergeben hätte (ein gespeicherter Sturm blitzt weiter).

@@ -4,7 +4,7 @@ A cross-platform 3D game engine and editor, written from scratch in C++20. It is
 built to power our own game **Catania**, which is why the feature list leans
 towards what an actual production needs rather than towards a demo reel.
 
-**Current release: 0.5.0 "Parhelion"** — [Downloads](https://horizoncreations.dev/HorizonEngine/HE.html) ·
+**Current release: 0.7.0 "Nimbus"** — [Downloads](https://horizoncreations.dev/HorizonEngine/HE.html) ·
 [Documentation](https://horizoncreations.dev/HorizonEngineDocs/) · [Website](https://horizoncreations.dev)
 
 ---

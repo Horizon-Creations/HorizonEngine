@@ -123,9 +123,20 @@ HE_NET_API SocketResult socketAccept(SocketHandle listener, SocketHandle& outAcc
 // Returns Ok (connected immediately, typical on loopback), WouldBlock (in
 // progress — poll socketConnectPoll()), or Error. `outSocket` is kInvalidSocket
 // unless the call returns Ok or WouldBlock.
+//
+// A WouldBlock result is bound to ONE address: the first candidate whose connect
+// did not fail outright. If that address then never answers (a dual-stack host
+// whose IPv6 route is dead, a firewall dropping the SYN) the caller times out and
+// would otherwise have no way to reach the host's other addresses. So the call
+// can also be told to start `skipCandidates` addresses further down the resolver
+// list, and reports how many candidates there are (`outCandidateCount`, set even
+// on Error once the name resolved, 0 when it did not). Call again with
+// skipCandidates + 1 after a timeout until it reaches outCandidateCount.
 HE_NET_API SocketResult socketCreateTcpConnecting(const std::string& host,
                                                   std::uint16_t port,
-                                                  SocketHandle& outSocket);
+                                                  SocketHandle& outSocket,
+                                                  unsigned skipCandidates = 0,
+                                                  unsigned* outCandidateCount = nullptr);
 
 // Start a non-blocking connect on an existing IPv4 socket.
 HE_NET_API SocketResult socketConnect(SocketHandle h, const std::string& host,

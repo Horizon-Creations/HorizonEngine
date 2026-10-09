@@ -68,6 +68,15 @@ void FillMaterialWind(const ::EnvironmentSettings& env, MaterialShaderLibrary::L
 	out.camPos[3]   = std::max(env.windSpeed, 0.0f);
 }
 
+void FillMaterialWeather(const ::EnvironmentSettings& env, MaterialShaderLibrary::Lighting& out)
+{
+    out.weather[0] = env.wetness;
+    out.weather[1] = env.snowAmount;
+    out.weather[2] = env.puddleAmount;
+    out.weather[3] = env.snowCover;
+    out.weather2[0] = env.puddleSize;
+}
+
 void FillMaterialGIProbe(MaterialShaderLibrary::Lighting& out,
                          const glm::vec3&                 gridOrigin,
                          float                            probeSpacing,

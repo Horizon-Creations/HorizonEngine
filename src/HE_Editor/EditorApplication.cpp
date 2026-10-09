@@ -5,6 +5,8 @@
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
+#include "ProjectPreflight.h"      // engine-content check in front of the first project open
+#include "SceneDiskWatch.h"        // the open scene's file stamp: our own save is not a pull
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
@@ -1998,7 +2000,13 @@ void EditorApplication::OnInit()
 		HE_LOG_INFO(Editor, "EditorApplication: opening %s (handed over at launch)",
 		            launchProject.c_str());
 		splashStatus("Opening " + std::filesystem::path(launchProject).stem().string(), 0.75f);
-		if (m_projectManager.loadProject(launchProject))
+		if (m_dumpPath.empty())
+		{
+			// The engine-content check (sign in, download, ask about what is missing) runs
+			// on the start screen before the project loads: the first frame hands it over.
+			ProjectPreflight::requestAtStartup(launchProject);
+		}
+		else if (m_projectManager.loadProject(launchProject))
 		{
 			m_globalState->addKnownProject(launchProject);
 			m_globalState->writeConfig();
@@ -2014,7 +2022,9 @@ void EditorApplication::OnInit()
 		splashStatus("Opening " +
 		             std::filesystem::path(m_globalState->getLastProjectPath())
 		                 .stem().string(), 0.75f);
-		if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
+		if (m_dumpPath.empty())
+			ProjectPreflight::requestAtStartup(m_globalState->getLastProjectPath());
+		else if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
 		{
 			m_projectLoaded         = true;
 			m_contentRefreshPending = true;
@@ -2204,11 +2214,14 @@ void EditorApplication::startSftpProbe()
 			// Reached and authenticated, but the catalogue itself did not arrive —
 			// a different fault (manifest missing, unreadable, or unparseable) and
 			// one the user cannot fix by checking their network.
+			const std::string why = HE::Cs::EngineContentSync::instance().lastManifestError();
 			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
 				"The EngineContent catalogue could not be read.",
-				"The server answered, but its manifest could not be fetched or parsed, "
-				"and there is no cached copy on this machine. EngineContent will not "
-				"appear in the Content Browser this session.");
+				std::string("The server accepted the login, but reading its manifest failed")
+				+ (why.empty() ? std::string(".") : std::string(": ") + why + ".")
+				+ "  There is no cached copy on this machine, so EngineContent will not "
+				  "appear in the Content Browser this session. Restarting the editor "
+				  "tries again.");
 		}
 
 		if (haveManifest && gs && !engineContentPath.empty())
@@ -11380,6 +11393,11 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	// changes with it, which is what a human sees after the save anyway. An
 	// edit committed in this very frame is marked first, or the sync would be
 	// what undoes it.
+	// The file changed on disk since this editor read or wrote it (a git pull): saving
+	// now would put the stale open scene over it. The reload question is raised and the
+	// save waits for the answer.
+	if (SceneDiskWatch::blocksSave(path)) return false;
+
 	recordPrefabEdits();
 	syncPrefabInstances("save");
 
@@ -11387,6 +11405,7 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
 	{
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);         // our own write, not somebody else's change
 		m_savedRevision    = m_undo.revision(); // scene is now clean
 		// The file now holds everything the snapshot held — and a leftover copy
 		// would be offered as "unsaved work" at the next start.
@@ -11581,6 +11600,7 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		loaded = true;
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);
 		// Before the asset preload: the sync may change which meshes and
 		// materials the placed prefabs reference.
 		syncPrefabInstances("open");
@@ -11777,6 +11797,7 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	ProjectPreflight::shutdown();   // joins a still-running engine-content check
 	// Give the network back what a session took, FIRST and synchronously: the
 	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits
 	// while hosting never presses "leave", and none of those clean themselves up

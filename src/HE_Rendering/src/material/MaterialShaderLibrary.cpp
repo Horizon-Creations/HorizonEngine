@@ -226,6 +226,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 viewMode;       // x = 1 → Unlit/Wireframe view: heLitP hands the base colour back, heApplyFog is a no-op (scene-pass fill sites only)
     vec4 clusterParams;  // HE_CLUSTERED variant only: x/y/z = cluster grid dims (x = 0 → off, window lights only), w = gridZ / log(far/near)
     vec4 clusterCamFwd;  // xyz = camera forward (cluster depth axis), w = cluster near plane
+    vec4 weather2;       // x = puddle size in metres (the Weather node's 5th output)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —

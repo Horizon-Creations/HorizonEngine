@@ -1376,7 +1376,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			for (auto& c : e) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
 			if (e == ".mat")                                   return { I.material, {0.60f, 0.90f, 0.60f, 1.0f} };
 			if (e == ".obj" || e == ".fbx" || e == ".gltf"
-				|| e == ".glb" || e == ".dae")                 return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
+				|| e == ".glb" || e == ".dae" || e == ".blend")  return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
 			if (e == ".svg" || e == ".ai")                     return { I.model2d,  {0.80f, 0.70f, 1.00f, 1.0f} };
 			if (e == ".cs"  || e == ".lua" || e == ".py"
 				|| e == ".js")                                  return { I.script,   {0.90f, 0.90f, 0.50f, 1.0f} };

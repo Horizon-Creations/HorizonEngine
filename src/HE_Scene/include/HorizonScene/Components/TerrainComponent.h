@@ -71,7 +71,7 @@ struct TerrainComponent {
     // Kept inline (base64 in the scene, like sculptHeights) rather than as a
     // separate texture asset: it is terrain data, not shared content, and this
     // way a landscape is one self-contained thing to copy or undo.
-    uint32_t              weightRes = 256;   // weightmap side length in texels
+    uint32_t              weightRes = 512;   // weightmap side length in texels (256 made a round stamp a visible polygon)
     std::vector<uint8_t>  layerWeights;      // weightRes² × 4 bytes, or empty
     // Layers 4..7 (R=4 … A=7), same layout as layerWeights. Empty = all four
     // zero, which is every landscape painted before there were eight layers —

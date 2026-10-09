@@ -1881,6 +1881,10 @@ namespace
 		a.weather.currentKind        = WeatherKind::Rain;
 		a.weather.targetKind         = WeatherKind::Storm;
 		a.weather.intensity          = 0.85f;
+		a.weather.puddleAmount       = 0.27f;
+		a.weather.snowCover          = 0.58f;
+		a.weather.puddleSize         = 37.5f;
+		a.weather.thunder            = 0.42f;
 		a.weather.transitionDuration = 14.0f;
 		a.weather.autoCycle          = true;
 		a.weather.cycleSeconds       = 95.0f;
@@ -2259,6 +2263,10 @@ namespace
 			CHECK(w->currentKind        == a.weather.currentKind);
 			CHECK(w->targetKind         == a.weather.targetKind);
 			CHECK(w->intensity          == doctest::Approx(a.weather.intensity));
+			CHECK(w->puddleAmount       == doctest::Approx(a.weather.puddleAmount));
+			CHECK(w->snowCover          == doctest::Approx(a.weather.snowCover));
+			CHECK(w->puddleSize         == doctest::Approx(a.weather.puddleSize));
+			CHECK(w->thunder            == doctest::Approx(a.weather.thunder));
 			CHECK(w->transitionDuration == doctest::Approx(a.weather.transitionDuration));
 			CHECK(w->autoCycle          == a.weather.autoCycle);
 			CHECK(w->cycleSeconds       == doctest::Approx(a.weather.cycleSeconds));

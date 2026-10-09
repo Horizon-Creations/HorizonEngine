@@ -58,6 +58,8 @@
 #include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
+#include "ProjectPreflight.h"            // engine-content check in front of every project open
+#include "SceneDiskWatch.h"             // "the open scene changed on disk (git pull) - reload?"
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
 #include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
 #include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
@@ -812,6 +814,17 @@ void EditorUI::render(AppContext& ctx, float dt)
     DocsPanel::setPanelOpener(ctx.projectLoaded ? &docsPanelOpener : nullptr);
     DocsPanel::draw(ctx);
 
+    // ── Engine-content check before a project opens ──────────────────────────
+    // Before the branch for the same reason as the dialogs above: it is shown over
+    // the hub while a project is being opened and over the editor while one is
+    // being switched to, and it is what finally flips projectLoaded.
+    ProjectPreflight::render(ctx);
+
+    // ── The open scene changed on disk ───────────────────────────────────────
+    // A pull rewrites the scene file under the editor; this asks whether to reload it.
+    if (ctx.projectLoaded && !ProjectPreflight::busy())
+        SceneDiskWatch::render(ctx);
+
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)
     {
@@ -1357,21 +1370,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// this from inside a menu, whose ID stack is not the popup's.
 	auto openProjectAt = [&](const std::string& chosen)
 	{
-		const bool switching = ctx.projectLoaded;
-		if (switching) EditorUI::endProjectSession(ctx);
-		if (ctx.projectManager->loadProject(chosen))
-		{
-			ctx.globalState->addKnownProject(chosen);
-			ctx.globalState->writeConfig();
-			ctx.contentRefreshPending = true;
-			ctx.projectLoaded = true;
-		}
-		else
-		{
-			if (switching) ctx.projectLoaded = false;   // the old one is gone
-			ctx.hubOpenError = "Failed to load project file.";
-			s_openProjectErrorPopup = true;
-		}
+		// The engine-content check runs first, with the current project still open; the
+		// session ends and the new project loads when it clears (ProjectPreflight::openNow,
+		// which reports a failure on the hub the editor falls back to).
+		ProjectPreflight::request(ctx, chosen);
 	};
 	auto triggerOpenProject = [&]()
 	{
@@ -1895,6 +1897,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			// native module — the native menu has no per-language gate, so the
 			// row is always live and the answer comes from the action.
 			case MC::BuildGameLogic:  GameLogicBuildPanel::start(ctx);                       break;
+			case MC::ShowBuildLog:    BuildProgressDialog::requestOpen();                    break;
 			case MC::SetViewMode:
 			{
 				const int m = MacMenuBar::arg() - 1;
@@ -2266,6 +2269,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("Export Project..."))
 			openExportDialog();
+		// The last run's rings and per-step logs — what the Build window shows,
+		// reopened after it was closed. Greyed until something has been built.
+		if (EditorWidgets::menuItem("Show Last Build Log", nullptr, false,
+		                            BuildProgressDialog::snapshot().hasRun))
+			BuildProgressDialog::requestOpen();
 		ImGui::EndMenu();
 	}
 	// ── View: how the Scene window draws ────────────────────────────────────

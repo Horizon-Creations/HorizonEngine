@@ -680,8 +680,17 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		// (packed builds — the blobs were compiled from the baked GLSL and must
 		// stay consistent with it).
 		else if (m && !m->nodeGraphJson.empty() && m->precompiledShaders.empty())
-			regenerateMaterialFromGraph(id);
+		{
+			// Only once every function it calls is on this machine: regenerating around a
+			// function that is still downloading would bake the "missing function" magenta
+			// into the material. The GLSL saved with the asset stays until then — it is the
+			// graph's own output, regenerating only refreshes it after a codegen upgrade.
+			if (graphFunctionsReady(m->nodeGraphJson))
+				regenerateMaterialFromGraph(id);
+		}
 	}
+	// Whatever this asset points at and has not arrived yet: start those downloads now.
+	prefetchRemoteReferences(id);
 	return id;
 }
 
@@ -1076,23 +1085,20 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 		}
 	}
 
+	// A remote-only EngineContent asset referenced BY PATH (a material's texture or texture
+	// array, its parent or node-graph function, a mesh's material …): there is no UUID here
+	// to find the remote entry by, so look it up by path. The download is asked for, in the
+	// background, and this load reports "not there yet" like every async miss — the caller
+	// asks again next frame, and gets the asset once it has landed. A file that already
+	// exists locally (real, override, cached) is never shadowed by this.
+	if (requestRemotePath(relativePath))
+		return HE::UUID{};
+
 	const std::string fullPath = resolveAbsolutePath(relativePath);
 
 	HAsset::Reader reader;
 	if (!reader.open(fullPath))
 	{
-		// Not on this machine, but the EngineContent server has it (the manifest
-		// registered it, see registerRemoteAsset): this path is the only handle a
-		// loose material has on its textures, so the download starts here. Not an
-		// error — the file is on its way. loadAssetAsync(UUID) coalesces, so asking
-		// again while it is in flight costs nothing.
-		if (const HE::UUID remoteId = remoteAssetIdForPath(relativePath); remoteId != HE::UUID{})
-		{
-			HE_LOG_DEBUG(Asset, "Asset '%s' is not on disk, fetching it from the EngineContent server",
-			             relativePath.c_str());
-			loadAssetAsync(remoteId);
-			return HE::UUID();
-		}
 		// The most-reported "why is my asset not there" path: the reference is
 		// fine, the file simply is not where the content root says it should be.
 		HE_LOG_ERROR(Asset, "Cannot load asset '%s': no readable .hasset at '%s'",
@@ -1183,19 +1189,6 @@ void ContentManager::loadPathAsync(const std::string& relativePath,
 	{
 		loadUuidAsync(it->second, std::move(callback), requester);
 		return;
-	}
-
-	// Remote-only EngineContent asset addressed by path (see loadAsset(path) and
-	// isRemoteAssetPending): the worker's disk read below would find no file, so go
-	// through the UUID route, which downloads first and calls back once it is loaded.
-	if (const HE::UUID remoteId = remoteAssetIdForPath(relativePath); remoteId != HE::UUID{})
-	{
-		std::error_code ec;
-		if (!std::filesystem::exists(resolveAbsolutePath(relativePath), ec))
-		{
-			loadAssetAsync(remoteId, std::move(callback));
-			return;
-		}
 	}
 
 	{
@@ -1354,9 +1347,8 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 			{
 				m_diskRegistry[r.id] = r.relativePath;
 				m_remoteAssets.erase(r.id);
-				// A file just appeared under the content roots: whoever remembers
-				// this path as "not there" (contentEpoch) looks again.
-				noteContentChanged();
+				m_remoteByPath.erase(r.relativePath);
+				m_remoteArrived.insert(r.relativePath);
 				loadAssetAsync(r.id, r.callback);
 			}
 			else if (r.callback)
@@ -1481,6 +1473,12 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 			// traversal — no path lookups. No-op for loose assets (empty ref UUIDs).
 			// The dependencies are wanted by whoever wanted this asset, no longer.
 			expandFrontier(id, interest ? interest->snapshot() : LoadRequester::from({}));
+			// A material that was downloaded (not merely read from disk): the instances
+			// registered while it was still remote could not derive anything from it —
+			// their sync returned early — so they follow it now.
+			if (!m_remoteArrived.empty() && m_remoteArrived.erase(r.relativePath)
+			    && assetType(id) == HE::AssetType::Material)
+				syncMaterialInstancesOf(r.relativePath);
 		}
 		++(id != HE::UUID{} ? m_asyncPollStats.registered : m_asyncPollStats.failed);
 		if (r.callback) r.callback(id);
@@ -1702,21 +1700,78 @@ void ContentManager::registerRemoteAsset(HE::UUID id, std::string relativePath,
 	if (isLoaded(id) || m_diskRegistry.count(id)) return;
 
 	RemoteAssetEntry entry;
+	m_remoteByPath[relativePath] = id;
 	entry.relativePath = std::move(relativePath);
 	entry.materialize   = std::move(materialize);
 	m_remoteAssets[id]  = std::move(entry);
 }
 
-HE::UUID ContentManager::remoteAssetIdForPath(const std::string& relativePath) const
+// ─── Remote references ───────────────────────────────────────────────────────
+bool ContentManager::requestRemotePath(const std::string& path)
 {
-	for (const auto& [id, entry] : m_remoteAssets)
-		if (entry.relativePath == relativePath) return id;
-	return HE::UUID{};
+	if (m_remoteByPath.empty()) return false;
+	const auto it = m_remoteByPath.find(path);
+	if (it == m_remoteByPath.end() || !m_remoteAssets.count(it->second)) return false;
+	// A real local, override or cached file always wins over the remote copy.
+	std::error_code ec;
+	if (std::filesystem::exists(resolveAbsolutePath(path), ec)) return false;
+	loadAssetAsync(it->second);   // coalesced: asking again while it downloads is a no-op
+	return true;
 }
 
-bool ContentManager::isRemoteAssetPending(const std::string& relativePath) const
+bool ContentManager::graphFunctionsReady(const std::string& nodeGraphJson)
 {
-	return remoteAssetIdForPath(relativePath) != HE::UUID{};
+	if (m_remoteByPath.empty()) return true;   // nothing is remote: the old behaviour exactly
+	HE::MaterialGraph g;
+	if (!HE::materialGraphFromJson(nodeGraphJson, g)) return true;
+	bool ready = true;
+	for (const HE::MatGraphNode& n : g.nodes)
+		if (n.type == HE::MatNodeType::FunctionCall && !n.s.empty() && !isLoaded(n.s))
+			if (requestRemotePath(n.s)) ready = false;
+	return ready;
+}
+
+void ContentManager::prefetchRemoteReferences(HE::UUID id)
+{
+	if (m_remoteAssets.empty()) return;
+	// Collected first, requested after: a request can touch the asset pools this reads.
+	std::vector<std::string> paths;
+	std::vector<HE::UUID>    ids;
+	auto path = [&](const std::string& p) { if (!p.empty()) paths.push_back(p); };
+	auto uid  = [&](HE::UUID u)           { if (u != HE::UUID{}) ids.push_back(u); };
+	auto sections = [&](const auto* a)
+	{
+		path(a->materialPath); uid(a->materialId);
+		for (const MeshSection& s : a->sections) { path(s.materialPath); uid(s.materialId); }
+	};
+	switch (assetType(id))
+	{
+	case HE::AssetType::Material:
+		if (const MaterialAsset* m = getMaterial(id))
+		{
+			path(m->shaderPath);          uid(m->shaderId);
+			path(m->parentMaterialPath);
+			for (const std::string& p : m->texturePaths)      path(p);
+			for (HE::UUID t : m->textureIds)                  uid(t);
+			for (const std::string& p : m->graphTexturePaths) path(p);
+			for (HE::UUID t : m->graphTextureIds)             uid(t);
+			// The functions the graph calls (a FunctionCall stores the asset's path).
+			if (!m->nodeGraphJson.empty())
+			{
+				HE::MaterialGraph g;
+				if (HE::materialGraphFromJson(m->nodeGraphJson, g))
+					for (const HE::MatGraphNode& n : g.nodes)
+						if (n.type == HE::MatNodeType::FunctionCall) path(n.s);
+			}
+		}
+		break;
+	case HE::AssetType::StaticMesh:   if (const auto* a = getStaticMesh(id))   sections(a); break;
+	case HE::AssetType::SkeletalMesh: if (const auto* a = getSkeletalMesh(id)) sections(a); break;
+	default: break;
+	}
+	for (const std::string& p : paths) requestRemotePath(p);
+	for (HE::UUID u : ids)
+		if (m_remoteAssets.count(u) && !isLoaded(u)) loadAssetAsync(u);
 }
 
 // ─── forgetDiskAsset ─────────────────────────────────────────────────────────

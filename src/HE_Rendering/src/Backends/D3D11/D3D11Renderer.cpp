@@ -6436,6 +6436,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         if (matClustered)
             HE::FillMaterialClusterParams(frameClusters, lit);
         HE::FillMaterialWind(m_environment, lit); // Wind / Wind Sway nodes, next to Time
+        HE::FillMaterialWeather(m_environment, lit); // Weather node + the generic wet/snow response
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
         // preamble binding 13 → t13/s13, bound in the scene pass). Same
         // pre-baked conventions as csmVP below (uvFlipY * kD3DClipFix), so the

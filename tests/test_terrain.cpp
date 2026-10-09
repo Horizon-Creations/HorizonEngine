@@ -506,6 +506,39 @@ TEST_CASE("TerrainPaint moves weight toward the painted layer and keeps the sum 
     CHECK(texel(c, c)[1] == 0);
 }
 
+TEST_CASE("TerrainPaint::fillLayer puts every texel on one layer, on either page")
+{
+    TerrainComponent tc;
+    tc.sizeX = 40.0f; tc.sizeZ = 40.0f; tc.weightRes = 32;
+
+    REQUIRE(TerrainPaint::fillLayer(tc, 2));
+    REQUIRE(tc.layerWeights.size() == 32u * 32u * 4u);
+    CHECK(tc.weightsDirty);
+    uint8_t w[kTerrainMaxLayers];
+    for (uint32_t z : { 0u, 17u, 31u })
+        for (uint32_t x : { 0u, 9u, 31u })
+        {
+            REQUIRE(TerrainPaint::texelWeights(tc, x, z, w));
+            for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 2 ? 255 : 0));
+        }
+    CHECK_FALSE(TerrainPaint::usesSecondPage(tc));
+
+    // A layer on the second page: page one goes to zero, the second page carries it.
+    REQUIRE(TerrainPaint::fillLayer(tc, 5));
+    REQUIRE(TerrainPaint::texelWeights(tc, 3, 4, w));
+    for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 5 ? 255 : 0));
+    CHECK(TerrainPaint::usesSecondPage(tc));
+
+    // And back: a first-page fill must not leave the second page voting.
+    REQUIRE(TerrainPaint::fillLayer(tc, 0));
+    REQUIRE(TerrainPaint::texelWeights(tc, 3, 4, w));
+    for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 0 ? 255 : 0));
+    CHECK_FALSE(TerrainPaint::usesSecondPage(tc));
+
+    CHECK_FALSE(TerrainPaint::fillLayer(tc, -1));
+    CHECK_FALSE(TerrainPaint::fillLayer(tc, kTerrainMaxLayers));
+}
+
 TEST_CASE("TerrainPaint falloff fades with distance and rejects bad layers")
 {
     TerrainComponent tc;

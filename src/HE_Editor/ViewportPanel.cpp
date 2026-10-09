@@ -1120,7 +1120,8 @@ void render(AppContext& ctx, float dt)
 								s_rmbTravel += std::abs(cin.mouseDelta.x) + std::abs(cin.mouseDelta.y);
 							// A flight with a still mouse — RMB held, W pressed,
 							// or the wheel dollying — is a look too, not a click.
-							if (cin.moveAxis != glm::vec3(0.0f) || cin.wheel != 0.0f)
+							if (cin.moveAxis != glm::vec3(0.0f) || cin.wheel != 0.0f ||
+							    cin.speedWheel != 0.0f)
 								s_rmbArmed = false;
 							const bool physRmb =
 								(SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
@@ -1189,6 +1190,32 @@ void render(AppContext& ctx, float dt)
 						bookmarkKeys(cam);
 
 					cam.update(cin);
+					// Scrolling during a fly changed the fly speed: the Speed field in the
+					// toolbar and in Preferences is the same number, so it follows, and a
+					// line over the image says what it is now - there is nothing else to
+					// show that the wheel did anything.
+					{
+						static double s_speedShownAt = -10.0;
+						if (cin.look && cin.speedWheel != 0.0f)
+						{
+							ctx.editorConfig.EditorCameraSpeed = cam.flySpeed();
+							s_speedShownAt = ImGui::GetTime();
+						}
+						const double age = ImGui::GetTime() - s_speedShownAt;
+						if (age < 1.4)
+						{
+							char txt[48];
+							std::snprintf(txt, sizeof(txt), "Camera speed  %.1f u/s", cam.flySpeed());
+							const ImVec2 ts = ImGui::CalcTextSize(txt);
+							const float  a  = age < 0.9 ? 1.0f : static_cast<float>(1.0 - (age - 0.9) / 0.5);
+							const ImVec2 p0((rectMin.x + rectMax.x - ts.x) * 0.5f - 10.0f, rectMin.y + 14.0f);
+							ImDrawList* dl = ImGui::GetWindowDrawList();
+							dl->AddRectFilled(p0, ImVec2(p0.x + ts.x + 20.0f, p0.y + ts.y + 10.0f),
+							                  IM_COL32(0, 0, 0, static_cast<int>(150 * a)), 6.0f);
+							dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 5.0f),
+							            IM_COL32(255, 255, 255, static_cast<int>(255 * a)), txt);
+						}
+					}
 					if (look.valid &&
 					    (cam.position() != camPosBefore || cam.yaw() != camYawBefore ||
 					     cam.pitch() != camPitchBefore || cam.orthographic() != camOrthoBefore))
