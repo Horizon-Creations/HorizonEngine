@@ -154,6 +154,14 @@ THEMES = {
     "parhelion": ([(0.0, (20, 46, 92)), (0.40, (58, 92, 148)),
                    (0.72, (150, 178, 210)), (1.0, (232, 236, 238))],
                   (255, 240, 214), 165, 0, (238, 232, 216)),
+    # 0.7.0 "Nimbus" — the weather release: a rain-heavy overcast sky. Dark slate
+    # blue overhead where the cloud deck is thickest, thinning to a pale, cool
+    # grey-blue at the horizon where the light gets through. No stars (the cloud
+    # hides them) and a soft, cold glow instead of a sun, since you cannot see
+    # one behind rain.
+    "nimbus": ([(0.0, (22, 30, 44)), (0.38, (46, 60, 78)),
+                (0.70, (96, 114, 134)), (1.0, (176, 190, 202))],
+               (190, 210, 228), 120, 0, (196, 210, 222)),
 }
 
 # Themes listed here also get northern-lights curtains over the sky. The base

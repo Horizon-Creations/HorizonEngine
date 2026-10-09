@@ -2204,11 +2204,14 @@ void EditorApplication::startSftpProbe()
 			// Reached and authenticated, but the catalogue itself did not arrive —
 			// a different fault (manifest missing, unreadable, or unparseable) and
 			// one the user cannot fix by checking their network.
+			const std::string why = HE::Cs::EngineContentSync::instance().lastManifestError();
 			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
 				"The EngineContent catalogue could not be read.",
-				"The server answered, but its manifest could not be fetched or parsed, "
-				"and there is no cached copy on this machine. EngineContent will not "
-				"appear in the Content Browser this session.");
+				std::string("The server accepted the login, but reading its manifest failed")
+				+ (why.empty() ? std::string(".") : std::string(": ") + why + ".")
+				+ "  There is no cached copy on this machine, so EngineContent will not "
+				  "appear in the Content Browser this session. Restarting the editor "
+				  "tries again.");
 		}
 
 		if (haveManifest && gs && !engineContentPath.empty())

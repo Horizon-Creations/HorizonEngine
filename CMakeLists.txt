@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HorizonEngine VERSION 0.5.0 LANGUAGES CXX)
+project(HorizonEngine VERSION 0.7.0 LANGUAGES CXX)
 
 # CMP0135 (CMake >= 3.24): archives fetched via FetchContent URL get the
 # extraction time as file timestamp instead of the archive's own, so a changed
@@ -435,6 +435,13 @@ find_package(Libssh2 QUIET NO_CMAKE_PACKAGE_REGISTRY NO_CMAKE_SYSTEM_PACKAGE_REG
 if(NOT TARGET Libssh2::libssh2 AND NOT LIBSSH2_FOUND)
     if(WIN32)
         set(CRYPTO_BACKEND "WinCNG" CACHE STRING "" FORCE)
+        # WinCNG ships with ECDSA/ECDH OFF, which leaves only the classic
+        # diffie-hellman-group* key exchanges. Current OpenSSH-style servers
+        # (the EngineContent host offers only curve25519-sha256 and
+        # ecdh-sha2-nistp256) share none of those, so the handshake died with
+        # "Unable to exchange encryption keys" before authentication was even
+        # tried. ECDSA needs Windows 10 or later, which the Editor requires anyway.
+        set(ENABLE_ECDSA_WINCNG ON CACHE BOOL "" FORCE)
     else()
         find_package(OpenSSL QUIET COMPONENTS Crypto)
         if(OPENSSL_FOUND)
@@ -896,7 +903,7 @@ endfunction()
 # FORCE so editing this line always wins over a value already stored in the CMake
 # cache — without it, a reconfigure keeps the old cached codename (the version from
 # project() updates, but the codename would silently stay stale).
-set(HE_VERSION_CODENAME "Parhelion" CACHE STRING "Sky-themed codename for this release" FORCE)
+set(HE_VERSION_CODENAME "Nimbus" CACHE STRING "Sky-themed codename for this release" FORCE)
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"
