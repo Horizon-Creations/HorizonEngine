@@ -6477,20 +6477,22 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Radius", "Brush Radius",
 	  "The inner, full-strength part of the brush, in metres — the tight circle "
-	  "drawn on the ground. The same value is used for sculpting and for "
-	  "painting, so changing it in one mode changes it in the other.",
+	  "drawn on the ground. The same value is used for sculpting, painting, "
+	  "foliage and water, so changing it in one mode changes it in the others.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Falloff", "Brush Falloff",
 	  "How far past the radius the brush keeps working, in metres — the faint "
 	  "outer circle. Strength falls off linearly from full at the radius to "
 	  "nothing at the outer edge, so 0 gives a hard-edged brush and a large "
-	  "value a very soft one. Shared with painting.",
+	  "value a very soft one. Shared with painting and the water brush, where "
+	  "it is the width of the shore the water thins out over.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Strength", "Brush Strength",
 	  "How fast the brush works while the left button is held. Raise and Lower "
 	  "move the ground by roughly this many metres a second under the "
 	  "full-strength part of the brush; Smooth, Flatten and Ramp use it as a "
-	  "rate of blending towards their target instead.",
+	  "rate of blending towards their target instead. The water brush uses it "
+	  "as how fast a spot fills with water (or dries) while the button is held.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Weightmap", "Weightmap Resolution",
 	  "How many texels per side the layer weightmap has, from 32 to 2048, "
@@ -6673,6 +6675,75 @@ namespace
 	  "Throws the painted mask away entirely: the layer goes back to an even "
 	  "scatter over the whole landscape, as if nothing had been painted, and "
 	  "the mask resolution unlocks. One undo step, the whole mask.",
+	  "", "editor#landscape-mode" },
+
+	// ── Landscape: the water brush ───────────────────────────────────────────
+	{ "Landscape/Water", "Water",
+	  "Paints water onto the landscape the way the other brushes paint ground: "
+	  "drag in the viewport and a pond appears under the cursor, hold Shift to "
+	  "wipe it off again. It writes into the landscape's water — the same data "
+	  "a lake drawn from a spline lives in — so a stroke that starts on a lake "
+	  "widens that lake, and the eraser can notch it. The surface only exists "
+	  "where the ground is below the water, so it never climbs a bank. A "
+	  "stroke is one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paint Water", "Paint Water",
+	  "Water goes where you drag. A stroke that starts on dry ground makes a "
+	  "new body of water at the level set below; one that starts on water goes "
+	  "on with that water, at its level. Holding the button over a spot fills "
+	  "it up (Strength sets how fast), so a quick pass leaves a thin trail "
+	  "and a slow one a solid pond. The cursor is blue; the faint dashed ring "
+	  "marks the height the surface will stand at.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Erase Water", "Erase Water",
+	  "Takes water away under the brush, from every body of water it touches. "
+	  "A pond painted with the brush is gone once it has no water left; a lake "
+	  "drawn from a spline stays and can be drawn back in. The cursor turns "
+	  "red. Holding Shift while you drag does the same without switching.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/From Ground##water", "Level From Ground",
+	  "Takes the surface height from the ground under the first point of each "
+	  "stroke, plus Above Ground — click in a hollow and the water stands "
+	  "just above its bottom. Switch it off to type the level yourself, for a "
+	  "second pond that has to match the first. Dragging uphill afterwards "
+	  "does not tilt the water: the level is fixed when the stroke begins.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Above Ground##water", "Water Above Ground",
+	  "How far above the ground at the first point the surface stands, in "
+	  "metres. Water level with the ground has no depth at all, so a click on "
+	  "flat ground paints nothing visible at 0; the default puts the first "
+	  "point a little under water. A negative value starts the surface below "
+	  "the ground: the pond then fills only the lower land around it.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Level##water", "Water Level",
+	  "The height of the surface for new water, in metres on the landscape's "
+	  "own height scale (a landscape standing at Y = 100 with level 2 has its "
+	  "water at 102). Strokes that start on existing water ignore it and keep "
+	  "that water's level.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Dig Bed##water", "Dig Bed",
+	  "Also digs while you paint: the ground under the brush is lowered to a "
+	  "floor Depth below the water level, with the brush falloff as the bank. "
+	  "It only ever lowers — a hole already deeper stays — and holding still "
+	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
+	  "The eraser never digs. One undo step takes the water and the pit back "
+	  "together.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Depth##water", "Bed Depth",
+	  "How far below the water level the bed is dug, in metres. Only used "
+	  "with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Resolution##water", "Water Grid Resolution",
+	  "How many cells per side the landscape's water is stored in, from 32 to "
+	  "2048, stretched over the whole landscape. The cell size is shown under "
+	  "it: a shore can only be as fine as that, so a large landscape wants more "
+	  "cells for small ponds. Applied when you let go of the slider, keeping "
+	  "the shape of what is painted; one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Clear All Water", "",
+	  "Removes every body of water from the landscape — painted ponds and "
+	  "spline lakes alike. The ground is not touched, and the grid resolution "
+	  "stays. One undo step.",
 	  "", "editor#landscape-mode" },
 
 	// ── The Environment window ───────────────────────────────────────────────

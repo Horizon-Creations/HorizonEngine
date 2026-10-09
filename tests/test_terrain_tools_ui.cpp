@@ -15,6 +15,7 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TerrainMeshGenerator.h>   // terrainHeightAt
+#include <HorizonScene/WaterField.h>             // the Water brush's result
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/DefaultAssets.h>
@@ -44,6 +45,7 @@
 // With HE_UI_DUMP_DIR set the panel is written out as well.
 
 using namespace HE::Ed;
+namespace water = HE::water;
 
 namespace
 {
@@ -551,4 +553,180 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	REQUIRE(locate(ctx, panelId("##lsTool0"), rx, ry));
 	clickAt(ctx, rx, ry);
 	CHECK(locate(ctx, panelId("Radius##brush"), rx, ry));
+}
+
+// ── The Water brush: arm it, drag, hold Shift, undo ──────────────────────────
+// The stroke logic (which body, which level, the eraser, the dig) has its own
+// tests in test_water_brush.cpp. This one asks what only the Landscape tool can
+// answer: does the panel arm the mode and show its form instead of the sculpt
+// numbers, does a drag in the viewport leave water where the pointer went, is a
+// whole stroke ONE undo step, does Shift erase, does a water stroke leave the
+// terrain's own rebuild flags alone, and does Dig Bed lower the ground.
+TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Shift erases, Dig Bed lowers the ground")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	// A flat 100 m landscape at the origin, a built one: dirty off, a 2ⁿ+1 grid, so
+	// "the terrain wants a rebuild" can only come from the stroke.
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.dirty = false;
+	tc.water.res = 100;                       // a cell is a metre
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MeshComponent mesh;                       // something for the picking-cache hook to invalidate
+	mesh.meshAssetId = HE::kDefaultCubeMeshId;
+	reg.emplace<MeshComponent>(terrain, mesh);
+	auto land = [&]() -> TerrainComponent&
+	{
+		auto view = reg.view<TerrainComponent>();
+		REQUIRE(view.size() == 1u);
+		return reg.get<TerrainComponent>(*view.begin());   // undo mints new handles
+	};
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// ── Arm Water: its form replaces the sculpt tools ──
+	float wx = 0.0f, wy = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("##lsWater"), wx, wy), "no Water cell in the mode well");
+	clickAt(ctx, wx, wy);
+	float fx = 0.0f, fy = 0.0f;
+	CHECK_MESSAGE(locate(ctx, panelId("##watErase"), fx, fy), "Water armed shows no Erase cell");
+	CHECK_MESSAGE(locate(ctx, panelId("Radius##water"), fx, fy), "Water armed shows no Radius");
+	CHECK_MESSAGE(locate(ctx, panelId("From Ground##water"), fx, fy), "Water armed shows no From Ground");
+	float digX = 0.0f, digY = 0.0f;
+	CHECK_MESSAGE(locate(ctx, panelId("Dig Bed##water"), digX, digY), "Water armed shows no Dig Bed");
+	CHECK_FALSE(locate(ctx, panelId("##lsTool0"), fx, fy));          // the sculpt brushes are gone
+	{
+		he_ui::Image img;
+		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+		for (int i = 0; i < 3; ++i) panelFrame(ctx, false, i == 2 ? &img : nullptr);
+		REQUIRE(img.valid());
+		dump(img, "landscape-water-panel");
+	}
+	const size_t depth0 = undo.undoDepth();
+	REQUIRE(land().water.bodies.empty());
+
+	// Top-down at 120 m, 60° field of view: 0.2665 m a pixel, +X right, +Z down
+	// (see the Mountain test). 75 px is 20 m.
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	const float px = 75.0f;
+	int invalidations = 0;
+	auto hook = [&](const HE::UUID&) { ++invalidations; };
+
+	// ── A press that misses the landscape takes no undo step ──
+	viewportFrame(ctx, snap, -50.0f, -50.0f, false, hook);       // pointer outside the viewport rectangle
+	viewportFrame(ctx, snap, -50.0f, -50.0f, true, hook);
+	viewportFrame(ctx, snap, -50.0f, -50.0f, false, hook);
+	CHECK(undo.undoDepth() == depth0);
+	CHECK(land().water.bodies.empty());
+
+	// ── Paint: press at the middle, drag 20 m east, let go ──
+	viewportFrame(ctx, snap, cx, cy, false, hook);
+	viewportFrame(ctx, snap, cx, cy, true, hook);
+	for (int i = 1; i <= 5; ++i)
+		viewportFrame(ctx, snap, cx + px * i / 5.0f, cy, true, hook);
+	// While the button is held the stroke is already in the model: water appears
+	// under the cursor as you drag, no release needed.
+	CHECK(land().water.wetCells() > 0u);
+	CHECK(undo.undoDepth() == depth0 + 1);                        // one entry, taken when the stroke began
+	viewportFrame(ctx, snap, cx + px, cy, false, hook);
+	{
+		const TerrainComponent& t = land();
+		REQUIRE(t.water.bodies.size() == 1);
+		CHECK(undo.undoDepth() == depth0 + 1);
+		CHECK(undo.undoLabel() == "Paint Water");
+		CHECK_FALSE(t.water.bodies[0].fromSpline());
+		CHECK(t.water.bodies[0].level == doctest::Approx(0.3f));  // flat ground at 0 plus the default 0.3 m
+		const uint16_t id = t.water.bodies[0].id;
+		CHECK(water::bodyAt(t, 0.0f, 0.0f)   == id);
+		CHECK(water::bodyAt(t, 10.0f, 0.0f)  == id);
+		CHECK(water::bodyAt(t, 20.0f, 0.0f)  == id);
+		CHECK(water::bodyAt(t, -10.0f, 0.0f) == id);              // radius 10 + falloff 5 behind the press
+		CHECK(water::bodyAt(t, 10.0f, 25.0f) == water::kNoBody);
+		CHECK(water::bodyAt(t, 40.0f, 40.0f) == water::kNoBody);
+		// The landscape's own flags: a water stroke is not a terrain edit.
+		CHECK_FALSE(t.dirty);
+		CHECK_FALSE(t.regionDirty);
+		CHECK(t.sculptHeights.empty());
+		CHECK(t.water.dirty);                                      // the sheet is built from this next tick
+		CHECK(invalidations == 0);                                 // the ground did not move
+	}
+
+	// ── One undo takes the whole stroke back, redo brings it back ──
+	const water::Field painted = land().water;
+	REQUIRE(undo.undo());
+	CHECK(land().water.wetCells() == 0u);
+	CHECK(land().water.bodies.empty());
+	REQUIRE(undo.redo());
+	CHECK(water::sameContent(land().water, painted));
+
+	// ── Shift flips Paint to Erase: wipe the middle ──
+	const uint32_t wetBefore = land().water.wetCells();
+	const size_t depth1 = undo.undoDepth();
+	ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift, true);
+	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);   // a frame for the modifier to arrive
+	viewportFrame(ctx, snap, cx + px * 0.5f, cy, true, hook);
+	for (int i = 0; i < 3; ++i)
+		viewportFrame(ctx, snap, cx + px * 0.5f, cy, true, hook);
+	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);
+	ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift, false);
+	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);
+	{
+		const TerrainComponent& t = land();
+		CHECK(t.water.wetCells() < wetBefore);
+		CHECK(water::bodyAt(t, 10.0f, 0.0f) == water::kNoBody);   // the pointer's spot is dry
+		CHECK(water::bodyAt(t, -10.0f, 0.0f) != water::kNoBody);  // the far end of the pond is not
+		CHECK(undo.undoDepth() == depth1 + 1);
+		CHECK(undo.undoLabel() == "Erase Water");
+		CHECK(t.water.bodies.size() == 1);                         // the eraser creates nothing
+	}
+	REQUIRE(undo.undo());                                          // the erase alone
+	CHECK(land().water.wetCells() == wetBefore);
+
+	// ── Dig Bed: a second pond, the ground goes down with it ──
+	clickAt(ctx, digX, digY);                                     // the checkbox
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
+	REQUIRE(land().sculptHeights.empty());
+	const size_t depth2 = undo.undoDepth();
+	const float gx = 30.0f, gz = 30.0f;                            // 112 px right and down of the middle
+	const float spx = cx + gx / 0.2665f, spy = cy + gz / 0.2665f;
+	viewportFrame(ctx, snap, spx, spy, false, hook);
+	viewportFrame(ctx, snap, spx, spy, true, hook);
+	for (int i = 0; i < 3; ++i) viewportFrame(ctx, snap, spx, spy, true, hook);
+	viewportFrame(ctx, snap, spx, spy, false, hook);
+	{
+		const TerrainComponent& t = land();
+		CHECK(undo.undoDepth() == depth2 + 1);
+		REQUIRE(t.sculptHeights.size() == 129u * 129u);
+		// Water 0.3 m up on flat ground, a bed 1 m (the default depth) under it.
+		CHECK(terrainHeightAt(t, gx, gz) == doctest::Approx(-0.7f).epsilon(0.02));
+		CHECK(terrainHeightAt(t, -40.0f, -40.0f) == 0.0f);         // out of reach, untouched
+		CHECK(t.regionDirty);                                      // only the chunks under the brush rebuild
+		CHECK_FALSE(t.dirty);
+		CHECK(invalidations > 0);                                  // the picking cache learned the ground moved
+		CHECK(water::bodyAt(t, gx, gz) != water::kNoBody);
+	}
+	REQUIRE(undo.undo());                                          // water and pit go together
+	CHECK(land().sculptHeights.empty());
+	CHECK(water::bodyAt(land(), gx, gz) == water::kNoBody);
+
+	// Back to Sculpt, Dig Bed off again: the file-static mode must not leak into
+	// another test.
+	clickAt(ctx, digX, digY);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
+	clickAt(ctx, wx, wy);
+	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
+	CHECK_FALSE(locate(ctx, panelId("Radius##water"), wx, wy));
 }
