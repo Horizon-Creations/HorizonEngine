@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -879,7 +880,10 @@ void drawChangesTab(GitController& git, AppContext& ctx, const HE::Sc::RepoStatu
 		ImGui::EndChild();
 		return;
 	}
-	EditorWidgets::WrapText wrap;
+	// Popped BEFORE EndChild: PopTextWrapPos acts on the current window, and by the
+	// time a scope-end destructor ran after EndChild that would be the parent.
+	std::optional<EditorWidgets::WrapText> wrap;
+	wrap.emplace();
 
 	if (m.total == 0)
 	{
@@ -938,6 +942,7 @@ void drawChangesTab(GitController& git, AppContext& ctx, const HE::Sc::RepoStatu
 		if (!toStage.empty())   git.requestStage(std::move(toStage));
 		if (!toUnstage.empty()) git.requestUnstage(std::move(toUnstage));
 	}
+	wrap.reset();
 	ImGui::EndChild();
 }
 
@@ -951,7 +956,10 @@ void drawHistoryTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayWr
 		ImGui::EndChild();
 		return;
 	}
-	EditorWidgets::WrapText wrap;
+	// Popped BEFORE EndChild: PopTextWrapPos acts on the current window, and by the
+	// time a scope-end destructor ran after EndChild that would be the parent.
+	std::optional<EditorWidgets::WrapText> wrap;
+	wrap.emplace();
 
 	const auto& commits = git.recentCommits();
 	if (commits.empty()) ImGui::TextDisabled("No commits yet.");
@@ -1071,6 +1079,7 @@ void drawHistoryTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayWr
 		else            dl->AddCircle(ImVec2(gx, dotY), 4.0f, ImGui::GetColorU32(ImGuiCol_CheckMark), 0, 2.0f);
 		ImGui::PopID();
 	}
+	wrap.reset();
 	ImGui::EndChild();
 }
 
@@ -1082,7 +1091,10 @@ void drawBranchesTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayW
 		ImGui::EndChild();
 		return;
 	}
-	EditorWidgets::WrapText wrap;
+	// Popped BEFORE EndChild: PopTextWrapPos acts on the current window, and by the
+	// time a scope-end destructor ran after EndChild that would be the parent.
+	std::optional<EditorWidgets::WrapText> wrap;
+	wrap.emplace();
 	const bool idle = !git.busy();
 
 	ImGui::BeginDisabled(!(mayWrite && idle && !st.initialCommit));
@@ -1160,6 +1172,7 @@ void drawBranchesTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayW
 			ImGui::EndDisabled();
 		}
 	}
+	wrap.reset();
 	ImGui::EndChild();
 }
 
