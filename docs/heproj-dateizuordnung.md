@@ -111,78 +111,27 @@ werden übersprungen, sie brauchen einen Release Build.
 * Windows und Linux, Nicht ASCII Pfade und eine zweite Instanz: ein Doppelklick bei
   laufendem Editor startet dort einen weiteren Prozess, es gibt keine Übergabe an die
   laufende Instanz (außerhalb dieses Themas).
-* Das Handbuch im Editor: siehe unten.
+* Der Anwenderhinweis zum einmaligen Registrieren steht im Handbuch (siehe unten),
+  ein Hinweis in `getting-started.html` (Schritt „Unpack &amp; run“) wurde nicht
+  ergänzt.
 
-## Handbuchtext (noch nicht in die Website übernommen)
+## Handbuch
 
-Die Doku im Editor (`EditorDeps/Docs/he-docs.json`) wird von
-`scripts/build_docs_bundle.py` aus der Website gebaut (`Website/HorizonEngineDocs/*.html`,
-Geschwisterordner). Der Abschnitt gehört in `editor.html` hinter den Hinweis am
-Ende von `<section id="project-hub">`, davor `</section>`. Danach im Website Ordner
-`python3 build_docs_index.py`, hier `python3 scripts/build_docs_bundle.py`, beides
-committen. Der Schreibzugriff auf `editor.html` wurde in Schritt 4 vom Auto Mode
-Klassifikator abgelehnt, deshalb liegt der Text hier.
+Der Abschnitt „Opening a project from the file manager“ steht in der Website Quelle
+`Website/HorizonEngineDocs/editor.html` unter `<section id="project-hub">`
+(Website Commit `12805c4` auf main, gepusht, nicht deployt) und im Editor Handbuch
+(`EditorDeps/Docs/he-docs.json`, Seite `editor`, Abschnitt `project-hub`). Er hat
+Fließtext zum Weg in den Editor, eine Tabelle je Plattform (was einmal zu tun ist)
+und einen Hinweis auf das Verhalten bei laufendem Editor.
 
-```html
-          <h3>Opening a project from the file manager</h3>
-          <p>
-            A project file (<code>.heproj</code>) opens in the editor with a
-            double click in Finder, Explorer or your Linux file manager. The
-            editor takes it the same way the Hub's own Open does: if another
-            project is open and has unsaved changes, it asks first, and if that
-            very project is already open, nothing happens. The path also works
-            on the command line, as in
-            <code>HorizonEditor MyGame.heproj</code>. If a
-            <code>.heproj</code> named at launch is missing, or the path is a
-            folder, the editor shows the Project Hub with the reason instead of
-            the last project. Anything that is not a <code>.heproj</code> is
-            only noted in the log.
-          </p>
-          <div class="docs-table-wrap">
-            <table class="docs-table">
-              <thead>
-                <tr><th>Platform</th><th>How the file type is registered</th><th>What you do</th></tr>
-              </thead>
-              <tbody>
-                <tr><td><strong>macOS</strong></td>
-                    <td>The app's <code>Info.plist</code> declares the type, so
-                        the <code>.dmg</code> already carries it.</td>
-                    <td>Drag the app into <code>Applications</code> and start it
-                        once. Until the first start macOS does not trust the new
-                        type, and a double click may open another program.</td></tr>
-                <tr><td><strong>Windows</strong></td>
-                    <td>Registry entries for the current user only, so no
-                        administrator is needed.</td>
-                    <td>After unpacking the <code>.zip</code>, run
-                        <code>FileTypes\register_heproj.cmd</code> once. Run it
-                        again if you move the folder, because the registry
-                        holds the full path.
-                        <code>FileTypes\unregister_heproj.cmd</code> removes it.</td></tr>
-                <tr><td><strong>Linux</strong></td>
-                    <td>A desktop entry and a MIME type in your own data
-                        directory (<code>~/.local/share</code>), so no root is
-                        needed.</td>
-                    <td>After unpacking the archive, run
-                        <code>FileTypes/install_file_types.sh</code> once, and
-                        again after moving the folder.
-                        <code>--uninstall</code> takes it away.</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="callout note">
-            <span class="callout-icon">◆</span>
-            <p>
-              <strong>Note:</strong> on macOS an editor that is already
-              running receives the file as an open document event and switches
-              to it after the unsaved changes question. Windows and Linux start
-              a new editor for every double click and do not pass the file to
-              one that is already running. To change the project inside a
-              running editor, open it from there.
-            </p>
-          </div>
-```
-
-Optional, ein Satz in `getting-started.html`, Schritt „Unpack &amp; run“, hinter
-`<code>Applications</code>.`: „To open `.heproj` files with a double click, register
-the file type once; the Project Hub guide (`editor.html#project-hub`) shows how for
-each platform.“
+Achtung beim Neubauen des Bundles: `scripts/build_docs_bundle.py` liest den
+Website Ordner so, wie er gerade ausgecheckt ist. Auf Website main fehlen derzeit
+Abschnitte, die in anderen Website Zweigen stehen und im Bundle von `release/0.7.0`
+schon enthalten sind (`editor/github`, `materials/water`, `scripting-reference/sequence`,
+`scripting-reference/settings`, `systems/audio-bus-eq`, `audio-curve`, `audio-editor`,
+`audio-trim`). Ein voller Neubau würde sie aus dem Handbuch entfernen, und `--check`
+meldet den Stand deshalb schon vor diesem Thema als veraltet. In Schritt 4 wurde
+darum nur der Abschnitt `editor/project-hub` aus der Ausgabe des Generators in das
+committete Bundle übernommen (vorher war dieser Abschnitt eine exakte Vorstufe des
+neuen, nur die vier neuen Blöcke und der Suchtext kamen hinzu). Ein voller Neubau
+gehört hinter das Zusammenführen der Website Zweige.
