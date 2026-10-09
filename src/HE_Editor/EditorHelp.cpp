@@ -246,7 +246,8 @@ namespace
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
 	  "that decides whether something reads as wet, polished or worn. On the "
 	  "engine water it is a parameter of its own: keep it low for sharp "
-	  "reflections and a tight sun glint.",
+	  "reflections and a tight sun glint. Distant water is made rougher on top "
+	  "of it, the way the eye averages ripples it can no longer resolve.",
 	  "", "rendering#lighting" },
 	{ "Material/Opacity", "",
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
@@ -287,17 +288,22 @@ namespace
 	{ "Material/WaveA", "",
 	  "The swell, the largest of three wave trains. x = direction in degrees "
 	  "(0 = +X, 90 = +Z), y = speed in m/s, z = wavelength in metres, "
-	  "w = steepness (0 is flat, about 0.4 is choppy). The waves bend the "
-	  "normal only, the mesh stays flat.",
+	  "w = steepness (0 is flat, about 0.3 is choppy). Each train also drives a "
+	  "second, shorter and weaker one at a turned angle, so the sea is not a "
+	  "single grid of crests. The waves bend the normal only, the mesh stays "
+	  "flat.",
 	  "", "materials#water" },
 	{ "Material/WaveB", "",
 	  "Second wave train, laid across the swell so the crests do not line up. "
 	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "
-	  "w = steepness. A steepness of 0 switches it off.",
+	  "w = steepness. A steepness of 0 switches it off. The foam sits on the "
+	  "crests of this train and of the fine ripples.",
 	  "", "materials#water" },
 	{ "Material/WaveC", "",
 	  "Fine ripples on top of the two larger trains. x = direction in degrees, "
-	  "y = speed in m/s, z = wavelength in metres, w = steepness.",
+	  "y = speed in m/s, z = wavelength in metres, w = steepness. The three "
+	  "steepnesses together also set how strong the irregular chop on top is: "
+	  "all three at 0 gives a flat surface.",
 	  "", "materials#water" },
 	{ "Material/FresnelPower", "",
 	  "How quickly the surface turns reflective toward grazing angles. 5 is "
@@ -323,16 +329,19 @@ namespace
 	  "tinted value suits murky or polluted water.",
 	  "", "materials#water" },
 	{ "Material/Foam", "",
-	  "x = coverage, the share of the wave crests that foam (0 = none), "
-	  "y = strength 0..1, z = size of the noise that breaks it up, in metres, "
-	  "w = drift speed in m/s. Foam sits on the crests, not at the shore — "
-	  "there is no scene depth to find a shoreline yet.",
+	  "x = coverage, the share of the wave crests that foam (0 = none; the "
+	  "default is a few whitecaps, 0.3 is a rough sea), y = strength 0..1, "
+	  "z = size of the noise that breaks it into lace, in metres, w = drift "
+	  "speed in m/s. Foam sits on the crests of the steeper waves, not at the "
+	  "shore — there is no scene depth to find a shoreline yet.",
 	  "", "materials#water" },
 	{ "Material/Caustics", "",
-	  "The shimmering light pattern on the surface. x = strength (0 = off), "
-	  "y = pattern size in metres, z = speed, w = camera distance in metres at "
-	  "which the pattern has faded out, so it does not shimmer into moiré far "
-	  "away.",
+	  "Focused light that brightens the water body, as a soft moving pattern. "
+	  "x = strength (0 = off), y = pattern size in metres, z = speed, "
+	  "w = camera distance in metres at which the pattern has faded out, so it "
+	  "does not shimmer into moiré far away. It fades with the water's own "
+	  "transmittance, so it shows in clear, shallow water (low Turbidity) and "
+	  "not in deep or murky water.",
 	  "", "materials#water" },
 
 	// ── Light ────────────────────────────────────────────────────────────────

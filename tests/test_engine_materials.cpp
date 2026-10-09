@@ -95,21 +95,21 @@ struct Scratch
 // change this list has to be shown.
 struct Knob { const char* name; MatParamKind kind; float v[4]; };
 const Knob kWaterKnobs[] = {
-	{ "ShallowColor", MatParamKind::Color, { 0.10f, 0.42f, 0.45f, 0.0f } },
-	{ "DeepColor",    MatParamKind::Color, { 0.01f, 0.07f, 0.12f, 0.0f } },
-	{ "Turbidity",    MatParamKind::Vec2,  { 0.35f, 3.0f, 0.0f, 0.0f } },
-	{ "WaveA",        MatParamKind::Vec4,  { 30.0f, 1.2f, 8.0f, 0.25f } },
-	{ "WaveB",        MatParamKind::Vec4,  { 310.0f, 0.8f, 3.5f, 0.18f } },
-	{ "WaveC",        MatParamKind::Vec4,  { 100.0f, 0.5f, 1.2f, 0.12f } },
+	{ "ShallowColor", MatParamKind::Color, { 0.045f, 0.20f, 0.22f, 0.0f } },
+	{ "DeepColor",    MatParamKind::Color, { 0.004f, 0.028f, 0.052f, 0.0f } },
+	{ "Turbidity",    MatParamKind::Vec2,  { 0.45f, 4.0f, 0.0f, 0.0f } },
+	{ "WaveA",        MatParamKind::Vec4,  { 20.0f, 1.0f, 14.0f, 0.07f } },
+	{ "WaveB",        MatParamKind::Vec4,  { 335.0f, 0.8f, 5.0f, 0.10f } },
+	{ "WaveC",        MatParamKind::Vec4,  { 70.0f, 0.5f, 1.6f, 0.09f } },
 	{ "FresnelPower", MatParamKind::Float, { 5.0f, 0.0f, 0.0f, 0.0f } },
 	{ "Reflection",   MatParamKind::Float, { 0.8f, 0.0f, 0.0f, 0.0f } },
-	{ "Roughness",    MatParamKind::Float, { 0.06f, 0.0f, 0.0f, 0.0f } },
+	{ "Roughness",    MatParamKind::Float, { 0.08f, 0.0f, 0.0f, 0.0f } },
 	{ "Specular",     MatParamKind::Float, { 0.3f, 0.0f, 0.0f, 0.0f } },
-	{ "Opacity",      MatParamKind::Float, { 0.55f, 0.0f, 0.0f, 0.0f } },
+	{ "Opacity",      MatParamKind::Float, { 0.5f, 0.0f, 0.0f, 0.0f } },
 	{ "Refraction",   MatParamKind::Float, { 0.3f, 0.0f, 0.0f, 0.0f } },
-	{ "FoamColor",    MatParamKind::Color, { 0.92f, 0.95f, 0.97f, 0.0f } },
-	{ "Foam",         MatParamKind::Vec4,  { 0.18f, 0.8f, 1.5f, 0.3f } },
-	{ "Caustics",     MatParamKind::Vec4,  { 0.35f, 2.5f, 0.25f, 25.0f } },
+	{ "FoamColor",    MatParamKind::Color, { 0.82f, 0.88f, 0.90f, 0.0f } },
+	{ "Foam",         MatParamKind::Vec4,  { 0.06f, 0.5f, 0.7f, 0.3f } },
+	{ "Caustics",     MatParamKind::Vec4,  { 0.2f, 2.0f, 0.2f, 18.0f } },
 };
 constexpr int kWaterKnobCount = static_cast<int>(sizeof(kWaterKnobs) / sizeof(kWaterKnobs[0]));
 
@@ -308,8 +308,8 @@ TEST_CASE("Engine water material: an edited value survives save and reload, the 
 	CHECK(m->shaderParamData[col * 4 + 2] == doctest::Approx(0.3f));
 	CHECK(m->shaderParamData[opa * 4 + 0] == doctest::Approx(0.75f));
 	// …and an untouched knob keeps its default.
-	CHECK(m->shaderParamData[deep * 4 + 0] == doctest::Approx(0.01f));
-	CHECK(m->shaderParamData[deep * 4 + 2] == doctest::Approx(0.12f));
+	CHECK(m->shaderParamData[deep * 4 + 0] == doctest::Approx(0.004f));
+	CHECK(m->shaderParamData[deep * 4 + 2] == doctest::Approx(0.052f));
 }
 
 TEST_CASE("Engine water material: the committed file carries a shader, not just the graph")
