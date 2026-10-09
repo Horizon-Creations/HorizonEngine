@@ -1956,6 +1956,10 @@ darunter). Umgesetzt mit fünf `Landscape Layer Blend`-Knoten: zwei lesen die Ge
 als Eingänge → die Kanäle des Ergebnisses SIND die Gewichte), drei mischen Albedo / Normal / Maske.
 Eine Schicht braucht keine neue Textur; die Arrays bleiben unverändert.
 
+* **Übermalen löscht automatische Pfützen schnell:** die Oberfläche folgt den Gewichten linear, die
+  automatischen Pfützen aber verschwinden dreimal so schnell (`Saturate(3 × (Grass+Dirt+Rock+Snow))`
+  nimmt ihnen den Anteil). Ein halb überdeckter Wasserfilm blieb sonst als Schimmer/Reflexion auf
+  gemaltem Boden stehen.
 * Die **Masken-Ansichten** (`MasksRockSnowWater`, `MasksDirtWet`) und damit der Zeuge zeigen weiter die
   AUTOMATISCHEN Masken und brauchen keine Weightmap.
 * Die **GI-Kernel** kennen die gemalten Gewichte nicht (wie bisher: sie lesen die automatischen

@@ -236,9 +236,14 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int sumGD  = w.op(T::Add, 6, { { mG, 0 }, { mD, 1 } });
     const int sumRS  = w.op(T::Add, 6, { { mR, 2 }, { mS, 0 } });
     const int sumAll = w.op(T::Add, 6, { { sumGD }, { sumRS } });
-    const int manual = w.op(T::Saturate, 6, { { w.op(T::Add, 6, { { sumAll }, { mP, 1 } }) } });
-    // How much of a texel is still left to the automatic rules.
-    const int autoShare = w.op(T::OneMinus, 6, { { manual } });
+    // How much of the AUTOMATIC PUDDLES survives painted ground. A puddle is a thin
+    // wet/glossy film, and a film left at half strength over ground the user has painted
+    // over reads as a leftover sheen, not as "half painted". So it dies three times as fast
+    // as the surface under it is replaced: a third of the way painted over, the automatic
+    // puddle is gone. (The surface itself keeps the plain weights, see the blends below.)
+    const int three     = w.constF(3.0f, 6);
+    const int groundHit = w.op(T::Saturate, 6, { { w.op(T::Multiply, 6, { { sumAll }, { three } }) } });
+    const int puddleKeep = w.op(T::OneMinus, 6, { { groundHit } });
 
     // The surface the painted weights make of it: one blend per channel set. The
     // Puddles input is s2 again — puddles change what lies on the ground, not the
@@ -292,10 +297,10 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
 
     // The strength the overlay is applied with: the automatic puddle where the
     // terrain is left to the automatic rules, plus whatever was painted (a painted
-    // puddle is water whatever the slope). Unpainted: autoShare = 1, mP = 0 → the
+    // puddle is water whatever the slope). Unpainted: puddleKeep = 1, mP = 0 → the
     // automatic masks unchanged.
-    const int wetAutoPart   = w.op(T::Multiply, 7, { { r.wetMask },   { autoShare } });
-    const int waterAutoPart = w.op(T::Multiply, 7, { { r.waterMask }, { autoShare } });
+    const int wetAutoPart   = w.op(T::Multiply, 7, { { r.wetMask },   { puddleKeep } });
+    const int waterAutoPart = w.op(T::Multiply, 7, { { r.waterMask }, { puddleKeep } });
     const int wetF   = w.op(T::Saturate, 7, { { w.op(T::Add, 7, { { wetAutoPart },   { mP, 1 } }) } });
     const int waterF = w.op(T::Saturate, 7, { { w.op(T::Add, 7, { { waterAutoPart }, { mP, 1 } }) } });
 
