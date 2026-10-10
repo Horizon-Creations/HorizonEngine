@@ -6867,6 +6867,29 @@ void EditorApplication::dumpFrameHeadless()
 		fol.maxScale     = scaleMax;
 		fol.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
 		fol.dirty        = true;
+		// HE_DUMP_FOLIAGEMAT=graph: the layer carries a node-graph material (one flat
+		// magenta ConstColor, no animation) instead of the built-in PBR. A backend that
+		// instances the batch with its built-in program draws it grey; one that keeps
+		// the material draws it magenta, once per instance (Thema 163 Teil 2b, GL gate).
+		if (const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT"); fm && std::string_view(fm) == "graph")
+		{
+			MaterialAsset mat;
+			mat.type = HE::AssetType::Material;
+			mat.name = "FoliageGraphTest";
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.1f; g.findNode(col)->p[2] = 0.8f;
+			g.connect(col, 0, out, 0);
+			mat.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			mat.customShaderFragGlsl = gen.glsl;
+			mat.customShaderGBufGlsl = gen.glslGBuffer;
+			mat.customShaderVertGlsl = gen.vertexBody;
+			mat.blendMode            = gen.blendMode;
+			mat.domain               = gen.domain;
+			fol.materialAssetId = contentManager().registerMaterial(std::move(mat));
+		}
 		reg.emplace<FoliageComponent>(land, fol);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		const auto t0 = std::chrono::steady_clock::now();

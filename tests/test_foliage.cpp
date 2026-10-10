@@ -4,7 +4,14 @@
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/FoliagePaint.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TerrainSculpt.h>
+#include <HorizonScene/TerrainMeshGenerator.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <ContentManager/ContentManager.h>
 #include <glm/glm.hpp>
+#include <algorithm>
 #include <filesystem>
 
 // ─── FoliageSystem instance generation ────────────────────────────────────────
@@ -391,4 +398,161 @@ TEST_CASE("FoliageComponent density mask survives a save and drops a bad blob")
     });
 
     he_test::removeQuiet(tmp);
+}
+
+// ─── The layer follows the ground (Thema 163, Teil 2b) ───────────────────────
+// The scatter reads the terrain once. Whatever changes the ground afterwards has
+// to say so, or the plants float over a stroke and sink into a fill. Every
+// change ends in TerrainSystem's rebuild gate, which marks the layer.
+
+namespace
+{
+    // A flat 16 m landscape (res 9 = 2^3+1, so no resample) carrying a layer of
+    // 256 plants, built and scattered once.
+    entt::entity makeGroundedLayer(HorizonWorld& world, ContentManager& cm)
+    {
+        auto& reg = world.registry();
+        auto  te  = world.createEntity("Landscape");
+        reg.emplace<TransformComponent>(te);
+        TerrainComponent tc;
+        tc.resolution = 9;
+        tc.sizeX = tc.sizeZ = 16.0f;
+        tc.seed = 0;
+        tc.heightScale = 0.0f;
+        tc.dirty = true;
+        reg.emplace<TerrainComponent>(te, tc);
+        FoliageComponent fol;
+        fol.meshAssetId = HE::UUID{1, 0};
+        fol.density     = 1.0f;   // 16 * 16 * 1.0 = 256 plants
+        fol.seed        = 7;
+        reg.emplace<FoliageComponent>(te, fol);
+
+        TerrainSystem::updateTerrains(world, cm);
+        FoliageSystem::update(world);
+        return te;
+    }
+
+    // Every plant stands on the ground the terrain describes right now.
+    bool allOnTheGround(const FoliageComponent& f, const TerrainComponent& t)
+    {
+        for (const glm::mat4& m : f.cachedInstances)
+            if (std::abs(m[3].y - terrainHeightAt(t, m[3].x, m[3].z)) > 1e-4f) return false;
+        return !f.cachedInstances.empty();
+    }
+
+    float highestPlant(const FoliageComponent& f)
+    {
+        float y = -1e9f;
+        for (const glm::mat4& m : f.cachedInstances) y = std::max(y, m[3].y);
+        return y;
+    }
+}
+
+TEST_CASE("Foliage re-scatters over the new ground after a sculpt stroke")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto  te  = makeGroundedLayer(world, cm);
+    auto& reg = world.registry();
+    auto& fol = reg.get<FoliageComponent>(te);
+    auto& tc  = reg.get<TerrainComponent>(te);
+
+    REQUIRE(fol.cachedInstances.size() == 256u);
+    CHECK(!fol.dirty);
+    CHECK(highestPlant(fol) == doctest::Approx(0.0f));   // flat ground, flat layer
+    const uint32_t revisionBefore = fol.revision;
+
+    // A dab through the same one-shot form the MCP and scripts use: heights move,
+    // regionDirty is set, nothing touches the layer.
+    const auto r = TerrainSculpt::apply(tc, 0.0f, 0.0f, TerrainSculpt::Op::Raise, 5.0f, 2.0f, 3.0f);
+    REQUIRE(r.ok);
+    REQUIRE(r.changed > 0u);
+    CHECK(!fol.dirty);
+
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(fol.dirty);                       // the rebuild gate marked the layer
+
+    FoliageSystem::update(world);
+    CHECK(!fol.dirty);
+    CHECK(fol.revision > revisionBefore);   // and a retained RenderWorld hears of it
+    CHECK(fol.cachedInstances.size() == 256u);
+    CHECK(highestPlant(fol) > 0.5f);        // something stands on the new hill
+    CHECK(allOnTheGround(fol, tc));
+    // The renderer reads the store, not the world-space copy: it moved too.
+    REQUIRE(fol.store != nullptr);
+    float storeTop = -1e9f;
+    for (const glm::mat4& m : fol.store->local) storeTop = std::max(storeTop, m[3].y);
+    CHECK(storeTop == doctest::Approx(highestPlant(fol)));
+}
+
+TEST_CASE("Foliage re-scatters over flat ground after Reset Sculpting")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto  te  = makeGroundedLayer(world, cm);
+    auto& reg = world.registry();
+    auto& fol = reg.get<FoliageComponent>(te);
+    auto& tc  = reg.get<TerrainComponent>(te);
+
+    REQUIRE(TerrainSculpt::apply(tc, 0.0f, 0.0f, TerrainSculpt::Op::Raise, 5.0f, 2.0f, 3.0f).ok);
+    TerrainSystem::updateTerrains(world, cm);
+    FoliageSystem::update(world);
+    REQUIRE(highestPlant(fol) > 0.5f);
+
+    // What the Landscape panel's Reset Sculpting button does.
+    tc.sculptHeights.clear();
+    tc.dirty = true;
+    CHECK(!fol.dirty);
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(fol.dirty);
+
+    FoliageSystem::update(world);
+    CHECK(highestPlant(fol) == doctest::Approx(0.0f));
+    CHECK(allOnTheGround(fol, tc));
+}
+
+TEST_CASE("Foliage re-scatters over the whole terrain after a new size")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto  te  = makeGroundedLayer(world, cm);
+    auto& reg = world.registry();
+    auto& fol = reg.get<FoliageComponent>(te);
+    auto& tc  = reg.get<TerrainComponent>(te);
+    REQUIRE(fol.cachedInstances.size() == 256u);
+
+    // What the Inspector's Width / Depth drag does: the size changes, `dirty` is set.
+    tc.sizeX = tc.sizeZ = 32.0f;
+    tc.dirty = true;
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(fol.dirty);
+
+    FoliageSystem::update(world);
+    CHECK(fol.cachedInstances.size() == 1024u);   // 32 * 32 * 1.0
+    float reach = 0.0f;
+    for (const glm::mat4& m : fol.cachedInstances) reach = std::max(reach, std::abs(m[3].x));
+    CHECK(reach > 8.0f);                          // plants out in the new half, not just the old 16 m
+}
+
+TEST_CASE("Foliage is left alone by a terrain tick that changed no ground")
+{
+    // The negative control: the rebuild gate is the only trigger. A material swap
+    // (synced ungated at the top of the tick) and an idle tick must not re-scatter.
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto  te  = makeGroundedLayer(world, cm);
+    auto& reg = world.registry();
+    auto& fol = reg.get<FoliageComponent>(te);
+    REQUIRE(!fol.dirty);
+    const uint32_t revisionBefore = fol.revision;
+
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(!fol.dirty);
+
+    reg.get<MaterialComponent>(te).materialAssetId = HE::UUID{ 0xABCDEF01ull, 0x1234ull };
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(!fol.dirty);
+
+    FoliageSystem::update(world);
+    CHECK(fol.revision == revisionBefore);
 }

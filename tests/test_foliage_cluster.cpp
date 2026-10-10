@@ -1051,3 +1051,44 @@ TEST_CASE("Every backend refreshes bounds through RenderObject::refineWorldBound
 				CHECK_MESSAGE(line.find("isCluster()") != std::string::npos, line);
 	}
 }
+
+TEST_CASE("OpenGL: a graph material keeps its own program, only built-in PBR takes the instanced one")
+{
+	// The color passes (G-buffer and forward) used to send EVERY instanced batch to the
+	// built-in instanced program, so a foliage layer with a graph material was drawn in flat
+	// grey PBR: no wind, no alpha discard, not its colours. The batch must reach the material's
+	// program (and draw per instance), exactly as Metal does with cMaterialPipeline == nullptr.
+	// A live GL context is not available on every CI machine, so this reads the source: each
+	// branch that sends a batch to a built-in instanced program must name the material program
+	// on its condition, and the material branches must loop over the instances.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - GL gate check skipped");
+		return;
+	}
+	const std::string text = readFile(root / "src" / "HE_Rendering" / "src" / "Backends" / "OpenGL" / "OpenGLRenderer.cpp");
+	REQUIRE(!text.empty());
+
+	// The forward loop's condition sits on one line, the G-buffer loop's wraps onto the next.
+	std::vector<std::string> rows;
+	{
+		std::istringstream lines(text);
+		for (std::string line; std::getline(lines, line);) rows.push_back(line);
+	}
+	size_t gated = 0;
+	for (size_t i = 0; i < rows.size(); ++i)
+	{
+		if (rows[i].find("dc.instanceTransforms.empty()") == std::string::npos) continue;
+		const std::string both = rows[i] + "\n" + (i + 1 < rows.size() ? rows[i + 1] : std::string());
+		const bool builtInInstanced = both.find("m_gbufferInstancedProgram") != std::string::npos
+		                           || both.find("m_instancedProgram") != std::string::npos;
+		if (!builtInInstanced) continue;
+		++gated;
+		CHECK_MESSAGE((both.find("matProg") != std::string::npos), both);
+	}
+	CHECK(gated == 2);   // G-buffer loop + forward loop; the depth passes carry no material
+	// Both material branches draw every instance with the material's program.
+	CHECK(countOf(text, "drawGraphInstance(t)") >= 2);
+	CHECK(countOf(text, "pushForward(t)") >= 1);
+}

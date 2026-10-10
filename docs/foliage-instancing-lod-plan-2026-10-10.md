@@ -116,7 +116,7 @@ Software-Kerne schleifen je Strahl über alle Instanzen („TLAS analogue: linea
 
 | # | Lücke | Beleg |
 |---|---|---|
-| F1 | **Sculpt-Striche streuen nicht neu.** Der Pinselpfad (Raise, Lower, Smooth, Flatten, Ramp, Roughen) setzt nur `regionDirty`; „Reset Sculpting“ und die Änderung von Größe, Auflösung oder Seed im Inspector ebenso nicht. Nur Mountain (`TerrainTools.cpp:701-704`) und Heightmap-Import setzen `fol->dirty` | Audit §3.1/1 stimmte; seit dem Audit ist nur Mountain dazugekommen |
+| F1 | **(behoben in Teil 2b, Abschnitt 12.2)** **Sculpt-Striche streuen nicht neu.** Der Pinselpfad (Raise, Lower, Smooth, Flatten, Ramp, Roughen) setzt nur `regionDirty`; „Reset Sculpting“ und die Änderung von Größe, Auflösung oder Seed im Inspector ebenso nicht. Nur Mountain (`TerrainTools.cpp:701-704`) und Heightmap-Import setzen `fol->dirty` | Audit §3.1/1 stimmte; seit dem Audit ist nur Mountain dazugekommen |
 | F2 | **Weltmatrix wird ignoriert:** nur `tf->position`, keine Drehung, Skala, kein Eltern. Terrain-Chunks rendern mit voller Weltmatrix, die Foliage liegt daneben | `FoliageSystem.cpp:51-54` |
 | F3 | **Verschieben setzt nichts dirty.** Nichts beobachtet das Transform | – |
 | F4 | **Floating Origin** (Projektschalter, Default aus) schiebt Partikel, Trails, Nav-Agenten, Jolt, aber nicht `cachedInstances` | `FloatingOrigin.h:19-28` |
@@ -203,7 +203,7 @@ Backend behandelt eine solche Charge anders (alles aus den Quellen, die Zeilen i
 
 | Backend | Verhalten bei N Instanzen eines Graph-Materials | Folge |
 |---|---|---|
-| OpenGL | Der Instanzzweig (`OpenGLRenderer.cpp:11525` G-Buffer, `:11749` Forward) steht **vor** dem Zweig für benutzerdefinierte Programme (`:11551`, `:11778`) und nimmt immer das eingebaute Instanzprogramm. Kommentar im Code: „Instanced batches always take the built-in instanced program“ | **Ein Draw, aber falsches Material:** kein Wind, kein Alpha-Discard, flaches PBR. Der Bug aus Altplan §2/§6.4 und Audit §7 Grenze 1 ist noch da |
+| OpenGL | Der Instanzzweig (`OpenGLRenderer.cpp:11525` G-Buffer, `:11749` Forward) steht **vor** dem Zweig für benutzerdefinierte Programme (`:11551`, `:11778`) und nimmt immer das eingebaute Instanzprogramm. Kommentar im Code: „Instanced batches always take the built-in instanced program“ | **Ein Draw, aber falsches Material:** kein Wind, kein Alpha-Discard, flaches PBR. Der Bug aus Altplan §2/§6.4 und Audit §7 Grenze 1 war da; **behoben in Teil 2b** (Abschnitt 12): ein Graph-Material zeichnet je Instanz mit seinem Programm, wie Metal |
 | Metal | Ausgeschlossen durch `cMaterialPipeline == nullptr` (`MetalRenderer.mm:14325`, G-Buffer `:16104-16105`); Schleife mit `setVertexBytes` + Draw je Instanz | Richtig, aber N Draws |
 | D3D11 | `drawMatInstance` je Instanz (`D3D11Renderer.cpp:7113, 7153`), je zwei Map/Unmap | Richtig, N Draws mit Mapping |
 | D3D12 | `drawMatInstance`; der Material-Ring hat `k_matMaxDraws = 1024` Slots je Frame (`:3376`), der Überschuss **wird übersprungen**, einmal Warnung (`:10762-10769`) | Nur die ersten 1024 Instanzen je Frame erscheinen |
@@ -649,3 +649,57 @@ auch ohne Gerät. **Mit begrenzter Sichtweite hängt er von den Pflanzen in den 
 - **Schritt 2b/2d:** `cachedInstances` und der Store doppelt im Speicher; Serialisierung der neuen Felder und die Schichten (`layers`) kommen mit 2d (`SceneSerializer.cpp` war ausdrücklich nicht Teil von 2a).
 - **LOD (3a):** der Randbucket-Weg ist die Vorlage für Bänder: eine Stufengrenze durch einen Bucket wird wie die Kreislinie instanzweise aufgeteilt.
 - **Picking:** ein Klick auf eine Pflanze trifft nur die erste je Bucket; ein Entfaltungsweg in `ScenePick` und `ViewportPick` fehlt.
+
+
+## 12. Stand Teil 2b (Schritt 4, 10.10.2026)
+
+Zwei Korrekturen aus 1.4 und Abschnitt 3, beide klein gehalten. Zweig wie in 11, davor `origin/release/0.7.0` erneut gemergt (neun Commits, nur Doku, `.gitignore` und
+`LandscapeTexGen`).
+
+### 12.1 GL: ein Graph-Material behält sein Programm
+
+`OpenGLRenderer.cpp`, die beiden Farbpässe (G-Buffer-Schleife und Forward-Schleife). Der Instanzzweig stand vor dem Zweig für benutzerdefinierte Programme und nahm
+jeden Batch ins eingebaute Instanzprogramm; ein Foliage-Layer mit Graph-Material wurde deshalb in flachem Grau-PBR gezeichnet. Jetzt gilt dieselbe Regel wie auf Metal
+(`cMaterialPipeline == nullptr`):
+
+- Der Instanzzweig nimmt nur Batches **ohne** Material-Programm (`!(gbProg || matProg)` im G-Buffer-Pass, `!matProg` im Forward-Pass). In der Forward-Schleife wird das
+  Programm dazu vor der Entscheidung aufgelöst (vorher erst im `else`).
+- Die drei Material-Zweige zeichnen den Batch **je Instanz** mit dem Programm des Materials: das G-Buffer-MRT-Programm (`drawGraphInstance`), der Forward-Zweig (ebenso)
+  und der Rückfall ohne G-Buffer-Variante (`pushForward`, ein Eintrag je Instanz im `deferredForward`-Replay). Programm, Licht, Parameter und Texturen werden einmal je
+  Batch gebunden, nur der Objektblock (`mvp`, `model`, Farbe) wird je Instanz neu geschrieben.
+- Ein Material, dessen Programm nicht gebaut werden konnte (`matProg == 0`), fällt wie bisher aufs eingebaute Instanzprogramm zurück: vollständig, nur im Grau.
+- Eingebautes PBR ist unberührt. Preis eines Graph-Material-Layers: **ein Draw je sichtbarer Pflanze** (wie Metal, D3D11 bis Vulkan unverändert in ihrem Zustand aus
+  Abschnitt 3). Ein Layer mit 100k sichtbaren Pflanzen und Graph-Material braucht den instanzierten Material-Vertex (2e).
+
+### 12.2 Scatter: der Layer folgt dem Boden (F1)
+
+Ein Haken im Rebuild-Tor von `TerrainSystem::updateTerrains` (`TerrainSystem.cpp`, zwei Zeilen und ein Include): nach `tc.dirty = false; tc.regionDirty = false;` wird `FoliageComponent::dirty`
+des Terrains gesetzt. Dort enden alle Wege, die den Boden ändern: Pinselstriche (Raise, Lower, Smooth, Flatten, Ramp, Roughen; der Pinsel ruft `updateTerrains` selbst
+mit `regionDirty`), „Reset Sculpting“ und Größe, Auflösung oder Seed im Inspector (`dirty`), `TerrainSculpt::apply` aus MCP und Skripten, Mountain und Heightmap-Import.
+`TerrainTools.cpp` bleibt unberührt (Thema 174 arbeitet dort). `SceneSystems` läuft Terrain (Zeile 113) vor Foliage (Zeile 143), der Layer wird im selben Tick neu gestreut.
+
+Der Haken sitzt **im** Tor: der Material-Abgleich am Anfang des Ticks (läuft ungated) und ein Tick ohne Änderung streuen nicht neu (Negativkontrolle im Test).
+
+**Kosten, bewusst nicht entschärft:** ein gehaltener Pinsel baut jeden Frame um und streut deshalb jeden Frame neu. Das wächst mit der Instanzzahl des Layers (grob: 6,5k Pflanzen
+unter 1 ms, 100k im zweistelligen Millisekundenbereich, 500k um 100 ms; nicht gemessen, geschätzt aus der Scatter-Schleife). Der Nachfolger ist eine Entprellung wie
+`g_pendingTerrainColliders` im selben File (neu streuen, wenn der Boden einen Tick ruhig war). Ebenso streuen Inspector-Änderungen neu, die `dirty` setzen, ohne die Höhen zu ändern
+(UV-Kachelung, Tessellation, LOD-Abstand): dasselbe Ergebnis, nur die Kosten.
+
+### 12.3 Prüfung
+
+- `he_tests`: vier neue Fälle in `test_foliage.cpp` (Sculpt-Strich, Reset Sculpting, neue Größe, Negativkontrolle für Material-Wechsel und Leerlauf-Tick), dazu ein Quelltext-Guard
+  in `test_foliage_cluster.cpp` für das GL-Tor (jeder Zweig, der einen Batch ins eingebaute Instanzprogramm schickt, nennt das Material-Programm in seiner Bedingung; beide Material-Zweige
+  schleifen über die Instanzen). **Rot ohne Fix gezeigt:** ohne den Haken fallen die drei Verhaltensfälle (acht Prüfungen), die Negativkontrolle bleibt grün; der Guard fällt gegen den
+  `HEAD`-Quelltext von `OpenGLRenderer.cpp` (vier Prüfungen). Voller `ctest` (Release, shaderc ON, `-j4 --timeout 1500`): 257 von 257 grün, 2 übersprungen (`runtime_size_app_*`), 291 s.
+- **GL headless** (Zeuge `HE_DUMP_FOLIAGETEST=2000 HE_DUMP_FOLIAGESIZE=100`, neu `HE_DUMP_FOLIAGEMAT=graph`: ein Graph-Material aus einer ConstColor, Kamera `CAMX=0 CAMY=25 CAMZ=60 PITCH=-20`;
+  die Kamera muss nach −Z auf das Feld schauen, sonst `visible=0`). Graph-Material, Forward und Deferred: `draws=1941` bzw. `1942` (vorher ein Draw je Batch), Pflanzen **magenta statt grau**,
+  `glGetError=0x0`, 0 Fehler im Log. Eingebautes Material: `draws=5` (Forward) und `6` (Deferred), **Roh-BMP bitgleich zum Vorher-Binary** (Stand 2a), Forward und Deferred. Metal mit demselben
+  Graph-Zeugen: `draws=1941`, mittlere Abweichung zu GL 0,051/255 (0,012 % der Bytes über 8, `HE_DUMP_SHADOW=0.1`).
+
+### 12.4 Offen
+
+- **Der Vorher-Lauf für das Graph-Material fehlt:** das Vorher-Binary kennt `HE_DUMP_FOLIAGEMAT` nicht. Dass der alte Weg grau gezeichnet hat, folgt aus dem Quelltext und aus dem Bild des
+  eingebauten Materials (weiß-grau, dieselben Würfel), nicht aus einem eigenen Bild.
+- F2 bis F10 aus 1.4 sind unverändert (F2 bis F4 sind für den Renderweg seit 2a erledigt, der Scatter selbst reagiert weiter nur auf `dirty`).
+- D3D11, D3D12 und Vulkan: Graph-Material je Instanz mit ihren Grenzen aus Abschnitt 3 (1024 Material-Slots), nicht angefasst (Windows-Gleis, 2f).
+- Entprellung des Neustreuens beim Pinsel (12.2).
