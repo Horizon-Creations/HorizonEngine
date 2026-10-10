@@ -248,6 +248,22 @@ die Thumbnails laufen auf eigenen Encodern, nur `PREVIEW`/`THUMB` treffen sie.
 - Gegen GL vergleichen; Dämmerung (`HE_DUMP_TOD=0.26`) für AO an gegen aus.
 - Messwerte und das volle Rezept stehen in `docs/graph-material-skyenv-ao-hardware-acceptance-2026-10-05.md`.
 
+**Material-Vorschau läuft in Echtzeit (Thema 176 Schritt 3):** Die Vorschau im Material-Editor
+bekommt jedes Frame die UI-Uhr als `timeSeconds` (`IRenderer::RenderMaterialPreview`, Metal und GL;
+D3D11/D3D12/Vulkan haben keinen Vorschau-Pfad) und zeichnet neu, solange der Shader die Uhr liest
+(`HE::matGlslUsesTime`: Time, Panner, Wind Sway, die Wasserwellen). Ohne `timeSeconds` (Default -1)
+bleibt sie das Standbild der Thumbnails: Time 0, kein Wind. Der Zeuge sind zwei Läufe, die sich
+unterscheiden müssen:
+- `HE_DUMP_PREVIEW=1 HE_PREVIEW_DUMP=/tmp/a.ppm HE_DUMP_PREVIEWTIME=1.0` und dasselbe mit `3.0`.
+- `HE_DUMP_PREVIEWMAT=Engine/Materials/Water.hasset` nimmt ein beliebiges Material statt
+  `HE_DUMP_MATERIALTEST` (`default` = metallic sin(Time), `wind` = Wind Sway auf WPO, dazu
+  `HE_DUMP_WINDSPEED=8`). Das Wasser braucht keinen `MATERIALTEST`.
+- Kontrollen: derselbe Zeitpunkt zweimal = byte-gleich (Rauschboden), `MATERIALTEST=chrome`
+  (liest keine Uhr) bei 1.0 und 3.0 = byte-gleich. Mit `HE_DUMP_WINDSPEED=0` ist auch das
+  Wind-Sway-Material zeitunabhängig.
+- Die PPMs schreibt das Backend (`HE_PREVIEW_DUMP`), `he_shot.py` reicht nur `HE_DUMP_*` durch:
+  `HE_CONFIG_DIR` (privat), `HE_COLLAB_OFFLINE=1` und `HE_PREVIEW_DUMP` in die Shell.
+
 **Live-Editor mit MCP-Clients:** `scripts/he_mcp_multiclient.py` setzt
 `HE_HIDDEN_WINDOW=1` selbst (per `setdefault`, ein `HE_HIDDEN_WINDOW=0` aus der
 Shell gewinnt). Wer den Editor für eigene MCP-Tests von Hand mit `HE_MCP=1`

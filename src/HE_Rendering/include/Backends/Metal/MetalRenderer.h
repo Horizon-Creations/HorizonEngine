@@ -102,7 +102,8 @@ public:
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
-	                            int shape = 0, const HE::UUID& meshId = HE::UUID{}) override;
+	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
+	                            float timeSeconds = -1.0f) override;
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t width, uint32_t height,
@@ -761,9 +762,12 @@ private:
 	// pipeline — the thumbnail path then falls back to m_meshPreviewPipeline.
 	// `meshId` (optional) draws that static mesh instead of the primitive, framed
 	// on its own bounds; an unresolvable mesh falls back to `shape`.
+	// `timeSeconds` < 0 = a frozen still (Time 0, no wind — thumbnails); >= 0 = the
+	// engine clock the Time input reads, plus the scene's wind (see IRenderer).
 	bool EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
 	                           float yaw, float pitch, float dist, int shape,
-	                           const HE::UUID& meshId = HE::UUID{});
+	                           const HE::UUID& meshId = HE::UUID{},
+	                           float timeSeconds = -1.0f);
 	// Bind every fragment texture/sampler slot the material lighting preamble pins
 	// outside the material-texture window: 5..15 (kMetalPreambleSamplerSlots) plus
 	// the cloud-shadow texture 16. `frameState` = this frame's GI/SSAO/reflection/

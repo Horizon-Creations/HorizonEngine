@@ -8769,6 +8769,8 @@ namespace
 		{ "Session Participants/",  "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Block Participant/",     "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Source Control Panel/",  "editor-collab", "Collaboration & Source Control", "Source control" },
+		// The reload question after a pull changed the open scene's file.
+		{ "Scene Changed/",         "editor-collab", "Collaboration & Source Control", "Scene changed on disk" },
 		// The bug reporter is neither collaboration nor source control: it
 		// attaches the engine log and files an issue, which is diagnostics.
 		{ "Report Issue/",          "editor-export", "Export & Diagnostics", "Report an issue" },

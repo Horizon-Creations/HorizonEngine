@@ -8689,7 +8689,8 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 // the Material Editor is showing. The caller owns FBO/viewport/clear and the
 // depth/blend/cull state; this only touches program, UBOs, textures and the VAO.
 bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
-                                                 float dist, int shape, const HE::UUID& meshId)
+                                                 float dist, int shape, const HE::UUID& meshId,
+                                                 float timeSeconds)
 {
 	// Resolve the material's node-graph program (built-in-PBR materials have none →
 	// nothing to draw). Reuses the same program cache + precompiled-variant path.
@@ -8774,10 +8775,18 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 
 	HE::MaterialShaderLibrary::Lighting lit{};
 	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
-	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
+	// Engine clock for the Time input. A live preview (the Material Editor) hands
+	// it in, a still (thumbnails) leaves it at 0 — and then must not pick up wind
+	// either, or a sway material's thumbnail would lean with whatever scene is open.
+	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
+	lit.sunDir[3] = timeSeconds >= 0.0f ? timeSeconds : 0.0f;
 	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	// Wind / Wind Sway nodes read the .w of sunColor / ambient / camPos. The three
+	// are spare in this block, so the wind rides in AFTER the studio values above
+	// (FillMaterialWind writes only those .w channels).
+	if (timeSeconds >= 0.0f) HE::FillMaterialWind(GetEnvironment(), lit);
 	// Studio sun as the single array light so heLitP() previews shade correctly.
 	lit.lightPos[0][3]   = 0.0f; // directional
 	lit.lightDir[0][0]   = -sd.x; lit.lightDir[0][1] = -sd.y; lit.lightDir[0][2] = -sd.z;
@@ -9044,7 +9053,7 @@ bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
 
 void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
                                            uint32_t size, float yaw, float pitch, float dist,
-                                           int shape, const HE::UUID& meshId)
+                                           int shape, const HE::UUID& meshId, float timeSeconds)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -9089,7 +9098,7 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
-	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape, meshId))
+	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape, meshId, timeSeconds))
 	{
 		glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
 		glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);

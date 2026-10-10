@@ -44,6 +44,20 @@ Landscape-Modus (Sculpting) — bleibt außerhalb dieses Plans.
   über `HAsset::Reader`/`CHUNK_SRC`, `saveToDisk` erhält alle anderen Chunks,
   `isDirty` via Undo-Index. **Dieses Muster ist die Blaupause für jeden neuen Tab.**
 
+**Ein Tab pro Asset (Thema 176, Schritt 4):** Jeder Weg, einen Asset-Tab zu öffnen
+(Doppelklick im Content Browser, „Open Function“/„Parent“ im Material-Editor, Go-to-Node
+und Go-to-Line aus der Konsole, fertiger Texture-Import, Wiederherstellen der Sitzung),
+läuft über `EditorTabs::openOrFocus` (`src/HE_Editor/EditorTabs.h`). Gesucht wird das
+**Asset**, nicht der String: gleiche normalisierte Schreibweise, dieselbe Datei auf der
+Platte (`equivalent`) oder derselbe Content-relative Pfad (die Panels laden darüber, daher
+sind der mitgelieferte `Engine/…`-Standard und der Projekt-Override ein Asset). Ein
+vorhandener Tab wird aktiviert und über `selectRequest` nach vorn geholt; ein Tab mit
+ausstehendem Schließen (`open == false`) bleibt erhalten. Umbenennen und Verschieben
+(Datei und Ordner, auch per Kollaboration und MCP) ziehen die Tabs über
+`EditorTabs::retarget` mit. Wer einen neuen Öffnen-Weg baut, ruft `openOrFocus` und
+schreibt kein eigenes `find_if` über `ctx.tabs`. Ein Doppelklick auf die gerade offene
+Szene holt den Szenen-Tab nach vorn, statt die Szene neu zu laden.
+
 **Schwachstelle:** Dispatch + Gating sind hartcodierte `if (isScriptAsset)`-Ketten.
 Vor dem dritten Tab lohnt eine kleine Registry (siehe Phase 0).
 
