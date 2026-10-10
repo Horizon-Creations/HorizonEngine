@@ -329,7 +329,7 @@ gemeinsamen Funktionen: `GeometryPass::execute` (Instanzliste des Laufs) und `Re
 `viewProj` die Cluster-Boxen, **ohne dass ein Backend davon weiß**.
 
 Was (B) trotzdem an Backend-Stellen kostet, alle einzeilig und mechanisch, Guard „Cluster überspringen“:
-1. **Bounds-Refine-Schleifen** (5 Backends; D3D11 `:6194-6199`, GL `:10651-10653`, die übrigen drei nachzulesen). Sie *überschreiben* heute `worldBounds` aus
+1. **Bounds-Refine-Schleifen** (5 Backends, **14 Stellen**, nicht fünf: Metal 5, Vulkan 5, GL 2, D3D11 1, D3D12 1, siehe 11.2; D3D11 `:6194-6199`, GL `:10651-10653`). Sie *überschreiben* heute `worldBounds` aus
    `mesh->localBounds.transformed(obj.transform)`; bei einem Cluster würde die Box auf **eine** Pflanze schrumpfen und der Bucket mit ihr verschwinden.
    Das ist die gefährlichste Falle des Entwurfs.
 2. **GI-Instanzbau** (6 Stellen: GL `:5703`, D3D11 `:3159`, D3D12 `:6740`, Vulkan `:9930`, Metal HW `:8246`, Metal SW `:8056`). Filter bisher nur
@@ -482,7 +482,9 @@ Fehlt (Teil 2c): eine Foliage-Szene (kein 100k-Benchmark; `test_culling.cpp:198`
 `Foliage`-Scope des Systems oder im Extract unter), eine Foliage-Option in `gen_reference_world.py` (sie erzeugt nur Mesh-Entities; `FoliageComponent` braucht ein `TerrainComponent` auf derselben Entity),
 und Zähler für Cluster/Instanzen/Aufklappen. Alle 100k-Ergebnisse auf Metal; GL über `HE_DUMP_*`-Läufe; D3D/Vulkan nur auf dem Windows-Gleis.
 
-**Stand Teil 2c (10.10.2026):** Scope `ExtractFoliage`, Zeuge `HE_DUMP_FOLIAGETEST=<N>`, `gen_reference_world.py --foliage`, `scripts/perf/foliage_ladder.sh` und `foliage_ladder_table.py` sind gebaut, die Basismessung 10k / 100k / 500k auf Metal (alles in Reichweite und rund 20 %) steht in `docs/perf-audit/foliage-baseline-2026-10-10.md`. Noch offen aus diesem Abschnitt: Zähler für Cluster/Instanzen/Aufklappen (gibt es erst mit 2a), 1 Mio. Instanzen in der Leiter, GL-Läufe.
+**Stand Teil 2c (10.10.2026):** Scope `ExtractFoliage`, Zeuge `HE_DUMP_FOLIAGETEST=<N>`, `gen_reference_world.py --foliage`, `scripts/perf/foliage_ladder.sh` und `foliage_ladder_table.py` sind gebaut, die Basismessung 10k / 100k / 500k auf Metal (alles in Reichweite und rund 20 %) steht in `docs/perf-audit/foliage-baseline-2026-10-10.md`. Noch offen aus diesem Abschnitt: Zähler für Cluster/Instanzen/Aufklappen (gibt es seit 2a, Abschnitt 11), 1 Mio. Instanzen in der Leiter, GL-Läufe.
+
+**Stand Teil 2a (10.10.2026):** Cluster-Pfad gebaut, geprüft auf Metal und GL, Befunde und Zahlen in Abschnitt 11.
 
 Messleiter (Vorschlag): 10k, 100k, 500k, 1 Mio. Instanzen, jeweils bei sichtbarem Anteil 100 % und 20 % (Kamera mitten drin, Kamera am Rand). Kennzahlen: `RenderExtractor::extract` p50, `FrustumCull`, Sortierung,
 `GeometryPass`, CPU/Frame p50, `draws`/`tris`, GPU-Zeit (`gpu_time_by_process.py`), RSS. Alles vor und nach 2a, mit `--no-counters` für FPS-Läufe (Memory *engine-profiler*). **Zielwerte** (nicht gemessen,
@@ -523,3 +525,120 @@ auf GL/D3D11/D3D12 tote Arbeit (zwei Läufe unabhängig, beide nur über die Abw
 5. GI-Ausschluss als neuer Standard für Foliage (7.5).
 6. Roadmap-Text „GPU-instanced foliage with wind“ nach 2e korrigieren (braucht die Bestätigung für den Deploy).
 7. Reihenfolge 2a/2b vor 174-Merge oder danach.
+
+
+## 11. Stand Teil 2a (Schritt 3, 10.10.2026)
+
+Zweig `claude/instanced-foliage-und-lod-impostor-fuer-b-ume-gras-felsen`, gebaut auf `08a8938b` (Merge von
+`origin/release/0.7.0`, damit sind die fünf roten Tests aus Schritt 2c behoben). Der Cluster-Pfad aus 6.3 und 7.1 bis
+7.3 steht auf Metal und GL, geprüft mit `he_tests` und mit Bildern. D3D11, D3D12 und Vulkan sind reiner Textpatch.
+
+### 11.1 Was gebaut ist
+
+| Baustein | Stelle |
+|---|---|
+| Store und Buckets: terrain-lokale Matrizen, 32-m-Raster, `shared_ptr`, Reihenfolge im Bucket = Erzeugungsreihenfolge | `HorizonScene/FoliageStore.h`, `FoliageSystem.cpp` |
+| Komponente: `store`, `revision`, `bucketSize`, `castsShadow`, `contributesAO`, `shadowDistance` (Laufzeitfelder, **nicht serialisiert**, Format unverändert); `cachedInstances` bleibt unverändert (Weltkoordinaten, Erzeugungsreihenfolge) | `Components/FoliageComponent.h` |
+| Cluster-Datenmodell: `RenderObject::instanceBlock` (+4 Byte), `RenderWorld::instanceBlocks`, `InstanceBlock` (`shared_ptr` auf den Store, Bereich, Elternmatrix, Art Identität/Verschiebung/allgemein) | `RenderObject.h`, `RenderWorld.h` |
+| Extraktion: ein Cluster je Bucket in Reichweite, Bounds aus den Mesh-Bounds, angeschnittene Buckets instanzweise | `FoliageExtract.cpp` (eigene Datei; in `RenderExtractor.cpp` ein Aufruf und ein Guard) |
+| Aufklappen und Cap: `GeometryPass`, `RenderSorter::batchDepthRuns`; Läufe über 65 536 Instanzen werden in mehrere Draws geschnitten | `RenderPass.cpp`, `RenderSorter.cpp`, `RenderConstants.h` (`kMaxInstancesPerDraw`) |
+| Bounds-Refine aller Backends über **eine** Funktion `RenderObject::refineWorldBounds` | 14 Stellen in 5 Backends |
+| Guards: sechs GI-Instanzbauten, Occlusion-Culler (Occluder-Auswahl), Kaskaden-Fit im Extraktor | siehe 11.2 |
+| Revisionszähler: bei jedem Neustreuen und jeder Einstellung, die die Extraktion liest | `FoliageSystem.cpp` |
+| Tests: 19 Fälle | `tests/test_foliage_cluster.cpp` |
+| Schalter: `HE_FOLIAGE_CLUSTERS=0` (ein Objekt je Instanz wie bisher), `=ordered` (Prüfmodus, 11.3), `HE_FOLIAGE_STATS=1` (Zähler im Log) | `FoliageExtract.cpp` |
+
+Das Layout des Scatters ist bit-gleich geblieben: `test_foliage_cluster.cpp` enthält eine Kopie des alten Generators und
+vergleicht jede Matrix. Die Instanzen werden beim Aufklappen mit der Weltmatrix des Terrains verrechnet, ein gedrehtes,
+skaliertes, verschobenes oder geparentetes Terrain trägt seine Pflanzen jetzt mit (F2, F3 und F4 aus 1.4 sind damit für
+den Renderweg erledigt; der Scatter selbst reagiert weiterhin nur auf `dirty`).
+
+### 11.2 Was der Plan anders sagte, und neue Funde
+
+1. **14 Refine-Stellen, nicht fünf.** Metal: `EncodeShadowMap`, `EnsureGIProbeGrid`, `EncodeSSAO`, Szene, G-Buffer.
+   Vulkan: Decal-Tiefe, `EncodeShadowMap`, `DrawScene`, `runGi`, `runSSAO`. GL: `EnsureGIProbeGrid`, `DrawScene`.
+   D3D11 und D3D12: `DrawScene`. Alle laufen jetzt über `RenderObject::refineWorldBounds`; ein Cluster behält die Bounds des
+   Extraktors. `test_foliage_cluster.cpp` liest die Backend-Quellen und scheitert an jeder handgeschriebenen Aktualisierung
+   und an jeder GI-Schleife, die Cluster nicht überspringt. Das fängt auch D3D und Vulkan, die hier nicht laufen.
+2. **Weitere Leser von `objects`, die der Plan nicht kannte.** Der TAA-Velocity-Pass jedes Backends zeichnet je sortiertem
+   Objekt einmal; Vulkan hat dazu den Decal-Tiefenpass und die SSR-Vorpass-Rückfallschleife. Ein Cluster würde dort nur seine
+   erste Pflanze zeichnen. Metal und GL klappen Cluster in der Velocity-Schleife auf (jede Pflanze statisch, Velocity = Kamerabewegung).
+   D3D11, D3D12 und Vulkan **überspringen** Cluster dort (Velocity), in der Decal-Tiefe und im SSR-Vorpass (Textpatch, Windows-Gleis).
+3. **TAA-Befund (alter Fehler, nicht neu).** Die Velocity-Historie ist je `entityId` geführt; alle Pflanzen einer Schicht tragen die
+   Id des Terrains und lasen dieselbe "vorige Pose". Der Cluster-Pfad ist dort richtig, nicht bitgleich: unter AA=3 weichen
+   4,3 % (Metal) und 3,7 % (GL) der Pixel ab (20 000 Pflanzen).
+4. **Der Kaskaden-Fit sah Foliage nie, ein Cluster hat gültige Bounds.** `fitDirectionalShadow` bildet die Szenenbox aus den
+   Objekt-Bounds; ohne Guard hätte jede Foliage-Szene ihre Schatten-Kaskaden verschoben. Cluster bleiben draußen (ein Test
+   vergleicht die Kaskadenmatrizen mit und ohne Cluster).
+5. **Der eingebaute Würfel hat keine Bounds.** `registerStaticMesh` berechnet sie nicht (`boundsMin == boundsMax == 0`, deshalb
+   verlangt `extractMeshes` `b.max != b.min`). Der Extraktor liest dann die Vertices (cooked oder lose), je Mesh einmal.
+6. **`cachedInstances` bleibt und der Speicher ist doppelt** (64 Byte je Instanz im Store zusätzlich), weil `test_foliage.cpp`,
+   `test_terrain_tools_ui.cpp` und die Anzeigen in `InspectorPanel`/`TerrainTools` es lesen und `TerrainTools` Thema 174 gehört.
+   Schritt 2d (Schichten) ersetzt es durch den Store.
+7. **`drawDistance` ist am Rand exakt.** Ein Bucket, den die Kreislinie schneidet, wird instanzweise gefiltert (derselbe Test auf
+   denselben Weltpositionen wie der alte Pfad) und als eigener Cluster über einen Zwischenvektor des Frames ausgegeben.
+   Deshalb ist die sichtbare Menge identisch; bei 100k Instanzen und `drawDistance` 100 m sind es 24 Randbuckets mit 15 529 Einzeltests je Frame (19 715 Instanzen sind in Reichweite).
+8. **`shadowDistance` ist bucket-genau:** ein Bucket wirft, solange irgendein Teil in Reichweite liegt. `giOccluder` ist **nicht**
+   gebaut. GI schließt Cluster auf allen Backends aus (Plan 7.5 Punkt 4), das verändert das Aussehen unter Baumkronen, wenn GI
+   an ist (Standard: aus). In keinem Zeugenlauf war GI an.
+9. **Picking, Rahmen-Auswahl, Marquee und Weltvorschau sehen einen Cluster als eine Pflanze** (`transform` = erste Instanz). Das
+   ist der Entwurf (fail-soft); wer Foliage per Klick auf die Pflanze anwählen will, braucht einen Entfaltungsweg in `ScenePick`.
+10. **`HE_DEPTH_INSTANCING` ist ein Schalter für D3D11, D3D12 und Vulkan** und hat auf Metal keine Wirkung. Der A/B auf diesem
+    Gerät ist `HE_MTL_INSTANCING=0`.
+
+### 11.3 Prüfung
+
+- **Build und Tests:** Release, `HE_ENABLE_SHADERC=ON`, `ctest -j4 --timeout 1500`: 257 von 257 grün (2 übersprungen: `runtime_size_app_*`).
+  Die fünf roten Tests aus 2c sind nach dem Merge von `release/0.7.0` grün. Mutationsprobe: ohne den Kaskaden-Guard, ohne den Cap-Schnitt,
+  ohne die Behandlung der angeschnittenen Buckets, ohne den Occluder-Guard und mit zu kleinen Cluster-Boxen scheitert je der passende Fall.
+- **Bilder**, Metal und OpenGL 4.1, `HE_DUMP_FOLIAGETEST` (`scripts/he_shot.py`-Kette, `HE_SKY_TIME=30`, AA aus, Wolken aus), jeweils gegen das Binary
+  vom Stand `08a8938b` (Deploy-Klon, rpaths auf `@loader_path`). Wiederholung des Vorher-Laufs und `HE_MTL_INSTANCING=0` sind bitgleich.
+
+| Fall | `HE_FOLIAGE_CLUSTERS=0` (neues Binary) | `=ordered` | Standard (Cluster) |
+|---|---|---|---|
+| Metal, Vorwärts, 100k alle in Reichweite | bitgleich | bitgleich | 751 Pixel (0,081 %) |
+| Metal, Deferred, 100k | bitgleich | bitgleich | 878 (0,095 %) |
+| Metal, 100k, `drawDistance` 100 m, Kamera mittendrin | bitgleich | bitgleich | 423 (0,046 %) |
+| Metal, 100k, tiefe Sonne (lange Schatten) | bitgleich | bitgleich | 579 (0,063 %) |
+| Metal, Mesh nicht im ContentManager (Rückfall auf den Würfel, Cluster ohne Bounds) | bitgleich | bitgleich | 571 (0,062 %) |
+| Metal, 500k alle in Reichweite (vorher über der Instanz-Cap) | bitgleich | bitgleich | 3 730 (0,405 %) |
+| GL, Vorwärts, 100k | bitgleich | bitgleich | 1 196 (0,130 %) |
+| GL, 100k, 100 m | bitgleich | bitgleich | 611 (0,066 %) |
+| GL, 100k, tiefe Sonne | bitgleich | bitgleich | 808 (0,088 %) |
+
+  **Der Standardpfad ist nicht pixelgleich, und das ist keine Fehlstelle der Geometrie.** Ohne Bloom, SSAO und Schatten sind es 35 einzelne
+  Pixel (0,004 %); Bloom verteilt sie auf rund 750. Es sind Schnittkanten, an denen zwei opake Flächen (Würfel an Würfel, Würfel am Boden) auf dieselbe
+  Tiefe fallen. Dort entscheidet die Zeichenreihenfolge im Batch: der alte Pfad sortiert jede Pflanze nach Abstand, der Cluster-Pfad zeichnet
+  Bucket für Bucket in Erzeugungsreihenfolge. `HE_FOLIAGE_CLUSTERS=ordered` zeichnet dieselben Instanzen in der Reihenfolge des alten Pfads (ein Cluster, nach
+  Abstand sortiert, ohne Culling) und ergibt in allen neun Fällen **dasselbe Bild wie vorher, Byte für Byte**. Damit sind Store, Aufklappen, Cap-Schnitt und die Tiefenpässe
+  (Schatten, SSAO) auf einem echten Gerät als genau belegt; was bleibt, ist die Reihenfolge. Das Culling der Bucket-Boxen deckt `test_foliage_cluster.cpp` ab
+  (keine Pflanze im Bild geht verloren), der Pruefmodus zeichnet ohne Culling.
+- **Compile:** Metal und GL kompiliert und gelaufen. `VulkanRenderer.cpp` ist mit `clang -fsyntax-only` gegen die MoltenVK-Header geprüft (Negativkontrolle mit
+  absichtlichem Tippfehler schlägt an). **D3D11 und D3D12 sind lokal nicht übersetzbar**; ihre Zeilen (zwei Refine-Stellen, zwei GI-Filter, zwei Velocity-Schleifen)
+  prüft nur der Windows-Job der CI.
+
+### 11.4 Messung (Metal, vorher gegen nachher, abwechselnd)
+
+Ausführlich in `docs/perf-audit/foliage-clusters-2026-10-10.md`. Vorher-Binary: Deploy-Klon von `08a8938b`. **Die Bedingungen waren schlecht** (Load 7 bis 14,5 durch fremde
+Compiler, Akkubetrieb, Bildschirm teils entsperrt, Stromsparmodus aus; die Basismessung lief gesperrt, im Stromsparmodus, bei Load 2 bis 3). Absolute Millisekunden sind deshalb
+nicht mit der Basismessung vergleichbar (gleiches Binary, zwei Durchgänge, Faktor 2); die Verhältnisse innerhalb der abwechselnden Paare sind es.
+
+| Fall | `Render` vorher gegen nachher (Median der Läufe, ms) | `ExtractFoliage` | `draws` | `objects` |
+|---|---|---|---|---|
+| 100 000, alle in Reichweite | 311 gegen 24 (13x); Pass 1: 246 gegen 12 (20x) | 6 bis 10 gegen 0,05 bis 0,08 | 3 gegen 3 | 100 004 gegen 173 |
+| 100 000, rund 20 % | 61 gegen 9,3 (6,6x); Pass 1: 25 gegen 3,7 (6,8x) | 3,1 bis 3,5 gegen 0,35 | 3 gegen 3 | 19 719 gegen 47 |
+| 500 000, rund 20 % | 414 gegen 28 (15x); Pass 1: 290 gegen 15 (19x) | 9,6 bis 17,5 gegen 1,5 bis 2,7 | 3 gegen 3 | 98 267 gegen 47 |
+| 500 000, alle in Reichweite | 3 190 gegen 105 (30x) | 103 bis 111 gegen 0,07 bis 0,11 | **139 794 gegen 5** | 500 004 gegen 173 |
+
+Abnahme 2a (3): der Foliage-Anteil am Extract hängt nicht mehr von der Gesamtzahl ab. Alle in Reichweite ist er bei 100k und 500k gleich (unter 0,1 ms, dieselben 169 Buckets), `test_foliage_cluster.cpp` prüft das
+auch ohne Gerät. **Mit begrenzter Sichtweite hängt er von den Pflanzen in den Randbuckets ab** (bei 100k 15 529 Einzeltests, 0,35 ms; bei 500k 76 781, 1,5 bis 2,7 ms), nicht von denen im Rest des Geländes. Das Plan-Ziel
+(100k, 20 % sichtbar, unter 0,5 ms) ist erreicht, bei 500k nicht. `triangles` steigt um 27 bis 56 % (ganze Buckets werden eingereicht), die GPU-Zeit nicht.
+
+### 11.5 Offen und Übergabe
+
+- **Windows-Gleis (D3D11, D3D12, Vulkan):** nur die Textpatches sind drin und werden von der CI übersetzt, nichts davon lief auf einem Gerät. Offen: Velocity (TAA), Decal-Tiefe und SSR-Vorpass (Vulkan) entfalten Cluster
+  noch nicht; die kumulativen Instanz-Ringe von D3D12 und Vulkan bleiben, der Cap-Schnitt verhindert nur, dass ein einzelner Batch den Ring sprengt.
+- **GI:** Cluster sind überall aus der GI-Instanzliste; ein `giOccluder`-Opt-in (begrenzt nach Anzahl) fehlt.
+- **Schritt 2b/2d:** `cachedInstances` und der Store doppelt im Speicher; Serialisierung der neuen Felder und die Schichten (`layers`) kommen mit 2d (`SceneSerializer.cpp` war ausdrücklich nicht Teil von 2a).
+- **LOD (3a):** der Randbucket-Weg ist die Vorlage für Bänder: eine Stufengrenze durch einen Bucket wird wie die Kreislinie instanzweise aufgeteilt.
+- **Picking:** ein Klick auf eine Pflanze trifft nur die erste je Bucket; ein Entfaltungsweg in `ScenePick` und `ViewportPick` fehlt.
