@@ -34,7 +34,7 @@ Entscheidungen dieses Plans (Begründung in den Abschnitten):
 | D5 | **Anker statt „die Kamera“:** `CellStreamer::update` bekommt eine Liste (Kamera, Spieler, Skript-Pins). Server ohne Kamera laden um ihre Spieler | 4.5 |
 | D6 | **Aufbau gestückelt:** Der Worker teilt die geparste Zelle in Gruppen kleiner Teilbäume, der Hauptthread baut Gruppen, solange das Budget reicht (statt einer ganzen Zelle) | 4.6 |
 | D7 | **Ein gemeinsamer Host (`CellRuntime`) für Spiel und Editor-Play** statt einer dritten Kopie der Zonen-Verdrahtung. Der Editor streamt nicht (er bearbeitet die ganze Szene), das Play schon | 8 |
-| D8 | **Zellen laden/entladen nur im Update-Teil des Frames**, nie innerhalb eines `RenderExtractor::FrameScope`. Dazu liefert Thema 164 einen Struktur-Zähler (`HorizonWorld::structureEpoch`), den Thema 162 lesen kann. **Ein** Zähler, nicht zwei | 7 |
+| D8 | **Zellen laden/entladen nur im Update-Teil des Frames**, nie innerhalb eines `RenderExtractor::FrameScope`. Dazu schlägt dieser Plan einen Struktur-Zähler vor (`HorizonWorld::structureEpoch`), den Thema 162 lesen kann; wer zuerst landet, baut ihn. **Ein** Zähler, nicht zwei | 7 |
 
 Nicht Teil: Terrain-Streaming, Foliage/Instancing (Thema 163), Streaming im Editor, Simulation
 entladener NPCs, vertikale Zellen, Asset-Eviction (Abschnitt 9).
@@ -261,6 +261,25 @@ Einstellung) erreicht ist. Jede Gruppe ist ein eigenes kleines Szenen-JSON, dess
   `GameApplication.cpp:2017`).
 - Eine Zelle gilt als geladen, sobald die letzte Gruppe steht; `isSettled` fragt darauf.
 
+**Offen, Schritt 2 klärt es als Erstes: wie eine Gruppe an die Zellwurzel kommt.** `rebuildHierarchy`
+(`SceneSerializer.cpp:1980`) verbindet nur Einträge, die in der `idMap` **desselben** Aufrufs stehen. Eine
+Gruppe kann die Zellwurzel (aus einem früheren Aufruf) deshalb nicht als `parent` benennen, und
+`createEntity` hängt jede neue Entity an die Weltwurzel. Zwei Wege:
+- **(a) `applyAdditiveJson` je Gruppe, danach die Spitzen umhängen:** die obersten Entities jeder Gruppe
+  werden aus den `children` der Weltwurzel genommen und an die Zellwurzel gehängt (dieselben zwei
+  Zeilen wie in `rebuildHierarchy`: `children.push_back`, `parent =`). Ob `reparentEntity` dabei die
+  lokalen Werte behält, ist nicht geprüft; die Zellwurzel steht auf `-origin`, die lokalen Positionen
+  der Spitzen sind absolut, ein Umhängen mit Weltwert-Erhalt wäre falsch.
+- **(b) `applyPrefabJson(world, scene, prefabParent = Zellwurzel, preserveIds = true)`** (`:2256`) hat beides schon:
+  das Elternteil und die UUIDs. Es verlangt genau **einen** Eintrag ohne Elternteil (`prefabRoot`). Das
+  passt, wenn eine Gruppe **ein** oberster Teilbaum ist (ein Haus, ein Cluster mit einer Spitze). Mehrere
+  Spitzen bräuchten je einen Aufruf, und ein Cluster aus mehreren Spitzen müsste im selben
+  Budgetschritt gebaut werden. Ein künstliches Zwischen-Root wäre falsch (es ändert die Hierarchie gegenüber
+  der Datei und damit den Merge). Zu klären: was `applyPrefabJson` über das Anlegen hinaus tut (Prefab-Bindungen,
+  `ensureEnvironmentLights` fehlt dort, `:2257–2380`).
+Entscheidung im Schritt, mit einem Test, der Hierarchie, Reihenfolge der Kinder und lokale Positionen gegen
+das ungestückelte Laden vergleicht.
+
 ### 4.7 Autorenschalter
 
 Ein Schalter je oberster Entity: *Streaming: Auto / Resident*. Auto = der Splitter entscheidet nach 4.4;
@@ -298,7 +317,10 @@ Eine Komponente, die nicht in der Tabelle 4.4 steht, macht ihren Teilbaum ohnehi
 **Gepflegt über entt-Signale** (`on_construct/on_update/on_destroy` von `EntityIdComponent`), nicht
 über die Aufrufer: die UUID wird an fünf Stellen direkt geschrieben, ohne `setEntityId`
 (`HorizonWorld.cpp:30, 402, 430`, `SceneSerializer.cpp:164, 2286`, `CollabController.cpp:2283`). Ein Index, der nur
-`createEntity` und `setEntityId` kennt, wäre still falsch.
+`createEntity` und `setEntityId` kennt, wäre still falsch. Ein Fallstrick bei den Signalen: `on_update`
+(`emplace_or_replace` auf eine vorhandene Komponente) feuert **nach** dem Schreiben und liefert nur den
+neuen Wert, die alte UUID ist dann weg. Der Index braucht deshalb eine Rückabbildung Entity → UUID, über die
+der alte Schlüssel gelöscht wird (oder die Schreiber rufen vorher `patch`/`replace` an einer Stelle auf).
 
 ### 5.2 Gründe gegen globale Verweise zu entladenen Entities
 
@@ -426,9 +448,23 @@ von 164. Das Editor-Play profitiert von beidem (D7).
 
 ## 8. Bauplan
 
-Die Titel der Schritte 2 und 4 in der Hive-Planung stimmen nicht mehr: „Laden/Entladen zur Laufzeit
-umsetzen“ ist Thema 153/5. **Vorschlag: Schritt 2 umbenennen** in „Laufzeit-Zellen für Entities ausbauen:
-stabile Identität, Anker, gestückelter Aufbau, gemeinsamer Host für Spiel und Play“.
+Der Titel von Schritt 2 in der Hive-Planung stimmt nicht mehr: „Laden/Entladen zur Laufzeit umsetzen“ ist
+Thema 153/5. **Vorschlag: Schritt 2 umbenennen** in „Laufzeit-Zellen für Entities ausbauen: stabile
+Identität, Anker, gestückelter Aufbau, gemeinsamer Host für Spiel und Play“. Schritt 4 (Verifikation) passt.
+
+**Schritte 2 und 3 sind zu groß für je eine Sitzung. Vorschlag für den Schnitt, nach dem, was „Dörfer“
+freischaltet (L1 + L2), zuerst:**
+
+| Teil | Inhalt | Warum an dieser Stelle |
+|---|---|---|
+| **2a Kern** | UUID-Index mit Rückabbildung (5.1); `preserveIds` auf dem Zellpfad samt Kollisionsprüfung (4.3); `prefabInstance` (und die dekorativen Komponenten) in der Klassentabelle (4.4); Manifest-Spalte `bodies` und Kopf (4.1, 4.2); der Lauf zu L7 vorab. Test: Prefab-Haus lädt, entlädt, lädt wieder mit denselben UUIDs und intakten Bindungen | ohne stabile Identität trägt nichts anderes; kleinster Eingriff mit der größten Wirkung |
+| **2b zweite Reihe** | Anker-Liste (4.5), gestückelter Aufbau (4.6, mit der Anhänge-Frage), `structureEpoch` (7.2, klein und unabhängig: kann jeder zuerst bauen, 162 oder 164), Zellansicht | macht das Streaming robust, schaltet aber keine neuen Inhalte frei |
+| **2c dritte Reihe** | `CellRuntime`/`ICellHost`, Streaming im Editor-Play | reines Umsortieren plus eine Produktentscheidung (Play); darf hinter 3a/3b rutschen, wenn die Warnung aus der Tabelle unten reicht |
+| **3a Physik und Ref-Hülle** | `addEntities`-Charge, `bodyCount`, `requeueJoints` beim Entladen, `setRegionHold` (6); Ref-Hülle im Splitter (5) | trägt die Sicherheit: nichts fällt durch den Boden, kein Gelenk geht verloren |
+| **3b Zustand und Skripte** | `CellState` (6.3), Skriptstart und -abbau pro Zelle, Gruppe `streaming` in der API (Pins, `isSettled`), `StreamingComponent`, Spieler als Anker auf dem Server | braucht 2a und 3a; erst jetzt dürfen NPCs in Zellen |
+
+Der Königin zur Entscheidung: ob 2c vor oder nach 3 kommt. Gegen 2c vor 3 spricht, dass Play ohne Zellen dann bis
+dahin eine **sichtbare Warnung** („Play zeigt nur die Basis“) braucht; die kostet eine Zeile und steht in 2a.
 
 ### Schritt 2: Identität, Anker, gestückelter Aufbau, Host
 
@@ -501,6 +537,10 @@ Position, ein Gelenk oder eine zerstörte Kiste verliert.
   `HorizonWorld.cpp`; der Rest des Codes wurde nicht auf Aufrufer durchgesehen).
 - Ob das Savegame eine Erweiterungsstelle für einen Abschnitt „Zellen“ hat (6.3).
 - Ob es ein vorhandenes Tag/Layer für den Autorenschalter gibt (4.7).
+- Der Skript-Abbau: `ICellHost` verspricht „Skripte starten/stoppen“. Zum Starten gibt es `startScriptsFor` →
+  `EntityHost::bindFor` (`GameApplication.cpp:2087`). Ein passendes Lösen im `EntityHost` wurde **nicht** gefunden/geprüft;
+  `UnloadZone` räumt nur `m_scriptInstances`, `unwatch` und `ScriptApi::destroy` ab (`:2065–2067`), das ist Abbau
+  der Instanzen, kein Lösen der HorizonCode-Entity-Klasse. Schritt 3b liest `EntityHost.h/.cpp` zuerst.
 - Dass jede der neuen Zelle-statisch-Komponenten (Audio, Partikel, Skelett, Animator, Prefab-Instanz) nach dem Laden
   sauber neu startet. Das ist als Test je Komponente geplant, nicht behauptet.
 - Die Jolt-Charge: nur die Existenz von `AddBodiesPrepare/Finalize` ist belegt (`BodyInterface.h:96, 121–127`
