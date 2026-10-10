@@ -1,0 +1,15 @@
+== base-1-r2  2026-10-10 13:33:03
+before:
+  uptime:      load averages: 2.04 2.92 5.63
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    1
+  gpu:         "Device Utilization %"=3
+  power:       Now drawing from 'Battery Power'
+  busy procs:  6.8% claude; 6.4% /Applications/CLion.app/Contents/MacOS/clion; 2.5% ugrep; 2.2% /usr/sbin/coreaudiod; 
+after (rc=0):
+  uptime:      load averages: 2.10 2.90 5.59
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    1
+  gpu:         "Device Utilization %"=30
+  power:       Now drawing from 'Battery Power'
+  busy procs:  14.3% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 12.4% /Applications/CLion.app/Contents/MacOS/clion; 5.9% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 5.8% /usr/sbin/coreaudiod; 

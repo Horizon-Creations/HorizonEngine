@@ -620,6 +620,9 @@ namespace
 	// one DrawCall with instanceTransforms automatically.
 	void extractFoliage(entt::registry& reg, RenderWorld& out)
 	{
+		// Its own scope: the walk over every cached instance (and the 280-byte
+		// RenderObject per one in range) used to hide inside RenderExtractor::extract.
+		HE_PROFILE_SCOPE_N("ExtractFoliage");
 		const HE::ActiveFilter active(reg);
 		for (auto [e, fol] : reg.view<FoliageComponent>().each())
 		{

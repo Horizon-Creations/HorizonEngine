@@ -79,6 +79,8 @@
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainGenerate.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
+#include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -6815,6 +6817,72 @@ void EditorApplication::dumpFrameHeadless()
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TEXBOMB witness landscape added "
 			"(mode %s, %zu graph textures, array mask %u, %zu hex grid(s))",
 			tb, gen.textures.size(), gen.textureArrayMask, grids);
+	}
+
+	// ── Foliage witness (HE_DUMP_FOLIAGETEST=<N>, Thema 163 Schritt 2c) ─────────
+	// A flat landscape with ONE foliage layer of N instances of a built-in mesh,
+	// so the cost of scattered vegetation (extract, cull, sort, batch, draw) has
+	// a repeatable subject and the picture before/after a rendering change can
+	// be compared. The instances are scattered here, synchronously, and the time
+	// FoliageSystem took goes into the log together with the count it really
+	// placed (the density is derived from N and the area, so it is N).
+	//   HE_DUMP_FOLIAGESIZE=<m>        terrain side, default 400 m, centred on 0,0,0
+	//   HE_DUMP_FOLIAGEDIST=<m>        drawDistance, default 1e6 (every instance
+	//                                  is in range; a small value is the "only a
+	//                                  part is in range" case)
+	//   HE_DUMP_FOLIAGEMESH=cube|sphere  default cube
+	//   HE_DUMP_FOLIAGESCALE=<min>,<max> instance scale, default 0.5,1.0
+	//   HE_DUMP_FOLIAGESEED=<n>        scatter seed, default 42
+	// The camera is the dump's own (HE_DUMP_CAMX/CAMY/CAMZ/PITCH/YAW); a view
+	// over the middle of the field is CAMX=0 CAMY=40 CAMZ=-120 PITCH=-20.
+	if (const char* ft = std::getenv("HE_DUMP_FOLIAGETEST"); ft && *ft && m_editorWorld)
+	{
+		auto envF = [](const char* k, float d)
+		{ const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : d; };
+		const long  want = std::max(1L, std::atol(ft));
+		const float side = std::max(10.0f, envF("HE_DUMP_FOLIAGESIZE", 400.0f));
+		const bool  sphere = [] { const char* m = std::getenv("HE_DUMP_FOLIAGEMESH");
+		                          return m && std::string_view(m) == "sphere"; }();
+		float scaleMin = 0.5f, scaleMax = 1.0f;
+		if (const char* sc = std::getenv("HE_DUMP_FOLIAGESCALE"); sc && *sc)
+		{
+			const char* comma = std::strchr(sc, ',');
+			scaleMin = static_cast<float>(std::atof(sc));
+			scaleMax = comma ? static_cast<float>(std::atof(comma + 1)) : scaleMin;
+		}
+
+		auto& reg  = m_editorWorld->registry();
+		auto  land = m_editorWorld->createEntity("FoliageTestField");
+		reg.emplace<TransformComponent>(land, TransformComponent{});
+		TerrainComponent ftc;
+		ftc.sizeX = ftc.sizeZ = side;
+		ftc.resolution  = 129;
+		ftc.heightScale = 0.0f;    // flat: terrainHeightAt is 0 everywhere
+		ftc.seed        = 0;
+		ftc.dirty       = true;
+		reg.emplace<TerrainComponent>(land, ftc);
+		FoliageComponent fol;
+		fol.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
+		// +0.5: the scatter takes int(area * density), and float rounding must
+		// not cost the last instance.
+		fol.density      = (static_cast<float>(want) + 0.5f) / (side * side);
+		fol.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
+		fol.minScale     = scaleMin;
+		fol.maxScale     = scaleMax;
+		fol.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
+		fol.dirty        = true;
+		reg.emplace<FoliageComponent>(land, fol);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const auto t0 = std::chrono::steady_clock::now();
+		FoliageSystem::update(*m_editorWorld);
+		const double scatterMs = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+		const FoliageComponent& placedFol = reg.get<FoliageComponent>(land);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGETEST witness field added "
+			"(%zu instances placed of %ld asked, %s, %.0f m square, scale %.2f-%.2f, "
+			"drawDistance %.0f, scatter %.1f ms)",
+			placedFol.cachedInstances.size(), want, sphere ? "sphere" : "cube", side,
+			placedFol.minScale, placedFol.maxScale, placedFol.drawDistance, scatterMs);
 	}
 
 	// ── Auto landscape material witness (HE_DUMP_AUTOLAND, Thema 158 Schritt 5) ─

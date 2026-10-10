@@ -1,0 +1,15 @@
+== base-500000-d100-r1  2026-10-10 13:35:55
+before:
+  uptime:      load averages: 2.81 2.89 5.11
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    1
+  gpu:         "Device Utilization %"=5
+  power:       Now drawing from 'Battery Power'
+  busy procs:  116.4% /Applications/CLion.app/Contents/MacOS/clion; 3.3% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 2.3% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 2.3% /Applications/Claude.app/Contents/MacOS/Claude; 
+after (rc=0):
+  uptime:      load averages: 2.25 2.74 4.97
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    1
+  gpu:         "Device Utilization %"=45
+  power:       Now drawing from 'Battery Power'
+  busy procs:  18.6% /Applications/CLion.app/Contents/MacOS/clion; 13.0% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 7.5% /usr/sbin/coreaudiod; 4.9% /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python; 

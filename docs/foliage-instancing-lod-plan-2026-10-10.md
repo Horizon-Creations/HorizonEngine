@@ -482,6 +482,8 @@ Fehlt (Teil 2c): eine Foliage-Szene (kein 100k-Benchmark; `test_culling.cpp:198`
 `Foliage`-Scope des Systems oder im Extract unter), eine Foliage-Option in `gen_reference_world.py` (sie erzeugt nur Mesh-Entities; `FoliageComponent` braucht ein `TerrainComponent` auf derselben Entity),
 und Zähler für Cluster/Instanzen/Aufklappen. Alle 100k-Ergebnisse auf Metal; GL über `HE_DUMP_*`-Läufe; D3D/Vulkan nur auf dem Windows-Gleis.
 
+**Stand Teil 2c (10.10.2026):** Scope `ExtractFoliage`, Zeuge `HE_DUMP_FOLIAGETEST=<N>`, `gen_reference_world.py --foliage`, `scripts/perf/foliage_ladder.sh` und `foliage_ladder_table.py` sind gebaut, die Basismessung 10k / 100k / 500k auf Metal (alles in Reichweite und rund 20 %) steht in `docs/perf-audit/foliage-baseline-2026-10-10.md`. Noch offen aus diesem Abschnitt: Zähler für Cluster/Instanzen/Aufklappen (gibt es erst mit 2a), 1 Mio. Instanzen in der Leiter, GL-Läufe.
+
 Messleiter (Vorschlag): 10k, 100k, 500k, 1 Mio. Instanzen, jeweils bei sichtbarem Anteil 100 % und 20 % (Kamera mitten drin, Kamera am Rand). Kennzahlen: `RenderExtractor::extract` p50, `FrustumCull`, Sortierung,
 `GeometryPass`, CPU/Frame p50, `draws`/`tris`, GPU-Zeit (`gpu_time_by_process.py`), RSS. Alles vor und nach 2a, mit `--no-counters` für FPS-Läufe (Memory *engine-profiler*). **Zielwerte** (nicht gemessen,
 nur Richtung): Extract-Kosten der Foliage unabhängig von der Gesamtzahl, 100k platziert mit 20 % sichtbar unter 0,5 ms; `draws` gleich Anzahl der Mesh-Läufe, nicht Instanzzahl.
