@@ -3,7 +3,8 @@
 Stand 10.10.2026, Zweig `claude/entities-pro-zelle-streamen-nur-die-umgebung-der-kamera-exis`,
 Basis `202e14f2` (= `origin/release/0.7.0`). Die Abschnitte 0 bis 11 sind der Bauplan aus Schritt 1
 (**nur Doku**, Zeilennummern gelten für `202e14f2`); **Abschnitt 12 hält fest, was Schritt 2a daraus
-gebaut hat und was dabei anders war, Abschnitt 13 dasselbe für Schritt 2b.** Bezug: `docs/world-streaming-baseline-2026-10-06.md` (Thema 153, §9.4, §10.5–10.7,
+gebaut hat und was dabei anders war, Abschnitt 13 dasselbe für Schritt 2b, Abschnitt 14 für 3a, Abschnitt 15 die Verifikation (gemessen und
+nicht gemessen).** Bezug: `docs/world-streaming-baseline-2026-10-06.md` (Thema 153, §9.4, §10.5–10.7,
 §11.4–11.5) und der Plan von Thema 162 (`docs/render-extractor-shadow-pass-plan.md`, liegt nur auf
 `origin/claude/render-extractor-und-schatten-pass-einmal-pro-frame-statt-me`, Commit `16947c08`,
 noch nicht auf `release/0.7.0`; hier nur zitiert, nicht übernommen).
@@ -507,7 +508,7 @@ Abnahme Schritt 3: wie die Tests; dazu ein Dorf (Prefab-Häuser, 50 NPCs mit Skr
 Wegpunkte als Resident), dessen Zellen mehrfach entladen und geladen werden, ohne dass ein NPC seine
 Position, ein Gelenk oder eine zerstörte Kiste verliert.
 
-### Schritt 4: Verifikation (nur Zielwerte, nichts gemessen)
+### Schritt 4: Verifikation (die Zielwerte aus Schritt 1; gemessen in Abschnitt 15)
 
 - Welt mit 100k+ Entities über viele Zellen, Messleiter wie 153 §11.3 (`scripts/perf/world_streaming_ladder.sh`,
   `ladder_table.py`), Bench `'Cell streaming bench*'` (braucht die geteilte Referenzwelt, Rezept im Test).
@@ -913,3 +914,100 @@ nicht zu sehen.
   Grün danach, nicht durch eine Mutation der einzelnen Zeilen.
 - CI pro Plattform: Windows, Linux, macOS (Lauf siehe Post im Thema). Dieser Schritt berührt keinen Backend-Code; die Physik ist Jolt und
   läuft in allen Läufen gleich.
+
+## 15. Schritt 5: Verifikation, was gemessen ist und was nicht (10.10.2026)
+
+Gemessen auf dem Mac (10 Kerne, 4 P und 6 E, macOS 27.0.1, Release, **Akku**, Stromsparmodus aus, thermisch nominal), Stand `9a2894c5`
+plus der Bench dieses Schritts. Rohzeilen: `docs/perf-audit/raw-cells/bench-164-step5.txt`. Auf dem Gerät lief fremde Arbeit: ein
+A/B-Editor von Thema 163 (~120 % CPU) und der Index von CLion (430 bis 520 % CPU) während der ersten Läufe. **Zahlen aus diesen Läufen sind
+unten als „unter Last“ gekennzeichnet**; die Vergleiche zwischen ganzer und gestreamter Welt stammen aus abwechselnden Läufen bei Last 2,5 bis
+3,0.
+
+### 15.1 Was gemessen wurde und wie
+
+Der Editor-Pfad der Messleiter (`scripts/perf/world_streaming_ladder.sh`) **streamt nicht**: der Editor bearbeitet die ganze Szene, Play
+streamt erst mit 2c (nicht in diesem Release). Der Zielwert („`RenderExtractor::extract` mit ~11k geladenen von 101k“) lässt sich dort nicht
+messen. Gemessen wurde deshalb im selben Prozess mit einem neuen Bench: `tests/test_world_scale.cpp`, „Cell streaming bench: extract on the
+whole world against the streamed cells around the camera“ (`doctest::skip`, läuft nicht in der CI), gestartet über
+`scripts/perf/cell_extract_bench.sh`.
+
+- **Welt:** die Referenzwelt der Messleiter, 101 070 Entities (100 000 Props in 1 000 Gruppen, 64 Punktlichter, Sky/Weather/Terrain), 8 000 m
+  Kantenlänge, Kamera wie die Leiter (0, 25, 90).
+- **Ganz:** `SceneSerializer::load`, `RenderExtractor::extract` 60-mal, jedes Mal ein voller Lauf (kein `FrameScope`), p50 der 60 Aufrufe.
+- **Gestreamt:** dieselbe Szene durch den **C++-Splitter dieses Themas** (`splitSceneIntoCells`: Version-2-Zellen mit Kopf, Klassentabelle,
+  Manifest-Spalte `bodies`, Ref-Hülle), 256 Zellen zu 512 m, 100 064 Entities in Zellen, 0 Zellen mit Ref-Cluster (die Welt hat keine
+  Verweise), Basis 6 Entities; der `CellStreamer` lädt die Zellen um die Kamera (Zellen werden mit ihren gespeicherten UUIDs in Scheiben
+  gebaut, 4-ms-Budget), dann dieselbe `extract`-Messung.
+- **RSS:** ein Prozess je Modus. Beim Streamen liest ein zweiter Lauf die vorab gesplitteten Dateien (`HE_CELL_BENCH_DIR`), damit der Prozess
+  den JSON-Baum der großen Szene nie hält. Im Lauf, der selbst splittet, sind es 1,8 GB (der Baum, nicht das Streaming).
+- **Lauf über die Karte:** 3 000 m auf der z-Achse bei 50 und bei 150 m/s, 60-Hz-Frames, die Kamera folgt der Uhr, Vorausschau 2 s. Gezählt
+  werden Frames, in denen eine Zelle des Manifests im Umkreis von 150 m der Kamera nicht gebaut ist („Boden fehlt“) oder die eigene Zelle fehlt.
+
+### 15.2 Ergebnis
+
+`RenderExtractor::extract`, p50 in ms (p90 in Klammern), Prozess-RSS in MB:
+
+| Welt | Entities geladen | Zellen | `extract` p50 | RSS (max resident set size) |
+|---|---|---|---|---|
+| ganz, 101 070 | 101 070 | – | **52,6 bis 57,4** (p90 58,8 bis 61,6), vier abwechselnde Läufe bei Last 2,5 bis 3,0, dazu 56,3 und 57,1 bei Last 3 | 621 |
+| ganz, 101 070, unter Last | 101 070 | – | 34,1 (p90 44,7) | 621 |
+| ganz, 10 170 (die 10k-Zeile) | 10 170 | – | 2,9 (p90 3,4); unter Last 2,4 | 92 |
+| gestreamt, Radius 768 m | 5 779 | 14 | 0,50 bis 1,50 (sieben Läufe, p90 0,5 bis 1,7) | 132 |
+| gestreamt, Radius 1 100 m | 9 908 | 24 | 2,4 bis 2,6 (p90 2,6 bis 3,0) | 146 bis 150 |
+| gestreamt, Radius 1 200 m | 12 363 | 30 | 3,4 (p90 4,1) | nicht vorab gesplittet gemessen |
+
+- **Zielwert erreicht.** Mit 9,9k bis 12,4k von 101k Entities geladen liegt `extract` bei 2,4 bis 3,4 ms, in der Größenordnung der 10k-Zeile
+  (2,4 bis 2,9 ms im selben Bench); die ganze 101k-Welt braucht im selben Bench 53 bis 57 ms. Das sind rund das 20- (bei 9,9k) bis 16-fache
+  (bei 12,4k). Die Kosten gehen mit der Zahl der **geladenen** Entities, nicht mit der Größe der Welt.
+- **Die Zahlen sind nicht die Zahlen von 153 §11.3.** Dort sind es 76,6 ms (101k) und 6,4 ms (10k) im Editor, mit Profiler, GPU-Thread und
+  Oberfläche. Der Bench misst nur den `extract`-Aufruf im Prozess ohne Fenster: 56 statt 76,6 ms bei 101k, 2,4 bis 2,9 statt 6,4 ms bei 10k.
+  Verglichen wird innerhalb des Benchs. Ein Lauf des echten Spiels mit `HE_PROFILE_CAPTURE` ist **nicht** Teil der Messung (siehe 15.4).
+- **Streuung:** das gestreamte p50 pendelt zwischen 0,5 und 1,5 ms für dieselbe Welt (zwei Häufungen, 0,5 bis 0,6 und 1,5; vermutlich
+  die Kernart, auf der der Hauptthread liegt, nicht belegt). Der ganze Lauf mit 101k war einmal (der erste, unter Last) 34 ms statt 56 ms; das
+  hat sich in sechs weiteren Läufen nicht wiederholt und ist unerklärt. Wer das Verhältnis zitiert, nimmt die abwechselnden Läufe.
+- **RSS und Assets getrennt:** das Streaming hält den Prozess bei **112 bis 150 MB** gegenüber **621 MB** mit ganzer Welt (101k) und
+  92 MB bei der ganzen 10k-Welt. Der Lauf über 3 000 m hebt die Spitze von 112 auf 126 MB (768 m) bzw. von 132 auf 139 bis 144 MB
+  (1 100 m) und lässt sie dann stehen: 24 bis 38 Zellen werden geladen und 24 bis 32 entladen, der Speicher wächst nicht mit der zurückgelegten
+  Strecke. **Assets sind hier nicht gemessen:** die Referenzwelt benutzt nur Würfel und Kugel (eingebaute Assets), es gibt keine Asset-
+  Zahl, die steigen könnte. Dass Assets nicht entladen werden (L9), bleibt eine Annahme aus dem Bauplan, kein Messwert; wächst der RSS
+  einer echten Welt beim Erkunden, kommt er von dort.
+
+### 15.3 Lauf über die Karte, Pop-in
+
+3 000 m, 60-Hz-Frames, Budget 4 ms:
+
+| Radius, Tempo | Frames | Zellen geladen/entladen | geladen (Zellen / Entities) | `update()` p50 / p99 / schlechtester | Boden fehlt (150 m) | eigene Zelle fehlt | failed |
+|---|---|---|---|---|---|---|---|
+| 768 m, 50 m/s | 3 600 | 24 / 24 | 16..18 / 6 589..7 445 | 0,016 / 0,12 / 4,8 ms | 0 | 0 | 0 |
+| 768 m, 150 m/s | 1 201 | 24 / 24 | 16..20 / 6 589..8 267 | 0,018 / 2,9 / 4,9 ms | 0 | 0 | 0 |
+| 1 100 m, 50 m/s | 3 597 | 36 / 32 | 26..32 / 10 738..13 226 | 0,022 / 1,1 / 9,4 ms | 0 | 0 | 0 |
+| 1 100 m, 150 m/s | 1 200 | 38 / 32 | 26..36 / 10 738..14 878 | 0,022 / 4,1 / 5,1 ms | 0 | 0 | 0 |
+
+- **Kein fehlender Boden und keine fehlende eigene Zelle** in 9 600 Frames, auch bei 150 m/s (540 km/h): die Vorausschau von 2 s trägt.
+- **Der Abnahmewert „schlechtester Hauptthread-Frame unter dem Budget plus der größten Gruppe (Ziel unter 8 ms)“ ist erreicht** bis auf einen
+  Frame: 4,8 bis 5,1 ms (reine Arbeit, Thread-CPU gleich Wanduhr) in drei Läufen. Der Lauf mit 9,4 ms hat **0,03 ms Thread-CPU**: der
+  Hauptthread wartete (macOS-27-Allokator, Lesson 181), das ist kein Aufbau. Ebenso der erste Lauf bei 768 m mit 23,3 ms und 0,55 ms CPU.
+- **Pop-in im Spiel, Metal** (`scripts/perf/make_cell_game_dir.py`, `HE_CAPTURE_FRAME`, Radius 1 100 m, Kamera 0, 25, 90): Bild 12 gegen
+  Bild 400, `docs/perf-audit/shots-cells/game-frame012.png` und `game-frame400.png`. **10 967 von 921 600 Pixeln unterscheiden sich
+  (1,2 %), alle in den Zeilen 196 bis 303, dem Horizontband mit den fernen Zellen; darunter ist das Bild bitgleich.** Die nahen Zellen
+  stehen also schon in Bild 12, die fernen (rund 1 km) kommen später: nächste zuerst, wie gebaut. Das ist ein Zeuge für **diese** Reihenfolge
+  an einem Startbild, kein Zeuge für das Überqueren einer Zellgrenze mit Kamerabewegung im Spiel (die Kamera steht; der Lauf über die Karte
+  oben ist der Zeuge für die Bewegung, aber ohne Bild).
+
+### 15.4 Nicht gemessen, nicht erreicht, Grenzen
+
+- **Editor-Leiter nicht neu gelaufen.** `world_streaming_ladder.sh` misst den Editor, und der streamt nicht (2c fehlt); er hat sich durch
+  Thema 164 nicht verändert. Die Zahlen von 153 §11.3 gelten weiter.
+- **Kein `HE_PROFILE_CAPTURE`-Lauf des Spiels mit gestreamter 101k-Welt** (die Zahl, die der Plan mit „p50 im Profiler“ meint). Das Spiel
+  läuft mit dieser Welt (`make_cell_game_dir.py`, Bilder oben), der Capture ist nicht gemacht; die Bench-Zahlen sind die Stellvertreter.
+- **Assets, Physik, Skripte nicht im Bild.** Die Referenzwelt hat keine Assets außer Würfel/Kugel, keine Bodies und keine Skripte. Die
+  Sicherheit der Physik (3 000 Bodies, Hold, Gelenke) steckt in den Tests von 3a, nicht in dieser Messung bei 100k. 3b (Zustand, Skripte pro
+  Zelle) und 2c (Play) sind nicht gebaut.
+- **GPU und Zeichnen:** `extract` ist die CPU-Seite. Wie viel das Zeichnen von 10k statt 101k Objekten spart, ist hier nicht gemessen
+  (153 §11.3: `Render` ist Renderer-Arbeit pro Entity).
+- **Last und Umgebung:** Akkubetrieb, Fremdlast in den ersten Läufen (oben). Eine zweite Messung auf einem ruhigen Gerät am Netz steht aus.
+- **Windows, Linux, D3D, Vulkan:** nicht gemessen; der Bench läuft in der CI nicht (`doctest::skip`). Die Plattform-CI läuft über die
+  Zweige (siehe Posts im Thema).
+- **Splitten kostet:** in-process 1,9 bis 5,4 s und rund 1,8 GB Spitze für 100k Entities (JSON-Baum der Szene plus Zell-JSON); der Editor geht
+  über CBOR und hat dieselbe Größenordnung. Das ist ein Editor-Vorgang, kein Laufzeitkostenpunkt, aber bei 1M Entities ein Thema.
+- **`OptimizeBroadPhase` nach einer Charge** (6.1) bleibt ungemessen (siehe 14).

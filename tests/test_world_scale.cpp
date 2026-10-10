@@ -14,6 +14,8 @@
 #include <HorizonScene/Components/NavAgentComponent.h>
 #include <HorizonScene/FloatingOrigin.h>
 #include <HorizonScene/CellStreamer.h>
+#include <HorizonScene/CellSplit.h>
+#include <HorizonScene/SceneJsonParse.h>
 #include <HorizonScene/CellPhysics.h>
 #include <HorizonScene/Components/JointComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
@@ -35,7 +37,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <set>
 #include <vector>
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -1697,6 +1703,260 @@ TEST_CASE("Cell streaming bench: whole reference world against base plus nearby 
 		        << world.registry().storage<entt::entity>().in_use() << " entities");
 		s.clear(world);
 	}
+}
+
+// A measurement, not a check (does not run in CI), Thema 164 step 5: what
+// RenderExtractor::extract costs on the reference world loaded whole, against the
+// same world split by HE::splitSceneIntoCells and streamed around the camera; on
+// the streamed world also a walk across the map at a given speed. One mode per
+// process, so that the peak resident size of the process belongs to one of them.
+//   python3 scripts/perf/gen_reference_world.py --count 100000 --extent 8000 --groups 1000 \
+//       --lights 64 --template docs/perf-audit/scenes/landscape_noclouds.hescene --out /tmp/ref.hescene
+//   HE_CELL_BENCH_WHOLE=/tmp/ref.hescene HE_CELL_BENCH_MODE=whole|streamed \
+//   [HE_CELL_BENCH_CELL=512] [HE_CELL_BENCH_LOAD=768] \
+//   [HE_CELL_BENCH_WALK=<metres>] [HE_CELL_BENCH_SPEED=<m/s>] [HE_CELL_BENCH_DIR=<keep dir>] \
+//       out/build/release/tests/he_tests --no-skip --test-case='Cell streaming bench: extract*'
+// Neither physics bodies nor assets are in the picture: the reference world has none of
+// its own (built-in cube and sphere only), so the cells' hooks are empty.
+TEST_CASE("Cell streaming bench: extract on the whole world against the streamed cells around the camera" * doctest::skip())
+{
+	using Clock = std::chrono::steady_clock;
+	const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+	const auto envNum = [](const char* key, double fallback)
+	{
+		const char* v = std::getenv(key);
+		return (v && *v) ? std::atof(v) : fallback;
+	};
+	const auto peakRssMb = []
+	{
+#if defined(_WIN32)
+		return 0.0;
+#else
+		rusage ru{};
+		getrusage(RUSAGE_SELF, &ru);
+#if defined(__APPLE__)
+		return static_cast<double>(ru.ru_maxrss) / (1024.0 * 1024.0);   // bytes there
+#else
+		return static_cast<double>(ru.ru_maxrss) / 1024.0;              // kilobytes there
+#endif
+#endif
+	};
+	const auto threadCpuMs = []
+	{
+#if defined(_WIN32)
+		return 0.0;
+#else
+		timespec ts{};
+		clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+		return static_cast<double>(ts.tv_sec) * 1e3 + static_cast<double>(ts.tv_nsec) * 1e-6;
+#endif
+	};
+
+	const char* wholeEnv = std::getenv("HE_CELL_BENCH_WHOLE");
+	REQUIRE_MESSAGE(wholeEnv, "set HE_CELL_BENCH_WHOLE and HE_CELL_BENCH_MODE=whole|streamed");
+	const std::string mode = std::getenv("HE_CELL_BENCH_MODE") ? std::getenv("HE_CELL_BENCH_MODE") : "streamed";
+	REQUIRE((mode == "whole" || mode == "streamed"));
+	// HE_CELL_BENCH_DIR keeps the split (Bench.hescene + Bench.cells/) for the next run, which then
+	// loads the base and streams the cells without reading or splitting the big scene: the process
+	// holds nothing but the streamed world, so its peak resident size is the streaming's.
+	const char* dirEnv = std::getenv("HE_CELL_BENCH_DIR");
+	const bool keep = dirEnv && *dirEnv;
+	const std::filesystem::path root = keep ? std::filesystem::path(dirEnv)
+	                                        : std::filesystem::temp_directory_path() / "he_cell_bench_extract";
+	const bool presplit = keep && mode == "streamed" && std::filesystem::exists(root / "Bench.hescene");
+
+	HorizonWorld world;
+	SceneSerializer ser;
+	HE::CellStreamer s;
+	HE::CellManifest m;
+	glm::dvec3 camera(0.0, 25.0, 90.0);   // the ladder's --cam
+
+	const auto settle = [&](const glm::dvec3& at, const glm::vec3& vel)
+	{
+		size_t frames = 0;
+		double worst = 0.0;
+		for (;;)
+		{
+			const Clock::time_point f0 = Clock::now();
+			s.update(world, at, vel, 4.0);
+			worst = std::max(worst, ms(Clock::now() - f0));
+			++frames;
+			if (s.stats().loaded > 0 && s.stats().inFlight == 0 && s.stats().ready == 0 && s.stats().building == 0) break;
+			std::this_thread::yield();
+		}
+		MESSAGE("settled in " << frames << " frames, worst update() " << worst << " ms, "
+		        << s.stats().loaded << " of " << m.cells.size() << " cells built");
+	};
+
+	const auto beginStreaming = [&]
+	{
+		s.begin(m, [&root](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
+		{
+			const auto file = root / path;
+			return [file](std::vector<uint8_t>& out)
+			{
+				std::ifstream in(file, std::ios::binary);
+				out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+				return !out.empty();
+			};
+		}, {});
+	};
+
+	if (mode == "whole")
+	{
+		const Clock::time_point t0 = Clock::now();
+		REQUIRE(ser.load(world, wholeEnv, SerializeFormat::JSON));
+		MESSAGE("whole: loaded in " << ms(Clock::now() - t0) << " ms");
+	}
+	else if (presplit)
+	{
+		const Clock::time_point t0 = Clock::now();
+		REQUIRE(ser.load(world, root / "Bench.hescene", SerializeFormat::JSON));
+		REQUIRE(HE::CellManifest::parse(world.cellManifestJson(), m));
+		MESSAGE("streamed: split from " << root.string() << ", " << m.cells.size() << " cells (cell " << m.cellSize
+		        << " m, load " << m.loadRadius << " m, unload " << m.unloadRadius << " m), base loaded in "
+		        << ms(Clock::now() - t0) << " ms, base " << world.registry().storage<entt::entity>().in_use()
+		        << " entities");
+		beginStreaming();
+		settle(camera, glm::vec3(0.0f));
+	}
+	else
+	{
+		std::ifstream in(wholeEnv, std::ios::binary);
+		const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		const nlohmann::json scene = HE::parseSceneText(text);
+		REQUIRE_FALSE(scene.is_discarded());
+		HE::CellSplitOptions opt;
+		opt.cellSize   = static_cast<float>(envNum("HE_CELL_BENCH_CELL", 512.0));
+		opt.loadRadius = static_cast<float>(envNum("HE_CELL_BENCH_LOAD", 0.0));
+		opt.dir        = "Bench.cells";
+		const Clock::time_point t0 = Clock::now();
+		const HE::CellSplitResult split = HE::splitSceneIntoCells(scene, opt);
+		REQUIRE_MESSAGE(split.error.empty(), split.error);
+		const Clock::time_point t1 = Clock::now();
+		REQUIRE(HE::CellManifest::parse(split.base["cells"].dump(), m));
+		he_test::removeAllQuiet(keep ? root / opt.dir : root);
+		std::filesystem::create_directories(root / opt.dir);
+		if (keep)
+		{
+			std::ofstream out(root / "Bench.hescene", std::ios::binary);
+			out << split.base.dump();
+			REQUIRE(out.good());
+		}
+		for (const HE::CellSplitResult::Cell& c : split.cells)
+		{
+			std::ofstream out(root / m.cellPath(c.x, c.z), std::ios::binary);
+			out << c.scene.dump();
+			REQUIRE(out.good());
+		}
+		const Clock::time_point t2 = Clock::now();
+		REQUIRE(ser.loadFromMemory(world, nlohmann::json::to_cbor(split.base)));
+		MESSAGE("streamed: split " << ms(t1 - t0) << " ms into " << split.cells.size() << " cells ("
+		        << split.moved << " entities moved, " << split.keptForRefs << " kept for refs, "
+		        << split.clusters << " clusters; cell " << m.cellSize << " m, load " << m.loadRadius
+		        << " m, unload " << m.unloadRadius << " m), written in " << ms(t2 - t1)
+		        << " ms, base loaded in " << ms(Clock::now() - t2) << " ms, base " << world.registry().storage<entt::entity>().in_use()
+		        << " entities");
+		beginStreaming();
+		settle(camera, glm::vec3(0.0f));
+	}
+	const size_t entities = world.registry().storage<entt::entity>().in_use();
+	MESSAGE(mode << ": " << entities << " entities in the world, peak RSS so far " << peakRssMb() << " MB");
+
+	// RenderExtractor::extract, a full walk every time (no FrameScope), the way the profiler's
+	// scope of that name is entered. The first call also propagates the transforms nobody has.
+	RenderExtractor ex;
+	configure(ex);
+	RenderWorld rw;
+	EditorCameraOverride cam;
+	const auto lookFrom = [&](const glm::dvec3& at)
+	{
+		const glm::vec3 eye(at);
+		cam.active   = true;
+		cam.position = eye;
+		cam.view     = glm::lookAt(eye, eye + glm::vec3(0.0f, -0.25f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	};
+	const auto measureExtract = [&](const std::string& label)
+	{
+		lookFrom(camera);
+		const Clock::time_point c0 = Clock::now();
+		ex.extract(world, rw, 16.0f / 9.0f, &cam);
+		const double cold = ms(Clock::now() - c0);
+		std::vector<double> t;
+		for (int i = 0; i < 60; ++i)
+		{
+			const Clock::time_point e0 = Clock::now();
+			ex.extract(world, rw, 16.0f / 9.0f, &cam);
+			t.push_back(ms(Clock::now() - e0));
+		}
+		std::sort(t.begin(), t.end());
+		MESSAGE("[" << label << "] extract p50 " << t[t.size() / 2] << " ms, p90 " << t[t.size() * 9 / 10]
+		        << " ms, min " << t.front() << " ms, max " << t.back() << " ms (first call " << cold
+		        << " ms), " << rw.objects.size() << " objects drawn of " << entities << " entities, peak RSS "
+		        << peakRssMb() << " MB");
+	};
+	measureExtract(mode);
+
+	const double walk = envNum("HE_CELL_BENCH_WALK", 0.0);
+	if (mode == "streamed" && walk > 0.0)
+	{
+		const double speed = envNum("HE_CELL_BENCH_SPEED", 50.0);
+		std::set<std::pair<int, int>> inManifest;
+		for (const auto& c : m.cells) inManifest.insert({ c.x, c.z });
+		camera = glm::dvec3(0.0, 25.0, -walk * 0.5);
+		settle(camera, glm::vec3(0.0f));
+		// 60 Hz frames, the camera moving by what the clock says it moved. A frame counts as "ground
+		// missing" when a cell of the manifest within 150 m of the camera is not built, "own cell
+		// missing" when the one it stands in is not.
+		const double groundRadius = 150.0;
+		size_t frames = 0, groundMissing = 0, ownMissing = 0, run = 0, longestRun = 0;
+		size_t minEntities = SIZE_MAX, maxEntities = 0, minCells = SIZE_MAX, maxCells = 0;
+		double worstUpdate = 0.0, worstCpu = 0.0, sumUpdate = 0.0;
+		std::vector<double> updates;
+		const size_t loadsBefore = s.stats().loadsDone, unloadsBefore = s.stats().unloads;
+		const Clock::time_point start = Clock::now();
+		Clock::time_point last = start;
+		while (camera.z < walk * 0.5)
+		{
+			const Clock::time_point f0 = Clock::now();
+			const double dt = std::chrono::duration<double>(f0 - last).count();
+			last = f0;
+			camera.z += speed * dt;
+			const double cpu0 = threadCpuMs();
+			s.update(world, camera, glm::vec3(0.0f, 0.0f, static_cast<float>(speed)), 4.0);
+			const double u = ms(Clock::now() - f0);
+			const double cpu = threadCpuMs() - cpu0;
+			updates.push_back(u);
+			sumUpdate += u;
+			if (u > worstUpdate) { worstUpdate = u; worstCpu = cpu; }
+			++frames;
+			bool ground = false;
+			for (const auto& c : m.cells)
+				if (!s.isLoaded(c.x, c.z) && m.distanceTo(camera, c.x, c.z) <= groundRadius) { ground = true; break; }
+			const int cx = HE::CellManifest::cellIndex(camera.x, m.cellSize), cz = HE::CellManifest::cellIndex(camera.z, m.cellSize);
+			if (inManifest.count({ cx, cz }) && !s.isLoaded(cx, cz)) ++ownMissing;
+			if (ground) { ++groundMissing; ++run; longestRun = std::max(longestRun, run); }
+			else run = 0;
+			const size_t n = world.registry().storage<entt::entity>().in_use();
+			minEntities = std::min(minEntities, n);
+			maxEntities = std::max(maxEntities, n);
+			minCells    = std::min(minCells, s.stats().loaded);
+			maxCells    = std::max(maxCells, s.stats().loaded);
+			while (Clock::now() - f0 < std::chrono::microseconds(16667)) std::this_thread::yield();
+		}
+		std::sort(updates.begin(), updates.end());
+		MESSAGE("walk " << walk << " m at " << speed << " m/s: " << frames << " frames in "
+		        << ms(Clock::now() - start) / 1000.0 << " s, " << s.stats().loadsDone - loadsBefore << " cells loaded and "
+		        << s.stats().unloads - unloadsBefore << " unloaded, loaded cells " << minCells << ".." << maxCells
+		        << ", entities " << minEntities << ".." << maxEntities << ", update() p50 " << updates[updates.size() / 2]
+		        << " ms p99 " << updates[updates.size() * 99 / 100] << " ms worst " << worstUpdate << " ms ("
+		        << worstCpu << " ms of thread CPU), ground within " << groundRadius << " m missing in " << groundMissing
+		        << " frames (longest run " << longestRun << " frames), own cell missing in " << ownMissing
+		        << " frames, failed " << s.stats().failed << ", peak RSS " << peakRssMb() << " MB");
+		measureExtract("streamed at the end of the walk");
+	}
+	if (mode == "streamed") s.clear(world);
+	if (!keep) he_test::removeAllQuiet(root);
 }
 
 // A measurement, not a check (does not run in CI): one physics step with a few

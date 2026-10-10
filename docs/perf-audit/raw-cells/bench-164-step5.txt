@@ -1,0 +1,40 @@
+Thema 164, Schritt 5: Rohzeilen des Benchs 'Cell streaming bench: extract*' (tests/test_world_scale.cpp),
+Mac mit 10 Kernen (4 P + 6 E), macOS 27.0.1, Release, Akku (kein Netz), kein Stromsparmodus, thermisch nominal.
+Szene: /tmp/ws_scenes/ref_100000_8000_0_0_0.hescene (101 070 Entities), Kamera 0,25,90, 60 extract-Aufrufe je Lauf.
+"load" ist die Lastzahl (1 min) vor dem Lauf; Fremdlast steht dabei.
+
+[ganze Welt, 101 070 Entities; ein Prozess je Lauf]
+load 10,4 (Editor von Thema 163 ~120 % CPU, CLion-Index): extract p50 34,05 ms, p90 44,68, min 26,52, max 48,54; erster Aufruf 73,1; RSS-Spitze 591,5 MB (max resident set size 620,6 MB)
+load  3,4 (ruhig):  p50 56,32  p90 59,62  min 36,83  max 61,24  erster Aufruf 94,4
+load  3,2 (ruhig):  p50 57,07  p90 61,62  min 43,41  max 71,59  erster Aufruf 77,1
+load  2,6 (ruhig, Runde 1 von 4): p50 52,58  p90 58,84  erster Aufruf 61,4
+load  2,5 (ruhig, Runde 2 von 4): p50 56,22  p90 60,30  erster Aufruf 56,6
+load  2,5 (ruhig, Runde 3 von 4): p50 57,37  p90 61,01  erster Aufruf 76,7
+load  3,0 (ruhig, Runde 4 von 4): p50 56,45  p90 59,45  erster Aufruf 80,0
+Laden der ganzen Szene: 1 420 ms.
+
+[ganze Welt, 10 170 Entities]
+Lauf ohne Fremdlast-Notiz (load ~10): p50 2,41  p90 3,51  RSS-Spitze 87,3 MB
+load 3,1 (ruhig): p50 2,89  p90 3,38  min 1,30  max 4,44  erster Aufruf 9,1; max resident set size 91,8 MB
+
+[gesplittet und gestreamt, 256 Zellen zu 512 m, 100 064 Entities in Zellen, Basis 6 Entities, 0 Ref-Huellen, 0 Cluster]
+Split 1,9 bis 5,4 s im Prozess (C++-Splitter), Dateien schreiben 1,3 bis 3,2 s, Basis laden 4 bis 10 ms.
+Lade-Radius 768 m (14 Zellen, 5 779 Entities):  p50 1,23 (load 8,3), 0,50 (load 7,2), 0,51 (load 6,9), 1,50 / 0,63 / 0,81 / 1,49 (load 2,5 bis 3,0, vier Runden) ms; p90 0,53 bis 1,74
+Lade-Radius 1100 m (24 Zellen, 9 908 Entities): p50 2,53 / 2,57 / 2,37 ms, p90 2,6 bis 3,0
+Lade-Radius 1200 m (30 Zellen, 12 363 Entities): p50 3,38 ms, p90 4,07
+RSS nur des Streamings (Zellen vorab gesplittet, der Prozess liest nie die grosse Szene):
+  768 m:  111,6 MB nach dem Einschwingen, Spitze 125,9 MB nach 3 000 m (50 m/s), max resident set size 132,0 MB
+  1100 m: 132,2 MB nach dem Einschwingen, Spitze 139,0 MB nach 3 000 m (50 m/s) bzw. 141,6 MB (150 m/s), max resident set size 145,8 / 150,4 MB
+RSS im selben Prozess, der auch splittet: 1 770 bis 1 797 MB (das ist der JSON-Baum der Szene, nicht das Streaming).
+
+[Lauf quer ueber die Karte, 3 000 m, Kamera folgt der Uhr, 60-Hz-Frames, Budget 4 ms, Vorausschau 2 s]
+768 m, 50 m/s (mit Split im Prozess): 3 562 Frames, 24 Zellen geladen und 24 entladen, geladen 16..18, Entities 6 589..7 445, update() p50 0,016 ms, p99 0,77, schlechtester 23,3 ms (0,55 ms Thread-CPU: der Hauptthread wartete), Boden innerhalb 150 m fehlt in 0 Frames, eigene Zelle fehlt in 0 Frames, failed 0
+768 m, 50 m/s (vorab gesplittet): 3 600 Frames, 24/24, 16..18, 6 589..7 445, p50 0,016, p99 0,12, schlechtester 4,84 ms (4,83 ms CPU), 0, 0, failed 0
+1100 m, 50 m/s: 3 597 Frames, 36 geladen / 32 entladen, 26..32 Zellen, 10 738..13 226 Entities, p50 0,022, p99 1,14, schlechtester 9,45 ms (0,03 ms CPU: gewartet), 0, 0, failed 0
+1100 m, 150 m/s: 1 200 Frames, 38/32, 26..36, 10 738..14 878, p50 0,022, p99 4,07, schlechtester 5,09 ms (5,07 ms CPU), 0, 0, failed 0
+768 m, 150 m/s: 1 201 Frames, 24/24, 16..20, 6 589..8 267, p50 0,018, p99 2,91, schlechtester 4,88 ms (4,87 ms CPU), 0, 0, failed 0
+extract am Ende des Laufs: 768 m 1,69 / 1,70 ms (6 567 Objekte), 1100 m 3,27 / 3,41 ms (12 323 bzw. 13 144 Objekte)
+
+[Spiel, Metal, scripts/perf/make_cell_game_dir.py + HE_CAPTURE_FRAME, Lade-Radius 1100 m]
+Frame 12 gegen Frame 400 (1280x720): 10 967 von 921 600 Pixeln unterscheiden sich (1,2 %), alle in den Zeilen 196 bis 303 (dem Horizontband);
+darunter ist das Bild bitgleich. Bilder: docs/perf-audit/shots-cells/game-frame012.png, game-frame400.png
