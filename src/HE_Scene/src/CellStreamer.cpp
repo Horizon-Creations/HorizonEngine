@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <iterator>
+#include <limits>
 
 using json = nlohmann::json;
 
@@ -88,13 +89,62 @@ double CellManifest::distanceTo(const glm::dvec3& p, int x, int z) const
 	return squareDistance(p, x, z, static_cast<double>(cellSize));
 }
 
+namespace
+{
+// An anchor as the streamer measures with it: where it is, where it will be, and
+// the factor its distances are divided by.
+struct AnchorReach
+{
+	glm::dvec3 here, ahead;
+	double     scale;
+};
+
+std::vector<AnchorReach> reachesOf(const std::vector<CellAnchor>& anchors, float lookaheadSec)
+{
+	std::vector<AnchorReach> out;
+	out.reserve(anchors.size());
+	for (const CellAnchor& a : anchors)
+	{
+		AnchorReach r;
+		r.here  = a.position;
+		r.ahead = a.position + glm::dvec3(a.velocity) * static_cast<double>(lookaheadSec);
+		r.scale = a.radiusScale > 0.0f ? static_cast<double>(a.radiusScale) : 1.0;
+		out.push_back(r);
+	}
+	return out;
+}
+
+// The distance to the cell's square from the nearest anchor, its radii taken as 1.
+double nearestReach(const std::vector<AnchorReach>& reaches, int x, int z, double size)
+{
+	double best = std::numeric_limits<double>::infinity();
+	for (const AnchorReach& r : reaches)
+		best = std::min(best, std::min(squareDistance(r.here, x, z, size), squareDistance(r.ahead, x, z, size))
+		                      / r.scale);
+	return best;
+}
+} // namespace
+
+double CellManifest::distanceTo(const std::vector<CellAnchor>& anchors, int x, int z) const
+{
+	return nearestReach(reachesOf(anchors, lookaheadSec), x, z, static_cast<double>(cellSize));
+}
+
 std::vector<CellManifest::View> CellManifest::around(const glm::dvec3& p, double range) const
+{
+	CellAnchor viewpoint;
+	viewpoint.position = p;
+	return around(std::vector<CellAnchor>{ viewpoint }, range);
+}
+
+std::vector<CellManifest::View> CellManifest::around(const std::vector<CellAnchor>& anchors, double range) const
 {
 	std::vector<View> out;
 	if (empty()) return out;
+	const std::vector<AnchorReach> reaches = reachesOf(anchors, lookaheadSec);
 	for (const Cell& c : cells)
 	{
-		const double d = distanceTo(p, c.x, c.z);
+		const double d = nearestReach(reaches, c.x, c.z, static_cast<double>(cellSize));
 		if (d > range) continue;
 		View v;
 		v.x        = c.x;
@@ -103,6 +153,8 @@ std::vector<CellManifest::View> CellManifest::around(const glm::dvec3& p, double
 		v.distance = d;
 		v.reach    = d <= loadRadius ? View::Reach::Load
 		           : d <= unloadRadius ? View::Reach::Keep : View::Reach::Out;
+		v.slicesEstimate = c.entities <= kDefaultCellSliceEntities ? 1u
+		                 : 1u + static_cast<uint32_t>((c.entities + kDefaultCellSliceEntities - 1) / kDefaultCellSliceEntities);
 		out.push_back(v);
 	}
 	std::sort(out.begin(), out.end(), [](const View& a, const View& b)
@@ -142,7 +194,13 @@ struct CellStreamer::Pending
 	int              x = 0, z = 0;
 	CancelToken      token = CancelToken::create();
 	std::atomic<int> state{ 0 };   // 0 running, 1 parsed, 2 failed
-	json             scene;
+	// Written by the worker before it sets state to 1, then the main thread's.
+	bool               preserveIds = false;   // the cell's head says its ids are stable
+	std::vector<json>  slices;                // see SceneSerializer::sliceForAdditiveLoad
+	// The main thread's, once the cell is being built.
+	size_t                    next = 0;            // slices built so far; > 0: the cell is under construction
+	entt::entity              root = entt::null;   // the cell's root, from the first slice on
+	std::vector<entt::entity> created;             // everything built so far
 };
 
 CellStreamer::CellStreamer() = default;
@@ -178,16 +236,42 @@ void CellStreamer::reset()
 
 void CellStreamer::clear(HorizonWorld& world)
 {
-	std::vector<Key> loaded;
+	std::vector<Key> loaded, building;
 	loaded.reserve(m_loaded.size());
 	for (const auto& [k, root] : m_loaded) loaded.push_back(k);
+	for (const auto& [k, p] : m_pending)
+		if (p->next > 0) building.push_back(k);
 	for (Key k : loaded) unloadCell(world, k);
+	for (Key k : building) abandonCell(world, k);
 	reset();
 }
 
 bool CellStreamer::isLoaded(int x, int z) const
 {
 	return m_loaded.count(key(x, z)) != 0;
+}
+
+bool CellStreamer::isBuilding(int x, int z) const
+{
+	const auto it = m_pending.find(key(x, z));
+	return it != m_pending.end() && it->second->next > 0;
+}
+
+bool CellStreamer::isSettled(const glm::dvec3& position, double radius) const
+{
+	if (!active()) return true;
+	const double size = m_manifest.cellSize;
+	const int    r    = static_cast<int>(std::ceil(radius / size)) + 1;
+	const int    cx   = CellManifest::cellIndex(position.x, m_manifest.cellSize);
+	const int    cz   = CellManifest::cellIndex(position.z, m_manifest.cellSize);
+	for (int x = cx - r; x <= cx + r; ++x)
+		for (int z = cz - r; z <= cz + r; ++z)
+		{
+			const Key k = key(x, z);
+			if (!m_index.count(k) || squareDistance(position, x, z, size) > radius) continue;
+			if (!m_loaded.count(k) && !m_failed.count(k)) return false;
+		}
+	return true;
 }
 
 void CellStreamer::unloadCell(HorizonWorld& world, Key k)
@@ -202,31 +286,69 @@ void CellStreamer::unloadCell(HorizonWorld& world, Key k)
 	++m_stats.unloads;
 }
 
+void CellStreamer::abandonCell(HorizonWorld& world, Key k)
+{
+	const auto it = m_pending.find(k);
+	if (it == m_pending.end()) return;
+	const std::shared_ptr<Pending> p = it->second;
+	m_pending.erase(it);
+	p->token.cancel();
+	for (size_t i = p->next; i < p->slices.size(); ++i) releaseOnWorker(std::move(p->slices[i]));
+	if (p->next == 0 || p->root == entt::null || !world.registry().valid(p->root)) return;
+	// Slices were built, so physics and asset streaming were told about them: the
+	// same teardown as for a built cell.
+	if (m_hooks.unloading) m_hooks.unloading(p->root);
+	world.destroyEntity(p->root);
+	++m_stats.abandoned;
+}
+
 void CellStreamer::update(HorizonWorld& world, const glm::dvec3& camera, const glm::vec3& velocity,
                           double budgetMs)
 {
+	CellAnchor cam;
+	cam.position = camera;
+	cam.velocity = velocity;
+	update(world, std::vector<Anchor>{ cam }, budgetMs);
+}
+
+void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchors, double budgetMs)
+{
 	if (!active()) return;
+	m_stats.anchors = anchors.size();
+	if (anchors.empty()) return;
 	using Clock = std::chrono::steady_clock;
 	const Clock::time_point start = Clock::now();
 	const double     size   = m_manifest.cellSize;
-	const glm::dvec3 ahead  = camera + glm::dvec3(velocity) * static_cast<double>(m_manifest.lookaheadSec);
-	const auto       nearer = [&](int x, int z)
-	{
-		return std::min(squareDistance(camera, x, z, size), squareDistance(ahead, x, z, size));
-	};
+	const std::vector<AnchorReach> reaches = reachesOf(anchors, m_manifest.lookaheadSec);
+	// The distance a cell counts at: from the anchor nearest to it, in the units of
+	// that anchor's radii (an anchor with radiusScale 2 is as far from a cell as one
+	// half the distance away).
+	const auto nearer = [&](int x, int z) { return nearestReach(reaches, x, z, size); };
 
 	// 0) Cells somebody else destroyed (world.clear() on a level change) are no
-	//    longer loaded; they come back like any other once wanted.
+	//    longer loaded, nor built in part; they come back like any other once wanted.
 	for (auto it = m_loaded.begin(); it != m_loaded.end();)
 		it = world.registry().valid(it->second) ? std::next(it) : m_loaded.erase(it);
-
-	// 1) Cells that should be there: within the load radius of the camera or of
-	//    where it is heading. Only the grid squares around both are looked at,
-	//    so a manifest of a hundred thousand cells costs what a few dozen do.
-	std::vector<std::pair<double, Key>> wanted;
-	const auto scan = [&](const glm::dvec3& p)
+	for (auto it = m_pending.begin(); it != m_pending.end();)
 	{
-		const int r  = static_cast<int>(std::ceil(m_manifest.loadRadius / size)) + 1;
+		const Pending& p = *it->second;
+		if (p.next > 0 && !world.registry().valid(p.root))
+		{
+			it->second->token.cancel();
+			for (size_t i = p.next; i < p.slices.size(); ++i) releaseOnWorker(std::move(it->second->slices[i]));
+			it = m_pending.erase(it);
+		}
+		else
+			++it;
+	}
+
+	// 1) Cells that should be there: within the load radius of an anchor or of where
+	//    it is heading. Only the grid squares around those are looked at, so a manifest
+	//    of a hundred thousand cells costs what a few dozen do.
+	std::vector<std::pair<double, Key>> wanted;
+	const auto scan = [&](const glm::dvec3& p, double scale)
+	{
+		const int r  = static_cast<int>(std::ceil(m_manifest.loadRadius * scale / size)) + 1;
 		const int cx = CellManifest::cellIndex(p.x, m_manifest.cellSize);
 		const int cz = CellManifest::cellIndex(p.z, m_manifest.cellSize);
 		for (int x = cx - r; x <= cx + r; ++x)
@@ -238,8 +360,11 @@ void CellStreamer::update(HorizonWorld& world, const glm::dvec3& camera, const g
 				if (d <= m_manifest.loadRadius) wanted.emplace_back(d, k);
 			}
 	};
-	scan(camera);
-	if (ahead != camera) scan(ahead);
+	for (const AnchorReach& a : reaches)
+	{
+		scan(a.here, a.scale);
+		if (a.ahead != a.here) scan(a.ahead, a.scale);
+	}
 	std::sort(wanted.begin(), wanted.end());
 	wanted.erase(std::unique(wanted.begin(), wanted.end(),
 	                         [](const auto& a, const auto& b) { return a.second == b.second; }),
@@ -267,7 +392,7 @@ void CellStreamer::update(HorizonWorld& world, const glm::dvec3& camera, const g
 		// The square the camera stands in is needed now, the rest is ahead of it.
 		desc.priority = d <= 0.0 ? JobPriority::High : JobPriority::Normal;
 		desc.cancel   = p->token;
-		globalPool().schedule([p, read = std::move(read)]
+		globalPool().schedule([p, read = std::move(read), sliceEntities = m_sliceEntities]
 		{
 			std::vector<uint8_t> bytes;
 			if (p->token.cancelled() || !read(bytes) || bytes.empty())
@@ -286,15 +411,20 @@ void CellStreamer::update(HorizonWorld& world, const glm::dvec3& camera, const g
 				p->state.store(2, std::memory_order_release);
 				return;
 			}
-			p->scene = std::move(scene);
+			// The head is read before the file is cut: a slice is a bare list of
+			// records. Cutting is the worker's work, the tree is in its hands anyway.
+			p->preserveIds = cellFormatVersionOf(scene) >= kCellFormatVersion;
+			p->slices      = SceneSerializer::sliceForAdditiveLoad(std::move(scene), sliceEntities);
 			p->state.store(1, std::memory_order_release);
 		}, std::move(desc));
 		m_pending[k] = std::move(p);
 	}
 
-	// 3) Reads the camera has turned away from are dropped (same hysteresis as
-	//    loaded cells), parsed ones are collected for building.
+	// 3) Reads every anchor has turned away from are dropped (same hysteresis as
+	//    loaded cells, and a cell half built goes the same way, with what was built of
+	//    it), parsed ones are collected for building.
 	std::vector<std::pair<double, Key>> ready;
+	std::vector<Key> turnedAway;
 	for (auto it = m_pending.begin(); it != m_pending.end();)
 	{
 		Pending& p = *it->second;
@@ -302,8 +432,15 @@ void CellStreamer::update(HorizonWorld& world, const glm::dvec3& camera, const g
 		const int    s = p.state.load(std::memory_order_acquire);
 		if (d > m_manifest.unloadRadius)
 		{
+			if (p.next > 0)
+			{
+				turnedAway.push_back(it->first);   // abandonCell takes it out of the map
+				++it;
+				continue;
+			}
 			p.token.cancel();
-			if (s == 1) releaseOnWorker(std::move(p.scene));
+			if (s == 1)
+				for (json& slice : p.slices) releaseOnWorker(std::move(slice));
 			++m_stats.cancelled;
 			it = m_pending.erase(it);
 			continue;
@@ -319,54 +456,82 @@ void CellStreamer::update(HorizonWorld& world, const glm::dvec3& camera, const g
 		if (s == 1) ready.emplace_back(d, it->first);
 		++it;
 	}
+	for (Key k : turnedAway) abandonCell(world, k);
 
-	// 4) Build parsed cells, nearest first: one always, more while time is left.
+	// 4) Build parsed cells, nearest first, slice by slice: one slice always, more
+	//    while time is left. A cell's slices go in order and a nearer cell is finished
+	//    before a farther one is started, so the budget runs out between slices and
+	//    the frame is over it by at most the largest slice.
 	std::sort(ready.begin(), ready.end());
 	SceneSerializer ser;
-	for (size_t i = 0; i < ready.size(); ++i)
+	bool builtOne = false;
+	const auto overBudget = [&]
 	{
-		if (i > 0 && std::chrono::duration<double, std::milli>(Clock::now() - start).count() >= budgetMs)
-			break;
+		return builtOne && std::chrono::duration<double, std::milli>(Clock::now() - start).count() >= budgetMs;
+	};
+	for (size_t i = 0; i < ready.size() && !overBudget(); ++i)
+	{
 		const Key k = ready[i].second;
-		std::shared_ptr<Pending> p = std::move(m_pending[k]);
-		m_pending.erase(k);
-		std::vector<entt::entity> created;
-		// A cell the C++ splitter wrote says so in its head, and its ids are then the
-		// scene's own ids: kept, so that what refers to them (a placed prefab's
-		// bindings above all) holds across an unload and a load. A cell without one
-		// gets the ids minted at creation, as before.
-		SceneSerializer::AdditiveOptions options;
-		options.preserveIds  = cellFormatVersionOf(p->scene) >= kCellFormatVersion;
-		options.idCollisions = &m_stats.idCollisions;
-		const bool ok = ser.loadAdditiveFromJson(world, p->scene, &created, options);
-		releaseOnWorker(std::move(p->scene));
-		entt::entity root = entt::null;
+		const std::shared_ptr<Pending> p = m_pending[k];
 		auto& reg = world.registry();
-		for (entt::entity e : created)
-			if (const auto* h = reg.try_get<HierarchyComponent>(e); h && h->parent == world.rootEntity())
-			{
-				root = e;
-				break;
-			}
-		if (!ok || root == entt::null)
+		while (p->next < p->slices.size() && !overBudget())
 		{
-			for (entt::entity e : created)
-				if (reg.valid(e) && reg.get<HierarchyComponent>(e).parent == world.rootEntity())
-					world.destroyEntity(e);
-			HE_LOG_WARN(World, "Cell streaming: cell %d,%d did not build", p->x, p->z);
-			m_failed[k] = true;
-			++m_stats.failed;
-			continue;
+			const bool first = p->next == 0;
+			std::vector<entt::entity> created;
+			// A cell the C++ splitter wrote says so in its head, and its ids are then the
+			// scene's own ids: kept, so that what refers to them (a placed prefab's
+			// bindings above all) holds across an unload and a load. A cell without one
+			// gets the ids minted at creation, as before.
+			SceneSerializer::AdditiveOptions options;
+			options.preserveIds  = p->preserveIds;
+			options.idCollisions = &m_stats.idCollisions;
+			// The later slices hang under the root the first one made.
+			options.attachTo     = first ? entt::null : p->root;
+			const bool ok = ser.loadAdditiveFromJson(world, p->slices[p->next], &created, options);
+			releaseOnWorker(std::move(p->slices[p->next]));
+			builtOne = true;
+			if (first)
+			{
+				entt::entity root = entt::null;
+				for (entt::entity e : created)
+					if (const auto* h = reg.try_get<HierarchyComponent>(e); h && h->parent == world.rootEntity())
+					{
+						root = e;
+						break;
+					}
+				if (!ok || root == entt::null)
+				{
+					for (entt::entity e : created)
+						if (reg.valid(e) && reg.get<HierarchyComponent>(e).parent == world.rootEntity())
+							world.destroyEntity(e);
+					HE_LOG_WARN(World, "Cell streaming: cell %d,%d did not build", p->x, p->z);
+					for (size_t s = 1; s < p->slices.size(); ++s) releaseOnWorker(std::move(p->slices[s]));
+					m_pending.erase(k);
+					m_failed[k] = true;
+					++m_stats.failed;
+					break;
+				}
+				// The file holds absolute positions; the world is relative to its origin.
+				reg.get_or_emplace<TransformComponent>(root).position = -glm::vec3(world.origin());
+				world.markHierarchyDirty();
+				p->root = root;
+			}
+			++p->next;
+			++m_stats.slicesDone;
+			m_stats.largestSlice = std::max(m_stats.largestSlice, created.size());
+			p->created.insert(p->created.end(), created.begin(), created.end());
+			if (m_hooks.loadedSlice) m_hooks.loadedSlice(p->root, created);
 		}
-		// The file holds absolute positions; the world is relative to its origin.
-		reg.get_or_emplace<TransformComponent>(root).position = -glm::vec3(world.origin());
-		world.markHierarchyDirty();
-		m_loaded[k] = root;
-		++m_stats.loadsDone;
-		if (m_hooks.loaded) m_hooks.loaded(root, created);
+		if (p->next > 0 && p->next == p->slices.size())
+		{
+			m_loaded[k] = p->root;
+			++m_stats.loadsDone;
+			m_pending.erase(k);
+			if (m_hooks.loaded) m_hooks.loaded(p->root, p->created);
+		}
 	}
 
-	// 5) Cells both the camera and its lookahead have left behind.
+	// 5) Cells every anchor and its lookahead have left behind.
 	std::vector<Key> gone;
 	for (const auto& [k, root] : m_loaded)
 	{
@@ -377,9 +542,14 @@ void CellStreamer::update(HorizonWorld& world, const glm::dvec3& camera, const g
 
 	m_stats.loaded   = m_loaded.size();
 	m_stats.ready    = 0;
+	m_stats.building = 0;
 	m_stats.inFlight = 0;
 	for (const auto& [k, p] : m_pending)
-		(p->state.load(std::memory_order_acquire) == 1 ? m_stats.ready : m_stats.inFlight)++;
+	{
+		if (p->next > 0)                                           ++m_stats.building;
+		else if (p->state.load(std::memory_order_acquire) == 1)    ++m_stats.ready;
+		else                                                       ++m_stats.inFlight;
+	}
 }
 
 } // namespace HE

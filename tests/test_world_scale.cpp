@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <thread>
 #include <nlohmann/json.hpp>
 #include <ContentManager/DefaultAssets.h>
@@ -29,6 +30,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <vector>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -661,7 +663,7 @@ void pumpCells(HE::CellStreamer& s, HorizonWorld& world, const glm::dvec3& cam, 
 	while (std::chrono::steady_clock::now() < until)
 	{
 		s.update(world, cam, vel, 100.0);
-		if (done() && s.stats().inFlight == 0 && s.stats().ready == 0) return;
+		if (done() && s.stats().inFlight == 0 && s.stats().ready == 0 && s.stats().building == 0) return;
 		std::this_thread::yield();
 	}
 }
@@ -886,6 +888,705 @@ TEST_CASE("Cell manifest: survives saving and loading the base scene, JSON and b
 	}
 }
 
+// ─── Cells in slices, several anchors, the structure epoch (Thema 164, 2b) ────
+
+namespace
+{
+// A cell as the C++ splitter writes one: the cell's root with `houses` subtrees below it,
+// each a house with `parts` meshes. Positions are absolute, in the square that starts at
+// x0. With `head` the "streaming" head of format version 2 is added, so that the streamer
+// keeps the ids; without it the cell loads with fresh ones, like one from the Python script.
+void writeHouses(const std::filesystem::path& file, int houses, int parts, float x0, bool head = true)
+{
+	HorizonWorld cell;
+	for (int h = 0; h < houses; ++h)
+	{
+		const Entity house = cell.createEntity("House " + std::to_string(h));
+		tf(cell, house).position = { x0 + 1.0f + static_cast<float>(h) * 0.5f, 0.0f, 50.0f };
+		tf(cell, house).rotation = { 0.0f, static_cast<float>(h * 7), 0.0f };
+		for (int p = 0; p < parts; ++p)
+		{
+			const Entity part = cell.createEntity("Part " + std::to_string(p));
+			cell.reparentEntity(part, house);
+			tf(cell, part).position = { static_cast<float>(p), 1.0f, 0.5f };
+			MeshComponent mc;
+			mc.meshAssetId = HE::kDefaultCubeMeshId;
+			cell.addComponent(part, mc);
+		}
+	}
+	std::filesystem::create_directories(file.parent_path());
+	SceneSerializer ser;
+	REQUIRE(ser.save(cell, file, SerializeFormat::JSON));
+	if (!head) return;
+	nlohmann::json j;
+	{
+		std::ifstream in(file);
+		j = nlohmann::json::parse(in);
+	}
+	j["streaming"] = { { "version", 2 } };
+	std::ofstream out(file, std::ios::trunc);
+	out << j.dump();
+}
+
+nlohmann::json readScene(const std::filesystem::path& file)
+{
+	std::ifstream in(file);
+	return nlohmann::json::parse(in);
+}
+
+HE::CellStreamer::Reader diskReader(const std::filesystem::path& root)
+{
+	return [root](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
+	{
+		const auto file = root / path;
+		if (!std::filesystem::exists(file)) return {};
+		return [file](std::vector<uint8_t>& out)
+		{
+			std::ifstream in(file, std::ios::binary);
+			out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+			return !out.empty();
+		};
+	};
+}
+
+HE::CellAnchor anchorAt(double x, float scale = 1.0f, double z = 50.0)
+{
+	HE::CellAnchor a;
+	a.position    = { x, 1.7, z };
+	a.radiusScale = scale;
+	return a;
+}
+
+// Updates until `done` (and nothing reading, parsed or half built) or twenty seconds.
+template <class Done>
+void pumpAnchors(HE::CellStreamer& s, HorizonWorld& world, const std::vector<HE::CellAnchor>& anchors,
+                 double budgetMs, Done done)
+{
+	const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+	while (std::chrono::steady_clock::now() < until)
+	{
+		s.update(world, anchors, budgetMs);
+		if (done() && s.stats().inFlight == 0 && s.stats().ready == 0 && s.stats().building == 0) return;
+		std::this_thread::yield();
+	}
+}
+
+size_t entityCount(HorizonWorld& world) { return world.registry().storage<entt::entity>().in_use(); }
+} // namespace
+
+TEST_CASE("HorizonWorld::structureEpoch: the set of entities, parents and sibling order move it; values do not")
+{
+	HorizonWorld w;
+	const uint64_t start = w.structureEpoch();
+	CHECK(start != 0);   // a cache that remembers 0 never matches by accident
+
+	uint64_t last = start;
+	const auto moved = [&]
+	{
+		const bool changed = w.structureEpoch() != last;
+		last = w.structureEpoch();
+		return changed;
+	};
+
+	const Entity a = w.createEntity("A");
+	CHECK(moved());
+	const Entity b = w.createEntity("B");
+	CHECK(moved());
+	REQUIRE(w.reparentEntity(b, a));
+	CHECK(moved());
+	REQUIRE(w.reparentEntity(b, a));   // already there: nothing happened
+	CHECK_FALSE(moved());
+	const Entity c = w.createEntity("C");
+	moved();
+	REQUIRE(w.reparentEntity(c, a));
+	moved();
+	CHECK(w.moveChild(c, -1));         // sibling order: C before B
+	CHECK(moved());
+	CHECK_FALSE(w.moveChild(c, -1));   // already first
+	CHECK_FALSE(moved());
+	CHECK(w.sortChildrenByName(a));    // B before C again
+	CHECK(moved());
+	CHECK_FALSE(w.sortChildrenByName(a));
+	CHECK_FALSE(moved());
+
+	// What it does not cover: values, and components of a live entity.
+	tf(w, a).position = { 1.0f, 2.0f, 3.0f };
+	MeshComponent mc;
+	mc.meshAssetId = HE::kDefaultCubeMeshId;
+	w.addComponent(b, mc);
+	w.renameEntity(b, "B2");
+	w.markHierarchyDirty();
+	w.setEntityId(b, HE::UUID::generate());
+	CHECK_FALSE(moved());
+
+	w.destroyEntity(b);
+	CHECK(moved());
+	// An additive load builds entities, so it moves it, and so does clear().
+	{
+		HorizonWorld src;
+		src.createEntity("X");
+		const auto file = std::filesystem::temp_directory_path() / "he_epoch_scene.hescene";
+		SceneSerializer ser;
+		REQUIRE(ser.save(src, file, SerializeFormat::JSON));
+		CHECK(ser.loadAdditive(w, file, SerializeFormat::JSON));
+		he_test::removeQuiet(file);
+		CHECK(moved());
+	}
+	w.clear();
+	CHECK(moved());
+}
+
+// MUTATION: in applyAdditiveJson, drop the `rootChildren.resize(kept)` that takes the entries
+// rebuildHierarchy re-parented out of the world root's list: this case, "Sliced load: the cell
+// built in slices is the cell built whole" and the half-built-cell case go red.
+TEST_CASE("SceneSerializer: an additive load leaves the world root listing only the load's tops")
+{
+	// createEntity lists every new entity under the world root, and the record links
+	// only re-pointed `parent`: every entity of a loaded cell stayed in the root's list as
+	// well. propagateTransforms walked it twice, and a floating-origin shift, which moves
+	// every child of the root, moved it twice (once by itself, once with its cell).
+	const auto root = std::filesystem::temp_directory_path() / "he_additive_root";
+	he_test::removeAllQuiet(root);
+	writeHouses(root / "a.hescene", 5, 3, 0.0f);
+
+	HorizonWorld world;
+	const Entity keep = world.createEntity("Already there");
+	(void)keep;
+	const auto rootKids = [&]() -> const std::vector<Entity>&
+	{
+		return world.registry().get<HierarchyComponent>(world.rootEntity()).children;
+	};
+	const size_t before = rootKids().size();
+	std::vector<Entity> created;
+	SceneSerializer ser;
+	REQUIRE(ser.loadAdditiveFromJson(world, readScene(root / "a.hescene"), &created));
+	CHECK(created.size() == 1u + 5u * 4u);
+	CHECK(rootKids().size() == before + 1);   // the cell's root, not its twenty-odd entities
+	for (const Entity e : rootKids())
+		CHECK(world.registry().get<HierarchyComponent>(e).parent == world.rootEntity());
+
+	// A second load, and then the same through destroying the first: no dead handles stay.
+	std::vector<Entity> second;
+	REQUIRE(ser.loadAdditiveFromJson(world, readScene(root / "a.hescene"), &second));
+	CHECK(rootKids().size() == before + 2);
+	Entity firstRoot = entt::null;
+	for (const Entity e : created)
+		if (world.registry().get<HierarchyComponent>(e).parent == world.rootEntity()) firstRoot = e;
+	REQUIRE((firstRoot != entt::null));
+	world.destroyEntity(firstRoot);
+	CHECK(rootKids().size() == before + 1);
+	for (const Entity e : rootKids()) CHECK(world.registry().valid(e));
+
+	// The shift: every mesh keeps its absolute position. The streamer gives the root of a
+	// cell the transform that puts it at -origin; this load did not go through it.
+	for (const Entity e : second)
+		if (world.registry().get<HierarchyComponent>(e).parent == world.rootEntity())
+			tf(world, e).position = -glm::vec3(world.origin());
+	HE::propagateTransforms(world);
+	std::vector<std::pair<Entity, glm::dvec3>> absolute;
+	for (auto [e, mc] : world.registry().view<MeshComponent>().each())
+		absolute.emplace_back(e, glm::dvec3(HE::worldPositionOf(world, e)) + world.origin());
+	REQUIRE(absolute.size() == 5u * 3u);   // the first cell is gone, the second is left
+	HE::shiftWorldOrigin(world, nullptr, glm::vec3(1000.0f, 0.0f, 0.0f));
+	HE::propagateTransforms(world);
+	for (const auto& [e, was] : absolute)
+	{
+		// Within a float's step at a kilometre (6e-5 m): a mesh moved twice is a kilometre off.
+		const glm::dvec3 now = glm::dvec3(HE::worldPositionOf(world, e)) + world.origin();
+		CHECK(std::fabs(now.x - was.x) < 1e-3);
+		CHECK(std::fabs(now.z - was.z) < 1e-3);
+		// And the matrix the renderer reads, not only the chain walk.
+		const glm::vec3 viaMatrix = glm::vec3(world.registry().get<TransformComponent>(e).worldMatrix[3]);
+		CHECK(std::fabs(double(viaMatrix.x) + world.origin().x - was.x) < 1e-3);
+	}
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("SceneSerializer::sliceForAdditiveLoad: whole subtrees, in order, or the cell as it was")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_slice_cut";
+	he_test::removeAllQuiet(root);
+	writeHouses(root / "c.hescene", 40, 9, 0.0f);   // 1 + 40 * 10 = 401 records
+	const nlohmann::json cell = readScene(root / "c.hescene");
+	REQUIRE(cell["entities"].size() == 401u);
+
+	// The order of the cell root's children, as the file has it.
+	std::vector<nlohmann::json> rootKids;
+	for (const auto& e : cell["entities"])
+		if (e["parent"].is_null()) rootKids = e["children"].get<std::vector<nlohmann::json>>();
+	REQUIRE(rootKids.size() == 40u);
+
+	std::vector<nlohmann::json> slices = SceneSerializer::sliceForAdditiveLoad(nlohmann::json(cell), 128);
+	// The root alone, then houses of ten records, twelve to a slice: 40 houses in four slices.
+	REQUIRE(slices.size() == 5u);
+	CHECK(slices[0]["entities"].size() == 1u);
+	size_t total = 0;
+	std::vector<nlohmann::json> topsInOrder;
+	for (size_t i = 0; i < slices.size(); ++i)
+	{
+		const auto& ents = slices[i]["entities"];
+		total += ents.size();
+		if (i > 0) CHECK(ents.size() <= 128u);
+		std::vector<nlohmann::json> inSlice;
+		for (const auto& e : ents) inSlice.push_back(e["uuid"]);
+		for (const auto& e : ents)
+		{
+			if (i == 0 || e["parent"] == slices[0]["entities"][0]["uuid"])
+			{
+				if (i > 0) topsInOrder.push_back(e["uuid"]);
+				continue;
+			}
+			// Never half a house: a part's parent is in its own slice.
+			CHECK(std::find(inSlice.begin(), inSlice.end(), e["parent"]) != inSlice.end());
+		}
+	}
+	CHECK(total == 401u);
+	CHECK(topsInOrder == rootKids);   // the sibling order survives the cut
+
+	// A cell that is no larger than a slice is not cut, and comes back unchanged.
+	std::vector<nlohmann::json> one = SceneSerializer::sliceForAdditiveLoad(nlohmann::json(cell), 401);
+	REQUIRE(one.size() == 1u);
+	CHECK(one[0] == cell);
+	CHECK(SceneSerializer::sliceForAdditiveLoad(nlohmann::json(cell), 0).size() == 1u);
+
+	// A subtree larger than a slice is not divided: it is a slice of its own.
+	writeHouses(root / "big.hescene", 3, 200, 0.0f);   // houses of 201
+	std::vector<nlohmann::json> big = SceneSerializer::sliceForAdditiveLoad(readScene(root / "big.hescene"), 128);
+	REQUIRE(big.size() == 4u);   // the root, then one slice per house
+	for (size_t i = 1; i < big.size(); ++i) CHECK(big[i]["entities"].size() == 201u);
+
+	// What the whole load would do differently from the slices is not cut: a record the
+	// root does not reach (the loader leaves it under the world root), a second root.
+	nlohmann::json orphan = cell;
+	nlohmann::json stray  = orphan["entities"][0];   // some part, or a house: any record will do
+	stray["uuid"][1]      = 0xDEADBEEFull;
+	orphan["entities"].push_back(stray);
+	CHECK(SceneSerializer::sliceForAdditiveLoad(std::move(orphan), 128).size() == 1u);
+	nlohmann::json twoRoots = cell;
+	nlohmann::json root2    = twoRoots["entities"][0];
+	root2["uuid"][1]        = 0xBADF00Dull;
+	root2["parent"]         = nullptr;
+	root2["children"]       = nlohmann::json::array();
+	twoRoots["entities"].push_back(root2);
+	CHECK(SceneSerializer::sliceForAdditiveLoad(std::move(twoRoots), 128).size() == 1u);
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("Sliced load: the cell built in slices is the cell built whole")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_slice_equal";
+	he_test::removeAllQuiet(root);
+	writeHouses(root / "c.hescene", 40, 9, 0.0f);
+	const nlohmann::json cell = readScene(root / "c.hescene");
+
+	SceneSerializer::AdditiveOptions keepIds;
+	keepIds.preserveIds = true;
+
+	HorizonWorld whole;
+	std::vector<Entity> wholeCreated;
+	REQUIRE(SceneSerializer().loadAdditiveFromJson(whole, cell, &wholeCreated, keepIds));
+
+	HorizonWorld cut;
+	std::vector<nlohmann::json> slices = SceneSerializer::sliceForAdditiveLoad(nlohmann::json(cell), 64);
+	REQUIRE(slices.size() > 2u);
+	Entity cellRoot = entt::null;
+	std::vector<Entity> cutCreated;
+	for (size_t i = 0; i < slices.size(); ++i)
+	{
+		SceneSerializer::AdditiveOptions o = keepIds;
+		o.attachTo = cellRoot;
+		std::vector<Entity> made;
+		REQUIRE(SceneSerializer().loadAdditiveFromJson(cut, slices[i], &made, o));
+		if (i == 0)
+		{
+			REQUIRE(made.size() == 1u);
+			cellRoot = made[0];
+		}
+		cutCreated.insert(cutCreated.end(), made.begin(), made.end());
+	}
+
+	CHECK(cutCreated.size() == wholeCreated.size());
+	CHECK(entityCount(cut) == entityCount(whole));
+	// The world root lists only the cell's root, both ways.
+	CHECK(cut.registry().get<HierarchyComponent>(cut.rootEntity()).children.size() == 1u);
+	CHECK(whole.registry().get<HierarchyComponent>(whole.rootEntity()).children.size() == 1u);
+
+	// Entity for entity, by id: name, parent, children in order, local transform.
+	size_t compared = 0;
+	bool   same     = true;
+	for (const Entity e : wholeCreated)
+	{
+		const HE::UUID id = whole.entityId(e);
+		const Entity   o  = cut.findByEntityId(id);
+		if (o == entt::null) { same = false; continue; }
+		++compared;
+		const auto& hw = whole.registry().get<HierarchyComponent>(e);
+		const auto& hc = cut.registry().get<HierarchyComponent>(o);
+		same = same && whole.registry().get<NameComponent>(e).name == cut.registry().get<NameComponent>(o).name;
+		same = same && (hw.parent == whole.rootEntity()) == (hc.parent == cut.rootEntity());
+		if (hw.parent != whole.rootEntity())
+			same = same && whole.entityId(hw.parent) == cut.entityId(hc.parent);
+		same = same && hw.children.size() == hc.children.size();
+		for (size_t i = 0; same && i < hw.children.size(); ++i)
+			same = same && whole.entityId(hw.children[i]) == cut.entityId(hc.children[i]);
+		// The cell's root has no transform (the streamer gives it one), the rest do.
+		const auto* tw = whole.registry().try_get<TransformComponent>(e);
+		const auto* tc = cut.registry().try_get<TransformComponent>(o);
+		same = same && (tw == nullptr) == (tc == nullptr);
+		if (tw && tc)
+			same = same && tw->position == tc->position && tw->rotation == tc->rotation && tw->scale == tc->scale;
+	}
+	CHECK(compared == wholeCreated.size());
+	CHECK(same);
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("CellStreamer: a cell is built in slices, one per update at no budget, and is loaded when the last is in")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_slices";
+	he_test::removeAllQuiet(root);
+	writeHouses(root / "W.cells" / "cell_0_0.hescene", 40, 9, 0.0f);   // 401 entities, houses of ten
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 0,
+		    "dir": "W.cells", "list": [[0,0,401]]})", m));
+
+	for (const size_t cap : { size_t(64), size_t(0) })
+	{
+		size_t sliceHooks = 0, loadedHooks = 0, inSlices = 0, inLoaded = 0;
+		HE::CellStreamer::Hooks hooks;
+		hooks.loadedSlice = [&](entt::entity, const std::vector<entt::entity>& created)
+		{
+			++sliceHooks;
+			inSlices += created.size();
+			CHECK_FALSE(created.empty());
+		};
+		hooks.loaded = [&](entt::entity, const std::vector<entt::entity>& created)
+		{
+			++loadedHooks;
+			inLoaded = created.size();
+			CHECK(sliceHooks > 0);   // after every slice, never before
+		};
+		HorizonWorld world;
+		HE::CellStreamer s;
+		s.setSliceEntities(cap);
+		s.begin(m, diskReader(root), hooks);
+
+		// Budget zero: each update builds exactly one slice (one is always built).
+		size_t maxPerUpdate = 0, updates = 0;
+		bool   sawBuilding = false, loadedWhileBuilding = false;
+		const std::vector<HE::CellAnchor> at = { anchorAt(50.0) };
+		const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+		while (!s.isLoaded(0, 0) && std::chrono::steady_clock::now() < until)
+		{
+			const size_t before = s.stats().slicesDone;
+			s.update(world, at, 0.0);
+			++updates;
+			maxPerUpdate = std::max(maxPerUpdate, s.stats().slicesDone - before);
+			if (s.isBuilding(0, 0))
+			{
+				sawBuilding = true;
+				loadedWhileBuilding = loadedWhileBuilding || s.isLoaded(0, 0) || loadedHooks > 0;
+			}
+			std::this_thread::yield();
+		}
+		REQUIRE(s.isLoaded(0, 0));
+		CHECK(maxPerUpdate <= 1u);
+		CHECK(loadedHooks == 1u);
+		CHECK(inLoaded == 401u);
+		CHECK(inSlices == 401u);
+		CHECK(entityCount(world) == 402u);   // the 401 and the world's root
+		CHECK(s.stats().failed == 0u);
+		CHECK(s.stats().loaded == 1u);
+		CHECK(s.stats().building == 0u);
+		if (cap == 64)
+		{
+			// The root alone, then houses of ten, six to a slice: 40 houses in seven.
+			CHECK(sawBuilding);
+			CHECK_FALSE(loadedWhileBuilding);
+			CHECK(sliceHooks == 8u);
+			CHECK(s.stats().slicesDone == 8u);
+			CHECK(s.stats().largestSlice == 60u);
+		}
+		else
+		{
+			// The control: with the slices off, one update builds the whole cell. The bound
+			// the sliced run keeps is the one this breaks.
+			CHECK(sliceHooks == 1u);
+			CHECK(s.stats().largestSlice == 401u);
+		}
+		s.clear(world);
+		CHECK(entityCount(world) == 1u);
+	}
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("CellStreamer: a sliced cell keeps its ids across an unload, a head-less one does not")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_slice_ids";
+	he_test::removeAllQuiet(root);
+	writeHouses(root / "W.cells" / "cell_0_0.hescene", 12, 5, 0.0f, /*head=*/true);   // 73 entities
+	writeHouses(root / "W.cells" / "cell_3_0.hescene", 12, 5, 300.0f, /*head=*/false);
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 0,
+		    "dir": "W.cells", "list": [[0,0,73],[3,0,73]]})", m));
+
+	HorizonWorld world;
+	HE::CellStreamer s;
+	s.setSliceEntities(20);
+	s.begin(m, diskReader(root), {});
+
+	const auto idsOf = [&](int cx)
+	{
+		std::vector<HE::UUID> ids;
+		for (auto [e, mc] : world.registry().view<MeshComponent>().each())
+		{
+			const double x = HE::worldPositionOf(world, e).x;
+			if (x >= cx * 100.0 && x < (cx + 1) * 100.0) ids.push_back(world.entityId(e));
+		}
+		std::sort(ids.begin(), ids.end(), [](const HE::UUID& a, const HE::UUID& b)
+		          { return a.hi != b.hi ? a.hi < b.hi : a.lo < b.lo; });
+		return ids;
+	};
+
+	std::vector<HE::CellAnchor> at = { anchorAt(50.0), anchorAt(350.0) };
+	pumpAnchors(s, world, at, 0.0, [&] { return s.isLoaded(0, 0) && s.isLoaded(3, 0); });
+	REQUIRE(s.isLoaded(0, 0));
+	REQUIRE(s.isLoaded(3, 0));
+	const std::vector<HE::UUID> withHead = idsOf(0), withoutHead = idsOf(3);
+	CHECK(withHead.size() == 60u);
+	CHECK(withoutHead.size() == 60u);
+
+	// Everybody leaves, both cells go; everybody comes back.
+	at = { anchorAt(5000.0) };
+	pumpAnchors(s, world, at, 100.0, [&] { return !s.isLoaded(0, 0) && !s.isLoaded(3, 0); });
+	REQUIRE_FALSE(s.isLoaded(0, 0));
+	CHECK(entityCount(world) == 1u);
+	at = { anchorAt(50.0), anchorAt(350.0) };
+	pumpAnchors(s, world, at, 0.0, [&] { return s.isLoaded(0, 0) && s.isLoaded(3, 0); });
+	REQUIRE(s.isLoaded(3, 0));
+	CHECK(idsOf(0) == withHead);        // the same entities, slice by slice
+	CHECK(idsOf(3) != withoutHead);     // version 1: fresh ids, as it always was
+	CHECK(s.stats().idCollisions == 0u);
+	s.clear(world);
+	he_test::removeAllQuiet(root);
+}
+
+// MUTATION: in nearestReach (CellStreamer.cpp), leave the loop after the first anchor, which is
+// what the streamer did before the list (only the first camera counted): this case, the sliced-ids
+// case and the viewpoints case go red.
+TEST_CASE("CellStreamer: several anchors, a cell is wanted by any and dropped only when every anchor is beyond")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_anchors";
+	he_test::removeAllQuiet(root);
+	for (int x = 0; x < 6; ++x)
+		writeCell(root / "W.cells" / ("cell_" + std::to_string(x) + "_0.hescene"),
+		          { { x * 100.0f + 40.0f, 0.0f, 50.0f }, { x * 100.0f + 50.0f, 0.0f, 50.0f },
+		            { x * 100.0f + 60.0f, 0.0f, 50.0f } });
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 2,
+		    "dir": "W.cells", "list": [[0,0,3],[1,0,3],[2,0,3],[3,0,3],[4,0,3],[5,0,3]]})", m));
+
+	HorizonWorld world;
+	HE::CellStreamer s;
+	s.begin(m, diskReader(root), {});
+	const auto loadedSet = [&]
+	{
+		std::string set;
+		for (int x = 0; x < 6; ++x) set += s.isLoaded(x, 0) ? char('0' + x) : '.';
+		return set;
+	};
+	const auto settle = [&](const std::vector<HE::CellAnchor>& anchors, const std::string& want)
+	{
+		pumpAnchors(s, world, anchors, 100.0, [&] { return loadedSet() == want; });
+		return loadedSet();
+	};
+
+	// Nobody to keep cells around: nothing is read, nothing built.
+	s.update(world, std::vector<HE::CellAnchor>{}, 100.0);
+	CHECK(s.stats().anchors == 0u);
+	CHECK(s.stats().inFlight == 0u);
+	CHECK(loadedSet() == "......");
+
+	// A in cell 0, B in cell 4: the cells around each, and nothing between.
+	CHECK(settle({ anchorAt(50.0), anchorAt(450.0) }, "01.345") == "01.345");
+	CHECK(s.stats().anchors == 2u);
+	// A leaves for good. B keeps what it holds, and what only A held goes.
+	CHECK(settle({ anchorAt(-1000.0), anchorAt(450.0) }, "...345") == "...345");
+	// B walks on to cell 2 and A is still away: 4 and 5 are 150 m and more behind B now.
+	CHECK(settle({ anchorAt(-1000.0), anchorAt(250.0) }, ".123..") == ".123..");
+	// A shows up beside cell 4 while B is away: B's cell 3 stays, held by A alone now.
+	CHECK(settle({ anchorAt(390.0), anchorAt(-1000.0) }, "..234.") == "..234.");
+	// The lookahead counts per anchor: A at cell 0 moving +x at 100 m/s is, in two seconds, at
+	// x = 250, so cells 2 and 3 are wanted as well as 0 and 1.
+	HE::CellAnchor runner = anchorAt(50.0);
+	runner.velocity = { 100.0f, 0.0f, 0.0f };
+	CHECK(settle({ runner, anchorAt(-1000.0) }, "0123..") == "0123..");
+
+	// Radius scale: an anchor that reaches three times as far loads cells three times as far out
+	// (cell 2 is 150 m from x = 50: 50 m in its units), and one that reaches half as far, half.
+	s.clear(world);
+	s.begin(m, diskReader(root), {});
+	CHECK(settle({ anchorAt(50.0, 3.0f) }, "012...") == "012...");
+	// Shrunk back to 1, the same anchor keeps cell 1 (50 m) but cell 2 (150 m) is beyond 120.
+	CHECK(settle({ anchorAt(50.0, 1.0f) }, "01....") == "01....");
+	s.clear(world);
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("CellStreamer: a cell half built when its anchor leaves is taken out again, bodies hook included")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_abandon";
+	he_test::removeAllQuiet(root);
+	writeHouses(root / "W.cells" / "cell_0_0.hescene", 40, 9, 0.0f);
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 0,
+		    "dir": "W.cells", "list": [[0,0,401]]})", m));
+
+	size_t sliceHooks = 0, loadedHooks = 0, unloadingHooks = 0;
+	HE::CellStreamer::Hooks hooks;
+	hooks.loadedSlice = [&](entt::entity, const std::vector<entt::entity>&) { ++sliceHooks; };
+	hooks.loaded      = [&](entt::entity, const std::vector<entt::entity>&) { ++loadedHooks; };
+	hooks.unloading   = [&](entt::entity) { ++unloadingHooks; };
+	HorizonWorld world;
+	HE::CellStreamer s;
+	s.setSliceEntities(64);
+	s.begin(m, diskReader(root), hooks);
+
+	const std::vector<HE::CellAnchor> near = { anchorAt(50.0) };
+	const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+	while (sliceHooks < 3 && std::chrono::steady_clock::now() < until)
+	{
+		s.update(world, near, 0.0);
+		std::this_thread::yield();
+	}
+	REQUIRE(sliceHooks >= 3u);
+	REQUIRE(s.isBuilding(0, 0));
+	CHECK_FALSE(s.isLoaded(0, 0));
+	CHECK(entityCount(world) > 1u);
+
+	// Away: the half cell is dropped as a loaded one would be.
+	s.update(world, std::vector<HE::CellAnchor>{ anchorAt(5000.0) }, 0.0);
+	CHECK_FALSE(s.isBuilding(0, 0));
+	CHECK_FALSE(s.isLoaded(0, 0));
+	CHECK(s.stats().abandoned == 1u);
+	CHECK(s.stats().building == 0u);
+	CHECK(unloadingHooks == 1u);   // the teardown a built cell gets (its bodies, its asset loads)
+	CHECK(loadedHooks == 0u);
+	CHECK(entityCount(world) == 1u);
+	CHECK(world.registry().get<HierarchyComponent>(world.rootEntity()).children.empty());
+
+	// And back: it builds again, completely.
+	pumpAnchors(s, world, near, 100.0, [&] { return s.isLoaded(0, 0); });
+	CHECK(s.isLoaded(0, 0));
+	CHECK(entityCount(world) == 402u);
+	CHECK(loadedHooks == 1u);
+
+	// Cleared (a level change) while half built: the same teardown, every slice's entities gone.
+	s.clear(world);
+	CHECK(entityCount(world) == 1u);
+	sliceHooks = 0;
+	s.begin(m, diskReader(root), hooks);
+	const auto again = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+	while (sliceHooks < 2 && std::chrono::steady_clock::now() < again)
+	{
+		s.update(world, near, 0.0);
+		std::this_thread::yield();
+	}
+	REQUIRE(sliceHooks >= 2u);
+	CHECK(s.isBuilding(0, 0));
+	const size_t unloadingBefore = unloadingHooks;
+	s.clear(world);
+	CHECK(unloadingHooks == unloadingBefore + 1);
+	CHECK(entityCount(world) == 1u);
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("CellStreamer::isSettled: true once every cell within the radius is built or has failed for good")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_settled";
+	he_test::removeAllQuiet(root);
+	writeHouses(root / "W.cells" / "cell_0_0.hescene", 10, 3, 0.0f);
+	writeHouses(root / "W.cells" / "cell_1_0.hescene", 10, 3, 100.0f);
+	// Cell 2 is in the list and has no file.
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 0,
+		    "dir": "W.cells", "list": [[0,0,41],[1,0,41],[2,0,41]]})", m));
+	HorizonWorld world;
+	HE::CellStreamer s;
+	s.setSliceEntities(10);
+	CHECK(s.isSettled({ 50.0, 0.0, 50.0 }, 60.0));   // inactive: nothing to wait for
+	s.begin(m, diskReader(root), {});
+	CHECK_FALSE(s.isSettled({ 50.0, 0.0, 50.0 }, 60.0));   // cells 0 and 1 are not there yet
+	CHECK(s.isSettled({ 5000.0, 0.0, 50.0 }, 60.0));       // no cell near: nothing to wait for
+
+	const std::vector<HE::CellAnchor> at = { anchorAt(150.0) };   // cells 0 (50 m), 1 and 2 (50 m)
+	// Half built is not settled.
+	bool sawHalfBuilt = false;
+	const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+	while (std::chrono::steady_clock::now() < until)
+	{
+		s.update(world, at, 0.0);
+		if (s.stats().building > 0 || (s.isLoaded(0, 0) && !s.isLoaded(1, 0)))
+		{
+			sawHalfBuilt = true;
+			CHECK_FALSE(s.isSettled({ 150.0, 0.0, 50.0 }, 60.0));
+		}
+		if (s.isSettled({ 150.0, 0.0, 50.0 }, 60.0) && s.stats().inFlight == 0 && s.stats().ready == 0
+		    && s.stats().building == 0)
+			break;
+		std::this_thread::yield();
+	}
+	CHECK(sawHalfBuilt);
+	CHECK(s.isLoaded(0, 0));
+	CHECK(s.isLoaded(1, 0));
+	CHECK_FALSE(s.isLoaded(2, 0));
+	CHECK(s.stats().failed == 1u);   // cell 2, which has no file, will never come
+	CHECK(s.isSettled({ 150.0, 0.0, 50.0 }, 60.0));
+	s.clear(world);
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("CellManifest::around with several viewpoints: each cell by its nearest")
+{
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "dir": "d",
+		    "list": [[0, 0, 5], [1, 0, 6], [2, 0, 7], [3, 0, 8], [4, 0, 300]]})", m));
+	// One at x = 50 (cell 0) and one at x = 450 (cell 4).
+	const std::vector<HE::CellAnchor> two = { anchorAt(50.0), anchorAt(450.0) };
+	const std::vector<HE::CellManifest::View> v = m.around(two, 1000.0);
+	REQUIRE(v.size() == 5u);
+	const auto reachOf = [&](int x)
+	{
+		for (const auto& c : v) if (c.x == x) return c.reach;
+		return HE::CellManifest::View::Reach::Out;
+	};
+	CHECK(reachOf(0) == HE::CellManifest::View::Reach::Load);
+	CHECK(reachOf(1) == HE::CellManifest::View::Reach::Load);
+	CHECK(reachOf(2) == HE::CellManifest::View::Reach::Out);   // 150 m from both
+	CHECK(reachOf(3) == HE::CellManifest::View::Reach::Load);
+	CHECK(reachOf(4) == HE::CellManifest::View::Reach::Load);
+	// The distance the cell counts at is the nearest anchor's, and a scale divides it.
+	CHECK(m.distanceTo(two, 3, 0) == doctest::Approx(50.0));
+	CHECK(m.distanceTo(std::vector<HE::CellAnchor>{ anchorAt(50.0, 2.0f) }, 3, 0) == doctest::Approx(125.0));   // 250 m / 2
+	CHECK(m.distanceTo(std::vector<HE::CellAnchor>{}, 3, 0) == std::numeric_limits<double>::infinity());
+	// The same single viewpoint through the old call.
+	const auto single = m.around(glm::dvec3(50.0, 0.0, 50.0), 200.0);
+	REQUIRE(single.size() >= 2u);
+	CHECK(single[0].x == 0);
+	// How many slices the game builds a cell in: one up to a slice's size, else the root's and the rest.
+	for (const auto& c : v)
+	{
+		if (c.x == 4) CHECK(c.slicesEstimate == 1u + (300u + 127u) / 128u);
+		else          CHECK(c.slicesEstimate == 1u);
+	}
+}
+
 // A measurement, not a check (does not run in CI): the reference world loaded
 // whole against its base plus the cells around the camera. Needs the scene and
 // its split on disk:
@@ -895,6 +1596,8 @@ TEST_CASE("Cell manifest: survives saving and loading the base scene, JSON and b
 //   python3 scripts/split_scene_cells.py /tmp/ref.hescene --out /tmp/cellproj/Content/World.hescene
 //   HE_CELL_BENCH_WHOLE=/tmp/ref.hescene HE_CELL_BENCH_PROJECT=/tmp/cellproj \
 //       out/build/release/tests/he_tests --no-skip --test-case='Cell streaming bench*'
+// HE_CELL_BENCH_SLICE=0 (entities per slice) builds each cell whole, the way it was built
+// before the slices; unset is the default of 128. The line to read is "worst main-thread frame".
 TEST_CASE("Cell streaming bench: whole reference world against base plus nearby cells" * doctest::skip())
 {
 	const char* wholeEnv   = std::getenv("HE_CELL_BENCH_WHOLE");
@@ -925,6 +1628,9 @@ TEST_CASE("Cell streaming bench: whole reference world against base plus nearby 
 		HE::CellManifest m;
 		REQUIRE(HE::CellManifest::parse(world.cellManifestJson(), m));
 		HE::CellStreamer s;
+		// HE_CELL_BENCH_SLICE: entities per slice; 0 builds every cell whole, as before the slices.
+		if (const char* slice = std::getenv("HE_CELL_BENCH_SLICE"))
+			s.setSliceEntities(static_cast<size_t>(std::strtoull(slice, nullptr, 10)));
 		s.begin(m, [&project](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
 		{
 			const auto file = project / path;
@@ -938,20 +1644,52 @@ TEST_CASE("Cell streaming bench: whole reference world against base plus nearby 
 		// Until every cell the camera wants is built; frames of 4 ms budget, like the game.
 		size_t frames = 0;
 		double worstFrameMs = 0.0;
+		// What the worst frame did: slices it built, entities it made. A slow frame that built
+		// nothing is not the build's doing (the main thread waiting for a core, a lock).
+		size_t worstSlices = 0, worstEntities = 0, worstFrame = 0;
+		// The main thread's own CPU time over the same frame: a frame that took 90 ms of wall
+		// clock and 5 of CPU was waiting (for a core, a lock, a page), not building.
+		const auto threadCpuMs = []
+		{
+#if defined(_WIN32)
+			return 0.0;   // the bench is read on the Mac; no per-thread clock worth porting
+#else
+			timespec ts{};
+			clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+			return static_cast<double>(ts.tv_sec) * 1e3 + static_cast<double>(ts.tv_nsec) * 1e-6;
+#endif
+		};
+		double worstCpuMs = 0.0;
 		for (;;)
 		{
+			const size_t slicesBefore = s.stats().slicesDone;
+			const size_t entsBefore   = world.registry().storage<entt::entity>().in_use();
+			const double cpu0 = threadCpuMs();
 			const Clock::time_point f0 = Clock::now();
 			s.update(world, camera, glm::vec3(0.0f), 4.0);
-			worstFrameMs = std::max(worstFrameMs, ms(Clock::now() - f0));
+			const double frameMs = ms(Clock::now() - f0);
+			if (frameMs > worstFrameMs)
+			{
+				worstFrameMs  = frameMs;
+				worstCpuMs    = threadCpuMs() - cpu0;
+				worstFrame    = frames;
+				worstSlices   = s.stats().slicesDone - slicesBefore;
+				worstEntities = world.registry().storage<entt::entity>().in_use() - entsBefore;
+			}
 			++frames;
-			if (s.stats().loaded > 0 && s.stats().inFlight == 0 && s.stats().ready == 0) break;
+			if (s.stats().loaded > 0 && s.stats().inFlight == 0 && s.stats().ready == 0
+			    && s.stats().building == 0) break;
 			std::this_thread::yield();
 		}
 		const Clock::time_point t2 = Clock::now();
 		MESSAGE("run " << run << ": whole " << wholeEntities << " entities in " << ms(wholeTime)
 		        << " ms | base " << ms(t1 - t0) << " ms + " << s.stats().loaded << " of "
 		        << m.cells.size() << " cells in " << ms(t2 - t1) << " ms (" << frames
-		        << " frames, worst main-thread frame " << worstFrameMs << " ms), "
+		        << " frames, worst main-thread frame " << worstFrameMs << " ms (" << worstCpuMs
+		        << " ms of thread CPU) = frame " << worstFrame
+		        << ", which built " << worstSlices << " slices / " << worstEntities << " entities; "
+		        << s.stats().slicesDone << " slices of " << s.sliceEntities() << " entities, the largest "
+		        << s.stats().largestSlice << "), "
 		        << world.registry().storage<entt::entity>().in_use() << " entities");
 		s.clear(world);
 	}

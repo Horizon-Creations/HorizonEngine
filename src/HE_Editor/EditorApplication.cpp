@@ -4248,7 +4248,8 @@ void EditorApplication::OnRender(float dt)
 			// A split scene's streaming cells, coloured by what the game would do
 			// with each from this camera. Editor furniture too: not while playing.
 			if (show.streamingCells && !m_isPlaying && m_editorWorld)
-				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(), dbg);
+				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(),
+				                                    StreamingDebugView::previewPins(), dbg);
 
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,

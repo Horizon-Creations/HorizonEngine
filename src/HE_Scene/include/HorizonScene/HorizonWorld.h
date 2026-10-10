@@ -121,6 +121,32 @@ public:
 	void clearHierarchyDirty()     { m_hierarchyDirty = false; }
 	void markHierarchyDirty()      { m_hierarchyDirty = true;  }
 
+	// ── Structure epoch (Thema 164, for Thema 162) ───────────────────────────
+	// ONE counter that moves whenever the SET of entities, their PARENTS or the
+	// ORDER of siblings changes: createEntity, destroyEntity, reparentEntity,
+	// moveChild, placeNextTo, sortChildrenByName, clear, and the scene loaders after
+	// they rebuilt the links. Whoever caches what a walk of the world produced (the
+	// extractor's per-frame copy, a retained render world) compares the number it saw
+	// with this one: equal means the walk would find the same entities in the same
+	// places, different means it would not. A cell streamed in or out
+	// (HE::CellStreamer) moves it, so it is also how a cache learns that a load
+	// happened between two reads that were meant to see one world.
+	//
+	// What it does NOT cover, on purpose: component VALUES (a moved transform, a
+	// changed material), and a component added to or removed from a live entity (a
+	// script can give an existing entity a mesh). A cache that needs those has to
+	// watch them itself. It is also not markHierarchyDirty(): that one is set by hand
+	// by the loaders and the editor and cleared by the Outliner, so it cannot answer
+	// "did anything change since I last looked" for a second reader.
+	//
+	// Not zero-initialised for a reason: a fresh world starts at 1, so a cache that
+	// initialises its remembered value to 0 never matches by accident.
+	uint64_t structureEpoch() const { return m_structureEpoch; }
+	// For code that rewires the hierarchy itself rather than through the methods
+	// above (the scene loaders' rebuildHierarchy, an additive load grafting its
+	// roots). Costs one increment.
+	void     noteStructureChanged() { ++m_structureEpoch; }
+
 	// Built-in entities (the root and the environment sun/moon lights) cannot be
 	// deleted or have arbitrary components managed; they belong to the World.
 	bool isBuiltin(Entity entity) const;
@@ -282,6 +308,7 @@ private:
 	entt::registry m_registry;
 	Entity         m_rootEntity     = entt::null;
 	bool           m_hierarchyDirty = true;
+	uint64_t       m_structureEpoch = 1;
 	glm::dvec3     m_origin{ 0.0 };
 	std::string    m_cellManifestJson;
 	std::string    m_cellHeadJson;

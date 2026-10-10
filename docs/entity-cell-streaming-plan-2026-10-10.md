@@ -3,7 +3,7 @@
 Stand 10.10.2026, Zweig `claude/entities-pro-zelle-streamen-nur-die-umgebung-der-kamera-exis`,
 Basis `202e14f2` (= `origin/release/0.7.0`). Die Abschnitte 0 bis 11 sind der Bauplan aus Schritt 1
 (**nur Doku**, Zeilennummern gelten für `202e14f2`); **Abschnitt 12 hält fest, was Schritt 2a daraus
-gebaut hat und was dabei anders war.** Bezug: `docs/world-streaming-baseline-2026-10-06.md` (Thema 153, §9.4, §10.5–10.7,
+gebaut hat und was dabei anders war, Abschnitt 13 dasselbe für Schritt 2b.** Bezug: `docs/world-streaming-baseline-2026-10-06.md` (Thema 153, §9.4, §10.5–10.7,
 §11.4–11.5) und der Plan von Thema 162 (`docs/render-extractor-shadow-pass-plan.md`, liegt nur auf
 `origin/claude/render-extractor-und-schatten-pass-einmal-pro-frame-statt-me`, Commit `16947c08`,
 noch nicht auf `release/0.7.0`; hier nur zitiert, nicht übernommen).
@@ -669,3 +669,93 @@ will, ersetzt `m_idIndexed` durch einen Vektor nach Entity-Nummer und die Multim
 - 2c/3b: Audio-Start und -Stopp, Zustandsautomaten-Bindung, Skripte: gehören in den Zellen-Host.
 - 3a: Ref-Hülle im Splitter (heute nur die Prefab-Bindungen), Body-Reserve aus `bodies`.
 - Handbuch auf der Website nachziehen (Befund 6).
+
+## 13. Schritt 2b: was gebaut ist und was der Bauplan anders sah (10.10.2026)
+
+Teil 2b (zweite Reihe) steht auf dem Zweig, aufbauend auf 2a und auf `origin/release/0.7.0` (mit #123
+und dem `test_culling`-Fix gemergt). Die Abnahme ist wieder ein benannter Test und eine Messung:
+`test_world_scale.cpp`, „CellStreamer: a cell is built in slices, one per update at no budget, and is
+loaded when the last is in“, „Sliced load: the cell built in slices is the cell built whole“, „CellStreamer:
+several anchors, a cell is wanted by any and dropped only when every anchor is beyond“, dazu der Bench
+`'Cell streaming bench*'`. Die neuen Fälle wurden mit absichtlich kaputt gemachtem Code geprüft: ohne das
+Aufräumen der Wurzel-Kinder in `applyAdditiveJson` werden drei Fälle rot, mit einem Anker statt der Liste
+(`nearestReach` verlässt die Schleife nach dem ersten) drei andere.
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| `structureEpoch` (7.2) | `HorizonWorld::structureEpoch()`, `noteStructureChanged()` | **Ein** Zähler, startet bei 1. Hochgezählt in `createEntity`, `destroyRecursive` (jeder Zerstörpfad endet dort), `clear`, `reparentEntity` (nur bei echter Änderung), `moveChild`, `placeNextTo`, `sortChildrenByName` (nur bei echter Änderung), im `attach` der Umgebungslichter und nach jedem `rebuildHierarchy` der Lader. Er deckt die Menge der Entities, ihre Eltern und die Reihenfolge der Geschwister; **nicht** Komponentenwerte und nicht das Hinzufügen einer Komponente an einer lebenden Entity. Test: „HorizonWorld::structureEpoch: …“ prüft auch das Negative (Transform, Komponente, Umbenennen, `markHierarchyDirty`, `setEntityId` bewegen ihn nicht). `RenderExtractor.*` und `FrameKey` sind **nicht** angefasst (7.6); Thema 162 liest ihn dort. Post 1158 an `render-extractor-u-1` |
+| Anker-Liste (4.5) | `HE::CellAnchor { position, velocity, radiusScale }`, `CellStreamer::update(world, anchors, budgetMs)` | Eine Zelle ist gewollt, wenn irgendein Anker (oder dessen Vorausschau) im Laderadius ist, und bleibt, bis **alle** jenseits des Entladeradius sind. `radiusScale` teilt die Entfernung dieses Ankers (3 lädt dreimal so weit). Ohne Anker ändert sich nichts. Der alte Aufruf mit Kamera und Geschwindigkeit bleibt als Einzelanker. `CellManifest::distanceTo(anchors, …)` und `around(anchors, range)` messen genauso (das nutzt die Zellansicht) |
+| Gestückelter Aufbau (4.6) | `SceneSerializer::sliceForAdditiveLoad`, `AdditiveOptions::attachTo`, `CellStreamer::setSliceEntities` (Standard `kDefaultCellSliceEntities` = 128) | Der Worker schneidet die geparste Zelle: Scheibe 0 ist die Zellwurzel allein, danach ganze Teilbäume der Wurzel in der Reihenfolge ihrer `children`, bis 128 Entities voll sind; ein Teilbaum wird nie geteilt (einer über 128 ist eine Scheibe für sich). Der Hauptthread baut Scheiben, solange das Budget reicht, mindestens eine; die nächste Zelle erst, wenn die nähere fertig ist. Zellen bis 128 Entities bleiben **eine** Scheibe, Bau und Reihenfolge wie vorher. Eine Zelle, die sich nicht ohne Unterschied zum ganzen Laden schneiden lässt (zwei Wurzeln, ein von der Wurzel nicht erreichter Eintrag, doppelte Id), bleibt eine Scheibe |
+| Hooks | `Hooks::loadedSlice(root, created)` je Scheibe, `loaded(root, alle)` einmal danach, `unloading(root)` auch für halb gebaute Zellen | `GameApplication` hängt Jolt (`addEntity` je Entity) und `streamSceneAssets` an `loadedSlice`; ein Token je Zelle, mit der ersten Scheibe angelegt, damit das Entladen die Ladevorgänge aller Scheiben abbricht |
+| Halb gebaut | `isBuilding`, `Stats::building`, `abandoned` | Verlassen alle Anker eine halb gebaute Zelle, wird sie wie eine gebaute abgebaut (`unloading`, `destroyEntity`); `clear()` ebenso. `isLoaded` heißt weiter „vollständig“ |
+| `isSettled(position, radius)` (4.5) | `CellStreamer` | Wahr, wenn jede Zelle des Manifests im Radius gebaut ist oder endgültig gescheitert (es kommt nichts mehr). Die Bodies stehen mit der Scheibe im Jolt-Welt, weil der Hook sie dort anlegt; ob die Welt wirklich gesteppt wird und der Boden unter dem Körper ist, ist 3a |
+| Stats | `slicesDone`, `largestSlice`, `anchors`, `building`, `abandoned` | `largestSlice` ist die Zahl, die zählt: so weit kann ein Frame über dem Budget liegen |
+| Zellansicht | `StreamingDebugView` | Der Editor hat **keinen** laufenden Streamer (L7, 2c), also gibt es dort keine echten Zähler für Anker, Gruppen, `idCollisions`, `settled`. Gebaut ist, was ohne ihn stimmt: Vorschau-Anker (*Pin an anchor at the editor camera*, *Clear anchors*), die das Fenster als eigene Ringe zeichnet und nach denen jede Zelle vom nächsten Anker aus gefärbt und gezählt wird, eine Spalte mit den geschätzten Scheiben je Zelle (`slicesEstimate`, eine untere Grenze) und ein Satz, der erklärt, wie gebaut wird. Test: „streaming view: split beside the scene file …“ (Ringe des Ankers) |
+| Bench | `tests/test_world_scale.cpp`, „Cell streaming bench“ | `HE_CELL_BENCH_SLICE` (Scheibengröße, 0 = ganze Zelle wie vorher); die Meldung nennt den schlechtesten Frame samt seiner Thread-CPU-Zeit, den Frame und was er gebaut hat |
+
+**Die Anhänge-Frage aus 4.6 ist beantwortet: Weg (a), mit einer Option statt Umhängen von Hand.**
+`AdditiveOptions::attachTo` hängt die obersten Entities eines Ladevorgangs (die, deren Eintrag in diesem Ladevorgang
+keinen Eltern nennt) ans Ende der Kinder einer vorhandenen Entity, in der Reihenfolge, in der sie entstanden. Lokale
+Transforms bleiben, die Zellwurzel steht auf `-origin`: dieselben Zahlen wie beim ganzen Laden. Der Test
+„Sliced load: the cell built in slices is the cell built whole“ vergleicht je UUID Name, Elternteil, Kinder in
+Reihenfolge und lokale Transform, und die Kinderzahl der Weltwurzel. Gegen Weg (b) sprach, was im Code zu lesen war:
+`applyPrefabJson` schreibt die Id mit `emplace_or_replace` ohne Kollisionsprüfung (die Prüfung aus 2a ginge verloren),
+verlangt genau einen Eintrag ohne Elternteil und gleicht Bindungen ab, die hier nicht gebraucht werden.
+`reparentEntity` (die Frage aus 4.6, ob es lokale Werte behält) rührt `TransformComponent` nicht an; es kam trotzdem nicht
+in Frage, weil es die Kinderliste der Weltwurzel pro Aufruf mit Löschen-und-Entfernen durchläuft, bei einer Basis mit
+Zehntausenden obersten Entities je Scheibe.
+
+**Befunde, die der Bauplan nicht kannte**
+
+9. **Additives Laden ließ jede Entity zusätzlich in den Kindern der Weltwurzel.** `createEntity` trägt jede neue Entity
+   in die Kinderliste der Weltwurzel ein, `rebuildHierarchy` setzt nur `parent` um, und die Weltwurzel ist kein Eintrag des
+   Ladevorgangs, räumt also nie auf. `applyPrefabJson` räumt auf (Abschnitt „stale“), `applyAdditiveJson` tat es nicht.
+   Folgen, alle an Zellen und Zonen: `propagateTransforms` ging jede Zellen-Entity zweimal durch (die spätere Runde gewinnt,
+   und welche später ist, hängt von der Reihenfolge der Einträge ab); `shiftWorldOrigin` verschiebt jedes Kind der Wurzel und
+   verschob eine Zellen-Entity deshalb **doppelt** (einmal selbst, einmal mit ihrer Zelle); nach dem Entladen blieb pro Ladevorgang
+   eine Liste toter Handles. Behoben in `applyAdditiveJson` für alle additiven Ladevorgänge (nur der Schwanz der Liste wird
+   angesehen, `O(neu)`). Test: „SceneSerializer: an additive load leaves the world root listing only the load's tops“,
+   einschließlich Ursprungswechsel nach dem Laden (alle Meshes behalten die absolute Position, im Kettenlauf und in der Matrix, die
+   der Renderer liest). Damit stimmt der Satz aus 7.3 („die Weltwurzel hat nur so viele Kinder wie geladene Zellen“) erst jetzt.
+10. **Der Budgetvertrag.** `update` baut mindestens eine Scheibe und danach weitere, solange die Zeit seit dem Anfang des
+    Aufrufs unter dem Budget liegt. Ein Frame liegt also höchstens um die größte Scheibe über dem Budget; Teilbäume über 128
+    Entities sind die Ausnahme, `Stats::largestSlice` nennt sie. Mit Budget 0 baut jeder Aufruf genau eine Scheibe (so
+    testen die Fälle, ohne Uhr).
+11. **Ein Stall im Allokator verfälscht den Bench, nicht der Aufbau.** Siehe unten (Gemessen).
+12. **Pins und Spieler als Anker sind nicht gebaut.** `GameApplication` übergibt weiter nur die Kamera; die Liste ist da, die Quellen
+    (`streaming.pin`, Spieler-Charaktere, Server) sind 3b. Die Python-Zellen aus `split_scene_cells.py` (Version 1, ohne Kopf)
+    lassen sich ebenso schneiden (der Schnitt hängt an den UUIDs im File, nicht am Kopf); sie laden weiter mit frischen Ids.
+
+**Gemessen** (Release, M-Serie, Referenzwelt 200k Entities in 256 Zellen zu rund 780, 14 Zellen = 11 527 Entities um die Kamera, Budget
+4 ms; `he_tests --no-skip --test-case='Cell streaming bench*'`, jeweils drei Läufe je Aufruf, mehrere Aufrufe, nebenbei lief
+fremde Last):
+
+| | schlechtester Hauptthread-Frame | größte Einheit |
+|---|---|---|
+| vor 2b (Stand 2a, im Vorlauf dieser Sitzung) | 8,7 / 73,7 / 9,7 ms (ein Aufruf) | 833 Entities (ganze Zelle) |
+| 2b, Scheiben aus (`HE_CELL_BENCH_SLICE=0`) | 6,9 bis 12,5 ms in den 6 von 9 Läufen ohne Stall | 833 |
+| 2b, Standard 128 | **4,7 bis 6,4 ms in 11 von 18 Läufen** (Budget 4 ms plus eine Scheibe) | **128** (112 Scheiben für die 14 Zellen) |
+
+Dazu der Befund zu den übrigen Läufen (7 von 18 mit Scheiben, 3 von 9 ohne). **Lauf 1** (von 0 bis 2) ist in jedem der sechs Aufrufe
+betroffen, mit und ohne Scheiben (65 bis 115 ms mit, 102 bis 114 ms ohne), einmal zusätzlich Lauf 0 (44 ms); der Stand vor 2b hatte
+dieselben 73,7 ms. Der Frame hat in diesen Fällen **nichts Nennenswertes gebaut**: Die Thread-CPU-Zeit des Hauptthreads lag bei 1,1 bis
+4,7 ms, die Wanduhr bei 44 bis 115 ms, und ein Frame ohne jede gebaute Scheibe stand mit 42 ms Wanduhr und 0,03 ms CPU im Log. `sample` zeigt den Hauptthread in
+`createEntity → operator new → _xzm_reclaim_mark_used → _os_unfair_lock_lock_slow → __ulock_wait2`: der neue Allokator von
+macOS 27 (Darwin 27.0.0) lässt den Hauptthread an einem Sperrobjekt warten, das Worker beim Rückgewinnen von Speicher halten. Es
+verschwindet **nicht**, wenn die geparsten Bäume gar nicht freigegeben werden (Versuch mit Leck, zwei Aufrufe), liegt also nicht an
+`releaseOnWorker`; wahrscheinlich ist der Speicher, den Lauf 0 frei macht (die ganze 200k-Welt), die Ursache. Das ist eine Eigenschaft des
+Messaufbaus (drei Läufe in einem Prozess, dazwischen viel freier Speicher) und des Allokators; ob ein Spiel nach dem Entladen eines großen
+Ausschnitts denselben Stall sieht, ist **nicht geprüft**. Gelesen wird deshalb die Spalte „Thread-CPU“ der Meldung zusammen mit der Wanduhr;
+die Abnahme „unter Budget plus größter Scheibe“ gilt für die Läufe, in denen der Hauptthread arbeitet.
+
+**Offen für die folgenden Teile**
+
+- 3a: die Regel „ein Cluster ist immer eine Scheibe“ (Ref-Hülle): heute ist die Einheit der Teilbaum der Zellwurzel, zwei Teilbäume mit
+  einem Verweis zwischeneinander können in verschiedenen Scheiben landen. Jolt-Charge je Scheibe (`addEntities`), Body-Reserve aus
+  `bodies`, `requeueJoints`, `setRegionHold`; `isSettled` um die Körper ergänzen.
+- 2c/3b: `ICellHost`; Quellen für Anker (Spieler, Pins, Server) und `streaming.pin/unpin/isSettled` in der Skript-API; Skripte erst bei
+  `loaded`, nicht bei `loadedSlice`; die Zellansicht kann echte Zähler zeigen, sobald das Play einen Streamer hat.
+- 162: `structureEpoch` in `FrameKey` und im behaltenen `RenderWorld` lesen (7.1).
+- Handbuch auf der Website: Zellen laden jetzt in Scheiben und halten Anker; wie Befund 6.

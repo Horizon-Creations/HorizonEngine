@@ -135,10 +135,14 @@ void HorizonWorld::ensureEnvironmentLights()
             if (auto* ph = m_registry.try_get<HierarchyComponent>(h.parent))
                 ph->children.erase(std::remove(ph->children.begin(), ph->children.end(), e),
                                    ph->children.end());
+        if (h.parent != parent) ++m_structureEpoch;
         h.parent = parent;
         auto& sh = m_registry.get<HierarchyComponent>(parent);
         if (std::find(sh.children.begin(), sh.children.end(), e) == sh.children.end())
+        {
             sh.children.push_back(e);
+            ++m_structureEpoch;
+        }
     };
 
     // ── Pass 1: exactly one tagged light per role ────────────────────────────
@@ -415,6 +419,7 @@ Entity HorizonWorld::createEntity(const std::string& name)
     rootHierarchy.children.push_back(e);
     m_registry.get<HierarchyComponent>(e).parent = m_rootEntity;
     m_hierarchyDirty = true;
+    ++m_structureEpoch;
     return e;
 }
 
@@ -475,6 +480,7 @@ void HorizonWorld::unindexEntityId(Entity entity)
 void HorizonWorld::destroyRecursive(Entity entity)
 {
     if (!m_registry.valid(entity)) return;
+    ++m_structureEpoch;   // every destroy path ends here, destroyEntity and the lights' teardown included
     // Destroy the subtree bottom-up (children vector is copied — destroying
     // mutates the registry under us). No built-in guard here: the caller vetted the
     // top-level entity, and a Sky entity's built-in sun/moon lights must go with it.
@@ -539,6 +545,7 @@ void HorizonWorld::clear()
     for (Entity e : strays)
         if (m_registry.valid(e))
             m_registry.destroy(e); // direct destroy: bypasses the built-in guard for env lights
+    ++m_structureEpoch;   // the strays above never went through destroyRecursive
 
     // Drop the level script too (like the environment, a loaded scene restores
     // its own via setLevelScriptJson; a scene without one starts empty).
@@ -603,6 +610,7 @@ bool HorizonWorld::reparentEntity(Entity entity, Entity newParent)
     nh->children.push_back(entity);
     h->parent = newParent;
     m_hierarchyDirty = true;
+    ++m_structureEpoch;
     return true;
 }
 
@@ -629,6 +637,7 @@ bool HorizonWorld::moveChild(Entity entity, int delta)
     if (to > from) std::rotate(ch.begin() + from, ch.begin() + from + 1, ch.begin() + to + 1);
     else           std::rotate(ch.begin() + to,   ch.begin() + from,     ch.begin() + from + 1);
     m_hierarchyDirty = true;
+    ++m_structureEpoch;
     return true;
 }
 
@@ -692,6 +701,7 @@ bool HorizonWorld::sortChildrenByName(Entity parent)
         return false;
     ph->children = std::move(sorted);
     m_hierarchyDirty = true;
+    ++m_structureEpoch;
     return true;
 }
 

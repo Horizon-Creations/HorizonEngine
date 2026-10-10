@@ -203,6 +203,17 @@ TEST_CASE("streaming view: split beside the scene file, one undo step each, merg
 	StreamingDebugView::appendCellLines(world, glm::vec3(50.0f, 10.0f, 50.0f), lines);
 	CHECK(lines.lines().size() >= 3 * 4 + 2 * 96);
 
+	// A preview anchor besides the camera gets a pair of rings of its own, drawn at its
+	// radiusScale, and its cells are judged by the nearest of the two.
+	HE::CellAnchor pin;
+	pin.position    = { 250.0, 1.7, 50.0 };
+	pin.radiusScale = 2.0f;
+	DebugDrawBuffer withPin;
+	StreamingDebugView::appendCellLines(world, glm::vec3(50.0f, 10.0f, 50.0f), { pin }, withPin);
+	CHECK(withPin.lines().size() >= lines.lines().size() + 2 * 96);
+	// The tab keeps such anchors for the Scene window; none to begin with.
+	CHECK(StreamingDebugView::previewPins().empty());
+
 	REQUIRE(StreamingDebugView::mergeOpenScene(ctx, message));
 	CHECK(meshCount(world) == 12);
 	CHECK(world.cellManifestJson().empty());

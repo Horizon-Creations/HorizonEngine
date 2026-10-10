@@ -26,9 +26,18 @@ namespace HE
 // stops a camera on the border from loading and unloading every frame).
 //
 // Reading and parsing a cell runs on the job pool; only building its entities
-// runs on the main thread, cell by cell, within a time budget. Positions in the
-// files are absolute: a loaded cell's root sits at -origin, so cells land in the
-// right place under a floating origin (FloatingOrigin.h) too.
+// runs on the main thread, within a time budget. Positions in the files are
+// absolute: a loaded cell's root sits at -origin, so cells land in the right place
+// under a floating origin (FloatingOrigin.h) too.
+//
+// Anchors and slices (Thema 164): what the streamer keeps around is decided by a
+// LIST of anchors (the camera, a player, a script's pin), not by one camera. A cell
+// is wanted as soon as any anchor wants it, and it is dropped only when every
+// anchor is beyond the unload radius. And a cell is not built in one piece: the
+// worker cuts the parsed file into slices of whole subtrees (a few hundred entities
+// at most), the main thread builds them one after the other while the frame's budget
+// lasts, and the frame that is over budget is over by the largest slice, not by the
+// largest cell.
 //
 // Identity (Thema 164): a cell the C++ splitter wrote (CellSplit.h) carries a
 // "streaming" head with its format version, and from version 2 on its entities are
@@ -42,6 +51,18 @@ namespace HE
 // The format the C++ splitter writes. Version 2 added the manifest's "version" and
 // the fourth column of its list ("bodies"), and the "streaming" head of every cell.
 constexpr int kCellFormatVersion = 2;
+
+// Something the streamer keeps cells around: a camera, a player, a pin a script set.
+// Positions are absolute (world position + world origin).
+struct CellAnchor
+{
+	glm::dvec3 position{ 0.0 };
+	// m/s. The anchor also wants what it will be near in `lookaheadSec`.
+	glm::vec3  velocity{ 0.0f };
+	// Stretches both radii for this anchor alone: 2 loads and keeps cells twice as far
+	// out as the manifest says, 0.5 half as far. Not positive counts as 1.
+	float      radiusScale = 1.0f;
+};
 
 struct CellManifest
 {
@@ -77,6 +98,11 @@ struct CellManifest
 	// 0 inside it — the distance CellStreamer loads and unloads by, so the
 	// editor's cell view can say what the game would hold from a viewpoint.
 	double      distanceTo(const glm::dvec3& p, int x, int z) const;
+	// The same for a list of anchors, as CellStreamer measures it: the nearest of
+	// them, where an anchor is as near as the closer of its position and where it
+	// will be in `lookaheadSec`, and its radiusScale divides the distance (an anchor
+	// with scale 2 is as good as one half as far away). Infinite for no anchor.
+	double      distanceTo(const std::vector<CellAnchor>& anchors, int x, int z) const;
 
 	// One cell as seen from a viewpoint.
 	struct View
@@ -91,12 +117,24 @@ struct CellManifest
 		uint32_t entities = 0;
 		double   distance = 0.0;   // distanceTo(viewpoint)
 		Reach    reach = Reach::Out;
+		// About how many slices the game builds the cell in: one for a cell of at most
+		// kDefaultCellSliceEntities, else the slice with the cell's root plus the entity
+		// count over the slice size, rounded up. From the count alone, so a lower bound:
+		// the real cut follows the subtrees in the file, and a subtree that does not fit
+		// what is packed so far starts the next slice.
+		uint32_t slicesEstimate = 0;
 	};
 	// The cells within `range` of `p` (absolute), nearest first, with what the
 	// game would do with each from there — CellStreamer's rule without the
 	// lookahead (a viewpoint has no velocity). For the editor's cell view.
 	std::vector<View> around(const glm::dvec3& p, double range) const;
+	// The same for several viewpoints at once (the camera and the pins): each cell
+	// is judged by the nearest of them, as the streamer does.
+	std::vector<View> around(const std::vector<CellAnchor>& anchors, double range) const;
 };
+
+// How many entities the streamer puts in one slice unless told otherwise.
+constexpr size_t kDefaultCellSliceEntities = 128;
 
 class CellStreamer
 {
@@ -108,12 +146,22 @@ public:
 	// function means the cell cannot be found.
 	using Reader = std::function<std::function<bool(std::vector<uint8_t>&)>(const std::string& path)>;
 
+	using Anchor = CellAnchor;
+
 	struct Hooks
 	{
-		// A cell was built: its root (a child of the world root) and every entity
-		// the load created, root included. Physics bodies, asset streaming.
+		// A slice of a cell was built: the cell's root (a child of the world root) and
+		// the entities this slice created. The first slice of a cell is the root alone
+		// (a cell of at most the slice size is ONE slice, root and all); the others are
+		// whole subtrees, already hung under the root. Physics bodies, asset streaming:
+		// what can be done a piece at a time is done here, inside the frame's budget.
+		std::function<void(entt::entity root, const std::vector<entt::entity>& created)> loadedSlice;
+		// The cell is built: its root and EVERY entity the load created, root included
+		// — the call after the last loadedSlice, for what needs the whole cell (a
+		// script's BeginPlay seeing all of it).
 		std::function<void(entt::entity root, const std::vector<entt::entity>& created)> loaded;
-		// A cell is about to be destroyed: its root.
+		// A cell is about to be destroyed: its root. Also for a cell that was only
+		// built in part (loadedSlice was called, loaded was not) when its anchors left.
 		std::function<void(entt::entity root)> unloading;
 	};
 
@@ -121,11 +169,19 @@ public:
 	{
 		size_t loaded    = 0;   // cells built right now
 		size_t inFlight  = 0;   // reading or parsing on the pool
-		size_t ready     = 0;   // parsed, waiting for the main thread
+		size_t ready     = 0;   // parsed, waiting for the main thread to start on them
+		size_t building  = 0;   // started, some slices built, the rest still to come
 		size_t loadsDone = 0;   // cells built since begin()
 		size_t unloads   = 0;   // cells destroyed since begin()
 		size_t failed    = 0;   // cells that could not be read or parsed
 		size_t cancelled = 0;   // reads dropped because the camera turned away
+		size_t abandoned = 0;   // cells dropped half built, because every anchor left
+		// Slices built since begin(), and the entities of the largest one: the most a
+		// single step of update() builds, and so how far a frame can be over its budget.
+		size_t slicesDone   = 0;
+		size_t largestSlice = 0;
+		// Anchors update() was given last time.
+		size_t anchors   = 0;
 		// Entities that kept a fresh id because the one stored in their (version 2)
 		// cell was already in the world: a copied cell file, or two copies of the
 		// scene in one project. Cumulative since begin().
@@ -142,13 +198,36 @@ public:
 	void begin(const CellManifest& manifest, Reader reader, Hooks hooks);
 	bool active() const { return !m_manifest.empty(); }
 
-	// Once a frame: which cells should be there for this camera (absolute
-	// position, and its velocity for the lookahead), start reading the missing
-	// ones, drop reads nobody wants any more, build what has been parsed — at
-	// least one cell, then more while `budgetMs` lasts — and destroy cells
-	// beyond the unload radius.
+	// Once a frame: which cells should be there for these anchors, start reading the
+	// missing ones, drop reads nobody wants any more, build what has been parsed — at
+	// least one slice, then more while `budgetMs` lasts, nearest cell first and a
+	// cell's slices in order — and destroy cells every anchor has left behind (and
+	// drop a cell half built the same way).
+	//
+	// A cell is wanted when ANY anchor is within the load radius of its square (or of
+	// where that anchor will be in lookaheadSec), kept while ANY is within the unload
+	// radius. With no anchor nothing changes: a server that has nobody on it keeps
+	// the cells it has and starts no new read, but the slices already on their way
+	// are not built either.
+	void update(HorizonWorld& world, const std::vector<Anchor>& anchors, double budgetMs);
+	// One anchor with a lookahead: the camera.
 	void update(HorizonWorld& world, const glm::dvec3& cameraAbsolute, const glm::vec3& cameraVelocity,
 	            double budgetMs);
+
+	// Entities per slice (kDefaultCellSliceEntities when never set). Takes effect for
+	// the cells read after the call; 0 builds every cell in one piece, as before the
+	// slices — for comparing, not for a game.
+	void   setSliceEntities(size_t n) { m_sliceEntities = n; }
+	size_t sliceEntities() const { return m_sliceEntities; }
+
+	// True when every cell of the manifest within `radius` of `position` (absolute) is
+	// built — or has failed for good, so that nothing more is coming — and so is
+	// there for whoever is about to stand or fall there. A teleport waits for this
+	// before it lets the player go. The bodies of the cell's entities are in the
+	// physics world once the cell is built, because the slice hook is what puts them
+	// there; that the world is really stepped and the floor really under a body is the
+	// physics integration's to check (Thema 164 step 3a).
+	bool isSettled(const glm::dvec3& position, double radius) const;
 
 	// Unloads every cell and cancels every read. The streamer is inactive after.
 	void clear(HorizonWorld& world);
@@ -157,7 +236,10 @@ public:
 	void reset();
 
 	const Stats& stats() const { return m_stats; }
+	// Built completely; a cell with slices still to come is not loaded yet.
 	bool         isLoaded(int x, int z) const;
+	// Its root exists and some slices are built, but not all.
+	bool         isBuilding(int x, int z) const;
 	const CellManifest& manifest() const { return m_manifest; }
 
 private:
@@ -166,7 +248,10 @@ private:
 	static Key key(int x, int z) { return (static_cast<int64_t>(x) << 32) ^ static_cast<uint32_t>(z); }
 
 	void unloadCell(HorizonWorld& world, Key k);
+	// Takes a cell with some slices built out of the world again.
+	void abandonCell(HorizonWorld& world, Key k);
 
+	size_t       m_sliceEntities = kDefaultCellSliceEntities;
 	CellManifest m_manifest;
 	Reader       m_reader;
 	Hooks        m_hooks;

@@ -74,9 +74,39 @@ public:
         // When set, the number of entities that kept a fresh id because their
         // stored one was taken is ADDED to it.
         size_t* idCollisions = nullptr;
+        // Where the load's top-level entities (the ones whose record names no parent
+        // inside the load) are hung, at the END of that entity's children and in the
+        // order the load made them: the world root when null, as always. Their local
+        // transforms are not touched — whoever passes this has put the parent where
+        // those numbers mean what they should (a cell's root at -origin). It is how a
+        // cell built in slices (sliceForAdditiveLoad) puts each slice under the cell's
+        // root, which an earlier load made: rebuildHierarchy only links records of the
+        // same load.
+        Entity attachTo = entt::null;
     };
     bool loadAdditiveFromJson(HorizonWorld& world, const nlohmann::json& scene,
                               std::vector<Entity>* outCreated, const AdditiveOptions& options);
+
+    // Cuts a parsed streaming cell (HE::CellStreamer parses on a worker) into slices
+    // that can be built one after the other, so that no frame has to build the whole
+    // cell. Returns scenes for loadAdditiveFromJson, in the order to load them:
+    //   slice 0     the cell's root record alone;
+    //   slice 1..   consecutive top-level subtrees of the root, in the order of the
+    //               root's `children`, packed until `maxEntities` is reached. A
+    //               subtree is never divided: one larger than `maxEntities` is a
+    //               slice of its own, and what refers to a sibling by id is not
+    //               kept apart from it by this function (the splitter's reference
+    //               hull, Thema 164 step 3a, is what keeps those in one subtree).
+    // Load slice 0 as usual, find its root among the created entities, then load the
+    // others with AdditiveOptions::attachTo = that root: the result is the entities,
+    // parents, sibling order and local transforms of loading `scene` whole.
+    //
+    // A scene that is not worth cutting, or cannot be cut without changing what the
+    // whole load would do, comes back as the one slice it was: at most `maxEntities`
+    // records, `maxEntities` 0, not exactly one record without a parent, two records
+    // with one identity, a record the root does not reach through `children`, or a
+    // record that is not an object. Consumes `scene`.
+    static std::vector<nlohmann::json> sliceForAdditiveLoad(nlohmann::json&& scene, size_t maxEntities);
 
     // In-memory snapshot (CBOR, same structure as the binary file format).
     // Used by play-in-editor and the undo system. load does not clear the

@@ -1532,17 +1532,22 @@ void GameApplication::updateCellStreaming(float dt)
 		};
 		HE::CellStreamer::Hooks hooks;
 		// What a zone gets when it streams in (executeSceneRequests): collision,
-		// and its assets under a token of its own. Cells carry no scripts.
-		hooks.loaded = [this](entt::entity root, const std::vector<entt::entity>& created)
+		// and its assets under a token of its own. Cells carry no scripts. A cell is
+		// built in slices, and each brings its own entities: their bodies and their
+		// asset loads start with the slice, inside the frame's budget, instead of all
+		// at once when the last one is done. One token per cell, made with its first
+		// slice, so that unloading the cell cancels the loads of every slice.
+		hooks.loadedSlice = [this](entt::entity root, const std::vector<entt::entity>& created)
 		{
 			if (m_physicsWorld)
 				for (entt::entity e : created) m_physicsWorld->addEntity(*m_world, (uint32_t)e);
 			std::vector<uint32_t> ids;
 			ids.reserve(created.size());
 			for (entt::entity e : created) ids.push_back((uint32_t)e);
-			HE::CancelToken& token = m_cellStreamTokens[(uint32_t)root];
-			token = HE::CancelToken::create();
-			streamSceneAssets(*m_world, token, &ids);
+			auto token = m_cellStreamTokens.find((uint32_t)root);
+			if (token == m_cellStreamTokens.end())
+				token = m_cellStreamTokens.emplace((uint32_t)root, HE::CancelToken::create()).first;
+			streamSceneAssets(*m_world, token->second, &ids);
 		};
 		hooks.unloading = [this](entt::entity root)
 		{
