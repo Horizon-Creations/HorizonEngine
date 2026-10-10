@@ -2071,9 +2071,10 @@ Deshalb wurde zuerst auf dem gemergten Stand nachgestellt, ob der Fehler überha
 
 **Er ist noch da, auch mit §18.1.** Zeuge: `HE_DUMP_AUTOLAND=masks` (B = Wasser) und `=1` (lit), Metal und
 OpenGL, Draufsicht auf den Fuß der Rampe: Die Pfützen auf der Ebene laufen bis zum Rampenfuß und enden dort auf
-einer **geraden Linie** von etwa 7 px Breite (bei 128 m auf 1280 px, also gut 1 m), während ihre übrigen Ränder
-dem Rauschen folgen. Auf der Schrägansicht bleibt dazu ein heller Streifen Wasser am Fuß, der den Himmel wie eine
-gekippte Scheibe spiegelt.
+einer **geraden Linie**, während ihre übrigen Ränder dem Rauschen folgen. Gemessen an `ALmasks-Metal` (166
+Bildzeilen, in denen Wasser den Fuß erreicht): das Wasser fällt dort über einen Median von 5 px ab (kleinste 2,
+größte 23; 128 m auf 1280 px, gut 6 px je Meter). Auf der Schrägansicht bleibt dazu ein heller Streifen Wasser
+am Fuß, der den Himmel wie eine gekippte Scheibe spiegelt.
 
 Ursache sind zwei Dinge im Builder (`AutoLandscapeMaterial.cpp`, Spalte 7/8):
 
@@ -2122,7 +2123,7 @@ Alle Aufnahmen Release-Editor, `cap158auto.sh`, Metal und OpenGL, AA/GI/SSAO/Blo
 | Metal gegen OpenGL, mittlerer Hang (20 / 64), lit, Schrägansicht / Draufsicht | 0,002 / 0,001, größte 2 / 3 |
 | Metal gegen OpenGL, Masken (Wasser) und `ground` (nasser Film), beide Hänge | 0,000, größte 1 |
 | Metal gegen OpenGL, steile Rampe (40 / 32), lit | 1,99 nach der Änderung, 2,01 davor: die Abweichung gab es schon vorher, sie ist nicht neu (liegt am Schnee/Fels der Rampe, nicht an Pfützen; die Wassermaske ist dort 0,000) |
-| Steile Rampe, neu gegen alt (lit / Masken) | 0,007 / 0,03 mittlere Abweichung: am **Fuß einer steilen Wand** ändert sich fast nichts. Wasser an einer Wand endet an der Wand, auch in der Natur auf einer Linie |
+| Steile Rampe, neu gegen alt (lit / Masken) | 0,007 / 0,03 mittlere Abweichung: am **Fuß einer steilen Wand** ändert sich im Bild fast nichts, **die Wasserkante dort wird aber schärfer**: Abfall des Wassers über einen Median von **1 px** statt 5 px (166 Zeilen, Maske B; die Kante ist am Wandfuß also nicht weicher, sondern härter geworden). Wasser an einer Wand endet an der Wand, auch in der Natur auf einer Linie, und der nasse Film läuft dahinter über die Böschung aus. Das Verbreitern der Wasserrampe mit der Neigung (+0,6 / +1,5 / +3 × steep) brachte nur 1 / 2 / 2 px, weil die Neigung dort selbst innerhalb eines Meters springt; verworfen |
 | Sanfter Hang (12 m auf 48 m), Wasser (Masken B > 0,5) je 100-px-Spalte auf dem Hang (Spalten 700 bis 1199) | alt 11,3 / 4,2 / 0,0 / 0,1 / 17,9 %, neu 0,7 / 0,0 / 0,0 / 0,0 / 0,0 % |
 
 Das Wasser verschwindet also früher auf Böschungen: bei typischer Senkentiefe (0,1 bis 0,22 gegen eine
@@ -2161,9 +2162,15 @@ reichte ihm einen Temporären, die Namen waren im optimierten Build leer. Der Te
   unmittelbar nutzt, bekommt 0,08. Wer nach dem Update noch scharfe Kanten sieht, prüft zuerst diesen Wert.
 * **Eine scharfe Geländekante bleibt eine Kante.** Wo die Neigung auf einem Meter von 0 auf 0,4 springt (Fuß
   einer Wand), ist jede Funktion der örtlichen Neigung räumlich so scharf wie das Gelände: das Wasser endet
-  dort auf einer geraden Linie, wie Wasser an einer Wand. Eine echte Lösung dafür braucht ein geglättetes
+  dort auf einer geraden Linie, wie Wasser an einer Wand, und diese Linie ist jetzt **härter** als vorher
+  (1 px statt 5 px, §20.3), weil das Wasser nicht mehr mit der Neigung verblasst, sondern auf einmal fällt.
+  Das ist der Preis der Änderung: auf Hängen, die sich langsam krümmen (der Fall im Screenshot), schrumpfen die
+  Pfützen jetzt organisch; am Fuß einer Wand wird die Linie schärfer, dafür läuft der nasse Film über die
+  Böschung aus. Wer auch dort weiche Kanten will, braucht den nächsten Schritt: ein geglättetes
   Neigungsfeld über mehrere Meter (zum Beispiel ein Kanal in der Weightmap oder ein Vertexattribut des
   Terrain-Meshes, das heute keinen freien Kanal hat). Das ist größer als dieser Fehler und nicht gemacht.
+  Die Änderung ist ohne Rückmeldung des Menschen zu seinem Screenshot-Fall **nicht** als erledigt zu
+  betrachten: belegt ist das Verhalten auf den Zeuge-Hängen, nicht auf seiner Landschaft.
 * Die **GI-Reflexion** kennt das Schrumpfen nicht: sie nimmt weiter den Anteil `autoWet.w × (1 − steep)`
   (§18.1) als Erwartungswert. Auf Hängen ist der erwartete Pfützenanteil daher in der Reflexion etwas höher
   als im Bild.
