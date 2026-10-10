@@ -168,6 +168,9 @@ dort neu messen; das Verhältnis ist das, was zählt. Bilder: `HE_DUMP_FOLIAGETE
 
 ## 7. Grenzen dieser Messung
 
+- **Nachtrag (Schritt 3):** `HE_DUMP_FOLIAGEMESH=sphere` zeichnet keine Kugel. Der Zeuge nimmt dafür die Id `{257, 1}`, die kein ContentManager kennt; die Backends fallen auf den
+  Würfel zurück. Gemessen wurde mit dem Würfel (`cube`), das ist hier ohnehin der Fall der Tabellen; der Schalter `sphere` ist ein zweiter Würfel-Lauf mit anderer Skala, kein anderes Mesh.
+
 - Nur Metal. GL, D3D11, D3D12 und Vulkan sind nicht gemessen (Vulkan und D3D laufen hier nicht).
 - Gesperrter Bildschirm, Stromsparmodus und Akku (Abschnitt 2). Die absoluten Zahlen sind
   vermutlich schlechter als an einem entsperrten Mac an der Steckdose. Die Verhältnisse zwischen den

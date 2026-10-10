@@ -600,7 +600,7 @@ den Renderweg erledigt; der Scatter selbst reagiert weiterhin nur auf `dirty`).
 | Metal, Deferred, 100k | bitgleich | bitgleich | 878 (0,095 %) |
 | Metal, 100k, `drawDistance` 100 m, Kamera mittendrin | bitgleich | bitgleich | 423 (0,046 %) |
 | Metal, 100k, tiefe Sonne (lange Schatten) | bitgleich | bitgleich | 579 (0,063 %) |
-| Metal, Mesh nicht im ContentManager (Rückfall auf den Würfel, Cluster ohne Bounds) | bitgleich | bitgleich | 571 (0,062 %) |
+| Metal, 100k, Skala 0,8 bis 1,6, tiefe Sonne, `FOLIAGEMESH=sphere` (Mesh-Id nicht registriert, siehe unten) | bitgleich | bitgleich | 571 (0,062 %) |
 | Metal, 500k alle in Reichweite (vorher über der Instanz-Cap) | bitgleich | bitgleich | 3 730 (0,405 %) |
 | GL, Vorwärts, 100k | bitgleich | bitgleich | 1 196 (0,130 %) |
 | GL, 100k, 100 m | bitgleich | bitgleich | 611 (0,066 %) |
@@ -613,6 +613,10 @@ den Renderweg erledigt; der Scatter selbst reagiert weiterhin nur auf `dirty`).
   Abstand sortiert, ohne Culling) und ergibt in allen neun Fällen **dasselbe Bild wie vorher, Byte für Byte**. Damit sind Store, Aufklappen, Cap-Schnitt und die Tiefenpässe
   (Schatten, SSAO) auf einem echten Gerät als genau belegt; was bleibt, ist die Reihenfolge. Das Culling der Bucket-Boxen deckt `test_foliage_cluster.cpp` ab
   (keine Pflanze im Bild geht verloren), der Pruefmodus zeichnet ohne Culling.
+- **Zur Zeile `FOLIAGEMESH=sphere`:** der Zeuge nennt dafür `{257, 1}`, und diese Id ist in keinem ContentManager registriert (`grep` über `src/`: nur der Zeuge selbst). Die Backends zeichnen
+  dafür den Würfel als Rückfall (das Bild zeigt Würfel), der Extraktor findet kein Mesh und lässt die Cluster-Bounds ungültig. Die Zeile belegt also einen zweiten Skalenbereich und den Fall
+  "Cluster ohne bekannte Mesh-Bounds" (nie culled, vollständig gezeichnet) auf einem Gerät, **keine Kugel**. Dass die Bounds eines gelesenen Meshes stimmen, prüft `test_foliage_cluster.cpp`.
+  (Auch die Basismessung aus 2c hat mit `HE_DUMP_FOLIAGEMESH=sphere` nie eine Kugel gemessen.)
 - **Compile:** Metal und GL kompiliert und gelaufen. `VulkanRenderer.cpp` ist mit `clang -fsyntax-only` gegen die MoltenVK-Header geprüft (Negativkontrolle mit
   absichtlichem Tippfehler schlägt an). **D3D11 und D3D12 sind lokal nicht übersetzbar**; ihre Zeilen (zwei Refine-Stellen, zwei GI-Filter, zwei Velocity-Schleifen)
   prüft nur der Windows-Job der CI.
