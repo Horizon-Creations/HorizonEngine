@@ -231,6 +231,7 @@ bleiben unangetastet.
 | `VulkanRenderer::Render()` und `RenderSceneImage()` | `RenderExtractor::FrameScope` vor dem ersten Pass | Bis zu **fünf volle Walks je Frame** (Kaskaden, Decal-Tiefe, GI, SSAO, Szene) werden zu einem. |
 | `tests/test_world_scale.cpp` | 5 neue Fälle (Struktur-Epoche je Änderungsart, In-Place-Zustand, fremdes `RenderWorld`, Größen-/Leer-Prüfung), 2 bestehende auf die Renderer-Praxis umgestellt (alle Pässe in dasselbe `RenderWorld`, Vergleich mit einem frischen Walk), Bench `Extraction bench: the frame copy against the walk it saves` (skip) | siehe 6.5 |
 | `tests/test_culling.cpp` | Quelltext-Pin "Vulkan and Metal record a frame inside one extractor FrameScope": Vulkan genau zwei Scopes (`Render()`, `RenderSceneImage()`), beide vor dem ersten Pass; Metal genau einer vor `EncodeShadowMap` | Der lokale Zeuge für Vulkan, das auf diesem Mac nicht kompiliert wird. Ein dritter, verschachtelter Scope in `DrawViewportFrame` würde den äußeren früh schließen (`endFrame`). |
+| `scripts/perf/frame_pixel_ab.sh` | Metal-Pixel-A/B: 16 richtig gerahmte Witness-Szenen (Lokalschatten, Decals, Foliage, Kaskadenschatten) einschließlich Render-Scale 0,51, bei dem der aspektabhängige Schwanz wirklich läuft; druckt je Shot die md5 | siehe 6.5; für Schritt 3 bis 5 wiederverwendbar |
 
 ### 6.3 Was der Schlüssel erzwingt, was nicht
 
@@ -310,14 +311,50 @@ zwischen zwei Läufen, und alle 12 sind byte-identisch zwischen Baseline und neu
 Baseline liegt im gleichen Rauschen wie neu gegen neu (GI Forward: mittlere Abweichung 0,0025/255, max 2,
 bei Baseline gegen Baseline 0,0006/255, max 1, bei neu gegen neu 0,0004 bis 0,0029/255, max 2; GI Deferred:
 0,0000/255, max 1; Low-Res-Wolken 0,05 bis 0,11/255, max 8, bei neu gegen neu 0,02 bis 0,06/255, max 8).
-**Grenzen dieser Runde**: unter den 12 sind nur 9 verschiedene Bilder (`SSAO=1` ändert gegenüber dem
+**Grenzen der ersten Runde**: unter den 12 sind nur 9 verschiedene Bilder (`SSAO=1` ändert gegenüber dem
 Standard nichts, Forward und Deferred gleichen sich im Lokalschatten-Shot), `LOCALSHADOW=1` ist kein
-gültiger Modus (`point|spot`, das Bild ist der Nachthimmel), und die Decal- und Foliage-Shots zeigen den
-Boden ohne ihr Motiv. Belegt sind damit Forward und Deferred mit Kaskadenschatten, Würfel-/Instancing-
-/Occlusion-Szenen, Nachtlicht, Himmel und GI im Rauschen; **nicht** belegt sind Decals, Lokalschatten und
-Foliage im Bild. Die Zahlen dafür liefert der Extractor-Test (Lokalschatten-Schicht und -Matrizen werden
-bitgleich gegen einen frischen Walk verglichen). Eine zweite Runde mit richtig gerahmten Witnesses folgt
-weiter unten, falls sie in diesem Schritt noch gefahren wurde.
+gültiger Modus (`point|spot`, das Bild ist der Nachthimmel), die Decal- und Foliage-Shots zeigen den
+Boden ohne ihr Motiv, und alle Shots rendern bei 1280×720: SSAO läuft bei 640×360, dasselbe Verhältnis,
+der aspektabhängige Schwanz des Extractors läuft in dieser Runde (und im 50k-Capture, 2840×1528 zu
+1420×764) nie. Deshalb die zweite.
+
+**Metal-Pixel-A/B, zweite Runde: richtig gerahmt, echter Vorher/Nachher** (`scripts/perf/frame_pixel_ab.sh`,
+16 Shots). Die Baseline-Binary war für den Vollbau überschrieben; sie wurde deshalb nachgebaut (nur die
+drei Produktdateien per `git checkout 25e8915d -- ...` auf den Stand vor Schritt 2, inkrementell), ihr
+Deploy-Ordner und der der neuen Build in je ein Verzeichnis kopiert und mit
+`scripts/perf/selfcontain_deploy_copy.sh` selbstständig gemacht (eine bloße Kopie lädt weiter die dylibs
+des Build-Baums). Beleg, dass die Kopien verschiedene Builds halten: das Symbol `frameShapeOf` steht nur
+in der neuen `libHorizonRendering.dylib`. Danach wurden die drei Dateien zurückgesetzt und alles neu
+gebaut (rc 0, `git status` sauber, Extractor-Tests erneut grün, das Skript im Repo reproduziert die md5s
+der neuen Build).
+
+| Witness | Bild |
+|---|---|
+| `ls_point_*`, `ls_spot_*` (Forward und Deferred) | Würfel wirft einen Schatten des Punkt- bzw. Spotlichts auf die Platte |
+| `decal_def`, `decal_fwd` | roter Decal-Fleck auf der Platte (Deferred projiziert, Forward ignoriert ihn in v1) |
+| `foliage_fwd`, `foliage_def` | Feld aus 2000 Foliage-Instanzen |
+| `shadinst_*` | Reihe aus sieben instanzierten Würfeln mit Kaskadenschatten |
+| `odd_*` (Render-Scale 0,51) | dasselbe bei Szene 653×367 und SSAO 326×183 (laut Engine-Log "scene render size 653x367"): **der Schwanz läuft zwischen Kaskaden- und Szenenpass**, auch mit Lokalschatten und mit Kaskadenschatten aus der Instanzreihe |
+
+Ergebnis: **16 von 16 Shots byte-identisch zwischen der Baseline-Binary und der neuen Build.** Kontrolle:
+jede der beiden Builds zweimal gefahren, beide Läufe je Build byte-gleich (16 von 16). Die md5s der
+neuen Build (Referenz für Schritt 3 bis 5, nur auf diesem Gerät und dieser macOS-Version gültig):
+
+```
+ls_point_fwd 83fe304229de8752d0cf0658caf5237b      shadinst_fwd 28daf946b3530cb82ae14a4ec921cd80
+ls_point_def c8f89f3ce3a707cc57abe74a7101c2dc      shadinst_def 5afc47ec1419ac39e5405ebf50d4b707
+ls_spot_fwd  049fc80e11c94c3af30ac21f7e1b221e      odd_shadinst_fwd eb65ffc9233511981e05fab88118585d
+ls_spot_def  1ebed478b610ab9ccf407d73449f339b      odd_shadinst_def 527517a083b2142f1f6d71eb5c99e56f
+decal_def    f49e23b192c0bb28dd8791de79bd70f4      odd_dof_fwd e261707ae4a2e19a4fefddf81630521f
+decal_fwd    26d302e97b016b60b3d8d202b815061e      odd_ls_point_fwd d2f62530c03eda9f8d3b855dd6a540e4
+foliage_fwd  19f138ba17824037c143c2507927be80      odd_ls_spot_fwd 74bcd815f76b621a8021e8583e34a59e
+foliage_def  07f8ad963cf4db5b0127a7e99e82a21b      odd_shadinst_nossao 84d4c5a9e6f754fa0e230a4793258156
+```
+
+Damit ist der aspektabhängige Schwanz nicht nur durch den Unit-Test ("a reused extract at another aspect
+equals a full walk at it", Grenzen absichtlich auf ±1000 zerschossen, bitgleich gegen einen frischen Walk),
+sondern auch im Bild belegt. Nicht abgedeckt bleiben GI, Low-Res-Wolken und der Wolken-Prepass (nicht
+bitgenau), D3D11/D3D12/Vulkan (kein Gerät) und echte Spielinhalte (Skinned, Partikel, Trails).
 
 ### 6.6 Was nur die CI belegt
 
@@ -355,7 +392,11 @@ weiter unten, falls sie in diesem Schritt noch gefahren wurde.
   bleibt jetzt im Zustand: ein Verfeinern je Walk ist möglich, und `FrustumCuller::cull` läuft fünfmal
   je Frame (2,1 ms bei 50k). Beides ist Kandidat für Schritt 4 oder 5; dieser Schritt hat es nicht
   angefasst, weil es das Verhalten der Pässe ändert (eine Mesh-Auflösung mitten im Frame würde dann erst
-  im nächsten Walk sichtbar).
+  im nächsten Walk sichtbar). Ein Kommentar ist durch den In-Place-Zustand veraltet und wurde bewusst
+  nicht angefasst (Metal blieb unberührt): `MetalRenderer.mm`, `EnsureGIProbeGrid` ("m_renderWorld was
+  re-extracted by EncodeGIAccelBuild's extract() … creates BRAND NEW RenderObjects whose worldBounds are
+  whatever the extractor could produce"): die Grenzen sind dort schon vom Schattenpass verfeinert. Das
+  Verfeinern ist idempotent, nichts bricht; der Text gehört mit den fünf Schleifen zusammen in Schritt 4.
 - **Schritt 5**: Die Leiter fährt gegen diesen Stand; der Zähler-Zeuge ist `RenderExtractor::extract`
   gegen `RenderExtractor::reuse` je Frame (`scripts/perf/dump_scope_p50.py`), erwartet (3, 2) auf Metal
   im Forward-Frame. Die Bench `Extraction bench: the frame copy against the walk it saves` lässt sich
