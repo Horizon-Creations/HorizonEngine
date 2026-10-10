@@ -3294,6 +3294,79 @@ TEST_CASE("Vulkan extracts with this frame's sun: one setDayNight at the frame's
 	CHECK(calls == 2);
 }
 
+TEST_CASE("Vulkan and Metal record a frame inside one extractor FrameScope (Thema 162)")
+{
+	// Vulkan extracted on its own in five places per frame (cascades, decal depth pre-pass, GI,
+	// SSAO, the scene) and, unlike Metal, never opened a RenderExtractor::FrameScope: every one of
+	// them was a FULL walk of the registry, ~26 ms each at 50k entities
+	// (docs/render-extractor-shadow-pass-plan.md 2.2). Inside the scope the first extract walks and
+	// the others answer from its copy. The scope has to be open before the first pass of each of
+	// the two places that record a frame, and it must not be opened a third time inside: a nested
+	// scope's endFrame() would close the outer one and the rest of the frame would walk again.
+	// No GPU under ctest, so this pins the order in the source.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - extractor FrameScope pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const auto bodyOf = [](const std::string& src, const char* signature) {
+		const size_t fn = src.find(signature);
+		REQUIRE_MESSAGE(fn != std::string::npos, signature);
+		const size_t fnEnd = src.find("\n}\n", fn);
+		REQUIRE_MESSAGE(fnEnd != std::string::npos, signature);
+		return src.substr(fn, fnEnd - fn);
+	};
+	const auto count = [](const std::string& hay, const char* needle) {
+		size_t n = 0;
+		for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+		return n;
+	};
+	const char* kScope = "RenderExtractor::FrameScope";
+
+	const std::string vk = stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp"));
+	REQUIRE(!vk.empty());
+	// Render(): before the viewport frame and before the swapchain branch's own cascades,
+	// decal depth and scene.
+	{
+		const std::string body = bodyOf(vk, "void VulkanRenderer::Render()");
+		const size_t scope = body.find(kScope);
+		REQUIRE_MESSAGE(scope != std::string::npos, "VulkanRenderer::Render opens no extractor FrameScope");
+		for (const char* pass : { "DrawViewportFrame(", "EncodeShadowMap(", "EncodeDecalDepth(", "DrawScene(" })
+		{
+			const size_t p = body.find(pass);
+			REQUIRE_MESSAGE(p != std::string::npos, pass);
+			CHECK_MESSAGE(scope < p, pass);
+		}
+	}
+	// RenderSceneImage(): records DrawViewportFrame on its own.
+	{
+		const std::string body = bodyOf(vk, "bool VulkanRenderer::RenderSceneImage(");
+		const size_t scope = body.find(kScope);
+		REQUIRE_MESSAGE(scope != std::string::npos, "VulkanRenderer::RenderSceneImage opens no extractor FrameScope");
+		const size_t p = body.find("DrawViewportFrame(");
+		REQUIRE(p != std::string::npos);
+		CHECK(scope < p);
+	}
+	// Exactly those two: the viewport frame they share must not open one of its own.
+	CHECK(count(vk, kScope) == 2);
+
+	// Metal keeps the scope it has had since Thema 153, ahead of its first pass.
+	{
+		const std::string mtl = stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm"));
+		REQUIRE(!mtl.empty());
+		const std::string body = bodyOf(mtl, "void MetalRenderer::EncodeFrame(");
+		const size_t scope = body.find(kScope);
+		REQUIRE(scope != std::string::npos);
+		const size_t p = body.find("EncodeShadowMap(");
+		REQUIRE(p != std::string::npos);
+		CHECK(scope < p);
+		CHECK(count(mtl, kScope) == 1);
+	}
+}
+
 TEST_CASE("GI instances get their material colour before the acceleration update (Thema 154)")
 {
 	// The extractor leaves RenderObject::baseColor white; resolveWorldMaterialScalars

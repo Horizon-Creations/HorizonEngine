@@ -198,3 +198,165 @@ Struktur-Pins, die bei einer Umstellung mitgehen müssen:
 - `tests/test_culling.cpp:3297-3341` (Vulkan-`runGi`-Kommentar "extracts on its own" — bei
   Vereinheitlichung nach Weg B nicht mehr zutreffend, Test + Kommentar müssten umgeschrieben
   werden).
+
+---
+
+## 6. Schritt 2: Frame-Zustand im RenderWorld des Aufrufers, ein Walk pro Frame (10.10.2026)
+
+Stand: Zweig auf `origin/release/0.7.0` (67a1064a) gemergt, dann Schritt 2. **Weg A** (Auftrag der
+Königin), klein am Extractor gehalten: der Reuse-Mechanismus aus Thema 153 bleibt, wo er ist; er
+bekommt den Struktur-Zähler aus Thema 164 in den Schlüssel, er hört auf zu kopieren, und Vulkan
+bekommt den Scope, den Metal seit Thema 153 hat. Die Pässe behalten ihren eigenen `extract()`-Aufruf.
+
+### 6.1 Warum die Pässe ihren Aufruf behalten (und Weg B trotzdem nicht fehlt)
+
+Der Aufruf ist nach dem ersten im Frame ein Schlüsselvergleich, kein Walk und keine Kopie mehr
+(gemessen unten). Ihn aus den Pässen zu entfernen und oben einmal zu extrahieren hätte jeden
+Ausstieg nachbauen müssen, bei dem ein Pass ihn nicht braucht: Metals SSAO aus dem G-Buffer extrahiert
+gar nicht (`EncodeSSAO`, `fromGBuffer`), der Wolken-Prepass ist opt-in, Vulkans `EncodeDecalDepth`
+kehrt vor seinem Extract zurück, wenn der Schatten-Extract keine Decals hinterließ. Jeder Pass
+braucht ein gültiges `m_renderWorld` **mit seinem Aspekt**, egal welche Pässe vor ihm liefen; der
+Aufruf ist genau diese Absicherung. D3D11/D3D12/OpenGL sind schon bei "ein Aufruf je Frame" und
+bleiben unangetastet.
+
+### 6.2 Was gebaut ist
+
+| Stelle | Änderung | Wirkung |
+|---|---|---|
+| `RenderExtractor::FrameKey` (`.h`, `makeFrameKey`/`sameFrameKey` in `.cpp`) | `+ structureEpoch`, gelesen aus `HorizonWorld::structureEpoch()` (Thema 164, Plan 164 §7.2; nicht neu gebaut) | Ein Zellwechsel, Spawn, Destroy oder Reparent zwischen zwei Extrakten eines Frames führt zu einem neuen Walk statt zur Antwort aus der Alt-Welt. Der Vertrag aus 164 §7.1 ist damit geprüft statt nur beschrieben. |
+| Frame-Zustand (`extract()`, `beginFrame`/`endFrame`) | `m_frameCopy` (eine zweite `RenderWorld`) entfällt. Der Walk bleibt in dem `RenderWorld`, in das er geschrieben wurde (`m_frameOut`); jeder weitere Aufruf mit gleichem Schlüssel **und gleichem `out`** kehrt sofort zurück. Ein anderes `RenderWorld` ist ein anderer Verbraucher und bekommt einen eigenen Walk. | Vorher: eine tiefe Kopie nach dem ersten Walk (Snapshot), eine je Wiederverwendung, ein `clear()` im `endFrame`. Jetzt keine. |
+| `FrameShape` (`m_frameShape`) | Objekt-Array-Zeiger und Größen von `objects`, `skinnedObjects`, `instanceBlocks`, `lights`, `decals`, `particleBatches`, `ribbonBatches`, `landscapes`, nach dem Walk gemerkt und bei jeder Wiederverwendung verglichen | Wer das Ergebnis leert, verkleinert oder neu zuweist, bekommt einen neuen Walk statt einer leeren Welt. |
+| `fitDirectionalShadow` (`RenderExtractor.cpp`) | nimmt die Szenenbox (Vereinigung der Caster-/Empfänger-Grenzen) herein und füllt sie beim ersten Aufruf des Walks (`m_frameShadowBox`) | Der aspektabhängige Schwanz (Projektion, Kaskaden-Fit, lokale Schattenlayer) läuft bei anderem Aspekt **an Ort und Stelle** und landet bitgleich beim vollen Walk, obwohl die Backends die Grenzen inzwischen verfeinert haben. Ein Refit aus den verfeinerten Grenzen hätte andere Kaskaden ergeben als die, mit denen der Schattenpass zeichnete. |
+| `extractCameraOnly` | verwirft den Frame-Zustand, wenn es in das `RenderWorld` des Frames schreibt | Eine Kamera, die nicht zum gemerkten Aspekt passt, wird nie als Walk ausgegeben. Nur Editor, dort gibt es keinen Scope. |
+| `VulkanRenderer::Render()` und `RenderSceneImage()` | `RenderExtractor::FrameScope` vor dem ersten Pass | Bis zu **fünf volle Walks je Frame** (Kaskaden, Decal-Tiefe, GI, SSAO, Szene) werden zu einem. |
+| `tests/test_world_scale.cpp` | 5 neue Fälle (Struktur-Epoche je Änderungsart, In-Place-Zustand, fremdes `RenderWorld`, Größen-/Leer-Prüfung), 2 bestehende auf die Renderer-Praxis umgestellt (alle Pässe in dasselbe `RenderWorld`, Vergleich mit einem frischen Walk), Bench `Extraction bench: the frame copy against the walk it saves` (skip) | siehe 6.5 |
+| `tests/test_culling.cpp` | Quelltext-Pin "Vulkan and Metal record a frame inside one extractor FrameScope": Vulkan genau zwei Scopes (`Render()`, `RenderSceneImage()`), beide vor dem ersten Pass; Metal genau einer vor `EncodeShadowMap` | Der lokale Zeuge für Vulkan, das auf diesem Mac nicht kompiliert wird. Ein dritter, verschachtelter Scope in `DrawViewportFrame` würde den äußeren früh schließen (`endFrame`). |
+
+### 6.3 Was der Schlüssel erzwingt, was nicht
+
+| Änderung zwischen zwei Extrakten eines Frames | Wirkung |
+|---|---|
+| `createEntity`, `destroyEntity`, `reparentEntity`, `moveChild`/`placeNextTo`/`sortChildrenByName`, ein Zell-Laden oder -Entladen, `noteStructureChanged` | neuer Walk (Test "every kind of structure change invalidates the frame copy") |
+| anderer Editor-Kamera-Zustand, Tageszeit, Schatten-Einstellungen, ContentManager oder dessen Epoche, andere Welt | neuer Walk (schon vorher) |
+| anderer Aspekt | Schwanz an Ort und Stelle, kein Walk |
+| Komponentenwerte (bewegter Transform, anderes Material), Mesh-Komponente an lebender Entity hinzugefügt | **nicht gesehen**: der Vertrag "die Welt wird im Scope nicht angefasst" gilt weiter. Genau das nennt 164 §7.2 als Grenze des Zählers. |
+
+### 6.4 Was die Pässe dem Zustand antun dürfen (Prüfung der Mutationsstellen)
+
+Ohne die Kopie sieht der nächste Pass, was der vorige im `RenderWorld` hinterließ. Alle nicht-const
+Zugriffe der Backends auf das Ergebnis wurden durchgesehen (`RenderWorld&` ohne const in
+`HE_Rendering`, Schleifen `for (RenderObject& ...)`, direkte Feldzuweisungen):
+
+- `RenderObject::refineWorldBounds` (Metal 5 Stellen, Vulkan 5, D3D11/D3D12/GL je 1 bis 2): ersetzt die
+  Grenze durch `meshLocalBounds.transformed(transform)`, hängt nur an Mesh-Grenze und Transform und
+  schreibt jedes Mal denselben Wert. Jeder Pass verfeinert vor dem Gebrauch ohnehin selbst.
+- `HE::resolveWorldMaterialScalars` (Vulkan 3 Stellen, D3D11/D3D12 je 1): schreibt die Skalare des
+  Materials, lässt den Wert unverändert, wenn es nicht auflöst. Gleiche Eingabe, gleicher Wert.
+- `extractUI` löscht `uiObjects` selbst, bevor es füllt; Metals `swap(uiObjects)` stellt wieder her.
+- Nichts sortiert, löscht oder hängt an `objects`, `lights`, `decals`. `RenderSorter::sort`,
+  `FrustumCuller::cull` und `GIProbeSceneSignature` nehmen `const RenderWorld&` bzw. nur
+  Entity- und Mesh-Id (nicht die Grenzen).
+
+Wer künftig in einem Pass sortiert oder entfernt, wird über `FrameShape` aufgefangen, wenn sich Größe
+oder Array-Zeiger ändern, und zahlt dann einen Walk. Ein In-Place-Umsortieren bei gleicher Größe fängt
+nichts ab: so etwas gehört in einen eigenen Index (wie `m_sortedIndices`), nicht in `objects`.
+
+### 6.5 Messung und Belege
+
+**Kosten der Kopie, die entfällt** (Bench, Release, M5, Last 2,4; 100 Entities je Gruppe, Würfel-Meshes,
+ohne ContentManager, deshalb ist der Walk billiger als im Spiel; Median über 7 Läufe):
+
+| Objekte | ein Walk | tiefe Kopie des Ergebnisses | Frame aus Walk + 1 Wiederverwendung (alt) |
+|---|---|---|---|
+| 1 000 | 0,25 ms | 0,04 ms | 0,33 ms |
+| 10 000 | 2,48 ms | 0,39 ms | 3,30 ms |
+| 50 000 | 15,8 ms | 2,18 ms | 20,4 ms |
+| 100 000 | 35,1 ms | 4,74 ms | 48,1 ms |
+
+Eine Kopie kostet also rund 14 % eines Walks. Metal zahlte davon im Forward-Frame drei (Snapshot nach dem
+Walk, SSAO, Szene) plus das `clear()`, Vulkan nach dem Scope fünf. Bei 50k sind das rechnerisch
+**6,6 ms (Metal) bzw. 11 ms (Vulkan) je Frame**, bei 100k das Doppelte. Das ist aus dem Bench
+abgeleitet, nicht im echten Loop gemessen: die Baseline-Binary wurde für den Vollbau überschrieben, und
+der Vorher/Nachher-Lauf der Leiter ist Schritt 5.
+
+**Der echte Editor-Loop, neue Build** (`scripts/he_perf_capture.py`, Metal, 50 568 Entities aus
+`gen_reference_world.py --count 50000`, `--warmup 240 --frames 120 --no-counters --cam 0,25,90,0,-0.25`,
+Last 2 bis 3, Bildschirm entsperrt):
+
+- Jeder der 120 Frames hat **genau 3 `RenderExtractor::extract`-Aufrufe und 2 `RenderExtractor::reuse`**
+  (1 Walk, SSAO, Szene). Der Struktur-Zähler bricht die Wiederverwendung im Betrieb also nicht.
+- Der volle Walk: p50 17,0 ms, p90 29,3 ms je Frame. Die Wiederverwendung: p50 0,000 ms, max 0,0004 ms
+  (statt einer Kopie von 2 bis 3 ms).
+- CPU/Frame p50 38,2 ms, `Render` p50 30,9 ms, `EncodeShadowMap` p50 20,8 ms (davon 17,0 der Walk),
+  `EncodeSSAO` p50 5,2 ms, `FrustumCuller::cull` 5 Aufrufe je Frame, zusammen p50 2,1 ms.
+
+**Tests** (alle lokal, Release, shaderc ON):
+
+- Gegen den unveränderten Code liefen die zwei Struktur-Tests und der Vulkan-Pin **rot** (der Walk
+  "Late" fehlte: `c.objects.size() == 41` statt 42), danach grün. Die später ergänzten Fälle
+  (In-Place, fremdes `RenderWorld`, Größenprüfung) wurden nur gegen den neuen Code gefahren.
+- `RenderExtractor: *`, die Pins `Vulkan extracts with this frame's sun ...`, `GI instances get their
+  material colour ...` und der neue Pin: 22 Fälle, 985 Assertions, grün.
+- ctest voll (`-j4 --timeout 1500`, Release, shaderc ON, `HE_CONFIG_DIR` ungesetzt, frisches `HOME`):
+  257 Tests, **255 grün, 0 rot, 2 übersprungen** (`runtime_size_app_advanced`/`_basic`: für diese
+  Plattform "reported and skipped" per Konstruktion, `scripts/runtime_size.py`), 300 s. Vorher ein
+  Vollbau des gemergten Stands ohne eigene Änderung (rc 0, 1637 Schritte, 32 min) und danach der
+  Vollbau mit der Änderung (rc 0).
+
+**Metal-Pixel-A/B, erste Runde** (`scripts/he_shot.py`, 15 Shots; `HE_SKY_TIME=30`, `AA=0`, privates
+`HE_CONFIG_DIR`): Kontrolle zuerst, dieselbe Baseline-Binary zweimal. **12 von 15 Shots sind byte-identisch
+zwischen zwei Läufen, und alle 12 sind byte-identisch zwischen Baseline und neuer Build.** Die drei
+übrigen (GI Forward, GI Deferred, Low-Res-Wolken) rauschen schon in der Baseline selbst; neu gegen
+Baseline liegt im gleichen Rauschen wie neu gegen neu (GI Forward: mittlere Abweichung 0,0025/255, max 2,
+bei Baseline gegen Baseline 0,0006/255, max 1, bei neu gegen neu 0,0004 bis 0,0029/255, max 2; GI Deferred:
+0,0000/255, max 1; Low-Res-Wolken 0,05 bis 0,11/255, max 8, bei neu gegen neu 0,02 bis 0,06/255, max 8).
+**Grenzen dieser Runde**: unter den 12 sind nur 9 verschiedene Bilder (`SSAO=1` ändert gegenüber dem
+Standard nichts, Forward und Deferred gleichen sich im Lokalschatten-Shot), `LOCALSHADOW=1` ist kein
+gültiger Modus (`point|spot`, das Bild ist der Nachthimmel), und die Decal- und Foliage-Shots zeigen den
+Boden ohne ihr Motiv. Belegt sind damit Forward und Deferred mit Kaskadenschatten, Würfel-/Instancing-
+/Occlusion-Szenen, Nachtlicht, Himmel und GI im Rauschen; **nicht** belegt sind Decals, Lokalschatten und
+Foliage im Bild. Die Zahlen dafür liefert der Extractor-Test (Lokalschatten-Schicht und -Matrizen werden
+bitgleich gegen einen frischen Walk verglichen). Eine zweite Runde mit richtig gerahmten Witnesses folgt
+weiter unten, falls sie in diesem Schritt noch gefahren wurde.
+
+### 6.6 Was nur die CI belegt
+
+- **Vulkan**: `VulkanRenderer.cpp` wird auf diesem Mac nicht kompiliert (kein SDK). Lokal belegt sind
+  nur `clang -fsyntax-only` gegen die MoltenVK-Header (rc 0; Negativkontrolle mit vertipptem
+  `FrameScope`-Typ scheitert wie erwartet) und der Quelltext-Pin. Dass es unter MSVC baut, belegt der
+  Windows-Job; dass die fünf Pässe aus **einem** Walk dasselbe Bild liefern, höchstens der Job
+  `vulkan-lavapipe` (Bild-A/B mit Validation). Mit Hardware ist nichts davon gelaufen.
+- **D3D11/D3D12**: keine Quelländerung, aber `RenderExtractor.h` (private Elemente) wird dort mitkompiliert:
+  Windows-Job.
+- **Linux/OpenGL**: Linux-Job und `he_tests` (der Extractor wird in `he_tests` direkt mitgebaut).
+
+### 6.7 Abgeschnitten, und was für Schritt 3 bis 5 daraus folgt
+
+- **Cross-Frame-Zustand: nicht gebaut.** Der Bauplan nannte "Frame- auf Cross-Frame-Gültigkeit heben".
+  Dafür fehlt die Voraussetzung: Komponentenwerte werden von Skripten, Inspector, Gizmo, Physik und
+  Animation direkt über Referenzen geschrieben, es gibt keinen Schreibpfad, an dem ein Zähler hängen
+  könnte (`TransformComponent::dirty` wird laut Kommentar nicht zuverlässig gesetzt), und `structureEpoch`
+  deckt Werte ausdrücklich nicht ab (164 §7.2). Dazu ändert sich in jedem Frame mit Spielinhalt etwas
+  (Partikel, Trails, Skinning, Tageszeit im Schlüssel), ein Frame-Überspringen würde selten greifen.
+  Der Hebel ist der Walk selbst (Schritt 3), nicht seine Gültigkeit.
+- **Editor-`s_extractor`: nicht angefasst.** Er schreibt in einen eigenen Snapshot mit eigener Kamera und
+  eigenem Aspekt, nur bei Bedarf (Klick, Rahmen, Drop, Snap-Drag, zweites Scene-Fenster). Ihn mit dem
+  Renderer zu teilen hieße, das `RenderWorld` des Backends über `IRenderer` herauszureichen: ein
+  API-Eingriff in alle fünf Backends, den dieser Schritt nicht rechtfertigt. Die Frage aus 2.4 ist damit
+  beantwortet: außen vor.
+- **Schritt 3 (Dirty-Flag)**: Ein Vergleich von `parentWorld` mit einem gemerkten Wert spart die
+  Multiplikation je Entity, **nicht den Abstieg**: `propagateFrom` liest jede `HierarchyComponent` und
+  jede `TransformComponent` in jedem Frame, und das ist Speicherverkehr, der bei 50k den Walk dominiert.
+  Ein echtes Überspringen eines Teilbaums braucht ein Signal je Teilbaum (von den Schreibern gesetzt oder
+  aus einer Prüfsumme je Gruppe), und das ist eine eigene Entscheidung. Der Anteil von
+  `propagateTransforms` am Walk ist im Bench (Abschnitt 6.5) noch nicht ausgewiesen.
+- **Schritt 4 (Schattenpass)**: Jeder Metal-Pass verfeinert in einer eigenen Schleife alle Objekte
+  (`ResolveMesh` je Objekt, fünf Schleifen je Frame). Die Verfeinerung ist idempotent und das Ergebnis
+  bleibt jetzt im Zustand: ein Verfeinern je Walk ist möglich, und `FrustumCuller::cull` läuft fünfmal
+  je Frame (2,1 ms bei 50k). Beides ist Kandidat für Schritt 4 oder 5; dieser Schritt hat es nicht
+  angefasst, weil es das Verhalten der Pässe ändert (eine Mesh-Auflösung mitten im Frame würde dann erst
+  im nächsten Walk sichtbar).
+- **Schritt 5**: Die Leiter fährt gegen diesen Stand; der Zähler-Zeuge ist `RenderExtractor::extract`
+  gegen `RenderExtractor::reuse` je Frame (`scripts/perf/dump_scope_p50.py`), erwartet (3, 2) auf Metal
+  im Forward-Frame. Die Bench `Extraction bench: the frame copy against the walk it saves` lässt sich
+  mit `--no-skip` wiederholen.

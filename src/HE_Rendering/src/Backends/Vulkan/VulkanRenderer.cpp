@@ -408,6 +408,15 @@ void VulkanRenderer::Shutdown()
 
 void VulkanRenderer::Render()
 {
+    // Every pass below that needs the scene (cascades, decal depth pre-pass, GI, SSAO, the scene
+    // itself) extracts on its own so its draw set and cascade fit agree with the others — five
+    // full walks of the registry a frame, ~26 ms each at 50k entities. Inside this scope the world
+    // does not change, so the extractor walks it once and the other four find that walk in
+    // m_renderWorld (RenderExtractor::beginFrame). Closed on every return. Exactly two of these
+    // exist, here and in RenderSceneImage(): a third one inside DrawViewportFrame would end the
+    // outer scope early (tests/test_culling.cpp pins it).
+    RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
     m_giRanThisFrame   = false;  // cleared each frame; set true only inside runGi()
@@ -3722,8 +3731,9 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     // one frame late; that is invisible.)
     if (m_renderWorld.decals.empty()) return;
 
-    // Now the real extract: the shadow one ran at aspect 1.0, which is the wrong
-    // frustum for a camera pass. Same reason runSSAO extracts for itself.
+    // Now the extract for this image's aspect. Inside the frame's scope the walk is already in
+    // m_renderWorld (EncodeShadowMap's), so this only redoes what depends on the aspect, and only
+    // when the depth image's differs from the cascades'. Same reason runSSAO extracts for itself.
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(d.w) / static_cast<float>(d.h), &m_editorCamera);
@@ -5817,6 +5827,8 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                                 m_environment.sunColor, m_environment.sunIntensity,
                                 m_environment.moonColor, m_environment.moonIntensity,
                                 m_environment.cloudCoverage);
+        // The same one-walk scope as Render(): DrawViewportFrame's passes extract on their own.
+        RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
 
         // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
         // decal depth) are torn down and rebuilt, and the one-shot buffer below
