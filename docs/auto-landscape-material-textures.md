@@ -1551,6 +1551,8 @@ diesem Schritt **nicht** dabei, sie sind hier also nicht ausprobiert.
   (§10.5). Gerendert ist in diesem Schritt nichts, geprüft ist nur der Inhalt der Dateien.
   **Nachtrag Thema 177, Schritt 2:** Metal und OpenGL sind gerendert, AO ist geklärt, siehe §15.
 - Dauerhafter Speicherort und Kompression (BC7 für Arrays).
+  **Nachtrag Thema 177, Schritt 5:** Ein Upload auf den EngineContent-Server allein macht die
+  echten Texturen nicht wirksam (der ausgelieferte Platzhalter schlägt den Cache), siehe §18.
 
 ## 15. Verifikation mit den echten Texturen und die AO-Frage (Thema 177, Schritt 2)
 
@@ -1921,10 +1923,351 @@ Metal-Lauf mit den echten Texturen ist bereits in Schritt 2/3 erfolgt). Kein Mip
 Mip-Kette, unabhängig vom Backend, §8.1/§15.6). Leistung/GPU-Speicher mit den 2K-Arrays weiter nicht
 gemessen (§15.4).
 
+## 18. Schritt 5: Auslieferung über den Engine-Default-Server (Thema 177)
+
+Auftrag: die vier echten Schichten (2K, `out/landscape-real`) auf den Engine-Default-Server
+(EngineContent-SFTP, `src/HE_ContentSync`) legen und prüfen, dass Build, Cook und Deploy sie von dort
+holen. **Hochgeladen ist nichts**, und die Prüfung ergibt, dass ein Upload allein die Texturen auch
+nicht ins Material bringen würde. Der Stand, mit Belegstellen:
+
+### 18.1 Warum ein Upload allein nichts ändert
+
+- **Der ausgelieferte Default schlägt den Server-Cache.** `ContentManager::resolveAbsolutePath`
+  (`ContentManager.cpp:965-984`) prüft für `Engine/…` der Reihe nach Projekt-Override, ausgelieferten
+  Default (`<exe>/EngineContent`, kommt aus `EditorDeps/EngineContent`, dort liegen die 18
+  128-px-Platzhalter, in git) und erst **zuletzt** den SFTP-Cache. Der Kommentar im Code sagt es
+  selbst: „a real shipped default always wins over a cached copy".
+- **Die echten Texturen werden nie als Remote-Asset registriert.** `registerRemoteAsset`
+  (`ContentManager.cpp:1392`) kehrt sofort zurück, wenn die UUID schon in `m_diskRegistry` steht, und
+  `scanContentDirectory` (`:2917-2922`) trägt die Platzhalter dort ein. Die echten Texturen haben
+  dieselben festen UUIDs (`hi` = 0x400 + Index, §6) wie die Platzhalter, genau damit Materialien heil
+  bleiben (§4.4). Das Manifest des Servers würde also zwar die Kacheln im Content Browser zeigen, aber
+  `ensureResident` lädt weiter den Platzhalter von der Platte.
+- **Das Material lädt sie über dieselben Pfade.** `kAutoLandscape{Albedo,Normal,Mask}Array` sind
+  `Engine/Textures/Landscape/T_Landscape_*_Array.hasset`
+  (`AutoLandscapeMaterial.h:62-64`), also genau die Pfade, die der ausgelieferte Default belegt.
+
+### 18.2 „CMake/Cook holt die Texturen vom Server" gibt es nicht
+
+- Das Design (`docs/engine-content-sftp-sync-design.md`, „Explicitly out of scope") nimmt Cook und
+  Pak ausdrücklich aus. SFTP ist ein Nachlade-Weg des Editors, kein Build-Schritt. Das Wiring in
+  `src/HE_ContentSync/CMakeLists.txt` bringt nur den **Endpunkt** (Host, Benutzer, Passwort als
+  Compile-Definition) in die Bibliothek, nie Inhalte.
+- Der Exporter packt `settings.engineContentDir` (`ProjectExporter.cpp:782`), das ist
+  `contentManager().engineContentRoot()` (`ExportDialogPanel.cpp:1601`), also das ausgelieferte
+  Verzeichnis neben der exe, **nie den SFTP-Cache**. Ein exportiertes Spiel enthält so immer die
+  Platzhalter. Würde man sie aus der Auslieferung nehmen, enthielte es die Texturen gar nicht, auch
+  nicht, wenn der Editor sie längst im Cache hat.
+- Der Deploy kopiert `EditorDeps/` ganz neben die exe und nach `out/deploy/Editor`
+  (`src/HE_Editor/CMakeLists.txt`, POST_BUILD, §14.5). Ein „Deploy enthält die echten Texturen" gibt es
+  damit nur durch das manuelle Zurückkopieren aus §14.5. Der lokale Deploy dieses Zweigs hat echte
+  Texturen (von Hand kopiert), ein frisch gebauter Baum nicht. **Aber nicht den Satz aus
+  `out/landscape-real`:** Gemessen (`cmp`, Schritt 5) sind 13 der 18 Dateien dort identisch, die
+  fünf Masken (Dirt, Grass, Rock, Snow und `T_Landscape_Mask_Array`) sind die AO-Variante aus
+  Schritt 2 (`out/landscape-real-ao`, byte-gleich). Ob AO übernommen wird, ist offen (§15.5): aus
+  `out/deploy` also **nicht** veröffentlichen.
+
+### 18.3 Zwei Fallen beim Veröffentlichen
+
+- **Das Manifest ist der volle lokale Scan.** `publishEngineContentBlocking`
+  (`EngineContentPublish.cpp:149-154`) lädt als `manifest.json` genau die `.hasset`-Dateien hoch, die
+  im lokalen Wurzelverzeichnis liegen, **zuletzt**. Aus einem Teilordner (nur die 18 Texturen) würde das
+  Manifest auf 18 Einträge schrumpfen: die Dateien blieben auf dem Server, aber jeder Editor verlöre
+  alle anderen Assets aus dem Katalog. Nur aus einem **vollständigen** EngineContent-Verzeichnis
+  veröffentlichen.
+- **Platzhalter überschreiben die echten Texturen.** Der Diff läuft über `Hpak::hash64` je Datei. Wer
+  „Publish Engine Content to Server" aus einem Checkout mit den eingecheckten Platzhaltern drückt,
+  ersetzt die echten Texturen auf dem Server durch die 128-px-Platzhalter (Hash weicht ab, also
+  Upload). Vor dem Veröffentlichen die 18 Dateien im Wurzelverzeichnis durch die echten ersetzen
+  (und beachten, dass jedes Neulinken von `HorizonEditor` sie zurücksetzt, §14.5).
+- Außerdem nicht schreibfrei: `rebuildManifestFromServerBlocking` („Rebuild Manifest from Server")
+  lädt am Ende ebenfalls `manifest.json` hoch.
+
+### 18.4 Wege, das tatsächlich zu liefern (offen, Entscheidung des Menschen)
+
+| Weg | Was nötig ist | Folge |
+|---|---|---|
+| Nur Ablage | Upload der 644 MiB, keine Codeänderung | Material bleibt auf Platzhaltern. Kein „funktioniert damit". |
+| Platzhalter aus git und Auslieferung | Editor holt on demand, Exporter muss den Cache zusätzlich packen (vorher herunterladen) | Frischer Klon, Forks und CI (Zugangsdaten sind Secrets) haben keine Landschaftstexturen. |
+| Build-/Cook-Schritt, der sie holt | Neuer Mechanismus, kein Prüfen | Offline-Builds brauchen weiterhin einen Rückfall. |
+
+Keine der Tests in `tests/` nennt `T_Landscape` oder `Textures/Landscape`; die Pfade hängen an den
+Aufnahmeskripten (`scripts/auto-landscape-repro/*`), die den Deploy benutzen.
+
+**Nachtrag: „direkt nach `EditorDeps/EngineContent/Textures/Landscape` und nach git“.** Das war die
+spätere Anweisung der Queen (statt der Ablage auf dem Server). Technisch ist das der einfachste Weg,
+denn der Deploy kopiert `EditorDeps/` ohnehin ganz (§18.2), der ausgelieferte Default gewinnt, und der
+Exporter packt ihn. Er ließ sich aber **nicht ausführen**, gemessen am Satz aus `out/landscape-real`
+(18 Dateien, 561 MiB roh):
+
+- **GitHub lehnt einen Push mit Dateien über 100 MiB ab.** Die drei Arrays haben je 111 848 271–275
+  Byte (106,7 MiB; fünf Slices RGBA8 mit gebackenen Mips). `.hasset` hat keine Kompression
+  (`HAsset.h:48`, `flags` reserviert und ungelesen), die Dateien lassen sich also nicht kleiner
+  schreiben. Eine Datei mit vier Slices wäre 89,5 MB (85,3 MiB) groß; dafür müsste Slice 4
+  (WetGround, seit §16 ungelesen) aus dem Pack-Werkzeug fallen. Das verschiebt die Array-UUIDs
+  (`landscape_tex_gen/main.cpp:222`, `hi` = 0x400 + `layerCount`·3 + Map) und damit
+  `M_AutoLandscape.hasset`, die Konstanten in `AutoLandscapeMaterial.h` und die gepinnten Tests.
+- **Verlauf:** Der gesamte Verlauf des Repos ist heute 285 MiB groß (`git count-objects -vH`,
+  size-pack). Der Satz komprimiert auf rund 255 MiB (`gzip -3`, Summe über die 18 Dateien), würde den
+  Klon also fast verdoppeln, **und bei jedem erneuten Packen noch einmal** (AO übernehmen und die
+  anderen Geschmacksentscheidungen aus §15.5 sind offen, §4.4: Binär-Ballast wurde schon einmal aus
+  der Historie gepurgt). Ein Merge nach `main` macht das dauerhaft.
+- Git LFS wäre der übliche Ausweg, ist aber ein Eingriff in jeden Checkout und in jeden CI-Job (jeder
+  Lauf zieht 560 MB je Job; das freie LFS-Kontingent von GitHub ist klein).
+
+Deshalb wurde nichts eingecheckt. Offen für den Menschen: (1) Slice 4 entfernen und einchecken, (2)
+LFS, oder (3) bei Platzhaltern in git bleiben und die Auslieferung über den Server bauen (Cache
+schlägt Platzhalter, Exporter packt den Cache, §18.1/§18.2).
+
+### 18.5 Was in diesem Schritt nicht ging
+
+Der Upload wurde **nicht ausgeführt**: Die Zugangsdaten stehen in
+`cmake/EngineContentCredentials.cmake` (gitignored, nur im Haupt-Checkout). Der Zugriff darauf wurde
+von der Sicherheitsprüfung der Sitzung abgelehnt, und es gibt kein Kommandozeilenwerkzeug fürs
+Veröffentlichen (nur den Editor-Dialog, `EngineContentPublishDialog.cpp`). Wer den Upload später macht:
+Editor aus dem Haupt-Checkout (der den Endpunkt eingebaut hat) bauen, die 18 echten Dateien aus
+`out/landscape-real/Engine/Textures/Landscape` nach `<exe>/EngineContent/Textures/Landscape/` kopieren,
+mit `HE_ENGINE_CONTENT_EDITABLE=1` starten und „Assets ▸ Publish Engine Content to Server" wählen.
+**Vorher** den Server lesend ansehen (Engine-Ordner im Content Browser nach dem Probe-Lauf).
+
+## 19. Schritt 6: echte Texturen im Ausliefer-Ordner, lose Einzeltexturen (Thema 177)
+
+Stand: Zweig `claude/auto-landscape-material-texturen-importieren-arrays-bauen-ve`, MacBook Air
+(Apple M5). Anweisung der Queen nach Schritt 5: die Arrays aus den lokalen Texturen
+(`out/landscape-real`, vier Poly-Haven-Schichten, 2K) bauen, in
+`EditorDeps/EngineContent/Textures/Landscape` die Platzhalter ersetzen, alle Einzeltexturen
+zusätzlich als lose Assets bereitlegen und den Upload auf den Engine-Default-Server vorbereiten.
+**Eingecheckt sind nur Code und diese Doku. Die Texturen sind im Arbeitsbaum, nicht in git** (§19.4).
+
+### 19.1 Was im Ordner liegt
+
+`EditorDeps/EngineContent/Textures/Landscape/` hat jetzt 30 Dateien, 752 MiB:
+
+| Gruppe | Dateien | UUID `hi` | Größe je Datei | Herkunft |
+|---|---|---|---|---|
+| 3 Arrays (`T_Landscape_{Albedo,Normal,Mask}_Array`) | 3 | 0x40F..0x411 | 106,7 MiB | `out/landscape-real`, **ersetzt** die 128-px-Platzhalter, 5 Slices, 12 Mips |
+| Je Schicht `_Albedo`, `_Normal`, `_Mask` (Grass, Dirt, Rock, Snow) | 12 | 0x400..0x40B | 16 MiB | `out/landscape-real`, **ersetzt** die Platzhalter |
+| Je Schicht `_Albedo`, `_Normal`, `_Mask` (WetGround) | 3 | 0x40C..0x40E | 16 MiB | `out/landscape-real`, **ersetzt**, aber weiter das **hochskalierte Schachbrett** (es gibt kein WetGround-Set, §14.1) |
+| **Neu:** je Schicht `_Roughness`, `_AO`, `_Height` (Grass, Dirt, Rock, Snow) | 12 | 0x420..0x42B | 16 MiB | `landscape_tex_gen --loose`, **neue Dateien**, keine UUID wird wiederverwendet |
+
+Die Arrays und `_Mask` sind die **Variante ohne AO** (Masken-R weiß), so wie die Queen
+`out/landscape-real` verlangt hat. Ob AO in die Maske kommt, ist weiter offen (§15.5). Die losen
+`_AO`-Texturen ändern daran nichts, sie liegen nur bereit.
+
+**Die „20 Einzeltexturen“** sind 4 Schichten × 5 Maps (Albedo, Normal, Roughness, AO, Height). Sie
+existieren jetzt alle als eigene Assets, aber nicht alle sind neu:
+
+- `T_Landscape_<Schicht>_Albedo` und `_Normal` (8 Stück) gab es schon als lose Dateien seit Schritt 1
+  (sie sind Teil des Pakets, aus dem die Arrays entstehen). Sie bleiben mit ihren UUIDs
+  (0x400, 0x401, 0x403, 0x404, 0x406, 0x407, 0x409, 0x40A), eine zweite Kopie unter anderem Namen
+  hätte nur die Verweise verdoppelt.
+- `_Roughness`, `_AO`, `_Height` (12 Stück) steckten bisher nur als Kanäle G, R, B in `_Mask`. Sie sind
+  neu und tragen ab 0x420.
+- Die 5. Schicht (WetGround) hat keine Einzeltexturen dieser Art: es gibt kein Set (§14.1, §16).
+  Ihr Block 0x42C..0x42E bleibt frei.
+
+### 19.2 Das Werkzeug: `landscape_tex_gen --loose`
+
+```
+landscape_tex_gen <Ziel> --loose <png-ordner> [--size 2048]
+```
+
+Liest `<Schicht>_{Roughness,AO,Height}.png` (dieselben Schreibweisen wie `--pack`, über dieselbe
+`loadImage`, also derselbe Decoder und dieselbe Spiegelung), schreibt `T_Landscape_<Schicht>_<Map>.hasset`.
+Linear, RGBA8 mit R=G=B (grau), ein Mip, wie ein importiertes PNG. Eine Ein-Kanal-Textur gibt es im
+Format nicht (`TextureFormat` kennt nur RGBA8 und die Blockformate), deshalb 16 MiB statt 4. Die UUID ist
+`0x420 + Schicht·3 + Map` in der Reihenfolge von `kLayers` (Roughness, AO, Height). Wird eine Schicht
+angehängt, verschiebt sich keine bestehende ID. `0x412` ist `M_AutoLandscape`
+(`kAutoLandscapeMaterialId`), deshalb beginnt der Block nicht bei 0x412.
+
+`--pack`, `--arrays-only`, `--material` und der Platzhalter-Lauf sind unverändert: ein Lauf ohne Flags
+liefert alle 18 Platzhalter **byteidentisch** zum eingecheckten Stand (`cmp`, Schritt 6).
+
+Neu erzeugen (die Quelle der AO-PNGs ist `out/landscape-real-ao/staging`, sie enthält auch die 16 anderen,
+byteidentisch zu `out/landscape-real/staging`):
+
+```
+landscape_tex_gen out/landscape-loose/Engine/Textures/Landscape --loose out/landscape-real-ao/staging --size 2048
+```
+
+### 19.3 Nachweis
+
+`hasset_tex.py --compare` gegen die gestagten PNGs, jede Datei einzeln, Mip 0:
+
+| Prüfung | Ergebnis |
+|---|---|
+| 12 neue lose Texturen (`_Roughness`, `_AO`, `_Height`) gegen `<Schicht>_<Map>.png`, Kanäle R, G, B | max. Abweichung **0** in allen 36 Werten |
+| Header der 12 | 2048², 4 Kanäle, 1 Mip, RGBA8, **linear**, UUID 0x420..0x42B, Low-Wort 1 |
+| 8 vorhandene lose `_Albedo`/`_Normal` gegen die PNGs | max. Abweichung **0**; Albedo sRGB, Normal linear |
+| Negativkontrolle: `Dirt_Roughness.hasset` gegen `Dirt_Height.png` | max. 251, Mittel 130,4: der Vergleich unterscheidet |
+| Kopie nach `EditorDeps/…/Landscape` | `cmp` aller 30 Dateien gegen ihre Quelle: gleich |
+| UUIDs | 62 Assets in `EditorDeps/EngineContent`, **62 verschiedene** UUIDs, keine doppelt |
+| `landscape_tex_gen` (Platzhalter-Lauf) gegen eingechecktes `EditorDeps/…/Landscape` und `out/landscape-ph` | 18/18 byteidentisch |
+
+Das ist der **Dateiinhalt**. Gerendert wurde in diesem Schritt nichts neu: Die Arrays und die Masken
+sind dieselben Bytes wie in Schritt 1 bis 4 (die Bilder aus §15 und §17 gelten also weiter).
+
+### 19.4 Warum die Dateien nicht in git sind
+
+Die drei Arrays haben je 111 848 271..275 Byte (106,7 MiB) und liegen über GitHubs Grenze von 100 MiB
+je Datei (§18.4). Ein Push mit ihnen wird abgelehnt. Der Auftrag lautete deshalb „Platzhalter
+ersetzen und vorbereiten“, nicht „einchecken“. Folgen für den, der als Nächstes in diesem Baum committet:
+
+- `git status` zeigt 18 geänderte (die ersetzten Platzhalter) und 12 neue Dateien in
+  `EditorDeps/EngineContent/Textures/Landscape`. **Nie `git add -A` oder `git commit -a`**, immer Pfade
+  einzeln. Der Merge-Weg der Queen nimmt nur Commits mit, die Texturen reisen dabei nicht mit.
+- Jedes Neulinken von `HorizonEditor` kopiert `EditorDeps/` neben die exe und nach `out/deploy/Editor`
+  (§14.5). Mit diesen 752 MiB ist das jetzt der echte Satz, nicht mehr der Platzhalter.
+
+### 19.5 Upload auf den Engine-Default-Server: was zu beachten ist
+
+Der Server bekommt die 30 Dateien aus `EditorDeps/EngineContent/Textures/Landscape` (Prüfsummen:
+`out/landscape-upload-SHA256SUMS.txt`, `shasum -a 256 -c`). Drei Dinge, die ein bloßes Hochkopieren
+nicht erledigt:
+
+1. **`manifest.json`.** Der Editor findet Server-Assets nur über das Manifest (`{path, uuid,
+   contentHash, size}`). Ein Kopieren per SFTP legt die Dateien ab, das Manifest kennt sie nicht. Es
+   entsteht nur durch „Publish Engine Content to Server“ (aus einem **vollständigen** EngineContent-Ordner,
+   §18.3) oder durch „Rebuild Manifest from Server“, und beide schreiben `manifest.json`.
+2. **Der ausgelieferte Platzhalter schlägt den Server-Cache** (§18.1). *(Überholt durch §20: die Platzhalter sind
+   aus git, die Punkte 2 und 3 gelten nur noch für einen Baum, der sie lokal hat.)* Für die 18 ersetzten Dateien gilt:
+   dieselbe UUID, der Platzhalter aus git gewinnt, die echte Textur vom Server erreicht das Material
+   **nicht**. Wirksam wird der Server nur für die 12 neuen Texturen (neue UUIDs): im Content Browser
+   erscheinen sie mit Download-Marke und lassen sich in Materialien benutzen.
+3. **Publish aus einem Checkout mit Platzhaltern überschreibt die echten Texturen** (§18.3). Dieser
+   Baum hat die echten Dateien, ein Checkout von `main` hat weiter die Platzhalter. Veröffentlicht wird
+   nur aus einem Baum, in dem die 30 Dateien so liegen wie hier.
+
+Die Entscheidung, wie die Arrays dauerhaft ins Spiel kommen (vier Slices, LFS oder Auslieferung über den
+Server mit Exporter-Anpassung), bleibt bei dem Menschen (§18.4).
+
+## 20. Schritt 7: die Platzhalter sind aus git, die Texturen kommen vom Server (Thema 177)
+
+Stand: Zweig `claude/auto-landscape-material-texturen-importieren-arrays-bauen-ve`, MacBook Air
+(Apple M5). Anweisung der Queen nach dem Upload: die Platzhalter aus `EditorDeps/EngineContent/Textures/Landscape`
+entfernen und die Engine so einstellen, dass sie die Landschaftstexturen vom Engine-Default-Server holt.
+Das ist der zweite Weg aus §18.4 ("Platzhalter aus git und Auslieferung, Editor holt on demand").
+Der Mensch hat danach gemeldet: **die 18 Dateien (3 Arrays, 12 Schicht-Texturen, 3 WetGround) liegen auf dem
+Server, sonst nichts**. Die 12 losen Texturen aus §19 (`_Roughness`, `_AO`, `_Height`, UUID 0x420..0x42B)
+sind nicht hochgeladen; kein Asset liest sie.
+
+### 20.1 Was aus git ging
+
+- `git rm --cached` auf die 18 eingecheckten Platzhalter (`T_Landscape_*.hasset`, 128 px). Die Dateien auf der
+  Platte sind unberührt (SHA-256 aller 30 gegen `out/landscape-upload-SHA256SUMS.txt`: 30/30 gleich), sie liegen
+  nur nicht mehr im Index.
+- `.gitignore`: `EditorDeps/EngineContent/Textures/Landscape/*.hasset`. Damit zieht kein `git add -A` die
+  752 MiB mit, und `landscape_tex_gen`, das dorthin schreibt, bleibt ohne Folgen für `git status`. Wer den
+  Platzhalter-Satz neu erzeugen will (`landscape_tex_gen <Ziel>`), schreibt ihn in ein anderes Verzeichnis.
+- Ein frischer Klon, ein Fork und jeder CI-Lauf hat diese Texturen also **nicht** mehr auf der Platte. Das ist
+  die Folge, die §18.4 für diese Zeile genannt hat (kein Landschaftsbild ohne Server), und sie ist hier gewollt.
+
+### 20.2 Wie eine Textur jetzt aufgelöst wird
+
+Reihenfolge für `Engine/Textures/Landscape/<Datei>` (`ContentManager::resolveAbsolutePath`, unverändert):
+
+1. Projekt-Override `<Content>/Engine/…`
+2. ausgelieferter Default `<exe>/EngineContent/…` (für diese Dateien jetzt **leer**, außer bei einem Baum, der
+   sie lokal hat, siehe 20.5)
+3. SFTP-Cache `<Nutzerdaten>/EngineContentCache/…`
+4. **neu:** nichts davon da, aber der Server hat die Datei → Download starten
+
+`resolveAbsolutePath` und `registerRemoteAsset` mussten für die UUID-Route **nicht** geändert werden: sobald
+die Platzhalter weg sind, trägt der Plattenscan (`scanDirInto`) die 18 UUIDs nicht mehr in `m_diskRegistry` ein,
+also kehrt `registerRemoteAsset` (`ContentManager.cpp:1392`) nicht mehr früh zurück, und der Manifest-Eintrag
+wird als Remote-Asset registriert. Ein früherer Download im Cache wird beim Scan wieder erkannt
+(`scanDirInto(engineContentCacheDir())`), dann liegt die UUID in `m_diskRegistry` und die Datei kommt von der Platte.
+
+**Die Lücke war der Pfad.** Eine lose Material-Datei wie `M_AutoLandscape.hasset` nennt ihre Texturen nur
+als Pfad (`graphTexturePaths`, `graphTextureIds` ist leer, das Packen backt erst die UUIDs, §14 / `HpakWriter`).
+Jeder Renderer löst sie über `resolveTextureRef(UUID{}, Pfad)` → `loadAsset(Pfad)` auf, und das las bisher nur
+von der Platte. Eine UUID-Registrierung nützt dem nichts, weil niemand die UUID anfragt: der Download wäre nie
+angestoßen worden. Die Änderung in `ContentManager`:
+
+- `loadAsset(Pfad)` und `loadAssetAsync(Pfad)`: fehlt die Datei und hat das Manifest den Pfad registriert
+  (`m_remoteAssets`), geht die Anfrage über die UUID-Route (`loadAssetAsync(UUID)`), also Download, dann laden.
+  Das Ergebnis von `loadAsset` ist dabei noch eine Null-UUID (die Datei ist ja noch nicht da), aber kein
+  Fehler-Log mehr, nur eine Debug-Zeile. Mehrfaches Fragen wird dort zusammengefasst (derselbe Schlüssel wie
+  bisher), es startet kein zweiter Download.
+- `isRemoteAssetPending(Pfad)`: wahr, solange der Pfad ein registriertes, noch nicht angekommenes Remote-Asset ist.
+- `pollAsyncResults()` ruft beim Eintreffen eines Downloads `noteContentChanged()` auf. `contentEpoch()` bewegt
+  sich dadurch, und Leser, die einen Pfad als "nicht da" gemerkt haben (`RenderExtractor`), schauen noch einmal.
+- Eine Datei, die schon auf der Platte liegt, schlägt den Download wie vorher (Test unten).
+
+### 20.3 Nachweis
+
+Neue Fälle in `tests/test_async_streaming.cpp`, alle drei mit einem Stand-in für den SFTP-Download
+(`registerRemoteAsset` mit eigenem `materialize`, das die Datei in den Engine-Ordner legt):
+
+| Fall | Prüft |
+|---|---|
+| `loadAsset(Pfad)` | `materialize` läuft **einmal** (auch bei zweiter Anfrage), ein unbekannter Pfad startet nichts, nach dem Eintreffen ist das Asset geladen, `contentEpoch()` hat sich bewegt, `isRemoteAssetPending` ist falsch |
+| `loadAssetAsync(Pfad, Callback)` | Callback kommt erst nach dem Download und liefert die richtige UUID |
+| Datei liegt schon da | Datei gewinnt, `materialize` läuft nie |
+
+Gemessen (macOS Release, Apple M5, `out/build/macos-release`, `-DHE_BUILD_TESTS=ON`):
+
+- Die drei Fälle bestehen (23 Prüfungen).
+- **Negativkontrolle:** mit abgeschalteter Pfad-Route in `loadAsset` (`false &&` vor der Bedingung, neu gebaut)
+  schlägt der erste Fall an (`started == 0` statt 1, danach bricht er bei `REQUIRE(finish)` ab). Route zurück,
+  wieder grün. Der Fall prüft also die Route und nicht nur, dass nichts abstürzt.
+- Volles `ctest`, seriell (die Tests teilen sich Temp-Ordner): 236 Einträge, **234 bestanden, 2 übersprungen**
+  (`runtime_size_app_basic` und `_advanced`, es ist keine App gebaut), 0 Fehler. `test_material_graph` (der
+  `M_AutoLandscape`-Wächter liest `Materials/`, nicht die Texturen) und `test_contentmanager` bestehen.
+- **Ohne die Dateien:** dieser Baum hat die 30 Dateien lokal (20.5), ein frischer Klon nicht (in git bleibt unter
+  `EditorDeps/EngineContent/Textures/` nichts, der Ordner entsteht gar nicht). Deshalb wurde `Textures/` für einen
+  Lauf aus dem Baum weggeschoben (`mv`, danach zurück, SHA-256 aller 30 wieder gleich) und alles ausgeführt, was
+  `HE_EDITOR_DEPS_DIR/EngineContent` liest: `test_material_graph`, `test_contentmanager`, `test_ui_widgets`,
+  `test_project_exporter`, `test_mcp_tools_material`, `test_docs_library`, `test_ui_shot`, `test_async_streaming`.
+  **8 von 8 bestehen** ohne den Ordner. Das ist die Bedingung eines CI-Checkouts; der CI-Lauf selbst ist damit
+  nicht ersetzt (Linux und Windows haben weitere Eigenheiten).
+- **Grenze:** der Server selbst wurde nicht angesprochen (keine Zugangsdaten für die Sitzung). Download, Manifest
+  und Fortschrittsanzeige sind hier nicht gelaufen, nur die Seite des `ContentManager`.
+
+### 20.4 Was damit **nicht** gelöst ist
+
+1. **Im Lauf, der den Download anstößt, bleibt die Textur weiß.** Die Renderer merken sich einen Fehlschlag:
+   Metal, OpenGL, D3D11, D3D12 und Vulkan legen in `m_graphTexCache`/`graphTexCache` auch ein `null` ab
+   ("kein Neuversuch pro Frame"), geschlüsselt nach dem **Pfad**, weil das Material keine UUID trägt. Die
+   UUID-Invalidierung (`IRenderer::InvalidateTexture`, Schlüssel `hi:lo`) trifft diesen Eintrag nicht. Die Datei ist
+   danach im Cache, der **nächste Start** findet sie über Stufe 3 und rendert richtig. Die Abhilfe ist ein
+   Einzeiler pro Backend in `resolveGraphTexture` / `ResolveGraphTexture`: den `null` nicht ablegen, solange
+   `cm->isRemoteAssetPending(Pfad)` gilt (das ist der Zweck der neuen Abfrage). Das ist hier **nicht**
+   gemacht: D3D11, D3D12 und Vulkan lassen sich auf dem Mac nicht ausführen, und ein halb eingeführtes Verhalten
+   (Metal anders als die anderen) wäre schlechter als ein einheitlich dokumentiertes.
+2. **Ein exportiertes Spiel hat keine Landschaftstexturen.** Der Exporter packt nur das ausgelieferte Verzeichnis
+   (`ProjectExporter.cpp:782`, §18.2), nie den SFTP-Cache, und das Spiel hat keinen SFTP. Das war die zweite Hälfte
+   der Zeile "Editor holt on demand, Exporter muss den Cache zusätzlich packen" in §18.4 und ist **nicht umgesetzt**:
+   Wer ein Spiel mit Auto-Landschaft exportiert, muss die 18 Dateien vorher in den Cache holen und der Exporter
+   müsste sie mitnehmen.
+3. **Headless-Läufe, Tests und CI** sehen keine Landschaftstexturen (keine Datei, kein Server). Kein Test in `tests/`
+   liest sie (§18.4, hier nochmal mit dem echten Lauf bestätigt); die Aufnahmeskripte `scripts/auto-landscape-repro/*`
+   brauchen sie und laufen weiter auf einem Deploy, der sie lokal hat.
+4. **Das Manifest muss die 18 Einträge enthalten.** Ein rohes SFTP-Hochladen legt die Dateien ab, der Editor findet
+   sie aber nur über `manifest.json` (§19.5). Prüfen: Editor mit Netz starten, Engine-Ordner im Content Browser →
+   `Textures/Landscape` zeigt 18 Kacheln mit Download-Marke.
+5. **Neue Falle beim Veröffentlichen.** `publishEngineContentBlocking` schreibt als `manifest.json` den **lokalen
+   Scan** (§18.3). Mit den Platzhaltern aus git war jeder Checkout ein Satz Dateien, die den Server überschrieben
+   (die alte Falle). Ohne sie ist es umgekehrt: Wer aus einem Checkout veröffentlicht, der die Landschaftstexturen nicht
+   lokal hat, schreibt ein Manifest **ohne** die 18 Einträge. Die Dateien bleiben auf dem Server, aber jeder Editor
+   verliert sie aus dem Katalog, und der Pfad-Download aus 20.2 findet nichts mehr. Veröffentlicht wird deshalb nur
+   aus einem Baum, der die 18 Dateien hat, oder danach "Rebuild Manifest from Server" (das liest den Server und
+   schreibt das Manifest neu). Eine Absicherung im Publish selbst (Einträge ohne lokale Datei übernehmen) ändert die
+   Bedeutung von "Publish" (nichts wird je mehr aus dem Katalog entfernt) und braucht eine Entscheidung.
+6. **Umfang des Downloads.** Das Material liest nur die drei Arrays (3 × 106,7 MiB = 320 MiB). Die 15 Schicht-Texturen
+   (je 16 MiB) werden nur geladen, wenn jemand sie in einem eigenen Material benutzt.
+
+### 20.5 Der eigene Baum dieses Zweigs
+
+In diesem Arbeitsbaum liegen die 30 Dateien weiter unversioniert in `EditorDeps/EngineContent/Textures/Landscape`
+(und per POST_BUILD in `out/deploy/Editor/EngineContent/…`). Dort **gewinnt der ausgelieferte Default** (Stufe 2) vor
+dem Server, genau wie vorher der Platzhalter: Dieser Baum zeigt die echten Texturen, ohne je den Server zu fragen,
+und ist deshalb **kein Beweis**, dass der Server-Weg funktioniert. Der Beweis ist der Test aus 20.3 plus ein Lauf
+auf einer Maschine ohne diese Dateien.
 
 ---
 
-## 18. Malen auf dem Auto-Material, weichere Pfützen-Kanten (2026-10-09)
+## 21. Malen auf dem Auto-Material, weichere Pfützen-Kanten (2026-10-09)
 
 **Zwei Änderungen am Builder** (`AutoLandscapeMaterial.cpp`), das ausgelieferte Asset ist neu erzeugt
 (`landscape_tex_gen EditorDeps/EngineContent/Materials --material`).
@@ -1989,7 +2332,7 @@ Eine Schicht braucht keine neue Textur; die Arrays bleiben unverändert.
 
 ---
 
-## 19. Puddles und Schnee kommen vom Wetter (2026-10-09)
+## 22. Puddles und Schnee kommen vom Wetter (2026-10-09)
 
 Die Pfützen des Auto-Materials hingen an einem festen Parameter, den man pro Material/Instanz setzen musste.
 Jetzt steuert die **Weather-Entity** der Szene sie, über zwei Regler und zwei Material-Funktionen.
