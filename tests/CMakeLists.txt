@@ -48,6 +48,11 @@ add_executable(he_tests
     # A .heproj double-clicked in the file manager: quotes, blanks, relative
     # paths and wrong extensions, and Hub vs. guarded switch vs. already open.
     test_project_launch_open.cpp
+    # The editor registering .heproj for itself at start: the decision (not yet /
+    # current / moved / somebody else's / switched off), the Windows registry layout
+    # over a map and the Linux files in a temp folder. Nothing here reaches the real
+    # registry or the real XDG folders.
+    test_heproj_registration.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
@@ -630,6 +635,9 @@ add_executable(he_tests
     # What a launch argument or a macOS open event means as a project path,
     # and which Open it takes. SDL- and ImGui-free (see the header).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectLaunchOpen.cpp
+    # Its sibling for the file type: what the editor writes to register .heproj for
+    # itself. Windows registry and Linux files, both behind seams (see the header).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HeprojRegistration.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
