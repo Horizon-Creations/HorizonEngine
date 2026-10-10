@@ -12,6 +12,7 @@
 #include <ContentManager/ContentManager.h>
 #include <glm/glm.hpp>
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 
 // ─── FoliageSystem instance generation ────────────────────────────────────────
