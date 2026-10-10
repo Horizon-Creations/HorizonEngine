@@ -5,6 +5,7 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
+#include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TerrainHeightmap.h"
@@ -598,6 +599,17 @@ namespace TerrainSystem
             tc.builtChunksPerSide = g.chunksPerSide;
             tc.dirty              = false;
             tc.regionDirty        = false;
+
+            // The foliage layer on this terrain was scattered over the ground as
+            // it stood: a sculpt stroke, Reset Sculpting, a new size / resolution,
+            // an import or an MCP dab changed it, so the plants would float or
+            // sink. Every one of those ends here, in the rebuild gate (a material
+            // swap does not — it is handled above, ungated — and must not
+            // re-scatter). The re-scatter itself is FoliageSystem's, later in the
+            // tick. A held brush rebuilds on every frame and so re-scatters on
+            // every frame: the cost grows with the layer's instance count.
+            if (auto* fol = reg.try_get<FoliageComponent>(te))
+                fol->dirty = true;
 
             // The ground the player stands on has to follow the ground they see —
             // but NOT from here. Reached only from inside the dirty/regionDirty

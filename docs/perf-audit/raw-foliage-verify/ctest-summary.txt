@@ -1,0 +1,4 @@
+/tmp/fol5/ctest_1.log:100% tests passed out of 130
+/tmp/fol5/ctest_1.log:Total Test time (real) = 348.11 sec
+/tmp/fol5/ctest_2.log:100% tests passed out of 127
+/tmp/fol5/ctest_2.log:Total Test time (real) = 112.67 sec

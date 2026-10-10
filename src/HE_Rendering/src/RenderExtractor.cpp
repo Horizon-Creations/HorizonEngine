@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include "HorizonRendering/RenderWorld.h"
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
+#include "FoliageExtract.h"                        // foliage → clusters (its own file, Thema 163)
 #include <Diagnostics/Profiler.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -614,42 +615,6 @@ namespace
 		}
 	}
 
-	// ── Foliage ──────────────────────────────────────────────────────────────
-	// Each cached foliage instance is pushed as a RenderObject. Because all
-	// instances share the same meshAssetId, the geometry pass batches them into
-	// one DrawCall with instanceTransforms automatically.
-	void extractFoliage(entt::registry& reg, RenderWorld& out)
-	{
-		const HE::ActiveFilter active(reg);
-		for (auto [e, fol] : reg.view<FoliageComponent>().each())
-		{
-			if (!fol.visible) continue; // hidden (e.g. a preloaded zone)
-			if (active.off(e)) continue;
-			if (fol.meshAssetId == HE::UUID{}) continue;
-			const float dd2 = fol.drawDistance * fol.drawDistance;
-			const glm::vec3 camPos = out.camera.position;
-
-			for (const glm::mat4& inst : fol.cachedInstances)
-			{
-				const glm::vec3 wp = glm::vec3(inst[3]);
-				const float dx = wp.x - camPos.x;
-				const float dz = wp.z - camPos.z;
-				if (dx * dx + dz * dz > dd2) continue;
-
-				RenderObject obj;
-				obj.meshAssetId     = fol.meshAssetId;
-				obj.materialAssetId = fol.materialAssetId;
-				obj.transform       = inst;
-				// Real bounds are filled in by the backend mesh-resolve refine; leave them invalid
-				// here so a not-yet-resident instance stays visible instead of being culled against
-				// a unit-cube proxy smaller than the actual foliage mesh.
-				obj.worldBounds     = HE::AABB{};
-				obj.entityId        = static_cast<uint32_t>(e);
-				out.objects.push_back(obj);
-			}
-		}
-	}
-
 	// ── Skinned renderables ─────────────────────────────────────────────────
 	// Same slot rules as the static path (resolveEntitySlots): a skinned glTF
 	// with several materials draws one section per slot, the entity's
@@ -952,8 +917,11 @@ namespace
 		// light's authored height would otherwise stretch the whole frustum.
 		// Authored non-casting meshes stay IN, as receivers the map must cover.
 		HE::AABB sceneBox;
+		// A foliage cluster's box stays out too: foliage never counted here (its bounds were
+		// invalid at this point) and the cascade fit — the light's depth range included — must
+		// not move because the same plants now arrive as buckets with real boxes.
 		for (const RenderObject& o : out.objects)
-			if (o.castsShadow || o.contributesAO) sceneBox.expand(o.worldBounds);
+			if ((o.castsShadow || o.contributesAO) && !o.isCluster()) sceneBox.expand(o.worldBounds);
 		glm::vec3 center = sceneBox.isValid() ? sceneBox.center() : glm::vec3(0.0f);
 		float radius = sceneBox.isValid() ? glm::length(sceneBox.extents()) : 10.0f;
 		radius = std::max(radius, 1.0f);
@@ -1322,7 +1290,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
-	extractFoliage(reg, out);
+	HE::extractFoliage(reg, out, m_contentManager);
 	extractSkinnedMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractDecals(reg, out);
 	// Ropes are ordinary mesh objects and must land in out.objects before the

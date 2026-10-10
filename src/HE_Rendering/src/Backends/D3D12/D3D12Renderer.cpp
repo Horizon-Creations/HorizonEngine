@@ -6737,7 +6737,8 @@ struct D3D12RendererImpl
 #endif
         for (const RenderObject& obj : rw.objects)
         {
-            if (!obj.castsShadow) continue;
+            // A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+            if (!obj.castsShadow || obj.isCluster()) continue;
             // Default-cube fallback — entities without a resolvable mesh RENDER
             // as the default cube, so they must occlude as one too.
             HE::UUID    effectiveId = obj.meshAssetId;
@@ -9988,9 +9989,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
     for (RenderObject& obj : p.m_renderWorld.objects)
     {
-        if (const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
-            mesh && mesh->localBounds.isValid())
-            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+        if (const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager))
+            obj.refineWorldBounds(mesh->localBounds);
     }
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
@@ -11363,6 +11363,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             {
                 if (drawIdx >= k_maxDraws) break;
                 const RenderObject& obj = p.m_renderWorld.objects[idx];
+                // A foliage cluster is one plant's transform with a whole bucket's worth
+                // of instances: it writes no velocity here yet (Metal and GL draw each
+                // plant, static). Windows track: unfold it like they do.
+                if (obj.isCluster()) continue;
                 const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
                 if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
 

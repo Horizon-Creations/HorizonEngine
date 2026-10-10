@@ -17,6 +17,21 @@ cube and sphere (asset ids [1,1] and [257,1]) so no project content is needed.
 --groups N parents the meshes under N group entities instead of directly
 under World (hierarchy depth 2, the shape a hand-built level has).
 The output is deterministic for a given seed.
+
+--foliage N (Thema 163) adds a foliage layer of N instances of a built-in mesh
+to the template's terrain: no entity per plant, one FoliageComponent on the
+terrain, which scatters them when the scene loads. The terrain is made a flat
+square of --foliage-extent metres (default 400) and the density is derived from
+N and its area, so the layer holds N instances (the scene log and the editor's
+HE_DUMP_FOLIAGETEST witness print the count really placed). --foliage-distance
+is the layer's drawDistance: the default 1e6 puts every instance in range, a
+small value is the "only a part is in range" case. --count 0 gives a scene with
+foliage alone.
+
+  python3 scripts/perf/gen_reference_world.py --count 0 --foliage 100000 \
+      --template docs/perf-audit/scenes/landscape_noclouds.hescene \
+      --out /tmp/fol/fol_100k.hescene [--foliage-extent 400] [--foliage-distance 1e6] \
+      [--foliage-mesh cube|sphere] [--foliage-scale 0.5,1.0]
 """
 import argparse
 import json
@@ -27,6 +42,9 @@ from pathlib import Path
 BUILTIN_CUBE = [1, 1]
 BUILTIN_SPHERE = [257, 1]
 NO_ASSET = [0, 0]
+# SceneSerializer's default for a FoliageComponent mask; unused here (no mask is
+# written, the layer is uniform) but the serializer reads the key.
+FOLIAGE_MASK_RES = 128
 
 
 def make_uuid(rng):
@@ -40,13 +58,22 @@ def transform(pos, rot=(0.0, 0.0, 0.0), scale=(1.0, 1.0, 1.0)):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--count", type=int, required=True, help="mesh entities")
+    ap.add_argument("--count", type=int, default=0, help="mesh entities")
     ap.add_argument("--extent", type=float, default=2000.0, help="square side in metres")
     ap.add_argument("--offset", default="0,0,0", help="x,y,z added to every mesh position")
     ap.add_argument("--lights", type=int, default=0, help="point lights spread over the area")
     ap.add_argument("--physics", type=float, default=0.0,
                     help="fraction of meshes that get a static box collider + rigidbody")
     ap.add_argument("--groups", type=int, default=0, help="parent meshes under N group entities")
+    ap.add_argument("--foliage", type=int, default=0,
+                    help="instances in one foliage layer on the template's terrain (no entities)")
+    ap.add_argument("--foliage-extent", type=float, default=400.0,
+                    help="side of the (flat) terrain the layer grows on, metres")
+    ap.add_argument("--foliage-distance", type=float, default=1.0e6,
+                    help="the layer's drawDistance; the default keeps every instance in range")
+    ap.add_argument("--foliage-mesh", choices=["cube", "sphere"], default="cube")
+    ap.add_argument("--foliage-scale", default="0.5,1.0", help="min,max instance scale")
+    ap.add_argument("--foliage-seed", type=int, default=42)
     ap.add_argument("--template", required=True, help="scene providing World root + environment")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=1)
@@ -103,6 +130,37 @@ def main():
         parent["children"].append(e["uuid"])
         entities.append(e)
 
+    n_foliage = 0
+    if a.foliage > 0:
+        terrains = [e for e in entities if "terrain" in e.get("components", {})]
+        if not terrains:
+            raise SystemExit("--foliage needs a terrain entity in the template")
+        t = terrains[0]
+        tc = t["components"]["terrain"]
+        # Flat on purpose: the instance height is then 0 for every seed and the
+        # picture does not depend on the template's noise. The terrain chunks
+        # are the same however many instances grow on them.
+        tc["sizeX"] = tc["sizeZ"] = a.foliage_extent
+        tc["heightScale"] = 0.0
+        tc.pop("sculptHeightsB64", None)
+        smin, _, smax = a.foliage_scale.partition(",")
+        smin = float(smin)
+        smax = float(smax) if smax else smin
+        # +0.5: the scatter takes int(area * density), and float rounding must
+        # not cost the last instance.
+        t["components"]["foliage"] = {
+            "visible": True,
+            "mesh": BUILTIN_SPHERE if a.foliage_mesh == "sphere" else BUILTIN_CUBE,
+            "material": NO_ASSET,
+            "density": (a.foliage + 0.5) / (a.foliage_extent * a.foliage_extent),
+            "seed": a.foliage_seed,
+            "minScale": smin,
+            "maxScale": smax,
+            "drawDistance": a.foliage_distance,
+            "maskRes": FOLIAGE_MASK_RES,
+        }
+        n_foliage = a.foliage
+
     for i in range(a.lights):
         x = rng.uniform(-half, half) + off[0]
         z = rng.uniform(-half, half) + off[2]
@@ -120,7 +178,8 @@ def main():
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(json.dumps(out))
     print(f"wrote {a.out}: {len(entities)} entities ({a.count} meshes, {a.lights} lights, "
-          f"{n_phys} physics, {a.groups} groups), extent {a.extent} m, offset {off}")
+          f"{n_phys} physics, {a.groups} groups, {n_foliage} foliage instances), "
+          f"extent {a.extent} m, offset {off}")
 
 
 if __name__ == "__main__":

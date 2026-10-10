@@ -7,6 +7,7 @@
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include <Diagnostics/Log.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -28,6 +29,98 @@ namespace
         state = wangHash(state);
         return static_cast<float>(state & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
     }
+
+    // ── FoliageComponent::revision ──────────────────────────────────────────
+    // A fingerprint of every setting the extraction reads that is NOT a scatter
+    // input (those set `dirty`, which re-scatters and bumps the revision itself).
+    uint64_t hashBytes(uint64_t h, const void* data, size_t n)
+    {
+        const auto* b = static_cast<const unsigned char*>(data);
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001B3ull; }
+        return h;
+    }
+    template <class T> uint64_t mix(uint64_t h, const T& v) { return hashBytes(h, &v, sizeof(T)); }
+
+    uint64_t settingsKeyOf(const FoliageComponent& f)
+    {
+        uint64_t h = 0xCBF29CE484222325ull;
+        h = mix(h, f.visible);
+        h = mix(h, f.meshAssetId.hi);     h = mix(h, f.meshAssetId.lo);
+        h = mix(h, f.materialAssetId.hi); h = mix(h, f.materialAssetId.lo);
+        h = mix(h, f.minScale);           h = mix(h, f.maxScale);
+        h = mix(h, f.drawDistance);
+        h = mix(h, f.bucketSize);
+        h = mix(h, f.castsShadow);        h = mix(h, f.contributesAO);
+        h = mix(h, f.shadowDistance);
+        return h;
+    }
+
+    // The bucket edge actually used: a layer asking for 0 (or less) gets the default,
+    // and a terrain so large that the grid would run past kMaxBuckets gets a coarser
+    // grid (a bucket is a culling unit, not a promise of its exact size).
+    constexpr int64_t kMaxBuckets = 4'000'000;
+
+    float usableBucketSize(float asked)
+    {
+        return asked >= 1.0f ? asked : 32.0f;
+    }
+
+    // ── Bucket sort ─────────────────────────────────────────────────────────
+    // `local` is the scatter in generation order, terrain-local. Counting sort by
+    // grid cell, stable, so inside a bucket the scatter's own order survives. O(N)
+    // time, one transient array of cell ids; the result is the only copy kept.
+    std::shared_ptr<const FoliageStore> sortIntoBuckets(const std::vector<glm::mat4>& local,
+                                                        float sizeX, float sizeZ, float bucketSize)
+    {
+        auto store = std::make_shared<FoliageStore>();
+        float edge = usableBucketSize(bucketSize);
+        int nx = 1, nz = 1;
+        for (;;)
+        {
+            nx = std::max(1, static_cast<int>(std::ceil(sizeX / edge)));
+            nz = std::max(1, static_cast<int>(std::ceil(sizeZ / edge)));
+            if (static_cast<int64_t>(nx) * nz <= kMaxBuckets) break;
+            edge *= 2.0f;
+        }
+        store->bucketSize = bucketSize;   // what was ASKED: that is what FoliageSystem compares against
+        store->edge       = edge;
+        store->gridX      = nx;
+        store->gridZ      = nz;
+
+        const size_t n          = local.size();
+        const size_t cellCount  = static_cast<size_t>(nx) * static_cast<size_t>(nz);
+        const float  halfX      = sizeX * 0.5f;
+        const float  halfZ      = sizeZ * 0.5f;
+        const float  inv        = 1.0f / edge;
+
+        std::vector<uint32_t> cellOf(n);
+        std::vector<uint32_t> start(cellCount + 1, 0u);
+        for (size_t i = 0; i < n; ++i)
+        {
+            const int ix = std::clamp(static_cast<int>((local[i][3].x + halfX) * inv), 0, nx - 1);
+            const int iz = std::clamp(static_cast<int>((local[i][3].z + halfZ) * inv), 0, nz - 1);
+            cellOf[i] = static_cast<uint32_t>(iz) * static_cast<uint32_t>(nx) + static_cast<uint32_t>(ix);
+            ++start[cellOf[i] + 1];
+        }
+        for (size_t c = 0; c < cellCount; ++c) start[c + 1] += start[c];
+
+        store->local.resize(n);
+        std::vector<uint32_t> cursor(start.begin(), start.end() - 1);
+        for (size_t i = 0; i < n; ++i)
+            store->local[cursor[cellOf[i]]++] = local[i];
+
+        for (size_t c = 0; c < cellCount; ++c)
+        {
+            if (start[c + 1] == start[c]) continue;
+            FoliageBucket b;
+            b.first = start[c];
+            b.count = start[c + 1] - start[c];
+            for (uint32_t k = b.first; k < b.first + b.count; ++k)
+                b.localBounds.expand(glm::vec3(store->local[k][3]));
+            store->buckets.push_back(b);
+        }
+        return store;
+    }
 }
 
 void FoliageSystem::update(HorizonWorld& world)
@@ -37,9 +130,21 @@ void FoliageSystem::update(HorizonWorld& world)
     auto view = registry.view<FoliageComponent, TerrainComponent>();
     for (auto [entity, foliage, terrain] : view.each())
     {
+        // A setting the extraction reads changed (mesh, distance, flags …): not a
+        // re-scatter, but whoever keeps a RenderWorld across frames must hear of it.
+        const uint64_t key = settingsKeyOf(foliage);
+        if (key != foliage.settingsKey) { foliage.settingsKey = key; ++foliage.revision; }
+
+        // The store is sorted into a grid of the layer's bucket size: a different size
+        // asks for a different grid, which only a re-scatter can produce.
+        if (foliage.store && foliage.store->bucketSize != foliage.bucketSize)
+            foliage.dirty = true;
+
         if (!foliage.dirty) continue;
         foliage.dirty = false;
         foliage.cachedInstances.clear();
+        foliage.store.reset();
+        ++foliage.revision;
 
         if (foliage.meshAssetId == HE::UUID{})
         {
@@ -73,6 +178,10 @@ void FoliageSystem::update(HorizonWorld& world)
                         static_cast<uint32_t>(entity), count, foliage.density, sizeX, sizeZ);
 
         foliage.cachedInstances.reserve(static_cast<size_t>(count));
+        // The same instances, terrain-local, in generation order: the input of the
+        // bucket sort below. Transient — only the sorted copy lives on in the store.
+        std::vector<glm::mat4> local;
+        local.reserve(static_cast<size_t>(count));
 
         const float halfX = sizeX * 0.5f;
         const float halfZ = sizeZ * 0.5f;
@@ -108,16 +217,26 @@ void FoliageSystem::update(HorizonWorld& world)
             }
             const float ly = terrainHeightAt(terrain, lx, lz);
 
-            const glm::vec3 worldPos = origin + glm::vec3(lx, ly, lz);
-            glm::mat4 m = glm::translate(glm::mat4(1.f), worldPos);
+            // The terrain-local pose, built exactly as the world one always was:
+            // translate, rotate about Y, scale. Rotating and scaling never touch the
+            // translation column, so the world matrix is this one with its position
+            // moved by `origin` — bit for bit what `translate(origin + local)` gave.
+            glm::mat4 m = glm::translate(glm::mat4(1.f), glm::vec3(lx, ly, lz));
             m = glm::rotate(m, rotY, glm::vec3(0.f, 1.f, 0.f));
             m = glm::scale(m, glm::vec3(scale));
+            local.push_back(m);
+
+            const glm::vec3 worldPos = origin + glm::vec3(lx, ly, lz);
+            m[3] = glm::vec4(worldPos, 1.0f);
             foliage.cachedInstances.push_back(m);
             ++placed;
         }
 
-        HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d of %d foliage instance(s) over %.0fx%.0f%s",
+        foliage.store = sortIntoBuckets(local, sizeX, sizeZ, foliage.bucketSize);
+
+        HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d of %d foliage instance(s) over %.0fx%.0f%s "
+                              "into %zu bucket(s)",
                      static_cast<uint32_t>(entity), placed, count, sizeX, sizeZ,
-                     masked ? " (density mask)" : "");
+                     masked ? " (density mask)" : "", foliage.store->buckets.size());
     }
 }
