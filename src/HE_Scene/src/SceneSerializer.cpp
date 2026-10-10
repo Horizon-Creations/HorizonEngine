@@ -991,6 +991,11 @@ namespace
 		// Cell manifest of a split scene (HE::CellStreamer), verbatim.
 		if (const std::string& cells = world.cellManifestJson(); !cells.empty())
 			scene["cells"] = json::parse(cells, nullptr, /*allow_exceptions=*/false);
+		// And the head of a scene that is itself a streaming cell, for the same
+		// reason: the export loads every project scene into a world and saves it
+		// again, and what the world does not carry does not reach the pak.
+		if (const std::string& head = world.cellHeadJson(); !head.empty())
+			scene["streaming"] = json::parse(head, nullptr, /*allow_exceptions=*/false);
 
 		return scene;
 	}
@@ -2017,6 +2022,8 @@ namespace
 			world.setLevelScriptJson(scene["levelScript"].dump());
 		if (const auto cells = scene.find("cells"); cells != scene.end() && cells->is_object())
 			world.setCellManifestJson(cells->dump());
+		if (const auto head = scene.find("streaming"); head != scene.end() && head->is_object())
+			world.setCellHeadJson(head->dump());
 
 		if (!scene.contains("entities")) return true; // empty scene — valid
 
@@ -2079,6 +2086,7 @@ namespace
 
 		// ── Pass 2: rebuild parent/child links ────────────────────────────────
 		rebuildHierarchy(registry, scene, idMap);
+		world.noteStructureChanged();
 
 		// Legacy scenes stored Environment/Weather on the World root; move them onto
 		// dedicated Sky/Weather entities so the whole engine sees one uniform model.
@@ -2099,7 +2107,8 @@ namespace
 	// root, which is parented to world.rootEntity() by createEntity). The loaded
 	// scene's children are grafted under the existing world root without clearing it.
 	bool applyAdditiveJson(HorizonWorld& world, const json& scene,
-	                       std::vector<Entity>* outCreated = nullptr)
+	                       std::vector<Entity>* outCreated = nullptr,
+	                       const SceneSerializer::AdditiveOptions& options = {})
 	{
 		if (!scene.contains("entities")) return true;
 
@@ -2113,6 +2122,22 @@ namespace
 		// copy of the scene into a world that may already contain one, and
 		// restoring would give both copies the same identities. Each graft keeps
 		// the ids minted at creation, so it is a distinct instance.
+		//
+		// options.preserveIds is the exception, for a load that happens once per
+		// file — a streamed cell (HE::CellStreamer). Its entities are destroyed
+		// again when the camera moves on, and what refers to them by id (a prefab
+		// placement's bindings, a joint, a rig's target) has to find them again
+		// when it comes back. The double graft the default exists to prevent is
+		// still caught, by asking the world: an id it holds already is not taken
+		// over. That entity keeps the fresh id it was created with, which only
+		// costs the references to it. The records stay addressed by their stored
+		// key below either way, so the hierarchy is rebuilt as the file says.
+		size_t      collisions = 0;
+		std::string firstCollision;
+		// createEntity() lists every new entity at the END of the world root's
+		// children. Noted here so the stale entries can be taken out again below
+		// without searching the whole list: it can hold a hundred thousand.
+		const size_t rootChildrenBefore = registry.get<HierarchyComponent>(world.rootEntity()).children.size();
 		for (auto& eJson : scene["entities"])
 		{
 			const HE::UUID key  = entityKeyOf(eJson);
@@ -2121,6 +2146,17 @@ namespace
 			// createEntity() parents to world.rootEntity() automatically, which is
 			// exactly what the source scene's own root needs too.
 			Entity e = world.createEntity(name);
+
+			if (options.preserveIds && hasStoredUuid(eJson) && key != HE::UUID{})
+			{
+				if (world.findByEntityId(key) == entt::null)
+					world.setEntityId(e, key);
+				else
+				{
+					if (collisions == 0) firstCollision = name;
+					++collisions;
+				}
+			}
 
 			idMap[key] = e;
 			if (outCreated) outCreated->push_back(e);
@@ -2134,8 +2170,56 @@ namespace
 				registry.emplace_or_replace<EditorLockComponent>(e);
 		}
 
+		// One line for the whole load, not one per entity: a copied cell file
+		// collides on every record it has.
+		if (collisions > 0)
+		{
+			HE_LOG_WARN(Serialize,
+			            "Additive load: %zu of %zu entities (the first is '%s') already had their stored "
+			            "id in the world and got fresh ones — a second copy of the same scene or cell "
+			            "file. What refers to them by id will not find them.",
+			            collisions, scene["entities"].size(), firstCollision.c_str());
+			if (options.idCollisions) *options.idCollisions += collisions;
+		}
+
 		// Pass 2: rebuild hierarchy (only within the newly loaded entities)
 		rebuildHierarchy(registry, scene, idMap);
+
+		// createEntity() wrote BOTH sides of the root link for every record, and
+		// rebuildHierarchy re-points only `parent`: the world root is not one of the
+		// records, so it never cleans up its own children. Left alone, every entity of
+		// the load stayed listed under the root as well as under its real parent —
+		// walked twice by propagateTransforms (the later visit wins, and which one is
+		// later depends on the order of the records), and for a streamed cell, whose
+		// entities are destroyed again, a list of dead handles that grew with every
+		// load. applyPrefabJson drops them the same way (below, "stale"). The new
+		// entities are exactly the tail of the root's list, in the order they were
+		// made, so only the tail is looked at.
+		//
+		// What is left in the tail are the load's tops: entities whose record named
+		// no parent that is in the load. They stay under the root, or move under
+		// options.attachTo (a cell's later slices go under the cell's root).
+		auto& rootChildren = registry.get<HierarchyComponent>(world.rootEntity()).children;
+		const Entity attachTo = options.attachTo != entt::null && registry.valid(options.attachTo)
+		                        && registry.all_of<HierarchyComponent>(options.attachTo)
+		                        && options.attachTo != world.rootEntity()
+		                        ? options.attachTo : entt::null;
+		size_t kept = std::min(rootChildrenBefore, rootChildren.size());
+		for (size_t i = kept; i < rootChildren.size(); ++i)
+		{
+			const Entity e = rootChildren[i];
+			auto& h = registry.get<HierarchyComponent>(e);
+			if (h.parent != world.rootEntity()) continue;   // stale: re-parented by rebuildHierarchy
+			if (attachTo != entt::null)
+			{
+				h.parent = attachTo;
+				registry.get<HierarchyComponent>(attachTo).children.push_back(e);
+			}
+			else
+				rootChildren[kept++] = e;
+		}
+		rootChildren.resize(kept);
+		world.noteStructureChanged();
 
 		world.purgeOrphanedGeneratedEntities();
 		world.ensureEnvironmentLights();
@@ -2379,6 +2463,7 @@ namespace
 
 		Entity targetParent = (prefabParent != entt::null) ? prefabParent : world.rootEntity();
 		world.reparentEntity(prefabRoot, targetParent);
+		world.noteStructureChanged();   // rebuildHierarchy and the stale cleanup above rewired links
 		world.markHierarchyDirty();
 		return prefabRoot;
 	}
@@ -2804,6 +2889,162 @@ bool SceneSerializer::loadAdditiveFromJson(HorizonWorld& world, const json& scen
 {
     if (!scene.is_object()) return false;
     return applyAdditiveJson(world, scene, outCreated);
+}
+
+bool SceneSerializer::loadAdditiveFromJson(HorizonWorld& world, const json& scene,
+                                           std::vector<Entity>* outCreated,
+                                           const AdditiveOptions& options)
+{
+    if (!scene.is_object()) return false;
+    return applyAdditiveJson(world, scene, outCreated, options);
+}
+
+std::vector<json> SceneSerializer::sliceForAdditiveLoad(json&& scene, size_t maxEntities)
+{
+    const auto whole = [&scene]()
+    {
+        std::vector<json> one;
+        one.push_back(std::move(scene));
+        return one;
+    };
+    const auto found = scene.is_object() ? scene.find("entities") : json::iterator{};
+    if (maxEntities == 0 || !scene.is_object() || found == scene.end() || !found->is_array()
+        || found->size() <= maxEntities)
+        return whole();
+    json&        records = *found;
+    const size_t n       = records.size();
+
+    // Every record by its key, and the one record without a parent: the cell's root.
+    // "Parent" is read the way the loader reads it (entityRefOf), so a record the
+    // loader would treat as parentless is the one found here.
+    std::unordered_map<HE::UUID, size_t> at;
+    at.reserve(n);
+    size_t rootAt = n;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const json& r = records[i];
+        if (!r.is_object()) return whole();
+        if (!at.emplace(entityKeyOf(r), i).second) return whole();   // two records, one identity: the loader reports it
+        HE::UUID parentKey;
+        const auto p = r.find("parent");
+        if (p != r.end() && entityRefOf(*p, parentKey)) continue;
+        if (rootAt != n) return whole();                             // two roots
+        rootAt = i;
+    }
+    if (rootAt == n) return whole();
+
+    // The subtrees under the root, in the order of its `children`, each in pre-order
+    // (a record before its descendants; the order among a record's own children is
+    // their `children` array, which the loader restores whatever order they are made
+    // in). Walked through `children` like rebuildHierarchy does, not through `parent`:
+    // what the loader would link is what is cut here.
+    std::vector<uint8_t> seen(n, 0);
+    seen[rootAt] = 1;
+    size_t reached = 1;
+    std::vector<std::vector<size_t>> tops;
+    const auto rootKids = records[rootAt].find("children");
+    if (rootKids == records[rootAt].end() || !rootKids->is_array()) return whole();
+    std::vector<size_t> stack;
+    for (const json& ref : *rootKids)
+    {
+        HE::UUID key;
+        if (!entityRefOf(ref, key)) continue;
+        const auto top = at.find(key);
+        if (top == at.end()) continue;                               // a link into nowhere: the loader skips it too
+        if (seen[top->second]) return whole();                       // listed twice
+        std::vector<size_t> subtree;
+        stack.assign(1, top->second);
+        while (!stack.empty())
+        {
+            const size_t i = stack.back();
+            stack.pop_back();
+            if (seen[i]) return whole();                             // a record with two parents, or a cycle
+            seen[i] = 1;
+            ++reached;
+            subtree.push_back(i);
+            const auto kids = records[i].find("children");
+            if (kids == records[i].end() || !kids->is_array()) continue;
+            // Pushed back to front, so the first child is popped first.
+            for (auto k = kids->end(); k != kids->begin();)
+            {
+                --k;
+                HE::UUID childKey;
+                if (!entityRefOf(*k, childKey)) continue;
+                const auto child = at.find(childKey);
+                if (child != at.end()) stack.push_back(child->second);
+            }
+        }
+        tops.push_back(std::move(subtree));
+    }
+    // A record the root does not reach would be left under the world root by the
+    // whole load; it cannot be reproduced in slices, so the cell is not cut.
+    if (reached != n) return whole();
+
+    // What is cut whole is a subtree, or a run of subtrees that refer to one another
+    // (the ref hull, Thema 164 step 3a): the splitter names those in the cell's
+    // "streaming" head ("clusters", lists of the ids of the subtrees' tops) and writes
+    // them side by side, so a cluster is a run of tops in `tops`. Cut in two slices it
+    // would have a frame in which a joint's partner, or the other half of a rope, is not
+    // in the world yet. A run is only ever formed from tops that stand next to each
+    // other, which keeps the order of the whole load. No head, no clusters: as before.
+    std::unordered_map<HE::UUID, size_t> clusterOf;
+    if (const auto head = scene.find("streaming"); head != scene.end() && head->is_object())
+        if (const auto lists = head->find("clusters"); lists != head->end() && lists->is_array())
+            for (size_t c = 0; c < lists->size(); ++c)
+            {
+                if (!(*lists)[c].is_array()) continue;
+                for (const json& ref : (*lists)[c])
+                {
+                    HE::UUID key;
+                    if (entityRefOf(ref, key)) clusterOf[key] = c;
+                }
+            }
+    if (!clusterOf.empty())
+    {
+        std::vector<std::vector<size_t>> together;
+        together.reserve(tops.size());
+        size_t previous = SIZE_MAX;
+        for (std::vector<size_t>& subtree : tops)
+        {
+            const auto in      = clusterOf.find(entityKeyOf(records[subtree.front()]));
+            const size_t group = in != clusterOf.end() ? in->second : SIZE_MAX;
+            if (group != SIZE_MAX && group == previous)
+                together.back().insert(together.back().end(), subtree.begin(), subtree.end());
+            else
+                together.push_back(std::move(subtree));
+            previous = group;
+        }
+        tops = std::move(together);
+    }
+
+    std::vector<json> slices;
+    slices.reserve(2 + n / maxEntities);
+    {
+        json first;
+        first["entities"] = json::array({ std::move(records[rootAt]) });
+        slices.push_back(std::move(first));
+    }
+    json   packed = json::array();
+    size_t inPack = 0;
+    const auto flush = [&]()
+    {
+        if (inPack == 0) return;
+        json slice;
+        slice["entities"] = std::move(packed);
+        slices.push_back(std::move(slice));
+        packed = json::array();
+        inPack = 0;
+    };
+    for (const std::vector<size_t>& subtree : tops)
+    {
+        // A subtree that does not fit what is packed so far starts the next slice;
+        // one that is larger than a slice by itself gets one to itself.
+        if (inPack > 0 && inPack + subtree.size() > maxEntities) flush();
+        for (const size_t i : subtree) packed.push_back(std::move(records[i]));
+        inPack += subtree.size();
+    }
+    flush();
+    return slices;
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────

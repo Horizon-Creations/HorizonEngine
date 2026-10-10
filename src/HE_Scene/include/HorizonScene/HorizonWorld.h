@@ -16,6 +16,14 @@ class HorizonWorld {
 public:
 	HorizonWorld();
 	~HorizonWorld() = default;
+	// The id index below listens to this world's own registry through delegates
+	// that point back at `this`: a copy would share them and a move would leave
+	// them pointing at the world it came from. Neither was ever possible (the
+	// registry and the script runtime are not copyable); now it is also said.
+	HorizonWorld(const HorizonWorld&)            = delete;
+	HorizonWorld& operator=(const HorizonWorld&) = delete;
+	HorizonWorld(HorizonWorld&&)                 = delete;
+	HorizonWorld& operator=(HorizonWorld&&)      = delete;
 
 	Entity rootEntity() const { return m_rootEntity; }
 
@@ -29,8 +37,19 @@ public:
 	// happens for an invalid handle — generate() never produces it, since it
 	// always sets the RFC 4122 version and variant bits.
 	HE::UUID entityId(Entity entity) const;
-	// The entity carrying `id`, or entt::null. Linear over the id pool: fine for
-	// load-time resolution and tests, not for a per-frame lookup.
+	// The entity carrying `id`, or entt::null. O(1): the world keeps an index of
+	// every EntityIdComponent, fed by the registry's own signals (construct,
+	// update, destroy) rather than by its callers, so it holds however the id got
+	// there — createEntity, setEntityId, a scene load, a collab peer's blob, a test
+	// that emplaces the component itself. That makes it cheap enough for the
+	// per-frame lookups (rope, camera rig, IK, joints, sequencer) and for asking
+	// "is this id taken" once per entity of a cell that is being loaded.
+	//
+	// The one thing it cannot see is a write straight into the component
+	// (`registry.get<EntityIdComponent>(e).id = x`): that fires no signal. Write
+	// through setEntityId, or registry.patch / replace / emplace_or_replace, which do.
+	// Two entities holding one id (a damaged merge) both stay findable: the lookup
+	// answers with one of them, and with the other once that one is gone.
 	Entity   findByEntityId(const HE::UUID& id) const;
 	// Replace an entity's identity. Used by scene loading to restore the value
 	// from the file — deliberately NOT used by prefab instantiation, which keeps
@@ -86,10 +105,47 @@ public:
 	// back when the scene is saved; clear() drops it.
 	const std::string& cellManifestJson() const { return m_cellManifestJson; }
 	void setCellManifestJson(std::string json) { m_cellManifestJson = std::move(json); }
+	// The "streaming" object of a scene file that IS a streaming cell (HE::CellSplit
+	// writes it into every cell, HE::CellStreamer reads it off the parsed file): its
+	// format version, which tells the game the ids in the file are stable and are to
+	// be kept on load. Carried by the world for the same reason as the manifest above:
+	// the export packs every project scene by loading it into a world and saving that
+	// to memory, and a key the world does not hold is gone from the pak — the shipped
+	// game would then load every cell with fresh ids. Empty for a scene that is not a
+	// cell. Written back when the scene is saved; clear() drops it. An additive load
+	// never sets it: a cell grafted into the game's world is not the game's world.
+	const std::string& cellHeadJson() const { return m_cellHeadJson; }
+	void setCellHeadJson(std::string json) { m_cellHeadJson = std::move(json); }
 
 	bool isHierarchyDirty()  const { return m_hierarchyDirty; }
 	void clearHierarchyDirty()     { m_hierarchyDirty = false; }
 	void markHierarchyDirty()      { m_hierarchyDirty = true;  }
+
+	// ── Structure epoch (Thema 164, for Thema 162) ───────────────────────────
+	// ONE counter that moves whenever the SET of entities, their PARENTS or the
+	// ORDER of siblings changes: createEntity, destroyEntity, reparentEntity,
+	// moveChild, placeNextTo, sortChildrenByName, clear, and the scene loaders after
+	// they rebuilt the links. Whoever caches what a walk of the world produced (the
+	// extractor's per-frame copy, a retained render world) compares the number it saw
+	// with this one: equal means the walk would find the same entities in the same
+	// places, different means it would not. A cell streamed in or out
+	// (HE::CellStreamer) moves it, so it is also how a cache learns that a load
+	// happened between two reads that were meant to see one world.
+	//
+	// What it does NOT cover, on purpose: component VALUES (a moved transform, a
+	// changed material), and a component added to or removed from a live entity (a
+	// script can give an existing entity a mesh). A cache that needs those has to
+	// watch them itself. It is also not markHierarchyDirty(): that one is set by hand
+	// by the loaders and the editor and cleared by the Outliner, so it cannot answer
+	// "did anything change since I last looked" for a second reader.
+	//
+	// Not zero-initialised for a reason: a fresh world starts at 1, so a cache that
+	// initialises its remembered value to 0 never matches by accident.
+	uint64_t structureEpoch() const { return m_structureEpoch; }
+	// For code that rewires the hierarchy itself rather than through the methods
+	// above (the scene loaders' rebuildHierarchy, an additive load grafting its
+	// roots). Costs one increment.
+	void     noteStructureChanged() { ++m_structureEpoch; }
 
 	// Built-in entities (the root and the environment sun/moon lights) cannot be
 	// deleted or have arbitrary components managed; they belong to the World.
@@ -232,11 +288,30 @@ private:
 	// once from the constructor. See the .cpp for the full rationale.
 	void reserveComponentStorage();
 
+	// ── The id index (findByEntityId) ─────────────────────────────────────────
+	// Declared BEFORE m_registry on purpose: members go in reverse order, so the
+	// registry is torn down while the index it still reports to is alive.
+	//   m_idIndex    id → holder. A multimap because two holders of one id is a
+	//                state a damaged scene can reach, and the second must not
+	//                disappear from the index when the first one is destroyed.
+	//   m_idIndexed  entity → the id it is indexed under. The update signal fires
+	//                AFTER the write and carries only the new value, so the old
+	//                key can only be found here.
+	std::unordered_multimap<HE::UUID, Entity> m_idIndex;
+	std::unordered_map<Entity, HE::UUID>      m_idIndexed;
+	// Connected to the registry's construct / update / destroy signals of
+	// EntityIdComponent in the constructor.
+	void onEntityIdSet(entt::registry& registry, Entity entity);
+	void onEntityIdDestroyed(entt::registry& registry, Entity entity);
+	void unindexEntityId(Entity entity);
+
 	entt::registry m_registry;
 	Entity         m_rootEntity     = entt::null;
 	bool           m_hierarchyDirty = true;
+	uint64_t       m_structureEpoch = 1;
 	glm::dvec3     m_origin{ 0.0 };
 	std::string    m_cellManifestJson;
+	std::string    m_cellHeadJson;
 	// Declared before the widget managers so it outlives them (they point at it).
 	HorizonCode::Runtime  m_ownScripts;          // used unless an app runtime is injected
 	HorizonCode::Runtime* m_scriptsPtr = nullptr;

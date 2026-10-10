@@ -7043,10 +7043,13 @@ namespace
 	  "", "editor#profiler" },
 	{ "Profiler/Split into Streaming Cells", "",
 	  "Moves the scene's placed things (meshes, point and spot lights, static "
-	  "bodies, decals) into one scene file per grid square, next to the scene in "
+	  "bodies, decals, placed prefabs, particle systems, skeletal meshes and "
+	  "animators) into one scene file per grid square, next to the scene in "
 	  "a folder named after it. The rest stays: sky, terrain, cameras, scripts, "
-	  "characters, dynamic bodies, prefab instances. The game then loads the "
-	  "squares around its camera and drops the far ones. One undo step; save the "
+	  "characters, dynamic bodies, audio sources. The game then loads the "
+	  "squares around its camera and drops the far ones; the things in a square "
+	  "keep their ids, so a placed prefab comes back as the same entities. Play "
+	  "in the editor shows only what stays in the scene. One undo step; save the "
 	  "scene to keep it. The scene has to have been saved once.",
 	  "", "editor#profiler" },
 	{ "Profiler/Merge Cells into the Scene", "",

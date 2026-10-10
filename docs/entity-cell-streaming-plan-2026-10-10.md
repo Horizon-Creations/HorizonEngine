@@ -1,0 +1,1050 @@
+# Entities pro Zelle streamen: Bauplan (Thema 164, Schritt 1)
+
+Stand 10.10.2026, Zweig `claude/entities-pro-zelle-streamen-nur-die-umgebung-der-kamera-exis`,
+Basis `202e14f2` (= `origin/release/0.7.0`). Die Abschnitte 0 bis 11 sind der Bauplan aus Schritt 1
+(**nur Doku**, Zeilennummern gelten für `202e14f2`); **Abschnitt 12 hält fest, was Schritt 2a daraus
+gebaut hat und was dabei anders war, Abschnitt 13 dasselbe für Schritt 2b, Abschnitt 14 für 3a, Abschnitt 15 die Verifikation (gemessen und
+nicht gemessen).** Bezug: `docs/world-streaming-baseline-2026-10-06.md` (Thema 153, §9.4, §10.5–10.7,
+§11.4–11.5) und der Plan von Thema 162 (`docs/render-extractor-shadow-pass-plan.md`, liegt nur auf
+`origin/claude/render-extractor-und-schatten-pass-einmal-pro-frame-statt-me`, Commit `16947c08`,
+noch nicht auf `release/0.7.0`; hier nur zitiert, nicht übernommen).
+
+## 0. Kurz
+
+**Die Annahme im Thema stimmt nicht mehr.** Dort steht: „bisher gibt es nur Szenen-Zellen zum
+Bearbeiten, aber kein Streaming von Entities zur Laufzeit“. Auf `release/0.7.0` gibt es das
+Laufzeit-Streaming schon: `HE::CellStreamer` lädt und entlädt Zellen nach Kameraabstand mit
+Vorausschau, Lesen und Parsen auf dem Job-Pool, Aufbau mit 4 ms Budget am Hauptthread, Jolt-Bodies
+und Asset-Streaming je Zelle (Thema 153 Schritt 5, `CellStreamer.h/.cpp`,
+`GameApplication::updateCellStreaming`). Schritt 6 hat dazu die Editor-Werkzeuge gebaut
+(Split/Merge, Zellansicht). Der Bauplan baut deshalb **nichts neu**, sondern benennt, was zwischen
+diesem Stand und dem Ziel „Dörfer, Wegpunkte, NPCs“ fehlt.
+
+Was fehlt, in einem Satz: In Zellen darf heute nur **unveränderlich Platziertes** liegen (Meshes,
+Punkt-/Spotlichter, statische Collider, Decals), jede Zelle bekommt bei **jedem Laden neue UUIDs**,
+nur **die erste Kamera** ist Anker, eine Zelle wird **in einem Stück** aufgebaut, und im **Editor-Play
+streamt nichts**.
+
+Entscheidungen dieses Plans (Begründung in den Abschnitten):
+
+| # | Entscheidung | Abschnitt |
+|---|---|---|
+| D1 | **Ein Dateiformat, eine Regeltabelle.** Laufzeit-Zellen sind dieselben `<Szene>.cells/cell_x_z.hescene` wie die Szenen-Zellen aus Schritt 6. Neu ist nur ein kleiner Kopf (`streaming`) und eine Manifest-Spalte. Split/Merge bleibt Editor-Werkzeug und ist die einzige Stelle, die entscheidet, was in eine Zelle darf | 3, 4 |
+| D2 | **Zellen laden mit ihren gespeicherten UUIDs** (`preserveIds`), nicht mit frischen. Eine Zelle ist nie zweimal geladen, das Argument gegen das Wiederherstellen (Kopien derselben Szene) trifft hier nicht zu | 4.3 |
+| D3 | **Drei Streaming-Klassen:** *Resident* (Basis), *Zelle-statisch*, *Zelle-zustandsbehaftet*. NPCs mit Skript und Zustand sind die dritte Klasse: beim Entladen wird der Zustand herausgeschrieben und die Entity zerstört, beim Laden wieder angewandt. Keine Simulation außerhalb des Radius | 4.4 |
+| D4 | **Verweise über Zellgrenzen gibt es nicht.** Der Splitter hält Verweis-Cluster zusammen (Ref-Hülle). Was ein Verweis nicht darf, bleibt Resident. Ein Verweis auf eine entladene Entity ist `entt::null`, nie ein hängender Zeiger | 5 |
+| D5 | **Anker statt „die Kamera“:** `CellStreamer::update` bekommt eine Liste (Kamera, Spieler, Skript-Pins). Server ohne Kamera laden um ihre Spieler | 4.5 |
+| D6 | **Aufbau gestückelt:** Der Worker teilt die geparste Zelle in Gruppen kleiner Teilbäume, der Hauptthread baut Gruppen, solange das Budget reicht (statt einer ganzen Zelle) | 4.6 |
+| D7 | **Ein gemeinsamer Host (`CellRuntime`) für Spiel und Editor-Play** statt einer dritten Kopie der Zonen-Verdrahtung. Der Editor streamt nicht (er bearbeitet die ganze Szene), das Play schon | 8 |
+| D8 | **Zellen laden/entladen nur im Update-Teil des Frames**, nie innerhalb eines `RenderExtractor::FrameScope`. Dazu schlägt dieser Plan einen Struktur-Zähler vor (`HorizonWorld::structureEpoch`), den Thema 162 lesen kann; wer zuerst landet, baut ihn. **Ein** Zähler, nicht zwei | 7 |
+
+Nicht Teil: Terrain-Streaming, Foliage/Instancing (Thema 163), Streaming im Editor, Simulation
+entladener NPCs, vertikale Zellen, Asset-Eviction (Abschnitt 9).
+
+## 1. Bestand auf release/0.7.0
+
+| Baustein | Stelle | Was er kann | Herkunft |
+|---|---|---|---|
+| Manifest | `CellManifest` (`CellStreamer.h:33`, `.cpp:22`) | `cellSize`, `loadRadius`, `unloadRadius`, `lookaheadSec`, `dir`, Liste `[x, z, entities]`; `around()`/`distanceTo()` für die Editor-Ansicht | 153/5 |
+| Streamer | `CellStreamer::update` (`CellStreamer.cpp:187`) | sucht nur die Gitterquadrate um Kamera und Vorausschau (`scan`, Zeile 209), Lesen+Parsen als Job (`CellLoad`, High wenn die Kamera drinsteht), Abbruch per `CancelToken`, Bau nächste zuerst, Entladen jenseits `unloadRadius` | 153/5 |
+| Hooks | `CellStreamer::Hooks` (`.h:92`) | `loaded(root, created)`, `unloading(root)` | 153/5 |
+| Spiel-Verdrahtung | `GameApplication::updateCellStreaming` (`GameApplication.cpp:1491`) | Reader (Pak per `detachedMountedEntryReader`, sonst lose Datei), Hooks für Jolt (`addEntity` je Entity) und `streamSceneAssets` unter eigenem Token; Aufruf im Update nach dem Floating Origin (`:3212`) | 153/5 |
+| Aufbau | `SceneSerializer::loadAdditiveFromJson` (`SceneSerializer.cpp:2802`) → `applyAdditiveJson` (`:2101`) | legt eine Zelle additiv unter die Weltwurzel; die Zellwurzel steht auf `-origin` (`CellStreamer.cpp:337`), fest gegenüber Floating Origin | 153/5 |
+| Parsen auf dem Worker | `parseSceneText`/`parseSceneCbor` (`SceneJsonParse.h`) | JSON oder CBOR, gleiche Zelldatei lose und im Pak | 153/5 |
+| Splitter | `splitSceneIntoCells`, `splitWorldIntoCells`, `mergeCellsIntoWorld` (`CellSplit.h/.cpp`) | Regeln aus `scripts/split_scene_cells.py` in C++; Merge stellt UUIDs, Ordner und Reihenfolge her; je ein Undo-Schritt | 153/6 |
+| Editor-Ansicht | `StreamingDebugView.*`, *Show ▸ Streaming Cells*, Profiler-Tab *Streaming* | zeigt, was das Spiel von der Editor-Kamera aus laden würde | 153/6 |
+| Floating Origin | `FloatingOrigin.h/.cpp` | schiebt Wurzel-Kinder, also auch die Zellwurzeln, samt Jolt | 153/5 |
+
+Gemessen (153 §10.5, Bench `'Cell streaming bench*'`, 200k-Welt): ganze Welt 2,6–2,8 s;
+**Basis 4–8 ms + 14 Zellen (11 527 Entities) in 87–170 ms**, schlechtester Hauptthread-Frame
+10–99 ms. Der Editor-Frame bei 101k Entities kostet CPU 145 ms, davon `RenderExtractor::extract`
+76,6 ms (§11.3). Ein geladener Ausschnitt von ~11k liegt in der 10k-Zeile (extract 6,4 ms).
+
+## 2. Was fehlt, gemessen am Ziel „Dörfer, Wegpunkte, NPCs“
+
+**L1. Zellen dürfen nur Unveränderliches enthalten.** `movableKey` (`CellSplit.cpp:25`) erlaubt
+`transform, mesh, material, light, lod, collider, rigidbody, decal, inactive`; Richtungslicht und
+dynamische Rigidbodies sind ausgenommen (`:54–59`). Ein Teilbaum geht nur dann in eine Zelle, wenn
+jede seiner Entities nur diese Komponenten trägt. Skripte, Charaktere, Nav-Agents, Audio,
+Partikel, Skelett-Meshes, Prefab-Instanzen bleiben in der Basis (153 §10.7: „Dynamische Bodies,
+Skripte, Prefab-Instanzen und Kameras bleiben in der Basis“). Ein Dorf aus Prefab-Häusern mit NPCs
+bleibt damit fast vollständig Basis, und genau die Basis ist es, die nicht skaliert.
+
+**L2. Jede Zelle bekommt bei jedem Laden neue UUIDs.** `applyAdditiveJson` erzeugt alle Entities frisch
+und stellt die gespeicherten UUIDs ausdrücklich nicht her (`SceneSerializer.cpp:2111–2118`, Kommentar:
+„The stored UUIDs are deliberately NOT restored here“). Es gibt keinen Remap-Schritt für Verweise in
+Komponenten, nur `rebuildHierarchy`. Folgen:
+- Jeder Verweis per UUID zeigt auf eine UUID, die nach dem Laden nicht existiert: `JointComponent::target`
+  (`PhysicsWorld.cpp:1614`), `RopeComponent::attachStart/End` (`RopeTrailSystem.cpp:79`),
+  `CameraRigComponent::target` (`CameraRigController.cpp:65`), IK-`lookAt` (`PoseFinalize.cpp:393`),
+  Sequencer-Bindungen (`SequenceEval.cpp:119`), die Bindungen einer `PrefabInstanceComponent`.
+- `SaveStateComponent` setzt eine **szenenautorierte** UUID voraus (`SaveStateComponent.h:15`): der
+  gespeicherte Zustand einer Entity in einer Zelle trifft nach dem Wiederladen nie wieder.
+- Replikation adressiert über die UUID (`SpawnReplicator.cpp:260`).
+
+Ein Mechanismus zum Wiederherstellen existiert schon, nur nicht auf diesem Pfad:
+`applyPrefabJson(..., preserveIds, ...)` (`SceneSerializer.cpp:2257, 2285`), von der Zusammenarbeit
+benutzt. 153 §11.5 hat das als „Verweise über Zellgrenzen im Spiel: außerhalb dieses Schritts“
+liegen lassen. Das ist Schritt 3 hier.
+
+**L3. `findByEntityId` ist linear.** `HorizonWorld.cpp:417` läuft über den ganzen Id-Pool („Linear over
+the id pool: fine for load-time resolution and tests, not for a per-frame lookup“, `HorizonWorld.h`).
+Die Aufrufer oben laufen teils pro Frame (Kamera-Rig, Seil, IK). Bei 100k+ Entities in der Basis ist
+das ein O(N)-Zugriff pro Verweis und Frame. Zellen drücken N, aber sobald UUID-Verweise wirklich
+auflösen, braucht es einen Index.
+
+**L4. Nur die erste Kamera ist Anker.** `updateCellStreaming` nimmt die erste Entity mit
+`TransformComponent`+`CameraComponent` (`GameApplication.cpp:1573–1578`) und `return` ohne Kamera.
+Ein dedizierter Server hat keine Kamera, ein zweiter Spieler (Split-Screen, Mehrspieler) wird nicht
+beachtet, und ein Teleport lädt erst nach dem Sprung, ohne dass jemand weiß, wann der Boden da ist.
+
+**L5. Eine Zelle wird in einem Stück gebaut.** Das 4-ms-Budget wird nur **zwischen** Zellen geprüft
+(`CellStreamer.cpp:308–311`, „one always“). Eine Zelle mit ~800 Entities überschreitet es: gemessen
+bis 99 ms (153 §10.7). Kleinere Zellen helfen, kosten aber mehr Dateien und Manifest.
+
+**L6. Jolt-Verdrahtung ist per Entity.** Der Hook ruft `addEntity` je Entity (`GameApplication.cpp:1538`).
+Jeder Aufruf macht `removeEntityImpl` und danach `resolvePendingJoints` (`PhysicsWorld.cpp:1978–2015`).
+Das Entladen ruft `removeEntity` (`requeueJoints=false`, `:2059`): ein Gelenk von einem Basis-Körper
+zu einem Zellen-Körper geht beim Entladen **dauerhaft** verloren. Nichts hält Basis-Körper davon ab,
+durch einen entladenen Boden zu fallen. Es gibt keine Abfrage der Body-Zahl gegen `kMaxBodies = 65 536`
+(`PhysicsWorld.cpp:583`, nur eine Warnung ab 90 %, `:1971`).
+
+**L7. Im Editor-Play streamt nichts.** `EditorApplication.cpp` enthält weder `CellStreamer` noch
+`cellManifestJson` (Suche über `src/`, nur `GameApplication`, `HorizonWorld`, `SceneSerializer`,
+`StreamingDebugView` treffen). Nach einem Split enthält die Editor-Welt nur die Basis; ein Play zeigt
+dann vermutlich nur die Basis (nicht gelaufen, siehe Abschnitt 10). Die Zonen-Verdrahtung ist heute
+schon doppelt vorhanden (`GameApplication.cpp:2044` und `EditorApplication.cpp:2796`); eine dritte
+Kopie für Zellen wäre die falsche Antwort.
+
+**L8. Kein „Struktur hat sich geändert“-Signal.** `markHierarchyDirty()` wird von Ladern und
+Editor-Code von Hand gesetzt (`CellStreamer.cpp:338`, `SceneSerializer.cpp:2094, 2142, 2382`, 22
+Stellen im Editor) und nur vom Outliner gelesen und gelöscht (`OutlinerPanel.cpp:597, 652`).
+`createEntity`/`destroyEntity`/`reparentEntity` in `HorizonWorld.cpp` rufen es nicht auf. Unter
+Thema 162 ist das entscheidend (Abschnitt 7).
+
+**L9 (kein Fehler, aber zu wissen).** Assets einer entladenen Zelle bleiben im Speicher: kein
+Eviction, kein LRU, `unloadAsset` nur manuell (153 §4.2, §10.7). Der Speicher wächst mit der
+erkundeten Welt, nicht mit dem geladenen Ausschnitt. Das Thema löst das nicht (Abschnitt 9), muss es aber
+in der Messung ausweisen.
+
+## 3. Abgrenzung zu den Szenen-Zellen aus Thema 153 Schritt 6
+
+Entscheidung D1: **Eine Zelldatei, zwei Verbraucher.**
+
+| | Szenen-Zellen (153/6) | Laufzeit-Zellen (164) |
+|---|---|---|
+| Zweck | eine große Szene teilen und zurückführen, bleibt bearbeitbar | Entities nach Ankerabstand laden und entladen |
+| Wer | Editor: *Split into Streaming Cells*, *Merge Cells into the Scene*, Undo | Spiel und Editor-Play: `CellStreamer` über `CellRuntime` |
+| Code | `CellSplit.h/.cpp`, `StreamingDebugView.*`, `scripts/split_scene_cells.py` | `CellStreamer.h/.cpp`, `CellRuntime.*` (neu), Hooks in `GameApplication`/`EditorApplication` |
+| Datei | `<Szene>.cells/cell_<x>_<z>.hescene` + Objekt `cells` in der Basisszene | **dieselben Dateien**; Kopf `streaming` je Zelle, Spalte `bodies` im Manifest |
+| Wer entscheidet, was in eine Zelle darf | `CellSplit.cpp` (`movableKey`, `movableEntity`) | **niemand**: die Laufzeit vertraut der Datei. Sie liest nur den Kopf |
+| Lebensdauer der Entities | Merge baut alles wieder in die Szene, UUIDs bleiben | Entladen zerstört, Laden baut neu **mit denselben UUIDs** |
+
+Was Schritt 6 unverändert bleibt: Split/Merge, `cellFolders`, Undo, die Sperre in Collab-Sitzungen,
+die Zellansicht. Neu ist nur, dass der Splitter eine **Regeltabelle mit Klassen** statt einer
+Ja/Nein-Liste hat (4.4) und den Kopf schreibt.
+
+Warum kein eigenes Laufzeitformat (Alternative verworfen): Der Lader (`loadAdditiveFromJson`), die Pak-Pfade
+(`detachedMountedEntryReader`, CBOR), Merge, Debug-Ansicht und alle Tests hängen an der Zelldatei als
+`.hescene`. Ein Zweitformat bräuchte einen Konverter, einen zweiten Parser und eine Regel, wann welches
+gilt. Der Export packt Zellen schon als Szenen in die `.hpak`. Gebackene Beschleunigung (Asset-Liste,
+Bounds) kann später als optionales Feld im Kopf folgen, ohne dass die Laufzeit sie braucht.
+
+Das Python-Skript `scripts/split_scene_cells.py` wird **nicht erweitert**. Es schreibt weiter
+Version-1-Zellen (kein Kopf), die die Laufzeit unverändert liest (4.2). Die C++-Fassung ist die
+Referenz; im Skript-Kopf steht ein Hinweis darauf. Das Dublettenproblem aus 153 §11.5 („Zwei Splitter“)
+wird so nicht größer.
+
+## 4. Zellformat v2
+
+### 4.1 Manifest (Objekt `cells` der Basisszene)
+
+Rückwärtskompatibel: ein v1-Manifest parst unverändert (`CellManifest::parse`, `.cpp:22`).
+
+```json
+"cells": {
+  "version": 2,
+  "cellSize": 256, "loadRadius": 384, "unloadRadius": 480, "lookaheadSec": 2.0,
+  "dir": "Content/Village.cells",
+  "list": [[0, 0, 812, 640], [0, 1, 790, 590], [-1, 0, 120, 4]]
+}
+```
+
+- `version` fehlt = 1.
+- Eintrag `[x, z, entities, bodies]`: `bodies` ist neu (Zahl der Entities mit Rigidbody/Collider).
+  `parse` liest heute `c.size() > 2`; ein viertes Element anzuhängen bricht kein altes Manifest.
+  Der Streamer nutzt `bodies`, um ein Laden zu **verschieben**, wenn die Body-Reserve nicht reicht (6).
+- Das Gitter ist **nur x/z** (`CellManifest::cellIndex`, `distanceTo`). Vertikale Welten (Höhlen unter
+  Dörfern, Hochhäuser) sind nicht Thema; eine Zelle ist eine Säule.
+
+### 4.2 Kopf der Zelldatei
+
+Ein Objekt `streaming` auf oberster Ebene der Zelldatei, neben `entities` und `cellFolders`:
+
+```json
+"streaming": { "version": 2, "cell": [0, 0], "bodies": 640, "classes": { "static": 812, "stateful": 0 } }
+```
+
+- Fehlt der Kopf, ist es eine v1-Zelle: alles gilt als Zelle-statisch, UUIDs werden **nicht** wiederhergestellt
+  (altes Verhalten, damit ein altes Projekt unverändert läuft).
+- `version >= 2` heißt: die Datei ist von der C++-Splittung geschrieben, UUIDs sind stabil und eindeutig
+  über die ganze Szene, die Ref-Hülle (5) ist eingehalten.
+- Bewusst **nicht** im Kopf: Asset-Liste und Bounds. Eine Asset-Liste im JSON zu errechnen hieße,
+  das Wissen aus `SceneSystems::collectAssetRefs` zu duplizieren (Driftgefahr); Bounds brauchen
+  Mesh-AABBs, die in den Assets liegen. Beides nur nachrüsten, wenn Schritt 4 zeigt, dass die Asset-Latenz
+  stört (7.5). Der Pop-in-Regler bleibt `loadRadius` (≥ Sichtweite + halbe größte Objektausdehnung,
+  eine Einstellung, keine Berechnung; die Zellansicht zeigt den Radius).
+
+### 4.3 Lade-Semantik
+
+- `loadAdditiveFromJson` bekommt Optionen (`struct AdditiveOptions { bool preserveIds = false; }`).
+  `applyAdditiveJson` (`:2101`) setzt bei `preserveIds` im Pass 1 die UUID wie `applyPrefabJson` (`:2285`).
+  `CellStreamer` setzt sie für `streaming.version >= 2`.
+- **Kollision:** existiert die UUID schon in der Welt (kopierte Zelldatei, Projekt mit zwei
+  Szenen-Kopien), wird für **diese** Entity eine frische vergeben und eine Warnung geloggt;
+  `Stats::idCollisions` zählt mit. Für die Prüfung braucht es den Index aus 5.1, sonst wäre das
+  O(N) je Entity.
+- Die Zellwurzel (`Cell x,z`, direktes Kind der Weltwurzel) bleibt, ihre Position bleibt `-origin`.
+  Alle Entities der Zelle sind Nachfahren dieser einen Wurzel. Das ist die Einheit für Entladen und, in
+  Abschnitt 7, für einen späteren Teilbaum-Zähler.
+
+### 4.4 Streaming-Klassen und Komponenten
+
+Die Tabelle ist die einzige Quelle (`CellSplit.cpp`, ersetzt `movableKey`). Ein Teilbaum geht nur in
+eine Zelle, wenn **jede** Entity darin zu einer Zellen-Klasse gehört; eine unbekannte Komponente macht
+ihn Resident (Whitelist-Prinzip bleibt).
+
+| Klasse | Heißt | Komponenten | Beim Entladen | Schritt |
+|---|---|---|---|---|
+| **Zelle-statisch** | Platziertes ohne Zustand, der ein Entladen überleben muss | heute: `transform, mesh, material, lod, collider, rigidbody (statisch), decal, inactive, light (Punkt/Spot)`. Neu: `audioSource, particleSystem, skeletalMesh` + `animator*`, `propertyAnimator`, **`prefabInstance`** | Entity zerstören, Bodies entfernen | 2 (Tabelle), 3 (Prüfung je Komponente) |
+| **Zelle-zustandsbehaftet** | hat Zustand und/oder Skript | `script` (Lua/Python/HorizonCode-Entity-Klasse), `saveState`, `navAgent`, `characterController`+`movement` (NPC); die Verweis-Komponenten (`joint`, `rope`, `cameraRig`, `ik`, `sequencePlayer`) nur innerhalb einer Ref-Hülle | Zustand über `SaveState` herausschreiben (`CellState`), dann zerstören | 3 |
+| **Resident** | muss immer da sein | `camera`, `cameraRig`, `audioListener`, Richtungslicht, Terrain/Terrain-Chunk, Himmel/Wetter/Umgebung, `network`, `replicatedVars`, dynamische `rigidbody`, Spieler, alles mit unbekannter Komponente, alles was ein Autor als Resident markiert | bleibt | – |
+
+Zur Zeile *Zelle-statisch, neu*: Das sind dekorative Komponenten ohne Verweis. Nach dem Laden
+starten ihre Systeme neu (Animationsphase, Partikel, Audio `playOnStart`); das ist gewollt und wird
+in `test_cell_split` je Komponente belegt, nicht angenommen. **Prefab-Instanzen** sind der Hebel für
+„Dörfer“ (Häuser sind Prefabs). Ihre `PrefabInstanceComponent::bindings` zeigen per UUID auf Entities
+des eigenen Teilbaums; das trägt nur mit `preserveIds` (L2), und deshalb sind Prefab-Instanzen erst
+ab D2 zellenfähig.
+
+Wegpunkte: Eine Entity nur mit `transform` (und Name) ist heute schon „movable“. Sucht ein Skript
+oder ein NPC einen Wegpunkt per Name oder UUID, während dessen Zelle entladen ist, bekommt es `null`.
+Bis es eine datenbasierte Darstellung gibt (Abschnitt 9), gilt: **Wegpunkte, auf die Basis-Logik
+zugreift, sind Resident.** Der Autor setzt das mit dem Schalter *Streaming ▸ Resident* (4.7).
+
+### 4.5 Anker
+
+`CellStreamer::update(world, anchors, budgetMs)`, `anchors` ist ein Vektor aus
+`{ glm::dvec3 position; glm::vec3 velocity; float radiusScale = 1; }`. Gesucht wird um jeden Anker
+(`scan`, `CellStreamer.cpp:209`, läuft heute für Kamera und Vorausschau). Eine Zelle ist gewollt,
+wenn irgendein Anker sie wünscht, und wird erst entladen, wenn **alle** Anker jenseits des Radius sind.
+Quellen:
+- Hauptkamera (wie heute, aus `GameApplication.cpp:1573`),
+- jeder Spieler-Charakter (Server und Split-Screen); auf dem dedizierten Server ist das der einzige Anker,
+- **Skript-Pins:** `streaming.pin(position, radius)` → Handle, `streaming.unpin(handle)`. Brauchen Teleport,
+  Zwischensequenz mit Kamera woanders, Quest-Orte.
+
+`CellStreamer::isSettled(position, radius)`: wahr, wenn alle Zellen im Radius gebaut sind **und** ihre
+Bodies im Jolt-Welt stehen. Ein Teleport wartet darauf, bevor er den Spieler freigibt; sonst fällt er durch
+den Boden einer Zelle, die erst im Aufbau ist.
+
+### 4.6 Gestückelter Aufbau
+
+Der Worker teilt die geparste Zelle (er hat sie ohnehin in der Hand, `CellStreamer.cpp:264–272`) in
+**Gruppen**: je ein oder mehrere Teilbäume unter der Zellwurzel, bis eine Obergrenze Entities (Start 128,
+Einstellung) erreicht ist. Jede Gruppe ist ein eigenes kleines Szenen-JSON, dessen Wurzeleintrag an die
+(schon gebaute) Zellwurzel gehängt wird. Der Hauptthread baut Gruppen, solange das Budget reicht
+(`budgetMs`, mindestens eine). Daraus folgt:
+- Das Budget gilt je **Gruppe**, nicht je Zelle: der Frame-Ausreißer ist die größte Gruppe, nicht die größte Zelle.
+- Es gibt nie ein halbes Objekt: Teilbäume sind unteilbar, Verweise liegen innerhalb eines Teilbaums
+  oder eines Clusters (5), und ein Cluster ist immer **eine** Gruppe.
+- Hooks: `loadedSlice(root, created)` je Gruppe (Jolt, Asset-Streaming), `loaded(root, all)` einmal nach der
+  letzten (Skripte starten erst jetzt, damit ihr `BeginPlay` die ganze Zelle sieht, wie bei Zonen
+  `GameApplication.cpp:2017`).
+- Eine Zelle gilt als geladen, sobald die letzte Gruppe steht; `isSettled` fragt darauf.
+
+**Offen, Schritt 2 klärt es als Erstes: wie eine Gruppe an die Zellwurzel kommt.** `rebuildHierarchy`
+(`SceneSerializer.cpp:1980`) verbindet nur Einträge, die in der `idMap` **desselben** Aufrufs stehen. Eine
+Gruppe kann die Zellwurzel (aus einem früheren Aufruf) deshalb nicht als `parent` benennen, und
+`createEntity` hängt jede neue Entity an die Weltwurzel. Zwei Wege:
+- **(a) `applyAdditiveJson` je Gruppe, danach die Spitzen umhängen:** die obersten Entities jeder Gruppe
+  werden aus den `children` der Weltwurzel genommen und an die Zellwurzel gehängt (dieselben zwei
+  Zeilen wie in `rebuildHierarchy`: `children.push_back`, `parent =`). Ob `reparentEntity` dabei die
+  lokalen Werte behält, ist nicht geprüft; die Zellwurzel steht auf `-origin`, die lokalen Positionen
+  der Spitzen sind absolut, ein Umhängen mit Weltwert-Erhalt wäre falsch.
+- **(b) `applyPrefabJson(world, scene, prefabParent = Zellwurzel, preserveIds = true)`** (`:2256`) hat beides schon:
+  das Elternteil und die UUIDs. Es verlangt genau **einen** Eintrag ohne Elternteil (`prefabRoot`). Das
+  passt, wenn eine Gruppe **ein** oberster Teilbaum ist (ein Haus, ein Cluster mit einer Spitze). Mehrere
+  Spitzen bräuchten je einen Aufruf, und ein Cluster aus mehreren Spitzen müsste im selben
+  Budgetschritt gebaut werden. Ein künstliches Zwischen-Root wäre falsch (es ändert die Hierarchie gegenüber
+  der Datei und damit den Merge). Zu klären: was `applyPrefabJson` über das Anlegen hinaus tut (Prefab-Bindungen,
+  `ensureEnvironmentLights` fehlt dort, `:2257–2380`).
+Entscheidung im Schritt, mit einem Test, der Hierarchie, Reihenfolge der Kinder und lokale Positionen gegen
+das ungestückelte Laden vergleicht.
+
+### 4.7 Autorenschalter
+
+Ein Schalter je oberster Entity: *Streaming: Auto / Resident*. Auto = der Splitter entscheidet nach 4.4;
+Resident = bleibt in der Basis. Die Daten brauchen einen Ort: eine kleine Komponente `StreamingComponent`
+(`enum Mode`), weil Inspector und Splitter sie lesen. Das ist eine neue ECS-Komponente mit
+sechs Registrierstellen (Memory `new-component-registration-places`: `SceneSerializer` Speichern+Laden,
+`HE_SCENE_COMPONENT_KEYS`, `isKnownComponentKey`, `InspectorPrefabKeys.cpp`, `kComponentScopes` in
+`EditorHelp.cpp`, `HorizonScene.h` + Add-Component-Zeile + Hilfe-Einträge). Ob es ein vorhandenes Tag
+oder einen Layer gibt, den man stattdessen nehmen könnte, ist **nicht geprüft**; Schritt 3 prüft das zuerst und
+nimmt die Komponente nur, wenn nichts passt.
+
+## 5. Verweise über Zellgrenzen
+
+Regeln (D4):
+
+| # | Regel |
+|---|---|
+| R1 | **Hierarchie** kreuzt nie eine Grenze. Der Splitter nimmt ganze Teilbäume; die Zellwurzel hängt an der Weltwurzel. Bleibt wie heute |
+| R2 | **UUID-Verweise** (Gelenk, Seil, Kamera-Rig, IK, Sequencer, Prefab-Bindungen, Skript-`Ref`-Variablen) gehen nur **innerhalb desselben Clusters**. Der Splitter bildet Cluster per Union-Find über die Verweisfelder (Liste unten) und schiebt einen Cluster nur als Ganzes in **eine** Zelle (die des ersten Mitglieds). Hat ein Cluster Mitglieder in verschiedenen Klassen oder zeigt ein Verweis aus der Basis hinein, **bleibt der ganze Cluster Resident** |
+| R3 | Zur **Laufzeit** ist ein Verweis auf eine entladene Entity `entt::null` (`findByEntityId` liefert null), wie bei einer zerstörten. Alle Verbraucher tolerieren das heute schon (Seil, Kamera-Rig-Fallback, Gelenk-Warteliste, Sequencer-Slot) und bekommen in Schritt 3 je einen Test |
+| R4 | **Skripte** erfahren Zellen über die API (4.5): `streaming.cellAt`, `streaming.isLoaded`, `streaming.isSettled`, `streaming.pin/unpin`. Eine UUID in einer Skriptvariable bleibt über ein Entladen nicht gültig; ein Skript, das eine Entity außerhalb seiner Zelle braucht, pinnt oder der Autor setzt sie Resident |
+| R5 | **Zustand** einer zustandsbehafteten Entity überlebt das Entladen über `CellState` (6.3), geschlüsselt mit der stabilen UUID. Das geht nur mit D2 |
+
+Verweisfelder, wie im Code gefunden (Liste für `CellSplit.cpp`; **keine Reflexion vorhanden**, die Liste
+ist von Hand und muss bei einer neuen Komponente mitwachsen, siehe Risiko in 10):
+`JointComponent::target`, `RopeComponent::attachStart/attachEnd`, `CameraRigComponent::target`,
+`IkComponent` (`lookAt.targetEntityId`), `SequencePlayerComponent` (Bindungen/Slots/Overrides),
+`PrefabInstanceComponent::bindings` (`instanceEntity`, `templateEntity` sind **innerhalb** des Teilbaums),
+`CharacterControllerComponent`/`NavAgentComponent` Ziele (nur zu prüfen, ob Entity-Ziele).
+Eine Komponente, die nicht in der Tabelle 4.4 steht, macht ihren Teilbaum ohnehin Resident.
+
+### 5.1 UUID-Index in `HorizonWorld`
+
+`findByEntityId` (`HorizonWorld.cpp:417`) wird O(1) über `std::unordered_map<HE::UUID, Entity>`.
+**Gepflegt über entt-Signale** (`on_construct/on_update/on_destroy` von `EntityIdComponent`), nicht
+über die Aufrufer: die UUID wird an fünf Stellen direkt geschrieben, ohne `setEntityId`
+(`HorizonWorld.cpp:30, 402, 430`, `SceneSerializer.cpp:164, 2286`, `CollabController.cpp:2283`). Ein Index, der nur
+`createEntity` und `setEntityId` kennt, wäre still falsch. Ein Fallstrick bei den Signalen: `on_update`
+(`emplace_or_replace` auf eine vorhandene Komponente) feuert **nach** dem Schreiben und liefert nur den
+neuen Wert, die alte UUID ist dann weg. Der Index braucht deshalb eine Rückabbildung Entity → UUID, über die
+der alte Schlüssel gelöscht wird (oder die Schreiber rufen vorher `patch`/`replace` an einer Stelle auf).
+
+### 5.2 Gründe gegen globale Verweise zu entladenen Entities
+
+Ein Manifest-Index „UUID → Zelle“ (wo ist Entity X?) würde jedem Verweis erlauben, die Zelle zu
+laden, in der sein Ziel liegt. Das macht aus dem Streaming ein Abhängigkeitsproblem (Zelle A zieht
+Zelle B, die zieht A) und verschiebt die Last vom Autor zur Laufzeit. Der Plan wählt den Weg „der
+Splitter sorgt dafür, dass es nie nötig ist“. Was das ändern würde: Gameplay, das per Namen oder UUID quer über die Welt
+adressiert (Questziele, Funkverkehr). Dafür gäbe es dann eine **Marker-Tabelle** im Manifest
+(Name → Position, Zelle) für ausgewählte Entities, keinen vollen Index (Abschnitt 9).
+
+## 6. Jolt
+
+### 6.1 Aufbau
+
+- Der Hook baut nicht mehr `addEntity` je Entity, sondern **eine Charge je Gruppe**:
+  `PhysicsWorld::addEntities(world, span)` baut die Bodies, gibt sie über Jolts
+  `AddBodiesPrepare/AddBodiesFinalize` an das Broadphase-System (der Jolt-Header empfiehlt das ausdrücklich für
+  mehrere Bodies, `BodyInterface.h:96`) und ruft `resolvePendingJoints` **einmal** (heute je Entity,
+  `PhysicsWorld.cpp:2015`).
+- `OptimizeBroadPhase()` nach einer Charge: **offene Messung**, keine Entscheidung. Es baut den ganzen
+  Baum neu (Kommentar `PhysicsWorld.cpp:2018`); ob einmal pro großer Zelle besser ist als gar nicht, misst
+  Schritt 4.
+- **Body-Reserve:** `PhysicsWorld::bodyCount()` (neu, heute nur intern `entityToBody.size()`) gegen
+  `kMaxBodies`. Der Streamer **verschiebt** ein Laden, wenn `bodyCount + cell.bodies` über 90 % läge, und
+  loggt es; er überspringt keine Zelle. Das Limit bleibt hart; dass ein Mensch es sieht, ist Absicht (Profiler-Tab).
+
+### 6.2 Entladen
+
+- Bodies einer Zelle werden **vor** dem Zerstören in einem eigenen Durchgang entfernt (wie bei Zonen,
+  `GameApplication.cpp:2044` Kommentar), mit `requeueJoints = true` für Gelenke, deren **Besitzer in der Basis**
+  liegt. Beim Wiederladen löst `resolvePendingJoints` sie wieder auf (R2 verhindert das meistens schon; das ist
+  das Netz darunter).
+- **Dynamische Basis-Körper über entladenem Boden:** Dynamische Rigidbodies und Charaktere bleiben Resident
+  (D3). Das Gelände ist Terrain (Basis, immer geladen); die Gefahr liegt bei Zellen-Collidern (Böden von
+  Gebäuden, Brücken). Regel: ein dynamischer Körper außerhalb von `unloadRadius` **aller** Anker wird aus der
+  Simulation genommen (Jolt `RemoveBody`, Body-Objekt und Zustand bleiben) und beim Betreten des
+  `loadRadius` wieder eingefügt, **nachdem** `isSettled` wahr ist. Mechanismus: `PhysicsWorld::setRegionHold`
+  (neu). Alternative (`SetMotionType(Static)` und zurück) wird in Schritt 3 gegen diese gemessen; die
+  Anforderung steht fest, der Mechanismus nicht.
+- Charaktere (`CharacterVirtual`) haben keinen Jolt-Body (`PhysicsWorld.cpp:2073` Kommentar); ihr Halt
+  ist deshalb die Bedingung „der Spieler ist Anker, seine Zellen sind `settled`“, nicht `RemoveBody`.
+
+### 6.3 `CellState` (Zustand zustandsbehafteter Zellen)
+
+`CellState` (neu, `HE_Scene`) hält je Zelle `{ tombstones: [uuid], states: { uuid: json } }`.
+- **Beim Entladen** (`unloading`, vor `destroyEntity`): für jede Entity mit `SaveStateComponent` die
+  markierten Attribute herausschreiben, mit demselben Code wie `entity.saveState` (`EngineApi.cpp`,
+  Transform, Sichtbarkeit, `Save Game`-Skriptvariablen). Dazu die Namen der Entities, die ein Skript
+  per `entity.destroy` entfernt hat (Tombstones; sonst kommt die Kiste nach dem Wiederladen zurück).
+- **Nach dem Laden** (`loaded`, vor dem Start der Skripte): Tombstones zerstören, Zustände anwenden
+  (`entity.applySavedState`-Logik).
+- Der Speicher ist **In-Memory je Sitzung** in Schritt 3. Ins Savegame zu schreiben ist eine Zeile in dessen
+  Abschnitt, **wenn** das Savegame eine Erweiterungsstelle hat (nicht geprüft, 10); sonst Folgearbeit. Das
+  ist die Grenze, die der Mensch kennen muss: ohne diese Zeile bleibt eine geöffnete Tür nur bis zum Spielende offen.
+- Lua- und Python-Zustand wird nicht erfasst (`SaveStateComponent.h`: die Backends können nicht
+  zurücklesen); HorizonCode-`Save Game`-Variablen schon.
+
+### 6.4 Netz
+
+Entities mit `NetworkComponent`/`ReplicatedVars` sind Resident (D3), also gibt es keine replizierten
+Entities in Zellen. Server und Client laden Zellen unabhängig nach ihren Ankern; mit `preserveIds` haben
+gleiche Zellen gleiche UUIDs auf beiden Seiten. Was **nicht** gebaut wird: Replikation von Zellinhalt.
+
+## 7. Zusammenspiel mit dem Extract einmal pro Frame (Thema 162)
+
+**Zellen machen die Arbeit pro Frame kleiner (N sinkt), Thema 162 macht sie billiger (pro Entity).** Beide
+Hebel sind unabhängig und ersetzen sich nicht. Entladene Zellen sind keine Entities im Registry: sie fallen aus
+`RenderExtractor::extract`, `propagateTransforms`, `FrustumCuller::cull`, `LODSystem::update` und den
+Systemen heraus, ohne dass 162 etwas dafür tut. Die Zellen **sind** die grobe räumliche Vorfilterung, die
+153 §5 Punkt 1 als dritten Hebel nennt („vor dem Sammeln räumlich vorfiltern“); 162 muss dafür keine zweite bauen.
+
+### 7.1 Der Vertrag
+
+Zellen laden und entladen **nur im Update des Frames**, nach Floating Origin, vor den Systemen und vor dem
+Rendern: `GameApplication.cpp:3203–3212`, `updateFloatingOrigin` dann `updateCellStreaming`. Nie zwischen zwei
+`extract()`-Aufrufen eines `FrameScope` (`RenderExtractor.h:131–163`). Das ist dieselbe Regel, die
+`FloatingOrigin.h:40–41` für den Ursprungswechsel nennt. Heute ist sie nur ein Vertrag: `FrameKey`
+(`RenderExtractor.cpp:1242`) enthält den `HorizonWorld`-Zeiger und Einstellungen, aber **keine
+Versionszahl**. Ein Zellwechsel zwischen zwei Extrakten würde also still aus der alten Kopie bedient.
+
+### 7.2 Koordinationspunkt: `HorizonWorld::structureEpoch`
+
+Der Plan von 162 (Weg A, Abschnitt 5: „ein Änderungs-Zähler auf der Registry oder ein globales
+Dirty-Bit“) und dieser Plan brauchen **dasselbe**. Vorschlag: Thema 164 baut in Schritt 2 genau einen
+`uint64_t HorizonWorld::structureEpoch()`; Thema 162 liest ihn in `FrameKey` (dann wird der Vertrag
+aus 7.1 erzwungen: ändert sich die Epoche zwischen zwei `extract()` im Scope, wird nicht
+wiederverwendet) und im behaltenen `RenderWorld`.
+- Hochgezählt in `HorizonWorld::createEntity`, `destroyRecursive`/`destroyEntity`, `reparentEntity`, `clear`
+  und in dem direkten `m_registry.destroy` bei `HorizonWorld.cpp:498`. **Nicht** über `markHierarchyDirty`
+  (L8): das ist von Hand gesetzt und wird nur vom Outliner gelöscht.
+- Er deckt die **Menge der Entities und ihre Eltern**. Er deckt **nicht** Komponentenwerte und nicht
+  das Hinzufügen oder Entfernen einer `MeshComponent` an einer lebenden Entity (ein Skript kann das). Ein
+  behaltener `RenderWorld` braucht dafür eigene Änderungserkennung; das ist 162, nicht 164.
+- **Eigentümer:** wer zuerst landet. Der andere liest nur. Dieser Plan wird dem Bearbeiter von 162
+  (`render-extractor-u-1`) und der Königin genannt, damit nicht zwei Zähler entstehen.
+
+### 7.3 Granularität für einen behaltenen RenderWorld (162 Weg A)
+
+Weil jede Zelle **eine Wurzel** hat (4.3), ist Laden/Entladen ein „Teilbaum hinzugefügt/entfernt“, nicht
+Tausende Einzelereignisse. Mit der gestückelten Bauweise (4.6) kommt der Teilbaum über mehrere Frames; jede Gruppe ist selbst ein
+vollständiger Teilbaum, es gibt nie halbe Objekte. Die Weltwurzel hat nur so viele Kinder wie geladene Zellen (statt
+100k): das hilft `propagateFrom` (`TransformHierarchy.cpp:39`, Abstieg über `children`) und dem Outliner.
+Weg B von 162 (alle Pässe lesen `m_renderWorld`, ein Extract pro Frame) braucht von 164 nichts.
+
+### 7.4 Ursprungswechsel
+
+`shiftWorldOrigin` verschiebt die Zellwurzeln mit. Unter 162 Schritt 3 (Vergleich von `parentWorld` mit einem
+gespeicherten Wert) heißt das: **ein** voller Durchlauf je Verschiebung über alle geladenen Zellen. Das ist
+selten (gemessen 2,2 ms bei 50k, 153 §10.5) und akzeptabel; kein Sonderpfad nötig.
+
+### 7.5 Assets und Extract
+
+Ist ein Mesh noch nicht resident, lässt der Extraktor die Bounds ungültig („never culled“,
+`RenderExtractor.h`) und das Backend löst es beim ersten Zeichnen auf. Eine frisch gebaute Zelle zeigt
+ihre Dinge deshalb, wenn die Assets eintreffen, nicht beim Aufbau. Der Start der Asset-Loads liegt heute im
+`loaded`-Hook nach dem Bau (`GameApplication.cpp:1545`); mit Gruppen (4.6) beginnt er je Gruppe früher und
+überlappt mit dem Rest des Aufbaus. Ob das reicht oder die Zelle erst sichtbar werden soll, wenn ihre
+Assets da sind, misst Schritt 4 (Pop-in), und nur dann kommt die Asset-Liste in den Kopf (4.2).
+
+### 7.6 Was Thema 164 in Schritt 2–3 nicht anfasst
+
+`RenderExtractor.*`, `FrustumCuller`, alle fünf Backends, `propagateTransforms`. Der Editor extrahiert weiter
+seine ganze Szene (Pick-Snapshot, Snap-Drag, zweites Scene-Fenster, 153 §11.5): er profitiert von 162, nicht
+von 164. Das Editor-Play profitiert von beidem (D7).
+
+## 8. Bauplan
+
+Der Titel von Schritt 2 in der Hive-Planung stimmt nicht mehr: „Laden/Entladen zur Laufzeit umsetzen“ ist
+Thema 153/5. **Vorschlag: Schritt 2 umbenennen** in „Laufzeit-Zellen für Entities ausbauen: stabile
+Identität, Anker, gestückelter Aufbau, gemeinsamer Host für Spiel und Play“. Schritt 4 (Verifikation) passt.
+
+**Schritte 2 und 3 sind zu groß für je eine Sitzung. Vorschlag für den Schnitt, nach dem, was „Dörfer“
+freischaltet (L1 + L2), zuerst:**
+
+| Teil | Inhalt | Warum an dieser Stelle |
+|---|---|---|
+| **2a Kern** | UUID-Index mit Rückabbildung (5.1); `preserveIds` auf dem Zellpfad samt Kollisionsprüfung (4.3); `prefabInstance` (und die dekorativen Komponenten) in der Klassentabelle (4.4); Manifest-Spalte `bodies` und Kopf (4.1, 4.2); der Lauf zu L7 vorab. Test: Prefab-Haus lädt, entlädt, lädt wieder mit denselben UUIDs und intakten Bindungen | ohne stabile Identität trägt nichts anderes; kleinster Eingriff mit der größten Wirkung |
+| **2b zweite Reihe** | Anker-Liste (4.5), gestückelter Aufbau (4.6, mit der Anhänge-Frage), `structureEpoch` (7.2, klein und unabhängig: kann jeder zuerst bauen, 162 oder 164), Zellansicht | macht das Streaming robust, schaltet aber keine neuen Inhalte frei |
+| **2c dritte Reihe** | `CellRuntime`/`ICellHost`, Streaming im Editor-Play | reines Umsortieren plus eine Produktentscheidung (Play); darf hinter 3a/3b rutschen, wenn die Warnung unter der Tabelle reicht |
+| **3a Physik und Ref-Hülle** | `addEntities`-Charge, `bodyCount`, `requeueJoints` beim Entladen, `setRegionHold` (6); Ref-Hülle im Splitter (5) | trägt die Sicherheit: nichts fällt durch den Boden, kein Gelenk geht verloren |
+| **3b Zustand und Skripte** | `CellState` (6.3), Skriptstart und -abbau pro Zelle, Gruppe `streaming` in der API (Pins, `isSettled`), `StreamingComponent`, Spieler als Anker auf dem Server | braucht 2a und 3a; erst jetzt dürfen NPCs in Zellen |
+
+Der Königin zur Entscheidung: ob 2c vor oder nach 3 kommt. Gegen 2c vor 3 spricht, dass Play ohne Zellen dann bis
+dahin eine **sichtbare Warnung** („Play zeigt nur die Basis“) braucht; die kostet eine Zeile und steht in 2a.
+
+### Schritt 2: Identität, Anker, gestückelter Aufbau, Host
+
+| Datei | Änderung |
+|---|---|
+| `src/HE_Scene/include/HorizonScene/HorizonWorld.h`, `src/HE_Scene/src/HorizonWorld.cpp` | UUID-Index über entt-Signale (5.1), `findByEntityId` O(1); `structureEpoch()` (7.2) |
+| `src/HE_Scene/include/HorizonScene/SceneSerializer.h`, `src/HE_Scene/src/SceneSerializer.cpp` | `AdditiveOptions { preserveIds }` für `loadAdditiveFromJson` und `applyAdditiveJson` (`:2101`, `:2802`); Kollisionsbehandlung (4.3) |
+| `src/HE_Scene/include/HorizonScene/CellStreamer.h`, `src/HE_Scene/src/CellStreamer.cpp` | Manifest v2 (`version`, `bodies`); Kopf lesen; `update(world, anchors, budgetMs)`; Worker-Gruppierung und gestückelter Aufbau (4.6); Hooks `loadedSlice`/`loaded`/`unloading`; `isSettled`, Pins; Stats `idCollisions`, `slices`, `deferredForBodies` |
+| `src/HE_Scene/include/HorizonScene/CellSplit.h`, `src/HE_Scene/src/CellSplit.cpp` | Klassentabelle statt `movableKey` (4.4, Stufe „Zelle-statisch, neu“); Kopf `streaming` schreiben; Manifest-Spalte `bodies`; `mergeCellsIntoWorld` liest den Kopf nicht, aber verliert nichts (Test) |
+| `src/HE_Scene/include/HorizonScene/CellRuntime.h`, `src/HE_Scene/src/CellRuntime.cpp` (neu), `src/HE_Scene/CMakeLists.txt` | `CellRuntime` besitzt den `CellStreamer`, den Reader und die Ankerquellen und spricht mit der Anwendung über ein kleines Interface `ICellHost` (Bodies hinzufügen/entfernen, Assets streamen, Skripte starten/stoppen). Löst die Lambdas aus `GameApplication.cpp:1514–1566` ab |
+| `src/HE_Game/src/GameApplication.cpp/.h` | `updateCellStreaming` (`:1491`) wird dünn: Anker einsammeln (Kamera + Spieler), `CellRuntime::update`; `ICellHost` implementieren; Zonen-Pfade bleiben unberührt |
+| `src/HE_Editor/EditorApplication.cpp` | Play: eigenes `CellRuntime` aus `m_editorWorld->cellManifestJson()` beim Start, **vor** der Wiederherstellung der Welt beim Stop `clear()`; Floating Origin gibt es dort nicht (153 §10.7), die Welt ist absolut. Fallback, wenn das zu groß wird: bei nicht-leerem Manifest eine sichtbare Warnung „Play zeigt nur die Basis“ und der Rest als Folgethema |
+| `src/HE_Editor/StreamingDebugView.cpp` | Anker, Gruppen, `idCollisions`, `settled` im Tab; Overlay zeichnet Anker |
+| `tests/test_world_scale.cpp` | bestehende Zellfälle (Laden, Entladen, Hysterese, Vorausschau, Origin) laufen weiter; neu: stabile UUIDs über Entladen/Laden, Kollision, Gruppen halten das Budget (Negativkontrolle mit ganzer Zelle: rot), mehrere Anker, Entladen erst wenn alle jenseits |
+| `tests/test_cell_split.cpp` | Klassentabelle je Komponente, Kopf, Manifest `bodies`, Merge-Rundweg mit neuen Klassen |
+| `tests/test_cell_runtime.cpp` (neu), `tests/CMakeLists.txt` | `CellRuntime` gegen einen Fake-`ICellHost`; PIE-Aufruf und -Abbau |
+| `tests/test_scene_serializer.cpp` (oder `test_world_identity.cpp`) | Index nach `emplace` an den fünf direkten Schreibstellen; `preserveIds` auf dem additiven Pfad |
+
+Abnahme Schritt 2: Alle bestehenden Zelltests grün; eine Zelle mit einem Prefab-Haus lädt, entlädt und lädt
+wieder mit **denselben** UUIDs und intakten `PrefabInstance`-Bindungen; Bench `'Cell streaming bench*'` zeigt
+den schlechtesten Hauptthread-Frame unter dem Budget plus der größten Gruppe (Ziel < 8 ms statt 10–99 ms);
+Play eines gesplitteten Projekts zeigt die Zellen (Bild-Zeuge oder `HE_DUMP`-Zeuge, nicht nur ein Zähler).
+
+### Schritt 3: Physik, Verweise, Zustand
+
+| Datei | Änderung |
+|---|---|
+| `src/HE_Scene/include/HorizonScene/PhysicsWorld.h`, `src/HE_Scene/src/PhysicsWorld.cpp` | `addEntities(world, span)` mit `AddBodiesPrepare/Finalize` und **einem** `resolvePendingJoints` (`:1978–2015`); `bodyCount()`; `removeEntityTree(..., requeueJoints)` (`:2080`); `setRegionHold`; Messung `OptimizeBroadPhase` (6.1) |
+| `src/HE_Scene/src/CellSplit.cpp` | Ref-Hülle per Union-Find über die Verweisfelder (5); Klasse „Zelle-zustandsbehaftet“; Autorenschalter beachten |
+| `src/HE_Scene/include/HorizonScene/CellState.h`, `src/HE_Scene/src/CellState.cpp` (neu) | Zustand und Tombstones (6.3); eingehängt in die `unloading`/`loaded`-Hooks |
+| `src/HE_Game/src/GameApplication.cpp` | `ICellHost`: Skripte am Zellenende starten (`startScriptsFor(created)`, `:2087`), beim Entladen wie in `UnloadZone` (`:2065–2067`: `m_scriptInstances.erase`, `unwatch(scriptToken)`, `ScriptApi::destroy`); Body-Reserve; Teleport-Gate |
+| `src/HE_Editor/EditorApplication.cpp` | gleicher Host für das Play; Skript-Teardown dort (die Zonenvariante dort, `:2796–2815`, ruft kein `unwatch` und löscht keine `m_scriptInstances`, bei der Übernahme abgleichen) |
+| `src/HE_Scene/include/HorizonScene/EngineApi.h`, `src/HE_Scene/src/EngineApi.cpp`, `src/HE_Editor/HcNodeDocs.cpp` | neue Gruppe `streaming` mit `cellAt`, `isLoaded`, `isSettled`, `pin`, `unpin`: **drei bis vier Stellen je Row** (Display-Name-Map, `HcNodeDocs`-Beschreibung, `isScriptGroup` für die neue Gruppe, bei C++-GameLogic-Schnittstelle zusätzlich Services-Tabelle); danach voller `ctest`, nicht nur `-tc` |
+| `src/HE_Scene/include/HorizonScene/Components/StreamingComponent.h` (neu, falls kein vorhandenes Tag passt) und die sechs Registrierstellen aus 4.7 | Autorenschalter *Auto/Resident* |
+| `src/HE_Scene/include/HorizonScene/Net/NetGameSession.h` und Umgebung | Spieler als Anker auf dem Server (nur Anker, keine Replikation von Zellinhalt) |
+| `tests/test_cell_state.cpp` (neu), `tests/test_cell_split.cpp`, `tests/test_physics_*` | Zustand überlebt Entladen/Laden; Tombstone; Verweis auf entladene Entity ist null und Verbraucher stürzen nicht; Gelenk Basis→Zelle wird nach dem Wiederladen wieder gebaut; dynamischer Körper fällt nicht durch einen entladenen Boden (Negativkontrolle ohne Hold: rot); 3 000+ Bodies in Zellen unter `kMaxBodies` |
+
+Abnahme Schritt 3: wie die Tests; dazu ein Dorf (Prefab-Häuser, 50 NPCs mit Skript und `SaveState`,
+Wegpunkte als Resident), dessen Zellen mehrfach entladen und geladen werden, ohne dass ein NPC seine
+Position, ein Gelenk oder eine zerstörte Kiste verliert.
+
+### Schritt 4: Verifikation (die Zielwerte aus Schritt 1; gemessen in Abschnitt 15)
+
+- Welt mit 100k+ Entities über viele Zellen, Messleiter wie 153 §11.3 (`scripts/perf/world_streaming_ladder.sh`,
+  `ladder_table.py`), Bench `'Cell streaming bench*'` (braucht die geteilte Referenzwelt, Rezept im Test).
+  **Zielwert:** `RenderExtractor::extract` p50 mit ~11k geladenen von 101k im Bereich der 10k-Zeile (6,4 ms) statt 76,6 ms;
+  Speicher (RSS) und Asset-Zahl getrennt ausweisen, weil Assets nicht entladen werden (L9).
+- Bild-Zeuge für Pop-in an der Zellgrenze (Metal, `scripts/he_shot.py`); Vulkan/D3D nicht (kein Backend-Code).
+- Vollbau, `ctest -j4 --timeout 1500` mit `shaderc ON`, und der Lauf der Streaming-Benches.
+
+## 9. Nicht Teil dieses Themas, und was es auslösen würde
+
+| Punkt | Warum nicht | Wann doch |
+|---|---|---|
+| Streaming im Editor (Zelle öffnen/schließen in der Editor-Welt) | Auswahl, Undo, Speichern über mehrere Dateien und Collab hängen daran | wenn die Editor-Welt selbst nicht mehr in den Speicher passt |
+| Simulation entladener NPCs | Zustand wird eingefroren, nichts läuft außerhalb des Radius | wenn Quests NPCs über die Karte laufen lassen; dann Resident oder „Simulations-LOD“ als Daten |
+| Datenbasierte Wegpunkte / Marker-Tabelle im Manifest | Wegpunkte, die Basis-Logik braucht, sind Resident | wenn Resident-Wegpunkte die Basis wieder aufblähen |
+| Asset-Eviction (LRU) | `ContentManager` kennt kein Entladen (153 §4.2) | wenn Schritt 4 zeigt, dass RSS mit der Erkundung wächst; eigenes Thema |
+| Vertikale Zellen | Gitter ist x/z | wenn Höhlen/Hochhäuser echte Welten werden |
+| Terrain- und Foliage-Streaming | Terrain bleibt Basis; Foliage und Instancing sind Thema 163 | – |
+| GPU-Upload-Budget | Renderer-Arbeit in fünf Backends (153 §10.6) | – |
+| Backend-Parität (Vulkan ohne `FrameScope`) | gehört nicht zu diesem Thema, siehe 162 | – |
+
+## 10. Nicht geprüft, Annahmen, Risiken
+
+**Nicht geprüft (nur im Code gelesen, nichts gebaut oder gelaufen):**
+- **L7:** dass Editor-Play einer gesplitteten Szene nur die Basis zeigt. Belegt ist nur, dass es keinen Aufruf des
+  Streamers im Editor gibt. Schritt 2 beginnt mit einem Lauf (Split, Play, Entity-Zahl).
+- Ob `createEntity`/`destroyEntity`/`reparentEntity` über andere Wege die Hierarchie als schmutzig markieren (sie tun es nicht in
+  `HorizonWorld.cpp`; der Rest des Codes wurde nicht auf Aufrufer durchgesehen).
+- Ob das Savegame eine Erweiterungsstelle für einen Abschnitt „Zellen“ hat (6.3).
+- Ob es ein vorhandenes Tag/Layer für den Autorenschalter gibt (4.7).
+- Der Skript-Abbau: `ICellHost` verspricht „Skripte starten/stoppen“. Zum Starten gibt es `startScriptsFor` →
+  `EntityHost::bindFor` (`GameApplication.cpp:2087`). Ein passendes Lösen im `EntityHost` wurde **nicht** gefunden/geprüft;
+  `UnloadZone` räumt nur `m_scriptInstances`, `unwatch` und `ScriptApi::destroy` ab (`:2065–2067`), das ist Abbau
+  der Instanzen, kein Lösen der HorizonCode-Entity-Klasse. Schritt 3b liest `EntityHost.h/.cpp` zuerst.
+- Dass jede der neuen Zelle-statisch-Komponenten (Audio, Partikel, Skelett, Animator, Prefab-Instanz) nach dem Laden
+  sauber neu startet. Das ist als Test je Komponente geplant, nicht behauptet.
+- Die Jolt-Charge: nur die Existenz von `AddBodiesPrepare/Finalize` ist belegt (`BodyInterface.h:96, 121–127`
+  im Jolt-Quellbaum), nicht der Gewinn. Schritt 3 misst.
+- Windows/Linux, D3D/Vulkan: dieser Plan berührt keinen Backend-Code und wurde auf dem Mac nicht gebaut.
+
+**Risiken:**
+1. **Verweisliste von Hand (5).** Eine neue Komponente mit einem Entity-Verweis, die der Liste fehlt, würde
+   zerrissene Verweise erzeugen, und kein Test merkt es. Abmilderung: Whitelist-Prinzip (unbekannt = Resident) und
+   ein Test, der jede Komponente der Tabelle 4.4 mit einem Verweis-Feld gegen die Liste prüft.
+2. **Zustand ist opt-in (`SaveState`).** Eine Entity ohne `SaveStateComponent` in einer „zustandsbehafteten“ Zelle
+   verliert ihren Zustand beim Entladen. Der Splitter sollte `script` ohne `saveState` melden (Warnung), nicht
+   still verschieben.
+3. **Budget je Gruppe.** Eine einzelne Gruppe kann das Budget überschreiten (ein Teilbaum mit vielen Entities,
+   ein Cluster). Die Obergrenze 128 ist ein Startwert, den Schritt 4 misst.
+4. **Play-Stop und Zellen.** Das Zurücksetzen der Welt beim Stop darf den Streamer nicht mit Handles einer
+   ersetzten Welt zurücklassen. Deshalb `clear()` **vor** der Wiederherstellung (Schritt 2).
+5. **Zwei Zähler.** Entsteht in 162 ein eigener Änderungs-Zähler, bevor 7.2 abgestimmt ist, gibt es zwei. Der Bauplan
+   nennt den Punkt, die Abstimmung liegt bei der Königin.
+
+## 11. Rezept für die nächsten Schritte
+
+```sh
+# Release-Build im Worktree (Deps vom Nachbar-Build, siehe Memory headless-dump-log-and-worktree-configure)
+cmake --build out/build/release -j8 --target he_tests
+out/build/release/tests/he_tests --source-file='*test_world_scale.cpp'
+out/build/release/tests/he_tests --source-file='*test_cell_split.cpp'
+out/build/release/tests/he_tests --source-file='*test_streaming_view.cpp'
+# Bench (laeuft in der CI nicht, doctest::skip), braucht die geteilte Referenzwelt:
+out/build/release/tests/he_tests --no-skip --test-case='Cell streaming bench*'
+# Nach jeder neuen Registry-Row und jeder neuen Komponente: voller ctest, nicht nur -tc
+(cd out/build/release && ctest -j4 --timeout 1500)
+```
+
+## 12. Schritt 2a: was gebaut ist und was der Bauplan anders sah (10.10.2026)
+
+Teil 2a (stabile Identität) steht auf dem Zweig. Die Abnahme ist ein Test, kein Zähler:
+`test_cell_split.cpp`, „A prefab house in a cell: unloaded and loaded again it is the same entities,
+bindings intact“ (Split, Streamen, Entladen, Wiederladen, Merge: dieselben UUIDs, dieselben
+`PrefabInstance`-Bindungen, derselbe Datensatz je Entity). Dazu die Negativkontrolle „Cells without the
+streaming head load as they always did“ (ohne Kopf: frische Ids, die Bindungen zeigen ins Leere, das ist L2).
+Die neuen Tests wurden mit absichtlich kaputt gemachtem Code geprüft: ohne den `on_update`-Hörer, ohne die
+Bindungsprüfung des Splitters und ohne `preserveIds` werden genau die zugehörigen Fälle rot (und, beim
+`on_update`-Hörer, auch Fälle in `test_scene_serializer` und `test_prefab`).
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| UUID-Index (5.1) | `HorizonWorld::findByEntityId`, O(1) | gepflegt über die entt-Signale `on_construct/on_update/on_destroy` von `EntityIdComponent`, mit Rückabbildung Entity → UUID; zwei Halter einer Id bleiben beide auffindbar. Nicht erfasst: ein Schreiben direkt in die Komponente (`registry.get<EntityIdComponent>(e).id = x`), das feuert kein Signal; drei Teststellen in `test_prefab.cpp` standen so und gehen jetzt über `setEntityId`. `HorizonWorld` ist jetzt ausdrücklich nicht kopier- und verschiebbar (die Hörer zeigen auf `this`; vorher war es nur implizit so) |
+| `preserveIds` auf dem Zellpfad (4.3) | `SceneSerializer::AdditiveOptions`, `CellStreamer::update` | der Streamer setzt es, wenn der Kopf `streaming.version >= 2` sagt; eine belegte Id wird nicht übernommen (frische Id, eine Sammelwarnung je Ladevorgang, `Stats::idCollisions`). Zonen und alle anderen additiven Laden bleiben bei frischen Ids |
+| Klassentabelle (4.4) | `CellSplit.cpp`, `kComponentClasses` | Zelle-statisch: die alten Schlüssel plus `prefab`, `particlesystem`, `skeletalmesh`, `animator`, `animatorblend`, `propertyanimator`; alles Unbekannte bleibt Resident. Zelle-zustandsbehaftet ist als Klasse da, enthält aber noch nichts (3b) |
+| Prefab-Bindungen im Splitter | `bindingsStayInside` | ein Teilbaum mit einer Prefab-Bindung auf eine Entity außerhalb des Teilbaums bleibt in der Basis (ein herausgezogenes Kind der Instanz) |
+| Manifest v2, Kopf (4.1, 4.2) | `CellManifest::version`, `Cell::bodies`; Kopf `streaming` je Zelle | `bodies` = Entities mit Rigidbody oder Collider, eine obere Schranke: ein Collider allein baut heute keinen Body (`PhysicsWorld::buildBodyFor` braucht ein `RigidBodyComponent`). Der Streamer liest `bodies` noch nicht (3a) |
+| Kopf in der Welt | `HorizonWorld::cellHeadJson` | siehe Befund 1 |
+| Play-Warnung | `EditorApplication::setPlayMode` | siehe Befund 4 |
+| Texte | Profiler-Tab, Tooltip *Split into Streaming Cells*, Kopf von `split_scene_cells.py` | sagen, was jetzt wandert; das Skript schreibt weiter Version 1 |
+
+**Befunde, die der Bauplan anders sah oder nicht kannte**
+
+1. **Der Export schreibt jede Szene neu.** `ExportDialogPanel.cpp` lädt jede `.hescene` des Projekts in eine
+   `HorizonWorld` und speichert sie mit `saveToMemory` (`:1282–1289`); `buildSceneJson` schreibt nur
+   `entities`, `version`, `levelScript` und `cells`. Ein Kopf, der nur in der Datei steht, wäre im Pak weg, und das
+   ausgelieferte Spiel würde jede Zelle wieder mit frischen Ids laden. Deshalb trägt die Welt den Kopf wie das
+   Manifest (`applySceneJson` liest ihn, `buildSceneJson` schreibt ihn, `clear()` löscht ihn; eine additive Ladung
+   fasst ihn nie an). Test: „The cell head survives the export's load and save“. Dasselbe gilt für jeden künftigen
+   Schlüssel auf oberster Ebene einer Zelldatei; `cellFolders` (nur für den Merge) geht im Pak verloren, das ist gewollt.
+2. **`audioSource` bleibt Resident, anders als in 4.4.** Der Plan nimmt an, dass `playOnStart` nach dem Laden
+   neu läuft. `AudioSystem::playOnStart` läuft aber nur beim Szenenstart und beim Szenenwechsel
+   (`GameApplication.cpp:1370`, `:1879`), nie für das, was eine Zelle (oder Zone) bringt, und niemand stoppt die
+   Stimme (`AudioSourceComponent::handle`), wenn die Zelle geht. Eine Quelle in einer Zelle bliebe stumm. Das gehört in den
+   Host (`ICellHost`, 2c/3b): Start für die `created`-Entities, `AudioEngine::stop(handle)` beim Entladen.
+3. **`animstatemachine` bleibt Resident:** `AnimatorHost::begin` bindet die Zustandsautomaten einmal beim
+   Szenenstart (`AnimatorHost.cpp:34`). `animationlayers`, `rootmotion`, `ik`, `sequenceplayer` sind nicht
+   geprüft (die beiden letzten nennen andere Entities) und bleiben in der Basis. `particlesystem`,
+   `skeletalmesh`, `animator`, `animatorblend`, `propertyanimator` halten nur Asset-Ids, ihr Laufzustand
+   liegt im eigenen Component, und ihre Systeme laufen je Frame über die Registry; der Rundlauf-Test
+   („The decorative components that may stream come back from a cell as they went in“) belegt die Werte, nicht
+   das Aussehen auf den Backends (Schritt 4).
+4. **L7 (Play zeigt nur die Basis) ist durch den Code belegt, nicht durch einen Lauf.**
+   `EditorApplication.cpp` enthält weder `CellStreamer` noch einen Streamer-Aufruf (nur `StreamingDebugView`
+   liest das Manifest), und `setPlayMode` sichert und stellt dieselbe Editor-Welt wieder her, die nach einem Split
+   nur die Basis enthält (`test_streaming_view`: `meshCount(world) == 0` nach dem Split). Ein GUI-Lauf war hier
+   nicht möglich (unter den `HE_DUMP_*`-Schaltern gibt es keinen für Play). Geliefert ist die Warnzeile; sie steht im
+   Post-Play-Bericht des Editors.
+5. **Ref-Hülle fehlt weiter (3a).** 2a prüft nur die Bindungen einer Prefab-Instanz. Verweise aus der Basis
+   in einen Zellen-Teilbaum (Gelenk, Rig, Seil) lösen jetzt auf, solange die Zelle geladen ist, und sind
+   `entt::null`, sobald sie entladen ist (R3); der Splitter verhindert das noch nicht.
+6. **Das Handbuch stimmt nicht mehr:** `HorizonEngineDocs` (Website-Checkout, nicht in diesem Repo) sagt, welche
+   Dinge in Zellen wandern. Aus dem Repo nicht änderbar; die Texte im Editor (Profiler-Tab, Tooltip) sind angepasst.
+7. **Fünf Tests sind auf `release/0.7.0` rot, bevor 2a etwas ändert:** `test_material_graph`, `test_culling`,
+   `test_terrain_tools_ui`, `test_assimpimport`, `test_editor_help` (gemessen mit einem vollen ctest auf dem
+   unveränderten Stand, Release, shaderc ON). Vier davon sind Thema 181; `test_culling` (zwei Fälle zur Himmels-Shader-Kopie:
+   „Dome clouds: Metal and GL march and shadow them the same way“, „Nebula: Metal's kSkyMSL copy matches the GL sky shader after
+   normalisation“) steht in dessen Liste nicht. Belegt auf CI, Fall für Fall: der Lauf 38000836257 auf `202e14f2` und der Lauf
+   38046374714 auf `ede20a89` (2a) scheitern je Plattform an denselben Tests mit denselben Meldungen: Linux vier
+   (`test_culling`, `test_terrain_tools_ui`, `test_assimpimport`, `test_editor_help`), macOS fünf (dazu `test_material_graph`),
+   Windows sechs (dazu `test_git_panel_ops`), Linux·Vulkan (lavapipe) grün. Der lokale volle ctest auf `ede20a89` (250 grün,
+   2 übersprungen) hat dieselben fünf wie macOS-CI.
+
+8. **Prefab-Instanzen in Zellen werden vom Editor nicht abgeglichen, solange sie in Zellen liegen.** Der Abgleich
+   mit dem Prefab-Asset (`syncPrefabInstances`) läuft beim Öffnen und vor dem Speichern über die Editor-Welt, und
+   die enthält nach einem Split nur die Basis. Der Export lädt dagegen jede Szene einzeln und gleicht sie ab
+   (`syncPrefabsForExport`, auch jede Zelle; die Bindungen halten, weil der Ladevorgang dort die Ids wiederherstellt).
+   Wer ein Prefab ändert, sieht es in den Zellen des Editor-Stands also erst nach *Merge Cells into the Scene* und im Export.
+   Der Grund, aus dem das Skript `split_scene_cells.py` Instanzen in der Basis ließ („the editor keeps those in sync“), gilt
+   für Version-2-Zellen damit eingeschränkt weiter.
+
+**Gemessen** (Release, M-Serie, nebenbei lief Last, drei Läufe, daher nur die Größenordnung; `he_tests --no-skip --test-case='Id index bench*'`, läuft in der CI nicht):
+
+| Entities | `createEntity` mit Index | dasselbe ohne Hörer | Auflösen einer Id: Index | Auflösen einer Id: Scan (alt) |
+|---|---|---|---|---|
+| 50 000 | 31–34 ms | 9–13 ms | 0,06 µs (3 ms für 50 000) | 32 µs (6,4 ms für 200 Aufrufe) |
+| 200 000 | 141–170 ms | 25–50 ms | 0,10–0,12 µs (20–25 ms für 200 000) | 246 µs (49 ms für 200 Aufrufe) |
+
+Der Index macht das Auflösen einer Id 500- bis 2000-mal billiger (je nach Weltgröße) und das Anlegen einer
+Entity um rund 0,5 µs teurer (zwei knotenbasierte Hash-Einfügungen): bei einer
+ganzen 200k-Welt etwa 100 ms auf 2,7 s Ladezeit (153 §10.5), bei einer Zelle von 800 Entities etwa 0,4 ms. Der
+Speicher je Entity ist nicht gemessen (grob zwei Hash-Knoten, der Größenordnung nach 100 Byte); wer ihn senken
+will, ersetzt `m_idIndexed` durch einen Vektor nach Entity-Nummer und die Multimap durch eine flache Tabelle.
+
+**Offen für die folgenden Teile**
+
+- 2b: Anker, gestückelter Aufbau (die Anhänge-Frage aus 4.6 ist unberührt), `structureEpoch`, Zellansicht; der Streamer ignoriert `bodies` und die Klassenzahlen im Kopf noch.
+- 2c/3b: Audio-Start und -Stopp, Zustandsautomaten-Bindung, Skripte: gehören in den Zellen-Host.
+- 3a: Ref-Hülle im Splitter (heute nur die Prefab-Bindungen), Body-Reserve aus `bodies`. **Erledigt, siehe 14.**
+- Handbuch auf der Website nachziehen (Befund 6).
+
+## 13. Schritt 2b: was gebaut ist und was der Bauplan anders sah (10.10.2026)
+
+Teil 2b (zweite Reihe) steht auf dem Zweig, aufbauend auf 2a und auf `origin/release/0.7.0` (mit #123
+und dem `test_culling`-Fix gemergt). Die Abnahme ist wieder ein benannter Test und eine Messung:
+`test_world_scale.cpp`, „CellStreamer: a cell is built in slices, one per update at no budget, and is
+loaded when the last is in“, „Sliced load: the cell built in slices is the cell built whole“, „CellStreamer:
+several anchors, a cell is wanted by any and dropped only when every anchor is beyond“, dazu der Bench
+`'Cell streaming bench*'`. Die neuen Fälle wurden mit absichtlich kaputt gemachtem Code geprüft: ohne das
+Aufräumen der Wurzel-Kinder in `applyAdditiveJson` werden drei Fälle rot, mit einem Anker statt der Liste
+(`nearestReach` verlässt die Schleife nach dem ersten) drei andere.
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| `structureEpoch` (7.2) | `HorizonWorld::structureEpoch()`, `noteStructureChanged()` | **Ein** Zähler, startet bei 1. Hochgezählt in `createEntity`, `destroyRecursive` (jeder Zerstörpfad endet dort), `clear`, `reparentEntity` (nur bei echter Änderung), `moveChild`, `placeNextTo`, `sortChildrenByName` (nur bei echter Änderung), im `attach` der Umgebungslichter und nach jedem `rebuildHierarchy` der Lader. Er deckt die Menge der Entities, ihre Eltern und die Reihenfolge der Geschwister; **nicht** Komponentenwerte und nicht das Hinzufügen einer Komponente an einer lebenden Entity. Test: „HorizonWorld::structureEpoch: …“ prüft auch das Negative (Transform, Komponente, Umbenennen, `markHierarchyDirty`, `setEntityId` bewegen ihn nicht). `RenderExtractor.*` und `FrameKey` sind **nicht** angefasst (7.6); Thema 162 liest ihn dort. Post 1158 an `render-extractor-u-1` |
+| Anker-Liste (4.5) | `HE::CellAnchor { position, velocity, radiusScale }`, `CellStreamer::update(world, anchors, budgetMs)` | Eine Zelle ist gewollt, wenn irgendein Anker (oder dessen Vorausschau) im Laderadius ist, und bleibt, bis **alle** jenseits des Entladeradius sind. `radiusScale` teilt die Entfernung dieses Ankers (3 lädt dreimal so weit). Ohne Anker ändert sich nichts. Der alte Aufruf mit Kamera und Geschwindigkeit bleibt als Einzelanker. `CellManifest::distanceTo(anchors, …)` und `around(anchors, range)` messen genauso (das nutzt die Zellansicht) |
+| Gestückelter Aufbau (4.6) | `SceneSerializer::sliceForAdditiveLoad`, `AdditiveOptions::attachTo`, `CellStreamer::setSliceEntities` (Standard `kDefaultCellSliceEntities` = 128) | Der Worker schneidet die geparste Zelle: Scheibe 0 ist die Zellwurzel allein, danach ganze Teilbäume der Wurzel in der Reihenfolge ihrer `children`, bis 128 Entities voll sind; ein Teilbaum wird nie geteilt (einer über 128 ist eine Scheibe für sich). Der Hauptthread baut Scheiben, solange das Budget reicht, mindestens eine; die nächste Zelle erst, wenn die nähere fertig ist. Zellen bis 128 Entities bleiben **eine** Scheibe, Bau und Reihenfolge wie vorher. Eine Zelle, die sich nicht ohne Unterschied zum ganzen Laden schneiden lässt (zwei Wurzeln, ein von der Wurzel nicht erreichter Eintrag, doppelte Id), bleibt eine Scheibe |
+| Hooks | `Hooks::loadedSlice(root, created)` je Scheibe, `loaded(root, alle)` einmal danach, `unloading(root)` auch für halb gebaute Zellen | `GameApplication` hängt Jolt (`addEntity` je Entity) und `streamSceneAssets` an `loadedSlice`; ein Token je Zelle, mit der ersten Scheibe angelegt, damit das Entladen die Ladevorgänge aller Scheiben abbricht |
+| Halb gebaut | `isBuilding`, `Stats::building`, `abandoned` | Verlassen alle Anker eine halb gebaute Zelle, wird sie wie eine gebaute abgebaut (`unloading`, `destroyEntity`); `clear()` ebenso. `isLoaded` heißt weiter „vollständig“ |
+| `isSettled(position, radius)` (4.5) | `CellStreamer` | Wahr, wenn jede Zelle des Manifests im Radius gebaut ist oder endgültig gescheitert (es kommt nichts mehr). Die Bodies stehen mit der Scheibe im Jolt-Welt, weil der Hook sie dort anlegt; ob die Welt wirklich gesteppt wird und der Boden unter dem Körper ist, ist 3a |
+| Stats | `slicesDone`, `largestSlice`, `anchors`, `building`, `abandoned` | `largestSlice` ist die Zahl, die zählt: so weit kann ein Frame über dem Budget liegen |
+| Zellansicht | `StreamingDebugView` | Der Editor hat **keinen** laufenden Streamer (L7, 2c), also gibt es dort keine echten Zähler für Anker, Gruppen, `idCollisions`, `settled`. Gebaut ist, was ohne ihn stimmt: Vorschau-Anker (*Pin an anchor at the editor camera*, *Clear anchors*), die das Fenster als eigene Ringe zeichnet und nach denen jede Zelle vom nächsten Anker aus gefärbt und gezählt wird, eine Spalte mit den geschätzten Scheiben je Zelle (`slicesEstimate`, eine untere Grenze) und ein Satz, der erklärt, wie gebaut wird. Test: „streaming view: split beside the scene file …“ (Ringe des Ankers) |
+| Bench | `tests/test_world_scale.cpp`, „Cell streaming bench“ | `HE_CELL_BENCH_SLICE` (Scheibengröße, 0 = ganze Zelle wie vorher); die Meldung nennt den schlechtesten Frame samt seiner Thread-CPU-Zeit, den Frame und was er gebaut hat |
+
+**Die Anhänge-Frage aus 4.6 ist beantwortet: Weg (a), mit einer Option statt Umhängen von Hand.**
+`AdditiveOptions::attachTo` hängt die obersten Entities eines Ladevorgangs (die, deren Eintrag in diesem Ladevorgang
+keinen Eltern nennt) ans Ende der Kinder einer vorhandenen Entity, in der Reihenfolge, in der sie entstanden. Lokale
+Transforms bleiben, die Zellwurzel steht auf `-origin`: dieselben Zahlen wie beim ganzen Laden. Der Test
+„Sliced load: the cell built in slices is the cell built whole“ vergleicht je UUID Name, Elternteil, Kinder in
+Reihenfolge und lokale Transform, und die Kinderzahl der Weltwurzel. Gegen Weg (b) sprach, was im Code zu lesen war:
+`applyPrefabJson` schreibt die Id mit `emplace_or_replace` ohne Kollisionsprüfung (die Prüfung aus 2a ginge verloren),
+verlangt genau einen Eintrag ohne Elternteil und gleicht Bindungen ab, die hier nicht gebraucht werden.
+`reparentEntity` (die Frage aus 4.6, ob es lokale Werte behält) rührt `TransformComponent` nicht an; es kam trotzdem nicht
+in Frage, weil es die Kinderliste der Weltwurzel pro Aufruf mit Löschen-und-Entfernen durchläuft, bei einer Basis mit
+Zehntausenden obersten Entities je Scheibe.
+
+**Befunde, die der Bauplan nicht kannte**
+
+9. **Additives Laden ließ jede Entity zusätzlich in den Kindern der Weltwurzel.** `createEntity` trägt jede neue Entity
+   in die Kinderliste der Weltwurzel ein, `rebuildHierarchy` setzt nur `parent` um, und die Weltwurzel ist kein Eintrag des
+   Ladevorgangs, räumt also nie auf. `applyPrefabJson` räumt auf (Abschnitt „stale“), `applyAdditiveJson` tat es nicht.
+   Folgen, alle an Zellen und Zonen: `propagateTransforms` ging jede Zellen-Entity zweimal durch (die spätere Runde gewinnt,
+   und welche später ist, hängt von der Reihenfolge der Einträge ab); `shiftWorldOrigin` verschiebt jedes Kind der Wurzel und
+   verschob eine Zellen-Entity deshalb **doppelt** (einmal selbst, einmal mit ihrer Zelle); nach dem Entladen blieb pro Ladevorgang
+   eine Liste toter Handles. Behoben in `applyAdditiveJson` für alle additiven Ladevorgänge (nur der Schwanz der Liste wird
+   angesehen, `O(neu)`). Test: „SceneSerializer: an additive load leaves the world root listing only the load's tops“,
+   einschließlich Ursprungswechsel nach dem Laden (alle Meshes behalten die absolute Position, im Kettenlauf und in der Matrix, die
+   der Renderer liest). Damit stimmt der Satz aus 7.3 („die Weltwurzel hat nur so viele Kinder wie geladene Zellen“) erst jetzt.
+10. **Der Budgetvertrag.** `update` baut mindestens eine Scheibe und danach weitere, solange die Zeit seit dem Anfang des
+    Aufrufs unter dem Budget liegt. Ein Frame liegt also höchstens um die größte Scheibe über dem Budget; Teilbäume über 128
+    Entities sind die Ausnahme, `Stats::largestSlice` nennt sie. Mit Budget 0 baut jeder Aufruf genau eine Scheibe (so
+    testen die Fälle, ohne Uhr).
+11. **Ein Stall im Allokator verfälscht den Bench, nicht der Aufbau.** Siehe unten (Gemessen).
+12. **Pins und Spieler als Anker sind nicht gebaut.** `GameApplication` übergibt weiter nur die Kamera; die Liste ist da, die Quellen
+    (`streaming.pin`, Spieler-Charaktere, Server) sind 3b. Die Python-Zellen aus `split_scene_cells.py` (Version 1, ohne Kopf)
+    lassen sich ebenso schneiden (der Schnitt hängt an den UUIDs im File, nicht am Kopf); sie laden weiter mit frischen Ids.
+
+**Gemessen** (Release, M-Serie, Referenzwelt 200k Entities in 256 Zellen zu rund 780, 14 Zellen = 11 527 Entities um die Kamera, Budget
+4 ms; `he_tests --no-skip --test-case='Cell streaming bench*'`, jeweils drei Läufe je Aufruf, mehrere Aufrufe, nebenbei lief
+fremde Last):
+
+| | schlechtester Hauptthread-Frame | größte Einheit |
+|---|---|---|
+| vor 2b (Stand 2a, im Vorlauf dieser Sitzung) | 8,7 / 73,7 / 9,7 ms (ein Aufruf) | 833 Entities (ganze Zelle) |
+| 2b, Scheiben aus (`HE_CELL_BENCH_SLICE=0`) | 6,9 bis 12,5 ms in den 6 von 9 Läufen ohne Stall | 833 |
+| 2b, Standard 128 | **4,7 bis 6,4 ms in 11 von 18 Läufen** (Budget 4 ms plus eine Scheibe) | **128** (112 Scheiben für die 14 Zellen) |
+
+Dazu der Befund zu den übrigen Läufen (7 von 18 mit Scheiben, 3 von 9 ohne). **Lauf 1** (von 0 bis 2) ist in jedem der sechs Aufrufe
+betroffen, mit und ohne Scheiben (65 bis 115 ms mit, 102 bis 114 ms ohne), einmal zusätzlich Lauf 0 (44 ms); der Stand vor 2b hatte
+dieselben 73,7 ms. Der Frame hat in diesen Fällen **nichts Nennenswertes gebaut**: Die Thread-CPU-Zeit des Hauptthreads lag bei 1,1 bis
+4,7 ms, die Wanduhr bei 44 bis 115 ms, und ein Frame ohne jede gebaute Scheibe stand mit 42 ms Wanduhr und 0,03 ms CPU im Log. `sample` zeigt den Hauptthread in
+`createEntity → operator new → _xzm_reclaim_mark_used → _os_unfair_lock_lock_slow → __ulock_wait2`: der neue Allokator von
+macOS 27 (Darwin 27.0.0) lässt den Hauptthread an einem Sperrobjekt warten, das Worker beim Rückgewinnen von Speicher halten. Es
+verschwindet **nicht**, wenn die geparsten Bäume gar nicht freigegeben werden (Versuch mit Leck, zwei Aufrufe), liegt also nicht an
+`releaseOnWorker`; wahrscheinlich ist der Speicher, den Lauf 0 frei macht (die ganze 200k-Welt), die Ursache. Das ist eine Eigenschaft des
+Messaufbaus (drei Läufe in einem Prozess, dazwischen viel freier Speicher) und des Allokators; ob ein Spiel nach dem Entladen eines großen
+Ausschnitts denselben Stall sieht, ist **nicht geprüft**. Gelesen wird deshalb die Spalte „Thread-CPU“ der Meldung zusammen mit der Wanduhr;
+die Abnahme „unter Budget plus größter Scheibe“ gilt für die Läufe, in denen der Hauptthread arbeitet.
+
+**Offen für die folgenden Teile**
+
+- 3a: die Regel „ein Cluster ist immer eine Scheibe“ (Ref-Hülle): heute ist die Einheit der Teilbaum der Zellwurzel, zwei Teilbäume mit
+  einem Verweis zwischeneinander können in verschiedenen Scheiben landen. Jolt-Charge je Scheibe (`addEntities`), Body-Reserve aus
+  `bodies`, `requeueJoints`, `setRegionHold`; `isSettled` um die Körper ergänzen.
+  **Erledigt, siehe 14** (bis auf die Messung von `OptimizeBroadPhase`).
+- 2c/3b: `ICellHost`; Quellen für Anker (Spieler, Pins, Server) und `streaming.pin/unpin/isSettled` in der Skript-API; Skripte erst bei
+  `loaded`, nicht bei `loadedSlice`; die Zellansicht kann echte Zähler zeigen, sobald das Play einen Streamer hat.
+- 162: `structureEpoch` in `FrameKey` und im behaltenen `RenderWorld` lesen (7.1).
+- Handbuch auf der Website: Zellen laden jetzt in Scheiben und halten Anker; wie Befund 6.
+
+## 14. Schritt 3a: was gebaut ist und was der Bauplan anders sah (10.10.2026)
+
+Teil 3a (Physik und Ref-Hülle) steht auf dem Zweig, aufbauend auf 2b und auf `origin/release/0.7.0` (mit `d955f0c3` gemergt). Die
+Abnahme sind benannte Tests, nicht Zähler:
+
+- `test_world_scale.cpp`, „Cells and physics: nothing falls through the floor of a cell that has gone, or has not come yet“: vier
+  Läufe (Zelle noch nicht da / Zelle weg, je mit und ohne Hold). Eine Basis-Kiste steht auf dem Boden einer Zelle. **Die Läufe ohne
+  Hold sind die Negativkontrolle und müssen fallen** (y unter -2 bzw. -5); die mit Hold bleiben bei 0,5, und nach dem Wiederladen
+  steht die Kiste weiter auf dem Boden. Dazu „a character put down in a cell that is still loading stands where it was put“.
+- „Cells and physics: a joint from the base to a cell is built again when the cell is back“: eine Tür der Basis, per Gelenk an einen
+  Rahmen in einer Zelle gehängt. Zwei Läufe: mit `requeueJoints` hängt die Tür nach dem Wiederladen wieder (das Gelenk wurde neu
+  gebaut), ohne fällt sie (Kontrolle). Dazwischen liegt das Laden einer zweiten Zelle mit über zwölf Scheiben, also mehr
+  Durchläufe der Pending-Liste, als ein zu früh gespawntes Gelenk bekommt (acht). Das Gelenk steht nach dem ersten Schritt nach dem
+  Wiederladen, nicht schon im Aufruf des Streamers: die Tür war gehalten und wird erst vom Schritt losgelassen (Befund 22).
+- „Cells and physics: three thousand bodies come in through cells under the table size, and a cell the reserve cannot take waits“:
+  12 Zellen zu 300 statischen Körpern, 3 600 Bodies, `bodyCount() < kMaxBodies`; mit einem Spielraum für 1 000 wartet die vierte
+  Zelle (`deferredForBodies > 0`, `ready > 0`, `isSettled` falsch), und nichts Unbegonnenes dahinter nimmt ihren Platz; mit Platz kommt
+  der Rest. Eine Basis, die die Reserve allein füllt, friert die erste Zelle nicht ein; eine halb gebaute Zelle wird fertig, während
+  eine nähere auf Platz wartet.
+- Auf der Ebene der `PhysicsWorld` (`test_physics.cpp`): „addEntities: a charge builds what addEntity builds, once each, and finds its
+  own joints“, „removeEntityTree: a joint kept for a returning cell comes back, however many spawns come between“ (mit Kontrolle),
+  „initialize: a joint to an entity that is not in the world yet is built when it arrives“ und fünf Fälle zu `setRegionHold`
+  (fällt nicht und ist für Abfragen unsichtbar; nur dynamische Körper werden gefragt; Ursprungsverschiebung, Entfernen,
+  Schwerkraftwechsel und `clear()` mit gehaltenen Körpern; ein Charakter wird nicht gesteppt; ein gehaltener Körper mit Gelenk zu einem
+  losen, siehe Befund 22).
+- Im Splitter (`test_cell_split.cpp`, `test_world_scale.cpp`): „a placement whose bindings leave its subtree moves only together with
+  what it binds“, „what the base refers to inside a cell keeps it in the base, in either direction“ und „sliceForAdditiveLoad:
+  subtrees named as a cluster in the head are never cut apart“. Die Gleitkomma-Ursprungsprüfung von `cellHolds` (lokale gegen
+  absolute Position) steht im Test „a cell's static bodies stand where the cell is, under a floating origin“.
+
+Die neuen Fälle wurden mit absichtlich kaputt gemachtem Code geprüft. Mit beiden Mutationen zugleich (`applyRegionHold` kehrt sofort
+zurück, und ein wartendes Gelenk zählt wie jedes andere gegen die acht Durchläufe) wurden acht von zehn gewählten Fällen rot. Den
+Hold-Teil tragen die drei `setRegionHold`-Fälle mit Körpern und der Bodentest (in allen vier Läufen: Kiste unter dem Boden, `heldCount`
+falsch); den Geduld-Teil „removeEntityTree: a joint kept for a returning cell comes back“ und „initialize: a joint to an entity that is
+not in the world yet…“; der Gelenktest mit Zellen wurde an seiner Kontrolle rot (die Tür fiel nicht, weil der Hold fehlte), und der
+Reserve-Fall wegen des Rennens weiter unten, nicht wegen der Mutationen. Der Gelenktest mit Zellen hatte im ersten Entwurf nur sechs Durchläufe zwischen Entladen und Wiederladen und hätte
+die zweite Mutation nicht bemerkt; mit der feiner geschnittenen zweiten Zelle (über zwölf Scheiben mit Körpern) ist er einzeln geprüft rot
+ohne die Geduld und grün mit ihr. **Nicht per Mutation geprüft:** der Charakter-Zweig des Holds (der Fall „a character is not stepped…“
+und der Zeichen-Fall mit Zellen laufen grün, ein Zweig, der nichts tut, würde aber von der Mutation „Hold aus“ nicht erfasst, weil sie
+`applyRegionHold` trifft und nicht die Schleife der Charaktere in `step`). Zwölf Wiederholungen der Streamer-Fälle liefen ohne Ausfall; der
+dritte Unterfall der Body-Reserve war in der ersten Fassung rennabhängig (welche von zwei gleichzeitig gewünschten Zellen der Pool zuerst
+fertig parst, wird zuerst gebaut) und wünscht jetzt zuerst nur die eine.
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| Charge (6.1) | `PhysicsWorld::addEntities(world, ids)`, `BodyBatch` | Die Körper werden zuerst nur erzeugt (`CreateBody`) und gehen dann zusammen durch `AddBodiesPrepare/Finalize` in den Broadphase-Baum (Jolt sortiert sie nach Schicht und baut je Schicht einen Teilbaum zum Einhängen); **ein** `resolvePendingJoints` je Charge. Dieselben Erbauer wie `addEntity`; der Gelenkdurchlauf des Abbaus (Replace-Regel) läuft nur für Entities, die schon Physik haben, nicht für frische; ein doppelt genannter Eintrag wird einmal gebaut. `GameApplication::loadedSlice` ruft eine Charge je Scheibe |
+| `bodyCount`, `kMaxBodies` | `PhysicsWorld` | `bodyCount()` = alle Jolt-Körper der Welt (Gelände, Proxies und gehaltene eingeschlossen). `kMaxBodies` ist jetzt öffentlich |
+| Body-Reserve (6.1) | `CellStreamer::Hooks::bodiesFit`, `Stats::deferredForBodies`, `cellBodiesFit` | Gefragt wird vor der **ersten** Scheibe einer Zelle, mit der Manifest-Spalte `bodies`. Passt sie nicht (neun Zehntel der Tabelle, 58 977 Körper), wartet die Zelle und **keine weitere unbegonnene dahinter** wird gestartet (eine halb gebaute wird fertig: ihr Platz wurde beim Beginn gefragt; der erste Entwurf mit `break` hätte sie hinter einer näheren wartenden Zelle für immer halb stehen lassen); das Entladen am Ende jedes `update` schafft Platz. Ausnahme: ist nichts gebaut und nichts im Bau, wird geladen (sonst fröre eine Basis, die die Reserve allein füllt, den ersten Zellenaufbau ein; die Physik meldet, was nicht passt). Gedrosseltes Log |
+| Wartende Gelenke (6.2) | `removeEntityTree(world, root, requeueJoints)`, `JointFate::{Drop, Rebuild, Wait}`, `PendingJoint::patient` | Siehe Befund 13. Beim Entladen (`cellUnloadBodies`) kommen alle Gelenke, die einen entfernten Körper nennen, **geduldig** auf die Liste: sie zählen nicht gegen die acht Durchläufe, werden still und nur versucht, wenn der Partner existiert und einen Körper hat, und fallen ab, sobald ihr Besitzer weg ist. Eine Tür der Basis wird so nach dem Wiederladen des Rahmens wieder angehängt |
+| Gelenke bei Szenenstart | `PhysicsWorld::initialize` | Ein Gelenk, dessen Partner gar nicht in der Welt ist, wird jetzt geduldig vorgemerkt statt verworfen (Befund 14) |
+| Hold (6.2) | `PhysicsWorld::setRegionHold(HoldTest)`, `CellStreamer::holdsAt`, `cellHolds` | Siehe Befunde 15 bis 18 und 22. Vor jedem Schritt wird für jeden dynamischen Körper gefragt; wahr nimmt ihn mit `RemoveBody` aus dem Baum (Körperobjekt, Geschwindigkeit, Entity bleiben), falsch setzt ihn wieder ein (`AddBody`, geweckt). Charaktere werden nicht gesteppt. Statische und kinematische Körper werden nicht gefragt. **Die Gelenke eines Körpers gehen mit ihm heraus** und warten, bis er wieder drin ist (Befund 22). Die Frage kostet einen Aufruf je dynamischem Körper und Schritt, auch bei einem Streamer ohne Zellen (`holdsAt` kehrt dann sofort zurück); 3b kann sie ganz überspringen, solange `!active()` |
+| Ref-Hülle (5) | `CellSplit.cpp` | Befunde 19 bis 21. Ergebnis: `CellSplitResult::keptForRefs` und `clusters` |
+| Cluster = eine Scheibe | Kopf `streaming.clusters`, `SceneSerializer::sliceForAdditiveLoad` | Der Splitter schreibt die Cluster (Listen der Spitzen-Ids) in den Kopf und die Mitglieder nebeneinander in die Kinder der Zellwurzel; der Schneider behandelt eine Folge benachbarter Mitglieder wie einen Teilbaum. Ohne Kopf keine Cluster, wie bisher |
+| Gemeinsame Aufrufe | `CellPhysics.h/.cpp` (`cellSliceBodies`, `cellUnloadBodies`, `cellBodiesFit`, `cellHolds`) | Die vier Aufrufe, die `GameApplication` an die Haken des Streamers hängt, in einer Stelle, damit die Tests dieselben Aufrufe machen und keine fehlende Verdrahtung verdecken. Der Zellen-Host aus 2c soll sie übernehmen |
+| `GameApplication` | `updateCellStreaming`, `startPhysics` | `loadedSlice` → Charge, `unloading` → `cellUnloadBodies`, `bodiesFit`; der Hold wird in `startPhysics` gesetzt und fragt zur Laufzeit den Streamer (ein Streamer ohne Zellen hält nichts) |
+
+**Befunde, die der Bauplan anders sah oder nicht kannte**
+
+13. **Die Pending-Liste hätte das wiedergekehrte Gelenk verloren.** `resolvePendingJoints` läuft nach jedem `addEntity`, zählt bei jedem
+    fruchtlosen Durchlauf jeden Eintrag hoch und gibt bei `kMaxJointAttempts = 8` auf. Ein beim Entladen vorgemerktes Gelenk (Plan 6.2:
+    „`requeueJoints = true` … `resolvePendingJoints` löst sie wieder auf“) wäre nach acht Spawns **irgendeiner anderen Zelle** weg gewesen,
+    und das Wiederladen hätte erst nach mehr als acht fremden Scheiben gefehlt. Darum der Eintrag `patient`, der nicht zählt. Der Test
+    muss deshalb mehr als acht Durchläufe dazwischen erzwingen, sonst bemerkt er die Regression nicht.
+14. **`initialize()` verwarf Gelenke zu Entities, die noch nicht in der Welt sind.** Mit Zellen ist das der Normalfall (der Rahmen
+    ist in einer Zelle, die noch nicht geladen ist). Der Splitter lässt das jetzt nicht mehr entstehen (Befund 19), aber eine
+    Python-Zelle (Version 1) oder eine von Hand geschriebene kann es. Vorgemerkt wird nur der Fall „Partner nicht in der Welt“; die
+    Ablehnungen (nennt nichts, nennt sich selbst, beide statisch) und „Partner da, aber ohne Körper“ bleiben, wie sie waren.
+15. **Jolt weckt nichts, was auf einem entfernten Körper lag.** Eine Kiste, die zwei Sekunden auf einem Zellenboden gelegen hat,
+    schläft; wird der Boden entfernt, hängt sie in der Luft, bis irgendetwas sie berührt, und fällt dann durch die Welt. Das macht
+    den Fehler tückischer (er zeigt sich zufällig und spät), nicht harmloser. Der Hold nimmt deshalb auch schlafende Körper aus
+    dem Baum, und die Negativkontrolle der Tests braucht eine Berührung (ein kleiner Impuls) nach dem Entfernen des Bodens.
+16. **`BodyInterface::ActivateBody` prüft nicht, ob der Körper im Baum ist.** `SetPosition`, `AddForce` und `RemoveBody` tun es und sind
+    für einen gehaltenen Körper sichere No-ops (deshalb gehen `shiftOrigin`, `destroyBodyFor` und `clear()` unverändert); `ActivateBody`
+    schreibt ihn dagegen in die aktive Liste, außerhalb des Baums. Vier Stellen der `PhysicsWorld` wecken Körper
+    (`setCollisionLayers`, `setGravity`, `buildJointFor`, `setJointMotor`) und lassen gehaltene aus; geweckt wird beim Zurücksetzen.
+17. **Der Hold fragt die Zelle unter dem Körper, nicht den Abstand zum Anker (Plan 6.2).** Die Regel „jenseits `unloadRadius` aller
+    Anker“ liefe an der Zellgrenze auseinander: der Radius misst bis zur Kante des Quadrats, die Zelle verschwindet aber als Ganzes;
+    ein Körper am Rand des Radius stünde über einer entladenen Zelle und wäre nicht gehalten. `holdsAt` ist wahr genau dort, wo das
+    Manifest eine Zelle hat, die nicht ganz gebaut ist (im Bau, aufgeschoben, nicht gewünscht) und nicht endgültig gescheitert ist; der
+    Rest der Welt (Quadrate ohne Zelle, Gelände) simuliert wie immer. Damit hält der Hold auch das, was die Zelle „noch nicht“ hat,
+    und der Planpunkt „Teleport wartet auf `isSettled`“ ergibt sich für alles, was fallen kann, von selbst. **Grenze:** ein Boden, der
+    über die Grenze seines Quadrats hinausragt (eine lange Brücke), verschwindet mit seiner Zelle, auch wenn der Körper darauf im
+    Nachbarquadrat steht, dessen Zelle noch geladen ist; die Zelle wird nach der Position des obersten Eintrags gewählt.
+18. **Charaktere werden nicht gesteppt, solange ihre Zelle fehlt (Plan 6.2: Anker und `isSettled`).** Ein Charakter hat keinen Körper, den
+    man aus dem Baum nehmen könnte; der Hold lässt ihn einfach aus (kein `ExtendedUpdate`, der Proxy folgt nicht). Das deckt den
+    Spawn und den Teleport in eine Zelle im Aufbau ab, ohne dass ein Skript wartet. Die Kehrseite: ein Spieler, dessen Zelle nicht
+    gebaut ist, weil die Kamera weit von ihm weg ist (Sequencer, freie Kamera), steht still, bis die Kamera zurückkehrt. Spieler als
+    Anker (3b) hebt das auf.
+19. **Ref-Hülle: ein Scan nach dem Wert, keine Feldliste (Plan 5, Risiko 1).** Als Verweis gilt jedes `[hi, lo]` in den
+    Komponentenblöcken eines Eintrags, das die Id einer anderen Entity der Szene ist. Ids sind 128 Bit zufällig; Asset-Ids und Paare
+    kleiner Zahlen treffen nicht zufällig. Damit entfällt die von Hand gepflegte Liste, die der Plan als Risiko nannte (neue Komponente
+    mit Verweisfeld, kein Test merkt es). Nur die Platzierung eines Prefabs wird nach Feld gelesen (`bindings[].entity`), weil ihre
+    `template`-Ids die des Prefab-Assets sind. Das Szenenformat schreibt für `sequenceplayer` und `navagent` keine Entity-Verweise
+    (Bindungen und Slots sind Sitzungszustand). **Nicht gesehen:** ein Verweis, der nicht im Komponentenblock der Szene steht, also
+    Level-Skripte und Graph-Assets, die eine Entity per Id nennen (Plan R4: der Autor setzt das Ziel Resident).
+20. **Das Ergebnis der Ref-Hülle.** Knoten sind die Top-Level-Teilbäume, die nach ihren Komponenten wandern dürfen, plus ein Knoten
+    „Basis“ (alles andere: nicht wandernde Teilbäume, Ordner, Szenenwurzel). Jeder Verweis zwischen zwei Knoten vereinigt sie (Union-
+    Find, in jeder Richtung); ein Cluster, der die Basis enthält, bleibt ganz in der Basis (`keptForRefs` zählt die Teilbäume, die
+    deshalb nicht wandern); die anderen gehen als Ganzes in **eine** Zelle, die des ersten Mitglieds in der Reihenfolge der
+    Traversierung, nebeneinander in den Kindern der Zellwurzel. Heute entstehen Cluster aus mehreren Teilbäumen nur über
+    Prefab-Bindungen, die aus dem Teilbaum zeigen (alle anderen Verweis-Komponenten sind nicht in der Tabelle, ihre Besitzer also
+    Basis, und ihre Ziele werden jetzt festgehalten); mit der Klasse „zustandsbehaftet“ aus 3b werden sie häufiger.
+21. **Eine Platzierung mit Bindung nach draußen wandert jetzt, wenn das Gebundene mitwandern kann.** In 2a blieb sie in der Basis
+    (`bindingsStayInside`); jetzt bilden beide einen Cluster und gehen zusammen in eine Zelle. Bleibt das Gebundene in der Basis, bleibt
+    die Platzierung dort, wie in 2a. Der Test aus 2a wurde auf beide Fälle umgestellt.
+
+22. **Ein gehaltener Körper mit lebender Constraint stürzt den Prozess ab (SIGSEGV).** Gefunden in der Abschlussprüfung, nicht
+    vom Plan gesehen: eine Basis-Kette oder ein Seil über eine Zellgrenze (zwei Basis-Körper, einer im entladenen Quadrat) lässt den
+    Hold einen Körper aus dem Baum nehmen, dessen Jolt-Constraint zum losen Partner bleibt. `TwoBodyConstraint::BuildIslands` aktiviert
+    jeden dynamischen, inaktiven Körper einer aktiven Constraint, ohne zu fragen, ob er im Baum ist; er steht dann in der aktiven Liste
+    außerhalb des Baums. Der Test „a held body does not keep its joint to a loose one…“ stürzte gegen die erste Fassung ab (rot), mit
+    der Behebung läuft er. **Behebung:** `applyRegionHold` nimmt beim Halten die Gelenke des Körpers mit heraus (`JointFate::Wait`:
+    die, die er besitzt, und die, die auf ihn zeigen); `buildJointFor` baut keine Constraint zu einem gehaltenen Körper (`addJoint`
+    antwortet falsch und das Gelenk wartet); das wartende Gelenk wird erst versucht, wenn keines seiner Enden gehalten ist, und nach
+    jedem Loslassen läuft `resolvePendingJoints` einmal. Das lose Ende ist solange auf sich gestellt (es fällt, hängt nicht an einem
+    Körper, der nicht da ist) und das Gelenk wird beim Loslassen mit den dann herrschenden Abständen neu gebaut (`Fixed` und `Slider`
+    nehmen die Pose von dann als Nullstellung, `Distance` die Länge von dann). Die Regel „Verwandtes gehört in eine Zelle“ (Ref-Hülle)
+    vermeidet das meistens; Basis-Körper, die über eine Zellgrenze eine Kette bilden, sind der Fall, den sie nicht sehen kann.
+
+**Gemessen** (Release, M-Serie, fremde Last nebenbei; `he_tests --no-skip --test-case='Physics charge bench*'`, läuft in der CI nicht):
+
+3 000 statische Körper in eine Welt bringen, die schon Gelenke hat (drei Läufe, der Lauf mit der kleinsten und der mit der größten Zeit):
+
+| | 0 Gelenke in der Welt | 500 Gelenke in der Welt |
+|---|---|---|
+| `addEntity` je Entity | 3,3 bis 3,9 ms | 9,8 bis 10,2 ms |
+| `addEntities` in Scheiben zu 128 | 1,1 bis 3,0 ms | 2,9 bis 3,1 ms |
+
+Der Gewinn der Charge kommt fast ganz aus dem, was für frische Entities wegfällt: dem Durchlauf über alle Gelenke der Welt je Entity (der
+Abbau, der `addEntity` idempotent macht) und dem Abrufen der Pending-Liste nach jedem einzelnen Körper. Das Einfügen in den
+Broadphase-Baum allein bringt bei 3 000 Körpern rund eine Millisekunde. Absolut ist das wenig: **die Physik ist nicht der Engpass beim
+Laden einer Zelle** (das 4-ms-Budget gehört dem Anlegen der Entities), die Charge spart ihn nur ein; sie war aber auch die Voraussetzung
+dafür, dass eine Scheibe ein `resolvePendingJoints` kostet statt eines je Entity. Die 60 Schritte danach unterscheiden sich nicht im
+Rahmen des Rauschens (Last 5 bis 10 von anderen Bienen auf dem Gerät), ein schlechterer Baum durch das Einfügen als Teilbaum ist also
+nicht zu sehen.
+
+**Offen**
+
+- `OptimizeBroadPhase` nach einer Charge (6.1) ist **nicht gemessen und nicht aufgerufen**: der Bench oben misst nur das Einfügen
+  und 60 Schritte danach, nicht den Aufruf, der den ganzen Baum neu baut. Eine Messung bräuchte einen öffentlichen Aufruf oder
+  einen Zeugen im Test; als Entscheidung bleibt „nicht aufrufen“ (Jolt hängt die Charge als Teilbäume ein).
+- 3b: die Klasse „zustandsbehaftet“ (`CellState`, Skripte, Spieler als Anker, Skript-API `streaming.*`). Der Teleport-Wartevermerk für
+  Skripte (`isSettled` in der API) ist dort; der Hold deckt das Fallen schon ab.
+- 2c: Editor-Play hat weiter keinen Streamer, also auch keinen Hold. Ein Play eines gesplitteten Projekts zeigt nur die Basis (Befund 4).
+- Zellansicht und Profiler-Tab zeigen `deferredForBodies` und die Zahl gehaltener Körper (`PhysicsWorld::heldCount`) noch nicht.
+- Ein Boden, der über sein Quadrat hinausragt (Befund 17), und ein Spieler ohne Kamera in der Nähe (Befund 18) sind Grenzen, keine Fehler.
+- Nicht per Mutation geprüft: der Charakter-Zweig des Holds (siehe oben); die Behebung aus Befund 22 nur durch den Absturz davor und das
+  Grün danach, nicht durch eine Mutation der einzelnen Zeilen.
+- CI pro Plattform: Windows, Linux, macOS (Lauf siehe Post im Thema). Dieser Schritt berührt keinen Backend-Code; die Physik ist Jolt und
+  läuft in allen Läufen gleich.
+
+## 15. Schritt 5: Verifikation, was gemessen ist und was nicht (10.10.2026)
+
+Gemessen auf dem Mac (10 Kerne, 4 P und 6 E, macOS 27.0.1, Release, **Akku**, Stromsparmodus aus, thermisch nominal), Stand `9a2894c5`
+plus der Bench dieses Schritts. Rohzeilen: `docs/perf-audit/raw-cells/bench-164-step5.txt`. Auf dem Gerät lief fremde Arbeit: ein
+A/B-Editor von Thema 163 (~120 % CPU) und der Index von CLion (430 bis 520 % CPU) während der ersten Läufe. **Zahlen aus diesen Läufen sind
+unten als „unter Last“ gekennzeichnet**; die Vergleiche zwischen ganzer und gestreamter Welt stammen aus abwechselnden Läufen bei Last 2,5 bis
+3,0.
+
+### 15.1 Was gemessen wurde und wie
+
+Der Editor-Pfad der Messleiter (`scripts/perf/world_streaming_ladder.sh`) **streamt nicht**: der Editor bearbeitet die ganze Szene, Play
+streamt erst mit 2c (nicht in diesem Release). Der Zielwert („`RenderExtractor::extract` mit ~11k geladenen von 101k“) lässt sich dort nicht
+messen. Gemessen wurde deshalb im selben Prozess mit einem neuen Bench: `tests/test_world_scale.cpp`, „Cell streaming bench: extract on the
+whole world against the streamed cells around the camera“ (`doctest::skip`, läuft nicht in der CI), gestartet über
+`scripts/perf/cell_extract_bench.sh`.
+
+- **Welt:** die Referenzwelt der Messleiter, 101 070 Entities (100 000 Props in 1 000 Gruppen, 64 Punktlichter, Sky/Weather/Terrain), 8 000 m
+  Kantenlänge, Kamera wie die Leiter (0, 25, 90).
+- **Ganz:** `SceneSerializer::load`, `RenderExtractor::extract` 60-mal, jedes Mal ein voller Lauf (kein `FrameScope`), p50 der 60 Aufrufe.
+- **Gestreamt:** dieselbe Szene durch den **C++-Splitter dieses Themas** (`splitSceneIntoCells`: Version-2-Zellen mit Kopf, Klassentabelle,
+  Manifest-Spalte `bodies`, Ref-Hülle), 256 Zellen zu 512 m, 100 064 Entities in Zellen, 0 Zellen mit Ref-Cluster (die Welt hat keine
+  Verweise), Basis 6 Entities; der `CellStreamer` lädt die Zellen um die Kamera (Zellen werden mit ihren gespeicherten UUIDs in Scheiben
+  gebaut, 4-ms-Budget), dann dieselbe `extract`-Messung.
+- **RSS:** ein Prozess je Modus. Beim Streamen liest ein zweiter Lauf die vorab gesplitteten Dateien (`HE_CELL_BENCH_DIR`), damit der Prozess
+  den JSON-Baum der großen Szene nie hält. Im Lauf, der selbst splittet, sind es 1,8 GB (der Baum, nicht das Streaming).
+- **Lauf über die Karte:** 3 000 m auf der z-Achse bei 50 und bei 150 m/s, 60-Hz-Frames, die Kamera folgt der Uhr, Vorausschau 2 s. Gezählt
+  werden Frames, in denen eine Zelle des Manifests im Umkreis von 150 m der Kamera nicht gebaut ist („Boden fehlt“) oder die eigene Zelle fehlt.
+
+### 15.2 Ergebnis
+
+`RenderExtractor::extract`, p50 in ms (p90 in Klammern), Prozess-RSS in MB:
+
+| Welt | Entities geladen | Zellen | `extract` p50 | RSS (max resident set size) |
+|---|---|---|---|---|
+| ganz, 101 070 | 101 070 | – | **52,6 bis 57,4** (p90 58,8 bis 61,6), vier abwechselnde Läufe bei Last 2,5 bis 3,0, dazu 56,3 und 57,1 bei Last 3 | 621 |
+| ganz, 101 070, unter Last | 101 070 | – | 34,1 (p90 44,7) | 621 |
+| ganz, 10 170 (die 10k-Zeile) | 10 170 | – | 2,9 (p90 3,4); unter Last 2,4 | 92 |
+| gestreamt, Radius 768 m | 5 779 | 14 | 0,50 bis 1,50 (sieben Läufe, p90 0,5 bis 1,7) | 132 |
+| gestreamt, Radius 1 100 m | 9 908 | 24 | 2,4 bis 2,6 (p90 2,6 bis 3,0) | 146 bis 150 |
+| gestreamt, Radius 1 200 m | 12 363 | 30 | 3,4 (p90 4,1) | nicht vorab gesplittet gemessen |
+
+- **Zielwert erreicht.** Mit 9,9k bis 12,4k von 101k Entities geladen liegt `extract` bei 2,4 bis 3,4 ms, in der Größenordnung der 10k-Zeile
+  (2,4 bis 2,9 ms im selben Bench); die ganze 101k-Welt braucht im selben Bench 53 bis 57 ms. Das sind rund das 20- (bei 9,9k) bis 16-fache
+  (bei 12,4k). Die Kosten gehen mit der Zahl der **geladenen** Entities, nicht mit der Größe der Welt.
+- **Die Zahlen sind nicht die Zahlen von 153 §11.3.** Dort sind es 76,6 ms (101k) und 6,4 ms (10k) im Editor, mit Profiler, GPU-Thread und
+  Oberfläche. Der Bench misst nur den `extract`-Aufruf im Prozess ohne Fenster: 56 statt 76,6 ms bei 101k, 2,4 bis 2,9 statt 6,4 ms bei 10k.
+  Verglichen wird innerhalb des Benchs; das echte Spiel steht gleich darunter.
+
+**Im echten Spiel (Metal, `HE_PROFILE_CAPTURE`).** Dieselbe Welt als loses Spiel-Verzeichnis (`scripts/perf/make_cell_game_dir.py`: Laufzeit,
+`project.hcfg` ohne Pak, Szene und Zellen lose, eine Kamera bei 0, 25, 90), 120 Frames nach 300 Warmlauf-Frames, `HE_PROFILE_VSYNC=off`,
+`HE_PROFILE_COUNTERS=0`, verstecktes Fenster, 2 560 × 1 440 ohne Vsync, ausgewertet mit `scripts/perf/dump_scope_p50.py`. Das Spiel ruft
+`RenderExtractor::extract` je Frame dreimal auf (Schatten, SSAO, Szene), einen vollen Lauf und zwei Wiederverwendungen aus dem `FrameScope`
+von Thema 162; die Spalte „je Frame“ ist die Summe der drei Aufrufe, „voller Lauf“ der p90 je Aufruf:
+
+| Welt | Frame-CPU p50 | `extract` je Frame, p50 | voller Lauf (p90 je Aufruf) | `CellStreaming` je Frame | RSS des Prozesses (max) |
+|---|---|---|---|---|---|
+| ganz, 101 069 Entities, Last 2,1 bis 2,5 | **164,5 ms** | **73,7 ms** | 66,0 ms | – | 817 MB |
+| gestreamt, Radius 1 100 m, 9 908 geladen, Lauf 2 (ruhig, Last 1,4 bis 2,3) | **12,6 ms** | **5,0 ms** | 4,4 ms | 0,019 ms | 340 MB |
+| gestreamt, Lauf 1 (der letzte ctest-Test lief noch, **unter Last**) | 12,3 ms | 4,9 ms | 4,3 ms | 0,020 ms | 342 MB |
+
+Das ist die Zahl, auf die der Zielwert zielt: **`extract` je Frame 73,7 ms (ganze 101k-Welt, deckt sich mit den 76,6 ms von 153 §11.3 im Editor)
+gegen 5,0 ms mit 9 908 geladenen Entities**, unter der 6,4-ms-Zeile der 10k-Welt im Editor. Der Frame sinkt von 164,5 auf 12,6 ms CPU
+(13-mal). Der RSS des ganzen Prozesses (mit Metal, Pipelines, Python) fällt von 817 auf 340 MB. Der Streamer selbst kostet 0,02 ms je Frame.
+Der schlechteste Frame der gestreamten Läufe (65 und 72 ms CPU, Frame 55 und 98 von 120) ist ein Warten auf den Swapchain
+(`Metal::NextDrawable` 58 und 65 ms, Wanduhr 686 und 1 366 ms im Frame des versteckten Fensters), `CellStreaming` steht dort bei 0,01 bis
+0,02 ms: nicht der Streamer.
+- **Streuung:** das gestreamte p50 pendelt zwischen 0,5 und 1,5 ms für dieselbe Welt (zwei Häufungen, 0,5 bis 0,6 und 1,5; vermutlich
+  die Kernart, auf der der Hauptthread liegt, nicht belegt). Der ganze Lauf mit 101k war einmal (der erste, unter Last) 34 ms statt 56 ms; das
+  hat sich in sechs weiteren Läufen nicht wiederholt und ist unerklärt. Wer das Verhältnis zitiert, nimmt die abwechselnden Läufe.
+- **RSS und Assets getrennt:** das Streaming hält den Prozess bei **112 bis 150 MB** gegenüber **621 MB** mit ganzer Welt (101k) und
+  92 MB bei der ganzen 10k-Welt. Der Lauf über 3 000 m hebt die Spitze von 112 auf 126 MB (768 m) bzw. von 132 auf 139 bis 144 MB
+  (1 100 m) und lässt sie dann stehen: 24 bis 38 Zellen werden geladen und 24 bis 32 entladen, der Speicher wächst nicht mit der zurückgelegten
+  Strecke. **Assets sind hier nicht gemessen:** die Referenzwelt benutzt nur Würfel und Kugel (eingebaute Assets), es gibt keine Asset-
+  Zahl, die steigen könnte. Dass Assets nicht entladen werden (L9), bleibt eine Annahme aus dem Bauplan, kein Messwert; wächst der RSS
+  einer echten Welt beim Erkunden, kommt er von dort.
+
+### 15.3 Lauf über die Karte, Pop-in
+
+3 000 m, 60-Hz-Frames, Budget 4 ms:
+
+| Radius, Tempo | Frames | Zellen geladen/entladen | geladen (Zellen / Entities) | `update()` p50 / p99 / schlechtester | Boden fehlt (150 m) | eigene Zelle fehlt | failed |
+|---|---|---|---|---|---|---|---|
+| 768 m, 50 m/s | 3 600 | 24 / 24 | 16..18 / 6 589..7 445 | 0,016 / 0,12 / 4,8 ms | 0 | 0 | 0 |
+| 768 m, 150 m/s | 1 201 | 24 / 24 | 16..20 / 6 589..8 267 | 0,018 / 2,9 / 4,9 ms | 0 | 0 | 0 |
+| 1 100 m, 50 m/s | 3 597 | 36 / 32 | 26..32 / 10 738..13 226 | 0,022 / 1,1 / 9,4 ms | 0 | 0 | 0 |
+| 1 100 m, 150 m/s | 1 200 | 38 / 32 | 26..36 / 10 738..14 878 | 0,022 / 4,1 / 5,1 ms | 0 | 0 | 0 |
+
+- **Kein fehlender Boden und keine fehlende eigene Zelle** in 9 600 Frames, auch bei 150 m/s (540 km/h): die Vorausschau von 2 s trägt.
+- **Der Abnahmewert „schlechtester Hauptthread-Frame unter dem Budget plus der größten Gruppe (Ziel unter 8 ms)“ ist erreicht** bis auf einen
+  Frame: 4,8 bis 5,1 ms (reine Arbeit, Thread-CPU gleich Wanduhr) in drei Läufen. Der Lauf mit 9,4 ms hat **0,03 ms Thread-CPU**: der
+  Hauptthread wartete (macOS-27-Allokator, Lesson 181), das ist kein Aufbau. Ebenso der erste Lauf bei 768 m mit 23,3 ms und 0,55 ms CPU.
+- **Pop-in im Spiel, Metal** (`scripts/perf/make_cell_game_dir.py`, `HE_CAPTURE_FRAME`, Radius 1 100 m, Kamera 0, 25, 90): Bild 12 gegen
+  Bild 400, `docs/perf-audit/shots-cells/game-frame012.png` und `game-frame400.png`. **10 967 von 921 600 Pixeln unterscheiden sich
+  (1,2 %), alle in den Zeilen 196 bis 303, dem Horizontband mit den fernen Zellen; darunter ist das Bild bitgleich.** Die nahen Zellen
+  stehen also schon in Bild 12, die fernen (rund 1 km) kommen später: nächste zuerst, wie gebaut. Das ist ein Zeuge für **diese** Reihenfolge
+  an einem Startbild, kein Zeuge für das Überqueren einer Zellgrenze mit Kamerabewegung im Spiel (die Kamera steht; der Lauf über die Karte
+  oben ist der Zeuge für die Bewegung, aber ohne Bild).
+
+### 15.4 Nicht gemessen, nicht erreicht, Grenzen
+
+- **Editor-Leiter: ein einziger Lauf bei 101k.** `world_streaming_ladder.sh` misst den Editor, und der streamt nicht (2c fehlt); der
+  Zielwert ist dort nicht zu lesen. Der Editor-Ladepfad trägt seit 2a den UUID-Index (entt-Signale), darum wurde die 101k-Zeile einmal gemessen
+  (`FRAMES=120`, **ohne verworfenen Lauf davor, auf Akku, Bildschirm gesperrt**, Last 1,4): `SceneLoadTiming` parse 1 197 ms und build 866 ms für
+  101 068 Entities, CPU/Frame p50 **135,7 ms** (s6end: 145,5 ms), `RenderExtractor::extract` je Frame p50 67,0 ms (die Summe der drei Aufrufe;
+  153 §11.3 nennt 76,6 ms). Eine Regression bei Laden oder `extract` ist daran nicht zu sehen. **Auffällig und nicht untersucht:** der RSS des
+  Editors in diesem Lauf, **1 326 MB gegen 888 MB** in s6end (`docs/perf-audit/raw-streaming/s6end-100000.summary.json`). Seit s6end sind viele
+  Änderungen auf main und `release/0.7.0` gekommen und der Lauf ist ein einzelner; ob der UUID-Index (eine Hash-Tabelle über 101k Einträge, rund
+  10 MB, kann das nicht allein sein) oder anderes dahintersteckt, klärt nur ein A/B-Lauf gegen einen Editor von `release/0.7.0`, der hier nicht
+  gebaut wurde. Die übrigen Zeilen der Leiter (1k bis 50k, 200k) sind nicht gelaufen.
+- **Der Capture-Lauf des Spiels hat eine stehende Kamera.** Die Zahlen in 15.2 stammen aus 120 Frames mit gesättigtem Streamer (alle Zellen
+  gebaut); das Profil **während** des Ladens beim Fahren über Zellgrenzen im Spiel ist nicht aufgenommen. Dafür gibt es den Lauf über die
+  Karte im Bench (15.3, ohne Zeichnen) und den Bildvergleich vom Start. Eine Kamerabahn im Spiel bräuchte ein Skript oder einen
+  Eingabe-Zeugen (nicht gebaut).
+- **Assets, Physik, Skripte nicht im Bild.** Die Referenzwelt hat keine Assets außer Würfel/Kugel, keine Bodies und keine Skripte. Die
+  Sicherheit der Physik (3 000 Bodies, Hold, Gelenke) steckt in den Tests von 3a, nicht in dieser Messung bei 100k. 3b (Zustand, Skripte pro
+  Zelle) und 2c (Play) sind nicht gebaut.
+- **GPU und Zeichnen:** `extract` ist die CPU-Seite. Wie viel das Zeichnen von 10k statt 101k Objekten spart, ist hier nicht gemessen
+  (153 §11.3: `Render` ist Renderer-Arbeit pro Entity).
+- **Last und Umgebung:** Akkubetrieb, Fremdlast in den ersten Läufen (oben). Eine zweite Messung auf einem ruhigen Gerät am Netz steht aus.
+- **Windows, Linux, D3D, Vulkan:** nicht gemessen; der Bench läuft in der CI nicht (`doctest::skip`). Die Plattform-CI läuft über die
+  Zweige (siehe Posts im Thema).
+- **Splitten kostet:** in-process 1,9 bis 5,4 s und rund 1,8 GB Spitze für 100k Entities (JSON-Baum der Szene plus Zell-JSON); der Editor geht
+  über CBOR und hat dieselbe Größenordnung. Das ist ein Editor-Vorgang, kein Laufzeitkostenpunkt, aber bei 1M Entities ein Thema.
+- **`OptimizeBroadPhase` nach einer Charge** (6.1) bleibt ungemessen (siehe 14).
+
+### 15.5 Vollbau und Tests
+
+Auf `9a2894c5` plus dem Bench dieses Schritts, Release, `HE_ENABLE_SHADERC=ON`, im Vordergrund gelesen: `cmake --build out/build/release -j8`
+(alle Ziele, `BUILD_RC=0`; ein Vollbau von `he_tests`, Editor und Spiel nach der Zusammenführung brauchte 13:50 min, jede weitere Änderung an
+einer Testdatei rund 7 bis 9 min, weil CMake nach jedem Lauf neu konfiguriert und eine große Zahl Übersetzungseinheiten neu baut) und
+`ctest -j4 --timeout 1500`: **`100% tests passed out of 256`**, `CTEST_RC=0`, 305 s, die zwei `runtime_size_app_*` übersprungen wie in jedem
+Lauf davor. `test_world_scale` und `test_cell_split` grün, `test_material_graph` 282 s und grün. Der Bench ist `doctest::skip` und fehlt
+in diesen 256; er lief mit `--no-skip` nur für die Messung. Die CI der Plattformen läuft über die Zweige und ist hier nicht abgewartet.
