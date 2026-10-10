@@ -3520,14 +3520,18 @@ TEST_CASE("Weather functions: a usable interface, flat, defaults authored, no Pa
 			CHECK(n.type != MatNodeType::ParamFloat);
 		}
 	}
+	// The pin names point into the graph (see McpToolsMaterial): keep the graphs alive, a
+	// temporary handed to matFunctionPins left empty names behind in an optimised build.
+	const MaterialGraph puddlesFn = HE::buildWeatherPuddlesFunction();
+	const MaterialGraph snowFn    = HE::buildWeatherSnowFunction();
 	std::vector<HE::MatPinDesc> ins, outs;
-	HE::matFunctionPins(HE::buildWeatherPuddlesFunction(), ins, outs);
+	HE::matFunctionPins(puddlesFn, ins, outs);
 	REQUIRE(ins.size() == 1u);
 	CHECK(std::string(ins[0].name) == "Max Water Level");
 	REQUIRE(outs.size() == 4u);
 	CHECK(std::string(outs[0].name) == "Water Level");
 	CHECK(std::string(outs[3].name) == "Size");   // appended last: the pins wired before keep their index
-	HE::matFunctionPins(HE::buildWeatherSnowFunction(), ins, outs);
+	HE::matFunctionPins(snowFn, ins, outs);
 	REQUIRE(ins.size() == 3u);
 	CHECK(std::string(ins[0].name) == "Slope");
 	CHECK(std::string(ins[1].name) == "Max Slope");
@@ -3597,6 +3601,75 @@ TEST_CASE("Auto landscape: puddles and ground snow come from the weather functio
 	}
 	for (int id : cone)
 		CHECK(a.graph.findNode(id)->type != MatNodeType::FunctionCall);
+}
+
+// Thema 180, Schritt 8: a puddle that runs into a bank. The slope used to MULTIPLY the water
+// away (water x flatMask), so every puddle ended on a slope contour, a clean arc wherever the
+// ground tilted. Now the slope only LOWERS THE WATER LEVEL in the noise field (the puddle shrinks
+// into the deepest part of its hollow and ends on a noise contour), the damp film around it
+// fades over twice the slope band, and the water is level (its normal points straight up).
+// The mask views read the same nodes, so the witness (HE_DUMP_AUTOLAND=masks, with
+// HE_DUMP_AUTOLANDHEIGHT / HE_DUMP_AUTOLANDRAMP for a gentle hillside) sees the same thing.
+TEST_CASE("Auto landscape: the slope lowers the puddle's water level, the damp film reaches further, the water is level")
+{
+	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
+	auto coneOf = [&](int root)
+	{
+		std::set<int> cone;
+		std::vector<int> todo{ root };
+		while (!todo.empty())
+		{
+			const int id = todo.back(); todo.pop_back();
+			if (!cone.insert(id).second) continue;
+			for (const HE::MatGraphLink& l : a.graph.links)
+				if (l.dstNode == id) todo.push_back(l.srcNode);
+		}
+		return cone;
+	};
+	auto inputOf = [&](int node, int pin) -> int
+	{
+		for (const HE::MatGraphLink& l : a.graph.links)
+			if (l.dstNode == node && l.dstPin == pin) return l.srcNode;
+		return 0;
+	};
+
+	// The water mask reads the slope, but through the level, not as a factor: the flat mask
+	// (1 - slope step, the GI kernels' reference) is NOT part of it any more.
+	const std::set<int> water = coneOf(a.waterMask);
+	CHECK(water.count(a.slope) == 1);
+	CHECK(water.count(a.flatMask) == 0);
+	// The wet rim fades over a wider band than the water, so it does not end with it.
+	const std::set<int> wet = coneOf(a.wetMask);
+	CHECK(wet.count(a.slope) == 1);
+	CHECK(wet.count(a.flatMask) == 0);
+	int slopeParam = 0;
+	for (const HE::MatGraphNode& n : a.graph.nodes)
+		if (n.type == MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamPuddleMaxSlope) slopeParam = n.id;
+	REQUIRE(slopeParam != 0);
+	int twiceLimit = 0;   // Multiply(Puddle Max Slope, 2): the damp band's far end
+	for (int id : wet)
+	{
+		const HE::MatGraphNode* n = a.graph.findNode(id);
+		if (n->type != MatNodeType::Multiply || inputOf(id, 0) != slopeParam) continue;
+		const HE::MatGraphNode* k = a.graph.findNode(inputOf(id, 1));
+		if (k && k->type == MatNodeType::ConstFloat && k->p[0] == 2.0f) twiceLimit = id;
+	}
+	CHECK(twiceLimit != 0);
+
+	// The lit normal of standing water is the constant up vector: output normal <- Normalize3
+	// <- Lerp(ground normal, up, water). Not the geometric normal of the bank under it.
+	const int normalize = inputOf(a.output, HE::kMatOutputNormalPin);
+	REQUIRE(a.graph.findNode(normalize) != nullptr);
+	REQUIRE(a.graph.findNode(normalize)->type == MatNodeType::Normalize3);
+	const int lerp = inputOf(normalize, 0);
+	REQUIRE(a.graph.findNode(lerp) != nullptr);
+	REQUIRE(a.graph.findNode(lerp)->type == MatNodeType::Lerp);
+	const HE::MatGraphNode* up = a.graph.findNode(inputOf(lerp, 1));
+	REQUIRE(up != nullptr);
+	CHECK(up->type == MatNodeType::ConstColor);
+	CHECK(up->p[0] == 0.0f);
+	CHECK(up->p[1] == 1.0f);
+	CHECK(up->p[2] == 0.0f);
 }
 
 // ── Thema 51, Schritt 2: instances + overrides never cost a second compile ────

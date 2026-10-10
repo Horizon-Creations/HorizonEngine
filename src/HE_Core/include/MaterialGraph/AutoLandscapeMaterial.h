@@ -29,7 +29,13 @@
 //              a wet rim around, standing water in the middle; never under snow.
 //              An OVERLAY on the ground below, no texture layer: the rim darkens
 //              and smooths what lies there, the water darkens it further and
-//              turns mirror-smooth and flat.
+//              turns mirror-smooth and level (its normal points straight up).
+//              The slope does not multiply the water away: it lowers the water
+//              level in the noise field, so a puddle shrinks into the deepest part
+//              of its hollow as the ground tilts and ends on a noise contour, not
+//              on a slope contour. The damp film around it fades over a wider
+//              slope band (up to twice "Puddle Max Slope"), so water, damp
+//              ground and dry ground are a gradient and not one line.
 //              The shader has no terrain curvature, so a hollow is a basin of
 //              that field — not a dip of the terrain mesh. Measured hollows need
 //              a cavity channel (see docs §10, open).

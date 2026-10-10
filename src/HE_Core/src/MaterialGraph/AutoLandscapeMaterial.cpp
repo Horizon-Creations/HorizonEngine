@@ -89,7 +89,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
         "0.32 = scattered puddles (~1/5 of the flat ground), ~0.5 = half.");
     const int pPudSlope   = w.param(kAutoLandscapeParamPuddleMaxSlope, 0.08f, 0.002f, 0.4f, "Puddles",
         "Slope (1 - normal.y) where automatic standing water has faded out completely; it starts to thin "
-        "out from a fifth of that. 0.08 ~ 23 degrees. Painted puddles ignore it.");
+        "out from a fifth of that, and the damp ground beside a puddle fades out at twice it. "
+        "0.08 ~ 23 degrees. Painted puddles ignore it.");
 
     // ── Coordinates and slope (column 1) ─────────────────────────────────────
     const int wpos   = w.node(T::WorldPos, 1);
@@ -300,11 +301,18 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int basin  = w.op(T::Fbm, 7, { { xzOff }, { invPud } });
     r.graph.findNode(basin)->p[0] = 1.0f; // integer hash, see dirtFbm
     const int depth  = w.op(T::Subtract, 7, { { puddleCall, 0 }, { basin } });  // > 0 inside a hollow
-    // Wet rim: from 0.06 below the water line up to it.
+    // Wet rim: from 0.06 below the water line up to it. The damp film is NOT cut at the
+    // water's own slope limit: the ground beside a puddle stays damp up the bank, and it
+    // fades over a band wider than the water's ("Puddle Max Slope" x 0.2 up to
+    // x 2). It is the same hollow-shaped patch, so its edge follows the noise, and the
+    // step from dark water to dry ground is a dark -> damp -> dry gradient, not one line.
     const int rimW   = w.constF(0.06f, 7);
     const int negRim = w.constF(-0.06f, 7);
     const int rim    = w.ramp(negRim, rimW, { depth }, 7);
-    r.wetMask = w.op(T::Multiply, 7, { { rim }, { r.flatMask } });
+    const int twoL      = w.op(T::Multiply, 7, { { pPudSlope }, { w.constF(2.0f, 7) } });
+    const int dampSteep = w.op(T::Smoothstep, 7, { { fadeFrom }, { twoL }, { r.slope } });
+    const int dampHolds = w.op(T::OneMinus, 7, { { dampSteep } });
+    r.wetMask = w.op(T::Multiply, 7, { { w.op(T::Multiply, 7, { { rim }, { dampHolds } }) }, { noSnow } });
     // Water fills the low texels of the ground below first (its height map, the
     // blended B channel of everything under the puddle). The AUTOMATIC surface s2
     // is used here, not the painted mix: the masks stay a pure function of the
@@ -315,9 +323,18 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int hOff   = w.op(T::Subtract, 7, { { s2Split, 2 }, { midH } });
     const int hBias  = w.op(T::Multiply, 7, { { hOff }, { pHeight } });
     const int hBias2 = w.op(T::Multiply, 7, { { hBias }, { k004 } });
-    const int waterT = w.op(T::Subtract, 7, { { depth }, { hBias2 } });
+    // The slope does not multiply the water away (that cut every puddle along a slope
+    // contour, a clean arc wherever a hollow ran into a bank). It LOWERS THE WATER LEVEL
+    // instead: the tilted ground holds less, so a puddle shrinks towards the deepest part
+    // of its hollow and ends on the noise's own contour, and at "Puddle Max Slope" the
+    // level has dropped by (level + 0.2), below every hollow, which is none left. Water
+    // against a wall of a bank can still end on a straight line, but then it is the bank.
+    const int shiftK = w.op(T::Add, 7, { { puddleCall, 0 }, { w.constF(0.2f, 7) } });
+    const int shift  = w.op(T::Multiply, 7, { { steep }, { shiftK } });
+    const int depthW = w.op(T::Subtract, 7, { { depth }, { shift } });
+    const int waterT = w.op(T::Subtract, 7, { { depthW }, { hBias2 } });
     const int water  = w.ramp(zero, k004, { waterT }, 7);
-    r.waterMask = w.op(T::Multiply, 7, { { water }, { r.flatMask } });
+    r.waterMask = w.op(T::Multiply, 7, { { water }, { noSnow } });
 
     // The strength the overlay is applied with: the automatic puddle where the
     // terrain is left to the automatic rules, plus whatever was painted (a painted
@@ -335,14 +352,22 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // ── Puddles as an overlay on the ground below (column 8) ─────────────────
     // No layer of its own: wet soil is the same soil, darker and smoother.
     //   wet rim  albedo x 0.6, roughness x 0.5; normal, AO and the texture untouched
-    //   water    albedo x 0.35 of the DRY ground, roughness 0.05, flat geometric normal
+    //   water    albedo x 0.35 of the DRY ground, roughness 0.05, a LEVEL normal (straight up):
+    //            standing water is horizontal whatever the bank under it does, and the
+    //            tilted terrain normal made a sliver of water at a slope's foot mirror the
+    //            sky like a tilted pane
     const int wetDark = w.constF(0.6f, 8);
     const int wetA    = w.op(T::Multiply, 8, { { s3.albedo }, { wetDark } });
     const int albedoW = w.op(T::Lerp, 8, { { s3.albedo }, { wetA }, { wetF } });
     const int dark    = w.constF(0.35f, 8);
     const int darkA   = w.op(T::Multiply, 8, { { s3.albedo }, { dark } });
     const int albedo  = w.op(T::Lerp, 8, { { albedoW }, { darkA }, { waterF } });
-    const int nWater  = w.op(T::Lerp, 8, { { s3.normal }, { nrm }, { waterF } });
+    const int upN = w.node(T::ConstColor, 8);
+    {
+        MatGraphNode* c = r.graph.findNode(upN);
+        c->p[0] = 0.0f; c->p[1] = 1.0f; c->p[2] = 0.0f;
+    }
+    const int nWater  = w.op(T::Lerp, 8, { { s3.normal }, { upN }, { waterF } });
     const int normal  = w.op(T::Normalize3, 8, { { nWater } });
     const int mSplit  = w.op(T::SplitRGBA, 8, { { s3.mask } });
     const int wetRgh  = w.constF(0.5f, 8);

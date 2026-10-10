@@ -5,7 +5,10 @@
 #
 # MODE = 1 | nobomb | masks | ground (HE_DUMP_AUTOLAND, see EditorApplication.cpp),
 # RHI defaults to "Metal OpenGL". Extra HE_DUMP_* overrides after "--", e.g.
-# "-- PITCH=-30 CAMX=-120 CAMY=360" for the oblique look.
+# "-- PITCH=-30 CAMX=-120 CAMY=360" for the oblique look. "-- AUTOLANDHEIGHT=12
+# AUTOLANDRAMP=48" (metres, default 40 / 32) turns the steep ramp into a gentle hillside, the
+# one where a puddle meets a slope that bends slowly (Thema 180 Schritt 8; oblique look there:
+# "CAMX=-52 CAMY=314 PITCH=-24 YAW=90").
 #
 # Top-down by default (pitch -89 from y=400, the 128 m terrain at y=300 fills
 # the frame height), clouds/GI/SSAO/SSR/AA/bloom/DoF/motion blur off, forward,

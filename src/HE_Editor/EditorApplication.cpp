@@ -6844,7 +6844,19 @@ void EditorApplication::dumpFrameHeadless()
 		const bool builtin = mode == "builtin";
 		const bool normalV = mode == "normal";
 		const bool surface = mode == "surface";
-		constexpr float kBaseY = 300.0f, kPlateau = 40.0f;
+		constexpr float kBaseY = 300.0f;
+		// HE_DUMP_AUTOLANDHEIGHT / HE_DUMP_AUTOLANDRAMP (metres): the plateau height and the
+		// width of the smoothstep ramp. The defaults (40 / 32) are the steep ramp every
+		// earlier witness used; a gentle hillside (e.g. 12 / 48) shows how a puddle meets
+		// a slope that bends slowly (Thema 180 Schritt 8).
+		auto envMetres = [](const char* name, float def)
+		{
+			const char* v = std::getenv(name);
+			const float f = (v && *v) ? static_cast<float>(std::atof(v)) : def;
+			return f > 0.0f ? f : def;
+		};
+		const float kPlateau = envMetres("HE_DUMP_AUTOLANDHEIGHT", 40.0f);
+		const float kRamp    = envMetres("HE_DUMP_AUTOLANDRAMP", 32.0f);
 		const float snowHeight = kBaseY + 20.0f;
 
 		HE::UUID amId{};
@@ -6920,7 +6932,7 @@ void EditorApplication::dumpFrameHeadless()
 			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
 			{
 				const float x = -64.0f + static_cast<float>(xi);
-				const float t = std::clamp((x + 24.0f) / 32.0f, 0.0f, 1.0f);
+				const float t = std::clamp((x + 24.0f) / kRamp, 0.0f, 1.0f);
 				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
 					kPlateau * t * t * (3.0f - 2.0f * t);
 			}

@@ -872,9 +872,9 @@ Maske):
 | Boden | Gras, darauf Erde in fBm-Flecken (Welt-Rauschen) **plus** ein Erdgürtel knapp unter der Felsgrenze (Geröll) | *Dirt Amount* 0,35, *Dirt Patch Size* 24 m |
 | Fels | `smoothstep(Rock Slope, + Rock Blend, slope)`, slope = 1 − N.y der **geometrischen** Normale | *Rock Slope* 0,12 (≈ 28°), *Rock Blend* 0,12 (voll bei ≈ 40°) |
 | Schnee | Welthöhe über *Snow Height*, über *Snow Blend* geschlossen, nicht auf Flächen steiler als *Snow Max Slope* (dort bleibt Fels) | 60 m, 6 m, 0,45 (≈ 57°) |
-| Pfützen | flacher Boden (slope < *Puddle Max Slope*), ohne Schnee, in den **Senken eines zweiten Welt-Rauschfelds**: nasser Rand und in der Mitte stehendes Wasser. **Overlay auf der Schicht darunter, keine eigene Schicht** (§16) | *Puddle Amount* 0,32, *Puddle Size* 10 m, *Puddle Max Slope* 0,03 (≈ 14°) |
+| Pfützen | flacher Boden (slope < *Puddle Max Slope*), ohne Schnee, in den **Senken eines zweiten Welt-Rauschfelds**: nasser Rand und in der Mitte stehendes Wasser. **Overlay auf der Schicht darunter, keine eigene Schicht** (§16) | *Puddle Amount* 0,5 (Wasserstand bei Regler 1, §19), *Puddle Size* aus dem Weather-Panel (Standard 10 m, §19.5), *Puddle Max Slope* 0,08 (≈ 23°; §18.1, Wirkung seit §20 anders: die Neigung senkt den Wasserstand statt das Wasser wegzumultiplizieren) |
 | Nasser Rand | Albedo × 0,6, Rauheit × 0,5; Normale und AO bleiben die des Bodens | fest |
-| Wasser | Albedo × 0,35 des **trockenen** Bodens, Rauheit 0,05, Normale = geometrische Normale | fest |
+| Wasser | Albedo × 0,35 des **trockenen** Bodens, Rauheit 0,05, **waagerechte** Normale (0, 1, 0; vor §20 die geometrische Normale) | fest |
 
 - **Stein ist der Hauptteil** der automatischen Verteilung: Er beginnt schon bei ≈ 28°,
   also auf jedem nennenswerten Hang.
@@ -2057,3 +2057,116 @@ Weather-Knoten nichts zu suchen hat). Feste UUIDs `0x413` / `0x414`; Quelle sind
   Wetter (oder in einem Sturm eben nicht), bis ein neuer Preset ihn zurückholt. Abstand zwischen Blitzen
   `(2,5…11 s) × (1,2 − Thunder)`. Alte Szenen ohne `thunder` bekommen beim Laden den Wert, den ihr Preset
   ergeben hätte (ein gespeicherter Sturm blitzt weiter).
+
+---
+
+## 20. Pfützen an Hängen: nicht mehr an der Neigungslinie abgeschnitten (Thema 180, Schritt 8)
+
+Der Mensch meldete (Screenshot vom 09.10., 10:37 Ortszeit): Pfützen auf dem Auto-Material werden an
+Steigungen abgeschnitten. Der Screenshot ist **vor** §18.1 entstanden (die weichere Kante kam am 09.10. um
+11:40 UTC), der Zweig dieses Themas hatte §18 und §19 aber noch nicht, bis `release/0.7.0` hineingemerged war.
+Deshalb wurde zuerst auf dem gemergten Stand nachgestellt, ob der Fehler überhaupt noch da ist.
+
+### 20.1 Befund
+
+**Er ist noch da, auch mit §18.1.** Zeuge: `HE_DUMP_AUTOLAND=masks` (B = Wasser) und `=1` (lit), Metal und
+OpenGL, Draufsicht auf den Fuß der Rampe: Die Pfützen auf der Ebene laufen bis zum Rampenfuß und enden dort auf
+einer **geraden Linie** von etwa 7 px Breite (bei 128 m auf 1280 px, also gut 1 m), während ihre übrigen Ränder
+dem Rauschen folgen. Auf der Schrägansicht bleibt dazu ein heller Streifen Wasser am Fuß, der den Himmel wie eine
+gekippte Scheibe spiegelt.
+
+Ursache sind zwei Dinge im Builder (`AutoLandscapeMaterial.cpp`, Spalte 7/8):
+
+1. **Die Neigung multiplizierte das Wasser weg** (`waterMask = water × (1 − steep) × (1 − Schnee)` mit
+   `steep = smoothstep(0,2 × L; L; slope)`, L = *Puddle Max Slope*). Eine Funktion, die nur von der Neigung am Pixel abhängt, ist dort räumlich so scharf wie das Gelände selbst:
+   die Pfütze endet auf einer Höhenlinie der Neigung, einem sauberen Bogen, und der Bogen fällt auf, weil das
+   Wasser mit Albedo × 0,35 sehr dunkel ist. Eine breitere Neigungsspanne (§18.1) macht den Bogen nur breiter,
+   nicht unregelmäßig.
+2. **Das Wasser benutzte die geometrische Normale** der Böschung. Ein Streifen Wasser am Fuß lag damit wie eine
+   gekippte Spiegelfläche da und spiegelte den Himmel grell. Stehendes Wasser ist waagerecht.
+
+Nicht die Ursache: die **Ufer-Beschneidung der Wasserfläche aus Thema 174** (`WaterSurfaceComponent`, Schritt 5).
+Dieser Code ist auf `release/0.7.0` und auf diesem Zweig nicht vorhanden (der Zweig
+`claude/prozedurales-wasser-spline-pinsel-lake-werkzeug` ist noch nicht gemergt) und der Screenshot zeigt die
+Materialpfütze. Wer Thema 174 nach dem Merge prüft, schaut auf eigene Ufer, nicht auf diese.
+
+### 20.2 Änderung
+
+* **Die Neigung senkt den Wasserstand statt das Wasser zu multiplizieren.** `depth = level − basin` (Pfützenfeld
+  wie bisher), neu `depth' = depth − steep × (level + 0.2)` mit demselben `steep`. Auf
+  geneigtem Boden hält das Feld weniger: die Pfütze schrumpft in den tiefsten Teil ihrer Senke und endet auf
+  einer Rauschlinie. Bei *Puddle Max Slope* ist der Wasserstand um `level + 0.2` gefallen, also unter jeder
+  Senke: kein Wasser, wie bisher. Dieselbe Spanne wie in §18.1 (`0,2 × … 1 ×`), die drei GI-Kernel-Kopien und
+  `GiLandscape.h` bleiben unverändert (`flatMask` ist unverändert und bleibt ihre Referenz; sie nutzt das
+  Wasser aber nicht mehr als Faktor).
+* **Der nasse Film reicht weiter.** `wetMask` blendet über `0,2 × … 2 × "Puddle Max Slope"` aus (vorher dieselbe
+  Spanne wie das Wasser): neben einer Pfütze bleibt der Boden die Böschung hinauf feucht (Albedo × 0,6,
+  Rauheit × 0,5) und trocknet allmählich ab. Dunkles Wasser → feuchter Boden → trockener Boden ist ein
+  Verlauf statt einer Linie. (Mit 3 × waren es auf dem mittleren Hang 20 / 64 große dunkle Flecken, mit 2 ×
+  sind sie leise genug.)
+* **Die Normale des Wassers ist die Konstante (0, 1, 0)** statt der geometrischen Normale.
+* Der Tooltip von *Puddle Max Slope* nennt die zweite Spanne. `M_AutoLandscape.hasset` ist neu erzeugt
+  (`landscape_tex_gen EditorDeps/EngineContent/Materials --material`, 200 Knoten, 13 Parameter, Zahl
+  unverändert).
+* **Testhilfe im Zeugen:** `HE_DUMP_AUTOLANDHEIGHT` und `HE_DUMP_AUTOLANDRAMP` (Meter, Vorgabe 40 / 32) machen
+  die Rampe flacher: `12 / 48` ist ein sanfter Hang, `20 / 64` ein mittlerer. Mit der alten steilen Rampe sieht
+  man nur den Fuß, mit dem sanften Hang das, was der Mensch gesehen hat.
+
+### 20.3 Messung
+
+Alle Aufnahmen Release-Editor, `cap158auto.sh`, Metal und OpenGL, AA/GI/SSAO/Bloom aus, Himmelszeit festgehalten.
+
+| Vergleich | Ergebnis |
+|---|---|
+| Metal gegen OpenGL, sanfter Hang (12 / 48), lit, Schrägansicht / Draufsicht | mittlere Abweichung 0,004 / 0,000 von 255, größte 5 / 1 |
+| Metal gegen OpenGL, mittlerer Hang (20 / 64), lit, Schrägansicht / Draufsicht | 0,002 / 0,001, größte 2 / 3 |
+| Metal gegen OpenGL, Masken (Wasser) und `ground` (nasser Film), beide Hänge | 0,000, größte 1 |
+| Metal gegen OpenGL, steile Rampe (40 / 32), lit | 1,99 nach der Änderung, 2,01 davor: die Abweichung gab es schon vorher, sie ist nicht neu (liegt am Schnee/Fels der Rampe, nicht an Pfützen; die Wassermaske ist dort 0,000) |
+| Steile Rampe, neu gegen alt (lit / Masken) | 0,007 / 0,03 mittlere Abweichung: am **Fuß einer steilen Wand** ändert sich fast nichts. Wasser an einer Wand endet an der Wand, auch in der Natur auf einer Linie |
+| Sanfter Hang (12 m auf 48 m), Wasser (Masken B > 0,5) je 100-px-Spalte auf dem Hang (Spalten 700 bis 1199) | alt 11,3 / 4,2 / 0,0 / 0,1 / 17,9 %, neu 0,7 / 0,0 / 0,0 / 0,0 / 0,0 % |
+
+Das Wasser verschwindet also früher auf Böschungen: bei typischer Senkentiefe (0,1 bis 0,22 gegen eine
+Verschiebung von `0,52 × steep`) ist es schon bei etwa `steep = 0,3` fort, d. h. bei Neigung ≈ 0,035 (≈ 15°),
+nicht erst nahe *Puddle Max Slope*. Statt mit der Neigung zu verblassen, schrumpft es.
+
+Optisch (Schrägansichten `12/48` und `20/64`, Metal): alt enden die Pfützen am Hang in weichen Bögen entlang
+einer Höhenlinie; neu schrumpfen sie in unregelmäßige Reste, der nasse Film läuft in einem Verlauf die Böschung
+hinauf aus, und der helle Wasserstreifen am Fuß spiegelt wie das Wasser daneben.
+
+**Tests:** `he_tests` Auto-Landscape-Fälle 8 von 8 grün, darunter der neue
+„the slope lowers the puddle's water level, the damp film reaches further, the water is level“ (Strukturtest:
+`flatMask` liegt nicht mehr im Kegel von `waterMask` und `wetMask`, die Obergrenze des nassen Bandes ist
+`Puddle Max Slope × 2`, die Wassernormale die Konstante (0, 1, 0)) und „The auto landscape material
+cross-compiles for all five backends, in every view and permutation“ (HLSL und SPIR-V für D3D11, D3D12 und
+Vulkan). Der volle Lauf (Release, macOS) hat 6 rote Fälle in Dateien, die auf `release/0.7.0` identisch sind
+und das Landschaftsmaterial nicht berühren (`.blend`-Import, Himmelsshader-Wächter ×2, Editor-Hilfe
+„Reload Scene“, Landscape-Panel ×2); sie sind nicht von dieser Änderung. Ein Strukturtest war in diesem
+Fall der Ersatz für einen Pixeltest: Es gibt keinen CPU-Auswerter für den Graphen.
+
+Beim Lauf fiel außerdem ein Fehler im Test „Weather functions: a usable interface, flat, defaults authored“
+auf, der mit dem Material nichts zu tun hat: `matFunctionPins` gibt Zeiger in den Graphen zurück, der Test
+reichte ihm einen Temporären, die Namen waren im optimierten Build leer. Der Test hält die Graphen jetzt am Leben.
+
+### 20.4 Offen und Grenzen
+
+* **D3D11, D3D12 und Vulkan sind nicht per Bild und nicht auf Hardware belegt.** Der Graph und alle Änderungen
+  sind backendneutral (Knoten, kein handgeschriebener Shader), der Kreuzübersetzungstest (HLSL, SPIR-V, GLSL,
+  MSL, jede Ansicht und Permutation) ist lokal grün. Was ein CI-Lauf nach dem Push zusätzlich zeigt, ist
+  Übersetzen und Linken; einen Pixeltest für das Auto-Material gibt es in der CI nicht (weder lavapipe noch
+  WARP). `scripts/auto-landscape-repro/cap158auto.ps1` ist der Weg dafür auf einem Windows-Rechner, die neuen
+  Zeuge-Variablen (`HE_DUMP_AUTOLANDHEIGHT`, `HE_DUMP_AUTOLANDRAMP`) gelten dort genauso. Hardware-Smoke bleibt
+  offen.
+* **Instanzen behalten ihren gespeicherten Wert.** Eine Material-Instanz, die *Puddle Max Slope* auf 0,03
+  überschrieben hat (der Standard vor §18.1), behält die schmale Spanne; nur wer das ausgelieferte Asset
+  unmittelbar nutzt, bekommt 0,08. Wer nach dem Update noch scharfe Kanten sieht, prüft zuerst diesen Wert.
+* **Eine scharfe Geländekante bleibt eine Kante.** Wo die Neigung auf einem Meter von 0 auf 0,4 springt (Fuß
+  einer Wand), ist jede Funktion der örtlichen Neigung räumlich so scharf wie das Gelände: das Wasser endet
+  dort auf einer geraden Linie, wie Wasser an einer Wand. Eine echte Lösung dafür braucht ein geglättetes
+  Neigungsfeld über mehrere Meter (zum Beispiel ein Kanal in der Weightmap oder ein Vertexattribut des
+  Terrain-Meshes, das heute keinen freien Kanal hat). Das ist größer als dieser Fehler und nicht gemacht.
+* Die **GI-Reflexion** kennt das Schrumpfen nicht: sie nimmt weiter den Anteil `autoWet.w × (1 − steep)`
+  (§18.1) als Erwartungswert. Auf Hängen ist der erwartete Pfützenanteil daher in der Reflexion etwas höher
+  als im Bild.
+* Die hellen **Glanzlinien** am Rand mancher Pfützen auf Metal und OpenGL (ein heller Saum, wo die Rauheit schon
+  auf 0,05 gefallen ist, die Normale aber noch die des Bodens ist) gab es schon vorher (im Bild vor der Änderung
+  zu sehen) und sind nicht Teil dieser Änderung.
