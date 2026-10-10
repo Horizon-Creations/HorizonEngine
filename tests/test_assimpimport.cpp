@@ -100,8 +100,10 @@ TEST_CASE("Import dialog: every offered extension imports, and the routing offer
 	}
 #endif
 	// A format the engine has never heard of is neither offered nor explained.
-	CHECK_FALSE(Importer::isImportableSource("Some/Model.blend"));
-	CHECK(std::string(Importer::importBlockedReason("Some/Model.blend")).empty());
+	// (.blend used to stand here; it is a mesh source since the Blender reader,
+	// so the stand-in is Blender's backup copy, which nothing reads.)
+	CHECK_FALSE(Importer::isImportableSource("Some/Model.blend1"));
+	CHECK(std::string(Importer::importBlockedReason("Some/Model.blend1")).empty());
 	// "tga" must not be found inside "gltf": the pattern lookup is per token.
 	CHECK_FALSE(Importer::isImportableSource("Some/File.lt"));
 	CHECK_FALSE(Importer::isImportableSource("Some/File.gl"));

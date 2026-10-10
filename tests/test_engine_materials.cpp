@@ -214,6 +214,29 @@ TEST_CASE("Engine water material: loads as a lit Translucent graph with all sixt
 	CHECK(m->customShaderFragGlsl.find("heLight.sunDir.w") != std::string::npos);
 }
 
+// The Material Editor redraws its preview every frame for a shader that reads the
+// clock, and the water is the material that made the stand-still obvious (its
+// waves live on Time). The shipped file, the way the editor loads it, has to be
+// recognised as one — the engine plane's waves would otherwise sit frozen in the
+// preview while moving in the scene.
+TEST_CASE("Engine water material: the Material Editor preview redraws it every frame")
+{
+	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
+	Scratch s("preview-animated");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const HE::UUID id = cm.loadAsset(kWaterPath);
+	const MaterialAsset* m = cm.getMaterial(id);
+	REQUIRE(m);
+	CHECK(HE::matGlslUsesTime(m->customShaderFragGlsl));
+	// Same answer from the graph the editor regenerates the shader from — what the
+	// preview asks after an edit, before anything is baked.
+	HE::MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(m->nodeGraphJson, g));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	CHECK(HE::matGlslUsesTime(gen.glsl));
+}
+
 // The Details panel lists these knobs under "Material Parameters (this entity)"
 // with the parameter NAME as the row label — data, which editor_help_audit
 // cannot read. So the shipped asset is walked against the help table here: a

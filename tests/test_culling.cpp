@@ -2823,7 +2823,7 @@ TEST_CASE("Dome clouds: Metal and GL march and shadow them the same way")
 	                                                   "Backends" / "Metal" / "MetalRenderer.mm"));
 	checkGroup({ "SkyShaderSource.h (GL)", "MetalRenderer.mm" }, { gl, mtl }, {
 		{ "early-out where the fade is 0",
-		  { R"(if \(dir\.y < ([0-9.]+)\) return baseSky;\s*int qBaseN)" } },
+		  { R"(if \(dir\.y < ([0-9.]+)\)\s*\{\s*return overcastBand\(baseSky, ov \* smoothstep\(([-0-9.]+), ([-0-9.]+), dir\.y\))" } },
 		{ "horizon fade",
 		  { R"(float horizon = smoothstep\(([0-9.]+), ([0-9.]+), dir\.y\);\s*float s0 = kCloudBase)" } },
 		{ "fade-coupled step budget",
@@ -3124,7 +3124,7 @@ TEST_CASE("Nebula: Metal's kSkyMSL copy matches the GL sky shader after normalis
 	for (const std::string& p : splitArgs(mNeb.params))
 		mParams.push_back(p.substr(p.find_last_of(" &") + 1));
 	auto callArgs = [](const std::string& src) {
-		static const std::regex kCallSite(R"(col \+= nebula\(([^;]*)\);)");
+		static const std::regex kCallSite(R"((?:col|celestial) \+= nebula\(([^;]*)\);)");
 		std::vector<std::vector<std::string>> calls;
 		for (auto it = std::sregex_iterator(src.begin(), src.end(), kCallSite); it != std::sregex_iterator(); ++it)
 			calls.push_back(splitArgs((*it)[1].str()));
