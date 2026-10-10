@@ -29,11 +29,13 @@ struct TerrainComponent;
 //
 // SOURCE. Body::sourceSpline is the EntityIdComponent::id of the closed spline a
 // lake was drawn from, so the lake tool can find the body again and reshape it
-// (clearBody + addPolygon, same id). A body painted with the brush has none:
-// "quellenlos". The two kinds share everything else, which is what makes them
-// interoperable — a brush can extend a lake, an eraser can notch one, and a lake
-// polygon can be drawn over painted water. The field stores the UUID and nothing
-// else about the spline; prefab instantiation mints fresh entity ids, so a
+// under the same id (WaterLake.h: reshape, which keeps what a brush added or took
+// away). A body painted with the brush has none: "quellenlos". The two kinds share
+// everything else, which is what makes them interoperable — a brush can extend a
+// lake, an eraser can notch one, and a lake polygon can be drawn over painted
+// water. The field stores the UUID, and Body::polygon, the outline the cells were
+// last laid from (the baseline reshape measures the brush share against); nothing
+// else about the spline. Prefab instantiation mints fresh entity ids, so a
 // duplicated terrain + spline pair has to be re-linked by whoever duplicates it.
 //
 // IDS ARE STABLE. A body keeps its id for its lifetime, removing one never

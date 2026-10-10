@@ -124,6 +124,9 @@ add_executable(he_tests
     # share kept on top (the merge rule), converted from painted water, the per-frame
     # sync, and the whole of it through undo and the scene file.
     test_water_lake.cpp
+    # The water group of HE::api: the same lakes and brush from HorizonCode, Lua,
+    # Python and MCP, in world coordinates.
+    test_water_lake_api.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp

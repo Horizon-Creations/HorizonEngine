@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace water = HE::water;
@@ -209,7 +210,7 @@ TEST_CASE("Water lake: an unusable outline creates nothing at all")
     CHECK(lake::create(tc, spline, { { 0, 0 }, { 5, 0 }, { 10, 0 } }, 1.0f) == water::kNoBody);       // no area
     CHECK(lake::create(tc, spline, rect(100, 100, 120, 120), 1.0f) == water::kNoBody);                // off the terrain
     CHECK(lake::create(tc, HE::UUID{}, rect(-5, -5, 5, 5), 1.0f) == water::kNoBody);                  // no spline
-    CHECK(lake::create(tc, spline, rect(-5, -5, 5, 5), std::nanf("")) == water::kNoBody);             // no level
+    CHECK(lake::create(tc, spline, rect(-5, -5, 5, 5), std::numeric_limits<float>::quiet_NaN()) == water::kNoBody);   // no level
     const float inf = std::numeric_limits<float>::infinity();
     CHECK(lake::create(tc, spline, { { 0, 0 }, { inf, 0 }, { 5, 5 } }, 1.0f) == water::kNoBody);
     CHECK(noWater(tc));
@@ -256,7 +257,7 @@ TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, 
 
     // Not a lake, no dig.
     CHECK_FALSE(lake::dig(tc, 999, 3.0f, 4.0f).ok);
-    CHECK_FALSE(lake::dig(tc, id, std::nanf(""), 4.0f).ok);
+    CHECK_FALSE(lake::dig(tc, id, std::numeric_limits<float>::quiet_NaN(), 4.0f).ok);
 }
 
 // ── The merge rule, one consequence at a time ───────────────────────────────

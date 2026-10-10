@@ -203,6 +203,22 @@ namespace HE::water::lake
     // Refused if the spline already is a lake (use reshape / dig).
     Created create(HorizonWorld& world, Entity terrain, Entity spline, const Params& p);
 
+    // The same action in two halves, for a caller that must not write the world
+    // directly (the MCP tool works on a COPY of the landscape and sends it back
+    // through the editor's command gateway). `plan` reads the world and the
+    // landscape and changes neither: the outline in the landscape's space, the
+    // level, or an error. `apply` is pure: dig, then lay the water, into any
+    // TerrainComponent — the world's or a copy of it.
+    struct Plan
+    {
+        std::string            error;       // empty = the lake can be made
+        std::vector<glm::vec2> polygon;     // terrain-local XZ
+        float                  level = 0.0f;
+        HE::UUID               spline{};
+    };
+    Plan    plan(HorizonWorld& world, Entity terrain, Entity spline, const Params& p);
+    Created apply(TerrainComponent& tc, const Plan& plan, const Params& p);
+
     // The lake's water follows its spline now (what the per-frame sync does).
     Result reshape(HorizonWorld& world, Entity spline);
     // "Dig Again": the ground under the lake's current outline. ok = false when the

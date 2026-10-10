@@ -79,6 +79,7 @@
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainGenerate.h>
 #include <HorizonScene/WaterBrush.h>
+#include <HorizonScene/WaterLake.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
@@ -7161,6 +7162,157 @@ void EditorApplication::dumpFrameHeadless()
 			"triangles %u, undone %d, wet cells now %u)",
 			wb, created ? 1 : 0, strokeLevel, dabs, wetAfterPaint, ws.created, ws.triangles,
 			mode == "undo" ? (undone ? 1 : 0) : -1, wetNow);
+	}
+
+	// ── Lake witness (HE_DUMP_LAKEEDIT, Thema 174 Schritt 8): a lake drawn from a
+	// closed spline, widened with the water brush, reshaped by moving its points,
+	// or converted from a painted pond — every step through the code the editor
+	// runs (HE::water::lake::create, HE::water::brush begin/dab/end, the spline
+	// sync inside updateTerrains, lake::convertBody), not a shortcut through the
+	// model. A flat 100 m landscape at y=300, the spline's own lines and handles
+	// drawn on top by ViewportOverlays. Modes:
+	//   =drawn      the bean-shaped spline made a lake (bed 2.5 m, bank 6 m).
+	//   =extended   drawn, then a brush stroke dug out of the east shore (Dig Bed
+	//               on) and the eraser cut an island out of the middle.
+	//   =reshaped   extended, then two points pulled out and one pushed in: the
+	//               outline moved, the channel and the island did not.
+	//   =converted  a pond painted with the brush (dug), then "To Lake": the same
+	//               pond, now with a spline of its own to edit.
+	// Camera as WATERBRUSH: CAMY=375 CAMZ=48 PITCH=-60. The log line carries the
+	// numbers as a twin to the picture.
+	if (const char* le = std::getenv("HE_DUMP_LAKEEDIT"); le && *le && m_editorWorld)
+	{
+		namespace L  = HE::water::lake;
+		namespace WB = HE::water::brush;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(le);
+		const bool extend  = mode == "extended" || mode == "reshaped";
+		const bool reshape = mode == "reshaped";
+
+		const Entity land = m_editorWorld->createEntity("LakeLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution  = 129;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 128;
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat chunks first
+		auto& tc = reg.get<TerrainComponent>(land);
+
+		// Terrain-local XZ outline of a bean, a spline of nine points at the
+		// landscape's world position (so local == world in x and z).
+		const glm::vec2 bean[] = { { -30, 0 }, { -22, -14 }, { -8, -18 }, { 8, -10 }, { 20, -12 },
+		                           { 30, 0 }, { 22, 14 }, { 4, 18 }, { -14, 14 } };
+		const Entity spline = m_editorWorld->createEntity("Shore");
+		reg.emplace<TransformComponent>(spline);
+		SplineComponent sc;
+		sc.closed = true;
+		for (const glm::vec2& p : bean) sc.controlPoints.emplace_back(p.x, 300.0f, p.y);
+
+		std::string note;
+		uint16_t body = HE::water::kNoBody;
+		Entity shown = spline;
+		if (mode == "converted")
+		{
+			// A pond painted with the brush, dug, then turned into a lake.
+			WB::Params p;
+			p.radius = 8.0f; p.falloff = 3.0f; p.amount = 1.0f;
+			p.levelFromGround = true; p.levelOffset = 0.0f;
+			p.dig = true; p.digDepth = 2.0f;
+			WB::Stroke s;
+			WB::begin(s, tc, -26.0f, -2.0f, p);
+			for (int i = 0; i <= 12; ++i)
+				WB::dab(s, tc, -26.0f + 52.0f * static_cast<float>(i) / 12.0f,
+				        -2.0f + 6.0f * std::sin(static_cast<float>(i) * 0.5f), p);
+			body = s.body;
+			WB::end(s, tc);
+			m_editorWorld->destroyEntity(spline);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			const uint32_t pondCells = tc.water.wetCells(body);
+			const L::Converted cv = L::convertBody(*m_editorWorld, land, body);
+			shown = cv.spline;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			char buf[200];
+			std::snprintf(buf, sizeof buf, "pond %u cells -> lake %u cells, %u spline points, error '%s'",
+			              pondCells, tc.water.wetCells(body), cv.points, cv.error.c_str());
+			note = buf;
+		}
+		else
+		{
+			reg.emplace<SplineComponent>(spline, sc);
+			L::Params lp;
+			lp.levelFromGround = true; lp.levelOffset = 0.0f;
+			lp.dig = true; lp.depth = 2.5f; lp.bank = 6.0f;
+			const L::Created made = L::create(*m_editorWorld, land, spline, lp);
+			body = made.body;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			char buf[200];
+			std::snprintf(buf, sizeof buf, "lake %s, level %.2f, %u cells, %u ground vertices dug%s%s",
+			              made.ok ? "made" : "FAILED", made.level, made.cells, made.ground,
+			              made.error.empty() ? "" : ", error ", made.error.c_str());
+			note = buf;
+
+			if (extend)
+			{
+				// A channel out of the east shore, dug, and an island cut out of the middle.
+				WB::Params p;
+				p.radius = 3.5f; p.falloff = 1.5f; p.amount = 1.0f;
+				p.levelFromGround = true; p.levelOffset = 0.0f;
+				p.dig = true; p.digDepth = 2.0f;
+				WB::Stroke s;
+				WB::begin(s, tc, 26.0f, 0.0f, p);
+				const bool continued = !s.created;
+				for (int i = 0; i <= 10; ++i)
+					WB::dab(s, tc, 26.0f + 20.0f * static_cast<float>(i) / 10.0f,
+					        8.0f * static_cast<float>(i) / 10.0f, p);
+				WB::end(s, tc);
+				WB::Params e = p;
+				e.erase = true; e.dig = false; e.radius = 4.0f; e.falloff = 0.5f;
+				WB::begin(s, tc, -8.0f, 3.0f, e);
+				for (int i = 0; i < 3; ++i) WB::dab(s, tc, -8.0f, 3.0f, e);
+				WB::end(s, tc);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				char b2[160];
+				std::snprintf(b2, sizeof b2, "; brush continued the lake: %d, wet cells now %u",
+				              continued ? 1 : 0, tc.water.wetCells(body));
+				note += b2;
+			}
+			if (reshape)
+			{
+				// Pull the east lobe out and the south bay in: the spline moves, the
+				// brush share (channel, island) stays.
+				auto& pts = reg.get<SplineComponent>(spline).controlPoints;
+				pts[4].x += 8.0f; pts[4].z -= 6.0f;
+				pts[5].x += 8.0f;
+				pts[7].z -= 8.0f;
+				const uint32_t before = tc.water.wetCells(body);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the sync inside it reshapes
+				const float chx = 40.0f, chz = 6.4f;   // far down the channel the brush dug
+				char b3[200];
+				std::snprintf(b3, sizeof b3, "; reshaped: %u -> %u cells, channel still wet: %d, island still dry: %d",
+				              before, tc.water.wetCells(body),
+				              HE::water::bodyAt(tc, chx, chz) == body ? 1 : 0,
+				              HE::water::bodyAt(tc, -8.0f, 3.0f) == HE::water::kNoBody ? 1 : 0);
+				note += b3;
+			}
+		}
+		m_selection.clear();
+		if (shown != entt::null) m_selection.add(shown);
+		DebugDrawBuffer guides;
+		HE::Ed::ViewportOverlays::appendSplineGuides(*m_editorWorld, m_selection, SplineEdit::GuideState{},
+		                                             m_editorCamera.position(), guides);
+		r->SetDebugLines(guides.lines());
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LAKEEDIT witness (mode %s): %s | surfaces %u, triangles %u, guide lines %zu",
+		            le, note.c_str(), ws.terrains, ws.triangles, guides.lines().size());
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling

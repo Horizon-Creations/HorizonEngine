@@ -9,7 +9,10 @@
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/WaterField.h>
+#include <HorizonScene/WaterLake.h>
 #include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/SplineComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 
 #include <algorithm>
@@ -889,6 +892,236 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			carry.weightsDirty       = true;
 			// Paint changes no heights, so no chunk mesh has to be rebuilt at all.
 			carry.regionDirty        = false;
+
+			const ToolResult wb = writeBack(*c, r, std::move(terrain), carry, *h);
+			if (wb.isError) return wb;
+
+			result["regenerated"] = static_cast<bool>(h->regenerate);
+			return ToolResult::ok(std::move(result));
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── terrain_lake ─────────────────────────────────────────────────────────
+	// The Spline panel's Lake section and the Water panel's To Lake button for a
+	// client. The registry's water.* rows are exec rows and MCP does not call
+	// those (they write the world without undo); this one runs on a COPY of the
+	// landscape and goes back through the gateway, so it is one undo step like
+	// terrain_sculpt. The lake is identified by its spline: draw a closed one with
+	// entity_create (a 'spline' component with controlPoints and closed: true),
+	// then call this with action 'create'.
+	{
+		McpTool t;
+		t.name        = "terrain_lake";
+		t.description =
+			"Make and shape a lake on a landscape from a CLOSED spline entity: water at a "
+			"level inside the spline's outline, optionally with a bed dug under it and a "
+			"bank sloping back to the old ground. The lake is identified by its spline. "
+			"Actions: 'create' (default) makes the lake — with 'level' (WORLD Y) the "
+			"surface stands there, without it at the lowest ground under the outline "
+			"plus 'above'; give 'body' to turn an existing painted pond into this "
+			"spline's lake instead of making new water. 'reshape' lays the water along "
+			"the spline's CURRENT points (the editor also does this by itself every "
+			"frame; water painted with the brush stays, the ground is never touched). "
+			"'dig' digs the bed again under the current outline. 'level' moves the "
+			"surface to a WORLD height. 'remove' takes the water away, keeping the spline "
+			"and the ground. All coordinates and heights are WORLD space. Undoable in the "
+			"editor as one step. Read the result back with api_water_levelAt / "
+			"api_water_bodyAt.";
+		t.inputSchema = objectSchema(json{
+			{ "uuid",   stringProp("Uuid of the landscape, from terrain_info.") },
+			{ "spline", stringProp("Uuid of the closed spline entity that is (or will be) the lake's outline.") },
+			{ "action", json{ { "type", "string" },
+			                  { "enum", json::array({ "create", "reshape", "dig", "level", "remove" }) },
+			                  { "description", "What to do. Default 'create'." } } },
+			{ "level",  numberProp("create / level: the WORLD Y of the surface. 'create' without it takes "
+			                       "the lowest ground under the outline plus 'above'.") },
+			{ "above",  numberProp("create without 'level': metres above the lowest ground under the "
+			                       "outline. Default 0.") },
+			{ "dig",    json{ { "type", "boolean" },
+			                  { "description", "create: also dig the bed. Default true." } } },
+			{ "depth",  numberProp("create / dig: how far below the surface the bed lies, metres. Default 2.") },
+			{ "bank",   numberProp("create / dig: width of the slope from the bed back up to the old "
+			                       "ground, metres. Default 4. 0 is a hard edge.") },
+			{ "body",   json{ { "type", "integer" },
+			                  { "description", "create: the number of a painted pond on this landscape to "
+			                                   "turn into this spline's lake (its level is kept). Omit to "
+			                                   "make new water." } } },
+		}, { "uuid", "spline" });
+		t.mutates = true;
+		t.handler = [c, h](const json& args) -> ToolResult {
+			namespace L = HE::water::lake;
+			Terrain r = resolveTerrain(*c, args);
+			if (!r.ok) return r.failure;
+
+			const std::string splineUuid = strArg(args, "spline");
+			Entity sp = entt::null;
+			if (!splineUuid.empty()) sp = entityByUuid(*r.world, splineUuid);
+			if (sp == entt::null)
+				return failFor(splineUuid.empty() ? CmdError::InvalidPayload : CmdError::NotFound,
+				               splineUuid.empty()
+				                   ? std::string("'spline' is required: the uuid of the closed spline entity "
+				                                 "that draws the lake. Make one with entity_create and a "
+				                                 "'spline' component.")
+				                   : splineUuid);
+			if (!r.world->registry().all_of<SplineComponent>(sp))
+				return failFor(CmdError::InvalidPayload,
+				               "Entity '" + splineUuid + "' has no spline component, so it cannot be a lake's outline.");
+
+			std::string action = strArg(args, "action");
+			if (action.empty()) action = "create";
+			if (action != "create" && action != "reshape" && action != "dig" &&
+			    action != "level" && action != "remove")
+				return failFor(CmdError::InvalidPayload,
+				               "'" + action + "' is not a lake action. Use one of create, reshape, dig, level, remove.");
+
+			// Everything runs on a copy: the world is only written through the gateway.
+			TerrainComponent work = *r.tc;
+			const HE::UUID      keepWeightmap = work.weightmapTextureId;
+			const std::uint32_t keepBuiltRes  = work.builtRes;
+			const std::uint32_t keepBuiltCps  = work.builtChunksPerSide;
+			const bool          wasDirty      = work.dirty;
+			work.dirty = false;   // ensureHeights sets it again if it snaps the grid
+
+			const L::Link link = L::linkOf(*r.world, sp);
+			const bool isLakeHere = link.body != HE::water::kNoBody && link.terrain == r.entity;
+			if (link.body != HE::water::kNoBody && link.terrain != r.entity)
+				return failFor(CmdError::InvalidPayload,
+				               "That spline is already the lake of another landscape.");
+			if (action != "create" && !isLakeHere)
+				return failFor(CmdError::InvalidPayload,
+				               "That spline is not a lake on this landscape yet. Call terrain_lake with action 'create' first.");
+			if (action == "create" && isLakeHere)
+				return failFor(CmdError::InvalidPayload,
+				               "That spline already is a lake. Move its points to reshape it, or use action 'dig' / 'level'.");
+
+			const std::string uuid = uuidOf(*r.world, r.entity);
+			json result{ { "uuid", uuid }, { "spline", splineUuid }, { "action", action } };
+			std::uint32_t groundChanged = 0;
+			bool changed = false;
+			std::uint16_t body = link.body;
+
+			if (action == "create")
+			{
+				L::Params p;
+				p.levelFromGround = !hasArg(args, "level");
+				p.levelOffset     = static_cast<float>(numArg(args, "above", 0.0));
+				p.level           = static_cast<float>(numArg(args, "level", 0.0)) - r.worldPos.y;
+				p.dig             = boolArg(args, "dig", true);
+				p.depth           = static_cast<float>(numArg(args, "depth", 2.0));
+				p.bank            = static_cast<float>(numArg(args, "bank", 4.0));
+				if (!std::isfinite(p.level) || !std::isfinite(p.levelOffset) ||
+				    !std::isfinite(p.depth) || !std::isfinite(p.bank) || p.depth < 0.0f || p.bank < 0.0f)
+					return failFor(CmdError::InvalidPayload,
+					               "'level', 'above', 'depth' and 'bank' must be numbers; 'depth' and 'bank' must not be negative.");
+
+				const L::Plan plan = L::plan(*r.world, r.entity, sp, p);
+				if (!plan.error.empty()) return failFor(CmdError::InvalidPayload, plan.error);
+
+				if (hasArg(args, "body"))
+				{
+					const int pond = intArg(args, "body", 0);
+					if (pond <= 0 || pond > 65535 || !work.water.findBody(static_cast<std::uint16_t>(pond)))
+						return failFor(CmdError::InvalidPayload,
+						               "'body' is not a body of water on this landscape. api_water_bodyAt "
+						               "tells which body a point is in.");
+					body = static_cast<std::uint16_t>(pond);
+					if (work.water.findBody(body)->fromSpline())
+						return failFor(CmdError::InvalidPayload, "That body already is a lake.");
+					if (!L::adopt(work, body, plan.spline, plan.polygon).ok)
+						return failFor(CmdError::InvalidPayload, "The outline could not be given to that pond.");
+					if (p.dig)
+					{
+						const TerrainSculpt::Result sr = L::dig(work, body, p.depth, p.bank);
+						groundChanged = sr.changed;
+					}
+					result["level"] = r.worldPos.y + work.water.findBody(body)->level;
+				}
+				else
+				{
+					const L::Created made = L::apply(work, plan, p);
+					if (!made.ok) return failFor(CmdError::InvalidPayload, made.error);
+					body = made.body;
+					groundChanged = made.ground;
+					result["level"] = r.worldPos.y + made.level;
+				}
+				changed = true;
+			}
+			else if (action == "reshape")
+			{
+				std::vector<glm::vec2> poly;
+				if (!L::polygonOf(*r.world, sp, r.entity, poly))
+					return failFor(CmdError::InvalidPayload,
+					               "The spline is not a closed shape of at least three points right now.");
+				const HE::water::Result rs = L::reshape(work, body, poly);
+				if (!rs.ok) return failFor(CmdError::InvalidPayload, "The outline lies outside the landscape.");
+				changed = rs.changed > 0 || work.water.findBody(body)->polygon != r.tc->water.findBody(body)->polygon;
+				result["cellsChanged"] = static_cast<int>(rs.changed);
+			}
+			else if (action == "dig")
+			{
+				const float depth = static_cast<float>(numArg(args, "depth", 2.0));
+				const float bank  = static_cast<float>(numArg(args, "bank", 4.0));
+				if (!std::isfinite(depth) || !std::isfinite(bank) || depth < 0.0f || bank < 0.0f)
+					return failFor(CmdError::InvalidPayload, "'depth' and 'bank' must be numbers and not negative.");
+				const TerrainSculpt::Result sr = L::dig(work, body, depth, bank);
+				if (!sr.ok) return failFor(CmdError::InvalidPayload, "The lake has no outline to dig under.");
+				groundChanged = sr.changed;
+				changed = sr.changed > 0;
+			}
+			else if (action == "level")
+			{
+				if (!hasArg(args, "level"))
+					return failFor(CmdError::InvalidPayload, "action 'level' needs 'level': the WORLD Y of the surface.");
+				const float local = static_cast<float>(numArg(args, "level", 0.0)) - r.worldPos.y;
+				if (!HE::water::setLevel(work, body, local))
+					return failFor(CmdError::InvalidPayload, "'level' must be a number.");
+				changed = work.water.findBody(body)->level != r.tc->water.findBody(body)->level;
+			}
+			else   // remove
+			{
+				HE::water::removeBody(work, body);
+				changed = true;
+			}
+
+			result["body"]    = static_cast<int>(body);
+			result["ground"]  = static_cast<int>(groundChanged);
+			if (action != "remove")
+				if (const HE::water::Body* b = work.water.findBody(body))
+				{
+					result["wetCells"] = static_cast<int>(work.water.wetCells(body));
+					result["level"]    = r.worldPos.y + b->level;
+				}
+			result["changed"] = changed || groundChanged > 0;
+
+			// Nothing moved: a success, and no undo step for it.
+			if (!changed && groundChanged == 0)
+			{
+				result["regenerated"] = false;
+				return ToolResult::ok(std::move(result));
+			}
+
+			// The edited copy as the scene format would write it: one serializer, so a
+			// field added to the landscape or its water appears here with no change.
+			json terrain;
+			{
+				HorizonWorld scratch;
+				const Entity se = scratch.createEntity("Landscape");
+				scratch.registry().emplace<TerrainComponent>(se, work);
+				terrain = componentsOf(scratch, se)["terrain"];
+			}
+			if (!terrain.is_object())
+				return failFor(CmdError::Failed, uuid);
+
+			CarryOver carry;
+			carry.weightmapTextureId = keepWeightmap;
+			carry.builtRes           = keepBuiltRes;
+			carry.builtChunksPerSide = keepBuiltCps;
+			carry.fullRebuild  = wasDirty || work.dirty || keepBuiltRes == 0;
+			carry.weightsDirty = false;
+			carry.regionDirty  = work.regionDirty;
+			carry.minX = work.dirtyMinX; carry.maxX = work.dirtyMaxX;
+			carry.minZ = work.dirtyMinZ; carry.maxZ = work.dirtyMaxZ;
 
 			const ToolResult wb = writeBack(*c, r, std::move(terrain), carry, *h);
 			if (wb.isError) return wb;

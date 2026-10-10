@@ -23,6 +23,11 @@
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/NavigationSystem.h"   // the pathfinder behind the nav group
+#include "HorizonScene/WaterBrush.h"         // the water group: the brush,
+#include "HorizonScene/WaterLake.h"          //   the lakes and
+#include "HorizonScene/WaterField.h"         //   the model they edit
+#include "HorizonScene/Components/TerrainComponent.h"
+#include "HorizonScene/Components/SplineComponent.h"
 #include "HorizonScene/EntityHost.h"
 #include "HorizonScene/EntityVisibility.h"   // the one list of what "visible" flips
 #include <UIWidget/UIShortcut.h>   // a menu entry's chord is checked where it is taken in
@@ -1349,6 +1354,215 @@ void setSpeed(Ctx& c, Entity e, float v)
     agent->speed = std::max(0.0f, v);
 }
 } // namespace nav
+
+// ── Water ────────────────────────────────────────────────────────────────────
+namespace water {
+namespace {
+// A landscape and the two matrices the world/terrain-local boundary needs. The
+// world matrix is composed on the spot (HE::worldMatrixOf), never read off the
+// stored one, which is a frame old.
+struct Land
+{
+    TerrainComponent* tc = nullptr;
+    entt::entity      entity = entt::null;
+    glm::mat4         toWorld{ 1.0f };
+    glm::mat4         toLocal{ 1.0f };
+    glm::vec2 xz(float x, float z) const
+    {
+        const glm::vec4 p = toLocal * glm::vec4(x, toWorld[3].y, z, 1.0f);
+        return { p.x, p.z };
+    }
+    // A WORLD height and a terrain-local one, for a landscape that is moved and
+    // uniformly scaled but not tipped over.
+    float localY(float worldY) const { return (toLocal * glm::vec4(toWorld[3].x, worldY, toWorld[3].z, 1.0f)).y; }
+    float worldY(float localY) const { return (toWorld * glm::vec4(0.0f, localY, 0.0f, 1.0f)).y; }
+};
+
+bool landOf(Ctx& c, Entity e, const char* who, Land& out)
+{
+    if (!c.world) return false;
+    auto& reg = c.world->registry();
+    const auto id = static_cast<entt::entity>(e);
+    TerrainComponent* tc = reg.valid(id) ? reg.try_get<TerrainComponent>(id) : nullptr;
+    if (!tc)
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "%s: entity %u is not a landscape (it has no TerrainComponent)",
+                        who, static_cast<uint32_t>(e));
+        return false;
+    }
+    out.tc = tc;
+    out.entity = id;
+    out.toWorld = HE::worldMatrixOf(*c.world, id);
+    out.toLocal = glm::inverse(out.toWorld);
+    return true;
+}
+
+bool splineOf(Ctx& c, Entity e, const char* who, entt::entity& out)
+{
+    if (!c.world) return false;
+    const auto id = static_cast<entt::entity>(e);
+    if (!c.world->registry().valid(id) || !c.world->registry().all_of<SplineComponent>(id))
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "%s: entity %u has no SplineComponent", who, static_cast<uint32_t>(e));
+        return false;
+    }
+    out = id;
+    return true;
+}
+
+int makeLake(Ctx& c, Entity terrain, Entity spline, bool fromGround, float levelOrAbove,
+             bool dig, float depth, float bank, const char* who)
+{
+    Land land;
+    entt::entity sp;
+    if (!landOf(c, terrain, who, land) || !splineOf(c, spline, who, sp)) return 0;
+    HE::water::lake::Params p;
+    p.levelFromGround = fromGround;
+    p.levelOffset     = fromGround ? levelOrAbove : 0.0f;
+    p.level           = fromGround ? 0.0f : land.localY(levelOrAbove);
+    p.dig             = dig;
+    p.depth           = depth;
+    p.bank            = bank;
+    const HE::water::lake::Created made = HE::water::lake::create(*c.world, land.entity, sp, p);
+    if (!made.ok)
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "%s: %s", who, made.error.c_str());
+        return 0;
+    }
+    return static_cast<int>(made.body);
+}
+} // namespace
+
+int createLake(Ctx& c, Entity terrain, Entity spline, float level, bool dig, float depth, float bank)
+{
+    return makeLake(c, terrain, spline, false, level, dig, depth, bank, "water.createLake");
+}
+
+int createLakeAtGround(Ctx& c, Entity terrain, Entity spline, float above, bool dig, float depth, float bank)
+{
+    return makeLake(c, terrain, spline, true, above, dig, depth, bank, "water.createLakeAtGround");
+}
+
+int reshapeLake(Ctx& c, Entity spline)
+{
+    entt::entity sp;
+    if (!splineOf(c, spline, "water.reshapeLake", sp)) return -1;
+    const HE::water::Result r = HE::water::lake::reshape(*c.world, sp);
+    return r.ok ? static_cast<int>(r.changed) : -1;
+}
+
+int digLake(Ctx& c, Entity spline, float depth, float bank)
+{
+    entt::entity sp;
+    if (!splineOf(c, spline, "water.digLake", sp)) return -1;
+    const TerrainSculpt::Result r = HE::water::lake::dig(*c.world, sp, depth, bank);
+    return r.ok ? static_cast<int>(r.changed) : -1;
+}
+
+bool setLakeLevel(Ctx& c, Entity spline, float level)
+{
+    entt::entity sp;
+    if (!splineOf(c, spline, "water.setLakeLevel", sp)) return false;
+    const HE::water::lake::Link l = HE::water::lake::linkOf(*c.world, sp);
+    if (l.body == HE::water::kNoBody) return false;
+    Land land;
+    if (!landOf(c, static_cast<Entity>(l.terrain), "water.setLakeLevel", land)) return false;
+    return HE::water::setLevel(*land.tc, l.body, land.localY(level));
+}
+
+bool removeLake(Ctx& c, Entity spline)
+{
+    entt::entity sp;
+    return splineOf(c, spline, "water.removeLake", sp) && HE::water::lake::remove(*c.world, sp);
+}
+
+Entity convertToLake(Ctx& c, Entity terrain, int body)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.convertToLake", land)) return 0;
+    if (body <= 0 || body > 65535) return 0;
+    const HE::water::lake::Converted cv =
+        HE::water::lake::convertBody(*c.world, land.entity, static_cast<uint16_t>(body));
+    if (cv.spline == entt::null)
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "water.convertToLake: %s", cv.error.c_str());
+        return 0;
+    }
+    return static_cast<Entity>(cv.spline);
+}
+
+namespace {
+int dab(Ctx& c, Entity terrain, float x, float z, float radius, float falloff, bool erase, const char* who)
+{
+    Land land;
+    if (!landOf(c, terrain, who, land)) return 0;
+    HE::water::brush::Params p;
+    p.radius  = std::max(0.0f, radius);
+    p.falloff = std::max(0.0f, falloff);
+    p.amount  = 1.0f;
+    p.erase   = erase;
+    const glm::vec2 at = land.xz(x, z);
+    HE::water::brush::Stroke s;
+    HE::water::brush::begin(s, *land.tc, at.x, at.y, p);
+    const HE::water::brush::Dab d = HE::water::brush::dab(s, *land.tc, at.x, at.y, p);
+    HE::water::brush::end(s, *land.tc);
+    return static_cast<int>(d.cells);
+}
+} // namespace
+
+int paint(Ctx& c, Entity terrain, float x, float z, float radius, float falloff)
+{
+    return dab(c, terrain, x, z, radius, falloff, false, "water.paint");
+}
+
+int erase(Ctx& c, Entity terrain, float x, float z, float radius, float falloff)
+{
+    return dab(c, terrain, x, z, radius, falloff, true, "water.erase");
+}
+
+int bodyAt(Ctx& c, Entity terrain, float x, float z)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.bodyAt", land)) return 0;
+    const glm::vec2 at = land.xz(x, z);
+    return static_cast<int>(HE::water::bodyAt(*land.tc, at.x, at.y));
+}
+
+bool levelAt(Ctx& c, Entity terrain, float x, float z, float& worldLevel)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.levelAt", land)) return false;
+    const glm::vec2 at = land.xz(x, z);
+    float local = 0.0f;
+    if (!HE::water::levelAt(*land.tc, at.x, at.y, local)) return false;
+    worldLevel = land.worldY(local);
+    return true;
+}
+
+int lakeBody(Ctx& c, Entity spline)
+{
+    entt::entity sp;
+    if (!splineOf(c, spline, "water.lakeBody", sp)) return 0;
+    return static_cast<int>(HE::water::lake::linkOf(*c.world, sp).body);
+}
+
+Entity lakeSpline(Ctx& c, Entity terrain, int body)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.lakeSpline", land) || body <= 0 || body > 65535) return 0;
+    const HE::water::Body* b = land.tc->water.findBody(static_cast<uint16_t>(body));
+    if (!b || !b->fromSpline()) return 0;
+    const entt::entity e = c.world->findByEntityId(b->sourceSpline);
+    return e == entt::null ? 0 : static_cast<Entity>(e);
+}
+
+int wetCells(Ctx& c, Entity terrain, int body)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.wetCells", land)) return 0;
+    return static_cast<int>(land.tc->water.wetCells(body <= 0 ? HE::water::kNoBody : static_cast<uint16_t>(body)));
+}
+} // namespace water
 
 // ── Entity UI ────────────────────────────────────────────────────────────────
 namespace ui {
@@ -6125,6 +6339,73 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "nav.setSpeed", "Navigation", true, {{"entity", P::Int}, {"speed", P::Float}}, {}, "HE::api::nav::setSpeed",
             [](Ctx& c, const VV& a){ nav::setSpeed(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
 
+        // Water — lakes, ponds and the brush on a landscape. x/z/level are WORLD
+        // (the water block in EngineApi.h says why); the landscape and the spline
+        // are entities, a body is the Int id the landscape's water gives it.
+        t.push_back({ "water.createLake", "Water", true,
+            {{"terrain", P::Int}, {"spline", P::Int}, {"level", P::Float}, {"dig", P::Bool},
+             {"depth", P::Float}, {"bank", P::Float}},
+            {{"body", P::Int}}, "HE::api::water::createLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::createLake(
+                c, (Entity)aI(a, 0), (Entity)aI(a, 1), aF(a, 2), aB(a, 3), aF(a, 4), aF(a, 5))) }; } });
+        t.push_back({ "water.createLakeAtGround", "Water", true,
+            {{"terrain", P::Int}, {"spline", P::Int}, {"above", P::Float}, {"dig", P::Bool},
+             {"depth", P::Float}, {"bank", P::Float}},
+            {{"body", P::Int}}, "HE::api::water::createLakeAtGround",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::createLakeAtGround(
+                c, (Entity)aI(a, 0), (Entity)aI(a, 1), aF(a, 2), aB(a, 3), aF(a, 4), aF(a, 5))) }; } });
+        t.push_back({ "water.reshapeLake", "Water", true, {{"spline", P::Int}}, {{"changed", P::Int}},
+            "HE::api::water::reshapeLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::reshapeLake(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "water.digLake", "Water", true,
+            {{"spline", P::Int}, {"depth", P::Float}, {"bank", P::Float}}, {{"lowered", P::Int}},
+            "HE::api::water::digLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::digLake(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "water.setLakeLevel", "Water", true, {{"spline", P::Int}, {"level", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::water::setLakeLevel",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(water::setLakeLevel(
+                c, (Entity)aI(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "water.removeLake", "Water", true, {{"spline", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::water::removeLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(water::removeLake(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "water.convertToLake", "Water", true, {{"terrain", P::Int}, {"body", P::Int}}, {{"spline", P::Int}},
+            "HE::api::water::convertToLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)water::convertToLake(
+                c, (Entity)aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "water.paint", "Water", true,
+            {{"terrain", P::Int}, {"x", P::Float}, {"z", P::Float}, {"radius", P::Float}, {"falloff", P::Float}},
+            {{"cells", P::Int}}, "HE::api::water::paint",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::paint(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2), aF(a, 3), aF(a, 4))) }; } });
+        t.push_back({ "water.erase", "Water", true,
+            {{"terrain", P::Int}, {"x", P::Float}, {"z", P::Float}, {"radius", P::Float}, {"falloff", P::Float}},
+            {{"cells", P::Int}}, "HE::api::water::erase",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::erase(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2), aF(a, 3), aF(a, 4))) }; } });
+        t.push_back({ "water.bodyAt", "Water", false,
+            {{"terrain", P::Int}, {"x", P::Float}, {"z", P::Float}}, {{"body", P::Int}},
+            "HE::api::water::bodyAt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::bodyAt(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "water.levelAt", "Water", false,
+            {{"terrain", P::Int}, {"x", P::Float}, {"z", P::Float}}, {{"wet", P::Bool}, {"level", P::Float}},
+            "HE::api::water::levelAt",
+            [](Ctx& c, const VV& a){ float lvl = 0.0f;
+                const bool wet = water::levelAt(c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2), lvl);
+                return VV{ Value::ofBool(wet), Value::ofFloat(lvl) }; } });
+        t.push_back({ "water.lakeBody", "Water", false, {{"spline", P::Int}}, {{"body", P::Int}},
+            "HE::api::water::lakeBody",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::lakeBody(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "water.lakeSpline", "Water", false, {{"terrain", P::Int}, {"body", P::Int}}, {{"spline", P::Int}},
+            "HE::api::water::lakeSpline",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)water::lakeSpline(
+                c, (Entity)aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "water.wetCells", "Water", false, {{"terrain", P::Int}, {"body", P::Int}}, {{"cells", P::Int}},
+            "HE::api::water::wetCells",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::wetCells(
+                c, (Entity)aI(a, 0), aI(a, 1))) }; } });
+
         // Entity UI
         t.push_back({ "ui.getText", "UI", false, {{"entity", P::Int}}, {{"text", P::String}}, "HE::api::ui::getText",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(ui::getText(c, (Entity)aI(a, 0))) }; } });
@@ -7632,6 +7913,20 @@ const std::vector<ApiFn>& registry()
             { "nav.remainingDistance", "Remaining Distance" },
             // Locomotion owns "Set Max Speed"; this one is the agent's pace.
             { "nav.setSpeed", "Set Agent Speed" },
+            { "water.createLake", "Create Lake" },
+            { "water.createLakeAtGround", "Create Lake At Ground" },
+            { "water.reshapeLake", "Reshape Lake" },
+            { "water.digLake", "Dig Lake" },
+            { "water.setLakeLevel", "Set Lake Level" },
+            { "water.removeLake", "Remove Lake" },
+            { "water.convertToLake", "Convert Pond To Lake" },
+            { "water.paint", "Paint Water" },
+            { "water.erase", "Erase Water" },
+            { "water.bodyAt", "Water Body At" },
+            { "water.levelAt", "Water Level At" },
+            { "water.lakeBody", "Get Lake Body" },
+            { "water.lakeSpline", "Get Lake Spline" },
+            { "water.wetCells", "Count Wet Cells" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
             // Suffixed like Set Position and Get Velocity above, and for the
             // same reason: Movement owns the unqualified "Is Grounded", and the
@@ -8247,7 +8542,14 @@ bool isScriptGroup(std::string_view group)
                                                     // "hc" exists FOR the text languages: it
                                                     // is how a Lua or Python script hears a
                                                     // HorizonCode variable change (plan §4.5).
-                                                    "hc" };
+                                                    "hc",
+                                                    // "water" has no flat twin: a landscape's
+                                                    // lakes, ponds and the brush are reachable
+                                                    // from a text script only here, which is
+                                                    // what makes a lake something a level script
+                                                    // can raise, drain or move, not just a thing
+                                                    // an author drew.
+                                                    "water" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

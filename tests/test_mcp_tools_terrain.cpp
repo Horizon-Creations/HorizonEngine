@@ -9,7 +9,10 @@
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/WaterBrush.h>
+#include <HorizonScene/WaterField.h>
 #include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/SplineComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 
@@ -127,7 +130,8 @@ TEST_CASE("Every terrain tool arrives with a schema and a name a client can use"
 	Fixture f;
 
 	const char* expected[] = { "terrain_info", "terrain_heightmap",
-	                           "terrain_sculpt", "terrain_mountain", "terrain_paint" };
+	                           "terrain_sculpt", "terrain_mountain", "terrain_paint",
+	                           "terrain_lake" };
 	for (const char* name : expected)
 	{
 		const McpTool* t = f.registry.find(name);
@@ -821,4 +825,228 @@ TEST_CASE("TerrainSculpt op names round-trip and an unknown one is refused")
 	Op unused{};
 	CHECK_FALSE(TerrainSculpt::opFromName("erode", unused));
 	CHECK_FALSE(TerrainSculpt::opFromName(nullptr, unused));
+}
+
+// ─── terrain_lake ─────────────────────────────────────────────────────────────
+// The lake for a client that cannot press the editor's buttons: a closed spline
+// entity, a landscape, one call. The model is tested in test_water_lake.cpp and
+// the registry rows in test_water_lake_api.cpp; what is asked here is the gateway
+// half — world coordinates in and out, ONE undo step that gives back the water
+// and the ground together, the refusals a client branches on, and that a request
+// which changes nothing leaves no undo step.
+
+namespace {
+
+// A closed spline of sixteen points on a circle (world XZ), standing at the world
+// origin so local == world.
+Entity makeLakeSpline(Fixture& f, float cx, float cz, float r, float y = 0.0f, bool closed = true)
+{
+	const Entity e = f.world.createEntity("Shore");
+	f.world.registry().emplace<TransformComponent>(e);
+	SplineComponent s;
+	s.closed = closed;
+	for (int i = 0; i < 16; ++i)
+	{
+		const float a = 6.2831853f * static_cast<float>(i) / 16.0f;
+		s.controlPoints.emplace_back(cx + r * std::cos(a), y, cz + r * std::sin(a));
+	}
+	f.world.registry().emplace<SplineComponent>(e, std::move(s));
+	return e;
+}
+
+// A landscape with 1 m water cells (100 m, 100 cells), ground at world y = 0.
+Entity makeLakeTerrain(Fixture& f)
+{
+	const Entity e = f.makeTerrain();
+	f.terrain(e).water.res = 100;
+	return e;
+}
+
+} // namespace
+
+TEST_CASE("terrain_lake is registered, marked as mutating, and says what it takes")
+{
+	Fixture f;
+	const McpTool* t = f.registry.find("terrain_lake");
+	REQUIRE(t != nullptr);
+	CHECK(McpToolRegistry::enforceNameRule(t->name));
+	CHECK(t->mutates);
+	CHECK_FALSE(t->description.empty());
+	CHECK(t->inputSchema["type"] == "object");
+	CHECK(t->inputSchema["required"].size() == 2);
+}
+
+TEST_CASE("terrain_lake create makes water at a WORLD level, digs the bed, and one undo takes both back")
+{
+	Fixture f;
+	const Entity e = makeLakeTerrain(f);
+	const Entity sp = makeLakeSpline(f, 200.0f, -50.0f, 15.0f);
+	const std::string id = f.uuid(e);
+	const std::vector<float> groundBefore = [&]
+	{
+		auto& tc = f.terrain(e);
+		TerrainSculpt::ensureHeights(tc);
+		return tc.sculptHeights;
+	}();
+	f.snapshotUndo.clearHistory();
+
+	// Surface at world y = 1.0 (ground 0), a 3 m bed below it, a 4 m bank.
+	const ToolResult r = f.call("terrain_lake", json{
+		{ "uuid", id }, { "spline", f.uuid(sp) },
+		{ "level", 1.0 }, { "depth", 3.0 }, { "bank", 4.0 } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
+	CHECK(r.content["action"] == "create");
+	CHECK(r.content["level"].get<float>() == doctest::Approx(1.0f));
+	CHECK(r.content["body"].get<int>() > 0);
+	CHECK(r.content["wetCells"].get<int>() > 500);
+	CHECK(r.content["ground"].get<int>() > 0);
+	CHECK(r.content["changed"] == true);
+
+	const auto& tc = f.terrain(e);
+	REQUIRE(tc.water.bodies.size() == 1);
+	CHECK(tc.water.bodies[0].level == doctest::Approx(1.0f));                    // terrain at y 0, so local == world
+	CHECK(tc.water.bodies[0].sourceSpline == f.world.entityId(sp));
+	CHECK(groundAt(f, e, 200.0f, -50.0f) == doctest::Approx(-2.0f));             // surface 1 − bed 3
+	CHECK(groundAt(f, e, 200.0f + 40.0f, -50.0f) == doctest::Approx(0.0f));      // beyond the bank
+
+	// One gateway command: one undo gives the water and the ground back together.
+	CHECK(f.snapshotUndo.undoDepth() == 1u);
+	REQUIRE(f.snapshotUndo.undo());
+	const Entity back = HE::Ed::entityByUuid(f.world, id);
+	REQUIRE((back != entt::null));
+	CHECK(f.terrain(back).water.bodies.empty());
+	CHECK(f.terrain(back).sculptHeights == groundBefore);
+}
+
+TEST_CASE("terrain_lake create without a level takes the lowest ground, and 'dig' false leaves the ground alone")
+{
+	Fixture f;
+	const Entity e = makeLakeTerrain(f);
+	const Entity sp = makeLakeSpline(f, 200.0f, -50.0f, 15.0f);
+	{
+		auto& tc = f.terrain(e);
+		TerrainSculpt::ensureHeights(tc);
+		for (float& h : tc.sculptHeights) h = 5.0f;                              // flat at y 5
+	}
+	const std::vector<float> before = f.terrain(e).sculptHeights;
+
+	const ToolResult r = f.call("terrain_lake", json{
+		{ "uuid", f.uuid(e) }, { "spline", f.uuid(sp) }, { "above", 0.5 }, { "dig", false } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
+	CHECK(r.content["level"].get<float>() == doctest::Approx(5.5f));
+	CHECK(r.content["ground"].get<int>() == 0);
+	CHECK(f.terrain(e).sculptHeights == before);
+}
+
+TEST_CASE("terrain_lake reshape follows the spline's points and never digs; dig and level are their own actions")
+{
+	Fixture f;
+	const Entity e = makeLakeTerrain(f);
+	const Entity sp = makeLakeSpline(f, 190.0f, -50.0f, 12.0f);
+	REQUIRE(!f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) },
+	                                      { "level", 1.0 }, { "dig", false } }).isError);
+	const std::uint16_t body = f.terrain(e).water.bodies[0].id;
+	const std::vector<float> ground = f.terrain(e).sculptHeights;
+
+	// The spline moves 20 m east (as entity_set_components would move it); the
+	// water is brought along by 'reshape'.
+	f.world.registry().get<TransformComponent>(sp).position.x += 20.0f;
+	ToolResult r = f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) }, { "action", "reshape" } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
+	CHECK(r.content["cellsChanged"].get<int>() > 100);
+	CHECK(HE::water::bodyAt(f.terrain(e), 10.0f + 0.0f, 0.0f) == body);          // x 210 world = 10 local
+	CHECK(f.terrain(e).sculptHeights == ground);
+
+	// 'dig' digs under the new outline: the surface is at 1, a 2 m bed is at −1.
+	r = f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) },
+	                                 { "action", "dig" }, { "depth", 2.0 }, { "bank", 2.0 } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
+	CHECK(r.content["ground"].get<int>() > 0);
+	CHECK(groundAt(f, e, 210.0f, -50.0f) == doctest::Approx(-1.0f));
+	// ... and the same again changes nothing: a success, and no undo step.
+	const std::size_t depth = f.snapshotUndo.undoDepth();
+	r = f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) },
+	                                 { "action", "dig" }, { "depth", 2.0 }, { "bank", 0.0 } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["ground"].get<int>() == 0);
+	CHECK(r.content["changed"] == false);
+	CHECK(f.snapshotUndo.undoDepth() == depth);
+
+	// 'level' takes a WORLD height, and is one undo step.
+	r = f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) },
+	                                 { "action", "level" }, { "level", 1.5 } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
+	CHECK(r.content["level"].get<float>() == doctest::Approx(1.5f));
+	CHECK(f.terrain(e).water.bodies[0].level == doctest::Approx(1.5f));
+	CHECK(f.snapshotUndo.undoDepth() == depth + 1);
+
+	// 'remove' takes the water, not the spline or the ground.
+	const std::vector<float> dug = f.terrain(e).sculptHeights;
+	r = f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) }, { "action", "remove" } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
+	CHECK(f.terrain(e).water.bodies.empty());
+	CHECK(f.terrain(e).sculptHeights == dug);
+	CHECK(f.world.registry().all_of<SplineComponent>(sp));
+}
+
+TEST_CASE("terrain_lake turns a painted pond into the spline's lake, keeping its level")
+{
+	Fixture f;
+	const Entity e = makeLakeTerrain(f);
+	const Entity sp = makeLakeSpline(f, 200.0f, -50.0f, 12.0f);
+	{
+		HE::water::brush::Params p;
+		p.radius = 10.0f; p.falloff = 0.0f; p.amount = 1.0f; p.levelFromGround = true; p.levelOffset = 0.7f;
+		HE::water::brush::Stroke s;
+		HE::water::brush::begin(s, f.terrain(e), 0.0f, 0.0f, p);
+		HE::water::brush::dab(s, f.terrain(e), 0.0f, 0.0f, p);
+		HE::water::brush::end(s, f.terrain(e));
+	}
+	REQUIRE(f.terrain(e).water.bodies.size() == 1);
+	const int pond = f.terrain(e).water.bodies[0].id;
+
+	const ToolResult r = f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) },
+	                                                  { "body", pond }, { "dig", false } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
+	REQUIRE(f.terrain(e).water.bodies.size() == 1);                              // the pond became the lake: no second body
+	const auto& b = f.terrain(e).water.bodies[0];
+	CHECK(b.id == pond);
+	CHECK(b.fromSpline());
+	CHECK(b.sourceSpline == f.world.entityId(sp));
+	CHECK(b.level == doctest::Approx(0.7f));
+
+	// A body that is not there, or already a lake, is refused.
+	const Entity sp2 = makeLakeSpline(f, 230.0f, -80.0f, 8.0f);
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp2) }, { "body", 99 } })) == "invalid_payload");
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp2) }, { "body", pond } })) == "invalid_payload");
+}
+
+TEST_CASE("terrain_lake refuses what a client can correct, under the code it branches on")
+{
+	Fixture f;
+	const Entity e = makeLakeTerrain(f);
+	const Entity sp = makeLakeSpline(f, 200.0f, -50.0f, 15.0f);
+	const Entity open = makeLakeSpline(f, 200.0f, -50.0f, 15.0f, 0.0f, /*closed=*/false);
+	const Entity off = makeLakeSpline(f, 900.0f, 900.0f, 10.0f);
+	const std::string id = f.uuid(e);
+
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id } })) == "invalid_payload");                         // no spline
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", "no-such-uuid" } })) == "not_found");
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", id } })) == "invalid_payload");       // a landscape is no spline
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(open) } })) == "invalid_payload");
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(off) } })) == "invalid_payload");
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(sp) }, { "action", "flood" } })) == "invalid_payload");
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(sp) }, { "depth", -1.0 } })) == "invalid_payload");
+	// Reshaping what is not a lake yet says so.
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(sp) }, { "action", "reshape" } })) == "invalid_payload");
+	CHECK(f.terrain(e).water.bodies.empty());                                                                   // none of that left anything
+
+	// Creating twice is refused, not doubled.
+	REQUIRE(!f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(sp) }, { "dig", false } }).isError);
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(sp) }, { "dig", false } })) == "invalid_payload");
+	CHECK(f.terrain(e).water.bodies.size() == 1);
+
+	// Play mode: the gateway's refusal, as for every other terrain tool.
+	f.playing = true;
+	CHECK(codeOf(f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(sp) }, { "action", "remove" } })) == "play_mode");
 }

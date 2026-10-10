@@ -370,11 +370,11 @@ Result adopt(TerrainComponent& tc, uint16_t id, const HE::UUID& spline, const st
             {
                 const size_t i = static_cast<size_t>(cz) * res + cx;
                 if (f.owner[i] != id) continue;
-                bool near = false;
-                for (int dz = -1; dz <= 1 && !near; ++dz)
-                    for (int dx = -1; dx <= 1 && !near; ++dx)
-                        near = rasterAt(mr, cx + dx, cz + dz) != 0;
-                if (!near) continue;
+                bool touches = false;      // not `near`: windows.h defines that as a macro
+                for (int dz = -1; dz <= 1 && !touches; ++dz)
+                    for (int dx = -1; dx <= 1 && !touches; ++dx)
+                        touches = rasterAt(mr, cx + dx, cz + dz) != 0;
+                if (!touches) continue;
                 f.coverage[i] = 0; f.owner[i] = kNoBody;
                 ch.add(cx, cz);
             }
@@ -460,38 +460,60 @@ std::string whyNot(HorizonWorld& world, Entity terrain, Entity spline)
     return {};
 }
 
-Created create(HorizonWorld& world, Entity terrain, Entity spline, const Params& p)
+Plan plan(HorizonWorld& world, Entity terrain, Entity spline, const Params& p)
 {
-    Created out;
+    Plan out;
     out.error = whyNot(world, terrain, spline);
     if (!out.error.empty()) return out;
-    auto& reg = world.registry();
-    auto* tc = &reg.get<TerrainComponent>(terrain);
-    const auto* sc = &reg.get<SplineComponent>(spline);
-    std::vector<glm::vec2> poly;
-    polygonOf(world, spline, terrain, poly);       // whyNot has just proved it is there
+    const auto& tc = world.registry().get<TerrainComponent>(terrain);
+    polygonOf(world, spline, terrain, out.polygon);       // whyNot has just proved it is there
+    out.spline = world.entityId(spline);
 
-    // The level is read from the ground as it is NOW, before the excavation.
-    const float level = p.levelFromGround ? lowestGround(*tc, poly) + p.levelOffset : p.level;
-    if (!finite(level)) { out.error = "The water level is not a number."; return out; }
+    // The level is read from the ground as it is NOW, before any excavation.
+    out.level = p.levelFromGround ? lowestGround(tc, out.polygon) + p.levelOffset : p.level;
+    if (!finite(out.level)) out.error = "The water level is not a number.";
+    return out;
+}
 
+Created apply(TerrainComponent& tc, const Plan& plan, const Params& p)
+{
+    Created out;
+    out.error = plan.error;
+    if (!out.error.empty()) return out;
     if (p.dig)
     {
         TerrainSculpt::ExcavateParams ep;
         ep.mode    = TerrainSculpt::ExcavateMode::Floor;
-        ep.amount  = level - std::max(0.0f, p.depth);
+        ep.amount  = plan.level - std::max(0.0f, p.depth);
         ep.falloff = std::max(0.0f, p.bank);
-        const TerrainSculpt::Result sr = TerrainSculpt::excavatePolygon(*tc, poly, ep);
+        const TerrainSculpt::Result sr = TerrainSculpt::excavatePolygon(tc, plan.polygon, ep);
         if (!sr.ok) { out.error = "The landscape could not be dug here."; return out; }
         out.ground = sr.changed;
     }
-    const uint16_t id = create(*tc, world.entityId(spline), poly, level);
+    const uint16_t id = create(tc, plan.spline, plan.polygon, plan.level);
     if (id == kNoBody) { out.error = "The water could not be laid."; return out; }
-    if (Body* b = tc->water.findBody(id)) b->syncKey = fingerprint(world, spline, terrain, *sc);
     out.ok = true;
     out.body = id;
-    out.level = level;
-    out.cells = tc->water.wetCells(id);
+    out.level = plan.level;
+    out.cells = tc.water.wetCells(id);
+    return out;
+}
+
+Created create(HorizonWorld& world, Entity terrain, Entity spline, const Params& p)
+{
+    const Plan pl = plan(world, terrain, spline, p);
+    if (!pl.error.empty())
+    {
+        Created out;
+        out.error = pl.error;
+        return out;
+    }
+    auto& reg = world.registry();
+    auto& tc = reg.get<TerrainComponent>(terrain);
+    const Created out = apply(tc, pl, p);
+    if (out.ok)
+        if (Body* b = tc.water.findBody(out.body))
+            b->syncKey = fingerprint(world, spline, terrain, reg.get<SplineComponent>(spline));
     return out;
 }
 

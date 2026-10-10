@@ -468,6 +468,70 @@ namespace
 	  "not the character's Max Speed, which belongs to input-driven movement; a "
 	  "negative value is taken as standing still." },
 
+	// ── Water ────────────────────────────────────────────────────────────────
+	{ "water.createLake",
+	  "Makes a lake of a closed Spline over a Landscape, the way the editor's Create "
+	  "Lake button does: water at Level (a world height), and with Dig a bed Depth "
+	  "metres below it that slopes back up to the old ground over Bank metres. Returns "
+	  "the lake's body number, or 0 when it could not be made: the entity is not a "
+	  "landscape, the spline is not closed with three points, it already is a lake, or "
+	  "it lies off the landscape. Afterwards the spline's points reshape the water by "
+	  "themselves; the ground is only dug again by Dig Lake." },
+	{ "water.createLakeAtGround",
+	  "The same as Create Lake, with the water level taken from the ground instead of "
+	  "typed: the lowest ground under the spline's outline, read before anything is "
+	  "dug, plus Above metres. Good for a lake that has to sit in a hollow whatever "
+	  "height the landscape stands at. Returns the body number, 0 when it failed." },
+	{ "water.reshapeLake",
+	  "Brings the water of a lake in line with its spline right now and returns how "
+	  "many water cells changed, or -1 when the spline is not a lake. The world does "
+	  "this by itself every frame, so call it only when you need the answer at once. "
+	  "Water painted onto the lake with the brush stays; the ground is never touched." },
+	{ "water.digLake",
+	  "Digs the lake's bed again under its current outline: Depth metres below the "
+	  "water level with a Bank slope. Moving the spline never digs, so this is what "
+	  "gives a reshaped lake its new bed. Returns how many ground points were lowered, "
+	  "or -1 when the spline is not a lake. The ground is only ever lowered." },
+	{ "water.setLakeLevel",
+	  "Moves the surface of a lake to a world height. The outline and the ground stay "
+	  "where they are, so a lake that is raised floods its banks and one that is "
+	  "lowered leaves a wider shore. False when the spline is not a lake." },
+	{ "water.removeLake",
+	  "Takes a lake's water away and cuts its link to the spline. The spline entity "
+	  "and the ground that was dug stay. False when the spline is not a lake." },
+	{ "water.convertToLake",
+	  "Turns a pond that was painted with the brush into a lake: creates a closed "
+	  "spline around its outline, a child of the Landscape, and gives the pond to it. "
+	  "The water keeps its level; its ragged edge becomes the smooth curve, an island "
+	  "is filled and a separate small piece stays as painted water. Returns the new "
+	  "spline, or 0 when the body is not a pond or too small to outline." },
+	{ "water.paint",
+	  "One full-strength dab of the water brush at a world point: on water it widens "
+	  "that body at its own level, on dry ground it starts a new pond a little above "
+	  "the ground. Returns how many water cells changed. Call it repeatedly along a "
+	  "path to paint a stream bed or a flood." },
+	{ "water.erase",
+	  "One dab of the eraser at a world point: water is taken out of every body under "
+	  "it, painted ponds and lakes alike. A lake keeps its body and its spline, a pond "
+	  "with no water left is gone. Returns how many water cells changed." },
+	{ "water.bodyAt",
+	  "The number of the body of water at a world point on a Landscape, 0 when the "
+	  "ground there is dry. Use it to ask whether a point is wet, or which of two "
+	  "lakes it is in." },
+	{ "water.levelAt",
+	  "Whether a world point on a Landscape is under water, and if so the world "
+	  "height of the surface there. Level is 0 when it is dry, so read Wet first." },
+	{ "water.lakeBody",
+	  "The body number of the lake a spline draws, 0 when the spline is not a lake. "
+	  "Pair it with Wet Cells to ask how big the lake is." },
+	{ "water.lakeSpline",
+	  "The spline a body of water was drawn from, 0 when the body is a painted pond "
+	  "or does not exist. The way back from Water Body At to something you can move." },
+	{ "water.wetCells",
+	  "How many cells of a Landscape's water grid are wet: those of one body, or of "
+	  "all water when Body is 0. A cell is Landscape size divided by the grid "
+	  "resolution on a side, so this is an area, not a count of lakes." },
+
 	// ── UI ───────────────────────────────────────────────────────────────────
 	{ "ui.getText",
 	  "The text of a UI Text element, by entity. Empty for an element that is not "
