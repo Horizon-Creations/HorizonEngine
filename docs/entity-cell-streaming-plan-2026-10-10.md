@@ -459,7 +459,7 @@ freischaltet (L1 + L2), zuerst:**
 |---|---|---|
 | **2a Kern** | UUID-Index mit Rückabbildung (5.1); `preserveIds` auf dem Zellpfad samt Kollisionsprüfung (4.3); `prefabInstance` (und die dekorativen Komponenten) in der Klassentabelle (4.4); Manifest-Spalte `bodies` und Kopf (4.1, 4.2); der Lauf zu L7 vorab. Test: Prefab-Haus lädt, entlädt, lädt wieder mit denselben UUIDs und intakten Bindungen | ohne stabile Identität trägt nichts anderes; kleinster Eingriff mit der größten Wirkung |
 | **2b zweite Reihe** | Anker-Liste (4.5), gestückelter Aufbau (4.6, mit der Anhänge-Frage), `structureEpoch` (7.2, klein und unabhängig: kann jeder zuerst bauen, 162 oder 164), Zellansicht | macht das Streaming robust, schaltet aber keine neuen Inhalte frei |
-| **2c dritte Reihe** | `CellRuntime`/`ICellHost`, Streaming im Editor-Play | reines Umsortieren plus eine Produktentscheidung (Play); darf hinter 3a/3b rutschen, wenn die Warnung aus der Tabelle unten reicht |
+| **2c dritte Reihe** | `CellRuntime`/`ICellHost`, Streaming im Editor-Play | reines Umsortieren plus eine Produktentscheidung (Play); darf hinter 3a/3b rutschen, wenn die Warnung unter der Tabelle reicht |
 | **3a Physik und Ref-Hülle** | `addEntities`-Charge, `bodyCount`, `requeueJoints` beim Entladen, `setRegionHold` (6); Ref-Hülle im Splitter (5) | trägt die Sicherheit: nichts fällt durch den Boden, kein Gelenk geht verloren |
 | **3b Zustand und Skripte** | `CellState` (6.3), Skriptstart und -abbau pro Zelle, Gruppe `streaming` in der API (Pins, `isSettled`), `StreamingComponent`, Spieler als Anker auf dem Server | braucht 2a und 3a; erst jetzt dürfen NPCs in Zellen |
 
