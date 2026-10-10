@@ -2980,6 +2980,43 @@ std::vector<json> SceneSerializer::sliceForAdditiveLoad(json&& scene, size_t max
     // whole load; it cannot be reproduced in slices, so the cell is not cut.
     if (reached != n) return whole();
 
+    // What is cut whole is a subtree, or a run of subtrees that refer to one another
+    // (the ref hull, Thema 164 step 3a): the splitter names those in the cell's
+    // "streaming" head ("clusters", lists of the ids of the subtrees' tops) and writes
+    // them side by side, so a cluster is a run of tops in `tops`. Cut in two slices it
+    // would have a frame in which a joint's partner, or the other half of a rope, is not
+    // in the world yet. A run is only ever formed from tops that stand next to each
+    // other, which keeps the order of the whole load. No head, no clusters: as before.
+    std::unordered_map<HE::UUID, size_t> clusterOf;
+    if (const auto head = scene.find("streaming"); head != scene.end() && head->is_object())
+        if (const auto lists = head->find("clusters"); lists != head->end() && lists->is_array())
+            for (size_t c = 0; c < lists->size(); ++c)
+            {
+                if (!(*lists)[c].is_array()) continue;
+                for (const json& ref : (*lists)[c])
+                {
+                    HE::UUID key;
+                    if (entityRefOf(ref, key)) clusterOf[key] = c;
+                }
+            }
+    if (!clusterOf.empty())
+    {
+        std::vector<std::vector<size_t>> together;
+        together.reserve(tops.size());
+        size_t previous = SIZE_MAX;
+        for (std::vector<size_t>& subtree : tops)
+        {
+            const auto in      = clusterOf.find(entityKeyOf(records[subtree.front()]));
+            const size_t group = in != clusterOf.end() ? in->second : SIZE_MAX;
+            if (group != SIZE_MAX && group == previous)
+                together.back().insert(together.back().end(), subtree.begin(), subtree.end());
+            else
+                together.push_back(std::move(subtree));
+            previous = group;
+        }
+        tops = std::move(together);
+    }
+
     std::vector<json> slices;
     slices.reserve(2 + n / maxEntities);
     {

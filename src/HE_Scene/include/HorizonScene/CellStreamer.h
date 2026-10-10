@@ -163,6 +163,18 @@ public:
 		// A cell is about to be destroyed: its root. Also for a cell that was only
 		// built in part (loadedSlice was called, loaded was not) when its anchors left.
 		std::function<void(entt::entity root)> unloading;
+		// Asked before the FIRST slice of a cell is built, with the number of bodies the
+		// manifest says the cell can own (its "bodies" column, an upper bound; the cell is
+		// never asked about when the column says nothing, 0): does the physics world have
+		// room for them? False puts the whole load off: the cell stays wanted, is not
+		// started, and neither is any cell behind it in the build order, so that a nearer
+		// cell does not wait while a farther one takes its room. It is asked again every
+		// update, and the cells the anchors have left behind are unloaded at the end of
+		// every update, which is what makes room. One exception, so that a world whose base
+		// alone fills the reserve is not frozen: with no cell built and none under
+		// construction the load goes ahead (the physics world logs what it cannot hold).
+		// Empty: no limit.
+		std::function<bool(uint32_t bodies)> bodiesFit;
 	};
 
 	struct Stats
@@ -186,6 +198,10 @@ public:
 		// cell was already in the world: a copied cell file, or two copies of the
 		// scene in one project. Cumulative since begin().
 		size_t idCollisions = 0;
+		// Updates in which a cell that was ready to be built waited because the physics
+		// world had no room for its bodies (Hooks::bodiesFit). Cumulative since begin();
+		// a number that keeps growing is a world with too many bodies for the reserve.
+		size_t deferredForBodies = 0;
 	};
 
 	CellStreamer();
@@ -225,9 +241,21 @@ public:
 	// there for whoever is about to stand or fall there. A teleport waits for this
 	// before it lets the player go. The bodies of the cell's entities are in the
 	// physics world once the cell is built, because the slice hook is what puts them
-	// there; that the world is really stepped and the floor really under a body is the
-	// physics integration's to check (Thema 164 step 3a).
+	// there synchronously (a cell put off for lack of room for its bodies is not
+	// built, so it is not settled either); the body of something that moves is held
+	// out of the simulation until its own cell is built (holdsAt), which is what
+	// makes the floor really be under it when it is let go (Thema 164 step 3a).
 	bool isSettled(const glm::dvec3& position, double radius) const;
+
+	// True when the manifest has a cell at `position` (absolute) that is not built
+	// and is not going to be: its file is still being read, parsed, built in part,
+	// put off, or not wanted at all yet. What stands there — the floor — is not there
+	// (yet), so a body that would fall or walk there has to be held
+	// (PhysicsWorld::setRegionHold). False where the manifest has no cell (nothing was
+	// moved out of that square), where the cell is built, and where it failed for good:
+	// a hold that waits for a file that cannot come would freeze whatever stands there.
+	// Inactive streamer: false.
+	bool holdsAt(const glm::dvec3& position) const;
 
 	// Unloads every cell and cancels every read. The streamer is inactive after.
 	void clear(HorizonWorld& world);

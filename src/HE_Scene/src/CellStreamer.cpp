@@ -274,6 +274,17 @@ bool CellStreamer::isSettled(const glm::dvec3& position, double radius) const
 	return true;
 }
 
+bool CellStreamer::holdsAt(const glm::dvec3& position) const
+{
+	if (!active()) return false;
+	const Key k = key(CellManifest::cellIndex(position.x, m_manifest.cellSize),
+	                  CellManifest::cellIndex(position.z, m_manifest.cellSize));
+	// m_loaded is complete cells only: one with slices still to come is in m_pending, so
+	// what stands in it is not all there and it holds. A cell that failed for good never
+	// will be, and holding for it would freeze what stands there for ever.
+	return m_index.count(k) && !m_loaded.count(k) && !m_failed.count(k);
+}
+
 void CellStreamer::unloadCell(HorizonWorld& world, Key k)
 {
 	const auto it = m_loaded.find(k);
@@ -465,6 +476,7 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 	std::sort(ready.begin(), ready.end());
 	SceneSerializer ser;
 	bool builtOne = false;
+	bool waiting  = false;   // a cell is waiting for room for its bodies: nothing new is started behind it
 	const auto overBudget = [&]
 	{
 		return builtOne && std::chrono::duration<double, std::milli>(Clock::now() - start).count() >= budgetMs;
@@ -474,6 +486,35 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 		const Key k = ready[i].second;
 		const std::shared_ptr<Pending> p = m_pending[k];
 		auto& reg = world.registry();
+
+		// Room for its bodies, asked before the first slice and never in the middle of
+		// a cell: the physics world's body table is a fixed size, and a cell that does
+		// not fit would be built into the errors of a table that is full. Nothing new
+		// is started behind a cell that waits (the cells are in build order, nearest
+		// first, and the nearest one must not wait while a farther one takes its room),
+		// but a cell that is under way is finished: its room was asked for when it began.
+		// It is the unloading below that makes room, a frame later. A world with no cell
+		// built and none under way has nothing to wait for, so the load goes ahead.
+		if (p->next == 0 && m_hooks.bodiesFit)
+		{
+			if (waiting) continue;
+			const uint32_t bodies = m_manifest.cells[m_index[k]].bodies;
+			if (bodies > 0 && !m_hooks.bodiesFit(bodies))
+			{
+				const bool somethingUp = !m_loaded.empty() ||
+					std::any_of(m_pending.begin(), m_pending.end(),
+					            [](const auto& e) { return e.second->next > 0; });
+				if (somethingUp)
+				{
+					++m_stats.deferredForBodies;
+					HE_LOG_THROTTLE(World, Warning, 5.0,
+					                "Cell streaming: cell %d,%d (%u bodies) waits, the physics world has no room for it yet",
+					                p->x, p->z, bodies);
+					waiting = true;
+					continue;
+				}
+			}
+		}
 		while (p->next < p->slices.size() && !overBudget())
 		{
 			const bool first = p->next == 0;

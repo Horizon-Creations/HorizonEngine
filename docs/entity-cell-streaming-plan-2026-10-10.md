@@ -667,7 +667,7 @@ will, ersetzt `m_idIndexed` durch einen Vektor nach Entity-Nummer und die Multim
 
 - 2b: Anker, gestückelter Aufbau (die Anhänge-Frage aus 4.6 ist unberührt), `structureEpoch`, Zellansicht; der Streamer ignoriert `bodies` und die Klassenzahlen im Kopf noch.
 - 2c/3b: Audio-Start und -Stopp, Zustandsautomaten-Bindung, Skripte: gehören in den Zellen-Host.
-- 3a: Ref-Hülle im Splitter (heute nur die Prefab-Bindungen), Body-Reserve aus `bodies`.
+- 3a: Ref-Hülle im Splitter (heute nur die Prefab-Bindungen), Body-Reserve aus `bodies`. **Erledigt, siehe 14.**
 - Handbuch auf der Website nachziehen (Befund 6).
 
 ## 13. Schritt 2b: was gebaut ist und was der Bauplan anders sah (10.10.2026)
@@ -755,7 +755,161 @@ die Abnahme „unter Budget plus größter Scheibe“ gilt für die Läufe, in d
 - 3a: die Regel „ein Cluster ist immer eine Scheibe“ (Ref-Hülle): heute ist die Einheit der Teilbaum der Zellwurzel, zwei Teilbäume mit
   einem Verweis zwischeneinander können in verschiedenen Scheiben landen. Jolt-Charge je Scheibe (`addEntities`), Body-Reserve aus
   `bodies`, `requeueJoints`, `setRegionHold`; `isSettled` um die Körper ergänzen.
+  **Erledigt, siehe 14** (bis auf die Messung von `OptimizeBroadPhase`).
 - 2c/3b: `ICellHost`; Quellen für Anker (Spieler, Pins, Server) und `streaming.pin/unpin/isSettled` in der Skript-API; Skripte erst bei
   `loaded`, nicht bei `loadedSlice`; die Zellansicht kann echte Zähler zeigen, sobald das Play einen Streamer hat.
 - 162: `structureEpoch` in `FrameKey` und im behaltenen `RenderWorld` lesen (7.1).
 - Handbuch auf der Website: Zellen laden jetzt in Scheiben und halten Anker; wie Befund 6.
+
+## 14. Schritt 3a: was gebaut ist und was der Bauplan anders sah (10.10.2026)
+
+Teil 3a (Physik und Ref-Hülle) steht auf dem Zweig, aufbauend auf 2b und auf `origin/release/0.7.0` (mit `d955f0c3` gemergt). Die
+Abnahme sind benannte Tests, nicht Zähler:
+
+- `test_world_scale.cpp`, „Cells and physics: nothing falls through the floor of a cell that has gone, or has not come yet“: vier
+  Läufe (Zelle noch nicht da / Zelle weg, je mit und ohne Hold). Eine Basis-Kiste steht auf dem Boden einer Zelle. **Die Läufe ohne
+  Hold sind die Negativkontrolle und müssen fallen** (y unter -2 bzw. -5); die mit Hold bleiben bei 0,5, und nach dem Wiederladen
+  steht die Kiste weiter auf dem Boden. Dazu „a character put down in a cell that is still loading stands where it was put“.
+- „Cells and physics: a joint from the base to a cell is built again when the cell is back“: eine Tür der Basis, per Gelenk an einen
+  Rahmen in einer Zelle gehängt. Zwei Läufe: mit `requeueJoints` hängt die Tür nach dem Wiederladen wieder (das Gelenk wurde neu
+  gebaut), ohne fällt sie (Kontrolle). Dazwischen liegt das Laden einer zweiten Zelle mit über zwölf Scheiben, also mehr
+  Durchläufe der Pending-Liste, als ein zu früh gespawntes Gelenk bekommt (acht). Das Gelenk steht nach dem ersten Schritt nach dem
+  Wiederladen, nicht schon im Aufruf des Streamers: die Tür war gehalten und wird erst vom Schritt losgelassen (Befund 22).
+- „Cells and physics: three thousand bodies come in through cells under the table size, and a cell the reserve cannot take waits“:
+  12 Zellen zu 300 statischen Körpern, 3 600 Bodies, `bodyCount() < kMaxBodies`; mit einem Spielraum für 1 000 wartet die vierte
+  Zelle (`deferredForBodies > 0`, `ready > 0`, `isSettled` falsch), und nichts Unbegonnenes dahinter nimmt ihren Platz; mit Platz kommt
+  der Rest. Eine Basis, die die Reserve allein füllt, friert die erste Zelle nicht ein; eine halb gebaute Zelle wird fertig, während
+  eine nähere auf Platz wartet.
+- Auf der Ebene der `PhysicsWorld` (`test_physics.cpp`): „addEntities: a charge builds what addEntity builds, once each, and finds its
+  own joints“, „removeEntityTree: a joint kept for a returning cell comes back, however many spawns come between“ (mit Kontrolle),
+  „initialize: a joint to an entity that is not in the world yet is built when it arrives“ und fünf Fälle zu `setRegionHold`
+  (fällt nicht und ist für Abfragen unsichtbar; nur dynamische Körper werden gefragt; Ursprungsverschiebung, Entfernen,
+  Schwerkraftwechsel und `clear()` mit gehaltenen Körpern; ein Charakter wird nicht gesteppt; ein gehaltener Körper mit Gelenk zu einem
+  losen, siehe Befund 22).
+- Im Splitter (`test_cell_split.cpp`, `test_world_scale.cpp`): „a placement whose bindings leave its subtree moves only together with
+  what it binds“, „what the base refers to inside a cell keeps it in the base, in either direction“ und „sliceForAdditiveLoad:
+  subtrees named as a cluster in the head are never cut apart“. Die Gleitkomma-Ursprungsprüfung von `cellHolds` (lokale gegen
+  absolute Position) steht im Test „a cell's static bodies stand where the cell is, under a floating origin“.
+
+Die neuen Fälle wurden mit absichtlich kaputt gemachtem Code geprüft. Mit beiden Mutationen zugleich (`applyRegionHold` kehrt sofort
+zurück, und ein wartendes Gelenk zählt wie jedes andere gegen die acht Durchläufe) wurden acht von zehn gewählten Fällen rot. Den
+Hold-Teil tragen die drei `setRegionHold`-Fälle mit Körpern und der Bodentest (in allen vier Läufen: Kiste unter dem Boden, `heldCount`
+falsch); den Geduld-Teil „removeEntityTree: a joint kept for a returning cell comes back“ und „initialize: a joint to an entity that is
+not in the world yet…“; der Gelenktest mit Zellen wurde an seiner Kontrolle rot (die Tür fiel nicht, weil der Hold fehlte), und der
+Reserve-Fall wegen des Rennens weiter unten, nicht wegen der Mutationen. Der Gelenktest mit Zellen hatte im ersten Entwurf nur sechs Durchläufe zwischen Entladen und Wiederladen und hätte
+die zweite Mutation nicht bemerkt; mit der feiner geschnittenen zweiten Zelle (über zwölf Scheiben mit Körpern) ist er einzeln geprüft rot
+ohne die Geduld und grün mit ihr. **Nicht per Mutation geprüft:** der Charakter-Zweig des Holds (der Fall „a character is not stepped…“
+und der Zeichen-Fall mit Zellen laufen grün, ein Zweig, der nichts tut, würde aber von der Mutation „Hold aus“ nicht erfasst, weil sie
+`applyRegionHold` trifft und nicht die Schleife der Charaktere in `step`). Zwölf Wiederholungen der Streamer-Fälle liefen ohne Ausfall; der
+dritte Unterfall der Body-Reserve war in der ersten Fassung rennabhängig (welche von zwei gleichzeitig gewünschten Zellen der Pool zuerst
+fertig parst, wird zuerst gebaut) und wünscht jetzt zuerst nur die eine.
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| Charge (6.1) | `PhysicsWorld::addEntities(world, ids)`, `BodyBatch` | Die Körper werden zuerst nur erzeugt (`CreateBody`) und gehen dann zusammen durch `AddBodiesPrepare/Finalize` in den Broadphase-Baum (Jolt sortiert sie nach Schicht und baut je Schicht einen Teilbaum zum Einhängen); **ein** `resolvePendingJoints` je Charge. Dieselben Erbauer wie `addEntity`; der Gelenkdurchlauf des Abbaus (Replace-Regel) läuft nur für Entities, die schon Physik haben, nicht für frische; ein doppelt genannter Eintrag wird einmal gebaut. `GameApplication::loadedSlice` ruft eine Charge je Scheibe |
+| `bodyCount`, `kMaxBodies` | `PhysicsWorld` | `bodyCount()` = alle Jolt-Körper der Welt (Gelände, Proxies und gehaltene eingeschlossen). `kMaxBodies` ist jetzt öffentlich |
+| Body-Reserve (6.1) | `CellStreamer::Hooks::bodiesFit`, `Stats::deferredForBodies`, `cellBodiesFit` | Gefragt wird vor der **ersten** Scheibe einer Zelle, mit der Manifest-Spalte `bodies`. Passt sie nicht (neun Zehntel der Tabelle, 58 977 Körper), wartet die Zelle und **keine weitere unbegonnene dahinter** wird gestartet (eine halb gebaute wird fertig: ihr Platz wurde beim Beginn gefragt; der erste Entwurf mit `break` hätte sie hinter einer näheren wartenden Zelle für immer halb stehen lassen); das Entladen am Ende jedes `update` schafft Platz. Ausnahme: ist nichts gebaut und nichts im Bau, wird geladen (sonst fröre eine Basis, die die Reserve allein füllt, den ersten Zellenaufbau ein; die Physik meldet, was nicht passt). Gedrosseltes Log |
+| Wartende Gelenke (6.2) | `removeEntityTree(world, root, requeueJoints)`, `JointFate::{Drop, Rebuild, Wait}`, `PendingJoint::patient` | Siehe Befund 13. Beim Entladen (`cellUnloadBodies`) kommen alle Gelenke, die einen entfernten Körper nennen, **geduldig** auf die Liste: sie zählen nicht gegen die acht Durchläufe, werden still und nur versucht, wenn der Partner existiert und einen Körper hat, und fallen ab, sobald ihr Besitzer weg ist. Eine Tür der Basis wird so nach dem Wiederladen des Rahmens wieder angehängt |
+| Gelenke bei Szenenstart | `PhysicsWorld::initialize` | Ein Gelenk, dessen Partner gar nicht in der Welt ist, wird jetzt geduldig vorgemerkt statt verworfen (Befund 14) |
+| Hold (6.2) | `PhysicsWorld::setRegionHold(HoldTest)`, `CellStreamer::holdsAt`, `cellHolds` | Siehe Befunde 15 bis 18 und 22. Vor jedem Schritt wird für jeden dynamischen Körper gefragt; wahr nimmt ihn mit `RemoveBody` aus dem Baum (Körperobjekt, Geschwindigkeit, Entity bleiben), falsch setzt ihn wieder ein (`AddBody`, geweckt). Charaktere werden nicht gesteppt. Statische und kinematische Körper werden nicht gefragt. **Die Gelenke eines Körpers gehen mit ihm heraus** und warten, bis er wieder drin ist (Befund 22). Die Frage kostet einen Aufruf je dynamischem Körper und Schritt, auch bei einem Streamer ohne Zellen (`holdsAt` kehrt dann sofort zurück); 3b kann sie ganz überspringen, solange `!active()` |
+| Ref-Hülle (5) | `CellSplit.cpp` | Befunde 19 bis 21. Ergebnis: `CellSplitResult::keptForRefs` und `clusters` |
+| Cluster = eine Scheibe | Kopf `streaming.clusters`, `SceneSerializer::sliceForAdditiveLoad` | Der Splitter schreibt die Cluster (Listen der Spitzen-Ids) in den Kopf und die Mitglieder nebeneinander in die Kinder der Zellwurzel; der Schneider behandelt eine Folge benachbarter Mitglieder wie einen Teilbaum. Ohne Kopf keine Cluster, wie bisher |
+| Gemeinsame Aufrufe | `CellPhysics.h/.cpp` (`cellSliceBodies`, `cellUnloadBodies`, `cellBodiesFit`, `cellHolds`) | Die vier Aufrufe, die `GameApplication` an die Haken des Streamers hängt, in einer Stelle, damit die Tests dieselben Aufrufe machen und keine fehlende Verdrahtung verdecken. Der Zellen-Host aus 2c soll sie übernehmen |
+| `GameApplication` | `updateCellStreaming`, `startPhysics` | `loadedSlice` → Charge, `unloading` → `cellUnloadBodies`, `bodiesFit`; der Hold wird in `startPhysics` gesetzt und fragt zur Laufzeit den Streamer (ein Streamer ohne Zellen hält nichts) |
+
+**Befunde, die der Bauplan anders sah oder nicht kannte**
+
+13. **Die Pending-Liste hätte das wiedergekehrte Gelenk verloren.** `resolvePendingJoints` läuft nach jedem `addEntity`, zählt bei jedem
+    fruchtlosen Durchlauf jeden Eintrag hoch und gibt bei `kMaxJointAttempts = 8` auf. Ein beim Entladen vorgemerktes Gelenk (Plan 6.2:
+    „`requeueJoints = true` … `resolvePendingJoints` löst sie wieder auf“) wäre nach acht Spawns **irgendeiner anderen Zelle** weg gewesen,
+    und das Wiederladen hätte erst nach mehr als acht fremden Scheiben gefehlt. Darum der Eintrag `patient`, der nicht zählt. Der Test
+    muss deshalb mehr als acht Durchläufe dazwischen erzwingen, sonst bemerkt er die Regression nicht.
+14. **`initialize()` verwarf Gelenke zu Entities, die noch nicht in der Welt sind.** Mit Zellen ist das der Normalfall (der Rahmen
+    ist in einer Zelle, die noch nicht geladen ist). Der Splitter lässt das jetzt nicht mehr entstehen (Befund 19), aber eine
+    Python-Zelle (Version 1) oder eine von Hand geschriebene kann es. Vorgemerkt wird nur der Fall „Partner nicht in der Welt“; die
+    Ablehnungen (nennt nichts, nennt sich selbst, beide statisch) und „Partner da, aber ohne Körper“ bleiben, wie sie waren.
+15. **Jolt weckt nichts, was auf einem entfernten Körper lag.** Eine Kiste, die zwei Sekunden auf einem Zellenboden gelegen hat,
+    schläft; wird der Boden entfernt, hängt sie in der Luft, bis irgendetwas sie berührt, und fällt dann durch die Welt. Das macht
+    den Fehler tückischer (er zeigt sich zufällig und spät), nicht harmloser. Der Hold nimmt deshalb auch schlafende Körper aus
+    dem Baum, und die Negativkontrolle der Tests braucht eine Berührung (ein kleiner Impuls) nach dem Entfernen des Bodens.
+16. **`BodyInterface::ActivateBody` prüft nicht, ob der Körper im Baum ist.** `SetPosition`, `AddForce` und `RemoveBody` tun es und sind
+    für einen gehaltenen Körper sichere No-ops (deshalb gehen `shiftOrigin`, `destroyBodyFor` und `clear()` unverändert); `ActivateBody`
+    schreibt ihn dagegen in die aktive Liste, außerhalb des Baums. Vier Stellen der `PhysicsWorld` wecken Körper
+    (`setCollisionLayers`, `setGravity`, `buildJointFor`, `setJointMotor`) und lassen gehaltene aus; geweckt wird beim Zurücksetzen.
+17. **Der Hold fragt die Zelle unter dem Körper, nicht den Abstand zum Anker (Plan 6.2).** Die Regel „jenseits `unloadRadius` aller
+    Anker“ liefe an der Zellgrenze auseinander: der Radius misst bis zur Kante des Quadrats, die Zelle verschwindet aber als Ganzes;
+    ein Körper am Rand des Radius stünde über einer entladenen Zelle und wäre nicht gehalten. `holdsAt` ist wahr genau dort, wo das
+    Manifest eine Zelle hat, die nicht ganz gebaut ist (im Bau, aufgeschoben, nicht gewünscht) und nicht endgültig gescheitert ist; der
+    Rest der Welt (Quadrate ohne Zelle, Gelände) simuliert wie immer. Damit hält der Hold auch das, was die Zelle „noch nicht“ hat,
+    und der Planpunkt „Teleport wartet auf `isSettled`“ ergibt sich für alles, was fallen kann, von selbst. **Grenze:** ein Boden, der
+    über die Grenze seines Quadrats hinausragt (eine lange Brücke), verschwindet mit seiner Zelle, auch wenn der Körper darauf im
+    Nachbarquadrat steht, dessen Zelle noch geladen ist; die Zelle wird nach der Position des obersten Eintrags gewählt.
+18. **Charaktere werden nicht gesteppt, solange ihre Zelle fehlt (Plan 6.2: Anker und `isSettled`).** Ein Charakter hat keinen Körper, den
+    man aus dem Baum nehmen könnte; der Hold lässt ihn einfach aus (kein `ExtendedUpdate`, der Proxy folgt nicht). Das deckt den
+    Spawn und den Teleport in eine Zelle im Aufbau ab, ohne dass ein Skript wartet. Die Kehrseite: ein Spieler, dessen Zelle nicht
+    gebaut ist, weil die Kamera weit von ihm weg ist (Sequencer, freie Kamera), steht still, bis die Kamera zurückkehrt. Spieler als
+    Anker (3b) hebt das auf.
+19. **Ref-Hülle: ein Scan nach dem Wert, keine Feldliste (Plan 5, Risiko 1).** Als Verweis gilt jedes `[hi, lo]` in den
+    Komponentenblöcken eines Eintrags, das die Id einer anderen Entity der Szene ist. Ids sind 128 Bit zufällig; Asset-Ids und Paare
+    kleiner Zahlen treffen nicht zufällig. Damit entfällt die von Hand gepflegte Liste, die der Plan als Risiko nannte (neue Komponente
+    mit Verweisfeld, kein Test merkt es). Nur die Platzierung eines Prefabs wird nach Feld gelesen (`bindings[].entity`), weil ihre
+    `template`-Ids die des Prefab-Assets sind. Das Szenenformat schreibt für `sequenceplayer` und `navagent` keine Entity-Verweise
+    (Bindungen und Slots sind Sitzungszustand). **Nicht gesehen:** ein Verweis, der nicht im Komponentenblock der Szene steht, also
+    Level-Skripte und Graph-Assets, die eine Entity per Id nennen (Plan R4: der Autor setzt das Ziel Resident).
+20. **Das Ergebnis der Ref-Hülle.** Knoten sind die Top-Level-Teilbäume, die nach ihren Komponenten wandern dürfen, plus ein Knoten
+    „Basis“ (alles andere: nicht wandernde Teilbäume, Ordner, Szenenwurzel). Jeder Verweis zwischen zwei Knoten vereinigt sie (Union-
+    Find, in jeder Richtung); ein Cluster, der die Basis enthält, bleibt ganz in der Basis (`keptForRefs` zählt die Teilbäume, die
+    deshalb nicht wandern); die anderen gehen als Ganzes in **eine** Zelle, die des ersten Mitglieds in der Reihenfolge der
+    Traversierung, nebeneinander in den Kindern der Zellwurzel. Heute entstehen Cluster aus mehreren Teilbäumen nur über
+    Prefab-Bindungen, die aus dem Teilbaum zeigen (alle anderen Verweis-Komponenten sind nicht in der Tabelle, ihre Besitzer also
+    Basis, und ihre Ziele werden jetzt festgehalten); mit der Klasse „zustandsbehaftet“ aus 3b werden sie häufiger.
+21. **Eine Platzierung mit Bindung nach draußen wandert jetzt, wenn das Gebundene mitwandern kann.** In 2a blieb sie in der Basis
+    (`bindingsStayInside`); jetzt bilden beide einen Cluster und gehen zusammen in eine Zelle. Bleibt das Gebundene in der Basis, bleibt
+    die Platzierung dort, wie in 2a. Der Test aus 2a wurde auf beide Fälle umgestellt.
+
+22. **Ein gehaltener Körper mit lebender Constraint stürzt den Prozess ab (SIGSEGV).** Gefunden in der Abschlussprüfung, nicht
+    vom Plan gesehen: eine Basis-Kette oder ein Seil über eine Zellgrenze (zwei Basis-Körper, einer im entladenen Quadrat) lässt den
+    Hold einen Körper aus dem Baum nehmen, dessen Jolt-Constraint zum losen Partner bleibt. `TwoBodyConstraint::BuildIslands` aktiviert
+    jeden dynamischen, inaktiven Körper einer aktiven Constraint, ohne zu fragen, ob er im Baum ist; er steht dann in der aktiven Liste
+    außerhalb des Baums. Der Test „a held body does not keep its joint to a loose one…“ stürzte gegen die erste Fassung ab (rot), mit
+    der Behebung läuft er. **Behebung:** `applyRegionHold` nimmt beim Halten die Gelenke des Körpers mit heraus (`JointFate::Wait`:
+    die, die er besitzt, und die, die auf ihn zeigen); `buildJointFor` baut keine Constraint zu einem gehaltenen Körper (`addJoint`
+    antwortet falsch und das Gelenk wartet); das wartende Gelenk wird erst versucht, wenn keines seiner Enden gehalten ist, und nach
+    jedem Loslassen läuft `resolvePendingJoints` einmal. Das lose Ende ist solange auf sich gestellt (es fällt, hängt nicht an einem
+    Körper, der nicht da ist) und das Gelenk wird beim Loslassen mit den dann herrschenden Abständen neu gebaut (`Fixed` und `Slider`
+    nehmen die Pose von dann als Nullstellung, `Distance` die Länge von dann). Die Regel „Verwandtes gehört in eine Zelle“ (Ref-Hülle)
+    vermeidet das meistens; Basis-Körper, die über eine Zellgrenze eine Kette bilden, sind der Fall, den sie nicht sehen kann.
+
+**Gemessen** (Release, M-Serie, fremde Last nebenbei; `he_tests --no-skip --test-case='Physics charge bench*'`, läuft in der CI nicht):
+
+3 000 statische Körper in eine Welt bringen, die schon Gelenke hat (drei Läufe, der Lauf mit der kleinsten und der mit der größten Zeit):
+
+| | 0 Gelenke in der Welt | 500 Gelenke in der Welt |
+|---|---|---|
+| `addEntity` je Entity | 3,3 bis 3,9 ms | 9,8 bis 10,2 ms |
+| `addEntities` in Scheiben zu 128 | 1,1 bis 3,0 ms | 2,9 bis 3,1 ms |
+
+Der Gewinn der Charge kommt fast ganz aus dem, was für frische Entities wegfällt: dem Durchlauf über alle Gelenke der Welt je Entity (der
+Abbau, der `addEntity` idempotent macht) und dem Abrufen der Pending-Liste nach jedem einzelnen Körper. Das Einfügen in den
+Broadphase-Baum allein bringt bei 3 000 Körpern rund eine Millisekunde. Absolut ist das wenig: **die Physik ist nicht der Engpass beim
+Laden einer Zelle** (das 4-ms-Budget gehört dem Anlegen der Entities), die Charge spart ihn nur ein; sie war aber auch die Voraussetzung
+dafür, dass eine Scheibe ein `resolvePendingJoints` kostet statt eines je Entity. Die 60 Schritte danach unterscheiden sich nicht im
+Rahmen des Rauschens (Last 5 bis 10 von anderen Bienen auf dem Gerät), ein schlechterer Baum durch das Einfügen als Teilbaum ist also
+nicht zu sehen.
+
+**Offen**
+
+- `OptimizeBroadPhase` nach einer Charge (6.1) ist **nicht gemessen und nicht aufgerufen**: der Bench oben misst nur das Einfügen
+  und 60 Schritte danach, nicht den Aufruf, der den ganzen Baum neu baut. Eine Messung bräuchte einen öffentlichen Aufruf oder
+  einen Zeugen im Test; als Entscheidung bleibt „nicht aufrufen“ (Jolt hängt die Charge als Teilbäume ein).
+- 3b: die Klasse „zustandsbehaftet“ (`CellState`, Skripte, Spieler als Anker, Skript-API `streaming.*`). Der Teleport-Wartevermerk für
+  Skripte (`isSettled` in der API) ist dort; der Hold deckt das Fallen schon ab.
+- 2c: Editor-Play hat weiter keinen Streamer, also auch keinen Hold. Ein Play eines gesplitteten Projekts zeigt nur die Basis (Befund 4).
+- Zellansicht und Profiler-Tab zeigen `deferredForBodies` und die Zahl gehaltener Körper (`PhysicsWorld::heldCount`) noch nicht.
+- Ein Boden, der über sein Quadrat hinausragt (Befund 17), und ein Spieler ohne Kamera in der Nähe (Befund 18) sind Grenzen, keine Fehler.
+- Nicht per Mutation geprüft: der Charakter-Zweig des Holds (siehe oben); die Behebung aus Befund 22 nur durch den Absturz davor und das
+  Grün danach, nicht durch eine Mutation der einzelnen Zeilen.
+- CI pro Plattform: Windows, Linux, macOS (Lauf siehe Post im Thema). Dieser Schritt berührt keinen Backend-Code; die Physik ist Jolt und
+  läuft in allen Läufen gleich.

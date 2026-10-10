@@ -1,6 +1,7 @@
 #pragma once
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <functional>
 #include <memory>
 #include <cstddef>
 #include <cstdint>
@@ -141,6 +142,28 @@ public:
     // brings child entities with their own colliders.
     int addEntityTree(HorizonWorld& world, uint32_t rootEntityId);
 
+    // addEntity for a CHARGE of entities (a slice of a streamed cell), and the
+    // count that got a body, a character or a landscape. What it saves over a
+    // loop of addEntity is the per-entity work that does not depend on the
+    // entity: the bodies are created first and go into Jolt's broad phase in ONE
+    // AddBodiesPrepare/AddBodiesFinalize (the header of BodyInterface asks for
+    // exactly that for more than one body), and the pending joints are retried
+    // ONCE for the whole charge instead of after every body. Nothing else
+    // differs: the same builders, the same replace-if-present rule, the same
+    // joint handling, an entity that is not valid or has nothing to build is
+    // skipped, and one named twice is built once.
+    int addEntities(HorizonWorld& world, const std::vector<uint32_t>& entityIds);
+
+    // Jolt's body table is sized once, when the world is built; nothing past it
+    // can be created. Public so that whoever feeds the world in bulk (the cell
+    // streamer) can hold a reserve back instead of finding out from a log line.
+    static constexpr uint32_t kMaxBodies = 65536;
+
+    // How many Jolt bodies the world owns right now: rigid bodies, the proxies of
+    // characters, landscapes, and the ones a region hold has taken out of the
+    // simulation (they still count against kMaxBodies).
+    std::size_t bodyCount() const;
+
     // Destroy the entity's body and/or character. Silent no-op when it has
     // neither. Also drops the entity's pending contact bookkeeping, so a removal
     // never produces an exit event naming an entity that is already gone.
@@ -152,7 +175,49 @@ public:
     // OWNER of that joint brings it back. Anything else would leave an entry
     // waiting for a body that was deliberately deleted.
     void removeEntity(uint32_t entityId);
-    int  removeEntityTree(HorizonWorld& world, uint32_t rootEntityId);
+
+    // removeEntity for a subtree, root included, and the count that had physics.
+    //
+    // `requeueJoints` is for the one kind of removal that is NOT permanent: a
+    // streamed cell going out, to come back when the camera does. With it, every
+    // joint that named a removed body is put on a list that waits for the entity to
+    // be added again (addEntity/addEntities), and rebuilds then: a hinge from a
+    // base door to a frame that streamed out is a hinge again when the frame is
+    // back. It needs the entity to return with the same id (a cell version 2 does),
+    // since a joint names its partner by id. The entries do not run out like the
+    // ones of a spawn that is merely early, and they are dropped on the next
+    // retry once their owner is gone. Without it (the default) this is exactly
+    // removeEntity applied to each.
+    int  removeEntityTree(HorizonWorld& world, uint32_t rootEntityId, bool requeueJoints = false);
+
+    // ── Region hold ──────────────────────────────────────────────────────────
+    // Nothing may fall through a floor that is not there. A streamed cell takes
+    // its floors with it when it goes (and has not brought them yet while it is
+    // being built), and a crate of the base that stood on one would drop out of
+    // the world; so would a character that spawns, or is teleported, into a cell
+    // that is still loading.
+    //
+    // `held` is asked once per step, before the simulation runs, about every
+    // DYNAMIC body and every character, with its WORLD position (relative to the
+    // floating origin, like everything here). True takes it out of the
+    // simulation: a body is removed from Jolt's broad phase (its Body object, its
+    // velocity and its entity stay, and it is invisible to raycasts and contacts
+    // meanwhile), a character is not stepped. False puts it back, as it was.
+    // Static and kinematic bodies are not asked: nothing falls because of them.
+    //
+    // The test belongs to whoever knows where the ground is missing; the physics
+    // world only applies it. A null test (the default) holds nothing.
+    //
+    // JOINTS do not stay: a constraint to a body outside the broad phase makes Jolt
+    // activate that body in the middle of a step, which is a crash, so a body that is
+    // taken out takes its joints with it (both the ones it owns and the ones aimed at
+    // it) and they wait, like the joints of a streamed cell, until it is back in; the
+    // other end is on its own meanwhile. A joint asked for while one end is held
+    // waits as well (addJoint answers false). Jointed things belong to one cell.
+    using HoldTest = std::function<bool(const glm::vec3& worldPosition)>;
+    void        setRegionHold(HoldTest held);
+    // Bodies and characters the hold has out of the simulation at the moment.
+    std::size_t heldCount() const;
 
     // TELEPORT — not a movement. Sets the physics representation's position
     // outright and writes the matching LOCAL value into TransformComponent, so
@@ -625,6 +690,21 @@ public:
     void clear();
 
 private:
+    // What happens to the joints that name a body which is being taken down.
+    //   Drop     it is gone for good (removeEntity): the joints go with it and
+    //            nothing waits for it.
+    //   Rebuild  a new body goes up in the same breath (addEntity's replace): the
+    //            owners are retried right away, and an entry that cannot be built
+    //            after a few passes is given up on with a warning.
+    //   Wait     it will be back, but not now (a streamed cell going out): the
+    //            owners wait for the entity to be added again, however many
+    //            unrelated spawns come in between.
+    enum class JointFate : uint8_t { Drop, Rebuild, Wait };
+
+    // A charge of bodies that were created but are not in the broad phase yet
+    // (addEntities). Defined in the source file: its members are Jolt types.
+    struct BodyBatch;
+
     // The per-entity halves of initialize(), shared with addEntity() so the two
     // paths cannot drift — two copies of "how a body is built" is exactly the
     // kind of divergence this class was audited for. Each returns whether it
@@ -634,7 +714,10 @@ private:
     // reading TransformComponent's own fields. That walk is per BUILD — scene
     // start, or one spawn — never per frame: step() moves bodies, it does not
     // rebuild them.
-    bool buildBodyFor(HorizonWorld& world, uint32_t entityId);
+    //
+    // With a `batch` the body is created and recorded there instead of being added
+    // to Jolt; addEntities puts the whole charge in with one call.
+    bool buildBodyFor(HorizonWorld& world, uint32_t entityId, BodyBatch* batch = nullptr);
     bool buildCharacterFor(HorizonWorld& world, uint32_t entityId);
     // The implicit landscape collider: a static height field for a terrain
     // entity that carries no RigidBodyComponent of its own.
@@ -650,11 +733,12 @@ private:
     // one leaves the solver reading freed memory: this must run BEFORE the body
     // goes, from every path that destroys a body.
     //
-    // `requeue` puts the affected owners back on the pending list, which is what
-    // a REBUILD wants (addEntity tears the old body down and builds a new one,
-    // and the chain the entity was part of has to come back) and what a removal
-    // does not.
-    void destroyJointsInvolving(uint32_t entityId, bool requeue);
+    // `fate` says what becomes of the affected owners (see JointFate): back on the
+    // pending list at once for a REBUILD (addEntity tears the old body down and
+    // builds a new one, and the chain the entity was part of has to come back),
+    // back on it for good for a WAIT (a cell that will return), nowhere for a
+    // removal.
+    void destroyJointsInvolving(uint32_t entityId, JointFate fate);
 
     // Break every joint whose component names a breakForce it exceeded in the
     // step that just ran, and remember the pairs for pollJointBroken(). Runs
@@ -663,23 +747,37 @@ private:
     void breakOverloadedJoints(HorizonWorld& world, float dt);
 
     // Try to build every joint that is authored but not yet in the simulation.
-    // Run after each body is built, because "the partner does not exist yet" is
-    // the normal state halfway through a spawn. Gives up on an entry that has
-    // failed too often, so the list cannot become a leak.
+    // Run after each body (or charge of bodies) is built, because "the partner
+    // does not exist yet" is the normal state halfway through a spawn. Gives up
+    // on an entry that has failed too often, so the list cannot become a leak.
+    //
+    // The entries that WAIT for a cell (JointFate::Wait, and a joint at scene
+    // start whose partner lives in a cell that is not loaded yet) are the
+    // exception: they are not failing, the partner is simply not there, and a
+    // cell may be a long walk away. They are retried silently, only when their
+    // partner exists, never counted against and never given up on; the next pass
+    // after their owner is gone drops them.
     void resolvePendingJoints(HorizonWorld& world);
 
     // The teardown half behind removeEntityImpl(). Includes dropping the
     // entity's contact bookkeeping and every joint the body was part of.
-    // `requeueJoints` is passed straight to destroyJointsInvolving — see there
-    // for which of the two callers wants which.
-    void destroyBodyFor(uint32_t entityId, bool requeueJoints);
+    // `fate` is passed straight to destroyJointsInvolving — see there for which
+    // of the callers wants which.
+    void destroyBodyFor(uint32_t entityId, JointFate fate);
 
-    // The body of removeEntity(), with the one thing the two callers disagree
+    // The body of removeEntity(), with the one thing the callers disagree
     // about made explicit. A REBUILD (addEntity, which tears the old body down
-    // to put a new one up) wants the joints back; the public, permanent
-    // removeEntity() does not. Both used to arrive here with `true`, which put
-    // a surviving partner's joint on a list that could never resolve.
-    void removeEntityImpl(uint32_t entityId, bool requeueJoints);
+    // to put a new one up) wants the joints back at once; the public, permanent
+    // removeEntity() does not; a streamed cell wants them back whenever it
+    // returns. The first two used to be one `true`, which put a surviving
+    // partner's joint on a list that could never resolve.
+    void removeEntityImpl(uint32_t entityId, JointFate fate);
+
+    // The hold of setRegionHold, applied to the dynamic bodies. Runs at the top of
+    // step(), before the simulation: a body that has to be held leaves the broad
+    // phase now, so the step never lets it fall. (The characters are asked in
+    // their own loop, where their position is at hand.)
+    void applyRegionHold();
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

@@ -151,6 +151,120 @@ bool nearly(const json& arr, double want)
 	return true;
 }
 
+// ── References between entities: the ref hull (Thema 164, step 3a, plan 5) ────
+// An entity that names another by id (a joint's target, a rope's ends, a rig's
+// follow entity, a look-at target, the bindings of a placed prefab, a script's
+// entity variable) is only worth anything while the other is there. A cell is
+// loaded and unloaded on its own, so such a reference must never cross a cell
+// boundary, nor the boundary between a cell and the base. The splitter therefore
+// forms clusters of the top-level subtrees that refer to one another, in either
+// direction, and a cluster goes into a cell whole (into ONE cell) or not at all.
+//
+// WHAT IS A REFERENCE is not decided by a list of fields. Every [hi, lo] pair of
+// unsigned numbers in an entity's component blocks that is the id of another
+// entity of the scene is one. Ids are 128 bits of randomness, so an asset id or a
+// pair of small numbers does not match by accident, and a component added next year
+// with a field that names an entity needs no entry here: a list kept by hand is the
+// kind of thing that drifts without any test noticing. (Only the placement of a
+// prefab is read by field: its "template" ids are the PREFAB ASSET's, which a
+// first placement can share with its own instance ids and must not be taken for
+// the entities of another.)
+//
+// What this cannot see: a reference that is not in a component block of the scene
+// file, which is a level script or a graph asset naming an entity by id. The plan
+// (R4) says the same of the runtime: an id held by a script does not survive a
+// cell being unloaded; the author makes the target resident.
+
+using IdPair = std::pair<uint64_t, uint64_t>;
+
+struct IdPairHash
+{
+	size_t operator()(const IdPair& p) const
+	{
+		return static_cast<size_t>(p.first * 0x9E3779B97F4A7C15ULL ^ (p.second + 0x7F4A7C15ULL + (p.first << 6)));
+	}
+};
+
+bool asIdPair(const json& v, IdPair& out)
+{
+	if (!v.is_array() || v.size() != 2 || !v[0].is_number_unsigned() || !v[1].is_number_unsigned())
+		return false;
+	out = { v[0].get<uint64_t>(), v[1].get<uint64_t>() };
+	return true;
+}
+
+// Every id-shaped pair anywhere below `v`.
+void collectIdPairs(const json& v, std::vector<IdPair>& out)
+{
+	if (v.is_array())
+	{
+		IdPair p;
+		if (asIdPair(v, p))
+		{
+			out.push_back(p);
+			return;
+		}
+		for (const json& c : v) collectIdPairs(c, out);
+	}
+	else if (v.is_object())
+		for (auto it = v.begin(); it != v.end(); ++it) collectIdPairs(it.value(), out);
+}
+
+// The ids one entity record refers to in its component blocks.
+void referencesOf(const json& e, std::vector<IdPair>& out)
+{
+	const json* comps = componentsOf(e);
+	if (!comps) return;
+	for (auto it = comps->begin(); it != comps->end(); ++it)
+	{
+		if (it.key() != "prefab")
+		{
+			collectIdPairs(it.value(), out);
+			continue;
+		}
+		// The placement of a prefab: the instance side of its bindings only.
+		const json& prefab = it.value();
+		if (!prefab.is_object()) continue;
+		const auto bindings = prefab.find("bindings");
+		if (bindings == prefab.end() || !bindings->is_array()) continue;
+		for (const json& b : *bindings)
+		{
+			IdPair p;
+			if (b.is_object())
+				if (const auto entity = b.find("entity"); entity != b.end() && asIdPair(*entity, p))
+					out.push_back(p);
+		}
+	}
+}
+
+// Union-find over the top-level units (and one more node, the base).
+struct Clusters
+{
+	std::vector<size_t> parent;
+	explicit Clusters(size_t n) : parent(n)
+	{
+		for (size_t i = 0; i < n; ++i) parent[i] = i;
+	}
+	size_t find(size_t i)
+	{
+		while (parent[i] != i)
+		{
+			parent[i] = parent[parent[i]];
+			i = parent[i];
+		}
+		return i;
+	}
+	void join(size_t a, size_t b)
+	{
+		a = find(a);
+		b = find(b);
+		// The lower index becomes the root, so the root of a cluster of units is its
+		// first member in traversal order; the base, the highest index, is a root only
+		// while nothing has joined it.
+		if (a != b) parent[std::max(a, b)] = std::min(a, b);
+	}
+};
+
 bool isFolder(const json& e)
 {
 	const json* kids = childrenOf(e);
@@ -232,56 +346,21 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		return ok;
 	};
 
-	// A placed prefab names the entities of its placement by id (its bindings). One
-	// that names an entity OUTSIDE the subtree the placement moves with — a child
-	// dragged out of the house — would dangle as soon as the two stand in different
-	// cells, or one in the base, so a subtree holding such a binding does not move.
-	// Checked per top-level unit and only when it holds a placement at all.
-	const auto bindingsStayInside = [&](const json& top) -> bool
-	{
-		std::vector<const json*> subtree;
-		bool hasPlacement = false;
-		std::function<void(const json&)> walk = [&](const json& e)
-		{
-			subtree.push_back(&e);
-			if (const json* comps = componentsOf(e); comps && comps->contains("prefab")) hasPlacement = true;
-			if (const json* kids = childrenOf(e))
-				for (const json& c : *kids)
-					if (const auto it = byId.find(idKey(c)); it != byId.end()) walk(*it->second);
-		};
-		walk(top);
-		if (!hasPlacement) return true;
-		std::unordered_set<std::string> members;
-		members.reserve(subtree.size());
-		for (const json* e : subtree) members.insert(idKey((*e)["uuid"]));
-		for (const json* e : subtree)
-		{
-			const json* comps = componentsOf(*e);
-			if (!comps) continue;
-			const auto prefab = comps->find("prefab");
-			if (prefab == comps->end() || !prefab->is_object()) continue;
-			const auto bindings = prefab->find("bindings");
-			if (bindings == prefab->end() || !bindings->is_array()) continue;
-			for (const json& b : *bindings)
-			{
-				if (!b.is_object()) continue;
-				const auto entity = b.find("entity");
-				// The null id is "no counterpart in this placement", a child deleted
-				// from it: it names nothing, so it cannot leave.
-				if (entity == b.end() || !entity->is_array() || nearly(*entity, 0.0)) continue;
-				if (members.count(idKey(*entity)) == 0) return false;
-			}
-		}
-		return true;
-	};
-
 	const double size = options.cellSize;
-	std::map<std::pair<int, int>, std::vector<std::string>> units;   // ordered: files come out sorted
-	std::unordered_set<std::string> moved;
-	// The folder a moved subtree hung in, when not the scene root: the merge
-	// puts it back there (and rebuilds the folder when the split dropped it).
-	std::unordered_map<std::string, std::string> unitFolder;
 	const std::string rootKey = idKey((*roots[0])["uuid"]);
+
+	// The top-level units, in the order the traversal meets them: every subtree that
+	// hangs directly below the scene root or below a folder (folders are looked
+	// through). Each is movable by itself or not (its components, subtreeMovable);
+	// whether it really moves depends on what it refers to and what refers to it.
+	struct Unit
+	{
+		const json* rec = nullptr;
+		std::string key;
+		std::string folder;       // the key of the folder it hung in, empty at the scene root
+		bool        movable = false;
+	};
+	std::vector<Unit> unitList;
 	std::function<void(const json&)> visit = [&](const json& parent)
 	{
 		const json* kids = childrenOf(parent);
@@ -297,11 +376,87 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 				visit(child);
 				continue;
 			}
-			const bool goes = subtreeMovable(child) && bindingsStayInside(child);
-			if (goes && parentKey != rootKey) unitFolder[idKey(child["uuid"])] = parentKey;
-			if (!goes) continue;
+			unitList.push_back({ &child, idKey(child["uuid"]), parentKey != rootKey ? parentKey : std::string(),
+			                     subtreeMovable(child) });
+		}
+	};
+	visit(*roots[0]);
+
+	// ── The ref hull ───────────────────────────────────────────────────────────
+	// Which unit every entity of the scene belongs to. The nodes are the units that
+	// are movable by themselves, and one more, the base: everything else (the
+	// unmovable units, the folders, the scene root) is the base.
+	const size_t baseNode = unitList.size();
+	std::unordered_map<std::string, size_t> nodeOfEntity;
+	nodeOfEntity.reserve(byId.size());
+	{
+		std::function<void(const json&, size_t)> assign = [&](const json& e, size_t node)
+		{
+			if (!nodeOfEntity.emplace(idKey(e["uuid"]), node).second) return;   // met twice: a cycle or a shared child
+			if (const json* kids = childrenOf(e))
+				for (const json& c : *kids)
+					if (const auto it = byId.find(idKey(c)); it != byId.end()) assign(*it->second, node);
+		};
+		for (size_t i = 0; i < unitList.size(); ++i)
+			assign(*unitList[i].rec, unitList[i].movable ? i : baseNode);
+	}
+	std::unordered_map<IdPair, const json*, IdPairHash> entityById;
+	entityById.reserve(byId.size());
+	for (const auto& [key, rec] : byId)
+	{
+		IdPair p;
+		if (asIdPair((*rec)["uuid"], p)) entityById.emplace(p, rec);
+	}
+
+	Clusters clusters(unitList.size() + 1);
+	{
+		std::vector<IdPair> refs;
+		for (const json& e : *ents)
+		{
+			if (!e.is_object() || !e.contains("uuid")) continue;
+			const auto from = nodeOfEntity.find(idKey(e["uuid"]));
+			const size_t a  = from != nodeOfEntity.end() ? from->second : baseNode;
+			refs.clear();
+			referencesOf(e, refs);
+			for (const IdPair& p : refs)
+			{
+				const auto target = entityById.find(p);
+				if (target == entityById.end() || target->second == &e) continue;   // not an entity of this scene, or itself
+				const auto to = nodeOfEntity.find(idKey((*target->second)["uuid"]));
+				const size_t b = to != nodeOfEntity.end() ? to->second : baseNode;
+				if (a != b) clusters.join(a, b);
+			}
+		}
+	}
+	// A unit moves when it is movable by itself and its cluster does not include the
+	// base. (What the base refers to inside a cell, and what a unit of a cell refers to
+	// in the base, both put the base in the cluster, and the cluster stays.)
+	std::vector<uint8_t> goes(unitList.size(), 0);
+	for (size_t i = 0; i < unitList.size(); ++i)
+	{
+		goes[i] = unitList[i].movable && clusters.find(i) != clusters.find(baseNode);
+		if (unitList[i].movable && !goes[i]) ++out.keptForRefs;
+	}
+
+	// Which cell: that of the first member of the cluster, by its own position; the
+	// others follow it and stand side by side in the cell root's children, in
+	// traversal order. A unit alone is a cluster of one, so it lands where its own
+	// position says, as before.
+	std::map<std::pair<int, int>, std::vector<std::string>> units;   // ordered: files come out sorted
+	std::map<std::pair<int, int>, std::vector<std::vector<std::string>>> unitClusters;   // the ones of two or more
+	std::unordered_set<std::string> moved;
+	// The folder a moved subtree hung in, when not the scene root: the merge
+	// puts it back there (and rebuilds the folder when the split dropped it).
+	std::unordered_map<std::string, std::string> unitFolder;
+	{
+		std::unordered_map<size_t, std::vector<size_t>> members;   // cluster root → its moving units
+		for (size_t i = 0; i < unitList.size(); ++i)
+			if (goes[i]) members[clusters.find(i)].push_back(i);
+		for (size_t i = 0; i < unitList.size(); ++i)
+		{
+			if (!goes[i] || clusters.find(i) != i) continue;   // the root of a cluster is its first member
 			double px = 0.0, pz = 0.0;
-			if (const json* comps = componentsOf(child))
+			if (const json* comps = componentsOf(*unitList[i].rec))
 				if (const auto t = comps->find("transform"); t != comps->end() && t->is_object())
 					if (const auto pos = t->find("position");
 					    pos != t->end() && pos->is_array() && pos->size() >= 3
@@ -312,12 +467,22 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 					}
 			const std::pair<int, int> cell{ CellManifest::cellIndex(px, options.cellSize),
 			                                CellManifest::cellIndex(pz, options.cellSize) };
-			const std::string k = idKey(child["uuid"]);
-			units[cell].push_back(k);
-			moved.insert(k);
+			const std::vector<size_t>& together = members[i];
+			std::vector<std::string> keys;
+			for (const size_t j : together)
+			{
+				units[cell].push_back(unitList[j].key);
+				moved.insert(unitList[j].key);
+				if (!unitList[j].folder.empty()) unitFolder[unitList[j].key] = unitList[j].folder;
+				keys.push_back(unitList[j].key);
+			}
+			if (keys.size() > 1)
+			{
+				unitClusters[cell].push_back(std::move(keys));
+				++out.clusters;
+			}
 		}
-	};
-	visit(*roots[0]);
+	}
 
 	// Everything that leaves: the moved subtrees, whole.
 	std::unordered_set<std::string> gone;
@@ -432,6 +597,21 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		head["bodies"]  = bodies;
 		head["classes"] = { { "static",   perClass[static_cast<size_t>(StreamClass::Static)] },
 		                    { "stateful", perClass[static_cast<size_t>(StreamClass::Stateful)] } };
+		// The units that refer to one another (the ref hull), by their ids, each list
+		// standing side by side in the cell root's children. The streamer builds a
+		// cluster in ONE slice (SceneSerializer::sliceForAdditiveLoad reads this), so
+		// that no frame ever has half of a cluster in the world. Only when there is one.
+		if (const auto together = unitClusters.find(cell); together != unitClusters.end())
+		{
+			json lists = json::array();
+			for (const std::vector<std::string>& keys : together->second)
+			{
+				json one = json::array();
+				for (const std::string& k : keys) one.push_back((*byId[k])["uuid"]);
+				lists.push_back(std::move(one));
+			}
+			head["clusters"] = std::move(lists);
+		}
 		c.scene["streaming"] = std::move(head);
 		// For the merge only (the game's loader reads no such key): which folder
 		// each subtree came from, and those folders as they were, up to the

@@ -94,9 +94,13 @@ public:
     //   slice 1..   consecutive top-level subtrees of the root, in the order of the
     //               root's `children`, packed until `maxEntities` is reached. A
     //               subtree is never divided: one larger than `maxEntities` is a
-    //               slice of its own, and what refers to a sibling by id is not
-    //               kept apart from it by this function (the splitter's reference
-    //               hull, Thema 164 step 3a, is what keeps those in one subtree).
+    //               slice of its own. Nor is a cluster: subtrees that refer to one
+    //               another by id (the splitter's reference hull, Thema 164 step 3a)
+    //               are named in the scene's "streaming" head ("clusters", lists of
+    //               the ids of their tops, which the splitter wrote side by side) and
+    //               are cut as one, so no slice, and no frame, has half of a cluster.
+    //               Without that head there are no clusters, and the cut is by
+    //               subtree alone, as in a cell of an earlier splitter.
     // Load slice 0 as usual, find its root among the created entities, then load the
     // others with AdditiveOptions::attachTo = that root: the result is the entities,
     // parents, sibling order and local transforms of loading `scene` whole.

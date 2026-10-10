@@ -31,6 +31,13 @@ struct CellManifest;
 // physics body. The ids in a cell are the scene's own and are kept when the game
 // loads it.
 //
+// References between entities never cross a cell boundary (the ref hull, plan 5): a
+// subtree that refers to another by id, or is referred to, is in one group with it,
+// and a group moves into one cell whole or not at all. Anything in a group that the
+// table keeps in the base, or that the base refers to, keeps the whole group there.
+// A reference is any id of another entity of the scene found in a component block
+// (CellSplit.cpp says why that and not a list of fields).
+//
 // The rules of scripts/split_scene_cells.py before Thema 164, which stays for
 // batch use and still writes version-1 cells (no head, a smaller table); this is
 // the reference. A merge is the way back, so a split scene stays editable as one
@@ -57,6 +64,14 @@ struct CellSplitResult
 	nlohmann::json    base;            // the scene without them, "cells" manifest included
 	std::vector<Cell> cells;           // sorted by x, then z
 	size_t            moved = 0;       // entities that went into cells
+	// The ref hull: top-level subtrees that would have moved by their components but
+	// stay in the base because something refers to them from the base or they refer to
+	// it (a joint of the base aimed at a door frame, a rope from a cell to a pole in the
+	// base)...
+	size_t            keptForRefs = 0;
+	// ...and the groups of two or more subtrees that refer to one another and went into
+	// one cell together.
+	size_t            clusters = 0;
 	std::string       error;           // set when the scene could not be split; nothing else is then
 };
 

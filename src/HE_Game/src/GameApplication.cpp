@@ -20,6 +20,7 @@
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/CellPhysics.h>
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
@@ -1539,8 +1540,10 @@ void GameApplication::updateCellStreaming(float dt)
 		// slice, so that unloading the cell cancels the loads of every slice.
 		hooks.loadedSlice = [this](entt::entity root, const std::vector<entt::entity>& created)
 		{
+			// The slice's bodies go in as one charge (cellSliceBodies is the call the
+			// tests make too).
 			if (m_physicsWorld)
-				for (entt::entity e : created) m_physicsWorld->addEntity(*m_world, (uint32_t)e);
+				HE::cellSliceBodies(*m_physicsWorld, *m_world, created);
 			std::vector<uint32_t> ids;
 			ids.reserve(created.size());
 			for (entt::entity e : created) ids.push_back((uint32_t)e);
@@ -1551,23 +1554,20 @@ void GameApplication::updateCellStreaming(float dt)
 		};
 		hooks.unloading = [this](entt::entity root)
 		{
+			// Bodies first, in a pass of their own, with the joints that name them kept
+			// for the cell's return (a door of the base hinged to a frame in the cell).
 			if (m_physicsWorld)
-			{
-				std::vector<entt::entity> stack{ root };
-				while (!stack.empty())
-				{
-					const entt::entity e = stack.back();
-					stack.pop_back();
-					m_physicsWorld->removeEntity((uint32_t)e);
-					if (const auto* h = m_world->registry().try_get<HierarchyComponent>(e))
-						stack.insert(stack.end(), h->children.begin(), h->children.end());
-				}
-			}
+				HE::cellUnloadBodies(*m_physicsWorld, *m_world, root);
 			if (const auto t = m_cellStreamTokens.find((uint32_t)root); t != m_cellStreamTokens.end())
 			{
 				t->second.cancel();
 				m_cellStreamTokens.erase(t);
 			}
+		};
+		// A cell is not started when the physics world has no room for its bodies.
+		hooks.bodiesFit = [this](uint32_t bodies)
+		{
+			return !m_physicsWorld || HE::cellBodiesFit(*m_physicsWorld, bodies);
 		};
 		m_cellStreamer.begin(manifest, std::move(reader), std::move(hooks));
 	}
@@ -2127,6 +2127,14 @@ void GameApplication::startPhysics()
 	// The rate half of that page is m_projectSettings.physics.fixedDt(), read
 	// where the accumulator steps.
 	m_physicsWorld->setGravity(m_projectSettings.physics.gravity);
+	// Nothing falls through a floor that is not there: whatever could fall is held
+	// while the cell under it is not built (a cell going out, or still coming in).
+	// Asked at call time, so it follows the streamer through scene changes: an
+	// inactive streamer (no cells in this scene) holds nothing.
+	m_physicsWorld->setRegionHold([this](const glm::vec3& p)
+	{
+		return m_world && HE::cellHolds(m_cellStreamer, *m_world, p);
+	});
 	m_physicsWorld->initialize(*m_world);
 	// Every runtime spawn goes through the entity host, so it is the host that
 	// has to know where bodies are built. Set HERE rather than at the two call

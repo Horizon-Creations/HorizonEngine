@@ -684,11 +684,14 @@ TEST_CASE("splitSceneIntoCells: which components may move into a cell, and which
 	CHECK_FALSE(moves("rigidbody", { { "type", 2 } }));   // kinematic
 }
 
-TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree stays in the base")
+TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree moves only together with what it binds")
 {
 	// A binding names an entity of the placement by id. One that names an entity
 	// outside the subtree (a child dragged out of the house) would dangle as soon as
-	// the two sit in different cells, so such a placement does not move.
+	// the two sit in different cells, or one in the base. Since step 3a the two are one
+	// cluster (the ref hull): they go into one cell together when both can move, and both
+	// stay in the base when the bound one cannot. (Step 2a kept the placement in the base
+	// in both cases.)
 	const auto id = [](std::uint64_t n) { return json::array({ 0x6000 + n, n }); };
 	const auto placement = [&](std::uint64_t root, std::uint64_t child, std::uint64_t bound, const char* name)
 	{
@@ -714,27 +717,160 @@ TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree sta
 		return std::vector<json>{ rootRecord, childRecord };
 	};
 
-	json ents = json::array();
-	ents.push_back({ { "uuid", id(1) }, { "name", "World" }, { "parent", nullptr },
-	                 { "children", json::array({ id(10), id(20), id(30) }) } });
-	for (const json& e : placement(10, 11, 11, "Kept")) ents.push_back(e);      // binds its own child
-	for (const json& e : placement(20, 21, 30, "Split")) ents.push_back(e);     // binds the Lamp beside it
-	ents.push_back({ { "uuid", id(30) }, { "name", "Lamp" }, { "parent", id(1) },
-	                 { "components", { { "transform", { { "position", { 60.0, 0.0, 60.0 } } } },
-	                                   { "mesh", json::object() } } } });
-	HE::CellSplitOptions o;
-	o.cellSize = 100.0f;
-	o.dir      = "Content/W.cells";
-	const HE::CellSplitResult r = HE::splitSceneIntoCells(json{ { "version", "1.1" }, { "entities", ents } }, o);
-	REQUIRE(r.error.empty());
-	REQUIRE(r.cells.size() == 1);
-	const std::set<std::string> inCell = namesIn(r.cells[0].scene), inBase = namesIn(r.base);
-	CHECK(inCell.count("Kept") == 1);
-	CHECK(inCell.count("Kept Door") == 1);
-	CHECK(inCell.count("Lamp") == 1);
-	CHECK(inBase.count("Split") == 1);
-	CHECK(inBase.count("Split Door") == 1);
-	CHECK(inCell.count("Split") == 0);
+	// `lampComponents` is what the Lamp beside the placement carries: a mesh (it can
+	// move) or a script (it cannot).
+	const auto split = [&](json lampComponents)
+	{
+		json ents = json::array();
+		ents.push_back({ { "uuid", id(1) }, { "name", "World" }, { "parent", nullptr },
+		                 { "children", json::array({ id(10), id(20), id(30) }) } });
+		for (const json& e : placement(10, 11, 11, "Kept")) ents.push_back(e);      // binds its own child
+		for (const json& e : placement(20, 21, 30, "Split")) ents.push_back(e);     // binds the Lamp beside it
+		lampComponents["transform"] = { { "position", { 60.0, 0.0, 60.0 } } };
+		ents.push_back({ { "uuid", id(30) }, { "name", "Lamp" }, { "parent", id(1) },
+		                 { "components", std::move(lampComponents) } });
+		HE::CellSplitOptions o;
+		o.cellSize = 100.0f;
+		o.dir      = "Content/W.cells";
+		return HE::splitSceneIntoCells(json{ { "version", "1.1" }, { "entities", ents } }, o);
+	};
+
+	SUBCASE("the Lamp can move: placement and Lamp are one cluster and go into the cell together")
+	{
+		const HE::CellSplitResult r = split({ { "mesh", json::object() } });
+		REQUIRE(r.error.empty());
+		REQUIRE(r.cells.size() == 1);
+		const std::set<std::string> inCell = namesIn(r.cells[0].scene), inBase = namesIn(r.base);
+		CHECK(inCell.count("Kept") == 1);
+		CHECK(inCell.count("Kept Door") == 1);
+		CHECK(inCell.count("Lamp") == 1);
+		CHECK(inCell.count("Split") == 1);
+		CHECK(inCell.count("Split Door") == 1);
+		CHECK(inBase.count("Split") == 0);
+		CHECK(r.clusters == 1u);
+		CHECK(r.keptForRefs == 0u);
+		// The head names the cluster by the ids of its subtrees, and the cell lists them side
+		// by side in the root's children, in the order the traversal met them.
+		const json& head = r.cells[0].scene["streaming"];
+		REQUIRE(head.contains("clusters"));
+		REQUIRE(head["clusters"].size() == 1u);
+		CHECK(head["clusters"][0] == json::array({ id(20), id(30) }));
+		const json& rootKids = r.cells[0].scene["entities"][0]["children"];
+		CHECK(rootKids == json::array({ id(10), id(20), id(30) }));
+	}
+
+	SUBCASE("the Lamp cannot move: placement and Lamp both stay in the base")
+	{
+		const HE::CellSplitResult r = split({ { "script", { { "asset", id(77) } } } });
+		REQUIRE(r.error.empty());
+		REQUIRE(r.cells.size() == 1);
+		const std::set<std::string> inCell = namesIn(r.cells[0].scene), inBase = namesIn(r.base);
+		CHECK(inCell.count("Kept") == 1);
+		CHECK(inCell.count("Kept Door") == 1);
+		CHECK(inBase.count("Lamp") == 1);
+		CHECK(inBase.count("Split") == 1);
+		CHECK(inBase.count("Split Door") == 1);
+		CHECK(inCell.count("Split") == 0);
+		CHECK(r.keptForRefs == 1u);   // the placement; the Lamp was not movable to begin with
+		CHECK(r.clusters == 0u);
+		CHECK_FALSE(r.cells[0].scene["streaming"].contains("clusters"));
+	}
+}
+
+TEST_CASE("splitSceneIntoCells: what the base refers to inside a cell keeps it in the base, in either direction")
+{
+	// The ref hull (Thema 164, step 3a). A door of the base hinged to a frame that stands in a
+	// cell: the frame would be gone with the cell and the joint with it. Whatever names another
+	// entity by id keeps both together; one side that cannot move keeps both in the base. The
+	// reference is found in the component block, wherever it is, not in a list of fields: the
+	// "joint" here, and a made-up field of a mesh block nobody told the splitter about.
+	const auto id = [](std::uint64_t n) { return json::array({ 0x7000 + n, n }); };
+	const auto record = [&](std::uint64_t n, const char* name, json components, double x = 50.0)
+	{
+		components["transform"] = { { "position", { x, 0.0, 50.0 } } };
+		return json{ { "uuid", id(n) }, { "name", name }, { "parent", id(1) }, { "components", std::move(components) } };
+	};
+	const auto world = [&](std::vector<json> things)
+	{
+		json kids = json::array();
+		for (const json& t : things) kids.push_back(t["uuid"]);
+		json ents = json::array();
+		ents.push_back({ { "uuid", id(1) }, { "name", "World" }, { "parent", nullptr }, { "children", kids } });
+		for (json& t : things) ents.push_back(std::move(t));
+		HE::CellSplitOptions o;
+		o.cellSize = 100.0f;
+		o.dir      = "Content/R.cells";
+		return HE::splitSceneIntoCells(json{ { "version", "1.1" }, { "entities", ents } }, o);
+	};
+	const json solid = { { "mesh", json::object() } };
+
+	SUBCASE("no reference: both move, as they always did")
+	{
+		const auto r = world({ record(10, "Door", { { "mesh", json::object() } }), record(11, "Frame", solid, 60.0) });
+		REQUIRE(r.error.empty());
+		CHECK(namesIn(r.base).count("Door") == 0);
+		CHECK(namesIn(r.base).count("Frame") == 0);
+		CHECK(r.keptForRefs == 0u);
+	}
+	SUBCASE("a joint of the base aimed at a frame in a cell keeps the frame in the base")
+	{
+		// The door carries a joint, which the table keeps in the base; it names the frame.
+		json door = solid;
+		door["joint"] = { { "type", 0 }, { "target", id(11) } };
+		const auto r = world({ record(10, "Door", door), record(11, "Frame", solid, 60.0), record(12, "Rock", solid, 70.0) });
+		REQUIRE(r.error.empty());
+		const auto base = namesIn(r.base);
+		CHECK(base.count("Door") == 1);
+		CHECK(base.count("Frame") == 1);                // would have moved by its components
+		CHECK(base.count("Rock") == 0);                 // nothing refers to it: it moves
+		CHECK(r.keptForRefs == 1u);
+		// The reference holds in the file the base writes: the base still has both ends.
+		bool joint = false;
+		for (const json& e : r.base["entities"])
+			if (e.value("name", std::string()) == "Door") joint = e["components"].contains("joint");
+		CHECK(joint);
+	}
+	SUBCASE("a movable thing that names something in the base stays with it")
+	{
+		// A lamp whose mesh block carries the id of a pole in the base (a script keeps the pole
+		// there). The field is made up, and it is the only thing that tells the lamp from a
+		// free one: that is the point of finding references by their value.
+		json lamp = { { "mesh", { { "partner", id(11) } } } };
+		json pole = { { "script", { { "asset", id(77) } } } };
+		const auto r = world({ record(10, "Lamp", lamp), record(11, "Pole", pole, 60.0) });
+		REQUIRE(r.error.empty());
+		const auto base = namesIn(r.base);
+		CHECK(base.count("Lamp") == 1);
+		CHECK(base.count("Pole") == 1);
+		CHECK(r.keptForRefs == 1u);
+	}
+	SUBCASE("two things that name each other move together, into the cell of the first")
+	{
+		json a = { { "mesh", { { "partner", id(11) } } } };
+		json b = { { "mesh", { { "partner", id(10) } } } };
+		// A is in cell (0,0), B in cell (3,0) by its own position; the cluster goes where A is.
+		const auto r = world({ record(10, "A", a, 50.0), record(12, "Elsewhere", solid, 350.0), record(11, "B", b, 350.0) });
+		REQUIRE(r.error.empty());
+		REQUIRE(r.cells.size() == 2);
+		const auto first = namesIn(r.cells[0].scene), second = namesIn(r.cells[1].scene);
+		REQUIRE(r.cells[0].x == 0);
+		REQUIRE(r.cells[1].x == 3);
+		CHECK(first.count("A") == 1);
+		CHECK(first.count("B") == 1);                 // moved to A's cell, off its own square
+		CHECK(second.count("Elsewhere") == 1);
+		CHECK(second.count("B") == 0);
+		CHECK(r.clusters == 1u);
+		CHECK(r.keptForRefs == 0u);
+	}
+	SUBCASE("an id that is not an entity of the scene is no reference")
+	{
+		// An asset id, or a pair of small numbers, in a field. Nothing to keep together.
+		json thing = { { "mesh", { { "asset", id(9999) }, { "range", json::array({ 3, 4 }) } } } };
+		const auto r = world({ record(10, "Thing", thing) });
+		REQUIRE(r.error.empty());
+		CHECK(namesIn(r.base).count("Thing") == 0);
+		CHECK(r.keptForRefs == 0u);
+	}
 }
 
 namespace

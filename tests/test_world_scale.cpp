@@ -14,6 +14,10 @@
 #include <HorizonScene/Components/NavAgentComponent.h>
 #include <HorizonScene/FloatingOrigin.h>
 #include <HorizonScene/CellStreamer.h>
+#include <HorizonScene/CellPhysics.h>
+#include <HorizonScene/Components/JointComponent.h>
+#include <HorizonScene/Components/CharacterControllerComponent.h>
+#include <functional>
 #include <HorizonScene/SceneSerializer.h>
 #include "TestFsUtil.h"
 #include <filesystem>
@@ -1772,8 +1776,14 @@ TEST_CASE("CellStreamer: a cell's static bodies stand where the cell is, under a
 			return !out.empty();
 		};
 	}, hooks);
+	// The hold's test is asked in world positions (relative to the origin): local x 50 is absolute
+	// 250, in cell (2,0), which is not built yet; local x -150 is absolute 50, where the manifest has
+	// no cell at all.
+	CHECK(HE::cellHolds(s, world, { 50.0f, 0.0f, 50.0f }));
+	CHECK_FALSE(HE::cellHolds(s, world, { -150.0f, 0.0f, 50.0f }));
 	pumpCells(s, world, { 250.0, 1.7, 50.0 }, glm::vec3(0.0f), [&] { return s.isLoaded(2, 0); });
 	REQUIRE(s.isLoaded(2, 0));
+	CHECK_FALSE(HE::cellHolds(s, world, { 50.0f, 0.0f, 50.0f }));   // built now
 
 	// Local x 50 is absolute 250: the ray straight down meets the crate's top.
 	const PhysicsWorld::RaycastHit hit = phys.raycast({ 50.0f, 10.0f, 50.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f);
@@ -1783,5 +1793,471 @@ TEST_CASE("CellStreamer: a cell's static bodies stand where the cell is, under a
 	// Where the absolute number would put it if the origin were ignored: nothing.
 	CHECK_FALSE(phys.raycast({ 250.0f, 10.0f, 50.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f).hit);
 	s.clear(world);
+	he_test::removeAllQuiet(root);
+}
+
+// ─── Cells and the physics world (Thema 164, step 3a) ─────────────────────────
+
+namespace
+{
+// Updates until `done` or twenty seconds; unlike pumpAnchors it does not insist that nothing is
+// left waiting, which is the very thing a cell put off for lack of room is.
+template <class Done>
+void pumpUntil(HE::CellStreamer& s, HorizonWorld& world, const std::vector<HE::CellAnchor>& anchors, Done done)
+{
+	const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+	while (std::chrono::steady_clock::now() < until && !done())
+	{
+		s.update(world, anchors, 100.0);
+		std::this_thread::yield();
+	}
+}
+
+// A cell with a floor: a static box over the 100 m square that starts at x0, its top face at
+// y = 0, and `boxes` more static boxes on it. Written with the version-2 head, so that the
+// streamer keeps the ids. Returns the floor's id.
+HE::UUID writePhysicsCell(const std::filesystem::path& file, float x0, int boxes = 0)
+{
+	HorizonWorld cell;
+	const Entity floor = cell.createEntity("Floor");
+	tf(cell, floor).position = { x0 + 50.0f, -0.5f, 50.0f };
+	tf(cell, floor).scale    = { 100.0f, 1.0f, 100.0f };
+	RigidBodyComponent frb;
+	frb.type = RigidBodyType::Static;
+	cell.addComponent(floor, frb);
+	for (int i = 0; i < boxes; ++i)
+	{
+		const Entity b = cell.createEntity("Box " + std::to_string(i));
+		tf(cell, b).position = { x0 + 2.0f + static_cast<float>(i % 40) * 2.4f, 0.5f,
+		                         2.0f + static_cast<float>(i / 40) * 2.4f };
+		RigidBodyComponent rb;
+		rb.type = RigidBodyType::Static;
+		cell.addComponent(b, rb);
+	}
+	std::filesystem::create_directories(file.parent_path());
+	SceneSerializer ser;
+	REQUIRE(ser.save(cell, file, SerializeFormat::JSON));
+	nlohmann::json j = readScene(file);
+	j["streaming"]   = { { "version", 2 } };
+	std::ofstream out(file, std::ios::trunc);
+	out << j.dump();
+	return cell.entityId(floor);
+}
+
+// A cell with a frame in it: one static box, 10 m up. Returns its id.
+HE::UUID writeFrameCell(const std::filesystem::path& file, float x0)
+{
+	HorizonWorld cell;
+	const Entity frame = cell.createEntity("Frame");
+	tf(cell, frame).position = { x0 + 50.0f, 10.0f, 50.0f };
+	RigidBodyComponent rb;
+	rb.type = RigidBodyType::Static;
+	cell.addComponent(frame, rb);
+	std::filesystem::create_directories(file.parent_path());
+	SceneSerializer ser;
+	REQUIRE(ser.save(cell, file, SerializeFormat::JSON));
+	nlohmann::json j = readScene(file);
+	j["streaming"]   = { { "version", 2 } };
+	std::ofstream out(file, std::ios::trunc);
+	out << j.dump();
+	return cell.entityId(frame);
+}
+
+// What GameApplication does with a streamer and a physics world, through the same calls
+// (CellPhysics.h): a slice's bodies in as one charge, a cell's out before it goes with its
+// joints kept, the reserve, and the hold. `hold` and `requeue` are the switches the control
+// runs turn off; `fits` replaces the reserve.
+struct PhysicsCells
+{
+	HorizonWorld     world;
+	PhysicsWorld     phys;
+	HE::CellStreamer streamer;
+	bool             hold    = true;
+	bool             requeue = true;
+	std::function<bool(uint32_t)> fits;
+
+	void begin(const HE::CellManifest& m, const std::filesystem::path& root, size_t sliceEntities = 128)
+	{
+		HE::CellStreamer::Hooks hooks;
+		hooks.loadedSlice = [this](entt::entity, const std::vector<entt::entity>& created)
+		{
+			HE::cellSliceBodies(phys, world, created);
+		};
+		hooks.unloading = [this](entt::entity r)
+		{
+			if (requeue) HE::cellUnloadBodies(phys, world, r);
+			else         phys.removeEntityTree(world, static_cast<uint32_t>(r), /*requeueJoints=*/false);
+		};
+		hooks.bodiesFit = [this](uint32_t n) { return fits ? fits(n) : HE::cellBodiesFit(phys, n); };
+		phys.setRegionHold([this](const glm::vec3& p) { return hold && HE::cellHolds(streamer, world, p); });
+		streamer.setSliceEntities(sliceEntities);
+		streamer.begin(m, diskReader(root), std::move(hooks));
+	}
+	void step(int n)
+	{
+		for (int i = 0; i < n; ++i) phys.step(world, 1.0f / 60.0f);
+	}
+	~PhysicsCells() { streamer.clear(world); }
+};
+
+Entity makeCrate(HorizonWorld& w, const char* name, const glm::vec3& at)
+{
+	const Entity e = w.createEntity(name);
+	tf(w, e).position = at;
+	RigidBodyComponent rb;
+	rb.type = RigidBodyType::Dynamic;
+	rb.mass = 1.0f;
+	w.addComponent(e, rb);
+	return e;
+}
+} // namespace
+
+// MUTATION: in PhysicsWorld::applyRegionHold, return at the top (or install no test in
+// PhysicsCells::begin): the "gone" and "not yet" runs with the hold still pass their
+// control CHECKs, and the CHECKs on the held crate fail, since it is below the floor.
+TEST_CASE("Cells and physics: nothing falls through the floor of a cell that has gone, or has not come yet")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_floor";
+	for (const bool gone : { false, true })
+	for (const bool hold : { true, false })
+	{
+		CAPTURE(gone);
+		CAPTURE(hold);
+		he_test::removeAllQuiet(root);
+		writePhysicsCell(root / "W.cells" / "cell_0_0.hescene", 0.0f);
+		HE::CellManifest m;
+		REQUIRE(HE::CellManifest::parse(
+			R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 0,
+			    "dir": "W.cells", "list": [[0,0,1,1]]})", m));
+
+		PhysicsCells rig;
+		rig.hold = hold;
+		// A crate of the base, standing where the cell's floor is (or will be).
+		const Entity crate = makeCrate(rig.world, "Crate", { 50.0f, 0.5f, 50.0f });
+		rig.phys.initialize(rig.world);
+		rig.begin(m, root);
+		const std::vector<HE::CellAnchor> near = { anchorAt(50.0) }, away = { anchorAt(5000.0) };
+		const auto crateY   = [&] { return tf(rig.world, crate).position.y; };
+		const auto loadCell = [&]
+		{
+			pumpAnchors(rig.streamer, rig.world, near, 100.0, [&] { return rig.streamer.isLoaded(0, 0); });
+			REQUIRE(rig.streamer.isLoaded(0, 0));
+		};
+
+		if (!gone)
+		{
+			// NOT YET: the crate stands over a cell that is not built, and time passes.
+			rig.step(60);
+			if (!hold)
+			{
+				CHECK(crateY() < -2.0f);   // the control: it has dropped out of the world
+				continue;
+			}
+			CHECK(crateY() == doctest::Approx(0.5f).epsilon(0.05));
+			CHECK(rig.phys.heldCount() == 1u);
+			// The cell comes; the crate is let go onto its floor and stays on it.
+			loadCell();
+			rig.step(120);
+			CHECK(crateY() == doctest::Approx(0.5f).epsilon(0.1));
+			CHECK(rig.phys.heldCount() == 0u);
+			continue;
+		}
+
+		// GONE: the cell is there, the crate rests on its floor...
+		loadCell();
+		rig.step(120);
+		CHECK(crateY() == doctest::Approx(0.5f).epsilon(0.1));
+		REQUIRE(rig.phys.raycast({ 10.0f, 5.0f, 10.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f).hit);   // the floor is in the physics world
+		// ...and then the anchor leaves, and the cell with it.
+		rig.streamer.update(rig.world, away, 0.0);
+		REQUIRE_FALSE(rig.streamer.isLoaded(0, 0));
+		CHECK_FALSE(rig.phys.raycast({ 10.0f, 5.0f, 10.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f).hit);   // and now it is not
+		// The crate has lain still for two seconds, so it sleeps, and Jolt does not wake what lay on
+		// a body that is taken away. Something touches it, as something does in a game sooner or
+		// later (a gust, a nudge from an NPC): that is when the missing floor shows.
+		CHECK(rig.phys.addImpulse(static_cast<uint32_t>(crate), { 0.0f, 0.01f, 0.0f }));
+		rig.step(120);
+		if (!hold)
+		{
+			CHECK(crateY() < -5.0f);       // the control: nothing is under it, it fell
+			continue;
+		}
+		CHECK(crateY() == doctest::Approx(0.5f).epsilon(0.05));
+		CHECK(rig.phys.heldCount() == 1u);
+		// The anchor comes back: the floor again, and the crate, which was never gone, on it.
+		loadCell();
+		rig.step(120);
+		CHECK(crateY() == doctest::Approx(0.5f).epsilon(0.1));
+		CHECK(rig.phys.heldCount() == 0u);
+		CHECK(rig.phys.raycast({ 10.0f, 5.0f, 10.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f).hit);
+	}
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("Cells and physics: a character put down in a cell that is still loading stands where it was put")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_char";
+	he_test::removeAllQuiet(root);
+	writePhysicsCell(root / "W.cells" / "cell_0_0.hescene", 0.0f);
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 0,
+		    "dir": "W.cells", "list": [[0,0,1,1]]})", m));
+
+	PhysicsCells rig;
+	// The player's shape as EntityHost builds it: a character that walks and the kinematic proxy.
+	const Entity player = rig.world.createEntity("Player");
+	tf(rig.world, player).position = { 50.0f, 1.2f, 50.0f };
+	rig.world.addComponent(player, CharacterControllerComponent{});
+	{ RigidBodyComponent rb; rb.type = RigidBodyType::Kinematic; rig.world.addComponent(player, rb); }
+	rig.phys.initialize(rig.world);
+	rig.begin(m, root);
+	const auto playerY = [&] { return tf(rig.world, player).position.y; };
+
+	// A spawn into a cell that is not there yet: a second passes and the player has not fallen.
+	rig.step(60);
+	CHECK(playerY() == doctest::Approx(1.2f).epsilon(0.001));
+	CHECK(rig.phys.heldCount() == 1u);
+
+	// The cell is built: the player is let go, lands on the floor and is grounded there.
+	pumpAnchors(rig.streamer, rig.world, { anchorAt(50.0) }, 100.0, [&] { return rig.streamer.isLoaded(0, 0); });
+	REQUIRE(rig.streamer.isLoaded(0, 0));
+	rig.step(120);
+	CHECK(rig.phys.heldCount() == 0u);
+	CHECK(playerY() > 0.5f);
+	CHECK(playerY() < 1.3f);
+	CHECK(rig.world.registry().get<CharacterControllerComponent>(player).isGrounded);
+	he_test::removeAllQuiet(root);
+}
+
+// MUTATION: in PhysicsWorld::removeEntityTree, map requeueJoints to JointFate::Drop, or let
+// resolvePendingJoints count a patient entry against kMaxJointAttempts: the `requeue` run
+// ends with a door that fell, and CHECK(hasJoint) fails.
+TEST_CASE("Cells and physics: a joint from the base to a cell is built again when the cell is back")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_joint";
+	for (const bool requeue : { true, false })
+	{
+		CAPTURE(requeue);
+		he_test::removeAllQuiet(root);
+		const HE::UUID frame = writeFrameCell(root / "W.cells" / "cell_0_0.hescene", 0.0f);
+		// Another cell, built in many slices: each one is a pass over the pending joints, and
+		// together they are more of them than a joint that is merely early gets (eight).
+		writePhysicsCell(root / "W.cells" / "cell_3_0.hescene", 300.0f, 60);
+		HE::CellManifest m;
+		REQUIRE(HE::CellManifest::parse(
+			R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 0,
+			    "dir": "W.cells", "list": [[0,0,1,1],[3,0,61,61]]})", m));
+
+		PhysicsCells rig;
+		rig.requeue = requeue;
+		// The door is the base's, hinged to the frame, which is in a cell.
+		const Entity door = makeCrate(rig.world, "Door", { 52.0f, 10.0f, 50.0f });
+		{
+			JointComponent j;
+			j.type   = JointType::Fixed;
+			j.target = frame;
+			rig.world.registry().emplace_or_replace<JointComponent>(door, j);
+		}
+		rig.phys.initialize(rig.world);
+		rig.begin(m, root, /*sliceEntities=*/4);
+		const uint32_t doorId = static_cast<uint32_t>(door);
+		const auto doorY      = [&] { return tf(rig.world, door).position.y; };
+		CHECK_FALSE(rig.phys.hasJoint(doorId));   // the frame is not loaded
+
+		// The cell comes: the joint, which waited for the frame since the scene started, is built.
+		pumpAnchors(rig.streamer, rig.world, { anchorAt(50.0) }, 100.0, [&] { return rig.streamer.isLoaded(0, 0); });
+		REQUIRE(rig.streamer.isLoaded(0, 0));
+		CHECK(rig.phys.hasJoint(doorId));
+		rig.step(120);
+		CHECK(doorY() == doctest::Approx(10.0f).epsilon(0.02));
+
+		// The player walks to the other cell: this one goes, that one is built slice by slice.
+		const size_t slicesBefore = rig.streamer.stats().slicesDone;
+		pumpAnchors(rig.streamer, rig.world, { anchorAt(350.0) }, 100.0,
+		            [&] { return rig.streamer.isLoaded(3, 0) && !rig.streamer.isLoaded(0, 0); });
+		REQUIRE(rig.streamer.isLoaded(3, 0));
+		REQUIRE_FALSE(rig.streamer.isLoaded(0, 0));
+		CHECK(rig.streamer.stats().slicesDone - slicesBefore >= 12u);   // each with bodies: a pass each, well over eight
+		CHECK_FALSE(rig.phys.hasJoint(doorId));
+		rig.step(60);
+		CHECK(doorY() == doctest::Approx(10.0f).epsilon(0.02));   // held where it hung, not fallen
+
+		// And back: the frame is the same entity again, and the joint is built again.
+		pumpAnchors(rig.streamer, rig.world, { anchorAt(50.0) }, 100.0, [&] { return rig.streamer.isLoaded(0, 0); });
+		REQUIRE(rig.streamer.isLoaded(0, 0));
+		// The door has been held since the frame went; the frame is back and the door is let go by
+		// the first step, which is also when its joint to the frame is built again.
+		rig.step(1);
+		CHECK(rig.phys.hasJoint(doorId) == requeue);
+		rig.step(120);
+		if (requeue)
+			CHECK(doorY() == doctest::Approx(10.0f).epsilon(0.02));
+		else
+			CHECK(doorY() < 5.0f);   // the control: nothing holds the door, it fell
+	}
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("Cells and physics: three thousand bodies come in through cells under the table size, and a cell the reserve cannot take waits")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_cell_bodies3k";
+	he_test::removeAllQuiet(root);
+	constexpr int kCells = 12;   // 12 cells of 300 static bodies
+	std::string list;
+	for (int c = 0; c < kCells; ++c)
+	{
+		writePhysicsCell(root / "W.cells" / ("cell_" + std::to_string(c) + "_0.hescene"), static_cast<float>(c) * 100.0f, 299);
+		list += std::string(c ? "," : "") + "[" + std::to_string(c) + ",0,300,300]";
+	}
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(
+		R"({"cellSize": 100, "loadRadius": 60, "unloadRadius": 120, "lookaheadSec": 0, "dir": "W.cells", "list": [)" + list + "]}", m));
+	// An anchor whose reach (radiusScale 10) covers the whole row: every cell is wanted.
+	const std::vector<HE::CellAnchor> wide = { anchorAt(600.0, 10.0f) };
+	const auto allLoaded = [](HE::CellStreamer& s) { return s.stats().loaded == static_cast<size_t>(kCells); };
+
+	SUBCASE("with the room there is, they all come in")
+	{
+		PhysicsCells rig;
+		rig.phys.initialize(rig.world);
+		rig.begin(m, root);
+		pumpAnchors(rig.streamer, rig.world, wide, 100.0, [&] { return allLoaded(rig.streamer); });
+		REQUIRE(allLoaded(rig.streamer));
+		CHECK(rig.phys.bodyCount() == 3600u);
+		CHECK(rig.phys.bodyCount() < PhysicsWorld::kMaxBodies);
+		CHECK(rig.streamer.stats().deferredForBodies == 0u);
+		// The reserve itself: nine tenths of the table, counted from what the world owns.
+		CHECK(HE::cellBodiesFit(rig.phys, 1000));
+		CHECK_FALSE(HE::cellBodiesFit(rig.phys, PhysicsWorld::kMaxBodies));
+		CHECK_FALSE(HE::cellBodiesFit(rig.phys, PhysicsWorld::kMaxBodies / 10 * 9 - 3600 + 1));
+		CHECK(HE::cellBodiesFit(rig.phys, PhysicsWorld::kMaxBodies / 10 * 9 - 3600));
+	}
+
+	SUBCASE("a cell that does not fit the reserve waits, and nothing behind it takes its room")
+	{
+		PhysicsCells rig;
+		size_t limit = 1000;   // room for three cells of 300 and a bit
+		rig.fits = [&](uint32_t n) { return rig.phys.bodyCount() + n <= limit; };
+		rig.phys.initialize(rig.world);
+		rig.begin(m, root);
+		const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+		while (std::chrono::steady_clock::now() < until
+		       && !(rig.streamer.stats().deferredForBodies > 0 && rig.streamer.stats().loaded >= 3))
+		{
+			rig.streamer.update(rig.world, wide, 100.0);
+			std::this_thread::yield();
+		}
+		for (int i = 0; i < 20; ++i) rig.streamer.update(rig.world, wide, 100.0);   // time to try again, and not to take it
+		CHECK(rig.streamer.stats().loaded == 3u);
+		CHECK(rig.phys.bodyCount() == 900u);
+		CHECK(rig.streamer.stats().deferredForBodies > 0u);
+		CHECK(rig.streamer.stats().ready > 0u);   // parsed, waiting for room, not dropped
+		// A cell that is put off is not built, and so not settled either.
+		CHECK_FALSE(rig.streamer.isSettled({ 600.0, 0.0, 50.0 }, 500.0));
+
+		// Room again: the rest comes in, all of it.
+		limit = 100000;
+		pumpAnchors(rig.streamer, rig.world, wide, 100.0, [&] { return allLoaded(rig.streamer); });
+		REQUIRE(allLoaded(rig.streamer));
+		CHECK(rig.phys.bodyCount() == 3600u);
+		CHECK(rig.streamer.isSettled({ 600.0, 0.0, 50.0 }, 500.0));
+	}
+
+	SUBCASE("a base that fills the reserve alone does not freeze the first cell")
+	{
+		PhysicsCells rig;
+		rig.fits = [](uint32_t) { return false; };   // nothing ever fits
+		rig.phys.initialize(rig.world);
+		rig.begin(m, root);
+		// Only cell 0 is wanted from x = -30 (cell 1 is 130 m away); it is built because nothing is
+		// built yet, whatever the reserve says. Which of two cells wanted together is parsed first is
+		// up to the pool, so the test does not leave that to chance.
+		pumpUntil(rig.streamer, rig.world, { anchorAt(-30.0) }, [&] { return rig.streamer.isLoaded(0, 0); });
+		CHECK(rig.streamer.isLoaded(0, 0));
+		CHECK(rig.streamer.stats().deferredForBodies == 0u);
+		// Cell 1 is wanted as well from x = 50, and now something is built, so it waits.
+		pumpUntil(rig.streamer, rig.world, { anchorAt(50.0) }, [&] { return rig.streamer.stats().deferredForBodies > 0; });
+		CHECK_FALSE(rig.streamer.isLoaded(1, 0));
+		CHECK(rig.streamer.stats().deferredForBodies > 0u);
+	}
+
+	SUBCASE("a cell under way is finished while a nearer one waits for room")
+	{
+		PhysicsCells rig;
+		rig.fits = [](uint32_t) { return false; };
+		rig.phys.initialize(rig.world);
+		rig.begin(m, root, /*sliceEntities=*/64);
+		const auto tick = [&](double x) { rig.streamer.update(rig.world, { anchorAt(x) }, 0.0); std::this_thread::yield(); };
+		// Cell 0 alone is wanted from x = -30; with a slice per update it is under way for a while.
+		const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+		while (std::chrono::steady_clock::now() < limit && !rig.streamer.isBuilding(0, 0)) tick(-30.0);
+		REQUIRE(rig.streamer.isBuilding(0, 0));
+		// Then cell 1 is the nearer one (the anchor stands in it) and does not fit.
+		while (std::chrono::steady_clock::now() < limit && rig.streamer.stats().deferredForBodies == 0) tick(150.0);
+		REQUIRE(rig.streamer.stats().deferredForBodies > 0u);
+		// Cell 0 is not left half built behind it.
+		while (std::chrono::steady_clock::now() < limit && !rig.streamer.isLoaded(0, 0)) tick(150.0);
+		CHECK(rig.streamer.isLoaded(0, 0));
+		CHECK_FALSE(rig.streamer.isLoaded(1, 0));
+	}
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("SceneSerializer::sliceForAdditiveLoad: subtrees named as a cluster in the head are never cut apart")
+{
+	const auto root = std::filesystem::temp_directory_path() / "he_slice_cluster";
+	he_test::removeAllQuiet(root);
+	writeHouses(root / "c.hescene", 12, 9, 0.0f);   // 1 + 12 * 10 records; two houses fit a slice of 25
+	nlohmann::json cell = readScene(root / "c.hescene");
+	std::vector<nlohmann::json> tops;
+	for (const auto& e : cell["entities"])
+		if (e["parent"].is_null()) tops = e["children"].get<std::vector<nlohmann::json>>();
+	REQUIRE(tops.size() == 12u);
+
+	// Which slice holds the subtree whose top is `top`; -1 when none does.
+	const auto sliceOf = [](const std::vector<nlohmann::json>& slices, const nlohmann::json& top)
+	{
+		for (size_t i = 0; i < slices.size(); ++i)
+			for (const auto& e : slices[i]["entities"])
+				if (e["uuid"] == top) return static_cast<int>(i);
+		return -1;
+	};
+
+	// Without a head, houses go two to a slice: the second and the third fall apart.
+	const std::vector<nlohmann::json> plain = SceneSerializer::sliceForAdditiveLoad(nlohmann::json(cell), 25);
+	REQUIRE(plain.size() == 7u);
+	CHECK(sliceOf(plain, tops[1]) != sliceOf(plain, tops[2]));
+
+	// With the two named as a cluster they are one unit: together in one slice, and the
+	// order of everything is the order of the whole file.
+	nlohmann::json withHead = cell;
+	withHead["streaming"]   = { { "version", 2 }, { "clusters", nlohmann::json::array({ nlohmann::json::array({ tops[1], tops[2] }) }) } };
+	const std::vector<nlohmann::json> cut = SceneSerializer::sliceForAdditiveLoad(nlohmann::json(withHead), 25);
+	CHECK(sliceOf(cut, tops[1]) == sliceOf(cut, tops[2]));
+	CHECK(sliceOf(cut, tops[1]) > 0);
+	size_t total = 0;
+	std::vector<nlohmann::json> order;
+	for (size_t i = 0; i < cut.size(); ++i)
+	{
+		total += cut[i]["entities"].size();
+		if (i == 0) continue;
+		for (const auto& e : cut[i]["entities"])
+			if (e["parent"] == cut[0]["entities"][0]["uuid"]) order.push_back(e["uuid"]);
+	}
+	CHECK(total == 121u);
+	CHECK(order == tops);
+
+	// A cluster larger than a slice is a slice of its own, like a large subtree.
+	withHead["streaming"]["clusters"] = nlohmann::json::array({ nlohmann::json::array({ tops[4], tops[5], tops[6], tops[7] }) });
+	const std::vector<nlohmann::json> big = SceneSerializer::sliceForAdditiveLoad(nlohmann::json(withHead), 25);
+	CHECK(sliceOf(big, tops[4]) == sliceOf(big, tops[7]));
+	CHECK(sliceOf(big, tops[3]) != sliceOf(big, tops[4]));
+
+	// Members that do not stand side by side in the root's children are not pulled together: the
+	// order of the whole load wins.
+	withHead["streaming"]["clusters"] = nlohmann::json::array({ nlohmann::json::array({ tops[1], tops[9] }) });
+	const std::vector<nlohmann::json> apart = SceneSerializer::sliceForAdditiveLoad(nlohmann::json(withHead), 25);
+	CHECK(sliceOf(apart, tops[1]) != sliceOf(apart, tops[9]));
 	he_test::removeAllQuiet(root);
 }
