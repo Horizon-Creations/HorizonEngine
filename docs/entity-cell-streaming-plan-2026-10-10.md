@@ -1015,8 +1015,15 @@ Der schlechteste Frame der gestreamten Läufe (65 und 72 ms CPU, Frame 55 und 98
 
 ### 15.4 Nicht gemessen, nicht erreicht, Grenzen
 
-- **Editor-Leiter nicht neu gelaufen.** `world_streaming_ladder.sh` misst den Editor, und der streamt nicht (2c fehlt); er hat sich durch
-  Thema 164 nicht verändert. Die Zahlen von 153 §11.3 gelten weiter.
+- **Editor-Leiter: ein einziger Lauf bei 101k.** `world_streaming_ladder.sh` misst den Editor, und der streamt nicht (2c fehlt); der
+  Zielwert ist dort nicht zu lesen. Der Editor-Ladepfad trägt seit 2a den UUID-Index (entt-Signale), darum wurde die 101k-Zeile einmal gemessen
+  (`FRAMES=120`, **ohne verworfenen Lauf davor, auf Akku, Bildschirm gesperrt**, Last 1,4): `SceneLoadTiming` parse 1 197 ms und build 866 ms für
+  101 068 Entities, CPU/Frame p50 **135,7 ms** (s6end: 145,5 ms), `RenderExtractor::extract` je Frame p50 67,0 ms (die Summe der drei Aufrufe;
+  153 §11.3 nennt 76,6 ms). Eine Regression bei Laden oder `extract` ist daran nicht zu sehen. **Auffällig und nicht untersucht:** der RSS des
+  Editors in diesem Lauf, **1 326 MB gegen 888 MB** in s6end (`docs/perf-audit/raw-streaming/s6end-100000.summary.json`). Seit s6end sind viele
+  Änderungen auf main und `release/0.7.0` gekommen und der Lauf ist ein einzelner; ob der UUID-Index (eine Hash-Tabelle über 101k Einträge, rund
+  10 MB, kann das nicht allein sein) oder anderes dahintersteckt, klärt nur ein A/B-Lauf gegen einen Editor von `release/0.7.0`, der hier nicht
+  gebaut wurde. Die übrigen Zeilen der Leiter (1k bis 50k, 200k) sind nicht gelaufen.
 - **Der Capture-Lauf des Spiels hat eine stehende Kamera.** Die Zahlen in 15.2 stammen aus 120 Frames mit gesättigtem Streamer (alle Zellen
   gebaut); das Profil **während** des Ladens beim Fahren über Zellgrenzen im Spiel ist nicht aufgenommen. Dafür gibt es den Lauf über die
   Karte im Bench (15.3, ohne Zeichnen) und den Bildvergleich vom Start. Eine Kamerabahn im Spiel bräuchte ein Skript oder einen
