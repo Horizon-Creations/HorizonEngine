@@ -16,6 +16,9 @@
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TerrainMeshGenerator.h>   // terrainHeightAt
 #include <HorizonScene/WaterField.h>             // the Water brush's result
+#include <HorizonScene/WaterBrush.h>             // ... painted through its own API
+#include <HorizonScene/WaterLake.h>              // ... and turned into a lake
+#include <HorizonScene/Components/SplineComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/DefaultAssets.h>
@@ -738,4 +741,135 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Shift e
 	clickAt(ctx, wx, wy);
 	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
 	CHECK_FALSE(locate(ctx, panelId("Radius##water"), wx, wy));
+}
+
+TEST_CASE("landscape ui: the Water panel lists the bodies, and To Lake turns a painted pond into a lake in one undo step")
+{
+	namespace L = HE::water::lake;
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.dirty = false;
+	tc.water.res = 100;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	auto land = [&]() -> TerrainComponent&
+	{
+		auto view = reg.view<TerrainComponent>();
+		REQUIRE(view.size() == 1u);
+		return reg.get<TerrainComponent>(*view.begin());
+	};
+
+	// A pond painted through the brush's own API, and a second one.
+	{
+		HE::water::brush::Params p;
+		p.radius = 8.0f; p.falloff = 0.0f; p.amount = 1.0f; p.levelFromGround = true; p.levelOffset = 0.5f;
+		HE::water::brush::Stroke s;
+		HE::water::brush::begin(s, land(), -20.0f, 0.0f, p);
+		for (int i = 0; i <= 6; ++i) HE::water::brush::dab(s, land(), -20.0f + 4.0f * i, 0.0f, p);
+		HE::water::brush::end(s, land());
+		HE::water::brush::begin(s, land(), 35.0f, 30.0f, p);
+		HE::water::brush::dab(s, land(), 35.0f, 30.0f, p);
+		HE::water::brush::end(s, land());
+	}
+	REQUIRE(land().water.bodies.size() == 2u);
+	const uint16_t pond = land().water.bodies[0].id;
+	const float level = land().water.bodies[0].level;
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// Arm Water on the normal-sized panel, then give the panel room: the list of
+	// bodies sits below the brush settings.
+	float wx = 0.0f, wy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsWater"), wx, wy));
+	clickAt(ctx, wx, wy);
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), 1100.0f);
+	auto tall = [&](bool down, he_ui::Image* shot = nullptr) -> ImGuiID
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, down);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, 1080.0f));
+		ImGui::Begin(kPanelWindow, nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		TerrainTools::renderPanel(ctx);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, 1100);
+		return hovered;
+	};
+	for (int i = 0; i < 3; ++i) tall(false);
+
+	// Two bodies, both ponds: each gets a To Lake button (ids are pushed per body,
+	// so the same label is two different items).
+	float bx = 0.0f, by = 0.0f;
+	ImGuiWindow* win = ImGui::FindWindowByName(kPanelWindow);
+	REQUIRE(win != nullptr);
+	win->IDStack.push_back(win->GetID(static_cast<int>(pond)));
+	const ImGuiID toLakeId = win->GetID("To Lake");
+	win->IDStack.pop_back();
+	bool found = false;
+	for (float yy = 14.0f; yy < 1090.0f && !found; yy += 3.0f)
+	{
+		ImGui::GetIO().AddMousePosEvent(30.0f, yy);
+		tall(false);
+		if (tall(false) == toLakeId) { bx = 30.0f; by = yy; found = true; }
+	}
+	REQUIRE_MESSAGE(found, "no To Lake button for the first pond");
+	{
+		he_ui::Image img;
+		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, 1090.0f);
+		for (int i = 0; i < 3; ++i) tall(false, i == 2 ? &img : nullptr);
+		dump(img, "landscape-water-bodies");
+	}
+
+	const size_t depth0 = undo.undoDepth();
+	const size_t splines0 = reg.view<SplineComponent>().size();
+	ImGui::GetIO().AddMousePosEvent(bx, by);
+	tall(false); tall(false); tall(true); tall(false); tall(false);
+
+	// ── The pond is a lake now, its spline a child of the landscape ──
+	REQUIRE(reg.view<SplineComponent>().size() == splines0 + 1);
+	CHECK(undo.undoDepth() == depth0 + 1);
+	CHECK(undo.undoLabel() == "Water To Lake");
+	const water::Body* b = land().water.findBody(pond);
+	REQUIRE(b != nullptr);
+	CHECK(b->fromSpline());
+	CHECK(b->level == level);                                      // converting does not move the surface
+	const Entity sp = *reg.view<SplineComponent>().begin();
+	CHECK(reg.get<HierarchyComponent>(sp).parent == reg.view<TerrainComponent>().front());
+	CHECK(reg.get<SplineComponent>(sp).closed);
+	CHECK(L::linkOf(world, sp).body == pond);
+	CHECK(bits.config.mode == EditorMode::Spline);                 // over to the Spline tool, where the points are
+	CHECK(ctx.selection.primary() == sp);
+	CHECK(land().water.findBody(land().water.bodies[1].id)->fromSpline() == false);   // the other pond is untouched
+
+	// ── One undo gives the pond back as it was ──
+	REQUIRE(undo.undo());
+	CHECK(reg.view<SplineComponent>().size() == splines0);
+	REQUIRE(land().water.findBody(pond) != nullptr);
+	CHECK_FALSE(land().water.findBody(pond)->fromSpline());
+	CHECK(land().water.bodies.size() == 2u);
+
+	// Leave the file-static mode as the next test expects it.
+	bits.config.mode = EditorMode::Landscape;
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), float(H));
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
+	clickAt(ctx, wx, wy);
+	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
 }

@@ -11,6 +11,7 @@
 #include <HorizonScene/TerrainHeightmap.h> // greyscale heightmap → heights
 #include <HorizonScene/TerrainGenerate.h>  // Mountain: a formation grown in a dragged area
 #include <HorizonScene/WaterBrush.h>       // Water: a stroke into the landscape's water field
+#include <HorizonScene/WaterLake.h>        // Water: "To Lake" on a painted pond
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -65,6 +66,7 @@ static float       s_waterDigDepth    = 1.0f;   // bed this far below the level
 static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
 static int         s_waterResEdit     = 0;      // the grid slider's pending value
 static bool        s_waterResEditing  = false;
+static std::string s_waterNote;                 // what the last "To Lake" said
 static float       s_brushRadius     = 10.0f;  // inner full-strength radius (m)
 static float       s_falloffRadius   = 5.0f;   // transition width — strength falls linearly to 0
 static float       s_brushStrength   = 5.0f;
@@ -1113,6 +1115,80 @@ void renderPanel(AppContext& ctx)
                 else
                     ImGui::TextDisabled("%zu water bod%s, %u wet cells", wtc.water.bodies.size(),
                                         wtc.water.bodies.size() == 1 ? "y" : "ies", wtc.water.wetCells());
+
+                // ── The bodies: what is a lake and what is a pond ────────────
+                // A painted pond has no outline; "To Lake" reads its shore, draws a
+                // closed spline through it and hands the pond to that spline, so
+                // its points can reshape it from then on. A lake shows where its
+                // spline is. One undo step each.
+                if (!wtc.water.bodies.empty())
+                {
+                    ImGui::SeparatorText("Bodies");
+                    namespace L = HE::water::lake;
+                    for (const WF::Body& b : wtc.water.bodies)
+                    {
+                        ImGui::PushID(static_cast<int>(b.id));
+                        const Entity sp = b.fromSpline() ? ctx.world->findByEntityId(b.sourceSpline) : entt::null;
+                        const char* kind = !b.fromSpline() ? "Pond" : (sp != entt::null ? "Lake" : "Lake, spline gone");
+                        ImGui::Text("%s %u: level %.2f m, %u cells", kind, static_cast<unsigned>(b.id), b.level,
+                                    wtc.water.wetCells(b.id));
+                        if (!b.fromSpline())
+                        {
+                            if (EditorWidgets::button("To Lake"))
+                            {
+                                const L::Outline o = L::extractOutline(wtc, b.id);
+                                if (!o.ok)
+                                    s_waterNote = "This water is too small or too thin to outline.";
+                                else
+                                {
+                                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Water To Lake");
+                                    const uint16_t id = b.id;       // convertBody may not move the body, but the loop holds a reference
+                                    const L::Converted cv = L::convertBody(*ctx.world, terrainEnt2, id);
+                                    if (cv.spline == entt::null)
+                                        s_waterNote = cv.error;
+                                    else
+                                    {
+                                        char line[200];
+                                        std::snprintf(line, sizeof line, "Lake drawn with %u points%s%s", cv.points,
+                                                      cv.islands ? "; the island inside is filled" : "",
+                                                      cv.pieces > 1 ? "; smaller pieces stay as brush water" : "");
+                                        s_waterNote = line;
+                                        // Over to the Spline tool with the new spline selected: its
+                                        // points are what edits the lake now.
+                                        ctx.selection.clear();
+                                        ctx.selection.add(cv.spline);
+                                        ctx.editorConfig.mode = EditorMode::Spline;
+                                        if (ctx.noteEntityEdited) ctx.noteEntityEdited(terrainEnt2);
+                                    }
+                                }
+                                ImGui::PopID();
+                                break;      // the body list may have changed under the loop
+                            }
+                            EditorWidgets::helpForLabel("To Lake");
+                        }
+                        else if (sp != entt::null)
+                        {
+                            if (EditorWidgets::button("Select Spline"))
+                            {
+                                ctx.selection.clear();
+                                ctx.selection.add(sp);
+                                ctx.editorConfig.mode = EditorMode::Spline;
+                            }
+                            EditorWidgets::helpForLabel("Select Spline");
+                        }
+                        else if (EditorWidgets::button("Detach"))
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Detach Lake");
+                            L::detach(wtc, b.id);
+                            ImGui::PopID();
+                            break;
+                        }
+                        else
+                            EditorWidgets::helpForLabel("Detach");
+                        ImGui::PopID();
+                    }
+                    if (!s_waterNote.empty()) EditorWidgets::hint("%s", s_waterNote.c_str());
+                }
 
                 ImGui::Spacing();
                 if (EditorWidgets::dangerButton("Clear All Water") &&

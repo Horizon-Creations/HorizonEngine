@@ -423,36 +423,53 @@ Link linkOf(HorizonWorld& world, Entity spline)
     return l;
 }
 
+Entity landscapeUnder(HorizonWorld& world, Entity spline)
+{
+    auto& reg = world.registry();
+    const auto* sc = reg.valid(spline) ? reg.try_get<SplineComponent>(spline) : nullptr;
+    if (!sc || sc->controlPoints.empty()) return entt::null;
+    glm::vec3 sum(0.0f);
+    for (const glm::vec3& p : sc->controlPoints) sum += p;
+    const glm::vec3 centre = sum / static_cast<float>(sc->controlPoints.size());
+    const glm::vec3 atWorld = glm::vec3(HE::worldMatrixOf(world, spline) * glm::vec4(centre, 1.0f));
+    for (auto [te, tc] : reg.view<TerrainComponent>().each())
+    {
+        if (!hasArea(tc)) continue;
+        const glm::vec3 local = glm::vec3(glm::inverse(HE::worldMatrixOf(world, te)) * glm::vec4(atWorld, 1.0f));
+        if (std::abs(local.x) <= tc.sizeX * 0.5f && std::abs(local.z) <= tc.sizeZ * 0.5f) return te;
+    }
+    return entt::null;
+}
+
+std::string whyNot(HorizonWorld& world, Entity terrain, Entity spline)
+{
+    auto& reg = world.registry();
+    const auto* tc = reg.valid(terrain) ? reg.try_get<TerrainComponent>(terrain) : nullptr;
+    if (!tc) return "That is not a landscape.";
+    const auto* sc = reg.valid(spline) ? reg.try_get<SplineComponent>(spline) : nullptr;
+    if (!sc) return "That is not a spline.";
+    if (!hasArea(*tc)) return "The landscape has no area.";
+    if (!HE::spline::Curve(*sc).closed())
+        return "A lake needs a closed spline of at least three points. Close the shape first.";
+    if (linkOf(world, spline).body != kNoBody)
+        return "This spline already is a lake. Move its points to reshape it, or use Dig Again.";
+    std::vector<glm::vec2> poly;
+    if (!polygonOf(world, spline, terrain, poly)) return "The outline has no area.";
+    if (rasterizePolygon(poly, tc->sizeX, tc->sizeZ, std::max<uint32_t>(1, tc->water.res)).empty())
+        return "The outline lies outside the landscape.";
+    return {};
+}
+
 Created create(HorizonWorld& world, Entity terrain, Entity spline, const Params& p)
 {
     Created out;
+    out.error = whyNot(world, terrain, spline);
+    if (!out.error.empty()) return out;
     auto& reg = world.registry();
-    auto* tc = reg.valid(terrain) ? reg.try_get<TerrainComponent>(terrain) : nullptr;
-    if (!tc) { out.error = "That is not a landscape."; return out; }
-    const auto* sc = reg.valid(spline) ? reg.try_get<SplineComponent>(spline) : nullptr;
-    if (!sc) { out.error = "That is not a spline."; return out; }
-    if (!hasArea(*tc)) { out.error = "The landscape has no area."; return out; }
-    if (!HE::spline::Curve(*sc).closed())
-    {
-        out.error = "A lake needs a closed spline of at least three points. Close the shape first.";
-        return out;
-    }
-    if (linkOf(world, spline).body != kNoBody)
-    {
-        out.error = "This spline already is a lake. Move its points to reshape it, or use Dig Again.";
-        return out;
-    }
+    auto* tc = &reg.get<TerrainComponent>(terrain);
+    const auto* sc = &reg.get<SplineComponent>(spline);
     std::vector<glm::vec2> poly;
-    if (!polygonOf(world, spline, terrain, poly))
-    {
-        out.error = "The outline has no area.";
-        return out;
-    }
-    if (rasterizePolygon(poly, tc->sizeX, tc->sizeZ, std::max<uint32_t>(1, tc->water.res)).empty())
-    {
-        out.error = "The outline lies outside the landscape.";
-        return out;
-    }
+    polygonOf(world, spline, terrain, poly);       // whyNot has just proved it is there
 
     // The level is read from the ground as it is NOW, before the excavation.
     const float level = p.levelFromGround ? lowestGround(*tc, poly) + p.levelOffset : p.level;

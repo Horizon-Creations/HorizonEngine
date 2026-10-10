@@ -1654,6 +1654,66 @@ namespace
 	  "Lets go of the spline, so the next click on the ground starts a new line "
 	  "instead of adding to this one.",
 	  "", "editor#viewport" },
+
+	// ── Spline tool: the lake ────────────────────────────────────────────────
+	{ "Spline Tool/From Ground##lake", "Level From Ground",
+	  "Takes the water level from the lowest ground under the outline, plus "
+	  "Above Ground. Switch it off to type the level yourself. The ground is "
+	  "read before the bed is dug.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Above Ground##lake", "Lake Above Ground",
+	  "How far above the lowest ground under the outline the surface stands, "
+	  "in metres. At 0 the water is level with the lowest point of the bank.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Level##lake", "Lake Level",
+	  "The height of the surface, in metres on the landscape's own height scale "
+	  "(a landscape standing at Y = 100 with level 2 has its water at 102). On "
+	  "a lake that exists this moves the surface; the shape and the ground stay. "
+	  "One undo step per drag.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Dig Bed##lake", "Dig Bed",
+	  "Makes the lake with a bed: the ground inside the outline is lowered to "
+	  "Depth below the water level, with a Bank that eases back into the old "
+	  "ground. It only ever lowers. Off makes just the water, for a lake that "
+	  "fills a hollow that is already there.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Depth##lake", "Lake Depth",
+	  "How far below the water level the bed is dug, in metres. Used by Create "
+	  "Lake with Dig Bed on, and by Dig Again.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Bank##lake", "Lake Bank",
+	  "The width of the slope from the bed back up to the old ground, in "
+	  "metres, measured outward from the outline. 0 is a hard edge; a wide "
+	  "bank makes a gentle shore.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Clip To Ground##lake", "Clip To Ground",
+	  "A landscape setting, shared by every lake and every painted pond on it: "
+	  "the water surface stops where the ground comes up through it instead of "
+	  "reaching over the bank. Off draws the surface over the whole outline at "
+	  "its level.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Shore Overshoot##lake", "Shore Overshoot",
+	  "How far above the water the ground may stand and still count as under "
+	  "it, in metres, so the edge of the surface sits under the bank and not a "
+	  "hair short of it. The same landscape setting as in the Terrain details.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Create Lake", "",
+	  "Turns the closed outline into a lake: digs the bed (with Dig Bed on) and "
+	  "lays the water over it, at the level set above, in one undo step. From "
+	  "then on the points reshape the water only; the ground is dug again only "
+	  "when you press Dig Again. Water you paint with the Water brush on this "
+	  "lake stays when the points move.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Dig Again", "",
+	  "Digs the bed again under the lake's current outline, to Depth below "
+	  "its water level with the Bank slope. Moving points never digs by "
+	  "itself, so after reshaping the lake this is how the new shape gets its "
+	  "bed. It only lowers; one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Remove Lake", "",
+	  "Takes the lake's water away and cuts its link to the spline. The spline "
+	  "stays, and so does the ground that was dug. One undo step.",
+	  "", "editor#landscape-mode" },
 	{ "Trail/Visible", "",
 	  "Off hides the band. Points keep being dropped and keep ageing, so switching "
 	  "it back on shows the trail as it would have been.",
@@ -6739,6 +6799,25 @@ namespace
 	  "it: a shore can only be as fine as that, so a large landscape wants more "
 	  "cells for small ponds. Applied when you let go of the slider, keeping "
 	  "the shape of what is painted; one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/To Lake", "",
+	  "Turns this painted pond into a lake: reads the outline of its water, "
+	  "draws a closed spline through it (a handful of points, in the Outliner "
+	  "under the landscape) and gives the pond to that spline, with the Spline "
+	  "tool switched on so you can move the points. The surface keeps its "
+	  "level. The ragged painted edge becomes the smooth curve of the spline, "
+	  "an island inside the pond is filled (erase it again with the brush; the "
+	  "erase stays when the points move), and a piece of the pond that is "
+	  "separate from the main one stays as painted water. One undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Select Spline", "",
+	  "Selects the spline this lake was drawn from and switches to the Spline "
+	  "tool, where its points and the Lake controls are.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Detach", "",
+	  "This lake's spline has been deleted, so the water has nothing to follow. "
+	  "Detach makes it a painted pond: the water stays exactly as it is, and "
+	  "it can be turned into a lake again with To Lake. One undo step.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Clear All Water", "",
 	  "Removes every body of water from the landscape — painted ponds and "

@@ -6,13 +6,22 @@
 #include "EditorUndo.h"
 #include "EditorWidgets.h"
 #include <HorizonScene/Components/EditorLockComponent.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/SplineComponent.h>
+#include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/SplineCurve.h>
+#include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/WaterField.h>
+#include <HorizonScene/WaterLake.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <string>
+#include <vector>
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
@@ -206,6 +215,199 @@ bool updateInViewport(AppContext& ctx,
 
 #endif // HE_IMGUI_ENABLED
 
+#ifdef HE_IMGUI_ENABLED
+namespace
+{
+	namespace L = HE::water::lake;
+
+	// The Lake section's memory: the numbers the next lake is made with (kept
+	// between lakes, like the brush sizes), and the last thing the section did,
+	// for the spline it happened to.
+	L::Params  s_lake;
+	std::string s_lakeNote;
+	HE::UUID   s_lakeNoteFor{};
+	bool       s_levelLive = false;     // a drag of the level is running: its undo step is taken
+	bool       s_clipLive  = false;
+
+	void say(AppContext& ctx, Entity spline, std::string text)
+	{
+		s_lakeNote    = std::move(text);
+		s_lakeNoteFor = ctx.world->entityId(spline);
+	}
+
+	// A DragFloat whose whole drag is ONE undo step: the snapshot is taken on the
+	// first frame that changes the value, before it is written. `live` remembers
+	// that the step is already taken until the drag lets go.
+	bool dragOneStep(AppContext& ctx, const char* label, float* v, float speed, float lo, float hi,
+	                 const char* fmt, const char* undoLabel, bool& live)
+	{
+		float tmp = *v;
+		const bool changed = ImGui::DragFloat(label, &tmp, speed, lo, hi, fmt);
+		if (changed)
+		{
+			if (!live && ctx.undoSys) ctx.undoSys->snapshotNow(undoLabel);
+			live = true;
+			*v = tmp;
+		}
+		if (ImGui::IsItemDeactivated()) live = false;
+		return changed;
+	}
+
+	// Shore clipping is the landscape's setting, not the lake's: the sheet of every
+	// body on it, brushed or drawn, stops where the ground comes up. Shown here
+	// because it decides how a lake meets its bank.
+	void clippingRows(AppContext& ctx, Entity terrain)
+	{
+		auto* tc = ctx.world->registry().try_get<TerrainComponent>(terrain);
+		if (!tc) return;
+		bool clip = tc->water.clipToGround;
+		if (EditorWidgets::checkbox("Clip To Ground##lake", &clip))
+		{
+			if (ctx.undoSys) ctx.undoSys->snapshotNow("Shore Clipping");
+			HE::water::setShoreClip(*tc, clip, tc->water.shoreOvershoot);
+		}
+		EditorWidgets::helpForLabel("Clip To Ground##lake");
+		ImGui::BeginDisabled(!tc->water.clipToGround);
+		float over = tc->water.shoreOvershoot;
+		if (dragOneStep(ctx, "Shore Overshoot##lake", &over, 0.01f, 0.0f, HE::water::kMaxShoreOvershoot,
+		                "%.2f m", "Shore Clipping", s_clipLive))
+			HE::water::setShoreClip(*tc, tc->water.clipToGround, over);
+		EditorWidgets::helpForLabel("Shore Overshoot##lake");
+		ImGui::EndDisabled();
+	}
+
+	// The lake of a closed spline: made here, reshaped by moving its points,
+	// dug again on request.
+	void lakeSection(AppContext& ctx, Entity spline)
+	{
+		HorizonWorld& world = *ctx.world;
+		auto& reg = world.registry();
+		ImGui::Spacing();
+		ImGui::SeparatorText("Lake");
+
+		const L::Link link = L::linkOf(world, spline);
+		const bool isLake = link.body != HE::water::kNoBody;
+		const Entity terrain = isLake ? link.terrain : L::landscapeUnder(world, spline);
+		if (terrain == entt::null)
+		{
+			ImGui::TextDisabled("Not over a landscape");
+			EditorWidgets::hint("Draw the closed shape over a landscape to make a lake of it.");
+			return;
+		}
+		if (const auto* n = reg.try_get<NameComponent>(terrain))
+			ImGui::TextDisabled("Landscape: %s", n->name.c_str());
+
+		if (!isLake)
+		{
+			const std::string why = L::whyNot(world, terrain, spline);
+			if (!why.empty()) EditorWidgets::hint("%s", why.c_str());
+
+			EditorWidgets::checkbox("From Ground##lake", &s_lake.levelFromGround);
+			EditorWidgets::helpForLabel("From Ground##lake");
+			if (s_lake.levelFromGround)
+			{
+				ImGui::DragFloat("Above Ground##lake", &s_lake.levelOffset, 0.05f, -20.0f, 50.0f, "%.2f m");
+				EditorWidgets::helpForLabel("Above Ground##lake");
+			}
+			else
+			{
+				ImGui::DragFloat("Level##lake", &s_lake.level, 0.1f, -10000.0f, 10000.0f, "%.2f m");
+				EditorWidgets::helpForLabel("Level##lake");
+			}
+			EditorWidgets::checkbox("Dig Bed##lake", &s_lake.dig);
+			EditorWidgets::helpForLabel("Dig Bed##lake");
+			ImGui::BeginDisabled(!s_lake.dig);
+			ImGui::DragFloat("Depth##lake", &s_lake.depth, 0.05f, 0.0f, 200.0f, "%.2f m");
+			EditorWidgets::helpForLabel("Depth##lake");
+			ImGui::DragFloat("Bank##lake", &s_lake.bank, 0.1f, 0.0f, 500.0f, "%.1f m");
+			EditorWidgets::helpForLabel("Bank##lake");
+			ImGui::EndDisabled();
+			s_lake.levelOffset = std::clamp(s_lake.levelOffset, -20.0f, 50.0f);
+			s_lake.depth = std::max(0.0f, s_lake.depth);
+			s_lake.bank  = std::max(0.0f, s_lake.bank);
+			clippingRows(ctx, terrain);
+
+			ImGui::BeginDisabled(!why.empty());
+			if (EditorWidgets::primaryButton("Create Lake", ImVec2(-1.0f, 0.0f)))
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow("Create Lake");
+				const L::Created c = L::create(world, terrain, spline, s_lake);
+				if (c.ok)
+				{
+					char line[160];
+					std::snprintf(line, sizeof line, "Lake made: level %.2f m, %u cells of water%s", c.level, c.cells,
+					              c.ground ? ", bed dug" : "");
+					say(ctx, spline, line);
+					noteEdited(ctx, terrain);
+					noteEdited(ctx, spline);
+				}
+				else
+					say(ctx, spline, c.error);
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Create Lake");
+		}
+		else
+		{
+			auto* tc = reg.try_get<TerrainComponent>(terrain);
+			HE::water::Body* body = tc ? tc->water.findBody(link.body) : nullptr;
+			if (!body) return;
+			ImGui::TextDisabled("%u cells of water", tc->water.wetCells(body->id));
+
+			float level = body->level;
+			if (dragOneStep(ctx, "Level##lake", &level, 0.05f, -10000.0f, 10000.0f, "%.2f m", "Lake Level", s_levelLive))
+			{
+				HE::water::setLevel(*tc, body->id, level);
+				noteEdited(ctx, terrain);
+			}
+			EditorWidgets::helpForLabel("Level##lake");
+			clippingRows(ctx, terrain);
+
+			ImGui::Spacing();
+			ImGui::DragFloat("Depth##lake", &s_lake.depth, 0.05f, 0.0f, 200.0f, "%.2f m");
+			EditorWidgets::helpForLabel("Depth##lake");
+			ImGui::DragFloat("Bank##lake", &s_lake.bank, 0.1f, 0.0f, 500.0f, "%.1f m");
+			EditorWidgets::helpForLabel("Bank##lake");
+			s_lake.depth = std::max(0.0f, s_lake.depth);
+			s_lake.bank  = std::max(0.0f, s_lake.bank);
+			if (EditorWidgets::button("Dig Again", ImVec2(-1.0f, 0.0f)))
+			{
+				// The world as it is now, kept aside: pressed on a bed that is already
+				// as deep as asked, nothing moves, and an undo step for that would be a
+				// step that appears to do nothing.
+				std::vector<uint8_t> before;
+				if (ctx.undoSys) SceneSerializer().saveToMemory(world, before);
+				const TerrainSculpt::Result r = L::dig(world, spline, s_lake.depth, s_lake.bank);
+				if (r.ok && r.changed > 0)
+				{
+					if (ctx.undoSys && !before.empty()) ctx.undoSys->pushSnapshot(std::move(before), "Dig Lake");
+					noteEdited(ctx, terrain);
+				}
+				char line[96];
+				std::snprintf(line, sizeof line, r.changed > 0 ? "Bed dug: %u vertices lowered"
+				                                               : "The bed is already that deep", r.changed);
+				say(ctx, spline, line);
+			}
+			EditorWidgets::helpForLabel("Dig Again");
+			EditorWidgets::hint("Moving the points reshapes the water only. The ground is dug again "
+			                    "only when you press Dig Again.");
+
+			if (EditorWidgets::dangerButton("Remove Lake"))
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow("Remove Lake");
+				L::remove(world, spline);
+				say(ctx, spline, "Lake removed, the ground stays as it is");
+				noteEdited(ctx, terrain);
+			}
+			EditorWidgets::helpForLabel("Remove Lake");
+		}
+
+		if (!s_lakeNote.empty() && s_lakeNoteFor == world.entityId(spline))
+			EditorWidgets::hint("%s", s_lakeNote.c_str());
+	}
+}
+#endif
+
 void renderPanel(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -265,6 +467,14 @@ void renderPanel(AppContext& ctx)
 	}
 	else
 		ImGui::TextDisabled("Click a point to select it");
+
+	// A closed shape can become a lake (and one that is a lake shows its controls).
+	if (closed && s.controlPoints.size() >= 3)
+		lakeSection(ctx, active);
+	else if (HE::water::lake::linkOf(world, active).body != HE::water::kNoBody)
+		lakeSection(ctx, active);     // a lake that was opened or cut down: its water waits, its controls stay
+	else
+		EditorWidgets::hint("Close the line with three or more points to make a lake of it.");
 
 	ImGui::Spacing();
 	if (EditorWidgets::button("New Spline"))

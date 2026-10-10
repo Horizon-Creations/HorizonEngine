@@ -177,6 +177,16 @@ namespace HE::water::lake
     struct Link { Entity terrain = entt::null; uint16_t body = kNoBody; };
     Link linkOf(HorizonWorld& world, Entity spline);
 
+    // The landscape a spline lies over: the first one whose area contains the
+    // centre of the spline's control points (in that landscape's own space), or
+    // entt::null. What the Lake panel offers as the lake's landscape.
+    Entity landscapeUnder(HorizonWorld& world, Entity spline);
+
+    // Why `create` would refuse, as a sentence for the user; empty when it would go
+    // ahead. Lets a panel enable its button, and take its undo snapshot only for an
+    // action that will happen.
+    std::string whyNot(HorizonWorld& world, Entity terrain, Entity spline);
+
     struct Created
     {
         bool        ok = false;

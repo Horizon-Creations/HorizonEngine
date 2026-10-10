@@ -10,8 +10,12 @@
 
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/SplineComponent.h>
+#include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/TerrainMeshGenerator.h>   // terrainHeightAt
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/WaterField.h>
+#include <HorizonScene/WaterLake.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>   // FindWindowByName: the id a label resolves to
@@ -562,4 +566,230 @@ TEST_CASE("spline ui: the picture carries a hint that says what a click does")
 	dump(r.shot, "spline-viewport-hint-line");
 	// The hint is ImGui draw data: it exists as text in the frame.
 	CHECK(r.shot.valid());
+}
+
+// ── The Lake section of the panel ────────────────────────────────────────────
+
+namespace
+{
+	namespace lakeui
+	{
+		constexpr int PH = 700;
+
+		// The Spline panel at a height that holds the whole Lake section.
+		ImGuiID frame(Rig& r, bool mouseDown, he_ui::Image* shot = nullptr)
+		{
+			ImGuiIO& io = ImGui::GetIO();
+			io.AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
+			ImGui::NewFrame();
+			ImGuizmo::BeginFrame();
+			r.viewportWindow(false, false);
+			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+			ImGui::SetNextWindowSize(ImVec2(float(PW) - 20.0f, float(PH) - 20.0f));
+			ImGui::Begin(kPanelWindow, nullptr,
+			             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+			             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+			SplineTool::renderPanel(r.ctx);
+			ImGui::End();
+			EditorWidgets::drawQueuedHelp();
+			const ImGuiID hovered = ImGui::GetHoveredID();
+			ImGui::Render();
+			if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+			return hovered;
+		}
+
+		ImGuiID idAt(Rig& r, float x, float y)
+		{
+			ImGui::GetIO().AddMousePosEvent(x, y);
+			frame(r, false);
+			return frame(r, false);
+		}
+
+		// A full-width row is found down one column, the way a user runs the pointer
+		// down a panel.
+		bool locate(Rig& r, const char* label, float& outX, float& outY)
+		{
+			ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
+			if (!w) return false;
+			const ImGuiID id = w->GetID(label);
+			for (float y = 14.0f; y < float(PH) - 14.0f; y += 3.0f)
+				if (idAt(r, 80.0f, y) == id) { outX = 80.0f; outY = y; return true; }
+			return false;
+		}
+
+		void click(Rig& r, float x, float y)
+		{
+			ImGui::GetIO().AddMousePosEvent(x, y);
+			frame(r, false);
+			frame(r, false);
+			frame(r, true);
+			frame(r, false);
+			frame(r, false);
+		}
+
+		TerrainComponent land(float height = 10.0f)
+		{
+			TerrainComponent tc;
+			tc.sizeX = tc.sizeZ = 64.0f;
+			tc.resolution = 65;
+			tc.dirty = false;
+			tc.water.res = 64;
+			tc.sculptHeights.assign(65u * 65u, height);
+			return tc;
+		}
+
+		TerrainComponent& landOf(Rig& r)
+		{
+			auto view = r.world.registry().view<TerrainComponent>();
+			REQUIRE(view.size() == 1u);
+			return r.world.registry().get<TerrainComponent>(*view.begin());
+		}
+		Entity theSpline(Rig& r)
+		{
+			auto view = r.world.registry().view<SplineComponent>();
+			REQUIRE(view.size() == 1u);
+			return *view.begin();
+		}
+		Entity theLand(Rig& r)
+		{
+			auto view = r.world.registry().view<TerrainComponent>();
+			REQUIRE(view.size() == 1u);
+			return *view.begin();
+		}
+	}
+}
+
+TEST_CASE("spline ui: the Lake section makes a lake of a closed spline in one undo step, and Dig Again digs only when it must")
+{
+	namespace L = HE::water::lake;
+	Rig r;
+	auto& reg = r.world.registry();
+
+	const Entity te = r.world.createEntity("Landscape");
+	reg.emplace<TransformComponent>(te);
+	reg.emplace<TerrainComponent>(te, lakeui::land());
+
+	// A round, closed spline of sixteen points around the middle, selected.
+	const Entity sp = r.world.createEntity("Shore");
+	reg.emplace<TransformComponent>(sp);
+	SplineComponent shape;
+	shape.closed = true;
+	for (int i = 0; i < 16; ++i)
+	{
+		const float a = 6.2831853f * float(i) / 16.0f;
+		shape.controlPoints.emplace_back(10.0f * std::cos(a), 10.0f, 10.0f * std::sin(a));
+	}
+	reg.emplace<SplineComponent>(sp, shape);
+	r.ctx.selection.add(sp);
+
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) lakeui::frame(r, false, i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	dump(img, "spline-panel-lake-before");
+
+	// The form is there, with the water level and the bed to choose.
+	float x = 0.0f, y = 0.0f;
+	CHECK_MESSAGE(lakeui::locate(r, "From Ground##lake", x, y), "no From Ground on the Lake section");
+	CHECK_MESSAGE(lakeui::locate(r, "Depth##lake", x, y), "no Depth on the Lake section");
+	CHECK_MESSAGE(lakeui::locate(r, "Bank##lake", x, y), "no Bank on the Lake section");
+	CHECK_MESSAGE(lakeui::locate(r, "Clip To Ground##lake", x, y), "no shore clipping on the Lake section");
+	REQUIRE_MESSAGE(lakeui::locate(r, "Create Lake", x, y), "no Create Lake button");
+	const std::vector<float> ground0 = lakeui::landOf(r).sculptHeights;
+	const size_t depth0 = r.undo.undoDepth();
+	CHECK(L::linkOf(r.world, sp).body == HE::water::kNoBody);
+
+	lakeui::click(r, x, y);
+	r.frame();                                           // every editor frame runs the viewport tool too
+	{
+		TerrainComponent& t = lakeui::landOf(r);
+		const L::Link l = L::linkOf(r.world, lakeui::theSpline(r));
+		REQUIRE(l.body != HE::water::kNoBody);
+		CHECK(r.undo.undoDepth() == depth0 + 1);           // dig and water are ONE step
+		CHECK(r.undo.undoLabel() == "Create Lake");
+		CHECK(t.water.wetCells(l.body) > 250u);
+		CHECK(t.water.bodies[0].level == doctest::Approx(10.0f));    // the lowest ground under the outline
+		CHECK(terrainHeightAt(t, 0.0f, 0.0f) == doctest::Approx(8.0f).epsilon(0.01));   // level 10 − the default depth 2
+		CHECK_FALSE(t.dirty);                              // the bed is a region edit, not a rebuild
+		CHECK(t.regionDirty);
+	}
+
+	// The panel now shows the lake's controls instead of the form.
+	for (int i = 0; i < 3; ++i) lakeui::frame(r, false);
+	CHECK_FALSE(lakeui::locate(r, "Create Lake", x, y));
+	CHECK(lakeui::locate(r, "Dig Again", x, y));
+	CHECK(lakeui::locate(r, "Remove Lake", x, y));
+	{
+		he_ui::Image after;
+		for (int i = 0; i < 3; ++i) lakeui::frame(r, false, i == 2 ? &after : nullptr);
+		dump(after, "spline-panel-lake-made");
+	}
+
+	// ── One undo takes the water AND the bed, redo brings them back ──
+	REQUIRE(r.undo.undo());
+	r.ctx.selection.clear();
+	r.frame();
+	CHECK(L::linkOf(r.world, lakeui::theSpline(r)).body == HE::water::kNoBody);
+	CHECK(lakeui::landOf(r).water.bodies.empty());
+	CHECK(lakeui::landOf(r).sculptHeights == ground0);
+	REQUIRE(r.undo.redo());
+	r.ctx.selection.clear();
+	r.frame();
+	REQUIRE(L::linkOf(r.world, lakeui::theSpline(r)).body != HE::water::kNoBody);
+	CHECK(terrainHeightAt(lakeui::landOf(r), 0.0f, 0.0f) == doctest::Approx(8.0f).epsilon(0.01));
+
+	// A lake that has come back from a snapshot is looked at once before it is
+	// followed: this is what the next world tick does, and it moves nothing.
+	CHECK(L::syncSplines(r.world) == 0u);
+
+	// ── The points move: the water follows by itself, the ground stays ──
+	{
+		const std::vector<float> dug = lakeui::landOf(r).sculptHeights;
+		auto& pts = reg.get<SplineComponent>(lakeui::theSpline(r));
+		for (glm::vec3& p : pts.controlPoints) p.x += 12.0f;
+		CHECK(L::syncSplines(r.world) == 1u);               // what the world tick does every frame
+		CHECK(lakeui::landOf(r).sculptHeights == dug);
+		CHECK(HE::water::bodyAt(lakeui::landOf(r), 12.0f, 0.0f) != HE::water::kNoBody);
+		CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) == doctest::Approx(10.0f));   // not dug there
+	}
+	// ... and Dig Again is what digs under the new place: one step.
+	for (int i = 0; i < 3; ++i) lakeui::frame(r, false);
+	const size_t depth1 = r.undo.undoDepth();
+	REQUIRE(lakeui::locate(r, "Dig Again", x, y));
+	lakeui::click(r, x, y);
+	r.frame();
+	CHECK(r.undo.undoDepth() == depth1 + 1);
+	CHECK(r.undo.undoLabel() == "Dig Lake");
+	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) == doctest::Approx(8.0f).epsilon(0.01));
+	REQUIRE(r.undo.undo());                                 // the dig alone: the water stays where the points put it
+	r.ctx.selection.clear();
+	r.frame();
+	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) == doctest::Approx(10.0f));
+	CHECK(HE::water::bodyAt(lakeui::landOf(r), 12.0f, 0.0f) != HE::water::kNoBody);
+	REQUIRE(r.undo.redo());
+	r.ctx.selection.clear();
+	r.frame();
+	CHECK(L::syncSplines(r.world) == 0u);
+
+	// ── Remove Lake: the water goes, the spline and the bed stay, one step ──
+	for (int i = 0; i < 3; ++i) lakeui::frame(r, false);
+	REQUIRE(lakeui::locate(r, "Remove Lake", x, y));
+	const size_t depth2 = r.undo.undoDepth();
+	lakeui::click(r, x, y);
+	r.frame();
+	CHECK(r.undo.undoDepth() == depth2 + 1);
+	CHECK(lakeui::landOf(r).water.bodies.empty());
+	CHECK(reg.all_of<SplineComponent>(lakeui::theSpline(r)));
+	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) == doctest::Approx(8.0f).epsilon(0.01));
+}
+
+TEST_CASE("spline ui: an open line offers no lake, only the way to one")
+{
+	Rig r;
+	r.clickGround({ -4.0f, 0.0f, 0.0f });
+	r.clickGround({ 4.0f, 0.0f, 0.0f });
+	REQUIRE(r.points() == 2);
+	for (int i = 0; i < 4; ++i) lakeui::frame(r, false);
+	float x = 0.0f, y = 0.0f;
+	CHECK_FALSE(lakeui::locate(r, "Create Lake", x, y));
+	CHECK_FALSE(lakeui::locate(r, "Depth##lake", x, y));
 }
