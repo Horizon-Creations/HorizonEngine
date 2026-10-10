@@ -85,5 +85,6 @@ Der Pfad je Instanz im **neuen** Binary (`HE_FOLIAGE_CLUSTERS=0`, Pass 2): 100k 
 - Die Bedingungen oben (Fremdlast, wechselnder Bildschirmzustand, Akku) machen jede absolute Zahl unsicher. Wer die Zahlen an einem ruhigen, gesperrten Mac im Stromsparmodus wiederholt, sollte die Basismessung
   mitlaufen lassen und die Verhältnisse vergleichen.
 - Nicht gemessen: 1 Mio. Instanzen, Graph-Materialien (Wind, Alpha), Kontrolllauf ohne Schatten, die Kosten eines Frames mit Kameraflug (Buckets wechseln).
+- Das Bild-A/B steht in `scripts/perf/foliage_pixel_ab.py` (Pfad je Instanz und Prüfmodus müssen bitgleich zum Vorher-Bild sein).
 - Rohdaten (`*.summary.json`, `*.conditions.txt`) dieser Läufe liegen nicht im Repository; die Aufrufe stehen in Abschnitt 1, die Tabellen kommen aus
   `python3 scripts/perf/foliage_ladder_table.py <label>.profile.json`.

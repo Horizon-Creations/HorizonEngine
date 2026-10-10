@@ -591,8 +591,9 @@ den Renderweg erledigt; der Scatter selbst reagiert weiterhin nur auf `dirty`).
 - **Build und Tests:** Release, `HE_ENABLE_SHADERC=ON`, `ctest -j4 --timeout 1500`: 257 von 257 grün (2 übersprungen: `runtime_size_app_*`).
   Die fünf roten Tests aus 2c sind nach dem Merge von `release/0.7.0` grün. Mutationsprobe: ohne den Kaskaden-Guard, ohne den Cap-Schnitt,
   ohne die Behandlung der angeschnittenen Buckets, ohne den Occluder-Guard und mit zu kleinen Cluster-Boxen scheitert je der passende Fall.
-- **Bilder**, Metal und OpenGL 4.1, `HE_DUMP_FOLIAGETEST` (`scripts/he_shot.py`-Kette, `HE_SKY_TIME=30`, AA aus, Wolken aus), jeweils gegen das Binary
+- **Bilder**, Metal und OpenGL 4.1, `HE_DUMP_FOLIAGETEST` (`HE_SKY_TIME=30`, AA aus, Wolken aus), jeweils gegen das Binary
   vom Stand `08a8938b` (Deploy-Klon, rpaths auf `@loader_path`). Wiederholung des Vorher-Laufs und `HE_MTL_INSTANCING=0` sind bitgleich.
+  Wiederholbar mit `python3 -I scripts/perf/foliage_pixel_ab.py --before <Klon> --after out/deploy/Editor [--rhi OpenGL]` (rohe BMPs, kein PIL nötig).
 
 | Fall | `HE_FOLIAGE_CLUSTERS=0` (neues Binary) | `=ordered` | Standard (Cluster) |
 |---|---|---|---|
