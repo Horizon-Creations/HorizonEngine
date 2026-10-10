@@ -20,6 +20,17 @@
 
 HorizonWorld::HorizonWorld()
 {
+    // The id index listens first, so the root's own id below is indexed too. It is
+    // fed by three signals instead of by trusting every writer: the id is written
+    // at more places than one API can cover (createEntity, setEntityId,
+    // applyPrefabJson's emplace_or_replace for a peer's subtree, entityUuid and the
+    // collab controller minting one for an entity that lacks it, tests that
+    // emplace), and an index that only knew some of them would be wrong without
+    // saying so.
+    m_registry.on_construct<EntityIdComponent>().connect<&HorizonWorld::onEntityIdSet>(*this);
+    m_registry.on_update<EntityIdComponent>().connect<&HorizonWorld::onEntityIdSet>(*this);
+    m_registry.on_destroy<EntityIdComponent>().connect<&HorizonWorld::onEntityIdDestroyed>(*this);
+
     m_rootEntity = m_registry.create();
     m_registry.emplace<NameComponent>(m_rootEntity, NameComponent{ "World" });
     m_registry.emplace<HierarchyComponent>(m_rootEntity);
@@ -419,15 +430,46 @@ Entity HorizonWorld::findByEntityId(const HE::UUID& id) const
     // A zero id is the "no identity" sentinel, never a real one — matching it
     // would return an arbitrary entity that merely lacks the component.
     if (id == HE::UUID{}) return entt::null;
-    for (auto [e, c] : m_registry.view<const EntityIdComponent>().each())
-        if (c.id == id) return e;
-    return entt::null;
+    const auto hit = m_idIndex.find(id);
+    if (hit == m_idIndex.end()) return entt::null;
+    return hit->second;
 }
 
 void HorizonWorld::setEntityId(Entity entity, const HE::UUID& id)
 {
     if (!m_registry.valid(entity)) return;
     m_registry.emplace_or_replace<EntityIdComponent>(entity, EntityIdComponent{ id });
+}
+
+void HorizonWorld::onEntityIdSet(entt::registry& registry, Entity entity)
+{
+    // Construct and update both land here: the component holds the NEW id by now,
+    // and whatever the entity was indexed under before is in m_idIndexed.
+    unindexEntityId(entity);
+    const HE::UUID id = registry.get<EntityIdComponent>(entity).id;
+    if (id == HE::UUID{}) return;   // "no identity" is not indexed, see findByEntityId
+    m_idIndex.emplace(id, entity);
+    m_idIndexed[entity] = id;
+}
+
+void HorizonWorld::onEntityIdDestroyed(entt::registry&, Entity entity)
+{
+    unindexEntityId(entity);
+}
+
+void HorizonWorld::unindexEntityId(Entity entity)
+{
+    const auto indexed = m_idIndexed.find(entity);
+    if (indexed == m_idIndexed.end()) return;
+    // Only this entity's own entry: another holder of the same id stays findable.
+    const auto holders = m_idIndex.equal_range(indexed->second);
+    for (auto it = holders.first; it != holders.second; ++it)
+        if (it->second == entity)
+        {
+            m_idIndex.erase(it);
+            break;
+        }
+    m_idIndexed.erase(indexed);
 }
 
 void HorizonWorld::destroyRecursive(Entity entity)
@@ -473,6 +515,7 @@ void HorizonWorld::clear()
     fireLevelUnloaded();
     m_origin = glm::dvec3(0.0);
     m_cellManifestJson.clear();
+    m_cellHeadJson.clear();
 
     // Live UI widgets track the world's lifetime (PIE stop / scene load) — but
     // ONLY a world-owned WM. An injected app-level WM (the game's persistent

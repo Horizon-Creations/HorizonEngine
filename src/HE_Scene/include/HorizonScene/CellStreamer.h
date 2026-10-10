@@ -29,6 +29,19 @@ namespace HE
 // runs on the main thread, cell by cell, within a time budget. Positions in the
 // files are absolute: a loaded cell's root sits at -origin, so cells land in the
 // right place under a floating origin (FloatingOrigin.h) too.
+//
+// Identity (Thema 164): a cell the C++ splitter wrote (CellSplit.h) carries a
+// "streaming" head with its format version, and from version 2 on its entities are
+// loaded with the ids they were saved with, not fresh ones — so whatever refers to
+// one of them by id (a prefab placement's bindings, a joint, a rig) finds it again
+// after the cell was unloaded and loaded. An id the world already holds is not
+// taken over: that entity gets a fresh one, and Stats::idCollisions and the log say
+// so. A cell without a head (scripts/split_scene_cells.py, or an editor from before
+// the head existed) is version 1 and loads as it always did, with fresh ids.
+
+// The format the C++ splitter writes. Version 2 added the manifest's "version" and
+// the fourth column of its list ("bodies"), and the "streaming" head of every cell.
+constexpr int kCellFormatVersion = 2;
 
 struct CellManifest
 {
@@ -37,7 +50,13 @@ struct CellManifest
 		int      x = 0;
 		int      z = 0;
 		uint32_t entities = 0;   // as the splitter counted them; informational
+		// Of those, the ones that can own a physics body: a rigid body or a collider
+		// (a collider alone gets none today, so this is an upper bound). Lets a loader
+		// see what a cell costs the physics world before it builds it. 0 when the
+		// manifest does not say (version 1).
+		uint32_t bodies = 0;
 	};
+	int               version      = 1;      // of the format, see kCellFormatVersion; missing = 1
 	float             cellSize     = 0.0f;   // m, edge of a grid square
 	float             loadRadius   = 0.0f;   // m, from the camera to the square
 	float             unloadRadius = 0.0f;   // m, >= loadRadius
@@ -107,6 +126,10 @@ public:
 		size_t unloads   = 0;   // cells destroyed since begin()
 		size_t failed    = 0;   // cells that could not be read or parsed
 		size_t cancelled = 0;   // reads dropped because the camera turned away
+		// Entities that kept a fresh id because the one stored in their (version 2)
+		// cell was already in the world: a copied cell file, or two copies of the
+		// scene in one project. Cumulative since begin().
+		size_t idCollisions = 0;
 	};
 
 	CellStreamer();

@@ -1,8 +1,9 @@
 # Entities pro Zelle streamen: Bauplan (Thema 164, Schritt 1)
 
 Stand 10.10.2026, Zweig `claude/entities-pro-zelle-streamen-nur-die-umgebung-der-kamera-exis`,
-Basis `202e14f2` (= `origin/release/0.7.0`). **Nur Doku, kein Produktcode.** Zeilennummern gelten
-für diesen Commit. Bezug: `docs/world-streaming-baseline-2026-10-06.md` (Thema 153, §9.4, §10.5–10.7,
+Basis `202e14f2` (= `origin/release/0.7.0`). Die Abschnitte 0 bis 11 sind der Bauplan aus Schritt 1
+(**nur Doku**, Zeilennummern gelten für `202e14f2`); **Abschnitt 12 hält fest, was Schritt 2a daraus
+gebaut hat und was dabei anders war.** Bezug: `docs/world-streaming-baseline-2026-10-06.md` (Thema 153, §9.4, §10.5–10.7,
 §11.4–11.5) und der Plan von Thema 162 (`docs/render-extractor-shadow-pass-plan.md`, liegt nur auf
 `origin/claude/render-extractor-und-schatten-pass-einmal-pro-frame-statt-me`, Commit `16947c08`,
 noch nicht auf `release/0.7.0`; hier nur zitiert, nicht übernommen).
@@ -574,3 +575,93 @@ out/build/release/tests/he_tests --no-skip --test-case='Cell streaming bench*'
 # Nach jeder neuen Registry-Row und jeder neuen Komponente: voller ctest, nicht nur -tc
 (cd out/build/release && ctest -j4 --timeout 1500)
 ```
+
+## 12. Schritt 2a: was gebaut ist und was der Bauplan anders sah (10.10.2026)
+
+Teil 2a (stabile Identität) steht auf dem Zweig. Die Abnahme ist ein Test, kein Zähler:
+`test_cell_split.cpp`, „A prefab house in a cell: unloaded and loaded again it is the same entities,
+bindings intact“ (Split, Streamen, Entladen, Wiederladen, Merge: dieselben UUIDs, dieselben
+`PrefabInstance`-Bindungen, derselbe Datensatz je Entity). Dazu die Negativkontrolle „Cells without the
+streaming head load as they always did“ (ohne Kopf: frische Ids, die Bindungen zeigen ins Leere, das ist L2).
+Die neuen Tests wurden mit absichtlich kaputt gemachtem Code geprüft: ohne den `on_update`-Hörer, ohne die
+Bindungsprüfung des Splitters und ohne `preserveIds` werden genau die zugehörigen Fälle rot (und, beim
+`on_update`-Hörer, auch Fälle in `test_scene_serializer` und `test_prefab`).
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| UUID-Index (5.1) | `HorizonWorld::findByEntityId`, O(1) | gepflegt über die entt-Signale `on_construct/on_update/on_destroy` von `EntityIdComponent`, mit Rückabbildung Entity → UUID; zwei Halter einer Id bleiben beide auffindbar. Nicht erfasst: ein Schreiben direkt in die Komponente (`registry.get<EntityIdComponent>(e).id = x`), das feuert kein Signal; drei Teststellen in `test_prefab.cpp` standen so und gehen jetzt über `setEntityId`. `HorizonWorld` ist jetzt ausdrücklich nicht kopier- und verschiebbar (die Hörer zeigen auf `this`; vorher war es nur implizit so) |
+| `preserveIds` auf dem Zellpfad (4.3) | `SceneSerializer::AdditiveOptions`, `CellStreamer::update` | der Streamer setzt es, wenn der Kopf `streaming.version >= 2` sagt; eine belegte Id wird nicht übernommen (frische Id, eine Sammelwarnung je Ladevorgang, `Stats::idCollisions`). Zonen und alle anderen additiven Laden bleiben bei frischen Ids |
+| Klassentabelle (4.4) | `CellSplit.cpp`, `kComponentClasses` | Zelle-statisch: die alten Schlüssel plus `prefab`, `particlesystem`, `skeletalmesh`, `animator`, `animatorblend`, `propertyanimator`; alles Unbekannte bleibt Resident. Zelle-zustandsbehaftet ist als Klasse da, enthält aber noch nichts (3b) |
+| Prefab-Bindungen im Splitter | `bindingsStayInside` | ein Teilbaum mit einer Prefab-Bindung auf eine Entity außerhalb des Teilbaums bleibt in der Basis (ein herausgezogenes Kind der Instanz) |
+| Manifest v2, Kopf (4.1, 4.2) | `CellManifest::version`, `Cell::bodies`; Kopf `streaming` je Zelle | `bodies` = Entities mit Rigidbody oder Collider, eine obere Schranke: ein Collider allein baut heute keinen Body (`PhysicsWorld::buildBodyFor` braucht ein `RigidBodyComponent`). Der Streamer liest `bodies` noch nicht (3a) |
+| Kopf in der Welt | `HorizonWorld::cellHeadJson` | siehe Befund 1 |
+| Play-Warnung | `EditorApplication::setPlayMode` | siehe Befund 4 |
+| Texte | Profiler-Tab, Tooltip *Split into Streaming Cells*, Kopf von `split_scene_cells.py` | sagen, was jetzt wandert; das Skript schreibt weiter Version 1 |
+
+**Befunde, die der Bauplan anders sah oder nicht kannte**
+
+1. **Der Export schreibt jede Szene neu.** `ExportDialogPanel.cpp` lädt jede `.hescene` des Projekts in eine
+   `HorizonWorld` und speichert sie mit `saveToMemory` (`:1282–1289`); `buildSceneJson` schreibt nur
+   `entities`, `version`, `levelScript` und `cells`. Ein Kopf, der nur in der Datei steht, wäre im Pak weg, und das
+   ausgelieferte Spiel würde jede Zelle wieder mit frischen Ids laden. Deshalb trägt die Welt den Kopf wie das
+   Manifest (`applySceneJson` liest ihn, `buildSceneJson` schreibt ihn, `clear()` löscht ihn; eine additive Ladung
+   fasst ihn nie an). Test: „The cell head survives the export's load and save“. Dasselbe gilt für jeden künftigen
+   Schlüssel auf oberster Ebene einer Zelldatei; `cellFolders` (nur für den Merge) geht im Pak verloren, das ist gewollt.
+2. **`audioSource` bleibt Resident, anders als in 4.4.** Der Plan nimmt an, dass `playOnStart` nach dem Laden
+   neu läuft. `AudioSystem::playOnStart` läuft aber nur beim Szenenstart und beim Szenenwechsel
+   (`GameApplication.cpp:1370`, `:1879`), nie für das, was eine Zelle (oder Zone) bringt, und niemand stoppt die
+   Stimme (`AudioSourceComponent::handle`), wenn die Zelle geht. Eine Quelle in einer Zelle bliebe stumm. Das gehört in den
+   Host (`ICellHost`, 2c/3b): Start für die `created`-Entities, `AudioEngine::stop(handle)` beim Entladen.
+3. **`animstatemachine` bleibt Resident:** `AnimatorHost::begin` bindet die Zustandsautomaten einmal beim
+   Szenenstart (`AnimatorHost.cpp:34`). `animationlayers`, `rootmotion`, `ik`, `sequenceplayer` sind nicht
+   geprüft (die beiden letzten nennen andere Entities) und bleiben in der Basis. `particlesystem`,
+   `skeletalmesh`, `animator`, `animatorblend`, `propertyanimator` halten nur Asset-Ids, ihr Laufzustand
+   liegt im eigenen Component, und ihre Systeme laufen je Frame über die Registry; der Rundlauf-Test
+   („The decorative components that may stream come back from a cell as they went in“) belegt die Werte, nicht
+   das Aussehen auf den Backends (Schritt 4).
+4. **L7 (Play zeigt nur die Basis) ist durch den Code belegt, nicht durch einen Lauf.**
+   `EditorApplication.cpp` enthält weder `CellStreamer` noch einen Streamer-Aufruf (nur `StreamingDebugView`
+   liest das Manifest), und `setPlayMode` sichert und stellt dieselbe Editor-Welt wieder her, die nach einem Split
+   nur die Basis enthält (`test_streaming_view`: `meshCount(world) == 0` nach dem Split). Ein GUI-Lauf war hier
+   nicht möglich (unter den `HE_DUMP_*`-Schaltern gibt es keinen für Play). Geliefert ist die Warnzeile; sie steht im
+   Post-Play-Bericht des Editors.
+5. **Ref-Hülle fehlt weiter (3a).** 2a prüft nur die Bindungen einer Prefab-Instanz. Verweise aus der Basis
+   in einen Zellen-Teilbaum (Gelenk, Rig, Seil) lösen jetzt auf, solange die Zelle geladen ist, und sind
+   `entt::null`, sobald sie entladen ist (R3); der Splitter verhindert das noch nicht.
+6. **Das Handbuch stimmt nicht mehr:** `HorizonEngineDocs` (Website-Checkout, nicht in diesem Repo) sagt, welche
+   Dinge in Zellen wandern. Aus dem Repo nicht änderbar; die Texte im Editor (Profiler-Tab, Tooltip) sind angepasst.
+7. **Fünf Tests sind auf `release/0.7.0` rot, bevor 2a etwas ändert:** `test_material_graph`, `test_culling`,
+   `test_terrain_tools_ui`, `test_assimpimport`, `test_editor_help` (gemessen mit einem vollen ctest auf dem
+   unveränderten Stand, Release, shaderc ON). Vier davon sind Thema 181; `test_culling` (zwei Fälle zur Himmels-Shader-Kopie:
+   „Dome clouds: Metal and GL march and shadow them the same way“, „Nebula: Metal's kSkyMSL copy matches the GL sky shader after
+   normalisation“) steht in dessen Liste nicht.
+
+8. **Prefab-Instanzen in Zellen werden vom Editor nicht abgeglichen, solange sie in Zellen liegen.** Der Abgleich
+   mit dem Prefab-Asset (`syncPrefabInstances`) läuft beim Öffnen und vor dem Speichern über die Editor-Welt, und
+   die enthält nach einem Split nur die Basis. Der Export lädt dagegen jede Szene einzeln und gleicht sie ab
+   (`syncPrefabsForExport`, auch jede Zelle; die Bindungen halten, weil der Ladevorgang dort die Ids wiederherstellt).
+   Wer ein Prefab ändert, sieht es in den Zellen des Editor-Stands also erst nach *Merge Cells into the Scene* und im Export.
+   Der Grund, aus dem das Skript `split_scene_cells.py` Instanzen in der Basis ließ („the editor keeps those in sync“), gilt
+   für Version-2-Zellen damit eingeschränkt weiter.
+
+**Gemessen** (Release, M-Serie, nebenbei lief Last, drei Läufe, daher nur die Größenordnung; `he_tests --no-skip --test-case='Id index bench*'`, läuft in der CI nicht):
+
+| Entities | `createEntity` mit Index | dasselbe ohne Hörer | Auflösen einer Id: Index | Auflösen einer Id: Scan (alt) |
+|---|---|---|---|---|
+| 50 000 | 31–34 ms | 9–13 ms | 0,06 µs (3 ms für 50 000) | 32 µs (6,4 ms für 200 Aufrufe) |
+| 200 000 | 141–170 ms | 25–50 ms | 0,10–0,12 µs (20–25 ms für 200 000) | 246 µs (49 ms für 200 Aufrufe) |
+
+Der Index macht das Auflösen einer Id 500- bis 2000-mal billiger (je nach Weltgröße) und das Anlegen einer
+Entity um rund 0,5 µs teurer (zwei knotenbasierte Hash-Einfügungen): bei einer
+ganzen 200k-Welt etwa 100 ms auf 2,7 s Ladezeit (153 §10.5), bei einer Zelle von 800 Entities etwa 0,4 ms. Der
+Speicher je Entity ist nicht gemessen (grob zwei Hash-Knoten, der Größenordnung nach 100 Byte); wer ihn senken
+will, ersetzt `m_idIndexed` durch einen Vektor nach Entity-Nummer und die Multimap durch eine flache Tabelle.
+
+**Offen für die folgenden Teile**
+
+- 2b: Anker, gestückelter Aufbau (die Anhänge-Frage aus 4.6 ist unberührt), `structureEpoch`, Zellansicht; der Streamer ignoriert `bodies` und die Klassenzahlen im Kopf noch.
+- 2c/3b: Audio-Start und -Stopp, Zustandsautomaten-Bindung, Skripte: gehören in den Zellen-Host.
+- 3a: Ref-Hülle im Splitter (heute nur die Prefab-Bindungen), Body-Reserve aus `bodies`.
+- Handbuch auf der Website nachziehen (Befund 6).

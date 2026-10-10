@@ -10544,6 +10544,17 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_playReportOpen = false;
 		Logger::setSink(&hePlayLogSink, this);
+		// A scene split into streaming cells has the game load them around the camera
+		// (HE::CellStreamer, GameApplication::updateCellStreaming). Play runs in THIS
+		// world, which after a split holds only the base, and nothing in the editor
+		// streams cells (Thema 164, docs/entity-cell-streaming-plan-2026-10-10.md L7).
+		// Said here, after the sink is in, so the post-play report carries it and an
+		// apparently empty scene is explained.
+		if (!m_editorWorld->cellManifestJson().empty())
+			HE_LOG_WARN(Editor, "%s", "Play shows only the base of this scene: it is split into "
+			            "streaming cells, and the editor does not stream them while playing. Merge "
+			            "the cells back (Profiler > Streaming > Merge Cells into the Scene) to play "
+			            "all of it, or run the game build.");
 		// Edits made while playing are not undoable. Clearing here only opens the
 		// session with an empty history; what keeps it that way is makeContext
 		// withholding the undo system while m_isPlaying (so no panel records) and

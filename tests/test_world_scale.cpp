@@ -549,6 +549,60 @@ TEST_CASE("Floating origin bench: one shift at 50k and 200k entities" * doctest:
 	}
 }
 
+// A measurement, not a check (does not run in CI): what the id index costs when an
+// entity is made, and what it saves when an id is looked up (Thema 164, step 2a).
+// The "without" column is the same creation work on a registry nobody listens to,
+// which is what createEntity cost before the index; the scan is the old
+// findByEntityId, run for 200 ids only because all of them would take minutes.
+//   out/build/release/tests/he_tests --no-skip --test-case='Id index bench*'
+TEST_CASE("Id index bench: creating entities and resolving ids, against the scan it replaced" * doctest::skip())
+{
+	using Clock = std::chrono::steady_clock;
+	const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+	for (const int n : { 50000, 200000 })
+	{
+		HorizonWorld world;
+		std::vector<HE::UUID> ids;
+		ids.reserve(static_cast<size_t>(n));
+		const auto t0 = Clock::now();
+		for (int i = 0; i < n; ++i) ids.push_back(world.entityId(world.createEntity("E")));
+		const auto t1 = Clock::now();
+
+		entt::registry bare;
+		const Entity root = bare.create();
+		bare.emplace<HierarchyComponent>(root);
+		const auto t2 = Clock::now();
+		for (int i = 0; i < n; ++i)
+		{
+			const Entity e = bare.create();
+			bare.emplace<NameComponent>(e, NameComponent{ "E" });
+			bare.emplace<HierarchyComponent>(e);
+			bare.emplace<EntityIdComponent>(e, EntityIdComponent{ HE::UUID::generate() });
+			bare.get<HierarchyComponent>(root).children.push_back(e);
+			bare.get<HierarchyComponent>(e).parent = root;
+		}
+		const auto t3 = Clock::now();
+
+		const auto t4 = Clock::now();
+		size_t found = 0;
+		for (const HE::UUID& id : ids) found += world.findByEntityId(id) != entt::null ? 1 : 0;
+		const auto t5 = Clock::now();
+		size_t scanned = 0;
+		const int scans = 200;
+		for (int i = 0; i < scans; ++i)
+		{
+			const HE::UUID& want = ids[static_cast<size_t>(i) * ids.size() / static_cast<size_t>(scans)];
+			for (auto [e, c] : world.registry().view<const EntityIdComponent>().each())
+				if (c.id == want) { ++scanned; break; }
+		}
+		const auto t6 = Clock::now();
+		MESSAGE(n << " entities: create " << ms(t1 - t0) << " ms with the index, " << ms(t3 - t2)
+		        << " ms without; " << n << " lookups " << ms(t5 - t4) << " ms by index (" << found
+		        << " found), " << scans << " lookups " << ms(t6 - t5) << " ms by scan (" << scanned
+		        << " found)");
+	}
+}
+
 TEST_CASE("Floating origin: a millimetre step 100 km out survives only after the shift")
 {
 	// The witness for the precision table (docs/world-streaming-baseline-
@@ -628,6 +682,18 @@ TEST_CASE("CellManifest: reads the splitter's object, refuses a malformed one")
 	CHECK(m.cellPath(-1, 2) == "Content/W.cells/cell_-1_2.hescene");
 	CHECK(HE::CellManifest::cellIndex(-0.5, 100.0f) == -1);   // floor, not truncation
 	CHECK(HE::CellManifest::cellIndex(99.9, 100.0f) == 0);
+	// A manifest from before the format had a version is version 1, and its rows
+	// end at three columns.
+	CHECK(m.version == 1);
+	CHECK(m.cells[0].bodies == 0u);
+	// Version 2 says so, and adds the number of entities that can own a body.
+	REQUIRE(HE::CellManifest::parse(
+		R"({"version": 2, "cellSize": 100, "dir": "d", "list": [[0, 0, 5, 3], [1, 0, 6]]})", m));
+	CHECK(m.version == 2);
+	REQUIRE(m.cells.size() == 2);
+	CHECK(m.cells[0].entities == 5u);
+	CHECK(m.cells[0].bodies == 3u);
+	CHECK(m.cells[1].bodies == 0u);   // a short row is not an error
 
 	CHECK_FALSE(HE::CellManifest::parse("not json", m));
 	CHECK(m.empty());

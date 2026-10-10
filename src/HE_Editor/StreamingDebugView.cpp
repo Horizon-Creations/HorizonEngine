@@ -372,9 +372,10 @@ void drawCells(AppContext& ctx)
 			return;
 		}
 		ImGui::TextDisabled("This scene does not stream in cells: the game loads all of it at once. "
-		                    "Splitting moves its placed meshes, point and spot lights, static bodies "
-		                    "and decals into one file per square; the game then loads the squares "
-		                    "around the camera.");
+		                    "Splitting moves its placed meshes, point and spot lights, static bodies, "
+		                    "decals and placed prefabs into one file per square; the game then loads "
+		                    "the squares around the camera. Play in the editor shows only what stays "
+		                    "in the scene.");
 		static HE::CellSplitOptions s_options;
 		EditorWidgets::Row::dragFloat("Cell size (m)##cellsplit", &s_options.cellSize, 8.0f, 16.0f, 100000.0f, "%.0f");
 		EditorWidgets::Row::dragFloat("Load radius (m), 0 = 1.5 cells##cellsplit", &s_options.loadRadius, 8.0f,

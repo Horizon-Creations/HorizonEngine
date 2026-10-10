@@ -991,6 +991,11 @@ namespace
 		// Cell manifest of a split scene (HE::CellStreamer), verbatim.
 		if (const std::string& cells = world.cellManifestJson(); !cells.empty())
 			scene["cells"] = json::parse(cells, nullptr, /*allow_exceptions=*/false);
+		// And the head of a scene that is itself a streaming cell, for the same
+		// reason: the export loads every project scene into a world and saves it
+		// again, and what the world does not carry does not reach the pak.
+		if (const std::string& head = world.cellHeadJson(); !head.empty())
+			scene["streaming"] = json::parse(head, nullptr, /*allow_exceptions=*/false);
 
 		return scene;
 	}
@@ -2017,6 +2022,8 @@ namespace
 			world.setLevelScriptJson(scene["levelScript"].dump());
 		if (const auto cells = scene.find("cells"); cells != scene.end() && cells->is_object())
 			world.setCellManifestJson(cells->dump());
+		if (const auto head = scene.find("streaming"); head != scene.end() && head->is_object())
+			world.setCellHeadJson(head->dump());
 
 		if (!scene.contains("entities")) return true; // empty scene — valid
 
@@ -2099,7 +2106,8 @@ namespace
 	// root, which is parented to world.rootEntity() by createEntity). The loaded
 	// scene's children are grafted under the existing world root without clearing it.
 	bool applyAdditiveJson(HorizonWorld& world, const json& scene,
-	                       std::vector<Entity>* outCreated = nullptr)
+	                       std::vector<Entity>* outCreated = nullptr,
+	                       const SceneSerializer::AdditiveOptions& options = {})
 	{
 		if (!scene.contains("entities")) return true;
 
@@ -2113,6 +2121,18 @@ namespace
 		// copy of the scene into a world that may already contain one, and
 		// restoring would give both copies the same identities. Each graft keeps
 		// the ids minted at creation, so it is a distinct instance.
+		//
+		// options.preserveIds is the exception, for a load that happens once per
+		// file — a streamed cell (HE::CellStreamer). Its entities are destroyed
+		// again when the camera moves on, and what refers to them by id (a prefab
+		// placement's bindings, a joint, a rig's target) has to find them again
+		// when it comes back. The double graft the default exists to prevent is
+		// still caught, by asking the world: an id it holds already is not taken
+		// over. That entity keeps the fresh id it was created with, which only
+		// costs the references to it. The records stay addressed by their stored
+		// key below either way, so the hierarchy is rebuilt as the file says.
+		size_t      collisions = 0;
+		std::string firstCollision;
 		for (auto& eJson : scene["entities"])
 		{
 			const HE::UUID key  = entityKeyOf(eJson);
@@ -2121,6 +2141,17 @@ namespace
 			// createEntity() parents to world.rootEntity() automatically, which is
 			// exactly what the source scene's own root needs too.
 			Entity e = world.createEntity(name);
+
+			if (options.preserveIds && hasStoredUuid(eJson) && key != HE::UUID{})
+			{
+				if (world.findByEntityId(key) == entt::null)
+					world.setEntityId(e, key);
+				else
+				{
+					if (collisions == 0) firstCollision = name;
+					++collisions;
+				}
+			}
 
 			idMap[key] = e;
 			if (outCreated) outCreated->push_back(e);
@@ -2132,6 +2163,18 @@ namespace
 			// clipboard (serializeSubtree does not write it).
 			if (eJson.value("locked", false))
 				registry.emplace_or_replace<EditorLockComponent>(e);
+		}
+
+		// One line for the whole load, not one per entity: a copied cell file
+		// collides on every record it has.
+		if (collisions > 0)
+		{
+			HE_LOG_WARN(Serialize,
+			            "Additive load: %zu of %zu entities (the first is '%s') already had their stored "
+			            "id in the world and got fresh ones — a second copy of the same scene or cell "
+			            "file. What refers to them by id will not find them.",
+			            collisions, scene["entities"].size(), firstCollision.c_str());
+			if (options.idCollisions) *options.idCollisions += collisions;
 		}
 
 		// Pass 2: rebuild hierarchy (only within the newly loaded entities)
@@ -2804,6 +2847,14 @@ bool SceneSerializer::loadAdditiveFromJson(HorizonWorld& world, const json& scen
 {
     if (!scene.is_object()) return false;
     return applyAdditiveJson(world, scene, outCreated);
+}
+
+bool SceneSerializer::loadAdditiveFromJson(HorizonWorld& world, const json& scene,
+                                           std::vector<Entity>* outCreated,
+                                           const AdditiveOptions& options)
+{
+    if (!scene.is_object()) return false;
+    return applyAdditiveJson(world, scene, outCreated, options);
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────

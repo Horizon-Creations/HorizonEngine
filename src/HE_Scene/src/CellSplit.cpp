@@ -20,15 +20,81 @@ namespace HE
 
 namespace
 {
-// Components a placed thing may carry and still move into a cell — the
-// splitter script's MOVABLE set. Anything else keeps its subtree in the base.
-bool movableKey(const std::string& k)
+// ── What may move into a cell: the streaming classes (Thema 164, plan 4.4) ─────
+// The one table the split decides by. A subtree goes into a cell only when EVERY
+// entity in it carries nothing but components of a class that moves, so a key that
+// is not listed here — a component somebody adds tomorrow — keeps its subtree in
+// the base until somebody decides otherwise: the whitelist the splitter script
+// always was, now with the reasons written down.
+//
+//   Static    placed things whose state is the file: the entity is destroyed on an
+//             unload and built again from the file on the next load, and nothing
+//             that was lost on the way matters.
+//   Stateful  things with state or a script (an NPC): the state has to be written
+//             out on an unload and applied on the load. Step 3b of Thema 164;
+//             nothing is in this class yet, so nothing moves as one.
+//   Resident  everything else. It is always there.
+enum class StreamClass : uint8_t
 {
-	static const std::unordered_set<std::string> kMovable = {
-		"transform", "mesh", "material", "light", "lod", "collider", "rigidbody", "decal", "inactive",
-	};
-	return kMovable.count(k) != 0;
+	Static,
+	Stateful,
+	Resident,
+};
+
+struct ComponentClass
+{
+	const char* key;   // scene-format component key, as in a record's "components" block
+	StreamClass cls;
+};
+
+constexpr ComponentClass kComponentClasses[] = {
+	// The splitter script's MOVABLE set. "light" is Static for point and spot lights
+	// only and "rigidbody" for static bodies only: see entityClass.
+	{ "transform",        StreamClass::Static },
+	{ "mesh",             StreamClass::Static },
+	{ "material",         StreamClass::Static },
+	{ "light",            StreamClass::Static },
+	{ "lod",              StreamClass::Static },
+	{ "collider",         StreamClass::Static },
+	{ "rigidbody",        StreamClass::Static },
+	{ "decal",            StreamClass::Static },
+	{ "inactive",         StreamClass::Static },
+	// A placed prefab, so that a village of prefab houses can stream. The bindings
+	// of a placement name its entities by id: that holds because a cell loads with
+	// the ids it was saved with now, and because a placement whose bindings leave
+	// its own subtree does not move (bindingsStayInside below).
+	{ "prefab",           StreamClass::Static },
+	// Dressing that names assets and nothing else, with its running state (the
+	// particles, a playhead) inside its own component: a load starts it afresh.
+	{ "particlesystem",   StreamClass::Static },
+	{ "skeletalmesh",     StreamClass::Static },
+	{ "animator",         StreamClass::Static },
+	{ "animatorblend",    StreamClass::Static },
+	{ "propertyanimator", StreamClass::Static },
+	// Deliberately NOT here, though some look like dressing:
+	//   audiosource       Nothing starts a streamed entity's sound: AudioSystem::playOnStart
+	//                     runs at a scene start or switch (GameApplication), not for what a
+	//                     cell brings, and nothing stops the voice when the cell goes. The
+	//                     cell host owns both (Thema 164, step 2c/3b).
+	//   animstatemachine  AnimatorHost binds the state machines once, at scene start.
+	//   animationlayers, rootmotion, ik, sequenceplayer
+	//                     Not looked at yet; ik and sequenceplayer name other entities.
+};
+
+StreamClass classOfKey(const std::string& key)
+{
+	static const std::unordered_map<std::string, StreamClass> kTable = []
+	{
+		std::unordered_map<std::string, StreamClass> t;
+		for (const ComponentClass& c : kComponentClasses) t[c.key] = c.cls;
+		return t;
+	}();
+	const auto it = kTable.find(key);
+	return it != kTable.end() ? it->second : StreamClass::Resident;
 }
+
+// Whether a class goes into a cell at all. Stateful joins in step 3b.
+constexpr bool movesIntoCell(StreamClass c) { return c == StreamClass::Static; }
 
 // An entity reference ([hi, lo], or a legacy number) as a map key.
 std::string idKey(const json& v) { return v.dump(); }
@@ -45,19 +111,36 @@ const json* childrenOf(const json& e)
 	return it != e.end() && it->is_array() ? &*it : nullptr;
 }
 
-bool movableEntity(const json& e)
+// The class one entity record belongs to: that of its least movable component,
+// after the two component values that decide it.
+StreamClass entityClass(const json& e)
 {
 	const json* comps = componentsOf(e);
-	if (!comps) return true;
+	if (!comps) return StreamClass::Static;
+	StreamClass cls = StreamClass::Static;
 	for (auto it = comps->begin(); it != comps->end(); ++it)
-		if (!movableKey(it.key())) return false;
+	{
+		const StreamClass k = classOfKey(it.key());
+		if (k == StreamClass::Resident) return StreamClass::Resident;
+		if (k == StreamClass::Stateful) cls = StreamClass::Stateful;
+	}
 	if (const auto l = comps->find("light"); l != comps->end() && l->is_object()
 	    && l->value("type", 0) == 0)
-		return false;   // directional: lights the whole world
+		return StreamClass::Resident;   // directional: lights the whole world
 	if (const auto b = comps->find("rigidbody"); b != comps->end() && b->is_object()
 	    && b->value("type", 0) != 0)
-		return false;   // dynamic: would unload with the square it started in
-	return true;
+		return StreamClass::Resident;   // dynamic: would unload with the square it started in
+	return cls;
+}
+
+bool movableEntity(const json& e) { return movesIntoCell(entityClass(e)); }
+
+// Whether the record can own a physics body: a rigid body or a collider. What the
+// manifest's "bodies" column counts (an upper bound, see CellManifest::Cell).
+bool mayOwnBody(const json& e)
+{
+	const json* comps = componentsOf(e);
+	return comps && (comps->contains("rigidbody") || comps->contains("collider"));
 }
 
 bool nearly(const json& arr, double want)
@@ -149,6 +232,49 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		return ok;
 	};
 
+	// A placed prefab names the entities of its placement by id (its bindings). One
+	// that names an entity OUTSIDE the subtree the placement moves with — a child
+	// dragged out of the house — would dangle as soon as the two stand in different
+	// cells, or one in the base, so a subtree holding such a binding does not move.
+	// Checked per top-level unit and only when it holds a placement at all.
+	const auto bindingsStayInside = [&](const json& top) -> bool
+	{
+		std::vector<const json*> subtree;
+		bool hasPlacement = false;
+		std::function<void(const json&)> walk = [&](const json& e)
+		{
+			subtree.push_back(&e);
+			if (const json* comps = componentsOf(e); comps && comps->contains("prefab")) hasPlacement = true;
+			if (const json* kids = childrenOf(e))
+				for (const json& c : *kids)
+					if (const auto it = byId.find(idKey(c)); it != byId.end()) walk(*it->second);
+		};
+		walk(top);
+		if (!hasPlacement) return true;
+		std::unordered_set<std::string> members;
+		members.reserve(subtree.size());
+		for (const json* e : subtree) members.insert(idKey((*e)["uuid"]));
+		for (const json* e : subtree)
+		{
+			const json* comps = componentsOf(*e);
+			if (!comps) continue;
+			const auto prefab = comps->find("prefab");
+			if (prefab == comps->end() || !prefab->is_object()) continue;
+			const auto bindings = prefab->find("bindings");
+			if (bindings == prefab->end() || !bindings->is_array()) continue;
+			for (const json& b : *bindings)
+			{
+				if (!b.is_object()) continue;
+				const auto entity = b.find("entity");
+				// The null id is "no counterpart in this placement", a child deleted
+				// from it: it names nothing, so it cannot leave.
+				if (entity == b.end() || !entity->is_array() || nearly(*entity, 0.0)) continue;
+				if (members.count(idKey(*entity)) == 0) return false;
+			}
+		}
+		return true;
+	};
+
 	const double size = options.cellSize;
 	std::map<std::pair<int, int>, std::vector<std::string>> units;   // ordered: files come out sorted
 	std::unordered_set<std::string> moved;
@@ -171,8 +297,9 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 				visit(child);
 				continue;
 			}
-			if (parentKey != rootKey && subtreeMovable(child)) unitFolder[idKey(child["uuid"])] = parentKey;
-			if (!subtreeMovable(child)) continue;
+			const bool goes = subtreeMovable(child) && bindingsStayInside(child);
+			if (goes && parentKey != rootKey) unitFolder[idKey(child["uuid"])] = parentKey;
+			if (!goes) continue;
 			double px = 0.0, pz = 0.0;
 			if (const json* comps = componentsOf(child))
 				if (const auto t = comps->find("transform"); t != comps->end() && t->is_object())
@@ -273,11 +400,15 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		cellEntities.push_back({ { "children", rootKids }, { "components", json::object() },
 		                         { "name", "Cell " + std::to_string(x) + "," + std::to_string(z) },
 		                         { "parent", nullptr }, { "uuid", rootId } });
+		uint32_t bodies = 0;
+		uint32_t perClass[3] = { 0, 0, 0 };   // indexed by StreamClass
 		std::function<void(const std::string&, const json&)> add = [&](const std::string& k, const json& parentId)
 		{
 			json e = *byId[k];
 			e["parent"] = parentId;
 			const json id = e["uuid"];
+			if (mayOwnBody(e)) ++bodies;
+			++perClass[static_cast<size_t>(entityClass(e))];
 			cellEntities.push_back(e);
 			if (const json* kids = childrenOf(*byId[k]))
 				for (const json& c : *kids)
@@ -288,8 +419,20 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		c.x        = x;
 		c.z        = z;
 		c.entities = static_cast<uint32_t>(cellEntities.size() - 1);
+		c.bodies   = bodies;
 		c.scene    = { { "entities", std::move(cellEntities) },
 		               { "version", scene.value("version", std::string("1.1")) } };
+		// The head the streamer reads off the parsed file (CellStreamer.h): the
+		// format version, which says the ids in the file are stable and are to be
+		// kept on load, and what the cell holds. The classes are how many of its
+		// entities belong to each streaming class; only Static moves for now.
+		json head = json::object();
+		head["version"] = kCellFormatVersion;
+		head["cell"]    = json::array({ x, z });
+		head["bodies"]  = bodies;
+		head["classes"] = { { "static",   perClass[static_cast<size_t>(StreamClass::Static)] },
+		                    { "stateful", perClass[static_cast<size_t>(StreamClass::Stateful)] } };
+		c.scene["streaming"] = std::move(head);
 		// For the merge only (the game's loader reads no such key): which folder
 		// each subtree came from, and those folders as they were, up to the
 		// scene root — the split may have dropped them from the base.
@@ -312,13 +455,14 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		if (!parents.empty())
 			c.scene["cellFolders"] = { { "parents", std::move(parents) }, { "folders", std::move(folders) } };
 		out.moved += c.entities;
-		listing.push_back(json::array({ x, z, c.entities }));
+		listing.push_back(json::array({ x, z, c.entities, c.bodies }));
 		out.cells.push_back(std::move(c));
 	}
 
 	const float load   = options.loadRadius > 0.0f ? options.loadRadius : 1.5f * options.cellSize;
 	const float unload = options.unloadRadius > 0.0f ? std::max(options.unloadRadius, load) : 1.25f * load;
-	out.base["cells"] = { { "cellSize", options.cellSize }, { "loadRadius", load },
+	out.base["cells"] = { { "version", kCellFormatVersion },
+	                      { "cellSize", options.cellSize }, { "loadRadius", load },
 	                      { "unloadRadius", unload }, { "lookaheadSec", options.lookaheadSec },
 	                      { "dir", options.dir }, { "list", std::move(listing) } };
 	return out;

@@ -57,6 +57,27 @@ public:
     bool loadAdditiveFromJson(HorizonWorld& world, const nlohmann::json& scene,
                               std::vector<Entity>* outCreated = nullptr);
 
+    // What an additive load does with the ids stored in the file. By default it
+    // restores none: a graft is a copy that may land in a world that holds the
+    // scene already (a zone loaded twice), and restoring would give both copies
+    // the same identities. A streamed cell is the exception — it is in the world
+    // at most once, and what refers to its entities by id (a prefab placement's
+    // bindings, a joint, a rig's target) has to find them again after the cell
+    // was unloaded and loaded — so HE::CellStreamer asks to keep them.
+    struct AdditiveOptions
+    {
+        // Give each entity the id its record was saved with. An id the world
+        // holds already is not taken over: that entity keeps the fresh one it was
+        // created with and is counted, and one warning names how many. Records
+        // without a stored id (a scene from before stable ids) keep the fresh one.
+        bool    preserveIds = false;
+        // When set, the number of entities that kept a fresh id because their
+        // stored one was taken is ADDED to it.
+        size_t* idCollisions = nullptr;
+    };
+    bool loadAdditiveFromJson(HorizonWorld& world, const nlohmann::json& scene,
+                              std::vector<Entity>* outCreated, const AdditiveOptions& options);
+
     // In-memory snapshot (CBOR, same structure as the binary file format).
     // Used by play-in-editor and the undo system. load does not clear the
     // world first — call HorizonWorld::clear() when replacing the content.

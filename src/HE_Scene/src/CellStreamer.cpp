@@ -34,6 +34,10 @@ bool CellManifest::parse(const std::string& text, CellManifest& out)
 	m.loadRadius   = num("loadRadius", m.cellSize);
 	m.unloadRadius = std::max(num("unloadRadius", m.loadRadius * 1.25f), m.loadRadius);
 	m.lookaheadSec = std::max(num("lookaheadSec", 2.0f), 0.0f);
+	// A manifest from before the format had a version is version 1; nothing below
+	// depends on the number yet, but it is what a later reader will branch on.
+	if (const auto it = j.find("version"); it != j.end() && it->is_number_integer())
+		m.version = std::max(it->get<int>(), 1);
 	if (const auto it = j.find("dir"); it != j.end() && it->is_string()) m.dir = it->get<std::string>();
 	if (!(m.cellSize > 0.0f) || !std::isfinite(m.cellSize) || m.dir.empty()) return false;
 	const auto list = j.find("list");
@@ -47,6 +51,8 @@ bool CellManifest::parse(const std::string& text, CellManifest& out)
 		cell.x = c[0].get<int>();
 		cell.z = c[1].get<int>();
 		if (c.size() > 2 && c[2].is_number_unsigned()) cell.entities = c[2].get<uint32_t>();
+		// The fourth column is new in version 2; an older manifest simply ends at three.
+		if (c.size() > 3 && c[3].is_number_unsigned()) cell.bodies = c[3].get<uint32_t>();
 		m.cells.push_back(cell);
 	}
 	out = std::move(m);
@@ -116,6 +122,18 @@ void releaseOnWorker(json&& tree)
 {
 	auto holder = std::make_shared<json>(std::move(tree));
 	globalPool().post([holder]() mutable { holder.reset(); }, "CellJsonRelease", 1, JobPriority::Low);
+}
+
+// The format version a parsed cell file says it has: the "streaming" head's
+// "version", or 1 for a file without one (a cell from scripts/split_scene_cells.py,
+// or from an editor older than the head). Read off the parsed tree rather than
+// from the world, on purpose: an additive load never touches the world's own head.
+int cellFormatVersionOf(const json& scene)
+{
+	const auto head = scene.find("streaming");
+	if (head == scene.end() || !head->is_object()) return 1;
+	const auto version = head->find("version");
+	return version != head->end() && version->is_number_integer() ? std::max(version->get<int>(), 1) : 1;
 }
 } // namespace
 
@@ -313,7 +331,14 @@ void CellStreamer::update(HorizonWorld& world, const glm::dvec3& camera, const g
 		std::shared_ptr<Pending> p = std::move(m_pending[k]);
 		m_pending.erase(k);
 		std::vector<entt::entity> created;
-		const bool ok = ser.loadAdditiveFromJson(world, p->scene, &created);
+		// A cell the C++ splitter wrote says so in its head, and its ids are then the
+		// scene's own ids: kept, so that what refers to them (a placed prefab's
+		// bindings above all) holds across an unload and a load. A cell without one
+		// gets the ids minted at creation, as before.
+		SceneSerializer::AdditiveOptions options;
+		options.preserveIds  = cellFormatVersionOf(p->scene) >= kCellFormatVersion;
+		options.idCollisions = &m_stats.idCollisions;
+		const bool ok = ser.loadAdditiveFromJson(world, p->scene, &created, options);
 		releaseOnWorker(std::move(p->scene));
 		entt::entity root = entt::null;
 		auto& reg = world.registry();

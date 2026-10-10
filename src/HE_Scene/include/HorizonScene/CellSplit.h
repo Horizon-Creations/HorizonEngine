@@ -15,16 +15,26 @@ struct CellManifest;
 
 // ── Splitting a scene into streaming cells, and merging it back (Thema 153) ───
 // The editor's side of HE::CellStreamer. A split takes the placed things of a
-// scene (meshes, point and spot lights, static bodies, decals: top-level
-// subtrees whose every entity carries only such components) out into one scene
-// file per grid square, and leaves everything else in the base: sky, weather,
-// terrain, cameras, scripts, characters, dynamic bodies, prefab instances,
-// directional lights. Folders (no components, or an identity transform only)
-// are looked through; one left empty is dropped. A subtree goes to the square
-// its top entity stands in; positions stay absolute.
+// scene (meshes, point and spot lights, static bodies, decals, placed prefabs,
+// and the dressing that names assets only: particle systems, skeletal meshes,
+// animators: top-level subtrees whose every entity carries only such
+// components) out into one scene file per grid square, and leaves everything
+// else in the base: sky, weather, terrain, cameras, scripts, characters,
+// dynamic bodies, audio sources, directional lights. Which component goes where
+// is one table, kComponentClasses in CellSplit.cpp; a component that is not in it
+// stays in the base. Folders (no components, or an identity transform only) are
+// looked through; one left empty is dropped. A subtree goes to the square its top
+// entity stands in; positions stay absolute.
 //
-// The same rules as scripts/split_scene_cells.py, which stays for batch use;
-// a merge is the way back, so a split scene stays editable as one piece.
+// Every cell file carries a "streaming" head (CellStreamer.h, kCellFormatVersion)
+// and the manifest a version and, per cell, how many of its entities can own a
+// physics body. The ids in a cell are the scene's own and are kept when the game
+// loads it.
+//
+// The rules of scripts/split_scene_cells.py before Thema 164, which stays for
+// batch use and still writes version-1 cells (no head, a smaller table); this is
+// the reference. A merge is the way back, so a split scene stays editable as one
+// piece.
 
 struct CellSplitOptions
 {
@@ -42,6 +52,7 @@ struct CellSplitResult
 		int            x = 0, z = 0;
 		nlohmann::json scene;          // a .hescene of its own: a "Cell x,z" root + the subtrees
 		uint32_t       entities = 0;   // without that root
+		uint32_t       bodies = 0;     // of them, the ones that can own a physics body
 	};
 	nlohmann::json    base;            // the scene without them, "cells" manifest included
 	std::vector<Cell> cells;           // sorted by x, then z

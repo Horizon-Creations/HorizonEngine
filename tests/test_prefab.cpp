@@ -1171,8 +1171,10 @@ TEST_CASE("PrefabSync: a lost record whose entity was changed here stays, as a c
         const Entity l2 = outer2.createEntity("Lamp");
         const Entity b2 = outer2.createEntity("Bulb");
         outer2.reparentEntity(b2, l2);
-        outer2.registry().get<EntityIdComponent>(l2).id = idOf(outerTemplate.registry(), oLamp);
-        outer2.registry().get<EntityIdComponent>(b2).id = tOBulb;
+        // Through setEntityId: a write straight into the component fires no
+        // signal, and the world's id index would stay on the ids it was born with.
+        outer2.setEntityId(l2, idOf(outerTemplate.registry(), oLamp));
+        outer2.setEntityId(b2, tOBulb);
         SceneSerializer::PrefabSyncReport rep2;
         REQUIRE(ser.syncPrefabInstance(scene2, root2, ser.serializeSubtree(outer2, l2), &rep2));
         CHECK(rep2.entitiesRemoved == 0);
@@ -1459,7 +1461,7 @@ TEST_CASE("PrefabNested: a nested placement the outer asset gained arrives whole
     HorizonWorld bare;
     const Entity bPost = bare.createEntity("Post");
     bare.addComponent(bPost, TransformComponent{});
-    bare.registry().get<EntityIdComponent>(bPost).id = idOf(o.world.registry(), o.post);
+    bare.setEntityId(bPost, idOf(o.world.registry(), o.post));
     SceneSerializer ser;
     HorizonWorld scene;
     std::vector<PrefabInstanceComponent::Binding> bindings;
