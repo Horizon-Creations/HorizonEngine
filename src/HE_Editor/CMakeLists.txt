@@ -302,6 +302,7 @@ add_executable(HorizonEditor WIN32
 	GitHubSignIn.cpp
 	GitHubSignInView.cpp
 	ProjectLaunchOpen.cpp
+	HeprojRegistration.cpp
 	ReportIssueDialog.cpp
 	EditorDockState.cpp
 	GitController.cpp

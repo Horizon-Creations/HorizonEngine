@@ -14,6 +14,7 @@
 #include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include "EditorRewards.h"             // Feedback > each tone's "Preview"
+#include "HeprojRegistration.h"        // Tool Status > File types: the .heproj registration switch
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitHubTokenStore.h>  // kHost: which remote the sign-in covers
 #include <SourceControl/GitProbe.h>
@@ -1626,8 +1627,15 @@ void drawStatusPage(AppContext& ctx)
 	// business but the router's.
 	EditorWidgets::WrapText wrap;
 
+#if defined(__APPLE__)
 	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
 	                   "the background at startup; nothing here changes any setting.");
+#else
+	// (The file type switch at the foot of the page is not built on macOS.)
+	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
+	                   "the background at startup; the rows change no setting. The one "
+	                   "setting on this page, at the end, is the .heproj file type.");
+#endif
 	ImGui::Spacing();
 
 	// The Claude rows are the one check that is not run at startup, so opening
@@ -1928,6 +1936,44 @@ void drawStatusPage(AppContext& ctx)
 			ImGui::TreePop();
 		}
 	}
+
+	// ── File types ───────────────────────────────────────────────────────────
+	// The editor registering .heproj for itself at start (HeprojRegistration.h). A
+	// plain GlobalState entry like the Panels page's, read once at startup: turning
+	// it on here also runs it now, so the effect is not "after the next restart".
+	// macOS has no use for it (the Info.plist is the registration).
+#if !defined(__APPLE__)
+	ImGui::Spacing();
+	ImGui::SeparatorText("File types");
+	{
+		GlobalState& gs = GlobalState::getInstance();
+		bool on = gs.getCustomConfigBool(HeprojRegistration::kSettingKey, true);
+		if (EditorWidgets::checkbox("Register .heproj with this editor", &on))
+		{
+			gs.setCustomConfigEntry(HeprojRegistration::kSettingKey, on);
+			if (!gs.writeConfig())
+				HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+				               "Could not save the file type setting",
+				               "The choice applies now, but this session's config file could "
+				               "not be written \xe2\x80\x94 the next launch will use the old one.");
+			if (on)
+			{
+				const HeprojRegistration::StartupReport report = HeprojRegistration::startAtStartup(true);
+				if (report.result.outcome == HeprojRegistration::Outcome::LeftAlone)
+					HE::Ed::notify(HE::Ed::NoteLevel::Info,
+					               ".heproj project files open with " + report.result.detail +
+					                   ", so the editor left the file type alone",
+					               "To open them with the Horizon Editor instead, use \"Open with\" in "
+					               "your file manager, or run the script in the editor's FileTypes folder.");
+			}
+		}
+		EditorWidgets::hint("At every start the editor checks that double-clicking a .heproj opens it here, "
+		                    "and sets that up for your user account if it does not (no administrator rights). "
+		                    "It never replaces another application's choice, and it writes nothing when the "
+		                    "registration is already right. The FileTypes folder next to the editor still has "
+		                    "the scripts that do it by hand.");
+	}
+#endif
 }
 
 // The C++ toolchain had a page of its own here once. It said what the Status

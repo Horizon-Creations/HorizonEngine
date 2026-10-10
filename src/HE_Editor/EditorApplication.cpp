@@ -44,6 +44,7 @@
 #include "EditorRewards.h"         // setSystemMotionQuery — Reduced Motion's "Follow System"
 #include "EditorSystemMotion.h"    // …and the system query it follows
 #include "ProjectLaunchOpen.h"     // a .heproj double-clicked in the file manager
+#include "HeprojRegistration.h"    // …and the editor making .heproj its own at start
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
@@ -419,6 +420,8 @@ static const char* scriptLogTagFor(ProjectScriptLanguage lang)
 	default:                            return "[HC] ";
 	}
 }
+
+static void registerProjectFileTypeAtStartup(GlobalState& gs);   // below, after Init
 
 // The project this start was asked to open, if any (ProjectLaunchOpen.h).
 // Windows and Linux hand it over as an argument; every argument that is not one
@@ -2049,6 +2052,33 @@ void EditorApplication::OnInit()
 		startSftpProbe();
 #endif
 	}
+
+	// The editor makes .heproj open with itself (Windows registry, Linux XDG files;
+	// macOS has the Info.plist). Not in the headless runs: those are tests and
+	// screenshots, and must not repoint the file type of whoever runs them.
+	if (m_dumpPath.empty() && !HE::hiddenWindowRequested())
+		registerProjectFileTypeAtStartup(*m_globalState);
+}
+
+// HeprojRegistration.h: looks now (a few registry values or small files), writes on
+// a worker only when the registration is missing or points somewhere else. When
+// another application handles .heproj nothing is written, and the person hears
+// about it ONCE per application: the remembered name is read and written here, on
+// the main thread, because GlobalState is not for the worker.
+static void registerProjectFileTypeAtStartup(GlobalState& gs)
+{
+	const bool enabled = gs.getCustomConfigBool(HeprojRegistration::kSettingKey, true);
+	const HeprojRegistration::StartupReport report = HeprojRegistration::startAtStartup(enabled);
+	if (report.result.outcome != HeprojRegistration::Outcome::LeftAlone) return;
+
+	const std::string& owner = report.result.detail;
+	if (gs.getCustomConfigString(HeprojRegistration::kNoticeKey, "") == owner) return;
+	gs.setCustomConfigEntry(HeprojRegistration::kNoticeKey, owner);
+	HE::Ed::notify(HE::Ed::NoteLevel::Info,
+	               ".heproj project files open with " + owner + ", so the editor left the file type alone",
+	               "To open them with the Horizon Editor instead, use \"Open with\" in your file manager, "
+	               "or run the script in the editor's FileTypes folder. The check can be switched off under "
+	               "Edit > Preferences > Editor > Tool Status.");
 }
 
 void EditorApplication::startToolchainProbe()
@@ -11985,6 +12015,9 @@ void EditorApplication::OnShutdown()
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
 	if (m_gitThread.joinable()) m_gitThread.join();
+	// The .heproj registration's writer (HeprojRegistration.h): a file-static thread
+	// like the publish worker below, bounded by the timeouts of the helpers it runs.
+	HeprojRegistration::shutdown();
 	// Bounded by the 30 s timeout on its single CLI run, so it cannot hang the
 	// quit — but it is a joinable std::thread like the others, and destroying one
 	// terminates the process.

@@ -7240,6 +7240,15 @@
        ]
       },
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "On Windows and Linux there is nothing to set up for this: the editor registers the file type for you every time it starts, as described below. On macOS the app itself carries it."
+        }
+       ]
+      },
+      {
        "head": [
         [
          {
@@ -7316,13 +7325,13 @@
          [
           {
            "s": "",
-           "t": "Registry entries for the current user only, so no administrator is needed."
+           "t": "The editor writes registry entries for the current user only, so no administrator is needed. It does so when they are missing or point to another place."
           }
          ],
          [
           {
            "s": "",
-           "t": "After unpacking the "
+           "t": "Unpack the "
           },
           {
            "s": "c",
@@ -7330,7 +7339,15 @@
           },
           {
            "s": "",
-           "t": ", run "
+           "t": " and start the editor once. As a fallback, run "
+          },
+          {
+           "s": "c",
+           "t": "HorizonEditor.exe --register-file-types"
+          },
+          {
+           "s": "",
+           "t": " or "
           },
           {
            "s": "c",
@@ -7338,7 +7355,7 @@
           },
           {
            "s": "",
-           "t": " once. Run it again if you move the folder, because the registry holds the full path. "
+           "t": ". "
           },
           {
            "s": "c",
@@ -7346,7 +7363,7 @@
           },
           {
            "s": "",
-           "t": " removes it."
+           "t": " removes the entries."
           }
          ]
         ],
@@ -7360,7 +7377,15 @@
          [
           {
            "s": "",
-           "t": "A desktop entry and a MIME type in your own data directory ("
+           "t": "The editor writes a desktop entry, a MIME type and two icons into your own data directory ("
+          },
+          {
+           "s": "c",
+           "t": "$XDG_DATA_HOME"
+          },
+          {
+           "s": "",
+           "t": ", by default "
           },
           {
            "s": "c",
@@ -7368,13 +7393,21 @@
           },
           {
            "s": "",
-           "t": "), so no root is needed."
+           "t": "), so no root is needed. It does so when they are missing or point to another place."
           }
          ],
          [
           {
            "s": "",
-           "t": "After unpacking the archive, run "
+           "t": "Unpack the archive and start the editor once. As a fallback, run "
+          },
+          {
+           "s": "c",
+           "t": "HorizonEditor --register-file-types"
+          },
+          {
+           "s": "",
+           "t": " or "
           },
           {
            "s": "c",
@@ -7382,7 +7415,7 @@
           },
           {
            "s": "",
-           "t": " once, and again after moving the folder. "
+           "t": ". Its "
           },
           {
            "s": "c",
@@ -7390,7 +7423,7 @@
           },
           {
            "s": "",
-           "t": " takes it away."
+           "t": " takes the files away."
           }
          ]
         ]
@@ -7414,11 +7447,412 @@
        ],
        "k": "callout",
        "tone": "note"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Registering the file type"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "On Windows and Linux the editor checks early in every start, before the first frame, whether "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " already opens with this editor. The check is cheap: a few registry values on Windows, a few small files on Linux. Only when something is missing or different does a short background task write, so the start never waits for it. The registration is for your user only, needs no administrator rights, and doing it again changes nothing. A freshly unpacked editor therefore has to be started once before a double click can find it. If you move the editor or update it into another folder, the registration still points to the old place, and the next start rewrites it to the new one. On Windows the editor also tells Explorer, so icons refresh without signing out; on Linux it refreshes the desktop's databases where the tools for that exist."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Headless runs and runs with a hidden window do not register, and neither does an editor that runs without its "
+        },
+        {
+         "s": "c",
+         "t": "FileTypes"
+        },
+        {
+         "s": "",
+         "t": " folder next to it, such as a plain build folder instead of an unpacked package."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The editor does not take "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " away from another program. If on Windows the "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " association, or the "
+        },
+        {
+         "s": "i",
+         "t": "Open with » Always"
+        },
+        {
+         "s": "",
+         "t": " choice you made in Explorer, names another program, or on Linux your "
+        },
+        {
+         "s": "c",
+         "t": "mimeapps.list"
+        },
+        {
+         "s": "",
+         "t": " names another default application, the editor writes nothing, adds one line to the log and shows one notification that says how to switch. It shows it once for each such program, because the editor remembers which one it told you about. To switch, choose the editor under "
+        },
+        {
+         "s": "i",
+         "t": "Open with"
+        },
+        {
+         "s": "",
+         "t": " in your file manager, or run the script from the "
+        },
+        {
+         "s": "c",
+         "t": "FileTypes"
+        },
+        {
+         "s": "",
+         "t": " folder, which overwrites the association. On Windows a choice stored by "
+        },
+        {
+         "s": "i",
+         "t": "Open with » Always"
+        },
+        {
+         "s": "",
+         "t": " outranks the registry, so use "
+        },
+        {
+         "s": "i",
+         "t": "Open with"
+        },
+        {
+         "s": "",
+         "t": " there."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "You can turn the registration off with the checkbox "
+        },
+        {
+         "s": "i",
+         "t": "Register .heproj with this editor"
+        },
+        {
+         "s": "",
+         "t": ", under "
+        },
+        {
+         "s": "i",
+         "t": "File types"
+        },
+        {
+         "s": "",
+         "t": " at the end of "
+        },
+        {
+         "s": "c",
+         "t": "Edit » Preferences » Editor » Tool Status"
+        },
+        {
+         "s": "",
+         "t": ". macOS does not show it, because the app needs no registration. It is on by default and is stored in the editor's "
+        },
+        {
+         "s": "c",
+         "t": "config.json"
+        },
+        {
+         "s": "",
+         "t": " as "
+        },
+        {
+         "s": "c",
+         "t": "RegisterHeprojFileType"
+        },
+        {
+         "s": "",
+         "t": ". With it off, the editor never touches the file association. Switch it off before you remove the registration with the unregister script, because otherwise the next start registers it again."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Each start adds one line to the editor log that says what was done: registered, updated, already registered, left alone because of a named program, skipped or failed. A failure is a warning, not an error, and the editor starts as usual."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "As a fallback, "
+        },
+        {
+         "s": "c",
+         "t": "HorizonEditor --register-file-types"
+        },
+        {
+         "s": "",
+         "t": " ("
+        },
+        {
+         "s": "c",
+         "t": "HorizonEditor.exe"
+        },
+        {
+         "s": "",
+         "t": " on Windows) does the same registration at once and without opening a window. It ignores the checkbox, because you asked for it, but like the start it leaves a program that already handles "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " alone. It prints one line, a keyword and a sentence, and exits with a code you can test in a script:"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Exit code"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Keyword"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "0"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "registered"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "updated"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "already-registered"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": ".heproj"
+          },
+          {
+           "s": "",
+           "t": " opens with this editor."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "1"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "failed"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Writing the registration failed. The line says why."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "3"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "left-alone"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Another program handles "
+          },
+          {
+           "s": "c",
+           "t": ".heproj"
+          },
+          {
+           "s": "",
+           "t": " and was left as it is."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "4"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "missing-files"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "There is no "
+          },
+          {
+           "s": "c",
+           "t": "FileTypes"
+          },
+          {
+           "s": "",
+           "t": " folder next to the editor."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "5"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "unsupported"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "macOS, where the app's "
+          },
+          {
+           "s": "c",
+           "t": "Info.plist"
+          },
+          {
+           "s": "",
+           "t": " does it and there is nothing to do."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The scripts in the "
+        },
+        {
+         "s": "c",
+         "t": "FileTypes"
+        },
+        {
+         "s": "",
+         "t": " folder do the same by hand. Unlike the editor, they take over a "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " that another program owns."
+        }
+       ]
       }
      ],
      "eyebrow": "Starting point",
      "id": "project-hub",
-     "text": "The editor launches into the Project Hub: a list of known projects plus a New Project form. Creating a project asks for a template, a scripting language, a name and a directory. Templates Template What it seeds Empty Project Only the basic folder skeleton (Content/, Config/, Shaders/) — no extra content. Game Scripts, Audio, Scenes, Models, Textures, Materials, Prefabs and UI folders, plus a startup scene that already contains a Sky and Weather entity. Simulation Data and Materials folders; startup scene with Sky and Weather. Tool Source and UI folders; a bare world with no Sky — ideal for utilities and non-game apps. Scripting language The language is a whole-project choice, fixed at creation. It gates which gameplay-logic assets the Content Browser offers and which components appear: Language What you write HorizonCode Visual node graphs; compiles to native C++ on export. Unlocks HorizonCode Class and Player Controller / Player Character assets. Lua Lightweight text scripting (the default script backend). Unlocks Script assets and the Script component. Python CPython scripting — needs a Python install on dev machines. Same Script workflow as Lua. C++ A native GameLogic library built with your own toolchain. Scaffolds a compilable Source/ tree (game runtime, GameInstance, a per-scene level script and a CMakeLists.txt). Hidden from the picker when no CMake/compiler is found on the machine. Note: widgets, the Level Script and the Game Instance are always authored in HorizonCode, regardless of the project language — the language choice governs entity scripting and gameplay classes. Opening a project from the file manager A project file (.heproj) opens in the editor with a double click in Finder, Explorer or your Linux file manager. The editor takes it the same way the Hub's own Open does: if another project is open and has unsaved changes, it asks first, and if that very project is already open, nothing happens. The path also works on the command line, as in HorizonEditor MyGame.heproj. If a .heproj named at launch is missing, or the path is a folder, the editor shows the Project Hub with the reason instead of the last project. Anything that is not a .heproj is only noted in the log. Platform How the file type is registered What you do macOS The app's Info.plist declares the type, so the .dmg already carries it. Drag the app into Applications and start it once. Until the first start macOS does not trust the new type, and a double click may open another program. Windows Registry entries for the current user only, so no administrator is needed. After unpacking the .zip, run FileTypes\\register_heproj.cmd once. Run it again if you move the folder, because the registry holds the full path. FileTypes\\unregister_heproj.cmd removes it. Linux A desktop entry and a MIME type in your own data directory (~/.local/share), so no root is needed. After unpacking the archive, run FileTypes/install_file_types.sh once, and again after moving the folder. --uninstall takes it away. Note: on macOS an editor that is already running receives the file as an open document event and switches to it after the unsaved changes question. Windows and Linux start a new editor for every double click and do not pass the file to one that is already running. To change the project inside a running editor, open it from there.",
+     "text": "The editor launches into the Project Hub: a list of known projects plus a New Project form. Creating a project asks for a template, a scripting language, a name and a directory. Templates Template What it seeds Empty Project Only the basic folder skeleton (Content/, Config/, Shaders/) — no extra content. Game Scripts, Audio, Scenes, Models, Textures, Materials, Prefabs and UI folders, plus a startup scene that already contains a Sky and Weather entity. Simulation Data and Materials folders; startup scene with Sky and Weather. Tool Source and UI folders; a bare world with no Sky — ideal for utilities and non-game apps. Scripting language The language is a whole-project choice, fixed at creation. It gates which gameplay-logic assets the Content Browser offers and which components appear: Language What you write HorizonCode Visual node graphs; compiles to native C++ on export. Unlocks HorizonCode Class and Player Controller / Player Character assets. Lua Lightweight text scripting (the default script backend). Unlocks Script assets and the Script component. Python CPython scripting — needs a Python install on dev machines. Same Script workflow as Lua. C++ A native GameLogic library built with your own toolchain. Scaffolds a compilable Source/ tree (game runtime, GameInstance, a per-scene level script and a CMakeLists.txt). Hidden from the picker when no CMake/compiler is found on the machine. Note: widgets, the Level Script and the Game Instance are always authored in HorizonCode, regardless of the project language — the language choice governs entity scripting and gameplay classes. Opening a project from the file manager A project file (.heproj) opens in the editor with a double click in Finder, Explorer or your Linux file manager. The editor takes it the same way the Hub's own Open does: if another project is open and has unsaved changes, it asks first, and if that very project is already open, nothing happens. The path also works on the command line, as in HorizonEditor MyGame.heproj. If a .heproj named at launch is missing, or the path is a folder, the editor shows the Project Hub with the reason instead of the last project. Anything that is not a .heproj is only noted in the log. On Windows and Linux there is nothing to set up for this: the editor registers the file type for you every time it starts, as described below. On macOS the app itself carries it. Platform How the file type is registered What you do macOS The app's Info.plist declares the type, so the .dmg already carries it. Drag the app into Applications and start it once. Until the first start macOS does not trust the new type, and a double click may open another program. Windows The editor writes registry entries for the current user only, so no administrator is needed. It does so when they are missing or point to another place. Unpack the .zip and start the editor once. As a fallback, run HorizonEditor.exe --register-file-types or FileTypes\\register_heproj.cmd. FileTypes\\unregister_heproj.cmd removes the entries. Linux The editor writes a desktop entry, a MIME type and two icons into your own data directory ($XDG_DATA_HOME, by default ~/.local/share), so no root is needed. It does so when they are missing or point to another place. Unpack the archive and start the editor once. As a fallback, run HorizonEditor --register-file-types or FileTypes/install_file_types.sh. Its --uninstall takes the files away. Note: on macOS an editor that is already running receives the file as an open document event and switches to it after the unsaved changes question. Windows and Linux start a new editor for every double click and do not pass the file to one that is already running. To change the project inside a running editor, open it from there. Registering the file type On Windows and Linux the editor checks early in every start, before the first frame, whether .heproj already opens with this editor. The check is cheap: a few registry values on Windows, a few small files on Linux. Only when something is missing or different does a short background task write, so the start never waits for it. The registration is for your user only, needs no administrator rights, and doing it again changes nothing. A freshly unpacked editor therefore has to be started once before a double click can find it. If you move the editor or update it into another folder, the registration still points to the old place, and the next start rewrites it to the new one. On Windows the editor also tells Explorer, so icons refresh without signing out; on Linux it refreshes the desktop's databases where the tools for that exist. Headless runs and runs with a hidden window do not register, and neither does an editor that runs without its FileTypes folder next to it, such as a plain build folder instead of an unpacked package. The editor does not take .heproj away from another program. If on Windows the .heproj association, or the Open with » Always choice you made in Explorer, names another program, or on Linux your mimeapps.list names another default application, the editor writes nothing, adds one line to the log and shows one notification that says how to switch. It shows it once for each such program, because the editor remembers which one it told you about. To switch, choose the editor under Open with in your file manager, or run the script from the FileTypes folder, which overwrites the association. On Windows a choice stored by Open with » Always outranks the registry, so use Open with there. You can turn the registration off with the checkbox Register .heproj with this editor, under File types at the end of Edit » Preferences » Editor » Tool Status. macOS does not show it, because the app needs no registration. It is on by default and is stored in the editor's config.json as RegisterHeprojFileType. With it off, the editor never touches the file association. Switch it off before you remove the registration with the unregister script, because otherwise the next start registers it again. Each start adds one line to the editor log that says what was done: registered, updated, already registered, left alone because of a named program, skipped or failed. A failure is a warning, not an error, and the editor starts as usual. As a fallback, HorizonEditor --register-file-types (HorizonEditor.exe on Windows) does the same registration at once and without opening a window. It ignores the checkbox, because you asked for it, but like the start it leaves a program that already handles .heproj alone. It prints one line, a keyword and a sentence, and exits with a code you can test in a script: Exit code Keyword Meaning 0 registered, updated, already-registered .heproj opens with this editor. 1 failed Writing the registration failed. The line says why. 3 left-alone Another program handles .heproj and was left as it is. 4 missing-files There is no FileTypes folder next to the editor. 5 unsupported macOS, where the app's Info.plist does it and there is nothing to do. The scripts in the FileTypes folder do the same by hand. Unlike the editor, they take over a .heproj that another program owns.",
      "title": "Project Hub"
     },
     {
