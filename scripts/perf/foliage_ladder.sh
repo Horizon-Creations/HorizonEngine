@@ -16,7 +16,9 @@
 # EXTENT (default 400), CAM (default 0,30,0,0,-0.2: in the middle of the
 # field, looking along -Z), WARMUP (60), FRAMES (180), TIMEOUT, MESH (cube|
 # sphere), EDITOR=<binary> (A/B), SCENES (scene cache dir), TAG (extra word in
-# the label, e.g. dist100). Each run writes <label>.conditions.txt next to the
+# the label, e.g. dist100), EXTRA_ENV="KEY=VAL KEY=VAL" (handed to the editor, e.g.
+# HE_FOLIAGE_CLUSTERS=0 for the per-instance path of the same binary, or
+# HE_FOLIAGE_STATS=1 for the cluster counters in the log). Each run writes <label>.conditions.txt next to the
 # capture: load, screen lock, low-power mode and GPU use before and after.
 set -u
 REPO=${0:A:h:h:h}
@@ -28,6 +30,7 @@ SCENES=${SCENES:-/tmp/fol_scenes}
 mkdir -p "$OUT" "$SCENES"
 EDARG=()
 [[ -n ${EDITOR:-} ]] && EDARG=(--editor "$EDITOR")
+for kv in ${=EXTRA_ENV:-}; do EDARG+=(--env "$kv"); done
 
 conditions() {
     echo "  uptime:      $(uptime | sed 's/.*load/load/')"

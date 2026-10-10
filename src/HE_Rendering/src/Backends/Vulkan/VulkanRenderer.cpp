@@ -3731,8 +3731,8 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
 
     for (RenderObject& obj : m_renderWorld.objects)
     {
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
+            obj.refineWorldBounds(mesh->localBounds);
     }
     // The material asset overrides the component's opacity, and DrawScene
     // splits opaque from transparent AFTER applying it. Without the same
@@ -3786,6 +3786,9 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
         // Opaque only. Transparent geometry does not write depth in the scene
         // pass either, so including it would project decals onto glass.
         if (obj.opacity < 1.0f) continue;
+        // A foliage cluster is one plant's transform with a whole bucket's worth of
+        // instances: it leaves no decal depth yet. Windows track: unfold it.
+        if (obj.isCluster()) continue;
         const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
         const GpuMesh& m    = mesh ? *mesh : m_cube;
         if (!m.indexCount) continue;
@@ -5353,6 +5356,10 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
         for (const uint32_t idx : m_sortedIndices)
         {
             const RenderObject& obj = m_renderWorld.objects[idx];
+            // A foliage cluster is one plant's transform with a whole bucket's worth
+            // of instances: it writes no velocity here yet (Metal and GL draw each
+            // plant, static). Windows track: unfold it like they do.
+            if (obj.isCluster()) continue;
             const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
             if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
 
@@ -6618,8 +6625,8 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowImage != VK_NULL_HANDLE;
     if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) { ensureSampledLayout(); return; }
     for (RenderObject& obj : m_renderWorld.objects)
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
+            obj.refineWorldBounds(mesh->localBounds);
 
     // ── Cascade frame constants (mirrors GL's shadowFrame / D3D11) ─────────
     // The extractor's cascade matrices are GL clip (y up, z∈[-1,1]);
@@ -7494,9 +7501,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
     for (RenderObject& obj : m_renderWorld.objects)
     {
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
-            mesh && mesh->localBounds.isValid())
-            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
+            obj.refineWorldBounds(mesh->localBounds);
     }
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
@@ -9927,7 +9933,8 @@ void VulkanRenderer::updateGiAccel()
     const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
     for (const RenderObject& obj : m_renderWorld.objects)
     {
-        if (!obj.castsShadow) continue;
+        // A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+        if (!obj.castsShadow || obj.isCluster()) continue;
         // Default-cube fallback — an entity without a resolvable mesh asset
         // RENDERS as the default cube (draw-loop fallback), so it must occlude
         // as one too, or plain cube entities cast no GI shadow at all.
@@ -11151,8 +11158,8 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
     for (RenderObject& obj : m_renderWorld.objects)
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
+            obj.refineWorldBounds(mesh->localBounds);
     // The extractor leaves baseColor at white, and this extraction throws away
     // DrawScene's resolve (which runs later anyway). Without it every GI
     // instance bounced white: a red and a grey floor gave the same probe field,
@@ -12318,8 +12325,8 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
     if (m_renderWorld.objects.empty()) return;
 
     for (RenderObject& obj : m_renderWorld.objects)
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
+            obj.refineWorldBounds(mesh->localBounds);
 
     m_culler.cull(m_renderWorld, m_visible);
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
@@ -12434,6 +12441,9 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
         {
             const RenderObject& obj = m_renderWorld.objects[idx];
             if (!obj.contributesAO) continue;   // skip particles/precipitation
+            // A foliage cluster is one plant's transform with a whole bucket's worth of
+            // instances (and this loop spends a prepass slot per draw): it does not reflect yet.
+            if (obj.isCluster()) continue;
             const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
             const GpuMesh& gm   = mesh ? *mesh : m_cube;
             if (!gm.indexCount) continue;

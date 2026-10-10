@@ -298,6 +298,7 @@ endif()
 # ─── HorizonRendering DLL ──────────────────────────────────────────────────────
 add_library(HorizonRendering SHARED
     src/RenderExtractor.cpp
+    src/FoliageExtract.cpp
     src/RenderWorld.cpp
     src/FrustumCuller.cpp
     src/OcclusionCuller.cpp

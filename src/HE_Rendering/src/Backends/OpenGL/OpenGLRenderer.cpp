@@ -4749,6 +4749,23 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
 		if (!mesh || !mesh->vao || mesh->indexCount <= 0) continue;
 
+		// A foliage cluster stands for a bucket of plants: draw every one of them,
+		// static (previous pose = this pose, so the velocity is the camera's own
+		// motion). The entity-keyed history below holds ONE pose per entity, which
+		// is all a cluster must not use: every plant of a layer shares the terrain's id.
+		if (obj.isCluster())
+		{
+			glBindVertexArray(mesh->vao);
+			m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model)
+			{
+				glUniformMatrix4fv(m_uTaaVelMvpJitter, 1, GL_FALSE, glm::value_ptr(viewProjJit * model));
+				glUniformMatrix4fv(m_uTaaVelMvpNow,    1, GL_FALSE, glm::value_ptr(viewProjClean * model));
+				glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(m_taaPrevViewProj * model));
+				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			});
+			continue;
+		}
+
 		// An object seen for the first time reports no motion — its "previous"
 		// position is where it is now. Anything else invents a streak out of
 		// nowhere on the frame something spawns.
@@ -5700,7 +5717,8 @@ void OpenGLRenderer::UpdateGIAccel()
 	};
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
-		if (!obj.castsShadow) continue;
+		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+		if (!obj.castsShadow || obj.isCluster()) continue;
 		// Default-cube fallback — an entity without a resolvable mesh asset
 		// RENDERS as the default cube (draw-loop fallback), so it must occlude
 		// as one too, or plain cube entities cast no GI shadow at all.
@@ -6108,8 +6126,8 @@ void OpenGLRenderer::EnsureGIProbeGrid()
 	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 	int unresolved = 0;
 	const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!sceneBox.isValid()) return;
@@ -10657,9 +10675,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	m_culler.cull(m_renderWorld, m_visible);

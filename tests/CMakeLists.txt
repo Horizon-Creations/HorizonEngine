@@ -131,6 +131,7 @@ add_executable(he_tests
     # Was on disk since the foliage layer landed but never in this list, so the
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp
+    test_foliage_cluster.cpp
     test_debug_draw.cpp
     # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
     test_bloom_kernel.cpp
@@ -333,6 +334,7 @@ add_executable(he_tests
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FoliageExtract.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiAutoLandscape.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp

@@ -7754,8 +7754,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
 	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
 	const int localLayers = wantLocal
 		? std::clamp(m_renderWorld.shadow.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers) : 0;
@@ -8053,7 +8053,8 @@ void MetalRenderer::EncodeGISwAccelBuild()
 	};
 	for (RenderObject& obj : m_renderWorld.objects)
 	{
-		if (!obj.castsShadow) continue;
+		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+		if (!obj.castsShadow || obj.isCluster()) continue;
 		// Default-cube fallback — must match the draw loops (see the HW path).
 		GISwBlasRange range = resolveSwRange(obj.meshAssetId);
 		if (!range.valid) range = resolveSwRange(HE::kDefaultCubeMeshId);
@@ -8243,7 +8244,8 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
-			if (!obj.castsShadow) continue;
+			// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+			if (!obj.castsShadow || obj.isCluster()) continue;
 			// Same fallback the shadow-caster/G-buffer DRAW loops use: an entity
 			// without a resolvable mesh asset renders as the default cube, so it
 			// must occlude as one too — skipping it here made such objects
@@ -8802,8 +8804,8 @@ void MetalRenderer::EnsureGIProbeGrid()
 	// so refresh here too before unioning, or the grid ends up sized to a handful
 	// of proxy boxes instead of the actual scene.
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	// Landscape/Terrain chunks are ordinary MeshComponent entities, so they ARE
 	// in m_renderWorld.objects (an older note here said otherwise). What kept a
@@ -12089,8 +12091,8 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
 	if (m_renderWorld.objects.empty()) return;
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
 	}
@@ -12693,6 +12695,29 @@ void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 		const RenderObject& obj = m_renderWorld.objects[idx];
 		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
 		if (!mesh || !mesh->vertexBuf || !mesh->indexBuf) continue;
+
+		// A foliage cluster stands for a bucket of plants: draw every one of them,
+		// static (previous pose = this pose, so the velocity is the camera's own
+		// motion). The entity-keyed history below holds ONE pose per entity, which
+		// is all a cluster must not use: every plant of a layer shares the terrain's id.
+		if (obj.isCluster())
+		{
+			[enc setVertexBuffer:(__bridge id<MTLBuffer>)mesh->vertexBuf offset:0 atIndex:0];
+			m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model)
+			{
+				VelocityUniformsCPU u;
+				u.mvpJitter = viewProjJit   * model;
+				u.mvpNow    = viewProjClean * model;
+				u.mvpPrev   = m_taaPrevViewProj * model;
+				[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+				                indexCount:mesh->indexCount
+				                 indexType:MTLIndexTypeUInt32
+				               indexBuffer:(__bridge id<MTLBuffer>)mesh->indexBuf
+				         indexBufferOffset:0];
+			});
+			continue;
+		}
 
 		// An object seen for the first time reports no motion — its "previous"
 		// position is where it is now. Anything else invents a streak out of
@@ -13767,9 +13792,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	CullCameraObjects();
@@ -15807,9 +15831,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	if (m_renderWorld.objects.empty()) return;
 
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
