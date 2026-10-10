@@ -634,6 +634,12 @@ namespace
 				{
 					json bj = { { "id", b.id }, { "level", b.level } };
 					if (b.fromSpline()) bj["sourceSpline"] = uuidToJson(b.sourceSpline);
+					// The outline the lake was last laid from, as raw float pairs
+					// (x, z): the baseline the brush share is measured against when
+					// the lake is reshaped. Same encoding as sculptHeights.
+					if (b.fromSpline() && !b.polygon.empty())
+						bj["polygonB64"] = base64Encode(reinterpret_cast<const uint8_t*>(b.polygon.data()),
+						                                b.polygon.size() * sizeof(glm::vec2));
 					bodies.push_back(std::move(bj));
 				}
 				tc["waterBodies"] = std::move(bodies);
@@ -1542,6 +1548,19 @@ namespace
 							b.level = bj["level"].get<float>();
 						if (bj.contains("sourceSpline"))
 							b.sourceSpline = jsonToUuid(bj["sourceSpline"]);
+						if (bj.contains("polygonB64") && bj["polygonB64"].is_string())
+						{
+							// A length that is not whole float pairs, or too many of
+							// them, is a damaged field: no outline (sanitize does the
+							// same for non-finite points).
+							const std::vector<uint8_t> raw = base64Decode(bj["polygonB64"].get<std::string>());
+							if (raw.size() % sizeof(glm::vec2) == 0 &&
+							    raw.size() / sizeof(glm::vec2) <= HE::water::kMaxPolygonPoints)
+							{
+								b.polygon.resize(raw.size() / sizeof(glm::vec2));
+								if (!raw.empty()) std::memcpy(b.polygon.data(), raw.data(), raw.size());
+							}
+						}
 						w.bodies.push_back(b);
 					}
 				if (c.contains("waterCellsB64") && c["waterCellsB64"].is_string())

@@ -12,6 +12,7 @@
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/WaterSurface.h"
 #include "HorizonScene/WaterField.h"
+#include "HorizonScene/WaterLake.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
@@ -594,6 +595,11 @@ namespace TerrainSystem
         // must not regenerate chunks) and still needs its surface. In this function
         // rather than in the world tick so that every direct updateTerrains of the
         // editor — and the headless dump, which renders before any tick — gets it.
+        //
+        // First, the lakes follow their splines: a point that moved since the last
+        // call reshapes the water it belongs to (never the ground), and the surface
+        // pass right below then builds the new sheet in the same frame.
+        HE::water::lake::syncSplines(world);
         WaterSurface::update(world, cm, renderer);
 
         // ── The collider catches up when the edit stops ──────────────────────

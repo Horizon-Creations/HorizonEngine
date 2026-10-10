@@ -70,12 +70,27 @@ namespace HE::water
     // sheet (metres), see Field::shoreOvershoot.
     inline constexpr float    kDefaultShoreOvershoot = 0.05f;
     inline constexpr float    kMaxShoreOvershoot     = 10.0f;
+    // Upper bound on Body::polygon. A spline polyline is a few hundred points; a
+    // scene file claiming more is damaged or hostile.
+    inline constexpr size_t   kMaxPolygonPoints      = 65536;
 
     struct Body
     {
         uint16_t id    = kNoBody;
         float    level = 0.0f;    // terrain-local Y of the surface
         HE::UUID sourceSpline{};  // closed spline a lake came from; zero = brush
+        // The outline the lake's cells were last laid from (terrain-local XZ, the
+        // polygon of the spline, no closing duplicate). Empty for brush water and
+        // for a lake whose spline never reached the field. It is the baseline the
+        // brush share is measured against when the lake is reshaped (WaterLake.h):
+        // "what the brush added or took away" is whatever the cells say that this
+        // outline does not. Saved with the body.
+        std::vector<glm::vec2> polygon;
+        // Runtime, never serialised, never compared: the fingerprint of the spline
+        // (points, closed flag, both world matrices) the field was last brought in
+        // line with. 0 = not looked at yet, so the first frame after a load or an
+        // undo only records it and reshapes nothing.
+        uint64_t syncKey = 0;
         bool     fromSpline() const { return sourceSpline != HE::UUID{}; }
     };
 
@@ -202,6 +217,12 @@ namespace HE::water
     // regionDirty (that direction would loop).
     void noteGroundChanged(TerrainComponent& tc, bool whole,
                            float minX = 0.0f, float minZ = 0.0f, float maxX = 0.0f, float maxZ = 0.0f);
+
+    // For editors of the cells that live in another file (WaterLake.cpp): widen the
+    // dirty rectangle by the cell rectangle [x0, x1] × [z0, z1] (inclusive, clamped
+    // to the grid) and bump the revision. Nothing when the rectangle is empty or the
+    // terrain has no area.
+    void markCellsDirty(TerrainComponent& tc, int x0, int z0, int x1, int z1);
 
     // Forget bodies that own no cell and have no source: what a brush leaves
     // behind when its water is wiped out. A lake keeps its body — its spline can

@@ -106,7 +106,8 @@ namespace
 
     bool bodyEq(const Body& a, const Body& b)
     {
-        return a.id == b.id && a.level == b.level && a.sourceSpline == b.sourceSpline;
+        return a.id == b.id && a.level == b.level && a.sourceSpline == b.sourceSpline &&
+               a.polygon == b.polygon;   // syncKey is runtime state and never part of the content
     }
     bool bodiesEq(const std::vector<Body>& a, const std::vector<Body>& b)
     {
@@ -331,6 +332,15 @@ void noteGroundChanged(TerrainComponent& tc, bool whole, float minX, float minZ,
     const float padX = tc.sizeX / static_cast<float>(hres - 1);
     const float padZ = tc.sizeZ / static_cast<float>(hres - 1);
     markRect(tc, minX - padX, minZ - padZ, maxX + padX, maxZ + padZ);
+}
+
+void markCellsDirty(TerrainComponent& tc, int x0, int z0, int x1, int z1)
+{
+    if (!hasArea(tc) || x0 > x1 || z0 > z1) return;
+    const int hi = static_cast<int>(clampRes(tc.water.res)) - 1;
+    x0 = std::clamp(x0, 0, hi); x1 = std::clamp(x1, 0, hi);
+    z0 = std::clamp(z0, 0, hi); z1 = std::clamp(z1, 0, hi);
+    markCells(tc, x0, z0, x1, z1);
 }
 
 uint32_t pruneEmptyBodies(TerrainComponent& tc)
@@ -822,7 +832,16 @@ void sanitize(TerrainComponent& tc)
         if (b.id == kNoBody || !finite(b.level)) continue;
         bool dup = false;
         for (const Body& k : kept) dup = dup || k.id == b.id;
-        if (!dup) kept.push_back(b);
+        if (dup) continue;
+        kept.push_back(b);
+        // The outline only means something for a lake, and only when every point
+        // is a number: anything else is dropped whole, which makes the next reshape
+        // a plain replace instead of a merge against garbage.
+        Body& nb = kept.back();
+        bool bad = !nb.fromSpline() || nb.polygon.size() > kMaxPolygonPoints;
+        for (const glm::vec2& p : nb.polygon) bad = bad || !finite(p.x) || !finite(p.y);
+        if (bad) nb.polygon.clear();
+        nb.syncKey = 0;
     }
     f.bodies = std::move(kept);
     uint32_t next = f.nextBodyId == 0 ? 1u : f.nextBodyId;

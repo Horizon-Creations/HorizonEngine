@@ -120,6 +120,10 @@ add_executable(he_tests
     # The water brush: which body a stroke paints into and at which level, the
     # eraser, digging, the sheet that appears, and the stroke through undo and the file.
     test_water_brush.cpp
+    # The lake: a closed spline's outline as a body of water, reshaped with the brush
+    # share kept on top (the merge rule), converted from painted water, the per-frame
+    # sync, and the whole of it through undo and the scene file.
+    test_water_lake.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp
