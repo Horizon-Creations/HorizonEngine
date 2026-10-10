@@ -1,0 +1,15 @@
+== ab-100000-d100-before-r3  2026-10-10 20:42:21
+before:
+  uptime:      load averages: 11.56 11.80 10.43
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=100
+  power:       Now drawing from 'Battery Power'
+  busy procs:  94.1% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 46.8% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 13.3% /Applications/CLion.app/Contents/MacOS/clion; 12.2% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 
+after (rc=0):
+  uptime:      load averages: 10.79 11.63 10.38
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=97
+  power:       Now drawing from 'Battery Power'
+  busy procs:  109.3% /Applications/CLion.app/Contents/MacOS/clion; 39.8% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 18.6% /usr/sbin/coreaudiod; 7.2% /System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted; 

@@ -1,0 +1,15 @@
+== ab-100000-d100-before-r1  2026-10-10 20:22:39
+before:
+  uptime:      load averages: 10.88 10.52 8.86
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=0
+  power:       Now drawing from 'AC Power'
+  busy procs:  85.9% /System/Library/PrivateFrameworks/IntelligencePlatformCore.framework/Versions/A/knowledgeconstructiond; 37.7% /sbin/launchd; 20.2% /Applications/CLion.app/Contents/MacOS/clion; 16.8% /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python; 
+after (rc=0):
+  uptime:      load averages: 10.09 10.36 8.82
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=31
+  power:       Now drawing from 'AC Power'
+  busy procs:  22.9% /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python; 16.4% claude; 13.6% /Applications/CLion.app/Contents/MacOS/clion; 10.9% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 

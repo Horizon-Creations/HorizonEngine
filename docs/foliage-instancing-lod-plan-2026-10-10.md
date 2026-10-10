@@ -486,6 +486,9 @@ und Zähler für Cluster/Instanzen/Aufklappen. Alle 100k-Ergebnisse auf Metal; G
 
 **Stand Teil 2a (10.10.2026):** Cluster-Pfad gebaut, geprüft auf Metal und GL, Befunde und Zahlen in Abschnitt 11.
 
+**Stand Verifikation (Schritt 5, 10.10.2026):** die Leiter ist auf Metal vorher gegen nachher gefahren (10k, 100k, 500k, 1 Mio., "alle" und rund 20 %, abwechselnd, unter Fremdlast), Bildvergleich Metal und voller `ctest` stehen, Befund und
+Zielabgleich in Abschnitt 13, Zahlen in `perf-audit/foliage-verification-2026-10-10.md`. Weiter offen: GL-Zeiten, D3D/Vulkan, 1k/50k/200k, Kamera am Rand.
+
 Messleiter (Vorschlag): 10k, 100k, 500k, 1 Mio. Instanzen, jeweils bei sichtbarem Anteil 100 % und 20 % (Kamera mitten drin, Kamera am Rand). Kennzahlen: `RenderExtractor::extract` p50, `FrustumCull`, Sortierung,
 `GeometryPass`, CPU/Frame p50, `draws`/`tris`, GPU-Zeit (`gpu_time_by_process.py`), RSS. Alles vor und nach 2a, mit `--no-counters` für FPS-Läufe (Memory *engine-profiler*). **Zielwerte** (nicht gemessen,
 nur Richtung): Extract-Kosten der Foliage unabhängig von der Gesamtzahl, 100k platziert mit 20 % sichtbar unter 0,5 ms; `draws` gleich Anzahl der Mesh-Läufe, nicht Instanzzahl.
@@ -702,4 +705,41 @@ unter 1 ms, 100k im zweistelligen Millisekundenbereich, 500k um 100 ms; nicht ge
   eingebauten Materials (weiß-grau, dieselben Würfel), nicht aus einem eigenen Bild.
 - F2 bis F10 aus 1.4 sind unverändert (F2 bis F4 sind für den Renderweg seit 2a erledigt, der Scatter selbst reagiert weiter nur auf `dirty`).
 - D3D11, D3D12 und Vulkan: Graph-Material je Instanz mit ihren Grenzen aus Abschnitt 3 (1024 Material-Slots), nicht angefasst (Windows-Gleis, 2f).
-- Entprellung des Neustreuens beim Pinsel (12.2).
+- Entprellung des Neustreuens beim Pinsel (12.2). Die Schätzung dort ("500k um 100 ms") ist inzwischen gemessen: Abschnitt 13.3, das Streuen kostet seit 2a rund doppelt so viel.
+
+
+## 13. Stand Verifikation (Schritt 5, 10.10.2026)
+
+Zweig auf `00f72717`, `origin/release/0.7.0` enthalten (nichts Neues). Gemessen auf Metal, abwechselnd gegen den Klon von `08a8938b` (vor dem Cluster-Pfad). Zahlen, Bedingungen und Rohdaten:
+`perf-audit/foliage-verification-2026-10-10.md` und `perf-audit/raw-foliage-verify/`. **Alle Millisekunden sind Zahlen unter Fremdlast** (Vollbau mit acht Compilern, Load 5 bis 14, in Teilen fremde GPU-Last und entsperrter Bildschirm);
+belastbar sind die Verhältnisse je Paar.
+
+### 13.1 Ziele aus Abschnitt 9 und 8, erreicht oder verfehlt
+
+| Ziel | Ergebnis |
+|---|---|
+| Foliage-Extract unabhängig von der Gesamtzahl | **erreicht** für alles in Reichweite: `ExtractFoliage` 0,05 bis 0,08 ms bei 10k bis 1 Mio. (vorher 0,4 bis 74 ms); mit begrenzter Reichweite hängt er vom Randring ab (0,3 bis 1,4 ms) |
+| 100k platziert, 20 % sichtbar, unter 0,5 ms | **erreicht** bei 100k (0,11 bis 0,33 ms), **verfehlt** bei 500k (0,6 bis 2,3 ms) und 1 Mio. (1,3 ms) |
+| `draws` = Zahl der Mesh-Läufe | **erreicht**: 3 bis 8 statt bis 279 163 |
+| Bild vorher gegen nachher | alter Pfad und `ordered` **bitgleich** (6 Fälle, Metal); Standardpfad 0,05 bis 0,4 % der Pixel anders (Tiefengleichstand, 11.3) |
+| `Render` je Frame | 5 bis 6 mal niedriger (10k, 100k mit 100 m), 12 mal (100k "alle", 500k mit 100 m), 16 bis 27 mal (1 Mio., 500k "alle") |
+| Voller `ctest`, `shaderc` ON | 257: 255 grün, 2 übersprungen (`runtime_size_app_*`), 0 rot; CI-Lauf 38074831163 auf `00f72717` grün (macOS, Windows, Linux, Linux Vulkan) |
+
+### 13.2 Was nicht gemessen ist
+
+OpenGL (nur Bilder aus 2a/2b), D3D11/D3D12/Vulkan (nichts davon lief je auf einem Gerät, nur Textpatches, von der CI übersetzt), Graph-Material-Layer, GI an, Kamera am Feldrand, die Stufen 1k/50k/200k, FPS-Läufe, jede
+Messung ohne Fremdlast, die Ursache des Mehrspeichers bei 10k/100k "alle" in diesem Lauf (RSS schwankt zwischen Läufen um Faktor 1,7, nicht belastbar). 1 Mio. ist je ein Paar.
+
+### 13.3 Neuer Befund: das Streuen ist teurer geworden
+
+Zeuge `HE_DUMP_FOLIAGETEST`, Metal, drei abwechselnde Wiederholungen: 500k **69 gegen 139 ms**, 1 Mio. **105 gegen 187 ms** (Mediane vorher gegen nachher). Das ist die einmalige Last je Neustreuen (der Store mit den Buckets kommt zu `cachedInstances` hinzu),
+kein Frame-Preis. Seit 2b zählt sie bei jeder Boden-Änderung: ein gehaltener Pinsel streut jeden Frame neu. Keine falsche Funktion, aber ein Preis, den 2a und 2b nicht genannt haben. Nachfolger: Entprellung (12.2) und
+billigere Bucket-Sortierung. Nicht geändert.
+
+### 13.4 Was in 0.7 ist und was bewusst nicht
+
+- **In 0.7 (Metal und GL gelaufen):** Messzeug (2c), Cluster-Pfad mit Store, Buckets und Aufklappen (2a), GL behält das Graph-Material und der Scatter folgt dem Boden (2b). Die Hälfte des Themas "ein Batch statt ein Objekt je Pflanze" ist damit erfüllt.
+- **Bewusst nicht in 0.7:** 2e (Graph-Material-Instancing, instanzierter Material-Vertex, Wind), 2f (Windows-Gleis: D3D11/D3D12/Vulkan auf einem Gerät, Velocity, Decal-Tiefe, SSR-Vorpass, Instanz-Ringe),
+  3a (LOD-Stufen), 3b (Auto-LOD mit meshoptimizer, braucht eine Abhängigkeits-Entscheidung), 3c (Impostor). **Die zweite Hälfte des Themas, LOD und Impostor für ferne Vegetation, ist damit nicht erfüllt.**
+- **Auch nicht gebaut, ohne dass es dafür einen Hive-Schritt gab:** 2d (Schichten: `layers`, Serialisierung der neuen Felder, Inspector), `giOccluder`, Entfaltung für Picking, `revision` im FrameKey (Thema 162).
+- **Zur Roadmap (Entscheidung 6 in Abschnitt 10):** der Text "GPU-instanced foliage with wind" stimmt für 0.7 nicht (kein Wind, Graph-Material-Layer zeichnen je Pflanze). Die Korrektur braucht die Bestätigung des Menschen für den Deploy; nicht erfolgt.
