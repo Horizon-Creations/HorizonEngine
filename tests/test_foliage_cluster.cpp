@@ -300,7 +300,7 @@ namespace
 	float refRand(uint32_t& s) { s = refWang(s); return static_cast<float>(s & 0x00FFFFFFu) / static_cast<float>(0x01000000u); }
 }
 
-TEST_CASE("FoliageSystem: the cached layout is bit for bit the one the scatter always produced")
+TEST_CASE("FoliageSystem: the cached layout is the one the scatter always produced")
 {
 	const glm::vec3 origin(37.5f, -4.25f, 120.125f);
 	Field f(80.0f, 0.2f, 1.0e6f, origin, glm::vec3(0.0f), glm::vec3(1.0f), 5.0f);
@@ -324,8 +324,23 @@ TEST_CASE("FoliageSystem: the cached layout is bit for bit the one the scatter a
 		expected.push_back(m);
 	}
 	REQUIRE(expected.size() == fol.cachedInstances.size());
+	// Same random stream, same formulas: the same plants. Bit for bit on Apple clang (arm64); GCC 13 on x86-64
+	// (the Linux CI) rounds the sin/cos of the rotation, or the height, differently in the library and in this
+	// test's own copy of the loop for about one plant in eight, by an ulp or two. A change to the generator moves
+	// plants by whole metres and turns them by whole radians, so a tolerance far above the rounding and far below
+	// any real change still pins the layout.
+	float worst3 = 0.0f, worstPos = 0.0f;
 	for (size_t i = 0; i < expected.size(); ++i)
-		CHECK(expected[i] == fol.cachedInstances[i]);
+	{
+		for (int c = 0; c < 3; ++c)
+			for (int r = 0; r < 4; ++r)
+				worst3 = std::max(worst3, std::abs(expected[i][c][r] - fol.cachedInstances[i][c][r]));
+		for (int r = 0; r < 4; ++r)
+			worstPos = std::max(worstPos, std::abs(expected[i][3][r] - fol.cachedInstances[i][3][r]));
+	}
+	MESSAGE("largest deviation: orientation/scale ", worst3, ", position ", worstPos);
+	CHECK(worst3 <= 1.0e-5f);
+	CHECK(worstPos <= 1.0e-4f);
 }
 
 TEST_CASE("FoliageComponent::revision counts re-scatters and settings the extraction reads")

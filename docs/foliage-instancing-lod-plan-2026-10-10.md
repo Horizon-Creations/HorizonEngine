@@ -548,8 +548,10 @@ Zweig `claude/instanced-foliage-und-lod-impostor-fuer-b-ume-gras-felsen`, gebaut
 | Tests: 19 Fälle | `tests/test_foliage_cluster.cpp` |
 | Schalter: `HE_FOLIAGE_CLUSTERS=0` (ein Objekt je Instanz wie bisher), `=ordered` (Prüfmodus, 11.3), `HE_FOLIAGE_STATS=1` (Zähler im Log) | `FoliageExtract.cpp` |
 
-Das Layout des Scatters ist bit-gleich geblieben: `test_foliage_cluster.cpp` enthält eine Kopie des alten Generators und
-vergleicht jede Matrix. Die Instanzen werden beim Aufklappen mit der Weltmatrix des Terrains verrechnet, ein gedrehtes,
+Das Layout des Scatters ist unverändert: `test_foliage_cluster.cpp` enthält eine Kopie des alten Generators und vergleicht jede Matrix. Auf Apple clang (arm64)
+ist das bitgleich (Abweichung 0, auch die Bilder). Auf GCC 13 (x86-64, Linux-CI) unterscheiden sich 150 von 1280 Matrizen in den letzten Bits von der Kopie
+im Test (der erste CI-Lauf mit einem Bit-Vergleich war dort rot); der Test vergleicht deshalb Position und Ausrichtung mit einer Toleranz von 1e-4 und 1e-5,
+weit über der Rundung und weit unter jeder echten Änderung des Generators. Ob die alte Bibliothek auf GCC dieselben Bits geliefert hätte, ist nicht geprüft. Die Instanzen werden beim Aufklappen mit der Weltmatrix des Terrains verrechnet, ein gedrehtes,
 skaliertes, verschobenes oder geparentetes Terrain trägt seine Pflanzen jetzt mit (F2, F3 und F4 aus 1.4 sind damit für
 den Renderweg erledigt; der Scatter selbst reagiert weiterhin nur auf `dirty`).
 
