@@ -4464,6 +4464,18 @@ namespace
 	  "or the dialog that does it for you. It only appears on rows that are not "
 	  "already in order.",
 	  "", "editor#preferences" },
+	// The one setting on the page, under "File types" at its foot.
+	{ "Tool Status/Register .heproj with this editor", "Register .heproj with this editor",
+	  "Lets the editor make .heproj project files open with it when you double-click "
+	  "them in the file manager. At every start it looks whether that is already so "
+	  "and, only when it is not (first start, or the editor was moved or updated), "
+	  "writes the registration for your user account: the HKCU registry keys on "
+	  "Windows, the .desktop entry and MIME files in your XDG data folder on Linux. "
+	  "No administrator rights, nothing machine-wide. If another application "
+	  "already handles .heproj, the editor leaves that alone and tells you once. "
+	  "Off: it never touches the file association (the scripts in the FileTypes "
+	  "folder still work). macOS needs none of this; the app bundle carries it.",
+	  "", "editor#project-hub" },
 	{ "Tool Status/Recheck all", "Recheck all",
 	  "Runs every probe again: git, the C++ toolchain, the router, and the Claude "
 	  "connection. The first three are cached from startup, so this is what to "

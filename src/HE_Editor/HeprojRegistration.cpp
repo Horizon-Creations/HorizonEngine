@@ -199,7 +199,7 @@ std::string describe(const Result& r, const std::string& exe)
 	case Outcome::Unsupported:
 		return "this system registers .heproj through the application bundle; nothing to do here";
 	case Outcome::MissingFiles:
-		return "no FileTypes folder next to the editor (not the packaged layout); .heproj was not registered";
+		return "no FileTypes folder next to the editor (not the packaged layout) or no per-user data folder; .heproj was not registered";
 	case Outcome::AlreadyRegistered:
 		return ".heproj already opens with this editor (" + exe + ")";
 	case Outcome::Registered:
@@ -758,6 +758,11 @@ int runCommandLine(int argc, char** argv)
 	for (int i = 1; i < argc; ++i)
 		if (argv && argv[i] && std::strcmp(argv[i], kCommandLineFlag) == 0) asked = true;
 	if (!asked) return -1;
+
+	// stdout carries the verdict line and nothing else: the logger would otherwise put
+	// its INFO records (a missing helper tool, say) in front of it, and a script reading
+	// the output should not have to guess which line is the answer.
+	HE::Log::setConsoleEnabled(false);
 
 	Result result;
 	std::string exe;

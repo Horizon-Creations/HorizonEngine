@@ -2076,7 +2076,7 @@ static void registerProjectFileTypeAtStartup(GlobalState& gs)
 	               ".heproj project files open with " + owner + ", so the editor left the file type alone",
 	               "To open them with the Horizon Editor instead, use \"Open with\" in your file manager, "
 	               "or run the script in the editor's FileTypes folder. The check can be switched off under "
-	               "Edit > Preferences > Editor > File Types.");
+	               "Edit > Preferences > Editor > Tool Status.");
 }
 
 void EditorApplication::startToolchainProbe()
