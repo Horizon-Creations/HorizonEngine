@@ -213,11 +213,14 @@ TEST_CASE("streaming view: split beside the scene file, one undo step each, merg
 	CHECK(withPin.lines().size() >= lines.lines().size() + 2 * 96);
 	// The tab keeps such anchors for the Scene window; none to begin with.
 	CHECK(StreamingDebugView::previewPins().empty());
+	StreamingDebugView::previewPins().push_back(pin);
 
 	REQUIRE(StreamingDebugView::mergeOpenScene(ctx, message));
 	CHECK(meshCount(world) == 12);
 	CHECK(world.cellManifestJson().empty());
 	CHECK(StreamingDebugView::manifestOf(world) == nullptr);
+	// They were set in the scene as it was split: another manifest, and they are gone.
+	CHECK(StreamingDebugView::previewPins().empty());
 	DebugDrawBuffer none;
 	StreamingDebugView::appendCellLines(world, glm::vec3(0.0f), none);
 	CHECK(none.lines().empty());

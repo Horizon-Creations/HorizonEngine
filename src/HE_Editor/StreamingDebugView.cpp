@@ -44,6 +44,9 @@ const HE::CellManifest* manifestOf(const HorizonWorld& world)
 	{
 		s_text = text;
 		s_ok   = !text.empty() && HE::CellManifest::parse(text, s_manifest) && !s_manifest.empty();
+		// The preview anchors are absolute positions in the scene they were set in; another
+		// scene (or the same one split or merged) would draw them somewhere that means nothing.
+		previewPins().clear();
 	}
 	return s_ok ? &s_manifest : nullptr;
 }
