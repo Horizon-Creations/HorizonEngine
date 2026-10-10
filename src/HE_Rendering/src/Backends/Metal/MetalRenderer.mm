@@ -9449,7 +9449,7 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 // depth-stencil state; this only sets the pipeline, buffers and textures.
 bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
                                           float yaw, float pitch, float dist, int shape,
-                                          const HE::UUID& meshId)
+                                          const HE::UUID& meshId, float timeSeconds)
 {
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -9533,10 +9533,18 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 
 	HE::MaterialShaderLibrary::Lighting lit{};
 	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
-	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
+	// Engine clock for the Time input. A live preview (the Material Editor) hands
+	// it in, a still (thumbnails) leaves it at 0 — and then must not pick up wind
+	// either, or a sway material's thumbnail would lean with whatever scene is open.
+	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
+	lit.sunDir[3] = timeSeconds >= 0.0f ? timeSeconds : 0.0f;
 	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	// Wind / Wind Sway nodes read the .w of sunColor / ambient / camPos. The three
+	// are spare in this block, so the wind rides in AFTER the studio values above
+	// (FillMaterialWind writes only those .w channels).
+	if (timeSeconds >= 0.0f) HE::FillMaterialWind(GetEnvironment(), lit);
 	// Studio sun as the single array light so heLitP() previews shade correctly
 	// (same seed as the GL backend's material preview). heLitP has NO separate
 	// sun term — sunDir/sunColor above only feed the legacy heLit() — so leaving
@@ -9733,7 +9741,7 @@ void MetalRenderer::EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void
 
 void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
                                            uint32_t size, float yaw, float pitch, float dist,
-                                           int shape, const HE::UUID& meshId)
+                                           int shape, const HE::UUID& meshId, float timeSeconds)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -9781,7 +9789,7 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
 	const bool encoded = EncodeMaterialPreview((__bridge void*)enc, materialId, yaw, pitch, dist,
-	                                           shape, meshId);
+	                                           shape, meshId, timeSeconds);
 	[enc endEncoding];
 	if (!encoded) { [cb commit]; return nullptr; }
 

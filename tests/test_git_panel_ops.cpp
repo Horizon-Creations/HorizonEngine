@@ -30,6 +30,15 @@ bool gitAvailable()
 	return available;
 }
 
+// A file name git would read as a pathspec pattern, to prove the panel's operations take
+// names literally. NTFS has no '*' in file names, so on Windows the pattern part is a
+// character class alone ("[draft].txt" would match d.txt, r.txt, ... but not itself).
+#ifdef _WIN32
+const char* const kGlobName = "[draft].txt";
+#else
+const char* const kGlobName = "[draft]*.txt";
+#endif
+
 fs::path uniqueDir(const char* stem)
 {
 	static const auto salt =
@@ -70,6 +79,9 @@ fs::path makeRepo(const char* stem)
 	REQUIRE(GitCli::run(dir, { "config", "user.name",  "HorizonEngine Test" }).ok);
 	REQUIRE(GitCli::run(dir, { "config", "user.email", "test@example.invalid" }).ok);
 	REQUIRE(GitCli::run(dir, { "config", "commit.gpgsign", "false" }).ok);
+	// Git for Windows ships core.autocrlf=true: a checked-out "main\n" comes back as
+	// "main\r\n". The assertions compare file contents byte for byte.
+	REQUIRE(GitCli::run(dir, { "config", "core.autocrlf", "false" }).ok);
 	return dir;
 }
 
@@ -123,19 +135,20 @@ TEST_CASE("Staging takes exactly the named files, and unstaging gives them back"
 	writeFile(repo / "keep.txt", "v2");
 	fs::remove(repo / "gone.txt");
 	writeFile(repo / "new one.txt", "n");
-	writeFile(repo / "[draft]*.txt", "glob");   // a name git would read as a pathspec pattern
+	writeFile(repo / kGlobName, "glob");        // a name git would read as a pathspec pattern
+	REQUIRE(fs::exists(repo / kGlobName));      // a name the file system refuses must not hide behind a git error
 
 	std::string err;
-	REQUIRE(GitCli::stage(repo, { "keep.txt", "gone.txt", "[draft]*.txt" }, &err));
+	REQUIRE(GitCli::stage(repo, { "keep.txt", "gone.txt", kGlobName }, &err));
 	RepoStatus st = statusOf(repo);
 	REQUIRE(st.find("keep.txt"));
 	CHECK(st.find("keep.txt")->staged());
 	CHECK(st.find("gone.txt")->index == FileState::Deleted);    // a deletion stages too
-	REQUIRE(st.find("[draft]*.txt"));
-	CHECK(st.find("[draft]*.txt")->staged());
+	REQUIRE(st.find(kGlobName));
+	CHECK(st.find(kGlobName)->staged());
 	CHECK_FALSE(st.find("new one.txt")->staged());              // literal: not swept in by the glob
 
-	REQUIRE(GitCli::unstage(repo, { "keep.txt", "gone.txt", "[draft]*.txt" }, &err));
+	REQUIRE(GitCli::unstage(repo, { "keep.txt", "gone.txt", kGlobName }, &err));
 	st = statusOf(repo);
 	CHECK_FALSE(st.hasStagedChanges());
 	CHECK(readFile(repo / "keep.txt") == "v2");                 // the working tree is untouched
