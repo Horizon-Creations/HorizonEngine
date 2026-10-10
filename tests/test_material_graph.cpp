@@ -3520,14 +3520,18 @@ TEST_CASE("Weather functions: a usable interface, flat, defaults authored, no Pa
 			CHECK(n.type != MatNodeType::ParamFloat);
 		}
 	}
+	// Pin NAMES point into the graph's node strings (see matFunctionPins), so the graphs are
+	// named locals here: a temporary would be gone before the names are read.
+	const MaterialGraph puddlesFn = HE::buildWeatherPuddlesFunction();
+	const MaterialGraph snowFn    = HE::buildWeatherSnowFunction();
 	std::vector<HE::MatPinDesc> ins, outs;
-	HE::matFunctionPins(HE::buildWeatherPuddlesFunction(), ins, outs);
+	HE::matFunctionPins(puddlesFn, ins, outs);
 	REQUIRE(ins.size() == 1u);
 	CHECK(std::string(ins[0].name) == "Max Water Level");
 	REQUIRE(outs.size() == 4u);
 	CHECK(std::string(outs[0].name) == "Water Level");
 	CHECK(std::string(outs[3].name) == "Size");   // appended last: the pins wired before keep their index
-	HE::matFunctionPins(HE::buildWeatherSnowFunction(), ins, outs);
+	HE::matFunctionPins(snowFn, ins, outs);
 	REQUIRE(ins.size() == 3u);
 	CHECK(std::string(ins[0].name) == "Slope");
 	CHECK(std::string(ins[1].name) == "Max Slope");
