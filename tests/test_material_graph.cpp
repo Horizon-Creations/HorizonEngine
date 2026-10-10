@@ -5855,6 +5855,13 @@ TEST_CASE("FXC: the SSR passes compile exactly as D3D11/D3D12 build them")
 // that t14 is really bound (the unbound zeros would give layer 0) and that s0
 // carried the clamp sampler while the draw ran. The state queries after the
 // restore say s0 is back on the built-in pass's sampler and t14 is off.
+//
+// Since "Landscape: smoother painted edges" the blend clamps the weight coordinate
+// to the page's texel centres itself, so the address mode of s0 no longer decides
+// the u = 1.2 read: CLAMP and WRAP both give texel 1. The clamp sampler on s0 is
+// still bound (it is the cheap half of the fix), and what the pixel proves about
+// s0 is now the opposite of what the paragraph above says: the read is robust to
+// it. Whether t14 is bound at all is still decided by the pixel (unbound = red).
 namespace
 {
 struct WarpDevice11
@@ -6183,16 +6190,22 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	CHECK(srvAt(HE::d3d11mat::kWeightmapSrvSlot).Get() == nullptr);
 
 	// 3. The bug's two faces, so the positive verdict has teeth. (a) t14 bound
-	//    but s0 left on the built-in WRAP sampler — the half that is easy to
-	//    forget: u = 1.2 wraps to 0.2 and lands mostly on texel 0 → red-ish,
-	//    NOT green. (b) t14 unbound (the pre-fix renderer): zeros → the blend's
-	//    layer-0 fallback → pure red.
+	//    but s0 left on the built-in WRAP sampler — once the half that was easy to
+	//    forget: u = 1.2 wrapped to 0.2 and landed mostly on texel 0 → red-ish.
+	//    Since the blend reads its weights through a smoothed coordinate that it
+	//    clamps to the page's texel centres itself (emitLayerBlendNode, "smoother
+	//    painted edges"), the address mode of s0 no longer decides this read:
+	//    u = 1.2 is clamped in the shader, so WRAP gives the same green as CLAMP.
+	//    The test pins exactly that, so a shader that goes back to leaning on the
+	//    sampler shows up here. (b) t14 unbound (the pre-fix renderer): zeros →
+	//    the blend's layer-0 fallback → pure red.
 	{
 		ID3D11ShaderResourceView* wm = weightmap.Get();
 		ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &wm);
 		const Pixel11 wrapped = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
-		CHECK_MESSAGE((wrapped.r > 128 && wrapped.g < 128),
-		              "t14 + WRAP s0 should read texel 0's side (red), got ", int(wrapped.r), ",", int(wrapped.g), ",", int(wrapped.b));
+		CHECK_MESSAGE((near8(wrapped.r, 0) && near8(wrapped.g, 255) && near8(wrapped.b, 0)),
+		              "t14 + WRAP s0: the blend clamps its own weight coordinate, expected layer 1 (green) all the same, got ",
+		              int(wrapped.r), ",", int(wrapped.g), ",", int(wrapped.b));
 		ID3D11ShaderResourceView* nullSrv = nullptr;
 		ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &nullSrv);
 		const Pixel11 unbound = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
