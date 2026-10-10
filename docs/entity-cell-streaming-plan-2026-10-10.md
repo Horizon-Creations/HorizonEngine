@@ -636,7 +636,11 @@ Bindungsprüfung des Splitters und ohne `preserveIds` werden genau die zugehöri
    `test_terrain_tools_ui`, `test_assimpimport`, `test_editor_help` (gemessen mit einem vollen ctest auf dem
    unveränderten Stand, Release, shaderc ON). Vier davon sind Thema 181; `test_culling` (zwei Fälle zur Himmels-Shader-Kopie:
    „Dome clouds: Metal and GL march and shadow them the same way“, „Nebula: Metal's kSkyMSL copy matches the GL sky shader after
-   normalisation“) steht in dessen Liste nicht.
+   normalisation“) steht in dessen Liste nicht. Belegt auf CI, Fall für Fall: der Lauf 38000836257 auf `202e14f2` und der Lauf
+   38046374714 auf `ede20a89` (2a) scheitern je Plattform an denselben Tests mit denselben Meldungen: Linux vier
+   (`test_culling`, `test_terrain_tools_ui`, `test_assimpimport`, `test_editor_help`), macOS fünf (dazu `test_material_graph`),
+   Windows sechs (dazu `test_git_panel_ops`), Linux·Vulkan (lavapipe) grün. Der lokale volle ctest auf `ede20a89` (250 grün,
+   2 übersprungen) hat dieselben fünf wie macOS-CI.
 
 8. **Prefab-Instanzen in Zellen werden vom Editor nicht abgeglichen, solange sie in Zellen liegen.** Der Abgleich
    mit dem Prefab-Asset (`syncPrefabInstances`) läuft beim Öffnen und vor dem Speichern über die Editor-Welt, und
