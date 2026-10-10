@@ -1627,9 +1627,15 @@ void drawStatusPage(AppContext& ctx)
 	// business but the router's.
 	EditorWidgets::WrapText wrap;
 
+#if defined(__APPLE__)
+	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
+	                   "the background at startup; nothing here changes any setting.");
+#else
+	// (The file type switch at the foot of the page is not built on macOS.)
 	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
 	                   "the background at startup; the rows change no setting. The one "
 	                   "setting on this page, at the end, is the .heproj file type.");
+#endif
 	ImGui::Spacing();
 
 	// The Claude rows are the one check that is not run at startup, so opening

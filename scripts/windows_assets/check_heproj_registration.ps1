@@ -222,8 +222,8 @@ function Check-Printed($run, [string]$pattern, [string]$when) {
     Check ($run.Output -match ('(?m)' + $pattern)) "[$when] the editor printed the expected line (it said: $($run.Output))"
 }
 
-# What register_heproj.ps1 leaves in HKCU, judged against the editor that was run and the
-# icon it ships ($icon = <exe folder>\FileTypes\heproj.ico).
+# What the editor leaves in HKCU (the layout register_heproj.ps1 writes), judged against
+# the exe that was run and the icon it ships ($icon = <exe folder>\FileTypes\heproj.ico).
 function Check-Registration([string]$exe, [string]$icon, [string]$when) {
     Check ((Get-Value 'Software\Classes\.heproj' '') -eq $progId) "[$when] .heproj points at $progId"
     Check ((Get-Value 'Software\Classes\.heproj' 'Content Type') -eq 'application/x-heproj') "[$when] Content Type is application/x-heproj"

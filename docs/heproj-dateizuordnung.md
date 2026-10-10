@@ -251,9 +251,27 @@ Spalte. Die Läufe stehen unter der Tabelle.
 | | | **Explorer UserChoice.** Wie sich eine echte Wahl über „Öffnen mit, Immer“ zur Registrierung verhält, ob die Benachrichtigung dann erscheint und ob das Skript eine solche Wahl überhaupt ersetzen kann |
 | | | **Der Schalter im Fenster.** Die Checkbox in `Edit > Preferences > Editor > Tool Status` wurde nicht als Bild gesehen |
 
-TODO-LEAD: Testergebnisse Schritt 5 eintragen
+Läufe auf dem Mac, 2026-10-10, Debug, auf dem Stand dieses Schritts (nach dem Zusammenführen
+mit `release/0.7.0`):
 
-Dorthin gehören: `he_tests` (Fälle und Prüfungen von `test_heproj_registration` und der Nachbarn), `ctest` für `heproj_file_types`, der CI Lauf je Windows und Linux, der Commit.
+* `he_tests`, `test_heproj_registration`: 36 Fälle, 188 Prüfungen, alle grün. Zusammen mit
+  `ProjectLaunchOpen` und den Hilfe Tests (`editor help: ...`, darunter „every topic it points
+  at exists in the manual“ für den neuen Eintrag): 60 Fälle, 17358 Prüfungen, alle grün.
+* Das gebaute `HorizonEditor --register-file-types` auf dem Mac: eine Zeile
+  `unsupported: ...`, Exit 5, ohne Fenster. Mehr kann es dort nicht tun, macOS hat kein
+  Backend.
+* Die Zweige, die der Mac nicht baut, sind nur auf Übersetzbarkeit geprüft: der Linux Zweig
+  von `makeNativeBackend` an einer Kopie ohne den macOS Zweig (`clang++ -fsyntax-only -Wall
+  -Wextra`, sauber), der Windows Zweig gegen selbst geschriebene Stub Header für
+  `windows.h` und `shlobj.h`. Das findet Tippfehler und Typfehler, nicht falsche Win32
+  Signaturen. Ausgeführt wurde keiner von beiden Zweigen, `/proc/self/exe`, die echte
+  Registry und `HE::Proc` mit den Hilfsprogrammen laufen zum ersten Mal auf der CI.
+* Voller `ctest` ohne `test_material_graph`, seriell: lief beim Festschreiben noch. Das
+  Ergebnis steht im Bericht des Schritts im Hive (Thema 161), nicht hier.
+* CI: der Lauf des Pull Requests nach `release/0.7.0`; sein Ergebnis meldet der Hive. Ob die
+  Klasse `LinuxSelfRegistration` dort wirklich lief und nicht übersprungen wurde (sie
+  überspringt, wenn die gepackte Binary nicht startet), zeigt nur das Log des Schritts
+  „Check the .heproj registration in the package (Linux)“.
 
 ## Offen, braucht Hardware
 
