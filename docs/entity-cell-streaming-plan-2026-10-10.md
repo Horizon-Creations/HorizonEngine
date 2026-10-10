@@ -961,7 +961,26 @@ whole world against the streamed cells around the camera“ (`doctest::skip`, l�
   (bei 12,4k). Die Kosten gehen mit der Zahl der **geladenen** Entities, nicht mit der Größe der Welt.
 - **Die Zahlen sind nicht die Zahlen von 153 §11.3.** Dort sind es 76,6 ms (101k) und 6,4 ms (10k) im Editor, mit Profiler, GPU-Thread und
   Oberfläche. Der Bench misst nur den `extract`-Aufruf im Prozess ohne Fenster: 56 statt 76,6 ms bei 101k, 2,4 bis 2,9 statt 6,4 ms bei 10k.
-  Verglichen wird innerhalb des Benchs. Ein Lauf des echten Spiels mit `HE_PROFILE_CAPTURE` ist **nicht** Teil der Messung (siehe 15.4).
+  Verglichen wird innerhalb des Benchs; das echte Spiel steht gleich darunter.
+
+**Im echten Spiel (Metal, `HE_PROFILE_CAPTURE`).** Dieselbe Welt als loses Spiel-Verzeichnis (`scripts/perf/make_cell_game_dir.py`: Laufzeit,
+`project.hcfg` ohne Pak, Szene und Zellen lose, eine Kamera bei 0, 25, 90), 120 Frames nach 300 Warmlauf-Frames, `HE_PROFILE_VSYNC=off`,
+`HE_PROFILE_COUNTERS=0`, verstecktes Fenster, 2 560 × 1 440 ohne Vsync, ausgewertet mit `scripts/perf/dump_scope_p50.py`. Das Spiel ruft
+`RenderExtractor::extract` je Frame dreimal auf (Schatten, SSAO, Szene), einen vollen Lauf und zwei Wiederverwendungen aus dem `FrameScope`
+von Thema 162; die Spalte „je Frame“ ist die Summe der drei Aufrufe, „voller Lauf“ der p90 je Aufruf:
+
+| Welt | Frame-CPU p50 | `extract` je Frame, p50 | voller Lauf (p90 je Aufruf) | `CellStreaming` je Frame | RSS des Prozesses (max) |
+|---|---|---|---|---|---|
+| ganz, 101 069 Entities, Last 2,1 bis 2,5 | **164,5 ms** | **73,7 ms** | 66,0 ms | – | 817 MB |
+| gestreamt, Radius 1 100 m, 9 908 geladen, Lauf 2 (ruhig, Last 1,4 bis 2,3) | **12,6 ms** | **5,0 ms** | 4,4 ms | 0,019 ms | 340 MB |
+| gestreamt, Lauf 1 (der letzte ctest-Test lief noch, **unter Last**) | 12,3 ms | 4,9 ms | 4,3 ms | 0,020 ms | 342 MB |
+
+Das ist die Zahl, auf die der Zielwert zielt: **`extract` je Frame 73,7 ms (ganze 101k-Welt, deckt sich mit den 76,6 ms von 153 §11.3 im Editor)
+gegen 5,0 ms mit 9 908 geladenen Entities**, unter der 6,4-ms-Zeile der 10k-Welt im Editor. Der Frame sinkt von 164,5 auf 12,6 ms CPU
+(13-mal). Der RSS des ganzen Prozesses (mit Metal, Pipelines, Python) fällt von 817 auf 340 MB. Der Streamer selbst kostet 0,02 ms je Frame.
+Der schlechteste Frame der gestreamten Läufe (65 und 72 ms CPU, Frame 55 und 98 von 120) ist ein Warten auf den Swapchain
+(`Metal::NextDrawable` 58 und 65 ms, Wanduhr 686 und 1 366 ms im Frame des versteckten Fensters), `CellStreaming` steht dort bei 0,01 bis
+0,02 ms: nicht der Streamer.
 - **Streuung:** das gestreamte p50 pendelt zwischen 0,5 und 1,5 ms für dieselbe Welt (zwei Häufungen, 0,5 bis 0,6 und 1,5; vermutlich
   die Kernart, auf der der Hauptthread liegt, nicht belegt). Der ganze Lauf mit 101k war einmal (der erste, unter Last) 34 ms statt 56 ms; das
   hat sich in sechs weiteren Läufen nicht wiederholt und ist unerklärt. Wer das Verhältnis zitiert, nimmt die abwechselnden Läufe.
@@ -998,8 +1017,10 @@ whole world against the streamed cells around the camera“ (`doctest::skip`, l�
 
 - **Editor-Leiter nicht neu gelaufen.** `world_streaming_ladder.sh` misst den Editor, und der streamt nicht (2c fehlt); er hat sich durch
   Thema 164 nicht verändert. Die Zahlen von 153 §11.3 gelten weiter.
-- **Kein `HE_PROFILE_CAPTURE`-Lauf des Spiels mit gestreamter 101k-Welt** (die Zahl, die der Plan mit „p50 im Profiler“ meint). Das Spiel
-  läuft mit dieser Welt (`make_cell_game_dir.py`, Bilder oben), der Capture ist nicht gemacht; die Bench-Zahlen sind die Stellvertreter.
+- **Der Capture-Lauf des Spiels hat eine stehende Kamera.** Die Zahlen in 15.2 stammen aus 120 Frames mit gesättigtem Streamer (alle Zellen
+  gebaut); das Profil **während** des Ladens beim Fahren über Zellgrenzen im Spiel ist nicht aufgenommen. Dafür gibt es den Lauf über die
+  Karte im Bench (15.3, ohne Zeichnen) und den Bildvergleich vom Start. Eine Kamerabahn im Spiel bräuchte ein Skript oder einen
+  Eingabe-Zeugen (nicht gebaut).
 - **Assets, Physik, Skripte nicht im Bild.** Die Referenzwelt hat keine Assets außer Würfel/Kugel, keine Bodies und keine Skripte. Die
   Sicherheit der Physik (3 000 Bodies, Hold, Gelenke) steckt in den Tests von 3a, nicht in dieser Messung bei 100k. 3b (Zustand, Skripte pro
   Zelle) und 2c (Play) sind nicht gebaut.
@@ -1011,3 +1032,12 @@ whole world against the streamed cells around the camera“ (`doctest::skip`, l�
 - **Splitten kostet:** in-process 1,9 bis 5,4 s und rund 1,8 GB Spitze für 100k Entities (JSON-Baum der Szene plus Zell-JSON); der Editor geht
   über CBOR und hat dieselbe Größenordnung. Das ist ein Editor-Vorgang, kein Laufzeitkostenpunkt, aber bei 1M Entities ein Thema.
 - **`OptimizeBroadPhase` nach einer Charge** (6.1) bleibt ungemessen (siehe 14).
+
+### 15.5 Vollbau und Tests
+
+Auf `9a2894c5` plus dem Bench dieses Schritts, Release, `HE_ENABLE_SHADERC=ON`, im Vordergrund gelesen: `cmake --build out/build/release -j8`
+(alle Ziele, `BUILD_RC=0`; ein Vollbau von `he_tests`, Editor und Spiel nach der Zusammenführung brauchte 13:50 min, jede weitere Änderung an
+einer Testdatei rund 7 bis 9 min, weil CMake nach jedem Lauf neu konfiguriert und eine große Zahl Übersetzungseinheiten neu baut) und
+`ctest -j4 --timeout 1500`: **`100% tests passed out of 256`**, `CTEST_RC=0`, 305 s, die zwei `runtime_size_app_*` übersprungen wie in jedem
+Lauf davor. `test_world_scale` und `test_cell_split` grün, `test_material_graph` 282 s und grün. Der Bench ist `doctest::skip` und fehlt
+in diesen 256; er lief mit `--no-skip` nur für die Messung. Die CI der Plattformen läuft über die Zweige und ist hier nicht abgewartet.

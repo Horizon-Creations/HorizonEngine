@@ -38,3 +38,18 @@ extract am Ende des Laufs: 768 m 1,69 / 1,70 ms (6 567 Objekte), 1100 m 3,27 / 3
 [Spiel, Metal, scripts/perf/make_cell_game_dir.py + HE_CAPTURE_FRAME, Lade-Radius 1100 m]
 Frame 12 gegen Frame 400 (1280x720): 10 967 von 921 600 Pixeln unterscheiden sich (1,2 %), alle in den Zeilen 196 bis 303 (dem Horizontband);
 darunter ist das Bild bitgleich. Bilder: docs/perf-audit/shots-cells/game-frame012.png, game-frame400.png
+
+[Spiel, Metal, HE_PROFILE_CAPTURE=120 HE_PROFILE_WARMUP=300 HE_PROFILE_COUNTERS=0 HE_PROFILE_VSYNC=off, verstecktes Fenster, 2560x1440; ausgewertet mit scripts/perf/dump_scope_p50.py]
+(die Dumps selbst, je 1,7 MB, liegen nicht im Repo; sie lagen in /tmp/ws_game/dumps und /tmp/ws_game_whole/dumps)
+ganze Welt 101 069 Entities (Bench.hescene ohne Zellen), Last 2,1 bis 2,5:
+  frame CPU p50 164,52 ms p90 173,14 max 186,65
+  RenderExtractor::extract: 360 Aufrufe, je Aufruf p50 4,893 p90 66,040 max 80,150 | je Frame (Summe) p50 73,686 p90 77,525 mean 72,239 ms
+  Render p50 164,133; RSS des Prozesses max 816,8 MB
+gestreamt, Radius 1100 m, 9 908 Entities geladen, Lauf 1 (der letzte Test von ctest, test_material_graph, lief noch: unter Last):
+  frame CPU p50 12,31 ms p90 13,63 max 72,12
+  extract: je Aufruf p50 0,414 p90 4,265 max 5,313 | je Frame p50 4,941 p90 5,495 mean 4,917 ms
+  CellStreaming je Frame p50 0,020 ms; RSS max 341,9 MB
+gestreamt, Radius 1100 m, Lauf 2, ruhig (Last 1,4 bis 2,3):
+  frame CPU p50 12,56 ms p90 14,34 max 65,09
+  extract: je Aufruf p50 0,426 p90 4,438 max 6,150 | je Frame p50 5,002 p90 5,797 mean 5,010 ms
+  CellStreaming je Frame p50 0,019 ms; RSS max 339,7 MB
