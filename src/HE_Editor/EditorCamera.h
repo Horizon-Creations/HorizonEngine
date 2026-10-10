@@ -9,6 +9,7 @@
 //   • Right-Mouse drag      : fly-look (rotate in place)
 //   • Right-Mouse + WASDQE  : fly movement (Shift = faster)
 //   • Mouse wheel           : dolly toward/away from the pivot
+//   • Right-Mouse + wheel   : fly SPEED - up is faster, down is slower
 //   • focusOn()             : frame a bounding sphere (F key in the UI)
 //
 // The class is input-agnostic: the UI layer collects raw deltas from ImGui and
@@ -32,6 +33,7 @@ public:
 		bool      look    = false;     // RMB drag (fly look)
 		glm::vec2 mouseDelta{ 0.0f };  // logical pixels since last frame
 		float     wheel   = 0.0f;      // scroll ticks (+ = zoom in)
+		float     speedWheel = 0.0f;   // scroll ticks while fly-look is held (+ = faster)
 		glm::vec3 moveAxis{ 0.0f };    // fly move: x=right y=up z=forward, each [-1,1]
 		bool      fast    = false;     // Shift held → move faster
 		float     dt      = 0.0f;      // seconds
@@ -72,6 +74,13 @@ public:
 	float     fovDegrees()  const { return m_fov; }
 	float     nearPlane()   const { return m_near; }
 	float     farPlane()    const { return m_far; }
+
+	// The fly speed's bounds, shared with the sliders that edit the same number.
+	static constexpr float kMinFlySpeed = 0.25f;
+	static constexpr float kMaxFlySpeed = 100.0f;
+	// What one scroll tick does to the fly speed: x1.15 up, /1.15 down - a multiplier
+	// rather than a step, so it is as fine at 1 u/s as it is coarse at 80.
+	static constexpr float kFlySpeedPerTick = 1.15f;
 
 	float     flySpeed()    const         { return m_flySpeed; }
 	void      setFlySpeed(float s)        { m_flySpeed = s > 0.0f ? s : m_flySpeed; }

@@ -2976,11 +2976,16 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		namespace T = EditorToolbar;
 		T::Bar bar;
 		T::assetHeader(bar, assetPath, st.dirty);
+		// Folder, then Save: what every asset tab opens with. The right edge is the
+		// Viewport | Code switch's.
+		if (T::saveButton(bar, true, /*atLeft=*/true)) saveClassState(st, ctx);
 		// Everything on this band goes through the Bar's OWN cells. A raw ImGui
 		// combo or radio drawn here lays itself out in window coordinates while
 		// the Bar places its cells into a draw list — the two do not know about
 		// each other, and the widget lands on top of the band's own text.
-		bar.group();
+		// Declared first so the base-class cell to its left knows how much room is
+		// its own; it is drawn at the right edge.
+		bar.rightGroup(bar.labelGroupWidth({ "Viewport", "Code" }));
 		if (bar.item("##hcmodeviewport", nullptr, "Viewport", st.showViewport, true,
 		             "The class's body — its components, and what they add up to"))
 			st.showViewport = true;
@@ -3054,7 +3059,6 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 			}
 			ImGui::EndPopup();
 		}
-		if (T::saveButton(bar, true)) saveClassState(st, ctx);
 	}
 
 	// The event catalog is the base-class chain's events (Object contributes

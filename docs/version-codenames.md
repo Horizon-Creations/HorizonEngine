@@ -7,7 +7,7 @@ zwei Stellen sichtbar:
 - **App-Titel / About**: z. B. `Horizon Engine 0.3.0 „Aurora"`
 - **DMG-Installer-Look**: jeder Codename hat ein passendes Hintergrund-Theme
   (`scripts/dmg_assets/gen_assets.py`). Vorhanden: `twilight`, `midnight`,
-  `sunrise`, `aurora`, `alpenglow`, `parhelion`. Geplant: `sunset`, `solar-eclipse`.
+  `sunrise`, `aurora`, `alpenglow`, `parhelion`, `nimbus`. Geplant: `sunset`, `solar-eclipse`.
 
 ---
 
@@ -23,6 +23,7 @@ zwei Stellen sichtbar:
 | **0.3.5** | **Aurora**  | Content-Management (Suche, Mehrfachauswahl, Referenz-Scan), grosse Assets in der Sitzung, Benachrichtigungen (Protokoll v13) | `aurora` |
 | **0.4.0** | **Alpenglow** | Charakter-Release: Animations-State-Machines + Sync-Graphen, Kamera-Rig, Gamepad, HorizonCode-Vererbung, Anti-Aliasing, volumetrische Wolken, Startfenster + Marken-Theme | `alpenglow` ✅ |
 | **0.5.0** | **Parhelion** ✅ | Welt-Release: Mehrfachauswahl, Prefab-Links mit Overrides, Sequencer, Assimp-Import, Terrain-Heightmap + Foliage, Submeshes/Material-Slots, Schatten + Material-Graph auf D3D11/D3D12/Vulkan, TAA auf Metal+GL, HorizonCode-Debugging, Apps Welle 2 | `parhelion` ✅ |
+| **0.7.0** | **Nimbus** ✅ | Wetter-Release: Wetter-Panel mit Regen, Schnee und Gewitter samt Sounds, wetterabhängige Pfützen und Schnee im Material, Auto-Landschaftsmaterial mit echten Texturen, EngineContent-Bibliothek per SFTP | `nimbus` ✅ |
 
 Ein Patch behält den Codenamen seines Minor-Release — der Name gehört zu 0.3,
 nicht zu 0.3.x. Was ein Patch trotzdem braucht, ist der Versions-Bump selbst:
@@ -71,7 +72,8 @@ Abend/Nacht über; **dramatische Himmelsereignisse** sind den großen Meilenstei
 | Licht-Release    | 0.3.0 *(vergeben)*  | **Aurora** ✅ ★     | Deferred + DDGI = die Engine lernt Licht   | `aurora` ✅      |
 | Rest der 0.x     | 0.4 *(vergeben)*    | **Alpenglow** ✅    | rosa Bergleuchten — der Charakter-Release   | `alpenglow` ✅   |
 | Rest der 0.x     | 0.5 *(vergeben)*    | **Parhelion** ✅    | Nebensonne — der Welt-Release (Licht durch Material/Schatten-Pipelines) | `parhelion` ✅   |
-| Rest der 0.x     | 0.6+                | **Daybreak**, **Morning Star** | Morgen-Pool weiterzählen        | (neu anlegen)    |
+| Rest der 0.x     | 0.7 *(vergeben)*    | **Nimbus** ✅       | Regenwolke — der Wetter-Release            | `nimbus` ✅      |
+| Rest der 0.x     | 0.8+                | **Daybreak**, **Morning Star** | Morgen-Pool weiterzählen        | (neu anlegen)    |
 | Erstes Stable    | **1.0**             | **Golden Hour**     | warmes, reifes Licht — alle Plattformen da | sunset (geplant) |
 | Reifer Höhepunkt | 2.0                 | **Zenith**          | Sonne am höchsten — Leistungs-/Feature-Peak| (neu: „day")     |
 | Übergang         | 2.x                 | **Sunset**          | Abendlicht                                  | `sunset` (geplant)|
@@ -129,7 +131,7 @@ Abend/Nacht über; **dramatische Himmelsereignisse** sind den großen Meilenstei
 
 ### 🌫️ Atmosphäre & Wetter  (oft Feature-bezogen)
 - **Aurora** ★ (Polarlicht/`applyAurora3D`)
-- **Cirrus** ★ / **Cumulus** / **Nimbus** ★ (Wolken-System)
+- **Cirrus** ★ / **Cumulus** / **Nimbus** ✅ ★ (Wolken-System; 0.7.0, der Wetter-Release)
 - **Halo** — Lichtring um Sonne/Mond
 - **Parhelion** ✅ — Nebensonne, Eiskristall-Lichtphänomen neben der Sonne (0.5.0)
 - **Mirage** — Luftspiegelung am Horizont

@@ -8,6 +8,7 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "HcEditorUtil.h"     // listAssets: what the material picker offers
+#include "EditorHelp.h"      // referenceTopic: which entry a hovered control resolves to
 
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>
@@ -21,6 +22,7 @@
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/WeatherComponent.h>
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
@@ -809,14 +811,14 @@ TEST_CASE("inspector ui: Add Component is grouped, and a typed search ends on En
 }
 
 // ── The engine water material on the panel (Thema 152) ──────────────────────
-// Engine/Materials/Water.hasset is the first material that ships with fifteen
-// parameters, three of them packed Vec4s. What the Details panel owes it: every
+// Engine/Materials/Water.hasset is the first material that ships with sixteen
+// parameters (the whole HeParams block), most of them packed Vec4s. What the Details panel owes it: every
 // one of them on the panel, and every one an edit of THIS entity (an override),
 // not of the shared engine asset. Driven like the cases above, in a window tall
 // enough for the whole Material section, edited bottom-up because an edit adds
 // a "Reset to material default" button under its row and moves everything below.
 #ifdef HE_EDITOR_DEPS_DIR
-TEST_CASE("inspector ui: the engine water material shows all fifteen parameters, and each one edits this entity")
+TEST_CASE("inspector ui: the engine water material shows all sixteen parameters, and each one edits this entity")
 {
 	Harness harness;
 	constexpr int TW = 420, TH = 2400;
@@ -840,7 +842,7 @@ TEST_CASE("inspector ui: the engine water material shows all fifteen parameters,
 		sharedBefore = m->shaderParamData;
 		names.insert(m->graphParamNames.begin(), m->graphParamNames.end());
 	}
-	REQUIRE(names.size() == 15);
+	REQUIRE(names.size() == 16);
 
 	// Selectable without any setup: the material slot's picker lists it
 	// (EditorWidgets → HcEditorUtil::listAssets, the same scan the panel runs).
@@ -918,7 +920,7 @@ TEST_CASE("inspector ui: the engine water material shows all fifteen parameters,
 	}
 	REQUIRE_MESSAGE(texAt >= 0, "'+ Texture Slot' not found on the panel");
 	REQUIRE_MESSAGE(saveAt > texAt, "'Save Material' not found below the texture slots");
-	// Every parameter is a row of its own between the two — fifteen controls.
+	// Every parameter is a row of its own between the two — sixteen controls.
 	CHECK(saveAt - texAt - 1 == static_cast<int>(names.size()));
 
 	// Edit each one, last row first: press on its first field, drag right, let go.
@@ -964,3 +966,92 @@ TEST_CASE("inspector ui: the engine water material shows all fifteen parameters,
 	CHECK(reloaded == names);
 }
 #endif
+
+// ── The weather's five sound slots (Thema 167) ──────────────────────────────
+// Empty, each slot names the engine sound it plays instead, and each one explains
+// itself on hover with an entry of its own (the generic "click to pick or drop"
+// line would say the same for all five). Hovered for a moment, F1 then opens THAT
+// slot's reference entry, which is how the test can tell which tooltip was queued.
+TEST_CASE("inspector ui: each weather sound slot says what it plays and explains itself on hover")
+{
+	Harness harness;
+	constexpr int TW = 420, TH = 1800;
+	ImGui::GetIO().DisplaySize = ImVec2(float(TW), float(TH));
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	const Entity weather = world.addWeather();
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+
+	struct Slot { const char* shown; const char* idSuffix; const char* key; ImGuiID id = 0; float y = -1.0f; };
+	Slot slots[] = {
+		{ "(default: Rain)",    "wxrain",  "Weather/Rain Sound"    },
+		{ "(default: Wind)",    "wxwind",  "Weather/Wind Sound"    },
+		{ "(default: Snow)",    "wxsnow",  "Weather/Snow Sound"    },
+		{ "(default: Storm)",   "wxstorm", "Weather/Storm Sound"   },
+		{ "(default: Thunder)", "thunder", "Weather/Thunder Sound" },
+	};
+
+	const char* topic = nullptr;
+	auto frame = [&](he_ui::Image* shot = nullptr) -> ImGuiID {
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(TW) - 20.0f, float(TH) - 20.0f));
+		ImGui::Begin("Details");
+		for (Slot& s : slots)
+			s.id = ImGui::GetID((std::string(s.shown) + "##" + s.idSuffix).c_str());
+		InspectorPanel::renderFor(ctx, world, weather, &undo);
+		ImGui::End();
+		topic = EditorWidgets::drawQueuedHelp();
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), TW, TH);
+		return hovered;
+	};
+	auto idAt = [&](float x, float y) {
+		ImGui::GetIO().AddMousePosEvent(x, y);
+		frame();
+		return frame();
+	};
+
+	ImGui::GetIO().AddMousePosEvent(float(TW) - 2.0f, float(TH) - 2.0f);
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) frame(i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-weather.bmp");
+
+	// Down the panel at a point inside the slot buttons (past the label), until every
+	// slot's button has been under the pointer. A slot the panel does not draw, or
+	// draws under another text, stays at y = -1.
+	const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 100.0f;
+	for (float y = 12.0f; y < float(TH) - 12.0f; y += 2.0f)
+	{
+		const ImGuiID hit = idAt(x, y);
+		for (Slot& s : slots)
+			if (hit == s.id && s.y < 0.0f) s.y = y;
+	}
+	for (const Slot& s : slots)
+		REQUIRE_MESSAGE(s.y > 0.0f, s.shown << " is not on the Weather panel");
+
+	for (const Slot& s : slots)
+	{
+		CAPTURE(std::string(s.key));
+		REQUIRE(HE::Ed::Help::findKey(s.key) != nullptr);
+		// Rest on the slot (stationary, as ImGui's tooltip flags want), then F1.
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMousePosEvent(float(TW) - 2.0f, float(TH) - 2.0f);
+		frame(); frame();
+		io.AddMousePosEvent(x, s.y);
+		for (int i = 0; i < 40; ++i) frame();
+		io.AddKeyEvent(ImGuiKey_F1, true);
+		frame();
+		REQUIRE(topic != nullptr);
+		CHECK(std::string(topic) == HE::Ed::Help::referenceTopic(s.key));
+		io.AddKeyEvent(ImGuiKey_F1, false);
+		frame();
+	}
+}

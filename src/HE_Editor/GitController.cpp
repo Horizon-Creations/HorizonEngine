@@ -1,4 +1,5 @@
 #include "GitController.h"
+#include "NotificationStore.h"   // errors go to the footer bell
 #include "CollabController.h"
 
 #include <Diagnostics/Log.h>
@@ -154,18 +155,71 @@ void GitController::requestInit(bool lfsAvailable)
 	m_service.requestInit(m_projectRoot, lfsAvailable);
 }
 
-void GitController::requestCommitAll(const std::string& message)
+void GitController::requestCommitAll(const std::string& message, bool forcePush)
 {
 	if (!mayModify() || message.empty()) return;
-	m_service.requestCommitAll(message, autoPushAfterCommit);
+	const bool push = autoPushAfterCommit || forcePush;
+	m_service.requestCommitAll(message, push);
 	// Reward moment (EditorRewards.h): armed only if the service queued it
 	// (busy at once) — without a worker the request vanishes, and an old
 	// "Committed." in lastInfo must not answer for it. The service pushes
 	// after the commit only where there is a remote.
 	if (m_service.busy())
 		m_syncWatch.requested(HE::Ed::Rewards::kSyncCommit
-		                      | (autoPushAfterCommit && !m_service.remoteUrl().empty()
+		                      | (push && !m_service.remoteUrl().empty()
 		                             ? HE::Ed::Rewards::kSyncPush : 0));
+}
+
+void GitController::requestStage(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	m_service.requestStage(std::move(paths));
+}
+
+void GitController::requestUnstage(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	m_service.requestUnstage(std::move(paths));
+}
+
+void GitController::requestDiscard(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	m_service.requestDiscard(std::move(paths));
+}
+
+void GitController::requestCommitStaged(const std::string& message, bool push, bool amend)
+{
+	if (!mayModify() || (message.empty() && !amend)) return;
+	m_service.requestCommitStaged(message, push, amend);
+	// Reward moment, as in requestCommitAll.
+	if (m_service.busy())
+		m_syncWatch.requested(HE::Ed::Rewards::kSyncCommit
+		                      | (push && !m_service.remoteUrl().empty()
+		                             ? HE::Ed::Rewards::kSyncPush : 0));
+}
+
+void GitController::requestResolveConflict(const std::string& path, bool keepMine)
+{
+	if (!mayModify() || path.empty()) return;
+	m_service.requestResolveConflict(path, keepMine);
+}
+
+void GitController::requestSwitchBranch(const std::string& name, bool stashFirst)
+{
+	if (!mayModify() || name.empty()) return;
+	m_service.requestSwitchBranch(name, stashFirst);
+}
+
+void GitController::requestStashPop()
+{
+	if (!mayModify()) return;
+	m_service.requestStashPop();
+}
+
+void GitController::requestCommitFiles(const std::string& commit)
+{
+	m_service.requestCommitFiles(commit);
 }
 
 void GitController::requestRestoreTo(const std::string& commit, const std::string& shortOid)
@@ -217,6 +271,25 @@ void GitController::requestSetRemote(const std::string& url)
 	m_service.requestSetRemote(url);
 }
 
+// An operation failed: say so where the user looks for such things (the footer bell,
+// ringing for a Problem), not as red text inside the panel. The panel used to print
+// lastError() itself, and a message that lives in a window nobody has open is a
+// message nobody read. One notification per distinct error: the service keeps the
+// text until the next operation succeeds, so without the memory below every frame
+// would post it again.
+void GitController::reportNewError()
+{
+	const std::string& err = m_service.lastError();
+	if (err.empty()) { m_notifiedError.clear(); return; }
+	if (err == m_notifiedError) return;
+	m_notifiedError = err;
+
+	// First line as the sentence, everything as the detail.
+	std::string first = err.substr(0, err.find('\n'));
+	if (first.size() > 160) first = first.substr(0, 157) + "...";
+	HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Source control: " + first, err);
+}
+
 void GitController::update(std::uint64_t nowMs)
 {
 	// Drain first, unconditionally. The result of a discovery is what makes
@@ -227,6 +300,7 @@ void GitController::update(std::uint64_t nowMs)
 	// pump collects its result (see m_cloneBusy).
 	const bool serviceIdle = !m_service.busy();
 	m_service.pump();
+	reportNewError();
 	if (const int f = m_syncWatch.poll(serviceIdle, m_service.lastError(), m_service.lastInfo()))
 		m_syncMoment |= f;
 	// The clone and the repository list run before any project is open, so

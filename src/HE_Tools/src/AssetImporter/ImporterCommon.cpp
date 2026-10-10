@@ -586,9 +586,10 @@ enum class SourceKind { None, Mesh, Texture, Audio, Material, Font };
 // pattern is what the Import Asset dialog offers, and offering .fbx in a build
 // that then fails every .fbx is worse than not offering it. The same three
 // extensions are spelled out once more in importBlockedReason(), which has to
-// know them precisely in the build that does NOT have them.
+// know them precisely in the build that does NOT have them (four now: .blend
+// came with the Blender importer).
 #ifdef HE_HAVE_ASSIMP
-constexpr const char* kMeshPattern = "gltf;glb;fbx;obj;dae";
+constexpr const char* kMeshPattern = "gltf;glb;fbx;obj;dae;blend";
 #else
 constexpr const char* kMeshPattern = "gltf;glb";
 #endif
@@ -691,10 +692,10 @@ const char* importBlockedReason(const std::filesystem::path& sourcePath)
 {
 	const std::string ext = patternExtensionOf(sourcePath);
 #ifndef HE_HAVE_ASSIMP
-	if (ext == "fbx" || ext == "obj" || ext == "dae")
-		return "FBX, OBJ and COLLADA need Assimp, which this build of the editor was "
-		       "made without (HE_ENABLE_ASSIMP=OFF). Export the model as glTF/GLB, "
-		       "or rebuild with Assimp.";
+	if (ext == "fbx" || ext == "obj" || ext == "dae" || ext == "blend")
+		return "FBX, OBJ, COLLADA and Blender files need Assimp, which this build of the "
+		       "editor was made without (HE_ENABLE_ASSIMP=OFF). Export the model as "
+		       "glTF/GLB, or rebuild with Assimp.";
 #else
 	(void)ext;
 #endif

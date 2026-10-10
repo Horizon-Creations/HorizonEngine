@@ -214,9 +214,13 @@ bool GitCli::addAll(const std::filesystem::path& root, std::string* err)
 }
 
 bool GitCli::commit(const std::filesystem::path& root, const std::string& message,
-                    std::string* err)
+                    std::string* err, bool amend)
 {
-	return runChecked(root, { "commit", "-m", message }, kLocalTimeoutMs, err);
+	if (!amend)
+		return runChecked(root, { "commit", "-m", message }, kLocalTimeoutMs, err);
+	if (message.empty())
+		return runChecked(root, { "commit", "--amend", "--no-edit" }, kLocalTimeoutMs, err);
+	return runChecked(root, { "commit", "--amend", "-m", message }, kLocalTimeoutMs, err);
 }
 
 bool GitCli::push(const std::filesystem::path& root, bool upstreamConfigured, std::string* err)
@@ -480,6 +484,251 @@ bool GitCli::listBranches(const std::filesystem::path& root,
 
 	const GitResult cur = run(root, { "branch", "--show-current" }, 10000);
 	if (cur.ok) outCurrent = trimTrailing(cur.out);
+	return true;
+}
+
+namespace {
+
+// Runs `git --literal-pathspecs <head...> -- <paths...>` over as many invocations as
+// the command line limit needs. Stops at the first failure.
+bool runOverPaths(const std::filesystem::path& root, std::vector<std::string> head,
+                  const std::vector<std::string>& paths, std::uint32_t timeoutMs,
+                  std::string* err)
+{
+	constexpr std::size_t kMaxChars = 16000;
+	std::size_t i = 0;
+	while (i < paths.size())
+	{
+		std::vector<std::string> args;
+		args.push_back("--literal-pathspecs");
+		args.insert(args.end(), head.begin(), head.end());
+		args.push_back("--");
+		std::size_t chars = 0;
+		while (i < paths.size() && (chars == 0 || chars + paths[i].size() + 1 <= kMaxChars))
+		{
+			chars += paths[i].size() + 1;
+			args.push_back(paths[i++]);
+		}
+		if (!runChecked(root, args, timeoutMs, err)) return false;
+	}
+	return true;
+}
+
+} // namespace
+
+bool GitCli::hasHead(const std::filesystem::path& root)
+{
+	return run(root, { "rev-parse", "--verify", "--quiet", "HEAD^{commit}" }, 10000).ok;
+}
+
+bool GitCli::stage(const std::filesystem::path& root,
+                   const std::vector<std::string>& paths, std::string* err)
+{
+	return runOverPaths(root, { "add", "-A" }, paths, kLocalTimeoutMs, err);
+}
+
+bool GitCli::unstage(const std::filesystem::path& root,
+                     const std::vector<std::string>& paths, std::string* err)
+{
+	// A staged rename is two index entries; taking only the new name back out would
+	// leave the old one staged as a deletion.
+	RepoStatus st;
+	std::vector<std::string> all;
+	const bool haveStatus = status(root, st);
+	for (const std::string& p : paths)
+	{
+		all.push_back(p);
+		if (!haveStatus) continue;
+		if (const FileEntry* e = st.find(p); e && !e->origPath.empty()) all.push_back(e->origPath);
+	}
+	std::sort(all.begin(), all.end());
+	all.erase(std::unique(all.begin(), all.end()), all.end());
+
+	if (hasHead(root))
+		return runOverPaths(root, { "restore", "--staged" }, all, kLocalTimeoutMs, err);
+	// No commit to restore from: the index simply forgets them (the files stay on disk).
+	return runOverPaths(root, { "rm", "--cached", "-r", "-q", "--ignore-unmatch" }, all,
+	                    kLocalTimeoutMs, err);
+}
+
+bool GitCli::discard(const std::filesystem::path& root,
+                     const std::vector<std::string>& paths, std::string* err)
+{
+	RepoStatus st;
+	if (!status(root, st, err)) return false;
+
+	std::vector<std::string> untracked, removeNew, restore;
+	for (const std::string& p : paths)
+	{
+		const FileEntry* e = st.find(p);
+		if (!e || !e->dirty()) continue;   // already clean - nothing to throw away
+		if (e->conflicted())
+		{
+			if (err) *err = "\"" + p + "\" is in conflict - resolve it (keep one side) instead of discarding it.";
+			return false;
+		}
+		if (e->worktree == FileState::Untracked && e->index == FileState::Unmodified)
+			untracked.push_back(p);
+		else if (e->index == FileState::Added || e->index == FileState::Copied)
+			removeNew.push_back(p);
+		else if (e->index == FileState::Renamed)
+		{
+			removeNew.push_back(p);
+			if (!e->origPath.empty()) restore.push_back(e->origPath);
+		}
+		else
+			restore.push_back(p);
+	}
+
+	if (!untracked.empty() &&
+	    !runOverPaths(root, { "clean", "-f", "-q" }, untracked, kLocalTimeoutMs, err))
+		return false;
+	if (!removeNew.empty() &&
+	    !runOverPaths(root, { "rm", "-f", "-q" }, removeNew, kLocalTimeoutMs, err))
+		return false;
+	if (!restore.empty() &&
+	    !runOverPaths(root, { "restore", "--source=HEAD", "--staged", "--worktree" },
+	                  restore, kLocalTimeoutMs, err))
+		return false;
+	return true;
+}
+
+bool GitCli::resolveConflict(const std::filesystem::path& root, const std::string& path,
+                             bool ours, std::string* err)
+{
+	if (!runOverPaths(root, { "checkout", ours ? "--ours" : "--theirs" }, { path },
+	                  kLocalTimeoutMs, err))
+		return false;
+	return runOverPaths(root, { "add" }, { path }, kLocalTimeoutMs, err);
+}
+
+bool GitCli::switchBranch(const std::filesystem::path& root, const std::string& name,
+                          std::string* err)
+{
+	if (name.empty() || name.front() == '-')
+	{
+		if (err) *err = "not a branch name";
+		return false;
+	}
+	// "origin/x" names a remote-tracking ref: switching to it directly would detach
+	// HEAD, so create the local branch that tracks it instead.
+	std::vector<std::string> locals;
+	std::string current;
+	listBranches(root, locals, current);
+	const bool isLocal = std::find(locals.begin(), locals.end(), name) != locals.end();
+	if (!isLocal)
+	{
+		std::vector<std::string> remotes;
+		listRemoteBranches(root, remotes);
+		if (std::find(remotes.begin(), remotes.end(), name) != remotes.end())
+		{
+			const std::size_t slash = name.find('/');
+			const std::string local = slash == std::string::npos ? name : name.substr(slash + 1);
+			if (std::find(locals.begin(), locals.end(), local) != locals.end())
+				return runChecked(root, { "switch", local }, kLocalTimeoutMs, err);
+			return runChecked(root, { "switch", "-c", local, "--track", name },
+			                  kLocalTimeoutMs, err);
+		}
+	}
+	return runChecked(root, { "switch", name }, kLocalTimeoutMs, err);
+}
+
+bool GitCli::listRemoteBranches(const std::filesystem::path& root,
+                                std::vector<std::string>& out, std::string* err)
+{
+	out.clear();
+	const GitResult r = run(root, { "for-each-ref", "--sort=refname",
+	                                "--format=%(refname:short)", "refs/remotes" }, 10000);
+	if (!r.ok)
+	{
+		if (err) *err = trimTrailing(r.err);
+		return false;
+	}
+	std::size_t pos = 0;
+	while (pos < r.out.size())
+	{
+		const std::size_t nl = r.out.find('\n', pos);
+		std::string line = trimTrailing(r.out.substr(pos, nl == std::string::npos
+		                                                  ? std::string::npos : nl - pos));
+		pos = nl == std::string::npos ? r.out.size() : nl + 1;
+		// "origin" alone is how some git versions print refs/remotes/origin/HEAD.
+		if (line.empty() || line.find('/') == std::string::npos) continue;
+		if (line.size() >= 5 && line.compare(line.size() - 5, 5, "/HEAD") == 0) continue;
+		out.push_back(std::move(line));
+	}
+	return true;
+}
+
+bool GitCli::stashPush(const std::filesystem::path& root, const std::string& message,
+                       std::string* err)
+{
+	return runChecked(root, { "stash", "push", "--include-untracked", "-m", message },
+	                  kLocalTimeoutMs, err);
+}
+
+bool GitCli::stashPop(const std::filesystem::path& root, std::string* err)
+{
+	return runChecked(root, { "stash", "pop" }, kLocalTimeoutMs, err);
+}
+
+bool GitCli::stashList(const std::filesystem::path& root, std::vector<std::string>& out,
+                       std::string* err)
+{
+	out.clear();
+	const GitResult r = run(root, { "stash", "list" }, 10000);
+	if (!r.ok)
+	{
+		if (err) *err = trimTrailing(r.err);
+		return false;
+	}
+	std::size_t pos = 0;
+	while (pos < r.out.size())
+	{
+		const std::size_t nl = r.out.find('\n', pos);
+		std::string line = trimTrailing(r.out.substr(pos, nl == std::string::npos
+		                                                  ? std::string::npos : nl - pos));
+		pos = nl == std::string::npos ? r.out.size() : nl + 1;
+		if (!line.empty()) out.push_back(std::move(line));
+	}
+	return true;
+}
+
+bool GitCli::commitFiles(const std::filesystem::path& root, const std::string& commit,
+                         std::vector<ChangedFile>& out, std::string* err)
+{
+	out.clear();
+	if (!commitExists(root, commit))
+	{
+		if (err) *err = "no commit named \"" + commit + "\" in this repository";
+		return false;
+	}
+	// -z: NUL-separated, no quoting. --root so the very first commit lists its files;
+	// -M so a move reads as one R entry rather than a delete plus an add.
+	const GitResult r = run(root, { "diff-tree", "--no-commit-id", "--name-status", "-r",
+	                                "-z", "-M", "--root", commit }, 15000);
+	if (!r.ok)
+	{
+		if (err) *err = trimTrailing(r.err);
+		return false;
+	}
+	std::vector<std::string> tok;
+	for (std::size_t pos = 0; pos < r.out.size();)
+	{
+		const std::size_t nul = r.out.find('\0', pos);
+		tok.push_back(r.out.substr(pos, nul == std::string::npos ? std::string::npos : nul - pos));
+		pos = nul == std::string::npos ? r.out.size() : nul + 1;
+	}
+	for (std::size_t i = 0; i < tok.size();)
+	{
+		if (tok[i].empty()) { ++i; continue; }
+		ChangedFile f;
+		f.state = tok[i][0];
+		const bool two = f.state == 'R' || f.state == 'C';
+		if (i + (two ? 3u : 2u) > tok.size()) break;
+		if (two) { f.origPath = tok[i + 1]; f.path = tok[i + 2]; i += 3; }
+		else     { f.path = tok[i + 1]; i += 2; }
+		out.push_back(std::move(f));
+	}
 	return true;
 }
 

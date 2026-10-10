@@ -1305,8 +1305,33 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				Row::sliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
 				                 ImGuiSliderFlags_Logarithmic); trackEdit();
 				ImGui::EndDisabled();
-				hint("Picking a preset sets clouds/fog/wind/precip; the sliders above stay "
-				     "editable, so you can nudge any value afterwards.");
+				hint("Picking a preset sets every value below; each one stays editable, so "
+				     "you can take over any of them afterwards.");
+
+				// ── Every value of the weather on its own ───────────────────────────
+				// The sliders edit the live Sky values (the same ones the Sky's own panel
+				// shows) — a preset writes them, and WeatherSystem leaves a value alone from
+				// the moment you move it, until the next preset pick takes everything back.
+				// Thunder lives on the weather itself and follows the same rule.
+				EditorWidgets::subHeading("Conditions");
+				{
+					const Entity envEnt = world.environmentEntity();
+					EnvironmentComponent* wenv = (envEnt != entt::null && registry.valid(envEnt))
+						? registry.try_get<EnvironmentComponent>(envEnt) : nullptr;
+					if (wenv)
+					{
+						Row::sliderFloat("Cloud Coverage", &wenv->cloudCoverage, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Fog Density##wx", &wenv->fogDensity, 0.0f, 0.15f, "%.3f"); trackEdit();
+						Row::sliderFloat("Wind Speed##wx", &wenv->windSpeed, 0.0f, 4.0f); trackEdit();
+						Row::sliderFloat("Rain##wx", &wenv->rainAmount, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Snow##wx", &wenv->snowAmount, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Wetness##wx", &wenv->wetness, 0.0f, 1.0f); trackEdit();
+					}
+					else
+						hint("No Sky in the scene — add one (Window ▸ Environment) to dial the "
+						     "clouds, fog, wind, rain, snow and wetness.");
+					Row::sliderFloat("Thunder", &w->thunder, 0.0f, 1.0f); trackEdit();
+				}
 
 				EditorWidgets::subHeading("Current State");
 				if (w->currentKind != w->targetKind)
@@ -1319,6 +1344,16 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				     w->curCloudCoverage, w->curFogDensity,
 				     w->curWindSpeed, w->curPrecip);
 
+				// What MATERIALS read from the weather (the material graph's Weather node,
+				// MF_WeatherPuddles / MF_WeatherSnow): set by hand, not by the presets.
+				EditorWidgets::subHeading("Surface");
+				Row::sliderFloat("Puddles",     &w->puddleAmount, 0.0f, 1.0f); trackEdit();
+				Row::sliderFloat("Puddle Size", &w->puddleSize,   0.5f, 100.0f, "%.1f m",
+				                 ImGuiSliderFlags_Logarithmic); trackEdit();
+				Row::sliderFloat("Snow Cover",  &w->snowCover,    0.0f, 1.0f); trackEdit();
+				hint("Read by materials through the Weather node — the auto landscape takes "
+				     "its puddles, their size and its ground snow from these.");
+
 				EditorWidgets::subHeading("Precipitation");
 				Row::dragInt("Max Rain Particles", &w->maxRainParticles, 10.0f, 0, 20000); trackEdit();
 				Row::dragInt("Max Snow Particles", &w->maxSnowParticles, 10.0f, 0, 20000); trackEdit();
@@ -1327,10 +1362,39 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				hint("Drops collide via physics in Play; else they die at Ground Y (the "
 				     "fallback floor).");
 
-				// Thunder sound — drop an audio .hasset here (played on each strike).
+				// Weather sounds (WeatherAudio). Every slot is optional: empty plays the
+				// EngineContent default, a dropped audio .hasset replaces just that one.
+				EditorWidgets::subHeading("Sound");
+				EditorWidgets::checkbox("Weather Sounds", &w->soundEnabled); trackEdit();
+				ImGui::BeginDisabled(!w->soundEnabled);
+				Row::sliderFloat("Volume##wxs", &w->soundVolume, 0.0f, 1.0f); trackEdit();
+				char wxBus[64];
+				std::strncpy(wxBus, w->soundBus.c_str(), sizeof(wxBus) - 1);
+				wxBus[sizeof(wxBus) - 1] = '\0';
+				if (Row::inputText("Bus##wxs", wxBus, sizeof(wxBus))) { w->soundBus = wxBus; trackEdit(); }
+				// An empty slot plays the engine's sound (Engine/Audio/Weather), so it says
+				// which; the entry behind each slot says how it behaves.
+				EditorWidgets::assetDropSlot(ctx, "Rain", w->rainSound,
+					HE::AssetType::Audio, "wxrain", "(default: Rain)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Rain Sound");
+				EditorWidgets::assetDropSlot(ctx, "Wind", w->windSound,
+					HE::AssetType::Audio, "wxwind", "(default: Wind)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Wind Sound");
+				EditorWidgets::assetDropSlot(ctx, "Snow", w->snowSound,
+					HE::AssetType::Audio, "wxsnow", "(default: Snow)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Snow Sound");
+				EditorWidgets::assetDropSlot(ctx, "Storm", w->stormSound,
+					HE::AssetType::Audio, "wxstorm", "(default: Storm)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Storm Sound");
+				// Thunder: one roll per lightning strike, a random distance away.
 				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
-					HE::AssetType::Audio, "thunder", "(none — drop audio)",
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "thunder", "(default: Thunder)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Thunder Sound");
+				ImGui::EndDisabled();
+				hint("The beds fade with the weather by themselves: rain and snow with how much "
+				     "falls, wind with the wind speed, storm with wind and rain together. An "
+				     "empty slot plays the engine's sound; drop an audio asset to replace it. "
+				     "The bus falls back to the clip's own, then master.");
 
 			}
 			if (!quiet && !only) ImGui::Separator();

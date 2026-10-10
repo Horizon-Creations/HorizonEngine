@@ -133,6 +133,24 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
     return true;
 }
 
+bool fillLayer(TerrainComponent& tc, int layer)
+{
+    if (layer < 0 || layer >= kTerrainMaxLayers) return false;
+    ensureWeightmap(tc);
+    if (tc.layerWeights.empty()) return false;
+
+    const size_t bytes = tc.layerWeights.size();
+    std::fill(tc.layerWeights.begin(), tc.layerWeights.end(), uint8_t{ 0 });
+    if (layer >= 4)
+        tc.layerWeights2.assign(bytes, 0);
+    else
+        tc.layerWeights2.clear();   // nothing on page 1: it is "all zero" without the bytes
+    std::vector<uint8_t>& page = layer < 4 ? tc.layerWeights : tc.layerWeights2;
+    for (size_t i = static_cast<size_t>(layer % 4); i < bytes; i += 4) page[i] = 255;
+    tc.weightsDirty = true;
+    return true;
+}
+
 bool texelWeights(const TerrainComponent& tc, uint32_t tx, uint32_t tz, uint8_t* out)
 {
     const uint32_t wr = tc.weightRes;

@@ -56,6 +56,12 @@ public:
 	//   insensitively; ties keep their order. Deeper levels are untouched —
 	//   what the user asked to sort is the list under one row.
 	bool   moveChild(Entity entity, int delta);
+	//   placeNextTo: `entity` becomes a sibling of `target`, directly before it
+	//   (or after, `after = true`) — a drop on the edge of an Outliner row.
+	//   Reparents when the parents differ. False (nothing changed) for the
+	//   root, a built-in, an entity dropped next to itself, a target with no
+	//   parent, or a move that would make a cycle.
+	bool   placeNextTo(Entity entity, Entity target, bool after);
 	bool   sortChildrenByName(Entity parent);
 	// Destroys every entity except the root (used by scene load / play-mode
 	// restore).

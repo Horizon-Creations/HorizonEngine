@@ -193,7 +193,12 @@ bool gather(AppContext& ctx, const void* owner, bool imageHovered,
 	// bare scroll away from the dolly, which reads as "zoom is broken" on a pad.
 	// Trackpad navigation is the fly TOGGLE above plus Alt+drag orbit;
 	// swipe-pan belongs to the 2D canvases.)
-	if (imageHovered) out.wheel = io.MouseWheel;
+	//
+	// While the right button is held (fly-look) the wheel is the fly SPEED instead: up is
+	// faster, down is slower. It is read whether or not the image is "hovered" - the look
+	// captures the pointer and ImGui reports nothing hovered for as long as it lasts.
+	if (out.look)             out.speedWheel = io.MouseWheel;
+	else if (imageHovered)    out.wheel      = io.MouseWheel;
 
 	// ── Self-diagnostic (throttled ~once/sec, only while it matters) ──
 	// The field report is "WASD stopped working after joining a session on

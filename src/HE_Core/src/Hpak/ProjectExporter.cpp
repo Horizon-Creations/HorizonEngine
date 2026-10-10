@@ -302,13 +302,22 @@ bool readEmbeddedPakKey(const std::filesystem::path& binary, uint8_t outKey[32])
 
 // ─── Incremental-pack manifest ────────────────────────────────────────────────
 // Sidecar "<name>.hpak.manifest" written next to the pak: per entry the hash of
-// the rewritten blob it was packed from, plus two fingerprints that gate reuse —
+// the rewritten blob it was packed from, the hash of the SOURCE it came from and the
+// references the pipeline resolved on the way (what lets an unchanged asset skip the
+// pipeline altogether, see Hpak::CachedEntry), plus two fingerprints that gate reuse —
 // the pak's tocHash (manifest must describe exactly this pak, not a stale or
 // hand-swapped one) and a settings fingerprint (codec/level/encrypt/key).
 
+// Bump when the pack pipeline's OUTPUT changes for the same input — a new cook, a
+// different ref bake, a changed shader precompile or material fold. The incremental
+// cache skips an unchanged asset's whole pipeline (Hpak::CachedEntry), so it cannot
+// notice a change in the CODE that produced the entry; this is how it is told.
+// "Incremental" off in the export dialog is the manual escape hatch.
+static constexpr uint8_t kPackPipelineVersion = 2;
+
 static uint64_t settingsFingerprint(const Hpak::PackSettings& s)
 {
-    uint8_t buf[8 + 32];
+    uint8_t buf[8 + 32 + 1];
     buf[0] = static_cast<uint8_t>(s.codec);
     buf[1] = static_cast<uint8_t>(s.level);
     buf[2] = s.encrypt ? 1 : 0;
@@ -319,12 +328,13 @@ static uint64_t settingsFingerprint(const Hpak::PackSettings& s)
                                   | ((s.textureQuality & 0x3) << 4));
     std::memcpy(buf + 4, &s.shaderBackends, 4); // precompiled-shader backend set → re-pack materials
     std::memcpy(buf + 8, s.key, 32);  // all-zero when not encrypting
+    buf[8 + 32] = kPackPipelineVersion;
     return Hpak::hash64(buf, sizeof(buf));
 }
 
 static bool loadPakManifest(const std::filesystem::path& path,
                             uint64_t expectPakTocHash, uint64_t expectSettingsFp,
-                            std::unordered_map<HE::UUID, uint64_t>& outHashes)
+                            Hpak::IncrementalCache& out)
 {
     std::ifstream in(path);
     if (!in.is_open()) return false;
@@ -350,21 +360,56 @@ static bool loadPakManifest(const std::filesystem::path& path,
         if (hi == e.end() || lo == e.end() || h == e.end()) continue;
         if (!hi->is_number_unsigned() || !lo->is_number_unsigned() || !h->is_number_unsigned())
             continue;
-        outHashes[HE::UUID{hi->get<uint64_t>(), lo->get<uint64_t>()}] = h->get<uint64_t>();
+        const HE::UUID id{hi->get<uint64_t>(), lo->get<uint64_t>()};
+        out.srcHashes[id] = h->get<uint64_t>();
+
+        // Level-1 data (absent in a manifest written before it existed → inHash 0,
+        // which never matches, so such an entry just takes the level-2 path).
+        Hpak::CachedEntry ce;
+        ce.srcHash = h->get<uint64_t>();
+        const auto ih = e.find("inHash");
+        if (ih != e.end() && ih->is_number_unsigned()) ce.inHash = ih->get<uint64_t>();
+        if (const auto refs = e.find("refs"); refs != e.end() && refs->is_array())
+            for (const auto& r : *refs)
+                if (r.is_array() && r.size() == 3 && r[0].is_string()
+                    && r[1].is_number_unsigned() && r[2].is_number_unsigned())
+                    ce.deps.refs.emplace_back(r[0].get<std::string>(),
+                        HE::UUID{ r[1].get<uint64_t>(), r[2].get<uint64_t>() });
+        if (const auto par = e.find("parents"); par != e.end() && par->is_array())
+            for (const auto& r : *par)
+                if (r.is_array() && r.size() == 2 && r[0].is_string() && r[1].is_number_unsigned())
+                    ce.deps.parents.emplace_back(r[0].get<std::string>(), r[1].get<uint64_t>());
+        out.entries[id] = std::move(ce);
     }
-    return !outHashes.empty();
+    return !out.srcHashes.empty();
 }
 
 static void savePakManifest(const std::filesystem::path& path,
                             uint64_t pakTocHash, uint64_t settingsFp,
-                            const std::vector<std::pair<HE::UUID, uint64_t>>& hashes)
+                            const std::vector<std::pair<HE::UUID, Hpak::CachedEntry>>& infos)
 {
     nlohmann::json j;
     j["pakTocHash"] = pakTocHash;
     j["settingsFp"] = settingsFp;
     nlohmann::json entries = nlohmann::json::array();
-    for (const auto& [id, h] : hashes)
-        entries.push_back({ {"hi", id.hi}, {"lo", id.lo}, {"srcHash", h} });
+    for (const auto& [id, ce] : infos)
+    {
+        nlohmann::json e = { {"hi", id.hi}, {"lo", id.lo}, {"srcHash", ce.srcHash},
+                             {"inHash", ce.inHash} };
+        if (!ce.deps.refs.empty())
+        {
+            nlohmann::json refs = nlohmann::json::array();
+            for (const auto& [p, u] : ce.deps.refs) refs.push_back({ p, u.hi, u.lo });
+            e["refs"] = std::move(refs);
+        }
+        if (!ce.deps.parents.empty())
+        {
+            nlohmann::json par = nlohmann::json::array();
+            for (const auto& [p, h] : ce.deps.parents) par.push_back({ p, h });
+            e["parents"] = std::move(par);
+        }
+        entries.push_back(std::move(e));
+    }
     j["entries"] = std::move(entries);
 
     // Best-effort cache metadata: failures are ignored (next export packs full).
@@ -614,6 +659,7 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
+    packSettings.onAsset = settings.onAsset;
     return std::nullopt;
 }
 
@@ -768,7 +814,7 @@ static std::optional<ExportResult> packContent(
     if (settings.incremental && std::filesystem::exists(pakPath, ec)
         && prevPak->open(pakPath.string()))
     {
-        if (loadPakManifest(manifestPath, prevPak->tocHash(), settingsFp, cache.srcHashes))
+        if (loadPakManifest(manifestPath, prevPak->tocHash(), settingsFp, cache))
         {
             cache.previousPak = prevPak.get();
             haveCache = true;
@@ -802,7 +848,7 @@ static std::optional<ExportResult> packContent(
         HpakReader newPak;
         if (newPak.open(pakPath.string()))
             savePakManifest(manifestPath, newPak.tocHash(), settingsFp,
-                            packer.sourceHashes());
+                            packer.entryInfos());
     }
     return std::nullopt;
 }

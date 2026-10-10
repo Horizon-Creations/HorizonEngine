@@ -49,6 +49,7 @@
 #include "TextureImporter.h"   // HorizonImporters — decodes the PNGs the way the editor's import does
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Types/UUID.h>
 
 #include <algorithm>
@@ -464,6 +465,28 @@ int packReal(const std::string& outDir, const std::string& pngDir, int requested
 // ContentManager's own regenerate path, so the file is exactly what the material
 // editor would save. Its texture paths point at the engine arrays ("Engine/…"),
 // which do not have to exist in <output-dir>.
+// The two weather functions the graph calls, registered under the very path its
+// FunctionCall nodes store — so the regenerate (and the one a load does) finds them
+// from the builders, with no engine-content root and no dependency on matfn_gen having
+// run first. The shipped assets (matfn_gen) are built from the same builders.
+static void registerWeatherFunctions(ContentManager& cm)
+{
+    struct F { const char* path; HE::UUID id; HE::MaterialGraph g; };
+    const std::vector<F> fns = {
+        F{ HE::kWeatherPuddlesFunctionPath, HE::kWeatherPuddlesFunctionId, HE::buildWeatherPuddlesFunction() },
+        F{ HE::kWeatherSnowFunctionPath,    HE::kWeatherSnowFunctionId,    HE::buildWeatherSnowFunction() } };
+    for (const F& f : fns)
+    {
+        MaterialFunctionAsset a;
+        a.type          = HE::AssetType::MaterialFunction;
+        a.path          = f.path;
+        a.name          = std::filesystem::path(f.path).stem().string();
+        a.id            = f.id;
+        a.nodeGraphJson = HE::materialGraphToJson(f.g);
+        cm.registerMaterialFunction(std::move(a));
+    }
+}
+
 bool writeMaterial(const std::string& outDir)
 {
     const char* kFile = "M_AutoLandscape.hasset";
@@ -476,6 +499,7 @@ bool writeMaterial(const std::string& outDir)
     am.nodeGraphJson = HE::materialGraphToJson(built.graph);
 
     ContentManager cm(outDir);
+    registerWeatherFunctions(cm);
     const HE::UUID id = cm.registerMaterial(std::move(am));
     cm.regenerateMaterialFromGraph(id);
     MaterialAsset* m = cm.getMaterialMutable(id);
@@ -490,6 +514,7 @@ bool writeMaterial(const std::string& outDir)
         return false;
     }
     ContentManager check(outDir);
+    registerWeatherFunctions(check);   // a load regenerates the GLSL from the graph
     const MaterialAsset* t = check.getMaterial(check.loadAsset(kFile));
     if (!t || t->id != HE::kAutoLandscapeMaterialId || t->nodeGraphJson != m->nodeGraphJson ||
         t->customShaderFragGlsl != m->customShaderFragGlsl || t->graphParamNames != m->graphParamNames)

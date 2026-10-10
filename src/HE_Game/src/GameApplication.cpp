@@ -1840,6 +1840,7 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 		m_world->fireLevelUnloaded();
 	m_scriptContext.reset();
 	m_scriptInstances.clear();
+	WeatherAudio::stop(m_weatherAudio, m_audioEngine);   // the new scene's weather fades in on its own
 	m_audioEngine.stopAll();
 	HE::api::scene::clearZones();
 
@@ -3316,6 +3317,20 @@ void GameApplication::OnRender(float deltaTime)
 		                                m_scriptContext.get(), m_scriptInstances,
 		                                &m_gameInstance.runtime(), m_entityHost.instances(),
 		                                &m_animatorHost);
+	}
+
+	// The weather's sound: rain/wind/snow/storm beds that follow the live weather and
+	// thunder after each lightning strike, with nothing for gameplay code to do. After
+	// the tick above so a strike is heard the frame it happens; quiet while paused (the
+	// weather itself stands still then).
+	if (m_world && !m_appMode)
+	{
+		HE_PROFILE_SCOPE_N("WeatherAudio");
+		WeatherAudio::Frame frame;
+		frame.realDt  = deltaTime;
+		frame.gameDt  = gameDt;
+		frame.audible = !HE::api::time::isPaused();
+		WeatherAudio::update(m_weatherAudio, *m_world, m_audioEngine, contentManager(), frame);
 	}
 
 	// ── Renderer settings, in BOTH modes ─────────────────────────────────────

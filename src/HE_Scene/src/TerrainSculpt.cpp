@@ -61,7 +61,7 @@ void ensureHeights(TerrainComponent& tc)
     // exactly on source grid points). Doing it BEFORE the brush is what keeps a
     // caller's arithmetic honest: at resolution 128 the grid step is size/127,
     // and one regen later it is size/128 with every height resampled.
-    const uint32_t r0 = std::clamp(tc.resolution, 2u, 1024u);
+    const uint32_t r0 = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     uint32_t cells = r0 - 1, p = 1;
     while (p < cells) p <<= 1;
     const uint32_t snapped = p + 1;

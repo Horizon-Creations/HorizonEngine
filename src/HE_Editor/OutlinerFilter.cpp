@@ -67,11 +67,92 @@ namespace
 		{ "Weather",              anyOf<WeatherComponent> },
 		{ "Prefab Instance",      anyOf<PrefabInstanceComponent> },
 	};
+
+	// One entry per kKinds entry, same order. The colours are spread over the
+	// hue wheel so neighbouring rows tell apart; letters are the initial where
+	// one is free.
+	struct Look { const char* glyph; unsigned rgb; };
+	const Look kLooks[] = {
+		{ "All", 0x9A9488 },   // All types
+		{ "M",   0x5B9BD5 },   // Mesh
+		{ "Sk",  0x7C8CF8 },   // Skeletal Mesh
+		{ "C",   0xE8A04C },   // Camera
+		{ "L",   0xF2D45C },   // Light
+		{ "B",   0xC678DD },   // Rigid Body
+		{ "X",   0x56B6C2 },   // Collider
+		{ "H",   0x4EC9A0 },   // Character Controller
+		{ "{}",  0x98C379 },   // Script
+		{ "P",   0xE06C9F },   // Particle System
+		{ "A",   0xD19A66 },   // Audio
+		{ "D",   0xB48EAD },   // Decal
+		{ "F",   0x6FBF73 },   // Foliage
+		{ "T",   0xA3875B },   // Terrain
+		{ "R",   0xE5C07B },   // Rope
+		{ "~",   0x61AFEF },   // Trail
+		{ "An",  0xFF9E64 },   // Animator
+		{ "N",   0x2AC3DE },   // Navigation
+		{ "UI",  0xBB9AF7 },   // UI
+		{ "W",   0x7DCFFF },   // Weather
+		{ "Pf",  0xE8A04C },   // Prefab Instance
+	};
+	static_assert(sizeof(kLooks) / sizeof(kLooks[0]) == sizeof(kKinds) / sizeof(kKinds[0]),
+	              "every kind needs a look");
+
+	// What an entity is called first, most telling first. A component that only
+	// decorates another (a Collider on a Mesh) comes after the thing it decorates.
+	// Prefab Instance is not here: it has a chip of its own on the row.
+	const int kPriority[] = {
+		3,   // Camera
+		4,   // Light
+		13,  // Terrain
+		12,  // Foliage
+		19,  // Weather
+		18,  // UI
+		2,   // Skeletal Mesh
+		1,   // Mesh
+		9,   // Particle System
+		10,  // Audio
+		11,  // Decal
+		14,  // Rope
+		15,  // Trail
+		7,   // Character Controller
+		5,   // Rigid Body
+		17,  // Navigation
+		16,  // Animator
+		6,   // Collider
+		8,   // Script
+	};
 }
 
 int kindCount()
 {
 	return static_cast<int>(sizeof(kKinds) / sizeof(kKinds[0]));
+}
+
+int primaryKind(const entt::registry& reg, Entity e)
+{
+	for (const int k : kPriority)
+		if (kKinds[k].test(reg, e)) return k;
+	return kAllKinds;
+}
+
+const char* kindGlyph(int i)
+{
+	if (i < 0 || i >= kindCount()) i = kAllKinds;
+	return kLooks[i].glyph;
+}
+
+unsigned kindColor(int i)
+{
+	if (i < 0 || i >= kindCount()) i = kAllKinds;
+	return kLooks[i].rgb;
+}
+
+void tally(const entt::registry& reg, Entity e, int* counts)
+{
+	++counts[kAllKinds];
+	for (int i = 1; i < kindCount(); ++i)
+		if (kKinds[i].test(reg, e)) ++counts[i];
 }
 
 const Kind& kindAt(int i)
@@ -89,6 +170,17 @@ bool nameMatches(std::string_view name, std::string_view needle)
 	const auto it = std::search(name.begin(), name.end(), needle.begin(), needle.end(),
 	                            [&](char a, char b) { return lower(a) == lower(b); });
 	return it != name.end();
+}
+
+Span matchSpan(std::string_view name, std::string_view needle)
+{
+	if (needle.empty() || needle.size() > name.size()) return {};
+	const auto lower = [](char c)
+	{ return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
+	const auto it = std::search(name.begin(), name.end(), needle.begin(), needle.end(),
+	                            [&](char a, char b) { return lower(a) == lower(b); });
+	if (it == name.end()) return {};
+	return { static_cast<size_t>(it - name.begin()), needle.size() };
 }
 
 std::vector<Shown> apply(const std::vector<Row>& rows)

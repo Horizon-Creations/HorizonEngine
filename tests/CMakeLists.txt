@@ -3,6 +3,7 @@ add_executable(he_tests
     test_slotmap.cpp
     test_hasset.cpp
     test_contentmanager.cpp
+    test_engine_dependencies.cpp
     test_asset_ref_retarget.cpp
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
@@ -44,6 +45,9 @@ add_executable(he_tests
     # remove its copy, pending at the next start, Restore's backup, and the
     # ContentManager::writeAssetTo path every asset panel's copy takes.
     test_asset_autosave.cpp
+    # A .heproj double-clicked in the file manager: quotes, blanks, relative
+    # paths and wrong extensions, and Hub vs. guarded switch vs. already open.
+    test_project_launch_open.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
@@ -251,6 +255,13 @@ add_executable(he_tests
     # press keys, read the binding back out of the pinned config.json.
     test_shortcuts_ui.cpp
     test_weather.cpp
+    # The weather's sound: the gain curves as plain functions, the voices on an
+    # AudioEngine without a device.
+    test_weather_audio.cpp
+    # The committed weather sounds (EditorDeps/EngineContent/Audio/Weather): what
+    # is in the files, that the loops are seamless, that an export ships them and
+    # that a shipped game's weather plays them.
+    test_engine_weather_sounds.cpp
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
     test_gamelogic_build.cpp
@@ -306,6 +317,8 @@ add_executable(he_tests
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
+    test_git_panel_ops.cpp
+    test_scene_file_stamp.cpp
     test_github_oauth.cpp
     test_game_replication.cpp
     # The first real gameplay session: two and three NetGameSessions against
@@ -611,6 +624,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneAutosave.cpp
     # Its sibling for the asset tabs — same clock-in-hand design.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetAutosave.cpp
+    # What a launch argument or a macOS open event means as a project path,
+    # and which Open it takes. SDL- and ImGui-free (see the header).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectLaunchOpen.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
@@ -818,6 +834,10 @@ target_include_directories(he_tests PRIVATE
 # resolves to dllexport (definitions are local to this exe) rather than dllimport,
 # which would emit unresolved __imp_ references for those same locally-built symbols.
 target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+if(HE_HAVE_ASSIMP AND HE_ASSIMP_TEST_MODELS)
+    # test_assimpimport.cpp reads Blender files out of Assimp's sample models.
+    target_compile_definitions(he_tests PRIVATE HE_ASSIMP_TEST_MODELS="${HE_ASSIMP_TEST_MODELS}")
+endif()
 # test_scene_serializer.cpp outgrew the 2^16 COFF sections of a Debug MSVC
 # object (fatal error C1128); CI builds Windows in Release only and never saw it.
 if(MSVC)
@@ -1156,6 +1176,21 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME he_mcp_shim
              COMMAND ${Python3_EXECUTABLE}
                      "${CMAKE_SOURCE_DIR}/tests/test_he_mcp.py")
+endif()
+
+# ── "Does a double-click on a .heproj open the editor?" ──────────────────────
+# macOS registers the type in Info.plist; Windows and Linux ship a ZIP / tarball with
+# no installer, so the registration is files inside the package (FileTypes/, from
+# scripts/windows_assets and scripts/linux_assets). This holds those files to ONE
+# name for the type on all three platforms, validates them, and on a POSIX machine
+# runs the Linux installer for real against a throwaway XDG_DATA_HOME. Python, because
+# what it checks is files and a shell script, and because the Windows half of the
+# same question is answered on the Windows runner by check_heproj_registration.ps1.
+# CI additionally passes --package to prove the deployed package carries the files.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME heproj_file_types
+             COMMAND ${Python3_EXECUTABLE}
+                     "${CMAKE_SOURCE_DIR}/tests/test_heproj_file_types.py")
 endif()
 
 # ── "How heavy is what we actually ship?" ────────────────────────────────────

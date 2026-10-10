@@ -533,10 +533,21 @@ namespace
 				{ "currentKind",        static_cast<int>(w->currentKind) },
 				{ "targetKind",         static_cast<int>(w->targetKind) },
 				{ "intensity",          w->intensity },
+				{ "puddleAmount",       w->puddleAmount },
+				{ "puddleSize",         w->puddleSize },
+				{ "snowCover",          w->snowCover },
+				{ "thunder",            w->thunder },
 				{ "transitionDuration", w->transitionDuration },
 				{ "autoCycle",          w->autoCycle },
 				{ "cycleSeconds",       w->cycleSeconds },
 				{ "thunderSound",       uuidToJson(w->thunderSound) },
+				{ "rainSound",          uuidToJson(w->rainSound) },
+				{ "windSound",          uuidToJson(w->windSound) },
+				{ "snowSound",          uuidToJson(w->snowSound) },
+				{ "stormSound",         uuidToJson(w->stormSound) },
+				{ "soundEnabled",       w->soundEnabled },
+				{ "soundVolume",        w->soundVolume },
+				{ "soundBus",           w->soundBus },
 				{ "maxRainParticles",   w->maxRainParticles },
 				{ "maxSnowParticles",   w->maxSnowParticles },
 				{ "groundLevel",        w->groundLevel },
@@ -1391,10 +1402,25 @@ namespace
 			w.targetKind         = static_cast<WeatherKind>(c.value("targetKind",  static_cast<int>(w.targetKind)));
 			w.prevTarget         = w.targetKind; // no spurious reclaim on load → authored env is respected
 			w.intensity          = c.value("intensity",          w.intensity);
+			w.puddleAmount       = std::clamp(c.value("puddleAmount", w.puddleAmount), 0.0f, 1.0f);
+			w.puddleSize         = std::clamp(c.value("puddleSize",   w.puddleSize),   0.5f, 100.0f);
+			w.snowCover          = std::clamp(c.value("snowCover",    w.snowCover),    0.0f, 1.0f);
+			// A scene saved before thunder was a value of its own has none: its lightning came from
+			// the preset ("Storm"), so a stored Storm keeps striking after the load.
+			w.thunder            = c.contains("thunder")
+				? std::clamp(c.value("thunder", w.thunder), 0.0f, 1.0f)
+				: (weatherPreset(w.targetKind).lightning ? std::clamp(w.intensity, 0.0f, 1.0f) : 0.0f);
 			w.transitionDuration = c.value("transitionDuration", w.transitionDuration);
 			w.autoCycle          = c.value("autoCycle",          w.autoCycle);
 			w.cycleSeconds       = c.value("cycleSeconds",       w.cycleSeconds);
 			if (c.contains("thunderSound")) w.thunderSound = jsonToUuid(c["thunderSound"]);
+			if (c.contains("rainSound"))    w.rainSound    = jsonToUuid(c["rainSound"]);
+			if (c.contains("windSound"))    w.windSound    = jsonToUuid(c["windSound"]);
+			if (c.contains("snowSound"))    w.snowSound    = jsonToUuid(c["snowSound"]);
+			if (c.contains("stormSound"))   w.stormSound   = jsonToUuid(c["stormSound"]);
+			w.soundEnabled = c.value("soundEnabled", w.soundEnabled);
+			w.soundVolume  = c.value("soundVolume",  w.soundVolume);
+			w.soundBus     = c.value("soundBus",     w.soundBus);
 			w.maxRainParticles = c.value("maxRainParticles", w.maxRainParticles);
 			w.maxSnowParticles = c.value("maxSnowParticles", w.maxSnowParticles);
 			w.groundLevel      = c.value("groundLevel",      w.groundLevel);

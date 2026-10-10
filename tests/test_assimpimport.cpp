@@ -1,4 +1,4 @@
-// FBX / OBJ / COLLADA import through Assimp (AssimpMeshImport, routed by
+// FBX / OBJ / COLLADA / Blender import through Assimp (AssimpMeshImport, routed by
 // MeshImporter). Compiled out without Assimp — the whole feature is — except
 // for the first case, which pins the Import Asset dialog to the routing in
 // EITHER build: with Assimp the dialog must offer the three formats, without
@@ -84,13 +84,15 @@ TEST_CASE("Import dialog: every offered extension imports, and the routing offer
 	CHECK(offers("fbx"));
 	CHECK(offers("obj"));
 	CHECK(offers("dae"));
+	CHECK(offers("blend"));
 #else
 	CHECK_FALSE(offers("fbx"));
 	CHECK_FALSE(offers("obj"));
 	CHECK_FALSE(offers("dae"));
+	CHECK_FALSE(offers("blend"));
 	// Not importable, but not silently so either: the Content Browser greys the
 	// Import item out with this sentence.
-	for (const char* ext : { ".fbx", ".OBJ", ".dae" })
+	for (const char* ext : { ".fbx", ".OBJ", ".dae", ".blend" })
 	{
 		CAPTURE(ext);
 		CHECK_FALSE(Importer::isImportableSource(fs::path("Some/Model") += ext));
@@ -344,15 +346,15 @@ std::string fbxTriangle(double unitScaleFactor, double unit)
 }
 } // namespace
 
-TEST_CASE("Assimp routing: .fbx/.obj/.dae are importable mesh sources, any case")
+TEST_CASE("Assimp routing: .fbx/.obj/.dae/.blend are importable mesh sources, any case")
 {
-	for (const char* ext : { ".fbx", ".obj", ".dae", ".FBX", ".Obj", ".DAE" })
+	for (const char* ext : { ".fbx", ".obj", ".dae", ".blend", ".FBX", ".Obj", ".DAE", ".Blend" })
 	{
 		CHECK(Importer::isAssimpSource(fs::path("Some/Model") += ext));
 		CHECK(Importer::isImportableSource(fs::path("Some/Model") += ext));
 	}
 	CHECK_FALSE(Importer::isAssimpSource("Some/Model.gltf"));
-	CHECK_FALSE(Importer::isAssimpSource("Some/Model.blend"));
+	CHECK_FALSE(Importer::isAssimpSource("Some/Model.blend1"));   // Blender's backup copy
 	// The skin probe is glTF-only and must not open other formats at all — a
 	// path that does not exist would otherwise be a parse failure, not a "no".
 	CHECK_FALSE(Importer::gltfHasSkin("Does/Not/Exist.fbx"));
@@ -999,5 +1001,155 @@ TEST_CASE("Reimport of a renamed OBJ asset keeps its uuid and redirects the mate
 	CHECK(HE::AssetRefs::assetUuidOfFile(renamedMesh.string()) == meshId);
 	he_test::removeAllQuiet(dir);
 }
+
+// ─── Blender ─────────────────────────────────────────────────────────────────
+// Assimp's reader takes .blend files up to Blender 3.4 and leaves them as the
+// file has them: Z up, -Y forward. The engine is Y up, so the bake turns them
+// (the rotation Blender's own glTF exporter applies). Newer files it cannot
+// read at all, and the import has to say what to do instead of "field not found".
+
+namespace
+{
+bool writeBytes(const fs::path& p, const std::string& bytes)
+{
+	std::error_code ec;
+	fs::create_directories(p.parent_path(), ec);
+	std::ofstream f(p, std::ios::binary);
+	f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+	return static_cast<bool>(f);
+}
+} // namespace
+
+TEST_CASE("Blender hint: names the version and the way out for the files Assimp cannot read")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_blend_hint";
+	he_test::removeAllQuiet(dir);
+	const auto hintFor = [&](const char* name, const std::string& bytes)
+	{
+		REQUIRE(writeBytes(dir / name, bytes));
+		return Importer::blendReadHint(dir / name);
+	};
+	const auto has = [](const std::string& s, const char* part) { return s.find(part) != std::string::npos; };
+
+	// Up to 3.4 is Assimp's own ground: no hint — its error, if any, stands.
+	CHECK(hintFor("old.blend", "BLENDER-v276REST").empty());
+	CHECK(hintFor("v34.blend", "BLENDER-v304REST").empty());
+	// 3.5 and on, in the old header (3.x) and the new one (4.1+).
+	{
+		const std::string h = hintFor("v35.blend", "BLENDER-v305REST");
+		CHECK(has(h, "Blender 3.5"));
+		CHECK(has(h, "glTF"));
+	}
+	{
+		const std::string h = hintFor("v42.blend", "BLENDER17-01v0402REST");
+		CHECK(has(h, "Blender 4.2"));
+		CHECK(has(h, "glTF"));
+	}
+	// zstd: Blender's own compression, which Assimp does not inflate.
+	{
+		const std::string h = hintFor("zstd.blend", std::string("\x28\xB5\x2F\xFD", 4) + "payload");
+		CHECK(has(h, "zstd"));
+		CHECK(has(h, "Compress"));
+	}
+	// A gzip file is readable, and "not a Blender file" is not this hint's news.
+	CHECK(hintFor("gz.blend", std::string("\x1F\x8B\x08\x00", 4) + "payload").empty());
+	CHECK(hintFor("text.blend", "hello world, this is not a blend file").empty());
+	CHECK(Importer::blendReadHint(dir / "missing.blend").empty());
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("Blender import: a file Assimp refuses fails with the reason, not a bare exception text")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_blend_refused";
+	he_test::removeAllQuiet(dir);
+	REQUIRE(writeBytes(dir / "new.blend", "BLENDER17-01v0402 and then nothing a reader could use"));
+	Importer::AssimpScene scene;
+	std::string           error;
+	CHECK_FALSE(scene.load(dir / "new.blend", error));
+	CHECK(error.find("Blender 4.2") != std::string::npos);
+	CHECK(error.find("glTF") != std::string::npos);
+	he_test::removeAllQuiet(dir);
+}
+
+#ifdef HE_ASSIMP_TEST_MODELS
+namespace
+{
+// One of Assimp's own sample files, or "" when this checkout does not have it —
+// the cases below then say so and stop rather than fail.
+fs::path blendFixture(const char* name)
+{
+	const fs::path p = fs::path(HE_ASSIMP_TEST_MODELS) / "BLEND" / name;
+	std::error_code ec;
+	return fs::is_regular_file(p, ec) ? p : fs::path{};
+}
+} // namespace
+
+TEST_CASE("Blender import: a plane lying in Blender's XY ground plane lands in the engine's XZ")
+{
+	const fs::path src = blendFixture("plane_2_textures_2_texcoords_279.blend");
+	if (src.empty()) { MESSAGE("Assimp sample models not available - skipped"); return; }
+
+	Importer::AssimpScene scene;
+	std::string           error;
+	REQUIRE_MESSAGE(scene.load(src, error), error);
+	Importer::AssimpBakedGeometry baked;
+	REQUIRE(scene.bake(1.0f, baked));
+	REQUIRE(baked.positions.size() == 4 * 3);
+	float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
+	for (size_t i = 0; i < baked.positions.size(); i += 3)
+		for (size_t k = 0; k < 3; ++k)
+		{
+			lo[k] = std::min(lo[k], baked.positions[i + k]);
+			hi[k] = std::max(hi[k], baked.positions[i + k]);
+		}
+	// Flat in Y (Blender's Z), 7.9 across in both X and Z.
+	CHECK(hi[1] - lo[1] == doctest::Approx(0.0f).epsilon(0.001));
+	CHECK(hi[0] - lo[0] == doctest::Approx(7.94f).epsilon(0.01));
+	CHECK(hi[2] - lo[2] == doctest::Approx(7.94f).epsilon(0.01));
+	// Facing up: the normals the Blender loader wrote are turned with the vertices.
+	REQUIRE(baked.normals.size() == baked.positions.size());
+	CHECK(std::abs(baked.normals[1]) == doctest::Approx(1.0f).epsilon(0.01));
+}
+
+TEST_CASE("Blender import: plain and gzip-compressed files both read")
+{
+	for (const char* name : { "BlenderDefault_250_Compressed.blend", "BlenderDefault_276.blend" })
+	{
+		CAPTURE(name);
+		const fs::path src = blendFixture(name);
+		if (src.empty()) { MESSAGE("Assimp sample models not available - skipped"); return; }
+		Importer::AssimpScene scene;
+		std::string           error;
+		REQUIRE_MESSAGE(scene.load(src, error), error);
+		Importer::AssimpBakedGeometry baked;
+		REQUIRE(scene.bake(1.0f, baked));
+		CHECK(baked.indices.size() == 12 * 3);   // Blender's default cube: 12 triangles
+		// The 2 x 2 x 2 cube, centred.
+		for (const float c : baked.positions)
+			CHECK(std::abs(c) == doctest::Approx(1.0f));
+	}
+}
+
+TEST_CASE("Blender import: MeshImporter turns a .blend into a StaticMesh")
+{
+	const fs::path src = blendFixture("BlenderDefault_276.blend");
+	if (src.empty()) { MESSAGE("Assimp sample models not available - skipped"); return; }
+	const fs::path dir = fs::temp_directory_path() / "he_test_blend_import";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	fs::copy_file(src, dir / "cube.blend");
+	const fs::path contentRoot = dir / "Content";
+
+	auto mesh = MeshImporter::import(dir / "cube.blend", contentRoot, "Imported");
+	REQUIRE(mesh != nullptr);
+	CHECK(mesh->path == "Imported/cube.hasset");
+	CHECK(mesh->indices.size() == 12 * 3);
+	CHECK(mesh->normals.size() == mesh->vertices.size());
+	CHECK_FALSE(mesh->sections.empty());
+	CHECK(Importer::isImportableSource(dir / "cube.blend"));
+	he_test::removeAllQuiet(dir);
+}
+#endif // HE_ASSIMP_TEST_MODELS
+
 
 #endif // HE_HAVE_ASSIMP
