@@ -5,9 +5,10 @@ struct AppContext;
 // ── World Outliner ───────────────────────────────────────────────────────────
 // The scene hierarchy tree on the right: the cached hierarchy snapshot, the
 // selection, drag & drop reparenting, the per-entity and background context
-// menus (create/duplicate/delete/sibling order/lock), the search + type
-// filter header (OutlinerFilter.h), the eye and padlock on every row
-// (EntityVisibility.h, EditorLockComponent.h) and the entity rename popup.
+// menus (create/duplicate/delete/sibling order/lock), the search box and type
+// chips (OutlinerFilter.h), per row a type icon, badges, the eye and padlock
+// (EntityVisibility.h, EditorLockComponent.h), in-place rename (F2 or a
+// double-click) and drops on a row's edge to reorder.
 // Split out of EditorUI.cpp; all of its state is file-static in the .cpp.
 namespace OutlinerPanel
 {

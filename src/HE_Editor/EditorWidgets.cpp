@@ -1,5 +1,6 @@
 #include "EditorWidgets.h"
 #include "EditorApplication.h"      // AppContext
+#include "EditorHelp.h"             // findKey — a slot with an entry of its own
 #include "EditorUndo.h"
 #include "HcEditorUtil.h"           // listAssets + the picker's search filter
 #include <ContentManager/ContentManager.h>
@@ -91,7 +92,7 @@ AssetDrop acceptAssetDrop(AppContext& ctx, HE::AssetType want, const char* rejec
 SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
                          HE::AssetType want, const char* idSuffix,
                          const char* emptyText, const char* rejectNoun,
-                         bool showClear, bool undo)
+                         bool showClear, bool undo, const char* helpKey)
 {
 	// Slot text: the asset's name when it resolves, the caller's hint when the
 	// slot is empty, and "(not loaded)" for a reference whose asset is gone —
@@ -127,7 +128,13 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 		s_pickerFocus = true;
 		ImGui::OpenPopup(popupId.c_str());
 	}
-	if (ImGui::IsItemHovered())
+	// A slot with an entry of its own explains itself through the help queue (drawn at
+	// the frame's end, after the delay); the generic line is for the rest. Not "if the
+	// queue took it": before the delay has passed the queue says no, and the generic
+	// line would flash up first and then be replaced.
+	if (helpKey && HE::Ed::Help::findKey(helpKey))
+		helpForKey(helpKey);
+	else if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Click to pick an asset, or drop one from the Content Browser");
 
 	if (const AssetDrop drop = acceptAssetDrop(ctx, want, rejectNoun))

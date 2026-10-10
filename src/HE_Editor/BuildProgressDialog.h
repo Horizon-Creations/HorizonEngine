@@ -49,7 +49,11 @@ namespace BuildProgressDialog
 		void stepProgress(int done, int total);
 
 		// A log line for the current step. severity: 0 info, 1 warning, 2 error.
-		void log(int severity, const std::string& text);
+		// `step` >= 0 files the line under that step instead of the running one — for
+		// a summary that is only known once the step's work has returned, by which
+		// time the run has already moved on (the pack summary arrives after
+		// exportProject() has entered "Clean up").
+		void log(int severity, const std::string& text, int step = -1);
 
 		// What the current step is doing right now — the file being packed, the
 		// class being translated. One line under the buttons, not the log.

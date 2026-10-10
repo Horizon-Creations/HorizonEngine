@@ -6,6 +6,8 @@
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
 #include "EditorTabs.h"            // retarget / dedupe the open asset tabs
+#include "ProjectPreflight.h"      // engine-content check in front of the first project open
+#include "SceneDiskWatch.h"        // the open scene's file stamp: our own save is not a pull
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
@@ -41,6 +43,7 @@
 #include "HcFallbackReport.h"      // which classes an export had to ship interpreted
 #include "EditorRewards.h"         // setSystemMotionQuery — Reduced Motion's "Follow System"
 #include "EditorSystemMotion.h"    // …and the system query it follows
+#include "ProjectLaunchOpen.h"     // a .heproj double-clicked in the file manager
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
@@ -413,6 +416,49 @@ static const char* scriptLogTagFor(ProjectScriptLanguage lang)
 	case ProjectScriptLanguage::HorizonCode:
 	default:                            return "[HC] ";
 	}
+}
+
+// The project this start was asked to open, if any (ProjectLaunchOpen.h).
+// Windows and Linux hand it over as an argument; every argument that is not one
+// is said in the log and otherwise left alone. macOS sends an open event
+// instead, and at launch that event is usually already waiting in SDL's queue
+// by now (the splash pumps it) — so it is PEEKED here, not taken: it still
+// reaches OnEvent on the first frame, finds its project open and does nothing.
+// That way the first project load is the right one, instead of the last
+// session's project followed by a switch. `askedForProject` says a .heproj was
+// named but cannot be opened (moved, deleted): that is still a request, so the
+// caller shows the Hub with the reason rather than the last project.
+static std::string pickLaunchProject(const std::vector<std::string>& args,
+                                     bool& askedForProject)
+{
+	std::error_code ec;
+	const std::filesystem::path cwd = std::filesystem::current_path(ec);
+	ProjectLaunchOpen::LaunchPick pick = ProjectLaunchOpen::pickFromArguments(args, cwd);
+	askedForProject = !pick.project.empty();
+	for (const auto& [arg, why] : pick.rejected)
+	{
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' %s — not opened",
+		            arg.c_str(), ProjectLaunchOpen::describe(why));
+		if (why == ProjectLaunchOpen::PathError::NotFound ||
+		    why == ProjectLaunchOpen::PathError::NotAFile)
+			askedForProject = true;
+	}
+	for (const std::string& p : pick.ignored)
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' not opened — the editor "
+		                    "opens one project at a time", p.c_str());
+	if (!pick.project.empty()) return pick.project;
+
+	SDL_PumpEvents();
+	SDL_Event evs[16];
+	const int n = SDL_PeepEvents(evs, 16, SDL_PEEKEVENT, SDL_EVENT_DROP_FILE, SDL_EVENT_DROP_FILE);
+	for (int i = 0; i < n; ++i)
+	{
+		if (evs[i].drop.windowID != 0 || !evs[i].drop.data) continue;
+		// Unopenable ones are not said here: OnEvent says it when it gets there.
+		const ProjectLaunchOpen::ParsedPath p = ProjectLaunchOpen::parse(evs[i].drop.data, cwd);
+		if (p.ok()) return p.path;
+	}
+	return {};
 }
 
 void EditorApplication::OnInit()
@@ -1328,6 +1374,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.SpecularAA                  = globalstate.getCustomConfigBool("SpecularAA",          m_editorConfig.SpecularAA);
 	m_editorConfig.SpecularAAStrength          = globalstate.getCustomConfigFloat("SpecularAAStrength", m_editorConfig.SpecularAAStrength);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
+	m_editorConfig.WeatherSoundInEditor        = globalstate.getCustomConfigBool("WeatherSoundInEditor", m_editorConfig.WeatherSoundInEditor);
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
@@ -1935,13 +1982,45 @@ void EditorApplication::OnInit()
 		m_savedRevision = m_undo.revision();
 	});
 
+	// A project double-clicked in the file manager wins over the last one. Loaded
+	// the way the Project Hub loads a chosen file (ProjectHubPanel), because at
+	// this point the Hub is what is open. A failure does NOT fall back to the
+	// last project: the user asked for this one, and the Hub says why it did not
+	// open instead of quietly showing something else.
+	bool askedForProject = false;
+	const std::string launchProject = pickLaunchProject(launchArguments(), askedForProject);
+	if (askedForProject && launchProject.empty())
+		m_hubOpenError = "The project file passed at launch could not be found.";
+	else if (!launchProject.empty())
+	{
+		HE_LOG_INFO(Editor, "EditorApplication: opening %s (handed over at launch)",
+		            launchProject.c_str());
+		splashStatus("Opening " + std::filesystem::path(launchProject).stem().string(), 0.75f);
+		if (m_dumpPath.empty())
+		{
+			// The engine-content check (sign in, download, ask about what is missing) runs
+			// on the start screen before the project loads: the first frame hands it over.
+			ProjectPreflight::requestAtStartup(launchProject);
+		}
+		else if (m_projectManager.loadProject(launchProject))
+		{
+			m_globalState->addKnownProject(launchProject);
+			m_globalState->writeConfig();
+			m_projectLoaded         = true;
+			m_contentRefreshPending = true;
+		}
+		else
+			m_hubOpenError = "Failed to load project file.";
+	}
 	// If a project was previously opened, load it now (triggers the callback above)
-	if (!m_globalState->getLastProjectPath().empty())
+	else if (!m_globalState->getLastProjectPath().empty())
 	{
 		splashStatus("Opening " +
 		             std::filesystem::path(m_globalState->getLastProjectPath())
 		                 .stem().string(), 0.75f);
-		if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
+		if (m_dumpPath.empty())
+			ProjectPreflight::requestAtStartup(m_globalState->getLastProjectPath());
+		else if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
 		{
 			m_projectLoaded         = true;
 			m_contentRefreshPending = true;
@@ -2131,11 +2210,14 @@ void EditorApplication::startSftpProbe()
 			// Reached and authenticated, but the catalogue itself did not arrive —
 			// a different fault (manifest missing, unreadable, or unparseable) and
 			// one the user cannot fix by checking their network.
+			const std::string why = HE::Cs::EngineContentSync::instance().lastManifestError();
 			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
 				"The EngineContent catalogue could not be read.",
-				"The server answered, but its manifest could not be fetched or parsed, "
-				"and there is no cached copy on this machine. EngineContent will not "
-				"appear in the Content Browser this session.");
+				std::string("The server accepted the login, but reading its manifest failed")
+				+ (why.empty() ? std::string(".") : std::string(": ") + why + ".")
+				+ "  There is no cached copy on this machine, so EngineContent will not "
+				  "appear in the Content Browser this session. Restarting the editor "
+				  "tries again.");
 		}
 
 		if (haveManifest && gs && !engineContentPath.empty())
@@ -3408,17 +3490,19 @@ void EditorApplication::OnRender(float dt)
 			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
 		}
 
-		// Thunder: when a lightning strike fired this frame, play the configured sound
-		// (graceful no-op if no thunderSound asset is set on the WeatherComponent).
-		if (m_isPlaying && m_editorWorld)
+		// The weather's sound: rain/wind/snow/storm beds that follow the live weather,
+		// and thunder after each lightning strike. After the tick above, so a strike is
+		// heard the frame it happens. Edit mode too (the Preferences switch is the way
+		// to silence it there); in Play it goes quiet with the pause, like the weather
+		// itself stands still.
+		if (m_editorWorld)
 		{
-			for (auto [e, wx] : m_editorWorld->registry().view<WeatherComponent>().each())
-			{
-				if (wx.flashTriggered && wx.thunderSound != HE::UUID{})
-					if (const auto* a = contentManager().getAudio(wx.thunderSound))
-						m_audioEngine.play(*a);
-				break;
-			}
+			HE_PROFILE_SCOPE_N("WeatherAudio");
+			WeatherAudio::Frame frame;
+			frame.realDt  = dt;
+			frame.gameDt  = gameDt;
+			frame.audible = m_isPlaying ? !m_isPaused : m_editorConfig.WeatherSoundInEditor;
+			WeatherAudio::update(m_weatherAudio, *m_editorWorld, m_audioEngine, contentManager(), frame);
 		}
 
 		// Per-frame script update. `simulating`, not m_isPlaying: onUpdate runs once
@@ -5727,10 +5811,16 @@ void EditorApplication::dumpFrameHeadless()
 			                          "Engine/Materials/Water.hasset or Engine/Meshes/Plane.hasset");
 		else
 		{
+			// HE_DUMP_WATERSIZE=<metres>: side of the square (default 40). The swell
+			// is 14 m long, so a pattern that repeats every few wavelengths only
+			// shows on a plane several times that (Thema 152, Schritt 8).
+			float side = 40.0f;
+			if (const char* ws = std::getenv("HE_DUMP_WATERSIZE"); ws && *ws)
+				side = std::clamp(std::strtof(ws, nullptr), 1.0f, 4000.0f);
 			auto e = m_editorWorld->createEntity("WaterTest");
 			TransformComponent tc;
 			tc.position = glm::vec3(0.0f, 0.0f, -8.0f);
-			tc.scale    = glm::vec3(40.0f, 1.0f, 40.0f);
+			tc.scale    = glm::vec3(side, 1.0f, side);
 			reg.emplace<TransformComponent>(e, tc);
 			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
 			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
@@ -5778,7 +5868,7 @@ void EditorApplication::dumpFrameHeadless()
 				auto fe = m_editorWorld->createEntity("WaterTestFloor");
 				TransformComponent ftc;
 				ftc.position = glm::vec3(0.0f, -1.5f, -8.0f);
-				ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+				ftc.scale    = glm::vec3(side, 0.2f, side);
 				reg.emplace<TransformComponent>(fe, ftc);
 				reg.emplace<MeshComponent>(fe, MeshComponent{ HE::kDefaultCubeMeshId });
 				reg.emplace<MaterialComponent>(fe,
@@ -10834,7 +10924,9 @@ void EditorApplication::setPlayMode(bool play)
 			m_widgetTextInputActive = false;
 		}
 
-		// Stop all audio when exiting play mode
+		// Stop all audio when exiting play mode — the weather's state first, so the
+		// beds start from silence again instead of reusing handles stopAll kills.
+		WeatherAudio::stop(m_weatherAudio, m_audioEngine);
 		m_audioEngine.stopAll();
 
 		HE_LOG_INFO(Editor, "%s", "EditorApplication: returned to edit mode");
@@ -11319,6 +11411,11 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	// changes with it, which is what a human sees after the save anyway. An
 	// edit committed in this very frame is marked first, or the sync would be
 	// what undoes it.
+	// The file changed on disk since this editor read or wrote it (a git pull): saving
+	// now would put the stale open scene over it. The reload question is raised and the
+	// save waits for the answer.
+	if (SceneDiskWatch::blocksSave(path)) return false;
+
 	recordPrefabEdits();
 	syncPrefabInstances("save");
 
@@ -11326,6 +11423,7 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
 	{
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);         // our own write, not somebody else's change
 		m_savedRevision    = m_undo.revision(); // scene is now clean
 		// The file now holds everything the snapshot held — and a leftover copy
 		// would be offered as "unsaved work" at the next start.
@@ -11520,6 +11618,7 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		loaded = true;
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);
 		// Before the asset preload: the sync may change which meshes and
 		// materials the placed prefabs reference.
 		syncPrefabInstances("open");
@@ -11716,6 +11815,7 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	ProjectPreflight::shutdown();   // joins a still-running engine-content check
 	// Give the network back what a session took, FIRST and synchronously: the
 	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits
 	// while hosting never presses "leave", and none of those clean themselves up
@@ -12020,6 +12120,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("SpecularAA",                m_editorConfig.SpecularAA);
 	globalstate.setCustomConfigEntry("SpecularAAStrength",        m_editorConfig.SpecularAAStrength);
 	globalstate.setCustomConfigEntry("GpuParticles",              m_editorConfig.GpuParticles);
+	globalstate.setCustomConfigEntry("WeatherSoundInEditor",      m_editorConfig.WeatherSoundInEditor);
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
@@ -12137,6 +12238,32 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			// Only a drop that landed IN the preview is answered here; one that
 			// missed it stays available to whatever the editor grows next.
 			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
+		}
+	}
+
+	// ── A project handed over by the system (ProjectLaunchOpen.h) ────────────
+	// macOS opens a document by event, also in an editor that is already
+	// running, and SDL delivers it as a DROP_FILE with no window (windowID 0).
+	// A .heproj dropped onto the editor window outside the live preview (which
+	// answered above) means the same thing. Only posted here: the Hub or the
+	// editor takes it on the next frame through its own Open, the editor's with
+	// the unsaved-changes prompt. A window drop of any other file stays silent —
+	// it was aimed at the preview or at nothing; an OS open of one is logged.
+	if (event.type == SDL_EVENT_DROP_FILE && event.drop.data)
+	{
+		const bool fromSystem = event.drop.windowID == 0;
+		std::error_code ec;
+		const ProjectLaunchOpen::ParsedPath p =
+			ProjectLaunchOpen::parse(event.drop.data, std::filesystem::current_path(ec));
+		if (fromSystem || p.error != ProjectLaunchOpen::PathError::WrongExtension)
+		{
+			if (!p.ok())
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' %s — not opened",
+				            event.drop.data, ProjectLaunchOpen::describe(p.error));
+			else if (!ProjectLaunchOpen::post(p.path))
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' not opened — another project is "
+				                    "already waiting to open, one at a time", p.path.c_str());
+			return true;
 		}
 	}
 

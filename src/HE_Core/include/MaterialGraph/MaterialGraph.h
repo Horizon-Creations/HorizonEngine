@@ -77,6 +77,11 @@ enum class MatNodeType : uint8_t
     CameraPos,      // heLight.camPos.xyz
     CameraDistance, // length(camPos - worldPos)
     ScreenPos,      // gl_FragCoord.xy (raw pixels)
+    Weather,        // the scene's WEATHER as five floats (heLight.weather / weather2): Wetness, Snow
+                    // Amount (the generic ground response every lit surface already gets), and the
+                    // three the Weather details panel sets for MATERIALS to read — Puddles and Snow
+                    // Cover (0..1) and Puddle Size (metres, >= 0.5). What the weather material
+                    // functions are built on.
 
     // ── v5: baked constants, more parameter types, logic ──
     ConstBool,      // p[0] = 0/1 (baked literal) → float 0.0/1.0
@@ -188,6 +193,23 @@ enum class MatNodeType : uint8_t
     NormalMapBombSample,        // (UV, Cell) → world-space N
     TextureArrayBombSample,     // (UV, Slice, Cell) → RGB + A
     NormalMapArrayBombSample,   // (UV, Slice, Cell) → world-space N
+
+    // ── v15: bombing cells as data (Thema 152, Schritt 8) ──
+    // The hex grid of the nodes above WITHOUT a texture read: for the pixel's three
+    // hexes, the blend weights and random numbers, so a PROCEDURAL pattern can be
+    // bombed too — evaluate it once per hex with that hex's random offset, angle
+    // or phase, blend the three results by the weights. A sum of sines repeats
+    // exactly (the water's swell is one), and bombing is what breaks that up.
+    //   inputs : UV (the hex grid lives on it, e.g. World Position xz), Cell (hex
+    //            spacing in UV units, e.g. metres), Blend (exponent of the weights,
+    //            clamped to 1..32: ~7 = sharp seams for a texture, ~1..2 = broad
+    //            blends for a smooth signal)
+    //   outputs: Weights (x,y,z = the three hexes, sum 1) and Random A, B, C (x,y,z
+    //            = one number in [0,1) per hex each, independent of each other)
+    //   p[0]   = Seed (rounded to an integer; another seed = another set of numbers)
+    // The numbers come from the integer hash the bombing nodes use (pcg3d of the hex
+    // index), so every backend picks the same ones bit for bit.
+    BombCells,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot

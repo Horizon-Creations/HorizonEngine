@@ -176,6 +176,12 @@ struct EditorConfig
 	// (GL + Metal = yes, so it's the path used unless the user turns it off).
 	bool  GpuParticles  = true;
 
+	// Weather sounds (rain, wind, thunder …) in the edit-mode viewport, not just in
+	// Play. On by default — the weather is part of the scene you are editing, and
+	// hearing it is how you tune it. Off for the days a rain loop is in the way.
+	// Play mode always has them (the component's own switch is the one to use there).
+	bool  WeatherSoundInEditor = true;
+
 	// Render path (pushed to the renderer each frame via SetRenderPath): 0 =
 	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,
 	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.

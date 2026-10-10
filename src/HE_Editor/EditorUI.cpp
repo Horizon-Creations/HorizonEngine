@@ -59,8 +59,11 @@
 #include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
+#include "ProjectPreflight.h"            // engine-content check in front of every project open
+#include "SceneDiskWatch.h"             // "the open scene changed on disk (git pull) - reload?"
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
 #include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
+#include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
@@ -484,14 +487,26 @@ void graphViewsLoad(GlobalState& gs, const std::string& project)
 {
 	GraphViewStore::Table& t = GraphViewStore::table();
 	t.views.clear();
+	t.tabs.clear();
 	t.dirty = false;
 	if (project.empty()) return;
 	const std::string raw = gs.getCustomConfigString(graphViewsKey(project), "");
 	if (raw.empty()) return;
 	const nlohmann::json j = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false);
 	if (j.is_discarded() || !j.is_object()) return;
+	// Open graph tabs ride along under one reserved key: {"__tabs": {key: [active, id…]}}.
+	if (const auto tabsIt = j.find("__tabs"); tabsIt != j.end() && tabsIt->is_object())
+		for (auto it = tabsIt->begin(); it != tabsIt->end(); ++it)
+			if (it.value().is_array() && !it.value().empty() && it.value()[0].is_number_integer())
+			{
+				GraphViewStore::OpenTabs ot;
+				ot.active = it.value()[0].get<int>();
+				for (std::size_t i = 1; i < it.value().size(); ++i)
+					if (it.value()[i].is_number_integer()) ot.open.push_back(it.value()[i].get<int>());
+				t.tabs[it.key()] = std::move(ot);
+			}
 	for (auto it = j.begin(); it != j.end(); ++it)
-		if (it.value().is_array() && it.value().size() == 3 &&
+		if (it.key() != "__tabs" && it.value().is_array() && it.value().size() == 3 &&
 		    it.value()[0].is_number() && it.value()[1].is_number() && it.value()[2].is_number())
 			t.views[it.key()] = { it.value()[0].get<float>(), it.value()[1].get<float>(),
 			                      it.value()[2].get<float>() };
@@ -503,6 +518,17 @@ bool graphViewsStore(GlobalState& gs, const std::string& project)
 	if (project.empty() || !t.dirty) return false;
 	nlohmann::json j = nlohmann::json::object();
 	for (const auto& [key, v] : t.views) j[key] = nlohmann::json::array({ v.panX, v.panY, v.zoom });
+	if (!t.tabs.empty())
+	{
+		nlohmann::json tj = nlohmann::json::object();
+		for (const auto& [key, ot] : t.tabs)
+		{
+			nlohmann::json a = nlohmann::json::array({ ot.active });
+			for (int id : ot.open) a.push_back(id);
+			tj[key] = std::move(a);
+		}
+		j["__tabs"] = std::move(tj);
+	}
 	// "replace": a path with invalid UTF-8 must not abort the editor in dump().
 	gs.setCustomConfigEntry(graphViewsKey(project),
 		j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
@@ -788,6 +814,17 @@ void EditorUI::render(AppContext& ctx, float dt)
     // "Show me" is only offered with a project open — see docsPanelOpener.
     DocsPanel::setPanelOpener(ctx.projectLoaded ? &docsPanelOpener : nullptr);
     DocsPanel::draw(ctx);
+
+    // ── Engine-content check before a project opens ──────────────────────────
+    // Before the branch for the same reason as the dialogs above: it is shown over
+    // the hub while a project is being opened and over the editor while one is
+    // being switched to, and it is what finally flips projectLoaded.
+    ProjectPreflight::render(ctx);
+
+    // ── The open scene changed on disk ───────────────────────────────────────
+    // A pull rewrites the scene file under the editor; this asks whether to reload it.
+    if (ctx.projectLoaded && !ProjectPreflight::busy())
+        SceneDiskWatch::render(ctx);
 
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)
@@ -1334,21 +1371,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// this from inside a menu, whose ID stack is not the popup's.
 	auto openProjectAt = [&](const std::string& chosen)
 	{
-		const bool switching = ctx.projectLoaded;
-		if (switching) EditorUI::endProjectSession(ctx);
-		if (ctx.projectManager->loadProject(chosen))
-		{
-			ctx.globalState->addKnownProject(chosen);
-			ctx.globalState->writeConfig();
-			ctx.contentRefreshPending = true;
-			ctx.projectLoaded = true;
-		}
-		else
-		{
-			if (switching) ctx.projectLoaded = false;   // the old one is gone
-			ctx.hubOpenError = "Failed to load project file.";
-			s_openProjectErrorPopup = true;
-		}
+		// The engine-content check runs first, with the current project still open; the
+		// session ends and the new project loads when it clears (ProjectPreflight::openNow,
+		// which reports a failure on the hub the editor falls back to).
+		ProjectPreflight::request(ctx, chosen);
 	};
 	auto triggerOpenProject = [&]()
 	{
@@ -1536,6 +1562,42 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// Open Project does, unsaved-work prompt and session teardown included.
 	if (std::string cloned; GitCloneDialog::takeOpenRequest(cloned))
 		requestGuarded(GuardedAction::OpenProjectPath, cloned);
+
+	// A .heproj double-clicked in the file manager while a project is open
+	// (ProjectLaunchOpen.h): the same door as File ▸ Open Project. It waits in its
+	// slot while any popup is up — above all the unsaved-changes prompt, whose
+	// pending action it would otherwise overwrite under the user's cursor.
+	// Said once per wait, naming the dialog: a project that was double-clicked
+	// and then "did nothing" is otherwise waiting behind a dialog nobody noticed.
+	static bool s_launchWaitLogged = false;
+	if (ProjectLaunchOpen::pending() &&
+	    ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+	{
+		if (!s_launchWaitLogged)
+		{
+			const ImGuiContext& g = *ImGui::GetCurrentContext();
+			const ImGuiWindow* top = g.OpenPopupStack.empty() ? nullptr
+			                                                  : g.OpenPopupStack.back().Window;
+			HE_LOG_INFO(Editor, "Editor: a project handed over by the system waits until the "
+			                    "open dialog is closed (%s)", top ? top->Name : "a popup");
+			s_launchWaitLogged = true;
+		}
+	}
+	else if (ProjectLaunchOpen::pending())
+	{
+		s_launchWaitLogged = false;
+		std::string launched;
+		ProjectLaunchOpen::take(launched);
+		const std::string& current = ctx.projectManager->currentProject().path;
+		if (ProjectLaunchOpen::decide(ctx.projectLoaded, current, launched) ==
+		    ProjectLaunchOpen::Action::AlreadyOpen)
+			HE_LOG_INFO(Editor, "Editor: %s is already the open project", launched.c_str());
+		else
+		{
+			HE_LOG_INFO(Editor, "Editor: opening %s (handed over by the system)", launched.c_str());
+			requestGuarded(GuardedAction::OpenProjectPath, launched);
+		}
+	}
 
 	// ── Menu actions shared by the ImGui menu bar and the macOS native menu ────
 	// Open (or focus) the Level Script / Game Instance as editor tabs.
@@ -1827,6 +1889,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			// native module — the native menu has no per-language gate, so the
 			// row is always live and the answer comes from the action.
 			case MC::BuildGameLogic:  GameLogicBuildPanel::start(ctx);                       break;
+			case MC::ShowBuildLog:    BuildProgressDialog::requestOpen();                    break;
 			case MC::SetViewMode:
 			{
 				const int m = MacMenuBar::arg() - 1;
@@ -2198,6 +2261,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("Export Project..."))
 			openExportDialog();
+		// The last run's rings and per-step logs — what the Build window shows,
+		// reopened after it was closed. Greyed until something has been built.
+		if (EditorWidgets::menuItem("Show Last Build Log", nullptr, false,
+		                            BuildProgressDialog::snapshot().hasRun))
+			BuildProgressDialog::requestOpen();
 		ImGui::EndMenu();
 	}
 	// ── View: how the Scene window draws ────────────────────────────────────

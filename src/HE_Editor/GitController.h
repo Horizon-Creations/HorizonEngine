@@ -52,7 +52,23 @@ public:
 	// mayModify() is enforced HERE, once, so no caller can forget it. The panel
 	// additionally hides the buttons and explains why.
 	void requestInit(bool lfsAvailable);
-	void requestCommitAll(const std::string& message);
+	// `forcePush`: push after this commit even with auto-push off ("Commit & Push").
+	void requestCommitAll(const std::string& message, bool forcePush = false);
+	// ── Per-file operations (Source Control panel) ───────────────────────────
+	// Paths are repository-relative, the keys of status().files.
+	void requestStage(std::vector<std::string> paths);
+	void requestUnstage(std::vector<std::string> paths);
+	// Irreversible - the panel confirms first.
+	void requestDiscard(std::vector<std::string> paths);
+	// Commit only what is staged. `push` also pushes (where there is a remote);
+	// `amend` rewrites the last commit instead of adding one.
+	void requestCommitStaged(const std::string& message, bool push, bool amend);
+	void requestResolveConflict(const std::string& path, bool keepMine);
+	// Switch the checked-out branch. `stashFirst` parks local changes in a stash.
+	void requestSwitchBranch(const std::string& name, bool stashFirst);
+	void requestStashPop();
+	// Read-only (also allowed for a collaboration guest): the files a commit touched.
+	void requestCommitFiles(const std::string& commit);
 	// An empty token uses the GitHub sign-in (see GitService::requestSetupGitHub);
 	// the editor always passes an empty one, it has no token field any more.
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate, std::string token);
@@ -154,12 +170,21 @@ public:
 	bool                     isRepo() const { return m_service.isRepo(); }
 	const HE::Sc::RepoStatus& status() const { return m_service.status(); }
 	bool                     busy()   const { return m_service.busy(); }
+	// Something the user asked for is under way (see GitService::busyWithWork). The panels
+	// disable their buttons on this, not on busy(): a status refresh is not a reason to.
+	bool                     busyWithWork() const { return m_service.busyWithWork(); }
 	const std::string&       lastError() const { return m_service.lastError(); }
 	const std::vector<HE::Sc::GitCli::CommitInfo>& recentCommits() const
 	{
 		return m_service.recentCommits();
 	}
 	const std::vector<std::string>& branches() const { return m_service.branches(); }
+	const std::vector<std::string>& remoteBranches() const { return m_service.remoteBranches(); }
+	const std::vector<std::string>& stashes() const { return m_service.stashes(); }
+	const std::vector<HE::Sc::GitCli::ChangedFile>* commitFiles(const std::string& commit) const
+	{
+		return m_service.commitFiles(commit);
+	}
 	const std::filesystem::path& projectRoot() const { return m_projectRoot; }
 
 	// Status for a file given its ABSOLUTE path, which is what the Content
@@ -188,6 +213,10 @@ public:
 	bool blockedByCollabSession() const;
 
 private:
+	// Posts a notification when the service reports an error it has not reported yet.
+	void reportNewError();
+	std::string m_notifiedError;
+
 	// Absolute → repository-relative with forward slashes, or empty when outside.
 	std::string toRepoRelative(const std::string& absolutePath) const;
 

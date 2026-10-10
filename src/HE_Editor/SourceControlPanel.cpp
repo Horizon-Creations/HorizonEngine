@@ -6,6 +6,8 @@
 #include "EditorHelp.h"        // "Source Control Panel/<label>" scope for the tooltips
 #include "EditorWidgets.h"     // primary/danger/cancel buttons
 #include "GitController.h"
+#include "ContentBrowserPanel.h"   // revealAsset: a changed file, shown in the Content Browser
+#include "EditorAssetTypeCache.h" // asset type of a .hasset, for the type icon and filter
 
 #include <Diagnostics/GlobalState.h>
 #include <SourceControl/GitCli.h>
@@ -15,8 +17,12 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -32,7 +38,7 @@ namespace {
 
 // Panel-local input state. A commit message is short-lived by design. (Repo
 // init and remote/GitHub setup live in Preferences ▸ Editor ▸ Source Control now.)
-char s_commitMessage[512] = "";
+char s_commitMessage[2048] = "";
 bool s_prefsLoaded        = false;
 
 // The settings the CONTROLLER acts on but the Preferences page owns: auto-push
@@ -57,7 +63,7 @@ void ensureSettingsLoaded(GitController& git)
 // Changes as a folder tree (VS Code's tree mode) or a flat list. Persisted.
 bool s_treeView       = true;
 bool s_treeViewLoaded = false;
-bool s_historyOpen    = true;
+bool s_wantBranchesTab = false;   // "Manage branches…" in the branch popup
 // Restore confirmation. Destructive enough to deserve a modal that states what
 // will happen in full before it happens.
 std::string s_restoreOid;
@@ -146,75 +152,523 @@ bool modalButtonRow(const char* confirmLabel, const char* cancelLabel,
 	return confirmed;
 }
 
-struct Row
+// ── What the Changes tab shows ───────────────────────────────────────────────
+// Rows are grouped by what kind of asset they are, not just by git state: a freshly
+// imported texture set adds dozens of "untracked" rows, and the two scene edits the
+// user actually cares about vanish between them. The category comes from the file
+// (extension, or the HAsset header for .hasset) and drives the type icon and the
+// filter chips.
+enum class Cat : int { Scene, Material, Texture, Mesh, Code, Audio, Other, Count };
+constexpr int kCatCount = static_cast<int>(Cat::Count);
+
+const char* catName(Cat c)
 {
-	const std::string*      path  = nullptr;
-	const HE::Sc::FileEntry* entry = nullptr;
+	switch (c)
+	{
+	case Cat::Scene:    return "Scenes";
+	case Cat::Material: return "Materials";
+	case Cat::Texture:  return "Textures";
+	case Cat::Mesh:     return "Meshes";
+	case Cat::Code:     return "Code";
+	case Cat::Audio:    return "Audio";
+	case Cat::Other:
+	case Cat::Count:    break;
+	}
+	return "Other";
+}
+
+const char* catLetter(Cat c)
+{
+	switch (c)
+	{
+	case Cat::Scene:    return "S";
+	case Cat::Material: return "M";
+	case Cat::Texture:  return "T";
+	case Cat::Mesh:     return "G";
+	case Cat::Code:     return "C";
+	case Cat::Audio:    return "A";
+	case Cat::Other:
+	case Cat::Count:    break;
+	}
+	return "·";
+}
+
+ImU32 catColour(Cat c)
+{
+	switch (c)
+	{
+	case Cat::Scene:    return IM_COL32(106,  90, 214, 255);
+	case Cat::Material: return IM_COL32(194,  90, 138, 255);
+	case Cat::Texture:  return IM_COL32( 58, 155, 143, 255);
+	case Cat::Mesh:     return IM_COL32(199, 138,  44, 255);
+	case Cat::Code:     return IM_COL32( 74, 120, 201, 255);
+	case Cat::Audio:    return IM_COL32(150, 110, 190, 255);
+	case Cat::Other:
+	case Cat::Count:    break;
+	}
+	return IM_COL32(123, 132, 152, 255);
+}
+
+std::string lowerCopy(std::string s)
+{
+	for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+	return s;
+}
+
+Cat categoryOf(const std::string& absPath, const std::string& rel)
+{
+	const std::size_t dot = rel.rfind('.');
+	const std::string ext = dot == std::string::npos ? std::string{} : lowerCopy(rel.substr(dot));
+	if (ext == ".hescene") return Cat::Scene;
+	if (ext == ".hasset")
+	{
+		switch (EditorAssetTypeCache::assetTypeOf(absPath))
+		{
+		case HE::AssetType::StaticMesh:
+		case HE::AssetType::SkeletalMesh:      return Cat::Mesh;
+		case HE::AssetType::Texture:           return Cat::Texture;
+		case HE::AssetType::Material:
+		case HE::AssetType::MaterialFunction:  return Cat::Material;
+		case HE::AssetType::Scene:             return Cat::Scene;
+		case HE::AssetType::Script:
+		case HE::AssetType::HorizonCodeClass:  return Cat::Code;
+		case HE::AssetType::Audio:             return Cat::Audio;
+		default:                               return Cat::Other;
+		}
+	}
+	static const char* const kCode[]    = { ".hcode", ".cpp", ".h", ".hpp", ".c", ".cc", ".lua", ".py", ".cs" };
+	static const char* const kTexture[] = { ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".exr", ".hdr", ".tif", ".tiff", ".psd" };
+	static const char* const kMesh[]    = { ".fbx", ".gltf", ".glb", ".obj", ".dae", ".blend" };
+	static const char* const kAudio[]   = { ".wav", ".ogg", ".mp3", ".flac" };
+	auto in = [&](const char* const* list, std::size_t n) {
+		for (std::size_t i = 0; i < n; ++i) if (ext == list[i]) return true;
+		return false;
+	};
+	if (in(kCode,    sizeof(kCode)    / sizeof(kCode[0])))    return Cat::Code;
+	if (in(kTexture, sizeof(kTexture) / sizeof(kTexture[0]))) return Cat::Texture;
+	if (in(kMesh,    sizeof(kMesh)    / sizeof(kMesh[0])))    return Cat::Mesh;
+	if (in(kAudio,   sizeof(kAudio)   / sizeof(kAudio[0])))   return Cat::Audio;
+	return Cat::Other;
+}
+
+struct ChangeRow
+{
+	std::string        path;        // repository-relative, as git keys it
+	std::string        name;        // last component
+	std::string        dir;         // everything before it, with the trailing slash
+	std::string        origPath;    // renames
+	HE::Sc::FileState  state = HE::Sc::FileState::Modified;   // the state THIS section shows
+	Cat                cat   = Cat::Other;
 };
 
-// One line for one file: coloured state letter + name, full path on hover.
-void drawFileRow(const Row& r, bool useIndexState, const char* label)
+// The status, regrouped for drawing. Rebuilt only when the status snapshot, the
+// filter or the search changes: the lists are sorted and filtered, and the Content
+// Browser's cached asset-type lookups are cheap but not free on thousands of rows.
+struct Model
 {
-	const HE::Sc::FileState s = useIndexState ? r.entry->index : r.entry->worktree;
-	ImGui::TextColored(colourFor(s), "%s", letterFor(s));
-	ImGui::SameLine();
-	ImGui::TextUnformatted(label);
-	if (ImGui::IsItemHovered())
+	std::vector<ChangeRow> conflicts, staged, unstaged, untracked;
+	int         catCounts[kCatCount] = {};
+	std::size_t total       = 0;     // every dirty file, whatever the filter hides
+	std::size_t stagedTotal = 0;
+	std::string root;
+
+	const void*   source     = nullptr;
+	std::uint64_t generation = ~0ull;
+	int           filter     = -2;
+	std::string   search;
+};
+
+Model s_model;
+int   s_filter = -1;                 // a Cat, or -1 for all
+char  s_search[96] = "";
+bool  s_sectionOpen[4] = { true, true, true, true };   // conflicts, staged, changes, new
+
+void rebuildModel(const HE::Sc::RepoStatus& st)
+{
+	using FS = HE::Sc::FileState;
+	Model m;
+	m.source     = &st;
+	m.generation = st.generation;
+	m.filter     = s_filter;
+	m.search     = s_search;
+	m.root       = st.root;
+	const std::string needle = lowerCopy(s_search);
+
+	for (const auto& [path, e] : st.files)
 	{
-		// The tooltip that answers "which file is this really" — so it is a full
-		// path, and for a rename, two of them. Left to SetTooltip that is one
-		// unbroken line, and a tooltip is as wide as its longest line: a box
-		// reaching across the editor to say one path, which is the look this pass
-		// is here to stop. Wrapped at a fixed column because a tooltip has no
-		// width of its own to wrap against — it is whatever its contents made it.
-		// Asked as a question, because imgui.h says so in as many words: EndTooltip
-		// is only to be called when BeginTooltip returned true.
-		if (ImGui::BeginTooltip())
+		if (!e.dirty()) continue;            // ignored files are not changes
+		const std::string abs = st.root + "/" + path;
+		const Cat cat = categoryOf(abs, path);
+		++m.catCounts[static_cast<int>(cat)];
+		++m.total;
+		if (e.staged()) ++m.stagedTotal;
+		if (s_filter >= 0 && static_cast<int>(cat) != s_filter) continue;
+		if (!needle.empty() && lowerCopy(path).find(needle) == std::string::npos) continue;
+
+		ChangeRow r;
+		r.path     = path;
+		r.origPath = e.origPath;
+		r.cat      = cat;
+		const std::size_t slash = path.rfind('/');
+		r.name = slash == std::string::npos ? path : path.substr(slash + 1);
+		r.dir  = slash == std::string::npos ? std::string{} : path.substr(0, slash + 1);
+
+		auto add = [&](std::vector<ChangeRow>& into, FS state) { r.state = state; into.push_back(r); };
+		if (e.conflicted())                 add(m.conflicts, FS::Conflicted);
+		else if (e.worktree == FS::Untracked) add(m.untracked, FS::Untracked);
+		else
+		{
+			if (e.staged()) add(m.staged, e.index);
+			if (e.worktree != FS::Unmodified && e.worktree != FS::Ignored) add(m.unstaged, e.worktree);
+		}
+	}
+	auto byPath = [](const ChangeRow& a, const ChangeRow& b) { return a.path < b.path; };
+	std::sort(m.conflicts.begin(), m.conflicts.end(), byPath);
+	std::sort(m.staged.begin(),    m.staged.end(),    byPath);
+	std::sort(m.unstaged.begin(),  m.unstaged.end(),  byPath);
+	std::sort(m.untracked.begin(), m.untracked.end(), byPath);
+	s_model = std::move(m);
+}
+
+const Model& modelFor(const HE::Sc::RepoStatus& st)
+{
+	if (s_model.source != &st || s_model.generation != st.generation ||
+	    s_model.filter != s_filter || s_model.search != s_search)
+		rebuildModel(st);
+	return s_model;
+}
+
+// ── Dialog state for the destructive / branching actions ─────────────────────
+std::vector<std::string> s_discardPaths;     // non-empty = the confirm dialog is up
+std::string              s_discardHeadline;
+std::vector<std::string> s_discardSample;    // a few names, so the dialog is concrete
+bool                     s_discardHasNew = false;
+
+std::string s_switchTarget;                  // non-empty = the "you have changes" dialog is up
+
+void askDiscard(const std::vector<ChangeRow>& rows, const std::string& headline)
+{
+	s_discardPaths.clear();
+	s_discardSample.clear();
+	s_discardHasNew = false;
+	for (const ChangeRow& r : rows)
+	{
+		s_discardPaths.push_back(r.path);
+		if (s_discardSample.size() < 8) s_discardSample.push_back(r.path);
+		if (r.state == HE::Sc::FileState::Untracked || r.state == HE::Sc::FileState::Added)
+			s_discardHasNew = true;
+	}
+	s_discardHeadline = headline;
+}
+
+// Switching replaces the working tree, so with local changes it asks first. A clean
+// project switches at once.
+void beginSwitch(GitController& git, const HE::Sc::RepoStatus& st, const std::string& name)
+{
+	if (name.empty() || name == st.branch) return;
+	if (st.dirtyCount() == 0) git.requestSwitchBranch(name, /*stashFirst=*/false);
+	else s_switchTarget = name;
+}
+
+// ── Small drawing helpers ────────────────────────────────────────────────────
+// A text button without a frame: the label, a rounded wash on hover. Drawn at the
+// cursor, which it advances past itself. Used for the actions that live INSIDE
+// rows and section headers, where a framed button per row would drown the list.
+bool inlineButton(const char* id, const char* label, ImU32 colour, const char* helpKey)
+{
+	const ImVec2 ts = ImGui::CalcTextSize(label);
+	const ImVec2 sz(ts.x + 10.0f, ImGui::GetFrameHeight());
+	const ImVec2 p  = ImGui::GetCursorScreenPos();
+	const bool clicked = ImGui::InvisibleButton(id, sz);
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	if (ImGui::IsItemHovered())
+		dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), IM_COL32(255, 255, 255, 28), 4.0f);
+	dl->AddText(ImVec2(p.x + 5.0f, p.y + (sz.y - ts.y) * 0.5f), colour, label);
+	if (helpKey) EditorWidgets::helpForKey(helpKey);
+	return clicked;
+}
+
+struct RowResult
+{
+	bool toggle  = false;     // stage or unstage, depending on the section
+	bool discard = false;
+	bool reveal  = false;
+	int  resolve = 0;         // conflicts: 1 = keep mine, 2 = take theirs
+};
+
+enum class RowKind { Conflict, Staged, Unstaged, Untracked };
+
+// One file. Layout, left to right:
+//   [ ☐ ] [ T ] name  folder/…………………………  (hover: ⌖ ⌫)  M
+// The whole row is a Selectable (hover wash, double-click) and everything on it is
+// drawn over it and hit-tested with InvisibleButtons that overlap it, so a click on
+// the checkbox is a click on the checkbox and not also on the row.
+RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite,
+                  const std::string& root)
+{
+	namespace T = EditorToolbar;
+	RowResult res;
+	ImGui::PushID(static_cast<int>(kind));
+	ImGui::PushID(r.path.c_str());
+
+	ImDrawList*  dl = ImGui::GetWindowDrawList();
+	const float  h  = ImGui::GetFrameHeight();
+	const ImVec2 p  = ImGui::GetCursorScreenPos();
+	const float  w  = ImGui::GetContentRegionAvail().x;
+	const ImVec2 pmax(p.x + w, p.y + h);
+	const float  pad = ImGui::GetStyle().FramePadding.x;
+
+	ImGui::SetNextItemAllowOverlap();
+	ImGui::Selectable("##row", false, ImGuiSelectableFlags_AllowOverlap, ImVec2(w, h));
+	const bool rowHovered = ImGui::IsMouseHoveringRect(p, pmax) &&
+	                        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+	const bool doubleClicked = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+	bool overButton = false;
+
+	const ImU32 textCol = ImGui::GetColorU32(ImGuiCol_Text);
+	const ImU32 dimCol  = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+	const float cy      = p.y + h * 0.5f;
+	float x = p.x + pad;
+
+	// ── Checkbox ─────────────────────────────────────────────────────────────
+	if (mayWrite && kind != RowKind::Conflict)
+	{
+		const bool checked = kind == RowKind::Staged;
+		ImGui::SetCursorScreenPos(ImVec2(x, p.y));
+		if (ImGui::InvisibleButton("##chk", ImVec2(h, h))) res.toggle = true;
+		if (ImGui::IsItemHovered()) overButton = true;
+		EditorWidgets::helpForKey(checked ? "sc.row.unstage" : "sc.row.stage");
+		const float b = h * 0.56f;
+		const ImVec2 a(x + (h - b) * 0.5f, cy - b * 0.5f);
+		const ImVec2 z(a.x + b, a.y + b);
+		if (checked)
+		{
+			dl->AddRectFilled(a, z, ImGui::GetColorU32(ImGuiCol_CheckMark), 3.0f);
+			T::iconCheck(dl, ImVec2(x + h * 0.5f, cy), h * 0.8f, IM_COL32(255, 255, 255, 255));
+		}
+		else
+		{
+			dl->AddRect(a, z, ImGui::IsItemHovered() ? textCol : dimCol, 3.0f, 0, 1.5f);
+		}
+		x += h;
+	}
+	else
+	{
+		x += 4.0f;
+	}
+
+	// ── Type icon ────────────────────────────────────────────────────────────
+	{
+		const float s = h * 0.66f;
+		const ImVec2 a(x, cy - s * 0.5f);
+		dl->AddRectFilled(a, ImVec2(a.x + s, a.y + s), catColour(r.cat), 3.0f);
+		const char* letter = catLetter(r.cat);
+		const float fs = ImGui::GetFontSize() * 0.74f;
+		const ImVec2 ls = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, letter);
+		dl->AddText(ImGui::GetFont(), fs, ImVec2(a.x + (s - ls.x) * 0.5f, a.y + (s - ls.y) * 0.5f),
+		            IM_COL32(255, 255, 255, 255), letter);
+		x += s + 6.0f;
+	}
+
+	// ── Right edge: state letter, then the hover actions to its left ─────────
+	const ImVec4 stateCol = colourFor(r.state);
+	const char*  letter   = letterFor(r.state);
+	const float  letterW  = ImGui::CalcTextSize(letter).x;
+	float rightEdge = pmax.x - pad - letterW;
+	dl->AddText(ImVec2(rightEdge, cy - ImGui::GetTextLineHeight() * 0.5f),
+	            ImGui::GetColorU32(stateCol), letter);
+	rightEdge -= 6.0f;
+
+	if (r.state == HE::Sc::FileState::Conflicted)
+	{
+		if (mayWrite)
+		{
+			const float bw = ImGui::CalcTextSize("theirs").x + 10.0f;
+			const float mw = ImGui::CalcTextSize("mine").x + 10.0f;
+			ImGui::SetCursorScreenPos(ImVec2(rightEdge - bw, p.y));
+			if (inlineButton("##theirs", "theirs", IM_COL32(240, 190, 90, 255), "sc.row.theirs")) res.resolve = 2;
+			if (ImGui::IsItemHovered()) overButton = true;
+			ImGui::SetCursorScreenPos(ImVec2(rightEdge - bw - mw, p.y));
+			if (inlineButton("##mine", "mine", IM_COL32(240, 190, 90, 255), "sc.row.mine")) res.resolve = 1;
+			if (ImGui::IsItemHovered()) overButton = true;
+			rightEdge -= bw + mw + 4.0f;
+		}
+	}
+	else if (rowHovered && mayWrite)
+	{
+		// Icon cells, each as wide as the row is tall.
+		auto cell = [&](const char* id, void (*icon)(ImDrawList*, const ImVec2&, float, ImU32),
+		                ImU32 col, const char* helpKey) {
+			rightEdge -= h;
+			ImGui::SetCursorScreenPos(ImVec2(rightEdge, p.y));
+			const bool clicked = ImGui::InvisibleButton(id, ImVec2(h, h));
+			const bool hov = ImGui::IsItemHovered();
+			if (hov) { overButton = true; dl->AddRectFilled(ImVec2(rightEdge, p.y + 1), ImVec2(rightEdge + h, pmax.y - 1),
+			                                                 IM_COL32(255, 255, 255, 30), 4.0f); }
+			icon(dl, ImVec2(rightEdge + h * 0.5f, cy), h * 0.74f, hov ? col : dimCol);
+			EditorWidgets::helpForKey(helpKey);
+			return clicked;
+		};
+		if (cell("##discard", T::iconTrash, IM_COL32(240, 110, 100, 255),
+		         kind == RowKind::Untracked ? "sc.row.delete" : "sc.row.discard"))
+			res.discard = true;
+	}
+	if (rowHovered && r.state != HE::Sc::FileState::Deleted && r.state != HE::Sc::FileState::Conflicted)
+	{
+		auto cell = [&](const char* id, void (*icon)(ImDrawList*, const ImVec2&, float, ImU32),
+		                const char* helpKey) {
+			rightEdge -= h;
+			ImGui::SetCursorScreenPos(ImVec2(rightEdge, p.y));
+			const bool clicked = ImGui::InvisibleButton(id, ImVec2(h, h));
+			const bool hov = ImGui::IsItemHovered();
+			if (hov) { overButton = true; dl->AddRectFilled(ImVec2(rightEdge, p.y + 1), ImVec2(rightEdge + h, pmax.y - 1),
+			                                                 IM_COL32(255, 255, 255, 30), 4.0f); }
+			icon(dl, ImVec2(rightEdge + h * 0.5f, cy), h * 0.74f, hov ? textCol : dimCol);
+			EditorWidgets::helpForKey(helpKey);
+			return clicked;
+		};
+		if (cell("##reveal", T::iconFolder, "sc.row.reveal")) res.reveal = true;
+	}
+
+	// ── Name and folder ──────────────────────────────────────────────────────
+	const ImVec2 nameSize = ImGui::CalcTextSize(r.name.c_str());
+	const float  ty = cy - nameSize.y * 0.5f;
+	const float  textRight = rightEdge - 4.0f;
+	dl->PushClipRect(ImVec2(x, p.y), ImVec2(std::max(x, textRight), pmax.y), true);
+	dl->AddText(ImVec2(x, ty), textCol, r.name.c_str());
+	if (r.state == HE::Sc::FileState::Deleted)
+		dl->AddLine(ImVec2(x, cy), ImVec2(x + nameSize.x, cy), dimCol, 1.0f);
+	if (showDir && !r.dir.empty())
+		dl->AddText(ImVec2(x + nameSize.x + 8.0f, ty), dimCol, r.dir.c_str());
+	dl->PopClipRect();
+
+	// ── Double-click reveals, hovering for a moment names the file in full ────
+	if (doubleClicked && !overButton && r.state != HE::Sc::FileState::Deleted) res.reveal = true;
+
+	static std::uint32_t s_hoverId   = 0;
+	static double        s_hoverFrom = 0.0;
+	const std::uint32_t myId = ImGui::GetID("##tip");
+	if (rowHovered && !overButton)
+	{
+		if (s_hoverId != myId) { s_hoverId = myId; s_hoverFrom = ImGui::GetTime(); }
+		if (ImGui::GetTime() - s_hoverFrom > 0.45 && ImGui::BeginTooltip())
 		{
 			{
 				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-				if (!r.entry->origPath.empty())
-					ImGui::Text("%s\nrenamed from %s", r.path->c_str(),
-					            r.entry->origPath.c_str());
+				if (!r.origPath.empty())
+					ImGui::Text("%s\nrenamed from %s", r.path.c_str(), r.origPath.c_str());
 				else
-					ImGui::TextUnformatted(r.path->c_str());
+					ImGui::TextUnformatted(r.path.c_str());
 			}
 			ImGui::EndTooltip();
 		}
 	}
+	else if (s_hoverId == myId)
+	{
+		s_hoverId = 0;
+	}
+	(void)root;
+
+	// The selectable already moved the cursor on; the buttons moved it around. Put it
+	// back and let one item of the row's size account for the line.
+	ImGui::SetCursorScreenPos(p);
+	ImGui::Dummy(ImVec2(w, h));
+	ImGui::PopID();
+	ImGui::PopID();
+	return res;
 }
 
-// The folder hierarchy of one section's rows, built per frame from the sorted
-// row list. Cheap: dirty sets are small (tens, rarely hundreds), and building
-// on the fly means no cache to invalidate against status generations.
+// A section heading: fold arrow, title, count, and up to two actions on the right.
+enum class Bulk { None, Primary, Secondary };
+
+Bulk drawSectionHeader(const char* title, std::size_t count, bool& open, bool showActions,
+                       const char* primaryLabel, const char* primaryKey,
+                       const char* secondaryLabel, const char* secondaryKey)
+{
+	Bulk result = Bulk::None;
+	ImGui::PushID(title);
+	ImDrawList*  dl = ImGui::GetWindowDrawList();
+	const float  h  = ImGui::GetFrameHeight();
+	const ImVec2 p  = ImGui::GetCursorScreenPos();
+	const float  w  = ImGui::GetContentRegionAvail().x;
+	const ImVec2 pmax(p.x + w, p.y + h);
+
+	dl->AddRectFilled(p, pmax, ImGui::GetColorU32(ImGuiCol_Header, 0.45f), 3.0f);
+	ImGui::SetNextItemAllowOverlap();
+	if (ImGui::Selectable("##sec", false, ImGuiSelectableFlags_AllowOverlap, ImVec2(w, h)))
+		open = !open;
+
+	const ImU32 dimCol = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+	const float cy = p.y + h * 0.5f;
+	// Fold arrow
+	{
+		const float a = h * 0.16f;
+		const float ax = p.x + h * 0.5f;
+		if (open) dl->AddTriangleFilled(ImVec2(ax - a, cy - a * 0.6f), ImVec2(ax + a, cy - a * 0.6f), ImVec2(ax, cy + a), dimCol);
+		else      dl->AddTriangleFilled(ImVec2(ax - a * 0.6f, cy - a), ImVec2(ax - a * 0.6f, cy + a), ImVec2(ax + a, cy), dimCol);
+	}
+	float x = p.x + h;
+	dl->AddText(ImVec2(x, cy - ImGui::GetTextLineHeight() * 0.5f), ImGui::GetColorU32(ImGuiCol_Text), title);
+	x += ImGui::CalcTextSize(title).x + 8.0f;
+	{
+		char n[24];
+		std::snprintf(n, sizeof(n), "%zu", count);
+		const ImVec2 ns = ImGui::CalcTextSize(n);
+		dl->AddRectFilled(ImVec2(x, cy - ns.y * 0.5f - 1), ImVec2(x + ns.x + 10.0f, cy + ns.y * 0.5f + 1),
+		                  IM_COL32(128, 136, 156, 70), 8.0f);
+		dl->AddText(ImVec2(x + 5.0f, cy - ns.y * 0.5f), ImGui::GetColorU32(ImGuiCol_Text), n);
+	}
+
+	if (showActions)
+	{
+		float rx = pmax.x - 2.0f;
+		if (secondaryLabel)
+		{
+			const float bw = ImGui::CalcTextSize(secondaryLabel).x + 10.0f;
+			rx -= bw;
+			ImGui::SetCursorScreenPos(ImVec2(rx, p.y));
+			if (inlineButton("##secondary", secondaryLabel, IM_COL32(240, 110, 100, 255), secondaryKey))
+				result = Bulk::Secondary;
+		}
+		if (primaryLabel)
+		{
+			const float bw = ImGui::CalcTextSize(primaryLabel).x + 10.0f;
+			rx -= bw;
+			ImGui::SetCursorScreenPos(ImVec2(rx, p.y));
+			if (inlineButton("##primary", primaryLabel, ImGui::GetColorU32(ImGuiCol_Text), primaryKey))
+				result = Bulk::Primary;
+		}
+	}
+	ImGui::SetCursorScreenPos(p);
+	ImGui::Dummy(ImVec2(w, h));
+	ImGui::PopID();
+	return result;
+}
+
 struct DirNode
 {
 	std::map<std::string, DirNode> dirs;
-	std::vector<std::pair<std::string, Row>> files;   // leaf name → row
+	std::vector<const ChangeRow*>  files;
 };
 
-void insertRow(DirNode& root, const Row& r)
+void insertRow(DirNode& root, const ChangeRow& r)
 {
 	DirNode* node = &root;
-	const std::string& p = *r.path;
 	std::size_t start = 0;
 	while (true)
 	{
-		const std::size_t slash = p.find('/', start);
-		if (slash == std::string::npos)
-		{
-			node->files.emplace_back(p.substr(start), r);
-			return;
-		}
-		node = &node->dirs[p.substr(start, slash - start)];
+		const std::size_t slash = r.path.find('/', start);
+		if (slash == std::string::npos) { node->files.push_back(&r); return; }
+		node = &node->dirs[r.path.substr(start, slash - start)];
 		start = slash + 1;
 	}
 }
 
-void drawDirNode(const std::string& name, const DirNode& node, bool useIndexState)
+template <class Fn>
+void drawDirNode(const std::string& name, const DirNode& node, Fn&& rowFn)
 {
-	// Compact single-child chains the way VS Code does: "Content/Meshes/Props"
-	// as one node instead of three nested ones with one child each.
+	// Single-child chains fold into one node ("Content/Meshes/Props"), the way VS Code
+	// does it.
 	const DirNode* n = &node;
 	std::string label = name;
 	while (n->files.empty() && n->dirs.size() == 1)
@@ -222,80 +676,504 @@ void drawDirNode(const std::string& name, const DirNode& node, bool useIndexStat
 		label += "/" + n->dirs.begin()->first;
 		n = &n->dirs.begin()->second;
 	}
-
 	ImGui::PushID(label.c_str());
-	if (ImGui::TreeNodeEx(label.c_str(),
-	                      ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
+	if (ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
 	{
-		for (const auto& [subName, sub] : n->dirs)
-			drawDirNode(subName, sub, useIndexState);
-		for (const auto& [leaf, row] : n->files)
-			drawFileRow(row, useIndexState, leaf.c_str());
+		for (const auto& [sub, child] : n->dirs) drawDirNode(sub, child, rowFn);
+		for (const ChangeRow* r : n->files) rowFn(*r);
 		ImGui::TreePop();
 	}
 	ImGui::PopID();
 }
 
-void drawRowsAsTree(const std::vector<Row>& rows, bool useIndexState)
+// One section's rows, as a tree or flat, with the results of every row gathered.
+template <class Fn>
+void drawRows(const std::vector<ChangeRow>& rows, Fn&& rowFn)
 {
-	DirNode root;
-	for (const Row& r : rows) insertRow(root, r);
-	for (const auto& [name, sub] : root.dirs)
-		drawDirNode(name, sub, useIndexState);
-	for (const auto& [leaf, row] : root.files)
-		drawFileRow(row, useIndexState, leaf.c_str());
+	if (s_treeView)
+	{
+		DirNode root;
+		for (const ChangeRow& r : rows) insertRow(root, r);
+		for (const auto& [name, sub] : root.dirs) drawDirNode(name, sub, rowFn);
+		for (const ChangeRow* r : root.files) rowFn(*r);
+	}
+	else
+	{
+		// Clipped: a freshly imported project can have thousands of untracked rows.
+		ImGuiListClipper clip;
+		clip.Begin(static_cast<int>(rows.size()), ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y);
+		while (clip.Step())
+			for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) rowFn(rows[static_cast<std::size_t>(i)]);
+	}
 }
 
-void drawChangeList(const HE::Sc::RepoStatus& st)
+std::vector<std::string> pathsOf(const std::vector<ChangeRow>& rows)
 {
-	std::vector<Row> conflicts, staged, unstaged, untracked;
-	for (const auto& [path, entry] : st.files)
+	std::vector<std::string> out;
+	out.reserve(rows.size());
+	for (const ChangeRow& r : rows) out.push_back(r.path);
+	return out;
+}
+
+// ── Commit box ───────────────────────────────────────────────────────────────
+void drawCommitBox(GitController& git, AppContext& ctx, const HE::Sc::RepoStatus& st, const Model& m)
+{
+	const bool identityOk = !ctx.gitProbe || ctx.gitProbe->identityConfigured;
+	if (!identityOk)
 	{
-		if (!entry.dirty()) continue;               // ignored files are not changes
-		if (entry.conflicted()) { conflicts.push_back({ &path, &entry }); continue; }
-		if (entry.worktree == HE::Sc::FileState::Untracked)
-		{
-			untracked.push_back({ &path, &entry });
-			continue;
-		}
-		if (entry.staged())                          staged.push_back({ &path, &entry });
-		if (entry.worktree != HE::Sc::FileState::Unmodified)
-			unstaged.push_back({ &path, &entry });
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+		ImGui::TextWrapped("git has no user.name / user.email configured — commits "
+		                   "will fail until they are set.");
+		ImGui::PopStyleColor();
 	}
 
-	auto byPath = [](const Row& a, const Row& b) { return *a.path < *b.path; };
-	std::sort(conflicts.begin(), conflicts.end(), byPath);
-	std::sort(staged.begin(),    staged.end(),    byPath);
-	std::sort(unstaged.begin(),  unstaged.end(),  byPath);
-	std::sort(untracked.begin(), untracked.end(), byPath);
-
-	auto section = [](const char* title, const std::vector<Row>& rows, bool useIndexState)
+	const float lineH = ImGui::GetTextLineHeight();
+	const ImVec2 boxPos = ImGui::GetCursorScreenPos();
+	ImGui::InputTextMultiline("##commitmsg", s_commitMessage, sizeof(s_commitMessage),
+	                          ImVec2(-FLT_MIN, lineH * 3.0f + ImGui::GetStyle().FramePadding.y * 2.0f));
+	if (s_commitMessage[0] == '\0' && !ImGui::IsItemActive())
 	{
-		if (rows.empty()) return;
-		ImGui::Spacing();
-		ImGui::SeparatorText(title);
-		// Sections share one ID scope, and the same folder legitimately shows up
-		// in more than one of them (Content/ both changed and untracked). Without
-		// a per-section scope those tree nodes collide on ID — they would fold
-		// and unfold together, and ImGui flags the conflict.
-		ImGui::PushID(title);
-		if (s_treeView)
+		ImGui::GetWindowDrawList()->AddText(
+			ImVec2(boxPos.x + ImGui::GetStyle().FramePadding.x, boxPos.y + ImGui::GetStyle().FramePadding.y),
+			ImGui::GetColorU32(ImGuiCol_TextDisabled), "Message for this commit");
+	}
+
+	const std::size_t dirty  = m.total;
+	const std::size_t staged = m.stagedTotal;
+	const bool conflicts = st.hasConflicts();
+	const bool hasMsg    = s_commitMessage[0] != '\0';
+	const bool hasRemote = !git.remoteUrl().empty();
+	const bool idle      = !git.busyWithWork();
+	const auto& commits  = git.recentCommits();
+	// A commit that is already on the remote is not rewritten from here: that is a
+	// force-push waiting to happen to whoever else pulled it.
+	const bool canAmend = !commits.empty() && !st.initialCommit && (commits.front().unpushed || !hasRemote);
+
+	const bool canCommit = idle && hasMsg && dirty > 0 && !conflicts;
+
+	char label[64];
+	if (dirty == 0)       std::snprintf(label, sizeof(label), "Nothing to commit");
+	else if (staged > 0)  std::snprintf(label, sizeof(label), "Commit %zu staged", staged);
+	else if (dirty == 1)  std::snprintf(label, sizeof(label), "Commit 1 change");
+	else                  std::snprintf(label, sizeof(label), "Commit all %zu changes", dirty);
+
+	const float arrowW = ImGui::GetFrameHeight();
+	const float mainW  = std::max(40.0f, ImGui::GetContentRegionAvail().x - arrowW - 2.0f);
+	ImGui::BeginDisabled(!canCommit);
+	if (EditorWidgets::primaryButton(label, ImVec2(mainW, 0.0f)))
+	{
+		// Staged files = exactly those. Nothing staged = everything, the way the button
+		// always worked, so the one-click habit costs nothing.
+		if (staged > 0) git.requestCommitStaged(s_commitMessage, git.autoPushAfterCommit, false);
+		else            git.requestCommitAll(s_commitMessage);
+		s_commitMessage[0] = '\0';
+	}
+	ImGui::EndDisabled();
+	EditorWidgets::helpForKey("sc.commit");
+	ImGui::SameLine(0.0f, 2.0f);
+	if (ImGui::ArrowButton("##commitmore", ImGuiDir_Down)) ImGui::OpenPopup("##commitMenu");
+	EditorWidgets::helpForKey("sc.commit.more");
+	if (ImGui::BeginPopup("##commitMenu"))
+	{
+		HE::Ed::Help::Scope helpScope("Source Control Panel");
+		if (EditorWidgets::menuItem("Commit & Push", nullptr, false,
+		                            canCommit && hasRemote))
 		{
-			drawRowsAsTree(rows, useIndexState);
+			if (staged > 0) git.requestCommitStaged(s_commitMessage, true, false);
+			else            git.requestCommitAll(s_commitMessage, /*forcePush=*/true);
+			s_commitMessage[0] = '\0';
+		}
+		if (EditorWidgets::menuItem("Commit everything (stage all first)", nullptr, false,
+		                            canCommit && staged > 0))
+		{
+			git.requestCommitAll(s_commitMessage);
+			s_commitMessage[0] = '\0';
+		}
+		if (EditorWidgets::menuItem("Amend last commit", nullptr, false,
+		                            idle && canAmend && !conflicts && (staged > 0 || hasMsg)))
+		{
+			git.requestCommitStaged(s_commitMessage, false, true);
+			s_commitMessage[0] = '\0';
+		}
+		ImGui::EndPopup();
+	}
+
+	// One quiet line saying why the button is not live, or what it will do.
+	if (conflicts)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+		ImGui::TextWrapped("Conflicts must be resolved before committing.");
+		ImGui::PopStyleColor();
+	}
+	else if (dirty > 0 && !hasMsg)
+	{
+		ImGui::TextDisabled("Write a message to commit.");
+	}
+	else if (dirty > 0 && staged == 0)
+	{
+		ImGui::TextDisabled("Nothing is staged, so this commits everything. Tick files to commit only those.");
+	}
+	else if (st.initialCommit && !hasRemote)
+	{
+		ImGui::TextDisabled("No remote yet — set one up in Preferences \xe2\x96\xb8 Source Control.");
+	}
+}
+
+// ── Filter chips and search ──────────────────────────────────────────────────
+void drawFilterBar(const Model& m)
+{
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	if (ImGui::InputTextWithHint("##scsearch", "Filter changes…", s_search, sizeof(s_search)))
+	{
+		// model rebuilds next draw: the cache key includes the text
+	}
+
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f, 1.0f));
+	bool first = true;
+	auto chip = [&](const char* name, int value, int count) {
+		char text[48];
+		if (count >= 0) std::snprintf(text, sizeof(text), "%s %d", name, count);
+		else            std::snprintf(text, sizeof(text), "%s", name);
+		const float w = ImGui::CalcTextSize(text).x + 16.0f;
+		if (!first)
+		{
+			if (ImGui::GetContentRegionAvail().x > w + 4.0f) ImGui::SameLine(0.0f, 4.0f);
+		}
+		first = false;
+		const bool on = s_filter == value;
+		if (on)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
 		}
 		else
 		{
-			for (const Row& r : rows) drawFileRow(r, useIndexState, r.path->c_str());
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+		}
+		if (ImGui::SmallButton(text)) s_filter = value;
+		ImGui::PopStyleColor(on ? 1 : 2);
+		EditorWidgets::helpForKey("sc.filter");
+	};
+	chip("All", -1, static_cast<int>(m.total));
+	for (int c = 0; c < kCatCount; ++c)
+		if (m.catCounts[c] > 0) chip(catName(static_cast<Cat>(c)), c, m.catCounts[c]);
+	ImGui::PopStyleVar(2);
+	// A filter whose category has emptied out would hide everything with no way to tell.
+	if (s_filter >= 0 && m.catCounts[s_filter] == 0) s_filter = -1;
+}
+
+// ── The Changes tab ──────────────────────────────────────────────────────────
+void drawChangesTab(GitController& git, AppContext& ctx, const HE::Sc::RepoStatus& st, bool mayWrite)
+{
+	const Model& m = modelFor(st);
+
+	if (mayWrite) drawCommitBox(git, ctx, st, m);
+	if (m.total > 0)
+	{
+		ImGui::Spacing();
+		drawFilterBar(m);
+	}
+
+	if (!ImGui::BeginChild("##changes", ImVec2(0.0f, 0.0f), false))
+	{
+		ImGui::EndChild();
+		return;
+	}
+	// Popped BEFORE EndChild: PopTextWrapPos acts on the current window, and by the
+	// time a scope-end destructor ran after EndChild that would be the parent.
+	std::optional<EditorWidgets::WrapText> wrap;
+	wrap.emplace();
+
+	if (m.total == 0)
+	{
+		ImGui::TextDisabled("Nothing has changed.");
+	}
+	else if (m.conflicts.empty() && m.staged.empty() && m.unstaged.empty() && m.untracked.empty())
+	{
+		ImGui::TextDisabled("No changes match the filter.");
+	}
+	else
+	{
+		const bool showDir = !s_treeView;
+		std::vector<std::string> toStage, toUnstage;
+
+		auto section = [&](int idx, const char* title, const std::vector<ChangeRow>& rows,
+		                   RowKind kind, const char* primaryLabel, const char* primaryKey,
+		                   const char* secondaryLabel, const char* secondaryKey) {
+			if (rows.empty()) return;
+			const Bulk b = drawSectionHeader(title, rows.size(), s_sectionOpen[idx], mayWrite,
+			                                 primaryLabel, primaryKey, secondaryLabel, secondaryKey);
+			if (b == Bulk::Primary)
+			{
+				auto paths = pathsOf(rows);
+				if (kind == RowKind::Staged) git.requestUnstage(std::move(paths));
+				else                         git.requestStage(std::move(paths));
+			}
+			else if (b == Bulk::Secondary)
+			{
+				askDiscard(rows, kind == RowKind::Untracked ? "Delete these new files?" : "Discard these changes?");
+			}
+			if (!s_sectionOpen[idx]) return;
+			ImGui::PushID(idx);
+			drawRows(rows, [&](const ChangeRow& r) {
+				const RowResult res = drawRow(r, kind, showDir, mayWrite, m.root);
+				if (res.toggle)
+				{
+					if (kind == RowKind::Staged) toUnstage.push_back(r.path);
+					else                         toStage.push_back(r.path);
+				}
+				if (res.discard)
+					askDiscard({ r }, kind == RowKind::Untracked ? "Delete this new file?" : "Discard this change?");
+				if (res.reveal) ContentBrowserPanel::revealAsset(m.root + "/" + r.path);
+				if (res.resolve != 0) git.requestResolveConflict(r.path, res.resolve == 1);
+			});
+			ImGui::PopID();
+			ImGui::Spacing();
+		};
+
+		// Conflicts first - they block a commit entirely, so burying them under a long
+		// list of ordinary changes would be exactly wrong.
+		section(0, "Conflicts", m.conflicts, RowKind::Conflict, nullptr, nullptr, nullptr, nullptr);
+		section(1, "Staged",    m.staged,    RowKind::Staged,   "Unstage all", "sc.unstage_all", nullptr, nullptr);
+		section(2, "Changes",   m.unstaged,  RowKind::Unstaged, "Stage all",   "sc.stage_all",   "Discard all", "sc.discard_all");
+		section(3, "New files", m.untracked, RowKind::Untracked,"Stage all",   "sc.stage_all",   "Delete all",  "sc.delete_all");
+
+		if (!toStage.empty())   git.requestStage(std::move(toStage));
+		if (!toUnstage.empty()) git.requestUnstage(std::move(toUnstage));
+	}
+	wrap.reset();
+	ImGui::EndChild();
+}
+
+// ── The History tab ──────────────────────────────────────────────────────────
+std::set<std::string> s_expandedCommits;
+
+void drawHistoryTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayWrite)
+{
+	if (!ImGui::BeginChild("##history", ImVec2(0.0f, 0.0f), false))
+	{
+		ImGui::EndChild();
+		return;
+	}
+	// Popped BEFORE EndChild: PopTextWrapPos acts on the current window, and by the
+	// time a scope-end destructor ran after EndChild that would be the parent.
+	std::optional<EditorWidgets::WrapText> wrap;
+	wrap.emplace();
+
+	const auto& commits = git.recentCommits();
+	if (commits.empty()) ImGui::TextDisabled("No commits yet.");
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const float gut = ImGui::GetFontSize() * 1.4f;
+	const float lineH = ImGui::GetTextLineHeight();
+	const ImU32 lineCol = ImGui::GetColorU32(ImGuiCol_Border);
+	const ImU32 dimCol  = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+
+	for (std::size_t i = 0; i < commits.size(); ++i)
+	{
+		const auto& c = commits[i];
+		ImGui::PushID(c.shortOid.c_str());
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		const float  w = ImGui::GetContentRegionAvail().x;
+		const float  rowH = lineH * 2.0f + 4.0f;
+		const bool expanded = s_expandedCommits.count(c.shortOid) != 0;
+
+		ImGui::SetNextItemAllowOverlap();
+		if (ImGui::Selectable("##commit", false, ImGuiSelectableFlags_AllowOverlap, ImVec2(w, rowH)))
+		{
+			if (expanded) s_expandedCommits.erase(c.shortOid);
+			else
+			{
+				s_expandedCommits.insert(c.shortOid);
+				if (!git.commitFiles(c.shortOid)) git.requestCommitFiles(c.shortOid);
+			}
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s — %s\n(click to list its files, right-click for more)", c.author.c_str(), c.relTime.c_str());
+
+		if (ImGui::BeginPopupContextItem("##commitctx"))
+		{
+			// Branching is non-destructive as long as it only writes a ref, so it
+			// stays available with a dirty tree - the dialog's "switch to it" is what
+			// the guard applies to.
+			ImGui::BeginDisabled(git.busyWithWork() || !mayWrite);
+			if (EditorWidgets::menuItem("Create branch from this commit…"))
+			{
+				s_branchFromOid     = c.shortOid;
+				s_branchFromSubject = c.subject;
+				s_branchName[0]     = '\0';
+				s_branchCheckout    = st.dirtyCount() == 0;
+				s_branchDialog      = true;
+			}
+			ImGui::EndDisabled();
+
+			ImGui::BeginDisabled(git.busyWithWork() || st.dirtyCount() != 0 || !mayWrite);
+			if (EditorWidgets::menuItem("Restore project to this commit…"))
+			{
+				s_restoreOid     = c.shortOid;
+				s_restoreSubject = c.subject;
+			}
+			ImGui::EndDisabled();
+			if (st.dirtyCount() != 0)
+			{
+				EditorWidgets::WrapText menuWrap(ImGui::GetFontSize() * 26.0f);
+				ImGui::TextDisabled("Restoring needs a clean project — commit or "
+				                    "discard your changes first.");
+			}
+			ImGui::EndPopup();
+		}
+
+		// Text over the selectable
+		const float tx = p.x + gut;
+		dl->PushClipRect(ImVec2(tx, p.y), ImVec2(p.x + w, p.y + rowH), true);
+		dl->AddText(ImVec2(tx, p.y + 2.0f), ImGui::GetColorU32(ImGuiCol_Text), c.subject.c_str());
+		char meta[256];
+		std::snprintf(meta, sizeof(meta), "%s · %s · %s", c.shortOid.c_str(), c.author.c_str(), c.relTime.c_str());
+		dl->AddText(ImVec2(tx, p.y + 2.0f + lineH), dimCol, meta);
+		if (c.unpushed)
+		{
+			const char* tag = "not pushed";
+			const float tw = ImGui::CalcTextSize(tag).x;
+			dl->AddText(ImVec2(p.x + w - tw - 6.0f, p.y + 2.0f), IM_COL32(110, 200, 140, 255), tag);
+		}
+		dl->PopClipRect();
+
+		// The files of an expanded commit, indented under it
+		if (expanded)
+		{
+			ImGui::Indent(gut + 6.0f);
+			if (const auto* files = git.commitFiles(c.shortOid))
+			{
+				constexpr std::size_t kShown = 200;
+				for (std::size_t f = 0; f < files->size() && f < kShown; ++f)
+				{
+					const auto& cf = (*files)[f];
+					const HE::Sc::FileState fs =
+						cf.state == 'A' ? HE::Sc::FileState::Added :
+						cf.state == 'D' ? HE::Sc::FileState::Deleted :
+						cf.state == 'R' ? HE::Sc::FileState::Renamed :
+						cf.state == 'C' ? HE::Sc::FileState::Copied :
+						cf.state == 'T' ? HE::Sc::FileState::TypeChanged : HE::Sc::FileState::Modified;
+					ImGui::TextColored(colourFor(fs), "%s", letterFor(fs));
+					ImGui::SameLine();
+					if (cf.origPath.empty()) ImGui::TextUnformatted(cf.path.c_str());
+					else ImGui::Text("%s ← %s", cf.path.c_str(), cf.origPath.c_str());
+				}
+				if (files->size() > kShown) ImGui::TextDisabled("… and %zu more", files->size() - kShown);
+				if (files->empty()) ImGui::TextDisabled("No files.");
+			}
+			else
+			{
+				ImGui::TextDisabled("Loading…");
+			}
+			ImGui::Unindent(gut + 6.0f);
+		}
+
+		// The strand: a line down the gutter, a dot per commit
+		const float y1 = ImGui::GetCursorScreenPos().y;
+		const float gx = p.x + gut * 0.5f;
+		const float dotY = p.y + 2.0f + lineH * 0.5f;
+		dl->AddLine(ImVec2(gx, i == 0 ? dotY : p.y), ImVec2(gx, y1), lineCol, 2.0f);
+		if (c.unpushed) dl->AddCircleFilled(ImVec2(gx, dotY), 4.5f, IM_COL32(110, 200, 140, 255));
+		else            dl->AddCircle(ImVec2(gx, dotY), 4.0f, ImGui::GetColorU32(ImGuiCol_CheckMark), 0, 2.0f);
+		ImGui::PopID();
+	}
+	wrap.reset();
+	ImGui::EndChild();
+}
+
+// ── The Branches tab ─────────────────────────────────────────────────────────
+void drawBranchesTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayWrite)
+{
+	if (!ImGui::BeginChild("##branches", ImVec2(0.0f, 0.0f), false))
+	{
+		ImGui::EndChild();
+		return;
+	}
+	// Popped BEFORE EndChild: PopTextWrapPos acts on the current window, and by the
+	// time a scope-end destructor ran after EndChild that would be the parent.
+	std::optional<EditorWidgets::WrapText> wrap;
+	wrap.emplace();
+	const bool idle = !git.busyWithWork();
+
+	ImGui::BeginDisabled(!(mayWrite && idle && !st.initialCommit));
+	if (EditorWidgets::button("New branch…"))
+	{
+		s_branchFromOid.clear();
+		s_branchFromSubject.clear();
+		s_branchName[0]  = '\0';
+		s_branchCheckout = st.dirtyCount() == 0;
+		s_branchDialog   = true;
+	}
+	ImGui::EndDisabled();
+	if (st.initialCommit) { ImGui::SameLine(); ImGui::TextDisabled("Make the first commit first."); }
+
+	ImGui::SeparatorText("On this computer");
+	if (git.branches().empty()) ImGui::TextDisabled("(none yet)");
+	for (const std::string& b : git.branches())
+	{
+		ImGui::PushID(b.c_str());
+		const bool current = b == st.branch;
+		if (current) ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.55f, 1.0f), "\xe2\x97\x8f");
+		else         ImGui::TextDisabled(" ");
+		ImGui::SameLine();
+		ImGui::TextUnformatted(b.c_str());
+		if (current && (st.ahead > 0 || st.behind > 0))
+		{
+			ImGui::SameLine();
+			ImGui::TextDisabled("\xe2\x86\x93%d \xe2\x86\x91%d", st.behind, st.ahead);
+		}
+		if (!current && mayWrite)
+		{
+			ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize("Switch").x - 16.0f);
+			ImGui::BeginDisabled(!idle);
+			if (EditorWidgets::smallButton("Switch")) beginSwitch(git, st, b);
+			ImGui::EndDisabled();
 		}
 		ImGui::PopID();
-	};
+	}
 
-	// Conflicts first — they block a commit entirely, so burying them under a
-	// long list of ordinary changes would be exactly wrong.
-	section("Conflicts — resolve before committing", conflicts, false);
-	section("Staged",    staged,    /*useIndexState=*/true);
-	section("Changed",   unstaged,  false);
-	section("Untracked", untracked, false);
+	// Branches the remote has that this computer does not
+	std::vector<const std::string*> remoteOnly;
+	for (const std::string& rb : git.remoteBranches())
+	{
+		const std::size_t slash = rb.find('/');
+		const std::string shortName = slash == std::string::npos ? rb : rb.substr(slash + 1);
+		const auto& locals = git.branches();
+		if (std::find(locals.begin(), locals.end(), shortName) == locals.end()) remoteOnly.push_back(&rb);
+	}
+	if (!remoteOnly.empty())
+	{
+		ImGui::SeparatorText("Only on the server");
+		for (const std::string* rb : remoteOnly)
+		{
+			ImGui::PushID(rb->c_str());
+			ImGui::TextUnformatted(rb->c_str());
+			if (mayWrite)
+			{
+				ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize("Check out").x - 16.0f);
+				ImGui::BeginDisabled(!idle);
+				if (EditorWidgets::smallButton("Check out")) beginSwitch(git, st, *rb);
+				ImGui::EndDisabled();
+			}
+			ImGui::PopID();
+		}
+	}
+
+	if (!git.stashes().empty())
+	{
+		ImGui::SeparatorText("Stashed changes");
+		for (const std::string& s : git.stashes()) ImGui::TextDisabled("%s", s.c_str());
+		if (mayWrite)
+		{
+			ImGui::BeginDisabled(!idle);
+			if (EditorWidgets::button("Bring back stashed changes")) git.requestStashPop();
+			ImGui::EndDisabled();
+		}
+	}
+	wrap.reset();
+	ImGui::EndChild();
 }
 
 // ── Header bar ───────────────────────────────────────────────────────────────
@@ -314,7 +1192,8 @@ void drawBranchPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	// "Source Control Panel", not "Source Control": that scope belongs to the
 	// Preferences page that INSTALLS git, and this is the window that uses it.
 	HE::Ed::Help::Scope helpScope("Source Control Panel");
-	ImGui::TextDisabled("Branches");
+	const bool mayWrite = git.mayModify();
+	ImGui::TextDisabled("Switch branch");
 	ImGui::Separator();
 	if (git.branches().empty())
 	{
@@ -322,14 +1201,14 @@ void drawBranchPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	}
 	else
 	{
-		// Listed, not switchable: checking out replaces the whole working tree,
-		// and doing that from a hover menu is how someone loses an afternoon.
-		// Switching lives behind the branch dialog's explicit checkbox.
+		// A clean project switches at once; with changes it asks (beginSwitch).
 		for (const std::string& b : git.branches())
-			ImGui::BulletText("%s%s", b.c_str(), b == st.branch ? "  (current)" : "");
+			if (EditorWidgets::menuItem(b.c_str(), nullptr, b == st.branch, mayWrite && !git.busyWithWork()))
+				beginSwitch(git, st, b);
 	}
 	ImGui::Separator();
-	ImGui::BeginDisabled(git.busy() || st.initialCommit || !git.mayModify());
+	if (EditorWidgets::menuItem("Manage branches…")) s_wantBranchesTab = true;
+	ImGui::BeginDisabled(git.busyWithWork() || st.initialCommit || !mayWrite);
 	if (EditorWidgets::menuItem("New branch…"))
 	{
 		s_branchFromOid.clear();          // empty start = branch off HEAD
@@ -416,7 +1295,7 @@ void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
 
 	const bool mayWrite  = git.mayModify();
 	const bool hasRemote = !git.remoteUrl().empty();
-	const bool idle      = !git.busy();
+	const bool idle      = !git.busyWithWork();
 
 	const char* branchLabel = st.detached ? "detached"
 	                        : st.branch.empty() ? "(no branch)"
@@ -599,7 +1478,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	}
 	if (!open) return;
 
-	ImGui::SetNextWindowSize(ImVec2(420.0f, 460.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(460.0f, 620.0f), ImGuiCond_FirstUseEver);
 	// Passing &open lets the window's own X clear the View-menu toggle.
 	if (!ImGui::Begin("Source Control", &open))
 	{
@@ -643,14 +1522,9 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
 		}
 
-		if (!git->lastError().empty())
-		{
-			ImGui::Spacing();
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-			ImGui::TextWrapped("%s", git->lastError().c_str());
-			ImGui::PopStyleColor();
-		}
-		if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
+		// Errors are not printed here: GitController posts them to the notifications
+		// (the footer bell), where they are seen whichever panel is open.
+		if (git->busyWithWork()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 		ImGui::End();
 		return;
 	}
@@ -687,13 +1561,9 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		                   "others through the session.");
 		ImGui::PopStyleColor();
 	}
-	if (!git->lastError().empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-		ImGui::TextWrapped("%s", git->lastError().c_str());
-		ImGui::PopStyleColor();
-	}
-	else if (!git->lastInfo().empty())
+	// Errors go to the notifications (GitController::reportNewError), not to red text
+	// in here; what stays is the plain outcome of the last thing that worked.
+	if (git->lastError().empty() && !git->lastInfo().empty())
 	{
 		// The one line here that was not already wrapped, and it is a whole
 		// sentence from git ("Fetched: 3 new commits on origin/main") in a panel
@@ -702,174 +1572,46 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		ImGui::TextDisabled("%s", git->lastInfo().c_str());
 	}
 
-	// ── Commit ───────────────────────────────────────────────────────────────
-	// Hidden — not greyed out — for a session guest: reading status is always
-	// allowed, it is writing and moving HEAD that would desync the session.
-	if (!git->blockedByCollabSession())
+	// ── Tabs ─────────────────────────────────────────────────────────────────
+	// Changes, History and Branches each get the whole height instead of sharing it:
+	// the old layout gave the history a fixed slice and the change list whatever was
+	// left, so neither was ever the right size. A guest in a collaboration session
+	// sees the same tabs read-only (no checkboxes, commit box or switch buttons).
+	const bool mayWrite = git->mayModify();
 	{
-		// One wrap position per block rather than one for the window: this
-		// panel's ImGui::End() is at the bottom of the function, and a guard
-		// opened next to Begin() would pop after it — onto whichever window is
-		// current by then. A block is the lifetime that matches, and between them
-		// these guards cover everything the panel draws below the header bar.
 		EditorWidgets::WrapText wrap;
-
-		const bool identityOk = !ctx.gitProbe || ctx.gitProbe->identityConfigured;
-		if (!identityOk)
+		if (ImGui::BeginTabBar("##sctabs", ImGuiTabBarFlags_NoTooltip))
 		{
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
-			ImGui::TextWrapped("git has no user.name / user.email configured — commits "
-			                   "will fail until they are set.");
-			ImGui::PopStyleColor();
-		}
+			const Model& model = modelFor(st);
+			char changesLabel[48];
+			if (model.total > 0)
+				std::snprintf(changesLabel, sizeof(changesLabel), "Changes (%zu)###sc_changes", model.total);
+			else
+				std::snprintf(changesLabel, sizeof(changesLabel), "Changes###sc_changes");
 
-		ImGui::InputTextWithHint("##commitmsg", "Message for this commit",
-		                         s_commitMessage, sizeof(s_commitMessage));
-
-		const std::size_t dirty     = st.dirtyCount();
-		const bool hasConflicts     = st.hasConflicts();
-		const bool canCommit = !git->busy() && s_commitMessage[0] != '\0' &&
-		                       dirty > 0 && !hasConflicts;
-
-		char commitLabel[64];
-		if (dirty == 0)      std::snprintf(commitLabel, sizeof(commitLabel), "Nothing to commit");
-		else if (dirty == 1) std::snprintf(commitLabel, sizeof(commitLabel), "Commit 1 change");
-		else std::snprintf(commitLabel, sizeof(commitLabel), "Commit %zu changes", dirty);
-
-		ImGui::BeginDisabled(!canCommit);
-		if (ImGui::Button(commitLabel, ImVec2(-FLT_MIN, 0.0f)))
-		{
-			git->requestCommitAll(s_commitMessage);
-			s_commitMessage[0] = '\0';
-		}
-		ImGui::EndDisabled();
-		// By key, not by label: the label is built at run time ("Commit 3
-		// changes"), so there is no fixed string to key the table on. The lookup
-		// allows a disabled item, which is exactly when this gets asked.
-		EditorWidgets::helpForKey("sc.commit");
-
-		if (hasConflicts)
-		{
-			// A commit with unresolved conflict markers preserves the mess
-			// forever; refusing is the only correct behaviour.
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-			ImGui::TextWrapped("Conflicts must be resolved before committing.");
-			ImGui::PopStyleColor();
-		}
-		else if (st.initialCommit && git->remoteUrl().empty())
-		{
-			ImGui::TextDisabled("No remote yet — set one up in Preferences \xe2\x96\xb8 "
-			                    "Source Control.");
-		}
-
-	}
-
-	// ── Changes ──────────────────────────────────────────────────────────────
-	// The history section below claims a fixed slice while it is open; the
-	// changes list takes whatever remains.
-	ImGui::Separator();
-	const float historyH = s_historyOpen
-		? 190.0f
-		: ImGui::GetFrameHeightWithSpacing();
-	if (ImGui::BeginChild("##changes", ImVec2(0.0f, -historyH), false))
-	{
-		// The list this panel exists for, and every row in it is a path. In the
-		// flat view that path is the full one from the project root, which is
-		// longer than the panel every time — and it is the END that identifies
-		// the file. Cut off at the right edge, three assets in the same folder
-		// read as three copies of the same row. A child is its own window, so it
-		// needs its own wrap position; this one ends before EndChild() below.
-		EditorWidgets::WrapText wrap;
-
-		if (st.dirtyCount() == 0)
-			ImGui::TextDisabled("Nothing has changed.");
-		else
-			drawChangeList(st);
-	}
-	ImGui::EndChild();
-
-	// ── History ──────────────────────────────────────────────────────────────
-	// The recent commits, newest first — the "where is this repository" view.
-	// An ↑ marks commits the upstream does not have yet, which is the honest
-	// answer to "did my push go through".
-	s_historyOpen = ImGui::CollapsingHeader("History", ImGuiTreeNodeFlags_DefaultOpen);
-	if (s_historyOpen)
-	{
-		if (ImGui::BeginChild("##history", ImVec2(0.0f, 0.0f), false))
-		{
-			EditorWidgets::WrapText wrap;
-
-			const auto& commits = git->recentCommits();
-			if (commits.empty())
+			ImGuiTabItemFlags branchesFlags = ImGuiTabItemFlags_None;
+			if (s_wantBranchesTab)
 			{
-				ImGui::TextDisabled("No commits yet.");
+				branchesFlags = ImGuiTabItemFlags_SetSelected;
+				s_wantBranchesTab = false;
 			}
-			// Reloading the scene after a restore is the caller's business; the
-			// panel says so rather than silently leaving a stale world open.
-			for (const auto& c : commits)
+			if (ImGui::BeginTabItem(changesLabel))
 			{
-				ImGui::PushID(c.shortOid.c_str());
-				if (c.unpushed)
-				{
-					ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "%s", "\xE2\x86\x91");
-					if (ImGui::IsItemHovered())
-						ImGui::SetTooltip("Not pushed yet");
-				}
-				else
-				{
-					ImGui::TextDisabled(" ");
-				}
-				ImGui::SameLine();
-				ImGui::TextDisabled("%s", c.shortOid.c_str());
-				ImGui::SameLine();
-				ImGui::Selectable(c.subject.c_str());
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("%s — %s\n(right-click to restore the project to "
-					                  "this state)", c.author.c_str(), c.relTime.c_str());
-
-				if (ImGui::BeginPopupContextItem("##commitctx"))
-				{
-					// Branching is non-destructive as long as it only writes a
-					// ref, so it stays available with a dirty tree — the
-					// dialog's "switch to it" is what the guard applies to.
-					ImGui::BeginDisabled(git->busy());
-					if (EditorWidgets::menuItem("Create branch from this commit…"))
-					{
-						s_branchFromOid     = c.shortOid;
-						s_branchFromSubject = c.subject;
-						s_branchName[0]     = '\0';
-						s_branchCheckout    = st.dirtyCount() == 0;
-						s_branchDialog      = true;
-					}
-					ImGui::EndDisabled();
-
-					ImGui::BeginDisabled(git->busy() || st.dirtyCount() != 0);
-					if (EditorWidgets::menuItem("Restore project to this commit…"))
-					{
-						s_restoreOid     = c.shortOid;
-						s_restoreSubject = c.subject;
-					}
-					ImGui::EndDisabled();
-					if (st.dirtyCount() != 0)
-					{
-						// Wrapped at a column, not at the window edge: a popup is
-						// as wide as its widest line, so wrapping "where the
-						// window ends" would be asking the sentence where it
-						// ends. This is the only prose in a menu of two entries,
-						// and unwrapped it stretched the menu to twice their
-						// width. Ends before EndPopup(), like every other guard.
-						// Named apart from the history child's guard it sits
-						// inside, so neither reads as the other one.
-						EditorWidgets::WrapText menuWrap(ImGui::GetFontSize() * 26.0f);
-						ImGui::TextDisabled("Restoring needs a clean project — commit or "
-						                    "discard your changes first.");
-					}
-					ImGui::EndPopup();
-				}
-				ImGui::PopID();
+				drawChangesTab(*git, ctx, st, mayWrite);
+				ImGui::EndTabItem();
 			}
+			if (ImGui::BeginTabItem("History###sc_history"))
+			{
+				drawHistoryTab(*git, st, mayWrite);
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Branches###sc_branches", nullptr, branchesFlags))
+			{
+				drawBranchesTab(*git, st, mayWrite);
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
 		}
-		ImGui::EndChild();
 	}
 
 	// ── Create branch ────────────────────────────────────────────────────────
@@ -938,7 +1680,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::Spacing();
 			bool cancelled = false;
 			const bool create = modalButtonRow(
-				"Create", "Cancel", empty || !nameOk || taken || git->busy(), cancelled);
+				"Create", "Cancel", empty || !nameOk || taken || git->busyWithWork(), cancelled);
 			if (create)
 				git->requestCreateBranch(s_branchName, s_branchFromOid, s_branchCheckout);
 			if (create || cancelled)
@@ -989,13 +1731,93 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::Spacing();
 
 			bool cancelled = false;
-			const bool restore = modalButtonRow("Restore", "Cancel", git->busy(), cancelled,
+			const bool restore = modalButtonRow("Restore", "Cancel", git->busyWithWork(), cancelled,
 			                                    /*danger=*/true);
 			if (restore) git->requestRestoreTo(s_restoreOid, s_restoreOid);
 			if (restore || cancelled)
 			{
 				s_restoreOid.clear();
 				s_restoreSubject.clear();
+				ImGui::CloseCurrentPopup();
+			}
+		}
+		ImGui::EndPopup();
+	}
+
+	// ── Discard confirmation ─────────────────────────────────────────────────
+	// Irreversible: the changes are not in any commit. Says which files, and says
+	// what happens to new ones (deleted from disk, not "reverted").
+	if (!s_discardPaths.empty()) ImGui::OpenPopup("Discard changes?");
+	beginModalSizing();
+	if (ImGui::BeginPopupModal("Discard changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextWrapped("%s", s_discardHeadline.c_str());
+			ImGui::Spacing();
+			for (const std::string& f : s_discardSample) ImGui::BulletText("%s", f.c_str());
+			if (s_discardPaths.size() > s_discardSample.size())
+				ImGui::TextDisabled("… and %zu more", s_discardPaths.size() - s_discardSample.size());
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+			ImGui::TextWrapped(s_discardHasNew
+				? "Edits are thrown away. New files are deleted from disk, and because they "
+				  "are not in any commit there is no getting them back."
+				: "The edits are thrown away and the files go back to how the last commit has "
+				  "them. This cannot be undone.");
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+
+			bool cancelled = false;
+			const bool discard = modalButtonRow("Discard", "Cancel", git->busyWithWork(), cancelled, /*danger=*/true);
+			if (discard) git->requestDiscard(s_discardPaths);
+			if (discard || cancelled)
+			{
+				s_discardPaths.clear();
+				s_discardSample.clear();
+				ImGui::CloseCurrentPopup();
+			}
+		}
+		ImGui::EndPopup();
+	}
+
+	// ── Switch branch with local changes ─────────────────────────────────────
+	if (!s_switchTarget.empty()) ImGui::OpenPopup("Switch branch?");
+	beginModalSizing(30.0f);
+	if (ImGui::BeginPopupModal("Switch branch?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextWrapped("Switching to \"%s\" replaces the files in the project folder, and "
+			                   "there are %zu uncommitted change(s).",
+			                   s_switchTarget.c_str(), st.dirtyCount());
+			ImGui::Spacing();
+			ImGui::TextWrapped("Stash puts them aside and switches to a clean project; you can bring "
+			                   "them back from the Branches tab. Carrying them over works only if the "
+			                   "other branch does not touch the same files.");
+			ImGui::Spacing();
+
+			const float spacing = ImGui::GetStyle().ItemSpacing.x;
+			const float bw = (ImGui::GetContentRegionAvail().x - spacing * 2.0f) / 3.0f;
+			bool close = false;
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(bw, 0.0f))) close = true;
+			ImGui::SameLine();
+			ImGui::BeginDisabled(git->busyWithWork());
+			if (EditorWidgets::button("Carry them over", ImVec2(bw, 0.0f)))
+			{
+				git->requestSwitchBranch(s_switchTarget, false);
+				close = true;
+			}
+			ImGui::SameLine();
+			if (EditorWidgets::primaryButton("Stash & switch", ImVec2(bw, 0.0f)))
+			{
+				git->requestSwitchBranch(s_switchTarget, true);
+				close = true;
+			}
+			ImGui::EndDisabled();
+			if (close)
+			{
+				s_switchTarget.clear();
 				ImGui::CloseCurrentPopup();
 			}
 		}

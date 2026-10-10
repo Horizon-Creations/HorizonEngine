@@ -3,6 +3,7 @@
 #include <vector>
 #include <array>
 #include <random>
+#include <string>
 #include "ParticleSystemComponent.h" // for Particle (precipitation reuses the pool type)
 
 // Weather controller, authored on the "Weather" entity — like the "Sky" entity that
@@ -57,10 +58,39 @@ struct WeatherComponent
     WeatherKind targetKind  = WeatherKind::Clear;  // desired state (set to start a change)
     float       intensity   = 1.0f;                // 0..1 scales the target preset
 
+    // What MATERIALS see of the weather, 0..1 each — the material graph's Weather node and
+    // the engine's weather material functions (MF_WeatherPuddles, MF_WeatherSnow) read
+    // them. Set by hand (Weather details panel ▸ Surface), not by the presets; WeatherSystem
+    // writes them into the EnvironmentComponent every tick. 0.64 is the puddle level the
+    // auto landscape had before it took its puddles from the weather.
+    float       puddleAmount = 0.64f;              // standing water in the landscape's hollows
+    float       puddleSize   = 10.0f;              // metres across one hollow (0.5 … 100)
+    float       snowCover    = 0.0f;               // snow lying on the ground
+
+    // Thunder / lightning, 0..1: how often the sky strikes (0 = never, 1 = the storm
+    // rhythm, one strike every few seconds). A preset sets it (Storm = intensity, every
+    // other = 0) like it sets the sky values; move the slider and the preset stops driving
+    // it until the next preset pick. Serialized.
+    float       thunder = 0.0f;
+
     float transitionDuration = 8.0f;   // seconds for a full weather change
     bool  autoCycle          = false;  // randomly cycle between weather kinds
     float cycleSeconds       = 60.0f;  // mean dwell time per state when autoCycle
-    HE::UUID thunderSound;             // audio asset played on each lightning strike (optional)
+    HE::UUID thunderSound;             // audio asset played on each lightning strike (null = engine default)
+
+    // Weather sounds (WeatherAudio): one looping bed per kind of weather plus the
+    // thunder above. A null slot means "the EngineContent default" (DefaultAssets.h,
+    // kEngineWeather*SoundId), so every project is audible without a file of its own;
+    // a slot that is set overrides just that sound. Volume and the choice between the
+    // beds follow the live weather (rain/snow amount, wind, storminess), cross-faded —
+    // gameplay code does nothing.
+    HE::UUID rainSound;                // rain bed, follows rainAmount
+    HE::UUID windSound;                // wind bed, follows wind speed (with gusts)
+    HE::UUID snowSound;                // snow atmosphere, follows snowAmount
+    HE::UUID stormSound;               // storm atmosphere, follows wind x rain
+    bool        soundEnabled = true;   // false = this weather makes no sound at all
+    float       soundVolume  = 1.0f;   // 0..1 gain over all weather sounds
+    std::string soundBus     = "SFX";  // mixer bus; falls back to the clip's own, then master
 
     // Precipitation budget: hard cap on simultaneously alive drops/flakes. Lets the
     // user trade density for performance. Emission throttles to stay under the cap.
@@ -97,6 +127,7 @@ struct WeatherComponent
     float      lastRain    = -999.0f;
     float      lastSnow    = -999.0f;
     float      lastWetness = -999.0f;
+    float      lastThunder = -999.0f;
 
     // Current blended output written into the EnvironmentComponent + precipitation.
     float      curCloudCoverage = 0.0f;
@@ -126,4 +157,9 @@ struct WeatherComponent
     float lightningCountdown = 0.0f;  // seconds until the next strike
     float flashIntensity     = 0.0f;  // current flash 0..1, decays each frame
     bool  flashTriggered     = false; // true on the frame a strike starts (thunder cue)
+    // Strikes since the component was created. flashTriggered is one frame wide and
+    // only reliable for a consumer that runs on exactly the frame of the tick; the
+    // counter lets WeatherAudio see every strike once however often (or rarely) it
+    // runs — paused, stepped, or ahead of the tick.
+    uint32_t strikeCount     = 0;
 };

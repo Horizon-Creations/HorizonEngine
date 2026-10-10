@@ -292,6 +292,10 @@ namespace
 		// the CPU into MaterialAsset::approxLayerColor. See GiLandscape.h for
 		// why a landscape — and only a landscape — can be sampled per texel.
 		std::unordered_map<uint32_t, int32_t> landscapeOf; // terrain entity → index
+		// The scene's Puddles slider, for the auto landscapes' GI entries (the default is the
+		// component's own, so a scene with no Sky entity keeps the old puddle share).
+		float puddleScale = EnvironmentComponent{}.puddleAmount;
+		for (auto [ee, ec] : reg.view<EnvironmentComponent>().each()) { puddleScale = ec.puddleAmount; break; }
 		for (auto [te, ttf, tc] : reg.view<TransformComponent, TerrainComponent>().each())
 		{
 			HE::GiLandscape ls;
@@ -324,7 +328,7 @@ namespace
 									if (o.name == name) { v = o.value[0]; return true; }
 								return false;
 							};
-							const int slot = HE::giAutoLandscapeParams(*ma, ov, ls);
+							const int slot = HE::giAutoLandscapeParams(*ma, ov, ls, puddleScale);
 							if (slot >= 0)
 							{
 								// Copied out: resolving may loadAsset, which moves `ma`.

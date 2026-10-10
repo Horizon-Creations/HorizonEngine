@@ -3,6 +3,18 @@
 ###############################################################################
 * text=auto
 
+# The .heproj file type registration scripts shipped inside the editor package
+# (scripts/windows_assets, scripts/linux_assets). Windows runs cmd/PowerShell
+# scripts with CRLF; the Linux installer must keep LF whatever the checkout's
+# autocrlf says, or `/bin/sh` fails on "\r" at the shebang.
+scripts/windows_assets/*.cmd text eol=crlf
+scripts/windows_assets/*.ps1 text eol=crlf
+scripts/windows_assets/*.ico binary
+scripts/linux_assets/*.sh text eol=lf
+scripts/linux_assets/*.desktop text eol=lf
+scripts/linux_assets/*.xml text eol=lf
+scripts/linux_assets/*.png binary
+
 ###############################################################################
 # Set default behavior for command prompt diff.
 #

@@ -462,6 +462,11 @@ bool saveButton(Bar& bar, bool enabled, bool atLeft)
 {
 	if (atLeft) bar.group();
 	else        bar.rightGroup(bar.iconGroupWidth(1));
+	// Greyed out while there is nothing to write: `dirty` is what assetHeader left
+	// on the bar, so every asset tab gets the same rule without each panel
+	// repeating it (and panels that passed a plain "asset loaded" no longer offer
+	// a Save that does nothing).
+	enabled = enabled && bar.dirty();
 	const bool pressed = bar.item("##save", iconSave, nullptr, false, enabled,
 	                              enabled ? "Save (Cmd/Ctrl+S)" : "Nothing to save");
 	if (bar.dirty())

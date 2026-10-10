@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Horizon Editor
+GenericName=Game Engine Editor
+Comment=Create and edit Horizon Engine projects
+# The editor is a relocatable tarball, so the installer (install_file_types.sh)
+# rewrites Exec and TryExec to the absolute path of the HorizonEditor next to it.
+# %f, not %F: the editor opens ONE project per process, so a selection of several
+# .heproj files should start several editors rather than silently drop all but one.
+Exec=HorizonEditor %f
+TryExec=HorizonEditor
+Icon=horizon-editor
+Terminal=false
+Categories=Development;IDE;
+Keywords=Horizon;Engine;Game;Editor;Project;
+# Keep the MIME type in step with scripts/linux_assets/horizon-editor.xml, the
+# macOS UTI (scripts/package_macos.sh) and the Windows ProgID (register_heproj.cmd).
+MimeType=application/x-heproj;

@@ -894,6 +894,33 @@ float4 PSMain(VSOut i) : SV_TARGET
     }
     return float4(result, uPBR.z);
 }
+
+// ─── Deferred G-buffer (built-in materials, Thema 150) ──────────────────────
+// Writes surface ATTRIBUTES instead of shading them; the fullscreen resolve
+// (MaterialShaderLibrary::deferredResolve → heLitP) lights them once per
+// visible pixel. GL's kGBufFS / Metal's gbufferMain with D3D11's own inputs:
+// the PerObject cbuffer and VSOut above, so VSMain and VSMainInstanced feed it
+// unchanged. Base colour by GL's and Metal's rule (texture × uColor; the draw
+// passes 1.0 / 0.55 for a mesh without a material, see drawDC) — PSMain lets the
+// texture replace uColor instead. Specular 0.5 = the dielectric F0 0.04 PSMain uses,
+// emissive 0, material AO 1. A named entry, not `main` — the validator maps
+// `main` to ps_5_0 by default and this file compiles every entry by name.
+struct GBufOut
+{
+    float4 gb0 : SV_Target0; // rgb BaseColor, a Metallic   (R8G8B8A8_UNORM_SRGB)
+    float4 gb1 : SV_Target1; // rg oct Normal, b Roughness, a Specular (RGBA16F)
+    float4 gb2 : SV_Target2; // rgb Emissive, a Material-AO  (RGBA16F)
+};
+GBufOut GBufPS(VSOut i)
+{
+    GBufOut o;
+    float3 base = (uColor.a > 0.5) ? uTexture.Sample(uSampler, i.uv).rgb * uColor.rgb : uColor.rgb;
+    float3 N    = normalize(i.normal);
+    o.gb0 = float4(base, saturate(uPBR.x));
+    o.gb1 = float4(giOctEncode(N) * 0.5 + 0.5, saturate(uPBR.y), 0.5);
+    o.gb2 = float4(0.0, 0.0, 0.0, 1.0);
+    return o;
+}
 )HLSL";
 
 // ─── PostProcess HLSL ───────────────────────────────────────────────────────
@@ -1395,6 +1422,11 @@ struct D3D11RendererImpl
     // (raw binding 23/19/22 would land past the 14 CB / 16 sampler slot limits).
     ComPtr<ID3D11VertexShader>       decalVS;
     ComPtr<ID3D11PixelShader>        decalPS;
+    // The deferred frame's variant (Thema 150 S5): decalFragmentSampled, the
+    // unshaded colour blended into GB0 before the resolve lights it — GL's
+    // deferred decal. Same registers as decalPS. Null → the deferred frame
+    // keeps the forward decal over the resolve (logged once).
+    ComPtr<ID3D11PixelShader>        decalGBufPS;
     ComPtr<ID3D11Buffer>             decalCB;         // DecalUniforms, WRITE_DISCARD per decal
     ComPtr<ID3D11SamplerState>       decalTexSampler; // s14: linear wrap
     ComPtr<ID3D11SamplerState>       decalDepthSampler; // s15: POINT clamp — uv is texel-exact,
@@ -4302,6 +4334,9 @@ struct D3D11RendererImpl
         // first read, so the editor's GI toggle reflects reality from the start.
         // Idempotent (giPipelinesBuilt), so the lazy call in runGiShadow is a no-op.
         createGiPipelines();
+        // The deferred path likewise (Thema 150): supportsDeferredRendering must be
+        // true before the editor first asks, and only if the resolve really built.
+        createDeferredPipelines();
         return vs && ps && inputLayout && perObjectCB && perFrameCB && sampler;
     }
 
@@ -4563,13 +4598,21 @@ struct D3D11RendererImpl
     // precompiledFor) wins over the runtime cross-compile — same split as GL's
     // GetOrBuildMaterialProgram and Metal's GetOrBuildMaterialPipeline, and the only
     // source of shaders in a flavour built without glslang.
+    // `gbuffer` (Thema 150): `frag` is the material's G-BUFFER tail
+    // (resolveGBufferShaders). Own key space — the cache is keyed by hash alone,
+    // and a G-buffer shader handed out as a forward one would write attributes
+    // into the lit colour (GL leans on the differing source hash, plan §10.7
+    // #4). Cross-compiled only, and never the clustered variant: the pak bakes
+    // no G-buffer HLSL, and its forward variant would write LIT colour into GB0
+    // — plausible-looking and wrong.
     MatShaders* GetOrBuildMaterialShaders(uint64_t hash, const std::string& frag,
                                           const std::string& vertBody,
                                           const MaterialShaderVariant* precompiled,
-                                          bool transparent)
+                                          bool transparent, bool gbuffer = false)
     {
         (void)transparent; // blend/depth are pass state on D3D11, not shader state
-        const uint64_t key = hash;
+        if (gbuffer) precompiled = nullptr;
+        const uint64_t key = gbuffer ? (hash ^ 0x6742756666657231ULL) : hash;
         if (auto it = m_materialShaders.find(key); it != m_materialShaders.end())
             return it->second.vs ? &it->second : nullptr; // null vs == cached miss
 
@@ -4639,7 +4682,7 @@ struct D3D11RendererImpl
             // t24..t26 cluster lists instead of the 8-light window. A variant
             // that does not cross-compile or that FXC rejects falls back to the
             // window variant below — the material still renders, with 8 lights.
-            if (matClustered() && vc.ok && !vc.source.empty())
+            if (!gbuffer && matClustered() && vc.ok && !vc.source.empty())
             {
                 const HE::MaterialShaderLibrary::Compiled& cc =
                     m_matShaderLib.fragmentClustered(hash, frag, Backend::HLSL);
@@ -4746,6 +4789,22 @@ struct D3D11RendererImpl
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: decal shader-object creation failed");
             return false;
+        }
+        {   // The deferred variant. Optional: a failure costs the deferred frame
+            // its lit decal, not the forward one.
+            const HE::MaterialShaderLibrary::Compiled& gc = m_matShaderLib.decalFragmentSampled(Backend::HLSL);
+            ComPtr<ID3DBlob> gsb, gerr;
+            if (!gc.ok || gc.source.empty()
+                || FAILED(D3DCompile(gc.source.c_str(), gc.source.size(), "decalGBufPS", nullptr, nullptr,
+                                     "main", "ps_5_0", cflags, 0, &gsb, &gerr))
+                || FAILED(device->CreatePixelShader(gsb->GetBufferPointer(), gsb->GetBufferSize(),
+                                                    nullptr, &decalGBufPS)))
+            {
+                decalGBufPS.Reset();
+                HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: deferred decal PS unavailable, "
+                    "deferred frames draw the forward decal: ")
+                    + (gerr ? static_cast<const char*>(gerr->GetBufferPointer()) : "")).c_str());
+            }
         }
 
         {   // 368 B = 4 mat4 + 7 vec4; already a 16-byte multiple.
@@ -4880,14 +4939,22 @@ struct D3D11RendererImpl
     // warns). So the DSV comes off the output merger BEFORE the depth SRV goes on,
     // and back on only after the SRV is gone. Get that backwards and the pass draws
     // nothing, with no error anywhere.
+    //
+    // intoGBuffer (deferred frame, Thema 150 S5): called right after the G-buffer
+    // pass, with GB0..2 + the scene depth on the output merger. The bound RT0 IS
+    // GB0, so the same code blends the UNSHADED decal colour into GB0.rgb (an
+    // _SRGB view: the blend happens in linear, like GL's FRAMEBUFFER_SRGB and
+    // Metal's sRGB attachment) and the resolve lights it. The RGB write mask
+    // keeps GB0.a (metallic); GB1/GB2 are not bound and keep the surface's.
     void EncodeDecals(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
-                      int width, int height, ContentManager* cm)
+                      int width, int height, ContentManager* cm, bool intoGBuffer = false)
     {
 #if !defined(HE_HAVE_SHADERC)
-        (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm;
+        (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm; (void)intoGBuffer;
 #else
         if (m_renderWorld.decals.empty()) return;
         if (!EnsureDecalPipeline()) return;
+        if (intoGBuffer && !decalGBufPS) return;
 
         ComPtr<ID3D11RenderTargetView> curRTV;
         ComPtr<ID3D11DepthStencilView> curDSV;
@@ -4913,7 +4980,7 @@ struct D3D11RendererImpl
         ctx->PSSetShaderResources(15, 1, depthSrvs);   // t15 heGBDepth
 
         ctx->VSSetShader(decalVS.Get(), nullptr, 0);
-        ctx->PSSetShader(decalPS.Get(), nullptr, 0);
+        ctx->PSSetShader(intoGBuffer ? decalGBufPS.Get() : decalPS.Get(), nullptr, 0);
         ctx->IASetInputLayout(nullptr);                 // buffer-less 36-vertex cube
         ID3D11Buffer* noVB = nullptr; UINT zeroStride = 0, zeroOffset = 0;
         ctx->IASetVertexBuffers(0, 1, &noVB, &zeroStride, &zeroOffset);
@@ -4994,6 +5061,160 @@ struct D3D11RendererImpl
 #endif
     }
 
+    // ── Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10) ──
+    // GL's / Metal-two-pass structure on D3D11: the opaque geometry goes into a
+    // three-target G-buffer (§3: GB0 R8G8B8A8_UNORM_SRGB base + metallic, GB1
+    // RGBA16F oct normal + roughness + specular, GB2 RGBA16F emissive + AO) and
+    // into the scene depth, which is ALREADY typeless with a DSV and an SRV
+    // (createDepthViews) — no depth copy, the decal pass's DSV-off/SRV-on order
+    // instead. The fullscreen resolve is MaterialShaderLibrary::deferredResolve
+    // [Clustered](HLSL): the SAME heLitP graph materials shade with, so no
+    // second lighting implementation lives here. Its registers are the
+    // kHlslResolve* contract (b4, t27..t30 / s2,s4,s5,s6) on top of the
+    // material pin table. No tile/single-pass variant: D3D has no framebuffer
+    // fetch (§10.6).
+    ComPtr<ID3D11Texture2D>          gbTex[3];
+    ComPtr<ID3D11RenderTargetView>   gbRTV[3];
+    ComPtr<ID3D11ShaderResourceView> gbSRV[3];
+    uint32_t gbW = 0, gbH = 0;
+    bool     gbFailed = false;                     // one log line for a failed allocation
+    ComPtr<ID3D11PixelShader>  gbufferPS;          // GBufPS (kSceneHLSL), built-in materials
+    ComPtr<ID3D11VertexShader> resolveVS;          // fullscreenVertex(HLSL), no varyings
+    ComPtr<ID3D11PixelShader>  resolvePS;          // deferredResolve(HLSL), 8-light window
+    ComPtr<ID3D11PixelShader>  resolveClusteredPS; // deferredResolveClustered(HLSL), optional
+    ComPtr<ID3D11Buffer>       resolveCB;          // ResolveUniforms → b4
+    ComPtr<ID3D11Buffer>       resolveLightCB;     // the resolve draw's OWN HeLighting → b0
+    ComPtr<ID3D11SamplerState> gbPointClamp;       // G-buffer + depth: uv is texel-exact
+    // Built once in createPipeline, like the GI kernels: the editor reads
+    // supportsDeferredRendering at startup (EditorApplication applies the saved
+    // RenderPath only when it is true), so a lazy first-frame build would leave
+    // a saved "Deferred" forward without a word.
+    bool deferredReady = false;
+
+    bool createDeferredPipelines()
+    {
+        deferredReady = false;
+#if !defined(HE_HAVE_SHADERC)
+        // The resolve is cross-compiled at runtime (like the decal pass); a
+        // flavour without the compiler keeps the capability off.
+        return false;
+#else
+        if (!device || !postFxReady || !m_matReady) return false;
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const std::string& src, const char* name, const char* entry,
+                           const char* profile, ComPtr<ID3DBlob>& out,
+                           const char* consequence = "the deferred path stays off") -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (SUCCEEDED(D3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
+                                     entry, profile, flags, 0, &out, &err)))
+                return true;
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: deferred ") + name + " compile failed — "
+                + consequence + ": " + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+            return false;
+        };
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        ComPtr<ID3DBlob> gbBlob, vsBlob, psBlob;
+        const std::string sceneSource = std::string(kSkyFuncHLSL) + kSceneHLSL;
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.fullscreenVertex(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& rc = m_matShaderLib.deferredResolve(Backend::HLSL);
+        if (!vc.ok || !rc.ok || vc.source.empty() || rc.source.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: deferred resolve cross-compile failed — "
+                "the deferred path stays off: ") + vc.log + " " + rc.log).c_str());
+            return false;
+        }
+        if (!compile(sceneSource, "GBufPS", "GBufPS", "ps_5_0", gbBlob)
+            || !compile(vc.source, "resolveVS", "main", "vs_5_0", vsBlob)
+            || !compile(rc.source, "resolvePS", "main", "ps_5_0", psBlob))
+            return false;
+        if (FAILED(device->CreatePixelShader(gbBlob->GetBufferPointer(), gbBlob->GetBufferSize(), nullptr, &gbufferPS))
+            || FAILED(device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &resolveVS))
+            || FAILED(device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &resolvePS)))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: deferred shader-object creation failed");
+            return false;
+        }
+        // The clustered resolve only where the raw cluster lists exist (the
+        // same rule as the clustered graph materials). A failure costs the
+        // clustering, not the path: the window resolve still lights 8 lights.
+        if (matClustered())
+        {
+            const HE::MaterialShaderLibrary::Compiled& cc = m_matShaderLib.deferredResolveClustered(Backend::HLSL);
+            ComPtr<ID3DBlob> ccBlob;
+            if (!cc.ok || cc.source.empty())
+                HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: clustered resolve cross-compile failed — "
+                    "deferred keeps the 8-light window: ") + cc.log).c_str());
+            else if (compile(cc.source, "resolveClusteredPS", "main", "ps_5_0", ccBlob,
+                             "deferred keeps the 8-light window"))
+                device->CreatePixelShader(ccBlob->GetBufferPointer(), ccBlob->GetBufferSize(), nullptr,
+                                          &resolveClusteredPS);
+        }
+        auto makeCB = [&](UINT bytes, ComPtr<ID3D11Buffer>& out) -> bool {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = (bytes + 15u) & ~15u;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            return SUCCEEDED(device->CreateBuffer(&bd, nullptr, &out));
+        };
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.MaxLOD   = D3D11_FLOAT32_MAX;
+        if (!makeCB(sizeof(HE::MaterialShaderLibrary::ResolveUniforms), resolveCB)
+            || !makeCB(sizeof(HE::MaterialShaderLibrary::Lighting), resolveLightCB)
+            || FAILED(device->CreateSamplerState(&sd, &gbPointClamp)))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: deferred resource allocation failed");
+            return false;
+        }
+        deferredReady = true;
+        HE_LOG_INFO(RHI, "D3D11Renderer: deferred path ready (G-buffer + %s resolve)",
+                    resolveClusteredPS ? "clustered" : "8-light window");
+        return true;
+#endif
+    }
+
+    // The G-buffer at the scene's size, rebuilt when it changes. Lazy (first
+    // deferred frame) — a forward-only session never allocates it.
+    bool ensureGBufferTargets(uint32_t w, uint32_t h)
+    {
+        if (gbRTV[0] && gbW == w && gbH == h) return true;
+        for (int i = 0; i < 3; ++i) { gbRTV[i].Reset(); gbSRV[i].Reset(); gbTex[i].Reset(); }
+        gbW = gbH = 0;
+        if (w == 0 || h == 0) return false;
+        const DXGI_FORMAT fmts[3] = { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                      DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                      DXGI_FORMAT_R16G16B16A16_FLOAT };
+        for (int i = 0; i < 3; ++i)
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = w; td.Height = h;
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = fmts[i]; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&td, nullptr, &gbTex[i]))
+                || FAILED(device->CreateRenderTargetView(gbTex[i].Get(), nullptr, &gbRTV[i]))
+                || FAILED(device->CreateShaderResourceView(gbTex[i].Get(), nullptr, &gbSRV[i])))
+            {
+                for (int k = 0; k < 3; ++k) { gbRTV[k].Reset(); gbSRV[k].Reset(); gbTex[k].Reset(); }
+                if (!gbFailed)
+                {
+                    gbFailed = true;
+                    HE_LOG_ERROR(RHI, "D3D11Renderer: G-buffer allocation failed (%ux%u) — frame stays forward", w, h);
+                }
+                return false;
+            }
+        }
+        gbW = w; gbH = h;
+        return true;
+    }
+
     // Drain the editor's material/mesh hot-reload requests at DrawScene top. Dropping the ComPtr
     // is GPU-safe (the D3D11 runtime keeps the resource alive until pending GPU work finishes),
     // so the entry can be erased immediately; the mesh/material re-resolves next frame.
@@ -5031,7 +5252,10 @@ struct D3D11RendererImpl
     // on the first id; the rest are cache hits. The D3D11 cache is keyed by hash alone
     // (blend/depth are pass state), so one build covers opaque AND blended draws.
     // Built-in-PBR materials resolve no shader and are skipped.
-    void drainMaterialWarmup(ContentManager* cm)
+    // `deferred`: the frame renders the deferred path — warm each material's
+    // G-buffer variant too, so the first deferred frame does not hitch on its
+    // cross-compile (GL's WarmupMaterials rule).
+    void drainMaterialWarmup(ContentManager* cm, bool deferred = false)
     {
         if (pendingMatWarmup.empty()) return;
         if (!m_matReady || !cm) { pendingMatWarmup.clear(); return; }
@@ -5042,6 +5266,13 @@ struct D3D11RendererImpl
         {
             uint64_t hash = 0; std::string frag, vertBody;
             if (!m_matShaderLib.resolveShaders(*cm, id, hash, frag, vertBody)) continue;
+            if (deferred && deferredReady)
+            {
+                uint64_t gbHash = 0; std::string gbFrag, gbVert;
+                if (m_matShaderLib.resolveGBufferShaders(*cm, id, gbHash, gbFrag, gbVert)
+                    && GetOrBuildMaterialShaders(gbHash, gbFrag, gbVert, nullptr, false, /*gbuffer=*/true))
+                    ++built;
+            }
             if (m_materialShaders.count(hash)) continue; // already warm (or a cached miss)
             const MaterialShaderVariant* pre =
                 HE::MaterialShaderLibrary::precompiledFor(cm->getMaterial(id), HE::RendererBackend::D3D11);
@@ -5798,6 +6029,17 @@ void D3D11Renderer::Initialize(HE::Window* window)
     if (!m_impl->createPipeline())
         HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: scene pipeline creation failed — only clear will work");
     m_impl->createCube();
+    // Deferred-path debug/headless knobs, GL's and Metal's: HE_RENDER_PATH=1/
+    // deferred forces the path without touching config, HE_DUMP_GBUFFER=1..4
+    // seeds a raw G-buffer view (the editor pushes its own view mode every
+    // frame, the packaged game never does).
+    if (const char* rp = std::getenv("HE_RENDER_PATH"); rp && *rp)
+        m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
+            ? HE::RenderPath::Deferred : HE::RenderPath::Forward;
+    if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
+        if (const int n = std::clamp(std::atoi(dv), 0, 4); n > 0)
+            m_viewMode = static_cast<HE::ViewMode>(
+                static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
     HE_LOG_INFO(RHI, "%s", "D3D11Renderer: initialized successfully");
 }
 
@@ -5828,7 +6070,7 @@ void D3D11Renderer::Shutdown()
     m_impl->graphTexCache.clear();
     m_impl->uiTexCache.clear();
     m_impl->pendingTexInval.clear();
-    m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalCB.Reset();
+    m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalGBufPS.Reset(); m_impl->decalCB.Reset();
     m_impl->decalTexSampler.Reset(); m_impl->decalDepthSampler.Reset();
     m_impl->decalRast.Reset(); m_impl->decalNoDepth.Reset(); m_impl->decalBlend.Reset();
     m_impl->decalReady = false;
@@ -5892,7 +6134,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     p.processPendingInvalidations();
     // Graph-material shaders queued by WarmupMaterials, built before any draw below can
     // stall on them.
-    p.drainMaterialWarmup(m_contentManager);
+    p.drainMaterialWarmup(m_contentManager, m_renderPath == HE::RenderPath::Deferred);
 
     // Feed time-of-day so the extractor recomputes the sun/moon direction (otherwise the
     // sky never responds to the time slider). Mirrors OpenGL/Metal.
@@ -6155,7 +6397,9 @@ void D3D11Renderer::DrawScene(int width, int height)
     // on D3D11 and stayed sun-lit at night). `aoActive`: this frame's SSAO result
     // is the AO SRV the material draw puts on t16 — the built-in shader's own
     // gate (fillPerFrame's), a parameter because that SRV only exists after
-    // the passes below ran.
+    // the passes below ran. `frameMatLight` keeps the last upload: the deferred
+    // resolve starts from exactly this fill (Thema 150).
+    HE::MaterialShaderLibrary::Lighting frameMatLight{};
     auto fillMatLight = [&](bool giActive, bool aoActive)
     {
         if (!(p.m_matReady && p.m_matLightCB)) return;
@@ -6192,6 +6436,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         if (matClustered)
             HE::FillMaterialClusterParams(frameClusters, lit);
         HE::FillMaterialWind(m_environment, lit); // Wind / Wind Sway nodes, next to Time
+        HE::FillMaterialWeather(m_environment, lit); // Weather node + the generic wet/snow response
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
         // preamble binding 13 → t13/s13, bound in the scene pass). Same
         // pre-baked conventions as csmVP below (uvFlipY * kD3DClipFix), so the
@@ -6244,13 +6489,10 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
         // lit.ssr stays 0, and that is NOT an oversight: the built-in
         // scene shader gets the forward reflection cascade (uSSRParams above),
-        // graph materials do not. Their consumer is heSSRFwd on binding 31, and
-        // the shared lighting preamble is emitted UNPINNED — SPIRV-Cross spells
-        // that register(t31)/register(s31), and D3D11 has 16 sampler slots, so
-        // the API cannot bind it. Setting the gate without the descriptor would
-        // make every graph material sample an unbound sampler. Closing it means
-        // pinning the whole preamble, which is its own, larger job
-        // (docs/ssr-cross-backend-plan.md §2.3 head 1 / C5).
+        // forward graph materials do not (docs/ssr-cross-backend-plan.md C5).
+        // The preamble is pinned now (heSSRFwd → t31/s8), but no material draw
+        // binds t31, so the gate would sample nothing. The deferred resolve
+        // sets it in its OWN copy of this block and binds t31 (Thema 150 S5).
         //
         // Height fog + the two image gates, the GL/Metal/Vulkan fill (Thema
         // 126; lit.fog stayed all-zero here before, so graph materials had no
@@ -6262,6 +6504,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         lit.fog[1] = m_environment.fogHeightFalloff;
         lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
         lit.fog[3] = aoActive    ? 1.0f : 0.0f;
+        frameMatLight = lit;
         D3D11_MAPPED_SUBRESOURCE lm{};
         if (SUCCEEDED(ctx->Map(p.m_matLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &lm)))
         {
@@ -6461,6 +6704,29 @@ void D3D11Renderer::DrawScene(int width, int height)
         // Only the direct swapchain branch (application mode, or the chain not
         // ready) draws straight into the backbuffer, has no HDR target, and
         // therefore no SSR.
+        //
+        // ── Deferred render path (Thema 150): decided here, before SSR. Only
+        // where the viewport frame bound the HDR target AND a depth this pass
+        // can sample: the direct-swapchain branch and the world previews stay
+        // forward, like SSR and TAA. A deferred frame runs the SAME forward
+        // trace (reflection pre-pass, trace, blur against last frame's HDR);
+        // the resolve composites it through heLitP's heSSRFwd stage — step 5,
+        // plan §10.12. Not Metal-tile's lag-free G-buffer composite.
+        ID3D11ShaderResourceView* deferredDepthSRV = nullptr;
+        bool deferredActive = false;
+        if (m_renderPath == HE::RenderPath::Deferred && p.deferredReady && p.hdrRTV)
+        {
+            ComPtr<ID3D11RenderTargetView> boundRTV;
+            ComPtr<ID3D11DepthStencilView> boundDSV;
+            ctx->OMGetRenderTargets(1, boundRTV.GetAddressOf(), boundDSV.GetAddressOf());
+            if (boundDSV)
+                deferredDepthSRV = boundDSV.Get() == p.viewportDSV.Get() ? p.viewportDepthSRV.Get()
+                                 : boundDSV.Get() == p.dsv.Get()         ? p.depthSRV.Get()
+                                                                         : nullptr;
+            deferredActive = boundRTV.Get() == p.hdrRTV.Get() && deferredDepthSRV
+                          && p.ensureGBufferTargets(static_cast<uint32_t>(width),
+                                                    static_cast<uint32_t>(height));
+        }
         bool ssrFrameActive = false;
 #if defined(HE_HAVE_SHADERC)
         {
@@ -6653,6 +6919,15 @@ void D3D11Renderer::DrawScene(int width, int height)
         // reuses drawDC with a blend state + per-instance depth sort, so it keeps the
         // per-instance loop (allowInstancing is set false before that pass).
         bool allowInstancing = true;
+        // Deferred (Thema 150): `gbufferPass` routes drawDC into the G-buffer —
+        // graph materials through their G-buffer tail, built-in ones through
+        // GBufPS (`builtinPS`, which every restore below puts back). A graph
+        // material WITHOUT a usable G-buffer variant is collected into
+        // deferredForwardDCs and replayed, lit, right after the resolve — GL's
+        // `deferredForward`, Metal's `forwardOpaque`.
+        bool gbufferPass = false;
+        ID3D11PixelShader* builtinPS = p.ps.Get();
+        std::vector<const DrawCall*> deferredForwardDCs;
         auto drawDC = [&](const DrawCall& dc) {
             // A trail carries no mesh asset — its geometry sits in the ribbon
             // pool, looked up by the DrawCall that was synthesised for it.
@@ -6695,8 +6970,25 @@ void D3D11Renderer::DrawScene(int width, int height)
                     // so the pointer is fresh; it is consumed before anything can load.
                     const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D11);
-                    D3D11RendererImpl::MatShaders* sh =
-                        p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, matTransp);
+                    D3D11RendererImpl::MatShaders* sh = nullptr;
+                    if (gbufferPass)
+                    {
+                        // The G-buffer tail of the same graph (same expressions,
+                        // attributes instead of heLitP). No variant, or one that
+                        // does not build → the lit forward replay after the resolve.
+                        uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
+                        if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
+                                                                   gbHash, gbFrag, gbVertBody))
+                            sh = p.GetOrBuildMaterialShaders(gbHash, gbFrag, gbVertBody, nullptr,
+                                                             false, /*gbuffer=*/true);
+                        if (!(sh && sh->vs && sh->ps && sh->il))
+                        {
+                            deferredForwardDCs.push_back(&dc);
+                            return;
+                        }
+                    }
+                    else
+                        sh = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, matTransp);
                     if (sh && sh->vs && sh->ps && sh->il)
                     {
                         // heTex0 = the material's base texture, matching the built-in selection +
@@ -6888,7 +7180,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                             HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin);
                         }
                         ctx->VSSetShader(p.vs.Get(), nullptr, 0);
-                        ctx->PSSetShader(p.ps.Get(), nullptr, 0);
+                        ctx->PSSetShader(builtinPS, nullptr, 0); // PSMain, or GBufPS in the G-buffer pass
                         ctx->IASetInputLayout(p.inputLayout.Get());
                         ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
                         ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
@@ -6918,6 +7210,22 @@ void D3D11Renderer::DrawScene(int width, int height)
             ID3D11ShaderResourceView* srv = albedo ? albedo : p.dummyTexture.Get();
             ctx->PSSetShaderResources(0, 1, &srv);
             ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
+            // The colour the built-in shader gets. Forward keeps D3D11's own rule
+            // (the draw's baseColor, which stays RenderObject's white default for a
+            // mesh without a loaded material). The G-buffer takes GL's and Metal's
+            // (kGBufFS / gbufferMain, Thema 150): no material → 0.55 grey, or 1.0
+            // under a texture GBufPS multiplies in; the instance tint folded in.
+            // The deferred resolve then shades it with heLitP exactly like they do
+            // — measured on the RTX 4070, the white default alone put D3D11's
+            // deferred floor 22.7/255 above GL's (docs §10.6).
+            glm::vec3 drawBase = dc.baseColor;
+            if (gbufferPass)
+            {
+                const bool hasMat = m_contentManager && dc.materialAssetId != HE::UUID{}
+                                 && m_contentManager->getMaterial(dc.materialAssetId);
+                if (!hasMat) drawBase = albedo ? glm::vec3(1.0f) : glm::vec3(0.55f);
+                drawBase *= glm::vec3(dc.instanceTint);
+            }
             ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
             if (!dc.instanceTransforms.empty())
             {
@@ -6943,7 +7251,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                     }
                     // … one PerObject CB (batch-constant colour/pbr; the instanced VS reads
                     // mvp/model from t3) … then ONE instanced draw.
-                    uploadObject(glm::mat4(1.0f), glm::mat4(1.0f), dc.baseColor, hasTex,
+                    uploadObject(glm::mat4(1.0f), glm::mat4(1.0f), drawBase, hasTex,
                                  dc.metallic, dc.roughness, dc.opacity,
                                  dc.receivesShadow ? 0.0f : 1.0f);
                     ctx->VSSetShader(p.vsInstanced.Get(), nullptr, 0);
@@ -6959,7 +7267,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 else
                 {
                     for (const glm::mat4& t : dc.instanceTransforms) { // fallback: transparent / ring full
-                        uploadObject(viewProj * t, t, dc.baseColor, hasTex,
+                        uploadObject(viewProj * t, t, drawBase, hasTex,
                                      dc.metallic, dc.roughness, dc.opacity,
                                      dc.receivesShadow ? 0.0f : 1.0f);
                         ctx->DrawIndexed(range.count, range.start, 0);
@@ -6970,7 +7278,7 @@ void D3D11Renderer::DrawScene(int width, int height)
             }
             else {
                 uploadObject(viewProj * dc.transform, dc.transform,
-                             dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity,
+                             drawBase, hasTex, dc.metallic, dc.roughness, dc.opacity,
                              dc.receivesShadow ? 0.0f : 1.0f);
                 ctx->DrawIndexed(range.count, range.start, 0);
                 ++p.counters.draws;
@@ -6978,7 +7286,200 @@ void D3D11Renderer::DrawScene(int width, int height)
             }
         };
 
-        for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
+        // Decals into GB0 when this frame is deferred and the variant built;
+        // otherwise the forward decal over the lit colour, as before.
+        const bool gbDecals = deferredActive && !p.m_renderWorld.decals.empty()
+                           && p.EnsureDecalPipeline() && p.decalGBufPS;
+        if (!deferredActive)
+            for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
+        else
+        {
+            // ── Deferred (Thema 150): G-buffer pass → lighting resolve → forward
+            // replay. The sky is already in the HDR target (drawn first, no depth
+            // write) and stays: the resolve discards d >= 1, and nothing between
+            // here and there clears or binds the HDR target.
+            ComPtr<ID3D11RenderTargetView> sceneRTV;
+            ComPtr<ID3D11DepthStencilView> sceneDSV;
+            ctx->OMGetRenderTargets(1, sceneRTV.GetAddressOf(), sceneDSV.GetAddressOf());
+
+            // G-buffer pass: three MRTs + the scene depth, which this pass fills
+            // (it was cleared at the top of the frame and nothing wrote it yet —
+            // the SSAO/GI pre-passes have depth targets of their own). Clear
+            // values are GL's: GB1 = an encoded +Z normal, mid rough/spec.
+            ID3D11RenderTargetView* gbRtvs[3] = { p.gbRTV[0].Get(), p.gbRTV[1].Get(), p.gbRTV[2].Get() };
+            ctx->OMSetRenderTargets(3, gbRtvs, sceneDSV.Get());
+            const float gbClear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            const float gbClear1[4] = { 0.5f, 0.5f, 1.0f, 0.5f };
+            ctx->ClearRenderTargetView(gbRtvs[0], gbClear0);
+            ctx->ClearRenderTargetView(gbRtvs[1], gbClear1);
+            ctx->ClearRenderTargetView(gbRtvs[2], gbClear0);
+            builtinPS   = p.gbufferPS.Get();
+            gbufferPass = true;
+            ctx->PSSetShader(builtinPS, nullptr, 0);
+            for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
+            gbufferPass = false;
+            builtinPS   = p.ps.Get();
+
+            // ── Decals into GB0 (step 5): after the geometry, before the resolve
+            // reads the attributes — GL's slot. The decal colour becomes base
+            // colour and is lit like everything else (shadows, point lights, GI,
+            // SSR); the forward tail below then skips its self-lit decal.
+            if (gbDecals)
+                p.EncodeDecals(ctx, viewProj, width, height, m_contentManager, /*intoGBuffer=*/true);
+
+            // ── Lighting resolve: fullscreen, into the HDR target. The depth
+            // comes OFF the output merger before its SRV goes on — D3D11 silently
+            // unbinds one of the two otherwise (EncodeDecals' rule).
+            ID3D11RenderTargetView* hdrOnly = sceneRTV.Get();
+            ctx->OMSetRenderTargets(1, &hdrOnly, nullptr);
+            {
+                using MSL = HE::MaterialShaderLibrary;
+                // The resolve's OWN lighting block: the frame's graph-material
+                // fill, specular AA off (its "normal" is a G-buffer texel whose
+                // derivative jumps at every silhouette — plan §10.7 #1), and in
+                // the clustered variant a directional-only window (heLitP walks
+                // the whole window; the point/spot lights come from the lists).
+                // A separate CB: the forward replay below still needs the full one.
+                MSL::Lighting rl = frameMatLight;
+                rl.specAA[1] = 0.0f;
+                // SSR (step 5): the forward trace result through heLitP's
+                // heSSRFwd stage, the stage Vulkan's graph materials already use.
+                // The gate goes into THIS block only — frameMatLight keeps
+                // ssr.x = 0, because the replay and the transparent graph draws
+                // have nothing bound on t31 (their forward SSR is plan C5).
+                // giParams.xy is the viewport here, the lookup's divisor.
+                if (ssrActive)
+                {
+                    rl.ssr[0] = 1.0f;
+                    rl.ssr[1] = p.ssrIntensity;
+                    rl.ssr[2] = p.ssrMaxRoughness;
+                    rl.ssr[3] = 0.0f;
+                }
+                MSL::ResolveUniforms ru;
+                // World-pos reconstruction from the depth this frame rasterised
+                // with: the JITTERED viewProj (§10.7 #3), and the decal pass's
+                // convention — the stored depth IS the GL-convention ndc z
+                // (scale 1, bias 0; the camera projection comes from the
+                // extractor, not from this ZERO_TO_ONE translation unit), and
+                // SV_Position.y counts from the top while NDC y points up (-1).
+                const glm::mat4 invViewProj = glm::inverse(viewProj);
+                std::memcpy(ru.invViewProj, &invViewProj[0][0], 16 * sizeof(float));
+                ru.depthParams[0] = -1.0f;
+                ru.depthParams[1] =  1.0f;
+                ru.depthParams[2] =  0.0f;
+                ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode));
+                ID3D11PixelShader* resolvePS = p.resolvePS.Get();
+                if (matClustered && p.resolveClusteredPS)
+                {
+                    // The raw lists on t24..t26 are the ones uploadClusters bound
+                    // with this frame's GI decision (fillPerFrame above).
+                    resolvePS = p.resolveClusteredPS.Get();
+                    HE::FillMaterialDirectionalWindow(p.m_renderWorld, rl);
+                    for (int c = 0; c < 4; ++c)
+                    {
+                        ru.clusterParams[c] = frameClusters.params[c];
+                        ru.clusterCamFwd[c] = frameClusters.camFwd[c];
+                    }
+                }
+                D3D11_MAPPED_SUBRESOURCE mr{};
+                if (SUCCEEDED(ctx->Map(p.resolveLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
+                {
+                    std::memcpy(mr.pData, &rl, sizeof(rl));
+                    ctx->Unmap(p.resolveLightCB.Get(), 0);
+                }
+                if (SUCCEEDED(ctx->Map(p.resolveCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
+                {
+                    std::memcpy(mr.pData, &ru, sizeof(ru));
+                    ctx->Unmap(p.resolveCB.Get(), 0);
+                }
+                ctx->PSSetConstantBuffers(0, 1, p.resolveLightCB.GetAddressOf());          // b0 HeLighting
+                ctx->PSSetConstantBuffers(MSL::kHlslResolveUboReg, 1, p.resolveCB.GetAddressOf()); // b4 HeResolve
+
+                // G-buffer + depth on t27..t30, one point/clamp sampler on their
+                // four sampler registers.
+                static_assert(MSL::kHlslResolveGB1Reg == MSL::kHlslResolveGB0Reg + 1 &&
+                              MSL::kHlslResolveGB2Reg == MSL::kHlslResolveGB0Reg + 2 &&
+                              MSL::kHlslResolveDepthReg == MSL::kHlslResolveGB0Reg + 3,
+                              "the resolve's inputs are one contiguous t-range");
+                ID3D11ShaderResourceView* gbIn[4] = { p.gbSRV[0].Get(), p.gbSRV[1].Get(),
+                                                      p.gbSRV[2].Get(), deferredDepthSRV };
+                ctx->PSSetShaderResources(MSL::kHlslResolveGB0Reg, 4, gbIn);
+                ID3D11SamplerState* pc = p.gbPointClamp.Get();
+                for (int s : { MSL::kHlslResolveGB0Sampler, MSL::kHlslResolveGB1Sampler,
+                               MSL::kHlslResolveGB2Sampler, MSL::kHlslResolveDepthSampler })
+                    ctx->PSSetSamplers(static_cast<UINT>(s), 1, &pc);
+                // The preamble's inputs on the material registers. t10..t13 (GI
+                // masks, CSM, local atlas) are already there from the scene
+                // setup above; sky cube + AO and the DDGI atlases go on exactly
+                // as for a graph-material draw, and come off again below.
+                HE::d3d11mat::BindSkyEnvAndAO(ctx,
+                    p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
+                    aoSRV, p.m_matWeightSampler.Get());
+                HE::d3d11mat::BindDDGIAtlases(ctx,
+                    giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
+                    giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
+                    p.m_matWeightSampler.Get());
+                // heSSRFwd on its pinned t31/s8 (kHlslMaterialPins). The trace
+                // sampler: linear clamp, the one the built-in uSSRFwd lookup uses.
+                constexpr UINT kSSRFwdReg = 31, kSSRFwdSampler = 8;
+                if (ssrActive)
+                {
+                    ctx->PSSetShaderResources(kSSRFwdReg, 1, &ssrSRV);
+                    ctx->PSSetSamplers(kSSRFwdSampler, 1, p.ssrLinearClamp.GetAddressOf());
+                }
+
+                ctx->IASetInputLayout(nullptr);
+                ID3D11Buffer* noVB = nullptr; UINT zero = 0;
+                ctx->IASetVertexBuffers(0, 1, &noVB, &zero, &zero);
+                ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                ctx->VSSetShader(p.resolveVS.Get(), nullptr, 0);
+                ctx->PSSetShader(resolvePS, nullptr, 0);
+                ctx->RSSetState(p.fsRastState.Get());
+                ctx->OMSetDepthStencilState(p.noDepthDSS.Get(), 0);
+                ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+                ctx->Draw(3, 0);
+                ++p.counters.draws;
+                static bool s_resolveLogged = false; // the runtime witness on Windows
+                if (!s_resolveLogged)
+                {
+                    s_resolveLogged = true;
+                    HE_LOG_INFO(RHI, "D3D11Renderer: deferred frame (%dx%d, %s resolve, G-buffer view %d)",
+                                width, height, resolvePS == p.resolveClusteredPS.Get() ? "clustered" : "8-light",
+                                HE::viewModeGBufferIndex(m_viewMode));
+                }
+
+                // Give the built-in pass its registers back: the inputs off (the
+                // depth SRV BEFORE the DSV returns), t15/t16 and t17/t18/s1/s3 as
+                // after a material draw, s2 = the built-in GI/SSR linear clamp,
+                // b0 = PerObject.
+                ID3D11ShaderResourceView* noIn[4] = {};
+                ctx->PSSetShaderResources(MSL::kHlslResolveGB0Reg, 4, noIn);
+                if (ssrActive) // the next frame's trace renders into it again
+                    ctx->PSSetShaderResources(kSSRFwdReg, 1, noIn);
+                HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
+                {
+                    HE::d3d11mat::BuiltinGISlots builtin;
+                    builtin.localShadowArray = localShadowSrv_;
+                    builtin.clusterLights    = clustered ? p.clusterLightSRV.Get() : nullptr;
+                    builtin.pointSampler     = p.pointSampler.Get();
+                    builtin.shadowSampler    = p.shadowSampler.Get();
+                    HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin);
+                }
+                if (p.giLinearClamp)
+                    ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
+                ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+            }
+            ctx->OMSetRenderTargets(1, &hdrOnly, sceneDSV.Get());
+            ctx->IASetInputLayout(p.inputLayout.Get());
+            ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+            ctx->PSSetShader(p.ps.Get(), nullptr, 0);
+            ctx->RSSetState(p.rasterState.Get());
+            ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
+
+            // Forward replay: graph materials without a G-buffer variant, lit by
+            // their own forward shader against the G-buffer depth (test + write).
+            for (const DrawCall* dc : deferredForwardDCs) drawDC(*dc);
+        }
 
         // ── Skinned mesh pass ─────────────────────────────────────────────────
         // Shares PSMain (lighting + shadow + AO) already bound above.
@@ -7057,7 +7558,9 @@ void D3D11Renderer::DrawScene(int width, int height)
         // and before the transparent draws — the slot Metal and GL use for their
         // G-buffer decals. Self-restoring; a frame without decals costs one
         // empty() check.
-        p.EncodeDecals(ctx, viewProj, width, height, m_contentManager);
+        // A deferred frame put them into GB0 already (gbDecals).
+        if (!gbDecals)
+            p.EncodeDecals(ctx, viewProj, width, height, m_contentManager);
 
         if (!transparentDCs.empty()) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
@@ -7360,6 +7863,11 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     // chain SSR needs — false only if a TAA shader failed to compile. Only the
     // direct swapchain fallback renders unjittered (taaFrame).
     c.supportsTemporalAA = m_impl->postFxReady && m_impl->taaReady();
+    // Deferred (Thema 150): the G-buffer + resolve built at init. Like SSR/TAA
+    // it lives on the viewport frame's HDR target (editor viewport and the
+    // packaged game's swapchain chain); the direct-swapchain branch without an
+    // HDR target and the world previews stay forward.
+    c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
     return c;
 }
 

@@ -1628,6 +1628,14 @@ void startExport(AppContext& ctx)
                 // finishing (or codesigning) the bundle are Clean up. Both are
                 // real work — an ad-hoc codesign of an .app takes seconds — which
                 // is why they are two rings and not one that sits at 100 %.
+                // The Package ring's log: every asset that went into the pak, in pack
+                // order, with "reused" for the ones carried over from the previous
+                // pak. The counter alone says how many; this says which — and is the
+                // answer to "why is my asset not in the build".
+                es.onAsset = [](const std::string& relPath, bool reused)
+                {
+                    Build::log(0, (reused ? "reused  " : "packed  ") + relPath);
+                };
                 es.onStage = [stepPackage, stepCleanup](const char* what)
                 {
                     const std::string s = what;
@@ -1662,7 +1670,7 @@ void startExport(AppContext& ctx)
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
-                                              hcBase = base, stepBuild, hostTarget]()
+                                              hcBase = base, stepBuild, stepPackage, hostTarget]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -1893,10 +1901,13 @@ void startExport(AppContext& ctx)
                             std::filesystem::path(outDir), esEff, sceneBinary, extraScenes,
                             gameInstanceJson);
                         if (res.success)
+                            // Filed under Package, not under whichever step the exporter
+                            // has reached by now (Clean up) — the summary belongs at the
+                            // foot of the asset list it totals.
                             Build::log(0, "Packed " + std::to_string(res.assetsPacked) +
                                           " asset(s) (" + std::to_string(res.assetsReused) +
                                           " reused), " + std::to_string(res.binaryFilesCopied) +
-                                          " runtime file(s) copied");
+                                          " runtime file(s) copied", stepPackage);
                         else
                             Build::log(2, res.errorMessage);
                         // Only a host-target export produces a binary this machine

@@ -280,3 +280,43 @@ TEST_CASE("ViewMode: the headless override reads VIEWMODE first, then the old GB
 	CHECK(viewModeOverride(ViewMode::Unlit, "bogus", nullptr) == ViewMode::Unlit);
 	CHECK(viewModeOverride(ViewMode::Unlit, "42",    nullptr) == ViewMode::Unlit);
 }
+
+TEST_CASE("EditorCamera: the wheel during fly-look changes the fly speed, not the distance")
+{
+	EditorCamera cam;
+	EditorCamera::Input init; init.dt = 0.016f;
+	cam.update(init);
+	const float speed0 = cam.flySpeed();
+	const glm::vec3 pos0 = cam.position();
+
+	// Up: faster, by a fixed factor per tick.
+	EditorCamera::Input up; up.dt = 0.016f; up.look = true; up.speedWheel = 2.0f;
+	cam.update(up);
+	CHECK(cam.flySpeed() == doctest::Approx(speed0 * EditorCamera::kFlySpeedPerTick * EditorCamera::kFlySpeedPerTick));
+	CHECK(cam.position() == pos0);                      // the camera did not dolly
+
+	// Down: slower; two ticks down undo two ticks up.
+	EditorCamera::Input down; down.dt = 0.016f; down.look = true; down.speedWheel = -2.0f;
+	cam.update(down);
+	CHECK(cam.flySpeed() == doctest::Approx(speed0));
+
+	// Held button only: without fly-look the same scroll does nothing to the speed.
+	EditorCamera::Input idle; idle.dt = 0.016f; idle.speedWheel = 3.0f;
+	cam.update(idle);
+	CHECK(cam.flySpeed() == doctest::Approx(speed0));
+
+	// Bounded both ways.
+	EditorCamera::Input many; many.dt = 0.016f; many.look = true; many.speedWheel = 200.0f;
+	cam.update(many);
+	CHECK(cam.flySpeed() == EditorCamera::kMaxFlySpeed);
+	many.speedWheel = -400.0f;
+	cam.update(many);
+	CHECK(cam.flySpeed() == EditorCamera::kMinFlySpeed);
+
+	// And the speed it was left at is the speed the camera flies at.
+	cam.setFlySpeed(10.0f);
+	EditorCamera::Input fly; fly.dt = 1.0f; fly.look = true; fly.moveAxis = glm::vec3(0, 0, 1);
+	const glm::vec3 before = cam.position();
+	cam.update(fly);
+	CHECK(glm::length(cam.position() - before) == doctest::Approx(10.0f).epsilon(0.001));
+}
