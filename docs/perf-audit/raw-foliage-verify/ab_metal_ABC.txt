@@ -1,0 +1,5 @@
+case old path (=0)  ordered        default clusters
+A    identical      identical      751 of 921600 pixels (0.081 %), worst channel 86/255   [100k, everything in range, forward; 19 s]
+B    identical      identical      878 of 921600 pixels (0.095 %), worst channel 85/255   [100k, everything in range, deferred; 30 s]
+C    identical      identical      423 of 921600 pixels (0.046 %), worst channel 81/255   [100k, drawDistance 100 m, camera in the field; 21 s]
+OK: the old path and ordered mode reproduce the BEFORE picture

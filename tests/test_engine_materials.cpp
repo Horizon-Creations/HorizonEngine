@@ -95,21 +95,22 @@ struct Scratch
 // change this list has to be shown.
 struct Knob { const char* name; MatParamKind kind; float v[4]; };
 const Knob kWaterKnobs[] = {
-	{ "ShallowColor", MatParamKind::Color, { 0.10f, 0.42f, 0.45f, 0.0f } },
-	{ "DeepColor",    MatParamKind::Color, { 0.01f, 0.07f, 0.12f, 0.0f } },
-	{ "Turbidity",    MatParamKind::Vec2,  { 0.35f, 3.0f, 0.0f, 0.0f } },
-	{ "WaveA",        MatParamKind::Vec4,  { 30.0f, 1.2f, 8.0f, 0.25f } },
-	{ "WaveB",        MatParamKind::Vec4,  { 310.0f, 0.8f, 3.5f, 0.18f } },
-	{ "WaveC",        MatParamKind::Vec4,  { 100.0f, 0.5f, 1.2f, 0.12f } },
+	{ "ShallowColor", MatParamKind::Color, { 0.045f, 0.20f, 0.22f, 0.0f } },
+	{ "DeepColor",    MatParamKind::Color, { 0.004f, 0.028f, 0.052f, 0.0f } },
+	{ "Turbidity",    MatParamKind::Vec2,  { 0.45f, 4.0f, 0.0f, 0.0f } },
+	{ "WaveA",        MatParamKind::Vec4,  { 20.0f, 1.0f, 14.0f, 0.07f } },
+	{ "WaveB",        MatParamKind::Vec4,  { 335.0f, 0.8f, 5.0f, 0.10f } },
+	{ "WaveC",        MatParamKind::Vec4,  { 70.0f, 0.5f, 1.6f, 0.09f } },
 	{ "FresnelPower", MatParamKind::Float, { 5.0f, 0.0f, 0.0f, 0.0f } },
 	{ "Reflection",   MatParamKind::Float, { 0.8f, 0.0f, 0.0f, 0.0f } },
-	{ "Roughness",    MatParamKind::Float, { 0.06f, 0.0f, 0.0f, 0.0f } },
+	{ "Roughness",    MatParamKind::Float, { 0.08f, 0.0f, 0.0f, 0.0f } },
 	{ "Specular",     MatParamKind::Float, { 0.3f, 0.0f, 0.0f, 0.0f } },
-	{ "Opacity",      MatParamKind::Float, { 0.55f, 0.0f, 0.0f, 0.0f } },
+	{ "Opacity",      MatParamKind::Float, { 0.5f, 0.0f, 0.0f, 0.0f } },
 	{ "Refraction",   MatParamKind::Float, { 0.3f, 0.0f, 0.0f, 0.0f } },
-	{ "FoamColor",    MatParamKind::Color, { 0.92f, 0.95f, 0.97f, 0.0f } },
-	{ "Foam",         MatParamKind::Vec4,  { 0.18f, 0.8f, 1.5f, 0.3f } },
-	{ "Caustics",     MatParamKind::Vec4,  { 0.35f, 2.5f, 0.25f, 25.0f } },
+	{ "FoamColor",    MatParamKind::Color, { 0.82f, 0.88f, 0.90f, 0.0f } },
+	{ "Foam",         MatParamKind::Vec4,  { 0.06f, 0.5f, 0.7f, 0.3f } },
+	{ "Caustics",     MatParamKind::Vec4,  { 0.2f, 2.0f, 0.2f, 18.0f } },
+	{ "Variation",    MatParamKind::Vec4,  { 3.5f, 1.0f, 22.0f, 2.5f } },
 };
 constexpr int kWaterKnobCount = static_cast<int>(sizeof(kWaterKnobs) / sizeof(kWaterKnobs[0]));
 
@@ -155,7 +156,7 @@ Baked readBaked(const fs::path& file)
 }
 } // namespace
 
-TEST_CASE("Engine water material: loads as a lit Translucent graph with all fifteen knobs")
+TEST_CASE("Engine water material: loads as a lit Translucent graph with all sixteen knobs")
 {
 	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
 	Scratch s("load");
@@ -211,6 +212,29 @@ TEST_CASE("Engine water material: loads as a lit Translucent graph with all fift
 		CHECK_MESSAGE(m->customShaderFragGlsl.find("heParams.v[" + std::to_string(i) + "]") != std::string::npos,
 		              "slot ", i, " is never read");
 	CHECK(m->customShaderFragGlsl.find("heLight.sunDir.w") != std::string::npos);
+}
+
+// The Material Editor redraws its preview every frame for a shader that reads the
+// clock, and the water is the material that made the stand-still obvious (its
+// waves live on Time). The shipped file, the way the editor loads it, has to be
+// recognised as one — the engine plane's waves would otherwise sit frozen in the
+// preview while moving in the scene.
+TEST_CASE("Engine water material: the Material Editor preview redraws it every frame")
+{
+	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
+	Scratch s("preview-animated");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const HE::UUID id = cm.loadAsset(kWaterPath);
+	const MaterialAsset* m = cm.getMaterial(id);
+	REQUIRE(m);
+	CHECK(HE::matGlslUsesTime(m->customShaderFragGlsl));
+	// Same answer from the graph the editor regenerates the shader from — what the
+	// preview asks after an edit, before anything is baked.
+	HE::MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(m->nodeGraphJson, g));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	CHECK(HE::matGlslUsesTime(gen.glsl));
 }
 
 // The Details panel lists these knobs under "Material Parameters (this entity)"
@@ -308,8 +332,8 @@ TEST_CASE("Engine water material: an edited value survives save and reload, the 
 	CHECK(m->shaderParamData[col * 4 + 2] == doctest::Approx(0.3f));
 	CHECK(m->shaderParamData[opa * 4 + 0] == doctest::Approx(0.75f));
 	// …and an untouched knob keeps its default.
-	CHECK(m->shaderParamData[deep * 4 + 0] == doctest::Approx(0.01f));
-	CHECK(m->shaderParamData[deep * 4 + 2] == doctest::Approx(0.12f));
+	CHECK(m->shaderParamData[deep * 4 + 0] == doctest::Approx(0.004f));
+	CHECK(m->shaderParamData[deep * 4 + 2] == doctest::Approx(0.052f));
 }
 
 TEST_CASE("Engine water material: the committed file carries a shader, not just the graph")
@@ -672,7 +696,7 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 	const WaterSources w = loadWaterSources("ubo");
 	REQUIRE(w.ok);
 
-	SUBCASE("CPU: fifteen knobs pack into the 64-float block the renderers upload")
+	SUBCASE("CPU: sixteen knobs pack into the 64-float block the renderers upload")
 	{
 		REQUIRE(static_cast<int>(w.paramNames.size()) == kWaterKnobCount);
 		REQUIRE(w.paramTypes.size() == w.paramNames.size());

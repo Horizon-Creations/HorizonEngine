@@ -58,6 +58,13 @@ struct State
 	float         previewYaw = 0.6f, previewPitch = 0.35f, previewDist = 3.1f;
 	void*         previewTex   = nullptr;
 	bool          previewDirty = true;
+	// The shader the preview last drew reads the engine clock (Time, Panner, Wind
+	// Sway, the water's waves). Such a preview is stale one frame after it was drawn,
+	// so it stays dirty and re-renders every frame; every other material keeps the
+	// draw-on-change rule and costs nothing while it sits still. Set from the very
+	// source handed to the renderer, so a per-node preview of a node that does not
+	// touch the clock stops redrawing even when the material as a whole does.
+	bool          previewAnimated = false;
 	int           previewPx    = 0;
 	int           previewShape = 0;  // 0 sphere / 1 cube / 2 plane (RenderMaterialPreview)
 	// Preview subject: a built-in primitive (previewShape) or ANY static mesh from the
@@ -763,6 +770,16 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		{
 			bool on = n.p[0] > 0.5f;
 			if (EditorWidgets::checkbox("On (default)", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
+			break;
+		}
+		// ── v15: bombing cells — the seed picks the set of numbers; Cell and Blend are pins ──
+		case MatNodeType::BombCells:
+		{
+			int seed = static_cast<int>(std::lround(n.p[0]));
+			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
+			if (ImGui::DragInt("Seed", &seed, 0.2f)) n.p[0] = static_cast<float>(seed);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Seed");
 			break;
 		}
 		// ── v6: procedural texture — inline Scale (bigger = finer speckle) ──
@@ -2295,6 +2312,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// change (camera/size/material edit). Reuse the handle otherwise.
 			static HE::UUID s_lastPreviewMat{};
 			if (s_lastPreviewMat != st.materialId) st.previewDirty = true;
+			// Time-driven material: the picture it showed last frame is already
+			// out of date. The editor draws every frame (no event-driven idle),
+			// so marking it dirty here is all it takes to keep it running.
+			if (st.previewAnimated) st.previewDirty = true;
+			// The clock the preview's Time input reads — the UI clock, which runs
+			// from the editor's start like the scene's engine seconds do.
+			const float previewClock = static_cast<float>(ImGui::GetTime());
 			// What this tab SHOWS is the canvas graph, and that graph is allowed to have no
 			// counterpart on the asset yet: a material created in the Content Browser is born
 			// with nothing but its META chunk, so the default graph stateFor() builds lives
@@ -2351,9 +2375,16 @@ void render(AppContext& ctx, const std::string& assetPath,
 						swapped = true;
 					}
 				}
+				// Asked of the text the GPU is about to run (the swapped-in source
+				// for a node preview), fragment and WPO vertex stage both.
+				const bool usesTime = HE::matGlslUsesTime(mat->customShaderFragGlsl)
+				                   || HE::matGlslUsesTime(mat->customShaderVertGlsl);
 				st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
 					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist, st.previewShape,
-					st.previewMeshId);
+					st.previewMeshId, previewClock);
+				// A render that produced nothing (a shader that does not build) is
+				// not worth retrying 60 times a second — the next edit asks again.
+				st.previewAnimated = usesTime && st.previewTex != nullptr;
 				if (swapped && mat)
 				{
 					mat->customShaderFragGlsl = std::move(origGlsl);
@@ -2409,7 +2440,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 						sm->graphLayerNames   = gen.layerNames;
 						st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager,
 							st.fnPreviewMatId, (uint32_t)px, st.previewYaw, st.previewPitch,
-							st.previewDist, st.previewShape, st.previewMeshId);
+							st.previewDist, st.previewShape, st.previewMeshId, previewClock);
+						st.previewAnimated = HE::matGlslUsesTime(gen.glsl) && st.previewTex != nullptr;
 						// Consumed only where a render was actually ATTEMPTED — bailing out
 						// above (no output pin yet, unsaved path) used to clear the flag too,
 						// which left the preview blank until the next edit re-set it.

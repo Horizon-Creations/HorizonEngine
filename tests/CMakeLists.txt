@@ -3,6 +3,7 @@ add_executable(he_tests
     test_slotmap.cpp
     test_hasset.cpp
     test_contentmanager.cpp
+    test_engine_dependencies.cpp
     test_asset_ref_retarget.cpp
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
@@ -44,6 +45,9 @@ add_executable(he_tests
     # remove its copy, pending at the next start, Restore's backup, and the
     # ContentManager::writeAssetTo path every asset panel's copy takes.
     test_asset_autosave.cpp
+    # A .heproj double-clicked in the file manager: quotes, blanks, relative
+    # paths and wrong extensions, and Hub vs. guarded switch vs. already open.
+    test_project_launch_open.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
@@ -57,6 +61,10 @@ add_executable(he_tests
     test_undo.cpp
     test_editor_selection.cpp
     test_editor_marquee.cpp
+    # Which tab an asset opens in: one tab per asset however the path is spelled
+    # (Content Browser double-click, Open Function, restore), and the tabs
+    # following a rename.
+    test_editor_tabs.cpp
     # The D3D12 ImGui SRV heap's free-list: a freed slot waits for its fence
     # before it is handed out again (Dock-Splitter drag, Thema 113).
     test_deferred_slot_free_list.cpp
@@ -123,6 +131,7 @@ add_executable(he_tests
     # Was on disk since the foliage layer landed but never in this list, so the
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp
+    test_foliage_cluster.cpp
     test_debug_draw.cpp
     # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
     test_bloom_kernel.cpp
@@ -309,6 +318,8 @@ add_executable(he_tests
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
+    test_git_panel_ops.cpp
+    test_scene_file_stamp.cpp
     test_github_oauth.cpp
     test_game_replication.cpp
     # The first real gameplay session: two and three NetGameSessions against
@@ -323,6 +334,7 @@ add_executable(he_tests
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FoliageExtract.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiAutoLandscape.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
@@ -353,6 +365,10 @@ add_executable(he_tests
     # Matrices in, yes/no out — the part of "drag a frame around these" that a
     # test can ask without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorMarquee.cpp
+    # The tab lookup behind every "open this asset": the tab vector and a
+    # ContentManager in, which tab out — no ImGui. AppContext::EditorTab lives
+    # under HE_IMGUI_ENABLED, set per file below.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
     # The viewport's right-click verbs (hide / isolate / show all / group /
     # ungroup): a registry and a selection in, touched entities out — no ImGui.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportActions.cpp
@@ -610,6 +626,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneAutosave.cpp
     # Its sibling for the asset tabs — same clock-in-hand design.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetAutosave.cpp
+    # What a launch argument or a macOS open event means as a project path,
+    # and which Open it takes. SDL- and ImGui-free (see the header).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectLaunchOpen.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
@@ -797,6 +816,8 @@ set_source_files_properties(
     test_texture_viewer.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     test_streaming_view.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
+    test_editor_tabs.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE
@@ -815,6 +836,10 @@ target_include_directories(he_tests PRIVATE
 # resolves to dllexport (definitions are local to this exe) rather than dllimport,
 # which would emit unresolved __imp_ references for those same locally-built symbols.
 target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+if(HE_HAVE_ASSIMP AND HE_ASSIMP_TEST_MODELS)
+    # test_assimpimport.cpp reads Blender files out of Assimp's sample models.
+    target_compile_definitions(he_tests PRIVATE HE_ASSIMP_TEST_MODELS="${HE_ASSIMP_TEST_MODELS}")
+endif()
 # test_scene_serializer.cpp outgrew the 2^16 COFF sections of a Debug MSVC
 # object (fatal error C1128); CI builds Windows in Release only and never saw it.
 if(MSVC)
@@ -1153,6 +1178,21 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME he_mcp_shim
              COMMAND ${Python3_EXECUTABLE}
                      "${CMAKE_SOURCE_DIR}/tests/test_he_mcp.py")
+endif()
+
+# ── "Does a double-click on a .heproj open the editor?" ──────────────────────
+# macOS registers the type in Info.plist; Windows and Linux ship a ZIP / tarball with
+# no installer, so the registration is files inside the package (FileTypes/, from
+# scripts/windows_assets and scripts/linux_assets). This holds those files to ONE
+# name for the type on all three platforms, validates them, and on a POSIX machine
+# runs the Linux installer for real against a throwaway XDG_DATA_HOME. Python, because
+# what it checks is files and a shell script, and because the Windows half of the
+# same question is answered on the Windows runner by check_heproj_registration.ps1.
+# CI additionally passes --package to prove the deployed package carries the files.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME heproj_file_types
+             COMMAND ${Python3_EXECUTABLE}
+                     "${CMAKE_SOURCE_DIR}/tests/test_heproj_file_types.py")
 endif()
 
 # ── "How heavy is what we actually ship?" ────────────────────────────────────

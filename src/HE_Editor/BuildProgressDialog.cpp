@@ -193,14 +193,15 @@ void stepFailed(int index)
 	s_steps[index].indeterminate = false;
 }
 
-void log(int severity, const std::string& text)
+void log(int severity, const std::string& text, int stepOverride)
 {
 	std::lock_guard<std::mutex> lk(s_mutex);
 	// Lines that arrive between steps (the closing summary, a throw caught
 	// outside any step) belong to the last step that ran — otherwise they land
 	// in a per-step view that shows nothing.
-	const int step = s_current >= 0 ? s_current
-	                                : std::max(0, static_cast<int>(s_steps.size()) - 1);
+	int step = s_current >= 0 ? s_current
+	                          : std::max(0, static_cast<int>(s_steps.size()) - 1);
+	if (stepOverride >= 0 && stepOverride < static_cast<int>(s_steps.size())) step = stepOverride;
 	s_log.push_back(LogLine{step, severity, text});
 }
 
@@ -582,23 +583,51 @@ void render([[maybe_unused]] AppContext& ctx)
 	const float footerH = ImGui::GetFrameHeightWithSpacing()
 	                    + ImGui::GetTextLineHeightWithSpacing()
 	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f;
-	ImGui::BeginChild("##build_step_log", ImVec2(0.0f, -footerH), ImGuiChildFlags_Borders);
+	ImGui::BeginChild("##build_step_log", ImVec2(0.0f, -footerH), ImGuiChildFlags_Borders,
+	                  ImGuiWindowFlags_HorizontalScrollbar);
 	{
 		std::string clip;
 		std::lock_guard<std::mutex> lk(s_mutex);
-		ImGui::PushTextWrapPos(0.0f);
-		for (const LogLine& l : s_log)
+		auto drawLine = [](const LogLine& l)
 		{
-			if (l.step != s_selected) continue;
-			if (copy) { clip += l.text; clip += '\n'; }
 			if (l.severity == 2)
 				ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "%s", l.text.c_str());
 			else if (l.severity == 1)
 				ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s", l.text.c_str());
 			else
 				ImGui::TextUnformatted(l.text.c_str());
+		};
+
+		// The step's own lines, in order. Pointers are good for this frame only —
+		// we hold the model's lock until the end of the block, so the worker cannot
+		// grow (and move) the vector underneath them.
+		std::vector<const LogLine*> lines;
+		for (const LogLine& l : s_log)
+			if (l.step == s_selected) lines.push_back(&l);
+		if (copy)
+			for (const LogLine* l : lines) { clip += l->text; clip += '\n'; }
+
+		// A pack step lists every asset it ships — thousands of lines in a real
+		// project, redrawn sixty times a second. Past this size the log is drawn
+		// through a clipper, which needs one fixed line height: no wrapping, and
+		// the child scrolls sideways instead. Short logs (compiler output
+		// included) keep their wrapping.
+		constexpr size_t kClipFrom = 400;
+		if (lines.size() > kClipFrom)
+		{
+			ImGuiListClipper clipper;
+			clipper.Begin(static_cast<int>(lines.size()));
+			while (clipper.Step())
+				for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+					drawLine(*lines[static_cast<size_t>(i)]);
+			clipper.End();
 		}
-		ImGui::PopTextWrapPos();
+		else
+		{
+			ImGui::PushTextWrapPos(0.0f);
+			for (const LogLine* l : lines) drawLine(*l);
+			ImGui::PopTextWrapPos();
+		}
 		if (copy) ImGui::SetClipboardText(clip.c_str());
 		// Follow the tail of the step being watched, unless the user scrolled up.
 		if (running && s_selected == current && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)

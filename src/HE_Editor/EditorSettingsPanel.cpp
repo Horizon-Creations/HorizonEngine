@@ -291,7 +291,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		Row::combo("Render Path", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-			ImGui::SetTooltip("Deferred is available on Metal and OpenGL only.");
+			ImGui::SetTooltip("Deferred needs this backend's G-buffer pipeline to finish setting up.");
 		else if (supported)
 			hint("Deferred: G-buffer + one lighting resolve per visible pixel.");
 	});
@@ -359,8 +359,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (aaMode == 4 && !mfxOK)
 			hint("MetalFX needs Apple Silicon — falls back to TAA.");
 		else if (aaMode >= 3 && !taaOK)
-			hint("TAA needs a velocity buffer — Metal and OpenGL so far (both render paths); "
-			     "this backend falls back to SMAA.");
+			hint("TAA needs a velocity buffer, which this backend does not write yet; falls back to SMAA.");
 		else if (aaMode == 0)
 			hint("No edge smoothing at all; the post chain still runs.");
 		else if (aaMode == 2)
@@ -441,7 +440,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
-			ImGui::SetTooltip("Metal only, and only with Render Path = Deferred.");
+			ImGui::SetTooltip("Needs this backend's post-processing pipeline to finish setting up.");
 		else if (supported)
 			hint("Metallic surfaces reflect the actual scene (deferred path).");
 	});
@@ -1101,19 +1100,14 @@ bool s_idSeeded      = false;
 
 void drawGitMessages(GitController* git)
 {
-	if (!git->lastError().empty())
-	{
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-		ImGui::TextWrapped("%s", git->lastError().c_str());
-		ImGui::PopStyleColor();
-	}
-	else if (!git->lastInfo().empty())
+	// Errors are posted to the notifications by GitController (the footer bell); what
+	// is printed here is only the outcome of the last thing that worked.
+	if (git->lastError().empty() && !git->lastInfo().empty())
 	{
 		ImGui::Spacing();
 		ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s", git->lastInfo().c_str());
 	}
-	if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
+	if (git->busyWithWork()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
 
 // Repository half of the page: init, remote / GitHub setup, auto-push.
@@ -1185,10 +1179,10 @@ void drawRepositorySection(AppContext& ctx)
 			ImGui::PopStyleColor();
 		}
 		ImGui::Spacing();
-		if (git->busy()) ImGui::BeginDisabled();
+		if (git->busyWithWork()) ImGui::BeginDisabled();
 		if (EditorWidgets::button("Initialize Git repository", ImVec2(240.0f, 0.0f)))
 			git->requestInit(lfs);
-		if (git->busy()) ImGui::EndDisabled();
+		if (git->busyWithWork()) ImGui::EndDisabled();
 		drawGitMessages(git);
 		return;
 	}
@@ -1229,7 +1223,7 @@ void drawRepositorySection(AppContext& ctx)
 		// The GitHub account (above) is the only way in: an empty token makes the
 		// service read the sign-in from the credential helper itself.
 		const bool signedIn = GitHubSignIn::account() == GitHubSignIn::Account::SignedIn;
-		ImGui::BeginDisabled(git->busy() || !signedIn ||
+		ImGui::BeginDisabled(git->busyWithWork() || !signedIn ||
 		                     s_ghRepoName[0] == '\0' || st.initialCommit);
 		if (EditorWidgets::primaryButton("Create & push", ImVec2(130.0f, 0.0f)))
 			git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, {});
@@ -1255,7 +1249,7 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::InputTextWithHint("##remoteurl", "https://github.com/you/project.git",
 		                         s_remoteUrl, sizeof(s_remoteUrl));
 		ImGui::SameLine();
-		ImGui::BeginDisabled(git->busy() || s_remoteUrl[0] == '\0');
+		ImGui::BeginDisabled(git->busyWithWork() || s_remoteUrl[0] == '\0');
 		if (EditorWidgets::button("Set##remote"))
 		{
 			git->requestSetRemote(s_remoteUrl);
@@ -1389,7 +1383,7 @@ void drawRepositorySection(AppContext& ctx)
 		                         ImGuiInputTextFlags_Password);
 
 		ImGui::Spacing();
-		ImGui::BeginDisabled(git->busy() || s_credHost[0] == '\0' ||
+		ImGui::BeginDisabled(git->busyWithWork() || s_credHost[0] == '\0' ||
 		                     s_credUser[0] == '\0' || s_credToken[0] == '\0');
 		if (EditorWidgets::primaryButton("Save token", ImVec2(140.0f, 0.0f)))
 		{

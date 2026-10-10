@@ -966,6 +966,44 @@ TEST_CASE("The reported IPv6 address is a stable one, not a rotating privacy add
     HE::Net::socketClose(listener);
 }
 
+TEST_CASE("socketCreateTcpConnecting can be told to start past the first address")
+{
+    // A host with several addresses commits a non-blocking connect to the first
+    // one that does not fail outright, and a caller whose connect then times out
+    // needs a way onto the next. "localhost" resolves to at least one address on
+    // every machine; how many more depends on the resolver, so only the contract
+    // is checked, not a particular count.
+    HE::Net::SocketHandle listener = HE::Net::socketCreateListenerDualStack(0);
+    REQUIRE(listener != HE::Net::kInvalidSocket);
+    const std::uint16_t port = HE::Net::socketBoundPort(listener);
+
+    HE::Net::SocketHandle first = HE::Net::kInvalidSocket;
+    unsigned count = 0;
+    const HE::Net::SocketResult rc =
+        HE::Net::socketCreateTcpConnecting("localhost", port, first, 0, &count);
+    CHECK(rc != HE::Net::SocketResult::Error);
+    CHECK(count >= 1);
+    if (first != HE::Net::kInvalidSocket) HE::Net::socketClose(first);
+
+    // Past the last candidate there is nothing left to try: an error, no socket,
+    // and the count still reported so the caller knows it has run out.
+    HE::Net::SocketHandle past = HE::Net::kInvalidSocket;
+    unsigned countPast = 0;
+    CHECK(HE::Net::socketCreateTcpConnecting("localhost", port, past, count, &countPast)
+          == HE::Net::SocketResult::Error);
+    CHECK(past == HE::Net::kInvalidSocket);
+    CHECK(countPast == count);
+
+    // A name that does not resolve reports zero candidates, not a stale count.
+    HE::Net::SocketHandle none = HE::Net::kInvalidSocket;
+    unsigned countNone = 99;
+    CHECK(HE::Net::socketCreateTcpConnecting("no-such-host.invalid", port, none, 0, &countNone)
+          == HE::Net::SocketResult::Error);
+    CHECK(countNone == 0);
+
+    HE::Net::socketClose(listener);
+}
+
 TEST_CASE("An IPv6 address is only reported when it is globally routable")
 {
     // Empty is a valid answer (no IPv6 here). What must never happen is a

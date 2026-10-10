@@ -2708,7 +2708,7 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
 	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
 	const float pms   = L.autoSlope.w;
-	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	const float flat  = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
 	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
 }
 
@@ -3166,7 +3166,7 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 	                  * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
 	const float3 s2   = mix(s1, L.layer[3].rgb, snow);
 	const float pms   = L.autoSlope.w;
-	const float flat  = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	const float flat  = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
 	return mix(s2, L.autoWet.rgb, L.autoWet.w * flat);
 }
 
@@ -4228,6 +4228,54 @@ float cirrusFbm(float2 p)
 constant float kCloudBase  = 1.0;
 constant float kCloudTop   = 2.6;
 constant float kCloudScale = 1.2;    // spatial frequency of the cloud field
+// Coverage -> presence threshold of the cloud noise (mirrors the GL cloudLo()): the last
+// stretch of the slider drops it below the noise floor so "100 %" is a CLOSED deck.
+float cloudLo(float coverage)
+{
+	float c = clamp(coverage, 0.0, 1.0);
+	return mix(0.70, 0.22, c) - 0.30 * smoothstep(0.85, 1.0, c);
+}
+// How overcast the sky is (mirrors the GL overcastAmount()): drives the celestial layer
+// fading out behind the deck and the deck carrying on to the horizon.
+float overcastAmount(float coverage)
+{
+	return smoothstep(0.75, 1.0, clamp(coverage, 0.0, 1.0));
+}
+float3 skyColor(float3 dir, float3 sunDir);   // defined with the analytic sky further down
+// The cloud layer beyond where the march resolves it, and under any thin spot a full coverage
+// leaves (mirrors the GL overcastDeck()): coarse cloud noise on the layer plane, flattened toward
+// the horizon, bleeding into the sky's own colour there. deckXZ = the point on the layer plane.
+float3 overcastDeck(float3 dir, float3 sunDir, float3 sunColor, float3 cloudTint, float2 deckXZ)
+{
+	float sunY = clamp(sunDir.y, -0.3, 1.0);
+	float day  = smoothstep(-0.10, 0.10, sunY);
+	float dusk = smoothstep(-0.14, 0.04, sunY) * (1.0 - smoothstep(0.04, 0.26, sunY));
+	float3 dayCol   = mix(float3(0.17, 0.20, 0.29), sunColor * 1.12, 0.45);
+	float3 nightCol = mix(float3(0.015, 0.018, 0.035), float3(0.13, 0.15, 0.24), 0.30);
+	float3 col = mix(nightCol, dayCol, day);
+	col = mix(col, sunColor * float3(1.5, 0.85, 0.42), dusk * 0.5);
+	float h    = abs(dir.y);
+	float calm = smoothstep(0.0, 0.18, h);
+	float n    = cloudFbm(deckXZ);
+	float mass = smoothstep(0.30, 0.72, n);
+	col *= mix(1.0, mix(0.50, 1.35, mass), calm);
+	col *= cloudTint;
+	float haze = mix(0.90, 0.25, smoothstep(0.0, 0.32, h));
+	return mix(col, skyColor(dir, sunDir), haze);
+}
+// A sky ray the deck covers although the march found nothing (mirrors the GL overcastBand()).
+float3 overcastBand(float3 baseSky, float gap, float3 dir, float3 sunDir, float3 sunColor,
+                    float3 cloudTint, float2 deckXZ, thread float& outT)
+{
+	outT = 1.0 - gap;
+	if (gap <= 0.0) return baseSky;
+	return baseSky * outT + overcastDeck(dir, sunDir, sunColor, cloudTint, deckXZ) * gap;
+}
+// Where a dome-model ray meets the layer plane, in noise units (mirrors the GL domeDeckXZ()).
+float2 domeDeckXZ(float3 dir, float3 wind, float time)
+{
+	return dir.xz / max(dir.y, 0.004) * (1.8 * kCloudScale * 0.5) + wind.xz * time * (kCloudScale * 0.5);
+}
 // Worley (cellular) lookup from the noise volume's G channel — bright at the cell
 // feature points. fBm of it is the billowy cumulus shape. The bake already tiles,
 // so a plain trilinear fetch is enough (Worley is C0-smooth).
@@ -4272,7 +4320,7 @@ float cloudDensity(float3 pos, float time, float coverage, float3 wind,
 	float  perlin = starFbm3(p + float3(0.0, morph, 0.0), 4, noiseTex, noiseSamp); // coverage
 	float  billow = worleyFbm(p * 0.9 + float3(morph, 0.0, 0.0), noiseTex, noiseSamp); // fine cauliflower
 	float  base   = perlin * 0.5 + billow * 0.55;
-	float  lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+	float  lo     = cloudLo(coverage);
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
 // Density for the sun light-march. Slightly fewer octaves than the view density
@@ -4289,7 +4337,7 @@ float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind,
 	float  billow = worleyNoise3(p * 0.9 + float3(morph, 0.0, 0.0), noiseTex, noiseSamp) * 0.7
 	              + worleyNoise3(p * 1.8, noiseTex, noiseSamp) * 0.3;
 	float  base   = perlin * 0.5 + billow * 0.55;
-	float  lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+	float  lo     = cloudLo(coverage);
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
 float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor, float3 wind,
@@ -4302,7 +4350,13 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	sunDir = normalize(sunDir);
 	// The horizon fade at the end is exactly 0 below dir.y 0.03 (T → 1, L → 0), so
 	// a march there could never show — bail before paying for it.
-	if (dir.y < 0.03) return baseSky;
+	const float ov = overcastAmount(coverage);
+	if (dir.y < 0.03)
+	{
+		// Overcast: the deck runs on to the horizon instead of stopping short of it.
+		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
+		                    cloudTint, domeDeckXZ(dir, wind, time), outT);
+	}
 
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == the original
 	// step counts; Med/Low trade horizon detail for frames.
@@ -4343,7 +4397,7 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	float costh = max(dot(dir, sunDir), 0.0);
 	float phase = mix(hgPhase(costh, 0.6), hgPhase(costh, -0.3), 0.25);
 
-	float lo = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0)); // coverage threshold (for the cheap gate)
+	float lo = cloudLo(coverage); // coverage threshold (for the cheap gate)
 	float  T = 1.0;                                // transmittance along the view ray
 	float3 L = float3(0.0);                        // accumulated in-scattered colour
 	for (int i = 0; i < N; ++i)
@@ -4405,8 +4459,10 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 			cloudCol *= mix(0.5, 1.15, hTone);
 			cloudCol += float3(0.07, 0.10, 0.17) * ((1.0 - hTone) * day * 0.25);
 			cloudCol *= cloudTint;                          // user colour tint (dome path)
+			// Overcast: lighter and darker masses so a closed deck still reads as clouds.
+			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68, perlin)), ov);
 
-			float opticalDepth = dens * ds * 7.0 * clamp(densityMul, 0.0, 3.0);
+			float opticalDepth = dens * ds * 7.0 * clamp(densityMul, 0.0, 3.0) * (1.0 + 2.0 * ov);
 			float a = 1.0 - exp(-opticalDepth);
 			L += T * a * cloudCol;
 			T *= 1.0 - a;
@@ -4417,6 +4473,14 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	// Horizon fade (computed above, before the march).
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
+	// Overcast: where the horizon fade cleared the deck - and, at full coverage, any thin spot
+	// the noise left - the deck stands in, so the clouds cover the whole background.
+	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
+	if (gap > 0.0)
+	{
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, domeDeckXZ(dir, wind, time));
+		T *= 1.0 - gap;
+	}
 	outT = T;
 	return baseSky * T + L;
 }
@@ -4456,6 +4520,15 @@ float cloudBillowFbm(float3 p, float farW, texture3d<float> noiseTex, sampler no
 // higher value now genuinely lifts the deck: clouds move up and shrink.
 constant float kCloudRefAltitude = 200.0;
 constant float kCloudElevFloor   = 0.06;   // was clamp((cloudH-50)/2500) — grew with altitude
+// Where a 3D-mode view ray meets the middle of the cloud slab, in the deck's noise units
+// (mirrors the GL deck3DXZ()); unbounded in distance so the deck runs on to the horizon.
+float2 deck3DXZ(float3 camPos, float3 dir, float cloudH, float3 wind, float time)
+{
+	float midY = max(cloudH, 1.0) + kCloudRefAltitude * 0.75;
+	float t    = abs(midY - camPos.y) / max(abs(dir.y), 0.004);
+	float2 xz  = camPos.xz + dir.xz * t;
+	return xz * (1.6 / kCloudRefAltitude * 0.5) + wind.xz * time * 0.5;
+}
 
 // ── Cloud slab intersection ──────────────────────────────────────────────────
 // Entry/exit distance of a view ray through the cloud deck, for ANY camera
@@ -4619,6 +4692,7 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	if (coverage <= 0.0) return baseSky;
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
+	const float ov = overcastAmount(coverage);
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == original counts.
 	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.30 : 0.22); // larger → fewer steps
 	float qMinN   = (quality < 0.5) ? 12.0 : (quality < 1.5 ? 18.0 : 24.0);
@@ -4631,7 +4705,8 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	float maxDist = cloudH * 60.0;                // fade clouds beyond this (∝ altitude)
 	float tNear, tFar;
 	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
-		return baseSky;
+		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
+		                    cloudTint, deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -4650,7 +4725,7 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	float elevFloor = kCloudElevFloor;
 	float fluff   = clamp(cloudFluffiness, 0.0, 1.0);
 	float densMul = clamp(cloudDensity, 0.0, 3.0);
-	float lo      = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+	float lo      = cloudLo(coverage);
 
 	float  T = 1.0;
 	float3 L = float3(0.0);
@@ -4716,11 +4791,12 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 			cloudCol *= mix(0.30, 1.32, hf);                     // strong base→crown contrast (3D relief)
 			cloudCol += float3(0.07, 0.10, 0.17) * ((1.0 - hf) * day * 0.25);
 			cloudCol *= cloudTint;                               // user colour tint
+			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68, cover)), ov);   // overcast masses
 			float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
 			cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);    // aerial perspective
 
 			float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
-			float opticalDepth = dens * (ds / thick) * 7.0 * distFade * densMul;
+			float opticalDepth = dens * (ds / thick) * 7.0 * distFade * densMul * (1.0 + 2.0 * ov);
 			float a = 1.0 - exp(-opticalDepth);
 			L += T * a * cloudCol;
 			T *= 1.0 - a;
@@ -4734,6 +4810,14 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	float horizon = smoothstep(elevFloor, elevFloor + 0.14, abs(dir.y));
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
+	// Overcast: the deck stands in where the horizon fade cleared it, and at full coverage
+	// fills any thin spot, so the clouds cover the whole background.
+	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
+	if (gap > 0.0)
+	{
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, deck3DXZ(camPos, dir, cloudH, wind, time));
+		T *= 1.0 - gap;
+	}
 	outT = T;
 	return baseSky * T + L;
 }
@@ -4761,6 +4845,7 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	if (coverage <= 0.0) return baseSky;
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
+	const float ov = overcastAmount(coverage);
 	// Slightly higher minimum step count than classic: the sharper silhouettes
 	// show the IGN dither earlier than the soft classic bodies do.
 	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.28 : 0.20);
@@ -4775,7 +4860,8 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float maxDist = cloudH * 60.0;
 	float tNear, tFar;
 	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
-		return baseSky;
+		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
+		                    cloudTint, deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -4797,7 +4883,7 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float elevFloor = kCloudElevFloor;
 	float fluff     = clamp(cloudFluffiness, 0.0, 1.0);
 	float densMul   = clamp(cloudDensity, 0.0, 3.0);
-	float lo        = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+	float lo        = cloudLo(coverage);
 
 	float  T = 1.0;
 	float3 L = float3(0.0);
@@ -4871,11 +4957,14 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		cloudCol *= mix(0.45, 1.15, smoothstep(0.0, 0.55, hf));
 		cloudCol += float3(0.06, 0.09, 0.15) * ((1.0 - hf) * day * 0.20); // sky bounce under the base
 		cloudCol *= cloudTint;
+		if (ov > 0.0)   // overcast: lighter and darker masses so a closed deck still reads as clouds
+			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68,
+			                cloudCoverFbm(pos * nscale * 0.35 + wind * time, 0.0, noiseTex, noiseSamp))), ov);
 		float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
 		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);
 
 		float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
-		float opticalDepth = dens * (ds / thick) * 12.0 * distFade * densMul;
+		float opticalDepth = dens * (ds / thick) * 12.0 * distFade * densMul * (1.0 + 2.0 * ov);
 		float a = 1.0 - exp(-opticalDepth);
 		L += T * a * cloudCol;
 		T *= 1.0 - a;
@@ -4888,6 +4977,14 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float horizon = smoothstep(elevFloor, elevFloor + 0.14, abs(dir.y));
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
+	// Overcast: the deck stands in where the horizon fade cleared it, and at full coverage
+	// fills any thin spot, so the clouds cover the whole background.
+	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
+	if (gap > 0.0)
+	{
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, deck3DXZ(camPos, dir, cloudH, wind, time));
+		T *= 1.0 - gap;
+	}
 	outT = T;
 	return baseSky * T + L;
 }
@@ -4950,7 +5047,7 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 		}
 		return float4(exp(-dens * dds * 7.0 * densMul));
 	}
-	float lo      = mix(0.70, 0.22, coverage);
+	float lo      = cloudLo(coverage);
 	float nscale  = 1.6 / kCloudRefAltitude;
 	// Slab entry/exit along the sun ray through the mid-plane point. Density
 	// comes from the SHARED cloudFieldDensity (style/evolution included), so
@@ -5677,7 +5774,7 @@ float godrayClear(float3 d, float time, float coverage, float3 wind,
 	float3 pos = d * s;
 	float3 pp  = pos * kCloudScale + wind * time;
 	float  perlin = starFbm3(pp + float3(0.0, time * 0.030, 0.0), 4, noiseTex, noiseSamp);
-	float  lo   = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0)); // same threshold as applyClouds
+	float  lo   = cloudLo(coverage); // same threshold as applyClouds
 	float  dens = smoothstep(lo, lo + 0.10, perlin * 0.5 + 0.275); // billow≈0.5 mean (sharper gap/cloud edge)
 	return 1.0 - clamp(dens, 0.0, 1.0);
 }
@@ -5847,28 +5944,32 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	// Night-sky elements + the celestial rotation are skipped entirely by day. The
 	// branch is coherent (sunDir is uniform → every pixel takes the same path).
 	float nightF = 1.0 - smoothstep(-0.10, 0.10, clamp(normalize(p.sunDir.xyz).y, -0.2, 1.0));
-	if (nightF > 0.0)
+	// Under a closed deck nothing of the night sky shows (mirrors the GL main()).
+	float celestialVeil = 1.0 - overcastAmount(p.params.y);
+	if (nightF > 0.0 && celestialVeil > 0.0)
 	{
 		float3 cdir = celestialDir(dir, p.params.x); // turns with the day-night cycle
+		float3 celestial = float3(0.0);
 		// Star brightness + colour tint applied at the call site (GL parity).
-		col += starField(dir, cdir, p.sunDir.xyz, p.params.z, p.auroraColor.w,
+		celestial += starField(dir, cdir, p.sunDir.xyz, p.params.z, p.auroraColor.w,
 		                 p.star.x, p.star.y, p.star.z, p.star.w, p.star2.x,
 		                 noiseTex, noiseSamp) * p.starColor.xyz * p.starColor.w;
-		col += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz,
+		celestial += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz,
 		              p.nebulaColor2.xyz, p.nebulaColor3.xyz, p.cirrus.w, p.nebulaColor2.w,
 		              p.neb2.x, noiseTex, noiseSamp);
-		col += applyAurora3D(dir, p.cameraPos.xyz, p.params.z, p.params.w,
+		celestial += applyAurora3D(dir, p.cameraPos.xyz, p.params.z, p.params.w,
 		                     p.auroraColor.xyz, p.auroraColorTop.xyz, p.sunDir.xyz,
 		                     p.cirrus.y, p.cirrus.z, in.position.xy);
-		col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.sunColor.w, moonTex, moonSamp);
-		col += shootingStars(dir, p.sunDir.xyz, p.params.z, p.auroraColorTop.w,
+		celestial += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.sunColor.w, moonTex, moonSamp);
+		celestial += shootingStars(dir, p.sunDir.xyz, p.params.z, p.auroraColorTop.w,
 		                     p.starColor.xyz, p.starColor.w, p.star.x, p.star.y); // meteors (clouds occlude below)
+		col += celestial * celestialVeil;
 	}
 	// High thin layers first, then the cumulus clouds in front so lower clouds occlude them.
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
 	col = contrails(col, dir, p.sunDir.xyz, p.cloud.w, p.params.y);
 	col += rainbow(dir, p.sunDir.xyz, p.star2.w);   // rain + sun → spectral arc (clouds occlude it below)
-	col += moonCorona(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.sunColor.w); // subtle phase-shaped glow ring around the moon
+	col += moonCorona(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.sunColor.w) * celestialVeil; // subtle phase-shaped glow ring around the moon
 	float cloudT = 1.0;                                     // view-ray cloud transmittance
 	if (p.star2.z > 0.5)
 	{
@@ -7653,8 +7754,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
 	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
 	const int localLayers = wantLocal
 		? std::clamp(m_renderWorld.shadow.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers) : 0;
@@ -7952,7 +8053,8 @@ void MetalRenderer::EncodeGISwAccelBuild()
 	};
 	for (RenderObject& obj : m_renderWorld.objects)
 	{
-		if (!obj.castsShadow) continue;
+		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+		if (!obj.castsShadow || obj.isCluster()) continue;
 		// Default-cube fallback — must match the draw loops (see the HW path).
 		GISwBlasRange range = resolveSwRange(obj.meshAssetId);
 		if (!range.valid) range = resolveSwRange(HE::kDefaultCubeMeshId);
@@ -8142,7 +8244,8 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
-			if (!obj.castsShadow) continue;
+			// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+			if (!obj.castsShadow || obj.isCluster()) continue;
 			// Same fallback the shadow-caster/G-buffer DRAW loops use: an entity
 			// without a resolvable mesh asset renders as the default cube, so it
 			// must occlude as one too — skipping it here made such objects
@@ -8701,8 +8804,8 @@ void MetalRenderer::EnsureGIProbeGrid()
 	// so refresh here too before unioning, or the grid ends up sized to a handful
 	// of proxy boxes instead of the actual scene.
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	// Landscape/Terrain chunks are ordinary MeshComponent entities, so they ARE
 	// in m_renderWorld.objects (an older note here said otherwise). What kept a
@@ -9348,7 +9451,7 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 // depth-stencil state; this only sets the pipeline, buffers and textures.
 bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
                                           float yaw, float pitch, float dist, int shape,
-                                          const HE::UUID& meshId)
+                                          const HE::UUID& meshId, float timeSeconds)
 {
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -9432,10 +9535,18 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 
 	HE::MaterialShaderLibrary::Lighting lit{};
 	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
-	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
+	// Engine clock for the Time input. A live preview (the Material Editor) hands
+	// it in, a still (thumbnails) leaves it at 0 — and then must not pick up wind
+	// either, or a sway material's thumbnail would lean with whatever scene is open.
+	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
+	lit.sunDir[3] = timeSeconds >= 0.0f ? timeSeconds : 0.0f;
 	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	// Wind / Wind Sway nodes read the .w of sunColor / ambient / camPos. The three
+	// are spare in this block, so the wind rides in AFTER the studio values above
+	// (FillMaterialWind writes only those .w channels).
+	if (timeSeconds >= 0.0f) HE::FillMaterialWind(GetEnvironment(), lit);
 	// Studio sun as the single array light so heLitP() previews shade correctly
 	// (same seed as the GL backend's material preview). heLitP has NO separate
 	// sun term — sunDir/sunColor above only feed the legacy heLit() — so leaving
@@ -9632,7 +9743,7 @@ void MetalRenderer::EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void
 
 void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
                                            uint32_t size, float yaw, float pitch, float dist,
-                                           int shape, const HE::UUID& meshId)
+                                           int shape, const HE::UUID& meshId, float timeSeconds)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -9680,7 +9791,7 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
 	const bool encoded = EncodeMaterialPreview((__bridge void*)enc, materialId, yaw, pitch, dist,
-	                                           shape, meshId);
+	                                           shape, meshId, timeSeconds);
 	[enc endEncoding];
 	if (!encoded) { [cb commit]; return nullptr; }
 
@@ -11980,8 +12091,8 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
 	if (m_renderWorld.objects.empty()) return;
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
 	}
@@ -12585,6 +12696,29 @@ void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
 		if (!mesh || !mesh->vertexBuf || !mesh->indexBuf) continue;
 
+		// A foliage cluster stands for a bucket of plants: draw every one of them,
+		// static (previous pose = this pose, so the velocity is the camera's own
+		// motion). The entity-keyed history below holds ONE pose per entity, which
+		// is all a cluster must not use: every plant of a layer shares the terrain's id.
+		if (obj.isCluster())
+		{
+			[enc setVertexBuffer:(__bridge id<MTLBuffer>)mesh->vertexBuf offset:0 atIndex:0];
+			m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model)
+			{
+				VelocityUniformsCPU u;
+				u.mvpJitter = viewProjJit   * model;
+				u.mvpNow    = viewProjClean * model;
+				u.mvpPrev   = m_taaPrevViewProj * model;
+				[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+				                indexCount:mesh->indexCount
+				                 indexType:MTLIndexTypeUInt32
+				               indexBuffer:(__bridge id<MTLBuffer>)mesh->indexBuf
+				         indexBufferOffset:0];
+			});
+			continue;
+		}
+
 		// An object seen for the first time reports no motion — its "previous"
 		// position is where it is now. Anything else invents a streak out of
 		// nowhere on the frame something spawns.
@@ -13025,6 +13159,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 		// no local shadow atlas, so it passes false.
 		HE::FillMaterialLightWindow(m_renderWorld, matLight, /*localShadowsActive=*/false);
 		HE::FillMaterialWind(GetEnvironment(), matLight); // Wind nodes, next to Time
+		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 	}
 
 	// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
@@ -13657,9 +13792,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	CullCameraObjects();
@@ -14403,6 +14537,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	HE::FillMaterialLightWindow(m_renderWorld, matLight,
 	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
 	HE::FillMaterialWind(GetEnvironment(), matLight); // Wind / Wind Sway nodes, next to Time
+	HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 	// Local (point/spot) shadow atlas for heLitP — the same matrices the
 	// built-in shaders sample with, Metal depth remap AND top-left UV origin
 	// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
@@ -15696,9 +15831,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	if (m_renderWorld.objects.empty()) return;
 
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
@@ -15737,6 +15871,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// The G-buffer's WPO vertex stage reads this block too: without the wind
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
+		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];

@@ -5,6 +5,14 @@
 
 // Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
 // Must equal HE::kMatMaxLandscapeLayers (MaterialGraph.h) — test_terrain pins it.
+// The largest resolution a landscape can have: 1025 = 2^10 + 1, the top of the 2ⁿ+1
+// ladder every landscape is snapped to (TerrainSystem / TerrainSculpt::ensureHeights).
+// The clamp used to be 1024, which is NOT on that ladder: a landscape of 513..1024
+// snaps UP to 1025, every consumer clamped it back down to 1024, and the height
+// field (1025² samples) never matched the grid it was read as (1024²) — so it was
+// read as flat, and the "snap" ran again every frame (dirty → all 256 chunks rebuilt
+// and re-uploaded per frame).
+inline constexpr uint32_t kTerrainMaxResolution = 1025;
 inline constexpr int kTerrainWeightPages = 2;
 inline constexpr int kTerrainMaxLayers   = 4 * kTerrainWeightPages;
 
@@ -63,7 +71,7 @@ struct TerrainComponent {
     // Kept inline (base64 in the scene, like sculptHeights) rather than as a
     // separate texture asset: it is terrain data, not shared content, and this
     // way a landscape is one self-contained thing to copy or undo.
-    uint32_t              weightRes = 256;   // weightmap side length in texels
+    uint32_t              weightRes = 512;   // weightmap side length in texels (256 made a round stamp a visible polygon)
     std::vector<uint8_t>  layerWeights;      // weightRes² × 4 bytes, or empty
     // Layers 4..7 (R=4 … A=7), same layout as layerWeights. Empty = all four
     // zero, which is every landscape painted before there were eight layers —

@@ -6,6 +6,7 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -503,6 +504,39 @@ TEST_CASE("TerrainPaint moves weight toward the painted layer and keeps the sum 
         TerrainPaint::paint(tc, 0.0f, 0.0f, 0, 8.0f, 0.0f, 0.5f);
     CHECK(texel(c, c)[0] == 255);
     CHECK(texel(c, c)[1] == 0);
+}
+
+TEST_CASE("TerrainPaint::fillLayer puts every texel on one layer, on either page")
+{
+    TerrainComponent tc;
+    tc.sizeX = 40.0f; tc.sizeZ = 40.0f; tc.weightRes = 32;
+
+    REQUIRE(TerrainPaint::fillLayer(tc, 2));
+    REQUIRE(tc.layerWeights.size() == 32u * 32u * 4u);
+    CHECK(tc.weightsDirty);
+    uint8_t w[kTerrainMaxLayers];
+    for (uint32_t z : { 0u, 17u, 31u })
+        for (uint32_t x : { 0u, 9u, 31u })
+        {
+            REQUIRE(TerrainPaint::texelWeights(tc, x, z, w));
+            for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 2 ? 255 : 0));
+        }
+    CHECK_FALSE(TerrainPaint::usesSecondPage(tc));
+
+    // A layer on the second page: page one goes to zero, the second page carries it.
+    REQUIRE(TerrainPaint::fillLayer(tc, 5));
+    REQUIRE(TerrainPaint::texelWeights(tc, 3, 4, w));
+    for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 5 ? 255 : 0));
+    CHECK(TerrainPaint::usesSecondPage(tc));
+
+    // And back: a first-page fill must not leave the second page voting.
+    REQUIRE(TerrainPaint::fillLayer(tc, 0));
+    REQUIRE(TerrainPaint::texelWeights(tc, 3, 4, w));
+    for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 0 ? 255 : 0));
+    CHECK_FALSE(TerrainPaint::usesSecondPage(tc));
+
+    CHECK_FALSE(TerrainPaint::fillLayer(tc, -1));
+    CHECK_FALSE(TerrainPaint::fillLayer(tc, kTerrainMaxLayers));
 }
 
 TEST_CASE("TerrainPaint falloff fades with distance and rejects bad layers")
@@ -1128,4 +1162,56 @@ TEST_CASE("The terrain tick pulls the collider after a sculpt, without anyone ca
     // not re-armed.
     TerrainSystem::updateTerrains(world, cm, nullptr, &phys);
     CHECK(phys.raycast(from, down, 400.0f).point.y == doctest::Approx(plateau).epsilon(0.01));
+}
+
+// ── The top of the 2ⁿ+1 ladder ─────────────────────────────────────────────────
+// A resolution of 513..1024 snaps UP to 1025. The clamp every consumer used was
+// 1024, so the 1025² height field was read as a 1024² grid, never matched, and the
+// landscape came out flat — while the snap ran again every frame and rebuilt and
+// re-uploaded all 256 chunks each time.
+TEST_CASE("terrain: a resolution that snaps to 1025 keeps its heights and settles")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 100.0f;
+    tc.resolution = 1024;
+    tc.seed = 0;
+    TerrainSculpt::ensureHeights(tc);
+    CHECK(tc.resolution == 1025);
+    REQUIRE(tc.sculptHeights.size() == 1025u * 1025u);
+
+    tc.sculptHeights[5 * 1025 + 7] = 12.0f;
+    const std::vector<float> field = computeTerrainHeightField(tc);
+    REQUIRE(field.size() == 1025u * 1025u);
+    CHECK(field[5 * 1025 + 7] == doctest::Approx(12.0f));
+
+    // Settled: snapping again changes nothing and asks for no rebuild.
+    tc.dirty = false;
+    TerrainSculpt::ensureHeights(tc);
+    CHECK(tc.resolution == 1025);
+    CHECK_FALSE(tc.dirty);
+}
+
+TEST_CASE("terrain: updateTerrains on a 1024 landscape builds the sculpted heights and then rests")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    const auto e = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(e);
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 100.0f;
+    tc.resolution = 1024;
+    tc.seed = 0;
+    TerrainSculpt::ensureHeights(tc);
+    tc.sculptHeights[512 * 1025 + 512] = 25.0f;
+    tc.dirty = true;
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    TerrainSystem::updateTerrains(world, cm);
+    const auto& after = world.registry().get<TerrainComponent>(e);
+    CHECK(after.resolution == 1025);
+    // Rested: nothing is pending, so the next tick does not rebuild.
+    CHECK_FALSE(after.dirty);
+    CHECK_FALSE(after.regionDirty);
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK_FALSE(world.registry().get<TerrainComponent>(e).dirty);
 }

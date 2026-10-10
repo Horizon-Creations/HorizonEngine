@@ -40,6 +40,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Types/UUID.h>
 
 #include <cstdint>
@@ -546,7 +547,41 @@ int main(int argc, char** argv)
         ++index;
     }
 
-    std::printf("matfn_gen: wrote %d/%zu effects to %s\n",
-                ok, entries.size(), outDir.c_str());
-    return ok == static_cast<int>(entries.size()) ? 0 : 1;
+    // ── The weather functions (3D materials, not UI effects) ─────────────────────
+    // Built in HE_Core (WeatherMaterialFunctions.h) because the auto landscape graph, the
+    // tests and landscape_tex_gen compile against the same builders. Written to a Weather/
+    // sub-folder: the UI-effect library above is one flat folder that a test enumerates
+    // (and compiles in the UI domain, which a Weather node has no business in). Their
+    // UUIDs are the fixed 0x413 / 0x414 of the landscape block, not the index above.
+    struct WeatherEntry { const char* file; HE::UUID id; MaterialGraph g; };
+    std::vector<WeatherEntry> weather;
+    weather.push_back({ "MF_WeatherPuddles", kWeatherPuddlesFunctionId, buildWeatherPuddlesFunction() });
+    weather.push_back({ "MF_WeatherSnow",    kWeatherSnowFunctionId,    buildWeatherSnowFunction()    });
+    int weatherOk = 0;
+    for (const WeatherEntry& e : weather)
+    {
+        MaterialFunctionAsset a;
+        a.type          = HE::AssetType::MaterialFunction;
+        a.name          = e.file;
+        a.path          = std::string("Weather/") + e.file + ".hasset";
+        a.id            = e.id;
+        a.nodeGraphJson = materialGraphToJson(e.g);
+        std::vector<MatPinDesc> ins, outs;
+        matFunctionPins(e.g, ins, outs);
+        for (const MatGraphNode& n : e.g.nodes)
+            if (n.type == MatNodeType::FnInput && n.p[2] < 0.5f)
+                std::fprintf(stderr, "  %-18s WARNING: input '%s' declares no default\n", e.file, n.s.c_str());
+        if (cm.saveAsset(a))
+        {
+            std::printf("  %-18s %2zu nodes  %zu in / %zu out  (Weather/)\n",
+                        e.file, e.g.nodes.size(), ins.size(), outs.size());
+            ++weatherOk;
+        }
+        else
+            std::fprintf(stderr, "  FAILED to write Weather/%s.hasset\n", e.file);
+    }
+
+    std::printf("matfn_gen: wrote %d/%zu effects and %d/%zu weather functions to %s\n",
+                ok, entries.size(), weatherOk, weather.size(), outDir.c_str());
+    return (ok == static_cast<int>(entries.size()) && weatherOk == static_cast<int>(weather.size())) ? 0 : 1;
 }

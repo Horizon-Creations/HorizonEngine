@@ -237,15 +237,18 @@ public:
         // the backend keeps rendering CSM shadows + AO/ambient as today.
         bool supportsGlobalIllumination = false;
         // Deferred render path (G-buffer + fullscreen lighting resolve, see
-        // docs/deferred-renderer-plan.md). Metal + OpenGL when built with the
-        // shader cross-compiler (the resolve shader is generated from the shared
-        // lighting preamble at runtime); the editor greys out the Render Path
-        // combo when false and the backend stays forward regardless of
-        // SetRenderPath.
+        // docs/deferred-renderer-plan.md). Metal, OpenGL, D3D11, D3D12 and
+        // Vulkan when built with the shader cross-compiler (the resolve shader is
+        // generated from the shared lighting preamble at runtime); the editor
+        // greys out the Render Path combo when false and the backend stays
+        // forward regardless of SetRenderPath. What each backend's deferred
+        // frame does and does not run (decals, SSR, AO) is plan §10.3/§10.12.
         bool supportsDeferredRendering = false;
-        // Screen-space reflections (docs/ssr-plan.md). v1: Metal only, and only
-        // in the DEFERRED render path's tile mode (the reflection pass reads the
-        // stored G-buffer + the resolved HDR colour — lag-free, no history).
+        // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
+        // plan.md). Metal (in the deferred tile path: lag-free, from the stored
+        // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last
+        // frame's HDR; the D3D/Vulkan deferred frame composites the same trace
+        // in the resolve, GL's deferred frame runs none).
         // The editor greys out the SSR toggle when false.
         bool supportsScreenSpaceReflections = false;
         // Ray-traced GI reflections (docs/gi-reflections-plan.md): specular rays
@@ -739,9 +742,19 @@ public:
     // never has to pre-check: the preview shows the primitive instead. The CALLER
     // owns getting the asset into the ContentManager (the editor streams it
     // asynchronously and shows progress) — this does no blocking disk I/O.
+    //
+    // `timeSeconds` is the clock the material's Time input (and Panner / Wind
+    // Sway / the engine water's waves) reads. Negative = a frozen still, the
+    // default: Time is 0 and there is no wind, so the same call always draws the
+    // same picture (what the Content Browser thumbnails rely on). Zero or more =
+    // a live preview at that engine time, with the scene's wind
+    // (EnvironmentSettings) riding along like it does in the viewport, so the
+    // Material Editor can step it every frame and a water or wind-sway material
+    // moves the way it will in the scene.
     virtual void* RenderMaterialPreview(class ContentManager& /*cm*/, const HE::UUID& /*materialId*/,
                                         uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/,
-                                        int /*shape*/ = 0, const HE::UUID& /*meshId*/ = HE::UUID{})
+                                        int /*shape*/ = 0, const HE::UUID& /*meshId*/ = HE::UUID{},
+                                        float /*timeSeconds*/ = -1.0f)
     { return nullptr; }
 
     // ── Skeletal mesh preview ──────────────────────────────────────────────

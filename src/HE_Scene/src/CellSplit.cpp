@@ -20,15 +20,81 @@ namespace HE
 
 namespace
 {
-// Components a placed thing may carry and still move into a cell — the
-// splitter script's MOVABLE set. Anything else keeps its subtree in the base.
-bool movableKey(const std::string& k)
+// ── What may move into a cell: the streaming classes (Thema 164, plan 4.4) ─────
+// The one table the split decides by. A subtree goes into a cell only when EVERY
+// entity in it carries nothing but components of a class that moves, so a key that
+// is not listed here — a component somebody adds tomorrow — keeps its subtree in
+// the base until somebody decides otherwise: the whitelist the splitter script
+// always was, now with the reasons written down.
+//
+//   Static    placed things whose state is the file: the entity is destroyed on an
+//             unload and built again from the file on the next load, and nothing
+//             that was lost on the way matters.
+//   Stateful  things with state or a script (an NPC): the state has to be written
+//             out on an unload and applied on the load. Step 3b of Thema 164;
+//             nothing is in this class yet, so nothing moves as one.
+//   Resident  everything else. It is always there.
+enum class StreamClass : uint8_t
 {
-	static const std::unordered_set<std::string> kMovable = {
-		"transform", "mesh", "material", "light", "lod", "collider", "rigidbody", "decal", "inactive",
-	};
-	return kMovable.count(k) != 0;
+	Static,
+	Stateful,
+	Resident,
+};
+
+struct ComponentClass
+{
+	const char* key;   // scene-format component key, as in a record's "components" block
+	StreamClass cls;
+};
+
+constexpr ComponentClass kComponentClasses[] = {
+	// The splitter script's MOVABLE set. "light" is Static for point and spot lights
+	// only and "rigidbody" for static bodies only: see entityClass.
+	{ "transform",        StreamClass::Static },
+	{ "mesh",             StreamClass::Static },
+	{ "material",         StreamClass::Static },
+	{ "light",            StreamClass::Static },
+	{ "lod",              StreamClass::Static },
+	{ "collider",         StreamClass::Static },
+	{ "rigidbody",        StreamClass::Static },
+	{ "decal",            StreamClass::Static },
+	{ "inactive",         StreamClass::Static },
+	// A placed prefab, so that a village of prefab houses can stream. The bindings
+	// of a placement name its entities by id: that holds because a cell loads with
+	// the ids it was saved with now, and because a placement whose bindings leave
+	// its own subtree does not move (bindingsStayInside below).
+	{ "prefab",           StreamClass::Static },
+	// Dressing that names assets and nothing else, with its running state (the
+	// particles, a playhead) inside its own component: a load starts it afresh.
+	{ "particlesystem",   StreamClass::Static },
+	{ "skeletalmesh",     StreamClass::Static },
+	{ "animator",         StreamClass::Static },
+	{ "animatorblend",    StreamClass::Static },
+	{ "propertyanimator", StreamClass::Static },
+	// Deliberately NOT here, though some look like dressing:
+	//   audiosource       Nothing starts a streamed entity's sound: AudioSystem::playOnStart
+	//                     runs at a scene start or switch (GameApplication), not for what a
+	//                     cell brings, and nothing stops the voice when the cell goes. The
+	//                     cell host owns both (Thema 164, step 2c/3b).
+	//   animstatemachine  AnimatorHost binds the state machines once, at scene start.
+	//   animationlayers, rootmotion, ik, sequenceplayer
+	//                     Not looked at yet; ik and sequenceplayer name other entities.
+};
+
+StreamClass classOfKey(const std::string& key)
+{
+	static const std::unordered_map<std::string, StreamClass> kTable = []
+	{
+		std::unordered_map<std::string, StreamClass> t;
+		for (const ComponentClass& c : kComponentClasses) t[c.key] = c.cls;
+		return t;
+	}();
+	const auto it = kTable.find(key);
+	return it != kTable.end() ? it->second : StreamClass::Resident;
 }
+
+// Whether a class goes into a cell at all. Stateful joins in step 3b.
+constexpr bool movesIntoCell(StreamClass c) { return c == StreamClass::Static; }
 
 // An entity reference ([hi, lo], or a legacy number) as a map key.
 std::string idKey(const json& v) { return v.dump(); }
@@ -45,19 +111,36 @@ const json* childrenOf(const json& e)
 	return it != e.end() && it->is_array() ? &*it : nullptr;
 }
 
-bool movableEntity(const json& e)
+// The class one entity record belongs to: that of its least movable component,
+// after the two component values that decide it.
+StreamClass entityClass(const json& e)
 {
 	const json* comps = componentsOf(e);
-	if (!comps) return true;
+	if (!comps) return StreamClass::Static;
+	StreamClass cls = StreamClass::Static;
 	for (auto it = comps->begin(); it != comps->end(); ++it)
-		if (!movableKey(it.key())) return false;
+	{
+		const StreamClass k = classOfKey(it.key());
+		if (k == StreamClass::Resident) return StreamClass::Resident;
+		if (k == StreamClass::Stateful) cls = StreamClass::Stateful;
+	}
 	if (const auto l = comps->find("light"); l != comps->end() && l->is_object()
 	    && l->value("type", 0) == 0)
-		return false;   // directional: lights the whole world
+		return StreamClass::Resident;   // directional: lights the whole world
 	if (const auto b = comps->find("rigidbody"); b != comps->end() && b->is_object()
 	    && b->value("type", 0) != 0)
-		return false;   // dynamic: would unload with the square it started in
-	return true;
+		return StreamClass::Resident;   // dynamic: would unload with the square it started in
+	return cls;
+}
+
+bool movableEntity(const json& e) { return movesIntoCell(entityClass(e)); }
+
+// Whether the record can own a physics body: a rigid body or a collider. What the
+// manifest's "bodies" column counts (an upper bound, see CellManifest::Cell).
+bool mayOwnBody(const json& e)
+{
+	const json* comps = componentsOf(e);
+	return comps && (comps->contains("rigidbody") || comps->contains("collider"));
 }
 
 bool nearly(const json& arr, double want)
@@ -67,6 +150,120 @@ bool nearly(const json& arr, double want)
 		if (!v.is_number() || std::abs(v.get<double>() - want) >= 1e-9) return false;
 	return true;
 }
+
+// ── References between entities: the ref hull (Thema 164, step 3a, plan 5) ────
+// An entity that names another by id (a joint's target, a rope's ends, a rig's
+// follow entity, a look-at target, the bindings of a placed prefab, a script's
+// entity variable) is only worth anything while the other is there. A cell is
+// loaded and unloaded on its own, so such a reference must never cross a cell
+// boundary, nor the boundary between a cell and the base. The splitter therefore
+// forms clusters of the top-level subtrees that refer to one another, in either
+// direction, and a cluster goes into a cell whole (into ONE cell) or not at all.
+//
+// WHAT IS A REFERENCE is not decided by a list of fields. Every [hi, lo] pair of
+// unsigned numbers in an entity's component blocks that is the id of another
+// entity of the scene is one. Ids are 128 bits of randomness, so an asset id or a
+// pair of small numbers does not match by accident, and a component added next year
+// with a field that names an entity needs no entry here: a list kept by hand is the
+// kind of thing that drifts without any test noticing. (Only the placement of a
+// prefab is read by field: its "template" ids are the PREFAB ASSET's, which a
+// first placement can share with its own instance ids and must not be taken for
+// the entities of another.)
+//
+// What this cannot see: a reference that is not in a component block of the scene
+// file, which is a level script or a graph asset naming an entity by id. The plan
+// (R4) says the same of the runtime: an id held by a script does not survive a
+// cell being unloaded; the author makes the target resident.
+
+using IdPair = std::pair<uint64_t, uint64_t>;
+
+struct IdPairHash
+{
+	size_t operator()(const IdPair& p) const
+	{
+		return static_cast<size_t>(p.first * 0x9E3779B97F4A7C15ULL ^ (p.second + 0x7F4A7C15ULL + (p.first << 6)));
+	}
+};
+
+bool asIdPair(const json& v, IdPair& out)
+{
+	if (!v.is_array() || v.size() != 2 || !v[0].is_number_unsigned() || !v[1].is_number_unsigned())
+		return false;
+	out = { v[0].get<uint64_t>(), v[1].get<uint64_t>() };
+	return true;
+}
+
+// Every id-shaped pair anywhere below `v`.
+void collectIdPairs(const json& v, std::vector<IdPair>& out)
+{
+	if (v.is_array())
+	{
+		IdPair p;
+		if (asIdPair(v, p))
+		{
+			out.push_back(p);
+			return;
+		}
+		for (const json& c : v) collectIdPairs(c, out);
+	}
+	else if (v.is_object())
+		for (auto it = v.begin(); it != v.end(); ++it) collectIdPairs(it.value(), out);
+}
+
+// The ids one entity record refers to in its component blocks.
+void referencesOf(const json& e, std::vector<IdPair>& out)
+{
+	const json* comps = componentsOf(e);
+	if (!comps) return;
+	for (auto it = comps->begin(); it != comps->end(); ++it)
+	{
+		if (it.key() != "prefab")
+		{
+			collectIdPairs(it.value(), out);
+			continue;
+		}
+		// The placement of a prefab: the instance side of its bindings only.
+		const json& prefab = it.value();
+		if (!prefab.is_object()) continue;
+		const auto bindings = prefab.find("bindings");
+		if (bindings == prefab.end() || !bindings->is_array()) continue;
+		for (const json& b : *bindings)
+		{
+			IdPair p;
+			if (b.is_object())
+				if (const auto entity = b.find("entity"); entity != b.end() && asIdPair(*entity, p))
+					out.push_back(p);
+		}
+	}
+}
+
+// Union-find over the top-level units (and one more node, the base).
+struct Clusters
+{
+	std::vector<size_t> parent;
+	explicit Clusters(size_t n) : parent(n)
+	{
+		for (size_t i = 0; i < n; ++i) parent[i] = i;
+	}
+	size_t find(size_t i)
+	{
+		while (parent[i] != i)
+		{
+			parent[i] = parent[parent[i]];
+			i = parent[i];
+		}
+		return i;
+	}
+	void join(size_t a, size_t b)
+	{
+		a = find(a);
+		b = find(b);
+		// The lower index becomes the root, so the root of a cluster of units is its
+		// first member in traversal order; the base, the highest index, is a root only
+		// while nothing has joined it.
+		if (a != b) parent[std::max(a, b)] = std::min(a, b);
+	}
+};
 
 bool isFolder(const json& e)
 {
@@ -150,12 +347,20 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 	};
 
 	const double size = options.cellSize;
-	std::map<std::pair<int, int>, std::vector<std::string>> units;   // ordered: files come out sorted
-	std::unordered_set<std::string> moved;
-	// The folder a moved subtree hung in, when not the scene root: the merge
-	// puts it back there (and rebuilds the folder when the split dropped it).
-	std::unordered_map<std::string, std::string> unitFolder;
 	const std::string rootKey = idKey((*roots[0])["uuid"]);
+
+	// The top-level units, in the order the traversal meets them: every subtree that
+	// hangs directly below the scene root or below a folder (folders are looked
+	// through). Each is movable by itself or not (its components, subtreeMovable);
+	// whether it really moves depends on what it refers to and what refers to it.
+	struct Unit
+	{
+		const json* rec = nullptr;
+		std::string key;
+		std::string folder;       // the key of the folder it hung in, empty at the scene root
+		bool        movable = false;
+	};
+	std::vector<Unit> unitList;
 	std::function<void(const json&)> visit = [&](const json& parent)
 	{
 		const json* kids = childrenOf(parent);
@@ -171,10 +376,87 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 				visit(child);
 				continue;
 			}
-			if (parentKey != rootKey && subtreeMovable(child)) unitFolder[idKey(child["uuid"])] = parentKey;
-			if (!subtreeMovable(child)) continue;
+			unitList.push_back({ &child, idKey(child["uuid"]), parentKey != rootKey ? parentKey : std::string(),
+			                     subtreeMovable(child) });
+		}
+	};
+	visit(*roots[0]);
+
+	// ── The ref hull ───────────────────────────────────────────────────────────
+	// Which unit every entity of the scene belongs to. The nodes are the units that
+	// are movable by themselves, and one more, the base: everything else (the
+	// unmovable units, the folders, the scene root) is the base.
+	const size_t baseNode = unitList.size();
+	std::unordered_map<std::string, size_t> nodeOfEntity;
+	nodeOfEntity.reserve(byId.size());
+	{
+		std::function<void(const json&, size_t)> assign = [&](const json& e, size_t node)
+		{
+			if (!nodeOfEntity.emplace(idKey(e["uuid"]), node).second) return;   // met twice: a cycle or a shared child
+			if (const json* kids = childrenOf(e))
+				for (const json& c : *kids)
+					if (const auto it = byId.find(idKey(c)); it != byId.end()) assign(*it->second, node);
+		};
+		for (size_t i = 0; i < unitList.size(); ++i)
+			assign(*unitList[i].rec, unitList[i].movable ? i : baseNode);
+	}
+	std::unordered_map<IdPair, const json*, IdPairHash> entityById;
+	entityById.reserve(byId.size());
+	for (const auto& [key, rec] : byId)
+	{
+		IdPair p;
+		if (asIdPair((*rec)["uuid"], p)) entityById.emplace(p, rec);
+	}
+
+	Clusters clusters(unitList.size() + 1);
+	{
+		std::vector<IdPair> refs;
+		for (const json& e : *ents)
+		{
+			if (!e.is_object() || !e.contains("uuid")) continue;
+			const auto from = nodeOfEntity.find(idKey(e["uuid"]));
+			const size_t a  = from != nodeOfEntity.end() ? from->second : baseNode;
+			refs.clear();
+			referencesOf(e, refs);
+			for (const IdPair& p : refs)
+			{
+				const auto target = entityById.find(p);
+				if (target == entityById.end() || target->second == &e) continue;   // not an entity of this scene, or itself
+				const auto to = nodeOfEntity.find(idKey((*target->second)["uuid"]));
+				const size_t b = to != nodeOfEntity.end() ? to->second : baseNode;
+				if (a != b) clusters.join(a, b);
+			}
+		}
+	}
+	// A unit moves when it is movable by itself and its cluster does not include the
+	// base. (What the base refers to inside a cell, and what a unit of a cell refers to
+	// in the base, both put the base in the cluster, and the cluster stays.)
+	std::vector<uint8_t> goes(unitList.size(), 0);
+	for (size_t i = 0; i < unitList.size(); ++i)
+	{
+		goes[i] = unitList[i].movable && clusters.find(i) != clusters.find(baseNode);
+		if (unitList[i].movable && !goes[i]) ++out.keptForRefs;
+	}
+
+	// Which cell: that of the first member of the cluster, by its own position; the
+	// others follow it and stand side by side in the cell root's children, in
+	// traversal order. A unit alone is a cluster of one, so it lands where its own
+	// position says, as before.
+	std::map<std::pair<int, int>, std::vector<std::string>> units;   // ordered: files come out sorted
+	std::map<std::pair<int, int>, std::vector<std::vector<std::string>>> unitClusters;   // the ones of two or more
+	std::unordered_set<std::string> moved;
+	// The folder a moved subtree hung in, when not the scene root: the merge
+	// puts it back there (and rebuilds the folder when the split dropped it).
+	std::unordered_map<std::string, std::string> unitFolder;
+	{
+		std::unordered_map<size_t, std::vector<size_t>> members;   // cluster root → its moving units
+		for (size_t i = 0; i < unitList.size(); ++i)
+			if (goes[i]) members[clusters.find(i)].push_back(i);
+		for (size_t i = 0; i < unitList.size(); ++i)
+		{
+			if (!goes[i] || clusters.find(i) != i) continue;   // the root of a cluster is its first member
 			double px = 0.0, pz = 0.0;
-			if (const json* comps = componentsOf(child))
+			if (const json* comps = componentsOf(*unitList[i].rec))
 				if (const auto t = comps->find("transform"); t != comps->end() && t->is_object())
 					if (const auto pos = t->find("position");
 					    pos != t->end() && pos->is_array() && pos->size() >= 3
@@ -185,12 +467,22 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 					}
 			const std::pair<int, int> cell{ CellManifest::cellIndex(px, options.cellSize),
 			                                CellManifest::cellIndex(pz, options.cellSize) };
-			const std::string k = idKey(child["uuid"]);
-			units[cell].push_back(k);
-			moved.insert(k);
+			const std::vector<size_t>& together = members[i];
+			std::vector<std::string> keys;
+			for (const size_t j : together)
+			{
+				units[cell].push_back(unitList[j].key);
+				moved.insert(unitList[j].key);
+				if (!unitList[j].folder.empty()) unitFolder[unitList[j].key] = unitList[j].folder;
+				keys.push_back(unitList[j].key);
+			}
+			if (keys.size() > 1)
+			{
+				unitClusters[cell].push_back(std::move(keys));
+				++out.clusters;
+			}
 		}
-	};
-	visit(*roots[0]);
+	}
 
 	// Everything that leaves: the moved subtrees, whole.
 	std::unordered_set<std::string> gone;
@@ -273,11 +565,15 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		cellEntities.push_back({ { "children", rootKids }, { "components", json::object() },
 		                         { "name", "Cell " + std::to_string(x) + "," + std::to_string(z) },
 		                         { "parent", nullptr }, { "uuid", rootId } });
+		uint32_t bodies = 0;
+		uint32_t perClass[3] = { 0, 0, 0 };   // indexed by StreamClass
 		std::function<void(const std::string&, const json&)> add = [&](const std::string& k, const json& parentId)
 		{
 			json e = *byId[k];
 			e["parent"] = parentId;
 			const json id = e["uuid"];
+			if (mayOwnBody(e)) ++bodies;
+			++perClass[static_cast<size_t>(entityClass(e))];
 			cellEntities.push_back(e);
 			if (const json* kids = childrenOf(*byId[k]))
 				for (const json& c : *kids)
@@ -288,8 +584,35 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		c.x        = x;
 		c.z        = z;
 		c.entities = static_cast<uint32_t>(cellEntities.size() - 1);
+		c.bodies   = bodies;
 		c.scene    = { { "entities", std::move(cellEntities) },
 		               { "version", scene.value("version", std::string("1.1")) } };
+		// The head the streamer reads off the parsed file (CellStreamer.h): the
+		// format version, which says the ids in the file are stable and are to be
+		// kept on load, and what the cell holds. The classes are how many of its
+		// entities belong to each streaming class; only Static moves for now.
+		json head = json::object();
+		head["version"] = kCellFormatVersion;
+		head["cell"]    = json::array({ x, z });
+		head["bodies"]  = bodies;
+		head["classes"] = { { "static",   perClass[static_cast<size_t>(StreamClass::Static)] },
+		                    { "stateful", perClass[static_cast<size_t>(StreamClass::Stateful)] } };
+		// The units that refer to one another (the ref hull), by their ids, each list
+		// standing side by side in the cell root's children. The streamer builds a
+		// cluster in ONE slice (SceneSerializer::sliceForAdditiveLoad reads this), so
+		// that no frame ever has half of a cluster in the world. Only when there is one.
+		if (const auto together = unitClusters.find(cell); together != unitClusters.end())
+		{
+			json lists = json::array();
+			for (const std::vector<std::string>& keys : together->second)
+			{
+				json one = json::array();
+				for (const std::string& k : keys) one.push_back((*byId[k])["uuid"]);
+				lists.push_back(std::move(one));
+			}
+			head["clusters"] = std::move(lists);
+		}
+		c.scene["streaming"] = std::move(head);
 		// For the merge only (the game's loader reads no such key): which folder
 		// each subtree came from, and those folders as they were, up to the
 		// scene root — the split may have dropped them from the base.
@@ -312,13 +635,14 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		if (!parents.empty())
 			c.scene["cellFolders"] = { { "parents", std::move(parents) }, { "folders", std::move(folders) } };
 		out.moved += c.entities;
-		listing.push_back(json::array({ x, z, c.entities }));
+		listing.push_back(json::array({ x, z, c.entities, c.bodies }));
 		out.cells.push_back(std::move(c));
 	}
 
 	const float load   = options.loadRadius > 0.0f ? options.loadRadius : 1.5f * options.cellSize;
 	const float unload = options.unloadRadius > 0.0f ? std::max(options.unloadRadius, load) : 1.25f * load;
-	out.base["cells"] = { { "cellSize", options.cellSize }, { "loadRadius", load },
+	out.base["cells"] = { { "version", kCellFormatVersion },
+	                      { "cellSize", options.cellSize }, { "loadRadius", load },
 	                      { "unloadRadius", unload }, { "lookaheadSec", options.lookaheadSec },
 	                      { "dir", options.dir }, { "list", std::move(listing) } };
 	return out;

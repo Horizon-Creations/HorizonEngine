@@ -58,6 +58,21 @@ struct WeatherComponent
     WeatherKind targetKind  = WeatherKind::Clear;  // desired state (set to start a change)
     float       intensity   = 1.0f;                // 0..1 scales the target preset
 
+    // What MATERIALS see of the weather, 0..1 each — the material graph's Weather node and
+    // the engine's weather material functions (MF_WeatherPuddles, MF_WeatherSnow) read
+    // them. Set by hand (Weather details panel ▸ Surface), not by the presets; WeatherSystem
+    // writes them into the EnvironmentComponent every tick. 0.64 is the puddle level the
+    // auto landscape had before it took its puddles from the weather.
+    float       puddleAmount = 0.64f;              // standing water in the landscape's hollows
+    float       puddleSize   = 10.0f;              // metres across one hollow (0.5 … 100)
+    float       snowCover    = 0.0f;               // snow lying on the ground
+
+    // Thunder / lightning, 0..1: how often the sky strikes (0 = never, 1 = the storm
+    // rhythm, one strike every few seconds). A preset sets it (Storm = intensity, every
+    // other = 0) like it sets the sky values; move the slider and the preset stops driving
+    // it until the next preset pick. Serialized.
+    float       thunder = 0.0f;
+
     float transitionDuration = 8.0f;   // seconds for a full weather change
     bool  autoCycle          = false;  // randomly cycle between weather kinds
     float cycleSeconds       = 60.0f;  // mean dwell time per state when autoCycle
@@ -112,6 +127,7 @@ struct WeatherComponent
     float      lastRain    = -999.0f;
     float      lastSnow    = -999.0f;
     float      lastWetness = -999.0f;
+    float      lastThunder = -999.0f;
 
     // Current blended output written into the EnvironmentComponent + precipitation.
     float      curCloudCoverage = 0.0f;

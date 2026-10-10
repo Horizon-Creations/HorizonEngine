@@ -20,6 +20,17 @@
 
 HorizonWorld::HorizonWorld()
 {
+    // The id index listens first, so the root's own id below is indexed too. It is
+    // fed by three signals instead of by trusting every writer: the id is written
+    // at more places than one API can cover (createEntity, setEntityId,
+    // applyPrefabJson's emplace_or_replace for a peer's subtree, entityUuid and the
+    // collab controller minting one for an entity that lacks it, tests that
+    // emplace), and an index that only knew some of them would be wrong without
+    // saying so.
+    m_registry.on_construct<EntityIdComponent>().connect<&HorizonWorld::onEntityIdSet>(*this);
+    m_registry.on_update<EntityIdComponent>().connect<&HorizonWorld::onEntityIdSet>(*this);
+    m_registry.on_destroy<EntityIdComponent>().connect<&HorizonWorld::onEntityIdDestroyed>(*this);
+
     m_rootEntity = m_registry.create();
     m_registry.emplace<NameComponent>(m_rootEntity, NameComponent{ "World" });
     m_registry.emplace<HierarchyComponent>(m_rootEntity);
@@ -124,10 +135,14 @@ void HorizonWorld::ensureEnvironmentLights()
             if (auto* ph = m_registry.try_get<HierarchyComponent>(h.parent))
                 ph->children.erase(std::remove(ph->children.begin(), ph->children.end(), e),
                                    ph->children.end());
+        if (h.parent != parent) ++m_structureEpoch;
         h.parent = parent;
         auto& sh = m_registry.get<HierarchyComponent>(parent);
         if (std::find(sh.children.begin(), sh.children.end(), e) == sh.children.end())
+        {
             sh.children.push_back(e);
+            ++m_structureEpoch;
+        }
     };
 
     // ── Pass 1: exactly one tagged light per role ────────────────────────────
@@ -404,6 +419,7 @@ Entity HorizonWorld::createEntity(const std::string& name)
     rootHierarchy.children.push_back(e);
     m_registry.get<HierarchyComponent>(e).parent = m_rootEntity;
     m_hierarchyDirty = true;
+    ++m_structureEpoch;
     return e;
 }
 
@@ -419,9 +435,9 @@ Entity HorizonWorld::findByEntityId(const HE::UUID& id) const
     // A zero id is the "no identity" sentinel, never a real one — matching it
     // would return an arbitrary entity that merely lacks the component.
     if (id == HE::UUID{}) return entt::null;
-    for (auto [e, c] : m_registry.view<const EntityIdComponent>().each())
-        if (c.id == id) return e;
-    return entt::null;
+    const auto hit = m_idIndex.find(id);
+    if (hit == m_idIndex.end()) return entt::null;
+    return hit->second;
 }
 
 void HorizonWorld::setEntityId(Entity entity, const HE::UUID& id)
@@ -430,9 +446,41 @@ void HorizonWorld::setEntityId(Entity entity, const HE::UUID& id)
     m_registry.emplace_or_replace<EntityIdComponent>(entity, EntityIdComponent{ id });
 }
 
+void HorizonWorld::onEntityIdSet(entt::registry& registry, Entity entity)
+{
+    // Construct and update both land here: the component holds the NEW id by now,
+    // and whatever the entity was indexed under before is in m_idIndexed.
+    unindexEntityId(entity);
+    const HE::UUID id = registry.get<EntityIdComponent>(entity).id;
+    if (id == HE::UUID{}) return;   // "no identity" is not indexed, see findByEntityId
+    m_idIndex.emplace(id, entity);
+    m_idIndexed[entity] = id;
+}
+
+void HorizonWorld::onEntityIdDestroyed(entt::registry&, Entity entity)
+{
+    unindexEntityId(entity);
+}
+
+void HorizonWorld::unindexEntityId(Entity entity)
+{
+    const auto indexed = m_idIndexed.find(entity);
+    if (indexed == m_idIndexed.end()) return;
+    // Only this entity's own entry: another holder of the same id stays findable.
+    const auto holders = m_idIndex.equal_range(indexed->second);
+    for (auto it = holders.first; it != holders.second; ++it)
+        if (it->second == entity)
+        {
+            m_idIndex.erase(it);
+            break;
+        }
+    m_idIndexed.erase(indexed);
+}
+
 void HorizonWorld::destroyRecursive(Entity entity)
 {
     if (!m_registry.valid(entity)) return;
+    ++m_structureEpoch;   // every destroy path ends here, destroyEntity and the lights' teardown included
     // Destroy the subtree bottom-up (children vector is copied — destroying
     // mutates the registry under us). No built-in guard here: the caller vetted the
     // top-level entity, and a Sky entity's built-in sun/moon lights must go with it.
@@ -473,6 +521,7 @@ void HorizonWorld::clear()
     fireLevelUnloaded();
     m_origin = glm::dvec3(0.0);
     m_cellManifestJson.clear();
+    m_cellHeadJson.clear();
 
     // Live UI widgets track the world's lifetime (PIE stop / scene load) — but
     // ONLY a world-owned WM. An injected app-level WM (the game's persistent
@@ -496,6 +545,7 @@ void HorizonWorld::clear()
     for (Entity e : strays)
         if (m_registry.valid(e))
             m_registry.destroy(e); // direct destroy: bypasses the built-in guard for env lights
+    ++m_structureEpoch;   // the strays above never went through destroyRecursive
 
     // Drop the level script too (like the environment, a loaded scene restores
     // its own via setLevelScriptJson; a scene without one starts empty).
@@ -560,6 +610,7 @@ bool HorizonWorld::reparentEntity(Entity entity, Entity newParent)
     nh->children.push_back(entity);
     h->parent = newParent;
     m_hierarchyDirty = true;
+    ++m_structureEpoch;
     return true;
 }
 
@@ -585,6 +636,36 @@ bool HorizonWorld::moveChild(Entity entity, int delta)
     // keeps its place relative to the others.
     if (to > from) std::rotate(ch.begin() + from, ch.begin() + from + 1, ch.begin() + to + 1);
     else           std::rotate(ch.begin() + to,   ch.begin() + from,     ch.begin() + from + 1);
+    m_hierarchyDirty = true;
+    ++m_structureEpoch;
+    return true;
+}
+
+bool HorizonWorld::placeNextTo(Entity entity, Entity target, bool after)
+{
+    if (entity == target || entity == m_rootEntity || target == m_rootEntity)
+        return false;
+    if (!m_registry.valid(entity) || !m_registry.valid(target) || isBuiltin(entity))
+        return false;
+    const auto* th = m_registry.try_get<HierarchyComponent>(target);
+    if (!th || th->parent == entt::null)
+        return false;
+    const Entity parent = th->parent;
+    if (!reparentEntity(entity, parent))
+        return false;
+    // Indices are read AFTER the reparent: it takes `entity` out of its old
+    // list, which can shift `target` when both lived in the same one.
+    auto& ch = m_registry.get<HierarchyComponent>(parent).children;
+    const auto fromIt = std::find(ch.begin(), ch.end(), entity);
+    const auto toIt   = std::find(ch.begin(), ch.end(), target);
+    if (fromIt == ch.end() || toIt == ch.end())
+        return false;
+    const int from = static_cast<int>(fromIt - ch.begin());
+    const int t    = static_cast<int>(toIt - ch.begin());
+    // Taking `entity` out of the list first moves everything behind it up one.
+    const int desired = from < t ? (after ? t : t - 1)
+                                 : (after ? t + 1 : t);
+    moveChild(entity, desired - from);
     m_hierarchyDirty = true;
     return true;
 }
@@ -620,6 +701,7 @@ bool HorizonWorld::sortChildrenByName(Entity parent)
         return false;
     ph->children = std::move(sorted);
     m_hierarchyDirty = true;
+    ++m_structureEpoch;
     return true;
 }
 

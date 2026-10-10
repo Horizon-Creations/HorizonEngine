@@ -165,7 +165,7 @@ json componentsOf(HorizonWorld& world, Entity e)
 // a grid step that changes under it the first time it sculpts.
 std::uint32_t snappedResolution(std::uint32_t res)
 {
-	const std::uint32_t r0 = std::clamp(res, 2u, 1024u);
+	const std::uint32_t r0 = std::clamp(res, 2u, kTerrainMaxResolution);
 	std::uint32_t cells = r0 - 1, p = 1;
 	while (p < cells) p <<= 1;
 	return p + 1;
@@ -272,7 +272,7 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			{
 				const auto& tc = world->registry().get<TerrainComponent>(e);
 				const glm::vec3 wp = HE::worldPositionOf(*world, e);
-				const std::uint32_t res = std::clamp(tc.resolution, 2u, 1024u);
+				const std::uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
 
 				// Over the WHOLE field, which is the master heightfield the chunks
 				// are built from — sculpted heights when they exist, the fBm

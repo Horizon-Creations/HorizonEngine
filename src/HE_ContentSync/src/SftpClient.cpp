@@ -6,6 +6,7 @@
 #include <libssh2.h>
 #include <libssh2_sftp.h>
 
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -34,38 +35,71 @@ void ensureLibssh2Initialized()
 // socketConnectPoll (a zero-timeout poll, see Socket.h) with short sleeps —
 // acceptable here because every caller of this file runs on a background
 // worker thread, never the main/frame thread.
-constexpr int kConnectTimeoutMs = 10000;
+//
+// The host resolves to more than one address (a dual-stack webhoster: IPv6 and
+// IPv4), and a non-blocking connect commits to the FIRST one that does not fail
+// outright. When that address silently drops the SYN — a dead IPv6 route, a
+// firewall rate limit — the old code waited out the whole timeout and gave up
+// without ever trying the other address, so one flaky candidate took the host
+// down with it. Each candidate now gets a shorter slice of the budget and the
+// next one is tried on timeout; only when every address has timed out does the
+// connect fail, and then as `transient` so the caller may retry.
+constexpr int kConnectTimeoutMs = 5000;   // per address
 constexpr int kPollIntervalMs   = 10;
 
-HE::Net::SocketHandle connectBlocking(const std::string& host, std::uint16_t port, std::string& outError)
+HE::Net::SocketHandle connectBlocking(const std::string& host, std::uint16_t port,
+                                       std::string& outError, bool& outTransient)
 {
 	HE::Net::socketSystemInit();
+	outTransient = false;
 
 	HE::Net::SocketHandle h = HE::Net::kInvalidSocket;
-	HE::Net::SocketResult r = HE::Net::socketCreateTcpConnecting(host, port, h);
-	if (r == HE::Net::SocketResult::Error)
+	unsigned candidates = 0;
+	bool     timedOut   = false;
+	bool     connected  = false;
+
+	for (unsigned index = 0; ; ++index)
 	{
-		outError = "Could not resolve/connect to " + host;
-		return HE::Net::kInvalidSocket;
+		HE::Net::SocketResult r = HE::Net::socketCreateTcpConnecting(host, port, h, index, &candidates);
+		if (r == HE::Net::SocketResult::Error)
+			break;   // nothing (further) to try; an earlier timeout stays the reported cause
+
+		int waitedMs = 0;
+		while (r == HE::Net::SocketResult::WouldBlock)
+		{
+			if (waitedMs >= kConnectTimeoutMs)
+			{
+				HE::Net::socketClose(h);
+				h        = HE::Net::kInvalidSocket;
+				timedOut = true;
+				break;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+			waitedMs += kPollIntervalMs;
+			r = HE::Net::socketConnectPoll(h);
+		}
+		if (r == HE::Net::SocketResult::Ok) { connected = true; break; }
+
+		if (r == HE::Net::SocketResult::Error && h != HE::Net::kInvalidSocket)
+		{
+			// This address refused after the connect had started — go on to the next one.
+			HE::Net::socketClose(h);
+			h = HE::Net::kInvalidSocket;
+		}
+		if (index + 1 >= candidates) break;
 	}
 
-	int waitedMs = 0;
-	while (r == HE::Net::SocketResult::WouldBlock)
+	if (!connected)
 	{
-		if (waitedMs >= kConnectTimeoutMs)
+		if (timedOut)
 		{
-			HE::Net::socketClose(h);
-			outError = "Timed out connecting to " + host;
-			return HE::Net::kInvalidSocket;
+			outError     = "Timed out connecting to " + host;
+			outTransient = true;
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
-		waitedMs += kPollIntervalMs;
-		r = HE::Net::socketConnectPoll(h);
-	}
-	if (r == HE::Net::SocketResult::Error)
-	{
-		HE::Net::socketClose(h);
-		outError = "Connection to " + host + " refused/failed";
+		else if (candidates == 0)
+			outError = "Could not resolve " + host;
+		else
+			outError = "Connection to " + host + " refused/failed";
 		return HE::Net::kInvalidSocket;
 	}
 
@@ -84,6 +118,7 @@ struct Session
 	LIBSSH2_SESSION*      ssh  = nullptr;
 	LIBSSH2_SFTP*         sftp = nullptr;
 	std::string           error;
+	bool                  transient = false;   // see SftpResult::transient
 
 	bool open(const SftpEndpoint& endpoint)
 	{
@@ -95,7 +130,7 @@ struct Session
 			return false;
 		}
 
-		sock = connectBlocking(endpoint.host, endpoint.port, error);
+		sock = connectBlocking(endpoint.host, endpoint.port, error, transient);
 		if (sock == HE::Net::kInvalidSocket) return false;
 
 		ssh = libssh2_session_init();
@@ -108,7 +143,8 @@ struct Session
 
 		if (libssh2_session_handshake(ssh, static_cast<libssh2_socket_t>(sock)) != 0)
 		{
-			error = "SSH handshake failed: " + lastSshError();
+			error     = "SSH handshake failed: " + lastSshError();
+			transient = true;
 			return false;
 		}
 
@@ -253,10 +289,24 @@ void listRemoteDirRecursive(Session& s, const std::string& fullDirPath,
 
 } // namespace
 
+SftpResult sftpWithConnectRetry(const std::function<SftpResult()>& op, int attempts)
+{
+	SftpResult result;
+	for (int attempt = 1; attempt <= attempts; ++attempt)
+	{
+		result = op();
+		if (result.ok || !result.transient || attempt == attempts) break;
+		HE_LOG_WARN(ContentSync, "EngineContent: connection attempt %d of %d failed (%s) — trying again",
+		            attempt, attempts, result.error.c_str());
+		std::this_thread::sleep_for(std::chrono::seconds(attempt));
+	}
+	return result;
+}
+
 SftpResult sftpTestConnection(const SftpEndpoint& endpoint)
 {
 	Session s;
-	if (!s.open(endpoint)) return { false, s.error };
+	if (!s.open(endpoint)) return { false, s.error, s.transient };
 	return { true, {} };
 }
 
@@ -264,7 +314,7 @@ SftpResult sftpGetFile(const SftpEndpoint& endpoint, const std::string& remoteRe
                         const std::string& localPath, const SftpProgressFn& onProgress)
 {
 	Session s;
-	if (!s.open(endpoint)) return { false, s.error };
+	if (!s.open(endpoint)) return { false, s.error, s.transient };
 
 	const std::string remotePath = joinRemotePath(endpoint.remoteBasePath, remoteRelPath);
 	LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(), LIBSSH2_FXF_READ, 0);
@@ -345,7 +395,7 @@ SftpResult sftpPutFile(const SftpEndpoint& endpoint, const std::string& localPat
 	if (!in) return { false, "Could not open local file '" + localPath + "'" };
 
 	Session s;
-	if (!s.open(endpoint)) return { false, s.error };
+	if (!s.open(endpoint)) return { false, s.error, s.transient };
 
 	const std::string remotePath = joinRemotePath(endpoint.remoteBasePath, remoteRelPath);
 	LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(),
@@ -384,7 +434,7 @@ SftpResult sftpPutFile(const SftpEndpoint& endpoint, const std::string& localPat
 SftpResult sftpEnsureRemoteDir(const SftpEndpoint& endpoint, const std::string& remoteRelDir)
 {
 	Session s;
-	if (!s.open(endpoint)) return { false, s.error };
+	if (!s.open(endpoint)) return { false, s.error, s.transient };
 
 	// Build up one path segment at a time — sftp mkdir has no -p equivalent,
 	// and creating a deep path in one call fails if any intermediate level is
@@ -421,7 +471,7 @@ SftpResult sftpEnsureRemoteDir(const SftpEndpoint& endpoint, const std::string& 
 SftpResult sftpListRemoteTree(const SftpEndpoint& endpoint, std::vector<RemoteFileInfo>& outFiles)
 {
 	Session s;
-	if (!s.open(endpoint)) return { false, s.error };
+	if (!s.open(endpoint)) return { false, s.error, s.transient };
 
 	std::string root = endpoint.remoteBasePath;
 	if (root.empty())        root = "/";

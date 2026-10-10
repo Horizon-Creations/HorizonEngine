@@ -3,6 +3,7 @@
 void RenderWorld::clear()
 {
 	objects.clear();
+	instanceBlocks.clear();   // the clusters in `objects` index into it: the two live and die together
 	skinnedObjects.clear();
 	lights.clear();
 	decals.clear();

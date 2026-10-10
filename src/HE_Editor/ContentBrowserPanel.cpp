@@ -10,6 +10,7 @@
 #include "EditorWidgets.h"
 #include "EditorHelp.h"               // pinDialogToEditorWindow
 #include "EditorUI.h"                    // discardPanelState on delete
+#include "EditorTabs.h"                  // find-or-focus an asset's tab, follow a move
 #include "ScriptEditorPanel.h"
 #include "CppClassEditorPanel.h"
 #include "MaterialEditorPanel.h"
@@ -1376,7 +1377,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			for (auto& c : e) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
 			if (e == ".mat")                                   return { I.material, {0.60f, 0.90f, 0.60f, 1.0f} };
 			if (e == ".obj" || e == ".fbx" || e == ".gltf"
-				|| e == ".glb" || e == ".dae")                 return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
+				|| e == ".glb" || e == ".dae" || e == ".blend")  return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
 			if (e == ".svg" || e == ".ai")                     return { I.model2d,  {0.80f, 0.70f, 1.00f, 1.0f} };
 			if (e == ".cs"  || e == ".lua" || e == ".py"
 				|| e == ".js")                                  return { I.script,   {0.90f, 0.90f, 0.50f, 1.0f} };
@@ -1554,6 +1555,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		{
 			if (std::filesystem::path(fullPath).extension() == ".hescene")
 			{
+				// The scene that is already open lives in the scene tab: bring that
+				// forward. Opening it again would ask about unsaved changes, then
+				// throw the world, the undo history and play mode away to read the
+				// file back in — a reload nobody asked for by double-clicking it.
+				if (EditorTabs::sameAsset(ctx.currentScenePath, fullPath, ctx.contentManager) &&
+				    EditorTabs::focusSceneTab(ctx.tabs, ctx.activeTab, tabSelectRequest))
+					return;
 				openSceneGuarded(fullPath);
 				return;
 			}
@@ -1584,21 +1592,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			      CinematicPanel::isCinematicAsset(fullPath)))
 				return; // no dedicated editor for this type — same no-op the old inline dispatch had
 
-			const std::string tabLabel = std::filesystem::path(fullPath).stem().string();
-			auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
-				[&](const AppContext::EditorTab& t){ return t.assetPath == fullPath; });
-			if (it == ctx.tabs.end())
-			{
-				ctx.tabs.push_back({ tabLabel, fullPath, true, true });
-				ctx.activeTab = static_cast<int>(ctx.tabs.size()) - 1;
-			}
-			else
-			{
-				ctx.activeTab = static_cast<int>(std::distance(ctx.tabs.begin(), it));
-			}
-			// Force the tab bar to select this tab next frame (else ImGui keeps the
-			// Scene tab selected and the editor never opens).
-			tabSelectRequest = ctx.activeTab;
+			// Find-or-push, and the tab bar's one-shot select (else ImGui keeps the
+			// Scene tab selected and the editor never opens) — the one shared
+			// answer to "is this asset already open", see EditorTabs.h.
+			EditorTabs::openOrFocus(ctx.tabs, ctx.activeTab, tabSelectRequest, fullPath,
+				std::filesystem::path(fullPath).stem().string(), ctx.contentManager);
 		};
 
 #ifdef HE_HAVE_LIBSSH2
@@ -2436,9 +2434,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// twelve paths they no longer live at) is a broken gesture.
 					for (std::string& sel : s_selection)
 						if (sel == moveSrc) sel = dst.string();
-					for (auto& t : ctx.tabs)
-						if (t.assetPath == moveSrc)
-							t.assetPath = dst.string();
+					EditorTabs::retarget(ctx.tabs, moveSrc, dst.string());
 					s_quietContentRefresh = true;
 				}
 			}
@@ -3810,15 +3806,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						// create; on a rename this is empty and stays so.
 						if (s_renameIsCreate && !s_pendingCreatePublish.empty())
 							s_pendingCreatePublish = newPath.string();
-						if (!s_renameIsFolder)
-						{
-							for (auto& t : ctx.tabs)
-								if (t.assetPath == s_renameTarget)
-								{
-									t.assetPath = newPath.string();
-									t.label     = newName;
-								}
-						}
+						// The tabs follow: a renamed asset's own, and for a folder every
+						// tab on an asset beneath it. One left on the old path would
+						// show a file that is gone — and a double-click on the asset at
+						// its new name would open a second tab beside it.
+						EditorTabs::retarget(ctx.tabs, s_renameTarget, newPath.string(),
+						                     s_renameIsFolder);
 						s_quietContentRefresh = true;
 
 						// In a C++ project, a freshly created scene gets a matching
@@ -4262,8 +4255,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					EditorAssetTypeCache::invalidate(newAbs);
 					AssetThumbnailCache::invalidate(oldAbs);
 					AssetThumbnailCache::invalidate(newAbs);
-					for (auto& t : ctx.tabs)
-						if (t.assetPath == oldAbs) t.assetPath = newAbs;
+					EditorTabs::retarget(ctx.tabs, oldAbs, newAbs);
 					for (std::string& sel : s_selection)
 						if (sel == oldAbs) sel = newAbs;
 					if (s_selectedItem == oldAbs) s_selectedItem = newAbs;

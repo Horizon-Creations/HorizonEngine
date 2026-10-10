@@ -44,12 +44,27 @@ const HE::CellManifest* manifestOf(const HorizonWorld& world)
 	{
 		s_text = text;
 		s_ok   = !text.empty() && HE::CellManifest::parse(text, s_manifest) && !s_manifest.empty();
+		// The preview anchors are absolute positions in the scene they were set in; another
+		// scene (or the same one split or merged) would draw them somewhere that means nothing.
+		previewPins().clear();
 	}
 	return s_ok ? &s_manifest : nullptr;
 }
 
+std::vector<HE::CellAnchor>& previewPins()
+{
+	static std::vector<HE::CellAnchor> s_pins;
+	return s_pins;
+}
+
 // ── The cells in the Scene window ────────────────────────────────────────────
 void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawBuffer& out)
+{
+	appendCellLines(world, eye, {}, out);
+}
+
+void appendCellLines(const HorizonWorld& world, const glm::vec3& eye,
+                     const std::vector<HE::CellAnchor>& pins, DebugDrawBuffer& out)
 {
 	const HE::CellManifest* m = manifestOf(world);
 	if (!m) return;
@@ -61,7 +76,15 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawB
 	// Far enough to see a ring of dropped cells around the kept ones, and never
 	// so far that a fine grid draws tens of thousands of squares.
 	const double range = std::max(static_cast<double>(m->unloadRadius) * 1.5, size * 2.0);
-	const std::vector<HE::CellManifest::View> cells = m->around(eyeAbs, range);
+	// The camera is an anchor like the pins: the nearest of them decides a cell's colour.
+	// A viewpoint has no velocity, so the lookahead does not enter.
+	std::vector<HE::CellAnchor> anchors;
+	anchors.reserve(1 + pins.size());
+	HE::CellAnchor cam;
+	cam.position = eyeAbs;
+	anchors.push_back(cam);
+	anchors.insert(anchors.end(), pins.begin(), pins.end());
+	const std::vector<HE::CellManifest::View> cells = m->around(anchors, range);
 
 	const glm::vec3 kLoad(0.25f, 0.85f, 0.35f);   // the game builds it from here
 	const glm::vec3 kKeep(0.95f, 0.70f, 0.20f);   // kept once built, not loaded
@@ -87,11 +110,11 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawB
 		out.line({ x0, y, z1 }, { x0, y, z0 }, col);
 	}
 
-	// The two radii around the camera's ground point.
-	const auto ring = [&](float radius, const glm::vec3& col)
+	// The two radii around each anchor's ground point: the camera's, and a pin's
+	// stretched by its radiusScale.
+	const auto ring = [&](float cx, float cz, float radius, const glm::vec3& col)
 	{
 		constexpr int kSegments = 96;
-		const float cx = eye.x, cz = eye.z;
 		for (int i = 0; i < kSegments; ++i)
 		{
 			const float a0 = 6.2831853f * static_cast<float>(i) / kSegments;
@@ -100,8 +123,14 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawB
 			         { cx + radius * std::cos(a1), y, cz + radius * std::sin(a1) }, col);
 		}
 	};
-	ring(m->loadRadius, kLoad);
-	if (m->unloadRadius > m->loadRadius) ring(m->unloadRadius, kKeep);
+	for (const HE::CellAnchor& a : anchors)
+	{
+		const float scale = a.radiusScale > 0.0f ? a.radiusScale : 1.0f;
+		const float cx = static_cast<float>(a.position.x - origin.x);
+		const float cz = static_cast<float>(a.position.z - origin.z);
+		ring(cx, cz, m->loadRadius * scale, kLoad);
+		if (m->unloadRadius > m->loadRadius) ring(cx, cz, m->unloadRadius * scale, kKeep);
+	}
 }
 
 // ── Split and merge, on the open scene ───────────────────────────────────────
@@ -372,9 +401,10 @@ void drawCells(AppContext& ctx)
 			return;
 		}
 		ImGui::TextDisabled("This scene does not stream in cells: the game loads all of it at once. "
-		                    "Splitting moves its placed meshes, point and spot lights, static bodies "
-		                    "and decals into one file per square; the game then loads the squares "
-		                    "around the camera.");
+		                    "Splitting moves its placed meshes, point and spot lights, static bodies, "
+		                    "decals and placed prefabs into one file per square; the game then loads "
+		                    "the squares around the camera. Play in the editor shows only what stays "
+		                    "in the scene.");
 		static HE::CellSplitOptions s_options;
 		EditorWidgets::Row::dragFloat("Cell size (m)##cellsplit", &s_options.cellSize, 8.0f, 16.0f, 100000.0f, "%.0f");
 		EditorWidgets::Row::dragFloat("Load radius (m), 0 = 1.5 cells##cellsplit", &s_options.loadRadius, 8.0f,
@@ -405,22 +435,52 @@ void drawCells(AppContext& ctx)
 
 	if (!ctx.editorCamera) return;
 	const glm::dvec3 eye = glm::dvec3(ctx.editorCamera->position()) + ctx.world->origin();
-	const std::vector<HE::CellManifest::View> nearby = m->around(eye, m->unloadRadius);
+
+	// Preview anchors: the game keeps a cell while ANY anchor is near it (the camera,
+	// a player, a pin a script sets). The editor has one camera, so a pin here is a way
+	// to look at what two places hold together; the Scene window draws them as well.
+	std::vector<HE::CellAnchor>& pins = previewPins();
+	if (EditorWidgets::button("Pin an anchor at the editor camera"))
+	{
+		HE::CellAnchor pin;
+		pin.position = eye;
+		pins.push_back(pin);
+	}
+	ImGui::BeginDisabled(pins.empty());
+	ImGui::SameLine();
+	if (EditorWidgets::button("Clear anchors")) pins.clear();
+	ImGui::EndDisabled();
+	if (!pins.empty())
+		ImGui::Text("%zu preview anchor(s) besides the camera.", pins.size());
+
+	std::vector<HE::CellAnchor> anchors;
+	anchors.reserve(1 + pins.size());
+	HE::CellAnchor cam;
+	cam.position = eye;
+	anchors.push_back(cam);
+	anchors.insert(anchors.end(), pins.begin(), pins.end());
+	const std::vector<HE::CellManifest::View> nearby = m->around(anchors, m->unloadRadius);
 	size_t   loadCells = 0, keepCells = 0;
 	uint64_t loadEnts = 0, keepEnts = 0;
+	uint32_t mostSlices = 0;
 	for (const HE::CellManifest::View& v : nearby)
 	{
 		if (v.reach == HE::CellManifest::View::Reach::Load) { ++loadCells; loadEnts += v.entities; }
 		else if (v.reach == HE::CellManifest::View::Reach::Keep) { ++keepCells; keepEnts += v.entities; }
+		mostSlices = std::max(mostSlices, v.slicesEstimate);
 	}
-	ImGui::Text("From the editor camera the game would build %zu cells (%llu entities) and keep %zu more "
-	            "(%llu) once built.", loadCells, static_cast<unsigned long long>(loadEnts), keepCells,
-	            static_cast<unsigned long long>(keepEnts));
+	ImGui::Text("From %s the game would build %zu cells (%llu entities) and keep %zu more (%llu) once built.",
+	            pins.empty() ? "the editor camera" : "the camera and the anchors", loadCells,
+	            static_cast<unsigned long long>(loadEnts), keepCells, static_cast<unsigned long long>(keepEnts));
+	ImGui::TextDisabled("A cell is built in slices of whole objects, up to %zu entities each, as many per frame as "
+	                    "fit its budget; the largest cell in reach here takes about %u slices. It is dropped only "
+	                    "once every anchor is beyond the unload radius.",
+	                    HE::kDefaultCellSliceEntities, mostSlices);
 
 	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
 	                                 | ImGuiTableFlags_SizingStretchProp;
-	if (nearby.empty() || !ImGui::BeginTable("##cells", 4, kFlags)) return;
-	for (const char* h : { "Cell", "Entities", "Distance", "Game" }) ImGui::TableSetupColumn(h);
+	if (nearby.empty() || !ImGui::BeginTable("##cells", 5, kFlags)) return;
+	for (const char* h : { "Cell", "Entities", "Slices", "Distance", "Game" }) ImGui::TableSetupColumn(h);
 	ImGui::TableHeadersRow();
 	constexpr size_t kRows = 16;
 	for (size_t i = 0; i < nearby.size() && i < kRows; ++i)
@@ -429,6 +489,7 @@ void drawCells(AppContext& ctx)
 		ImGui::TableNextRow();
 		ImGui::TableNextColumn(); ImGui::Text("%d, %d", v.x, v.z);
 		ImGui::TableNextColumn(); ImGui::Text("%u", v.entities);
+		ImGui::TableNextColumn(); ImGui::Text("~%u", v.slicesEstimate);
 		ImGui::TableNextColumn(); ImGui::Text("%.0f m", v.distance);
 		ImGui::TableNextColumn(); ImGui::TextUnformatted(reachName(v.reach));
 	}

@@ -68,6 +68,15 @@ void FillMaterialWind(const ::EnvironmentSettings& env, MaterialShaderLibrary::L
 	out.camPos[3]   = std::max(env.windSpeed, 0.0f);
 }
 
+void FillMaterialWeather(const ::EnvironmentSettings& env, MaterialShaderLibrary::Lighting& out)
+{
+    out.weather[0] = env.wetness;
+    out.weather[1] = env.snowAmount;
+    out.weather[2] = env.puddleAmount;
+    out.weather[3] = env.snowCover;
+    out.weather2[0] = env.puddleSize;
+}
+
 void FillMaterialGIProbe(MaterialShaderLibrary::Lighting& out,
                          const glm::vec3&                 gridOrigin,
                          float                            probeSpacing,
@@ -227,6 +236,23 @@ DirectionalLightWindow BuildDirectionalLightWindow(const RenderWorld& rw)
 		++out.count;
 	}
 	return out;
+}
+
+void FillMaterialDirectionalWindow(const RenderWorld& rw, MaterialShaderLibrary::Lighting& out)
+{
+	const DirectionalLightWindow w = BuildDirectionalLightWindow(rw);
+	for (int i = 0; i < kMaxLightWindow; ++i)
+		for (int k = 0; k < 4; ++k)
+		{
+			const bool on = i < w.count;
+			out.lightPos[i][k]    = on ? w.pos[i][k]   : 0.0f;
+			out.lightDir[i][k]    = on ? w.dir[i][k]   : 0.0f;
+			out.lightColor[i][k]  = on ? w.color[i][k] : 0.0f;
+			// x = range; y = 0 ("no local atlas layer" in the heLitP window,
+			// not BuildDirectionalLightWindow's built-in -1).
+			out.lightParams[i][k] = (on && k == 0) ? w.params[i][0] : 0.0f;
+		}
+	out.counts[0] = static_cast<float>(w.count);
 }
 
 } // namespace HE

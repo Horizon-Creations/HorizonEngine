@@ -246,7 +246,8 @@ namespace
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
 	  "that decides whether something reads as wet, polished or worn. On the "
 	  "engine water it is a parameter of its own: keep it low for sharp "
-	  "reflections and a tight sun glint.",
+	  "reflections and a tight sun glint. Distant water is made rougher on top "
+	  "of it, the way the eye averages ripples it can no longer resolve.",
 	  "", "rendering#lighting" },
 	{ "Material/Opacity", "",
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
@@ -287,17 +288,22 @@ namespace
 	{ "Material/WaveA", "",
 	  "The swell, the largest of three wave trains. x = direction in degrees "
 	  "(0 = +X, 90 = +Z), y = speed in m/s, z = wavelength in metres, "
-	  "w = steepness (0 is flat, about 0.4 is choppy). The waves bend the "
-	  "normal only, the mesh stays flat.",
+	  "w = steepness (0 is flat, about 0.3 is choppy). Each train also drives a "
+	  "second, shorter and weaker one at a turned angle, so the sea is not a "
+	  "single grid of crests. The waves bend the normal only, the mesh stays "
+	  "flat.",
 	  "", "materials#water" },
 	{ "Material/WaveB", "",
 	  "Second wave train, laid across the swell so the crests do not line up. "
 	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "
-	  "w = steepness. A steepness of 0 switches it off.",
+	  "w = steepness. A steepness of 0 switches it off. The foam sits on the "
+	  "crests of this train and of the fine ripples.",
 	  "", "materials#water" },
 	{ "Material/WaveC", "",
 	  "Fine ripples on top of the two larger trains. x = direction in degrees, "
-	  "y = speed in m/s, z = wavelength in metres, w = steepness.",
+	  "y = speed in m/s, z = wavelength in metres, w = steepness. The three "
+	  "steepnesses together also set how strong the irregular chop on top is: "
+	  "all three at 0 gives a flat surface.",
 	  "", "materials#water" },
 	{ "Material/FresnelPower", "",
 	  "How quickly the surface turns reflective toward grazing angles. 5 is "
@@ -323,16 +329,30 @@ namespace
 	  "tinted value suits murky or polluted water.",
 	  "", "materials#water" },
 	{ "Material/Foam", "",
-	  "x = coverage, the share of the wave crests that foam (0 = none), "
-	  "y = strength 0..1, z = size of the noise that breaks it up, in metres, "
-	  "w = drift speed in m/s. Foam sits on the crests, not at the shore — "
-	  "there is no scene depth to find a shoreline yet.",
+	  "x = coverage, the share of the wave crests that foam (0 = none; the "
+	  "default is a few whitecaps, 0.3 is a rough sea), y = strength 0..1, "
+	  "z = size of the noise that breaks it into lace, in metres, w = drift "
+	  "speed in m/s. Foam sits on the crests of the steeper waves, not at the "
+	  "shore — there is no scene depth to find a shoreline yet.",
 	  "", "materials#water" },
 	{ "Material/Caustics", "",
-	  "The shimmering light pattern on the surface. x = strength (0 = off), "
-	  "y = pattern size in metres, z = speed, w = camera distance in metres at "
-	  "which the pattern has faded out, so it does not shimmer into moiré far "
-	  "away.",
+	  "Focused light that brightens the water body, as a soft moving pattern. "
+	  "x = strength (0 = off), y = pattern size in metres, z = speed, "
+	  "w = camera distance in metres at which the pattern has faded out, so it "
+	  "does not shimmer into moiré far away. It fades with the water's own "
+	  "transmittance, so it shows in clear, shallow water (low Turbidity) and "
+	  "not in deep or murky water.",
+	  "", "materials#water" },
+	{ "Material/Variation", "",
+	  "Breaks the repeat of the waves, the way texture bombing hides a tiling "
+	  "texture. A sum of waves is periodic, so on a big surface the same bright "
+	  "patch and the same foam dot come back row after row. The water is cut "
+	  "into hexes and each wave train runs once per hex with its own direction "
+	  "and phase; the hexes blend. x = hex size in wavelengths (3.5 = a few "
+	  "waves per hex), y = phase offset between hexes, 0..1 of a wavelength, "
+	  "z = direction offset between hexes in degrees (plus or minus), "
+	  "w = seam sharpness (1 = broad blends, 8 = sharp). y = 0 and z = 0 "
+	  "switch it off.",
 	  "", "materials#water" },
 
 	// ── Light ────────────────────────────────────────────────────────────────
@@ -1119,6 +1139,56 @@ namespace
 	  "Snow strength for the state being shown, 0 to 1.", "", "rendering#weather" },
 	{ "Environment/Wetness", "",
 	  "How wet surfaces look once it has been raining.", "", "rendering#weather" },
+	{ "Weather/Puddles", "",
+	  "How much standing water the scene's materials show, 0 to 1. The auto landscape "
+	  "scales its puddle level by this: 0 = dry ground, 1 = the most it can hold "
+	  "(its Puddle Amount parameter). Any material can read it through the Weather "
+	  "node or the MF_WeatherPuddles function. Not driven by the presets — set it by "
+	  "hand, or from a script.",
+	  "", "rendering#weather" },
+	{ "Weather/Puddle Size", "",
+	  "How big one puddle is, in metres: the scale of the hollows the standing water "
+	  "collects in. Small values give many small puddles, large ones a few big pools. "
+	  "The auto landscape reads it through MF_WeatherPuddles; any material can through "
+	  "the Weather node.",
+	  "", "rendering#weather" },
+	{ "Weather/Cloud Coverage", "",
+	  "How much of the sky is cloud, 0 to 1 — the Sky's own Coverage, set from here. A "
+	  "preset writes it; once you move it the weather leaves it alone until the next "
+	  "preset pick.",
+	  "", "rendering#weather" },
+	{ "Weather/Fog Density##wx", "",
+	  "Atmospheric fog thickness — the Sky's Density. Moving it takes it away from the "
+	  "preset until the next pick.",
+	  "", "rendering#weather" },
+	{ "Weather/Wind Speed##wx", "",
+	  "Cloud drift and rain slant, 1 = calm. The Sky's Wind Speed, set from here.",
+	  "", "rendering#weather" },
+	{ "Weather/Rain##wx", "",
+	  "How hard it rains, 0 to 1: the density of the rain streaks and the sky rainbow. "
+	  "Independent of the preset once moved.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow##wx", "",
+	  "How hard it snows, 0 to 1: flakes in the air and the white tint on every lit "
+	  "up-facing surface. Not the same as Snow Cover (below), which is what materials "
+	  "that read the Weather node lay on the ground.",
+	  "", "rendering#weather" },
+	{ "Weather/Wetness##wx", "",
+	  "How wet every lit surface looks, 0 to 1: darker and glossier. Rain presets raise it.",
+	  "", "rendering#weather" },
+	{ "Weather/Thunder", "",
+	  "How often lightning strikes, 0 to 1: 0 = never, 1 = the storm rhythm. The Storm "
+	  "preset sets it to the Intensity, every other preset to 0; move it to strike in "
+	  "any weather, or to silence a storm. Each strike flashes the sky and plays the "
+	  "thunder sound.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow Cover", "",
+	  "How much snow lies on the ground in materials that read it, 0 to 1. The auto "
+	  "landscape adds it to its altitude snow (cliffs stay bare) through the "
+	  "MF_WeatherSnow function; any material can read it through the Weather node. "
+	  "It is separate from the white tint every lit surface already takes in a Snow "
+	  "preset, and it is not driven by the presets.",
+	  "", "rendering#weather" },
 	{ "Weather/Max Rain Particles", "",
 	  "Hard ceiling on live raindrops. Emission throttles itself to stay under it, "
 	  "so this is the dial that trades downpour against frame rate.",
@@ -2022,7 +2092,7 @@ namespace
 	  "", "editor#content-browser" },
 	{ "Assets/Import Asset...", "",
 	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
-	  "COLLADA), textures, audio, fonts — converting it to the engine's own format "
+	  "COLLADA, Blender up to 3.4), textures, audio, fonts — converting it to the engine's own format "
 	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "Assets/Refresh Assets", "",
@@ -2040,6 +2110,11 @@ namespace
 	{ "Build/Export Project...", "",
 	  "Packages the project as a standalone game: cooked assets, the runtime, "
 	  "and a config beside it. The export profile decides platform and packing.",
+	  "", "export#overview" },
+	{ "Build/Show Last Build Log", "",
+	  "Reopens the Build window on the last export or game-logic build. Click a "
+	  "ring to read that step's log — Package lists every asset that went into "
+	  "the pak. Greyed until something has been built in this session.",
 	  "", "export#overview" },
 	{ "Build/Build and Reload Game Logic", "",
 	  "Compiles this project's Source/ folder into its native GameLogic library "
@@ -2402,7 +2477,7 @@ namespace
 	{ "Content Browser/Import", "",
 	  "Brings this file into the project as an engine asset. The original is not "
 	  "moved; a .hasset beside it records where it came from. Greyed out for an "
-	  "FBX/OBJ/COLLADA file when this build of the editor has no Assimp to read it.",
+	  "FBX/OBJ/COLLADA/Blender file when this build of the editor has no Assimp to read it.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Import to Project", "",
 	  "For source files inside the engine's own content (a sound, a picture, a "
@@ -2751,6 +2826,31 @@ namespace
 	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
 	  "whenever you want it.",
 	  "", "getting-started#first-project" },
+	{ "Scene Changed/Reload Scene", "",
+	  "Loads the scene file as it is on disk now, replacing what is open. Use it "
+	  "after a git pull that brought a newer version of this scene. Unsaved edits "
+	  "in the open scene are dropped, and the undo history starts over.",
+	  "", "" },
+	{ "Scene Changed/Keep My Version", "",
+	  "Leaves the open scene as it is. Nothing is loaded, and the next save "
+	  "overwrites the file that came from disk with what is open here. Another "
+	  "change to the file on disk asks again.",
+	  "", "" },
+	{ "Project Hub/Open Anyway", "",
+	  "Opens the project although some of the engine content it uses could not be "
+	  "downloaded. Materials and meshes that use the missing files look wrong until "
+	  "they arrive; the editor keeps trying to fetch them whenever something needs them.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Close Project", "",
+	  "Does not open the project and goes back to the Project Hub. Nothing was loaded, "
+	  "so nothing needs saving; open it again once the EngineContent server is reachable.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Close Editor", "",
+	  "Quits the editor without opening the project.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Cancel", "",
+	  "Stops checking the project's engine content and does not open it.",
+	  "", "editor#project-hub" },
 	{ "Documentation/Start", "",
 	  "Back to the first page of the manual.", "", "editor#menus" },
 	{ "Documentation/Online", "",
@@ -2954,7 +3054,9 @@ namespace
 	  "", "editor#viewport" },
 	{ "viewport.camera-speed", "Camera Speed",
 	  "How fast the editor's fly camera moves, in metres per second. Hold Shift "
-	  "while flying for three times this.",
+	  "while flying for four times this. While flying (right mouse button held), "
+	  "the scroll wheel changes it on the spot: up is faster, down is slower, and "
+	  "this field follows.",
 	  "", "editor#viewport" },
 	{ "viewport.view", "View",
 	  "Which way the scene is looked at: Perspective, or an orthographic Top, "
@@ -3042,28 +3144,45 @@ namespace
 	{ "outliner.search", "Search",
 	  "Narrows the tree to entities whose name contains this text, in any case. "
 	  "Every entity in the scene is searched, including those under folded "
-	  "rows. Hits are shown with the rows above them, dimmed, so you can see "
-	  "where each one lives; clearing the box puts the tree back as it was.",
+	  "rows. Hits are shown with the matching letters marked and the rows above "
+	  "them dimmed, so you can see where each one lives; clearing the box puts "
+	  "the tree back as it was.",
 	  "", "editor#outliner" },
 	{ "outliner.type-filter", "Type filter",
-	  "Shows only entities that carry the chosen component, such as every Light "
-	  "or every Camera. An entity is the sum of its components, so this is what "
-	  "\"type\" means here. Combined with the search box, both have to match.",
+	  "One pill per kind of entity the scene contains, with how many there are: "
+	  "click Mesh to see only meshes, click it again to see everything. An "
+	  "entity is the sum of its components, so a kind means \"carries that "
+	  "component\" — the crate that is a Mesh, a Collider and a Rigid Body is "
+	  "counted under all three, and its icon shows the one that tells it apart. "
+	  "Combined with the search box, both have to match. If the pills do not "
+	  "fit, the rest are behind the +N one.",
 	  "", "editor#outliner" },
 	{ "outliner.visibility", "Visibility",
 	  "Hides or shows this entity and everything under it: every mesh, light, "
 	  "particle system, foliage, rope and trail in the subtree is switched off "
 	  "or on. This is the same Visible flag the Details panel and scripts use, "
-	  "so it is saved with the scene and applies in the game too. A row with "
-	  "nothing to draw under it has no eye. One undo step.",
+	  "so it is saved with the scene and applies in the game too. The eye "
+	  "shows while the pointer is on the row; a hidden entity keeps its slashed "
+	  "eye in the accent colour and its row dimmed. A row with nothing to draw "
+	  "under it has no eye. One undo step.",
 	  "", "editor#outliner" },
 	{ "outliner.lock", "Lock",
 	  "Keeps the mouse in the viewport off this entity: a click passes through "
 	  "it to whatever is behind, the selection frame does not take it, and the "
 	  "gizmo will not move it. It can still be selected here and edited in the "
 	  "Details panel. Lock the floor and the walls, and the props in front of "
-	  "them stop being hard to grab. Saved with the scene.",
+	  "them stop being hard to grab. The padlock shows while the pointer is on "
+	  "the row; a locked entity keeps it in the accent colour. Saved with the "
+	  "scene.",
 	  "", "editor#outliner" },
+	{ "outliner.rename", "Rename",
+	  "Double-click a name, or press F2 with the entity selected, to type a new "
+	  "one in place. Enter keeps it, Escape leaves the old name, an empty name "
+	  "changes nothing. One undo step. (Drag a row onto another to parent it; "
+	  "on a row's top or bottom edge, where a line shows, to place it before or "
+	  "after that row instead. Alt-click on a folded row's arrow opens the whole "
+	  "branch.)",
+	  "F2", "editor#outliner" },
 
 	// ── Details panel ────────────────────────────────────────────────────────
 	{ "details.add-component", "Add Component",
@@ -3216,7 +3335,8 @@ namespace
 	// ── Content Browser ──────────────────────────────────────────────────────
 	{ "content.import", "Import Asset",
 	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
-	  "COLLADA), textures, audio, fonts. It is converted to the engine's own format "
+	  "COLLADA, .blend files saved with Blender 3.4 or older — export newer ones "
+	  "as glTF), textures, audio, fonts. It is converted to the engine's own format "
 	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "content.create", "Create Asset",
@@ -3242,8 +3362,8 @@ namespace
 	{ "Preferences/Display/Backend", "Backend",
 	  "Which graphics API the editor and the game render through. Changing it "
 	  "takes effect on the next start, and the list holds only what this build "
-	  "and this machine actually support — some features (deferred shading, "
-	  "ray-traced GI) exist on some backends and not on others.",
+	  "and this machine actually support — some features (ray-traced GI) exist "
+	  "on some backends and not on others.",
 	  "", "rendering#backends" },
 	{ "Preferences/Display/Render Path", "",
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
@@ -3264,7 +3384,8 @@ namespace
 	  "", "rendering#performance" },
 	{ "Preferences/Post-Processing/Anti-Aliasing", "",
 	  "How jagged edges are smoothed. SMAA is one cheap pass; TAA is steadier in "
-	  "motion but needs a velocity buffer, which only the Metal and OpenGL backends write so far.",
+	  "motion but needs a velocity buffer, which falls back to SMAA on a backend "
+	  "that is not ready to write one yet.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "
@@ -6345,6 +6466,35 @@ namespace
 	// Nine numbers that decide what the ground looks like before there is any
 	// ground to look at. Octaves, Lacunarity and Gain are the noise vocabulary,
 	// and nobody should have to know it to make a hill.
+	{ "New Landscape/Material", "",
+	  "The material the new landscape is created with; it decides which layers can "
+	  "be painted. Leave it empty for the engine's default terrain material. It "
+	  "can be changed later from the Landscape panel.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Heightmap", "",
+	  "A greyscale texture that shapes the ground as the landscape is created: "
+	  "black is 0 m, white is the Height Scale. With one set, the noise settings "
+	  "are not used. Project textures are 8-bit; use Choose File for a 16-bit PNG "
+	  "or an .r16 when the terrain is tall.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Choose File...", "",
+	  "Picks a heightmap straight from the disk: 8- or 16-bit PNG, PGM, or a "
+	  "headerless 16-bit .r16/.raw. Reading it directly keeps the full 16-bit "
+	  "precision, which a texture asset does not.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Remove File", "",
+	  "Forgets the chosen heightmap file; the landscape will be created from the "
+	  "noise settings below instead.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Flip Z", "",
+	  "Mirrors the heightmap top-to-bottom before it is laid over the landscape. "
+	  "Some tools export their maps the other way up; this is the fix.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Use Image Resolution", "",
+	  "Gives the landscape the heightmap's own vertex resolution (rounded to the "
+	  "2^n+1 the chunks use, at most 513) instead of resampling the picture onto "
+	  "the Resolution above.",
+	  "", "editor#landscape-mode" },
 	{ "New Landscape/Width (X)", "",
 	  "How wide the new landscape will be along X, in metres. The green preview "
 	  "grid in the viewport is this size.",
@@ -6418,6 +6568,16 @@ namespace
 	  "that node's list IS the set of layers there are to paint — without one "
 	  "this stays greyed out.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Setup", "Landscape Setup",
+	  "The things done once rather than per stroke: the landscape's material, "
+	  "importing a heightmap, the weightmap and foliage-mask resolutions, and the "
+	  "reset buttons. The brush is off while this tab is open.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Fill With Layer", "",
+	  "Puts the selected layer on every texel of the landscape, replacing whatever "
+	  "was painted. A starting point for a landscape built by hand: fill with the "
+	  "base layer, then paint the rest over it. One undo step.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
 	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
@@ -6425,23 +6585,35 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Radius", "Brush Radius",
 	  "The inner, full-strength part of the brush, in metres — the tight circle "
-	  "drawn on the ground. The same value is used for sculpting and for "
-	  "painting, so changing it in one mode changes it in the other.",
+	  "drawn on the ground. The same value is used for sculpting, painting and "
+	  "foliage, so changing it in one mode changes it in the other. In the "
+	  "viewport, [ and ] make it smaller and larger.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Falloff", "Brush Falloff",
 	  "How far past the radius the brush keeps working, in metres — the faint "
 	  "outer circle. Strength falls off linearly from full at the radius to "
 	  "nothing at the outer edge, so 0 gives a hard-edged brush and a large "
-	  "value a very soft one. Shared with painting.",
+	  "value a very soft one. Shared with painting. In the viewport, Shift+[ "
+	  "and Shift+] change it. The curve above the sliders draws the profile.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Strength", "Brush Strength",
-	  "How fast the brush works while the left button is held. Raise and Lower "
-	  "move the ground by roughly this many metres a second under the "
-	  "full-strength part of the brush; Smooth, Flatten and Ramp use it as a "
-	  "rate of blending towards their target instead.",
+	  "How hard the brush works while the left button is held, from 0 to 1. For "
+	  "Raise and Lower the scale is squared, so the gentle end gets most of the "
+	  "slider; at 1 the ground moves about 50 m a second under the full-strength "
+	  "part of the brush. Smooth, Flatten and Ramp use it as a rate of blending "
+	  "towards their target instead. Hold Ctrl while dragging to turn the brush "
+	  "around: Raise lowers, Lower raises.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paint Strength", "Paint Strength",
+	  "How much of the selected layer a texel takes while you paint, from 0 to 1. "
+	  "At 1 the first touch gives the layer 100 % at once, whatever was there "
+	  "before; lower values build it up the longer the left button is held "
+	  "(0.1 takes about half a second to cover a spot). Applies to layer painting "
+	  "only — sculpting and foliage keep the Brush Strength.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Weightmap", "Weightmap Resolution",
-	  "How many texels per side the layer weightmap has, from 32 to 2048, "
+	  "How many texels per side the layer weightmap has, from 32 to 2048 — click "
+	  "the field and type a number, 1024 for instance — "
 	  "stretched over the whole landscape — a large terrain needs more of them "
 	  "before a painted edge stops looking blocky. It is locked as soon as "
 	  "anything has been painted, because changing it would throw the existing "
@@ -6871,10 +7043,13 @@ namespace
 	  "", "editor#profiler" },
 	{ "Profiler/Split into Streaming Cells", "",
 	  "Moves the scene's placed things (meshes, point and spot lights, static "
-	  "bodies, decals) into one scene file per grid square, next to the scene in "
+	  "bodies, decals, placed prefabs, particle systems, skeletal meshes and "
+	  "animators) into one scene file per grid square, next to the scene in "
 	  "a folder named after it. The rest stays: sky, terrain, cameras, scripts, "
-	  "characters, dynamic bodies, prefab instances. The game then loads the "
-	  "squares around its camera and drops the far ones. One undo step; save the "
+	  "characters, dynamic bodies, audio sources. The game then loads the "
+	  "squares around its camera and drops the far ones; the things in a square "
+	  "keep their ids, so a placed prefab comes back as the same entities. Play "
+	  "in the editor shows only what stays in the scene. One undo step; save the "
 	  "scene to keep it. The scene has to have been saved once.",
 	  "", "editor#profiler" },
 	{ "Profiler/Merge Cells into the Scene", "",
@@ -8106,11 +8281,110 @@ namespace
 	  "switched off and you move to it once you have committed.",
 	  "", "" },
 	{ "sc.commit", "Commit",
-	  "Records every changed file in one commit with the message above; the "
-	  "button says how many that is. It stays unavailable without a message, with "
+	  "Records a commit with the message above. With files ticked it commits exactly "
+	  "those, and the button says how many; with nothing ticked it commits every "
+	  "changed file, as it always did. It stays unavailable without a message, with "
 	  "nothing changed, and while a conflict is unresolved — a commit that keeps "
-	  "conflict markers preserves the mess for good. With auto-push on, the "
-	  "commit goes to the remote as it is made.",
+	  "conflict markers preserves the mess for good. With auto-push on, the commit "
+	  "goes to the remote as it is made.",
+	  "", "" },
+	{ "sc.commit.more", "More ways to commit",
+	  "Commit and push in one step, commit everything even though some files are "
+	  "ticked, or fold what is staged into the last commit.",
+	  "", "" },
+	{ "Source Control Panel/Commit & Push", "",
+	  "Commits (the ticked files, or everything when none is ticked) and pushes the "
+	  "branch to the remote straight away. If the push fails the commit stays; "
+	  "the message says so.",
+	  "", "" },
+	{ "Source Control Panel/Commit everything (stage all first)", "",
+	  "Stages every changed file and commits them all, ignoring which ones are "
+	  "ticked. For the moment you ticked a few files and then decided you wanted "
+	  "the lot after all.",
+	  "", "" },
+	{ "Source Control Panel/Amend last commit", "",
+	  "Rewrites the last commit: the ticked files are added to it and, if you "
+	  "typed a message, it replaces the old one. Only offered while that commit has "
+	  "not been pushed, because rewriting one the server already has would hurt "
+	  "everyone who pulled it.",
+	  "", "" },
+	{ "sc.row.stage", "Stage",
+	  "Tick to include this file in the next commit. Ticked files are committed "
+	  "alone; leave all unticked to commit everything.",
+	  "", "" },
+	{ "sc.row.unstage", "Unstage",
+	  "Untick to take this file out of the next commit. The file itself is not "
+	  "touched; it moves back to Changes.",
+	  "", "" },
+	{ "sc.row.discard", "Discard changes",
+	  "Throws away your edits to this file and puts it back to how the last commit "
+	  "has it. Asks first, because the edits are not in any commit and cannot be "
+	  "brought back.",
+	  "", "" },
+	{ "sc.row.delete", "Delete new file",
+	  "Deletes this file from the project folder. It is not in any commit yet, so "
+	  "there is no getting it back. Asks first.",
+	  "", "" },
+	{ "sc.row.reveal", "Show in Content Browser",
+	  "Opens the Content Browser at this file and selects it. Double-clicking the "
+	  "row does the same.",
+	  "", "" },
+	{ "sc.row.mine", "Keep mine",
+	  "Resolves the conflict with the version from the branch you are on and "
+	  "stages the file. The other side's edits to it are dropped.",
+	  "", "" },
+	{ "sc.row.theirs", "Take theirs",
+	  "Resolves the conflict with the incoming version and stages the file. Your "
+	  "edits to it are dropped.",
+	  "", "" },
+	{ "sc.stage_all", "Stage all",
+	  "Ticks every file in this group (only the ones the filter shows).",
+	  "", "" },
+	{ "sc.unstage_all", "Unstage all",
+	  "Unticks every staged file (only the ones the filter shows). Nothing on "
+	  "disk changes.",
+	  "", "" },
+	{ "sc.discard_all", "Discard all",
+	  "Throws away your edits to every file in this group (only the ones the filter "
+	  "shows) after asking. Not undoable.",
+	  "", "" },
+	{ "sc.delete_all", "Delete all",
+	  "Deletes every new file in this group (only the ones the filter shows) from "
+	  "the project folder after asking. They are in no commit, so not undoable.",
+	  "", "" },
+	{ "sc.filter", "Filter by type",
+	  "Shows only one kind of asset in the list below: scenes, materials, "
+	  "textures, meshes, code, audio. The number is how many changed files there "
+	  "are of that kind.",
+	  "", "" },
+	{ "Source Control Panel/Switch", "",
+	  "Checks this branch out and replaces the files in the project folder with "
+	  "its contents. With uncommitted changes it asks whether to stash them or "
+	  "carry them over.",
+	  "", "" },
+	{ "Source Control Panel/Check out", "",
+	  "Creates a local branch that follows this one on the server and switches to "
+	  "it. With uncommitted changes it asks whether to stash them or carry them "
+	  "over.",
+	  "", "" },
+	{ "Source Control Panel/Bring back stashed changes", "",
+	  "Re-applies the most recent stash and removes it from the list. If it "
+	  "conflicts with the current files, git keeps the stash and the conflicts "
+	  "show up under Changes.",
+	  "", "" },
+	{ "Source Control Panel/Manage branches…", "",
+	  "Opens the Branches tab: every branch on this computer, the ones that only "
+	  "exist on the server, and any stashed changes.",
+	  "", "" },
+	{ "Source Control Panel/Carry them over", "",
+	  "Switches branch and takes your uncommitted changes along. This works only "
+	  "when the other branch has not changed the same files; otherwise git refuses "
+	  "and nothing moves.",
+	  "", "" },
+	{ "Source Control Panel/Stash & switch", "",
+	  "Puts all uncommitted changes (new files included) in a stash, switches to a "
+	  "clean project on the other branch, and keeps the stash for you to bring "
+	  "back from the Branches tab.",
 	  "", "" },
 
 	// ── The startup dialog for a missing git ─────────────────────────────────
@@ -8495,6 +8769,8 @@ namespace
 		{ "Session Participants/",  "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Block Participant/",     "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Source Control Panel/",  "editor-collab", "Collaboration & Source Control", "Source control" },
+		// The reload question after a pull changed the open scene's file.
+		{ "Scene Changed/",         "editor-collab", "Collaboration & Source Control", "Scene changed on disk" },
 		// The bug reporter is neither collaboration nor source control: it
 		// attaches the engine log and files an issue, which is diagnostics.
 		{ "Report Issue/",          "editor-export", "Export & Diagnostics", "Report an issue" },

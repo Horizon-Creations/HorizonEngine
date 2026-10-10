@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 
 #include <assimp/Importer.hpp>
 #include <assimp/postprocess.h>
@@ -136,7 +137,55 @@ void walkNodes(const aiScene& scene, const aiNode& node, const glm::mat4& parent
 bool isAssimpSource(const std::filesystem::path& sourcePath)
 {
 	const std::string ext = lowerExtension(sourcePath);
-	return ext == ".fbx" || ext == ".obj" || ext == ".dae";
+	return ext == ".fbx" || ext == ".obj" || ext == ".dae" || ext == ".blend";
+}
+
+std::string blendReadHint(const std::filesystem::path& sourcePath)
+{
+	unsigned char head[17] = {};
+	{
+		std::ifstream in(sourcePath, std::ios::binary);
+		if (!in) return {};
+		in.read(reinterpret_cast<char*>(head), sizeof(head));
+		if (in.gcount() < 4) return {};
+	}
+	const char* const exportHow =
+		"In Blender: File > Export > glTF 2.0 (.glb), then import that file.";
+
+	// Blender 3.0 added zstd as the second way to compress a file; Assimp only
+	// inflates gzip, and says "couldn't find GZIP header".
+	if (head[0] == 0x28 && head[1] == 0xB5 && head[2] == 0x2F && head[3] == 0xFD)
+		return std::string("This .blend is zstd-compressed (Blender's \"Compress File\" option); "
+		                   "Assimp reads uncompressed and gzip files only. Save it with Compress "
+		                   "switched off. ") + exportHow;
+	if (std::memcmp(head, "BLENDER", 7) != 0)
+		return {};   // gzip (readable) or not a Blender file at all: nothing to add
+
+	const auto digit = [&](int i) { return head[i] >= '0' && head[i] <= '9'; };
+	int major = 0, minor = 0;
+	if (digit(7) && digit(8))
+	{
+		// The header Blender writes since 4.1: "BLENDER17-01v0401" — header size,
+		// format version, then the version as four digits, 0401 = Blender 4.1.
+		for (int i = 13; i < 17; ++i)
+			if (!digit(i)) return {};
+		major = (head[13] - '0') * 10 + (head[14] - '0');
+		minor = (head[15] - '0') * 10 + (head[16] - '0');
+	}
+	else
+	{
+		// "BLENDER-v276": pointer size, endianness, then three digits, 276 = 2.76.
+		for (int i = 9; i < 12; ++i)
+			if (!digit(i)) return {};
+		major = head[9] - '0';
+		minor = (head[10] - '0') * 10 + (head[11] - '0');
+	}
+	// 3.5 is where Mesh lost the vertex array Assimp's reader requires.
+	if (major * 100 + minor < 305)
+		return {};
+	return "Saved with Blender " + std::to_string(major) + "." + std::to_string(minor) +
+	       ". Assimp reads .blend files up to Blender 3.4: 3.5 moved mesh data into generic "
+	       "attributes, which its reader does not know. " + exportHow;
 }
 
 struct AssimpScene::Impl
@@ -152,7 +201,9 @@ const aiScene* AssimpScene::scene() const { return impl_->scene; }
 
 bool AssimpScene::load(const std::filesystem::path& sourcePath, std::string& error)
 {
-	fbx_ = lowerExtension(sourcePath) == ".fbx";
+	const std::string sourceExt = lowerExtension(sourcePath);
+	fbx_   = sourceExt == ".fbx";
+	blend_ = sourceExt == ".blend";
 
 	// SortByPType splits mixed meshes by primitive type; with points and lines
 	// on the removal list only triangle meshes survive, which is all a static
@@ -174,6 +225,9 @@ bool AssimpScene::load(const std::filesystem::path& sourcePath, std::string& err
 	{
 		error = impl_->importer.GetErrorString();
 		if (error.empty()) error = "Assimp returned no scene";
+		if (blend_)
+			if (const std::string hint = blendReadHint(sourcePath); !hint.empty())
+				error += " — " + hint;
 		return false;
 	}
 	return true;
@@ -198,12 +252,19 @@ bool AssimpScene::bake(float uniformScale, AssimpBakedGeometry& out) const
 	// The factor multiplies the caller's scale rather than replacing it.
 	const float scale = uniformScale * (fbx_ ? fbxUnitScaleFactor(*scene) * 0.01f : 1.0f);
 
+	// Blender's axes (Z up, -Y forward) into the engine's (Y up, +Z forward): the
+	// same (x, y, z) -> (x, z, -y) Blender's glTF exporter applies. Assimp's
+	// Blender loader leaves the scene as the file has it. Columns are the images
+	// of the x, y and z unit vectors.
+	const glm::mat4 base = blend_ ? glm::mat4(glm::vec4(1, 0, 0, 0), glm::vec4(0, 0, -1, 0),
+	                                          glm::vec4(0, 1, 0, 0), glm::vec4(0, 0, 0, 1))
+	                              : glm::mat4(1.0f);
 	if (scene->mRootNode)
-		walkNodes(*scene, *scene->mRootNode, glm::mat4(1.0f), scale, out);
+		walkNodes(*scene, *scene->mRootNode, base, scale, out);
 	// No node references a mesh: take the meshes directly, untransformed.
 	if (out.positions.empty())
 		for (unsigned m = 0; m < scene->mNumMeshes; ++m)
-			appendMesh(*scene->mMeshes[m], glm::mat4(1.0f), scale, out);
+			appendMesh(*scene->mMeshes[m], base, scale, out);
 
 	return !out.positions.empty();
 }

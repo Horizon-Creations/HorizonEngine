@@ -102,6 +102,15 @@ HE_RENDERING_API void FillMaterialLightWindow(const RenderWorld&               r
 HE_RENDERING_API void FillMaterialWind(const ::EnvironmentSettings&     env,
                                        MaterialShaderLibrary::Lighting& out);
 
+// The weather block (Lighting::weather): x wetness and y snow amount — the generic ground
+// response heLitP applies to every lit graph material — and z puddles / w snow cover, the
+// two the Weather details panel sets for MATERIALS (the graph's Weather node reads all
+// four). Call it next to FillMaterialWind. Backends that used to set x/y by hand get the
+// same values; D3D11 / D3D12 / Vulkan, which never filled them, now answer to the weather
+// like OpenGL and Metal do.
+HE_RENDERING_API void FillMaterialWeather(const ::EnvironmentSettings&     env,
+                                          MaterialShaderLibrary::Lighting& out);
+
 // ── Graph-material DDGI probe field (Lighting v2.5) ──────────────────────────
 // Writes giGridOrigin / giGridCounts / giProbe — the SAME grid the built-in
 // shaders' GI uniforms carry, so heLitP's indirect diffuse (heGIIrradianceAt)
@@ -209,5 +218,16 @@ struct DirectionalLightWindow
 };
 
 HE_RENDERING_API DirectionalLightWindow BuildDirectionalLightWindow(const RenderWorld& rw);
+
+// The CLUSTERED deferred resolve's light window (Thema 150): rewrites the
+// window half of a graph-material Lighting block to the directional lights
+// only (same pick as BuildDirectionalLightWindow), unused slots zeroed,
+// counts.x = their number. The resolve is injected WITHOUT HE_CLUSTERED, so its
+// heLitP walks the whole window, and heClusterLighting adds every point/spot
+// light from the lists on top — a full window would count them twice. Metal's
+// EncodeClusterData does the same in place. Fill a COPY: the forward-routed and
+// transparent graph materials of the same frame still need the full window.
+HE_RENDERING_API void FillMaterialDirectionalWindow(const RenderWorld&               rw,
+                                                   MaterialShaderLibrary::Lighting& out);
 
 } // namespace HE

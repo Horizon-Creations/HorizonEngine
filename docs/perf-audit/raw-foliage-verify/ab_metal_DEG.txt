@@ -1,0 +1,5 @@
+case old path (=0)  ordered        default clusters
+D    identical      identical      579 of 921600 pixels (0.063 %), worst channel 90/255   [100k, low sun (long shadows); 20 s]
+E    identical      identical      571 of 921600 pixels (0.062 %), worst channel 111/255   [100k, scale 0.8..1.6, mesh id nobody registered (default cube, clusters without bounds); 26 s]
+G    identical      identical      3730 of 921600 pixels (0.405 %), worst channel 79/255   [500k, everything in range (past the 65536 instance cap); 27 s]
+OK: the old path and ordered mode reproduce the BEFORE picture

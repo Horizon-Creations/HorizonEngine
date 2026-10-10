@@ -5,6 +5,7 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
+#include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TerrainHeightmap.h"
@@ -18,6 +19,7 @@
 #include <entt/entt.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <unordered_map>
@@ -474,7 +476,7 @@ namespace TerrainSystem
             // sculpted terrain this resamples sculptHeights one time (near-lossless,
             // e.g. 512→513); for noise it just bumps the resolution. Idempotent.
             {
-                const uint32_t r0 = std::clamp(tc.resolution, 2u, 1024u);
+                const uint32_t r0 = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
                 uint32_t cells = r0 - 1, p = 1; while (p < cells) p <<= 1;
                 const uint32_t snappedRes = p + 1;
                 if (snappedRes != r0)
@@ -486,7 +488,7 @@ namespace TerrainSystem
                 }
             }
 
-            const uint32_t res = std::clamp(tc.resolution, 2u, 1024u);
+            const uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
             const ChunkGrid g  = computeGrid(res);
             const std::vector<float> field = computeTerrainHeightField(tc);
 
@@ -523,6 +525,7 @@ namespace TerrainSystem
             const float chunkX = tc.sizeX / static_cast<float>(g.chunksPerSide);
             const float chunkZ = tc.sizeZ / static_cast<float>(g.chunksPerSide);
 
+            size_t chunksBuilt = 0;
             for (uint32_t cz = 0; cz < g.chunksPerSide; ++cz)
                 for (uint32_t cx = 0; cx < g.chunksPerSide; ++cx)
                 {
@@ -563,12 +566,50 @@ namespace TerrainSystem
                     }
 
                     buildChunk(world, cm, renderer, chunkEnt, field, res, tc, g, cx, cz, disp);
+                    ++chunksBuilt;
                 }
+
+            // Diagnostic (INFO, at most once a second while a brush is dragging): what
+            // this rebuild saw — whether it ran, how many chunks it touched and the
+            // height range of the field they were built from. A landscape that stays
+            // flat after a sculpt shows up here as a range of 0..0 (the field has no
+            // heights), 0 chunks (the rebuild skipped everything) or both healthy
+            // (then the problem is after the mesh: LOD swap, upload or the draw).
+            {
+                static auto s_lastLog = std::chrono::steady_clock::time_point{};
+                const auto now = std::chrono::steady_clock::now();
+                if (rebuildAll || now - s_lastLog > std::chrono::seconds(1))
+                {
+                    s_lastLog = now;
+                    float fMin = 0.0f, fMax = 0.0f;
+                    if (!field.empty())
+                    {
+                        const auto mm = std::minmax_element(field.begin(), field.end());
+                        fMin = *mm.first; fMax = *mm.second;
+                    }
+                    HE_LOG_INFO(Terrain, "%s", ("TerrainSystem: rebuilt " + std::to_string(chunksBuilt) +
+                        " of " + std::to_string(g.chunksPerSide * g.chunksPerSide) + " chunks (" +
+                        (rebuildAll ? "all" : "region") + "), res " + std::to_string(res) +
+                        ", sculptHeights " + std::to_string(tc.sculptHeights.size()) +
+                        ", field height " + std::to_string(fMin) + " .. " + std::to_string(fMax)).c_str());
+                }
+            }
 
             tc.builtRes           = res;
             tc.builtChunksPerSide = g.chunksPerSide;
             tc.dirty              = false;
             tc.regionDirty        = false;
+
+            // The foliage layer on this terrain was scattered over the ground as
+            // it stood: a sculpt stroke, Reset Sculpting, a new size / resolution,
+            // an import or an MCP dab changed it, so the plants would float or
+            // sink. Every one of those ends here, in the rebuild gate (a material
+            // swap does not — it is handled above, ungated — and must not
+            // re-scatter). The re-scatter itself is FoliageSystem's, later in the
+            // tick. A held brush rebuilds on every frame and so re-scatters on
+            // every frame: the cost grows with the layer's instance count.
+            if (auto* fol = reg.try_get<FoliageComponent>(te))
+                fol->dirty = true;
 
             // The ground the player stands on has to follow the ground they see —
             // but NOT from here. Reached only from inside the dirty/regionDirty

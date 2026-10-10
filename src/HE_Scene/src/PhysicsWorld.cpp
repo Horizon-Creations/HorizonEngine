@@ -498,10 +498,18 @@ struct PhysicsWorld::Impl
     // every pass that resolved ANYTHING, because a chain resolves one link per
     // pass and the entries at the far end would otherwise be dropped for being
     // patient. Only a pass in which nothing at all moved counts against them.
+    //
+    // `patient` is the other kind of waiting: the partner is not late, it is in
+    // a streamed cell that is not loaded, and it will be back whenever the camera
+    // is. Such an entry is not failing, so it is never counted against and never
+    // given up on (a cell may be a long walk away, and every other cell's load
+    // would otherwise use up its eight passes); it is retried quietly when its
+    // partner exists, and it falls off the list once its owner is gone.
     struct PendingJoint
     {
         uint32_t entityId = 0;
         int      attempts = 0;
+        bool     patient  = false;
     };
     std::vector<PendingJoint> pendingJoints;
 
@@ -520,7 +528,22 @@ struct PhysicsWorld::Impl
         for (const auto& p : pendingJoints)
             if (p.entityId == entityId)
                 return;
-        pendingJoints.push_back({ entityId, 0 });
+        pendingJoints.push_back({ entityId, 0, false });
+    }
+
+    // The same, for a joint that waits for a cell (see PendingJoint::patient). An
+    // entry that is on the list already becomes patient: the partner it waited for
+    // is the one that has just gone.
+    void queuePatientJoint(uint32_t entityId)
+    {
+        for (auto& p : pendingJoints)
+            if (p.entityId == entityId)
+            {
+                p.patient  = true;
+                p.attempts = 0;
+                return;
+            }
+        pendingJoints.push_back({ entityId, 0, true });
     }
 
     // Remove just the joint this entity AUTHORED, and leave alone the ones other
@@ -570,6 +593,21 @@ struct PhysicsWorld::Impl
     std::vector<uint32_t> stepBodies;
     std::vector<uint32_t> stepCharacters;
 
+    // ── Region hold (setRegionHold) ──────────────────────────────────────────
+    // The test the application gave, or empty.
+    PhysicsWorld::HoldTest holdTest;
+    // Every DYNAMIC body, by entity: the only ones the hold is asked about. Kept
+    // beside entityToBody so that the per-step pass walks the few things that can
+    // fall and not all the (tens of thousands of) static ones. A character's own
+    // proxy is kinematic and is not in it.
+    std::unordered_set<uint32_t> dynamicBodies;
+    // The ones among them that are out of Jolt's broad phase right now. They stay
+    // in entityToBody, so hasPhysics() is still true for them and a rebuild or a
+    // removal finds them.
+    std::unordered_set<uint32_t> heldBodies;
+    // Characters that were not stepped the last time they were looked at.
+    std::unordered_set<uint32_t> heldCharacters;
+
     // Hard limits handed to Jolt below. Exceeding them makes CreateAndAddBody
     // return an invalid id, which used to be swallowed silently — the scene then
     // simply had objects that never fell. They are logged instead.
@@ -580,7 +618,7 @@ struct PhysicsWorld::Impl
     // first wall a larger world hit, long before float precision
     // (docs/world-streaming-baseline-2026-10-06.md §3.6). Jolt allocates the
     // body table and broadphase up front from these, a few MB per world.
-    static constexpr uint32_t kMaxBodies             = 65536;
+    static constexpr uint32_t kMaxBodies             = PhysicsWorld::kMaxBodies;
     static constexpr uint32_t kMaxBodyPairs          = 65536;
     static constexpr uint32_t kMaxContactConstraints = 10240;
 
@@ -604,6 +642,13 @@ struct PhysicsWorld::Impl
         );
         physicsSystem.SetContactListener(&contactListener);
     }
+};
+
+// The bodies of one addEntities charge: created and recorded in entityToBody, but
+// not in the broad phase yet. Only addEntities makes one, and puts the lot in.
+struct PhysicsWorld::BodyBatch
+{
+    std::vector<JPH::BodyID> ids;
 };
 
 // ─── World space ──────────────────────────────────────────────────────────────
@@ -914,7 +959,7 @@ JPH::ShapeSettings::ShapeResult buildHeightFieldShape(const TerrainComponent& tc
     // physics build can run before the terrain has ever ticked (initialize() at
     // scene start), and a component this class mutated behind TerrainSystem's
     // back would be a second author of the same data.
-    uint32_t res   = std::clamp(tc.resolution, 2u, 1024u);
+    uint32_t res   = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     uint32_t cells = res - 1, p = 1;
     while (p < cells) p <<= 1;
     const uint32_t snapped = p + 1;
@@ -1218,16 +1263,21 @@ void PhysicsWorld::setCollisionLayers(const HE::CollisionLayerConfig& config)
     // Statics are skipped by Jolt itself, and this runs once per matrix edit
     // (the editor on a change, GameApplication before a single body exists), so
     // it never touches the frame loop.
+    //
+    // Not the held ones: a body the region hold took out of the broad phase must
+    // not be woken (Jolt would put it on its active list, outside the tree). It
+    // is woken when the hold ends, and by then the matrix is the new one.
     std::vector<JPH::BodyID> ids;
     ids.reserve(m_impl->entityToBody.size());
     for (const auto& [entityId, bodyId] : m_impl->entityToBody)
-        ids.push_back(bodyId);
+        if (!m_impl->heldBodies.count(entityId))
+            ids.push_back(bodyId);
     if (!ids.empty())
         m_impl->physicsSystem.GetBodyInterface().ActivateBodies(
             ids.data(), static_cast<int>(ids.size()));
 }
 
-bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
+bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId, BodyBatch* batch)
 {
     auto&        reg    = world.registry();
     const Entity entity = static_cast<Entity>(entityId);
@@ -1329,8 +1379,18 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
     // it is invisible to all of them, silently.
     bcs.mUserData = static_cast<uint64_t>(entityId);
 
-    const JPH::BodyID bodyId =
-        m_impl->physicsSystem.GetBodyInterface().CreateAndAddBody(bcs, activation);
+    // In a charge the body is only CREATED here and goes into the broad phase with
+    // the others (addEntities), activated then; a lone build adds it at once.
+    auto&       bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    JPH::BodyID bodyId;
+    if (batch)
+    {
+        const JPH::Body* created = bodyInterface.CreateBody(bcs);
+        if (created)
+            bodyId = created->GetID();
+    }
+    else
+        bodyId = bodyInterface.CreateAndAddBody(bcs, activation);
     if (bodyId.IsInvalid())
     {
         HE_LOG_ERROR(Physics, "Entity %u: body creation failed — the %u-body limit is "
@@ -1339,7 +1399,11 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
         return false;
     }
 
+    if (batch)
+        batch->ids.push_back(bodyId);
     m_impl->entityToBody[entityId] = bodyId;
+    if (motionType == JPH::EMotionType::Dynamic)
+        m_impl->dynamicBodies.insert(entityId);
     return true;
 }
 
@@ -1634,6 +1698,14 @@ bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
         return false;
     }
 
+    // Not to a body the region hold has out of the broad phase (see applyRegionHold):
+    // it waits, as a joint waits for a partner that is away, and the hold's end builds it.
+    if (m_impl->heldBodies.count(entityId) || m_impl->heldBodies.count(targetId))
+    {
+        m_impl->queuePatientJoint(entityId);
+        return false;
+    }
+
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
     const JPH::EMotionType motionA = bodyInterface.GetMotionType(itA->second);
     const JPH::EMotionType motionB = bodyInterface.GetMotionType(itB->second);
@@ -1807,15 +1879,18 @@ bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
     m_impl->setJointedPairCollides(itA->second, itB->second, jc->collideConnected);
 
     // A settled crate does not feel a rope that was tied to it while it slept:
-    // Jolt only solves constraints between active bodies.
-    if (motionA != JPH::EMotionType::Static) bodyInterface.ActivateBody(itA->second);
-    if (motionB != JPH::EMotionType::Static) bodyInterface.ActivateBody(itB->second);
+    // Jolt only solves constraints between active bodies. (Not a held one: it is
+    // outside the broad phase and is woken by the hold's end.)
+    if (motionA != JPH::EMotionType::Static && !m_impl->heldBodies.count(entityId))
+        bodyInterface.ActivateBody(itA->second);
+    if (motionB != JPH::EMotionType::Static && !m_impl->heldBodies.count(targetId))
+        bodyInterface.ActivateBody(itB->second);
     return true;
 }
 
-void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, bool requeue)
+void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, JointFate fate)
 {
-    if (!requeue)
+    if (fate == JointFate::Drop)
         m_impl->unqueueJoint(entityId);
     if (m_impl->joints.empty())
         return;
@@ -1841,8 +1916,16 @@ void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, bool requeue)
         // Every owner, including this entity's own joint: it is a rebuild for
         // that one too. A permanent removal instead lets the entries fall off
         // the list on their own, which is where the give-up message comes from.
-        if (requeue)
+        //
+        // A WAIT is a rebuild that is not due yet: the entity belongs to a streamed
+        // cell and comes back with it. Every owner is queued as one that waits, the
+        // surviving ones above all (a door of the base, hinged to a frame in the
+        // cell); the ones that were in the cell die with it, and the next retry
+        // drops their entries because the entity is gone.
+        if (fate == JointFate::Rebuild)
             m_impl->queueJoint(owner);
+        else if (fate == JointFate::Wait)
+            m_impl->queuePatientJoint(owner);
     }
 }
 
@@ -1853,13 +1936,14 @@ void PhysicsWorld::resolvePendingJoints(HorizonWorld& world)
 
     // A snapshot, because buildJointFor removes its own entry on success and on
     // a refusal — both of which would invalidate an iterator over the list.
-    std::vector<uint32_t> ids;
+    struct Waiting { uint32_t id; bool patient; };
+    std::vector<Waiting> ids;
     ids.reserve(m_impl->pendingJoints.size());
     for (const auto& p : m_impl->pendingJoints)
-        ids.push_back(p.entityId);
+        ids.push_back({ p.entityId, p.patient });
 
     bool progress = false;
-    for (const uint32_t id : ids)
+    for (const auto& [id, patient] : ids)
     {
         const Entity entity = static_cast<Entity>(id);
         if (!world.registry().valid(entity) || !world.registry().all_of<JointComponent>(entity))
@@ -1867,18 +1951,37 @@ void PhysicsWorld::resolvePendingJoints(HorizonWorld& world)
             m_impl->unqueueJoint(id);   // nothing left to build — not a failure
             continue;
         }
+        if (patient)
+        {
+            // The partner of a joint that waits for a cell is not late, it is
+            // away; asking buildJointFor about it every pass would only repeat its
+            // complaint about a body that is not there. Look first, in silence.
+            const auto& jc = world.registry().get<JointComponent>(entity);
+            if (jc.target != HE::UUID{})
+            {
+                const Entity partner = world.findByEntityId(jc.target);
+                if (partner == entt::null
+                    || !m_impl->entityToBody.count(id)
+                    || !m_impl->entityToBody.count(static_cast<uint32_t>(partner))
+                    || m_impl->heldBodies.count(id)
+                    || m_impl->heldBodies.count(static_cast<uint32_t>(partner)))
+                    continue;
+            }
+        }
         if (buildJointFor(world, id))
             progress = true;
     }
 
     // A chain resolves one link per pass, so the entries at the far end are
     // patient rather than broken: a pass that built ANYTHING forgives all of
-    // them. Only a pass in which nothing moved counts against the survivors.
+    // them. Only a pass in which nothing moved counts against the survivors —
+    // the ones that are not waiting for a cell, that is: those are not counted.
     for (auto& p : m_impl->pendingJoints)
-        p.attempts = progress ? 0 : p.attempts + 1;
+        if (!p.patient)
+            p.attempts = progress ? 0 : p.attempts + 1;
 
     const auto giveUp = [this](const Impl::PendingJoint& p) {
-        if (p.attempts < Impl::kMaxJointAttempts)
+        if (p.patient || p.attempts < Impl::kMaxJointAttempts)
             return false;
         // Said once, at the point it stops being tried. Anything else would
         // either repeat every spawn or say nothing at all, and "my joint does
@@ -1952,14 +2055,29 @@ void PhysicsWorld::initialize(HorizonWorld& world)
     // which of the two comes first. Half a chain would build and the other half
     // would not, differently on every run.
     //
-    // Nothing goes on the pending list here. Every body a scene HAS was built in
-    // phase one, so a joint that cannot be built now names something that has no
-    // body at all — buildJointFor says so and drops it, rather than leaving an
-    // entry that would resolve on the first unrelated spawn.
+    // Nothing goes on the pending list here (but for the one case below). Every
+    // body a scene HAS was built in phase one, so a joint that cannot be built now
+    // names something that has no body at all — buildJointFor says so and drops
+    // it, rather than leaving an entry that would resolve on the first unrelated
+    // spawn.
     std::size_t builtJoints = 0;
     for (uint32_t entityId : jointed)
         if (buildJointFor(world, entityId))
             ++builtJoints;
+
+    // The one case that does go on the list: a partner that is not in the world at
+    // all. With streamed cells that is no mistake, the partner may be in a cell
+    // that has not been loaded yet, and the joint has to be there when it is. (A
+    // partner that exists and has no body is the other thing, said and dropped
+    // above; so is every refusal.) These wait for the partner as long as it takes.
+    for (uint32_t entityId : jointed)
+    {
+        if (m_impl->joints.count(entityId))
+            continue;
+        const auto* jc = reg.try_get<JointComponent>(static_cast<Entity>(entityId));
+        if (jc && jc->target != HE::UUID{} && world.findByEntityId(jc->target) == entt::null)
+            m_impl->queuePatientJoint(entityId);
+    }
 
     m_impl->physicsSystem.OptimizeBroadPhase();
     m_impl->initialized = true;
@@ -1995,7 +2113,7 @@ bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
     // is not called here: a new body is going up in the same breath, so the
     // chain this entity was part of has to survive the swap. resolvePendingJoints
     // below rebuilds them.
-    removeEntityImpl(entityId, /*requeueJoints=*/true);
+    removeEntityImpl(entityId, JointFate::Rebuild);
 
     bool built = buildBodyFor(world, entityId);
     built      = buildCharacterFor(world, entityId) || built;
@@ -2024,6 +2142,79 @@ bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
                         "Entity %u was given a physics body before the world was initialised — "
                         "it will not simulate, and initialize() discards it", entityId);
     return built;
+}
+
+int PhysicsWorld::addEntities(HorizonWorld& world, const std::vector<uint32_t>& entityIds)
+{
+    if (!m_impl || entityIds.empty())
+        return 0;
+
+    m_impl->world = &world;
+    auto& reg     = world.registry();
+
+    // Phase one: every body is CREATED (it owns its slot in Jolt's body table and
+    // is in entityToBody), none is in the broad phase yet. Everything that does
+    // not depend on the other entities of the charge happens here, in order, with
+    // the same builders addEntity uses.
+    BodyBatch batch;
+    batch.ids.reserve(entityIds.size());
+    std::unordered_set<uint32_t> seen;
+    seen.reserve(entityIds.size());
+    int built = 0;
+    for (const uint32_t entityId : entityIds)
+    {
+        const Entity entity = static_cast<Entity>(entityId);
+        if (!reg.valid(entity) || !seen.insert(entityId).second)
+            continue;
+
+        // Replace-if-present, as addEntity. The teardown is only run when there is
+        // something to tear down: a charge of fresh entities (the normal case, a
+        // slice of a cell) would otherwise pay a walk over every joint in the
+        // world per entity, to find that none names a body that does not exist.
+        if (hasPhysics(entityId))
+            removeEntityImpl(entityId, JointFate::Rebuild);
+
+        bool one = buildBodyFor(world, entityId, &batch);
+        one      = buildCharacterFor(world, entityId) || one;
+        if (!one)
+            one = buildTerrainBodyFor(world, entityId);
+        if (!one)
+            continue;
+        ++built;
+        if (reg.all_of<JointComponent>(entity))
+            m_impl->queueJoint(entityId);
+    }
+
+    // Phase two: the bodies go into the broad phase together. Jolt sorts them by
+    // layer and builds one subtree per layer to merge into the live one, which is
+    // what the single adds of addEntity cannot do, and activates the moving ones
+    // (a static body is not activated, whatever the mode says).
+    if (!batch.ids.empty())
+    {
+        auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+        const int count = static_cast<int>(batch.ids.size());
+        const JPH::BodyInterface::AddState state =
+            bodyInterface.AddBodiesPrepare(batch.ids.data(), count);
+        bodyInterface.AddBodiesFinalize(batch.ids.data(), count, state, JPH::EActivation::Activate);
+    }
+
+    // Phase three, ONCE for the charge: a body of the charge may be the missing
+    // half of a joint of the base or of another entity of the charge (they are all
+    // in now), and the entries that wait for a cell are looked at.
+    if (built > 0)
+    {
+        resolvePendingJoints(world);
+        if (!m_impl->initialized)
+            HE_LOG_THROTTLE(Physics, Warning, 5.0,
+                            "%d entities were given physics bodies before the world was initialised — "
+                            "they will not simulate, and initialize() discards them", built);
+    }
+    return built;
+}
+
+std::size_t PhysicsWorld::bodyCount() const
+{
+    return m_impl ? m_impl->entityToBody.size() : 0;
 }
 
 int PhysicsWorld::addEntityTree(HorizonWorld& world, uint32_t rootEntityId)
@@ -2062,25 +2253,30 @@ void PhysicsWorld::removeEntity(uint32_t entityId)
     // the two reaps in step(), the zone unloads in both applications, entity.destroy
     // from a script. None of them is going to put the body back, so a joint aimed at
     // this entity must not go on the pending list waiting for one.
-    removeEntityImpl(entityId, /*requeueJoints=*/false);
+    removeEntityImpl(entityId, JointFate::Drop);
 }
 
-void PhysicsWorld::removeEntityImpl(uint32_t entityId, bool requeueJoints)
+void PhysicsWorld::removeEntityImpl(uint32_t entityId, JointFate fate)
 {
     if (!m_impl)
         return;
-    destroyBodyFor(entityId, requeueJoints);
+    destroyBodyFor(entityId, fate);
     // A CharacterVirtual has no Jolt body of its own (mInnerBodyShape is never
     // set), so it appears in no raycast, overlap or contact — erasing the owning
     // pointer IS its complete removal.
     m_impl->entityToCharacter.erase(entityId);
     m_impl->characterLayer.erase(entityId);
+    m_impl->heldCharacters.erase(entityId);
 }
 
-int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId)
+int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId, bool requeueJoints)
 {
     if (!m_impl)
         return 0;
+
+    // The streamed cell's own removal keeps the joints it cut for the return of
+    // the entity; every other one is permanent (see removeEntity).
+    const JointFate fate = requeueJoints ? JointFate::Wait : JointFate::Drop;
 
     auto&        reg  = world.registry();
     const Entity root = static_cast<Entity>(rootEntityId);
@@ -2089,7 +2285,7 @@ int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId)
         // The handle is already gone, so the hierarchy cannot be walked. Remove
         // what we can name and let step()'s reap collect the rest.
         const bool had = hasPhysics(rootEntityId);
-        removeEntity(rootEntityId);
+        removeEntityImpl(rootEntityId, fate);
         return had ? 1 : 0;
     }
 
@@ -2104,7 +2300,7 @@ int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId)
         const uint32_t id = static_cast<uint32_t>(current);
         if (hasPhysics(id))
         {
-            removeEntity(id);
+            removeEntityImpl(id, fate);
             ++removed;
         }
         if (const auto* hierarchy = reg.try_get<HierarchyComponent>(current))
@@ -2278,9 +2474,11 @@ bool PhysicsWorld::setJointMotor(HorizonWorld& world, uint32_t entityA,
     // moment both its bodies are asleep, so a door told to open while nothing
     // was moving would simply stay shut.
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
-    if (bodyInterface.GetMotionType(it->second.bodyA) != JPH::EMotionType::Static)
+    if (bodyInterface.GetMotionType(it->second.bodyA) != JPH::EMotionType::Static
+        && !m_impl->heldBodies.count(entityA))
         bodyInterface.ActivateBody(it->second.bodyA);
-    if (bodyInterface.GetMotionType(it->second.bodyB) != JPH::EMotionType::Static)
+    if (bodyInterface.GetMotionType(it->second.bodyB) != JPH::EMotionType::Static
+        && !m_impl->heldBodies.count(it->second.partner))
         bodyInterface.ActivateBody(it->second.bodyB);
     return true;
 }
@@ -2384,7 +2582,7 @@ void PhysicsWorld::breakOverloadedJoints(HorizonWorld& world, float dt)
     }
 }
 
-void PhysicsWorld::destroyBodyFor(uint32_t entityId, bool requeueJoints)
+void PhysicsWorld::destroyBodyFor(uint32_t entityId, JointFate fate)
 {
     // FIRST, before the body goes anywhere. A Jolt constraint keeps raw Body
     // pointers, so a constraint left behind by a destroyed body reads freed
@@ -2398,17 +2596,22 @@ void PhysicsWorld::destroyBodyFor(uint32_t entityId, bool requeueJoints)
     // for a body nobody was going to build. It stayed on the list, was retried
     // by every unrelated spawn after it, and gave up eight passes later with a
     // warning about a joint that had nothing wrong with it.
-    destroyJointsInvolving(entityId, requeueJoints);
+    destroyJointsInvolving(entityId, fate);
 
     const auto it = m_impl->entityToBody.find(entityId);
     if (it == m_impl->entityToBody.end())
         return;
 
     // Remove THEN destroy — Jolt's own order, and the one clear() has always used.
+    // A body the region hold already took out of the broad phase is not in it to be
+    // removed: Jolt's RemoveBody checks and does nothing, and DestroyBody is the
+    // same for a body that was never in.
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
     bodyInterface.RemoveBody(it->second);
     bodyInterface.DestroyBody(it->second);
     m_impl->entityToBody.erase(it);
+    m_impl->dynamicBodies.erase(entityId);
+    m_impl->heldBodies.erase(entityId);
 
     // And forget its contacts. Jolt fires OnContactRemoved for a destroyed body's
     // cached contacts during the NEXT Update(); without this the listener would
@@ -2602,6 +2805,11 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
     m_impl->world = &world;
 
+    // Before the simulation, not after: a body whose floor is gone must be out of
+    // the broad phase when Update runs, or it falls for one step before anything
+    // notices, and a body whose floor is back must be in it.
+    applyRegionHold();
+
     m_impl->physicsSystem.Update(dt, 1,
         &m_impl->tempAllocator, &m_impl->jobSystem);
 
@@ -2641,6 +2849,11 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
         // Only write back non-static bodies
         if (bodyInterface.GetMotionType(bodyId) == JPH::EMotionType::Static)
+            continue;
+
+        // A held body did not move: its pose in Jolt is the one the transform was
+        // given last, and writing it back would only repeat that.
+        if (!m_impl->heldBodies.empty() && m_impl->heldBodies.count(entityId))
             continue;
 
         // An entity that also has a character controller belongs to the character
@@ -2734,6 +2947,24 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         if (!cc || !transform)
             continue;
 
+        // The region hold, for a character: it has no Jolt body to take out of the
+        // broad phase, so it is simply not stepped. No gravity, no movement, the
+        // transform and the proxy body stay where they are — standing at the spot
+        // where the floor will be, instead of falling through the place it is not
+        // yet. (A spawn or a teleport into a cell that is still loading is the case.)
+        if (m_impl->holdTest)
+        {
+            const JPH::RVec3 at = character->GetPosition();
+            if (m_impl->holdTest(glm::vec3(static_cast<float>(at.GetX()),
+                                           static_cast<float>(at.GetY()),
+                                           static_cast<float>(at.GetZ()))))
+            {
+                m_impl->heldCharacters.insert(entityId);
+                continue;
+            }
+            m_impl->heldCharacters.erase(entityId);
+        }
+
         // Use Jolt character's current velocity so setCharacterVelocity() takes effect.
         // cc->velocity is an output field — game code drives velocity via setCharacterVelocity.
         float grav = cc->gravity;
@@ -2817,6 +3048,93 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
                 JPH::Quat(q.x, q.y, q.z, q.w), dt);
         }
     }
+}
+
+// ─── Region hold ──────────────────────────────────────────────────────────────
+
+void PhysicsWorld::setRegionHold(HoldTest held)
+{
+    if (!m_impl)
+        return;
+    m_impl->holdTest = std::move(held);
+    if (m_impl->holdTest)
+        return;
+
+    // No test any more: nothing is held. Every body that was out goes back in, the
+    // way a hold that ends does it (applyRegionHold), so that taking the test away
+    // is never what leaves a crate floating outside the world.
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const bool any = !m_impl->heldBodies.empty();
+    for (const uint32_t entityId : m_impl->heldBodies)
+        if (const auto it = m_impl->entityToBody.find(entityId); it != m_impl->entityToBody.end())
+            bodyInterface.AddBody(it->second, JPH::EActivation::Activate);
+    m_impl->heldBodies.clear();
+    m_impl->heldCharacters.clear();
+    if (any && m_impl->world)
+        resolvePendingJoints(*m_impl->world);   // the joints that waited for them
+}
+
+std::size_t PhysicsWorld::heldCount() const
+{
+    return m_impl ? m_impl->heldBodies.size() + m_impl->heldCharacters.size() : 0;
+}
+
+void PhysicsWorld::applyRegionHold()
+{
+    if (!m_impl->holdTest)
+        return;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    bool  released      = false;
+    for (const uint32_t entityId : m_impl->dynamicBodies)
+    {
+        // The proxy body of a character is kinematic and never here; a dynamic body
+        // on an entity that also has a character is an odd authoring, and the
+        // character loop is what decides about that entity.
+        if (m_impl->entityToCharacter.count(entityId))
+            continue;
+        const auto bodyIt = m_impl->entityToBody.find(entityId);
+        if (bodyIt == m_impl->entityToBody.end())
+            continue;
+        const JPH::BodyID bodyId = bodyIt->second;
+
+        const JPH::RVec3 at = bodyInterface.GetPosition(bodyId);
+        const bool wanted = m_impl->holdTest(glm::vec3(static_cast<float>(at.GetX()),
+                                                       static_cast<float>(at.GetY()),
+                                                       static_cast<float>(at.GetZ())));
+        const bool held = m_impl->heldBodies.count(entityId) != 0;
+        if (wanted == held)
+            continue;
+
+        if (wanted)
+        {
+            // Its joints go first, and wait for it. A constraint to a body that is
+            // not in the broad phase is not harmless: when the other end is active,
+            // Jolt activates this one in the middle of the step (TwoBodyConstraint::
+            // BuildIslands, which does not ask whether it is in the tree), and a body
+            // that is on the active list and not in the tree is a crash. The free end
+            // is on its own meanwhile; the joint is built again when the hold ends.
+            destroyJointsInvolving(entityId, JointFate::Wait);
+            // Out of the broad phase, nothing else: the Body object keeps its pose,
+            // its velocity and its shape, which is what lets it carry on as it was.
+            // Jolt deactivates it on the way out.
+            bodyInterface.RemoveBody(bodyId);
+            m_impl->heldBodies.insert(entityId);
+        }
+        else
+        {
+            // Back in, awake: whatever it rested on may be a different floor now,
+            // and a body that went to sleep before the hold will find out within a
+            // few steps.
+            bodyInterface.AddBody(bodyId, JPH::EActivation::Activate);
+            m_impl->heldBodies.erase(entityId);
+            released = true;
+        }
+    }
+
+    // The joints that waited for a body to be let go come back now that it is in.
+    if (released && m_impl->world)
+        resolvePendingJoints(*m_impl->world);
 }
 
 namespace {
@@ -3620,9 +3938,13 @@ void PhysicsWorld::setGravity(const glm::vec3& gravity)
     // system, but a sleeping body is not stepped at all — so without this,
     // flipping gravity leaves every crate that had come to rest hanging in the
     // air until something else happens to touch it.
+    //
+    // Except a body the region hold has out of the broad phase: it is woken when
+    // the hold lets it back in.
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
     for (const auto& entry : m_impl->entityToBody)
-        if (bodyInterface.GetMotionType(entry.second) != JPH::EMotionType::Static)
+        if (bodyInterface.GetMotionType(entry.second) != JPH::EMotionType::Static
+            && !m_impl->heldBodies.count(entry.first))
             bodyInterface.ActivateBody(entry.second);
 }
 
@@ -3692,6 +4014,12 @@ void PhysicsWorld::clear()
     m_impl->entityToBody.clear();
     m_impl->entityToCharacter.clear();
     m_impl->characterLayer.clear();
+    // What the hold knew about those bodies goes with them. The TEST stays: it is
+    // set up once for the world, like the collision matrix, and a world that is
+    // initialised again keeps asking it.
+    m_impl->dynamicBodies.clear();
+    m_impl->heldBodies.clear();
+    m_impl->heldCharacters.clear();
     // After the bodies are gone: drop the contact bookkeeping, otherwise the
     // OnContactRemoved callbacks Jolt fires for them would emit exit events
     // referring to entities that no longer exist.

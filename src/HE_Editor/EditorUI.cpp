@@ -55,11 +55,15 @@
 #include "HcRenameDialog.h"            // "that rename reaches other files" — from both graph editors
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "EditorShortcuts.h"           // the chords the menus print and the keys fire
+#include "EditorTabs.h"                // find-or-focus for every way of opening an asset tab
 #include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
+#include "ProjectPreflight.h"            // engine-content check in front of every project open
+#include "SceneDiskWatch.h"             // "the open scene changed on disk (git pull) - reload?"
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
 #include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
+#include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
@@ -811,6 +815,17 @@ void EditorUI::render(AppContext& ctx, float dt)
     DocsPanel::setPanelOpener(ctx.projectLoaded ? &docsPanelOpener : nullptr);
     DocsPanel::draw(ctx);
 
+    // ── Engine-content check before a project opens ──────────────────────────
+    // Before the branch for the same reason as the dialogs above: it is shown over
+    // the hub while a project is being opened and over the editor while one is
+    // being switched to, and it is what finally flips projectLoaded.
+    ProjectPreflight::render(ctx);
+
+    // ── The open scene changed on disk ───────────────────────────────────────
+    // A pull rewrites the scene file under the editor; this asks whether to reload it.
+    if (ctx.projectLoaded && !ProjectPreflight::busy())
+        SceneDiskWatch::render(ctx);
+
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)
     {
@@ -1356,21 +1371,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// this from inside a menu, whose ID stack is not the popup's.
 	auto openProjectAt = [&](const std::string& chosen)
 	{
-		const bool switching = ctx.projectLoaded;
-		if (switching) EditorUI::endProjectSession(ctx);
-		if (ctx.projectManager->loadProject(chosen))
-		{
-			ctx.globalState->addKnownProject(chosen);
-			ctx.globalState->writeConfig();
-			ctx.contentRefreshPending = true;
-			ctx.projectLoaded = true;
-		}
-		else
-		{
-			if (switching) ctx.projectLoaded = false;   // the old one is gone
-			ctx.hubOpenError = "Failed to load project file.";
-			s_openProjectErrorPopup = true;
-		}
+		// The engine-content check runs first, with the current project still open; the
+		// session ends and the new project loads when it clears (ProjectPreflight::openNow,
+		// which reports a failure on the hub the editor falls back to).
+		ProjectPreflight::request(ctx, chosen);
 	};
 	auto triggerOpenProject = [&]()
 	{
@@ -1559,25 +1563,52 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	if (std::string cloned; GitCloneDialog::takeOpenRequest(cloned))
 		requestGuarded(GuardedAction::OpenProjectPath, cloned);
 
+	// A .heproj double-clicked in the file manager while a project is open
+	// (ProjectLaunchOpen.h): the same door as File ▸ Open Project. It waits in its
+	// slot while any popup is up — above all the unsaved-changes prompt, whose
+	// pending action it would otherwise overwrite under the user's cursor.
+	// Said once per wait, naming the dialog: a project that was double-clicked
+	// and then "did nothing" is otherwise waiting behind a dialog nobody noticed.
+	static bool s_launchWaitLogged = false;
+	if (ProjectLaunchOpen::pending() &&
+	    ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+	{
+		if (!s_launchWaitLogged)
+		{
+			const ImGuiContext& g = *ImGui::GetCurrentContext();
+			const ImGuiWindow* top = g.OpenPopupStack.empty() ? nullptr
+			                                                  : g.OpenPopupStack.back().Window;
+			HE_LOG_INFO(Editor, "Editor: a project handed over by the system waits until the "
+			                    "open dialog is closed (%s)", top ? top->Name : "a popup");
+			s_launchWaitLogged = true;
+		}
+	}
+	else if (ProjectLaunchOpen::pending())
+	{
+		s_launchWaitLogged = false;
+		std::string launched;
+		ProjectLaunchOpen::take(launched);
+		const std::string& current = ctx.projectManager->currentProject().path;
+		if (ProjectLaunchOpen::decide(ctx.projectLoaded, current, launched) ==
+		    ProjectLaunchOpen::Action::AlreadyOpen)
+			HE_LOG_INFO(Editor, "Editor: %s is already the open project", launched.c_str());
+		else
+		{
+			HE_LOG_INFO(Editor, "Editor: opening %s (handed over by the system)", launched.c_str());
+			requestGuarded(GuardedAction::OpenProjectPath, launched);
+		}
+	}
+
 	// ── Menu actions shared by the ImGui menu bar and the macOS native menu ────
 	// Open (or focus) the Level Script / Game Instance as editor tabs.
 	auto openVirtualTab = [&](const char* label, const char* path)
 	{
-		auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
-			[&](const AppContext::EditorTab& t){ return t.assetPath == path; });
-		if (it == ctx.tabs.end())
-		{ ctx.tabs.push_back({ label, path, true, true }); ctx.activeTab = (int)ctx.tabs.size() - 1; }
-		else ctx.activeTab = (int)std::distance(ctx.tabs.begin(), it);
-		s_tabSelectRequest = ctx.activeTab;
+		EditorTabs::openOrFocus(ctx.tabs, ctx.activeTab, s_tabSelectRequest, path, label);
 	};
 	// Back to the scene tab (the one with no asset behind it, normally index 0).
 	auto openViewportTab = [&]()
 	{
-		const auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
-			[](const AppContext::EditorTab& t){ return t.assetPath.empty(); });
-		if (it == ctx.tabs.end()) return;
-		ctx.activeTab      = static_cast<int>(std::distance(ctx.tabs.begin(), it));
-		s_tabSelectRequest = ctx.activeTab;
+		EditorTabs::focusSceneTab(ctx.tabs, ctx.activeTab, s_tabSelectRequest);
 	};
 	// "Show in Content Browser" from an asset editor's header: the browser is
 	// docked into the scene tab and is not drawn on any other, so the scene tab
@@ -1858,6 +1889,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			// native module — the native menu has no per-language gate, so the
 			// row is always live and the answer comes from the action.
 			case MC::BuildGameLogic:  GameLogicBuildPanel::start(ctx);                       break;
+			case MC::ShowBuildLog:    BuildProgressDialog::requestOpen();                    break;
 			case MC::SetViewMode:
 			{
 				const int m = MacMenuBar::arg() - 1;
@@ -2229,6 +2261,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("Export Project..."))
 			openExportDialog();
+		// The last run's rings and per-step logs — what the Build window shows,
+		// reopened after it was closed. Greyed until something has been built.
+		if (EditorWidgets::menuItem("Show Last Build Log", nullptr, false,
+		                            BuildProgressDialog::snapshot().hasRun))
+			BuildProgressDialog::requestOpen();
 		ImGui::EndMenu();
 	}
 	// ── View: how the Scene window draws ────────────────────────────────────
@@ -3365,19 +3402,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
         // Open request from inside an editor panel (e.g. double-clicking a Material
         // Function node) — same find-or-push flow as the Content Browser double-click.
+        // The request comes from ContentManager::resolveAbsolutePath, which is not
+        // the spelling the Content Browser's tile has: EditorTabs matches the asset,
+        // not the string.
         if (const std::string req = MaterialEditorPanel::takeOpenRequest(); !req.empty())
-        {
-            auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
-                [&](const AppContext::EditorTab& t){ return t.assetPath == req; });
-            if (it == s_tabs.end())
-            {
-                s_tabs.push_back({ std::filesystem::path(req).stem().string(), req, true, true });
-                s_activeTab = static_cast<int>(s_tabs.size()) - 1;
-            }
-            else
-                s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
-            s_tabSelectRequest = s_activeTab;
-        }
+            EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, req, {},
+                                    ctx.contentManager);
 
         // The texture viewer: a just-imported image, or a raw-image tab whose Import
         // ran and which now becomes the asset's tab (`replacing`) rather than a second
@@ -3386,24 +3416,19 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         for (auto req = TextureViewerPanel::takeOpenRequest(); !req.path.empty();
              req = TextureViewerPanel::takeOpenRequest())
         {
-            auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
-                [&](const AppContext::EditorTab& t){ return t.assetPath == req.path; });
-            auto old = std::find_if(s_tabs.begin(), s_tabs.end(),
-                [&](const AppContext::EditorTab& t){ return t.assetPath == req.replacing; });
-            if (it == s_tabs.end() && !req.replacing.empty() && old != s_tabs.end())
+            if (EditorTabs::find(s_tabs, req.path, ctx.contentManager) < 0 && !req.replacing.empty())
             {
-                TextureViewerPanel::forget(old->assetPath);
-                old->assetPath = req.path;
-                old->label     = std::filesystem::path(req.path).stem().string();
-                it = old;
+                // The raw-image tab becomes the imported asset's tab in place.
+                const int old = EditorTabs::find(s_tabs, req.replacing, ctx.contentManager);
+                if (old >= 0)
+                {
+                    TextureViewerPanel::forget(s_tabs[old].assetPath);
+                    s_tabs[old].assetPath = req.path;
+                    s_tabs[old].label     = std::filesystem::path(req.path).stem().string();
+                }
             }
-            else if (it == s_tabs.end())
-            {
-                s_tabs.push_back({ std::filesystem::path(req.path).stem().string(), req.path, true, true });
-                it = s_tabs.end() - 1;
-            }
-            s_activeTab        = static_cast<int>(std::distance(s_tabs.begin(), it));
-            s_tabSelectRequest = s_activeTab;
+            EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, req.path,
+                std::filesystem::path(req.path).stem().string(), ctx.contentManager);
         }
 
         // A "go to node" from the console (HcExecTrace::requestReveal): the tab
@@ -3425,21 +3450,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 HcExecTrace::cancelReveal();   // nothing to open; drop the node half too
             else
             {
-                auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
-                    [&](const AppContext::EditorTab& t)
-                    { return t.assetPath == full ||
-                             (!reserved && std::filesystem::path(t.assetPath) == std::filesystem::path(full)); });
-                if (it == s_tabs.end())
-                {
-                    const std::string label = reserved
-                        ? (revealTab == LevelScriptPanel::kTabPath ? "Level Script" : "Game Instance")
-                        : std::filesystem::path(full).stem().string();
-                    s_tabs.push_back({ label, full, true, true });
-                    s_activeTab = static_cast<int>(s_tabs.size()) - 1;
-                }
-                else
-                    s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
-                s_tabSelectRequest = s_activeTab;
+                const std::string label = reserved
+                    ? (revealTab == LevelScriptPanel::kTabPath ? "Level Script" : "Game Instance")
+                    : std::filesystem::path(full).stem().string();
+                EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, full, label,
+                                        ctx.contentManager);
             }
         }
 
@@ -3453,21 +3468,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (!std::filesystem::exists(revealScript))
                 ScriptEditorPanel::cancelReveal();   // gone since the error was logged
             else
-            {
-                auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
-                    [&](const AppContext::EditorTab& t)
-                    { return t.assetPath == revealScript ||
-                             std::filesystem::path(t.assetPath) == std::filesystem::path(revealScript); });
-                if (it == s_tabs.end())
-                {
-                    s_tabs.push_back({ std::filesystem::path(revealScript).stem().string(),
-                                       revealScript, true, true });
-                    s_activeTab = static_cast<int>(s_tabs.size()) - 1;
-                }
-                else
-                    s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
-                s_tabSelectRequest = s_activeTab;
-            }
+                EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, revealScript,
+                    std::filesystem::path(revealScript).stem().string(), ctx.contentManager);
         }
 
         if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
@@ -3497,7 +3499,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             for (int i = 0; i < static_cast<int>(s_tabs.size()); )
             {
                 auto& tab = s_tabs[i];
-                if (!tab.open) { forgetTabState(tab); s_tabs.erase(s_tabs.begin() + i); continue; }
+                if (!tab.open)
+                {
+                    forgetTabState(tab);
+                    s_tabs.erase(s_tabs.begin() + i);
+                    // Everything after it moved down one: a select request that
+                    // was aimed at a later tab (a tab opened in the frame this one
+                    // was closed in) would otherwise land on its neighbour or on
+                    // nothing at all, and the asset just opened would not come up.
+                    if (s_tabSelectRequest > i) --s_tabSelectRequest;
+                    continue;
+                }
 
                 ImGuiTabItemFlags flags = ImGuiTabItemFlags_None;
                 // Force-select only on an explicit one-shot request (double-click). Using

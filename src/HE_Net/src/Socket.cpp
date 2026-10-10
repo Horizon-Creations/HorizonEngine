@@ -356,8 +356,11 @@ SocketResult socketConnect(SocketHandle h, const std::string& host,
 }
 
 SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t port,
-                                       SocketHandle& outSocket) {
+                                       SocketHandle& outSocket,
+                                       unsigned skipCandidates,
+                                       unsigned* outCandidateCount) {
     outSocket = kInvalidSocket;
+    if (outCandidateCount) *outCandidateCount = 0;
     if (!socketSystemInit()) return SocketResult::Error;
 
     // AF_UNSPEC: let the resolver decide. A session directory records whichever
@@ -374,8 +377,14 @@ SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t po
         return SocketResult::Error;
     }
 
+    unsigned candidateCount = 0;
+    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) ++candidateCount;
+    if (outCandidateCount) *outCandidateCount = candidateCount;
+
     SocketResult result = SocketResult::Error;
-    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+    unsigned candidateIndex = 0;
+    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next, ++candidateIndex) {
+        if (candidateIndex < skipCandidates) continue;
 #ifdef _WIN32
         SOCKET s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (s == INVALID_SOCKET) continue;
