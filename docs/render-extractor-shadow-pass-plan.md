@@ -169,9 +169,10 @@ Zwei Wege, keiner in diesem Schritt entschieden:
 Beide Wege müssen den aspekt-abhängigen Sonderfall (SSAO bei halber Auflösung,
 `RenderExtractor.cpp:1297-1306`) erhalten.
 
-### Schritt 3 — Dirty-Flag für `propagateTransforms`
+### Schritt 3 — Dirty-Flag für `propagateTransforms` (umgesetzt, siehe Abschnitt 7)
 
-Offene Design-Frage, nicht Teil dieses Schritts: `propagateFrom` müsste einen Teilbaum
+Die Design-Frage, wie sie in Schritt 1 stand (Abschnitt 7 beantwortet sie mit einem Scan statt eines
+`parentWorld`-Vergleichs): `propagateFrom` müsste einen Teilbaum
 überspringen (Rekursion **und** Matrixmultiplikation), wenn weder sein eigenes Lokal noch das
 übergebene `parentWorld` sich seit dem letzten Lauf geändert haben — und dabei korrekt bleiben,
 wenn ein Vorfahre sich bewegt (dann ändert sich `parentWorld` für den ganzen Teilbaum, auch ohne
@@ -381,7 +382,7 @@ bitgenau), D3D11/D3D12/Vulkan (kein Gerät) und echte Spielinhalte (Skinned, Par
   Renderer zu teilen hieße, das `RenderWorld` des Backends über `IRenderer` herauszureichen: ein
   API-Eingriff in alle fünf Backends, den dieser Schritt nicht rechtfertigt. Die Frage aus 2.4 ist damit
   beantwortet: außen vor.
-- **Schritt 3 (Dirty-Flag)**: Ein Vergleich von `parentWorld` mit einem gemerkten Wert spart die
+- **Schritt 3 (Dirty-Flag), gebaut in Abschnitt 7**: Ein Vergleich von `parentWorld` mit einem gemerkten Wert spart die
   Multiplikation je Entity, **nicht den Abstieg**: `propagateFrom` liest jede `HierarchyComponent` und
   jede `TransformComponent` in jedem Frame, und das ist Speicherverkehr, der bei 50k den Walk dominiert.
   Ein echtes Überspringen eines Teilbaums braucht ein Signal je Teilbaum (von den Schreibern gesetzt oder
@@ -401,3 +402,240 @@ bitgenau), D3D11/D3D12/Vulkan (kein Gerät) und echte Spielinhalte (Skinned, Par
   gegen `RenderExtractor::reuse` je Frame (`scripts/perf/dump_scope_p50.py`), erwartet (3, 2) auf Metal
   im Forward-Frame. Die Bench `Extraction bench: the frame copy against the walk it saves` lässt sich
   mit `--no-skip` wiederholen.
+
+---
+
+## 7. Schritt 3: Dirty-Flag für `propagateTransforms` (11.10.2026)
+
+Stand: Zweig auf `53fc31cb` (Schritt 2). Die CI auf `9d664207` (Schritt 2) ist grün: im Lauf `38088649573`
+Windows, macOS, Linux und Linux Vulkan (lavapipe), im Lauf `38088642698` ("Runtime flavours") macOS, Linux und
+Windows. Der lavapipe-Job, der einzige Zeuge für Vulkan aus **einem** Walk (6.6), ist grün; an Schritt 2
+war nichts zu beheben.
+
+### 7.1 Die Entscheidung
+
+§6.7 hatte offen gelassen, woher das Signal je Teilbaum kommt: "von den Schreibern gesetzt oder aus einer
+Prüfsumme". Von den Schreibern geht es nicht. `TransformComponent::dirty` setzen Skripte, Physik, Animation,
+Sequencer und Replikation, nicht aber der Inspector und der Gizmo, und an
+`position`/`rotation`/`scale` wird über Referenzen aus Hunderten Stellen geschrieben; es gibt keinen Pfad, an
+dem ein Zähler hängen könnte. Ein Vergleich von `parentWorld` mit einem gemerkten Wert spart die Multiplikation,
+nicht den Abstieg.
+
+Gebaut ist deshalb das Signal aus dem Vergleich, den es schon gab: der Lokal-Cache (`localCache` mit
+`localCachePosition/Rotation/Scale`) hält die Werte, aus denen die lokale Matrix gebaut wurde. **Ein Scan über
+den dichten `TransformComponent`-Speicher findet jede Entity, deren Werte nicht mehr dazu passen.** Das ist ein
+sequentielles Lesen je Entity, ohne Baumabstieg, ohne `try_get` und ohne Matrixprodukt. Danach wird nur
+gerechnet, was sich geändert hat, samt allem darunter.
+
+Verworfen: Dirty von den Schreibern (nicht verlässlich, nicht prüfbar); `parentWorld`-Vergleich (spart den
+Abstieg nicht); eine Prüfsumme je Gruppe (müsste jede Entity der Gruppe lesen, also dasselbe wie der Scan, nur
+ungenauer); ein Hash der Werte (eine Kollision ließe eine Bewegung still ausfallen, das verträgt sich nicht mit
+"bitgleich"); die Hot-Felder an den Anfang der Struktur ziehen (im Mikro-Bench kein stabiler Gewinn).
+
+### 7.2 Was eine Weltmatrix bewegt, und wer es erkennt
+
+Eine Weltmatrix ist `Eltern-Welt * Lokal`. Sie ändert sich aus fünf Gründen, jeder hat einen Detektor, und
+jeder hat eine Negativkontrolle (7.6):
+
+| Ursache | Detektor | Folge |
+|---|---|---|
+| Position/Rotation/Skala der Entity oder eines Vorfahren | Scan: 36 Byte Werte gegen die 36 Byte des Cache-Schlüssels. Ein gesetztes `dirty` zählt als Hinweis, die Werte entscheiden auch ohne | Entity plus Teilbaum neu |
+| Eltern: Reparent, Zellen laden/entladen, Szene laden, Spawn, Destroy, Geschwister umordnen | `HorizonWorld::structureEpoch()` (Thema 164, nur gelesen, nicht erweitert) gegen die Epoche des letzten Durchlaufs | voller Walk |
+| Links von Hand umverdrahtet | `HorizonWorld::noteStructureChanged()` (der Vertrag aus 164, die Lader rufen es) | voller Walk |
+| Weltmatrix von Hand geschrieben | `HE::invalidateWorldMatrices(world)`. Das tut nur `shiftWorldOrigin`: es zieht `worldMatrix[3] -= shift` an **jeder** Entity ab, damit ein Leser vor dem nächsten Durchlauf die neue Lage sieht, und das ist nicht das Produkt, das `propagateTransforms` bildet (Rundung; und eine Entity ohne `HierarchyComponent` oder unter einem Knoten ohne Transform behält eine verschobene Matrix, zu der ihre Position nie passte) | voller Walk, einmal je Verschiebung |
+| `TransformComponent` von einem Knoten genommen, der noch lebende Kinder hat | `on_destroy`-Hörer im Zustand: Kinder nehmen dann die Matrix des Großelternteils | voller Walk |
+| Ganze Komponente zurückgeschrieben (`*tc = saved`, so macht es `CinematicPreview`) | `TransformCacheFlag`: `localCacheValid` überlebt eine **Kopie** nicht, die Kopie gilt als ungültig und der Scan findet sie, obwohl ihre Matrix von irgendwo anders stammt | Entity plus Teilbaum neu |
+
+Eine neu angelegte `TransformComponent` hat einen ungültigen Cache und `dirty = true`: der Scan findet sie
+ohne weiteres Zutun. Darum braucht ein Spawn keinen eigenen Detektor.
+
+**Zellwechsel** (Auftrag der Königin: Floating Origin, Reparent und Zellwechsel müssen richtig ungültig werden).
+Floating Origin und Reparent haben je eine Negativkontrolle, die rot wird (`ignoreInvalidation`,
+`ignoreStructureEpoch`, 7.6). Für den Zellwechsel gibt es keine, und das ist das Argument, keine Lücke: jede
+Komponente einer geladenen Zelle ist neu (ungültiger Cache, `dirty = true`), der Scan findet also den ganzen
+Teilbaum auch ohne Epoche; die späteren Slices unter `attachTo` klettern auf die gespeicherte Matrix der
+Zellwurzel; ein Entladen braucht keine Rechnung. Die Epoche ist dort ein zweiter Gurt (`applyAdditiveJson` ruft
+`ensureEnvironmentLights` und räumt die Wurzel-Kinder auf, das kann auch bestehende Links berühren) und macht
+aus dem Laden einen vollen Walk. Belegt wird der Zellfall nicht durch eine rote Kontrolle, sondern durch den
+Gleichheitstest: die Eingriffsart `CellLoad` im Zufallsvergleich (Zelle additiv laden, Wurzel auf `-origin`) und der
+Fall "a cell loaded and unloaded between two passes" (Laden, ruhige Welt, Floating Origin, Entladen), beide
+bitgleich zum vollen Walk.
+
+### 7.3 Der Ablauf
+
+Der Zustand (`structureEpoch` des letzten Durchlaufs, `forceFull`, `preferFull`, die letzten Zahlen, ein
+Scratch-Vektor) liegt je Registry in deren Kontext (`registry.ctx()`), nicht in `HorizonWorld`: kein Eingriff in
+den Kopf, den alles einbindet, und jede Welt (Tests bauen viele, der Editor hat die Spielkopie) hat ihren eigenen.
+
+1. **Voller Walk**, wenn es keinen Durchlauf gibt, auf dem man aufbauen kann (erster Aufruf), die
+   `structureEpoch` eine andere ist, `forceFull` gesetzt ist oder `HE_PROPAGATE_FULL=1`.
+2. Sonst der **Scan**: jede Entity mit `dirty` oder abweichendem Cache-Schlüssel bekommt `dirty = true` und
+   kommt in eine Liste. Leer: fertig, nichts wurde geschrieben.
+3. Mehr als die Hälfte der Transforms in der Liste: **voller Walk** (ein Aufstieg je Entity wäre teurer), und
+   `preferFull` wird gesetzt. Solange das gilt, läuft der nächste Aufruf **ohne Scan** direkt den Walk; ein Walk,
+   der höchstens ein Viertel der Lokalmatrizen neu bauen musste, nimmt das zurück. So kostet eine Welt, in der
+   ohnehin fast alles läuft, nicht mehr als vorher (die Zeile "jedes Blatt" in 7.7 zeigt gleiche Zeiten).
+4. Sonst je Eintrag der Liste: Eintrag ohne `dirty` ist schon von einem Vorfahren miterledigt (überspringen).
+   Dann den Elternpfad hinauf bis zur Welt-Wurzel: ist ein Vorfahr `dirty`, deckt dessen Durchlauf diesen Eintrag
+   ab (überspringen); endet der Pfad nicht an der Wurzel, erreicht auch der volle Walk die Entity nicht
+   (überspringen, genau wie dort). Sonst ist die Welt-Matrix des nächsten Vorfahren mit Transform
+   (gespeichert, aktuell, denn nichts darüber ist `dirty`) die Ausgangsmatrix, und `propagateFrom` rechnet die
+   Entity und alles darunter. Entities ohne `HierarchyComponent` bekommen wie im vollen Walk `Lokal = Welt`.
+
+### 7.4 Warum das bitgleich ist
+
+Es gibt **eine** Stelle, die eine Weltmatrix bildet: `propagateFrom` (`parentWorld * refreshLocal(*t)`). Der volle
+Walk und der Teilbaum-Durchlauf rufen dieselbe Funktion, und sie ist `noinline`, damit das Produkt nicht in einem
+Aufrufer anders geplant oder zu FMA zusammengezogen wird als im anderen. Der Teilbaum bekommt als `parentWorld`
+die gespeicherte Matrix des Vorfahren, und das sind dieselben Bits, die der volle Walk dem Kind als lokale Variable
+weitergäbe. Der Lokal-Cache (`refreshLocal`) bleibt der alleinige Schiedsrichter, ob eine Lokalmatrix neu gebaut
+wird; der Scan vergleicht Bytes statt Werte und ist damit nur an einer Stelle strenger (+0 gegen -0: eine
+Entity mehr im Durchlauf, dieselbe Matrix) und an einer Stelle milder (NaN: Wert ungleich, Bytes gleich; der volle
+Walk baut sie jedes Mal neu und bekommt jedes Mal dieselben Bits).
+
+Die Annahme dahinter: jede Entity steht in den `children` genau ihres `parent` und nirgends sonst (das hält
+`HorizonWorld`; der additive Lader hat deshalb den Eintrag unter der Wurzel entfernt, siehe Kommentar in
+`applyAdditiveJson`), und niemand außer `propagateTransforms` und `shiftWorldOrigin` schreibt `worldMatrix`.
+
+### 7.5 Was gebaut ist
+
+| Datei | Änderung |
+|---|---|
+| `src/HE_Scene/src/TransformHierarchy.cpp` | Scan, Teilbaum-Durchlauf, Zustand im Registry-Kontext, `propagateTransformsFull` (der alte Walk, wörtlich, als Referenz und Rückfall), `invalidateWorldMatrices`, `lastPropagateStats`, `HE_PROPAGATE_FULL`, `HE_PROPAGATE_VERIFY`, Profiler-Scopes `Transforms::propagate/scan/subtrees/full` |
+| `src/HE_Scene/include/HorizonScene/TransformHierarchy.h` | die neuen Aufrufe, `PropagateStats`, `PropagateTestSwitches`, der Vertrag (was erkannt wird, was angenommen wird) |
+| `src/HE_Scene/include/HorizonScene/Components/TransformComponent.h` | `localCacheValid` ist ein `TransformCacheFlag`: liest sich wie ein `bool`, überlebt aber keine Kopie. Bleibt ein Aggregat (die Tests initialisieren mit `.position = ...`) und gleich groß (208 Byte) |
+| `src/HE_Scene/src/FloatingOrigin.cpp` | `shiftWorldOrigin` ruft `invalidateWorldMatrices` |
+| `src/HE_Scene/include/HorizonScene/Components/HierarchyComponent.h` | der Kopfkommentar nannte noch den Extractor als den, der läuft |
+| `tests/test_transform_propagation.cpp` (neu), `tests/CMakeLists.txt` | 14 Fälle, siehe 7.6 |
+
+`HorizonWorld` ist **nicht** angefasst: `structureEpoch` und `noteStructureChanged` reichen. Das heißt aber auch,
+dass jede Strukturänderung (auch ein Spawn oder Destroy) den nächsten Durchlauf zu einem vollen Walk macht, siehe 7.8.
+
+Zwei Schalter für Diagnose und Messung, beide aus der Umgebung gelesen:
+
+- `HE_PROPAGATE_FULL=1`: jeder Aufruf läuft den ganzen Walk, wie vor diesem Schritt. Ein A/B im **selben
+  Binary** (so ist 7.7 gemessen), und die Antwort auf "ist dieses falsche Transform der inkrementelle Pfad?".
+- `HE_PROPAGATE_VERIFY=1`: nach jedem inkrementellen Durchlauf zusätzlich ein voller Walk und ein Bitvergleich
+  aller Weltmatrizen; eine Abweichung wird geloggt und bricht ab. Langsam, für Läufe, die das Überspringen auf
+  echtem Inhalt belegen sollen.
+
+### 7.6 Tests und Negativkontrollen
+
+`tests/test_transform_propagation.cpp`, 14 Fälle, 1132 Assertions, grün (auch mit `HE_PROPAGATE_VERIFY=1`).
+
+- **Vergleich über zufällige Änderungsfolgen**: zwei Welten, gleich gebaut und gleich geändert (16 Seeds, je 300
+  Schritte, je Schritt 1 bis 3 Eingriffe); die eine mit `propagateTransforms`, die andere mit dem vollen Walk
+  nachgezogen, danach jede Weltmatrix beider **Bit für Bit** verglichen (`memcmp`). Eingriffe: Werte schreiben
+  mit und ohne `dirty`, nur `dirty`, Reparent, Spawn (mit und ohne Transform), Destroy eines Teilbaums,
+  Transform abnehmen und aufsetzen, Floating Origin, ganze Komponente zurückschreiben (mit `dirty = false`),
+  Geschwister umordnen, Entity ohne Hierarchie, Entity ohne Verbindung zur Wurzel (die der volle Walk nie
+  erreicht), eine Zelle additiv laden (mit dem Wurzel-Transform auf `-origin` wie der Streamer), großer Anteil der
+  Welt auf einmal (über der Schwelle), Leerlauf. Die Welt enthält Knoten ohne Transform mitten in Ketten. Der Test
+  prüft, dass alle drei Wege (still, Teilbäume, voller Walk) und alle 16 Eingriffsarten vorkamen. Der Zufall ist
+  ein eigener LCG mit je einer Ziehung je Anweisung, auf jedem Compiler dieselbe Folge.
+- **Arbeit, nicht nur Ergebnis** (über `lastPropagateStats`): eine Welt, in der nichts geschah, wird gescannt
+  und nichts wird geschrieben; ein Blatt ist eine Matrix; eine Gruppe samt einem Blatt darin und einem Blatt
+  einer anderen Gruppe sind 51 + 1 Matrizen (das Blatt in der Gruppe wird nicht zweimal gemacht, auch wenn die
+  Gruppe nach ihren Kindern angelegt wurde); `dirty` ohne Wertänderung ist eine Matrix und wird gelöscht; eine
+  Welt, in der drei Viertel läuft, fällt auf den Walk zurück und scannt wieder, sobald sie ruhig ist.
+- **Jeder Detektor, einzeln abgeschaltet** (`PropagateTestSwitches`, bleiben im Code, damit die Kontrolle wahr
+  bleibt): `ignoreStructureEpoch` (Reparent), `ignoreInvalidation` (Floating Origin), `ignoreValueCompare`
+  (Werte ohne `dirty`), `ignoreTransformRemoval` (Transform vom Elternknoten genommen). Je Detektor ein
+  gezielter Fall und dazu: dieselben Zufallsfolgen divergieren, und alle Schalter aus divergieren nicht.
+  Dazu die zwei Verträge als Fälle: Links von Hand umverdrahtet **ohne** `noteStructureChanged` bleiben alt
+  (das ist der Vertrag, kein Fehler), **mit** stimmen sie; eine zurückgeschriebene Komponente wird gefunden, und
+  ein `localCacheValid`, das die Kopie überlebt hätte, würde sie verstecken.
+- **Mutationen am Produktcode** (je ein Build, nur diese Datei rot, Quelle danach zurück):
+
+  | Mutation | rot |
+  |---|---|
+  | Prüfung "Vorfahr ist `dirty`" entfernt | "a moved group carries its children, once" (Ergebnis bleibt richtig, Arbeit verdoppelt sich) |
+  | Prüfung "schon von einem Vorfahren erledigt" entfernt | derselbe Fall, aber erst mit der Gruppe, die nach ihren Kindern angelegt ist (davor blieb sie grün: die Lücke war im Test, nicht im Code) |
+  | Ausgangsmatrix des Vorfahren nicht genommen | 5 Fälle |
+  | Entity ohne Hierarchie schreibt nichts | die Zufallsfolgen (2 Fälle) |
+  | Keine Schwelle zum vollen Walk | "most of the world moving ..." |
+
+- **Echter Inhalt**: der ganze ctest (258 Tests) mit `HE_PROPAGATE_VERIFY=1`: jeder `propagateTransforms`-Aufruf
+  aller Tests (Kamera-Rig, Sequencer, Physik, Floating Origin, Zellen, Extractor, 100k-Entity-Fälle) wurde gegen
+  den vollen Walk geprüft, kein Abbruch. Der Editor-Loop mit der 50k-Welt, 360 Frames mit
+  `HE_PROPAGATE_VERIFY=1`: kein Abbruch.
+
+### 7.7 Messung
+
+**Mikro (Bench `Transform propagation bench`, Release, M5, `--no-skip`)**, Median von 7 Läufen, ms, voller Walk
+gegen `propagateTransforms`, Welt in Gruppen zu 100 (die Bench misst auch eine flache Welt mit allen Entities
+direkt unter der Wurzel, mit ähnlichen Zahlen):
+
+| Entities | nichts bewegt | ein Blatt | 1 % der Blätter | eine Gruppe (101) | 10 % der Gruppen | jedes Blatt |
+|---|---|---|---|---|---|---|
+| 1 000 | 0,10 → 0,015 | 0,10 → 0,015 | 0,10 → 0,018 | 0,10 → 0,024 | 0,10 → 0,024 | 0,22 → 0,22 |
+| 10 000 | 1,0 → 0,17 | 1,0 → 0,16 | 1,0 → 0,19 | 1,0 → 0,17 | 1,0 → 0,25 | 2,2 → 2,2 |
+| 50 000 | 5,0 → 1,06 | 5,0 → 0,94 | 5,0 → 0,7 bis 1,1 | 5,0 → 0,86 | 5,0 → 1,5 | 10,9 → 10,9 |
+| 100 000 | 10,0 → 2,4 | 10,0 → 2,1 | 10,1 → 3,1 | 10 → 2,1 | 10,0 → 3,3 | 21,6 → 21,8 |
+| 200 000 | 19 → 5,0 | 20 → 5,0 | 20 → 6,8 | 20 → 4,8 | 20 → 7,3 | 43,4 → 43,3 |
+
+Der Gewinn bei ruhiger Welt ist rund das Vierfache (der Scan kostet etwa 25 ns je Entity bei 200k, etwa 20 ns bei
+50k), je mehr sich ändert desto weniger, und wenn fast alles läuft (letzte Spalte, über der Schwelle) kostet es
+dasselbe wie vorher. Einzelne Ausreißer der Walk-Spalte (1,8 ms bei 50k/1 %, 5,3 bei 100k/Gruppe) sind der
+Wechsel zwischen schnellen und langsamen Kernen im Median über 7 Läufe; die Bench ist ein Verhältnis, keine
+Absolutzahl.
+
+**Echter Editor-Loop** (`scripts/he_perf_capture.py`, Metal, `/tmp/he162_scenes/ref_50000.hescene` = 50 568
+Entities, `--warmup 240 --frames 120 --no-counters --cam 0,25,90,0,-0.25`; **Bildschirm gesperrt, Akkubetrieb,
+Last 2 bis 3**, also nicht die Bedingungen von 6.5, nur zwischen den Zeilen vergleichbar), abwechselnd im
+**selben Binary** mit `HE_PROPAGATE_FULL=1` (= vorher) und ohne (= nachher), p50 je Frame:
+
+| Lauf | `Transforms::propagate` | `RenderExtractor::extract` (ein Walk) | CPU je Frame |
+|---|---|---|---|
+| vorher 1 | 14,73 ms | 31,5 ms | 64,9 ms |
+| nachher 1 | 1,35 ms | 18,5 ms | 52,1 ms |
+| vorher 2 | 15,00 ms | 31,8 ms | 64,5 ms |
+| nachher 2 | 1,39 ms | 19,1 ms | 54,1 ms |
+
+`propagateTransforms` ist im echten Loop knapp ein Elftel (15,0 → 1,4 ms), mehr als im Mikro-Bench: dort liegen
+die Entities dicht und frisch angelegt, hier hat jede Entity viele andere Komponenten und ihre `children`-Vektoren
+liegen verstreut, was den Baumabstieg teuer macht, den linearen Scan aber nicht. Der Walk im Extract sinkt
+von 31,6 auf 18,8 ms, die CPU je Frame von 64,7 auf 53,1 ms (minus 11,6 ms, minus 18 %). Die Vorher-Zeile
+sagt auch, wohin der Rest des Extracts geht: **47 % des Walks waren `propagateTransforms`**, das ist der Anteil, der in
+6.7 noch offen war. Was bleibt (18,8 ms im Walk) ist `extractMeshes` und Zubehör, nicht Transforms.
+
+### 7.8 Grenzen
+
+- **Jede Strukturänderung macht einen vollen Walk.** `structureEpoch` bewegt sich bei `createEntity`,
+  `destroyEntity`, `reparentEntity`, Geschwister umordnen, `clear`, jedem Lader und jedem Zellwechsel. Ein
+  Spiel, das jeden Frame spawnt, läuft damit wie vorher (kein Rückschritt, kein Gewinn). Feiner ginge es mit
+  einem zweiten Zähler, der nur das bewegt, was **bestehende** Entities umhängt (Reparent, Lader, Floating
+  Origin, `clear`) und Spawn/Destroy auslässt: ein neuer Eintrag wird vom Scan ohnehin gefunden, ein
+  entfernter braucht nichts. Das ist ein Eingriff in `HorizonWorld.h` (Neubau von allem) und ein Fall für
+  einen Folgeschritt, wenn die Messung zeigt, dass Spawns im Frame vorkommen.
+- **Der Scan ist O(N).** Etwa 25 ns je Entity bei 200k (DRAM-gebunden). Auf mehrere Kerne verteilt
+  (`HE::parallel_for` gibt es) wäre er ein Drittel davon; nicht gebaut: bei 50k sind es 1,3 ms von 52.
+- **Mehr als die Hälfte der Welt in Bewegung** läuft den Walk, und der kostet wie vor diesem Schritt.
+- **Mehrere Aufrufe je Frame** (Kamera-Rig bis zu dreimal, Navigation, Extractor) zahlen je einen Scan. Sie
+  waren vorher je ein voller Walk.
+- **Nicht getestet auf dieser Maschine**: Windows und Linux (Compiler: MSVC, GCC; die Bitgleichheit gilt dort,
+  wenn derselbe Quelltext dieselben Bits bildet, und genau das prüft der Vergleichstest in der CI), D3D11,
+  D3D12 und Vulkan (kein Backend-Code angefasst).
+- Wer **`worldMatrix` selbst schreibt** (außer `shiftWorldOrigin`) oder **Links von Hand umhängt** ohne
+  `noteStructureChanged`, bekommt eine alte Matrix. `HE_PROPAGATE_VERIFY=1` findet es.
+- **Vorbestehend, nicht angefasst, aber im Test sichtbar geworden**: `shiftWorldOrigin` verschiebt nur die
+  Position von Wurzelkindern **mit** `TransformComponent`. Ein Wurzelkind ohne Transform (ein Ordner aus
+  `createEntity`) bleibt, und seine Kinder erfasst die Verschiebung nur in der Weltmatrix, die der nächste Durchlauf
+  aus den unverschobenen Lokalwerten neu bildet: sie stehen danach wieder an ihrer alten lokalen Stelle, in
+  absoluten Koordinaten also um `shift` versetzt. Der alte volle Walk tat dasselbe; der neue ist bitgleich dazu und
+  erbt es. Wer Ordner unter der Wurzel mit Floating Origin nutzt, gibt ihnen ein Transform.
+- Zwei Kleinigkeiten ohne Folgen für das Ergebnis: `propagateTransformsFull` setzt `preferFull` nicht zurück (nach
+  einer Strukturänderung kostet das höchstens einen überzähligen Walk, der sich selbst korrigiert), und eine
+  Hierarchie, die an nichts hängt (Orphan), bleibt `dirty` und zählt in jedem Scan in `flagged`, ohne dass etwas
+  gerechnet wird (nur in beschädigten Szenen).
+
+### 7.9 Was für Schritt 4 und 5 daraus folgt
+
+- Schritt 5 kann **dieselbe Binary** vorher und nachher messen: `HE_PROPAGATE_FULL=1` ist der Zustand von
+  vor diesem Schritt (alle anderen Schritte bleiben an). Die Scopes `Transforms::*` weisen den Anteil aus.
+- Der Walk im Extract hat noch 18,8 ms bei 50k (6.5: 17,0 ms bei anderer Last); die nächsten Hebel liegen in
+  `extractMeshes` (RenderObject je Entity, 280 Byte), im fünffachen `FrustumCuller::cull` und in den fünf
+  Verfeinern-Schleifen der Metal-Pässe (6.7), nicht mehr in den Transforms.
+- Im Schattenpass (Schritt 4) ändert sich nichts durch diesen Schritt: die Sonnenrichtung bei Tag/Nacht hängt
+  nicht an den Transforms.
+- CI zu diesem Schritt: siehe die Hive-Meldung des Themas (Lauf auf dem Commit dieses Schritts).

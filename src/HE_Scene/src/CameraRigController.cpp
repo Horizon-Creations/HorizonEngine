@@ -406,7 +406,7 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
 
     // World matrices, so the target's world position is THIS frame's no matter
     // where in the frame the caller sits. Idempotent — the extractor propagating
-    // again later costs a walk and changes nothing.
+    // again later costs a scan of the transforms and changes nothing.
     HE::propagateTransforms(world);
 
     // ── Solve every rig, not only the one that is driving ────────────────────

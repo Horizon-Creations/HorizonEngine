@@ -165,6 +165,7 @@ add_executable(he_tests
     test_python_scripting.cpp
     test_physics.cpp
     test_world_scale.cpp
+    test_transform_propagation.cpp
     test_cell_split.cpp
     test_collision_system.cpp
     test_entity_host.cpp

@@ -1,6 +1,7 @@
 #include "HorizonScene/FloatingOrigin.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/PhysicsWorld.h"
+#include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
@@ -44,6 +45,14 @@ size_t shiftWorldOrigin(HorizonWorld& world, PhysicsWorld* physics, const glm::v
 	// propagateTransforms sees where things are now, not a kilometre off.
 	for (auto [e, tc] : reg.view<TransformComponent>().each())
 		tc.worldMatrix[3] -= glm::vec4(shift, 0.0f);
+	// That is a matrix written by hand: not the product propagateTransforms would
+	// make (the subtraction rounds differently from a fresh product, and an entity
+	// that is no root child keeps a shifted matrix its own position never agreed
+	// with). The pass only recomputes what it finds changed, and the root children's
+	// new positions are found, but the rest of the world has to be rebuilt, not
+	// trusted: the next propagateTransforms walks everything. Once per shift, which
+	// is a kilometre of travel.
+	HE::invalidateWorldMatrices(world);
 
 	if (physics) physics->shiftOrigin(shift);
 

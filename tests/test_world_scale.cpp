@@ -147,8 +147,9 @@ TEST_CASE("propagateTransforms: a moved parent carries its unchanged children, a
 
 	REQUIRE(world.reparentEntity(child, b));
 	HE::propagateTransforms(world);
-	// reparentEntity keeps the WORLD pose by rewriting the local one; either
-	// way the matrix must be B's world times the child's current local.
+	// reparentEntity leaves the local values alone, so the child's WORLD pose
+	// changes (nothing of its own moved: only structureEpoch tells propagateTransforms);
+	// the matrix must be B's world times the child's current local.
 	CHECK(sameMatrix(tf(world, child).worldMatrix,
 	                 HE::localMatrix(tf(world, b)) * HE::localMatrix(tf(world, child))));
 	CHECK(nearMatrix(tf(world, child).worldMatrix, HE::worldMatrixOf(world, child), 1e-6f));
