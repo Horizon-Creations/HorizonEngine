@@ -189,17 +189,25 @@ namespace
 	// A widget label inside the panel. The panel's own items (the card, the tab control)
 	// live in the window itself; the tab's content and the pinned brush live in two child
 	// windows, and an id is hashed against the window it was submitted in - so a label
-	// can match under any of the three.
-	struct PanelRef { const char* label; };
-	PanelRef panelId(const char* label) { return { label }; }
+	// can match under any of the three. An item inside an open TreeNode (the Mountain
+	// page's "More" group) is hashed against the node's id as well, so `inTree` names
+	// that node by its full label, "##" suffix included.
+	struct PanelRef { const char* label; const char* inTree = nullptr; };
+	PanelRef panelId(const char* label, const char* inTree = nullptr) { return { label, inTree }; }
+
+	ImGuiID refIdIn(ImGuiWindow* w, const PanelRef& ref)
+	{
+		if (!ref.inTree) return w->GetID(ref.label);
+		return ImHashStr(ref.label, 0, w->GetID(ref.inTree));
+	}
 
 	bool idMatches(ImGuiID hovered, const PanelRef& ref)
 	{
 		ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
 		REQUIRE(w != nullptr);
-		if (hovered == w->GetID(ref.label)) return true;
+		if (hovered == refIdIn(w, ref)) return true;
 		for (ImGuiWindow* c : w->DC.ChildWindows)
-			if (c && hovered == c->GetID(ref.label)) return true;
+			if (c && hovered == refIdIn(c, ref)) return true;
 		return false;
 	}
 
@@ -441,7 +449,9 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	float nx = 0.0f, ny = 0.0f;
 	CHECK_MESSAGE(locate(ctx, panelId("##mtRect"), nx, ny), "Mountain armed shows no Rectangle cell");
 	CHECK_MESSAGE(locate(ctx, panelId("##mountain_maxh"), nx, ny), "Mountain armed shows no Max Height");
-	CHECK_MESSAGE(locate(ctx, panelId("New Seed##mountain"), nx, ny), "Mountain armed shows no New Seed");
+	// New Seed sits in the page's "More" group (open by default), so its id is hashed under that node.
+	CHECK_MESSAGE(locate(ctx, panelId("New Seed##mountain", "More (Falloff, Frequency, Seed)##mountainmore"), nx, ny),
+	              "Mountain armed shows no New Seed");
 	CHECK_FALSE(locate(ctx, panelId("##radius_brush"), nx, ny));
 	{
 		he_ui::Image img;
@@ -634,9 +644,23 @@ TEST_CASE("landscape ui: the Setup tab switches the brush off, and Ctrl turns Ra
 	CHECK(extremes().first == 0.0f);
 
 	// ── Ctrl held: Raise lowers ──
-	ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
+	// The panel reads io.KeyCtrl. Under ConfigMacOSXBehaviors (the default on Apple)
+	// AddKeyEvent swaps Ctrl and Cmd, so ImGuiMod_Ctrl would arrive as Super - and
+	// Super + left click is aliased into a RIGHT click, so the drag would never be a
+	// left drag. The key that ends up as io.KeyCtrl there is ImGuiMod_Super (the Cmd
+	// key, the platform's primary modifier).
+	const ImGuiKey ctrlKey = ImGui::GetIO().ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl;
+	// The ground is already lifted by the Raise drag above and the inverted stroke is the
+	// same size the other way, so ONE Ctrl drag takes the hill back to flat; only a second
+	// one digs below zero. Asserting the dig after a single drag would be asserting that
+	// a Lower stroke is stronger than a Raise one.
+	ImGui::GetIO().AddKeyEvent(ctrlKey, true);
 	drag();
-	ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
+	viewportFrame(ctx, snap, cx, cy, false);
+	CHECK(extremes().second < 0.5f);
+	CHECK(extremes().first > -0.5f);
+	drag();
+	ImGui::GetIO().AddKeyEvent(ctrlKey, false);
 	viewportFrame(ctx, snap, cx, cy, false);
 	CHECK(extremes().first < -0.5f);
 }

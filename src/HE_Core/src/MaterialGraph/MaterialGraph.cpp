@@ -1908,6 +1908,11 @@ uint32_t matGlslTextureArrayMask(const std::string& glsl)
     return mask & ((1u << kMatMaxGraphTextures) - 1);
 }
 
+bool matGlslUsesTime(const std::string& glsl)
+{
+    return glsl.find("heLight.sunDir.w") != std::string::npos;
+}
+
 const char* matDomainName(MatDomain d)
 {
     return d == MatDomain::UserInterface ? "User Interface" : "Surface";
