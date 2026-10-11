@@ -65,6 +65,8 @@ JPH_SUPPRESS_WARNINGS
 #include "HorizonScene/Components/TerrainComponent.h"
 
 #include <glm/gtc/quaternion.hpp>
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -285,40 +287,57 @@ public:
                   { return a.entityA != b.entityA ? a.entityA < b.entityA : a.entityB < b.entityB; });
     }
 
+    // How many events one poll hands out per list (0 = all of them). What does not
+    // fit stays at the FRONT of its queue and goes out first at the next poll, in the
+    // order it would have gone out in: nothing is dropped and nothing overtakes.
+    // Set between steps, read under the lock.
+    void setLimit(uint32_t perPoll)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_limit = perPoll;
+    }
+
+    // Events still queued behind a limit: the carried-over ones, which the next
+    // poll hands out first.
+    uint32_t backlog()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return static_cast<uint32_t>(m_enteredCarry + m_exitedCarry + m_enteredOverlapCarry + m_exitedOverlapCarry);
+    }
+
+    // Events held back by a limit, summed over polls.
+    uint64_t deferredTotal()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_deferredTotal;
+    }
+
+    // An exit is never handed out ahead of an enter that is still queued: the
+    // enter of the same contact can only be in front of it, and a script that sees
+    // "stopped touching" before "started touching" is the reorder this must not do.
+    // The cost is that exits wait for the enters, which is what a backlog is.
     std::vector<PhysicsWorld::CollisionEvent> pollEntered()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<PhysicsWorld::CollisionEvent> result;
-        result.swap(m_entered);
-        sortEvents(result);
-        return result;
+        return take(m_entered, m_enteredCarry, false);
     }
 
     std::vector<PhysicsWorld::CollisionEvent> pollOverlapEntered()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<PhysicsWorld::CollisionEvent> result;
-        result.swap(m_enteredOverlap);
-        sortEvents(result);
-        return result;
+        return take(m_enteredOverlap, m_enteredOverlapCarry, false);
     }
 
     std::vector<PhysicsWorld::CollisionEvent> pollOverlapExited()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<PhysicsWorld::CollisionEvent> result;
-        result.swap(m_exitedOverlap);
-        sortEvents(result);
-        return result;
+        return take(m_exitedOverlap, m_exitedOverlapCarry, m_enteredOverlapCarry > 0);
     }
 
     std::vector<PhysicsWorld::CollisionEvent> pollExited()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<PhysicsWorld::CollisionEvent> result;
-        result.swap(m_exited);
-        sortEvents(result);
-        return result;
+        return take(m_exited, m_exitedCarry, m_enteredCarry > 0);
     }
 
     // Forget every buffered event and every tracked contact. PhysicsWorld::clear()
@@ -334,6 +353,7 @@ public:
         m_exited.clear();
         m_enteredOverlap.clear();
         m_exitedOverlap.clear();
+        m_enteredCarry = m_exitedCarry = m_enteredOverlapCarry = m_exitedOverlapCarry = 0;
     }
 
     // reset() for ONE entity — what removeEntity() needs and what clear() did to
@@ -356,17 +376,25 @@ public:
             else
                 ++it;
         }
-        const auto drop = [entityId](std::vector<PhysicsWorld::CollisionEvent>& queue) {
-            queue.erase(std::remove_if(queue.begin(), queue.end(),
-                                       [entityId](const PhysicsWorld::CollisionEvent& ev) {
-                                           return ev.entityA == entityId || ev.entityB == entityId;
-                                       }),
-                        queue.end());
+        // Keeps count of how many of the carried-over events survive, so the part of
+        // the queue that is "already sorted, goes out first" stays that part.
+        const auto drop = [entityId](std::vector<PhysicsWorld::CollisionEvent>& queue, size_t& carried) {
+            size_t kept = 0, keptCarried = 0;
+            for (size_t i = 0; i < queue.size(); ++i)
+            {
+                if (queue[i].entityA == entityId || queue[i].entityB == entityId)
+                    continue;
+                if (i < carried)
+                    ++keptCarried;
+                queue[kept++] = queue[i];
+            }
+            queue.resize(kept);
+            carried = keptCarried;
         };
-        drop(m_entered);
-        drop(m_exited);
-        drop(m_enteredOverlap);
-        drop(m_exitedOverlap);
+        drop(m_entered, m_enteredCarry);
+        drop(m_exited, m_exitedCarry);
+        drop(m_enteredOverlap, m_enteredOverlapCarry);
+        drop(m_exitedOverlap, m_exitedOverlapCarry);
     }
 
 private:
@@ -391,7 +419,40 @@ private:
         return (static_cast<uint64_t>(lo) << 32) | static_cast<uint64_t>(hi);
     }
 
+    // One poll of one queue. The first `carried` events were sorted and held back by
+    // an earlier poll and go out first; only what arrived since is sorted (by entity
+    // pair, as always), so with no limit this is exactly "swap the queue out and
+    // sort it". `hold` leaves the queue alone (an exit waiting for the enters).
+    std::vector<PhysicsWorld::CollisionEvent> take(std::vector<PhysicsWorld::CollisionEvent>& queue,
+                                                   size_t& carried, bool hold)
+    {
+        std::vector<PhysicsWorld::CollisionEvent> result;
+        if (hold)
+        {
+            // Everything in it stays; the part that arrived since is not sorted yet,
+            // but it will be when the poll that takes it comes.
+            return result;
+        }
+        std::sort(queue.begin() + static_cast<std::ptrdiff_t>(carried), queue.end(),
+                  [](const PhysicsWorld::CollisionEvent& a, const PhysicsWorld::CollisionEvent& b)
+                  { return a.entityA != b.entityA ? a.entityA < b.entityA : a.entityB < b.entityB; });
+        if (m_limit == 0 || queue.size() <= m_limit)
+        {
+            result.swap(queue);
+            carried = 0;
+            return result;
+        }
+        result.assign(queue.begin(), queue.begin() + static_cast<std::ptrdiff_t>(m_limit));
+        queue.erase(queue.begin(), queue.begin() + static_cast<std::ptrdiff_t>(m_limit));
+        carried = queue.size();
+        m_deferredTotal += queue.size();
+        return result;
+    }
+
     std::mutex m_mutex;
+    uint32_t   m_limit = 0;
+    uint64_t   m_deferredTotal = 0;
+    size_t     m_enteredCarry = 0, m_exitedCarry = 0, m_enteredOverlapCarry = 0, m_exitedOverlapCarry = 0;
     std::unordered_map<uint64_t, ActiveContact> m_active;
     // Body pairs held together by a joint whose collideConnected is false.
     // Keyed the same way m_active is, so a recycled body slot cannot inherit an
@@ -612,6 +673,24 @@ struct PhysicsWorld::Impl
     std::vector<std::pair<uint32_t, JPH::BodyID>> stepBodies;   // entity, its body
     std::vector<uint32_t>                         stepCharacters;
 
+    // ── Time budget (Thema 178 step 3) ────────────────────────────────────────
+    // See HE::PhysicsBudgetConfig. The budget is spent on the work around Update():
+    // what queries and body work charged since the previous step comes off first,
+    // the characters take the rest.
+    HE::PhysicsBudgetConfig budget;
+    HE::PhysicsBudgetStats  budgetStats;
+    // Scene queries and body add/remove charge here from wherever they run (a
+    // query may come from a job), the step takes the sums.
+    std::atomic<int64_t>    queryNs{0};
+    std::atomic<uint32_t>   queryCount{0};
+    std::atomic<int64_t>    bodyNs{0};
+    // Body work nests (addEntities → addEntity, removeEntityTree → removeEntityImpl);
+    // only the outermost call charges. Game thread only, like every writer.
+    int                     bodyWorkDepth = 0;
+    // The time a character that was put off still owes (steppedDt), by entity.
+    // Absent = nothing owed. Only the step writes it; removeEntity erases.
+    std::unordered_map<uint32_t, float> characterOwed;
+
     // ── Region hold (setRegionHold) ──────────────────────────────────────────
     // The test the application gave, or empty.
     PhysicsWorld::HoldTest holdTest;
@@ -685,6 +764,10 @@ struct PhysicsWorld::Impl
         threads = HE::PhysicsTuning::resolveThreads(0, HE::PhysicsTuning::threadsFromEnv(),
                                                     std::thread::hardware_concurrency());
         jobSystem.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threads - 1);
+        // The time budget: the default, unless the environment pins it; the project's
+        // setting arrives through setBudget, like the thread count.
+        budget.frameMs = HE::PhysicsBudgetRules::resolveFrameMs(
+            budget.frameMs, HE::PhysicsBudgetRules::frameMsFromEnv());
         physicsSystem.Init(
             kMaxBodies,
             0,      // num body mutexes (0 = auto)
@@ -711,6 +794,80 @@ struct PhysicsWorld::BodyBatch
 {
     std::vector<JPH::BodyID> ids;
 };
+
+// ─── Time budget: charging the work around Update() ───────────────────────────
+namespace {
+
+using BudgetClock = std::chrono::steady_clock;
+
+// The newest step's numbers from ANY world, for the profiler panel (which has no
+// handle on the world). Written once per step, read by the UI thread.
+std::mutex             g_publishedMutex;
+HE::PhysicsBudgetStats g_published;
+
+void publishBudgetStats(const HE::PhysicsBudgetStats& stats)
+{
+    std::lock_guard<std::mutex> lock(g_publishedMutex);
+    g_published = stats;
+}
+
+int64_t nsSince(BudgetClock::time_point from)
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(BudgetClock::now() - from).count();
+}
+
+thread_local int t_queryDepth = 0;
+
+// Charges the scene query it lives in to the budget (and counts it). Queries are
+// synchronous - a script wants the answer on this line - so they cannot be put off;
+// they come off the characters' share of the budget in the next step instead. Nested
+// queries (a query that calls another) charge once. Templated on the world's private
+// Impl only so that this file-level class does not have to name it.
+template <class ImplT>
+class QueryCharge
+{
+public:
+    explicit QueryCharge(ImplT* impl) : m_impl(impl), m_outer(t_queryDepth++ == 0), m_start(BudgetClock::now()) {}
+    ~QueryCharge()
+    {
+        --t_queryDepth;
+        if (!m_impl || !m_outer)
+            return;
+        m_impl->queryNs.fetch_add(nsSince(m_start), std::memory_order_relaxed);
+        m_impl->queryCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    QueryCharge(const QueryCharge&)            = delete;
+    QueryCharge& operator=(const QueryCharge&) = delete;
+private:
+    ImplT*                  m_impl;
+    bool                    m_outer;
+    BudgetClock::time_point m_start;
+};
+
+// The same for the bodies a streamed cell adds and removes. Game thread only (every
+// writer of the body tables is), so the nesting depth needs no atomics.
+template <class ImplT>
+class BodyWorkCharge
+{
+public:
+    explicit BodyWorkCharge(ImplT* impl) : m_impl(impl), m_outer(impl && impl->bodyWorkDepth++ == 0), m_start(BudgetClock::now()) {}
+    ~BodyWorkCharge()
+    {
+        if (!m_impl)
+            return;
+        --m_impl->bodyWorkDepth;
+        if (m_outer)
+            m_impl->bodyNs.fetch_add(nsSince(m_start), std::memory_order_relaxed);
+    }
+    BodyWorkCharge(const BodyWorkCharge&)            = delete;
+    BodyWorkCharge& operator=(const BodyWorkCharge&) = delete;
+private:
+    ImplT*                  m_impl;
+    bool                    m_outer;
+    BudgetClock::time_point m_start;
+};
+
+} // namespace
 
 // ─── World space ──────────────────────────────────────────────────────────────
 namespace {
@@ -1338,6 +1495,37 @@ int PhysicsWorld::threadCount() const
 PhysicsWorld::StepStats PhysicsWorld::stepStats() const
 {
     return m_impl ? m_impl->stats : StepStats{};
+}
+
+void PhysicsWorld::setBudget(const HE::PhysicsBudgetConfig& config)
+{
+    if (!m_impl)
+        return;
+    HE::PhysicsBudgetConfig resolved = config;
+    // The environment wins over whatever the application asks for (a benchmark or a
+    // bug report pins it), 0 meaning "no budget".
+    resolved.frameMs = HE::PhysicsBudgetRules::resolveFrameMs(
+        config.frameMs, HE::PhysicsBudgetRules::frameMsFromEnv());
+    m_impl->budget = resolved;
+    m_impl->contactListener.setLimit(resolved.eventsPerPoll);
+    if (resolved.frameMs <= 0.0)
+        m_impl->characterOwed.clear();   // no budget: nobody owes anything
+}
+
+HE::PhysicsBudgetConfig PhysicsWorld::budget() const
+{
+    return m_impl ? m_impl->budget : HE::PhysicsBudgetConfig{};
+}
+
+HE::PhysicsBudgetStats PhysicsWorld::budgetStats() const
+{
+    return m_impl ? m_impl->budgetStats : HE::PhysicsBudgetStats{};
+}
+
+HE::PhysicsBudgetStats PhysicsWorld::lastBudgetStats()
+{
+    std::lock_guard<std::mutex> lock(g_publishedMutex);
+    return g_published;
 }
 
 HE::PhysicsLimits PhysicsWorld::limits() const
@@ -2209,6 +2397,7 @@ void PhysicsWorld::initialize(HorizonWorld& world)
 
 bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
 {
+    BodyWorkCharge bodyCharge(m_impl.get());
     if (!m_impl)
         return false;
 
@@ -2260,6 +2449,7 @@ bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
 
 int PhysicsWorld::addEntities(HorizonWorld& world, const std::vector<uint32_t>& entityIds)
 {
+    BodyWorkCharge bodyCharge(m_impl.get());
     if (!m_impl || entityIds.empty())
         return 0;
 
@@ -2372,6 +2562,7 @@ void PhysicsWorld::removeEntity(uint32_t entityId)
 
 void PhysicsWorld::removeEntityImpl(uint32_t entityId, JointFate fate)
 {
+    BodyWorkCharge bodyCharge(m_impl.get());
     if (!m_impl)
         return;
     destroyBodyFor(entityId, fate);
@@ -2381,10 +2572,12 @@ void PhysicsWorld::removeEntityImpl(uint32_t entityId, JointFate fate)
     m_impl->entityToCharacter.erase(entityId);
     m_impl->characterLayer.erase(entityId);
     m_impl->heldCharacters.erase(entityId);
+    m_impl->characterOwed.erase(entityId);
 }
 
 int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId, bool requeueJoints)
 {
+    BodyWorkCharge bodyCharge(m_impl.get());
     if (!m_impl)
         return 0;
 
@@ -3081,6 +3274,40 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     for (const auto& entry : m_impl->entityToCharacter)
         m_impl->stepCharacters.push_back(entry.first);
 
+    // The time budget (HE::PhysicsBudgetConfig). Scene queries and the body work of
+    // streaming have been charging since the previous step; what is left is the
+    // characters'. With no budget (0) none of this runs and every character is
+    // stepped exactly as before.
+    const auto msSince = [](BudgetClock::time_point from)
+    {
+        return std::chrono::duration<double, std::milli>(BudgetClock::now() - from).count();
+    };
+    const double budgetMs   = m_impl->budget.frameMs;
+    const bool   budgeted   = budgetMs > 0.0;
+    const double queriesMs  = static_cast<double>(m_impl->queryNs.exchange(0)) * 1.0e-6;
+    const double bodiesMs   = static_cast<double>(m_impl->bodyNs.exchange(0)) * 1.0e-6;
+    const uint32_t queryCount = m_impl->queryCount.exchange(0);
+    const double chargedMs  = queriesMs + bodiesMs;
+    const auto   charactersFrom = BudgetClock::now();
+    uint32_t     stepped = 0, deferred = 0;
+
+    if (budgeted)
+    {
+        // The ones that were put off go first, longest wait first (entity id breaks a
+        // tie, so the order never depends on the hash map): every character is stepped
+        // within ceil(characters / stepped per step) steps whatever the budget.
+        auto& owedOf = m_impl->characterOwed;
+        std::stable_sort(m_impl->stepCharacters.begin(), m_impl->stepCharacters.end(),
+                         [&owedOf](uint32_t a, uint32_t b)
+                         {
+                             const auto ia = owedOf.find(a), ib = owedOf.find(b);
+                             const float oa = ia != owedOf.end() ? ia->second : 0.0f;
+                             const float ob = ib != owedOf.end() ? ib->second : 0.0f;
+                             if (oa != ob) return oa > ob;
+                             return oa > 0.0f && a < b;
+                         });
+    }
+
     for (const uint32_t entityId : m_impl->stepCharacters)
     {
         const auto characterIt = m_impl->entityToCharacter.find(entityId);
@@ -3119,12 +3346,36 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
             m_impl->heldCharacters.erase(entityId);
         }
 
+        // Over the budget: this character waits, and is stepped later with the time it
+        // missed (cdt below), so it covers the same distance and falls the same way,
+        // only later. The first kGuaranteedCharacters are always stepped, so a budget
+        // smaller than one ExtendedUpdate still makes progress and a small scene never
+        // sees a deferral; the ones that waited longest are first in the next step
+        // (sorted above). What a character may owe is
+        // capped (PhysicsBudgetRules::kMaxOwedSteps): a crowd the budget can never
+        // keep up with slows down instead of stepping with an enormous dt.
+        float cdt = dt;
+        if (budgeted)
+        {
+            float& owed = m_impl->characterOwed[entityId];
+            if (stepped >= HE::PhysicsBudgetRules::kGuaranteedCharacters &&
+                chargedMs + msSince(charactersFrom) >= budgetMs)
+            {
+                owed = HE::PhysicsBudgetRules::carryOwed(owed, dt);
+                ++deferred;
+                continue;
+            }
+            cdt  = HE::PhysicsBudgetRules::steppedDt(dt, owed);
+            owed = 0.0f;
+        }
+        ++stepped;
+
         // Use Jolt character's current velocity so setCharacterVelocity() takes effect.
         // cc->velocity is an output field — game code drives velocity via setCharacterVelocity.
         float grav = cc->gravity;
         JPH::Vec3 vel = character->GetLinearVelocity();
         if (!character->IsSupported())
-            vel.SetY(vel.GetY() - grav * dt);
+            vel.SetY(vel.GetY() - grav * cdt);
         character->SetLinearVelocity(vel);
 
         JPH::Vec3 gravity(0.0f, -grav, 0.0f);
@@ -3149,7 +3400,7 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         const CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter,
                                        m_impl->characterLayerOf(entityId));
 
-        character->ExtendedUpdate(dt, gravity, euSettings,
+        character->ExtendedUpdate(cdt, gravity, euSettings,
             filters.bp, filters.ol, selfFilter, filters.shape,
             m_impl->tempAllocator);
 
@@ -3173,7 +3424,7 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
         // The coyote credit, in SIMULATED time: it accrues per fixed step, so it
         // measures the same grace whatever the frame rate. Landing restores it.
-        cc->airTime = cc->isGrounded ? 0.0f : cc->airTime + dt;
+        cc->airTime = cc->isGrounded ? 0.0f : cc->airTime + cdt;
 
         // ── Drag the collision proxy along ───────────────────────────────────
         // A character usually carries BOTH a CharacterVirtual (what moves) and a
@@ -3199,8 +3450,37 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
             const glm::quat q = worldPoseOf(world, entity).rotation;
             bodyInterface.MoveKinematic(bodyIt->second,
                 JPH::RVec3(worldPos.x, worldPos.y, worldPos.z),
-                JPH::Quat(q.x, q.y, q.z, q.w), dt);
+                JPH::Quat(q.x, q.y, q.z, q.w), cdt);
         }
+    }
+
+    // ── What the budget did, for the profiler (PhysicsWorld::budgetStats) ───────
+    {
+        HE::PhysicsBudgetStats& bs = m_impl->budgetStats;
+        const double charactersMs = msSince(charactersFrom);
+        bs.budgetMs           = budgeted ? budgetMs : 0.0;
+        bs.charactersMs       = charactersMs;
+        bs.queriesMs          = queriesMs;
+        bs.bodiesMs           = bodiesMs;
+        bs.usedMs             = chargedMs + charactersMs;
+        bs.queries            = queryCount;
+        bs.characters         = static_cast<uint32_t>(m_impl->stepCharacters.size());
+        bs.charactersStepped  = stepped;
+        bs.charactersDeferred = deferred;
+        bs.eventsBacklog      = m_impl->contactListener.backlog();
+        bs.eventsDeferred     = m_impl->contactListener.deferredTotal();
+        uint32_t waited = 0;
+        for (const auto& [id, owed] : m_impl->characterOwed)
+            waited = std::max(waited, HE::PhysicsBudgetRules::waitedSteps(owed, dt));
+        bs.maxOwedSteps = waited;
+        if (budgeted)
+        {
+            ++bs.steps;
+            bs.deferredCharacterSteps += deferred;
+            if (deferred > 0 || bs.usedMs >= budgetMs)
+                ++bs.overBudgetSteps;
+        }
+        publishBudgetStats(bs);
     }
 }
 
@@ -3558,6 +3838,7 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     RaycastHit result;
     if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
         return result;
@@ -3621,6 +3902,7 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
         return {};
 
@@ -3638,6 +3920,7 @@ PhysicsWorld::RaycastHit PhysicsWorld::boxCast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized ||
         halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
         return {};
@@ -3662,6 +3945,7 @@ PhysicsWorld::RaycastHit PhysicsWorld::capsuleCast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
         return {};
 
@@ -3681,6 +3965,7 @@ std::vector<uint32_t> PhysicsWorld::overlapSphere(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
         return {};
 
@@ -3697,6 +3982,7 @@ std::vector<uint32_t> PhysicsWorld::overlapBox(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized ||
         halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
         return {};
@@ -3718,6 +4004,7 @@ std::vector<uint32_t> PhysicsWorld::overlapCapsule(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
         return {};
 
@@ -3737,6 +4024,7 @@ std::vector<PhysicsWorld::RaycastHit> PhysicsWorld::raycastAll(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     std::vector<RaycastHit> hits;
     if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
         return hits;

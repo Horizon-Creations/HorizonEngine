@@ -4308,6 +4308,25 @@ namespace
 	  "Saved to Config/ProjectSettings.json; the editor's Play and the exported "
 	  "build read the same value.",
 	  "", "systems#physics" },
+	{ "Physics/Physics budget", "Physics budget",
+	  "How many milliseconds one simulation step may spend on the work around the "
+	  "physics engine itself: the character controllers' update, scene queries "
+	  "(raycasts, sweeps, overlaps) and adding or removing the bodies of streamed "
+	  "cells. It does not limit the simulation: the fixed rate and the physics "
+	  "threads do that.\n\n"
+	  "When the budget is spent, the characters that have not been updated yet "
+	  "wait for the next step and are then updated with the time they missed, so "
+	  "they walk and fall the same distance, a step or two later. The ones that "
+	  "waited longest go first. The first 32 characters are always updated, so "
+	  "an ordinary game never notices the budget; it is there for crowds. Scene "
+	  "queries and streaming cannot wait (a script wants its answer now), so "
+	  "they are counted against the budget and leave less for the characters.\n\n"
+	  "Off applies no limit. What the budget spent and put off is shown in the "
+	  "Performance Profiler under Overview, Physics budget. The environment "
+	  "variable HE_PHYSICS_BUDGET_MS overrides this for one run.\n\n"
+	  "Saved to Config/ProjectSettings.json; the editor's Play and the exported "
+	  "build read the same value.",
+	  "", "systems#physics" },
 	{ "Physics/Gravity", "Gravity",
 	  "The acceleration every rigid body is under, in metres per second squared "
 	  "along X, Y and Z. Earth is 0, −9.81, 0. A character controller falls by "
