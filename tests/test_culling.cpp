@@ -3367,6 +3367,126 @@ TEST_CASE("Vulkan and Metal record a frame inside one extractor FrameScope (Them
 	}
 }
 
+TEST_CASE("The frame is walked before the shadow pass, through the function the pass itself calls (Thema 162, Schritt 4)")
+{
+	// The shadow pass used to be the first extract of a Metal or Vulkan frame, so it paid the one
+	// full walk and the profiler booked the biggest cost of the frame under it. The walk is now the
+	// frame's: one call just before the pass (MetalRenderer::ExtractFrame, VulkanRenderer::extractFrame),
+	// and the pass's own extract() is the key check that m_renderWorld holds that walk at the pass's
+	// aspect. That only stays a key check while both calls push the same inputs: a setter that differs
+	// (the shadow settings, the content manager, the day-night state) makes the pass a SECOND full walk,
+	// which no image test, no unit test of the extractor and no lavapipe job can see. So both calls go
+	// through one function, and the pass pushes and extracts nothing by itself. D3D11, D3D12 and
+	// OpenGL extract once per frame in DrawScene and run their shadow pass off that result.
+	// No GPU under ctest, so this pins the source.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - frame-walk pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const auto bodyOf = [](const std::string& src, const char* signature) {
+		const size_t fn = src.find(signature);
+		REQUIRE_MESSAGE(fn != std::string::npos, signature);
+		const size_t fnEnd = src.find("\n}\n", fn);
+		REQUIRE_MESSAGE(fnEnd != std::string::npos, signature);
+		return src.substr(fn, fnEnd - fn);
+	};
+	const auto count = [](const std::string& hay, const char* needle) {
+		size_t n = 0;
+		for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+		return n;
+	};
+	// What the shadow pass must not do itself: every one of these goes through the helper.
+	const auto passPushesNothing = [&](const std::string& pass, const char* helper, const char* what) {
+		CHECK_MESSAGE(pass.find(helper) != std::string::npos, std::string(what), " does not call ", std::string(helper));
+		for (const char* own : { "m_extractor.extract(", "m_extractor.setDayNight(",
+		                         "m_extractor.setContentManager(", "m_extractor.setShadowSettings(" })
+			CHECK_MESSAGE(pass.find(own) == std::string::npos, std::string(what), " calls ", std::string(own), " on its own");
+	};
+
+	// Metal: the walk sits in EncodeFrame, after the FrameScope and before the pass; the helper pushes
+	// this frame's sun and the content manager and then walks.
+	{
+		const std::string mtl = stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm"));
+		REQUIRE(!mtl.empty());
+		const std::string frame = bodyOf(mtl, "void MetalRenderer::EncodeFrame(");
+		const size_t scope = frame.find("RenderExtractor::FrameScope");
+		const size_t walk  = frame.find("ExtractFrame(");
+		const size_t bound = frame.find("RefineObjectBounds();");
+		const size_t pass  = frame.find("EncodeShadowMap(");
+		REQUIRE(scope != std::string::npos);
+		REQUIRE_MESSAGE(walk != std::string::npos, "MetalRenderer::EncodeFrame takes no frame walk");
+		REQUIRE_MESSAGE(bound != std::string::npos, "MetalRenderer::EncodeFrame refines no bounds before its first pass");
+		REQUIRE(pass != std::string::npos);
+		CHECK(scope < walk);
+		CHECK_MESSAGE(walk < pass, "the frame's walk comes after the shadow pass");
+		CHECK_MESSAGE(walk < bound, "the bounds are refined before the walk exists");
+		CHECK_MESSAGE(bound < pass, "the bounds are refined after the shadow pass");
+		CHECK(count(frame, "ExtractFrame(") == 1);
+
+		const std::string helper = bodyOf(mtl, "void MetalRenderer::ExtractFrame(");
+		const size_t sun = helper.find("m_extractor.setDayNight(");
+		const size_t cm  = helper.find("m_extractor.setContentManager(");
+		const size_t ex  = helper.find("m_extractor.extract(");
+		REQUIRE(sun != std::string::npos);
+		REQUIRE(cm != std::string::npos);
+		REQUIRE(ex != std::string::npos);
+		CHECK(sun < cm);
+		CHECK(cm < ex);
+
+		passPushesNothing(bodyOf(mtl, "void MetalRenderer::EncodeShadowMap("), "ExtractFrame(",
+		                  "MetalRenderer::EncodeShadowMap");
+	}
+
+	// Vulkan: the same at the two places that record a frame (Render() without a viewport,
+	// DrawViewportFrame). The sun is pushed once at the top of Render()/RenderSceneImage() (the
+	// pin above), so the helper pushes the shadow settings and the content manager only.
+	{
+		const std::string vk = stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp"));
+		REQUIRE(!vk.empty());
+		for (const char* sig : { "void VulkanRenderer::Render()", "void VulkanRenderer::DrawViewportFrame(" })
+		{
+			const std::string body = bodyOf(vk, sig);
+			const size_t walk  = body.find("extractFrame(");
+			const size_t bound = body.find("refineObjectBounds();");
+			const size_t pass  = body.find("EncodeShadowMap(");
+			REQUIRE_MESSAGE(walk != std::string::npos, std::string(sig), " takes no frame walk");
+			REQUIRE_MESSAGE(bound != std::string::npos, std::string(sig), " refines no bounds before its first pass");
+			REQUIRE_MESSAGE(pass != std::string::npos, std::string(sig));
+			CHECK_MESSAGE(walk < pass, std::string(sig), " walks after the shadow pass");
+			CHECK_MESSAGE(walk < bound, std::string(sig), " refines the bounds before the walk exists");
+			CHECK_MESSAGE(bound < pass, std::string(sig), " refines the bounds after the shadow pass");
+			CHECK_MESSAGE(count(body, "extractFrame(") == 1, std::string(sig));
+		}
+		const std::string helper = bodyOf(vk, "void VulkanRenderer::extractFrame(");
+		const size_t shadow = helper.find("m_extractor.setShadowSettings(");
+		const size_t cm     = helper.find("m_extractor.setContentManager(");
+		const size_t ex     = helper.find("m_extractor.extract(");
+		REQUIRE(shadow != std::string::npos);
+		REQUIRE(cm != std::string::npos);
+		REQUIRE(ex != std::string::npos);
+		CHECK(shadow < cm);
+		CHECK(cm < ex);
+		CHECK_MESSAGE(helper.find("setDayNight(") == std::string::npos,
+		              "the sun has one source in Vulkan: the top of Render()/RenderSceneImage()");
+
+		passPushesNothing(bodyOf(vk, "void VulkanRenderer::EncodeShadowMap("), "extractFrame(",
+		                  "VulkanRenderer::EncodeShadowMap");
+	}
+
+	// D3D11, D3D12, OpenGL: exactly one walk site per frame (OpenGL's previewExtractor is another
+	// extractor, for thumbnails), so their shadow pass has none of its own.
+	for (const char* file : { "D3D11/D3D11Renderer.cpp", "D3D12/D3D12Renderer.cpp", "OpenGL/OpenGLRenderer.cpp" })
+	{
+		const std::string src = stripLineComments(readFile(be / file));
+		REQUIRE_MESSAGE(!src.empty(), std::string(file));
+		CHECK_MESSAGE(count(src, "m_extractor.extract(") == 1, std::string(file), " extracts more than once per frame");
+	}
+}
+
 TEST_CASE("GI instances get their material colour before the acceleration update (Thema 154)")
 {
 	// The extractor leaves RenderObject::baseColor white; resolveWorldMaterialScalars

@@ -400,8 +400,9 @@ bitgenau), D3D11/D3D12/Vulkan (kein Gerät) und echte Spielinhalte (Skinned, Par
   Verfeinern ist idempotent, nichts bricht; der Text gehört mit den fünf Schleifen zusammen in Schritt 4.
 - **Schritt 5**: Die Leiter fährt gegen diesen Stand; der Zähler-Zeuge ist `RenderExtractor::extract`
   gegen `RenderExtractor::reuse` je Frame (`scripts/perf/dump_scope_p50.py`), erwartet (3, 2) auf Metal
-  im Forward-Frame. Die Bench `Extraction bench: the frame copy against the walk it saves` lässt sich
-  mit `--no-skip` wiederholen.
+  im Forward-Frame (**seit Schritt 4: (4, 3)**, siehe 8.5: der Frame nimmt den Walk, der Schattenpass
+  behält seinen Aufruf als Schlüsselvergleich). Die Bench `Extraction bench: the frame copy against the
+  walk it saves` lässt sich mit `--no-skip` wiederholen.
 
 ---
 
@@ -639,3 +640,230 @@ sagt auch, wohin der Rest des Extracts geht: **47 % des Walks waren `propagateTr
 - Im Schattenpass (Schritt 4) ändert sich nichts durch diesen Schritt: die Sonnenrichtung bei Tag/Nacht hängt
   nicht an den Transforms.
 - CI zu diesem Schritt: siehe die Hive-Meldung des Themas (Lauf auf dem Commit dieses Schritts).
+
+---
+
+## 8. Schritt 4: Der Schattenpass liest den Frame-Zustand (11.10.2026)
+
+Stand: Zweig auf `7cb9a18d` (Merge von `origin/release/0.7.0` in `9a890ca6`, Schritt 3; der Merge brachte nur
+Editor-Code, `.heproj`-Registrierung). Die CI auf `9a890ca6` ist grün (Läufe `38095347474`, `38088649573`,
+`38088642698`).
+
+### 8.1 Was der Schattenpass vorher tat
+
+Auf Metal und Vulkan war `EncodeShadowMap` der erste Pass eines Frames und rief selbst `setDayNight`,
+`setContentManager` (Vulkan zusätzlich `setShadowSettings`) und `extract()` auf. Er zahlte deshalb den einen vollen
+Walk des Frames, und der Profiler buchte ihn unter `Metal::EncodeShadowMap`: die "35 ms `EncodeShadowMap` (den
+Extract eingerechnet)" aus 153 §11.3 sind im Kern der Walk, der Pass selbst ist der Rest (6.5: 3,8 ms bei 50k,
+unten 8.5: 25,0 ms mit Walk und Verfeinern, 2,7 ms ohne beides). Danach lief jeder Pass seine eigene Schleife über
+alle Objekte, die deren Grenzen aus dem echten Mesh verfeinert (`RenderObject::refineWorldBounds`): drei auf Metal
+(Schatten, SSAO, Szene), bis zu fünf auf Vulkan (Decal-Tiefe, Kaskaden, Szene, GI, SSAO). Das sind die "fünf
+Verfeinern-Schleifen", die 6.7 für diesen Schritt vorgemerkt hatte, und sie sind der größte Posten außerhalb des
+Walks: **3,5 ms je Lauf bei 50k Entities, 10,6 ms je Frame, ein Fünftel der CPU-Zeit** (gemessen mit eigenem Scope,
+8.5).
+
+D3D11, D3D12 und OpenGL extrahieren einmal je Frame in `DrawScene` und lassen ihren Schattenpass `m_renderWorld`
+lesen (2.3): für den Schattenpass gab es dort nichts umzustellen. Sie verfeinern weiter je Pass (ein bis zwei
+Stellen), also nicht mehrfach je Frame, und sind unverändert.
+
+### 8.2 Was gebaut ist
+
+Zwei Änderungen, beide auf Metal und Vulkan:
+
+| Stelle | Änderung | Wirkung |
+|---|---|---|
+| `MetalRenderer::ExtractFrame(aspect)` (neu), `EncodeFrame` | Der Frame nimmt den Walk, bevor der erste Pass läuft: Sonne (`GetEnvironment()`), ContentManager, `extract()`. Eigener Profiler-Scope `Metal::ExtractFrame`. | Der Walk gehört dem Frame, nicht dem Pass; das Profil trennt beides |
+| `VulkanRenderer::extractFrame(aspect)` (neu) | Dasselbe an den zwei Stellen, die einen Frame aufzeichnen (`Render()` ohne Viewport, `DrawViewportFrame`): Schatten-Einstellungen, ContentManager, `extract()`. Die Sonne bleibt einmal oben in `Render()`/`RenderSceneImage()` (Pin: genau zwei `setDayNight`). | Textpatch, nur die CI belegt mehr (8.6) |
+| `MetalRenderer::RefineObjectBounds()`, `VulkanRenderer::refineObjectBounds()` (neu) | Die Verfeinern-Schleife läuft **einmal je Walk**: der Helfer merkt sich `RenderExtractor::fullExtractCount()` sowie Objektfeld und Größe und kehrt zurück, wenn beides passt. Der Frame ruft ihn direkt nach dem Walk, die Pass-Schleifen sind Aufrufe desselben Helfers (Metal 5, Vulkan 5). | Metal: zwei von drei Läufen entfallen; Vulkan: vier von fünf |
+| `EditorApplication.cpp` | `HE_DUMP_DAYNIGHT=0` schaltet im Headless-Dump den Zyklus aus (Standard an, wie immer) | Zeuge für die Zyklus-aus-Seite |
+| `scripts/perf/frame_pixel_ab.sh` | dritter Parameter `frame\|shadow\|all`, neuer Satz `shadow` mit 26 Zeugen | 8.5 |
+| `scripts/perf/ladder_table.py` | Spalten `Metal::ExtractFrame` und `Metal::RefineBounds` | Schritt 5 liest den Walk dort |
+| `scripts/he_shot.py` | `DAYNIGHT` und `SHADOW` im Kopf dokumentiert | |
+| Kommentare | `EnsureGIProbeGrid` (der in 6.7 gemerkte Kommentar, der von einem Re-Extract sprach), Wolken-Schatten und Sky-View-LUT in `EncodeFrame` | |
+
+### 8.3 Warum der Aufruf im Pass bleibt, und warum es eine Funktion ist
+
+Wie in 6.1: jeder Pass sichert sich selbst ab, dass `m_renderWorld` den Walk mit **seinem Aspekt** hält, egal was
+vor ihm lief. Der `extract()`-Aufruf im Schattenpass ist deshalb nicht weg, sondern ein Schlüsselvergleich (Metal
+`ExtractFrame(aspect)` im Pass, Vulkan `extractFrame(aspect)`), und `RefineObjectBounds()` im Pass findet die Grenzen
+fertig. Auch der Schattenpass kehrt weiter früh zurück, wenn es nichts zu zeichnen gibt (keine Sonne und kein
+Lokalschatten): der Frame hat den Walk dann trotzdem genommen, wie es vorher der nächste Pass getan hätte.
+
+Das hat eine Falle, die kein Bildtest sieht: der zweite Aufruf bleibt nur dann ein Schlüsselvergleich, wenn er genau
+das pusht, was der erste gepusht hat. Ein Setter, der abweicht (Schatten-Einstellungen, ContentManager, Sonne), macht
+den Pass zu einem **zweiten vollen Walk**: dasselbe Bild, gut 18 ms mehr bei 50k, weder Pixel-A/B noch lavapipe noch
+ein Test des Extractors sehen es. Darum gehen Frame und Pass durch dieselbe Funktion, der Pass pusht nichts selbst,
+und ein Quelltext-Pin hält das fest (8.5). Der Zähler-Zeuge im Betrieb ist `RenderExtractor::extract` gegen
+`RenderExtractor::reuse` je Frame: ein Walk je Frame heißt (4, 3), jeder zusätzliche Walk wäre (5, 3) mit einem
+zweiten großen Eintrag.
+
+### 8.4 Die Sonderfälle
+
+**Day/Night.** Mit dem Zyklus an ändert sich die Sonnenrichtung jeden Frame, und das ist unabhängig davon, was an
+den Entities dirty ist. Sonne, Mond, Farben, Stärken, Bewölkung und `dayNight` selbst sind Teil des
+`FrameKey` (`timeOfDay` und die anderen), ein Walk mit einer anderen Sonne kann also nie als Antwort auf einen
+anderen dienen. Metal schiebt `GetEnvironment()` im Helfer vor jedem Walk, Vulkan einmal oben in `Render()` und
+`RenderSceneImage()`, vor dem ersten Extract. Schritt 3 berührt weder Lichter noch Sonne (7.9), und das ist hier
+belegt statt nur behauptet:
+
+- Einheitstest `a frame as the backends record it is one walk with that frame's sun, night to night`: sieben
+  Tageszeiten (Nacht, Dämmerung, Morgen, Mittag, Abend, Nacht, bei denen das Schattenlicht vom Mond zur Sonne und
+  zurück wechselt) in der Aufrufreihenfolge eines Frames (Walk, Schattenpass, SSAO bei halber Auflösung, Szene):
+  je Frame genau ein Walk (`full == Frames`, `reuse == 3 × Frames`), und der Zustand nach dem Frame ist bei beiden
+  Aspekten bitgleich zu einem frischen Walk mit derselben Tageszeit. Positivkontrolle: die Sonne und die erste
+  Kaskade bewegen sich von Frame zu Frame wirklich.
+- Zyklus aus: die Sonne bleibt auf ihrer festen Richtung, die Tageszeit wird ignoriert (Test, Bild `dn_off_*`).
+- Volle Bewölkung: Sonne und Mond gehen auf Intensität 0, `shadow.enabled` ist falsch, der Schattenpass kehrt
+  vor dem Verfeinern zurück, der Lokalatlas hat seine Schichten weiter (Test, Bild `dn_overcast_fwd`).
+- Kein Himmel: ohne Sonnenlicht in der Welt gibt es keine Kaskaden (Bild `nosky_fwd`).
+
+**Kaskaden.** Der aspektabhängige Schwanz (Projektion, Kaskaden-Fit, lokale Schichten) läuft bei SSAO an Ort und
+Stelle aus der Szenenbox des Walks (6.2) und ist in Schritt 2 für drei Kaskaden bitgleich belegt. Hier zusätzlich:
+
+- Einheitstest `the cascade settings reach every pass of the frame, and a pass that pushes others pays a walk`:
+  fünf Einstellungen (1, 2, 3 Kaskaden, Distanz 30 bis 250 m, Auflösung 512 bis 4096), je Frame ein Walk und der
+  Zustand bei beiden Aspekten bitgleich zu einem frischen Walk; jede Einstellung ist ein anderer Fit. Und die Falle
+  aus 8.3 als Test: ändert ein Pass zwischen Walk und Schlüsselvergleich die Einstellungen, kostet das genau einen
+  zusätzlichen Walk (`fullExtractCount() + 1`) und liefert die neuen Kaskaden, nicht die alten.
+- Bilder: 1, 2 und 3 Kaskaden, Auflösung 512, Lambda 1, Kamera nah, fern und mit der Zeile über der ersten Grenze
+  (3 Kaskaden über 60 m trennen bei etwa 10, 24 und 60 m), Sonne und Lokallicht zugleich in einem Schattenpass,
+  zwei Kaskaden beim ungeraden Render-Scale 0,51 (dort läuft der Schwanz zwischen Schatten- und Szenenpass).
+- Die Schatten-Einstellungen (`SetShadowSettings`): Distanz, Kaskadenzahl und Lambda gehen beim Setzen in den
+  Extractor, ein Auflösungswechsel wird am Anfang von `EncodeFrame` übernommen, vor dem ersten Extract. Alle vier
+  stehen im Schlüssel: ein Wechsel mitten im Frame wäre ein neuer Walk, nie die Kaskaden des alten.
+
+**Verfeinern einmal je Walk: die eine Grenze.** Ein Mesh, das beim Lauf der Schleife noch nicht auflösbar war, behält
+bis zum Ende des Walks die Grenze, die der Walk ihm gab, im Zweifel ungültig. Wird es zwischen dem Lauf im Frame und
+einem späteren Pass desselben Frames auflösbar (Laden im Hintergrund), hätte der alte Code es im späteren Pass
+verfeinert, der neue erst im nächsten Frame. Ein Objekt mit ungültiger Grenze wird nie gecullt, und die Zeichen-
+Schleifen lösen das Mesh selbst auf: das ist die vorsichtige Seite, ein Frame mit etwas mehr Draws am Rand, keine
+verlorenen Objekte. Das gilt nur im Zeitfenster eines einzelnen Frames.
+
+### 8.5 Belege
+
+**Bild, Metal** (`scripts/perf/frame_pixel_ab.sh`, privates `HE_CONFIG_DIR`, `HE_SKY_TIME=30`, AA aus, Render-
+Pfad explizit). Der Vorher-Stand wurde **vor dem ersten Rebuild** als selbstständige Deploy-Kopie gesichert
+(`selfcontain_deploy_copy.sh`; Beleg, welche Build eine Kopie hält: das Symbol `MetalRenderer::ExtractFrame` steht
+nur in der neuen `libHorizonRendering.dylib`). Reihenfolge der Kontrollen:
+
+1. Der Vorher-Stand reproduziert die 16 md5s aus 6.5 (Schritt 2) Byte für Byte: Schritt 3, der Merge und macOS
+   haben nichts verschoben, die Tabelle ist eine gültige Referenz.
+2. Rauschboden: die erste neue Build zweimal gefahren, beide Läufe in beiden Sätzen byte-gleich (16 von 16 und
+   26 von 26). Der Vorher-Stand ist zusätzlich durch die Tabelle aus Schritt 2 belegt (anderer Lauf, andere
+   Sitzung), und alle drei neuen Stände stimmen untereinander überein.
+3. Sensitivität: die 24 vergleichbaren Zeugen des neuen Satzes `shadow` sind 24 **verschiedene** Bilder (24 md5s),
+   und sie zeigen ihr Motiv (angesehen: Kaskadenschatten über mehrere Tiefen, lange Morgenschatten, bei voller
+   Bewölkung gar keine).
+4. Ergebnis, für alle drei Stände (nur Frame-Walk, plus Verfeinern einmal je Walk in der ersten Pass-Schleife, plus
+   Verfeinern im Frame-Schritt = der Stand dieses Commits): **16 von 16 byte-identisch zur Referenz, 24 von 24
+   vergleichbaren Zeugen des Satzes `shadow` byte-identisch zur alten Binary.** Die zwei Zeugen mit ausgeschaltetem
+   Zyklus (`dn_off_*`) gehen nicht gegen die alte Exe (sie kennt den Schalter nicht): dort steht der alte Renderer
+   in der **neuen Exe** gegen den neuen Renderer in derselben Exe, byte-identisch, mit Kontrollen (Zyklus aus bei
+   TOD 0,5 gleich TOD 0,9, Zyklus an bei TOD 0,9 ein anderes Bild).
+
+Die md5s des Satzes `shadow` (Referenz für Schritt 5, nur auf diesem Gerät und dieser macOS-Version gültig; die 16
+des Satzes `frame` stehen in 6.5):
+
+```
+dn_0_fwd           c3f894f1a9a86dc71a48f1ba0f520072    casc1_fwd         70dd8a52a51d552704ff02984a933cce
+dn_20_fwd          a8f787f0216b25c2ec76d8a4472aa836    casc2_fwd         213e4a78fe48a2b894b467a16724564f
+dn_25_fwd          08c787b3c1011b961f9795d504805e83    casc3_fwd         f09feee1d02db976fe160fcd5ff9895f
+dn_30_fwd          435272e08df94aa62f326cace95ecaff    casc3_def         cbd90d0851f6a2cee8663b67fcf599de
+dn_50_fwd          a4d726a63ac6d18f3528f71862daedd6    casc3_res512_fwd  a20ef0d3caeaaaa1b177e85a8d4e07c3
+dn_70_fwd          bde03197cb89e5aea56f151789a15312    casc3_lambda1_fwd 0417e4b606cd782115d89fc0a344978c
+dn_75_fwd          fbb540c1b9eed22b91f6392732eed041    casc3_near_fwd    4ab0dc96bd3ee458ae0941dd4ee37b1c
+dn_90_fwd          a918b0e6239d4133d4fb6cbb2ddeca3f    casc3_far_fwd     c3182f81cf4b2aa14f2767320c1c56b2
+dn_30_def          ef201f9c4c7e24a0feb63a45975448da    casc3_split_fwd   4ff07829f0bed3138d5218b2fd9e8ed3
+dn_70_def          5cd138c546e80f3d94577c733f3ff85a    ls_point_day_fwd  385de35fb6e7c4e14e68f09befd3969f
+dn_off_fwd         a11a70f2502112f5a42f167dbf23931b    ls_spot_day_def   9d1b83e8cb3224ce73d4f9a828eaa84a
+dn_off_def         2d91dff673508ddc70e6b43d326e1052    odd_casc2_fwd     4c3d0cd5318f843879366fd34d2aded5
+dn_overcast_fwd    73b9fd6f017b060c45f7525cff365b8c    nosky_fwd         be9d5dc81f95503f8c6b0cb6aec001bf
+```
+
+**Zähler und Profil, Metal, 50 568 Entities** (`scripts/he_perf_capture.py`, `ref_50000.hescene`, `--warmup 240
+--frames 120 --no-counters --cam 0,25,90,0,-0.25`, ein **Scratch-Projekt** kopiert aus dem Test-Projekt, damit
+kein Projekt des Menschen angefasst wird; Fenster **versteckt**). Bedingungen, ehrlich: **Bildschirm gesperrt,
+Akkubetrieb, Last 2 bis 4, andere Hive-Instanzen am Rechner**. Die absoluten Zahlen sind damit nicht mit 6.5 und 7.7
+vergleichbar (anderes Fenster, anderer Zustand), nur alt gegen neu **in dieser Sitzung**, abwechselnd gefahren.
+p50 je Frame in ms, in Klammern die Aufrufe je Frame:
+
+| Lauf | Stand | CPU/Frame | `extract` | `reuse` | `ExtractFrame` | `EncodeShadowMap` | `RefineBounds` | `EncodeSSAO` | `EncodeScene` | `Render` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| old1, old2 | vor Schritt 4 | 51,40; 50,15 | 19,10; 19,07 (3×) | (2×) | | 25,74; 25,34 | | 8,02; 7,90 | 7,78; 7,80 | 41,94; 41,79 |
+| old3, old4, old5 | vor Schritt 4 | 49,46; 49,58; 49,47 | 18,55; 18,64; 18,79 (3×) | (2×) | | 24,86; 24,81; 25,00 | | 7,76; 7,72; 7,75 | 7,58; 7,43; 7,53 | 40,99; 40,59; 40,97 |
+| new1, new2 | nur Frame-Walk | 49,77; 49,90 | 18,79; 18,73 (4×) | (3×) | 18,79; 18,73 | 6,33; 6,52 | | 7,95; 8,07 | 7,71; 7,78 | 41,32; 41,52 |
+| meas1 | + Scope um die Schleife | 49,39 | 18,48 (4×) | (3×) | 18,48 | 6,23 | **10,56 (3×)** | 7,68 | 7,54 | 40,82 |
+| n2a, n2b | Verfeinern einmal, im ersten Pass | 41,74; 42,36 | 18,37; 18,66 (4×) | (3×) | 18,37; 18,66 | 6,24; 6,21 | **3,48 (1×)** | 4,05; 4,09 | 4,07; 4,04 | 33,45; 34,04 |
+| n3a, n3b | **dieser Commit** | 43,15; 41,66 | 18,87; 18,56 (4×) | (3×) | 22,25; 22,06 | 2,85; 2,69 | 3,48; 3,54 (1×) | 4,11; 4,06 | 4,21; 4,10 | 34,32; 33,45 |
+
+Was die Tabelle sagt:
+
+- **Ein Walk je Frame, wie vorher.** `extract` (3 → 4) und `reuse` (2 → 3) je Frame wachsen um genau den
+  Schlüsselvergleich des Schattenpasses; die Walk-Zeit (`extract` p50, 18,4 bis 19,1 ms) bleibt, es gibt keinen
+  zweiten Walk. Die Erwartung für Schritt 5 ist damit (4, 3), nicht (3, 2) (6.7 ist angepasst).
+- **Das Profil trennt Walk und Pass.** `ExtractFrame` (18,8) plus `EncodeShadowMap` (6,3) ist der alte
+  `EncodeShadowMap` (25,3 bis 25,7). In diesem Commit steht das einzige Verfeinern (3,5) im Frame-Schritt:
+  `ExtractFrame` 22,1 bis 22,3 (Walk plus Verfeinern), `EncodeShadowMap` nur noch 2,7 bis 2,9. **Wer in Schritt 5
+  `Metal::ExtractFrame` mit dem alten `RenderExtractor::extract` vergleicht, sieht den Walk gewachsen: es ist das
+  Verfeinern.** `EncodeShadowMap` zwischen vorher und nachher nur als Summe mit `ExtractFrame` vergleichen.
+- **Verfeinern einmal je Walk spart bei 50k rund 6 bis 8 ms je Frame** (CPU/Frame 49,5 auf 41,7 bis 43,2, `Render`
+  41,0 auf 33,5 bis 34,3): SSAO und Szene sinken um je 3,5 bis 3,9 ms, ungefähr um ihre Schleife (`RefineBounds`
+  10,56 ms in drei Läufen auf 3,48 ms in einem). Die alte Binary als Gegenprobe zwischen den neuen Läufen (old5)
+  liegt wieder bei 49,5, die Verschiebung ist also kein Drift der Sitzung.
+- Die Streuung der neuen Läufe (41,7 bis 43,2) ist größer als die der alten (49,5 bis 49,6); eine Genauigkeit über
+  1 ms hinaus nehme ich daraus nicht. Die saubere Leiter bei entsperrtem Bildschirm und am Netz ist Schritt 5.
+
+**Tests, lokal** (Release, shaderc ON, frisches `HOME`, `HE_CONFIG_DIR` ungesetzt):
+
+- Neu in `tests/test_world_scale.cpp`: die drei Fälle aus 8.4 (Tageszeiten, Kaskaden-Einstellungen, Zyklus aus und
+  volle Bewölkung) und `the bounds a pass refined stay for the rest of the frame, the next walk starts unrefined`
+  (der Zähler `fullExtractCount()` bewegt sich bei einer Wiederverwendung nicht und bei jedem neuen Walk, und was
+  ein Pass in den Objekten schrieb, bleibt für den Rest des Frames: das ist die Annahme hinter "einmal je Walk").
+- Neu in `tests/test_culling.cpp`: der Quelltext-Pin `The frame is walked before the shadow pass, through the
+  function the pass itself calls`. Metal: der Walk (`ExtractFrame`) und das Verfeinern stehen in `EncodeFrame` nach
+  dem `FrameScope` und vor dem Schattenpass; der Helfer pusht Sonne, ContentManager und `extract` in dieser
+  Reihenfolge; `EncodeShadowMap` hat keinen eigenen `extract`/`setDayNight`/`setContentManager`/
+  `setShadowSettings`. Vulkan: dasselbe an den zwei Stellen, die einen Frame aufzeichnen, und der Helfer enthält
+  kein `setDayNight`. D3D11, D3D12, OpenGL: genau ein `m_extractor.extract(` je Datei (die Vorschau-Instanz in
+  OpenGL ist ein anderer Extractor).
+- `tests/test_foliage_cluster.cpp` (`Every backend refreshes bounds through RenderObject::refineWorldBounds`):
+  Metal und Vulkan haben genau eine Schleife (im Helfer) und mindestens fünf Aufrufe; die anderen drei unverändert.
+- **Negativkontrollen**: drei Mutationen am Quelltext, der Pin wurde jedes Mal rot, danach der Originalstand per
+  `cp -p` zurück (Byte-Vergleich und Zeitstempel, damit ninja nicht neu baut): ein eigener `setContentManager` im
+  Metal-Schattenpass, ein fehlendes `extractFrame` im Vulkan-Frame, ein zweiter `extract()` in D3D11.
+- ctest voll (`-j4 --timeout 1500`): **259 Tests, 259 grün, 0 rot, 2 übersprungen** (`runtime_size_app_advanced`
+  und `_basic`, für diese Plattform "reported and skipped" per Konstruktion), 297 s. Der Stand ist der Commit
+  dieses Schritts nach einem Vollbau (rc 0).
+
+### 8.6 Was nur die CI belegt
+
+- **Vulkan**: `VulkanRenderer.cpp` wird auf diesem Mac nicht kompiliert. Lokal belegt sind `clang -fsyntax-only`
+  gegen die MoltenVK-Header (Homebrew `molten-vk` 1.4.1, Flags aus dem Compile-Befehl des OpenGL-Objekts), **rc 0**,
+  mit zwei Negativkontrollen (ein vertippter Aufruf scheitert an allen fünf Stellen, ohne den MoltenVK-Include
+  scheitert es an `vulkan/vulkan.h`), und der Quelltext-Pin. Dass es unter MSVC baut, belegt der Windows-Job; ob
+  die fünf Pässe aus einem Walk und mit einmal verfeinerten Grenzen dasselbe Bild liefern, höchstens der Job
+  `vulkan-lavapipe` (Bild-A/B mit Validation). **Auf Hardware ist nichts davon gelaufen, und der Gewinn vom
+  Verfeinern (6 bis 8 ms bei 50k) ist für Metal gemessen; für Vulkan ist es dieselbe Schleife, aber ungemessen.**
+- **D3D11, D3D12**: keine Quelländerung. Beide verfeinern weiter je Pass (eine Stelle), nicht mehrfach je Frame. Der
+  Pin liest ihren Quelltext, geprüft wird nichts davon zur Laufzeit.
+- **Linux/OpenGL**: Linux-Job und `he_tests`; `RenderExtractor.h` ist in diesem Schritt **nicht** geändert.
+- **Metal** ist lokal belegt (Bild, Zähler, Profil, Tests). **Nicht im Bild abgedeckt** bleiben GI, die Wolken mit
+  halber Auflösung und der Wolken-Prepass (nicht bitgenau), Skinned, Partikel, Trails und echte Spielinhalte. Der
+  Fall "Mesh wird mitten im Frame auflösbar" (8.4) ist begründet, nicht gemessen.
+
+### 8.7 Offen, und was für Schritt 5 folgt
+
+- **Zähler-Erwartung (4, 3)** auf Metal im Forward-Frame, wie 8.5; `scripts/perf/ladder_table.py` hat die zwei neuen
+  Spalten. Die Leiter 1k/10k/50k/100k/200k vorher/nachher ist Schritt 5; `HE_PROPAGATE_FULL=1` (7.9) gibt weiter
+  den Stand von vor Schritt 3 im selben Binary, für Schritt 4 gibt es keinen Schalter (die alte Binary liegt als
+  Kopie, wer sie braucht, baut `9a890ca6`).
+- **Der Rest des Frames bei 50k** (Metal, p50): Walk 18,6 (davon `Transforms::propagate` 1,3, der Rest ist
+  `extractMeshes` und Zubehör), Verfeinern 3,5, `FrustumCuller::cull` 3,2 (fünf Läufe, drei davon die Kaskaden),
+  SSAO und Szene je 4,1, der Schattenpass selbst 2,7. Nächste Hebel, nicht gebaut: das Verfeinern selbst (70 ns
+  je Objekt, ein Hash-Lookup je Objekt; ein Merker "gleiches Mesh wie das Objekt davor" ließe die meisten
+  entfallen), die Culls aller Kaskaden in einem Lauf über die Objekte, und der Walk (`extractMeshes`, 280 Byte je
+  `RenderObject`).
+- **D3D11, D3D12, OpenGL** verfeinern weiter je Pass; da sie nur einmal je Frame extrahieren, ist das ein Lauf je Frame
+  und kein Fund.
+- Vorbestehend, nicht angefasst: der Kommentar in Vulkans `runGi` ("this extraction throws away DrawScene's resolve")
+  beschreibt den Zustand vor Schritt 2; die Auflösung der Materialwerte ist idempotent, es bricht nichts.

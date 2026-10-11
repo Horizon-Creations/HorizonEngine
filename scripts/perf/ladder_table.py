@@ -16,8 +16,13 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# Metal::ExtractFrame is the frame's one walk plus the refined object bounds since Thema 162 step 4:
+# before it the walk was booked under Metal::EncodeShadowMap and the bounds loop ran inside every
+# pass (Metal::RefineBounds, nested), so EncodeShadowMap, EncodeSSAO and EncodeScene only compare
+# across that change as a sum with ExtractFrame.
 SCOPES = ["RenderExtractor::extract", "Metal::EncodeScene", "Metal::EncodeSSAO",
-          "Metal::EncodeShadowMap", "Metal::Overlay", "FrustumCull", "OnRender"]
+          "Metal::EncodeShadowMap", "Metal::Overlay", "FrustumCull", "OnRender", "Metal::ExtractFrame",
+          "Metal::RefineBounds"]
 
 
 def pct(v, p):
