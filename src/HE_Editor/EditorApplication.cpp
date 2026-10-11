@@ -10109,11 +10109,16 @@ AppContext EditorApplication::makeContext()
 				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		},
 		.applyPhysicsSettings = [this]{
-			// Gravity only: the fixed rate is read from the project on every
-			// step already. Outside play mode there is no world, and the next
-			// play start reads both from the project itself.
+			// Gravity and the thread count: the fixed rate is read from the
+			// project on every step already. Outside play mode there is no
+			// world, and the next play start reads all of it from the project
+			// itself.
 			if (m_physicsWorld)
-				m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+			{
+				const auto& physics = m_projectManager.currentProject().settings.physics;
+				m_physicsWorld->setGravity(physics.gravity);
+				m_physicsWorld->setThreadCount(physics.threads);
+			}
 		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
@@ -10742,6 +10747,9 @@ void EditorApplication::setPlayMode(bool play)
 		// Same order as GameApplication::startPhysics, because a preview that
 		// falls differently from the build is not a preview.
 		m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+		// The project's thread count too (0 = automatic), for the same reason as
+		// the game: the preview should run the step the build will run.
+		m_physicsWorld->setThreadCount(m_projectManager.currentProject().settings.physics.threads);
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is

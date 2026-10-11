@@ -4,7 +4,11 @@
 #include <thread>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <unordered_set>
+#if defined(__APPLE__)
+#include <pthread.h>   // pthread_setname_np: Jolt names its workers only on Windows and Linux
+#endif
 
 JPH_SUPPRESS_WARNINGS
 
@@ -406,11 +410,26 @@ struct PhysicsWorld::Impl
     ObjectVsBPLayerFilterImpl ovbpFilter;
     ObjectLayerPairFilterImpl ooFilter;
 
+    // What Jolt's caches were sized by (see HE::PhysicsLimits). Declared before the
+    // allocator, which is sized from it.
+    const HE::PhysicsLimits      limits;
+
     // Both must outlive every Update() call — keep as members.
-    JPH::TempAllocatorImpl       tempAllocator{ 10u * 1024u * 1024u };
+    //
+    // The scratch block is sized from the caps (HE::PhysicsTuning::tempBytesFor)
+    // and falls back to the heap when a step wants more. It used to be Jolt's plain
+    // TempAllocatorImpl at a fixed 10 MB, which std::abort()s the process on
+    // overflow while the measured peak was 8.6 to 9.9 MB of it.
+    JPH::TempAllocatorImplWithMallocFallback tempAllocator;
+    std::size_t                  tempBlockBytes = 0;
     JPH::JobSystemThreadPool     jobSystem;
     JPH::PhysicsSystem           physicsSystem;
     HEContactListener            contactListener;
+
+    // Threads that take part in a step, the caller included (setThreadCount).
+    int                          threads = 1;
+    // What the steps said about themselves (stepStats()).
+    PhysicsWorld::StepStats      stats;
 
     // Entity id (cast to uint32_t) → Jolt body id
     std::unordered_map<uint32_t, JPH::BodyID> entityToBody;
@@ -590,17 +609,31 @@ struct PhysicsWorld::Impl
     // the iterator underneath it — that would be a rehash mid-loop, i.e. the
     // kind of crash that only shows up in a shipped build. Members rather than
     // locals so the per-frame allocation happens once.
-    std::vector<uint32_t> stepBodies;
-    std::vector<uint32_t> stepCharacters;
+    std::vector<std::pair<uint32_t, JPH::BodyID>> stepBodies;   // entity, its body
+    std::vector<uint32_t>                         stepCharacters;
 
     // ── Region hold (setRegionHold) ──────────────────────────────────────────
     // The test the application gave, or empty.
     PhysicsWorld::HoldTest holdTest;
+    // The cheap half of it (setRegionHold's `mayHold`), or empty: false means the
+    // test would say "no" to every position.
+    PhysicsWorld::HoldProbe holdProbe;
+    // Whether this step has to ask the test about anything. True without a probe,
+    // and whenever a body or a character is held (it may have to be let go).
+    bool holdNeeded() const
+    {
+        if (!holdTest)
+            return false;
+        if (!holdProbe || holdProbe())
+            return true;
+        return !heldBodies.empty() || !heldCharacters.empty();
+    }
     // Every DYNAMIC body, by entity: the only ones the hold is asked about. Kept
     // beside entityToBody so that the per-step pass walks the few things that can
     // fall and not all the (tens of thousands of) static ones. A character's own
-    // proxy is kinematic and is not in it.
-    std::unordered_set<uint32_t> dynamicBodies;
+    // proxy is kinematic and is not in it. The body id rides along, so the pass
+    // does not look the entity up in entityToBody once per body per step.
+    std::unordered_map<uint32_t, JPH::BodyID> dynamicBodies;
     // The ones among them that are out of Jolt's broad phase right now. They stay
     // in entityToBody, so hasPhysics() is still true for them and a rebuild or a
     // removal finds them.
@@ -608,9 +641,9 @@ struct PhysicsWorld::Impl
     // Characters that were not stepped the last time they were looked at.
     std::unordered_set<uint32_t> heldCharacters;
 
-    // Hard limits handed to Jolt below. Exceeding them makes CreateAndAddBody
-    // return an invalid id, which used to be swallowed silently — the scene then
-    // simply had objects that never fell. They are logged instead.
+    // Hard limits handed to Jolt below. Exceeding the BODY table makes
+    // CreateAndAddBody return an invalid id, which used to be swallowed silently —
+    // the scene then simply had objects that never fell. That is logged instead.
     //
     // They were 1024 each — the numbers from Jolt's HelloWorld, whose own
     // comment says a real project wants "something in the order of 65536"
@@ -618,29 +651,57 @@ struct PhysicsWorld::Impl
     // first wall a larger world hit, long before float precision
     // (docs/world-streaming-baseline-2026-10-06.md §3.6). Jolt allocates the
     // body table and broadphase up front from these, a few MB per world.
-    static constexpr uint32_t kMaxBodies             = PhysicsWorld::kMaxBodies;
-    static constexpr uint32_t kMaxBodyPairs          = 65536;
-    static constexpr uint32_t kMaxContactConstraints = 10240;
+    //
+    // The pair and constraint caps are HE::PhysicsLimits now (`limits`): a dense
+    // pile of ten thousand bodies filled the old ones in every step, and Jolt
+    // dropped contacts without a word (docs/physics-threading-baseline.md §4).
+    static constexpr uint32_t kMaxBodies = PhysicsWorld::kMaxBodies;
 
-    Impl()
+    explicit Impl(const HE::PhysicsLimits& lim)
+        : limits(lim),
+          tempAllocator(tempBlockSize(lim))
     {
-        // Jolt's own worker threads (the caller joins in too): up to four,
-        // half the cores minus one, so a step with thousands of bodies in
-        // contact is not one core's work while the engine pool sits next to
-        // it. The simulation stays deterministic whatever the count (Jolt,
-        // Docs/Architecture.md "Deterministic Simulation").
-        const int hw = static_cast<int>(std::thread::hardware_concurrency());
-        jobSystem.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::clamp(hw / 2 - 1, 0, 4));
+        tempBlockBytes = tempBlockSize(lim);
+
+        // Named, so a profiler and a thread dump can tell the Jolt workers from the
+        // engine pool and the driver threads; Jolt names its own only on Windows and
+        // Linux, and on macOS they were "(unnamed)" between Metal and SDL threads.
+        // The log name matches what the engine pool does for its workers.
+        jobSystem.SetThreadInitFunction([](int index)
+        {
+            char name[16];
+            std::snprintf(name, sizeof(name), "Jolt-%d", index);
+            HE::Log::setThreadName(name);
+#if defined(__APPLE__)
+            pthread_setname_np(name);
+#endif
+        });
+
+        // Jolt's own worker threads (the caller joins in too). The environment
+        // can pin the number from the start; the project's setting arrives later
+        // through setThreadCount, once the application has read it. Whatever the
+        // count, the simulation stays deterministic (Jolt, Docs/Architecture.md
+        // "Deterministic Simulation").
+        threads = HE::PhysicsTuning::resolveThreads(0, HE::PhysicsTuning::threadsFromEnv(),
+                                                    std::thread::hardware_concurrency());
+        jobSystem.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threads - 1);
         physicsSystem.Init(
             kMaxBodies,
             0,      // num body mutexes (0 = auto)
-            kMaxBodyPairs,
-            kMaxContactConstraints,
+            lim.maxBodyPairs,
+            lim.maxContactConstraints,
             bpLayerInterface,
             ovbpFilter,
             ooFilter
         );
         physicsSystem.SetContactListener(&contactListener);
+    }
+
+    // The scratch block for these caps, in the 32 bits Jolt's constructor takes.
+    static JPH::uint tempBlockSize(const HE::PhysicsLimits& lim)
+    {
+        const std::size_t bytes = HE::PhysicsTuning::tempBytesFor(kMaxBodies, lim.maxContactConstraints);
+        return static_cast<JPH::uint>(std::min<std::size_t>(bytes, 0xF0000000u));
     }
 };
 
@@ -1226,14 +1287,67 @@ struct CharacterFilters
 
 // ─── PhysicsWorld ─────────────────────────────────────────────────────────────
 PhysicsWorld::PhysicsWorld()
+    : PhysicsWorld(HE::PhysicsLimits{})
+{
+}
+
+PhysicsWorld::PhysicsWorld(const HE::PhysicsLimits& limits)
 {
     joltEnsureInit();
-    m_impl = std::make_unique<Impl>();
+    HE::PhysicsLimits lim = limits;
+    // A cap of zero is a world that can never hold a contact; Jolt asserts on it.
+    lim.maxBodyPairs          = std::max<uint32_t>(lim.maxBodyPairs, 1u);
+    lim.maxContactConstraints = std::max<uint32_t>(lim.maxContactConstraints, 1u);
+    m_impl = std::make_unique<Impl>(lim);
+    // Once per process: a test run builds hundreds of worlds, and the line is for
+    // the log of a game or an editor session, where there is one.
+    HE_LOG_ONCE(Physics, Info,
+                "Physics world: %d thread(s) per step (%d Jolt worker(s) + the caller) on %u hardware "
+                "thread(s); limits %u body pairs, %u contact constraints; %zu MiB scratch block",
+                m_impl->threads, m_impl->threads - 1, std::thread::hardware_concurrency(),
+                lim.maxBodyPairs, lim.maxContactConstraints, m_impl->tempBlockBytes >> 20);
 }
 
 PhysicsWorld::~PhysicsWorld()
 {
     clear();
+}
+
+void PhysicsWorld::setThreadCount(int threads)
+{
+    if (!m_impl)
+        return;
+    const int resolved = HE::PhysicsTuning::resolveThreads(
+        threads, HE::PhysicsTuning::threadsFromEnv(), std::thread::hardware_concurrency());
+    if (resolved == m_impl->threads)
+        return;   // joining and starting workers is not free, and nothing would change
+
+    // Jolt's SetNumThreads joins the workers and starts new ones; it is only legal
+    // between steps, which is the only place the applications call this from.
+    m_impl->jobSystem.SetNumThreads(resolved - 1);
+    HE_LOG_INFO(Physics, "Physics threads: %d -> %d (%d Jolt worker(s) + the caller)",
+                m_impl->threads, resolved, resolved - 1);
+    m_impl->threads = resolved;
+}
+
+int PhysicsWorld::threadCount() const
+{
+    return m_impl ? m_impl->threads : 1;
+}
+
+PhysicsWorld::StepStats PhysicsWorld::stepStats() const
+{
+    return m_impl ? m_impl->stats : StepStats{};
+}
+
+HE::PhysicsLimits PhysicsWorld::limits() const
+{
+    return m_impl ? m_impl->limits : HE::PhysicsLimits{};
+}
+
+std::size_t PhysicsWorld::tempBytes() const
+{
+    return m_impl ? m_impl->tempBlockBytes : 0;
 }
 
 void PhysicsWorld::setContentManager(ContentManager* content)
@@ -1403,7 +1517,7 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId, BodyBatc
         batch->ids.push_back(bodyId);
     m_impl->entityToBody[entityId] = bodyId;
     if (motionType == JPH::EMotionType::Dynamic)
-        m_impl->dynamicBodies.insert(entityId);
+        m_impl->dynamicBodies[entityId] = bodyId;
     return true;
 }
 
@@ -2810,8 +2924,37 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     // notices, and a body whose floor is back must be in it.
     applyRegionHold();
 
-    m_impl->physicsSystem.Update(dt, 1,
-        &m_impl->tempAllocator, &m_impl->jobSystem);
+    // One collision step per 1/60 s at most, which Jolt asks for: the default 60 Hz
+    // (and anything from 45 Hz up) is still ONE, a 30 Hz project gets two. See
+    // PhysicsTuning::collisionStepsFor for why it rounds.
+    const int collisionSteps = HE::PhysicsTuning::collisionStepsFor(dt);
+    const JPH::EPhysicsUpdateError updateErrors = m_impl->physicsSystem.Update(
+        dt, collisionSteps, &m_impl->tempAllocator, &m_impl->jobSystem);
+
+    // The value Update() hands back used to be dropped on the floor. A non-zero one
+    // is Jolt telling us it ran out of room and LEFT CONTACTS OUT of this step (bodies
+    // sink into each other, stacks lean), and it does so again in the next step.
+    {
+        StepStats& stats = m_impl->stats;
+        ++stats.steps;
+        stats.collisionSteps = collisionSteps;
+        stats.lastErrors     = static_cast<uint32_t>(updateErrors);
+        if (updateErrors != JPH::EPhysicsUpdateError::None)
+        {
+            ++stats.saturatedSteps;
+            HE_LOG_THROTTLE(Physics, Warning, 5.0,
+                            "Jolt dropped contacts in this step (%s%s%s): a collision cache is full. "
+                            "%zu bodies; limits %u body pairs / %u contact constraints; "
+                            "%llu of %llu steps so far. Raise HE::PhysicsLimits for a scene this dense.",
+                            (stats.lastErrors & 1u) ? "manifold cache " : "",
+                            (stats.lastErrors & 2u) ? "body-pair cache " : "",
+                            (stats.lastErrors & 4u) ? "contact constraints " : "",
+                            m_impl->entityToBody.size(),
+                            m_impl->limits.maxBodyPairs, m_impl->limits.maxContactConstraints,
+                            static_cast<unsigned long long>(stats.saturatedSteps),
+                            static_cast<unsigned long long>(stats.steps));
+        }
+    }
 
     // Immediately after Update and before anything else: a constraint's
     // accumulated impulse describes the step that just ran, and the next call
@@ -2820,22 +2963,27 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
     auto& reg           = world.registry();
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    // What the write-back reads of a body (motion type, position, rotation) goes
+    // through Jolt's no-lock lookup, once per body instead of three locked calls.
+    // Update() has returned, so no Jolt worker is inside a body, and everything
+    // that writes one is a call on this thread; the answers are the ones the
+    // locking BodyInterface would give, minus a mutex round trip per read
+    // (Thema 178: those were a fifth of a 20 000-body step).
+    const JPH::BodyLockInterfaceNoLock& bodyLookup = m_impl->physicsSystem.GetBodyLockInterfaceNoLock();
 
     // Snapshot the ids before touching anything. The write-back below runs game
     // code's contact handlers indirectly and may itself remove entries (the reap),
-    // and either would rehash the map out from under a range-for.
+    // and either would rehash the map out from under a range-for. The body id is
+    // kept with the entity: a body removed since the snapshot fails the lookup
+    // below (Jolt checks the id's sequence number), which is the same "removed
+    // since the snapshot was taken" answer a second find() gave.
     m_impl->stepBodies.clear();
     m_impl->stepBodies.reserve(m_impl->entityToBody.size());
     for (const auto& entry : m_impl->entityToBody)
-        m_impl->stepBodies.push_back(entry.first);
+        m_impl->stepBodies.emplace_back(entry.first, entry.second);
 
-    for (const uint32_t entityId : m_impl->stepBodies)
+    for (const auto& [entityId, bodyId] : m_impl->stepBodies)
     {
-        auto bodyIt = m_impl->entityToBody.find(entityId);
-        if (bodyIt == m_impl->entityToBody.end())
-            continue;   // removed since the snapshot was taken
-        const JPH::BodyID bodyId = bodyIt->second;
-
         // The reap, and it has to come BEFORE the static-body skip: nothing
         // notifies this class when an entity is deleted, and a static body whose
         // entity is gone would otherwise never be looked at again — an invisible
@@ -2847,8 +2995,13 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
             continue;
         }
 
+        // Removed since the snapshot was taken (or never valid): nothing to read.
+        const JPH::Body* body = bodyLookup.TryGetBody(bodyId);
+        if (!body)
+            continue;
+
         // Only write back non-static bodies
-        if (bodyInterface.GetMotionType(bodyId) == JPH::EMotionType::Static)
+        if (body->GetMotionType() == JPH::EMotionType::Static)
             continue;
 
         // A held body did not move: its pose in Jolt is the one the transform was
@@ -2883,8 +3036,8 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         // when this was written — but a convex hull's centre of mass sits
         // wherever the geometry puts it, and reading that would shift the mesh
         // by the offset on the very first step and every step after.
-        JPH::RVec3 pos = bodyInterface.GetPosition(bodyId);
-        JPH::Quat  rot = bodyInterface.GetRotation(bodyId);
+        JPH::RVec3 pos = body->GetPosition();
+        JPH::Quat  rot = body->GetRotation();
 
         // A body that goes non-finite (degenerate shape, absurd mass, a huge
         // impulse from a script) writes NaN into the transform, and from there
@@ -2952,7 +3105,8 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         // transform and the proxy body stay where they are — standing at the spot
         // where the floor will be, instead of falling through the place it is not
         // yet. (A spawn or a teleport into a cell that is still loading is the case.)
-        if (m_impl->holdTest)
+        // Not asked at all while the probe says nothing can be held and nothing is.
+        if (m_impl->holdNeeded())
         {
             const JPH::RVec3 at = character->GetPosition();
             if (m_impl->holdTest(glm::vec3(static_cast<float>(at.GetX()),
@@ -3052,11 +3206,12 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
 // ─── Region hold ──────────────────────────────────────────────────────────────
 
-void PhysicsWorld::setRegionHold(HoldTest held)
+void PhysicsWorld::setRegionHold(HoldTest held, HoldProbe mayHold)
 {
     if (!m_impl)
         return;
-    m_impl->holdTest = std::move(held);
+    m_impl->holdTest  = std::move(held);
+    m_impl->holdProbe = m_impl->holdTest ? std::move(mayHold) : HoldProbe{};
     if (m_impl->holdTest)
         return;
 
@@ -3081,24 +3236,34 @@ std::size_t PhysicsWorld::heldCount() const
 
 void PhysicsWorld::applyRegionHold()
 {
-    if (!m_impl->holdTest)
+    // Nothing to ask while the probe says no position can be held and no body is
+    // (a world that streams no cells: the test would answer "no" tens of thousands
+    // of times a second for nothing).
+    if (!m_impl->holdNeeded())
         return;
 
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
-    bool  released      = false;
-    for (const uint32_t entityId : m_impl->dynamicBodies)
+    // Position reads only, so the no-lock lookup (this runs on the stepping thread,
+    // before Update, with no Jolt worker inside a body); taking a body in or out of
+    // the broad phase below stays on the locking interface.
+    const JPH::BodyLockInterfaceNoLock& bodyLookup = m_impl->physicsSystem.GetBodyLockInterfaceNoLock();
+    const bool anyCharacter = !m_impl->entityToCharacter.empty();
+    bool       released     = false;
+    for (const auto& [entityId, bodyId] : m_impl->dynamicBodies)
     {
         // The proxy body of a character is kinematic and never here; a dynamic body
         // on an entity that also has a character is an odd authoring, and the
         // character loop is what decides about that entity.
-        if (m_impl->entityToCharacter.count(entityId))
+        if (anyCharacter && m_impl->entityToCharacter.count(entityId))
             continue;
-        const auto bodyIt = m_impl->entityToBody.find(entityId);
-        if (bodyIt == m_impl->entityToBody.end())
+        // dynamicBodies is kept in step with entityToBody (the body id is recorded
+        // with the entity and goes with it), so the entity lookup that used to be
+        // here had nothing to find that the map does not already hold.
+        const JPH::Body* body = bodyLookup.TryGetBody(bodyId);
+        if (!body)
             continue;
-        const JPH::BodyID bodyId = bodyIt->second;
 
-        const JPH::RVec3 at = bodyInterface.GetPosition(bodyId);
+        const JPH::RVec3 at = body->GetPosition();
         const bool wanted = m_impl->holdTest(glm::vec3(static_cast<float>(at.GetX()),
                                                        static_cast<float>(at.GetY()),
                                                        static_cast<float>(at.GetZ())));

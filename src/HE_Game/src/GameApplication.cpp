@@ -2127,13 +2127,22 @@ void GameApplication::startPhysics()
 	// The rate half of that page is m_projectSettings.physics.fixedDt(), read
 	// where the accumulator steps.
 	m_physicsWorld->setGravity(m_projectSettings.physics.gravity);
+	// How many threads a step uses (Thema 178): the project's word, 0 = automatic.
+	// HE_PHYSICS_THREADS in the environment still wins. Before initialize() as well,
+	// so the first step already runs on the right number.
+	m_physicsWorld->setThreadCount(m_projectSettings.physics.threads);
 	// Nothing falls through a floor that is not there: whatever could fall is held
 	// while the cell under it is not built (a cell going out, or still coming in).
 	// Asked at call time, so it follows the streamer through scene changes: an
-	// inactive streamer (no cells in this scene) holds nothing.
+	// inactive streamer (no cells in this scene) holds nothing. The second function
+	// is that same fact as a cheap question, so a world without cells does not ask
+	// the first one about every dynamic body in every step.
 	m_physicsWorld->setRegionHold([this](const glm::vec3& p)
 	{
 		return m_world && HE::cellHolds(m_cellStreamer, *m_world, p);
+	}, [this]
+	{
+		return m_cellStreamer.active();
 	});
 	m_physicsWorld->initialize(*m_world);
 	// Every runtime spawn goes through the entity host, so it is the host that
