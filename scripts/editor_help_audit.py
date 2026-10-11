@@ -83,6 +83,12 @@ IGNORE = {
     # above DrawAudioMixerWindow, which pushes the "Audio Mixer" scope. Covered
     # by its explicit helpForKey("Audio Mixer/EQ").
     (None, "EQ"),
+    # The console's category popup: drawCategoryFilter() sits above draw(), which
+    # pushes the "Console" scope, and is only ever called from inside it. The
+    # entry "Console/Show all categories" exists and resolves at run time —
+    # checked by the { "Console", "Show all categories" } row in
+    # tests/test_editor_help.cpp.
+    (None, "Show all categories"),
     # The one literal entry in the Target Class dropdown (the others are asset
     # names, built at run time and invisible here). It is not a control with an
     # explanation of its own: "HorizonCode Node/Target Class" is the entry, and it
