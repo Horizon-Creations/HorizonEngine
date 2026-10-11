@@ -111,7 +111,7 @@ SETTINGS_ROW = re.compile(r'row\("[^"]*",\s*"([^"]+)"')
 AREAS: dict[str, list[str]] = {
     "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "SecondaryViewportPanel.cpp",
                   "OutlinerPanel.cpp",
-                  "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp",
+                  "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp", "ConsoleView.cpp",
                   "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
                   "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp",
                   "TextureViewerPanel.cpp", "TextureColourSpaceDialog.cpp", "AssetRecoveryDialog.cpp"],

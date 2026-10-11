@@ -226,7 +226,20 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "About",           "Website" },
 		{ "Content Browser", "Find References" },
 		{ "New Asset",       "Input Action" },
-		{ "Console",         "Auto-scroll" },
+		// The console's controls whose labels carry a number or a state (the
+		// chips, "Category (2 hidden)", "Latest (3 new)") are looked up by a
+		// fixed key, so the scope is what makes these resolve.
+		{ "Console",         "Copy" },
+		{ "Console",         "Search" },
+		{ "Console",         "All" },
+		{ "Console",         "Debug" },
+		{ "Console",         "Info" },
+		{ "Console",         "Warnings" },
+		{ "Console",         "Errors" },
+		{ "Console",         "Category" },
+		{ "Console",         "Show all categories" },
+		{ "Console",         "Reset filters" },
+		{ "Console",         "Latest" },
 		{ "Window",          "Audio Mixer" },
 		// The mixer's strips are data-labelled (a bus name over each fader), so
 		// every control in it asks by key; these are those keys under the
