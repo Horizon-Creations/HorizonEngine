@@ -141,7 +141,7 @@ struct HE_API ProjectPhysicsSettings
     static constexpr int   kMaxHz = 480;
     static constexpr float kMaxFloatingOriginRadius = 1.0e5f;
     // PhysicsTuning::kMaxThreads (HE_Scene) spells the same number; a static_assert
-    // in PhysicsWorld.cpp keeps the two together.
+    // in tests/test_project_settings.cpp keeps the two together.
     static constexpr int   kMaxThreads = 32;
 
     // The step length both applications hand to HE::advanceFixedSteps. ONE
