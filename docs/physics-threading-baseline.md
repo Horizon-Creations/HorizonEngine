@@ -164,7 +164,7 @@ Spitze = größter gleichzeitiger Verbrauch, `Update` und `ExtendedUpdate` zusam
 | 131 072 | 40 960 | 34,06 MB |
 | 262 144 | 81 920 | 67,96 MB |
 
-  Das sind **rund 0,84 KB je Kontakt-Constraint**. Die 10 MB reichen für genau 12 000 Constraints; **jede Hebung der
+  Das sind **rund 0,84 KB je Kontakt-Constraint**. Die 10 MB reichen für etwa 12 000 Constraints; **jede Hebung der
   Obergrenze über etwa 11 900 ohne größeren Allocator beendet den Prozess.** Der Haufen mit vierfachen Obergrenzen
   (Abschnitt 4) bräuchte 34 MB.
 - In den gemessenen Szenen bleibt der Verbrauch unter 10 MB, der Spielraum beträgt aber nur 0,4 bis 1,4 MB. Charaktere
@@ -217,8 +217,8 @@ Aufrufe):
 (`sample` hält den Prozess je Probe an, taugt also nur für Anteile, nicht für Millisekunden; 187 Proben in 10 s auf
 dem Hauptthread, 149 davon in `step`.) `applyRegionHold` ist neu seit Thema 164 Schritt 3a: `GameApplication.cpp:2134` setzt die Prüf-Funktion
 immer (sie antwortet "nichts halten", solange kein Streamer aktiv ist), die Funktion geht aber trotzdem bei jedem
-Schritt über alle dynamischen Körper und macht je Körper zwei Map-Zugriffe, ein gesperrtes `GetPosition` und den
-Callback. Das ist der größte Einzelposten außerhalb von Jolt und für
+Schritt über alle dynamischen Körper und macht je Körper drei Map-Zugriffe (`entityToCharacter.count`, `entityToBody.find`,
+`heldBodies.count`), ein gesperrtes `GetPosition` und den Callback. Das ist der größte Einzelposten außerhalb von Jolt und für
 Schritt 2 oder 3 der erste Kandidat.
 
 **Engine-Pool im Loop:** die zehn `Worker-N`-Threads (aus `HorizonCore`) liegen in jedem Lauf bei etwa 1 % je Thread;
@@ -238,12 +238,17 @@ fünfter Thread dort ist untätig). Zusammen sind es 4 Jolt-Worker, 10 Pool-Thre
 Wiederholen:
 
 ```
-scripts/perf/physics_load_bench.sh build
+JOLT_BUILD=<build-baum mit _deps/joltphysics-build/libJolt.a> scripts/perf/physics_load_bench.sh build
 python3 scripts/perf/physics_load_sweep.py                      # Bench-Tabellen
 clang -O2 -dynamiclib scripts/perf/thread_cpu_probe.c -o /tmp/he178/thread_cpu_probe.dylib
-cp -cR <worktree>/out/deploy/Game /tmp/he178/gamebase          # dann @loader_path-Rpaths setzen, siehe selfcontain_deploy_copy.sh
+cp -cR <worktree>/out/deploy/Game /tmp/he178/gamebase
+scripts/perf/selfcontain_deploy_copy.sh /tmp/he178/gamebase    # sonst lädt HorizonGame die Dylibs des Build-Baums
 python3 scripts/perf/physics_load_run.py --layout sparse --bodies 20000
 ```
+
+`JOLT_BUILD` hat als Vorgabe den Pfad des Hauptcheckouts auf Connors Mac. Das "Vorher"-Binary dieser Messung liegt
+unverändert in `~/HorizonEnginePerf/he178_before` (Kopie von `/tmp/he178/gamebase`, Rpaths schon gesetzt); Schritt 4
+nimmt es als `--runtime`.
 
 ## 9. Was Schritt 2 bis 4 daraus mitnehmen
 
