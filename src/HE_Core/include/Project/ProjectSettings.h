@@ -129,10 +129,20 @@ struct HE_API ProjectPhysicsSettings
     // position, would jump by the shift. Read by the packaged game only; the
     // editor's Play keeps absolute coordinates.
     float     floatingOriginRadius = 0.0f;   // m
+    // Threads that take part in one physics step, the one that calls it included
+    // (Thema 178). 0 = automatic: half the cores minus the caller, at most four
+    // Jolt workers (PhysicsTuning::autoWorkers). 1 = single-threaded, N = the
+    // caller plus N-1 workers. Jolt's simulation is deterministic whatever the
+    // count, so this moves speed and nothing else. HE_PHYSICS_THREADS in the
+    // environment overrides it, for a benchmark or a bug report.
+    int       threads = 0;
 
     static constexpr int   kMinHz = 10;
     static constexpr int   kMaxHz = 480;
     static constexpr float kMaxFloatingOriginRadius = 1.0e5f;
+    // PhysicsTuning::kMaxThreads (HE_Scene) spells the same number; a static_assert
+    // in tests/test_project_settings.cpp keeps the two together.
+    static constexpr int   kMaxThreads = 32;
 
     // The step length both applications hand to HE::advanceFixedSteps. ONE
     // function so the editor's preview and the packaged game cannot round the

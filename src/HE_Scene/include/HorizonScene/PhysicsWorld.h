@@ -11,6 +11,7 @@ class HorizonWorld;
 class ContentManager;
 namespace HE { struct CollisionLayerConfig; }
 #include <Types/Enums.h>   // HE::JointType, named by JointDesc below
+#include "HorizonScene/PhysicsTuning.h"   // HE::PhysicsLimits, named by the constructor
 
 // PIMPL wrapper around Jolt PhysicsSystem.
 // Keeps all Jolt headers out of the public API.
@@ -54,8 +55,45 @@ public:
         uint8_t   layer    = 0;
     };
 
+    // The caches Jolt sizes once, at construction (HE::PhysicsLimits has the
+    // defaults and why they are what they are). The scratch memory of a step is
+    // derived from the same numbers, so the two cannot disagree.
     PhysicsWorld();
+    explicit PhysicsWorld(const HE::PhysicsLimits& limits);
     ~PhysicsWorld();
+
+    // ── Threads (Thema 178) ──────────────────────────────────────────────────
+    // How many threads take part in one step, the one that calls step() included:
+    // 1 is single-threaded, N is the caller plus N-1 Jolt workers. 0 asks for the
+    // automatic count (HE::PhysicsTuning::autoWorkers + the caller). The world
+    // starts on the automatic count; the applications pass the project's setting
+    // (ProjectPhysicsSettings::threads) right after constructing it. The
+    // environment variable HE_PHYSICS_THREADS wins over whatever is asked for.
+    //
+    // Restarts the workers when the number changes, so it belongs between steps,
+    // not inside one; calling it with the number already in force does nothing.
+    // The simulation is deterministic whatever the count (Jolt), so this changes
+    // how fast a step is and nothing it computes.
+    void setThreadCount(int threads);
+    int  threadCount() const;
+
+    // What the step says about its own health. Jolt returns a set of flags from
+    // Update() when one of its fixed-size caches is full and it had to drop
+    // contacts; the engine used to throw that value away, so a pile of ten thousand
+    // boxes ran with a third of its contacts missing and nothing said so.
+    struct StepStats
+    {
+        uint64_t steps          = 0;   // step() calls that ran the simulation
+        uint64_t saturatedSteps = 0;   // …of which Jolt dropped contacts because a cache was full
+        uint32_t lastErrors     = 0;   // flags of the latest step: 1 manifold cache, 2 body-pair cache, 4 contact constraints
+        int      collisionSteps = 1;   // Jolt collision steps the latest step() used (PhysicsTuning::collisionStepsFor)
+    };
+    StepStats stepStats() const;
+
+    // The limits the world was built with, and the size of the scratch block a
+    // step allocates from (it falls back to the heap past that, never aborts).
+    HE::PhysicsLimits limits() const;
+    std::size_t       tempBytes() const;
 
     // Where triangle meshes come from. ColliderShape::Mesh and ::ConvexHull are
     // built from the entity's own mesh asset, which only the ContentManager can
@@ -214,8 +252,18 @@ public:
     // it) and they wait, like the joints of a streamed cell, until it is back in; the
     // other end is on its own meanwhile. A joint asked for while one end is held
     // waits as well (addJoint answers false). Jointed things belong to one cell.
-    using HoldTest = std::function<bool(const glm::vec3& worldPosition)>;
-    void        setRegionHold(HoldTest held);
+    //
+    // `mayHold` is the optional cheap half of the question: "could `held` say yes
+    // for ANY position at all right now?". Without it every step asks `held` about
+    // every dynamic body, which for a world that streams no cells is twenty
+    // thousand calls to learn "no" (19 % of a step at that size, Thema 178
+    // baseline). With it, a step whose probe says no and that has nothing held
+    // skips the pass; the moment the probe says yes, or anything is held (and has
+    // to be let go), the full pass runs as before. The contract is one way only: a
+    // probe may say yes when the test would say no, never the reverse.
+    using HoldTest  = std::function<bool(const glm::vec3& worldPosition)>;
+    using HoldProbe = std::function<bool()>;
+    void        setRegionHold(HoldTest held, HoldProbe mayHold = {});
     // Bodies and characters the hold has out of the simulation at the moment.
     std::size_t heldCount() const;
 

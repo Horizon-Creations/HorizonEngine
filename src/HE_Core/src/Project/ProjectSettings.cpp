@@ -144,6 +144,7 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && nearlyEqual(shadows.slopeBias, o.shadows.slopeBias)
         && nearlyEqual(shadows.minBias, o.shadows.minBias)
         && physics.fixedHz == o.physics.fixedHz
+        && physics.threads == o.physics.threads
         && nearlyEqual(physics.gravity.x, o.physics.gravity.x)
         && nearlyEqual(physics.gravity.y, o.physics.gravity.y)
         && nearlyEqual(physics.gravity.z, o.physics.gravity.z)
@@ -196,6 +197,7 @@ void ProjectSettings::clamp()
 
     auto& p = physics;
     p.fixedHz = std::clamp(p.fixedHz, ProjectPhysicsSettings::kMinHz, ProjectPhysicsSettings::kMaxHz);
+    p.threads = std::clamp(p.threads, 0, ProjectPhysicsSettings::kMaxThreads);
     p.floatingOriginRadius = std::isfinite(p.floatingOriginRadius)
         ? std::clamp(p.floatingOriginRadius, 0.0f, ProjectPhysicsSettings::kMaxFloatingOriginRadius)
         : 0.0f;
@@ -298,6 +300,7 @@ void ProjectSettings::toJson(json& out) const
         { "fixedHz", physics.fixedHz },
         { "gravity", { physics.gravity.x, physics.gravity.y, physics.gravity.z } },
         { "floatingOriginRadius", physics.floatingOriginRadius },
+        { "threads", physics.threads },
     };
 
     out["renderDefaults"] = {
@@ -376,6 +379,7 @@ void ProjectSettings::fromJson(const json& in)
         const json& p = section(in, "physics");
         readNumber(p, "fixedHz", physics.fixedHz);
         readNumber(p, "floatingOriginRadius", physics.floatingOriginRadius);
+        readNumber(p, "threads", physics.threads);
         const auto g = p.find("gravity");
         if (g != p.end() && g->is_array() && g->size() == 3)
         {

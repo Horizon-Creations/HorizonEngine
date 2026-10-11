@@ -4291,7 +4291,22 @@ namespace
 	  "exact and 0.01667 is not.\n\n"
 	  "Saved to Config/ProjectSettings.json and read on every step, in the "
 	  "editor's Play and in the exported build alike — the two cannot simulate "
-	  "at different rates.",
+	  "at different rates.\n\n"
+	  "Below about 40 Hz a step is longer than the physics engine likes (it asks "
+	  "for at most 1/60 s per collision step), so the engine splits it into "
+	  "several collision steps on its own: 30 Hz runs two, 10 Hz six.",
+	  "", "systems#physics" },
+	{ "Physics/Physics threads", "Physics threads",
+	  "How many threads work on one simulation step, the one that runs the game "
+	  "included. Auto leaves about half the cores to streaming, rendering and "
+	  "audio and uses at most four physics workers beside the game thread; 1 "
+	  "simulates on the game thread alone.\n\n"
+	  "The result of the simulation is the same whatever the number — only the "
+	  "time a step takes changes — so this is safe to tune for a machine. The "
+	  "environment variable HE_PHYSICS_THREADS overrides it for one run, which "
+	  "is what a benchmark or a bug report wants.\n\n"
+	  "Saved to Config/ProjectSettings.json; the editor's Play and the exported "
+	  "build read the same value.",
 	  "", "systems#physics" },
 	{ "Physics/Gravity", "Gravity",
 	  "The acceleration every rigid body is under, in metres per second squared "
