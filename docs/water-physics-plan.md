@@ -448,7 +448,8 @@ Ringen; ohne Ring eine einheitliche Verzweigung. Gemessen wird in Schritt 3 mit 
 
 ### 7.2 Skript-API (Schritt 5)
 
-Die Gruppe `water` existiert nach 174 (14 Zeilen, Weltkoordinaten) und ist bereits `isScriptGroup`. Neue Zeilen, **alle in Welt, ohne
+Die Gruppe `water` existiert nach 174 (14 Zeilen, Weltkoordinaten) und steht in `isScriptGroup` (`EngineApi.cpp:8552` auf dem 174-Zweig
+gelesen). Neue Zeilen, **alle in Welt, ohne
 Landschaften-Handle** (der Aufrufer hat eine Position oder einen Körper, selten die Landschaft):
 
 | Zeile | Art | Bedeutung |
@@ -461,8 +462,9 @@ Landschaften-Handle** (der Aufrufer hat eine Position oder einen Körper, selten
 | `water.setFlow(terrain, body, x, z)` | exec | Strömung eines Körpers setzen (terrain-lokal wie gespeichert) |
 
 Jede Zeile braucht (`engine-api-row-three-places`): Display-Name-Map am Ende von `EngineApi.cpp`, Beschreibung (≥ 20 Zeichen) in
-`HcNodeDocs.cpp`, die Parity-Fixture, falls die Gruppe eine hat, und, **nur wenn `water` schon in den C++-GameLogic-Servicetabellen steht**
-(`HorizonGameServices.h`, in 174 zu prüfen), die vierte Stelle (Tabellenerweiterung, ABI-Version, Probe). Die vier reinen Zeilen sind
+`HcNodeDocs.cpp`, die Parity-Fixture, falls die Gruppe eine hat. Eine vierte Stelle (C++-GameLogic-Servicetabelle, ABI-Version, Probe)
+entfällt: `water` kommt in `HorizonGameServices.h` auf dem 174-Zweig nicht vor (gelesen, 0 Treffer); wer die Zeilen dort anbieten will,
+legt die Tabelle neu an und folgt dem Muster der Rumble-Zeilen (Thema 85). Die vier reinen Zeilen sind
 über `McpToolsApi` automatisch MCP-Werkzeuge; exec-Zeilen sind es nicht (Lehre 174), ein mutierender MCP-Weg wäre ein eigenes Werkzeug
 und gehört zu den optionalen Teilen.
 `ctest -R test_hc_node_docs` und der volle `ctest` laufen lassen, nicht nur die eigenen Fälle.
