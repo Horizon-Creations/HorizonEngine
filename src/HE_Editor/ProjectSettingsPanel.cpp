@@ -876,6 +876,19 @@ void drawSimulationPage(AppContext& ctx)
 	     "HE_PHYSICS_THREADS overrides this.");
 	ImGui::Spacing();
 
+	ImGui::SeparatorText("Time budget");
+	Row::sliderFloat("Physics budget##physbudget", &ph.budgetMs, 0.0f, 16.0f,
+	                 ph.budgetMs <= 0.0f ? "Off" : "%.1f ms");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How many milliseconds one simulation step may spend on the work around "
+	     "the physics engine: character updates, scene queries and the bodies of "
+	     "streamed cells. What does not fit waits for the next step; a crowd of "
+	     "characters is stepped over several steps, each with the time it missed. "
+	     "Off applies no limit. The first 32 characters are always stepped. "
+	     "Shown in the Performance Profiler. The environment variable "
+	     "HE_PHYSICS_BUDGET_MS overrides this.");
+	ImGui::Spacing();
+
 	ImGui::SeparatorText("Gravity");
 	float g[3] = { ph.gravity.x, ph.gravity.y, ph.gravity.z };
 	if (Row::dragFloat3("Gravity##gravity", g, 0.01f, -1000.0f, 1000.0f, "%.2f"))

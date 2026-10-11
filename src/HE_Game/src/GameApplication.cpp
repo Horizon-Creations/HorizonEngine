@@ -2131,6 +2131,9 @@ void GameApplication::startPhysics()
 	// HE_PHYSICS_THREADS in the environment still wins. Before initialize() as well,
 	// so the first step already runs on the right number.
 	m_physicsWorld->setThreadCount(m_projectSettings.physics.threads);
+	// The time budget for the work around the step (Thema 178 step 3), likewise.
+	m_physicsWorld->setBudget({ m_projectSettings.physics.budgetMs,
+	                            static_cast<uint32_t>(m_projectSettings.physics.eventsPerPoll) });
 	// Nothing falls through a floor that is not there: whatever could fall is held
 	// while the cell under it is not built (a cell going out, or still coming in).
 	// Asked at call time, so it follows the streamer through scene changes: an

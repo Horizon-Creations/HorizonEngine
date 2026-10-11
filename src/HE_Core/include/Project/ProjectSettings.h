@@ -136,6 +136,17 @@ struct HE_API ProjectPhysicsSettings
     // count, so this moves speed and nothing else. HE_PHYSICS_THREADS in the
     // environment overrides it, for a benchmark or a bug report.
     int       threads = 0;
+    // Time budget for the work around the physics step (Thema 178 step 3), in ms per
+    // step: character updates, scene queries, streaming bodies. What does not fit
+    // waits for the next step (a crowd of characters is stepped over several steps,
+    // each with the time it missed). 0 = no budget. The default is a quarter of a 60 Hz
+    // frame (PhysicsBudgetConfig::frameMs, HE_Scene, spells the same number; a
+    // test keeps them together). HE_PHYSICS_BUDGET_MS in
+    // the environment overrides it.
+    float     budgetMs = 4.0f;
+    // Contact events one poll hands to gameplay, per list; the rest wait in order for
+    // the next poll. 0 = all. Settings file only, no editor field.
+    int       eventsPerPoll = 4096;
 
     static constexpr int   kMinHz = 10;
     static constexpr int   kMaxHz = 480;
@@ -143,6 +154,8 @@ struct HE_API ProjectPhysicsSettings
     // PhysicsTuning::kMaxThreads (HE_Scene) spells the same number; a static_assert
     // in tests/test_project_settings.cpp keeps the two together.
     static constexpr int   kMaxThreads = 32;
+    static constexpr float kMaxBudgetMs = 1000.0f;
+    static constexpr int   kMaxEventsPerPoll = 1 << 20;
 
     // The step length both applications hand to HE::advanceFixedSteps. ONE
     // function so the editor's preview and the packaged game cannot round the

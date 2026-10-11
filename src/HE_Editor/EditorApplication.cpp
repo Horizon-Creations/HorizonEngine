@@ -10118,6 +10118,7 @@ AppContext EditorApplication::makeContext()
 				const auto& physics = m_projectManager.currentProject().settings.physics;
 				m_physicsWorld->setGravity(physics.gravity);
 				m_physicsWorld->setThreadCount(physics.threads);
+				m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
 			}
 		},
 		.propScriptEngine    = m_propScriptEngine.get(),
@@ -10750,6 +10751,10 @@ void EditorApplication::setPlayMode(bool play)
 		// The project's thread count too (0 = automatic), for the same reason as
 		// the game: the preview should run the step the build will run.
 		m_physicsWorld->setThreadCount(m_projectManager.currentProject().settings.physics.threads);
+		{
+			const auto& physics = m_projectManager.currentProject().settings.physics;
+			m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
+		}
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is

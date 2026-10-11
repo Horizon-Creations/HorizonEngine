@@ -12,6 +12,7 @@ class ContentManager;
 namespace HE { struct CollisionLayerConfig; }
 #include <Types/Enums.h>   // HE::JointType, named by JointDesc below
 #include "HorizonScene/PhysicsTuning.h"   // HE::PhysicsLimits, named by the constructor
+#include "HorizonScene/PhysicsBudget.h"   // HE::PhysicsBudgetConfig / Stats
 
 // PIMPL wrapper around Jolt PhysicsSystem.
 // Keeps all Jolt headers out of the public API.
@@ -89,6 +90,23 @@ public:
         int      collisionSteps = 1;   // Jolt collision steps the latest step() used (PhysicsTuning::collisionStepsFor)
     };
     StepStats stepStats() const;
+
+    // ── Time budget (Thema 178 step 3) ───────────────────────────────────────
+    // A limit on the work AROUND Update(): the characters' ExtendedUpdate (a crowd
+    // is stepped over several steps, each character with the time it missed, in an
+    // order that serves the longest wait first), the scene queries and the body
+    // adds/removes of cell streaming (they cannot be put off, they are charged and
+    // come off the characters' share), and the contact events handed to gameplay
+    // (at most eventsPerPoll per list and poll, the rest queued in order).
+    // HE_PHYSICS_BUDGET_MS in the environment wins over the application's value.
+    // Between steps, like setThreadCount. See docs/physics-threading-budget.md.
+    void                    setBudget(const HE::PhysicsBudgetConfig& config);
+    HE::PhysicsBudgetConfig budget() const;
+    // What the latest step spent and put off.
+    HE::PhysicsBudgetStats  budgetStats() const;
+    // The newest step of any world in the process, for the profiler window, which
+    // holds no world. Zeroed until a step has run.
+    static HE::PhysicsBudgetStats lastBudgetStats();
 
     // The limits the world was built with, and the size of the scratch block a
     // step allocates from (it falls back to the heap past that, never aborts).

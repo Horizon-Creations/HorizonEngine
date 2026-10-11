@@ -145,6 +145,8 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && nearlyEqual(shadows.minBias, o.shadows.minBias)
         && physics.fixedHz == o.physics.fixedHz
         && physics.threads == o.physics.threads
+        && nearlyEqual(physics.budgetMs, o.physics.budgetMs)
+        && physics.eventsPerPoll == o.physics.eventsPerPoll
         && nearlyEqual(physics.gravity.x, o.physics.gravity.x)
         && nearlyEqual(physics.gravity.y, o.physics.gravity.y)
         && nearlyEqual(physics.gravity.z, o.physics.gravity.z)
@@ -198,6 +200,10 @@ void ProjectSettings::clamp()
     auto& p = physics;
     p.fixedHz = std::clamp(p.fixedHz, ProjectPhysicsSettings::kMinHz, ProjectPhysicsSettings::kMaxHz);
     p.threads = std::clamp(p.threads, 0, ProjectPhysicsSettings::kMaxThreads);
+    p.budgetMs = std::isfinite(p.budgetMs)
+        ? std::clamp(p.budgetMs, 0.0f, ProjectPhysicsSettings::kMaxBudgetMs)
+        : ProjectPhysicsSettings{}.budgetMs;
+    p.eventsPerPoll = std::clamp(p.eventsPerPoll, 0, ProjectPhysicsSettings::kMaxEventsPerPoll);
     p.floatingOriginRadius = std::isfinite(p.floatingOriginRadius)
         ? std::clamp(p.floatingOriginRadius, 0.0f, ProjectPhysicsSettings::kMaxFloatingOriginRadius)
         : 0.0f;
@@ -301,6 +307,8 @@ void ProjectSettings::toJson(json& out) const
         { "gravity", { physics.gravity.x, physics.gravity.y, physics.gravity.z } },
         { "floatingOriginRadius", physics.floatingOriginRadius },
         { "threads", physics.threads },
+        { "budgetMs", physics.budgetMs },
+        { "eventsPerPoll", physics.eventsPerPoll },
     };
 
     out["renderDefaults"] = {
@@ -380,6 +388,8 @@ void ProjectSettings::fromJson(const json& in)
         readNumber(p, "fixedHz", physics.fixedHz);
         readNumber(p, "floatingOriginRadius", physics.floatingOriginRadius);
         readNumber(p, "threads", physics.threads);
+        readNumber(p, "budgetMs", physics.budgetMs);
+        readNumber(p, "eventsPerPoll", physics.eventsPerPoll);
         const auto g = p.find("gravity");
         if (g != p.end() && g->is_array() && g->size() == 3)
         {
