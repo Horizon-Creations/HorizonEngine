@@ -5018,7 +5018,9 @@ void EditorApplication::dumpFrameHeadless()
 		if (auto* e = dumpSky == entt::null ? nullptr
 		            : m_editorWorld->registry().try_get<EnvironmentComponent>(dumpSky))
 		{
-			e->dayNightCycle  = true;
+			// HE_DUMP_DAYNIGHT=0 switches the cycle off (the sun keeps its fixed default
+			// direction, TOD does nothing): the day-night-off side of a shadow A/B.
+			e->dayNightCycle  = envF("HE_DUMP_DAYNIGHT", 1.0f) > 0.5f;
 			e->timeOfDay      = static_cast<float>(envF("HE_DUMP_TOD", 0.0f));        // 0 = midnight
 			e->cloudMode      = static_cast<int>(envF("HE_DUMP_CLOUDMODE", 1.0f));
 			e->cloudCoverage  = static_cast<float>(envF("HE_DUMP_COVERAGE", 0.5f));

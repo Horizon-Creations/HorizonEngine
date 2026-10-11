@@ -147,8 +147,9 @@ TEST_CASE("propagateTransforms: a moved parent carries its unchanged children, a
 
 	REQUIRE(world.reparentEntity(child, b));
 	HE::propagateTransforms(world);
-	// reparentEntity keeps the WORLD pose by rewriting the local one; either
-	// way the matrix must be B's world times the child's current local.
+	// reparentEntity leaves the local values alone, so the child's WORLD pose
+	// changes (nothing of its own moved: only structureEpoch tells propagateTransforms);
+	// the matrix must be B's world times the child's current local.
 	CHECK(sameMatrix(tf(world, child).worldMatrix,
 	                 HE::localMatrix(tf(world, b)) * HE::localMatrix(tf(world, child))));
 	CHECK(nearMatrix(tf(world, child).worldMatrix, HE::worldMatrixOf(world, child), 1e-6f));
@@ -297,20 +298,29 @@ TEST_CASE("RenderExtractor: inside a frame the second extract reuses the first w
 	buildSmallScene(world);
 	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
 
+	// Like the backends: every pass extracts into the same RenderWorld.
 	RenderExtractor ex;
 	configure(ex);
-	RenderWorld first, second;
+	RenderWorld rw;
+	const RenderObject* walked = nullptr;
 	{
 		RenderExtractor::FrameScope frame(ex);
-		ex.extract(world, first, 1.5f, &cam);
-		ex.extract(world, second, 1.5f, &cam);
+		ex.extract(world, rw, 1.5f, &cam);
+		walked = rw.objects.data();
+		ex.extract(world, rw, 1.5f, &cam);
 	}
 	CHECK(ex.fullExtractCount() == 1u);
 	CHECK(ex.reusedExtractCount() == 1u);
-	REQUIRE(first.objects.size() >= 40u);   // positive control: there was something to reuse
-	CHECK(first.shadow.enabled);
-	CHECK(first.shadow.localLayerCount > 0);   // the point light's cube faces
-	checkSameWorld(second, first);
+	CHECK(rw.objects.data() == walked);   // found in place: nothing was copied or reallocated
+	REQUIRE(rw.objects.size() >= 40u);    // positive control: there was something to reuse
+	CHECK(rw.shadow.enabled);
+	CHECK(rw.shadow.localLayerCount > 0); // the point light's cube faces
+
+	RenderExtractor fresh;
+	configure(fresh);
+	RenderWorld reference;
+	fresh.extract(world, reference, 1.5f, &cam);
+	checkSameWorld(rw, reference);
 }
 
 TEST_CASE("RenderExtractor: a reused extract at another aspect equals a full walk at it")
@@ -321,21 +331,37 @@ TEST_CASE("RenderExtractor: a reused extract at another aspect equals a full wal
 
 	RenderExtractor ex;
 	configure(ex);
-	RenderWorld scene, ssao;
+	RenderWorld rw, scene, ssao;
 	{
 		RenderExtractor::FrameScope frame(ex);
-		ex.extract(world, scene, 1920.0f / 1080.0f, &cam);
+		ex.extract(world, rw, 1920.0f / 1080.0f, &cam);
+		scene = rw;
+		// The backends refine the bounds in place right after the walk. The tail below must
+		// not read them: the cascades are the ones the shadow pass fit from the walk's own.
+		for (RenderObject& o : rw.objects)
+		{
+			o.worldBounds = HE::AABB{};
+			o.worldBounds.expand(glm::vec3(-1000.0f));
+			o.worldBounds.expand(glm::vec3(1000.0f));
+		}
 		// The SSAO pass: half resolution, rounded — a slightly different aspect.
-		ex.extract(world, ssao, 960.0f / 541.0f, &cam);
+		ex.extract(world, rw, 960.0f / 541.0f, &cam);
+		ssao = rw;
+		// ...and the next pass is back at the scene's aspect.
+		ex.extract(world, rw, 1920.0f / 1080.0f, &cam);
 	}
-	CHECK(ex.reusedExtractCount() == 1u);
+	CHECK(ex.fullExtractCount() == 1u);
+	CHECK(ex.reusedExtractCount() == 2u);
 
 	RenderExtractor fresh;
 	configure(fresh);
-	RenderWorld reference;
-	fresh.extract(world, reference, 960.0f / 541.0f, &cam);
-	CHECK_FALSE(sameMatrix(scene.camera.projection, reference.camera.projection));
-	checkSameWorld(ssao, reference);
+	RenderWorld referenceSsao, referenceScene;
+	fresh.extract(world, referenceSsao, 960.0f / 541.0f, &cam);
+	fresh.extract(world, referenceScene, 1920.0f / 1080.0f, &cam);
+	CHECK_FALSE(sameMatrix(scene.camera.projection, referenceSsao.camera.projection));
+	checkSameWorld(ssao, referenceSsao);
+	checkSameWorld(rw, referenceScene);   // the cascades of the shadow pass are back, bit for bit
+	checkSameWorld(scene, referenceScene);
 }
 
 TEST_CASE("RenderExtractor: nothing is reused outside a frame or with other inputs")
@@ -378,6 +404,490 @@ TEST_CASE("RenderExtractor: nothing is reused outside a frame or with other inpu
 		ex.extract(world, rw, 1.5f);
 	}
 	CHECK(rw.objects.size() == before + 1);
+}
+
+TEST_CASE("RenderExtractor: the frame's state is the caller's RenderWorld, passes edit it in place")
+{
+	// Thema 162, Schritt 2: the walk is not copied out of the extractor and back. What a pass
+	// does to it between two extracts (the backends replace the bounds by the real mesh bounds
+	// and resolve the material scalars, both idempotent) is still there for the next one.
+	HorizonWorld world;
+	buildSmallScene(world);
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	RenderExtractor ex;
+	configure(ex);
+	RenderWorld rw;
+	RenderExtractor::FrameScope frame(ex);
+	ex.extract(world, rw, 1.5f, &cam);
+	REQUIRE(rw.objects.size() >= 40u);
+	const RenderObject* walked = rw.objects.data();
+	rw.objects[3].roughness = 0.125f;   // a pass resolving a material
+	ex.extract(world, rw, 1.5f, &cam);
+	ex.extract(world, rw, 1.5f, &cam);
+	CHECK(ex.fullExtractCount() == 1u);
+	CHECK(ex.reusedExtractCount() == 2u);
+	CHECK(rw.objects.data() == walked);
+	CHECK(rw.objects[3].roughness == 0.125f);
+}
+
+TEST_CASE("RenderExtractor: another RenderWorld inside a frame is another consumer and gets its own walk")
+{
+	HorizonWorld world;
+	buildSmallScene(world);
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	RenderExtractor ex;
+	configure(ex);
+	RenderWorld a, b;
+	{
+		RenderExtractor::FrameScope frame(ex);
+		ex.extract(world, a, 1.5f, &cam);
+		ex.extract(world, b, 1.5f, &cam);   // not served from `a`: its owner may be gone by now
+		ex.extract(world, b, 1.5f, &cam);   // the walk is in `b` from here on
+	}
+	CHECK(ex.fullExtractCount() == 2u);
+	CHECK(ex.reusedExtractCount() == 1u);
+	checkSameWorld(b, a);
+}
+
+TEST_CASE("RenderExtractor: a RenderWorld that was cleared or resized since the walk no longer holds it")
+{
+	HorizonWorld world;
+	buildSmallScene(world);
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	RenderExtractor ex;
+	configure(ex);
+	RenderWorld rw;
+	RenderExtractor::FrameScope frame(ex);
+	ex.extract(world, rw, 1.5f, &cam);
+	const size_t objects = rw.objects.size();
+	const size_t lights  = rw.lights.size();
+	REQUIRE(objects >= 40u);
+	REQUIRE(lights >= 1u);
+
+	rw.objects.pop_back();                      // somebody edited the walk's result
+	ex.extract(world, rw, 1.5f, &cam);
+	CHECK(ex.fullExtractCount() == 2u);
+	CHECK(rw.objects.size() == objects);
+
+	rw.lights.clear();
+	ex.extract(world, rw, 1.5f, &cam);
+	CHECK(ex.fullExtractCount() == 3u);
+	CHECK(rw.lights.size() == lights);
+
+	rw.clear();                                 // ...or wiped it
+	ex.extract(world, rw, 1.5f, &cam);
+	CHECK(ex.fullExtractCount() == 4u);
+	CHECK(rw.objects.size() == objects);
+	CHECK(ex.reusedExtractCount() == 0u);
+}
+
+TEST_CASE("RenderExtractor: a structure change between two extracts of a frame forces a new walk")
+{
+	// Thema 162 reads HorizonWorld::structureEpoch (Thema 164, plan 7.1/7.2). The frame copy is
+	// only valid while the world holds the same entities in the same places: a cell streamed in
+	// or out between two passes would otherwise be answered from the copy of the old world.
+	HorizonWorld world;
+	buildSmallScene(world);
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	RenderExtractor ex;
+	configure(ex);
+	RenderWorld rw;
+	{
+		RenderExtractor::FrameScope frame(ex);
+		ex.extract(world, rw, 1.5f, &cam);
+		const size_t before = rw.objects.size();
+		ex.extract(world, rw, 1.5f, &cam);
+		REQUIRE(ex.fullExtractCount() == 1u);
+		REQUIRE(ex.reusedExtractCount() == 1u);
+
+		// A cell arrives between two passes.
+		const Entity late = world.createEntity("Late");
+		tf(world, late).position = glm::vec3(0.0f, 50.0f, 0.0f);
+		MeshComponent mc;
+		mc.meshAssetId = HE::kDefaultCubeMeshId;
+		world.addComponent(late, mc);
+		ex.extract(world, rw, 1.5f, &cam);
+		CHECK(ex.fullExtractCount() == 2u);        // not answered from the walk of the old world
+		CHECK(rw.objects.size() == before + 1);
+
+		// The new walk is the frame's from here on.
+		ex.extract(world, rw, 1.5f, &cam);
+		CHECK(ex.fullExtractCount() == 2u);
+		CHECK(ex.reusedExtractCount() == 2u);
+	}
+}
+
+TEST_CASE("RenderExtractor: every kind of structure change invalidates the frame copy")
+{
+	HorizonWorld world;
+	buildSmallScene(world);
+	const Entity a = world.createEntity("A");
+	const Entity b = world.createEntity("B");
+	const Entity c = world.createEntity("C");
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	struct Change { const char* what; std::function<void()> apply; };
+	const Change changes[] = {
+		{ "createEntity",         [&] { (void)world.createEntity("New"); } },
+		{ "reparentEntity",       [&] { REQUIRE(world.reparentEntity(a, b)); } },
+		{ "placeNextTo",          [&] { REQUIRE(world.placeNextTo(c, b, /*after=*/false)); } },
+		{ "destroyEntity",        [&] { world.destroyEntity(c); } },
+		{ "noteStructureChanged", [&] { world.noteStructureChanged(); } },
+	};
+
+	RenderExtractor ex;
+	configure(ex);
+	RenderWorld rw;
+	uint64_t walks = 0;
+	{
+		RenderExtractor::FrameScope frame(ex);
+		ex.extract(world, rw, 1.5f, &cam);
+		++walks;
+		for (const Change& ch : changes)
+		{
+			ex.extract(world, rw, 1.5f, &cam);   // answered from the copy: nothing moved yet
+			CHECK_MESSAGE(ex.fullExtractCount() == walks, ch.what);
+			const uint64_t before = world.structureEpoch();
+			ch.apply();
+			CHECK_MESSAGE(world.structureEpoch() != before, ch.what);   // the counter is what the key relies on
+			ex.extract(world, rw, 1.5f, &cam);
+			++walks;
+			CHECK_MESSAGE(ex.fullExtractCount() == walks, ch.what);
+		}
+	}
+}
+
+// ─── The shadow pass reads the frame's walk (Thema 162, Schritt 4) ──────────
+//
+// The shadow pass used to be the first extract of a Metal or Vulkan frame and paid the walk. The
+// frame now takes it just before the pass (MetalRenderer::ExtractFrame, VulkanRenderer::extractFrame),
+// and what the pass calls is a key check. The special cases the shadow pass depends on are the sun,
+// which moves every frame with the day-night cycle, and the cascade fit, which depends on the aspect
+// and on the project's shadow settings. Each of them is part of the extractor's frame key, and each
+// of them is shown here through the same call sequence a backend makes, against a fresh walk.
+
+namespace
+{
+constexpr float kSceneAspect = 1920.0f / 1080.0f;
+constexpr float kSsaoAspect  = 960.0f / 541.0f;   // the half resolution SSAO rounds to
+
+struct FrameInputs
+{
+	bool  cycle      = true;    // day-night cycle on
+	float tod        = 0.4f;
+	float coverage   = 0.2f;    // above 0.5 the direct sun/moon light fades out
+	int   cascades   = 3;
+	float distance   = 120.0f;
+	int   resolution = 2048;
+};
+
+void pushInputs(RenderExtractor& ex, const FrameInputs& in)
+{
+	ex.setDayNight(in.cycle, in.tod, glm::vec3(1.0f, 0.97f, 0.9f), 2.2f,
+	               glm::vec3(0.55f, 0.65f, 0.95f), 0.66f, in.coverage);
+	ex.setShadowSettings(in.distance, in.cascades, 0.5f, in.resolution);
+}
+
+// The extract() calls of a frame, in the order of its passes: the frame's walk, the shadow pass's
+// key check at the same aspect, SSAO at the half resolution (another aspect), the scene at the first
+// aspect again. `atSsao`, when given, receives a copy of what the SSAO pass found.
+void recordFrame(RenderExtractor& ex, HorizonWorld& world, RenderWorld& rw,
+                 const EditorCameraOverride& cam, RenderWorld* atSsao = nullptr)
+{
+	RenderExtractor::FrameScope frame(ex);
+	ex.extract(world, rw, kSceneAspect, &cam);   // the frame's walk
+	ex.extract(world, rw, kSceneAspect, &cam);   // the shadow pass
+	ex.extract(world, rw, kSsaoAspect, &cam);    // SSAO
+	if (atSsao) *atSsao = rw;
+	ex.extract(world, rw, kSceneAspect, &cam);   // the scene
+}
+
+// What a single walk at `aspect` gives with the same inputs: the oracle for everything above.
+void walkFresh(HorizonWorld& world, const FrameInputs& in, const EditorCameraOverride& cam,
+               float aspect, RenderWorld& out)
+{
+	RenderExtractor fresh;
+	pushInputs(fresh, in);
+	fresh.extract(world, out, aspect, &cam);
+}
+} // namespace
+
+TEST_CASE("RenderExtractor: a frame as the backends record it is one walk with that frame's sun, night to night")
+{
+	HorizonWorld world;
+	buildSmallScene(world);
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	RenderExtractor ex;
+	RenderWorld rw;
+	glm::vec3 previousSun(0.0f);
+	glm::mat4 previousCascade(0.0f);
+	uint64_t frames = 0;
+	// Night, dawn, morning, noon, dusk, night: the shadow light changes hands from the moon to the
+	// sun and back, and the sun moves a good part of its arc between two of these frames.
+	for (const float tod : { 0.05f, 0.2f, 0.3f, 0.5f, 0.7f, 0.8f, 0.95f })
+	{
+		FrameInputs in;
+		in.tod = tod;
+		pushInputs(ex, in);               // once per frame, before the walk
+		RenderWorld atSsao;
+		recordFrame(ex, world, rw, cam, &atSsao);
+		++frames;
+		CHECK_MESSAGE(ex.fullExtractCount() == frames, "tod ", tod);          // one walk per frame
+		CHECK_MESSAGE(ex.reusedExtractCount() == 3 * frames, "tod ", tod);    // the other three answer from it
+
+		RenderWorld scene, ssao;
+		walkFresh(world, in, cam, kSceneAspect, scene);
+		walkFresh(world, in, cam, kSsaoAspect, ssao);
+		checkSameWorld(rw, scene);        // the scene pass found this frame's sun and cascades, bit for bit
+		checkSameWorld(atSsao, ssao);     // ...and so did SSAO at its own aspect
+		CHECK(rw.shadow.direction == scene.shadow.direction);
+
+		REQUIRE_MESSAGE(rw.shadow.enabled, "tod ", tod);                      // cascades were fit at all
+		CHECK_MESSAGE(rw.sunDirection != previousSun, "tod ", tod);            // the sun moved since the last frame
+		CHECK_MESSAGE(!sameMatrix(rw.shadow.cascadeViewProj[0], previousCascade), "tod ", tod);
+		previousSun     = rw.sunDirection;
+		previousCascade = rw.shadow.cascadeViewProj[0];
+	}
+}
+
+TEST_CASE("RenderExtractor: the cascade settings reach every pass of the frame, and a pass that pushes others pays a walk")
+{
+	HorizonWorld world;
+	buildSmallScene(world);
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	// The project's shadow settings change between frames (SetShadowSettings): the cascade count,
+	// how far shadows reach and the resolution the texel snap is done against.
+	const FrameInputs frames[] = {
+		{ true, 0.4f, 0.2f, 3, 120.0f, 2048 },
+		{ true, 0.4f, 0.2f, 2,  60.0f, 2048 },
+		{ true, 0.4f, 0.2f, 1,  60.0f, 1024 },
+		{ true, 0.4f, 0.2f, 3, 250.0f,  512 },
+		{ true, 0.4f, 0.2f, 2,  30.0f, 4096 },
+	};
+	RenderExtractor ex;
+	RenderWorld rw;
+	uint64_t walks = 0;
+	glm::mat4 previous(0.0f);
+	for (const FrameInputs& in : frames)
+	{
+		pushInputs(ex, in);
+		RenderWorld atSsao;
+		recordFrame(ex, world, rw, cam, &atSsao);
+		++walks;
+		CHECK(ex.fullExtractCount() == walks);
+		CHECK(ex.reusedExtractCount() == 3 * walks);
+
+		RenderWorld scene, ssao;
+		walkFresh(world, in, cam, kSceneAspect, scene);
+		walkFresh(world, in, cam, kSsaoAspect, ssao);
+		REQUIRE(rw.shadow.enabled);
+		CHECK(rw.shadow.cascadeCount == in.cascades);
+		checkSameWorld(rw, scene);
+		checkSameWorld(atSsao, ssao);                                  // the aspect tail, at every count
+		CHECK(!sameMatrix(rw.shadow.cascadeViewProj[0], previous));   // each setting is a different fit
+		previous = rw.shadow.cascadeViewProj[0];
+	}
+
+	// The failure the shared helper in the backends rules out: a pass that pushed other settings
+	// than the frame's walk used is not a key check but a second walk.
+	{
+		const FrameInputs in = frames[0];
+		pushInputs(ex, in);
+		RenderExtractor::FrameScope frame(ex);
+		ex.extract(world, rw, kSceneAspect, &cam);
+		const uint64_t before = ex.fullExtractCount();
+		ex.setShadowSettings(60.0f, 2, 0.5f, 2048);
+		ex.extract(world, rw, kSceneAspect, &cam);
+		CHECK(ex.fullExtractCount() == before + 1);
+		CHECK(rw.shadow.cascadeCount == 2);                            // the new walk, not the old cascades
+	}
+}
+
+TEST_CASE("RenderExtractor: the cycle off keeps the sun still, full overcast leaves no cascades, through every pass")
+{
+	HorizonWorld world;
+	buildSmallScene(world);
+	// An authored directional light: what a world without the day-night cycle shades with.
+	const Entity sun = world.createEntity("Sun");
+	tf(world, sun).position = glm::vec3(0.0f, 10.0f, 0.0f);
+	LightComponent lc;
+	lc.type        = HE::LightType::Directional;
+	lc.intensity   = 2.0f;
+	lc.castsShadow = true;
+	world.addComponent(sun, lc);
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	// Cycle off: the time of day is ignored, the sun stays where it was put.
+	{
+		const glm::vec3 fixedSun = glm::normalize(glm::vec3(0.45f, 0.80f, 0.55f));
+		RenderExtractor ex;
+		RenderWorld rw;
+		glm::mat4 first(0.0f);
+		glm::vec3 firstSun(0.0f);
+		for (const float tod : { 0.1f, 0.4f, 0.9f })
+		{
+			FrameInputs in;
+			in.cycle = false;
+			in.tod   = tod;
+			pushInputs(ex, in);
+			RenderWorld atSsao;
+			recordFrame(ex, world, rw, cam, &atSsao);
+			RenderWorld scene, ssao;
+			walkFresh(world, in, cam, kSceneAspect, scene);
+			walkFresh(world, in, cam, kSsaoAspect, ssao);
+			checkSameWorld(rw, scene);
+			checkSameWorld(atSsao, ssao);
+			REQUIRE_MESSAGE(rw.shadow.enabled, "tod ", tod);
+			CHECK_MESSAGE(glm::length(rw.sunDirection - fixedSun) < 1e-5f, "tod ", tod);
+			if (tod == 0.1f)
+			{
+				first    = rw.shadow.cascadeViewProj[0];
+				firstSun = rw.sunDirection;
+			}
+			else
+			{
+				// Nothing moved: the same sun and the same cascades as the first frame, bit for bit.
+				CHECK_MESSAGE(rw.sunDirection == firstSun, "tod ", tod);
+				CHECK_MESSAGE(sameMatrix(rw.shadow.cascadeViewProj[0], first), "tod ", tod);
+			}
+		}
+		CHECK(ex.fullExtractCount() == 3u);       // a walk per frame all the same: the key holds the time
+		CHECK(ex.reusedExtractCount() == 9u);
+	}
+
+	// Full overcast with the cycle on: the direct light fades to zero, so there is no sun to cast
+	// cascades; the point light's cube faces are still there for the local shadow pass.
+	{
+		FrameInputs in;
+		in.coverage = 1.0f;
+		RenderExtractor ex;
+		pushInputs(ex, in);
+		RenderWorld rw, atSsao;
+		recordFrame(ex, world, rw, cam, &atSsao);
+		RenderWorld scene, ssao;
+		walkFresh(world, in, cam, kSceneAspect, scene);
+		walkFresh(world, in, cam, kSsaoAspect, ssao);
+		checkSameWorld(rw, scene);
+		checkSameWorld(atSsao, ssao);
+		CHECK_FALSE(rw.shadow.enabled);           // the shadow pass has no cascades to draw
+		CHECK(rw.shadow.localLayerCount > 0);     // but the local atlas still has its layers
+		CHECK(ex.fullExtractCount() == 1u);
+		CHECK(ex.reusedExtractCount() == 3u);
+	}
+}
+
+TEST_CASE("RenderExtractor: the bounds a pass refined stay for the rest of the frame, the next walk starts unrefined")
+{
+	// Thema 162, Schritt 4: Metal and Vulkan refine every object's bound from its real mesh once per
+	// WALK (RenderObject::refineWorldBounds; the loop ran in every pass before, 3.5 ms each at 50k
+	// entities), remembering fullExtractCount() and the object array. That is only sound if reusing the
+	// walk leaves what a pass wrote where it is, if the count does not move for a reuse (nothing to
+	// refine again), and if every new walk moves it and hands out unrefined objects.
+	HorizonWorld world;
+	buildSmallScene(world);
+	const EditorCameraOverride cam = makeCam(glm::vec3(-5.0f, 6.0f, 8.0f));
+
+	RenderExtractor ex;
+	configure(ex);
+	RenderWorld rw;
+	HE::AABB meshBound;                       // what a resolved mesh would say
+	meshBound.expand(glm::vec3(-0.5f));
+	meshBound.expand(glm::vec3(0.5f));
+	const auto same = [](const HE::AABB& a, const HE::AABB& b) {
+		return a.isValid() == b.isValid() && (!a.isValid() || (a.min == b.min && a.max == b.max));
+	};
+
+	HE::AABB walked;
+	{
+		RenderExtractor::FrameScope frame(ex);
+		ex.extract(world, rw, 1.5f, &cam);                // the frame's walk
+		const uint64_t      walk    = ex.fullExtractCount();
+		const RenderObject* objects = rw.objects.data();
+		REQUIRE(rw.objects.size() >= 40u);
+		walked = rw.objects[7].worldBounds;
+		CHECK_FALSE(walked.isValid());                    // no content manager: the walk leaves it invalid
+		for (RenderObject& o : rw.objects) o.refineWorldBounds(meshBound);   // the first pass that needs bounds
+		const HE::AABB refined = rw.objects[7].worldBounds;
+		REQUIRE(refined.isValid());                       // positive control: the refine wrote something
+
+		ex.extract(world, rw, 1.5f, &cam);                // the shadow pass's key check
+		ex.extract(world, rw, 960.0f / 541.0f, &cam);     // SSAO, another aspect
+		ex.extract(world, rw, 1.5f, &cam);                // the scene
+		CHECK(ex.fullExtractCount() == walk);             // no new walk: no pass has to refine again
+		CHECK(rw.objects.data() == objects);              // the same array
+		CHECK(same(rw.objects[7].worldBounds, refined));  // and what the first pass wrote is still there
+	}
+	{
+		RenderExtractor::FrameScope frame(ex);
+		ex.extract(world, rw, 1.5f, &cam);                // the next frame
+		CHECK(ex.fullExtractCount() == 2u);               // the count moved: refine again
+		CHECK(same(rw.objects[7].worldBounds, walked));   // the walk's own bound, not the last frame's refine
+	}
+}
+
+// Thema 162, Schritt 2: what one extract costs against what the frame copy costs, at the sizes
+// of the ladder. Every pass of a Metal or Vulkan frame after the first one is a "reuse", and a
+// reuse is a deep copy of the RenderWorld (out = *frameCopy); the first walk of the frame also
+// pays one (*frameCopy = out). This puts numbers on all three. Not part of the normal run:
+//   out/build/release/tests/he_tests --no-skip --test-case='Extraction bench: the frame copy*'
+TEST_CASE("Extraction bench: the frame copy against the walk it saves" * doctest::skip())
+{
+	using Clock = std::chrono::steady_clock;
+	const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+	const auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+
+	for (const int n : { 1000, 10000, 50000, 100000 })
+	{
+		HorizonWorld world;
+		const std::vector<Entity> leaves = buildGroupedWorld(world, n / 100, 100);
+		for (const Entity e : leaves)
+		{
+			MeshComponent mc;
+			mc.meshAssetId = HE::kDefaultCubeMeshId;
+			world.addComponent(e, mc);
+		}
+		const Entity sun = world.createEntity("Sun");
+		LightComponent lc;
+		lc.type        = HE::LightType::Directional;
+		lc.intensity   = 3.0f;
+		lc.castsShadow = true;
+		world.addComponent(sun, lc);
+
+		RenderExtractor ex;
+		RenderWorld rw, copy, second;
+		ex.extract(world, rw, 16.0f / 9.0f);   // sizes every vector: the timings below are steady state
+		copy   = rw;
+		second = rw;
+
+		std::vector<double> walk, deepCopy, framed;
+		for (int i = 0; i < 7; ++i)
+		{
+			Clock::time_point t0 = Clock::now();
+			ex.extract(world, rw, 16.0f / 9.0f);
+			walk.push_back(ms(Clock::now() - t0));
+
+			t0 = Clock::now();
+			copy = rw;
+			deepCopy.push_back(ms(Clock::now() - t0));
+
+			// A frame of two passes: one walk (+ the snapshot) and one reuse.
+			t0 = Clock::now();
+			{
+				RenderExtractor::FrameScope frame(ex);
+				ex.extract(world, rw, 16.0f / 9.0f);
+				ex.extract(world, second, 16.0f / 9.0f);
+			}
+			framed.push_back(ms(Clock::now() - t0));
+		}
+		MESSAGE(rw.objects.size() << " objects: walk " << median(walk) << " ms, deep copy of the result "
+		        << median(deepCopy) << " ms, frame of walk + 1 reuse " << median(framed) << " ms");
+	}
 }
 
 // ─── Physics: past the old 1024-body wall ───────────────────────────────────

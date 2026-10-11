@@ -173,6 +173,25 @@ private:
 	void createShadowImages();          // the size-dependent part: image, views, framebuffers
 	void destroyShadowImages();
 	void writeShadowDescriptors();      // scene set binding 1 → the array view, every frame slot
+	// The frame's one walk of the world (Thema 162, step 4): the project's shadow settings
+	// and the content manager go into the extractor, then RenderExtractor::extract fills
+	// m_renderWorld at `aspect`. The two places that record a frame (Render() without a
+	// viewport, DrawViewportFrame) call it once before the cascades, so the walk belongs to
+	// the frame and not to the shadow pass; EncodeShadowMap calls it again as its guarantee
+	// that m_renderWorld holds the walk at ITS aspect, which then is a key compare inside the
+	// extractor (RenderExtractor::beginFrame), not a walk. One function for both on purpose:
+	// the second call only stays a key compare while it pushes exactly what the first pushed.
+	// tests/test_culling.cpp pins that the pass goes through it.
+	void extractFrame(float aspect);
+	// Every object's world bound replaced by the real bound of its resolved mesh
+	// (RenderObject::refineWorldBounds), once per walk of the extractor: the walk lives in
+	// m_renderWorld for the whole frame, so the two places that record a frame do the loop right
+	// after the walk, and every pass calls this again as its guarantee that the bounds are real
+	// and finds it done. A new walk or a different object array starts over (Thema 162, step 4).
+	void refineObjectBounds();
+	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
+	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
+	size_t              m_refinedCount   = 0;
 	// Own render pass, before the scene. `aspect` is the camera aspect the
 	// cascades are fit against — the single map never cared, a cascade fit to
 	// a square frustum drops the screen edges of a wide viewport.
