@@ -396,5 +396,7 @@ Schritten je Frame).
   weil die Zeit bis zur Frist nicht für beides reichte. Das heißt: der Editor-Teil dieser Verifikation ist lokal **nicht** belegt
   (die Schritte 2 und 3 haben `all` gebaut, siehe `physics-threading-step2.md` und `physics-threading-budget.md`, jeweils
   Abschnitt 8; `git diff e3f5bff9 af4f2868 -- src tests` ist leer, der Quelltext gleicht also dem von Schritt 3).
-  Die CI auf dem PR deckt ihn ab.
+  Zur CI: Der PR dieses Schritts ändert nur Doku, zum Zeitpunkt des Schreibens hatte er noch keinen Check. Der CI-Lauf 38158075083
+  auf dem Kopf `4799cc01` (Quelltext gleich, `git diff 4799cc01 af4f2868` ist leer) war auf allen Plattformen grün; ob er den
+  Editor-Link auf macOS einschließt, habe ich nicht nachgesehen.
 - **Nicht gelaufen:** Windows und Linux lokal (nur CI), die zwei `runtime_size_app_*` (übersprungen).
