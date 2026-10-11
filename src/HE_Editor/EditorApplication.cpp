@@ -37,6 +37,9 @@
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
 #include "ViewportOverlays.h"      // selection boxes + collider outlines, shared with the dump
+#include "SplineTool.h"            // Spline mode: the tool's state for the overlay, the dump witness
+#include <HorizonScene/SplineCurve.h> // the witness aims its hover at a point on the curve
+#include <glm/gtc/matrix_transform.hpp> // perspective — the witness's mouse-to-ground view
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
 #include "GameLogicBuildPanel.h"   // …and the native compile they start the other way
 #include "BuildProgressDialog.h"   // …and the one window both of them report into
@@ -80,6 +83,8 @@
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainGenerate.h>
+#include <HorizonScene/WaterBrush.h>
+#include <HorizonScene/WaterLake.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
@@ -4064,6 +4069,20 @@ void EditorApplication::OnRender(float dt)
 					RopeTrailSystem::appendTrailGuides(*trail, dbg);
 			}
 
+			// Splines: every one as a line, the selected ones with a handle on
+			// each control point, and in Spline mode the point being edited and
+			// the spot a click on the line would insert at. Authoring furniture,
+			// so not while the game runs, and in Spline mode whatever the Guides
+			// switch says: there the splines are the subject. Built in
+			// ViewportOverlays, the code the HE_DUMP_SPLINETEST witness draws with.
+			if ((show.guides || m_editorConfig.mode == EditorMode::Spline) && !m_isPlaying)
+				HE::Ed::ViewportOverlays::appendSplineGuides(
+					*m_editorWorld, m_selection,
+					m_editorConfig.mode == EditorMode::Spline
+						? SplineTool::guides(*m_editorWorld, m_selection)
+						: SplineEdit::GuideState{},
+					m_editorCamera.position(), dbg);
+
 			// NavMesh wireframe(s): baked polygons, per-component toggle — and
 			// the viewport's switch over all of them, for a scene with twenty.
 			if (show.navMesh)
@@ -7125,6 +7144,384 @@ void EditorApplication::dumpFrameHeadless()
 		}
 	}
 
+	// ── Water surface witness (HE_DUMP_WATERLAKE, Thema 174 Schritte 4 und 5): a
+	// 128 m landscape at y=300 and water drawn into its water field the way the lake
+	// tool will — polygons through HE::water::addPolygon — then updateTerrains, which
+	// builds the surface meshes and their entities. The shapes are the ones the mesh
+	// has to get right (all on flat ground at the water's level unless noted):
+	//   =l     an L (concave corner)
+	//   =star  a five-pointed star (five concave notches, off the grid)
+	//   =ring  a square lake with a square island and a pond on the island
+	//   =two   two lakes side by side, two bodies 0.8 m apart in level
+	//   =slope a lake over a BANK (Schritt 5): the ground rises to the east (0.12 m
+	//          per metre, a wobble across z) and the lake polygon runs on over the hill
+	//   =bowl  a lake drawn bigger than the hollow it lies in (round bank, Schritt 5)
+	//   =brush the same bank, with the water painted by brush dabs instead of a polygon
+	//   =none  the landscape and no water: the control for every other frame
+	// HE_DUMP_WATERLEVEL moves the surface above the ground (default 0.4 m, 2 m for
+	// the bank shapes). HE_DUMP_WATERCLIP=0 switches the shore clipping off (the A of
+	// the A/B; default on), HE_DUMP_WATEROVERSHOOT sets the margin in metres,
+	// HE_DUMP_WATERHIDEGROUND=1 hides the landscape's own chunks so the frame shows
+	// the sheets alone (from above the terrain hides every part of a sheet that is
+	// under it, which is exactly why the clipped and the unclipped picture look the
+	// same there). The log line carries the numbers as a twin to the image.
+	// Camera: CAMY=375 CAMZ=48 PITCH=-60.
+	if (const char* wl = std::getenv("HE_DUMP_WATERLAKE"); wl && *wl && m_editorWorld)
+	{
+		namespace water = HE::water;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(wl);
+		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush";
+		const float level = [bank] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : (bank ? 2.0f : 0.4f); }();
+		auto land = m_editorWorld->createEntity("WaterLakeLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);   // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 128.0f;
+		ltc.resolution  = 65;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 256;
+		if (bank)
+		{
+			// The ground, as a sculpted height field (terrain-local metres). 129 is
+			// 2^7+1, so TerrainSystem does not resample it.
+			const uint32_t hr = 129;
+			ltc.resolution = hr;
+			ltc.sculptHeights.assign(static_cast<size_t>(hr) * hr, 0.0f);
+			for (uint32_t zi = 0; zi < hr; ++zi)
+				for (uint32_t xi = 0; xi < hr; ++xi)
+				{
+					const float x = -64.0f + 128.0f * static_cast<float>(xi) / static_cast<float>(hr - 1);
+					const float z = -64.0f + 128.0f * static_cast<float>(zi) / static_cast<float>(hr - 1);
+					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
+						mode == "bowl" ? 0.004f * (x * x + z * z) - 6.0f
+						               : 0.12f * x + 1.2f * std::sin(0.15f * z);
+				}
+		}
+		if (const char* c = std::getenv("HE_DUMP_WATERCLIP"); c && *c)
+			ltc.water.clipToGround = std::atoi(c) != 0;
+		if (const char* o = std::getenv("HE_DUMP_WATEROVERSHOOT"); o && *o)
+			ltc.water.shoreOvershoot = std::clamp(static_cast<float>(std::atof(o)), 0.0f, water::kMaxShoreOvershoot);
+
+		auto rect = [](float x0, float z0, float x1, float z1) {
+			return std::vector<glm::vec2>{ { x0, z0 }, { x1, z0 }, { x1, z1 }, { x0, z1 } };
+		};
+		bool ok = true;
+		if (mode == "l")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -44, -30 }, { 30, -30 }, { 30, -8 }, { -12, -8 }, { -12, 40 }, { -44, 40 } }).ok;
+		}
+		else if (mode == "star")
+		{
+			std::vector<glm::vec2> star;
+			for (int i = 0; i < 10; ++i)
+			{
+				const float a = 3.14159265f * static_cast<float>(i) / 5.0f - 1.5707963f;
+				const float rad = (i & 1) ? 19.0f : 46.0f;
+				star.emplace_back(2.3f + rad * std::cos(a), 3.1f + rad * std::sin(a));
+			}
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, star).ok;
+		}
+		else if (mode == "ring")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, rect(-48, -40, 48, 40)).ok
+			  && water::removePolygon(ltc, { { -22, -16 }, { 20, -22 }, { 26, 14 }, { -14, 20 } }).ok   // a slanted island
+			  && water::addPolygon(ltc, b, { { -6, -4 }, { 6, -4 }, { 8, 4 }, { -4, 6 } }).ok;           // a pond on it
+		}
+		else if (mode == "slope")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -60, -46 }, { 20, -52 }, { 58, -30 }, { 60, 44 }, { 6, 52 }, { -58, 40 } }).ok;
+		}
+		else if (mode == "bowl")
+		{
+			// The hollow's rim stands at r² = (level + 6) / 0.004, 45 m at level 2: inside the polygon.
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -54, -50 }, { 50, -56 }, { 58, 40 }, { -48, 52 } }).ok;
+		}
+		else if (mode == "brush")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = true;
+			for (int i = 0; i < 9; ++i)       // a trail of dabs across the bank, like a stroke
+			{
+				const float t = static_cast<float>(i) / 8.0f;
+				ok = ok && water::addCircle(ltc, b, -34.0f + 62.0f * t, -26.0f + 50.0f * std::sin(t * 3.0f), 17.0f, 6.0f).ok;
+			}
+		}
+		else if (mode == "two")
+		{
+			const uint16_t a = ltc.water.createBody(level);
+			const uint16_t c = ltc.water.createBody(level + 0.8f);
+			ok = water::addPolygon(ltc, a, { { -50, -36 }, { -8, -42 }, { -2, 10 }, { -44, 18 } }).ok
+			  && water::addPolygon(ltc, c, { { 8, -6 }, { 52, -14 }, { 56, 38 }, { 20, 44 }, { 12, 20 } }).ok;
+		}
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		// The sheet alone: the landscape's chunks stay in the world (collision, the
+		// field) but are not drawn.
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		// The number that says what the picture cannot: how far the ground stands
+		// above the sheet's level at the sheet's own vertices (a clipped sheet has
+		// the overshoot at most), and the vertex span in x.
+		float worstOver = -1.0e30f, lo = 1.0e30f, hi = -1.0e30f;
+		uint32_t verts = 0;
+		for (auto [we, wsc, wtf] : reg.view<WaterSurfaceComponent, TransformComponent>().each())
+			if (const StaticMeshAsset* m = contentManager().getStaticMesh(wsc.meshId))
+				for (size_t i = 0; i + 2 < m->vertices.size(); i += 3, ++verts)
+				{
+					const float x = m->vertices[i] + wtf.position.x, z = m->vertices[i + 2] + wtf.position.z;
+					worstOver = std::max(worstOver, terrainHeightAt(reg.get<TerrainComponent>(land), x, z) - wsc.level);
+					lo = std::min(lo, x); hi = std::max(hi, x);
+				}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE witness landscape added "
+			"(mode %s, polygons %s, surfaces created %u, triangles %u, level %.2f, clip %d, overshoot %.2f, "
+			"vertices %u, x span %.2f..%.2f, ground over sheet at the vertices at most %.3f m)",
+			wl, ok ? "ok" : "FAILED", ws.created, ws.triangles, level,
+			ltc.water.clipToGround ? 1 : 0, ltc.water.shoreOvershoot, verts, lo, hi, worstOver);
+	}
+
+	// ── Water brush witness (HE_DUMP_WATERBRUSH, Thema 174 Schritt 7): a flat
+	// 100 m landscape at y=300, painted the way the Landscape tool's Water mode
+	// paints it — a drag of several dabs through HE::water::brush (begin/dab/end),
+	// the same calls TerrainTools::sculptInViewport makes, not a shortcut through
+	// addCircle. Modes:
+	//   =paint  a straight drag, water at the ground's height plus the default
+	//           offset (no dig): the sheet floats a little above flat ground.
+	//   =dig    the same drag with Dig Bed on: a pit under the water, so the
+	//           sheet has a visible depth instead of a film on the surface.
+	//   =undo   paints, then takes the stroke back through EditorUndo (one
+	//           snapshot before, one undo after) — the A/B for "undo removes a
+	//           whole stroke": compare against =paint at the same settings.
+	// HE_DUMP_WATERLEVEL (default: ground + 0.3, i.e. unset) can pin a fixed
+	// level instead. Camera: CAMY=375 CAMZ=48 PITCH=-60, the WATERLAKE framing.
+	if (const char* wb = std::getenv("HE_DUMP_WATERBRUSH"); wb && *wb && m_editorWorld)
+	{
+		namespace WB = HE::water::brush;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(wb);
+		auto land = m_editorWorld->createEntity("WaterBrushLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution  = 129;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 128;
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat chunks first
+
+		m_undo.setWorld(m_editorWorld.get());
+		m_undo.clearHistory();
+		if (mode == "undo") m_undo.snapshotNow("Paint Water");   // the editor's protocol: snapshot, then the stroke
+
+		WB::Params p;
+		p.radius = 14.0f; p.falloff = 6.0f; p.amount = 1.0f;
+		p.levelFromGround = true; p.levelOffset = 0.3f;
+		if (const char* lv = std::getenv("HE_DUMP_WATERLEVEL"); lv && *lv)
+		{ p.levelFromGround = false; p.level = static_cast<float>(std::atof(lv)); }
+		p.dig = mode == "dig"; p.digDepth = 1.5f;
+
+		auto& ltc2 = reg.get<TerrainComponent>(land);
+		WB::Stroke s;
+		WB::begin(s, ltc2, -24.0f, 0.0f, p);
+		for (int i = 0; i <= 12; ++i)
+			WB::dab(s, ltc2, -24.0f + 48.0f * static_cast<float>(i) / 12.0f, 0.0f, p);
+		const bool created = s.created;
+		const float strokeLevel = s.level;
+		const uint32_t dabs = s.dabs;
+		WB::end(s, ltc2);
+		const uint32_t wetAfterPaint = ltc2.water.wetCells();
+
+		bool undone = false;
+		if (mode == "undo")
+		{
+			undone = m_undo.undo();
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		}
+		else
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+
+		const TerrainComponent& afterTc = [&]() -> const TerrainComponent& {
+			// undo() replaces every entity; find the one landscape again.
+			auto view = reg.view<TerrainComponent>();
+			return reg.get<TerrainComponent>(*view.begin());
+		}();
+		const uint32_t wetNow = afterTc.water.wetCells();
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH witness landscape added "
+			"(mode %s, created %d, level %.2f, dabs %u, wet cells after paint %u, surfaces created %u, "
+			"triangles %u, undone %d, wet cells now %u)",
+			wb, created ? 1 : 0, strokeLevel, dabs, wetAfterPaint, ws.created, ws.triangles,
+			mode == "undo" ? (undone ? 1 : 0) : -1, wetNow);
+	}
+
+	// ── Lake witness (HE_DUMP_LAKEEDIT, Thema 174 Schritt 8): a lake drawn from a
+	// closed spline, widened with the water brush, reshaped by moving its points,
+	// or converted from a painted pond — every step through the code the editor
+	// runs (HE::water::lake::create, HE::water::brush begin/dab/end, the spline
+	// sync inside updateTerrains, lake::convertBody), not a shortcut through the
+	// model. A flat 100 m landscape at y=300, the spline's own lines and handles
+	// drawn on top by ViewportOverlays. Modes:
+	//   =drawn      the bean-shaped spline made a lake (bed 2.5 m, bank 6 m).
+	//   =extended   drawn, then a brush stroke dug out of the east shore (Dig Bed
+	//               on) and the eraser cut an island out of the middle.
+	//   =reshaped   extended, then two points pulled out and one pushed in: the
+	//               outline moved, the channel and the island did not.
+	//   =converted  a pond painted with the brush (dug), then "To Lake": the same
+	//               pond, now with a spline of its own to edit.
+	// Camera as WATERBRUSH: CAMY=375 CAMZ=48 PITCH=-60. The log line carries the
+	// numbers as a twin to the picture.
+	if (const char* le = std::getenv("HE_DUMP_LAKEEDIT"); le && *le && m_editorWorld)
+	{
+		namespace L  = HE::water::lake;
+		namespace WB = HE::water::brush;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(le);
+		const bool extend  = mode == "extended" || mode == "reshaped";
+		const bool reshape = mode == "reshaped";
+
+		const Entity land = m_editorWorld->createEntity("LakeLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution  = 129;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 128;
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat chunks first
+		auto& tc = reg.get<TerrainComponent>(land);
+
+		// Terrain-local XZ outline of a bean, a spline of nine points at the
+		// landscape's world position (so local == world in x and z).
+		const glm::vec2 bean[] = { { -30, 0 }, { -22, -14 }, { -8, -18 }, { 8, -10 }, { 20, -12 },
+		                           { 30, 0 }, { 22, 14 }, { 4, 18 }, { -14, 14 } };
+		const Entity spline = m_editorWorld->createEntity("Shore");
+		reg.emplace<TransformComponent>(spline);
+		SplineComponent sc;
+		sc.closed = true;
+		for (const glm::vec2& p : bean) sc.controlPoints.emplace_back(p.x, 300.0f, p.y);
+
+		std::string note;
+		uint16_t body = HE::water::kNoBody;
+		Entity shown = spline;
+		if (mode == "converted")
+		{
+			// A pond painted with the brush, dug, then turned into a lake.
+			WB::Params p;
+			p.radius = 8.0f; p.falloff = 3.0f; p.amount = 1.0f;
+			p.levelFromGround = true; p.levelOffset = 0.0f;
+			p.dig = true; p.digDepth = 2.0f;
+			WB::Stroke s;
+			WB::begin(s, tc, -26.0f, -2.0f, p);
+			for (int i = 0; i <= 12; ++i)
+				WB::dab(s, tc, -26.0f + 52.0f * static_cast<float>(i) / 12.0f,
+				        -2.0f + 6.0f * std::sin(static_cast<float>(i) * 0.5f), p);
+			body = s.body;
+			WB::end(s, tc);
+			m_editorWorld->destroyEntity(spline);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			const uint32_t pondCells = tc.water.wetCells(body);
+			const L::Converted cv = L::convertBody(*m_editorWorld, land, body);
+			shown = cv.spline;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			char buf[200];
+			std::snprintf(buf, sizeof buf, "pond %u cells -> lake %u cells, %u spline points, error '%s'",
+			              pondCells, tc.water.wetCells(body), cv.points, cv.error.c_str());
+			note = buf;
+		}
+		else
+		{
+			reg.emplace<SplineComponent>(spline, sc);
+			L::Params lp;
+			lp.levelFromGround = true; lp.levelOffset = 0.0f;
+			lp.dig = true; lp.depth = 2.5f; lp.bank = 6.0f;
+			const L::Created made = L::create(*m_editorWorld, land, spline, lp);
+			body = made.body;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			char buf[200];
+			std::snprintf(buf, sizeof buf, "lake %s, level %.2f, %u cells, %u ground vertices dug%s%s",
+			              made.ok ? "made" : "FAILED", made.level, made.cells, made.ground,
+			              made.error.empty() ? "" : ", error ", made.error.c_str());
+			note = buf;
+
+			if (extend)
+			{
+				// A channel out of the east shore, dug, and an island cut out of the middle.
+				WB::Params p;
+				p.radius = 3.5f; p.falloff = 1.5f; p.amount = 1.0f;
+				p.levelFromGround = true; p.levelOffset = 0.0f;
+				p.dig = true; p.digDepth = 2.0f;
+				WB::Stroke s;
+				WB::begin(s, tc, 26.0f, 0.0f, p);
+				const bool continued = !s.created;
+				for (int i = 0; i <= 10; ++i)
+					WB::dab(s, tc, 26.0f + 20.0f * static_cast<float>(i) / 10.0f,
+					        8.0f * static_cast<float>(i) / 10.0f, p);
+				WB::end(s, tc);
+				WB::Params e = p;
+				e.erase = true; e.dig = false; e.radius = 4.0f; e.falloff = 0.5f;
+				WB::begin(s, tc, -8.0f, 3.0f, e);
+				for (int i = 0; i < 3; ++i) WB::dab(s, tc, -8.0f, 3.0f, e);
+				WB::end(s, tc);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				char b2[160];
+				std::snprintf(b2, sizeof b2, "; brush continued the lake: %d, wet cells now %u",
+				              continued ? 1 : 0, tc.water.wetCells(body));
+				note += b2;
+			}
+			if (reshape)
+			{
+				// Pull the east lobe out and the south bay in: the spline moves, the
+				// brush share (channel, island) stays.
+				auto& pts = reg.get<SplineComponent>(spline).controlPoints;
+				pts[4].x += 8.0f; pts[4].z -= 6.0f;
+				pts[5].x += 8.0f;
+				pts[7].z -= 8.0f;
+				const uint32_t before = tc.water.wetCells(body);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the sync inside it reshapes
+				const float chx = 40.0f, chz = 6.4f;   // far down the channel the brush dug
+				char b3[200];
+				std::snprintf(b3, sizeof b3, "; reshaped: %u -> %u cells, channel still wet: %d, island still dry: %d",
+				              before, tc.water.wetCells(body),
+				              HE::water::bodyAt(tc, chx, chz) == body ? 1 : 0,
+				              HE::water::bodyAt(tc, -8.0f, 3.0f) == HE::water::kNoBody ? 1 : 0);
+				note += b3;
+			}
+		}
+		m_selection.clear();
+		if (shown != entt::null) m_selection.add(shown);
+		DebugDrawBuffer guides;
+		HE::Ed::ViewportOverlays::appendSplineGuides(*m_editorWorld, m_selection, SplineEdit::GuideState{},
+		                                             m_editorCamera.position(), guides);
+		r->SetDebugLines(guides.lines());
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LAKEEDIT witness (mode %s): %s | surfaces %u, triangles %u, guide lines %zu",
+		            le, note.c_str(), ws.terrains, ws.triangles, guides.lines().size());
+	}
+
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
 	// 240 m landscape at y=300; "after" grows one TerrainGenerate::mountain in a
 	// circle around its centre. The before/after pair is the oracle: the frames
@@ -8098,6 +8495,113 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_LIGHTGIZMOTEST marker lines=%zu reach lines=%zu "
 			"| spot endpoints on its range sphere=%d of %d",
 			markerLines, lines.lines().size() - markerLines, onRange, spotEnds);
+		HE_LOG_INFO(Editor, "%s", line);
+		r->SetDebugLines(lines.lines());
+	}
+
+	// ── Spline tool witness (HE_DUMP_SPLINETEST): a line drawn the way the tool
+	// draws it. Clicks at pixel positions of the 1280x720 picture go through
+	// SplineEdit::Tool::click with this frame's camera — the mouse-to-ground
+	// mapping, the undo steps and the lines all run the code of the viewport —
+	// onto a floor, and the result is drawn by ViewportOverlays. The value is a
+	// list of words: "closed" joins the last point to the first, "undo" takes
+	// the last two edits back through EditorUndo and lets the tool find its
+	// spline again, "redo" (with "undo") brings one back, "hover" puts the cursor
+	// on the line (the insert cross), "hoverpoint" on a handle (its box lights
+	// up). The log line carries the numbers to read without the picture.
+	if (const char* st = std::getenv("HE_DUMP_SPLINETEST"); st && *st && m_editorWorld)
+	{
+		const std::string words(st);
+		auto has = [&](const char* w) { return words.find(w) != std::string::npos; };
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 base = m_editorCamera.position() + camFwd * 9.0f;
+
+		// The ground: a wide slab under the line, so the picture has a surface to
+		// read it against and the frame is not sky only.
+		const float floorTop = base.y - 1.9f;
+		auto floorE = m_editorWorld->createEntity("SplineFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(base.x, floorTop - 0.1f, base.z);
+		ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		m_undo.setWorld(m_editorWorld.get());
+		m_undo.clearHistory();
+		SplineEdit::Tool tool;
+		SplineEdit::View view;
+		{
+			const float aspect = 1280.0f / 720.0f;
+			view.viewProj = glm::perspective(glm::radians(m_editorCamera.fovDegrees()), aspect,
+			                                 m_editorCamera.nearPlane(), m_editorCamera.farPlane())
+			              * m_editorCamera.viewMatrix();
+			view.rectMin  = { 0.0f, 0.0f };
+			view.rectSize = { 1280.0f, 720.0f };
+		}
+		const SplineEdit::GroundProbe ground = [&](const glm::vec3& o, const glm::vec3& d, glm::vec3& out)
+		{
+			return SplineEdit::rayHitsPlaneY(o, d, floorTop, out);
+		};
+		// A bean of seven clicks, left to right then back.
+		const glm::vec2 clicks[] = { { 330, 520 }, { 470, 430 }, { 650, 400 }, { 830, 440 },
+		                             { 950, 530 }, { 800, 620 }, { 520, 630 } };
+		for (const glm::vec2& c : clicks)
+			tool.click(*m_editorWorld, m_selection, &m_undo, view, c, ground);
+		const size_t editsDone = m_undo.undoDepth();
+		if (has("closed"))
+			tool.toggleClosed(*m_editorWorld, m_selection, &m_undo);
+
+		auto splineNow = [&]() -> const SplineComponent* {
+			const Entity e = tool.activeSpline(*m_editorWorld, m_selection);
+			return e != entt::null ? reg.try_get<SplineComponent>(e) : nullptr;
+		};
+		const size_t pointsBefore = splineNow() ? splineNow()->controlPoints.size() : 0;
+		if (has("undo"))
+		{
+			// What Ctrl+Z does in the editor: the history steps back, the
+			// selection is cleared, and the tool picks its spline up again.
+			for (int i = 0; i < 2; ++i)
+				if (m_undo.undo()) m_selection.clear();
+			tool.sync(*m_editorWorld, m_selection, m_undo.revision());
+			if (has("redo"))
+			{
+				if (m_undo.redo()) m_selection.clear();
+				tool.sync(*m_editorWorld, m_selection, m_undo.revision());
+			}
+		}
+		if (has("hover") || has("hoverpoint"))
+		{
+			// "hover": the mouse on the line between the third and fourth point
+			// (the insert cross). "hoverpoint": on the third handle itself (its
+			// box lights up). One hover state, so one of the two.
+			const SplineComponent* s = splineNow();
+			if (s && s->controlPoints.size() > 3)
+			{
+				const Entity e = tool.activeSpline(*m_editorWorld, m_selection);
+				const glm::mat4 model = HE::worldMatrixOf(*m_editorWorld, e);
+				const HE::spline::Curve curve(*s);
+				const glm::vec3 local = has("hoverpoint") ? s->controlPoints[2] : curve.position(2.5f);
+				glm::vec2 px;
+				if (SplineEdit::project(view, glm::vec3(model * glm::vec4(local, 1.0f)), px))
+					tool.hover(*m_editorWorld, m_selection, view, px);
+			}
+		}
+
+		DebugDrawBuffer lines;
+		HE::Ed::ViewportOverlays::appendSplineGuides(
+			*m_editorWorld, m_selection, tool.guides(*m_editorWorld, m_selection),
+			m_editorCamera.position(), lines);
+		const SplineComponent* s = splineNow();
+		char line[384];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_SPLINETEST clicks=%zu edits=%zu points %zu -> %zu closed=%d "
+			"selected point=%d lines=%zu undo depth=%zu redo depth=%zu",
+			sizeof(clicks) / sizeof(clicks[0]), editsDone, pointsBefore, s ? s->controlPoints.size() : 0u,
+			s && s->closed ? 1 : 0, tool.selectedPoint(), lines.lines().size(),
+			m_undo.undoDepth(), m_undo.redoDepth());
 		HE_LOG_INFO(Editor, "%s", line);
 		r->SetDebugLines(lines.lines());
 	}
@@ -9736,7 +10240,7 @@ void EditorApplication::syncStructuralChanges()
 	// peer, so the allocators are never in lockstep.
 	const auto isLocalOnly = [&reg](Entity e) {
 		return reg.all_of<EnvironmentLightComponent>(e) ||
-		       reg.all_of<TerrainChunkComponent>(e);
+		       HE::isTerrainGenerated(reg, e);
 	};
 
 	std::unordered_set<Entity> current;

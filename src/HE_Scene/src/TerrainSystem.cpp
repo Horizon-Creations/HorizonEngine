@@ -11,6 +11,9 @@
 #include "HorizonScene/TerrainHeightmap.h"
 #include "HorizonScene/TerrainPaint.h"
 #include "HorizonScene/TransformHierarchy.h"
+#include "HorizonScene/WaterSurface.h"
+#include "HorizonScene/WaterField.h"
+#include "HorizonScene/WaterLake.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
@@ -569,6 +572,12 @@ namespace TerrainSystem
                     ++chunksBuilt;
                 }
 
+            // The ground moved, and a water sheet clipped against it has to follow:
+            // hand the rectangle over BEFORE the flags below are cleared (the
+            // surface pass runs after them). Water edits never come back this way.
+            HE::water::noteGroundChanged(tc, rebuildAll || !tc.regionDirty,
+                                         tc.dirtyMinX, tc.dirtyMinZ, tc.dirtyMaxX, tc.dirtyMaxZ);
+
             // Diagnostic (INFO, at most once a second while a brush is dragging): what
             // this rebuild saw — whether it ran, how many chunks it touched and the
             // height range of the field they were built from. A landscape that stays
@@ -620,6 +629,19 @@ namespace TerrainSystem
             if (physics)
                 g_pendingTerrainColliders[&world][static_cast<uint32_t>(te)] = true;
         }
+
+        // ── Water surfaces ───────────────────────────────────────────────────
+        // After the chunks and OUTSIDE the dirty gate above: a water edit leaves
+        // the terrain clean (Field::dirty is the water's own flag, a brush stroke
+        // must not regenerate chunks) and still needs its surface. In this function
+        // rather than in the world tick so that every direct updateTerrains of the
+        // editor — and the headless dump, which renders before any tick — gets it.
+        //
+        // First, the lakes follow their splines: a point that moved since the last
+        // call reshapes the water it belongs to (never the ground), and the surface
+        // pass right below then builds the new sheet in the same frame.
+        HE::water::lake::syncSplines(world);
+        WaterSurface::update(world, cm, renderer);
 
         // ── The collider catches up when the edit stops ──────────────────────
         // A height-field rebuild is not in the same price class as the mesh

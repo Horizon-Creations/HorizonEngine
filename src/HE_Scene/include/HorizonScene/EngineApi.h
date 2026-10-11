@@ -856,6 +856,73 @@ namespace nav {
     // of these rows, so it is named as the next step instead of guessed at here.
 }
 
+// ── Water: lakes, ponds and the brush (Thema 174) ────────────────────────────
+// The scriptable face of the landscape's water (WaterField.h, WaterLake.h,
+// WaterBrush.h): the same model the editor's Lake panel and Water brush edit, so a
+// graph, a script or an MCP client makes and shapes exactly what a hand can.
+//
+// ENTITIES AND IDS. A landscape and a spline are entities (Int); a body of water is
+// the Int id the landscape's water field gives it (0 = none). A lake is a body whose
+// source is a closed spline, so the lake rows take the SPLINE: it is the one handle
+// an author already has.
+//
+// SPACE. x, z and level are WORLD, like the nav group and for the same reason: they
+// come from raycasts, markers and other entities' positions. The landscape's own
+// storage is terrain-local and the rows convert at the edge, through the landscape's
+// world matrix composed on the spot (HE::worldMatrixOf — never the stored one).
+//
+// WHAT RUNS WHEN. The rows change the model; the water SURFACE is built by the world
+// tick (TerrainSystem::updateTerrains), so a lake made in this frame has its sheet at
+// the next one. Moving a lake's spline reshapes its water by itself in that same
+// tick; `reshapeLake` is for a caller that wants it now and wants the number. Nothing
+// here digs except `createLake` with dig, `createLakeAtGround` with dig and `digLake`:
+// reshaping never touches the ground.
+//
+// UNDO. These rows write the world directly, like every exec row. In the editor they
+// are for play-in-editor (the world is restored when play stops); an external MCP
+// client reaches the undoable form through the `terrain_lake` tool, and the pure rows
+// (bodyAt, levelAt, lakeBody, lakeSpline, wetCells) are callable from MCP as they are.
+namespace water {
+    // A lake from a closed spline over a landscape: the water at `level` (world Y),
+    // and with `dig` a bed `depth` metres below it with a `bank` slope back to the
+    // old ground (all in metres). The body's id, or 0 with a log line saying why
+    // not (not a landscape, not a closed spline of three points, the spline already
+    // is a lake, the outline lies off the landscape).
+    int  createLake(Ctx&, Entity terrain, Entity spline, float level, bool dig, float depth, float bank);
+    // The same with the level taken from the lowest ground under the outline plus
+    // `above` metres (read before any digging).
+    int  createLakeAtGround(Ctx&, Entity terrain, Entity spline, float above, bool dig, float depth, float bank);
+    // Bring the water of the lake in line with its spline now. Cells that moved, or
+    // -1 when the spline is not a lake (or is not a closed shape at the moment).
+    // The brush share survives (WaterLake.h, "the merge rule").
+    int  reshapeLake(Ctx&, Entity spline);
+    // Dig the bed again under the lake's current outline. Terrain vertices lowered,
+    // or -1 when the spline is not a lake.
+    int  digLake(Ctx&, Entity spline, float depth, float bank);
+    // Move the lake's surface to a WORLD height. The shape and the ground stay.
+    bool setLakeLevel(Ctx&, Entity spline, float level);
+    // The lake's water and its link to the spline go; the spline and the ground stay.
+    bool removeLake(Ctx&, Entity spline);
+    // A painted pond (a body with no spline) becomes the lake of a new closed
+    // spline that is created for it, a child of the landscape. The spline entity,
+    // 0 when the body is not a pond or too small to outline.
+    Entity convertToLake(Ctx&, Entity terrain, int body);
+
+    // One full-strength dab of the brush at a WORLD point: on water it widens that
+    // body at its level, on dry ground it starts a new pond 0.3 m above the ground.
+    // Cells whose water changed.
+    int  paint(Ctx&, Entity terrain, float x, float z, float radius, float falloff);
+    // One dab of the eraser: water taken out of every body under it.
+    int  erase(Ctx&, Entity terrain, float x, float z, float radius, float falloff);
+
+    // Reading. Pure.
+    int   bodyAt(Ctx&, Entity terrain, float x, float z);                       // 0 = dry
+    bool  levelAt(Ctx&, Entity terrain, float x, float z, float& worldLevel);   // false = dry
+    int   lakeBody(Ctx&, Entity spline);                                        // 0 = not a lake
+    Entity lakeSpline(Ctx&, Entity terrain, int body);                          // 0 = a pond, or no such body
+    int   wetCells(Ctx&, Entity terrain, int body);                             // body 0 = all water
+}
+
 // ── Materials (node-graph param by name) ─────────────────────────────────────
 namespace material {
     glm::vec4 getParam(Ctx&, Entity e, const std::string& name);                       // (0,0,0,0)

@@ -13,6 +13,7 @@
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/DecalComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
+#include "HorizonScene/Components/SplineComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
@@ -383,6 +384,19 @@ namespace
 				{ "material",       uuidToJson(rope->materialAssetId) },
 			};
 		}
+		if (auto* spline = registry.try_get<SplineComponent>(entity))
+		{
+			// The whole component is authored data, so the whole component is
+			// written. "closed" is the flag as authored, not Curve::closed(): a
+			// two-point spline saved as closed must come back closed, so that
+			// adding the third point after a reload closes it.
+			json pts = json::array();
+			for (const glm::vec3& p : spline->controlPoints) pts.push_back(vec3ToJson(p));
+			comps["spline"] = {
+				{ "points", pts },
+				{ "closed", spline->closed },
+			};
+		}
 		if (auto* tr = registry.try_get<TrailComponent>(entity))
 		{
 			// The point ring buffer stays out for the same reason a particle pool
@@ -609,6 +623,37 @@ namespace
 				tc["sculptHeightsB64"] = base64Encode(
 					reinterpret_cast<const uint8_t*>(t->sculptHeights.data()),
 					t->sculptHeights.size() * sizeof(float));
+			}
+			// Water (WaterField.h). Written once there is anything to save, so a
+			// landscape without water saves byte for byte as before. The cells go
+			// out run-length encoded: a dry grid with one lake is a few hundred
+			// bytes where the raw rasters would be a few hundred KB per snapshot.
+			if (!t->water.pristine())
+			{
+				const HE::water::Field& w = t->water;
+				tc["waterRes"]    = w.res;
+				tc["waterNextId"] = w.nextBodyId;
+				json bodies = json::array();
+				for (const HE::water::Body& b : w.bodies)
+				{
+					json bj = { { "id", b.id }, { "level", b.level } };
+					if (b.fromSpline()) bj["sourceSpline"] = uuidToJson(b.sourceSpline);
+					// The outline the lake was last laid from, as raw float pairs
+					// (x, z): the baseline the brush share is measured against when
+					// the lake is reshaped. Same encoding as sculptHeights.
+					if (b.fromSpline() && !b.polygon.empty())
+						bj["polygonB64"] = base64Encode(reinterpret_cast<const uint8_t*>(b.polygon.data()),
+						                                b.polygon.size() * sizeof(glm::vec2));
+					bodies.push_back(std::move(bj));
+				}
+				tc["waterBodies"] = std::move(bodies);
+				// The shore clipping settings, only when they are not the default
+				// (a scene with water from before them reads back as clipped).
+				if (!w.clipToGround) tc["waterClip"] = false;
+				if (w.shoreOvershoot != HE::water::kDefaultShoreOvershoot) tc["waterShoreOvershoot"] = w.shoreOvershoot;
+				const std::vector<uint8_t> cells = HE::water::encodeCells(w);
+				if (!cells.empty())
+					tc["waterCellsB64"] = base64Encode(cells.data(), cells.size());
 			}
 			comps["terrain"] = tc;
 		}
@@ -935,11 +980,12 @@ namespace
 		auto view = registry.view<NameComponent>();
 		for (auto entity : view)
 		{
-			// The built-in environment sun/moon lights and runtime terrain chunks are
-			// never serialised — both are recreated on load (ensureEnvironmentLights /
-			// TerrainSystem from the TerrainComponent), so the scene file stays clean.
+			// The built-in environment sun/moon lights and what a landscape generates
+			// for itself (terrain chunks, water surfaces) are never serialised — all
+			// are recreated on load (ensureEnvironmentLights / TerrainSystem from the
+			// TerrainComponent), so the scene file stays clean.
 			if (registry.all_of<EnvironmentLightComponent>(entity) ||
-			    registry.all_of<TerrainChunkComponent>(entity))
+			    HE::isTerrainGenerated(registry, entity))
 				continue;
 
 			json eJson;
@@ -970,7 +1016,7 @@ namespace
 				json children = json::array();
 				for (auto child : hier->children)
 					if (!registry.all_of<EnvironmentLightComponent>(child) &&    // omit built-ins
-					    !registry.all_of<TerrainChunkComponent>(child))          // + terrain chunks
+					    !HE::isTerrainGenerated(registry, child))                // + chunks, water
 						children.push_back(uuidToJson(entityUuid(registry, child)));
 				eJson["children"] = children;
 			}
@@ -1222,6 +1268,16 @@ namespace
 			rope.castsShadow      = c.value("castsShadow",    rope.castsShadow);
 			rope.materialAssetId  = jsonToUuid(c.value("material", json()));
 			registry.emplace_or_replace<RopeComponent>(entity, rope);
+		}
+		if (comps.contains("spline"))
+		{
+			const json& c = comps["spline"];
+			SplineComponent spline;
+			if (auto pts = c.find("points"); pts != c.end() && pts->is_array())
+				for (const json& p : *pts)
+					spline.controlPoints.push_back(jsonToVec3(p, glm::vec3(0.0f)));
+			spline.closed = c.value("closed", spline.closed);
+			registry.emplace_or_replace<SplineComponent>(entity, spline);
 		}
 		if (comps.contains("trail"))
 		{
@@ -1484,6 +1540,53 @@ namespace
 			}
 			else if (c.contains("sculptHeights") && c["sculptHeights"].is_array())
 				t.sculptHeights = c["sculptHeights"].get<std::vector<float>>(); // legacy scenes
+			// Water. Every key is optional and every value is checked: a scene
+			// written before water existed has none of them, and one edited or
+			// merged by hand must not leave a grid the surface can index out of.
+			{
+				HE::water::Field& w = t.water;
+				w.res = c.value("waterRes", w.res);
+				w.nextBodyId = c.value("waterNextId", w.nextBodyId);
+				if (c.contains("waterClip") && c["waterClip"].is_boolean())
+					w.clipToGround = c["waterClip"].get<bool>();
+				if (c.contains("waterShoreOvershoot") && c["waterShoreOvershoot"].is_number())
+					w.shoreOvershoot = c["waterShoreOvershoot"].get<float>();   // sanitize() clamps it
+				if (c.contains("waterBodies") && c["waterBodies"].is_array())
+					for (const json& bj : c["waterBodies"])
+					{
+						if (!bj.is_object()) continue;
+						HE::water::Body b;
+						if (bj.contains("id") && bj["id"].is_number_integer())
+						{
+							const long long id = bj["id"].get<long long>();
+							b.id = (id > 0 && id <= 65535) ? static_cast<uint16_t>(id) : HE::water::kNoBody;
+						}
+						if (bj.contains("level") && bj["level"].is_number())
+							b.level = bj["level"].get<float>();
+						if (bj.contains("sourceSpline"))
+							b.sourceSpline = jsonToUuid(bj["sourceSpline"]);
+						if (bj.contains("polygonB64") && bj["polygonB64"].is_string())
+						{
+							// A length that is not whole float pairs, or too many of
+							// them, is a damaged field: no outline (sanitize does the
+							// same for non-finite points).
+							const std::vector<uint8_t> raw = base64Decode(bj["polygonB64"].get<std::string>());
+							if (raw.size() % sizeof(glm::vec2) == 0 &&
+							    raw.size() / sizeof(glm::vec2) <= HE::water::kMaxPolygonPoints)
+							{
+								b.polygon.resize(raw.size() / sizeof(glm::vec2));
+								if (!raw.empty()) std::memcpy(b.polygon.data(), raw.data(), raw.size());
+							}
+						}
+						w.bodies.push_back(b);
+					}
+				if (c.contains("waterCellsB64") && c["waterCellsB64"].is_string())
+				{
+					const std::vector<uint8_t> bytes = base64Decode(c["waterCellsB64"].get<std::string>());
+					HE::water::decodeCells(w, bytes.data(), bytes.size());   // a bad stream drops the cells, keeps the bodies
+				}
+				HE::water::sanitize(t);
+			}
 			t.dirty       = true; // always regenerate after load
 			registry.emplace_or_replace<TerrainComponent>(entity, t);
 		}
@@ -2240,7 +2343,7 @@ namespace
 	bool isEngineGenerated(entt::registry& registry, Entity e)
 	{
 		return registry.all_of<EnvironmentLightComponent>(e) ||
-		       registry.all_of<TerrainChunkComponent>(e);
+		       HE::isTerrainGenerated(registry, e);
 	}
 
 	void collectSubtree(entt::registry& registry, Entity root,
@@ -2492,6 +2595,7 @@ namespace
 	X("light",               LightComponent) \
 	X("decal",               DecalComponent) \
 	X("rope",                RopeComponent) \
+	X("spline",              SplineComponent) \
 	X("trail",               TrailComponent) \
 	X("rigidbody",           RigidBodyComponent) \
 	X("collider",            ColliderComponent) \
@@ -2753,7 +2857,7 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
-		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "terrain",
+		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "spline", "terrain",
 		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",

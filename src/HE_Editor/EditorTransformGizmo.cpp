@@ -8,6 +8,7 @@
 #include <HorizonScene/TransformHierarchy.h>   // worldMatrixOf
 #include <ImGuizmo.h>
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>   // translate
 
 namespace EditorTransformGizmo
 {
@@ -357,6 +358,43 @@ bool manipulate(HorizonWorld& world, const std::vector<Entity>& entities,
 		                     enabled, undo, outChanged, probe);
 	return manipulateGroup(world, movable, view, proj, rectMin, rectMax, tb, enabled,
 	                       undo, outChanged, probe);
+}
+
+bool manipulatePoint(glm::vec3& worldPos,
+                     const glm::mat4& view, const glm::mat4& proj,
+                     const ImVec2& rectMin, const ImVec2& rectMax,
+                     const ViewportToolbar::State& tb, bool enabled,
+                     PointDrag& drag, const SnapProbe& probe)
+{
+	drag = {};
+	// The toolbar's snapping, with the operation forced to Move: a point has no
+	// rotation or scale, whichever handle the toolbar has armed for entities.
+	ViewportToolbar::State move = tb;
+	move.op = ImGuizmo::TRANSLATE;
+	beginFrame(rectMin, rectMax, proj, move, enabled);
+
+	// The matrix ImGuizmo produced last frame is the one it works on while the
+	// drag lasts, for the same reason as the entity gizmo: re-deriving it from
+	// the stored point every frame would hand it a different start each time.
+	static bool      s_wasUsing = false;
+	static glm::mat4 s_matrix(1.0f);
+	glm::mat4 m = s_wasUsing ? s_matrix : glm::translate(glm::mat4(1.0f), worldPos);
+	ImGuizmo::Manipulate(&view[0][0], &proj[0][0],
+	                     ImGuizmo::TRANSLATE, ImGuizmo::WORLD, &m[0][0],
+	                     nullptr, move.activeSnap());
+	applySnapProbe(move, probe, view, proj, rectMin, rectMax, ImGuizmo::TRANSLATE, m);
+	s_matrix = m;
+
+	const bool using_ = ImGuizmo::IsUsing();
+	drag.started = using_ && !s_wasUsing;
+	drag.ended   = !using_ && s_wasUsing;
+	s_wasUsing   = using_;
+	if (using_)
+	{
+		worldPos   = glm::vec3(m[3]);
+		drag.moved = true;
+	}
+	return ImGuizmo::IsOver() || using_;
 }
 
 } // namespace EditorTransformGizmo

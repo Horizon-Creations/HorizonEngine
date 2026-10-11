@@ -60,6 +60,12 @@ namespace
 	  "chain, a cable, a grapple line. It is geometry, not simulation: the points "
 	  "are where you put them, or where the entities its ends are attached to are.",
 	  "", "scenes#components" },
+	{ "Component/Spline", "Spline",
+	  "A line or a closed outline through its control points — a lake shore, a "
+	  "path, a fence run. It draws nothing in the game: the editor shows it as a "
+	  "guide, and whatever is built along it reads the points. Draw and edit it "
+	  "with the Spline mode of the Scene toolbar, or type the points in here.",
+	  "", "scenes#components" },
 	{ "Component/Trail", "Trail",
 	  "Leaves a band behind the entity as it moves: a weapon swipe, a tyre mark in "
 	  "the air, a projectile streak. Points are dropped as it travels and fade out "
@@ -776,6 +782,19 @@ namespace
 	{ "Terrain/Disp. Tiling", "",
 	  "How many times the displacement map repeats across the whole landscape. "
 	  "0 follows Texture Tiling, so it lines up with the material.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Clip To Ground", "",
+	  "Water stops where the ground comes up through it: a lake over a slope ends "
+	  "at the bank instead of floating over the hill. Brushed water and lakes "
+	  "alike. Off draws every water body as the flat shape it was painted or "
+	  "drawn in, at its own height. The painted shape is never changed, so "
+	  "switching back restores the bank.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Shore Overshoot", "",
+	  "How far above the water the ground may stand and still be covered by it, "
+	  "in metres. A little keeps the water's rim tucked under the bank instead of "
+	  "a hair short of it. On a gentle bank it pushes the rim further than on a "
+	  "steep one. 0 ends it exactly where the surface meets the ground.",
 	  "", "scenes#terrain" },
 	{ "Terrain/Seed", "",
 	  "Which random landscape is generated. 0 is flat ground; any other number is "
@@ -1674,6 +1693,97 @@ namespace
 	  "Adds a control point at the far end, carrying on in the direction the last "
 	  "two describe, so it lands somewhere you can see and grab.",
 	  "", "scenes#components" },
+	{ "Spline/Closed", "",
+	  "Joins the last point back to the first, with the curve smooth across the "
+	  "join, so the line becomes an outline. It needs at least three points; with "
+	  "fewer it stays an open line until you add the third.",
+	  "", "scenes#components" },
+	{ "Spline/Point", "",
+	  "One control point, in the entity's own space. The curve passes through every "
+	  "one of them; drag the handle in the Scene view (Spline mode) or type the "
+	  "numbers here.",
+	  "", "scenes#components" },
+	{ "Spline/+ Point", "",
+	  "Adds a control point at the far end, carrying on in the direction of the "
+	  "last segment, so it lands somewhere you can see and grab.",
+	  "", "scenes#components" },
+	{ "Spline/Remove", "",
+	  "Deletes this control point. The spline stays even with none left, so you "
+	  "can start it again.",
+	  "", "scenes#components" },
+	{ "Spline Tool/Closed", "",
+	  "Joins the last point back to the first so the line becomes an outline "
+	  "(it needs three points). One undo step.",
+	  "", "editor#viewport" },
+	{ "Spline Tool/Delete Point", "",
+	  "Removes the selected point from the line. The Delete key does the same "
+	  "while the Scene view has the focus; the neighbouring point is selected "
+	  "next, so holding the key eats the line from the end you are at.",
+	  "", "editor#viewport" },
+	{ "Spline Tool/New Spline", "",
+	  "Lets go of the spline, so the next click on the ground starts a new line "
+	  "instead of adding to this one.",
+	  "", "editor#viewport" },
+
+	// ── Spline tool: the lake ────────────────────────────────────────────────
+	{ "Spline Tool/From Ground##lake", "Level From Ground",
+	  "Takes the water level from the lowest ground under the outline, plus "
+	  "Above Ground. Switch it off to type the level yourself. The ground is "
+	  "read before the bed is dug.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Above Ground##lake", "Lake Above Ground",
+	  "How far above the lowest ground under the outline the surface stands, "
+	  "in metres. At 0 the water is level with the lowest point of the bank.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Level##lake", "Lake Level",
+	  "The height of the surface, in metres on the landscape's own height scale "
+	  "(a landscape standing at Y = 100 with level 2 has its water at 102). On "
+	  "a lake that exists this moves the surface; the shape and the ground stay. "
+	  "One undo step per drag.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Dig Bed##lake", "Dig Bed",
+	  "Makes the lake with a bed: the ground inside the outline is lowered to "
+	  "Depth below the water level, with a Bank that eases back into the old "
+	  "ground. It only ever lowers. Off makes just the water, for a lake that "
+	  "fills a hollow that is already there.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Depth##lake", "Lake Depth",
+	  "How far below the water level the bed is dug, in metres. Used by Create "
+	  "Lake with Dig Bed on, and by Dig Again.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Bank##lake", "Lake Bank",
+	  "The width of the slope from the bed back up to the old ground, in "
+	  "metres, measured outward from the outline. 0 is a hard edge; a wide "
+	  "bank makes a gentle shore.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Clip To Ground##lake", "Clip To Ground",
+	  "A landscape setting, shared by every lake and every painted pond on it: "
+	  "the water surface stops where the ground comes up through it instead of "
+	  "reaching over the bank. Off draws the surface over the whole outline at "
+	  "its level.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Shore Overshoot##lake", "Shore Overshoot",
+	  "How far above the water the ground may stand and still count as under "
+	  "it, in metres, so the edge of the surface sits under the bank and not a "
+	  "hair short of it. The same landscape setting as in the Terrain details.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Create Lake", "",
+	  "Turns the closed outline into a lake: digs the bed (with Dig Bed on) and "
+	  "lays the water over it, at the level set above, in one undo step. From "
+	  "then on the points reshape the water only; the ground is dug again only "
+	  "when you press Dig Again. Water you paint with the Water brush on this "
+	  "lake stays when the points move.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Dig Again", "",
+	  "Digs the bed again under the lake's current outline, to Depth below "
+	  "its water level with the Bank slope. Moving points never digs by "
+	  "itself, so after reshaping the lake this is how the new shape gets its "
+	  "bed. It only lowers; one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Remove Lake", "",
+	  "Takes the lake's water away and cuts its link to the spline. The spline "
+	  "stays, and so does the ground that was dug. One undo step.",
+	  "", "editor#landscape-mode" },
 	{ "Trail/Visible", "",
 	  "Off hides the band. Points keep being dropped and keep ageing, so switching "
 	  "it back on shows the trail as it would have been.",
@@ -3122,7 +3232,9 @@ namespace
 	  "", "editor#viewport" },
 	{ "viewport.mode", "Viewport Mode",
 	  "Scene is normal editing. Landscape turns the viewport into the terrain "
-	  "sculpting and painting tool, with its brushes in Quick Settings.",
+	  "sculpting and painting tool, with its brushes in Quick Settings. Spline "
+	  "draws lines and outlines: click the ground to add points, click the line "
+	  "to insert one, drag the gizmo to move one, Delete removes it.",
 	  "", "editor#landscape-mode" },
 	{ "viewport.show", "Show",
 	  "Which overlays the editor draws over the scene: the ground grid, the "
@@ -6677,31 +6789,34 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Radius", "Brush Radius",
 	  "The inner, full-strength part of the brush, in metres — the tight circle "
-	  "drawn on the ground. The same value is used for sculpting, painting and "
-	  "foliage, so changing it in one mode changes it in the other. In the "
-	  "viewport, [ and ] make it smaller and larger.",
+	  "drawn on the ground. The same value is used for sculpting, painting, "
+	  "foliage and water, so changing it in one tab changes it in the others. "
+	  "In the viewport, [ and ] make it smaller and larger.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Falloff", "Brush Falloff",
 	  "How far past the radius the brush keeps working, in metres — the faint "
 	  "outer circle. Strength falls off linearly from full at the radius to "
 	  "nothing at the outer edge, so 0 gives a hard-edged brush and a large "
-	  "value a very soft one. Shared with painting. In the viewport, Shift+[ "
-	  "and Shift+] change it. The curve above the sliders draws the profile.",
+	  "value a very soft one. Shared with painting and the water brush, where "
+	  "it is the width of the shore the water thins out over. In the viewport, "
+	  "Shift+[ and Shift+] change it. The curve above the sliders draws the "
+	  "profile.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Strength", "Brush Strength",
 	  "How hard the brush works while the left button is held, from 0 to 1. For "
 	  "Raise and Lower the scale is squared, so the gentle end gets most of the "
 	  "slider; at 1 the ground moves about 50 m a second under the full-strength "
 	  "part of the brush. Smooth, Flatten and Ramp use it as a rate of blending "
-	  "towards their target instead. Hold Ctrl while dragging to turn the brush "
-	  "around: Raise lowers, Lower raises.",
+	  "towards their target instead. The water brush uses it as how fast a spot "
+	  "fills with water (or dries) while the button is held. Hold Ctrl while "
+	  "dragging to turn the brush around: Raise lowers, Lower raises.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Paint Strength", "Paint Strength",
 	  "How much of the selected layer a texel takes while you paint, from 0 to 1. "
 	  "At 1 the first touch gives the layer 100 % at once, whatever was there "
 	  "before; lower values build it up the longer the left button is held "
 	  "(0.1 takes about half a second to cover a spot). Applies to layer painting "
-	  "only — sculpting and foliage keep the Brush Strength.",
+	  "only — sculpting, foliage and water keep the Brush Strength.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Weightmap", "Weightmap Resolution",
 	  "How many texels per side the layer weightmap has, from 32 to 2048 — click "
@@ -6885,6 +7000,95 @@ namespace
 	  "Throws the painted mask away entirely: the layer goes back to an even "
 	  "scatter over the whole landscape, as if nothing had been painted, and "
 	  "the mask resolution unlocks. One undo step, the whole mask.",
+	  "", "editor#landscape-mode" },
+
+	// ── Landscape: the water brush ───────────────────────────────────────────
+	{ "Landscape/Water", "Water",
+	  "Paints water onto the landscape the way the other brushes paint ground: "
+	  "drag in the viewport and a pond appears under the cursor, hold Ctrl to "
+	  "wipe it off again. It writes into the landscape's water — the same data "
+	  "a lake drawn from a spline lives in — so a stroke that starts on a lake "
+	  "widens that lake, and the eraser can notch it. The surface only exists "
+	  "where the ground is below the water, so it never climbs a bank. A "
+	  "stroke is one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paint Water", "Paint Water",
+	  "Water goes where you drag. A stroke that starts on dry ground makes a "
+	  "new body of water at the level set below; one that starts on water goes "
+	  "on with that water, at its level. Holding the button over a spot fills "
+	  "it up (Strength sets how fast), so a quick pass leaves a thin trail "
+	  "and a slow one a solid pond. The cursor is blue; the faint dashed ring "
+	  "marks the height the surface will stand at.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Erase Water", "Erase Water",
+	  "Takes water away under the brush, from every body of water it touches. "
+	  "A pond painted with the brush is gone once it has no water left; a lake "
+	  "drawn from a spline stays and can be drawn back in. The cursor turns "
+	  "red. Holding Ctrl while you drag does the same without switching.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/From Ground##water", "Level From Ground",
+	  "Takes the surface height from the ground under the first point of each "
+	  "stroke, plus Above Ground — click in a hollow and the water stands "
+	  "just above its bottom. Switch it off to type the level yourself, for a "
+	  "second pond that has to match the first. Dragging uphill afterwards "
+	  "does not tilt the water: the level is fixed when the stroke begins.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Above Ground##water", "Water Above Ground",
+	  "How far above the ground at the first point the surface stands, in "
+	  "metres. Water level with the ground has no depth at all, so a click on "
+	  "flat ground paints nothing visible at 0; the default puts the first "
+	  "point a little under water. A negative value starts the surface below "
+	  "the ground: the pond then fills only the lower land around it.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Level##water", "Water Level",
+	  "The height of the surface for new water, in metres on the landscape's "
+	  "own height scale (a landscape standing at Y = 100 with level 2 has its "
+	  "water at 102). Strokes that start on existing water ignore it and keep "
+	  "that water's level.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Dig Bed##water", "Dig Bed",
+	  "Also digs while you paint: the ground under the brush is lowered to a "
+	  "floor Depth below the water level, with the brush falloff as the bank. "
+	  "It only ever lowers — a hole already deeper stays — and holding still "
+	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
+	  "The eraser never digs. One undo step takes the water and the pit back "
+	  "together.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Depth##water", "Bed Depth",
+	  "How far below the water level the bed is dug, in metres. Only used "
+	  "with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Resolution##water", "Water Grid Resolution",
+	  "How many cells per side the landscape's water is stored in, from 32 to "
+	  "2048, stretched over the whole landscape. The cell size is shown under "
+	  "it: a shore can only be as fine as that, so a large landscape wants more "
+	  "cells for small ponds. Type a number and press Enter (or click away): it "
+	  "is applied then, not on every digit, keeping the shape of what is "
+	  "painted; one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/To Lake", "",
+	  "Turns this painted pond into a lake: reads the outline of its water, "
+	  "draws a closed spline through it (a handful of points, in the Outliner "
+	  "under the landscape) and gives the pond to that spline, with the Spline "
+	  "tool switched on so you can move the points. The surface keeps its "
+	  "level. The ragged painted edge becomes the smooth curve of the spline, "
+	  "an island inside the pond is filled (erase it again with the brush; the "
+	  "erase stays when the points move), and a piece of the pond that is "
+	  "separate from the main one stays as painted water. One undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Select Spline", "",
+	  "Selects the spline this lake was drawn from and switches to the Spline "
+	  "tool, where its points and the Lake controls are.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Detach", "",
+	  "This lake's spline has been deleted, so the water has nothing to follow. "
+	  "Detach makes it a painted pond: the water stays exactly as it is, and "
+	  "it can be turned into a lake again with To Lake. One undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Clear All Water", "",
+	  "Removes every body of water from the landscape — painted ponds and "
+	  "spline lakes alike. The ground is not touched, and the grid resolution "
+	  "stays. One undo step.",
 	  "", "editor#landscape-mode" },
 
 	// ── The Environment window ───────────────────────────────────────────────
@@ -8834,6 +9038,7 @@ namespace
 		{ "env.",                 "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },
 		{ "Landscape/",           "editor-landscape", "Landscape Tools", "Sculpting and painting" },
+		{ "Spline Tool/",         "editor-landscape", "Landscape Tools", "Drawing splines" },
 		{ "Environment Window/",  "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "anim.",                      "editor-animation", "Animation Editors", "Animator" },
 		{ "State Machine/",             "editor-animation", "Animation Editors", "State machine" },
@@ -8874,7 +9079,7 @@ namespace
 	// editor.
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
-		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
+		"Decal", "Rope", "Spline", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Replication",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
