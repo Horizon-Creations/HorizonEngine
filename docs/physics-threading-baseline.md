@@ -290,7 +290,7 @@ Vorher (Schritt-1-Binary, Quelle `a4fa3a9d`) und Nachher (Kopf dieses Zweigs), g
 | dense 10 000 | 11,60 / 12,68 / 20,24 | 8,23 / 9,41 / 11,05 | -29 % | -26 % |
 | sparse 5 000 + 500 Charaktere | 5,65 / 6,39 / 10,31 | 3,88 / 4,47 / 12,57 | -31 % | -30 % |
 
-Der Median und das 95. Perzentil sinken um 26 bis 42 %. Die Spitze (max) sinkt bei fünf von sechs Zeilen (bei 20 000
+Der Median und das 95. Perzentil sinken um 26 bis 42 %. Die Spitze (max) sinkt bei vier von fünf Zeilen (bei 20 000
 um 30 %), nur bei 5 000 mit 500 Charakteren liegt sie nachher höher (12,57 statt 10,31 ms, ein einzelner Schritt in
 600 Frames; das 95. Perzentil liegt tiefer). Ein Lauf je Zeile, siehe Grenzen.
 
@@ -318,7 +318,11 @@ der Schritt serieller wäre: der Schritt kostet 10,5 ms; nimmt man die 8,5 ms vo
 Jolt-Worker laufen länger (37 statt 28 %), weil sie in kürzerer Zeit dieselbe Arbeit tun. **`stepStats`:** keiner der Nachher-Läufe meldet verworfene Kontakte (kein
 `Jolt dropped contacts` in den Logs, `ContactConstraintsFull` tritt in keiner Szene auf); die Zeilen unter
 `docs/perf-audit/physics-threading-step4/*.runlog` belegen das. (`stepStats()` ist eine C++-Schnittstelle und steht nicht im
-Profiler-Dump; der Beleg ist die gedrosselte Warnung, die beim ersten gesättigten Schritt kommen müsste.)
+Profiler-Dump; der Beleg ist die gedrosselte Warnung, die beim ersten gesättigten Schritt kommen müsste.) Die
+Logs enthalten bei den großen Szenen tausende Zeilen `PhysicsWorld::step took ... ms (budget 8.00 ms)`: das ist die
+ältere Langsam-Schritt-Warnung der Engine (eine Zeile je Schritt über 8 ms, vorher wie nachher vorhanden), nicht das Zeitbudget
+aus Schritt 3; die Zahlen stehen in den `*.physics-log.txt` (sparse 20 000: 4 341 vorher, 2 899 nachher, passend zu 4,96 gegen 3,38
+Schritten je Frame).
 
 **Bedingungen (ehrlich):**
 
@@ -356,4 +360,24 @@ Profiler-Dump; der Beleg ist die gedrosselte Warnung, die beim ersten gesättigt
   `CollideShape`, Strahlen unter Last, der Durchtunnelungs-Gegenversuch der Collision-Steps, Windows, Linux, und alles mit
   entsperrtem Bildschirm und vsync.
 
-**Voll-Build und Tests:** TODO-TESTS
+**Voll-Build und Tests** (macOS, Release, `HE_ENABLE_SHADERC=ON` laut `CMakeCache.txt`, Quelle gleich `origin/release/0.7.0`
+`af4f2868`, alles im Vordergrund gebaut und gelaufen):
+
+- **`HorizonGame`:** 35 Schritte, 1,5 Minuten, `BUILD_RC=0`.
+- **`he_tests`** (mit allen Test-Bibliotheken): 396 Schritte, 12 Minuten, `BUILD_RC=0`, kein `error:` und kein `FAILED` im Log.
+- **Voller `ctest -j4 --timeout 1500`: 261 Tests, 100 % bestanden** (`CTEST_RC=0`, 284,7 s). Übersprungen sind nur
+  `runtime_size_app_advanced` und `runtime_size_app_basic` (kein Deploy-Ordner `AppAdvanced`/`AppBasic`, wie in Schritt 2 und 3).
+  Kein roter Test, also auch kein Gegenlauf nötig. Die Tests aus den vom Auftrag genannten Bereichen sind alle grün:
+  - Physik: `test_physics`, `test_physics_threading` (Schritt 2), `test_physics_budget` (Schritt 3), `test_collision_system`;
+  - Charaktere und Bewegung: `test_character`, `test_player_host`, `test_player_settings`, `test_movement`;
+  - Streaming: `test_async_streaming`, `test_cell_split`, `test_streaming_view`;
+  - Projekt-Einstellungen mit dem neuen Feld: `test_project_settings`, `test_project_settings_ui`;
+  - Netzwerk-Schicht, die auf die Physik aufsetzt: `test_game_replication`, `test_net_property_replication`, `test_net_game_session`,
+    `test_anticheat`.
+- **Nicht gebaut: `all`** (der Link von `HorizonEditor` mit `ProfilerPanel`, `ProjectSettingsPanel`, `EditorHelp`). Ich habe ihn
+  gestartet (723 Schritte, nach den Erfahrungen aus Schritt 2 gut 19 Minuten) und für die Messwiederholung wieder abgebrochen,
+  weil die Zeit bis zur Frist nicht für beides reichte. Das heißt: der Editor-Teil dieser Verifikation ist lokal **nicht** belegt
+  (die Schritte 2 und 3 haben `all` gebaut, siehe `physics-threading-step2.md` und `physics-threading-budget.md`, jeweils
+  Abschnitt 8; `git diff e3f5bff9 af4f2868 -- src tests` ist leer, der Quelltext gleicht also dem von Schritt 3).
+  Die CI auf dem PR deckt ihn ab.
+- **Nicht gelaufen:** Windows und Linux lokal (nur CI), die zwei `runtime_size_app_*` (übersprungen).
