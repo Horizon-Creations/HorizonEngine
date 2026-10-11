@@ -2,7 +2,7 @@
 
 Stand 11.10.2026, Zweig `claude/physik-multithreading-jolt-jobsystem-thread-aufteilung-zeitbudget`. Aufbauend auf
 `docs/physics-threading-baseline.md` (Schritt 1). Dieses Dokument beschreibt, was geändert wurde, welche Standardwerte
-gelten und warum, was getestet ist und, in Abschnitt 8, **was in diesem Schritt nicht gemessen werden konnte**.
+gelten und warum, was getestet ist und, in Abschnitt 8, was gemessen wurde und **was nicht**.
 
 ## 1. Kurzfassung
 
@@ -105,7 +105,7 @@ Schritten in `ContactConstraintsFull` (Jolt lässt Kontakte weg, Körper sinken 
 Haufen mit vierfachen Obergrenzen doppelt so schnell ist (20,4 gegen 41,3 ms Update), weil Jolt das Abgeschnittene
 nicht jeden Schritt neu versucht. Mit den neuen Werten meldet der Bench für diesen Haufen 0 Fehler. Der Preis ist
 Adressraum und ein etwas größeres Löschen der Cache-Tabellen je Schritt (rund 2,6 MB, in der Größenordnung 0,1 ms; im
-Bench unter Last nicht von Rauschen zu trennen, Abschnitt 8). Szenen unterhalb der Grenzen rechnen unverändert.
+Bench unter Last nicht von Rauschen zu trennen; im Spielloop bei 1 000 Körpern kein Mehraufwand sichtbar, Abschnitt 8). Szenen unterhalb der Grenzen rechnen unverändert.
 
 `PhysicsWorld(const HE::PhysicsLimits&)` erlaubt andere Werte (der Test nutzt 64 Paare und 16 Constraints, um die
 Sättigung billig zu erzeugen); der Block wird aus denselben Zahlen abgeleitet, beide können also nicht auseinanderlaufen.
@@ -166,38 +166,57 @@ gezählte Sättigung bei winzigen Obergrenzen ohne Absturz (und keine bei den St
 `step()`, drei Fälle zur Hold-Sonde (nicht gefragt solange "nein", ohne Sonde wie bisher, ein gehaltener Körper wird auch bei
 "nein" freigegeben). `scripts/editor_help_audit.py --check`: 1129 von 1129 Steuerelementen abgedeckt (Hilfe-Eintrag für das neue Feld).
 
-**Ausgeführt (macOS, Release):** eine aus der Link-Zeile von `he_tests` abgeleitete Teilmenge `he_tests_phys` mit allen
-Testdateien, die `PhysicsWorld` berühren: `test_physics`, `test_physics_threading`, `test_character`, `test_raycast`,
-`test_collision_system`, `test_collider`, `test_project_settings`, `test_world_scale` (44 Fälle ohne Benchmarks),
-`test_entity_host`, `test_movement`, `test_terrain`, `test_root_motion`, `test_camera_rig`, `test_third_person_template`,
-`test_navigation`, `test_net_game_session`, `test_net_rpc`, `test_engine_api`, `test_particles`, `test_animation_ik`,
-`test_anticheat`, `test_project_exporter`: **659 Fälle, 36 796 Assertions, 0 Fehler** (7 übersprungen, alle schon vorher mit
-`skip`). Dieselbe Teilmenge ohne `test_world_scale` zusätzlich mit `HE_PHYSICS_THREADS` 1, 2 und 8: je 359 Fälle grün.
-`EditorApplication.cpp` und `ProjectSettingsPanel.cpp` kompilieren (Editor-Binary nicht gelinkt).
+**Ausgeführt (macOS, Release, shaderc ON, Stand `aa92c54a` = dieser Zweig mit eingemergtem `origin/release/0.7.0`):**
 
-**Nicht ausgeführt, abgeschnitten:**
+- **Voller Bau:** `he_tests` (361 Schritte nach dem Merge) und danach `all` (638 Schritte, mit dem Link von `HorizonEditor`):
+  fehlerfrei.
+- **Voller `ctest -j4 --timeout 1500`, 260 Tests: 100 % bestanden** (erster Lauf nach dem `he_tests`-Bau 242 s, zweiter Lauf nach
+  `all` 283 s). Übersprungen sind `runtime_size_app_advanced` und `runtime_size_app_basic`: sie messen `out/deploy/AppAdvanced`
+  und `AppBasic`, die nur beim Verpacken der App-Varianten entstehen ("nothing to measure", `SKIP_RETURN_CODE 2`), das ist bei jedem
+  Standardbau so. Kein roter Test, also auch kein Gegenlauf auf `origin/release/0.7.0` nötig.
+- **CI-Lauf 38140744172** (Kopf `8acc03af`, vor dem Merge): Linux, Linux · Vulkan (lavapipe), Windows und macOS alle **grün**.
+- Davor, als der Kaltbau nicht passte: eine aus der Link-Zeile von `he_tests` abgeleitete Teilmenge mit allen Testdateien, die
+  `PhysicsWorld` berühren, 659 Fälle, 36 796 Assertions, 0 Fehler; dieselbe Teilmenge mit `HE_PHYSICS_THREADS` 1, 2 und 8 grün.
+  Der volle Lauf ersetzt sie.
+- `scripts/editor_help_audit.py --check`: 1129 von 1129 Steuerelementen abgedeckt (läuft auch im `ctest`).
 
-- Der **volle `he_tests`-Bau und der volle `ctest`**. Der Worktree hatte keinen Build; ein Kaltbau hat 1364 Objekte, die
-  letzten rund 340 sind schwere Test-TUs, und auf dem Gerät lief gleichzeitig der Kaltbau einer anderen Instanz (Load 12 bis 23
-  auf 10 Kernen). Nach 24 Minuten standen 1005 von 1364; der Rest hätte bei dieser Rate mehr als 40 Minuten gebraucht. Die
-  Matrix übernimmt die CI auf dem Zweig (Windows, Linux, macOS).
-- Nicht in der Teilmenge: `test_python_scripting`, `test_viewport_overlays`, `test_gamelogic_services`,
-  `test_project_settings_ui` (je mit eigenen Zusatz-Objekten), `editor_help_audit` lief als Skript (grün), `he_mcp_shim` nicht.
-- **Sauberes Vorher/Nachher der Frame-Zeit.** Die Echt-Loop-Läufe (`physics_load_run.py`, Szene sparse, 10 000 Körper, 150
-  Frames, Vorher-Binary `~/HorizonEnginePerf/he178_before`, Nachher-Binary dieser Stand) liefen unter fremder Last; die
-  Zeit je Schritt ist dort Rauschen (p50 17,35 gegen 17,22 ms), weil die Jolt-Worker um Kerne konkurrieren. Was sich unter
-  dieser Last trotzdem sagen lässt:
-  - Hauptthread-CPU (Thread-Probe) für dieselbe Schrittzahl (rund 740): 7523 ms in 18,4 s vor, 6750 ms in 18,7 s nach, also
-    rund 10,1 gegen 9,1 ms je Schritt (minus 10 %, ein Paar, kein Rauschboden).
-  - `sample` auf den Hauptthread (rund 150 Proben je Lauf): `applyRegionHold` 42 von 124 Proben in `step` (34 %, davon 30 in
-    `std::mutex::lock` der gesperrten `GetPosition`) vor, **0** nach. Der Anteil von `step` ohne `Update` an allen
-    Hauptthread-Proben sinkt von rund 51 % (82 von 160) auf rund 26 % (37 von 144). Mit rund 150 Proben je Lauf sind das Größenordnungen,
-    keine Prozentpunkte.
-  - Die Jolt-Worker verbrauchten im Nachher-Lauf mehr CPU (4 x 2,1 s gegen 4 x 1,4 s). Der Bench ohne Engine zeigt bei gleicher
-    Szene mit den alten und den neuen Obergrenzen 2594 und 2233 ms gegen 2718 und 2634 ms CPU für 150 Schritte, bei 16 %
-    Spanne innerhalb derselben Einstellung. Ob die größeren Tabellen etwas kosten, ist offen.
-  Schritt 4 muss die Zahlen auf einem ruhigen Gerät (kein fremder Bau, Netz, Bildschirm entsperrt) neu erheben, abwechselnd
-  alt und neu, mehrere Läufe. Die Binaries liegen: Vorher `~/HorizonEnginePerf/he178_before`, Nachher wird aus dem Zweig gebaut.
+**Vorher/Nachher im echten Spielloop** (`scripts/perf/physics_load_run.py`, Standard: 300 Warm-up- und 600 Mess-Frames,
+`HE_PROFILE_COUNTERS=0`, verstecktes Fenster, abwechselnd Vorher und Nachher).
+
+Bedingungen: MacBook Air, 10 Kerne, Release; Netzteil, Akku 90 %, Stromsparmodus aus; **Bildschirm gesperrt**, wie in der
+Baseline (`Metal::NextDrawable` wartet, das betrifft die Frame-Zeit, nicht die CPU-Zeit der Physik); Load Average 1,5 bis 4,4,
+kein fremder Bau, kein anderes Spiel oder Editor. Vorher-Binary `~/HorizonEnginePerf/he178_before` (Quelle `a4fa3a9d`, Schritt 1),
+Nachher-Binary dieser Stand (`out/deploy/Game`, mit `selfcontain_deploy_copy.sh` kopiert; der Merge von `release/0.7.0` bringt
+dort nur Audio und Editor-UI). Die Vorher-Werte decken sich mit der Baseline-Tabelle (20 000: 18,74 dort, 18,75 und 18,91 hier;
+5 000: 4,46 und 4,45; 1 000: 0,94 und 0,95; dense 10 000: 12,01 und 12,18), die Bedingungen sind also vergleichbar.
+
+Zeit je Schritt in ms, `PhysicsStep` geteilt durch die nachgerechnete Schrittzahl (p50 / p95 / max):
+
+| Szene | Vorher | Nachher | p50 |
+|---|---|---|---:|
+| sparse 20 000, Lauf 1 | 18,75 / 21,27 / 27,99 | 11,42 / 13,49 / 17,07 | -39 % |
+| sparse 20 000, Lauf 2 | 18,91 / 21,99 / 28,33 | 10,96 / 13,05 / 29,38 | -42 % |
+| sparse 5 000 | 4,45 / 5,32 / 8,85 | 2,52 / 3,08 / 3,89 | -43 % |
+| sparse 1 000 | 0,95 / 1,17 / 2,43 | 0,58 / 0,81 / 1,53 | -39 % |
+| dense 10 000 | 12,18 / 13,99 / 16,25 | 8,64 / 10,19 / 21,22 | -29 % |
+| sparse 5 000 + 500 Charaktere | 5,89 / 7,12 / 9,15 | 3,92 / 4,81 / 6,70 | -33 % |
+
+Bei 20 000 Körpern sinkt der Frame (p50) von 118,8 auf 74,2 ms und von 119,1 auf 66,8 ms; die Simulation läuft nicht mehr an der
+5-Schritte-Grenze (nachgerechnete Schritte je Frame 4,90 und 5,00 vorher, 4,46 und 3,65 nachher). Die Jolt-Worker sind
+nachher höher ausgelastet (39 % statt 28 %, derselbe Jolt-Anteil in kürzerem Schritt). Die vierfachen Obergrenzen kosten bei
+1 000 Körpern nichts Messbares (dort wäre ein fester Aufwand je Schritt am deutlichsten); die Sorge aus der Messung unter fremder
+Last (mehr Worker-CPU) hat sich nicht bestätigt.
+
+Grenzen der Zahlen: ein Lauf je Zeile (außer 20 000), kein Rauschboden; die Schrittzahl je Frame ist aus `deltaMs`
+zurückgerechnet (`physics_load_run.py`), die Zeilen mit genau einem Schritt (`one-step frames`) liegen bei ähnlichen Werten. Welcher
+Anteil auf die Hold-Sonde und welcher auf das Rückschreiben ohne Sperren entfällt, ist nicht getrennt gemessen (es gibt keine
+Profiler-Scopes in `step`); die Baseline-Aufschlüsselung (Hold 19 %, gesperrte Abfragen 23 % eines 20 000-Schritts) und eine
+`sample`-Probe (`applyRegionHold` 34 % von `step` vor, 0 nach) erklären die Größenordnung. Jolt selbst (`Update`) läuft
+unverändert.
+
+**Nicht gemessen:** der Durchtunnelungs-Gegenversuch für die Collision-Steps (30 Hz, ein gegen zwei Steps); Streaming plus Physik
+im selben Frame; Mesh-Collider, Treppen, laufende Charaktere; Windows und Linux (dort läuft nur die CI, nicht die Messung).
+Nicht in der lokalen Durchführung ersetzbar: `he_mcp_shim` lief im `ctest` mit, `runtime_size_app_*` blieben übersprungen.
 
 ## 9. Hinweise für Schritt 3 und 4
 
@@ -205,6 +224,8 @@ Testdateien, die `PhysicsWorld` berühren: `test_physics`, `test_physics_threadi
   und eine Anzeige im Profiler ansetzen können; `Impl` kennt jetzt `limits`, `threads` und `stats`.
 - Profiler-Scopes in `PhysicsWorld::step` fehlen weiterhin (`Update`, Rückschreiben, Charaktere, Hold); mit ihnen wäre die
   `sample`-Aufschlüsselung dieses Dokuments im Profiler sichtbar und für Vorher/Nachher nicht auf `sample` angewiesen.
-- Die 5-Schritte-Grenze von `advanceFixedSteps` (Simulation bei 20 000 Körpern 0,7-fach) ist unverändert.
+- Die 5-Schritte-Grenze von `advanceFixedSteps` ist unverändert. Bei 20 000 Körpern lief jeder Frame an ihr (Simulation 0,7-fach, Baseline);
+  jetzt liegt der Schnitt bei 3,7 bis 4,5 Schritten je Frame (Abschnitt 8), die Grenze bleibt aber die Stelle, die Schritt 3 beim
+  Zeitbudget im Blick haben muss.
 - Website-Doku (HorizonEngineDocs, Project Settings, Physics) kennt das neue Feld "Physics threads" noch nicht; die Datei liegt
   außerhalb dieses Repos und wurde nicht angefasst.
