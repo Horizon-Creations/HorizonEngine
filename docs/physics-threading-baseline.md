@@ -290,9 +290,24 @@ Vorher (Schritt-1-Binary, Quelle `a4fa3a9d`) und Nachher (Kopf dieses Zweigs), g
 | dense 10 000 | 11,60 / 12,68 / 20,24 | 8,23 / 9,41 / 11,05 | -29 % | -26 % |
 | sparse 5 000 + 500 Charaktere | 5,65 / 6,39 / 10,31 | 3,88 / 4,47 / 12,57 | -31 % | -30 % |
 
-Der Median und das 95. Perzentil sinken um 26 bis 42 %. Die Spitze (max) sinkt bei vier von fünf Zeilen (bei 20 000
-um 30 %), nur bei 5 000 mit 500 Charakteren liegt sie nachher höher (12,57 statt 10,31 ms, ein einzelner Schritt in
-600 Frames; das 95. Perzentil liegt tiefer). Ein Lauf je Zeile, siehe Grenzen.
+Der Median und das 95. Perzentil sinken um 26 bis 42 %. **Die Spitzen (max) sinken nicht verlässlich:** im ersten Lauf
+liegen sie bei vier von fünf Zeilen tiefer (bei 20 000 um 30 %), bei 5 000 mit 500 Charakteren höher (12,57 statt 10,31 ms,
+ein einzelner Schritt in 600 Frames). Im Wiederholungslauf (unten) hat sparse 20 000 nachher einen Ausreißer von 30,5 ms
+(vorher 23,1 ms), das 95. Perzentil liegt dort mit 12,5 ms über dem des ersten Laufs (11,8 ms). Belegt ist die Senkung von
+Median und 95. Perzentil; über die Spitzen (ein Schritt von 600 bis 3 000) sagt diese Messung nichts Sicheres.
+
+**Wiederholung in umgekehrter Reihenfolge** (Nachher zuerst, dann Vorher; gleiche Szenen, frische Prozesse, Load 3,2 bis 4,2
+durch den vorangegangenen `ctest`-Lauf; Rohdaten `*_r2.txt`). Schritt p50 / p95 / max in ms:
+
+| Szene | Vorher Lauf 1 / Lauf 2 (p50) | Nachher Lauf 1 / Lauf 2 (p50) | Lauf 2 Vorher p95 / max | Lauf 2 Nachher p95 / max | p50 Lauf 2 |
+|---|---|---|---|---|---:|
+| sparse 20 000 | 17,81 / 17,88 | 10,54 / 10,41 | 19,34 / 23,10 | 12,54 / 30,48 | -42 % |
+| sparse 5 000 | 4,26 / 4,32 | 2,47 / 2,45 | 5,05 / 6,05 | 2,90 / 3,75 | -43 % |
+
+Der Median wiederholt sich auf 0,4 bis 1,4 % (Rauschboden für p50 in dieser Messanordnung, zwei Szenen); der Gewinn ist
+rund 30-mal größer als diese Streuung. Auch im Wiederholungslauf bleiben die Jolt-Worker bei 20 000 Körpern bei 35 bis 36 % (vorher 29 %)
+und der Hauptthread bei 90 % (vorher 94 %); 3,15 Schritte je Frame bei 54,2 ms Frame-Abstand (0,97 der Echtzeit, vorher 4,99
+Schritte bei 112,1 ms, also 0,74).
 
 **Pro Frame** (was der Frame kostet), sparse 20 000: `PhysicsStep` je Frame p50 88,8 auf 33,0 ms (p95 97,1 auf 46,1; max
 118,8 auf 63,1), Frame-CPU p50 110,6 auf 56,2 ms. Vorher lief jeder Frame an die 5-Schritte-Grenze (4,96 Schritte je
@@ -339,10 +354,12 @@ Schritten je Frame).
 
 **Grenzen der Zahlen:**
 
-- **Ein Lauf je Zeile.** Es gibt keinen Rauschboden für den Echt-Loop. Aus Schritt 2 liegt die Gegenprobe vor: dieselbe
-  Messung gab bei 20 000 Körpern 18,75 und 18,91 (Vorher) sowie 11,42 und 10,96 (Nachher), eine Streuung von unter 5 %
-  innerhalb einer Seite. Die Werte hier (17,81 und 10,54) liegen im selben Band. Die Richtung ist in allen Zeilen gleich, die
-  Größenordnung (-29 bis -42 %) deckt sich mit Schritt 2.
+- **Ein Lauf je Zeile, außer sparse 20 000 und 5 000 (zwei Läufe).** Dense 10 000, sparse 1 000 und 5 000 mit 500 Charakteren
+  stehen auf einem Lauf, ohne eigenen Rauschboden. Die Gegenprobe aus Schritt 2 (20 000: 18,75 und 18,91 vorher, 11,42 und
+  10,96 nachher) und die Wiederholung oben (0,4 bis 1,4 %) sprechen für eine Streuung des Medians unter 5 %. Die Richtung ist in
+  allen Zeilen gleich, die Größenordnung (-29 bis -42 %) deckt sich mit Schritt 2. Die Spitzen sind, wie oben, nicht belastbar.
+- **Die Reihenfolge ist nur teilweise ausgeglichen:** Lauf 1 immer Vorher zuerst, Lauf 2 (nur zwei Szenen) Nachher zuerst. Der
+  Load Average lag in Lauf 1 bei 1,7 bis 4,7, in Lauf 2 bei 3,2 bis 4,2 (bei sparse 20 000 trägt der Spielprozess selbst rund 2,3 Kerne davon: Hauptthread 0,9 plus vier Jolt-Worker zu je 0,36).
 - **Schritt 3 steckt in den Zahlen, ist aber kaum sichtbar.** Das Zeitbudget für Charaktere, Abfragen und Events greift erst ab
   32 Charakteren und bei verbrauchtem Budget; die Lastszenen setzen stehende Charaktere (500 in einer Zeile) und keine
   Strahlen. Der Gewinn kommt aus Schritt 2 (Rückschreiben ohne Sperren, Hold-Sonde, Obergrenzen). Dass das Budget bei ausgeschalteter
