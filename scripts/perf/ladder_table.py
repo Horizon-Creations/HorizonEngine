@@ -16,8 +16,15 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# Metal::ExtractFrame is the frame's one walk plus the refined object bounds since Thema 162 step 4:
+# before it the walk was booked under Metal::EncodeShadowMap and the bounds loop ran inside every
+# pass (Metal::RefineBounds, nested), so EncodeShadowMap, EncodeSSAO and EncodeScene only compare
+# across that change as a sum with ExtractFrame.
 SCOPES = ["RenderExtractor::extract", "Metal::EncodeScene", "Metal::EncodeSSAO",
-          "Metal::EncodeShadowMap", "Metal::Overlay", "FrustumCull", "OnRender"]
+          "Metal::EncodeShadowMap", "Metal::Overlay", "FrustumCuller::cull", "OnRender", "Metal::ExtractFrame",
+          "Metal::RefineBounds", "Transforms::scan", "Transforms::propagate"]
+# A scope no frame of the run contains prints "-" (not 0.0): the scope did not exist in that build
+# (Metal::ExtractFrame, Metal::RefineBounds, Transforms::* came with Thema 162).
 
 
 def pct(v, p):
@@ -52,10 +59,11 @@ def row(path):
     steady = cpu[2:] or cpu
     med = statistics.median(steady)
     stalls = sum(1 for c in steady if c > 2 * med)
-    scopes = {n: pct([scope_sum(f, n) for f in frames[2:]], 50) for n in SCOPES}
+    scopes = {n: (pct([scope_sum(f, n) for f in frames[2:]], 50)
+                  if any(s["n"] == n for f in frames[2:] for s in f["cpu"]) else None) for n in SCOPES}
     return {
         "label": label,
-        "entities": frames[0]["stats"].get("entities"),
+        "entities": frames[-1]["stats"].get("entities"),  # frames 0..2 can still show the empty scene before the load lands
         "parseMs": t.get("parseMs"), "buildMs": t.get("buildMs"), "loadMs": t.get("loadMs"),
         "warmupMs": t.get("warmupMs"), "totalMs": t.get("totalMs"),
         "cpuP50": pct(steady, 50), "cpuP99": pct(steady, 99),

@@ -1031,19 +1031,35 @@ TEST_CASE("Every backend refreshes bounds through RenderObject::refineWorldBound
 		return;
 	}
 	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
-	const std::pair<const char*, size_t> refineSites[] = {
-		{ "Metal/MetalRenderer.mm", 5 }, { "OpenGL/OpenGLRenderer.cpp", 2 },
-		{ "D3D11/D3D11Renderer.cpp", 1 }, { "D3D12/D3D12Renderer.cpp", 1 },
-		{ "Vulkan/VulkanRenderer.cpp", 5 } };
+	// Metal and Vulkan refine once per walk (Thema 162, step 4): one helper holds the loop and
+	// the five passes that need the bounds call it. The other three still loop in place.
+	struct RefineSite
+	{
+		const char* file;
+		size_t      refines;      // .refineWorldBounds( sites
+		const char* helper;       // the call the passes make, when there is a helper
+		size_t      helperCalls;
+	};
+	const RefineSite refineSites[] = {
+		{ "Metal/MetalRenderer.mm", 1, "RefineObjectBounds();", 5 }, { "OpenGL/OpenGLRenderer.cpp", 2, nullptr, 0 },
+		{ "D3D11/D3D11Renderer.cpp", 1, nullptr, 0 }, { "D3D12/D3D12Renderer.cpp", 1, nullptr, 0 },
+		{ "Vulkan/VulkanRenderer.cpp", 1, "refineObjectBounds();", 5 } };
 	for (const auto& site : refineSites)
 	{
-		const char* rel     = site.first;
-		const size_t atLeast = site.second;
+		const char* rel     = site.file;
+		const size_t atLeast = site.refines;
 		INFO(rel);
 		const std::string text = readFile(dir / rel);
 		REQUIRE(!text.empty());
 		CHECK(text.find("localBounds.transformed(") == std::string::npos);   // no hand-written refine
 		CHECK(countOf(text, ".refineWorldBounds(") >= atLeast);
+		if (site.helper)
+		{
+			// One loop, the passes go through it: a pass with a loop of its own would refine
+			// again on every walk, and one without a call would cull with unrefined bounds.
+			CHECK(countOf(text, ".refineWorldBounds(") == atLeast);
+			CHECK_MESSAGE(countOf(text, site.helper) >= site.helperCalls, std::string(site.helper));
+		}
 		// Every GI / caster instance build skips clusters on the line that tests castsShadow.
 		std::istringstream lines(text);
 		for (std::string line; std::getline(lines, line);)

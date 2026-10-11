@@ -7732,15 +7732,9 @@ void MetalRenderer::EnsureShadowResources()
 	}
 }
 
-void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
+void MetalRenderer::ExtractFrame(float aspect)
 {
-	if (!m_world || !m_shadowPipeline || !m_shadowDepthTex) return;
-
-	// Re-extract to get the cascade light matrices + caster geometry. CRITICAL for
-	// CSM: this MUST use the SAME day-night state and the SAME aspect ratio as the
-	// scene pass's extract (EncodeScene), because the cascade fit depends on both.
-	// If they differ, the depth maps are rendered with different cascade matrices
-	// than the shader samples with → shadows slide with the camera (swimming).
+	if (!m_world) return;
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
@@ -7748,14 +7742,56 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	                        env.cloudCoverage);
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+}
+
+void MetalRenderer::RefineObjectBounds()
+{
+	// What the loop writes depends only on an object's transform and its mesh's bound, and the
+	// walk stays in m_renderWorld for the whole frame (RenderExtractor::beginFrame): a second loop
+	// over the same walk writes the same values again. Each of them cost about 3.5 ms of CPU at
+	// 50k entities, three a frame (shadow, SSAO, scene), a fifth of the frame. So: once per walk.
+	// EncodeFrame refines right after the walk, every pass calls this again as its guarantee and
+	// finds it done; a new walk (the count moves) or another object array starts over, and a
+	// frame that never reached the frame step (no primary window) has its first pass do it.
+	// A mesh that could not be resolved when the loop ran
+	// keeps the bound the walk gave it for the rest of the walk, invalid at worst, and an object
+	// with an invalid bound is never culled: the conservative side, the draw loops resolve the
+	// mesh on their own.
+	const uint64_t      walk    = m_extractor.fullExtractCount();
+	const RenderObject* objects = m_renderWorld.objects.data();
+	const size_t        count   = m_renderWorld.objects.size();
+	if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
+	{
+		HE_PROFILE_SCOPE_N("Metal::RefineBounds");
+		for (RenderObject& obj : m_renderWorld.objects)
+			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+				obj.refineWorldBounds(mesh->localBounds);
+	}
+	m_refinedWalk    = walk;
+	m_refinedObjects = objects;
+	m_refinedCount   = count;
+}
+
+void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
+{
+	if (!m_world || !m_shadowPipeline || !m_shadowDepthTex) return;
+
+	// The cascade light matrices + caster geometry are the frame's walk, which EncodeFrame took
+	// just before this pass (ExtractFrame); this call is the key check that m_renderWorld holds
+	// that walk at THIS pass's aspect, no walk of its own. CRITICAL for CSM: the cascade fit
+	// must use the SAME day-night state and the SAME aspect ratio as the scene pass's extract
+	// (EncodeScene), because it depends on both. If they differ, the depth maps are rendered
+	// with different cascade matrices than the shader samples with → shadows slide with the
+	// camera (swimming). Day-night and the shadow settings are part of the extractor's frame
+	// key, so a sun that moved since the walk (or settings pushed in between) is a new walk,
+	// never last frame's cascades.
+	ExtractFrame(aspect);
 	// CSM needs a directional light; the local (point/spot) atlas is independent
 	// of it — night scenes with only shadow-casting point lights still render.
 	const bool wantCsm   = m_renderWorld.shadow.enabled;
 	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
 	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	RefineObjectBounds();
 	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
 	const int localLayers = wantLocal
 		? std::clamp(m_renderWorld.shadow.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers) : 0;
@@ -8795,17 +8831,17 @@ void MetalRenderer::EnsureGIProbeGrid()
 	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
 	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
-	// m_renderWorld was re-extracted by EncodeGIAccelBuild's m_extractor.extract()
-	// call earlier this frame, which creates BRAND NEW RenderObjects whose
-	// worldBounds are whatever the extractor could produce — invalid for meshes it
-	// could not resolve, a unit-cube proxy for particles/skinned (see
-	// RenderObject.h) — NOT the real per-mesh bounds EncodeShadowMap/EncodeSSAO
-	// refresh in their own passes. Those refreshes don't survive the re-extraction,
-	// so refresh here too before unioning, or the grid ends up sized to a handful
-	// of proxy boxes instead of the actual scene.
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	// m_renderWorld holds the frame's walk (ExtractFrame, answered in place by every later
+	// extract() of the frame — RenderExtractor::beginFrame), not a fresh one: the
+	// RenderObjects are the ones the shadow pass already refined, when it had cascades or
+	// local layers to draw. The walk itself leaves worldBounds as the extractor could
+	// produce them — invalid for meshes it could not resolve, a unit-cube proxy for
+	// particles/skinned (see RenderObject.h) — NOT the real per-mesh bounds, and a frame
+	// whose shadow pass returned early (no sun, no local shadow lights) refined nothing.
+	// refineWorldBounds writes the same value every time, so refresh here too before
+	// unioning, or the grid ends up sized to a handful of proxy boxes instead of the
+	// actual scene.
+	RefineObjectBounds();
 
 	// Landscape/Terrain chunks are ordinary MeshComponent entities, so they ARE
 	// in m_renderWorld.objects (an older note here said otherwise). What kept a
@@ -12090,9 +12126,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
 	if (m_renderWorld.objects.empty()) return;
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	RefineObjectBounds();
 	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
 	}
@@ -13791,9 +13825,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	}
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	RefineObjectBounds();
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	CullCameraObjects();
@@ -15830,9 +15862,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 
 	if (m_renderWorld.objects.empty()) return;
 
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	RefineObjectBounds();
 
 	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
@@ -16417,22 +16447,34 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool shOff = m_viewportReqW > 0 && m_viewportReqH > 0;
 			shW = shOff ? (int)m_viewportReqW : pw;
 			shH = shOff ? (int)m_viewportReqH : ph;
+			const float shadowAspect = shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f;
+			// The frame's state, taken here and not inside the shadow pass (Thema 162, step 4):
+			// the one walk of the world and the real bound of every object. The walk used to be
+			// the shadow pass's own first extract, so the profiler booked the biggest cost of the
+			// frame at 50k entities under Metal::EncodeShadowMap, and each pass refined the bounds
+			// again. Every pass from here on, the shadow pass included, finds both in
+			// m_renderWorld: its extract() is a key compare, its RefineObjectBounds() finds the
+			// bounds done. The scope is the frame's; Metal::EncodeShadowMap below is the pass.
+			{
+				HE_PROFILE_SCOPE_N("Metal::ExtractFrame");
+				ExtractFrame(shadowAspect);
+				if (m_world) RefineObjectBounds();
+			}
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeShadowMap");
-				EncodeShadowMap((__bridge void*)cmdBuf,
-				                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+				EncodeShadowMap((__bridge void*)cmdBuf, shadowAspect);
 			}
 			// Cloud-shadow map: rendered before the G-buffer/scene passes (both
-			// sample it at texture 16). Uses the extraction EncodeShadowMap just
-			// ran (dominant light + camera).
+			// sample it at texture 16). Uses the frame's walk (ExtractFrame above:
+			// dominant light + camera).
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeCloudShadow");
 				EncodeCloudShadow((__bridge void*)cmdBuf);
 			}
 			// Sky-View LUT for the sky pass in the scene encoder. The sun comes from
-			// the extraction EncodeShadowMap ran; if that one was skipped it is last
-			// frame's, and EncodeSky falls back to the per-pixel integral whenever
-			// the LUT's sun doesn't match the one it draws with.
+			// the frame's walk (ExtractFrame above); a frame without a world has none
+			// and it is last frame's, and EncodeSky falls back to the per-pixel integral
+			// whenever the LUT's sun doesn't match the one it draws with.
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeSkyViewLut");
 				EncodeSkyViewLut((__bridge void*)cmdBuf, m_renderWorld.sunDirection);

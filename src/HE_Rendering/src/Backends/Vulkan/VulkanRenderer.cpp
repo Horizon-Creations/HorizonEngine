@@ -408,6 +408,15 @@ void VulkanRenderer::Shutdown()
 
 void VulkanRenderer::Render()
 {
+    // Every pass below that needs the scene (cascades, decal depth pre-pass, GI, SSAO, the scene
+    // itself) extracts on its own so its draw set and cascade fit agree with the others — five
+    // full walks of the registry a frame, ~26 ms each at 50k entities. Inside this scope the world
+    // does not change, so the extractor walks it once and the other four find that walk in
+    // m_renderWorld (RenderExtractor::beginFrame). Closed on every return. Exactly two of these
+    // exist, here and in RenderSceneImage(): a third one inside DrawViewportFrame would end the
+    // outer scope early (tests/test_culling.cpp pins it).
+    RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
     m_giRanThisFrame   = false;  // cleared each frame; set true only inside runGi()
@@ -602,8 +611,11 @@ void VulkanRenderer::Render()
         // path, so nothing would resolve a TAA jitter.
         m_taaFrame = false;
         updateSkyEnvCube(cmd); // before any pass — graph materials' heSkyEnv
-        EncodeShadowMap(cmd, float(std::max(m_swapExtent.width,  1u))
-                           / float(std::max(m_swapExtent.height, 1u)));
+        const float shadowAspect = float(std::max(m_swapExtent.width,  1u))
+                                 / float(std::max(m_swapExtent.height, 1u));
+        extractFrame(shadowAspect); // the frame's one walk; the cascade pass finds it in m_renderWorld
+        if (m_world) refineObjectBounds();   // ...and the real bound of every object, once
+        EncodeShadowMap(cmd, shadowAspect);
         m_decalDepthActive = &m_decalDepth;
         EncodeDecalDepth(cmd, m_decalDepth);
     }
@@ -731,7 +743,13 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 
     // Cascade shadow maps first, in their own render passes (before the scene
     // pass), fit against the aspect of the target the scene will be drawn into.
-    EncodeShadowMap(cmd, float(m_viewportW) / float(m_viewportH));
+    // The frame's one walk of the world comes right before them (extractFrame), with the
+    // real bound of every object: the cascade pass reads both from m_renderWorld, as every
+    // pass after it does.
+    const float shadowAspect = float(m_viewportW) / float(m_viewportH);
+    extractFrame(shadowAspect);
+    if (m_world) refineObjectBounds();
+    EncodeShadowMap(cmd, shadowAspect);
 
     // Camera-depth pre-pass for screen-space decals. It must run before the scene
     // pass opens, because the decal draw sits INSIDE that pass and samples this
@@ -3722,18 +3740,15 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     // one frame late; that is invisible.)
     if (m_renderWorld.decals.empty()) return;
 
-    // Now the real extract: the shadow one ran at aspect 1.0, which is the wrong
-    // frustum for a camera pass. Same reason runSSAO extracts for itself.
+    // Now the extract for this image's aspect. Inside the frame's scope the walk is already in
+    // m_renderWorld (EncodeShadowMap's), so this only redoes what depends on the aspect, and only
+    // when the depth image's differs from the cascades'. Same reason runSSAO extracts for itself.
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(d.w) / static_cast<float>(d.h), &m_editorCamera);
     if (m_renderWorld.decals.empty() || m_renderWorld.objects.empty()) return;
 
-    for (RenderObject& obj : m_renderWorld.objects)
-    {
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
-            obj.refineWorldBounds(mesh->localBounds);
-    }
+    refineObjectBounds();
     // The material asset overrides the component's opacity, and DrawScene
     // splits opaque from transparent AFTER applying it. Without the same
     // resolve here (Translucent clamp included) a material-driven glass pane
@@ -5817,6 +5832,8 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                                 m_environment.sunColor, m_environment.sunIntensity,
                                 m_environment.moonColor, m_environment.moonIntensity,
                                 m_environment.cloudCoverage);
+        // The same one-walk scope as Render(): DrawViewportFrame's passes extract on their own.
+        RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
 
         // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
         // decal depth) are torn down and rebuilt, and the one-shot buffer below
@@ -6559,6 +6576,42 @@ bool VulkanRenderer::drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe
     return true;
 }
 
+void VulkanRenderer::extractFrame(float aspect)
+{
+    if (!m_world) return;
+    // The cascades are fit against the camera frustum, so this extract needs
+    // the real aspect (the old whole-scene single map never cared) and the
+    // project shadow settings — the extractor hands back the size that is
+    // actually ALLOCATED, the texel snap must match the texture.
+    m_extractor.setShadowSettings(m_shadowSettings.distance, m_shadowSettings.cascadeCount,
+                                  m_shadowSettings.splitLambda, static_cast<int>(m_shadowSize));
+    m_extractor.setContentManager(m_contentManager);
+    m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+}
+
+void VulkanRenderer::refineObjectBounds()
+{
+    // What the loop writes depends only on an object's transform and its mesh's bound, and the
+    // walk stays in m_renderWorld for the whole frame (RenderExtractor::beginFrame): a second loop
+    // over the same walk writes the same values again, and a Vulkan frame ran it up to five times
+    // (decal depth, cascades, scene, GI, SSAO). So: once per walk. The frame refines right after
+    // the walk, every pass calls this again as its guarantee and finds it done; a new walk (the
+    // count moves) or another object array starts over. A mesh that could not be resolved when
+    // the loop ran keeps the bound the walk gave it for
+    // the rest of the walk, invalid at worst, and an object with an invalid bound is never culled:
+    // the conservative side, the draw loops resolve the mesh on their own.
+    const uint64_t      walk    = m_extractor.fullExtractCount();
+    const RenderObject* objects = m_renderWorld.objects.data();
+    const size_t        count   = m_renderWorld.objects.size();
+    if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
+    for (RenderObject& obj : m_renderWorld.objects)
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
+            obj.refineWorldBounds(mesh->localBounds);
+    m_refinedWalk    = walk;
+    m_refinedObjects = objects;
+    m_refinedCount   = count;
+}
+
 void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
 {
     m_shadowRenderedThisFrame = false;
@@ -6610,23 +6663,20 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     ensureLocalSampledLayout();
     if (!m_world) { ensureSampledLayout(); return; }
 
-    // The cascades are fit against the camera frustum, so this extract needs
-    // the real aspect (the old whole-scene single map never cared) and the
-    // project shadow settings — the extractor hands back the size that is
-    // actually ALLOCATED, the texel snap must match the texture.
-    m_extractor.setShadowSettings(m_shadowSettings.distance, m_shadowSettings.cascadeCount,
-                                  m_shadowSettings.splitLambda, static_cast<int>(m_shadowSize));
-    m_extractor.setContentManager(m_contentManager);
-    m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+    // The cascades come from the frame's walk, which the caller took just before this pass
+    // (extractFrame); this call is the key check that m_renderWorld holds that walk at THIS
+    // pass's aspect — no walk of its own. The day-night state is pushed once at the top of
+    // Render()/RenderSceneImage() and, like the shadow settings, part of the extractor's
+    // frame key: a sun that moved or settings pushed in between would be a new walk, never
+    // last frame's cascades.
+    extractFrame(aspect);
     // CSM needs a directional light; the local (point/spot) atlas is
     // independent of it — night scenes with only shadow-casting point lights
     // still render their atlas (mirrors Metal/GL/D3D).
     const bool wantCsm   = m_renderWorld.shadow.enabled;
     const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowImage != VK_NULL_HANDLE;
     if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) { ensureSampledLayout(); return; }
-    for (RenderObject& obj : m_renderWorld.objects)
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
-            obj.refineWorldBounds(mesh->localBounds);
+    refineObjectBounds();
 
     // ── Cascade frame constants (mirrors GL's shadowFrame / D3D11) ─────────
     // The extractor's cascade matrices are GL clip (y up, z∈[-1,1]);
@@ -7499,11 +7549,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // that has nothing BUT a trail still has something to draw past here.
     if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty()) return;
 
-    for (RenderObject& obj : m_renderWorld.objects)
-    {
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
-            obj.refineWorldBounds(mesh->localBounds);
-    }
+    refineObjectBounds();
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
@@ -11157,9 +11203,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
-    for (RenderObject& obj : m_renderWorld.objects)
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
-            obj.refineWorldBounds(mesh->localBounds);
+    refineObjectBounds();
     // The extractor leaves baseColor at white, and this extraction throws away
     // DrawScene's resolve (which runs later anyway). Without it every GI
     // instance bounced white: a red and a grey floor gave the same probe field,
@@ -12324,9 +12368,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
 
-    for (RenderObject& obj : m_renderWorld.objects)
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
-            obj.refineWorldBounds(mesh->localBounds);
+    refineObjectBounds();
 
     m_culler.cull(m_renderWorld, m_visible);
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
