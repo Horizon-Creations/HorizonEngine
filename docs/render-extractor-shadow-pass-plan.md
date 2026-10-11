@@ -976,8 +976,10 @@ Teilbäume neu propagieren*; Anlass waren bei 50k ~33 ms `extract` und ~35 ms `E
 - **Persistenter Zustand über Frames hinweg: nicht gebaut.** Der Walk (`extractMeshes`, 280 Byte je `RenderObject`) läuft jeden Frame
   voll und kostet bei 50k **18,7 ms, bei 200k 73,1 ms**. Er ist weiter der größte Einzelposten des Frames, und, ehrlich, **weiter größer als
   alle Encode-Pässe zusammen**: SSAO 4,3 + Szene 4,3 + Schattenpass 2,8 = 11,4 ms, mit dem Verfeinern (3,5) 14,9 ms. Das war der Anlass des
-  Themas ("größer als alle Encode-Pässe zusammen"); der Abstand ist kleiner geworden (vorher 37,7 gegen rund 22 für SSAO 10,2, Szene 10,1 und den
-  Schattenpass ohne Walk, jetzt 18,7 gegen 11,4), die Aussage gilt noch.
+  Themas ("größer als alle Encode-Pässe zusammen"); der Abstand ist kleiner geworden. Gemessen am alten Profil (der erste `extract` im
+  `EncodeShadowMap` ist der Walk, p50 über drei Läufe 33,1 bis 33,7 ms; die zwei späteren `extract`-Aufrufe kosten zusammen die restlichen ~4 ms):
+  vorher Walk 33,5 gegen SSAO 10,2 + Szene 10,1 + Schattenpass ohne Walk 6,4 = 26,7 ms, jetzt Walk 18,7 gegen 11,4 ms. Der Walk allein ist um
+  rund 15 ms billiger geworden (davon `propagate` 12,8), dazu entfallen die ~4 ms der Kopien.
 - **Zahlen gegen den Anlass**: `extract` 37,7 → 18,7 ms (in 1, `s6end`, unter anderen Bedingungen 33,4), Schatten samt Walk 39,9 → 25,1 ms,
   CPU je Frame **−39 %** bei 50k, −37 % bei 100k und 200k, −34 % bei 10k, nichts messbar bei 1k. **Halbiert, nicht beseitigt.**
 
