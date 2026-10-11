@@ -270,3 +270,133 @@ nimmt es als `--runtime`.
 - **Offen (nicht gemessen):** Streaming plus Physik im selben Frame, Mesh-Collider, Treppen, `CastShape` und
   `CollideShape`, laufende Charaktere, Wiederholläufe des Echt-Loops, entsperrter Bildschirm mit vsync (dort gäbe es
   genau einen Schritt je Frame statt der nachgerechneten Mischung), Windows und Linux.
+
+## 10. Ergebnis nach Schritt 2 und 3 (Schritt 4: Vorher-nachher, Voll-Build, Tests)
+
+Stand 11.10.2026, Zweig auf `origin/release/0.7.0` (`af4f2868`, enthält Schritt 1 bis 3: Messbasis, Threads #131,
+Zeitbudget #132). Dieser Abschnitt ändert keinen Produktcode; die Rohdaten stehen in
+`docs/perf-audit/physics-threading-step4/`.
+
+**Ziel des Themas ("eine Lastszene mit vielen Körpern braucht messbar weniger Physik-Zeit pro Frame"): erreicht.**
+Gemessen im echten Spielloop, Zeit je Schritt (`PhysicsStep` geteilt durch die nachgerechnete Schrittzahl, ms), abwechselnd
+Vorher (Schritt-1-Binary, Quelle `a4fa3a9d`) und Nachher (Kopf dieses Zweigs), gleiche Szenen (`--seed 1`),
+`HE_PROFILE_COUNTERS=0`, 300 Warm-up- und 600 Mess-Frames:
+
+| Szene | Vorher p50 / p95 / max | Nachher p50 / p95 / max | p50 | p95 |
+|---|---|---|---:|---:|
+| sparse 1 000 | 0,91 / 1,13 / 1,50 | 0,56 / 0,69 / 1,08 | -38 % | -39 % |
+| sparse 5 000 | 4,26 / 4,86 / 6,27 | 2,47 / 2,99 / 5,25 | -42 % | -38 % |
+| sparse 20 000 | 17,81 / 19,42 / 23,76 | 10,54 / 11,75 / 16,71 | -41 % | -40 % |
+| dense 10 000 | 11,60 / 12,68 / 20,24 | 8,23 / 9,41 / 11,05 | -29 % | -26 % |
+| sparse 5 000 + 500 Charaktere | 5,65 / 6,39 / 10,31 | 3,88 / 4,47 / 12,57 | -31 % | -30 % |
+
+Der Median und das 95. Perzentil sinken um 26 bis 42 %. **Die Spitzen (max) sinken nicht verlässlich:** im ersten Lauf
+liegen sie bei vier von fünf Zeilen tiefer (bei 20 000 um 30 %), bei 5 000 mit 500 Charakteren höher (12,57 statt 10,31 ms,
+ein einzelner Schritt in 600 Frames). Im Wiederholungslauf (unten) hat sparse 20 000 nachher einen Ausreißer von 30,5 ms
+(vorher 23,1 ms), das 95. Perzentil liegt dort mit 12,5 ms über dem des ersten Laufs (11,8 ms). Belegt ist die Senkung von
+Median und 95. Perzentil; über die Spitzen (ein Schritt von 600 bis 3 000) sagt diese Messung nichts Sicheres.
+
+**Wiederholung in umgekehrter Reihenfolge** (Nachher zuerst, dann Vorher; gleiche Szenen, frische Prozesse, Load 3,2 bis 4,2
+durch den vorangegangenen `ctest`-Lauf; Rohdaten `*_r2.txt`). Schritt p50 / p95 / max in ms:
+
+| Szene | Vorher Lauf 1 / Lauf 2 (p50) | Nachher Lauf 1 / Lauf 2 (p50) | Lauf 2 Vorher p95 / max | Lauf 2 Nachher p95 / max | p50 Lauf 2 |
+|---|---|---|---|---|---:|
+| sparse 20 000 | 17,81 / 17,88 | 10,54 / 10,41 | 19,34 / 23,10 | 12,54 / 30,48 | -42 % |
+| sparse 5 000 | 4,26 / 4,32 | 2,47 / 2,45 | 5,05 / 6,05 | 2,90 / 3,75 | -43 % |
+
+Der Median wiederholt sich auf 0,4 bis 1,4 % (Rauschboden für p50 in dieser Messanordnung, zwei Szenen); der Gewinn ist
+rund 30-mal größer als diese Streuung. Auch im Wiederholungslauf bleiben die Jolt-Worker bei 20 000 Körpern bei 35 bis 36 % (vorher 29 %)
+und der Hauptthread bei 90 % (vorher 94 %); 3,15 Schritte je Frame bei 54,2 ms Frame-Abstand (0,97 der Echtzeit, vorher 4,99
+Schritte bei 112,1 ms, also 0,74).
+
+**Pro Frame** (was der Frame kostet), sparse 20 000: `PhysicsStep` je Frame p50 88,8 auf 33,0 ms (p95 97,1 auf 46,1; max
+118,8 auf 63,1), Frame-CPU p50 110,6 auf 56,2 ms. Vorher lief jeder Frame an die 5-Schritte-Grenze (4,96 Schritte je
+Frame, die Simulation holte 0,75 der Echtzeit: 82,7 ms simuliert je 110,8 ms Wanduhr). Nachher sind es 3,38 Schritte je
+Frame bei 56,2 ms Frame-Abstand, also 56,3 ms simuliert je 56,2 ms Wanduhr: **die Simulation läuft in Echtzeit statt mit
+dreiviertel Geschwindigkeit, und die Grenze wird nicht mehr erreicht.** (Die Pro-Frame-Zahlen vergleichen unterschiedlich
+viele Schritte je Frame, der faire Vergleich ist die Tabelle oben.)
+
+**Auslastung** (CPU je Thread im Mess-Fenster, Sonde `thread_cpu_probe`; die Jolt-Worker tragen jetzt Namen `Jolt-0` bis
+`Jolt-3`, vorher stand dort nur das Image):
+
+| Szene | Hauptthread vorher / nachher | je Jolt-Worker vorher / nachher |
+|---|---:|---:|
+| sparse 1 000 | 12 % / 10 % | 2 % / 2 % |
+| sparse 5 000 | 45 % / 33 % | 9 % / 9 % |
+| sparse 20 000 | 94 % / 92 % | 28 bis 29 % / 37 % |
+| dense 10 000 | 96 % / 89 % | 33 % / 34 % |
+| sparse 5 000 + 500 Charaktere | 52 % / 44 % | 9 % / 10 % |
+
+Bei 20 000 Körpern bleibt der Hauptthread nachher fast voll ausgelastet (92 %), weil der Frame kürzer wurde, nicht weil
+der Schritt serieller wäre: der Schritt kostet 10,5 ms; nimmt man die 8,5 ms von `JPH::PhysicsSystem::Update` aus dem Bench
+(Abschnitt 4, nicht im Loop gemessen) als Jolt-Anteil, bleiben für die Engine etwa 2 ms, vorher waren es 10,2 ms. Die
+Jolt-Worker laufen länger (37 statt 28 %), weil sie in kürzerer Zeit dieselbe Arbeit tun. **`stepStats`:** keiner der Nachher-Läufe meldet verworfene Kontakte (kein
+`Jolt dropped contacts` in den Logs, `ContactConstraintsFull` tritt in keiner Szene auf); die Zeilen unter
+`docs/perf-audit/physics-threading-step4/*.runlog` belegen das. (`stepStats()` ist eine C++-Schnittstelle und steht nicht im
+Profiler-Dump; der Beleg ist die gedrosselte Warnung, die beim ersten gesättigten Schritt kommen müsste.) Die
+Logs enthalten bei den großen Szenen tausende Zeilen `PhysicsWorld::step took ... ms (budget 8.00 ms)`: das ist die
+ältere Langsam-Schritt-Warnung der Engine (eine Zeile je Schritt über 8 ms, vorher wie nachher vorhanden), nicht das Zeitbudget
+aus Schritt 3; die Zahlen stehen in den `*.physics-log.txt` (sparse 20 000: 4 341 vorher, 2 899 nachher, passend zu 4,96 gegen 3,38
+Schritten je Frame).
+
+**Bedingungen (ehrlich):**
+
+| | |
+|---|---|
+| Gerät | MacBook Air von Connor, 10 Kerne, Release-Build, Metal |
+| Strom | **Netzteil** (`AC Power`), Akku 90 %, Stromsparmodus aus (`pmset lowpowermode 0`) |
+| Bildschirm | **gesperrt** (`CGSSessionScreenIsLocked=Yes`) wie in Schritt 1 und 2. Das versteckte Fenster wird nicht komponiert, `Metal::NextDrawable` wartet (24 ms je Frame bei den kleinen Szenen). Das bremst Frame-Zeit und FPS, nicht die CPU-Zeit der Physik; FPS-Zahlen stehen deshalb nirgends. Die vom Auftrag gewünschte Messung mit entsperrtem Bildschirm und vsync (genau ein Schritt je Frame) konnte ich nicht herstellen |
+| Last | Load Average vor dem ersten Lauf 2,4, während der Läufe 1,7 bis 4,7 (der Spielprozess selbst, Hive-Dienste; kein Bau, kein Editor, kein anderes Spiel); der he_tests-Bau lief erst nach den Messungen |
+| Vorher-Binary | `~/HorizonEnginePerf/he178_before` (Schritt 1, Quelle `a4fa3a9d`) |
+| Nachher-Binary | `out/deploy/Game` dieses Zweigs, gebaut aus dem Kopf `af4f2868`, kopiert mit `selfcontain_deploy_copy.sh` nach `/tmp/he178_s4/gamenew` |
+| Reihenfolge | je Szene Vorher, dann Nachher (abwechselnd), eigener frischer Prozess je Lauf, getrennte Arbeitsordner (`m_old`, `m_new`) |
+| Einstellungen | Standardwerte (kein `HE_PHYSICS_THREADS`, kein `HE_PHYSICS_BUDGET_MS`): 4 Jolt-Worker, Zeitbudget 4 ms, vierfache Obergrenzen, Hold-Sonde bei "nichts halten" übersprungen |
+
+**Grenzen der Zahlen:**
+
+- **Ein Lauf je Zeile, außer sparse 20 000 und 5 000 (zwei Läufe).** Dense 10 000, sparse 1 000 und 5 000 mit 500 Charakteren
+  stehen auf einem Lauf, ohne eigenen Rauschboden. Die Gegenprobe aus Schritt 2 (20 000: 18,75 und 18,91 vorher, 11,42 und
+  10,96 nachher) und die Wiederholung oben (0,4 bis 1,4 %) sprechen für eine Streuung des Medians unter 5 %. Die Richtung ist in
+  allen Zeilen gleich, die Größenordnung (-29 bis -42 %) deckt sich mit Schritt 2. Die Spitzen sind, wie oben, nicht belastbar.
+- **Die Reihenfolge ist nur teilweise ausgeglichen:** Lauf 1 immer Vorher zuerst, Lauf 2 (nur zwei Szenen) Nachher zuerst. Der
+  Load Average lag in Lauf 1 bei 1,7 bis 4,7, in Lauf 2 bei 3,2 bis 4,2 (bei sparse 20 000 trägt der Spielprozess selbst rund 2,3 Kerne davon: Hauptthread 0,9 plus vier Jolt-Worker zu je 0,36).
+- **Schritt 3 steckt in den Zahlen, ist aber kaum sichtbar.** Das Zeitbudget für Charaktere, Abfragen und Events greift erst ab
+  32 Charakteren und bei verbrauchtem Budget; die Lastszenen setzen stehende Charaktere (500 in einer Zeile) und keine
+  Strahlen. Der Gewinn kommt aus Schritt 2 (Rückschreiben ohne Sperren, Hold-Sonde, Obergrenzen). Dass das Budget bei ausgeschalteter
+  Wirkung nichts kostet, ist durch den Vergleich mit der Schritt-2-Messung (500 Charaktere: -33 % damals, -31 % jetzt) gestützt, aber nicht
+  gegen Rauschen aufgelöst. Der von Schritt 3 gemeldete `stable_sort` über alle Charaktere in jedem Schritt (`PhysicsWorld.cpp:3300`,
+  läuft solange das Budget an ist, also im Standard) steht unverändert im Code; die Zeile mit 500 Charakteren ist mit ihm
+  gemessen, seine Kosten sind nicht isoliert. Bei einigen tausend Charakteren ist er der erste Kandidat für eine Nacharbeit.
+- **dense 10 000** ist nicht rein Serienanteil: die vierfachen Obergrenzen aus Schritt 2 können Kontakte erhalten, die vorher
+  stillschweigend abgeschnitten wurden. Im Vorher-Binary war das nicht zu sehen (das Flag wurde weggeworfen), im Nachher-Binary
+  trat es nicht auf. Wie viel der -29 % darauf entfällt, ist nicht getrennt.
+- **Die 5-Schritte-Grenze bleibt**, wenn die Physik für Echtzeit zu langsam ist. Bei 20 000 aktiven Körpern ist sie auf
+  diesem Mac jetzt eingeholt; eine lineare Hochrechnung (10,5 ms je 20 000 Körper gegen 16,7 ms je Schritt) legt die Grenze bei
+  etwa 30 000 aktiven Körpern nahe. Das ist **nicht gemessen**.
+- **Nicht gemessen:** Streaming plus Physik im selben Frame, Mesh-Collider, Treppen, laufende Charaktere, `CastShape` und
+  `CollideShape`, Strahlen unter Last, der Durchtunnelungs-Gegenversuch der Collision-Steps, Windows, Linux, und alles mit
+  entsperrtem Bildschirm und vsync.
+
+**Voll-Build und Tests** (macOS, Release, `HE_ENABLE_SHADERC=ON` laut `CMakeCache.txt`, Quelle gleich `origin/release/0.7.0`
+`af4f2868`, alles im Vordergrund gebaut und gelaufen):
+
+- **`HorizonGame`:** 35 Schritte, 1,5 Minuten, `BUILD_RC=0`.
+- **`he_tests`** (mit allen Test-Bibliotheken): 396 Schritte, 12 Minuten, `BUILD_RC=0`, kein `error:` und kein `FAILED` im Log.
+- **Voller `ctest -j4 --timeout 1500`: 261 Tests, 100 % bestanden** (`CTEST_RC=0`, 284,7 s). Übersprungen sind nur
+  `runtime_size_app_advanced` und `runtime_size_app_basic` (kein Deploy-Ordner `AppAdvanced`/`AppBasic`, wie in Schritt 2 und 3).
+  Kein roter Test, also auch kein Gegenlauf nötig. Die Tests aus den vom Auftrag genannten Bereichen sind alle grün:
+  - Physik: `test_physics`, `test_physics_threading` (Schritt 2), `test_physics_budget` (Schritt 3), `test_collision_system`;
+  - Charaktere und Bewegung: `test_character`, `test_player_host`, `test_player_settings`, `test_movement`;
+  - Streaming: `test_async_streaming`, `test_cell_split`, `test_streaming_view`;
+  - Projekt-Einstellungen mit dem neuen Feld: `test_project_settings`, `test_project_settings_ui`;
+  - Netzwerk-Schicht, die auf die Physik aufsetzt: `test_game_replication`, `test_net_property_replication`, `test_net_game_session`,
+    `test_anticheat`.
+- **Nicht gebaut: `all`** (der Link von `HorizonEditor` mit `ProfilerPanel`, `ProjectSettingsPanel`, `EditorHelp`). Ich habe ihn
+  gestartet (723 Schritte, nach den Erfahrungen aus Schritt 2 gut 19 Minuten) und für die Messwiederholung wieder abgebrochen,
+  weil die Zeit bis zur Frist nicht für beides reichte. Das heißt: der Editor-Teil dieser Verifikation ist lokal **nicht** belegt
+  (die Schritte 2 und 3 haben `all` gebaut, siehe `physics-threading-step2.md` und `physics-threading-budget.md`, jeweils
+  Abschnitt 8; `git diff e3f5bff9 af4f2868 -- src tests` ist leer, der Quelltext gleicht also dem von Schritt 3).
+  Zur CI: Der PR dieses Schritts ändert nur Doku, zum Zeitpunkt des Schreibens hatte er noch keinen Check. Der CI-Lauf 38158075083
+  auf dem Kopf `4799cc01` (Quelltext gleich, `git diff 4799cc01 af4f2868` ist leer) war auf allen Plattformen grün; ob er den
+  Editor-Link auf macOS einschließt, habe ich nicht nachgesehen.
+- **Nicht gelaufen:** Windows und Linux lokal (nur CI), die zwei `runtime_size_app_*` (übersprungen).
