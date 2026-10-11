@@ -226,6 +226,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 viewMode;       // x = 1 → Unlit/Wireframe view: heLitP hands the base colour back, heApplyFog is a no-op (scene-pass fill sites only)
     vec4 clusterParams;  // HE_CLUSTERED variant only: x/y/z = cluster grid dims (x = 0 → off, window lights only), w = gridZ / log(far/near)
     vec4 clusterCamFwd;  // xyz = camera forward (cluster depth axis), w = cluster near plane
+    vec4 weather2;       // x = puddle size in metres (the Weather node's 5th output)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -1289,6 +1290,28 @@ vec3 heClusterLighting(vec3 P, vec3 Nin, vec3 baseColor, float metallic,
     return src;
 }
 
+// The clustered resolve for FXC (HLSL) and SPIR-V (Thema 150): the two samples
+// inside the per-light loop become explicit-LOD, exactly the forward twin's
+// spelling (heFwdClusterShadow / heFwdClusterLights). FXC rejects a gradient
+// sample in a loop whose trip count is per pixel (X3570 → X4014), which
+// stopped the whole clustered resolve on D3D11 (measured 2026-10-08 on the
+// RTX 4070). The atlas and the GI mask have one mip, so LOD 0 is the same
+// texel. Applied to the BUILT text, not to the literal above: Metal keeps its
+// byte-identical source, and the drift guard in test_culling.cpp (which
+// normalises the forward twin back to texture()) keeps comparing the literal.
+std::string explicitLodClusterSamples(std::string src)
+{
+    const std::pair<const char*, const char*> swaps[] = {
+        { "texture(heLocalShadow, vec3(suv + vec2(x, y) * texel, float(layer))).r",
+          "textureLod(heLocalShadow, vec3(suv + vec2(x, y) * texel, float(layer)), 0.0).r" },
+        { "texture(heGILocal, uv)", "textureLod(heGILocal, uv, 0.0)" },
+    };
+    for (const auto& [from, to] : swaps)
+        for (size_t p = src.find(from); p != std::string::npos; p = src.find(from, p + std::strlen(to)))
+            src.replace(p, std::strlen(from), to);
+    return src;
+}
+
 // Fullscreen triangle with NO varyings — the resolve fragment reads gl_FragCoord,
 // so nothing needs to cross the stage boundary.
 constexpr const char* kFullscreenVS = R"(#version 450
@@ -1327,10 +1350,59 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
 {
     using namespace he::shaderc;
     using Backend = MaterialShaderLibrary::Backend;
+    if (backend == Backend::HLSL)
+    {
+        // D3D11/D3D12 (Thema 150). Unpinned, SPIRV-Cross would put the G-buffer
+        // and the preamble's 16..18/31..33 on s16+ and HeResolve on b23 — past
+        // SM 5.0's 16 sampler / 14 constant-buffer registers, FXC rejects the
+        // shader (X4509) and the renderer would silently stay forward. Same
+        // registers as kHlslMaterialPins for the preamble (one bind code for
+        // graph materials and the resolve), the resolve's own inputs per the
+        // kHlslResolve* contract in the header. 15 sampler declarations, 14 of
+        // them live (heAO's s0 is dead: texelFetch), all in s0..s15.
+        if (tile) return {}; // framebuffer fetch is Apple-only
+        using MSL = MaterialShaderLibrary;
+        std::vector<HlslPin> pins = {
+            //        stage           set bind reg  sampler
+            { Stage::Fragment, 0,  0,  0 },     // HeLighting      → b0
+            { Stage::Fragment, 0, 10, 10 },     // heGIShadow      → t10/s10
+            { Stage::Fragment, 0, 11, 11 },     // heGILocal       → t11/s11
+            { Stage::Fragment, 0, 12, 12 },     // heCsm           → t12/s12
+            { Stage::Fragment, 0, 13, 13 },     // heLocalShadow   → t13/s13
+            { Stage::Fragment, 0, 15, 15 },     // heSkyEnv        → t15/s15
+            { Stage::Fragment, 0, 16, 16,  0 }, // heAO            → t16/s0 (dead: texelFetch)
+            { Stage::Fragment, 0, 17, 17,  1 }, // heGIIrradiance  → t17/s1
+            { Stage::Fragment, 0, 18, 18,  3 }, // heGIVisibility  → t18/s3
+            { Stage::Fragment, 0, 31, 31,  8 }, // heSSRFwd        → t31/s8
+            { Stage::Fragment, 0, 32, 32,  9 }, // heGIReflFwd     → t32/s9
+            { Stage::Fragment, 0, 33, 33, 14 }, // heCloudShadow   → t33/s14
+            { Stage::Fragment, 0, 19, MSL::kHlslResolveGB0Reg,   MSL::kHlslResolveGB0Sampler },
+            { Stage::Fragment, 0, 20, MSL::kHlslResolveGB1Reg,   MSL::kHlslResolveGB1Sampler },
+            { Stage::Fragment, 0, 21, MSL::kHlslResolveGB2Reg,   MSL::kHlslResolveGB2Sampler },
+            { Stage::Fragment, 0, 22, MSL::kHlslResolveDepthReg, MSL::kHlslResolveDepthSampler },
+            { Stage::Fragment, 0, 23, MSL::kHlslResolveUboReg },  // HeResolve → b4
+        };
+        if (clustered)
+        {
+            // Raw ByteAddressBuffers, no sampler — the forward clustered
+            // variant's t24..t26 (Thema 117), so D3D11 binds the same raw twins.
+            pins.push_back({ Stage::Fragment, 0, 24, 24 });
+            pins.push_back({ Stage::Fragment, 0, 25, 25 });
+            pins.push_back({ Stage::Fragment, 0, 26, 26 });
+        }
+        return toCompiled(compileHlslPinned(injected, Stage::Fragment, pins));
+    }
+    if (backend == Backend::SpirV && clustered && !tile)
+    {
+        // Vulkan keeps the canonical bindings (no pin needed, Thema 150 §10.4);
+        // the SSBOs 24..26 exist there as for the forward clustered variant.
+        return toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+    }
     if (backend != Backend::Metal)
     {
         // GL keeps the sampled non-clustered resolve (no SSBOs in GL 4.1, no
-        // framebuffer fetch); the tile/clustered variants are Metal-only.
+        // framebuffer fetch); the tile variants are Metal-only, the clustered
+        // one exists for Metal, HLSL and SPIR-V (above).
         if (tile || clustered) return {};
         return toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
     }
@@ -1391,9 +1463,9 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveClu
 {
     const int key = static_cast<int>(backend) + 64;
     if (auto it = m_resolveCache.find(key); it != m_resolveCache.end()) return it->second;
-    Compiled out = compileResolveVariant(
-        injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/true)),
-        backend, false, true);
+    std::string src = buildDeferredResolveSource(/*tile=*/false, /*clustered=*/true);
+    if (backend != Backend::Metal) src = explicitLodClusterSamples(std::move(src));
+    Compiled out = compileResolveVariant(injectPreamble(src), backend, false, true);
     return m_resolveCache.emplace(key, std::move(out)).first->second;
 }
 

@@ -859,7 +859,34 @@ void drawSimulationPage(AppContext& ctx)
 	               HE::ProjectPhysicsSettings::kMinHz, HE::ProjectPhysicsSettings::kMaxHz, "%d Hz");
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	hint("How many simulation steps a second of game time is cut into, "
-	                    "whatever the frame rate. 60 is what every project has run at.");
+	                    "whatever the frame rate. 60 is what every project has run at. "
+	                    "Below about 40 Hz a step is longer than the physics engine likes "
+	                    "and is split into several collision steps automatically.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Threads");
+	Row::sliderInt("Physics threads##physthreads", &ph.threads,
+	               0, HE::ProjectPhysicsSettings::kMaxThreads, ph.threads == 0 ? "Auto" : "%d");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How many threads work on one simulation step, the one that runs the game "
+	     "included. Auto leaves about half the cores to streaming, rendering and "
+	     "audio, with at most four Jolt workers. 1 simulates on the game thread "
+	     "alone. The result of the simulation is the same whatever the number; "
+	     "only the time a step takes changes. The environment variable "
+	     "HE_PHYSICS_THREADS overrides this.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Time budget");
+	Row::sliderFloat("Physics budget##physbudget", &ph.budgetMs, 0.0f, 16.0f,
+	                 ph.budgetMs <= 0.0f ? "Off" : "%.1f ms");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How many milliseconds one simulation step may spend on the work around "
+	     "the physics engine: character updates, scene queries and the bodies of "
+	     "streamed cells. What does not fit waits for the next step; a crowd of "
+	     "characters is stepped over several steps, each with the time it missed. "
+	     "Off applies no limit. The first 32 characters are always stepped. "
+	     "Shown in the Performance Profiler. The environment variable "
+	     "HE_PHYSICS_BUDGET_MS overrides this.");
 	ImGui::Spacing();
 
 	ImGui::SeparatorText("Gravity");

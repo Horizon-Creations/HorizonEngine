@@ -184,6 +184,14 @@ void EditorCamera::update(const Input& in)
 		m_pivotDistance  = std::max(kMinPivot, m_pivotDistance - move);
 	}
 
+	// ── Fly speed: the wheel while fly-look is held ──────────────────────────
+	// Up = faster, down = slower, exactly the "scroll to change speed" of every
+	// fly camera. Held RMB means the wheel is not a dolly (the caller routes it here
+	// instead), and the change is a multiplier so it feels the same at any speed.
+	if (in.look && in.speedWheel != 0.0f)
+		m_flySpeed = glm::clamp(m_flySpeed * std::pow(kFlySpeedPerTick, in.speedWheel),
+		                        kMinFlySpeed, kMaxFlySpeed);
+
 	// ── Fly movement (only while fly-look is held) ───────────────────────────
 	if (in.look &&
 	    (in.moveAxis.x != 0.0f || in.moveAxis.y != 0.0f || in.moveAxis.z != 0.0f))

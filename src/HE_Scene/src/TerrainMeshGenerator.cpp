@@ -71,7 +71,7 @@ float terrainFbm(int seed, float x, float z, int octaves,
 
 std::vector<float> computeTerrainHeightField(const TerrainComponent& tc)
 {
-    const uint32_t res       = std::clamp(tc.resolution, 2u, 1024u);
+    const uint32_t res       = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     const uint32_t vertCount = res * res;
     std::vector<float> heights(vertCount, 0.0f);
     if (tc.sculptHeights.size() == static_cast<size_t>(vertCount))
@@ -95,7 +95,7 @@ std::vector<float> computeTerrainHeightField(const TerrainComponent& tc)
 
 StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
 {
-    const uint32_t res   = std::clamp(tc.resolution, 2u, 1024u);
+    const uint32_t res   = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     const float    halfX = tc.sizeX * 0.5f;
     const float    halfZ = tc.sizeZ * 0.5f;
     const float    stepX = tc.sizeX / static_cast<float>(res - 1);
@@ -182,7 +182,7 @@ float terrainHeightAt(const TerrainComponent& tc, float localX, float localZ)
     const float nx = (localX + tc.sizeX * 0.5f) / tc.sizeX;
     const float nz = (localZ + tc.sizeZ * 0.5f) / tc.sizeZ;
 
-    const uint32_t res = std::clamp(tc.resolution, 2u, 1024u);
+    const uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     if (tc.sculptHeights.size() == static_cast<size_t>(res * res))
     {
         // Bilinear sample from sculpted heights

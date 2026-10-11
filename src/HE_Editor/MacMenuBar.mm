@@ -360,6 +360,7 @@ void install()
 		heAddItem(build, @"Build and Reload Game Logic", C::BuildGameLogic, nil, 0, true);
 		[build addItem:[NSMenuItem separatorItem]];
 		heAddItem(build, @"Export Project…", C::ExportProject, nil, 0, true);
+		heAddItem(build, @"Show Last Build Log", C::ShowBuildLog, nil, 0, true);
 	}
 
 	// ── View: how the Scene window draws ───────────────────────────────────

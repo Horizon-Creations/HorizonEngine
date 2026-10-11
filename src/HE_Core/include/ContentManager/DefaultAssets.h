@@ -87,7 +87,8 @@ constexpr int kEditorIconTextureSize = 64;
 // same UUID in memory as well would collide with the file.
 
 // Water: lit, translucent node-graph material with three animated wave trains,
-// depth tint, Fresnel, foam and caustics, 15 parameters for the Inspector.
+// depth tint, Fresnel, foam and caustics, 16 parameters for the Inspector (the
+// waves are bombed on a hex grid so a big surface does not tile).
 // Content path "Engine/Materials/Water.hasset". docs/water-shader-plan.md.
 constexpr UUID kEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000001ULL };
 

@@ -8,6 +8,7 @@
 #include "TestFsUtil.h"
 
 #include <Project/ProjectSettings.h>
+#include <HorizonScene/PhysicsTuning.h>   // kMaxThreads, pinned against the project's
 #include "ProjectManager.h"
 
 #include <nlohmann/json.hpp>
@@ -93,6 +94,7 @@ TEST_CASE("ProjectSettings: toJson/fromJson round-trips every field")
 	a.shadows.slopeBias                = 0.002f;
 	a.shadows.minBias                  = 0.0006f;
 	a.physics.fixedHz                  = 120;
+	a.physics.threads                  = 6;
 	a.physics.gravity                  = glm::vec3(0.5f, -3.7f, 0.0f);
 	a.renderDefaults.useEditorSettings = false;
 	a.renderDefaults.windowWidth       = 1920;
@@ -106,10 +108,12 @@ TEST_CASE("ProjectSettings: toJson/fromJson round-trips every field")
 	CHECK(j["version"] == HE::ProjectSettings::kVersion);
 	CHECK(j["shadows"]["cascadeCount"] == 2);
 	CHECK(j["physics"]["gravity"].size() == 3);
+	CHECK(j["physics"]["threads"] == 6);
 
 	HE::ProjectSettings b;
 	b.fromJson(j);
 	CHECK(a == b);
+	CHECK(b.physics.threads == 6);
 	CHECK(b.game.title == "Sky Harbour");
 	CHECK(b.renderDefaults.windowMode == "Borderless");
 	CHECK(b.physics.gravity.x == doctest::Approx(0.5f));
@@ -129,7 +133,38 @@ TEST_CASE("ProjectSettings: a missing key is its default, an unknown key is igno
 	CHECK(s.shadows.distance == doctest::Approx(120.0f));
 	CHECK(s.shadows.cascadeCount == 3);
 	CHECK(s.physics.fixedHz == 60);
+	CHECK(s.physics.threads == 0);   // a project from before the setting: automatic
 	CHECK(s.renderDefaults.useEditorSettings);
+}
+
+// Thema 178: the thread count of a physics step. 0 is "pick for me", the number is
+// clamped on the way in, and an edit makes the settings non-default.
+TEST_CASE("ProjectPhysicsSettings::threads: automatic by default, clamped, and part of equality")
+{
+	HE::ProjectSettings s;
+	CHECK(s.physics.threads == 0);
+	CHECK(s.isDefault());
+
+	s.physics.threads = 4;
+	CHECK_FALSE(s.isDefault());
+
+	s.physics.threads = -7;
+	s.clamp();
+	CHECK(s.physics.threads == 0);
+	s.physics.threads = 100000;
+	s.clamp();
+	CHECK(s.physics.threads == HE::ProjectPhysicsSettings::kMaxThreads);
+
+	// A hand-edited file: a string is ignored (default), a huge number is clamped.
+	HE::ProjectSettings fromText;
+	fromText.fromJson(json::parse(R"({ "physics": { "threads": "many" } })"));
+	CHECK(fromText.physics.threads == 0);
+	fromText.fromJson(json::parse(R"({ "physics": { "threads": 9999 } })"));
+	CHECK(fromText.physics.threads == HE::ProjectPhysicsSettings::kMaxThreads);
+
+	// The editor's setting and the engine's tuning name the same ceiling.
+	static_assert(HE::ProjectPhysicsSettings::kMaxThreads == HE::PhysicsTuning::kMaxThreads,
+	              "ProjectPhysicsSettings::kMaxThreads and PhysicsTuning::kMaxThreads must agree");
 }
 
 TEST_CASE("ProjectSettings: wrong types and out-of-range numbers are corrected, never trusted")

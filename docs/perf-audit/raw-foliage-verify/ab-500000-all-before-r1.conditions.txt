@@ -1,0 +1,15 @@
+== ab-500000-all-before-r1  2026-10-10 20:23:53
+before:
+  uptime:      load averages: 5.42 8.91 8.38
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=0
+  power:       Now drawing from 'AC Power'
+  busy procs:  17.4% /Applications/CLion.app/Contents/MacOS/clion; 15.3% /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python; 4.8% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 3.1% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 
+after (rc=0):
+  uptime:      load averages: 5.31 8.31 8.19
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=79
+  power:       Now drawing from 'AC Power'
+  busy procs:  96.7% /System/Library/PrivateFrameworks/FileProviderDaemon.framework/XPCServices/FPCKService.xpc/Contents/MacOS/FPCKService; 6.6% /usr/sbin/coreaudiod; 4.8% /Applications/CLion.app/Contents/MacOS/clion; 4.6% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 

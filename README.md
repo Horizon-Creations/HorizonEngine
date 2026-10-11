@@ -4,7 +4,7 @@ A cross-platform 3D game engine and editor, written from scratch in C++20. It is
 built to power our own game **Catania**, which is why the feature list leans
 towards what an actual production needs rather than towards a demo reel.
 
-**Current release: 0.5.0 "Parhelion"** — [Downloads](https://horizoncreations.dev/HorizonEngine/HE.html) ·
+**Current release: 0.7.0 "Nimbus"** — [Downloads](https://horizoncreations.dev/HorizonEngine/HE.html) ·
 [Documentation](https://horizoncreations.dev/HorizonEngineDocs/) · [Website](https://horizoncreations.dev)
 
 ---
@@ -55,7 +55,7 @@ in daily use on Catania. It is **not at 1.0**, and the honest gaps are:
 | Area | State |
 |---|---|
 | Metal, OpenGL | Complete |
-| Direct3D 11/12, Vulkan | Close to parity — shadows (cascaded + point/spot atlases) and the material node-graph shader pipeline are now wired on all five backends, still awaiting a manual smoke test on real D3D/Vulkan hardware; the newest sky work (nebula/atmosphere, volumetric clouds) is still Metal/OpenGL only |
+| Direct3D 11/12, Vulkan | Close to parity — shadows (cascaded + point/spot atlases), the material node-graph shader pipeline and the deferred renderer (clustered lighting, decals, SSR, AO, GI) are now wired on all five backends, checked against WARP/lavapipe in CI but still awaiting a manual smoke test on more than one real GPU; the newest sky work (nebula/atmosphere, volumetric clouds) is still Metal/OpenGL only |
 | Linux | Builds and runs, but has had far less real-world use than macOS and Windows |
 | Texture compression | ASTC on Apple hardware; BCn encoders are not written yet |
 

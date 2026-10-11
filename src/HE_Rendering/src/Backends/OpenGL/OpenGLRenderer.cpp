@@ -2450,7 +2450,7 @@ vec3 giAutoLandAlbedo(int li, vec3 pos, vec3 n)
 	            * (1.0 - smoothstep(giLands[li].autoSnow.z, giLands[li].autoSnow.z + 0.1, slope));
 	vec3 s2     = mix(s1, giLands[li].layer[3].rgb, snow);
 	float pms   = giLands[li].autoSlope.w;
-	float flat_ = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	float flat_ = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
 	return mix(s2, giLands[li].autoWet.rgb, giLands[li].autoWet.w * flat_);
 }
 
@@ -4749,6 +4749,23 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
 		if (!mesh || !mesh->vao || mesh->indexCount <= 0) continue;
 
+		// A foliage cluster stands for a bucket of plants: draw every one of them,
+		// static (previous pose = this pose, so the velocity is the camera's own
+		// motion). The entity-keyed history below holds ONE pose per entity, which
+		// is all a cluster must not use: every plant of a layer shares the terrain's id.
+		if (obj.isCluster())
+		{
+			glBindVertexArray(mesh->vao);
+			m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model)
+			{
+				glUniformMatrix4fv(m_uTaaVelMvpJitter, 1, GL_FALSE, glm::value_ptr(viewProjJit * model));
+				glUniformMatrix4fv(m_uTaaVelMvpNow,    1, GL_FALSE, glm::value_ptr(viewProjClean * model));
+				glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(m_taaPrevViewProj * model));
+				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			});
+			continue;
+		}
+
 		// An object seen for the first time reports no motion — its "previous"
 		// position is where it is now. Anything else invents a streak out of
 		// nowhere on the frame something spawns.
@@ -5700,7 +5717,8 @@ void OpenGLRenderer::UpdateGIAccel()
 	};
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
-		if (!obj.castsShadow) continue;
+		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+		if (!obj.castsShadow || obj.isCluster()) continue;
 		// Default-cube fallback — an entity without a resolvable mesh asset
 		// RENDERS as the default cube (draw-loop fallback), so it must occlude
 		// as one too, or plain cube entities cast no GI shadow at all.
@@ -6108,8 +6126,8 @@ void OpenGLRenderer::EnsureGIProbeGrid()
 	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 	int unresolved = 0;
 	const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!sceneBox.isValid()) return;
@@ -7657,6 +7675,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 				// has no local shadow atlas, so it passes false.
 				HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/false);
 				HE::FillMaterialWind(GetEnvironment(), lit); // Wind nodes, next to Time
+				HE::FillMaterialWeather(GetEnvironment(), lit); // Weather node + the generic wet/snow response
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 				uiLightUploaded = true;
@@ -8688,7 +8707,8 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 // the Material Editor is showing. The caller owns FBO/viewport/clear and the
 // depth/blend/cull state; this only touches program, UBOs, textures and the VAO.
 bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
-                                                 float dist, int shape, const HE::UUID& meshId)
+                                                 float dist, int shape, const HE::UUID& meshId,
+                                                 float timeSeconds)
 {
 	// Resolve the material's node-graph program (built-in-PBR materials have none →
 	// nothing to draw). Reuses the same program cache + precompiled-variant path.
@@ -8773,10 +8793,18 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 
 	HE::MaterialShaderLibrary::Lighting lit{};
 	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
-	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
+	// Engine clock for the Time input. A live preview (the Material Editor) hands
+	// it in, a still (thumbnails) leaves it at 0 — and then must not pick up wind
+	// either, or a sway material's thumbnail would lean with whatever scene is open.
+	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
+	lit.sunDir[3] = timeSeconds >= 0.0f ? timeSeconds : 0.0f;
 	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	// Wind / Wind Sway nodes read the .w of sunColor / ambient / camPos. The three
+	// are spare in this block, so the wind rides in AFTER the studio values above
+	// (FillMaterialWind writes only those .w channels).
+	if (timeSeconds >= 0.0f) HE::FillMaterialWind(GetEnvironment(), lit);
 	// Studio sun as the single array light so heLitP() previews shade correctly.
 	lit.lightPos[0][3]   = 0.0f; // directional
 	lit.lightDir[0][0]   = -sd.x; lit.lightDir[0][1] = -sd.y; lit.lightDir[0][2] = -sd.z;
@@ -9043,7 +9071,7 @@ bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
 
 void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
                                            uint32_t size, float yaw, float pitch, float dist,
-                                           int shape, const HE::UUID& meshId)
+                                           int shape, const HE::UUID& meshId, float timeSeconds)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -9088,7 +9116,7 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
-	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape, meshId))
+	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape, meshId, timeSeconds))
 	{
 		glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
 		glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
@@ -10647,9 +10675,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	m_culler.cull(m_renderWorld, m_visible);
@@ -11374,6 +11401,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (matClustered)
 				HE::FillMaterialClusterParams(frameClusters, lit);
 			HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
+			HE::FillMaterialWeather(GetEnvironment(), lit); // Weather node + the generic wet/snow response
 			// Local (point/spot) shadow atlas for heLitP — same matrices the
 			// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
 			// PRE-BAKED so the shared preamble stays convention-free.
@@ -11520,9 +11548,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						pushTP(dc.transform);
 					continue;
 				}
-				if (!dc.instanceTransforms.empty() && m_gbufferInstancedProgram && m_instanceVBO)
+				// A graph material keeps its own program: the built-in instanced
+				// program would swap the look (no wind, no alpha discard, flat PBR),
+				// so those batches fall through to the per-instance loops below —
+				// the same rule Metal applies (cMaterialPipeline == nullptr).
+				if (!dc.instanceTransforms.empty() && !(gbProg || matProg)
+				    && m_gbufferInstancedProgram && m_instanceVBO)
 				{
-					// Instanced batches always take the built-in instanced program —
+					// Built-in PBR batches take the built-in instanced program —
 					// the same routing the forward loop uses.
 					glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
 					glBufferData(GL_ARRAY_BUFFER,
@@ -11549,20 +11582,29 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				if (hasCustom && !gbProg)
 				{
 					// No G-buffer variant → forward replay after the resolve.
-					TPDraw tp{ viewProj * dc.transform, dc.transform, baseColor,
-					           cMetallic, cRoughness, opacity, tex, vao, indexCount, 0.0f };
-					tp.indexOffset    = indexOffset;
-					tp.receivesShadow = dc.receivesShadow;
-					tp.matProg = matProg;
-					tp.params  = mParams;
-					for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
-					tp.gtexCount = mGtexCount;
+					// A batch replays one entry per instance, each with the material.
+					unsigned int wmTex = 0;
 					{
 						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
 							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
-						tp.wmTex = ResolveGraphTexture(wid, {});
+						wmTex = ResolveGraphTexture(wid, {});
 					}
-					deferredForward.push_back(std::move(tp));
+					auto pushForward = [&](const glm::mat4& t) {
+						TPDraw tp{ viewProj * t, t, baseColor,
+						           cMetallic, cRoughness, opacity, tex, vao, indexCount, 0.0f };
+						tp.indexOffset    = indexOffset;
+						tp.receivesShadow = dc.receivesShadow;
+						tp.matProg = matProg;
+						tp.params  = mParams;
+						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
+						tp.gtexCount = mGtexCount;
+						tp.wmTex     = wmTex;
+						deferredForward.push_back(std::move(tp));
+					};
+					if (!dc.instanceTransforms.empty())
+						for (const glm::mat4& t : dc.instanceTransforms) pushForward(t);
+					else
+						pushForward(dc.transform);
 					continue;
 				}
 #if defined(HE_HAVE_SHADERC)
@@ -11572,15 +11614,6 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					// binds as the forward custom branch (minus the lighting-only
 					// inputs the resolve owns).
 					glUseProgram(gbProg);
-					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
-					obj.mvp   = viewProj * dc.transform;
-					obj.model = dc.transform;
-					obj.color = glm::vec4(baseColor, 1.0f);
-					obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
-					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
-					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					glBindBuffer(GL_UNIFORM_BUFFER, 0);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting" (Time)
 					if (!mParams.empty())
@@ -11614,10 +11647,27 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 					}
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+					// Only the per-object block changes between the instances of a
+					// batch; program, params and textures above stay bound.
+					auto drawGraphInstance = [&](const glm::mat4& t) {
+						struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+						obj.mvp   = viewProj * t;
+						obj.model = t;
+						obj.color = glm::vec4(baseColor, 1.0f);
+						obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+						obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						++m_counters.draws;
+						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+					};
+					if (!dc.instanceTransforms.empty())
+						for (const glm::mat4& t : dc.instanceTransforms) drawGraphInstance(t);
+					else
+						drawGraphInstance(dc.transform);
 					glUseProgram(m_gbufferProgram);
-					++m_counters.draws;
-					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					continue;
 				}
 #endif
@@ -11744,7 +11794,29 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				continue; // drawn in the transparency pass below
 			}
 
-			if (!dc.instanceTransforms.empty() && m_instancedProgram && m_instanceVBO)
+			// Per-material GL program (MaterialAsset custom shader), cross-compiled from
+			// canonical GLSL via the shared library; 0 for built-in PBR. Resolved BEFORE
+			// the instancing decision: a graph material keeps its own program, the
+			// built-in instanced one would swap the look (no wind, no alpha discard,
+			// flat PBR) — such a batch is drawn instance by instance below, the rule
+			// Metal applies too (cMaterialPipeline == nullptr).
+			unsigned int matProg = 0;
+#if defined(HE_HAVE_SHADERC)
+			{
+				uint64_t shKey; std::string shFrag, shVert;
+				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
+				{
+					const MaterialShaderVariant* pre = nullptr;
+					if (const MaterialAsset* ma = m_contentManager
+						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+						for (const auto& var : ma->precompiledShaders)
+							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+				}
+			}
+#endif
+
+			if (!dc.instanceTransforms.empty() && !matProg && m_instancedProgram && m_instanceVBO)
 			{
 				// GPU-instanced opaque draw: upload all transforms to the scratch VBO,
 				// then call glDrawElementsInstanced with the instanced program.
@@ -11774,31 +11846,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			else
 			{
 #if defined(HE_HAVE_SHADERC)
-				// Per-material GL program (MaterialAsset custom shader), cross-compiled from
-				// canonical GLSL via the shared library. Feeds per-object + lighting through
-				// UBOs; same VAO/attribs as the unlit program. Materials without one fall
+				// Feeds per-object + lighting through UBOs; same VAO/attribs as the
+				// unlit program. Materials without a program (matProg == 0) fall
 				// through to the built-in shader below.
-				uint64_t shKey; std::string shFrag, shVert; unsigned int matProg = 0;
-				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
-				{
-					const MaterialShaderVariant* pre = nullptr;
-					if (const MaterialAsset* ma = m_contentManager
-						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
-						for (const auto& var : ma->precompiledShaders)
-							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-				}
 				if (matProg)
 				{
 					glUseProgram(matProg);
-					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
-					obj.mvp   = viewProj * dc.transform;
-					obj.model = dc.transform;
-					obj.color = glm::vec4(baseColor, 1.0f);
-					obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
-					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
-					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 					HE::MaterialShaderLibrary::Lighting lit{};
 					fillMatLight(lit); // shared heLitP ABI fill (see the lambda above)
 					// Lighting is identical for every material draw this frame → upload once.
@@ -11884,10 +11937,27 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
 					}
-					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+					// Only the per-object block changes between the instances of a
+					// batch; program, lighting, params and textures stay bound.
+					auto drawGraphInstance = [&](const glm::mat4& t) {
+						struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+						obj.mvp   = viewProj * t;
+						obj.model = t;
+						obj.color = glm::vec4(baseColor, 1.0f);
+						obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+						obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						++m_counters.draws;
+						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+					};
+					if (!dc.instanceTransforms.empty())
+						for (const glm::mat4& t : dc.instanceTransforms) drawGraphInstance(t);
+					else
+						drawGraphInstance(dc.transform);
 					glUseProgram(m_unlitProgram); // restore for the next single-draw
-					++m_counters.draws;
-					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					continue;
 				}
 #endif

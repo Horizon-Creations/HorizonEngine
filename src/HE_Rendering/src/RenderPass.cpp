@@ -1,6 +1,8 @@
 #include "HorizonRendering/RenderPass.h"
+#include <algorithm>
 #include <cstdint>
 #include "HorizonRendering/RenderObject.h"
+#include "HorizonRendering/RenderConstants.h"
 #include "HorizonRendering/FrustumCuller.h"
 
 // ─── GeometryPass ───────────────────────────────────────────────────────────
@@ -58,7 +60,6 @@ void GeometryPass::execute(const RenderWorld&           world,
 			++j;
 		}
 
-		const size_t runLen = j - i;
 		DrawCall dc;
 		dc.meshAssetId     = first.meshAssetId;
 		dc.materialAssetId = first.materialAssetId;
@@ -77,23 +78,17 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.paramOverride   = first.paramOverride; // per-entity HeParams block (empty = none)
 		dc.weightmapTextureId = first.weightmapTextureId; // landscape layer weights
 
-		if (runLen > 1)
+		// One draw (per section) over the instance list `d` already carries.
+		auto recordRun = [&](const DrawCall& d)
 		{
-			dc.instanceCount = static_cast<uint32_t>(runLen);
-			dc.instanceTransforms.reserve(runLen);
-			for (size_t k = i; k < j; ++k)
-				dc.instanceTransforms.push_back(world.objects[sortedIndices[k]].transform);
-		}
-
-		if (first.sections.empty())
-		{
-			// One-section mesh (and every primitive, terrain chunk, override):
-			// exactly the draw this pass always recorded — whole index buffer,
-			// one material, one DrawCall per run.
-			outCmds.recordDraw(dc);
-		}
-		else
-		{
+			if (first.sections.empty())
+			{
+				// One-section mesh (and every primitive, terrain chunk, override):
+				// exactly the draw this pass always recorded — whole index buffer,
+				// one material, one DrawCall per run.
+				outCmds.recordDraw(d);
+				return;
+			}
 			// Multi-section mesh: one DrawCall per material slot over the same
 			// instance list. The slot's own material rides in materialAssetId, so
 			// the backends resolve it through the very same path as an entity
@@ -104,7 +99,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 				// An empty slot has nothing to draw — and indexCount 0 would read
 				// as "whole mesh" downstream, which is the one thing it must not.
 				if (sec.indexCount == 0) continue;
-				DrawCall sd        = dc;
+				DrawCall sd        = d;
 				sd.indexOffset     = sec.indexOffset;
 				sd.indexCount      = sec.indexCount;
 				sd.sectionIndex    = static_cast<int32_t>(s);
@@ -118,8 +113,59 @@ void GeometryPass::execute(const RenderWorld&           world,
 				// The param block belongs to the entity's whole-mesh material
 				// (RenderExtractor merges it for that one); a slot overridden with
 				// another material draws that one plain.
-				if (sec.materialAssetId != dc.materialAssetId) sd.paramOverride.clear();
+				if (sec.materialAssetId != d.materialAssetId) sd.paramOverride.clear();
 				outCmds.recordDraw(sd);
+			}
+		};
+
+		// The instances the run stands for: one per ordinary object, a cluster's whole
+		// block per cluster (foliage — RenderObject::instanceBlock). This is where a
+		// cluster is unfolded; everything before it culled and sorted ONE object per bucket.
+		size_t total = 0;
+		for (size_t k = i; k < j; ++k)
+			total += world.instanceCountOf(world.objects[sortedIndices[k]]);
+
+		if (total <= 1)
+		{
+			// A single instance stays a plain draw: instanceTransforms empty, the
+			// transform in dc.transform. Backends keep their non-instanced program for it.
+			recordRun(dc);
+		}
+		else if (total <= HE::kMaxInstancesPerDraw)
+		{
+			dc.instanceCount = static_cast<uint32_t>(total);
+			dc.instanceTransforms.reserve(total);
+			for (size_t k = i; k < j; ++k)
+				world.appendInstances(world.objects[sortedIndices[k]], dc.instanceTransforms);
+			recordRun(dc);
+		}
+		else
+		{
+			// More than one instanced draw may carry: cut the run into draws of at most
+			// kMaxInstancesPerDraw. Without this every backend quietly fell back to one
+			// draw per instance above its ring size (140k plants = 140k draws).
+			std::vector<glm::mat4> all;
+			all.reserve(total);
+			for (size_t k = i; k < j; ++k)
+				world.appendInstances(world.objects[sortedIndices[k]], all);
+			for (size_t from = 0; from < total; from += HE::kMaxInstancesPerDraw)
+			{
+				const size_t to = std::min<size_t>(total, from + HE::kMaxInstancesPerDraw);
+				DrawCall chunk   = dc;
+				chunk.transform  = all[from];
+				if (to - from == 1)
+				{
+					// The tail of a split can be one instance: keep the "exactly one
+					// instance = empty list" contract.
+					chunk.instanceCount = 1;
+				}
+				else
+				{
+					chunk.instanceCount = static_cast<uint32_t>(to - from);
+					chunk.instanceTransforms.assign(all.begin() + static_cast<std::ptrdiff_t>(from),
+					                                all.begin() + static_cast<std::ptrdiff_t>(to));
+				}
+				recordRun(chunk);
 			}
 		}
 		i = j;

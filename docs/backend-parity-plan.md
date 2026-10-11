@@ -132,11 +132,11 @@ einkompiliert (`heSSRFwd`, `MaterialShaderLibrary.cpp:257`, Mix-Zweig `:504-508`
 beweisbar unerreichbar, weil `heLight.ssr` außerhalb von Metal nirgends geschrieben wird. Die
 Library sagt das selbst (`:496-497`: Gates sind 0, „dead code after constant folding").
 
-### 1.4 Der Deferred-Resolve ist teilweise schon portabel — die Sperre ist eine Zeile
+### 1.4 Der Deferred-Resolve war teilweise schon portabel — die Sperre war eine Zeile (erledigt, Thema 150)
 
-`compileResolveVariant` (`MaterialShaderLibrary.cpp:1024`) übersetzt den **nicht-tile,
-nicht-clustered** Resolve für *jedes* Backend. Tile- und Clustered-Variante werden dagegen
-hart abgewiesen:
+**Stand zum Zeitpunkt dieser Analyse** (vor Thema 150): `compileResolveVariant`
+(`MaterialShaderLibrary.cpp:1024`) übersetzte den **nicht-tile, nicht-clustered** Resolve für
+*jedes* Backend. Tile- und Clustered-Variante wurden dagegen hart abgewiesen:
 
 ```cpp
 if (backend != Backend::Metal) {
@@ -145,10 +145,16 @@ if (backend != Backend::Metal) {
     if (tile || clustered) return {};
 ```
 
-Die Begründung ist **GL-4.1-spezifisch** — und gilt für D3D11/D3D12/Vulkan nicht: die haben
-Structured Buffers bzw. SSBOs. Die Clustered-Variante ist für sie also nicht technisch
-gesperrt, sondern nur von dieser Zeile. Für die Tile-Variante gilt das nur eingeschränkt
-(siehe §4).
+Die Begründung war **GL-4.1-spezifisch** — und galt für D3D11/D3D12/Vulkan nicht: die haben
+Structured Buffers bzw. SSBOs. Die Clustered-Variante war für sie also nicht technisch
+gesperrt, sondern nur von dieser Zeile.
+
+**Seit Thema 150 (08.10.2026) ist die Sperre für HLSL/SpirV weg.** Dieselbe Funktion hat jetzt
+einen eigenen Zweig davor (`backend == Backend::SpirV && clustered && !tile`, analog für HLSL),
+der die clustered Variante mit den kanonischen Bindings kompiliert; nur `tile` bleibt
+Metal-exklusiv (`MaterialShaderLibrary.cpp:1394–1407`, Stand 08.10.2026). Die GL-4.1-Begründung
+oben gilt unverändert nur noch für GL selbst. Details, Messwerte und Bildtests:
+`docs/deferred-renderer-plan.md` §10.3–10.13.
 
 ### 1.5 Der UI-Pass zeichnet auf D3D11, D3D12 und Vulkan nur farbige Rechtecke
 
@@ -244,27 +250,53 @@ geschrieben; er läuft nicht.
 
 | Feature | GL | D3D11 | D3D12 | Vulkan |
 |---|:--:|:--:|:--:|:--:|
-| Deferred G-Buffer-Pass (4 MRT) | JA | -- | -- | -- |
-| Zwei-Pass-Resolve (gesampelt) | JA | -- | -- | -- |
-| `heLitP` Lighting-ABI-Fill | JA | ~ | ~ | ~ |
-| G-Buffer-Variante für Graph-Materials | JA | -- | -- | -- |
-| RenderPath-Umschaltung Forward/Deferred | ~ | -- | -- | -- |
+| Deferred G-Buffer-Pass (4 MRT) | JA | JA | JA | JA |
+| Zwei-Pass-Resolve (gesampelt) | JA | JA | JA | JA |
+| `heLitP` Lighting-ABI-Fill | JA | JA | JA | JA |
+| G-Buffer-Variante für Graph-Materials | JA | JA | JA | JA |
+| RenderPath-Umschaltung Forward/Deferred | ~ | JA | JA | JA |
 | Tile-Memory-Resolve (Framebuffer-Fetch) | -- | -- | -- | -- |
-| Deferred Decals | JA | ~ ¹ | ~ ¹ | ~ ¹ |
+| Deferred Decals | JA | JA ¹ | JA ¹ | JA ¹ |
 | Clustered-Lighting-Build | -- | ~ ² | ~ ² | ~ ² |
-| SSR deferred / SSR forward | -- | -- | -- | -- |
+| SSR deferred | -- | ~ ³ | ~ ³ | ~ ³ |
+
+**D3D11, D3D12 und Vulkan haben den Deferred-Pfad seit Thema 150 (08.10.2026).**
+G-Buffer-Pass, Zwei-Pass-Resolve über `heLitP` (CSM, Punkt-/Spot-Atlas, Sky/Env,
+AO, GI alle im Resolve wie GL/Metal), die Graph-Material-G-Buffer-Variante,
+Clustered Lighting im Resolve, Decals in GB0 und SSR sind jetzt auf allen fünf
+Backends verdrahtet, Editor-Viewport und Spielpfad gleich. Details, Messwerte
+(RTX 4070) und die lavapipe/WARP-Bildtests: `docs/deferred-renderer-plan.md`
+§10.9–10.13. Offen bleibt dort ausgewiesen:
+- SSAO aus der G-Buffer-Tiefe (P5) ist auf D3D/Vulkan nicht portiert — das Bild
+  ist gleich, der Prepass rastert nur zusätzlich (Perf-Folgepunkt).
+- Echte-Hardware-Abnahme ist nur die eine RTX 4070 auf NN-WS03; es gibt kein Mac
+  und keine AMD/Intel-GPU, die den Port gesehen hätte.
 
 ² **Forward-Clustered im eingebauten Szenen-Shader** (Thema 35 Schritt 8,
 17.09.2026): der CPU-Scatter ist als `HE::BuildClusterLights` (`LightPacking.h`)
 geteilt, die drei Backends lesen ihn aus Structured Buffers t18–t20 (D3D11,
 D3D12 als Root-SRVs) bzw. SSBOs Binding 10–12 (`scene.frag`); das 8-Licht-Fenster
 trägt nur noch Directional-Lichter. Kein Deferred-Resolve, deshalb „~": Graph-
-Materialien (heLitP) bleiben auf diesen Backends beim 8-Licht-Fenster, und
-Metals `EncodeClusterData` ist noch eine eigene Kopie desselben Algorithmus.
+Materialien (heLitP) bleiben im FORWARD-Pfad dieser Backends beim 8-Licht-Fenster,
+und Metals `EncodeClusterData` ist noch eine eigene Kopie desselben Algorithmus.
+Seit Thema 150 schließt der Deferred-Resolve diese Lücke für jedes Material, das
+über den Deferred-Pfad läuft: dort ist `heLitP` auf D3D11/D3D12/Vulkan bereits
+clustered (`deferredResolveClustered`, docs/deferred-renderer-plan.md §10.3).
 
-¹ **Vulkan zeichnet Decals, aber nicht deferred.** Vulkan hat keinen G-Buffer, also
-gibt es dort kein Base-Color-Ziel, in das ein Decal *vor* der Beleuchtung blenden
-könnte. Statt auf den Deferred-Port (P4) zu warten, zeichnet Vulkan
+³ **SSR deferred ist der Forward-Trace, im Resolve komponiert, kein Trace aus
+GB1 + Tiefe.** `heLitP`s `heSSRFwd`-Stufe liefert dieselbe Reflexion, die der
+Forward-Pfad schon hatte; ein lag-freier G-Buffer-Trace wie bei Metals
+Tile-Pfad existiert auf D3D/Vulkan nicht. Zusätzlich bleibt `frameMatLight`
+(Forward-Replay von Graph-Materialien im Deferred-Frame-Schwanz, Transparenz)
+bei `ssr.x = 0`, weil es t31 nicht bindet (`docs/ssr-cross-backend-plan.md`
+Plan C5) — ein Graph-Spiegel sieht im selben Deferred-Frame also anders aus,
+je nachdem ob er über den G-Buffer oder den Forward-Schwanz läuft. GL hat
+weiterhin kein SSR im Deferred-Pfad (nur forward); Metal nur im Tile-Pfad.
+Details und Messwerte: `docs/deferred-renderer-plan.md` §10.12.
+
+¹ **Stand vor Thema 150: Vulkan zeichnete Decals, aber nicht deferred.** Vulkan hatte noch
+keinen G-Buffer, also gab es dort kein Base-Color-Ziel, in das ein Decal *vor* der Beleuchtung
+blenden konnte. Statt auf den Deferred-Port (P4) zu warten, zeichnete Vulkan
 **Forward-Screen-Space-Decals**: Kamera-Tiefen-Vorpass, Weltposition rekonstruieren,
 Box clippen, in die bereits beleuchtete Farbe blenden. Der Projektor bringt seine
 eigene, viel kleinere Beleuchtung mit (ein Richtungslicht + Ambient, Normale aus
@@ -291,10 +323,17 @@ Output-Merger, eine Resource-Barrier stellt die Tiefe auf `PIXEL_SHADER_RESOURCE
 nach den Draws geht beides zurück. Kein Vorpass, also dieselbe Deckung wie D3D11
 (Skinned Meshes, Partikel, WPO-Geometrie). Details: `…-plan.md` §6c.
 
-**Damit zeichnen alle fünf Backends Decals**, und zwar aus einer einzigen
+**Damit zeichneten alle fünf Backends Decals**, und zwar aus einer einzigen
 Shader-Quelle in drei Fassungen: Metal per Framebuffer-Fetch in den G-Buffer, GL aus
 einer gesampelten Tiefe in den G-Buffer, Vulkan/D3D11/D3D12 forward ins Farbziel.
-Der Roadmap-Punkt ist damit nicht mehr „nur Metal".
+Der Roadmap-Punkt war damit nicht mehr „nur Metal".
+
+**Seit Thema 150 Schritt 5 (08.10.2026) zeichnen D3D11, D3D12 und Vulkan zusätzlich echte
+Deferred-Decals in GB0**, vor dem Resolve, wie GL/Metal (`decalFragmentSampled`,
+`docs/deferred-renderer-plan.md` §10.12). Den Forward-Weg oben behalten alle drei als
+Rückfall: er greift im reinen Forward-Frame und wenn die GB-Variante nicht baut; dann steht
+eine WARN-Zeile im Log. Die Tabellenzeile oben ist deshalb „JA ¹" und nicht mehr „~ ¹" —
+der Haken ist nur noch die Herkunft der Abweichung, nicht mehr ihre Existenz.
 
 ### Himmel & Wetter
 
@@ -629,10 +668,14 @@ Phase kehrt sie um. Das ist eine bewusste Änderung, keine Übersehung.
 `HE_DUMP_RAIN`. Tageszeit-Sweep pro Backend gegen GL. Nach P3b zusätzlich ein UBO-Offset-Test:
 ein Feld setzen und prüfen, dass **genau** das im Shader ankommt.
 
-### P4 — Deferred-Pfad (D3D12, Vulkan; D3D11 nach Maßgabe)
+### P4 — Deferred-Pfad (D3D12, Vulkan; D3D11 nach Maßgabe) — erledigt (Thema 150, 08.10.2026)
 
-Erst hier, weil es das erste ist, das echte neue Infrastruktur braucht: heute wertet **kein**
-Zielbackend `SetRenderPath` aus (`grep -c RenderPath` = 0 in allen dreien).
+**Stand zum Zeitpunkt dieser Planung:** erst hier, weil es das erste ist, das echte neue
+Infrastruktur braucht: damals wertete **kein** Zielbackend `SetRenderPath` aus
+(`grep -c RenderPath` = 0 in allen dreien). Alle fünf Punkte unten (P4a–P4e) sind durch Thema
+150 Schritt 2–5 umgesetzt, Reihenfolge D3D11 → D3D12 → Vulkan statt der hier geplanten
+D3D12/Vulkan-zuerst. Details, Messwerte und Bildtests: `docs/deferred-renderer-plan.md`
+§10.3–10.13.
 
 - P4a — MRT-G-Buffer-Target (4 Attachments + Tiefe) und der eigene Extract/Cull/Sort-Zweig.
 - P4b — Zwei-Pass-Resolve. Der Shader dafür wird **schon heute** für jedes Backend übersetzt

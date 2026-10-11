@@ -9,6 +9,7 @@
 #include "ImporterCommon.h"   // import provenance: writeAsset / sourceFileOf / reimport
 #include <Diagnostics/GlobalState.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Types/TypeRegistry.h>              // struct/enum defs mirror in on load
 #include <algorithm>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -2416,7 +2418,7 @@ TEST_CASE("Importer::isImportableSource covers every extension the editor offers
 #ifdef HE_HAVE_ASSIMP
 	// The Assimp-backed mesh formats join the list only when Assimp is built in
 	// — offering them without it would be an import that can only fail.
-	for (const char* ext : { ".fbx", ".obj", ".dae" })
+	for (const char* ext : { ".fbx", ".obj", ".dae", ".blend" })
 		CHECK(Importer::isImportableSource(fs::path("Some/Model") += ext));
 #else
 	CHECK_FALSE(Importer::isImportableSource("Some/Model.fbx"));
@@ -3244,4 +3246,239 @@ TEST_CASE("A section table that does not cover the index buffer falls back to on
 	whole.resize(whole.size() - 5);
 	std::vector<MeshSection> out;
 	CHECK_FALSE(HE::decodeMeshSections(whole, out));
+}
+
+// ─── Remote EngineContent: references download on demand ─────────────────────
+// registerRemoteAsset (HE_ContentSync's manifest registers one per asset) used to serve
+// UUID references only. A reference stored as a PATH — a material's texture, its parent,
+// its node-graph function, a mesh's material — goes through loadAsset(path), which found
+// no file and gave up. These tests drive the whole route with a fake "server": a
+// materialize that copies a staged file into the engine root when the test says so.
+
+namespace
+{
+struct FakeRemote
+{
+	// A deferred download: the test decides when the file "arrives".
+	int                             calls = 0;
+	std::function<void(bool)>       done;
+	std::filesystem::path           from, to;
+	void arrive(bool ok = true)
+	{
+		if (ok)
+		{
+			fs::create_directories(to.parent_path());
+			fs::copy_file(from, to, fs::copy_options::overwrite_existing);
+		}
+		auto d = std::move(done);
+		done = nullptr;
+		if (d) d(ok);
+	}
+};
+
+void registerFake(ContentManager& cm, FakeRemote& f, HE::UUID id, const std::string& enginePath,
+                  const fs::path& staged, const fs::path& engineRoot, const std::string& rel)
+{
+	f.from = staged;
+	f.to   = engineRoot / rel;
+	cm.registerRemoteAsset(id, enginePath, [&f](std::function<void(bool)> done) {
+		++f.calls;
+		f.done = std::move(done);
+	});
+}
+
+// Drain the async pipeline until `pred` holds (downloads land, then loads decode, then
+// registrations happen — each on a later poll).
+template<class Pred>
+bool pumpUntil(ContentManager& cm, Pred pred)
+{
+	for (int i = 0; i < 400 && !pred(); ++i)
+	{
+		cm.pollAsyncResults(16);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	return pred();
+}
+} // namespace
+
+TEST_CASE("Remote EngineContent: a PATH reference asks for the download once and resolves after it lands")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 255, 255, 255, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+	}
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote rock;
+	const std::string path = "Engine/Textures/Rock.hasset";
+	registerFake(cm, rock, texId, path, staging.path / "Rock.hasset", engineDir.path, "Textures/Rock.hasset");
+
+	// Nothing local: the load is "not there yet" — and starts the download, once, however
+	// often the caller asks while it is under way (a renderer asks every frame).
+	CHECK(cm.loadAsset(path) == HE::UUID{});
+	CHECK(cm.loadAsset(path) == HE::UUID{});
+	CHECK(cm.loadAsset(path) == HE::UUID{});
+	CHECK(rock.calls == 1);
+	CHECK(cm.getTexture(texId) == nullptr);
+
+	// The file lands: the next ask gets the asset, under the very id the manifest promised.
+	rock.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(texId); }));
+	CHECK(cm.loadAsset(path) == texId);
+	CHECK(cm.getTexture(texId) != nullptr);
+	CHECK(rock.calls == 1);   // nothing asked again
+}
+
+TEST_CASE("Remote EngineContent: a local file is never shadowed by the remote entry")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 1, 2, 3, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+	}
+	// The same file is already in the engine root (an earlier download, a dev checkout).
+	fs::create_directories(engineDir.path / "Textures");
+	fs::copy_file(staging.path / "Rock.hasset", engineDir.path / "Textures" / "Rock.hasset");
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote rock;
+	registerFake(cm, rock, texId, "Engine/Textures/Rock.hasset", staging.path / "Rock.hasset",
+	             engineDir.path, "Textures/Rock.hasset");
+
+	CHECK(cm.loadAsset("Engine/Textures/Rock.hasset") == texId);   // read from disk, at once
+	CHECK(rock.calls == 0);                                         // no download asked for
+}
+
+TEST_CASE("Remote EngineContent: an arriving material pulls its textures and its parent")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId, matId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 255, 255, 255, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+
+		MaterialAsset m;
+		m.type = HE::AssetType::Material; m.name = "Ground"; m.path = "Ground.hasset";
+		m.texturePaths = { "Engine/Textures/Rock.hasset" };
+		m.id = matId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(m));
+	}
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote rock, ground;
+	registerFake(cm, rock,   texId, "Engine/Textures/Rock.hasset",   staging.path / "Rock.hasset",
+	             engineDir.path, "Textures/Rock.hasset");
+	registerFake(cm, ground, matId, "Engine/Materials/Ground.hasset", staging.path / "Ground.hasset",
+	             engineDir.path, "Materials/Ground.hasset");
+
+	// Only the MATERIAL is asked for (by UUID, as a scene would).
+	cm.loadAssetAsync(matId);
+	CHECK(ground.calls == 1);
+	CHECK(rock.calls == 0);
+	ground.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(matId); }));
+
+	// Registering it asked for what it references — before anything drew with it.
+	CHECK(rock.calls == 1);
+	rock.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(texId); }));
+	CHECK(cm.getTexture(texId) != nullptr);
+}
+
+TEST_CASE("Remote EngineContent: a failed download leaves the asset pending, not wedged")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 255, 255, 255, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+	}
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote rock;
+	registerFake(cm, rock, texId, "Engine/Textures/Rock.hasset", staging.path / "Rock.hasset",
+	             engineDir.path, "Textures/Rock.hasset");
+
+	CHECK(cm.loadAsset("Engine/Textures/Rock.hasset") == HE::UUID{});
+	rock.arrive(/*ok=*/false);
+	cm.pollAsyncResults(16);
+	CHECK_FALSE(cm.isLoaded(texId));
+
+	// The entry is still registered: a later ask tries again and, this time, succeeds.
+	CHECK(cm.loadAsset("Engine/Textures/Rock.hasset") == HE::UUID{});
+	CHECK(rock.calls == 2);
+	rock.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(texId); }));
+}
+
+TEST_CASE("Remote EngineContent: a material whose graph calls a remote function waits for it instead of baking the placeholder")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	const std::string fnPath = HE::kWeatherSnowFunctionPath;   // "Engine/MaterialFunctions/Weather/…"
+	{
+		// The function, as the server holds it.
+		ContentManager src(staging.path.string());
+		MaterialFunctionAsset f;
+		f.type = HE::AssetType::MaterialFunction; f.name = "MF_WeatherSnow"; f.path = "MF_WeatherSnow.hasset";
+		f.id = HE::kWeatherSnowFunctionId;
+		f.nodeGraphJson = HE::materialGraphToJson(HE::buildWeatherSnowFunction());
+		REQUIRE(src.saveAsset(f));
+	}
+	HE::UUID matId;
+	{
+		// A project material that calls it.
+		HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == HE::MatNodeType::Output) out = n.id;
+		const int call = g.addNode(HE::MatNodeType::FunctionCall);
+		g.findNode(call)->s = fnPath;
+		REQUIRE(g.connect(call, 0, out, HE::kMatOutputRoughnessPin));
+		ContentManager author(project.path.string());
+		MaterialAsset m;
+		m.type = HE::AssetType::Material; m.name = "Snowy"; m.path = "Snowy.hasset";
+		m.nodeGraphJson = HE::materialGraphToJson(g);
+		m.id = matId = HE::UUID::generate();
+		REQUIRE(author.saveAsset(m));
+	}
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote fn;
+	registerFake(cm, fn, HE::kWeatherSnowFunctionId, fnPath, staging.path / "MF_WeatherSnow.hasset",
+	             engineDir.path, "MaterialFunctions/Weather/MF_WeatherSnow.hasset");
+
+	// Loading the material asks for the function and does NOT regenerate around its absence.
+	REQUIRE(cm.loadAsset("Snowy.hasset") == matId);
+	CHECK(fn.calls == 1);
+	CHECK(cm.getMaterial(matId)->customShaderFragGlsl.find("missing function") == std::string::npos);
+
+	// Once the function is here, regenerating compiles real code.
+	fn.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(fnPath); }));
+	cm.regenerateMaterialFromGraph(matId);
+	const std::string& glsl = cm.getMaterial(matId)->customShaderFragGlsl;
+	CHECK(glsl.find("missing function") == std::string::npos);
+	CHECK(glsl.find("heLight.weather") != std::string::npos);
 }

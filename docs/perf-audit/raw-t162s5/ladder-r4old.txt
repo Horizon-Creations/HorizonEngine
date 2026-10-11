@@ -1,0 +1,8 @@
+== r4old-50000  load averages: 3.37 3.38 3.84  locked="CGSSessionScreenIsLocked"=Yes
+[r4old-50000] rc=0 wall=13s fps=11.4873385601319 cpu_p50=71.10125 gpu_p50=11.153750005178154 modes={'whole-frame': 118} size=2840x1528
+   rc=0
+   [04:05:54.516] [ INFO] [Job        ] [Main    ] [f      3] ThreadPool starting with 10 worker(s)
+   [04:05:55.422] [ INFO] [Serialize  ] [Main    ] [f      3] SceneLoadTiming: entities=50568 parseMs=614.34 buildMs=418.94
+   [04:05:56.219] [ INFO] [Editor     ] [Main    ] [f      3] SceneOpenTiming: loadMs=1033.44 prefabSyncMs=0.02 preloadMs=4.42 warmupMs=792.85 totalMs=1830.73
+   [04:05:56.219] [ INFO] [Editor     ] [Main    ] [f      3] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [04:05:51.801] 

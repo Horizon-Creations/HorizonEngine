@@ -77,11 +77,16 @@ bool EngineContentSync::refreshManifestBlocking()
 	}
 
 	const fs::path tmpPath = GlobalState::engineContentCacheDir() / ".manifest.json.tmp";
-	const SftpResult dl = sftpGetFile(endpoint, kManifestRemoteName, tmpPath.string());
+	// Retried on a failed CONNECTION only (see sftpWithConnectRetry): the probe
+	// that just succeeded does not make this second connection a given.
+	const SftpResult dl = sftpWithConnectRetry(
+		[&] { return sftpGetFile(endpoint, kManifestRemoteName, tmpPath.string()); });
 	if (!dl.ok)
 	{
-		HE_LOG_WARN(ContentSync, "Could not fetch EngineContent manifest: %s",
-		            HE::Cs::detail::scrub(dl.error).c_str());
+		const std::string why = HE::Cs::detail::scrub(dl.error);
+		HE_LOG_WARN(ContentSync, "Could not fetch EngineContent manifest: %s", why.c_str());
+		std::lock_guard<std::mutex> lock(m_manifestMutex);
+		m_lastManifestError = why;
 		return false;
 	}
 
@@ -96,12 +101,15 @@ bool EngineContentSync::refreshManifestBlocking()
 	if (!parseManifest(ss.str(), parsed))
 	{
 		HE_LOG_WARN(ContentSync, "%s", "EngineContent manifest failed to parse — keeping previous manifest");
+		std::lock_guard<std::mutex> lock(m_manifestMutex);
+		m_lastManifestError = "the manifest on the server could not be parsed";
 		return false;
 	}
 
 	size_t entryCount = 0;
 	{
 		std::lock_guard<std::mutex> lock(m_manifestMutex);
+		m_lastManifestError.clear();
 		m_manifest   = std::move(parsed);
 		m_manifestIsLive = true;
 		entryCount   = m_manifest.entries.size();
@@ -113,6 +121,12 @@ bool EngineContentSync::refreshManifestBlocking()
 	}
 	HE_LOG_INFO(ContentSync, "EngineContent manifest refreshed (%zu entries)", entryCount);
 	return true;
+}
+
+std::string EngineContentSync::lastManifestError() const
+{
+	std::lock_guard<std::mutex> lock(m_manifestMutex);
+	return m_lastManifestError;
 }
 
 bool EngineContentSync::loadCachedManifest()

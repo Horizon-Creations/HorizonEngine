@@ -26,9 +26,11 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace HE::Sc {
 
@@ -68,6 +70,25 @@ public:
 	// Stage everything and commit it with `message`; optionally push right
 	// after a successful commit (the panel's auto-push toggle).
 	void requestCommitAll(const std::string& message, bool pushAfter = false);
+
+	// ── Per-file operations (see the matching GitCli functions) ──────────────
+	// Stage / unstage / discard exactly these repository-relative paths. Staging
+	// routes big media into LFS first, the same size pass a commit-all does -
+	// a file added to the index BEFORE it is tracked would be stored as a plain blob.
+	void requestStage(std::vector<std::string> paths);
+	void requestUnstage(std::vector<std::string> paths);
+	void requestDiscard(std::vector<std::string> paths);
+	// Commit what is staged and nothing else. `amend` rewrites the last commit.
+	void requestCommitStaged(const std::string& message, bool pushAfter, bool amend);
+	// Keep one side of a conflicted path and stage it.
+	void requestResolveConflict(const std::string& path, bool ours);
+	// git switch. `stashFirst` stashes local changes (untracked included) so the
+	// switch starts from a clean tree; without it git carries them along when it can
+	// and refuses when it cannot.
+	void requestSwitchBranch(const std::string& name, bool stashFirst);
+	void requestStashPop();
+	// Reads the files one commit touched; the answer lands in commitFiles().
+	void requestCommitFiles(const std::string& commit);
 
 	// The whole GitHub setup in one worker pass: create the repository via the
 	// API, point origin at it, make sure a credential helper exists, hand the
@@ -151,6 +172,11 @@ public:
 	// Local branches as of the last status refresh (RepoStatus::branch already
 	// names the current one).
 	const std::vector<std::string>& branches() const { return m_branches; }
+	// Remote-tracking branches ("origin/main"), and the stash list, newest first.
+	const std::vector<std::string>& remoteBranches() const { return m_remoteBranches; }
+	const std::vector<std::string>& stashes() const { return m_stashes; }
+	// The files of a commit asked for with requestCommitFiles; nullptr until it answered.
+	const std::vector<GitCli::ChangedFile>* commitFiles(const std::string& commit) const;
 
 	// Drain finished work on the MAIN thread. `maxEvents` bounds how much is
 	// applied per frame — a clone that produced twenty thousand entries should
@@ -163,6 +189,12 @@ public:
 	// A command is queued or running. The UI shows progress rather than a stale
 	// value, the same way the collaboration panel does for directory calls.
 	bool               busy()    const { return m_busy.load(std::memory_order_acquire); }
+	// A command the USER asked for is queued or running (commit, push, pull, a manual
+	// fetch, a switch ...) - as opposed to a status refresh or the quiet timer-driven
+	// fetch, which only bring the numbers up to date. The UI disables its buttons on
+	// this one: a refresh every few seconds used to grey out Push, Pull and Commit each
+	// time, for no reason the user could see.
+	bool               busyWithWork() const { return m_work.load(std::memory_order_acquire) > 0; }
 	const std::string& lastError() const { return m_lastError; }
 
 	// Called from pump(), i.e. on the main thread, after a refresh lands.
@@ -171,7 +203,9 @@ public:
 private:
 	enum class Kind : std::uint8_t {
 		Open, Status, Init, CommitAll, Push, Pull, Fetch, SetRemote, SetupGitHub,
-		StoreCredential, RestoreTo, CreateBranch, Clone, LfsPull, Quit
+		StoreCredential, RestoreTo, CreateBranch, Clone, LfsPull,
+		Stage, Unstage, Discard, CommitStaged, ResolveConflict, SwitchBranch, StashPop,
+		CommitFiles, Quit
 	};
 
 	struct Command
@@ -182,6 +216,8 @@ private:
 		std::string           user;   // credential username (StoreCredential)
 		std::string           secret; // PAT — wiped after use
 		bool                  flag = false;
+		bool                  flag2 = false;
+		std::vector<std::string> paths;   // Stage / Unstage / Discard
 	};
 
 	struct Event
@@ -192,6 +228,10 @@ private:
 		bool        remoteUrlValid = false;
 		std::vector<GitCli::CommitInfo> commits;
 		std::vector<std::string>        branches;
+		std::vector<std::string>        remoteBranches;
+		std::vector<std::string>        stashes;
+		std::string                     commitFilesFor;   // set when commitFiles is the answer
+		std::vector<GitCli::ChangedFile> commitFiles;
 		RepoStatus  status;
 		std::string error;
 		std::filesystem::path clonedRoot;    // applied even alongside an error
@@ -213,6 +253,12 @@ private:
 
 	std::atomic<bool> m_quit{false};
 	std::atomic<bool> m_busy{false};
+	std::atomic<int>  m_work{0};   // queued + running commands that are not background refreshes
+	static bool countsAsWork(const Command& c)
+	{
+		return c.kind != Kind::Status && c.kind != Kind::Open && c.kind != Kind::Quit &&
+		       !(c.kind == Kind::Fetch && c.flag);
+	}
 	// Set when a refresh is already queued, so a burst of requests collapses.
 	std::atomic<bool> m_statusPending{false};
 
@@ -227,6 +273,9 @@ private:
 	std::filesystem::path                  m_lastClonedRoot;
 	std::vector<GitCli::CommitInfo>        m_commits;
 	std::vector<std::string>               m_branches;
+	std::vector<std::string>               m_remoteBranches;
+	std::vector<std::string>               m_stashes;
+	std::map<std::string, std::vector<GitCli::ChangedFile>> m_commitFiles;
 	std::uint64_t                          m_generation = 0;
 	std::function<void(const RepoStatus&)> m_onStatus;
 };

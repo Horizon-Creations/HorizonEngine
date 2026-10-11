@@ -1,0 +1,15 @@
+== ab-500000-all-after-r2  2026-10-10 20:31:49
+before:
+  uptime:      load averages: 11.49 10.32 9.13
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=88
+  power:       Now drawing from 'Battery Power'
+  busy procs:  54.6% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 54.5% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 53.5% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 53.5% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 
+after (rc=0):
+  uptime:      load averages: 11.75 10.46 9.21
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=81
+  power:       Now drawing from 'Battery Power'
+  busy procs:  151.3% /Applications/CLion.app/Contents/MacOS/clion; 55.3% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 49.0% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 47.7% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 

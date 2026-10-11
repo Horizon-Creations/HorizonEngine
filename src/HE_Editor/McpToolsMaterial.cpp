@@ -664,6 +664,7 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::CameraPos:           return "CameraPos";
 	case T::CameraDistance:      return "CameraDistance";
 	case T::ScreenPos:           return "ScreenPos";
+	case T::Weather:             return "Weather";
 	case T::ConstBool:           return "ConstBool";
 	case T::ParamVec2:           return "ParamVec2";
 	case T::ParamVec4:           return "ParamVec4";
@@ -688,6 +689,7 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::NormalMapBombSample: return "NormalMapBombSample";
 	case T::TextureArrayBombSample:   return "TextureArrayBombSample";
 	case T::NormalMapArrayBombSample: return "NormalMapArrayBombSample";
+	case T::BombCells:           return "BombCells";
 	case T::LandscapeLayerBlend: return "LandscapeLayerBlend";
 	case T::ElementSize:         return "ElementSize";
 	case T::ElementUV:           return "ElementUV";
@@ -1609,6 +1611,15 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 				                "Give the Albedo/Normal/Mask reads of one texture the same uv, "
 				                "Cell source, rotation, sharpness and seed: they then share one "
 				                "hex grid.";
+				break;
+			case HE::MatNodeType::BombCells:
+				j["requires"] = "p[0] = seed. Reads no texture: its outputs are the weights "
+				                "of the three hexes under the pixel (x,y,z, sum 1) and three "
+				                "random numbers in [0,1) per hex (Random A/B/C, x,y,z = the "
+				                "hexes). Evaluate a procedural pattern once per hex with that "
+				                "hex's number and blend the results by the weights. Inputs: "
+				                "UV (the grid lives on it), Cell (hex spacing in UV units), "
+				                "Blend (weight exponent 1..32, 7 unwired).";
 				break;
 			case HE::MatNodeType::StaticSwitch:
 				j["requires"] = "s = switch name; p[0] = default (1 = true).";

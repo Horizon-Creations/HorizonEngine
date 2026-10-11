@@ -102,7 +102,8 @@ public:
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
-	                            int shape = 0, const HE::UUID& meshId = HE::UUID{}) override;
+	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
+	                            float timeSeconds = -1.0f) override;
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t width, uint32_t height,
@@ -651,6 +652,25 @@ private:
 	int   m_localShadowSize = 1024;
 	bool  m_debugShadowCascades = false; // tint fragments by cascade index (debug)
 	void  EnsureShadowResources();
+	// The frame's one walk of the world (Thema 162, step 4): this frame's sun, the content
+	// manager, then RenderExtractor::extract into m_renderWorld at `aspect`. EncodeFrame calls it
+	// once before the shadow pass, so the walk belongs to the frame and not to whichever pass
+	// happens to run first; EncodeShadowMap calls it again as its guarantee that m_renderWorld
+	// holds the walk at ITS aspect, which then is a key compare inside the extractor, not a walk
+	// (RenderExtractor::beginFrame). One function for both on purpose: the second call only stays
+	// a key compare while it pushes exactly what the first one pushed, and two hand-written copies
+	// are two chances to drift apart. tests/test_culling.cpp pins that the pass goes through it.
+	void  ExtractFrame(float aspect);
+	// Every object's world bound replaced by the real bound of its resolved mesh
+	// (RenderObject::refineWorldBounds; ResolveMesh also uploads a mesh seen for the first time),
+	// once per walk of the extractor: the walk lives in m_renderWorld for the whole frame, so
+	// EncodeFrame does the loop right after the walk, and every pass calls this again as its
+	// guarantee that the bounds are real and finds it done. A new walk or a different object
+	// array starts over (Thema 162, step 4).
+	void  RefineObjectBounds();
+	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
+	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
+	size_t              m_refinedCount   = 0;
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
@@ -761,9 +781,12 @@ private:
 	// pipeline — the thumbnail path then falls back to m_meshPreviewPipeline.
 	// `meshId` (optional) draws that static mesh instead of the primitive, framed
 	// on its own bounds; an unresolvable mesh falls back to `shape`.
+	// `timeSeconds` < 0 = a frozen still (Time 0, no wind — thumbnails); >= 0 = the
+	// engine clock the Time input reads, plus the scene's wind (see IRenderer).
 	bool EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
 	                           float yaw, float pitch, float dist, int shape,
-	                           const HE::UUID& meshId = HE::UUID{});
+	                           const HE::UUID& meshId = HE::UUID{},
+	                           float timeSeconds = -1.0f);
 	// Bind every fragment texture/sampler slot the material lighting preamble pins
 	// outside the material-texture window: 5..15 (kMetalPreambleSamplerSlots) plus
 	// the cloud-shadow texture 16. `frameState` = this frame's GI/SSAO/reflection/

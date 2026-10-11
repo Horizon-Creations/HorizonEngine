@@ -1,0 +1,15 @@
+== ab-1000000-all-before-r1  2026-10-10 20:43:55
+before:
+  uptime:      load averages: 6.81 10.12 9.91
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=53
+  power:       Now drawing from 'Battery Power'
+  busy procs:  87.7% /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-entities-pro-zelle-streamen-nur-d/out/build/release/tests/he_tests; 41.9% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 18.8% /Users/connorjansen/VSCode/HorizonEngine/out/deploy/Editor/HorizonEditor; 14.8% /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python; 
+after (rc=0):
+  uptime:      load averages: 11.34 10.23 9.95
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=92
+  power:       Now drawing from 'Battery Power'
+  busy procs:  56.7% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 53.1% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 53.1% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 52.0% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 

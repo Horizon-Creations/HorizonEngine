@@ -200,6 +200,11 @@ struct HE_API ExportSettings {
     // codesigning an .app are neither instant nor part of the pak. Same thread
     // and the same thread-safety rule as `progress`.
     std::function<void(const char*)> onStage;
+    // Optional, one call per asset that went into the pak — (addressed path, reused
+    // from the previous pak). See Hpak::PackSettings::onAsset; same thread rule as
+    // `progress`. This is what lets a build window list WHAT was packed, not only
+    // how many.
+    std::function<void(const std::string&, bool)> onAsset;
     // Precompile node-graph material shaders into the pak for these graphics backends
     // (bitmask of 1u << HE::RendererBackend). 0 → no precompile (runtime cross-compile).
     // `compileShaderVariants` is supplied by the editor (it links the shader compiler):

@@ -18,6 +18,12 @@ in), prefab instances (the editor keeps those in sync), directional lights.
 A subtree goes to the cell its top entity's position falls into. Positions are
 absolute (a folder above it is identity), and stay as they are in the cell file.
 
+This script writes version-1 cells and stays as it is: no "streaming" head, so the
+game loads its cells with fresh ids, and the smaller set of components above. The
+editor's splitter (src/HE_Scene/src/CellSplit.cpp, "Split into Streaming Cells")
+is the reference; it writes version-2 cells whose ids are kept on load, with prefab
+placements and more in the table. The game loads both.
+
     scripts/split_scene_cells.py <scene.hescene> --out <base.hescene>
         [--cell-size 512] [--load-radius 768] [--unload-radius 1024]
         [--lookahead 2] [--cells-dir <dir>] [--project-root <dir>]

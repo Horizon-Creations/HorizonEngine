@@ -73,6 +73,12 @@ public:
 	// erase an Editor session's already-known remote catalogue.
 	bool refreshManifestBlocking();
 
+	// Why the last refreshManifestBlocking() failed, scrubbed of the password;
+	// empty after a success. The Editor's notification quotes it — without it
+	// "the catalogue could not be read" cannot say whether the server never
+	// answered, the file is missing, or it did not parse.
+	std::string lastManifestError() const;
+
 	// The last successfully fetched manifest. Empty (not an error) before the
 	// first successful refreshManifestBlocking() or when the endpoint is not
 	// configured.
@@ -156,6 +162,7 @@ private:
 	// against replacing a live catalogue with the stale one on disk — the probe
 	// and a manual refresh can both land after startup restored the cache.
 	bool                   m_manifestIsLive = false;
+	std::string            m_lastManifestError;   // guarded by m_manifestMutex
 };
 
 } // namespace HE::Cs

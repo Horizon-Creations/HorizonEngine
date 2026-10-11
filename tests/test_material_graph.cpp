@@ -11,6 +11,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <MaterialGraph/MaterialGraph.h>
 // he_materialshader is linked into he_tests in every flavour (the stub answers the
 // compiles); only the cross-compile TEST CASES below are gated on HE_TESTS_HAVE_SHADERC.
@@ -403,10 +404,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// NormalMapArrayBombSample is the LAST enum value today; a node added after it
+	// BombCells is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::NormalMapArrayBombSample; ++t)
+	for (int t = 0; t <= (int)MatNodeType::BombCells; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -727,6 +728,88 @@ TEST_CASE("Wind Sway inside a function called from WPO still gets the bend mask"
 	REQUIRE_FALSE(gen.vertexBody.empty());
 	CHECK(gen.vertexBody.find("clamp(pos.y / ") != std::string::npos);
 	CHECK(gen.glsl.find("pos.y") == std::string::npos);
+}
+
+// ═══ Material Editor preview: does the shader on screen read the clock? ════════
+// The preview redraws every frame for exactly these shaders and only on edits for
+// the rest, so the question has to be answered from the text the GPU runs — and
+// answered "no" for everything that does not move, or an idle editor burns a core
+// re-rendering a still sphere.
+TEST_CASE("matGlslUsesTime: every clock reader says yes, everything else says no")
+{
+	// A graph with nothing animated in it: the fresh material, a lit colour with a
+	// Fresnel rim, the environment wind alone (a constant between two edits).
+	{
+		const HE::MatShaderGen gen = HE::generateFragment(MaterialGraph::makeDefault());
+		CHECK_FALSE(HE::matGlslUsesTime(gen.glsl));
+		CHECK_FALSE(HE::matGlslUsesTime(gen.vertexBody));
+	}
+	{
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int fres = g.addNode(MatNodeType::Fresnel);
+		REQUIRE(g.connect(fres, 0, out, HE::kMatOutputMetallicPin));
+		CHECK_FALSE(HE::matGlslUsesTime(HE::generateFragment(g).glsl));
+	}
+	{
+		MaterialGraph g;
+		const int out  = g.addNode(MatNodeType::Output);
+		const int wind = g.addNode(MatNodeType::Wind);
+		REQUIRE(g.connect(wind, 1, out, HE::kMatOutputMetallicPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		CHECK(gen.glsl.find("heLight.camPos.w") != std::string::npos); // it reads wind…
+		CHECK_FALSE(HE::matGlslUsesTime(gen.glsl));                    // …not the clock
+	}
+
+	// The Time node, wherever it lands: the demo graph's sin(Time) → Metallic.
+	CHECK(HE::matGlslUsesTime(HE::generateFragment(makeDemoGraph()).glsl));
+
+	// Panner scrolls UVs by Speed * Time.
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int uv  = g.addNode(MatNodeType::UV);
+		const int pan = g.addNode(MatNodeType::Panner);
+		const int nz  = g.addNode(MatNodeType::ValueNoise);
+		REQUIRE(g.connect(uv,  0, pan, 0));
+		REQUIRE(g.connect(pan, 0, nz,  0));
+		REQUIRE(g.connect(nz,  0, out, HE::kMatOutputMetallicPin));
+		CHECK(HE::matGlslUsesTime(HE::generateFragment(g).glsl));
+	}
+
+	// Wind Sway in the WPO pin lives in the VERTEX body only; the fragment text is
+	// clean, so a scan of the fragment alone would call a swaying plant still.
+	{
+		MaterialGraph g;
+		const int out  = g.addNode(MatNodeType::Output);
+		const int sway = g.addNode(MatNodeType::WindSway);
+		REQUIRE(g.connect(sway, 0, out, HE::kMatOutputWPOPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.vertexBody.empty());
+		CHECK(HE::matGlslUsesTime(gen.vertexBody));
+		CHECK_FALSE(HE::matGlslUsesTime(gen.glsl));
+	}
+
+	// A Time inside a called material function reaches the caller's text.
+	{
+		MaterialGraph fn;
+		const int t  = fn.addNode(MatNodeType::Time);
+		const int fo = fn.addNode(MatNodeType::FnOutput);
+		fn.findNode(fo)->s    = "Phase";
+		fn.findNode(fo)->p[0] = 0.0f; // Float
+		REQUIRE(fn.connect(t, 0, fo, 0));
+		MaterialGraph g;
+		const int out  = g.addNode(MatNodeType::Output);
+		const int call = g.addNode(MatNodeType::FunctionCall);
+		g.findNode(call)->s = "Fns/Phase.hasset";
+		REQUIRE(g.connect(call, 0, out, HE::kMatOutputMetallicPin));
+		HE::MatFunctionLoader loader = [&](const std::string& path) -> const MaterialGraph*
+		{ return path == "Fns/Phase.hasset" ? &fn : nullptr; };
+		CHECK(HE::matGlslUsesTime(HE::generateFragment(g, loader).glsl));
+	}
+
+	CHECK_FALSE(HE::matGlslUsesTime(""));
 }
 
 TEST_CASE("FillMaterialWind: the cloud compass, a unit direction and the raw strength")
@@ -1127,6 +1210,99 @@ TEST_CASE("Texture bombing: params are sanitised, and an empty path falls back t
 	CHECK(bn->p[2] == doctest::Approx(-1.4f));
 	CHECK(HE::matNodeSamplesTexture(MatNodeType::NormalMapArrayBombSample));
 	CHECK_FALSE(HE::matNodeIsBombing(MatNodeType::TextureArraySample));
+}
+
+// ═══ Bombing Cells (Thema 152, Schritt 8) ═════════════════════════════════════
+// The hex grid of the bombing nodes as numbers: no texture, so a PROCEDURAL
+// pattern (the water's wave trains) can be bombed. One cell source feeds every
+// read of the three hexes, so the node is cheap by design.
+static MaterialGraph makeBombCellsGraph(float seed, bool wireCell)
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int wp  = g.addNode(MatNodeType::WorldPos);
+	const int ws  = g.addNode(MatNodeType::SplitRGBA);
+	const int uv  = g.addNode(MatNodeType::CombineRGBA);
+	const int hex = g.addNode(MatNodeType::BombCells);
+	g.findNode(hex)->p[0] = seed;
+	const int split = g.addNode(MatNodeType::SplitRGBA);
+	CHECK(g.connect(wp, 0, ws, 0));
+	CHECK(g.connect(ws, 0, uv, 0));
+	CHECK(g.connect(ws, 2, uv, 1));
+	CHECK(g.connect(uv, 0, hex, 0));
+	if (wireCell)
+	{
+		const int cell = g.addNode(MatNodeType::ConstFloat);
+		g.findNode(cell)->p[0] = 24.0f;
+		CHECK(g.connect(cell, 0, hex, 1));
+	}
+	// Weights → base colour, Random A → emissive: both must be readable.
+	CHECK(g.connect(hex, 0, out, HE::kMatOutputBaseColorPin));
+	CHECK(g.connect(hex, 1, split, 0));
+	CHECK(g.connect(split, 0, out, HE::kMatOutputRoughnessPin));
+	CHECK(g.connect(hex, 3, out, HE::kMatOutputEmissivePin));
+	return g;
+}
+
+TEST_CASE("Bombing Cells: the hex grid as numbers, on the texture nodes' integer hash, no texture")
+{
+	const HE::MatShaderGen gen = HE::generateFragment(makeBombCellsGraph(5.0f, true));
+	REQUIRE_FALSE(gen.glsl.empty());
+	CHECK(gen.textures.empty());
+	// One helper, called once; the seed is baked, the Cell pin is the wired constant.
+	CHECK(countOf(gen.glsl, "void heBombCells(") == 1u);
+	CHECK(countOf(gen.glsl, "heBombCells(") == 2u);
+	CHECK(gen.glsl.find(", 5u, n") != std::string::npos);
+	CHECK(gen.glsl.find("24.000000") != std::string::npos);
+	// The hash is the bombing nodes' (pcg3d of the hex index), emitted once, and the
+	// texture helper is NOT dragged in: nothing here reads a texture.
+	CHECK(countOf(gen.glsl, "uvec3 heBombHash(ivec2 cell, uint seed)") == 1u);
+	CHECK(gen.glsl.find("void heBombGrid(") == std::string::npos);
+	CHECK(gen.glsl.find("fract(sin") == std::string::npos);
+	// Three hexes: three hashes, and every random pin is one number per hex.
+	CHECK(countOf(gen.glsl, "heBombHash(b + ivec2(") == 3u);
+	CHECK(gen.glsl.find("vec3(uvec3(h0.x >> 8u, h1.x >> 8u, h2.x >> 8u))") != std::string::npos);
+	// The G-buffer variant carries the same body.
+	CHECK(countOf(gen.glslGBuffer, "heBombCells(") == 2u);
+
+	// Unwired: the registry defaults (8 units, blend 7) and the mesh UV; a negative
+	// seed wraps like the bombing nodes'.
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int hex = g.addNode(MatNodeType::BombCells);
+		g.findNode(hex)->p[0] = -1.4f;
+		CHECK(g.connect(hex, 0, out, HE::kMatOutputBaseColorPin));
+		CHECK(HE::generateFragment(g).glsl.find("heBombCells(vUV, 8.000000, 7.000000, 4294967295u, ")
+		      != std::string::npos);
+	}
+	// Another seed is another call, not another helper; both kinds of bombing in
+	// one graph share the hash and the grid math is each its own.
+	{
+		MaterialGraph g = makeTextureBombGraph();
+		const int hex = g.addNode(MatNodeType::BombCells);
+		const int out = [&] { for (const auto& n : g.nodes) if (n.type == MatNodeType::Output) return n.id; return 0; }();
+		CHECK(g.connect(hex, 1, out, HE::kMatOutputEmissivePin));
+		const std::string glsl = HE::generateFragment(g).glsl;
+		CHECK(countOf(glsl, "uvec3 heBombHash(ivec2 cell, uint seed)") == 1u);
+		CHECK(countOf(glsl, "void heBombGrid(") == 1u);
+		CHECK(countOf(glsl, "void heBombCells(") == 1u);
+	}
+	// Graphs without the node keep their exact text.
+	CHECK(HE::generateFragment(makeTextureBombGraph()).glsl.find("heBombCells") == std::string::npos);
+	CHECK(HE::generateFragment(makeDemoGraph()).glsl.find("heBombHash") == std::string::npos);
+
+	// The seed and the pins survive a save and a reload.
+	{
+		const MaterialGraph g = makeBombCellsGraph(7.0f, true);
+		MaterialGraph back;
+		REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+		int found = 0;
+		for (const auto& n : back.nodes)
+			if (n.type == MatNodeType::BombCells) { ++found; CHECK(n.p[0] == doctest::Approx(7.0f)); }
+		CHECK(found == 1);
+		CHECK(HE::generateFragment(back).glsl == HE::generateFragment(g).glsl);
+	}
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
@@ -1920,7 +2096,7 @@ TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
 	// The sampler is declared at the reserved binding and sampled at the RAW UV
 	// (the weightmap spans the whole terrain; detail tiling is per layer).
 	CHECK(gen.glsl.find("binding = 14) uniform sampler2D heLandscapeWeights") != std::string::npos);
-	CHECK(gen.glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+	CHECK(gen.glsl.find("_wuv);") != std::string::npos);     // the smoothed coordinate, see emitLayerBlendNode
 	// Normalised by the weight sum, so a partly painted texel doesn't darken…
 	CHECK(gen.glsl.find("1e-4") != std::string::npos);
 	// …and a texel with NO weight at all falls back to layer 0 instead of
@@ -1989,7 +2165,7 @@ TEST_CASE("Landscape Layer Blend reads layers 4..7 from the right half of the sa
 		CHECK(g->glsl.find("textureSize(heLandscapeWeights, 0)") != std::string::npos);
 		CHECK(g->glsl.find("textureLod(heLandscapeWeights") != std::string::npos);
 		// … beside the untouched square-map read the blend always made.
-		CHECK(g->glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+		CHECK(g->glsl.find("texture(heLandscapeWeights, ") != std::string::npos);
 	}
 	// Only a blend with a fifth layer reads the second page at all.
 	CHECK(count(three.glsl, "textureLod(heLandscapeWeights") == 1);
@@ -2249,7 +2425,7 @@ TEST_CASE("A bombed texture layer cross-compiles for all five backends, with gra
 TEST_CASE("The auto landscape material cross-compiles for all five backends, in every view and permutation")
 {
 	// The biggest graph the engine ships: four layers × three array reads, three
-	// hex grids, two noise fields, fourteen parameters. All of it is shader TEXT
+	// hex grids, two noise fields, thirteen parameters. All of it is shader TEXT
 	// in existing slots — what has to hold is that every backend's translator
 	// takes it, the clustered and G-buffer variants included, and that the
 	// bombing-off permutation and the unlit mask views (the witness) do too.
@@ -2258,10 +2434,10 @@ TEST_CASE("The auto landscape material cross-compiles for all five backends, in 
 	const std::map<std::string, bool> noBomb{ { HE::kAutoLandscapeSwitchBombing, false } };
 	struct Variant { const char* name; HE::MatShaderGen gen; };
 	const Variant variants[] = {
-		{ "lit",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph) },
-		{ "nobomb", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, {}, &noBomb) },
-		{ "masks",  HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksRockSnowWater).graph) },
-		{ "ground", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksDirtWet).graph) },
+		{ "lit",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()) },
+		{ "nobomb", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader(), &noBomb) },
+		{ "masks",  HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksRockSnowWater).graph, HE::weatherFunctionLoader()) },
+		{ "ground", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksDirtWet).graph, HE::weatherFunctionLoader()) },
 	};
 	for (const Variant& v : variants)
 	{
@@ -2357,10 +2533,10 @@ TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambl
 
 // ═══ Auto landscape material (Thema 158, Schritt 5) ═══════════════════════════
 
-TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex grid per bombed layer")
+TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex grid per bombed layer")
 {
 	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
-	const HE::MatShaderGen gen = HE::generateFragment(a.graph);
+	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 	REQUIRE_FALSE(gen.glsl.empty());
 	CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle / missing-output magenta
 
@@ -2386,15 +2562,36 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 	                          HE::kAutoLandscapeParamDirtAmount, HE::kAutoLandscapeParamDirtSize,
 	                          HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowBlend,
 	                          HE::kAutoLandscapeParamSnowMaxSlope, HE::kAutoLandscapeParamPuddleAmount,
-	                          HE::kAutoLandscapeParamPuddleSize, HE::kAutoLandscapeParamPuddleMaxSlope })
+	                          HE::kAutoLandscapeParamPuddleMaxSlope })
 	{
 		const bool found = std::any_of(gen.params.begin(), gen.params.end(),
 		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
 		CHECK_MESSAGE(found, name);
 	}
-	// Procedural layers only: no weightmap, no paint layers.
-	CHECK(gen.layerNames.empty());
-	CHECK(gen.glsl.find("heLandscapeWeights, vUV") == std::string::npos);
+	// The paint layers on top of the automatic rules: Auto first — an unpainted
+	// terrain binds the (1,0,0,0) default weightmap and must resolve to it — then
+	// the five textures. Five Landscape Layer Blend nodes read the weightmap (two
+	// extract the weights, three mix albedo / normal / mask), all with the same names.
+	{
+		const std::vector<std::string> names = HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames);
+		REQUIRE(names.size() == static_cast<size_t>(HE::kAutoLandscapePaintLayerCount));
+		CHECK(names[static_cast<size_t>(HE::AutoLandscapePaintLayer::Auto)] == "Auto");
+		CHECK(names[static_cast<size_t>(HE::AutoLandscapePaintLayer::Puddles)] == "Puddles");
+		CHECK(gen.layerNames == names);
+		CHECK(gen.glsl.find("texture(heLandscapeWeights, ") != std::string::npos);
+		size_t blends = 0;
+		for (const HE::MatGraphNode& n : a.graph.nodes)
+			if (n.type == HE::MatNodeType::LandscapeLayerBlend) { ++blends; CHECK(n.s == HE::kAutoLandscapePaintLayerNames); }
+		CHECK(blends == 5u);
+	}
+	// The mask views are the AUTOMATIC masks and need no weightmap — the witness
+	// renders them on an unpainted terrain.
+	for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet })
+	{
+		const HE::MatShaderGen mg = HE::generateFragment(HE::buildAutoLandscapeGraph(v).graph, HE::weatherFunctionLoader());
+		CHECK(mg.layerNames.empty());
+		CHECK(mg.glsl.find("heLandscapeWeights") == std::string::npos);
+	}
 
 	// Puddles are an OVERLAY on the ground below, not a layer: slice 4 of the arrays
 	// (WetGround) stays in them but no read asks for it — every array read takes its
@@ -2420,22 +2617,22 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 				sawSnow = sawSnow || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Snow);
 			}
 		}
-		CHECK(reads == 21); // 3 bombed layers x 3 maps x (plain + bombed) + Snow x 3 maps
+		CHECK(reads == 24); // 4 bombed layers (Grass, Dirt, Rock, Snow) x 3 maps x (plain + bombed)
 		CHECK(sawSnow);
 	}
 
-	// Grass, Dirt, Rock each read albedo + normal + mask on ONE grid (three grids
-	// in total); Snow is a plain read. The uv here is a coerced
+	// Grass, Dirt, Rock and Snow each read albedo + normal + mask on ONE grid (four
+	// grids in total). The uv here is a coerced
 	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
 	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 3u);
+	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 4u);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
 	CHECK(gen.switches[0].second);
 
 	// The bombing-off permutation: no grid at all, the same three slots.
 	const std::map<std::string, bool> off{ { HE::kAutoLandscapeSwitchBombing, false } };
-	const HE::MatShaderGen plain = HE::generateFragment(a.graph, {}, &off);
+	const HE::MatShaderGen plain = HE::generateFragment(a.graph, HE::weatherFunctionLoader(), &off);
 	CHECK(plain.glsl.find("heBomb") == std::string::npos);
 	CHECK(plain.textureArrayMask == 0x7u);
 	CHECK(plain.textures.size() == 3u);
@@ -2451,7 +2648,7 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 		CHECK(m.graph.findNode(m.output)->p[0] == 0.0f);
 		for (int id : { m.slope, m.dirtMask, m.rockMask, m.snowMask, m.flatMask, m.wetMask, m.waterMask })
 			CHECK(m.graph.findNode(id) != nullptr);
-		const HE::MatShaderGen mg = HE::generateFragment(m.graph);
+		const HE::MatShaderGen mg = HE::generateFragment(m.graph, HE::weatherFunctionLoader());
 		CHECK_FALSE(mg.glsl.empty());
 		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 	}
@@ -2459,7 +2656,7 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 	// The graph survives its JSON (what the .hasset stores) byte for byte.
 	MaterialGraph back;
 	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(a.graph), back));
-	CHECK(HE::generateFragment(back).glsl == gen.glsl);
+	CHECK(HE::generateFragment(back, HE::weatherFunctionLoader()).glsl == gen.glsl);
 }
 
 TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
@@ -2498,7 +2695,7 @@ TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
 	using V = HE::AutoLandscapeView;
 	for (V view : { V::Lit, V::MasksRockSnowWater, V::MasksDirtWet, V::Normal, V::Surface })
 	{
-		const std::string glsl = HE::generateFragment(HE::buildAutoLandscapeGraph(view).graph).glsl;
+		const std::string glsl = HE::generateFragment(HE::buildAutoLandscapeGraph(view).graph, HE::weatherFunctionLoader()).glsl;
 		CHECK(glsl.find("heFbmI(") != std::string::npos);
 		CHECK(glsl.find("heHash21") == std::string::npos);
 		CHECK(glsl.find("heFbm(") == std::string::npos);
@@ -3216,6 +3413,9 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 		std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent" / "Materials";
 	REQUIRE(std::filesystem::exists(dir / "M_AutoLandscape.hasset"));
 	ContentManager cm(dir.string());
+	// A load regenerates the GLSL from the graph, and the graph calls the weather functions by
+	// their "Engine/…" path: with the engine root set they resolve to the shipped assets.
+	cm.setEngineContentRoot(dir.parent_path().string());
 	const HE::UUID id = cm.loadAsset("M_AutoLandscape.hasset");
 	CHECK(id == HE::kAutoLandscapeMaterialId);
 	const MaterialAsset* m = cm.getMaterial(id);
@@ -3224,9 +3424,184 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
 	CHECK(m->graphTexturePaths.size() == 3u);
 	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	// The Landscape tool lists these as the paintable layers — Auto first, so an
+	// unpainted terrain reads the automatic distribution.
+	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
 	CHECK(m->parentMaterialPath.empty());
 }
+
+TEST_CASE("The shipped weather functions are exactly what the builders make, and the landscape material resolves them")
+{
+	// Generated by matfn_gen (Weather/ sub-folder) and committed — the tripwire for a change
+	// to HE::buildWeather*Function that did not re-run the generator.
+	const std::filesystem::path root = std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent";
+	const std::filesystem::path dir  = root / "MaterialFunctions" / "Weather";
+	struct Want { const char* file; HE::UUID id; HE::MaterialGraph g; };
+	const std::vector<Want> want = {
+		{ "MF_WeatherPuddles.hasset", HE::kWeatherPuddlesFunctionId, HE::buildWeatherPuddlesFunction() },
+		{ "MF_WeatherSnow.hasset",    HE::kWeatherSnowFunctionId,    HE::buildWeatherSnowFunction() } };
+	ContentManager cm(dir.string());
+	for (const Want& w : want)
+	{
+		CAPTURE(w.file);
+		REQUIRE(std::filesystem::exists(dir / w.file));
+		const HE::UUID id = cm.loadAsset(w.file);
+		CHECK(id == w.id);
+		const MaterialFunctionAsset* f = cm.getMaterialFunction(id);
+		REQUIRE(f);
+		CHECK_MESSAGE(f->nodeGraphJson == HE::materialGraphToJson(w.g),
+		              "re-run: matfn_gen EditorDeps/EngineContent/MaterialFunctions");
+	}
+
+	// The landscape material, loaded with the engine root, found both by their Engine/ path
+	// and compiled real code around them.
+	ContentManager mats((root / "Materials").string());
+	mats.setEngineContentRoot(root.string());
+	const MaterialAsset* m = mats.getMaterial(mats.loadAsset("M_AutoLandscape.hasset"));
+	REQUIRE(m);
+	CHECK(m->customShaderFragGlsl.find("missing function") == std::string::npos);
+	CHECK(m->customShaderFragGlsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
+	CHECK(m->customShaderFragGlsl.find("heLight.weather") != std::string::npos);
+}
 #endif // HE_EDITOR_DEPS_DIR
+
+// ── The Weather node and the weather material functions ─────────────────────
+
+TEST_CASE("Weather node: four floats from heLight.weather, one per pin")
+{
+	MaterialGraph g = MaterialGraph::makeDefault();
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	const int w = g.addNode(MatNodeType::Weather);
+	REQUIRE(HE::matNodeDesc(MatNodeType::Weather).outputs.size() == 5u);   // + Puddle Size (metres)
+	REQUIRE(g.connect(w, 2, out, HE::kMatOutputRoughnessPin));   // Puddles
+	REQUIRE(g.connect(w, 3, out, HE::kMatOutputMetallicPin));    // Snow Cover
+	const std::string glsl = HE::generateFragment(g).glsl;
+	CHECK(glsl.find("clamp(heLight.weather, 0.0, 1.0)") != std::string::npos);
+	CHECK(glsl.find(".z") != std::string::npos);
+	CHECK(glsl.find(".w") != std::string::npos);
+	// Puddle Size (pin 4) is metres from the second weather vec4, never below half a metre — a
+	// zero-filled lighting block must not divide a noise scale by zero.
+	{
+		MaterialGraph g2 = MaterialGraph::makeDefault();
+		int out2 = 0;
+		for (auto& n : g2.nodes) if (n.type == MatNodeType::Output) out2 = n.id;
+		const int w2 = g2.addNode(MatNodeType::Weather);
+		REQUIRE(g2.connect(w2, 4, out2, HE::kMatOutputRoughnessPin));
+		CHECK(HE::generateFragment(g2).glsl.find("max(heLight.weather2.x, 0.5)") != std::string::npos);
+	}
+
+	// By name through JSON, like every node.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	CHECK(HE::generateFragment(back).glsl == glsl);
+}
+
+TEST_CASE("Weather functions: a usable interface, flat, defaults authored, no Param nodes")
+{
+	const std::vector<std::pair<const char*, MaterialGraph>> fns = {
+		{ HE::kWeatherPuddlesFunctionPath, HE::buildWeatherPuddlesFunction() },
+		{ HE::kWeatherSnowFunctionPath,    HE::buildWeatherSnowFunction() } };
+	for (const auto& [path, fn] : fns)
+	{
+		CAPTURE(path);
+		std::vector<HE::MatPinDesc> ins, outs;
+		HE::matFunctionPins(fn, ins, outs);
+		CHECK_FALSE(ins.empty());
+		CHECK_FALSE(outs.empty());
+		for (const HE::MatPinDesc& p : ins)  CHECK(std::string(p.name).size() > 0);
+		for (const HE::MatPinDesc& p : outs) CHECK(std::string(p.name).size() > 0);
+		for (const HE::MatGraphNode& n : fn.nodes)
+		{
+			if (n.type == MatNodeType::FnInput) CHECK(n.p[2] >= 0.5f);
+			CHECK(n.type != MatNodeType::FunctionCall);
+			// Knobs are function INPUTS: a Param node would land in the caller's parameter panel
+			// under a fixed name and collide when the function is used twice.
+			CHECK(n.type != MatNodeType::ParamFloat);
+		}
+	}
+	// Pin NAMES point into the graph's node strings (see matFunctionPins), so the graphs are
+	// named locals here: a temporary would be gone before the names are read.
+	const MaterialGraph puddlesFn = HE::buildWeatherPuddlesFunction();
+	const MaterialGraph snowFn    = HE::buildWeatherSnowFunction();
+	std::vector<HE::MatPinDesc> ins, outs;
+	HE::matFunctionPins(puddlesFn, ins, outs);
+	REQUIRE(ins.size() == 1u);
+	CHECK(std::string(ins[0].name) == "Max Water Level");
+	REQUIRE(outs.size() == 4u);
+	CHECK(std::string(outs[0].name) == "Water Level");
+	CHECK(std::string(outs[3].name) == "Size");   // appended last: the pins wired before keep their index
+	HE::matFunctionPins(snowFn, ins, outs);
+	REQUIRE(ins.size() == 3u);
+	CHECK(std::string(ins[0].name) == "Slope");
+	CHECK(std::string(ins[1].name) == "Max Slope");
+	CHECK(std::string(ins[2].name) == "Height Bias");
+	CHECK(std::string(outs.at(0).name) == "Snow");
+}
+
+TEST_CASE("Weather functions: an unwired call emits real code that reads the weather")
+{
+	for (const char* path : { HE::kWeatherPuddlesFunctionPath, HE::kWeatherSnowFunctionPath })
+	{
+		CAPTURE(path);
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int call = g.addNode(MatNodeType::FunctionCall);
+		g.findNode(call)->s = path;
+		REQUIRE(g.connect(call, 0, out, HE::kMatOutputRoughnessPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g, HE::weatherFunctionLoader());
+		CHECK(gen.glsl.find("missing function") == std::string::npos);
+		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
+		CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
+		CHECK(gen.params.empty());
+	}
+	// Without a loader the call is the magenta placeholder — what the landscape graph would be
+	// if its two functions did not resolve, which is why every compile of it passes the loader.
+	MaterialGraph g = MaterialGraph::makeDefault();
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	const int call = g.addNode(MatNodeType::FunctionCall);
+	g.findNode(call)->s = HE::kWeatherSnowFunctionPath;
+	REQUIRE(g.connect(call, 0, out, HE::kMatOutputRoughnessPin));
+	CHECK(HE::generateFragment(g).glsl.find("missing function") != std::string::npos);
+}
+
+TEST_CASE("Auto landscape: puddles and ground snow come from the weather functions, the masks stay weather-free")
+{
+	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
+	int puddles = 0, snow = 0;
+	for (const HE::MatGraphNode& n : a.graph.nodes)
+		if (n.type == MatNodeType::FunctionCall)
+		{
+			puddles += n.s == HE::kWeatherPuddlesFunctionPath;
+			snow    += n.s == HE::kWeatherSnowFunctionPath;
+		}
+	CHECK(puddles == 1);
+	CHECK(snow == 1);
+	// "Puddle Amount" is now the level AT slider 1, and "Puddle Size" is gone — the size is the
+	// Weather panel's slider (the function's Size output), not a per-material parameter.
+	for (const HE::MatParamSlot& s : HE::generateFragment(a.graph, HE::weatherFunctionLoader()).params)
+		CHECK(s.name != "Puddle Size");
+	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
+	CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
+	CHECK(gen.glsl.find("missing function") == std::string::npos);
+
+	// The snow mask the views and the witness read is the HEIGHT snow alone: no function call
+	// sits in its cone, so it cannot move with the scene's Snow Cover slider.
+	std::set<int> cone;
+	std::vector<int> todo{ a.snowMask };
+	while (!todo.empty())
+	{
+		const int id = todo.back(); todo.pop_back();
+		if (!cone.insert(id).second) continue;
+		for (const HE::MatGraphLink& l : a.graph.links)
+			if (l.dstNode == id) todo.push_back(l.srcNode);
+	}
+	for (int id : cone)
+		CHECK(a.graph.findNode(id)->type != MatNodeType::FunctionCall);
+}
 
 // ── Thema 51, Schritt 2: instances + overrides never cost a second compile ────
 // What the D3D11/D3D12/Vulkan draw loops key their shader/PSO/pipeline caches on is
@@ -3540,7 +3915,7 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 	// The auto landscape material (Thema 158 Schritt 5) is a graph, not a node
 	// type, so the registry loop never builds it: 33 array taps, two fBm fields
 	// and 14 HeParams slots through FXC, the D3D12 root signature and the GL link.
-	cases.push_back({ "Auto landscape material", HE::generateFragment(HE::buildAutoLandscapeGraph().graph).glsl, {} });
+	cases.push_back({ "Auto landscape material", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()).glsl, {} });
 	return cases;
 }
 
@@ -4155,6 +4530,130 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 		CHECK_MESSAGE(name.find("(UI domain)") != std::string::npos, name, " uses a binding outside the layout");
 }
 
+// ═══ Thema 150 Schritt 4: the Vulkan deferred resolve's own set layout ═══════
+// VulkanRenderer builds m_resolveSetLayout from HE::vkmat::kResolveBindings and
+// runs deferredResolve[Clustered](SpirV) against it; the G-buffer tails of the
+// graph materials run against the material layout (kBindings) in the G-buffer
+// pass. A binding the layout lacks makes the pipeline invalid (NVIDIA draws
+// garbage with one validation line, lavapipe crashes in the draw), and CI has
+// no Vulkan device to show it. Same method as above: reflection of the
+// statically used descriptors, held against the tables — set, binding, kind
+// AND the fragment stage.
+namespace
+{
+std::string uncoveredVkResolve(const std::vector<VkUse>& uses, uint32_t skipBinding = ~0u)
+{
+	std::string miss;
+	for (const VkUse& u : uses)
+	{
+		bool ok = false;
+		for (uint32_t i = 0; i < HE::vkmat::kResolveBindingCount && !ok; ++i)
+		{
+			const HE::vkmat::Binding& row = HE::vkmat::kResolveBindings[i];
+			ok = row.binding != skipBinding && u.set == 0 && row.binding == u.binding
+			  && static_cast<int>(row.kind) == u.kind && (row.stages & HE::vkmat::kStageFragment);
+		}
+		if (!ok)
+			miss += " " + std::to_string(u.set) + "/" + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
+} // namespace
+
+TEST_CASE("Vulkan: the deferred resolve's set layout covers both resolve variants, and the G-buffer tails fit the material layout (Thema 150)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using HE::vkmat::DescKind;
+	namespace vm = HE::vkmat;
+	HE::MaterialShaderLibrary lib;
+
+	// The table: no duplicate binding, the cluster lists last, and few enough
+	// fragment samplers for the spec minimum of 16 — no device needs a fallback.
+	for (uint32_t i = 0; i < vm::kResolveBindingCount; ++i)
+		for (uint32_t j = i + 1; j < vm::kResolveBindingCount; ++j)
+			CHECK_MESSAGE(vm::kResolveBindings[i].binding != vm::kResolveBindings[j].binding,
+			              "duplicate resolve binding ", vm::kResolveBindings[i].binding);
+	CHECK(vm::kResolveBindings[vm::kResolvePreClusterBindingCount + 0].binding == vm::kClusterLightsBinding);
+	CHECK(vm::kResolveBindings[vm::kResolvePreClusterBindingCount + 1].binding == vm::kClusterGridBinding);
+	CHECK(vm::kResolveBindings[vm::kResolvePreClusterBindingCount + 2].binding == vm::kClusterIdxBinding);
+	uint32_t fragSamplers = 0;
+	for (uint32_t i = 0; i < vm::kResolveBindingCount; ++i)
+		if (vm::kResolveBindings[i].kind == DescKind::CombinedImageSampler
+		    && (vm::kResolveBindings[i].stages & vm::kStageFragment))
+			++fragSamplers;
+	CHECK(fragSamplers == 15);
+	CHECK(fragSamplers <= 16);
+
+	// Both variants, reflected.
+	const auto& plain = lib.deferredResolve(B::SpirV);
+	const auto& clus  = lib.deferredResolveClustered(B::SpirV);
+	REQUIRE_MESSAGE(plain.ok, plain.log);
+	REQUIRE_MESSAGE(clus.ok, clus.log);
+	std::string err;
+	const std::vector<VkUse> up = activeVkDescriptors(plain.spirv, err);
+	REQUIRE_MESSAGE(err.empty(), err);
+	const std::vector<VkUse> uc = activeVkDescriptors(clus.spirv, err);
+	REQUIRE_MESSAGE(err.empty(), err);
+
+	// Positive: every statically used descriptor has its row.
+	CHECK_MESSAGE(uncoveredVkResolve(up).empty(), "8-light resolve outside the layout:", uncoveredVkResolve(up));
+	CHECK_MESSAGE(uncoveredVkResolve(uc).empty(), "clustered resolve outside the layout:", uncoveredVkResolve(uc));
+
+	// The resolve's own inputs are really read: G-buffer 19..22 (sampled) and
+	// HeResolve 23 — a resolve that silently stopped reading GB3 would pass the
+	// coverage check above and draw nothing.
+	const int kCis = static_cast<int>(DescKind::CombinedImageSampler);
+	const int kUbo = static_cast<int>(DescKind::UniformBuffer);
+	const int kSsbo = static_cast<int>(DescKind::StorageBuffer);
+	for (const VkUse& want : { VkUse{ 0, vm::kResolveGB0Binding, kCis }, VkUse{ 0, vm::kResolveGB1Binding, kCis },
+	                           VkUse{ 0, vm::kResolveGB2Binding, kCis }, VkUse{ 0, vm::kResolveDepthBinding, kCis },
+	                           VkUse{ 0, vm::kResolveUboBinding, kUbo }, VkUse{ 0, 0, kUbo } })
+	{
+		CHECK_MESSAGE(std::find(up.begin(), up.end(), want) != up.end(), "8-light resolve does not use ", want.binding);
+		CHECK_MESSAGE(std::find(uc.begin(), uc.end(), want) != uc.end(), "clustered resolve does not use ", want.binding);
+	}
+
+	// Clustered = the 8-light resolve + exactly the three lists.
+	const std::vector<VkUse> lists = { { 0, vm::kClusterLightsBinding, kSsbo },
+	                                   { 0, vm::kClusterGridBinding,   kSsbo },
+	                                   { 0, vm::kClusterIdxBinding,    kSsbo } };
+	std::vector<VkUse> added, dropped;
+	std::set_difference(uc.begin(), uc.end(), up.begin(), up.end(), std::back_inserter(added));
+	std::set_difference(up.begin(), up.end(), uc.begin(), uc.end(), std::back_inserter(dropped));
+	CHECK_MESSAGE(added == lists, "clustered adds", uncoveredVk(added, 0));
+	CHECK_MESSAGE(dropped.empty(), "clustered drops", uncoveredVk(dropped, 0));
+
+	// Negative controls: the table without the GB3 row leaves exactly that use
+	// uncovered, and the MATERIAL layout (which the resolve must not borrow)
+	// lacks the whole G-buffer + HeResolve.
+	CHECK(uncoveredVkResolve(up, vm::kResolveDepthBinding) == " 0/22:1");
+	CHECK(uncoveredVkFragment(up) == " 0/19:1 0/20:1 0/21:1 0/22:1 0/23:0");
+
+	// G-buffer tails (MaterialGraph's glslGBuffer) of every surface node graph:
+	// they run in the G-buffer pass on the MATERIAL layout, so every use must
+	// have a fragment row there — heLandscapeWeights (14) included.
+	int tails = 0;
+	std::set<VkUse> gbGap;
+	for (const HE::MatNodeDesc& d : HE::matNodeRegistry())
+	{
+		if (d.type == MatNodeType::Output || d.type == MatNodeType::FnInput ||
+		    d.type == MatNodeType::FnOutput || d.type == MatNodeType::FunctionCall)
+			continue;
+		const HE::MatShaderGen gen = HE::generateFragment(graphForNode(d.type, HE::MatDomain::Surface));
+		if (gen.glslGBuffer.empty()) continue; // unlit graphs have none
+		const auto& sv = lib.fragment(std::hash<std::string>{}(gen.glslGBuffer), gen.glslGBuffer, B::SpirV);
+		REQUIRE_MESSAGE(sv.ok, d.name, ": ", sv.log);
+		const std::vector<VkUse> uses = activeVkDescriptors(sv.spirv, err);
+		REQUIRE_MESSAGE(err.empty(), d.name, ": ", err);
+		++tails;
+		for (const VkUse& u : uses)
+			if (!uncoveredVkFragment({ u }).empty()) gbGap.insert(u);
+	}
+	CHECK(tails > 40);
+	CHECK_MESSAGE(gbGap.empty(), "G-buffer tail uses outside the material layout:",
+	              uncoveredVk(std::vector<VkUse>(gbGap.begin(), gbGap.end()), 0));
+}
+
 // ═══ Thema 117 Schritt 6: OpenGL 4.3 binds the clustered variant ═════════════
 // OpenGLRenderer links forward graph materials from standardVertex /
 // customVertex(GLSL430) + fragmentClustered(GLSL430) and binds the lists on
@@ -4401,6 +4900,61 @@ TEST_CASE("Export bake: every backend carries the clustered twin, GL as a linkin
 		CHECK(!error.empty());
 		CHECK(var.backend == 0xEE); // untouched
 	}
+}
+
+TEST_CASE("Deferred resolve HLSL registers stay inside SM 5.0's bindable range (Thema 150)")
+{
+	// docs/deferred-renderer-plan.md §10.4. Unpinned, SPIRV-Cross put the
+	// G-buffer on s19..s22, the preamble's 16..18/31..33 samplers on s16+ and
+	// HeResolve on b23 — FXC rejects that (X4509) and D3D11/D3D12 would silently
+	// stay forward. This is the net on the emitted text for macOS/Linux; the FXC
+	// and WARP cases below are the proof on Windows.
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	MSL lib;
+	const MSL::Compiled& plain = lib.deferredResolve(B::HLSL);
+	const MSL::Compiled& clus  = lib.deferredResolveClustered(B::HLSL);
+	REQUIRE_MESSAGE(plain.ok, plain.log);
+	REQUIRE_MESSAGE(clus.ok, clus.log);
+	auto reg = [](char k, int n) { return "register(" + std::string(1, k) + std::to_string(n) + ")"; };
+	for (const std::string* ps : { &plain.source, &clus.source })
+	{
+		CHECK(ps->find(reg('b', MSL::kHlslResolveUboReg)) != std::string::npos);  // HeResolve
+		CHECK(ps->find(reg('b', 0)) != std::string::npos);                         // HeLighting
+		CHECK(ps->find(reg('t', MSL::kHlslResolveGB0Reg))   != std::string::npos);
+		CHECK(ps->find(reg('s', MSL::kHlslResolveGB0Sampler)) != std::string::npos);
+		CHECK(ps->find(reg('t', MSL::kHlslResolveGB1Reg))   != std::string::npos);
+		CHECK(ps->find(reg('s', MSL::kHlslResolveGB1Sampler)) != std::string::npos);
+		CHECK(ps->find(reg('t', MSL::kHlslResolveGB2Reg))   != std::string::npos);
+		CHECK(ps->find(reg('s', MSL::kHlslResolveGB2Sampler)) != std::string::npos);
+		CHECK(ps->find(reg('t', MSL::kHlslResolveDepthReg)) != std::string::npos);
+		CHECK(ps->find(reg('s', MSL::kHlslResolveDepthSampler)) != std::string::npos);
+		// The canonical numbers are gone, every sampler and cbuffer register exists.
+		CHECK(ps->find("register(b23)") == std::string::npos);
+		CHECK_MESSAGE(maxRegister(*ps, 's') <= 15, "a resolve sampler past s15: s", maxRegister(*ps, 's'));
+		CHECK_MESSAGE(maxRegister(*ps, 'b') <= 13, "a resolve cbuffer past b13: b", maxRegister(*ps, 'b'));
+		CHECK_FALSE_MESSAGE(twoLiveSamplersShareRegister(*ps), "two live samplers on one register (FXC X4500)");
+		// The G-buffer keeps clear of the built-in scene shader's structured
+		// cluster lists (t18..t20) — a view left there would be read as a grid.
+		for (int t : { 19, 20, 21, 22 })
+			CHECK_MESSAGE(ps->find(reg('t', t)) == std::string::npos, "the resolve binds t", t);
+	}
+	// The cluster lists only in the clustered variant, as raw buffers on t24..t26.
+	for (int t : { 24, 25, 26 })
+	{
+		CHECK(clus.source.find(reg('t', t)) != std::string::npos);
+		CHECK(plain.source.find(reg('t', t)) == std::string::npos);
+	}
+	CHECK(clus.source.find("ByteAddressBuffer") != std::string::npos);
+
+	// The variant gates: tile is Metal-only, GL 4.1 has no SSBO for the
+	// clustered one, Vulkan gets it with the canonical bindings (step 4).
+	CHECK_FALSE(lib.deferredResolveTile(B::HLSL).ok);
+	CHECK_FALSE(lib.deferredResolveClustered(B::GLSL410).ok);
+	CHECK(lib.deferredResolve(B::GLSL410).ok);
+	const MSL::Compiled& vkClus = lib.deferredResolveClustered(B::SpirV);
+	CHECK_MESSAGE(vkClus.ok, vkClus.log);
+	CHECK(lib.fullscreenVertex(B::HLSL).ok);
 }
 
 #if defined(_WIN32)
@@ -4937,6 +5491,156 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 	}
 }
 
+TEST_CASE("D3D12: the deferred resolve and G-buffer PSOs build against their signatures (WARP, Thema 150)")
+{
+	// docs/deferred-renderer-plan.md §10.8 Schritt 3. The resolve is heLitP in a
+	// fullscreen pass: the material preamble's registers PLUS b4 / t27..t30. Its
+	// signature (DescribeResolveRootSignature, what D3D12Renderer serialises)
+	// must accept the 8-light and the clustered resolve; the plain material
+	// signature must refuse them — otherwise the extra param and range are not
+	// what the PSO depends on. The G-buffer PSOs (graph tail + three MRTs) ride
+	// on the unchanged material signature.
+	using Microsoft::WRL::ComPtr;
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	namespace dm = HE::d3d12mat;
+	static_assert(dm::kResolveGBufferReg == MSL::kHlslResolveGB0Reg, "t27 = heGB0");
+	static_assert(dm::kResolveUboReg     == MSL::kHlslResolveUboReg, "b4 = HeResolve");
+	static_assert(dm::kResolvePointSamplers[0] == MSL::kHlslResolveGB0Sampler
+	           && dm::kResolvePointSamplers[1] == MSL::kHlslResolveGB1Sampler
+	           && dm::kResolvePointSamplers[2] == MSL::kHlslResolveGB2Sampler
+	           && dm::kResolvePointSamplers[3] == MSL::kHlslResolveDepthSampler,
+	              "the resolve's point samplers are the kHlslResolve* ones");
+	WarpDevice w;
+	const bool haveWarp = createWarpDevice(w);
+	REQUIRE_MESSAGE(haveWarp, w.log);
+
+	MSL lib;
+	std::string err;
+	ComPtr<ID3DBlob> fsVs = fxcBlob(lib.fullscreenVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(fsVs.Get() != nullptr, "fullscreen vertex: ", err);
+	ComPtr<ID3DBlob> resolvePs = fxcBlob(lib.deferredResolve(B::HLSL).source, "ps_5_0", err);
+	REQUIRE_MESSAGE(resolvePs.Get() != nullptr, "resolve: ", err);
+	ComPtr<ID3DBlob> clusterPs = fxcBlob(lib.deferredResolveClustered(B::HLSL).source, "ps_5_0", err);
+	REQUIRE_MESSAGE(clusterPs.Get() != nullptr, "clustered resolve: ", err);
+	{
+		const std::vector<Binding> b = reflectBindings(clusterPs.Get());
+		for (UINT t : { 27u, 28u, 29u, 30u })
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, t), "the resolve no longer binds t", t);
+		for (UINT t : { 24u, 25u, 26u })
+			CHECK_MESSAGE(binds(b, D3D_SIT_BYTEADDRESS, t), "the clustered resolve does not bind t", t);
+		CHECK(binds(b, D3D_SIT_CBUFFER, 4));
+	}
+
+	// The renderer's resolve PSO: no input layout, one RGBA16F target (the HDR
+	// scene colour), no depth (the depth is t30, a shader resource).
+	auto makeResolvePso = [&](ID3D12RootSignature* rs, ID3DBlob* ps, ComPtr<ID3D12PipelineState>& out) {
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = rs;
+		pd.VS                    = { fsVs->GetBufferPointer(), fsVs->GetBufferSize() };
+		pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = 1;
+		pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.DSVFormat             = DXGI_FORMAT_UNKNOWN;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		return w.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
+	};
+
+	dm::ResolveRootSignature rdesc;
+	dm::DescribeResolveRootSignature(rdesc);
+	CHECK(rdesc.params[dm::kRootClusterLights].Descriptor.ShaderRegister == 24); // bindClusterRoots' indices hold
+	CHECK(rdesc.params[dm::kRootResolveCB].Descriptor.ShaderRegister == 4);
+	for (const D3D12_STATIC_SAMPLER_DESC& s : rdesc.samplers)
+		for (UINT reg : dm::kResolvePointSamplers)
+			if (s.ShaderRegister == reg)
+				CHECK_MESSAGE(s.Filter == D3D12_FILTER_MIN_MAG_MIP_POINT, "resolve sampler s", reg, " filters");
+	ComPtr<ID3D12RootSignature> resolveRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), rdesc.desc, resolveRs, err);
+		const std::string why = drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "resolve root signature: ", err, why);
+	}
+	for (ID3DBlob* ps : { resolvePs.Get(), clusterPs.Get() })
+	{
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeResolvePso(resolveRs.Get(), ps, pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(SUCCEEDED(hr), "resolve PSO against the resolve signature failed, hr=", hr, ": ", why);
+	}
+
+	// Negative control: the material signature, the same shaders and PSO.
+	dm::MaterialRootSignature mdesc;
+	dm::DescribeMaterialRootSignature(mdesc);
+	ComPtr<ID3D12RootSignature> matRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), mdesc.desc, matRs, err);
+		drainInfoQueue(w);
+		REQUIRE(SUCCEEDED(hr));
+	}
+	for (ID3DBlob* ps : { resolvePs.Get(), clusterPs.Get() })
+	{
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeResolvePso(matRs.Get(), ps, pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(hr == E_INVALIDARG, "the material signature accepted the resolve (hr=", hr,
+		              ") — b4/t27..t30 are not what the PSO depends on: ", why);
+		CHECK(pso.Get() == nullptr);
+	}
+
+	// G-buffer PSOs: the graph material's G-buffer tail (heLitP replaced by the
+	// attribute writes) on the material signature, three MRTs as the renderer
+	// builds them (SRGB8 + 2x RGBA16F) against the D32 scene depth. The tail
+	// also writes oGB3 (SV_Target3, Metal's depth copy) — with NumRenderTargets
+	// 3 that output is discarded; the PSO must still be legal.
+	const auto gen = HE::generateFragment(makeDemoGraph());
+	REQUIRE_FALSE(gen.glslGBuffer.empty());
+	const auto& gbf = lib.fragment(std::hash<std::string>{}(gen.glslGBuffer), gen.glslGBuffer, B::HLSL);
+	REQUIRE_MESSAGE(gbf.ok, gbf.log);
+	ComPtr<ID3DBlob> gbPs = fxcBlob(gbf.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(gbPs.Get() != nullptr, "G-buffer fragment: ", err);
+	ComPtr<ID3DBlob> stdVs = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE(stdVs.Get() != nullptr);
+	{
+		static const D3D12_INPUT_ELEMENT_DESC layout[] = {
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		};
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = matRs.Get();
+		pd.VS                    = { stdVs->GetBufferPointer(), stdVs->GetBufferSize() };
+		pd.PS                    = { gbPs->GetBufferPointer(), gbPs->GetBufferSize() };
+		pd.InputLayout           = { layout, 3 };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = 3;
+		pd.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.RTVFormats[2]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable    = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+		for (int i = 0; i < 3; ++i)
+			pd.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = w.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(SUCCEEDED(hr), "G-buffer material PSO failed, hr=", hr, ": ", why);
+		if (!why.empty()) MESSAGE("G-buffer PSO debug-layer notes: ", why);
+	}
+}
+
 TEST_CASE("D3D12: every node's bytecode binds only registers the material root signature covers")
 {
 	// The WARP case above builds PSOs for four shapes; this is the net for the
@@ -5151,6 +5855,13 @@ TEST_CASE("FXC: the SSR passes compile exactly as D3D11/D3D12 build them")
 // that t14 is really bound (the unbound zeros would give layer 0) and that s0
 // carried the clamp sampler while the draw ran. The state queries after the
 // restore say s0 is back on the built-in pass's sampler and t14 is off.
+//
+// Since "Landscape: smoother painted edges" the blend clamps the weight coordinate
+// to the page's texel centres itself, so the address mode of s0 no longer decides
+// the u = 1.2 read: CLAMP and WRAP both give texel 1. The clamp sampler on s0 is
+// still bound (it is the cheap half of the fix), and what the pixel proves about
+// s0 is now the opposite of what the paragraph above says: the read is robust to
+// it. Whether t14 is bound at all is still decided by the pixel (unbound = red).
 namespace
 {
 struct WarpDevice11
@@ -5479,16 +6190,22 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	CHECK(srvAt(HE::d3d11mat::kWeightmapSrvSlot).Get() == nullptr);
 
 	// 3. The bug's two faces, so the positive verdict has teeth. (a) t14 bound
-	//    but s0 left on the built-in WRAP sampler — the half that is easy to
-	//    forget: u = 1.2 wraps to 0.2 and lands mostly on texel 0 → red-ish,
-	//    NOT green. (b) t14 unbound (the pre-fix renderer): zeros → the blend's
-	//    layer-0 fallback → pure red.
+	//    but s0 left on the built-in WRAP sampler — once the half that was easy to
+	//    forget: u = 1.2 wrapped to 0.2 and landed mostly on texel 0 → red-ish.
+	//    Since the blend reads its weights through a smoothed coordinate that it
+	//    clamps to the page's texel centres itself (emitLayerBlendNode, "smoother
+	//    painted edges"), the address mode of s0 no longer decides this read:
+	//    u = 1.2 is clamped in the shader, so WRAP gives the same green as CLAMP.
+	//    The test pins exactly that, so a shader that goes back to leaning on the
+	//    sampler shows up here. (b) t14 unbound (the pre-fix renderer): zeros →
+	//    the blend's layer-0 fallback → pure red.
 	{
 		ID3D11ShaderResourceView* wm = weightmap.Get();
 		ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &wm);
 		const Pixel11 wrapped = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
-		CHECK_MESSAGE((wrapped.r > 128 && wrapped.g < 128),
-		              "t14 + WRAP s0 should read texel 0's side (red), got ", int(wrapped.r), ",", int(wrapped.g), ",", int(wrapped.b));
+		CHECK_MESSAGE((near8(wrapped.r, 0) && near8(wrapped.g, 255) && near8(wrapped.b, 0)),
+		              "t14 + WRAP s0: the blend clamps its own weight coordinate, expected layer 1 (green) all the same, got ",
+		              int(wrapped.r), ",", int(wrapped.g), ",", int(wrapped.b));
 		ID3D11ShaderResourceView* nullSrv = nullptr;
 		ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &nullSrv);
 		const Pixel11 unbound = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
@@ -6660,6 +7377,909 @@ TEST_CASE("D3D11: every sky-cube texel samples back along the direction the bake
 	CHECK(run(Layout::RowsReversed, flipMisses) == int(kProbes));
 	CHECK(run(Layout::ColumnsReversed, flipMisses) == int(kProbes));
 }
+
+TEST_CASE("D3D11: G-buffer + deferred resolve shade a graph material like its forward draw (WARP, Thema 150)")
+{
+	// The P4 gate of docs/deferred-renderer-plan.md on a software device: the
+	// SAME graph drawn (a) forward through fragment() and (b) through its
+	// G-buffer tail into the renderer's three targets + typeless depth, then
+	// lit by deferredResolve over a fullscreen triangle — with the D3D11
+	// renderer's registers (kHlslResolve*) and depth convention (-1, 1, 0).
+	// 8x8 and a TILTED triangle under an off-centre point light, so every pixel
+	// has its own world position: a wrong uv→NDC sign or depth scale moves P
+	// and changes the light falloff (negative control 1). Then the clustered
+	// resolve against the clustered forward variant with 12 list lights, four
+	// of them lit, past an 8-light window of black ones.
+	using Microsoft::WRL::ComPtr;
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	MESSAGE(w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+	constexpr UINT kW = 8, kH = 8;
+
+	// ── Shaders, through FXC as the renderer compiles them.
+	MSL lib;
+	const auto gen = HE::generateFragment(plainColourGraph());
+	REQUIRE_FALSE(gen.glslGBuffer.empty());
+	const uint64_t fwdHash = std::hash<std::string>{}(gen.glsl);
+	const uint64_t gbHash  = std::hash<std::string>{}(gen.glslGBuffer);
+	auto blobOf = [&](const MSL::Compiled& c, const char* profile, const char* what) {
+		std::string err;
+		REQUIRE_MESSAGE(c.ok, what, ": ", c.log);
+		ComPtr<ID3DBlob> b = fxcBlob(c.source, profile, err);
+		REQUIRE_MESSAGE(b.Get() != nullptr, what, ": ", err);
+		return b;
+	};
+	ComPtr<ID3DBlob> vsB    = blobOf(lib.standardVertex(B::HLSL), "vs_5_0", "standard vertex");
+	ComPtr<ID3DBlob> fwdB   = blobOf(lib.fragment(fwdHash, gen.glsl, B::HLSL), "ps_5_0", "forward fragment");
+	ComPtr<ID3DBlob> fwdClB = blobOf(lib.fragmentClustered(fwdHash, gen.glsl, B::HLSL), "ps_5_0", "forward clustered fragment");
+	ComPtr<ID3DBlob> gbB    = blobOf(lib.fragment(gbHash, gen.glslGBuffer, B::HLSL), "ps_5_0", "G-buffer fragment");
+	ComPtr<ID3DBlob> fsB    = blobOf(lib.fullscreenVertex(B::HLSL), "vs_5_0", "fullscreen vertex");
+	ComPtr<ID3DBlob> resB   = blobOf(lib.deferredResolve(B::HLSL), "ps_5_0", "deferred resolve");
+	ComPtr<ID3DBlob> resClB = blobOf(lib.deferredResolveClustered(B::HLSL), "ps_5_0", "clustered deferred resolve");
+
+	// What the resolve bytecode really binds (FXC strips what is dead): the
+	// renderer binds exactly these registers.
+	for (ID3DBlob* rb : { resB.Get(), resClB.Get() })
+	{
+		const std::vector<Binding> b = reflectBindings(rb);
+		CHECK(binds(b, D3D_SIT_CBUFFER, 0));
+		CHECK(binds(b, D3D_SIT_CBUFFER, MSL::kHlslResolveUboReg));
+		for (UINT t : { UINT(MSL::kHlslResolveGB0Reg), UINT(MSL::kHlslResolveGB1Reg),
+		                UINT(MSL::kHlslResolveGB2Reg), UINT(MSL::kHlslResolveDepthReg) })
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, t), "the resolve does not read t", t);
+		for (UINT s : { UINT(MSL::kHlslResolveGB0Sampler), UINT(MSL::kHlslResolveGB1Sampler),
+		                UINT(MSL::kHlslResolveGB2Sampler), UINT(MSL::kHlslResolveDepthSampler) })
+			CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, s), "the resolve does not sample through s", s);
+		for (const Binding& x : b)
+			if (x.type == D3D_SIT_SAMPLER) CHECK_MESSAGE(x.reg <= 15u, x.name, " on s", x.reg);
+	}
+	for (UINT t : { 24u, 25u, 26u })
+		CHECK(binds(reflectBindings(resClB.Get()), D3D_SIT_BYTEADDRESS, t));
+
+	ComPtr<ID3D11VertexShader> vs, fsVS;
+	ComPtr<ID3D11PixelShader> fwdPS, fwdClPS, gbPS, resPS, resClPS;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &vs)));
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(fsB->GetBufferPointer(), fsB->GetBufferSize(), nullptr, &fsVS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(fwdB->GetBufferPointer(), fwdB->GetBufferSize(), nullptr, &fwdPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(fwdClB->GetBufferPointer(), fwdClB->GetBufferSize(), nullptr, &fwdClPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(gbB->GetBufferPointer(), gbB->GetBufferSize(), nullptr, &gbPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(resB->GetBufferPointer(), resB->GetBufferSize(), nullptr, &resPS)));
+	REQUIRE(SUCCEEDED(dev->CreatePixelShader(resClB->GetBufferPointer(), resClB->GetBufferSize(), nullptr, &resClPS)));
+	static const D3D11_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsB->GetBufferPointer(), vsB->GetBufferSize(), &il)));
+	ComPtr<ID3D11RasterizerState> rasterNoCull;
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
+	ComPtr<ID3D11DepthStencilState> depthLess;
+	{
+		D3D11_DEPTH_STENCIL_DESC dd{};
+		dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dd.DepthFunc = D3D11_COMPARISON_LESS;
+		REQUIRE(SUCCEEDED(dev->CreateDepthStencilState(&dd, &depthLess)));
+	}
+	ComPtr<ID3D11SamplerState> pointClamp;
+	{
+		D3D11_SAMPLER_DESC sd{};
+		sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+		sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		sd.MaxLOD = D3D11_FLOAT32_MAX;
+		REQUIRE(SUCCEEDED(dev->CreateSamplerState(&sd, &pointClamp)));
+	}
+
+	// ── Targets: two float outputs (forward / resolve), the renderer's G-buffer
+	// formats, and its typeless depth with a DSV and an SRV (createDepthViews).
+	auto makeRT = [&](DXGI_FORMAT fmt, ComPtr<ID3D11Texture2D>& tex, ComPtr<ID3D11RenderTargetView>& rtv,
+	                  ComPtr<ID3D11ShaderResourceView>* srv) {
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = kW; td.Height = kH; td.MipLevels = td.ArraySize = 1;
+		td.Format = fmt; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+		td.BindFlags = D3D11_BIND_RENDER_TARGET | (srv ? D3D11_BIND_SHADER_RESOURCE : 0u);
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &tex)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(tex.Get(), nullptr, &rtv)));
+		if (srv) REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), nullptr, srv->GetAddressOf())));
+	};
+	ComPtr<ID3D11Texture2D> outTex, gbTex[3], staging;
+	ComPtr<ID3D11RenderTargetView> outRTV, gbRTV[3];
+	ComPtr<ID3D11ShaderResourceView> gbSRV[3];
+	makeRT(DXGI_FORMAT_R32G32B32A32_FLOAT, outTex, outRTV, nullptr);
+	makeRT(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, gbTex[0], gbRTV[0], &gbSRV[0]);
+	makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT,  gbTex[1], gbRTV[1], &gbSRV[1]);
+	makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT,  gbTex[2], gbRTV[2], &gbSRV[2]);
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		outTex->GetDesc(&td);
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+	ComPtr<ID3D11Texture2D> depthTex;
+	ComPtr<ID3D11DepthStencilView> dsv;
+	ComPtr<ID3D11ShaderResourceView> depthSRV;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = kW; td.Height = kH; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R24G8_TYPELESS; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+		td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &depthTex)));
+		D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+		dvd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+		REQUIRE(SUCCEEDED(dev->CreateDepthStencilView(depthTex.Get(), &dvd, &dsv)));
+		D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+		svd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		svd.Texture2D.MipLevels = 1;
+		REQUIRE(SUCCEEDED(dev->CreateShaderResourceView(depthTex.Get(), &svd, &depthSRV)));
+	}
+
+	// ── Geometry: one triangle over the whole 8x8 viewport, depth 0.3 → 0.7
+	// across it, normal tilted off +Z. Identity mvp/model: world = clip.
+	const glm::vec3 nrm = glm::normalize(glm::vec3(0.3f, -0.2f, 1.0f));
+	const MatVertex11 tri[3] = {
+		{ { -1.0f, -1.0f, 0.3f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+		{ {  3.0f, -1.0f, 0.5f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+		{ { -1.0f,  3.0f, 0.7f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+	};
+	ComPtr<ID3D11Buffer> vb;
+	{
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = sizeof(tri); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA init{ tri, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &vb)));
+	}
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[1] = 0.5f; u.pbr[2] = 1.0f;
+	ComPtr<ID3D11Buffer> uCB = makeConstantBuffer11(dev, &u, sizeof(u));
+
+	// ── Lighting: one point light off-centre in front of the surface, a little
+	// ambient, the camera in front; every image gate (GI, CSM, sky, AO) at 0.
+	MSL::Lighting lit{};
+	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.05f;
+	lit.camPos[0] = 0.2f; lit.camPos[1] = 0.1f; lit.camPos[2] = 3.0f;
+	lit.giParams[0] = float(kW); lit.giParams[1] = float(kH); // the resolve's uv divides by it
+	lit.lightPos[0][0] = 0.4f; lit.lightPos[0][1] = -0.3f; lit.lightPos[0][2] = 1.4f; lit.lightPos[0][3] = 1.0f;
+	lit.lightDir[0][2] = -1.0f;
+	lit.lightColor[0][0] = 1.0f; lit.lightColor[0][1] = 0.9f; lit.lightColor[0][2] = 0.8f; lit.lightColor[0][3] = 3.0f;
+	lit.lightParams[0][0] = 4.0f;
+	lit.counts[0] = 1.0f;
+	ComPtr<ID3D11Buffer> litCB = makeConstantBuffer11(dev, &lit, sizeof(lit));
+	MSL::ResolveUniforms ru;
+	for (int i = 0; i < 4; ++i) ru.invViewProj[i * 5] = 1.0f; // inverse(identity)
+	ru.depthParams[0] = -1.0f; ru.depthParams[1] = 1.0f; ru.depthParams[2] = 0.0f; ru.depthParams[3] = 0.0f;
+	ComPtr<ID3D11Buffer> ruCB = makeConstantBuffer11(dev, &ru, sizeof(ru));
+
+	D3D11_VIEWPORT vp{}; vp.Width = float(kW); vp.Height = float(kH); vp.MaxDepth = 1.0f;
+	ctx->RSSetViewports(1, &vp);
+	ctx->RSSetState(rasterNoCull.Get());
+	const UINT stride = sizeof(MatVertex11), offset = 0;
+	auto bindMesh = [&]() {
+		ctx->IASetInputLayout(il.Get());
+		ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
+		ctx->VSSetShader(vs.Get(), nullptr, 0);
+		ctx->VSSetConstantBuffers(1, 1, uCB.GetAddressOf());
+		ctx->OMSetDepthStencilState(depthLess.Get(), 0);
+	};
+	auto readOut = [&]() {
+		ctx->CopyResource(staging.Get(), outTex.Get());
+		std::vector<float> px(kW * kH * 4, 0.0f);
+		D3D11_MAPPED_SUBRESOURCE m{};
+		if (SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
+		{
+			for (UINT y = 0; y < kH; ++y)
+				std::memcpy(&px[y * kW * 4], static_cast<const uint8_t*>(m.pData) + y * m.RowPitch, kW * 16);
+			ctx->Unmap(staging.Get(), 0);
+		}
+		return px;
+	};
+	const float black[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	auto drawForward = [&](ID3D11PixelShader* ps, ID3D11Buffer* lcb) {
+		ctx->ClearRenderTargetView(outRTV.Get(), black);
+		ctx->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+		ID3D11RenderTargetView* rt = outRTV.Get();
+		ctx->OMSetRenderTargets(1, &rt, dsv.Get());
+		bindMesh();
+		ctx->PSSetShader(ps, nullptr, 0);
+		ctx->PSSetConstantBuffers(0, 1, &lcb);
+		ctx->Draw(3, 0);
+		return readOut();
+	};
+	// The renderer's G-buffer pass: three MRTs + depth, GL's clear values.
+	auto drawGBuffer = [&]() {
+		const float c1[4] = { 0.5f, 0.5f, 1.0f, 0.5f };
+		ctx->ClearRenderTargetView(gbRTV[0].Get(), black);
+		ctx->ClearRenderTargetView(gbRTV[1].Get(), c1);
+		ctx->ClearRenderTargetView(gbRTV[2].Get(), black);
+		ctx->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+		ID3D11RenderTargetView* rts[3] = { gbRTV[0].Get(), gbRTV[1].Get(), gbRTV[2].Get() };
+		ctx->OMSetRenderTargets(3, rts, dsv.Get());
+		bindMesh();
+		ctx->PSSetShader(gbPS.Get(), nullptr, 0);
+		ctx->PSSetConstantBuffers(0, 1, litCB.GetAddressOf());
+		ctx->Draw(3, 0);
+		ID3D11RenderTargetView* none = nullptr;
+		ctx->OMSetRenderTargets(1, &none, nullptr); // depth OFF before its SRV goes on
+	};
+	// The renderer's resolve draw: no vertex buffer, inputs on t27..t30.
+	auto drawResolve = [&](ID3D11PixelShader* ps, ID3D11Buffer* lcb, ID3D11Buffer* rcb) {
+		ctx->ClearRenderTargetView(outRTV.Get(), black);
+		ID3D11RenderTargetView* rt = outRTV.Get();
+		ctx->OMSetRenderTargets(1, &rt, nullptr);
+		ctx->IASetInputLayout(nullptr);
+		ID3D11Buffer* noVB = nullptr; UINT zero = 0;
+		ctx->IASetVertexBuffers(0, 1, &noVB, &zero, &zero);
+		ctx->VSSetShader(fsVS.Get(), nullptr, 0);
+		ctx->PSSetShader(ps, nullptr, 0);
+		ctx->PSSetConstantBuffers(0, 1, &lcb);
+		ctx->PSSetConstantBuffers(MSL::kHlslResolveUboReg, 1, &rcb);
+		ID3D11ShaderResourceView* in[4] = { gbSRV[0].Get(), gbSRV[1].Get(), gbSRV[2].Get(), depthSRV.Get() };
+		ctx->PSSetShaderResources(MSL::kHlslResolveGB0Reg, 4, in);
+		ID3D11SamplerState* pc = pointClamp.Get();
+		for (int s : { MSL::kHlslResolveGB0Sampler, MSL::kHlslResolveGB1Sampler,
+		               MSL::kHlslResolveGB2Sampler, MSL::kHlslResolveDepthSampler })
+			ctx->PSSetSamplers(UINT(s), 1, &pc);
+		ctx->Draw(3, 0);
+		std::vector<float> px = readOut();
+		ID3D11ShaderResourceView* nulls[4] = {};
+		ctx->PSSetShaderResources(MSL::kHlslResolveGB0Reg, 4, nulls);
+		return px;
+	};
+	struct Diff { float mean = 0, max = 0, lumMin = 1e9f, lumMax = 0; };
+	auto compare = [&](const std::vector<float>& a, const std::vector<float>& b) {
+		Diff d;
+		for (UINT i = 0; i < kW * kH; ++i)
+		{
+			for (int k = 0; k < 3; ++k)
+			{
+				const float e = std::fabs(a[i * 4 + k] - b[i * 4 + k]);
+				d.mean += e; d.max = std::max(d.max, e);
+			}
+			const float l = a[i * 4] + a[i * 4 + 1] + a[i * 4 + 2];
+			d.lumMin = std::min(d.lumMin, l); d.lumMax = std::max(d.lumMax, l);
+		}
+		d.mean /= float(kW * kH * 3);
+		return d;
+	};
+
+	// 1. Forward vs deferred, 8-light window.
+	drainInfoQueue11(w);
+	const std::vector<float> fwd = drawForward(fwdPS.Get(), litCB.Get());
+	drawGBuffer();
+	const std::vector<float> def = drawResolve(resPS.Get(), litCB.Get(), ruCB.Get());
+	const std::string why = drainInfoQueue11(w);
+	const Diff d = compare(fwd, def);
+	MESSAGE("forward vs deferred: mean ", d.mean, " max ", d.max, " (forward luminance ",
+	        d.lumMin, "..", d.lumMax, ")", why.empty() ? "" : " — debug layer: ", why);
+	// The rig is only a witness if the light really varies across it.
+	REQUIRE_MESSAGE(d.lumMax - d.lumMin > 0.05f, "the point light does not vary over the 8x8 surface");
+	CHECK_MESSAGE(d.mean < 1.0f / 255.0f, "deferred drifts from forward: mean ", d.mean);
+	CHECK_MESSAGE(d.max  < 4.0f / 255.0f, "deferred drifts from forward: max ", d.max);
+
+	// Negative control 1: the GL/Vulkan uv→NDC sign instead of D3D's. P moves,
+	// the falloff changes — the comparison above would have caught it.
+	MSL::ResolveUniforms ruFlip = ru;
+	ruFlip.depthParams[0] = 1.0f;
+	ComPtr<ID3D11Buffer> ruFlipCB = makeConstantBuffer11(dev, &ruFlip, sizeof(ruFlip));
+	const Diff dFlip = compare(fwd, drawResolve(resPS.Get(), litCB.Get(), ruFlipCB.Get()));
+	MESSAGE("negative control (wrong uv sign): mean ", dFlip.mean, " max ", dFlip.max);
+	CHECK_MESSAGE(dFlip.max > 8.0f / 255.0f, "a wrong uv sign went unnoticed — the rig is blind to P");
+
+	// Negative control 2: the G-buffer base-colour view (depthParams.w = 1)
+	// shows the graph's 0.25/0.5/0.75 unlit — proof the resolve read GB0 and
+	// not a stale or unbound view.
+	MSL::ResolveUniforms ruView = ru;
+	ruView.depthParams[3] = 1.0f;
+	ComPtr<ID3D11Buffer> ruViewCB = makeConstantBuffer11(dev, &ruView, sizeof(ruView));
+	const std::vector<float> view = drawResolve(resPS.Get(), litCB.Get(), ruViewCB.Get());
+	CHECK_MESSAGE((std::fabs(view[0] - 0.25f) < 0.01f && std::fabs(view[1] - 0.5f) < 0.01f
+	               && std::fabs(view[2] - 0.75f) < 0.01f),
+	              "G-buffer base-colour view: ", view[0], ",", view[1], ",", view[2]);
+
+	// 2. Clustered: 12 point lights in the lists, 0..7 black (they fill the
+	// forward variant's window), 8..11 coloured and placed apart.
+	const int kLists = 12, kBlack = 8;
+	std::vector<float> lights(size_t(kLists) * 16, 0.0f);
+	const float pos[4][3] = { { -0.6f, 0.5f, 1.2f }, { 0.7f, 0.6f, 1.0f }, { -0.4f, -0.7f, 1.5f }, { 0.5f, -0.5f, 0.9f } };
+	const float col[4][3] = { { 1.0f, 0.2f, 0.2f }, { 0.2f, 1.0f, 0.2f }, { 0.2f, 0.3f, 1.0f }, { 1.0f, 1.0f, 0.3f } };
+	for (int i = 0; i < kLists; ++i)
+	{
+		float* l = &lights[size_t(i) * 16];
+		const float* p = i >= kBlack ? pos[i - kBlack] : pos[0];
+		l[0] = p[0]; l[1] = p[1]; l[2] = p[2]; l[3] = 1.0f; // point
+		l[6] = -1.0f;
+		if (i >= kBlack) { l[8] = col[i - kBlack][0]; l[9] = col[i - kBlack][1]; l[10] = col[i - kBlack][2]; l[11] = 1.5f; }
+		l[12] = 3.0f; // range, no atlas, no GI channel
+	}
+	const uint32_t grid[2] = { 0u, uint32_t(kLists) };
+	std::vector<uint32_t> indices(kLists);
+	for (int i = 0; i < kLists; ++i) indices[i] = uint32_t(i);
+	ComPtr<ID3D11Buffer> rawBuf[3];
+	ComPtr<ID3D11ShaderResourceView> rawSrv[3];
+	const UINT rawBytes[3] = { UINT(lights.size() * sizeof(float)), sizeof(grid), UINT(indices.size() * sizeof(uint32_t)) };
+	const void* rawData[3] = { lights.data(), grid, indices.data() };
+	for (int i = 0; i < 3; ++i)
+	{
+		REQUIRE(HE::d3d11mat::CreateClusterRawBuffer(dev, rawBytes[i], &rawBuf[i], &rawSrv[i]));
+		D3D11_MAPPED_SUBRESOURCE m{};
+		REQUIRE(SUCCEEDED(ctx->Map(rawBuf[i].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)));
+		std::memcpy(m.pData, rawData[i], rawBytes[i]);
+		ctx->Unmap(rawBuf[i].Get(), 0);
+	}
+	ID3D11ShaderResourceView* lists[3] = { rawSrv[0].Get(), rawSrv[1].Get(), rawSrv[2].Get() };
+	HE::d3d11mat::BindClusterLists(ctx, lists);
+
+	// Forward: the full window (eight black point lights, the renderer's
+	// FillMaterialLightWindow) + the gate in heLight. Resolve: the window the
+	// renderer gives it — FillMaterialDirectionalWindow over the same 12 point
+	// lights, i.e. EMPTY — and the grid in HeResolve.
+	MSL::Lighting fwdLit = lit;
+	for (int i = 0; i < 8; ++i)
+	{
+		for (int k = 0; k < 4; ++k) { fwdLit.lightPos[i][k] = 0; fwdLit.lightColor[i][k] = 0; fwdLit.lightParams[i][k] = 0; }
+		fwdLit.lightPos[i][0] = pos[0][0]; fwdLit.lightPos[i][1] = pos[0][1]; fwdLit.lightPos[i][2] = pos[0][2];
+		fwdLit.lightPos[i][3] = 1.0f;
+		fwdLit.lightParams[i][0] = 3.0f;
+	}
+	fwdLit.counts[0] = 8.0f;
+	fwdLit.clusterParams[0] = fwdLit.clusterParams[1] = fwdLit.clusterParams[2] = 1.0f;
+	fwdLit.clusterCamFwd[2] = -1.0f; fwdLit.clusterCamFwd[3] = 0.1f;
+	RenderWorld rw;
+	for (int i = 0; i < kLists; ++i)
+	{
+		LightData ld;
+		ld.type = 1; // point
+		ld.position = glm::vec3(lights[size_t(i) * 16], lights[size_t(i) * 16 + 1], lights[size_t(i) * 16 + 2]);
+		rw.lights.push_back(ld);
+	}
+	MSL::Lighting resLit = fwdLit;
+	HE::FillMaterialDirectionalWindow(rw, resLit);
+	CHECK(resLit.counts[0] == 0.0f);
+	CHECK(resLit.lightColor[0][3] == 0.0f);
+	MSL::ResolveUniforms ruCl = ru;
+	ruCl.clusterParams[0] = ruCl.clusterParams[1] = ruCl.clusterParams[2] = 1.0f;
+	ruCl.clusterCamFwd[2] = -1.0f; ruCl.clusterCamFwd[3] = 0.1f;
+	ComPtr<ID3D11Buffer> fwdLitCB = makeConstantBuffer11(dev, &fwdLit, sizeof(fwdLit));
+	ComPtr<ID3D11Buffer> resLitCB = makeConstantBuffer11(dev, &resLit, sizeof(resLit));
+	ComPtr<ID3D11Buffer> ruClCB   = makeConstantBuffer11(dev, &ruCl, sizeof(ruCl));
+
+	drainInfoQueue11(w);
+	const std::vector<float> fwdCl = drawForward(fwdClPS.Get(), fwdLitCB.Get());
+	drawGBuffer();
+	const std::vector<float> defCl = drawResolve(resClPS.Get(), resLitCB.Get(), ruClCB.Get());
+	const std::string whyCl = drainInfoQueue11(w);
+	const Diff dc = compare(fwdCl, defCl);
+	MESSAGE("clustered forward vs clustered deferred: mean ", dc.mean, " max ", dc.max, " (luminance ",
+	        dc.lumMin, "..", dc.lumMax, ")", whyCl.empty() ? "" : " — debug layer: ", whyCl);
+	REQUIRE_MESSAGE(dc.lumMax > 0.2f, "the four list lights do not reach the surface");
+	CHECK_MESSAGE(dc.mean < 1.0f / 255.0f, "clustered deferred drifts from clustered forward: mean ", dc.mean);
+	CHECK_MESSAGE(dc.max  < 4.0f / 255.0f, "clustered deferred drifts from clustered forward: max ", dc.max);
+
+	// Negative control 3: the 8-light resolve over the same G-buffer sees only
+	// the black window — the four lit lights reach the deferred image through
+	// the lists alone.
+	const Diff dWin = compare(fwdCl, drawResolve(resPS.Get(), fwdLitCB.Get(), ruClCB.Get()));
+	MESSAGE("negative control (8-light resolve, black window): mean ", dWin.mean);
+	CHECK_MESSAGE(dWin.mean > 0.05f, "the window resolve matched the clustered image — the lists were not needed");
+	// Negative control 4, why the resolve gets a trimmed window: hand the
+	// clustered resolve a window holding the four LIT lights (what
+	// FillMaterialLightWindow gives a scene whose first lights shine) and they
+	// are counted twice — heLitP walks the window, heClusterLighting the lists.
+	MSL::Lighting fullLit = fwdLit;
+	for (int i = 0; i < 4; ++i)
+	{
+		const float* l = &lights[size_t(kBlack + i) * 16];
+		for (int k = 0; k < 4; ++k)
+		{
+			fullLit.lightPos[i][k]    = l[k];
+			fullLit.lightColor[i][k]  = l[8 + k];
+			fullLit.lightParams[i][k] = l[12 + k];
+		}
+	}
+	fullLit.counts[0] = 4.0f;
+	ComPtr<ID3D11Buffer> fullLitCB = makeConstantBuffer11(dev, &fullLit, sizeof(fullLit));
+	const Diff dFull = compare(fwdCl, drawResolve(resClPS.Get(), fullLitCB.Get(), ruClCB.Get()));
+	MESSAGE("negative control (untrimmed window, lit lights): mean ", dFull.mean);
+	CHECK_MESSAGE(dFull.mean > 0.05f, "lit window lights were not counted twice — the control is blind");
+}
+
+TEST_CASE("D3D12: G-buffer + deferred resolve shade a graph material like its forward draw (WARP, Thema 150)")
+{
+	// The D3D11 case above on D3D12, with what only D3D12 has: the renderer's
+	// two signatures (DescribeMaterialRootSignature for the forward and G-buffer
+	// draws, DescribeResolveRootSignature with its point-clamp s2/s4/s5/s6 for
+	// the resolve), ONE table of 17 material slots + 4 G-buffer inputs (the two
+	// ring blocks D3D12Renderer hands the resolve), the R32_TYPELESS depth with
+	// a D32 DSV and an R32_FLOAT SRV, explicit barriers between the passes, and
+	// the cluster lists as root SRVs 6..8. Same rig: 8x8, tilted triangle,
+	// off-centre point light; then 12 list lights past a black 8-light window.
+	using Microsoft::WRL::ComPtr;
+	using B   = HE::MaterialShaderLibrary::Backend;
+	using MSL = HE::MaterialShaderLibrary;
+	namespace dm = HE::d3d12mat;
+	WarpDevice w;
+	REQUIRE_MESSAGE(createWarpDevice(w), w.log);
+	ID3D12Device* dev = w.device.Get();
+	constexpr UINT kW = 8, kH = 8;
+
+	MSL lib;
+	const auto gen = HE::generateFragment(plainColourGraph());
+	REQUIRE_FALSE(gen.glslGBuffer.empty());
+	const uint64_t fwdHash = std::hash<std::string>{}(gen.glsl);
+	const uint64_t gbHash  = std::hash<std::string>{}(gen.glslGBuffer);
+	auto blobOf = [&](const MSL::Compiled& c, const char* profile, const char* what) {
+		std::string err;
+		REQUIRE_MESSAGE(c.ok, what, ": ", c.log);
+		ComPtr<ID3DBlob> b = fxcBlob(c.source, profile, err);
+		REQUIRE_MESSAGE(b.Get() != nullptr, what, ": ", err);
+		return b;
+	};
+	ComPtr<ID3DBlob> vsB    = blobOf(lib.standardVertex(B::HLSL), "vs_5_0", "standard vertex");
+	ComPtr<ID3DBlob> fwdB   = blobOf(lib.fragment(fwdHash, gen.glsl, B::HLSL), "ps_5_0", "forward fragment");
+	ComPtr<ID3DBlob> fwdClB = blobOf(lib.fragmentClustered(fwdHash, gen.glsl, B::HLSL), "ps_5_0", "forward clustered fragment");
+	ComPtr<ID3DBlob> gbB    = blobOf(lib.fragment(gbHash, gen.glslGBuffer, B::HLSL), "ps_5_0", "G-buffer fragment");
+	ComPtr<ID3DBlob> fsB    = blobOf(lib.fullscreenVertex(B::HLSL), "vs_5_0", "fullscreen vertex");
+	ComPtr<ID3DBlob> resB   = blobOf(lib.deferredResolve(B::HLSL), "ps_5_0", "deferred resolve");
+	ComPtr<ID3DBlob> resClB = blobOf(lib.deferredResolveClustered(B::HLSL), "ps_5_0", "clustered deferred resolve");
+
+	// ── Signatures, exactly the renderer's descriptions.
+	std::string err;
+	dm::MaterialRootSignature mdesc;  dm::DescribeMaterialRootSignature(mdesc);
+	dm::ResolveRootSignature  rdesc;  dm::DescribeResolveRootSignature(rdesc);
+	ComPtr<ID3D12RootSignature> matRs, resRs;
+	REQUIRE_MESSAGE(SUCCEEDED(makeRootSignature(dev, mdesc.desc, matRs, err)), err, drainInfoQueue(w));
+	REQUIRE_MESSAGE(SUCCEEDED(makeRootSignature(dev, rdesc.desc, resRs, err)), err, drainInfoQueue(w));
+
+	// ── PSOs: forward (one RGBA32F target), G-buffer (the renderer's three
+	// MRT formats), resolve (no IA, no depth). All against D32.
+	static const D3D12_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+	const DXGI_FORMAT gbFmt[3] = { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R16G16B16A16_FLOAT,
+	                               DXGI_FORMAT_R16G16B16A16_FLOAT };
+	auto makePso = [&](ID3D12RootSignature* rs, ID3DBlob* vs, ID3DBlob* ps, bool mesh, UINT nRT,
+	                   const DXGI_FORMAT* fmts, const char* what) {
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = rs;
+		pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+		pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		if (mesh) pd.InputLayout = { layout, 3 };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = nRT;
+		for (UINT i = 0; i < nRT; ++i)
+		{
+			pd.RTVFormats[i] = fmts[i];
+			pd.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		}
+		pd.DSVFormat             = mesh ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable    = mesh ? TRUE : FALSE;
+		pd.DepthStencilState.DepthWriteMask = mesh ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+		pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+		REQUIRE_MESSAGE(SUCCEEDED(hr), what, ": hr=", hr, " ", drainInfoQueue(w));
+		return pso;
+	};
+	const DXGI_FORMAT outFmt = DXGI_FORMAT_R32G32B32A32_FLOAT;
+	ComPtr<ID3D12PipelineState> fwdPso   = makePso(matRs.Get(), vsB.Get(), fwdB.Get(),   true, 1, &outFmt, "forward PSO");
+	ComPtr<ID3D12PipelineState> fwdClPso = makePso(matRs.Get(), vsB.Get(), fwdClB.Get(), true, 1, &outFmt, "clustered forward PSO");
+	ComPtr<ID3D12PipelineState> gbPso    = makePso(matRs.Get(), vsB.Get(), gbB.Get(),    true, 3, gbFmt,   "G-buffer PSO");
+	ComPtr<ID3D12PipelineState> resPso   = makePso(resRs.Get(), fsB.Get(), resB.Get(),   false, 1, &outFmt, "resolve PSO");
+	ComPtr<ID3D12PipelineState> resClPso = makePso(resRs.Get(), fsB.Get(), resClB.Get(), false, 1, &outFmt, "clustered resolve PSO");
+	drainInfoQueue(w); // the G-buffer PSO's "slot 3 discarded" note is expected (oGB3)
+
+	// ── Resources.
+	D3D12_HEAP_PROPERTIES defHeap{}; defHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+	D3D12_HEAP_PROPERTIES upHeap{};  upHeap.Type  = D3D12_HEAP_TYPE_UPLOAD;
+	D3D12_HEAP_PROPERTIES rbHeap{};  rbHeap.Type  = D3D12_HEAP_TYPE_READBACK;
+	auto makeTex = [&](DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
+	                   const D3D12_CLEAR_VALUE* cv) {
+		D3D12_RESOURCE_DESC td{};
+		td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		td.Width = kW; td.Height = kH; td.DepthOrArraySize = 1; td.MipLevels = 1;
+		td.Format = fmt; td.SampleDesc.Count = 1; td.Flags = flags;
+		ComPtr<ID3D12Resource> r;
+		REQUIRE(SUCCEEDED(dev->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &td, state, cv, IID_PPV_ARGS(&r))));
+		return r;
+	};
+	auto makeBuf = [&](const D3D12_HEAP_PROPERTIES& hp, UINT64 size, D3D12_RESOURCE_STATES state) {
+		D3D12_RESOURCE_DESC bd{};
+		bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		bd.Width = size; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+		bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		ComPtr<ID3D12Resource> r;
+		REQUIRE(SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, state, nullptr, IID_PPV_ARGS(&r))));
+		return r;
+	};
+	// Optimised clear values = the clears below (the renderer's rule), so the
+	// debug layer's verdict is about the passes, not about clear speed.
+	auto clearOf = [](DXGI_FORMAT f, float r, float g, float b, float a) {
+		D3D12_CLEAR_VALUE cv{}; cv.Format = f;
+		cv.Color[0] = r; cv.Color[1] = g; cv.Color[2] = b; cv.Color[3] = a;
+		return cv;
+	};
+	const D3D12_CLEAR_VALUE outCv = clearOf(outFmt, 0, 0, 0, 0);
+	ComPtr<ID3D12Resource> outTex = makeTex(outFmt, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+	                                        D3D12_RESOURCE_STATE_RENDER_TARGET, &outCv);
+	ComPtr<ID3D12Resource> gbTex[3];
+	for (int i = 0; i < 3; ++i)
+	{
+		const D3D12_CLEAR_VALUE cv = i == 1 ? clearOf(gbFmt[i], 0.5f, 0.5f, 1.0f, 0.5f) : clearOf(gbFmt[i], 0, 0, 0, 0);
+		gbTex[i] = makeTex(gbFmt[i], D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv);
+	}
+	ComPtr<ID3D12Resource> depthTex;
+	{
+		D3D12_CLEAR_VALUE dcv{}; dcv.Format = DXGI_FORMAT_D32_FLOAT; dcv.DepthStencil.Depth = 1.0f;
+		depthTex = makeTex(DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+		                   D3D12_RESOURCE_STATE_DEPTH_WRITE, &dcv);
+	}
+	const UINT readRow = (kW * 16u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+	ComPtr<ID3D12Resource> readback = makeBuf(rbHeap, UINT64(readRow) * kH, D3D12_RESOURCE_STATE_COPY_DEST);
+
+	// Descriptors: 4 RTVs (out + G-buffer), 1 DSV, and the resolve's table —
+	// 17 material slots (null views of the declared dimension, the template's
+	// rule) + GB0..2 + depth. The forward/G-buffer draws use its first 17.
+	ComPtr<ID3D12DescriptorHeap> rtvHeap, dsvHeap, srvHeap;
+	{
+		D3D12_DESCRIPTOR_HEAP_DESC hd{};
+		hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; hd.NumDescriptors = 4;
+		REQUIRE(SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvHeap))));
+		hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; hd.NumDescriptors = 1;
+		REQUIRE(SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&dsvHeap))));
+		hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = dm::kResolveSrvCount;
+		hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		REQUIRE(SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&srvHeap))));
+	}
+	const UINT rtvInc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	const UINT srvInc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	auto rtvAt = [&](UINT i) { D3D12_CPU_DESCRIPTOR_HANDLE h = rtvHeap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(i) * rtvInc; return h; };
+	auto srvAt = [&](UINT i) { D3D12_CPU_DESCRIPTOR_HANDLE h = srvHeap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(i) * srvInc; return h; };
+	dev->CreateRenderTargetView(outTex.Get(), nullptr, rtvAt(0));
+	for (UINT i = 0; i < 3; ++i) dev->CreateRenderTargetView(gbTex[i].Get(), nullptr, rtvAt(1 + i));
+	const D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap->GetCPUDescriptorHandleForHeapStart();
+	{
+		D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
+		dvd.Format = DXGI_FORMAT_D32_FLOAT; dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+		dev->CreateDepthStencilView(depthTex.Get(), &dvd, dsv);
+	}
+	for (UINT slot = 0; slot < dm::kSrvPerDraw; ++slot)
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC nv{};
+		nv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		nv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		if (slot == dm::kSlotCsm || slot == dm::kSlotLocalShadow)
+		{
+			nv.Format = DXGI_FORMAT_R32_FLOAT;
+			nv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+			nv.Texture2DArray.MipLevels = 1; nv.Texture2DArray.ArraySize = 1;
+		}
+		else if (slot == dm::kSlotSkyEnv)
+		{
+			nv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+			nv.TextureCube.MipLevels = 1;
+		}
+		else
+		{
+			nv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			nv.Texture2D.MipLevels = 1;
+		}
+		dev->CreateShaderResourceView(nullptr, &nv, srvAt(slot));
+	}
+	auto srv2D = [&](ID3D12Resource* r, DXGI_FORMAT fmt, UINT slot) {
+		D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+		sv.Format = fmt; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		sv.Texture2D.MipLevels = 1;
+		dev->CreateShaderResourceView(r, &sv, srvAt(slot));
+	};
+	for (UINT i = 0; i < 3; ++i) srv2D(gbTex[i].Get(), gbFmt[i], dm::kResolveSlotGB0 + i);
+	srv2D(depthTex.Get(), DXGI_FORMAT_R32_FLOAT, dm::kResolveSlotDepth);
+
+	// ── Geometry + constants (the D3D11 case's numbers) in one upload buffer,
+	// every block at a 256-B offset.
+	const glm::vec3 nrm = glm::normalize(glm::vec3(0.3f, -0.2f, 1.0f));
+	const MatVertex11 tri[3] = {
+		{ { -1.0f, -1.0f, 0.3f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+		{ {  3.0f, -1.0f, 0.5f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+		{ { -1.0f,  3.0f, 0.7f }, { nrm.x, nrm.y, nrm.z }, { 0.5f, 0.5f } },
+	};
+	constexpr UINT64 kUpBytes = 64 * 1024;
+	ComPtr<ID3D12Resource> up = makeBuf(upHeap, kUpBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
+	uint8_t* upPtr = nullptr;
+	{
+		const D3D12_RANGE noRead{ 0, 0 };
+		REQUIRE(SUCCEEDED(up->Map(0, &noRead, reinterpret_cast<void**>(&upPtr))));
+	}
+	UINT64 upCursor = 0;
+	auto push = [&](const void* data, size_t bytes) {
+		const UINT64 off = upCursor;
+		REQUIRE(off + bytes <= kUpBytes);
+		std::memcpy(upPtr + off, data, bytes);
+		upCursor = (off + bytes + 255) & ~UINT64(255);
+		return up->GetGPUVirtualAddress() + off;
+	};
+	const D3D12_GPU_VIRTUAL_ADDRESS vbVA = push(tri, sizeof(tri));
+	const D3D12_VERTEX_BUFFER_VIEW vbv{ vbVA, sizeof(tri), sizeof(MatVertex11) };
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[1] = 0.5f; u.pbr[2] = 1.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS uVA = push(&u, sizeof(u));
+	const float params[64] = {};
+	const D3D12_GPU_VIRTUAL_ADDRESS parVA = push(params, sizeof(params));
+
+	MSL::Lighting lit{};
+	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.05f;
+	lit.camPos[0] = 0.2f; lit.camPos[1] = 0.1f; lit.camPos[2] = 3.0f;
+	lit.giParams[0] = float(kW); lit.giParams[1] = float(kH);
+	lit.lightPos[0][0] = 0.4f; lit.lightPos[0][1] = -0.3f; lit.lightPos[0][2] = 1.4f; lit.lightPos[0][3] = 1.0f;
+	lit.lightDir[0][2] = -1.0f;
+	lit.lightColor[0][0] = 1.0f; lit.lightColor[0][1] = 0.9f; lit.lightColor[0][2] = 0.8f; lit.lightColor[0][3] = 3.0f;
+	lit.lightParams[0][0] = 4.0f;
+	lit.counts[0] = 1.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS litVA = push(&lit, sizeof(lit));
+	MSL::ResolveUniforms ru;
+	for (int i = 0; i < 4; ++i) ru.invViewProj[i * 5] = 1.0f;
+	ru.depthParams[0] = -1.0f; ru.depthParams[1] = 1.0f; ru.depthParams[2] = 0.0f; ru.depthParams[3] = 0.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS ruVA = push(&ru, sizeof(ru));
+	MSL::ResolveUniforms ruFlip = ru;  ruFlip.depthParams[0] = 1.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS ruFlipVA = push(&ruFlip, sizeof(ruFlip));
+	MSL::ResolveUniforms ruView = ru;  ruView.depthParams[3] = 1.0f;
+	const D3D12_GPU_VIRTUAL_ADDRESS ruViewVA = push(&ruView, sizeof(ruView));
+
+	// Cluster lists (root SRVs t24..t26), the D3D11 case's twelve lights.
+	const int kLists = 12, kBlack = 8;
+	std::vector<float> lights(size_t(kLists) * 16, 0.0f);
+	const float pos[4][3] = { { -0.6f, 0.5f, 1.2f }, { 0.7f, 0.6f, 1.0f }, { -0.4f, -0.7f, 1.5f }, { 0.5f, -0.5f, 0.9f } };
+	const float col[4][3] = { { 1.0f, 0.2f, 0.2f }, { 0.2f, 1.0f, 0.2f }, { 0.2f, 0.3f, 1.0f }, { 1.0f, 1.0f, 0.3f } };
+	for (int i = 0; i < kLists; ++i)
+	{
+		float* l = &lights[size_t(i) * 16];
+		const float* p = i >= kBlack ? pos[i - kBlack] : pos[0];
+		l[0] = p[0]; l[1] = p[1]; l[2] = p[2]; l[3] = 1.0f;
+		l[6] = -1.0f;
+		if (i >= kBlack) { l[8] = col[i - kBlack][0]; l[9] = col[i - kBlack][1]; l[10] = col[i - kBlack][2]; l[11] = 1.5f; }
+		l[12] = 3.0f;
+	}
+	const uint32_t grid[2] = { 0u, uint32_t(kLists) };
+	std::vector<uint32_t> indices(kLists);
+	for (int i = 0; i < kLists; ++i) indices[i] = uint32_t(i);
+	const D3D12_GPU_VIRTUAL_ADDRESS listVA[3] = { push(lights.data(), lights.size() * sizeof(float)),
+	                                              push(grid, sizeof(grid)),
+	                                              push(indices.data(), indices.size() * sizeof(uint32_t)) };
+	MSL::Lighting fwdLit = lit;
+	for (int i = 0; i < 8; ++i)
+	{
+		for (int k = 0; k < 4; ++k) { fwdLit.lightPos[i][k] = 0; fwdLit.lightColor[i][k] = 0; fwdLit.lightParams[i][k] = 0; }
+		fwdLit.lightPos[i][0] = pos[0][0]; fwdLit.lightPos[i][1] = pos[0][1]; fwdLit.lightPos[i][2] = pos[0][2];
+		fwdLit.lightPos[i][3] = 1.0f;
+		fwdLit.lightParams[i][0] = 3.0f;
+	}
+	fwdLit.counts[0] = 8.0f;
+	fwdLit.clusterParams[0] = fwdLit.clusterParams[1] = fwdLit.clusterParams[2] = 1.0f;
+	fwdLit.clusterCamFwd[2] = -1.0f; fwdLit.clusterCamFwd[3] = 0.1f;
+	RenderWorld rw;
+	for (int i = 0; i < kLists; ++i)
+	{
+		LightData ld;
+		ld.type = 1;
+		ld.position = glm::vec3(lights[size_t(i) * 16], lights[size_t(i) * 16 + 1], lights[size_t(i) * 16 + 2]);
+		rw.lights.push_back(ld);
+	}
+	MSL::Lighting resLit = fwdLit;
+	HE::FillMaterialDirectionalWindow(rw, resLit);
+	MSL::ResolveUniforms ruCl = ru;
+	ruCl.clusterParams[0] = ruCl.clusterParams[1] = ruCl.clusterParams[2] = 1.0f;
+	ruCl.clusterCamFwd[2] = -1.0f; ruCl.clusterCamFwd[3] = 0.1f;
+	const D3D12_GPU_VIRTUAL_ADDRESS fwdLitVA = push(&fwdLit, sizeof(fwdLit));
+	const D3D12_GPU_VIRTUAL_ADDRESS resLitVA = push(&resLit, sizeof(resLit));
+	const D3D12_GPU_VIRTUAL_ADDRESS ruClVA   = push(&ruCl, sizeof(ruCl));
+
+	// ── One command list per image, run to completion.
+	ComPtr<ID3D12CommandQueue> queue;
+	ComPtr<ID3D12CommandAllocator> alloc;
+	ComPtr<ID3D12GraphicsCommandList> cl;
+	ComPtr<ID3D12Fence> fence;
+	UINT64 fenceVal = 0;
+	{
+		D3D12_COMMAND_QUEUE_DESC qd{}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+		REQUIRE(SUCCEEDED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue))));
+		REQUIRE(SUCCEEDED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))));
+		REQUIRE(SUCCEEDED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
+		                                         IID_PPV_ARGS(&cl))));
+		REQUIRE(SUCCEEDED(cl->Close()));
+		REQUIRE(SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))));
+	}
+	auto barrier = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b) {
+		D3D12_RESOURCE_BARRIER rb{};
+		rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		rb.Transition.pResource = r; rb.Transition.StateBefore = a; rb.Transition.StateAfter = b;
+		rb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+		cl->ResourceBarrier(1, &rb);
+	};
+	const D3D12_VIEWPORT vp{ 0.0f, 0.0f, float(kW), float(kH), 0.0f, 1.0f };
+	const D3D12_RECT scissor{ 0, 0, LONG(kW), LONG(kH) };
+	const float black[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	std::string debugLog;
+	auto run = [&](auto&& record) {
+		REQUIRE(SUCCEEDED(alloc->Reset()));
+		REQUIRE(SUCCEEDED(cl->Reset(alloc.Get(), nullptr)));
+		cl->RSSetViewports(1, &vp);
+		cl->RSSetScissorRects(1, &scissor);
+		ID3D12DescriptorHeap* heaps[] = { srvHeap.Get() };
+		cl->SetDescriptorHeaps(1, heaps);
+		record();
+		// out → readback
+		barrier(outTex.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+		src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.pResource = outTex.Get();
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;  dst.pResource = readback.Get();
+		dst.PlacedFootprint.Footprint = { outFmt, kW, kH, 1, readRow };
+		cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+		barrier(outTex.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		REQUIRE(SUCCEEDED(cl->Close()));
+		ID3D12CommandList* lists[] = { cl.Get() };
+		queue->ExecuteCommandLists(1, lists);
+		REQUIRE(SUCCEEDED(queue->Signal(fence.Get(), ++fenceVal)));
+		if (fence->GetCompletedValue() < fenceVal)
+		{
+			HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+			REQUIRE(ev != nullptr);
+			REQUIRE(SUCCEEDED(fence->SetEventOnCompletion(fenceVal, ev)));
+			WaitForSingleObject(ev, INFINITE);
+			CloseHandle(ev);
+		}
+		debugLog += drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(dev->GetDeviceRemovedReason()), "device removed: ", debugLog);
+		std::vector<float> px(size_t(kW) * kH * 4, 0.0f);
+		uint8_t* mapped = nullptr;
+		const D3D12_RANGE readAll{ 0, SIZE_T(readRow) * kH };
+		REQUIRE(SUCCEEDED(readback->Map(0, &readAll, reinterpret_cast<void**>(&mapped))));
+		for (UINT y = 0; y < kH; ++y)
+			std::memcpy(&px[size_t(y) * kW * 4], mapped + size_t(y) * readRow, kW * 16);
+		const D3D12_RANGE noWrite{ 0, 0 };
+		readback->Unmap(0, &noWrite);
+		return px;
+	};
+	// The material draw's root arguments (D3D12Renderer's drawMatInstance).
+	auto bindMaterial = [&](ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS light) {
+		cl->SetGraphicsRootSignature(matRs.Get());
+		cl->SetPipelineState(pso);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootLightCB,   light);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootObjectCB,  uVA);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootParamsCB,  parVA);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootLightCBVS, light);
+		cl->SetGraphicsRootConstantBufferView(dm::kRootParamsCBVS, parVA);
+		cl->SetGraphicsRootDescriptorTable(dm::kRootSrvTable, srvHeap->GetGPUDescriptorHandleForHeapStart());
+		cl->SetGraphicsRootShaderResourceView(dm::kRootClusterLights, listVA[0]);
+		cl->SetGraphicsRootShaderResourceView(dm::kRootClusterGrid,   listVA[1]);
+		cl->SetGraphicsRootShaderResourceView(dm::kRootClusterIdx,    listVA[2]);
+		cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		cl->IASetVertexBuffers(0, 1, &vbv);
+	};
+	auto forward = [&](ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS light) {
+		return run([&] {
+			const D3D12_CPU_DESCRIPTOR_HANDLE rt = rtvAt(0);
+			cl->ClearRenderTargetView(rt, black, 0, nullptr);
+			cl->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			cl->OMSetRenderTargets(1, &rt, FALSE, &dsv);
+			bindMaterial(pso, light);
+			cl->DrawInstanced(3, 1, 0, 0);
+		});
+	};
+	// G-buffer pass + resolve in ONE list, with the renderer's barrier order:
+	// DSV off the OM, depth DEPTH_WRITE → PSR and G-buffer RT → PSR, draw,
+	// and back. The G-buffer clears are GL's.
+	auto deferred = [&](ID3D12PipelineState* rpso, D3D12_GPU_VIRTUAL_ADDRESS rLight, D3D12_GPU_VIRTUAL_ADDRESS rUbo) {
+		return run([&] {
+			const D3D12_CPU_DESCRIPTOR_HANDLE gbRtv[3] = { rtvAt(1), rtvAt(2), rtvAt(3) };
+			const float c1[4] = { 0.5f, 0.5f, 1.0f, 0.5f };
+			cl->ClearRenderTargetView(gbRtv[0], black, 0, nullptr);
+			cl->ClearRenderTargetView(gbRtv[1], c1, 0, nullptr);
+			cl->ClearRenderTargetView(gbRtv[2], black, 0, nullptr);
+			cl->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			cl->OMSetRenderTargets(3, gbRtv, FALSE, &dsv);
+			bindMaterial(gbPso.Get(), litVA);
+			cl->DrawInstanced(3, 1, 0, 0);
+
+			const D3D12_CPU_DESCRIPTOR_HANDLE rt = rtvAt(0);
+			cl->ClearRenderTargetView(rt, black, 0, nullptr);
+			cl->OMSetRenderTargets(1, &rt, FALSE, nullptr);
+			barrier(depthTex.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			for (auto& g : gbTex)
+				barrier(g.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			cl->SetGraphicsRootSignature(resRs.Get());
+			cl->SetPipelineState(rpso);
+			cl->SetGraphicsRootConstantBufferView(dm::kRootLightCB,  rLight);
+			cl->SetGraphicsRootConstantBufferView(dm::kRootResolveCB, rUbo);
+			cl->SetGraphicsRootDescriptorTable(dm::kRootSrvTable, srvHeap->GetGPUDescriptorHandleForHeapStart());
+			cl->SetGraphicsRootShaderResourceView(dm::kRootClusterLights, listVA[0]);
+			cl->SetGraphicsRootShaderResourceView(dm::kRootClusterGrid,   listVA[1]);
+			cl->SetGraphicsRootShaderResourceView(dm::kRootClusterIdx,    listVA[2]);
+			cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			cl->DrawInstanced(3, 1, 0, 0);
+			barrier(depthTex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+			for (auto& g : gbTex)
+				barrier(g.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		});
+	};
+	struct Diff { float mean = 0, max = 0, lumMin = 1e9f, lumMax = 0; };
+	auto compare = [&](const std::vector<float>& a, const std::vector<float>& b) {
+		Diff d;
+		for (UINT i = 0; i < kW * kH; ++i)
+		{
+			for (int k = 0; k < 3; ++k)
+			{
+				const float e = std::fabs(a[i * 4 + k] - b[i * 4 + k]);
+				d.mean += e; d.max = std::max(d.max, e);
+			}
+			const float l = a[i * 4] + a[i * 4 + 1] + a[i * 4 + 2];
+			d.lumMin = std::min(d.lumMin, l); d.lumMax = std::max(d.lumMax, l);
+		}
+		d.mean /= float(kW * kH * 3);
+		return d;
+	};
+
+	// 1. Forward vs deferred, 8-light window.
+	drainInfoQueue(w);
+	const std::vector<float> fwd = forward(fwdPso.Get(), litVA);
+	const std::vector<float> def = deferred(resPso.Get(), litVA, ruVA);
+	const Diff d = compare(fwd, def);
+	MESSAGE("D3D12 forward vs deferred: mean ", d.mean, " max ", d.max, " (forward luminance ",
+	        d.lumMin, "..", d.lumMax, ")", std::string(debugLog.empty() ? "" : " — debug layer: "), debugLog);
+	REQUIRE_MESSAGE(d.lumMax - d.lumMin > 0.05f, "the point light does not vary over the 8x8 surface");
+	CHECK_MESSAGE(d.mean < 1.0f / 255.0f, "deferred drifts from forward: mean ", d.mean);
+	CHECK_MESSAGE(d.max  < 4.0f / 255.0f, "deferred drifts from forward: max ", d.max);
+
+	// Negative control 1: GL/Vulkan's uv sign instead of D3D's — P moves.
+	const Diff dFlip = compare(fwd, deferred(resPso.Get(), litVA, ruFlipVA));
+	MESSAGE("negative control (wrong uv sign): mean ", dFlip.mean, " max ", dFlip.max);
+	CHECK_MESSAGE(dFlip.max > 8.0f / 255.0f, "a wrong uv sign went unnoticed — the rig is blind to P");
+
+	// Negative control 2: the base-colour view shows the graph's 0.25/0.5/0.75
+	// unlit — the resolve read GB0 through the table's slot 17, not a null view.
+	const std::vector<float> view = deferred(resPso.Get(), litVA, ruViewVA);
+	CHECK_MESSAGE((std::fabs(view[0] - 0.25f) < 0.01f && std::fabs(view[1] - 0.5f) < 0.01f
+	               && std::fabs(view[2] - 0.75f) < 0.01f),
+	              "G-buffer base-colour view: ", view[0], ",", view[1], ",", view[2]);
+
+	// 2. Clustered: forward with the full (black) window + gate, resolve with
+	// the trimmed window and the grid in HeResolve; lists as root SRVs.
+	debugLog.clear();
+	const std::vector<float> fwdCl = forward(fwdClPso.Get(), fwdLitVA);
+	const std::vector<float> defCl = deferred(resClPso.Get(), resLitVA, ruClVA);
+	const Diff dc = compare(fwdCl, defCl);
+	MESSAGE("D3D12 clustered forward vs clustered deferred: mean ", dc.mean, " max ", dc.max, " (luminance ",
+	        dc.lumMin, "..", dc.lumMax, ")", std::string(debugLog.empty() ? "" : " — debug layer: "), debugLog);
+	REQUIRE_MESSAGE(dc.lumMax > 0.2f, "the four list lights do not reach the surface");
+	CHECK_MESSAGE(dc.mean < 1.0f / 255.0f, "clustered deferred drifts from clustered forward: mean ", dc.mean);
+	CHECK_MESSAGE(dc.max  < 4.0f / 255.0f, "clustered deferred drifts from clustered forward: max ", dc.max);
+
+	// Negative control 3: the 8-light resolve over the same G-buffer sees only
+	// the black window — the lit lights arrive through the root SRVs alone.
+	const Diff dWin = compare(fwdCl, deferred(resPso.Get(), fwdLitVA, ruClVA));
+	MESSAGE("negative control (8-light resolve, black window): mean ", dWin.mean);
+	CHECK_MESSAGE(dWin.mean > 0.05f, "the window resolve matched the clustered image — the lists were not needed");
+	up->Unmap(0, nullptr);
+}
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC
 
@@ -6798,9 +8418,9 @@ TEST_CASE("Material codegen fits a small thread stack: auto landscape views and 
 	{
 		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(view);
 		std::string glsl;
-		REQUIRE(runOnSmallStack(512 * 1024, [&] { glsl = HE::generateFragment(a.graph).glsl; }));
+		REQUIRE(runOnSmallStack(512 * 1024, [&] { glsl = HE::generateFragment(a.graph, HE::weatherFunctionLoader()).glsl; }));
 		CHECK(!glsl.empty());
-		CHECK(glsl == HE::generateFragment(a.graph).glsl); // the thread changes nothing
+		CHECK(glsl == HE::generateFragment(a.graph, HE::weatherFunctionLoader()).glsl); // the thread changes nothing
 	}
 
 	HE::MaterialGraph g;

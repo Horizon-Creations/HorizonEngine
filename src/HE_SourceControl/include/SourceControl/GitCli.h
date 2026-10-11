@@ -59,8 +59,11 @@ public:
 
 	// git commit -m. Fails cleanly when there is nothing staged or no identity
 	// is configured — both come back as git's message, not as a mystery.
+	// `amend` rewrites the last commit with what is staged (an empty message keeps
+	// the old one). The caller decides whether that commit may still be rewritten.
 	static bool commit(const std::filesystem::path& root, const std::string& message,
-	                   std::string* err = nullptr);
+	                   std::string* err = nullptr,
+	                   bool amend = false);
 
 	// git push, with -u origin HEAD on the first one (no upstream yet) so the
 	// branch tracks its remote counterpart from then on.
@@ -175,6 +178,68 @@ public:
 	static bool listBranches(const std::filesystem::path& root,
 	                         std::vector<std::string>& out, std::string& outCurrent,
 	                         std::string* err = nullptr);
+
+	// ── Per-file operations (the Source Control panel's stage / discard) ─────
+	// Paths are repository-relative with forward slashes, as RepoStatus keys them.
+	// They are passed as LITERAL pathspecs, so a file called "[draft]*.hasset"
+	// means that file and not a glob. Long lists are split into several git
+	// invocations (Windows caps a command line near 32k characters).
+
+	// True when HEAD points at a commit (false in a repository with no commits).
+	static bool hasHead(const std::filesystem::path& root);
+
+	// git add -A -- paths: stages additions, edits AND deletions of exactly these.
+	static bool stage(const std::filesystem::path& root,
+	                  const std::vector<std::string>& paths, std::string* err = nullptr);
+
+	// Takes paths back out of the index without touching the working tree. A rename
+	// is undone as a pair (the new path and the one it came from). Works in a
+	// repository with no commits too.
+	static bool unstage(const std::filesystem::path& root,
+	                    const std::vector<std::string>& paths, std::string* err = nullptr);
+
+	// Throws the changes to these paths away, staged and unstaged alike:
+	//   untracked            -> deleted from disk
+	//   new in the index     -> removed from index and disk
+	//   edited/deleted/...   -> back to how HEAD has them
+	// Conflicted paths are refused (resolveConflict is the way out for those).
+	// Irreversible - the caller asks first.
+	static bool discard(const std::filesystem::path& root,
+	                    const std::vector<std::string>& paths, std::string* err = nullptr);
+
+	// Settles a conflicted path with one side's version and stages the result.
+	// `ours` = the branch you are on, otherwise the incoming side.
+	static bool resolveConflict(const std::filesystem::path& root, const std::string& path,
+	                            bool ours, std::string* err = nullptr);
+
+	// git switch <name>. A remote-only name ("origin/x" or just "x" when exactly one
+	// remote has it) is checked out as a new local branch tracking it. Refuses -
+	// with git's own wording - when local changes would be overwritten.
+	static bool switchBranch(const std::filesystem::path& root, const std::string& name,
+	                         std::string* err = nullptr);
+
+	// Remote-tracking branches ("origin/main"), without the symbolic HEAD entry.
+	static bool listRemoteBranches(const std::filesystem::path& root,
+	                               std::vector<std::string>& out, std::string* err = nullptr);
+
+	// Stash everything including untracked files, so a branch switch starts clean.
+	static bool stashPush(const std::filesystem::path& root, const std::string& message,
+	                      std::string* err = nullptr);
+	// Re-apply the newest stash and drop it. On a conflict the stash is kept (git's rule).
+	static bool stashPop(const std::filesystem::path& root, std::string* err = nullptr);
+	// One line per stash, newest first ("stash@{0}: On main: message").
+	static bool stashList(const std::filesystem::path& root, std::vector<std::string>& out,
+	                      std::string* err = nullptr);
+
+	// The files one commit touched, with git's one-letter state (A/M/D/R/C/T).
+	struct ChangedFile
+	{
+		char        state = 'M';
+		std::string path;
+		std::string origPath;   // renames and copies
+	};
+	static bool commitFiles(const std::filesystem::path& root, const std::string& commit,
+	                        std::vector<ChangedFile>& out, std::string* err = nullptr);
 
 	// True when `commit` names something this repository actually has.
 	static bool commitExists(const std::filesystem::path& root, const std::string& commit);

@@ -53,6 +53,11 @@ namespace water = HE::water;
 namespace
 {
 	constexpr int W = 360, H = 520;
+	// The panel window is taller than the viewport frame: the Landscape panel is a card,
+	// a segmented tab control, a scrolling body and a pinned brush, and the Foliage and
+	// Mountain pages need the room to show every control without scrolling. The viewport
+	// frames keep W x H, so the pixel-to-metre scale the stroke tests rely on is untouched.
+	constexpr int PH = 760;
 
 	struct Harness
 	{
@@ -60,7 +65,7 @@ namespace
 		{
 			ImGui::CreateContext();
 			ImGuiIO& io = ImGui::GetIO();
-			io.DisplaySize = ImVec2(float(W), float(H));
+			io.DisplaySize = ImVec2(float(W), float(PH));
 			io.DeltaTime   = 1.0f / 60.0f;
 			io.IniFilename = nullptr;
 			io.LogFilename = nullptr;
@@ -156,7 +161,7 @@ namespace
 		io.AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
 		ImGui::NewFrame();
 		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
-		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(PH) - 20.0f));
 		ImGui::Begin(kPanelWindow, nullptr,
 		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
 		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
@@ -165,7 +170,7 @@ namespace
 		EditorWidgets::drawQueuedHelp();
 		const ImGuiID hovered = ImGui::GetHoveredID();
 		ImGui::Render();
-		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, PH);
 		return hovered;
 	}
 
@@ -186,23 +191,39 @@ namespace
 		panelFrame(ctx, false);
 	}
 
-	// The id a widget label resolves to inside the panel window. The toolbar
-	// cells are InvisibleButtons under their "##id", a button is its label.
-	ImGuiID panelId(const char* label)
+	// A widget label inside the panel. The panel's own items (the card, the tab control)
+	// live in the window itself; the tab's content and the pinned brush live in two child
+	// windows, and an id is hashed against the window it was submitted in - so a label
+	// can match under any of the three. An item inside an open TreeNode (the Mountain
+	// page's "More" group) is hashed against the node's id as well, so `inTree` names
+	// that node by its full label, "##" suffix included.
+	struct PanelRef { const char* label; const char* inTree = nullptr; };
+	PanelRef panelId(const char* label, const char* inTree = nullptr) { return { label, inTree }; }
+
+	ImGuiID refIdIn(ImGuiWindow* w, const PanelRef& ref)
+	{
+		if (!ref.inTree) return w->GetID(ref.label);
+		return ImHashStr(ref.label, 0, w->GetID(ref.inTree));
+	}
+
+	bool idMatches(ImGuiID hovered, const PanelRef& ref)
 	{
 		ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
 		REQUIRE(w != nullptr);
-		return w->GetID(label);
+		if (hovered == refIdIn(w, ref)) return true;
+		for (ImGuiWindow* c : w->DC.ChildWindows)
+			if (c && hovered == refIdIn(c, ref)) return true;
+		return false;
 	}
 
 	// Where an item is, found the way a user finds it: by moving the pointer
 	// over the panel until ImGui reports that id. Coarse grid first, so the
 	// scan stays a few thousand frames.
-	bool locate(AppContext& ctx, ImGuiID id, float& outX, float& outY)
+	bool locate(AppContext& ctx, PanelRef ref, float& outX, float& outY)
 	{
-		for (float y = 14.0f; y < float(H) - 14.0f; y += 4.0f)
+		for (float y = 14.0f; y < float(PH) - 14.0f; y += 4.0f)
 			for (float x = 14.0f; x < float(W) - 14.0f; x += 6.0f)
-				if (idAt(ctx, x, y) == id) { outX = x; outY = y; return true; }
+				if (idMatches(idAt(ctx, x, y), ref)) { outX = x; outY = y; return true; }
 		return false;
 	}
 
@@ -432,9 +453,11 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	clickAt(ctx, mx, my);
 	float nx = 0.0f, ny = 0.0f;
 	CHECK_MESSAGE(locate(ctx, panelId("##mtRect"), nx, ny), "Mountain armed shows no Rectangle cell");
-	CHECK_MESSAGE(locate(ctx, panelId("Max Height##mountain"), nx, ny), "Mountain armed shows no Max Height");
-	CHECK_MESSAGE(locate(ctx, panelId("New Seed##mountain"), nx, ny), "Mountain armed shows no New Seed");
-	CHECK_FALSE(locate(ctx, panelId("Radius##brush"), nx, ny));
+	CHECK_MESSAGE(locate(ctx, panelId("##mountain_maxh"), nx, ny), "Mountain armed shows no Max Height");
+	// New Seed sits in the page's "More" group (open by default), so its id is hashed under that node.
+	CHECK_MESSAGE(locate(ctx, panelId("New Seed##mountain", "More (Falloff, Frequency, Seed)##mountainmore"), nx, ny),
+	              "Mountain armed shows no New Seed");
+	CHECK_FALSE(locate(ctx, panelId("##radius_brush"), nx, ny));
 	{
 		he_ui::Image img;
 		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
@@ -555,17 +578,107 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	clickAt(ctx, rx, ry);
 	REQUIRE(locate(ctx, panelId("##lsTool0"), rx, ry));
 	clickAt(ctx, rx, ry);
-	CHECK(locate(ctx, panelId("Radius##brush"), rx, ry));
+	CHECK(locate(ctx, panelId("##radius_brush"), rx, ry));
 }
 
-// ── The Water brush: arm it, drag, hold Shift, undo ──────────────────────────
+// ── Setup tab and Ctrl-invert ────────────────────────────────────────────────
+// Two things the viewport has to get right that the panel only asks for: the
+// Setup tab is a form, so a drag over the viewport while it is open must not
+// sculpt; and Ctrl turns the armed brush around (Raise lowers) for as long as it
+// is held.
+TEST_CASE("landscape ui: the Setup tab switches the brush off, and Ctrl turns Raise into Lower")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.sculptHeights.assign(129u * 129u, 0.0f);
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MeshComponent mesh;
+	mesh.meshAssetId = HE::kDefaultCubeMeshId;
+	reg.emplace<MeshComponent>(terrain, mesh);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	auto extremes = [&] {
+		const auto& t = reg.get<TerrainComponent>(terrain);
+		float lo = 0.0f, hi = 0.0f;
+		for (float h : t.sculptHeights) { lo = std::min(lo, h); hi = std::max(hi, h); }
+		return std::pair<float, float>(lo, hi);
+	};
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	auto drag = [&] {
+		viewportFrame(ctx, snap, cx, cy, false);
+		viewportFrame(ctx, snap, cx, cy, false);
+		for (int i = 0; i < 4; ++i) viewportFrame(ctx, snap, cx, cy, true);
+		viewportFrame(ctx, snap, cx, cy, false);
+	};
+
+	// ── Setup: the form is there, the brush is not ──
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("##lsSetup"), sx, sy), "no Setup cell in the tab well");
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	CHECK_MESSAGE(locate(ctx, panelId("Reset Sculpting"), bx, by), "Setup shows no Reset Sculpting");
+	CHECK_FALSE(locate(ctx, panelId("##radius_brush"), bx, by));
+	const size_t depth0 = undo.undoDepth();
+	drag();
+	CHECK(extremes().first == 0.0f);
+	CHECK(extremes().second == 0.0f);
+	CHECK(undo.undoDepth() == depth0);
+
+	// ── Back on Sculpt, Raise: the same drag lifts the ground ──
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
+	clickAt(ctx, sx, sy);
+	CHECK_FALSE(locate(ctx, panelId("Reset Sculpting"), bx, by));
+	REQUIRE(locate(ctx, panelId("##lsTool0"), bx, by));
+	clickAt(ctx, bx, by);
+	drag();
+	CHECK(extremes().second > 1.0f);
+	CHECK(extremes().first == 0.0f);
+
+	// ── Ctrl held: Raise lowers ──
+	// The panel reads io.KeyCtrl. Under ConfigMacOSXBehaviors (the default on Apple)
+	// AddKeyEvent swaps Ctrl and Cmd, so ImGuiMod_Ctrl would arrive as Super - and
+	// Super + left click is aliased into a RIGHT click, so the drag would never be a
+	// left drag. The key that ends up as io.KeyCtrl there is ImGuiMod_Super (the Cmd
+	// key, the platform's primary modifier).
+	const ImGuiKey ctrlKey = ImGui::GetIO().ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl;
+	// The ground is already lifted by the Raise drag above and the inverted stroke is the
+	// same size the other way, so ONE Ctrl drag takes the hill back to flat; only a second
+	// one digs below zero. Asserting the dig after a single drag would be asserting that
+	// a Lower stroke is stronger than a Raise one.
+	ImGui::GetIO().AddKeyEvent(ctrlKey, true);
+	drag();
+	viewportFrame(ctx, snap, cx, cy, false);
+	CHECK(extremes().second < 0.5f);
+	CHECK(extremes().first > -0.5f);
+	drag();
+	ImGui::GetIO().AddKeyEvent(ctrlKey, false);
+	viewportFrame(ctx, snap, cx, cy, false);
+	CHECK(extremes().first < -0.5f);
+}
+
+// ── The Water brush: arm it, drag, hold Ctrl, undo ───────────────────────────
 // The stroke logic (which body, which level, the eraser, the dig) has its own
 // tests in test_water_brush.cpp. This one asks what only the Landscape tool can
-// answer: does the panel arm the mode and show its form instead of the sculpt
-// numbers, does a drag in the viewport leave water where the pointer went, is a
-// whole stroke ONE undo step, does Shift erase, does a water stroke leave the
-// terrain's own rebuild flags alone, and does Dig Bed lower the ground.
-TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Shift erases, Dig Bed lowers the ground")
+// answer: does the panel arm the Water tab and show its form instead of the
+// sculpt tools, does a drag in the viewport leave water where the pointer went,
+// is a whole stroke ONE undo step, does Ctrl erase (as it turns every brush
+// around), does a water stroke leave the terrain's own rebuild flags alone, and
+// does Dig Bed lower the ground.
+TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl erases, Dig Bed lowers the ground")
 {
 	Harness harness;
 	HorizonWorld world;
@@ -600,11 +713,11 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Shift e
 
 	// ── Arm Water: its form replaces the sculpt tools ──
 	float wx = 0.0f, wy = 0.0f;
-	REQUIRE_MESSAGE(locate(ctx, panelId("##lsWater"), wx, wy), "no Water cell in the mode well");
+	REQUIRE_MESSAGE(locate(ctx, panelId("##lsWater"), wx, wy), "no Water cell in the tab well");
 	clickAt(ctx, wx, wy);
 	float fx = 0.0f, fy = 0.0f;
 	CHECK_MESSAGE(locate(ctx, panelId("##watErase"), fx, fy), "Water armed shows no Erase cell");
-	CHECK_MESSAGE(locate(ctx, panelId("Radius##water"), fx, fy), "Water armed shows no Radius");
+	CHECK_MESSAGE(locate(ctx, panelId("##radius_water"), fx, fy), "Water armed shows no Radius");
 	CHECK_MESSAGE(locate(ctx, panelId("From Ground##water"), fx, fy), "Water armed shows no From Ground");
 	float digX = 0.0f, digY = 0.0f;
 	CHECK_MESSAGE(locate(ctx, panelId("Dig Bed##water"), digX, digY), "Water armed shows no Dig Bed");
@@ -674,16 +787,20 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Shift e
 	REQUIRE(undo.redo());
 	CHECK(water::sameContent(land().water, painted));
 
-	// ── Shift flips Paint to Erase: wipe the middle ──
+	// ── Ctrl flips Paint to Erase: wipe the middle ──
+	// The panel reads io.KeyCtrl. Under ConfigMacOSXBehaviors AddKeyEvent swaps Ctrl
+	// and Cmd, and Ctrl + left click is aliased into a RIGHT click, so the key that
+	// ends up as io.KeyCtrl there is ImGuiMod_Super (see the Setup / Ctrl test above).
+	const ImGuiKey ctrlKey = ImGui::GetIO().ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl;
 	const uint32_t wetBefore = land().water.wetCells();
 	const size_t depth1 = undo.undoDepth();
-	ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift, true);
+	ImGui::GetIO().AddKeyEvent(ctrlKey, true);
 	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);   // a frame for the modifier to arrive
 	viewportFrame(ctx, snap, cx + px * 0.5f, cy, true, hook);
 	for (int i = 0; i < 3; ++i)
 		viewportFrame(ctx, snap, cx + px * 0.5f, cy, true, hook);
 	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);
-	ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift, false);
+	ImGui::GetIO().AddKeyEvent(ctrlKey, false);
 	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);
 	{
 		const TerrainComponent& t = land();
@@ -740,7 +857,8 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Shift e
 	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
 	clickAt(ctx, wx, wy);
 	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
-	CHECK_FALSE(locate(ctx, panelId("Radius##water"), wx, wy));
+	CHECK(locate(ctx, panelId("##radius_brush"), wx, wy));
+	CHECK_FALSE(locate(ctx, panelId("##radius_water"), wx, wy));
 }
 
 TEST_CASE("landscape ui: the Water panel lists the bodies, and To Lake turns a painted pond into a lake in one undo step")
@@ -815,19 +933,30 @@ TEST_CASE("landscape ui: the Water panel lists the bodies, and To Lake turns a p
 	for (int i = 0; i < 3; ++i) tall(false);
 
 	// Two bodies, both ponds: each gets a To Lake button (ids are pushed per body,
-	// so the same label is two different items).
+	// so the same label is two different items). The tab's content is a child
+	// window of the panel, and an id is hashed against the window it was submitted
+	// in, so the button's id is the one the child computes.
 	float bx = 0.0f, by = 0.0f;
 	ImGuiWindow* win = ImGui::FindWindowByName(kPanelWindow);
 	REQUIRE(win != nullptr);
-	win->IDStack.push_back(win->GetID(static_cast<int>(pond)));
-	const ImGuiID toLakeId = win->GetID("To Lake");
-	win->IDStack.pop_back();
+	auto isToLake = [&](ImGuiID hovered) -> bool
+	{
+		for (ImGuiWindow* c : win->DC.ChildWindows)
+		{
+			if (!c) continue;
+			c->IDStack.push_back(c->GetID(static_cast<int>(pond)));
+			const ImGuiID id = c->GetID("To Lake");
+			c->IDStack.pop_back();
+			if (id == hovered) return true;
+		}
+		return false;
+	};
 	bool found = false;
 	for (float yy = 14.0f; yy < 1090.0f && !found; yy += 3.0f)
 	{
 		ImGui::GetIO().AddMousePosEvent(30.0f, yy);
 		tall(false);
-		if (tall(false) == toLakeId) { bx = 30.0f; by = yy; found = true; }
+		if (isToLake(tall(false))) { bx = 30.0f; by = yy; found = true; }
 	}
 	REQUIRE_MESSAGE(found, "no To Lake button for the first pond");
 	{
@@ -867,7 +996,7 @@ TEST_CASE("landscape ui: the Water panel lists the bodies, and To Lake turns a p
 
 	// Leave the file-static mode as the next test expects it.
 	bits.config.mode = EditorMode::Landscape;
-	ImGui::GetIO().DisplaySize = ImVec2(float(W), float(H));
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), float(PH));
 	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
 	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
 	clickAt(ctx, wx, wy);

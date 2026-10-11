@@ -36,7 +36,7 @@ Fläche live mitwächst.
 |---|---|---|
 | Welcher Körper | unter dem ersten Punkt fortsetzen (`bodyAt`), sonst neu | Macht Pinsel und spätere Seen (Schritt 8) interoperabel, ohne dass der Nutzer eine Körper-Id wählen muss; ein Strich über zwei Gewässer hält sich an das erste. |
 | Spiegel | beim ersten Punkt fest, aus Geländehöhe + Versatz ODER einer Zahl | Ein Zug über geneigtes Gelände darf das Wasser nicht kippen; "aus Gelände" ist der Normalfall (ein Klick ergibt sofort einen plausiblen Spiegel), die Zahl ist für einen zweiten Teich auf exakt demselben Niveau. |
-| Löschen | eigener Stroke-Zustand (`erase`), beim ersten Dab fest, nicht pro Dab neu gelesen | Deckt sich damit, wie Shift im Editor einmal pro Frame gelesen wird, und mit dem Grow/Erase-Vorbild des Foliage-Pinsels: ein Strich ist entweder/oder. |
+| Löschen | eigener Stroke-Zustand (`erase`), beim ersten Dab fest, nicht pro Dab neu gelesen | Deckt sich damit, wie die Umkehr-Taste im Editor einmal pro Frame gelesen wird (Strg, seit dem neuen Landscape-Panel für alle Pinsel; vorher Shift), und mit dem Grow/Erase-Vorbild des Foliage-Pinsels: ein Strich ist entweder/oder. |
 | Graben | eigene Funktion `TerrainSculpt::lowerToFloor`, nicht `excavatePolygon` | `excavatePolygon` ist Schritt 8s Werkzeug für ein festes Polygon; der Pinsel braucht denselben Kreis wie `addCircle`/`removeCircle` mit demselben Falloff, Dab für Dab. Gleicher Vertrag wie `excavatePolygon`s Floor-Modus: hebt nie, Gewicht 1 setzt exakt (bit-gleich), eine Böschung läuft über den Falloff aus. |
 | Grenzfall: Strich ohne eine einzige nasse Zelle | Körper/Gitter wieder leeren | Ein Klick daneben oder ein Löschversuch ohne Wasser darf keinen leeren, aber zugewiesenen Körper oder ein allozierter-aber-leeres Gitter hinterlassen — sonst ist die Szene nicht mehr `pristine()`, obwohl nichts passiert ist. |
 | Tempo | Stärke×dt, aber deutlich schneller als Sculpt/Paint (×1,0 statt ×0,16) | Eine Zelle existiert erst ab coverage ≥ `kWet` (128 von 255): bei der Paint-Pinsel-Rate bräuchte ein Strich mehrere Sekunden, bis überhaupt etwas sichtbar wird. Bei der Standard-Stärke (5) und 60 Hz ist eine Zelle in weniger als einer Sekunde nass. |
@@ -76,8 +76,8 @@ wieder bloß:
   Zellen exakt, und ein geladener Körper lässt sich weiter bemalen (Fortsetzung funktioniert nach dem
   Laden genauso wie vorher).
 - **Editor-Verdrahtung** (`tests/test_terrain_tools_ui.cpp`): der echte `TerrainTools::renderPanel` +
-  `sculptInViewport` headless, mit einem Software-ImGui — Wasser-Modus bewaffnen, ziehen, ein
-  Undo-Schritt für den ganzen Strich, Shift löscht, Dig Bed senkt das Gelände, Undo lässt die
+  `sculptInViewport` headless, mit einem Software-ImGui — Wasser-Tab bewaffnen, ziehen, ein
+  Undo-Schritt für den ganzen Strich, Strg löscht, Dig Bed senkt das Gelände, Undo lässt die
   Landschafts-eigenen Dirty-Flags unangetastet. Panel-Screenshot per `HE_UI_DUMP_DIR` (Software-
   Rasterizer, nicht `he_uishot.py`).
 - **Pixel-Screenshot eines gemalten Wasserflecks** (dieses Dokument): oben, über den echten
@@ -92,3 +92,43 @@ Das Lake-Werkzeug (Schritt 8) — der Pinsel liest nur, ob ein Punkt schon Wasse
 zeichnet keine Splines und kennt keine Polygone. D3D11/D3D12/Vulkan (Schritte 9/10) — die Fläche ist ein
 gewöhnliches Mesh + Material, ohne Sonderpfad, aber nur auf Metal/OpenGL belegt. Neue Wasser-Shader-
 Features, Strömung, Auftrieb — ausdrücklich außerhalb des Themas.
+
+## Nachtrag (Schritt 12): Wasser im umgebauten Landscape-Panel
+
+Beim Merge von `release/0.7.0` (161 Commits) war das Landscape-Panel schon umgebaut: Karte mit Größe und
+Material, Tabs, ein gemeinsamer Pinsel mit Profil unten angeheftet, Layer-Liste, Setup-Tab. Nichts davon
+ist zurückgenommen; das Wasser hängt in dieser Struktur als fünfter Tab, `Sculpt | Paint | Foliage | Water |
+Setup`:
+
+![Der Wasser-Tab im neuen Panel](water-brush/landscape-water-tab.png)
+
+- **Inhalt des Tabs** (scrollender Körper, mit den Bausteinen des Panels: `sectionLabel`, `segmented`,
+  `rowLabel`, `dimText`): *Mode* (Paint | Erase), *Level* (From Ground, Above Ground oder Level), *Ground*
+  (Dig Bed, Depth), *Water Grid* (Resolution), die Liste *Bodies* mit To Lake / Select Spline / Detach und
+  *Clear All Water*.
+- **Radius, Falloff, Strength** sind nicht mehr eigene Felder, sondern der angeheftete Pinsel: dasselbe
+  Profil wie bei Sculpt, Paint und Foliage, hier blau (rot beim Löschen). Die Stärke läuft wie bei Sculpt
+  und Foliage über die 0..1-Skala (quadratisch auf 0,1..50 abgebildet); die Rate des Wassers ist
+  unverändert Stärke × dt.
+- **Umkehr-Taste: Strg+Ziehen** (Cmd auf dem Mac), wie bei jedem Pinsel dieses Panels, statt Shift; Shift+`[`
+  und `]` bleiben Radius und Falloff. Die Zeile unter dem Pinsel sagt für alle Tabs dasselbe.
+- **Wasser-Gitter** ist wie die Weightmap-Auflösung ein getipptes Feld (32 bis 2048 trifft ein Schieber nicht
+  genau); angewandt beim Verlassen des Feldes, nicht je Ziffer, ein Undo-Schritt.
+- **Zwei Folgen des Merges, die Git nicht meldet**: die Outliner-Typ-Tabelle (`OutlinerFilter.cpp`) ist neu
+  und hat neben `kKinds` ein `kLooks` und eine nach Position indizierte `kPriority`; die Spline-Art steht jetzt
+  zwischen Rope und Trail und hat ein Zeichen ("S") und eine Farbe, die Prioritäten dahinter sind um eins
+  verschoben. Und die vom Terrain erzeugten Wasserflächen bleiben im Outliner versteckt
+  (`HE::isTerrainGenerated`, im umgeschriebenen Aufbau mit `return false`).
+- **Zeugen auf Metal nach dem Merge** (`HE_DUMP_LAKEEDIT`, `HE_DUMP_WATERBRUSH`, Kamera wie oben): die
+  Logzeilen sind Zahl für Zahl die von vorher (See gezeichnet 2564 Zellen / 4267 Vertices gegraben, mit Pinsel
+  fortgesetzt 2771, umgeformt 2771 → 2865 mit Rinne nass und Insel trocken, Teich → See 2287 → 2275 Zellen mit
+  20 Punkten; Pinsel paint/dig 4462 Zellen, 280 Dreiecke, undo 0). Gelände, Seeform, Insel, Rinne und die
+  Spline-Hilfslinien liegen auf denselben Pixeln. Anders sieht nur das Wasser selbst aus, weil `release`
+  inzwischen das neu gebaute Wasser-Material (Thema 152: dunklerer Körper, kleinere Wellen und Schaum) mitbringt:
+
+![See mit Pinsel-Rinne und Insel, Metal, nach dem Merge](water-lake/metal-merged-extended.png)
+
+![Gemalter Teich, Metal, nach dem Merge](water-brush/metal-merged-paint.png)
+
+Mit `shaderc` an: Vollbau (Release, Ninja) und voller `ctest -j4 --timeout 1500` über 270 Tests, alle grün; zwei
+sind übersprungen (`runtime_size_app_basic/advanced` wiegen Deploys, die dieser Worktree nicht baut).

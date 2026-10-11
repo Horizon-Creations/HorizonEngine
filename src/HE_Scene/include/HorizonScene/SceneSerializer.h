@@ -57,6 +57,61 @@ public:
     bool loadAdditiveFromJson(HorizonWorld& world, const nlohmann::json& scene,
                               std::vector<Entity>* outCreated = nullptr);
 
+    // What an additive load does with the ids stored in the file. By default it
+    // restores none: a graft is a copy that may land in a world that holds the
+    // scene already (a zone loaded twice), and restoring would give both copies
+    // the same identities. A streamed cell is the exception — it is in the world
+    // at most once, and what refers to its entities by id (a prefab placement's
+    // bindings, a joint, a rig's target) has to find them again after the cell
+    // was unloaded and loaded — so HE::CellStreamer asks to keep them.
+    struct AdditiveOptions
+    {
+        // Give each entity the id its record was saved with. An id the world
+        // holds already is not taken over: that entity keeps the fresh one it was
+        // created with and is counted, and one warning names how many. Records
+        // without a stored id (a scene from before stable ids) keep the fresh one.
+        bool    preserveIds = false;
+        // When set, the number of entities that kept a fresh id because their
+        // stored one was taken is ADDED to it.
+        size_t* idCollisions = nullptr;
+        // Where the load's top-level entities (the ones whose record names no parent
+        // inside the load) are hung, at the END of that entity's children and in the
+        // order the load made them: the world root when null, as always. Their local
+        // transforms are not touched — whoever passes this has put the parent where
+        // those numbers mean what they should (a cell's root at -origin). It is how a
+        // cell built in slices (sliceForAdditiveLoad) puts each slice under the cell's
+        // root, which an earlier load made: rebuildHierarchy only links records of the
+        // same load.
+        Entity attachTo = entt::null;
+    };
+    bool loadAdditiveFromJson(HorizonWorld& world, const nlohmann::json& scene,
+                              std::vector<Entity>* outCreated, const AdditiveOptions& options);
+
+    // Cuts a parsed streaming cell (HE::CellStreamer parses on a worker) into slices
+    // that can be built one after the other, so that no frame has to build the whole
+    // cell. Returns scenes for loadAdditiveFromJson, in the order to load them:
+    //   slice 0     the cell's root record alone;
+    //   slice 1..   consecutive top-level subtrees of the root, in the order of the
+    //               root's `children`, packed until `maxEntities` is reached. A
+    //               subtree is never divided: one larger than `maxEntities` is a
+    //               slice of its own. Nor is a cluster: subtrees that refer to one
+    //               another by id (the splitter's reference hull, Thema 164 step 3a)
+    //               are named in the scene's "streaming" head ("clusters", lists of
+    //               the ids of their tops, which the splitter wrote side by side) and
+    //               are cut as one, so no slice, and no frame, has half of a cluster.
+    //               Without that head there are no clusters, and the cut is by
+    //               subtree alone, as in a cell of an earlier splitter.
+    // Load slice 0 as usual, find its root among the created entities, then load the
+    // others with AdditiveOptions::attachTo = that root: the result is the entities,
+    // parents, sibling order and local transforms of loading `scene` whole.
+    //
+    // A scene that is not worth cutting, or cannot be cut without changing what the
+    // whole load would do, comes back as the one slice it was: at most `maxEntities`
+    // records, `maxEntities` 0, not exactly one record without a parent, two records
+    // with one identity, a record the root does not reach through `children`, or a
+    // record that is not an object. Consumes `scene`.
+    static std::vector<nlohmann::json> sliceForAdditiveLoad(nlohmann::json&& scene, size_t maxEntities);
+
     // In-memory snapshot (CBOR, same structure as the binary file format).
     // Used by play-in-editor and the undo system. load does not clear the
     // world first — call HorizonWorld::clear() when replacing the content.

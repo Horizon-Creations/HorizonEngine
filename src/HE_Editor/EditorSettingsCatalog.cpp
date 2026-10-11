@@ -329,7 +329,7 @@ std::vector<SettingDesc> buildCatalog()
 	}
 	t.push_back(enumRow("display.renderPath", "Render Path", "Display", "renderpath",
 	                    &EditorConfig::RenderPath, { "Forward", "Deferred" },
-	                    "Deferred needs a backend that supports it (Metal, OpenGL); "
+	                    "Deferred needs the backend's G-buffer pipeline ready; "
 	                    "an unsupported choice falls back at push time."));
 
 	t.push_back(boolRow("display.occlusionCulling", "Occlusion Culling", "Display",
@@ -397,7 +397,8 @@ std::vector<SettingDesc> buildCatalog()
 	                     0.0, 128.0, "Longest streak in pixels at 720p."));
 	t.push_back(boolRow("postProcess.ssrEnabled", "Screen-Space Reflections",
 	                    "Post-Processing", "ssr", &EditorConfig::SSREnabled,
-	                    "Metal + the deferred render path; the backend gates it."));
+	                    "All five backends once their post-processing pipeline is ready; "
+	                    "the backend gates it."));
 	t.push_back(floatRow("postProcess.ssrIntensity", "SSR Intensity",
 	                     "Post-Processing", "ssr", &EditorConfig::SSRIntensity,
 	                     0.0, 2.0, ""));

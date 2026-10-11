@@ -71,6 +71,9 @@ namespace MacMenuBar
 		// built once and a project can be swapped underneath it, so the row
 		// stays live and the action says what it did (GameLogicBuildPanel).
 		BuildGameLogic,
+		// Build ▸ Show Last Build Log: reopens the Build window on the last run's
+		// rings and per-step logs. Always live — with no run yet it says so itself.
+		ShowBuildLog,
 		// ── View: how the Scene window draws. No Toggle Full Screen command
 		// on purpose: the View menu carries the NATIVE one (toggleFullScreen:
 		// on the responder chain, ⌃⌘F), and a second item on SDL's own

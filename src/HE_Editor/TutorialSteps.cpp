@@ -310,8 +310,8 @@ constexpr Step kContent[] = {
 
 	{ "import",
 	  "Import your own assets",
-	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB, FBX, OBJ "
-	  "and COLLADA models, PNG/JPG/TGA/HDR textures, WAV/OGG audio and fonts. "
+	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB, FBX, OBJ, "
+	  "COLLADA and Blender (.blend, up to 3.4) models, PNG/JPG/TGA/HDR textures, WAV/OGG audio and fonts. "
 	  "Importing converts them to .hasset once; the editor never re-reads the "
 	  "original at runtime.\n"
 	  "A glTF with a skin is imported as a skeletal mesh plus its animation clips, "
@@ -409,7 +409,7 @@ constexpr Step kAssetTypes[] = {
 	  "instances rather than one draw call each.\n"
 	  "A Skeletal Mesh is the same thing plus a rig, and carries its Animation "
 	  "Clips. Both usually arrive through Import from a glTF/GLB — whether the file "
-	  "has a skin decides which one you get. FBX, OBJ and COLLADA always give a "
+	  "has a skin decides which one you get. FBX, OBJ, COLLADA and Blender always give a "
 	  "Static Mesh.\n"
 	  "You do not need a file of your own to look at one: the Engine root ships "
 	  "the built-in primitives (cube, sphere, plane, cylinder and friends) as "

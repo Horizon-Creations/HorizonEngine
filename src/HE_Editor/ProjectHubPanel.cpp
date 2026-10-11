@@ -1,6 +1,7 @@
 #include "ProjectHubPanel.h"
 #include "EditorApplication.h"           // AppContext, ProjectManager, EditorConfig
 #include "EditorWidgets.h"
+#include "ProjectPreflight.h"           // engine-content check in front of every open
 #include "EditorHelp.h"                  // "Project Hub/<label>" for its controls
 #include "EditorTheme.h"                 // brand palette — the hub is the first
                                          // surface after the splash, so it is the
@@ -9,6 +10,7 @@
 #include "TutorialPanel.h"               // Help ▸ Interactive Tutorial → sandbox offer
 #include "DocsPanel.h"                   // Help ▸ Documentation — readable before a project exists
 #include "GitCloneDialog.h"              // Open Project ▸ Clone from GitHub...
+#include "ProjectLaunchOpen.h"           // a .heproj double-clicked in the file manager
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -468,13 +470,10 @@ void render(AppContext& ctx)
 
             if (!exists) ImGui::PopStyleColor(4);
 
-            if (ImGui::IsItemClicked() && exists && ctx.projectManager->loadProject(known[i]))
-            {
-                ctx.globalState->addKnownProject(known[i]);
-                ctx.globalState->writeConfig();
-                ctx.contentRefreshPending = true;
-                ctx.projectLoaded = true;
-            }
+            // Through the preflight: the project's engine-content references are fetched
+            // (and a missing one asked about) BEFORE it loads — see ProjectPreflight.h.
+            if (ImGui::IsItemClicked() && exists && !ProjectPreflight::busy())
+                ProjectPreflight::request(ctx, known[i]);
 
             if (ImGui::BeginPopupContextItem("##KnownCtx"))
             {
@@ -634,26 +633,23 @@ void render(AppContext& ctx)
 
     std::string cloned;
     const bool clonedReady = GitCloneDialog::takeOpenRequest(cloned);
-    if (ctx.pendingFileReady || clonedReady)
+    // A .heproj double-clicked in the file manager (ProjectLaunchOpen.h) takes
+    // the same load as the dialog's choice. One per frame: a clone that landed
+    // at the same moment goes first and this one waits in its slot.
+    std::string launched;
+    const bool launchedReady = !clonedReady && ProjectLaunchOpen::take(launched);
+    if (ctx.pendingFileReady || clonedReady || launchedReady)
     {
-        std::string chosen = clonedReady ? cloned : ctx.pendingFileResult;
-        if (ctx.pendingFileReady && !clonedReady)
+        std::string chosen = clonedReady ? cloned : launchedReady ? launched : ctx.pendingFileResult;
+        if (launchedReady)
+            HE_LOG_INFO(Editor, "Project Hub: opening %s (handed over by the system)", chosen.c_str());
+        if (ctx.pendingFileReady && !clonedReady && !launchedReady)
         {
             ctx.pendingFileReady = false;
             ctx.pendingFileResult.clear();
         }
         ctx.hubOpenError.clear();
-        if (ctx.projectManager->loadProject(chosen))
-        {
-            ctx.globalState->addKnownProject(chosen);
-            ctx.globalState->writeConfig();
-            ctx.contentRefreshPending = true;
-            ctx.projectLoaded = true;
-        }
-        else
-        {
-            ctx.hubOpenError = "Failed to load project file.";
-        }
+        ProjectPreflight::request(ctx, chosen);
     }
 
     if (ctx.fontBody) ImGui::PopFont();

@@ -5,6 +5,7 @@
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <Math/Math.h>
+#include <memory>
 #include <vector>
 #include <cstdint>
 
@@ -181,6 +182,71 @@ inline glm::vec3 rebaseRibbonVertices(const RibbonBatch& batch, std::vector<floa
     return c;
 }
 
+// The instances one cluster RenderObject stands for (RenderObject::instanceBlock
+// indexes RenderWorld::instanceBlocks). Foliage lives here instead of as an object
+// per plant: culling, sorting and material resolve see ONE object per bucket, and
+// only GeometryPass / RenderSorter::batchDepthRuns walk the matrices when they form
+// a draw.
+struct InstanceBlock {
+    // How `parent` combines with the stored matrices. Identity and Translation are the
+    // overwhelmingly common terrain poses and unfold with copies and three adds; General
+    // is a full matrix product. All three give the same bits a hand-built world matrix would.
+    enum class Parent : uint8_t { Identity, Translation, General };
+
+    // Owns the storage for as long as ANY copy of the RenderWorld lives: a frame copy
+    // (RenderExtractor::beginFrame), a retained world, a world that outlives the
+    // re-scatter it was extracted from keep reading exactly the matrices they got.
+    std::shared_ptr<const std::vector<glm::mat4>> matrices;
+    uint32_t  first  = 0;   // this block's instances: matrices[first, first + count)
+    uint32_t  count  = 0;
+    glm::mat4 parent = glm::mat4(1.0f);   // world = parent * matrices[i]; the terrain's world matrix
+    Parent    kind   = Parent::Identity;
+
+    // Classify a parent matrix (exact comparison: an almost-identity rotation is General).
+    static Parent classify(const glm::mat4& m)
+    {
+        if (m[0] != glm::vec4(1, 0, 0, 0) || m[1] != glm::vec4(0, 1, 0, 0) ||
+            m[2] != glm::vec4(0, 0, 1, 0) || m[3].w != 1.0f)
+            return Parent::General;
+        return (m[3].x == 0.0f && m[3].y == 0.0f && m[3].z == 0.0f) ? Parent::Identity
+                                                                   : Parent::Translation;
+    }
+
+    // False for a block whose range does not fit its storage (a hand-built or corrupt
+    // one): the readers then treat the object as the single plant `transform` says.
+    bool valid() const
+    {
+        return matrices && count > 0 && static_cast<size_t>(first) + count <= matrices->size();
+    }
+
+    // Only the world POSITION of instance `i` (world(i)[3]), bit for bit what world(i) puts there
+    // — for a test that rejects most instances before it pays for the matrix (the draw-distance
+    // test of FoliageExtract). Identity and Translation read three floats; the general case is the
+    // full product, because anything cheaper might round differently.
+    glm::vec3 position(uint32_t i) const
+    {
+        const glm::mat4& m = (*matrices)[static_cast<size_t>(first) + i];
+        switch (kind)
+        {
+        case Parent::Identity:    return glm::vec3(m[3]);
+        case Parent::Translation: return glm::vec3(m[3]) + glm::vec3(parent[3]);
+        default:                  return glm::vec3((parent * m)[3]);
+        }
+    }
+
+    // The world matrix of instance `i` of this block, bit-identical on every path.
+    glm::mat4 world(uint32_t i) const
+    {
+        const glm::mat4& m = (*matrices)[static_cast<size_t>(first) + i];
+        switch (kind)
+        {
+        case Parent::Identity:    return m;
+        case Parent::Translation: { glm::mat4 w = m; w[3] = glm::vec4(glm::vec3(m[3]) + glm::vec3(parent[3]), 1.0f); return w; }
+        default:                  return parent * m;
+        }
+    }
+};
+
 class RenderWorld {
 public:
     void clear();
@@ -215,8 +281,50 @@ public:
     HE_RENDERING_API bool dominantDirectionalLight(glm::vec3& towardOut,
                                                    glm::vec3& colorIntensityOut) const;
 
+    // ── Instances a draw item stands for ────────────────────────────────────
+    // The block of a cluster object, or nullptr for an ordinary one (and for a
+    // cluster whose block is missing or does not fit its storage: such an object
+    // reads as the single plant its `transform` names).
+    const InstanceBlock* blockOf(const RenderObject& obj) const
+    {
+        if (!obj.isCluster() || static_cast<size_t>(obj.instanceBlock) >= instanceBlocks.size())
+            return nullptr;
+        const InstanceBlock& b = instanceBlocks[static_cast<size_t>(obj.instanceBlock)];
+        return b.valid() ? &b : nullptr;
+    }
+
+    // 1 for an ordinary object, the block's count for a cluster.
+    uint32_t instanceCountOf(const RenderObject& obj) const
+    {
+        const InstanceBlock* b = blockOf(obj);
+        return b ? b->count : 1u;
+    }
+
+    // Append the WORLD matrices of obj's instances to `out`: its own transform for an
+    // ordinary object, the whole block (parent applied) for a cluster. The one place
+    // that unfolds a cluster; GeometryPass and RenderSorter::batchDepthRuns call it.
+    void appendInstances(const RenderObject& obj, std::vector<glm::mat4>& out) const
+    {
+        const InstanceBlock* b = blockOf(obj);
+        if (!b) { out.push_back(obj.transform); return; }
+        const size_t base = out.size();
+        out.resize(base + b->count);
+        for (uint32_t i = 0; i < b->count; ++i) out[base + i] = b->world(i);
+    }
+
+    // The same walk without materialising a list: call fn(world matrix) per instance.
+    template <class Fn>
+    void forEachInstance(const RenderObject& obj, Fn&& fn) const
+    {
+        const InstanceBlock* b = blockOf(obj);
+        if (!b) { fn(obj.transform); return; }
+        for (uint32_t i = 0; i < b->count; ++i) fn(b->world(i));
+    }
+
     std::vector<RenderObject>        objects;
     std::vector<SkinnedRenderObject> skinnedObjects;
+    // Storage behind RenderObject::instanceBlock (foliage clusters); empty without foliage.
+    std::vector<InstanceBlock>       instanceBlocks;
     std::vector<LightData>           lights;
     std::vector<DecalData>           decals;
     std::vector<UIRenderObject>      uiObjects;

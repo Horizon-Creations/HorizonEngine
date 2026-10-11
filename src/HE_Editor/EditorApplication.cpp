@@ -5,6 +5,9 @@
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
+#include "EditorTabs.h"            // retarget / dedupe the open asset tabs
+#include "ProjectPreflight.h"      // engine-content check in front of the first project open
+#include "SceneDiskWatch.h"        // the open scene's file stamp: our own save is not a pull
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
@@ -43,6 +46,8 @@
 #include "HcFallbackReport.h"      // which classes an export had to ship interpreted
 #include "EditorRewards.h"         // setSystemMotionQuery — Reduced Motion's "Follow System"
 #include "EditorSystemMotion.h"    // …and the system query it follows
+#include "ProjectLaunchOpen.h"     // a .heproj double-clicked in the file manager
+#include "HeprojRegistration.h"    // …and the editor making .heproj its own at start
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
@@ -81,6 +86,8 @@
 #include <HorizonScene/WaterBrush.h>
 #include <HorizonScene/WaterLake.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
+#include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -419,6 +426,51 @@ static const char* scriptLogTagFor(ProjectScriptLanguage lang)
 	}
 }
 
+static void registerProjectFileTypeAtStartup(GlobalState& gs);   // below, after Init
+
+// The project this start was asked to open, if any (ProjectLaunchOpen.h).
+// Windows and Linux hand it over as an argument; every argument that is not one
+// is said in the log and otherwise left alone. macOS sends an open event
+// instead, and at launch that event is usually already waiting in SDL's queue
+// by now (the splash pumps it) — so it is PEEKED here, not taken: it still
+// reaches OnEvent on the first frame, finds its project open and does nothing.
+// That way the first project load is the right one, instead of the last
+// session's project followed by a switch. `askedForProject` says a .heproj was
+// named but cannot be opened (moved, deleted): that is still a request, so the
+// caller shows the Hub with the reason rather than the last project.
+static std::string pickLaunchProject(const std::vector<std::string>& args,
+                                     bool& askedForProject)
+{
+	std::error_code ec;
+	const std::filesystem::path cwd = std::filesystem::current_path(ec);
+	ProjectLaunchOpen::LaunchPick pick = ProjectLaunchOpen::pickFromArguments(args, cwd);
+	askedForProject = !pick.project.empty();
+	for (const auto& [arg, why] : pick.rejected)
+	{
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' %s — not opened",
+		            arg.c_str(), ProjectLaunchOpen::describe(why));
+		if (why == ProjectLaunchOpen::PathError::NotFound ||
+		    why == ProjectLaunchOpen::PathError::NotAFile)
+			askedForProject = true;
+	}
+	for (const std::string& p : pick.ignored)
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' not opened — the editor "
+		                    "opens one project at a time", p.c_str());
+	if (!pick.project.empty()) return pick.project;
+
+	SDL_PumpEvents();
+	SDL_Event evs[16];
+	const int n = SDL_PeepEvents(evs, 16, SDL_PEEKEVENT, SDL_EVENT_DROP_FILE, SDL_EVENT_DROP_FILE);
+	for (int i = 0; i < n; ++i)
+	{
+		if (evs[i].drop.windowID != 0 || !evs[i].drop.data) continue;
+		// Unopenable ones are not said here: OnEvent says it when it gets there.
+		const ProjectLaunchOpen::ParsedPath p = ProjectLaunchOpen::parse(evs[i].drop.data, cwd);
+		if (p.ok()) return p.path;
+	}
+	return {};
+}
+
 void EditorApplication::OnInit()
 {
 	// A received collaboration snapshot replaces the whole world. Selection and
@@ -726,12 +778,7 @@ void EditorApplication::OnInit()
 			// An open tab follows its asset rather than being closed: the file
 			// still exists, it just lives somewhere else, and closing it would
 			// throw away unsaved work for a move the user did not make.
-			for (AppContext::EditorTab& t : m_tabs)
-			{
-				if (t.assetPath != full) continue;
-				t.assetPath = newFull;
-				t.label     = std::filesystem::path(newFull).stem().string();
-			}
+			EditorTabs::retarget(m_tabs, full, newFull, folder);
 
 			// Every peer retargets, not just the one who asked. The rules follow
 			// from (oldPath, newPath) alone, so identical inputs give identical
@@ -1945,13 +1992,45 @@ void EditorApplication::OnInit()
 		m_savedRevision = m_undo.revision();
 	});
 
+	// A project double-clicked in the file manager wins over the last one. Loaded
+	// the way the Project Hub loads a chosen file (ProjectHubPanel), because at
+	// this point the Hub is what is open. A failure does NOT fall back to the
+	// last project: the user asked for this one, and the Hub says why it did not
+	// open instead of quietly showing something else.
+	bool askedForProject = false;
+	const std::string launchProject = pickLaunchProject(launchArguments(), askedForProject);
+	if (askedForProject && launchProject.empty())
+		m_hubOpenError = "The project file passed at launch could not be found.";
+	else if (!launchProject.empty())
+	{
+		HE_LOG_INFO(Editor, "EditorApplication: opening %s (handed over at launch)",
+		            launchProject.c_str());
+		splashStatus("Opening " + std::filesystem::path(launchProject).stem().string(), 0.75f);
+		if (m_dumpPath.empty())
+		{
+			// The engine-content check (sign in, download, ask about what is missing) runs
+			// on the start screen before the project loads: the first frame hands it over.
+			ProjectPreflight::requestAtStartup(launchProject);
+		}
+		else if (m_projectManager.loadProject(launchProject))
+		{
+			m_globalState->addKnownProject(launchProject);
+			m_globalState->writeConfig();
+			m_projectLoaded         = true;
+			m_contentRefreshPending = true;
+		}
+		else
+			m_hubOpenError = "Failed to load project file.";
+	}
 	// If a project was previously opened, load it now (triggers the callback above)
-	if (!m_globalState->getLastProjectPath().empty())
+	else if (!m_globalState->getLastProjectPath().empty())
 	{
 		splashStatus("Opening " +
 		             std::filesystem::path(m_globalState->getLastProjectPath())
 		                 .stem().string(), 0.75f);
-		if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
+		if (m_dumpPath.empty())
+			ProjectPreflight::requestAtStartup(m_globalState->getLastProjectPath());
+		else if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
 		{
 			m_projectLoaded         = true;
 			m_contentRefreshPending = true;
@@ -1978,6 +2057,33 @@ void EditorApplication::OnInit()
 		startSftpProbe();
 #endif
 	}
+
+	// The editor makes .heproj open with itself (Windows registry, Linux XDG files;
+	// macOS has the Info.plist). Not in the headless runs: those are tests and
+	// screenshots, and must not repoint the file type of whoever runs them.
+	if (m_dumpPath.empty() && !HE::hiddenWindowRequested())
+		registerProjectFileTypeAtStartup(*m_globalState);
+}
+
+// HeprojRegistration.h: looks now (a few registry values or small files), writes on
+// a worker only when the registration is missing or points somewhere else. When
+// another application handles .heproj nothing is written, and the person hears
+// about it ONCE per application: the remembered name is read and written here, on
+// the main thread, because GlobalState is not for the worker.
+static void registerProjectFileTypeAtStartup(GlobalState& gs)
+{
+	const bool enabled = gs.getCustomConfigBool(HeprojRegistration::kSettingKey, true);
+	const HeprojRegistration::StartupReport report = HeprojRegistration::startAtStartup(enabled);
+	if (report.result.outcome != HeprojRegistration::Outcome::LeftAlone) return;
+
+	const std::string& owner = report.result.detail;
+	if (gs.getCustomConfigString(HeprojRegistration::kNoticeKey, "") == owner) return;
+	gs.setCustomConfigEntry(HeprojRegistration::kNoticeKey, owner);
+	HE::Ed::notify(HE::Ed::NoteLevel::Info,
+	               ".heproj project files open with " + owner + ", so the editor left the file type alone",
+	               "To open them with the Horizon Editor instead, use \"Open with\" in your file manager, "
+	               "or run the script in the editor's FileTypes folder. The check can be switched off under "
+	               "Edit > Preferences > Editor > Tool Status.");
 }
 
 void EditorApplication::startToolchainProbe()
@@ -2141,11 +2247,14 @@ void EditorApplication::startSftpProbe()
 			// Reached and authenticated, but the catalogue itself did not arrive —
 			// a different fault (manifest missing, unreadable, or unparseable) and
 			// one the user cannot fix by checking their network.
+			const std::string why = HE::Cs::EngineContentSync::instance().lastManifestError();
 			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
 				"The EngineContent catalogue could not be read.",
-				"The server answered, but its manifest could not be fetched or parsed, "
-				"and there is no cached copy on this machine. EngineContent will not "
-				"appear in the Content Browser this session.");
+				std::string("The server accepted the login, but reading its manifest failed")
+				+ (why.empty() ? std::string(".") : std::string(": ") + why + ".")
+				+ "  There is no cached copy on this machine, so EngineContent will not "
+				  "appear in the Content Browser this session. Restarting the editor "
+				  "tries again.");
 		}
 
 		if (haveManifest && gs && !engineContentPath.empty())
@@ -4190,7 +4299,8 @@ void EditorApplication::OnRender(float dt)
 			// A split scene's streaming cells, coloured by what the game would do
 			// with each from this camera. Editor furniture too: not while playing.
 			if (show.streamingCells && !m_isPlaying && m_editorWorld)
-				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(), dbg);
+				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(),
+				                                    StreamingDebugView::previewPins(), dbg);
 
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,
@@ -4927,7 +5037,9 @@ void EditorApplication::dumpFrameHeadless()
 		if (auto* e = dumpSky == entt::null ? nullptr
 		            : m_editorWorld->registry().try_get<EnvironmentComponent>(dumpSky))
 		{
-			e->dayNightCycle  = true;
+			// HE_DUMP_DAYNIGHT=0 switches the cycle off (the sun keeps its fixed default
+			// direction, TOD does nothing): the day-night-off side of a shadow A/B.
+			e->dayNightCycle  = envF("HE_DUMP_DAYNIGHT", 1.0f) > 0.5f;
 			e->timeOfDay      = static_cast<float>(envF("HE_DUMP_TOD", 0.0f));        // 0 = midnight
 			e->cloudMode      = static_cast<int>(envF("HE_DUMP_CLOUDMODE", 1.0f));
 			e->cloudCoverage  = static_cast<float>(envF("HE_DUMP_COVERAGE", 0.5f));
@@ -5753,10 +5865,16 @@ void EditorApplication::dumpFrameHeadless()
 			                          "Engine/Materials/Water.hasset or Engine/Meshes/Plane.hasset");
 		else
 		{
+			// HE_DUMP_WATERSIZE=<metres>: side of the square (default 40). The swell
+			// is 14 m long, so a pattern that repeats every few wavelengths only
+			// shows on a plane several times that (Thema 152, Schritt 8).
+			float side = 40.0f;
+			if (const char* ws = std::getenv("HE_DUMP_WATERSIZE"); ws && *ws)
+				side = std::clamp(std::strtof(ws, nullptr), 1.0f, 4000.0f);
 			auto e = m_editorWorld->createEntity("WaterTest");
 			TransformComponent tc;
 			tc.position = glm::vec3(0.0f, 0.0f, -8.0f);
-			tc.scale    = glm::vec3(40.0f, 1.0f, 40.0f);
+			tc.scale    = glm::vec3(side, 1.0f, side);
 			reg.emplace<TransformComponent>(e, tc);
 			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
 			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
@@ -5804,7 +5922,7 @@ void EditorApplication::dumpFrameHeadless()
 				auto fe = m_editorWorld->createEntity("WaterTestFloor");
 				TransformComponent ftc;
 				ftc.position = glm::vec3(0.0f, -1.5f, -8.0f);
-				ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+				ftc.scale    = glm::vec3(side, 0.2f, side);
 				reg.emplace<TransformComponent>(fe, ftc);
 				reg.emplace<MeshComponent>(fe, MeshComponent{ HE::kDefaultCubeMeshId });
 				reg.emplace<MaterialComponent>(fe,
@@ -6749,6 +6867,95 @@ void EditorApplication::dumpFrameHeadless()
 			tb, gen.textures.size(), gen.textureArrayMask, grids);
 	}
 
+	// ── Foliage witness (HE_DUMP_FOLIAGETEST=<N>, Thema 163 Schritt 2c) ─────────
+	// A flat landscape with ONE foliage layer of N instances of a built-in mesh,
+	// so the cost of scattered vegetation (extract, cull, sort, batch, draw) has
+	// a repeatable subject and the picture before/after a rendering change can
+	// be compared. The instances are scattered here, synchronously, and the time
+	// FoliageSystem took goes into the log together with the count it really
+	// placed (the density is derived from N and the area, so it is N).
+	//   HE_DUMP_FOLIAGESIZE=<m>        terrain side, default 400 m, centred on 0,0,0
+	//   HE_DUMP_FOLIAGEDIST=<m>        drawDistance, default 1e6 (every instance
+	//                                  is in range; a small value is the "only a
+	//                                  part is in range" case)
+	//   HE_DUMP_FOLIAGEMESH=cube|sphere  default cube
+	//   HE_DUMP_FOLIAGESCALE=<min>,<max> instance scale, default 0.5,1.0
+	//   HE_DUMP_FOLIAGESEED=<n>        scatter seed, default 42
+	// The camera is the dump's own (HE_DUMP_CAMX/CAMY/CAMZ/PITCH/YAW); a view
+	// over the middle of the field is CAMX=0 CAMY=40 CAMZ=-120 PITCH=-20.
+	if (const char* ft = std::getenv("HE_DUMP_FOLIAGETEST"); ft && *ft && m_editorWorld)
+	{
+		auto envF = [](const char* k, float d)
+		{ const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : d; };
+		const long  want = std::max(1L, std::atol(ft));
+		const float side = std::max(10.0f, envF("HE_DUMP_FOLIAGESIZE", 400.0f));
+		const bool  sphere = [] { const char* m = std::getenv("HE_DUMP_FOLIAGEMESH");
+		                          return m && std::string_view(m) == "sphere"; }();
+		float scaleMin = 0.5f, scaleMax = 1.0f;
+		if (const char* sc = std::getenv("HE_DUMP_FOLIAGESCALE"); sc && *sc)
+		{
+			const char* comma = std::strchr(sc, ',');
+			scaleMin = static_cast<float>(std::atof(sc));
+			scaleMax = comma ? static_cast<float>(std::atof(comma + 1)) : scaleMin;
+		}
+
+		auto& reg  = m_editorWorld->registry();
+		auto  land = m_editorWorld->createEntity("FoliageTestField");
+		reg.emplace<TransformComponent>(land, TransformComponent{});
+		TerrainComponent ftc;
+		ftc.sizeX = ftc.sizeZ = side;
+		ftc.resolution  = 129;
+		ftc.heightScale = 0.0f;    // flat: terrainHeightAt is 0 everywhere
+		ftc.seed        = 0;
+		ftc.dirty       = true;
+		reg.emplace<TerrainComponent>(land, ftc);
+		FoliageComponent fol;
+		fol.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
+		// +0.5: the scatter takes int(area * density), and float rounding must
+		// not cost the last instance.
+		fol.density      = (static_cast<float>(want) + 0.5f) / (side * side);
+		fol.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
+		fol.minScale     = scaleMin;
+		fol.maxScale     = scaleMax;
+		fol.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
+		fol.dirty        = true;
+		// HE_DUMP_FOLIAGEMAT=graph: the layer carries a node-graph material (one flat
+		// magenta ConstColor, no animation) instead of the built-in PBR. A backend that
+		// instances the batch with its built-in program draws it grey; one that keeps
+		// the material draws it magenta, once per instance (Thema 163 Teil 2b, GL gate).
+		if (const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT"); fm && std::string_view(fm) == "graph")
+		{
+			MaterialAsset mat;
+			mat.type = HE::AssetType::Material;
+			mat.name = "FoliageGraphTest";
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.1f; g.findNode(col)->p[2] = 0.8f;
+			g.connect(col, 0, out, 0);
+			mat.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			mat.customShaderFragGlsl = gen.glsl;
+			mat.customShaderGBufGlsl = gen.glslGBuffer;
+			mat.customShaderVertGlsl = gen.vertexBody;
+			mat.blendMode            = gen.blendMode;
+			mat.domain               = gen.domain;
+			fol.materialAssetId = contentManager().registerMaterial(std::move(mat));
+		}
+		reg.emplace<FoliageComponent>(land, fol);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const auto t0 = std::chrono::steady_clock::now();
+		FoliageSystem::update(*m_editorWorld);
+		const double scatterMs = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+		const FoliageComponent& placedFol = reg.get<FoliageComponent>(land);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGETEST witness field added "
+			"(%zu instances placed of %ld asked, %s, %.0f m square, scale %.2f-%.2f, "
+			"drawDistance %.0f, scatter %.1f ms)",
+			placedFol.cachedInstances.size(), want, sphere ? "sphere" : "cube", side,
+			placedFol.minScale, placedFol.maxScale, placedFol.drawDistance, scatterMs);
+	}
+
 	// ── Auto landscape material witness (HE_DUMP_AUTOLAND, Thema 158 Schritt 5) ─
 	// A 128 m landscape at y=300 whose relief is ANALYTIC, so every column's
 	// expected layer is known: a flat plain (x < -24), a smoothstep ramp up to a
@@ -7475,10 +7682,26 @@ void EditorApplication::dumpFrameHeadless()
 
 	// Witness the material-preview offscreen path (HE_DUMP_PREVIEW + HE_PREVIEW_DUMP):
 	// render the test material's preview sphere and let the backend dump it.
-	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && s_matTestId != HE::UUID{})
+	// HE_DUMP_PREVIEWMAT=<content-relative .hasset> previews THAT material instead
+	// (e.g. "Engine/Materials/Water.hasset"), and HE_DUMP_PREVIEWTIME=<seconds> hands
+	// the preview the engine clock the Material Editor hands it every frame — two runs
+	// at different times must differ for a material that reads Time, and match for one
+	// that does not (the noise floor). Without it the preview is the frozen still the
+	// Content Browser thumbnails use.
+	HE::UUID pvMat = s_matTestId;
+	if (const char* pmat = std::getenv("HE_DUMP_PREVIEWMAT"); pmat && *pmat && std::getenv("HE_DUMP_PREVIEW"))
+	{
+		pvMat = contentManager().loadAsset(pmat);
+		HE_LOG_INFO(Editor, "%s", (std::string("EditorApplication: preview material '") + pmat
+			+ (pvMat != HE::UUID{} ? "' loaded" : "' NOT FOUND")).c_str());
+	}
+	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && pvMat != HE::UUID{})
 	{
 		// HE_DUMP_PREVIEW=1 → sphere (default); =2 cube, =3 plane (the editor's primitives).
 		const int shape = std::clamp(std::atoi(pv) - 1, 0, 2);
+		float pvTime = -1.0f;
+		if (const char* pt = std::getenv("HE_DUMP_PREVIEWTIME"); pt && *pt)
+			pvTime = static_cast<float>(std::atof(pt));
 		// HE_DUMP_PREVIEWMESH=<content-relative path> witnesses the OTHER preview
 		// subject: any static mesh the Material Editor's picker can choose (e.g.
 		// "Engine/Meshes/Torus.hasset"), auto-framed on its bounds.
@@ -7489,11 +7712,11 @@ void EditorApplication::dumpFrameHeadless()
 			HE_LOG_INFO(Editor, "%s", (std::string("EditorApplication: preview mesh '") + pm
 				+ (pvMesh != HE::UUID{} ? "' loaded" : "' NOT FOUND")).c_str());
 		}
-		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f, shape, pvMesh);
+		r->RenderMaterialPreview(contentManager(), pvMat, 512, 0.6f, 0.35f, 3.1f, shape, pvMesh, pvTime);
 		// Stress the property-change→re-preview path (repro for the side-panel crash):
 		// mutate the material's shader source + params like an editor edit would, then
 		// re-preview. HE_DUMP_PREVIEW_STRESS=N repeats N times.
-		if (const char* sp = std::getenv("HE_DUMP_PREVIEW_STRESS"); sp && *sp)
+		if (const char* sp = std::getenv("HE_DUMP_PREVIEW_STRESS"); sp && *sp && pvMat == s_matTestId)
 		{
 			const int reps = std::max(1, std::atoi(sp));
 			for (int k = 0; k < reps; ++k)
@@ -9361,16 +9584,10 @@ void EditorApplication::setupMcpTools()
 	assets.onAssetAppeared = [this](const std::string&) {
 		m_contentRefreshPending = true;
 	};
-	assets.onAssetMoved = [this](const std::string& oldAbs, const std::string& newAbs, bool) {
+	assets.onAssetMoved = [this](const std::string& oldAbs, const std::string& newAbs, bool folder) {
 		AssetThumbnailCache::invalidate(oldAbs);
 		AssetThumbnailCache::invalidate(newAbs);
-		AppContext ctx = makeContext();
-		for (auto& t : ctx.tabs)
-			if (t.assetPath == oldAbs)
-			{
-				t.assetPath = newAbs;
-				t.label     = std::filesystem::path(newAbs).stem().string();
-			}
+		EditorTabs::retarget(m_tabs, oldAbs, newAbs, folder);
 		m_contentRefreshPending = true;
 	};
 	assets.projectRoot = [this] {
@@ -10396,11 +10613,17 @@ AppContext EditorApplication::makeContext()
 				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		},
 		.applyPhysicsSettings = [this]{
-			// Gravity only: the fixed rate is read from the project on every
-			// step already. Outside play mode there is no world, and the next
-			// play start reads both from the project itself.
+			// Gravity and the thread count: the fixed rate is read from the
+			// project on every step already. Outside play mode there is no
+			// world, and the next play start reads all of it from the project
+			// itself.
 			if (m_physicsWorld)
-				m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+			{
+				const auto& physics = m_projectManager.currentProject().settings.physics;
+				m_physicsWorld->setGravity(physics.gravity);
+				m_physicsWorld->setThreadCount(physics.threads);
+				m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
+			}
 		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
@@ -10961,6 +11184,17 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_playReportOpen = false;
 		Logger::setSink(&hePlayLogSink, this);
+		// A scene split into streaming cells has the game load them around the camera
+		// (HE::CellStreamer, GameApplication::updateCellStreaming). Play runs in THIS
+		// world, which after a split holds only the base, and nothing in the editor
+		// streams cells (Thema 164, docs/entity-cell-streaming-plan-2026-10-10.md L7).
+		// Said here, after the sink is in, so the post-play report carries it and an
+		// apparently empty scene is explained.
+		if (!m_editorWorld->cellManifestJson().empty())
+			HE_LOG_WARN(Editor, "%s", "Play shows only the base of this scene: it is split into "
+			            "streaming cells, and the editor does not stream them while playing. Merge "
+			            "the cells back (Profiler > Streaming > Merge Cells into the Scene) to play "
+			            "all of it, or run the game build.");
 		// Edits made while playing are not undoable. Clearing here only opens the
 		// session with an empty history; what keeps it that way is makeContext
 		// withholding the undo system while m_isPlaying (so no panel records) and
@@ -11018,6 +11252,13 @@ void EditorApplication::setPlayMode(bool play)
 		// Same order as GameApplication::startPhysics, because a preview that
 		// falls differently from the build is not a preview.
 		m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+		// The project's thread count too (0 = automatic), for the same reason as
+		// the game: the preview should run the step the build will run.
+		m_physicsWorld->setThreadCount(m_projectManager.currentProject().settings.physics.threads);
+		{
+			const auto& physics = m_projectManager.currentProject().settings.physics;
+			m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
+		}
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is
@@ -11511,16 +11752,28 @@ void EditorApplication::restoreOpenTabs()
 	m_tabs.erase(std::remove_if(m_tabs.begin(), m_tabs.end(),
 		[](const AppContext::EditorTab& t){ return !t.assetPath.empty(); }), m_tabs.end());
 
+	// `active` is an index into the tab list AS SAVED (the Viewport tab is 0), and
+	// entries dropped below shift everything after them — so remember where each
+	// saved position ended up.
+	std::vector<int> placed{ 0 };
 	for (const auto& t : state.value("tabs", nlohmann::json::array()))
 	{
 		const std::string path = t.value("path", std::string());
 		// Restore virtual tabs (":…") and assets that still exist on disk.
-		if (path.empty()) continue;
-		if (path[0] != ':' && !std::filesystem::exists(path)) continue;
+		if (path.empty() || (path[0] != ':' && !std::filesystem::exists(path)))
+		{
+			placed.push_back(-1);
+			continue;
+		}
+		placed.push_back(static_cast<int>(m_tabs.size()));
 		m_tabs.push_back({ t.value("label", std::string()), path, true, true });
 	}
+	// A list saved while the open path could still make two tabs for one asset
+	// would bring both back every session; keep the first of each.
+	const std::vector<int> merged = EditorTabs::dedupe(m_tabs, &contentManager());
 	const int active = state.value("active", 0);
-	m_activeTab = (active >= 0 && active < (int)m_tabs.size()) ? active : 0;
+	const int at     = (active >= 0 && active < static_cast<int>(placed.size())) ? placed[active] : -1;
+	m_activeTab = (at >= 0 && at < static_cast<int>(merged.size())) ? merged[at] : 0;
 }
 
 // ─── Scene file management ──────────────────────────────────────────────────────
@@ -11810,6 +12063,11 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	// changes with it, which is what a human sees after the save anyway. An
 	// edit committed in this very frame is marked first, or the sync would be
 	// what undoes it.
+	// The file changed on disk since this editor read or wrote it (a git pull): saving
+	// now would put the stale open scene over it. The reload question is raised and the
+	// save waits for the answer.
+	if (SceneDiskWatch::blocksSave(path)) return false;
+
 	recordPrefabEdits();
 	syncPrefabInstances("save");
 
@@ -11817,6 +12075,7 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
 	{
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);         // our own write, not somebody else's change
 		m_savedRevision    = m_undo.revision(); // scene is now clean
 		// The file now holds everything the snapshot held — and a leftover copy
 		// would be offered as "unsaved work" at the next start.
@@ -12011,6 +12270,7 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		loaded = true;
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);
 		// Before the asset preload: the sync may change which meshes and
 		// materials the placed prefabs reference.
 		syncPrefabInstances("open");
@@ -12207,6 +12467,7 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	ProjectPreflight::shutdown();   // joins a still-running engine-content check
 	// Give the network back what a session took, FIRST and synchronously: the
 	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits
 	// while hosting never presses "leave", and none of those clean themselves up
@@ -12273,6 +12534,9 @@ void EditorApplication::OnShutdown()
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
 	if (m_gitThread.joinable()) m_gitThread.join();
+	// The .heproj registration's writer (HeprojRegistration.h): a file-static thread
+	// like the publish worker below, bounded by the timeouts of the helpers it runs.
+	HeprojRegistration::shutdown();
 	// Bounded by the 30 s timeout on its single CLI run, so it cannot hang the
 	// quit — but it is a joinable std::thread like the others, and destroying one
 	// terminates the process.
@@ -12629,6 +12893,32 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			// Only a drop that landed IN the preview is answered here; one that
 			// missed it stays available to whatever the editor grows next.
 			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
+		}
+	}
+
+	// ── A project handed over by the system (ProjectLaunchOpen.h) ────────────
+	// macOS opens a document by event, also in an editor that is already
+	// running, and SDL delivers it as a DROP_FILE with no window (windowID 0).
+	// A .heproj dropped onto the editor window outside the live preview (which
+	// answered above) means the same thing. Only posted here: the Hub or the
+	// editor takes it on the next frame through its own Open, the editor's with
+	// the unsaved-changes prompt. A window drop of any other file stays silent —
+	// it was aimed at the preview or at nothing; an OS open of one is logged.
+	if (event.type == SDL_EVENT_DROP_FILE && event.drop.data)
+	{
+		const bool fromSystem = event.drop.windowID == 0;
+		std::error_code ec;
+		const ProjectLaunchOpen::ParsedPath p =
+			ProjectLaunchOpen::parse(event.drop.data, std::filesystem::current_path(ec));
+		if (fromSystem || p.error != ProjectLaunchOpen::PathError::WrongExtension)
+		{
+			if (!p.ok())
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' %s — not opened",
+				            event.drop.data, ProjectLaunchOpen::describe(p.error));
+			else if (!ProjectLaunchOpen::post(p.path))
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' not opened — another project is "
+				                    "already waiting to open, one at a time", p.path.c_str());
+			return true;
 		}
 	}
 
