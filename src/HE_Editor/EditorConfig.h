@@ -19,6 +19,7 @@ enum class EditorMode
 {
 	View,
 	Landscape,
+	Spline,    // draw and edit lines and outlines (SplineComponent) in the Scene viewport
 };
 
 struct EditorConfig
@@ -260,6 +261,7 @@ struct EditorConfig
 		{
 		case EditorMode::View:      return "View";
 		case EditorMode::Landscape: return "Landscape";
+		case EditorMode::Spline:    return "Spline";
 		default:                   return "Unknown";
 		}
 	}

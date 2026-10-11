@@ -45,6 +45,38 @@ namespace HE::spline
         bool   empty()         const { return indices.empty(); }
     };
 
+    // ── One span of the curve ────────────────────────────────────────────────
+    // The piece of a centripetal Catmull-Rom spline between p1 and p2, shaped by
+    // its neighbours p0 and p3. This is the single place the curve's maths lives:
+    // sampleCatmullRom below walks it for ropes and trails, and HE::spline::Curve
+    // (SplineCurve.h) evaluates it at arbitrary parameters for the spline
+    // component, so a rope and a spline through the same points are the same curve.
+    //
+    // The knots are built once per span, not per sample. `u` runs 0…1 and is
+    // mapped linearly onto the knot interval [t1, t2], which is NOT arc length —
+    // equal steps in u cover unequal distances where the curve bends.
+    struct CatmullRomSpan
+    {
+        glm::vec3 p0 { 0.0f }, p1 { 0.0f }, p2 { 0.0f }, p3 { 0.0f };
+        float     t1 = 0.0f, t2 = 0.0f, t3 = 0.0f;   // knots, with t0 = 0
+        bool      degenerate = true;                 // a coincident pair collapsed a knot interval
+
+        CatmullRomSpan() = default;
+        CatmullRomSpan(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, const glm::vec3& d);
+
+        // The point at u (p1 at 0, p2 at 1). A degenerate span — two of its
+        // neighbouring points coincide, which would divide by zero in the
+        // recursion — is a straight line from p1 to p2.
+        glm::vec3 at(float u) const;
+
+        // dC/dt at u: the direction of travel, analytically (the derivative of
+        // the same recursion at() runs), so a tangent does not depend on a step
+        // size that float precision would punish at large coordinates. Its
+        // LENGTH is in knot units and means nothing — normalise it. Zero where
+        // the curve has no direction (a degenerate span between coincident points).
+        glm::vec3 derivative(float u) const;
+    };
+
     // ── Stage 1: the curve ───────────────────────────────────────────────────
     // Centripetal Catmull-Rom (α = 0.5) through every control point, with the
     // end segments defined by mirrored phantom points. Centripetal rather than

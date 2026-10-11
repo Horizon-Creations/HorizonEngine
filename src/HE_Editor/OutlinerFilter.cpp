@@ -15,6 +15,7 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/RopeComponent.h>
+#include <HorizonScene/Components/SplineComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
@@ -58,6 +59,7 @@ namespace
 		{ "Foliage",              anyOf<FoliageComponent> },
 		{ "Terrain",              anyOf<TerrainComponent> },
 		{ "Rope",                 anyOf<RopeComponent> },
+		{ "Spline",               anyOf<SplineComponent> },
 		{ "Trail",                anyOf<TrailComponent> },
 		{ "Animator",             anyOf<AnimatorComponent, AnimatorStateMachineComponent> },
 		{ "Navigation",           anyOf<NavMeshComponent, NavAgentComponent> },
@@ -88,6 +90,7 @@ namespace
 		{ "F",   0x6FBF73 },   // Foliage
 		{ "T",   0xA3875B },   // Terrain
 		{ "R",   0xE5C07B },   // Rope
+		{ "S",   0xEF6F6C },   // Spline
 		{ "~",   0x61AFEF },   // Trail
 		{ "An",  0xFF9E64 },   // Animator
 		{ "N",   0x2AC3DE },   // Navigation
@@ -100,25 +103,28 @@ namespace
 
 	// What an entity is called first, most telling first. A component that only
 	// decorates another (a Collider on a Mesh) comes after the thing it decorates.
-	// Prefab Instance is not here: it has a chip of its own on the row.
+	// Prefab Instance is not here: it has a chip of its own on the row. The
+	// numbers are positions in kKinds: a kind added in the middle of that list
+	// moves every one after it.
 	const int kPriority[] = {
 		3,   // Camera
 		4,   // Light
 		13,  // Terrain
 		12,  // Foliage
-		19,  // Weather
-		18,  // UI
+		20,  // Weather
+		19,  // UI
 		2,   // Skeletal Mesh
 		1,   // Mesh
 		9,   // Particle System
 		10,  // Audio
 		11,  // Decal
 		14,  // Rope
-		15,  // Trail
+		15,  // Spline
+		16,  // Trail
 		7,   // Character Controller
 		5,   // Rigid Body
-		17,  // Navigation
-		16,  // Animator
+		18,  // Navigation
+		17,  // Animator
 		6,   // Collider
 		8,   // Script
 	};

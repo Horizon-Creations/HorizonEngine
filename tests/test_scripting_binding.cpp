@@ -16,6 +16,9 @@
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonScene/Components/SplineComponent.h>      // the water group's lake outline
+#include <HorizonScene/Components/TerrainComponent.h>     // … and the landscape it lies on
+#include <cmath>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Diagnostics/Log.h>   // addSink — the error-report tests read what reached the log
@@ -1191,4 +1194,60 @@ return M
 	CHECK(seen.count("second script broke") == 1);
 	// The report says which instance and which callback, like before.
 	CHECK(seen.count("failed in onUpdate()") == 2);
+}
+
+TEST_CASE("ScriptContext: horizon.water makes a lake over a landscape and reads it back (Lua)")
+{
+	// The water group has no flat twin: this is the only door a Lua script has to
+	// lakes and the brush. A landscape at (100, 20, -50) with its ground at world
+	// y = 30, a closed round spline over its middle.
+	HorizonWorld world;
+	const Entity land = world.createEntity("Landscape");
+	{
+		TransformComponent t; t.position = { 100.0f, 20.0f, -50.0f }; t.dirty = true;
+		world.registry().emplace<TransformComponent>(land, t);
+		TerrainComponent tc;
+		tc.sizeX = tc.sizeZ = 64.0f; tc.resolution = 65; tc.dirty = false; tc.water.res = 64;
+		tc.sculptHeights.assign(65u * 65u, 10.0f);
+		world.registry().emplace<TerrainComponent>(land, tc);
+	}
+	const Entity spline = world.createEntity("Shore");
+	{
+		TransformComponent t; t.position = { 100.0f, 20.0f, -50.0f }; t.dirty = true;
+		world.registry().emplace<TransformComponent>(spline, t);
+		SplineComponent s; s.closed = true;
+		for (int i = 0; i < 16; ++i)
+		{
+			const float a = 6.2831853f * static_cast<float>(i) / 16.0f;
+			s.controlPoints.emplace_back(10.0f * std::cos(a), 10.0f, 10.0f * std::sin(a));
+		}
+		world.registry().emplace<SplineComponent>(spline, std::move(s));
+	}
+
+	ScriptContext ctx(world);
+	const std::string script =
+		"_G._land = " + std::to_string(static_cast<uint32_t>(land)) + "\n"
+		"_G._spl  = " + std::to_string(static_cast<uint32_t>(spline)) + "\n"
+		// Surface at world 31, a 3 m bed with a 3 m bank.
+		"_G._body = horizon.water.createLake(_G._land, _G._spl, 31, true, 3, 3)\n"
+		"_G._at   = horizon.water.bodyAt(_G._land, 100, -50)\n"
+		"_G._dry  = horizon.water.bodyAt(_G._land, 100, -5)\n"
+		"local wet, level = horizon.water.levelAt(_G._land, 100, -50)\n"
+		"_G._wet = wet and 1 or 0\n"
+		"_G._level = level\n"
+		"_G._lake = horizon.water.lakeBody(_G._spl)\n"
+		"_G._cells = horizon.water.wetCells(_G._land, _G._body)\n"
+		// One brush dab on dry ground makes a pond of its own.
+		"_G._painted = horizon.water.paint(_G._land, 125, -30, 4, 0)\n";
+	REQUIRE(ctx.engine().exec(script.c_str()));
+	const auto body = static_cast<int>(ctx.engine().getGlobalNumber("_body"));
+	CHECK(body > 0);
+	CHECK(static_cast<int>(ctx.engine().getGlobalNumber("_at")) == body);
+	CHECK(static_cast<int>(ctx.engine().getGlobalNumber("_dry")) == 0);
+	CHECK(ctx.engine().getGlobalNumber("_wet") == 1.0);
+	CHECK(ctx.engine().getGlobalNumber("_level") == doctest::Approx(31.0));    // WORLD height, as given
+	CHECK(static_cast<int>(ctx.engine().getGlobalNumber("_lake")) == body);
+	CHECK(ctx.engine().getGlobalNumber("_cells") > 250.0);
+	CHECK(ctx.engine().getGlobalNumber("_painted") > 0.0);
+	CHECK(world.registry().get<TerrainComponent>(land).water.bodies.size() == 2u);
 }

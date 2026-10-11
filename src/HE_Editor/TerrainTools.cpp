@@ -11,6 +11,8 @@
 #include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
 #include <HorizonScene/TerrainHeightmap.h> // greyscale heightmap → heights
 #include <HorizonScene/TerrainGenerate.h>  // Mountain: a formation grown in a dragged area
+#include <HorizonScene/WaterBrush.h>       // Water: a stroke into the landscape's water field
+#include <HorizonScene/WaterLake.h>        // Water: "To Lake" on a painted pond
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -57,6 +59,22 @@ static bool        s_landscapeFoliage = false;
 static bool        s_landscapeSetup   = false;
 static bool        s_foliageErase     = false;
 static float       s_foliageTarget    = 1.0f;   // Grow paints toward this fraction of Density
+// Landscape WATER mode (Thema 174 Schritt 7): the same brush writes the
+// landscape's water field (HE::water, TerrainComponent::water) — the model the
+// lake tool shares — instead of heights. What a stroke means (which body it
+// paints into, at which level, the eraser, the optional dig) lives in
+// HE::water::brush; this file owns the cursor, the pacing and the undo step.
+static bool        s_landscapeWater   = false;
+static bool        s_waterErase       = false;  // the tab's Paint | Erase; Ctrl inverts it
+static bool        s_waterFromGround  = true;   // level = the ground under the first point + offset
+static float       s_waterLevel       = 0.0f;   // ... or this number (terrain-local Y)
+static float       s_waterOffset      = 0.3f;   // above the ground at the first point
+static bool        s_waterDig         = false;  // also dig a bed under the water
+static float       s_waterDigDepth    = 1.0f;   // bed this far below the level
+static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
+static int         s_waterResEdit     = 0;      // the grid slider's pending value
+static bool        s_waterResEditing  = false;
+static std::string s_waterNote;                 // what the last "To Lake" said
 static float       s_brushRadius     = 10.0f;  // inner full-strength radius (m)
 static float       s_falloffRadius   = 5.0f;   // transition width — strength falls linearly to 0
 static float       s_brushStrength   = 5.0f;
@@ -435,10 +453,11 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 				}
 			}
 
-			// Mountain is armed only on the Sculpt page: in Paint or Foliage
+			// Mountain is armed only on the Sculpt page: in Paint, Foliage or Water
 			// mode the same brush state paints, whatever tool Sculpt left armed.
 			const bool mountainArmed = s_terrainTool == TerrainTool::Mountain
-			                        && !s_landscapePaint && !s_landscapeFoliage && !s_landscapeSetup;
+			                        && !s_landscapePaint && !s_landscapeFoliage && !s_landscapeWater
+			                        && !s_landscapeSetup;
 
 			// Ctrl turns the armed brush around for as long as it is held: Raise <-> Lower,
 			// Paint -> back to the base layer, Grow <-> Erase. Alt is the camera's.
@@ -458,6 +477,30 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					v = io.KeyShift ? std::clamp(v, 0.0f, 500.0f) : std::clamp(v, 0.5f, 500.0f);
 				}
 			}
+
+			// A water stroke belongs to the Water tab: leaving it (a panel click,
+			// which cannot happen with the button down, but also the tab being
+			// driven some other way) closes the stroke so nothing keeps painting.
+			if (!s_landscapeWater && s_waterStroke.active)
+				HE::water::brush::end(s_waterStroke, tc);
+
+			// What the water brush would do, as of this frame: the same numbers the
+			// cursor previews and the stroke uses. Ctrl flips Paint and Erase, as it
+			// turns every other brush around. Strength is paced like the foliage
+			// brush's but six times as fast: water has to cross the 50 % coverage
+			// line before it exists at all (at the default strength that is about
+			// eight frames under the cursor), where a plant is visible from its
+			// first frame.
+			HE::water::brush::Params waterParams;
+			waterParams.radius          = s_brushRadius;
+			waterParams.falloff         = s_falloffRadius;
+			waterParams.amount          = std::clamp(s_brushStrength * static_cast<float>(dt) * 1.0f, 0.0f, 1.0f);
+			waterParams.erase           = s_waterErase != invert;
+			waterParams.levelFromGround = s_waterFromGround;
+			waterParams.level           = s_waterLevel;
+			waterParams.levelOffset     = s_waterOffset;
+			waterParams.dig             = s_waterDig;
+			waterParams.digDepth        = s_waterDigDepth;
 
 			ImDrawList* dl    = ImGui::GetWindowDrawList();
 			const float viewW = rectMax.x - rectMin.x;
@@ -485,13 +528,18 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 				const float totalR   = s_brushRadius + s_falloffRadius;
 
 				// The foliage brush says what it will do by colour: green
-				// grows, red erases. Sculpt and layer paint keep the white.
+				// grows, red erases. The water brush likewise: blue paints,
+				// red erases. Sculpt and layer paint keep the white.
 				const bool folCursor = s_landscapeFoliage;
 				const bool folErase  = s_foliageErase != invert;
-				const ImU32 innerCol = !folCursor       ? IM_COL32(255,255,255,210)
+				const bool watCursor = s_landscapeWater;
+				const bool watErase  = waterParams.erase;
+				const ImU32 innerCol = watCursor ? (watErase ? IM_COL32(255,110, 90,220) : IM_COL32( 90,190,255,230))
+				                     : !folCursor       ? IM_COL32(255,255,255,210)
 				                     : folErase         ? IM_COL32(255,110, 90,220)
 				                                        : IM_COL32(120,230,110,220);
-				const ImU32 outerCol = !folCursor       ? IM_COL32(180,180,180,120)
+				const ImU32 outerCol = watCursor ? (watErase ? IM_COL32(255,110, 90,110) : IM_COL32( 90,190,255,120))
+				                     : !folCursor       ? IM_COL32(180,180,180,120)
 				                     : folErase         ? IM_COL32(255,110, 90,110)
 				                                        : IM_COL32(120,230,110,110);
 				for (int ci = 0; ci < 2; ++ci)
@@ -517,12 +565,56 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 				// Ramp guide: a line from the stroke start to the cursor so
 				// the gradient direction is visible while dragging.
 				if (s_terrainTool == TerrainTool::Ramp && s_rampValid &&
-				    ImGui::IsMouseDown(ImGuiMouseButton_Left))
+				    ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+				    !s_landscapePaint && !s_landscapeFoliage && !s_landscapeWater)
 				{
 					ImVec2 ps{}, pe{};
 					if (projectPt(s_rampStartWS.x, s_rampStartWS.z, ps) &&
 					    projectPt(hitWS.x, hitWS.z, pe))
 						dl->AddLine(ps, pe, IM_COL32(120,200,255,230), 2.0f);
+				}
+
+				// Water: where the surface will stand. A flat ring at the stroke's
+				// level (held while dragging, otherwise what a press here would
+				// take: the ground plus the offset, or the level of the water
+				// under the cursor), so a click on a slope can be judged before it
+				// is made — the part of the ring under the ground is the part of
+				// the pond that will not exist. The line of text says which.
+				if (watCursor && !watErase)
+				{
+					const bool held = s_waterStroke.active && !s_waterStroke.erase;
+					const HE::water::brush::Target tgt = HE::water::brush::targetAt(
+						tc, hitWS.x - terrainWorldPos.x, hitWS.z - terrainWorldPos.z, waterParams);
+					const float level = held ? s_waterStroke.level : tgt.level;
+					const bool  cont  = held ? !s_waterStroke.created : tgt.continues;
+					const ImU32 lvlCol = IM_COL32(90,190,255,200);
+					ImVec2 prev{}; bool prevValid = false;
+					for (int i = 0; i <= kSeg; ++i)
+					{
+						const float a = kPi2 * i / kSeg;
+						const glm::vec4 clip = VP * glm::vec4(hitWS.x + s_brushRadius * std::cos(a),
+						                                      terrainWorldY + level,
+						                                      hitWS.z + s_brushRadius * std::sin(a), 1.0f);
+						ImVec2 cur{}; bool curValid = false;
+						if (clip.w > 0.0f)
+						{
+							const glm::vec3 n = glm::vec3(clip) / clip.w;
+							if (n.z >= -1.0f && n.z <= 1.0f)
+							{
+								cur = ImVec2(rectMin.x + (n.x * 0.5f + 0.5f) * viewW,
+								             rectMin.y + (0.5f - n.y * 0.5f) * viewH);
+								curValid = true;
+							}
+						}
+						if (prevValid && curValid && (i & 1))   // dashed: every other segment
+							dl->AddLine(prev, cur, lvlCol, 1.0f);
+						prev = cur; prevValid = curValid;
+					}
+					char label[64];
+					std::snprintf(label, sizeof(label), cont ? "continues water, level %.2f m" : "new water, level %.2f m", level);
+					ImVec2 anchor{};
+					if (projectPt(hitWS.x, hitWS.z, anchor))
+						dl->AddText(ImVec2(anchor.x + 14.0f, anchor.y + 10.0f), lvlCol, label);
 				}
 			}
 
@@ -664,8 +756,49 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					}
 				}
 			}
-			// Sculpting is suppressed while painting layers or foliage.
-			const bool sculptDown = lmbDown && !s_landscapePaint && !s_landscapeFoliage;
+			// ── Water mode: the water field, and optionally the bed under it ──
+			// A stroke is one undo step (the snapshot is taken where it BEGINS —
+			// the first frame the pointer is on the ground with the button down,
+			// not on the press, so a click that misses the landscape leaves no
+			// empty entry) and it writes into ONE body: the water under the
+			// first point if there is any, else a new one (HE::water::brush). Water
+			// never touches TerrainComponent::dirty, so the chunks are not rebuilt;
+			// updateTerrains builds the sheet — that call is what makes the water
+			// appear under the cursor while dragging. Digging moves the ground,
+			// which sets the region-dirty rectangle the chunks (and the shore
+			// clipping) follow.
+			else if (s_landscapeWater)
+			{
+				namespace WB = HE::water::brush;
+				const float lx = hitWS.x - terrainWorldPos.x;
+				const float lz = hitWS.z - terrainWorldPos.z;
+				if (lmbDown && hasHit && !s_waterStroke.active)
+				{
+					if (ctx.undoSys)
+						ctx.undoSys->snapshotNow(waterParams.erase ? "Erase Water" : "Paint Water");
+					s_waterStroke = WB::Stroke{};   // a stale one is not ours to finish: begin() would end it against THIS terrain
+					WB::begin(s_waterStroke, tc, lx, lz, waterParams);
+				}
+				if (lmbDown && hasHit && s_waterStroke.active)
+				{
+					const WB::Dab d = WB::dab(s_waterStroke, tc, lx, lz, waterParams);
+					if (d.ground > 0)
+					{
+						if (const auto* mc = terrainReg.try_get<MeshComponent>(terrainEnt))
+							invalidateMeshAabb(mc->meshAssetId);
+					}
+					if ((d.cells > 0 || d.ground > 0) && ctx.contentManager)
+						TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager, ctx.renderer);
+				}
+				if (!lmbDown && s_waterStroke.active)
+				{
+					WB::end(s_waterStroke, tc);
+					if (ctx.contentManager)    // a press that wet nothing may have taken its grid back
+						TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager, ctx.renderer);
+				}
+			}
+			// Sculpting is suppressed while painting layers, foliage or water.
+			const bool sculptDown = lmbDown && !s_landscapePaint && !s_landscapeFoliage && !s_landscapeWater;
 
 			// ── Mountain: mark the area on press, grow it on release ──
 			// Nothing moves while dragging — the outline above is the preview —
@@ -1177,36 +1310,42 @@ void renderPanel(AppContext& ctx)
                               builtIn ? "Engine Default" : ""))
             {
                 s_landscapeSetup = true; s_landscapePaint = false; s_landscapeFoliage = false;
+                s_landscapeWater = false;
             }
             EditorWidgets::helpForKey("Landscape/Material");
         }
 
-        // ── Sculpt | Paint | Foliage | Setup ─────────────────────────────
+        // ── Sculpt | Paint | Foliage | Water | Setup ─────────────────────
         {
             const SegCell tabs[] = {
                 { "##lsSculpt",  "Sculpt",  "Landscape/Sculpt",  nullptr, true },
                 { "##lsPaint",   "Paint",   "Landscape/Paint",
                   "Painting needs a material with a Landscape Layer Blend node", !layers.empty() },
                 { "##lsFoliage", "Foliage", "Landscape/Foliage", nullptr, true },
+                { "##lsWater",   "Water",   "Landscape/Water",   nullptr, true },
                 { "##lsSetup",   "Setup",   "Landscape/Setup",   nullptr, true },
             };
-            const int active = s_landscapeSetup ? 3 : s_landscapeFoliage ? 2 : s_landscapePaint ? 1 : 0;
-            const int pick = segmented(tabs, 4, 4, active);
+            const int active = s_landscapeSetup ? 4 : s_landscapeWater ? 3
+                             : s_landscapeFoliage ? 2 : s_landscapePaint ? 1 : 0;
+            const int pick = segmented(tabs, 5, 5, active);
             if (pick >= 0)
             {
                 s_landscapePaint   = pick == 1;
                 s_landscapeFoliage = pick == 2;
-                s_landscapeSetup   = pick == 3;
+                s_landscapeWater   = pick == 3;
+                s_landscapeSetup   = pick == 4;
             }
         }
 
-        const bool sculptTab   = !s_landscapePaint && !s_landscapeFoliage && !s_landscapeSetup;
+        const bool sculptTab   = !s_landscapePaint && !s_landscapeFoliage && !s_landscapeWater
+                              && !s_landscapeSetup;
         const bool mountainTab = sculptTab && s_terrainTool == TerrainTool::Mountain;
         // The brush is shown wherever a stroke can happen: not in Setup, not for Mountain
         // (an area tool with its own form), and not in Foliage until a layer exists.
         const bool brushShown = !s_landscapeSetup && !mountainTab && !(s_landscapeFoliage && !fol);
         const bool paintStrength = s_landscapePaint;
-        const char* sfx = s_landscapePaint ? "paint" : s_landscapeFoliage ? "foliage" : "brush";
+        const char* sfx = s_landscapePaint ? "paint" : s_landscapeFoliage ? "foliage"
+                        : s_landscapeWater ? "water" : "brush";
 
         const ImGuiStyle& style = ImGui::GetStyle();
         const float footerH = brushShown
@@ -1461,6 +1600,179 @@ void renderPanel(AppContext& ctx)
                     dimText("Ctrl+drag swaps Grow and Erase.");
                 }
             }
+            // ═════════════════════════ WATER ═════════════════════════════
+            // The brush writes the landscape's water field, the model the lake tool
+            // shares. The brush's own numbers (Radius, Falloff, Strength) are the
+            // pinned ones below; what is here is what only water has.
+            else if (s_landscapeWater)
+            {
+                namespace WF = HE::water;
+
+                // Paint | Erase: one choice, one control. Ctrl+drag swaps them while held.
+                sectionLabel("Mode");
+                {
+                    const SegCell modes[] = {
+                        { "##watPaint", "Paint", "Landscape/Paint Water", nullptr, true },
+                        { "##watErase", "Erase", "Landscape/Erase Water", nullptr, true },
+                    };
+                    const int pick = segmented(modes, 2, 2, s_waterErase ? 1 : 0);
+                    if (pick >= 0) s_waterErase = pick == 1;
+                }
+
+                // The surface height: either the ground under the first point of
+                // the stroke plus a little, or a number. A stroke pressed on
+                // water that is already there ignores both and goes on at that
+                // water's level.
+                sectionLabel("Level");
+                EditorWidgets::checkbox("From Ground##water", &s_waterFromGround);
+                EditorWidgets::helpForLabel("From Ground##water");
+                if (s_waterFromGround)
+                {
+                    rowLabel("Above Ground");
+                    ImGui::DragFloat("##water_offset", &s_waterOffset, 0.05f, -20.0f, 50.0f, "%.2f m");
+                    EditorWidgets::helpForLabel("Above Ground##water");
+                }
+                else
+                {
+                    rowLabel("Level");
+                    ImGui::DragFloat("##water_level", &s_waterLevel, 0.1f, -10000.0f, 10000.0f, "%.2f m");
+                    EditorWidgets::helpForLabel("Level##water");
+                }
+                s_waterOffset = std::clamp(s_waterOffset, -20.0f, 50.0f);
+
+                // The bed: the ground under the brush goes down to a floor below
+                // the level while you paint, so the pond has a depth.
+                sectionLabel("Ground");
+                EditorWidgets::checkbox("Dig Bed##water", &s_waterDig);
+                EditorWidgets::helpForLabel("Dig Bed##water");
+                ImGui::BeginDisabled(!s_waterDig);
+                rowLabel("Depth");
+                ImGui::DragFloat("##water_depth", &s_waterDigDepth, 0.05f, 0.0f, 200.0f, "%.2f m");
+                EditorWidgets::helpForLabel("Depth##water");
+                ImGui::EndDisabled();
+                s_waterDigDepth = std::max(0.0f, s_waterDigDepth);
+
+                // The grid the water lives on: cells per side over the whole
+                // landscape. A typed field, like the weightmap's (32..2048 on a few
+                // hundred pixels of slider cannot hit 1024), applied when the field
+                // is left rather than per keystroke - a resample per digit would
+                // blur the shape - as one undo step.
+                sectionLabel("Water Grid");
+                {
+                    int wres = s_waterResEditing ? s_waterResEdit : static_cast<int>(tc.water.res);
+                    rowLabel("Resolution");
+                    if (ImGui::InputInt("##water_res", &wres, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
+                    {
+                        s_waterResEdit    = wres;
+                        s_waterResEditing = true;
+                    }
+                    EditorWidgets::helpForLabel("Resolution##water");
+                    if (ImGui::IsItemDeactivatedAfterEdit() && s_waterResEditing)
+                    {
+                        s_waterResEditing = false;
+                        const uint32_t want = static_cast<uint32_t>(std::clamp(s_waterResEdit, 32, 2048));
+                        if (want != tc.water.res)
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Water Grid");
+                            WF::setResolution(tc, want);
+                        }
+                    }
+                }
+                dimText("%.1f m per cell", tc.sizeX / static_cast<float>(std::max(1u, tc.water.res)));
+
+                ImGui::Spacing();
+                dimText("LMB drag in the viewport to paint water. Ctrl+drag does the opposite.");
+                if (tc.water.bodies.empty())
+                    dimText("No water on this landscape yet.");
+                else
+                    dimText("%zu water bod%s, %u wet cells", tc.water.bodies.size(),
+                            tc.water.bodies.size() == 1 ? "y" : "ies", tc.water.wetCells());
+
+                // ── The bodies: what is a lake and what is a pond ────────────
+                // A painted pond has no outline; "To Lake" reads its shore, draws a
+                // closed spline through it and hands the pond to that spline, so
+                // its points can reshape it from then on. A lake shows where its
+                // spline is. One undo step each.
+                if (!tc.water.bodies.empty())
+                {
+                    sectionLabel("Bodies");
+                    namespace L = HE::water::lake;
+                    for (const WF::Body& b : tc.water.bodies)
+                    {
+                        ImGui::PushID(static_cast<int>(b.id));
+                        const Entity sp = b.fromSpline() ? ctx.world->findByEntityId(b.sourceSpline) : entt::null;
+                        const char* kind = !b.fromSpline() ? "Pond" : (sp != entt::null ? "Lake" : "Lake, spline gone");
+                        ImGui::Text("%s %u: level %.2f m, %u cells", kind, static_cast<unsigned>(b.id), b.level,
+                                    tc.water.wetCells(b.id));
+                        if (!b.fromSpline())
+                        {
+                            if (EditorWidgets::button("To Lake"))
+                            {
+                                const L::Outline o = L::extractOutline(tc, b.id);
+                                if (!o.ok)
+                                    s_waterNote = "This water is too small or too thin to outline.";
+                                else
+                                {
+                                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Water To Lake");
+                                    const uint16_t id = b.id;       // convertBody may not move the body, but the loop holds a reference
+                                    const L::Converted cv = L::convertBody(*ctx.world, terrainEnt, id);
+                                    if (cv.spline == entt::null)
+                                        s_waterNote = cv.error;
+                                    else
+                                    {
+                                        char line[200];
+                                        std::snprintf(line, sizeof line, "Lake drawn with %u points%s%s", cv.points,
+                                                      cv.islands ? "; the island inside is filled" : "",
+                                                      cv.pieces > 1 ? "; smaller pieces stay as brush water" : "");
+                                        s_waterNote = line;
+                                        // Over to the Spline tool with the new spline selected: its
+                                        // points are what edits the lake now.
+                                        ctx.selection.clear();
+                                        ctx.selection.add(cv.spline);
+                                        ctx.editorConfig.mode = EditorMode::Spline;
+                                        if (ctx.noteEntityEdited) ctx.noteEntityEdited(terrainEnt);
+                                    }
+                                }
+                                ImGui::PopID();
+                                break;      // the body list may have changed under the loop
+                            }
+                            EditorWidgets::helpForLabel("To Lake");
+                        }
+                        else if (sp != entt::null)
+                        {
+                            if (EditorWidgets::button("Select Spline"))
+                            {
+                                ctx.selection.clear();
+                                ctx.selection.add(sp);
+                                ctx.editorConfig.mode = EditorMode::Spline;
+                            }
+                            EditorWidgets::helpForLabel("Select Spline");
+                        }
+                        else if (EditorWidgets::button("Detach"))
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Detach Lake");
+                            L::detach(tc, b.id);
+                            ImGui::PopID();
+                            break;
+                        }
+                        else
+                            EditorWidgets::helpForLabel("Detach");
+                        ImGui::PopID();
+                    }
+                    if (!s_waterNote.empty()) EditorWidgets::hint("%s", s_waterNote.c_str());
+                }
+
+                ImGui::Spacing();
+                if (EditorWidgets::dangerButton("Clear All Water") &&
+                    (!tc.water.bodies.empty() || !tc.water.coverage.empty()))
+                {
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Clear Water");
+                    const uint32_t keepRes = tc.water.res;   // clearAll puts the default back
+                    WF::clearAll(tc);
+                    tc.water.res = keepRes;
+                }
+                EditorWidgets::helpForLabel("Clear All Water");
+            }
             // ═════════════════════════ SCULPT ════════════════════════════
             else
             {
@@ -1601,6 +1913,7 @@ void renderPanel(AppContext& ctx)
                     : std::sqrt(std::clamp((s_brushStrength - 0.1f) / 49.9f, 0.0f, 1.0f));
                 ImU32 col = ImGui::GetColorU32(ImGuiCol_ButtonActive);
                 if (s_landscapeFoliage) col = s_foliageErase ? IM_COL32(255, 110, 90, 255) : IM_COL32(120, 230, 110, 255);
+                if (s_landscapeWater)   col = s_waterErase   ? IM_COL32(255, 110, 90, 255) : IM_COL32( 90, 190, 255, 255);
                 brushProfile(s_brushRadius, s_falloffRadius, ui, col);
 
                 char id[48];

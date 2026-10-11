@@ -94,6 +94,9 @@ add_executable(he_tests
     # The Landscape panel's Foliage brush, driven the same way: mode well,
     # Grow/Erase well, and a drag over a top-down viewport into the mask.
     test_terrain_tools_ui.cpp
+    # The Spline mode's viewport tool and panel, driven headless like the Landscape
+    # tools above (the real SplineTool, a real AppContext, a hand-fed mouse).
+    test_spline_tool_ui.cpp
     # The Audio Mixer, driven the same way: strips from a real ProjectData, a
     # click on M reaching the device-less AudioEngine as a mute, S as a solo.
     test_audio_mixer_ui.cpp
@@ -124,6 +127,22 @@ add_executable(he_tests
     test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # The water model: bodies, coverage + owner raster, circle/polygon edits, scene format, undo.
+    test_water_field.cpp
+    test_water_surface.cpp
+    # The water brush: which body a stroke paints into and at which level, the
+    # eraser, digging, the sheet that appears, and the stroke through undo and the file.
+    test_water_brush.cpp
+    # The lake: a closed spline's outline as a body of water, reshaped with the brush
+    # share kept on top (the merge rule), converted from painted water, the per-frame
+    # sync, and the whole of it through undo and the scene file.
+    test_water_lake.cpp
+    # The water group of HE::api: the same lakes and brush from HorizonCode, Lua,
+    # Python and MCP, in world coordinates.
+    test_water_lake_api.cpp
+    # The ground under a lake: a polygon dug to a floor with a soft bank, the
+    # chunks it rebuilds, and the editor's one undo step giving it back exactly.
+    test_terrain_excavate.cpp
     # The refined level near the camera: Catmull-Rom between the samples,
     # displacement, the build/release life cycle and its budget.
     test_terrain_tessellation.cpp
@@ -250,6 +269,9 @@ add_executable(he_tests
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
+    test_spline.cpp
+    # The spline tool's click / delete / drag rules and their undo, headless.
+    test_spline_edit.cpp
     test_editor_icons.cpp
     # A click on a light's icon selects the light: the Scene window's picking
     # rule against a snapshot the real RenderExtractor produced.
@@ -380,6 +402,10 @@ add_executable(he_tests
     # The viewport's right-click verbs (hide / isolate / show all / group /
     # ungroup): a registry and a selection in, touched entities out — no ImGui.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportActions.cpp
+    # The spline tool's rules (pick a handle or the curve, add / insert / delete /
+    # close / move, one undo entry each, survive an undo): registry, camera matrix
+    # and EditorUndo in, no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineEdit.cpp
     # Multi-selection editing: which leaves of the active entity's component
     # state changed, and how they land on the other members. JSON in, JSON
     # out, plus a real world for the write-back — no widgets involved.
@@ -582,6 +608,10 @@ add_executable(he_tests
     # The GitHub sign-in's drawing half (code, countdown, buttons), for the
     # ui shots. ImGui plus EditorWidgets; the state half needs the editor.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitHubSignInView.cpp
+    # The console's buffer, sink and drawing — everything except the window and
+    # the lookups that need the editor (ConsolePanel.cpp). ImGui plus
+    # EditorWidgets, so the ui shots can draw the real panel.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ConsoleView.cpp
     # The toolbar look — wells and segmented cells. The reader's language
     # switcher is one, and borrowing the primitives is what keeps it from being
     # a second copy of the palette. ImGui-only by construction, so it compiles
@@ -722,6 +752,9 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
     # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
+    # The Spline mode's tool, for test_spline_tool_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED; SplineEdit and the point gizmo are already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineTool.cpp
     # The Audio Mixer window, for test_audio_mixer_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads ProjectData (HorizonTools, linked
     # below) and AudioEngine (HorizonScene), both already here.
@@ -797,6 +830,8 @@ set_source_files_properties(
     test_inspector_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
     test_terrain_tools_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineTool.cpp
+    test_spline_tool_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
     test_audio_mixer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
