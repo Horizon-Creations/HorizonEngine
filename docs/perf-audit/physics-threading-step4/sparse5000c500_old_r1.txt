@@ -1,0 +1,15 @@
+# start 20:03:48 load 
+## sparse 5000 bodies, 500 characters - 600 frames, wall 82 s, load 3.8 -> 2.8
+  frame CPU ms      p50 15.03 p95 64.80 max 72.48 | frame delta p50 15.0 ms
+  PhysicsStep/frame p50 5.89 p95 22.56 max 29.05 ms | inferred steps/frame mean 1.42 (0:127 1:287 2:79 3+:107)
+  per STEP (PhysicsStep / inferred steps) p50 5.65 p95 6.39 max 10.31 | one-step frames: p50 5.74 p95 6.75 max 10.31 ms (n=287)
+  CollisionDispatch p50 0.001 max 0.005 ms (nested inside PhysicsStep)
+  top scopes (mean ms per frame, summed over calls): Render 15.80, Metal::NextDrawable 10.39, OnRender 7.74, PhysicsStep 7.67, Metal::ExtractFrame 2.28, RenderExtractor::extract 2.01, Metal::EncodeShadowMap 1.31, Transforms::propagate 0.94, Transforms::full 0.92, Metal::EncodeScene 0.69
+  thread CPU over the last 14.3 s before exit (utilisation = cpu / window):
+    main                          threads  1  sum     7517 ms  =  0.52 cores   per thread:  52%
+    HorizonScene                  threads  5  sum     5303 ms  =  0.37 cores   per thread:   9%   9%   9%   9%   0%
+    HorizonCore                   threads 10  sum      981 ms  =  0.07 cores   per thread:   1%   1%   1%   1%   1%   1%   1%   1%
+    (not created via pthread_create)              threads  7  sum      599 ms  =  0.04 cores   per thread:   2%   1%   1%   0%   0%   0%   0%
+    CoreAudio        com.apple.audio.IOThread.client threads  1  sum       24 ms  =  0.00 cores   per thread:   0%
+  log: /tmp/he178_s4/m_old/g_sparse5000c500/run.log | dump: /tmp/he178_s4/m_old/g_sparse5000c500/dumps/profile_20261011_200510.json
+# end 20:05:11 load 
