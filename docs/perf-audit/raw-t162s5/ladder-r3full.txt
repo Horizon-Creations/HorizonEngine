@@ -1,0 +1,40 @@
+== r3full-1000  load averages: 2.74 3.24 4.01  locked="CGSSessionScreenIsLocked"=Yes
+[r3full-1000] rc=0 wall=7s fps=28.2289058533408 cpu_p50=14.955375 gpu_p50=6.074583332519978 modes={'whole-frame': 119} size=2840x1528
+   rc=0
+   [04:01:21.346] [ INFO] [Job        ] [Main    ] [f      2] ThreadPool starting with 10 worker(s)
+   [04:01:21.346] [ INFO] [Serialize  ] [Main    ] [f      2] SceneLoadTiming: entities=1078 parseMs=16.53 buildMs=9.46
+   [04:01:22.231] [ INFO] [Editor     ] [Main    ] [f      2] SceneOpenTiming: loadMs=26.27 prefabSyncMs=0.02 preloadMs=0.69 warmupMs=884.14 totalMs=911.12
+   [04:01:22.231] [ INFO] [Editor     ] [Main    ] [f      2] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [04:01:18.779] 
+== r3full-10000  load averages: 2.70 3.21 3.99  locked="CGSSessionScreenIsLocked"=Yes
+[r3full-10000] rc=0 wall=6s fps=41.56984871004308 cpu_p50=12.23775 gpu_p50=5.404499999713153 modes={'whole-frame': 119} size=2840x1528
+   rc=0
+   [04:01:28.745] [ INFO] [Job        ] [Main    ] [f      2] ThreadPool starting with 10 worker(s)
+   [04:01:28.925] [ INFO] [Serialize  ] [Main    ] [f      2] SceneLoadTiming: entities=10168 parseMs=137.76 buildMs=78.02
+   [04:01:29.797] [ INFO] [Editor     ] [Main    ] [f      2] SceneOpenTiming: loadMs=215.93 prefabSyncMs=0.02 preloadMs=0.59 warmupMs=870.94 totalMs=1087.49
+   [04:01:29.797] [ INFO] [Editor     ] [Main    ] [f      2] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [04:01:26.174] 
+== r3full-50000  load averages: 2.72 3.21 3.98  locked="CGSSessionScreenIsLocked"=Yes
+[r3full-50000] rc=0 wall=12s fps=13.737385758390051 cpu_p50=55.941167 gpu_p50=10.538125003222376 modes={'whole-frame': 117} size=2840x1528
+   rc=0
+   [04:01:34.996] [ INFO] [Job        ] [Main    ] [f      4] ThreadPool starting with 10 worker(s)
+   [04:01:35.878] [ INFO] [Serialize  ] [Main    ] [f      4] SceneLoadTiming: entities=50568 parseMs=635.18 buildMs=413.78
+   [04:01:36.682] [ INFO] [Editor     ] [Main    ] [f      4] SceneOpenTiming: loadMs=1049.19 prefabSyncMs=0.03 preloadMs=1.82 warmupMs=801.59 totalMs=1852.63
+   [04:01:36.682] [ INFO] [Editor     ] [Main    ] [f      4] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [04:01:32.315] 
+== r3full-100000  load averages: 2.68 3.18 3.96  locked="CGSSessionScreenIsLocked"=Yes
+[r3full-100000] rc=0 wall=20s fps=7.298338754688904 cpu_p50=111.60137499999999 gpu_p50=15.11937502073124 modes={'whole-frame': 118} size=2840x1528
+   rc=0
+   [04:01:47.268] [ INFO] [Job        ] [Main    ] [f      3] ThreadPool starting with 10 worker(s)
+   [04:01:48.923] [ INFO] [Serialize  ] [Main    ] [f      3] SceneLoadTiming: entities=101068 parseMs=1154.90 buildMs=793.31
+   [04:01:49.768] [ INFO] [Editor     ] [Main    ] [f      3] SceneOpenTiming: loadMs=1948.43 prefabSyncMs=0.04 preloadMs=3.62 warmupMs=841.11 totalMs=2793.20
+   [04:01:49.768] [ INFO] [Editor     ] [Main    ] [f      3] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [04:01:44.378] 
+== r3full-200000  load averages: 2.63 3.12 3.92  locked="CGSSessionScreenIsLocked"=Yes
+[r3full-200000] rc=0 wall=37s fps=3.589255076387719 cpu_p50=233.24137499999998 gpu_p50=19.441416661720723 modes={'whole-frame': 117} size=2840x1528
+   rc=0
+   [04:02:07.782] [ INFO] [Job        ] [Main    ] [f      5] ThreadPool starting with 10 worker(s)
+   [04:02:11.224] [ INFO] [Serialize  ] [Main    ] [f      5] SceneLoadTiming: entities=202068 parseMs=2264.80 buildMs=1835.09
+   [04:02:12.100] [ INFO] [Editor     ] [Main    ] [f      5] SceneOpenTiming: loadMs=4100.13 prefabSyncMs=0.04 preloadMs=7.12 warmupMs=868.56 totalMs=4975.85
+   [04:02:12.100] [ INFO] [Editor     ] [Main    ] [f      5] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [04:02:04.576] 

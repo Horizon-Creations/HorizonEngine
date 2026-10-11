@@ -189,7 +189,7 @@ Metals `EncodeFrame`-Reihenfolge, §2.1). Sonderfälle zu prüfen: Day/Night (`s
 das invalidiert Licht-/Schattendaten unabhängig vom Entity-Dirty-Zustand und darf nicht durch
 Schritt 3 verdeckt werden. Kaskaden-Fit bleibt aspekt-abhängig (siehe Schritt 2).
 
-### Schritt 5 — Verifikation
+### Schritt 5 — Verifikation (durchgeführt, siehe Abschnitt 9)
 
 Leiter 1k/10k/50k/100k/200k wie §11.3 (gleiches Werkzeug, §1), Vollbau, `ctest`. Bekannte
 Struktur-Pins, die bei einer Umstellung mitgehen müssen:
@@ -867,3 +867,156 @@ Was die Tabelle sagt:
   und kein Fund.
 - Vorbestehend, nicht angefasst: der Kommentar in Vulkans `runGi` ("this extraction throws away DrawScene's resolve")
   beschreibt den Zustand vor Schritt 2; die Auflösung der Materialwerte ist idempotent, es bricht nichts.
+
+---
+
+## 9. Schritt 5: Verifikation, Messleiter vorher/nachher (11.10.2026)
+
+Kein Produktcode geändert. Gemessen ist **Metal**; Vulkan, D3D11, D3D12 und OpenGL sind nur über die CI belegt (9.6).
+Rohdaten, Tabellen und Bedingungen: `docs/perf-audit/raw-t162s5/` (Zusammenfassungen, `conditions.txt`,
+`ab-table.md`, `ladder-table.md`; die Profiler-Dumps selbst bleiben lokal, `.gitignore`).
+
+### 9.1 Was verglichen wurde
+
+| | Stand | Bau |
+|---|---|---|
+| **old** | `25e8915d`, der letzte Merge vor Schritt 2 (Thema 153 komplett, kein Thema 162) | `src/HE_Rendering` und `src/HE_Scene` aus diesem Commit in den Baum gelegt, `HorizonEditor` gebaut, Deploy als selbstständige Kopie gesichert (`selfcontain_deploy_copy.sh`), danach `git checkout HEAD -- src/HE_Rendering src/HE_Scene` (Arbeitsbaum wieder sauber) |
+| **new** | `9606ecac`, Ende Schritt 4 | derselbe Baum, Deploy ebenfalls als Kopie |
+| **full** | `9606ecac` mit `HE_PROPAGATE_FULL=1` | dieselbe Kopie wie **new**, nur der Schalter aus Schritt 3: trennt den Anteil von Schritt 3 vom Rest |
+
+Dass die Kopien wirklich zwei Stände sind, belegt das Symbol: `Metal ExtractFrame` steht nur in der `libHorizonRendering.dylib`
+von **new** (`nm`, 0 gegen 1), der Text `HE_PROPAGATE_FULL` nur in der `libHorizonScene.dylib` von **new**. Zwischen den beiden
+Ständen liegt in `src/HE_Rendering` und `src/HE_Scene` nichts als die Dateien der Schritte 2 bis 4
+(`git diff --stat 25e8915d HEAD` auf diese Ordner: 12 Dateien, alle von Thema 162; der Merge `7cb9a18d` brachte dort nichts. Der Rest des Baums,
+`src/HE_Editor` mit dem `.heproj`-Code aus dem Merge, ist in beiden Ständen derselbe).
+
+Werkzeug wie in Thema 153: `scripts/perf/world_streaming_ladder.sh` (`FRAMES=120`, `WARMUP=0`, `--no-counters`, Kamera
+`0,25,90,0,-0.25`, Referenzwelt aus `gen_reference_world.py` mit 64 Lichtern) über ein **Scratch-Projekt**, kopiert aus
+`~/HorizonEngineProjects/Test` nach `/tmp` (kein Projekt des Menschen angefasst). Aufruf je Binary:
+`EDITOR=<Kopie>/HorizonEditor FRAMES=120 scripts/perf/world_streaming_ladder.sh <Scratch>/Test.heproj <out> <Präfix> 1000 10000 50000 100000 200000`.
+
+Reihenfolge, damit Drift sichtbar wird: Runde 1 alt, neu; Runde 2 neu, alt; Runde 3 full, neu, **alt zuletzt**; Runde 4 nur 50k, neu, alt.
+Auswertung: `scripts/perf/ladder_ab_table.py <raw> old=r1old,r2old,r3old new=r1new,r2new,r3new full=r3full`.
+
+**Bedingungen, ehrlich** (je Lauf in `conditions.txt`): Bildschirm **gesperrt** (`CGSSessionScreenIsLocked=Yes`), **Akkubetrieb** (57 %,
+`lowpowermode 0`, keine Thermik-Warnung), Last 1,9 bis 3,8, Fremdlast (die drei größten Prozesse vor jedem Lauf): CLion 8 bis 15 %,
+das Hive-Dashboard (Python) 8 bis 23 %, einmal die Hive-App mit 44 %, Dock 14 bis 16 %, die Claude-Sitzung 8 bis 17 %; GPU-Auslastung 19 bis 53 % (jeweils
+unmittelbar nach dem vorigen Lauf gelesen, also zum Teil der Editor selbst), keine zweite Bee auf dem Mac. Entsperrt und am Netz war von hier aus nicht herzustellen
+(dieselben Bedingungen wie Schritt 2 bis 4, der Queen vorab gemeldet). Das Fenster ist **nicht** versteckt (Standard der Leiter;
+2840 x 1528), die Vergleiche mit der Zähler-Tabelle aus 8.5 (versteckt) sind darum nur Größenordnungen. **Absolute Werte sind nicht
+mit 1 (s6end) vergleichbar**: der Vorher-Stand ist hier `25e8915d` und nicht `s6end`, und die Sitzung ist eine andere (bei 50k
+70,7 ms hier gegen 62,4 ms dort, die 8 ms sind nicht untersucht). Belastbar ist nur **alt gegen neu in dieser Sitzung**.
+
+### 9.2 CPU je Frame, p50 (ms)
+
+Mittel über drei Läufe je Stand (kleinster bis größter Lauf), Frames ab 2. Rohwerte je Lauf in `ladder-table.md`.
+
+| Entities | old | new | Δ new | full (= new ohne Schritt 3) |
+|---|---|---|---|---|
+| 1 084 | 12,9 (11,2 bis 14,7) | 13,3 (13,0 bis 13,8) | +0,4 ms, **im Rauschen** | 14,4 |
+| 10 174 | 14,5 (14,2 bis 14,8) | 9,6 (9,4 bis 9,9) | −4,9 ms (−34 %) | 12,2 |
+| 50 574 | 70,7 (70,5 bis 70,9) | 43,5 (43,1 bis 43,8) | **−27,3 ms (−39 %)** | 56,1 |
+| 101 074 | 142,5 (140,7 bis 143,9) | 89,2 (88,2 bis 90,5) | −53,2 ms (−37 %) | 111,8 |
+| 202 074 | 291,6 (289,0 bis 295,4) | 182,5 (178,5 bis 187,1) | −109,1 ms (−37 %) | 233,4 |
+
+- **Streuung und Drift**: bei 50k vier Läufe je Stand, old 70,5 / 70,1 / 70,9 / 71,2 (die Läufe 3 und 4 sind die jeweils letzten ihrer
+  Runde), new 43,4 / 43,1 / 43,8 / 43,1. Der Abstand zwischen den Ständen (27 ms) ist mehr als das Zwanzigfache der Streuung innerhalb eines
+  Standes (bis 1,1 ms über vier Läufe); die alte Binary am Ende der Runden liegt wieder bei 70,9 und 71,2, es gibt keinen Drift der Sitzung.
+- **Zerlegung bei 50k**: 70,7 → 56,1 (**−14,6 ms**, Schritt 2 und 4: keine Kopien des `RenderWorld` mehr, Verfeinern einmal je Walk,
+  Schlüsselvergleich im Schattenpass) → 43,5 (**−12,6 ms**, Schritt 3: `Transforms::propagate` 14,2 → 1,4 ms). `full` ist nur die
+  Näherung "Schritt 3 aus": der Schalter lässt den alten Walk im neuen Binary laufen, nicht den alten Quelltext.
+- **FPS bei 50k** (Leiter, VSync aus, gesperrter Bildschirm): 11,5 → 16,3. **GPU-Zeit je Frame unverändert** (p50 10,6 bis 11,2 ms alt,
+  10,1 bis 10,6 ms neu; die Pässe kodieren dieselben Draws): der Gewinn ist reine CPU-Zeit, und bei 50k und mehr ist die CPU die Grenze.
+- **p99 (ab Frame 2)** bei 50k: old 85,8 bis 98,3, new 69,4 bis 86,0 ms. Die Hänger des gesperrten Bildschirms bleiben (jeweils
+  Einzelframes über dem Doppelten des Medians: 1 bis 2 je Lauf). Bei 1k sind es 46 bis 51 solche Frames in beiden Ständen, bei 10k 2 bis 5 (old) und
+  9 bis 10 (new): der Median ist dort kleiner (9,6 gegen 14,5 ms), die Hänger des gesperrten Bildschirms nicht.
+- **Laden unverändert** (Parse, Aufbau, Laden): 50k `loadMs` 1035 / 1049 (old) gegen 1065 / 1016 (new); RSS max bei 50k 757 bis 764 MB
+  gegen 743 bis 755 MB. Schritt 5 prüft nur den Frame, die Ladezeit hat kein Schritt dieses Themas angefasst.
+
+### 9.3 Wohin die Zeit ging (p50 je Frame, ms, Mittel der Läufe)
+
+Beachte 8.5: der Walk steht jetzt in `Metal::ExtractFrame`, vorher im `Metal::EncodeShadowMap`. Verglichen werden darum nur Summen:
+"Schatten samt Walk" ist beim alten Stand `EncodeShadowMap`, beim neuen `ExtractFrame` + `EncodeShadowMap`.
+
+| Entities | `extract` (Summe je Frame) old → new | Schatten samt Walk old → new | `EncodeSSAO` old → new | `EncodeScene` old → new | `FrustumCuller::cull` old → new | `OnRender` old → new |
+|---|---|---|---|---|---|---|
+| 1 084 | 0,7 → 0,4 | 0,9 → 0,7 | 0,3 → 0,2 | 0,4 → 0,3 | 0,2 → 0,2 | 0,9 → 0,9 |
+| 10 174 | 6,5 → 3,2 | 7,1 → 4,6 | 1,9 → 0,7 | 1,9 → 0,8 | 0,6 → 0,6 | 2,6 → 2,6 |
+| 50 574 | 37,7 → 18,7 | 39,9 → 25,1 | 10,2 → 4,3 | 10,1 → 4,3 | 3,3 → 3,2 | 8,3 → 8,8 |
+| 101 074 | 75,1 → 37,2 | 79,2 → 50,0 | 22,4 → 10,5 | 22,8 → 11,0 | 7,9 → 7,4 | 17,3 → 16,7 |
+| 202 074 | 147,5 → 73,1 | 155,5 → 99,0 | 48,7 → 24,3 | 51,4 → 27,4 | 19,4 → 18,5 | 35,1 → 33,5 |
+
+Aufrufe je Frame (Median über die Frames, Metal-Forward): `RenderExtractor::extract` / `reuse` **old (3, 2), new (4, 3)**, in allen fünf
+Größen. Das ist die Erwartung aus 8.5/8.7: genau ein voller Walk je Frame, die drei weiteren Aufrufe (Schatten, SSAO, Szene) sind
+Schlüsselvergleiche; ein zweiter Walk wäre (5, 3). `Metal::ExtractFrame` und `Metal::RefineBounds` je 1 (old: nicht vorhanden),
+`FrustumCuller::cull` 5 in beiden Ständen (fünf Läufe, drei davon die Kaskaden, 8.7).
+
+Verschachtelung (aus den Tiefen des Profils): `ExtractFrame` = `RenderExtractor::extract` (der Walk) + `RefineBounds`; `Transforms::scan` steckt in
+`Transforms::propagate`, und das im Walk; `FrustumCuller::cull` steckt in den Pässen (Schatten, SSAO, Szene), die Spalte ist also keine
+weitere Summe, sondern ein Teil der Pass-Spalten.
+
+Der Rest des Frames bei 50k (new): Walk 18,7 (darin `Transforms::propagate` 1,4, darin der Scan 1,4), Verfeinern 3,5, SSAO 4,3, Szene 4,3,
+Schattenpass selbst 2,8 (die Culls, zusammen 3,2, stecken darin). Gegen old: der Walk wird nicht mehr mit zwei Kopien des `RenderWorld` bezahlt
+(alte `extract`-Summe 37,7), die Verfeinern-Schleife läuft einmal statt dreimal (SSAO und Szene sinken um je 5,9 ms), und `propagate` liest
+nur noch die geänderten Teilbäume.
+
+### 9.4 Ziel erreicht oder verfehlt
+
+Das Ziel des Themas: *ein persistenter RenderWorld-Zustand, ein Extract pro Frame, Pässe lesen daraus, Transforms nur für geänderte
+Teilbäume neu propagieren*; Anlass waren bei 50k ~33 ms `extract` und ~35 ms `EncodeShadowMap`, "der größte Posten im Frame".
+
+- **Ein Extract pro Frame, Pässe lesen daraus: erreicht, auf Metal gemessen** ((4, 3) im Betrieb, Schattenpass ist ein Schlüsselvergleich,
+  Pin gegen den zweiten Walk in `test_culling.cpp`). Ehrlich dazu: einen vollen Walk je Frame gab es auf Metal schon nach Thema 153
+  ((3, 2) im alten Stand). Der Gewinn von Schritt 2 und 4 liegt in den **Kopien**, die weg sind, und im **dreifachen Verfeinern**,
+  nicht in einem Walk weniger.
+- **Transforms nur für geänderte Teilbäume: erreicht, aber nur für eine ruhende Welt gemessen.** `Transforms::propagate` bei 50k 14,2 → 1,4 ms
+  (der Scan über 50 574 Entities kostet 1,4 ms, bei 200k 5,1). Die Referenzwelt bewegt nichts: das ist der günstigste Fall. Mit bewegten
+  Entities wächst die Zeit mit der Zahl der geänderten Teilbäume (Messung in 7.7), und jede Strukturänderung im Frame (Spawn, Destroy,
+  Reparent, Zellwechsel) kostet weiter einen vollen Walk (7.8).
+- **Persistenter Zustand über Frames hinweg: nicht gebaut.** Der Walk (`extractMeshes`, 280 Byte je `RenderObject`) läuft jeden Frame
+  voll und kostet bei 50k **18,7 ms, bei 200k 73,1 ms**. Er ist weiter der größte Einzelposten des Frames, und, ehrlich, **weiter größer als
+  alle Encode-Pässe zusammen**: SSAO 4,3 + Szene 4,3 + Schattenpass 2,8 = 11,4 ms, mit dem Verfeinern (3,5) 14,9 ms. Das war der Anlass des
+  Themas ("größer als alle Encode-Pässe zusammen"); der Abstand ist kleiner geworden (vorher 37,7 gegen rund 22 für SSAO 10,2, Szene 10,1 und den
+  Schattenpass ohne Walk, jetzt 18,7 gegen 11,4), die Aussage gilt noch.
+- **Zahlen gegen den Anlass**: `extract` 37,7 → 18,7 ms (in 1, `s6end`, unter anderen Bedingungen 33,4), Schatten samt Walk 39,9 → 25,1 ms,
+  CPU je Frame **−39 %** bei 50k, −37 % bei 100k und 200k, −34 % bei 10k, nichts messbar bei 1k. **Halbiert, nicht beseitigt.**
+
+### 9.5 Vollbau, Tests
+
+- **Vollbau** (Release, shaderc ON, `ninja -j8`, alle Ziele): rc 0. Der Aufruf lief als Hintergrundbefehl und wurde nach 600 s vom
+  Werkzeug-Zeitlimit beendet (Schritt 228 von 305, "interrupted by user"); ich habe ihn mit längerem Limit neu gestartet, ninja setzte fort,
+  `BUILD_RC=0` gelesen, danach kein Schritt offen. Der Deploy (`out/deploy/Editor`) ist der Build-Baum (`cmp` auf `HorizonEditor` und
+  `libHorizonRendering.dylib` byte-gleich, `ExtractFrame` im Symbol); `git diff HEAD -- src` leer.
+- **ctest voll** im Vordergrund auf `9606ecac`: `ctest -j4 --timeout 1500 --output-on-failure`, frisches `HOME`, `HE_CONFIG_DIR` ungesetzt,
+  04:08:29 bis 04:13:25: **259 von 259 grün, rc 0, 296,7 s**, 2 übersprungen (`runtime_size_app_advanced`, `runtime_size_app_basic`,
+  für diese Plattform per Konstruktion). `docs/perf-audit/raw-t162s5/ctest-summary.txt`.
+- **CI** auf `9606ecac` (Schritt 4), workflow_dispatch-Lauf
+  [38101027036](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/38101027036): **Linux, Windows, macOS und
+  Linux · Vulkan (lavapipe) alle grün**. Nichts von Schritt 4 war rot, es gab nichts zu beheben.
+
+### 9.6 Was nur die CI belegt, was ungemessen ist
+
+- **Vulkan**: übersetzt unter MSVC und GCC (Windows- und Linux-Job), der Bild-A/B läuft über lavapipe (grün). **Die CPU-Zeit ist auf Vulkan
+  nicht gemessen** und auf Hardware lief Vulkan nie; der Gewinn (Kopien, Verfeinern, `propagate`) ist derselbe Quelltext, die Größe
+  ist für Vulkan eine Annahme.
+- **D3D11, D3D12, OpenGL**: Schritt 2 bis 4 haben dort keinen Pass umgebaut (ein `extract` je Frame von Anfang an). Der Gewinn aus Schritt 3
+  (`propagateTransforms`) gilt für alle Backends, weil er im gemeinsamen `HE_Scene` steckt; **gemessen ist er nur auf Metal**.
+- **Nicht in der Leiter**: bewegte Entities, GI, Wolken mit halber Auflösung, Skinned, Partikel, Trails, echte Spielinhalte, Play-Modus,
+  ein offenes zweites Scene-Fenster (`sceneSnapshot` extrahiert dort weiter jeden Frame voll, 2.4).
+- **Entsperrter Bildschirm, Netzbetrieb**: nicht gemessen (9.1). Die Differenz alt gegen neu ist unter diesen Bedingungen belegt; ob
+  sie unter anderen genauso groß ist, ist eine Annahme (die CPU-Scopes sind von Sperre und Akku weniger abhängig als FPS und GPU).
+
+### 9.7 Offen, nächste Hebel (nicht gebaut)
+
+Gemessen bei 50k (new): der Walk 18,7 ms ist die Grenze nach unten, solange er jeden Frame voll läuft. Hebel in der Reihenfolge ihres
+Gewichts: (1) der Walk selbst, nur geänderte Entities neu schreiben (braucht einen Änderungszähler je Entity, den der Scan aus Schritt 3
+schon fast liefert), (2) das Verfeinern, 3,5 ms (70 ns je Objekt, ein Hash-Lookup; ein Merker "gleiches Mesh wie das Vorherige"),
+(3) die Culls aller Kaskaden in einem Lauf (3,2 ms). Alle drei wachsen linear mit der Entity-Zahl (200k: 73 / 14 / 18 ms).
+
+### 9.8 Änderungen an den Werkzeugen dieses Schritts
+
+- `scripts/perf/ladder_ab_table.py` (neu): die Tabellen aus 9.2 und 9.3 und die Aufrufzähler aus mehreren Läufen je Stand.
+- `scripts/perf/ladder_table.py`: ein Scope, den kein Frame des Laufs enthält, druckt `-` statt `0.0` (die Scopes aus Thema 162 gibt es im alten
+  Stand nicht); die Spalte `FrustumCull` hieß falsch und war in jeder alten Tabelle 0,0, sie heißt jetzt `FrustumCuller::cull` (3,2 ms bei 50k,
+  die alten `s5end`/`s6end`-Tabellen haben dort einen Artefaktwert); `Transforms::scan`/`::propagate` neu; `entities` kommt vom letzten Frame
+  (mit `WARMUP=0` zeigen die ersten Frames noch die leere Szene mit 1 Entity).

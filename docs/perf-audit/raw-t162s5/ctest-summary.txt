@@ -1,0 +1,12 @@
+        Start 209: test_collab_controller
+258/259 Test #209: test_collab_controller ..............   Passed   21.33 sec
+        Start 246: test_net_game_session
+259/259 Test #246: test_net_game_session ...............   Passed    0.52 sec
+
+100% tests passed out of 259
+
+Total Test time (real) = 296.66 sec
+
+The following tests did not run:
+	258 - runtime_size_app_advanced (Skipped)
+	259 - runtime_size_app_basic (Skipped)
