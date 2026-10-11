@@ -177,6 +177,14 @@ HE_NET_API SocketHandle socketCreateUdp6();
 HE_NET_API bool         socketBindUdp6To(SocketHandle h, const std::string& localAddress,
                                          std::uint16_t port);
 // Bind to a local port (0 = any). Required before receiving.
+//
+// Deliberately WITHOUT SO_REUSEADDR. UDP has no TIME_WAIT, so a port is free the
+// moment its socket closes and a restart never needs it; what it does buy is
+// harm. On Linux two sockets that both set it may bind the same port — and the
+// ephemeral picker (port 0) does not skip a port a reuse socket already holds —
+// so two clients, or a client and a host, end up on one port and each other's
+// datagrams. A caller that really wants a shared port (discovery) says so with
+// socketBindUdpShared.
 HE_NET_API bool         socketBindUdp(SocketHandle h, std::uint16_t port);
 // Allow sending to multicast groups (SSDP's 239.255.255.250).
 HE_NET_API bool         socketSetMulticastTtl(SocketHandle h, int ttl);
