@@ -2669,12 +2669,57 @@ namespace
 	{ "Console/Clear", "",
 	  "Empties the view. The log file next to the executable keeps everything.",
 	  "", "advanced#diagnostics" },
-	{ "Console/Auto-scroll", "",
-	  "Follow the newest line. Switch it off to read something while the log "
-	  "keeps growing.",
+	{ "Console/Copy", "",
+	  "Copies every line currently shown, in the shape of the log file — the "
+	  "level chips, the category filter and the search all apply.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Search", "",
+	  "Narrows the list to lines containing this text, anywhere in them: the "
+	  "message, the category, the time. Not case sensitive.",
+	  "", "advanced#diagnostics" },
+	{ "Console/All", "",
+	  "Shows every level again. The number is how many lines the console holds "
+	  "right now, repeats included.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Debug", "",
+	  "Debug and Trace lines. Click to show only these; click again to show "
+	  "everything. Ctrl-click (Cmd on a Mac) adds or removes this level from "
+	  "what is shown. The engine only logs these for categories whose "
+	  "verbosity is raised (HE_LOG, or logVerbosity in config.json).",
+	  "", "advanced#diagnostics" },
+	{ "Console/Info", "",
+	  "Ordinary progress lines and everything a script prints. Click to show "
+	  "only these; click again to show everything. Ctrl-click (Cmd on a Mac) "
+	  "adds or removes this level from what is shown.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Warnings", "",
+	  "Things that went wrong but did not stop anything. Click to show only "
+	  "warnings; click again to show everything. Ctrl-click (Cmd on a Mac) "
+	  "adds or removes this level from what is shown.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Errors", "",
+	  "Errors and critical failures. Click to show only these; click again to "
+	  "show everything. Ctrl-click (Cmd on a Mac) adds or removes this level "
+	  "from what is shown. The number counts repeats too.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Category", "",
+	  "Hide or show whole parts of the engine — Render, Physics, Script and so "
+	  "on. Only categories that have logged something are listed, with how "
+	  "many lines each has under the current search and levels.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Show all categories", "",
+	  "Brings back every category hidden in this list.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Reset filters", "",
+	  "Clears the search, shows every level and every category again.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Latest", "",
+	  "Jumps to the newest line and follows the log again. Shown while you "
+	  "have scrolled away from the end; the number is what arrived since.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Copy Line", "",
-	  "Copies the selected line — the one to paste into a bug report.",
+	  "Copies this line, in the shape of the log file — the one to paste into "
+	  "a bug report.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
@@ -2682,14 +2727,15 @@ namespace
 	{ "Console/Go to Node", "",
 	  "Opens the HorizonCode graph this line came from and selects the node "
 	  "that wrote it — a Print, or the node whose call raised the warning. "
-	  "Only on lines with a [node N] marker; double-clicking the line does the "
-	  "same.",
+	  "Only on lines with a `node N` link after the message; clicking the link "
+	  "or double-clicking the line does the same.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Go to Line", "",
 	  "Opens the Lua or Python script this error names and selects the line — "
-	  "the `script:7:` in front of the message. Only on script errors that "
-	  "carry a line, and only while an entity in the scene runs the script "
-	  "under that name; double-clicking the line does the same.",
+	  "the `script:7:` in front of the message, shown as a link after it. Only "
+	  "on script errors that carry a line, and only while an entity in the "
+	  "scene runs the script under that name; clicking the link or "
+	  "double-clicking the line does the same.",
 	  "", "advanced#diagnostics" },
 	// ── Undo History ─────────────────────────────────────────────────────────
 	// The scene undo stack as a list. Its rows are the operations' own labels

@@ -582,6 +582,10 @@ add_executable(he_tests
     # The GitHub sign-in's drawing half (code, countdown, buttons), for the
     # ui shots. ImGui plus EditorWidgets; the state half needs the editor.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitHubSignInView.cpp
+    # The console's buffer, sink and drawing — everything except the window and
+    # the lookups that need the editor (ConsolePanel.cpp). ImGui plus
+    # EditorWidgets, so the ui shots can draw the real panel.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ConsoleView.cpp
     # The toolbar look — wells and segmented cells. The reader's language
     # switcher is one, and borrowing the primitives is what keeps it from being
     # a second copy of the palette. ImGui-only by construction, so it compiles
