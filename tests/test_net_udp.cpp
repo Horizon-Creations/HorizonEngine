@@ -16,6 +16,12 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+  #include <winsock2.h>
+#else
+  #include <sys/socket.h>
+#endif
+
 using namespace HE::Net;
 
 // Every case here runs over real localhost UDP sockets, like test_net_tcp. What
@@ -256,11 +262,12 @@ TEST_CASE("UdpTransport: a Connect without a valid cookie allocates nothing on t
 {
     Pair p = connectedPair();   // one genuine peer, so "nothing changed" is observable
 
-    // Bound WITHOUT SO_REUSEADDR (socketBindUdp sets it). On Linux two reuse
-    // sockets may share a UDP port, and the ephemeral picker hands out a port
-    // the client's reuse socket already holds: the "stranger" then comes from
-    // the client's own address, and its datagram reaches the host as client
-    // data (seen once on Linux CI, run 37544985679).
+    // On Linux two sockets that both set SO_REUSEADDR may share a UDP port, and
+    // the ephemeral picker hands out a port a reuse socket already holds: the
+    // "stranger" then comes from the client's own address, and its datagram
+    // reaches the host as client data (seen once on Linux CI, run 37544985679).
+    // The product no longer sets the option on any UDP socket (section 12 pins
+    // that); the port check below stays as a tripwire for the stranger itself.
     SocketHandle raw = socketCreateUdp();
     REQUIRE(raw != kInvalidSocket);
     REQUIRE(socketBindUdpTo(raw, "127.0.0.1", 0));
@@ -676,4 +683,108 @@ TEST_CASE("UdpTransport: the log carries no cookie material and no nonce")
         }
         CHECK_MESSAGE(longest < 10, "log line carries a cookie value: " << line);
     }
+}
+
+// ─── 12. Ports are not shared ────────────────────────────────────────────────
+//
+// Thema 170. socketBindUdp used to set SO_REUSEADDR on every UDP socket,
+// including each client transport's ephemeral one. On Linux two sockets that
+// both set it may bind one port, and the ephemeral picker (port 0) does not
+// skip a port a reuse socket holds: two clients — or a client and a host — end
+// up sharing a port and the kernel hands a datagram to whichever it likes.
+// macOS/BSD never did that for unicast UDP, so the collision itself can only
+// be observed on Linux; the option, though, can be read back anywhere.
+
+namespace {
+
+// SO_REUSEADDR as the kernel reports it; -1 when the query itself failed. (On
+// Windows socketSetReuseAddr is deliberately a no-op, so this reads 0 there.)
+int reuseAddrOption(SocketHandle h) {
+    int value = -1;
+#ifdef _WIN32
+    int len = static_cast<int>(sizeof(value));
+    if (::getsockopt(static_cast<SOCKET>(h), SOL_SOCKET, SO_REUSEADDR,
+                     reinterpret_cast<char*>(&value), &len) != 0) return -1;
+#else
+    socklen_t len = sizeof(value);
+    if (::getsockopt(static_cast<int>(h), SOL_SOCKET, SO_REUSEADDR, &value, &len) != 0)
+        return -1;
+#endif
+    return value != 0 ? 1 : 0;
+}
+
+} // namespace
+
+TEST_CASE("UDP sockets: none of the game transport's sockets sets SO_REUSEADDR")
+{
+    SUBCASE("a client socket for an IPv4 peer") {
+        SocketHandle s = socketCreateUdpFor(false);
+        REQUIRE(s != kInvalidSocket);
+        CHECK(reuseAddrOption(s) == 0);
+        socketClose(s);
+    }
+    SUBCASE("a client socket for an IPv6 peer") {
+        SocketHandle s = socketCreateUdpFor(true);
+        if (s == kInvalidSocket) return;   // no IPv6 stack here, nothing to read
+        CHECK(reuseAddrOption(s) == 0);
+        socketClose(s);
+    }
+    SUBCASE("the host socket") {
+        SocketHandle s = socketCreateUdpDualStack(0);
+        REQUIRE(s != kInvalidSocket);
+        CHECK(reuseAddrOption(s) == 0);
+        socketClose(s);
+    }
+    SUBCASE("socketBindUdp itself") {
+        SocketHandle s = socketCreateUdp();
+        REQUIRE(s != kInvalidSocket);
+        REQUIRE(socketBindUdp(s, 0));
+        CHECK(reuseAddrOption(s) == 0);
+        socketClose(s);
+    }
+    SUBCASE("socketBindUdpShared still does, that is its whole point") {
+        SocketHandle s = socketCreateUdp();
+        REQUIRE(s != kInvalidSocket);
+        // Port 0: only the option is under test, not a well-known port.
+        REQUIRE(socketBindUdpShared(s, 0));
+        CHECK(reuseAddrOption(s) == 1);
+        socketClose(s);
+    }
+}
+
+TEST_CASE("UDP sockets: a client's port cannot be bound again by a socket that asks for reuse")
+{
+    SocketHandle client = socketCreateUdpFor(false);
+    REQUIRE(client != kInvalidSocket);
+    const std::uint16_t port = socketBoundPort(client);
+    REQUIRE(port != 0);
+
+    // The second socket sets the option ITSELF. Linux shares a UDP port only
+    // when both parties ask, so this is what separates "the client refuses to
+    // share" from "the second socket happened not to ask". With the old client
+    // (reuse set) this bind succeeds on Linux; macOS and Windows refuse it
+    // either way, so this case only proves the fix on Linux.
+    SocketHandle other = socketCreateUdp();
+    REQUIRE(other != kInvalidSocket);
+    REQUIRE(socketSetReuseAddr(other, true));
+    CHECK_FALSE(socketBindUdp(other, port));
+
+    socketClose(other);
+    socketClose(client);
+}
+
+TEST_CASE("UDP sockets: a second host cannot bind the port a host already holds")
+{
+    SocketHandle first = socketCreateUdpDualStack(0);
+    REQUIRE(first != kInvalidSocket);
+    const std::uint16_t port = socketBoundPort(first);
+    REQUIRE(port != 0);
+
+    // Two game servers on one fixed port must fail loudly; on Linux with the
+    // old reuse option both "succeeded" and split the clients between them.
+    SocketHandle second = socketCreateUdpDualStack(port);
+    CHECK(second == kInvalidSocket);
+
+    if (second != kInvalidSocket) socketClose(second);
+    socketClose(first);
 }
