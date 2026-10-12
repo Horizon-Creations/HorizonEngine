@@ -81,8 +81,9 @@ because its account is compiled in. This one is not (rule 1 in
 plumbing on purpose). A CMake template in the ContentSync style would be read
 by nothing, and baking the values in instead would settle Open decision 1
 below, which is the human's call. So a fresh clone on any machine (NN-WS03
-included) does not lack a file. It lacks six environment variables in the
-user's environment, set once, outside the repository.
+included) does not lack a file. It lacks the environment variables (three
+required, three optional) in the user's environment, set once, outside the
+repository.
 
 The values (host, read-only user, password and, if the account is not chrooted,
 the base path) come from whoever administers the account, over a password
@@ -106,7 +107,8 @@ An editor started from Finder, the Dock or a mounted DMG does not read
 `~/.zshrc`. It inherits launchd's environment, so set the same names there
 too, with `launchctl setenv HE_SELFUPDATE_HOST '<host>'` and so on, then start
 the editor again. `launchctl setenv` does not survive a reboot. To make it
-permanent, put those calls in a per-user LaunchAgent (`RunAtLoad`) that stays
+permanent, put those calls in a per-user LaunchAgent (`RunAtLoad`, `chmod 600`
+the plist, since it holds the password) that stays
 outside the repository. Checking it: `launchctl getenv NAME` exits 0 and
 prints an empty line for a variable that is **not** set. Only a non-empty
 value means it took.
