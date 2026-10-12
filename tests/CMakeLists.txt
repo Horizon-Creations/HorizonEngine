@@ -1110,6 +1110,26 @@ target_link_libraries(he_tests PRIVATE
     nlohmann_json::nlohmann_json
 )
 
+# The editor's SFTP self-update (src/HE_SelfUpdate). Present only when the root
+# CMakeLists resolved libssh2, like HorizonContentSync it sits on, so the file is
+# added only then (the ctest loop below registers every test_*.cpp source).
+if(TARGET HorizonSelfUpdate)
+    target_sources(he_tests PRIVATE test_selfupdate.cpp)
+    target_link_libraries(he_tests PRIVATE HorizonSelfUpdate)
+    if(WIN32)
+        # No rpath on Windows: the two DLLs have to sit beside the test exe, as
+        # the engine DLLs above do. HorizonContentSync is the one HorizonSelfUpdate
+        # loads; he_tests never linked it before this.
+        add_custom_command(TARGET he_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:HorizonSelfUpdate>  $<TARGET_FILE_DIR:he_tests>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:HorizonContentSync> $<TARGET_FILE_DIR:he_tests>
+            VERBATIM
+        )
+    endif()
+endif()
+
 # Shared material shader layer (CPU-only: glslang + SPIRV-Cross under the hood) — lets
 # the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
 # path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.

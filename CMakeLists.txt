@@ -929,6 +929,11 @@ add_subdirectory(src/HE_SourceControl)
 # and runs, it just falls back to whatever EngineContent is present on disk.
 if(HE_HAVE_LIBSSH2)
     add_subdirectory(src/HE_ContentSync)
+    # The Editor updating itself over SFTP, on a SECOND account of its own. It
+    # reuses HorizonContentSync's SftpClient (which takes the endpoint as an
+    # argument) and so needs that target; it shares neither its account nor any
+    # of its code paths.
+    add_subdirectory(src/HE_SelfUpdate)
 endif()
 add_subdirectory(src/HE_Scene)
 # After HE_Scene: the Python plugin links it (and is loaded by it at runtime).
