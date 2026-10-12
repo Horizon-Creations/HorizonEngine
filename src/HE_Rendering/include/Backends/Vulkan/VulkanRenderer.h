@@ -781,6 +781,22 @@ private:
 	VkPipeline            m_presentPipe      = VK_NULL_HANDLE;
 	VkDescriptorSet       m_presentDS        = VK_NULL_HANDLE;
 
+	// ── Underwater fog (Thema 185 Schritt 2) ────────────────────────────────
+	// Alpha-blended straight onto m_hdrView, no ping-pong target (see
+	// HlslSources.h's kUnderwaterFogHLSL comment — same math, GLSL twin in
+	// postfx_underwaterfog.frag). Its own render pass/framebuffer because it
+	// needs loadOp=LOAD on the color attachment (every other postFx pass fully
+	// overwrites its target); its own descriptor set layout + pipeline layout
+	// because it reads ONE texture (the depth, sampled directly — no ping-pong
+	// copy, just a layout flip around the draw) instead of postFxDSLayout's two.
+	VkRenderPass          m_underwaterFogRP        = VK_NULL_HANDLE;
+	VkFramebuffer         m_underwaterFogFB        = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_underwaterFogDSLayout  = VK_NULL_HANDLE;
+	VkPipelineLayout      m_underwaterFogPipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_underwaterFogPipe      = VK_NULL_HANDLE;
+	VkDescriptorSet       m_underwaterFogDS        = VK_NULL_HANDLE;
+	bool                  m_underwaterFogReady     = false;
+
 	// Anti-aliasing method in force, already resolved against this backend's
 	// capabilities (docs/anti-aliasing-plan.md). The final post pass writes
 	// m_viewportImage, so it always runs — only the pipeline changes.

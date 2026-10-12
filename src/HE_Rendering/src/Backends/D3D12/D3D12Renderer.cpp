@@ -1804,6 +1804,16 @@ struct D3D12RendererImpl
     bool                         postFxReady = false;
     UINT                         postFxW = 0, postFxH = 0;
 
+    // ── Underwater fog (Thema 185 Schritt 2) — alpha-blended onto hdrRT, no
+    // ping-pong target (see HlslSources.h's kUnderwaterFogHLSL comment). Its
+    // own root sig: 28 root constants (b0, the 112-byte CB inlined) + one SRV
+    // table (t0, the depth at k_underwaterFogDepthSlot) + a static point-clamp
+    // sampler (s0) — simpler than postFxRootSig's two-table shape since this
+    // pass only ever reads one texture.
+    ComPtr<ID3D12RootSignature> underwaterFogRootSig;
+    ComPtr<ID3D12PipelineState> underwaterFogPSO;
+    bool                        underwaterFogReady = false;
+
     // PostFX settings
     float exposure       = 1.0f;
     float bloomStrength  = 0.25f;
@@ -1832,7 +1842,11 @@ struct D3D12RendererImpl
     static constexpr UINT k_taaSrvResolve0 = 5;   // {ldr, history[1], velocity} → history[0]
     static constexpr UINT k_taaSrvResolve1 = 8;   // {ldr, history[0], velocity} → history[1]
     static constexpr UINT k_taaSrvHistory  = 11;  // history[0], history[1]
-    static constexpr UINT k_postFxSrvCount = 13;
+    // Underwater fog's own depth read (Thema 185 Schritt 2): the viewport depth,
+    // refreshed in this SAME heap everywhere viewportDepth is (re)created — see
+    // the k_decalViewportDepthSlot sibling writes into sceneSrvHeap.
+    static constexpr UINT k_underwaterFogDepthSlot = 13;
+    static constexpr UINT k_postFxSrvCount = 14;
     ComPtr<ID3D12RootSignature>  taaVelocityRootSig;  // [0] root CBV b0 (HE::TaaVelocityConstants)
     ComPtr<ID3D12RootSignature>  taaResolveRootSig;   // [0] 4 constants b0, [1] table t0..t2, s0
     ComPtr<ID3D12PipelineState>  taaVelocityPSO, taaResolvePSO, taaSharpenPSO;
@@ -2022,6 +2036,21 @@ struct D3D12RendererImpl
         if (postFxSrvHeap)
             device->CreateShaderResourceView(nullptr, &nullSrv0, srvCpuHandle(0));
 
+        // Slot 13: the viewport depth, for the underwater fog pass below (Thema
+        // 185 Schritt 2) — its own copy in THIS heap, parallel to
+        // k_decalViewportDepthSlot's in sceneSrvHeap, since runPostFX binds
+        // postFxSrvHeap (not sceneSrvHeap) while its root sig is active.
+        // viewportDepth was (re)created by the caller just before this function.
+        if (postFxSrvHeap && viewportDepth)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC dsv{};
+            dsv.Format                  = DXGI_FORMAT_R32_FLOAT;
+            dsv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+            dsv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            dsv.Texture2D.MipLevels     = 1;
+            device->CreateShaderResourceView(viewportDepth.Get(), &dsv, srvCpuHandle(k_underwaterFogDepthSlot));
+        }
+
         const UINT bw = std::max(1u, w/2), bh = std::max(1u, h/2);
         makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, w,  h,  hdrRT,     hdrRtvHeap,     1);
         makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, bw, bh, bloomRT[0], bloomRtvHeap[0], 2);
@@ -2142,6 +2171,54 @@ struct D3D12RendererImpl
         if (!makePSO(vsB.Get(), btB.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, aaBlitPSO))    return false;
         if (!makePSO(vsB.Get(), brB.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, bloomBrightPSO)) return false;
         if (!makePSO(vsB.Get(), blB.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, bloomBlurPSO))   return false;
+
+        // Underwater fog (Thema 185 Schritt 2): its own root sig + PSO, see the
+        // member declaration for why it does not share postFxRootSig.
+        ComPtr<ID3DBlob> uwB;
+        if (compile(kUnderwaterFogHLSL, "main", "ps_5_0", uwB))
+        {
+            D3D12_DESCRIPTOR_RANGE r0{}; r0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
+            D3D12_ROOT_PARAMETER params[2]{};
+            params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            params[0].Constants = { 0, 0, 28 };   // mat4 + 3×float4, see kUnderwaterFogHLSL
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[1].DescriptorTable = { 1, &r0 };
+            params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_STATIC_SAMPLER_DESC samp{};
+            samp.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;   // depth: texel-exact, like gbPointClamp (D3D11)
+            samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 2; rsd.pParameters = params;
+            rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
+            ComPtr<ID3DBlob> sig, err;
+            if (SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) &&
+                SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                      IID_PPV_ARGS(&underwaterFogRootSig))))
+            {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+                pd.pRootSignature = underwaterFogRootSig.Get();
+                pd.VS = { vsB->GetBufferPointer(), vsB->GetBufferSize() };
+                pd.PS = { uwB->GetBufferPointer(), uwB->GetBufferSize() };
+                D3D12_RENDER_TARGET_BLEND_DESC& rt = pd.BlendState.RenderTarget[0];
+                rt.BlendEnable = TRUE;
+                // Premultiplied shader output: dst' = src*1 + dst*(1-fogAmount).
+                rt.SrcBlend = D3D12_BLEND_ONE;       rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;  rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                pd.SampleMask = UINT_MAX;
+                pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                pd.DepthStencilState.DepthEnable = FALSE;
+                pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                pd.SampleDesc.Count = 1;
+                underwaterFogReady = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&underwaterFogPSO)));
+            }
+        }
 
         postFxReady = true;
         createTaaPipelines(vsB.Get());
@@ -2306,12 +2383,6 @@ struct D3D12RendererImpl
         const UINT bw = std::max(1u, w/2), bh = std::max(1u, h/2);
         const float tw = 1.0f/float(bw), th = 1.0f/float(bh);
 
-        // Bind PostFX root sig + SRV heap once for all passes.
-        cl->SetGraphicsRootSignature(postFxRootSig.Get());
-        ID3D12DescriptorHeap* heaps[] = { postFxSrvHeap.Get() };
-        cl->SetDescriptorHeaps(1, heaps);
-        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
         auto setVP = [&](UINT pw, UINT ph) {
             D3D12_VIEWPORT vp{0,0,(float)pw,(float)ph,0,1};
             D3D12_RECT sc{0,0,(LONG)pw,(LONG)ph};
@@ -2321,6 +2392,55 @@ struct D3D12RendererImpl
             D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvH->GetCPUDescriptorHandleForHeapStart();
             cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         };
+
+        // Underwater fog (Thema 185 Schritt 2): straight onto hdrRT while it is
+        // still RENDER_TARGET (before bloom's SRV read below) — alpha-blended, no
+        // ping-pong target. Skipped whole on a dry frame: the only cost a scene
+        // without water pays here is this one branch. See kUnderwaterFogHLSL
+        // (HlslSources.h) for the per-pixel math.
+        const UnderwaterCameraData& uwCam = m_renderWorld.underwaterCamera;
+        if (uwCam.wet && underwaterFogReady && viewportDepth)
+        {
+            const glm::mat4 viewProjUw = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+            const glm::mat4 invViewProjUw = glm::inverse(viewProjUw);
+            struct UnderwaterFogConstants
+            {
+                float invViewProj[16];
+                float depthParams[4];
+                float camPosSurfaceY[4];
+                float tintDensity[4];
+            } cb{};
+            std::memcpy(cb.invViewProj, &invViewProjUw[0][0], 16 * sizeof(float));
+            cb.depthParams[0] = -1.0f; cb.depthParams[1] = 1.0f; cb.depthParams[2] = 0.0f; cb.depthParams[3] = 0.0f;
+            cb.camPosSurfaceY[0] = m_renderWorld.camera.position.x;
+            cb.camPosSurfaceY[1] = m_renderWorld.camera.position.y;
+            cb.camPosSurfaceY[2] = m_renderWorld.camera.position.z;
+            cb.camPosSurfaceY[3] = uwCam.surfaceY;
+            cb.tintDensity[0] = uwCam.tintColor.x; cb.tintDensity[1] = uwCam.tintColor.y;
+            cb.tintDensity[2] = uwCam.tintColor.z; cb.tintDensity[3] = uwCam.density;
+
+            ID3D12DescriptorHeap* uwHeaps[] = { postFxSrvHeap.Get() };
+            cl->SetDescriptorHeaps(1, uwHeaps);
+            cl->SetGraphicsRootSignature(underwaterFogRootSig.Get());
+            cl->SetPipelineState(underwaterFogPSO.Get());
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            setVP(w, h);
+            setRTV(hdrRtvHeap);
+            cl->SetGraphicsRoot32BitConstants(0, 28, &cb, 0);
+            // Depth off the DSV before it is readable as an SRV — same dance EncodeDecals uses.
+            barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(k_underwaterFogDepthSlot));
+            cl->DrawInstanced(3, 1, 0, 0);
+            barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                      D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        }
+
+        // Bind PostFX root sig + SRV heap once for all passes.
+        cl->SetGraphicsRootSignature(postFxRootSig.Get());
+        ID3D12DescriptorHeap* heaps[] = { postFxSrvHeap.Get() };
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         // HDR should already be in RENDER_TARGET after scene writes.
         // Transition to SRV for PostFX reads.
