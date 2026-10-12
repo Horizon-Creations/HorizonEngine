@@ -140,6 +140,21 @@ names, saying "compiled into this build" or "from HE_SELFUPDATE_*", when an
 account is there but half filled. `HE_SELFUPDATE_CHANNEL` alone never switches
 the feature on.
 
+**macOS.** Nothing differs from the other platforms: the same template, the
+same CMake block, and the `Configure (macOS)` step in `ci.yml` carries the same
+`SELFUPDATE_*` secrets. Compiled in is what macOS needed most, because an
+editor started from Finder, the Dock or the DMG never sees a shell's exports.
+The file is found per checkout (`${CMAKE_SOURCE_DIR}/cmake/`), so a git worktree
+does not see the main checkout's copy and needs its own, as with
+`EngineContentCredentials.cmake`. Checked on macOS arm64 on 2026-10-13 (Thema
+192 Schritt 3, Release/Ninja, dummy account): the file route printed
+`update account <user>@<host>:2222` and a password with `"` and `\` came out of
+`libHorizonSelfUpdate.dylib` byte for byte; the configure-time environment
+route compiled its account in without writing it to `CMakeCache.txt`; with
+neither there, configure printed "no update account compiled in" plus the copy
+hint and the dylib held none of the dummy strings. `test_selfupdate`,
+`test_editor_selfupdate` and `test_selfupdate_apply` passed in both builds.
+
 ## The server layout and the manifest
 
 The update account has two directories at its root, one per channel:
