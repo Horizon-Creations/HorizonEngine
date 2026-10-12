@@ -8,6 +8,7 @@
 #include "doctest.h"
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/UnderwaterCausticsShared.h>
 #include <HorizonScene/WaterQuery.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TerrainComponent.h>
@@ -15,6 +16,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace water = HE::water;
@@ -343,4 +345,30 @@ TEST_CASE("Underwater caustics: the camera resolves the body's knobs, faded in b
     c.intensity = 0.0f;
     REQUIRE(water::setUnderwaterCaustics(tc, id, c));
     CHECK(HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 0.5f, 0.0f)).causticsIntensity == 0.0f);
+}
+
+TEST_CASE("Underwater caustics: the shader's wave trains are the engine water's own, as 12 float literals")
+{
+    // The three trains of Physics/WaterWaves.h (kWaveA/B/C) spliced into every backend's
+    // caustic shader: twelve comma-separated numbers, each a float literal (a point or an
+    // exponent, never a bare "14" that HLSL/GLSL would read as an int).
+    const std::string list = HE::causticsWaveTrainsList();
+    std::vector<std::string> parts;
+    size_t from = 0;
+    while (true)
+    {
+        const size_t comma = list.find(',', from);
+        parts.push_back(list.substr(from, comma == std::string::npos ? std::string::npos : comma - from));
+        if (comma == std::string::npos) break;
+        from = comma + 1;
+    }
+    REQUIRE(parts.size() == 12);
+    for (const std::string& part : parts)
+        CHECK(part.find_first_of(".eE") != std::string::npos);
+    // The first train is kWaveA: direction, speed, length, steepness, in that order.
+    CHECK(std::stof(parts[0]) == doctest::Approx(water::kWaveA.directionDeg));
+    CHECK(std::stof(parts[1]) == doctest::Approx(water::kWaveA.speed));
+    CHECK(std::stof(parts[2]) == doctest::Approx(water::kWaveA.length));
+    CHECK(std::stof(parts[3]) == doctest::Approx(water::kWaveA.steepness));
+    CHECK(std::stof(parts[8]) == doctest::Approx(water::kWaveC.directionDeg));   // the third train is kWaveC
 }
