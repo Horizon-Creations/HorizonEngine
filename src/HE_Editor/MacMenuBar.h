@@ -96,6 +96,9 @@ namespace MacMenuBar
 		ResetLayout,
 		// ── Help ──
 		OpenTutorial, ReportIssue,
+		// Help ▸ Check for Updates…: SelfUpdateDialog. Not project-scoped — the
+		// Hub can update the editor too.
+		CheckForUpdates,
 		// Help ▸ Documentation opens the manual INSIDE the editor (DocsPanel);
 		// DocumentationOnline is the website. Both exist because they answer
 		// different needs — one keeps you where you are, the other is

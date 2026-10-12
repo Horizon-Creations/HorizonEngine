@@ -1115,6 +1115,11 @@ target_link_libraries(he_tests PRIVATE
 # added only then (the ctest loop below registers every test_*.cpp source).
 if(TARGET HorizonSelfUpdate)
     target_sources(he_tests PRIVATE test_selfupdate.cpp)
+    # Help ▸ Check for Updates' session (Thema 186 Schritt 6): ImGui-free on
+    # purpose so the editor's half of the update — what the takeover is started
+    # with, and that it is not started on its own — runs here on every platform.
+    target_sources(he_tests PRIVATE test_editor_selfupdate.cpp
+        ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSelfUpdate.cpp)
     target_link_libraries(he_tests PRIVATE HorizonSelfUpdate)
     if(WIN32)
         # No rpath on Windows: the two DLLs have to sit beside the test exe, as

@@ -69,6 +69,7 @@
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
+#include "SelfUpdateDialog.h"            // Help > Check for Updates (SFTP self-update)
 #include "DocsPanel.h"                   // Help > Documentation (the in-editor manual)
 #include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
@@ -131,9 +132,11 @@ namespace
 	// A destructive action that would discard the current scene. When requested
 	// while the scene is dirty it is stashed and a "Save changes?" modal is shown;
 	// the action runs once the user resolves the modal.
+	// InstallUpdate (Help ▸ Check for Updates ▸ Restart to Update) quits the
+	// editor for HorizonUpdater, so it is guarded exactly like Quit.
 	enum class GuardedAction {
 		None, NewScene, OpenSceneDialog, OpenScenePath,
-		OpenProjectDialog, OpenProjectPath, CloseProject, Quit,
+		OpenProjectDialog, OpenProjectPath, CloseProject, Quit, InstallUpdate,
 	};
 }
 
@@ -384,6 +387,8 @@ void EditorUI::joinPendingExport()
 	// log or filing an issue, and a joinable std::thread destroyed at teardown
 	// terminates the process.
 	ReportIssueDialog::joinPendingWork();
+	// Help ▸ Check for Updates: a check or a download on its worker.
+	SelfUpdateDialog::joinPendingWork();
 	// And the GitHub sign-in: its poll thread and the worker that stores a token.
 	GitHubSignIn::joinPendingWork();
 }
@@ -806,6 +811,10 @@ void EditorUI::render(AppContext& ctx, float dt)
     // opening a project as after, and the macOS Help menu is reachable in both.
     ReportIssueDialog::DrawReportIssueDialog(ctx);
 
+    // ── Help ▸ Check for Updates… ────────────────────────────────────────────
+    // Before the branch as well: the Hub has a Help menu on macOS too.
+    SelfUpdateDialog::Draw(ctx);
+
     // ── Help ▸ Documentation ─────────────────────────────────────────────────
     // Before the branch, so the manual is readable on the Project Hub as well as
     // in the editor. That is not symmetry for its own sake: "how do I start a
@@ -838,6 +847,12 @@ void EditorUI::render(AppContext& ctx, float dt)
     else
     {
         ProjectHubPanel::render(ctx);
+        // Restart to Update with no project open: nothing unsaved to ask about,
+        // so no guard. Not while a project is being opened — the request then
+        // waits and is taken by renderEditor's guarded path once it is loaded.
+        if (!ProjectPreflight::busy() && SelfUpdateDialog::takeInstallRequest() &&
+            SelfUpdateDialog::beginInstall(ctx) && ctx.quit)
+            ctx.quit();
         // Drawn after the hub so the welcome card sits on top of it. Draws nothing
         // once the user has answered it once (persisted in the editor config).
         TutorialPanel::renderWelcome(ctx);
@@ -1506,6 +1521,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		case GuardedAction::OpenProjectPath:   openProjectAt(arg);                 break;
 		case GuardedAction::CloseProject:      doCloseProject();                   break;
 		case GuardedAction::Quit:              if (ctx.quit) ctx.quit();           break;
+		// Reached only through the prompt (or with nothing unsaved): start
+		// HorizonUpdater, and quit only if it really started. A failure leaves
+		// the editor, the scene and the install exactly as they were.
+		case GuardedAction::InstallUpdate:
+			if (SelfUpdateDialog::beginInstall(ctx) && ctx.quit) ctx.quit();
+			break;
 		case GuardedAction::None:                                                  break;
 		}
 	};
@@ -1518,7 +1539,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	auto endsSession = [](GuardedAction a)
 	{
 		return a == GuardedAction::Quit || a == GuardedAction::CloseProject ||
-		       a == GuardedAction::OpenProjectDialog || a == GuardedAction::OpenProjectPath;
+		       a == GuardedAction::OpenProjectDialog || a == GuardedAction::OpenProjectPath ||
+		       a == GuardedAction::InstallUpdate;
 	};
 	// (asset path, label to show) per unsaved asset. The path is what the prompt's
 	// per-asset Save button writes through EditorUI::saveAsset.
@@ -1546,6 +1568,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		const bool tabsDirty = endsSession(a) && !unsavedTabEntries().empty();
 		if (!ctx.sceneDirty && !tabsDirty) { runGuardedAction(a, arg); return; }
+		if (a == GuardedAction::InstallUpdate)
+			HE_LOG_INFO(Editor, "Editor: unsaved changes (scene %s, %zu asset tab(s)) -- asking before the update",
+			            ctx.sceneDirty ? "dirty" : "clean", unsavedTabEntries().size());
 		s_guardAction      = a;
 		s_guardArg         = arg;
 		s_guardSaveThenAct = false;
@@ -1582,6 +1607,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ctx.exitRequested = false;
 		requestGuarded(GuardedAction::Quit);
 	}
+
+	// Help ▸ Check for Updates ▸ Restart to Update: through the same door as
+	// Quit, so unsaved scene and asset-tab edits are asked about first.
+	if (SelfUpdateDialog::takeInstallRequest())
+		requestGuarded(GuardedAction::InstallUpdate);
 
 	// A clone finished from Preferences ▸ Source Control: open it the way File ▸
 	// Open Project does, unsaved-work prompt and session teardown included.
@@ -1979,6 +2009,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleLandscapeTools: toggleLandscapeTools();                          break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
+			case MC::CheckForUpdates: SelfUpdateDialog::open();                              break;
 			case MC::Documentation:       DocsPanel::open();                                 break;
 			case MC::SearchDocumentation: DocsPanel::openSearch("");                         break;
 			case MC::DocumentationOnline: SDL_OpenURL(kDocsUrl);                             break;
@@ -2400,6 +2431,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("Report Issue...", nullptr, ReportIssueDialog::isOpen()))
 			ReportIssueDialog::open();
+		if (SelfUpdateDialog::available() &&
+		    EditorWidgets::menuItem("Check for Updates...", nullptr, SelfUpdateDialog::isOpen()))
+			SelfUpdateDialog::open();
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("About")) openAboutPopup = true;
 		ImGui::EndMenu();
@@ -2533,7 +2567,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     ImGui::Text("%d other %s connected to this editor.",
                                 peers, peers == 1 ? "person is" : "people are");
                 ImGui::TextUnformatted(
-                    action == GuardedAction::Quit
+                    action == GuardedAction::Quit || action == GuardedAction::InstallUpdate
                         ? "Quitting ends the session for everyone."
                         : "Leaving this project ends the session for everyone. "
                           "A session belongs to one project, so it cannot follow "
@@ -2544,6 +2578,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::Spacing();
 
             const char* runLabel = action == GuardedAction::Quit      ? "Quit Anyway"
+                                 : action == GuardedAction::InstallUpdate ? "Update Anyway"
                                  : action == GuardedAction::CloseProject ? "Close Anyway"
                                                                         : "Switch Anyway";
             if (EditorWidgets::dangerButton(runLabel, ImVec2(130, 0)))
@@ -2586,6 +2621,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             // Snapshot the stashed action — the buttons may clear it.
             const GuardedAction action = s_guardAction;
             const std::string   arg    = s_guardArg;
+            // The self-update acceptance driver answers this prompt like a click
+            // (SelfUpdateDialog.h); None for everyone else, every time.
+            using Answer = SelfUpdateDialog::PromptAnswer;
+            const Answer driven = action == GuardedAction::InstallUpdate
+                ? SelfUpdateDialog::takeE2EPromptAnswer() : Answer::None;
 
             // Editor tabs are only at risk when the action ends the session; a scene
             // switch keeps them and their unsaved edits (see requestGuarded).
@@ -2684,7 +2724,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (anythingDirty)
             {
                 const bool both = ctx.sceneDirty && !dirtyTabs.empty();
-                if (ImGui::Button(both ? "Save All" : "Save", ImVec2(110, 0)))
+                if (ImGui::Button(both ? "Save All" : "Save", ImVec2(110, 0)) || driven == Answer::Save)
                 {
                     // Assets first: those writes are synchronous, so a failure can
                     // still abort the flow before the scene's async Save-As dialog is
@@ -2735,9 +2775,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             // between them and the Save button next door.
             const char* runLabel = !anythingDirty ? "Continue"
                                  : (ctx.sceneDirty ? "Don't Save" : "Discard");
-            const bool runIt = anythingDirty
+            const bool runIt = (anythingDirty
                 ? EditorWidgets::dangerButton(runLabel, ImVec2(110, 0))
-                : ImGui::Button(runLabel, ImVec2(110, 0));
+                : ImGui::Button(runLabel, ImVec2(110, 0))) || driven == Answer::Discard;
             if (runIt)
             {
                 runGuardedAction(action, arg);
@@ -2747,8 +2787,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             }
             ImGui::SameLine();
             if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)) ||
-                ImGui::IsKeyPressed(ImGuiKey_Escape))
+                ImGui::IsKeyPressed(ImGuiKey_Escape) || driven == Answer::Cancel)
             {
+                if (action == GuardedAction::InstallUpdate)
+                    HE_LOG_INFO(Editor, "Editor: update cancelled at the unsaved-changes prompt -- nothing changed");
                 s_guardAction      = GuardedAction::None;
                 s_guardSaveThenAct = false;
                 s_guardSaveError.clear();

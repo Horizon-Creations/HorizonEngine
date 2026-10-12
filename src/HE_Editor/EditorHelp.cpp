@@ -2269,6 +2269,11 @@ namespace
 	  "Opens a pre-filled issue on the project's tracker, with the version, the "
 	  "platform and the recent log already in it.",
 	  "", "editor#notifications" },
+	{ "Help/Check for Updates...", "",
+	  "Asks the update server whether a newer editor is out, downloads it for "
+	  "this platform and checks it byte for byte. Installing restarts the editor "
+	  "after the usual question about unsaved changes, and reopens the project.",
+	  "", "editor#menus" },
 	{ "Help/About", "",
 	  "Which version this is — the number to quote in a bug report.",
 	  "", "editor#menus" },
@@ -8856,6 +8861,21 @@ namespace
 	  "Opens the issue that has just been filed in your browser. Its address is "
 	  "shown above and stays there until this dialog is closed.",
 	  "", "advanced#diagnostics" },
+	{ "Self-Update/Download", "",
+	  "Fetches the new version for this platform into a staging folder and "
+	  "checks its size and SHA-256 against the server's list. Nothing is "
+	  "installed yet, and the editor keeps running as it is.",
+	  "", "editor#menus" },
+	{ "Self-Update/Restart to Update", "",
+	  "Closes the editor, swaps in the downloaded version and starts it again "
+	  "with the same project. Unsaved changes are asked about first, exactly as "
+	  "when quitting; Cancel there keeps everything as it is. If the new version "
+	  "fails to start, the old one is put back.",
+	  "", "editor#menus" },
+	{ "Self-Update/Check Again", "",
+	  "Asks the update server once more, for instance after a release was "
+	  "published while this window was open.",
+	  "", "editor#menus" },
 	{ "Report Issue/Copy Link", "",
 	  "Puts the address of the issue that has just been filed on the clipboard. "
 	  "The report itself is already on GitHub; this is only the way back to it.",
@@ -9133,6 +9153,8 @@ namespace
 		// The bug reporter is neither collaboration nor source control: it
 		// attaches the engine log and files an issue, which is diagnostics.
 		{ "Report Issue/",          "editor-export", "Export & Diagnostics", "Report an issue" },
+		// Help ▸ Check for Updates: diagnostics' neighbour in the Help menu.
+		{ "Self-Update/",           "editor-export", "Export & Diagnostics", "Updating the editor" },
 	};
 
 	// Every component scope maps to the component page, with the component as
