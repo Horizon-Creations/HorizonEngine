@@ -217,5 +217,13 @@ dazwischen blendet die Höhe smoothstep-artig zu `edgeHeight` (dem Wasserspiegel
 Kontur wird nichts mehr angerührt, und der Boden erreicht an der Kontur selbst höchstens den Wasserspiegel, sodass
 die (unverändert auf der Kontur gerasterte) Wasserfläche sie auch tatsächlich erreicht. Der alte, nach außen
 gemessene `falloff` bleibt in `TerrainSculpt::excavatePolygon` als eigenständiges, unverändertes Verhalten erhalten
-(Default `bankIn = 0`, bit-gleich zu vorher) — er wird nur vom Lake-Werkzeug nicht mehr benutzt. Vorher/Nachher am
-selben Fall: `water-lake/bugfix-13-*.png`.
+(Default `bankIn = 0`, bit-gleich zu vorher) — er wird nur vom Lake-Werkzeug nicht mehr benutzt.
+
+Vorher/Nachher am selben Fall (`HE_DUMP_LAKEEDIT=drawn`, D3D11, derselbe Code-Pfad wie der echte Create-Lake-Knopf,
+Bohnen-Spline, Tiefe 2,5 m, Bank 6 m, flaches Gelände): vorher ein sichtbar abgesenkter, beschatteter Ring direkt
+außerhalb der Kontur (4267 gegrabene Bodenvertices für 2564 Wasserzellen), nachher kein Ring mehr, Boden und
+Wasserkante schließen bündig ab (2565 gegrabene Bodenvertices, fast genau die Zellenzahl — der Aushub reicht nur
+noch so weit wie die Wasserfläche selbst).
+
+![Vorher: abgesenkter Ring außerhalb der Kontur](water-lake/bugfix-13-before-d3d11.png)
+![Nachher: Boden und Wasserkante schließen bündig ab](water-lake/bugfix-13-after-d3d11.png)
