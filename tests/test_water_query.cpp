@@ -881,3 +881,137 @@ TEST_CASE("Buoyancy factor: water density over body density, held to what the st
     CHECK(buoyancyFactorFor(std::numeric_limits<float>::quiet_NaN(), 500.0f) == 1.0f);
     CHECK(buoyancyFactorFor(1000.0f, std::numeric_limits<float>::infinity()) == 1.0f);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Thema 185 Schritt 3: the refracted-light (caustics) settings of a body
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Underwater caustics settings: the defaults write nothing, a change writes only what changed and round-trips")
+{
+    HorizonWorld world;
+    const Entity e = addLandscape(world);
+    TerrainComponent& tc = terrainOf(world, e);
+    const uint16_t lake = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+
+    SUBCASE("defaults leave no trace in the scene")
+    {
+        REQUIRE(tc.water.findBody(lake)->underwaterCaustics == water::UnderwaterCausticsParams{});
+        const std::string text = sceneText(world);
+        CHECK(text.find("waterBodies") != std::string::npos);
+        CHECK(text.find("underwaterCaustics") == std::string::npos);
+    }
+    SUBCASE("a change writes only the keys that differ, and round-trips")
+    {
+        water::UnderwaterCausticsParams c;
+        c.intensity = 1.75f;
+        c.scale     = 2.5f;
+        REQUIRE(water::setUnderwaterCaustics(tc, lake, c));
+
+        json j = json::parse(sceneText(world));
+        json* terrain = findKey(j, "terrain");
+        REQUIRE(terrain != nullptr);
+        const json& cj = (*terrain)["waterBodies"][0]["underwaterCaustics"];
+        CHECK(cj.size() == 2);
+        CHECK(cj.contains("intensity"));
+        CHECK(cj.contains("scale"));
+        CHECK_FALSE(cj.contains("speed"));
+        CHECK_FALSE(cj.contains("depth"));
+
+        HorizonWorld loaded;
+        reloadEdited(world, loaded, [](json&) {});
+        const TerrainComponent* t = firstTerrain(loaded);
+        REQUIRE(t != nullptr);
+        REQUIRE(t->water.bodies.size() == 1);
+        CHECK(t->water.bodies[0].underwaterCaustics == c);
+        // The fog next to it is untouched by the caustics key.
+        CHECK(t->water.bodies[0].underwaterFog == water::UnderwaterFogParams{});
+    }
+    SUBCASE("every setting travels")
+    {
+        water::UnderwaterCausticsParams c;
+        c.intensity = 3.0f; c.scale = 0.4f; c.speed = 2.0f; c.depth = 33.0f;
+        REQUIRE(water::setUnderwaterCaustics(tc, lake, c));
+        SceneSerializer ser;
+        std::vector<uint8_t> blob;
+        REQUIRE(ser.saveToMemory(world, blob));
+        HorizonWorld loaded;
+        REQUIRE(ser.loadFromMemory(loaded, blob));
+        const TerrainComponent* t = firstTerrain(loaded);
+        REQUIRE(t != nullptr);
+        CHECK(t->water.bodies[0].underwaterCaustics == c);
+    }
+}
+
+TEST_CASE("Underwater caustics settings: a damaged file cannot leave a number the post pass would trip on")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    const uint16_t lake = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+    water::UnderwaterCausticsParams c;
+    c.intensity = 2.0f;
+    REQUIRE(water::setUnderwaterCaustics(tc, lake, c));
+
+    HorizonWorld loaded;
+    reloadEdited(world, loaded, [](json& j)
+    {
+        json* terrain = findKey(j, "terrain");
+        REQUIRE(terrain != nullptr);
+        json& cj = (*terrain)["waterBodies"][0]["underwaterCaustics"];
+        cj["intensity"] = 1.0e9;     // far past the bound
+        cj["scale"]     = -4.0;      // below the minimum
+        cj["speed"]     = "fast";    // not a number: keeps the default
+        cj["depth"]     = 0.0;       // below the minimum
+    });
+    const TerrainComponent* t = firstTerrain(loaded);
+    REQUIRE(t != nullptr);
+    const water::UnderwaterCausticsParams& q = t->water.bodies[0].underwaterCaustics;
+    CHECK(q.intensity == water::kMaxCausticsIntensity);
+    CHECK(q.scale     == water::kMinCausticsScale);
+    CHECK(q.speed     == water::kDefaultCausticsSpeed);
+    CHECK(q.depth     == water::kMinCausticsDepth);
+}
+
+TEST_CASE("Underwater caustics settings: clampUnderwaterCaustics holds each knob to its bounds, non-finite to its default")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    water::UnderwaterCausticsParams wild;
+    wild.intensity = inf; wild.scale = nan; wild.speed = -1.0f; wild.depth = 1.0e9f;
+    const water::UnderwaterCausticsParams c = water::clampUnderwaterCaustics(wild);
+    CHECK(c.intensity == water::kDefaultCausticsIntensity);   // not a number: the default
+    CHECK(c.scale     == water::kDefaultCausticsScale);
+    CHECK(c.speed     == 0.0f);                               // negative: held at 0 (frozen)
+    CHECK(c.depth     == water::kMaxCausticsDepth);
+
+    water::UnderwaterCausticsParams ok;
+    ok.intensity = 0.0f;   // 0 is a legal value: off
+    CHECK(water::clampUnderwaterCaustics(ok).intensity == 0.0f);
+}
+
+TEST_CASE("Underwater caustics settings: setUnderwaterCaustics touches the revision, never the surface; they are content")
+{
+    TerrainComponent a = makeTerrain();
+    const uint16_t lake = addLake(a, rect(-10, -10, 10, 10), 2.0f);
+    CHECK_FALSE(water::setUnderwaterCaustics(a, 999, water::UnderwaterCausticsParams{}));   // an unknown body
+
+    TerrainComponent b = a;
+    CHECK(water::sameContent(a.water, b.water));
+    const uint32_t rev = b.water.revision;
+    water::UnderwaterCausticsParams c;
+    c.intensity = 1.5f;
+    REQUIRE(water::setUnderwaterCaustics(b, lake, c));
+    CHECK(b.water.revision == rev + 1);
+    CHECK_FALSE(b.water.dirty);                              // no surface rebuilt
+    REQUIRE(water::setUnderwaterCaustics(b, lake, c));       // the same again: nothing
+    CHECK(b.water.revision == rev + 1);
+    CHECK_FALSE(water::sameContent(a.water, b.water));       // only the caustics differ
+
+    water::Delta d;
+    REQUIRE(water::makeDelta(a.water, b.water, d));
+    CHECK_FALSE(d.empty());
+    TerrainComponent undone = a;
+    REQUIRE(water::applyDelta(undone, d));
+    CHECK(undone.water.findBody(lake)->underwaterCaustics == c);
+    REQUIRE(water::revertDelta(undone, d));
+    CHECK(water::sameContent(undone.water, a.water));
+}

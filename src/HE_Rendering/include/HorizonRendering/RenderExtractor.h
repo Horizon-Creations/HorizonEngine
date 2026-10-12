@@ -108,6 +108,14 @@ HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
 HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
                                                              const glm::vec3& cameraPos);
 
+// The caustic net's waterline fade-in (Thema 185 Schritt 3): the body's causticsIntensity
+// is multiplied by this smoothstep of the camera's depth below the surface — 0 on the
+// line (and above it), 1 from kCausticsFadeInDepth metres down, continuous in between,
+// so the net eases in over the first half metre of a dive instead of popping on at the
+// waterline. Pure function of the argument; no state.
+inline constexpr float kCausticsFadeInDepth = 0.5f;
+HE_RENDERING_API float causticsFadeIn(float signedDepth);
+
 } // namespace HE
 
 // Reads the ECS world each frame and fills a RenderWorld snapshot.

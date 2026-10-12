@@ -123,7 +123,9 @@ namespace
     {
         if (!bodiesEq(a, b)) return false;
         for (size_t i = 0; i < a.size(); ++i)
-            if (a[i].physics != b[i].physics || a[i].underwaterFog != b[i].underwaterFog) return false;
+            if (a[i].physics != b[i].physics || a[i].underwaterFog != b[i].underwaterFog ||
+                a[i].underwaterCaustics != b[i].underwaterCaustics)
+                return false;
         return true;
     }
 
@@ -366,6 +368,29 @@ bool setUnderwaterFog(TerrainComponent& tc, uint16_t id, const UnderwaterFogPara
     if (b->underwaterFog == next) return true;
     b->underwaterFog = next;
     // Same non-effect on the sheet as setPhysics: nothing here reads it.
+    ++tc.water.revision;
+    return true;
+}
+
+UnderwaterCausticsParams clampUnderwaterCaustics(const UnderwaterCausticsParams& p)
+{
+    const UnderwaterCausticsParams d;   // the defaults stand in for anything that is not a number
+    UnderwaterCausticsParams out;
+    out.intensity = finite(p.intensity) ? std::clamp(p.intensity, 0.0f, kMaxCausticsIntensity) : d.intensity;
+    out.scale     = finite(p.scale) ? std::clamp(p.scale, kMinCausticsScale, kMaxCausticsScale) : d.scale;
+    out.speed     = finite(p.speed) ? std::clamp(p.speed, 0.0f, kMaxCausticsSpeed) : d.speed;
+    out.depth     = finite(p.depth) ? std::clamp(p.depth, kMinCausticsDepth, kMaxCausticsDepth) : d.depth;
+    return out;
+}
+
+bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCausticsParams& c)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    const UnderwaterCausticsParams next = clampUnderwaterCaustics(c);
+    if (b->underwaterCaustics == next) return true;
+    b->underwaterCaustics = next;
+    // Same non-effect on the sheet as setUnderwaterFog: nothing here reads it.
     ++tc.water.revision;
     return true;
 }
@@ -910,6 +935,7 @@ void sanitize(TerrainComponent& tc)
         nb.syncKey = 0;
         nb.physics = clampPhysics(nb.physics);
         nb.underwaterFog = clampUnderwaterFog(nb.underwaterFog);
+        nb.underwaterCaustics = clampUnderwaterCaustics(nb.underwaterCaustics);
     }
     f.bodies = std::move(kept);
     uint32_t next = f.nextBodyId == 0 ? 1u : f.nextBodyId;

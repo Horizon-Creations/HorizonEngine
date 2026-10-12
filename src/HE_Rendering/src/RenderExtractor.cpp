@@ -1236,7 +1236,26 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	const float depthT = std::pow(std::clamp(ramp, 0.0f, 1.0f), fog.falloff);
 	out.tintColor = glm::mix(fog.shallowColor, fog.deepColor, depthT);
 	out.density   = fog.density;
+
+	// The caustic pass's knobs (Thema 185 Schritt 3). The net is faded IN over the
+	// first kCausticsFadeInDepth metres of the dive (smoothstep of the camera's own
+	// depth): exactly 0 with the camera on the waterline, the body's full value from
+	// half a metre down. A function of this frame's depth alone, like everything above
+	// — no state, no hysteresis — and zero on both sides of the line, so crossing it
+	// can never pop the net on or off; the pass is simply not run at 0.
+	const water::UnderwaterCausticsParams& cau = surf.underwaterCaustics;
+	out.causticsIntensity = cau.intensity * causticsFadeIn(signedDepth);
+	out.causticsScale     = cau.scale;
+	out.causticsSpeed     = cau.speed;
+	out.causticsDepth     = cau.depth;
 	return out;
+}
+
+float causticsFadeIn(float signedDepth)
+{
+	if (!std::isfinite(signedDepth)) return 0.0f;   // no depth to speak of: no net
+	const float t = std::clamp(signedDepth / kCausticsFadeInDepth, 0.0f, 1.0f);
+	return t * t * (3.0f - 2.0f * t);
 }
 
 } // namespace HE

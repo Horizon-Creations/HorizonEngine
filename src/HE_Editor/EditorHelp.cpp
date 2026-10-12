@@ -7153,6 +7153,54 @@ namespace
 	  "the water material's picture and move no body.",
 	  "", "systems#water-physics" },
 
+	// ── What the water looks like from below (Thema 185) ─────────────────────
+	{ "Landscape/Underwater Fog##wfog", "Underwater Fog",
+	  "How the view looks while the camera is under this water: a tint that deepens "
+	  "with the camera's own depth, and a fog that thickens with the distance the "
+	  "view ray travels through the water. Separate from the water material's own "
+	  "colours, which shade the surface when you look down into it.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Shallow Color##wfog", "Underwater Shallow Color",
+	  "The tint just under the surface.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Deep Color##wfog", "Underwater Deep Color",
+	  "The tint the view ramps toward the deeper the camera dives.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Density##wfog", "Underwater Density",
+	  "How fast the water swallows the view, per metre (Beer-Lambert). Higher is "
+	  "murkier: things vanish into the tint sooner. 0 is perfectly clear.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Depth Curve##wfog", "Underwater Depth Curve",
+	  "Shapes how fast the tint goes from shallow to deep. Above 1 it lingers near "
+	  "the shallow colour before darkening, below 1 it reaches the deep colour "
+	  "sooner. Does not touch the fog.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Refracted Light##wcau", "Refracted Light",
+	  "The moving net of bright lines the waves throw onto whatever lies below the "
+	  "surface while the camera is under water. It follows the same waves the "
+	  "water material draws (Physics/WaterWaves.h), so it moves with the swell you "
+	  "see from above, takes the sun's colour and is gone at night. It eases in "
+	  "over the first half metre of a dive, so crossing the waterline never pops. "
+	  "Intensity 0 turns it off and costs nothing.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Intensity##wcau", "Refracted Light Intensity",
+	  "How bright the net is, as a multiple of the sun's light on the spot. 0 is "
+	  "off. Around 0.5 is a gentle shimmer; up to 4 for a stylised look.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Scale##wcau", "Refracted Light Scale",
+	  "The size of the net's cells. 1 matches the water material's own waves; 2 "
+	  "makes the net twice as fine, 0.5 twice as wide.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Speed##wcau", "Refracted Light Speed",
+	  "How fast the net moves relative to the surface's waves. 1 keeps step with "
+	  "them, 0 freezes the net.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Fade Depth##wcau", "Refracted Light Fade Depth",
+	  "The depth below the surface where the net has faded to about a third, the "
+	  "water swallowing the light on its way down. Beyond five times this depth "
+	  "nothing is shaded at all.",
+	  "", "systems#water-physics" },
+
 	// ── The Environment window ───────────────────────────────────────────────
 	{ "Environment Window/Select", "Select the entity",
 	  "Selects the Sky or Weather entity, which is what puts its settings into "

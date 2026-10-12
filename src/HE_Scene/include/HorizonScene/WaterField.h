@@ -174,6 +174,54 @@ namespace HE::water
     // intent lost, not as "clamp the channels that still make sense").
     UnderwaterFogParams clampUnderwaterFog(const UnderwaterFogParams& p);
 
+    // ── Light the surface refracts down onto what lies below (Thema 185 Schritt 3) ──
+    // The caustic pass (a sibling of the fog pass, run just before it) paints the
+    // moving net of bright lines a wavy surface throws on the floor: per pixel it
+    // follows the sun's ray from the geometry up to the flat surface plane, bends
+    // it by the slope of the engine water's own waves there (Physics/WaterWaves.h —
+    // the numbers the surface material and the physics already share, so the net
+    // moves with the swell you see from above) and reads a tileable caustic pattern
+    // at the bent position. Defaults are visible but mild: a lake that never touches
+    // this panel still gets a gentle net once the camera dives, and 0 intensity
+    // turns the pass off entirely (zero cost, no draw).
+    inline constexpr float kDefaultCausticsIntensity = 0.55f;
+    inline constexpr float kMaxCausticsIntensity     = 4.0f;
+    inline constexpr float kDefaultCausticsScale     = 1.0f;    // 1 = the water material's own wavelengths
+    inline constexpr float kMinCausticsScale         = 0.1f;
+    inline constexpr float kMaxCausticsScale         = 8.0f;
+    inline constexpr float kDefaultCausticsSpeed     = 1.0f;    // 1 = the surface's own wave clock
+    inline constexpr float kMaxCausticsSpeed         = 4.0f;
+    inline constexpr float kDefaultCausticsDepth     = 14.0f;   // m below the surface where it has faded to 1/e
+    inline constexpr float kMinCausticsDepth         = 0.5f;
+    inline constexpr float kMaxCausticsDepth         = 200.0f;
+
+    struct UnderwaterCausticsParams
+    {
+        // Brightness of the net (0 = off). Multiplies the sun's colour, so the net is
+        // as bright as the sun the scene already has — and gone at night.
+        float intensity = kDefaultCausticsIntensity;
+        // Size of the net's cells relative to the water material's waves: 2 = twice
+        // as fine, 0.5 = twice as wide. Scales the wave phases the pass reads too.
+        float scale = kDefaultCausticsScale;
+        // Animation speed relative to the surface's wave clock.
+        float speed = kDefaultCausticsSpeed;
+        // Depth below the surface at which the net has faded to 1/e (the water
+        // swallows the light on its way down). Pixels deeper than 5x this are not
+        // shaded at all — the pass's cost cap for a surface far above.
+        float depth = kDefaultCausticsDepth;
+
+        bool operator==(const UnderwaterCausticsParams& o) const
+        {
+            return intensity == o.intensity && scale == o.scale && speed == o.speed &&
+                   depth == o.depth;
+        }
+        bool operator!=(const UnderwaterCausticsParams& o) const { return !(*this == o); }
+    };
+
+    // Held to its bounds like clampUnderwaterFog: a non-finite value becomes the
+    // default, each knob clamped to its kMin..kMax above (intensity and speed 0..max).
+    UnderwaterCausticsParams clampUnderwaterCaustics(const UnderwaterCausticsParams& p);
+
     struct Body
     {
         uint16_t id    = kNoBody;
@@ -185,6 +233,8 @@ namespace HE::water
         // What this body looks like from below its surface (Thema 185 Schritt 2).
         // Same save/compare rule as physics: only when it differs from the defaults.
         UnderwaterFogParams underwaterFog{};
+        // The refracted-light net from below (Thema 185 Schritt 3); same rule.
+        UnderwaterCausticsParams underwaterCaustics{};
         // The outline the lake's cells were last laid from (terrain-local XZ, the
         // polygon of the spline, no closing duplicate). Empty for brush water and
         // for a lake whose spline never reached the field. It is the baseline the
@@ -318,6 +368,11 @@ namespace HE::water
     // bumps Field::revision, touches neither `dirty` nor the rectangle nor
     // TerrainComponent::dirty. False for an unknown body.
     bool setUnderwaterFog(TerrainComponent& tc, uint16_t id, const UnderwaterFogParams& fog);
+
+    // The refracted-light net from below (UnderwaterCausticsParams), held to its
+    // bounds (clampUnderwaterCaustics). Same non-effect on the sheet as
+    // setUnderwaterFog. False for an unknown body.
+    bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCausticsParams& c);
 
     // Shore clipping on or off and its overshoot (Field::clipToGround,
     // shoreOvershoot), every surface of the landscape rebuilt. The overshoot is

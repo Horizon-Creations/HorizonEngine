@@ -1876,6 +1876,61 @@ void renderPanel(AppContext& ctx)
                                 WF::setUnderwaterFog(tc, b.id, fog);
                             ImGui::TreePop();
                         }
+
+                        // ── Refracted light from the surface (Thema 185 Schritt 3) ───────
+                        // HE::water::UnderwaterCausticsParams: the net of bright lines the
+                        // waves throw onto what lies below, painted by the caustic pass
+                        // (fed by Physics/WaterWaves.h, the engine water's own wave trains).
+                        // Same write path as the fog above: water::setUnderwaterCaustics.
+                        const bool cauOpen = ImGui::TreeNodeEx("Refracted Light##wcau", physFlags);
+                        EditorWidgets::helpForLabel("Refracted Light##wcau");
+                        if (cauOpen)
+                        {
+                            WF::UnderwaterCausticsParams cau = b.underwaterCaustics;
+                            bool cauEdited = false;
+                            const auto trackCau = [&]
+                            {
+                                if (!ctx.undoSys) return;
+                                if (ImGui::IsItemActivated())
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Refracted Light");
+                                }
+                                if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+                            };
+
+                            rowLabel("Intensity");
+                            if (ImGui::DragFloat("##wcau_intensity", &cau.intensity, 0.01f, 0.0f,
+                                                 WF::kMaxCausticsIntensity, "%.2f"))
+                                cauEdited = true;
+                            trackCau();
+                            EditorWidgets::helpForLabel("Intensity##wcau");
+
+                            rowLabel("Scale");
+                            if (ImGui::DragFloat("##wcau_scale", &cau.scale, 0.01f, WF::kMinCausticsScale,
+                                                 WF::kMaxCausticsScale, "%.2f"))
+                                cauEdited = true;
+                            trackCau();
+                            EditorWidgets::helpForLabel("Scale##wcau");
+
+                            rowLabel("Speed");
+                            if (ImGui::DragFloat("##wcau_speed", &cau.speed, 0.01f, 0.0f,
+                                                 WF::kMaxCausticsSpeed, "%.2f"))
+                                cauEdited = true;
+                            trackCau();
+                            EditorWidgets::helpForLabel("Speed##wcau");
+
+                            rowLabel("Fade Depth");
+                            if (ImGui::DragFloat("##wcau_depth", &cau.depth, 0.1f, WF::kMinCausticsDepth,
+                                                 WF::kMaxCausticsDepth, "%.1f m"))
+                                cauEdited = true;
+                            trackCau();
+                            EditorWidgets::helpForLabel("Fade Depth##wcau");
+
+                            if (cauEdited && cau != b.underwaterCaustics)
+                                WF::setUnderwaterCaustics(tc, b.id, cau);
+                            ImGui::TreePop();
+                        }
                         ImGui::PopID();
                     }
                     if (!s_waterNote.empty()) EditorWidgets::hint("%s", s_waterNote.c_str());

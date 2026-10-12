@@ -286,3 +286,61 @@ TEST_CASE("Underwater camera: resolved tint/density are non-finite-proof like th
     CHECK_FALSE(d.wet);
     CHECK(d.density == 0.0f);
 }
+
+// ─── Thema 185, step 3: the caustic net's waterline fade-in and its resolved knobs ─
+// causticsIntensity is the body's intensity times a smoothstep of the camera's depth
+// below the surface: exactly 0 ON the line, so the net can never pop on at the
+// waterline, the body's full value from kCausticsFadeInDepth down.
+
+TEST_CASE("Underwater caustics: the fade-in is 0 on and above the waterline, 1 from half a metre down, continuous between")
+{
+    CHECK(HE::causticsFadeIn(0.0f) == 0.0f);
+    CHECK(HE::causticsFadeIn(-3.0f) == 0.0f);
+    CHECK(HE::causticsFadeIn(HE::kCausticsFadeInDepth) == doctest::Approx(1.0f));
+    CHECK(HE::causticsFadeIn(40.0f) == doctest::Approx(1.0f));
+    // Monotonic and with no jump bigger than the step could explain (smoothstep
+    // slope is at most 1.5 per unit of t, so a 1 mm step moves it at most 0.003).
+    float prev = 0.0f;
+    for (float d = 0.0f; d <= 0.6f; d += 0.001f)
+    {
+        const float f = HE::causticsFadeIn(d);
+        CHECK(f >= prev - 1e-6f);
+        CHECK(f - prev <= 0.0031f);
+        prev = f;
+    }
+    // Non-finite input never escapes as a non-finite factor.
+    CHECK(std::isfinite(HE::causticsFadeIn(std::numeric_limits<float>::quiet_NaN())));
+}
+
+TEST_CASE("Underwater caustics: the camera resolves the body's knobs, faded in by depth, and 0 whenever the pass should skip")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    const uint16_t id = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+
+    water::UnderwaterCausticsParams c;
+    c.intensity = 1.5f; c.scale = 2.0f; c.speed = 0.5f; c.depth = 9.0f;
+    REQUIRE(water::setUnderwaterCaustics(tc, id, c));
+
+    // Dry (above the surface): the pass is skipped.
+    CHECK(HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 10.0f, 0.0f)).causticsIntensity == 0.0f);
+    // Exactly on the waterline: wet, yet zero — the fade starts from nothing.
+    const UnderwaterCameraData onLine = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 2.0f, 0.0f));
+    CHECK(onLine.wet);
+    CHECK(onLine.causticsIntensity == 0.0f);
+    // A hair below it: a hair of net, not the whole thing.
+    const UnderwaterCameraData hair = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 1.999f, 0.0f));
+    CHECK(hair.causticsIntensity > 0.0f);
+    CHECK(hair.causticsIntensity < 0.01f);
+    // Well below: the body's own numbers, unchanged.
+    const UnderwaterCameraData deep = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 0.5f, 0.0f));
+    CHECK(deep.causticsIntensity == doctest::Approx(1.5f));
+    CHECK(deep.causticsScale == doctest::Approx(2.0f));
+    CHECK(deep.causticsSpeed == doctest::Approx(0.5f));
+    CHECK(deep.causticsDepth == doctest::Approx(9.0f));
+
+    // A body that turned the net off stays at 0 however deep the camera is.
+    c.intensity = 0.0f;
+    REQUIRE(water::setUnderwaterCaustics(tc, id, c));
+    CHECK(HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 0.5f, 0.0f)).causticsIntensity == 0.0f);
+}

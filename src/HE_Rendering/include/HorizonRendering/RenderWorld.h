@@ -35,6 +35,17 @@ struct UnderwaterCameraData {
     float signedDepth = 0.0f;   // surfaceY - camera.y: > 0 means the camera is below the surface. 0 when !wet.
     glm::vec3 tintColor { 0.045f, 0.20f, 0.22f };   // resolved shallow→deep blend; meaningful only if wet
     float     density = 0.0f;                        // body's per-metre absorption; 0 when !wet (skip the pass)
+
+    // Thema 185 Schritt 3 — the caustic pass's knobs, resolved here like tintColor
+    // (the body's UnderwaterCausticsParams, WaterField.h). causticsIntensity already
+    // carries the waterline fade-in (kCausticsFadeInDepth in RenderExtractor.cpp: 0 with
+    // the camera exactly on the surface, ramping to the body's own value over the first
+    // half metre of the dive), so the net never pops on at the waterline and 0 is the
+    // pass's one cue to skip — dry camera, body turned it off, or camera on the line.
+    float causticsIntensity = 0.0f;
+    float causticsScale     = 1.0f;
+    float causticsSpeed     = 1.0f;
+    float causticsDepth     = 14.0f;
 };
 
 // "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so
