@@ -19,7 +19,11 @@
 
 namespace HE::Su {
 
-struct Version
+// HE_SU_API on the type, not only on the free functions: toString() is defined
+// in the .cpp, and an MSVC build with explicit exports leaves a member of a
+// non-exported type unresolved in every consumer (the Windows rule in
+// docs/editor-selfupdate-sftp-design.md; same house style as HE_API classes).
+struct HE_SU_API Version
 {
 	std::uint32_t major = 0;
 	std::uint32_t minor = 0;

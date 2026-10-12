@@ -202,6 +202,14 @@ that stops answering mid-transfer holds the worker thread.
 | `scripts/selfupdate_test_sftp_server.py` | read-only paramiko SFTP server with password login, for the live test and the CI matrix |
 | `HE::Log::Cat::SelfUpdate` | log category (`HE_LOG=SelfUpdate=Debug`) |
 
+Windows export rule (see the `HE_API` rules in the Windows CI notes): the DLL
+uses explicit exports, so every free function carries `HE_SU_API`, **and** every
+struct that has a member function defined in a `.cpp` is exported as a whole
+type (`struct HE_SU_API Version`, `UpdateArtifact`, `UpdateManifest`,
+`SelfUpdateConfig`). A member of a non-exported type links on macOS and Linux
+and is an unresolved external for every consumer (the tests included) on MSVC.
+New types with only inline members need nothing.
+
 The transport being an interface is what makes the rest testable without a
 network, and lets the CI matrix prove the whole path on a runner before (or
 without) a real server.

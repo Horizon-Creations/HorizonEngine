@@ -47,7 +47,8 @@ namespace HE::Su {
 
 inline constexpr int kManifestSchema = 1;
 
-struct UpdateArtifact
+// Types with a member defined in the .cpp carry HE_SU_API themselves (see Version).
+struct HE_SU_API UpdateArtifact
 {
 	std::string   platform;   // "windows-x64" | "macos-arm64" | "linux-x64" | …
 	std::string   path;       // relative to the manifest's directory, '/'-separated
@@ -58,7 +59,7 @@ struct UpdateArtifact
 	std::string fileName() const;
 };
 
-struct UpdateManifest
+struct HE_SU_API UpdateManifest
 {
 	int         schema = kManifestSchema;
 	std::string version;      // as written; parse it with parseVersion()

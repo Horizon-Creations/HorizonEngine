@@ -69,7 +69,7 @@ enum class ConfigState
 	Ready,     // `endpoint` is complete and not the EngineContent account
 };
 
-struct SelfUpdateConfig
+struct HE_SU_API SelfUpdateConfig   // manifestRemotePath() lives in the .cpp, so the type is exported
 {
 	ConfigState          state = ConfigState::NotSet;
 	HE::Cs::SftpEndpoint endpoint;
