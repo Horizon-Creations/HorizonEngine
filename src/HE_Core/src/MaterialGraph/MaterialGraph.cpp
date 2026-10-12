@@ -1866,11 +1866,12 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         // splash, 0.3 to 1.2 m) under a gaussian that widens with age, fading with age
         // (exp(-age / decay)) and with the spread of the ring (the energy of a circle is
         // shared out over a longer rim). h is that height; g is its analytic gradient, so a
-        // normal that leans with g and the height agree. The factor 0.35 is the lean of a
-        // full-strength ring whatever its wavelength (the height is 0.35 / k). f is the
-        // packet's envelope at the crest, for strong rings only. Nothing here reads a
-        // derivative or a texture, so the loop may leave early; with no ring (count 0) the
-        // loop never runs and the three results are 0.
+        // normal that leans with g and the height agree. The factor 0.5 is the lean of a
+        // full-strength ring whatever its wavelength (the height is 0.5 / k). f is the
+        // packet's envelope at the crest, thin, for strong young rings only (the crown of a
+        // splash, gone within half a second). Nothing here reads a derivative or a texture,
+        // so the loop may leave early; with no ring (count 0) the loop never runs and the
+        // three results are 0.
         src += R"HE(void heWaterRipple(vec2 p, out float h, out vec2 g, out float f) {
     h = 0.0; g = vec2(0.0); f = 0.0;
     int n = int(heLight.waterRipples.x + 0.5);
@@ -1894,9 +1895,9 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         float ph = k * u;
         float sn = sin(ph);
         float cs = cos(ph);
-        h += (0.35 / k) * env * pk * cs;
-        g += (0.35 * env * pk * (-sn - 2.0 * u / (w * w * k) * cs)) * dv / max(d, 0.001);
-        f += smoothstep(0.35, 0.9, env) * exp(-(u * u) / (0.25 * lam * lam));
+        h += (0.5 / k) * env * pk * cs;
+        g += (0.5 * env * pk * (-sn - 2.0 * u / (w * w * k) * cs)) * dv / max(d, 0.001);
+        f += 0.7 * smoothstep(0.45, 1.0, env) * exp(-(u * u) / (0.1 * lam * lam));
     }
     f = clamp(f, 0.0, 1.0);
 }

@@ -694,20 +694,20 @@ Die Regeln der Auslöser (`RippleTriggers`, `raiseRings`):
 
 Der Shader (Startwerte, am Bild abgestimmt, die **Schnittstelle** — Blocklayout und Knotenanschlüsse — ist der Vertrag): ein Ring ist ein Wellenpaket auf seiner Front `r0 + Tempo * Alter`,
 ein Kosinus mit einer Wellenlänge `clamp(r0, 0,3, 1,2)` m unter einer Gauß-Hülle der Breite `Wellenlänge * (0,7 + 0,35 * Alter)`, Stärke `s * exp(-Alter / τ) / sqrt(Front / r0)`.
-Die Neigung ist der **analytische** Gradient der Höhe (Normale und Höhe stimmen überein), skaliert auf 0,35 bei voller Stärke, unabhängig von der Wellenlänge; der Schaum ist die Hülle am Kamm,
-nur für starke Ringe (`smoothstep(0,35, 0,9, Stärke)`).
+Die Neigung ist der **analytische** Gradient der Höhe (Normale und Höhe stimmen überein), skaliert auf 0,5 bei voller Stärke, unabhängig von der Wellenlänge; der Schaum ist die Hülle am Kamm,
+dünn und nur für starke junge Ringe (`0,7 * smoothstep(0,45, 1,0, Stärke)`, die Krone eines Aufpralls, nach einer halben Sekunde weg).
 
 ### 14.2 Abweichungen vom Konzept (Abschnitt 6)
 
 | Konzept | Gebaut | Grund |
 |---|---|---|
 | 6.3 Besitzer `HorizonWorld::ripples()` (D3 offen) | `PhysicsWorld::waterRipples()` | `PhysicsWorld.h` hat 42 Include-Stellen, `HorizonWorld.h` 180; das Alter läuft in `step()` auf der Simulationszeit (8.2), ohne dass die Anwendung es tickt; die Liste wird mit der Welt geleert. Ein Skript (Schritt 5, `water.disturb`) fügt über denselben Zugriff hinzu |
-| 6.1 / 12: Ringe sind reine Anzeige | unverändert gebaut. **Der Schritttext verlangt mehr:** "Die Wellenhöhe aus Schritt 2 enthält diese Störungen, damit Optik und Physik übereinstimmen" | `WaterIndex::surfaceAt` liest die Ringe **nicht**. Das hält die Determinismus-Aussage von 8.2 (Ringe verändern keinen Körper) und das Zeitbudget. Die Rückkopplung wäre ein CPU-Spiegel der Ringhöhe in `surfaceAt` (Höhe `0,35 / k * Hülle * cos`, bei vollem Ring etwa 4 cm), bei leerer Liste bit-gleich zu heute. **Entscheidung der Queen (12.10.): Anzeige-only**, bewusste Abweichung vom Schritttext; Optik und Physik können im Zentimeterbereich der Ringhöhe auseinanderliegen. Möglicher Folgeschritt (rund 30 bis 40 Minuten mit Tests), später zu entscheiden |
+| 6.1 / 12: Ringe sind reine Anzeige | unverändert gebaut. **Der Schritttext verlangt mehr:** "Die Wellenhöhe aus Schritt 2 enthält diese Störungen, damit Optik und Physik übereinstimmen" | `WaterIndex::surfaceAt` liest die Ringe **nicht**. Das hält die Determinismus-Aussage von 8.2 (Ringe verändern keinen Körper) und das Zeitbudget. Die Rückkopplung wäre ein CPU-Spiegel der Ringhöhe in `surfaceAt` (Höhe `0,5 / k * Hülle * cos`, bei vollem Ring etwa 6 cm), bei leerer Liste bit-gleich zu heute. **Entscheidung der Queen (12.10.): Anzeige-only**, bewusste Abweichung vom Schritttext; Optik und Physik können im Zentimeterbereich der Ringhöhe auseinanderliegen. Möglicher Folgeschritt (rund 30 bis 40 Minuten mit Tests), später zu entscheiden |
 | 6.2 Spuren verschmelzen mit jungen Ringen | Spuren verschmelzen nie | Sonst klebt ein Ring am bewegten Körper, statt eine Linie dahinter zu lassen |
 | 6.2 Arten 0 bis 2 | zusätzlich Art 3 (Austritt) | Der Schritttext verlangt Eintauch- **und Austauch**-Ereignisse |
 | 6.4 Punkt 4: Füllen an neun Stellen | Metal (2) und OpenGL (1 gemeinsame Stelle); **D3D11, D3D12, Vulkan nicht** | Queen: D3D/Vulkan-Dateien gehören zu Schritt 4 mit der Hardware-Abnahme. Die UI-Pässe und die Vorschau bleiben ohne Ringe (Plan: dort nichts nötig) |
 | 6.4 Punkt 1: `IRenderer::SetWaterRipples` "wie `SetEnvironmentSettings`" | nicht virtuell | Kein Backend überschreibt es; ein neues `virtual` verschöbe alle späteren vtable-Stellen |
-| 6.4 Punkt 5: Formelkonstanten | andere Startwerte (siehe oben) | Plan nannte sie ausdrücklich Startwerte; Neigung statt Höhe als Maß (0,35 = Neigung bei voller Stärke) |
+| 6.4 Punkt 5: Formelkonstanten | andere Startwerte (siehe oben) | Plan nannte sie ausdrücklich Startwerte; Neigung statt Höhe als Maß (0,5 = Neigung bei voller Stärke) |
 
 ### 14.4 Grenzen, ehrlich
 
@@ -724,4 +724,4 @@ nur für starke Ringe (`smoothstep(0,35, 0,9, Stärke)`).
 * **D3D11, D3D12, Vulkan.** Nicht angefasst. Sie binden `sizeof(Lighting)` Byte (der Anhang ist also da, 0 Ringe), rufen aber `FillMaterialWater` nicht auf, zeichnen deshalb **keine Ringe**.
   Den neuen Shadertext kompilieren sie (gemeinsame Quelle, `test_engine_materials`, `test_material_graph`, auf dem Mac gegen glslang, SPIRV-Cross und die Reflexion, auf Windows und Linux in der CI), **gesehen hat ihn
   dort keine Hardware.** Schritt 4 trägt das `FillMaterialWater` an den drei Stellen nach (Abschnitt 6.4 Punkt 4) und nimmt die Abnahme.
-* **Optik und Physik.** `surfaceAt` liest die Ringe nicht (14.2): ein Körper reitet auf den Wellen des Materials, nicht auf seinen eigenen Ringen. Der Unterschied ist die Ringhöhe (bei voller Stärke etwa 4 cm).
+* **Optik und Physik.** `surfaceAt` liest die Ringe nicht (14.2): ein Körper reitet auf den Wellen des Materials, nicht auf seinen eigenen Ringen. Der Unterschied ist die Ringhöhe (bei voller Stärke etwa 6 cm).
