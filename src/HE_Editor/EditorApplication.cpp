@@ -5976,6 +5976,9 @@ void EditorApplication::dumpFrameHeadless()
 	// about (0, 303, -2): frame it with SKYTEST CAMY=305 CAMZ=6 PITCH=-18. HE_DUMP_WATERDROPRINGS=0
 	// leaves the rings out of the frame and keeps everything else (the A of the A/B: the same
 	// crate in the same water, no rings). The log line carries the numbers as a twin to the image.
+	// HE_DUMP_WATERDROPDENSITIES="300,600,900,1200,2500" (Thema 179 Schritt 6) drops one crate of each
+	// density, 2.5 m apart along x and centred on x = 0, instead of the one half-density crate: three
+	// float at different depths, the two heavier ones sink to the bed. The log then names each crate.
 	if (const char* wd = std::getenv("HE_DUMP_WATERDROP"); wd && *wd && m_editorWorld)
 	{
 		namespace water = HE::water;
@@ -5997,20 +6000,35 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<TerrainComponent>(land, ltc);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the sheet the crate floats on
 
-		auto crate = m_editorWorld->createEntity("WaterDropCrate");
-		TransformComponent ctf;
-		ctf.position = glm::vec3(0.0f, 306.0f, -2.0f);
-		reg.emplace<TransformComponent>(crate, ctf);
-		reg.emplace<MeshComponent>(crate, MeshComponent{ HE::kDefaultCubeMeshId });
-		RigidBodyComponent crb;
-		crb.type    = RigidBodyType::Dynamic;
-		crb.mass    = 500.0f;
-		crb.density = 500.0f;   // half the water's: it floats half out
-		reg.emplace<RigidBodyComponent>(crate, crb);
-		ColliderComponent ccol;
-		ccol.shape       = ColliderShape::Box;
-		ccol.halfExtents = glm::vec3(0.5f);
-		reg.emplace<ColliderComponent>(crate, ccol);
+		std::vector<float> densities{ 500.0f };   // half the water's: it floats half out
+		if (const char* dl = std::getenv("HE_DUMP_WATERDROPDENSITIES"); dl && *dl)
+		{
+			densities.clear();
+			std::stringstream list(dl);
+			for (std::string item; std::getline(list, item, ',') && densities.size() < 8;)
+				if (const float d = static_cast<float>(std::atof(item.c_str())); d > 0.0f)
+					densities.push_back(d);
+			if (densities.empty()) densities.push_back(500.0f);
+		}
+		std::vector<Entity> crates;
+		for (size_t i = 0; i < densities.size(); ++i)
+		{
+			auto crate = m_editorWorld->createEntity("WaterDropCrate");
+			TransformComponent ctf;
+			ctf.position = glm::vec3(2.5f * (static_cast<float>(i) - 0.5f * static_cast<float>(densities.size() - 1)), 306.0f, -2.0f);
+			reg.emplace<TransformComponent>(crate, ctf);
+			reg.emplace<MeshComponent>(crate, MeshComponent{ HE::kDefaultCubeMeshId });
+			RigidBodyComponent crb;
+			crb.type    = RigidBodyType::Dynamic;
+			crb.mass    = densities[i];   // a metre cube: kg = kg/m3
+			crb.density = densities[i];
+			reg.emplace<RigidBodyComponent>(crate, crb);
+			ColliderComponent ccol;
+			ccol.shape       = ColliderShape::Box;
+			ccol.halfExtents = glm::vec3(0.5f);
+			reg.emplace<ColliderComponent>(crate, ccol);
+			crates.push_back(crate);
+		}
 
 		PhysicsWorld pw;
 		pw.initialize(*m_editorWorld);
@@ -6028,11 +6046,19 @@ void EditorApplication::dumpFrameHeadless()
 		if (ringsOn)
 			pw.waterRipples().pack(m_dumpRipples);
 		m_dumpRipplesOn = true;   // the block as it is: nothing in the dump ages it further
-		const glm::vec3 at = reg.get<TransformComponent>(crate).position;
+		const glm::vec3 at = reg.get<TransformComponent>(crates.front()).position;
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERDROP lake %s, landed at step %d of %d, crate at (%.2f, %.2f, %.2f), "
 			"%d ring(s) on the water, rings %s, share under water %.2f",
 			lakeOk ? "ok" : "FAILED", landedAt, steps, at.x, at.y, at.z, pw.waterRipples().count(),
-			ringsOn ? "on" : "left out", pw.submergedFraction(static_cast<uint32_t>(crate)));
+			ringsOn ? "on" : "left out", pw.submergedFraction(static_cast<uint32_t>(crates.front())));
+		if (crates.size() > 1)
+			for (size_t i = 0; i < crates.size(); ++i)
+			{
+				const glm::vec3 p = reg.get<TransformComponent>(crates[i]).position;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERDROP crate %zu density %.0f at (%.2f, %.2f, %.2f), height over the bed %.2f m, "
+					"share under water %.2f", i, densities[i], p.x, p.y, p.z, p.y - 300.0f,
+					pw.submergedFraction(static_cast<uint32_t>(crates[i])));
+			}
 	}
 
 	// ── sRGB-texture witness (HE_DUMP_SRGBTEST=1): two cubes side by side, both
