@@ -229,4 +229,15 @@ namespace TerrainSculpt
     // centre of the polygon's bounding box afterwards.
     Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
                            const ExcavateParams& params);
+
+    // The vertex rect (indices into the tc.resolution² grid, inclusive) that
+    // excavatePolygon with the same arguments walks: every vertex outside it keeps
+    // its bits. The same code excavatePolygon itself uses, so a caller that keeps
+    // the ground under a dig (WaterLake.cpp's ground patch, re-dug on every frame a
+    // lake's outline moves) can copy exactly this rect instead of the whole grid.
+    // Read on the grid as it is: call ensureHeights first (it may snap the
+    // resolution). False when the call would change nothing at all: refused
+    // arguments, or the polygon and its bank wholly off the terrain.
+    bool excavateReach(const TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
+                       const ExcavateParams& params, int& x0, int& z0, int& x1, int& z1);
 }

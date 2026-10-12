@@ -389,8 +389,10 @@ namespace
 				say(ctx, spline, line);
 			}
 			EditorWidgets::helpForLabel("Dig Again");
-			EditorWidgets::hint("Moving the points reshapes the water only. The ground is dug again "
-			                    "only when you press Dig Again.");
+			EditorWidgets::hint(body->digsBed
+				? "Moving the points reshapes the water and moves the dug bed with it."
+				: "Moving the points reshapes the water only. Press Dig Again once and "
+				  "the bed follows the points from then on.");
 
 			if (EditorWidgets::dangerButton("Remove Lake"))
 			{

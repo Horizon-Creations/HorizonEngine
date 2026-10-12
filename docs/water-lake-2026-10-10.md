@@ -3,8 +3,8 @@
 Stand 10.10.2026, macOS (Metal und OpenGL), Debug-Build. Schritt 3 lieferte das gemeinsame Wassermodell
 (`HE::water::Field`), Schritt 4/5 die Fläche samt Ufer-Beschneidung, Schritt 6 den Aushub unter einem Polygon,
 Schritt 7 den Wasser-Pinsel. Dieser Schritt ist das zweite Werkzeug, das in dasselbe Modell schreibt: eine
-**geschlossene Spline wird ein See**. Punkte verschieben formt nur das Wasser um, der Aushub ist eine eigene,
-ausdrückliche Aktion, und was der Pinsel an einem See hinzugefügt oder weggenommen hat, bleibt beim Umformen
+**geschlossene Spline wird ein See**. Punkte verschieben formt das Wasser um und nimmt seit Thema 188 Schritt 2 das
+gegrabene Bett mit (Nachtrag am Ende), und was der Pinsel an einem See hinzugefügt oder weggenommen hat, bleibt beim Umformen
 erhalten.
 
 Code: `src/HE_Scene/include/HorizonScene/WaterLake.h` + `src/HE_Scene/src/WaterLake.cpp` (Kern, ohne ImGui;
@@ -25,8 +25,9 @@ Code: `src/HE_Scene/include/HorizonScene/WaterLake.h` + `src/HE_Scene/src/WaterL
    Ground* und *Shore Overshoot* (Beschneidung). **Create Lake** gräbt das Bett und legt das Wasser darüber,
    in **einem** Undo-Schritt.
 3. **Umformen.** Punkte ziehen, einfügen oder löschen, auch den ganzen Spline-Entity bewegen oder das Landscape
-   verschieben: das Wasser folgt noch im selben Frame (`syncSplines`), der Boden bleibt, wie er ist. **Dig Again**
-   gräbt das Bett unter der *aktuellen* Kontur neu, nur auf Knopfdruck, ein Undo-Schritt (und keiner, wenn nichts
+   verschieben: das Wasser folgt noch im selben Frame (`syncSplines`), und ein See, der sein Bett selbst gegraben hat,
+   nimmt es mit (seit Thema 188 Schritt 2, siehe Nachtrag). **Dig Again** gräbt das Bett unter der *aktuellen*
+   Kontur neu, ein Undo-Schritt (und keiner, wenn nichts
    tiefer wurde). Der Wasserspiegel ist ein eigener Regler (ein Undo-Schritt je Zug).
 4. **Mit dem Pinsel erweitern.** Ein Strich, der auf dem See beginnt, setzt diesen See fort (Schritt 7). Was er
    außerhalb der Kontur malt oder mit dem Radierer aus ihr herausschneidet, ist der *Pinsel-Anteil* und bleibt
@@ -86,7 +87,8 @@ innen beginnt und innen endet, ist für die Regel unsichtbar. Das ist gewollt, e
 
 ![Dieselbe Szene, Punkte verschoben: Kontur gewandert, Rinne und Insel bleiben](water-lake/metal-reshaped.png)
 
-Das zweite Bild zeigt auch, was „nur das Wasser“ heißt: Wo die Kontur zurückgezogen wurde, bleibt die alte Grube
+Das zweite Bild zeigt den Stand von Thema 174, „nur das Wasser“ (seit Thema 188 Schritt 2 nur noch für einen See ohne
+eigenes Bett): Wo die Kontur zurückgezogen wurde, bleibt die alte Grube
 als trockene Mulde (dunkler Rand); wo sie vorgezogen wurde, liegt das Wasser flach auf ungegrabenem Boden, ohne Tiefe.
 **Dig Again** gräbt beides nach, wenn man es will.
 
@@ -95,7 +97,7 @@ als trockene Mulde (dunkler Rand); wo sie vorgezogen wurde, liegt das Wasser fla
 | Aktion | Wasser | Boden | Undo |
 |---|---|---|---|
 | Create Lake | ja | ja (`excavatePolygon`, Floor-Modus, nur Absenken) | 1 Schritt |
-| Punkt ziehen / einfügen / löschen, Spline oder Landscape bewegen | ja, automatisch (`syncSplines`) | nein | der Schritt der Spline-Bearbeitung |
+| Punkt ziehen / einfügen / löschen, Spline oder Landscape bewegen | ja, automatisch (`syncSplines`) | ja, wenn der See sein Bett gegraben hat (`Body::digsBed`): altes Bett angehoben, neues gegraben, jeden Frame des Ziehens | der Schritt der Spline-Bearbeitung |
 | Dig Again | nein | ja, unter der aktuellen Kontur | 1 Schritt, keiner ohne Änderung |
 | Wasserspiegel | ja (`setLevel`) | nein | 1 Schritt je Zug |
 | Remove Lake | ja | nein | 1 Schritt |

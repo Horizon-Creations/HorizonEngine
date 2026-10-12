@@ -76,13 +76,14 @@ namespace HE::water
     // scene file claiming more is damaged or hostile.
     inline constexpr size_t   kMaxPolygonPoints      = 65536;
 
-    // A patch of ground a lake's own dig last left (WaterLake.cpp: "Create Lake"
-    // and "Dig Again"), kept so a lake whose TRANSFORM moves can lift it off the
-    // old spot before digging a fresh one at the new one (Thema 174 Schritt 14:
-    // moving the lake's own entity moves the bed with it; moving a spline POINT
-    // still never touches the ground, see WaterLake.h). Runtime only, like
-    // syncKey: not serialised, so a lake seen for the first time after a load or
-    // an undo has nothing to move until it is next dug in that session.
+    // The ground a lake's own digs have moved, all of them together (WaterLake.cpp:
+    // "Create Lake", "Dig Again" and every re-dig since), kept so a lake whose
+    // outline or transform moves can lift its bed off the old spot before digging
+    // a fresh one under the new outline (Thema 174 Schritt 14 for the transform,
+    // Thema 188 Schritt 2 for a dragged point, see WaterLake.h). Saved with the
+    // body (SceneSerializer, raw floats like sculptHeights), so a lake keeps
+    // following after an undo, a save and load, or the end of Play; sanitize()
+    // drops a patch that does not fit the height grid it claims.
     struct GroundPatch
     {
         uint32_t res = 0;          // tc.resolution at dig time; a different one now invalidates the patch
@@ -91,6 +92,10 @@ namespace HE::water
         std::vector<float> delta; // w·h, row-major: height right after the dig minus right before it
         bool empty() const { return delta.empty(); }
     };
+    // True when `p` can be applied to a height grid of res² vertices: measured on
+    // that grid, its rect inside it, w·h deltas, every one a number. An empty patch
+    // fits nothing (there is nothing to apply).
+    bool patchFits(const GroundPatch& p, uint32_t res);
 
     // ── What the water does to a body in it (Thema 179 Schritt 2) ────────────────
     // Defaults, and the bounds a stored or edited value is held to.
@@ -263,16 +268,21 @@ namespace HE::water
         // line with. 0 = not looked at yet, so the first frame after a load or an
         // undo only records it and reshapes nothing.
         uint64_t syncKey = 0;
-        // Runtime, never serialised: the ground patch, dig depth and bank this
-        // lake's own excavation last used, and the fingerprint of just the
-        // spline+terrain world matrices (not the control points) it was dug at.
-        // syncSplines compares THIS against the current one to tell "the whole
-        // lake moved" apart from "a point was edited" — both change `syncKey`
-        // (which folds in the control points too), only the former must also
-        // move the bed.
+        // The lake's own bed (Thema 174 Schritt 14, Thema 188 Schritt 2): `digsBed`
+        // is set by a lake dig ("Create Lake" with Dig, "Dig Again") and means the
+        // ground follows the outline from then on — lifted by `groundPatch`, dug
+        // again with `dugDepth` / `dugBank` under the new outline. The flag, not the
+        // patch, says so: a re-dig that happens to move nothing (the outline over
+        // ground already below the bed, or off the terrain for a frame) leaves an
+        // empty patch and must not end the following. All four are saved with the
+        // body; none is part of sameContent (they describe the ground, not the
+        // water). Cleared by detach.
+        // What moves the bed is the OUTLINE in the landscape's space changing — a
+        // dragged point, the spline entity moved, the landscape slid under it —
+        // never which of those did it, so there is no transform key any more.
+        bool        digsBed = false;
         GroundPatch groundPatch;
-        float    dugDepth = 0.0f, dugBank = 0.0f;
-        uint64_t transformKey = 0;
+        float       dugDepth = 0.0f, dugBank = 0.0f;
         bool     fromSpline() const { return sourceSpline != HE::UUID{}; }
     };
 
