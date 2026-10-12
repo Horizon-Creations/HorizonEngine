@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-10-06",
+ "generated": "2026-10-12",
  "groups": [
   {
    "pages": [
@@ -6775,7 +6775,7 @@
          [
           {
            "s": "",
-           "t": "Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode."
+           "t": "Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode, or the lake controls of the selected spline in Spline mode."
           }
          ]
         ],
@@ -6859,7 +6859,7 @@
      ],
      "eyebrow": "Orientation",
      "id": "layout",
-     "text": "The editor is a single window built from dockable panels around a central Scene viewport. Double-clicking assets opens additional full-size asset editor tabs (material graphs, widget designer, particle graphs …) alongside the Scene tab. The editor's default layout: the panels and where they sit Panel Purpose Scene The 3D viewport — camera navigation, gizmos, play mode, landscape sculpting. Has its own inline toolbar. World Outliner Hierarchy tree of every entity in the active scene; create, rename, reparent, delete, save as prefab. Details All components and properties of the selected entity, plus the Add Component menu. Content Browser Every asset in the project — create, import, organise and open assets in their editors. Quick Settings Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode. Environment (View menu) Add or remove the scene's Sky and Weather entities. Performance Profiler (View menu) Live FPS/CPU/GPU HUD, benchmark captures, per-pass frame analysis. Play Session Report Summary shown after a play-in-editor session ends. The footer bar holds Undo/Redo buttons on the left, the status text in the centre, and the current resolution and FPS on the right. Log output is written to HorizonEngine.log next to the executable (truncated each launch).",
+     "text": "The editor is a single window built from dockable panels around a central Scene viewport. Double-clicking assets opens additional full-size asset editor tabs (material graphs, widget designer, particle graphs …) alongside the Scene tab. The editor's default layout: the panels and where they sit Panel Purpose Scene The 3D viewport — camera navigation, gizmos, play mode, landscape sculpting. Has its own inline toolbar. World Outliner Hierarchy tree of every entity in the active scene; create, rename, reparent, delete, save as prefab. Details All components and properties of the selected entity, plus the Add Component menu. Content Browser Every asset in the project — create, import, organise and open assets in their editors. Quick Settings Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode, or the lake controls of the selected spline in Spline mode. Environment (View menu) Add or remove the scene's Sky and Weather entities. Performance Profiler (View menu) Live FPS/CPU/GPU HUD, benchmark captures, per-pass frame analysis. Play Session Report Summary shown after a play-in-editor session ends. The footer bar holds Undo/Redo buttons on the left, the status text in the centre, and the current resolution and FPS on the right. Log output is written to HorizonEngine.log next to the executable (truncated each launch).",
      "title": "Editor Layout"
     },
     {
@@ -7878,6 +7878,14 @@
         },
         {
          "s": "",
+         "t": " / "
+        },
+        {
+         "s": "b",
+         "t": "Spline"
+        },
+        {
+         "s": "",
          "t": "), the gizmo buttons "
         },
         {
@@ -8147,7 +8155,7 @@
      ],
      "eyebrow": "Where you live",
      "id": "viewport",
-     "text": "The Scene panel renders the world through the editor camera and carries an inline toolbar: a mode selector (View / Landscape), the gizmo buttons Move / Rotate / Scale, a gizmo-space combo (Local / World), a Screen ring toggle for the rotate gizmo, and the centred Play / Stop button. Where the Scene viewport sits in the default layout Camera navigation Input Action RMB hold Fly-look — steer with W A S D, E/Q up/down, Shift = fast Alt + LMB Orbit around the pivot MMB drag Pan Mouse wheel Zoom (works on hover, no button needed) F Frame the selected entity Gizmos W / E / R switch between translate, rotate and scale (mirrored by the toolbar buttons). The space combo toggles manipulation in local or world axes; Screen ring adds the view-axis outer ring to the rotate gizmo. Gizmos are suppressed while flying, while Alt is held, and in Landscape mode. Every edit is undoable (Ctrl/Cmd+Z). Static-mesh assets can be dragged from the Content Browser into the viewport to spawn an entity at the drop point.",
+     "text": "The Scene panel renders the world through the editor camera and carries an inline toolbar: a mode selector (View / Landscape / Spline), the gizmo buttons Move / Rotate / Scale, a gizmo-space combo (Local / World), a Screen ring toggle for the rotate gizmo, and the centred Play / Stop button. Where the Scene viewport sits in the default layout Camera navigation Input Action RMB hold Fly-look — steer with W A S D, E/Q up/down, Shift = fast Alt + LMB Orbit around the pivot MMB drag Pan Mouse wheel Zoom (works on hover, no button needed) F Frame the selected entity Gizmos W / E / R switch between translate, rotate and scale (mirrored by the toolbar buttons). The space combo toggles manipulation in local or world axes; Screen ring adds the view-axis outer ring to the rotate gizmo. Gizmos are suppressed while flying, while Alt is held, and in Landscape mode. Every edit is undoable (Ctrl/Cmd+Z). Static-mesh assets can be dragged from the Content Browser into the viewport to spawn an entity at the drop point.",
      "title": "Scene Viewport"
     },
     {
@@ -9823,6 +9831,345 @@
      "id": "landscape-mode",
      "text": "Switch the viewport toolbar's mode selector to Landscape and the Quick Settings panel becomes the terrain tool. Create Landscape With no terrain in the scene the panel shows a creation form: Width (X), Depth (Z), Resolution (2–512), Height Scale, and procedural noise — Seed (0 = flat), Octaves, Frequency, Lacunarity, Gain — with a live grid preview. Creating adds a Terrain entity with a default terrain material. The seed noise is baked once into editable heights; from then on the terrain is a plain heightfield your brushes edit directly. Sculpting Six brush tools: Raise, Lower, Smooth, Flatten, Ramp, Roughen, with Radius (0.5–500 m), Falloff and Strength. Drag with the left mouse button in the viewport to sculpt — Flatten pulls toward the height under the drag-start point, Ramp blends between two dragged points. Reset Sculpting clears all edits. Strokes only regenerate the terrain chunks they touch, so sculpting stays fast on large terrains. Mountain The seventh tool, Mountain, grows a whole formation inside an area instead of under a brush. Drag across the ground to mark the area, as a Rectangle (corner to corner, the mountain fills the ellipse inside it) or a Circle (centre to rim); the outline follows the pointer and the mountain appears when you let go, as one undo step. It is added on top of the ground that is there, so earlier sculpting stays underneath, and outside the area nothing moves. Max Height is how far the tallest point rises (negative digs a basin), Falloff the width in metres of the slope back down to the rim, and Roughness, Octaves and Frequency shape the noisy relief. The same Seed, area and settings give the same mountain again; New Seed picks another. MCP clients reach the same operation through terrain_mountain. Terrain renders as a grid of chunk entities with automatic LOD meshes and skirt geometry — details under Rendering » Performance. Scatter vegetation with the Foliage component.",
      "title": "Landscape Mode"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Landscape Mode's Quick Settings panel has a fifth tab, "
+        },
+        {
+         "s": "b",
+         "t": "Water"
+        },
+        {
+         "s": "",
+         "t": ", alongside Sculpt, Paint, Foliage and Setup. It puts water on the landscape three ways: painted free-form with a brush, drawn as a lake from a closed spline, or spawned ready-made with "
+        },
+        {
+         "s": "c",
+         "t": "Create Entity » Lake"
+        },
+        {
+         "s": "",
+         "t": " in the Outliner. All three share one body of water per landscape, so a painted stroke that starts on a lake widens it and a spline lake can sit beside painted water on the same terrain."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Painting water"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Paint Water"
+        },
+        {
+         "s": "",
+         "t": " drags a pond into existence on dry ground, at "
+        },
+        {
+         "s": "b",
+         "t": "Level"
+        },
+        {
+         "s": "",
+         "t": " or, with "
+        },
+        {
+         "s": "b",
+         "t": "From Ground"
+        },
+        {
+         "s": "",
+         "t": " on, a fixed "
+        },
+        {
+         "s": "b",
+         "t": "Above Ground"
+        },
+        {
+         "s": "",
+         "t": " distance over the lowest point under the first click. "
+        },
+        {
+         "s": "b",
+         "t": "Erase Water"
+        },
+        {
+         "s": "",
+         "t": " (or holding "
+        },
+        {
+         "s": "c",
+         "t": "Ctrl"
+        },
+        {
+         "s": "",
+         "t": " while painting) takes water away from every body it touches — a painted pond disappears once it is dry; a spline lake stays and can be painted back in. "
+        },
+        {
+         "s": "b",
+         "t": "Dig Bed"
+        },
+        {
+         "s": "",
+         "t": " lowers the ground under the stroke to a floor "
+        },
+        {
+         "s": "b",
+         "t": "Depth"
+        },
+        {
+         "s": "",
+         "t": " below the water as you paint, using the brush's own falloff as the bank, and only ever lowers. "
+        },
+        {
+         "s": "b",
+         "t": "Resolution"
+        },
+        {
+         "s": "",
+         "t": " sets how many cells the landscape's water grid has (32–2048 per side) — raise it for a small pond on a large landscape. The surface only ever exists where the ground is below the water, so it never climbs a bank."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Lakes from a spline"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Switch the viewport's mode selector to "
+        },
+        {
+         "s": "b",
+         "t": "Spline"
+        },
+        {
+         "s": "",
+         "t": " to draw an outline: click the ground to start a line, click again to add points, click the line itself to insert a point between two, and drag a point's handle — which carries the Move gizmo — to reposition it. "
+        },
+        {
+         "s": "b",
+         "t": "Closed"
+        },
+        {
+         "s": "",
+         "t": " joins the last point back to the first, which a lake needs. A painted pond becomes a lake the same way in reverse: "
+        },
+        {
+         "s": "b",
+         "t": "To Lake"
+        },
+        {
+         "s": "",
+         "t": " in the Water tab traces its edge into a new closed spline and hands the pond to it, ready to edit as points."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A closed spline shows a "
+        },
+        {
+         "s": "b",
+         "t": "Lake"
+        },
+        {
+         "s": "",
+         "t": " section in the Spline panel. "
+        },
+        {
+         "s": "b",
+         "t": "Create Lake"
+        },
+        {
+         "s": "",
+         "t": " lays water over the outline at the level set above — from the lowest ground under it plus "
+        },
+        {
+         "s": "b",
+         "t": "Above Ground"
+        },
+        {
+         "s": "",
+         "t": ", or a typed "
+        },
+        {
+         "s": "b",
+         "t": "Level"
+        },
+        {
+         "s": "",
+         "t": " — and, with "
+        },
+        {
+         "s": "b",
+         "t": "Dig Bed"
+        },
+        {
+         "s": "",
+         "t": " on, lowers the ground inside to "
+        },
+        {
+         "s": "b",
+         "t": "Depth"
+        },
+        {
+         "s": "",
+         "t": " below that level in the same undo step. From then on, dragging a point only reshapes the water; the ground is dug again only when you press "
+        },
+        {
+         "s": "b",
+         "t": "Dig Again"
+        },
+        {
+         "s": "",
+         "t": ", so moving points around does not dig a trench as you go. "
+        },
+        {
+         "s": "b",
+         "t": "Remove Lake"
+        },
+        {
+         "s": "",
+         "t": " takes the water away and cuts the spline's link to it, leaving both the outline and the dug ground behind."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "The shore"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Bank"
+        },
+        {
+         "s": "",
+         "t": " sets how far the slope reaches on either side of a lake's outline — inward down to the bed, outward back up to the old ground — both starting at the water's own level right on the outline, so the water always reaches its edge and nothing outside the bank ever sinks below the water level. "
+        },
+        {
+         "s": "c",
+         "t": "0"
+        },
+        {
+         "s": "",
+         "t": " is a hard edge; a wider bank makes a gentle shore instead of a cliff or a dry ring. "
+        },
+        {
+         "s": "b",
+         "t": "Clip To Ground"
+        },
+        {
+         "s": "",
+         "t": " (a landscape setting, shared by every lake and painted pond on it) stops the surface where the ground rises back through it, instead of drawing it flat over the whole outline; "
+        },
+        {
+         "s": "b",
+         "t": "Shore Overshoot"
+        },
+        {
+         "s": "",
+         "t": " lets the ground stand a little above the water and still count as covered, so the edge sits under the bank rather than a hair short of it."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Tip:"
+          },
+          {
+           "s": "",
+           "t": " "
+          },
+          {
+           "s": "c",
+           "t": "Create Entity » Lake"
+          },
+          {
+           "s": "",
+           "t": " in the Outliner spawns a ready-made closed spline — a 16-point ring a few metres across, parented under the landscape if there is one — without digging or adding water yet; press "
+          },
+          {
+           "s": "b",
+           "t": "Create Lake"
+          },
+          {
+           "s": "",
+           "t": " once it sits where you want it. Moving or rotating the whole lake entity afterwards moves the spline, the water and its dug bed together, provided the bed was dug by "
+          },
+          {
+           "s": "b",
+           "t": "Create Lake"
+          },
+          {
+           "s": "",
+           "t": " or "
+          },
+          {
+           "s": "b",
+           "t": "Dig Again"
+          },
+          {
+           "s": "",
+           "t": " on this lake; a lake loaded from an older scene, or converted from a painted pond, only carries its water along until you press "
+          },
+          {
+           "s": "b",
+           "t": "Dig Again"
+          },
+          {
+           "s": "",
+           "t": " once at the new spot."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "tip"
+      }
+     ],
+     "eyebrow": "Terrain",
+     "id": "water-tools",
+     "text": "Landscape Mode's Quick Settings panel has a fifth tab, Water, alongside Sculpt, Paint, Foliage and Setup. It puts water on the landscape three ways: painted free-form with a brush, drawn as a lake from a closed spline, or spawned ready-made with Create Entity » Lake in the Outliner. All three share one body of water per landscape, so a painted stroke that starts on a lake widens it and a spline lake can sit beside painted water on the same terrain. Painting water Paint Water drags a pond into existence on dry ground, at Level or, with From Ground on, a fixed Above Ground distance over the lowest point under the first click. Erase Water (or holding Ctrl while painting) takes water away from every body it touches — a painted pond disappears once it is dry; a spline lake stays and can be painted back in. Dig Bed lowers the ground under the stroke to a floor Depth below the water as you paint, using the brush's own falloff as the bank, and only ever lowers. Resolution sets how many cells the landscape's water grid has (32–2048 per side) — raise it for a small pond on a large landscape. The surface only ever exists where the ground is below the water, so it never climbs a bank. Lakes from a spline Switch the viewport's mode selector to Spline to draw an outline: click the ground to start a line, click again to add points, click the line itself to insert a point between two, and drag a point's handle — which carries the Move gizmo — to reposition it. Closed joins the last point back to the first, which a lake needs. A painted pond becomes a lake the same way in reverse: To Lake in the Water tab traces its edge into a new closed spline and hands the pond to it, ready to edit as points. A closed spline shows a Lake section in the Spline panel. Create Lake lays water over the outline at the level set above — from the lowest ground under it plus Above Ground, or a typed Level — and, with Dig Bed on, lowers the ground inside to Depth below that level in the same undo step. From then on, dragging a point only reshapes the water; the ground is dug again only when you press Dig Again, so moving points around does not dig a trench as you go. Remove Lake takes the water away and cuts the spline's link to it, leaving both the outline and the dug ground behind. The shore Bank sets how far the slope reaches on either side of a lake's outline — inward down to the bed, outward back up to the old ground — both starting at the water's own level right on the outline, so the water always reaches its edge and nothing outside the bank ever sinks below the water level. 0 is a hard edge; a wider bank makes a gentle shore instead of a cliff or a dry ring. Clip To Ground (a landscape setting, shared by every lake and painted pond on it) stops the surface where the ground rises back through it, instead of drawing it flat over the whole outline; Shore Overshoot lets the ground stand a little above the water and still count as covered, so the edge sits under the bank rather than a hair short of it. Tip: Create Entity » Lake in the Outliner spawns a ready-made closed spline — a 16-point ring a few metres across, parented under the landscape if there is one — without digging or adding water yet; press Create Lake once it sits where you want it. Moving or rotating the whole lake entity afterwards moves the spline, the water and its dug bed together, provided the bed was dug by Create Lake or Dig Again on this lake; a lake loaded from an older scene, or converted from a painted pond, only carries its water along until you press Dig Again once at the new spot.",
+     "title": "Water & Lakes"
     },
     {
      "blocks": [
