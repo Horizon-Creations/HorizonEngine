@@ -72,6 +72,67 @@ A password in the environment is visible to the same user's other processes; it
 is the form a CI secret takes anyway. **How a shipped editor on a user's machine
 gets its read-only credentials is an open decision** (see below).
 
+### Setting the account up on a new machine
+
+**There is no credentials file to copy, and that is deliberate.**
+`HorizonContentSync` has `cmake/EngineContentCredentials.cmake.template`
+because its account is compiled in. This one is not (rule 1 in
+`SelfUpdateEndpoint.h`; `src/HE_SelfUpdate/CMakeLists.txt` has no credential
+plumbing on purpose). A CMake template in the ContentSync style would be read
+by nothing, and baking the values in instead would settle Open decision 1
+below, which is the human's call. So a fresh clone on any machine (NN-WS03
+included) does not lack a file. It lacks six environment variables in the
+user's environment, set once, outside the repository.
+
+The values (host, read-only user, password and, if the account is not chrooted,
+the base path) come from whoever administers the account, over a password
+manager or in person. They do not go into a Hive post, a chat, a commit, or a
+tracked config such as `.vscode/launch.json`. On 2026-10-12 GitHub held no
+`HE_SELFUPDATE_*` secrets (`gh secret list`: only `ENGINE_CONTENT_*` and the bot
+token), and CI does not need any: the live leg starts its own test server with a
+generated password (`scripts/selfupdate_live_ci_check.py`).
+
+**macOS.** For an editor started from a terminal, export the variables in
+`~/.zshrc` (single quotes, so a `$` or a backtick in the password survives):
+
+```sh
+export HE_SELFUPDATE_HOST='<host>'
+export HE_SELFUPDATE_USER='<read-only user>'
+export HE_SELFUPDATE_PASSWORD='<password>'
+# optional: HE_SELFUPDATE_PORT, HE_SELFUPDATE_BASEPATH, HE_SELFUPDATE_CHANNEL
+```
+
+An editor started from Finder, the Dock or a mounted DMG does not read
+`~/.zshrc`. It inherits launchd's environment, so set the same names there
+too, with `launchctl setenv HE_SELFUPDATE_HOST '<host>'` and so on, then start
+the editor again. `launchctl setenv` does not survive a reboot. To make it
+permanent, put those calls in a per-user LaunchAgent (`RunAtLoad`) that stays
+outside the repository. Checking it: `launchctl getenv NAME` exits 0 and
+prints an empty line for a variable that is **not** set. Only a non-empty
+value means it took.
+
+**Windows.** Set them as *user* environment variables: System Properties ▸
+Environment Variables ▸ "User variables", or in PowerShell:
+
+```powershell
+[Environment]::SetEnvironmentVariable('HE_SELFUPDATE_HOST',     '<host>',            'User')
+[Environment]::SetEnvironmentVariable('HE_SELFUPDATE_USER',     '<read-only user>',  'User')
+[Environment]::SetEnvironmentVariable('HE_SELFUPDATE_PASSWORD', '<password>',        'User')
+```
+
+Only processes started afterwards see them. Close and reopen the terminal,
+VS Code and anything else that launches the editor. On a self-hosted runner,
+restart the runner service as well, although CI does not need the real account.
+
+**Linux.** Export them in `~/.profile` (read at desktop login, so launchers
+see them as well as shells) or, on a systemd user session, as `NAME=value`
+lines in `~/.config/environment.d/horizon-selfupdate.conf`. Log out and back in.
+
+**Did it take?** Help ▸ Check for Updates… says "self-update is not
+configured" when none of the variables reached the editor process, and "still
+missing: …" with the names when only some did. `HE_SELFUPDATE_CHANNEL` alone
+never switches the feature on.
+
 ## The server layout and the manifest
 
 The update account has two directories at its root, one per channel:
@@ -559,7 +620,8 @@ Not shown yet: a run against the real account (host name still missing).
    build-time definition the way ContentSync does it (read-only account, so a
    leak is "someone can download builds", not "someone can publish"), or a
    settings entry. Not decided here; the loader takes an `EnvLookup`, so another
-   source is a small addition.
+   source is a small addition. Until it is decided, a developer machine uses the
+   environment ("Setting the account up on a new machine" above).
 2. **Signature and host-key pinning** (above) before the takeover runs
    unattended.
 3. **Same-version rebuilds.** Versions come from `project(VERSION)`; a new build
