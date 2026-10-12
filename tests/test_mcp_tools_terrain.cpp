@@ -963,10 +963,13 @@ TEST_CASE("terrain_lake reshape follows the spline's points and never digs; dig 
 	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
 	CHECK(r.content["ground"].get<int>() > 0);
 	CHECK(groundAt(f, e, 210.0f, -50.0f) == doctest::Approx(-1.0f));
-	// ... and the same again changes nothing: a success, and no undo step.
+	// ... and the same again (same depth, same bank) changes nothing: a success,
+	// and no undo step. A DIFFERENT bank would legitimately reach new ground —
+	// the bank is now measured INWARD (Thema 174 Schritt 13) — so this is not
+	// idempotent for just any bank, only for repeating the identical call.
 	const std::size_t depth = f.snapshotUndo.undoDepth();
 	r = f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) },
-	                                 { "action", "dig" }, { "depth", 2.0 }, { "bank", 0.0 } });
+	                                 { "action", "dig" }, { "depth", 2.0 }, { "bank", 2.0 } });
 	REQUIRE_MESSAGE(!r.isError, codeOf(r));
 	CHECK(r.content["ground"].get<int>() == 0);
 	CHECK(r.content["changed"] == false);

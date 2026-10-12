@@ -226,7 +226,9 @@ TEST_CASE("Water lake: the default level is the lowest ground under the outline"
     CHECK(lake::lowestGround(tc, rect(0, 0, 4, 4)) == doctest::Approx(10.0f));
 }
 
-TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, and the bank eases back")
+TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, and the bank eases INWARD "
+          "(Thema 174 Schritt 13: an outward bank left a dry ring below the water's own level, outside the "
+          "outline, that the water never covered — see docs/water-lake-2026-10-10.md)")
 {
     TerrainComponent tc = makeLand(10.0f);
     tc.sculptHeights[static_cast<size_t>(32) * 65 + 32] = 5.0f;   // a pit already deeper than the lake's bed
@@ -241,14 +243,16 @@ TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, 
     REQUIRE(r.ok);
     CHECK(r.changed > 0u);
     auto h = [&](int x, int z) { return tc.sculptHeights[static_cast<size_t>(z + 32) * 65 + (x + 32)]; };
-    CHECK(h(0, 5) == doctest::Approx(7.0f));                  // inside: the floor, exactly
-    CHECK(h(-9, -9) == doctest::Approx(7.0f));
+    CHECK(h(0, 5) == doctest::Approx(7.0f));                  // 5 m from the nearest edge, past the 4 m bank: the floor
+    CHECK(h(-9, -9) > 7.0f);                                   // 1 m from the nearest edge: in the INWARD bank
+    CHECK(h(-9, -9) < 10.0f);
+    CHECK(h(10, 0) == doctest::Approx(10.0f));                 // ON the outline: eased to the level, not past it
     CHECK(h(0, 0) == doctest::Approx(5.0f));                  // the pit that was deeper stays deeper
-    CHECK(h(13, 0) > 7.0f);                                    // in the bank: between floor and old ground
-    CHECK(h(13, 0) < 10.0f);
-    CHECK(h(25, 0) == doctest::Approx(10.0f));                 // beyond the bank: untouched
+    CHECK(h(13, 0) == 10.0f);                                  // OUTSIDE the outline: bit-equal, never touched
+    CHECK(h(25, 0) == 10.0f);                                  // far outside: likewise
     CHECK(tc.regionDirty);                                     // chunks under it are rebuilt, not all of them
     CHECK_FALSE(tc.dirty);
+    CHECK(tc.dirtyMaxX <= 11.0f);                               // one grid step past the outline, never past the old 4 m bank
 
     // A deeper pit than asked for stays where it is.
     tc.sculptHeights[static_cast<size_t>(32) * 65 + 34] = 2.0f;
@@ -258,6 +262,37 @@ TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, 
     // Not a lake, no dig.
     CHECK_FALSE(lake::dig(tc, 999, 3.0f, 4.0f).ok);
     CHECK_FALSE(lake::dig(tc, id, std::numeric_limits<float>::quiet_NaN(), 4.0f).ok);
+}
+
+TEST_CASE("Water lake dig: the water (laid over the same outline) reaches every vertex the dig left at the "
+          "level or below — no dry ring, inside or outside, on a slope")
+{
+    // A slope, not flat ground: the old ground along the outline is NOT all the
+    // same height, so `level` (the lowest point on it) is below most of it — the
+    // exact case an outward bank got wrong, since it never reached inward to
+    // bring the rest of the outline down to the level too.
+    TerrainComponent tc = makeLand(10.0f, 0.3f);     // height 10 at x = 0, 0.3 m per metre of x
+    const uint16_t id = lake::create(tc, HE::UUID::generate(), rect(-10, -10, 10, 10), 10.0f);
+    REQUIRE(id != water::kNoBody);
+    REQUIRE(lake::dig(tc, id, 2.0f, 5.0f).ok);                  // depth 2, bank 5: amount = 8
+
+    auto h = [&](int x, int z) { return tc.sculptHeights[static_cast<size_t>(z + 32) * 65 + (x + 32)]; };
+    const float kLevelTol = 1e-4f;
+    // Every vertex ON the outline (whatever the old slope put there) is at or
+    // below the level now, so the water the same outline rasters reaches it.
+    for (int x = -10; x <= 10; ++x)
+    {
+        CHECK(h(x, -10) <= 10.0f + kLevelTol);
+        CHECK(h(x, 10)  <= 10.0f + kLevelTol);
+    }
+    for (int z = -10; z <= 10; ++z)
+    {
+        CHECK(h(-10, z) <= 10.0f + kLevelTol);
+        CHECK(h(10, z)  <= 10.0f + kLevelTol);
+    }
+    // And nothing outside the outline moved: the steepest point (x = 10, the
+    // original ground's highest edge, 13 above the level) is still exactly that.
+    CHECK(h(13, 0) == doctest::Approx(10.0f + 0.3f * 13.0f));
 }
 
 // ── The merge rule, one consequence at a time ───────────────────────────────

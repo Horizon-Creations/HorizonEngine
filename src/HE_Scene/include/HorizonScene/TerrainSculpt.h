@@ -126,6 +126,22 @@ namespace TerrainSculpt
         // crease — the brush's linear ramp would leave a visible edge on a pit
         // this wide). 0 = a hard edge. Beyond it the ground is not touched at all.
         float        falloff = 2.0f;
+        // Width of a second bank, world units, measured INWARD from the outline
+        // instead of outward. Within it, Floor mode's clamp eases from
+        // `edgeHeight` (right on the outline) down to `amount` (this far in and
+        // beyond); Dig mode's depth eases from 0 (right on the outline) up to the
+        // full depth the same way, `edgeHeight` unused. 0 = disabled, the whole
+        // inside is `amount` (or the full depth) as `falloff` alone describes.
+        // Nothing outside the outline moves because of this one — for a lake,
+        // where a `falloff` bank would sink the ground below the water's own
+        // level without any water laid over it (a dry moat outside the shape the
+        // caller asked for), this is the width to use instead, with `edgeHeight`
+        // at the water's level: the bed still reaches exactly `amount` in the
+        // middle, but nothing beyond the outline is ever touched, and the ground
+        // right at the outline is pulled down to the water level, so the water
+        // (laid over the same polygon) reaches the outline too.
+        float        bankIn     = 0.0f;
+        float        edgeHeight = 0.0f;   // Floor mode only
     };
 
     // The polygon is terrain-local XZ (x → glm::vec2::x, z → ::y), no closing
@@ -138,7 +154,9 @@ namespace TerrainSculpt
     // Heights are computed per terrain VERTEX: a vertex inside the outline gets
     // exactly the floor (or exactly its old height minus the depth), one beyond
     // the bank keeps its old bits. A vertex on the outline counts as inside, up to
-    // rounding on a slanted edge.
+    // rounding on a slanted edge. With `bankIn` set (Floor mode), a vertex inside
+    // the outline but within `bankIn` of it is eased toward `edgeHeight` instead —
+    // see ExcavateParams::bankIn.
     //
     // Like apply: calls ensureHeights first, writes sculptHeights only, and marks
     // the region-dirty rect (the vertices that moved, plus one grid step so the

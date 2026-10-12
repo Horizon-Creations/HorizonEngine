@@ -100,8 +100,11 @@ namespace HE::water::lake
         float level           = 0.0f;
         float levelOffset     = 0.0f;
         // Tiefe: the bed lies this far below the level. Randverlauf: the width of
-        // the bank that eases back into the old ground (metres, measured outward
-        // from the outline; smoothstep).
+        // the bank that eases from the water's own level, right on the outline,
+        // down to the bed (metres, measured INWARD from the outline; smoothstep).
+        // Nothing outside the outline is ever touched, so the ground never sinks
+        // below the water's level without water laid over it, and the water
+        // (laid over the same outline) always reaches the shore.
         bool  dig   = true;
         float depth = 2.0f;
         float bank  = 4.0f;
@@ -135,8 +138,10 @@ namespace HE::water::lake
     Result reshape(TerrainComponent& tc, uint16_t body, const std::vector<glm::vec2>& polygon);
 
     // The ground under the lake's outline goes down to `level − depth`, with a bank
-    // of `bank` metres (TerrainSculpt::excavatePolygon, Floor mode: never raises).
-    // Explicit by design: reshape never calls it.
+    // of `bank` metres easing up from the bed to the level right on the outline
+    // (TerrainSculpt::excavatePolygon, Floor mode, bankIn: never raises, never
+    // touches the ground outside the outline). Explicit by design: reshape never
+    // calls it.
     TerrainSculpt::Result dig(TerrainComponent& tc, uint16_t body, float depth, float bank);
 
     // The body keeps its water and level but stops being a lake: no spline, no

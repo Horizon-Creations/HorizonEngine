@@ -916,7 +916,8 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 		t.description =
 			"Make and shape a lake on a landscape from a CLOSED spline entity: water at a "
 			"level inside the spline's outline, optionally with a bed dug under it and a "
-			"bank sloping back to the old ground. The lake is identified by its spline. "
+			"bank sloping from the shoreline down to the bed, inside the outline — the "
+			"ground outside it is never touched. The lake is identified by its spline. "
 			"Actions: 'create' (default) makes the lake — with 'level' (WORLD Y) the "
 			"surface stands there, without it at the lowest ground under the outline "
 			"plus 'above'; give 'body' to turn an existing painted pond into this "
@@ -941,8 +942,9 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			{ "dig",    json{ { "type", "boolean" },
 			                  { "description", "create: also dig the bed. Default true." } } },
 			{ "depth",  numberProp("create / dig: how far below the surface the bed lies, metres. Default 2.") },
-			{ "bank",   numberProp("create / dig: width of the slope from the bed back up to the old "
-			                       "ground, metres. Default 4. 0 is a hard edge.") },
+			{ "bank",   numberProp("create / dig: width of the slope from the shoreline down to the bed, "
+			                       "inside the outline, metres. Default 4. 0 is a hard edge (the full "
+			                       "depth right up to the outline).") },
 			{ "body",   json{ { "type", "integer" },
 			                  { "description", "create: the number of a painted pond on this landscape to "
 			                                   "turn into this spline's lake (its level is kept). Omit to "

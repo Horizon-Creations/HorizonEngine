@@ -312,7 +312,8 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
 {
     Result r;
     if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return r;
-    if (polygon.size() < 3 || !std::isfinite(params.amount) || !std::isfinite(params.falloff)) return r;
+    if (polygon.size() < 3 || !std::isfinite(params.amount) || !std::isfinite(params.falloff) ||
+        !std::isfinite(params.bankIn) || !std::isfinite(params.edgeHeight)) return r;
 
     glm::vec2 lo(std::numeric_limits<float>::max()), hi(std::numeric_limits<float>::lowest());
     double area2 = 0.0;
@@ -328,6 +329,7 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
     if (std::fabs(area2) <= 1e-12) return r;   // a line or a point: nothing to dig
 
     const float falloff = std::max(0.0f, params.falloff);
+    const float bankIn  = std::max(0.0f, params.bankIn);
     const float depth   = std::max(0.0f, params.amount);
 
     ensureHeights(tc);
@@ -342,7 +344,7 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
     // says about a slanted edge. A fraction of a grid cell, far below anything a
     // caller means by "outside".
     const float onEdge  = 1e-4f * std::min(stepX, stepZ);
-    const float reach   = std::max(falloff, onEdge);
+    const float reach   = std::max({ falloff, bankIn, onEdge });
 
     r.ok = true;   // legal request; a polygon entirely off the terrain simply changes nothing
 
@@ -405,9 +407,10 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
         }
     }
 
-    // ── Distance of the rest to the outline, only where the bank reaches ────
+    // ── Distance of the rest to the outline, only where a bank reaches ──────
     // Edge by edge, over the vertices within `reach` of that edge's box: a long
     // outline costs its length times the bank width, not the polygon's area.
+    // Inside vertices are skipped too, UNLESS `bankIn` needs their distance.
     constexpr float kFar = std::numeric_limits<float>::max();
     std::vector<float> dist2(cells, kFar);
     for (size_t i = 0; i < polygon.size(); ++i)
@@ -424,17 +427,18 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
             for (int xi = ex0; xi <= ex1; ++xi)
             {
                 const size_t c = at(xi, zi);
-                if (inside[c]) continue;
+                if (inside[c] && bankIn <= 0.0f) continue;
                 const float wx = -halfX + static_cast<float>(xi) * stepX;
                 dist2[c] = std::min(dist2[c], segmentDist2(wx, wz, a, b));
             }
         }
     }
 
-    // 1 on and inside the outline, 0 from `falloff` outward, smoothstep between.
-    auto weightAt = [&](size_t c) -> float
+    // 0 outside the bank, 1 on the outline and inward of it, smoothstep across
+    // `falloff` between — the OUTWARD bank, same as ever, `bankIn` does not
+    // touch it. Only called for vertices outside the polygon.
+    auto outWeight = [&](size_t c) -> float
     {
-        if (inside[c]) return 1.0f;
         const float d2 = dist2[c];
         if (d2 >= kFar) return 0.0f;
         const float d = std::sqrt(d2);
@@ -444,6 +448,17 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
         return t * t * (3.0f - 2.0f * t);
     };
 
+    // Floor mode, `bankIn` > 0: the clamp ceiling for a vertex `d` metres inside
+    // the outline. `edgeHeight` right on it, `amount` from `bankIn` in and
+    // beyond — see ExcavateParams::bankIn.
+    auto insideTarget = [&](float d) -> float
+    {
+        if (d >= bankIn) return params.amount;
+        const float t = d / bankIn;
+        const float s = t * t * (3.0f - 2.0f * t);
+        return params.edgeHeight + s * (params.amount - params.edgeHeight);
+    };
+
     float mn = std::numeric_limits<float>::max();
     float mx = std::numeric_limits<float>::lowest();
     int cx0 = x1, cx1 = x0, cz0 = z1, cz1 = z0;   // vertices that actually moved
@@ -451,23 +466,52 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
     for (int zi = z0; zi <= z1; ++zi)
         for (int xi = x0; xi <= x1; ++xi)
         {
-            const float w = weightAt(at(xi, zi));
-            if (w <= 0.0f) continue;
-
+            const size_t c = at(xi, zi);
             float& h = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
             const float was = h;
+            float newH = was;
 
-            if (params.mode == ExcavateMode::Floor)
+            if (inside[c])
             {
-                // w == 1 assigns, it does not blend: h + 1 * (floor - h) is not
-                // bit-equal to floor, and "the bottom is at the floor" is the
-                // thing a caller checks.
-                if (h > params.amount)
-                    h = (w >= 1.0f) ? params.amount : h + w * (params.amount - h);
+                if (bankIn <= 0.0f)
+                {
+                    // w == 1 assigns, it does not blend: h + 1 * (floor - h) is not
+                    // bit-equal to floor, and "the bottom is at the floor" is the
+                    // thing a caller checks.
+                    if (params.mode == ExcavateMode::Floor) { if (was > params.amount) newH = params.amount; }
+                    else                                      newH = was - depth;
+                }
+                else
+                {
+                    const float d2 = dist2[c];
+                    const float d  = (d2 >= kFar) ? bankIn : std::sqrt(d2);
+                    if (params.mode == ExcavateMode::Floor)
+                    {
+                        const float target = insideTarget(d);
+                        if (was > target) newH = target;
+                    }
+                    else
+                    {
+                        const float t = (d >= bankIn) ? 1.0f : d / bankIn;
+                        const float s = t * t * (3.0f - 2.0f * t);
+                        newH = was - s * depth;
+                    }
+                }
             }
             else
-                h = (w >= 1.0f) ? h - depth : h - w * depth;
+            {
+                const float w = outWeight(c);
+                if (w <= 0.0f) continue;
+                if (params.mode == ExcavateMode::Floor)
+                {
+                    if (was > params.amount)
+                        newH = (w >= 1.0f) ? params.amount : was + w * (params.amount - was);
+                }
+                else
+                    newH = (w >= 1.0f) ? was - depth : was - w * depth;
+            }
 
+            h = newH;
             if (h != was)
             {
                 ++r.changed;
