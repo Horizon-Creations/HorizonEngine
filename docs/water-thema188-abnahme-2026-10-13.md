@@ -9,12 +9,16 @@ D3D11 hat keinen Debug-Layer, dort zählt nur Bild und Logzeile.
 
 | Prüfung | D3D11 | D3D12 | Vulkan |
 |---|---|---|---|
-| Pinsel-Grube deckungsgleich (`HE_DUMP_WATERBRUSH=pit`) | ✔ | ✔ | ✔ |
+| Pinsel: keine trockene Grube, Grube ⊂ Fläche (`HE_DUMP_WATERBRUSH=pit`)¹ | ✔ | ✔ | ✔ |
 | See: Bett folgt Lappen/Bucht (`HE_DUMP_LAKEEDIT=reshaped`) | ✔ | ✔ | ✔ |
 | See: Bett folgt Frame für Frame (`=drag`) | ✔ | ✔ | ✔ |
 | See: hin und zurück bit-genau (`=dragback`) | ✔ | ✔ | ✔ |
 | See: Play-Modus, Collider, Stop (`=play`) | ✔ | ✔ | ✔ |
 | `[ERROR]`-Zeilen im Log | 0 | 0 | 0 |
+
+¹ „Exakt deckungsgleich“ ist das nicht, und zwei Abweichungen bleiben zur Entscheidung des Menschen (siehe unten):
+- Die Fläche ist bergab bis ~2 m größer als die Grube, weil der Boden dort von Natur aus unter dem Pegel liegt.
+- Bergauf steht über dem Wasser eine bis 4 m hohe, am Nordrand gezackte Böschung.
 
 Die Logzahlen sind auf allen drei Backends identisch (die Geometrie entsteht auf der CPU). Die Bilder weichen von
 Vulkan im Mittel um 1,0/255 (mit animiertem Wasser) bzw. 0,4/255 (Boden allein) ab.
@@ -37,13 +41,17 @@ Editors. Gezählt wird gegen das Mesh, das `buildSurface` baut (das, was `WaterS
 | Fix | 1337 | **0** | – | −36…24 / ±12 | −38,06…24,34 / ±12,43 |
 | Negativkontrolle (Gate aus) | 1887 | **450** | 4,68 m | −38…32 / ±14 | −38,06…26,09 / ±12,53 |
 
-Die Grube liegt jetzt ganz unter dem Wasser. Die Fläche reicht 0,3 bis 2 m darüber hinaus: Dort liegt flaches
-Wasser auf ungegrabenem Boden, das ist der Pegelversatz von 0,3 m und keine Grube.
+Die Grube liegt jetzt ganz unter dem Wasser, die Fläche reicht aber über sie hinaus (40 Vertices unter Wasser,
+nicht gegraben):
+- **Bergab (West):** bis ~2 m. Dort liegt der Boden ohnehin unter dem Pegel; am Westende der Fläche (−38,06; 0)
+  liegt er bei −3,04 m, der Pegel bei −2,10 m, also 0,94 m natürliche Wassertiefe ohne Aushub.
+- **Seitlich und bergauf:** 0,3 bis 0,4 m, die Uferlinie zwischen den Vertices.
 
 ![Fix: die Grube endet an der Wasserlinie](water-lake/thema188-pit-after-vulkan.png)
 ![Negativkontrolle: trockener Krater bergauf neben dem Wasser](water-lake/thema188-pit-negctrl-vulkan.png)
 
-**Bleibt sichtbar (kein Fehler im Sinne des Themas, zur Entscheidung):** Bergauf schneidet der Pinsel bis auf den
+**Bleibt sichtbar, zur Entscheidung des Menschen:** Es ist das Erste, was man im Editor sieht, und eine Zählung
+trockener Vertices erfasst es nicht. Bergauf schneidet der Pinsel bis auf den
 Wasserspiegel, und darüber steht eine senkrechte Böschung von bis zu 4 m (Gelände über dem Pegel, das abgetragen
 wurde). Am Nordrand ist sie gezackt, weil das Vertexgitter (1 m) gegen die Uferlinie der 4-m-Wasserzellen läuft.
 Trockener Grubenboden ist dort nicht zu sehen. Mit `HE_DUMP_WATERHIDESHEET=1` sieht man den Boden allein; auf dem
@@ -74,10 +82,13 @@ Bild ist dann nur die Wand zu sehen.
 
 | Raster | Frame | ohne Neu-Graben (Negativkontrolle) |
 |---|---|---|
-| 129² auf 100 m (≈ Editor-Standard 1 m/Vertex) | 8,7 ms Mittel, 12,6 ms schlimmster | 2,7 ms |
+| **Editor-Standard: 1 km, 1025², 256 Wasserzellen** (1628 gegrabene Vertices) | **6,7 ms** Mittel, 7,15 ms schlimmster | – |
+| 129² auf 100 m, 128 Wasserzellen (1 m/Vertex) | 8,7 ms Mittel, 12,6 ms schlimmster | 2,7 ms |
 | 1025² auf 100 m (10 cm/Vertex, 164 000 gegrabene Vertices) | 124 ms Mittel, 137 ms schlimmster | – |
 
-Der zweite Fall ist ein Stresstest mit 64-facher Vertexdichte; Release ist nicht gemessen.
+Die erste Zeile ist mit `HE_DUMP_LAKESIZE=1000 HE_DUMP_LAKERES=1025 HE_DUMP_LAKEWATERRES=256` gemessen, auf Vulkan
+und D3D12 gleich. Hin und zurück ist auch dort bit-genau. Die letzte Zeile ist ein Stresstest mit 64-facher
+Vertexdichte. Release ist nicht gemessen.
 
 ## Nicht geprüft / offen
 
@@ -91,4 +102,8 @@ Der zweite Fall ist ein Stresstest mit 64-facher Vertexdichte; Release ist nicht
 
 Zum Nachstellen: `HE_DUMP_WATERBRUSH=pit` bzw. `HE_DUMP_LAKEEDIT=drag|dragback|play` mit `HE_DUMP_SKYTEST=1
 HE_DUMP_CAMY=375 HE_DUMP_CAMZ=48 HE_DUMP_PITCH=-60`, optional `HE_DUMP_WATERHIDESHEET=1` (Boden allein) und
-`HE_DUMP_LAKERES=1025`.
+`HE_DUMP_LAKERES` / `HE_DUMP_LAKESIZE` / `HE_DUMP_LAKEWATERRES`.
+
+Negativkontrolle, nie committen: in `WaterBrush.cpp` (`keepUnderSheet`) die Zeile
+`if (sheet && insideSheet(...)) continue;` durch `continue;` ersetzen, in `WaterLake.cpp` (`syncSplines`)
+`follow(tc, b.id, poly)` durch `reshape(tc, b.id, poly)`.

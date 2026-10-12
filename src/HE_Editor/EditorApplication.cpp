@@ -7612,7 +7612,7 @@ void EditorApplication::dumpFrameHeadless()
 					dryDepth = std::max(dryDepth, lowered);
 					dryMinX = std::min(dryMinX, x); dryMaxX = std::max(dryMaxX, x);
 				}
-			char pb[480];
+			char pb[640];
 			std::snprintf(pb, sizeof pb, "; pit vs sheet: sheet built %d (%u triangles), %u vertices dug (deepest %.2f m), "
 			              "%u of them dry (deepest dry %.2f m, x %.1f..%.1f), %u under water but not dug; "
 			              "dug vertices span x %.2f..%.2f z %.2f..%.2f, the sheet x %.2f..%.2f z %.2f..%.2f",
@@ -7620,6 +7620,12 @@ void EditorApplication::dumpFrameHeadless()
 			              dugDry ? dryMinX : 0.0f, dugDry ? dryMaxX : 0.0f, wetUndug,
 			              dugMin.x, dugMax.x, dugMin.y, dugMax.y, sheetMin.x, sheetMax.x, sheetMin.y, sheetMax.y);
 			pitNote = pb;
+			// Where the sheet reaches past the pit (downhill, the west end): ground
+			// the water covers without a dig, below the stroke's level by nature.
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH pit: ground at the sheet's west end (%.2f,0) "
+			            "%.2f m, at the pit's west end (%.2f,0) %.2f m, level %.2f m",
+			            sheetMin.x, terrainHeightAt(ltc2, sheetMin.x, 0.0f),
+			            dugMin.x, terrainHeightAt(ltc2, dugMin.x, 0.0f), strokeLevel);
 		}
 
 		bool undone = false;
@@ -7717,6 +7723,12 @@ void EditorApplication::dumpFrameHeadless()
 		ltc.resolution  = 129;
 		if (const char* lr = std::getenv("HE_DUMP_LAKERES"); lr && std::atoi(lr) > 1)
 			ltc.resolution = static_cast<uint32_t>(std::atoi(lr));
+		// The editor's default rig is 1 km at 1025 with 256 water cells:
+		// HE_DUMP_LAKESIZE=1000 HE_DUMP_LAKERES=1025 HE_DUMP_LAKEWATERRES=256.
+		if (const char* ls = std::getenv("HE_DUMP_LAKESIZE"); ls && std::atof(ls) > 0.0)
+			ltc.sizeX = ltc.sizeZ = static_cast<float>(std::atof(ls));
+		if (const char* lw = std::getenv("HE_DUMP_LAKEWATERRES"); lw && std::atoi(lw) > 1)
+			ltc.water.res = static_cast<uint32_t>(std::atoi(lw));
 		ltc.heightScale = 0.0f;
 		ltc.seed        = 0;
 		ltc.dirty       = true;
