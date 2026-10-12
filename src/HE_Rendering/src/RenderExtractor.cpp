@@ -1204,19 +1204,26 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 		return out;   // dry at this XZ — WaterIndex already clips the shore itself
 
 	const float signedDepth = surf.level - cameraPos.y;
-	// Outside [0, surf.depth] the camera is either above the surface (flying,
-	// standing on a dock, a boat on top of the body) or under its own bed
-	// (inside solid ground or a cave under the sheet) — neither is "underwater".
-	// The CI regression this fixed (Thema 185 Schritt 1, commit 71df88e3): a
-	// camera far above a lake's XZ read as wet because only the lower bound was
-	// checked, which among other things made the Schritt 2 post pass fog the
-	// view of a plane flying over a distant lake.
-	if (signedDepth < 0.0f || signedDepth > surf.depth)
-		return out;
+	if (signedDepth > surf.depth)
+		return out;   // under the water's own bed — not underwater, just underground
 
-	out.wet         = true;
+	// surfaceY/signedDepth are reported whenever the camera is above the bed,
+	// even when it reads dry below (the next check) — a camera a hair above the
+	// surface still gets its real (small negative) signedDepth, not a reset-to-
+	// zero default, which is what "Underwater camera: exactly on the waterline
+	// reads a continuous ~0, not a special case" (test_underwater_camera.cpp)
+	// pins: justOver (2.001, 1 mm above a level-2 surface) must still read a
+	// small NEGATIVE signedDepth, not 0 — only `wet` has a hard edge here.
 	out.surfaceY    = surf.level;
 	out.signedDepth = signedDepth;
+	// At or below the surface, not above it (flying, a dock, a boat on top of
+	// the body). The CI regression this fixed (Thema 185 Schritt 1, commit
+	// 71df88e3): a camera far above a lake's XZ read as wet because only the
+	// lower (bed) bound above was ever checked, which among other things made
+	// the Schritt 2 post pass fog the view of a plane flying over a distant lake.
+	out.wet = signedDepth >= 0.0f;
+	if (!out.wet)
+		return out;   // above the surface: nothing below here resolves against it
 
 	// The post pass's tint (Thema 185 Schritt 2): a Beer-Lambert ramp of the CAMERA's
 	// own depth, reshaped by the body's falloff curve — 0 at the surface (shallowColor),

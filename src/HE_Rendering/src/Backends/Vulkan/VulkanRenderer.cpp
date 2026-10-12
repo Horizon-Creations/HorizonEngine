@@ -5683,7 +5683,12 @@ void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
         ici.arrayLayers = 1;
         ici.samples     = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        // SAMPLED_BIT: the underwater fog pass (Thema 185 Schritt 2) samples this
+        // same image directly as a depth texture — without it, binding
+        // m_viewportDepthView into a COMBINED_IMAGE_SAMPLER descriptor is invalid
+        // usage (VUID-VkWriteDescriptorSet-descriptorType-00337), which validation
+        // layers (lavapipe in CI) treat as fatal and abort the whole process.
+        ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_viewportDepthImage), "viewport depth image");
 
