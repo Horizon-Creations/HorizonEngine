@@ -11402,6 +11402,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				HE::FillMaterialClusterParams(frameClusters, lit);
 			HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
 			HE::FillMaterialWeather(GetEnvironment(), lit); // Weather node + the generic wet/snow response
+			HE::FillMaterialWater(GetWaterRipples(), lit); // Water Ripple node: the rings the physics raised
 			// Local (point/spot) shadow atlas for heLitP — same matrices the
 			// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
 			// PRE-BAKED so the shared preamble stays convention-free.

@@ -43,6 +43,7 @@
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the editor)
+#include <HorizonScene/WaterRipples.h>         // pushRipples: the water's rings, once per frame
 #include <HorizonScene/FlyCameraController.h>  // free-fly camera (shared with the editor's PIE)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
@@ -3540,6 +3541,10 @@ void GameApplication::OnRender(float deltaTime)
 				// reading them sees the Sky's values and not a stale default.
 				m_world->syncEnvironmentLights();
 			}
+			// The rings the water physics raised this frame (bodies going into or out of
+			// the water), for the water material. After the physics steps above; no
+			// physics world, no rings.
+			HE::water::pushRipples(r, m_physicsWorld.get());
 		}
 	}
 

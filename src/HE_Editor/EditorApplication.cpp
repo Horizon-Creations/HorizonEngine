@@ -119,6 +119,7 @@
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
+#include <HorizonScene/WaterRipples.h>         // pushRipples + the HE_DUMP_WATERRIPPLE witness's RippleField
 #include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
@@ -5930,6 +5931,108 @@ void EditorApplication::dumpFrameHeadless()
 			}
 			HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST engine water plane added");
 		}
+	}
+
+	// ── Water ring witness (HE_DUMP_WATERRIPPLE, Thema 179 Schritt 3): rings on the engine
+	// water (HE_DUMP_WATERTEST), without a physics run. "x,z,radius,strength,age[,kind];…"
+	// in world metres, 0..1 and seconds (kind 0 impact, 1 trail, 2 script, 3 exit; default 0),
+	// e.g. "0,-4,0.5,1,0.8;3,-6,0.3,0.6,0.2". "1" is one ring of a crate's size at 0.8 s. The rings
+	// go through the same RippleField::add and ::pack the physics uses, then the renderer's
+	// block stays exactly as written: nothing ages them (the dump advances no time), so the
+	// same string twice is the same image, and the age you ask for is the age you get. Unset
+	// is the control: no block is pushed, the image is the water as it was before rings.
+	if (const char* wr = std::getenv("HE_DUMP_WATERRIPPLE"); wr && *wr)
+	{
+		const std::string spec = std::string(wr) == "1" ? std::string("0,-4,0.5,1,0.8") : std::string(wr);
+		HE::water::RippleField field;
+		std::stringstream all(spec);
+		std::string item;
+		while (std::getline(all, item, ';'))
+		{
+			float v[6] = { 0.0f, 0.0f, 0.5f, 1.0f, 0.0f, 0.0f };
+			std::stringstream fields(item);
+			std::string f;
+			for (int k = 0; k < 6 && std::getline(fields, f, ','); ++k)
+				v[k] = std::strtof(f.c_str(), nullptr);
+			HE::water::Ripple r;
+			r.pos = glm::vec2(v[0], v[1]);
+			r.radius = v[2];
+			r.strength = v[3];
+			r.age = v[4];
+			r.kind = static_cast<int>(v[5]);
+			field.add(r);
+		}
+		field.pack(m_dumpRipples);
+		m_dumpRipplesOn = true;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERRIPPLE %d ring(s) from '%s'", field.count(), spec.c_str());
+	}
+
+	// ── Water drop witness (HE_DUMP_WATERDROP, Thema 179 Schritt 3): the whole chain on one
+	// image, no shortcut. A 128 m landscape at y = 300 with a lake 3 m deep, a one-metre crate
+	// of half the water's density that falls on it from 3 m up, a REAL PhysicsWorld stepped until
+	// the crate has landed and then HE_DUMP_WATERDROP seconds more (the age of the splash the
+	// frame shows; 0.8 is a good one), and the rings that world raised handed to the renderer the
+	// way the game hands them (RippleField::pack → IRenderer::SetWaterRipples). The crate lands at
+	// about (0, 303, -2): frame it with SKYTEST CAMY=305 CAMZ=6 PITCH=-18. HE_DUMP_WATERDROPRINGS=0
+	// leaves the rings out of the frame and keeps everything else (the A of the A/B: the same
+	// crate in the same water, no rings). The log line carries the numbers as a twin to the image.
+	if (const char* wd = std::getenv("HE_DUMP_WATERDROP"); wd && *wd && m_editorWorld)
+	{
+		namespace water = HE::water;
+		auto& reg = m_editorWorld->registry();
+		const float after = std::clamp(static_cast<float>(std::atof(wd)), 0.0f, 6.0f);
+		auto land = m_editorWorld->createEntity("WaterDropLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);   // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 128.0f;
+		ltc.resolution  = 65;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 128;
+		const uint16_t lake = ltc.water.createBody(3.0f);
+		const bool lakeOk = water::addPolygon(ltc, lake, { { -60, -60 }, { 60, -60 }, { 60, 60 }, { -60, 60 } }).ok;
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the sheet the crate floats on
+
+		auto crate = m_editorWorld->createEntity("WaterDropCrate");
+		TransformComponent ctf;
+		ctf.position = glm::vec3(0.0f, 306.0f, -2.0f);
+		reg.emplace<TransformComponent>(crate, ctf);
+		reg.emplace<MeshComponent>(crate, MeshComponent{ HE::kDefaultCubeMeshId });
+		RigidBodyComponent crb;
+		crb.type    = RigidBodyType::Dynamic;
+		crb.mass    = 500.0f;
+		crb.density = 500.0f;   // half the water's: it floats half out
+		reg.emplace<RigidBodyComponent>(crate, crb);
+		ColliderComponent ccol;
+		ccol.shape       = ColliderShape::Box;
+		ccol.halfExtents = glm::vec3(0.5f);
+		reg.emplace<ColliderComponent>(crate, ccol);
+
+		PhysicsWorld pw;
+		pw.initialize(*m_editorWorld);
+		pw.setThreadCount(1);
+		constexpr float dt = 1.0f / 60.0f;
+		int landedAt = -1, steps = 0;
+		for (int i = 1; i <= 900 && (landedAt < 0 || static_cast<float>(i - landedAt) * dt <= after + 0.5f * dt); ++i)
+		{
+			pw.step(*m_editorWorld, dt);
+			steps = i;
+			if (landedAt < 0 && pw.waterRipples().count() > 0)
+				landedAt = i;
+		}
+		const bool ringsOn = [] { const char* v = std::getenv("HE_DUMP_WATERDROPRINGS"); return !(v && std::atoi(v) == 0); }();
+		if (ringsOn)
+			pw.waterRipples().pack(m_dumpRipples);
+		m_dumpRipplesOn = true;   // the block as it is: nothing in the dump ages it further
+		const glm::vec3 at = reg.get<TransformComponent>(crate).position;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERDROP lake %s, landed at step %d of %d, crate at (%.2f, %.2f, %.2f), "
+			"%d ring(s) on the water, rings %s, share under water %.2f",
+			lakeOk ? "ok" : "FAILED", landedAt, steps, at.x, at.y, at.z, pw.waterRipples().count(),
+			ringsOn ? "on" : "left out", pw.submergedFraction(static_cast<uint32_t>(crate)));
 	}
 
 	// ── sRGB-texture witness (HE_DUMP_SRGBTEST=1): two cubes side by side, both
@@ -12220,6 +12323,14 @@ void EditorApplication::captureSceneThumbnail(const std::string& scenePath)
 void EditorApplication::pushEnvironment(float dt)
 {
 	if (!renderer() || !m_editorWorld) return;
+	// The rings the water physics raised, for the water material: only while the game
+	// plays (a stopped editor steps no physics, so it has none), and from the witness
+	// block instead when the headless dump asked for rings (HE_DUMP_WATERRIPPLE, where no
+	// physics runs). Pushed every frame next to the environment, like the game does.
+	if (m_dumpRipplesOn)
+		renderer()->SetWaterRipples(m_dumpRipples);
+	else
+		HE::water::pushRipples(renderer(), m_isPlaying ? m_physicsWorld.get() : nullptr);
 	// The Sky (EnvironmentComponent) is a scene entity now, not a fixed root component.
 	// No Sky entity → tell the renderer to skip the sky pass (flat background).
 	const Entity envEntity = m_editorWorld->environmentEntity();

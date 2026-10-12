@@ -55,6 +55,7 @@ JPH_SUPPRESS_WARNINGS
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/WaterQuery.h"
+#include "HorizonScene/WaterRipples.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
@@ -707,6 +708,13 @@ struct PhysicsWorld::Impl
     std::unordered_map<uint32_t, float> waterSubmerged;
     // What the latest applyWater did, for the budget stats.
     uint32_t                waterWet = 0, waterDeferred = 0;
+    // The rings on the water (Thema 179 step 3): raised by applyWater, aged by step(),
+    // read by whoever packs them for the renderer. Display only.
+    HE::water::RippleField  ripples;
+    // When (simTime) a body last left a trail ring, by entity: a body moving through the
+    // surface raises one every kTrailInterval, not one per step. Only a body that is
+    // wet and moving has an entry; removeEntity and clear() erase.
+    std::unordered_map<uint32_t, double> waterTrailAt;
     // Scratch, kept so the per-step allocation happens once.
     struct WaterCandidate
     {
@@ -1573,6 +1581,7 @@ void PhysicsWorld::setWaterPhysics(bool on)
         // Nothing is owed and nothing is wet while the water does nothing.
         m_impl->waterOwed.clear();
         m_impl->waterSubmerged.clear();
+        m_impl->waterTrailAt.clear();
     }
 }
 
@@ -1592,6 +1601,16 @@ float PhysicsWorld::submergedFraction(uint32_t entityId) const
         return 0.0f;
     const auto it = m_impl->waterSubmerged.find(entityId);
     return it != m_impl->waterSubmerged.end() ? it->second : 0.0f;
+}
+
+HE::water::RippleField& PhysicsWorld::waterRipples()
+{
+    return m_impl->ripples;
+}
+
+const HE::water::RippleField& PhysicsWorld::waterRipples() const
+{
+    return m_impl->ripples;
 }
 
 HE::PhysicsLimits PhysicsWorld::limits() const
@@ -2644,6 +2663,7 @@ void PhysicsWorld::removeEntityImpl(uint32_t entityId, JointFate fate)
     m_impl->waterOwed.erase(entityId);
     m_impl->waterSubmerged.erase(entityId);
     m_impl->waterNoSleep.erase(entityId);
+    m_impl->waterTrailAt.erase(entityId);
 }
 
 int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId, bool requeueJoints)
@@ -3192,6 +3212,9 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     // the step that is about to run. Here and nowhere else — this is the window in
     // which no Jolt worker is inside a body (Update() has not started) and every
     // writer is this thread. A scene with no water leaves it after one test.
+    // The rings on the water age first, by this step's dt: the ones applyWater raises
+    // next start at age 0, so the frame that follows draws them at their full size.
+    m_impl->ripples.advance(dt);
     const double buoyancyMs = applyWater(world, dt);
     // The waves' clock moves on after the water has used it: a step's impulse is for
     // the surface as it stood at the start of that step.
@@ -3716,6 +3739,7 @@ double PhysicsWorld::applyWater(HorizonWorld& world, float dt)
     {
         impl.waterOwed.clear();
         impl.waterSubmerged.clear();
+        impl.waterTrailAt.clear();
         for (const auto& [entity, id] : impl.waterNoSleep)
             allowSleepAgain(id);
         impl.waterNoSleep.clear();
@@ -3825,6 +3849,87 @@ double PhysicsWorld::applyWater(HorizonWorld& world, float dt)
         }
     }
 
+    // ── The rings ───────────────────────────────────────────────────────────────
+    // What a body raises on the surface (HE::water::RippleField, display only): a ring where
+    // it goes into the water fast enough (before = the share under water it had at its last
+    // serving, 0 when it had none), a smaller one where it comes out fast, and a trail of small
+    // ones while it cuts the surface at speed, one every kTrailInterval of simulation time.
+    // `vel` is read BEFORE the buoyancy impulse (the impulse is the water's answer, and the
+    // impact is what the body arrived with). Speeds are relative to the surface's normal and
+    // the water's current, so a crate that drifts with the river leaves no wake. Bounded per
+    // step (RippleTriggers) in the order the bodies are served, which is deterministic; the
+    // list itself is bounded too (RippleField::kMax). The size of a ring follows the body's
+    // horizontal half extent, its strength the speed, `splash` of the water scales both
+    // ways (0 = this water makes no rings).
+    using HE::water::RippleTriggers;
+    int impactsRaised = 0, trailsRaised = 0;
+    const auto raiseRings = [&](const Impl::WaterCandidate& c, const JPH::Body& body, const JPH::Vec3& vel,
+                                float before, float share)
+    {
+        const HE::water::Surface& s = c.surface;
+        if (!(s.physics.splash > 0.0f))
+            return;
+        const glm::vec3& n = s.normal;
+        const JPH::RVec3 centre = body.GetCenterOfMassPosition();
+        const JPH::Vec3  half   = body.GetWorldSpaceBounds().GetExtent();
+        const float      size   = std::max(half.GetX(), half.GetZ());
+        // Positive = going down into the surface, negative = coming up out of it.
+        const float into = -(vel.GetX() * n.x + vel.GetY() * n.y + vel.GetZ() * n.z);
+
+        HE::water::Ripple r;
+        r.pos   = glm::vec2(static_cast<float>(centre.GetX()), static_cast<float>(centre.GetZ()));
+        r.drift = glm::vec2(s.flow.x, s.flow.z);
+        const bool wasIn = before >= RippleTriggers::kWetShare, isIn = share >= RippleTriggers::kWetShare;
+        if (!wasIn && isIn)
+        {
+            if (into >= RippleTriggers::kImpactSpeed && impactsRaised < RippleTriggers::kMaxImpactsPerStep)
+            {
+                r.kind     = WaterRippleImpact;
+                r.radius   = std::clamp(size, 0.15f, 3.0f);
+                r.strength = std::clamp(into / 6.0f, 0.15f, 1.0f) * s.physics.splash;
+                impl.ripples.add(r);
+                ++impactsRaised;
+                // The splash IS the ring here: the first trail comes one interval later, not
+                // on top of it in the same step.
+                impl.waterTrailAt[c.entity] = impl.simTime;
+            }
+        }
+        else if (wasIn && !isIn)
+        {
+            if (-into >= RippleTriggers::kExitSpeed && impactsRaised < RippleTriggers::kMaxImpactsPerStep)
+            {
+                r.kind     = WaterRippleExit;
+                r.radius   = std::clamp(0.8f * size, 0.15f, 3.0f);
+                r.strength = std::clamp(-into / 8.0f, 0.1f, 0.6f) * s.physics.splash;
+                impl.ripples.add(r);
+                ++impactsRaised;
+            }
+        }
+
+        // The trail: on the surface (part of the body in, part out) and moving through the water.
+        const float relX = vel.GetX() - s.flow.x, relY = vel.GetY() - s.flow.y, relZ = vel.GetZ() - s.flow.z;
+        const float speed = std::sqrt(relX * relX + relY * relY + relZ * relZ);
+        const bool cutting = isIn && share <= RippleTriggers::kTrailMaxShare && speed >= RippleTriggers::kTrailSpeed;
+        if (!cutting)
+        {
+            if (!impl.waterTrailAt.empty())
+                impl.waterTrailAt.erase(c.entity);
+            return;
+        }
+        const auto last = impl.waterTrailAt.find(c.entity);
+        if (last != impl.waterTrailAt.end() &&
+            impl.simTime - last->second < static_cast<double>(RippleTriggers::kTrailInterval))
+            return;
+        if (trailsRaised >= RippleTriggers::kMaxTrailsPerStep)
+            return;
+        r.kind     = WaterRippleTrail;
+        r.radius   = std::clamp(0.5f * size, 0.12f, 1.0f);
+        r.strength = std::clamp(speed / 8.0f, 0.0f, 0.5f) * s.physics.splash;
+        impl.ripples.add(r);
+        impl.waterTrailAt[c.entity] = impl.simTime;
+        ++trailsRaised;
+    };
+
     // ── Serve them ──────────────────────────────────────────────────────────────
     const uint32_t cap     = impl.budget.waterBodiesPerStep;
     const JPH::Vec3 gravity = impl.physicsSystem.GetGravity();
@@ -3872,12 +3977,18 @@ double PhysicsWorld::applyWater(HorizonWorld& world, float dt)
             : 1.0f / (motion->GetInverseMass() * total);   // mass / volume
         const float factor = HE::PhysicsTuning::buoyancyFactorFor(c.surface.physics.density, bodyDensity);
         const glm::vec3& flow = c.surface.flow;
+        // What the body arrived with, before the water's impulse changes it (the rings).
+        const JPH::Vec3 arrival = body.GetLinearVelocity();
         body.ApplyBuoyancyImpulse(total, submerged, centreOfBuoyancy, factor,
                                   c.surface.physics.linearDrag, c.surface.physics.angularDrag,
                                   JPH::Vec3(flow.x, flow.y, flow.z), gravity,
                                   HE::PhysicsBudgetRules::steppedDt(dt, c.owed));
 
         const float share = std::clamp(submerged / total, 0.0f, 1.0f);
+        {
+            const auto was = impl.waterSubmerged.find(c.entity);
+            raiseRings(c, body, arrival, was != impl.waterSubmerged.end() ? was->second : 0.0f, share);
+        }
         impl.waterSubmergedNext[c.entity] = share;
         if (submerged > 0.0f)
             ++impl.waterWet;
@@ -4801,6 +4912,10 @@ void PhysicsWorld::clear()
     m_impl->waterSubmerged.clear();
     m_impl->waterNoSleep.clear();   // the bodies they belonged to were just destroyed
     m_impl->waterScratch.clear();
+    // The rings belong to the world that raised them: a scene swapped or stopped must not
+    // leave them standing on the next one's lake.
+    m_impl->ripples.clear();
+    m_impl->waterTrailAt.clear();
     // After the bodies are gone: drop the contact bookkeeping, otherwise the
     // OnContactRemoved callbacks Jolt fires for them would emit exit events
     // referring to entities that no longer exist.

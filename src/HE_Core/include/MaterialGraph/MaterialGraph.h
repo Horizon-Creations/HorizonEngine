@@ -210,6 +210,21 @@ enum class MatNodeType : uint8_t
     // The numbers come from the integer hash the bombing nodes use (pcg3d of the hex
     // index), so every backend picks the same ones bit for bit.
     BombCells,
+
+    // ── v16: the rings on the water (Thema 179, Schritt 3) ──
+    // The rings the water physics raised where a body went into or out of the surface
+    // (heLight.waterRipples / waterRippleA / waterRippleB, which HE::FillMaterialWater
+    // fills from IRenderer::GetWaterRipples), summed at one point. The engine water
+    // subtracts Slope from its wave normal and adds Foam to its foam mask, so a crate
+    // that lands on a lake leaves rings in the shader.
+    //   input  : Position (world XZ in metres; unconnected = this fragment's world XZ)
+    //   outputs: Height (metres), Slope (the height's gradient in world XZ, what a
+    //            normal subtracts to lean with the ring) and Foam (0..1, white on the
+    //            crest of a strong ring)
+    // Without rings (a preview, a UI pass, a scene with no splash) all three are 0.
+    // Fragment stage only: a World Position Offset body gets zeros, since the rings
+    // are a normal-and-foam effect on a flat surface.
+    WaterRipple,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot

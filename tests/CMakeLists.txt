@@ -144,6 +144,9 @@ add_executable(he_tests
     # buoyancy, drag and current on Jolt bodies, with the scene-without-water control.
     test_water_query.cpp
     test_water_buoyancy.cpp
+    # The rings on the water (Thema 179 step 3): the bounded list, what raises a ring in the
+    # physics (and the scenes that must raise none), and the block the shaders read.
+    test_water_ripples.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp
