@@ -295,10 +295,17 @@ Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
             }
             else
             {
-                // How far the old, uncapped dig would have gone.
-                const float oldBlended = (was > floorY && f > 0.0f)
-                                        ? ((f >= 1.0f) ? floorY : was + f * (floorY - was))
-                                        : was;
+                // Ground above the water goes down to its level at once, not paced
+                // (Thema 188): a vertex half way down is still above the sheet, the
+                // shore clipping takes the water off it, and dug ground with no water
+                // over it is exactly the crater this cap exists to prevent. Whether
+                // the water reaches it at all is the caller's to check (the water
+                // brush puts back every vertex its sheet does not cover).
+                const float top = std::min(was, wetLevel);
+                // How far the old, uncapped dig would have gone, from there.
+                const float oldBlended = (top > floorY && f > 0.0f)
+                                        ? ((f >= 1.0f) ? floorY : top + f * (floorY - top))
+                                        : top;
                 // The raw ceiling for THIS dab: below half weight, the circle's own
                 // paint (the identical weight, WaterField::addCircle) would not have
                 // turned this ground wet from a single dab, so the target is the
@@ -316,8 +323,8 @@ Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
                                                      : wetLevel + (w - 0.5f) / 0.5f * (floorY - wetLevel);
                 // Whichever digs less wins (max: digging lowers) — never past where
                 // this dab's own paint already wets it — then never past the
-                // original height (min: an excavation never raises).
-                h = std::min(was, std::max(oldBlended, capTarget));
+                // level-capped height (min: an excavation never raises).
+                h = std::min(top, std::max(oldBlended, capTarget));
             }
             if (h != was)
             {

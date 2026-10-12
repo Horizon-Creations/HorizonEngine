@@ -129,6 +129,14 @@ namespace TerrainSculpt
     // toward wet without any one of them alone reaching w ≥ 0.5 there stays capped
     // a little shallow rather than risk the dry ring the other way; that is a
     // shallower shore, never a moat.
+    // With wetLevel, ground ABOVE it goes to it at once, unpaced, before the blend
+    // toward the floor starts (Thema 188): paced, a vertex half way down would
+    // stand above the water, the shore clipping would take the sheet off it, and
+    // the dab would leave dug ground no water covers. The weight still decides
+    // how far below the level it may go. This shaves the whole circle, wet or not;
+    // the water brush therefore puts back every vertex its own sheet does not
+    // cover afterwards (WaterBrush.cpp), which is what makes the pit and the water
+    // one shape.
     //
     // Same contract as apply: terrain-local coordinates, ensureHeights first, the
     // region-dirty rect (vertices that moved, one grid step wider) and not `dirty`,

@@ -43,6 +43,17 @@ struct TerrainComponent;
 // SAME dab's own paint (the identical weight, addCircle) would not have turned
 // it wet — a dry ring sunk below the level, around every stroke, is the water
 // brush's share of the bug `WaterLake.cpp`'s outward bank had.
+// And it digs ONLY under the water (Thema 188): after the dab, every vertex it
+// lowered that the body's own sheet does not cover (WaterMesh.h insideSheet: the
+// lattice, marching squares and the shore clipping the mesh is built with) goes
+// back to where it was. The weight alone did not say where the sheet ends — at the
+// Landscape tool's pacing a cell needs several dabs to cross the shoreline while
+// the dig starts with the first, and ground above the level was shaved to it all
+// the way out to the falloff's edge — so the pit used to be wider than the water,
+// a dry crater round the rim. Ground above the level under the sheet goes to the
+// level at once (it would otherwise clip the very water that is to cover it).
+// The pit is therefore never larger than the water; the water can be larger than
+// the pit (shallow water over ground the weight left above the floor).
 //
 // PACING is the caller's: Params::amount is the share (0..1) one dab moves each
 // cell toward wet (or dry), the same number addCircle/removeCircle take as their

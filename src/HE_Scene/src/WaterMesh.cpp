@@ -76,6 +76,78 @@ namespace
         return inside;
     }
 
+    // One lattice cell as marching squares sees it: which of its corners are inside
+    // the sheet and where along each edge the inside ends. The one rule both the
+    // contours (extractContours) and the point test (insideSheet) are cut by, so
+    // what a brush digs under and what the mesh covers cannot drift apart.
+    struct CellCut
+    {
+        glm::dvec2 corner[4];   // counter-clockwise from the lower left (x right, z up)
+        bool       in[4] = { false, false, false, false };
+        glm::dvec2 cross[4];    // on edge e (corner e → e+1), when in[e] != in[e+1]
+        int        crossings = 0;
+        bool       joined = false;   // saddle (4 crossings): the wet corners meet through the middle
+    };
+
+    CellCut cutCell(const Lattice& L, int i, int j, double iso)
+    {
+        CellCut cut;
+        const bool clip = L.clipped() && L.g.size() == L.v.size();
+        // Corners counter-clockwise from the lower left (x right, z up).
+        const double c[4] = { L.at(i, j), L.at(i + 1, j), L.at(i + 1, j + 1), L.at(i, j + 1) };
+        // The ground's depth under the water at the same corners; 1 when the
+        // lattice is not clipped, so that its sign never says "outside".
+        const double d[4] = { clip ? L.groundAt(i, j)         : 1.0, clip ? L.groundAt(i + 1, j)         : 1.0,
+                              clip ? L.groundAt(i + 1, j + 1) : 1.0, clip ? L.groundAt(i, j + 1)         : 1.0 };
+        const bool   wet[4] = { c[0] >= iso, c[1] >= iso, c[2] >= iso, c[3] >= iso };
+        const bool   dry[4] = { d[0] >= 0.0, d[1] >= 0.0, d[2] >= 0.0, d[3] >= 0.0 };   // ground under the sheet
+        for (int k = 0; k < 4; ++k) cut.in[k] = wet[k] && dry[k];
+        cut.corner[0] = L.position(i, j);         cut.corner[1] = L.position(i + 1, j);
+        cut.corner[2] = L.position(i + 1, j + 1); cut.corner[3] = L.position(i, j + 1);
+        if (cut.in[0] == cut.in[1] && cut.in[1] == cut.in[2] && cut.in[2] == cut.in[3]) return cut;
+
+        for (int e = 0; e < 4; ++e)
+        {
+            const int a = e, b = (e + 1) & 3;
+            if (cut.in[a] == cut.in[b]) continue;
+            // Where along a→b the inside ends: the coverage reaches the iso
+            // value at tCov, the ground comes up through the water at tGround.
+            // Leaving the inside the first of them counts, entering it the last.
+            double tCov = -1.0, tGround = -1.0;
+            if (wet[a] != wet[b]) tCov = (iso - c[a]) / (c[b] - c[a]);
+            if (dry[a] != dry[b]) tGround = d[a] / (d[a] - d[b]);
+            double t = 0.5;                                // cannot be missing: the corners differ in one of the two
+            if (cut.in[a]) { t = 2.0; if (tCov >= 0.0) t = std::min(t, tCov); if (tGround >= 0.0) t = std::min(t, tGround); }
+            else           { t = -1.0; if (tCov >= 0.0) t = std::max(t, tCov); if (tGround >= 0.0) t = std::max(t, tGround); }
+            t = std::clamp(t, 0.0, 1.0);
+            cut.cross[e] = cut.corner[a] + (cut.corner[b] - cut.corner[a]) * t;
+            ++cut.crossings;
+        }
+        // A saddle: two opposite corners wet. The mean of the corners says whether
+        // the wet ones are joined through the middle; on a clipped lattice the
+        // ground says it too: the middle must be under the sheet as well.
+        cut.joined = (c[0] + c[1] + c[2] + c[3]) * 0.25 >= iso &&
+                     (d[0] + d[1] + d[2] + d[3]) * 0.25 >= 0.0;
+        return cut;
+    }
+
+    // Distance from p to the segment a–b.
+    double segmentDistance(const glm::dvec2& p, const glm::dvec2& a, const glm::dvec2& b)
+    {
+        const glm::dvec2 ab = b - a;
+        const double len2 = glm::dot(ab, ab);
+        const double t = len2 > 0.0 ? std::clamp(glm::dot(p - a, ab) / len2, 0.0, 1.0) : 0.0;
+        return glm::length(p - (a + ab * t));
+    }
+
+    // Inside the ring or on its outline (within eps).
+    bool inOrOnRing(const Ring& ring, const glm::dvec2& p, double eps)
+    {
+        for (size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++)
+            if (segmentDistance(p, ring[j], ring[i]) <= eps) return true;
+        return pointInRing(ring, p);
+    }
+
     uint64_t fnv(uint64_t h, const void* data, size_t bytes)
     {
         const auto* p = static_cast<const uint8_t*>(data);
@@ -217,26 +289,14 @@ std::vector<Contour> extractContours(const Lattice& L, double iso)
 
     std::unordered_map<int64_t, glm::dvec2> points;
     std::unordered_map<int64_t, int64_t>    next;      // crossing → the crossing the contour goes to
-    const bool clip = L.clipped() && L.g.size() == L.v.size();
 
     struct Crossing { int64_t key; bool exit; };
 
     for (int j = 0; j + 1 < L.h; ++j)
         for (int i = 0; i + 1 < L.w; ++i)
         {
-            // Corners counter-clockwise from the lower left (x right, z up).
-            const double c[4] = { L.at(i, j), L.at(i + 1, j), L.at(i + 1, j + 1), L.at(i, j + 1) };
-            // The ground's depth under the water at the same corners; 1 when the
-            // lattice is not clipped, so that its sign never says "outside".
-            const double d[4] = { clip ? L.groundAt(i, j)         : 1.0, clip ? L.groundAt(i + 1, j)         : 1.0,
-                                  clip ? L.groundAt(i + 1, j + 1) : 1.0, clip ? L.groundAt(i, j + 1)         : 1.0 };
-            const bool   wet[4] = { c[0] >= iso, c[1] >= iso, c[2] >= iso, c[3] >= iso };
-            const bool   dry[4] = { d[0] >= 0.0, d[1] >= 0.0, d[2] >= 0.0, d[3] >= 0.0 };   // ground under the sheet
-            const bool   in[4]  = { wet[0] && dry[0], wet[1] && dry[1], wet[2] && dry[2], wet[3] && dry[3] };
-            if (in[0] == in[1] && in[1] == in[2] && in[2] == in[3]) continue;
-
-            const glm::dvec2 pos[4] = { L.position(i, j), L.position(i + 1, j),
-                                        L.position(i + 1, j + 1), L.position(i, j + 1) };
+            const CellCut cut = cutCell(L, i, j, iso);
+            if (cut.crossings == 0) continue;
             // Edge e runs from corner e to corner e+1.
             const int64_t keys[4] = { hKey(i, j), vKey(i + 1, j), hKey(i, j + 1), vKey(i, j) };
 
@@ -244,22 +304,11 @@ std::vector<Contour> extractContours(const Lattice& L, double iso)
             int n = 0;
             for (int e = 0; e < 4; ++e)
             {
-                const int a = e, b = (e + 1) & 3;
-                if (in[a] == in[b]) continue;
-                // Where along a→b the inside ends: the coverage reaches the iso
-                // value at tCov, the ground comes up through the water at tGround.
-                // Leaving the inside the first of them counts, entering it the last.
-                double tCov = -1.0, tGround = -1.0;
-                if (wet[a] != wet[b]) tCov = (iso - c[a]) / (c[b] - c[a]);
-                if (dry[a] != dry[b]) tGround = d[a] / (d[a] - d[b]);
-                double t = 0.5;                                // cannot be missing: the corners differ in one of the two
-                if (in[a]) { t = 2.0; if (tCov >= 0.0) t = std::min(t, tCov); if (tGround >= 0.0) t = std::min(t, tGround); }
-                else       { t = -1.0; if (tCov >= 0.0) t = std::max(t, tCov); if (tGround >= 0.0) t = std::max(t, tGround); }
-                t = std::clamp(t, 0.0, 1.0);
-                points[keys[e]] = pos[a] + (pos[b] - pos[a]) * t;
+                if (cut.in[e] == cut.in[(e + 1) & 3]) continue;
+                points[keys[e]] = cut.cross[e];
                 // Walking the cell counter-clockwise, a crossing from a wet corner
                 // to a dry one is where the water's boundary LEAVES the cell edge.
-                xs[n++] = { keys[e], in[a] };
+                xs[n++] = { keys[e], cut.in[e] };
             }
 
             if (n == 2)
@@ -270,17 +319,12 @@ std::vector<Contour> extractContours(const Lattice& L, double iso)
             }
             else if (n == 4)
             {
-                // A saddle: two opposite corners wet. The mean of the corners says
-                // whether the wet ones are joined through the middle. Joined: each
-                // exit continues to the next entry (a hexagon of water); apart: to
-                // the previous one (two corner triangles).
-                // On a clipped lattice the ground says it too: the middle must be
-                // under the sheet as well.
-                const bool joined = (c[0] + c[1] + c[2] + c[3]) * 0.25 >= iso &&
-                                    (d[0] + d[1] + d[2] + d[3]) * 0.25 >= 0.0;
+                // A saddle: each exit continues to the next entry when the wet
+                // corners are joined through the middle (a hexagon of water), to
+                // the previous one when they are apart (two corner triangles).
                 for (int k = 0; k < 4; ++k)
                     if (xs[k].exit)
-                        next[xs[k].key] = xs[joined ? (k + 1) & 3 : (k + 3) & 3].key;
+                        next[xs[k].key] = xs[cut.joined ? (k + 1) & 3 : (k + 3) & 3].key;
             }
         }
 
@@ -326,6 +370,41 @@ std::vector<Contour> extractContours(const Lattice& L, double iso)
         result.push_back(std::move(c));
     }
     return result;
+}
+
+bool insideSheet(const Lattice& L, double x, double z, double iso)
+{
+    if (L.w < 2 || L.h < 2 || L.v.size() != static_cast<size_t>(L.w) * L.h) return false;
+    if (!std::isfinite(x) || !std::isfinite(z)) return false;
+    const double fi = (x - L.originX) / L.cellW - L.x0;
+    const double fj = (z - L.originZ) / L.cellH - L.z0;
+    if (fi < 0.0 || fj < 0.0 || fi > L.w - 1 || fj > L.h - 1) return false;
+    // The cell the point is in; on the last corner line, the cell before it.
+    const int i = std::min(static_cast<int>(std::floor(fi)), L.w - 2);
+    const int j = std::min(static_cast<int>(std::floor(fj)), L.h - 2);
+    const CellCut cut = cutCell(L, i, j, iso);
+    if (cut.crossings == 0) return cut.in[0];
+
+    const glm::dvec2 p(x, z);
+    const double eps = mergeTolerance(L);
+    if (cut.crossings == 4 && !cut.joined)
+    {
+        // Two corner triangles: each wet corner with the crossings on its two edges.
+        for (int k = 0; k < 4; ++k)
+            if (cut.in[k] && inOrOnRing({ cut.cross[(k + 3) & 3], cut.corner[k], cut.cross[k] }, p, eps))
+                return true;
+        return false;
+    }
+    // The water side of the cell: its inside corners and the crossings between
+    // them, in order round the cell — one piece of contour cuts off the rest, a
+    // joined saddle leaves a hexagon.
+    Ring piece;
+    for (int k = 0; k < 4; ++k)
+    {
+        if (cut.in[k]) piece.push_back(cut.corner[k]);
+        if (cut.in[k] != cut.in[(k + 1) & 3]) piece.push_back(cut.cross[k]);
+    }
+    return piece.size() >= 3 && inOrOnRing(piece, p, eps);
 }
 
 std::vector<Polygon> groupContours(const std::vector<Contour>& contours)

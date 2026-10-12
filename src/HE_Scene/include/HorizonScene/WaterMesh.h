@@ -146,6 +146,15 @@ namespace HE::water
     // a lattice contour, invisible on a shore that is not a rectangle.
     std::vector<Contour> extractContours(const Lattice& lattice, double iso = kContourIso);
 
+    // Whether terrain-local (x, z) is on the water side of the contours
+    // extractContours draws through the lattice cell it lies in — the sheet's own
+    // rule, cell by cell (coverage at `iso` and, clipped, the ground), with a point
+    // on the outline counting as inside. What the water brush's dig asks before it
+    // lowers a vertex (Thema 188), so the pit never reaches past the water. Differs
+    // from the finished mesh only where the mesh simplifies (a thousandth of a cell)
+    // or drops a loop smaller than a fiftieth of a cell. False off the lattice.
+    bool insideSheet(const Lattice& lattice, double x, double z, double iso = kContourIso);
+
     // An outer boundary with the islands inside it.
     struct Polygon
     {
