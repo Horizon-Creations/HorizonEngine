@@ -300,7 +300,15 @@ jobs:
 
       # Four jobs on GitHub's four cores; on NN-WS03 Ninja's default (all of
       # its 32 threads — it has room for that next to the bees).
+      #
+      # id: build — the self-update steps below gate on `steps.build.outcome`
+      # rather than just `!cancelled()`, the way the lavapipe job's own build
+      # step already does: without it, a build failure (the Windows C2026
+      # literal-length bug step 3 flagged is exactly this shape) would show up
+      # a confusing second time as "executable not found" instead of being
+      # skipped in favour of the one real failure.
       - name: Build
+        id: build
         run: cmake --build build ${{ runner.environment == 'self-hosted' && '--parallel' || '-j 4' }}
 
       # -j because the suite waits far more than it computes: real git
@@ -315,6 +323,58 @@ jobs:
         env:
           HE_NET_LOOPBACK_ONLY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
         run: ctest --test-dir build --output-on-failure -j4
+
+      # Self-update's live leg (Thema 186 Schritt 4): a real SftpClient/libssh2
+      # session against a real server, not a mock or a directory-backed stand-in.
+      # test_selfupdate.cpp's two "live" cases (docs/editor-selfupdate-sftp-design.md,
+      # "Verification") are skipped without HE_SELFUPDATE_LIVE_TEST=1 and a real
+      # account — this script supplies both: scripts/selfupdate_test_sftp_server.py
+      # as a throwaway, read-only account on 127.0.0.1 with a password generated on
+      # the fly (never written to a file, never printed) and a one-build manifest for
+      # whichever platform this job is. No secret involved, so it runs on every PR,
+      # forks included — unlike the real update account, still an open decision in
+      # the design doc.
+      #
+      # `pip install --target` into RUNNER_TEMP, not the ambient interpreter: on
+      # NN-WS03 this Python is the one the device's own account uses for
+      # everything else, shared with up to eight bees at once — a plain
+      # `pip install` would mutate its global site-packages for all of them and
+      # race any other install happening at the same moment.
+      #
+      # Split by OS rather than one `shell: bash` step: NN-WS03 (self-hosted
+      # Windows) isn't guaranteed a bash — the Vulkan-assert and compiler-cache
+      # steps above already say so ("PowerShell, not bash", "the action needs
+      # sh, which a Windows PC needn't have"). The pwsh branch below also picks
+      # `python` BEFORE `python3`, the same order the existing ".heproj
+      # registration" step uses: on a plain Windows PC (NN-WS03 included)
+      # `python3` resolves to the WindowsApps execution-alias stub, a real file
+      # `Get-Command`/`command -v` happily finds, that exits 49 with a
+      # Microsoft-Store nag the moment it is actually RUN — `python`, the real
+      # interpreter, is never reached if it is tried second.
+      - name: Self-update live round trip over SFTP (local test server, Windows)
+        if: ${{ runner.os == 'Windows' && !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          PIP_TARGET: ${{ runner.temp }}/selfupdate-ci-deps
+        run: |
+          $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { 'python3' }
+          & $py -m pip install --quiet --disable-pip-version-check --target "$env:PIP_TARGET" paramiko
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PYTHONPATH = if ($env:PYTHONPATH) { "$env:PIP_TARGET;$env:PYTHONPATH" } else { $env:PIP_TARGET }
+          & $py scripts/selfupdate_live_ci_check.py --build-dir build
+          exit $LASTEXITCODE
+
+      - name: Self-update live round trip over SFTP (local test server)
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        timeout-minutes: 10
+        env:
+          PIP_TARGET: ${{ runner.temp }}/selfupdate-ci-deps
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" -m pip install --quiet --disable-pip-version-check --target "$PIP_TARGET" paramiko
+          PYTHONPATH="$PIP_TARGET${PYTHONPATH:+:$PYTHONPATH}" "$PY" scripts/selfupdate_live_ci_check.py --build-dir build
 
       # The Metal backend compiles its MSL strings at RUNTIME (newLibraryWithSource)
       # and answers a failure by disabling the feature, while the build above only
@@ -480,6 +540,24 @@ jobs:
       # run. It used to sit before them, which meant Windows uploaded an editor even
       # when ctest was red; it now behaves like macOS and Linux always have.
       #
+      # HorizonUpdater (Thema 186) deploys next to HorizonEditor the same way the
+      # engine DLLs do (he_deploy_dll(HorizonUpdater), src/HE_SelfUpdate/CMakeLists.txt)
+      # — a build-ordering dependency, not a packaging step, so there is nothing here
+      # that COULD silently drop it the way a hand-written packaging script could.
+      # Checked anyway, cheaply, on the raw deploy directory (works whether or not
+      # this job zips it): preflightTakeover() refuses the takeover without this file
+      # next to the running editor, so its absence is exactly the kind of thing that
+      # must fail loudly in CI rather than ship quietly broken.
+      - name: Check HorizonUpdater is deployed beside the editor (Windows)
+        if: runner.os == 'Windows' && !cancelled() && steps.build.outcome == 'success'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "package/Editor/HorizonUpdater.exe")) {
+            Write-Host "::error::package/Editor/HorizonUpdater.exe is missing — self-update's takeover helper did not deploy"
+            exit 1
+          }
+          Write-Host "HorizonUpdater.exe present in package/Editor"
+
       # Not on NN-WS03: a topic branch's check needs no download package, its
       # package/ is an incremental deploy that keeps old files, and the zip
       # would go up through a home connection.
@@ -506,6 +584,32 @@ jobs:
         if: runner.os == 'macOS'
         run: cmake --build build --target dmg
 
+      # Unlike Windows/Linux, package_macos.sh has to copy HorizonUpdater into the
+      # .app bundle by hand (out/deploy/Editor is a flat directory, not a bundle, until
+      # this script builds one) — and on a missing file it only WARNS and keeps going,
+      # on purpose (a self-update regression must not block every other DMG build). So
+      # this is the one platform where the check has to look inside the shipped
+      # artifact itself: mount the real DMG read-only, exactly how SelfUpdateInstall.cpp
+      # extracts one on a user's machine, and look in Contents/MacOS.
+      - name: Check HorizonUpdater is inside the macOS package (DMG)
+        if: runner.os == 'macOS' && !cancelled()
+        run: |
+          set -eo pipefail
+          dmg=$(ls out/HorizonEditor-*.dmg | head -1)
+          mount_point="$(mktemp -d)"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg"
+          app=$(ls -d "$mount_point"/*.app | head -1)
+          found=0
+          if [ -f "$app/Contents/MacOS/HorizonUpdater" ]; then
+            echo "HorizonUpdater present in $(basename "$dmg")"
+            found=1
+          fi
+          hdiutil detach "$mount_point"
+          if [ "$found" -ne 1 ]; then
+            echo "::error::$dmg does not contain Contents/MacOS/HorizonUpdater — package_macos.sh only warns on this, it does not fail the build"
+            exit 1
+          fi
+
       - name: Upload macOS editor package
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
@@ -513,6 +617,18 @@ jobs:
           name: HorizonEditor-macos-arm64
           path: out/HorizonEditor-*.dmg
           if-no-files-found: error
+
+      # Same reasoning as the Windows check above: he_deploy_dll(HorizonUpdater)
+      # puts it beside HorizonEditor as part of the normal build, so this is the
+      # raw deploy directory, not the tarball made from it below.
+      - name: Check HorizonUpdater is deployed beside the editor (Linux)
+        if: runner.os == 'Linux' && !cancelled() && steps.build.outcome == 'success'
+        run: |
+          test -f package/Editor/HorizonUpdater || {
+            echo "::error::package/Editor/HorizonUpdater is missing — self-update's takeover helper did not deploy"
+            exit 1
+          }
+          echo "HorizonUpdater present in package/Editor"
 
       # ── Linux: tarball the self-contained editor bundle ─────────────────────────
       # The editor POST_BUILD deployed package/Editor: HorizonEditor + engine .so

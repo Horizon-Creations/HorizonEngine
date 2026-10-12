@@ -1,14 +1,13 @@
 # Editor self-update over SFTP — Design
 
-Status: **Steps 1 and 3 of Thema 186 implemented** (module, second account,
+Status: **Steps 1, 3 and 4 of Thema 186 implemented** (module, second account,
 version check, verified download; the takeover mechanism — `HorizonUpdater`,
 the swap/rollback/relaunch state machine, extraction, editor-side
 orchestration — all with tests that run the real executables as real
-processes). **Not done:** the CI matrix wiring the takeover tests into
-`ci.yml`'s platform runners (step 4), the real-account run on the hosting
-server (needs its host name, see "Open decisions"), and the Editor UI itself
-— `HorizonEditor` now **links** `HorizonSelfUpdate` and depends on
-`HorizonUpdater`, but nothing calls `Takeover.h` yet: no background
+processes; the CI matrix's live SFTP leg). **Not done:** the real-account run
+on the hosting server (needs its host name, see "Open decisions"), and the
+Editor UI itself — `HorizonEditor` now **links** `HorizonSelfUpdate` and
+depends on `HorizonUpdater`, but nothing calls `Takeover.h` yet: no background
 check-for-update, no menu row, no "restart to update?" dialog. See "What the
 next step hangs on" for exactly where that wiring goes.
 
@@ -291,6 +290,7 @@ portable; see "What the next step hangs on".
 | `tests/test_selfupdate.cpp` | 17 cases; `ctest -R test_selfupdate` |
 | `tests/test_selfupdate_apply.cpp` | `HorizonUpdater` run as a real child process against `tests/helpers/fake_editor.cpp` (`he_fake_editor`, a real process standing in for both "the editor being waited on" and "the build being relaunched"): `ApplyPlan` CLI round trip, happy swap (preserves `config.json`, relaunch args reach the new build), the editor outliving the wait timeout (nothing touched), a new build that dies on arrival (rollback + the old build relaunched) |
 | `scripts/selfupdate_test_sftp_server.py` | read-only paramiko SFTP server with password login, for the live test and the CI matrix |
+| `scripts/selfupdate_live_ci_check.py` | the CI-side orchestrator (Thema 186 Schritt 4): writes a one-build manifest+artifact fixture, starts the server above with a generated password, points `HE_SELFUPDATE_*` at it and runs `ctest -R ^test_selfupdate$` |
 | `HE::Log::Cat::SelfUpdate` | log category (`HE_LOG=SelfUpdate=Debug`) |
 
 Windows export rule (see the `HE_API` rules in the Windows CI notes): the DLL
@@ -378,17 +378,84 @@ without) a real server.
 * **The known gap above** (a rename blocked for the whole retry window) has no
   test; it needs a platform-specific way to hold a directory-internal file
   handle open without `FILE_SHARE_DELETE` for the duration.
-* **Step 4 (CI):** the matrix is `.github/workflows/ci.yml` — **not**
-  `claude.yml`, which is only the `@claude` comment bot. `ci.yml` already runs
-  `ctest`, so `test_selfupdate` and `test_selfupdate_apply` run on all three
-  platforms as soon as this lands; the live leg needs `pip install paramiko`,
-  the server script above and a platform-matching artifact. On Windows,
-  `he_tests` now needs `HorizonSelfUpdate.dll` and `HorizonContentSync.dll`
-  beside it (copied in `tests/CMakeLists.txt`), and `he_fake_editor.exe` /
-  `HorizonUpdater.exe` are built as their own targets the test discovers via
-  `$<TARGET_FILE:...>` — no extra CI step needed for those two, `ctest`
-  alone exercises them. `ci.yml`'s `concurrency: ci-<branch>,
-  cancel-in-progress` applies: finish before the one push.
+* **Step 4 (CI) — done.** The matrix is `.github/workflows/ci.yml` — **not**
+  `claude.yml`, which is only the `@claude` comment bot. `ci.yml` already ran
+  `ctest`, so `test_selfupdate` and `test_selfupdate_apply` (the offline cases)
+  were already exercised on all three platforms before this step; what it adds
+  is the one thing that was not covered yet — the two cases gated behind
+  `HE_SELFUPDATE_LIVE_TEST=1`, a real `SftpClient`/libssh2 session against a
+  real server, plus a check that the takeover helper actually ships.
+
+  Two new steps, right after "Run tests" in the `build-and-test` matrix job
+  (not the `vulkan-lavapipe` job — it never builds `he_tests`), one per shell
+  because NN-WS03 (self-hosted Windows) is not guaranteed a `bash` (`ci.yml`
+  says so twice already, at the Vulkan-assert and compiler-cache steps): a
+  `shell: pwsh` step for `runner.os == 'Windows'` and a `shell: bash` step for
+  everything else, both gated on `steps.build.outcome == 'success'` (the
+  `Build` step now has `id: build`) so a build failure shows up once, not a
+  second time as a confusing "executable not found". Each installs `paramiko`
+  with `pip install --target` into `runner.temp` — not the ambient
+  interpreter, which on NN-WS03 is shared with up to eight other bees and
+  would race any other install happening at the same moment — then runs
+  `scripts/selfupdate_live_ci_check.py --build-dir build`, which:
+  1. writes a one-build manifest + artifact fixture for whichever platform the
+     job is;
+  2. starts `scripts/selfupdate_test_sftp_server.py` as a throwaway, read-only
+     account on 127.0.0.1 with a password generated on the fly (never written
+     to a file, never printed) — no secret involved, so this runs on every PR,
+     forks included, unlike the real update account (still open, "Open
+     decisions" #4);
+  3. runs `ctest -R ^test_selfupdate$ -V --no-tests=error` against it and
+     parses doctest's own `test cases: N | M passed | F failed | S skipped`
+     summary out of the captured output, failing unless `S` is `0`. This is
+     not redundant with ctest's exit code: a `doctest::skip(...)`-gated case
+     that never actually ran because the live-test environment did not reach
+     the child process is itself a ctest PASS, which would otherwise let a
+     wiring regression report green while proving nothing.
+
+  Then, right before/after the three platforms' packaging steps: "Check
+  HorizonUpdater is deployed beside the editor" (Windows, Linux — checks the
+  raw `package/Editor/HorizonUpdater[.exe]`, since `he_deploy_dll` puts it
+  there as part of the ordinary build, not a packaging step that could drop
+  it) and "Check HorizonUpdater is inside the macOS package (DMG)" (mounts the
+  real `.dmg` read-only, the same way `SelfUpdateInstall.cpp` extracts one on
+  a user's machine, and looks in `Contents/MacOS`) — macOS is the one platform
+  where this can actually go missing, because `package_macos.sh` only *warns*
+  and keeps going when `HorizonUpdater` isn't where it expects it (see the
+  kontext lesson on this file), on purpose, so a self-update regression there
+  does not block every other DMG build; this CI check is what turns that warn
+  into a hard failure.
+
+  **Trap found building this, now fixed:** the `python3`-then-`python`
+  fallback other `shell: bash` steps use (`command -v python3 || command -v
+  python`) is not reliable on a plain Windows PC — NN-WS03 included.
+  `command -v python3` resolves to the Windows "App execution alias" stub
+  (`%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe`), which exists as a file
+  (so `command -v` accepts it) but exits 49 with a Microsoft-Store nag the
+  moment it is actually run — `python` (the real interpreter) is never
+  reached. The existing fallback in the "Build the two app runtimes" step
+  never hit this because it is push-only, and on Windows a push always routes
+  to the hosted `windows-latest` runner, never to NN-WS03. The fix ended up
+  being the OS split above, not a cleverer fallback: the `pwsh` branch tries
+  `python` *before* `python3` (same order as the existing ".heproj
+  registration (Windows)" step), which the stub never shadows; the `bash`
+  branch keeps the ordinary `python3`-first order, correct on macOS/Linux,
+  which have no such stub. See the Hive lessons on this topic (one superseded
+  by a correction) for the reproduction and the wrong first fix.
+
+  **Local verification for this step** (no engine build available/affordable
+  here): `scripts/selfupdate_live_ci_check.py`'s own logic — fixture creation,
+  the server round trip, the thread-backed `wait_for_ready` (including its
+  timeout path against a process that never prints), and the doctest
+  skip-count parser (including the "`10 skipped`" vs. "`0 skipped`" substring
+  trap) — was smoke-tested directly against a real
+  `scripts/selfupdate_test_sftp_server.py` process and a real `paramiko` SFTP
+  client. The `ctest`-running half is the existing, already-proven `ctest
+  --test-dir build` call with a `-R` filter, `-V` and extra environment added
+  — not independently re-verified end-to-end locally; that is what the pushed
+  branch's CI run now proves on real Windows/macOS/Linux runners (step 5 is
+  where a human-visible verdict on that run belongs). The two "HorizonUpdater
+  shipped" checks are untested against a real package/DMG for the same reason.
 * **A Debug build of `he_tests` on Windows currently fails** regardless of this
   topic: `src/HE_Rendering/src/material/MaterialShaderLibrary.cpp:469` and
   `:755` hit MSVC's string-literal length limit (C2026) in a `Debug`
