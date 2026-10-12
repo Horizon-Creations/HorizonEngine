@@ -53,7 +53,7 @@ namespace
         Empty, Cube,
         CameraThirdPerson, CameraFirstPerson, CameraPlain,
         LightDirectional, LightPoint, LightSpot,
-        Rope, Trail,
+        Rope, Trail, Lake,
     };
 
     Entity createPreset(HorizonWorld& world, Preset p)
@@ -70,6 +70,7 @@ namespace
             case Preset::LightSpot:         name = "Spot Light";        break;
             case Preset::Rope:              name = "Rope";              break;
             case Preset::Trail:             name = "Trail";             break;
+            case Preset::Lake:              name = "Lake";              break;
             default:                                                    break;
         }
 
@@ -121,6 +122,43 @@ namespace
             // one at all.
             case Preset::Rope:  world.addComponent(e, RopeComponent{});  break;
             case Preset::Trail: world.addComponent(e, TrailComponent{}); break;
+            // A lake spawns as a closed spline with an example ring (a ring, not
+            // a rect: the spline's Catmull-Rom bulges past a rectangle's corners,
+            // see WaterLake.h's lake::reshape tests) a few metres across, so there
+            // is a shape to see and edit the moment it is made — same idea as
+            // Rope's default control points.
+            case Preset::Lake:
+            {
+                SplineComponent sc;
+                sc.closed = true;
+                constexpr int   kPoints = 16;
+                constexpr float kRadius = 5.0f;
+                sc.controlPoints.reserve(kPoints);
+                for (int i = 0; i < kPoints; ++i)
+                {
+                    const float a = 6.2831853f * static_cast<float>(i) / static_cast<float>(kPoints);
+                    sc.controlPoints.emplace_back(kRadius * std::cos(a), 0.0f, kRadius * std::sin(a));
+                }
+                world.addComponent(e, std::move(sc));
+
+                // Not yet a lake — no water, no dig: that stays the "Create
+                // Lake" button's job (one click, in the Spline panel, once the
+                // ring sits where it should; WaterLake.h: "Create Lake" is the
+                // ground AND the water together, one undo step). Doing it here
+                // instead would dig under wherever identity-local happens to
+                // land BEFORE a caller like "Create Child" reparents the fresh
+                // entity a second time (OutlinerPanel.cpp's own Create-Child
+                // menu does exactly that right after this returns) — the dig
+                // would be left behind at the wrong spot.
+                //
+                // What IS safe to do here: group it under a landscape instead of
+                // leaving one more loose name at the Outliner root — part of
+                // Thema 174 Schritt 14's "not a flat list" ask. Parenting alone
+                // has nothing to misalign; a second reparent just moves the
+                // still-bare spline again, same as any other preset.
+                for (auto te : world.registry().view<TerrainComponent>()) { world.reparentEntity(e, te); break; }
+                break;
+            }
             default: break;
         }
         return e;
@@ -158,6 +196,7 @@ namespace
         ImGui::Separator();
         item("Rope",  Preset::Rope);
         item("Trail", Preset::Trail);
+        item("Lake",  Preset::Lake);
         return picked;
     }
 
@@ -1869,6 +1908,7 @@ static const struct { EntityPresetRow row; Preset preset; } kPresetTable[] = {
     { { "Spot",           "Light"  }, Preset::LightSpot         },
     { { "Rope",           ""       }, Preset::Rope              },
     { { "Trail",          ""       }, Preset::Trail             },
+    { { "Lake",           ""       }, Preset::Lake              },
 };
 
 const EntityPresetRow* entityPresetTable(int& outCount)

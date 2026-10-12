@@ -173,6 +173,99 @@ namespace
             h = hashBytes(h, sc.controlPoints.data(), sc.controlPoints.size() * sizeof(glm::vec3));
         return h == 0 ? 1 : h;    // 0 is "not looked at yet"
     }
+
+    // The two world matrices alone, none of the control points: changes exactly
+    // when the spline ENTITY (or its parent, or the terrain) moves, not when a
+    // point is edited in place — fingerprint() above cannot tell those apart,
+    // which is why the ground move needs its own key (Body::transformKey).
+    uint64_t transformFingerprint(HorizonWorld& world, Entity spline, Entity terrain)
+    {
+        uint64_t h = 1469598103934665603ull;
+        const glm::mat4 a = HE::worldMatrixOf(world, spline);
+        const glm::mat4 b = HE::worldMatrixOf(world, terrain);
+        h = hashBytes(h, &a, sizeof(a));
+        h = hashBytes(h, &b, sizeof(b));
+        return h == 0 ? 1 : h;
+    }
+
+    // ── Digging a lake's bed, with a patch to undo it later ──────────────────
+    struct DigOutcome { TerrainSculpt::Result result; GroundPatch patch; };
+
+    // The Floor-mode excavation "Create Lake" and "Dig Again" both do, wrapped to
+    // also return the GROUND PATCH it made: a snapshot of the whole height grid
+    // is taken first (an editor action that digs already rebuilds every touched
+    // chunk, so this is not where the cost comes from), the dig runs exactly as
+    // before, then the two are diffed down to the smallest rectangle that
+    // changed. That sidesteps re-deriving excavatePolygon's own reach formula
+    // (bank/falloff/onEdge) here — whatever it actually touched is what the diff
+    // finds, however the formula reads on a given day.
+    DigOutcome digFloorWithPatch(TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
+                                 float level, float depth, float bank)
+    {
+        DigOutcome out;
+        TerrainSculpt::ensureHeights(tc);
+        const std::vector<float> before = tc.sculptHeights;
+
+        TerrainSculpt::ExcavateParams ep;
+        ep.mode       = TerrainSculpt::ExcavateMode::Floor;
+        ep.amount     = level - std::max(0.0f, depth);
+        ep.falloff    = ep.bankIn = std::max(0.0f, bank);
+        ep.edgeHeight = level;
+        out.result = TerrainSculpt::excavatePolygon(tc, polygon, ep);
+        if (!out.result.ok || out.result.changed == 0 || before.size() != tc.sculptHeights.size())
+            return out;
+
+        const int res = static_cast<int>(tc.resolution);
+        int x0 = res, x1 = -1, z0 = res, z1 = -1;
+        for (int zi = 0; zi < res; ++zi)
+            for (int xi = 0; xi < res; ++xi)
+            {
+                const size_t i = static_cast<size_t>(zi) * res + xi;
+                if (tc.sculptHeights[i] == before[i]) continue;
+                x0 = std::min(x0, xi); x1 = std::max(x1, xi);
+                z0 = std::min(z0, zi); z1 = std::max(z1, zi);
+            }
+        if (x1 < x0) return out;    // changed > 0 said otherwise; be defensive anyway
+
+        out.patch.res = tc.resolution;
+        out.patch.x0 = x0; out.patch.z0 = z0;
+        out.patch.w  = x1 - x0 + 1; out.patch.h = z1 - z0 + 1;
+        out.patch.delta.resize(static_cast<size_t>(out.patch.w) * out.patch.h);
+        for (int zi = z0; zi <= z1; ++zi)
+            for (int xi = x0; xi <= x1; ++xi)
+            {
+                const size_t i = static_cast<size_t>(zi) * res + xi;
+                out.patch.delta[static_cast<size_t>(zi - z0) * out.patch.w + (xi - x0)] = tc.sculptHeights[i] - before[i];
+            }
+        return out;
+    }
+
+    // Lifts a previously recorded patch back off the ground: subtracts the dig's
+    // own delta from whatever is at those vertices NOW, so a sculpt or brush edit
+    // made to the bank afterwards survives (it is additive, not a restore to the
+    // pre-dig snapshot). A resolution change since the dig (setResolution, a
+    // resample) invalidates the patch outright — nothing safe to subtract from a
+    // grid that is not the one it was measured on.
+    void restorePatch(TerrainComponent& tc, const GroundPatch& patch)
+    {
+        if (patch.delta.empty() || patch.res != tc.resolution) return;
+        const int res = static_cast<int>(tc.resolution);
+        if (tc.sculptHeights.size() != static_cast<size_t>(res) * res) return;
+        for (int zi = patch.z0; zi < patch.z0 + patch.h; ++zi)
+            for (int xi = patch.x0; xi < patch.x0 + patch.w; ++xi)
+            {
+                const float d = patch.delta[static_cast<size_t>(zi - patch.z0) * patch.w + (xi - patch.x0)];
+                if (d != 0.0f) tc.sculptHeights[static_cast<size_t>(zi) * res + xi] -= d;
+            }
+        const float halfX = tc.sizeX * 0.5f, halfZ = tc.sizeZ * 0.5f;
+        const float stepX = tc.sizeX / static_cast<float>(std::max(1, res - 1));
+        const float stepZ = tc.sizeZ / static_cast<float>(std::max(1, res - 1));
+        TerrainSculpt::markRegionDirty(tc,
+            -halfX + static_cast<float>(patch.x0) * stepX - stepX,
+            -halfZ + static_cast<float>(patch.z0) * stepZ - stepZ,
+            -halfX + static_cast<float>(patch.x0 + patch.w - 1) * stepX + stepX,
+            -halfZ + static_cast<float>(patch.z0 + patch.h - 1) * stepZ + stepZ);
+    }
 }
 
 float polylineTolerance(const TerrainComponent& tc)
@@ -302,18 +395,20 @@ uint16_t create(TerrainComponent& tc, const HE::UUID& spline, const std::vector<
 
 TerrainSculpt::Result dig(TerrainComponent& tc, uint16_t id, float depth, float bank)
 {
-    const Body* b = tc.water.findBody(id);
+    Body* b = tc.water.findBody(id);
     if (!b || b->polygon.size() < 3 || !finite(depth) || !finite(bank)) return {};
-    TerrainSculpt::ExcavateParams ep;
-    ep.mode       = TerrainSculpt::ExcavateMode::Floor;
-    ep.amount     = b->level - std::max(0.0f, depth);
     // bankIn > 0 makes the outward bank (falloff) target edgeHeight instead of
     // amount, so both sides of the outline meet at the water's level, not a
-    // cliff — see ExcavateParams::bankIn.
-    ep.falloff    = std::max(0.0f, bank);
-    ep.bankIn     = std::max(0.0f, bank);
-    ep.edgeHeight = b->level;
-    return TerrainSculpt::excavatePolygon(tc, b->polygon, ep);
+    // cliff — see ExcavateParams::bankIn. digFloorWithPatch also records the
+    // ground patch and the depth/bank used, for a later move to repeat.
+    const DigOutcome dug = digFloorWithPatch(tc, b->polygon, b->level, depth, bank);
+    if (dug.result.ok)
+    {
+        b->groundPatch = dug.patch;
+        b->dugDepth = depth;
+        b->dugBank = bank;
+    }
+    return dug.result;
 }
 
 bool detach(TerrainComponent& tc, uint16_t id)
@@ -323,6 +418,9 @@ bool detach(TerrainComponent& tc, uint16_t id)
     b->sourceSpline = HE::UUID{};
     b->polygon.clear();
     b->syncKey = 0;
+    b->groundPatch = GroundPatch{};
+    b->dugDepth = b->dugBank = 0.0f;
+    b->transformKey = 0;
     return true;
 }
 
@@ -485,20 +583,16 @@ Created apply(TerrainComponent& tc, const Plan& plan, const Params& p)
     Created out;
     out.error = plan.error;
     if (!out.error.empty()) return out;
+    GroundPatch patch;    // stays empty unless p.dig
     if (p.dig)
     {
-        TerrainSculpt::ExcavateParams ep;
-        ep.mode       = TerrainSculpt::ExcavateMode::Floor;
-        ep.amount     = plan.level - std::max(0.0f, p.depth);
         // bankIn > 0 makes the outward bank (falloff) target edgeHeight instead of
         // amount, so both sides of the outline meet at the water's level, not a
         // cliff — see ExcavateParams::bankIn.
-        ep.falloff    = std::max(0.0f, p.bank);
-        ep.bankIn     = std::max(0.0f, p.bank);
-        ep.edgeHeight = plan.level;
-        const TerrainSculpt::Result sr = TerrainSculpt::excavatePolygon(tc, plan.polygon, ep);
-        if (!sr.ok) { out.error = "The landscape could not be dug here."; return out; }
-        out.ground = sr.changed;
+        const DigOutcome dug = digFloorWithPatch(tc, plan.polygon, plan.level, p.depth, p.bank);
+        if (!dug.result.ok) { out.error = "The landscape could not be dug here."; return out; }
+        out.ground = dug.result.changed;
+        patch = dug.patch;
     }
     const uint16_t id = create(tc, plan.spline, plan.polygon, plan.level);
     if (id == kNoBody) { out.error = "The water could not be laid."; return out; }
@@ -506,6 +600,13 @@ Created apply(TerrainComponent& tc, const Plan& plan, const Params& p)
     out.body = id;
     out.level = plan.level;
     out.cells = tc.water.wetCells(id);
+    if (p.dig)
+        if (Body* b = tc.water.findBody(id))
+        {
+            b->groundPatch = patch;
+            b->dugDepth = p.depth;
+            b->dugBank = p.bank;
+        }
     return out;
 }
 
@@ -523,7 +624,10 @@ Created create(HorizonWorld& world, Entity terrain, Entity spline, const Params&
     const Created out = apply(tc, pl, p);
     if (out.ok)
         if (Body* b = tc.water.findBody(out.body))
+        {
             b->syncKey = fingerprint(world, spline, terrain, reg.get<SplineComponent>(spline));
+            b->transformKey = transformFingerprint(world, spline, terrain);
+        }
     return out;
 }
 
@@ -546,7 +650,12 @@ TerrainSculpt::Result dig(HorizonWorld& world, Entity spline, float depth, float
 {
     const Link l = linkOf(world, spline);
     if (l.body == kNoBody) return {};
-    return dig(world.registry().get<TerrainComponent>(l.terrain), l.body, depth, bank);
+    auto& tc = world.registry().get<TerrainComponent>(l.terrain);
+    const TerrainSculpt::Result r = dig(tc, l.body, depth, bank);
+    if (r.ok)
+        if (Body* b = tc.water.findBody(l.body))
+            b->transformKey = transformFingerprint(world, spline, l.terrain);
+    return r;
 }
 
 bool setLevel(HorizonWorld& world, Entity spline, float level)
@@ -632,12 +741,38 @@ uint32_t syncSplines(HorizonWorld& world)
             if (se == entt::null) continue;                     // its spline is gone: the water stays
             const auto& sc = reg.get<SplineComponent>(se);
             const uint64_t key = fingerprint(world, se, te, sc);
-            if (b.syncKey == 0 || b.syncKey == key) { b.syncKey = key; continue; }
+            if (b.syncKey == 0 || b.syncKey == key)
+            {
+                // First sight after a load or an undo (or truly nothing changed):
+                // only record the fingerprints, same reason as ever — neither
+                // reshapes nor re-digs anything that was already laid that way.
+                b.syncKey = key;
+                if (b.transformKey == 0) b.transformKey = transformFingerprint(world, se, te);
+                continue;
+            }
             b.syncKey = key;
             std::vector<glm::vec2> poly;
             if (!polygonOf(world, se, te, poly)) continue;     // not a closed shape right now: wait for one
-            if (poly == b.polygon) continue;
-            if (reshape(tc, b.id, poly).ok) ++reshaped;
+
+            // Apart from "did the outline change" (any edit, including a point
+            // drag), also ask "did the ENTITY'S transform change" — the only case
+            // that should move the bed too (see WaterLake.h, "WHAT EDITS TOUCH
+            // WHAT"). A lake with no ground patch of its own (never dug this
+            // session) only ever reshapes, same as before.
+            const uint64_t tkey = transformFingerprint(world, se, te);
+            const bool shapeChanged = poly != b.polygon;
+            const bool moved = !b.groundPatch.empty() && b.transformKey != 0 && b.transformKey != tkey;
+            if (!shapeChanged && !moved) continue;
+
+            if (shapeChanged)
+                if (reshape(tc, b.id, poly).ok) ++reshaped;
+            if (moved)
+            {
+                restorePatch(tc, b.groundPatch);
+                const DigOutcome dug = digFloorWithPatch(tc, b.polygon, b.level, b.dugDepth, b.dugBank);
+                b.groundPatch = dug.result.ok ? dug.patch : GroundPatch{};
+            }
+            b.transformKey = tkey;
         }
     return reshaped;
 }

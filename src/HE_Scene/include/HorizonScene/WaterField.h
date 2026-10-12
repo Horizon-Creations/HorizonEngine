@@ -76,6 +76,22 @@ namespace HE::water
     // scene file claiming more is damaged or hostile.
     inline constexpr size_t   kMaxPolygonPoints      = 65536;
 
+    // A patch of ground a lake's own dig last left (WaterLake.cpp: "Create Lake"
+    // and "Dig Again"), kept so a lake whose TRANSFORM moves can lift it off the
+    // old spot before digging a fresh one at the new one (Thema 174 Schritt 14:
+    // moving the lake's own entity moves the bed with it; moving a spline POINT
+    // still never touches the ground, see WaterLake.h). Runtime only, like
+    // syncKey: not serialised, so a lake seen for the first time after a load or
+    // an undo has nothing to move until it is next dug in that session.
+    struct GroundPatch
+    {
+        uint32_t res = 0;          // tc.resolution at dig time; a different one now invalidates the patch
+        int      x0 = 0, z0 = 0;   // vertex rect the dig actually changed, inclusive
+        int      w  = 0, h  = 0;
+        std::vector<float> delta; // w·h, row-major: height right after the dig minus right before it
+        bool empty() const { return delta.empty(); }
+    };
+
     struct Body
     {
         uint16_t id    = kNoBody;
@@ -93,6 +109,16 @@ namespace HE::water
         // line with. 0 = not looked at yet, so the first frame after a load or an
         // undo only records it and reshapes nothing.
         uint64_t syncKey = 0;
+        // Runtime, never serialised: the ground patch, dig depth and bank this
+        // lake's own excavation last used, and the fingerprint of just the
+        // spline+terrain world matrices (not the control points) it was dug at.
+        // syncSplines compares THIS against the current one to tell "the whole
+        // lake moved" apart from "a point was edited" — both change `syncKey`
+        // (which folds in the control points too), only the former must also
+        // move the bed.
+        GroundPatch groundPatch;
+        float    dugDepth = 0.0f, dugBank = 0.0f;
+        uint64_t transformKey = 0;
         bool     fromSpline() const { return sourceSpline != HE::UUID{}; }
     };
 

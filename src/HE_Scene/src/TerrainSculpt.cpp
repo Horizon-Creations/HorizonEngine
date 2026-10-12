@@ -12,6 +12,26 @@
 namespace TerrainSculpt
 {
 
+// Only the chunks under the rect have to be rebuilt. `dirty` is left alone:
+// setting it would rebuild all 64+ of them, which is the difference between a
+// brush and a regeneration. Public so a caller that edits sculptHeights
+// directly outside this file's own ops (WaterLake.cpp's ground-patch restore,
+// Thema 174 Schritt 14) can mark the same rect dirty the same way.
+void markRegionDirty(TerrainComponent& tc, float mnX, float mnZ, float mxX, float mxZ)
+{
+    if (tc.regionDirty)
+    {
+        tc.dirtyMinX = std::min(tc.dirtyMinX, mnX); tc.dirtyMaxX = std::max(tc.dirtyMaxX, mxX);
+        tc.dirtyMinZ = std::min(tc.dirtyMinZ, mnZ); tc.dirtyMaxZ = std::max(tc.dirtyMaxZ, mxZ);
+    }
+    else
+    {
+        tc.dirtyMinX = mnX; tc.dirtyMaxX = mxX;
+        tc.dirtyMinZ = mnZ; tc.dirtyMaxZ = mxZ;
+        tc.regionDirty = true;
+    }
+}
+
 namespace
 {
     // The same stable per-vertex hash the interactive Roughen brush uses: a value
@@ -24,24 +44,6 @@ namespace
         n ^= n >> 4u; n *= 0x27D4EB2Du; n ^= n >> 15u;
         return static_cast<float>(n & 0x00FFFFFFu)
              / static_cast<float>(0x01000000u) * 2.0f - 1.0f;
-    }
-
-    // Only the chunks under the rect have to be rebuilt. `dirty` is left alone:
-    // setting it would rebuild all 64+ of them, which is the difference between a
-    // brush and a regeneration.
-    void markRegionDirty(TerrainComponent& tc, float mnX, float mnZ, float mxX, float mxZ)
-    {
-        if (tc.regionDirty)
-        {
-            tc.dirtyMinX = std::min(tc.dirtyMinX, mnX); tc.dirtyMaxX = std::max(tc.dirtyMaxX, mxX);
-            tc.dirtyMinZ = std::min(tc.dirtyMinZ, mnZ); tc.dirtyMaxZ = std::max(tc.dirtyMaxZ, mxZ);
-        }
-        else
-        {
-            tc.dirtyMinX = mnX; tc.dirtyMaxX = mxX;
-            tc.dirtyMinZ = mnZ; tc.dirtyMaxZ = mxZ;
-            tc.regionDirty = true;
-        }
     }
 
     // Beyond any landscape; keeps the index arithmetic of excavatePolygon finite.

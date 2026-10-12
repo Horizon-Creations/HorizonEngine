@@ -91,6 +91,14 @@ namespace
 
     bool noWater(const TerrainComponent& tc) { return tc.water.bodies.empty() && tc.water.coverage.empty(); }
 
+    // A vertex of makeLand's grid (65 over 64 m, a vertex on every whole metre).
+    float sculptAt(const TerrainComponent& tc, float x, float z)
+    {
+        const int xi = static_cast<int>(std::lround(x + 32.0f));
+        const int zi = static_cast<int>(std::lround(z + 32.0f));
+        return tc.sculptHeights[static_cast<size_t>(zi) * 65u + static_cast<size_t>(xi)];
+    }
+
     // A stroke the way the Landscape tool makes it: begin, a dab at every step, end.
     brush::Stroke drag(TerrainComponent& tc, glm::vec2 a, glm::vec2 b, const brush::Params& p, int steps = 8)
     {
@@ -733,16 +741,59 @@ TEST_CASE("Water lake sync: moving a spline point reshapes the water, never the 
     CHECK(sameBits(rig.tc().sculptHeights, dug));
     CHECK_FALSE(rig.tc().regionDirty);
     CHECK(lake::syncSplines(rig.world) == 0u);                   // same fingerprint: nothing to do
+}
 
-    // Move the whole spline entity: the water follows.
+// Thema 174 Schritt 14: unlike a point edit, moving the lake's own ENTITY (what
+// the viewport gizmo does, or a reparent) is "the lake as a whole" and takes its
+// dug bed with it — see WaterLake.h, "WHAT EDITS TOUCH WHAT". Was, before this
+// schritt, indistinguishable from a point edit (both just reshaped the water),
+// which is the dry-ring-at-the-old-spot / cliff-at-the-new-one bug a human
+// report would read as "the lake tool digs too deep" all over again.
+TEST_CASE("Water lake sync: moving the whole spline entity moves the water AND the ground it dug")
+{
+    Rig rig;
+    const Entity sp = rig.addSpline(rect(-10, -10, 10, 10), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, flat(10.5f, 2.0f, true)).ok);
+    REQUIRE(lake::syncSplines(rig.world) == 0u);                 // nothing moved since create
+
+    const float bedBefore = sculptAt(rig.tc(), 0.0f, 0.0f);      // deep inside the outline: the floor, 10.5 - 2
+    CHECK(bedBefore < 9.0f);
+
     rig.world.registry().get<TransformComponent>(sp).position.z += 8.0f;
-    CHECK(lake::syncSplines(rig.world) == 1u);
+    CHECK(lake::syncSplines(rig.world) == 1u);                   // the water reshape, same count as a point edit
     CHECK(wetAt(rig.tc(), 0.5f, 16.5f));
     CHECK_FALSE(wetAt(rig.tc(), 0.5f, -9.5f));
 
-    // Dig Again is what digs under the new place.
-    CHECK(lake::dig(rig.world, sp, 2.0f, 3.0f).changed > 0u);
-    CHECK_FALSE(sameBits(rig.tc().sculptHeights, dug));
+    // The old bed is lifted back off (its own dig's delta subtracted back out,
+    // not a bit-exact restore — see GroundPatch), and a fresh one dug at the new
+    // spot, the same depth and bank the original "Create Lake" used.
+    CHECK(sculptAt(rig.tc(), 0.0f, 0.0f) > 9.5f);
+    CHECK(sculptAt(rig.tc(), 0.0f, 8.0f) < 9.0f);
+
+    // Dig Again still works at the new place, same as ever, an explicit action
+    // with its own bank.
+    const std::vector<float> afterMove = rig.tc().sculptHeights;
+    CHECK(lake::dig(rig.world, sp, 2.0f, 1.0f).changed > 0u);
+    CHECK_FALSE(sameBits(rig.tc().sculptHeights, afterMove));
+}
+
+// A lake with no ground patch of its own (never dug in this session: loaded from
+// a scene, or converted from a painted pond) has nothing to lift off the old
+// spot, so moving it only reshapes the water — same as a point edit, and the
+// only thing the old behaviour ever did. Not a loss: the ground for a body like
+// this was never this lake's to move in the first place.
+TEST_CASE("Water lake sync: moving a lake with no ground patch of its own only reshapes")
+{
+    Rig rig;
+    const Entity sp = rig.addSpline(rect(-10, -10, 10, 10), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, flat(10.5f)).ok);   // dig = false
+    REQUIRE(lake::syncSplines(rig.world) == 0u);
+    const std::vector<float> ground = rig.tc().sculptHeights;
+
+    rig.world.registry().get<TransformComponent>(sp).position.z += 8.0f;
+    CHECK(lake::syncSplines(rig.world) == 1u);
+    CHECK(wetAt(rig.tc(), 0.5f, 16.5f));
+    CHECK(sameBits(rig.tc().sculptHeights, ground));
 }
 
 TEST_CASE("Water lake sync: the landscape moving under a still spline reshapes the water")

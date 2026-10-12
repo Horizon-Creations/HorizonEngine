@@ -1701,9 +1701,26 @@ void renderPanel(AppContext& ctx)
                     {
                         ImGui::PushID(static_cast<int>(b.id));
                         const Entity sp = b.fromSpline() ? ctx.world->findByEntityId(b.sourceSpline) : entt::null;
-                        const char* kind = !b.fromSpline() ? "Pond" : (sp != entt::null ? "Lake" : "Lake, spline gone");
-                        ImGui::Text("%s %u: level %.2f m, %u cells", kind, static_cast<unsigned>(b.id), b.level,
-                                    tc.water.wetCells(b.id));
+                        // Several lakes on one landscape used to all read "Lake 1",
+                        // "Lake 2", ... — a numbered body id, nothing a human ever
+                        // named. A lake spawned as its own actor (or renamed in the
+                        // Outliner) has a NameComponent on its spline; show that
+                        // instead, so this row reads as ITS lake, not a slot in an
+                        // anonymous list (Thema 174 Schritt 14's "not a flat list").
+                        char label[96];
+                        if (!b.fromSpline())
+                            std::snprintf(label, sizeof label, "Pond %u", static_cast<unsigned>(b.id));
+                        else if (sp == entt::null)
+                            std::snprintf(label, sizeof label, "Lake %u, spline gone", static_cast<unsigned>(b.id));
+                        else
+                        {
+                            const auto* n = ctx.world->registry().try_get<NameComponent>(sp);
+                            if (n && !n->name.empty())
+                                std::snprintf(label, sizeof label, "%s", n->name.c_str());
+                            else
+                                std::snprintf(label, sizeof label, "Lake %u", static_cast<unsigned>(b.id));
+                        }
+                        ImGui::Text("%s: level %.2f m, %u cells", label, b.level, tc.water.wetCells(b.id));
                         if (!b.fromSpline())
                         {
                             if (EditorWidgets::button("To Lake"))

@@ -33,10 +33,27 @@ struct TerrainComponent;
 // ── WHAT EDITS TOUCH WHAT ────────────────────────────────────────────────────
 //   Moving a spline point        the WATER only (reshape). Never the ground: a
 //                                bank dug once stays where it was dug.
+//   Moving the spline ENTITY'S   the water (reshape) AND, if this lake has a
+//   transform (the gizmo, or                        ground patch of its own
+//   its parent's)                                    (Body::groundPatch, left by
+//                                a dig in this session), the ground too: the old
+//                                bed is lifted (syncSplines' saved delta,
+//                                subtracted back off whatever is there now) and a
+//                                fresh one dug at the new spot with the same
+//                                depth/bank. A lake with no patch to lift (never
+//                                dug this session — loaded, or a converted pond)
+//                                only reshapes, same as a point edit, Schritt 14's
+//                                one known gap (see Body::groundPatch). This is
+//                                what makes "move the lake as a whole" (Thema 174
+//                                Schritt 14) work with the ordinary entity gizmo:
+//                                no bespoke "whole lake" gizmo needed.
 //   "Create Lake"                the ground (excavatePolygon, Floor mode) AND the
 //                                water, in one call, one undo step for the caller.
+//                                Records the ground patch and the dig's depth/bank
+//                                for a later move to repeat.
 //   "Dig Again"                  the ground only, from the lake's current outline,
-//                                on an explicit action and nothing else.
+//                                on an explicit action and nothing else. Also
+//                                records a fresh ground patch.
 //   Changing the level           the water only (water::setLevel).
 //   Shore clipping              a landscape-wide setting (Field::clipToGround), not
 //                                per lake: the Lake panel shows it, it is not a
@@ -248,8 +265,11 @@ namespace HE::water::lake
     Converted convertBody(HorizonWorld& world, Entity terrain, uint16_t body, const std::string& name = "Lake");
 
     // The per-frame hook (TerrainSystem::updateTerrains, before the surfaces are
-    // rebuilt): every lake whose spline moved since the last call is reshaped. A
-    // lake seen for the first time only records the spline's fingerprint, so a
-    // load or an undo reshapes nothing. Returns how many lakes were reshaped.
+    // rebuilt): every lake whose spline moved since the last call is reshaped,
+    // and, if its ENTITY'S transform (not just a point) moved and it has a ground
+    // patch of its own, re-dug at the new spot (see "WHAT EDITS TOUCH WHAT"
+    // above). A lake seen for the first time only records the fingerprints, so a
+    // load or an undo reshapes and re-digs nothing. Returns how many lakes were
+    // reshaped (a move that only re-dug, polygon unchanged, is not counted here).
     uint32_t syncSplines(HorizonWorld& world);
 }

@@ -58,6 +58,13 @@ namespace TerrainSculpt
     // longer be the vertex it read back.
     void ensureHeights(TerrainComponent& tc);
 
+    // Widen TerrainComponent's region-dirty rect (terrain-local XZ) to cover
+    // [mnX, mxX] × [mnZ, mxZ], same merge as every op in this file. For a caller
+    // that edits sculptHeights directly, outside apply/lowerToFloor/excavatePolygon
+    // (WaterLake.cpp's ground-patch restore, moving a lake's own dig when its
+    // transform moves: see WaterLake.h).
+    void markRegionDirty(TerrainComponent& tc, float mnX, float mnZ, float mxX, float mxZ);
+
     struct Result
     {
         bool     ok       = false;   // false = the arguments could not be applied
