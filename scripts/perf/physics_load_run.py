@@ -67,14 +67,16 @@ def main():
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--probe", default="/tmp/he178/thread_cpu_probe.dylib")
     ap.add_argument("--label", default="")
+    ap.add_argument("--scene-args", default="", help="more arguments for physics_load_scene.py, e.g. '--no-lake --densities 500' (layout lake)")
+    ap.add_argument("--tag", default="", help="suffix for the game dir name, so two variants of one layout do not overwrite each other")
     ap.add_argument("--reanalyze", action="store_true", help="skip building and running, read the dump and thread TSV already in the game dir")
     a = ap.parse_args()
 
-    out = a.workdir / f"g_{a.layout}{a.bodies}c{a.characters}"
+    out = a.workdir / f"g_{a.layout}{a.bodies}c{a.characters}{a.tag}"
     load0, wall = os.getloadavg()[0], 0.0
     if not a.reanalyze:
         subprocess.run([sys.executable, str(HERE / "physics_load_scene.py"), "--runtime", str(a.runtime), "--out", str(out),
-                        "--layout", a.layout, "--bodies", str(a.bodies), "--characters", str(a.characters)],
+                        "--layout", a.layout, "--bodies", str(a.bodies), "--characters", str(a.characters)] + a.scene_args.split(),
                        check=True, stdout=subprocess.DEVNULL)
         env = dict(os.environ, HE_PROFILE_CAPTURE=str(a.frames), HE_PROFILE_WARMUP=str(a.warmup), HE_PROFILE_COUNTERS="0",
                    HE_HIDDEN_WINDOW="1", HE_THREAD_PROBE_OUT=str(out / "threads.tsv"), DYLD_INSERT_LIBRARIES=a.probe,
