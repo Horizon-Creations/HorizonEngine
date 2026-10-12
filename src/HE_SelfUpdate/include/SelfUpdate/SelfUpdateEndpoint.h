@@ -2,7 +2,8 @@
 
 // ─── The self-update SFTP account — a SECOND one, and a separate one ──────────
 // HorizonContentSync reaches its server with one account, compiled in at build
-// time (ContentSync/SftpCredentials.h). The self-update does NOT share it:
+// time (ContentSync/SftpCredentials.h). The self-update has its own, compiled in
+// the same way, and does NOT share that one:
 //
 //   * What the account can reach differs. The EngineContent account is scoped to
 //     the asset library; this one is scoped to the directory holding editor
@@ -15,17 +16,25 @@
 //
 // Hence the rules this header enforces:
 //
-//   1. The values come from the process ENVIRONMENT at run time, never from a
-//      compile definition and never from a tracked file (this repository is
-//      public). A packaged editor that should update by itself on a user's
-//      machine needs a delivery decision for that — see the design doc.
+//   1. The values come from exactly two places, never from a tracked file (this
+//      repository is public):
+//        a. the process ENVIRONMENT at run time — when any of HE_SELFUPDATE_HOST,
+//           _USER, _PASSWORD, _PORT or _BASEPATH is set, the environment IS the
+//           account, and nothing of the compiled-in one is mixed in (a password
+//           baked into the binary must never be sent to a host someone named in
+//           the environment);
+//        b. otherwise the account COMPILED IN at build time
+//           (builtInSelfUpdateEndpoint(): cmake/SelfUpdateCredentials.cmake or
+//           CI secrets, see src/HE_SelfUpdate/CMakeLists.txt). This is what an
+//           installed editor uses, so it has to be a READ-ONLY login.
+//      HE_SELFUPDATE_CHANNEL is read from the environment in both cases.
 //   2. Nothing here ever reads HE::Cs::engineContentEndpoint() as a SOURCE of
-//      values. It is read only to refuse the case where the self-update variables
-//      were pointed at the very same account as the EngineContent one.
+//      values. It is read only to refuse the case where the self-update account
+//      (from either place) is the very same login as the EngineContent one.
 //   3. The password is scrubbed out of every error text this module returns or
 //      logs (HE::Cs::detail::scrub only knows the EngineContent password).
 //
-// Environment variables:
+// Environment variables (also the CMake names of the compiled-in account):
 //   HE_SELFUPDATE_HOST       required. SFTP host name.
 //   HE_SELFUPDATE_USER       required. SFTP user name.
 //   HE_SELFUPDATE_PASSWORD   required. Password auth only (SftpClient's limit).
@@ -64,14 +73,23 @@ using EnvLookup = std::function<const char*(const char*)>;
 
 enum class ConfigState
 {
-	NotSet,    // none of the HE_SELFUPDATE_* variables is set: the feature is simply off
-	Invalid,   // some are set but the result is unusable — `problem` says why
+	NotSet,    // no account compiled in and none of HE_SELFUPDATE_* set: the feature is simply off
+	Invalid,   // an account is there but unusable — `problem` says why
 	Ready,     // `endpoint` is complete and not the EngineContent account
+};
+
+// Where the account in a SelfUpdateConfig came from (rule 1).
+enum class ConfigSource
+{
+	None,          // NotSet
+	Environment,   // HE_SELFUPDATE_* at run time
+	BuiltIn,       // compiled in at build time
 };
 
 struct HE_SU_API SelfUpdateConfig   // manifestRemotePath() lives in the .cpp, so the type is exported
 {
 	ConfigState          state = ConfigState::NotSet;
+	ConfigSource         source = ConfigSource::None;
 	HE::Cs::SftpEndpoint endpoint;
 	std::string          channel = kDefaultChannel;
 	std::string          problem;   // empty unless state == Invalid
@@ -83,8 +101,17 @@ struct HE_SU_API SelfUpdateConfig   // manifestRemotePath() lives in the .cpp, s
 	std::string manifestRemotePath() const;
 };
 
-// Reads HE_SELFUPDATE_* through `env` (std::getenv when empty).
+// The account compiled into this build; host/user/password empty when none was
+// supplied at configure time. Read only through loadSelfUpdateConfig().
+HE_SU_API const HE::Cs::SftpEndpoint& builtInSelfUpdateEndpoint();
+
+// Rule 1: HE_SELFUPDATE_* through `env` (std::getenv when empty) when any account
+// variable is set there, otherwise builtInSelfUpdateEndpoint().
 HE_SU_API SelfUpdateConfig loadSelfUpdateConfig(const EnvLookup& env = {});
+
+// The same with the compiled-in account handed in — a test passes an empty one
+// so that its result does not depend on what the build it runs in carries.
+HE_SU_API SelfUpdateConfig loadSelfUpdateConfig(const EnvLookup& env, const HE::Cs::SftpEndpoint& builtIn);
 
 // True when both name the same login on the same server (host compared without
 // regard to case) — the situation rule 2 above refuses. Two unconfigured

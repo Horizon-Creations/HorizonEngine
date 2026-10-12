@@ -286,17 +286,23 @@ TEST_CASE("selfupdate: the safe-path rule")
 
 TEST_CASE("selfupdate: the account comes from HE_SELFUPDATE_* and nothing else")
 {
+	// The cases that expect "off" hand in an empty compiled-in account: a build
+	// configured with one (CI with the SELFUPDATE_* secrets, a developer's
+	// cmake/SelfUpdateCredentials.cmake) would otherwise be Ready here.
+	const HE::Cs::SftpEndpoint noBuiltIn;
+
 	SUBCASE("nothing set means the feature is simply off")
 	{
-		const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv({}));
+		const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv({}), noBuiltIn);
 		CHECK(c.state == ConfigState::NotSet);
+		CHECK(c.source == ConfigSource::None);
 		CHECK_FALSE(c.ready());
 		CHECK(c.problem.empty());
 		CHECK_FALSE(c.endpoint.configured());
 	}
 	SUBCASE("a channel alone does not switch it on")
 	{
-		CHECK(loadSelfUpdateConfig(mapEnv({ { kEnvChannel, "beta" } })).state == ConfigState::NotSet);
+		CHECK(loadSelfUpdateConfig(mapEnv({ { kEnvChannel, "beta" } }), noBuiltIn).state == ConfigState::NotSet);
 	}
 	SUBCASE("the EngineContent variables are not a source for this account")
 	{
@@ -304,7 +310,8 @@ TEST_CASE("selfupdate: the account comes from HE_SELFUPDATE_* and nothing else")
 		// names are the nearest thing to confuse: setting them must not light this up.
 		const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv({ { "HE_ENGINE_CONTENT_HOST", "files.example.org" },
 		                                                          { "HE_ENGINE_CONTENT_USER", "content" },
-		                                                          { "HE_ENGINE_CONTENT_PASSWORD", "pw" } }));
+		                                                          { "HE_ENGINE_CONTENT_PASSWORD", "pw" } }),
+		                                                noBuiltIn);
 		CHECK(c.state == ConfigState::NotSet);
 		CHECK_FALSE(c.endpoint.configured());
 	}
@@ -355,6 +362,95 @@ TEST_CASE("selfupdate: the account comes from HE_SELFUPDATE_* and nothing else")
 			vars[kEnvChannel] = channel;
 			CHECK_MESSAGE(loadSelfUpdateConfig(mapEnv(vars)).state == ConfigState::Invalid, "channel '", channel, "'");
 		}
+	}
+}
+
+TEST_CASE("selfupdate: the compiled-in account, and the environment replacing it as a whole")
+{
+	HE::Cs::SftpEndpoint baked;
+	baked.host = "updates.example.org"; baked.port = 2222; baked.username = "editor-ro";
+	baked.password = "baked-pw"; baked.remoteBasePath = "/srv/updates";
+
+	SUBCASE("with nothing in the environment the compiled-in account is used")
+	{
+		const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv({}), baked);
+		REQUIRE_MESSAGE(c.ready(), c.problem);
+		CHECK(c.source == ConfigSource::BuiltIn);
+		CHECK(c.endpoint.host == "updates.example.org");
+		CHECK(c.endpoint.port == 2222);
+		CHECK(c.endpoint.username == "editor-ro");
+		CHECK(c.endpoint.password == "baked-pw");
+		CHECK(c.endpoint.remoteBasePath == "/srv/updates");
+		CHECK(c.manifestRemotePath() == "packages/manifest.json");
+	}
+	SUBCASE("the channel still comes from the environment, and is still validated")
+	{
+		const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv({ { kEnvChannel, kPreviewChannel } }), baked);
+		REQUIRE(c.ready());
+		CHECK(c.source == ConfigSource::BuiltIn);
+		CHECK(c.manifestRemotePath() == "preview-packages/manifest.json");
+		CHECK(loadSelfUpdateConfig(mapEnv({ { kEnvChannel, "a/b" } }), baked).state == ConfigState::Invalid);
+	}
+	SUBCASE("a complete account in the environment wins")
+	{
+		const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv(
+			{ { kEnvHost, "127.0.0.1" }, { kEnvUser, "test" }, { kEnvPassword, "env-pw" } }), baked);
+		REQUIRE(c.ready());
+		CHECK(c.source == ConfigSource::Environment);
+		CHECK(c.endpoint.host == "127.0.0.1");
+		CHECK(c.endpoint.port == 22);                  // not the compiled-in 2222
+		CHECK(c.endpoint.password == "env-pw");
+		CHECK(c.endpoint.remoteBasePath.empty());      // not the compiled-in base path
+	}
+	SUBCASE("a partial environment is never topped up from the compiled-in account")
+	{
+		// Otherwise naming a host in the environment would send the baked password to it.
+		const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv({ { kEnvHost, "elsewhere.example.org" } }), baked);
+		CHECK(c.state == ConfigState::Invalid);
+		CHECK(c.source == ConfigSource::Environment);
+		CHECK(c.problem.find(kEnvPassword) != std::string::npos);
+		CHECK(c.problem.find("replaces the compiled-in one") != std::string::npos);
+		CHECK_FALSE(c.endpoint.configured());
+		CHECK(c.problem.find("baked-pw") == std::string::npos);
+
+		// HE_SELFUPDATE_PORT alone counts as naming an account, too.
+		CHECK(loadSelfUpdateConfig(mapEnv({ { kEnvPort, "22" } }), baked).state == ConfigState::Invalid);
+	}
+	SUBCASE("an incomplete compiled-in account says so")
+	{
+		HE::Cs::SftpEndpoint half = baked;
+		half.password.clear();
+		const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv({}), half);
+		CHECK(c.state == ConfigState::Invalid);
+		CHECK(c.source == ConfigSource::BuiltIn);
+		CHECK(c.problem.find("compiled into this build") != std::string::npos);
+		CHECK(c.problem.find(kEnvPassword) != std::string::npos);
+	}
+	SUBCASE("a compiled-in account that is the EngineContent login is refused like any other")
+	{
+		const HE::Cs::SftpEndpoint& content = HE::Cs::engineContentEndpoint();
+		if (content.configured())
+		{
+			HE::Cs::SftpEndpoint same = content;
+			same.password = "anything";
+			const SelfUpdateConfig c = loadSelfUpdateConfig(mapEnv({}), same);
+			CHECK(c.state == ConfigState::Invalid);
+			CHECK(c.problem.find("EngineContent") != std::string::npos);
+			CHECK_FALSE(c.endpoint.configured());
+		}
+		else
+		{
+			MESSAGE("no EngineContent account compiled into this build — nothing to collide with");
+		}
+	}
+	SUBCASE("this build's own compiled-in account, whatever it is, is what the one-argument form falls back to")
+	{
+		const SelfUpdateConfig viaDefault = loadSelfUpdateConfig(mapEnv({}));
+		const SelfUpdateConfig explicitly = loadSelfUpdateConfig(mapEnv({}), builtInSelfUpdateEndpoint());
+		CHECK(viaDefault.state == explicitly.state);
+		CHECK(viaDefault.source == explicitly.source);
+		CHECK(viaDefault.endpoint.host == explicitly.endpoint.host);
+		MESSAGE("compiled-in update account: ", builtInSelfUpdateEndpoint().host.empty() ? "none" : "present");
 	}
 }
 

@@ -250,7 +250,7 @@ CheckResult checkForUpdate(const SelfUpdateConfig& config, const LocalBuild& loc
 		result.localVersion = local.version;
 		result.platform     = local.platform;
 		result.error        = config.problem.empty()
-		                          ? std::string("self-update is not configured (HE_SELFUPDATE_* is not set)")
+		                          ? std::string("self-update is not configured (no update account compiled into this build, and HE_SELFUPDATE_* is not set)")
 		                          : config.problem;
 		return result;
 	}

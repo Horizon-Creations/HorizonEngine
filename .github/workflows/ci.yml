@@ -230,6 +230,12 @@ jobs:
       # out of CMakeCache.txt, and spares any quoting question about the password.
       # Unset secrets are simply empty: the build then reports "not configured" and
       # the Editor works as it did before the remote library existed.
+      # HE_SELFUPDATE_* is the same for the editor's self-update account, the
+      # second, READ-ONLY one (src/HE_SelfUpdate/CMakeLists.txt; secrets
+      # SELFUPDATE_HOST/USER/PASSWORD): compiled in, so a packaged editor can check
+      # for updates without anyone setting anything. Configure-time only — these
+      # step-level variables never reach "Run tests" or the self-update live leg,
+      # which points HE_SELFUPDATE_* at its own throwaway test server at run time.
       # macOS uses static mbedTLS for the same reason Linux and Windows do, and it
       # was the only one of the three that did not: libcrypto is a LOAD-TIME edge
       # of libHorizonCore, so a shipped build carried 4,8 MB of Homebrew OpenSSL
@@ -243,6 +249,9 @@ jobs:
           HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
+          HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
+          HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
+          HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
 
       # Linux: build a self-contained editor package like Windows — bundle cmake so a
@@ -254,6 +263,9 @@ jobs:
           HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
+          HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
+          HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
+          HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
       # Windows: build a self-contained editor package — bundle cmake, deploy into the
@@ -265,6 +277,9 @@ jobs:
           HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
+          HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
+          HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
+          HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
       # Configure has fetched everything; nothing is compiled yet.
@@ -332,8 +347,9 @@ jobs:
       # as a throwaway, read-only account on 127.0.0.1 with a password generated on
       # the fly (never written to a file, never printed) and a one-build manifest for
       # whichever platform this job is. No secret involved, so it runs on every PR,
-      # forks included — unlike the real update account, still an open decision in
-      # the design doc.
+      # forks included. Its HE_SELFUPDATE_* in the environment replaces whatever
+      # account the Configure step compiled in from the SELFUPDATE_* secrets, as a
+      # whole, so this leg never touches the real update server.
       #
       # `pip install --target` into RUNNER_TEMP, not the ambient interpreter: on
       # NN-WS03 this Python is the one the device's own account uses for
@@ -767,6 +783,9 @@ jobs:
           HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
+          HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
+          HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
+          HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
 
       - name: Save FetchContent dependencies

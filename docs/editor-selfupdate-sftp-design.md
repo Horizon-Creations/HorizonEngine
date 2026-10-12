@@ -41,9 +41,10 @@ So the module takes nothing from `HE_ContentSync` except its transport:
 
 Separation is enforced, not just intended:
 
-* the endpoint is built only from `HE_SELFUPDATE_*` (below); the EngineContent
-  account is never a source of values;
-* if those variables name the same login (host, port, user) as the compiled-in
+* the endpoint is built only from the `HE_SELFUPDATE_*` account, compiled in or
+  from the environment (below); the EngineContent account is never a source of
+  values;
+* if that account is the same login (host, port, user) as the compiled-in
   EngineContent account, the config is `Invalid` ("needs its own, separate
   account") and the endpoint is not handed out;
 * an unconfigured endpoint never reaches `SftpClient` (its own message would name
@@ -53,87 +54,91 @@ Separation is enforced, not just intended:
 
 ## Configuration
 
-Process environment, read at run time. Nothing is baked into the binary and
-nothing is in a tracked file (this repository is public).
+**Compiled in, the way `HorizonContentSync` does it** (decided by the human,
+2026-10-12, Thema 192 Schritt 2): an installed editor has the account from the
+build and can check for updates without anyone setting anything. Nothing is in
+a tracked file (this repository is public). The values reach the build one of
+three ways, in this order (`src/HE_SelfUpdate/CMakeLists.txt`):
+
+1. `cmake/SelfUpdateCredentials.cmake`, gitignored, copied from the committed
+   `cmake/SelfUpdateCredentials.cmake.template` and filled in;
+2. `-DHE_SELFUPDATE_HOST=…` on the configure line, or the environment variable
+   of the same name **at configure time** (HOST, USER, PASSWORD, BASEPATH; PORT
+   only through 1 or 2's `-D`). CI uses this with the repository secrets
+   `SELFUPDATE_HOST`, `SELFUPDATE_USER`, `SELFUPDATE_PASSWORD` on all four
+   Configure steps of `.github/workflows/ci.yml`, next to `ENGINE_CONTENT_*`;
+3. nothing: no account compiled in, Help ▸ Check for Updates… says "not
+   configured".
+
+The configure output says which: `HorizonSelfUpdate: update account
+<user>@<host>:22`, or "no update account compiled in", or a warning for a
+half-filled one. The password is never echoed.
+
+**What is compiled in can be read out of every shipped binary.** The account
+must therefore be **read-only** on the server: a leak then means "someone can
+download editor builds", not "someone can publish one". Publishing uses another
+credential that stays on the release machine or in CI.
+
+**The run-time environment still overrides it, as a whole.** When any of
+`HE_SELFUPDATE_HOST`, `_USER`, `_PASSWORD`, `_PORT`, `_BASEPATH` is set in the
+editor's environment, that environment *is* the account and nothing of the
+compiled-in one is mixed in. Otherwise a host named in the environment would be
+sent the baked-in password. This is what the tests, CI's live leg
+(`scripts/selfupdate_live_ci_check.py`) and the end-to-end script use to point
+an editor at a throwaway test server, and what a developer uses for their own.
+`HE_SELFUPDATE_CHANNEL` is read from the environment in both cases.
 
 | Variable | | |
 |---|---|---|
 | `HE_SELFUPDATE_HOST` | required | SFTP host |
-| `HE_SELFUPDATE_USER` | required | |
+| `HE_SELFUPDATE_USER` | required | the read-only login |
 | `HE_SELFUPDATE_PASSWORD` | required | password auth only — `SftpClient`'s limit |
 | `HE_SELFUPDATE_PORT` | optional | 1–65535, default 22 |
 | `HE_SELFUPDATE_BASEPATH` | optional | directory the tree lives in; empty = the account's root (the chrooted case) |
-| `HE_SELFUPDATE_CHANNEL` | optional | `packages` (default) or `preview-packages`; any `[A-Za-z0-9._+-]` name |
+| `HE_SELFUPDATE_CHANNEL` | optional, run time only | `packages` (default) or `preview-packages`; any `[A-Za-z0-9._+-]` name |
 
-None of them set = the feature is off, silently (`ConfigState::NotSet`). Some set
-but not usable = `Invalid`, with the missing names listed — never a guess.
+The first five are both the CMake names of the compiled-in account and the
+names of the run-time override. A shell that exports them while configuring
+therefore also compiles them in. That is route 2, so keep the real account out
+of a shell you build test setups from.
 
-A password in the environment is visible to the same user's other processes; it
-is the form a CI secret takes anyway. **How a shipped editor on a user's machine
-gets its read-only credentials is an open decision** (see below).
+No account anywhere = the feature is off, silently (`ConfigState::NotSet`). An
+account that is there but not usable = `Invalid`, with the missing names listed
+and whether the environment or the build is at fault. Never a guess.
+`SelfUpdateConfig::source` says which place the account came from.
 
 ### Setting the account up on a new machine
 
-**There is no credentials file to copy, and that is deliberate.**
-`HorizonContentSync` has `cmake/EngineContentCredentials.cmake.template`
-because its account is compiled in. This one is not (rule 1 in
-`SelfUpdateEndpoint.h`; `src/HE_SelfUpdate/CMakeLists.txt` has no credential
-plumbing on purpose). A CMake template in the ContentSync style would be read
-by nothing, and baking the values in instead would settle Open decision 1
-below, which is the human's call. So a fresh clone on any machine (NN-WS03
-included) does not lack a file. It lacks the environment variables (three
-required, three optional) in the user's environment, set once, outside the
-repository.
-
-The values (host, read-only user, password and, if the account is not chrooted,
-the base path) come from whoever administers the account, over a password
-manager or in person. They do not go into a Hive post, a chat, a commit, or a
-tracked config such as `.vscode/launch.json`. On 2026-10-12 GitHub held no
-`HE_SELFUPDATE_*` secrets (`gh secret list`: only `ENGINE_CONTENT_*` and the bot
-token), and CI does not need any: the live leg starts its own test server with a
-generated password (`scripts/selfupdate_live_ci_check.py`).
-
-**macOS.** For an editor started from a terminal, export the variables in
-`~/.zshrc` (single quotes, so a `$` or a backtick in the password survives):
+The same on every OS, NN-WS03 included, and the same steps as for the
+EngineContent account:
 
 ```sh
-export HE_SELFUPDATE_HOST='<host>'
-export HE_SELFUPDATE_USER='<read-only user>'
-export HE_SELFUPDATE_PASSWORD='<password>'
-# optional: HE_SELFUPDATE_PORT, HE_SELFUPDATE_BASEPATH, HE_SELFUPDATE_CHANNEL
+cp cmake/SelfUpdateCredentials.cmake.template cmake/SelfUpdateCredentials.cmake
+# fill in HOST, USER (the read-only login), PASSWORD, and BASEPATH if the
+# account is not chrooted; then configure once
 ```
 
-An editor started from Finder, the Dock or a mounted DMG does not read
-`~/.zshrc`. It inherits launchd's environment, so set the same names there
-too, with `launchctl setenv HE_SELFUPDATE_HOST '<host>'` and so on, then start
-the editor again. `launchctl setenv` does not survive a reboot. To make it
-permanent, put those calls in a per-user LaunchAgent (`RunAtLoad`, `chmod 600`
-the plist, since it holds the password) that stays
-outside the repository. Checking it: `launchctl getenv NAME` exits 0 and
-prints an empty line for a variable that is **not** set. Only a non-empty
-value means it took.
+The values come from whoever administers the account, over a password manager
+or in person. They do not go into a Hive post, a chat, a commit, or a tracked
+config such as `.vscode/launch.json`. `git check-ignore -v
+cmake/SelfUpdateCredentials.cmake` names the `.gitignore` line that keeps the
+copy out of git. A machine that only builds through CI needs nothing: CI takes
+the repository secrets. **On 2026-10-12 those secrets did not exist yet**
+(`gh secret list`: only `ENGINE_CONTENT_*` and the bot token). Until someone
+adds `SELFUPDATE_HOST`, `SELFUPDATE_USER` and `SELFUPDATE_PASSWORD` (repository
+▸ Settings ▸ Secrets and variables ▸ Actions), CI builds carry no account and
+report "no update account compiled in".
 
-**Windows.** Set them as *user* environment variables: System Properties ▸
-Environment Variables ▸ "User variables", or in PowerShell:
+A developer who wants a *different* account for one editor run (their own test
+server, say) sets `HE_SELFUPDATE_HOST`/`_USER`/`_PASSWORD` in that run's
+environment. That replaces the compiled-in account entirely, as above.
 
-```powershell
-[Environment]::SetEnvironmentVariable('HE_SELFUPDATE_HOST',     '<host>',            'User')
-[Environment]::SetEnvironmentVariable('HE_SELFUPDATE_USER',     '<read-only user>',  'User')
-[Environment]::SetEnvironmentVariable('HE_SELFUPDATE_PASSWORD', '<password>',        'User')
-```
-
-Only processes started afterwards see them. Close and reopen the terminal,
-VS Code and anything else that launches the editor. On a self-hosted runner,
-restart the runner service as well, although CI does not need the real account.
-
-**Linux.** Export them in `~/.profile` (read at desktop login, so launchers
-see them as well as shells) or, on a systemd user session, as `NAME=value`
-lines in `~/.config/environment.d/horizon-selfupdate.conf`. Log out and back in.
-
-**Did it take?** Help ▸ Check for Updates… says "self-update is not
-configured" when none of the variables reached the editor process, and "still
-missing: …" with the names when only some did. `HE_SELFUPDATE_CHANNEL` alone
-never switches the feature on.
+**Did it take?** At configure time, the `HorizonSelfUpdate:` status line. In
+the editor, Help ▸ Check for Updates… says "self-update is not configured" when
+there is no account at all, and "… is incomplete — still missing: …" with the
+names, saying "compiled into this build" or "from HE_SELFUPDATE_*", when an
+account is there but half filled. `HE_SELFUPDATE_CHANNEL` alone never switches
+the feature on.
 
 ## The server layout and the manifest
 
@@ -403,8 +408,10 @@ runGuardedAction               SelfUpdateDialog::beginInstall → Session::insta
   download, preflight, begin). It is compiled into `he_tests`, so the editor's
   half runs on every CI platform. `SelfUpdateDialog.{h,cpp}` is the window.
 * Not done on purpose: no automatic check at start-up and no background
-  polling. The account is still an environment variable (Open decision 1), so a
-  start-up check would only ever say "not configured" on a user's machine.
+  polling. The account is compiled in now (Open decision 1, decided), so a
+  start-up check would reach the server from an installed editor. Whether to
+  add one is a separate decision, and it should wait for decision 2 (signature,
+  host-key pinning).
 
 **Acceptance driver.** `HE_SELFUPDATE_E2E=save|discard|cancel` plus
 `HE_SELFUPDATE_E2E_TRIGGER=<file>`: once the file appears the dialog opens and
@@ -431,7 +438,8 @@ the installed bundle, which the swap replaces.
 | `src/HE_SelfUpdate/CMakeLists.txt` | `HorizonSelfUpdate` SHARED, `HE_SU_API`; links `HorizonContentSync` (PUBLIC — its `SftpEndpoint` is in our header) and `HorizonCore`. Added from the root `CMakeLists.txt` inside `if(HE_HAVE_LIBSSH2)`, right after ContentSync. Editor-only like ContentSync: not in HE_Game's or hc_codegen's deploy lists. |
 | `SelfUpdateVersion.h/.cpp` | `parseVersion`, `compareVersions` |
 | `SelfUpdateManifest.h/.cpp` | manifest model, validation, `isSafeRelativePath` |
-| `SelfUpdateEndpoint.h/.cpp` | `loadSelfUpdateConfig` (env → endpoint), `sameAccount`, `scrubSecret` |
+| `SelfUpdateEndpoint.h/.cpp` | `builtInSelfUpdateEndpoint` (the compiled-in account), `loadSelfUpdateConfig` (environment or compiled-in → endpoint), `sameAccount`, `scrubSecret` |
+| `cmake/SelfUpdateCredentials.cmake.template` | committed template for the gitignored `cmake/SelfUpdateCredentials.cmake`, the local route to a compiled-in account |
 | `SelfUpdateTransport.h/.cpp` | `IUpdateTransport`: `makeSftpTransport` (SftpClient) and `makeLocalDirTransport` (a directory laid out like the server) |
 | `SelfUpdateCheck.h/.cpp` | `checkForUpdate`, `downloadUpdate`, `readPendingUpdate`, `verifyStagedUpdate`, `discardStagedUpdates`, `currentPlatformKey`, `runningBuild` |
 | `SelfUpdateProcess.h/.cpp` | `spawnDetached`, `processExists`, `waitForProcessExit`, `currentExecutablePath`, UTF-8 path helpers — compiled into BOTH `HorizonSelfUpdate` and `HorizonUpdater` |
@@ -445,7 +453,7 @@ the installed bundle, which the swap replaces.
 | `tests/test_editor_selfupdate.cpp` | 6 cases: the relaunch argument reopens the project through `pickFromArguments`; check and download never begin the takeover; a failed begin leaves staging intact and does not quit; preflight blocker hides Restart; damaged download; no account |
 | `scripts/selfupdate_editor_e2e.py` | the end-to-end run with a real editor, `--mode save|discard|cancel` |
 | `updater/main.cpp` → **`HorizonUpdater`** | the separate executable `Takeover.cpp` spawns; `HE_SU_STANDALONE`, links no engine library, deployed beside `HorizonEditor` (`he_deploy_dll`, and on macOS `package_macos.sh` copies it into `Contents/MacOS`) |
-| `tests/test_selfupdate.cpp` | 20 cases (3 of them the leftover rule: the named one kept, the newest kept right after a swap, nothing within the grace period); `ctest -R test_selfupdate` |
+| `tests/test_selfupdate.cpp` | 21 cases (3 of them the leftover rule: the named one kept, the newest kept right after a swap, nothing within the grace period); `ctest -R test_selfupdate` |
 | `tests/test_selfupdate_apply.cpp` | `HorizonUpdater` run as a real child process against `tests/helpers/fake_editor.cpp` (`he_fake_editor`, a real process standing in for both "the editor being waited on" and "the build being relaunched"): `ApplyPlan` CLI round trip, happy swap (preserves `config.json`, relaunch args reach the new build), the editor outliving the wait timeout (nothing touched), a new build that dies on arrival (rollback + the old build relaunched) |
 | `scripts/selfupdate_test_sftp_server.py` | read-only paramiko SFTP server with password login, for the live test and the CI matrix |
 | `scripts/selfupdate_live_ci_check.py` | the CI-side orchestrator (Thema 186 Schritt 4): writes a one-build manifest+artifact fixture, starts the server above with a generated password, points `HE_SELFUPDATE_*` at it and runs `ctest -R ^test_selfupdate$` |
@@ -469,7 +477,8 @@ without) a real server.
   ordering incl. `0.10.0 > 0.9.0` and pre-releases; manifest round trip,
   unknown-field tolerance, and 23 kinds of unsafe or incomplete manifest rejected;
   env → endpoint incl. "setting only the EngineContent variables does not light
-  this up"; same-account refusal; password scrubbing; check outcomes against a
+  this up"; the compiled-in account used when the environment is empty, replaced
+  as a whole (never topped up) when it is not; same-account refusal for both; password scrubbing; check outcomes against a
   directory-backed server (newer / same / older / pre-release / no platform build
   / missing or corrupt manifest / retry vs. no retry); download verify (happy
   path, already staged, staged file damaged, server file swapped with the earlier
@@ -617,13 +626,11 @@ Not shown yet: a run against the real account (host name still missing).
 
 ## Open decisions (need the human)
 
-1. **Where does a shipped editor get its credentials?** Env vars suit CI and a
-   developer; a user who installed the DMG has none. The options are a
-   build-time definition the way ContentSync does it (read-only account, so a
-   leak is "someone can download builds", not "someone can publish"), or a
-   settings entry. Not decided here; the loader takes an `EnvLookup`, so another
-   source is a small addition. Until it is decided, a developer machine uses the
-   environment ("Setting the account up on a new machine" above).
+1. ~~**Where does a shipped editor get its credentials?**~~ **Decided
+   2026-10-12 by the human (Thema 192 Schritt 2): compiled in, like
+   ContentSync.** See "Configuration". What is still open there is only
+   operational: the read-only account itself and the three `SELFUPDATE_*`
+   repository secrets.
 2. **Signature and host-key pinning** (above) before the takeover runs
    unattended.
 3. **Same-version rebuilds.** Versions come from `project(VERSION)`; a new build

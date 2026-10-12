@@ -282,7 +282,8 @@ TEST_CASE("editor self-update: no account, no network, nothing to download")
 {
 	EditorSelfUpdate::Backend b;
 	b.check = [] {
-		const SelfUpdateConfig config = loadSelfUpdateConfig([](const char*) -> const char* { return nullptr; });
+		const SelfUpdateConfig config = loadSelfUpdateConfig([](const char*) -> const char* { return nullptr; },
+		                                                     HE::Cs::SftpEndpoint{});   // not this build's compiled-in one
 		return checkForUpdate(config, kRunning);
 	};
 	int begins = 0;

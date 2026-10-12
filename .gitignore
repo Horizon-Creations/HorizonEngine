@@ -75,6 +75,10 @@ imgui.ini
 # them from repository secrets instead; see src/HE_ContentSync/CMakeLists.txt.
 cmake/EngineContentCredentials.cmake
 
+# The self-update SFTP account (the second, read-only one) for a LOCAL build. Same
+# reason, same route for CI; see src/HE_SelfUpdate/CMakeLists.txt.
+cmake/SelfUpdateCredentials.cmake
+
 # Raw downloaded source textures of the auto landscape material (4K Poly Haven /
 # ambientCG sets, ~400 MB). The repo has no Git LFS and big binaries were purged
 # from history once; where they live for good is still open (docs/auto-landscape-
