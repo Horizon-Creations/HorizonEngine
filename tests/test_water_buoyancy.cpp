@@ -566,22 +566,22 @@ TEST_CASE("Water buoyancy: water in the scene that no body is near changes nothi
 {
     // The lake is in the far corner; the boxes are in the middle. Bodies never in a box
     // of water are never served, so the step is the step it was.
-    Pond far(false);
+    Pond corner(false);
     {
-        TerrainComponent& tc = far.tcRef();
+        TerrainComponent& tc = corner.tcRef();
         const uint16_t pond = tc.water.createBody(kLevel);
         REQUIRE(water::addPolygon(tc, pond, rect(18, 18, 30, 30)).ok);
     }
-    const std::vector<Entity> a = addLattice(far);
-    far.start();
-    far.step(300);
+    const std::vector<Entity> a = addLattice(corner);
+    corner.start();
+    corner.step(300);
 
     Pond reference(false);
     const std::vector<Entity> b = addLattice(reference);
     reference.start(false);
     reference.step(300);
 
-    CHECK(identical(poseOf(far, a), poseOf(reference, b)));
+    CHECK(identical(poseOf(corner, a), poseOf(reference, b)));
 }
 
 TEST_CASE("Water buoyancy: two runs of the same wet scene agree to the last bit")

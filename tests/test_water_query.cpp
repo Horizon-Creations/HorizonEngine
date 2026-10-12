@@ -547,9 +547,9 @@ TEST_CASE("Water physics settings: a damaged file cannot leave a number the phys
 TEST_CASE("Water physics settings: clampPhysics replaces what is not a number and holds the rest to its bounds")
 {
     water::BodyPhysics bad;
-    const float nan = std::numeric_limits<float>::quiet_NaN();
-    const float inf = std::numeric_limits<float>::infinity();
-    bad.density = nan; bad.linearDrag = inf; bad.angularDrag = -inf; bad.splash = nan; bad.flow = { nan, inf };
+    const float notANumber = std::numeric_limits<float>::quiet_NaN();
+    const float infinite = std::numeric_limits<float>::infinity();
+    bad.density = notANumber; bad.linearDrag = infinite; bad.angularDrag = -infinite; bad.splash = notANumber; bad.flow = { notANumber, infinite };
     const water::BodyPhysics fixed = water::clampPhysics(bad);
     const water::BodyPhysics d;
     CHECK(fixed.density == d.density);
