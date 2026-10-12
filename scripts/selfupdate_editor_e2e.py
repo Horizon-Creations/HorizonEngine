@@ -32,8 +32,9 @@ the flat deploy directory (HorizonEditor[.exe] + libraries + HorizonUpdater)
 on Linux and Windows. Exit code 0 = every expectation of the mode held;
 OUT/result.json lists them.
 
-Verified on macOS (arm64). The Linux/Windows branches (tar.gz / zip artifact,
-flat install) follow SelfUpdateInstall.cpp but have not been run yet.
+Verified on macOS (arm64, Schritt 6) and Windows (x64, NN-WS03, Schritt 7:
+flat zip like ci.yml's, flat deploy as the install). The Linux branch (tar.gz
+artifact, flat install) follows SelfUpdateInstall.cpp but has not been run yet.
 """
 
 import argparse
@@ -101,7 +102,11 @@ def copy_tree(src, dst):
     if sys.platform == "darwin":
         subprocess.run(["/usr/bin/ditto", str(src), str(dst)], check=True)
     else:
-        shutil.copytree(src, dst, symlinks=True)
+        # Leftovers of an editor once started from the source deploy: its log
+        # would put stale lines into this run's, and a config.json in the
+        # relaunched editor's working directory (the install) outranks APPDATA.
+        shutil.copytree(src, dst, symlinks=True,
+                        ignore=shutil.ignore_patterns("HorizonEngine*.log", "config.json", "imgui.ini"))
 
 
 def build_artifact(install_src, work, key):
@@ -123,10 +128,12 @@ def build_artifact(install_src, work, key):
         subprocess.run(["hdiutil", "create", "-quiet", "-volname", "HorizonEditor", "-srcfolder", str(stage),
                         "-format", "UDZO", "-ov", str(out)], check=True)
     elif os.name == "nt":
+        # Flat, like the shipped one (ci.yml: Compress-Archive package/Editor/*):
+        # extractStagedBuild then takes the many-top-level-entries branch.
         out = work / ("HorizonEditor-%s.zip" % key)
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             for p in root.rglob("*"):
-                z.write(p, pathlib.Path("Editor") / p.relative_to(root))
+                z.write(p, p.relative_to(root).as_posix())
     else:
         out = work / ("HorizonEditor-%s.tar.gz" % key)
         with tarfile.open(out, "w:gz") as t:
@@ -177,11 +184,43 @@ def wait_for(cond, timeout, what, poll=0.5):
 
 
 def pid_alive(pid):
+    if os.name == "nt":
+        # os.kill(pid, 0) is TerminateProcess(pid, 0) on Windows, not a probe.
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259   # STILL_ACTIVE
     try:
         os.kill(pid, 0)
         return True
     except OSError:
         return False
+
+
+def kill_pid(pid):
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def command_line_of(pid):
+    """The process's full command line, '' when it cannot be read."""
+    if os.name == "nt":
+        ps = ("$p = Get-CimInstance Win32_Process -Filter 'ProcessId=%d'; "
+              "if ($p) { $p.ExecutablePath + ' :: ' + $p.CommandLine }" % pid)
+        return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                              capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+                          text=True).stdout.strip()
 
 
 class Bridge:
@@ -280,6 +319,11 @@ def main():
     })
     if sys.platform == "darwin":
         env.setdefault("HE_DUMP_RHI", "Metal")
+    else:
+        # The relaunched editor's working directory is the install, and a
+        # config.json there would outrank APPDATA/HOME: pin both editors to one.
+        env["HE_CONFIG_DIR"] = str(userdata)
+        env["HE_NET_LOOPBACK_ONLY"] = "1"   # no firewall prompt for a new exe path
     endpoint = userdata / "mcp-endpoint.json"
     bridge = Bridge(endpoint)
     old_log = open(out / "editor-old.log", "wb")
@@ -327,7 +371,23 @@ def main():
 
         trigger.write_text("go")
         log("trigger written: Check for Updates -> Download -> Restart to Update -> prompt (%s)" % args.mode)
-        text = lambda: (out / "editor-old.log").read_text(errors="replace")
+        # On Windows the editor's stdout into a file is block buffered, so the
+        # live waits read its own log file too (flushed per record; beside the
+        # exe, rotated to .1 by the relaunched editor after the swap carried it
+        # over). Opened and closed on every read: a handle held inside the
+        # install would block HorizonUpdater's rename of it.
+        file_logs = [] if sys.platform == "darwin" else [
+            main_exe(install).parent / "HorizonEngine.log", main_exe(install).parent / "HorizonEngine.1.log",
+            userdata / "HorizonEngine.log"]
+
+        def text():
+            parts = []
+            for p in [out / "editor-old.log"] + file_logs:
+                try:
+                    parts.append(p.read_text(errors="replace"))
+                except OSError:
+                    pass
+            return "\n".join(parts)
 
         if args.mode == "cancel":
             wait_for(lambda: "update cancelled at the unsaved-changes prompt" in text(), args.timeout,
@@ -346,18 +406,20 @@ def main():
             return 0 if all(c["ok"] for c in checks) else 1
 
         # save / discard: the editor quits, HorizonUpdater swaps, the new build comes up.
-        rc = wait_for(lambda: editor.poll() is not None or None, args.timeout, "the old editor to quit")
+        wait_for(lambda: editor.poll() is not None or None, args.timeout, "the old editor to quit")
         old_log.flush()
+        log("old editor exited with %s" % editor.returncode)
+
+        # Only after HorizonUpdater is through: reading a log inside the install
+        # while it renames the install aside could make that rename fail.
+        last = userdata / "SelfUpdate" / "last-apply.json"
+        result = wait_for(lambda: json.loads(last.read_text()) if last.exists() else None, args.timeout,
+                          "HorizonUpdater's last-apply.json")
         t = text()
         expect("asking before the update" in t, "the unsaved-changes prompt was raised for the update")
         answered = "Save" if args.mode == "save" else "Discard"
         expect("prompt answered with %s" % answered in t, "the prompt was answered with %s" % answered)
         expect("HorizonUpdater started" in t, "the editor started HorizonUpdater before quitting")
-        log("old editor exited with %s" % editor.returncode)
-
-        last = userdata / "SelfUpdate" / "last-apply.json"
-        result = wait_for(lambda: json.loads(last.read_text()) if last.exists() else None, args.timeout,
-                          "HorizonUpdater's last-apply.json")
         expect(result.get("status") == "applied", "HorizonUpdater reports the update applied (%s)" % result)
         expect(marker_path(install).exists(), "the install now holds the 9.9.9 build (marker file)")
 
@@ -370,12 +432,12 @@ def main():
         info2 = wait_for(lambda: (lambda i: i if i and i.get("pid") not in (None, editor.pid) else None)(bridge.info()),
                          args.timeout, "the relaunched editor's MCP endpoint")
         new_pid = info2["pid"]
-        exe_of_new = subprocess.run(["ps", "-o", "command=", "-p", str(new_pid)], capture_output=True,
-                                    text=True).stdout.strip() if os.name != "nt" else ""
+        exe_of_new = command_line_of(new_pid)
         log("relaunched editor pid %d: %s" % (new_pid, exe_of_new))
-        if exe_of_new:
-            expect(str(install) in exe_of_new, "the relaunched editor runs from the swapped install")
-            expect(str(heproj) in exe_of_new, "the relaunched editor was started with the project file")
+        norm = (lambda s: s.replace("/", "\\").lower()) if os.name == "nt" else (lambda s: s)
+        expect(norm(str(main_exe(install))) in norm(exe_of_new),
+               "the relaunched editor runs from the swapped install")
+        expect(norm(str(heproj)) in norm(exe_of_new), "the relaunched editor was started with the project file")
         state2 = wait_for(lambda: (lambda s: s if s.get("sceneOpen") else None)(bridge.call("scene_info")),
                           args.timeout, "the relaunched editor to open the project")
         expect(state2.get("project") == state.get("project") if state.get("project") else True,
@@ -393,18 +455,18 @@ def main():
     finally:
         for pid in filter(None, [editor.pid if editor.poll() is None else None, new_pid]):
             if pid_alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
+                kill_pid(pid)
         server.kill()
         time.sleep(0.5)
         old_log.close()
         # The editors' own log files (GlobalState::setLogFile: beside the
         # executable when writable, else the per-user directory). After a save
-        # or discard run the install's one is the RELAUNCHED editor's.
+        # or discard run the install's one is the RELAUNCHED editor's, and .1 is
+        # the old editor's, carried over by the swap.
         for src, name in ((main_exe(install).parent / "HorizonEngine.log", "editor-installed-dir.log"),
-                          (userdata / "HorizonEngine.log", "editor-userdata.log")):
+                          (main_exe(install).parent / "HorizonEngine.1.log", "editor-installed-dir.1.log"),
+                          (userdata / "HorizonEngine.log", "editor-userdata.log"),
+                          (userdata / "SelfUpdate" / "selfupdate-apply.log", "selfupdate-apply.log")):
             if src.exists():
                 shutil.copy2(src, out / name)
         (out / "result.json").write_text(json.dumps({"mode": args.mode, "platform": key, "checks": checks},

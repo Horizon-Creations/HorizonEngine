@@ -6,11 +6,11 @@ account, version check, verified download; the takeover mechanism —
 editor-side orchestration — all with tests that run the real executables as
 real processes; the CI matrix's live SFTP leg; and the Editor UI, Help ▸ Check
 for Updates…, behind the same unsaved-changes prompt as Quit, shown end to end
-on macOS with a real editor, see "The Editor UI"). **Not done:** the
-real-account run on the hosting server (needs its host name, see "Open
-decisions"), and the same end-to-end editor run on Windows and Linux hardware
-(the script exists, its Windows/Linux branches have not been run). See
-"Acceptance" for the verdict against the topic's definition of done.
+on macOS with a real editor, see "The Editor UI"; Schritt 7 repeated that run
+on Windows, NN-WS03). **Not done:** the real-account run on the hosting server
+(needs its host name, see "Open decisions"), and the end-to-end editor run on
+Linux hardware (no Linux device with bees; the script's tar.gz branch has never
+run). See "Acceptance" for the verdict against the topic's definition of done.
 
 ## What it is
 
@@ -419,7 +419,7 @@ jobs ran on **GitHub-hosted** runners (`macos-26-arm64`, `ubuntu-24.04`,
 | Manifest/version check + SHA-256-verified download over a real SFTP session | done | live leg on all three runners: `live: offered 9.9.9 (3145728 bytes)`, doctest 17 passed = 15 offline + 2 live (round trip, wrong password refused) |
 | Takeover (swap, relaunch, rollback) on every platform | done at process level | `test_selfupdate_apply` passed on macOS (6.9 s), Linux (6.2 s), Windows (6.4 s): real `HorizonUpdater` + `he_fake_editor` child processes, happy swap keeps config, timeout aborts untouched, crash on arrival rolls back |
 | Helper ships with the editor | Windows + Linux done, macOS open | `package/Editor/HorizonUpdater[.exe]` present on Windows and Linux; the macOS DMG check never saw a DMG in that run (the packaging step was skipped after the live check failed), so DMG content is only proven by the next run |
-| No editor state lost | **macOS done (real editor); Windows/Linux: logic in CI only** | Schritt 6, see the table below; `test_editor_selfupdate` runs in the CI matrix on all three; the end-to-end editor run is macOS only so far |
+| No editor state lost | **macOS + Windows done (real editor); Linux: logic in CI only** | Schritt 6 (macOS) and Schritt 7 (Windows, NN-WS03), see the tables below; `test_editor_selfupdate` runs in the CI matrix on all three; the end-to-end editor run on Linux is open |
 | Real update account on the hosting server | **open** | host name never supplied (Hive request #49); every live run so far is against `selfupdate_test_sftp_server.py` |
 | CI matrix checks it automatically | done | `.github/workflows/ci.yml` (`claude.yml` is only the `@claude` bot) |
 
@@ -446,8 +446,50 @@ by `package_macos.sh`, project a copy of HorizonTutorial, the editor hidden:
 | `save` | 13/13 | prompt → Save wrote the scene, HorizonUpdater started, old editor exited 0, `last-apply.json` `applied` 0.7.0 → 9.9.9, the bundle holds the 9.9.9 marker, the relaunched editor runs from the swapped bundle with the `.heproj` argument, logs "opening … (handed over at launch)", has HorizonTutorial open, clean, with the saved entity in it |
 | `discard` | 13/13 | the same swap and relaunch; the scene file on disk unchanged and the discarded entity absent in the relaunched editor (the user's choice, honoured) |
 
-Not shown yet: the same run on Windows and Linux (the script has those
-branches, unrun), and against the real account (host name still missing).
+### Schritt 7: end to end on Windows (2026-10-12)
+
+The same script on NN-WS03 (Windows 11, Ryzen 9 9950X, RTX 4070), a Release
+build of this branch (commit 443a4285 plus the script fixes below) configured
+into its own tree with its own `DEPLOY_DIR`; `--install-src` the flat deploy
+`<DEPLOY_DIR>/Editor` (what CI zips as `package/Editor`), project a copy of
+HorizonTutorial, the editor hidden, OpenGL (the Windows default RHI), the test
+SFTP account from a paramiko venv:
+
+| Mode | Checks | What it showed |
+|---|---|---|
+| `cancel` | 9/9 | prompt raised, Cancel → editor still running, `scene_info.dirty` still true, the unsaved entity still in the scene, HorizonUpdater never started, install and scene file unchanged |
+| `save` | 13/13 | Check → Download (47.9 MB zip, SHA-256 verified) → Restart to Update → prompt → Save wrote the scene; old editor exited 0; `last-apply.json` `applied` 0.7.0 → 9.9.9, payload `…\payload\extract` (the flat-zip branch of `collapseSingleTopLevelDir`); the install holds the 9.9.9 marker; the relaunched editor's `Win32_Process` command line is `<install>\HorizonEditor.exe <project>.heproj`, it has HorizonTutorial open, clean, with the saved entity in it |
+| `discard` | 13/13 | the same swap and relaunch; the scene file on disk unchanged and the discarded entity absent in the relaunched editor |
+
+The Windows branch of the script had never run and needed fixes before it
+could: `os.kill(pid, 0)` is `TerminateProcess` on Windows (the liveness probe
+killed what it probed) and `signal.SIGKILL` does not exist there (now ctypes
+`GetExitCodeProcess` / `taskkill`); the editor's stdout redirected into a file
+is block buffered on Windows, so the cancel run would have waited for a line
+that only reaches the file at exit (the line was in `HorizonEngine.log`, 0 times
+in stdout) — the script now also reads `HorizonEngine.log` / `.1.log` beside the
+exe, opening and closing it on each read so no handle blocks HorizonUpdater's
+rename, and only after `last-apply.json` exists in save/discard; the fixture zip
+was wrapped in `Editor/` while the shipped one is flat (`Compress-Archive
+package/Editor/*`), now flat; the relaunched editor's command line was only
+checked through `ps` (two checks silently skipped on Windows), now
+`Win32_Process`; `HE_CONFIG_DIR` pins both editors to the private config (the
+relaunched one runs with the install as working directory, where a
+`config.json` would win) and `HE_NET_LOOPBACK_ONLY=1` keeps the new exe path
+free of a firewall prompt; run leftovers (`HorizonEngine*.log`, `config.json`,
+`imgui.ini`) are not copied out of the source deploy.
+
+**Found on the way, not changed (product decision):** nothing removes the work
+directory `<install parent>/.heselfupdate-<version>-<suffix>/` after a
+successful update. Its `backup/` is the complete previous install (118 MB for
+this deploy), so every update leaves one more full copy beside the install.
+Keeping the last one is a manual rollback; keeping all of them is a leak. To
+decide: delete older ones on the next start of the new build, or keep exactly
+one.
+
+Not shown yet: the same run on Linux (the tar.gz branch of the script is
+unrun; NN-WS03 has no WSL distribution and the Linux device NN-RP01 runs no
+bees), and against the real account (host name still missing).
 
 ## Open decisions (need the human)
 
@@ -469,12 +511,12 @@ branches, unrun), and against the real account (host name still missing).
 
 ## What the next step hangs on
 
-* **The Editor UI — done in Schritt 6**, see "The Editor UI". What is left
-  of it: run `scripts/selfupdate_editor_e2e.py` on Windows (NN-WS03, a zip
-  artifact of `package/Editor`) and Linux (a tar.gz of the flat deploy) — the
-  branches are written but have never run — and, once that is green there,
-  consider a macOS CI leg after the DMG step (the hosted runner has Metal; the
-  run takes ~1 min per mode).
+* **The Editor UI — done in Schritt 6**, end to end on macOS (Schritt 6) and
+  Windows (Schritt 7). What is left of it: run `scripts/selfupdate_editor_e2e.py`
+  on Linux (a tar.gz of the flat deploy; that branch has never run, it needs a
+  Linux machine with a display or Xvfb, a build of this branch and a paramiko
+  venv), the cleanup of `.heselfupdate-*` above, and, once Linux is green,
+  consider a CI leg after the packaging step (~1 min per mode).
 * **The known gap above** (a rename blocked for the whole retry window) has no
   test; it needs a platform-specific way to hold a directory-internal file
   handle open without `FILE_SHARE_DELETE` for the duration.
