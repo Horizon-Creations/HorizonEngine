@@ -91,9 +91,11 @@ HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
 // here for this to be exact.
 //
 // Several overlapping bodies: WaterIndex::surfaceAt's own rule decides (the highest
-// surface wins) — the same rule the water physics itself queries by. A camera below
-// the water's own bed (inside solid ground or a cave under the sheet) is reported dry:
-// being under a surface whose floor is also below you is not "underwater".
+// surface wins) — the same rule the water physics itself queries by. Dry outside
+// [bed, surface level]: below the water's own bed (inside solid ground or a cave
+// under the sheet), being under a surface whose floor is also below you is not
+// "underwater" either; above the surface (flying, a dock, a boat on top of the
+// body) there is simply no water at the camera's own position to be in.
 //
 // Stateless — called fresh every extract(), nothing carried from one frame to the next,
 // so a camera resting exactly on the waterline, or crossing it within a single frame,

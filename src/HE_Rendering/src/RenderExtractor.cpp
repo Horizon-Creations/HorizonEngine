@@ -1204,8 +1204,15 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 		return out;   // dry at this XZ — WaterIndex already clips the shore itself
 
 	const float signedDepth = surf.level - cameraPos.y;
-	if (signedDepth > surf.depth)
-		return out;   // under the water's own bed — not underwater, just underground
+	// Outside [0, surf.depth] the camera is either above the surface (flying,
+	// standing on a dock, a boat on top of the body) or under its own bed
+	// (inside solid ground or a cave under the sheet) — neither is "underwater".
+	// The CI regression this fixed (Thema 185 Schritt 1, commit 71df88e3): a
+	// camera far above a lake's XZ read as wet because only the lower bound was
+	// checked, which among other things made the Schritt 2 post pass fog the
+	// view of a plane flying over a distant lake.
+	if (signedDepth < 0.0f || signedDepth > surf.depth)
+		return out;
 
 	out.wet         = true;
 	out.surfaceY    = surf.level;

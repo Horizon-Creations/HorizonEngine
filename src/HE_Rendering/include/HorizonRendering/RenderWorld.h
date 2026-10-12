@@ -30,7 +30,7 @@ struct CameraData {
 // depth buffer, so that part stays in the shader). Both are meaningless — and
 // density is exactly 0, the shader's cue to skip the whole pass — when !wet.
 struct UnderwaterCameraData {
-    bool  wet         = false;  // a water surface covers the camera's XZ (and the camera is above that body's own bed)
+    bool  wet         = false;  // a water surface covers the camera's XZ, AND camera.y is between that body's bed and its surface level (inclusive) — not above the surface, not under the bed
     float surfaceY    = 0.0f;   // world Y of that surface (the flat body level the material shades waves on top of; meaningful only if wet)
     float signedDepth = 0.0f;   // surfaceY - camera.y: > 0 means the camera is below the surface. 0 when !wet.
     glm::vec3 tintColor { 0.045f, 0.20f, 0.22f };   // resolved shallow→deep blend; meaningful only if wet
