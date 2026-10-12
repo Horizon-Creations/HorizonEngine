@@ -1735,13 +1735,15 @@ fragment float4 ucFragment(FSOut in [[stage_in]],
 	const float kEta   = 1.33;
 	float3 sc = scene.sample(sl, in.uv).rgb;
 	float  d  = depthTex.sample(sn, in.uv);
-	if (d >= 1.0) return float4(sc, 1.0);                       // sky
 	float4 wp = u.invViewProj * float4(in.uv.x * 2.0 - 1.0, 1.0 - 2.0 * in.uv.y, d, 1.0);
 	float3 P  = wp.xyz / wp.w;
+	float3 dPx = dfdx(P);                                       // before any early-out: derivatives are
+	float3 dPy = dfdy(P);                                       // undefined after divergent flow
 	float  depth = u.camSurface.w - P.y;                        // metres below the flat surface
 	float  fadeDepth = u.caustics.w;
 	float3 L = u.sun.xyz;
-	if (depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02) return float4(sc, 1.0);   // dry, too deep, no sun
+	if (d >= 1.0 || depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02)
+		return float4(sc, 1.0);                                 // sky, dry, too deep, no sun
 
 	float2 hz   = L.xz / kEta;
 	float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
@@ -1769,7 +1771,7 @@ fragment float4 ucFragment(FSOut in [[stage_in]],
 	float x   = max(1.0 / max(abs(det), 0.1) - 2.0, 0.0);
 	float net = x / (x + 2.0);
 
-	float3 n = normalize(cross(dfdx(P), dfdy(P)));
+	float3 n = normalize(cross(dPx, dPy));
 	if (dot(n, u.camSurface.xyz - P) < 0.0) n = -n;
 	float ndl   = clamp(dot(n, Lr), 0.0, 1.0);
 	float atten = exp(-depth / fadeDepth) * smoothstep(0.0, 0.4, depth);

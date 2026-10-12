@@ -5481,13 +5481,14 @@ void main()
 	vec3 scene = texture(uScene, vUV).rgb;
 	fragColor = vec4(scene, 1.0);
 	float d = texture(uDepth, vUV).r;
-	if (d >= 1.0) return;                                   // sky
 	vec4 wp = uInvViewProj * vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
 	vec3 P = wp.xyz / wp.w;
+	vec3 dPx = dFdx(P);                                     // before any early-out: derivatives are
+	vec3 dPy = dFdy(P);                                     // undefined after divergent flow
 	float depth = uCamSurface.w - P.y;                      // metres below the flat surface
 	float fadeDepth = uCaustics.w;
 	vec3 L = uSun.xyz;
-	if (depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02) return;   // dry, too deep, or no sun
+	if (d >= 1.0 || depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02) return;   // sky, dry, too deep, or no sun
 
 	// The sun's ray inside the water (Snell: the horizontal part shrinks by 1/eta),
 	// followed back up to the surface plane.
@@ -5532,7 +5533,7 @@ void main()
 	float net = x / (x + 2.0);
 
 	// Surfaces that face the refracted sun catch it; a wall barely does.
-	vec3 n = normalize(cross(dFdx(P), dFdy(P)));
+	vec3 n = normalize(cross(dPx, dPy));
 	if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
 	float ndl = clamp(dot(n, Lr), 0.0, 1.0);
 	float atten = exp(-depth / fadeDepth) * smoothstep(0.0, 0.4, depth);
