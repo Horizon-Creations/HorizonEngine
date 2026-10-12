@@ -11,6 +11,9 @@ Gemessen wurde nichts.
 > **Stand nach Schritt 2 (12.10.2026): Abschnitt 13 am Ende beschreibt, was gebaut wurde, und wo er dem Konzept widerspricht,
 > gilt Abschnitt 13.** Das betrifft vor allem 5.1 (zwei Dämpfungen statt `drag`, keine Wellen je Wasserkörper), 3.2 (Region je
 > Landschaft statt je Körper) und 3.4 (schwimmende Körper dürfen nicht schlafen; Aufwecken bei Pegeländerung ist nicht gebaut).
+>
+> **Stand nach Schritt 5 (12.10.2026): Abschnitt 15** beschreibt Editor und Skript-API und wo sie dem Abschnitt 7 widersprechen
+> (`setFlow` in Weltachsen, die Zeile `water.buoyancy`, das Eintauch-Ereignis als abholbare Warteschlange, nicht gebaute Teile aus 7.1).
 
 ## 0. Kurzfassung
 
@@ -744,3 +747,83 @@ der Frühausstieg bei `splash <= 0` in `raiseRings` ist nur eine Abkürzung, den
   Den neuen Shadertext kompilieren sie (gemeinsame Quelle, `test_engine_materials`, `test_material_graph`, auf dem Mac gegen glslang, SPIRV-Cross und die Reflexion, auf Windows und Linux in der CI), **gesehen hat ihn
   dort keine Hardware.** Schritt 4 trägt das `FillMaterialWater` an den drei Stellen nach (Abschnitt 6.4 Punkt 4) und nimmt die Abnahme.
 * **Optik und Physik.** `surfaceAt` liest die Ringe nicht (14.2): ein Körper reitet auf den Wellen des Materials, nicht auf seinen eigenen Ringen. Der Unterschied ist die Ringhöhe (bei voller Stärke etwa 6 cm).
+
+## 15. Stand nach Schritt 5 (12.10.2026): Editor und Skript-API
+
+Schritt 5 (Wasserphysik einstellen, abfragen und ausprobieren) ist gebaut: die Einstellungen eines Wasserkörpers stehen im Editor, die Starrkörper-Zeilen
+ebenfalls, die Gruppe `water` der zentralen `HE::api` kann die Höhe, die Tiefe, die Strömung, das Eintauchen und den Auftrieb abfragen und meldet, wenn ein Körper
+ins Wasser geht oder es verlässt. Gebaut und geprüft auf dem Mac (Release, shaderc ON); Windows und Linux nur über die CI. Wo dieser Abschnitt den Abschnitten 1 bis 14
+widerspricht, gilt dieser Abschnitt.
+
+### 15.1 Was gebaut wurde
+
+| Teil | Wo | Inhalt |
+|---|---|---|
+| Wasserkörper im Editor | `TerrainTools.cpp`, Water-Tab, Liste *Bodies* | je Teich oder See ein Abschnitt **Physics**: Enabled, Density (1 bis 20000), Linear Drag und Angular Drag (0 bis 10), Flow X und Z (±50 m/s, Achsen der Landschaft), Splash (0 bis 4). Jede Änderung geht über `water::setPhysics` (klemmt, erhöht `Field::revision`, baut weder Netz noch Chunks neu, setzt nie `TerrainComponent::dirty`). Bild: `docs/water-physics/editor-water-tab-physics.png` |
+| Undo | dort | ein Griff (Klick, Ziehen) ist **ein** Undo-Schritt mit dem Namen "Water Physics": `capturePre()` + `stashPre()` beim Greifen, `commitPending()` beim Loslassen (siehe 15.4, warum `capturePre` nötig ist) |
+| Starrkörper im Editor | `InspectorPanel.cpp`, Abschnitt Rigid Body | **Affected By Water** und **Density** (0 = aus Masse und Collider). Beide werden je Physikschritt gelesen, wirken also auch während Play |
+| Hilfe | `EditorHelp.cpp` | neun Einträge (`Rigid Body/Affected By Water`, `Rigid Body/Density`, `Landscape/Physics##wphys`, `…/Enabled`, `…/Density`, `…/Linear Drag`, `…/Angular Drag`, `…/Flow`, `…/Splash`), die Tooltips sagen die brauchbare Spanne des Widerstands (bis etwa 3, Lehre 216) und die Referenzdichten. `editor_help_audit` bleibt grün, Basis 0 |
+| API | `EngineApi.h/.cpp`, Gruppe `water` | acht neue Zeilen, alle in **Welt**, ohne Landschafts-Handle (außer `setFlow`): `surfaceAt(x, z)` → (wet, height), `depthAt`, `flowAt` → vec3, `submerged(entity)`, `buoyancy(entity)`, `pollImmersion()` → vier parallele Listen (entities, entered, speeds, positions), `disturb(x, z, radius, strength)`, `setFlow(terrain, body, x, z)`. Je Zeile: Anzeigename, Beschreibung in `HcNodeDocs.cpp`, Test. `isScriptGroup` kannte `water` schon; eine Parity-Fixture und eine C++-GameLogic-Servicetabelle hat die Gruppe nicht |
+| Physik | `PhysicsWorld.h/.cpp` | `pollWaterEvents()` (begrenzt auf 256, der älteste fliegt), `waterLift(entity)`, ein Zustand je Körper (`WaterTrack`: Anteil und Auftrieb) statt der Anteilstabelle allein |
+| Dispatcher | `ScriptContext.cpp`, `PyScriptBackend.cpp` | **Listen-Ergebnisse** der Registry kommen in Lua als **eine** Tabelle und in Python als **eine** Liste an (siehe 15.4) |
+| Handbuch | `EditorDeps/Docs/he-docs.json` | `systems#water-physics` (Wirkung, Einstellungen, Zeilen, Beispiel Lua und Python, Grenzen), `scripting-reference#water`, ein Absatz in `editor#landscape-mode` |
+
+Auftrieb in der API ist der **Hub in Körpergewichten**: Auftriebsfaktor (Wasserdichte durch Körperdichte, geklemmt 0,02 bis 4) mal Anteil unter Wasser. 1 heißt: schwimmt, wo er ist; über 1: steigt;
+unter 1: sinkt (ein Stein liegt bei etwa 0,38 in jeder Tiefe). Es ist genau das, woraus Jolts Impuls besteht (`fluid_density * eingetaucht * g`).
+
+**Das Eintauch-Ereignis** (`pollImmersion`): jedes Mal, wenn der Anteil unter Wasser die Schwelle von 2 % (`RippleTriggers::kWetShare`, dieselbe wie für die Ringe) überschreitet, entsteht ein Eintrag
+(`entered`, Geschwindigkeit durch die Fläche entlang der Wellennormale **relativ zur Strömung**, Schwerpunkt). Er hängt **nicht** an `splash` oder an einer Mindestgeschwindigkeit (anders als der Ring), und er
+sitzt neben `raiseRings`, nicht darin. Ein Körper, den die Physik das erste Mal im Wasser sieht (Szene beginnt mit einer Kiste im See), tritt im ersten Schritt ein, mit kleiner Geschwindigkeit. Ein Körper,
+den der Schritt nicht mehr im Wasser findet (über das Ufer, Wasser ausgeschaltet, Körper wählt `affectedByWater` ab, See ausgetrocknet), tritt **ohne Geschwindigkeit** aus (0), in Entity-Reihenfolge.
+Ein zerstörter Körper tritt nicht aus, und seine ungelesenen Einträge gehen mit ihm (`removeEntity`). Wasserphysik aus, oder kein Wasser in der Szene: keine Einträge.
+
+### 15.2 Abweichungen vom Konzept (Abschnitt 7)
+
+| Konzept | Gebaut | Grund |
+|---|---|---|
+| 7.2 `setFlow(terrain, body, x, z)` terrain-lokal wie gespeichert | **Weltachsen** (die Drehung der Landschaft um Y wird eingerechnet, die Skalierung nicht) | `flowAt` liefert Welt; so läuft `setFlow(0, 3)` → `flowAt` = (0, 0, 3) rund. Gespeichert wird weiter terrain-lokal, wie es der Water-Tab zeigt |
+| 7.2 sechs Zeilen | acht: dazu `water.buoyancy` und `water.pollImmersion` | Auftrieb stand im Auftrag der Queen; das Eintauch-Ereignis im Schritttext. Der Plan kannte nur `submerged` |
+| Ereignis als Callback (`onWaterEnter`) | **abholbare Warteschlange**, wie `pollJointBroken` | HorizonCode, Lua, Python und C++ nutzen dieselbe Zeile; ein Callback bräuchte einen Weg in `EntityHost`, `ScriptContext` und den Python-Pfad und ist ein eigener Schritt |
+| 7.1 Zeilen im Inspector "Terrain" | nur im **Water-Tab** des Landscape-Panels | dort steht die Liste der Körper (Teich, See, "To Lake"); der Inspector "Terrain" hat nur Landschaftseinstellungen (Ufer-Beschneidung) |
+| 7.1 Profiler, Projektschlüssel, Optionales | **nicht gebaut**: Profiler-Zeilen `buoyancy ms`, `wet bodies`, `buoyancy deferred`; Projektschlüssel `waterBodiesPerStep` in `ProjectSettings.json`; Dichte-Voreinstellungen; "Wellen aus Material"; Fall-Taste "Drop"; MCP-Werkzeug für die Physikwerte | Zeit und Streichreihenfolge (Abschnitt 11). Die reinen Zeilen sind über `McpToolsApi` automatisch MCP-Werkzeuge |
+| Speichern und Laden der neuen Felder | **keine neuen gespeicherten Felder** in Schritt 5 | das Format ist Schritt 2 (`test_water_query.cpp`: "the defaults write nothing…", "they are content…", "Rigid body: affectedByWater and density are written only off their defaults"). Schritt 5 prüft den Weg vom Editor bis zum Verhalten nach dem Neuladen (15.3) |
+
+### 15.3 Belegt und gemessen (Mac, Release, shaderc ON; gemeldet, wo nicht ausdrücklich geprüft)
+
+* **Voller `ctest -j4 --timeout 1500`**: **274 Tests, 274 bestanden**, 2 übersprungen (`runtime_size_app_basic` und `_advanced`, laufen hier nicht), 285 s. (Schritt 3: 273 Tests; neu ist `test_water_api`.)
+* **`tests/test_water_api.cpp`**, 15 Fälle, 1649 Zusicherungen, auf Jolt-Körpern in einem See: die Zeilen und ihre Form; Höhe, Tiefe und Strömung in Welt, mit verschobener und um Y gedrehter Landschaft, mit und ohne
+  Physikuhr; `setFlow` in Weltachsen mit Rundlauf, Klemme, Ablehnung (kein Körper, Körper 0, keine Landschaft, NaN), ohne Netz- oder Chunk-Neubau; `submerged` und `buoyancy` (Kiste halber Dichte: Anteil 0,5 und Auftrieb 1,0 im Mittel,
+  Stein: 1,0 und 0,38, auch schlafend); das Ereignis (Aufprall mit Geschwindigkeit, Eintritt und Austritt wechseln sich ab, Szenenstart im Wasser, hochgeworfen und zurück, Wasser ausgeschaltet, Körper wählt ab, zerstört, entfernt,
+  begrenzt auf 256 mit dem **neuesten** am Ende, ohne Wasserphysik kein Eintrag); `disturb` (Klemme 0,05 bis 6 m, NaN, Strömung trägt, nur Ringe); Lua; **das Beispiel des Handbuchs läuft wortgleich** (Lua hier, Python in
+  `test_python_scripting`) und ringt dort, wo die Kiste gelandet ist; Undo und Redo über `EditorUndo`; **gespeichert, geladen, und die Körper spüren danach, was getippt wurde** (Sole 2000: die Kiste sitzt zu einem Viertel
+  unter, der Abwähler fällt zum Grund, die Strömung zieht).
+* **Die echte Oberfläche, ohne Fenster**: `landscape ui: the Water panel's Physics rows…` (Software-Raster, `TerrainTools::renderPanel` mit echtem `AppContext`): der Abschnitt ist da, öffnet sich, ein Klick auf Enabled und ein Zug an Density
+  sind je **ein** Undo-Schritt, Undo bringt die Zahl zurück, `TerrainComponent::dirty` und `Field::dirty` bleiben, wie sie waren. `inspector ui: the Rigid Body section's water rows…`: Klick auf Affected By Water und Zug an Density, je ein Schritt.
+  Python: `horizon.water.*` und das Beispiel. **Nie ein Mensch an der echten GUI.**
+* **Mutationsprobe** (sieben Mutationen in einem Bau, jeweils die gemeinte Prüfung rot gesehen, dann aus dem Commit zurückgenommen): `capturePre` entfernt (UI-Fall: kein Undo-Schritt), Warteschlange ohne Grenze, `setFlow` ohne Drehung der Landschaft,
+  Physikuhr ignoriert, ruhender Körper vergisst seinen Zustand (Stein), Lua-Liste nicht als Tabelle, Auftrieb gleich Anteil. Alle sieben rot, der Lua-Fall nur auf der Lua-Seite (die Python-Seite des Dispatchers wurde nicht mutiert).
+* **Kosten**: die Ereignisprüfung läuft in der Schleife, die den Auftrieb schon bedient, einmal je Körper und Schritt (ein Vergleich zweier Zahlen, ein Eintrag in der Zustandstabelle). Der Bench `what 256 floating bodies cost`
+  (256 halb eingetauchte Quader, ein Physik-Thread, drei Läufe nach dem Bau): **0,33 / 0,33 / 0,41 ms je Schritt, 1,28 bis 1,61 µs je Körper, schlechtester Schritt 0,50 bis 0,57 ms**. Schritt 3 meldete 0,36 ms und 1,41 µs, Schritt 2 0,28 bis 0,38 ms:
+  kein Unterschied außerhalb der Streuung. Nicht gemessen: Konvexhüllen, Windows, Linux.
+
+### 15.4 Gefunden unterwegs
+
+* **`EditorUndo::stashPre` tut nichts ohne vorheriges `capturePre()`** (`if (m_scratch.empty()) return`), und das Details-Panel ruft `capturePre()` in jedem Frame, das Landscape-Panel nicht. Ein `stashPre()` allein hätte dort still nichts gebucht oder
+  auf einen alten Stand zurückgesetzt. Der Water-Tab sichert deshalb beim Greifen selbst (`capturePre()` + `stashPre()`, wie der Transform-Gizmo). Die Mutation, die `capturePre` entfernt, macht den UI-Fall rot.
+* **Die generischen Dispatcher gaben Listen-Ergebnisse als Zahl zurück** (`luaPushValue` und `pyAppendValue` gehen nach dem **Typ** der Zeile und ignorierten `isArray`): `horizon.water.pollImmersion()`, aber auch
+  `horizon.physics.pollJointBroken()`, `raycastAll` und die `overlap*`-Zeilen lieferten in Lua und Python die Null statt einer Liste. Behoben für beide Frontends (eine Tabelle, eine Liste; ein Vec3 darin ist `{x, y, z}`
+  beziehungsweise `[x, y, z]`; Lua kannte Vec3 und Vec4 als Listenelement nicht und gab 0). Kein bestehender Test verließ sich auf das alte Verhalten.
+* **Das Handbuch-Bündel ist dem Website-HTML voraus.** `build_docs_bundle.py --check` war schon vor diesem Schritt rot (acht Abschnitte stehen nur im Bündel: `editor#github`, `materials#water`, `scripting-reference#sequence` und `#settings`, vier Audio-Abschnitte).
+  Eine Neuerzeugung aus `Website/HorizonEngineDocs` **verliert** sie, auch die drei Stellen dieses Schritts. Dieser Schritt hat das Bündel deshalb **direkt** ergänzt (wie Thema 152 den Abschnitt Engine Water) und die Website nicht angefasst.
+* **Die Glyphe `±` darf nicht ins Bündel** (`test_docs_library`: "nothing in it needs a glyph the editor cannot draw"): "-50 to 50 m/s" statt "±50".
+* **doctest `Approx(x).epsilon(e)` rechnet `e * (1 + |x|)`**: `Approx(0.5).epsilon(0.2)` ließ 0,2 bis 0,8 durch. Die Mittelwerte stehen deshalb als `abs(mean - 0.5) < 0.1`.
+* **Ein Körper, der still in fließendem Wasser steht, hinterlässt eine Spur** (Spurring, Tempo relativ zur Strömung ≥ 0,6 m/s): der Fall `disturb` zählt darum nur die Ringe der Art Skript.
+
+### 15.5 Grenzen, ehrlich
+
+* **Das Ereignis flackert an der Schwelle**: ein sehr leichter Körper (Dichte von wenigen Prozent der des Wassers), der an der Fläche tanzt, kann die 2 % mit jeder Welle kreuzen und meldet dann jedes Mal Ein- und Austritt. Eine Entprellung ist nicht gebaut und das Flackern nicht gemessen, nur aus der Regel gefolgert.
+* **Kein Callback** (`onWaterEnter`): wer das Ereignis will, fragt `pollImmersion` ab, an einer Stelle (es leert die Liste).
+* **Geschwindigkeit** ist die des Körpers relativ zur Strömung entlang der Wellennormale, nicht relativ zur bewegten Fläche (die Wellen heben die Fläche mit höchstens etwa 0,15 m/s: Amplitude mal Kreisfrequenz der beiden Züge, gerechnet, nicht gemessen).
+* **Ringe nur auf Metal und OpenGL** (Schritt 4 trägt D3D11, D3D12 und Vulkan nach): das Handbuch sagt es im Abschnitt Water Physics, **Schritt 4 muss den Satz mit dem Ergebnis nachziehen**.
+* **Nicht gebaut** (15.2): Profiler-Zeilen, Projektschlüssel, Dichte-Voreinstellungen, MCP-Werkzeug für die Physikwerte; keine Physics-Zeilen an der Spline eines Sees (der Water-Tab ist der Ort).
+* **Nicht geprüft**: Windows und Linux (CI), D3D11, D3D12, Vulkan, eine echte Fensterbedienung des Editors, das Handbuch im echten Leser (nur als Bündel gelesen und durch `test_docs_library` und `test_editor_help`).

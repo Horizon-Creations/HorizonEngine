@@ -707,6 +707,63 @@ TEST_CASE("Water api (physics): the rows reach a Lua script as horizon.water.*")
     CHECK(scripted == 1);
 }
 
+// The Lua example of the manual (Systems, Water Physics), word for word. If the manual changes, this
+// changes with it: the point is that the text a reader copies is a script that runs.
+static const char* kManualSplash = R"lua(local M = {}
+
+-- Rings and a log line where something heavy hits the water, and a wading check.
+function M.onUpdate(self, dt)
+    local who, entered, speed, where = horizon.water.pollImmersion()
+    for i = 1, #who do
+        if entered[i] and speed[i] > 2.0 then
+            local at = where[i]                      -- a vec3 in a list is {x, y, z}
+            horizon.water.disturb(at[1], at[3], 1.0, math.min(1.0, speed[i] / 6.0))
+            horizon.log(string.format("entity %d hit the water at %.1f m/s", who[i], speed[i]))
+        end
+    end
+
+    local x, y, z = horizon.getPosition(self.entityId)
+    local wet, surface = horizon.water.surfaceAt(x, z)
+    self.wading = wet and surface > y                -- the surface is above my feet
+end
+
+return M
+)lua";
+
+TEST_CASE("Water api (physics): the manual's example script runs, and rings where the crate landed")
+{
+    Pond pond;
+    BodySpec s;
+    s.at = { 2.0f, 5.0f, -3.0f };                       // a fall of 1.5 m to the surface: well over the script's 2 m/s
+    const Entity crate = pond.add(s);
+    pond.start();
+    pond.step(150);                                     // it lands, plunges, floats
+
+    ScriptContext ctx(pond.world);
+    ctx.setPhysicsWorld(&pond.phys);
+    REQUIRE(ctx.loadScript("splash", kManualSplash));
+    const auto id = ctx.createInstance("splash", crate);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    pond.phys.waterRipples().clear();                   // the physics' own impact ring is not what is asked here
+
+    CHECK(ctx.callOnUpdate(id, 0.016f));
+    CHECK(ctx.lastError().empty());
+
+    // The script read the news (nothing is left to read) and put a ring where the crate landed.
+    Ctx c = pond.ctx();
+    CHECK(poll(c).empty());
+    int scripted = 0;
+    for (int i = 0; i < pond.phys.waterRipples().count(); ++i)
+    {
+        const water::Ripple& r = pond.phys.waterRipples().at(i);
+        if (r.kind != WaterRippleScript) continue;
+        ++scripted;
+        CHECK(r.pos.x == doctest::Approx(2.0f).epsilon(0.1));
+        CHECK(r.pos.y == doctest::Approx(-3.0f).epsilon(0.1));
+    }
+    CHECK(scripted >= 1);
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // What an author sets in the editor
 // ═════════════════════════════════════════════════════════════════════════════

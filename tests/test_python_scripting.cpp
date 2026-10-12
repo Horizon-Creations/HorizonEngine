@@ -19,7 +19,10 @@
 #include <HorizonScene/AudioEngine.h>   // a host service the plugin can only read across the module boundary
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>   // the water group's landscape
+#include <HorizonScene/Components/RigidBodyComponent.h> // … and a body that floats on its lake
+#include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/WaterField.h>                    // … and the lake on it
+#include <HorizonScene/WaterRipples.h>                  // … and the rings a script raises
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <filesystem>   // the save-backed container round trip needs a sandbox root
@@ -1462,6 +1465,84 @@ TEST_CASE("ScriptContext: registry-driven horizon.water.* physics rows (Python)"
     const auto& t = world.registry().get<TransformComponent>(e);
     CHECK(t.position.x == doctest::Approx(1.0f));                 // every assertion in the script held
     CHECK(terrain.water.findBody(lake)->physics.flow.y == doctest::Approx(2.0f));   // and setFlow reached the lake
+}
+
+// The Python example of the manual (Systems, Water Physics), word for word: the text a reader
+// copies is a script that runs. (The Lua one is in test_water_api.cpp.)
+static const char* kPyManualSplash = R"py(import horizon
+
+class Splash(horizon.Behavior):
+    # Rings and a log line where something heavy hits the water, and a wading check.
+    def on_update(self, dt):
+        who, entered, speed, where = horizon.water.pollImmersion()
+        for i in range(len(who)):
+            if entered[i] and speed[i] > 2.0:
+                x, y, z = where[i]                   # a vec3 in a list is [x, y, z]
+                horizon.water.disturb(x, z, 1.0, min(1.0, speed[i] / 6.0))
+                horizon.log(f"entity {who[i]} hit the water at {speed[i]:.1f} m/s")
+
+        x, y, z = horizon.getPosition(self.entity_id)
+        wet, surface = horizon.water.surfaceAt(x, z)
+        self.wading = wet and surface > y            # the surface is above my feet
+)py";
+
+TEST_CASE("ScriptContext: the manual's Python water example runs, and rings where the crate landed")
+{
+    HorizonWorld world;
+    const auto land = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(land, TransformComponent{});
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.resolution = 9;                  // flat ground
+    tc.water.res = 64;                  // a cell is a metre
+    world.registry().emplace<TerrainComponent>(land, tc);
+    TerrainComponent& terrain = world.registry().get<TerrainComponent>(land);
+    const uint16_t lake = terrain.water.createBody(3.0f);
+    REQUIRE(HE::water::addPolygon(terrain, lake,
+                                  { { -20.0f, -20.0f }, { 20.0f, -20.0f }, { 20.0f, 20.0f }, { -20.0f, 20.0f } }).ok);
+
+    // A crate of half the water's density, dropped from 1.5 m over the surface at (2, -3).
+    const auto crate = world.createEntity("Crate");
+    TransformComponent ct;
+    ct.position = { 2.0f, 5.0f, -3.0f };
+    world.registry().emplace<TransformComponent>(crate, ct);
+    RigidBodyComponent rb;
+    rb.type = RigidBodyType::Dynamic;
+    rb.mass = 500.0f;
+    rb.density = 500.0f;
+    world.registry().emplace<RigidBodyComponent>(crate, rb);
+    ColliderComponent col;
+    col.shape = ColliderShape::Box;
+    col.halfExtents = { 0.5f, 0.5f, 0.5f };
+    world.registry().emplace<ColliderComponent>(crate, col);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    phys.setThreadCount(1);
+    phys.setWaterPhysics(true);
+    for (int i = 0; i < 150; ++i) phys.step(world, 1.0f / 60.0f);       // it lands, plunges, floats
+
+    ScriptContext ctx(world);
+    ctx.setPhysicsWorld(&phys);
+    REQUIRE(ctx.loadScript("pysplash", kPyManualSplash, HE::ScriptLanguage::Python));
+    const auto id = ctx.createInstance("pysplash", crate);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    phys.waterRipples().clear();                                         // the physics' own impact ring is not what is asked
+
+    CHECK(ctx.callOnUpdate(id, 0.016f));
+    CHECK(ctx.lastError().empty());
+
+    int scripted = 0;
+    for (int i = 0; i < phys.waterRipples().count(); ++i)
+    {
+        const HE::water::Ripple& r = phys.waterRipples().at(i);
+        if (r.kind != WaterRippleScript) continue;
+        ++scripted;
+        CHECK(r.pos.x == doctest::Approx(2.0f).epsilon(0.1));
+        CHECK(r.pos.y == doctest::Approx(-3.0f).epsilon(0.1));
+    }
+    CHECK(scripted >= 1);
+    CHECK(phys.pollWaterEvents().empty());                               // the script read the news
 }
 
 #endif // HE_HAVE_PYTHON
