@@ -48,6 +48,7 @@
 #include "EditorSystemMotion.h"    // …and the system query it follows
 #include "ProjectLaunchOpen.h"     // a .heproj double-clicked in the file manager
 #include "HeprojRegistration.h"    // …and the editor making .heproj its own at start
+#include "SelfUpdateDialog.h"      // …and dropping what older updates left beside the install
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
@@ -2057,6 +2058,9 @@ void EditorApplication::OnInit()
 #ifdef HE_HAVE_LIBSSH2
 		startSftpProbe();
 #endif
+		// The previous install an update left beside this one is kept; older
+		// ones go now (a no-op in a build without the self-update).
+		SelfUpdateDialog::startHousekeeping();
 	}
 
 	// The editor makes .heproj open with itself (Windows registry, Linux XDG files;

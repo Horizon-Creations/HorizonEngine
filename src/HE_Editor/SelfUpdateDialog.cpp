@@ -7,6 +7,7 @@
 #include "EditorWidgets.h"       // pinDialogToEditorWindow, primaryButton, WrapText
 
 #include <SelfUpdate/SelfUpdateApplyCore.h>   // readApplyResult: how the last update ended
+#include <SelfUpdate/Takeover.h>              // pruneTakeoverLeftovers: the older backups
 
 #include <Diagnostics/Log.h>
 
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
 
 namespace SelfUpdateDialog
 {
@@ -34,6 +36,7 @@ bool        s_installRequested = false;
 std::string s_lastApply;   // one line about the previous takeover, read on open
 
 std::unique_ptr<EditorSelfUpdate::Session> s_session;
+std::thread s_housekeeping;   // startHousekeeping()
 
 // The acceptance driver (SelfUpdateDialog.h). Read once.
 struct E2E
@@ -306,9 +309,25 @@ void Draw(AppContext& ctx)
 #endif
 }
 
+void startHousekeeping()
+{
+	if (s_housekeeping.joinable()) return;
+	s_housekeeping = std::thread([] {
+		const HE::Su::PruneResult r = HE::Su::pruneTakeoverLeftoversForRunningBuild(HE::Su::defaultStagingDir());
+		for (const std::string& p : r.removed)
+			HE_LOG_INFO(SelfUpdate, "removed the leftovers of an earlier update: %s", p.c_str());
+		for (const std::string& e : r.errors)
+			HE_LOG_WARN(SelfUpdate, "could not remove the leftovers of an earlier update (next start retries): %s",
+			            e.c_str());
+		HE_LOG_INFO(SelfUpdate, "update leftovers: kept '%s', removed %zu, %zu too recent to touch, %zu failed",
+		            r.kept.c_str(), r.removed.size(), r.young.size(), r.errors.size());
+	});
+}
+
 void joinPendingWork()
 {
 	if (s_session) s_session->join();
+	if (s_housekeeping.joinable()) s_housekeeping.join();
 }
 }
 
@@ -322,6 +341,7 @@ bool isOpen() { return false; }
 void Draw(AppContext&) {}
 bool takeInstallRequest() { return false; }
 bool beginInstall(AppContext&) { return false; }
+void startHousekeeping() {}
 void joinPendingWork() {}
 PromptAnswer takeE2EPromptAnswer() { return PromptAnswer::None; }
 }

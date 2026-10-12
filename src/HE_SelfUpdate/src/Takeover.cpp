@@ -201,4 +201,77 @@ TakeoverResult beginTakeover(const TakeoverOptions& options)
 	return result;
 }
 
+PruneResult pruneTakeoverLeftovers(const PruneOptions& options)
+{
+	PruneResult result;
+	if (options.installRoot.empty()) return result;
+	const fs::path parent = options.installRoot.parent_path();
+
+	struct WorkDir { fs::path path; fs::file_time_type mtime; bool hasBackup = false; };
+	std::vector<WorkDir> dirs;
+	std::error_code ec;
+	for (fs::directory_iterator it(parent, ec), end; !ec && it != end; it.increment(ec))
+	{
+		const fs::path p = it->path();
+		std::error_code sec;
+		// Never follow a link out of the install's parent directory.
+		if (!startsWith(utf8FromPath(p.filename()), ".heselfupdate-") ||
+		    !fs::is_directory(fs::symlink_status(p, sec)))
+			continue;
+		WorkDir d;
+		d.path      = p;
+		d.mtime     = fs::last_write_time(p, sec);
+		if (sec) continue;
+		d.hasBackup = fs::is_directory(p / "backup", sec);
+		dirs.push_back(std::move(d));
+	}
+	if (dirs.empty()) return result;
+
+	const WorkDir* keep = nullptr;
+	ApplyResult last;
+	std::string readErr;
+	if (!options.lastApplyFile.empty() && readApplyResult(utf8FromPath(options.lastApplyFile), last, readErr) &&
+	    last.status == ApplyStatus::Applied && last.toVersion == options.runningVersion && !last.backupRoot.empty())
+	{
+		const fs::path named = pathFromUtf8(last.backupRoot).parent_path();
+		for (const WorkDir& d : dirs)
+		{
+			std::error_code eec;
+			if (d.hasBackup && fs::equivalent(d.path, named, eec)) { keep = &d; break; }
+		}
+	}
+	if (!keep)
+		for (const WorkDir& d : dirs)
+			if (d.hasBackup && (!keep || d.mtime > keep->mtime)) keep = &d;
+	if (keep) result.kept = utf8FromPath(keep->path);
+
+	const fs::file_time_type now = fs::file_time_type::clock::now();
+	for (const WorkDir& d : dirs)
+	{
+		if (&d == keep) continue;
+		if (now - d.mtime < options.grace)
+		{
+			result.young.push_back(utf8FromPath(d.path));
+			continue;
+		}
+		std::error_code rec;
+		fs::remove_all(d.path, rec);
+		if (rec) result.errors.push_back(utf8FromPath(d.path) + ": " + rec.message());
+		else     result.removed.push_back(utf8FromPath(d.path));
+	}
+	return result;
+}
+
+PruneResult pruneTakeoverLeftoversForRunningBuild(const fs::path& stagingRoot)
+{
+	const LocalBuild running = runningBuild();
+	const fs::path currentExe = currentExecutablePath();
+	if (currentExe.empty()) return {};
+	PruneOptions o;
+	o.installRoot    = installRootForRunningBuild(currentExe, running.platform);
+	o.lastApplyFile  = stagingRoot.empty() ? fs::path() : stagingRoot / "last-apply.json";
+	o.runningVersion = running.version;
+	return pruneTakeoverLeftovers(o);
+}
+
 } // namespace HE::Su

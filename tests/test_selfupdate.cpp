@@ -4,8 +4,10 @@
 #include <SelfUpdate/SelfUpdateCheck.h>
 #include <SelfUpdate/SelfUpdateEndpoint.h>
 #include <SelfUpdate/SelfUpdateManifest.h>
+#include <SelfUpdate/SelfUpdateProcess.h>
 #include <SelfUpdate/SelfUpdateTransport.h>
 #include <SelfUpdate/SelfUpdateVersion.h>
+#include <SelfUpdate/Takeover.h>
 
 #include <ContentSync/SftpCredentials.h>
 #include <Crypto/Sha256.h>
@@ -20,6 +22,8 @@
 #include <regex>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
 using namespace HE::Su;
@@ -737,6 +741,127 @@ TEST_CASE("selfupdate: download, verify and stage")
 // second account's endpoint, SftpClient and a real server work together. The
 // server needs the layout of a real one (<channel>/manifest.json, and the artifact
 // the manifest names for this platform beside it) and a version newer than 0.0.1.
+// ── What earlier takeovers left beside the install (Takeover.h) ──────────────
+namespace {
+
+// <parent>/.heselfupdate-<name>/ with a backup/ (a finished swap) or only a
+// payload/ (an aborted or in-flight one), dated `age` ago.
+fs::path seedWorkDir(const fs::path& parent, const std::string& name, bool withBackup, std::chrono::hours age)
+{
+	const fs::path d = parent / (".heselfupdate-" + name);
+	writeFile(d / (withBackup ? "backup" : "payload") / "HorizonEditor", "old build");
+	fs::last_write_time(d, fs::file_time_type::clock::now() - age);
+	return d;
+}
+
+void writeLastApply(const fs::path& file, const std::string& status, const std::string& toVersion,
+                    const fs::path& backupRoot)
+{
+	writeFile(file, "{\"schema\":1,\"status\":\"" + status + "\",\"error\":\"\",\"fromVersion\":\"0.6.0\","
+	                "\"toVersion\":\"" + toVersion + "\",\"installRoot\":\"\",\"backupRoot\":" +
+	                nlohmann::json(utf8FromPath(backupRoot)).dump() + ",\"newPid\":1}");
+}
+
+} // namespace
+
+TEST_CASE("selfupdate: older update leftovers are pruned, the one last-apply.json names is kept")
+{
+	TempDir t;
+	const fs::path install = t.path / "Editor";
+	writeFile(install / "HorizonEditor", "running build");
+	const fs::path oldest = seedWorkDir(t.path, "0.5.0-aaaa", true,  std::chrono::hours(72));
+	const fs::path named  = seedWorkDir(t.path, "0.7.0-bbbb", true,  std::chrono::hours(48));
+	const fs::path newer  = seedWorkDir(t.path, "0.6.0-cccc", true,  std::chrono::hours(24));  // newer, but not named
+	const fs::path stale  = seedWorkDir(t.path, "0.7.0-dddd", false, std::chrono::hours(30));  // rolled back / aborted
+	// Names that only look alike are none of this code's business.
+	writeFile(t.path / "heselfupdate-0.4.0" / "backup" / "x", "x");
+	writeFile(t.path / ".heselfupdate-file", "a file, not a work directory");
+	writeLastApply(t.path / "last-apply.json", "applied", "0.7.0", named / "backup");
+
+	PruneOptions o;
+	o.installRoot    = install;
+	o.lastApplyFile  = t.path / "last-apply.json";
+	o.runningVersion = "0.7.0";
+	const PruneResult r = pruneTakeoverLeftovers(o);
+
+	CHECK(fs::equivalent(pathFromUtf8(r.kept), named));
+	CHECK(fs::exists(named / "backup" / "HorizonEditor"));
+	CHECK_FALSE(fs::exists(oldest));
+	CHECK_FALSE(fs::exists(newer));
+	CHECK_FALSE(fs::exists(stale));
+	CHECK(r.removed.size() == 3);
+	CHECK(r.errors.empty());
+	CHECK(fs::exists(install / "HorizonEditor"));
+	CHECK(fs::exists(t.path / "heselfupdate-0.4.0" / "backup" / "x"));
+	CHECK(fs::exists(t.path / ".heselfupdate-file"));
+}
+
+TEST_CASE("selfupdate: right after a swap the newest backup is kept, whatever last-apply.json still says")
+{
+	// The relaunched editor starts while HorizonUpdater is still watching it:
+	// last-apply.json is the PREVIOUS update's, applied to another version.
+	TempDir t;
+	const fs::path install = t.path / "Editor";
+	writeFile(install / "HorizonEditor", "running build");
+	const fs::path previous = seedWorkDir(t.path, "0.7.0-aaaa", true, std::chrono::hours(48));
+	const fs::path justNow  = seedWorkDir(t.path, "0.8.0-bbbb", true, std::chrono::hours(1));
+	writeLastApply(t.path / "last-apply.json", "applied", "0.7.0", previous / "backup");
+
+	PruneOptions o;
+	o.installRoot    = install;
+	o.lastApplyFile  = t.path / "last-apply.json";
+	o.runningVersion = "0.8.0";
+	const PruneResult r = pruneTakeoverLeftovers(o);
+
+	CHECK(fs::equivalent(pathFromUtf8(r.kept), justNow));
+	CHECK(fs::exists(justNow / "backup"));
+	CHECK_FALSE(fs::exists(previous));
+
+	SUBCASE("and a missing last-apply.json picks the same one")
+	{
+		const fs::path older = seedWorkDir(t.path, "0.6.0-cccc", true, std::chrono::hours(96));
+		o.lastApplyFile = t.path / "nothing-here.json";
+		const PruneResult again = pruneTakeoverLeftovers(o);
+		CHECK(fs::equivalent(pathFromUtf8(again.kept), justNow));
+		CHECK_FALSE(fs::exists(older));
+	}
+}
+
+TEST_CASE("selfupdate: nothing younger than the grace period is pruned")
+{
+	// A second editor on the same install may be mid-takeover: its payload/ and
+	// even a just-swapped backup/ look like leftovers until HorizonUpdater is done.
+	TempDir t;
+	const fs::path install = t.path / "Editor";
+	writeFile(install / "HorizonEditor", "running build");
+	const fs::path kept     = seedWorkDir(t.path, "0.7.0-aaaa", true,  std::chrono::hours(48));
+	const fs::path inFlight = seedWorkDir(t.path, "0.8.0-bbbb", false, std::chrono::hours(0));
+	const fs::path old      = seedWorkDir(t.path, "0.6.0-cccc", true,  std::chrono::hours(72));
+	writeLastApply(t.path / "last-apply.json", "applied", "0.7.0", kept / "backup");
+
+	PruneOptions o;
+	o.installRoot    = install;
+	o.lastApplyFile  = t.path / "last-apply.json";
+	o.runningVersion = "0.7.0";
+	const PruneResult r = pruneTakeoverLeftovers(o);
+
+	CHECK(fs::equivalent(pathFromUtf8(r.kept), kept));
+	CHECK(fs::exists(inFlight / "payload" / "HorizonEditor"));
+	CHECK(r.young.size() == 1);
+	CHECK_FALSE(fs::exists(old));
+
+	SUBCASE("with no work directories at all there is nothing to report")
+	{
+		TempDir empty;
+		writeFile(empty.path / "Editor" / "HorizonEditor", "running build");
+		o.installRoot = empty.path / "Editor";
+		const PruneResult none = pruneTakeoverLeftovers(o);
+		CHECK(none.kept.empty());
+		CHECK(none.removed.empty());
+		CHECK(none.young.empty());
+	}
+}
+
 TEST_CASE("selfupdate: live round trip over SFTP" * doctest::skip(std::getenv("HE_SELFUPDATE_LIVE_TEST") == nullptr))
 {
 	const SelfUpdateConfig config = loadSelfUpdateConfig();

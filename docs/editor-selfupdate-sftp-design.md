@@ -272,6 +272,36 @@ design but has no automated test — it needs a platform-specific way to hold
 such a handle open, deliberately left out of this step to keep the test suite
 portable; see "What the next step hangs on".
 
+**What a takeover leaves behind, and how long (Schritt 8).** The work directory
+`<install parent>/.heselfupdate-<version>-<suffix>/` stays after the swap: an
+applied one holds `backup/`, the complete previous install (118 MB on Windows,
+148 MB on Linux), plus an empty `payload/extract/`; a rolled-back one holds the
+broken new build in `payload/`; an aborted one only `payload/`. The rule
+(the queen's decision): **exactly one previous install is kept, older ones go
+at the next start.** `pruneTakeoverLeftovers` (`Takeover.h`), started by
+`SelfUpdateDialog::startHousekeeping()` on a worker from the editor's
+start-up probes (not in the headless dump), joined at shutdown:
+
+* Only directories named `.heselfupdate-*` directly beside the install root
+  (`installRootForRunningBuild`: the deploy folder, or the `.app` on macOS) are
+  looked at; links are not followed.
+* Kept: the one `last-apply.json` names, if it says `applied` to exactly the
+  running version. **On the first start after a swap it never does** —
+  HorizonUpdater writes it only after its health watch (8 s), while the
+  relaunched editor is already starting (seen in the Linux run: the pass at
+  21:58:29, `last-apply.json` 8 s later). So the rule that actually decides
+  there is the fallback: the newest directory (by modification time, which the
+  swap's two renames set) that holds a `backup/`.
+* Everything else is deleted — unless it is younger than 15 minutes: a second
+  editor on the same install may be mid-takeover, and its `payload/` looks like
+  any leftover until HorizonUpdater has swapped it in. Two updates within a
+  quarter of an hour therefore keep two backups until a later start.
+* A directory that cannot be deleted (a file still open on Windows) is logged
+  and tried again at the next start.
+
+`HorizonUpdater-<suffix>[.exe]` in the temp directory (a few MB per update) is
+not cleaned up by this; the OS temp cleanup is left to it.
+
 ## The Editor UI (Thema 186 Schritt 6)
 
 **Help ▸ Check for Updates…** — in the ImGui menu bar and in the native macOS
@@ -345,14 +375,14 @@ the installed bundle, which the swap replaces.
 | `SelfUpdateApplyPlan.h` | `ApplyPlan` (command-line contract, `toArgs`/`fromArgs`), `ApplyStatus`, `ApplyResult` — header-only, no engine type |
 | `SelfUpdateApplyCore.h/.cpp` | `applyUpdate` (the swap/rollback/relaunch state machine), `writeApplyResult`/`readApplyResult`, `appendApplyLog` — compiled into both `HorizonSelfUpdate` (so the next editor start can read the last result) and `HorizonUpdater` |
 | `SelfUpdateInstall.h/.cpp` | `extractStagedBuild` (OS tool per platform), `mainExecutableRelativePath`, `installRootForRunningBuild` |
-| `Takeover.h/.cpp` | `preflightTakeover`, `beginTakeover` — the editor-side entry point, called from `EditorSelfUpdate::Session` |
+| `Takeover.h/.cpp` | `preflightTakeover`, `beginTakeover` — the editor-side entry point, called from `EditorSelfUpdate::Session`; `pruneTakeoverLeftovers` — the older `.heselfupdate-*` directories, at editor start |
 | `src/HE_Editor/EditorSelfUpdate.h/.cpp` | `Session` (check / download / install on a worker, injectable `Backend`), `relaunchArgsFor` — ImGui-free, also compiled into `he_tests` |
 | `src/HE_Editor/SelfUpdateDialog.h/.cpp` | Help ▸ Check for Updates… window, the one-slot install request, `beginInstall`, the `HE_SELFUPDATE_E2E` acceptance driver; stubs without `HE_HAVE_SELFUPDATE` |
 | `src/HE_Editor/EditorUI.cpp` | `GuardedAction::InstallUpdate` (enum, `runGuardedAction`, `endsSession`, collab wording), menu row, request poll in `renderEditor`, direct path on the Hub |
 | `tests/test_editor_selfupdate.cpp` | 6 cases: the relaunch argument reopens the project through `pickFromArguments`; check and download never begin the takeover; a failed begin leaves staging intact and does not quit; preflight blocker hides Restart; damaged download; no account |
 | `scripts/selfupdate_editor_e2e.py` | the end-to-end run with a real editor, `--mode save|discard|cancel` |
 | `updater/main.cpp` → **`HorizonUpdater`** | the separate executable `Takeover.cpp` spawns; `HE_SU_STANDALONE`, links no engine library, deployed beside `HorizonEditor` (`he_deploy_dll`, and on macOS `package_macos.sh` copies it into `Contents/MacOS`) |
-| `tests/test_selfupdate.cpp` | 17 cases; `ctest -R test_selfupdate` |
+| `tests/test_selfupdate.cpp` | 20 cases (3 of them the leftover rule: the named one kept, the newest kept right after a swap, nothing within the grace period); `ctest -R test_selfupdate` |
 | `tests/test_selfupdate_apply.cpp` | `HorizonUpdater` run as a real child process against `tests/helpers/fake_editor.cpp` (`he_fake_editor`, a real process standing in for both "the editor being waited on" and "the build being relaunched"): `ApplyPlan` CLI round trip, happy swap (preserves `config.json`, relaunch args reach the new build), the editor outliving the wait timeout (nothing touched), a new build that dies on arrival (rollback + the old build relaunched) |
 | `scripts/selfupdate_test_sftp_server.py` | read-only paramiko SFTP server with password login, for the live test and the CI matrix |
 | `scripts/selfupdate_live_ci_check.py` | the CI-side orchestrator (Thema 186 Schritt 4): writes a one-build manifest+artifact fixture, starts the server above with a generated password, points `HE_SELFUPDATE_*` at it and runs `ctest -R ^test_selfupdate$` |
@@ -479,17 +509,48 @@ relaunched one runs with the install as working directory, where a
 free of a firewall prompt; run leftovers (`HorizonEngine*.log`, `config.json`,
 `imgui.ini`) are not copied out of the source deploy.
 
-**Found on the way, not changed (product decision):** nothing removes the work
-directory `<install parent>/.heselfupdate-<version>-<suffix>/` after a
-successful update. Its `backup/` is the complete previous install (118 MB for
-this deploy), so every update leaves one more full copy beside the install.
-Keeping the last one is a manual rollback; keeping all of them is a leak. To
-decide: delete older ones on the next start of the new build, or keep exactly
-one.
+**Found on the way:** nothing removed the work directory
+`<install parent>/.heselfupdate-<version>-<suffix>/` after a successful update
+(118 MB of previous install each time). Decided and built in Schritt 8 — see
+"What a takeover leaves behind" under "The takeover".
 
-Not shown yet: the same run on Linux (the tar.gz branch of the script is
-unrun; NN-WS03 has no WSL distribution and the Linux device NN-RP01 runs no
-bees), and against the real account (host name still missing).
+### Schritt 8: end to end on Linux, and the leftover cleanup (2026-10-12)
+
+WSL 2 Ubuntu 26.04 on NN-WS03 (GCC 15.2, CMake 4.2, no GPU: Xvfb + Mesa
+llvmpipe), a Release build of this branch configured like ci.yml's Linux job
+(`-DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON`, own `DEPLOY_DIR`) on the WSL
+ext4 filesystem; `--install-src` `<DEPLOY_DIR>/Editor`, artifact the script's
+tar.gz wrapped in `Editor/` like ci.yml's (`tar czf … -C package Editor`), the
+test SFTP account from the distribution's `python3-paramiko`:
+
+| Mode | 563b2450 (script unchanged) | with the cleanup (this step) | What it showed |
+|---|---|---|---|
+| `cancel` | 9/9 | 9/9 | as on macOS/Windows |
+| `save` | 13/13 | 16/16 | Check → Download (57 MB tar.gz, SHA-256 verified) → Restart → prompt → Save; `last-apply.json` `applied` 0.7.0 → 9.9.9, payload `…/payload/extract/Editor` (the single-top-level-dir branch); the relaunched editor's `ps` command line `<install>/HorizonEditor <project>.heproj`, project open, clean, entity saved; then: the seeded three-day-old `.heselfupdate-0.6.0-e2estale` deleted, this update's backup kept, a fresh payload-only directory left alone |
+| `discard` | 13/13 | 16/16 | the same, the scene file unchanged and the entity absent |
+
+The same three modes with the cleanup on Windows (NN-WS03, Release build in
+`C:/hw186`, as in Schritt 7): `cancel` 9/9, `save` 16/16, `discard` 16/16.
+macOS has not been re-run with this script (its 13/13 above is from the
+Schritt-6 script; the three new checks are path-generic, the bundle's backup is
+`backup/Contents/MacOS/HorizonEditor`).
+
+Two things the Linux run needed that are not in the product:
+
+* **`MESA_GL_VERSION_OVERRIDE=4.6 MESA_GLSL_VERSION_OVERRIDE=460`.** The editor
+  hands ImGui `#version 460` on every platform but macOS
+  (`EditorApplication.cpp`, `ImGui_ImplOpenGL3_Init`); llvmpipe offers 4.5, the
+  ImGui shader fails to compile and the editor dies after its first frame
+  (the MCP port refused, nothing in the log). That is a real limit for a Linux
+  user on a GL-4.5 driver, not a self-update one — noted, not changed here.
+* **`env -u WAYLAND_DISPLAY SDL_VIDEO_DRIVER=x11`** under WSLg, or SDL opens on
+  the Windows desktop instead of Xvfb.
+
+GCC 15 also failed `tests/test_engine_dependencies.cpp` (`std::find` without
+`<algorithm>`, which GCC 13 on the CI runner pulls in indirectly) — one include,
+fixed.
+
+Not shown yet: a run against the real account (host name still missing).
 
 ## Open decisions (need the human)
 
@@ -511,12 +572,12 @@ bees), and against the real account (host name still missing).
 
 ## What the next step hangs on
 
-* **The Editor UI — done in Schritt 6**, end to end on macOS (Schritt 6) and
-  Windows (Schritt 7). What is left of it: run `scripts/selfupdate_editor_e2e.py`
-  on Linux (a tar.gz of the flat deploy; that branch has never run, it needs a
-  Linux machine with a display or Xvfb, a build of this branch and a paramiko
-  venv), the cleanup of `.heselfupdate-*` above, and, once Linux is green,
-  consider a CI leg after the packaging step (~1 min per mode).
+* **The Editor UI — done in Schritt 6**, end to end on macOS (Schritt 6),
+  Windows (Schritt 7) and Linux (Schritt 8, WSL), with the `.heselfupdate-*`
+  cleanup (Schritt 8). What is left of it: a CI leg running
+  `scripts/selfupdate_editor_e2e.py` after the packaging step (~1 min per mode;
+  on the hosted Linux runner it needs Xvfb and the Mesa override above), and a
+  macOS re-run of the current script.
 * **The known gap above** (a rename blocked for the whole retry window) has no
   test; it needs a platform-specific way to hold a directory-internal file
   handle open without `FILE_SHARE_DELETE` for the duration.

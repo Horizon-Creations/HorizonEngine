@@ -30,7 +30,13 @@ namespace SelfUpdateDialog
 	// happened to the install, and the dialog is open again with the reason.
 	bool beginInstall(AppContext& ctx);
 
-	// Editor shutdown: a check or a download may still be running.
+	// Editor start: delete what earlier updates left beside the install, keeping
+	// the one previous install the running build was swapped in from
+	// (Takeover.h, pruneTakeoverLeftovers). On a worker — it can be a few
+	// hundred megabytes — joined by joinPendingWork().
+	void startHousekeeping();
+
+	// Editor shutdown: a check, a download or the housekeeping may still be running.
 	void joinPendingWork();
 
 	// ── Acceptance driver (scripts/selfupdate_editor_e2e.py) ─────────────────

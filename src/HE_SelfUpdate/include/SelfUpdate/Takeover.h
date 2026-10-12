@@ -19,6 +19,7 @@
 #include "SelfUpdate/SelfUpdateCheck.h"
 #include "SelfUpdate/SuCommon.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -61,5 +62,43 @@ struct TakeoverResult
 // that. On failure, any scratch directory this created is removed again and the
 // editor's own install is untouched; the caller should report the error and NOT quit.
 HE_SU_API TakeoverResult beginTakeover(const TakeoverOptions& options);
+
+// ─── What earlier takeovers left beside the install ───────────────────────────
+// Every takeover works in <install parent>/.heselfupdate-<version>-<suffix>/,
+// and after a successful swap its backup/ is the complete previous install
+// (~120-150 MB). That is the manual way back, so one is kept: the one the
+// running build was swapped in from. Every OLDER one is deleted at the next
+// start of the editor (pruneTakeoverLeftoversForRunningBuild, on a worker).
+//
+// Which one is kept: the work directory last-apply.json names, when it says
+// "applied" to exactly the running version. Right after a swap it does not say
+// that yet — HorizonUpdater writes it only after its health watch, while the
+// relaunched editor is already starting — so otherwise it is the newest one
+// (by modification time, which the swap's two renames set) holding a backup/.
+// Nothing younger than `grace` is touched at all: a second editor on the same
+// install may be in the middle of its own takeover, and a takeover's payload/
+// looks like any leftover until HorizonUpdater has swapped it in.
+struct PruneOptions
+{
+	std::filesystem::path installRoot;     // installRootForRunningBuild(); its PARENT is searched
+	std::filesystem::path lastApplyFile;   // <stagingRoot>/last-apply.json, may be missing
+	std::string           runningVersion;  // runningBuild().version
+	std::chrono::seconds  grace = std::chrono::minutes(15);
+};
+
+struct PruneResult
+{
+	std::string              kept;      // the one work directory kept, empty if there was none
+	std::vector<std::string> removed;   // deleted
+	std::vector<std::string> young;     // left alone, younger than `grace`
+	std::vector<std::string> errors;    // could not be deleted (retried at the next start)
+};
+
+HE_SU_API PruneResult pruneTakeoverLeftovers(const PruneOptions& options);
+
+// The same for the running executable's own install and the given staging
+// directory (SelfUpdateCheck.h's defaultStagingDir()). Nothing to do — an
+// empty result — for a build that does not sit where its platform expects.
+HE_SU_API PruneResult pruneTakeoverLeftoversForRunningBuild(const std::filesystem::path& stagingRoot);
 
 } // namespace HE::Su

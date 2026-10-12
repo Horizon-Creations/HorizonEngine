@@ -32,9 +32,22 @@ the flat deploy directory (HorizonEditor[.exe] + libraries + HorizonUpdater)
 on Linux and Windows. Exit code 0 = every expectation of the mode held;
 OUT/result.json lists them.
 
-Verified on macOS (arm64, Schritt 6) and Windows (x64, NN-WS03, Schritt 7:
-flat zip like ci.yml's, flat deploy as the install). The Linux branch (tar.gz
-artifact, flat install) follows SelfUpdateInstall.cpp but has not been run yet.
+save and discard also check the start-up cleanup (Takeover.h,
+pruneTakeoverLeftovers): before the update the script leaves an old backup and
+an in-flight payload beside the install, and the relaunched editor must delete
+the first, keep this update's backup and leave the second alone.
+
+Verified on macOS (arm64, Schritt 6), Windows (x64, NN-WS03, Schritt 7: flat
+zip like ci.yml's, flat deploy as the install) and Linux (x64, WSL Ubuntu on
+NN-WS03, Schritt 8: tar.gz wrapped in Editor/, flat install). Without a GPU,
+under Xvfb with Mesa llvmpipe, which offers GL 4.5 where the editor asks ImGui
+for GLSL 460:
+
+    env -u WAYLAND_DISPLAY SDL_VIDEO_DRIVER=x11 MESA_GL_VERSION_OVERRIDE=4.6 \\
+        MESA_GLSL_VERSION_OVERRIDE=460 xvfb-run -a -s "-screen 0 1920x1080x24" \\
+        python3 scripts/selfupdate_editor_e2e.py --install-src <DEPLOY_DIR>/Editor ...
+
+(-u WAYLAND_DISPLAY: under WSLg SDL would otherwise open on the real desktop.)
 """
 
 import argparse
@@ -369,8 +382,6 @@ def main():
         state = bridge.call("scene_info")
         expect(state.get("dirty") is True, "scene is dirty after the unsaved change (scene_info.dirty)")
 
-        trigger.write_text("go")
-        log("trigger written: Check for Updates -> Download -> Restart to Update -> prompt (%s)" % args.mode)
         # On Windows the editor's stdout into a file is block buffered, so the
         # live waits read its own log file too (flushed per record; beside the
         # exe, rotated to .1 by the relaunched editor after the swap carried it
@@ -388,6 +399,24 @@ def main():
                 except OSError:
                     pass
             return "\n".join(parts)
+
+        # What an earlier update would have left beside the install, put there
+        # only after this editor's own start-up pass is through (it would delete
+        # it before the update ever ran): a three-day-old previous install the
+        # relaunched editor must delete, and a payload of a takeover that may
+        # still be in flight, which it must leave alone (Takeover.h).
+        stale_left = install.parent / ".heselfupdate-0.6.0-e2estale"
+        young_left = install.parent / ".heselfupdate-9.9.9-e2einflight"
+        if args.mode != "cancel":
+            wait_for(lambda: "update leftovers:" in text(), args.timeout, "the old editor's leftover pass")
+            (stale_left / "backup").mkdir(parents=True)
+            (stale_left / "backup" / "HorizonEditor").write_text("0.6.0")
+            (young_left / "payload").mkdir(parents=True)
+            past = time.time() - 3 * 24 * 3600
+            os.utime(stale_left, (past, past))
+
+        trigger.write_text("go")
+        log("trigger written: Check for Updates -> Download -> Restart to Update -> prompt (%s)" % args.mode)
 
         if args.mode == "cancel":
             wait_for(lambda: "update cancelled at the unsaved-changes prompt" in text(), args.timeout,
@@ -448,6 +477,16 @@ def main():
             expect(has_marker, "the saved change is in the scene the relaunched editor shows")
         else:
             expect(not has_marker, "the discarded change is not in the relaunched editor's scene")
+
+        this_update = pathlib.Path(result.get("backupRoot", "")).parent
+        try:
+            wait_for(lambda: not stale_left.exists(), args.timeout, "the relaunched editor's leftover pass")
+        except RuntimeError:
+            pass
+        expect(not stale_left.exists(), "the relaunched editor deleted an older update's backup (%s)" % stale_left.name)
+        expect((this_update / "backup" / main_exe(install).relative_to(install)).exists(),
+               "it kept this update's backup, the previous install (%s)" % this_update.name)
+        expect(young_left.exists(), "it left a takeover that may still be in flight alone (%s)" % young_left.name)
         return 0 if all(c["ok"] for c in checks) else 1
     except Exception as e:  # report, then clean up
         expect(False, "aborted: %s" % e)
