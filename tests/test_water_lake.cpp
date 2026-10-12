@@ -756,7 +756,15 @@ TEST_CASE("Water lake sync: moving the whole spline entity moves the water AND t
     REQUIRE(lake::create(rig.world, rig.terrain, sp, flat(10.5f, 2.0f, true)).ok);
     REQUIRE(lake::syncSplines(rig.world) == 0u);                 // nothing moved since create
 
-    const float bedBefore = sculptAt(rig.tc(), 0.0f, 0.0f);      // deep inside the outline: the floor, 10.5 - 2
+    // (0, -8), not the outline's own centre (0, 0): the spline is a 4-point rect
+    // through a Catmull-Rom curve, which bulges past its corners (±10 reads back
+    // as roughly ±12.5, Thema 174 Schritt 8's own lesson on this exact shape), and
+    // the dig's bank reaches another 4 m beyond THAT outline — an 8 m move is not
+    // enough to clear the centre from the NEW outline's reach, so checking there
+    // after the move would be asking "did the fresh dig at the new spot also
+    // happen to touch the old centre", not "was the old bed lifted". (0, -8) stays
+    // south of both outlines' bank throughout.
+    const float bedBefore = sculptAt(rig.tc(), 0.0f, -8.0f);     // deep inside the outline: the floor, 10.5 - 2
     CHECK(bedBefore < 9.0f);
 
     rig.world.registry().get<TransformComponent>(sp).position.z += 8.0f;
@@ -767,7 +775,7 @@ TEST_CASE("Water lake sync: moving the whole spline entity moves the water AND t
     // The old bed is lifted back off (its own dig's delta subtracted back out,
     // not a bit-exact restore — see GroundPatch), and a fresh one dug at the new
     // spot, the same depth and bank the original "Create Lake" used.
-    CHECK(sculptAt(rig.tc(), 0.0f, 0.0f) > 9.5f);
+    CHECK(sculptAt(rig.tc(), 0.0f, -8.0f) > 9.5f);
     CHECK(sculptAt(rig.tc(), 0.0f, 8.0f) < 9.0f);
 
     // Dig Again still works at the new place, same as ever, an explicit action
