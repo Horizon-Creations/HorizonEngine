@@ -7390,6 +7390,10 @@ void EditorApplication::dumpFrameHeadless()
 	//               the same order SplineTool's button uses): the lake must
 	//               disappear, the spline must stay.
 	//   =redo       undo, then Ctrl+Shift+Z: the lake must come back, same body.
+	//   =slope      drawn, but over a bank instead of flat ground (the WATERLAKE
+	//               witness's own bank heightfield, Thema 174 Schritt 13: both
+	//               sides of the outline meet at the water's own level, a gentle
+	//               shore, not the cliff a `falloff = 0` first attempt left here).
 	// Camera as WATERBRUSH: CAMY=375 CAMZ=48 PITCH=-60. The log line carries the
 	// numbers as a twin to the picture.
 	if (const char* le = std::getenv("HE_DUMP_LAKEEDIT"); le && *le && m_editorWorld)
@@ -7414,8 +7418,21 @@ void EditorApplication::dumpFrameHeadless()
 		ltc.seed        = 0;
 		ltc.dirty       = true;
 		ltc.water.res   = 128;
+		if (mode == "slope")
+		{
+			// The WATERLAKE witness's own bank heightfield (EditorApplication.cpp,
+			// HE_DUMP_WATERLAKE=slope), same shape, so the two witnesses agree.
+			ltc.sculptHeights.assign(static_cast<size_t>(ltc.resolution) * ltc.resolution, 0.0f);
+			for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+				for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+				{
+					const float x = -50.0f + 100.0f * static_cast<float>(xi) / static_cast<float>(ltc.resolution - 1);
+					const float z = -50.0f + 100.0f * static_cast<float>(zi) / static_cast<float>(ltc.resolution - 1);
+					ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] = 0.12f * x + 1.2f * std::sin(0.15f * z);
+				}
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
-		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat chunks first
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat (or banked) chunks first
 		auto& tc = reg.get<TerrainComponent>(land);
 
 		// Terrain-local XZ outline of a bean, a spline of nine points at the
@@ -7471,10 +7488,29 @@ void EditorApplication::dumpFrameHeadless()
 			const L::Created made = L::create(*m_editorWorld, land, spline, lp);
 			body = made.body;
 			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			// The largest height step between adjacent terrain vertices, anywhere:
+			// the number a cliff at the outline would show up as, against the
+			// smooth background slope's own per-step change (a few tenths of a
+			// metre here). The twin to the picture for `=slope` (Thema 174 Schritt
+			// 13): a cliff at the bank reads as a clear outlier, a gentle one does
+			// not.
+			float worstStep = 0.0f;
+			{
+				const uint32_t res = tc.resolution;
+				for (uint32_t zi = 0; zi < res; ++zi)
+					for (uint32_t xi = 0; xi < res; ++xi)
+					{
+						const float here = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
+						if (xi + 1 < res)
+							worstStep = std::max(worstStep, std::fabs(tc.sculptHeights[static_cast<size_t>(zi) * res + xi + 1] - here));
+						if (zi + 1 < res)
+							worstStep = std::max(worstStep, std::fabs(tc.sculptHeights[static_cast<size_t>(zi + 1) * res + xi] - here));
+					}
+			}
 			char buf[200];
-			std::snprintf(buf, sizeof buf, "lake %s, level %.2f, %u cells, %u ground vertices dug%s%s",
+			std::snprintf(buf, sizeof buf, "lake %s, level %.2f, %u cells, %u ground vertices dug%s%s, worst step %.3f m",
 			              made.ok ? "made" : "FAILED", made.level, made.cells, made.ground,
-			              made.error.empty() ? "" : ", error ", made.error.c_str());
+			              made.error.empty() ? "" : ", error ", made.error.c_str(), worstStep);
 			note = buf;
 
 			if (extend)

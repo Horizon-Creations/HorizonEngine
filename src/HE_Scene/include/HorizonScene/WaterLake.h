@@ -100,11 +100,13 @@ namespace HE::water::lake
         float level           = 0.0f;
         float levelOffset     = 0.0f;
         // Tiefe: the bed lies this far below the level. Randverlauf: the width of
-        // the bank that eases from the water's own level, right on the outline,
-        // down to the bed (metres, measured INWARD from the outline; smoothstep).
-        // Nothing outside the outline is ever touched, so the ground never sinks
-        // below the water's level without water laid over it, and the water
-        // (laid over the same outline) always reaches the shore.
+        // the bank on EITHER side of the outline (metres; smoothstep): inward down
+        // to the bed, outward back up to the old ground, both starting from the
+        // water's own level right on the outline, so the two sides meet there
+        // without a seam. The ground only ever eases DOWN where it stood above
+        // the level, never below it on the outward side — so nothing outside the
+        // outline ever sinks below the water's level without water laid over it,
+        // and the water (laid over the same outline) always reaches the shore.
         bool  dig   = true;
         float depth = 2.0f;
         float bank  = 4.0f;
@@ -137,11 +139,11 @@ namespace HE::water::lake
     // the terrain's.
     Result reshape(TerrainComponent& tc, uint16_t body, const std::vector<glm::vec2>& polygon);
 
-    // The ground under the lake's outline goes down to `level − depth`, with a bank
-    // of `bank` metres easing up from the bed to the level right on the outline
-    // (TerrainSculpt::excavatePolygon, Floor mode, bankIn: never raises, never
-    // touches the ground outside the outline). Explicit by design: reshape never
-    // calls it.
+    // The ground under the lake's outline goes down to `level − depth`, with a
+    // bank of `bank` metres on either side of the outline, meeting at the level
+    // right on it (TerrainSculpt::excavatePolygon, Floor mode, bankIn + falloff:
+    // never raises, never lowers the ground outside the outline below the level).
+    // Explicit by design: reshape never calls it.
     TerrainSculpt::Result dig(TerrainComponent& tc, uint16_t body, float depth, float bank);
 
     // The body keeps its water and level but stops being a lake: no spline, no

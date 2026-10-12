@@ -1743,18 +1743,22 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Dig Bed##lake", "Dig Bed",
 	  "Makes the lake with a bed: the ground inside the outline is lowered to "
-	  "Depth below the water level, with a Bank that eases back into the old "
-	  "ground. It only ever lowers. Off makes just the water, for a lake that "
-	  "fills a hollow that is already there.",
+	  "Depth below the water level, with a Bank that eases on both sides of "
+	  "the outline — down to the bed inside it, back up to the old ground "
+	  "outside it. It only ever lowers, and never below the water level "
+	  "outside the outline. Off makes just the water, for a lake that fills a "
+	  "hollow that is already there.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Depth##lake", "Lake Depth",
 	  "How far below the water level the bed is dug, in metres. Used by Create "
 	  "Lake with Dig Bed on, and by Dig Again.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Bank##lake", "Lake Bank",
-	  "The width of the slope from the bed back up to the old ground, in "
-	  "metres, measured outward from the outline. 0 is a hard edge; a wide "
-	  "bank makes a gentle shore.",
+	  "The width of the slope on either side of the outline, in metres: inward "
+	  "down to the bed, outward back up to the old ground, both starting at "
+	  "the water's own level right on the outline, so the water reaches the "
+	  "outline and nothing outside it ever sinks below the water's level. 0 is "
+	  "a hard edge; a wide bank makes a gentle shore.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Clip To Ground##lake", "Clip To Ground",
 	  "A landscape setting, shared by every lake and every painted pond on it: "

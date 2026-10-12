@@ -290,9 +290,34 @@ TEST_CASE("Water lake dig: the water (laid over the same outline) reaches every 
         CHECK(h(-10, z) <= 10.0f + kLevelTol);
         CHECK(h(10, z)  <= 10.0f + kLevelTol);
     }
-    // And nothing outside the outline moved: the steepest point (x = 10, the
-    // original ground's highest edge, 13 above the level) is still exactly that.
-    CHECK(h(13, 0) == doctest::Approx(10.0f + 0.3f * 13.0f));
+    // Outward of the outline (Thema 174 Schritt 13, second pass): ground above
+    // the level still only ever EASES toward it (a smoothstep blend of the old
+    // height toward `edgeHeight`, same shape as ever, just a different target) —
+    // never raised, never past `edgeHeight` the other way, so the two sides meet
+    // AT the outline without a seam. This is a blend, not a clamp like the
+    // inward side: a point well out in the band can still sit above the level,
+    // easing the rest of the way only as it nears the outline. What matters is
+    // the step right AT the outline, which is what a cliff would show up as.
+    //
+    // The first pass (`falloff = 0`, nothing outward touched at all) left h(11)
+    // at its old 13.3 here — a 3.3 m step across the outline alone (h(10) = 10).
+    // This pass:
+    CHECK(h(11, 0) == doctest::Approx(10.3432f).epsilon(1e-3));   // d = 1: eased to within 0.34 m of the outline, not 3.3
+    CHECK(h(12, 0) == doctest::Approx(11.2672f).epsilon(1e-3));   // d = 2
+    CHECK(h(13, 0) == doctest::Approx(12.5272f).epsilon(1e-3));   // d = 3
+    CHECK(h(14, 0) == doctest::Approx(13.7632f).epsilon(1e-3));   // d = 4
+    CHECK(h(15, 0) == doctest::Approx(10.0f + 0.3f * 15.0f));     // d = 5 = falloff: untouched, the band's far edge
+    CHECK(h(16, 0) == doctest::Approx(10.0f + 0.3f * 16.0f));     // further out: untouched too
+    // Never raised anywhere in the band, and monotonic back up to the old slope:
+    // no local bump, no second step hiding further out.
+    float prev = h(10, 0);
+    for (int x = 11; x <= 16; ++x)
+    {
+        const float cur = h(x, 0);
+        CHECK(cur >= prev);
+        CHECK(cur <= 10.0f + 0.3f * static_cast<float>(x) + kLevelTol);
+        prev = cur;
+    }
 }
 
 // ── The merge rule, one consequence at a time ───────────────────────────────

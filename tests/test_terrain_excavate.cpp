@@ -282,6 +282,47 @@ TEST_CASE("Excavate bankIn: the clamp eases from edgeHeight on the outline to th
     CHECK(tc.sculptHeights[32 * 65 + (32 + 6)] < tc.sculptHeights[32 * 65 + (32 + 9)]);
 }
 
+TEST_CASE("Excavate bankIn + falloff together: the outward bank targets edgeHeight too, so both sides "
+          "meet AT the outline without a cliff — Thema 174 Schritt 13's second pass")
+{
+    // The first pass set `falloff` to 0 for the lake tool (nothing outward moves
+    // at all) to stop the old outward bank from sinking the ground below the
+    // water's level outside the outline (dry moat, the first half of the bug).
+    // On ground that is not flat right at the outline, that traded the moat for
+    // a cliff instead: the vertex just inside gets clamped to `edgeHeight`, the
+    // vertex one step outside stays at its old height, whatever that was. This
+    // is the fix: `falloff` back on, but its target is `edgeHeight` too (not
+    // `amount`), whenever `bankIn` > 0 — both banks reach the exact same height
+    // right on the outline, and the ground only ever eases DOWN toward it,
+    // outward as much as inward, never below it outward.
+    TerrainComponent tc = makeLand();
+    for (uint32_t zi = 0; zi < 65; ++zi)
+        for (uint32_t xi = 0; xi < 65; ++xi)
+            tc.sculptHeights[zi * 65 + xi] = 10.0f + 0.5f * (-32.0f + static_cast<float>(xi));   // a 0.5 m/m slope in x
+    const std::vector<float> before = tc.sculptHeights;
+
+    sculpt::ExcavateParams p = floorAt(2.0f, 3.0f);   // amount 2, falloff 3 m outward
+    p.bankIn = 3.0f;                                   // same width inward
+    p.edgeHeight = 9.0f;                                // the "water level"
+    REQUIRE(sculpt::excavatePolygon(tc, rect(-10, -10, 10, 10), p).ok);
+
+    auto h = [&](int x) { return tc.sculptHeights[32 * 65 + (32 + x)]; };
+    // East edge, original height 10 + 0.5*10 = 15, well above edgeHeight 9.
+    CHECK(h(9)  == doctest::Approx(7.18519f).epsilon(1e-4));   // 1 m inward (d = 1 of the 3 m bankIn)
+    CHECK(h(10) == doctest::Approx(9.0f).epsilon(1e-4));       // ON the outline: exactly edgeHeight, from EITHER side
+    CHECK(h(11) == doctest::Approx(10.68519f).epsilon(1e-4));  // 1 m outward (d = 1 of the 3 m falloff)
+    CHECK(h(12) == doctest::Approx(14.18519f).epsilon(1e-4));  // 2 m outward
+    CHECK(h(13) == doctest::Approx(before[32 * 65 + (32 + 13)]).epsilon(1e-5));   // d = falloff: untouched
+    CHECK(h(14) == doctest::Approx(before[32 * 65 + (32 + 14)]).epsilon(1e-5));   // further out: untouched too
+    // The step across the outline (h(10) - h(9), h(11) - h(10)) is no bigger
+    // than the steps either side of it: no special jump sits AT the outline.
+    CHECK(std::fabs(h(11) - h(10)) <= std::fabs(h(10) - h(9)) + 0.5f);
+    // West edge, original height 10 - 0.5*10 = 5, already below edgeHeight 9:
+    // never raised, inward or outward.
+    CHECK(h(-10) == doctest::Approx(before[32 * 65 + (32 - 10)]).epsilon(1e-5));
+    CHECK(h(-11) == doctest::Approx(before[32 * 65 + (32 - 11)]).epsilon(1e-5));
+}
+
 TEST_CASE("Excavate bankIn: zero is bit-identical to the old, distance-independent floor")
 {
     TerrainComponent a = makeLand();

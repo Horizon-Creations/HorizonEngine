@@ -536,8 +536,22 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
                 if (w <= 0.0f) continue;
                 if (params.mode == ExcavateMode::Floor)
                 {
-                    if (was > params.amount)
-                        newH = (w >= 1.0f) ? params.amount : was + w * (params.amount - was);
+                    // `bankIn` > 0: this is the water-aware mode (ExcavateParams::
+                    // bankIn), and the outward bank has to agree with the inward one
+                    // AT the outline (both reach exactly `edgeHeight` there) or the
+                    // two meet as a cliff — ground just inside pulled down to
+                    // `edgeHeight`, ground just outside still at its old height,
+                    // whatever that was (Thema 174 Schritt 13, second pass: the
+                    // first pass set `falloff` to 0 instead, which silently was that
+                    // cliff on any ground that was not already flat at the outline).
+                    // Outward of the outline the ground only ever eases DOWN toward
+                    // `edgeHeight` where it stood above it — never below the water's
+                    // own level, so the dry-moat bug this schritt fixes cannot come
+                    // back — and back up to its own old height by `falloff` metres
+                    // out, same shape as ever.
+                    const float outTarget = (bankIn > 0.0f) ? params.edgeHeight : params.amount;
+                    if (was > outTarget)
+                        newH = (w >= 1.0f) ? outTarget : was + w * (outTarget - was);
                 }
                 else
                     newH = (w >= 1.0f) ? was - depth : was - w * depth;

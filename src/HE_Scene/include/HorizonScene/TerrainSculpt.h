@@ -161,14 +161,24 @@ namespace TerrainSculpt
         // beyond); Dig mode's depth eases from 0 (right on the outline) up to the
         // full depth the same way, `edgeHeight` unused. 0 = disabled, the whole
         // inside is `amount` (or the full depth) as `falloff` alone describes.
-        // Nothing outside the outline moves because of this one — for a lake,
-        // where a `falloff` bank would sink the ground below the water's own
-        // level without any water laid over it (a dry moat outside the shape the
-        // caller asked for), this is the width to use instead, with `edgeHeight`
-        // at the water's level: the bed still reaches exactly `amount` in the
-        // middle, but nothing beyond the outline is ever touched, and the ground
-        // right at the outline is pulled down to the water level, so the water
-        // (laid over the same polygon) reaches the outline too.
+        //
+        // Floor mode only, with this > 0, ALSO changes what the OUTWARD `falloff`
+        // bank eases toward: `edgeHeight` instead of `amount`. Both banks then
+        // reach the exact same height right on the outline (`edgeHeight`) and the
+        // ground never has a seam there — without this, `falloff` alone eases
+        // outward toward `amount` (the DEEP floor), so ground just outside the
+        // outline could sink to the SAME depth as the lake bed, well below the
+        // water's own level, with no water ever laid over it there (a dry moat
+        // around the shape, outside what the caller drew — the bug this pairing
+        // exists to fix, Thema 174 Schritt 13 first pass) — OR, with `falloff` set
+        // to 0 to dodge that (the same schritt's own first attempt), ground just
+        // inside drops to `edgeHeight` while ground one vertex outside stays at
+        // its old height, whatever that was: a cliff on any ground that was not
+        // already flat at the outline (second pass). Set both to the SAME width
+        // for a lake's "Bank": the ground only ever eases DOWN where it stands
+        // above `edgeHeight`, continuously inward to the bed and outward back up
+        // to the old ground, and nothing anywhere sinks below the water's level
+        // without the water (laid over the same polygon) reaching it too.
         float        bankIn     = 0.0f;
         float        edgeHeight = 0.0f;   // Floor mode only
     };

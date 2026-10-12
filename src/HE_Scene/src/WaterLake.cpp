@@ -307,7 +307,10 @@ TerrainSculpt::Result dig(TerrainComponent& tc, uint16_t id, float depth, float 
     TerrainSculpt::ExcavateParams ep;
     ep.mode       = TerrainSculpt::ExcavateMode::Floor;
     ep.amount     = b->level - std::max(0.0f, depth);
-    ep.falloff    = 0.0f;              // nothing outside the outline moves, see ExcavateParams::bankIn
+    // bankIn > 0 makes the outward bank (falloff) target edgeHeight instead of
+    // amount, so both sides of the outline meet at the water's level, not a
+    // cliff — see ExcavateParams::bankIn.
+    ep.falloff    = std::max(0.0f, bank);
     ep.bankIn     = std::max(0.0f, bank);
     ep.edgeHeight = b->level;
     return TerrainSculpt::excavatePolygon(tc, b->polygon, ep);
@@ -487,7 +490,10 @@ Created apply(TerrainComponent& tc, const Plan& plan, const Params& p)
         TerrainSculpt::ExcavateParams ep;
         ep.mode       = TerrainSculpt::ExcavateMode::Floor;
         ep.amount     = plan.level - std::max(0.0f, p.depth);
-        ep.falloff    = 0.0f;              // nothing outside the outline moves, see ExcavateParams::bankIn
+        // bankIn > 0 makes the outward bank (falloff) target edgeHeight instead of
+        // amount, so both sides of the outline meet at the water's level, not a
+        // cliff — see ExcavateParams::bankIn.
+        ep.falloff    = std::max(0.0f, p.bank);
         ep.bankIn     = std::max(0.0f, p.bank);
         ep.edgeHeight = plan.level;
         const TerrainSculpt::Result sr = TerrainSculpt::excavatePolygon(tc, plan.polygon, ep);
