@@ -458,6 +458,10 @@ namespace
         uint32_t dugDry = 0;         // ... that the sheet does not cover
         float    dryDepth = 0.0f;    // the deepest of those, metres below the old ground
         uint32_t triangles = 0;
+        // The other way round, reported, not required: water over ground the
+        // stroke left where it was (shallow water at the rim, the level offset).
+        uint32_t wetUndug = 0;
+        float    widestShelf = 0.0f; // metres from such a vertex to the nearest lowered one, at most
     };
 
     // The sheet the field's own settings build for `body`, the mesh WaterSurface draws.
@@ -505,17 +509,31 @@ namespace
         auto covered = [&](float x, float z) { return sheetCovers(sheet, x, z, 0.005f); };
         const uint32_t res = tc.resolution;
         const float stepX = tc.sizeX / static_cast<float>(res - 1), stepZ = tc.sizeZ / static_cast<float>(res - 1);
+        std::vector<glm::vec2> dugAt, wetUndugAt;
         for (uint32_t zi = 0; zi < res; ++zi)
             for (uint32_t xi = 0; xi < res; ++xi)
             {
                 const size_t i = static_cast<size_t>(zi) * res + xi;
-                if (!(tc.sculptHeights[i] < before[i])) continue;
-                ++r.dug;
                 const float x = -tc.sizeX * 0.5f + static_cast<float>(xi) * stepX;
                 const float z = -tc.sizeZ * 0.5f + static_cast<float>(zi) * stepZ;
+                if (!(tc.sculptHeights[i] < before[i]))
+                {
+                    if (sheetCovers(sheet, x, z, 0.0f)) wetUndugAt.push_back({ x, z });
+                    continue;
+                }
+                ++r.dug;
+                dugAt.push_back({ x, z });
                 if (covered(x, z)) continue;
                 ++r.dugDry;
                 r.dryDepth = std::max(r.dryDepth, before[i] - tc.sculptHeights[i]);
+            }
+        r.wetUndug = static_cast<uint32_t>(wetUndugAt.size());
+        if (!dugAt.empty())
+            for (const glm::vec2& w : wetUndugAt)
+            {
+                float best = 1e30f;
+                for (const glm::vec2& d : dugAt) best = std::min(best, glm::dot(w - d, w - d));
+                r.widestShelf = std::max(r.widestShelf, std::sqrt(best));
             }
         return r;
     }
@@ -585,12 +603,28 @@ TEST_CASE("Water brush dig (Thema 188): the pit is never wider than the sheet â€
         }
         MESSAGE(std::string(c.name) << ": dug " << r.dug << " vertices, " << r.dugDry << " of them dry (deepest "
                 << r.dryDepth << " m), bed " << (deepest - floorY) << " m above the floor, "
-                << cutAboveLevel << " cut down from above the level, sheet " << r.triangles << " triangles");
+                << cutAboveLevel << " cut down from above the level, sheet " << r.triangles << " triangles; "
+                << r.wetUndug << " vertices under water but not dug, at most " << r.widestShelf
+                << " m from the pit");
         CHECK(r.dugDry == 0u);
         CHECK(r.dug > 100u);   // a gentle brush paints (and digs) a narrower stroke, not none
         if (c.bed) CHECK(deepest <= floorY + 0.05f);   // paced: within a few cm of it, not on it
         if (c.slopeX > 0.0f) CHECK(cutAboveLevel > 50u);
     }
+
+    // A caller that hands the brush a negative falloff: the dig clamps it to 0 and
+    // walks the radius, and so must the check after it.
+    TerrainComponent tc = makeWideLand(10.0f, 0.08f);
+    const std::vector<float> before = tc.sculptHeights;
+    brush::Params p;
+    p.radius = 10.0f; p.falloff = -5.0f; p.amount = 1.0f;
+    p.levelFromGround = true; p.levelOffset = 0.3f;
+    p.dig = true; p.digDepth = 1.0f;
+    const brush::Stroke s = drag(tc, { -30.0f, 0.0f }, { 18.0f, 0.0f }, p, 12);
+    REQUIRE(s.body != water::kNoBody);
+    const PitVsSheet r = pitVsSheet(tc, before, s.body);
+    CHECK(r.dug > 100u);
+    CHECK(r.dugDry == 0u);
 }
 
 TEST_CASE("insideSheet (Thema 188): the point test the dig asks says what the mesh covers, saddles and shore "

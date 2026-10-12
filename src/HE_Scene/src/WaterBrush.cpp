@@ -164,7 +164,8 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         // wetLevel = the stroke's own water level (Thema 174 Schritt 13): the bed
         // eases from the level at half weight to the floor at full weight, and
         // ground above the level goes to it at once.
-        const Region was = saveRegion(tc, x, z, p.radius + p.falloff);
+        // The reach lowerToFloor itself walks: it clamps both to ≥ 0 first.
+        const Region was = saveRegion(tc, x, z, std::max(0.0f, p.radius) + std::max(0.0f, p.falloff));
         const TerrainSculpt::Result g =
             TerrainSculpt::lowerToFloor(tc, x, z, p.radius, p.falloff, s.level - p.digDepth, p.amount, s.level);
         d.ok = d.ok || g.ok;
