@@ -1040,9 +1040,10 @@ private:
 	// when the pass could not run (the caller then keeps `sourceHdr`).
 	void* EncodeMotionBlur(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
 
-	// Underwater caustics (Thema 185 Schritt 3): one full-res pass ahead of DoF/motion
-	// blur/bloom (see kUnderwaterCausticsMSL). Built on first use, never runs unless the
-	// camera is under water with RenderWorld::underwaterCamera.causticsIntensity > 0.
+	// Underwater caustics + fog (Thema 185 Schritte 2 und 3): one full-res pass ahead of
+	// motion blur/bloom, after DoF (see kUnderwaterCausticsMSL; the fog is folded into it).
+	// Built on first use, never runs unless the camera is under water with
+	// RenderWorld::underwaterCamera.causticsIntensity > 0 or .density > 0.
 	void*     m_ucPipeline         = nullptr; // id<MTLRenderPipelineState>
 	void*     m_ucColor            = nullptr; // id<MTLTexture> RGBA16F full-res
 	int       m_ucW                = 0;

@@ -1053,12 +1053,13 @@ private:
 	unsigned int RenderMotionBlur(unsigned int sourceHdr, int fullW, int fullH,
 	                              const glm::mat4& view, const glm::mat4& proj);
 
-	// ── Underwater caustics (Thema 185 Schritt 3) ───────────────────────────
-	// One full-res pass ahead of DoF/motion blur/bloom: reads the HDR scene and the
-	// scene depth, adds the refracted-sun net (shared wave trains, Physics/
-	// WaterWaves.h) below the flat surface plane, writes m_ucColor. Built on first
-	// use; never runs (zero cost) unless the camera is under water with the body's
-	// intensity above 0 (RenderWorld::underwaterCamera.causticsIntensity).
+	// ── Underwater caustics + fog (Thema 185 Schritte 2 und 3) ──────────────
+	// One full-res pass ahead of motion blur/bloom (after DoF): reads the HDR scene and
+	// the scene depth, adds the refracted-sun net (shared wave trains, Physics/
+	// WaterWaves.h) below the flat surface plane, then the depth fog over it, writes
+	// m_ucColor. Built on first use; never runs (zero cost) unless the camera is under
+	// water with the body's net intensity or fog density above 0
+	// (RenderWorld::underwaterCamera.causticsIntensity / .density).
 	unsigned int m_ucProgram    = 0;
 	bool         m_ucTried      = false;     // the program failed to link once: do not retry every frame
 	int          m_uUcScene     = -1;
@@ -1068,6 +1069,7 @@ private:
 	int          m_uUcSun       = -1;
 	int          m_uUcSunColor  = -1;
 	int          m_uUcParams    = -1;
+	int          m_uUcTint      = -1;
 	unsigned int m_ucFBO        = 0;
 	unsigned int m_ucColor      = 0;         // RGBA16F, full-res
 	int          m_ucW          = 0;

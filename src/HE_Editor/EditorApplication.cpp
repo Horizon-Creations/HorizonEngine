@@ -7391,6 +7391,48 @@ void EditorApplication::dumpFrameHeadless()
 			ok = water::addPolygon(ltc, a, { { -50, -36 }, { -8, -42 }, { -2, 10 }, { -44, 18 } }).ok
 			  && water::addPolygon(ltc, c, { { 8, -6 }, { 52, -14 }, { 56, 38 }, { 20, 44 }, { 12, 20 } }).ok;
 		}
+		// The underwater post pass's per-body knobs (Thema 185 Schritt 4), for the A/B and the
+		// depth series: HE_DUMP_UWFOG="density[,falloff]" and
+		// HE_DUMP_UWCAUSTICS="intensity[,scale[,speed[,depth]]]" are set on EVERY body of the
+		// witness through the same setters the Water tab uses (so the clamp applies). Unset =
+		// the bodies keep their defaults. Density 0 / intensity 0 switch that stage off.
+		// Camera under water: CAMY = surface (302 for bank shapes at the default level) - depth.
+		auto uwFloats = [](const char* name, float* out, int n) {
+			const char* v = std::getenv(name);
+			if (!v || !*v) return false;
+			char* end = nullptr;
+			for (int i = 0; i < n; ++i)
+			{
+				const float val = std::strtof(v, &end);
+				if (end == v) break;   // fewer numbers than knobs: the rest keep their defaults
+				out[i] = val;
+				v = end;
+				if (*v == ',') ++v;
+			}
+			return true;
+		};
+		{
+			water::UnderwaterFogParams fogOv{};
+			float f[2] = { fogOv.density, fogOv.falloff };
+			const bool haveFog = uwFloats("HE_DUMP_UWFOG", f, 2);
+			water::UnderwaterCausticsParams cauOv{};
+			float c[4] = { cauOv.intensity, cauOv.scale, cauOv.speed, cauOv.depth };
+			const bool haveCau = uwFloats("HE_DUMP_UWCAUSTICS", c, 4);
+			if (haveFog) { fogOv.density = f[0]; fogOv.falloff = f[1]; }
+			if (haveCau) { cauOv.intensity = c[0]; cauOv.scale = c[1]; cauOv.speed = c[2]; cauOv.depth = c[3]; }
+			if (haveFog || haveCau)
+			{
+				for (const water::Body& body : std::vector<water::Body>(ltc.water.bodies))
+				{
+					if (haveFog) water::setUnderwaterFog(ltc, body.id, fogOv);
+					if (haveCau) water::setUnderwaterCaustics(ltc, body.id, cauOv);
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_UWFOG/UWCAUSTICS applied to %zu body(ies): "
+					"fog %s density %.3f falloff %.2f, caustics %s intensity %.2f scale %.2f speed %.2f depth %.1f",
+					ltc.water.bodies.size(), haveFog ? "set" : "default", fogOv.density, fogOv.falloff,
+					haveCau ? "set" : "default", cauOv.intensity, cauOv.scale, cauOv.speed, cauOv.depth);
+			}
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		const WaterSurface::Stats& ws = WaterSurface::lastStats();
@@ -7417,6 +7459,17 @@ void EditorApplication::dumpFrameHeadless()
 			"vertices %u, x span %.2f..%.2f, ground over sheet at the vertices at most %.3f m)",
 			wl, ok ? "ok" : "FAILED", ws.created, ws.triangles, level,
 			ltc.water.clipToGround ? 1 : 0, ltc.water.shoreOvershoot, verts, lo, hi, worstOver);
+		// HE_DUMP_SAVESCENE=<file.hescene> writes the witness world out as it stands (landscape,
+		// water body with the HE_DUMP_UWFOG / HE_DUMP_UWCAUSTICS knobs, the sky the SKYTEST block
+		// configured) so the REAL editor loop can open it: a perf capture (scripts/he_perf_capture.py
+		// --scene) of the underwater stage needs a scene file, and the lake only ever existed as
+		// an env-var witness. Same call the editor's File > Save makes.
+		if (const char* sv = std::getenv("HE_DUMP_SAVESCENE"); sv && *sv)
+		{
+			SceneSerializer saver;
+			const bool saved = saver.save(*m_editorWorld, sv, SerializeFormat::JSON);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_SAVESCENE %s -> %s", saved ? "wrote" : "FAILED to write", sv);
+		}
 	}
 
 	// ── Water brush witness (HE_DUMP_WATERBRUSH, Thema 174 Schritt 7): a flat
