@@ -413,6 +413,22 @@ namespace
 	  "Solve this body in the 2D solver — motion stays in the XY plane. For "
 	  "sprite games; pair it with a Transform 2D.",
 	  "", "systems#physics" },
+	{ "Rigid Body/Affected By Water", "",
+	  "Whether lakes, ponds and rivers act on this body: they lift it, slow it, "
+	  "carry it along with the current and ring where it falls in. Switch it off "
+	  "for what should ignore the water: bullets, debris, a body that has to fall "
+	  "through to the bed. Read at every physics step, so it also works while the "
+	  "game plays.",
+	  "", "systems#water-physics" },
+	{ "Rigid Body/Density", "",
+	  "The density the buoyancy uses, in kilograms per cubic metre. A body floats "
+	  "when it is below the water's (1000 for fresh water) and sinks when it is "
+	  "above; a floating body rides with that share of its volume under water, so "
+	  "500 sits half out and 920 (ice) hardly shows. 0 takes it from the Mass and "
+	  "the size of the Collider. Set it when the Mass is chosen for how the body "
+	  "hits things and not for how it swims: the Mass decides collisions, this "
+	  "decides buoyancy. Wood 500, ice 920, stone 2600, iron 7800.",
+	  "", "systems#water-physics" },
 	// Two entries, one per component scope, because that is what the combo
 	// resolves to: the Details panel sets the scope to the component it is
 	// drawing, so a single shared key would answer under neither. They say
@@ -7090,6 +7106,52 @@ namespace
 	  "spline lakes alike. The ground is not touched, and the grid resolution "
 	  "stays. One undo step.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Physics##wphys", "Water Physics",
+	  "What this body of water does to a body in it: it lifts the light ones, "
+	  "slows the moving ones, carries them along with its current and rings where "
+	  "something falls in. The settings are saved with the landscape and every "
+	  "change is one undo step. The surface a body floats on is this water's "
+	  "level plus the waves of the engine water material, so the waves are not "
+	  "set here; Density, the drags and Flow are.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Enabled##wphys", "Water Physics On",
+	  "Off makes this water do nothing to the bodies in it: no lift, no damping, "
+	  "no current, so a body falls through to the bed. It is still a lake to look "
+	  "at. Bodies can opt out on their own with Affected By Water on the Rigid "
+	  "Body.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Density##wphys", "Water Density",
+	  "The density of this water in kilograms per cubic metre: 1000 is fresh "
+	  "water, 1025 sea water, more for brine or mud. A body whose own Density is "
+	  "lower floats, a higher one sinks, and the share of a floating body that "
+	  "is under water is its density over this one, so heavier water carries "
+	  "more. From 1 to 20000.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Linear Drag##wphys", "Water Linear Drag",
+	  "How strongly this water slows a body moving through it, growing with the "
+	  "square of the speed against the current and with the share of the body "
+	  "under water. 0.5 is a good start. Above about 3 a light body no longer "
+	  "settles (its speed collapses and creeps back), so 3 is the top of the "
+	  "useful range; the field accepts up to 10.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Angular Drag##wphys", "Water Angular Drag",
+	  "How strongly this water stops a body from spinning, in proportion to the "
+	  "share of it under water. The default 0.05 settles a crate that rocks on "
+	  "the waves; 0 lets it roll on.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Flow##wphys", "Water Flow",
+	  "The current of this water in metres per second, along the landscape's own "
+	  "X and Z axes (the world's, unless the landscape is turned about Y). A body "
+	  "in the water is pulled toward it through the drag, so a river carries what "
+	  "floats on it; there is no force beyond that, and the waves of the water "
+	  "material do not follow it. Rings travel with it. 0 is still water.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Splash##wphys", "Water Splash",
+	  "How strong the rings are that a body makes in this water when it falls in, "
+	  "comes out or cuts across the surface. 1 is the default; 0 makes none (the "
+	  "body itself is unaffected); up to 4 for something thick. The rings are "
+	  "the water material's picture and move no body.",
+	  "", "systems#water-physics" },
 
 	// ── The Environment window ───────────────────────────────────────────────
 	{ "Environment Window/Select", "Select the entity",

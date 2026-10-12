@@ -531,6 +531,52 @@ namespace
 	  "How many cells of a Landscape's water grid are wet: those of one body, or of "
 	  "all water when Body is 0. A cell is Landscape size divided by the grid "
 	  "resolution on a side, so this is an area, not a count of lakes." },
+	{ "water.surfaceAt",
+	  "Whether there is water at a world point and how high its surface stands there, "
+	  "waves included: the height the water physics floats bodies on. Needs no "
+	  "Landscape, the highest surface wins where several overlap. Wet is false when "
+	  "the ground stands above the water or there is none, and Height is then 0, so "
+	  "read Wet first. While the game plays the waves move with the physics clock; "
+	  "outside play the surface stands at its level plus the waves at time zero." },
+	{ "water.depthAt",
+	  "How many metres of water lie over the ground at a world point, waves "
+	  "included; 0 when it is dry. The question a swimming or wading check asks: "
+	  "knee-deep, over the head, or a puddle." },
+	{ "water.flowAt",
+	  "The current at a world point in metres per second, in world axes: the "
+	  "landscape's turn is already in it. Zero where it is dry or the water stands "
+	  "still. A river sets it with the Flow fields of its body of water in the "
+	  "Landscape panel, or with Set Water Flow." },
+	{ "water.submerged",
+	  "How much of an entity's body is under water, from 0 to 1, as of the latest "
+	  "physics step: 0.5 is a crate that floats half out, 1 is a stone on the bed. 0 "
+	  "for an entity that is not in water or has no physics body. Read it to know "
+	  "whether something is afloat, wading or dry." },
+	{ "water.buoyancy",
+	  "How many times its own weight the water lifts an entity's body right now: 1 "
+	  "means it floats where it is, more than 1 means it rises, less than 1 means it "
+	  "sinks (a stone is about 0.4 however deep). It is the water's density over the "
+	  "body's, times the share under water. 0 for an entity that is not in water." },
+	{ "water.pollImmersion",
+	  "Every body that went into the water or came out of it since the last call, as "
+	  "four parallel arrays: index i of Entities is the body, Entered says which way "
+	  "(true = in), Speeds is how fast it went through the surface in metres per "
+	  "second (0 for an exit over the shore) and Positions is where its centre was. "
+	  "Reading empties the list, so read it in one place. A body that starts the "
+	  "scene in the water enters on the first step. Use it for splash sounds and "
+	  "effects; it does not need the rings, which are only the picture." },
+	{ "water.disturb",
+	  "Raises a ring on the water at a world point: a footstep, a shot, a thrown "
+	  "stone. Radius is the size it starts at in metres (0.05 to 6), Strength runs "
+	  "from 0 to 1. The ring travels with the current. It only draws the water "
+	  "material's ripple and moves no body, it shows while the game plays and on "
+	  "every surface that uses the engine water material." },
+	{ "water.setFlow",
+	  "Sets the current of one body of water, in world metres per second on X and "
+	  "Z (held to 50 either way); Terrain is the landscape and Body the number from "
+	  "Water Body At. A body floating in that water is pulled toward it. False when "
+	  "the entity is no landscape or the body does not exist. Density, damping and "
+	  "the on/off switch are set in the Landscape panel." },
 
 	// ── UI ───────────────────────────────────────────────────────────────────
 	{ "ui.getText",

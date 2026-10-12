@@ -2825,6 +2825,13 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
 			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
 			EditorWidgets::checkbox("2D Physics",   &r->is2D); trackEdit();
+			// What water does to this body (Thema 179). Both are read at every physics
+			// step, so changing them while the game plays takes effect at once, and
+			// neither is part of what the body is built from: nothing is rebuilt.
+			EditorWidgets::checkbox("Affected By Water", &r->affectedByWater); trackEdit();
+			Row::dragFloat("Density", &r->density, 10.0f, 0.0f, 20000.0f,
+			               r->density > 0.0f ? "%.0f kg/m3" : "from mass"); trackEdit();
+			r->density = std::max(0.0f, r->density);
 			// Which channel this body sits in — what the project's collision
 			// matrix looks up when it decides whether a pair may touch.
 			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,

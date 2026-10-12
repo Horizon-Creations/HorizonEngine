@@ -135,6 +135,41 @@ public:
     // steps, like the other getters here.
     float submergedFraction(uint32_t entityId) const;
 
+    // How hard the water lifts the body, in multiples of its own weight, as of the latest
+    // step it was served (Thema 179 step 5): the buoyancy factor times the share under
+    // water, which is what Jolt's impulse is made of. 1 is a body that floats where it is,
+    // above 1 it rises, below 1 it sinks (a stone is about 0.4 however deep it lies); 0 for
+    // a body that is not in water or unknown. A body at rest keeps the number it came to
+    // rest with, like submergedFraction. Game thread, between steps.
+    float waterLift(uint32_t entityId) const;
+
+    // A body went into the water or came out of it (Thema 179 step 5). `entered` is true
+    // when the share of its volume under water crossed RippleTriggers::kWetShare (2 %)
+    // upwards and false when it crossed back; a body that is seen in the water for the
+    // first time (a scene that starts with a crate in the lake) enters then, with whatever
+    // speed it has. `speed` is how fast it went through the surface in m/s, along the
+    // surface normal and relative to the current: down for an entry, up for an exit, never
+    // negative; an exit that was not seen at the surface (the body left over the shore, or
+    // the water dried up under it) has speed 0. `position` is where its centre of mass was.
+    //
+    // Raised by the water step for the bodies it serves, in the order it serves them, so
+    // two runs of the same scene give the same list. Independent of the rings (a water
+    // with `splash` 0 still has events). Water physics off, or no water in the scene,
+    // raises none: the step forgets what it knew of the bodies then.
+    struct WaterEvent
+    {
+        uint32_t  entity   = 0;
+        bool      entered  = true;
+        float     speed    = 0.0f;
+        glm::vec3 position = {};
+    };
+    // Every event since the last call, drained by whoever calls it (like the contact
+    // queues: ask in one place). Nobody drains this one on their own, so kMaxWaterEvents
+    // bounds it: past that the OLDEST are dropped and a throttled warning says nobody is
+    // asking. An entity that is destroyed before it is asked takes its events with it.
+    std::vector<WaterEvent> pollWaterEvents();
+    static constexpr std::size_t kMaxWaterEvents = 256;
+
     // The rings on the water (Thema 179 step 3): a short list of disturbances of the
     // surface that the engine water material draws (HE::water::RippleField,
     // HorizonScene/WaterRipples.h). The step raises them where a body goes into the

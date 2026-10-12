@@ -26,6 +26,8 @@
 #include "HorizonScene/WaterBrush.h"         // the water group: the brush,
 #include "HorizonScene/WaterLake.h"          //   the lakes and
 #include "HorizonScene/WaterField.h"         //   the model they edit
+#include "HorizonScene/WaterQuery.h"         // …and the questions the physics asks of it
+#include "HorizonScene/WaterRipples.h"       // the rings water.disturb adds to
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/SplineComponent.h"
 #include "HorizonScene/EntityHost.h"
@@ -1561,6 +1563,103 @@ int wetCells(Ctx& c, Entity terrain, int body)
     Land land;
     if (!landOf(c, terrain, "water.wetCells", land)) return 0;
     return static_cast<int>(land.tc->water.wetCells(body <= 0 ? HE::water::kNoBody : static_cast<uint16_t>(body)));
+}
+
+// ── What the water does to the things in it (Thema 179 step 5) ──────────────
+namespace {
+// The one question the rows below ask: the water at a world point, as the physics sees it.
+// A fresh index each call: it is a view over the landscapes with water (nothing is
+// rescanned for a point query), and it cannot be left holding the component pointers of a
+// landscape that a script has just deleted. The clock is the physics' own, 0 without one.
+bool surfaceNow(Ctx& c, float x, float z, HE::water::Surface& out)
+{
+    out = HE::water::Surface{};
+    if (!c.world) return false;
+    const HE::water::WaterIndex index = HE::water::WaterIndex::build(*c.world);
+    return index.surfaceAt(x, z, c.physics ? c.physics->simTime() : 0.0, out);
+}
+} // namespace
+
+bool surfaceAt(Ctx& c, float x, float z, float& height)
+{
+    HE::water::Surface s;
+    if (!surfaceNow(c, x, z, s)) return false;
+    height = s.height;
+    return true;
+}
+
+float depthAt(Ctx& c, float x, float z)
+{
+    HE::water::Surface s;
+    return surfaceNow(c, x, z, s) ? s.depth : 0.0f;
+}
+
+glm::vec3 flowAt(Ctx& c, float x, float z)
+{
+    HE::water::Surface s;
+    return surfaceNow(c, x, z, s) ? s.flow : glm::vec3(0.0f);
+}
+
+float submerged(Ctx& c, Entity e)
+{
+    return c.physics ? c.physics->submergedFraction(static_cast<uint32_t>(e)) : 0.0f;
+}
+
+float buoyancy(Ctx& c, Entity e)
+{
+    return c.physics ? c.physics->waterLift(static_cast<uint32_t>(e)) : 0.0f;
+}
+
+std::vector<ImmersionEvent> pollImmersion(Ctx& c)
+{
+    std::vector<ImmersionEvent> out;
+    if (!c.physics) return out;
+    for (const PhysicsWorld::WaterEvent& ev : c.physics->pollWaterEvents())
+        out.push_back({ static_cast<Entity>(ev.entity), ev.entered, ev.speed, ev.position });
+    return out;
+}
+
+void disturb(Ctx& c, float x, float z, float radius, float strength)
+{
+    if (!c.physics)
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "%s: there is no physics world to hold the ring "
+                        "(rings are made while the game plays)", "water.disturb");
+        return;
+    }
+    if (!std::isfinite(x) || !std::isfinite(z)) return;
+    HE::water::Ripple r;
+    r.pos      = glm::vec2(x, z);
+    r.radius   = radius;
+    r.strength = strength;
+    r.kind     = WaterRippleScript;
+    // A ring on moving water goes with it, like the rings a body makes.
+    HE::water::Surface s;
+    if (surfaceNow(c, x, z, s)) r.drift = glm::vec2(s.flow.x, s.flow.z);
+    c.physics->waterRipples().add(r);   // clamps, and drops what is not a number or has no strength
+}
+
+bool setFlow(Ctx& c, Entity terrain, int body, float x, float z)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.setFlow", land)) return false;
+    if (body <= 0 || body > 65535 || !std::isfinite(x) || !std::isfinite(z)) return false;
+    const HE::water::Body* b = land.tc->water.findBody(static_cast<uint16_t>(body));
+    if (!b) return false;
+    // World axes in, the landscape's own axes out. A current is a velocity: the landscape's
+    // turn about Y carries it, its scale does not (the same rotation the query uses to carry
+    // the stored current back out to the world).
+    glm::mat3 turn(1.0f);
+    for (int k = 0; k < 3; ++k)
+    {
+        const glm::vec3 col(land.toWorld[k]);
+        const float len = glm::length(col);
+        if (len > 1.0e-12f) turn[k] = col / len;
+    }
+    const glm::vec3 local = glm::transpose(turn) * glm::vec3(x, 0.0f, z);
+    HE::water::BodyPhysics p = b->physics;
+    p.flow = glm::vec2(local.x, local.z);
+    return HE::water::setPhysics(*land.tc, static_cast<uint16_t>(body), p);
 }
 } // namespace water
 
@@ -6406,6 +6505,60 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::wetCells(
                 c, (Entity)aI(a, 0), aI(a, 1))) }; } });
 
+        // Water physics (Thema 179 step 5): what the water does to the things in it. WORLD
+        // space and no landscape handle — the caller has a position or a body. The first
+        // five only read.
+        t.push_back({ "water.surfaceAt", "Water", false,
+            {{"x", P::Float}, {"z", P::Float}}, {{"wet", P::Bool}, {"height", P::Float}},
+            "HE::api::water::surfaceAt",
+            [](Ctx& c, const VV& a){ float h = 0.0f;
+                const bool wet = water::surfaceAt(c, aF(a, 0), aF(a, 1), h);
+                return VV{ Value::ofBool(wet), Value::ofFloat(h) }; } });
+        t.push_back({ "water.depthAt", "Water", false,
+            {{"x", P::Float}, {"z", P::Float}}, {{"depth", P::Float}},
+            "HE::api::water::depthAt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(water::depthAt(
+                c, aF(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "water.flowAt", "Water", false,
+            {{"x", P::Float}, {"z", P::Float}}, {{"flow", P::Vec3}},
+            "HE::api::water::flowAt",
+            [](Ctx& c, const VV& a){ return VV{ v3(water::flowAt(c, aF(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "water.submerged", "Water", false, {{"entity", P::Int}}, {{"share", P::Float}},
+            "HE::api::water::submerged",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(water::submerged(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "water.buoyancy", "Water", false, {{"entity", P::Int}}, {{"lift", P::Float}},
+            "HE::api::water::buoyancy",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(water::buoyancy(c, (Entity)aI(a, 0))) }; } });
+        // Four PARALLEL arrays, index i of each is one event (a graph value is a list of ONE
+        // type, the reason raycastAll and pollJointBroken split theirs the same way). Drained
+        // once, here: a second row on the same queue would hand whoever ran second nothing.
+        t.push_back({ "water.pollImmersion", "Water", true,
+            {}, {{"entities", P::Int, /*isArray=*/true}, {"entered", P::Bool, /*isArray=*/true},
+                 {"speeds", P::Float, /*isArray=*/true}, {"positions", P::Vec3, /*isArray=*/true}},
+            "HE::api::water::pollImmersion",
+            [](Ctx& c, const VV&){
+                Value entities; entities.isArray = true; entities.type = P::Int;
+                Value entered;  entered.isArray  = true; entered.type  = P::Bool;
+                Value speeds;   speeds.isArray   = true; speeds.type   = P::Float;
+                Value points;   points.isArray   = true; points.type   = P::Vec3;
+                for (const auto& ev : water::pollImmersion(c))
+                {
+                    entities.items.push_back(Value::ofInt((int)ev.entity));
+                    entered.items.push_back(Value::ofBool(ev.entered));
+                    speeds.items.push_back(Value::ofFloat(ev.speed));
+                    points.items.push_back(v3(ev.position));
+                }
+                return VV{ std::move(entities), std::move(entered), std::move(speeds), std::move(points) }; } });
+        t.push_back({ "water.disturb", "Water", true,
+            {{"x", P::Float}, {"z", P::Float}, {"radius", P::Float}, {"strength", P::Float}}, {},
+            "HE::api::water::disturb",
+            [](Ctx& c, const VV& a){ water::disturb(c, aF(a, 0), aF(a, 1), aF(a, 2), aF(a, 3)); return VV{}; } });
+        t.push_back({ "water.setFlow", "Water", true,
+            {{"terrain", P::Int}, {"body", P::Int}, {"x", P::Float}, {"z", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::water::setFlow",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(water::setFlow(
+                c, (Entity)aI(a, 0), aI(a, 1), aF(a, 2), aF(a, 3))) }; } });
+
         // Entity UI
         t.push_back({ "ui.getText", "UI", false, {{"entity", P::Int}}, {{"text", P::String}}, "HE::api::ui::getText",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(ui::getText(c, (Entity)aI(a, 0))) }; } });
@@ -7927,6 +8080,14 @@ const std::vector<ApiFn>& registry()
             { "water.lakeBody", "Get Lake Body" },
             { "water.lakeSpline", "Get Lake Spline" },
             { "water.wetCells", "Count Wet Cells" },
+            { "water.surfaceAt", "Water Surface At" },
+            { "water.depthAt", "Water Depth At" },
+            { "water.flowAt", "Water Flow At" },
+            { "water.submerged", "Get Submerged Share" },
+            { "water.buoyancy", "Get Water Buoyancy" },
+            { "water.pollImmersion", "Poll Water Immersion" },
+            { "water.disturb", "Disturb Water" },
+            { "water.setFlow", "Set Water Flow" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
             // Suffixed like Set Position and Get Velocity above, and for the
             // same reason: Movement owns the unqualified "Is Grounded", and the

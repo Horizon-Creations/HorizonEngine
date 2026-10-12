@@ -725,7 +725,22 @@ PyObject* py_engineCall(PyObject*, PyObject* args)
 	const std::vector<HorizonCode::Value> res = fn->invoke(c, in);
 	PyObject* out = PyList_New(0);
 	for (size_t i = 0; i < fn->results.size(); ++i)
-		pyAppendValue(out, i < res.size() ? res[i] : HorizonCode::Value{}, fn->results[i].type);
+	{
+		if (fn->results[i].isArray)
+		{
+			// A LIST result (physics.raycastAll, pollJointBroken, water.pollImmersion…) is ONE
+			// Python list, whatever the element type. pyAppendValue goes by the declared TYPE
+			// alone, so without this a list of ints came back as the number 0 and the row was
+			// unusable from Python. A row that returned nothing for a list result is [].
+			HorizonCode::Value list = i < res.size() ? res[i] : HorizonCode::Value{};
+			list.isArray = true;
+			PyObject* l = pyFieldValueToObj(list, 0);
+			PyList_Append(out, l);
+			Py_XDECREF(l);
+		}
+		else
+			pyAppendValue(out, i < res.size() ? res[i] : HorizonCode::Value{}, fn->results[i].type);
+	}
 	const Py_ssize_t outN = PyList_Size(out);
 	if (outN == 0) { Py_DECREF(out); Py_RETURN_NONE; }
 	if (outN == 1) { PyObject* only = PyList_GetItem(out, 0); Py_INCREF(only); Py_DECREF(out); return only; }

@@ -18,6 +18,8 @@
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/AudioEngine.h>   // a host service the plugin can only read across the module boundary
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/TerrainComponent.h>   // the water group's landscape
+#include <HorizonScene/WaterField.h>                    // … and the lake on it
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <filesystem>   // the save-backed container round trip needs a sandbox root
@@ -1400,6 +1402,66 @@ TEST_CASE("ScriptContext: a watched HorizonCode variable reaches Python as on_ch
         CHECK(t.position.z == doctest::Approx(1.0f));    // once, from source 0
     }
     rt.onVariableChanged = nullptr;
+}
+
+// The water group's physics rows (Thema 179 step 5) reach Python as horizon.water.*, the same
+// rows Lua and HorizonCode call. Asserted INSIDE the script, so a wrong answer is a raised
+// error and not a position that happens to look right. No physics world is wired in, so the
+// clock stands at 0 and the event lists are empty - the lists themselves are what is checked.
+static const char* kPyWater = R"py(
+import horizon
+
+class WaterUser(horizon.Behavior):
+    def on_start(self):
+        wet, y = horizon.water.surfaceAt(0.0, 0.0)
+        assert wet
+        assert 2.5 < y < 3.5, y                      # the lake's level is 3, the waves are +/- 0.24
+        assert 2.5 < horizon.water.depthAt(0.0, 0.0) < 3.5
+        wet2, y2 = horizon.water.surfaceAt(50.0, 50.0)
+        assert not wet2                              # off the landscape
+        assert horizon.water.depthAt(50.0, 50.0) == 0.0
+        assert tuple(horizon.water.flowAt(0.0, 0.0)) == (0.0, 0.0, 0.0)
+        assert horizon.water.setFlow(LAND, LAKE, 0.0, 2.0)
+        fx, fy, fz = horizon.water.flowAt(0.0, 0.0)
+        assert abs(fz - 2.0) < 1e-4 and fx == 0.0, (fx, fz)
+        assert not horizon.water.setFlow(LAND, LAKE + 40, 0.0, 2.0)   # no such body
+        who, entered, speed, where = horizon.water.pollImmersion()
+        assert who == [] and entered == [] and speed == [] and where == []
+        assert horizon.water.submerged(self.entity_id) == 0.0
+        assert horizon.water.buoyancy(self.entity_id) == 0.0
+        horizon.water.disturb(0.0, 0.0, 1.0, 0.5)    # no physics world to hold it: quietly nothing
+        horizon.setPosition(self.entity_id, 1.0, 0.0, 0.0)
+)py";
+
+TEST_CASE("ScriptContext: registry-driven horizon.water.* physics rows (Python)")
+{
+    HorizonWorld world;
+    const auto land = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(land, TransformComponent{});
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.resolution = 9;                  // flat ground
+    tc.water.res = 64;                  // a cell is a metre
+    world.registry().emplace<TerrainComponent>(land, tc);
+    TerrainComponent& terrain = world.registry().get<TerrainComponent>(land);
+    const uint16_t lake = terrain.water.createBody(3.0f);
+    REQUIRE(HE::water::addPolygon(terrain, lake,
+                                  { { -20.0f, -20.0f }, { 20.0f, -20.0f }, { 20.0f, 20.0f }, { -20.0f, 20.0f } }).ok);
+
+    const std::string source = "LAND = " + std::to_string(static_cast<uint32_t>(land)) +
+                               "\nLAKE = " + std::to_string(static_cast<int>(lake)) + "\n" + kPyWater;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pywater", source.c_str(), HE::ScriptLanguage::Python));
+
+    auto e  = makeEntity(world, "Swimmer");
+    auto id = ctx.createInstance("pywater", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    CHECK(ctx.callOnStart(id));
+    CHECK(ctx.lastError().empty());
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(1.0f));                 // every assertion in the script held
+    CHECK(terrain.water.findBody(lake)->physics.flow.y == doctest::Approx(2.0f));   // and setFlow reached the lake
 }
 
 #endif // HE_HAVE_PYTHON

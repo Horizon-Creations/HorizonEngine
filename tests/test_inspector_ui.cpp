@@ -1223,3 +1223,98 @@ TEST_CASE("inspector ui: the Terrain section's Water rows switch shore clipping,
     CHECK(field().clipToGround);
     CHECK(field().bodies.size() == 1);
 }
+
+TEST_CASE("inspector ui: the Rigid Body section's water rows opt a body out and set its density, each one undo step")
+{
+    // Thema 179 Schritt 5. Two rows on the component, Affected By Water and Density: they have
+    // to be on the panel, a click and a drag have to reach the component, and each has to land
+    // as ONE undo step that takes the number back. (How the numbers are saved is
+    // test_water_query.cpp's; what they do to a body is test_water_buoyancy.cpp's.)
+    Harness harness;
+    constexpr int TW = 420, TH = 900;
+    ImGui::GetIO().DisplaySize = ImVec2(float(TW), float(TH));
+
+    HorizonWorld world;
+    EditorUndo   undo;
+    undo.setWorld(&world);
+    auto& reg = world.registry();
+    Entity crate = world.createEntity("Crate");          // undo remaps handles: re-read after one
+    reg.emplace<TransformComponent>(crate);
+    RigidBodyComponent rb;
+    rb.type = RigidBodyType::Dynamic;
+    reg.emplace<RigidBodyComponent>(crate, rb);
+
+    ContextBits bits;
+    AppContext ctx = bits.make(world, undo);
+    ImGuiID afloatBox = 0, densityDrag = 0;
+    auto frame = [&](bool left) -> ImGuiID {
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, left);
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+        ImGui::SetNextWindowSize(ImVec2(float(TW) - 20.0f, float(TH) - 20.0f));
+        ImGui::Begin("Details");
+        afloatBox = ImGui::GetID("Affected By Water");
+        ImGui::PushID("Density");                        // Row::dragFloat: the label scopes its control
+        densityDrag = ImGui::GetID("##v");
+        ImGui::PopID();
+        InspectorPanel::renderFor(ctx, world, crate, &undo);
+        ImGui::End();
+        EditorWidgets::drawQueuedHelp();
+        const ImGuiID hovered = ImGui::GetHoveredID();
+        ImGui::Render();
+        return hovered;
+    };
+    auto idAtP = [&](float x, float y) {
+        ImGui::GetIO().AddMousePosEvent(x, y);
+        frame(false);
+        return frame(false);
+    };
+    auto body = [&]() -> RigidBodyComponent& { return reg.get<RigidBodyComponent>(reg.view<RigidBodyComponent>().front()); };
+
+    ImGui::GetIO().AddMousePosEvent(float(TW) - 2.0f, float(TH) - 2.0f);
+    for (int i = 0; i < 4; ++i) frame(false);
+    REQUIRE(afloatBox != 0);
+    REQUIRE(densityDrag != 0);
+    const float xLeft = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+    const float xMid  = float(TW) * 0.5f;
+    auto locate = [&](ImGuiID want, float x, float& yOut) -> bool {
+        for (float yy = 12.0f; yy < float(TH) - 12.0f; yy += 2.0f)
+            if (idAtP(x, yy) == want) { yOut = yy + 3.0f; return true; }
+        return false;
+    };
+
+    REQUIRE(body().affectedByWater);
+    REQUIRE(body().density == 0.0f);
+    REQUIRE_FALSE(undo.canUndo());
+
+    // ── The checkbox: off with one click, one step back ──
+    float y = -1.0f;
+    REQUIRE_MESSAGE(locate(afloatBox, xLeft, y), "the Rigid Body section has no Affected By Water row on the panel");
+    ImGui::GetIO().AddMousePosEvent(xLeft, y);
+    frame(false); frame(false); frame(true); frame(false); frame(false);
+    CHECK_FALSE(body().affectedByWater);
+    CHECK(undo.undoDepth() == 1);
+    REQUIRE(undo.undo());
+    CHECK(body().affectedByWater);
+    crate = reg.view<RigidBodyComponent>().front();          // the restored world has its own handle
+
+    // ── The drag: a density where there was "from mass", the whole drag one step ──
+    float yd = -1.0f;
+    ImGui::GetIO().AddMousePosEvent(float(TW) - 2.0f, float(TH) - 2.0f);
+    for (int i = 0; i < 4; ++i) frame(false);
+    REQUIRE_MESSAGE(locate(densityDrag, xMid, yd), "the Rigid Body section has no Density row on the panel");
+    ImGui::GetIO().AddMousePosEvent(xMid, yd);
+    frame(false); frame(false); frame(true);
+    for (int i = 1; i <= 6; ++i)
+    {
+        ImGui::GetIO().AddMousePosEvent(xMid + 5.0f * static_cast<float>(i), yd);
+        frame(true);
+    }
+    frame(false); frame(false);
+    CHECK(body().density > 100.0f);                          // 10 kg/m3 per pixel, to the right
+    CHECK(body().density < 600.0f);
+    CHECK(undo.undoDepth() == 1);                            // the undo of the checkbox was taken; this is the only entry
+    REQUIRE(undo.undo());
+    CHECK(body().density == 0.0f);                           // back to "from mass"
+}
