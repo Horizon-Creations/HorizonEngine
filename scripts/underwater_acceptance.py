@@ -64,6 +64,33 @@ def shot_list():
     return s
 
 
+# The fine sweep over the zone where the near plane slices the sheet off (to about +10 cm on GL/Vulkan,
+# +30 cm on D3D/Metal): a moving edge spreads its change evenly per centimetre, a pop puts most of it
+# into one step. Default knobs. Heights in cm, top to bottom.
+SWEEP_CM = (30, 25, 20, 16, 13, 10, 8, 6, 5, 4, 3, 2, 1, 0.5, -0.5, -1, -2)
+
+
+def sweep_name(cm):
+    return f"sweep_{'above' if cm > 0 else 'below'}_{abs(cm):04.1f}cm"
+
+
+def sweep_list():
+    return {sweep_name(cm): {**cam(cm / 100.0)} for cm in SWEEP_CM}
+
+
+def sweep_table(out_dir):
+    print("\n6. Fine waterline sweep, default knobs: step to the next lower camera, and that step per cm")
+    prev = None
+    for cm in SWEEP_CM:
+        p = out_dir / f"{sweep_name(cm)}.bmp"
+        im = read_bmp(p) if p.exists() else None
+        if prev and im:
+            md, mx, pct = diff(prev[1], im)
+            dcm = prev[0] - cm
+            print(f"   {prev[0]:+6.1f} -> {cm:+6.1f} cm ({dcm:4.1f} cm): mean|d|={md:7.3f}  per cm={md / dcm:7.3f}  >2: {pct:6.2f}%")
+        prev = (cm, im) if im else None
+
+
 # ── BMP (32-bit BGRA or 24-bit, top-down or bottom-up) ───────────────────────────────────────
 def read_bmp(path):
     d = pathlib.Path(path).read_bytes()
@@ -251,6 +278,8 @@ def main():
     ap.add_argument("--tables-only", action="store_true", help="skip the shooting, just print the tables")
     ap.add_argument("--gputime", metavar="N[,WxH]", help="measure the pass cost instead of shooting the series")
     ap.add_argument("--rounds", type=int, default=3, help="--gputime: interleaved off/on rounds")
+    ap.add_argument("--sweep", action="store_true",
+                    help="fine waterline sweep (+30 .. -2 cm) instead of the series: is the near-plane edge a pop?")
     ap.add_argument("--compare", nargs=2, metavar=("DIR_A", "DIR_B"))
     a = ap.parse_args()
     if a.compare:
@@ -263,15 +292,19 @@ def main():
     if a.gputime:
         gputime(a.editor, out, a.rhi, a.gputime, a.rounds, a.renderpath, a.timeout)
         return 0
+    shots = sweep_list() if a.sweep else shot_list()
     if not a.tables_only:
-        todo = {k: v for k, v in shot_list().items()
+        todo = {k: v for k, v in shots.items()
                 if not a.only or any(p in k for p in a.only.split(","))}
         with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
             res = list(ex.map(lambda kv: shoot(a.editor, out, kv[0], a.rhi, kv[1], a.renderpath, a.timeout),
                               todo.items()))
         if not all(res):
             print("some shots failed — see the .log files", file=sys.stderr)
-    tables(out)
+    if a.sweep:
+        sweep_table(out)
+    else:
+        tables(out)
     return 0
 
 

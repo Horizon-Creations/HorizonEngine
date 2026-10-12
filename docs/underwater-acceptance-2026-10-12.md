@@ -15,8 +15,9 @@ anderes Backend abnimmt, ruft es mit `--rhi` auf und bekommt dieselben Tabellen.
 | Vulkan | ja (Rekonstruktionsmatrix korrigiert) | ja (neu in Schritt 4) | Schritt 5: Hardware mit Validation, 0 Fehler, Bilder, A/B. Pass-Zeit nicht aufloesbar (Abschnitt 8) |
 
 Die Hardware-Abnahme von D3D11, D3D12 und Vulkan ist in Schritt 5 gelaufen (Abschnitt 8). Dort ist auch der
-Wasserlinien-Sprung aus Abschnitt 4 behoben, auf allen fuenf Backends. Metal ist dabei nur geschrieben und von
-der CI kompiliert, nicht gesehen.
+Wasserlinien-Sprung aus Abschnitt 4 behoben, auf allen fuenf Backends. Metal: Der Fix ist geschrieben, und der
+CI-Lauf 38286547705 (macOS-Job, `validate_embedded_shaders.py --msl-only --require-msl`) hat `kUnderwaterCausticsMSL`
+mit dem echten `metal`-Compiler uebersetzt ("ok", 16 von 16). Laufen gesehen hat ihn auf Metal noch niemand.
 
 Ctest dieses Stands: 275 Tests, 100 % bestanden (273 gelaufen, 2 Groessentests absichtlich uebersprungen),
 542 s, Release mit shaderc ON. `validate_embedded_shaders.py --glsl-only`: 58 von 58.
@@ -153,8 +154,9 @@ D3D11/D3D12/Vulkan: nicht gemessen.
 
 ## 8. Windows-Hardware-Abnahme (Schritt 5, NN-WS03)
 
-12.10.2026, NN-WS03 (NVIDIA RTX 4070), Release, privater Baum `C:\hw185` mit eigenem `DEPLOY_DIR`, alle vier
-Windows-Backends auf derselben Karte. D3D12 lief mit Debug-Layer + DRED (`HE_GPU_DEBUG=1`), Vulkan mit
+12.10.2026, NN-WS03 (NVIDIA RTX 4070), Release, privater Baum `C:\hw185` mit eigenem `DEPLOY_DIR`. Alle vier
+Windows-Backends liefen auf derselben Karte: Waehrend je einer Aufnahme stand der Editor-Prozess in `nvidia-smi`
+als C+G auf GPU 0 = RTX 4070, bei GL, D3D11, D3D12 und Vulkan. D3D12 lief mit Debug-Layer + DRED (`HE_GPU_DEBUG=1`), Vulkan mit
 Validation-Layer (im Backend fest an). Ueber alle 37 Aufnahmen je Backend: **0 `[ERROR]`**. D3D12 meldet je Lauf nur
 zwei allgemeine Warnungen (ein Pixel-Shader mit vierter Ausgabe in einem PSO mit drei Zielen, ein Clear-Wert). Beide
 betreffen die Unterwasser-Passes nicht, sie schreiben nur `SV_Target0`. D3D11 hat keinen Debug-Layer, dort zaehlen nur
@@ -209,7 +211,23 @@ Schritt ueber die Linie (+0,5 -> -0,5 cm, mittlere Abweichung von 255):
 | **nachher** | **7,6** | **4,8** | **4,8** | **8,1** |
 | Forward-Pfad (`RENDERPATH=0`), nachher | 7,6 | 4,6 | 4,6 | 7,8 |
 
-Zum Vergleich: Unter Wasser liegen die Nachbarschritte (2,5 bis 20 cm) bei 7 bis 12.
+Diese Tabelle allein beweist noch keine Sprungfreiheit: Die verbleibende Aenderung liegt jetzt in der Zone, in der die
+Near-Plane die Flaeche abschneidet, und die war oben nur in 7- und 20-cm-Schritten abgetastet. Die feine Abtastung
+(`--sweep`, Tabelle 6 des Skripts) gibt jeden Schritt und den Wert je Zentimeter:
+
+| Kamera | OpenGL je cm | Vulkan je cm | D3D11 je cm |
+|---|---|---|---|
+| +30 -> +10 cm (5/4/3-cm-Schritte) | 2,5..3,0 | 2,3..2,9 | 2,3..4,8 |
+| +10 -> +6 cm (2-cm-Schritte) | 6,0 / 9,7 | 4,7 / 7,0 | 5,1 / 4,5 |
+| +6 -> +1 cm (1-cm-Schritte) | 10,9 / 10,0 / 9,2 / 8,2 / 8,6 | 8,3 / 7,9 / 7,4 / 7,2 / 8,6 | 5,4 / 5,4 / 5,7 / 6,3 / 6,8 |
+| +1 -> +0,5 cm | 11,3 | 11,7 | 7,5 |
+| **+0,5 -> -0,5 cm (die Linie)** | **7,6** | **8,1** | **4,8** |
+| -0,5 -> -1 / -1 -> -2 cm | 6,0 / 5,4 | 6,9 / 5,8 | 4,0 / 3,6 |
+
+In der Schnittzone ist der Wert je Zentimeter flach. Kein einzelner Zentimeter traegt die Aenderung, und die Linie
+selbst ist nicht groesser als ihre Nachbarn. Die Kante wandert gleichmaessig; ein Sprung ist es nicht mehr. Je
+Zentimeter aendert sich das Bild in der Zone etwa doppelt so stark wie tiefer unter Wasser, weil sich dort die
+Kante bewegt. D3D12 ist pixelgleich zu D3D11 (8.1) und wurde nicht eigens abgetastet.
 
 Die Schritte knapp ueber der Linie, nachher (vorher in Klammern):
 
