@@ -34,6 +34,7 @@ add_library(HorizonScene SHARED
     src/WaterTriangulate.cpp
     src/WaterSurface.cpp
     src/WaterQuery.cpp
+    src/WaterRipples.cpp
     src/TerrainHeightmap.cpp
     src/TerrainGenerate.cpp
     src/FoliagePaint.cpp

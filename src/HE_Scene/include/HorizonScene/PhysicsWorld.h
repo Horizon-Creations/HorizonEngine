@@ -10,6 +10,7 @@
 class HorizonWorld;
 class ContentManager;
 namespace HE { struct CollisionLayerConfig; }
+namespace HE::water { class RippleField; }   // PhysicsWorld::waterRipples (HorizonScene/WaterRipples.h)
 #include <Types/Enums.h>   // HE::JointType, named by JointDesc below
 #include "HorizonScene/PhysicsTuning.h"   // HE::PhysicsLimits, named by the constructor
 #include "HorizonScene/PhysicsBudget.h"   // HE::PhysicsBudgetConfig / Stats
@@ -133,6 +134,19 @@ public:
     // waterBodiesPerStep before it was ever served, or is unknown. Game thread, between
     // steps, like the other getters here.
     float submergedFraction(uint32_t entityId) const;
+
+    // The rings on the water (Thema 179 step 3): a short list of disturbances of the
+    // surface that the engine water material draws (HE::water::RippleField,
+    // HorizonScene/WaterRipples.h). The step raises them where a body goes into the
+    // water at 1 m/s or more, comes out of it at 1.5 m/s or more, or moves through the
+    // surface (water::Body::physics.splash scales them, 0 turns them off for that
+    // water), and ages them by its own dt: simulation time, not the render clock. The
+    // application loop packs the list into IRenderer::SetWaterRipples every frame, and
+    // a script's water.disturb adds to it. Display only, nothing reads it back into the
+    // simulation. Cleared with the world (clear()). Game thread, between steps, like the
+    // other getters here: step() runs on that thread too, so nothing races it.
+    HE::water::RippleField&       waterRipples();
+    const HE::water::RippleField& waterRipples() const;
 
     // The limits the world was built with, and the size of the scratch block a
     // step allocates from (it falls back to the heap past that, never aborts).

@@ -383,6 +383,12 @@ TEST_CASE("Engine water material: the committed file carries a shader, not just 
 	for (int i = 0; i < kWaterKnobCount; ++i)
 		CHECK(b.frag.find("heParams.v[" + std::to_string(i) + "]") != std::string::npos);
 	CHECK(b.frag.find("heLight.sunDir.w") != std::string::npos);
+	// The rings the water physics raises (Thema 179 Schritt 3): the shipped shader reads them.
+	// A Water.hasset that was not regenerated and copied after the node went in draws no ring
+	// and looks like a shader bug; this is where it shows up as what it is.
+	CHECK(b.frag.find("void heWaterRipple(") != std::string::npos);
+	CHECK(b.frag.find("heWaterRipple(vWorldPos.xz, ") != std::string::npos);
+	CHECK(b.frag.find("heLight.waterRippleA[i]") != std::string::npos);
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)

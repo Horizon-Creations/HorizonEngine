@@ -1,6 +1,7 @@
 #include "HorizonRendering/LightPacking.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace HE
 {
@@ -75,6 +76,27 @@ void FillMaterialWeather(const ::EnvironmentSettings& env, MaterialShaderLibrary
     out.weather[2] = env.puddleAmount;
     out.weather[3] = env.snowCover;
     out.weather2[0] = env.puddleSize;
+}
+
+// The Lighting tail and the block the scene packs are the same three arrays: a size that
+// drifts on either side would shear the rings across the shader's loop. And Metal hands
+// the whole block over with setFragmentBytes, which stops at 4096 bytes — the next
+// append to Lighting that crosses it fails here, not on a Mac at runtime.
+using LightingTail = MaterialShaderLibrary::Lighting;
+static_assert(sizeof(LightingTail::waterRipples) == sizeof(WaterRippleBlock::head), "WaterRippleBlock::head");
+static_assert(sizeof(LightingTail::waterRippleA) == sizeof(WaterRippleBlock::a), "WaterRippleBlock::a");
+static_assert(sizeof(LightingTail::waterRippleB) == sizeof(WaterRippleBlock::b), "WaterRippleBlock::b");
+static_assert(sizeof(LightingTail::waterRippleA) / sizeof(LightingTail::waterRippleA[0]) ==
+              static_cast<size_t>(kWaterRippleMax), "the preamble declares 16 rings");
+static_assert(sizeof(LightingTail) <= 4096, "Metal setFragmentBytes limit for the HeLighting block");
+
+void FillMaterialWater(const ::WaterRippleBlock& water, MaterialShaderLibrary::Lighting& out)
+{
+    std::memcpy(out.waterRipples, water.head, sizeof(out.waterRipples));
+    std::memcpy(out.waterRippleA, water.a,    sizeof(out.waterRippleA));
+    std::memcpy(out.waterRippleB, water.b,    sizeof(out.waterRippleB));
+    // The count rides in head.x; a hand-built block must not send the shader past its arrays.
+    out.waterRipples[0] = std::clamp(out.waterRipples[0], 0.0f, static_cast<float>(kWaterRippleMax));
 }
 
 void FillMaterialGIProbe(MaterialShaderLibrary::Lighting& out,

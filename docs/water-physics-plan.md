@@ -654,3 +654,74 @@ Starrkörper: `"affectedByWater": false` und `"density"` nur bei Abweichung. Ein
   steigt, schwimmt erst, wenn ihn etwas berührt oder weckt.
 * **Nicht getestet:** Hüllen (Konvex), Seile und Gelenke im Wasser, überlappende Landschaften mit Körpern darauf (nur die Abfrage ist getestet), Landschaften mit
   Drehung um X oder Z (nicht unterstützt, 2), Windows, Linux, D3D und Vulkan (nicht Teil dieses Schritts).
+
+## 14. Stand nach Schritt 3 (12.10.2026): Ringe im Wassermaterial, Metal und OpenGL
+
+Schritt 3 (Wassermaterial reagiert auf Körper) ist gebaut: die Physik hebt bei Eintauchen, Austauchen und Bewegung im Wasser Ringe in eine kleine,
+begrenzte Liste, die Anwendungsschleife packt sie jeden Frame in einen Block, jeder Graph-Shader liest ihn über die Beleuchtungs-ABI, und der Wassergraph
+neigt damit seine Normale und weißt den Kamm. Gebaut und im Bild belegt auf **Metal und OpenGL** (Mac). **D3D11, D3D12 und Vulkan sind in diesem Schritt
+nicht angefasst** (Queen, Schritt 4): ihre Dateien enthalten kein `FillMaterialWater`, sie zeichnen das Wasser ohne Ringe, kompilieren aber den neuen
+Shadertext (gemeinsame Quelle, Tests unten). Wo dieser Abschnitt den Abschnitten 1 bis 13 widerspricht, gilt dieser Abschnitt.
+
+### 14.1 Was gebaut wurde
+
+| Teil | Wo | Inhalt |
+|---|---|---|
+| Block | `HE_Core/include/Renderer/WaterRipples.h` | POD `WaterRippleBlock { head[4]; a[16][4]; b[16][4] }` (head: Anzahl, Ringtempo m/s, Abklingzeit s; a: Mitte XZ, Startradius, Stärke; b: Alter, Art), `kWaterRippleMax = 16`, Arten `WaterRippleKind` (0 Aufprall, 1 Spur, 2 Skript, 3 Austritt) |
+| Ablage | `IRenderer::SetWaterRipples/GetWaterRipples` | nicht virtuell, Member ganz am Ende der Klasse: keine vtable-Stelle und kein älterer Offset verschiebt sich |
+| ABI | `MaterialShaderLibrary::Lighting` + `kLightingPreamble` | drei Felder am Ende (`waterRipples`, `waterRippleA[16]`, `waterRippleB[16]`, 33 vec4 = 528 Byte, gesamt 2624 Byte); `LightPacking.cpp` hält per `static_assert` Größe und Blockfelder gleich und die Gesamtgröße unter Metals 4096 Byte (`setFragmentBytes`) |
+| Füllen | `HE::FillMaterialWater` (`LightPacking`) | Metal: Szenen-Pass (`FillMaterialLighting`) und G-Buffer-Pass; OpenGL: das gemeinsame `fillMatLight` (Vorwärts, G-Buffer, Resolve). Nicht in den UI-Passes und der Material-Vorschau: dort bleibt der Anhang 0 = keine Ringe |
+| Knoten | `MatNodeType::WaterRipple` ("Water Ripple", Kategorie Input) | Eingang Position (Vec2, ohne Draht die Welt-XZ des Fragments), Ausgänge Height (m), Slope (Vec2, Gradient der Höhe), Foam (0..1). Nur Fragmentstufe, in einem WPO-Körper liefert er Nullen. Eine Hilfsfunktion `heWaterRipple` über höchstens 16 Einträge, bei Anzahl 0 läuft die Schleife nie |
+| Graph | `MatGen/main.cpp` → `Water.hasset` | Neigung wird **nach** dem Gust-Faktor zur Wellenneigung addiert und geht durch das **eine** `Normalize3` (Fresnel, Refraktion, Kaustik und Glanzlicht sehen sie), Schaum wird zur Schaummaske addiert (mit dem Lace aufgebrochen), beides mit Distanz-Fade 30 bis 120 m. Kein neuer Parameter (alle 16 Slots sind belegt) |
+| Liste | `HE_Scene/WaterRipples.h/.cpp` | `HE::water::RippleField` (16 Einträge): `add`, `advance`, `clear`, `pack`, `effectiveStrength`; Konstanten `kRingSpeed` 1,1 m/s, `kDecayTime` 1,4 s, `kMinStrength` 0,02, `kMergeDistance` 0,3 m, `kMergeAge` 0,25 s; `RippleTriggers` für die Auslöser |
+| Besitzer | `PhysicsWorld::waterRipples()` | die Liste liegt in `PhysicsWorld::Impl`, wird in `step()` mit dem `dt` der Physik gealtert (Simulationszeit) und mit der Welt (`clear()`) geleert |
+| Auslöser | `PhysicsWorld::applyWater` (`raiseRings`) | Anteil unter Wasser im Vorschritt gegen den jetzigen, Geschwindigkeit **vor** dem Auftriebsimpuls; Aufprall, Austritt und Spur, höchstens 4 + 2 je Schritt |
+| Schleife | `HE::water::pushRipples(renderer, physics)` | einmal je Frame neben dem Umgebungs-Push: Spiel (`GameApplication.cpp`) und Editor (`pushEnvironment`, nur im Play-Modus) |
+| Zeugen | `HE_DUMP_WATERRIPPLE`, `HE_DUMP_WATERDROP` | Ringe aus Text (Ort, Radius, Stärke, Alter) und die ganze Kette mit echter Physik (Kiste fällt in einen See) |
+
+Die Regeln der Auslöser (`RippleTriggers`, `raiseRings`):
+
+* **Aufprall (Art 0):** der Anteil unter Wasser springt von unter 2 % auf 2 % oder mehr **und** die Geschwindigkeit in die Fläche beträgt mindestens 1 m/s.
+  Stärke `clamp(v / 6, 0,15, 1) * splash`, Startradius = horizontale halbe Ausdehnung des Körpers, 0,15 bis 3 m. Ein Körper, der schon im Wasser steht (Szenenstart),
+  oder der langsam hineinkommt, macht keinen Aufprall; danach wird die erste Spur um ein Intervall verschoben, damit sie nicht auf dem Aufprall im selben Schritt liegt.
+* **Austritt (Art 3):** der Anteil fällt unter 2 % bei mindestens 1,5 m/s nach oben. Stärke `clamp(v / 8, 0,1, 0,6) * splash`, Radius 0,8 der Ausdehnung.
+* **Spur (Art 1):** der Körper schneidet die Fläche (Anteil 2 % bis 98 %) und bewegt sich **relativ zur Strömung** mit mindestens 0,6 m/s: alle 0,12 s Simulationszeit
+  ein kleiner Ring (Stärke `clamp(v / 8, 0, 0,5) * splash`, Radius halbe Ausdehnung, 0,12 bis 1 m). Spuren verschmelzen nicht (sie sind die Linie hinter dem Körper).
+* **Die Strömung trägt den Ring** (`drift` = Strömung des Wasserkörpers in Welt-XZ). `splash` am Wasserkörper (`BodyPhysics::splash`) skaliert alles, 0 = dieses Wasser macht keine Ringe.
+* **Grenzen:** höchstens 4 Aufprälle und Austritte und 2 Spuren je Schritt, in der Reihenfolge der Bedienung (nach Schuld, dann Entity-Id: deterministisch); die Liste hat 16 Einträge;
+  voll ersetzt ein stärkerer Ring den schwächsten, ein schwächerer als alle wird verworfen; ein junger Ring derselben Art (kein Spur) innerhalb von 0,3 m wird aufgefrischt statt verdoppelt;
+  ein Ring unter 2 % Reststärke fliegt raus. Die Rechnung steckt in `applyWater`, also im gebuchten Teil (`buoyancyMs`).
+
+Der Shader (Startwerte, am Bild abgestimmt, die **Schnittstelle** — Blocklayout und Knotenanschlüsse — ist der Vertrag): ein Ring ist ein Wellenpaket auf seiner Front `r0 + Tempo * Alter`,
+ein Kosinus mit einer Wellenlänge `clamp(r0, 0,3, 1,2)` m unter einer Gauß-Hülle der Breite `Wellenlänge * (0,7 + 0,35 * Alter)`, Stärke `s * exp(-Alter / τ) / sqrt(Front / r0)`.
+Die Neigung ist der **analytische** Gradient der Höhe (Normale und Höhe stimmen überein), skaliert auf 0,35 bei voller Stärke, unabhängig von der Wellenlänge; der Schaum ist die Hülle am Kamm,
+nur für starke Ringe (`smoothstep(0,35, 0,9, Stärke)`).
+
+### 14.2 Abweichungen vom Konzept (Abschnitt 6)
+
+| Konzept | Gebaut | Grund |
+|---|---|---|
+| 6.3 Besitzer `HorizonWorld::ripples()` (D3 offen) | `PhysicsWorld::waterRipples()` | `PhysicsWorld.h` hat 42 Include-Stellen, `HorizonWorld.h` 180; das Alter läuft in `step()` auf der Simulationszeit (8.2), ohne dass die Anwendung es tickt; die Liste wird mit der Welt geleert. Ein Skript (Schritt 5, `water.disturb`) fügt über denselben Zugriff hinzu |
+| 6.1 / 12: Ringe sind reine Anzeige | unverändert gebaut. **Der Schritttext verlangt mehr:** "Die Wellenhöhe aus Schritt 2 enthält diese Störungen, damit Optik und Physik übereinstimmen" | `WaterIndex::surfaceAt` liest die Ringe **nicht**. Das hält die Determinismus-Aussage von 8.2 (Ringe verändern keinen Körper) und das Zeitbudget. Die Rückkopplung wäre ein CPU-Spiegel der Ringhöhe in `surfaceAt` (Höhe `0,35 / k * Hülle * cos`, bei vollem Ring etwa 4 cm), bei leerer Liste bit-gleich zu heute. **Entscheidung der Queen (12.10.): Anzeige-only**, bewusste Abweichung vom Schritttext; Optik und Physik können im Zentimeterbereich der Ringhöhe auseinanderliegen. Möglicher Folgeschritt (rund 30 bis 40 Minuten mit Tests), später zu entscheiden |
+| 6.2 Spuren verschmelzen mit jungen Ringen | Spuren verschmelzen nie | Sonst klebt ein Ring am bewegten Körper, statt eine Linie dahinter zu lassen |
+| 6.2 Arten 0 bis 2 | zusätzlich Art 3 (Austritt) | Der Schritttext verlangt Eintauch- **und Austauch**-Ereignisse |
+| 6.4 Punkt 4: Füllen an neun Stellen | Metal (2) und OpenGL (1 gemeinsame Stelle); **D3D11, D3D12, Vulkan nicht** | Queen: D3D/Vulkan-Dateien gehören zu Schritt 4 mit der Hardware-Abnahme. Die UI-Pässe und die Vorschau bleiben ohne Ringe (Plan: dort nichts nötig) |
+| 6.4 Punkt 1: `IRenderer::SetWaterRipples` "wie `SetEnvironmentSettings`" | nicht virtuell | Kein Backend überschreibt es; ein neues `virtual` verschöbe alle späteren vtable-Stellen |
+| 6.4 Punkt 5: Formelkonstanten | andere Startwerte (siehe oben) | Plan nannte sie ausdrücklich Startwerte; Neigung statt Höhe als Maß (0,35 = Neigung bei voller Stärke) |
+
+### 14.4 Grenzen, ehrlich
+
+* **Anzeige, keine Geometrie.** Die Ringe lehnen die Normale und weißen den Kamm; das Netz der Fläche bleibt flach. An der Silhouette (flacher Blick) und von nahe am Wasser sieht man
+  sie nur über das Licht, nicht als Höhe. Sie wirken bis 120 m (Distanz-Fade 30 bis 120 m, wie der Kräusel-Fade der Wellen).
+* **Welt-XZ, ohne Bindung an einen Wasserkörper.** Ein Ring gilt an dieser Stelle für **jede** Wasserfläche mit dem Wassermaterial: zwei Flächen übereinander (See über See) zeigen beide den
+  Ring, ebenso eine Wasserebene neben dem See, die dasselbe Material benutzt. Die Physik kennt die Höhe der Fläche, an der sie den Ring erzeugt hat, der Shader nicht.
+* **Simulationszeit.** Bei angehaltener Physik (Zeitskala 0, Pause, nicht gespielt) altern die Ringe nicht und stehen still; im Editor ohne Play gibt es keine (`pushEnvironment` schiebt dann
+  den leeren Block). Ein Frame mit mehreren Physikschritten altert sie mehrfach und zeichnet den letzten Stand (höchstens fünf Schritte, 83 ms: nicht zu sehen).
+* **Bounded.** 16 Einträge: ein Spiel mit vielen schnellen Körpern verliert die schwächsten Ringe (das ist die Absicht, die Obergrenze ist auch die Kostengrenze des Shaders).
+  Ein sehr großer Körper (Hüllradius über 3 m) macht einen Ring von höchstens 3 m Startradius.
+* **Nur Wassermaterial.** Der Knoten steckt in `Water.hasset`; Material-Instanzen davon erben ihn, ein eigenes Wassermaterial muss `Water Ripple` selbst einbauen (Neigung von der Normale abziehen,
+  Schaum addieren, wie `mat_gen` es tut).
+* **D3D11, D3D12, Vulkan.** Nicht angefasst. Sie binden `sizeof(Lighting)` Byte (der Anhang ist also da, 0 Ringe), rufen aber `FillMaterialWater` nicht auf, zeichnen deshalb **keine Ringe**.
+  Den neuen Shadertext kompilieren sie (gemeinsame Quelle, `test_engine_materials`, `test_material_graph`, auf dem Mac gegen glslang, SPIRV-Cross und die Reflexion, auf Windows und Linux in der CI), **gesehen hat ihn
+  dort keine Hardware.** Schritt 4 trägt das `FillMaterialWater` an den drei Stellen nach (Abschnitt 6.4 Punkt 4) und nimmt die Abnahme.
+* **Optik und Physik.** `surfaceAt` liest die Ringe nicht (14.2): ein Körper reitet auf den Wellen des Materials, nicht auf seinen eigenen Ringen. Der Unterschied ist die Ringhöhe (bei voller Stärke etwa 4 cm).

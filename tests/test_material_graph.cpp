@@ -404,10 +404,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// BombCells is the LAST enum value today; a node added after it
+	// WaterRipple is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::BombCells; ++t)
+	for (int t = 0; t <= (int)MatNodeType::WaterRipple; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -1300,6 +1300,87 @@ TEST_CASE("Bombing Cells: the hex grid as numbers, on the texture nodes' integer
 		int found = 0;
 		for (const auto& n : back.nodes)
 			if (n.type == MatNodeType::BombCells) { ++found; CHECK(n.p[0] == doctest::Approx(7.0f)); }
+		CHECK(found == 1);
+		CHECK(HE::generateFragment(back).glsl == HE::generateFragment(g).glsl);
+	}
+}
+
+// ═══ Water Ripple (Thema 179, Schritt 3) ═══════════════════════════════════════
+// The rings the water physics raised, read from the lighting block. Height, Slope
+// and Foam come out of one helper call; unwired, the point is the fragment's own
+// world XZ.
+static MaterialGraph makeWaterRippleGraph(bool wirePosition)
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int rip = g.addNode(MatNodeType::WaterRipple);
+	const int sp  = g.addNode(MatNodeType::SplitRGBA);
+	if (wirePosition)
+	{
+		const int wp = g.addNode(MatNodeType::WorldPos);
+		const int ws = g.addNode(MatNodeType::SplitRGBA);
+		const int uv = g.addNode(MatNodeType::CombineRGBA);
+		CHECK(g.connect(wp, 0, ws, 0));
+		CHECK(g.connect(ws, 0, uv, 0));
+		CHECK(g.connect(ws, 2, uv, 1));
+		CHECK(g.connect(uv, 0, rip, 0));
+	}
+	CHECK(g.connect(rip, 0, out, HE::kMatOutputRoughnessPin));      // Height
+	CHECK(g.connect(rip, 1, sp, 0));                                // Slope (vec2 → .xy)
+	CHECK(g.connect(sp, 0, out, HE::kMatOutputMetallicPin));
+	CHECK(g.connect(rip, 2, out, HE::kMatOutputEmissivePin));       // Foam
+	return g;
+}
+
+TEST_CASE("Water Ripple: one helper over the lighting block's rings, three outputs, no texture")
+{
+	const HE::MatShaderGen gen = HE::generateFragment(makeWaterRippleGraph(false));
+	REQUIRE_FALSE(gen.glsl.empty());
+	CHECK(gen.textures.empty());
+	// One helper, called once, reading the block the engine fills (count, speed, decay,
+	// then the two arrays), looping over its 16 entries and leaving early.
+	CHECK(countOf(gen.glsl, "void heWaterRipple(") == 1u);
+	CHECK(countOf(gen.glsl, "heWaterRipple(") == 2u);
+	CHECK(gen.glsl.find("heLight.waterRipples.x") != std::string::npos);
+	CHECK(gen.glsl.find("heLight.waterRipples.y") != std::string::npos);
+	CHECK(gen.glsl.find("heLight.waterRipples.z") != std::string::npos);
+	CHECK(gen.glsl.find("heLight.waterRippleA[i]") != std::string::npos);
+	CHECK(gen.glsl.find("heLight.waterRippleB[i]") != std::string::npos);
+	CHECK(gen.glsl.find("i < 16") != std::string::npos);
+	CHECK(gen.glsl.find("if (i >= n) break;") != std::string::npos);
+	// Unwired, the point is this fragment's world XZ; wired, it is the wire.
+	CHECK(gen.glsl.find("heWaterRipple(vWorldPos.xz, ") != std::string::npos);
+	CHECK(HE::generateFragment(makeWaterRippleGraph(true)).glsl.find("heWaterRipple(vWorldPos.xz, ")
+	      == std::string::npos);
+	// The G-buffer variant carries the same body.
+	CHECK(countOf(gen.glslGBuffer, "heWaterRipple(") == 2u);
+
+	// A graph without the node keeps its exact text: no helper, no block read.
+	CHECK(HE::generateFragment(makeDemoGraph()).glsl.find("heWaterRipple") == std::string::npos);
+	CHECK(HE::generateFragment(makeDemoGraph()).glsl.find("waterRipple") == std::string::npos);
+
+	// In a World Position Offset body (the vertex stage) the node is zeros: that stage declares
+	// no ripple helper, and the rings only lean a normal and whiten a crest.
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int rip = g.addNode(MatNodeType::WaterRipple);
+		REQUIRE(g.connect(rip, 0, out, HE::kMatOutputWPOPin));          // Height → WPO
+		const HE::MatShaderGen wpo = HE::generateFragment(g);
+		REQUIRE_FALSE(wpo.vertexBody.empty());
+		CHECK(wpo.vertexBody.find("heWaterRipple") == std::string::npos);
+		CHECK(wpo.vertexBody.find("= vec2(0.0);") != std::string::npos);
+		CHECK(wpo.glsl.find("heWaterRipple") == std::string::npos);     // nothing for the fragment to call either
+	}
+
+	// The pins survive a save and a reload, and the text is the same afterwards.
+	{
+		const MaterialGraph g = makeWaterRippleGraph(true);
+		MaterialGraph back;
+		REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+		int found = 0;
+		for (const auto& n : back.nodes)
+			if (n.type == MatNodeType::WaterRipple) ++found;
 		CHECK(found == 1);
 		CHECK(HE::generateFragment(back).glsl == HE::generateFragment(g).glsl);
 	}

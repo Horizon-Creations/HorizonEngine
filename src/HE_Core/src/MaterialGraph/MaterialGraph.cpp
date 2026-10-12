@@ -255,6 +255,11 @@ const std::vector<MatNodeDesc>& registry()
           { { "UV", F::Vec2, 0 }, { "Cell", F::Float, 8.0f }, { "Blend", F::Float, kMatBombDefaultSharpness } },
           { { "Weights", F::Vec3, 0 }, { "Random A", F::Vec3, 0 }, { "Random B", F::Vec3, 0 },
             { "Random C", F::Vec3, 0 } }, 1 },
+
+        // ── v16: the rings on the water, read from the lighting block ──
+        { MatNodeType::WaterRipple, "Water Ripple", "Input",
+          { { "Position", F::Vec2, 0 } },
+          { { "Height", F::Float, 0 }, { "Slope", F::Vec2, 0 }, { "Foam", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -524,6 +529,7 @@ struct EmitCtx
     // prefix. One layer's Albedo/Normal/Mask reads reuse ONE grid this way.
     bool usesBombGrid = false;
     bool usesBombCells = false;                          // heBombCells (Bombing Cells, no texture)
+    bool usesWaterRipple = false;                        // heWaterRipple (Water Ripple, reads heLight)
     std::unordered_map<std::string, std::string> bombGrids;
     // Landscape layer blending: the fragment declares heLandscapeWeights and the
     // material advertises its layer names (order = weightmap channel order).
@@ -1380,6 +1386,37 @@ HE_MG_NOINLINE bool emitWindSwayNode(EmitCtx& c, const Scope& sc, const MatGraph
     return true;
 }
 
+// Water rings.
+HE_MG_NOINLINE bool emitWaterNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                  std::string& decl, std::vector<std::string>& pinExpr)
+{
+    switch (n.type)
+    {
+        case MatNodeType::WaterRipple:
+        {
+            // Same stage test as Wind Sway: the WPO body is emitted in scope "vs" (a
+            // function it calls inlines as "vs/<id>"). The vertex stage declares no ripple
+            // helper and the rings only lean a normal and whiten a crest, so it gets zeros.
+            const bool vertex = sc.key == "vs" || sc.key.rfind("vs/", 0) == 0;
+            if (vertex)
+                decl = "float " + v + "_h = 0.0; vec2 " + v + "_g = vec2(0.0); float " + v + "_f = 0.0;";
+            else
+            {
+                // Unconnected, the point is where the fragment is: the rings live in the world.
+                const std::string pos = hasInput(sc, n, 0) ? inputExpr(c, sc, n, 0, F::Vec2)
+                                                           : std::string("vWorldPos.xz");
+                c.usesWaterRipple = true;
+                decl = "float " + v + "_h; vec2 " + v + "_g; float " + v + "_f; heWaterRipple(" + pos + ", "
+                     + v + "_h, " + v + "_g, " + v + "_f);";
+            }
+            pinExpr = { v + "_h", v + "_g", v + "_f" };
+            break;
+        }
+        default: return false;
+    }
+    return true;
+}
+
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
 std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
 {
@@ -1407,7 +1444,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         || emitPatternNode(c, sc, n, v, decl, pinExpr)
         || emitFlowNode(c, sc, n, v, decl, pinExpr)
         || emitUiNode(c, sc, n, v, decl, pinExpr)
-        || emitWindSwayNode(c, sc, n, v, decl, pinExpr));
+        || emitWindSwayNode(c, sc, n, v, decl, pinExpr)
+        || emitWaterNode(c, sc, n, v, decl, pinExpr));
 
     if (!decl.empty())
         c.body += "    " + decl + "\n";
@@ -1821,6 +1859,48 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    heBombTap(uv, size, b + ivec2(1 - si, si), rot, seed, t2, r2);\n"
             "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(sharp));\n"
             "    w /= w.x + w.y + w.z; }\n";
+    if (c.usesWaterRipple)
+        // Water Ripple: the rings of heLight.waterRipples (A: xy centre, z start radius, w
+        // strength; B: x age; the head: y ring speed, z decay time). One ring is a wave packet
+        // riding its front, r0 + speed * age: a cosine of one wavelength (it grows with the
+        // splash, 0.3 to 1.2 m) under a gaussian that widens with age, fading with age
+        // (exp(-age / decay)) and with the spread of the ring (the energy of a circle is
+        // shared out over a longer rim). h is that height; g is its analytic gradient, so a
+        // normal that leans with g and the height agree. The factor 0.35 is the lean of a
+        // full-strength ring whatever its wavelength (the height is 0.35 / k). f is the
+        // packet's envelope at the crest, for strong rings only. Nothing here reads a
+        // derivative or a texture, so the loop may leave early; with no ring (count 0) the
+        // loop never runs and the three results are 0.
+        src += R"HE(void heWaterRipple(vec2 p, out float h, out vec2 g, out float f) {
+    h = 0.0; g = vec2(0.0); f = 0.0;
+    int n = int(heLight.waterRipples.x + 0.5);
+    float speed = heLight.waterRipples.y;
+    float decay = max(heLight.waterRipples.z, 0.05);
+    for (int i = 0; i < 16; i++) {
+        if (i >= n) break;
+        vec4 ra = heLight.waterRippleA[i];
+        vec4 rb = heLight.waterRippleB[i];
+        vec2 dv = p - ra.xy;
+        float d = length(dv);
+        float r0 = max(ra.z, 0.05);
+        float lam = clamp(r0, 0.3, 1.2);
+        float k = 6.2831853 / lam;
+        float front = r0 + speed * rb.x;
+        float w = lam * (0.7 + 0.35 * rb.x);
+        float u = d - front;
+        float q = u / w;
+        float env = ra.w * exp(-rb.x / decay) * inversesqrt(max(front / r0, 1.0));
+        float pk = exp(-q * q);
+        float ph = k * u;
+        float sn = sin(ph);
+        float cs = cos(ph);
+        h += (0.35 / k) * env * pk * cs;
+        g += (0.35 * env * pk * (-sn - 2.0 * u / (w * w * k) * cs)) * dv / max(d, 0.001);
+        f += smoothstep(0.35, 0.9, env) * exp(-(u * u) / (0.25 * lam * lam));
+    }
+    f = clamp(f, 0.0, 1.0);
+}
+)HE";
     src += "void main() {\n" + c.body;
     // Masked: kill sub-cutoff fragments BEFORE shading — hard-edged holes, opaque pass.
     if (blendMode == (int)MatBlendMode::Masked)
