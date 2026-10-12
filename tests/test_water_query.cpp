@@ -996,12 +996,15 @@ TEST_CASE("Underwater caustics settings: setUnderwaterCaustics touches the revis
 
     TerrainComponent b = a;
     CHECK(water::sameContent(a.water, b.water));
-    const uint32_t rev = b.water.revision;
+    b.dirty       = false;   // addLake (addPolygon) left both set; the question is what the setter does
+    b.water.dirty = false;
+    const uint64_t rev = b.water.revision;
     water::UnderwaterCausticsParams c;
     c.intensity = 1.5f;
     REQUIRE(water::setUnderwaterCaustics(b, lake, c));
     CHECK(b.water.revision == rev + 1);
-    CHECK_FALSE(b.water.dirty);                              // no surface rebuilt
+    CHECK_FALSE(b.water.dirty);                              // the sheet is not rebuilt
+    CHECK_FALSE(b.dirty);                                    // nor a single terrain chunk
     REQUIRE(water::setUnderwaterCaustics(b, lake, c));       // the same again: nothing
     CHECK(b.water.revision == rev + 1);
     CHECK_FALSE(water::sameContent(a.water, b.water));       // only the caustics differ
