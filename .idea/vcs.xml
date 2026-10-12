@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/assimp-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/astcenc-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/astcenc-src/Source/GoogleTest" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/glslang-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/lua-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/nlohmann_json-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/recastnavigation-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/sdl3-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/spirv_cross-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/astcenc-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/astcenc-src/Source/GoogleTest" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/glslang-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/lua-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/nlohmann_json-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/recastnavigation-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/sdl3-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-dmg26/_deps/spirv_cross-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/assimp-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/astcenc-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/astcenc-src/Source/GoogleTest" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/glslang-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/libssh2-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/lua-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/recastnavigation-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/sdl3-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/spirv_cross-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/lua-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/nlohmann_json-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/recastnavigation-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/sdl3-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/astcenc-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/astcenc-src/Source/GoogleTest" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/glslang-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/lua-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/nlohmann_json-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/recastnavigation-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/sdl3-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/macos-release/_deps/spirv_cross-src" vcs="Git" />
+  </component>
+</project>
