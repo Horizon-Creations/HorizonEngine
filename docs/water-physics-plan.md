@@ -689,7 +689,7 @@ Die Regeln der Auslöser (`RippleTriggers`, `raiseRings`):
   ein kleiner Ring (Stärke `clamp(v / 8, 0, 0,5) * splash`, Radius halbe Ausdehnung, 0,12 bis 1 m). Spuren verschmelzen nicht (sie sind die Linie hinter dem Körper).
 * **Die Strömung trägt den Ring** (`drift` = Strömung des Wasserkörpers in Welt-XZ). `splash` am Wasserkörper (`BodyPhysics::splash`) skaliert alles, 0 = dieses Wasser macht keine Ringe.
 * **Grenzen:** höchstens 4 Aufprälle und Austritte und 2 Spuren je Schritt, in der Reihenfolge der Bedienung (nach Schuld, dann Entity-Id: deterministisch); die Liste hat 16 Einträge;
-  voll ersetzt ein stärkerer Ring den schwächsten, ein schwächerer als alle wird verworfen; ein junger Ring derselben Art (kein Spur) innerhalb von 0,3 m wird aufgefrischt statt verdoppelt;
+  voll ersetzt ein stärkerer Ring den schwächsten, ein schwächerer als alle wird verworfen; ein junger Ring derselben Art (keine Spur) innerhalb von 0,3 m wird aufgefrischt statt verdoppelt;
   ein Ring unter 2 % Reststärke fliegt raus. Die Rechnung steckt in `applyWater`, also im gebuchten Teil (`buoyancyMs`).
 
 Der Shader (Startwerte, am Bild abgestimmt, die **Schnittstelle** — Blocklayout und Knotenanschlüsse — ist der Vertrag): ein Ring ist ein Wellenpaket auf seiner Front `r0 + Tempo * Alter`,
@@ -708,6 +708,24 @@ dünn und nur für starke junge Ringe (`0,7 * smoothstep(0,45, 1,0, Stärke)`, d
 | 6.4 Punkt 4: Füllen an neun Stellen | Metal (2) und OpenGL (1 gemeinsame Stelle); **D3D11, D3D12, Vulkan nicht** | Queen: D3D/Vulkan-Dateien gehören zu Schritt 4 mit der Hardware-Abnahme. Die UI-Pässe und die Vorschau bleiben ohne Ringe (Plan: dort nichts nötig) |
 | 6.4 Punkt 1: `IRenderer::SetWaterRipples` "wie `SetEnvironmentSettings`" | nicht virtuell | Kein Backend überschreibt es; ein neues `virtual` verschöbe alle späteren vtable-Stellen |
 | 6.4 Punkt 5: Formelkonstanten | andere Startwerte (siehe oben) | Plan nannte sie ausdrücklich Startwerte; Neigung statt Höhe als Maß (0,5 = Neigung bei voller Stärke) |
+
+### 14.3 Belegt und gemessen (Mac, Release, shaderc ON; gemeldet, wo nicht ausdrücklich geprüft)
+
+**Bilder** (Headless-Dump, `scripts/he_shot.py`, `HE_SKY_TIME=1.0`, frischer `HE_CONFIG_DIR`, Vorwärtspfad, AA aus, `WATERTEST=floor TOD=0.4 CAMY=4 CAMZ=6 PITCH=-25`, Bilder in `docs/water-physics/`):
+
+* **Kontrolle ohne Ringe = Bild vor der Änderung, Byte für Byte**, auf Metal (md5 `ecdaf6f1…`) und OpenGL (`bf28f2ec…`), obwohl der Shadertext des Wassers sich geändert hat (der Ring-Zweig läuft bei Anzahl 0 nicht, die Summen addieren 0).
+* **Ring** (`HE_DUMP_WATERRIPPLE="0,-3,0.8,1,<Alter>"`) bei 0,2 / 0,8 / 1,6 s: bei 0,2 s die weiße Krone mit einem Ring darum, bei 0,8 s drei bis vier Ringe, bei 1,6 s weiche, größere Ringe. Auf Metal **und** OpenGL.
+  Dieselbe Eingabe zweimal ergibt dasselbe Bild (Metal `0e134fe5…`, OpenGL `b84cec49…` bei 0,8 s). Metal gegen OpenGL: 5 Pixel mehr abweichend als im Kontrollbild (7,907 % gegen 7,906 %, größte Abweichung 5 von 255; das ist der Unterschied der Backends, nicht der Ring).
+* **Die ganze Kette** (`HE_DUMP_WATERDROP=0.8`, echte `PhysicsWorld`): eine Ein-Meter-Kiste mit halber Dichte fällt aus 3 m in einen See, landet in Schritt 45, 0,8 s später liegen 3 Ringe auf dem Wasser, die Kiste taucht ein, um sie laufen Ringe. Das Bild auf Metal und OpenGL; dieselbe Szene ohne Ringe
+  (`HE_DUMP_WATERDROPRINGS=0`) unterscheidet sich in 3,25 % der Pixel (dem Ring).
+
+**Tests** (alle neu mit Negativkontrollen): `tests/test_water_ripples.cpp` 14 Fälle, 298 Zusicherungen (Liste, Block, Lighting-Anhang samt **Offsets im SPIR-V**, Auslöser, Szenen ohne Ring: ohne Wasser, Wasser aus, `splash` 0, Start im Wasser, langsamer Eintritt; Drosselung, Simulationszeit, Determinismus Byte für Byte).
+`test_material_graph` (Knoten Water Ripple: Text, Fragment-Stufe und WPO-Nullen, Rundlauf, Querkompilierung aller Knoten für Metal und GLSL, GL 4.30 gelinkt 87/87), `test_engine_materials` (Blockgröße auf SPIR-V, HLSL und D3D12-Layout gleich `sizeof(Lighting)`, `Water.hasset` trägt `heWaterRipple`). Voller `ctest`: siehe Ergebnis im Hive-Bericht (Abschnitt unten ergänzt, falls abweichend).
+**Mutationsprobe** (sechs Mutationen in einem Bau gesetzt, die Fälle rot gesehen, zurückgenommen): Spuren verschmelzen, Geschwindigkeitsgrenze des Aufpralls, `advance` im Physikschritt, Klemme der Anzahl in `FillMaterialWater`, Ringtempo im Block (`head[1]`) — **fünf rot, eine gleichwertig**:
+der Frühausstieg bei `splash <= 0` in `raiseRings` ist nur eine Abkürzung, denn die Stärke wird ohnehin mit `splash` multipliziert und `add` verwirft Ringe unter 2 %.
+
+**Kosten.** Auslöser: der Bench `what 256 floating bodies cost` (Schritt 2) meldet jetzt 0,36 ms je Schritt, 1,41 µs je Körper, schlechtester Schritt 0,47 ms (Schritt 2: 0,28 bis 0,38 ms und 1,1 bis 1,5 µs): kein Unterschied außerhalb der Streuung. Die Rechnung steckt in `applyWater`, also im gebuchten Teil.
+**Nicht gemessen:** die Kosten des Shaders (Pass-p50 mit und ohne Ringe; `he_perf_capture.py` braucht ein Projekt mit Wasserszene), Windows, Linux, D3D11, D3D12, Vulkan.
 
 ### 14.4 Grenzen, ehrlich
 
