@@ -17,6 +17,7 @@ class HorizonWorld;
 class RenderWorld;
 class ContentManager;
 struct EditorCameraOverride;
+struct UnderwaterCameraData;
 
 namespace HE
 {
@@ -80,6 +81,25 @@ inline constexpr float kEditorIconScreenFraction = 0.05f;
 // F-key framing must NOT measure them, or a light whose only "geometry" is a
 // symbol sized in screen fractions frames to a few centimetres.
 HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
+
+// How far `cameraPos` sits under a water surface, straight from the flat body LEVEL
+// WaterIndex resolves (HorizonScene/WaterQuery.h) — never the wave-displaced height.
+// The water material shades its waves on top of a geometrically flat mesh (mat_gen's
+// waterMaterial(): the wave trains only ever feed pixel-shading nodes — fresnel, foam,
+// the normal perturbation — never a vertex/world-position offset), so the flat level is
+// exactly where the lens draws the waterline; no wave phase or clock needs to travel
+// here for this to be exact.
+//
+// Several overlapping bodies: WaterIndex::surfaceAt's own rule decides (the highest
+// surface wins) — the same rule the water physics itself queries by. A camera below
+// the water's own bed (inside solid ground or a cave under the sheet) is reported dry:
+// being under a surface whose floor is also below you is not "underwater".
+//
+// Stateless — called fresh every extract(), nothing carried from one frame to the next,
+// so a camera resting exactly on the waterline, or crossing it within a single frame,
+// reads correctly immediately with no hysteresis and no special-casing.
+HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
+                                                             const glm::vec3& cameraPos);
 
 } // namespace HE
 

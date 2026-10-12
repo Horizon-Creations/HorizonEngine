@@ -15,6 +15,17 @@ struct CameraData {
     glm::vec3 position   = glm::vec3(0.0f);
 };
 
+// How far the render camera sits under a water surface this frame (Thema 185 Schritt
+// 1), for the post-processing stage to read. Set by HE::queryUnderwaterCamera
+// (RenderExtractor.h/.cpp) right after the camera, straight from camera.position — no
+// state carried between frames, so a camera resting exactly on the waterline or
+// crossing it within one frame is correct immediately, with no hysteresis.
+struct UnderwaterCameraData {
+    bool  wet         = false;  // a water surface covers the camera's XZ (and the camera is above that body's own bed)
+    float surfaceY    = 0.0f;   // world Y of that surface (the flat body level the material shades waves on top of; meaningful only if wet)
+    float signedDepth = 0.0f;   // surfaceY - camera.y: > 0 means the camera is below the surface. 0 when !wet.
+};
+
 // "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so
 // the sentinel has to be a value the registry never hands out.
 inline constexpr uint32_t kNoOwnerEntity = 0xFFFFFFFFu;
@@ -339,6 +350,7 @@ public:
     std::vector<HE::GiLandscape>     landscapes;
     CameraData                camera;
     ShadowData                shadow;
+    UnderwaterCameraData      underwaterCamera;
 
     // Direction *toward* the sun (normalized), set by the extractor: from the
     // first directional light, or driven by the day-night cycle when enabled.

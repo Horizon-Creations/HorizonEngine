@@ -26,6 +26,7 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
+#include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/RopeTrailSystem.h>                   // buildTrailGeometry
@@ -1188,6 +1189,30 @@ bool isEditorIconMaterial(const UUID& materialId)
 	    || materialId == kEditorIconAudioSourceMaterialId;
 }
 
+UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3& cameraPos)
+{
+	UnderwaterCameraData out{};
+	if (!std::isfinite(cameraPos.x) || !std::isfinite(cameraPos.y) || !std::isfinite(cameraPos.z))
+		return out;
+
+	// A fresh snapshot, like the `water.surfaceAt` script binding (EngineApi.cpp) —
+	// the one-off-question use WaterIndex::build documents itself for. `t` plays no
+	// part here (the comment above explains why), so 0.0 is as good as any value.
+	water::Surface surf;
+	const water::WaterIndex index = water::WaterIndex::build(world);
+	if (!index.surfaceAt(cameraPos.x, cameraPos.z, 0.0, surf))
+		return out;   // dry at this XZ — WaterIndex already clips the shore itself
+
+	const float signedDepth = surf.level - cameraPos.y;
+	if (signedDepth > surf.depth)
+		return out;   // under the water's own bed — not underwater, just underground
+
+	out.wet         = true;
+	out.surfaceY    = surf.level;
+	out.signedDepth = signedDepth;
+	return out;
+}
+
 } // namespace HE
 
 // Out-of-line on purpose (see the header): the one definition the DLL exports.
@@ -1331,6 +1356,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 
 	extractTransforms(world, reg);
 	extractCamera(reg, out, aspectRatio, editorCam);
+	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
 	extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
