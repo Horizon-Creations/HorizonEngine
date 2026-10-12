@@ -465,19 +465,19 @@ namespace
     };
 
     // The sheet the field's own settings build for `body`, the mesh WaterSurface draws.
-    water::Surface sheetOf(const TerrainComponent& tc, uint16_t body)
+    water::SurfaceMesh sheetOf(const TerrainComponent& tc, uint16_t body)
     {
         water::SurfaceOptions opt;
         opt.clipToGround   = tc.water.clipToGround;
         opt.shoreOvershoot = tc.water.shoreOvershoot;
-        water::Surface sheet;
+        water::SurfaceMesh sheet;
         REQUIRE(water::buildSurface(tc, body, opt, sheet));
         return sheet;
     }
 
     // Whether a triangle of the sheet covers terrain-local (x, z), the outline
     // counting as covered within `tol` metres.
-    bool sheetCovers(const water::Surface& sheet, float x, float z, float tol)
+    bool sheetCovers(const water::SurfaceMesh& sheet, float x, float z, float tol)
     {
         const std::vector<float>&    v  = sheet.mesh.vertices;
         const std::vector<uint32_t>& ix = sheet.mesh.indices;
@@ -502,7 +502,7 @@ namespace
     PitVsSheet pitVsSheet(const TerrainComponent& tc, const std::vector<float>& before, uint16_t body)
     {
         PitVsSheet r;
-        const water::Surface sheet = sheetOf(tc, body);
+        const water::SurfaceMesh sheet = sheetOf(tc, body);
         r.triangles = sheet.triangles;
         // On the outline counts as under it, within what the mesh's own
         // simplification moves it (a thousandth of a cell, 4 mm here).
@@ -651,7 +651,7 @@ TEST_CASE("insideSheet (Thema 188): the point test the dig asks says what the me
     brush::end(s, tc);
     REQUIRE(tc.water.findBody(body));
 
-    const water::Surface sheet = sheetOf(tc, body);
+    const water::SurfaceMesh sheet = sheetOf(tc, body);
     water::Lattice lattice;
     REQUIRE(water::buildLattice(tc, body, water::bodyCells(tc, body), lattice,
                                 { tc.water.clipToGround, p.level, tc.water.shoreOvershoot }));

@@ -210,7 +210,7 @@ namespace
     // The mesh of a body, with its centre applied so the triangles are terrain-local.
     struct Built
     {
-        water::Surface s;
+        water::SurfaceMesh s;
         std::vector<Tri> tris;
     };
     Built build(const TerrainComponent& tc, uint16_t id, water::SurfaceOptions opt = {})
@@ -705,7 +705,7 @@ TEST_CASE("Water mesh: a body without water is an empty surface, an unknown one 
     TerrainComponent tc = makeTerrain();
     const uint16_t id = tc.water.createBody(0.0f);                    // no cells
     REQUIRE(water::ensureGrid(tc));
-    water::Surface s;
+    water::SurfaceMesh s;
     CHECK(water::buildSurface(tc, id, {}, s));
     CHECK(s.empty());
     CHECK_FALSE(water::buildSurface(tc, 999, {}, s));
@@ -1381,7 +1381,7 @@ TEST_CASE("Water shore: ground above the level everywhere is no sheet at all")
     TerrainComponent tc = makeTerrain();
     shapeGround(tc, 65, [](float, float) { return 2.0f; });
     const uint16_t id = addLake(tc, rect(-10, -10, 10, 10), 0.5f);
-    water::Surface s;
+    water::SurfaceMesh s;
     REQUIRE(water::buildSurface(tc, id, clipped(), s));
     CHECK(s.empty());
     CHECK(s.polygons == 0);

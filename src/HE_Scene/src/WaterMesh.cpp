@@ -446,9 +446,9 @@ uint64_t surfaceHash(const Lattice& l, float level, const SurfaceOptions& opt)
     return h;
 }
 
-bool buildSurface(const TerrainComponent& tc, uint16_t body, const SurfaceOptions& opt, Surface& out)
+bool buildSurface(const TerrainComponent& tc, uint16_t body, const SurfaceOptions& opt, SurfaceMesh& out)
 {
-    out = Surface{};
+    out = SurfaceMesh{};
     const Body* b = tc.water.findBody(body);
     if (!b || !tc.water.allocated()) return false;
     const CellRect cells = bodyCells(tc, body);
@@ -459,10 +459,10 @@ bool buildSurface(const TerrainComponent& tc, uint16_t body, const SurfaceOption
 }
 
 bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const CellRect& cells,
-                  float level, const SurfaceOptions& opt, Surface& out)
+                  float level, const SurfaceOptions& opt, SurfaceMesh& out)
 {
     (void)tc;
-    out = Surface{};
+    out = SurfaceMesh{};
     out.level = level;
     out.cells = cells;
     if (lattice.empty()) return false;
