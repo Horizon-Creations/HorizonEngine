@@ -2,6 +2,7 @@
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
+#include <Diagnostics/EngineProfiler.h> // HE_DUMP_GPUTIME turns live GPU timing on
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
@@ -8971,6 +8972,57 @@ void EditorApplication::dumpFrameHeadless()
 	else
 		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());
+
+	// HE_DUMP_GPUTIME="frames[,WxH]": the pass-cost witness for backends whose GPU timer
+	// has no per-pass rows (D3D11, D3D12 and Vulkan time the whole frame only). AFTER the
+	// capture, so the picture is the one the same knobs give without it: the viewport goes
+	// to WxH (default the dump's 1280x720), `frames` more frames are rendered from the same
+	// camera with the profiler's live GPU timing on (D3D11 and GL only time when asked;
+	// D3D12 and Vulkan always do), and the whole-frame GPU times are logged as
+	// median/mean/min/max. A pass's cost is the difference between two runs that differ
+	// only in that pass (Thema 185 Schritt 5: UWFOG=0 UWCAUSTICS=0 against the defaults).
+	// The first frames are dropped: every backend reads its timestamps a few frames late.
+	if (const char* gt = std::getenv("HE_DUMP_GPUTIME"); gt && *gt)
+	{
+		int frames = std::clamp(std::atoi(gt), 30, 5000);
+		uint32_t tw = 1280, th = 720;
+		if (const char* comma = std::strchr(gt, ','))
+			if (unsigned a = 0, b = 0; std::sscanf(comma + 1, "%ux%u", &a, &b) == 2 && a >= 64 && b >= 64)
+				tw = a, th = b;
+		r->SetViewportSize(tw, th);
+		EngineProfiler& prof = EngineProfiler::instance();
+		const bool liveBefore = prof.liveEnabled();
+		prof.setLiveEnabled(true);
+		std::vector<double> ms;
+		ms.reserve(static_cast<size_t>(frames));
+		const int skip = 16;
+		for (int i = 0; i < frames + skip; ++i)
+		{
+			r->Render();
+			const double g = r->GetFrameGpuStats().gpuFrameMs;
+			if (i >= skip && g > 0.0)
+				ms.push_back(g);
+		}
+		prof.setLiveEnabled(liveBefore);
+		r->SetViewportSize(1280, 720);
+		char line[256];
+		if (ms.empty())
+			std::snprintf(line, sizeof line,
+				"EditorApplication: HE_DUMP_GPUTIME %ux%u — no GPU time from this backend", tw, th);
+		else
+		{
+			std::vector<double> s = ms;
+			std::sort(s.begin(), s.end());
+			double sum = 0.0;
+			for (double v : s) sum += v;
+			std::snprintf(line, sizeof line,
+				"EditorApplication: HE_DUMP_GPUTIME %ux%u frames=%zu gpu ms median=%.4f mean=%.4f "
+				"min=%.4f p90=%.4f max=%.4f",
+				tw, th, s.size(), s[s.size() / 2], sum / double(s.size()), s.front(),
+				s[(s.size() * 9) / 10], s.back());
+		}
+		HE_LOG_INFO(Editor, "%s", line);
+	}
 
 	// Witness the MCP screenshot path (HE_DUMP_SCENEIMAGE=<file.png>): the same
 	// IRenderer::RenderSceneImage call scene_screenshot makes, from the dump
