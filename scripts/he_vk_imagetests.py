@@ -307,12 +307,13 @@ CASES = {
     # shader change touched this material (the branch is dead at count 0, §14.3's Mac
     # byte-identical control).
     #
-    # REPORT ONLY for now (min_mean=None): measured on an RTX 4070 (real Vulkan, driver
-    # 1.4.341, 12.10.2026, this exact case): off vs on mean |Δ| 0.2445 (max 104, 2.6 % of
-    # pixels off by more than 2) — before this step's three FillMaterialWater calls, off
-    # and on were byte-identical (mean |Δ| 0). No lavapipe number yet (this job runs on
-    # Linux CI, not on NN-WS03); once one exists, turn this into a judged pair at roughly
-    # half of it, the convention every other case here follows.
+    # Judged at half the measured number, the convention every other case here follows.
+    # Measured on this exact case: RTX 4070 (real Vulkan, driver 1.4.341, 12.10.2026) off vs
+    # on mean |Δ| 0.2445 (max 104, 51702 px, 2.6 % of pixels off by more than 2); lavapipe
+    # (llvmpipe LLVM 20.1.2, Vulkan 1.4.318, CI run 38213877852 on ff3411bd) mean |Δ| 0.2451
+    # (max 104, 51289 px, 2.603 %). Before the three FillMaterialWater calls of Schritt 4,
+    # off and on were byte-identical (mean |Δ| 0), so 0.12 fails exactly when the ring is
+    # gone, with a factor of two of room for the backend difference (19 to 400 px).
     "water_ripple": {
         "base": {"WATERTEST": "1", "SKYTEST": "1", "TOD": "0.4", "CAMY": "4", "CAMZ": "6",
                  "PITCH": "-25", "CLOUDMODE": "0", "COVERAGE": "0"},
@@ -320,7 +321,7 @@ CASES = {
             "off": {},
             "on":  {"dump": {"WATERRIPPLE": "0,-3,0.8,1,0.8"}},
         },
-        "pairs": [("off", "on", None)],
+        "pairs": [("off", "on", 0.12)],
         "require": {"off": ["HE_DUMP_WATERTEST engine water plane added"],
                     "on":  ["HE_DUMP_WATERTEST engine water plane added",
                             "HE_DUMP_WATERRIPPLE 1 ring(s)"]},
