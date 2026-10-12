@@ -9817,11 +9817,61 @@
          "t": "."
         }
        ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Water"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "b",
+         "t": "Water"
+        },
+        {
+         "s": "",
+         "t": " tab paints ponds with the water brush (hold Ctrl to erase) and lists every pond and lake of the landscape under "
+        },
+        {
+         "s": "i",
+         "t": "Bodies"
+        },
+        {
+         "s": "",
+         "t": ". Under each body, "
+        },
+        {
+         "s": "b",
+         "t": "Physics"
+        },
+        {
+         "s": "",
+         "t": " sets what that water does to a body in it: density, drag, current and the strength of the rings. See "
+        },
+        {
+         "s": "i",
+         "t": "Water Physics"
+        },
+        {
+         "s": "",
+         "t": " in Systems."
+        }
+       ]
       }
      ],
      "eyebrow": "Terrain",
      "id": "landscape-mode",
-     "text": "Switch the viewport toolbar's mode selector to Landscape and the Quick Settings panel becomes the terrain tool. Create Landscape With no terrain in the scene the panel shows a creation form: Width (X), Depth (Z), Resolution (2–512), Height Scale, and procedural noise — Seed (0 = flat), Octaves, Frequency, Lacunarity, Gain — with a live grid preview. Creating adds a Terrain entity with a default terrain material. The seed noise is baked once into editable heights; from then on the terrain is a plain heightfield your brushes edit directly. Sculpting Six brush tools: Raise, Lower, Smooth, Flatten, Ramp, Roughen, with Radius (0.5–500 m), Falloff and Strength. Drag with the left mouse button in the viewport to sculpt — Flatten pulls toward the height under the drag-start point, Ramp blends between two dragged points. Reset Sculpting clears all edits. Strokes only regenerate the terrain chunks they touch, so sculpting stays fast on large terrains. Mountain The seventh tool, Mountain, grows a whole formation inside an area instead of under a brush. Drag across the ground to mark the area, as a Rectangle (corner to corner, the mountain fills the ellipse inside it) or a Circle (centre to rim); the outline follows the pointer and the mountain appears when you let go, as one undo step. It is added on top of the ground that is there, so earlier sculpting stays underneath, and outside the area nothing moves. Max Height is how far the tallest point rises (negative digs a basin), Falloff the width in metres of the slope back down to the rim, and Roughness, Octaves and Frequency shape the noisy relief. The same Seed, area and settings give the same mountain again; New Seed picks another. MCP clients reach the same operation through terrain_mountain. Terrain renders as a grid of chunk entities with automatic LOD meshes and skirt geometry — details under Rendering » Performance. Scatter vegetation with the Foliage component.",
+     "text": "Switch the viewport toolbar's mode selector to Landscape and the Quick Settings panel becomes the terrain tool. Create Landscape With no terrain in the scene the panel shows a creation form: Width (X), Depth (Z), Resolution (2–512), Height Scale, and procedural noise — Seed (0 = flat), Octaves, Frequency, Lacunarity, Gain — with a live grid preview. Creating adds a Terrain entity with a default terrain material. The seed noise is baked once into editable heights; from then on the terrain is a plain heightfield your brushes edit directly. Sculpting Six brush tools: Raise, Lower, Smooth, Flatten, Ramp, Roughen, with Radius (0.5–500 m), Falloff and Strength. Drag with the left mouse button in the viewport to sculpt — Flatten pulls toward the height under the drag-start point, Ramp blends between two dragged points. Reset Sculpting clears all edits. Strokes only regenerate the terrain chunks they touch, so sculpting stays fast on large terrains. Mountain The seventh tool, Mountain, grows a whole formation inside an area instead of under a brush. Drag across the ground to mark the area, as a Rectangle (corner to corner, the mountain fills the ellipse inside it) or a Circle (centre to rim); the outline follows the pointer and the mountain appears when you let go, as one undo step. It is added on top of the ground that is there, so earlier sculpting stays underneath, and outside the area nothing moves. Max Height is how far the tallest point rises (negative digs a basin), Falloff the width in metres of the slope back down to the rim, and Roughness, Octaves and Frequency shape the noisy relief. The same Seed, area and settings give the same mountain again; New Seed picks another. MCP clients reach the same operation through terrain_mountain. Terrain renders as a grid of chunk entities with automatic LOD meshes and skirt geometry — details under Rendering » Performance. Scatter vegetation with the Foliage component. Water The Water tab paints ponds with the water brush (hold Ctrl to erase) and lists every pond and lake of the landscape under Bodies. Under each body, Physics sets what that water does to a body in it: density, drag, current and the strength of the rings. See Water Physics in Systems.",
      "title": "Landscape Mode"
     },
     {
@@ -41974,6 +42024,486 @@
         },
         {
          "s": "c",
+         "t": "horizon.water.<function>"
+        },
+        {
+         "s": "",
+         "t": " · C++: "
+        },
+        {
+         "s": "c",
+         "t": "HE::api::water::<function>"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "What the water of a "
+        },
+        {
+         "s": "b",
+         "t": "Landscape"
+        },
+        {
+         "s": "",
+         "t": " does to the things in it, and the moment they go in or come out. Everything is in world space and needs no landscape handle, except "
+        },
+        {
+         "s": "c",
+         "t": "setFlow"
+        },
+        {
+         "s": "",
+         "t": ", which names the landscape and the body of water it changes. The group also holds the lake and brush functions ("
+        },
+        {
+         "s": "c",
+         "t": "createLake"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "paint"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "bodyAt"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "levelAt"
+        },
+        {
+         "s": "",
+         "t": " and so on); they are listed with the other Engine Call nodes in the HorizonCode node reference. How the water behaves, and the settings an author gives it, are described under "
+        },
+        {
+         "s": "i",
+         "t": "Water Physics"
+        },
+        {
+         "s": "",
+         "t": " in Systems."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Functions"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Function"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Returns"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Description"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "surfaceAt(x: float, z: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "wet: bool, height: float"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Whether there is water at a world point and how high its surface stands there, waves included: the height the water physics floats bodies on. It needs no landscape, and the highest surface wins where several overlap. Wet is false when the ground stands above the water or there is none, and height is then 0, so read wet first. While the game plays the waves move with the physics clock; outside play the surface stands at its level plus the waves at time zero.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.surfaceAt"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Water Surface At"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::surfaceAt"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "depthAt(x: float, z: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "depth: float"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Metres of water over the ground at a world point, waves included; 0 when it is dry. The question a wading or swimming check asks.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.depthAt"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Water Depth At"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::depthAt"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "flowAt(x: float, z: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "flow: vec3"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The current at a world point in metres per second, in world axes (the landscape's turn is already in it). Zero where it is dry or the water stands still.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.flowAt"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Water Flow At"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::flowAt"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "submerged(entity: int)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "share: float"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How much of an entity's body is under water, from 0 to 1, as of the latest physics step: 0.5 is a crate that floats half out, 1 is a stone on the bed. 0 for an entity that is not in water or has no physics body.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.submerged"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Get Submerged Share"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::submerged"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "buoyancy(entity: int)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "lift: float"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How many times its own weight the water lifts the body right now: 1 means it floats where it is, more than 1 that it rises, less than 1 that it sinks (a stone is about 0.4 however deep it lies). The buoyancy factor, the water's density over the body's, times the share under water. 0 for an entity that is not in water.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.buoyancy"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Get Water Buoyancy"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::buoyancy"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "pollImmersion()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "entities: int[], entered: bool[], speeds: float[], positions: vec3[]"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Every body that went into the water or came out of it since the last call, as four parallel lists: index i of entities is the body, entered says which way (true = in), speeds is how fast it went through the surface in metres per second (0 for an exit over the shore) and positions is where its centre was. Reading empties the lists, so read them in one place. A body that starts the scene in the water enters on the first step. Needs a physics world and the water physics on; the queue keeps the newest 256.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.pollImmersion"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Poll Water Immersion"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::pollImmersion"
+          },
+          {
+           "s": "",
+           "t": " · action"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "disturb(x: float, z: float, radius: float, strength: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "—"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Raises a ring on the water at a world point: a footstep, a shot, a thrown stone. Radius is the size it starts at in metres (0.05 to 6), strength runs from 0 to 1. The ring travels with the current. It is the water material's picture only and moves no body; it shows while the game plays, on every surface that uses the engine water material.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.disturb"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Disturb Water"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::disturb"
+          },
+          {
+           "s": "",
+           "t": " · action"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "setFlow(terrain: int, body: int, x: float, z: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "ok: bool"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Sets the current of one body of water, in world metres per second on x and z (held to 50 either way). terrain is the landscape and body the number from the body-at row. A body floating in that water is pulled toward it. False when the entity is no landscape or the body does not exist. Density, damping and the on/off switch are set in the Landscape panel.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.setFlow"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Set Water Flow"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::setFlow"
+          },
+          {
+           "s": "",
+           "t": " · action"
+          }
+         ]
+        ]
+       ]
+      }
+     ],
+     "eyebrow": "Gameplay · water physics",
+     "id": "water",
+     "text": "Lua / Python: horizon.water.<function> · C++: HE::api::water::<function> What the water of a Landscape does to the things in it, and the moment they go in or come out. Everything is in world space and needs no landscape handle, except setFlow, which names the landscape and the body of water it changes. The group also holds the lake and brush functions (createLake, paint, bodyAt, levelAt and so on); they are listed with the other Engine Call nodes in the HorizonCode node reference. How the water behaves, and the settings an author gives it, are described under Water Physics in Systems. Functions Function Returns Description surfaceAt(x: float, z: float) wet: bool, height: float Whether there is water at a world point and how high its surface stands there, waves included: the height the water physics floats bodies on. It needs no landscape, and the highest surface wins where several overlap. Wet is false when the ground stands above the water or there is none, and height is then 0, so read wet first. While the game plays the waves move with the physics clock; outside play the surface stands at its level plus the waves at time zero.\nLua/Python horizon.water.surfaceAt · HorizonCode Water Surface At · C++ HE::api::water::surfaceAt · query depthAt(x: float, z: float) depth: float Metres of water over the ground at a world point, waves included; 0 when it is dry. The question a wading or swimming check asks.\nLua/Python horizon.water.depthAt · HorizonCode Water Depth At · C++ HE::api::water::depthAt · query flowAt(x: float, z: float) flow: vec3 The current at a world point in metres per second, in world axes (the landscape's turn is already in it). Zero where it is dry or the water stands still.\nLua/Python horizon.water.flowAt · HorizonCode Water Flow At · C++ HE::api::water::flowAt · query submerged(entity: int) share: float How much of an entity's body is under water, from 0 to 1, as of the latest physics step: 0.5 is a crate that floats half out, 1 is a stone on the bed. 0 for an entity that is not in water or has no physics body.\nLua/Python horizon.water.submerged · HorizonCode Get Submerged Share · C++ HE::api::water::submerged · query buoyancy(entity: int) lift: float How many times its own weight the water lifts the body right now: 1 means it floats where it is, more than 1 that it rises, less than 1 that it sinks (a stone is about 0.4 however deep it lies). The buoyancy factor, the water's density over the body's, times the share under water. 0 for an entity that is not in water.\nLua/Python horizon.water.buoyancy · HorizonCode Get Water Buoyancy · C++ HE::api::water::buoyancy · query pollImmersion() entities: int[], entered: bool[], speeds: float[], positions: vec3[] Every body that went into the water or came out of it since the last call, as four parallel lists: index i of entities is the body, entered says which way (true = in), speeds is how fast it went through the surface in metres per second (0 for an exit over the shore) and positions is where its centre was. Reading empties the lists, so read them in one place. A body that starts the scene in the water enters on the first step. Needs a physics world and the water physics on; the queue keeps the newest 256.\nLua/Python horizon.water.pollImmersion · HorizonCode Poll Water Immersion · C++ HE::api::water::pollImmersion · action disturb(x: float, z: float, radius: float, strength: float) — Raises a ring on the water at a world point: a footstep, a shot, a thrown stone. Radius is the size it starts at in metres (0.05 to 6), strength runs from 0 to 1. The ring travels with the current. It is the water material's picture only and moves no body; it shows while the game plays, on every surface that uses the engine water material.\nLua/Python horizon.water.disturb · HorizonCode Disturb Water · C++ HE::api::water::disturb · action setFlow(terrain: int, body: int, x: float, z: float) ok: bool Sets the current of one body of water, in world metres per second on x and z (held to 50 either way). terrain is the landscape and body the number from the body-at row. A body floating in that water is pulled toward it. False when the entity is no landscape or the body does not exist. Density, damping and the on/off switch are set in the Landscape panel.\nLua/Python horizon.water.setFlow · HorizonCode Set Water Flow · C++ HE::api::water::setFlow · action",
+     "title": "Water"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Lua / Python: "
+        },
+        {
+         "s": "c",
          "t": "horizon.movement.<function>"
         },
         {
@@ -70569,6 +71099,718 @@
      "id": "physics",
      "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike. Large worlds — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). Project Settings » Physics » Simulation » Floating origin radius (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates. Cell streaming — a scene too big to keep loaded whole can be split into a grid of cells in the editor (Performance Profiler » Streaming) or with scripts/split_scene_cells.py: placed things (meshes, point and spot lights, static bodies, decals) go into one scene file per grid square, everything else stays in the base scene, which names the cells. The exported game then loads a cell once the camera, or where it is heading, comes within the load radius, and unloads it beyond the unload radius; reading and parsing run on worker threads, only building the entities on the main thread, a few milliseconds a frame. Cells work with the floating origin. The editor holds the base scene and draws the cells as squares on the ground; merging them back makes the scene one piece to edit.",
      "title": "Physics"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "Bodies in water are lifted, slowed and carried. A crate floats, a stone sinks to the bed, a river drifts what lies on it, and something that falls in rings the surface. This is the water of a "
+        },
+        {
+         "s": "b",
+         "t": "Landscape"
+        },
+        {
+         "s": "",
+         "t": " (lakes drawn from splines, ponds painted with the water brush), not a fluid simulation, and a scene that already has water needs nothing added: a Dynamic "
+        },
+        {
+         "s": "b",
+         "t": "Rigid Body"
+        },
+        {
+         "s": "",
+         "t": " with a Collider over a wet spot is picked up by it."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "What happens to a body"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Buoyancy"
+         },
+         {
+          "s": "",
+          "t": " — Jolt works out the volume of the shape under water (exact for boxes, spheres and capsules, a polygon cut for convex hulls) and lifts the body by it. A body floats when its density is below the water's (1000 kg/m3 for fresh water) and rides with the share of its volume under water that its density is of the water's: wood at 500 sits half out, ice at 920 hardly shows, stone at 2600 sinks, lies on the bed and goes to sleep there. Only Dynamic bodies are served, and only awake ones. A body whose centre of mass is over land gets nothing, even with half of it in the water."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Drag"
+         },
+         {
+          "s": "",
+          "t": " — the water slows a body that moves through it (the linear drag grows with the square of the speed against the current) and stops one that spins (the angular drag). Both grow with the share of the body under water."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Current"
+         },
+         {
+          "s": "",
+          "t": " — each body of water has one current, in metres per second. A body is dragged toward it, so a river carries what floats on it. There is no force beyond that drag, and the waves of the water material do not follow the current."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Waves"
+         },
+         {
+          "s": "",
+          "t": " — the surface a body floats on is the level of the water plus two waves of the sizes of the engine water material (about 0.16 m and 0.08 m at the defaults), running on the physics clock. They have the heights and directions of the water you see, not its exact phase: a crate rides the same swell as the picture, not the same crest. One plane per body, taken at its centre of mass, so a boat longer than a wave does not tilt with it."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Rings"
+         },
+         {
+          "s": "",
+          "t": " — a body that goes into the water at 1 m/s or more, comes out at 1.5 m/s or more, or cuts across the surface at speed raises rings that the engine water material draws (up to 16 at a time). They are a picture only and move no body. They are drawn on Metal and OpenGL; Direct3D 11, Direct3D 12 and Vulkan draw the water without them for now. The physics is the same on all five."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Setting it up"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "On a body of water."
+        },
+        {
+         "s": "",
+         "t": " Select the Landscape, open the "
+        },
+        {
+         "s": "b",
+         "t": "Landscape"
+        },
+        {
+         "s": "",
+         "t": " panel, the "
+        },
+        {
+         "s": "b",
+         "t": "Water"
+        },
+        {
+         "s": "",
+         "t": " tab, and open "
+        },
+        {
+         "s": "b",
+         "t": "Physics"
+        },
+        {
+         "s": "",
+         "t": " under the pond or lake in the "
+        },
+        {
+         "s": "i",
+         "t": "Bodies"
+        },
+        {
+         "s": "",
+         "t": " list. Every change is one undo step and is saved with the scene. Only the numbers that differ from the defaults are written, so a scene without any stays as it was."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Setting"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Default"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Range"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Enabled"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on"
+          }
+         ],
+         [],
+         [
+          {
+           "s": "",
+           "t": "Off lets this water do nothing to bodies: no lift, no damping, no current. It is still a lake to look at."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Density"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1000 kg/m3"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1 to 20000"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Fresh water 1000, sea water 1025, brine and mud more. A heavier water carries more: the share under water of a floating body is its density over this."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Linear Drag"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.5"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0 to 10"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How strongly the water slows a moving body. Above about 3 a light body no longer settles, so 3 is the top of the useful range."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Angular Drag"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.05"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0 to 10"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How strongly the water stops a spinning body. 0 lets a crate roll on."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Flow X, Flow Z"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0, 0"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "-50 to 50 m/s"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The current, along the landscape's own X and Z axes (the world's, unless the landscape is turned about Y)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Splash"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0 to 4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Strength of the rings. 0 makes none; the body itself is not affected."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "On a Rigid Body."
+        },
+        {
+         "s": "",
+         "t": " Two rows on the component: "
+        },
+        {
+         "s": "b",
+         "t": "Affected By Water"
+        },
+        {
+         "s": "",
+         "t": " (on by default; switch it off for bullets, debris, anything that should fall through to the bed) and "
+        },
+        {
+         "s": "b",
+         "t": "Density"
+        },
+        {
+         "s": "",
+         "t": " (0 takes it from the Mass and the size of the Collider). Set a density when the mass is chosen for how the body hits things and not for how it swims: the Mass decides collisions, the Density decides buoyancy. Wood 500, ice 920, water 1000, stone 2600, iron 7800. Both are read at every physics step, so changing them while the game plays takes effect at once."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Switching it off."
+        },
+        {
+         "s": "",
+         "t": " "
+        },
+        {
+         "s": "c",
+         "t": "HE_PHYSICS_WATER=0"
+        },
+        {
+         "s": "",
+         "t": " in the environment starts the world without water physics. With it off, or with no water in the scene, the physics step does exactly what it did before water had physics."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Asking the water from a script"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "c",
+         "t": "water"
+        },
+        {
+         "s": "",
+         "t": " group answers in "
+        },
+        {
+         "s": "b",
+         "t": "world"
+        },
+        {
+         "s": "",
+         "t": " space and needs no landscape handle: the caller has a position or a body. It is the same in Lua and Python ("
+        },
+        {
+         "s": "c",
+         "t": "horizon.water.*"
+        },
+        {
+         "s": "",
+         "t": "), in HorizonCode (Engine Call nodes under Water) and in C++ ("
+        },
+        {
+         "s": "c",
+         "t": "HE::api::water::*"
+        },
+        {
+         "s": "",
+         "t": ")."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Function"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Returns"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "surfaceAt(x, z)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "wet, height"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Whether there is water at the point and how high its surface stands there, waves included. Height is 0 when it is dry, so read wet first."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "depthAt(x, z)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "depth"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Metres of water over the ground at the point; 0 when dry."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "flowAt(x, z)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "vec3"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The current at the point in world axes; zero when dry or still."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "submerged(entity)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "share"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How much of the entity's body is under water, 0 to 1."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "buoyancy(entity)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "lift"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How many times its own weight the water lifts the body: 1 floats where it is, above 1 rises, below 1 sinks."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "pollImmersion()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "entities, entered, speeds, positions"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Every body that went into the water or came out of it since the last call, as four parallel lists. Reading empties them."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "disturb(x, z, radius, strength)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "—"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Raises a ring at the point: a footstep, a shot."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "setFlow(terrain, body, x, z)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "ok"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Sets the current of one body of water, in world metres per second."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\n-- Rings and a log line where something heavy hits the water, and a wading check.\nfunction M.onUpdate(self, dt)\n    local who, entered, speed, where = horizon.water.pollImmersion()\n    for i = 1, #who do\n        if entered[i] and speed[i] > 2.0 then\n            local at = where[i]                      -- a vec3 in a list is {x, y, z}\n            horizon.water.disturb(at[1], at[3], 1.0, math.min(1.0, speed[i] / 6.0))\n            horizon.log(string.format(\"entity %d hit the water at %.1f m/s\", who[i], speed[i]))\n        end\n    end\n\n    local x, y, z = horizon.getPosition(self.entityId)\n    local wet, surface = horizon.water.surfaceAt(x, z)\n    self.wading = wet and surface > y                -- the surface is above my feet\nend\n\nreturn M\n",
+         "title": "splash.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Splash(horizon.Behavior):\n    # Rings and a log line where something heavy hits the water, and a wading check.\n    def on_update(self, dt):\n        who, entered, speed, where = horizon.water.pollImmersion()\n        for i in range(len(who)):\n            if entered[i] and speed[i] > 2.0:\n                x, y, z = where[i]                   # a vec3 in a list is [x, y, z]\n                horizon.water.disturb(x, z, 1.0, min(1.0, speed[i] / 6.0))\n                horizon.log(f\"entity {who[i]} hit the water at {speed[i]:.1f} m/s\")\n\n        x, y, z = horizon.getPosition(self.entity_id)\n        wet, surface = horizon.water.surfaceAt(x, z)\n        self.wading = wet and surface > y            # the surface is above my feet\n",
+         "title": "splash.py"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "An event is raised each time the share of a body under water crosses 2 %, with the speed it went through the surface at; a body that starts the scene in the water enters at the first step with no speed to speak of, and one that leaves over the shore or whose water is switched off under it exits with a speed of 0. A very light body bobbing at the surface raises one pair per wave. Nobody has to read the list, it only keeps the newest 256."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Limits"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Characters do not swim: a Character Controller walks its own path. "
+         },
+         {
+          "s": "c",
+          "t": "surfaceAt"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "depthAt"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "flowAt"
+         },
+         {
+          "s": "",
+          "t": " give a script what it needs to build swimming; nothing is built in."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "One plane per body at its centre of mass, so no body tilts with a wave."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "A body that fell asleep on dry ground is not woken when the water rises to it; it floats once something touches or moves it."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The landscape must not be tipped about X or Z (turning it about Y, moving it and scaling it are fine)."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Fluid simulation, spray particles and underwater post-processing are not part of it."
+         }
+        ]
+       ],
+       "k": "ul"
+      }
+     ],
+     "eyebrow": "Systems · Landscape water",
+     "id": "water-physics",
+     "text": "Bodies in water are lifted, slowed and carried. A crate floats, a stone sinks to the bed, a river drifts what lies on it, and something that falls in rings the surface. This is the water of a Landscape (lakes drawn from splines, ponds painted with the water brush), not a fluid simulation, and a scene that already has water needs nothing added: a Dynamic Rigid Body with a Collider over a wet spot is picked up by it. What happens to a body Buoyancy — Jolt works out the volume of the shape under water (exact for boxes, spheres and capsules, a polygon cut for convex hulls) and lifts the body by it. A body floats when its density is below the water's (1000 kg/m3 for fresh water) and rides with the share of its volume under water that its density is of the water's: wood at 500 sits half out, ice at 920 hardly shows, stone at 2600 sinks, lies on the bed and goes to sleep there. Only Dynamic bodies are served, and only awake ones. A body whose centre of mass is over land gets nothing, even with half of it in the water. Drag — the water slows a body that moves through it (the linear drag grows with the square of the speed against the current) and stops one that spins (the angular drag). Both grow with the share of the body under water. Current — each body of water has one current, in metres per second. A body is dragged toward it, so a river carries what floats on it. There is no force beyond that drag, and the waves of the water material do not follow the current. Waves — the surface a body floats on is the level of the water plus two waves of the sizes of the engine water material (about 0.16 m and 0.08 m at the defaults), running on the physics clock. They have the heights and directions of the water you see, not its exact phase: a crate rides the same swell as the picture, not the same crest. One plane per body, taken at its centre of mass, so a boat longer than a wave does not tilt with it. Rings — a body that goes into the water at 1 m/s or more, comes out at 1.5 m/s or more, or cuts across the surface at speed raises rings that the engine water material draws (up to 16 at a time). They are a picture only and move no body. They are drawn on Metal and OpenGL; Direct3D 11, Direct3D 12 and Vulkan draw the water without them for now. The physics is the same on all five. Setting it up On a body of water. Select the Landscape, open the Landscape panel, the Water tab, and open Physics under the pond or lake in the Bodies list. Every change is one undo step and is saved with the scene. Only the numbers that differ from the defaults are written, so a scene without any stays as it was. Setting Default Range Meaning Enabled on  Off lets this water do nothing to bodies: no lift, no damping, no current. It is still a lake to look at. Density 1000 kg/m3 1 to 20000 Fresh water 1000, sea water 1025, brine and mud more. A heavier water carries more: the share under water of a floating body is its density over this. Linear Drag 0.5 0 to 10 How strongly the water slows a moving body. Above about 3 a light body no longer settles, so 3 is the top of the useful range. Angular Drag 0.05 0 to 10 How strongly the water stops a spinning body. 0 lets a crate roll on. Flow X, Flow Z 0, 0 -50 to 50 m/s The current, along the landscape's own X and Z axes (the world's, unless the landscape is turned about Y). Splash 1 0 to 4 Strength of the rings. 0 makes none; the body itself is not affected. On a Rigid Body. Two rows on the component: Affected By Water (on by default; switch it off for bullets, debris, anything that should fall through to the bed) and Density (0 takes it from the Mass and the size of the Collider). Set a density when the mass is chosen for how the body hits things and not for how it swims: the Mass decides collisions, the Density decides buoyancy. Wood 500, ice 920, water 1000, stone 2600, iron 7800. Both are read at every physics step, so changing them while the game plays takes effect at once. Switching it off. HE_PHYSICS_WATER=0 in the environment starts the world without water physics. With it off, or with no water in the scene, the physics step does exactly what it did before water had physics. Asking the water from a script The water group answers in world space and needs no landscape handle: the caller has a position or a body. It is the same in Lua and Python (horizon.water.*), in HorizonCode (Engine Call nodes under Water) and in C++ (HE::api::water::*). Function Returns Meaning surfaceAt(x, z) wet, height Whether there is water at the point and how high its surface stands there, waves included. Height is 0 when it is dry, so read wet first. depthAt(x, z) depth Metres of water over the ground at the point; 0 when dry. flowAt(x, z) vec3 The current at the point in world axes; zero when dry or still. submerged(entity) share How much of the entity's body is under water, 0 to 1. buoyancy(entity) lift How many times its own weight the water lifts the body: 1 floats where it is, above 1 rises, below 1 sinks. pollImmersion() entities, entered, speeds, positions Every body that went into the water or came out of it since the last call, as four parallel lists. Reading empties them. disturb(x, z, radius, strength) — Raises a ring at the point: a footstep, a shot. setFlow(terrain, body, x, z) ok Sets the current of one body of water, in world metres per second. splash.lua local M = {}\n\n-- Rings and a log line where something heavy hits the water, and a wading check.\nfunction M.onUpdate(self, dt)\n    local who, entered, speed, where = horizon.water.pollImmersion()\n    for i = 1, #who do\n        if entered[i] and speed[i] > 2.0 then\n            local at = where[i]                      -- a vec3 in a list is {x, y, z}\n            horizon.water.disturb(at[1], at[3], 1.0, math.min(1.0, speed[i] / 6.0))\n            horizon.log(string.format(\"entity %d hit the water at %.1f m/s\", who[i], speed[i]))\n        end\n    end\n\n    local x, y, z = horizon.getPosition(self.entityId)\n    local wet, surface = horizon.water.surfaceAt(x, z)\n    self.wading = wet and surface > y                -- the surface is above my feet\nend\n\nreturn M splash.py import horizon\n\nclass Splash(horizon.Behavior):\n    # Rings and a log line where something heavy hits the water, and a wading check.\n    def on_update(self, dt):\n        who, entered, speed, where = horizon.water.pollImmersion()\n        for i in range(len(who)):\n            if entered[i] and speed[i] > 2.0:\n                x, y, z = where[i]                   # a vec3 in a list is [x, y, z]\n                horizon.water.disturb(x, z, 1.0, min(1.0, speed[i] / 6.0))\n                horizon.log(f\"entity {who[i]} hit the water at {speed[i]:.1f} m/s\")\n\n        x, y, z = horizon.getPosition(self.entity_id)\n        wet, surface = horizon.water.surfaceAt(x, z)\n        self.wading = wet and surface > y            # the surface is above my feet An event is raised each time the share of a body under water crosses 2 %, with the speed it went through the surface at; a body that starts the scene in the water enters at the first step with no speed to speak of, and one that leaves over the shore or whose water is switched off under it exits with a speed of 0. A very light body bobbing at the surface raises one pair per wave. Nobody has to read the list, it only keeps the newest 256. Limits Characters do not swim: a Character Controller walks its own path. surfaceAt, depthAt and flowAt give a script what it needs to build swimming; nothing is built in. One plane per body at its centre of mass, so no body tilts with a wave. A body that fell asleep on dry ground is not woken when the water rises to it; it floats once something touches or moves it. The landscape must not be tipped about X or Z (turning it about Y, moving it and scaling it are fine). Fluid simulation, spray particles and underwater post-processing are not part of it.",
+     "title": "Water Physics"
     },
     {
      "blocks": [

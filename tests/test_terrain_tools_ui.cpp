@@ -1002,3 +1002,187 @@ TEST_CASE("landscape ui: the Water panel lists the bodies, and To Lake turns a p
 	clickAt(ctx, wx, wy);
 	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
 }
+
+// ── Thema 179 step 5: what a body of water does to the bodies in it ───────────
+// The Physics rows under each body of the Water tab. What these ask that no model test can:
+// is the section on the panel and does it open, does a click on Enabled and a drag on Density
+// reach the body of water, is each gesture ONE undo step that takes the number back, and does
+// none of it make the landscape rebuild anything (setPhysics, never TerrainComponent::dirty).
+TEST_CASE("landscape ui: the Water panel's Physics rows set what a body of water does, one undo step each, nothing rebuilt")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.dirty = false;
+	tc.water.res = 100;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	auto land = [&]() -> TerrainComponent&
+	{
+		auto view = reg.view<TerrainComponent>();
+		REQUIRE(view.size() == 1u);
+		return reg.get<TerrainComponent>(*view.begin());
+	};
+
+	// One pond, painted through the brush's own API.
+	{
+		HE::water::brush::Params p;
+		p.radius = 8.0f; p.falloff = 0.0f; p.amount = 1.0f; p.levelFromGround = true; p.levelOffset = 0.5f;
+		HE::water::brush::Stroke s;
+		HE::water::brush::begin(s, land(), -20.0f, 0.0f, p);
+		for (int i = 0; i <= 6; ++i) HE::water::brush::dab(s, land(), -20.0f + 4.0f * i, 0.0f, p);
+		HE::water::brush::end(s, land());
+	}
+	REQUIRE(land().water.bodies.size() == 1u);
+	const uint16_t pond = land().water.bodies[0].id;
+	REQUIRE(land().water.bodies[0].physics == water::BodyPhysics{});
+	const bool terrainDirty = land().dirty;
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// Arm Water, then give the panel room: the list of bodies sits below the brush settings.
+	float wx = 0.0f, wy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsWater"), wx, wy));
+	clickAt(ctx, wx, wy);
+	// Tall enough for the brush settings, the body list AND the opened Physics rows below it.
+	constexpr int PT = 1500;
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), float(PT));
+	auto tall = [&](bool down, he_ui::Image* shot = nullptr) -> ImGuiID
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, down);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(PT) - 20.0f));
+		ImGui::Begin(kPanelWindow, nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		TerrainTools::renderPanel(ctx);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, PT);
+		return hovered;
+	};
+	for (int i = 0; i < 3; ++i) tall(false);
+
+	// An item under a body's PushID and, when it is inside an open tree node, under the node's
+	// id as well. The tab's content is a child window of the panel, and an id is hashed against
+	// the window it was submitted in (see the To Lake test above).
+	ImGuiWindow* win = ImGui::FindWindowByName(kPanelWindow);
+	REQUIRE(win != nullptr);
+	auto idOf = [&](ImGuiWindow* c, const char* tree, const char* label) -> ImGuiID
+	{
+		c->IDStack.push_back(c->GetID(static_cast<int>(pond)));
+		if (tree) c->IDStack.push_back(c->GetID(tree));
+		const ImGuiID id = c->GetID(label);
+		if (tree) c->IDStack.pop_back();
+		c->IDStack.pop_back();
+		return id;
+	};
+	auto find = [&](const char* tree, const char* label, float& fx, float& fy) -> bool
+	{
+		for (float yy = 14.0f; yy < float(PT) - 10.0f; yy += 3.0f)
+			for (float xx : { 30.0f, 60.0f, 140.0f, 230.0f, 300.0f })   // 60: inside an indented checkbox
+			{
+				ImGui::GetIO().AddMousePosEvent(xx, yy);
+				tall(false);
+				const ImGuiID hovered = tall(false);
+				for (ImGuiWindow* c : win->DC.ChildWindows)
+					if (c && idOf(c, tree, label) == hovered) { fx = xx; fy = yy; return true; }
+			}
+		return false;
+	};
+	const auto parkPointer = [&] { ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(PT) - 6.0f); tall(false); tall(false); };
+
+	// The section is there, closed, and a click opens it.
+	float px = 0.0f, py = 0.0f;
+	REQUIRE_MESSAGE(find(nullptr, "Physics##wphys", px, py), "no Physics section under the body of water");
+	float ex = 0.0f, ey = 0.0f;
+	CHECK_FALSE(find("Physics##wphys", "Enabled##wphys", ex, ey));          // closed: no rows yet
+	REQUIRE(find(nullptr, "Physics##wphys", px, py));
+	ImGui::GetIO().AddMousePosEvent(px, py);
+	tall(false); tall(false); tall(true); tall(false); tall(false);
+	{
+		he_ui::Image img;
+		parkPointer();
+		tall(false, &img);
+		dump(img, "landscape-water-physics-open");
+	}
+	REQUIRE_MESSAGE(find("Physics##wphys", "Enabled##wphys", ex, ey), "Physics opened but shows no Enabled row");
+	float dx = 0.0f, dy = 0.0f;
+	REQUIRE_MESSAGE(find("Physics##wphys", "##wphys_density", dx, dy), "no Density row");
+	CHECK(find("Physics##wphys", "##wphys_ldrag", wx, wy));
+	CHECK(find("Physics##wphys", "##wphys_adrag", wx, wy));
+	CHECK(find("Physics##wphys", "##wphys_fx", wx, wy));
+	CHECK(find("Physics##wphys", "##wphys_fz", wx, wy));
+	CHECK(find("Physics##wphys", "##wphys_splash", wx, wy));
+	{
+		he_ui::Image img;
+		parkPointer();
+		tall(false, &img);
+		dump(img, "landscape-water-physics");
+	}
+
+	const bool waterDirty = land().water.dirty;
+	const uint64_t revision0 = land().water.revision;
+	const size_t depth0 = undo.undoDepth();
+
+	// ── A click on Enabled: off, one undo step ──
+	REQUIRE(find("Physics##wphys", "Enabled##wphys", ex, ey));
+	ImGui::GetIO().AddMousePosEvent(ex, ey);
+	tall(false); tall(false); tall(true); tall(false); tall(false);
+	CHECK_FALSE(land().water.findBody(pond)->physics.enabled);
+	CHECK(undo.undoDepth() == depth0 + 1);
+	CHECK(undo.undoLabel() == "Water Physics");
+	CHECK(land().water.revision > revision0);                      // the physics is told
+	// A water setting is not a terrain edit: nothing to rebuild, no chunk to regenerate. (Read
+	// before the undo: restoring a scene marks the landscape dirty, as loading one does.)
+	CHECK(land().dirty == terrainDirty);
+	CHECK(land().water.dirty == waterDirty);
+	REQUIRE(undo.undo());
+	CHECK(land().water.findBody(pond)->physics.enabled);           // and the click is taken back whole
+	CHECK(undo.undoDepth() == depth0);
+
+	// ── A drag on Density: one undo step for the whole drag, however many frames it took ──
+	parkPointer();
+	REQUIRE(find("Physics##wphys", "##wphys_density", dx, dy));
+	const bool terrainDirty2 = land().dirty, waterDirty2 = land().water.dirty;
+	ImGui::GetIO().AddMousePosEvent(dx, dy);
+	tall(false); tall(false); tall(true);
+	for (int i = 1; i <= 6; ++i)
+	{
+		ImGui::GetIO().AddMousePosEvent(dx + 5.0f * static_cast<float>(i), dy);
+		tall(true);
+	}
+	tall(false); tall(false);
+	const float dragged = land().water.findBody(pond)->physics.density;
+	CHECK(dragged > 1050.0f);                                      // 5 kg/m3 per pixel, to the right
+	CHECK(dragged < 1250.0f);
+	CHECK(undo.undoDepth() == depth0 + 1);                         // not one step per frame
+	CHECK(undo.undoLabel() == "Water Physics");
+	CHECK(land().dirty == terrainDirty2);
+	CHECK(land().water.dirty == waterDirty2);
+	REQUIRE(undo.undo());
+	CHECK(land().water.findBody(pond)->physics.density == water::kDefaultDensity);
+	CHECK(land().water.findBody(pond)->physics == water::BodyPhysics{});   // nothing else moved with it
+
+	// Leave the file-static mode as the next test expects it.
+	bits.config.mode = EditorMode::Landscape;
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), float(PH));
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
+	clickAt(ctx, wx, wy);
+	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
+}

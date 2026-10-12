@@ -147,6 +147,10 @@ add_executable(he_tests
     # The rings on the water (Thema 179 step 3): the bounded list, what raises a ring in the
     # physics (and the scenes that must raise none), and the block the shaders read.
     test_water_ripples.cpp
+    # What an author and a script can do with the water physics (Thema 179 step 5): the
+    # water group's questions, the immersion event, disturb and setFlow, from the registry
+    # and from Lua, and the editor's numbers saved, undone and felt by the bodies.
+    test_water_api.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp

@@ -1757,6 +1757,69 @@ void renderPanel(AppContext& ctx)
                         }
                         else
                             EditorWidgets::helpForLabel("Detach");
+
+                        // ── What this water does to a body in it (Thema 179) ─────
+                        // HE::water::BodyPhysics: floats what is lighter than Density, drags
+                        // what moves through it, carries it along with Flow, and rings when
+                        // something falls in. Every write goes through water::setPhysics,
+                        // which holds the numbers to their bounds and tells the physics the
+                        // field changed; it rebuilds no surface and never touches
+                        // TerrainComponent::dirty (that would rebuild every chunk). Undo is the
+                        // Details panel's own pair: the scene is stashed when a control is
+                        // first touched and committed when it is let go, so a drag is ONE step.
+                        // The water is in the scene, so its settings save, load, undo and
+                        // copy with it.
+                        const ImGuiTreeNodeFlags physFlags = ImGuiTreeNodeFlags_SpanAvailWidth;
+                        const bool physOpen = ImGui::TreeNodeEx("Physics##wphys", physFlags);
+                        EditorWidgets::helpForLabel("Physics##wphys");
+                        if (physOpen)
+                        {
+                            WF::BodyPhysics ph = b.physics;
+                            bool physEdited = false;
+                            // stashPre() takes what capturePre() last saw, and nothing in this
+                            // panel calls capturePre() every frame the way the Details panel
+                            // does: so the scene is captured here, at the moment the control is
+                            // grabbed and before this frame's write below (the gizmo does the same).
+                            const auto track = [&]
+                            {
+                                if (!ctx.undoSys) return;
+                                if (ImGui::IsItemActivated())
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Water Physics");
+                                }
+                                if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+                            };
+                            const auto physDrag = [&](const char* label, const char* itemId, const char* help,
+                                                      float* value, float speed, float lo, float hi, const char* fmt)
+                            {
+                                rowLabel(label);
+                                if (ImGui::DragFloat(itemId, value, speed, lo, hi, fmt)) physEdited = true;
+                                track();
+                                EditorWidgets::helpForLabel(help);
+                            };
+
+                            if (EditorWidgets::checkbox("Enabled##wphys", &ph.enabled)) physEdited = true;
+                            track();
+                            EditorWidgets::helpForLabel("Enabled##wphys");
+                            ImGui::BeginDisabled(!ph.enabled);
+                            physDrag("Density", "##wphys_density", "Density##wphys", &ph.density,
+                                     5.0f, WF::kMinDensity, WF::kMaxDensity, "%.0f kg/m3");
+                            physDrag("Linear Drag", "##wphys_ldrag", "Linear Drag##wphys", &ph.linearDrag,
+                                     0.01f, 0.0f, WF::kMaxDrag, "%.2f");
+                            physDrag("Angular Drag", "##wphys_adrag", "Angular Drag##wphys", &ph.angularDrag,
+                                     0.005f, 0.0f, WF::kMaxDrag, "%.3f");
+                            physDrag("Flow X", "##wphys_fx", "Flow##wphys", &ph.flow.x,
+                                     0.02f, -WF::kMaxFlow, WF::kMaxFlow, "%.2f m/s");
+                            physDrag("Flow Z", "##wphys_fz", "Flow##wphys", &ph.flow.y,
+                                     0.02f, -WF::kMaxFlow, WF::kMaxFlow, "%.2f m/s");
+                            physDrag("Splash", "##wphys_splash", "Splash##wphys", &ph.splash,
+                                     0.01f, 0.0f, WF::kMaxSplash, "%.2f");
+                            ImGui::EndDisabled();
+                            if (physEdited && ph != b.physics)
+                                WF::setPhysics(tc, b.id, ph);
+                            ImGui::TreePop();
+                        }
                         ImGui::PopID();
                     }
                     if (!s_waterNote.empty()) EditorWidgets::hint("%s", s_waterNote.c_str());
