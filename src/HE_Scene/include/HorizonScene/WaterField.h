@@ -129,6 +129,51 @@ namespace HE::water
     // ±50 m/s per axis, splash 0..4).
     BodyPhysics clampPhysics(const BodyPhysics& p);
 
+    // ── What this body looks like from BELOW the surface (Thema 185 Schritt 2) ──
+    // The post-processing stage reads this when RenderWorld::underwaterCamera says
+    // the camera sits in this body — color and visibility while submerged, not the
+    // surface material's own look DOWN into the water (Water.hasset's ShallowColor /
+    // DeepColor / Turbidity, which never reads scene depth and stays this task's
+    // sibling, not its source). The defaults match that material's today, so a lake
+    // that never touches this panel still looks continuous crossing the waterline.
+    inline constexpr float kDefaultUnderwaterDensity = 0.45f;   // 1/m, Beer-Lambert absorption
+    inline constexpr float kMaxUnderwaterDensity     = 5.0f;
+    inline constexpr float kDefaultUnderwaterFalloff = 1.0f;    // depth-curve exponent, 1 = plain exponential
+    inline constexpr float kMinUnderwaterFalloff     = 0.1f;
+    inline constexpr float kMaxUnderwaterFalloff     = 8.0f;
+
+    struct UnderwaterFogParams
+    {
+        // Tint just under the surface, and the long-submerged tint it ramps toward
+        // with the camera's own depth (RenderWorld::underwaterCamera.signedDepth) —
+        // never a per-pixel scene distance, so a camera hovering at a fixed depth
+        // sees a fixed color no matter what it looks at.
+        glm::vec3 shallowColor { 0.045f, 0.20f, 0.22f };
+        glm::vec3 deepColor    { 0.004f, 0.028f, 0.052f };
+        // Per-metre absorption along the VIEW RAY's segment inside this body (the
+        // post pass's own Beer-Lambert fog: 1 - exp(-density * segmentLength)).
+        // The same number also drives how fast the tint above ramps shallow→deep —
+        // one murkiness, two symptoms, instead of a second knob to keep in sync.
+        float density = kDefaultUnderwaterDensity;
+        // Exponent reshaping that shallow→deep ramp (>1 lingers near shallowColor
+        // before darkening, <1 reaches deepColor sooner). Does not touch the fog.
+        float falloff = kDefaultUnderwaterFalloff;
+
+        bool operator==(const UnderwaterFogParams& o) const
+        {
+            return shallowColor == o.shallowColor && deepColor == o.deepColor &&
+                   density == o.density && falloff == o.falloff;
+        }
+        bool operator!=(const UnderwaterFogParams& o) const { return !(*this == o); }
+    };
+
+    // Held to its bounds like clampPhysics: a non-finite colour channel or scalar
+    // becomes the default, density clamped 0..kMaxUnderwaterDensity, falloff clamped
+    // kMinUnderwaterFalloff..kMaxUnderwaterFalloff. A colour with any non-finite
+    // channel falls back to the default colour whole (a half-finite tint reads as
+    // intent lost, not as "clamp the channels that still make sense").
+    UnderwaterFogParams clampUnderwaterFog(const UnderwaterFogParams& p);
+
     struct Body
     {
         uint16_t id    = kNoBody;
@@ -137,6 +182,9 @@ namespace HE::water
         // What the water does to a body in it. Saved with the body when it differs
         // from the defaults, part of sameContent and of Delta.
         BodyPhysics physics{};
+        // What this body looks like from below its surface (Thema 185 Schritt 2).
+        // Same save/compare rule as physics: only when it differs from the defaults.
+        UnderwaterFogParams underwaterFog{};
         // The outline the lake's cells were last laid from (terrain-local XZ, the
         // polygon of the spline, no closing duplicate). Empty for brush water and
         // for a lake whose spline never reached the field. It is the baseline the
@@ -264,6 +312,12 @@ namespace HE::water
     // `dirty` nor the rectangle, and never touches TerrainComponent::dirty. False
     // for an unknown body.
     bool setPhysics(TerrainComponent& tc, uint16_t id, const BodyPhysics& physics);
+
+    // What this body looks like from below its surface (UnderwaterFogParams), held to
+    // its bounds (clampUnderwaterFog). Same non-effect on the sheet as setPhysics:
+    // bumps Field::revision, touches neither `dirty` nor the rectangle nor
+    // TerrainComponent::dirty. False for an unknown body.
+    bool setUnderwaterFog(TerrainComponent& tc, uint16_t id, const UnderwaterFogParams& fog);
 
     // Shore clipping on or off and its overshoot (Field::clipToGround,
     // shoreOvershoot), every surface of the landscape rebuilt. The overshoot is

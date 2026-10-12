@@ -20,10 +20,21 @@ struct CameraData {
 // (RenderExtractor.h/.cpp) right after the camera, straight from camera.position — no
 // state carried between frames, so a camera resting exactly on the waterline or
 // crossing it within one frame is correct immediately, with no hysteresis.
+// Thema 185 Schritt 2 adds the post pass's own two numbers, resolved here (not left
+// to the shader) because they are a function of signedDepth above, which is already
+// a per-frame scalar, not a per-pixel one: a camera hovering at a fixed depth sees a
+// fixed tint no matter what it looks at. tintColor is shallowColor..deepColor of the
+// body's UnderwaterFogParams (WaterField.h), blended by signedDepth through that
+// body's own density/falloff curve. density is that same body's absorption, carried
+// through unchanged for the per-pixel view-ray fog (segment length still needs the
+// depth buffer, so that part stays in the shader). Both are meaningless — and
+// density is exactly 0, the shader's cue to skip the whole pass — when !wet.
 struct UnderwaterCameraData {
     bool  wet         = false;  // a water surface covers the camera's XZ (and the camera is above that body's own bed)
     float surfaceY    = 0.0f;   // world Y of that surface (the flat body level the material shades waves on top of; meaningful only if wet)
     float signedDepth = 0.0f;   // surfaceY - camera.y: > 0 means the camera is below the surface. 0 when !wet.
+    glm::vec3 tintColor { 0.045f, 0.20f, 0.22f };   // resolved shallow→deep blend; meaningful only if wet
+    float     density = 0.0f;                        // body's per-metre absorption; 0 when !wet (skip the pass)
 };
 
 // "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so

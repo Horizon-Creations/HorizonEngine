@@ -416,6 +416,67 @@ float4 main(In i) : SV_Target {
 }
 )HLSL";
 
+// ─── Underwater fog post pass (Thema 185 Schritt 2) ─────────────────────────
+// A straight alpha-blended overlay onto the HDR scene colour — no ping-pong
+// target, the depth-reconstruction convention is the deferred resolve's own
+// (MaterialShaderLibrary.cpp's buildDeferredResolveSource: depthParams.x = the
+// uv→NDC y sign, .y/.z = NDC-z scale/bias, folded in by the C++ fill site so
+// this stays convention-free between D3D11 and D3D12).
+//
+// Per pixel: reconstruct the world position the depth buffer names, then the
+// length of the SEGMENT of [camera, that point] that lies on the wet side of
+// the flat plane y = surfaceY (the body's un-waved level, same one
+// queryUnderwaterCamera compares the camera against). Both endpoints on the
+// dry side → 0 (a dry camera looking at the sky pays nothing); both on the wet
+// side → the whole ray (looking at the lake bed from inside it); split →
+// only the portion before the plane crossing. This is what makes the
+// waterline soft: the segment — and so the blend — grows continuously as the
+// camera's own eye crosses y = surfaceY, never a step.
+//
+// cbuffer CB (b0, PS only): invViewProj (64B) + depthParams (16B) +
+// camPos.xyz/surfaceY (16B) + tintColor.rgb/density (16B) = 112B, no padding.
+// Output is PREMULTIPLIED (rgb = tint * fogAmount, a = fogAmount) for a
+// ONE/INV_SRC_ALPHA blend state: dst' = tint*fog + dst*(1-fog) in one draw.
+inline constexpr const char* kUnderwaterFogHLSL = R"HLSL(
+Texture2D    uDepth : register(t0);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0)
+{
+    float4x4 uInvViewProj;
+    float4   uDepthParams;    // x = uv.y sign, y/z = ndc-z scale/bias, w unused
+    float4   uCamPosSurfaceY; // xyz = camera world pos, w = surfaceY
+    float4   uTintDensity;    // rgb = resolved tint, a = per-metre density
+};
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    float d = uDepth.Sample(uSamp, i.uv).r;
+    float4 clip = float4(i.uv.x * 2.0 - 1.0,
+                         (i.uv.y * 2.0 - 1.0) * uDepthParams.x,
+                         d * uDepthParams.y + uDepthParams.z, 1.0);
+    float4 wp = mul(uInvViewProj, clip);
+    float3 P = wp.xyz / max(wp.w, 1e-8);
+
+    float3 camPos   = uCamPosSurfaceY.xyz;
+    float  surfaceY = uCamPosSurfaceY.w;
+    bool camBelow = camPos.y < surfaceY;
+    bool pBelow   = P.y < surfaceY;
+
+    float segment;
+    if (camBelow == pBelow)
+        segment = camBelow ? length(camPos - P) : 0.0;
+    else
+    {
+        float t = (surfaceY - camPos.y) / (P.y - camPos.y);
+        float3 crossPt = camPos + t * (P - camPos);
+        segment = camBelow ? length(camPos - crossPt) : length(crossPt - P);
+    }
+
+    float fogAmount = 1.0 - exp(-uTintDensity.a * segment);
+    return float4(uTintDensity.rgb * fogAmount, fogAmount);
+}
+)HLSL";
+
 // ─── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ─────────────────────────
 // The HLSL twins of GL's kTaaVelocityVS/FS, kTaaResolveFS and kTaaSharpenFS
 // (OpenGLRenderer.cpp) and of Metal's kTaaMSL, same rule: the geometry is

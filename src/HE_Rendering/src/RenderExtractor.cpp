@@ -1210,6 +1210,18 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	out.wet         = true;
 	out.surfaceY    = surf.level;
 	out.signedDepth = signedDepth;
+
+	// The post pass's tint (Thema 185 Schritt 2): a Beer-Lambert ramp of the CAMERA's
+	// own depth, reshaped by the body's falloff curve — 0 at the surface (shallowColor),
+	// asymptotic toward 1 (deepColor) the longer the camera has been submerged. Never a
+	// per-pixel scene distance, so hovering at a fixed depth gives a fixed tint. density
+	// carries through unchanged; the per-pixel view-ray fog still needs the depth buffer,
+	// which stays the shader's job.
+	const water::UnderwaterFogParams& fog = surf.underwaterFog;
+	const float ramp = 1.0f - std::exp(-fog.density * std::max(signedDepth, 0.0f));
+	const float depthT = std::pow(std::clamp(ramp, 0.0f, 1.0f), fog.falloff);
+	out.tintColor = glm::mix(fog.shallowColor, fog.deepColor, depthT);
+	out.density   = fog.density;
 	return out;
 }
 

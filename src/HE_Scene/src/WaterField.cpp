@@ -122,7 +122,8 @@ namespace
     bool bodiesFullEq(const std::vector<Body>& a, const std::vector<Body>& b)
     {
         if (!bodiesEq(a, b)) return false;
-        for (size_t i = 0; i < a.size(); ++i) if (a[i].physics != b[i].physics) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (a[i].physics != b[i].physics || a[i].underwaterFog != b[i].underwaterFog) return false;
         return true;
     }
 
@@ -339,6 +340,32 @@ bool setPhysics(TerrainComponent& tc, uint16_t id, const BodyPhysics& physics)
     b->physics = next;
     // The sheet is the same: neither `dirty` nor the rectangle, or the mesh would be
     // rebuilt for a number it never reads. The revision is what tells the physics.
+    ++tc.water.revision;
+    return true;
+}
+
+UnderwaterFogParams clampUnderwaterFog(const UnderwaterFogParams& p)
+{
+    const UnderwaterFogParams d;   // the defaults stand in for anything that is not a number
+    UnderwaterFogParams out;
+    const auto finiteColor = [](const glm::vec3& c)
+    { return finite(c.x) && finite(c.y) && finite(c.z); };
+    out.shallowColor = finiteColor(p.shallowColor) ? p.shallowColor : d.shallowColor;
+    out.deepColor    = finiteColor(p.deepColor)    ? p.deepColor    : d.deepColor;
+    out.density = finite(p.density) ? std::clamp(p.density, 0.0f, kMaxUnderwaterDensity) : d.density;
+    out.falloff = finite(p.falloff) ? std::clamp(p.falloff, kMinUnderwaterFalloff, kMaxUnderwaterFalloff)
+                                     : d.falloff;
+    return out;
+}
+
+bool setUnderwaterFog(TerrainComponent& tc, uint16_t id, const UnderwaterFogParams& fog)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    const UnderwaterFogParams next = clampUnderwaterFog(fog);
+    if (b->underwaterFog == next) return true;
+    b->underwaterFog = next;
+    // Same non-effect on the sheet as setPhysics: nothing here reads it.
     ++tc.water.revision;
     return true;
 }
@@ -882,6 +909,7 @@ void sanitize(TerrainComponent& tc)
         if (bad) nb.polygon.clear();
         nb.syncKey = 0;
         nb.physics = clampPhysics(nb.physics);
+        nb.underwaterFog = clampUnderwaterFog(nb.underwaterFog);
     }
     f.bodies = std::move(kept);
     uint32_t next = f.nextBodyId == 0 ? 1u : f.nextBodyId;

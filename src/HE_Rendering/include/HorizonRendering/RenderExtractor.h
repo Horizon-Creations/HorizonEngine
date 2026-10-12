@@ -98,6 +98,11 @@ HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
 // Stateless — called fresh every extract(), nothing carried from one frame to the next,
 // so a camera resting exactly on the waterline, or crossing it within a single frame,
 // reads correctly immediately with no hysteresis and no special-casing.
+//
+// Also resolves the post pass's tint/density (Thema 185 Schritt 2) from the body's own
+// UnderwaterFogParams (WaterField.h) — see UnderwaterCameraData's comment for the split
+// between what is resolved here (a per-frame scalar, the camera's own depth) and what
+// the pass still computes per pixel (the view-ray's segment length inside the body).
 HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
                                                              const glm::vec3& cameraPos);
 

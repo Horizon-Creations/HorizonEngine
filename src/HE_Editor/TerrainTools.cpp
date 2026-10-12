@@ -1820,6 +1820,62 @@ void renderPanel(AppContext& ctx)
                                 WF::setPhysics(tc, b.id, ph);
                             ImGui::TreePop();
                         }
+
+                        // ── What this body looks like from BELOW its surface (Thema 185) ─
+                        // HE::water::UnderwaterFogParams: the post-processing stage's own
+                        // tint/fog, read every frame off RenderWorld::underwaterCamera —
+                        // separate from this material's own ShallowColor/DeepColor/Turbidity
+                        // (which shade looking DOWN into the water and never read scene
+                        // depth). Every write goes through water::setUnderwaterFog, which
+                        // holds the numbers to their bounds and bumps the revision; it
+                        // rebuilds no surface, same as Physics above.
+                        const bool fogOpen = ImGui::TreeNodeEx("Underwater Fog##wfog", physFlags);
+                        EditorWidgets::helpForLabel("Underwater Fog##wfog");
+                        if (fogOpen)
+                        {
+                            WF::UnderwaterFogParams fog = b.underwaterFog;
+                            bool fogEdited = false;
+                            const auto trackFog = [&]
+                            {
+                                if (!ctx.undoSys) return;
+                                if (ImGui::IsItemActivated())
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Underwater Fog");
+                                }
+                                if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+                            };
+
+                            rowLabel("Shallow Color");
+                            if (ImGui::ColorEdit3("##wfog_shallow", &fog.shallowColor.x, ImGuiColorEditFlags_Float))
+                                fogEdited = true;
+                            trackFog();
+                            EditorWidgets::helpForLabel("Shallow Color##wfog");
+
+                            rowLabel("Deep Color");
+                            if (ImGui::ColorEdit3("##wfog_deep", &fog.deepColor.x, ImGuiColorEditFlags_Float))
+                                fogEdited = true;
+                            trackFog();
+                            EditorWidgets::helpForLabel("Deep Color##wfog");
+
+                            rowLabel("Density");
+                            if (ImGui::DragFloat("##wfog_density", &fog.density, 0.01f, 0.0f,
+                                                 WF::kMaxUnderwaterDensity, "%.2f /m"))
+                                fogEdited = true;
+                            trackFog();
+                            EditorWidgets::helpForLabel("Density##wfog");
+
+                            rowLabel("Depth Curve");
+                            if (ImGui::DragFloat("##wfog_falloff", &fog.falloff, 0.02f, WF::kMinUnderwaterFalloff,
+                                                 WF::kMaxUnderwaterFalloff, "%.2f"))
+                                fogEdited = true;
+                            trackFog();
+                            EditorWidgets::helpForLabel("Depth Curve##wfog");
+
+                            if (fogEdited && fog != b.underwaterFog)
+                                WF::setUnderwaterFog(tc, b.id, fog);
+                            ImGui::TreePop();
+                        }
                         ImGui::PopID();
                     }
                     if (!s_waterNote.empty()) EditorWidgets::hint("%s", s_waterNote.c_str());

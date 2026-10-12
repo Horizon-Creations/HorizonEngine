@@ -186,3 +186,103 @@ TEST_CASE("Underwater camera: RenderExtractor::extract wires it onto RenderWorld
     ex.extract(world, rw, 16.0f / 9.0f, &cam);
     CHECK_FALSE(rw.underwaterCamera.wet);
 }
+
+// ─── Thema 185, step 2: the post pass's own tint/density, resolved in the same
+// query from the body's UnderwaterFogParams (WaterField.h) — see RenderWorld.h's
+// comment on UnderwaterCameraData for why this is a per-frame scalar (a function of
+// the CAMERA's own depth) rather than something the shader derives per pixel.
+
+TEST_CASE("Underwater camera: dry reads density 0 — the post pass's cue to skip entirely")
+{
+    HorizonWorld world;
+    const UnderwaterCameraData dry = HE::queryUnderwaterCamera(world, glm::vec3(0.0f));
+    CHECK_FALSE(dry.wet);
+    CHECK(dry.density == 0.0f);
+}
+
+TEST_CASE("Underwater camera: right at the waterline, the tint is exactly shallowColor")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    const uint16_t id = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+
+    water::UnderwaterFogParams fog;
+    fog.shallowColor = { 0.1f, 0.3f, 0.4f };
+    fog.deepColor    = { 0.0f, 0.0f, 0.05f };
+    fog.density      = 1.0f;
+    REQUIRE(water::setUnderwaterFog(tc, id, fog));
+
+    // signedDepth == 0 here: the ramp (1 - exp(-density * 0)) is exactly 0, so the
+    // blend lands on shallowColor bit for bit, whatever falloff is — no special case.
+    const UnderwaterCameraData d = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 2.0f, 0.0f));
+    CHECK(d.wet);
+    CHECK(d.density == doctest::Approx(1.0f));
+    CHECK(d.tintColor.x == doctest::Approx(fog.shallowColor.x));
+    CHECK(d.tintColor.y == doctest::Approx(fog.shallowColor.y));
+    CHECK(d.tintColor.z == doctest::Approx(fog.shallowColor.z));
+}
+
+TEST_CASE("Underwater camera: tint darkens monotonically with depth and saturates toward deepColor")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    const uint16_t id = addLake(tc, rect(-10, -10, 10, 10), 100.0f);   // deep column, ground at y=0
+
+    water::UnderwaterFogParams fog;
+    fog.shallowColor = { 1.0f, 1.0f, 1.0f };
+    fog.deepColor    = { 0.0f, 0.0f, 0.0f };
+    fog.density      = 0.5f;
+    fog.falloff      = 1.0f;
+    REQUIRE(water::setUnderwaterFog(tc, id, fog));
+
+    float prevR = 2.0f;   // above white, so the first sample is guaranteed "lighter"
+    for (float y : { 99.0f, 90.0f, 50.0f, 10.0f, 1.0f })   // signedDepth 1, 10, 50, 90, 99 (ground at y=0)
+    {
+        const UnderwaterCameraData d = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, y, 0.0f));
+        REQUIRE(d.wet);
+        CHECK(d.tintColor.x <= prevR);      // never lighter than the previous, shallower sample
+        CHECK(d.tintColor.x >= 0.0f);
+        prevR = d.tintColor.x;
+    }
+    CHECK(prevR == doctest::Approx(0.0f).epsilon(0.01));   // deep enough to have all but reached deepColor
+    // And the first, shallowest sample is strictly darker than the surface itself —
+    // the ramp is actually moving, not flat at 0 or 1 everywhere.
+    const float atOne = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 99.0f, 0.0f)).tintColor.x;
+    CHECK(atOne < fog.shallowColor.x);
+}
+
+TEST_CASE("Underwater camera: falloff > 1 lingers near shallowColor longer than falloff < 1")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    const uint16_t id = addLake(tc, rect(-10, -10, 10, 10), 20.0f);
+
+    water::UnderwaterFogParams fog;
+    fog.shallowColor = { 1.0f, 0.0f, 0.0f };
+    fog.deepColor    = { 0.0f, 0.0f, 0.0f };
+    fog.density      = 0.3f;
+
+    fog.falloff = 4.0f;
+    REQUIRE(water::setUnderwaterFog(tc, id, fog));
+    const float lingering = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 17.0f, 0.0f)).tintColor.x;
+
+    fog.falloff = 0.25f;
+    REQUIRE(water::setUnderwaterFog(tc, id, fog));
+    const float eager = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 17.0f, 0.0f)).tintColor.x;
+
+    // Same depth, same density — only the curve shape differs: a high falloff keeps
+    // more of shallowColor (x closer to 1) than a low one (x closer to 0).
+    CHECK(lingering > eager);
+}
+
+TEST_CASE("Underwater camera: resolved tint/density are non-finite-proof like the rest of the query")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const UnderwaterCameraData d = HE::queryUnderwaterCamera(world, glm::vec3(nan, 1.0f, 0.0f));
+    CHECK_FALSE(d.wet);
+    CHECK(d.density == 0.0f);
+}
