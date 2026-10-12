@@ -8,6 +8,10 @@ das Wassermaterial (`docs/water-shader-plan.md`, `src/HE_Tools/src/MatGen/main.c
 Zahlen in diesem Dokument sind entweder gelesen (mit Fundstelle) oder ausdrücklich als **Schätzung** gekennzeichnet.
 Gemessen wurde nichts.
 
+> **Stand nach Schritt 2 (12.10.2026): Abschnitt 13 am Ende beschreibt, was gebaut wurde, und wo er dem Konzept widerspricht,
+> gilt Abschnitt 13.** Das betrifft vor allem 5.1 (zwei Dämpfungen statt `drag`, keine Wellen je Wasserkörper), 3.2 (Region je
+> Landschaft statt je Körper) und 3.4 (schwimmende Körper dürfen nicht schlafen; Aufwecken bei Pegeländerung ist nicht gebaut).
+
 ## 0. Kurzfassung
 
 | Frage | Entscheidung |
@@ -596,3 +600,57 @@ Offene Entscheidungen für die Queen:
 * **D1** Schritt 4 trotz Regel gegen D3D/Vulkan auf dem Mac (Abschnitt 11).
 * **D2** `affectedByWater` Standard `true` (Verhaltensänderung für dynamische Körper im Wasser) gegen Opt-in. Empfehlung: `true`.
 * **D3** Besitzer des `RippleField`: `HorizonWorld` (Vorschlag) gegen ein Feld in `TerrainSystem`.
+
+## 13. Stand nach Schritt 2 (12.10.2026): was gebaut wurde, wo es vom Konzept abweicht, was gemessen wurde
+
+Schritt 2 (Wasserhöhe-Abfrage und Auftrieb in der Physik-Schicht) ist gebaut: `HE_Core/include/Physics/WaterWaves.h`,
+`HE_Scene/WaterQuery.h/.cpp`, `BodyPhysics` in `WaterField.h`, `PhysicsWorld::applyWater`, zwei Felder am Starrkörper, Budgetzahlen,
+Tests `test_water_query.cpp` und `test_water_buoyancy.cpp`. Gebaut und getestet auf dem Mac (Release, shaderc ON). Windows und
+Linux nur über die CI. **Wo dieser Abschnitt den Abschnitten 1 bis 12 widerspricht, gilt dieser Abschnitt.**
+
+### 13.1 Abweichungen vom Konzept
+
+| Konzept | Gebaut | Grund |
+|---|---|---|
+| 5.1 ein Faktor `drag` | `BodyPhysics::linearDrag` (0,5) und `angularDrag` (0,05), je 0 bis 10, dazu `enabled` | Die Schrittvorgabe nennt lineare **und** angulare Dämpfung und Ein-/Ausschalten je Wasser |
+| 5.1 `waves[2]` je Wasserkörper | keine Wellen am Körper. Die Wellen sind die des Materials, **eine** Quelle in `Physics/WaterWaves.h` (`kWaveA/B/C`, `waveAmplitude`, `sampleWaves`); die Physik folgt `kWaveA` + `kWaveB` | "Eine gemeinsame Quelle, keine Kopie": `mat_gen` baut die Knöpfe `WaveA/B/C` aus denselben Konstanten, `Water.hasset` bleibt **byte-gleich** (neu erzeugt und mit `cmp` verglichen), `test_engine_materials` pinnt das gelieferte Asset gegen den Header. Eigene Wellen je Körper wären eine Kopie, die auseinanderläuft |
+| 3.2 Broadphase-Abfrage je Wasserkörper | je **Landschaft**: das Rechteck der nassen Zellen, Y vom tiefsten Pegel minus 512 m bis zum höchsten Pegel plus Wellenhöhe plus 1 m. Das Rechteck wird zwischengespeichert, Schlüssel (Entity, `Field::revision`, Auflösung, Raster, Körperzahl) | einfacher; ein Körper trägt seine Zellen ohnehin nur über `bodyAt` ein, die Gegenprobe macht `surfaceAt` je Kandidat |
+| 3.4 schlafende Körper bei Pegeländerung wecken | **nicht gebaut.** `Field::revision` wird geführt (`setPhysics`, jeder Zellenedit, Undo-Replay), `WaterIndex::revisionOf` liest sie, nichts nutzt sie | Zeit |
+| 3.4 nur aktive Körper | gebaut, mit zwei Ergänzungen: ein **teilweise eingetauchter** Körper bekommt `SetAllowSleeping(false)` und schwimmt damit nie ein, bis er ganz unter oder ganz über Wasser ist oder das Wasser ausgeschaltet wird; ein Körper in Ruhe behält den Anteil, mit dem er zur Ruhe kam (`submergedFraction`) | siehe 13.3 |
+| 8.1 Auflage 3 (Zeit buchen) | gebaut: `PhysicsBudgetStats::buoyancyMs`, `wetBodies`, `buoyancyDeferred`; die Zeit zählt in `chargedMs` und kommt vom Anteil der Charaktere ab. **Nicht** gebaut (Schritt 5): Profiler-Zeilen, Projekt-JSON-Schlüssel `waterBodiesPerStep`, Profiler-Scope `Buoyancy` | Zeit |
+| 6 Ringe, 7 Editor und Skript-API | nicht Teil von Schritt 2. Haken für Schritt 3: `PhysicsWorld::submergedFraction(entity)` (Eintritt = der Anteil springt von 0 auf größer 0) und `simTime()`; für Schritt 5: `WaterIndex::build(world).surfaceAt(x, z, physics.simTime(), s)` | |
+
+Der Besitz der Wassereinstellungen: `HE::water::Body::physics` (`BodyPhysics`), gesetzt über `water::setPhysics(tc, id, p)`
+(klemmt auf die Grenzen, erhöht `Field::revision`, setzt **nie** `dirty`, das Rechteck oder `TerrainComponent::dirty`, es wird kein Netz neu
+gebaut). Gespeichert wird `"physics"` im `waterBodies`-Eintrag **nur bei Abweichung** und nur mit den abweichenden Schlüsseln;
+Starrkörper: `"affectedByWater": false` und `"density"` nur bei Abweichung. Eine Szene ohne Abweichung ist byte-gleich zu vorher.
+
+### 13.2 Gemessen (Mac, Release, ein Physik-Thread, Test "what 256 floating bodies cost", gemeldet und nicht geprüft)
+
+* **256 halb eingetauchte Quader (1 m³, Dichte 500), Obergrenze 256:** 0,28 bis 0,38 ms je Schritt, **1,1 bis 1,5 µs je Körper**, schlechtester
+  Schritt 0,49 ms. Das sind 7 bis 10 % des Standardbudgets von 4 ms bei voller Obergrenze, in der Spanne der Schätzung aus 8.1 (1 bis 3 µs).
+  **Nicht gemessen:** Konvexhüllen mit vielen Flächen (der Plan nannte sie als Risiko; `GetSubmergedVolume` schneidet dort jede Fläche), Windows, Linux.
+* **Ohne Wasser in der Szene:** `applyWater` ist eine Ansicht über die `TerrainComponent`s plus `empty()`, wird **nicht** ans Budget gebucht, und
+  64 fallende und stapelnde Körper über 300 Schritte sind **bitgleich** zum Lauf mit `setWaterPhysics(false)` (Positionen und Drehungen mit
+  `memcmp`). Dasselbe gilt für Wasser in der Ecke, an das kein Körper herankommt. Die Gegenprobe (derselbe Aufbau über einem See) unterscheidet
+  sich, der Vergleich ist also nicht leer. Zwei Läufe derselben nassen Szene sind bitgleich.
+* **Netz:** nichts davon wird repliziert (nur `TransformComponent`), die Wellen laufen auf der Simulationszeit (`PhysicsWorld::simTime`, Summe der `dt`,
+  Doppelte Genauigkeit), nie auf `sunDir.w` oder `steady_clock`. Jolt ist weiter ohne `CROSS_PLATFORM_DETERMINISTIC` gebaut, `std::sin` ist
+  plattformabhängig im letzten Bit: bitgleich **innerhalb** einer Plattform, nicht zwischen Plattformen (wie schon vorher).
+
+### 13.3 Grenzen und was die Tests sagen (ehrlich)
+
+* **Starke Dämpfung.** Jolts Widerstand greift am Auftriebsschwerpunkt unter dem Massenmittelpunkt an. Ein riesiger Stoß (`linearDrag` 10 bei 4 m/s) stößt
+  auch die Drehung an, das explizite Verfahren verlässt seinen Stabilitätsbereich, und die Geschwindigkeit fällt auf fast 0 und kriecht auf rund 0,8 m/s
+  zurück (gemessen). Der brauchbare Bereich ist 0 bis etwa 3 (Jolt empfiehlt 0,5); die Grenze 10 ist eine Klemme gegen Unsinn, keine Empfehlung.
+* **Kriechen im ruhigen Wasser.** Ein auf dem Seegang schaukelnder Quader wandert ohne Strömung in 12 s rund 1,6 m (quadratischer Widerstand eines
+  schaukelnden Körpers hebt sich nicht auf). Mit 1 m/s Strömung sind es über 8 m. Die Tests prüfen "klar weniger als mit Strömung", nicht "null".
+* **Einschlafen.** Die Planungsrechnung sagte voraus, dass ein Körper auf dem Seegang in der Flaute zwischen zwei Wellen unter Jolts Schlafschwelle
+  (0,03 m/s für 0,5 s) fällt und einfriert. Das ließ sich **nicht reproduzieren**: sechs Quader und sechs Kugeln über 40 s schliefen auch ohne den
+  Schutz nie ein (Mutation: `SetAllowSleeping(false)` entfernt, Test blieb grün). Der Schutz bleibt als Vorsicht; **seine Notwendigkeit ist nicht
+  belegt.** Die andere Hälfte, das **Zurückgeben** der Schlaferlaubnis, ist belegt: ohne sie liegt der gesunkene Stein wach auf dem Grund und wird in jedem
+  Schritt bedient (Mutation: Test `served == 0` wurde rot).
+* **Eine Ebene am Schwerpunkt** (3.5) und **kein Aufwecken bei Pegeländerung** (13.1): ein Körper, der auf trockenem Ufer eingeschlafen ist, wenn der Pegel
+  steigt, schwimmt erst, wenn ihn etwas berührt oder weckt.
+* **Nicht getestet:** Hüllen (Konvex), Seile und Gelenke im Wasser, überlappende Landschaften mit Körpern darauf (nur die Abfrage ist getestet), Landschaften mit
+  Drehung um X oder Z (nicht unterstützt, 2), Windows, Linux, D3D und Vulkan (nicht Teil dieses Schritts).

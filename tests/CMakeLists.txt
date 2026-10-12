@@ -140,6 +140,10 @@ add_executable(he_tests
     # The water group of HE::api: the same lakes and brush from HorizonCode, Lua,
     # Python and MCP, in world coordinates.
     test_water_lake_api.cpp
+    # The water physics (Thema 179): the height query on a landscape in the world, and
+    # buoyancy, drag and current on Jolt bodies, with the scene-without-water control.
+    test_water_query.cpp
+    test_water_buoyancy.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp

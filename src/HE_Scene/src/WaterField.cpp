@@ -104,6 +104,8 @@ namespace
         return c;
     }
 
+    // The bodies as far as the SURFACE is concerned: where it is and what it was
+    // drawn from. A change here moves or reshapes a sheet, so it rebuilds meshes.
     bool bodyEq(const Body& a, const Body& b)
     {
         return a.id == b.id && a.level == b.level && a.sourceSpline == b.sourceSpline &&
@@ -113,6 +115,14 @@ namespace
     {
         if (a.size() != b.size()) return false;
         for (size_t i = 0; i < a.size(); ++i) if (!bodyEq(a[i], b[i])) return false;
+        return true;
+    }
+    // …and with what the water does to a body in it (BodyPhysics). The CONTENT of a
+    // field, for sameContent and Delta; it moves no sheet, so it never rebuilds one.
+    bool bodiesFullEq(const std::vector<Body>& a, const std::vector<Body>& b)
+    {
+        if (!bodiesEq(a, b)) return false;
+        for (size_t i = 0; i < a.size(); ++i) if (a[i].physics != b[i].physics) return false;
         return true;
     }
 
@@ -191,7 +201,7 @@ uint32_t Field::wetCells(uint16_t id) const
 
 bool sameContent(const Field& a, const Field& b)
 {
-    if (a.res != b.res || a.nextBodyId != b.nextBodyId || !bodiesEq(a.bodies, b.bodies)) return false;
+    if (a.res != b.res || a.nextBodyId != b.nextBodyId || !bodiesFullEq(a.bodies, b.bodies)) return false;
     if (a.clipToGround != b.clipToGround || a.shoreOvershoot != b.shoreOvershoot) return false;
     const size_t n = static_cast<size_t>(a.res) * a.res;
     if (a.allocated() && b.allocated()) return a.coverage == b.coverage && a.owner == b.owner;
@@ -303,6 +313,33 @@ bool setLevel(TerrainComponent& tc, uint16_t id, float level)
     if (b->level == level) return true;
     b->level = level;
     markAll(tc);    // the whole surface of the body moves, not a rectangle of cells
+    return true;
+}
+
+BodyPhysics clampPhysics(const BodyPhysics& p)
+{
+    const BodyPhysics d;   // the defaults stand in for anything that is not a number
+    BodyPhysics out;
+    out.enabled     = p.enabled;
+    out.density     = finite(p.density)     ? std::clamp(p.density, kMinDensity, kMaxDensity) : d.density;
+    out.linearDrag  = finite(p.linearDrag)  ? std::clamp(p.linearDrag, 0.0f, kMaxDrag)        : d.linearDrag;
+    out.angularDrag = finite(p.angularDrag) ? std::clamp(p.angularDrag, 0.0f, kMaxDrag)       : d.angularDrag;
+    out.flow.x      = finite(p.flow.x)      ? std::clamp(p.flow.x, -kMaxFlow, kMaxFlow)       : 0.0f;
+    out.flow.y      = finite(p.flow.y)      ? std::clamp(p.flow.y, -kMaxFlow, kMaxFlow)       : 0.0f;
+    out.splash      = finite(p.splash)      ? std::clamp(p.splash, 0.0f, kMaxSplash)          : d.splash;
+    return out;
+}
+
+bool setPhysics(TerrainComponent& tc, uint16_t id, const BodyPhysics& physics)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    const BodyPhysics next = clampPhysics(physics);
+    if (b->physics == next) return true;
+    b->physics = next;
+    // The sheet is the same: neither `dirty` nor the rectangle, or the mesh would be
+    // rebuilt for a number it never reads. The revision is what tells the physics.
+    ++tc.water.revision;
     return true;
 }
 
@@ -703,7 +740,7 @@ bool anyWater(const TerrainComponent& tc, const CellRect& rect, bool wetOnly)
 
 bool Delta::sameBodies() const
 {
-    return nextIdBefore == nextIdAfter && bodiesEq(bodiesBefore, bodiesAfter);
+    return nextIdBefore == nextIdAfter && bodiesFullEq(bodiesBefore, bodiesAfter);
 }
 
 bool makeDelta(const Field& before, const Field& after, Delta& out)
@@ -757,6 +794,8 @@ namespace
             if (t.changed) markCells(tc, t.x0, t.z0, t.x1, t.z1);
             // A level that changed moves a surface no cell records.
             if (!bodiesEq(d.bodiesBefore, d.bodiesAfter)) markAll(tc);
+            // Physics settings alone move no sheet: the revision is all the physics wants.
+            else if (!bodiesFullEq(d.bodiesBefore, d.bodiesAfter)) ++f.revision;
         }
         return true;
     }
@@ -842,6 +881,7 @@ void sanitize(TerrainComponent& tc)
         for (const glm::vec2& p : nb.polygon) bad = bad || !finite(p.x) || !finite(p.y);
         if (bad) nb.polygon.clear();
         nb.syncKey = 0;
+        nb.physics = clampPhysics(nb.physics);
     }
     f.bodies = std::move(kept);
     uint32_t next = f.nextBodyId == 0 ? 1u : f.nextBodyId;

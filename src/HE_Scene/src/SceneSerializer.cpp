@@ -424,6 +424,10 @@ namespace
 				{ "is2D",        r->is2D },
 				{ "layer",       r->collisionLayer },
 			};
+			// Water (Thema 179): written only off their defaults, so a scene without
+			// any saves byte for byte as it did before the fields existed.
+			if (!r->affectedByWater) comps["rigidbody"]["affectedByWater"] = false;
+			if (r->density > 0.0f)   comps["rigidbody"]["density"] = r->density;
 		}
 		if (auto* col = registry.try_get<ColliderComponent>(entity))
 		{
@@ -644,6 +648,21 @@ namespace
 					if (b.fromSpline() && !b.polygon.empty())
 						bj["polygonB64"] = base64Encode(reinterpret_cast<const uint8_t*>(b.polygon.data()),
 						                                b.polygon.size() * sizeof(glm::vec2));
+					// What the water does to a body in it (Thema 179): only the settings
+					// that are not the default, and nothing at all while none is, so a
+					// body of water from before them saves byte for byte as it did.
+					if (b.physics != HE::water::BodyPhysics{})
+					{
+						const HE::water::BodyPhysics d;
+						json pj = json::object();
+						if (b.physics.enabled     != d.enabled)     pj["enabled"]     = b.physics.enabled;
+						if (b.physics.density     != d.density)     pj["density"]     = b.physics.density;
+						if (b.physics.linearDrag  != d.linearDrag)  pj["linearDrag"]  = b.physics.linearDrag;
+						if (b.physics.angularDrag != d.angularDrag) pj["angularDrag"] = b.physics.angularDrag;
+						if (b.physics.flow        != d.flow)        pj["flow"]        = { b.physics.flow.x, b.physics.flow.y };
+						if (b.physics.splash      != d.splash)      pj["splash"]      = b.physics.splash;
+						bj["physics"] = std::move(pj);
+					}
 					bodies.push_back(std::move(bj));
 				}
 				tc["waterBodies"] = std::move(bodies);
@@ -1308,6 +1327,15 @@ namespace
 			// collision layers existed loads every body into Default (0) — which
 			// is the channel it effectively had.
 			r.collisionLayer = c.value("layer", r.collisionLayer);
+			// Water (Thema 179). Absent in every scene written before it: the defaults
+			// stand. A density that is not a number or is negative is "from the mass".
+			if (c.contains("affectedByWater") && c["affectedByWater"].is_boolean())
+				r.affectedByWater = c["affectedByWater"].get<bool>();
+			if (c.contains("density") && c["density"].is_number())
+			{
+				r.density = c["density"].get<float>();
+				if (!std::isfinite(r.density) || r.density < 0.0f) r.density = 0.0f;
+			}
 			registry.emplace_or_replace<RigidBodyComponent>(entity, r);
 		}
 		if (comps.contains("collider"))
@@ -1577,6 +1605,25 @@ namespace
 								b.polygon.resize(raw.size() / sizeof(glm::vec2));
 								if (!raw.empty()) std::memcpy(b.polygon.data(), raw.data(), raw.size());
 							}
+						}
+						// The physics of the water (Thema 179). Every key is optional and
+						// checked; sanitize() below holds the numbers to their bounds.
+						if (bj.contains("physics") && bj["physics"].is_object())
+						{
+							const json& pj = bj["physics"];
+							const auto number = [&pj](const char* key, float& into)
+							{
+								if (pj.contains(key) && pj[key].is_number()) into = pj[key].get<float>();
+							};
+							if (pj.contains("enabled") && pj["enabled"].is_boolean())
+								b.physics.enabled = pj["enabled"].get<bool>();
+							number("density",     b.physics.density);
+							number("linearDrag",  b.physics.linearDrag);
+							number("angularDrag", b.physics.angularDrag);
+							number("splash",      b.physics.splash);
+							if (pj.contains("flow") && pj["flow"].is_array() && pj["flow"].size() == 2 &&
+							    pj["flow"][0].is_number() && pj["flow"][1].is_number())
+								b.physics.flow = { pj["flow"][0].get<float>(), pj["flow"][1].get<float>() };
 						}
 						w.bodies.push_back(b);
 					}

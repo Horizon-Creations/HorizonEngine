@@ -108,6 +108,32 @@ public:
     // holds no world. Zeroed until a step has run.
     static HE::PhysicsBudgetStats lastBudgetStats();
 
+    // ── Water (Thema 179 step 2) ─────────────────────────────────────────────
+    // Bodies in water get buoyancy, drag and the current of the water they are in
+    // (the field of a landscape, WaterField.h; where its surface is, WaterQuery.h).
+    // It runs inside step(), on the stepping thread, after the region hold and before
+    // Jolt's Update, and nowhere else: no Jolt body is read or written for the water
+    // outside that window, and no query here touches one.
+    //
+    // ON by default. HE_PHYSICS_WATER=0 in the environment starts the world with it
+    // off, setWaterPhysics changes it between steps; off, or with no water in the
+    // scene, the step does what it did before water had physics, bit for bit.
+    // Which bodies it serves and how many per step: RigidBodyComponent::affectedByWater
+    // and ::density, HE::PhysicsBudgetConfig::waterBodiesPerStep; the time it takes is
+    // part of the budget (PhysicsBudgetStats::buoyancyMs).
+    void setWaterPhysics(bool on);
+    bool waterPhysics() const;
+    // The clock the waves run on: seconds of dt that step() has been given since
+    // initialize(). Never the render clock, so a paused or slowed game keeps its bodies
+    // and its waves in step.
+    double simTime() const;
+    // The share (0..1) of the body's volume under water as of the latest step it was
+    // served (a body at rest keeps the share it came to rest with: a stone on the bed
+    // stays "fully under"); 0 for a body that is not in water, was put off past
+    // waterBodiesPerStep before it was ever served, or is unknown. Game thread, between
+    // steps, like the other getters here.
+    float submergedFraction(uint32_t entityId) const;
+
     // The limits the world was built with, and the size of the scratch block a
     // step allocates from (it falls back to the heap past that, never aborts).
     HE::PhysicsLimits limits() const;
@@ -844,6 +870,14 @@ private:
     // phase now, so the step never lets it fall. (The characters are asked in
     // their own loop, where their position is at hand.)
     void applyRegionHold();
+
+    // The water's effect on the bodies in it (setWaterPhysics): buoyancy, drag and
+    // current as a Jolt impulse, for the active dynamic bodies over a landscape's
+    // water. Runs in step() right after applyRegionHold and before Update, on the
+    // stepping thread — the one window in which no Jolt worker is inside a body and
+    // every writer is a call on this thread. Returns the milliseconds it took, which
+    // step() books against the budget.
+    double applyWater(HorizonWorld& world, float dt);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;
