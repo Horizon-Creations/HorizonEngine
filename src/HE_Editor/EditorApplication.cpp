@@ -7565,7 +7565,9 @@ void EditorApplication::dumpFrameHeadless()
 	//   =extended   drawn, then a brush stroke dug out of the east shore (Dig Bed
 	//               on) and the eraser cut an island out of the middle.
 	//   =reshaped   extended, then two points pulled out and one pushed in: the
-	//               outline moved, the channel and the island did not.
+	//               outline moved, the channel and the island did not, and the
+	//               lake's own bed followed the outline (Thema 188 Schritt 2; the
+	//               log line reads the ground under the lobe and in the bay).
 	//   =converted  a pond painted with the brush (dug), then "To Lake": the same
 	//               pond, now with a spline of its own to edit.
 	//   =undo       drawn, then Ctrl+Z through EditorUndo — the editor's own
@@ -7724,19 +7726,24 @@ void EditorApplication::dumpFrameHeadless()
 			if (reshape)
 			{
 				// Pull the east lobe out and the south bay in: the spline moves, the
-				// brush share (channel, island) stays.
+				// brush share (channel, island) stays, and the lake's own bed moves
+				// with the outline (Thema 188 Schritt 2) — dug under the pulled-out
+				// lobe, filled back in where the bay was pushed in.
 				auto& pts = reg.get<SplineComponent>(spline).controlPoints;
 				pts[4].x += 8.0f; pts[4].z -= 6.0f;
 				pts[5].x += 8.0f;
 				pts[7].z -= 8.0f;
 				const uint32_t before = tc.water.wetCells(body);
+				const float lobeBefore = terrainHeightAt(tc, 27.0f, -12.0f), bayBefore = terrainHeightAt(tc, 4.0f, 16.0f);
 				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the sync inside it reshapes
 				const float chx = 40.0f, chz = 6.4f;   // far down the channel the brush dug
-				char b3[200];
-				std::snprintf(b3, sizeof b3, "; reshaped: %u -> %u cells, channel still wet: %d, island still dry: %d",
+				char b3[320];
+				std::snprintf(b3, sizeof b3, "; reshaped: %u -> %u cells, channel still wet: %d, island still dry: %d"
+				              ", ground under the pulled lobe (27,-12) %.2f -> %.2f m, in the pushed-in bay (4,16) %.2f -> %.2f m",
 				              before, tc.water.wetCells(body),
 				              HE::water::bodyAt(tc, chx, chz) == body ? 1 : 0,
-				              HE::water::bodyAt(tc, -8.0f, 3.0f) == HE::water::kNoBody ? 1 : 0);
+				              HE::water::bodyAt(tc, -8.0f, 3.0f) == HE::water::kNoBody ? 1 : 0,
+				              lobeBefore, terrainHeightAt(tc, 27.0f, -12.0f), bayBefore, terrainHeightAt(tc, 4.0f, 16.0f));
 				note += b3;
 			}
 			if (undoIt)

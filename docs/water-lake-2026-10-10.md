@@ -254,3 +254,46 @@ ein erneutes Create Lake oder Dig Again senkt nur weiter ab, es hebt den alten F
 Seen brauchen Undo (solange die Historie reicht) oder von Hand nachsculpten (Raise/Flatten). Derselbe Mechanismus,
 anderer Code, traf auch den Wasser-Pinsel (`TerrainSculpt::lowerToFloor`) — siehe `docs/water-brush-2026-10-09.md`,
 Nachtrag Schritt 13 (dort war die Außen-/Innen-Geometrie von Anfang an gekoppelt, kein zweiter Durchgang nötig).
+
+## Nachtrag Thema 188 Schritt 2 (12.10.2026): Das Bett folgt dem gezogenen Punkt
+
+Rückmeldung des Menschen: Beim Lake-Werkzeug zieht ein verschobener Spline-Punkt nur die Wasserfläche mit, der
+Aushub bleibt auf der alten Form stehen. **Ursache:** Das war bis hierher Vertrag (`WaterLake.h`, „Moving a spline
+point: the WATER only“). `syncSplines` grub nur dann neu, wenn sich die *Transform* des Spline-Entitys änderte
+(Schritt 14), und der Bodenpatch, mit dem das alte Bett angehoben wird, war reine Laufzeit: Nach einem Undo, dem
+Ende von Play oder einem Laden war er weg, auch das Verschieben des ganzen Sees grub dann nicht mehr mit.
+
+**Jetzt:** Ändert sich die Kontur im Raum des Landscapes (Punkt ziehen, einfügen, löschen, Entity oder Landscape
+bewegen) und hat der See sein Bett selbst gegraben (`Body::digsBed`, gesetzt von Create Lake mit Dig Bed und von
+Dig Again), hebt `syncSplines` in **jedem Frame des Ziehens** das alte Bett an (`groundPatch` abziehen, additiv, ein
+Nachsculpten bleibt) und gräbt mit Tiefe und Böschung des letzten Aushubs ein neues unter der neuen Kontur. Das Flag
+statt „Patch nicht leer“: Ein Neu-Graben, das nichts bewegt (Kontur kurz über tieferem Boden oder neben dem
+Terrain), lässt einen leeren Patch zurück und darf das Folgen nicht beenden. Dig Again **mischt** seinen Patch in den
+des Sees, eine spätere Bewegung hebt also beide Aushübe an. Ein See ohne eigenes Bett (Create Lake ohne Dig Bed,
+umgewandelter Teich, Szene von vor Thema 188) formt weiter nur das Wasser um; ein Dig Again macht ihn zum folgenden.
+
+**Leistung beim Ziehen:** Gelesen wird nur das Rechteck, das altes Bett und neuer Aushub erreichen
+(`TerrainSculpt::excavateReach`, derselbe Code, den `excavatePolygon` läuft), nicht das ganze Höhengitter; für den
+Chunk-Neubau markiert wird nur, wo die Höhe sich *netto* geändert hat. Gemessen im Debug-Build, 1025² Vertices,
+See mit 100 m Durchmesser, ein Punkt um 0,25 m je Frame: **1,23 ms je Sync** (schlimmster 1,54 ms), Dirty-Rechteck
+höchstens **27 × 70 m** statt der ~110 × 110 m des ganzen Sees (`test_water_lake.cpp`, „re-digs only around that
+point“). `syncSplines` läuft jetzt **vor** der Chunk-Schleife in `updateTerrains`, damit der neue Boden im selben
+Aufruf gebaut und an die Ufer-Beschneidung übergeben wird, nicht einen Frame später.
+
+**Gespeichert:** `digsBed`, Tiefe, Böschung und Patch stehen am Körper unter `lakeBed` (nur bei grabenden Seen,
+alle anderen Szenen bleiben byte-gleich); `sanitize` verwirft einen Patch, der nicht ins Höhengitter passt
+(`patchFits`), und das Anheben prüft ihn selbst noch einmal.
+
+Zeuge `HE_DUMP_LAKEEDIT=reshaped` (jetzt mit Bodenhöhen in der Logzeile), Vulkan und D3D11 gleich:
+
+| | Boden unter dem herausgezogenen Lappen (27, −12) | in der hineingedrückten Bucht (4, 16) |
+|---|---|---|
+| vorher (Neu-Graben abgeschaltet) | 0,00 → 0,00 m (Wasser auf ungegrabenem Boden) | −0,65 → −0,65 m (trockene Grube) |
+| nachher | 0,00 → −2,44 m | −0,65 → 0,00 m |
+
+![Vorher: am Südufer bleibt die alte Grube als dunkler, trockener Streifen](water-lake/thema188-redig-before-vulkan.png)
+![Nachher (Vulkan): das Bett ist mitgewandert, das Ufer schließt bündig](water-lake/thema188-redig-after-vulkan.png)
+![Nachher (D3D11)](water-lake/thema188-redig-after-d3d11.png)
+
+Offen: Das In-Editor-Handbuch (`he-docs.json`, Abschnitt `editor#landscape-mode`, Quelle im Website-Repo) sagt noch
+„dragging a point only reshapes the water“; es wird aus dem Website-Checkout neu gebaut, der auf NN-WS03 fehlt.
