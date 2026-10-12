@@ -797,6 +797,19 @@ private:
 	VkDescriptorSet       m_underwaterFogDS        = VK_NULL_HANDLE;
 	bool                  m_underwaterFogReady     = false;
 
+	// ── Underwater caustics (Thema 185 Schritt 3) ───────────────────────────
+	// The refracted-light net (postfx_underwatercaustics.frag, GLSL twin of
+	// kUnderwaterCausticsHLSL). A second fullscreen draw INSIDE the fog's render
+	// pass, right before the fog draw: same attachment, same blend state (the
+	// shader outputs alpha 0, so ONE / ONE_MINUS_SRC_ALPHA adds its light), same
+	// depth set and layout flip — so it reuses m_underwaterFogRP/FB/DS and exists
+	// only where those do. Its own pipeline layout because the push-constant
+	// range differs: 128 bytes (the minimum every device guarantees) vs the
+	// fog's 112, and the two ranges cannot be shared.
+	VkPipelineLayout      m_underwaterCausticsPipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_underwaterCausticsPipe       = VK_NULL_HANDLE;
+	bool                  m_underwaterCausticsReady      = false;
+
 	// Anti-aliasing method in force, already resolved against this backend's
 	// capabilities (docs/anti-aliasing-plan.md). The final post pass writes
 	// m_viewportImage, so it always runs — only the pipeline changes.

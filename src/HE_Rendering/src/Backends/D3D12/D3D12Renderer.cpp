@@ -38,6 +38,7 @@
 #include <HorizonRendering/WorldPreviewGrid.h> // RenderWorldPreview: grid, background, dump
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
+#include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
 #include <SDL3/SDL.h>
@@ -1814,6 +1815,16 @@ struct D3D12RendererImpl
     ComPtr<ID3D12PipelineState> underwaterFogPSO;
     bool                        underwaterFogReady = false;
 
+    // ── Underwater caustics (Thema 185 Schritt 3) — a second fullscreen pass onto the
+    // same hdrRT, drawn right before the fog with the fog's own blend (the shader's
+    // alpha is 0, so ONE/INV_SRC_ALPHA adds its light; see kUnderwaterCausticsHLSL).
+    // Same root sig shape as the fog's — one SRV table (t0, the depth at
+    // k_underwaterFogDepthSlot) + the static point-clamp sampler (s0) — but 36 root
+    // constants (b0, the 144-byte CB inlined) instead of 28, hence its own.
+    ComPtr<ID3D12RootSignature> underwaterCausticsRootSig;
+    ComPtr<ID3D12PipelineState> underwaterCausticsPSO;
+    bool                        underwaterCausticsReady = false;
+
     // PostFX settings
     float exposure       = 1.0f;
     float bloomStrength  = 0.25f;
@@ -2220,6 +2231,61 @@ struct D3D12RendererImpl
             }
         }
 
+        // Underwater caustics (Thema 185 Schritt 3): the fog's root sig / PSO shape again, only
+        // with 36 root constants and the caustic pixel shader — whose @TRAINS@ token is
+        // replaced by the engine water's wave trains before it is compiled, exactly as D3D11
+        // does. Optional like the fog: a failure here leaves underwaterCausticsReady false and
+        // the rest of the chain alone.
+        ComPtr<ID3DBlob> ucB;
+        std::string causticsSrc = kUnderwaterCausticsHLSL;
+        const size_t trainsAt = causticsSrc.find("@TRAINS@");
+        if (trainsAt != std::string::npos)
+            causticsSrc.replace(trainsAt, 8, HE::causticsWaveTrainsList());
+        if (trainsAt != std::string::npos && compile(causticsSrc.c_str(), "main", "ps_5_0", ucB))
+        {
+            D3D12_DESCRIPTOR_RANGE r0{}; r0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
+            D3D12_ROOT_PARAMETER params[2]{};
+            params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            params[0].Constants = { 0, 0, 36 };   // mat4 + 5×float4, see kUnderwaterCausticsHLSL
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[1].DescriptorTable = { 1, &r0 };
+            params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_STATIC_SAMPLER_DESC samp{};
+            samp.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;   // depth: texel-exact, like the fog
+            samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 2; rsd.pParameters = params;
+            rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
+            ComPtr<ID3DBlob> sig, err;
+            if (SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) &&
+                SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                      IID_PPV_ARGS(&underwaterCausticsRootSig))))
+            {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+                pd.pRootSignature = underwaterCausticsRootSig.Get();
+                pd.VS = { vsB->GetBufferPointer(), vsB->GetBufferSize() };
+                pd.PS = { ucB->GetBufferPointer(), ucB->GetBufferSize() };
+                D3D12_RENDER_TARGET_BLEND_DESC& rt = pd.BlendState.RenderTarget[0];
+                rt.BlendEnable = TRUE;
+                // Same blend as the fog: the shader outputs alpha 0, so dst' = src*1 + dst*(1-0) = dst + light.
+                rt.SrcBlend = D3D12_BLEND_ONE;       rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;  rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                pd.SampleMask = UINT_MAX;
+                pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                pd.DepthStencilState.DepthEnable = FALSE;
+                pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                pd.SampleDesc.Count = 1;
+                underwaterCausticsReady = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&underwaterCausticsPSO)));
+            }
+        }
+
         postFxReady = true;
         createTaaPipelines(vsB.Get());
         return true;
@@ -2392,6 +2458,65 @@ struct D3D12RendererImpl
             D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvH->GetCPUDescriptorHandleForHeapStart();
             cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         };
+
+        // Underwater caustics (Thema 185 Schritt 3), BEFORE the fog so the fog swallows the
+        // net with distance: light added onto hdrRT while it is still RENDER_TARGET, by the
+        // fog's own blend (the shader's alpha is 0, so ONE/INV_SRC_ALPHA is a plain add).
+        // Runs only with the camera under water and the body's intensity above 0 (the
+        // extractor's waterline fade-in makes it exactly 0 on the line). Hands the depth
+        // over exactly like the fog below does, and gives it back in the state the fog
+        // expects. See kUnderwaterCausticsHLSL (HlslSources.h) for the per-pixel math.
+        const UnderwaterCameraData& ucCam = m_renderWorld.underwaterCamera;
+        if (ucCam.wet && ucCam.causticsIntensity > 0.0f && underwaterCausticsReady && viewportDepth)
+        {
+            const glm::mat4 invViewProjUc =
+                glm::inverse(m_renderWorld.camera.projection * m_renderWorld.camera.view);
+            glm::vec3 ucSunDir, ucSunColor;
+            m_renderWorld.dominantDirectionalLight(ucSunDir, ucSunColor);   // colour is 0 at night
+            const glm::vec3 towardSun = glm::normalize(m_renderWorld.sunDirection);
+            static const char* s_ucTimeOv = std::getenv("HE_SKY_TIME");   // pins the wave clock for captures
+            const float ucSeconds = (s_ucTimeOv && *s_ucTimeOv) ? static_cast<float>(std::atof(s_ucTimeOv))
+                                                                : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+            struct UnderwaterCausticsConstants
+            {
+                float invViewProj[16];
+                float depthParams[4];
+                float camSurface[4];
+                float sun[4];
+                float sunColor[4];
+                float caustics[4];
+            } ucb{};
+            static_assert(sizeof(UnderwaterCausticsConstants) == 144,
+                          "36 root constants: must match the cbuffer of kUnderwaterCausticsHLSL");
+            std::memcpy(ucb.invViewProj, &invViewProjUc[0][0], 16 * sizeof(float));
+            ucb.depthParams[0] = -1.0f; ucb.depthParams[1] = 1.0f; ucb.depthParams[2] = 0.0f;   // same as the fog
+            ucb.camSurface[0] = m_renderWorld.camera.position.x;
+            ucb.camSurface[1] = m_renderWorld.camera.position.y;
+            ucb.camSurface[2] = m_renderWorld.camera.position.z;
+            ucb.camSurface[3] = ucCam.surfaceY;
+            ucb.sun[0] = towardSun.x; ucb.sun[1] = towardSun.y; ucb.sun[2] = towardSun.z;
+            ucb.sunColor[0] = ucSunColor.r; ucb.sunColor[1] = ucSunColor.g; ucb.sunColor[2] = ucSunColor.b;
+            ucb.caustics[0] = ucCam.causticsIntensity;
+            ucb.caustics[1] = ucCam.causticsScale;
+            ucb.caustics[2] = ucSeconds * ucCam.causticsSpeed;
+            ucb.caustics[3] = ucCam.causticsDepth;
+
+            ID3D12DescriptorHeap* ucHeaps[] = { postFxSrvHeap.Get() };
+            cl->SetDescriptorHeaps(1, ucHeaps);
+            cl->SetGraphicsRootSignature(underwaterCausticsRootSig.Get());
+            cl->SetPipelineState(underwaterCausticsPSO.Get());
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            setVP(w, h);
+            setRTV(hdrRtvHeap);
+            cl->SetGraphicsRoot32BitConstants(0, 36, &ucb, 0);
+            // Depth off the DSV before it is readable as an SRV — the fog's own dance, round trip.
+            barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(k_underwaterFogDepthSlot));
+            cl->DrawInstanced(3, 1, 0, 0);
+            barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                      D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        }
 
         // Underwater fog (Thema 185 Schritt 2): straight onto hdrRT while it is
         // still RENDER_TARGET (before bloom's SRV read below) — alpha-blended, no

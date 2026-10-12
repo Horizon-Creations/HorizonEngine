@@ -14,9 +14,15 @@
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace water = HE::water;
@@ -371,4 +377,81 @@ TEST_CASE("Underwater caustics: the shader's wave trains are the engine water's 
     CHECK(std::stof(parts[2]) == doctest::Approx(water::kWaveA.length));
     CHECK(std::stof(parts[3]) == doctest::Approx(water::kWaveA.steepness));
     CHECK(std::stof(parts[8]) == doctest::Approx(water::kWaveC.directionDeg));   // the third train is kWaveC
+}
+
+// ─── The Vulkan caustic shader's copy of the wave trains ─────────────────────────────────────
+// D3D11, D3D12, GL and Metal splice HE::causticsWaveTrainsList() into their shader source when
+// they start. The Vulkan shader is built offline by glslc and cannot, so
+// src/HE_Rendering/shaders/postfx_underwatercaustics.frag holds the same twelve numbers as a
+// literal. A retuned kWaveA/B/C that nobody copied over would quietly pull the Vulkan net away
+// from the water it is the shadow of, so this reads the shader source and fails instead (the
+// source-reading guard test_culling.cpp uses for the other hand-kept copies).
+namespace
+{
+    namespace fs = std::filesystem;
+
+    // The .frag, found from the directory this TU was compiled from or from the CWD (the build
+    // tree lives inside the checkout), walking up. Empty when the sources are not there.
+    fs::path causticsFragPath()
+    {
+        std::error_code ec;
+        std::vector<fs::path> seeds;
+        fs::path self(__FILE__);
+        if (!self.is_absolute()) self = fs::current_path(ec) / self;
+        seeds.push_back(self.parent_path());
+        seeds.push_back(fs::current_path(ec));
+        for (fs::path seed : seeds)
+            for (int up = 0; up < 8 && !seed.empty(); ++up, seed = seed.parent_path())
+            {
+                const fs::path p = seed / "src" / "HE_Rendering" / "shaders" / "postfx_underwatercaustics.frag";
+                if (fs::exists(p, ec)) return p;
+            }
+        return {};
+    }
+
+    // The file's text without "//" comments and without whitespace: CRLF line endings, a
+    // re-wrapped list, or a comment that quotes the numbers must not matter.
+    std::string compactSource(const fs::path& file)
+    {
+        std::ifstream in(file, std::ios::binary);
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        const std::string raw = ss.str();
+        std::string out;
+        out.reserve(raw.size());
+        for (size_t i = 0; i < raw.size();)
+        {
+            if (raw[i] == '/' && i + 1 < raw.size() && raw[i + 1] == '/')
+            {
+                while (i < raw.size() && raw[i] != '\n') ++i;
+                continue;
+            }
+            if (!std::isspace(static_cast<unsigned char>(raw[i]))) out += raw[i];
+            ++i;
+        }
+        return out;
+    }
+}
+
+TEST_CASE("Underwater caustics: the Vulkan shader's wave-train literal is HE::causticsWaveTrainsList()")
+{
+    const fs::path frag = causticsFragPath();
+    if (frag.empty())
+    {
+        MESSAGE("postfx_underwatercaustics.frag not found from this build - wave-train sync check skipped");
+        return;
+    }
+    const std::string src = compactSource(frag);
+    const std::string open = "float[12](";
+    const size_t at = src.find(open);
+    REQUIRE(at != std::string::npos);   // the kTrains declaration is still there
+    const size_t close = src.find(')', at + open.size());
+    REQUIRE(close != std::string::npos);
+    const std::string literal = src.substr(at + open.size(), close - (at + open.size()));
+
+    std::string expected = HE::causticsWaveTrainsList();
+    expected.erase(std::remove_if(expected.begin(), expected.end(),
+                                  [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; }),
+                   expected.end());
+    CHECK(literal == expected);
 }
