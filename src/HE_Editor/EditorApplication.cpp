@@ -86,6 +86,7 @@
 #include <HorizonScene/TerrainGenerate.h>
 #include <HorizonScene/WaterBrush.h>
 #include <HorizonScene/WaterLake.h>
+#include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
@@ -7485,6 +7486,14 @@ void EditorApplication::dumpFrameHeadless()
 	//   =undo   paints, then takes the stroke back through EditorUndo (one
 	//           snapshot before, one undo after) — the A/B for "undo removes a
 	//           whole stroke": compare against =paint at the same settings.
+	//   =pit    (Thema 188 Schritt 3) the case the dry crater showed in: ground
+	//           rising 8 % to the east, the editor's pacing (amount = strength 5 ·
+	//           1/60 s, a dab every half metre) and its default brush (radius 10,
+	//           falloff 5), Dig Bed on, a 128 m landscape at a vertex per metre
+	//           and a water cell four vertices wide (the editor's own proportions).
+	//           The log line counts the vertices the stroke lowered that no
+	//           triangle of the sheet covers — the mesh buildSurface makes, the one
+	//           WaterSurface draws, not the point test the dig itself asks.
 	// HE_DUMP_WATERLEVEL (default: ground + 0.3, i.e. unset) can pin a fixed
 	// level instead. Camera: CAMY=375 CAMZ=48 PITCH=-60, the WATERLAKE framing.
 	if (const char* wb = std::getenv("HE_DUMP_WATERBRUSH"); wb && *wb && m_editorWorld)
@@ -7492,17 +7501,26 @@ void EditorApplication::dumpFrameHeadless()
 		namespace WB = HE::water::brush;
 		auto& reg = m_editorWorld->registry();
 		const std::string_view mode(wb);
+		const bool pit = mode == "pit";
 		auto land = m_editorWorld->createEntity("WaterBrushLandscape");
 		TransformComponent ltf;
 		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
-		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.sizeX = ltc.sizeZ = pit ? 128.0f : 100.0f;
 		ltc.resolution  = 129;
 		ltc.heightScale = 0.0f;
 		ltc.seed        = 0;
 		ltc.dirty       = true;
-		ltc.water.res   = 128;
+		ltc.water.res   = pit ? 32 : 128;
+		if (pit)
+		{
+			ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
+			for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+				for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+					ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
+						0.08f * (-64.0f + static_cast<float>(xi));
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat chunks first
 
@@ -7516,17 +7534,93 @@ void EditorApplication::dumpFrameHeadless()
 		if (const char* lv = std::getenv("HE_DUMP_WATERLEVEL"); lv && *lv)
 		{ p.levelFromGround = false; p.level = static_cast<float>(std::atof(lv)); }
 		p.dig = mode == "dig"; p.digDepth = 1.5f;
+		if (pit)
+		{
+			p.radius = 10.0f; p.falloff = 5.0f; p.amount = 5.0f / 60.0f;
+			p.dig = true; p.digDepth = 1.0f;
+		}
 
 		auto& ltc2 = reg.get<TerrainComponent>(land);
+		const std::vector<float> groundBefore = ltc2.sculptHeights;
+		const float x0 = pit ? -30.0f : -24.0f, x1 = pit ? 18.0f : 24.0f;
+		const int steps = pit ? 96 : 12;
 		WB::Stroke s;
-		WB::begin(s, ltc2, -24.0f, 0.0f, p);
-		for (int i = 0; i <= 12; ++i)
-			WB::dab(s, ltc2, -24.0f + 48.0f * static_cast<float>(i) / 12.0f, 0.0f, p);
+		WB::begin(s, ltc2, x0, 0.0f, p);
+		for (int i = 0; i <= steps; ++i)
+			WB::dab(s, ltc2, x0 + (x1 - x0) * static_cast<float>(i) / static_cast<float>(steps), 0.0f, p);
 		const bool created = s.created;
 		const float strokeLevel = s.level;
 		const uint32_t dabs = s.dabs;
+		const uint16_t strokeBody = s.body;
 		WB::end(s, ltc2);
 		const uint32_t wetAfterPaint = ltc2.water.wetCells();
+
+		std::string pitNote;
+		if (pit && strokeBody != HE::water::kNoBody && groundBefore.size() == ltc2.sculptHeights.size())
+		{
+			// The sheet as WaterSurface builds it (the field's own shore clipping).
+			HE::water::SurfaceOptions so;
+			so.clipToGround   = ltc2.water.clipToGround;
+			so.shoreOvershoot = ltc2.water.shoreOvershoot;
+			HE::water::SurfaceMesh sheet;
+			const bool built = HE::water::buildSurface(ltc2, strokeBody, so, sheet);
+			const std::vector<float>&    sv = sheet.mesh.vertices;
+			const std::vector<uint32_t>& si = sheet.mesh.indices;
+			// A point on a triangle or within `tol` of its edges counts as covered.
+			auto covered = [&](float x, float z, float tol)
+			{
+				const float px = x - sheet.center.x, pz = z - sheet.center.y;
+				auto side = [&](float ax, float az, float bx, float bz)
+				{
+					const float len = std::sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
+					return len > 0.0f ? ((bx - ax) * (pz - az) - (bz - az) * (px - ax)) / len : 0.0f;
+				};
+				for (size_t t = 0; t + 2 < si.size(); t += 3)
+				{
+					const float ax = sv[si[t] * 3], az = sv[si[t] * 3 + 2];
+					const float bx = sv[si[t + 1] * 3], bz = sv[si[t + 1] * 3 + 2];
+					const float cx = sv[si[t + 2] * 3], cz = sv[si[t + 2] * 3 + 2];
+					const float d1 = side(ax, az, bx, bz), d2 = side(bx, bz, cx, cz), d3 = side(cx, cz, ax, az);
+					if ((d1 >= -tol && d2 >= -tol && d3 >= -tol) || (d1 <= tol && d2 <= tol && d3 <= tol)) return true;
+				}
+				return false;
+			};
+			const uint32_t res = ltc2.resolution;
+			const float step = ltc2.sizeX / static_cast<float>(res - 1);
+			uint32_t dug = 0, dugDry = 0, wetUndug = 0;
+			float dryDepth = 0.0f, deepest = 0.0f;
+			float dryMinX = 1e9f, dryMaxX = -1e9f;
+			glm::vec2 dugMin(1e9f), dugMax(-1e9f), sheetMin(1e9f), sheetMax(-1e9f);
+			for (size_t k = 0; k + 2 < sv.size(); k += 3)
+			{
+				const glm::vec2 q(sv[k] + sheet.center.x, sv[k + 2] + sheet.center.y);
+				sheetMin = glm::min(sheetMin, q); sheetMax = glm::max(sheetMax, q);
+			}
+			for (uint32_t zi = 0; zi < res; ++zi)
+				for (uint32_t xi = 0; xi < res; ++xi)
+				{
+					const size_t i = static_cast<size_t>(zi) * res + xi;
+					const float x = -ltc2.sizeX * 0.5f + static_cast<float>(xi) * step;
+					const float z = -ltc2.sizeZ * 0.5f + static_cast<float>(zi) * step;
+					const float lowered = groundBefore[i] - ltc2.sculptHeights[i];
+					if (!(lowered > 0.0f)) { if (covered(x, z, 0.0f)) ++wetUndug; continue; }
+					++dug;
+					deepest = std::max(deepest, lowered);
+					dugMin = glm::min(dugMin, glm::vec2(x, z)); dugMax = glm::max(dugMax, glm::vec2(x, z));
+					if (covered(x, z, 0.005f)) continue;
+					++dugDry;
+					dryDepth = std::max(dryDepth, lowered);
+					dryMinX = std::min(dryMinX, x); dryMaxX = std::max(dryMaxX, x);
+				}
+			char pb[480];
+			std::snprintf(pb, sizeof pb, "; pit vs sheet: sheet built %d (%u triangles), %u vertices dug (deepest %.2f m), "
+			              "%u of them dry (deepest dry %.2f m, x %.1f..%.1f), %u under water but not dug; "
+			              "dug vertices span x %.2f..%.2f z %.2f..%.2f, the sheet x %.2f..%.2f z %.2f..%.2f",
+			              built ? 1 : 0, sheet.triangles, dug, deepest, dugDry, dryDepth,
+			              dugDry ? dryMinX : 0.0f, dugDry ? dryMaxX : 0.0f, wetUndug,
+			              dugMin.x, dugMax.x, dugMin.y, dugMax.y, sheetMin.x, sheetMax.x, sheetMin.y, sheetMax.y);
+			pitNote = pb;
+		}
 
 		bool undone = false;
 		if (mode == "undo")
@@ -7547,11 +7641,16 @@ void EditorApplication::dumpFrameHeadless()
 		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
 			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
 				mc.visible = false;
+		// The other half of a pit-against-sheet picture: the ground alone, the
+		// pit with no water in it.
+		if (const char* hs = std::getenv("HE_DUMP_WATERHIDESHEET"); hs && std::atoi(hs) != 0)
+			for (auto [we, wsc, mc] : reg.view<WaterSurfaceComponent, MeshComponent>().each())
+				mc.visible = false;
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH witness landscape added "
 			"(mode %s, created %d, level %.2f, dabs %u, wet cells after paint %u, surfaces created %u, "
-			"triangles %u, undone %d, wet cells now %u)",
+			"triangles %u, undone %d, wet cells now %u)%s",
 			wb, created ? 1 : 0, strokeLevel, dabs, wetAfterPaint, ws.created, ws.triangles,
-			mode == "undo" ? (undone ? 1 : 0) : -1, wetNow);
+			mode == "undo" ? (undone ? 1 : 0) : -1, wetNow, pitNote.c_str());
 	}
 
 	// ── Lake witness (HE_DUMP_LAKEEDIT, Thema 174 Schritt 8): a lake drawn from a
@@ -7579,6 +7678,21 @@ void EditorApplication::dumpFrameHeadless()
 	//               witness's own bank heightfield, Thema 174 Schritt 13: both
 	//               sides of the outline meet at the water's own level, a gentle
 	//               shore, not the cliff a `falloff = 0` first attempt left here).
+	//   =drag       (Thema 188 Schritt 3) drawn, then the east tip (30,0) pulled
+	//               out to (42,0) a metre per frame, one updateTerrains per step —
+	//               the editor's frame during a point drag (the sync and the chunk
+	//               rebuild). One log line per step: the ground at (36,0) and
+	//               (41,0) and what the step cost.
+	//   =dragback   drag, then back to (30,0) the same way: the ground must end
+	//               where it started (the line says by how much it does not).
+	//   =play       drawn, then Play (setPlayMode), the tip pulled out to (40,0)
+	//               while playing and the world ticked as the play loop ticks it
+	//               (SceneSystems::tickWorld with the physics world): the ground
+	//               AND the collider under (36,0); then Stop (the snapshot restore)
+	//               and the same pull in edit mode — the bed restored with the
+	//               world must still follow.
+	// HE_DUMP_LAKERES (default 129) sets the landscape's resolution, for timing
+	// the drag on a denser grid.
 	// Camera as WATERBRUSH: CAMY=375 CAMZ=48 PITCH=-60. The log line carries the
 	// numbers as a twin to the picture.
 	if (const char* le = std::getenv("HE_DUMP_LAKEEDIT"); le && *le && m_editorWorld)
@@ -7591,6 +7705,8 @@ void EditorApplication::dumpFrameHeadless()
 		const bool reshape = mode == "reshaped";
 		const bool undoIt  = mode == "undo" || mode == "redo";
 		const bool redoIt  = mode == "redo";
+		const bool dragIt  = mode == "drag" || mode == "dragback";
+		const bool playIt  = mode == "play";
 
 		const Entity land = m_editorWorld->createEntity("LakeLandscape");
 		TransformComponent ltf;
@@ -7599,6 +7715,8 @@ void EditorApplication::dumpFrameHeadless()
 		TerrainComponent ltc;
 		ltc.sizeX = ltc.sizeZ = 100.0f;
 		ltc.resolution  = 129;
+		if (const char* lr = std::getenv("HE_DUMP_LAKERES"); lr && std::atoi(lr) > 1)
+			ltc.resolution = static_cast<uint32_t>(std::atoi(lr));
 		ltc.heightScale = 0.0f;
 		ltc.seed        = 0;
 		ltc.dirty       = true;
@@ -7746,6 +7864,105 @@ void EditorApplication::dumpFrameHeadless()
 				              lobeBefore, terrainHeightAt(tc, 27.0f, -12.0f), bayBefore, terrainHeightAt(tc, 4.0f, 16.0f));
 				note += b3;
 			}
+			if (dragIt)
+			{
+				// The east tip (point 5, at (30,0)) dragged a metre per frame; each
+				// frame is what the editor's own frame does with a moved point — the
+				// spline sync and the chunk rebuild, both inside updateTerrains.
+				const std::vector<float> start = tc.sculptHeights;
+				double worstMs = 0.0, sumMs = 0.0;
+				int frames = 0;
+				auto frameAt = [&](float tipX)
+				{
+					reg.get<SplineComponent>(spline).controlPoints[5].x = tipX;
+					const auto t0 = std::chrono::steady_clock::now();
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+					worstMs = std::max(worstMs, ms); sumMs += ms; ++frames;
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LAKEEDIT drag: tip x %.0f -> ground (36,0) %.2f m, "
+					            "(41,0) %.2f m, %u wet cells, chunks rebuilt %s, frame %.2f ms",
+					            tipX, terrainHeightAt(tc, 36.0f, 0.0f), terrainHeightAt(tc, 41.0f, 0.0f),
+					            tc.water.wetCells(body), (tc.dirty || tc.regionDirty) ? "NO (still dirty)" : "yes", ms);
+				};
+				for (int i = 1; i <= 12; ++i) frameAt(30.0f + static_cast<float>(i));
+				if (mode == "dragback")
+					for (int i = 11; i >= 0; --i) frameAt(30.0f + static_cast<float>(i));
+				float worstDiff = 0.0f;
+				uint32_t differ = 0;
+				for (size_t i = 0; i < start.size() && i < tc.sculptHeights.size(); ++i)
+				{
+					const float d = std::fabs(tc.sculptHeights[i] - start[i]);
+					if (d > 0.0f) ++differ;
+					worstDiff = std::max(worstDiff, d);
+				}
+				char db[240];
+				std::snprintf(db, sizeof db, "; dragged %d frames (%u x %u vertices), frame %.2f ms mean, %.2f ms worst; "
+				              "against the ground before the drag: %u vertices differ, by %.4f m at most",
+				              frames, tc.resolution, tc.resolution, frames ? sumMs / frames : 0.0, worstMs, differ, worstDiff);
+				note += db;
+			}
+			if (playIt)
+			{
+				const float groundBefore = terrainHeightAt(tc, 36.0f, 0.0f);
+				setPlayMode(true);
+				const bool played = m_isPlaying && m_physicsWorld;
+				char pb[600];
+				int n = std::snprintf(pb, sizeof pb, "; play %s", played ? "started" : "did NOT start");
+				if (played)
+				{
+					// Down onto (36,0) from well above it: what the player would stand on.
+					auto colliderAt = [&](float x, float z)
+					{
+						const auto hit = m_physicsWorld->raycast(glm::vec3(x, 400.0f, z), glm::vec3(0.0f, -1.0f, 0.0f), 200.0f);
+						return hit.hit ? hit.point.y - 300.0f : 9999.0f;
+					};
+					auto tick = [&]
+					{
+						SceneSystems::tickWorld(*m_editorWorld, contentManager(), r, m_editorCamera.position(),
+						                        1.0f / 60.0f, m_physicsWorld.get(), false);
+					};
+					tick();   // a plain play frame first: nothing moved yet
+					const float colliderStart = colliderAt(36.0f, 0.0f);
+					reg.get<SplineComponent>(spline).controlPoints[5].x = 40.0f;
+					tick();   // the frame of the drag: water, bed and chunks follow; the collider is queued
+					const float groundPlay = terrainHeightAt(tc, 36.0f, 0.0f);
+					const float colliderDrag = colliderAt(36.0f, 0.0f);
+					tick();   // the next frame with the point at rest: the collider catches up
+					const float colliderRest = colliderAt(36.0f, 0.0f);
+					n += std::snprintf(pb + n, sizeof pb - n,
+					                   ", ground (36,0) %.2f -> %.2f m while playing, collider %.2f -> %.2f on the drag frame "
+					                   "-> %.2f the frame after",
+					                   groundBefore, groundPlay, colliderStart, colliderDrag, colliderRest);
+					setPlayMode(false);
+					// The restore replaced every entity: find the landscape and the spline again.
+					auto tv = reg.view<TerrainComponent>();
+					auto sv = reg.view<SplineComponent>();
+					if (tv.begin() != tv.end() && sv.begin() != sv.end())
+					{
+						const Entity land2 = *tv.begin();
+						const Entity spline2 = *sv.begin();
+						TerrainComponent& tc2 = reg.get<TerrainComponent>(land2);
+						TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the first edit-mode frame
+						const HE::water::Body* b2 = tc2.water.findBody(body);
+						const float groundStop = terrainHeightAt(tc2, 36.0f, 0.0f);
+						reg.get<SplineComponent>(spline2).controlPoints[5].x = 40.0f;
+						TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+						n += std::snprintf(pb + n, sizeof pb - n,
+						                   "; stopped %s: ground (36,0) %.2f m, lake digs %d, bed patch %s; "
+						                   "the same pull in edit mode -> %.2f m",
+						                   m_isPlaying ? "NOT" : "ok", groundStop, b2 && b2->digsBed ? 1 : 0,
+						                   b2 && !b2->groundPatch.empty() ? "kept" : "EMPTY",
+						                   terrainHeightAt(tc2, 36.0f, 0.0f));
+						shown = spline2;
+					}
+					else
+					{
+						n += std::snprintf(pb + n, sizeof pb - n, "; the restore lost the landscape or the spline");
+						shown = entt::null;
+					}
+				}
+				note += pb;
+			}
 			if (undoIt)
 			{
 				// m_undo.undo()/redo() restore a full snapshot, replacing every
@@ -7793,6 +8010,11 @@ void EditorApplication::dumpFrameHeadless()
 		r->SetDebugLines(guides.lines());
 		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
 			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		// The bed alone (Thema 188 Schritt 3): with the water drawn, a bed left
+		// behind under a moved outline looks exactly like one that followed.
+		if (const char* hs = std::getenv("HE_DUMP_WATERHIDESHEET"); hs && std::atoi(hs) != 0)
+			for (auto [we, wsc, mc] : reg.view<WaterSurfaceComponent, MeshComponent>().each())
 				mc.visible = false;
 		const WaterSurface::Stats& ws = WaterSurface::lastStats();
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LAKEEDIT witness (mode %s): %s | surfaces %u, triangles %u, guide lines %zu",
