@@ -225,5 +225,11 @@ außerhalb der Kontur (4267 gegrabene Bodenvertices für 2564 Wasserzellen), nac
 Wasserkante schließen bündig ab (2565 gegrabene Bodenvertices, fast genau die Zellenzahl — der Aushub reicht nur
 noch so weit wie die Wasserfläche selbst).
 
+**Was weiterhin gilt, auch nach dem Fix:** `Floor`-Modus hebt das Gelände nie an. Ein Ring, der mit dem alten,
+fehlerhaften Verhalten schon in eine bestehende Szene gegraben wurde, bleibt dort liegen — ein erneutes Create Lake
+oder Dig Again senkt nur weiter ab, es hebt den alten Fehlgriff nicht wieder an. Betroffene Seen brauchen Undo
+(solange die Historie reicht) oder von Hand nachsculpten (Raise/Flatten). Derselbe Mechanismus, anderer Code, traf
+auch den Wasser-Pinsel (`TerrainSculpt::lowerToFloor`) — siehe `docs/water-brush-2026-10-09.md`, Nachtrag Schritt 13.
+
 ![Vorher: abgesenkter Ring außerhalb der Kontur](water-lake/bugfix-13-before-d3d11.png)
 ![Nachher: Boden und Wasserkante schließen bündig ab](water-lake/bugfix-13-after-d3d11.png)

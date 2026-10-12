@@ -132,3 +132,35 @@ Setup`:
 
 Mit `shaderc` an: Vollbau (Release, Ninja) und voller `ctest -j4 --timeout 1500` über 270 Tests, alle grün; zwei
 sind übersprungen (`runtime_size_app_basic/advanced` wiegen Deploys, die dieser Worktree nicht baut).
+
+## Nachtrag Schritt 13: derselbe trockene Ring wie beim Lake-Werkzeug
+
+Die Rückmeldung des Menschen nannte Lake-Werkzeug UND Pinsel. Die Ursache ist hier eine andere als beim
+Lake-Werkzeug (siehe `docs/water-lake-2026-10-10.md`, Nachtrag Schritt 13), aber derselbe Effekt: `dab()`
+rief `TerrainSculpt::lowerToFloor` mit demselben Radius/Falloff wie `addCircle`, aber ohne zu wissen, wie
+weit `addCircle` an derselben Stelle die Deckung tatsächlich je nass gemacht hatte. Ein einzelner Tupfer
+macht eine Stelle erst ab Gewicht 0,5 nass (`WaterField::kWet` bei 255/2, der Schwellwert, den
+`WaterMesh.cpp` für die Gitterecken benutzt), grub aber schon ab Gewicht > 0 Richtung Bett — ein
+trockener, unter den Wasserspiegel abgesenkter Ring um jeden Strich, sichtbar als abgesenkter, beschatteter
+Rand direkt am Wasser.
+
+`lowerToFloor` bekommt einen neuen Parameter `wetLevel`: unterhalb von Gewicht 0,5 ist die Zieldecke der
+Wasserspiegel, nicht das Bett, von dort bis Gewicht 1 blendet sie zum Bett. `WaterBrush.cpp` übergibt den
+Strich-Spiegel. Vorher/Nachher am selben Fall (`HE_DUMP_WATERBRUSH=dig`, D3D11, Radius 14 m, Falloff 6 m,
+flaches Gelände):
+
+![Vorher: abgesenkter, beschatteter Ring am Wasser](water-brush/bugfix-13-before-d3d11.png)
+![Nachher: Boden und Wasserkante schließen bündig ab](water-brush/bugfix-13-after-d3d11.png)
+
+**Was weiterhin gilt, auch nach dem Fix:** Sowohl `TerrainSculpt::ExcavateParams`s `Floor`-Modus als auch
+`lowerToFloor` heben das Gelände nie an (per Entscheidung oben, "Graben"). Ein Ring, der mit dem alten,
+fehlerhaften Verhalten schon in eine bestehende Szene gegraben wurde, bleibt dort liegen — Create Lake,
+Dig Again und ein neuer Pinselstrich senken nur weiter ab, sie heben den alten Fehlgriff nicht wieder an.
+Betroffene Stellen brauchen Undo (solange die Historie reicht) oder von Hand nachsculpten (Raise/Flatten).
+
+Tests: `tests/test_water_brush.cpp`, neue Fälle für `lowerToFloor` direkt (Deckel/Blend auf flachem und
+auf ansteigendem Gelände) und ein Invarianten-Test über einen echten Strich (kein gegrabener Vertex bleibt
+trocken, gemessen exakt wie `WaterMesh.cpp` es tut: `water::coverageAt` gegen `kContourIso`/255, nicht die
+gröbere `water::bodyAt`-Abfrage). Voller `he_tests`: 4991 Fälle, 4986 grün; die 5 roten sind vorbestehend
+und unabhängig (Cell-Streaming-Benchmarks ohne `HE_CELL_BENCH_*`, Disk-Registry, OpenGL-Clustered-Shader,
+zwei Inspector-UI-Fälle — keines davon Wasser, Terrain, Spline oder Pinsel).
