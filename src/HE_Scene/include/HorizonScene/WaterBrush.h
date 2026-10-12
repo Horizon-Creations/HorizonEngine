@@ -38,6 +38,11 @@ struct TerrainComponent;
 // toward `level − digDepth` (TerrainSculpt::lowerToFloor): a bed of that depth
 // below the surface with a bank that eases back into the old ground. It never
 // raises, and repeating the dab converges instead of digging without end.
+// Capped at `level` itself below half the circle's own weight (Thema 174
+// Schritt 13): the ground never sinks below the water's own level where this
+// SAME dab's own paint (the identical weight, addCircle) would not have turned
+// it wet — a dry ring sunk below the level, around every stroke, is the water
+// brush's share of the bug `WaterLake.cpp`'s outward bank had.
 //
 // PACING is the caller's: Params::amount is the share (0..1) one dab moves each
 // cell toward wet (or dry), the same number addCircle/removeCircle take as their

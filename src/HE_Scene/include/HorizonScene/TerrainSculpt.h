@@ -1,6 +1,7 @@
 #pragma once
 #include <glm/vec2.hpp>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 struct TerrainComponent;
@@ -95,13 +96,41 @@ namespace TerrainSculpt
     // without a step. `blend` is the caller's pacing: 1 = one dab does all of it,
     // a held button passes a fraction per frame.
     //
+    // `wetLevel`, finite (Thema 174 Schritt 13): the water's own level, so a dab
+    // never lowers the ground below it where a SINGLE dab's own circle would not
+    // paint that ground wet — the circle's weight at half strength (0.5, the
+    // circle's own coverage-wet boundary: `WaterField::addCircle` reaches a
+    // coverage half of 255 at the same weight, for one full-strength dab) is the
+    // line. Below it (w < 0.5) the CEILING is `wetLevel`, whatever `floor` says;
+    // from there to w = 1 it eases linearly to `floor`, same as the weight itself
+    // eases. The result is the LOWER of that ceiling-blend and the plain old
+    // blend toward `floor` (never raised past either): on flat ground that is the
+    // ceiling (the old blend alone would dig too far); on ground ABOVE the level
+    // (an upward slope under the stroke) the plain blend alone would often UNDER-
+    // dig — at w = 0.5 it only reaches halfway down, short of the level, which
+    // would leave this exact lattice corner un-wet right where the paint just
+    // wet it, "water stops too early" on a slope. Taking the lower of the two
+    // reaches the level in one dab at w = 0.5 on any starting height, up or down.
+    // Without this cap entirely, a dab's falloff ring reaches well past where its
+    // own paint ever turns the coverage wet (coverage needs w ≥ 0.5, the dig used
+    // to reach all the way to `floor` as soon as w > 0): a dry ring, sunk below
+    // the water's own level, around every stroke — the water brush's share of the
+    // bug `WaterLake.cpp`'s outward bank had (see ExcavateParams::bankIn).
+    // NaN (the default) disables this and reproduces the old, unbounded dig bit
+    // for bit — every caller before Schritt 13 passed none. The cap is per dab,
+    // not per the stroke's accumulated coverage: a point several dabs have nudged
+    // toward wet without any one of them alone reaching w ≥ 0.5 there stays capped
+    // a little shallow rather than risk the dry ring the other way; that is a
+    // shallower shore, never a moat.
+    //
     // Same contract as apply: terrain-local coordinates, ensureHeights first, the
     // region-dirty rect (vertices that moved, one grid step wider) and not `dirty`,
     // undo is the caller's. ok = false for a degenerate terrain, a non-positive
     // radius + falloff or a non-finite argument; a dab off the terrain is ok with
     // changed = 0.
     Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
-                        float radius, float falloff, float floorY, float blend);
+                        float radius, float falloff, float floorY, float blend,
+                        float wetLevel = std::numeric_limits<float>::quiet_NaN());
 
     // ── Excavation under a polygon ───────────────────────────────────────────
     // The ground inside a polygon goes down to a floor, with a soft bank around

@@ -230,12 +230,14 @@ Result apply(TerrainComponent& tc, float localX, float localZ, Op op,
 }
 
 Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
-                    float radius, float falloff, float floorY, float blend)
+                    float radius, float falloff, float floorY, float blend, float wetLevel)
 {
     Result r;
     if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return r;
     if (!std::isfinite(localX) || !std::isfinite(localZ) || !std::isfinite(radius) ||
         !std::isfinite(falloff) || !std::isfinite(floorY) || !std::isfinite(blend)) return r;
+    const bool capToWet = !std::isnan(wetLevel);          // NaN (the default): disabled
+    if (capToWet && !std::isfinite(wetLevel)) return r;   // an infinity is bad input, not "disabled"
 
     radius  = std::max(0.0f, radius);
     falloff = std::max(0.0f, falloff);
@@ -281,10 +283,40 @@ Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
             float& h = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
             const float was = h;
             const float f = std::clamp(w * blend, 0.0f, 1.0f);
-            // f == 1 assigns: h + 1 * (floor - h) is not bit-equal to floor, and
-            // "the bed is at the floor" is what a caller checks.
-            if (h > floorY && f > 0.0f)
-                h = (f >= 1.0f) ? floorY : h + f * (floorY - h);
+
+            if (!capToWet)
+            {
+                // f == 1 assigns: h + 1 * (floor - h) is not bit-equal to floor, and
+                // "the bed is at the floor" is what a caller checks.
+                if (was > floorY && f > 0.0f)
+                    h = (f >= 1.0f) ? floorY : was + f * (floorY - was);
+            }
+            else
+            {
+                // How far the old, uncapped dig would have gone.
+                const float oldBlended = (was > floorY && f > 0.0f)
+                                        ? ((f >= 1.0f) ? floorY : was + f * (floorY - was))
+                                        : was;
+                // The raw ceiling for THIS dab: below half weight, the circle's own
+                // paint (the identical weight, WaterField::addCircle) would not have
+                // turned this ground wet from a single dab, so the target is the
+                // water's level, not the floor — nothing ever sinks below the water
+                // the dab did not wet. From half weight to full it eases linearly to
+                // the floor, same shape as the weight itself. NOT blended further
+                // (unlike `oldBlended`): on uphill ground this is what lets the edge
+                // of the stroke's own wet reach land exactly on the level in one dab,
+                // instead of only halfway there and still above it (which would clip
+                // the water at the lattice corner it was just painted onto — "water
+                // stops too early" on a slope, the OTHER half of what a blend-only
+                // cap gets wrong).
+                const float capTarget = (w >= 1.0f) ? floorY
+                                       : (w < 0.5f)  ? wetLevel
+                                                     : wetLevel + (w - 0.5f) / 0.5f * (floorY - wetLevel);
+                // Whichever digs less wins (max: digging lowers) — never past where
+                // this dab's own paint already wets it — then never past the
+                // original height (min: an excavation never raises).
+                h = std::min(was, std::max(oldBlended, capTarget));
+            }
             if (h != was)
             {
                 ++r.changed;
