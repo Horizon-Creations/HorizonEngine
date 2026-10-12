@@ -14,6 +14,9 @@ Gemessen wurde nichts.
 >
 > **Stand nach Schritt 5 (12.10.2026): Abschnitt 15** beschreibt Editor und Skript-API und wo sie dem Abschnitt 7 widersprechen
 > (`setFlow` in Weltachsen, die Zeile `water.buoyancy`, das Eintauch-Ereignis als abholbare Warteschlange, nicht gebaute Teile aus 7.1).
+>
+> **Stand nach Schritt 4 (12.10.2026): Abschnitt 16** beschreibt die Ringe auf D3D11, D3D12 und Vulkan (NN-WS03, echte RTX-4070-
+> Hardware) und den Vulkan-Bildfall für die lavapipe-CI. Ringe laufen jetzt auf allen fünf Backends.
 
 ## 0. Kurzfassung
 
@@ -827,3 +830,83 @@ Ein zerstörter Körper tritt nicht aus, und seine ungelesenen Einträge gehen m
 * **Ringe nur auf Metal und OpenGL** (Schritt 4 trägt D3D11, D3D12 und Vulkan nach): das Handbuch sagt es im Abschnitt Water Physics, **Schritt 4 muss den Satz mit dem Ergebnis nachziehen**.
 * **Nicht gebaut** (15.2): Profiler-Zeilen, Projektschlüssel, Dichte-Voreinstellungen, MCP-Werkzeug für die Physikwerte; keine Physics-Zeilen an der Spline eines Sees (der Water-Tab ist der Ort).
 * **Nicht geprüft**: Windows und Linux (CI), D3D11, D3D12, Vulkan, eine echte Fensterbedienung des Editors, das Handbuch im echten Leser (nur als Bündel gelesen und durch `test_docs_library` und `test_editor_help`).
+
+## 16. Stand nach Schritt 4 (12.10.2026): Ringe auf D3D11, D3D12 und Vulkan
+
+Schritt 4 (Wasserstörungen auf D3D11, D3D12 und Vulkan) ist gebaut: die drei Backends rufen jetzt `HE::FillMaterialWater` auf, zeichnen die Ringe aus Schritt 3
+und sind auf **NN-WS03** (echte RTX-4070-Hardware, Windows) und als neuer Vulkan-Bildfall für die **lavapipe-CI** geprüft. Gebaut, gebaut und geprüft auf Windows;
+der Shadertext selbst war bereits seit Schritt 3 gemeinsame Quelle und kompilierte auf allen Backends — nur das Füllen des Blocks fehlte. Wo dieser Abschnitt den
+Abschnitten 1 bis 15 widerspricht, gilt dieser Abschnitt.
+
+### 16.1 Was gebaut wurde
+
+| Teil | Wo | Inhalt |
+|---|---|---|
+| Füllen | `HE::FillMaterialWater(GetWaterRipples(), lit)` direkt nach `FillMaterialWeather` | `D3D11Renderer.cpp:6443`, `D3D12Renderer.cpp:10201`, `VulkanRenderer.cpp:7755` — exakt die drei Stellen, die Abschnitt 14.3's Fundstellenliste (10.4) offen gelassen hatte. Jede Zeile ist ein Dreizeiler nach dem Muster von Metal/OpenGL, `GetWaterRipples()` ist das nicht-virtuelle `IRenderer`-Mitglied aus Schritt 3, in jedem Backend schon vorhanden |
+| Vulkan-Bildfall | `scripts/he_vk_imagetests.py`, Fall `water_ripple` | `HE_DUMP_WATERTEST` (Wasserebene) + `HE_DUMP_WATERRIPPLE="0,-3,0.8,1,0.8"` (ein Ring, 0,8 s, ohne Physik, wie Schritt 3), `off`/`on`-Paar, `require` prüft beide Zeugen-Logzeilen. Läuft automatisch mit (die CI ruft das Skript **ohne** `--cases`, Vorgabe ist jeder Schlüssel aus `CASES`) |
+| Bilder | `docs/water-physics/d3d11-before-after-ring.png`, `d3d12-before-after-ring.png`, `vulkan-before-after-ring.png`, `d3d12-ring-ages-0.2-1.6.png` | Vorher/Nachher-Ausschnitte (Trennlinie Magenta, wie die Mac-Bilder aus Schritt 3) und die Alterssequenz 0,2/0,8/1,6 s auf D3D12, inhaltlich deckungsgleich mit `metal-before-after-ring.png`/`opengl-before-after-ring.png` |
+
+Keine Änderung an `D3D12MaterialRootSignature.h`: die Plan-Zeile (Abschnitt 10.4) vermutete einen Kommentar dort, aber die Datei bindet den Materialpuffer bereits
+über `sizeof(HE::MaterialShaderLibrary::Lighting)` (`D3D12Renderer.cpp:8662`), nicht über eine Literalzahl — es gibt nichts nachzuziehen. Der Plan sprach von "vier
+Stellen"; es sind **drei** (D3D11, D3D12, Vulkan je eine), wie Abschnitt 14.3's eigene Fundstellenliste schon zeigte (Metal zwei, OpenGL eine, macht zusammen die
+"neun Stellen" aus 6.4 Punkt 4 für alle fünf Backends).
+
+### 16.2 Belegt und gemessen (NN-WS03, Windows, Release, `-DDEPLOY_DIR` auf einen eigenen Baum)
+
+**Binding-Limits (Schritttext ausdrücklich genannt) — geprüft, keine ausgelöst:** `WaterRippleBlock` ist reine Fließkomma-Daten, am Ende des ohnehin pro Draw
+gebundenen `Lighting`-Puffers (Schritt 3, 2624 Byte, `static_assert`-geprüft). Schritt 4 fügt **keinen** neuen Texturslot und **keinen** neuen Sampler hinzu — die
+drei Zeilen sind ein `memcpy` in einen Puffer, der schon da war. Die SM5.0-Grenze (16 Sampler, `D3D11MaterialBindings.h:183`, `D3D12MaterialRootSignature.h:98`)
+und Vulkans Fragment-Sampler-Zahl (15 von 16, `VulkanMaterialLayout.h:150`) sind **schon ohne diesen Schritt** fast voll (`heAO` sitzt auf Bindung 16, ein Kommentar
+dort nennt die Grenze ausdrücklich) — nachgesehen, nicht angerührt. Die Bindung 14 auf lavapipe (`heLandscapeWeights`, SIGSEGV vor der Reihenfolge-Korrektur in
+Thema 143, Kommentar im `landscape`-Fall von `he_vk_imagetests.py`) ist eine andere, bestehende Bindung; dieser Schritt ändert keine Vulkan-Deskriptor-Bindung.
+
+**Bilder** (Headless-Dump, eigenes Skript `out/he_d3d_watershot.py` für D3D11/D3D12 — es gibt kein `he_shot.py`-Äquivalent für Windows, `sips` ist Mac-only —, plus
+`scripts/he_vk_imagetests.py --cases water_ripple` für Vulkan; `HE_SKY_TIME=10` fest, `WATERTEST=1 SKYTEST=1 TOD=0.4 CAMY=4 CAMZ=6 PITCH=-25`, 1280×720):
+
+* **Kontrolle vs. Ring, alle drei Backends, 0,8 s:** D3D11 und D3D12 sind **auf das Pixel gleich** (mean |Δ| 0,2445, max 104, 51683 Pixel verändert, 2,6 % über
+  Schwelle 2 — identische Zahlen, weil beide dieselbe Shaderquelle und dieselbe HLSL-Übersetzung ziehen). Vulkan auf der **echten RTX 4070** (nicht lavapipe):
+  mean |Δ| 0,2445, max 104, **51702** Pixel (19 mehr als D3D) — der Backend-Unterschied, nicht der Ring, genau wie Schritt 3 zwischen Metal und OpenGL 5 Pixel
+  Unterschied maß. Vor diesem Schritt war `off` gleich `on` auf allen drei Backends (kein `FillMaterialWater`-Aufruf, der Zweig im Shader läuft bei Anzahl 0 nie).
+* **Visuell**: `docs/water-physics/d3d11-before-after-ring.png`, `d3d12-before-after-ring.png`, `vulkan-before-after-ring.png` zeigen denselben Doppelring an
+  derselben Stelle wie `metal-before-after-ring.png`/`opengl-before-after-ring.png` aus Schritt 3 (gleiche Kamera, gleicher Ringtext). `d3d12-ring-ages-0.2-1.6.png`
+  zeigt dieselbe Alterssequenz wie Schritt 3's `metal-ring-ages-0.2-1.6.png`: bei 0,2 s die weiße Schaumkrone mit einem Ring, bei 0,8 s der Doppelring, bei 1,6 s
+  weiche, größere Ringe — Wellenform und -tempo sind die Shaderquelle, die Schritt 3 schon abgestimmt hat, hier nur zum ersten Mal auf Direct3D/Vulkan gesehen.
+* **Logs**: 0 Fehler, je 1 erwarte Warnung (fehlende `config.json` im frischen `HE_CONFIG_DIR`) auf allen sechs D3D-Läufen; Vulkan 0 Validierungsmeldungen in
+  beiden Varianten (`validation_in_dump=0/total=0`). Beide Zeugen-Logzeilen (`HE_DUMP_WATERTEST engine water plane added`, `HE_DUMP_WATERRIPPLE 1 ring(s) from
+  '…'`) vorhanden, wie `he_vk_imagetests.py`'s `require` es jetzt prüft.
+* **`water_ripple`-Fall selbst**: `1/1 case(s) passed` lokal gegen die RTX 4070 (`--require-device ""`, da der Normalwert `llvmpipe` lautet). Der Paarvergleich
+  steht **REPORT ONLY** (`min_mean=None`): es gibt noch keine lavapipe-Zahl für genau diesen Fall (anders als bei `deferred`/`clustered`, wo beide Zahlen schon
+  im Kommentar stehen); die RTX-4070-Zahl (0,2445) steht im Code-Kommentar, damit ein späterer Schritt daraus eine geurteilte Schwelle machen kann, sobald die
+  CI gelaufen ist.
+* **Voller `he_tests.exe`** (Release, derselbe Baum, Scratch-`HE_CONFIG_DIR`): **5052 Testfälle, 5043 bestanden, 9 rot, 10 übersprungen**
+  (1.297.680 Zusicherungen, 1.297.665 bestanden). Alle neun Roten sind **vorbestehendes Rauschen, keine Regression dieses Schritts**: fünf
+  `test_git_roundtrip.cpp`/`test_git_panel_ops.cpp` (echter `git push`/`clone` scheitert in dieser Agenten-Umgebung, Netz/Zugangsdaten), eine
+  `test_hpak.cpp` (`scanContentDirectory`, Inhaltsverzeichnis-Scan), zwei `test_inspector_ui.cpp` (`clipboardComponentKey`, `OpenClipboard` liefert
+  in einer Agenten-Sitzung auf NN-WS03 `ERROR_ACCESS_DENIED`, belegt in `vulkan-d3d-baseline-noise`-Erfahrung vom 26.09.) und eine
+  `test_shortcuts_ui.cpp` (`persisted()`, dieselbe Fensterfokus-/Zwischenablage-Klasse). Keine davon berührt Wasser, Materialgraph, `LightPacking`
+  oder einen der drei geänderten Renderer; `test_water_ripples`, `test_water_buoyancy`, `test_water_api`, `test_material_graph` und
+  `test_engine_materials` liefen **alle grün**, darunter der FXC-Querkompilierungs-Fall "Every node's HLSL compiles under FXC exactly as D3D11/D3D12
+  compile it" (87 Knotentypen, Water Ripple eingeschlossen).
+
+**Nicht gemessen:** die Kosten des Shaders auf D3D/Vulkan (`he_perf_capture.py` braucht ein Projekt mit Wasserszene, wie schon in Schritt 3 für Mac offen); die
+lavapipe-Zahl selbst (die CI läuft, siehe Ergebnis-Post); eine Vulkan-Validierungsschicht mit `VK_LAYER_KHRONOS_validation` explizit erzwungen (die lokale RTX-
+4070-Messung lief mit den Standard-Layern des SDK, 0 Meldungen); D3D11/D3D12 haben **kein** eigenes CI-Bildtest-Skript — `out/he_d3d_watershot.py` ist ein
+Ad-hoc-Werkzeug für diesen Lauf, nicht committet (kein Auftrag dafür in diesem Schritt; eine Dauerlösung bräuchte einen eigenen CI-Job mit GPU-Runner, den es für
+D3D nicht gibt — NN-WS03 ist der einzige Ort, an dem D3D11/D3D12 überhaupt laufen, siehe `no-d3d-vulkan-work-on-mac` und die Abnahme-Regel dieses Themas).
+
+### 16.3 Grenzen, ehrlich
+
+* **Nur eine Kamera, ein Ring-Text, ein Zeitpunkt-Satz** geprüft (0,2/0,8/1,6 s nur auf D3D12; D3D11 und Vulkan nur bei 0,8 s, weil die drei Backends laut 16.2
+  pixelgleich mit D3D12 laufen — nicht einzeln für jedes Alter nachgewiesen, nur aus der Gleichheit bei 0,8 s gefolgert).
+* **Kein `HE_DUMP_WATERDROP` (ganze Kette mit echter `PhysicsWorld`) auf D3D/Vulkan** — nur der textbasierte `HE_DUMP_WATERRIPPLE`-Zeuge wie in 16.2. Die Physik
+  selbst ist Backend-unabhängig (Schritt 2), das Risiko liegt allein im Shader/Fill-Pfad, den dieser Schritt geprüft hat.
+* **lavapipe-Zahl steht aus.** Der Vulkan-Bildfall läuft als REPORT ONLY (16.2); die CI (`vulkan-lavapipe`) ist mit diesem Commit gestartet, aber nicht
+  abgewartet (Hive-Regel). Ein späterer Schritt sollte, sobald die Zahl da ist, `min_mean` auf etwa die Hälfte davon setzen, wie es jeder andere Fall in
+  `he_vk_imagetests.py` tut.
+* **D3D11/D3D12 haben keinen dauerhaften Bildtest.** Der Nachweis in 16.2 ist ein einmaliger, von Hand gestarteter Lauf auf NN-WS03, kein CI-Job (es gibt keinen
+  GPU-Runner für D3D in der CI). Eine Regression auf D3D11/D3D12 fiele nur auf, wenn jemand diesen Lauf wiederholt oder NN-WS03 regelmäßig für diese Abnahme
+  genutzt wird.
+* **Shader-Kosten auf D3D/Vulkan unbekannt**, wie schon für Metal/OpenGL in Schritt 3 (`he_perf_capture.py` braucht eine Wasserszene als Projekt).
+* **Thema 174, Schritt 9** (`prozedurales-wasse-9`, Zweig `claude/prozedurales-wasser-spline-pinsel-lake-werkzeug`) bringt zur selben Zeit die Wasserflächen selbst
+  auf D3D11/D3D12/Vulkan und rührt dieselben drei Dateien (`D3D11Renderer.cpp`, `D3D12Renderer.cpp`, `VulkanRenderer.cpp`) an anderer Stelle an. Beide Zweige
+  laufen unabhängig (verschiedene Funktionen, verschiedene Zeilen); der Merge nach `release/0.7.0` sollte das gegenlesen.
