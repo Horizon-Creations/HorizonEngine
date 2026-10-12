@@ -33,6 +33,13 @@ struct PhysicsBudgetConfig
     // Counts rather than time: the events are cheap to buffer and expensive to
     // CONSUME (a script runs for each), and a count is the same on every machine.
     uint32_t eventsPerPoll = 4096;
+    // Bodies in water the buoyancy serves per step (Thema 179). A count and not a
+    // time, like eventsPerPoll: a number does the same on every machine, so which
+    // bodies are served never depends on how fast this one is. The rest wait for the
+    // next step and are then served with the time they missed (steppedDt), the way
+    // a character that was put off is, so a crowd of crates in a lake sinks no
+    // slower for being a crowd, only later. 0 = all of them, every step.
+    uint32_t waterBodiesPerStep = 256;
 };
 
 // What the latest step spent, for the profiler and for tests. "Used" is the
@@ -44,6 +51,9 @@ struct PhysicsBudgetStats
     double   charactersMs  = 0.0;   // …of which ExtendedUpdate and its write-back
     double   queriesMs     = 0.0;   // …of which scene queries fired since the previous step
     double   bodiesMs      = 0.0;   // …of which body add/remove since the previous step
+    double   buoyancyMs    = 0.0;   // …of which the water (buoyancy, drag, current) of this step
+    uint32_t wetBodies         = 0; // bodies the water served in the latest step
+    uint32_t buoyancyDeferred  = 0; // …bodies in water put off to a later step (over waterBodiesPerStep)
     uint32_t characters        = 0; // characters that exist
     uint32_t charactersStepped = 0; // …stepped in the latest step
     uint32_t charactersDeferred = 0; // …put off to a later step

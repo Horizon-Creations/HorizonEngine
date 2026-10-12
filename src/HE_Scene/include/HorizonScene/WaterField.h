@@ -76,11 +76,67 @@ namespace HE::water
     // scene file claiming more is damaged or hostile.
     inline constexpr size_t   kMaxPolygonPoints      = 65536;
 
+    // ── What the water does to a body in it (Thema 179 Schritt 2) ────────────────
+    // Defaults, and the bounds a stored or edited value is held to.
+    inline constexpr float kDefaultDensity     = 1000.0f;   // kg/m³, fresh water
+    inline constexpr float kMinDensity         = 1.0f;
+    inline constexpr float kMaxDensity         = 20000.0f;
+    // Jolt's own advice for the two drag coefficients ("about 0.5" and "about 0.01"),
+    // the angular one a little higher so a crate settles instead of rocking on.
+    inline constexpr float kDefaultLinearDrag  = 0.5f;
+    inline constexpr float kDefaultAngularDrag = 0.05f;
+    inline constexpr float kMaxDrag            = 10.0f;
+    inline constexpr float kMaxFlow            = 50.0f;     // m/s
+    inline constexpr float kMaxSplash          = 4.0f;
+
+    // The physics of ONE body of water, the settings a designer gives a lake or a
+    // river. They live with the body (and are saved with it, only when they differ
+    // from these defaults), not on a component of their own: the water has no entity
+    // that is saved (WaterSurface keeps generated children), and "which water is this"
+    // is exactly what a Body is. The waves a floating body rides are NOT here: they
+    // are the material's (Physics/WaterWaves.h), one definition for what you see and
+    // what carries the crate.
+    struct BodyPhysics
+    {
+        // false: this water does nothing to bodies (no buoyancy, no drag, no flow). It
+        // is still a lake to look at.
+        bool      enabled     = true;
+        // kg/m³ of the water. A body with more density than this sinks, one with less
+        // floats, and the submerged share of a floating one is its density over this.
+        float     density     = kDefaultDensity;
+        // Jolt's drag coefficients (Body::ApplyBuoyancyImpulse): the linear one is
+        // quadratic in the relative speed, the angular one proportional to the share
+        // of the body under water.
+        float     linearDrag  = kDefaultLinearDrag;
+        float     angularDrag = kDefaultAngularDrag;
+        // The current: terrain-local XZ (x → glm::vec2::x, z → ::y), m/s. A body is
+        // dragged toward it through the same drag; there is no force beyond that.
+        glm::vec2 flow{ 0.0f, 0.0f };
+        // Strength of the rings a body makes entering this water (0 = none). Read by the
+        // ripple step, stored here so the water's settings live in one place.
+        float     splash      = 1.0f;
+
+        bool operator==(const BodyPhysics& o) const
+        {
+            return enabled == o.enabled && density == o.density && linearDrag == o.linearDrag &&
+                   angularDrag == o.angularDrag && flow == o.flow && splash == o.splash;
+        }
+        bool operator!=(const BodyPhysics& o) const { return !(*this == o); }
+    };
+
+    // The same settings held to their bounds: a value that is not a number becomes
+    // the default, the others are clamped (density 1..20000, drags 0..10, flow
+    // ±50 m/s per axis, splash 0..4).
+    BodyPhysics clampPhysics(const BodyPhysics& p);
+
     struct Body
     {
         uint16_t id    = kNoBody;
         float    level = 0.0f;    // terrain-local Y of the surface
         HE::UUID sourceSpline{};  // closed spline a lake came from; zero = brush
+        // What the water does to a body in it. Saved with the body when it differs
+        // from the defaults, part of sameContent and of Delta.
+        BodyPhysics physics{};
         // The outline the lake's cells were last laid from (terrain-local XZ, the
         // polygon of the spline, no closing duplicate). Empty for brush water and
         // for a lake whose spline never reached the field. It is the baseline the
@@ -201,6 +257,13 @@ namespace HE::water
     // Move a body's surface. The cells do not change, so the dirty rectangle is
     // the whole terrain. False for an unknown body or a non-finite level.
     bool setLevel(TerrainComponent& tc, uint16_t id, float level);
+
+    // What the water of body `id` does to a body in it (BodyPhysics), held to its
+    // bounds (clampPhysics). The surface does not change, so nothing is rebuilt:
+    // this bumps Field::revision (the physics reads it to notice) and sets neither
+    // `dirty` nor the rectangle, and never touches TerrainComponent::dirty. False
+    // for an unknown body.
+    bool setPhysics(TerrainComponent& tc, uint16_t id, const BodyPhysics& physics);
 
     // Shore clipping on or off and its overshoot (Field::clipToGround,
     // shoreOvershoot), every surface of the landscape rebuilt. The overshoot is

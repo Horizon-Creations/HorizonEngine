@@ -37,6 +37,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/DefaultAssets.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <Physics/WaterWaves.h>
 #include <Types/UUID.h>
 
 #include <algorithm>
@@ -517,7 +518,9 @@ Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin dr
 //
 // Assumes a roughly horizontal surface: the wave slope is subtracted from the
 // mesh normal in world XZ.
-Mb water()
+// (Not called `water`: `using namespace HE` above also brings in HE::water, the
+// namespace of Physics/WaterWaves.h, and the two would be ambiguous.)
+Mb waterMaterial()
 {
     Mb m;
 
@@ -529,14 +532,18 @@ Mb water()
     const int turb = m.param(T::ParamVec2, "Turbidity", { 0.45f, 4.0f }, "Color",
         "x = absorption per metre (higher = murkier, the deep colour arrives sooner). "
         "y = water depth in metres the tint assumes (no scene depth is read yet).", 2);
-    const int waveA = m.param(T::ParamVec4, "WaveA", { 20.0f, 1.0f, 14.0f, 0.07f }, "Waves",
+    // The three knobs start from the trains in Physics/WaterWaves.h, the same ones
+    // the water physics follows (WaterQuery), so retuning the water here retunes
+    // the surface a crate floats on with it.
+    constexpr HE::water::WaveTrain wa = HE::water::kWaveA, wb = HE::water::kWaveB, wc = HE::water::kWaveC;
+    const int waveA = m.param(T::ParamVec4, "WaveA", { wa.directionDeg, wa.speed, wa.length, wa.steepness }, "Waves",
         "Swell. x = direction (degrees, 0 = +X, 90 = +Z), y = speed (m/s), "
         "z = wavelength (m), w = steepness (0 = flat, ~0.3 = choppy). Drives a second, "
         "shorter train at a turned angle.", 3);
-    const int waveB = m.param(T::ParamVec4, "WaveB", { 335.0f, 0.8f, 5.0f, 0.10f }, "Waves",
+    const int waveB = m.param(T::ParamVec4, "WaveB", { wb.directionDeg, wb.speed, wb.length, wb.steepness }, "Waves",
         "Second wave train. x = direction (degrees), y = speed (m/s), "
         "z = wavelength (m), w = steepness. Drives a second train at a turned angle.", 4);
-    const int waveC = m.param(T::ParamVec4, "WaveC", { 70.0f, 0.5f, 1.6f, 0.09f }, "Waves",
+    const int waveC = m.param(T::ParamVec4, "WaveC", { wc.directionDeg, wc.speed, wc.length, wc.steepness }, "Waves",
         "Fine ripples. x = direction (degrees), y = speed (m/s), "
         "z = wavelength (m), w = steepness. Also sets the strength of the chop on top.", 5);
     const int fresPow = m.param(T::ParamFloat, "FresnelPower", { 5.0f }, "Surface",
@@ -800,7 +807,7 @@ int main(int argc, char** argv)
     // one of these stores that UUID. Append, never reorder.
     struct Entry { const char* name; Mb mb; const std::set<std::string>* params; };
     std::vector<Entry> entries;
-    entries.push_back({ "Water", water(), &kWaterParams });
+    entries.push_back({ "Water", waterMaterial(), &kWaterParams });
 
     int ok = 0, index = 0;
     for (Entry& e : entries)
