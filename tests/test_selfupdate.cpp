@@ -761,3 +761,18 @@ TEST_CASE("selfupdate: live round trip over SFTP" * doctest::skip(std::getenv("H
 	// The very same version must now read as up to date.
 	CHECK(checkForUpdate(config, { check.remoteVersion, currentPlatformKey() }, options).status == CheckStatus::UpToDate);
 }
+
+TEST_CASE("selfupdate: live, a wrong password is refused and never printed" * doctest::skip(std::getenv("HE_SELFUPDATE_LIVE_TEST") == nullptr))
+{
+	SelfUpdateConfig config = loadSelfUpdateConfig();
+	REQUIRE_MESSAGE(config.ready(), config.problem);
+	const std::string wrong = config.endpoint.password + "-wrong";
+	config.endpoint.password = wrong;
+
+	TempDir scratch;
+	const CheckResult check = checkForUpdate(config, { "0.0.1", currentPlatformKey() }, fastOptions(scratch.path));
+	CHECK(check.status == CheckStatus::Failed);
+	CHECK(check.error.find("authentication") != std::string::npos);
+	CHECK(check.error.find(wrong) == std::string::npos);
+	CHECK(check.error.find(config.endpoint.password.substr(0, config.endpoint.password.size() - 6)) == std::string::npos);
+}
