@@ -7385,6 +7385,11 @@ void EditorApplication::dumpFrameHeadless()
 	//               outline moved, the channel and the island did not.
 	//   =converted  a pond painted with the brush (dug), then "To Lake": the same
 	//               pond, now with a spline of its own to edit.
+	//   =undo       drawn, then Ctrl+Z through EditorUndo — the editor's own
+	//               protocol (snapshotNow("Create Lake") right before L::create,
+	//               the same order SplineTool's button uses): the lake must
+	//               disappear, the spline must stay.
+	//   =redo       undo, then Ctrl+Shift+Z: the lake must come back, same body.
 	// Camera as WATERBRUSH: CAMY=375 CAMZ=48 PITCH=-60. The log line carries the
 	// numbers as a twin to the picture.
 	if (const char* le = std::getenv("HE_DUMP_LAKEEDIT"); le && *le && m_editorWorld)
@@ -7395,6 +7400,8 @@ void EditorApplication::dumpFrameHeadless()
 		const std::string_view mode(le);
 		const bool extend  = mode == "extended" || mode == "reshaped";
 		const bool reshape = mode == "reshaped";
+		const bool undoIt  = mode == "undo" || mode == "redo";
+		const bool redoIt  = mode == "redo";
 
 		const Entity land = m_editorWorld->createEntity("LakeLandscape");
 		TransformComponent ltf;
@@ -7455,6 +7462,12 @@ void EditorApplication::dumpFrameHeadless()
 			L::Params lp;
 			lp.levelFromGround = true; lp.levelOffset = 0.0f;
 			lp.dig = true; lp.depth = 2.5f; lp.bank = 6.0f;
+			if (undoIt)
+			{
+				m_undo.setWorld(m_editorWorld.get());
+				m_undo.clearHistory();
+				m_undo.snapshotNow("Create Lake");   // SplineTool's button: snapshot, then L::create
+			}
 			const L::Created made = L::create(*m_editorWorld, land, spline, lp);
 			body = made.body;
 			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
@@ -7506,6 +7519,44 @@ void EditorApplication::dumpFrameHeadless()
 				              HE::water::bodyAt(tc, chx, chz) == body ? 1 : 0,
 				              HE::water::bodyAt(tc, -8.0f, 3.0f) == HE::water::kNoBody ? 1 : 0);
 				note += b3;
+			}
+			if (undoIt)
+			{
+				// m_undo.undo()/redo() restore a full snapshot, replacing every
+				// entity (same as the WATERBRUSH witness above) — land/spline/tc
+				// no longer name anything afterwards, find them again by component.
+				auto findTerrain = [&]() -> TerrainComponent& {
+					auto view = reg.view<TerrainComponent>();
+					return reg.get<TerrainComponent>(*view.begin());
+				};
+				auto findSpline = [&]() -> Entity {
+					auto view = reg.view<SplineComponent>();
+					return view.begin() != view.end() ? *view.begin() : entt::null;
+				};
+				const uint32_t beforeUndo = tc.water.wetCells(body);
+				const bool undone = m_undo.undo();
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				const uint32_t afterUndo = findTerrain().water.wetCells(body);
+				bool redone = false;
+				uint32_t afterRedo = afterUndo;
+				if (redoIt)
+				{
+					redone = m_undo.redo();
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					afterRedo = findTerrain().water.wetCells(body);
+				}
+				shown = findSpline();
+				char ub[200];
+				std::snprintf(ub, sizeof ub, "; undo %s: %u -> %u cells",
+				              undone ? "ok" : "FAILED", beforeUndo, afterUndo);
+				note += ub;
+				if (redoIt)
+				{
+					char rb[120];
+					std::snprintf(rb, sizeof rb, "; redo %s: -> %u cells",
+					              redone ? "ok" : "FAILED", afterRedo);
+					note += rb;
+				}
 			}
 		}
 		m_selection.clear();
