@@ -7069,6 +7069,10 @@ namespace
 	{ "Landscape/Dig Bed##water", "Dig Bed",
 	  "Also digs while you paint: the ground under the brush is lowered to a "
 	  "floor Depth below the water level, with the brush falloff as the bank. "
+	  "It digs only where the water is, so the pit never reaches past it: "
+	  "ground at the edge of a stroke stays as it is until the water has "
+	  "spread there, and ground above the water level is cut down to it "
+	  "the moment the water covers it. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
 	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
 	  "The eraser never digs. One undo step takes the water and the pit back "
