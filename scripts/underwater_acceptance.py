@@ -114,6 +114,7 @@ def shoot(editor, out_dir, name, rhi, kv, renderpath, timeout, extra_env=None):
         env["HE_DUMP_" + k] = str(v)
     env.update(extra_env or {})
     engine_log = pathlib.Path(editor).parent / "HorizonEngine.log"
+    grace = 120 if "HE_DUMP_GPUTIME" in env else 15   # the timing frames run AFTER the BMP is written
     t0 = time.time()
     rc = None
     with open(out_dir / f"{name}.log", "wb") as lf:
@@ -132,7 +133,7 @@ def shoot(editor, out_dir, name, rhi, kv, renderpath, timeout, extra_env=None):
             cur = bmp.stat().st_size if bmp.exists() else -1
             if cur > 1024 and cur == size:
                 stable_since = stable_since or now
-                if now - stable_since > 15:            # dumped, but not leaving: D3D12's shutdown hang
+                if now - stable_since > grace:         # dumped, but not leaving: D3D12's shutdown hang
                     proc.kill()
                     rc = "killed after dump"
                     break
