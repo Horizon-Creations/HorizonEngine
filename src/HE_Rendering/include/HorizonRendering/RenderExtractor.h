@@ -116,6 +116,25 @@ HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
 inline constexpr float kCausticsFadeInDepth = 0.5f;
 HE_RENDERING_API float causticsFadeIn(float signedDepth);
 
+// The fog's waterline band (Thema 185 Schritt 5): a DRY camera up to kFogDryBandFull
+// metres above a body's surface still gets that body's fog density (times this factor,
+// 1 in the band, smoothstep down to 0 at kFogDryBandEnd), wet stays false. The pass
+// then fogs, per pixel, only where the near plane has sliced the water sheet off (the
+// pixel's own near-plane point already lies below the surface plane): the floor that
+// shows bare there gets the segment from the plane crossing to the pixel, the way it
+// does from a hair below the line. Without that, it showed bright and unfogged at
+// +0.5 cm and fully fogged at -0.5 cm — the waterline pop (109 of 255 on every backend,
+// docs/underwater-acceptance-2026-10-12.md). Everywhere else nothing changes: the
+// translucent water surface is NOT in the depth buffer the pass reads, so fogging every
+// pixel below the plane would tint the whole lake seen from above. The per-pixel test
+// alone confines the effect to about one near distance above the surface (about twice
+// that on D3D and Metal, which rasterise GL's projection into a [0,1] clip); the band
+// is the cost gate that keeps the pass off for every other dry frame. 1 for
+// signedDepth >= 0.
+inline constexpr float kFogDryBandFull = 0.5f;
+inline constexpr float kFogDryBandEnd  = 1.0f;
+HE_RENDERING_API float fogWaterlineBand(float signedDepth);
+
 } // namespace HE
 
 // Reads the ECS world each frame and fills a RenderWorld snapshot.

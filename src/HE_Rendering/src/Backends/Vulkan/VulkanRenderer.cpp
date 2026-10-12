@@ -837,8 +837,13 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // Skipped whole on a dry frame: the only cost a scene without water
         // pays here is this one branch. See postfx_underwaterfog.frag for the
         // per-pixel math (kUnderwaterFogHLSL's GLSL twin).
+        // Gated on the two knobs, not wet: density stays above 0 for a dry camera in the
+        // waterline band just above the surface (HE::fogWaterlineBand, Thema 185 Schritt 5),
+        // and the net (drawn inside this same render pass) is 0 whenever dry. A fog draw at
+        // density 0 blends nothing (premultiplied, alpha 0).
         const UnderwaterCameraData& uwCam = m_renderWorld.underwaterCamera;
-        if (uwCam.wet && m_underwaterFogReady && m_underwaterFogFB && m_viewportDepthImage)
+        if ((uwCam.density > 0.0f || uwCam.causticsIntensity > 0.0f)
+            && m_underwaterFogReady && m_underwaterFogFB && m_viewportDepthImage)
         {
             // The matrix the scene was RASTERISED with (kVulkanClipFix: NDC y down, depth 0..1,
             // line ~7842), inverted — what the decal, SSR and deferred-resolve passes reconstruct

@@ -2523,8 +2523,10 @@ struct D3D12RendererImpl
         // ping-pong target. Skipped whole on a dry frame: the only cost a scene
         // without water pays here is this one branch. See kUnderwaterFogHLSL
         // (HlslSources.h) for the per-pixel math.
+        // Gated on density, not wet: it stays above 0 for a dry camera in the waterline
+        // band just above the surface (HE::fogWaterlineBand, Thema 185 Schritt 5).
         const UnderwaterCameraData& uwCam = m_renderWorld.underwaterCamera;
-        if (uwCam.wet && underwaterFogReady && viewportDepth)
+        if (uwCam.density > 0.0f && underwaterFogReady && viewportDepth)
         {
             const glm::mat4 viewProjUw = m_renderWorld.camera.projection * m_renderWorld.camera.view;
             const glm::mat4 invViewProjUw = glm::inverse(viewProjUw);

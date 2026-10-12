@@ -295,6 +295,70 @@ TEST_CASE("Underwater camera: resolved tint/density are non-finite-proof like th
     CHECK(d.density == 0.0f);
 }
 
+// ─── Thema 185, step 5: the fog's waterline band ──────────────────────────────────
+// Just above the surface the near plane slices the water sheet off and the camera sees
+// the floor below the plane; without fog there it read bright on one side of the line
+// and fogged on the other (the waterline pop). The band keeps the body's density for a
+// dry camera close above the surface, so the pass fogs that floor the way it does from
+// a hair below — and nothing higher up, where a plane over a lake must stay clear.
+
+TEST_CASE("Underwater fog: the waterline band is 1 under and just above the line, 0 from kFogDryBandEnd up, continuous between")
+{
+    CHECK(HE::fogWaterlineBand(3.0f) == 1.0f);                    // under water
+    CHECK(HE::fogWaterlineBand(0.0f) == 1.0f);                    // on the line
+    CHECK(HE::fogWaterlineBand(-HE::kFogDryBandFull) == 1.0f);    // top of the full band
+    CHECK(HE::fogWaterlineBand(-HE::kFogDryBandEnd) == doctest::Approx(0.0f));
+    CHECK(HE::fogWaterlineBand(-10.0f) == 0.0f);
+    // Monotonic going up and with no jump bigger than a 1 mm step can explain
+    // (smoothstep over half a metre: slope at most 1.5 / 0.5 m = 3 per metre).
+    float prev = 1.0f;
+    for (float h = 0.0f; h <= 1.2f; h += 0.001f)
+    {
+        const float f = HE::fogWaterlineBand(-h);
+        CHECK(f <= prev + 1e-6f);
+        CHECK(prev - f <= 0.0031f);
+        prev = f;
+    }
+    CHECK(HE::fogWaterlineBand(std::numeric_limits<float>::quiet_NaN()) == 0.0f);
+}
+
+TEST_CASE("Underwater fog: a dry camera just above the surface keeps the body's density, high above it none")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    const uint16_t id = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+
+    water::UnderwaterFogParams fog;
+    fog.shallowColor = { 0.1f, 0.3f, 0.4f };
+    fog.deepColor    = { 0.0f, 0.0f, 0.05f };
+    fog.density      = 0.8f;
+    REQUIRE(water::setUnderwaterFog(tc, id, fog));
+
+    // A hair either side of the line: same density, same tint — the fog itself has no
+    // edge at the waterline any more, only `wet` (and with it the net) does.
+    const UnderwaterCameraData under = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 1.999f, 0.0f));
+    const UnderwaterCameraData over  = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 2.001f, 0.0f));
+    CHECK(under.wet);
+    CHECK_FALSE(over.wet);
+    CHECK(over.density == doctest::Approx(under.density));
+    CHECK(over.density == doctest::Approx(0.8f));
+    CHECK(over.tintColor.x == doctest::Approx(fog.shallowColor.x));
+    CHECK(over.tintColor.y == doctest::Approx(fog.shallowColor.y));
+    CHECK(over.tintColor.z == doctest::Approx(fog.shallowColor.z));
+    CHECK(over.causticsIntensity == 0.0f);                          // the net stays a wet-only thing
+
+    // Inside the fade: some, not all.
+    const float mid = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 2.0f + 0.75f, 0.0f)).density;
+    CHECK(mid > 0.0f);
+    CHECK(mid < 0.8f);
+
+    // Flying over the lake (the Schritt 1 regression): no fog at all, the pass is skipped.
+    CHECK(HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 2.0f + HE::kFogDryBandEnd, 0.0f)).density == 0.0f);
+    CHECK(HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 10.0f, 0.0f)).density == 0.0f);
+    // Beside the lake, however low: dry and fog-free (the band is the body's, not the plane's).
+    CHECK(HE::queryUnderwaterCamera(world, glm::vec3(20.0f, 2.1f, 20.0f)).density == 0.0f);
+}
+
 // ─── Thema 185, step 3: the caustic net's waterline fade-in and its resolved knobs ─
 // causticsIntensity is the body's intensity times a smoothstep of the camera's depth
 // below the surface: exactly 0 ON the line, so the net can never pop on at the

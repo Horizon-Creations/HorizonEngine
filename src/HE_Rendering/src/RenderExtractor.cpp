@@ -1222,20 +1222,25 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	// lower (bed) bound above was ever checked, which among other things made
 	// the Schritt 2 post pass fog the view of a plane flying over a distant lake.
 	out.wet = signedDepth >= 0.0f;
-	if (!out.wet)
-		return out;   // above the surface: nothing below here resolves against it
 
 	// The post pass's tint (Thema 185 Schritt 2): a Beer-Lambert ramp of the CAMERA's
 	// own depth, reshaped by the body's falloff curve — 0 at the surface (shallowColor),
 	// asymptotic toward 1 (deepColor) the longer the camera has been submerged. Never a
 	// per-pixel scene distance, so hovering at a fixed depth gives a fixed tint. density
 	// carries through unchanged; the per-pixel view-ray fog still needs the depth buffer,
-	// which stays the shader's job.
+	// which stays the shader's job. A dry camera within kFogDryBandEnd of the surface
+	// (Thema 185 Schritt 5, fogWaterlineBand) keeps shallowColor and a faded density, so
+	// the pass also fogs the floor the near plane bares where it slices the water sheet
+	// off just above the line — the waterline pop came from that floor being unfogged on
+	// one side of the line and fogged on the other (the shaders decide per pixel, see
+	// RenderExtractor.h). Further up, density stays 0 and the pass is skipped as before.
 	const water::UnderwaterFogParams& fog = surf.underwaterFog;
 	const float ramp = 1.0f - std::exp(-fog.density * std::max(signedDepth, 0.0f));
 	const float depthT = std::pow(std::clamp(ramp, 0.0f, 1.0f), fog.falloff);
 	out.tintColor = glm::mix(fog.shallowColor, fog.deepColor, depthT);
-	out.density   = fog.density;
+	out.density   = fog.density * fogWaterlineBand(signedDepth);
+	if (!out.wet)
+		return out;   // above the surface: no net (causticsFadeIn is 0 there anyway)
 
 	// The caustic pass's knobs (Thema 185 Schritt 3). The net is faded IN over the
 	// first kCausticsFadeInDepth metres of the dive (smoothstep of the camera's own
@@ -1256,6 +1261,15 @@ float causticsFadeIn(float signedDepth)
 	if (!std::isfinite(signedDepth)) return 0.0f;   // no depth to speak of: no net
 	const float t = std::clamp(signedDepth / kCausticsFadeInDepth, 0.0f, 1.0f);
 	return t * t * (3.0f - 2.0f * t);
+}
+
+float fogWaterlineBand(float signedDepth)
+{
+	if (!std::isfinite(signedDepth)) return 0.0f;
+	const float height = -signedDepth;                     // metres above the surface
+	const float t = std::clamp((height - kFogDryBandFull) / (kFogDryBandEnd - kFogDryBandFull),
+	                           0.0f, 1.0f);
+	return 1.0f - t * t * (3.0f - 2.0f * t);
 }
 
 } // namespace HE

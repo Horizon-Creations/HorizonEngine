@@ -5562,6 +5562,11 @@ void main()
 	float surfaceY = uCamSurface.w;
 	bool  camBelow = camPos.y < surfaceY;
 	bool  pBelow   = P.y < surfaceY;
+	// This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera (the
+	// waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the water sheet
+	// off, never what lies under the translucent surface (see kUnderwaterFogHLSL).
+	vec4 wn = uInvViewProj * vec4(vUV * 2.0 - 1.0, -1.0, 1.0);
+	bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
 	float segment;
 	if (camBelow == pBelow)
 		segment = camBelow ? length(camPos - P) : 0.0;
@@ -5569,7 +5574,7 @@ void main()
 	{
 		float t = (surfaceY - camPos.y) / (P.y - camPos.y);
 		vec3 crossPt = camPos + t * (P - camPos);
-		segment = camBelow ? length(camPos - crossPt) : length(crossPt - P);
+		segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
 	}
 	float fogAmount = 1.0 - exp(-uTintDensity.a * segment);
 	fragColor = vec4(mix(lit, uTintDensity.rgb, fogAmount), 1.0);
@@ -11122,9 +11127,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// the body's two knobs (net intensity, fog density) above 0 (the extractor's
 			// waterline fade-in makes the intensity exactly 0 on the line, the fog carries on
 			// through it); every other frame pays nothing. Sibling scope, like the passes below.
-			if (m_renderWorld.underwaterCamera.wet
-			    && (m_renderWorld.underwaterCamera.causticsIntensity > 0.0f
-			        || m_renderWorld.underwaterCamera.density > 0.0f))
+			// Not gated on wet: density stays above 0 for a dry camera in the waterline band
+			// just above the surface (HE::fogWaterlineBand, Thema 185 Schritt 5).
+			if (m_renderWorld.underwaterCamera.causticsIntensity > 0.0f
+			    || m_renderWorld.underwaterCamera.density > 0.0f)
 			{
 				GpuPassScope _ucTimer(this, "UnderwaterCaustics");
 				glm::vec3 ucSunDir, ucSunColor;

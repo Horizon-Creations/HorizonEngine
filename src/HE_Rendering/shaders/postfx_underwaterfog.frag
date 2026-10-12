@@ -32,6 +32,12 @@ void main()
     bool camBelow = camPos.y < surfaceY;
     bool pBelow   = P.y < surfaceY;
 
+    // This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera
+    // (the waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the
+    // water sheet off, never what lies under the translucent surface (kUnderwaterFogHLSL).
+    vec4 wn = pc.invViewProj * vec4(clip.xy, pc.depthParams.z, 1.0);
+    bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+
     float segment;
     if (camBelow == pBelow)
     {
@@ -41,7 +47,7 @@ void main()
     {
         float t = (surfaceY - camPos.y) / (P.y - camPos.y);
         vec3 crossPt = camPos + t * (P - camPos);
-        segment = camBelow ? length(camPos - crossPt) : length(crossPt - P);
+        segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
     }
 
     float fogAmount = 1.0 - exp(-pc.tintDensity.a * segment);

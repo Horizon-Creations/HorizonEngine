@@ -462,6 +462,15 @@ float4 main(In i) : SV_Target
     bool camBelow = camPos.y < surfaceY;
     bool pBelow   = P.y < surfaceY;
 
+    // This pixel's point on the near plane (d = 0 through the same mapping). For a DRY
+    // camera (the waterline band, Thema 185 Schritt 5) the fog only belongs where the
+    // near plane has sliced the water sheet off — the ray crossed the plane before the
+    // near plane — so the floor shows bare where it would otherwise lie under the
+    // surface. Everywhere else the translucent surface itself is drawn (it is not in
+    // this depth buffer), and fogging what lies under it would tint the lake.
+    float4 wn = mul(uInvViewProj, float4(clip.xy, uDepthParams.z, 1.0));
+    bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+
     float segment;
     if (camBelow == pBelow)
         segment = camBelow ? length(camPos - P) : 0.0;
@@ -469,7 +478,7 @@ float4 main(In i) : SV_Target
     {
         float t = (surfaceY - camPos.y) / (P.y - camPos.y);
         float3 crossPt = camPos + t * (P - camPos);
-        segment = camBelow ? length(camPos - crossPt) : length(crossPt - P);
+        segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
     }
 
     float fogAmount = 1.0 - exp(-uTintDensity.a * segment);

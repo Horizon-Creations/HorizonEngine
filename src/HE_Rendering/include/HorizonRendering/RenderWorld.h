@@ -27,14 +27,19 @@ struct CameraData {
 // body's UnderwaterFogParams (WaterField.h), blended by signedDepth through that
 // body's own density/falloff curve. density is that same body's absorption, carried
 // through unchanged for the per-pixel view-ray fog (segment length still needs the
-// depth buffer, so that part stays in the shader). Both are meaningless — and
-// density is exactly 0, the shader's cue to skip the whole pass — when !wet.
+// depth buffer, so that part stays in the shader). density is exactly 0 — the
+// cue to skip the whole fog pass — when dry, EXCEPT in the waterline band just
+// above a body's surface (Thema 185 Schritt 5, HE::fogWaterlineBand): there wet
+// stays false but tintColor is shallowColor and density the body's, faded out over
+// the band, so the pass fogs the floor the near plane bares where it slices the
+// water sheet off just above the line (the shaders' per-pixel near-plane test). The
+// fog gate on every backend is therefore density > 0, never wet.
 struct UnderwaterCameraData {
     bool  wet         = false;  // a water surface covers the camera's XZ, AND camera.y is between that body's bed and its surface level (inclusive) — not above the surface, not under the bed
     float surfaceY    = 0.0f;   // world Y of that surface (the flat body level the material shades waves on top of; meaningful only if wet)
     float signedDepth = 0.0f;   // surfaceY - camera.y: > 0 means the camera is below the surface. 0 when !wet.
-    glm::vec3 tintColor { 0.045f, 0.20f, 0.22f };   // resolved shallow→deep blend; meaningful only if wet
-    float     density = 0.0f;                        // body's per-metre absorption; 0 when !wet (skip the pass)
+    glm::vec3 tintColor { 0.045f, 0.20f, 0.22f };   // resolved shallow→deep blend; meaningful only if density > 0
+    float     density = 0.0f;                        // body's per-metre absorption; 0 when dry outside the waterline band (skip the pass)
 
     // Thema 185 Schritt 3 — the caustic pass's knobs, resolved here like tintColor
     // (the body's UnderwaterCausticsParams, WaterField.h). causticsIntensity already

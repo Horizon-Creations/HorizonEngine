@@ -226,9 +226,11 @@ static constexpr int kSkyLutW = 256, kSkyLutH = 128;
 // run this frame? ONE definition for the two places that must agree: the post chain's gate and
 // the scene pass's depth store (the pass SAMPLES the scene depth, which on a tile GPU only
 // reaches memory if the scene pass stores it — see the hdrPass depth attachment).
+// Not gated on wet: density stays above 0 for a dry camera in the waterline band just above
+// the surface (HE::fogWaterlineBand, Thema 185 Schritt 5), and the net is 0 whenever dry.
 static bool underwaterPostWanted(const UnderwaterCameraData& uc)
 {
-	return uc.wet && (uc.causticsIntensity > 0.0f || uc.density > 0.0f);
+	return uc.causticsIntensity > 0.0f || uc.density > 0.0f;
 }
 
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
@@ -1810,6 +1812,11 @@ fragment float4 ucFragment(FSOut in [[stage_in]],
 	float  surfaceY = u.camSurface.w;
 	bool   camBelow = camPos.y < surfaceY;
 	bool   pBelow   = P.y < surfaceY;
+	// This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera (the
+	// waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the water sheet
+	// off, never what lies under the translucent surface (see kUnderwaterFogHLSL).
+	float4 wn = u.invViewProj * float4(in.uv.x * 2.0 - 1.0, 1.0 - 2.0 * in.uv.y, 0.0, 1.0);
+	bool   nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
 	float  segment;
 	if (camBelow == pBelow)
 		segment = camBelow ? length(camPos - P) : 0.0;
@@ -1817,7 +1824,7 @@ fragment float4 ucFragment(FSOut in [[stage_in]],
 	{
 		float  t = (surfaceY - camPos.y) / (P.y - camPos.y);
 		float3 crossPt = camPos + t * (P - camPos);
-		segment = camBelow ? length(camPos - crossPt) : length(crossPt - P);
+		segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
 	}
 	float fogAmount = 1.0 - exp(-u.tintDensity.a * segment);
 	return float4(lit * (1.0 - fogAmount) + u.tintDensity.rgb * fogAmount, 1.0);

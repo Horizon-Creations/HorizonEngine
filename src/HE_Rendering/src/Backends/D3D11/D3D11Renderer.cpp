@@ -7758,7 +7758,10 @@ void D3D11Renderer::DrawViewportFrame()
             ID3D11RenderTargetView* ucN = nullptr; p.context->OMSetRenderTargets(1, &ucN, nullptr);
         }
 
-        if (uwCam.wet && p.underwaterFogReady && p.viewportDepthSRV)
+        // Gated on density, not wet: the extractor keeps it above 0 for a dry camera in the
+        // waterline band just above the surface (HE::fogWaterlineBand), where the shader
+        // fogs only what lies below the plane — the near-plane-exposed floor that popped.
+        if (uwCam.density > 0.0f && p.underwaterFogReady && p.viewportDepthSRV)
         {
             const glm::mat4 viewProjUw = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
             const glm::mat4 invViewProjUw = glm::inverse(viewProjUw);
