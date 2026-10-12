@@ -1114,6 +1114,46 @@ target_link_libraries(he_tests PRIVATE
     nlohmann_json::nlohmann_json
 )
 
+# The editor's SFTP self-update (src/HE_SelfUpdate). Present only when the root
+# CMakeLists resolved libssh2, like HorizonContentSync it sits on, so the file is
+# added only then (the ctest loop below registers every test_*.cpp source).
+if(TARGET HorizonSelfUpdate)
+    target_sources(he_tests PRIVATE test_selfupdate.cpp)
+    # Help ▸ Check for Updates' session (Thema 186 Schritt 6): ImGui-free on
+    # purpose so the editor's half of the update — what the takeover is started
+    # with, and that it is not started on its own — runs here on every platform.
+    target_sources(he_tests PRIVATE test_editor_selfupdate.cpp
+        ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSelfUpdate.cpp)
+    target_link_libraries(he_tests PRIVATE HorizonSelfUpdate)
+    if(WIN32)
+        # No rpath on Windows: the two DLLs have to sit beside the test exe, as
+        # the engine DLLs above do. HorizonContentSync is the one HorizonSelfUpdate
+        # loads; he_tests never linked it before this.
+        add_custom_command(TARGET he_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:HorizonSelfUpdate>  $<TARGET_FILE_DIR:he_tests>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:HorizonContentSync> $<TARGET_FILE_DIR:he_tests>
+            VERBATIM
+        )
+    endif()
+
+    # ─── Takeover fixture: a real HorizonUpdater against a real child process ──
+    # test_selfupdate_apply.cpp proves the swap/rollback/relaunch state machine
+    # (SelfUpdateApplyCore.cpp) by actually running it: HorizonUpdater as the
+    # real executable Takeover.cpp would spawn, and he_fake_editor standing in
+    # both for "the editor being waited on" and "the build being relaunched" —
+    # none of what this exercises (CreateProcess/posix_spawn, directory rename,
+    # a health-watch timeout) is visible to a mock.
+    add_executable(he_fake_editor helpers/fake_editor.cpp)
+    target_compile_features(he_fake_editor PRIVATE cxx_std_20)
+    add_dependencies(he_tests he_fake_editor HorizonUpdater)
+    target_sources(he_tests PRIVATE test_selfupdate_apply.cpp)
+    target_compile_definitions(he_tests PRIVATE
+        HE_TEST_FAKE_EDITOR_EXE="$<TARGET_FILE:he_fake_editor>"
+        HE_TEST_UPDATER_EXE="$<TARGET_FILE:HorizonUpdater>")
+endif()
+
 # Shared material shader layer (CPU-only: glslang + SPIRV-Cross under the hood) — lets
 # the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
 # path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.

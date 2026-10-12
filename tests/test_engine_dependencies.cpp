@@ -4,6 +4,7 @@
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <filesystem>

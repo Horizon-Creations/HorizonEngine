@@ -309,6 +309,7 @@ add_executable(HorizonEditor WIN32
 	ProjectLaunchOpen.cpp
 	HeprojRegistration.cpp
 	ReportIssueDialog.cpp
+	SelfUpdateDialog.cpp
 	EditorDockState.cpp
 	GitController.cpp
 	SourceControlPanel.cpp
@@ -375,7 +376,7 @@ add_executable(HorizonEditor WIN32
 	# for one thing, the HE_DUMP_TUTORIALUI witness (TutorialPanel.cpp), which
 	# pictures the tour card in the running editor. Plain C++ over imgui.h.
 	${CMAKE_SOURCE_DIR}/tests/ImGuiSoftwareRaster.cpp
- "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "AudioEditorPanel.h" "AudioWaveformView.h" "AudioMixView.h" "TextureViewerPanel.h" "EditorInput.h" "ExportDialogPanel.h" "BuildProgressDialog.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "ViewportToolbar.h" "EditorToolbar.h" "OutlinerPanel.h" "ProjectHubPanel.h" "ProjectPreflight.h" "SceneDiskWatch.h" "SceneFileStamp.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "ConsolePanel.h" "ConsoleView.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ProjectSettingsPanel.h" "ToolchainDialog.h" "ReportIssueDialog.h" "EditorDockState.h" "PlayReportPanel.h" "AudioMixerPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
+ "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "AudioEditorPanel.h" "AudioWaveformView.h" "AudioMixView.h" "TextureViewerPanel.h" "EditorInput.h" "ExportDialogPanel.h" "BuildProgressDialog.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "ViewportToolbar.h" "EditorToolbar.h" "OutlinerPanel.h" "ProjectHubPanel.h" "ProjectPreflight.h" "SceneDiskWatch.h" "SceneFileStamp.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "ConsolePanel.h" "ConsoleView.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ProjectSettingsPanel.h" "ToolchainDialog.h" "ReportIssueDialog.h" "SelfUpdateDialog.h" "EditorDockState.h" "PlayReportPanel.h" "AudioMixerPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
 
 if(APPLE)
 	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h
@@ -431,6 +432,27 @@ if(TARGET HorizonContentSync)
 	# in the editor so it still builds and runs without the feature.
 	target_link_libraries(HorizonEditor PRIVATE HorizonContentSync)
 	target_compile_definitions(HorizonEditor PRIVATE HE_HAVE_LIBSSH2)
+endif()
+
+if(TARGET HorizonSelfUpdate)
+	# Editor self-update, a SEPARATE account from HorizonContentSync's (see
+	# src/HE_SelfUpdate, docs/editor-selfupdate-sftp-design.md). Same libssh2 gate.
+	target_link_libraries(HorizonEditor PRIVATE HorizonSelfUpdate)
+	target_compile_definitions(HorizonEditor PRIVATE HE_HAVE_LIBSSH2 HE_HAVE_SELFUPDATE)
+	# Help ▸ Check for Updates: the session logic (ImGui-free, also in he_tests).
+	# SelfUpdateDialog.cpp is compiled either way and turns into stubs, and its
+	# menu row disappears, without HE_HAVE_SELFUPDATE.
+	target_sources(HorizonEditor PRIVATE EditorSelfUpdate.cpp EditorSelfUpdate.h)
+endif()
+if(TARGET HorizonUpdater)
+	# Not linked — Takeover.cpp copies this executable, standalone, to a temp
+	# directory and runs it from there — but it must be as current as the editor
+	# it ships beside. src/HE_SelfUpdate/CMakeLists.txt deploys HorizonUpdater
+	# via he_deploy_dll on its OWN post-build step (it is added before this
+	# directory, so it cannot depend on HorizonEditor from its own side); this is
+	# the other half, so `cmake --build . --target HorizonEditor` alone still
+	# rebuilds and redeploys it when its sources change.
+	add_dependencies(HorizonEditor HorizonUpdater)
 endif()
 
 if(HE_IMGUI_AVAILABLE)

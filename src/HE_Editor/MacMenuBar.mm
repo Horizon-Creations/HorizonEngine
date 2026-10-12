@@ -4,6 +4,7 @@
 #include "OutlinerPanel.h"    // entityPresetTable — the Entity ▸ Create rows
 #include "ViewportPanel.h"    // showFlagFields — the View ▸ Show rows
 #include "EditorCamera.h"     // ViewPreset + presetName — the View ▸ Camera rows
+#include "SelfUpdateDialog.h"  // available() — Help ▸ Check for Updates only with libssh2
 #include <Renderer/IRenderer.h> // HE::ViewMode + viewModeName — the View ▸ View Mode rows
 
 #import <Cocoa/Cocoa.h>
@@ -488,6 +489,8 @@ void install()
 		heAddToggle(help, @"Interactive Tutorial", C::OpenTutorial, false);
 		[help addItem:[NSMenuItem separatorItem]];
 		heAddItem(help, @"Report Issue…", C::ReportIssue, nil, 0, false);
+		if (SelfUpdateDialog::available())
+			heAddItem(help, @"Check for Updates…", C::CheckForUpdates, nil, 0, false);
 		NSApp.helpMenu = help;
 	}
 
