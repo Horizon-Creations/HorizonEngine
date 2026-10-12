@@ -1255,7 +1255,7 @@ TEST_CASE("inspector ui: the Rigid Body section's water rows opt a body out and 
         ImGui::SetNextWindowSize(ImVec2(float(TW) - 20.0f, float(TH) - 20.0f));
         ImGui::Begin("Details");
         afloatBox = ImGui::GetID("Affected By Water");
-        ImGui::PushID("Density");                        // Row::dragFloat: the label scopes its control
+        ImGui::PushID("Density##rb");                    // Row::dragFloat: the label scopes its control
         densityDrag = ImGui::GetID("##v");
         ImGui::PopID();
         InspectorPanel::renderFor(ctx, world, crate, &undo);
