@@ -10,6 +10,7 @@
 class HorizonWorld;
 class ContentManager;
 namespace HE { struct CollisionLayerConfig; }
+namespace HE::water { class RippleField; }   // PhysicsWorld::waterRipples (HorizonScene/WaterRipples.h)
 #include <Types/Enums.h>   // HE::JointType, named by JointDesc below
 #include "HorizonScene/PhysicsTuning.h"   // HE::PhysicsLimits, named by the constructor
 #include "HorizonScene/PhysicsBudget.h"   // HE::PhysicsBudgetConfig / Stats
@@ -107,6 +108,80 @@ public:
     // The newest step of any world in the process, for the profiler window, which
     // holds no world. Zeroed until a step has run.
     static HE::PhysicsBudgetStats lastBudgetStats();
+
+    // ── Water (Thema 179 step 2) ─────────────────────────────────────────────
+    // Bodies in water get buoyancy, drag and the current of the water they are in
+    // (the field of a landscape, WaterField.h; where its surface is, WaterQuery.h).
+    // It runs inside step(), on the stepping thread, after the region hold and before
+    // Jolt's Update, and nowhere else: no Jolt body is read or written for the water
+    // outside that window, and no query here touches one.
+    //
+    // ON by default. HE_PHYSICS_WATER=0 in the environment starts the world with it
+    // off, setWaterPhysics changes it between steps; off, or with no water in the
+    // scene, the step does what it did before water had physics, bit for bit.
+    // Which bodies it serves and how many per step: RigidBodyComponent::affectedByWater
+    // and ::density, HE::PhysicsBudgetConfig::waterBodiesPerStep; the time it takes is
+    // part of the budget (PhysicsBudgetStats::buoyancyMs).
+    void setWaterPhysics(bool on);
+    bool waterPhysics() const;
+    // The clock the waves run on: seconds of dt that step() has been given since
+    // initialize(). Never the render clock, so a paused or slowed game keeps its bodies
+    // and its waves in step.
+    double simTime() const;
+    // The share (0..1) of the body's volume under water as of the latest step it was
+    // served (a body at rest keeps the share it came to rest with: a stone on the bed
+    // stays "fully under"); 0 for a body that is not in water, was put off past
+    // waterBodiesPerStep before it was ever served, or is unknown. Game thread, between
+    // steps, like the other getters here.
+    float submergedFraction(uint32_t entityId) const;
+
+    // How hard the water lifts the body, in multiples of its own weight, as of the latest
+    // step it was served (Thema 179 step 5): the buoyancy factor times the share under
+    // water, which is what Jolt's impulse is made of. 1 is a body that floats where it is,
+    // above 1 it rises, below 1 it sinks (a stone is about 0.4 however deep it lies); 0 for
+    // a body that is not in water or unknown. A body at rest keeps the number it came to
+    // rest with, like submergedFraction. Game thread, between steps.
+    float waterLift(uint32_t entityId) const;
+
+    // A body went into the water or came out of it (Thema 179 step 5). `entered` is true
+    // when the share of its volume under water crossed RippleTriggers::kWetShare (2 %)
+    // upwards and false when it crossed back; a body that is seen in the water for the
+    // first time (a scene that starts with a crate in the lake) enters then, with whatever
+    // speed it has. `speed` is how fast it went through the surface in m/s, along the
+    // surface normal and relative to the current: down for an entry, up for an exit, never
+    // negative; an exit that was not seen at the surface (the body left over the shore, or
+    // the water dried up under it) has speed 0. `position` is where its centre of mass was.
+    //
+    // Raised by the water step for the bodies it serves, in the order it serves them, so
+    // two runs of the same scene give the same list. Independent of the rings (a water
+    // with `splash` 0 still has events). Water physics off, or no water in the scene,
+    // raises none: the step forgets what it knew of the bodies then.
+    struct WaterEvent
+    {
+        uint32_t  entity   = 0;
+        bool      entered  = true;
+        float     speed    = 0.0f;
+        glm::vec3 position = {};
+    };
+    // Every event since the last call, drained by whoever calls it (like the contact
+    // queues: ask in one place). Nobody drains this one on their own, so kMaxWaterEvents
+    // bounds it: past that the OLDEST are dropped and a throttled warning says nobody is
+    // asking. An entity that is destroyed before it is asked takes its events with it.
+    std::vector<WaterEvent> pollWaterEvents();
+    static constexpr std::size_t kMaxWaterEvents = 256;
+
+    // The rings on the water (Thema 179 step 3): a short list of disturbances of the
+    // surface that the engine water material draws (HE::water::RippleField,
+    // HorizonScene/WaterRipples.h). The step raises them where a body goes into the
+    // water at 1 m/s or more, comes out of it at 1.5 m/s or more, or moves through the
+    // surface (water::Body::physics.splash scales them, 0 turns them off for that
+    // water), and ages them by its own dt: simulation time, not the render clock. The
+    // application loop packs the list into IRenderer::SetWaterRipples every frame, and
+    // a script's water.disturb adds to it. Display only, nothing reads it back into the
+    // simulation. Cleared with the world (clear()). Game thread, between steps, like the
+    // other getters here: step() runs on that thread too, so nothing races it.
+    HE::water::RippleField&       waterRipples();
+    const HE::water::RippleField& waterRipples() const;
 
     // The limits the world was built with, and the size of the scratch block a
     // step allocates from (it falls back to the heap past that, never aborts).
@@ -844,6 +919,14 @@ private:
     // phase now, so the step never lets it fall. (The characters are asked in
     // their own loop, where their position is at hand.)
     void applyRegionHold();
+
+    // The water's effect on the bodies in it (setWaterPhysics): buoyancy, drag and
+    // current as a Jolt impulse, for the active dynamic bodies over a landscape's
+    // water. Runs in step() right after applyRegionHold and before Update, on the
+    // stepping thread — the one window in which no Jolt worker is inside a body and
+    // every writer is a call on this thread. Returns the milliseconds it took, which
+    // step() books against the budget.
+    double applyWater(HorizonWorld& world, float dt);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

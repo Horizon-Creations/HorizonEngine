@@ -54,6 +54,8 @@ JPH_SUPPRESS_WARNINGS
 #include "HorizonScene/EntityActive.h"   // the "Active" switch: no body for what is off
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TransformHierarchy.h"
+#include "HorizonScene/WaterQuery.h"
+#include "HorizonScene/WaterRipples.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
@@ -690,6 +692,59 @@ struct PhysicsWorld::Impl
     // The time a character that was put off still owes (steppedDt), by entity.
     // Absent = nothing owed. Only the step writes it; removeEntity erases.
     std::unordered_map<uint32_t, float> characterOwed;
+
+    // ── Water (Thema 179 step 2, PhysicsWorld::applyWater) ───────────────────
+    // setWaterPhysics; HE_PHYSICS_WATER=0 starts a world with it off.
+    bool                    waterOn = HE::PhysicsTuning::waterFromEnv() != 0;
+    // Seconds of dt step() has been given since initialize(): the clock of the waves.
+    double                  simTime = 0.0;
+    // The landscapes with water, kept from step to step so that the wet rectangle of
+    // one is only rescanned when its field's revision moved.
+    HE::water::WaterIndex   waterIndex;
+    // The time a body that the buoyancy put off still owes it (steppedDt), by entity.
+    // Only the ones put off have an entry. Written by applyWater alone.
+    std::unordered_map<uint32_t, float> waterOwed;
+    // What the water made of a body at its latest serving, by entity: the share of its
+    // volume under water and the lift (buoyancy factor times share: how many times its
+    // own weight the water carries it). One map for both, so that the two cannot be
+    // remembered for different sets of bodies.
+    struct WaterTrack
+    {
+        float share = 0.0f;
+        float lift  = 0.0f;
+    };
+    std::unordered_map<uint32_t, WaterTrack> waterTrack;
+    // Bodies that went into the water or came out of it since the last pollWaterEvents
+    // (Thema 179 step 5). Written by applyWater alone, bounded by kMaxWaterEvents.
+    std::vector<PhysicsWorld::WaterEvent> waterEvents;
+    // What the latest applyWater did, for the budget stats.
+    uint32_t                waterWet = 0, waterDeferred = 0;
+    // The rings on the water (Thema 179 step 3): raised by applyWater, aged by step(),
+    // read by whoever packs them for the renderer. Display only.
+    HE::water::RippleField  ripples;
+    // When (simTime) a body last left a trail ring, by entity: a body moving through the
+    // surface raises one every kTrailInterval, not one per step. Only a body that is
+    // wet and moving has an entry; removeEntity and clear() erase.
+    std::unordered_map<uint32_t, double> waterTrailAt;
+    // Scratch, kept so the per-step allocation happens once.
+    struct WaterCandidate
+    {
+        uint32_t            entity = 0;
+        JPH::BodyID         id;
+        float               owed   = 0.0f;
+        HE::water::Surface  surface;
+    };
+    std::vector<WaterCandidate>    waterScratch;
+    std::vector<HE::water::Region> waterRegions;
+    std::unordered_map<uint32_t, float> waterOwedNext;
+    std::unordered_map<uint32_t, WaterTrack> waterTrackNext;
+    // The bodies the water has forbidden to sleep, by entity (with the body to give the
+    // permission back to). A body afloat rides a surface that never stands still: left to
+    // Jolt it would drop below the sleep speed in a lull between two waves, fall asleep,
+    // and hang there while the water moved on — and the water only serves active bodies.
+    // It may sleep again once it is fully under, out of the water, or the water is off.
+    std::unordered_map<uint32_t, JPH::BodyID> waterNoSleep;
+    std::unordered_set<uint32_t>              waterSeen;
 
     // ── Region hold (setRegionHold) ──────────────────────────────────────────
     // The test the application gave, or empty.
@@ -1526,6 +1581,65 @@ HE::PhysicsBudgetStats PhysicsWorld::lastBudgetStats()
 {
     std::lock_guard<std::mutex> lock(g_publishedMutex);
     return g_published;
+}
+
+void PhysicsWorld::setWaterPhysics(bool on)
+{
+    if (!m_impl)
+        return;
+    m_impl->waterOn = on;
+    if (!on)
+    {
+        // Nothing is owed and nothing is wet while the water does nothing.
+        m_impl->waterOwed.clear();
+        m_impl->waterTrack.clear();
+        m_impl->waterTrailAt.clear();
+    }
+}
+
+bool PhysicsWorld::waterPhysics() const
+{
+    return m_impl && m_impl->waterOn;
+}
+
+double PhysicsWorld::simTime() const
+{
+    return m_impl ? m_impl->simTime : 0.0;
+}
+
+float PhysicsWorld::submergedFraction(uint32_t entityId) const
+{
+    if (!m_impl)
+        return 0.0f;
+    const auto it = m_impl->waterTrack.find(entityId);
+    return it != m_impl->waterTrack.end() ? it->second.share : 0.0f;
+}
+
+float PhysicsWorld::waterLift(uint32_t entityId) const
+{
+    if (!m_impl)
+        return 0.0f;
+    const auto it = m_impl->waterTrack.find(entityId);
+    return it != m_impl->waterTrack.end() ? it->second.lift : 0.0f;
+}
+
+std::vector<PhysicsWorld::WaterEvent> PhysicsWorld::pollWaterEvents()
+{
+    if (!m_impl)
+        return {};
+    std::vector<WaterEvent> result;
+    result.swap(m_impl->waterEvents);
+    return result;
+}
+
+HE::water::RippleField& PhysicsWorld::waterRipples()
+{
+    return m_impl->ripples;
+}
+
+const HE::water::RippleField& PhysicsWorld::waterRipples() const
+{
+    return m_impl->ripples;
 }
 
 HE::PhysicsLimits PhysicsWorld::limits() const
@@ -2573,6 +2687,19 @@ void PhysicsWorld::removeEntityImpl(uint32_t entityId, JointFate fate)
     m_impl->characterLayer.erase(entityId);
     m_impl->heldCharacters.erase(entityId);
     m_impl->characterOwed.erase(entityId);
+    // What the water remembers of a body goes with it (its body is gone: no permission
+    // to give back).
+    m_impl->waterOwed.erase(entityId);
+    m_impl->waterTrack.erase(entityId);
+    m_impl->waterNoSleep.erase(entityId);
+    m_impl->waterTrailAt.erase(entityId);
+    // …and so do the events that nobody has asked for yet: a script that polls later must
+    // not be handed an entity that is gone (the same line pollCollisionExit draws).
+    if (!m_impl->waterEvents.empty())
+        m_impl->waterEvents.erase(
+            std::remove_if(m_impl->waterEvents.begin(), m_impl->waterEvents.end(),
+                           [entityId](const WaterEvent& e) { return e.entity == entityId; }),
+            m_impl->waterEvents.end());
 }
 
 int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId, bool requeueJoints)
@@ -3117,6 +3244,18 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     // notices, and a body whose floor is back must be in it.
     applyRegionHold();
 
+    // The water: buoyancy, drag and current for the bodies in it, as an impulse for
+    // the step that is about to run. Here and nowhere else — this is the window in
+    // which no Jolt worker is inside a body (Update() has not started) and every
+    // writer is this thread. A scene with no water leaves it after one test.
+    // The rings on the water age first, by this step's dt: the ones applyWater raises
+    // next start at age 0, so the frame that follows draws them at their full size.
+    m_impl->ripples.advance(dt);
+    const double buoyancyMs = applyWater(world, dt);
+    // The waves' clock moves on after the water has used it: a step's impulse is for
+    // the surface as it stood at the start of that step.
+    m_impl->simTime += static_cast<double>(dt);
+
     // One collision step per 1/60 s at most, which Jolt asks for: the default 60 Hz
     // (and anything from 45 Hz up) is still ONE, a 30 Hz project gets two. See
     // PhysicsTuning::collisionStepsFor for why it rounds.
@@ -3287,7 +3426,9 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     const double queriesMs  = static_cast<double>(m_impl->queryNs.exchange(0)) * 1.0e-6;
     const double bodiesMs   = static_cast<double>(m_impl->bodyNs.exchange(0)) * 1.0e-6;
     const uint32_t queryCount = m_impl->queryCount.exchange(0);
-    const double chargedMs  = queriesMs + bodiesMs;
+    // The water's time counts against the budget like any other work around Update():
+    // what it took this step comes off the characters' share.
+    const double chargedMs  = queriesMs + bodiesMs + buoyancyMs;
     const auto   charactersFrom = BudgetClock::now();
     uint32_t     stepped = 0, deferred = 0;
 
@@ -3462,6 +3603,9 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         bs.charactersMs       = charactersMs;
         bs.queriesMs          = queriesMs;
         bs.bodiesMs           = bodiesMs;
+        bs.buoyancyMs         = buoyancyMs;
+        bs.wetBodies          = m_impl->waterWet;
+        bs.buoyancyDeferred   = m_impl->waterDeferred;
         bs.usedMs             = chargedMs + charactersMs;
         bs.queries            = queryCount;
         bs.characters         = static_cast<uint32_t>(m_impl->stepCharacters.size());
@@ -3580,6 +3724,403 @@ void PhysicsWorld::applyRegionHold()
     // The joints that waited for a body to be let go come back now that it is in.
     if (released && m_impl->world)
         resolvePendingJoints(*m_impl->world);
+}
+
+// ─── Water ────────────────────────────────────────────────────────────────────
+//
+// WHEN: from step(), after applyRegionHold and before physicsSystem.Update, on the
+// stepping thread. That is the one window in which no Jolt worker is inside a body and
+// every writer is a call on this thread, so the bodies are read through Jolt's own
+// locks (BodyLockWrite, uncontended) and nothing else touches them. Nothing outside
+// step() can reach this function: it is private, and the public water calls
+// (setWaterPhysics, simTime, submergedFraction) only touch this class's own state.
+//
+// WHO: the ACTIVE, DYNAMIC, non-sensor bodies whose centre of mass stands over water.
+//   • active only: a body asleep on the lake bed would be woken by every impulse and
+//     never rest again, and one that rests has nothing to do. (A body that sleeps
+//     floating on perfectly calm water stays asleep until something touches it.)
+//   • dynamic only: a kinematic body (a character's proxy, a platform) is moved by
+//     code, not by the water; a sensor is a volume, not a thing.
+//   • RigidBodyComponent::affectedByWater, and not a character (its own movement path).
+//   • not a held body (the region hold took it out of the broad phase, so it is not
+//     found).
+//
+// HOW MANY: not more than HE::PhysicsBudgetConfig::waterBodiesPerStep per step (a
+// count, so the same on every machine). The others are served in a later step with
+// the time they missed (steppedDt), the ones that waited longest first and entity id
+// breaking a tie, so the order never depends on a hash or on the broad phase's tree.
+// The impulse is linear in dt, so a body served late sinks and floats just as far,
+// only later; what it owes is capped like a character's (kMaxOwedSteps).
+//
+// WHAT: Jolt's Body::ApplyBuoyancyImpulse with a plane through the centre of mass
+// whose height and tilt are the water's there (WaterQuery), the factor from the
+// densities (PhysicsTuning::buoyancyFactorFor), and the body of water's drags and
+// current. ONE plane per body, taken at its centre of mass: a boat longer than a wave
+// does not tilt with the wave. docs/water-physics-plan.md §3.5.
+//
+// WHAT IT KEEPS (step 5): per body the share under water and the lift (factor times
+// share), for submergedFraction() and waterLift(), and an event each time the share
+// crosses kWetShare (pollWaterEvents). A body the step no longer finds in the water
+// (it left over the shore) exits without a speed.
+double PhysicsWorld::applyWater(HorizonWorld& world, float dt)
+{
+    Impl& impl = *m_impl;
+    impl.waterWet      = 0;
+    impl.waterDeferred = 0;
+
+    // Give a body its sleep back (it may be gone: Jolt's id carries a sequence number,
+    // so a lock on a removed body fails instead of landing on whoever has its slot).
+    const auto allowSleepAgain = [&impl](JPH::BodyID id)
+    {
+        JPH::BodyLockWrite lock(impl.physicsSystem.GetBodyLockInterface(), id);
+        if (lock.Succeeded())
+            lock.GetBody().SetAllowSleeping(true);
+    };
+    const auto forgetBodies = [&impl, &allowSleepAgain]
+    {
+        impl.waterOwed.clear();
+        impl.waterTrack.clear();
+        impl.waterTrailAt.clear();
+        for (const auto& [entity, id] : impl.waterNoSleep)
+            allowSleepAgain(id);
+        impl.waterNoSleep.clear();
+    };
+    if (!impl.waterOn)
+    {
+        forgetBodies();
+        return 0.0;
+    }
+
+    const auto from = BudgetClock::now();
+    impl.waterIndex.refresh(world);
+    if (impl.waterIndex.empty())
+    {
+        // No water anywhere: this is the whole price of a scene without it, and it is
+        // not charged to the budget (a scene without water keeps its accounting).
+        forgetBodies();
+        return 0.0;
+    }
+
+    auto& reg = world.registry();
+    const JPH::BodyLockInterfaceNoLock& lookup = impl.physicsSystem.GetBodyLockInterfaceNoLock();
+    const JPH::SpecifiedBroadPhaseLayerFilter movingOnly(HEBPLayers::MOVING);
+
+    // ── Who is in a body of water ───────────────────────────────────────────────
+    std::vector<Impl::WaterCandidate>& candidates = impl.waterScratch;
+    candidates.clear();
+    impl.waterOwedNext.clear();
+    impl.waterTrackNext.clear();
+    impl.waterIndex.regions(impl.waterRegions);
+    for (const HE::water::Region& region : impl.waterRegions)
+    {
+        JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> hits;
+        impl.physicsSystem.GetBroadPhaseQuery().CollideAABox(
+            JPH::AABox(JPH::Vec3(region.min.x, region.min.y, region.min.z),
+                       JPH::Vec3(region.max.x, region.max.y, region.max.z)),
+            hits, movingOnly);
+
+        for (const JPH::BodyID& bodyId : hits.mHits)
+        {
+            const JPH::Body* body = lookup.TryGetBody(bodyId);
+            if (!body || !body->IsDynamic() || body->IsSensor())
+                continue;
+            if (!body->IsActive())
+            {
+                // At rest: nothing to serve (see above), and it is still as far under
+                // as it was when it came to rest — a stone on the bed is "fully under"
+                // for as long as it lies there, not 0 from the moment it sleeps.
+                const uint32_t asleep = static_cast<uint32_t>(body->GetUserData());
+                if (const auto last = impl.waterTrack.find(asleep); last != impl.waterTrack.end())
+                    impl.waterTrackNext[asleep] = last->second;
+                continue;
+            }
+            const uint32_t entityId = static_cast<uint32_t>(body->GetUserData());
+            const Entity   entity   = static_cast<Entity>(entityId);
+            if (!reg.valid(entity))
+                continue;   // gone: the reap in step() removes its body after Update
+            if (!impl.entityToCharacter.empty() && impl.entityToCharacter.count(entityId))
+                continue;
+            const auto* rigid = reg.try_get<RigidBodyComponent>(entity);
+            if (rigid && !rigid->affectedByWater)
+                continue;
+
+            const JPH::RVec3 centre = body->GetCenterOfMassPosition();
+            Impl::WaterCandidate c;
+            c.entity = entityId;
+            c.id     = bodyId;
+            if (!impl.waterIndex.surfaceAt(static_cast<float>(centre.GetX()), static_cast<float>(centre.GetZ()),
+                                           impl.simTime, c.surface) ||
+                !c.surface.physics.enabled)
+                continue;
+            const auto owedIt = impl.waterOwed.find(entityId);
+            c.owed = owedIt != impl.waterOwed.end() ? owedIt->second : 0.0f;
+            candidates.push_back(std::move(c));
+        }
+    }
+
+    // Longest wait first, entity id on a tie; the same body found through two
+    // landscapes' boxes is one.
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Impl::WaterCandidate& a, const Impl::WaterCandidate& b)
+              {
+                  if (a.owed != b.owed) return a.owed > b.owed;
+                  return a.entity < b.entity;
+              });
+    candidates.erase(std::unique(candidates.begin(), candidates.end(),
+                                 [](const Impl::WaterCandidate& a, const Impl::WaterCandidate& b)
+                                 { return a.entity == b.entity; }),
+                     candidates.end());
+
+    // A body that was afloat and is no longer among them (out of the water, off the
+    // landscape, dried up) may sleep again.
+    if (!impl.waterNoSleep.empty())
+    {
+        impl.waterSeen.clear();
+        for (const Impl::WaterCandidate& c : candidates)
+            impl.waterSeen.insert(c.entity);
+        for (auto it = impl.waterNoSleep.begin(); it != impl.waterNoSleep.end();)
+        {
+            if (impl.waterSeen.count(it->first))
+            {
+                ++it;
+                continue;
+            }
+            allowSleepAgain(it->second);
+            it = impl.waterNoSleep.erase(it);
+        }
+    }
+
+    // ── The rings ───────────────────────────────────────────────────────────────
+    // What a body raises on the surface (HE::water::RippleField, display only): a ring where
+    // it goes into the water fast enough (before = the share under water it had at its last
+    // serving, 0 when it had none), a smaller one where it comes out fast, and a trail of small
+    // ones while it cuts the surface at speed, one every kTrailInterval of simulation time.
+    // `vel` is read BEFORE the buoyancy impulse (the impulse is the water's answer, and the
+    // impact is what the body arrived with). Speeds are relative to the surface's normal and
+    // the water's current, so a crate that drifts with the river leaves no wake. Bounded per
+    // step (RippleTriggers) in the order the bodies are served, which is deterministic; the
+    // list itself is bounded too (RippleField::kMax). The size of a ring follows the body's
+    // horizontal half extent, its strength the speed, `splash` of the water scales both
+    // ways (0 = this water makes no rings).
+    using HE::water::RippleTriggers;
+    int impactsRaised = 0, trailsRaised = 0;
+    const auto raiseRings = [&](const Impl::WaterCandidate& c, const JPH::Body& body, const JPH::Vec3& vel,
+                                float before, float share)
+    {
+        const HE::water::Surface& s = c.surface;
+        if (!(s.physics.splash > 0.0f))
+            return;
+        const glm::vec3& n = s.normal;
+        const JPH::RVec3 centre = body.GetCenterOfMassPosition();
+        const JPH::Vec3  half   = body.GetWorldSpaceBounds().GetExtent();
+        const float      size   = std::max(half.GetX(), half.GetZ());
+        // Positive = going down into the surface, negative = coming up out of it.
+        const float into = -(vel.GetX() * n.x + vel.GetY() * n.y + vel.GetZ() * n.z);
+
+        HE::water::Ripple r;
+        r.pos   = glm::vec2(static_cast<float>(centre.GetX()), static_cast<float>(centre.GetZ()));
+        r.drift = glm::vec2(s.flow.x, s.flow.z);
+        const bool wasIn = before >= RippleTriggers::kWetShare, isIn = share >= RippleTriggers::kWetShare;
+        if (!wasIn && isIn)
+        {
+            if (into >= RippleTriggers::kImpactSpeed && impactsRaised < RippleTriggers::kMaxImpactsPerStep)
+            {
+                r.kind     = WaterRippleImpact;
+                r.radius   = std::clamp(size, 0.15f, 3.0f);
+                r.strength = std::clamp(into / 6.0f, 0.15f, 1.0f) * s.physics.splash;
+                impl.ripples.add(r);
+                ++impactsRaised;
+                // The splash IS the ring here: the first trail comes one interval later, not
+                // on top of it in the same step.
+                impl.waterTrailAt[c.entity] = impl.simTime;
+            }
+        }
+        else if (wasIn && !isIn)
+        {
+            if (-into >= RippleTriggers::kExitSpeed && impactsRaised < RippleTriggers::kMaxImpactsPerStep)
+            {
+                r.kind     = WaterRippleExit;
+                r.radius   = std::clamp(0.8f * size, 0.15f, 3.0f);
+                r.strength = std::clamp(-into / 8.0f, 0.1f, 0.6f) * s.physics.splash;
+                impl.ripples.add(r);
+                ++impactsRaised;
+            }
+        }
+
+        // The trail: on the surface (part of the body in, part out) and moving through the water.
+        const float relX = vel.GetX() - s.flow.x, relY = vel.GetY() - s.flow.y, relZ = vel.GetZ() - s.flow.z;
+        const float speed = std::sqrt(relX * relX + relY * relY + relZ * relZ);
+        const bool cutting = isIn && share <= RippleTriggers::kTrailMaxShare && speed >= RippleTriggers::kTrailSpeed;
+        if (!cutting)
+        {
+            if (!impl.waterTrailAt.empty())
+                impl.waterTrailAt.erase(c.entity);
+            return;
+        }
+        const auto last = impl.waterTrailAt.find(c.entity);
+        if (last != impl.waterTrailAt.end() &&
+            impl.simTime - last->second < static_cast<double>(RippleTriggers::kTrailInterval))
+            return;
+        if (trailsRaised >= RippleTriggers::kMaxTrailsPerStep)
+            return;
+        r.kind     = WaterRippleTrail;
+        r.radius   = std::clamp(0.5f * size, 0.12f, 1.0f);
+        r.strength = std::clamp(speed / 8.0f, 0.0f, 0.5f) * s.physics.splash;
+        impl.ripples.add(r);
+        impl.waterTrailAt[c.entity] = impl.simTime;
+        ++trailsRaised;
+    };
+
+    // ── The events ──────────────────────────────────────────────────────────────
+    // A body that goes into the water or comes out of it, for pollWaterEvents (Thema 179
+    // step 5). Not part of raiseRings: that is the display, it gives up when `splash` is 0
+    // or the body is slow, and an event must depend on neither a visual knob nor a speed.
+    // Bounded like the joints' queue: nobody drains it on their own, so past the bound the
+    // OLDEST are dropped, because a caller that finally asks wants the news, not the archive.
+    const auto pushEvent = [&impl](const PhysicsWorld::WaterEvent& ev)
+    {
+        if (impl.waterEvents.size() >= PhysicsWorld::kMaxWaterEvents)
+        {
+            impl.waterEvents.erase(impl.waterEvents.begin());
+            HE_LOG_THROTTLE(Physics, Warning, 10.0,
+                            "%zu water events are waiting and nothing is calling pollWaterEvents - "
+                            "the oldest are being dropped.", PhysicsWorld::kMaxWaterEvents);
+        }
+        impl.waterEvents.push_back(ev);
+    };
+
+    // ── Serve them ──────────────────────────────────────────────────────────────
+    const uint32_t cap     = impl.budget.waterBodiesPerStep;
+    const JPH::Vec3 gravity = impl.physicsSystem.GetGravity();
+    uint32_t processed = 0;
+    for (const Impl::WaterCandidate& c : candidates)
+    {
+        if (cap != 0 && processed >= cap)
+        {
+            // Over the count: it waits, owing this step's time on top of what it owed,
+            // and keeps the share it last had so the answer to "is it wet" does not
+            // flicker to dry for a step.
+            impl.waterOwedNext[c.entity] = HE::PhysicsBudgetRules::carryOwed(c.owed, dt);
+            const auto last = impl.waterTrack.find(c.entity);
+            if (last != impl.waterTrack.end())
+                impl.waterTrackNext[c.entity] = last->second;
+            ++impl.waterDeferred;
+            continue;
+        }
+        ++processed;
+
+        JPH::BodyLockWrite lock(impl.physicsSystem.GetBodyLockInterface(), c.id);
+        if (!lock.Succeeded())
+            continue;
+        JPH::Body& body = lock.GetBody();
+        const JPH::MotionProperties* motion = body.GetMotionProperties();
+        if (!motion || !(motion->GetInverseMass() > 0.0f))
+            continue;
+
+        // The plane the water is at the body: through the column of its centre of
+        // mass, at the height of the waves there, tilted like them.
+        const JPH::RVec3 centre = body.GetCenterOfMassPosition();
+        const glm::vec3& n = c.surface.normal;
+        float total = 0.0f, submerged = 0.0f;
+        JPH::Vec3 centreOfBuoyancy = JPH::Vec3::sZero();
+        body.GetSubmergedVolume(JPH::RVec3(centre.GetX(), c.surface.height, centre.GetZ()),
+                                JPH::Vec3(n.x, n.y, n.z), total, submerged, centreOfBuoyancy);
+        // A shape without a volume (a degenerate one) has nothing to float; dividing
+        // by it would send the body to infinity.
+        if (!(total > 1.0e-6f) || !std::isfinite(total) || !std::isfinite(submerged))
+            continue;
+
+        const auto* rigid = reg.try_get<RigidBodyComponent>(static_cast<Entity>(c.entity));
+        const float bodyDensity = (rigid && rigid->density > 0.0f)
+            ? rigid->density
+            : 1.0f / (motion->GetInverseMass() * total);   // mass / volume
+        const float factor = HE::PhysicsTuning::buoyancyFactorFor(c.surface.physics.density, bodyDensity);
+        const glm::vec3& flow = c.surface.flow;
+        // What the body arrived with, before the water's impulse changes it (the rings).
+        const JPH::Vec3 arrival = body.GetLinearVelocity();
+        body.ApplyBuoyancyImpulse(total, submerged, centreOfBuoyancy, factor,
+                                  c.surface.physics.linearDrag, c.surface.physics.angularDrag,
+                                  JPH::Vec3(flow.x, flow.y, flow.z), gravity,
+                                  HE::PhysicsBudgetRules::steppedDt(dt, c.owed));
+
+        const float share = std::clamp(submerged / total, 0.0f, 1.0f);
+        {
+            const auto was = impl.waterTrack.find(c.entity);
+            const float before = was != impl.waterTrack.end() ? was->second.share : 0.0f;
+            raiseRings(c, body, arrival, before, share);
+
+            // The same crossing the rings look at (the share passes kWetShare), as an event
+            // with the speed it went through the surface: along the surface normal, relative
+            // to the current, down for an entry and up for an exit.
+            const bool wasIn = before >= RippleTriggers::kWetShare, isIn = share >= RippleTriggers::kWetShare;
+            if (wasIn != isIn)
+            {
+                const glm::vec3& nrm = c.surface.normal;
+                const float into = -((arrival.GetX() - flow.x) * nrm.x + (arrival.GetY() - flow.y) * nrm.y +
+                                     (arrival.GetZ() - flow.z) * nrm.z);
+                PhysicsWorld::WaterEvent ev;
+                ev.entity   = c.entity;
+                ev.entered  = isIn;
+                ev.speed    = std::max(0.0f, isIn ? into : -into);
+                ev.position = glm::vec3(static_cast<float>(centre.GetX()), static_cast<float>(centre.GetY()),
+                                        static_cast<float>(centre.GetZ()));
+                pushEvent(ev);
+            }
+        }
+        impl.waterTrackNext[c.entity] = Impl::WaterTrack{ share, factor * share };
+        if (submerged > 0.0f)
+            ++impl.waterWet;
+
+        // Afloat (part of it under, part of it out) = on the surface = never at rest.
+        // Fully under or fully out, it may sleep like any body.
+        if (share > 0.0f && share < 1.0f)
+        {
+            if (body.GetAllowSleeping())
+                body.SetAllowSleeping(false);
+            impl.waterNoSleep[c.entity] = c.id;
+        }
+        else if (const auto held = impl.waterNoSleep.find(c.entity); held != impl.waterNoSleep.end())
+        {
+            body.SetAllowSleeping(true);
+            impl.waterNoSleep.erase(held);
+        }
+    }
+    // A body that was in the water at its last serving and is not among the ones the water
+    // knows now has left it altogether: over the shore, out of the box of the water, or into
+    // a landscape that dried up. It did not pass the surface where the step could see it, so
+    // its exit has no speed. A destroyed entity is not an exit (the reap has it), and a body
+    // the region hold parked is where it was: it keeps what it had.
+    if (!impl.waterTrack.empty())
+    {
+        std::vector<uint32_t> left;
+        for (const auto& [entity, track] : impl.waterTrack)
+        {
+            if (track.share < RippleTriggers::kWetShare || impl.waterTrackNext.count(entity))
+                continue;
+            if (!impl.heldBodies.empty() && impl.heldBodies.count(entity))
+            {
+                impl.waterTrackNext[entity] = track;
+                continue;
+            }
+            if (!reg.valid(static_cast<Entity>(entity)))
+                continue;
+            left.push_back(entity);
+        }
+        std::sort(left.begin(), left.end());   // the map's order is not ours to depend on
+        for (const uint32_t entity : left)
+        {
+            PhysicsWorld::WaterEvent ev;
+            ev.entity   = entity;
+            ev.entered  = false;
+            ev.speed    = 0.0f;
+            ev.position = HE::worldPositionOf(world, static_cast<Entity>(entity));
+            pushEvent(ev);
+        }
+    }
+    impl.waterOwed.swap(impl.waterOwedNext);
+    impl.waterTrack.swap(impl.waterTrackNext);
+
+    return std::chrono::duration<double, std::milli>(BudgetClock::now() - from).count();
 }
 
 namespace {
@@ -4473,6 +5014,19 @@ void PhysicsWorld::clear()
     m_impl->dynamicBodies.clear();
     m_impl->heldBodies.clear();
     m_impl->heldCharacters.clear();
+    // The water's clock starts over with the world, and what it knew of the bodies
+    // (and of the landscapes: their components may be gone) goes with them.
+    m_impl->simTime = 0.0;
+    m_impl->waterIndex = HE::water::WaterIndex{};
+    m_impl->waterOwed.clear();
+    m_impl->waterTrack.clear();
+    m_impl->waterEvents.clear();    // about a scene that no longer exists
+    m_impl->waterNoSleep.clear();   // the bodies they belonged to were just destroyed
+    m_impl->waterScratch.clear();
+    // The rings belong to the world that raised them: a scene swapped or stopped must not
+    // leave them standing on the next one's lake.
+    m_impl->ripples.clear();
+    m_impl->waterTrailAt.clear();
     // After the bodies are gone: drop the contact bookkeeping, otherwise the
     // OnContactRemoved callbacks Jolt fires for them would emit exit events
     // referring to entities that no longer exist.

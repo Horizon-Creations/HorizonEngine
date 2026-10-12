@@ -14570,6 +14570,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
 	HE::FillMaterialWind(GetEnvironment(), matLight); // Wind / Wind Sway nodes, next to Time
 	HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
+	HE::FillMaterialWater(GetWaterRipples(), matLight); // Water Ripple node: the rings the physics raised
 	// Local (point/spot) shadow atlas for heLitP — the same matrices the
 	// built-in shaders sample with, Metal depth remap AND top-left UV origin
 	// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
@@ -15902,6 +15903,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
 		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
+		HE::FillMaterialWater(GetWaterRipples(), matLight);  // Water Ripple node, same rings as the forward pass
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];

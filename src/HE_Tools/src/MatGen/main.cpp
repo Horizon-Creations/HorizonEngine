@@ -37,6 +37,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/DefaultAssets.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <Physics/WaterWaves.h>
 #include <Types/UUID.h>
 
 #include <algorithm>
@@ -517,7 +518,9 @@ Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin dr
 //
 // Assumes a roughly horizontal surface: the wave slope is subtracted from the
 // mesh normal in world XZ.
-Mb water()
+// (Not called `water`: `using namespace HE` above also brings in HE::water, the
+// namespace of Physics/WaterWaves.h, and the two would be ambiguous.)
+Mb waterMaterial()
 {
     Mb m;
 
@@ -529,14 +532,18 @@ Mb water()
     const int turb = m.param(T::ParamVec2, "Turbidity", { 0.45f, 4.0f }, "Color",
         "x = absorption per metre (higher = murkier, the deep colour arrives sooner). "
         "y = water depth in metres the tint assumes (no scene depth is read yet).", 2);
-    const int waveA = m.param(T::ParamVec4, "WaveA", { 20.0f, 1.0f, 14.0f, 0.07f }, "Waves",
+    // The three knobs start from the trains in Physics/WaterWaves.h, the same ones
+    // the water physics follows (WaterQuery), so retuning the water here retunes
+    // the surface a crate floats on with it.
+    constexpr HE::water::WaveTrain wa = HE::water::kWaveA, wb = HE::water::kWaveB, wc = HE::water::kWaveC;
+    const int waveA = m.param(T::ParamVec4, "WaveA", { wa.directionDeg, wa.speed, wa.length, wa.steepness }, "Waves",
         "Swell. x = direction (degrees, 0 = +X, 90 = +Z), y = speed (m/s), "
         "z = wavelength (m), w = steepness (0 = flat, ~0.3 = choppy). Drives a second, "
         "shorter train at a turned angle.", 3);
-    const int waveB = m.param(T::ParamVec4, "WaveB", { 335.0f, 0.8f, 5.0f, 0.10f }, "Waves",
+    const int waveB = m.param(T::ParamVec4, "WaveB", { wb.directionDeg, wb.speed, wb.length, wb.steepness }, "Waves",
         "Second wave train. x = direction (degrees), y = speed (m/s), "
         "z = wavelength (m), w = steepness. Drives a second train at a turned angle.", 4);
-    const int waveC = m.param(T::ParamVec4, "WaveC", { 70.0f, 0.5f, 1.6f, 0.09f }, "Waves",
+    const int waveC = m.param(T::ParamVec4, "WaveC", { wc.directionDeg, wc.speed, wc.length, wc.steepness }, "Waves",
         "Fine ripples. x = direction (degrees), y = speed (m/s), "
         "z = wavelength (m), w = steepness. Also sets the strength of the chop on top.", 5);
     const int fresPow = m.param(T::ParamFloat, "FresnelPower", { 5.0f }, "Surface",
@@ -650,8 +657,23 @@ Mb water()
 
     const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x };
     const Pin slopesZ[] = { a.slopeZ, a2.slopeZ, b.slopeZ, b2.slopeZ, c.slopeZ, c2.slopeZ, r1.z, r2.z };
-    const int sx    = m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesX), std::end(slopesX)), 41, 26), gust, 44, 26);
-    const int sz    = m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesZ), std::end(slopesZ)), 41, 28), gust, 44, 28);
+    // The rings the water physics raised where a body went into or out of the surface
+    // (the Water Ripple node, which reads the lighting block the engine fills). Their
+    // slope is one more term of the SAME sum, so it leans the one normalised wave normal
+    // below and everything downstream (Fresnel, refraction, caustics, the sun glint) sees it;
+    // it is added AFTER the gust, because a ring is not a patch of rougher water, and fades
+    // with distance for the reason the chop does (a ring is a few decimetres long, under a
+    // pixel at the horizon). With no ring in the scene the node returns zeros and the terms
+    // add nothing. No parameter: all sixteen HeParams slots are taken.
+    const int ring   = m.node(T::WaterRipple, 44, 31);        // position unwired = the fragment's world XZ
+    const int fadeRg = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(30.0f, 44, 33), m.k(120.0f, 44, 33.5f), dist, 45, 33), 46, 33);
+    const int rs     = m.un(T::SplitRGBA, Pin{ ring, 1 }, 45, 31);
+    const int ringX  = m.op(T::Multiply, Pin{ rs, 0 }, fadeRg, 46, 31);
+    const int ringZ  = m.op(T::Multiply, Pin{ rs, 1 }, fadeRg, 46, 32);
+    const int sx    = m.op(T::Add, m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesX), std::end(slopesX)), 41, 26), gust, 44, 26),
+                           ringX, 45, 26);
+    const int sz    = m.op(T::Add, m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesZ), std::end(slopesZ)), 41, 28), gust, 44, 28),
+                           ringZ, 45, 28);
     const int tilt  = m.node(T::Combine3, 45, 27);
     m.link(sx, tilt, 0);
     m.link(sz, tilt, 2);                                     // Y stays 0
@@ -741,7 +763,13 @@ Mb water()
     const int lace    = m.op(T::Add, m.op(T::Multiply, n1, m.k(0.6f, 26, 19), 27, 19),
                              m.op(T::Multiply, n2, m.k(0.4f, 26, 21), 27, 21), 28, 20);
     const int breakup = m.op3(T::Smoothstep, m.k(0.36f, 28, 21), m.k(0.74f, 28, 22), lace, 29, 20);
-    const int foamAmt = m.op(T::Multiply, m.op(T::Multiply, band, breakup, 30, 18), Pin{ fs, 1 }, 31, 18);
+    const int waveFoam = m.op(T::Multiply, m.op(T::Multiply, band, breakup, 30, 18), Pin{ fs, 1 }, 31, 18);
+    // The crest of a strong ring is white too: the Water Ripple node's foam, broken up by the
+    // same lace (half of it stays solid so a ring does not turn into dots) and faded with
+    // distance like its slope. Zero without a ring, so the sum is the wave foam alone.
+    const int ringFoam = m.op(T::Multiply, m.op(T::Multiply, Pin{ ring, 2 }, fadeRg, 31, 19),
+                              m.op(T::Add, m.k(0.5f, 31, 20), m.op(T::Multiply, breakup, m.k(0.5f, 31, 21), 32, 20), 33, 20), 34, 19);
+    const int foamAmt = m.un(T::Saturate, m.op(T::Add, waveFoam, ringFoam, 35, 18), 36, 18);
     m.comment("Foam", 16, 16, 16, 8);
 
     // Output tail. Far water is rougher: what a pixel can no longer resolve is
@@ -800,7 +828,7 @@ int main(int argc, char** argv)
     // one of these stores that UUID. Append, never reorder.
     struct Entry { const char* name; Mb mb; const std::set<std::string>* params; };
     std::vector<Entry> entries;
-    entries.push_back({ "Water", water(), &kWaterParams });
+    entries.push_back({ "Water", waterMaterial(), &kWaterParams });
 
     int ok = 0, index = 0;
     for (Entry& e : entries)

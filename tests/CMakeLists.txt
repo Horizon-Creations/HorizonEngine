@@ -140,6 +140,17 @@ add_executable(he_tests
     # The water group of HE::api: the same lakes and brush from HorizonCode, Lua,
     # Python and MCP, in world coordinates.
     test_water_lake_api.cpp
+    # The water physics (Thema 179): the height query on a landscape in the world, and
+    # buoyancy, drag and current on Jolt bodies, with the scene-without-water control.
+    test_water_query.cpp
+    test_water_buoyancy.cpp
+    # The rings on the water (Thema 179 step 3): the bounded list, what raises a ring in the
+    # physics (and the scenes that must raise none), and the block the shaders read.
+    test_water_ripples.cpp
+    # What an author and a script can do with the water physics (Thema 179 step 5): the
+    # water group's questions, the immersion event, disturb and setFlow, from the registry
+    # and from Lua, and the editor's numbers saved, undone and felt by the bodies.
+    test_water_api.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp
@@ -608,6 +619,10 @@ add_executable(he_tests
     # The GitHub sign-in's drawing half (code, countdown, buttons), for the
     # ui shots. ImGui plus EditorWidgets; the state half needs the editor.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitHubSignInView.cpp
+    # The console's buffer, sink and drawing — everything except the window and
+    # the lookups that need the editor (ConsolePanel.cpp). ImGui plus
+    # EditorWidgets, so the ui shots can draw the real panel.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ConsoleView.cpp
     # The toolbar look — wells and segmented cells. The reader's language
     # switcher is one, and borrowing the primitives is what keeps it from being
     # a second copy of the palette. ImGui-only by construction, so it compiles

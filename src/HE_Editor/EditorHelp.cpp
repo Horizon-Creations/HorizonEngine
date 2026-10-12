@@ -413,6 +413,22 @@ namespace
 	  "Solve this body in the 2D solver — motion stays in the XY plane. For "
 	  "sprite games; pair it with a Transform 2D.",
 	  "", "systems#physics" },
+	{ "Rigid Body/Affected By Water", "",
+	  "Whether lakes, ponds and rivers act on this body: they lift it, slow it, "
+	  "carry it along with the current and ring where it falls in. Switch it off "
+	  "for what should ignore the water: bullets, debris, a body that has to fall "
+	  "through to the bed. Read at every physics step, so it also works while the "
+	  "game plays.",
+	  "", "systems#water-physics" },
+	{ "Rigid Body/Density", "",
+	  "The density the buoyancy uses, in kilograms per cubic metre. A body floats "
+	  "when it is below the water's (1000 for fresh water) and sinks when it is "
+	  "above; a floating body rides with that share of its volume under water, so "
+	  "500 sits half out and 920 (ice) hardly shows. 0 takes it from the Mass and "
+	  "the size of the Collider. Set it when the Mass is chosen for how the body "
+	  "hits things and not for how it swims: the Mass decides collisions, this "
+	  "decides buoyancy. Wood 500, ice 920, stone 2600, iron 7800.",
+	  "", "systems#water-physics" },
 	// Two entries, one per component scope, because that is what the combo
 	// resolves to: the Details panel sets the scope to the component it is
 	// drawing, so a single shared key would answer under neither. They say
@@ -2783,12 +2799,57 @@ namespace
 	{ "Console/Clear", "",
 	  "Empties the view. The log file next to the executable keeps everything.",
 	  "", "advanced#diagnostics" },
-	{ "Console/Auto-scroll", "",
-	  "Follow the newest line. Switch it off to read something while the log "
-	  "keeps growing.",
+	{ "Console/Copy", "",
+	  "Copies every line currently shown, in the shape of the log file — the "
+	  "level chips, the category filter and the search all apply.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Search", "",
+	  "Narrows the list to lines containing this text, anywhere in them: the "
+	  "message, the category, the time. Not case sensitive.",
+	  "", "advanced#diagnostics" },
+	{ "Console/All", "",
+	  "Shows every level again. The number is how many lines the console holds "
+	  "right now, repeats included.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Debug", "",
+	  "Debug and Trace lines. Click to show only these; click again to show "
+	  "everything. Ctrl-click (Cmd on a Mac) adds or removes this level from "
+	  "what is shown. The engine only logs these for categories whose "
+	  "verbosity is raised (HE_LOG, or logVerbosity in config.json).",
+	  "", "advanced#diagnostics" },
+	{ "Console/Info", "",
+	  "Ordinary progress lines and everything a script prints. Click to show "
+	  "only these; click again to show everything. Ctrl-click (Cmd on a Mac) "
+	  "adds or removes this level from what is shown.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Warnings", "",
+	  "Things that went wrong but did not stop anything. Click to show only "
+	  "warnings; click again to show everything. Ctrl-click (Cmd on a Mac) "
+	  "adds or removes this level from what is shown.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Errors", "",
+	  "Errors and critical failures. Click to show only these; click again to "
+	  "show everything. Ctrl-click (Cmd on a Mac) adds or removes this level "
+	  "from what is shown. The number counts repeats too.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Category", "",
+	  "Hide or show whole parts of the engine — Render, Physics, Script and so "
+	  "on. Only categories that have logged something are listed, with how "
+	  "many lines each has under the current search and levels.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Show all categories", "",
+	  "Brings back every category hidden in this list.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Reset filters", "",
+	  "Clears the search, shows every level and every category again.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Latest", "",
+	  "Jumps to the newest line and follows the log again. Shown while you "
+	  "have scrolled away from the end; the number is what arrived since.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Copy Line", "",
-	  "Copies the selected line — the one to paste into a bug report.",
+	  "Copies this line, in the shape of the log file — the one to paste into "
+	  "a bug report.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
@@ -2796,14 +2857,15 @@ namespace
 	{ "Console/Go to Node", "",
 	  "Opens the HorizonCode graph this line came from and selects the node "
 	  "that wrote it — a Print, or the node whose call raised the warning. "
-	  "Only on lines with a [node N] marker; double-clicking the line does the "
-	  "same.",
+	  "Only on lines with a `node N` link after the message; clicking the link "
+	  "or double-clicking the line does the same.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Go to Line", "",
 	  "Opens the Lua or Python script this error names and selects the line — "
-	  "the `script:7:` in front of the message. Only on script errors that "
-	  "carry a line, and only while an entity in the scene runs the script "
-	  "under that name; double-clicking the line does the same.",
+	  "the `script:7:` in front of the message, shown as a link after it. Only "
+	  "on script errors that carry a line, and only while an entity in the "
+	  "scene runs the script under that name; clicking the link or "
+	  "double-clicking the line does the same.",
 	  "", "advanced#diagnostics" },
 	// ── Undo History ─────────────────────────────────────────────────────────
 	// The scene undo stack as a list. Its rows are the operations' own labels
@@ -7048,6 +7110,52 @@ namespace
 	  "spline lakes alike. The ground is not touched, and the grid resolution "
 	  "stays. One undo step.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Physics##wphys", "Water Physics",
+	  "What this body of water does to a body in it: it lifts the light ones, "
+	  "slows the moving ones, carries them along with its current and rings where "
+	  "something falls in. The settings are saved with the landscape and every "
+	  "change is one undo step. The surface a body floats on is this water's "
+	  "level plus the waves of the engine water material, so the waves are not "
+	  "set here; Density, the drags and Flow are.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Enabled##wphys", "Water Physics On",
+	  "Off makes this water do nothing to the bodies in it: no lift, no damping, "
+	  "no current, so a body falls through to the bed. It is still a lake to look "
+	  "at. Bodies can opt out on their own with Affected By Water on the Rigid "
+	  "Body.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Density##wphys", "Water Density",
+	  "The density of this water in kilograms per cubic metre: 1000 is fresh "
+	  "water, 1025 sea water, more for brine or mud. A body whose own Density is "
+	  "lower floats, a higher one sinks, and the share of a floating body that "
+	  "is under water is its density over this one, so heavier water carries "
+	  "more. From 1 to 20000.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Linear Drag##wphys", "Water Linear Drag",
+	  "How strongly this water slows a body moving through it, growing with the "
+	  "square of the speed against the current and with the share of the body "
+	  "under water. 0.5 is a good start. Above about 3 a light body no longer "
+	  "settles (its speed collapses and creeps back), so 3 is the top of the "
+	  "useful range; the field accepts up to 10.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Angular Drag##wphys", "Water Angular Drag",
+	  "How strongly this water stops a body from spinning, in proportion to the "
+	  "share of it under water. The default 0.05 settles a crate that rocks on "
+	  "the waves; 0 lets it roll on.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Flow##wphys", "Water Flow",
+	  "The current of this water in metres per second, along the landscape's own "
+	  "X and Z axes (the world's, unless the landscape is turned about Y). A body "
+	  "in the water is pulled toward it through the drag, so a river carries what "
+	  "floats on it; there is no force beyond that, and the waves of the water "
+	  "material do not follow it. Rings travel with it. 0 is still water.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Splash##wphys", "Water Splash",
+	  "How strong the rings are that a body makes in this water when it falls in, "
+	  "comes out or cuts across the surface. 1 is the default; 0 makes none (the "
+	  "body itself is unaffected); up to 4 for something thick. The rings are "
+	  "the water material's picture and move no body.",
+	  "", "systems#water-physics" },
 
 	// ── The Environment window ───────────────────────────────────────────────
 	{ "Environment Window/Select", "Select the entity",

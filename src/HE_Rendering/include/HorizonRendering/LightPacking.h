@@ -3,6 +3,7 @@
 #include "RenderWorld.h"
 #include <material/MaterialShaderLibrary.h> // MaterialShaderLibrary::Lighting (the graph-material light ABI)
 #include <Renderer/EnvironmentSettings.h>   // FillMaterialWind's source
+#include <Renderer/WaterRipples.h>          // FillMaterialWater's source
 #include <Math/Math.h>
 #include <cstdint>
 #include <vector>
@@ -110,6 +111,15 @@ HE_RENDERING_API void FillMaterialWind(const ::EnvironmentSettings&     env,
 // like OpenGL and Metal do.
 HE_RENDERING_API void FillMaterialWeather(const ::EnvironmentSettings&     env,
                                           MaterialShaderLibrary::Lighting& out);
+
+// ── Graph-material water rings (the Water Ripple node, Thema 179) ─────────────
+// Copies the rings the water physics raised (IRenderer::GetWaterRipples) into the
+// Lighting tail waterRipples / waterRippleA / waterRippleB. Like wind and weather it
+// is a world-space value with no clip-space convention, so one helper serves every
+// backend; call it next to FillMaterialWeather at each fill site that draws graph
+// materials in the scene (a preview or UI pass leaves the tail zero = no rings).
+HE_RENDERING_API void FillMaterialWater(const ::WaterRippleBlock&       water,
+                                        MaterialShaderLibrary::Lighting& out);
 
 // ── Graph-material DDGI probe field (Lighting v2.5) ──────────────────────────
 // Writes giGridOrigin / giGridCounts / giProbe — the SAME grid the built-in

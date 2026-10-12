@@ -702,6 +702,11 @@ private:
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
 	float m_physicsAccum = 0.0f;
+	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness
+	// builds the block itself and pushEnvironment hands it to the renderer instead of the
+	// physics world's. Off outside the dump.
+	WaterRippleBlock m_dumpRipples;
+	bool             m_dumpRipplesOn = false;
 	// The step is the PROJECT's (ProjectPhysicsSettings::fixedDt, read from
 	// currentProject().settings where the accumulator steps): the packaged game
 	// reads the same file, so it simulates at the rate the editor previewed at.

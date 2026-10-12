@@ -174,6 +174,20 @@ public:
         // clamps it to >= 0.5). `weather` above carries the 0..1 values. Zero in the
         // fill sites that never call HE::FillMaterialWeather (previews, UI).
         float weather2[4]      = {};
+        // Water disturbances (append-only, v3.5, Thema 179): the rings the water
+        // physics raises where a body goes into or out of the surface, laid out
+        // exactly like WaterRippleBlock (Renderer/WaterRipples.h) — HE::FillMaterialWater
+        // copies the three arrays over, LightPacking.cpp static_asserts the sizes. The
+        // Water Ripple node reads them. waterRipples.x = 0 is "no rings": the node
+        // returns zeros and its loop never runs, which is what every fill site that
+        // never calls FillMaterialWater (previews, UI, D3D11 / D3D12 / Vulkan until
+        // they do) leaves in place.
+        //   waterRipples : x = live count (0..16), y = ring speed (m/s), z = decay time (s)
+        //   waterRippleA : xy = centre (world XZ), z = start radius (m), w = strength 0..1
+        //   waterRippleB : x = age (s), y = kind (WaterRippleKind)
+        float waterRipples[4]     = {};
+        float waterRippleA[16][4] = {};
+        float waterRippleB[16][4] = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
     // Clustered variant's light lists (fragmentClustered): GLSL bindings 24/25/26

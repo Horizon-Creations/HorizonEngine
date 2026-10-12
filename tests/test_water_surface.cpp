@@ -1061,6 +1061,11 @@ TEST_CASE("Water surface: physics does not see the sheet, a body dropped over a 
         t.position = { 0.0f, 15.0f, 0.0f };
         rig.world.addComponent(ball, t);
         RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.mass = 1.0f;
+        // This test is about the SHEET: it has no collider, so what falls through it
+        // reaches the ground. The water itself has physics since Thema 179 (a 1 kg
+        // ball of this size is about 2 kg/m³ and would float), which is
+        // test_water_buoyancy.cpp's business, so the ball opts out of it here.
+        rb.affectedByWater = false;
         rig.world.addComponent(ball, rb);
         ColliderComponent col; col.shape = ColliderShape::Sphere; col.radius = radius;
         rig.world.addComponent(ball, col);

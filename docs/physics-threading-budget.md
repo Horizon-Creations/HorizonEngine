@@ -13,6 +13,7 @@ gemessen wurde und was nicht.
 | Szenenabfragen (`raycast`, `sphereCast`, `boxCast`, `capsuleCast`, `overlap*`, `raycastAll`) | **Gezählt und gebucht**, nicht aufgeschoben (sie sind synchron: ein Skript will die Antwort in derselben Zeile). Die gebuchte Zeit geht im nächsten Schritt vom Anteil der Charaktere ab | `QueryCharge` |
 | Körper anlegen/entfernen beim Zellen-Streaming (`addEntity`, `addEntities`, `removeEntityImpl`, `removeEntityTree`) | Ebenfalls **gebucht**. Der Streamer hat sein eigenes Slice-Budget (`CellStreamer::update(..., budgetMs)`, in `GameApplication` 4 ms) und sein `bodiesFit`-Tor; das wurde nicht angefasst | `BodyWorkCharge` |
 | Kontakt-Events | Höchstens `eventsPerPoll` je Liste und Abruf (Standard 4096). Der Rest bleibt **in Reihenfolge** vorn in der Warteschlange und geht beim nächsten Abruf zuerst hinaus. Ein Exit geht nie vor dem Enter desselben Kontakts hinaus | `HEContactListener::take` |
+| Wasser (Thema 179): Auftrieb, Dämpfung, Strömung für Körper im Wasser | **Gezählt, begrenzt, gebucht** (Abschnitt 10): höchstens `waterBodiesPerStep` (256, 0 = alle) Körper je Schritt; die übrigen kommen im nächsten Schritt mit der **verpassten Zeit** dran (`steppedDt`, wie ein aufgeschobener Charakter), am längsten Wartende zuerst. Die Zeit des Schritts geht vom Anteil der Charaktere ab | `PhysicsWorld::applyWater` |
 
 Nicht im Budget: `PhysicsSystem::Update()` selbst. Dafür sind der Schritt-Deckel von `advanceFixedSteps` (5 je Frame), die
 Thread-Anzahl (Schritt 2) und die Obergrenzen da. Das Budget begrenzt, was mit der Zahl der **Entities** wächst und
@@ -172,3 +173,23 @@ Ablesung je Schritt; er wurde nicht gegen Rauschen aufgelöst.
   mitnehmen; das wurde in der Zeit nicht gemacht. Das Anlegen ist schon in Slices geteilt (Streamer).
 * **Rückschreiben und Reap** der Körper (der Hauptposten des seriellen Anteils nach Schritt 2) stehen nicht im Budget.
 * **Kein Profiler-Scope in `step`** für Update/Rückschreiben/Charaktere; die neuen Zahlen ersetzen ihn nur für die Budgetarbeit.
+
+## 10. Wasser (Thema 179, Schritt 2)
+
+Auftrieb, Dämpfung und Strömung für Körper im Wasser (`PhysicsWorld::applyWater`, Konzept und Messung in `docs/water-physics-plan.md`
+Abschnitt 13) ist neue Arbeit **vor** `Update()`, im selben Fenster wie `applyRegionHold`: auf dem Schritt-Thread, bevor Jolts Worker in einen
+Körper greifen, durch Jolts eigene Sperren (`BodyLockWrite`). Außerhalb von `step()` ist sie nicht erreichbar (private Funktion).
+
+* **Kosten wachsen mit den Körpern über der Landschaft unterhalb ihrer Wasserfläche, nicht mit der Szene.** Je Landschaft mit Wasser eine
+  Broadphase-Abfrage (nur die bewegliche Ebene) über das Rechteck der nassen Zellen. Ohne Wasser in der Szene: eine Ansicht über die
+  `TerrainComponent`s und `empty()`; die Zeit dafür wird **nicht** gebucht, das Budget rechnet wie vorher.
+* **Obergrenze per Zähler:** `PhysicsBudgetConfig::waterBodiesPerStep` (Standard 256, 0 = alle). Wer drüber liegt, wartet und bekommt im nächsten
+  Schritt `dt + Schuld` (`PhysicsBudgetRules::carryOwed/steppedDt`, höchstens `kMaxOwedSteps`): der Auftriebsimpuls ist linear in `dt`, ein
+  Körper sinkt und schwimmt also gleich weit, nur später. Reihenfolge: größte Schuld zuerst, dann kleinste Entity-Id (nie Hash- oder
+  Broadphase-Reihenfolge). Getestet mit 300 Körpern: bei Obergrenze 100 sind alle drei Schritte später einmal bedient.
+* **Gebucht:** `PhysicsBudgetStats::buoyancyMs` zählt in `chargedMs` und kommt vom Anteil der Charaktere ab (die ersten 32 bleiben garantiert);
+  `wetBodies` (bedient und eingetaucht) und `buoyancyDeferred` stehen daneben. Profiler-Zeilen und ein Projekt-JSON-Schlüssel dafür fehlen noch.
+* **Gemessen:** 256 Quader 0,28 bis 0,38 ms je Schritt (1,1 bis 1,5 µs je Körper, Release, Mac); Konvexhüllen nicht.
+* **Determinismus:** die Entscheidung, welche Körper bedient werden, hängt an einer Zahl und an Entity-Ids, nicht an Zeit oder Maschine. Der Auftrieb
+  macht damit keinen Starrkörper wandzeitabhängig; die wandzeitabhängige Aufschubentscheidung der Charaktere bleibt, was sie war (`HE_PHYSICS_BUDGET_MS=0`).
+  `HE_PHYSICS_WATER=0` schaltet das Wasser für Vergleichsläufe aus.

@@ -10199,6 +10199,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             HE::FillMaterialClusterParams(frameClusters, lit);
         HE::FillMaterialWind(m_environment, lit); // Wind / Wind Sway nodes, next to Time
         HE::FillMaterialWeather(m_environment, lit); // Weather node + the generic wet/snow response
+        HE::FillMaterialWater(GetWaterRipples(), lit); // Water Ripple node: the rings the physics raised
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
         // preamble binding 13 → t13 = SRV block slot k_matLocalShadowSlot,
         // point sampler s13). Same pre-baked conventions as csmVP below

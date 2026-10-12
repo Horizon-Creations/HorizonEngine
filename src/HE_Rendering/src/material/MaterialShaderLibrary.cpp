@@ -227,6 +227,9 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 clusterParams;  // HE_CLUSTERED variant only: x/y/z = cluster grid dims (x = 0 → off, window lights only), w = gridZ / log(far/near)
     vec4 clusterCamFwd;  // xyz = camera forward (cluster depth axis), w = cluster near plane
     vec4 weather2;       // x = puddle size in metres (the Weather node's 5th output)
+    vec4 waterRipples;   // water rings: x = live count (0 = none), y = ring speed (m/s), z = decay time (s)
+    vec4 waterRippleA[16]; // xy = ring centre (world XZ), z = start radius (m), w = strength 0..1
+    vec4 waterRippleB[16]; // x = age (s), y = kind (0 impact, 1 trail, 2 script, 3 exit)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —

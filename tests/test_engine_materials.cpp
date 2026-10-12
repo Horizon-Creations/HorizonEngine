@@ -16,6 +16,7 @@
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <Physics/WaterWaves.h>   // the wave trains the water physics shares with the material
 
 #include <chrono>
 #include <cstdint>
@@ -214,6 +215,38 @@ TEST_CASE("Engine water material: loads as a lit Translucent graph with all sixt
 	CHECK(m->customShaderFragGlsl.find("heLight.sunDir.w") != std::string::npos);
 }
 
+TEST_CASE("Engine water material: its wave knobs ARE the trains the water physics follows")
+{
+	// Thema 179: one definition of the waves (Physics/WaterWaves.h). mat_gen builds the
+	// three Wave knobs from it and the water query (WaterQuery) evaluates it, so what is
+	// drawn and what a crate floats on cannot drift apart. kWaterKnobs above pins the
+	// shipped numbers; this pins that the header and the shipped asset agree.
+	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
+	Scratch s("wavesource");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const MaterialAsset* m = cm.getMaterial(cm.loadAsset(kWaterPath));
+	REQUIRE(m);
+
+	const struct { const char* name; HE::water::WaveTrain train; } knobs[] = {
+		{ "WaveA", HE::water::kWaveA }, { "WaveB", HE::water::kWaveB }, { "WaveC", HE::water::kWaveC },
+	};
+	for (const auto& k : knobs)
+	{
+		CAPTURE(std::string(k.name));
+		const int i = slotOf(*m, k.name);
+		REQUIRE(i >= 0);
+		CHECK(m->shaderParamData[i * 4 + 0] == k.train.directionDeg);
+		CHECK(m->shaderParamData[i * 4 + 1] == k.train.speed);
+		CHECK(m->shaderParamData[i * 4 + 2] == k.train.length);
+		CHECK(m->shaderParamData[i * 4 + 3] == k.train.steepness);
+	}
+	// The physics follows the two that carry the height: the swell and the second train.
+	REQUIRE(HE::water::kPhysicsWaveCount == 2);
+	CHECK(HE::water::kPhysicsWaves[0] == HE::water::kWaveA);
+	CHECK(HE::water::kPhysicsWaves[1] == HE::water::kWaveB);
+}
+
 // The Material Editor redraws its preview every frame for a shader that reads the
 // clock, and the water is the material that made the stand-still obvious (its
 // waves live on Time). The shipped file, the way the editor loads it, has to be
@@ -350,6 +383,12 @@ TEST_CASE("Engine water material: the committed file carries a shader, not just 
 	for (int i = 0; i < kWaterKnobCount; ++i)
 		CHECK(b.frag.find("heParams.v[" + std::to_string(i) + "]") != std::string::npos);
 	CHECK(b.frag.find("heLight.sunDir.w") != std::string::npos);
+	// The rings the water physics raises (Thema 179 Schritt 3): the shipped shader reads them.
+	// A Water.hasset that was not regenerated and copied after the node went in draws no ring
+	// and looks like a shader bug; this is where it shows up as what it is.
+	CHECK(b.frag.find("void heWaterRipple(") != std::string::npos);
+	CHECK(b.frag.find("heWaterRipple(vWorldPos.xz, ") != std::string::npos);
+	CHECK(b.frag.find("heLight.waterRippleA[i]") != std::string::npos);
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)

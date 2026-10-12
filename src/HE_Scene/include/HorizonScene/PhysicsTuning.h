@@ -132,5 +132,43 @@ inline std::size_t tempBytesFor(uint32_t maxBodies, uint32_t maxContactConstrain
     return (block + mib - 1) / mib * mib;
 }
 
+// ── Buoyancy (Thema 179) ─────────────────────────────────────────────────────
+// Jolt's Body::ApplyBuoyancyImpulse takes a FACTOR, not a density: the fluid density
+// it works with is  factor · mass / volume,  so the body floats with 1 / factor of its
+// volume under water (factor 1 = neutral, above 1 floats, below 1 sinks). A designer
+// thinks in "wood floats, stone sinks", so the engine asks for densities and derives
+// the factor:  water density / body density  (floats with  body / water  of itself
+// under water — wood at 500 in fresh water, half).
+//
+// The ends are limits of the explicit step, not of the physics. The impulse is a
+// spring: the surface pushes back with  factor · g / height  per metre of depth, and
+// at 60 Hz an explicit step holds for  omega · dt < 2  only. A body of density 1 kg/m³
+// (the default 1 kg box of a cubic metre) has a factor of 1000 and would explode
+// every step; capped at 4 it floats a quarter submerged and stays calm. The lower end
+// keeps a body whose density is absurdly high a finite pull instead of a rounding
+// error. Measured on thin bodies in tests/test_water_buoyancy.cpp ("settles").
+inline constexpr float kMinBuoyancyFactor = 0.02f;
+inline constexpr float kMaxBuoyancyFactor = 4.0f;
+
+// water density / body density, held to the range above. A body or water density
+// that is not positive or not a number gives the neutral factor 1.
+inline float buoyancyFactorFor(float waterDensity, float bodyDensity)
+{
+    if (!(waterDensity > 0.0f) || !(bodyDensity > 0.0f) ||
+        !std::isfinite(waterDensity) || !std::isfinite(bodyDensity))
+        return 1.0f;
+    return std::clamp(waterDensity / bodyDensity, kMinBuoyancyFactor, kMaxBuoyancyFactor);
+}
+
+// HE_PHYSICS_WATER=0 in the environment starts a world with the water's effect on
+// bodies off (a server comparison, an A/B run); anything else leaves it on. -1 = not set.
+inline int waterFromEnv()
+{
+    const char* text = std::getenv("HE_PHYSICS_WATER");
+    if (!text || !*text)
+        return -1;
+    return (text[0] == '0' && text[1] == '\0') ? 0 : 1;
+}
+
 } // namespace PhysicsTuning
 } // namespace HE

@@ -7753,6 +7753,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             HE::FillMaterialClusterParams(frameClusters, lit);
         HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
         HE::FillMaterialWeather(GetEnvironment(), lit); // Weather node + the generic wet/snow response
+        HE::FillMaterialWater(GetWaterRipples(), lit); // Water Ripple node: the rings the physics raised
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow, set 0
         // binding 13, bound per draw below). kVulkanClipFix is already in
         // m_localShadowClip and is the whole convention — same as csmVP.
