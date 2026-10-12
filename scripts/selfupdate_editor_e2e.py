@@ -283,8 +283,30 @@ def main():
     endpoint = userdata / "mcp-endpoint.json"
     bridge = Bridge(endpoint)
     old_log = open(out / "editor-old.log", "wb")
-    editor = subprocess.Popen([str(main_exe(install)), str(heproj)], env=env, stdout=old_log,
-                              stderr=subprocess.STDOUT, cwd=str(out))
+    cmd = [str(main_exe(install)), str(heproj)]
+    if os.name == "nt":
+        editor = subprocess.Popen(cmd, env=env, stdout=old_log, stderr=subprocess.STDOUT, cwd=str(out))
+    else:
+        # A pseudo-terminal, not a pipe: into a pipe the editor's stdout is block
+        # buffered, and the cancel case ends with a kill — the last lines, the
+        # ones this run is about, would never arrive.
+        import pty
+        master, slave = pty.openpty()
+        editor = subprocess.Popen(cmd, env=env, stdout=slave, stderr=slave, stdin=subprocess.DEVNULL,
+                                  cwd=str(out))
+        os.close(slave)
+
+        def pump():
+            while True:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                old_log.write(data)
+                old_log.flush()
+        threading.Thread(target=pump, daemon=True).start()
     log("editor (0.x, installed) started, pid %d" % editor.pid)
     new_pid = None
     try:
@@ -376,10 +398,15 @@ def main():
                 except OSError:
                     pass
         server.kill()
+        time.sleep(0.5)
         old_log.close()
-        newlog = userdata / "HorizonEngine.log"
-        if newlog.exists():
-            shutil.copy2(newlog, out / "editor-userdata.log")
+        # The editors' own log files (GlobalState::setLogFile: beside the
+        # executable when writable, else the per-user directory). After a save
+        # or discard run the install's one is the RELAUNCHED editor's.
+        for src, name in ((main_exe(install).parent / "HorizonEngine.log", "editor-installed-dir.log"),
+                          (userdata / "HorizonEngine.log", "editor-userdata.log")):
+            if src.exists():
+                shutil.copy2(src, out / name)
         (out / "result.json").write_text(json.dumps({"mode": args.mode, "platform": key, "checks": checks},
                                                     indent=2))
         log("%d/%d checks passed -> %s" % (sum(c["ok"] for c in checks), len(checks), out / "result.json"))

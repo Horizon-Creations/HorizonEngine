@@ -1,16 +1,16 @@
 # Editor self-update over SFTP — Design
 
-Status: **Steps 1, 3 and 4 of Thema 186 implemented** (module, second account,
-version check, verified download; the takeover mechanism — `HorizonUpdater`,
-the swap/rollback/relaunch state machine, extraction, editor-side
-orchestration — all with tests that run the real executables as real
-processes; the CI matrix's live SFTP leg). **Not done:** the real-account run
-on the hosting server (needs its host name, see "Open decisions"), and the
-Editor UI itself — `HorizonEditor` now **links** `HorizonSelfUpdate` and
-depends on `HorizonUpdater`, but nothing calls `Takeover.h` yet: no background
-check-for-update, no menu row, no "restart to update?" dialog. See "What the
-next step hangs on" for exactly where that wiring goes, and "Acceptance" for
-the step-5 verdict against the topic's definition of done.
+Status: **Steps 1, 3, 4 and 6 of Thema 186 implemented** (module, second
+account, version check, verified download; the takeover mechanism —
+`HorizonUpdater`, the swap/rollback/relaunch state machine, extraction,
+editor-side orchestration — all with tests that run the real executables as
+real processes; the CI matrix's live SFTP leg; and the Editor UI, Help ▸ Check
+for Updates…, behind the same unsaved-changes prompt as Quit, shown end to end
+on macOS with a real editor, see "The Editor UI"). **Not done:** the
+real-account run on the hosting server (needs its host name, see "Open
+decisions"), and the same end-to-end editor run on Windows and Linux hardware
+(the script exists, its Windows/Linux branches have not been run). See
+"Acceptance" for the verdict against the topic's definition of done.
 
 ## What it is
 
@@ -272,6 +272,65 @@ design but has no automated test — it needs a platform-specific way to hold
 such a handle open, deliberately left out of this step to keep the test suite
 portable; see "What the next step hangs on".
 
+## The Editor UI (Thema 186 Schritt 6)
+
+**Help ▸ Check for Updates…** — in the ImGui menu bar and in the native macOS
+menu (`MacMenuBar` `CheckForUpdates`; on a Mac the ImGui bar is not drawn at
+all). Both rows are left out of a build without libssh2, where
+`SelfUpdateDialog` compiles to stubs (`HE_HAVE_SELFUPDATE`).
+
+```
+Help ▸ Check for Updates…      SelfUpdateDialog::open()      → Session::startCheck   (worker)
+  [Download]                   Session::startDownload        → downloadUpdate + preflightTakeover (worker)
+  [Restart to Update]          one-slot request, dialog closes   (only when preflight said ok)
+EditorUI (renderEditor)        requestGuarded(GuardedAction::InstallUpdate)
+  collab host?                 "Update Anyway" / Cancel        (same as Quit)
+  scene or asset tab dirty?    Save / Don't Save / Cancel      (the Quit prompt, unchanged)
+runGuardedAction               SelfUpdateDialog::beginInstall → Session::install → beginTakeover
+                               relaunchArgs = { open .heproj }
+  ok                           ctx.quit()  → HorizonUpdater swaps, relaunches with the project
+  failed                       editor keeps running, dialog reopens with the reason
+```
+
+* `GuardedAction::InstallUpdate` counts as session-ending (`endsSession`), so
+  unsaved **asset tabs** are asked about as well as the scene, exactly as for
+  Quit. Cancel there abandons the update and changes nothing.
+* The open project survives through the relaunch arguments: the new build gets
+  the `.heproj` path as its argument, and `EditorApplication`'s launch pick
+  (`ProjectLaunchOpen::pickFromArguments`) opens it through
+  `ProjectPreflight::requestAtStartup`, like a double-clicked project file. On
+  macOS `HorizonUpdater` relaunches through `open -n <bundle> --args <project>`;
+  LaunchServices passes both the arguments and the environment through
+  (checked: a private `HOME` and `HE_HIDDEN_WINDOW` arrive in the new process).
+* On the Project Hub (no project) Restart to Update needs no prompt and runs
+  directly, but not while `ProjectPreflight` is opening a project; the request
+  then waits and is taken by the guarded path once the project is open.
+* `EditorSelfUpdate::Session` (`src/HE_Editor/EditorSelfUpdate.{h,cpp}`) is the
+  ImGui-free part: worker thread, phases, an injectable `Backend` (check,
+  download, preflight, begin). It is compiled into `he_tests`, so the editor's
+  half runs on every CI platform. `SelfUpdateDialog.{h,cpp}` is the window.
+* Not done on purpose: no automatic check at start-up and no background
+  polling. The account is still an environment variable (Open decision 1), so a
+  start-up check would only ever say "not configured" on a user's machine.
+
+**Acceptance driver.** `HE_SELFUPDATE_E2E=save|discard|cancel` plus
+`HE_SELFUPDATE_E2E_TRIGGER=<file>`: once the file appears the dialog opens and
+presses its own Download and Restart to Update buttons, and the unsaved-changes
+prompt guarding `InstallUpdate` is answered with the named button, through the
+same code a click runs. Without both variables nothing changes.
+`scripts/selfupdate_editor_e2e.py` drives it: a copy of a built editor as the
+"installed" build, a 9.9.9 build that is the same editor plus a marker file
+(DMG on macOS, tar.gz on Linux, zip on Windows), the read-only test SFTP
+account, a private `HOME`, a copy of the project, the editor hidden. It makes
+the scene dirty over the Remote Control bridge (`entity_create`), writes the
+trigger, then checks the outcome from outside (MCP `scene_info`/`entity_list`
+on the old and the relaunched editor, the scene file, the install, HorizonUpdater's
+`last-apply.json`). Two traps found building it: (1) into a pipe the editor's
+stdout is block-buffered and a killed editor loses its last lines, so the
+script reads it through a pseudo-terminal; (2) the editor's own log is
+`HorizonEngine.log` beside the executable when that is writable, i.e. inside
+the installed bundle, which the swap replaces.
+
 ## Files
 
 | | |
@@ -286,7 +345,12 @@ portable; see "What the next step hangs on".
 | `SelfUpdateApplyPlan.h` | `ApplyPlan` (command-line contract, `toArgs`/`fromArgs`), `ApplyStatus`, `ApplyResult` — header-only, no engine type |
 | `SelfUpdateApplyCore.h/.cpp` | `applyUpdate` (the swap/rollback/relaunch state machine), `writeApplyResult`/`readApplyResult`, `appendApplyLog` — compiled into both `HorizonSelfUpdate` (so the next editor start can read the last result) and `HorizonUpdater` |
 | `SelfUpdateInstall.h/.cpp` | `extractStagedBuild` (OS tool per platform), `mainExecutableRelativePath`, `installRootForRunningBuild` |
-| `Takeover.h/.cpp` | `preflightTakeover`, `beginTakeover` — the editor-side entry point; nothing calls it yet (see below) |
+| `Takeover.h/.cpp` | `preflightTakeover`, `beginTakeover` — the editor-side entry point, called from `EditorSelfUpdate::Session` |
+| `src/HE_Editor/EditorSelfUpdate.h/.cpp` | `Session` (check / download / install on a worker, injectable `Backend`), `relaunchArgsFor` — ImGui-free, also compiled into `he_tests` |
+| `src/HE_Editor/SelfUpdateDialog.h/.cpp` | Help ▸ Check for Updates… window, the one-slot install request, `beginInstall`, the `HE_SELFUPDATE_E2E` acceptance driver; stubs without `HE_HAVE_SELFUPDATE` |
+| `src/HE_Editor/EditorUI.cpp` | `GuardedAction::InstallUpdate` (enum, `runGuardedAction`, `endsSession`, collab wording), menu row, request poll in `renderEditor`, direct path on the Hub |
+| `tests/test_editor_selfupdate.cpp` | 6 cases: the relaunch argument reopens the project through `pickFromArguments`; check and download never begin the takeover; a failed begin leaves staging intact and does not quit; preflight blocker hides Restart; damaged download; no account |
+| `scripts/selfupdate_editor_e2e.py` | the end-to-end run with a real editor, `--mode save|discard|cancel` |
 | `updater/main.cpp` → **`HorizonUpdater`** | the separate executable `Takeover.cpp` spawns; `HE_SU_STANDALONE`, links no engine library, deployed beside `HorizonEditor` (`he_deploy_dll`, and on macOS `package_macos.sh` copies it into `Contents/MacOS`) |
 | `tests/test_selfupdate.cpp` | 17 cases; `ctest -R test_selfupdate` |
 | `tests/test_selfupdate_apply.cpp` | `HorizonUpdater` run as a real child process against `tests/helpers/fake_editor.cpp` (`he_fake_editor`, a real process standing in for both "the editor being waited on" and "the build being relaunched"): `ApplyPlan` CLI round trip, happy swap (preserves `config.json`, relaunch args reach the new build), the editor outliving the wait timeout (nothing touched), a new build that dies on arrival (rollback + the old build relaunched) |
@@ -355,7 +419,7 @@ jobs ran on **GitHub-hosted** runners (`macos-26-arm64`, `ubuntu-24.04`,
 | Manifest/version check + SHA-256-verified download over a real SFTP session | done | live leg on all three runners: `live: offered 9.9.9 (3145728 bytes)`, doctest 17 passed = 15 offline + 2 live (round trip, wrong password refused) |
 | Takeover (swap, relaunch, rollback) on every platform | done at process level | `test_selfupdate_apply` passed on macOS (6.9 s), Linux (6.2 s), Windows (6.4 s): real `HorizonUpdater` + `he_fake_editor` child processes, happy swap keeps config, timeout aborts untouched, crash on arrival rolls back |
 | Helper ships with the editor | Windows + Linux done, macOS open | `package/Editor/HorizonUpdater[.exe]` present on Windows and Linux; the macOS DMG check never saw a DMG in that run (the packaging step was skipped after the live check failed), so DMG content is only proven by the next run |
-| No editor state lost | **not demonstrated** | nothing in the editor calls `Takeover.h` yet, so the `GuardedAction` save/discard/cancel prompt is not in front of a takeover; see "What the next step hangs on" |
+| No editor state lost | **macOS done (real editor); Windows/Linux: logic in CI only** | Schritt 6, see the table below; `test_editor_selfupdate` runs in the CI matrix on all three; the end-to-end editor run is macOS only so far |
 | Real update account on the hosting server | **open** | host name never supplied (Hive request #49); every live run so far is against `selfupdate_test_sftp_server.py` |
 | CI matrix checks it automatically | done | `.github/workflows/ci.yml` (`claude.yml` is only the `@claude` bot) |
 
@@ -369,6 +433,21 @@ a stand-in `he_tests` (green when the env arrives, red with "passed 15 -> 15"
 when it does not). (2) The DMG check ran with only `!cancelled()` and blamed
 `package_macos.sh` for a DMG that had never been built; it is now gated on
 `steps.dmg.outcome == 'success'` and says so separately when no DMG exists.
+
+### Schritt 6: end to end on macOS (2026-10-12, commit of this step)
+
+`scripts/selfupdate_editor_e2e.py --install-src out/dmg_staging/HorizonEditor.app`
+on a MacBook Air (M-series, macOS 27), Release build of this branch packaged
+by `package_macos.sh`, project a copy of HorizonTutorial, the editor hidden:
+
+| Mode | Checks | What it showed |
+|---|---|---|
+| `cancel` | 9/9 | prompt raised ("scene dirty, 0 asset tab(s)"), Cancel → editor still running, `scene_info.dirty` still true, the unsaved entity still in the scene, HorizonUpdater never started, install and scene file unchanged |
+| `save` | 13/13 | prompt → Save wrote the scene, HorizonUpdater started, old editor exited 0, `last-apply.json` `applied` 0.7.0 → 9.9.9, the bundle holds the 9.9.9 marker, the relaunched editor runs from the swapped bundle with the `.heproj` argument, logs "opening … (handed over at launch)", has HorizonTutorial open, clean, with the saved entity in it |
+| `discard` | 13/13 | the same swap and relaunch; the scene file on disk unchanged and the discarded entity absent in the relaunched editor (the user's choice, honoured) |
+
+Not shown yet: the same run on Windows and Linux (the script has those
+branches, unrun), and against the real account (host name still missing).
 
 ## Open decisions (need the human)
 
@@ -390,22 +469,12 @@ when it does not). (2) The DMG check ran with only `!cancelled()` and blamed
 
 ## What the next step hangs on
 
-* **The Editor UI** — nothing calls `Takeover.h` yet. `HorizonEditor` links
-  `HorizonSelfUpdate` and depends on `HorizonUpdater`
-  (`src/HE_Editor/CMakeLists.txt`), but there is no background
-  check-for-update, no menu row, and no dialog. The hook point is
-  `src/HE_Editor/EditorUI.cpp`'s existing `GuardedAction` state machine (around
-  line 134 for the enum, ~1498 `runGuardedAction`, ~1518 `endsSession` — add
-  `InstallUpdate` to all three, treating it like `Quit`/`CloseProject` for
-  `endsSession`) and `requestGuarded(GuardedAction::InstallUpdate)` from a new
-  menu row. The action itself: call `Su::preflightTakeover()` to decide whether
-  to even offer the menu row / dialog, then on confirmation
-  `Su::beginTakeover()` — only on `.ok` does the handler go on to
-  `ctx.quit()`; the existing save/discard/cancel prompt already guards every
-  `GuardedAction`, so nothing further needs to ask about unsaved work. This was
-  deliberately left undone rather than attempted without being able to run the
-  editor's UI interactively to check for a regression in that large, heavily
-  interconnected file; see the topic's run history for why.
+* **The Editor UI — done in Schritt 6**, see "The Editor UI". What is left
+  of it: run `scripts/selfupdate_editor_e2e.py` on Windows (NN-WS03, a zip
+  artifact of `package/Editor`) and Linux (a tar.gz of the flat deploy) — the
+  branches are written but have never run — and, once that is green there,
+  consider a macOS CI leg after the DMG step (the hosted runner has Metal; the
+  run takes ~1 min per mode).
 * **The known gap above** (a rename blocked for the whole retry window) has no
   test; it needs a platform-specific way to hold a directory-internal file
   handle open without `FILE_SHARE_DELETE` for the duration.
