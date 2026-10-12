@@ -36,7 +36,16 @@ bool        s_installRequested = false;
 std::string s_lastApply;   // one line about the previous takeover, read on open
 
 std::unique_ptr<EditorSelfUpdate::Session> s_session;
-std::thread s_housekeeping;   // startHousekeeping()
+// startHousekeeping(). Unlike the session's worker this one exists after every
+// start, so an exit that never reaches joinPendingWork() (std::exit somewhere
+// past the start-up probes) must not meet a joinable std::thread at static
+// teardown — that is std::terminate.
+struct JoiningThread
+{
+	std::thread t;
+	~JoiningThread() { if (t.joinable()) t.join(); }
+};
+JoiningThread s_housekeeping;
 
 // The acceptance driver (SelfUpdateDialog.h). Read once.
 struct E2E
@@ -311,8 +320,8 @@ void Draw(AppContext& ctx)
 
 void startHousekeeping()
 {
-	if (s_housekeeping.joinable()) return;
-	s_housekeeping = std::thread([] {
+	if (s_housekeeping.t.joinable()) return;
+	s_housekeeping.t = std::thread([] {
 		const HE::Su::PruneResult r = HE::Su::pruneTakeoverLeftoversForRunningBuild(HE::Su::defaultStagingDir());
 		for (const std::string& p : r.removed)
 			HE_LOG_INFO(SelfUpdate, "removed the leftovers of an earlier update: %s", p.c_str());
@@ -327,7 +336,7 @@ void startHousekeeping()
 void joinPendingWork()
 {
 	if (s_session) s_session->join();
-	if (s_housekeeping.joinable()) s_housekeeping.join();
+	if (s_housekeeping.t.joinable()) s_housekeeping.t.join();
 }
 }
 
