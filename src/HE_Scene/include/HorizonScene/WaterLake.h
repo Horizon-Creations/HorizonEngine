@@ -157,6 +157,14 @@ namespace HE::water::lake
     // the terrain's.
     Result reshape(TerrainComponent& tc, uint16_t body, const std::vector<glm::vec2>& polygon);
 
+    // What an outline edit does to a lake (Thema 188 Schritt 2): reshape, and for a
+    // lake that digs its own bed (Body::digsBed) the bed lifted and dug again under
+    // the new outline. The same polygon as the body's changes nothing. The sync,
+    // the entity reshape and the MCP tool's reshape all go through here, so no way
+    // of moving an outline leaves the bed behind. `changed` counts water cells, as
+    // reshape's; the ground marks its own region dirty.
+    Result follow(TerrainComponent& tc, uint16_t body, const std::vector<glm::vec2>& polygon);
+
     // The ground under the lake's outline goes down to `level − depth`, with a
     // bank of `bank` metres on either side of the outline, meeting at the level
     // right on it (TerrainSculpt::excavatePolygon, Floor mode, bankIn + falloff:
@@ -245,7 +253,8 @@ namespace HE::water::lake
     Plan    plan(HorizonWorld& world, Entity terrain, Entity spline, const Params& p);
     Created apply(TerrainComponent& tc, const Plan& plan, const Params& p);
 
-    // The lake's water follows its spline now (what the per-frame sync does).
+    // The lake follows its spline now (what the per-frame sync does): the water,
+    // and the bed of a lake that digs its own (follow).
     Result reshape(HorizonWorld& world, Entity spline);
     // "Dig Again": the ground under the lake's current outline. ok = false when the
     // spline is not a lake.

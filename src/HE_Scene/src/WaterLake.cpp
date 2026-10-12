@@ -481,6 +481,22 @@ Result reshape(TerrainComponent& tc, uint16_t id, const std::vector<glm::vec2>& 
     return r;
 }
 
+Result follow(TerrainComponent& tc, uint16_t id, const std::vector<glm::vec2>& polygon)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return {};
+    if (polygon == b->polygon)
+    {
+        Result same;
+        same.ok = validPolygon(polygon);
+        return same;
+    }
+    const Result r = reshape(tc, id, polygon);
+    if (r.ok)
+        if (Body* nb = tc.water.findBody(id); nb && nb->digsBed) redig(tc, *nb);
+    return r;
+}
+
 uint16_t create(TerrainComponent& tc, const HE::UUID& spline, const std::vector<glm::vec2>& polygon, float level)
 {
     if (spline == HE::UUID{} || !validPolygon(polygon) || !finite(level) || !hasArea(tc)) return kNoBody;
@@ -746,7 +762,7 @@ Result reshape(HorizonWorld& world, Entity spline)
     auto& tc = reg.get<TerrainComponent>(l.terrain);
     std::vector<glm::vec2> poly;
     if (!polygonOf(world, spline, l.terrain, poly)) return {};
-    const Result r = reshape(tc, l.body, poly);
+    const Result r = follow(tc, l.body, poly);
     if (r.ok)
         if (Body* b = tc.water.findBody(l.body))
             b->syncKey = fingerprint(world, spline, l.terrain, reg.get<SplineComponent>(spline));
@@ -859,11 +875,9 @@ uint32_t syncSplines(HorizonWorld& world)
             if (poly == b.polygon) continue;
 
             // The water follows, and a lake that digs its own bed takes the bed
-            // with it, on this very frame of the drag (see WaterLake.h, "WHAT
-            // EDITS TOUCH WHAT"). A lake that never dug only reshapes.
-            if (!reshape(tc, b.id, poly).ok) continue;
-            ++reshaped;
-            if (b.digsBed) redig(tc, b);
+            // with it, on this very frame of the drag (follow; see WaterLake.h,
+            // "WHAT EDITS TOUCH WHAT"). A lake that never dug only reshapes.
+            if (follow(tc, b.id, poly).ok) ++reshaped;
         }
     return reshaped;
 }
