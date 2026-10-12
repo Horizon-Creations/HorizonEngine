@@ -9,7 +9,8 @@ on the hosting server (needs its host name, see "Open decisions"), and the
 Editor UI itself — `HorizonEditor` now **links** `HorizonSelfUpdate` and
 depends on `HorizonUpdater`, but nothing calls `Takeover.h` yet: no background
 check-for-update, no menu row, no "restart to update?" dialog. See "What the
-next step hangs on" for exactly where that wiring goes.
+next step hangs on" for exactly where that wiring goes, and "Acceptance" for
+the step-5 verdict against the topic's definition of done.
 
 ## What it is
 
@@ -339,6 +340,36 @@ without) a real server.
   the test runs on (the manifest needs a `macos-arm64` / `linux-x64` /
   `windows-x64` entry accordingly).
 
+## Acceptance (Thema 186 Schritt 5, 2026-10-12)
+
+Measured against the topic's definition of done: self-update over SFTP
+demonstrably works on Windows, macOS and Linux without losing editor state,
+and the GitHub pipeline checks it through a platform matrix. Evidence is CI
+run 38255921746 (commit 067fdf08) unless stated otherwise; all three of its
+jobs ran on **GitHub-hosted** runners (`macos-26-arm64`, `ubuntu-24.04`,
+`windows-2025-vs2026`), not on NN-WS03 or another real device.
+
+| Criterion | State | Evidence |
+|---|---|---|
+| Second SFTP account, kept apart from HE_ContentSync | done | `test_selfupdate` ("the account comes from HE_SELFUPDATE_* and nothing else", "the same login as the EngineContent account is not a second account") passed on all three runners |
+| Manifest/version check + SHA-256-verified download over a real SFTP session | done | live leg on all three runners: `live: offered 9.9.9 (3145728 bytes)`, doctest 17 passed = 15 offline + 2 live (round trip, wrong password refused) |
+| Takeover (swap, relaunch, rollback) on every platform | done at process level | `test_selfupdate_apply` passed on macOS (6.9 s), Linux (6.2 s), Windows (6.4 s): real `HorizonUpdater` + `he_fake_editor` child processes, happy swap keeps config, timeout aborts untouched, crash on arrival rolls back |
+| Helper ships with the editor | Windows + Linux done, macOS open | `package/Editor/HorizonUpdater[.exe]` present on Windows and Linux; the macOS DMG check never saw a DMG in that run (the packaging step was skipped after the live check failed), so DMG content is only proven by the next run |
+| No editor state lost | **not demonstrated** | nothing in the editor calls `Takeover.h` yet, so the `GuardedAction` save/discard/cancel prompt is not in front of a takeover; see "What the next step hangs on" |
+| Real update account on the hosting server | **open** | host name never supplied (Hive request #49); every live run so far is against `selfupdate_test_sftp_server.py` |
+| CI matrix checks it automatically | done | `.github/workflows/ci.yml` (`claude.yml` is only the `@claude` bot) |
+
+**Both reds in run 38255921746 were defects in the step-4 checks, not in the
+product.** (1) `selfupdate_live_ci_check.py` demanded doctest's `0 skipped`,
+which a `--source-file`-filtered single binary never prints (~5000 other cases
+count as skipped); it now compares against an offline baseline run, see
+"Verification" above. Checked locally against the real ctest output of all
+three runners and end to end with real `ctest`, the real test SFTP server and
+a stand-in `he_tests` (green when the env arrives, red with "passed 15 -> 15"
+when it does not). (2) The DMG check ran with only `!cancelled()` and blamed
+`package_macos.sh` for a DMG that had never been built; it is now gated on
+`steps.dmg.outcome == 'success'` and says so separately when no DMG exists.
+
 ## Open decisions (need the human)
 
 1. **Where does a shipped editor get its credentials?** Env vars suit CI and a
@@ -405,13 +436,22 @@ without) a real server.
      to a file, never printed) — no secret involved, so this runs on every PR,
      forks included, unlike the real update account (still open, "Open
      decisions" #4);
-  3. runs `ctest -R ^test_selfupdate$ -V --no-tests=error` against it and
-     parses doctest's own `test cases: N | M passed | F failed | S skipped`
-     summary out of the captured output, failing unless `S` is `0`. This is
-     not redundant with ctest's exit code: a `doctest::skip(...)`-gated case
-     that never actually ran because the live-test environment did not reach
-     the child process is itself a ctest PASS, which would otherwise let a
-     wiring regression report green while proving nothing.
+  3. runs `ctest -R ^test_selfupdate$ -V --no-tests=error` twice — first with
+     every `HE_SELFUPDATE_*` stripped (the offline baseline, live cases
+     skipped), then live against the server — parses doctest's own `test
+     cases: N | M passed | F failed | S skipped` summary out of both, and fails
+     unless the live run has exactly 2 more passed and 2 fewer skipped cases
+     than the baseline and the round trip's `live: offered 9.9.9` MESSAGE is
+     in its output. This is not redundant with ctest's exit code: a
+     `doctest::skip(...)`-gated case that never actually ran because the
+     live-test environment did not reach the child process is itself a ctest
+     PASS, which would otherwise let a wiring regression report green while
+     proving nothing. (Step 4 first insisted on `S == 0`, which can never
+     hold: he_tests is one binary, ctest filters it with
+     `--source-file=*test_selfupdate.cpp`, and doctest counts every case that
+     filter excludes, ~5000, as skipped too. CI run 38255921746 went red on
+     all three platforms on that alone, with both live cases passed: 17
+     passed = 15 offline + 2 live.)
 
   Then, right before/after the three platforms' packaging steps: "Check
   HorizonUpdater is deployed beside the editor" (Windows, Linux — checks the

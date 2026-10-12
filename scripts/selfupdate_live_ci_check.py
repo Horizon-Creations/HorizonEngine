@@ -15,10 +15,15 @@ printed. Needs `pip install paramiko` (the server's own dependency).
 
 A doctest case skipped is a ctest PASS, not a failure — so a wiring mistake
 that never actually sets HE_SELFUPDATE_LIVE_TEST on the child process would
-report green while proving nothing. This script therefore also parses
-doctest's own summary line out of the captured output and insists on
-"0 skipped": the two live cases, and only those two, are skip-gated in that
-test file.
+report green while proving nothing. "0 skipped" in doctest's summary is NOT
+the test for that: he_tests is one binary for every tests/test_*.cpp, ctest
+runs it with --source-file=*test_selfupdate.cpp, and doctest counts every case
+that filter excludes (~5000 of them) as "skipped" too (CI run 38255921746 went
+red on exactly that while both live cases had passed). So the script runs the
+same ctest case twice — once with every HE_SELFUPDATE_* stripped (the
+baseline), once live — and insists the live run has exactly LIVE_CASES more
+passed and LIVE_CASES fewer skipped cases than the baseline, and that the live
+round trip's own MESSAGE line is in the output.
 
     python3 scripts/selfupdate_live_ci_check.py --build-dir build
 """
@@ -103,30 +108,60 @@ def wait_for_ready(proc, timeout_s):
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SUMMARY_RE = re.compile(
-    r"test cases:\s*\d+\s*\|\s*\d+\s*passed\s*\|\s*\d+\s*failed\s*\|\s*(\d+)\s*skipped"
+    r"test cases:\s*\d+\s*\|\s*(\d+)\s*passed\s*\|\s*(\d+)\s*failed\s*\|\s*(\d+)\s*skipped"
 )
+# The two doctest::skip(HE_SELFUPDATE_LIVE_TEST unset) cases in
+# tests/test_selfupdate.cpp: "live round trip over SFTP" and "live, a wrong
+# password is refused and never printed".
+LIVE_CASES = 2
+# Printed by the live round trip (test_selfupdate.cpp) only once it has
+# actually fetched and parsed the manifest from the server.
+_LIVE_MESSAGE_RE = re.compile(r"MESSAGE: live: offered 9\.9\.9 ")
 
 
-def check_nothing_was_skipped(ctest_output):
-    """Raises unless doctest's own summary says '0 skipped'.
-
-    ctest returning 0 is not enough: a doctest case gated by doctest::skip(...)
-    that never actually ran (e.g. the live-test env didn't reach the child
-    process) is itself a PASS as far as ctest is concerned. test_selfupdate.cpp
-    has exactly two skip-gated cases (the live ones), and only HE_SELFUPDATE_
-    LIVE_TEST unset should ever cause a skip — count >0 here means that
-    happened despite this script setting it.
-    """
+def parse_summary(ctest_output):
+    """(passed, failed, skipped) from doctest's own summary line, or raises."""
     text = _ANSI_RE.sub("", ctest_output)
     match = _SUMMARY_RE.search(text)
     if not match:
         raise RuntimeError("could not find doctest's 'test cases: ... skipped' summary in the ctest output")
-    skipped = int(match.group(1))
-    if skipped != 0:
+    return tuple(int(g) for g in match.groups())
+
+
+def check_live_cases_ran(baseline_output, live_output):
+    """Raises unless the live run executed exactly the LIVE_CASES gated cases.
+
+    ctest returning 0 is not enough: a doctest case gated by doctest::skip(...)
+    that never actually ran (e.g. the live-test env didn't reach the child
+    process) is itself a PASS as far as ctest is concerned. And doctest's
+    "skipped" count alone says nothing, because it also counts every case of
+    the other test files that ctest's --source-file filter excludes. Against a
+    baseline run of the same ctest case with no HE_SELFUPDATE_* at all, the
+    difference is exactly the live cases, whatever the rest of he_tests holds.
+    """
+    base_passed, _, base_skipped = parse_summary(baseline_output)
+    live_passed, _, live_skipped = parse_summary(live_output)
+    ran = live_passed - base_passed
+    if ran != LIVE_CASES or base_skipped - live_skipped != LIVE_CASES:
         raise RuntimeError(
-            "%d doctest case(s) were skipped — the live round trip did not actually run "
-            "(HE_SELFUPDATE_LIVE_TEST likely did not reach he_tests)" % skipped
+            "expected the live run to execute exactly %d more doctest case(s) than the baseline, "
+            "got passed %d -> %d, skipped %d -> %d — the live round trip did not actually run "
+            "(HE_SELFUPDATE_LIVE_TEST likely did not reach he_tests)"
+            % (LIVE_CASES, base_passed, live_passed, base_skipped, live_skipped)
         )
+    if not _LIVE_MESSAGE_RE.search(_ANSI_RE.sub("", live_output)):
+        raise RuntimeError("the live run passed, but the round trip's 'live: offered 9.9.9' message is missing")
+    return ran
+
+
+def run_ctest(build_dir, env, timeout_s):
+    """Runs just the test_selfupdate ctest case; (returncode, captured output)."""
+    result = subprocess.run(
+        ["ctest", "--test-dir", build_dir, "-R", "^test_selfupdate$", "-V", "--no-tests=error"],
+        env=env, timeout=timeout_s,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    return result.returncode, result.stdout
 
 
 def main():
@@ -146,6 +181,17 @@ def main():
     platform_key = current_platform_key()
     user = "editor-ro"
     password = secrets.token_urlsafe(24)
+
+    # Baseline first, with no HE_SELFUPDATE_* at all: the same ctest case, live
+    # cases skipped. Its counts are what the live run is compared against.
+    base_env = {k: v for k, v in os.environ.items() if not k.startswith("HE_SELFUPDATE_")}
+    code, baseline_output = run_ctest(args.build_dir, base_env, args.ctest_timeout)
+    if code != 0:
+        print(baseline_output)
+        print("selfupdate_live_ci_check: the offline baseline run already failed")
+        return code
+    print("selfupdate_live_ci_check: offline baseline: %d passed, %d failed, %d skipped"
+          % parse_summary(baseline_output))
 
     root = tempfile.mkdtemp(prefix="he_selfupdate_ci_")
     server_proc = None
@@ -171,16 +217,12 @@ def main():
         env["HE_SELFUPDATE_USER"] = user
         # HE_SELFUPDATE_PASSWORD is already in env, same value the server was given.
 
-        result = subprocess.run(
-            ["ctest", "--test-dir", args.build_dir, "-R", "^test_selfupdate$", "-V", "--no-tests=error"],
-            env=env, timeout=args.ctest_timeout,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
-        print(result.stdout)
-        if result.returncode != 0:
-            return result.returncode
-        check_nothing_was_skipped(result.stdout)
-        print("selfupdate_live_ci_check: live round trip ran for real (0 skipped)")
+        code, live_output = run_ctest(args.build_dir, env, args.ctest_timeout)
+        print(live_output)
+        if code != 0:
+            return code
+        ran = check_live_cases_ran(baseline_output, live_output)
+        print("selfupdate_live_ci_check: live round trip ran for real (%d live case(s) executed and passed)" % ran)
         return 0
     finally:
         if server_proc is not None and server_proc.poll() is None:

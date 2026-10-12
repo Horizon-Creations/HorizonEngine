@@ -581,6 +581,7 @@ jobs:
       # produces out/HorizonEditor-<version>.dmg. Runs after the tests so a packaging
       # failure surfaces without masking the build+test result.
       - name: Package macOS editor (DMG)
+        id: dmg
         if: runner.os == 'macOS'
         run: cmake --build build --target dmg
 
@@ -591,11 +592,19 @@ jobs:
       # this is the one platform where the check has to look inside the shipped
       # artifact itself: mount the real DMG read-only, exactly how SelfUpdateInstall.cpp
       # extracts one on a user's machine, and look in Contents/MacOS.
+      # Gated on the DMG step itself having succeeded, not just !cancelled(): in
+      # run 38255921746 an earlier failing step skipped the packaging, this check
+      # still ran, found no DMG at all and reported that as "HorizonUpdater missing
+      # from the DMG" — a second red that was only an echo of the first.
       - name: Check HorizonUpdater is inside the macOS package (DMG)
-        if: runner.os == 'macOS' && !cancelled()
+        if: runner.os == 'macOS' && !cancelled() && steps.dmg.outcome == 'success'
         run: |
           set -eo pipefail
-          dmg=$(ls out/HorizonEditor-*.dmg | head -1)
+          dmg=$(ls out/HorizonEditor-*.dmg 2>/dev/null | head -1 || true)
+          if [ -z "$dmg" ]; then
+            echo "::error::the DMG step succeeded but left no out/HorizonEditor-*.dmg behind — cannot check for HorizonUpdater"
+            exit 1
+          fi
           mount_point="$(mktemp -d)"
           hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg"
           app=$(ls -d "$mount_point"/*.app | head -1)
