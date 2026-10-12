@@ -151,6 +151,10 @@ add_executable(he_tests
     # water group's questions, the immersion event, disturb and setFlow, from the registry
     # and from Lua, and the editor's numbers saved, undone and felt by the bodies.
     test_water_api.cpp
+    # Thema 185 step 1: how far the render camera sits under a water surface, from
+    # the same WaterIndex the physics immersion detection uses, wired onto
+    # RenderWorld by RenderExtractor::extract() for the post-processing stage.
+    test_underwater_camera.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp

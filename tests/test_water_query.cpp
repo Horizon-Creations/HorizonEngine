@@ -544,6 +544,91 @@ TEST_CASE("Water physics settings: a damaged file cannot leave a number the phys
     CHECK(t2->water.bodies[0].physics.density == 1100.0f);
 }
 
+TEST_CASE("Underwater fog settings: the defaults write nothing, a change writes only what changed and round-trips")
+{
+    HorizonWorld world;
+    const Entity e = addLandscape(world);
+    TerrainComponent& tc = terrainOf(world, e);
+    const uint16_t lake = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+
+    SUBCASE("defaults leave no trace in the scene")
+    {
+        REQUIRE(tc.water.findBody(lake)->underwaterFog == water::UnderwaterFogParams{});
+        const std::string text = sceneText(world);
+        CHECK(text.find("waterBodies") != std::string::npos);
+        CHECK(text.find("underwaterFog") == std::string::npos);
+    }
+    SUBCASE("a change writes only the keys that differ, and round-trips")
+    {
+        water::UnderwaterFogParams f;
+        f.density = 1.2f;
+        f.deepColor = { 0.01f, 0.02f, 0.03f };
+        REQUIRE(water::setUnderwaterFog(tc, lake, f));
+
+        const std::string text = sceneText(world);
+        json j = json::parse(text);
+        json* terrain = findKey(j, "terrain");
+        REQUIRE(terrain != nullptr);
+        const json& fj = (*terrain)["waterBodies"][0]["underwaterFog"];
+        CHECK(fj.size() == 2);
+        CHECK(fj.contains("density"));
+        CHECK(fj.contains("deepColor"));
+        CHECK_FALSE(fj.contains("shallowColor"));
+        CHECK_FALSE(fj.contains("falloff"));
+
+        HorizonWorld loaded;
+        reloadEdited(world, loaded, [](json&) {});
+        const TerrainComponent* t = firstTerrain(loaded);
+        REQUIRE(t != nullptr);
+        REQUIRE(t->water.bodies.size() == 1);
+        CHECK(t->water.bodies[0].underwaterFog == f);
+    }
+    SUBCASE("every setting travels")
+    {
+        water::UnderwaterFogParams f;
+        f.shallowColor = { 0.3f, 0.4f, 0.5f }; f.deepColor = { 0.01f, 0.02f, 0.03f };
+        f.density = 2.5f; f.falloff = 3.0f;
+        REQUIRE(water::setUnderwaterFog(tc, lake, f));
+        SceneSerializer ser;
+        std::vector<uint8_t> blob;
+        REQUIRE(ser.saveToMemory(world, blob));
+        HorizonWorld loaded;
+        REQUIRE(ser.loadFromMemory(loaded, blob));
+        const TerrainComponent* t = firstTerrain(loaded);
+        REQUIRE(t != nullptr);
+        CHECK(t->water.bodies[0].underwaterFog == f);
+    }
+}
+
+TEST_CASE("Underwater fog settings: a damaged file cannot leave a number the post pass would trip on")
+{
+    HorizonWorld world;
+    const Entity e = addLandscape(world);
+    TerrainComponent& tc = terrainOf(world, e);
+    const uint16_t lake = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+    water::UnderwaterFogParams f;
+    f.density = 1.1f;   // any change, so the key exists to damage
+    REQUIRE(water::setUnderwaterFog(tc, lake, f));
+
+    HorizonWorld loaded;
+    reloadEdited(world, loaded, [](json& j)
+    {
+        json* terrain = findKey(j, "terrain");
+        REQUIRE(terrain != nullptr);
+        json& fj = (*terrain)["waterBodies"][0]["underwaterFog"];
+        fj["density"] = 1.0e9;                                 // far above anything water is
+        fj["falloff"] = -5.0;                                  // not a valid exponent
+        fj["shallowColor"] = json::array({ 1.0, "x", 3.0 });   // not a colour at all
+    });
+    const TerrainComponent* t = firstTerrain(loaded);
+    REQUIRE(t != nullptr);
+    REQUIRE(t->water.bodies.size() == 1);
+    const water::UnderwaterFogParams& q = t->water.bodies[0].underwaterFog;
+    CHECK(q.density == water::kMaxUnderwaterDensity);
+    CHECK(q.falloff == water::kMinUnderwaterFalloff);
+    CHECK(q.shallowColor == water::UnderwaterFogParams{}.shallowColor);   // ignored whole, the default stands
+}
+
 TEST_CASE("Water physics settings: clampPhysics replaces what is not a number and holds the rest to its bounds")
 {
     water::BodyPhysics bad;
@@ -627,6 +712,85 @@ TEST_CASE("Water physics settings: they are content - equality, undo delta and i
     CHECK(c.water.findBody(lake)->physics == p);
     CHECK(c.water.revision > rev);                               // the physics is told…
     CHECK_FALSE(c.water.dirty);                                  // …no sheet is rebuilt for it
+    REQUIRE(water::revertDelta(c, d));
+    CHECK(water::sameContent(c.water, a.water));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// What a body looks like from below its surface (Thema 185 Schritt 2)
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Underwater fog settings: clampUnderwaterFog holds density/falloff to their bounds, colour to its default")
+{
+    water::UnderwaterFogParams wild;
+    wild.shallowColor = { std::numeric_limits<float>::quiet_NaN(), 2.0f, -1.0f };
+    wild.deepColor    = { 0.5f, 0.5f, 0.5f };   // in range — left alone
+    wild.density      = -3.0f;
+    wild.falloff      = 50.0f;
+    const water::UnderwaterFogParams held = water::clampUnderwaterFog(wild);
+    CHECK(held.shallowColor == water::UnderwaterFogParams{}.shallowColor);   // one bad channel drops the whole colour
+    CHECK(held.deepColor == wild.deepColor);
+    CHECK(held.density == 0.0f);
+    CHECK(held.falloff == water::kMaxUnderwaterFalloff);
+
+    // In range is left alone, bit for bit.
+    water::UnderwaterFogParams fine;
+    fine.shallowColor = { 0.2f, 0.3f, 0.4f };
+    fine.deepColor    = { 0.0f, 0.0f, 0.1f };
+    fine.density      = 2.0f;
+    fine.falloff      = 2.0f;
+    CHECK(water::clampUnderwaterFog(fine) == fine);
+}
+
+TEST_CASE("Underwater fog settings: setUnderwaterFog touches the revision, never the surface")
+{
+    HorizonWorld world;
+    const Entity e = addLandscape(world);
+    TerrainComponent& tc = terrainOf(world, e);
+    const uint16_t lake = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+    tc.dirty       = false;
+    tc.water.dirty = false;
+    const uint64_t rev = tc.water.revision;
+
+    CHECK_FALSE(water::setUnderwaterFog(tc, 999, water::UnderwaterFogParams{}));   // an unknown body
+    CHECK(tc.water.revision == rev);
+
+    water::UnderwaterFogParams f;
+    f.density = 2.0f;
+    REQUIRE(water::setUnderwaterFog(tc, lake, f));
+    CHECK(tc.water.revision == rev + 1);
+    CHECK_FALSE(tc.water.dirty);     // the sheet is not rebuilt
+    CHECK_FALSE(tc.dirty);           // nor a single terrain chunk
+
+    REQUIRE(water::setUnderwaterFog(tc, lake, f));   // the same again: nothing
+    CHECK(tc.water.revision == rev + 1);
+
+    water::UnderwaterFogParams wild;
+    wild.density = 1.0e6f;
+    REQUIRE(water::setUnderwaterFog(tc, lake, wild));
+    CHECK(tc.water.findBody(lake)->underwaterFog.density == water::kMaxUnderwaterDensity);
+}
+
+TEST_CASE("Underwater fog settings: they are content - equality and undo delta notice them")
+{
+    TerrainComponent a = makeTerrain();
+    const uint16_t lake = addLake(a, rect(-10, -10, 10, 10), 2.0f);
+    TerrainComponent b = a;
+    CHECK(water::sameContent(a.water, b.water));
+
+    water::UnderwaterFogParams f;
+    f.density = 1.5f;
+    REQUIRE(water::setUnderwaterFog(b, lake, f));
+    CHECK_FALSE(water::sameContent(a.water, b.water));   // only the fog settings differ
+
+    water::Delta d;
+    REQUIRE(water::makeDelta(a.water, b.water, d));
+    CHECK_FALSE(d.sameBodies());
+    CHECK_FALSE(d.empty());
+
+    TerrainComponent c = a;
+    REQUIRE(water::applyDelta(c, d));
+    CHECK(c.water.findBody(lake)->underwaterFog == f);
     REQUIRE(water::revertDelta(c, d));
     CHECK(water::sameContent(c.water, a.water));
 }
@@ -716,4 +880,141 @@ TEST_CASE("Buoyancy factor: water density over body density, held to what the st
     CHECK(buoyancyFactorFor(1000.0f, -3.0f) == 1.0f);
     CHECK(buoyancyFactorFor(std::numeric_limits<float>::quiet_NaN(), 500.0f) == 1.0f);
     CHECK(buoyancyFactorFor(1000.0f, std::numeric_limits<float>::infinity()) == 1.0f);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Thema 185 Schritt 3: the refracted-light (caustics) settings of a body
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Underwater caustics settings: the defaults write nothing, a change writes only what changed and round-trips")
+{
+    HorizonWorld world;
+    const Entity e = addLandscape(world);
+    TerrainComponent& tc = terrainOf(world, e);
+    const uint16_t lake = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+
+    SUBCASE("defaults leave no trace in the scene")
+    {
+        REQUIRE(tc.water.findBody(lake)->underwaterCaustics == water::UnderwaterCausticsParams{});
+        const std::string text = sceneText(world);
+        CHECK(text.find("waterBodies") != std::string::npos);
+        CHECK(text.find("underwaterCaustics") == std::string::npos);
+    }
+    SUBCASE("a change writes only the keys that differ, and round-trips")
+    {
+        water::UnderwaterCausticsParams c;
+        c.intensity = 1.75f;
+        c.scale     = 2.5f;
+        REQUIRE(water::setUnderwaterCaustics(tc, lake, c));
+
+        json j = json::parse(sceneText(world));
+        json* terrain = findKey(j, "terrain");
+        REQUIRE(terrain != nullptr);
+        const json& cj = (*terrain)["waterBodies"][0]["underwaterCaustics"];
+        CHECK(cj.size() == 2);
+        CHECK(cj.contains("intensity"));
+        CHECK(cj.contains("scale"));
+        CHECK_FALSE(cj.contains("speed"));
+        CHECK_FALSE(cj.contains("depth"));
+
+        HorizonWorld loaded;
+        reloadEdited(world, loaded, [](json&) {});
+        const TerrainComponent* t = firstTerrain(loaded);
+        REQUIRE(t != nullptr);
+        REQUIRE(t->water.bodies.size() == 1);
+        CHECK(t->water.bodies[0].underwaterCaustics == c);
+        // The fog next to it is untouched by the caustics key.
+        CHECK(t->water.bodies[0].underwaterFog == water::UnderwaterFogParams{});
+    }
+    SUBCASE("every setting travels")
+    {
+        water::UnderwaterCausticsParams c;
+        c.intensity = 3.0f; c.scale = 0.4f; c.speed = 2.0f; c.depth = 33.0f;
+        REQUIRE(water::setUnderwaterCaustics(tc, lake, c));
+        SceneSerializer ser;
+        std::vector<uint8_t> blob;
+        REQUIRE(ser.saveToMemory(world, blob));
+        HorizonWorld loaded;
+        REQUIRE(ser.loadFromMemory(loaded, blob));
+        const TerrainComponent* t = firstTerrain(loaded);
+        REQUIRE(t != nullptr);
+        CHECK(t->water.bodies[0].underwaterCaustics == c);
+    }
+}
+
+TEST_CASE("Underwater caustics settings: a damaged file cannot leave a number the post pass would trip on")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    const uint16_t lake = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+    water::UnderwaterCausticsParams c;
+    c.intensity = 2.0f;
+    REQUIRE(water::setUnderwaterCaustics(tc, lake, c));
+
+    HorizonWorld loaded;
+    reloadEdited(world, loaded, [](json& j)
+    {
+        json* terrain = findKey(j, "terrain");
+        REQUIRE(terrain != nullptr);
+        json& cj = (*terrain)["waterBodies"][0]["underwaterCaustics"];
+        cj["intensity"] = 1.0e9;     // far past the bound
+        cj["scale"]     = -4.0;      // below the minimum
+        cj["speed"]     = "fast";    // not a number: keeps the default
+        cj["depth"]     = 0.0;       // below the minimum
+    });
+    const TerrainComponent* t = firstTerrain(loaded);
+    REQUIRE(t != nullptr);
+    const water::UnderwaterCausticsParams& q = t->water.bodies[0].underwaterCaustics;
+    CHECK(q.intensity == water::kMaxCausticsIntensity);
+    CHECK(q.scale     == water::kMinCausticsScale);
+    CHECK(q.speed     == water::kDefaultCausticsSpeed);
+    CHECK(q.depth     == water::kMinCausticsDepth);
+}
+
+TEST_CASE("Underwater caustics settings: clampUnderwaterCaustics holds each knob to its bounds, non-finite to its default")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    water::UnderwaterCausticsParams wild;
+    wild.intensity = inf; wild.scale = nan; wild.speed = -1.0f; wild.depth = 1.0e9f;
+    const water::UnderwaterCausticsParams c = water::clampUnderwaterCaustics(wild);
+    CHECK(c.intensity == water::kDefaultCausticsIntensity);   // not a number: the default
+    CHECK(c.scale     == water::kDefaultCausticsScale);
+    CHECK(c.speed     == 0.0f);                               // negative: held at 0 (frozen)
+    CHECK(c.depth     == water::kMaxCausticsDepth);
+
+    water::UnderwaterCausticsParams ok;
+    ok.intensity = 0.0f;   // 0 is a legal value: off
+    CHECK(water::clampUnderwaterCaustics(ok).intensity == 0.0f);
+}
+
+TEST_CASE("Underwater caustics settings: setUnderwaterCaustics touches the revision, never the surface; they are content")
+{
+    TerrainComponent a = makeTerrain();
+    const uint16_t lake = addLake(a, rect(-10, -10, 10, 10), 2.0f);
+    CHECK_FALSE(water::setUnderwaterCaustics(a, 999, water::UnderwaterCausticsParams{}));   // an unknown body
+
+    TerrainComponent b = a;
+    CHECK(water::sameContent(a.water, b.water));
+    b.dirty       = false;   // addLake (addPolygon) left both set; the question is what the setter does
+    b.water.dirty = false;
+    const uint64_t rev = b.water.revision;
+    water::UnderwaterCausticsParams c;
+    c.intensity = 1.5f;
+    REQUIRE(water::setUnderwaterCaustics(b, lake, c));
+    CHECK(b.water.revision == rev + 1);
+    CHECK_FALSE(b.water.dirty);                              // the sheet is not rebuilt
+    CHECK_FALSE(b.dirty);                                    // nor a single terrain chunk
+    REQUIRE(water::setUnderwaterCaustics(b, lake, c));       // the same again: nothing
+    CHECK(b.water.revision == rev + 1);
+    CHECK_FALSE(water::sameContent(a.water, b.water));       // only the caustics differ
+
+    water::Delta d;
+    REQUIRE(water::makeDelta(a.water, b.water, d));
+    CHECK_FALSE(d.empty());
+    TerrainComponent undone = a;
+    REQUIRE(water::applyDelta(undone, d));
+    CHECK(undone.water.findBody(lake)->underwaterCaustics == c);
+    REQUIRE(water::revertDelta(undone, d));
+    CHECK(water::sameContent(undone.water, a.water));
 }

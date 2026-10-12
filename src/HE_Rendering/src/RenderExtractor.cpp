@@ -26,6 +26,7 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
+#include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/RopeTrailSystem.h>                   // buildTrailGeometry
@@ -1188,6 +1189,89 @@ bool isEditorIconMaterial(const UUID& materialId)
 	    || materialId == kEditorIconAudioSourceMaterialId;
 }
 
+UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3& cameraPos)
+{
+	UnderwaterCameraData out{};
+	if (!std::isfinite(cameraPos.x) || !std::isfinite(cameraPos.y) || !std::isfinite(cameraPos.z))
+		return out;
+
+	// A fresh snapshot, like the `water.surfaceAt` script binding (EngineApi.cpp) —
+	// the one-off-question use WaterIndex::build documents itself for. `t` plays no
+	// part here (the comment above explains why), so 0.0 is as good as any value.
+	water::Surface surf;
+	const water::WaterIndex index = water::WaterIndex::build(world);
+	if (!index.surfaceAt(cameraPos.x, cameraPos.z, 0.0, surf))
+		return out;   // dry at this XZ — WaterIndex already clips the shore itself
+
+	const float signedDepth = surf.level - cameraPos.y;
+	if (signedDepth > surf.depth)
+		return out;   // under the water's own bed — not underwater, just underground
+
+	// surfaceY/signedDepth are reported whenever the camera is above the bed,
+	// even when it reads dry below (the next check) — a camera a hair above the
+	// surface still gets its real (small negative) signedDepth, not a reset-to-
+	// zero default, which is what "Underwater camera: exactly on the waterline
+	// reads a continuous ~0, not a special case" (test_underwater_camera.cpp)
+	// pins: justOver (2.001, 1 mm above a level-2 surface) must still read a
+	// small NEGATIVE signedDepth, not 0 — only `wet` has a hard edge here.
+	out.surfaceY    = surf.level;
+	out.signedDepth = signedDepth;
+	// At or below the surface, not above it (flying, a dock, a boat on top of
+	// the body). The CI regression this fixed (Thema 185 Schritt 1, commit
+	// 71df88e3): a camera far above a lake's XZ read as wet because only the
+	// lower (bed) bound above was ever checked, which among other things made
+	// the Schritt 2 post pass fog the view of a plane flying over a distant lake.
+	out.wet = signedDepth >= 0.0f;
+
+	// The post pass's tint (Thema 185 Schritt 2): a Beer-Lambert ramp of the CAMERA's
+	// own depth, reshaped by the body's falloff curve — 0 at the surface (shallowColor),
+	// asymptotic toward 1 (deepColor) the longer the camera has been submerged. Never a
+	// per-pixel scene distance, so hovering at a fixed depth gives a fixed tint. density
+	// carries through unchanged; the per-pixel view-ray fog still needs the depth buffer,
+	// which stays the shader's job. A dry camera within kFogDryBandEnd of the surface
+	// (Thema 185 Schritt 5, fogWaterlineBand) keeps shallowColor and a faded density, so
+	// the pass also fogs the floor the near plane bares where it slices the water sheet
+	// off just above the line — the waterline pop came from that floor being unfogged on
+	// one side of the line and fogged on the other (the shaders decide per pixel, see
+	// RenderExtractor.h). Further up, density stays 0 and the pass is skipped as before.
+	const water::UnderwaterFogParams& fog = surf.underwaterFog;
+	const float ramp = 1.0f - std::exp(-fog.density * std::max(signedDepth, 0.0f));
+	const float depthT = std::pow(std::clamp(ramp, 0.0f, 1.0f), fog.falloff);
+	out.tintColor = glm::mix(fog.shallowColor, fog.deepColor, depthT);
+	out.density   = fog.density * fogWaterlineBand(signedDepth);
+	if (!out.wet)
+		return out;   // above the surface: no net (causticsFadeIn is 0 there anyway)
+
+	// The caustic pass's knobs (Thema 185 Schritt 3). The net is faded IN over the
+	// first kCausticsFadeInDepth metres of the dive (smoothstep of the camera's own
+	// depth): exactly 0 with the camera on the waterline, the body's full value from
+	// half a metre down. A function of this frame's depth alone, like everything above
+	// — no state, no hysteresis — and zero on both sides of the line, so crossing it
+	// can never pop the net on or off; the pass is simply not run at 0.
+	const water::UnderwaterCausticsParams& cau = surf.underwaterCaustics;
+	out.causticsIntensity = cau.intensity * causticsFadeIn(signedDepth);
+	out.causticsScale     = cau.scale;
+	out.causticsSpeed     = cau.speed;
+	out.causticsDepth     = cau.depth;
+	return out;
+}
+
+float causticsFadeIn(float signedDepth)
+{
+	if (!std::isfinite(signedDepth)) return 0.0f;   // no depth to speak of: no net
+	const float t = std::clamp(signedDepth / kCausticsFadeInDepth, 0.0f, 1.0f);
+	return t * t * (3.0f - 2.0f * t);
+}
+
+float fogWaterlineBand(float signedDepth)
+{
+	if (!std::isfinite(signedDepth)) return 0.0f;
+	const float height = -signedDepth;                     // metres above the surface
+	const float t = std::clamp((height - kFogDryBandFull) / (kFogDryBandEnd - kFogDryBandFull),
+	                           0.0f, 1.0f);
+	return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
 } // namespace HE
 
 // Out-of-line on purpose (see the header): the one definition the DLL exports.
@@ -1331,6 +1415,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 
 	extractTransforms(world, reg);
 	extractCamera(reg, out, aspectRatio, editorCam);
+	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
 	extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);

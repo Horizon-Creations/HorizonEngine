@@ -831,6 +831,139 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // show a half-drawn world.
         if (ssrWanted) CaptureSSRColorHistory(cmd, m_viewportW, m_viewportH);
 
+        // Underwater fog (Thema 185 Schritt 2): straight onto m_hdrView while it
+        // is still COLOR_ATTACHMENT_OPTIMAL (before the barrier below hands it to
+        // bloom as a sampled image) — alpha-blended, no ping-pong target.
+        // Skipped whole on a dry frame: the only cost a scene without water
+        // pays here is this one branch. See postfx_underwaterfog.frag for the
+        // per-pixel math (kUnderwaterFogHLSL's GLSL twin).
+        // Gated on the two knobs, not wet: density stays above 0 for a dry camera in the
+        // waterline band just above the surface (HE::fogWaterlineBand, Thema 185 Schritt 5),
+        // and the net (drawn inside this same render pass) is 0 whenever dry. A fog draw at
+        // density 0 blends nothing (premultiplied, alpha 0).
+        const UnderwaterCameraData& uwCam = m_renderWorld.underwaterCamera;
+        if ((uwCam.density > 0.0f || uwCam.causticsIntensity > 0.0f)
+            && m_underwaterFogReady && m_underwaterFogFB && m_viewportDepthImage)
+        {
+            // The matrix the scene was RASTERISED with (kVulkanClipFix: NDC y down, depth 0..1,
+            // line ~7842), inverted — what the decal, SSR and deferred-resolve passes reconstruct
+            // with, and what makes depthParams 1 / 1 / 0 below a valid Vulkan NDC point. The plain
+            // projection * view (GL clip) put every reconstructed position metres off (Thema 185
+            // Schritt 4: numeric check on three points, 8 to 14 m), so the fog's segment lengths
+            // were wrong on any Vulkan frame under water.
+            const glm::mat4 viewProjUw = HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+            const glm::mat4 invViewProjUw = glm::inverse(viewProjUw);
+            struct UnderwaterFogPC
+            {
+                float invViewProj[16];
+                float depthParams[4];
+                float camPosSurfaceY[4];
+                float tintDensity[4];
+            } pc{};
+            std::memcpy(pc.invViewProj, &invViewProjUw[0][0], 16 * sizeof(float));
+            pc.depthParams[0] = 1.0f; pc.depthParams[1] = 1.0f; pc.depthParams[2] = 0.0f; pc.depthParams[3] = 0.0f;
+            pc.camPosSurfaceY[0] = m_renderWorld.camera.position.x;
+            pc.camPosSurfaceY[1] = m_renderWorld.camera.position.y;
+            pc.camPosSurfaceY[2] = m_renderWorld.camera.position.z;
+            pc.camPosSurfaceY[3] = uwCam.surfaceY;
+            pc.tintDensity[0] = uwCam.tintColor.x; pc.tintDensity[1] = uwCam.tintColor.y;
+            pc.tintDensity[2] = uwCam.tintColor.z; pc.tintDensity[3] = uwCam.density;
+
+            // Depth off the attachment before it is readable as a sampler — the
+            // same flip EncodeDecalDepth's consumers use, just on the live
+            // viewport depth instead of a ping-pong copy (nothing else this
+            // frame still needs it as an attachment: bloom/tonemap/FXAA below
+            // are all colour-only). Not runPostFXBarrier: that helper hardcodes
+            // the COLOR aspect and knows nothing about depth-attachment layouts.
+            auto depthBarrier = [&](VkImageLayout from, VkImageLayout to,
+                                    VkAccessFlags srcAccess, VkAccessFlags dstAccess,
+                                    VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+            {
+                VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                b.oldLayout = from; b.newLayout = to;
+                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = m_viewportDepthImage;
+                b.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+                b.srcAccessMask = srcAccess; b.dstAccessMask = dstAccess;
+                vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+            };
+            depthBarrier(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+            VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            bi.renderPass = m_underwaterFogRP; bi.framebuffer = m_underwaterFogFB;
+            bi.renderArea.extent = { m_viewportW, m_viewportH };
+            vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+
+            // Underwater caustics (Thema 185 Schritt 3), drawn FIRST in this same pass so the
+            // fog below swallows the net with distance: LIGHT added onto m_hdrView by the
+            // fog's own blend state (the shader's alpha is 0, so ONE / ONE_MINUS_SRC_ALPHA is
+            // a plain add). Two draws to one attachment in one subpass blend in primitive
+            // order, so nothing sits between them; the depth is already flipped to
+            // SHADER_READ_ONLY for the fog and the caustics read the very same set. Runs only
+            // with the net switched on (the extractor's waterline fade-in makes
+            // causticsIntensity exactly 0 on the line). See postfx_underwatercaustics.frag.
+            if (uwCam.causticsIntensity > 0.0f && m_underwaterCausticsReady)
+            {
+                glm::vec3 ucSunDir, ucSunColor;
+                m_renderWorld.dominantDirectionalLight(ucSunDir, ucSunColor);   // colour is 0 at night
+                const glm::vec3 towardSun = glm::normalize(m_renderWorld.sunDirection);
+                static const char* s_ucTimeOv = std::getenv("HE_SKY_TIME");   // pins the wave clock for captures
+                const float ucSeconds = (s_ucTimeOv && *s_ucTimeOv) ? static_cast<float>(std::atof(s_ucTimeOv))
+                                                                    : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+                // The matrix the scene was rasterised with (kVulkanClipFix: NDC y down, depth
+                // 0..1), inverted — the same reconstruction the decal, SSR and deferred-resolve
+                // passes use, so the shader's (uv * 2 - 1, depth) with the constants 1 / 1 / 0
+                // baked in is a valid Vulkan NDC point. The clean matrix, not the jittered one:
+                // a TAA frame's sub-pixel offset moves P by less than a pixel.
+                const glm::mat4 invViewProjUc = glm::inverse(
+                    HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view);
+                struct UnderwaterCausticsPC
+                {
+                    float invViewProj[16];
+                    float camSurface[4];
+                    float sun[4];
+                    float sunColor[4];
+                    float caustics[4];
+                } ucpc{};
+                static_assert(sizeof(UnderwaterCausticsPC) == 128,
+                              "must match the push-constant block of postfx_underwatercaustics.frag and the 128-byte range");
+                std::memcpy(ucpc.invViewProj, &invViewProjUc[0][0], 16 * sizeof(float));
+                ucpc.camSurface[0] = m_renderWorld.camera.position.x;
+                ucpc.camSurface[1] = m_renderWorld.camera.position.y;
+                ucpc.camSurface[2] = m_renderWorld.camera.position.z;
+                ucpc.camSurface[3] = uwCam.surfaceY;
+                ucpc.sun[0] = towardSun.x; ucpc.sun[1] = towardSun.y; ucpc.sun[2] = towardSun.z;
+                ucpc.sunColor[0] = ucSunColor.r; ucpc.sunColor[1] = ucSunColor.g; ucpc.sunColor[2] = ucSunColor.b;
+                ucpc.caustics[0] = uwCam.causticsIntensity;
+                ucpc.caustics[1] = uwCam.causticsScale;
+                ucpc.caustics[2] = ucSeconds * uwCam.causticsSpeed;
+                ucpc.caustics[3] = uwCam.causticsDepth;
+
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_underwaterCausticsPipe);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_underwaterCausticsPipeLayout, 0, 1, &m_underwaterFogDS, 0, nullptr);
+                vkCmdPushConstants(cmd, m_underwaterCausticsPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128, &ucpc);
+                VkViewport ucvp{0,0,(float)m_viewportW,(float)m_viewportH,0,1}; vkCmdSetViewport(cmd,0,1,&ucvp);
+                VkRect2D ucsc{{0,0},{m_viewportW,m_viewportH}}; vkCmdSetScissor(cmd,0,1,&ucsc);
+                vkCmdDraw(cmd, 3, 1, 0, 0);
+            }
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_underwaterFogPipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_underwaterFogPipeLayout, 0, 1, &m_underwaterFogDS, 0, nullptr);
+            vkCmdPushConstants(cmd, m_underwaterFogPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 112, &pc);
+            VkViewport vp{0,0,(float)m_viewportW,(float)m_viewportH,0,1}; vkCmdSetViewport(cmd,0,1,&vp);
+            VkRect2D sc{{0,0},{m_viewportW,m_viewportH}}; vkCmdSetScissor(cmd,0,1,&sc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRenderPass(cmd);
+
+            depthBarrier(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+        }
+
         // Transition HDR → SHADER_READ_ONLY for bloom bright pass.
         runPostFXBarrier(cmd, m_hdrImage,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -4562,10 +4695,23 @@ void VulkanRenderer::createPostFXPipelines()
     slci.bindingCount = 2; slci.pBindings = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_postFxDSLayout), "postfx dsl");
 
-    // 5 chain sets + m_presentDS (the game's present pass), 2 samplers each.
-    VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12 };
+    // Underwater fog's own 1-binding layout (depth only — see the header's
+    // m_underwaterFogDSLayout comment for why it does not share m_postFxDSLayout).
+    {
+        VkDescriptorSetLayoutBinding b0{};
+        b0.binding = 0; b0.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b0.descriptorCount = 1; b0.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        b0.pImmutableSamplers = &m_postFxSampler;
+        VkDescriptorSetLayoutCreateInfo slci1{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        slci1.bindingCount = 1; slci1.pBindings = &b0;
+        vkCheck(vkCreateDescriptorSetLayout(m_device, &slci1, nullptr, &m_underwaterFogDSLayout), "underwaterfog dsl");
+    }
+
+    // 5 chain sets + m_presentDS (the game's present pass), 2 samplers each,
+    // + 1 underwater-fog set, 1 sampler.
+    VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 13 };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    dpci.maxSets = 6; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    dpci.maxSets = 7; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_postFxDSPool), "postfx pool");
 
     VkDescriptorSetLayout layouts[5]; for (auto& l : layouts) l = m_postFxDSLayout;
@@ -4574,6 +4720,8 @@ void VulkanRenderer::createPostFXPipelines()
     vkCheck(vkAllocateDescriptorSets(m_device, &dsai, m_postFxDS), "postfx ds alloc");
     dsai.descriptorSetCount = 1;
     vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_presentDS), "present ds alloc");
+    dsai.pSetLayouts = &m_underwaterFogDSLayout;
+    vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_underwaterFogDS), "underwaterfog ds alloc");
 
     // Dummy 1×1 RGBA8 image for unused binding slots.
     {
@@ -4696,11 +4844,19 @@ void VulkanRenderer::createPostFXPipelines()
     VkShaderModule btFS = loadShaderModule("postfx_aa_blit.frag.spv");
     VkShaderModule brFS = loadShaderModule("postfx_bloom_bright.frag.spv");
     VkShaderModule blFS = loadShaderModule("postfx_bloom_blur.frag.spv");
+    // Not in the "missing → abort the whole chain" check below: the underwater
+    // fog pass is optional (m_underwaterFogReady gates it independently, like
+    // D3D11/D3D12's underwaterFogReady) — a scene with no water should not lose
+    // bloom/tonemap/FXAA over a missing fog shader.
+    VkShaderModule uwFS = loadShaderModule("postfx_underwaterfog.frag.spv");
+    // Same for the caustics (Thema 185 Schritt 3): optional, gated by
+    // m_underwaterCausticsReady on its own.
+    VkShaderModule ucFS = loadShaderModule("postfx_underwatercaustics.frag.spv");
 
     if (!vsM || !tmFS || !fxFS || !smFS || !btFS || !brFS || !blFS)
     {
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: PostFX shaders missing — no HDR/bloom/FXAA");
-        for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
+        for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS,uwFS,ucFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
         return;
     }
 
@@ -4754,9 +4910,103 @@ void VulkanRenderer::createPostFXPipelines()
         VkPipelineDepthStencilStateCreateInfo noDepth{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
         makePipe(btFS, m_renderPass, m_presentPipe, &noDepth);
     }
+
+    // Underwater fog (Thema 185 Schritt 2): own render pass (loadOp=LOAD, every
+    // other postFx pass here fully overwrites its target) + own pipeline layout
+    // (112-byte fragment push constant + the 1-binding depth-only set above).
+    if (uwFS)
+    {
+        VkAttachmentDescription att{};
+        att.format = VK_FORMAT_R16G16B16A16_SFLOAT; att.samples = VK_SAMPLE_COUNT_1_BIT;
+        att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        att.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        att.finalLayout   = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference ref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1; sub.pColorAttachments = &ref;
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL; dep.dstSubpass = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 1; rpci.pAttachments = &att;
+        rpci.subpassCount = 1; rpci.pSubpasses = &sub;
+        rpci.dependencyCount = 1; rpci.pDependencies = &dep;
+        vkCheck(vkCreateRenderPass(m_device, &rpci, nullptr, &m_underwaterFogRP), "underwaterfog render pass");
+
+        VkPushConstantRange pcr2{};
+        pcr2.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr2.size = 112;   // mat4 + 3×vec4, see the .frag
+        VkPipelineLayoutCreateInfo plci2{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        plci2.setLayoutCount = 1; plci2.pSetLayouts = &m_underwaterFogDSLayout;
+        plci2.pushConstantRangeCount = 1; plci2.pPushConstantRanges = &pcr2;
+        vkCheck(vkCreatePipelineLayout(m_device, &plci2, nullptr, &m_underwaterFogPipeLayout), "underwaterfog pipe layout");
+
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vsM; stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = uwFS; stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        // Premultiplied shader output: dst' = src*1 + dst*(1-fogAmount).
+        VkPipelineColorBlendAttachmentState cba{};
+        cba.blendEnable = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE; cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.colorBlendOp = cba.alphaBlendOp = VK_BLEND_OP_ADD;
+        cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = stages;
+        pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia;
+        pci.pViewportState = &vp; pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
+        pci.pDynamicState = &dyn; pci.layout = m_underwaterFogPipeLayout;
+        pci.renderPass = m_underwaterFogRP; pci.subpass = 0;
+        m_underwaterFogReady = m_underwaterFogRP && m_underwaterFogPipeLayout &&
+            vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_underwaterFogPipe) == VK_SUCCESS;
+
+        // Underwater caustics (Thema 185 Schritt 3): the fog's render pass, descriptor set
+        // layout and every fixed-function state above (incl. the blend — the shader outputs
+        // alpha 0, so ONE / ONE_MINUS_SRC_ALPHA is a plain add of its light), only the
+        // fragment shader and the push-constant range differ: 128 bytes = mat4 + 4×vec4, see
+        // the .frag. That is why it has its own pipeline layout and sits in this block (it
+        // needs m_underwaterFogRP, which exists only here).
+        if (ucFS)
+        {
+            VkPushConstantRange pcr3{};
+            pcr3.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr3.size = 128;
+            VkPipelineLayoutCreateInfo plci3{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            plci3.setLayoutCount = 1; plci3.pSetLayouts = &m_underwaterFogDSLayout;
+            plci3.pushConstantRangeCount = 1; plci3.pPushConstantRanges = &pcr3;
+            vkCheck(vkCreatePipelineLayout(m_device, &plci3, nullptr, &m_underwaterCausticsPipeLayout), "underwatercaustics pipe layout");
+
+            stages[1].module = ucFS;
+            pci.layout = m_underwaterCausticsPipeLayout;
+            m_underwaterCausticsReady = m_underwaterFogRP && m_underwaterCausticsPipeLayout &&
+                vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_underwaterCausticsPipe) == VK_SUCCESS;
+        }
+    }
+
     createTaaPipelines(vsM);                         // optional — see taaReady()
 
-    for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS}) vkDestroyShaderModule(m_device,m,nullptr);
+    for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS,uwFS,ucFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
 
     m_postFxReady = true;
     // ── HDR-compatible scene pipelines ────────────────────────────────────────
@@ -4854,6 +5104,15 @@ void VulkanRenderer::destroyPostFXPipelines()
         if (p) vkDestroyPipeline(m_device, p, nullptr);
     m_bloomBrightPipe=m_bloomBlurPipe=m_tonemapPipe=m_fxaaPipe=m_smaaPipe=m_aaBlitPipe=m_presentPipe=VK_NULL_HANDLE;
     m_presentDS = VK_NULL_HANDLE;   // freed with the pool below
+    m_underwaterCausticsReady = false;
+    if (m_underwaterCausticsPipe)       { vkDestroyPipeline(m_device, m_underwaterCausticsPipe, nullptr); m_underwaterCausticsPipe=VK_NULL_HANDLE; }
+    if (m_underwaterCausticsPipeLayout) { vkDestroyPipelineLayout(m_device, m_underwaterCausticsPipeLayout, nullptr); m_underwaterCausticsPipeLayout=VK_NULL_HANDLE; }
+    m_underwaterFogReady = false;
+    m_underwaterFogDS = VK_NULL_HANDLE;   // freed with the pool below
+    if (m_underwaterFogPipe)       { vkDestroyPipeline(m_device, m_underwaterFogPipe, nullptr); m_underwaterFogPipe=VK_NULL_HANDLE; }
+    if (m_underwaterFogPipeLayout) { vkDestroyPipelineLayout(m_device, m_underwaterFogPipeLayout, nullptr); m_underwaterFogPipeLayout=VK_NULL_HANDLE; }
+    if (m_underwaterFogDSLayout)   { vkDestroyDescriptorSetLayout(m_device, m_underwaterFogDSLayout, nullptr); m_underwaterFogDSLayout=VK_NULL_HANDLE; }
+    if (m_underwaterFogRP)         { vkDestroyRenderPass(m_device, m_underwaterFogRP, nullptr); m_underwaterFogRP=VK_NULL_HANDLE; }
     if (m_postFxPipeLayout) { vkDestroyPipelineLayout(m_device, m_postFxPipeLayout, nullptr); m_postFxPipeLayout=VK_NULL_HANDLE; }
     if (m_postFxDSPool)     { vkDestroyDescriptorPool(m_device, m_postFxDSPool, nullptr); m_postFxDSPool=VK_NULL_HANDLE; }
     if (m_postFxDSLayout)   { vkDestroyDescriptorSetLayout(m_device, m_postFxDSLayout, nullptr); m_postFxDSLayout=VK_NULL_HANDLE; }
@@ -4920,6 +5179,11 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
     makeFB(m_postFxBlitF16, m_bloomView[1], bw, bh, m_bloomFB[1]);
     makeFB(m_postFxBlitF8,  m_ldrView,      w,  h,  m_ldrFB);
     makeFB(m_postFxFinalRP, m_viewportView, w,  h,  m_fxaaFB);
+    // Underwater fog (Thema 185 Schritt 2): a second, LOAD-op framebuffer over
+    // the SAME m_hdrView — valid in Vulkan since load/store ops are not part of
+    // render-pass compatibility (see m_postFxSceneRP's depth attachment comment).
+    if (m_underwaterFogRP)
+        makeFB(m_underwaterFogRP, m_hdrView, w, h, m_underwaterFogFB);
     // UI overlay framebuffer — uses the same viewport image with LOAD_OP_LOAD render pass.
     if (m_uiViewportRP && m_viewportView)
         makeFB(m_uiViewportRP, m_viewportView, w, h, m_uiViewportFB);
@@ -4951,6 +5215,18 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
         vkUpdateDescriptorSets(m_device, 2, w, 0, nullptr);
     }
 
+    // Underwater fog's own 1-binding set: the viewport depth, read via a
+    // layout flip around the draw (see the Render() call site), not a
+    // ping-pong copy — so this points at m_viewportDepthView directly.
+    if (m_underwaterFogDS && m_viewportDepthView)
+    {
+        VkDescriptorImageInfo dii{ VK_NULL_HANDLE, m_viewportDepthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet dw{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        dw.dstSet = m_underwaterFogDS; dw.dstBinding = 0; dw.descriptorCount = 1;
+        dw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; dw.pImageInfo = &dii;
+        vkUpdateDescriptorSets(m_device, 1, &dw, 0, nullptr);
+    }
+
     // TAA's targets follow the same size and read m_ldrView / the viewport
     // depth just (re)built; the GPU is idle (destroyPostFXResources above).
     if (taaWanted()) createTaaTargets(w, h);
@@ -4968,6 +5244,7 @@ void VulkanRenderer::destroyPostFXResources()
     if (m_ldrFB)      { vkDestroyFramebuffer(m_device, m_ldrFB,      nullptr); m_ldrFB=VK_NULL_HANDLE; }
     if (m_bloomFB[1]) { vkDestroyFramebuffer(m_device, m_bloomFB[1], nullptr); m_bloomFB[1]=VK_NULL_HANDLE; }
     if (m_bloomFB[0]) { vkDestroyFramebuffer(m_device, m_bloomFB[0], nullptr); m_bloomFB[0]=VK_NULL_HANDLE; }
+    if (m_underwaterFogFB) { vkDestroyFramebuffer(m_device, m_underwaterFogFB, nullptr); m_underwaterFogFB=VK_NULL_HANDLE; }
     if (m_hdrFB)      { vkDestroyFramebuffer(m_device, m_hdrFB,      nullptr); m_hdrFB=VK_NULL_HANDLE; }
     if (m_ldrView)    { vkDestroyImageView(m_device, m_ldrView,    nullptr); m_ldrView=VK_NULL_HANDLE; }
     if (m_ldrImage)   { vkDestroyImage    (m_device, m_ldrImage,   nullptr); m_ldrImage=VK_NULL_HANDLE; }
@@ -5499,7 +5776,12 @@ void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
         ici.arrayLayers = 1;
         ici.samples     = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        // SAMPLED_BIT: the underwater fog pass (Thema 185 Schritt 2) samples this
+        // same image directly as a depth texture — without it, binding
+        // m_viewportDepthView into a COMBINED_IMAGE_SAMPLER descriptor is invalid
+        // usage (VUID-VkWriteDescriptorSet-descriptorType-00337), which validation
+        // layers (lavapipe in CI) treat as fatal and abort the whole process.
+        ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_viewportDepthImage), "viewport depth image");
 

@@ -17,6 +17,7 @@ class HorizonWorld;
 class RenderWorld;
 class ContentManager;
 struct EditorCameraOverride;
+struct UnderwaterCameraData;
 
 namespace HE
 {
@@ -80,6 +81,59 @@ inline constexpr float kEditorIconScreenFraction = 0.05f;
 // F-key framing must NOT measure them, or a light whose only "geometry" is a
 // symbol sized in screen fractions frames to a few centimetres.
 HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
+
+// How far `cameraPos` sits under a water surface, straight from the flat body LEVEL
+// WaterIndex resolves (HorizonScene/WaterQuery.h) — never the wave-displaced height.
+// The water material shades its waves on top of a geometrically flat mesh (mat_gen's
+// waterMaterial(): the wave trains only ever feed pixel-shading nodes — fresnel, foam,
+// the normal perturbation — never a vertex/world-position offset), so the flat level is
+// exactly where the lens draws the waterline; no wave phase or clock needs to travel
+// here for this to be exact.
+//
+// Several overlapping bodies: WaterIndex::surfaceAt's own rule decides (the highest
+// surface wins) — the same rule the water physics itself queries by. Dry outside
+// [bed, surface level]: below the water's own bed (inside solid ground or a cave
+// under the sheet), being under a surface whose floor is also below you is not
+// "underwater" either; above the surface (flying, a dock, a boat on top of the
+// body) there is simply no water at the camera's own position to be in.
+//
+// Stateless — called fresh every extract(), nothing carried from one frame to the next,
+// so a camera resting exactly on the waterline, or crossing it within a single frame,
+// reads correctly immediately with no hysteresis and no special-casing.
+//
+// Also resolves the post pass's tint/density (Thema 185 Schritt 2) from the body's own
+// UnderwaterFogParams (WaterField.h) — see UnderwaterCameraData's comment for the split
+// between what is resolved here (a per-frame scalar, the camera's own depth) and what
+// the pass still computes per pixel (the view-ray's segment length inside the body).
+HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
+                                                             const glm::vec3& cameraPos);
+
+// The caustic net's waterline fade-in (Thema 185 Schritt 3): the body's causticsIntensity
+// is multiplied by this smoothstep of the camera's depth below the surface — 0 on the
+// line (and above it), 1 from kCausticsFadeInDepth metres down, continuous in between,
+// so the net eases in over the first half metre of a dive instead of popping on at the
+// waterline. Pure function of the argument; no state.
+inline constexpr float kCausticsFadeInDepth = 0.5f;
+HE_RENDERING_API float causticsFadeIn(float signedDepth);
+
+// The fog's waterline band (Thema 185 Schritt 5): a DRY camera up to kFogDryBandFull
+// metres above a body's surface still gets that body's fog density (times this factor,
+// 1 in the band, smoothstep down to 0 at kFogDryBandEnd), wet stays false. The pass
+// then fogs, per pixel, only where the near plane has sliced the water sheet off (the
+// pixel's own near-plane point already lies below the surface plane): the floor that
+// shows bare there gets the segment from the plane crossing to the pixel, the way it
+// does from a hair below the line. Without that, it showed bright and unfogged at
+// +0.5 cm and fully fogged at -0.5 cm — the waterline pop (109 of 255 on every backend,
+// docs/underwater-acceptance-2026-10-12.md). Everywhere else nothing changes: the
+// translucent water surface is NOT in the depth buffer the pass reads, so fogging every
+// pixel below the plane would tint the whole lake seen from above. The per-pixel test
+// alone confines the effect to about one near distance above the surface (about twice
+// that on D3D and Metal, which rasterise GL's projection into a [0,1] clip); the band
+// is the cost gate that keeps the pass off for every other dry frame. 1 for
+// signedDepth >= 0.
+inline constexpr float kFogDryBandFull = 0.5f;
+inline constexpr float kFogDryBandEnd  = 1.0f;
+HE_RENDERING_API float fogWaterlineBand(float signedDepth);
 
 } // namespace HE
 

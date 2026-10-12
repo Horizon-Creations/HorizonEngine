@@ -2,6 +2,7 @@
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
+#include <Diagnostics/EngineProfiler.h> // HE_DUMP_GPUTIME turns live GPU timing on
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
@@ -7391,6 +7392,48 @@ void EditorApplication::dumpFrameHeadless()
 			ok = water::addPolygon(ltc, a, { { -50, -36 }, { -8, -42 }, { -2, 10 }, { -44, 18 } }).ok
 			  && water::addPolygon(ltc, c, { { 8, -6 }, { 52, -14 }, { 56, 38 }, { 20, 44 }, { 12, 20 } }).ok;
 		}
+		// The underwater post pass's per-body knobs (Thema 185 Schritt 4), for the A/B and the
+		// depth series: HE_DUMP_UWFOG="density[,falloff]" and
+		// HE_DUMP_UWCAUSTICS="intensity[,scale[,speed[,depth]]]" are set on EVERY body of the
+		// witness through the same setters the Water tab uses (so the clamp applies). Unset =
+		// the bodies keep their defaults. Density 0 / intensity 0 switch that stage off.
+		// Camera under water: CAMY = surface (302 for bank shapes at the default level) - depth.
+		auto uwFloats = [](const char* name, float* out, int n) {
+			const char* v = std::getenv(name);
+			if (!v || !*v) return false;
+			char* end = nullptr;
+			for (int i = 0; i < n; ++i)
+			{
+				const float val = std::strtof(v, &end);
+				if (end == v) break;   // fewer numbers than knobs: the rest keep their defaults
+				out[i] = val;
+				v = end;
+				if (*v == ',') ++v;
+			}
+			return true;
+		};
+		{
+			water::UnderwaterFogParams fogOv{};
+			float f[2] = { fogOv.density, fogOv.falloff };
+			const bool haveFog = uwFloats("HE_DUMP_UWFOG", f, 2);
+			water::UnderwaterCausticsParams cauOv{};
+			float c[4] = { cauOv.intensity, cauOv.scale, cauOv.speed, cauOv.depth };
+			const bool haveCau = uwFloats("HE_DUMP_UWCAUSTICS", c, 4);
+			if (haveFog) { fogOv.density = f[0]; fogOv.falloff = f[1]; }
+			if (haveCau) { cauOv.intensity = c[0]; cauOv.scale = c[1]; cauOv.speed = c[2]; cauOv.depth = c[3]; }
+			if (haveFog || haveCau)
+			{
+				for (const water::Body& body : std::vector<water::Body>(ltc.water.bodies))
+				{
+					if (haveFog) water::setUnderwaterFog(ltc, body.id, fogOv);
+					if (haveCau) water::setUnderwaterCaustics(ltc, body.id, cauOv);
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_UWFOG/UWCAUSTICS applied to %zu body(ies): "
+					"fog %s density %.3f falloff %.2f, caustics %s intensity %.2f scale %.2f speed %.2f depth %.1f",
+					ltc.water.bodies.size(), haveFog ? "set" : "default", fogOv.density, fogOv.falloff,
+					haveCau ? "set" : "default", cauOv.intensity, cauOv.scale, cauOv.speed, cauOv.depth);
+			}
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		const WaterSurface::Stats& ws = WaterSurface::lastStats();
@@ -7417,6 +7460,17 @@ void EditorApplication::dumpFrameHeadless()
 			"vertices %u, x span %.2f..%.2f, ground over sheet at the vertices at most %.3f m)",
 			wl, ok ? "ok" : "FAILED", ws.created, ws.triangles, level,
 			ltc.water.clipToGround ? 1 : 0, ltc.water.shoreOvershoot, verts, lo, hi, worstOver);
+		// HE_DUMP_SAVESCENE=<file.hescene> writes the witness world out as it stands (landscape,
+		// water body with the HE_DUMP_UWFOG / HE_DUMP_UWCAUSTICS knobs, the sky the SKYTEST block
+		// configured) so the REAL editor loop can open it: a perf capture (scripts/he_perf_capture.py
+		// --scene) of the underwater stage needs a scene file, and the lake only ever existed as
+		// an env-var witness. Same call the editor's File > Save makes.
+		if (const char* sv = std::getenv("HE_DUMP_SAVESCENE"); sv && *sv)
+		{
+			SceneSerializer saver;
+			const bool saved = saver.save(*m_editorWorld, sv, SerializeFormat::JSON);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_SAVESCENE %s -> %s", saved ? "wrote" : "FAILED to write", sv);
+		}
 	}
 
 	// ── Water brush witness (HE_DUMP_WATERBRUSH, Thema 174 Schritt 7): a flat
@@ -9005,6 +9059,57 @@ void EditorApplication::dumpFrameHeadless()
 	else
 		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());
+
+	// HE_DUMP_GPUTIME="frames[,WxH]": the pass-cost witness for backends whose GPU timer
+	// has no per-pass rows (D3D11, D3D12 and Vulkan time the whole frame only). AFTER the
+	// capture, so the picture is the one the same knobs give without it: the viewport goes
+	// to WxH (default the dump's 1280x720), `frames` more frames are rendered from the same
+	// camera with the profiler's live GPU timing on (D3D11 and GL only time when asked;
+	// D3D12 and Vulkan always do), and the whole-frame GPU times are logged as
+	// median/mean/min/max. A pass's cost is the difference between two runs that differ
+	// only in that pass (Thema 185 Schritt 5: UWFOG=0 UWCAUSTICS=0 against the defaults).
+	// The first frames are dropped: every backend reads its timestamps a few frames late.
+	if (const char* gt = std::getenv("HE_DUMP_GPUTIME"); gt && *gt)
+	{
+		int frames = std::clamp(std::atoi(gt), 30, 5000);
+		uint32_t tw = 1280, th = 720;
+		if (const char* comma = std::strchr(gt, ','))
+			if (unsigned a = 0, b = 0; std::sscanf(comma + 1, "%ux%u", &a, &b) == 2 && a >= 64 && b >= 64)
+				tw = a, th = b;
+		r->SetViewportSize(tw, th);
+		EngineProfiler& prof = EngineProfiler::instance();
+		const bool liveBefore = prof.liveEnabled();
+		prof.setLiveEnabled(true);
+		std::vector<double> ms;
+		ms.reserve(static_cast<size_t>(frames));
+		const int skip = 16;
+		for (int i = 0; i < frames + skip; ++i)
+		{
+			r->Render();
+			const double g = r->GetFrameGpuStats().gpuFrameMs;
+			if (i >= skip && g > 0.0)
+				ms.push_back(g);
+		}
+		prof.setLiveEnabled(liveBefore);
+		r->SetViewportSize(1280, 720);
+		char line[256];
+		if (ms.empty())
+			std::snprintf(line, sizeof line,
+				"EditorApplication: HE_DUMP_GPUTIME %ux%u — no GPU time from this backend", tw, th);
+		else
+		{
+			std::vector<double> s = ms;
+			std::sort(s.begin(), s.end());
+			double sum = 0.0;
+			for (double v : s) sum += v;
+			std::snprintf(line, sizeof line,
+				"EditorApplication: HE_DUMP_GPUTIME %ux%u frames=%zu gpu ms median=%.4f mean=%.4f "
+				"min=%.4f p90=%.4f max=%.4f",
+				tw, th, s.size(), s[s.size() / 2], sum / double(s.size()), s.front(),
+				s[(s.size() * 9) / 10], s.back());
+		}
+		HE_LOG_INFO(Editor, "%s", line);
+	}
 
 	// Witness the MCP screenshot path (HE_DUMP_SCENEIMAGE=<file.png>): the same
 	// IRenderer::RenderSceneImage call scene_screenshot makes, from the dump

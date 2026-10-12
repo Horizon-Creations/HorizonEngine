@@ -1040,6 +1040,19 @@ private:
 	// when the pass could not run (the caller then keeps `sourceHdr`).
 	void* EncodeMotionBlur(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
 
+	// Underwater caustics + fog (Thema 185 Schritte 2 und 3): one full-res pass ahead of
+	// motion blur/bloom, after DoF (see kUnderwaterCausticsMSL; the fog is folded into it).
+	// Built on first use, never runs unless the camera is under water with
+	// RenderWorld::underwaterCamera.causticsIntensity > 0 or .density > 0.
+	void*     m_ucPipeline         = nullptr; // id<MTLRenderPipelineState>
+	void*     m_ucColor            = nullptr; // id<MTLTexture> RGBA16F full-res
+	int       m_ucW                = 0;
+	int       m_ucH                = 0;
+	bool      m_ucTried            = false;   // the pipeline failed once: do not retry every frame
+	// Reads `sourceHdr` + the scene depth, writes m_ucColor; returns it, or null when the
+	// pass could not run (the caller then keeps `sourceHdr`).
+	void* EncodeUnderwaterCaustics(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
+
 	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
 	// Raymarch the clouds into m_cloudColor (rgb = L, a = T) at quarter resolution; the
 	// sky pass then bilinear-upsamples + composites. Uses the PREVIOUS frame's view/sun

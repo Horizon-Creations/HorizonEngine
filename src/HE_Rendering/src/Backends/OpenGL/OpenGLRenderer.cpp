@@ -14,6 +14,7 @@
 #include <HorizonRendering/GiInstanceSurface.h> // shared flat surface for a GI/reflection hit
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
+#include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake for the IBL ambient cubemap
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <glad/glad.h>
@@ -5447,6 +5448,246 @@ unsigned int OpenGLRenderer::RenderMotionBlur(unsigned int sourceHdr, int fullW,
 	return m_mbColor;
 }
 
+// ─── Underwater caustics (Thema 185 Schritt 3) ────────────────────────────────
+// The refracted-light net on whatever lies below the flat surface plane. Per pixel:
+// the depth names a world position P; the sun's ray through P (bent by Snell's law on
+// the way down) pierces the surface plane at S; the engine water's own wave trains
+// (Physics/WaterWaves.h, spliced in below) give the surface's curvature at S, and the
+// Jacobian of "where the light enters" -> "where it lands" says how much that spot's
+// light is squeezed: 1/|det| (a lens focus where the surface bulges up like a crest,
+// a dim spot where it dips). The wave trains are the SAME ones the surface material
+// draws and the physics floats on, so the net moves with the swell seen from above.
+// Added to the scene colour (light, not a tint), faded by depth below the surface
+// (Beer-Lambert, uCaustics.w) and by the surface's lean toward the refracted sun.
+// uCaustics.x is already multiplied by the waterline fade-in (RenderExtractor.cpp's
+// causticsFadeIn) and is exactly 0 on the line, where the net is skipped in the shader.
+//
+// The same pass carries the depth fog (Thema 185 Schritt 2 on the D3D/Vulkan backends,
+// a separate alpha-blended pass there): GL has no blend-onto-HDR step in this chain, and
+// a second full-resolution read+write for a few instructions would double the cost, so
+// the fog is folded in AFTER the net (the order the D3D backends draw them in). The pass
+// therefore runs whenever the camera is under water and either knob is non-zero.
+static const char* kUnderwaterCausticsFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uScene;
+uniform sampler2D uDepth;
+uniform mat4 uInvViewProj;
+uniform vec4 uCamSurface;   // xyz = camera world position, w = surface Y
+uniform vec4 uSun;          // xyz = direction TOWARD the sun (unit)
+uniform vec4 uSunColor;     // rgb = sun radiance (0 at night)
+uniform vec4 uCaustics;     // x = intensity (faded in), y = scale, z = wave clock (s), w = fade depth (m)
+uniform vec4 uTintDensity;  // rgb = resolved fog tint, a = per-metre density (the fog stage, see main)
+const float kTrains[12] = float[12](@TRAINS@);
+const float kTwoPi = 6.28318530718;
+const float kEta   = 1.33;
+
+// The light the refracted-sun net adds at P (vec3(0) where there is none). The screen
+// derivatives of P come in as arguments: main() takes them before any branch.
+vec3 causticLight(vec3 P, vec3 dPx, vec3 dPy)
+{
+	float depth = uCamSurface.w - P.y;                      // metres below the flat surface
+	float fadeDepth = uCaustics.w;
+	vec3 L = uSun.xyz;
+	if (uCaustics.x <= 0.0 || depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02) return vec3(0.0);   // off, dry, too deep, or no sun
+
+	// The sun's ray inside the water (Snell: the horizontal part shrinks by 1/eta),
+	// followed back up to the surface plane.
+	vec2  hz   = L.xz / kEta;
+	float cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
+	vec3  Lr   = vec3(hz.x, cosT, hz.y);
+	vec2  S    = P.xz + hz / max(cosT, 0.1) * depth;
+	// The material bends its wave phase with a slow FBM field; a cheap two-sine stand-in
+	// does the same here, so the lattice of the plane trains does not read as a grid.
+	S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * uCaustics.z), sin(0.37 * S.x - 0.27 * uCaustics.z));
+
+	// Curvature of the wave surface at S, summed over the engine water's trains.
+	// h = (steepness / k) sin(k (d.p - speed t)); H = -steepness k sin(.) d d^T.
+	// The first three trains are the engine water's own; the other three are their
+	// companions (turned 57 degrees, 0.73x the length, 0.6x the steepness, a touch
+	// faster) — the material shades a companion per knob as well, and with one
+	// direction per knob the net would collapse to parallel stripes.
+	float mxx = 0.0, mzz = 0.0, mxz = 0.0;
+	for (int i = 0; i < 6; ++i)
+	{
+		int   b    = i % 3;
+		float comp = i >= 3 ? 1.0 : 0.0;
+		float rad  = radians(kTrains[b * 4] + comp * 57.0);
+		vec2  dv   = vec2(cos(rad), sin(rad));
+		float k    = kTwoPi / (kTrains[b * 4 + 2] * mix(1.0, 0.73, comp)) * uCaustics.y;
+		float stp  = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
+		float spd  = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
+		float c    = stp * k * sin(k * (dot(dv, S) - spd * uCaustics.z));
+		mxx -= c * dv.x * dv.x;
+		mzz -= c * dv.y * dv.y;
+		mxz -= c * dv.x * dv.y;
+	}
+	// How far the bend moves the light on its way down. The reference depth added to
+	// the real one stands for the fine chop the material shades on top of its trains,
+	// so shallow water still shows a net.
+	float kd  = (kEta - 1.0) / kEta * (0.6 * depth + 2.0);
+	float det = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
+	// Only real focusing counts (1/|det| well above 1): bright pools and lines on a floor
+	// that keeps its own light, rather than a brightening of everything. Graded, so a
+	// pool has a core and a falloff instead of a flat plateau.
+	float x   = max(1.0 / max(abs(det), 0.1) - 2.0, 0.0);
+	float net = x / (x + 2.0);
+
+	// Surfaces that face the refracted sun catch it; a wall barely does.
+	vec3 n = normalize(cross(dPx, dPy));
+	if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
+	float ndl = clamp(dot(n, Lr), 0.0, 1.0);
+	float atten = exp(-depth / fadeDepth) * smoothstep(0.0, 0.4, depth);
+	return uSunColor.rgb * (uCaustics.x * net * ndl * atten);
+}
+
+void main()
+{
+	vec3 scene = texture(uScene, vUV).rgb;
+	float d = texture(uDepth, vUV).r;
+	vec4 wp = uInvViewProj * vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+	vec3 P = wp.xyz / max(wp.w, 1e-8);
+	vec3 dPx = dFdx(P);                                     // before any early-out: derivatives are
+	vec3 dPy = dFdy(P);                                     // undefined after divergent flow
+	vec3 lit = scene + (d < 1.0 ? causticLight(P, dPx, dPy) : vec3(0.0));   // the sky has no floor to catch the net
+
+	// The fog (twin of the D3D/Vulkan underwater fog pass, HlslSources.h kUnderwaterFogHLSL):
+	// Beer-Lambert over the part of the camera->P ray that lies on the wet side of the flat
+	// surface plane. Both ends dry = 0 (a ray that never enters the water pays nothing); both
+	// wet = the whole ray; split = the part before the plane crossing, which is what keeps the
+	// waterline soft. Applied AFTER the net so the fog swallows it with distance, exactly as
+	// on the D3D backends (caustics first, then the premultiplied tint*fog + dst*(1-fog) blend).
+	vec3  camPos   = uCamSurface.xyz;
+	float surfaceY = uCamSurface.w;
+	bool  camBelow = camPos.y < surfaceY;
+	bool  pBelow   = P.y < surfaceY;
+	// This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera (the
+	// waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the water sheet
+	// off, never what lies under the translucent surface (see kUnderwaterFogHLSL).
+	vec4 wn = uInvViewProj * vec4(vUV * 2.0 - 1.0, -1.0, 1.0);
+	bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+	float segment;
+	if (camBelow == pBelow)
+		segment = camBelow ? length(camPos - P) : 0.0;
+	else
+	{
+		float t = (surfaceY - camPos.y) / (P.y - camPos.y);
+		vec3 crossPt = camPos + t * (P - camPos);
+		segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
+	}
+	float fogAmount = 1.0 - exp(-uTintDensity.a * segment);
+	fragColor = vec4(mix(lit, uTintDensity.rgb, fogAmount), 1.0);
+}
+)GLSL";
+
+bool OpenGLRenderer::EnsureUnderwaterCausticsPipeline()
+{
+	if (m_ucProgram) return true;
+	if (m_ucTried) return false;
+	m_ucTried = true;
+	std::string fsSrc = kUnderwaterCausticsFS;
+	const std::string trains = HE::causticsWaveTrainsList();
+	fsSrc.replace(fsSrc.find("@TRAINS@"), 8, trains);
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fsSrc.c_str());
+	GLuint prog = glCreateProgram();
+	glAttachShader(prog, vs);
+	glAttachShader(prog, fs);
+	glLinkProgram(prog);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+	GLint ok = GL_FALSE;
+	glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+	if (!ok)
+	{
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: underwater caustics program failed to link");
+		glDeleteProgram(prog);
+		return false;
+	}
+	m_ucProgram   = prog;
+	m_uUcScene    = glGetUniformLocation(prog, "uScene");
+	m_uUcDepth    = glGetUniformLocation(prog, "uDepth");
+	m_uUcInvVP    = glGetUniformLocation(prog, "uInvViewProj");
+	m_uUcCamSurf  = glGetUniformLocation(prog, "uCamSurface");
+	m_uUcSun      = glGetUniformLocation(prog, "uSun");
+	m_uUcSunColor = glGetUniformLocation(prog, "uSunColor");
+	m_uUcParams   = glGetUniformLocation(prog, "uCaustics");
+	m_uUcTint     = glGetUniformLocation(prog, "uTintDensity");
+	return true;
+}
+
+void OpenGLRenderer::EnsureUnderwaterCausticsTarget(int fullW, int fullH)
+{
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (m_ucFBO && fullW == m_ucW && fullH == m_ucH) return;
+	if (m_ucFBO)   { glDeleteFramebuffers(1, &m_ucFBO); m_ucFBO = 0; }
+	if (m_ucColor) { glDeleteTextures(1, &m_ucColor);   m_ucColor = 0; }
+	glGenFramebuffers(1, &m_ucFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ucFBO);
+	glGenTextures(1, &m_ucColor);
+	glBindTexture(GL_TEXTURE_2D, m_ucColor);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, fullW, fullH, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ucColor, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: underwater caustics FBO incomplete");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_ucW = fullW;
+	m_ucH = fullH;
+}
+
+// Assumes m_fsVAO is bound and the depth test is off (the post-process pass's state);
+// restores nothing, the next pass rebinds its own output.
+unsigned int OpenGLRenderer::RenderUnderwaterCaustics(unsigned int sourceHdr, int fullW, int fullH,
+                                                      const glm::mat4& invViewProj,
+                                                      const glm::vec3& towardSun,
+                                                      const glm::vec3& sunColor)
+{
+	if (!sourceHdr || !m_hdrDepth || !EnsureUnderwaterCausticsPipeline()) return 0;
+	EnsureUnderwaterCausticsTarget(fullW, fullH);
+	if (!m_ucFBO) return 0;
+
+	const UnderwaterCameraData& uc = m_renderWorld.underwaterCamera;
+	// The wave clock the engine water material runs on (HE_SKY_TIME pins it for
+	// deterministic captures), scaled by the body's own speed.
+	static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+	const float engineSeconds = s_timeOv && *s_timeOv ? static_cast<float>(std::atof(s_timeOv))
+	                                                  : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	const glm::vec3 cam = m_renderWorld.camera.position;
+
+	glViewport(0, 0, m_ucW, m_ucH);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ucFBO);
+	glDisable(GL_BLEND);
+	glUseProgram(m_ucProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, sourceHdr);
+	glUniform1i(m_uUcScene, 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glUniform1i(m_uUcDepth, 1);
+	glUniformMatrix4fv(m_uUcInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
+	glUniform4f(m_uUcCamSurf, cam.x, cam.y, cam.z, uc.surfaceY);
+	glUniform4f(m_uUcSun, towardSun.x, towardSun.y, towardSun.z, 0.0f);
+	glUniform4f(m_uUcSunColor, sunColor.r, sunColor.g, sunColor.b, 0.0f);
+	glUniform4f(m_uUcParams, uc.causticsIntensity, uc.causticsScale,
+	            engineSeconds * uc.causticsSpeed, uc.causticsDepth);
+	glUniform4f(m_uUcTint, uc.tintColor.r, uc.tintColor.g, uc.tintColor.b, uc.density);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// Units clean for the passes that follow (depth on unit 1 is what the scene pass renders into).
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return m_ucColor;
+}
+
 // ─── SSAO ────────────────────────────────────────────────────────────────────
 // Kernel + rotation noise come from HorizonRendering/SsaoKernel.h: the same
 // deterministic samples every backend bakes, which is what makes GL == Metal ==
@@ -10872,11 +11113,31 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// THAT. Off → sceneHdr stays m_hdrColor and nothing here changes.
 			// Sibling scope, not nested in Bloom's: GL_TIME_ELAPSED cannot nest.
 			unsigned int sceneHdr = m_hdrColor;
+
 			if (m_dofEnabled)
 			{
 				GpuPassScope _dofTimer(this, "DoF");
 				if (const unsigned int dofTex = RenderDepthOfField(pw, ph, m_renderWorld.camera.projection))
 					sceneHdr = dofTex;
+			}
+
+			// Underwater caustics + fog next, on whatever DoF left (Thema 185 Schritte 2 und 3): light
+			// added to the scene and the depth fog over it, so motion blur/bloom treat both like
+			// any other lit surface. Runs only with the camera under water and at least one of
+			// the body's two knobs (net intensity, fog density) above 0 (the extractor's
+			// waterline fade-in makes the intensity exactly 0 on the line, the fog carries on
+			// through it); every other frame pays nothing. Sibling scope, like the passes below.
+			// Not gated on wet: density stays above 0 for a dry camera in the waterline band
+			// just above the surface (HE::fogWaterlineBand, Thema 185 Schritt 5).
+			if (m_renderWorld.underwaterCamera.causticsIntensity > 0.0f
+			    || m_renderWorld.underwaterCamera.density > 0.0f)
+			{
+				GpuPassScope _ucTimer(this, "UnderwaterCaustics");
+				glm::vec3 ucSunDir, ucSunColor;
+				m_renderWorld.dominantDirectionalLight(ucSunDir, ucSunColor);
+				if (const unsigned int ucTex = RenderUnderwaterCaustics(sceneHdr, pw, ph, invViewProj,
+				                                                        glm::normalize(sunDir), ucSunColor))
+					sceneHdr = ucTex;
 			}
 
 			// Motion blur next, on whatever DoF left: the camera's frame-to-frame

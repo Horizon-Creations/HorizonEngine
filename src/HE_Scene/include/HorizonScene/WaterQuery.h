@@ -46,6 +46,8 @@ namespace HE::water
         float        depth   = 0.0f;         // height above the ground, never negative
         glm::vec3    flow    { 0.0f };       // the current, m/s
         BodyPhysics  physics {};             // that body's settings (density, drags, …)
+        UnderwaterFogParams underwaterFog{}; // that body's look from below (Thema 185 Schritt 2)
+        UnderwaterCausticsParams underwaterCaustics{};   // …and its refracted-light net (Schritt 3)
     };
 
     // A box in world space where there is water (for the physics' broad phase).

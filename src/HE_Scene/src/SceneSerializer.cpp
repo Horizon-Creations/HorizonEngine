@@ -663,6 +663,33 @@ namespace
 						if (b.physics.splash      != d.splash)      pj["splash"]      = b.physics.splash;
 						bj["physics"] = std::move(pj);
 					}
+					// What this body looks like from below its surface (Thema 185 Schritt
+					// 2): same "only the non-default settings" rule as physics above.
+					if (b.underwaterFog != HE::water::UnderwaterFogParams{})
+					{
+						const HE::water::UnderwaterFogParams d;
+						json fj = json::object();
+						if (b.underwaterFog.shallowColor != d.shallowColor)
+							fj["shallowColor"] = { b.underwaterFog.shallowColor.x, b.underwaterFog.shallowColor.y,
+							                       b.underwaterFog.shallowColor.z };
+						if (b.underwaterFog.deepColor != d.deepColor)
+							fj["deepColor"] = { b.underwaterFog.deepColor.x, b.underwaterFog.deepColor.y,
+							                    b.underwaterFog.deepColor.z };
+						if (b.underwaterFog.density != d.density) fj["density"] = b.underwaterFog.density;
+						if (b.underwaterFog.falloff != d.falloff) fj["falloff"] = b.underwaterFog.falloff;
+						bj["underwaterFog"] = std::move(fj);
+					}
+					// The refracted-light net from below (Thema 185 Schritt 3): same rule.
+					if (b.underwaterCaustics != HE::water::UnderwaterCausticsParams{})
+					{
+						const HE::water::UnderwaterCausticsParams d;
+						json cj = json::object();
+						if (b.underwaterCaustics.intensity != d.intensity) cj["intensity"] = b.underwaterCaustics.intensity;
+						if (b.underwaterCaustics.scale     != d.scale)     cj["scale"]     = b.underwaterCaustics.scale;
+						if (b.underwaterCaustics.speed     != d.speed)     cj["speed"]     = b.underwaterCaustics.speed;
+						if (b.underwaterCaustics.depth     != d.depth)     cj["depth"]     = b.underwaterCaustics.depth;
+						bj["underwaterCaustics"] = std::move(cj);
+					}
 					bodies.push_back(std::move(bj));
 				}
 				tc["waterBodies"] = std::move(bodies);
@@ -1624,6 +1651,37 @@ namespace
 							if (pj.contains("flow") && pj["flow"].is_array() && pj["flow"].size() == 2 &&
 							    pj["flow"][0].is_number() && pj["flow"][1].is_number())
 								b.physics.flow = { pj["flow"][0].get<float>(), pj["flow"][1].get<float>() };
+						}
+						// What this body looks like from below its surface (Thema 185
+						// Schritt 2). Every key is optional; sanitize() below clamps it.
+						if (bj.contains("underwaterFog") && bj["underwaterFog"].is_object())
+						{
+							const json& fj = bj["underwaterFog"];
+							const auto color3 = [&fj](const char* key, glm::vec3& into)
+							{
+								if (fj.contains(key) && fj[key].is_array() && fj[key].size() == 3 &&
+								    fj[key][0].is_number() && fj[key][1].is_number() && fj[key][2].is_number())
+									into = { fj[key][0].get<float>(), fj[key][1].get<float>(), fj[key][2].get<float>() };
+							};
+							color3("shallowColor", b.underwaterFog.shallowColor);
+							color3("deepColor",    b.underwaterFog.deepColor);
+							if (fj.contains("density") && fj["density"].is_number())
+								b.underwaterFog.density = fj["density"].get<float>();
+							if (fj.contains("falloff") && fj["falloff"].is_number())
+								b.underwaterFog.falloff = fj["falloff"].get<float>();
+						}
+						// The refracted-light net from below (Thema 185 Schritt 3).
+						if (bj.contains("underwaterCaustics") && bj["underwaterCaustics"].is_object())
+						{
+							const json& cj = bj["underwaterCaustics"];
+							const auto num = [&cj](const char* key, float& into)
+							{
+								if (cj.contains(key) && cj[key].is_number()) into = cj[key].get<float>();
+							};
+							num("intensity", b.underwaterCaustics.intensity);
+							num("scale",     b.underwaterCaustics.scale);
+							num("speed",     b.underwaterCaustics.speed);
+							num("depth",     b.underwaterCaustics.depth);
 						}
 						w.bodies.push_back(b);
 					}

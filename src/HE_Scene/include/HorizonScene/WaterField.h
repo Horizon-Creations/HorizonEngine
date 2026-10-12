@@ -145,6 +145,99 @@ namespace HE::water
     // ±50 m/s per axis, splash 0..4).
     BodyPhysics clampPhysics(const BodyPhysics& p);
 
+    // ── What this body looks like from BELOW the surface (Thema 185 Schritt 2) ──
+    // The post-processing stage reads this when RenderWorld::underwaterCamera says
+    // the camera sits in this body — color and visibility while submerged, not the
+    // surface material's own look DOWN into the water (Water.hasset's ShallowColor /
+    // DeepColor / Turbidity, which never reads scene depth and stays this task's
+    // sibling, not its source). The defaults match that material's today, so a lake
+    // that never touches this panel still looks continuous crossing the waterline.
+    inline constexpr float kDefaultUnderwaterDensity = 0.45f;   // 1/m, Beer-Lambert absorption
+    inline constexpr float kMaxUnderwaterDensity     = 5.0f;
+    inline constexpr float kDefaultUnderwaterFalloff = 1.0f;    // depth-curve exponent, 1 = plain exponential
+    inline constexpr float kMinUnderwaterFalloff     = 0.1f;
+    inline constexpr float kMaxUnderwaterFalloff     = 8.0f;
+
+    struct UnderwaterFogParams
+    {
+        // Tint just under the surface, and the long-submerged tint it ramps toward
+        // with the camera's own depth (RenderWorld::underwaterCamera.signedDepth) —
+        // never a per-pixel scene distance, so a camera hovering at a fixed depth
+        // sees a fixed color no matter what it looks at.
+        glm::vec3 shallowColor { 0.045f, 0.20f, 0.22f };
+        glm::vec3 deepColor    { 0.004f, 0.028f, 0.052f };
+        // Per-metre absorption along the VIEW RAY's segment inside this body (the
+        // post pass's own Beer-Lambert fog: 1 - exp(-density * segmentLength)).
+        // The same number also drives how fast the tint above ramps shallow→deep —
+        // one murkiness, two symptoms, instead of a second knob to keep in sync.
+        float density = kDefaultUnderwaterDensity;
+        // Exponent reshaping that shallow→deep ramp (>1 lingers near shallowColor
+        // before darkening, <1 reaches deepColor sooner). Does not touch the fog.
+        float falloff = kDefaultUnderwaterFalloff;
+
+        bool operator==(const UnderwaterFogParams& o) const
+        {
+            return shallowColor == o.shallowColor && deepColor == o.deepColor &&
+                   density == o.density && falloff == o.falloff;
+        }
+        bool operator!=(const UnderwaterFogParams& o) const { return !(*this == o); }
+    };
+
+    // Held to its bounds like clampPhysics: a non-finite colour channel or scalar
+    // becomes the default, density clamped 0..kMaxUnderwaterDensity, falloff clamped
+    // kMinUnderwaterFalloff..kMaxUnderwaterFalloff. A colour with any non-finite
+    // channel falls back to the default colour whole (a half-finite tint reads as
+    // intent lost, not as "clamp the channels that still make sense").
+    UnderwaterFogParams clampUnderwaterFog(const UnderwaterFogParams& p);
+
+    // ── Light the surface refracts down onto what lies below (Thema 185 Schritt 3) ──
+    // The caustic pass (a sibling of the fog pass, run just before it) paints the
+    // moving net of bright lines a wavy surface throws on the floor: per pixel it
+    // follows the sun's ray from the geometry up to the flat surface plane, bends
+    // it by the slope of the engine water's own waves there (Physics/WaterWaves.h —
+    // the numbers the surface material and the physics already share, so the net
+    // moves with the swell you see from above) and reads a tileable caustic pattern
+    // at the bent position. Defaults are visible but mild: a lake that never touches
+    // this panel still gets a gentle net once the camera dives, and 0 intensity
+    // turns the pass off entirely (zero cost, no draw).
+    inline constexpr float kDefaultCausticsIntensity = 0.55f;
+    inline constexpr float kMaxCausticsIntensity     = 4.0f;
+    inline constexpr float kDefaultCausticsScale     = 1.0f;    // 1 = the water material's own wavelengths
+    inline constexpr float kMinCausticsScale         = 0.1f;
+    inline constexpr float kMaxCausticsScale         = 8.0f;
+    inline constexpr float kDefaultCausticsSpeed     = 1.0f;    // 1 = the surface's own wave clock
+    inline constexpr float kMaxCausticsSpeed         = 4.0f;
+    inline constexpr float kDefaultCausticsDepth     = 14.0f;   // m below the surface where it has faded to 1/e
+    inline constexpr float kMinCausticsDepth         = 0.5f;
+    inline constexpr float kMaxCausticsDepth         = 200.0f;
+
+    struct UnderwaterCausticsParams
+    {
+        // Brightness of the net (0 = off). Multiplies the sun's colour, so the net is
+        // as bright as the sun the scene already has — and gone at night.
+        float intensity = kDefaultCausticsIntensity;
+        // Size of the net's cells relative to the water material's waves: 2 = twice
+        // as fine, 0.5 = twice as wide. Scales the wave phases the pass reads too.
+        float scale = kDefaultCausticsScale;
+        // Animation speed relative to the surface's wave clock.
+        float speed = kDefaultCausticsSpeed;
+        // Depth below the surface at which the net has faded to 1/e (the water
+        // swallows the light on its way down). Pixels deeper than 5x this are not
+        // shaded at all — the pass's cost cap for a surface far above.
+        float depth = kDefaultCausticsDepth;
+
+        bool operator==(const UnderwaterCausticsParams& o) const
+        {
+            return intensity == o.intensity && scale == o.scale && speed == o.speed &&
+                   depth == o.depth;
+        }
+        bool operator!=(const UnderwaterCausticsParams& o) const { return !(*this == o); }
+    };
+
+    // Held to its bounds like clampUnderwaterFog: a non-finite value becomes the
+    // default, each knob clamped to its kMin..kMax above (intensity and speed 0..max).
+    UnderwaterCausticsParams clampUnderwaterCaustics(const UnderwaterCausticsParams& p);
+
     struct Body
     {
         uint16_t id    = kNoBody;
@@ -153,6 +246,11 @@ namespace HE::water
         // What the water does to a body in it. Saved with the body when it differs
         // from the defaults, part of sameContent and of Delta.
         BodyPhysics physics{};
+        // What this body looks like from below its surface (Thema 185 Schritt 2).
+        // Same save/compare rule as physics: only when it differs from the defaults.
+        UnderwaterFogParams underwaterFog{};
+        // The refracted-light net from below (Thema 185 Schritt 3); same rule.
+        UnderwaterCausticsParams underwaterCaustics{};
         // The outline the lake's cells were last laid from (terrain-local XZ, the
         // polygon of the spline, no closing duplicate). Empty for brush water and
         // for a lake whose spline never reached the field. It is the baseline the
@@ -290,6 +388,17 @@ namespace HE::water
     // `dirty` nor the rectangle, and never touches TerrainComponent::dirty. False
     // for an unknown body.
     bool setPhysics(TerrainComponent& tc, uint16_t id, const BodyPhysics& physics);
+
+    // What this body looks like from below its surface (UnderwaterFogParams), held to
+    // its bounds (clampUnderwaterFog). Same non-effect on the sheet as setPhysics:
+    // bumps Field::revision, touches neither `dirty` nor the rectangle nor
+    // TerrainComponent::dirty. False for an unknown body.
+    bool setUnderwaterFog(TerrainComponent& tc, uint16_t id, const UnderwaterFogParams& fog);
+
+    // The refracted-light net from below (UnderwaterCausticsParams), held to its
+    // bounds (clampUnderwaterCaustics). Same non-effect on the sheet as
+    // setUnderwaterFog. False for an unknown body.
+    bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCausticsParams& c);
 
     // Shore clipping on or off and its overshoot (Field::clipToGround,
     // shoreOvershoot), every surface of the landscape rebuilt. The overshoot is

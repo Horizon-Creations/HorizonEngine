@@ -3,6 +3,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <Renderer/UIRenderObject.h>
 #include <Renderer/UIFont.h>
 #include <Diagnostics/EngineProfiler.h>
@@ -1628,6 +1629,18 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>            postFxCB;
     bool postFxReady     = false;
     float exposure       = 1.0f;
+
+    // ── Underwater fog (Thema 185 Schritt 2) — alpha-blended onto hdrRTV,
+    // no ping-pong target (see HlslSources.h's kUnderwaterFogHLSL comment).
+    ComPtr<ID3D11PixelShader>       underwaterFogPS;
+    ComPtr<ID3D11Buffer>            underwaterFogCB;
+    ComPtr<ID3D11BlendState>        underwaterFogBlendState;
+    bool underwaterFogReady = false;
+    // ── Underwater caustics (Thema 185 Schritt 3) — a second fullscreen pass on the same
+    // target with the fog's blend state (output alpha 0 → plain additive), drawn first.
+    ComPtr<ID3D11PixelShader>       underwaterCausticsPS;
+    ComPtr<ID3D11Buffer>            underwaterCausticsCB;
+    bool underwaterCausticsReady = false;
 
     // ── Sky pipeline ──────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>       skyVS;
@@ -3788,7 +3801,7 @@ struct D3D11RendererImpl
             }
             return true;
         };
-        ComPtr<ID3DBlob> vsB, tmB, fxB, brB, blB, btB, smB;
+        ComPtr<ID3DBlob> vsB, tmB, fxB, brB, blB, btB, smB, uwB;
         if (!compile(kFSTriangleVS,   "main", "vs_5_0", vsB)) return false;
         if (!compile(kTonemapHLSL,    "main", "ps_5_0", tmB)) return false;
         if (!compile(kFxaaHLSL,       "main", "ps_5_0", fxB)) return false;
@@ -3796,6 +3809,11 @@ struct D3D11RendererImpl
         if (!compile(kAABlitHLSL,     "main", "ps_5_0", btB)) return false;
         if (!compile(kBloomBrightHLSL,"main", "ps_5_0", brB)) return false;
         if (!compile(kBloomBlurHLSL,  "main", "ps_5_0", blB)) return false;
+        const bool underwaterCompiled = compile(kUnderwaterFogHLSL, "main", "ps_5_0", uwB);
+        ComPtr<ID3DBlob> ucB;
+        std::string causticsSrc = kUnderwaterCausticsHLSL;
+        causticsSrc.replace(causticsSrc.find("@TRAINS@"), 8, HE::causticsWaveTrainsList());
+        const bool causticsCompiled = compile(causticsSrc.c_str(), "main", "ps_5_0", ucB);
 
         device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &fsVS);
         device->CreatePixelShader (tmB->GetBufferPointer(), tmB->GetBufferSize(), nullptr, &tonemapPS);
@@ -3804,6 +3822,10 @@ struct D3D11RendererImpl
         device->CreatePixelShader (btB->GetBufferPointer(), btB->GetBufferSize(), nullptr, &aaBlitPS);
         device->CreatePixelShader (brB->GetBufferPointer(), brB->GetBufferSize(), nullptr, &bloomBrightPS);
         device->CreatePixelShader (blB->GetBufferPointer(), blB->GetBufferSize(), nullptr, &bloomBlurPS);
+        if (underwaterCompiled)
+            device->CreatePixelShader(uwB->GetBufferPointer(), uwB->GetBufferSize(), nullptr, &underwaterFogPS);
+        if (causticsCompiled)
+            device->CreatePixelShader(ucB->GetBufferPointer(), ucB->GetBufferSize(), nullptr, &underwaterCausticsPS);
 
         { D3D11_SAMPLER_DESC sd{};
           sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -3823,6 +3845,29 @@ struct D3D11RendererImpl
           bd.ByteWidth = 16u; bd.Usage = D3D11_USAGE_DYNAMIC;
           bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
           device->CreateBuffer(&bd, nullptr, &postFxCB); }
+
+        { D3D11_BUFFER_DESC bd{};
+          bd.ByteWidth = 112u; bd.Usage = D3D11_USAGE_DYNAMIC;   // mat4 + 3 x float4, see kUnderwaterFogHLSL
+          bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+          device->CreateBuffer(&bd, nullptr, &underwaterFogCB); }
+        { D3D11_BLEND_DESC bd{};
+          D3D11_RENDER_TARGET_BLEND_DESC& rt = bd.RenderTarget[0];
+          rt.BlendEnable = TRUE;
+          // Shader output is premultiplied (rgb = tint * fogAmount, a = fogAmount):
+          // dst' = src*1 + dst*(1 - fogAmount) = mix(dst, tint, fogAmount) in one draw.
+          rt.SrcBlend = D3D11_BLEND_ONE;       rt.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+          rt.SrcBlendAlpha = D3D11_BLEND_ONE;  rt.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+          rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+          rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+          device->CreateBlendState(&bd, &underwaterFogBlendState); }
+        underwaterFogReady = underwaterCompiled && underwaterFogPS && underwaterFogCB
+                           && underwaterFogBlendState && fsVS && noDepthDSS && fsRastState;
+        { D3D11_BUFFER_DESC bd{};
+          bd.ByteWidth = 144u; bd.Usage = D3D11_USAGE_DYNAMIC;   // mat4 + 5 x float4, see kUnderwaterCausticsHLSL
+          bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+          device->CreateBuffer(&bd, nullptr, &underwaterCausticsCB); }
+        underwaterCausticsReady = causticsCompiled && underwaterCausticsPS && underwaterCausticsCB
+                                && underwaterFogBlendState && fsVS && noDepthDSS && fsRastState;
 
         postFxReady = fsVS && tonemapPS && fxaaPS && smaaPS && aaBlitPS && bloomBrightPS && bloomBlurPS
                    && linearSampler && noDepthDSS && fsRastState && postFxCB;
@@ -7642,6 +7687,125 @@ void D3D11Renderer::DrawViewportFrame()
     {
         // Unbind the HDR RT before using it as an SRV.
         { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
+
+        // Underwater fog (Thema 185 Schritt 2): alpha-blended straight onto hdrRTV,
+        // before bloom samples it (so a bright light seen through murky water
+        // blooms less, not more). Skipped whole on a dry frame — the only cost a
+        // scene without water pays is this one branch. See kUnderwaterFogHLSL
+        // (HlslSources.h) for the per-pixel math.
+        const UnderwaterCameraData& uwCam = p.m_renderWorld.underwaterCamera;
+
+        // Underwater caustics (Thema 185 Schritt 3), BEFORE the fog so the fog swallows the
+        // net with distance: light added onto hdrRTV by the fog's own blend state (the
+        // shader's alpha is 0, so ONE/INV_SRC_ALPHA is a plain add). Runs only with the
+        // camera under water and the body's intensity above 0 (the extractor's waterline
+        // fade-in makes it exactly 0 on the line). See kUnderwaterCausticsHLSL.
+        if (uwCam.wet && uwCam.causticsIntensity > 0.0f && p.underwaterCausticsReady && p.viewportDepthSRV)
+        {
+            const glm::mat4 invViewProjUc =
+                glm::inverse(p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view);
+            glm::vec3 ucSunDir, ucSunColor;
+            p.m_renderWorld.dominantDirectionalLight(ucSunDir, ucSunColor);   // colour is 0 at night
+            const glm::vec3 towardSun = glm::normalize(p.m_renderWorld.sunDirection);
+            static const char* s_ucTimeOv = std::getenv("HE_SKY_TIME");   // pins the wave clock for captures
+            const float ucSeconds = (s_ucTimeOv && *s_ucTimeOv) ? static_cast<float>(std::atof(s_ucTimeOv))
+                                                                : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+            struct UnderwaterCausticsCB
+            {
+                float invViewProj[16];
+                float depthParams[4];
+                float camSurface[4];
+                float sun[4];
+                float sunColor[4];
+                float caustics[4];
+            } ucb{};
+            std::memcpy(ucb.invViewProj, &invViewProjUc[0][0], 16 * sizeof(float));
+            ucb.depthParams[0] = -1.0f; ucb.depthParams[1] = 1.0f; ucb.depthParams[2] = 0.0f;   // same as the fog
+            ucb.camSurface[0] = p.m_renderWorld.camera.position.x;
+            ucb.camSurface[1] = p.m_renderWorld.camera.position.y;
+            ucb.camSurface[2] = p.m_renderWorld.camera.position.z;
+            ucb.camSurface[3] = uwCam.surfaceY;
+            ucb.sun[0] = towardSun.x; ucb.sun[1] = towardSun.y; ucb.sun[2] = towardSun.z;
+            ucb.sunColor[0] = ucSunColor.r; ucb.sunColor[1] = ucSunColor.g; ucb.sunColor[2] = ucSunColor.b;
+            ucb.caustics[0] = uwCam.causticsIntensity;
+            ucb.caustics[1] = uwCam.causticsScale;
+            ucb.caustics[2] = ucSeconds * uwCam.causticsSpeed;
+            ucb.caustics[3] = uwCam.causticsDepth;
+
+            D3D11_MAPPED_SUBRESOURCE ucm{};
+            if (SUCCEEDED(p.context->Map(p.underwaterCausticsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ucm)))
+            {
+                std::memcpy(ucm.pData, &ucb, sizeof(ucb));
+                p.context->Unmap(p.underwaterCausticsCB.Get(), 0);
+            }
+            p.context->OMSetRenderTargets(1, &sceneRTV, nullptr);
+            p.context->OMSetBlendState(p.underwaterFogBlendState.Get(), nullptr, 0xFFFFFFFFu);
+            p.context->RSSetViewports(1, &vvp);
+            p.context->IASetInputLayout(nullptr);
+            p.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            p.context->VSSetShader(p.fsVS.Get(), nullptr, 0);
+            p.context->PSSetShader(p.underwaterCausticsPS.Get(), nullptr, 0);
+            p.context->OMSetDepthStencilState(p.noDepthDSS.Get(), 0);
+            p.context->RSSetState(p.fsRastState.Get());
+            p.context->PSSetConstantBuffers(0, 1, p.underwaterCausticsCB.GetAddressOf());
+            p.context->PSSetShaderResources(0, 1, p.viewportDepthSRV.GetAddressOf());
+            p.context->PSSetSamplers(0, 1, p.gbPointClamp.GetAddressOf());
+            p.context->Draw(3, 0);
+
+            ID3D11ShaderResourceView* ucNullSRV = nullptr;
+            p.context->PSSetShaderResources(0, 1, &ucNullSRV);
+            p.context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+            ID3D11RenderTargetView* ucN = nullptr; p.context->OMSetRenderTargets(1, &ucN, nullptr);
+        }
+
+        // Gated on density, not wet: the extractor keeps it above 0 for a dry camera in the
+        // waterline band just above the surface (HE::fogWaterlineBand), where the shader
+        // fogs only what lies below the plane — the near-plane-exposed floor that popped.
+        if (uwCam.density > 0.0f && p.underwaterFogReady && p.viewportDepthSRV)
+        {
+            const glm::mat4 viewProjUw = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+            const glm::mat4 invViewProjUw = glm::inverse(viewProjUw);
+            struct UnderwaterFogCB
+            {
+                float invViewProj[16];
+                float depthParams[4];
+                float camPosSurfaceY[4];
+                float tintDensity[4];
+            } cb{};
+            std::memcpy(cb.invViewProj, &invViewProjUw[0][0], 16 * sizeof(float));
+            cb.depthParams[0] = -1.0f; cb.depthParams[1] = 1.0f; cb.depthParams[2] = 0.0f; cb.depthParams[3] = 0.0f;
+            cb.camPosSurfaceY[0] = p.m_renderWorld.camera.position.x;
+            cb.camPosSurfaceY[1] = p.m_renderWorld.camera.position.y;
+            cb.camPosSurfaceY[2] = p.m_renderWorld.camera.position.z;
+            cb.camPosSurfaceY[3] = uwCam.surfaceY;
+            cb.tintDensity[0] = uwCam.tintColor.x; cb.tintDensity[1] = uwCam.tintColor.y;
+            cb.tintDensity[2] = uwCam.tintColor.z; cb.tintDensity[3] = uwCam.density;
+
+            D3D11_MAPPED_SUBRESOURCE mr{};
+            if (SUCCEEDED(p.context->Map(p.underwaterFogCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
+            {
+                std::memcpy(mr.pData, &cb, sizeof(cb));
+                p.context->Unmap(p.underwaterFogCB.Get(), 0);
+            }
+            p.context->OMSetRenderTargets(1, &sceneRTV, nullptr);
+            p.context->OMSetBlendState(p.underwaterFogBlendState.Get(), nullptr, 0xFFFFFFFFu);
+            p.context->RSSetViewports(1, &vvp);
+            p.context->IASetInputLayout(nullptr);
+            p.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            p.context->VSSetShader(p.fsVS.Get(), nullptr, 0);
+            p.context->PSSetShader(p.underwaterFogPS.Get(), nullptr, 0);
+            p.context->OMSetDepthStencilState(p.noDepthDSS.Get(), 0);
+            p.context->RSSetState(p.fsRastState.Get());
+            p.context->PSSetConstantBuffers(0, 1, p.underwaterFogCB.GetAddressOf());
+            p.context->PSSetShaderResources(0, 1, p.viewportDepthSRV.GetAddressOf());
+            p.context->PSSetSamplers(0, 1, p.gbPointClamp.GetAddressOf());
+            p.context->Draw(3, 0);
+
+            ID3D11ShaderResourceView* nullSRV = nullptr;
+            p.context->PSSetShaderResources(0, 1, &nullSRV);
+            p.context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+            ID3D11RenderTargetView* n2 = nullptr; p.context->OMSetRenderTargets(1, &n2, nullptr);
+        }
 
         // Bloom bright-pass + ping-pong blur → bloomTex[0] (or dummyTexture if disabled).
         const uint32_t bw = std::max(1u, p.viewportW / 2);

@@ -4,6 +4,7 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
+#include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
@@ -220,6 +221,17 @@ static bool skyViewLutEnabled()
 }
 // Sky-View LUT size. MUST match kSkyLutW/H in kSkyMSL.
 static constexpr int kSkyLutW = 256, kSkyLutH = 128;
+
+// Does the underwater post pass (Thema 185: caustic net + depth fog, EncodeUnderwaterCaustics)
+// run this frame? ONE definition for the two places that must agree: the post chain's gate and
+// the scene pass's depth store (the pass SAMPLES the scene depth, which on a tile GPU only
+// reaches memory if the scene pass stores it — see the hdrPass depth attachment).
+// Not gated on wet: density stays above 0 for a dry camera in the waterline band just above
+// the surface (HE::fogWaterlineBand, Thema 185 Schritt 5), and the net is 0 whenever dry.
+static bool underwaterPostWanted(const UnderwaterCameraData& uc)
+{
+	return uc.causticsIntensity > 0.0f || uc.density > 0.0f;
+}
 
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // Mirrors the OpenGL backend's GLSL unlit shader (same light dir / ambient).
@@ -1689,6 +1701,136 @@ fragment float4 dofCompositeFragment(FSOut in [[stage_in]],
 // is top-left, so ndc.y = 1 - 2·uv.y going in and the velocity's y flips sign
 // coming out — a yaw must streak horizontally on both backends, a pitch
 // vertically.
+// Underwater caustics (Thema 185 Schritt 3) — MSL twin of the GL kUnderwaterCausticsFS
+// (OpenGLRenderer.cpp carries the derivation). Per pixel: the depth names a world
+// position P; the sun's ray through P, bent by Snell's law, pierces the flat surface
+// plane at S; the engine water's wave trains (Physics/WaterWaves.h, spliced in at
+// @TRAINS@) give the surface's curvature there, and 1/|det| of the light's
+// surface->floor mapping is how much it is squeezed. Added to the scene colour.
+// Metal depth is already GL ndc z (same convention as mbVelocityFragment above).
+//
+// The same pass carries the depth fog (Thema 185 Schritt 2: a separate alpha-blended pass
+// on the D3D/Vulkan backends, see HlslSources.h kUnderwaterFogHLSL), folded in AFTER the
+// net — the order those backends draw them in — instead of costing a second full-resolution
+// read+write for a few instructions. The pass therefore runs whenever the camera is under
+// water and either the net intensity or the fog density is non-zero.
+static const char* kUnderwaterCausticsMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct FSOut { float4 position [[position]]; float2 uv; };
+
+vertex FSOut fsVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	FSOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+
+struct UcParams
+{
+	float4x4 invViewProj;   // GL-style clip, jittered like the depth it reads
+	float4   camSurface;    // xyz = camera world position, w = surface Y
+	float4   sun;           // xyz = direction TOWARD the sun (unit)
+	float4   sunColor;      // rgb = sun radiance (0 at night)
+	float4   caustics;      // x = intensity (faded in), y = scale, z = wave clock (s), w = fade depth (m)
+	float4   tintDensity;   // rgb = resolved fog tint, a = per-metre density (the fog stage, see ucFragment)
+};
+
+constant float kTrains[12] = { @TRAINS@ };
+
+// The light the refracted-sun net adds at P (float3(0) where there is none). The screen
+// derivatives of P come in as arguments: ucFragment takes them before any branch.
+static float3 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dPy)
+{
+	const float kTwoPi = 6.28318530718;
+	const float kEta   = 1.33;
+	float  depth = u.camSurface.w - P.y;                        // metres below the flat surface
+	float  fadeDepth = u.caustics.w;
+	float3 L = u.sun.xyz;
+	if (u.caustics.x <= 0.0 || depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02)
+		return float3(0.0);                                     // off, dry, too deep, no sun
+
+	float2 hz   = L.xz / kEta;
+	float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
+	float3 Lr   = float3(hz.x, cosT, hz.y);
+	float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
+	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * u.caustics.z), sin(0.37 * S.x - 0.27 * u.caustics.z));
+
+	float mxx = 0.0, mzz = 0.0, mxz = 0.0;
+	for (int i = 0; i < 6; ++i)
+	{
+		int   b    = i % 3;
+		float comp = i >= 3 ? 1.0 : 0.0;
+		float rad  = kTrains[b * 4] * (3.14159265359 / 180.0) + comp * 0.99483767;   // companion: +57 deg
+		float2 dv  = float2(cos(rad), sin(rad));
+		float k    = kTwoPi / (kTrains[b * 4 + 2] * mix(1.0, 0.73, comp)) * u.caustics.y;
+		float stp  = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
+		float spd  = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
+		float c    = stp * k * sin(k * (dot(dv, S) - spd * u.caustics.z));
+		mxx -= c * dv.x * dv.x;
+		mzz -= c * dv.y * dv.y;
+		mxz -= c * dv.x * dv.y;
+	}
+	float kd  = (kEta - 1.0) / kEta * (0.6 * depth + 2.0);
+	float det = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
+	float x   = max(1.0 / max(abs(det), 0.1) - 2.0, 0.0);
+	float net = x / (x + 2.0);
+
+	float3 n = normalize(cross(dPx, dPy));
+	if (dot(n, u.camSurface.xyz - P) < 0.0) n = -n;
+	float ndl   = clamp(dot(n, Lr), 0.0, 1.0);
+	float atten = exp(-depth / fadeDepth) * smoothstep(0.0, 0.4, depth);
+	return u.sunColor.rgb * (u.caustics.x * net * ndl * atten);
+}
+
+fragment float4 ucFragment(FSOut in [[stage_in]],
+                           texture2d<float> scene [[texture(0)]],
+                           depth2d<float> depthTex [[texture(1)]],
+                           constant UcParams& u [[buffer(0)]])
+{
+	constexpr sampler sl(filter::linear,  address::clamp_to_edge);
+	constexpr sampler sn(filter::nearest, address::clamp_to_edge);
+	float3 sc = scene.sample(sl, in.uv).rgb;
+	float  d  = depthTex.sample(sn, in.uv);
+	float4 wp = u.invViewProj * float4(in.uv.x * 2.0 - 1.0, 1.0 - 2.0 * in.uv.y, d, 1.0);
+	float3 P  = wp.xyz / max(wp.w, 1e-8);
+	float3 dPx = dfdx(P);                                       // before any early-out: derivatives are
+	float3 dPy = dfdy(P);                                       // undefined after divergent flow
+	float3 lit = sc + (d < 1.0 ? causticLight(u, P, dPx, dPy) : float3(0.0));   // the sky has no floor to catch the net
+
+	// The fog (twin of kUnderwaterFogHLSL): Beer-Lambert over the part of the camera->P ray
+	// that lies on the wet side of the flat surface plane. Both ends dry = 0 (a ray that
+	// never enters the water pays nothing); both wet = the whole ray; split = the part before
+	// the plane crossing, which is what keeps the waterline soft. Applied AFTER the net so
+	// the fog swallows it with distance, exactly as on the D3D backends (caustics first,
+	// then the premultiplied tint*fog + dst*(1-fog) blend).
+	float3 camPos   = u.camSurface.xyz;
+	float  surfaceY = u.camSurface.w;
+	bool   camBelow = camPos.y < surfaceY;
+	bool   pBelow   = P.y < surfaceY;
+	// This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera (the
+	// waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the water sheet
+	// off, never what lies under the translucent surface (see kUnderwaterFogHLSL).
+	float4 wn = u.invViewProj * float4(in.uv.x * 2.0 - 1.0, 1.0 - 2.0 * in.uv.y, 0.0, 1.0);
+	bool   nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+	float  segment;
+	if (camBelow == pBelow)
+		segment = camBelow ? length(camPos - P) : 0.0;
+	else
+	{
+		float  t = (surfaceY - camPos.y) / (P.y - camPos.y);
+		float3 crossPt = camPos + t * (P - camPos);
+		segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
+	}
+	float fogAmount = 1.0 - exp(-u.tintDensity.a * segment);
+	return float4(lit * (1.0 - fogAmount) + u.tintDensity.rgb * fogAmount, 1.0);
+}
+)MSL";
+
 static const char* kMotionBlurMSL = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
@@ -6632,6 +6774,10 @@ void MetalRenderer::Shutdown()
 	DestroyBloomTargets();
 	DestroyDepthOfFieldTargets();
 	DestroyMotionBlurTargets();
+	if (m_ucColor)    { CFBridgingRelease(m_ucColor);    m_ucColor = nullptr; }
+	if (m_ucPipeline) { CFBridgingRelease(m_ucPipeline); m_ucPipeline = nullptr; }
+	m_ucW = m_ucH = 0;
+	m_ucTried = false;
 	DestroyCloudTarget();
 	DestroyLdrTarget();
 	DestroySSAOTargets();
@@ -12029,6 +12175,107 @@ void* MetalRenderer::EncodeMotionBlur(void* cmdBufPtr, void* sourceHdr, int full
 	return m_mbColor;
 }
 
+// Underwater caustics: one encoder in the caller's command buffer, sourceHdr + scene
+// depth in, the HDR image with the refracted-sun net added out (m_ucColor). The pipeline
+// is built on first use (a failure is logged once and the pass then stays off).
+void* MetalRenderer::EncodeUnderwaterCaustics(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
+{
+	if (!sourceHdr || !m_hdrDepth) return nullptr;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!m_ucPipeline)
+	{
+		if (m_ucTried) return nullptr;
+		m_ucTried = true;
+		std::string src = kUnderwaterCausticsMSL;
+		src.replace(src.find("@TRAINS@"), 8, HE::causticsWaveTrainsList());
+		NSError* err = nil;
+		id<MTLLibrary> lib = [device newLibraryWithSource:[NSString stringWithUTF8String:src.c_str()]
+		                                          options:nil error:&err];
+		if (!lib)
+		{
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: underwater caustics shader compile failed");
+			return nullptr;
+		}
+		MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+		d.vertexFunction   = [lib newFunctionWithName:@"fsVertex"];
+		d.fragmentFunction = [lib newFunctionWithName:@"ucFragment"];
+		d.colorAttachments[0].pixelFormat = kSceneColorFormat;
+		id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:d error:&err];
+		if (!pso)
+		{
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: underwater caustics pipeline creation failed");
+			return nullptr;
+		}
+		m_ucPipeline = (void*)CFBridgingRetain(pso);
+	}
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (!m_ucColor || fullW != m_ucW || fullH != m_ucH)
+	{
+		if (m_ucColor) { CFBridgingRelease(m_ucColor); m_ucColor = nullptr; }
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:kSceneColorFormat width:fullW height:fullH mipmapped:NO];
+		desc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		desc.storageMode = MTLStorageModePrivate;
+		m_ucColor = (void*)CFBridgingRetain([device newTextureWithDescriptor:desc]);
+		m_ucW = fullW;
+		m_ucH = fullH;
+	}
+	if (!m_ucColor) return nullptr;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+
+	const UnderwaterCameraData& uc = m_renderWorld.underwaterCamera;
+	glm::vec3 sunColor(0.0f);
+	glm::vec3 towardSun = glm::normalize(m_renderWorld.sunDirection);
+	{
+		glm::vec3 domDir;
+		m_renderWorld.dominantDirectionalLight(domDir, sunColor);   // colour is 0 at night
+	}
+	float engineSeconds = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
+		engineSeconds = static_cast<float>(std::atof(ov));   // deterministic headless captures
+	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 invViewProj = glm::inverse(viewProj);
+	const glm::vec3 cam = m_renderWorld.camera.position;
+
+	// Layout mirrors the MSL UcParams struct (160 bytes).
+	struct UcParams
+	{
+		float invViewProj[16];
+		float camSurface[4];
+		float sun[4];
+		float sunColor[4];
+		float caustics[4];
+		float tintDensity[4];
+	} u{};
+	std::memcpy(u.invViewProj, glm::value_ptr(invViewProj), sizeof(u.invViewProj));
+	u.camSurface[0] = cam.x; u.camSurface[1] = cam.y; u.camSurface[2] = cam.z; u.camSurface[3] = uc.surfaceY;
+	u.sun[0] = towardSun.x; u.sun[1] = towardSun.y; u.sun[2] = towardSun.z;
+	u.sunColor[0] = sunColor.r; u.sunColor[1] = sunColor.g; u.sunColor[2] = sunColor.b;
+	u.caustics[0] = uc.causticsIntensity;
+	u.caustics[1] = uc.causticsScale;
+	u.caustics[2] = engineSeconds * uc.causticsSpeed;
+	u.caustics[3] = uc.causticsDepth;
+	u.tintDensity[0] = uc.tintColor.r; u.tintDensity[1] = uc.tintColor.g; u.tintDensity[2] = uc.tintColor.b;
+	u.tintDensity[3] = uc.density;
+
+	const uint32_t ucBase = ftBeginMulti("UnderwaterCaustics");
+	MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
+	p.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ucColor;
+	p.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+	p.colorAttachments[0].storeAction = MTLStoreActionStore;
+	if (ucBase != kInvalidSlot) ftAttachStart((__bridge void*)p, ucBase);
+	if (ucBase != kInvalidSlot) ftAttachEnd  ((__bridge void*)p, ucBase);
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:p];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ucPipeline];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)sourceHdr atIndex:0];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrDepth atIndex:1];
+	[enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	return m_ucColor;
+}
+
 void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
 {
 	m_ssaoEnabled   = s.enabled;
@@ -16785,8 +17032,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// flat texture and blurred everything alike). Off keeps the free
 			// discard. The forward velocity pass (TAA/MetalFX) depth-TESTS
 			// against it too — same rule, or it would test against garbage and
-			// silently emit no motion at all.
-			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive())
+			// silently emit no motion at all. The underwater caustics + fog pass
+			// (Thema 185) samples it as well: without this term a camera under water
+			// with DoF, motion blur and TAA all off (the defaults) read a flat depth
+			// texture, and the pass painted the whole frame as one depth.
+			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive()
+			                                       || underwaterPostWanted(m_renderWorld.underwaterCamera))
 			                                          ? MTLStoreActionStore
 			                                          : MTLStoreActionDontCare;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
@@ -16901,6 +17152,16 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			m_dofResult = m_dofEnabled ? EncodeDepthOfField((__bridge void*)cmdBuf, sceneW, sceneH)
 			                           : nullptr;
 			void* sceneHdr = m_dofResult ? m_dofResult : m_hdrColor;
+
+			// Underwater caustics + fog next, on whatever DoF left (Thema 185 Schritte 2 und 3):
+			// light added to the scene and the depth fog over it, so motion blur, bloom and the
+			// tonemap treat both like any other lit surface. Runs only with the camera under
+			// water and at least one of the body's two knobs (net intensity, fog density)
+			// above 0 (the extractor's waterline fade-in makes the intensity exactly 0 on the
+			// line, the fog carries on through it); every other frame pays nothing.
+			if (underwaterPostWanted(m_renderWorld.underwaterCamera))
+				if (void* const ucTex = EncodeUnderwaterCaustics((__bridge void*)cmdBuf, sceneHdr, sceneW, sceneH))
+					sceneHdr = ucTex;
 
 			// Motion blur next, on whatever DoF left: the camera's frame-to-frame
 			// motion smears the image (velocity from depth + previous view-

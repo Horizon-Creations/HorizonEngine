@@ -1837,6 +1837,117 @@ void renderPanel(AppContext& ctx)
                                 WF::setPhysics(tc, b.id, ph);
                             ImGui::TreePop();
                         }
+
+                        // ── What this body looks like from BELOW its surface (Thema 185) ─
+                        // HE::water::UnderwaterFogParams: the post-processing stage's own
+                        // tint/fog, read every frame off RenderWorld::underwaterCamera —
+                        // separate from this material's own ShallowColor/DeepColor/Turbidity
+                        // (which shade looking DOWN into the water and never read scene
+                        // depth). Every write goes through water::setUnderwaterFog, which
+                        // holds the numbers to their bounds and bumps the revision; it
+                        // rebuilds no surface, same as Physics above.
+                        const bool fogOpen = ImGui::TreeNodeEx("Underwater Fog##wfog", physFlags);
+                        EditorWidgets::helpForLabel("Underwater Fog##wfog");
+                        if (fogOpen)
+                        {
+                            WF::UnderwaterFogParams fog = b.underwaterFog;
+                            bool fogEdited = false;
+                            const auto trackFog = [&]
+                            {
+                                if (!ctx.undoSys) return;
+                                if (ImGui::IsItemActivated())
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Underwater Fog");
+                                }
+                                if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+                            };
+
+                            rowLabel("Shallow Color");
+                            if (ImGui::ColorEdit3("##wfog_shallow", &fog.shallowColor.x, ImGuiColorEditFlags_Float))
+                                fogEdited = true;
+                            trackFog();
+                            EditorWidgets::helpForLabel("Shallow Color##wfog");
+
+                            rowLabel("Deep Color");
+                            if (ImGui::ColorEdit3("##wfog_deep", &fog.deepColor.x, ImGuiColorEditFlags_Float))
+                                fogEdited = true;
+                            trackFog();
+                            EditorWidgets::helpForLabel("Deep Color##wfog");
+
+                            rowLabel("Density");
+                            if (ImGui::DragFloat("##wfog_density", &fog.density, 0.01f, 0.0f,
+                                                 WF::kMaxUnderwaterDensity, "%.2f /m"))
+                                fogEdited = true;
+                            trackFog();
+                            EditorWidgets::helpForLabel("Density##wfog");
+
+                            rowLabel("Depth Curve");
+                            if (ImGui::DragFloat("##wfog_falloff", &fog.falloff, 0.02f, WF::kMinUnderwaterFalloff,
+                                                 WF::kMaxUnderwaterFalloff, "%.2f"))
+                                fogEdited = true;
+                            trackFog();
+                            EditorWidgets::helpForLabel("Depth Curve##wfog");
+
+                            if (fogEdited && fog != b.underwaterFog)
+                                WF::setUnderwaterFog(tc, b.id, fog);
+                            ImGui::TreePop();
+                        }
+
+                        // ── Refracted light from the surface (Thema 185 Schritt 3) ───────
+                        // HE::water::UnderwaterCausticsParams: the net of bright lines the
+                        // waves throw onto what lies below, painted by the caustic pass
+                        // (fed by Physics/WaterWaves.h, the engine water's own wave trains).
+                        // Same write path as the fog above: water::setUnderwaterCaustics.
+                        const bool cauOpen = ImGui::TreeNodeEx("Refracted Light##wcau", physFlags);
+                        EditorWidgets::helpForLabel("Refracted Light##wcau");
+                        if (cauOpen)
+                        {
+                            WF::UnderwaterCausticsParams cau = b.underwaterCaustics;
+                            bool cauEdited = false;
+                            const auto trackCau = [&]
+                            {
+                                if (!ctx.undoSys) return;
+                                if (ImGui::IsItemActivated())
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Refracted Light");
+                                }
+                                if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+                            };
+
+                            rowLabel("Intensity");
+                            if (ImGui::DragFloat("##wcau_intensity", &cau.intensity, 0.01f, 0.0f,
+                                                 WF::kMaxCausticsIntensity, "%.2f"))
+                                cauEdited = true;
+                            trackCau();
+                            EditorWidgets::helpForLabel("Intensity##wcau");
+
+                            rowLabel("Scale");
+                            if (ImGui::DragFloat("##wcau_scale", &cau.scale, 0.01f, WF::kMinCausticsScale,
+                                                 WF::kMaxCausticsScale, "%.2f"))
+                                cauEdited = true;
+                            trackCau();
+                            EditorWidgets::helpForLabel("Scale##wcau");
+
+                            rowLabel("Speed");
+                            if (ImGui::DragFloat("##wcau_speed", &cau.speed, 0.01f, 0.0f,
+                                                 WF::kMaxCausticsSpeed, "%.2f"))
+                                cauEdited = true;
+                            trackCau();
+                            EditorWidgets::helpForLabel("Speed##wcau");
+
+                            rowLabel("Fade Depth");
+                            if (ImGui::DragFloat("##wcau_depth", &cau.depth, 0.1f, WF::kMinCausticsDepth,
+                                                 WF::kMaxCausticsDepth, "%.1f m"))
+                                cauEdited = true;
+                            trackCau();
+                            EditorWidgets::helpForLabel("Fade Depth##wcau");
+
+                            if (cauEdited && cau != b.underwaterCaustics)
+                                WF::setUnderwaterCaustics(tc, b.id, cau);
+                            ImGui::TreePop();
+                        }
                         ImGui::PopID();
                     }
                     if (!s_waterNote.empty()) EditorWidgets::hint("%s", s_waterNote.c_str());

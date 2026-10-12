@@ -15,6 +15,44 @@ struct CameraData {
     glm::vec3 position   = glm::vec3(0.0f);
 };
 
+// How far the render camera sits under a water surface this frame (Thema 185 Schritt
+// 1), for the post-processing stage to read. Set by HE::queryUnderwaterCamera
+// (RenderExtractor.h/.cpp) right after the camera, straight from camera.position — no
+// state carried between frames, so a camera resting exactly on the waterline or
+// crossing it within one frame is correct immediately, with no hysteresis.
+// Thema 185 Schritt 2 adds the post pass's own two numbers, resolved here (not left
+// to the shader) because they are a function of signedDepth above, which is already
+// a per-frame scalar, not a per-pixel one: a camera hovering at a fixed depth sees a
+// fixed tint no matter what it looks at. tintColor is shallowColor..deepColor of the
+// body's UnderwaterFogParams (WaterField.h), blended by signedDepth through that
+// body's own density/falloff curve. density is that same body's absorption, carried
+// through unchanged for the per-pixel view-ray fog (segment length still needs the
+// depth buffer, so that part stays in the shader). density is exactly 0 — the
+// cue to skip the whole fog pass — when dry, EXCEPT in the waterline band just
+// above a body's surface (Thema 185 Schritt 5, HE::fogWaterlineBand): there wet
+// stays false but tintColor is shallowColor and density the body's, faded out over
+// the band, so the pass fogs the floor the near plane bares where it slices the
+// water sheet off just above the line (the shaders' per-pixel near-plane test). The
+// fog gate on every backend is therefore density > 0, never wet.
+struct UnderwaterCameraData {
+    bool  wet         = false;  // a water surface covers the camera's XZ, AND camera.y is between that body's bed and its surface level (inclusive) — not above the surface, not under the bed
+    float surfaceY    = 0.0f;   // world Y of that surface (the flat body level the material shades waves on top of; meaningful only if wet)
+    float signedDepth = 0.0f;   // surfaceY - camera.y: > 0 means the camera is below the surface. 0 when !wet.
+    glm::vec3 tintColor { 0.045f, 0.20f, 0.22f };   // resolved shallow→deep blend; meaningful only if density > 0
+    float     density = 0.0f;                        // body's per-metre absorption; 0 when dry outside the waterline band (skip the pass)
+
+    // Thema 185 Schritt 3 — the caustic pass's knobs, resolved here like tintColor
+    // (the body's UnderwaterCausticsParams, WaterField.h). causticsIntensity already
+    // carries the waterline fade-in (kCausticsFadeInDepth in RenderExtractor.cpp: 0 with
+    // the camera exactly on the surface, ramping to the body's own value over the first
+    // half metre of the dive), so the net never pops on at the waterline and 0 is the
+    // pass's one cue to skip — dry camera, body turned it off, or camera on the line.
+    float causticsIntensity = 0.0f;
+    float causticsScale     = 1.0f;
+    float causticsSpeed     = 1.0f;
+    float causticsDepth     = 14.0f;
+};
+
 // "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so
 // the sentinel has to be a value the registry never hands out.
 inline constexpr uint32_t kNoOwnerEntity = 0xFFFFFFFFu;
@@ -339,6 +377,7 @@ public:
     std::vector<HE::GiLandscape>     landscapes;
     CameraData                camera;
     ShadowData                shadow;
+    UnderwaterCameraData      underwaterCamera;
 
     // Direction *toward* the sun (normalized), set by the extractor: from the
     // first directional light, or driven by the day-night cycle when enabled.

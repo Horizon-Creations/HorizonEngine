@@ -198,6 +198,8 @@ bool WaterIndex::entryAt(const Entry& e, float x, float z, double t, Surface& ou
     out.depth   = std::max(0.0f, out.height - groundY);
     out.flow    = e.rotation * glm::vec3(body->physics.flow.x, 0.0f, body->physics.flow.y);
     out.physics = body->physics;
+    out.underwaterFog = body->underwaterFog;
+    out.underwaterCaustics = body->underwaterCaustics;
     return true;
 }
 
