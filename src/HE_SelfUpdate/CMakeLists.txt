@@ -24,6 +24,10 @@ add_library(HorizonSelfUpdate SHARED
 	src/SelfUpdateEndpoint.cpp
 	src/SelfUpdateTransport.cpp
 	src/SelfUpdateCheck.cpp
+	src/SelfUpdateProcess.cpp
+	src/SelfUpdateInstall.cpp
+	src/SelfUpdateApplyCore.cpp
+	src/Takeover.cpp
 )
 
 # HorizonCore for the engine log and HE::Crypto::Sha256. HorizonContentSync is
@@ -47,3 +51,33 @@ target_compile_definitions(HorizonSelfUpdate
 )
 
 he_deploy_dll(HorizonSelfUpdate)
+
+# ─── HorizonUpdater ─────────────────────────────────────────────────────────────
+# The separate, tiny program the takeover needs: the editor cannot replace its
+# own files while it is running (the Windows loader holds every DLL and the
+# exe open), so whatever does the swap has to run from somewhere else, as its
+# own process. See SelfUpdateApplyPlan.h / SelfUpdateApplyCore.h / Takeover.cpp.
+#
+# HE_SU_STANDALONE (SuCommon.h) makes HE_SU_API a no-op here: this links no
+# engine library at all, not even HorizonCore, because Takeover.cpp copies this
+# executable alone to a temp directory and runs it from there — it must be able
+# to start with nothing beside it but the OS and the C++ runtime.
+add_executable(HorizonUpdater
+	updater/main.cpp
+	src/SelfUpdateProcess.cpp
+	src/SelfUpdateApplyCore.cpp
+)
+target_include_directories(HorizonUpdater PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(HorizonUpdater PRIVATE cxx_std_20)
+target_compile_definitions(HorizonUpdater PRIVATE HE_SU_STANDALONE)
+target_link_libraries(HorizonUpdater PRIVATE nlohmann_json::nlohmann_json)
+
+# Deployed beside HorizonEditor the same way HorizonSelfUpdate's own .dll/.so is
+# — he_deploy_dll only copies $<TARGET_FILE:target> to DEPLOY_EDITOR, which
+# works for an executable exactly as well as for a DLL. This subdirectory is
+# added BEFORE src/HE_Editor (see the root CMakeLists.txt), so there is no
+# HorizonEditor target yet to depend on here; src/HE_Editor/CMakeLists.txt adds
+# `add_dependencies(HorizonEditor HorizonUpdater)` on its own side instead, so a
+# stale HorizonUpdater is never what an editor Build picks up — the same lesson
+# that applies to every DLL beside the editor's tool executables.
+he_deploy_dll(HorizonUpdater)

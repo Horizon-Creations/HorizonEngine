@@ -433,6 +433,23 @@ if(TARGET HorizonContentSync)
 	target_compile_definitions(HorizonEditor PRIVATE HE_HAVE_LIBSSH2)
 endif()
 
+if(TARGET HorizonSelfUpdate)
+	# Editor self-update, a SEPARATE account from HorizonContentSync's (see
+	# src/HE_SelfUpdate, docs/editor-selfupdate-sftp-design.md). Same libssh2 gate.
+	target_link_libraries(HorizonEditor PRIVATE HorizonSelfUpdate)
+	target_compile_definitions(HorizonEditor PRIVATE HE_HAVE_LIBSSH2)
+endif()
+if(TARGET HorizonUpdater)
+	# Not linked — Takeover.cpp copies this executable, standalone, to a temp
+	# directory and runs it from there — but it must be as current as the editor
+	# it ships beside. src/HE_SelfUpdate/CMakeLists.txt deploys HorizonUpdater
+	# via he_deploy_dll on its OWN post-build step (it is added before this
+	# directory, so it cannot depend on HorizonEditor from its own side); this is
+	# the other half, so `cmake --build . --target HorizonEditor` alone still
+	# rebuilds and redeploys it when its sources change.
+	add_dependencies(HorizonEditor HorizonUpdater)
+endif()
+
 if(HE_IMGUI_AVAILABLE)
 	# HE_IMGUI_ENABLED is ONLY defined on HorizonEditor — never on the game or renderer
 	target_compile_definitions(HorizonEditor PRIVATE HE_IMGUI_ENABLED)

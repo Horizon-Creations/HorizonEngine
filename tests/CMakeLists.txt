@@ -1128,6 +1128,21 @@ if(TARGET HorizonSelfUpdate)
             VERBATIM
         )
     endif()
+
+    # ─── Takeover fixture: a real HorizonUpdater against a real child process ──
+    # test_selfupdate_apply.cpp proves the swap/rollback/relaunch state machine
+    # (SelfUpdateApplyCore.cpp) by actually running it: HorizonUpdater as the
+    # real executable Takeover.cpp would spawn, and he_fake_editor standing in
+    # both for "the editor being waited on" and "the build being relaunched" —
+    # none of what this exercises (CreateProcess/posix_spawn, directory rename,
+    # a health-watch timeout) is visible to a mock.
+    add_executable(he_fake_editor helpers/fake_editor.cpp)
+    target_compile_features(he_fake_editor PRIVATE cxx_std_20)
+    add_dependencies(he_tests he_fake_editor HorizonUpdater)
+    target_sources(he_tests PRIVATE test_selfupdate_apply.cpp)
+    target_compile_definitions(he_tests PRIVATE
+        HE_TEST_FAKE_EDITOR_EXE="$<TARGET_FILE:he_fake_editor>"
+        HE_TEST_UPDATER_EXE="$<TARGET_FILE:HorizonUpdater>")
 endif()
 
 # Shared material shader layer (CPU-only: glslang + SPIRV-Cross under the hood) — lets

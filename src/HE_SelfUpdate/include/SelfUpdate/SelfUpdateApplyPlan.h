@@ -154,4 +154,19 @@ inline const char* applyStatusName(ApplyStatus s)
 	return "failed";
 }
 
+// What `applyUpdate` (SelfUpdateApplyCore.h) found when it finished, written to
+// `ApplyPlan::resultFile` and read back by the next editor start — including an
+// Aborted/Failed one, so a user who reopens the OLD editor still sees why the
+// update did not happen.
+struct ApplyResult
+{
+	ApplyStatus   status = ApplyStatus::Aborted;
+	std::string   error;
+	std::string   fromVersion;
+	std::string   toVersion;
+	std::string   installRoot;   // where the (possibly restored) install ended up
+	std::string   backupRoot;    // set while the previous install may still be here
+	std::int64_t  newPid = 0;    // the process that was (re)started, 0 if none
+};
+
 } // namespace HE::Su

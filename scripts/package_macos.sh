@@ -123,6 +123,18 @@ mkdir -p "$MACOS_PATH" "$FW_PATH" "$RES_PATH"
 # ─── 3. Binary ────────────────────────────────────────────────────────────────
 cp "$DEPLOY_DIR/$APP_NAME" "$BINARY"
 
+# HorizonUpdater (src/HE_SelfUpdate): the self-update takeover helper. It is NOT
+# one of the engine dylibs copied below (it is a separate executable, deployed by
+# its own he_deploy_dll POST_BUILD step beside HorizonEditor in $DEPLOY_DIR, same
+# as this binary), so without this line it is silently absent from the DMG and
+# Takeover.cpp finds nothing next to the bundled editor to copy out and run.
+if [ -f "$DEPLOY_DIR/HorizonUpdater" ]; then
+    cp "$DEPLOY_DIR/HorizonUpdater" "$MACOS_PATH/HorizonUpdater"
+    echo "    HorizonUpdater → Contents/MacOS"
+else
+    echo "    WARNING: $DEPLOY_DIR/HorizonUpdater not found — self-update will not work from this .app."
+fi
+
 # ─── 4. Engine dylibs: copy everything from the flat deploy ───────────────────
 echo "--> Copying engine dylibs..."
 for lib in "$DEPLOY_DIR/"*.dylib; do

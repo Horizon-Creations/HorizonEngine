@@ -1,11 +1,16 @@
 # Editor self-update over SFTP — Design
 
-Status: **Step 1 of Thema 186 implemented** (module, second account, version
-check, verified download, tests, live round trip against a local SFTP server).
-**Not done:** taking a staged build over on Windows / macOS / Linux without losing
-an open project (step 2), the CI matrix (step 3), the real-account run on the
-hosting server (needs its host name, see "Open decisions"), and anything in the
-Editor UI. Nothing in `HorizonEditor` links this module yet.
+Status: **Steps 1 and 3 of Thema 186 implemented** (module, second account,
+version check, verified download; the takeover mechanism — `HorizonUpdater`,
+the swap/rollback/relaunch state machine, extraction, editor-side
+orchestration — all with tests that run the real executables as real
+processes). **Not done:** the CI matrix wiring the takeover tests into
+`ci.yml`'s platform runners (step 4), the real-account run on the hosting
+server (needs its host name, see "Open decisions"), and the Editor UI itself
+— `HorizonEditor` now **links** `HorizonSelfUpdate` and depends on
+`HorizonUpdater`, but nothing calls `Takeover.h` yet: no background
+check-for-update, no menu row, no "restart to update?" dialog. See "What the
+next step hangs on" for exactly where that wiring goes.
 
 ## What it is
 
@@ -188,6 +193,85 @@ Also from `SftpClient`, worth knowing: password auth only; one TCP+SSH session
 per file; a 5 s connect timeout per address but **no read timeout**, so a server
 that stops answering mid-transfer holds the worker thread.
 
+## The takeover
+
+The editor cannot replace its own files while it is running — on Windows the
+loader holds every DLL and the exe open, and even where the OS would allow it a
+process has no business overwriting itself mid-flight. So the swap runs in a
+**separate, tiny program, `HorizonUpdater`**, started detached and outliving the
+editor:
+
+```
+editor (Takeover.cpp: beginTakeover)
+    verify the staged build again (readPendingUpdate + verifyStagedUpdate)
+    extract it into a SIBLING of the install root        (SelfUpdateInstall.h)
+    copy HorizonUpdater to a temp directory
+    spawn it detached with an ApplyPlan on its command line, waitPid = own pid
+    return — the CALLER quits right after (the editor's own save/discard/
+    cancel gate, already in place for Quit/CloseProject/OpenProjectPath,
+    is what decides WHETHER to reach this call at all; see below)
+
+HorizonUpdater (SelfUpdateApplyCore.h: applyUpdate), once the editor is gone
+    rename installRoot -> backupRoot
+    rename payloadRoot -> installRoot            (both on one volume: one rename each)
+    copy `preserve`d files (config.json, imgui.ini, the rotated logs) over,
+        unless the new build already brought its own
+    start the new build, watch it for `healthMs`
+    still alive?  Applied.
+    exited, or never started?  swap back, relaunch the OLD build.  RolledBack.
+    write the result to <stagingRoot>/last-apply.json
+```
+
+`preflightTakeover()` is everything from that list that can still be shown to a
+user — verification, a writability probe on the install directory's parent,
+`HorizonUpdater` actually being there next to the editor — checked **before**
+offering "Restart to update?". `beginTakeover()` does the one-way part
+(extract, copy, spawn) and returns false on any failure without having touched
+`installRoot` at all: the editor keeps running exactly as it was, and the
+caller must not quit. Once `beginTakeover()` returns true, quitting is the only
+correct next step — `HorizonUpdater` is already waiting on exactly that pid.
+
+**Why the editor validates, not the updater.** By the time `HorizonUpdater`
+runs, the editor process is on its way out — there is nobody left to show an
+error to. `applyUpdate()` still re-validates everything it can (the payload has
+the executable, `backupRoot` does not already exist, the main-exe path has no
+`..`) purely as defense in depth, and on every failure **after** the editor is
+confirmed gone it relaunches whatever old/original build it can find rather
+than leaving the user with nothing running — the one case it does NOT do that
+is the editor still being alive past `waitTimeoutMs`, where nothing should be
+touched or started at all.
+
+**Extraction uses the OS's own tool, not a bundled library** — each platform
+only ever extracts the artifact IT packaged (a Windows editor never sees a
+`.tar.gz`), so there is no cross-format need: Windows' bundled `tar.exe`
+(bsdtar, reads `.zip`) via `System32`, GNU `tar -xzf` on Linux, and
+`hdiutil attach -readonly` + `ditto` (then `hdiutil detach`) for the macOS
+`.dmg`. A flat archive (Windows' zip of `package/Editor/*`) and a wrapped one
+(Linux's tar with a top-level `Editor/`, a mounted dmg's single `.app`) are
+told apart generically: exactly one top-level entry after extraction becomes
+the payload root, otherwise the extraction directory itself is.
+
+**Preserved across the swap**, Windows/Linux only (`config.json`, `imgui.ini`,
+`HorizonEngine.log` + its three rotated backups): a macOS `.app` bundle is
+signed and often read-only, so `GlobalState::setLogFile()` already falls back
+to the per-user data directory there instead of writing beside the
+executable — nothing of the install itself needs to carry over on that
+platform.
+
+**Rename, not copy**, for `installRoot <-> backupRoot <-> payloadRoot`: the
+three are siblings on one volume by construction (`Takeover.cpp` places
+`payloadRoot`/`backupRoot` next to `installRoot`), so each move is a single
+atomic rename, retried for up to `renameRetryMs` against a file a virus
+scanner or indexer is still holding — the one thing that does NOT heal with
+retrying is a real cross-volume move (`std::errc::cross_device_link`), reported
+immediately instead of retried to the deadline.
+
+**Known gap:** a rename blocked for the entire retry window (something holding
+a handle open without `FILE_SHARE_DELETE` the whole time) is exercised by the
+design but has no automated test — it needs a platform-specific way to hold
+such a handle open, deliberately left out of this step to keep the test suite
+portable; see "What the next step hangs on".
+
 ## Files
 
 | | |
@@ -198,7 +282,14 @@ that stops answering mid-transfer holds the worker thread.
 | `SelfUpdateEndpoint.h/.cpp` | `loadSelfUpdateConfig` (env → endpoint), `sameAccount`, `scrubSecret` |
 | `SelfUpdateTransport.h/.cpp` | `IUpdateTransport`: `makeSftpTransport` (SftpClient) and `makeLocalDirTransport` (a directory laid out like the server) |
 | `SelfUpdateCheck.h/.cpp` | `checkForUpdate`, `downloadUpdate`, `readPendingUpdate`, `verifyStagedUpdate`, `discardStagedUpdates`, `currentPlatformKey`, `runningBuild` |
+| `SelfUpdateProcess.h/.cpp` | `spawnDetached`, `processExists`, `waitForProcessExit`, `currentExecutablePath`, UTF-8 path helpers — compiled into BOTH `HorizonSelfUpdate` and `HorizonUpdater` |
+| `SelfUpdateApplyPlan.h` | `ApplyPlan` (command-line contract, `toArgs`/`fromArgs`), `ApplyStatus`, `ApplyResult` — header-only, no engine type |
+| `SelfUpdateApplyCore.h/.cpp` | `applyUpdate` (the swap/rollback/relaunch state machine), `writeApplyResult`/`readApplyResult`, `appendApplyLog` — compiled into both `HorizonSelfUpdate` (so the next editor start can read the last result) and `HorizonUpdater` |
+| `SelfUpdateInstall.h/.cpp` | `extractStagedBuild` (OS tool per platform), `mainExecutableRelativePath`, `installRootForRunningBuild` |
+| `Takeover.h/.cpp` | `preflightTakeover`, `beginTakeover` — the editor-side entry point; nothing calls it yet (see below) |
+| `updater/main.cpp` → **`HorizonUpdater`** | the separate executable `Takeover.cpp` spawns; `HE_SU_STANDALONE`, links no engine library, deployed beside `HorizonEditor` (`he_deploy_dll`, and on macOS `package_macos.sh` copies it into `Contents/MacOS`) |
 | `tests/test_selfupdate.cpp` | 17 cases; `ctest -R test_selfupdate` |
+| `tests/test_selfupdate_apply.cpp` | `HorizonUpdater` run as a real child process against `tests/helpers/fake_editor.cpp` (`he_fake_editor`, a real process standing in for both "the editor being waited on" and "the build being relaunched"): `ApplyPlan` CLI round trip, happy swap (preserves `config.json`, relaunch args reach the new build), the editor outliving the wait timeout (nothing touched), a new build that dies on arrival (rollback + the old build relaunched) |
 | `scripts/selfupdate_test_sftp_server.py` | read-only paramiko SFTP server with password login, for the live test and the CI matrix |
 | `HE::Log::Cat::SelfUpdate` | log category (`HE_LOG=SelfUpdate=Debug`) |
 
@@ -266,19 +357,41 @@ without) a real server.
    server today, and who writes the manifest on release, is for the publishing
    step (upload the files, the manifest last).
 
-## What the next steps hang on
+## What the next step hangs on
 
-* **Step 2 (takeover):** `readPendingUpdate()` + `verifyStagedUpdate()` is the
-  entry. Attach the "unsaved changes" gate to `EditorApplication.cpp` and the
-  save checks in `ProjectPreflight.cpp`; when the Editor starts linking
-  `HorizonSelfUpdate`, check that the macOS bundle step, the Windows zip and the
-  Linux tar pick the new library up — none of them names ContentSync, they take
-  what is in the deploy directory, but verify it.
-* **Step 3 (CI):** the matrix is `.github/workflows/ci.yml` — **not**
+* **The Editor UI** — nothing calls `Takeover.h` yet. `HorizonEditor` links
+  `HorizonSelfUpdate` and depends on `HorizonUpdater`
+  (`src/HE_Editor/CMakeLists.txt`), but there is no background
+  check-for-update, no menu row, and no dialog. The hook point is
+  `src/HE_Editor/EditorUI.cpp`'s existing `GuardedAction` state machine (around
+  line 134 for the enum, ~1498 `runGuardedAction`, ~1518 `endsSession` — add
+  `InstallUpdate` to all three, treating it like `Quit`/`CloseProject` for
+  `endsSession`) and `requestGuarded(GuardedAction::InstallUpdate)` from a new
+  menu row. The action itself: call `Su::preflightTakeover()` to decide whether
+  to even offer the menu row / dialog, then on confirmation
+  `Su::beginTakeover()` — only on `.ok` does the handler go on to
+  `ctx.quit()`; the existing save/discard/cancel prompt already guards every
+  `GuardedAction`, so nothing further needs to ask about unsaved work. This was
+  deliberately left undone rather than attempted without being able to run the
+  editor's UI interactively to check for a regression in that large, heavily
+  interconnected file; see the topic's run history for why.
+* **The known gap above** (a rename blocked for the whole retry window) has no
+  test; it needs a platform-specific way to hold a directory-internal file
+  handle open without `FILE_SHARE_DELETE` for the duration.
+* **Step 4 (CI):** the matrix is `.github/workflows/ci.yml` — **not**
   `claude.yml`, which is only the `@claude` comment bot. `ci.yml` already runs
-  `ctest`, so `test_selfupdate` runs on all three platforms as soon as this lands;
-  the live leg needs `pip install paramiko`, the server script above and a
-  platform-matching artifact. On Windows, `he_tests` now needs
-  `HorizonSelfUpdate.dll` and `HorizonContentSync.dll` beside it (copied in
-  `tests/CMakeLists.txt`). `ci.yml`'s `concurrency: ci-<branch>,
+  `ctest`, so `test_selfupdate` and `test_selfupdate_apply` run on all three
+  platforms as soon as this lands; the live leg needs `pip install paramiko`,
+  the server script above and a platform-matching artifact. On Windows,
+  `he_tests` now needs `HorizonSelfUpdate.dll` and `HorizonContentSync.dll`
+  beside it (copied in `tests/CMakeLists.txt`), and `he_fake_editor.exe` /
+  `HorizonUpdater.exe` are built as their own targets the test discovers via
+  `$<TARGET_FILE:...>` — no extra CI step needed for those two, `ctest`
+  alone exercises them. `ci.yml`'s `concurrency: ci-<branch>,
   cancel-in-progress` applies: finish before the one push.
+* **A Debug build of `he_tests` on Windows currently fails** regardless of this
+  topic: `src/HE_Rendering/src/material/MaterialShaderLibrary.cpp:469` and
+  `:755` hit MSVC's string-literal length limit (C2026) in a `Debug`
+  configuration specifically — `Release` compiles the same file. Local
+  verification for this step used a Release configuration; see the topic's
+  lessons for the pointer.
