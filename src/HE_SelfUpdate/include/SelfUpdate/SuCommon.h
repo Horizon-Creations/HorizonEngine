@@ -7,7 +7,14 @@
 // The module is editor-only. It is deliberately NOT copied into the packaged
 // game: a player's binary has no business carrying an SSH client or a way to
 // replace itself.
-#ifdef _WIN32
+//
+// HE_SU_STANDALONE: a few source files are ALSO compiled straight into the
+// HorizonUpdater executable (SelfUpdateProcess.cpp and the updater's own core),
+// which links no engine library at all — there is no DLL boundary for them to
+// cross, so the macro is empty there.
+#if defined(HE_SU_STANDALONE)
+  #define HE_SU_API
+#elif defined(_WIN32)
   #ifdef HE_SU_BUILD_DLL
     #define HE_SU_API __declspec(dllexport)
   #else
